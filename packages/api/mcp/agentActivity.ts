@@ -1,0 +1,194 @@
+import type { Knex } from 'knex';
+import type { RedisClientType } from 'redis';
+import { redactVisualPreviewPaths } from '@propr/core';
+import { projectTaskLiveDetails } from '../routes/liveDetailsRoutes.js';
+import { McpError } from './config.js';
+
+const MAX_ACTIVITY_MESSAGE_LENGTH = 500;
+
+interface AgentActivityArgs {
+  repository: string;
+  goalId?: string;
+  taskId?: string;
+  offset: number;
+  limit: number;
+}
+
+interface AgentActivityTarget {
+  type: 'goal' | 'task';
+  goalId?: string;
+  taskId: string;
+  launchStrategy?: string;
+  sessionId: string | null;
+  fallbackTimestamp: string | null;
+}
+
+interface IndexedActivity {
+  index: number;
+  timestamp: string;
+  message: string;
+}
+
+function notFound(): never {
+  throw new McpError('NOT_FOUND', 'Target not found in your authorized repository.', 404);
+}
+
+async function latestExecutionSession(db: Knex, taskId: string): Promise<string | null> {
+  try {
+    const execution = await db('llm_executions')
+      .where({ task_id: taskId })
+      .orderBy('start_time', 'desc')
+      .first('session_id');
+    return typeof execution?.session_id === 'string' ? execution.session_id : null;
+  } catch {
+    return null;
+  }
+}
+
+async function latestTaskTimestamp(db: Knex, taskId: string, fallback: unknown): Promise<string | null> {
+  try {
+    const history = await db('task_history')
+      .where({ task_id: taskId })
+      .orderBy('timestamp', 'desc')
+      .first('timestamp');
+    return typeof history?.timestamp === 'string'
+      ? history.timestamp
+      : typeof fallback === 'string' ? fallback : null;
+  } catch {
+    return typeof fallback === 'string' ? fallback : null;
+  }
+}
+
+async function resolveGoalTarget(db: Knex, args: AgentActivityArgs, ownerId: string): Promise<AgentActivityTarget> {
+  const goal = await db('goals')
+    .where({ goal_id: args.goalId, repository: args.repository, owner_id: ownerId })
+    .first('goal_id', 'current_task_id', 'launch_strategy', 'session_id', 'started_at', 'updated_at', 'created_at');
+  if (!goal || typeof goal.current_task_id !== 'string') return notFound();
+  return {
+    type: 'goal',
+    goalId: goal.goal_id,
+    taskId: goal.current_task_id,
+    launchStrategy: goal.launch_strategy,
+    sessionId: typeof goal.session_id === 'string' ? goal.session_id : null,
+    fallbackTimestamp: await latestTaskTimestamp(
+      db,
+      goal.current_task_id,
+      goal.started_at ?? goal.updated_at ?? goal.created_at,
+    ),
+  };
+}
+
+async function resolveTaskTarget(db: Knex, args: AgentActivityArgs, ownerId: string): Promise<AgentActivityTarget> {
+  const task = await db('tasks')
+    .where({ task_id: args.taskId, repository: args.repository })
+    .first('task_id', 'task_type', 'created_at');
+  if (!task) return notFound();
+  const goal = await db('goals')
+    .where({ current_task_id: args.taskId })
+    .first('goal_id', 'owner_id', 'launch_strategy', 'session_id', 'started_at', 'updated_at');
+  if ((task.task_type === 'goal' && !goal) || (goal && goal.owner_id !== ownerId)) return notFound();
+  return {
+    type: 'task',
+    taskId: task.task_id,
+    ...(goal ? { goalId: goal.goal_id, launchStrategy: goal.launch_strategy } : {}),
+    sessionId: typeof goal?.session_id === 'string'
+      ? goal.session_id
+      : await latestExecutionSession(db, task.task_id),
+    fallbackTimestamp: await latestTaskTimestamp(
+      db,
+      task.task_id,
+      goal?.started_at ?? goal?.updated_at ?? task.created_at,
+    ),
+  };
+}
+
+async function resolveTarget(db: Knex, args: AgentActivityArgs, ownerId: string): Promise<AgentActivityTarget> {
+  return args.goalId
+    ? resolveGoalTarget(db, args, ownerId)
+    : resolveTaskTarget(db, args, ownerId);
+}
+
+function isoTimestamp(value: unknown, fallback: string | null): string | null {
+  const candidate = typeof value === 'string' && value.trim() ? value : fallback;
+  if (!candidate) return null;
+  const milliseconds = new Date(candidate).getTime();
+  return Number.isNaN(milliseconds) ? null : new Date(milliseconds).toISOString();
+}
+
+function checkpointNarration(value: unknown): string | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const checkpoint = value as { checkpointReady?: unknown; message?: unknown; summary?: unknown };
+  if (checkpoint.checkpointReady !== true || typeof checkpoint.message !== 'string') return null;
+  const summary = typeof checkpoint.summary === 'string' && checkpoint.summary.trim()
+    ? ` ${checkpoint.summary.trim()}`
+    : '';
+  return `Checkpoint ready: ${checkpoint.message.trim()}.${summary}`;
+}
+
+function compactNarration(content: string): string | null {
+  let text = redactVisualPreviewPaths(content).trim().replace(/^\*\*Result:\*\*\s*/i, '');
+  if (!text) return null;
+  if (/^[{[]/.test(text)) {
+    try {
+      const checkpoint = checkpointNarration(JSON.parse(text));
+      if (!checkpoint) return null;
+      text = checkpoint;
+    } catch {
+      return null;
+    }
+  }
+  text = text.replace(/\s+/g, ' ').trim();
+  if (!text) return null;
+  return text.length <= MAX_ACTIVITY_MESSAGE_LENGTH
+    ? text
+    : `${text.slice(0, MAX_ACTIVITY_MESSAGE_LENGTH - 1).trimEnd()}…`;
+}
+
+function projectNarration(
+  events: Array<Record<string, unknown>>,
+  fallbackTimestamp: string | null,
+): IndexedActivity[] {
+  const projected = events.flatMap((event, index): IndexedActivity[] => {
+    if (!['thought', 'message'].includes(String(event.type)) || event.internalReasoning === true) return [];
+    const message = typeof event.content === 'string' ? compactNarration(event.content) : null;
+    const timestamp = isoTimestamp(event.timestamp, fallbackTimestamp);
+    return message && timestamp ? [{ index, timestamp, message }] : [];
+  });
+  projected.sort((left, right) => right.timestamp.localeCompare(left.timestamp) || right.index - left.index);
+  const seen = new Set<string>();
+  return projected.filter(entry => {
+    if (seen.has(entry.message)) return false;
+    seen.add(entry.message);
+    return true;
+  });
+}
+
+export async function getAgentActivity(
+  deps: { db: Knex; redisClient: RedisClientType },
+  args: AgentActivityArgs,
+  ownerId: string,
+) {
+  const target = await resolveTarget(deps.db, args, ownerId);
+  const live = await projectTaskLiveDetails(
+    deps.redisClient,
+    deps.db,
+    target.taskId,
+    target.sessionId,
+  );
+  const entries = projectNarration(live?.events ?? [], target.fallbackTimestamp);
+  const activity = entries
+    .slice(args.offset, args.offset + args.limit)
+    .map(({ timestamp, message }) => ({ timestamp, message }));
+  return {
+    target: {
+      type: target.type,
+      ...(target.goalId ? { goalId: target.goalId } : {}),
+      taskId: target.taskId,
+      ...(target.launchStrategy ? { launchStrategy: target.launchStrategy } : {}),
+    },
+    currentFocus: live?.currentTask ? compactNarration(live.currentTask) : null,
+    activity,
+    order: 'newest_first' as const,
+    nextOffset: args.offset + args.limit < entries.length ? args.offset + args.limit : null,
+  };
+}

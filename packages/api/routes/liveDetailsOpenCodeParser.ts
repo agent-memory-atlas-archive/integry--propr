@@ -19,14 +19,21 @@ export function parseOpenCodeOutputToConversationResult(output: string): Convers
   let hasAssistantMessageEvents = false;
   let pendingAssistantMessage = '';
   let pendingAssistantTimestamp: string | null = null;
+  let pendingAssistantInternalReasoning = false;
   const emittedToolUseIds = new Set<string>();
   const emittedToolResultIds = new Set<string>();
   const flushPendingAssistantMessage = (fallbackTimestamp: string): void => {
     if (!pendingAssistantMessage) return;
     hasAssistantMessageEvents = true;
-    events.push({ type: 'thought', content: pendingAssistantMessage, timestamp: pendingAssistantTimestamp ?? fallbackTimestamp });
+    events.push({
+      type: 'thought',
+      content: pendingAssistantMessage,
+      ...(pendingAssistantInternalReasoning ? { internalReasoning: true } : {}),
+      timestamp: pendingAssistantTimestamp ?? fallbackTimestamp,
+    });
     pendingAssistantMessage = '';
     pendingAssistantTimestamp = null;
+    pendingAssistantInternalReasoning = false;
   };
   for (const event of parsed.conversationLog) {
     const eventTimestamp = getOpenCodeEventTimestamp(event, timestamp);
@@ -35,6 +42,7 @@ export function parseOpenCodeOutputToConversationResult(output: string): Convers
       if (isOpenCodeStreamingTextEvent(event)) {
         pendingAssistantMessage += assistantMessage;
         pendingAssistantTimestamp ??= eventTimestamp;
+        pendingAssistantInternalReasoning ||= hasOpenCodeReasoning(event);
       } else {
         flushPendingAssistantMessage(eventTimestamp);
         hasAssistantMessageEvents = true;
@@ -64,7 +72,13 @@ function buildOpenCodeAssistantTextEvent(event: OpenCodeEvent, content: string, 
   const type = event.message?.role === 'assistant' && event.type?.toLowerCase() === 'message'
     ? 'message'
     : 'thought';
-  return { type, content, timestamp };
+  return { type, content, ...(hasOpenCodeReasoning(event) ? { internalReasoning: true } : {}), timestamp };
+}
+
+function hasOpenCodeReasoning(event: OpenCodeEvent): boolean {
+  if (event.type?.toLowerCase() === 'reasoning') return true;
+  const parts = [event.part, ...(event.parts ?? []), ...(event.message?.parts ?? [])];
+  return parts.some(part => part?.type?.toLowerCase() === 'reasoning');
 }
 
 function getOpenCodeEventTimestamp(event: OpenCodeEvent, fallback: string): string {

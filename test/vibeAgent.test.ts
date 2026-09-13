@@ -212,7 +212,7 @@ describe('parseVibeOutput', () => {
         assert.strictEqual(conversationLog.length, 4);
         assert.strictEqual(conversationLog[0].type, 'user');
         assert.deepStrictEqual(conversationLog[1].message.content, [
-            { type: 'text', text: 'I need to inspect the file.' },
+            { type: 'text', text: 'I need to inspect the file.', internalReasoning: true },
             { type: 'tool_use', id: 'tool-1', name: 'read_file', input: { path: 'vibe_test.py' } }
         ]);
         assert.deepStrictEqual(conversationLog[2].message.content, [{

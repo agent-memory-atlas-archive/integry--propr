@@ -113,6 +113,8 @@ export interface IndexingUpdatePayload {
 export interface ConversationEvent {
   type: 'thought' | 'tool_use' | 'tool_result';
   content?: string;
+  /** Provider-labelled reasoning is excluded from concise external activity feeds. */
+  internalReasoning?: boolean;
   toolName?: string;
   input?: Record<string, unknown>;
   id?: string;

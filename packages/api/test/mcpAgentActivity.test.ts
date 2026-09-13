@@ -1,0 +1,171 @@
+import assert from 'node:assert/strict';
+import test, { after } from 'node:test';
+import knex from 'knex';
+import type { RedisClientType } from 'redis';
+import { closeConnection } from '@propr/core';
+import type { McpPolicy, McpPrincipal } from '../mcp/policy.js';
+import { createToolCatalog, type ToolDeps } from '../mcp/tools.js';
+
+const directGoalId = '11111111-1111-4111-8111-111111111111';
+const orchestratedGoalId = '22222222-2222-4222-8222-222222222222';
+const repository = 'acme/repo';
+
+after(async () => closeConnection());
+
+async function createActivityDatabase() {
+  const db = knex({ client: 'better-sqlite3', connection: { filename: ':memory:' }, useNullAsDefault: true });
+  await db.schema.createTable('tasks', table => {
+    table.string('task_id').primary();
+    table.string('repository').notNullable();
+    table.string('task_type').notNullable();
+    table.timestamp('created_at');
+  });
+  await db.schema.createTable('goals', table => {
+    table.string('goal_id').primary();
+    table.string('owner_id').notNullable();
+    table.string('repository').notNullable();
+    table.string('current_task_id').notNullable();
+    table.string('launch_strategy').notNullable();
+    table.string('session_id');
+    table.timestamp('started_at');
+    table.timestamp('updated_at');
+    table.timestamp('created_at');
+  });
+  await db.schema.createTable('task_history', table => {
+    table.increments('history_id').primary();
+    table.string('task_id').notNullable();
+    table.string('state').notNullable();
+    table.timestamp('timestamp');
+    table.text('metadata');
+  });
+  await db.schema.createTable('llm_executions', table => {
+    table.string('execution_id').primary();
+    table.string('task_id');
+    table.string('session_id');
+    table.timestamp('start_time');
+  });
+  await db.schema.createTable('llm_execution_details', table => {
+    table.increments('detail_id').primary();
+    table.string('execution_id');
+    table.integer('sequence_number');
+    table.string('event_type');
+    table.timestamp('event_timestamp');
+    table.text('content');
+    table.boolean('is_error');
+    table.string('tool_name');
+    table.text('tool_input');
+    table.text('metadata');
+  });
+  const createdAt = '2026-09-13T10:00:00.000Z';
+  await db('tasks').insert([
+    { task_id: 'goal-task-direct', repository, task_type: 'goal', created_at: createdAt },
+    { task_id: 'goal-task-orchestrated', repository, task_type: 'goal', created_at: createdAt },
+  ]);
+  await db('goals').insert([
+    { goal_id: directGoalId, owner_id: 'owner-1', repository, current_task_id: 'goal-task-direct', launch_strategy: 'direct', started_at: createdAt, updated_at: createdAt, created_at: createdAt },
+    { goal_id: orchestratedGoalId, owner_id: 'owner-1', repository, current_task_id: 'goal-task-orchestrated', launch_strategy: 'orchestrate', started_at: createdAt, updated_at: createdAt, created_at: createdAt },
+  ]);
+  await db('task_history').insert([
+    { task_id: 'goal-task-direct', state: 'codex_execution', timestamp: createdAt },
+    { task_id: 'goal-task-orchestrated', state: 'claude_execution', timestamp: createdAt },
+  ]);
+  return db;
+}
+
+test('get_agent_activity returns compact newest-first narration for direct and orchestrated goals', async () => {
+  const db = await createActivityDatabase();
+  const emittedAtMs = Date.parse('2026-09-13T10:00:00.000Z');
+  const directOutput = [
+    { method: 'turn/plan/updated', params: { plan: [{ step: 'Implement the MCP activity projection', status: 'inProgress' }] }, emittedAtMs },
+    { method: 'item/completed', params: { item: { type: 'reasoning', summary: ['Hidden provider reasoning'] } }, emittedAtMs },
+    { method: 'item/completed', params: { item: { type: 'commandExecution', command: 'cat .env', aggregatedOutput: 'secret tool output', exitCode: 0 } }, emittedAtMs: emittedAtMs + 1_000 },
+    { method: 'item/completed', params: { item: { type: 'agentMessage', text: 'Inspecting packages/api/mcp/tools.ts before wiring the activity projection.' } }, emittedAtMs: emittedAtMs + 2_000 },
+    { method: 'item/completed', params: { item: { type: 'agentMessage', text: `Verified direct goal activity.\n\n${'Bounded detail. '.repeat(50)}` } }, emittedAtMs: emittedAtMs + 3_000 },
+    { method: 'item/completed', params: { item: { type: 'agentMessage', text: JSON.stringify({ checkpointReady: true, message: 'feat(mcp): expose agent activity', summary: 'Direct activity is ready.' }) } }, emittedAtMs: emittedAtMs + 4_000 },
+  ].map(event => JSON.stringify(event)).join('\n');
+  const orchestratedOutput = JSON.stringify({
+    type: 'assistant',
+    timestamp: '2026-09-13T10:01:00.000Z',
+    message: { content: [
+      { type: 'thinking', thinking: 'Hidden Claude reasoning' },
+      { type: 'text', text: 'Reviewing the orchestrated task state and its persisted events.' },
+      { type: 'tool_use', name: 'TodoWrite', input: { todos: [{ content: 'Verify orchestrated activity', status: 'in_progress' }] } },
+      { type: 'tool_use', name: 'Bash', input: { command: 'printenv' } },
+    ] },
+  });
+  const redisClient = {
+    get: async (key: string) => {
+      if (key === 'agent:output:goal-task-direct') return directOutput;
+      if (key === 'agent:output:goal-task-orchestrated') return orchestratedOutput;
+      if (key.startsWith('worker:state:')) return JSON.stringify({ history: [{ state: 'codex_execution', timestamp: '2026-09-13T10:00:00.000Z' }] });
+      return null;
+    },
+  } as unknown as RedisClientType;
+  const deps = {
+    db,
+    redisClient,
+    policy: {} as McpPolicy,
+    taskQueue: {} as never,
+    runtimeBuildQueue: {} as never,
+  } satisfies ToolDeps;
+  const tool = createToolCatalog(deps).find(candidate => candidate.name === 'get_agent_activity');
+  assert.ok(tool);
+  const principal = { user: { id: 'owner-1' } } as McpPrincipal;
+
+  try {
+    const defaults = tool.schema.parse({ repository, goalId: directGoalId });
+    const direct = (await tool.run({ principal, args: defaults })).data as Record<string, any>; // eslint-disable-line @typescript-eslint/no-explicit-any
+    assert.deepEqual(direct.target, {
+      type: 'goal', goalId: directGoalId, taskId: 'goal-task-direct', launchStrategy: 'direct',
+    });
+    assert.equal(direct.order, 'newest_first');
+    assert.equal(direct.nextOffset, null);
+    assert.equal(direct.currentFocus, 'Implement the MCP activity projection');
+    assert.deepEqual(direct.activity[0], {
+      timestamp: '2026-09-13T10:00:04.000Z',
+      message: 'Checkpoint ready: feat(mcp): expose agent activity. Direct activity is ready.',
+    });
+    assert.equal(direct.activity[1].timestamp, '2026-09-13T10:00:03.000Z');
+    assert.match(direct.activity[1].message, /^Verified direct goal activity\./);
+    assert.equal(direct.activity[1].message.length, 500);
+    assert.match(direct.activity[1].message, /…$/);
+    assert.deepEqual(direct.activity[2], {
+      timestamp: '2026-09-13T10:00:02.000Z',
+      message: 'Inspecting packages/api/mcp/tools.ts before wiring the activity projection.',
+    });
+    assert.doesNotMatch(JSON.stringify(direct), /Hidden provider reasoning|secret tool output|cat \.env/);
+
+    const firstPageArgs = tool.schema.parse({ repository, goalId: directGoalId, limit: 1 });
+    const firstPage = (await tool.run({ principal, args: firstPageArgs })).data as Record<string, any>; // eslint-disable-line @typescript-eslint/no-explicit-any
+    assert.equal(firstPage.activity.length, 1);
+    assert.equal(firstPage.nextOffset, 1);
+    const secondPageArgs = tool.schema.parse({ repository, goalId: directGoalId, limit: 1, offset: 1 });
+    const secondPage = (await tool.run({ principal, args: secondPageArgs })).data as Record<string, any>; // eslint-disable-line @typescript-eslint/no-explicit-any
+    assert.equal(secondPage.activity[0].timestamp, '2026-09-13T10:00:03.000Z');
+
+    const orchestratedArgs = tool.schema.parse({ repository, goalId: orchestratedGoalId });
+    const orchestrated = (await tool.run({ principal, args: orchestratedArgs })).data as Record<string, any>; // eslint-disable-line @typescript-eslint/no-explicit-any
+    assert.equal(orchestrated.target.launchStrategy, 'orchestrate');
+    assert.equal(orchestrated.currentFocus, 'Verify orchestrated activity');
+    assert.deepEqual(orchestrated.activity, [{
+      timestamp: '2026-09-13T10:01:00.000Z',
+      message: 'Reviewing the orchestrated task state and its persisted events.',
+    }]);
+    assert.doesNotMatch(JSON.stringify(orchestrated), /Hidden Claude reasoning|printenv/);
+
+    const taskArgs = tool.schema.parse({ repository, taskId: 'goal-task-orchestrated' });
+    const task = (await tool.run({ principal, args: taskArgs })).data as Record<string, any>; // eslint-disable-line @typescript-eslint/no-explicit-any
+    assert.equal(task.target.type, 'task');
+    assert.equal(task.target.goalId, orchestratedGoalId);
+    await assert.rejects(
+      () => tool.run({ principal: { user: { id: 'owner-2' } } as McpPrincipal, args: taskArgs }),
+      /Target not found/,
+    );
+    assert.throws(
+      () => tool.schema.parse({ repository, goalId: directGoalId, taskId: 'goal-task-direct' }),
+      /Provide exactly one/,
+    );
+  } finally {
+    await db.destroy();
+  }
+});

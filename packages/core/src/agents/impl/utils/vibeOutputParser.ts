@@ -47,8 +47,9 @@ interface ParsedVibeOutput {
 }
 
 interface ConversationContentItem {
-    type: 'text' | 'tool_use' | 'tool_result';
-    text?: string;
+  type: 'text' | 'tool_use' | 'tool_result';
+  text?: string;
+  internalReasoning?: boolean;
     id?: string;
     name?: string;
     input?: unknown;
@@ -204,8 +205,8 @@ function parseToolInput(input: unknown): unknown {
     }
 }
 
-function buildTextItem(text: string): ConversationContentItem {
-    return { type: 'text', text };
+function buildTextItem(text: string, internalReasoning = false): ConversationContentItem {
+    return { type: 'text', text, ...(internalReasoning ? { internalReasoning: true } : {}) };
 }
 
 function hasContentItems(items: ConversationContentItem[]): boolean {
@@ -218,7 +219,7 @@ function buildAssistantConversationEntry(event: VibeJsonOutput, index: number): 
     const messageText = textFromValue(event.content);
 
     if (reasoningText) {
-        content.push(buildTextItem(reasoningText));
+        content.push(buildTextItem(reasoningText, true));
     }
     if (messageText) {
         content.push(buildTextItem(messageText));

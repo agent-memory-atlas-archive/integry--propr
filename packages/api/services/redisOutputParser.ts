@@ -33,7 +33,7 @@ interface ParseState {
   codexTurnCompletedUsage: ParseState['tokenUsage'] | null;
   codexResultUsage: ParseState['tokenUsage'] | null;
   lastOpenCodeCumulativeTopLevelUsage: { input_tokens: number; output_tokens: number; cache_creation_input_tokens: number; cache_read_input_tokens: number } | null;
-  pendingAssistantMessage: string; pendingAssistantTimestamp: string | null;
+  pendingAssistantMessage: string; pendingAssistantTimestamp: string | null; pendingAssistantInternalReasoning: boolean;
   antigravityStreamActive: boolean;
   syntheticTimestampBaseMs: number | null;
   syntheticTimestampIndex: number;
@@ -130,7 +130,7 @@ function processCodexItem(
   switch (item.type) {
     case 'reasoning':
       if (item.text) {
-        events.push({ type: 'thought' as const, content: item.text, timestamp });
+        events.push({ type: 'thought' as const, content: item.text, internalReasoning: true, timestamp });
       }
       break;
     case 'command_execution':
@@ -271,7 +271,7 @@ function processAppServerItem(item: Record<string, unknown>, timestamp: string, 
   }
   if (type === 'reasoning') {
     const summary = Array.isArray(item.summary) ? item.summary.join('\n') : textFromValue(item.summary);
-    if (summary) state.events.push({ type: 'thought', content: truncateContent(summary), timestamp });
+    if (summary) state.events.push({ type: 'thought', content: truncateContent(summary), internalReasoning: true, timestamp });
     return;
   }
   if (type === 'commandExecution') {
@@ -407,9 +407,15 @@ function processOpenCodeEvent(
     if (type === 'delta' || event.part || event.parts?.length) {
       state.pendingAssistantMessage += assistantText;
       state.pendingAssistantTimestamp ??= timestamp;
+      state.pendingAssistantInternalReasoning ||= hasOpenCodeReasoning(event);
     } else {
       flushPendingMessage(state, timestamp);
-      state.events.push({ type: 'thought' as const, content: assistantText, timestamp });
+      state.events.push({
+        type: 'thought' as const,
+        content: assistantText,
+        ...(hasOpenCodeReasoning(event) ? { internalReasoning: true } : {}),
+        timestamp,
+      });
     }
   }
 
@@ -554,6 +560,12 @@ function hasOpenCodeSessionId(event: OpenCodeRedisEvent): boolean {
   return Boolean(event.sessionID || event.sessionId || event.session_id);
 }
 
+function hasOpenCodeReasoning(event: OpenCodeRedisEvent): boolean {
+  if (event.type?.toLowerCase() === 'reasoning') return true;
+  const parts = [event.part, ...(event.parts ?? []), ...(event.message?.parts ?? [])];
+  return parts.some(part => part?.type?.toLowerCase() === 'reasoning');
+}
+
 interface OpenCodeRedisToolTracker {
   emittedToolUseIds: Set<string>;
   emittedToolResultIds: Set<string>;
@@ -675,9 +687,15 @@ function hasRedisTokenUsage(usage: ParseState['tokenUsage']): boolean {
  */
 function flushPendingMessage(state: ParseState, timestamp: string): void {
   if (state.pendingAssistantMessage) {
-    state.events.push({ type: 'thought' as const, content: state.pendingAssistantMessage, timestamp: state.pendingAssistantTimestamp ?? timestamp });
+    state.events.push({
+      type: 'thought' as const,
+      content: state.pendingAssistantMessage,
+      ...(state.pendingAssistantInternalReasoning ? { internalReasoning: true } : {}),
+      timestamp: state.pendingAssistantTimestamp ?? timestamp,
+    });
     state.pendingAssistantMessage = '';
     state.pendingAssistantTimestamp = null;
+    state.pendingAssistantInternalReasoning = false;
   }
 }
 
@@ -812,6 +830,7 @@ export function parseRedisOutput(lines: string[], options: RedisOutputParseOptio
     lastOpenCodeCumulativeTopLevelUsage: null,
     pendingAssistantMessage: '',
     pendingAssistantTimestamp: null,
+    pendingAssistantInternalReasoning: false,
     antigravityStreamActive: false,
     syntheticTimestampBaseMs: Number.isNaN(executionStartMs) ? null : executionStartMs,
     syntheticTimestampIndex: 0,
