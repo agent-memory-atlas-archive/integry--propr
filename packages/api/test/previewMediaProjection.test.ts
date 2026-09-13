@@ -1,14 +1,43 @@
 import assert from 'node:assert/strict';
+import { execFile } from 'node:child_process';
+import { mkdtemp, readdir, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { after, test } from 'node:test';
+import { fileURLToPath } from 'node:url';
+import { promisify } from 'node:util';
 import knex from 'knex';
 import type { Request, Response } from 'express';
-import { closeConnection, type RepoToMonitor } from '@propr/core';
-import { parseNotification, trustedPreviewMedia, type Notification } from '@propr/shared';
+import { closeConnection, NotificationService, type RepoToMonitor } from '@propr/core';
+import { parseNotification, TASK_UPDATE, trustedPreviewMedia, type Notification, type PublishedVisualPreview } from '@propr/shared';
 import { createPreviewMediaReader, goalPreviewSource, projectNotificationPreviews, taskPreviewSource } from '../services/previewMediaProjection.js';
 import { createRepositoryMediaRoutes } from '../routes/repositoryMediaRoutes.js';
 import { getTasksFromDb } from '../routes/taskHelpers.js';
+import { createNotificationProjectionTestHarness, countNotificationEvents } from './notificationProjectionTestHarness.js';
 
 after(closeConnection);
+
+test('default task-list and identity-only preview consumers exit without opening a global database', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'propr-preview-import-'));
+  try {
+    const env: NodeJS.ProcessEnv = { ...process.env, NODE_ENV: 'test', DATA_DIR: directory, DB_FILENAME: join(directory, 'propr.sqlite') };
+    // Run standalone rather than inheriting the parent test runner's IPC state.
+    delete env.NODE_TEST_CONTEXT;
+    // A fresh process must exit naturally; this suite's core import and teardown
+    // would otherwise hide a singleton connection acquired by the list helpers.
+    const { stdout, stderr } = await promisify(execFile)(process.execPath, [
+      '--import', 'tsx', fileURLToPath(new URL('./goalTaskIsolation.test.ts', import.meta.url)),
+    ], {
+      cwd: fileURLToPath(new URL('../../../', import.meta.url)),
+      env,
+      timeout: 15_000,
+    });
+    assert.match(stdout, /ok \d+ - generic task lists exclude native goal backing tasks/);
+    assert.doesNotMatch(stdout + stderr, /SQLite database connection/);
+    assert.deepEqual(await readdir(directory), []);
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
 const url = (id: string) => `https://github.com/user-attachments/assets/${id}`;
 const body = (prefix: string) => `![unmarked](${url('ignored')})\n<!-- propr-visual-preview -->\n${Array.from({ length: 5 }, (_, i) => `### ${prefix} ${i}\n\n![Preview](${url(`${prefix}-${i}`)})\n`).join('\n')}`;
 function fixture() {
@@ -25,7 +54,8 @@ function fixture() {
       return { data: { body: body(String(params.pull_number)) } };
     },
   }) as never });
-  return { reader, calls, disable: () => { repos = []; } };
+  return { reader, calls, disable: () => { repos = repos.map(repo => ({ ...repo, visualPreview: { enabled: false, types: ['image'] } })); },
+    legacy: () => { repos = repos.map(repo => { const legacy = { ...repo }; delete legacy.visualPreview; return legacy; }); } };
 }
 
 test('batch projections preserve branch-sharing, gate cached media, deduplicate reads and truncate rows', async () => {
@@ -62,18 +92,76 @@ const notification = (kind = 'task', severity = 'success') => ({
   occurredAt: '2026-09-13T12:00:00.000Z', createdAt: '2026-09-13T12:00:00.000Z', readAt: null, dismissedAt: null,
 }) as Notification;
 
-test('Inbox projects one preview only for completed tasks and shared parsing preserves the bounded trusted field', async () => {
-  const { reader, disable } = fixture();
-  const media = await projectNotificationPreviews([notification(), notification('task', 'error'), notification('review')], reader);
-  assert.equal(media[0].previewMedia?.length, 1);
-  assert.equal(parseNotification(media[0]).previewMedia?.length, 1);
-  assert.equal(media[1].previewMedia, undefined);
-  assert.equal(media[2].previewMedia, undefined);
-  const overfull = Array.from({ length: 5 }, (_, i) => ({ title: `Image ${i}`, type: 'image', url: url(String(i)) }));
-  assert.equal(parseNotification({ ...notification(), previewMedia: overfull }).previewMedia?.length, 1);
-  assert.equal(parseNotification({ ...notification('task', 'error'), previewMedia: overfull }).previewMedia, undefined);
-  disable();
-  assert.equal((await projectNotificationPreviews(media, reader))[0].previewMedia, undefined);
+test('real implementation completion persists one PR event and projects one trusted preview only while enabled', async () => {
+  const now = () => new Date('2026-09-13T12:00:00.000Z');
+  const { database, projection } = await createNotificationProjectionTestHarness(now);
+  const { reader, calls, disable, legacy } = fixture();
+  try {
+    await database('tasks').insert({
+      task_id: 'implementation-1', repository: 'Acme/Web', issue_number: 2373,
+      task_type: 'issue', initial_job_data: '{}',
+    });
+    await database('task_history').insert({
+      task_id: 'implementation-1', state: 'completed', timestamp: now().toISOString(),
+      metadata: JSON.stringify({ prResult: { prNumber: 1, prUrl: 'https://evil.test/secret' } }),
+    });
+    const payload = {
+      eventType: TASK_UPDATE, taskId: 'implementation-1', state: 'completed',
+      repository: 'Acme/Web', timestamp: now().toISOString(),
+      metadata: { secret: 'never copy task metadata' },
+    };
+    await projection.projectTaskUpdate(payload);
+    await projection.projectTaskUpdate(payload);
+    assert.equal(await countNotificationEvents(database), 1);
+    const service = new NotificationService({ database, now });
+    const { notifications } = await service.listNotifications('member-user');
+    assert.equal(notifications.length, 1);
+    const [completion] = notifications;
+    assert.equal(completion.kind, 'pull_request');
+    assert.equal(completion.severity, 'info');
+    assert.deepEqual(completion.target, { type: 'pull_request', repository: 'Acme/Web', prNumber: 1 });
+    assert.deepEqual(completion.metadata, { completedImplementationTaskId: 'implementation-1' });
+    assert.deepEqual(completion.actions, ['open_pr', 'dismiss']);
+    assert.equal(completion.action?.href, 'https://github.com/Acme/Web/pull/1');
+    // The immutable event retains its original PR even if the task subsequently changes.
+    await database('tasks').where({ task_id: 'implementation-1' }).update({ pr_number: 88 });
+    const [projected] = await projectNotificationPreviews(notifications, reader, database);
+    assert.deepEqual(projected.previewMedia?.map(item => item.url), [url('1-0')]);
+    assert.deepEqual(parseNotification(projected), projected);
+    const unchanged = { ...projected };
+    delete unchanged.previewMedia;
+    assert.deepEqual(unchanged, completion);
+    assert.deepEqual(calls, [1]);
+    const overfull = Array.from({ length: 5 }, (_, i) => ({ title: `Image ${i}`, type: 'image', url: url(String(i)) }));
+    assert.equal(parseNotification({ ...completion, previewMedia: overfull }).previewMedia?.length, 1);
+    disable();
+    assert.equal((await projectNotificationPreviews([projected], reader, database))[0].previewMedia, undefined);
+    legacy();
+    assert.equal((await projectNotificationPreviews([projected], reader, database))[0].previewMedia, undefined);
+    assert.deepEqual(calls, [1]);
+  } finally { projection.close(); await database.destroy(); }
+});
+
+test('unrelated notifications and malformed completion identities never fetch or retain thumbnails', async () => {
+  const { reader, calls } = fixture();
+  const pr = { ...notification(), kind: 'pull_request', severity: 'info',
+    target: { type: 'pull_request', repository: 'acme/web', prNumber: 1 } } as Notification;
+  const unrelated: Notification[] = [
+    pr,
+    ...[null, false, 1, {}, [], '', '   '].map(taskId => ({ ...pr, metadata: { completedImplementationTaskId: taskId } })),
+    { ...pr, severity: 'warning', metadata: { completedImplementationTaskId: 'task-1' } },
+    notification('task', 'error'), notification('task', 'warning'),
+    { ...pr, kind: 'review', severity: 'success', target: { type: 'review', repository: 'acme/web', prNumber: 1 } },
+    { ...pr, kind: 'plan', target: { type: 'plan', repository: 'acme/web', draftId: 'draft-1' } },
+    { ...pr, kind: 'indexing', target: { type: 'indexing', repository: 'acme/web' } },
+    { ...pr, kind: 'system_failure', target: { type: 'system_failure', component: 'worker' } },
+  ];
+  const previews: PublishedVisualPreview[] = [{ type: 'image', title: 'Preview', url: url('injected') }];
+  const injected = unrelated.map(item => ({ ...item, previewMedia: previews }));
+  for (const item of injected) assert.equal(parseNotification(item).previewMedia, undefined);
+  const projected = await projectNotificationPreviews(injected, reader);
+  assert.ok(projected.every(item => item.previewMedia === undefined));
+  assert.deepEqual(calls, []);
 });
 
 test('artifact sources use stored PR identities, including final results, and ignore cross-repository goal artifacts', () => {
@@ -85,8 +173,8 @@ test('artifact sources use stored PR identities, including final results, and ig
 });
 
 function response() {
-  const state: { status: number; body: Record<string, unknown> } = { status: 200, body: {} };
-  const res = { status(code: number) { state.status = code; return this; }, json(body: Record<string, unknown>) { state.body = body; } } as Response;
+  const state: { status: number; body: { previews?: PublishedVisualPreview[]; unavailable?: boolean; nextOffset?: number | null; error?: string } } = { status: 200, body: {} };
+  const res = { status(code: number) { state.status = code; return this; }, json(body: typeof state.body) { state.body = body; } } as Response;
   return { res, state };
 }
 
@@ -113,8 +201,7 @@ test('repository gallery scopes tasks and owned goals, paginates, reports empty/
     const route = createRepositoryMediaRoutes({ db, reader }).getMedia;
     const req = { user: { id: 'alice' }, query: { repository: 'acme/web' } } as unknown as Request;
     const first = response(); await route(req, first.res);
-    assert.ok(Array.isArray(first.state.body.previews));
-    assert.equal(first.state.body.previews.length, 10);
+    assert.equal(first.state.body.previews?.length, 10);
     assert.equal(first.state.body.unavailable, true);
     assert.equal(first.state.body.nextOffset, 24);
     assert.deepEqual([...calls].sort((a, b) => a - b), [1, 2, 99]);
