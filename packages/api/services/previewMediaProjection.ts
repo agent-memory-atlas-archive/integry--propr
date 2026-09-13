@@ -3,7 +3,7 @@ import {
   db as defaultDb, getAuthenticatedOctokit, loadMonitoredReposRaw, resolveRepositoryVisualPreviewSettings,
   parsePublishedVisualPreviews, parseGoalArtifacts,
 } from '@propr/core';
-import { trustedPreviewMedia, type Notification, type PublishedVisualPreview } from '@propr/shared';
+import { isNotificationPreviewEligible, trustedPreviewMedia, type Notification, type PublishedVisualPreview } from '@propr/shared';
 
 export interface PreviewSource { repository: string; prNumbers: number[] }
 export interface PreviewProjection { previews: PublishedVisualPreview[]; unavailable?: boolean }
@@ -111,7 +111,8 @@ export function goalPreviewSource(row: { repository: string; final_pr_number: nu
 export async function projectNotificationPreviews(
   notifications: readonly Notification[], reader = previewMediaReader, database: Knex = defaultDb,
 ): Promise<Notification[]> {
-  const sources = notifications.map(notification => notification.kind === 'task' && notification.severity === 'success'
+  const sources = notifications.map(notification => isNotificationPreviewEligible(notification)
+    && (notification.kind === 'task' || notification.kind === 'pull_request')
     ? { repository: notification.target.repository, prNumbers: notification.target.prNumber ? [notification.target.prNumber] : [] }
     : { repository: '', prNumbers: [] });
   // Older immutable completion events may predate the task's persisted PR identity.

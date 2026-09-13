@@ -55,10 +55,14 @@ export interface RepoActionContainerProps {
   settingsContent?: React.ReactNode;
 }
 
+function availableTab(requestedTab: ActionTab, mediaEnabled: boolean): ActionTab {
+  return requestedTab === 'media' && !mediaEnabled ? 'settings' : requestedTab;
+}
+
 const RepoActionContainer: React.FC<RepoActionContainerProps> = ({ selectedRepo, initialTab, settingsContent }) => {
   const [requestedTab, setActiveTab] = useState<ActionTab>(initialTab || 'settings');
   const mediaEnabled = selectedRepo?.visualPreview?.enabled === true;
-  const activeTab = requestedTab === 'media' && !mediaEnabled ? 'settings' : requestedTab;
+  const activeTab = availableTab(requestedTab, mediaEnabled);
   const [chatMessages, setChatMessages] = useState<Message[]>([]);
   const [suggestions, setSuggestions] = useState<SuggestionItem[]>([]);
   const [isLoadingMessages, setIsLoadingMessages] = useState(false);
@@ -287,7 +291,7 @@ const RepoActionContainer: React.FC<RepoActionContainerProps> = ({ selectedRepo,
       {/* Tab Content */}
       <div className="flex-1 min-h-0 min-w-0">
         {activeTab === 'settings' && settingsContent}
-        {activeTab === 'media' && mediaEnabled && <RepoMediaPanel key={selectedRepo.name} repository={selectedRepo.name} />}
+        {activeTab === 'media' && <RepoMediaPanel key={selectedRepo.name} repository={selectedRepo.name} />}
         {activeTab === 'chat' && (
           <RepoChatPanel
             onSendMessage={handleSendMessage}

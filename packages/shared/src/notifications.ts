@@ -1279,6 +1279,14 @@ export function parseNotificationEvent(value: unknown): NotificationEvent {
   } as NotificationEvent;
 }
 
+/** Completion identity is producer-owned metadata, independent of PR attention and navigation. */
+export function isNotificationPreviewEligible(event: NotificationEvent): boolean {
+  if (event.kind === 'task') return event.severity === 'success';
+  const taskId = event.metadata?.completedImplementationTaskId;
+  return event.kind === 'pull_request' && event.severity === 'info'
+    && typeof taskId === 'string' && taskId.trim().length > 0;
+}
+
 /** Validate an Inbox item immediately before serializing an API response. */
 export function parseNotification(value: unknown): Notification {
   const record = parseRecord(value, 'notification');
@@ -1295,7 +1303,7 @@ export function parseNotification(value: unknown): Notification {
   if (dismissedAt !== null && dismissedAt < event.createdAt) {
     return invalid('notification.dismissedAt', 'a timestamp at or after event createdAt');
   }
-  const previewMedia = event.kind === 'task' && event.severity === 'success'
+  const previewMedia = isNotificationPreviewEligible(event)
     ? trustedPreviewMedia(record.previewMedia, 1) : [];
   return { ...event, readAt, dismissedAt, ...(previewMedia.length ? { previewMedia } : {}) } as Notification;
 }
