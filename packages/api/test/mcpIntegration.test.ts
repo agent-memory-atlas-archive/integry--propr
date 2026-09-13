@@ -193,6 +193,9 @@ test('MCP task, goal and plan lists paginate in deterministic newest-first order
     table.integer('order_index'); table.boolean('is_completed'); table.string('linked_draft_id');
     table.timestamp('created_at'); table.timestamp('updated_at');
   });
+  await db.schema.createTable('notification_pull_request_state', table => {
+    table.string('repository'); table.integer('pr_number'); table.timestamp('merged_at');
+  });
 
   const repository = 'acme/repo';
   const newest = '2026-09-01 12:00:00';
@@ -229,6 +232,7 @@ test('MCP task, goal and plan lists paginate in deterministic newest-first order
       created_at: newest, updated_at: '2026-09-01 12:00:30' },
   ]);
   await db('plan_issues').insert({ draft_id: 'plan-b-new', task_id: '10151', pr_number: 188, status: 'closed', agent_alias: 'codex', model_name: 'gpt-5.6' });
+  await db('notification_pull_request_state').insert({ repository, pr_number: 288, merged_at: '2026-09-01 12:00:21' });
   await db('repo_todo_categories').insert({ category_id: 'category-1', user_id: '123', repository, name: 'API', order_index: 0 });
   await db('repo_todos').insert({ todo_id: 'todo-1', user_id: '123', repository, category_id: 'category-1', content: 'Keep list payloads compact',
     order_index: 0, is_completed: false, linked_draft_id: 'plan-b-new', created_at: newest, updated_at: newest });
@@ -263,7 +267,7 @@ test('MCP task, goal and plan lists paginate in deterministic newest-first order
     assert.equal(goalPageOne.goals[0].summary, 'Make every MCP list result understandable without another fetch.');
     assert.equal(goalPageOne.goals[0].agent_alias, 'codex');
     assert.equal(goalPageOne.goals[0].model_name, 'gpt-5.6-codex');
-    assert.equal(goalPageOne.goals[0].pr_state, 'closed');
+    assert.equal(goalPageOne.goals[0].pr_state, 'merged');
     assert.equal(goalPageOne.goals[0].elapsed_ms, 19_000);
 
     const planPageOne = await page('list_plans', 0);

@@ -48,6 +48,16 @@ export interface McpTool {
 export interface ToolDeps { db: Knex; taskQueue: Queue; redisClient: RedisClientType; runtimeBuildQueue: Queue; policy: McpPolicy; goalServices?: Omit<Parameters<typeof createGoalRoutes>[0], 'db' | 'taskQueue' | 'redisClient'> }
 export const ok = (data: unknown): OperationResult => ({ status: 200, data });
 
+async function markMergedPullRequests(db: Knex, repository: string, items: Record<string, unknown>[]): Promise<void> {
+  const numbers = [...new Set(items.map(item => Number(item.pr_number))
+    .filter(number => Number.isSafeInteger(number) && number > 0))];
+  if (!numbers.length) return;
+  const rows = await db('notification_pull_request_state').where({ repository })
+    .whereIn('pr_number', numbers).whereNotNull('merged_at').select('pr_number');
+  const merged = new Set(rows.map(row => Number(row.pr_number)));
+  for (const item of items) if (merged.has(Number(item.pr_number))) item.pr_state = 'merged';
+}
+
 export function createToolCatalog(deps: ToolDeps): McpTool[] {
   const { db, taskQueue, redisClient, policy } = deps;
   const tools: McpTool[] = [];
@@ -103,6 +113,7 @@ export function createToolCatalog(deps: ToolDeps): McpTool[] {
         'created_at', 'updated_at', 'started_at', 'completed_at')
       .orderBy('created_at', 'desc').orderBy('goal_id', 'desc').offset(args.offset).limit(args.limit);
     const goals = rows.map(row => summarizeGoal(row));
+    await markMergedPullRequests(db, args.repository, goals);
     return ok({ goals, nextOffset: rows.length === args.limit ? args.offset + args.limit : null });
   } });
   const goalTarget = { table: 'goals', column: 'goal_id', arg: 'goalId', owner: 'owner_id' };
@@ -137,6 +148,7 @@ export function createToolCatalog(deps: ToolDeps): McpTool[] {
       'task_plan_issue.plan_agent_alias', 'task_plan_issue.plan_model_name')
       .orderBy('tasks.created_at', 'desc').orderBy('tasks.task_id', 'desc').offset(args.offset).limit(args.limit);
     const tasks = rows.map(row => summarizeTask(row));
+    await markMergedPullRequests(db, args.repository, tasks);
     return ok({ tasks, nextOffset: rows.length === args.limit ? args.offset + args.limit : null });
   } });
   tools.push({ name: 'get_task', description: 'Read a task’s persisted state.', scope: 'read', readOnly: true, schema: z.object(taskShape).strict(), target: taskTarget, run: async ({ args }) => ok({ ...await db('tasks').where({ task_id: args.taskId }).first(taskColumns), latestEvent: await db('task_history').where({ task_id: args.taskId }).orderBy('history_id', 'desc').first('state', 'reason', 'timestamp') }) });

@@ -1,5 +1,6 @@
 const SUMMARY_LIMIT = 240;
 const TITLE_LIMIT = 160;
+const RELATION_LIMIT = 20;
 
 type JsonObject = Record<string, unknown>;
 
@@ -98,8 +99,8 @@ export function summarizeTask(row: JsonObject, now = Date.now()): JsonObject {
     title: compactText(rawTitle ?? taskFallbackTitle(row, prNumber), TITLE_LIMIT),
     summary: compactText(job.subtitle),
     state,
-    agent_alias: text(job.agentAlias) ?? text(issueRef.agentAlias) ?? text(row.plan_agent_alias),
-    model_name: text(row.model_name) ?? text(job.modelName) ?? text(issueRef.modelName) ?? text(row.plan_model_name),
+    agent_alias: compactText(job.agentAlias ?? issueRef.agentAlias ?? row.plan_agent_alias, 100),
+    model_name: compactText(row.model_name ?? job.modelName ?? issueRef.modelName ?? row.plan_model_name, 100),
     pr_number: prNumber,
     pr_state: pullRequestState(row.plan_issue_status, prNumber !== null),
     created_at: row.created_at,
@@ -133,8 +134,8 @@ export function summarizeGoal(row: JsonObject, now = Date.now()): JsonObject {
     desired_state: row.desired_state,
     result_state: row.result_state ?? null,
     current_task_id: row.current_task_id,
-    agent_alias: row.agent_alias ?? null,
-    model_name: row.effective_model ?? row.requested_model ?? null,
+    agent_alias: compactText(row.agent_alias, 100),
+    model_name: compactText(row.effective_model ?? row.requested_model, 255),
     pr_number: prNumber,
     pr_state: prNumber ? text(finalPr?.state) ?? 'open' : null,
     created_at: row.created_at,
@@ -149,25 +150,25 @@ export function summarizeGoal(row: JsonObject, now = Date.now()): JsonObject {
 export function summarizePlan(row: JsonObject, issues: JsonObject[], now = Date.now()): JsonObject {
   const counts = { total: issues.length, pending: 0, active: 0, merged: 0, closed: 0 };
   const agentModels = new Map<string, { agent_alias: string; model_name: string }>();
-  const pullRequests: Array<{ number: number; state: string }> = [];
+  const pullRequests = new Map<number, string>();
   for (const issue of issues) {
     const status = text(issue.status) ?? 'pending';
     if (status === 'pending') counts.pending += 1;
     else if (status === 'merged') counts.merged += 1;
     else if (status === 'closed') counts.closed += 1;
     else counts.active += 1;
-    const alias = text(issue.agent_alias);
-    const model = text(issue.model_name);
+    const alias = compactText(issue.agent_alias, 100);
+    const model = compactText(issue.model_name, 100);
     if (alias && model) agentModels.set(`${alias}\u0000${model}`, { agent_alias: alias, model_name: model });
     const number = positiveInteger(issue.pr_number);
-    if (number) pullRequests.push({ number, state: pullRequestState(status, true)! });
+    if (number) pullRequests.set(number, pullRequestState(status, true)!);
   }
   const status = text(row.status) ?? 'draft';
   const completedAt = status === 'merged' ? row.updated_at : null;
   const trace = parseObject(row.generation_trace);
   const refinement = parseObject(row.refinement_result);
   const context = parseObject(row.context_config);
-  const generationModel = text(context.generationModel);
+  const generationModel = compactText(context.generationModel, 255);
   const onlyAgentModel = agentModels.size === 1 ? [...agentModels.values()][0] : null;
 
   return {
@@ -182,8 +183,10 @@ export function summarizePlan(row: JsonObject, issues: JsonObject[], now = Date.
     agent_alias: onlyAgentModel?.agent_alias ?? null,
     model_name: onlyAgentModel?.model_name ?? generationModel,
     generation_model: generationModel,
-    agent_models: [...agentModels.values()],
-    pull_requests: pullRequests,
+    agent_model_count: agentModels.size,
+    agent_models: [...agentModels.values()].slice(0, RELATION_LIMIT),
+    pull_request_count: pullRequests.size,
+    pull_requests: [...pullRequests].slice(0, RELATION_LIMIT).map(([number, state]) => ({ number, state })),
     created_at: row.created_at,
     updated_at: row.updated_at,
     started_at: row.created_at,
@@ -203,10 +206,10 @@ export function summarizeTodo(row: JsonObject): JsonObject {
     title: compactText(row.content, TITLE_LIMIT) ?? 'Untitled TODO',
     summary: compactText(row.content),
     is_completed: Boolean(row.is_completed),
-    category: row.category_id ? { id: row.category_id, name: row.category_name ?? null } : null,
+    category: row.category_id ? { id: row.category_id, name: compactText(row.category_name, 100) } : null,
     linked_plan: linkedPlanId ? {
       id: linkedPlanId,
-      title: row.linked_plan_name ?? null,
+      title: compactText(row.linked_plan_name, TITLE_LIMIT),
       status: row.linked_plan_status ?? null,
     } : null,
     order_index: row.order_index,
