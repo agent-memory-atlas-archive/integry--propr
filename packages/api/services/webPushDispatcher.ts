@@ -125,6 +125,12 @@ export interface WebPushDispatcherStartResult {
   publicKey: string | null;
 }
 
+function dispatcherConfiguration(options: WebPushDispatcherOptions): ValidatedWebPushConfiguration {
+  return options.resolvedConfiguration ?? validateWebPushConfiguration(
+    options.configuration ?? webPushConfigurationFromEnvironment(),
+  );
+}
+
 function positiveInteger(value: number | undefined, fallback: number, name: string): number {
   const resolved = value ?? fallback;
   if (!Number.isSafeInteger(resolved) || resolved <= 0) {
@@ -430,9 +436,7 @@ export class WebPushDispatcher {
 
   constructor(options: WebPushDispatcherOptions) {
     this.database = options.database;
-    this.configuration = options.resolvedConfiguration ?? validateWebPushConfiguration(
-      options.configuration ?? webPushConfigurationFromEnvironment(),
-    );
+    this.configuration = dispatcherConfiguration(options);
     const insecureLocalhostRequested = options.allowInsecureLocalhost
       ?? parseTruthyEnvValue(process.env.PROPR_ALLOW_INSECURE_LOCAL_WEB_PUSH);
     this.allowInsecureLocalhost = insecureLocalhostRequested
