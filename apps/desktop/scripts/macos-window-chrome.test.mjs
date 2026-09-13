@@ -157,8 +157,12 @@ async function exerciseChrome(context, native) {
     await expect(page.getByRole('heading', { name: 'Recent Activity' })).toBeVisible();
     const logo = page.locator('.desktop-sidebar-header img');
     await expect.poll(() => logo.evaluate(img => img.complete && img.naturalWidth > 0)).toBe(true);
-    await expect(page.locator('.desktop-sidebar-header')).toHaveCSS('background-color', 'rgb(244, 247, 247)');
-    await expect(page.locator('.desktop-content-toolbar')).toHaveCSS('background-color', 'rgb(244, 247, 247)');
+    // The header is transparent so the native traffic lights float directly on
+    // the sidebar's continuous tinted wash; the toolbar belongs to the white
+    // content surface.
+    await expect(page.locator('.desktop-sidebar-header')).toHaveCSS('background-color', 'rgba(0, 0, 0, 0)');
+    await expect(page.locator('.desktop-sidebar')).toHaveCSS('background-color', 'rgb(242, 246, 246)');
+    await expect(page.locator('.desktop-content-toolbar')).toHaveCSS('background-color', 'rgb(252, 253, 253)');
     await capture('connected', 'macOS connected: logo clears the 80px traffic-light area');
     for (const width of [1280, 880]) {
       if (native) await application.evaluate(({ BrowserWindow }, width) => BrowserWindow.getAllWindows()[0].setSize(width, 820), width);
