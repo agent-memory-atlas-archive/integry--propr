@@ -48,6 +48,9 @@ test('OAuth codes are single use, PKCE/resource/redirect bound, credentials encr
     await assert.rejects(f.oauth.exchangeAuthorizationCode(f.client, code, f.verifier, 'http://127.0.0.1:9999/callback', new URL(f.config.resource)));
     await assert.rejects(f.oauth.exchangeAuthorizationCode(f.client, code, f.verifier, f.client.redirect_uris[0], new URL('https://another.example/api/mcp')));
     const token = await f.exchange(code);
+    // Claude may proactively refresh up to five minutes before expiry. The
+    // access token must be born outside that window instead of looking stale.
+    assert.equal(token.expires_in, 15 * 60);
     await assert.rejects(f.exchange(code));
     const info = await f.oauth.verifyAccessToken(token.access_token);
     assert.deepEqual(info.scopes, ['read', 'plan']);

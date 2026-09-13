@@ -13,7 +13,7 @@ import { authenticateSocketRequest, setupAuth } from './auth.js';
 import { configureDemoMode, createDemoRedisClient, demoModeReadOnlyMiddleware } from './demoMode.js';
 import { resolveGithubAuthMode, resolveGithubEventIntakeMode, validateIntakeModePrerequisites } from '@propr/shared';
 import { initSocketService, closeSocketService } from './services/socketService.js';
-import { corsRejectionHandler, createCorsOriginValidator } from './corsValidation.js';
+import { corsRejectionHandler, createCorsOriginValidator, isTrustedMcpWebOrigin } from './corsValidation.js';
 import {
   createStatusRoutes, createTaskRoutes,
   createTaskHistoryRoutes, createLiveDetailsRoutes,
@@ -193,10 +193,13 @@ app.use('/api/mcp', (req, res, next) => { if (isMcpEnabledSync()) { mcpResponseH
 
 app.use((req, res, next) => {
   // Server-rendered MCP consent forms submit on the API's own public origin,
-  // which can differ from FRONTEND_URL. Keep other API CORS policy intact.
+  // which can differ from FRONTEND_URL. Known remote MCP web clients also need
+  // their exact origin accepted at the bearer-authenticated MCP endpoint. Keep
+  // the cookie-authenticated REST and Socket.IO CORS policy intact.
   const mcpOrigin = getMcpOriginSync();
   const consentOrigin = req.path.startsWith('/mcp/') && mcpOrigin && req.get('origin') === mcpOrigin;
-  cors({ origin: consentOrigin ? mcpOrigin : validateCorsOrigin, credentials: true })(req, res, next);
+  const webClientOrigin = isTrustedMcpWebOrigin(req.path, req.get('origin')) ? req.get('origin') : undefined;
+  cors({ origin: consentOrigin ? mcpOrigin : webClientOrigin ?? validateCorsOrigin, credentials: true })(req, res, next);
 });
 // The `cors` package forwards rejected origins as middleware errors. Handle
 // those immediately so Express never renders its development HTML error page

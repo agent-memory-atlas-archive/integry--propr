@@ -80,6 +80,15 @@ export const mcpResponseHeaders: RequestHandler = (_req, res, next) => {
   next();
 };
 
+// OAuth failures otherwise disappear inside the SDK router. Record only the
+// grant type and outcome; never log codes, tokens, client IDs or request bodies.
+const logTokenRequestOutcome: RequestHandler = (req, res, next) => {
+  const grantType = req.body?.grant_type === 'authorization_code' || req.body?.grant_type === 'refresh_token'
+    ? req.body.grant_type : 'unknown';
+  res.once('finish', () => console.info('[mcp] OAuth token request completed', { grantType, status: res.statusCode }));
+  next();
+};
+
 // Paths owned by the OAuth authorization/metadata router. Everything else must
 // fall through untouched: this router is mounted at the application root, ahead
 // of the rest of the API.
@@ -186,9 +195,12 @@ export function mountMcp(app: Express, services: Omit<ToolDeps, 'policy'>): void
         res.status(400).json({ error: 'invalid_request', error_description: 'Exact registered redirect_uri required' }); return;
       }
       next();
-    } catch { res.status(400).json({ error: 'invalid_client' }); }
+    } catch (error) {
+      console.error('[mcp] OAuth client metadata lookup failed:', error instanceof Error ? error.message : 'Unknown error');
+      res.status(400).json({ error: 'invalid_client' });
+    }
   });
-  app.use('/token', gate, express.urlencoded({ extended: false, limit: '16kb' }), validatePublicTokenRequest);
+  app.use('/token', gate, express.urlencoded({ extended: false, limit: '16kb' }), logTokenRequestOutcome, validatePublicTokenRequest);
   // The SDK router must be mounted at the application root to keep its absolute
   // paths, so filter by path here instead of by mount point. Requests it does
   // not own continue down the stack untouched, including while MCP is off.
@@ -201,6 +213,9 @@ export function mountMcp(app: Express, services: Omit<ToolDeps, 'policy'>): void
   const endpoint: RequestHandler = async (req, res) => {
     // Empty 202 notifications still have an HTTP body stream at the gateway.
     res.set({ 'Cache-Control': 'no-store', 'X-ProPR-MCP-Contract': MCP_CONNECT_CONTRACT }).type('application/json');
+    if (req.body?.method === 'initialize') {
+      res.once('finish', () => console.info('[mcp] Initialize request completed', { status: res.statusCode }));
+    }
     const config = await resolveMcpConfig(services.db).catch(logMcpResolveFailure);
     if (!config || !await ensureInitialized()) { res.status(404).end(); return; }
     const bearer = /^Bearer ([^\s]+)$/i.exec(req.get('authorization') || '')?.[1];

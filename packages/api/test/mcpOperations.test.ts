@@ -58,3 +58,24 @@ test('CIMD intersects plural supported methods with public PKCE instead of trust
   assert.throws(() => parseClientMetadataDocument({ ...document, token_endpoint_auth_methods_supported: undefined }, id));
   assert.throws(() => parseClientMetadataDocument({ ...document, client_id: 'https://imposter.example/client.json' }, id));
 });
+
+test('CIMD accepts Claude by intersecting broader advertised grant capabilities', () => {
+  const id = 'https://claude.ai/oauth/mcp-oauth-client-metadata';
+  const document = {
+    client_id: id,
+    client_name: 'Claude',
+    client_uri: 'https://claude.ai',
+    redirect_uris: ['https://claude.ai/api/mcp/auth_callback'],
+    grant_types: ['authorization_code', 'refresh_token', 'urn:ietf:params:oauth:grant-type:jwt-bearer'],
+    response_types: ['code'],
+    token_endpoint_auth_method: 'none',
+  };
+  const client = parseClientMetadataDocument(document, id);
+  assert.deepEqual(client.grant_types, ['authorization_code', 'refresh_token']);
+  assert.deepEqual(client.redirect_uris, document.redirect_uris);
+  assert.throws(() => parseClientMetadataDocument({ ...document,
+    grant_types: ['urn:ietf:params:oauth:grant-type:jwt-bearer'] }, id));
+  for (const grantTypes of [[], ['authorization_code', 42], ['authorization_code', ''], ['authorization code'], 'authorization_code']) {
+    assert.throws(() => parseClientMetadataDocument({ ...document, grant_types: grantTypes }, id));
+  }
+});

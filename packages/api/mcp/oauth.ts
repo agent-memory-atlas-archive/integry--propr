@@ -16,6 +16,7 @@ export interface McpGrant {
 }
 interface Code { grantId: string; clientId: string; challenge: string; redirect: string; resource: string }
 interface Token { grantId: string; clientId: string; expiresAt: number; used?: boolean }
+const ACCESS_TOKEN_TTL_SECONDS = 15 * 60;
 export interface PendingAuthorization {
   client: OAuthClientInformationFull;
   params: Omit<AuthorizationParams, 'resource'> & { resource: string };
@@ -112,10 +113,11 @@ export class McpOAuthProvider implements OAuthServerProvider {
   private async issue(grant: McpGrant, tx: Knex, scopes = grant.scopes): Promise<OAuthTokens> {
     const access = `propr_mcp_${secret()}`;
     const refresh = secret();
-    await this.store.put('access', digest(access), { grantId: grant.id, clientId: grant.clientId, scopes, expiresAt: Date.now() + 300_000 }, { expiresAt: Date.now() + 300_000, database: tx });
+    const accessExpiresAt = Date.now() + ACCESS_TOKEN_TTL_SECONDS * 1000;
+    await this.store.put('access', digest(access), { grantId: grant.id, clientId: grant.clientId, scopes, expiresAt: accessExpiresAt }, { expiresAt: accessExpiresAt, database: tx });
     // Retain spent refresh tokens until the grant expires, to detect reuse.
     await this.store.put('refresh', digest(refresh), { grantId: grant.id, clientId: grant.clientId, scopes, expiresAt: grant.expiresAt, used: false }, { expiresAt: grant.expiresAt, database: tx });
-    return { access_token: access, token_type: 'Bearer', expires_in: 300, refresh_token: refresh, scope: scopes.join(' ') };
+    return { access_token: access, token_type: 'Bearer', expires_in: ACCESS_TOKEN_TTL_SECONDS, refresh_token: refresh, scope: scopes.join(' ') };
   }
 
   async exchangeRefreshToken(client: OAuthClientInformationFull, refresh: string, scopes?: string[], resource?: URL): Promise<OAuthTokens> {
