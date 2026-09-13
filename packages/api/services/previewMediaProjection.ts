@@ -1,8 +1,5 @@
 import type { Knex } from 'knex';
-import {
-  db as defaultDb, getAuthenticatedOctokit, loadMonitoredReposRaw, resolveRepositoryVisualPreviewSettings,
-  parsePublishedVisualPreviews, parseGoalArtifacts,
-} from '@propr/core';
+import type { getAuthenticatedOctokit, loadMonitoredReposRaw, GoalArtifact } from '@propr/core';
 import { isNotificationPreviewEligible, trustedPreviewMedia, type Notification, type PublishedVisualPreview } from '@propr/shared';
 
 export interface PreviewSource { repository: string; prNumbers: number[] }
@@ -15,13 +12,16 @@ interface Dependencies {
 /** Bounded cache of parsed published bodies only. Policy is re-read before every projection. */
 export function createPreviewMediaReader(deps: Dependencies = {}) {
   const cache = new Map<string, { expires: number; value: Promise<PreviewProjection> }>();
-  const loadRepos = deps.loadRepos ?? loadMonitoredReposRaw;
-  const getOctokit = deps.getOctokit ?? getAuthenticatedOctokit;
+  // The core barrel initializes the global database. Resolve production services
+  // only when needed so importing list helpers or projecting rows without PRs is inert.
+  const loadRepos = deps.loadRepos ?? (async () => (await import('@propr/core')).loadMonitoredReposRaw());
+  const getOctokit = deps.getOctokit ?? (async () => (await import('@propr/core')).getAuthenticatedOctokit());
 
   async function enabledRepositories(repositories: string[]): Promise<Set<string>> {
     if (!repositories.length) return new Set();
     try {
       const repos = await loadRepos();
+      const { resolveRepositoryVisualPreviewSettings } = await import('@propr/core');
       return new Set(repositories.map(name => name.trim().toLowerCase())
         .filter(name => resolveRepositoryVisualPreviewSettings(repos, name).enabled));
     } catch { return new Set(); } // Fail closed, including legacy/unconfigured repositories.
@@ -39,6 +39,7 @@ export function createPreviewMediaReader(deps: Dependencies = {}) {
         const response = await octokit.request('GET /repos/{owner}/{repo}/pulls/{pull_number}', {
           owner, repo, pull_number: prNumber, request: { timeout: 4000 },
         });
+        const { parsePublishedVisualPreviews } = await import('@propr/core');
         return { previews: parsePublishedVisualPreviews(response.data.body) };
       } catch {
         entry.expires = Date.now() + 10_000;
@@ -100,7 +101,12 @@ export function taskPreviewSource(row: Record<string, unknown>): PreviewSource {
 }
 
 export function goalPreviewSource(row: { repository: string; final_pr_number: number | null; artifact_refs: unknown }): PreviewSource {
-  const artifacts = parseGoalArtifacts(row.artifact_refs as string | null);
+  // Stored identity parsing must remain synchronous and independent of core services.
+  let artifacts: GoalArtifact[] = [];
+  try {
+    const parsed: unknown = typeof row.artifact_refs === 'string' ? JSON.parse(row.artifact_refs) : row.artifact_refs;
+    if (Array.isArray(parsed)) artifacts = parsed;
+  } catch { /* Malformed stored artifacts have no preview identity. */ }
   return { repository: row.repository, prNumbers: [
     ...(row.final_pr_number ? [row.final_pr_number] : []),
     ...artifacts.filter(artifact => artifact?.type === 'pull_request'
@@ -109,7 +115,7 @@ export function goalPreviewSource(row: { repository: string; final_pr_number: nu
 }
 
 export async function projectNotificationPreviews(
-  notifications: readonly Notification[], reader = previewMediaReader, database: Knex = defaultDb,
+  notifications: readonly Notification[], reader = previewMediaReader, database?: Knex,
 ): Promise<Notification[]> {
   const sources = notifications.map(notification => isNotificationPreviewEligible(notification)
     && (notification.kind === 'task' || notification.kind === 'pull_request')
@@ -124,7 +130,8 @@ export async function projectNotificationPreviews(
       && enabled.has(notification.target.repository.trim().toLowerCase()) ? [notification.target.taskId] : []);
     if (taskIds.length) {
       try {
-        const tasks = await database('tasks').whereIn('task_id', taskIds)
+        const db = database ?? (await import('@propr/core')).db;
+        const tasks = await db('tasks').whereIn('task_id', taskIds)
           .where(function () { this.whereNull('task_type').orWhereNot('task_type', 'goal'); })
           .select('task_id', 'repository', 'pr_number', 'initial_job_data', 'final_result');
         const byId = new Map(tasks.map(row => [row.task_id, taskPreviewSource(row)]));
