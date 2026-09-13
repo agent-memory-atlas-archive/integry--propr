@@ -13,7 +13,7 @@ import { authenticateSocketRequest, setupAuth } from './auth.js';
 import { configureDemoMode, createDemoRedisClient, demoModeReadOnlyMiddleware } from './demoMode.js';
 import { resolveGithubAuthMode, resolveGithubEventIntakeMode, validateIntakeModePrerequisites } from '@propr/shared';
 import { initSocketService, closeSocketService } from './services/socketService.js';
-import { corsRejectionHandler, createCorsOriginValidator, isTrustedMcpWebOrigin } from './corsValidation.js';
+import { CORS_PREFLIGHT_MAX_AGE_SECONDS, corsRejectionHandler, createCorsOriginValidator, isTrustedMcpWebOrigin } from './corsValidation.js';
 import {
   createStatusRoutes, createTaskRoutes,
   createTaskHistoryRoutes, createLiveDetailsRoutes,
@@ -82,6 +82,7 @@ import {
 } from './requestRateLimits.js';
 import { desktopAuthService } from './desktopAuthService.js';
 import { prohibitApiResponseCaching } from './apiCacheControl.js';
+import { createApiPerformanceTimingMiddleware } from './apiPerformanceTiming.js';
 import { startConfigReloadSubscription, type ConfigReloadSubscription } from './services/configReloadSubscription.js';
 import {
   assertNoDuplicateRoutes,
@@ -171,6 +172,10 @@ configureApiProxyTrust(app);
 // be cached by a browser or intermediary.
 app.use('/api', prohibitApiResponseCaching);
 
+// Disabled by default. When sampled, this remains ahead of CORS, limiting, body
+// parsing, sessions and Passport without recording any request contents.
+app.use('/api', createApiPerformanceTimingMiddleware());
+
 if (!process.env.FRONTEND_URL) {
   console.error('FRONTEND_URL environment variable is required');
   process.exit(1);
@@ -199,7 +204,11 @@ app.use((req, res, next) => {
   const mcpOrigin = getMcpOriginSync();
   const consentOrigin = req.path.startsWith('/mcp/') && mcpOrigin && req.get('origin') === mcpOrigin;
   const webClientOrigin = isTrustedMcpWebOrigin(req.path, req.get('origin')) ? req.get('origin') : undefined;
-  cors({ origin: consentOrigin ? mcpOrigin : webClientOrigin ?? validateCorsOrigin, credentials: true })(req, res, next);
+  cors({
+    origin: consentOrigin ? mcpOrigin : webClientOrigin ?? validateCorsOrigin,
+    credentials: true,
+    maxAge: CORS_PREFLIGHT_MAX_AGE_SECONDS,
+  })(req, res, next);
 });
 // The `cors` package forwards rejected origins as middleware errors. Handle
 // those immediately so Express never renders its development HTML error page

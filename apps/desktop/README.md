@@ -39,8 +39,13 @@ new hidden background mode. Windows tray support remains deferred.
 
 Linux native task notifications pass the same transparent, full-color ProPR application artwork to Electron as an
 absolute local icon path in both development and packaged execution. macOS notifications continue to use the app's
-bundle identity and the operating system's native presentation instead of requesting a custom per-alert icon; local
-notification testing does not require Apple signing. Windows native notifications remain deferred.
+bundle identity and the operating system's native presentation instead of requesting a custom per-alert icon. Electron's
+[macOS notification implementation](https://www.electronjs.org/docs/latest/api/notification) uses Apple's User
+Notifications framework and requires a code-signed application; ineligible development builds report a native delivery
+failure. A temporary/ad-hoc package is diagnostic evidence only: the absence of a banner can also be caused by macOS
+notification settings, Focus, or presentation policy—[alert authorization does not guarantee on-screen
+presentation](https://developer.apple.com/documentation/usernotifications/unnotificationsettings/alertsetting)—so
+release delivery must be validated with the signed, installed artifact. Windows native notifications remain deferred.
 
 ### Recovery and troubleshooting
 
@@ -88,9 +93,10 @@ npm run make:dmg -w @propr/desktop -- --arch=arm64
 ```
 
 The Linux transaction durability parity gate runs on both x64 and arm64 package jobs.
-Its exact inventory is 140 tests: 86 credential-service (including the 11 credential
-regressions from #2299), 37 profile-store, 10 pairing-shutdown, and 7 pairing-browser.
-`scripts/run-native-durability.mjs` requires exact suite and scenario counts, all 140
+Its exact inventory is 141 tests: 87 credential-service (including active-work v3
+goal-count coverage and the 11 credential regressions from #2299), 37 profile-store,
+10 pairing-shutdown, and 7 pairing-browser.
+`scripts/run-native-durability.mjs` requires exact suite and scenario counts, all 141
 tests passing, zero failures/cancellations/skips, and a successful child-process exit.
 When adding coverage to these suites, reconcile the runner inventory with an actual
 native durability run; extra tests also fail until the inventory is updated. The
