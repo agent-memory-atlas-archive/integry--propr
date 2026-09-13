@@ -175,7 +175,7 @@ const MetricRow: React.FC<MetricRowProps> = ({ metric, compact = false }) => (
           style={{ width: `${Math.min(100, metric.percent)}%` }}
         />
       </div>
-      <span className={`text-[10px] font-medium w-7 text-right ${getTextColor(metric.percent)}`}>
+      <span className={`text-[10px] font-medium leading-none w-7 text-right ${getTextColor(metric.percent)}`}>
         {metric.percent}%
       </span>
     </div>
@@ -226,8 +226,11 @@ const AgentRow: React.FC<AgentRowProps> = ({ agent, expanded, onToggle }) => {
           <ProviderLogo provider={agent.name} className="w-3.5 h-3.5 flex-none" />
           <span className="text-xs leading-none">{displayName}</span>
         </div>
+        {/* leading-none keeps the right-hand text boxes shorter than the 14px icon
+            slot on the left, so the row height stays an even 14px and the chevron,
+            provider icon, and label center on whole pixels. */}
         {agent.error ? (
-          <span className="text-[10px] text-red-500">Error</span>
+          <span className="text-[10px] leading-none text-red-500">Error</span>
         ) : primaryMetric && !expanded ? (
           <div className="flex items-center gap-1.5">
             <div className="w-10 h-1.5 bg-gray-200 rounded-full overflow-hidden">
@@ -236,7 +239,7 @@ const AgentRow: React.FC<AgentRowProps> = ({ agent, expanded, onToggle }) => {
                 style={{ width: `${Math.min(100, primaryMetric.percent)}%` }}
               />
             </div>
-            <span className={`text-[10px] font-medium w-7 text-right ${getTextColor(primaryMetric.percent)}`}>
+            <span className={`text-[10px] font-medium leading-none w-7 text-right ${getTextColor(primaryMetric.percent)}`}>
               {primaryMetric.percent}%
             </span>
           </div>

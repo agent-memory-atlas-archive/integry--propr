@@ -34,9 +34,11 @@ interface NavItem {
 
 // Single badge component for all nav counts: forms a circle for one digit and
 // stretches horizontally for wider content (e.g. "99+") with the same radius and padding.
+// The parent nav row is `flex items-center justify-between`, which keeps the badge on
+// the same horizontal center line as the label.
 function NavBadge({ children }: { children: React.ReactNode }) {
   return (
-    <span className="ml-auto inline-flex h-4 min-w-4 items-center justify-center rounded-full bg-primary-500 px-1 text-[10px] font-bold leading-none text-white">
+    <span className="inline-flex h-4 min-w-4 flex-none items-center justify-center rounded-full bg-primary-500 px-1 text-[10px] font-bold leading-none text-white">
       {children}
     </span>
   );
@@ -206,39 +208,43 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
     setIsSidebarOpen(true);
   };
 
+  // Active rows pair the teal border / gray background with darker, medium-weight
+  // text so the label keeps visual dominance over the low-contrast background.
   const renderNavigationItem = (item: NavItem) => (
     <Link
       key={item.name}
       to={item.href}
-      className={`flex items-center text-[13px] font-medium leading-5 transition-colors duration-150 ${
+      className={`flex items-center justify-between text-[13px] leading-5 transition-colors duration-150 ${
         desktop ? 'mx-2 rounded-lg border-0 px-3 py-1.5' : 'border-l-4 px-4 py-2'
       } ${
         isActive(item.href)
           ? desktop
-            ? 'bg-teal-50 text-teal-700'
-            : 'bg-slate-50 text-gray-900 border-primary-600'
+            ? 'bg-teal-50 font-medium text-teal-700'
+            : 'bg-slate-50 font-medium text-slate-900 border-primary-600'
           : desktop
-            ? 'text-slate-600 hover:bg-slate-100 hover:text-slate-900'
-            : 'text-gray-600 hover:bg-gray-50 hover:text-gray-900 border-transparent'
+            ? 'font-normal text-slate-600 hover:bg-slate-100 hover:text-slate-900'
+            : 'font-normal text-gray-600 hover:bg-gray-50 hover:text-gray-900 border-transparent'
       }`}
     >
-      <item.icon className="mr-2.5 h-4 w-4 flex-none" strokeWidth={1.5} />
-      {item.name}
+      <span className="flex min-w-0 items-center">
+        <item.icon className="mr-2.5 h-4 w-4 flex-none" strokeWidth={1.5} />
+        <span className="truncate">{item.name}</span>
+      </span>
       <WorkCountBadge name={item.name} taskCount={displayTaskCount} goalCount={activeGoalCount} />
       {item.name === 'Inbox' && unreadCount !== null && unreadCount > 0 && (
         <NavBadge>{unreadCount > 99 ? '99+' : unreadCount}</NavBadge>
       )}
       {item.name === 'Tasks' && displayTaskCount === 0 && !hasTasks && hasAgents && hasRepos && (
-        <span className="ml-auto w-2 h-2 rounded-full bg-amber-500" title="No tasks created yet" />
+        <span className="w-2 h-2 flex-none rounded-full bg-amber-500" title="No tasks created yet" />
       )}
       {item.name === 'Plans' && generatingPlansCount > 0 && (
         <NavBadge>{generatingPlansCount}</NavBadge>
       )}
       {item.name === 'Repositories' && !hasRepos && (
-        <span className="ml-auto w-2 h-2 rounded-full bg-amber-500" title="No repositories configured" />
+        <span className="w-2 h-2 flex-none rounded-full bg-amber-500" title="No repositories configured" />
       )}
       {item.name === 'Coding Agents' && !hasAgents && (
-        <span className="ml-auto w-2 h-2 rounded-full bg-amber-500" title="No AI agents configured" />
+        <span className="w-2 h-2 flex-none rounded-full bg-amber-500" title="No AI agents configured" />
       )}
     </Link>
   );
@@ -276,16 +282,20 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
         </div>
         {desktop && <DesktopInstanceSelector transportReady={isConnected && user !== null} />}
         <div className="flex min-h-0 flex-1 flex-col">
-          <nav className="flex flex-col gap-0.5 overflow-y-auto flex-1 py-1">
+          <nav className="flex min-h-0 flex-col gap-0.5 overflow-y-auto py-1">
             {navigation.map(renderNavigationItem)}
           </nav>
+          {/* Usage, settings, metadata, and profile travel together as one utility
+              group anchored to the bottom; mt-auto absorbs the flexible space so no
+              dividers are needed between the group's members. */}
+          <div className="mt-auto flex flex-none flex-col">
           {(isDemoMode || userHasPermission(user, 'instance.manage_agents')) && (
             <AgentTankSidebar allowManualRefresh={!isDemoMode} />
           )}
-          <nav className="flex flex-none flex-col gap-0.5 border-t border-gray-100 py-1" aria-label="Application settings">
+          <nav className="flex flex-none flex-col gap-0.5 py-1" aria-label="Application settings">
             {utilityNavigation.map(renderNavigationItem)}
           </nav>
-          {!desktop && <footer className="px-4 py-3 border-t border-gray-100 text-[11px] leading-tight text-gray-400 space-y-1">
+          {!desktop && <footer className="px-4 pb-2 pt-1 text-[11px] leading-tight text-gray-400 space-y-1">
             <div>
               <a
                 href="https://propr.dev"
@@ -300,8 +310,8 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
             <div>© {new Date().getFullYear()} Rinalds Uzkalns</div>
           </footer>}
           {user && (
-            // The web layout's version footer sits directly above; the profile block anchors
-            // the sidebar on its own there, so only the desktop app draws a divider.
+            // The profile block sits flush under the metadata footer on the web;
+            // only the desktop app (which renders no footer) draws a divider.
             <div className={`desktop-sidebar-profile flex flex-none items-center justify-between gap-2 px-3 py-2 ${desktop ? 'border-t border-gray-200' : ''}`}>
               <a
                 href={`https://github.com/${user.username}`}
@@ -332,6 +342,7 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
               </button>
             </div>
           )}
+          </div>
         </div>
       </aside>}
 
