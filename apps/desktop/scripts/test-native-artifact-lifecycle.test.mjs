@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, test } from 'node:test';
 import { inspect } from 'node:util';
+import { createPrivateSmokeProfile } from './packaged-smoke-support.mjs';
 import {
   assertArtifactSet,
   assertSafeExtractedTree,
@@ -653,6 +654,69 @@ describe('native staged artifact lifecycle authority', () => {
       assertInstallRootAbsent: async () => { calls.push('install-postcondition'); },
     }), []);
     assert.deepEqual(calls, ['unregister', 'postcondition', 'remove', 'install-postcondition']);
+  });
+
+  test('keeps the private temporary directory available through LaunchServices cleanup', async () => {
+    const workRoot = await mkdtemp(join(tmpdir(), 'propr-native-cleanup-'));
+    const installRoot = join(workRoot, 'install');
+    const profile = await createPrivateSmokeProfile();
+    const calls = [];
+    try {
+      await mkdir(installRoot);
+      const authority = new LaunchServicesAuthority(join(installRoot, 'ProPR Desktop.app'), {
+        TEMP: profile.temporary,
+        TMP: profile.temporary,
+        TMPDIR: profile.temporary,
+      }, {
+        runCommand: async (_file, args, { env }) => {
+          calls.push(args[0]);
+          // Model a native command creating a scratch file in its inherited
+          // temporary directory, including the post-unregister database query.
+          for (const key of ['TEMP', 'TMP', 'TMPDIR']) {
+            await writeFile(join(env[key], `launchservices-${key}`), 'scratch');
+          }
+          return { stdout: Buffer.alloc(0), stderr: Buffer.alloc(0) };
+        },
+      });
+      authority.registered = true;
+      assert.deepEqual(await removeLifecycleRootsWithAuthority({
+        cleanupFailures: [], installRoot, launchServices: authority, profile, workRoot,
+      }), []);
+      assert.deepEqual(calls, ['-u', '-dump']);
+      assert.equal(authority.registered, false);
+      await assert.rejects(readFile(join(profile.temporary, 'launchservices-TMPDIR')), { code: 'ENOENT' });
+      await assert.rejects(readFile(join(workRoot, 'install')), { code: 'ENOENT' });
+    } finally {
+      await rm(profile.root, { recursive: true, force: true });
+      await rm(workRoot, { recursive: true, force: true });
+    }
+  });
+
+  test('still cleans the profile after LaunchServices failure and retains remediation roots', async () => {
+    const calls = [];
+    const staleFailure = { label: 'launchservices-postcondition', error: new Error('stale registration') };
+    const profileFailure = new Error('profile removal failed');
+    const profile = { root: '/private/profile' };
+    const failures = await removeLifecycleRootsWithAuthority({
+      cleanupFailures: [],
+      installRoot: '/private/work/install',
+      launchServices: { registered: true },
+      profile,
+      workRoot: '/private/work',
+    }, {
+      removeCopiedApplication: async () => {
+        calls.push('launchservices');
+        return [staleFailure];
+      },
+      removeProfile: async value => {
+        assert.equal(value, profile);
+        calls.push('profile');
+        throw profileFailure;
+      },
+      removeWorkRoot: async () => { calls.push('work-root'); },
+    });
+    assert.deepEqual(calls, ['launchservices', 'profile']);
+    assert.deepEqual(failures, [staleFailure, { label: 'profile-authority', error: profileFailure }]);
   });
 
   test('retains copied install and outer work roots when process-group absence cannot be proved', async () => {

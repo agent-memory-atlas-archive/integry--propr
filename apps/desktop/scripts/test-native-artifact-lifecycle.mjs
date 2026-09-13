@@ -1055,9 +1055,11 @@ export const removeLifecycleRootsWithAuthority = async ({
   cleanupFailures,
   installRoot,
   launchServices,
+  profile,
   workRoot,
 }, {
   removeCopiedApplication = removeCopiedApplicationWithLaunchServicesAuthority,
+  removeProfile = removeAuthorizedProfile,
   removeWorkRoot = path => rm(path, { recursive: true, force: true }),
   assertWorkRootAbsent = path => assertAbsent(
     path,
@@ -1077,6 +1079,11 @@ export const removeLifecycleRootsWithAuthority = async ({
   // process group could still contain a live member. Do not unregister or remove it.
   if (processGroupAbsenceWasProved(failures)) {
     failures.push(...await removeCopiedApplication({ installRoot, launchServices }));
+  }
+  // LaunchServices commands still use the profile's TEMP/TMP/TMPDIR. Keep those
+  // directories alive until unregister and its database query have finished.
+  if (profile) {
+    await attempt('profile-authority', () => removeProfile(profile));
   }
   const blocksOuterRemoval = failures.some(failure => [
     'process-groups',
@@ -1672,13 +1679,11 @@ const lifecycleForArtifact = async ({ target, kind, artifact, report }) => {
     await cleanup('mount-root', () => rm(mountRoot, { recursive: true, force: true }));
     await cleanup('mount-postcondition', () => assertAbsent(mountRoot, 'Native DMG mount root remained after detach'));
   }
-  if (profile) {
-    await cleanup('profile-authority', () => removeAuthorizedProfile(profile));
-  }
   const finalCleanupFailures = await removeLifecycleRootsWithAuthority({
     cleanupFailures,
     installRoot,
     launchServices,
+    profile,
     workRoot,
   });
   throwCombined(primaryError, finalCleanupFailures);
