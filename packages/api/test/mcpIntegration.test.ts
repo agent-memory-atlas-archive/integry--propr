@@ -20,7 +20,7 @@ import { McpError } from '../mcp/config.js';
 import { McpPolicy, type McpPrincipal } from '../mcp/policy.js';
 import { buildMcpServer } from '../mcp/server.js';
 import { createToolCatalog, executeTool, type ToolDeps } from '../mcp/tools.js';
-import { compactText, summarizeTask } from '../mcp/listSummaries.js';
+import { compactText, summarizePlan, summarizeTask } from '../mcp/listSummaries.js';
 
 after(async () => closeConnection());
 
@@ -34,6 +34,19 @@ test('MCP list summaries bound natural-language fields and tolerate legacy task 
   }, new Date('2026-09-01 12:00:05').getTime());
   assert.equal(task.title, 'Issue #19');
   assert.equal(task.elapsed_ms, 5_000);
+
+  const issues = Array.from({ length: 12 }, (_, index) => ({
+    status: 'under_review', pr_number: index + 1,
+    agent_alias: `agent-${index}`, model_name: `model-${index}`,
+  }));
+  const plan = summarizePlan({
+    draft_id: 'plan-1', repository: 'acme/repo', name: 'Bounded relations',
+    status: 'pr_created', created_at: '2026-09-01 12:00:00', updated_at: '2026-09-01 12:00:05',
+  }, issues, new Date('2026-09-01 12:00:05').getTime());
+  assert.equal(plan.agent_model_count, 12);
+  assert.equal((plan.agent_models as unknown[]).length, 8);
+  assert.equal(plan.pull_request_count, 12);
+  assert.equal((plan.pull_requests as unknown[]).length, 8);
 });
 
 test('both official SDK protocol eras execute real draft/revision/publication/task transitions over the same HTTP endpoint', async () => {

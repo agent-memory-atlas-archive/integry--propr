@@ -1,6 +1,6 @@
 const SUMMARY_LIMIT = 240;
 const TITLE_LIMIT = 160;
-const RELATION_LIMIT = 20;
+const RELATION_LIMIT = 8;
 
 type JsonObject = Record<string, unknown>;
 
