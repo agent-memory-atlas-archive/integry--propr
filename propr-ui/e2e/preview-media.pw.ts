@@ -15,10 +15,13 @@ const goal = {
   createdAt: timestamp, updatedAt: timestamp, activeMs: 240000, elapsedMs: 240000,
 };
 const notification = {
-  id: 'completed-1', deduplicationKey: 'completed-1', kind: 'task', severity: 'success',
-  target: { type: 'task', repository: 'acme/web', taskId: 'task-1', prNumber: 42 },
-  title: 'Published previews are ready to review', body: 'The task finished successfully. Open the implementation to review the result.',
-  actions: ['dismiss'], occurredAt: timestamp, createdAt: timestamp, readAt: null, dismissedAt: null,
+  id: 'completed-1', deduplicationKey: 'completed-1', kind: 'pull_request', severity: 'info',
+  target: { type: 'pull_request', repository: 'acme/web', prNumber: 42 },
+  metadata: { completedImplementationTaskId: 'task-1' },
+  title: 'Published previews are ready to review', body: 'PR #42 is ready for review.',
+  actions: ['open_pr', 'dismiss'],
+  action: { type: 'external_link', label: 'Open PR', href: 'https://github.com/acme/web/pull/42' },
+  occurredAt: timestamp, createdAt: timestamp, readAt: null, dismissedAt: null,
 };
 
 async function fixture(page: Page) {
@@ -51,7 +54,10 @@ async function fixture(page: Page) {
         modelName: 'gpt-6-astra', llmProvider: 'codex', previewMedia }], total: 1 },
       '/api/stats/repositories': { repositories: [{ repository: 'acme/web', total: 1 }] },
       '/api/goals': { goals: [{ ...goal, previewMedia }] },
-      '/api/notifications': { notifications: [{ ...notification, previewMedia }, { ...notification, id: 'failed-1', deduplicationKey: 'failed-1', severity: 'error', title: 'A separate task needs attention', previewMedia }], unreadCount: 2, nextCursor: null },
+      '/api/notifications': { notifications: [{ ...notification, previewMedia }, {
+        ...notification, id: 'attention-1', deduplicationKey: 'attention-1', metadata: undefined,
+        title: 'A separate PR needs attention', previewMedia,
+      }], unreadCount: 2, nextCursor: null },
       '/api/notifications/unread-count': { unreadCount: 2 },
       '/api/notifications/config': { push: { configured: false, vapidPublicKey: null } },
       '/api/notifications/preferences': { preferences: {}, quietHours: { start: null, end: null, timezone: 'UTC' }, badgeEnabled: false },
@@ -63,7 +69,7 @@ async function fixture(page: Page) {
   await expect(page.getByRole('heading', { name: goal.title })).toBeVisible();
   image = await page.screenshot();
   showMedia = true;
-  return { requests, state: (state: typeof mediaState) => { mediaState = state; } };
+  return { requests, state: (state: typeof mediaState) => { mediaState = state; }, disable: () => { showMedia = false; } };
 }
 
 async function capture(page: Page, name: string) {
@@ -73,6 +79,26 @@ async function capture(page: Page, name: string) {
 }
 
 for (const width of [390, 1440]) {
+  test(`completion-derived PR Inbox preview at ${width}px`, async ({ page }) => {
+    await page.setViewportSize({ width, height: 900 });
+    const api = await fixture(page);
+    await page.goto('/inbox');
+    const completion = page.getByRole('article').filter({ hasText: notification.title });
+    const unrelated = page.getByRole('article').filter({ hasText: 'A separate PR needs attention' });
+    await expect(completion.getByRole('img', { name: 'Task queue', exact: true })).toBeVisible();
+    await expect(completion.locator('img')).toHaveCount(1);
+    await expect(unrelated.locator('img')).toHaveCount(0);
+    await expect(completion.getByRole('link', { name: 'View details' })).toHaveAttribute('href', '/repositories');
+    await expect(completion.getByRole('button', { name: `Open pull request for ${notification.title}` })).toBeEnabled();
+    await expect(page.getByRole('region', { name: 'Needs attention', exact: true }).getByRole('article')).toHaveCount(2);
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+    await capture(page, `completion-inbox-${width}`);
+    api.disable();
+    await page.reload();
+    await expect(completion).toBeVisible();
+    await expect(page.locator('[aria-label="Published visual previews"]')).toHaveCount(0);
+  });
+
   test(`published media is responsive across rows, Inbox and repository tabs at ${width}px`, async ({ page }) => {
     await page.setViewportSize({ width, height: 900 });
     const api = await fixture(page);

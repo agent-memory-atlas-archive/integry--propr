@@ -1,11 +1,25 @@
 import assert from 'node:assert/strict';
-import { after, test } from 'node:test';
+import { test } from 'node:test';
 import knex from 'knex';
-import { closeConnection } from '@propr/core';
 import { getTasksFromDb } from '../routes/taskHelpers.js';
+import { goalPreviewSource, previewMediaReader, projectNotificationPreviews } from '../services/previewMediaProjection.js';
 
-// Task preview projection also initializes the shared core database connection.
-after(closeConnection);
+test('identity-only goal previews and empty Inbox projections need no global services', async () => {
+  const repository = 'acme/widget';
+  const artifact = { type: 'pull_request', number: 8, url: `https://github.com/${repository}/pull/8` };
+  for (const artifact_refs of [[artifact], JSON.stringify([artifact])]) {
+    assert.deepEqual(goalPreviewSource({ repository, final_pr_number: 7, artifact_refs }), {
+      repository, prNumbers: [7, 8],
+    });
+  }
+  for (const artifact_refs of [null, undefined, '', '{invalid', '{}', 'null', []]) {
+    const source = goalPreviewSource({ repository, final_pr_number: null, artifact_refs });
+    assert.deepEqual(source, { repository, prNumbers: [] });
+    assert.deepEqual(await previewMediaReader.project([source]), [{ previews: [] }]);
+  }
+  assert.deepEqual(await previewMediaReader.project([]), []);
+  assert.deepEqual(await projectNotificationPreviews([]), []);
+});
 
 test('generic task lists exclude native goal backing tasks', async () => {
   const database = knex({ client: 'better-sqlite3', connection: { filename: ':memory:' }, useNullAsDefault: true });

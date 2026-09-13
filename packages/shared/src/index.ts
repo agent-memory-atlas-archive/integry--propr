@@ -296,6 +296,7 @@ export {
   parseNotificationEventActions,
   parseNotificationEvent,
   parseNotification,
+  isNotificationPreviewEligible,
   parseNotificationUserState,
   parseNotificationPreferenceChannels,
   parseNotificationPreference,
