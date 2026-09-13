@@ -50,18 +50,19 @@ function formatAntigravityModelLabel(fullName: string): { display: React.ReactNo
   return { display: withoutThinking, plain: withoutThinking };
 }
 
-// Get status color based on percentage
+// Capacity bars stay neutral for normal usage; color is reserved for
+// approaching (amber) or near-exhausted (red) quota.
 function getStatusColor(percent: number): string {
-  if (percent <= 50) return 'bg-green-500';
-  if (percent <= 80) return 'bg-yellow-500';
-  return 'bg-red-500';
+  if (percent >= 90) return 'bg-red-500';
+  if (percent >= 75) return 'bg-amber-500';
+  return 'bg-slate-400';
 }
 
-// Get text color based on percentage
+// Text color follows the same quiet-until-warning rule as the bar.
 function getTextColor(percent: number): string {
-  if (percent <= 50) return 'text-green-600';
-  if (percent <= 80) return 'text-yellow-600';
-  return 'text-red-600';
+  if (percent >= 90) return 'text-red-600';
+  if (percent >= 75) return 'text-amber-600';
+  return 'text-gray-500';
 }
 
 interface UsageMetric {
@@ -213,11 +214,17 @@ const AgentRow: React.FC<AgentRowProps> = ({ agent, expanded, onToggle }) => {
         } : undefined}
       >
         <div className="flex items-center gap-1.5 text-gray-600">
-          {hasMultipleMetrics && (
-            expanded ? <ChevronDown className="w-3 h-3 text-gray-400" /> : <ChevronRight className="w-3 h-3 text-gray-400" />
-          )}
-          <ProviderLogo provider={agent.name} className="w-3.5 h-3.5" />
-          <span className="text-xs">{displayName}</span>
+          {/* Fixed-size chevron slot keeps provider icons and labels on the same
+              vertical axis whether or not a row is expandable. */}
+          <span className="flex h-3.5 w-3.5 flex-none items-center justify-center">
+            {hasMultipleMetrics && (
+              expanded
+                ? <ChevronDown className="w-3 h-3 text-gray-400" />
+                : <ChevronRight className="w-3 h-3 text-gray-400" />
+            )}
+          </span>
+          <ProviderLogo provider={agent.name} className="w-3.5 h-3.5 flex-none" />
+          <span className="text-xs leading-none">{displayName}</span>
         </div>
         {agent.error ? (
           <span className="text-[10px] text-red-500">Error</span>

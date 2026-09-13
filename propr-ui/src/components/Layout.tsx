@@ -31,14 +31,20 @@ interface NavItem {
   icon: React.FC<{ className?: string }>;
 }
 
+// Single badge component for all nav counts: forms a circle for one digit and
+// stretches horizontally for wider content (e.g. "99+") with the same radius and padding.
+function NavBadge({ children }: { children: React.ReactNode }) {
+  return (
+    <span className="ml-auto inline-flex h-5 min-w-5 items-center justify-center rounded-full bg-primary-500 px-1.5 py-0.5 text-[10px] font-bold leading-none text-white">
+      {children}
+    </span>
+  );
+}
+
 function WorkCountBadge({ name, taskCount, goalCount }: { name: string; taskCount: number; goalCount: number }) {
   const count = name === 'Tasks' ? taskCount : name === 'Goals' ? goalCount : 0;
   if (count <= 0) return null;
-  return (
-    <span className="ml-auto inline-flex items-center justify-center h-5 w-5 rounded-full bg-primary-500 text-xs font-semibold text-white">
-      {count}
-    </span>
-  );
+  return <NavBadge>{count}</NavBadge>;
 }
 
 const Layout: React.FC<LayoutProps> = ({ children }) => {
@@ -204,12 +210,12 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
       key={item.name}
       to={item.href}
       className={`flex items-center text-sm font-medium transition-colors duration-150 ${
-        desktop ? 'mx-2 rounded-lg border-0 px-3 py-2.5' : 'border-r-2 px-4 py-3'
+        desktop ? 'mx-2 rounded-lg border-0 px-3 py-2.5' : 'border-l-4 px-4 py-3'
       } ${
         isActive(item.href)
           ? desktop
             ? 'bg-teal-50 text-teal-700'
-            : 'bg-red-50 text-primary-600 border-primary-600 font-medium'
+            : 'bg-slate-50 text-gray-900 border-primary-600'
           : desktop
             ? 'text-slate-600 hover:bg-slate-100 hover:text-slate-900'
             : 'text-gray-600 hover:bg-gray-50 hover:text-gray-900 border-transparent'
@@ -219,17 +225,13 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
       {item.name}
       <WorkCountBadge name={item.name} taskCount={displayTaskCount} goalCount={activeGoalCount} />
       {item.name === 'Inbox' && unreadCount !== null && unreadCount > 0 && (
-        <span className="ml-auto inline-flex min-w-5 items-center justify-center rounded-full bg-primary-500 px-1.5 text-xs font-semibold leading-5 text-white">
-          {unreadCount > 99 ? '99+' : unreadCount}
-        </span>
+        <NavBadge>{unreadCount > 99 ? '99+' : unreadCount}</NavBadge>
       )}
       {item.name === 'Tasks' && displayTaskCount === 0 && !hasTasks && hasAgents && hasRepos && (
         <span className="ml-auto w-2 h-2 rounded-full bg-amber-500" title="No tasks created yet" />
       )}
       {item.name === 'Plans' && generatingPlansCount > 0 && (
-        <span className="ml-auto inline-flex items-center justify-center h-5 w-5 rounded-full bg-primary-500 text-xs font-semibold text-white">
-          {generatingPlansCount}
-        </span>
+        <NavBadge>{generatingPlansCount}</NavBadge>
       )}
       {item.name === 'Repositories' && !hasRepos && (
         <span className="ml-auto w-2 h-2 rounded-full bg-amber-500" title="No repositories configured" />
@@ -279,6 +281,9 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
           {(isDemoMode || userHasPermission(user, 'instance.manage_agents')) && (
             <AgentTankSidebar allowManualRefresh={!isDemoMode} />
           )}
+          <nav className="flex flex-none flex-col gap-1 border-t border-gray-100 py-1" aria-label="Application settings">
+            {utilityNavigation.map(renderNavigationItem)}
+          </nav>
           {!desktop && <footer className="px-4 py-3 border-t border-gray-100 text-[11px] leading-tight text-gray-400 space-y-1">
             <div>
               <a
@@ -293,9 +298,6 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
             </div>
             <div>© {new Date().getFullYear()} Rinalds Uzkalns</div>
           </footer>}
-          <nav className="flex flex-none flex-col gap-1 border-t border-gray-100 py-1" aria-label="Application settings">
-            {utilityNavigation.map(renderNavigationItem)}
-          </nav>
           {user && (
             <div className="desktop-sidebar-profile flex flex-none items-center gap-2 border-t border-gray-200 px-3 py-3">
               <a
