@@ -222,7 +222,10 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
       key={item.name}
       to={item.href}
       className={`flex items-center justify-between text-[13px] leading-5 transition-colors duration-150 ${
-        desktop ? 'mx-2 rounded-lg border-0 px-3 py-1.5' : 'border-l-4 px-4 py-2'
+        // mx-2 + px-2 puts the pill's inner edges on the sidebar's shared
+        // 16px rail, matching the web rows' px-4 (their border-l-4 is part
+        // of the box, so trailing content ends at the same 16px boundary).
+        desktop ? 'mx-2 rounded-lg border-0 px-2 py-1.5' : 'border-l-4 px-4 py-2'
       } ${
         isActive(item.href)
           ? desktop
@@ -239,22 +242,27 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
         <item.icon className="mr-2.5 h-4 w-4 flex-none" strokeWidth={1.5} />
         <span className="truncate">{item.name}</span>
       </span>
-      <WorkCountBadge name={item.name} taskCount={displayTaskCount} goalCount={activeGoalCount} />
-      {item.name === 'Inbox' && unreadCount !== null && unreadCount > 0 && (
-        <NavBadge>{unreadCount > 99 ? '99+' : unreadCount}</NavBadge>
-      )}
-      {item.name === 'Tasks' && displayTaskCount === 0 && !hasTasks && hasAgents && hasRepos && (
-        <span className="w-2 h-2 flex-none rounded-full bg-amber-500" title="No tasks created yet" />
-      )}
-      {item.name === 'Plans' && generatingPlansCount > 0 && (
-        <NavBadge>{generatingPlansCount}</NavBadge>
-      )}
-      {item.name === 'Repositories' && !hasRepos && (
-        <span className="w-2 h-2 flex-none rounded-full bg-amber-500" title="No repositories configured" />
-      )}
-      {item.name === 'Coding Agents' && !hasAgents && (
-        <span className="w-2 h-2 flex-none rounded-full bg-amber-500" title="No AI agents configured" />
-      )}
+      {/* Single trailing slot: every badge and readiness dot right-aligns
+          against the row's shared boundary — no per-element right margins —
+          so all secondary indicators snap to one vertical axis. */}
+      <span className="flex flex-none items-center justify-end gap-1.5">
+        <WorkCountBadge name={item.name} taskCount={displayTaskCount} goalCount={activeGoalCount} />
+        {item.name === 'Inbox' && unreadCount !== null && unreadCount > 0 && (
+          <NavBadge>{unreadCount > 99 ? '99+' : unreadCount}</NavBadge>
+        )}
+        {item.name === 'Tasks' && displayTaskCount === 0 && !hasTasks && hasAgents && hasRepos && (
+          <span className="w-2 h-2 flex-none rounded-full bg-amber-500" title="No tasks created yet" />
+        )}
+        {item.name === 'Plans' && generatingPlansCount > 0 && (
+          <NavBadge>{generatingPlansCount}</NavBadge>
+        )}
+        {item.name === 'Repositories' && !hasRepos && (
+          <span className="w-2 h-2 flex-none rounded-full bg-amber-500" title="No repositories configured" />
+        )}
+        {item.name === 'Coding Agents' && !hasAgents && (
+          <span className="w-2 h-2 flex-none rounded-full bg-amber-500" title="No AI agents configured" />
+        )}
+      </span>
     </Link>
   );
 
@@ -324,7 +332,10 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
           {user && (
             // The profile block sits flush under the metadata footer on the web;
             // only the desktop app (which renders no footer) draws a divider.
-            <div className={`desktop-sidebar-profile flex flex-none items-center justify-between gap-2 px-3 py-2 ${utilityInk.profileDivider}`}>
+            // pr-2.5 (10px) + the 6px glyph inset inside the 28px logout button
+            // puts the logout icon's right edge on the sidebar's shared 16px
+            // rail, aligned with the nav badges and the Usage refresh icon.
+            <div className={`desktop-sidebar-profile flex flex-none items-center justify-between gap-2 py-2 pl-3 pr-2.5 ${utilityInk.profileDivider}`}>
               <a
                 href={`https://github.com/${user.username}`}
                 target="_blank"

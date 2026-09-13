@@ -160,8 +160,11 @@ interface MetricRowProps {
   compact?: boolean;
 }
 
+// Compact rows (the expanded tree children) use a fixed 20px height rather
+// than padding so the threading rail can be sized deterministically: the rail
+// stops exactly half a row (10px) above the container's bottom edge.
 const MetricRow: React.FC<MetricRowProps> = ({ metric, compact = false }) => (
-  <div className={`flex items-center justify-between ${compact ? 'py-0.5' : 'py-1'}`}>
+  <div className={`flex items-center justify-between ${compact ? 'h-5' : 'py-1'}`}>
     <span
       className="text-[10px] text-gray-500 truncate max-w-[100px]"
       title={metric.title ?? (metric.resetsIn ? `Resets in ${metric.resetsIn}` : metric.label)}
@@ -246,21 +249,23 @@ const AgentRow: React.FC<AgentRowProps> = ({ agent, expanded, onToggle }) => {
         ) : null}
       </div>
 
-      {/* Expanded details. The threading rail is drawn per row instead of as a
-          border on the container so it can stop at the vertical middle of the
-          last metric rather than running on into the next provider row.
+      {/* Expanded details. One continuous threading rail is anchored to the
+          relative container and sized calc(100% - 10px): each child row is a
+          fixed 20px (h-5), so stopping 10px short of the container's bottom
+          terminates the rail exactly at the vertical middle of the last child.
           The rail stays centered under the 14px chevron slot (7px), while the
           metric text is padded to 33px so it lands on the 40px axis of the
           parent label (chevron 14 + gap 6 + icon 14 + gap 6), matching
           standard tree-view text-under-text alignment. */}
       {expanded && metrics.length > 0 && (
-        <div className="ml-[7px] mt-0.5">
+        <div className="relative ml-[7px] mt-0.5">
+          <span
+            aria-hidden="true"
+            className="absolute left-0 top-0 w-px bg-gray-200"
+            style={{ height: 'calc(100% - 10px)' }}
+          />
           {metrics.map((metric, idx) => (
-            <div key={idx} className="relative pl-[33px]">
-              <span
-                aria-hidden="true"
-                className={`absolute left-0 top-0 w-px bg-gray-200 ${idx === metrics.length - 1 ? 'h-1/2' : 'h-full'}`}
-              />
+            <div key={idx} className="pl-[33px]">
               <MetricRow metric={metric} compact />
             </div>
           ))}
@@ -328,9 +333,13 @@ const AgentTankSidebar: React.FC<AgentTankSidebarProps> = ({ allowManualRefresh 
   if (agents.length === 0) return null;
 
   return (
-    <div className={`px-4 py-3 border-t ${className || 'border-gray-200'}`}>
+    // The top border is the roof of the bottom-anchored utility group (the
+    // wrapper in Layout carries mt-auto): pt-4 gives the divider a standard
+    // 16px of air above the USAGE header instead of floating in the gap.
+    <div className={`px-4 pt-4 pb-3 border-t ${className || 'border-gray-200'}`}>
       <div className="flex items-center justify-between mb-2">
-        <span className="text-[10px] font-semibold uppercase tracking-wider text-gray-400">
+        {/* Utility-header spec from the design system handover. */}
+        <span className="text-[10px] uppercase font-bold tracking-widest text-slate-500">
           Usage
         </span>
         {allowManualRefresh && (
