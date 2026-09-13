@@ -9,7 +9,7 @@ export interface BackgroundDatabase {
   close(): Promise<void>;
 }
 
-function sqliteFilename(database: Knex): string | undefined {
+export function sqliteFilename(database: Knex): string | undefined {
   const connection = database.client.config.connection;
   if (typeof connection === 'string') return connection;
   if (connection && typeof connection === 'object' && 'filename' in connection) {

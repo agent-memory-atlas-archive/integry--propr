@@ -70,8 +70,6 @@ import type { WebhookEventType, DetectedIssue, CommentPayload, CommentEventConfi
 import { handleWebhookRequest } from './webhookHandler.js';
 import { stopTaskExecution } from './routes/dockerRoutes.js';
 import { initializePushSubscriptionMaintenance } from './services/pushSubscriptionMaintenance.js';
-import { NotificationProjectionService } from './services/notificationProjectionService.js';
-import { WebPushDispatcher } from './services/webPushDispatcher.js';
 import { resolveInstanceWebPushConfiguration } from './services/instanceWebPushConfiguration.js';
 import type { ValidatedWebPushConfiguration } from './services/webPushConfiguration.js';
 import { assertInstanceAdministratorConfigured } from './authorization.js';
@@ -100,7 +98,10 @@ import {
   type VisualPreviewOAuthRefreshScheduler,
 } from './services/visualPreviewOAuth.js';
 import { createVoiceBriefingService } from './services/voiceBriefingService.js';
-import { createBackgroundDatabase, type BackgroundDatabase } from './services/backgroundDatabase.js';
+import {
+  startNotificationBackgroundService,
+  type NotificationBackgroundService,
+} from './services/notificationBackgroundService.js';
 
 type ShutdownTask = { name: string; close: () => Promise<unknown> };
 
@@ -246,9 +247,7 @@ let redisClient: RedisClientType;
 let taskQueue: Queue;
 let runtimeBuildQueue: Queue;
 let configReloadSubscription: ConfigReloadSubscription | undefined;
-let notificationProjection: NotificationProjectionService | undefined;
-let backgroundDatabase: BackgroundDatabase | undefined;
-let webPushDispatcher: WebPushDispatcher | undefined;
+let notificationBackground: NotificationBackgroundService | undefined;
 let webPushDispatcherConfigured = false;
 let resolvedWebPushConfiguration: ValidatedWebPushConfiguration = { configured: false, issue: 'disabled' };
 let desktopPairingCleanupTimer: NodeJS.Timeout | undefined;
@@ -298,14 +297,11 @@ async function initRedis(): Promise<void> {
 function setupRoutes(): void {
   const statusRoutes = createStatusRoutes({
     redisClient,
-    ...(notificationProjection === undefined ? {} : {
+    ...(notificationBackground === undefined ? {} : {
       projectSystemSnapshot: (
         snapshot: Record<string, unknown> & { timestamp: string },
         additionalAdministratorIds: readonly string[],
-      ) => notificationProjection!.bestEffort(
-        'system health snapshot',
-        () => notificationProjection!.projectSystemSnapshot(snapshot, additionalAdministratorIds),
-      ),
+      ) => notificationBackground!.projectSystemSnapshot(snapshot, additionalAdministratorIds),
     }),
   });
   const desktopAuthRoutes = createDesktopAuthRoutes();
@@ -507,24 +503,28 @@ async function start(): Promise<void> {
     await assertInstanceAdministratorConfigured();
     await initRedis();
     if (!demoMode) {
-      backgroundDatabase = await createBackgroundDatabase(db);
+      resolvedWebPushConfiguration = resolveInstanceWebPushConfiguration();
+      const vapidEnvironment = {
+        WEB_PUSH_VAPID_SUBJECT: process.env.WEB_PUSH_VAPID_SUBJECT,
+        WEB_PUSH_VAPID_PUBLIC_KEY: process.env.WEB_PUSH_VAPID_PUBLIC_KEY,
+        WEB_PUSH_VAPID_PRIVATE_KEY: process.env.WEB_PUSH_VAPID_PRIVATE_KEY,
+      };
       try {
-        resolvedWebPushConfiguration = resolveInstanceWebPushConfiguration();
-        const dispatcher = new WebPushDispatcher({
-          database: backgroundDatabase.database,
-          resolvedConfiguration: resolvedWebPushConfiguration,
-        });
-        webPushDispatcherConfigured = dispatcher.start().configured;
-        webPushDispatcher = dispatcher;
-      } catch {
-        webPushDispatcher = undefined;
-        webPushDispatcherConfigured = false;
-        console.warn('[notifications] Web Push dispatcher disabled: invalid dispatcher tuning configuration');
+        // Both background implementations read their startup configuration from
+        // the environment; the worker copies it before loading the dispatcher.
+        if (resolvedWebPushConfiguration.configured) {
+          process.env.WEB_PUSH_VAPID_SUBJECT = resolvedWebPushConfiguration.subject;
+          process.env.WEB_PUSH_VAPID_PUBLIC_KEY = resolvedWebPushConfiguration.publicKey;
+          process.env.WEB_PUSH_VAPID_PRIVATE_KEY = resolvedWebPushConfiguration.privateKey;
+        }
+        notificationBackground = await startNotificationBackgroundService(db);
+        webPushDispatcherConfigured = notificationBackground.webPushDispatcherConfigured;
+      } finally {
+        for (const [name, value] of Object.entries(vapidEnvironment)) {
+          if (value === undefined) delete process.env[name];
+          else process.env[name] = value;
+        }
       }
-      notificationProjection = new NotificationProjectionService({
-        database: backgroundDatabase.database,
-      });
-      notificationProjection.startStalledDetector();
       // Every API process drops its MCP cache on a published config event, so an
       // admin toggle applies across processes rather than waiting out the TTL.
       // Re-resolve immediately: authRedirect and the CORS/header middleware read
@@ -582,7 +582,10 @@ async function start(): Promise<void> {
         authenticate: authenticateSocketRequest,
       });
       console.log('[WebSocket] Socket.IO server initialized');
-      socketService.initQueueFeatures({ taskQueue, redisClient, db, notificationProjection });
+      socketService.initQueueFeatures({
+        taskQueue, redisClient, db,
+        notificationProjection: notificationBackground,
+      });
       console.log('[WebSocket] Queue features initialized for real-time updates');
       await initializeUltrafix(getIoRedisClient());
       // Register the webhook processors in THIS (API) process ONLY when the API
@@ -627,7 +630,7 @@ async function start(): Promise<void> {
       if (desktopPairingCleanupTimer) clearInterval(desktopPairingCleanupTimer);
       if (!demoMode) {
         shutdownTasks.push(
-          { name: 'Web Push dispatcher', close: () => webPushDispatcher?.close() ?? Promise.resolve() },
+          { name: 'notification background service', close: () => notificationBackground?.close() ?? Promise.resolve() },
           { name: 'visual-preview OAuth refresh scheduler', close: () => visualPreviewOAuthRefreshScheduler?.close() ?? Promise.resolve() },
           { name: 'config reload subscriber', close: () => configReloadSubscription?.close() ?? Promise.resolve() },
           { name: 'ultrafix state redis', close: () => closeUltrafixStateRedis() },
@@ -636,9 +639,6 @@ async function start(): Promise<void> {
         );
       }
       await closeResources(shutdownTasks);
-      await backgroundDatabase?.close().catch(error => {
-        console.error('Failed to close background database:', error);
-      });
       httpServer.close(() => {
         console.log('Server closed');
         process.exit(0);
