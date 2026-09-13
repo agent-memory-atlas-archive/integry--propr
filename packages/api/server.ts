@@ -98,6 +98,7 @@ import {
   type VisualPreviewOAuthRefreshScheduler,
 } from './services/visualPreviewOAuth.js';
 import { createVoiceBriefingService } from './services/voiceBriefingService.js';
+import { createBackgroundDatabase, type BackgroundDatabase } from './services/backgroundDatabase.js';
 
 type ShutdownTask = { name: string; close: () => Promise<unknown> };
 
@@ -244,6 +245,7 @@ let taskQueue: Queue;
 let runtimeBuildQueue: Queue;
 let configReloadSubscription: ConfigReloadSubscription | undefined;
 let notificationProjection: NotificationProjectionService | undefined;
+let backgroundDatabase: BackgroundDatabase | undefined;
 let webPushDispatcher: WebPushDispatcher | undefined;
 let webPushDispatcherConfigured = false;
 let desktopPairingCleanupTimer: NodeJS.Timeout | undefined;
@@ -297,7 +299,10 @@ function setupRoutes(): void {
       projectSystemSnapshot: (
         snapshot: Record<string, unknown> & { timestamp: string },
         additionalAdministratorIds: readonly string[],
-      ) => notificationProjection!.projectSystemSnapshot(snapshot, additionalAdministratorIds),
+      ) => notificationProjection!.bestEffort(
+        'system health snapshot',
+        () => notificationProjection!.projectSystemSnapshot(snapshot, additionalAdministratorIds),
+      ),
     }),
   });
   const desktopAuthRoutes = createDesktopAuthRoutes();
@@ -499,8 +504,9 @@ async function start(): Promise<void> {
     await assertInstanceAdministratorConfigured();
     await initRedis();
     if (!demoMode) {
+      backgroundDatabase = await createBackgroundDatabase(db);
       try {
-        const dispatcher = new WebPushDispatcher({ database: db });
+        const dispatcher = new WebPushDispatcher({ database: backgroundDatabase.database });
         webPushDispatcherConfigured = dispatcher.start().configured;
         webPushDispatcher = dispatcher;
       } catch {
@@ -508,7 +514,9 @@ async function start(): Promise<void> {
         webPushDispatcherConfigured = false;
         console.warn('[notifications] Web Push dispatcher disabled: invalid dispatcher tuning configuration');
       }
-      notificationProjection = new NotificationProjectionService({ database: db });
+      notificationProjection = new NotificationProjectionService({
+        database: backgroundDatabase.database,
+      });
       notificationProjection.startStalledDetector();
       // Every API process drops its MCP cache on a published config event, so an
       // admin toggle applies across processes rather than waiting out the TTL.
@@ -621,6 +629,9 @@ async function start(): Promise<void> {
         );
       }
       await closeResources(shutdownTasks);
+      await backgroundDatabase?.close().catch(error => {
+        console.error('Failed to close background database:', error);
+      });
       httpServer.close(() => {
         console.log('Server closed');
         process.exit(0);
