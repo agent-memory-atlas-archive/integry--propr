@@ -2,6 +2,7 @@ import React from 'react';
 import { Github } from 'lucide-react';
 import { RepositoryIndexingStatus, MonitoredRepo } from '../api/proprApi';
 import { getRepoStatusKey } from '../api/repoIndexingApi';
+import { RepositoryIcon } from './RepositoryIcon';
 
 type RepoStatusType = 'indexed' | 'indexing' | 'failed' | 'idle';
 
@@ -119,6 +120,13 @@ export const RepositoryListItem: React.FC<RepositoryListItemProps> = ({
           )}
         </div>
         <div className="flex items-center gap-2 min-w-0">
+          <RepositoryIcon
+            repository={repo.name}
+            iconPath={repoStatus?.icon_path}
+            revision={repoStatus?.last_indexed_hash || repo.baseBranch || 'HEAD'}
+            className="w-5 h-5"
+            fallbackClassName="text-slate-400"
+          />
           <button
             type="button"
             className="min-w-0 flex-1 truncate text-left font-semibold text-slate-800 rounded focus-visible:outline-teal-500"
