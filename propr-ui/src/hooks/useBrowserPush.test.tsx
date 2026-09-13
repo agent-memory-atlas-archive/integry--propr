@@ -11,6 +11,7 @@ import {
 
 const mocks = vi.hoisted(() => ({
   getCapabilities: vi.fn(),
+  listBackend: vi.fn(),
   registerBackend: vi.fn(),
   revokeBackend: vi.fn(),
   getOrRegisterWorker: vi.fn(),
@@ -20,6 +21,7 @@ const mocks = vi.hoisted(() => ({
 
 vi.mock('../api/notificationApi', () => ({
   getNotificationCapabilities: mocks.getCapabilities,
+  listPushSubscriptions: mocks.listBackend,
   registerPushSubscription: mocks.registerBackend,
   revokePushSubscription: mocks.revokeBackend,
   PushSubscriptionOwnershipConflictError: class extends Error {},
@@ -127,6 +129,7 @@ describe('BrowserPushProvider enrollment', () => {
     });
     mocks.registerBackend.mockResolvedValue({ subscription: { id: 'backend-1' } });
     mocks.revokeBackend.mockResolvedValue(undefined);
+    mocks.listBackend.mockResolvedValue({ subscriptions: [] });
     mocks.getOrRegisterWorker.mockResolvedValue(registration);
     mocks.supportsWorkerOrigin.mockReturnValue(true);
     mocks.supportsWorkers.mockReturnValue(true);
@@ -174,6 +177,47 @@ describe('BrowserPushProvider enrollment', () => {
     await waitFor(() => expect(screen.getByText('ready')).toBeInTheDocument());
     expect(mocks.revokeBackend).toHaveBeenCalledWith(subscription.endpoint);
     expect(unsubscribeBrowser).toHaveBeenCalledTimes(1);
+  });
+
+  test.each([null, 'another-user', 'user-1'])('an existing subscription with owner %s never enrolls on load', async owner => {
+    permission = 'granted';
+    getSubscription.mockResolvedValue(subscription);
+    if (owner) localStorage.setItem('propr:push-subscription-owner', owner);
+    render(<AuthProvider user={user}><BrowserPushProvider><Probe /></BrowserPushProvider></AuthProvider>);
+    await screen.findByText('ready');
+    expect(mocks.listBackend).toHaveBeenCalledTimes(1);
+    expect(mocks.registerBackend).not.toHaveBeenCalled();
+    expect(subscribeBrowser).not.toHaveBeenCalled();
+    expect(unsubscribeBrowser).not.toHaveBeenCalled();
+    expect(requestPermission).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole('button', { name: 'Enable' }));
+    await screen.findByText('subscribed');
+    expect(mocks.registerBackend).toHaveBeenCalledTimes(1);
+  });
+
+  test('an already enrolled browser is recognized through a read-only ownership check', async () => {
+    permission = 'granted';
+    getSubscription.mockResolvedValue(subscription);
+    mocks.listBackend.mockResolvedValue({ subscriptions: [{ endpoint: subscription.endpoint, revokedAt: null }] });
+    render(<AuthProvider user={user}><BrowserPushProvider><Probe /></BrowserPushProvider></AuthProvider>);
+    await screen.findByText('subscribed');
+    expect(mocks.registerBackend).not.toHaveBeenCalled();
+    expect(subscribeBrowser).not.toHaveBeenCalled();
+    expect(requestPermission).not.toHaveBeenCalled();
+  });
+
+  test('disabled instance does not attempt enrollment even with an existing subscription and permission', async () => {
+    permission = 'granted';
+    getSubscription.mockResolvedValue(subscription);
+    mocks.getCapabilities.mockResolvedValue({ push: { configured: false, vapidPublicKey: null } });
+    render(<AuthProvider user={user}><BrowserPushProvider><Probe /></BrowserPushProvider></AuthProvider>);
+    await screen.findByText('subscribed');
+    fireEvent.click(screen.getByRole('button', { name: 'Enable' }));
+    await act(async () => undefined);
+    expect(mocks.listBackend).not.toHaveBeenCalled();
+    expect(mocks.registerBackend).not.toHaveBeenCalled();
+    expect(subscribeBrowser).not.toHaveBeenCalled();
+    expect(requestPermission).not.toHaveBeenCalled();
   });
 
   test('does not subscribe or call the backend when the permission prompt is denied', async () => {

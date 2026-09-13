@@ -102,6 +102,7 @@ interface AttemptOutcome {
 export interface WebPushDispatcherOptions {
   database: Knex;
   configuration?: WebPushServerConfiguration;
+  resolvedConfiguration?: ValidatedWebPushConfiguration;
   sender?: PushSender;
   now?: () => TimestampInput;
   generateId?: () => string;
@@ -429,7 +430,7 @@ export class WebPushDispatcher {
 
   constructor(options: WebPushDispatcherOptions) {
     this.database = options.database;
-    this.configuration = validateWebPushConfiguration(
+    this.configuration = options.resolvedConfiguration ?? validateWebPushConfiguration(
       options.configuration ?? webPushConfigurationFromEnvironment(),
     );
     const insecureLocalhostRequested = options.allowInsecureLocalhost

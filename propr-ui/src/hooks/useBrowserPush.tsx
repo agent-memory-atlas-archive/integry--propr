@@ -14,6 +14,7 @@ import type {
 } from '@propr/shared';
 import {
   getNotificationCapabilities,
+  listPushSubscriptions,
   PushSubscriptionOwnershipConflictError,
   registerPushSubscription,
   revokePushSubscription,
@@ -187,8 +188,6 @@ export const BrowserPushProvider: React.FC<{ children: React.ReactNode }> = ({ c
   const reconciledRef = useRef<string | null>(null);
   stateRef.current = state;
 
-  // Reconciliation branches across capability, ownership, and recovery states.
-  // eslint-disable-next-line complexity
   const inspect = useCallback(async (): Promise<void> => {
     const userId = user?.id;
     if (!userId) {
@@ -223,42 +222,16 @@ export const BrowserPushProvider: React.FC<{ children: React.ReactNode }> = ({ c
         ? registrationResult.reason
         : null;
 
-    if (localSubscription) {
-      const reconcile = async () => {
-        await registerPushSubscription(browserSubscriptionInput(localSubscription!));
-        reconciledRef.current = `${userId}:${localSubscription!.endpoint}`;
-        storePushOwner(userId);
-      };
+    if (localSubscription && capabilities?.push.configured) {
       try {
-        const priorOwner = storedPushOwner();
-        if (
-          priorOwner !== null
-          && priorOwner !== userId
-          && capabilities?.push.configured
-          && capabilities.push.vapidPublicKey
-          && currentPermission() === 'granted'
-        ) {
-          await localSubscription.unsubscribe();
-          localSubscription = await subscribe(registration!, capabilities.push.vapidPublicKey);
-        }
-        await reconcile();
+        // Inspect ownership without creating enrollment. An existing browser
+        // subscription may belong to another account or instance.
+        const { subscriptions } = await listPushSubscriptions();
+        if (!subscriptions.some(subscription => subscription.endpoint === localSubscription!.endpoint
+          && subscription.revokedAt === null)) localSubscription = null;
       } catch (error) {
-        if (
-          error instanceof PushSubscriptionOwnershipConflictError
-          && capabilities?.push.configured
-          && capabilities.push.vapidPublicKey
-          && currentPermission() === 'granted'
-        ) {
-          try {
-            await localSubscription.unsubscribe();
-            localSubscription = await subscribe(registration!, capabilities.push.vapidPublicKey);
-            await reconcile();
-          } catch (rotationError) {
-            reconciliationError = rotationError;
-          }
-        } else {
-          reconciliationError = error;
-        }
+        localSubscription = null;
+        reconciliationError = error;
       }
     }
 
@@ -299,6 +272,8 @@ export const BrowserPushProvider: React.FC<{ children: React.ReactNode }> = ({ c
 
   const enable = useCallback((): Promise<void> => {
     if (inFlightRef.current) return inFlightRef.current;
+    // Permission guards and ownership recovery belong to the same explicit user action.
+    // eslint-disable-next-line complexity
     const operation = (async () => {
       const current = stateRef.current;
       const userId = user?.id;
@@ -317,7 +292,7 @@ export const BrowserPushProvider: React.FC<{ children: React.ReactNode }> = ({ c
       }
       const vapidPublicKey = current.capabilities?.push.vapidPublicKey;
       if (!current.capabilities?.push.configured || !vapidPublicKey) {
-        throw new Error('Web Push is not configured on this ProPR instance.');
+        throw new Error('Browser notifications are unavailable for this ProPR instance.');
       }
       setState(previous => ({ ...previous, operation: 'enabling', error: null }));
       let permission = currentPermission();
@@ -331,13 +306,25 @@ export const BrowserPushProvider: React.FC<{ children: React.ReactNode }> = ({ c
       const registration = current.serviceWorkerRegistration
         ?? await getOrRegisterServiceWorker();
       if (!registration) throw new Error('The ProPR service worker is not available.');
-      const localSubscription = current.subscription
-        ?? await registration.pushManager.getSubscription()
-        ?? await subscribe(registration, vapidPublicKey);
+      let localSubscription = current.subscription
+        ?? await registration.pushManager.getSubscription();
+      if (localSubscription && !current.subscription && storedPushOwner() !== userId) {
+        await localSubscription.unsubscribe();
+        localSubscription = null;
+      }
+      localSubscription ??= await subscribe(registration, vapidPublicKey);
       const reconciliationKey = `${userId}:${localSubscription.endpoint}`;
       if (reconciledRef.current !== reconciliationKey) {
-        await registerPushSubscription(browserSubscriptionInput(localSubscription));
-        reconciledRef.current = reconciliationKey;
+        try {
+          await registerPushSubscription(browserSubscriptionInput(localSubscription));
+        } catch (error) {
+          if (!(error instanceof PushSubscriptionOwnershipConflictError)) throw error;
+          // Recovery also requires this explicit Enable click.
+          await localSubscription.unsubscribe();
+          localSubscription = await subscribe(registration, vapidPublicKey);
+          await registerPushSubscription(browserSubscriptionInput(localSubscription));
+        }
+        reconciledRef.current = `${userId}:${localSubscription.endpoint}`;
       }
       storePushOwner(userId);
       setState(previous => ({

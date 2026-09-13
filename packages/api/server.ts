@@ -72,6 +72,8 @@ import { stopTaskExecution } from './routes/dockerRoutes.js';
 import { initializePushSubscriptionMaintenance } from './services/pushSubscriptionMaintenance.js';
 import { NotificationProjectionService } from './services/notificationProjectionService.js';
 import { WebPushDispatcher } from './services/webPushDispatcher.js';
+import { resolveInstanceWebPushConfiguration } from './services/instanceWebPushConfiguration.js';
+import type { ValidatedWebPushConfiguration } from './services/webPushConfiguration.js';
 import { assertInstanceAdministratorConfigured } from './authorization.js';
 import { resolveApiListenHost } from './listenAddress.js';
 import {
@@ -246,6 +248,7 @@ let configReloadSubscription: ConfigReloadSubscription | undefined;
 let notificationProjection: NotificationProjectionService | undefined;
 let webPushDispatcher: WebPushDispatcher | undefined;
 let webPushDispatcherConfigured = false;
+let resolvedWebPushConfiguration: ValidatedWebPushConfiguration = { configured: false, issue: 'disabled' };
 let desktopPairingCleanupTimer: NodeJS.Timeout | undefined;
 let visualPreviewOAuthRefreshScheduler: VisualPreviewOAuthRefreshScheduler | undefined;
 
@@ -343,7 +346,7 @@ function setupRoutes(): void {
   const repoTodoRoutes = createRepoTodoRoutes();
   const userRepoPreferencesRoutes = createUserRepoPreferencesRoutes();
   const agentRuntimeRoutes = createAgentRuntimeRoutes({ getRuntimeBuildQueue: () => runtimeBuildQueue });
-  const notificationRoutes = createNotificationRoutes({ webPushDispatcherConfigured });
+  const notificationRoutes = createNotificationRoutes({ webPushDispatcherConfigured, resolvedWebPushConfiguration });
   const voiceBriefingService = createVoiceBriefingService({
     database: db,
     taskQueue,
@@ -500,7 +503,8 @@ async function start(): Promise<void> {
     await initRedis();
     if (!demoMode) {
       try {
-        const dispatcher = new WebPushDispatcher({ database: db });
+        resolvedWebPushConfiguration = resolveInstanceWebPushConfiguration();
+        const dispatcher = new WebPushDispatcher({ database: db, resolvedConfiguration: resolvedWebPushConfiguration });
         webPushDispatcherConfigured = dispatcher.start().configured;
         webPushDispatcher = dispatcher;
       } catch {
