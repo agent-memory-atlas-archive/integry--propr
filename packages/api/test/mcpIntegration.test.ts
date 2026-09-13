@@ -20,8 +20,21 @@ import { McpError } from '../mcp/config.js';
 import { McpPolicy, type McpPrincipal } from '../mcp/policy.js';
 import { buildMcpServer } from '../mcp/server.js';
 import { createToolCatalog, executeTool, type ToolDeps } from '../mcp/tools.js';
+import { compactText, summarizeTask } from '../mcp/listSummaries.js';
 
 after(async () => closeConnection());
+
+test('MCP list summaries bound natural-language fields and tolerate legacy task metadata', () => {
+  const summary = compactText(`  ${'long context '.repeat(40)}  `)!;
+  assert.ok(summary.length <= 240);
+  assert.ok(summary.endsWith('…'));
+  const task = summarizeTask({
+    task_id: 'legacy-1', repository: 'acme/repo', issue_number: 19, task_type: 'issue',
+    initial_job_data: '{invalid', created_at: '2026-09-01 12:00:00', state: 'pending',
+  }, new Date('2026-09-01 12:00:05').getTime());
+  assert.equal(task.title, 'Issue #19');
+  assert.equal(task.elapsed_ms, 5_000);
+});
 
 test('both official SDK protocol eras execute real draft/revision/publication/task transitions over the same HTTP endpoint', async () => {
   const db = knex({ client: 'better-sqlite3', connection: { filename: ':memory:' }, useNullAsDefault: true });
@@ -113,12 +126,18 @@ test('MCP task, goal and plan lists paginate in deterministic newest-first order
     table.string('repository').notNullable();
     table.integer('issue_number');
     table.string('task_type').notNullable();
+    table.string('model_name');
+    table.integer('pr_number');
+    table.text('initial_job_data');
     table.timestamp('created_at').notNullable();
   });
   await db.schema.createTable('task_history', table => {
     table.increments('history_id').primary();
     table.string('task_id').notNullable();
     table.string('state').notNullable();
+    table.timestamp('timestamp');
+    table.text('reason');
+    table.text('metadata');
   });
   await db.schema.createTable('goals', table => {
     table.string('goal_id').primary();
@@ -129,8 +148,16 @@ test('MCP task, goal and plan lists paginate in deterministic newest-first order
     table.string('desired_state');
     table.string('result_state');
     table.string('current_task_id');
+    table.string('agent_alias');
+    table.string('requested_model');
+    table.string('effective_model');
+    table.integer('final_pr_number');
+    table.text('artifact_refs');
+    table.text('failure_reason');
     table.timestamp('created_at').notNullable();
     table.timestamp('updated_at').notNullable();
+    table.timestamp('started_at');
+    table.timestamp('completed_at');
   });
   await db.schema.createTable('task_drafts', table => {
     table.string('draft_id').primary();
@@ -138,11 +165,33 @@ test('MCP task, goal and plan lists paginate in deterministic newest-first order
     table.string('repository').notNullable();
     table.string('name');
     table.text('initial_prompt');
+    table.text('context_config');
+    table.text('generation_trace');
+    table.text('refinement_result');
     table.string('status');
     table.integer('mcp_revision');
     table.boolean('paused');
     table.timestamp('created_at').notNullable();
     table.timestamp('updated_at').notNullable();
+  });
+  await db.schema.createTable('plan_issues', table => {
+    table.increments('id').primary();
+    table.string('draft_id');
+    table.string('task_id');
+    table.integer('pr_number');
+    table.string('status');
+    table.string('agent_alias');
+    table.string('model_name');
+  });
+  await db.schema.createTable('repo_todo_categories', table => {
+    table.increments('id').primary(); table.string('category_id'); table.string('user_id');
+    table.string('repository'); table.string('name'); table.integer('order_index');
+  });
+  await db.schema.createTable('repo_todos', table => {
+    table.increments('id').primary(); table.string('todo_id'); table.string('user_id');
+    table.string('repository'); table.string('category_id'); table.text('content');
+    table.integer('order_index'); table.boolean('is_completed'); table.string('linked_draft_id');
+    table.timestamp('created_at'); table.timestamp('updated_at');
   });
 
   const repository = 'acme/repo';
@@ -153,21 +202,36 @@ test('MCP task, goal and plan lists paginate in deterministic newest-first order
     { task_id: '1024', repository, task_type: 'issue', created_at: oldest },
     { task_id: '10149', repository, task_type: 'issue', created_at: middle },
     { task_id: '10150', repository, task_type: 'issue', created_at: newest },
-    { task_id: '10151', repository, task_type: 'issue', created_at: newest },
+    { task_id: '10151', repository, issue_number: 88, task_type: 'issue', model_name: 'gpt-5.6', pr_number: 188,
+      initial_job_data: JSON.stringify({ title: 'Make task lists self-explanatory', subtitle: 'Expose bounded lifecycle context', agentAlias: 'codex' }), created_at: newest },
   ]);
-  await db('task_history').insert(['1024', '10149', '10150', '10151'].map(task_id => ({ task_id, state: 'completed' })));
+  await db('task_history').insert({ task_id: '10151', state: 'processing', timestamp: '2026-09-01 12:00:02' });
+  await db('task_history').insert([
+    ...['1024', '10149', '10150'].map(task_id => ({ task_id, state: 'completed', timestamp: newest })),
+    { task_id: '10151', state: 'failed', timestamp: '2026-09-01 12:00:12', reason: 'Fixture agent stopped',
+      metadata: JSON.stringify({ error: { message: 'Agent exited before completing the requested edits' } }) },
+  ]);
   await db('goals').insert([
     { goal_id: 'goal-z-old', owner_id: '123', repository, current_task_id: 'goal-task-old', created_at: oldest, updated_at: oldest },
     { goal_id: 'goal-a-middle', owner_id: '123', repository, current_task_id: 'goal-task-middle', created_at: middle, updated_at: middle },
     { goal_id: 'goal-a-new', owner_id: '123', repository, current_task_id: 'goal-task-new-a', created_at: newest, updated_at: newest },
-    { goal_id: 'goal-b-new', owner_id: '123', repository, current_task_id: 'goal-task-new-b', created_at: newest, updated_at: newest },
+    { goal_id: 'goal-b-new', owner_id: '123', repository, title: 'Enrich MCP list results', objective: 'Make every MCP list result understandable without another fetch.',
+      desired_state: 'running', result_state: 'completed', current_task_id: 'goal-task-new-b', agent_alias: 'codex', requested_model: 'gpt-5.6',
+      effective_model: 'gpt-5.6-codex', final_pr_number: 288, artifact_refs: JSON.stringify([{ type: 'pull_request', number: 288, state: 'closed' }]),
+      created_at: newest, updated_at: '2026-09-01 12:00:20', started_at: '2026-09-01 12:00:01', completed_at: '2026-09-01 12:00:20' },
   ]);
   await db('task_drafts').insert([
     { draft_id: 'plan-z-old', user_id: '123', repository, created_at: oldest, updated_at: oldest },
     { draft_id: 'plan-a-middle', user_id: '123', repository, created_at: middle, updated_at: middle },
     { draft_id: 'plan-a-new', user_id: '123', repository, created_at: newest, updated_at: newest },
-    { draft_id: 'plan-b-new', user_id: '123', repository, created_at: newest, updated_at: newest },
+    { draft_id: 'plan-b-new', user_id: '123', repository, name: 'MCP list summaries', initial_prompt: 'Add compact summaries to list tools.',
+      context_config: JSON.stringify({ generationModel: 'codex:gpt-5.6' }), status: 'merged', mcp_revision: 3, paused: false,
+      created_at: newest, updated_at: '2026-09-01 12:00:30' },
   ]);
+  await db('plan_issues').insert({ draft_id: 'plan-b-new', task_id: '10151', pr_number: 188, status: 'closed', agent_alias: 'codex', model_name: 'gpt-5.6' });
+  await db('repo_todo_categories').insert({ category_id: 'category-1', user_id: '123', repository, name: 'API', order_index: 0 });
+  await db('repo_todos').insert({ todo_id: 'todo-1', user_id: '123', repository, category_id: 'category-1', content: 'Keep list payloads compact',
+    order_index: 0, is_completed: false, linked_draft_id: 'plan-b-new', created_at: newest, updated_at: newest });
 
   const deps: ToolDeps = { db, policy: {} as McpPolicy, taskQueue: {} as never, redisClient: {} as never, runtimeBuildQueue: {} as never };
   const catalog = createToolCatalog(deps);
@@ -184,16 +248,39 @@ test('MCP task, goal and plan lists paginate in deterministic newest-first order
     const taskPageTwo = await page('list_tasks', taskPageOne.nextOffset);
     assert.deepEqual(taskPageOne.tasks.map((task: { task_id: string }) => task.task_id), ['10151', '10150']);
     assert.deepEqual(taskPageTwo.tasks.map((task: { task_id: string }) => task.task_id), ['10149', '1024']);
+    assert.deepEqual(taskPageOne.tasks[0], {
+      task_id: '10151', repository, issue_number: 88, task_type: 'issue', title: 'Make task lists self-explanatory',
+      summary: 'Expose bounded lifecycle context', state: 'failed', agent_alias: 'codex', model_name: 'gpt-5.6',
+      pr_number: 188, pr_state: 'closed', created_at: newest, updated_at: '2026-09-01 12:00:12',
+      started_at: '2026-09-01 12:00:02', completed_at: '2026-09-01 12:00:12', elapsed_ms: 10_000,
+      failure_reason: 'Agent exited before completing the requested edits',
+    });
 
     const goalPageOne = await page('list_goals', 0);
     const goalPageTwo = await page('list_goals', goalPageOne.nextOffset);
     assert.deepEqual(goalPageOne.goals.map((goal: { goal_id: string }) => goal.goal_id), ['goal-b-new', 'goal-a-new']);
     assert.deepEqual(goalPageTwo.goals.map((goal: { goal_id: string }) => goal.goal_id), ['goal-a-middle', 'goal-z-old']);
+    assert.equal(goalPageOne.goals[0].summary, 'Make every MCP list result understandable without another fetch.');
+    assert.equal(goalPageOne.goals[0].agent_alias, 'codex');
+    assert.equal(goalPageOne.goals[0].model_name, 'gpt-5.6-codex');
+    assert.equal(goalPageOne.goals[0].pr_state, 'closed');
+    assert.equal(goalPageOne.goals[0].elapsed_ms, 19_000);
 
     const planPageOne = await page('list_plans', 0);
     const planPageTwo = await page('list_plans', planPageOne.nextOffset);
     assert.deepEqual(planPageOne.plans.map((plan: { draft_id: string }) => plan.draft_id), ['plan-b-new', 'plan-a-new']);
     assert.deepEqual(planPageTwo.plans.map((plan: { draft_id: string }) => plan.draft_id), ['plan-a-middle', 'plan-z-old']);
+    assert.deepEqual(planPageOne.plans[0].issue_counts, { total: 1, pending: 0, active: 0, merged: 0, closed: 1 });
+    assert.deepEqual(planPageOne.plans[0].agent_models, [{ agent_alias: 'codex', model_name: 'gpt-5.6' }]);
+    assert.deepEqual(planPageOne.plans[0].pull_requests, [{ number: 188, state: 'closed' }]);
+
+    const todos = await page('list_todos', 0);
+    assert.deepEqual(todos.items[0], {
+      todo_id: 'todo-1', repository, title: 'Keep list payloads compact', summary: 'Keep list payloads compact',
+      is_completed: false, category: { id: 'category-1', name: 'API' },
+      linked_plan: { id: 'plan-b-new', title: 'MCP list summaries', status: 'merged' },
+      order_index: 0, created_at: newest, updated_at: newest,
+    });
   } finally {
     await db.destroy();
   }
