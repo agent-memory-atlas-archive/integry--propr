@@ -16,7 +16,7 @@ export function addPlanningTools(tools: McpTool[], deps: ToolDeps, planner: Retu
   const { db, policy } = deps;
   tools.push({ name: 'list_plans', description: 'List your plans in an authorized repository.', scope: 'read', readOnly: true,
     schema: z.object({ repository: repositorySchema, ...pageShape }).strict(), run: async ({ principal, args }) => {
-      const plans = await db('task_drafts').where({ repository: args.repository, user_id: principal.user.id }).select(columns.filter(column => !['plan_json', 'attachments'].includes(column))).orderBy('draft_id').offset(args.offset).limit(args.limit);
+      const plans = await db('task_drafts').where({ repository: args.repository, user_id: principal.user.id }).select(columns.filter(column => !['plan_json', 'attachments'].includes(column))).orderBy('created_at', 'desc').orderBy('draft_id', 'desc').offset(args.offset).limit(args.limit);
       return ok({ plans, nextOffset: plans.length === args.limit ? args.offset + args.limit : null });
     } });
   tools.push({ name: 'get_plan', description: 'Read your plan, revision and published issue/task handles.', scope: 'read', readOnly: true, schema: z.object(planShape).strict(), target,
