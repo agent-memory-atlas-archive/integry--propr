@@ -70,7 +70,7 @@ async function buildBundle(
         return { success: false, imageTag, error: `Unified agent Dockerfile not found: ${dockerfile}` };
     }
 
-    await assertAgentImageBuildCapacity({ rootPath: basePath });
+    await assertAgentImageBuildCapacity();
     logger.info({ imageTag, versions, dockerfile }, 'Building unified agent Docker image...');
     const result = await executeDockerCommand('docker', [
         'build',

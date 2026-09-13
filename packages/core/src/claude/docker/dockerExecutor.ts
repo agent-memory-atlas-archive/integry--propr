@@ -71,6 +71,24 @@ export interface DockerCommandOptions {
     signal?: AbortSignal;
 }
 
+/**
+ * Returns the daemon's configured storage root. This is deliberately obtained
+ * through Docker's info API rather than by assuming the host default
+ * (/var/lib/docker); image and build storage may live on another filesystem.
+ */
+export async function getDockerRootDir(
+    executor: typeof executeDockerCommand = executeDockerCommand,
+): Promise<string> {
+    const result = await executor('docker', [
+        'info', '--format', '{{.DockerRootDir}}',
+    ], { timeout: 10_000 });
+    const rootDir = result.stdout.trim();
+    if (result.exitCode !== 0 || !rootDir || /[\r\n]/.test(rootDir)) {
+        throw new Error(`Docker root directory could not be determined: ${result.stderr.trim() || 'docker info returned no usable DockerRootDir'}`);
+    }
+    return rootDir;
+}
+
 // ANSI escape code regex for stripping terminal formatting (constructed dynamically to avoid control char lint errors)
 const ANSI_REGEX = new RegExp('[' + String.fromCharCode(0x1b) + String.fromCharCode(0x9b) + '][[()#;?]*(?:[0-9]{1,4}(?:;[0-9]{0,4})*)?[0-9A-ORZcf-nqry=><]', 'g');
 
