@@ -5,7 +5,6 @@ import * as configManager from '../config/configManager.js';
 import { executeDockerCommand } from '../claude/docker/dockerExecutor.js';
 import { closeConnection } from '../db/connection.js';
 import { shutdownQueue } from '../queue/taskQueue.js';
-import { loadAgentRuntimePackageState } from './runtime/agentRuntimePackages.js';
 import { GoalCapabilityProbe, type GoalCapability } from './goalCapabilities.js';
 import type { AgentRegistryOperationalStatus } from './agentRegistryTypes.js';
 import { SyntheticAgentRegistry, type BeginSyntheticRoutingOptions, type SyntheticRoutingSession } from './SyntheticAgentRegistry.js';
@@ -13,36 +12,20 @@ import { createAgentFromConfig } from './createAgentFromConfig.js';
 import { resolveDefaultAgentConfig, resolveUnifiedAgentImage } from './agentImagePreparation.js';
 import { closeAgentImagePreparationQueue, enqueueAgentImagePreparation } from './agentImagePreparationQueue.js';
 import { isAgentImageDiskPressureError } from './agentImageBuildCapacity.js';
+import { areAgentImagesAvailable, captureRuntimePackageStateVersion, hasRuntimePackageStateChanged } from './agentRegistryRuntimeState.js';
+import {
+    logUnifiedAgentImageCircuitOpen,
+    recordUnifiedAgentImageFailure,
+    scheduleUnifiedAgentImageRetry,
+    startUnifiedAgentImageRecovery,
+    type UnavailableUnifiedAgentImage,
+} from './unifiedAgentImageRecovery.js';
 
 export type { AgentRegistryOperationalStatus } from './agentRegistryTypes.js';
 
 const RUNTIME_PACKAGE_STATE_CHECK_INTERVAL_MS = 5000;
-export const UNIFIED_AGENT_IMAGE_RETRY_BASE_DELAY_MS = 5_000;
-export const UNIFIED_AGENT_IMAGE_RETRY_MAX_DELAY_MS = 5 * 60_000;
-export const UNIFIED_AGENT_IMAGE_RETRY_MAX_ATTEMPTS = 5;
-const UNIFIED_AGENT_IMAGE_RETRY_JITTER_RATIO = 0.25;
 
-export function getUnifiedAgentImageRetryDelay(
-    retryCount: number,
-    random = Math.random,
-): number {
-    const exponentialDelay = Math.min(
-        UNIFIED_AGENT_IMAGE_RETRY_MAX_DELAY_MS,
-        UNIFIED_AGENT_IMAGE_RETRY_BASE_DELAY_MS * 2 ** Math.max(0, retryCount - 1),
-    );
-    const jitter = 1 + (random() * 2 - 1) * UNIFIED_AGENT_IMAGE_RETRY_JITTER_RATIO;
-    return Math.round(exponentialDelay * jitter);
-}
-
-interface UnavailableUnifiedAgentImage {
-    imageTag?: string;
-    error: string;
-    recordedAt: string;
-    retryCount?: number;
-    nextRetryAt?: string;
-    circuitBreakerOpen?: boolean;
-    operatorActionRequired?: boolean;
-}
+export { getUnifiedAgentImageRetryDelay, UNIFIED_AGENT_IMAGE_RETRY_MAX_ATTEMPTS } from './unifiedAgentImageRecovery.js';
 
 /**
  * AgentRegistry manages the lifecycle of agent instances.
@@ -107,9 +90,7 @@ export class AgentRegistry {
      * The main worker sets this before startup preparation; API/analysis
      * processes leave it disabled and use the worker-owned preparation queue.
      */
-    setImagePreparationOwner(owner = true): void {
-        this.imagePreparationOwner = owner;
-    }
+    setImagePreparationOwner(owner = true): void { this.imagePreparationOwner = owner; }
 
     private requestRefresh(prepareImages: boolean): Promise<void> {
         if (this.pendingRefresh) {
@@ -355,15 +336,6 @@ export class AgentRegistry {
         return { unifiedAgentImage: { status: 'ready' } };
     }
 
-    /**
-     * Ensures the registry is initialized, refreshing if necessary.
-     *
-     * When a runtime package state change is detected on an already-initialized
-     * registry, the inspect-only refresh runs in the background. The dedicated
-     * runtime build worker prepares changed package images before publishing the
-     * new state. API and analysis processes request missing-image preparation
-     * from the main worker and never launch Docker builds themselves.
-     */
     async ensureInitialized(): Promise<void> {
         if (!this.initialized) {
             if (this.imagePreparationOwner) {
@@ -425,49 +397,26 @@ export class AgentRegistry {
         const images = [...new Set([...this.agents.values()]
             .map(agent => agent.config.dockerImage)
             .filter(Boolean))];
-        if (images.length === 0) return true;
-
-        try {
-            const result = await executeDockerCommand('docker', [
+        return areAgentImagesAvailable(images, () => executeDockerCommand('docker', [
                 'image', 'inspect', '--format', '{{.Id}}', ...images
-            ], { timeout: 10000 });
-            return result.exitCode === 0;
-        } catch (error) {
-            logger.warn({ images, error: (error as Error).message }, 'Could not verify registered agent Docker images');
-            return false;
-        }
+            ], { timeout: 10000 }));
     }
 
-    /**
-     * Resolves once any in-flight background refresh has completed.
-     * Primarily for shutdown paths and tests that need a settled registry.
-     */
-    async waitForPendingRefresh(): Promise<void> {
-        await this.pendingBackgroundRefresh;
-    }
+    async waitForPendingRefresh(): Promise<void> { await this.pendingBackgroundRefresh; }
 
     private async captureRuntimePackageStateVersion(): Promise<void> {
-        try {
-            this.runtimePackagesUpdatedAt = (await loadAgentRuntimePackageState()).updatedAt;
-            this.runtimePackageStateUnavailable = false;
-        } catch (error) {
-            logger.warn({ error: (error as Error).message }, 'Could not capture agent runtime package state version');
-            this.runtimePackagesUpdatedAt = undefined;
-            this.runtimePackageStateUnavailable = true;
-        }
+        await captureRuntimePackageStateVersion((updatedAt, unavailable) => {
+            this.runtimePackagesUpdatedAt = updatedAt;
+            this.runtimePackageStateUnavailable = unavailable;
+        });
     }
 
     private async hasRuntimePackageStateChanged(): Promise<boolean> {
-        if (this.runtimePackagesUpdatedAt === undefined && !this.runtimePackageStateUnavailable) return true;
-        try {
-            const state = await loadAgentRuntimePackageState();
-            this.runtimePackageStateUnavailable = false;
-            return state.updatedAt !== this.runtimePackagesUpdatedAt;
-        } catch (error) {
-            logger.warn({ error: (error as Error).message }, 'Could not check agent runtime package state version');
-            this.runtimePackageStateUnavailable = true;
-            return false;
-        }
+        return hasRuntimePackageStateChanged(
+            this.runtimePackagesUpdatedAt,
+            this.runtimePackageStateUnavailable,
+            value => { this.runtimePackageStateUnavailable = value; },
+        );
     }
 
     private async ensureUnifiedAgentImage(configs: AgentConfig[], prepareImages: boolean): Promise<string | null> {
@@ -481,11 +430,7 @@ export class AgentRegistry {
         return this.markUnifiedAgentImageReady(result.image);
     }
 
-    private markUnifiedAgentImageReady(image: string): string {
-        this.clearUnifiedAgentImageRetry();
-        this.unavailableUnifiedAgentImage = null;
-        return image;
-    }
+    private markUnifiedAgentImageReady(image: string): string { this.clearUnifiedAgentImageRetry(); this.unavailableUnifiedAgentImage = null; return image; }
 
     /**
      * Request a single worker-owned preparation and refresh this process after
@@ -493,68 +438,36 @@ export class AgentRegistry {
      * callers across API/analysis processes.
      */
     private scheduleUnifiedAgentImageRetry(): void {
-        const unavailable = this.unavailableUnifiedAgentImage;
-        if (
-            this.imagePreparationOwner
-            || this.unifiedAgentImageRetryTimer
-            || this.pendingBackgroundRefresh
-            || !unavailable
-            || unavailable.circuitBreakerOpen
-            || (unavailable.retryCount ?? 0) >= UNIFIED_AGENT_IMAGE_RETRY_MAX_ATTEMPTS
-        ) return;
-
-        const delay = getUnifiedAgentImageRetryDelay(unavailable.retryCount ?? 1);
-        unavailable.nextRetryAt = new Date(Date.now() + delay).toISOString();
-        this.unifiedAgentImageRetryTimer = setTimeout(() => {
-            this.unifiedAgentImageRetryTimer = null;
-            if (!this.unavailableUnifiedAgentImage || this.unavailableUnifiedAgentImage.circuitBreakerOpen) return;
-            void this.startWorkerOwnedImageRecovery();
-        }, delay);
-        this.unifiedAgentImageRetryTimer.unref?.();
+        scheduleUnifiedAgentImageRetry({
+            unavailable: this.unavailableUnifiedAgentImage,
+            imagePreparationOwner: this.imagePreparationOwner,
+            retryTimer: this.unifiedAgentImageRetryTimer,
+            pendingBackgroundRefresh: this.pendingBackgroundRefresh,
+            startRecovery: () => this.startWorkerOwnedImageRecovery(),
+            setRetryTimer: timer => { this.unifiedAgentImageRetryTimer = timer; },
+        });
     }
 
     private startWorkerOwnedImageRecovery(): Promise<void> {
-        if (this.pendingBackgroundRefresh) return this.pendingBackgroundRefresh;
         const firstAgent = this.agents.values().next().value as Agent | undefined;
         const imageTag = this.unavailableUnifiedAgentImage?.imageTag || firstAgent?.config.dockerImage;
-        if (!imageTag) return Promise.resolve();
-
-        this.clearUnifiedAgentImageRetry();
-        const recovery = enqueueAgentImagePreparation(imageTag)
-            .then(() => this.refresh())
-            .catch(error => {
-                const message = error instanceof Error ? error.message : String(error);
-                this.recordUnavailableUnifiedAgentImage(imageTag, message);
-                logger.error(
-                    { imageTag, error: message, diskPressure: isAgentImageDiskPressureError(error) },
-                    'Worker-owned unified agent image recovery failed',
-                );
-            })
-            .finally(() => {
-                if (this.pendingBackgroundRefresh === recovery) this.pendingBackgroundRefresh = null;
-            });
-        this.pendingBackgroundRefresh = recovery;
-        return recovery;
+        return startUnifiedAgentImageRecovery({
+            pendingBackgroundRefresh: this.pendingBackgroundRefresh,
+            imageTag,
+            clearRetry: () => this.clearUnifiedAgentImageRetry(),
+            enqueuePreparation: enqueueAgentImagePreparation,
+            refresh: () => this.refresh(),
+            recordFailure: (failedImageTag, error) => this.recordUnavailableUnifiedAgentImage(failedImageTag, error),
+            setPendingBackgroundRefresh: promise => { this.pendingBackgroundRefresh = promise; },
+        });
     }
 
-    private clearUnifiedAgentImageRetry(): void {
-        if (!this.unifiedAgentImageRetryTimer) return;
-        clearTimeout(this.unifiedAgentImageRetryTimer);
-        this.unifiedAgentImageRetryTimer = null;
-    }
+    private clearUnifiedAgentImageRetry(): void { if (this.unifiedAgentImageRetryTimer) clearTimeout(this.unifiedAgentImageRetryTimer); this.unifiedAgentImageRetryTimer = null; }
 
-    /**
-     * Creates an agent instance from configuration.
-     * This is the factory method that handles different agent types.
-     */
     createAgentFromConfig(config: AgentConfig): Agent {
         return createAgentFromConfig(config);
     }
 
-    /**
-     * Registers a default Claude agent using environment variables.
-     * This is the fallback when no agents are configured.
-     */
     private async registerDefaultAgent(prepareImages: boolean): Promise<void> {
         const result = await resolveDefaultAgentConfig(prepareImages);
         if (!result.config) {
@@ -583,27 +496,17 @@ export class AgentRegistry {
     }
 
     private recordUnavailableUnifiedAgentImage(imageTag: string | undefined, error: string): void {
-        const previous = this.unavailableUnifiedAgentImage;
-        const sameImage = previous?.imageTag === imageTag;
-        const retryCount = sameImage ? (previous?.retryCount ?? 0) + 1 : 1;
         const diskPressure = isAgentImageDiskPressureError(error);
-        const circuitBreakerOpen = diskPressure || retryCount >= UNIFIED_AGENT_IMAGE_RETRY_MAX_ATTEMPTS;
-        this.unavailableUnifiedAgentImage = {
+        const result = recordUnifiedAgentImageFailure({
+            previous: this.unavailableUnifiedAgentImage,
             imageTag,
             error,
-            recordedAt: new Date().toISOString(),
-            retryCount,
-            circuitBreakerOpen: circuitBreakerOpen || undefined,
-            operatorActionRequired: diskPressure || undefined,
-        };
-        if (circuitBreakerOpen) {
+            diskPressure,
+        });
+        this.unavailableUnifiedAgentImage = result.state;
+        if (!result.shouldRetry) {
             this.clearUnifiedAgentImageRetry();
-            logger.error(
-                { imageTag, error, retryCount, diskPressure },
-                diskPressure
-                    ? 'Unified agent image recovery halted by disk pressure; operator action is required'
-                    : 'Unified agent image recovery circuit breaker opened after repeated failures',
-            );
+            logUnifiedAgentImageCircuitOpen(imageTag, error, result.state.retryCount, diskPressure);
             return;
         }
         this.scheduleUnifiedAgentImageRetry();

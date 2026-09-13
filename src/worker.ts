@@ -1,5 +1,5 @@
 import 'dotenv/config';
-import { Queue, Worker } from 'bullmq';
+import { Queue, Worker, type Job } from 'bullmq';
 import { Redis } from 'ioredis';
 import { GITHUB_ISSUE_QUEUE_NAME, closeStateManager, createWorker, getStateManager, runMigrations } from '@propr/core';
 import { logger } from '@propr/core';
@@ -17,6 +17,8 @@ import {
 import {
     AGENT_IMAGE_PREPARATION_QUEUE_NAME,
     createAgentImagePreparationQueue,
+    closeAgentImageBuildLock,
+    ensureAgentBundleImage,
     type AgentImagePreparationJobData,
 } from '@propr/core';
 import { setCheckRunDeps } from './jobs/ultrafixLoopContinuation.js';
@@ -35,6 +37,7 @@ import {
 } from './jobs/prCommentTaskStateFinalizers.js';
 import { startWorkerTaskStateRecovery } from './workerTaskStateRecovery.js';
 import { recoverNonterminalGoals } from './goalRecovery.js';
+import { prepareAgentRegistryAtStartup } from './workerAgentPreparation.js';
 
 process.on('uncaughtException', (error: Error) => {
     logger.fatal({ error: error.message, stack: error.stack }, 'Uncaught exception in worker');
@@ -177,6 +180,22 @@ async function refreshAgentRegistryForConfigUpdate(subtype: string): Promise<voi
     }
 }
 
+async function processAgentImagePreparationJob(job: Job<AgentImagePreparationJobData>): Promise<void> {
+    logger.info({ imageTag: job.data.imageTag }, 'Preparing unified agent image in the worker-owned path');
+    const workerRegistry = AgentRegistry.getInstance();
+    workerRegistry.setImagePreparationOwner(true);
+    if (job.data.versions && job.data.contentHash) {
+        const result = await ensureAgentBundleImage(job.data.versions, job.data.contentHash);
+        if (!result.success) throw new Error(result.error || `Agent image ${job.data.imageTag} is unavailable`);
+        return;
+    }
+    await workerRegistry.prepareImagesAndRefresh();
+    const status = workerRegistry.getOperationalStatus().unifiedAgentImage;
+    if (status.status !== 'ready') {
+        throw new Error(status.error || `Unified agent image ${status.imageTag || job.data.imageTag} is unavailable`);
+    }
+}
+
 export interface StartedWorker {
     worker: MainWorker;
     runtimeBuildWorker: Worker<AgentRuntimeBuildJobData>;
@@ -227,22 +246,8 @@ async function startWorker(options: WorkerOptions = {}): Promise<StartedWorker> 
         resetPerformed: options.reset || false
     }, 'Starting GitHub Issue Worker...');
 
-    // The main worker is the single owner of base/runtime agent image
-    // preparation. Do this before heartbeats and BullMQ workers so the stack
-    // cannot advertise or claim task capacity while an image is still building.
-    logger.info('Preparing agent Docker images and initializing agent registry...');
-    const registry = AgentRegistry.getInstance();
-    registry.setImagePreparationOwner(true);
-    await registry.prepareImagesAndRefresh();
-    const imageStatus = registry.getOperationalStatus().unifiedAgentImage;
-    if (imageStatus.status !== 'ready') {
-        throw new Error(imageStatus.error || `Agent image ${imageStatus.imageTag || 'unknown'} is unavailable`);
-    }
-    const agents = registry.getAllAgents();
-    logger.info({
-        agentCount: agents.length,
-        agents: agents.map(a => ({ alias: a.config.alias, type: a.config.type, dockerImage: a.config.dockerImage }))
-    }, 'Agent images prepared and registry initialized successfully');
+    // Do not advertise or claim task capacity while an image is still building.
+    await prepareAgentRegistryAtStartup();
 
     const heartbeatRedis = new Redis({
         host: process.env.REDIS_HOST || 'localhost',
@@ -381,14 +386,7 @@ async function startWorker(options: WorkerOptions = {}): Promise<StartedWorker> 
     const agentImagePreparationWorker = new Worker<AgentImagePreparationJobData>(
         AGENT_IMAGE_PREPARATION_QUEUE_NAME,
         async (job) => {
-            logger.info({ imageTag: job.data.imageTag }, 'Preparing unified agent image in the worker-owned path');
-            const workerRegistry = AgentRegistry.getInstance();
-            workerRegistry.setImagePreparationOwner(true);
-            await workerRegistry.prepareImagesAndRefresh();
-            const status = workerRegistry.getOperationalStatus().unifiedAgentImage;
-            if (status.status !== 'ready') {
-                throw new Error(status.error || `Unified agent image ${status.imageTag || job.data.imageTag} is unavailable`);
-            }
+            await processAgentImagePreparationJob(job);
             logger.info({ requestedImageTag: job.data.imageTag }, 'Worker-owned unified agent image preparation completed');
         },
         {
@@ -413,6 +411,7 @@ async function startWorker(options: WorkerOptions = {}): Promise<StartedWorker> 
         await runtimeBuildWorker.close();
         await agentImagePreparationWorker.close();
         await agentImagePreparationQueue.close();
+        await closeAgentImageBuildLock();
         await heartbeatRedis.srem('system:status:workers', workerId);
         await subscriberRedis.quit();
         await heartbeatRedis.quit();

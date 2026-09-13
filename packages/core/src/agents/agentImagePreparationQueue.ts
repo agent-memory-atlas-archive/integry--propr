@@ -1,5 +1,6 @@
 import crypto from 'node:crypto';
-import { Job, Queue, QueueEvents } from 'bullmq';
+import { Queue, QueueEvents } from 'bullmq';
+import type { AgentCliVersionMatrix } from './version/versionService.js';
 
 export const AGENT_IMAGE_PREPARATION_QUEUE_NAME = 'agent-image-preparation';
 const AGENT_IMAGE_PREPARATION_TIMEOUT_MS = 25 * 60 * 1000;
@@ -7,6 +8,8 @@ const AGENT_IMAGE_PREPARATION_TIMEOUT_MS = 25 * 60 * 1000;
 export interface AgentImagePreparationJobData {
     imageTag: string;
     requestedAt: string;
+    versions?: AgentCliVersionMatrix;
+    contentHash?: string;
 }
 
 const connection = {
@@ -44,30 +47,28 @@ async function getRequestEvents(): Promise<QueueEvents> {
     return requestEvents;
 }
 
-async function findOrCreateJob(
-    queue: Queue<AgentImagePreparationJobData>,
-    imageTag: string,
-): Promise<Job<AgentImagePreparationJobData>> {
-    const jobId = agentImagePreparationJobId(imageTag);
-    const existing = await queue.getJob(jobId);
-    if (existing) {
-        const state = await existing.getState();
-        if (state !== 'failed') return existing;
-        await existing.remove().catch(() => undefined);
-    }
-    return queue.add('prepare-unified-agent-image', {
-        imageTag,
-        requestedAt: new Date().toISOString(),
-    }, { jobId });
-}
-
 /**
  * Enqueue one worker-owned preparation for an image and await its result.
  * BullMQ's deterministic job ID coalesces concurrent API callers and the
  * worker is the only process that owns the Docker preparation operation.
  */
-export async function enqueueAgentImagePreparation(imageTag: string): Promise<void> {
-    const job = await findOrCreateJob(getRequestQueue(), imageTag);
+export async function enqueueAgentImagePreparation(
+    imageTag: string,
+    options: { versions?: AgentCliVersionMatrix; contentHash?: string } = {},
+): Promise<void> {
+    const queue = getRequestQueue();
+    const jobId = agentImagePreparationJobId(imageTag);
+    const existing = await queue.getJob(jobId);
+    let job = existing;
+    if (job && (await job.getState()) === 'failed') {
+        await job.remove().catch(() => undefined);
+        job = undefined;
+    }
+    job ??= await queue.add('prepare-unified-agent-image', {
+        imageTag,
+        requestedAt: new Date().toISOString(),
+        ...options,
+    }, { jobId });
     await job.waitUntilFinished(await getRequestEvents(), AGENT_IMAGE_PREPARATION_TIMEOUT_MS);
 }
 
