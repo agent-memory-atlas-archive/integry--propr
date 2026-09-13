@@ -16,6 +16,8 @@ import { Loader2, ChevronRight } from 'lucide-react';
 import { useSocket } from '../contexts/useSocket';
 import { useCurrentUser, userHasPermission } from '../contexts/AuthContext';
 import { ConnectSoftPromoBanner } from './ConnectPlusBanner';
+import { useLiveRefreshScheduler } from '../hooks/useLiveRefreshScheduler';
+import type { TaskUpdatePayload } from '@propr/shared';
 
 interface QueueStats {
   active: number;
@@ -131,6 +133,7 @@ const Dashboard: React.FC = () => {
 
   // WebSocket for real-time updates
   const { onTaskUpdate, isConnected } = useSocket();
+  const taskEventFingerprintsRef = React.useRef<Map<string, string>>(new Map());
 
   // Fetch all stats
   const fetchAllStats = useCallback(async (isInitialLoad = false) => {
@@ -152,6 +155,10 @@ const Dashboard: React.FC = () => {
       setStatsLoading(false);
     }
   }, []);
+  const scheduleLiveStatsRefresh = useLiveRefreshScheduler({
+    isConnected,
+    refresh: () => fetchAllStats(false),
+  });
 
   // Initial load
   useEffect(() => {
@@ -163,9 +170,11 @@ const Dashboard: React.FC = () => {
     if (!isConnected) return;
 
     // Handle task updates - refresh stats when any task changes state
-    const handleTaskUpdate = () => {
-      console.log('[Dashboard] Received task update, refreshing stats');
-      fetchAllStats(false);
+    const handleTaskUpdate = (payload: TaskUpdatePayload) => {
+      const fingerprint = `${payload.state}\0${payload.repository ?? ''}\0${payload.issueNumber ?? ''}`;
+      if (taskEventFingerprintsRef.current.get(payload.taskId) === fingerprint) return;
+      taskEventFingerprintsRef.current.set(payload.taskId, fingerprint);
+      scheduleLiveStatsRefresh();
     };
 
     const unsubscribe = onTaskUpdate(handleTaskUpdate);
@@ -173,7 +182,7 @@ const Dashboard: React.FC = () => {
     return () => {
       unsubscribe();
     };
-  }, [isConnected, onTaskUpdate, fetchAllStats]);
+  }, [isConnected, onTaskUpdate, scheduleLiveStatsRefresh]);
 
   // Format date for sparkline display
   const formatDate = (dateStr: string): string => {
