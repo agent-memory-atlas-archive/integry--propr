@@ -30,6 +30,16 @@ export class CorsOriginError extends Error {
   }
 }
 
+// Remote MCP clients can execute requests from a browser-originated fetch even
+// though their OAuth exchange runs in the provider's cloud. Keep this exception
+// to the exact MCP endpoint and known product origin; it must never widen the
+// cookie-authenticated REST or Socket.IO boundaries.
+const MCP_WEB_CLIENT_ORIGINS = new Set(['https://claude.ai']);
+
+export function isTrustedMcpWebOrigin(path: string, origin: string | undefined): origin is string {
+  return path === '/api/mcp' && origin !== undefined && MCP_WEB_CLIENT_ORIGINS.has(origin);
+}
+
 /**
  * Handle validator failures before Express's environment-dependent default
  * error renderer can expose an HTML stack trace. Keep one public response for
