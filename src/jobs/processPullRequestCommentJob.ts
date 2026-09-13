@@ -3,7 +3,6 @@ import type { Logger } from 'pino';
 import { getAuthenticatedOctokit, hashTaskAttemptToken, logger, retryConfigs, runWithExecutionAbortSignal, withRetry } from '@propr/core';
 import { getStateManager, TaskStates } from '@propr/core';
 import type { WorkerStateManager } from '@propr/core';
-import { ensureRepoCloned, createWorktreeFromExistingBranch, getRepoUrl } from '@propr/core';
 import type { WorktreeInfo } from '@propr/core';
 import { ensureGitRepository } from '@propr/core';
 import { createLogFiles } from '@propr/core';
@@ -53,6 +52,7 @@ import {
     startPRProcessingLockHeartbeat,
 } from './prProcessingLock.js';
 import { createPRCommentTaskStateIfMissing, evaluatePRCommentPreExecutionRecovery, handlePRCommentLockContention } from './prCommentCollisionRecovery.js';
+import { createPullRequestHeadWorktree, resolvePullRequestGitTarget, type PullRequestHead } from './prGitOperations.js';
 
 const redisClient = new Redis({
     host: process.env.REDIS_HOST || '127.0.0.1',
@@ -60,7 +60,7 @@ const redisClient = new Redis({
     maxRetriesPerRequest: null, enableReadyCheck: false,
 });
 
-interface PRData { data: { head: { ref: string; sha?: string }; body: string | null; labels: Array<{ name: string }>; user: { login: string }; title: string } }
+interface PRData { data: { head: PullRequestHead; body: string | null; labels: Array<{ name: string }>; user: { login: string }; title: string } }
 interface PRComment { id: number; body: string; body_html?: string; user: { login: string; type?: string }; created_at: string; pull_request_review_id?: number }
 
 interface PRJobContext {
@@ -209,7 +209,7 @@ function buildStartingWorkCommentBody(authorsText: string, unprocessedComments: 
 async function executeProcessing(params: ExecuteProcessingParams): Promise<JobResult> {
     const { job, context, taskId, stateManager, state, lockKey, lockToken } = params;
     let { llm } = params;
-    const { pullRequestNumber, jobBranchName, repoOwner, repoName, correlationId, correlatedLogger } = context;
+    const { pullRequestNumber, repoOwner, repoName, correlationId, correlatedLogger } = context;
 
     state.octokit = await withRetry(() => getAuthenticatedOctokit(), { ...retryConfigs.githubApi, correlationId }, 'get_authenticated_octokit');
     const validation = await validatePRAndComments(state.octokit, { ...context, llm });
@@ -221,7 +221,7 @@ async function executeProcessing(params: ExecuteProcessingParams): Promise<JobRe
     const { prData, unprocessedComments: validUnprocessed, llm: resolvedLlm } = validation;
     state.unprocessedComments = validUnprocessed!;
     llm = resolvedLlm;
-    const branchName = jobBranchName || prData!.data.head.ref;
+    const gitTarget = resolvePullRequestGitTarget(prData!.data.head, { repoOwner, repoName });
     const { combinedCommentBody, combinedBodyHtml, commentAuthors } = buildCombinedComment(state.unprocessedComments);
     state.authorsText = commentAuthors.map(a => `@${a}`).join(', ');
 
@@ -284,18 +284,17 @@ async function executeProcessing(params: ExecuteProcessingParams): Promise<JobRe
     });
 
     const githubToken = await state.octokit.auth({ type: "installation" }) as GitHubToken;
-    const repoUrl = getRepoUrl({ repoOwner, repoName });
 
     await stateManager.updateTaskState(taskId, TaskStates.PROCESSING, {
         reason: 'Starting PR comment processing',
         historyMetadata: { commandMode: job.data.commandMode || 'default' }
     });
     await ensureGitRepository(correlatedLogger);
-    state.localRepoPath = await ensureRepoCloned({ repoUrl, owner: repoOwner, repoName, authToken: githubToken.token });
-
     const timestamp = new Date().toISOString().replace(/[:.]/g, '-').substring(0, 19);
-    state.worktreeInfo = await createWorktreeFromExistingBranch(state.localRepoPath, branchName, { worktreeDirName: `pr-${pullRequestNumber}-followup-${timestamp}`, owner: repoOwner, repoName });
-    correlatedLogger.info({ worktreePath: state.worktreeInfo.worktreePath, branchName: state.worktreeInfo.branchName }, 'Created worktree from existing PR branch');
+    const prepared = await createPullRequestHeadWorktree({ target: gitTarget, authToken: githubToken.token, worktreeDirName: `pr-${pullRequestNumber}-followup-${timestamp}` });
+    state.localRepoPath = prepared.localRepoPath;
+    state.worktreeInfo = prepared.worktreeInfo;
+    correlatedLogger.info({ worktreePath: state.worktreeInfo.worktreePath, branchName: state.worktreeInfo.branchName, gitRepository: `${gitTarget.repoOwner}/${gitTarget.repoName}`, isFork: gitTarget.isFork }, 'Created worktree from existing PR branch');
 
     const requestBody = isFixMode
         ? (fixSelection.remainingInstructions || 'Apply only the selected review finding records below.')
@@ -380,7 +379,7 @@ async function executeProcessing(params: ExecuteProcessingParams): Promise<JobRe
     });
 
     const postResult = await handlePostExecution(
-        { state, job, taskId, stateManager, context, unprocessedReviewComments: selectedReviewComments, llm, redisClient, prProcessingLockKey: lockKey, prProcessingLockToken: lockToken },
+        { state, job, taskId, stateManager, context: { ...context, gitTarget }, unprocessedReviewComments: selectedReviewComments, llm, redisClient, prProcessingLockKey: lockKey, prProcessingLockToken: lockToken },
         taskUrl,
     );
 

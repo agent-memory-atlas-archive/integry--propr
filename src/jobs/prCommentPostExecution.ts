@@ -5,11 +5,9 @@ import {
     commitChanges,
     cleanupPreparedVisualPreviewEvidence,
     db,
-    getRepoUrl,
     getAuthenticatedOctokit,
     loadRepositoryVisualPreviewSettings,
     prepareVisualPreviewEvidence,
-    pushBranch,
     appendVisualPreviewSection,
     renderVisualPreviewSection,
     renderVisualPreviewUploadFailureSection,
@@ -35,6 +33,8 @@ import {
     isVisualPreviewUploadAuthenticationError,
     publishPullRequestCommentVisualPreviews,
 } from '../github/visualPreviewAttachments.js';
+import type { PullRequestGitTarget } from './prGitTarget.js';
+import { pushPullRequestHeadBranch } from './prGitOperations.js';
 
 interface PostExecutionState {
     octokit: Awaited<ReturnType<typeof getAuthenticatedOctokit>> | null;
@@ -56,6 +56,7 @@ interface PostExecutionContext {
     pullRequestNumber: number;
     repoOwner: string;
     repoName: string;
+    gitTarget: PullRequestGitTarget;
     correlatedLogger: Logger;
 }
 
@@ -84,6 +85,7 @@ interface UndoContextParams {
 async function commitAndPush(
     state: ReadyPostExecutionState,
     issueRef: { repoOwner: string; repoName: string; pullRequestNumber: number },
+    gitTarget: PullRequestGitTarget,
     llm: string | null | undefined
 ) {
     const changesSummary = state.claudeResult.summary || state.claudeResult.finalResult?.result || '';
@@ -91,12 +93,11 @@ async function commitAndPush(
     const commitResult = await commitChanges(state.worktreeInfo.worktreePath, commitMessage, AI_COMMIT_AUTHOR, { issueNumber: issueRef.pullRequestNumber, issueTitle: 'Follow-up changes' });
 
     if (commitResult) {
-        const repoUrl = getRepoUrl({ repoOwner: issueRef.repoOwner, repoName: issueRef.repoName });
         const githubToken = await state.octokit.auth({ type: "installation" }) as GitHubToken;
-        const pushResult = await pushBranch(state.worktreeInfo.worktreePath, state.worktreeInfo.branchName, {
-            repoUrl,
+        const pushResult = await pushPullRequestHeadBranch({
+            worktreePath: state.worktreeInfo.worktreePath,
+            target: gitTarget,
             authToken: githubToken.token,
-            rebaseOnNonFastForward: true,
         });
         if (pushResult.rebased && pushResult.commitHash) {
             commitResult.commitHash = pushResult.commitHash;
@@ -219,7 +220,7 @@ export async function handlePostExecution(params: PostExecutionParams, taskUrl: 
         prProcessingLockKey,
         prProcessingLockToken,
     } = params;
-    const { repoOwner, repoName, pullRequestNumber, correlatedLogger } = context;
+    const { repoOwner, repoName, pullRequestNumber, gitTarget, correlatedLogger } = context;
 
     requirePostExecutionState(state);
     const disposition = getPostExecutionDisposition(state.claudeResult);
@@ -236,7 +237,7 @@ export async function handlePostExecution(params: PostExecutionParams, taskUrl: 
             settings: await loadRepositoryVisualPreviewSettings(`${repoOwner}/${repoName}`),
             taskId
         });
-        const { commitResult, changesSummary, commitMessage } = await commitAndPush(state, { repoOwner, repoName, pullRequestNumber }, llm);
+        const { commitResult, changesSummary, commitMessage } = await commitAndPush(state, { repoOwner, repoName, pullRequestNumber }, gitTarget, llm);
         if (partial && !commitResult) {
             throw new Error(`Agent execution ${terminationReason === 'timeout' ? 'timed out' : 'reached the maximum turn limit'} before producing changes to publish`);
         }
