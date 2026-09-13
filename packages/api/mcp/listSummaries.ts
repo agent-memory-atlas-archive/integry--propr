@@ -1,6 +1,8 @@
 const SUMMARY_LIMIT = 240;
 const TITLE_LIMIT = 160;
 const RELATION_LIMIT = 8;
+const RELATION_PAGE_BUDGET = RELATION_LIMIT * 20;
+const MODEL_LIMIT = 100;
 
 type JsonObject = Record<string, unknown>;
 
@@ -34,8 +36,22 @@ function text(value: unknown): string | null {
 
 export function compactText(value: unknown, limit = SUMMARY_LIMIT): string | null {
   const normalized = text(value)?.replace(/\s+/g, ' ') ?? null;
-  if (!normalized || normalized.length <= limit) return normalized;
-  return `${normalized.slice(0, limit - 1).trimEnd()}…`;
+  if (!normalized || Buffer.byteLength(normalized) <= limit) return normalized;
+  const ellipsis = '…';
+  const byteLimit = Math.max(0, limit - Buffer.byteLength(ellipsis));
+  let bytes = 0;
+  let truncated = '';
+  for (const character of normalized) {
+    const characterBytes = Buffer.byteLength(character);
+    if (bytes + characterBytes > byteLimit) break;
+    truncated += character;
+    bytes += characterBytes;
+  }
+  return `${truncated.trimEnd()}${ellipsis}`;
+}
+
+export function planRelationLimit(pageSize: number): number {
+  return Math.max(1, Math.min(RELATION_LIMIT, Math.floor(RELATION_PAGE_BUDGET / Math.max(1, pageSize))));
 }
 
 function positiveInteger(...values: unknown[]): number | null {
@@ -100,7 +116,7 @@ export function summarizeTask(row: JsonObject, now = Date.now()): JsonObject {
     summary: compactText(job.subtitle),
     state,
     agent_alias: compactText(job.agentAlias ?? issueRef.agentAlias ?? row.plan_agent_alias, 100),
-    model_name: compactText(row.model_name ?? job.modelName ?? issueRef.modelName ?? row.plan_model_name, 100),
+    model_name: compactText(row.model_name ?? job.modelName ?? issueRef.modelName ?? row.plan_model_name, MODEL_LIMIT),
     pr_number: prNumber,
     pr_state: pullRequestState(row.plan_issue_status, prNumber !== null),
     created_at: row.created_at,
@@ -135,7 +151,7 @@ export function summarizeGoal(row: JsonObject, now = Date.now()): JsonObject {
     result_state: row.result_state ?? null,
     current_task_id: row.current_task_id,
     agent_alias: compactText(row.agent_alias, 100),
-    model_name: compactText(row.effective_model ?? row.requested_model, 255),
+    model_name: compactText(row.effective_model ?? row.requested_model, MODEL_LIMIT),
     pr_number: prNumber,
     pr_state: prNumber ? text(finalPr?.state) ?? 'open' : null,
     created_at: row.created_at,
@@ -147,7 +163,7 @@ export function summarizeGoal(row: JsonObject, now = Date.now()): JsonObject {
   };
 }
 
-export function summarizePlan(row: JsonObject, issues: JsonObject[], now = Date.now()): JsonObject {
+export function summarizePlan(row: JsonObject, issues: JsonObject[], now = Date.now(), relationLimit = RELATION_LIMIT): JsonObject {
   const counts = { total: issues.length, pending: 0, active: 0, merged: 0, closed: 0 };
   const agentModels = new Map<string, { agent_alias: string; model_name: string }>();
   const pullRequests = new Map<number, string>();
@@ -158,7 +174,7 @@ export function summarizePlan(row: JsonObject, issues: JsonObject[], now = Date.
     else if (status === 'closed') counts.closed += 1;
     else counts.active += 1;
     const alias = compactText(issue.agent_alias, 100);
-    const model = compactText(issue.model_name, 100);
+    const model = compactText(issue.model_name, MODEL_LIMIT);
     if (alias && model) agentModels.set(`${alias}\u0000${model}`, { agent_alias: alias, model_name: model });
     const number = positiveInteger(issue.pr_number);
     if (number) pullRequests.set(number, pullRequestState(status, true)!);
@@ -168,8 +184,9 @@ export function summarizePlan(row: JsonObject, issues: JsonObject[], now = Date.
   const trace = parseObject(row.generation_trace);
   const refinement = parseObject(row.refinement_result);
   const context = parseObject(row.context_config);
-  const generationModel = compactText(context.generationModel, 255);
+  const generationModel = compactText(context.generationModel, MODEL_LIMIT);
   const onlyAgentModel = agentModels.size === 1 ? [...agentModels.values()][0] : null;
+  const boundedRelationLimit = Math.max(0, Math.min(RELATION_LIMIT, relationLimit));
 
   return {
     draft_id: row.draft_id,
@@ -184,9 +201,9 @@ export function summarizePlan(row: JsonObject, issues: JsonObject[], now = Date.
     model_name: onlyAgentModel?.model_name ?? generationModel,
     generation_model: generationModel,
     agent_model_count: agentModels.size,
-    agent_models: [...agentModels.values()].slice(0, RELATION_LIMIT),
+    agent_models: [...agentModels.values()].slice(0, boundedRelationLimit),
     pull_request_count: pullRequests.size,
-    pull_requests: [...pullRequests].slice(0, RELATION_LIMIT).map(([number, state]) => ({ number, state })),
+    pull_requests: [...pullRequests].slice(0, boundedRelationLimit).map(([number, state]) => ({ number, state })),
     created_at: row.created_at,
     updated_at: row.updated_at,
     started_at: row.created_at,

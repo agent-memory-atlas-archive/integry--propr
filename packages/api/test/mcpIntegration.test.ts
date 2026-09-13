@@ -20,7 +20,7 @@ import { McpError } from '../mcp/config.js';
 import { McpPolicy, type McpPrincipal } from '../mcp/policy.js';
 import { buildMcpServer } from '../mcp/server.js';
 import { createToolCatalog, executeTool, type ToolDeps } from '../mcp/tools.js';
-import { compactText, summarizePlan, summarizeTask } from '../mcp/listSummaries.js';
+import { compactText, planRelationLimit, summarizePlan, summarizeTask } from '../mcp/listSummaries.js';
 
 after(async () => closeConnection());
 
@@ -28,6 +28,9 @@ test('MCP list summaries bound natural-language fields and tolerate legacy task 
   const summary = compactText(`  ${'long context '.repeat(40)}  `)!;
   assert.ok(summary.length <= 240);
   assert.ok(summary.endsWith('…'));
+  const unicodeSummary = compactText('界'.repeat(240))!;
+  assert.ok(Buffer.byteLength(unicodeSummary) <= 240);
+  assert.ok(unicodeSummary.endsWith('…'));
   const task = summarizeTask({
     task_id: 'legacy-1', repository: 'acme/repo', issue_number: 19, task_type: 'issue',
     initial_job_data: '{invalid', created_at: '2026-09-01 12:00:00', state: 'pending',
@@ -47,6 +50,26 @@ test('MCP list summaries bound natural-language fields and tolerate legacy task 
   assert.equal((plan.agent_models as unknown[]).length, 8);
   assert.equal(plan.pull_request_count, 12);
   assert.equal((plan.pull_requests as unknown[]).length, 8);
+
+  assert.equal(planRelationLimit(10), 8);
+  assert.equal(planRelationLimit(20), 8);
+  assert.equal(planRelationLimit(100), 1);
+  const largePageRelations = Array.from({ length: 12 }, (_, index) => ({
+    status: 'under_review', pr_number: Number.MAX_SAFE_INTEGER - index,
+    agent_alias: `agent-${index}-${'界'.repeat(100)}`,
+    model_name: `model-${index}-${'界'.repeat(100)}`,
+  }));
+  const largePagePlans = Array.from({ length: 100 }, (_, index) => summarizePlan({
+    draft_id: `00000000-0000-4000-8000-${String(index).padStart(12, '0')}`,
+    repository: `${'r'.repeat(127)}/${'s'.repeat(127)}`,
+    name: '界'.repeat(1_000), initial_prompt: '界'.repeat(1_000), status: 'failed',
+    mcp_revision: Number.MAX_SAFE_INTEGER, paused: false,
+    context_config: { generationModel: '界'.repeat(1_000) },
+    generation_trace: { error: '界'.repeat(1_000) },
+    created_at: '2026-09-01T12:00:00.000Z', updated_at: '2026-09-01T12:00:05.000Z',
+  }, largePageRelations, new Date('2026-09-01T12:00:05.000Z').getTime(), planRelationLimit(100)));
+  const largePageBytes = Buffer.byteLength(JSON.stringify({ plans: largePagePlans, nextOffset: null }));
+  assert.ok(largePageBytes < 256 * 1024, `large plan page is ${largePageBytes} bytes`);
 });
 
 test('both official SDK protocol eras execute real draft/revision/publication/task transitions over the same HTTP endpoint', async () => {

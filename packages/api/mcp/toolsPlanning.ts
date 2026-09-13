@@ -5,7 +5,7 @@ import type { createPlannerRoutes } from '../routes/plannerRoutes.js';
 import { McpError } from './config.js';
 import { callWorkflow } from './adapter.js';
 import { type McpTool, type ToolDeps, planShape, mutationShape, pageShape, repositorySchema, textSchema, idSchema, ok, workflow } from './tools.js';
-import { summarizePlan } from './listSummaries.js';
+import { planRelationLimit, summarizePlan } from './listSummaries.js';
 
 const target = { table: 'task_drafts', column: 'draft_id', arg: 'planId', owner: 'user_id' };
 const columns = ['draft_id', 'repository', 'name', 'initial_prompt', 'plan_json', 'attachments', 'status', 'mcp_revision', 'paused', 'created_at', 'updated_at'];
@@ -32,7 +32,9 @@ export function addPlanningTools(tools: McpTool[], deps: ToolDeps, planner: Retu
         issues.push(issue);
         issuesByPlan.set(issue.draft_id, issues);
       }
-      const plans = rows.map(row => summarizePlan(row, issuesByPlan.get(row.draft_id) ?? []));
+      const now = Date.now();
+      const relationLimit = planRelationLimit(rows.length);
+      const plans = rows.map(row => summarizePlan(row, issuesByPlan.get(row.draft_id) ?? [], now, relationLimit));
       return ok({ plans, nextOffset: rows.length === args.limit ? args.offset + args.limit : null });
     } });
   tools.push({ name: 'get_plan', description: 'Read your plan, revision and published issue/task handles.', scope: 'read', readOnly: true, schema: z.object(planShape).strict(), target,
