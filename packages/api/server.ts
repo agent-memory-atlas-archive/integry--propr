@@ -245,6 +245,7 @@ let redisClient: RedisClientType;
 let taskQueue: Queue;
 let runtimeBuildQueue: Queue;
 let configReloadSubscription: ConfigReloadSubscription | undefined;
+let invalidateStatusAgentCache: (() => void) | undefined;
 let notificationBackground: NotificationBackgroundService | undefined;
 let webPushDispatcherConfigured = false;
 let desktopPairingCleanupTimer: NodeJS.Timeout | undefined;
@@ -301,6 +302,7 @@ function setupRoutes(): void {
       ) => notificationBackground!.projectSystemSnapshot(snapshot, additionalAdministratorIds),
     }),
   });
+  invalidateStatusAgentCache = statusRoutes.invalidateAgentStatusCache;
   const desktopAuthRoutes = createDesktopAuthRoutes();
   // INTENTIONALLY UNAUTHENTICATED: compatibility/discovery and the bounded
   // pairing bootstrap, poll, and browser entry are registered before the guard.
@@ -511,6 +513,10 @@ async function start(): Promise<void> {
         invalidateMcpConfigCache();
         await resolveMcpConfig(db).catch(error => { console.error('Failed to resolve MCP configuration:', error); });
         await reloadConfigs();
+      }, console, subtype => {
+        if (subtype === 'agents_update' || subtype === 'synthetic_agents_update') {
+          invalidateStatusAgentCache?.();
+        }
       });
       // Subscribe first, then enqueue the initial load through the same serial
       // chain so no settings update can race with the startup snapshot.

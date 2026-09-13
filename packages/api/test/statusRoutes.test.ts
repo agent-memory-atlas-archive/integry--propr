@@ -19,7 +19,9 @@ type StatusRoutesDeps = {
   loadSyntheticAgents?: () => Promise<SyntheticAgentConfig[]>;
   getIndexingQueue?: () => Promise<{ getJobCounts: (...statuses: string[]) => Promise<Record<string, number>> }>;
   agentStatusCacheTtlMs?: number;
+  agentStatusCacheMaxAgeMs?: number;
   agentHealthTimeoutMs?: number;
+  statusDependencyTimeoutMs?: number;
   now?: () => number;
   loadSummarizationRuntimeState?: () => Promise<{
     primary_quota_failures: number;
@@ -181,6 +183,11 @@ async function readStatus(overrides: Partial<StatusRoutesDeps> = {}, configureEn
     loadAgents: async () => [],
     agentRegistry: createRegistry(),
     getIndexingQueue: async () => createIndexingQueue(),
+    loadSummarizationRuntimeState: async () => ({
+      primary_quota_failures: 0,
+      primary_quota_failures_by_alias: {},
+      cooldowns: {},
+    }),
     ...overrides,
   });
 
@@ -407,6 +414,7 @@ test('/api/status projects enabled, disabled, and re-enabled Claude transitions'
   for (const enabled of [true, false, true]) {
     config = { ...config, enabled };
     currentTime += 6_000;
+    routes.invalidateAgentStatusCache();
     const response = createJsonResponse();
     await routes.getStatus({} as Request, response.response);
   }
@@ -540,6 +548,306 @@ test('/api/status coalesces concurrent expired-cache health snapshots', async ()
   assert.ok(responses.every(response => response.status() === 200));
   assert.ok(responses.every(response =>
     (response.body().agents as Array<{ status: string }>)[0]?.status === 'connected'));
+});
+
+test('/api/status serves stale measurements while one bounded refresh runs', async () => {
+  configureStatusEnv();
+  let currentTime = 1_000;
+  let healthChecks = 0;
+  let indexingReads = 0;
+  let warningReads = 0;
+  let healthy = true;
+  let releaseRefresh!: () => void;
+  const refreshBlocked = new Promise<void>(resolve => { releaseRefresh = resolve; });
+  const config = createAgentConfig();
+  const routes = await createRoutes({
+    redisClient: createRedisClient() as never,
+    loadAgents: async () => [config],
+    agentRegistry: createRegistry([createAgent(config, async () => {
+      healthChecks += 1;
+      if (healthChecks === 2) await refreshBlocked;
+      return healthy;
+    })]),
+    getIndexingQueue: async () => ({
+      getJobCounts: async () => { indexingReads += 1; return {}; },
+    }),
+    loadSummarizationRuntimeState: async () => {
+      warningReads += 1;
+      return { primary_quota_failures: 0, primary_quota_failures_by_alias: {}, cooldowns: {} };
+    },
+    now: () => currentTime,
+    agentStatusCacheTtlMs: 5_000,
+    agentStatusCacheMaxAgeMs: 30_000,
+  });
+
+  const initial = createJsonResponse();
+  await routes.getStatus({} as Request, initial.response);
+  assert.equal((initial.body().agents as Array<{ status: string }>)[0]?.status, 'connected');
+
+  healthy = false;
+  currentTime += 6_000;
+  const staleResponses = Array.from({ length: 12 }, () => createJsonResponse());
+  await Promise.all(staleResponses.map(response => routes.getStatus({} as Request, response.response)));
+  await new Promise<void>(resolve => setImmediate(resolve));
+
+  assert.equal(healthChecks, 2, '12 stale consumers should launch one refresh probe');
+  assert.equal(indexingReads, 2, '12 stale consumers should launch one indexing refresh');
+  assert.equal(warningReads, 2, '12 stale consumers should launch one warning refresh');
+  assert.ok(staleResponses.every(response =>
+    (response.body().agents as Array<{ status: string }>)[0]?.status === 'connected'));
+
+  releaseRefresh();
+  await new Promise<void>(resolve => setImmediate(resolve));
+  const refreshed = createJsonResponse();
+  await routes.getStatus({} as Request, refreshed.response);
+  assert.equal((refreshed.body().agents as Array<{ status: string }>)[0]?.status, 'disconnected');
+});
+
+test('/api/status stops serving a stale measurement at the hard freshness bound', async () => {
+  configureStatusEnv();
+  let currentTime = 1_000;
+  let healthChecks = 0;
+  const config = createAgentConfig();
+  const routes = await createRoutes({
+    redisClient: createRedisClient() as never,
+    loadAgents: async () => [config],
+    agentRegistry: createRegistry([createAgent(config, async () => {
+      healthChecks += 1;
+      if (healthChecks > 1) await new Promise<void>(() => undefined);
+      return true;
+    })]),
+    getIndexingQueue: async () => createIndexingQueue(),
+    loadSummarizationRuntimeState: async () => ({
+      primary_quota_failures: 0, primary_quota_failures_by_alias: {}, cooldowns: {},
+    }),
+    now: () => currentTime,
+    agentStatusCacheTtlMs: 5,
+    agentStatusCacheMaxAgeMs: 30,
+    agentHealthTimeoutMs: 40,
+  });
+
+  await routes.getStatus({} as Request, createJsonResponse().response);
+  currentTime += 6;
+  await routes.getStatus({} as Request, createJsonResponse().response);
+  await new Promise<void>(resolve => setImmediate(resolve));
+  currentTime += 25;
+
+  const startedAt = performance.now();
+  const hardExpired = createJsonResponse();
+  await routes.getStatus({} as Request, hardExpired.response);
+  const elapsedMs = performance.now() - startedAt;
+
+  assert.equal(healthChecks, 2, 'hard-expired readers should join the in-flight refresh');
+  assert.ok(elapsedMs >= 10 && elapsedMs < 200, `hard-expired read took ${elapsedMs.toFixed(1)}ms`);
+  assert.equal((hardExpired.body().agents as Array<{ status: string }>)[0]?.status, 'disconnected');
+});
+
+test('/api/status invalidation isolates a new agent identity from an old in-flight refresh', async () => {
+  configureStatusEnv();
+  let currentTime = 1_000;
+  let config = createAgentConfig({ id: 'agent-a', alias: 'agent-a' });
+  let oldChecks = 0;
+  let releaseOldRefresh!: () => void;
+  const oldRefreshBlocked = new Promise<void>(resolve => { releaseOldRefresh = resolve; });
+  const registered = createAgent(config, async () => {
+    oldChecks += 1;
+    if (oldChecks === 2) await oldRefreshBlocked;
+    return true;
+  });
+  const routes = await createRoutes({
+    redisClient: createRedisClient() as never,
+    loadAgents: async () => [config],
+    agentRegistry: createRegistry([registered], {
+      createAgentFromConfig: candidate => createAgent(candidate, async () => true),
+    }),
+    getIndexingQueue: async () => createIndexingQueue(),
+    loadSummarizationRuntimeState: async () => ({
+      primary_quota_failures: 0, primary_quota_failures_by_alias: {}, cooldowns: {},
+    }),
+    now: () => currentTime,
+    agentStatusCacheTtlMs: 5,
+  });
+
+  await routes.getStatus({} as Request, createJsonResponse().response);
+  currentTime += 6;
+  await routes.getStatus({} as Request, createJsonResponse().response);
+  await new Promise<void>(resolve => setImmediate(resolve));
+  assert.equal(oldChecks, 2);
+
+  config = createAgentConfig({ id: 'agent-b', alias: 'agent-b' });
+  routes.invalidateAgentStatusCache();
+  const changed = createJsonResponse();
+  await routes.getStatus({} as Request, changed.response);
+  assert.deepEqual(changed.body().agents, [{
+    id: 'agent-b', type: 'codex', alias: 'agent-b', status: 'connected',
+  }]);
+
+  releaseOldRefresh();
+  await new Promise<void>(resolve => setImmediate(resolve));
+  const settled = createJsonResponse();
+  await routes.getStatus({} as Request, settled.response);
+  assert.equal((settled.body().agents as Array<{ id: string }>)[0]?.id, 'agent-b');
+});
+
+test('/api/status does not attribute an old registered runtime to changed persisted config', async () => {
+  configureStatusEnv();
+  let oldRuntimeChecks = 0;
+  const registeredConfig = createAgentConfig({ configPath: '/credentials/old' });
+  const persistedConfig = { ...registeredConfig, configPath: '/credentials/new' };
+  const body = await readStatus({
+    loadAgents: async () => [persistedConfig],
+    agentRegistry: createRegistry([createAgent(registeredConfig, async () => {
+      oldRuntimeChecks += 1;
+      return true;
+    })]),
+  });
+
+  assert.equal(oldRuntimeChecks, 0);
+  assert.deepEqual(body.agents, [{
+    id: persistedConfig.id,
+    type: persistedConfig.type,
+    alias: persistedConfig.alias,
+    status: 'disconnected',
+  }]);
+});
+
+test('/api/status runs independent config, health, indexing, and warning work concurrently', async () => {
+  configureStatusEnv();
+  let release!: () => void;
+  const blocked = new Promise<void>(resolve => { release = resolve; });
+  const starts = new Set<string>();
+  const direct = createAgentConfig();
+  const synthetic: SyntheticAgentConfig = {
+    id: '11111111-1111-4111-8111-111111111111',
+    alias: 'pool', enabled: true, defaultModel: 'balanced', models: [],
+  };
+  const directAgent = createAgent(direct, async () => {
+    starts.add('direct-health');
+    await blocked;
+    return true;
+  });
+  const syntheticAgent = createAgent({
+    ...direct,
+    id: synthetic.id,
+    alias: synthetic.alias,
+  }, async () => {
+    starts.add('synthetic-health');
+    await blocked;
+    return true;
+  });
+  const routes = await createRoutes({
+    redisClient: createRedisClient() as never,
+    loadAgents: async () => { starts.add('direct-config'); return [direct]; },
+    loadSyntheticAgents: async () => { starts.add('synthetic-config'); return [synthetic]; },
+    agentRegistry: createRegistry([directAgent, syntheticAgent]),
+    getIndexingQueue: async () => ({
+      getJobCounts: async () => { starts.add('indexing'); await blocked; return {}; },
+    }),
+    loadSummarizationRuntimeState: async () => {
+      starts.add('warnings');
+      await blocked;
+      return { primary_quota_failures: 0, primary_quota_failures_by_alias: {}, cooldowns: {} };
+    },
+  });
+
+  const response = createJsonResponse();
+  const request = routes.getStatus({} as Request, response.response);
+  await new Promise<void>(resolve => setImmediate(resolve));
+  assert.deepEqual([...starts].sort(), [
+    'direct-config', 'direct-health', 'indexing', 'synthetic-config', 'synthetic-health', 'warnings',
+  ]);
+
+  release();
+  await request;
+  assert.equal(response.status(), 200);
+});
+
+test('/api/status does not initialize the execution registry and bounds failing probes', async () => {
+  configureStatusEnv();
+  let registryInitializations = 0;
+  const config = createAgentConfig();
+  const routes = await createRoutes({
+    redisClient: createRedisClient() as never,
+    loadAgents: async () => [config],
+    agentRegistry: createRegistry([createAgent(config, async () =>
+      new Promise<boolean>(() => undefined))], {
+      ensureInitialized: async () => { registryInitializations += 1; },
+    }),
+    getIndexingQueue: async () => createIndexingQueue(),
+    loadSummarizationRuntimeState: async () => ({
+      primary_quota_failures: 0, primary_quota_failures_by_alias: {}, cooldowns: {},
+    }),
+    agentHealthTimeoutMs: 25,
+  });
+
+  const startedAt = performance.now();
+  const response = createJsonResponse();
+  await routes.getStatus({} as Request, response.response);
+  const elapsedMs = performance.now() - startedAt;
+
+  assert.equal(registryInitializations, 0);
+  assert.ok(elapsedMs >= 10 && elapsedMs < 200, `bounded probe took ${elapsedMs.toFixed(1)}ms`);
+  assert.equal((response.body().agents as Array<{ status: string }>)[0]?.status, 'disconnected');
+});
+
+test('/api/status bounds an unavailable configuration read and reports unknown applicability', async () => {
+  configureStatusEnv();
+  const routes = await createRoutes({
+    redisClient: createRedisClient() as never,
+    loadAgents: async () => new Promise<AgentConfig[]>(() => undefined),
+    agentRegistry: createRegistry(),
+    getIndexingQueue: async () => createIndexingQueue(),
+    loadSummarizationRuntimeState: async () => ({
+      primary_quota_failures: 0, primary_quota_failures_by_alias: {}, cooldowns: {},
+    }),
+    statusDependencyTimeoutMs: 25,
+  });
+
+  const startedAt = performance.now();
+  const response = createJsonResponse();
+  await routes.getStatus({} as Request, response.response);
+  const elapsedMs = performance.now() - startedAt;
+
+  assert.ok(elapsedMs >= 10 && elapsedMs < 200, `bounded config read took ${elapsedMs.toFixed(1)}ms`);
+  assert.deepEqual(response.body().agents, []);
+  assert.equal(response.body().claudeAuth, 'unknown');
+});
+
+test('/api/status recovers after a failed cached health measurement', async () => {
+  configureStatusEnv();
+  let currentTime = 1_000;
+  let healthChecks = 0;
+  const config = createAgentConfig();
+  const routes = await createRoutes({
+    redisClient: createRedisClient() as never,
+    loadAgents: async () => [config],
+    agentRegistry: createRegistry([createAgent(config, async () => {
+      healthChecks += 1;
+      if (healthChecks === 1) throw new Error('temporary probe failure');
+      return true;
+    })]),
+    getIndexingQueue: async () => createIndexingQueue(),
+    loadSummarizationRuntimeState: async () => ({
+      primary_quota_failures: 0, primary_quota_failures_by_alias: {}, cooldowns: {},
+    }),
+    now: () => currentTime,
+    agentStatusCacheTtlMs: 5,
+  });
+
+  const failed = createJsonResponse();
+  await routes.getStatus({} as Request, failed.response);
+  assert.equal((failed.body().agents as Array<{ status: string }>)[0]?.status, 'disconnected');
+
+  currentTime += 6;
+  const stale = createJsonResponse();
+  await routes.getStatus({} as Request, stale.response);
+  assert.equal((stale.body().agents as Array<{ status: string }>)[0]?.status, 'disconnected');
+  await new Promise<void>(resolve => setImmediate(resolve));
+
+  const recovered = createJsonResponse();
+  await routes.getStatus({} as Request, recovered.response);
+  assert.equal(healthChecks, 2);
+  assert.equal((recovered.body().agents as Array<{ status: string }>)[0]?.status, 'connected');
 });
 
 test('/api/status marks an unavailable synthetic pool degraded without downgrading direct agents', async () => {
