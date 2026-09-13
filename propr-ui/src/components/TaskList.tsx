@@ -22,6 +22,8 @@ import {
   selectValue,
 } from './TaskList/utils';
 import { useDebouncedCallback } from './TaskList/hooks';
+import { useLiveRefreshScheduler } from '../hooks/useLiveRefreshScheduler';
+import type { TaskUpdatePayload } from '@propr/shared';
 
 const createRepoOptions = (repositories: Array<{ repository: string; total: number }>): RepoOption[] => {
   const totalCount = repositories.reduce((sum, repo) => sum + repo.total, 0);
@@ -85,6 +87,7 @@ const TaskList: React.FC<TaskListProps> = ({ limit, showViewAll = false, hideFil
   const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set());
   const hasLoadedRepoStats = useRef(false);
   const repoStatsRequestId = useRef(0);
+  const taskEventFingerprintsRef = useRef<Map<string, string>>(new Map());
 
   const tasksPerPage = limit;
 
@@ -196,21 +199,33 @@ const TaskList: React.FC<TaskListProps> = ({ limit, showViewAll = false, hideFil
     hasLoadedRepoStats.current = true;
   }, [hideFilters, refreshRepositoryStats]);
 
+  const refreshLiveTasks = useCallback(async () => {
+    await Promise.all([
+      fetchTasks({ setLoadingState: false }),
+      refreshRepositoryStats(false),
+    ]);
+  }, [fetchTasks, refreshRepositoryStats]);
+  const scheduleLiveRefresh = useLiveRefreshScheduler({
+    isConnected,
+    refresh: refreshLiveTasks,
+  });
+
   // Subscribe to WebSocket task updates for real-time refresh
   useEffect(() => {
     if (!isConnected) return;
 
-    const handleTaskUpdate = () => {
-      // Refresh task list without showing loading spinner
-      fetchTasks({ setLoadingState: false });
-      refreshRepositoryStats(false);
+    const handleTaskUpdate = (payload: TaskUpdatePayload) => {
+      const fingerprint = `${payload.state}\0${payload.repository ?? ''}\0${payload.issueNumber ?? ''}`;
+      if (taskEventFingerprintsRef.current.get(payload.taskId) === fingerprint) return;
+      taskEventFingerprintsRef.current.set(payload.taskId, fingerprint);
+      scheduleLiveRefresh();
     };
 
     const unsubscribe = onTaskUpdate(handleTaskUpdate);
     return () => {
       unsubscribe();
     };
-  }, [isConnected, onTaskUpdate, fetchTasks, refreshRepositoryStats]);
+  }, [isConnected, onTaskUpdate, scheduleLiveRefresh]);
 
   const groupedTasks = useMemo(() => groupTasksForDisplay(tasks), [tasks]);
 
