@@ -243,11 +243,19 @@ const AgentRow: React.FC<AgentRowProps> = ({ agent, expanded, onToggle }) => {
         ) : null}
       </div>
 
-      {/* Expanded details */}
+      {/* Expanded details. The threading rail is drawn per row instead of as a
+          border on the container so it can stop at the vertical middle of the
+          last metric rather than running on into the next provider row. */}
       {expanded && metrics.length > 0 && (
-        <div className="ml-5 mt-1 space-y-0.5 border-l border-gray-200 pl-2">
+        <div className="ml-[7px] mt-0.5">
           {metrics.map((metric, idx) => (
-            <MetricRow key={idx} metric={metric} compact />
+            <div key={idx} className="relative pl-3">
+              <span
+                aria-hidden="true"
+                className={`absolute left-0 top-0 w-px bg-gray-200 ${idx === metrics.length - 1 ? 'h-1/2' : 'h-full'}`}
+              />
+              <MetricRow metric={metric} compact />
+            </div>
           ))}
         </div>
       )}

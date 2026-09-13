@@ -1,11 +1,11 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { Link, useLocation } from 'react-router-dom';
-import { ScrollText, ListTodo, BookMarked, Bot, Cpu, ShieldCheck, Inbox, LogOut, Target } from 'lucide-react';
+import { LayoutDashboard, ScrollText, ListTodo, BookMarked, Bot, Cpu, Settings, ShieldCheck, Inbox, LogOut, Target } from 'lucide-react';
 import { logout } from '../api/proprApi';
 import { useDynamicFavicon } from '../hooks/useDynamicFavicon';
 import { useSystemReadiness } from '../hooks/useSystemReadiness';
 import { useToast } from './ui/useToast';
-import { HomeIcon, SettingsIcon, MenuIcon, CloseIcon } from './icons/LayoutIcons';
+import { MenuIcon, CloseIcon } from './icons/LayoutIcons';
 import { DESKTOP_UI_COMMAND_EVENT } from '../desktop/useDesktopNativeCommands';
 import GlobalHeader from './GlobalHeader';
 import AgentTankSidebar from './AgentTankSidebar';
@@ -28,14 +28,15 @@ interface LayoutProps {
 interface NavItem {
   name: string;
   href: string;
-  icon: React.FC<{ className?: string }>;
+  // All nav icons come from lucide so a shared strokeWidth keeps line weights uniform.
+  icon: React.FC<{ className?: string; strokeWidth?: number | string }>;
 }
 
 // Single badge component for all nav counts: forms a circle for one digit and
 // stretches horizontally for wider content (e.g. "99+") with the same radius and padding.
 function NavBadge({ children }: { children: React.ReactNode }) {
   return (
-    <span className="ml-auto inline-flex h-5 min-w-5 items-center justify-center rounded-full bg-primary-500 px-1.5 py-0.5 text-[10px] font-bold leading-none text-white">
+    <span className="ml-auto inline-flex h-4 min-w-4 items-center justify-center rounded-full bg-primary-500 px-1 text-[10px] font-bold leading-none text-white">
       {children}
     </span>
   );
@@ -85,7 +86,7 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
   const displayTaskCount = Math.max(0, activeQueueCount - generatingPlansCount - activeGoalCount);
 
   const navigation: NavItem[] = [
-    { name: 'Dashboard', href: '/', icon: HomeIcon },
+    { name: 'Dashboard', href: '/', icon: LayoutDashboard },
     { name: 'Inbox', href: '/inbox', icon: Inbox },
     { name: 'Plans', href: '/plans', icon: ScrollText },
     { name: 'Goals', href: '/goals', icon: Target },
@@ -98,7 +99,7 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
   ];
 
   const utilityNavigation: NavItem[] = [
-    { name: 'Settings', href: '/settings', icon: SettingsIcon },
+    { name: 'Settings', href: '/settings', icon: Settings },
     ...(userHasPermission(user, 'instance.manage_members')
       ? [{ name: 'Access', href: '/admin/members', icon: ShieldCheck }]
       : []),
@@ -209,8 +210,8 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
     <Link
       key={item.name}
       to={item.href}
-      className={`flex items-center text-sm font-medium transition-colors duration-150 ${
-        desktop ? 'mx-2 rounded-lg border-0 px-3 py-2.5' : 'border-l-4 px-4 py-3'
+      className={`flex items-center text-[13px] font-medium leading-5 transition-colors duration-150 ${
+        desktop ? 'mx-2 rounded-lg border-0 px-3 py-1.5' : 'border-l-4 px-4 py-2'
       } ${
         isActive(item.href)
           ? desktop
@@ -221,7 +222,7 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
             : 'text-gray-600 hover:bg-gray-50 hover:text-gray-900 border-transparent'
       }`}
     >
-      <item.icon className="w-5 h-5 mr-3" />
+      <item.icon className="mr-2.5 h-4 w-4 flex-none" strokeWidth={1.5} />
       {item.name}
       <WorkCountBadge name={item.name} taskCount={displayTaskCount} goalCount={activeGoalCount} />
       {item.name === 'Inbox' && unreadCount !== null && unreadCount > 0 && (
@@ -275,13 +276,13 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
         </div>
         {desktop && <DesktopInstanceSelector transportReady={isConnected && user !== null} />}
         <div className="flex min-h-0 flex-1 flex-col">
-          <nav className="flex flex-col gap-1 overflow-y-auto flex-1">
+          <nav className="flex flex-col gap-0.5 overflow-y-auto flex-1 py-1">
             {navigation.map(renderNavigationItem)}
           </nav>
           {(isDemoMode || userHasPermission(user, 'instance.manage_agents')) && (
             <AgentTankSidebar allowManualRefresh={!isDemoMode} />
           )}
-          <nav className="flex flex-none flex-col gap-1 border-t border-gray-100 py-1" aria-label="Application settings">
+          <nav className="flex flex-none flex-col gap-0.5 border-t border-gray-100 py-1" aria-label="Application settings">
             {utilityNavigation.map(renderNavigationItem)}
           </nav>
           {!desktop && <footer className="px-4 py-3 border-t border-gray-100 text-[11px] leading-tight text-gray-400 space-y-1">
@@ -299,7 +300,9 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
             <div>© {new Date().getFullYear()} Rinalds Uzkalns</div>
           </footer>}
           {user && (
-            <div className="desktop-sidebar-profile flex flex-none items-center gap-2 border-t border-gray-200 px-3 py-3">
+            // The web layout's version footer sits directly above; the profile block anchors
+            // the sidebar on its own there, so only the desktop app draws a divider.
+            <div className={`desktop-sidebar-profile flex flex-none items-center justify-between gap-2 px-3 py-2 ${desktop ? 'border-t border-gray-200' : ''}`}>
               <a
                 href={`https://github.com/${user.username}`}
                 target="_blank"
@@ -308,24 +311,24 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
               >
                 <UserAvatar
                   user={user}
-                  className="flex h-8 w-8 flex-none items-center justify-center rounded-full border border-gray-200 object-cover text-xs font-bold transition-colors group-hover:border-gray-300"
+                  className="flex h-7 w-7 flex-none items-center justify-center rounded-full border border-gray-200 object-cover text-[10px] font-bold transition-colors group-hover:border-gray-300"
                   fallbackClassName="bg-primary-100 text-primary-600 group-hover:bg-primary-200"
                 />
                 <span className="min-w-0 leading-tight">
-                  <span className="block truncate text-sm font-semibold text-slate-700">
+                  <span className="block truncate text-[13px] font-medium text-slate-700">
                     {user.displayName || user.username}
                   </span>
-                  <span className="block truncate text-xs text-slate-500">@{user.username}</span>
+                  <span className="block truncate text-[11px] text-slate-500">@{user.username}</span>
                 </span>
               </a>
               <button
                 type="button"
                 onClick={logout}
-                className="flex h-9 w-9 flex-none items-center justify-center rounded-md text-slate-500 transition-colors hover:bg-red-50 hover:text-red-600"
+                className="flex h-7 w-7 flex-none items-center justify-center rounded-md text-slate-500 transition-colors hover:bg-red-50 hover:text-red-600"
                 aria-label="Logout"
                 title="Logout"
               >
-                <LogOut className="h-4 w-4" aria-hidden="true" />
+                <LogOut className="h-3.5 w-3.5" strokeWidth={1.5} aria-hidden="true" />
               </button>
             </div>
           )}
