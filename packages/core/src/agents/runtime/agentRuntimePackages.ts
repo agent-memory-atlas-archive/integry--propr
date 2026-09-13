@@ -2,6 +2,7 @@ import crypto from 'node:crypto';
 import logger from '../../utils/logger.js';
 import { getConfig, saveConfig } from '../../config/configStore.js';
 import { executeDockerCommand } from '../../claude/docker/dockerExecutor.js';
+import { assertAgentImageBuildCapacity } from '../agentImageBuildCapacity.js';
 
 export const AGENT_RUNTIME_BUILD_QUEUE_NAME = 'agent-runtime-build';
 const CONFIG_KEY = 'agent_runtime_packages';
@@ -254,6 +255,7 @@ async function buildRuntimeImage(
             log: `${image} already exists locally`
         };
     }
+    await assertAgentImageBuildCapacity();
     const result = await executeDockerCommand('docker', [
         'build', '--pull=false',
         '--label', `dev.propr.agent-runtime.installation=${installationId}`,

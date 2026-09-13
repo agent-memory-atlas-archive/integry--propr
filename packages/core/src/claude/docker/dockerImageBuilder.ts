@@ -9,6 +9,7 @@ import {
     generateAgentBundleImageTag,
     getDefaultAgentCliVersionMatrix
 } from '../../agents/version/versionService.js';
+import { assertAgentImageBuildCapacity } from '../../agents/agentImageBuildCapacity.js';
 import { executeDockerCommand } from './dockerExecutor.js';
 
 const PROJECT_ROOT = process.env.PROPR_ROOT
@@ -69,6 +70,7 @@ async function buildBundle(
         return { success: false, imageTag, error: `Unified agent Dockerfile not found: ${dockerfile}` };
     }
 
+    await assertAgentImageBuildCapacity({ rootPath: basePath });
     logger.info({ imageTag, versions, dockerfile }, 'Building unified agent Docker image...');
     const result = await executeDockerCommand('docker', [
         'build',

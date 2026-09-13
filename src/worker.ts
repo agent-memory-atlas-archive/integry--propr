@@ -1,5 +1,5 @@
 import 'dotenv/config';
-import { Worker } from 'bullmq';
+import { Queue, Worker } from 'bullmq';
 import { Redis } from 'ioredis';
 import { GITHUB_ISSUE_QUEUE_NAME, closeStateManager, createWorker, getStateManager, runMigrations } from '@propr/core';
 import { logger } from '@propr/core';
@@ -13,6 +13,11 @@ import {
     AGENT_RUNTIME_BUILD_QUEUE_NAME,
     buildAgentRuntimePackageProfile,
     type AgentRuntimeBuildJobData
+} from '@propr/core';
+import {
+    AGENT_IMAGE_PREPARATION_QUEUE_NAME,
+    createAgentImagePreparationQueue,
+    type AgentImagePreparationJobData,
 } from '@propr/core';
 import { setCheckRunDeps } from './jobs/ultrafixLoopContinuation.js';
 import { createUltrafixDeps } from './jobs/ultrafixBootstrap.js';
@@ -227,6 +232,7 @@ async function startWorker(options: WorkerOptions = {}): Promise<StartedWorker> 
     // cannot advertise or claim task capacity while an image is still building.
     logger.info('Preparing agent Docker images and initializing agent registry...');
     const registry = AgentRegistry.getInstance();
+    registry.setImagePreparationOwner(true);
     await registry.prepareImagesAndRefresh();
     const imageStatus = registry.getOperationalStatus().unifiedAgentImage;
     if (imageStatus.status !== 'ready') {
@@ -370,6 +376,34 @@ async function startWorker(options: WorkerOptions = {}): Promise<StartedWorker> 
         logger.error({ buildId: job?.data.buildId, error: error.message }, 'Agent runtime package build failed');
     });
 
+    const agentImagePreparationQueue: Queue<AgentImagePreparationJobData> = createAgentImagePreparationQueue();
+    await agentImagePreparationQueue.setGlobalConcurrency(1);
+    const agentImagePreparationWorker = new Worker<AgentImagePreparationJobData>(
+        AGENT_IMAGE_PREPARATION_QUEUE_NAME,
+        async (job) => {
+            logger.info({ imageTag: job.data.imageTag }, 'Preparing unified agent image in the worker-owned path');
+            const workerRegistry = AgentRegistry.getInstance();
+            workerRegistry.setImagePreparationOwner(true);
+            await workerRegistry.prepareImagesAndRefresh();
+            const status = workerRegistry.getOperationalStatus().unifiedAgentImage;
+            if (status.status !== 'ready') {
+                throw new Error(status.error || `Unified agent image ${status.imageTag || job.data.imageTag} is unavailable`);
+            }
+            logger.info({ requestedImageTag: job.data.imageTag }, 'Worker-owned unified agent image preparation completed');
+        },
+        {
+            connection: {
+                host: process.env.REDIS_HOST || 'localhost',
+                port: parseInt(process.env.REDIS_PORT || '6379', 10),
+                maxRetriesPerRequest: null,
+            },
+            concurrency: 1,
+        },
+    );
+    agentImagePreparationWorker.on('failed', (job, error) => {
+        logger.error({ imageTag: job?.data.imageTag, error: error.message }, 'Worker-owned unified agent image preparation failed');
+    });
+
     const close = async (): Promise<void> => {
         clearInterval(heartbeatInterval);
         await taskStateRecovery.close();
@@ -377,6 +411,8 @@ async function startWorker(options: WorkerOptions = {}): Promise<StartedWorker> 
         await attachedTaskStateFinalizers.close();
         await closeStateManager();
         await runtimeBuildWorker.close();
+        await agentImagePreparationWorker.close();
+        await agentImagePreparationQueue.close();
         await heartbeatRedis.srem('system:status:workers', workerId);
         await subscriberRedis.quit();
         await heartbeatRedis.quit();

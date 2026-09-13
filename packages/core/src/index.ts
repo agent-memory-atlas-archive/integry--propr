@@ -318,6 +318,23 @@ export { processDetectedIssue, fetchIssuesForRepo } from './daemon/issueDetectio
 
 // Agent abstraction exports
 export { AgentRegistry, getAgentRegistry, type AgentRegistryOperationalStatus } from './agents/AgentRegistry.js';
+export {
+    AGENT_IMAGE_PREPARATION_QUEUE_NAME,
+    agentImagePreparationJobId,
+    closeAgentImagePreparationQueue,
+    createAgentImagePreparationQueue,
+    enqueueAgentImagePreparation,
+} from './agents/agentImagePreparationQueue.js';
+export type { AgentImagePreparationJobData } from './agents/agentImagePreparationQueue.js';
+export {
+    AGENT_IMAGE_BUILD_MIN_FREE_BYTES,
+    AGENT_IMAGE_BUILD_MIN_FREE_INODES,
+    AgentImageBuildCapacityError,
+    assertAgentImageBuildCapacity,
+    isAgentImageDiskPressureError,
+    readAgentImageBuildDiskSpace,
+} from './agents/agentImageBuildCapacity.js';
+export type { AgentImageBuildDiskSpace } from './agents/agentImageBuildCapacity.js';
 export * from './goalExports.js';
 export * from './agents/syntheticRouting.js';
 export { describeAgentTermination, isIncompleteAgentExecution, resolveAgentTerminationReason } from './agents/termination.js';
