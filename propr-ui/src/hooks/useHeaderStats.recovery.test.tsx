@@ -338,12 +338,14 @@ describe('useHeaderStats live recovery', () => {
       timestamp: '2026-09-13T00:01:05.000Z',
     })));
 
-    await waitFor(() => expect(getQueueStats).toHaveBeenCalledTimes(3));
+    await waitFor(() => {
+      expect(result.current.activePlans.map(draft => draft.draft_id)).toEqual(['draft-created-offline']);
+      expect(result.current.systemHealth.redis).toBe('Disconnected');
+    });
+    expect(getQueueStats).toHaveBeenCalledTimes(3);
     expect(getDrafts).toHaveBeenCalledTimes(2);
     expect(getTasks).toHaveBeenCalledTimes(2);
     expect(getSystemStatus).toHaveBeenCalledTimes(2);
-    expect(result.current.activePlans.map(draft => draft.draft_id)).toEqual(['draft-created-offline']);
-    expect(result.current.systemHealth.redis).toBe('Disconnected');
   });
 
   it('invalidates activity during a real transport outage and automatically recovers', async () => {
