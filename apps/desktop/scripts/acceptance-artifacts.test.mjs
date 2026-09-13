@@ -4,15 +4,18 @@ import { mkdtemp, mkdir, readFile, realpath, rm, symlink, writeFile } from 'node
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { describe, it } from 'node:test';
+import { inflateRawSync } from 'node:zlib';
 import {
   ACCEPTANCE_ARTIFACT_LEAF,
   ACCEPTANCE_JOURNEYS,
+  ACCEPTANCE_REDACTION_PLACEHOLDER,
   ACCEPTANCE_VARIANTS,
   DETERMINISTIC_INPUTS,
   FIXED_TIME,
   expectedScreenshotNames,
   readPngDimensions,
   safeRemoveAcceptanceLeaf,
+  sanitizeAcceptanceTrace,
   scanAcceptancePaths,
   scanRenderedScreenshot,
   screenshotName,
@@ -46,6 +49,13 @@ const zipFixture = (name, contents) => {
   end.writeUInt32LE(0x06054b50, 0); end.writeUInt16LE(1, 8); end.writeUInt16LE(1, 10);
   end.writeUInt32LE(central.length, 12); end.writeUInt32LE(local.length + data.length, 16);
   return Buffer.concat([local, data, central, end]);
+};
+const readSingleZipEntry = bytes => {
+  const method = bytes.readUInt16LE(8);
+  const compressedSize = bytes.readUInt32LE(18);
+  const nameLength = bytes.readUInt16LE(26);
+  const data = bytes.subarray(30 + nameLength, 30 + nameLength + compressedSize);
+  return method === 0 ? Buffer.from(data) : inflateRawSync(data);
 };
 const pngHeader = (width, height) => {
   const bytes = Buffer.alloc(24);
@@ -358,6 +368,52 @@ describe('packaged acceptance artifact contract', () => {
         Buffer.from([0x01, 0xfe, 0x00]),
       ]));
       await assert.rejects(scanAcceptancePaths([database], [sentinel]), /Secret sentinel/);
+    } finally { await rm(root, { recursive: true, force: true }); }
+  });
+
+  it('sanitizes traced network secrets so sentinel and generic scans pass deterministically', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'propr-acceptance-contract-trace-'));
+    const trace = join(root, 'sanitized-trace.zip');
+    const sentinel = `propr_it_${'T'.repeat(43)}`;
+    const network = JSON.stringify({
+      type: 'resource-snapshot',
+      snapshot: {
+        request: {
+          url: 'http://127.0.0.2:41731/api/queue/stats',
+          headers: [{ name: 'Authorization', value: `Bearer ${sentinel}` }],
+        },
+        response: { status: 200 },
+      },
+    });
+    try {
+      await writeFile(trace, zipFixture('trace.network', network));
+      await assert.rejects(scanAcceptancePaths([trace], [sentinel]), /Secret sentinel/);
+      await sanitizeAcceptanceTrace(trace, [sentinel]);
+      await scanAcceptancePaths([trace], [sentinel]);
+      await scanAcceptancePaths([trace]);
+      const sanitizedEntry = readSingleZipEntry(await readFile(trace)).toString('utf8');
+      const event = JSON.parse(sanitizedEntry);
+      assert.equal(event.snapshot.request.url, 'http://127.0.0.2:41731/api/queue/stats');
+      assert.equal(event.snapshot.request.headers[0].value, `Bearer ${ACCEPTANCE_REDACTION_PLACEHOLDER}`);
+      assert.ok(!sanitizedEntry.includes(sentinel));
+      const firstPass = await readFile(trace);
+      await sanitizeAcceptanceTrace(trace, [sentinel]);
+      assert.deepEqual(await readFile(trace), firstPass);
+    } finally { await rm(root, { recursive: true, force: true }); }
+  });
+
+  it('preserves secret-free trace entries byte-for-byte through sanitization', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'propr-acceptance-contract-trace-binary-'));
+    const trace = join(root, 'sanitized-trace.zip');
+    const binary = Buffer.concat([
+      Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x80]),
+      Buffer.from('screenshot-body', 'ascii'),
+      Buffer.from([0x00, 0x01, 0xfe, 0xff]),
+    ]);
+    try {
+      await writeFile(trace, zipFixture('resources/page@1.jpeg', binary));
+      await sanitizeAcceptanceTrace(trace, [`propr_it_${'T'.repeat(43)}`]);
+      assert.deepEqual(readSingleZipEntry(await readFile(trace)), binary);
     } finally { await rm(root, { recursive: true, force: true }); }
   });
 

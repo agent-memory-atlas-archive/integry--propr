@@ -49,6 +49,7 @@ describe('native Electron test setup', () => {
       environment: { PATH: '/missing' },
       findExecutable: () => undefined,
       platform: 'linux',
+      probeLaunch: () => undefined,
       resolveElectron: () => {
         resolutions += 1;
         return '/electron';
@@ -69,6 +70,7 @@ describe('native Electron test setup', () => {
       environment: {},
       findExecutable: () => assert.fail('macOS must not look for xvfb-run'),
       platform: 'darwin',
+      probeLaunch: () => undefined,
       resolveElectron: () => {
         resolutions += 1;
         return '/electron';
@@ -83,10 +85,15 @@ describe('native Electron test setup', () => {
   });
 
   it('preserves xvfb-run for a supported headless Linux worker', () => {
+    const probes = [];
     const setup = prepareNativeElectronTest({
       environment: { PATH: '/tools' },
       findExecutable: () => '/tools/xvfb-run',
       platform: 'linux',
+      probeLaunch: probe => {
+        probes.push(probe);
+        return undefined;
+      },
       resolveElectron: () => '/electron',
     });
 
@@ -94,6 +101,49 @@ describe('native Electron test setup', () => {
       electronExecutable: '/electron',
       xvfbRun: '/tools/xvfb-run',
     });
+    assert.deepEqual(probes, [{
+      electronExecutable: '/electron',
+      platform: 'linux',
+      xvfbRun: '/tools/xvfb-run',
+    }]);
+  });
+
+  it('skips when the resolved Electron binary cannot start on the worker', () => {
+    const setup = prepareNativeElectronTest({
+      environment: { PATH: '/tools' },
+      findExecutable: () => '/tools/xvfb-run',
+      platform: 'linux',
+      probeLaunch: () => 'Electron cannot start on this worker (exit 127)',
+      resolveElectron: () => '/electron',
+    });
+
+    assert.deepEqual(setup, {
+      skipReason: 'Electron cannot start on this worker (exit 127)',
+    });
+  });
+
+  it('skips a headless session-only probe when Electron cannot start', () => {
+    const probes = [];
+    const setup = prepareNativeElectronTest({
+      allowHeadlessLinux: true,
+      environment: { PATH: '/missing' },
+      findExecutable: () => undefined,
+      platform: 'linux',
+      probeLaunch: probe => {
+        probes.push(probe);
+        return 'Electron cannot start on this worker (exit 127)';
+      },
+      resolveElectron: () => '/electron',
+    });
+
+    assert.deepEqual(setup, {
+      skipReason: 'Electron cannot start on this worker (exit 127)',
+    });
+    assert.deepEqual(probes, [{
+      electronExecutable: '/electron',
+      platform: 'linux',
+      xvfbRun: undefined,
+    }]);
   });
 
   it('runs one Electron preflight before starting parallel test workers', async () => {
