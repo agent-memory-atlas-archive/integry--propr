@@ -286,28 +286,31 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
             {navigation.map(renderNavigationItem)}
           </nav>
           {/* Usage, settings, metadata, and profile travel together as one utility
-              group anchored to the bottom; mt-auto absorbs the flexible space so no
-              dividers are needed between the group's members. */}
+              group anchored to the bottom; mt-auto absorbs the flexible space, and
+              top margins (instead of dividers) separate the group's functional
+              clusters: data widget, global navigation, and meta-information. */}
           <div className="mt-auto flex flex-none flex-col">
           {(isDemoMode || userHasPermission(user, 'instance.manage_agents')) && (
             <AgentTankSidebar allowManualRefresh={!isDemoMode} />
           )}
-          <nav className="flex flex-none flex-col gap-0.5 py-1" aria-label="Application settings">
+          <nav className="mt-6 flex flex-none flex-col gap-0.5 py-1" aria-label="Application settings">
             {utilityNavigation.map(renderNavigationItem)}
           </nav>
-          {!desktop && <footer className="px-4 pb-2 pt-1 text-[11px] leading-tight text-gray-400 space-y-1">
-            <div>
+          {!desktop && <footer className="mt-6 px-4 pb-2 leading-tight space-y-1">
+            {/* The version is the datum developers scan for, so it sits one
+                contrast step above the secondary copyright line. */}
+            <div className="text-xs text-slate-500">
               <a
                 href="https://propr.dev"
                 target="_blank"
                 rel="noopener noreferrer"
-                className="hover:text-gray-600 hover:underline"
+                className="hover:text-slate-700 hover:underline"
               >
                 ProPR
               </a>{' '}
               v{__APP_VERSION__}
             </div>
-            <div>© {new Date().getFullYear()} Rinalds Uzkalns</div>
+            <div className="text-[11px] text-slate-400">© {new Date().getFullYear()} Rinalds Uzkalns</div>
           </footer>}
           {user && (
             // The profile block sits flush under the metadata footer on the web;
@@ -338,7 +341,9 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
                 aria-label="Logout"
                 title="Logout"
               >
-                <LogOut className="h-3.5 w-3.5" strokeWidth={1.5} aria-hidden="true" />
+                {/* Same rendered size and stroke as the nav icons; lucide scales
+                    stroke with the viewBox, so a smaller box would thin the line. */}
+                <LogOut className="h-4 w-4" strokeWidth={1.5} aria-hidden="true" />
               </button>
             </div>
           )}

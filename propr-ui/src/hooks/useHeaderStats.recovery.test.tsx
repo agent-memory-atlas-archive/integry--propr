@@ -231,7 +231,10 @@ describe('useHeaderStats live recovery', () => {
     expect(getDrafts).toHaveBeenCalledTimes(3);
     expect(getTasks).toHaveBeenCalledTimes(3);
     expect(getSystemStatus).toHaveBeenCalledTimes(3);
-    expect(result.current.activePlans.map(draft => draft.draft_id)).toEqual(['draft-created-offline']);
+    // The call-count waitFor above can resolve on the poll where the requests
+    // were just issued, before React commits the resulting state, so the
+    // reconciled snapshot itself must also be awaited.
+    await waitFor(() => expect(result.current.activePlans.map(draft => draft.draft_id)).toEqual(['draft-created-offline']));
     expect(result.current.systemHealth.redis).toBe('Disconnected');
   });
 

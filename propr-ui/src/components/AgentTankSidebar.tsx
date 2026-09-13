@@ -248,11 +248,15 @@ const AgentRow: React.FC<AgentRowProps> = ({ agent, expanded, onToggle }) => {
 
       {/* Expanded details. The threading rail is drawn per row instead of as a
           border on the container so it can stop at the vertical middle of the
-          last metric rather than running on into the next provider row. */}
+          last metric rather than running on into the next provider row.
+          The rail stays centered under the 14px chevron slot (7px), while the
+          metric text is padded to 33px so it lands on the 40px axis of the
+          parent label (chevron 14 + gap 6 + icon 14 + gap 6), matching
+          standard tree-view text-under-text alignment. */}
       {expanded && metrics.length > 0 && (
         <div className="ml-[7px] mt-0.5">
           {metrics.map((metric, idx) => (
-            <div key={idx} className="relative pl-3">
+            <div key={idx} className="relative pl-[33px]">
               <span
                 aria-hidden="true"
                 className={`absolute left-0 top-0 w-px bg-gray-200 ${idx === metrics.length - 1 ? 'h-1/2' : 'h-full'}`}
