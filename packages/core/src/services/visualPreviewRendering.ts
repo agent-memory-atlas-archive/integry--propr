@@ -1,4 +1,5 @@
 import {
+  trustedGitHubAttachmentUrl,
   parsePreviewArtifactV1,
   sanitizePreviewDisplayFilename,
   VISUAL_PREVIEW_CONTENT_TYPES,
@@ -47,23 +48,7 @@ export interface PublishedVisualPreviewMetadata {
   readonly assets: readonly PublishedVisualPreviewAsset[];
 }
 
-export function trustedGitHubAttachmentUrl(value: unknown): string | null {
-  if (typeof value !== 'string') return null;
-  try {
-    const parsed = new URL(value);
-    if (parsed.protocol !== 'https:'
-      || parsed.hostname !== 'github.com'
-      || parsed.port
-      || parsed.username
-      || parsed.password
-      || parsed.search
-      || parsed.hash
-      || !/^\/user-attachments\/assets\/[A-Za-z0-9_-]+$/.test(parsed.pathname)) return null;
-    return parsed.href;
-  } catch {
-    return null;
-  }
-}
+export { trustedGitHubAttachmentUrl } from '@propr/shared';
 
 export function createPublishedVisualPreviewMetadata(
   evidence: VisualPreviewEvidence,

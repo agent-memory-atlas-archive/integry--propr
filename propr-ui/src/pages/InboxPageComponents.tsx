@@ -1,3 +1,4 @@
+import { PreviewThumbnails } from '../components/PreviewMedia';
 import React from 'react';
 import { Link } from 'react-router-dom';
 import type { Notification } from '@propr/shared';
@@ -97,6 +98,7 @@ export const InboxCard: React.FC<{
               {notification.title}
             </h3>
             <p className="mt-1 break-words text-sm leading-5 text-slate-600">{notification.body}</p>
+            {notification.kind === 'task' && notification.severity === 'success' && <PreviewThumbnails media={notification.previewMedia} limit={1} />}
           </div>
           <ChevronRight className="mt-1 h-4 w-4 flex-none text-slate-400" aria-hidden="true" />
         </div>

@@ -1,3 +1,4 @@
+import { trustedPreviewMedia, type PublishedVisualPreview } from '@propr/shared';
 import { API_BASE_URL, apiFetch, handleApiResponse } from './apiClient';
 
 export interface GoalCapability {
@@ -33,14 +34,10 @@ export interface GoalAttachment {
   type: 'image' | 'text';
 }
 
-export interface GoalVisualPreview {
-  type: 'image' | 'video';
-  title: string;
-  description?: string;
-  url: string;
-}
+export type GoalVisualPreview = PublishedVisualPreview;
 
 export interface Goal {
+  previewMedia?: PublishedVisualPreview[];
   id: string;
   owner: string;
   repository: string;
@@ -144,39 +141,9 @@ export const getGoalCapabilities = async (recheck = false) =>
   request<{ agents: GoalCapability[] }>(`/api/goals/capabilities${recheck ? '?recheck=true' : ''}`);
 export const listGoals = async () => request<{ goals: Goal[] }>('/api/goals');
 export const getGoal = async (id: string) => request<{ goal: Goal }>(`/api/goals/${encodeURIComponent(id)}`);
-const safePublishedPreviewUrl = (value: unknown): string | null => {
-  if (typeof value !== 'string') return null;
-  try {
-    const parsed = new URL(value);
-    if (parsed.protocol !== 'https:'
-      || parsed.hostname !== 'github.com'
-      || parsed.port
-      || parsed.username
-      || parsed.password
-      || parsed.search
-      || parsed.hash
-      || !/^\/user-attachments\/assets\/[A-Za-z0-9_-]+$/.test(parsed.pathname)) return null;
-    return parsed.href;
-  } catch {
-    return null;
-  }
-};
-
 export const getGoalVisualPreviews = async (id: string) => {
   const response = await request<{ previews?: unknown[]; unavailable?: boolean }>(`/api/goals/${encodeURIComponent(id)}/previews`);
-  const previews = (response.previews || []).flatMap(value => {
-    if (!value || typeof value !== 'object' || Array.isArray(value)) return [];
-    const candidate = value as Record<string, unknown>;
-    const url = safePublishedPreviewUrl(candidate.url);
-    if (!url || (candidate.type !== 'image' && candidate.type !== 'video') || typeof candidate.title !== 'string') return [];
-    return [{
-      type: candidate.type,
-      title: candidate.title.slice(0, 120),
-      ...(typeof candidate.description === 'string' ? { description: candidate.description.slice(0, 300) } : {}),
-      url,
-    } satisfies GoalVisualPreview];
-  });
-  return { previews, ...(response.unavailable === true ? { unavailable: true } : {}) };
+  return { previews: trustedPreviewMedia(response.previews), ...(response.unavailable === true ? { unavailable: true } : {}) };
 };
 export const deleteGoal = async (id: string): Promise<void> => {
   const response = await apiFetch(`${API_BASE_URL}/api/goals/${encodeURIComponent(id)}`, {

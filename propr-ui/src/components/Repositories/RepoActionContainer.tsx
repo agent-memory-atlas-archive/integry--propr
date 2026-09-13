@@ -1,5 +1,6 @@
+import RepoMediaPanel from './RepoMediaPanel';
 import React, { useState, useCallback, useEffect } from 'react';
-import { MessageSquareText, Sparkles, Book, ListTodo, Settings } from 'lucide-react';
+import { MessageSquareText, Sparkles, Book, ListTodo, Settings, Images } from 'lucide-react';
 import RepoChatPanel, { ChatResponse, Message } from './RepoChatPanel';
 import RepoImprovementsPanel, { ImprovementCategory, SuggestionItem, GenerateSuggestionsResult } from './RepoImprovementsPanel';
 import RepoBrowsePanel from './RepoBrowsePanel';
@@ -18,7 +19,7 @@ import type { InstanceCatalogAgent } from '@propr/shared';
 import { generateRepoImprovements } from '../../api/repoImprovementsApi';
 import { useDemoMode } from '../../contexts/DemoModeContext';
 
-type ActionTab = 'chat' | 'improve' | 'browse' | 'todos' | 'settings';
+type ActionTab = 'chat' | 'improve' | 'browse' | 'todos' | 'settings' | 'media';
 
 interface TabButtonProps {
   label: string;
@@ -30,6 +31,7 @@ interface TabButtonProps {
 const TabButton: React.FC<TabButtonProps> = ({ label, icon, isActive, onClick }) => (
   <button
     onClick={onClick}
+    aria-pressed={isActive}
     className={`flex min-w-0 flex-1 flex-col items-center justify-center gap-1 whitespace-nowrap px-1 py-2.5 text-[10px] font-bold uppercase tracking-normal transition-all border-t-2 sm:flex-none sm:flex-row sm:gap-1.5 sm:px-4 sm:text-[11px] sm:tracking-widest
       ${isActive
         ? 'text-teal-600 border-t-teal-500 bg-white'
@@ -47,13 +49,16 @@ export interface RepoActionContainerProps {
     name: string;
     alias?: string;
     baseBranch?: string;
+    visualPreview?: { enabled: boolean };
   } | null;
   initialTab?: ActionTab;
   settingsContent?: React.ReactNode;
 }
 
 const RepoActionContainer: React.FC<RepoActionContainerProps> = ({ selectedRepo, initialTab, settingsContent }) => {
-  const [activeTab, setActiveTab] = useState<ActionTab>(initialTab || 'settings');
+  const [requestedTab, setActiveTab] = useState<ActionTab>(initialTab || 'settings');
+  const mediaEnabled = selectedRepo?.visualPreview?.enabled === true;
+  const activeTab = requestedTab === 'media' && !mediaEnabled ? 'settings' : requestedTab;
   const [chatMessages, setChatMessages] = useState<Message[]>([]);
   const [suggestions, setSuggestions] = useState<SuggestionItem[]>([]);
   const [isLoadingMessages, setIsLoadingMessages] = useState(false);
@@ -267,6 +272,7 @@ const RepoActionContainer: React.FC<RepoActionContainerProps> = ({ selectedRepo,
             isActive={activeTab === 'todos'}
             onClick={() => setActiveTab('todos')}
           />
+          {mediaEnabled && <TabButton label="Media" icon={<Images className="h-3 w-3" />} isActive={activeTab === 'media'} onClick={() => setActiveTab('media')} />}
           {settingsContent && (
             <TabButton
               label="Settings"
@@ -281,6 +287,7 @@ const RepoActionContainer: React.FC<RepoActionContainerProps> = ({ selectedRepo,
       {/* Tab Content */}
       <div className="flex-1 min-h-0 min-w-0">
         {activeTab === 'settings' && settingsContent}
+        {activeTab === 'media' && mediaEnabled && <RepoMediaPanel key={selectedRepo.name} repository={selectedRepo.name} />}
         {activeTab === 'chat' && (
           <RepoChatPanel
             onSendMessage={handleSendMessage}

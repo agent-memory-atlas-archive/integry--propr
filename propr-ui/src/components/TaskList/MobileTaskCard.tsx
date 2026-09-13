@@ -1,3 +1,4 @@
+import { PreviewThumbnails } from '../PreviewMedia';
 import React from 'react';
 import { ChevronRight, ChevronDown, ChevronUp, GitPullRequest, CircleDot } from 'lucide-react';
 import type { Task, TaskGroup } from './types';
@@ -75,6 +76,7 @@ const MobileTaskItemWithGroup: React.FC<{
         <p className={`text-sm text-gray-900 line-clamp-2 ${isChild ? 'text-gray-600' : 'font-medium'}`}>
           {displayTitle}
         </p>
+        <PreviewThumbnails media={task.previewMedia} />
         <div className="flex items-center gap-2 mt-1 text-xs text-gray-500">
           <span>{formatRelativeTime(task.createdAt)}</span>
           <span className="text-gray-300">•</span>

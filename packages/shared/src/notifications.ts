@@ -1,3 +1,4 @@
+import { trustedPreviewMedia, type PublishedVisualPreview } from './publishedVisualPreviews.js';
 /**
  * Durable notification contracts shared by the API, backend workers, and UI.
  *
@@ -272,7 +273,7 @@ export type NotificationUserState = NotificationUserStateFields & (
 /** The Inbox representation returned to an authenticated user. */
 export type Notification<K extends NotificationKind = NotificationKind> =
   K extends NotificationKind
-    ? NotificationEvent<K> & Pick<NotificationUserState, 'readAt' | 'dismissedAt'>
+    ? NotificationEvent<K> & Pick<NotificationUserState, 'readAt' | 'dismissedAt'> & { previewMedia?: PublishedVisualPreview[] }
     : never;
 
 export interface NotificationPreferenceChannels {
@@ -1294,7 +1295,9 @@ export function parseNotification(value: unknown): Notification {
   if (dismissedAt !== null && dismissedAt < event.createdAt) {
     return invalid('notification.dismissedAt', 'a timestamp at or after event createdAt');
   }
-  return { ...event, readAt, dismissedAt } as Notification;
+  const previewMedia = event.kind === 'task' && event.severity === 'success'
+    ? trustedPreviewMedia(record.previewMedia, 1) : [];
+  return { ...event, readAt, dismissedAt, ...(previewMedia.length ? { previewMedia } : {}) } as Notification;
 }
 
 /** Validate the persisted per-recipient state at a database boundary. */
