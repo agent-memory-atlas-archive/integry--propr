@@ -1,5 +1,11 @@
 import assert from 'node:assert/strict';
+import { execFile } from 'node:child_process';
+import { mkdtemp, readdir, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { after, test } from 'node:test';
+import { fileURLToPath } from 'node:url';
+import { promisify } from 'node:util';
 import knex from 'knex';
 import type { Request, Response } from 'express';
 import { closeConnection, NotificationService, type RepoToMonitor } from '@propr/core';
@@ -10,6 +16,28 @@ import { getTasksFromDb } from '../routes/taskHelpers.js';
 import { createNotificationProjectionTestHarness, countNotificationEvents } from './notificationProjectionTestHarness.js';
 
 after(closeConnection);
+
+test('default task-list and identity-only preview consumers exit without opening a global database', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'propr-preview-import-'));
+  try {
+    const env: NodeJS.ProcessEnv = { ...process.env, NODE_ENV: 'test', DATA_DIR: directory, DB_FILENAME: join(directory, 'propr.sqlite') };
+    // Run standalone rather than inheriting the parent test runner's IPC state.
+    delete env.NODE_TEST_CONTEXT;
+    // A fresh process must exit naturally; this suite's core import and teardown
+    // would otherwise hide a singleton connection acquired by the list helpers.
+    const { stdout, stderr } = await promisify(execFile)(process.execPath, [
+      '--import', 'tsx', fileURLToPath(new URL('./goalTaskIsolation.test.ts', import.meta.url)),
+    ], {
+      cwd: fileURLToPath(new URL('../../../', import.meta.url)),
+      env,
+      timeout: 15_000,
+    });
+    assert.match(stdout, /ok \d+ - generic task lists exclude native goal backing tasks/);
+    assert.doesNotMatch(stdout + stderr, /SQLite database connection/);
+    assert.deepEqual(await readdir(directory), []);
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
 const url = (id: string) => `https://github.com/user-attachments/assets/${id}`;
 const body = (prefix: string) => `![unmarked](${url('ignored')})\n<!-- propr-visual-preview -->\n${Array.from({ length: 5 }, (_, i) => `### ${prefix} ${i}\n\n![Preview](${url(`${prefix}-${i}`)})\n`).join('\n')}`;
 function fixture() {
