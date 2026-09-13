@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { uploadAttachment, removeAttachment, generatePlan, abortGeneration, getInstanceCatalog, getRepoBranches, updateDraft, PlannerDraft, PlannerAttachment, Granularity } from '../../api/proprApi';
-import { getRepositoriesIndexingStatus, RepositoryIndexingStatus } from '../../api/repoIndexingApi';
+import { getRepositoriesIndexingStatus, getRepoStatusKey, RepositoryIndexingStatus } from '../../api/repoIndexingApi';
 import { getUserRepoPreferences, UserRepoPreferences } from '../../api/userRepoPreferencesApi';
 import { savePlannerSettings } from '../../hooks/usePlannerSettings';
 import { resizeImage } from './imageUtils';
@@ -44,11 +44,18 @@ async function loadRepositories(savedLastRepository: string | undefined, savedLa
     getRepositoriesIndexingStatus().catch(() => ({ repositories: [] as RepositoryIndexingStatus[] }))
   ]);
   const indexingMap = new Map<string, RepositoryIndexingStatus>();
-  for (const status of indexingData.repositories || []) indexingMap.set(status.full_name, status);
+  for (const status of indexingData.repositories || []) indexingMap.set(getRepoStatusKey(status.full_name, status.branch), status);
   const validRepos = repoData.repositories.map(r => {
     const prefs = userPrefs[r.name];
-    const indexingStatus = indexingMap.get(r.name);
-    return { name: r.name, enabled: r.enabled, baseBranch: r.baseBranch, starred: prefs?.starred || false, iconPath: indexingStatus?.icon_path || null };
+    const indexingStatus = indexingMap.get(getRepoStatusKey(r.name, r.baseBranch));
+    return {
+      name: r.name,
+      enabled: r.enabled,
+      baseBranch: r.baseBranch,
+      starred: prefs?.starred || false,
+      iconPath: indexingStatus?.icon_path || null,
+      iconRevision: indexingStatus?.last_indexed_hash || r.baseBranch || 'HEAD',
+    };
   });
   const enabledRepos = validRepos.filter(r => r.enabled);
   const selectedRepoEntry = savedLastRepository
