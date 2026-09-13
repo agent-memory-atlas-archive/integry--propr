@@ -3,6 +3,7 @@ import { render, screen, waitFor, act } from '@testing-library/react';
 import { MemoryRouter, Route, Routes, useNavigate } from 'react-router-dom';
 import TaskList from './TaskList';
 import { getTasks, getRepositoryStats } from '../api/proprApi';
+import type { TaskUpdatePayload } from '@propr/shared';
 
 const mockGetTasks = vi.mocked(getTasks);
 const mockGetRepositoryStats = vi.mocked(getRepositoryStats);
@@ -16,7 +17,7 @@ const repositoryStats = (repository: string, total: number) => ({
   successRate: 0,
 });
 
-let taskUpdateHandler: (() => void) | null = null;
+let taskUpdateHandler: ((payload: TaskUpdatePayload) => void) | null = null;
 
 vi.mock('../api/proprApi', () => ({
   getTasks: vi.fn(),
@@ -26,7 +27,7 @@ vi.mock('../api/proprApi', () => ({
 vi.mock('../contexts/useSocket', () => ({
   useSocket: () => ({
     isConnected: true,
-    onTaskUpdate: (handler: () => void) => {
+    onTaskUpdate: (handler: (payload: TaskUpdatePayload) => void) => {
       taskUpdateHandler = handler;
       return () => {
         if (taskUpdateHandler === handler) taskUpdateHandler = null;
@@ -124,7 +125,11 @@ describe('TaskList', () => {
     expect(taskUpdateHandler).not.toBeNull();
 
     await act(async () => {
-      taskUpdateHandler?.();
+      taskUpdateHandler?.({
+        eventType: 'task:update', taskId: 'task-1', state: 'completed',
+        previousState: 'processing', repository: 'integry/propr', issueNumber: 1,
+        timestamp: '2026-09-13T00:00:00.000Z',
+      });
     });
 
     await waitFor(() => expect(mockGetRepositoryStats).toHaveBeenCalledTimes(2));
