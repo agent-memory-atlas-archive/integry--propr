@@ -208,6 +208,13 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
     setIsSidebarOpen(true);
   };
 
+  // Divider and hover inks for the bottom utility group: translucent inks on
+  // the desktop app's tinted macOS-style wash, opaque grays on the web's
+  // white sidebar.
+  const utilityInk = desktop
+    ? { tankBorder: 'border-slate-900/10', profileDivider: 'border-t border-slate-900/10', profileHover: 'hover:bg-slate-900/5' }
+    : { tankBorder: undefined, profileDivider: '', profileHover: 'hover:bg-slate-100' };
+
   // Active rows pair the teal border / gray background with darker, medium-weight
   // text so the label keeps visual dominance over the low-contrast background.
   const renderNavigationItem = (item: NavItem) => (
@@ -219,10 +226,12 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
       } ${
         isActive(item.href)
           ? desktop
-            ? 'bg-teal-50 font-medium text-teal-700'
+            // The desktop sidebar sits on a tinted macOS-style wash, so the
+            // pill fills use translucent inks that stay visible on that tint.
+            ? 'bg-primary-600/10 font-medium text-primary-700'
             : 'bg-slate-50 font-medium text-slate-900 border-primary-600'
           : desktop
-            ? 'font-normal text-slate-600 hover:bg-slate-100 hover:text-slate-900'
+            ? 'font-normal text-slate-600 hover:bg-slate-900/5 hover:text-slate-900'
             : 'font-normal text-gray-600 hover:bg-gray-50 hover:text-gray-900 border-transparent'
       }`}
     >
@@ -291,7 +300,7 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
               clusters: data widget, global navigation, and meta-information. */}
           <div className="mt-auto flex flex-none flex-col">
           {(isDemoMode || userHasPermission(user, 'instance.manage_agents')) && (
-            <AgentTankSidebar allowManualRefresh={!isDemoMode} />
+            <AgentTankSidebar allowManualRefresh={!isDemoMode} className={utilityInk.tankBorder} />
           )}
           <nav className="mt-6 flex flex-none flex-col gap-0.5 py-1" aria-label="Application settings">
             {utilityNavigation.map(renderNavigationItem)}
@@ -315,12 +324,12 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
           {user && (
             // The profile block sits flush under the metadata footer on the web;
             // only the desktop app (which renders no footer) draws a divider.
-            <div className={`desktop-sidebar-profile flex flex-none items-center justify-between gap-2 px-3 py-2 ${desktop ? 'border-t border-gray-200' : ''}`}>
+            <div className={`desktop-sidebar-profile flex flex-none items-center justify-between gap-2 px-3 py-2 ${utilityInk.profileDivider}`}>
               <a
                 href={`https://github.com/${user.username}`}
                 target="_blank"
                 rel="noopener noreferrer"
-                className="group flex min-w-0 flex-1 items-center gap-2 rounded-md p-1 transition-colors hover:bg-slate-100"
+                className={`group flex min-w-0 flex-1 items-center gap-2 rounded-md p-1 transition-colors ${utilityInk.profileHover}`}
               >
                 <UserAvatar
                   user={user}

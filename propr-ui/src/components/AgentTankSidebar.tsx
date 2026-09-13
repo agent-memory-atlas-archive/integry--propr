@@ -201,7 +201,7 @@ const AgentRow: React.FC<AgentRowProps> = ({ agent, expanded, onToggle }) => {
   return (
     <div className="py-1">
       <div
-        className={`flex items-center justify-between ${hasMultipleMetrics ? 'cursor-pointer hover:bg-gray-50 -mx-1 px-1 rounded' : ''}`}
+        className={`flex items-center justify-between ${hasMultipleMetrics ? 'cursor-pointer hover:bg-slate-900/5 -mx-1 px-1 rounded' : ''}`}
         onClick={hasMultipleMetrics ? onToggle : undefined}
         role={hasMultipleMetrics ? 'button' : undefined}
         tabIndex={hasMultipleMetrics ? 0 : undefined}

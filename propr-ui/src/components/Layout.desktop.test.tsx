@@ -109,8 +109,8 @@ describe('Layout desktop instance selector', () => {
       'mx-2',
       'rounded-lg',
       'border-0',
-      'bg-teal-50',
-      'text-teal-700',
+      'bg-primary-600/10',
+      'text-primary-700',
     );
     expect(screen.getByRole('link', { name: 'Dashboard' }).className).not.toMatch(/\bborder-l(?:-|\b)/);
     expect(screen.getByTestId('global-header')).toHaveTextContent('GitHub user');
