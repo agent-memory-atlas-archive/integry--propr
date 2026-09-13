@@ -1,3 +1,4 @@
+import { projectNotificationPreviews } from '../services/previewMediaProjection.js';
 import type { Request, Response } from 'express';
 import {
     decodeNotificationCursor,
@@ -184,7 +185,7 @@ export function createNotificationRoutes(
                 limit: parseNotificationListLimit(req.query.limit),
                 includeDismissed: parseIncludeDismissed(req.query.includeDismissed)
             });
-            res.json(response);
+            res.json({ ...response, notifications: await projectNotificationPreviews(response.notifications) });
         } catch (error) {
             handleRouteError(res, error, 'list notifications');
         }

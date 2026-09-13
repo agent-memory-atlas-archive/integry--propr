@@ -1,14 +1,9 @@
-import type { VisualPreviewType } from '../config/configManager.js';
 import { trustedGitHubAttachmentUrl, VISUAL_PREVIEW_MARKER } from './visualPreviewService.js';
 
 const MAX_PREVIEW_ASSETS = 8;
 
-export interface PublishedVisualPreview {
-  type: VisualPreviewType;
-  title: string;
-  description?: string;
-  url: string;
-}
+export type { PublishedVisualPreview } from '@propr/shared';
+import type { PublishedVisualPreview } from '@propr/shared';
 
 function unescapeMarkdownText(value: string): string {
   return value.replace(/\\([\\`*_[\]{}()<>#+.!|])/g, '$1');
