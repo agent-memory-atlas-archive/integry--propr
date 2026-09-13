@@ -495,6 +495,31 @@ app.get('/health', (_req: Request, res: Response) => { res.json({ status: 'ok' }
 // Create HTTP server to wrap Express app (required for Socket.IO)
 const httpServer: HttpServer = createServer(app);
 
+async function initializeNotificationBackground(): Promise<void> {
+  resolvedWebPushConfiguration = resolveInstanceWebPushConfiguration();
+  const vapidEnvironment = {
+    WEB_PUSH_VAPID_SUBJECT: process.env.WEB_PUSH_VAPID_SUBJECT,
+    WEB_PUSH_VAPID_PUBLIC_KEY: process.env.WEB_PUSH_VAPID_PUBLIC_KEY,
+    WEB_PUSH_VAPID_PRIVATE_KEY: process.env.WEB_PUSH_VAPID_PRIVATE_KEY,
+  };
+  try {
+    // Both background implementations read their startup configuration from
+    // the environment; the worker copies it before loading the dispatcher.
+    if (resolvedWebPushConfiguration.configured) {
+      process.env.WEB_PUSH_VAPID_SUBJECT = resolvedWebPushConfiguration.subject;
+      process.env.WEB_PUSH_VAPID_PUBLIC_KEY = resolvedWebPushConfiguration.publicKey;
+      process.env.WEB_PUSH_VAPID_PRIVATE_KEY = resolvedWebPushConfiguration.privateKey;
+    }
+    notificationBackground = await startNotificationBackgroundService(db);
+    webPushDispatcherConfigured = notificationBackground.webPushDispatcherConfigured;
+  } finally {
+    for (const [name, value] of Object.entries(vapidEnvironment)) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+  }
+}
+
 async function start(): Promise<void> {
   try {
     console.log('SQLite persistence is enabled');
@@ -503,28 +528,7 @@ async function start(): Promise<void> {
     await assertInstanceAdministratorConfigured();
     await initRedis();
     if (!demoMode) {
-      resolvedWebPushConfiguration = resolveInstanceWebPushConfiguration();
-      const vapidEnvironment = {
-        WEB_PUSH_VAPID_SUBJECT: process.env.WEB_PUSH_VAPID_SUBJECT,
-        WEB_PUSH_VAPID_PUBLIC_KEY: process.env.WEB_PUSH_VAPID_PUBLIC_KEY,
-        WEB_PUSH_VAPID_PRIVATE_KEY: process.env.WEB_PUSH_VAPID_PRIVATE_KEY,
-      };
-      try {
-        // Both background implementations read their startup configuration from
-        // the environment; the worker copies it before loading the dispatcher.
-        if (resolvedWebPushConfiguration.configured) {
-          process.env.WEB_PUSH_VAPID_SUBJECT = resolvedWebPushConfiguration.subject;
-          process.env.WEB_PUSH_VAPID_PUBLIC_KEY = resolvedWebPushConfiguration.publicKey;
-          process.env.WEB_PUSH_VAPID_PRIVATE_KEY = resolvedWebPushConfiguration.privateKey;
-        }
-        notificationBackground = await startNotificationBackgroundService(db);
-        webPushDispatcherConfigured = notificationBackground.webPushDispatcherConfigured;
-      } finally {
-        for (const [name, value] of Object.entries(vapidEnvironment)) {
-          if (value === undefined) delete process.env[name];
-          else process.env[name] = value;
-        }
-      }
+      await initializeNotificationBackground();
       // Every API process drops its MCP cache on a published config event, so an
       // admin toggle applies across processes rather than waiting out the TTL.
       // Re-resolve immediately: authRedirect and the CORS/header middleware read
