@@ -13,7 +13,7 @@ import { authenticateSocketRequest, setupAuth } from './auth.js';
 import { configureDemoMode, createDemoRedisClient, demoModeReadOnlyMiddleware } from './demoMode.js';
 import { resolveGithubAuthMode, resolveGithubEventIntakeMode, validateIntakeModePrerequisites } from '@propr/shared';
 import { initSocketService, closeSocketService } from './services/socketService.js';
-import { CORS_PREFLIGHT_MAX_AGE_SECONDS, corsRejectionHandler, createCorsOriginValidator, isTrustedMcpWebOrigin } from './corsValidation.js';
+import { CORS_PREFLIGHT_MAX_AGE_SECONDS, corsRejectionHandler, createCorsOriginValidator, isTrustedMcpWebOrigin, type CorsOriginValidator } from './corsValidation.js';
 import {
   createStatusRoutes, createTaskRoutes,
   createTaskHistoryRoutes, createLiveDetailsRoutes,
@@ -201,11 +201,24 @@ app.use((req, res, next) => {
   // which can differ from FRONTEND_URL. Known remote MCP web clients also need
   // their exact origin accepted at the bearer-authenticated MCP endpoint. Keep
   // the cookie-authenticated REST and Socket.IO CORS policy intact.
+  // Validate inside the callback and never pass a request-derived string as
+  // the `origin` option: the `cors` package echoes an allowed origin back
+  // verbatim, so reflecting `req.get('origin')` would read as a permissive,
+  // user-controlled configuration even when it is gated by an allowlist.
   const mcpOrigin = getMcpOriginSync();
-  const consentOrigin = req.path.startsWith('/mcp/') && mcpOrigin && req.get('origin') === mcpOrigin;
-  const webClientOrigin = isTrustedMcpWebOrigin(req.path, req.get('origin')) ? req.get('origin') : undefined;
+  const validateRequestCorsOrigin: CorsOriginValidator = (origin, callback) => {
+    if (req.path.startsWith('/mcp/') && mcpOrigin && origin === mcpOrigin) {
+      callback(null, true);
+      return;
+    }
+    if (isTrustedMcpWebOrigin(req.path, origin)) {
+      callback(null, true);
+      return;
+    }
+    validateCorsOrigin(origin, callback);
+  };
   cors({
-    origin: consentOrigin ? mcpOrigin : webClientOrigin ?? validateCorsOrigin,
+    origin: validateRequestCorsOrigin,
     credentials: true,
     maxAge: CORS_PREFLIGHT_MAX_AGE_SECONDS,
   })(req, res, next);
