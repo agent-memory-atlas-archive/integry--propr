@@ -105,3 +105,96 @@ test('both official SDK protocol eras execute real draft/revision/publication/ta
     assert.equal(githubIssues.length, 2);
   } finally { server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())); await db.destroy(); }
 });
+
+test('MCP task, goal and plan lists paginate in deterministic newest-first order', async () => {
+  const db = knex({ client: 'better-sqlite3', connection: { filename: ':memory:' }, useNullAsDefault: true });
+  await db.schema.createTable('tasks', table => {
+    table.string('task_id').primary();
+    table.string('repository').notNullable();
+    table.integer('issue_number');
+    table.string('task_type').notNullable();
+    table.timestamp('created_at').notNullable();
+  });
+  await db.schema.createTable('task_history', table => {
+    table.increments('history_id').primary();
+    table.string('task_id').notNullable();
+    table.string('state').notNullable();
+  });
+  await db.schema.createTable('goals', table => {
+    table.string('goal_id').primary();
+    table.string('owner_id').notNullable();
+    table.string('repository').notNullable();
+    table.string('title');
+    table.text('objective');
+    table.string('desired_state');
+    table.string('result_state');
+    table.string('current_task_id');
+    table.timestamp('created_at').notNullable();
+    table.timestamp('updated_at').notNullable();
+  });
+  await db.schema.createTable('task_drafts', table => {
+    table.string('draft_id').primary();
+    table.string('user_id').notNullable();
+    table.string('repository').notNullable();
+    table.string('name');
+    table.text('initial_prompt');
+    table.string('status');
+    table.integer('mcp_revision');
+    table.boolean('paused');
+    table.timestamp('created_at').notNullable();
+    table.timestamp('updated_at').notNullable();
+  });
+
+  const repository = 'acme/repo';
+  const newest = '2026-09-01 12:00:00';
+  const middle = '2026-08-01 12:00:00';
+  const oldest = '2026-06-01 12:00:00';
+  await db('tasks').insert([
+    { task_id: '1024', repository, task_type: 'issue', created_at: oldest },
+    { task_id: '10149', repository, task_type: 'issue', created_at: middle },
+    { task_id: '10150', repository, task_type: 'issue', created_at: newest },
+    { task_id: '10151', repository, task_type: 'issue', created_at: newest },
+  ]);
+  await db('task_history').insert(['1024', '10149', '10150', '10151'].map(task_id => ({ task_id, state: 'completed' })));
+  await db('goals').insert([
+    { goal_id: 'goal-z-old', owner_id: '123', repository, current_task_id: 'goal-task-old', created_at: oldest, updated_at: oldest },
+    { goal_id: 'goal-a-middle', owner_id: '123', repository, current_task_id: 'goal-task-middle', created_at: middle, updated_at: middle },
+    { goal_id: 'goal-a-new', owner_id: '123', repository, current_task_id: 'goal-task-new-a', created_at: newest, updated_at: newest },
+    { goal_id: 'goal-b-new', owner_id: '123', repository, current_task_id: 'goal-task-new-b', created_at: newest, updated_at: newest },
+  ]);
+  await db('task_drafts').insert([
+    { draft_id: 'plan-z-old', user_id: '123', repository, created_at: oldest, updated_at: oldest },
+    { draft_id: 'plan-a-middle', user_id: '123', repository, created_at: middle, updated_at: middle },
+    { draft_id: 'plan-a-new', user_id: '123', repository, created_at: newest, updated_at: newest },
+    { draft_id: 'plan-b-new', user_id: '123', repository, created_at: newest, updated_at: newest },
+  ]);
+
+  const deps: ToolDeps = { db, policy: {} as McpPolicy, taskQueue: {} as never, redisClient: {} as never, runtimeBuildQueue: {} as never };
+  const catalog = createToolCatalog(deps);
+  const principal = { user: { id: '123' } } as McpPrincipal;
+  const page = async (name: string, offset: number) => {
+    const tool = catalog.find(candidate => candidate.name === name)!;
+    const result = await tool.run({ principal, args: { repository, offset, limit: 2 } });
+    assert.equal(result.status, 200);
+    return result.data as Record<string, any>; // eslint-disable-line @typescript-eslint/no-explicit-any
+  };
+
+  try {
+    const taskPageOne = await page('list_tasks', 0);
+    const taskPageTwo = await page('list_tasks', taskPageOne.nextOffset);
+    assert.deepEqual(taskPageOne.tasks.map((task: { task_id: string }) => task.task_id), ['10151', '10150']);
+    assert.deepEqual(taskPageTwo.tasks.map((task: { task_id: string }) => task.task_id), ['10149', '1024']);
+
+    const goalPageOne = await page('list_goals', 0);
+    const goalPageTwo = await page('list_goals', goalPageOne.nextOffset);
+    assert.deepEqual(goalPageOne.goals.map((goal: { goal_id: string }) => goal.goal_id), ['goal-b-new', 'goal-a-new']);
+    assert.deepEqual(goalPageTwo.goals.map((goal: { goal_id: string }) => goal.goal_id), ['goal-a-middle', 'goal-z-old']);
+
+    const planPageOne = await page('list_plans', 0);
+    const planPageTwo = await page('list_plans', planPageOne.nextOffset);
+    assert.deepEqual(planPageOne.plans.map((plan: { draft_id: string }) => plan.draft_id), ['plan-b-new', 'plan-a-new']);
+    assert.deepEqual(planPageTwo.plans.map((plan: { draft_id: string }) => plan.draft_id), ['plan-a-middle', 'plan-z-old']);
+  } finally {
+    await db.destroy();
+  }
+});
