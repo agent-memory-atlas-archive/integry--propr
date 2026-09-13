@@ -21,7 +21,11 @@ import type {
 // proof ceiling and is independent of the 32-entry input-schema bound.
 export const WINDOWS_INSPECTION_TIMEOUT_MS = 60_000;
 export const WINDOWS_INSPECTION_CUMULATIVE_TIMEOUT_MS = 240_000;
-export const WINDOWS_NATIVE_TIMING_PROBE_TIMEOUT_MS = 60_000;
+// The diagnostic probe is the first Reflection.Emit invocation in the fresh
+// hosted user profile. Runner cold starts can exceed the production per-call
+// deadline here; allow two minutes to collect the complete timing evidence
+// before the harness exercises discovery with its separate production limits.
+export const WINDOWS_NATIVE_TIMING_PROBE_TIMEOUT_MS = 120_000;
 const WINDOWS_INSPECTION_MAX_BYTES = 128 * 1024;
 const WINDOWS_NATIVE_PROBE_MAX_BYTES = 2 * 1024;
 const WINDOWS_INSPECTION_MAX_ENTRIES = 32;

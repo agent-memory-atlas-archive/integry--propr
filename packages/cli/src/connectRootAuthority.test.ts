@@ -200,7 +200,7 @@ test("Windows native timing uses only coarse fixed buckets", () => {
 test("Windows production inspection has one cold-start deadline and a cumulative batch cap", () => {
   assert.equal(WINDOWS_INSPECTION_TIMEOUT_MS, 60_000);
   assert.equal(WINDOWS_INSPECTION_CUMULATIVE_TIMEOUT_MS, 240_000);
-  assert.equal(WINDOWS_NATIVE_TIMING_PROBE_TIMEOUT_MS, 60_000);
+  assert.equal(WINDOWS_NATIVE_TIMING_PROBE_TIMEOUT_MS, 120_000);
   assert.equal(WINDOWS_INSPECTION_CUMULATIVE_TIMEOUT_MS, 4 * WINDOWS_INSPECTION_TIMEOUT_MS);
   assert.notEqual(
     WINDOWS_INSPECTION_CUMULATIVE_TIMEOUT_MS / WINDOWS_INSPECTION_TIMEOUT_MS,
