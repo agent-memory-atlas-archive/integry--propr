@@ -26,7 +26,7 @@ import { addContextTools } from './toolsContext.js';
 import { addAdministrationTools } from './toolsAdministration.js';
 import { addArtifactTools } from './toolsArtifacts.js';
 import { addManagementTools } from './toolsManagement.js';
-import { presentResult } from './presentation.js';
+import { presentResult, type PresentedResult } from './presentation.js';
 
 export const repositorySchema = z.string().regex(/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/).max(255);
 export const idSchema = z.string().min(1).max(255);
@@ -252,7 +252,7 @@ async function authorizeTarget(tool: McpTool, args: Args, principal: McpPrincipa
   }
 }
 
-export async function executeTool(tool: McpTool, raw: unknown, principal: McpPrincipal, deps: ToolDeps): Promise<Record<string, unknown>> {
+export async function executeTool(tool: McpTool, raw: unknown, principal: McpPrincipal, deps: ToolDeps): Promise<PresentedResult> {
   const args = tool.schema.parse(raw) as Args;
   deps.policy.requireScope(principal, tool.scope);
   if (tool.permission) deps.policy.requirePermission(principal, tool.permission);

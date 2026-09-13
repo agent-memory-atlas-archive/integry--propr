@@ -14,6 +14,7 @@ import { McpOAuthProvider, validatePublicTokenRequest } from './oauth.js';
 import { McpPolicy, type McpPrincipal } from './policy.js';
 import { mountMcpBrowser } from './browser.js';
 import { createToolCatalog, executeTool, type McpTool, type ToolDeps } from './tools.js';
+import { presentResultText } from './presentation.js';
 import { resolveMcpConfig, isMcpEnabledSync, getMcpScopeCeilingSync } from './configResolver.js';
 
 const prompts: Record<string, string> = {
@@ -39,7 +40,7 @@ export function buildMcpServer(principal: McpPrincipal, deps: ToolDeps, catalog:
       annotations: { readOnlyHint: !!tool.readOnly, destructiveHint: !tool.readOnly, idempotentHint: true, openWorldHint: true } }, async args => {
       try {
         const result = await call(tool.name, args);
-        return { content: [{ type: 'text', text: String(result.summary) }], structuredContent: result };
+        return { content: [{ type: 'text', text: presentResultText(result) }], structuredContent: result };
       } catch (error) {
         const code = error instanceof McpError ? error.code : error instanceof z.ZodError ? 'INVALID_INPUT' : 'INTERNAL_ERROR';
         const message = error instanceof McpError ? error.message : error instanceof z.ZodError ? 'Invalid or missing tool arguments.' : 'The request could not be completed.';
