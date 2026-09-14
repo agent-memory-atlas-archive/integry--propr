@@ -5,6 +5,8 @@ import type { RedisClientType } from 'redis';
 import { closeConnection } from '@propr/core';
 import type { McpPolicy, McpPrincipal } from '../mcp/policy.js';
 import { createToolCatalog, type ToolDeps } from '../mcp/tools.js';
+import { getAgentActivity } from '../mcp/agentActivity.js';
+import { parseAgentStreamOutput } from '../services/agentStreamProjection.js';
 
 const directGoalId = '11111111-1111-4111-8111-111111111111';
 const orchestratedGoalId = '22222222-2222-4222-8222-222222222222';
@@ -221,6 +223,104 @@ test('get_agent_activity opts in to only Codex summaries for live and persisted 
       }
     }
     assert.throws(() => tool.schema.parse({ repository, goalId: directGoalId, includeReasoningSummaries: 'true' }));
+  } finally {
+    await db.destroy();
+  }
+});
+
+
+test('activity paginates all Claude narration before the mixed live event limit', async () => {
+  const db = await createActivityDatabase();
+  const start = Date.parse('2026-09-13T10:00:00.000Z');
+  const narration = Array.from({ length: 105 }, (_, index) => ({
+    type: 'assistant',
+    timestamp: new Date(start + index * 1000).toISOString(),
+    message: { content: [{ type: 'text', text: `Verified parser case ${index}.` }] },
+  }));
+  const tools = Array.from({ length: 100 }, (_, index) => ({
+    type: 'assistant',
+    message: { content: [{ type: 'tool_use', id: `tool-${index}`, name: 'Bash', input: { command: 'npm test' } }] },
+  }));
+  const output = [...narration, ...tools].map(event => JSON.stringify(event)).join('\n');
+  const redisClient = {
+    get: async (key: string) => key.startsWith('agent:output:') ? output : null,
+  } as unknown as RedisClientType;
+  try {
+    const ui = parseAgentStreamOutput(output);
+    assert.equal(ui.totalEventCount, 205);
+    assert.equal(ui.events.length, 100);
+    assert.ok(ui.events.every(event => event.type === 'tool_use'));
+    for (const target of [{ goalId: directGoalId }, { taskId: 'goal-task-orchestrated' }]) {
+      const read = (offset: number) => getAgentActivity(
+        { db, redisClient }, { repository, ...target, offset, limit: 50 }, 'owner-1',
+      );
+      const first = await read(0);
+      assert.equal(first.activity.length, 50);
+      assert.deepEqual(first.activity[0], {
+        timestamp: narration[104].timestamp, message: 'Verified parser case 104.',
+      });
+      assert.equal(first.nextOffset, 50);
+      const second = await read(first.nextOffset);
+      assert.equal(second.activity.length, 50);
+      assert.equal(second.nextOffset, 100);
+      const third = await read(second.nextOffset);
+      assert.equal(third.activity.length, 5);
+      assert.equal(third.nextOffset, null);
+      assert.deepEqual([...first.activity, ...second.activity, ...third.activity].map(entry => entry.message),
+        narration.map(event => event.message.content[0].text).reverse());
+      assert.deepEqual((await read(105)).activity, []);
+    }
+  } finally {
+    await db.destroy();
+  }
+});
+
+test('activity removes fenced payloads and retains bracket-prefixed prose in live and stored output', async () => {
+  const db = await createActivityDatabase();
+  const cases: Array<[string, string | null]> = [
+    ['```json\n{"raw":"payload"}\n```', null],
+    ['```ts\nconst raw = "payload";\n```', null],
+    ['**Result:** ```json\n{"raw":"payload"}\n```', null],
+    ['~~~json\n["raw", "payload"]\n~~~', null],
+    ['Before the change.\n```ts\nconst raw = 1;\n```\nTests passed.', 'Before the change. Tests passed.'],
+    ['```json\n{"raw":1}\n```\nUpdated the parser.\n~~~sh\ncat .env\n~~~', 'Updated the parser.'],
+    ['Still working.\n```json\n{"unfinished":', 'Still working.'],
+    ['```ts\nconst unfinished =', null],
+    ['````md\n```json\n{"raw":1}\n```\n````', null],
+    ['```json\n{"checkpointReady":true,"message":"Parser updated","summary":"Tests passed."}\n```',
+      'Checkpoint ready: Parser updated. Tests passed.'],
+    ['{"checkpointReady":true,"message":"Parser updated"}', 'Checkpoint ready: Parser updated.'],
+    ['{"raw":"payload"}', null],
+    ['["raw", "payload"]', null],
+    ['[{"unfinished":', null],
+    ['[parser.ts](src/parser.ts) is updated; tests passed.', '[parser.ts](src/parser.ts) is updated; tests passed.'],
+    ['[done] Parser updated; tests passed.', '[done] Parser updated; tests passed.'],
+    ['[1/3] Updating the parser.', '[1/3] Updating the parser.'],
+  ];
+  let output: string | null = null;
+  const redisClient = {
+    get: async (key: string) => key === 'agent:output:goal-task-direct' ? output : null,
+  } as unknown as RedisClientType;
+  const timestamp = '2026-09-13T10:00:00.000Z';
+  try {
+    for (const [content, expected] of cases) {
+      const record = JSON.stringify({
+        method: 'item/completed', params: { item: { type: 'agentMessage', text: content } },
+        emittedAtMs: Date.parse(timestamp),
+      });
+      await db('task_history').where({ task_id: 'goal-task-direct' }).update({
+        metadata: JSON.stringify({ goalOutputRecords: [record] }),
+      });
+      for (const live of [true, false]) {
+        output = live ? record : null;
+        const result = await getAgentActivity(
+          { db, redisClient }, { repository, goalId: directGoalId, offset: 0, limit: 20 }, 'owner-1',
+        );
+        assert.deepEqual(result.activity, expected ? [{ timestamp, message: expected }] : [],
+          `${live ? 'live' : 'stored'}: ${content}`);
+        assert.equal(result.nextOffset, null);
+      }
+    }
   } finally {
     await db.destroy();
   }

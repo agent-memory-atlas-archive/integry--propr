@@ -126,8 +126,36 @@ function checkpointNarration(value: unknown): string | null {
   return `Checkpoint ready: ${checkpoint.message.trim()}.${summary}`;
 }
 
+function withoutFencedPayloads(content: string): string {
+  const prose: string[] = [];
+  let fence: string | null = null;
+  let payload: string[] = [];
+  for (const line of content.split(/\r?\n/)) {
+    const marker = line.match(/^ {0,3}(`{3,}|~{3,})(.*)$/);
+    if (!fence) {
+      if (marker) {
+        fence = marker[1];
+        payload = [];
+      } else {
+        prose.push(line);
+      }
+    } else if (marker && marker[1][0] === fence[0] && marker[1].length >= fence.length && !marker[2].trim()) {
+      try {
+        const checkpoint = checkpointNarration(JSON.parse(payload.join('\n')));
+        if (checkpoint) prose.push(checkpoint);
+      } catch { /* Code and non-JSON payloads are not narration. */ }
+      fence = null;
+    } else {
+      payload.push(line);
+    }
+  }
+  // An unfinished fence can occur while streaming; keep only preceding prose.
+  return prose.join('\n');
+}
+
 function compactNarration(content: string): string | null {
-  let text = redactVisualPreviewPaths(content).trim().replace(/^\*\*Result:\*\*\s*/i, '');
+  const result = redactVisualPreviewPaths(content).trim().replace(/^\*\*Result:\*\*\s*/i, '');
+  let text = withoutFencedPayloads(result).trim();
   if (!text) return null;
   if (/^[{[]/.test(text)) {
     try {
@@ -135,7 +163,9 @@ function compactNarration(content: string): string | null {
       if (!checkpoint) return null;
       text = checkpoint;
     } catch {
-      return null;
+      // Keep Markdown links and bracket-prefixed status prose, but exclude
+      // incomplete object payloads and arrays of structured values.
+      if (text.startsWith('{') || /^\[\s*["{[]/.test(text)) return null;
     }
   }
   text = text.replace(/\s+/g, ' ').trim();
@@ -177,6 +207,7 @@ export async function getAgentActivity(
     deps.db,
     target.taskId,
     target.sessionId,
+    { limitEvents: false },
   );
   const entries = projectNarration(live?.events ?? [], target.fallbackTimestamp, args.includeReasoningSummaries);
   const activity = entries

@@ -18,7 +18,7 @@ import { parseOpenCodeOutputToConversationResult } from './liveDetailsOpenCodePa
 import { parseExecutionDetailsRows, type ExecutionDetailRow } from './liveDetailsExecutionParser.js';
 import { detectStoredOutputFormat, hasCodexAppServerNotification, type StoredOutputFormat } from './liveDetailsStoredOutputFormat.js';
 import { parseRedisOutput } from '../services/redisOutputParser.js';
-import { parseAgentStreamOutput } from '../services/agentStreamProjection.js';
+import { parseAgentStreamOutput, type AgentStreamParseOptions } from '../services/agentStreamProjection.js';
 import { parseConversationFile } from '../services/conversationParser.js';
 import { withStableLiveEventIds, type LiveEventSource } from '../services/liveEventIds.js';
 
@@ -270,11 +270,11 @@ async function loadStoredExecutionOutput(redisClient: RedisClientType, sessionId
   const output = await fs.readFile(outputPath, 'utf8');
   return parseStoredOutputContent(output);
 }
-async function parseActiveExecutionOutput(redisClient: RedisClientType, db: Knex, taskId: string): Promise<(ConversationResult & { nativeGoal?: ReturnType<typeof parseRedisOutput>['nativeGoal'] }) | null> {
+async function parseActiveExecutionOutput(redisClient: RedisClientType, db: Knex, taskId: string, options: AgentStreamParseOptions = {}): Promise<(ConversationResult & { nativeGoal?: ReturnType<typeof parseRedisOutput>['nativeGoal'] }) | null> {
   const output = await redisClient.get(`agent:output:${taskId}`);
   if (!output?.trim()) return null;
   const executionStartTimestamp = await findExecutionStartTimestamp(redisClient, db, taskId);
-  const redisParsed = parseAgentStreamOutput(output, { executionStartTimestamp });
+  const redisParsed = parseAgentStreamOutput(output, { ...options, executionStartTimestamp });
   if (redisParsed.events.length > 0 || redisParsed.todos.length > 0 || redisParsed.currentTask || redisParsed.tokenUsage) {
     return {
       events: withStableLiveEventIds({
@@ -303,8 +303,9 @@ export async function projectTaskLiveDetails(
   db: Knex,
   taskId: string,
   sessionId?: string | null,
+  options: AgentStreamParseOptions = {},
 ): Promise<(ConversationResult & { nativeGoal?: ReturnType<typeof parseRedisOutput>['nativeGoal'] }) | null> {
-  const active = await parseActiveExecutionOutput(redisClient, db, taskId);
+  const active = await parseActiveExecutionOutput(redisClient, db, taskId, options);
   if (active) return active;
   try {
     const details = sessionId ? await parseExecutionDetailsFromDb(db, taskId, sessionId) : null;
