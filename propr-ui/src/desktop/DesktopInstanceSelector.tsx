@@ -10,13 +10,7 @@ import {
   RefreshCw,
 } from 'lucide-react';
 import { useDesktop } from './DesktopContext';
-
-// The selector sits inside the sidebar, whose glyphs all paint a 1.25
-// device-px line. lucide strokes are 24px-viewBox units, so the prop is
-// 1.25 * 24 / renderedPx: the status icon renders at 16px, the trailing
-// action icon at 14px (see .desktop-instance-icon / .desktop-instance-action).
-const STATUS_ICON_STROKE = 1.875;
-const ACTION_ICON_STROKE = (1.25 * 24) / 14;
+import { SIDEBAR_ICON_STROKE_WIDTH, SIDEBAR_ICON_STROKE_CLASS } from '../components/icons/sidebarIconStroke';
 
 interface DesktopInstanceSelectorProps {
   /** Authenticated REST and Socket.IO are ready for the published desktop scope. */
@@ -67,7 +61,7 @@ export const DesktopInstanceSelector: React.FC<DesktopInstanceSelectorProps> = (
         title={action.title}
       >
         <span className="desktop-instance-icon" aria-hidden="true">
-          {connected ? <InstanceIcon strokeWidth={STATUS_ICON_STROKE} /> : reconnecting ? <RefreshCw className="desktop-spin" strokeWidth={STATUS_ICON_STROKE} /> : incompatible ? <CircleAlert strokeWidth={STATUS_ICON_STROKE} /> : <CloudOff strokeWidth={STATUS_ICON_STROKE} />}
+          {connected ? <InstanceIcon className={SIDEBAR_ICON_STROKE_CLASS} strokeWidth={SIDEBAR_ICON_STROKE_WIDTH} /> : reconnecting ? <RefreshCw className={`${SIDEBAR_ICON_STROKE_CLASS} desktop-spin`} strokeWidth={SIDEBAR_ICON_STROKE_WIDTH} /> : incompatible ? <CircleAlert className={SIDEBAR_ICON_STROKE_CLASS} strokeWidth={SIDEBAR_ICON_STROKE_WIDTH} /> : <CloudOff className={SIDEBAR_ICON_STROKE_CLASS} strokeWidth={SIDEBAR_ICON_STROKE_WIDTH} />}
         </span>
         <span className="desktop-instance-copy">
           <strong title={desktop.profile.name}>{desktop.profile.name}</strong>
@@ -89,7 +83,7 @@ export const DesktopInstanceSelector: React.FC<DesktopInstanceSelectorProps> = (
             </span>
             <span className="desktop-instance-switch">
               {action.label}
-              <action.Icon className="desktop-instance-action" strokeWidth={ACTION_ICON_STROKE} aria-hidden="true" />
+              <action.Icon className={`${SIDEBAR_ICON_STROKE_CLASS} desktop-instance-action`} strokeWidth={SIDEBAR_ICON_STROKE_WIDTH} aria-hidden="true" />
             </span>
           </span>
         </span>

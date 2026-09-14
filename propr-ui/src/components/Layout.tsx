@@ -6,6 +6,7 @@ import { useDynamicFavicon } from '../hooks/useDynamicFavicon';
 import { useSystemReadiness } from '../hooks/useSystemReadiness';
 import { useToast } from './ui/useToast';
 import { MenuIcon, CloseIcon } from './icons/LayoutIcons';
+import { SIDEBAR_ICON_STROKE_WIDTH, SIDEBAR_ICON_STROKE_CLASS } from './icons/sidebarIconStroke';
 import { DESKTOP_UI_COMMAND_EVENT } from '../desktop/useDesktopNativeCommands';
 import GlobalHeader from './GlobalHeader';
 import AgentTankSidebar from './AgentTankSidebar';
@@ -31,13 +32,6 @@ interface NavItem {
   // All nav icons come from lucide so a shared strokeWidth keeps line weights uniform.
   icon: React.FC<{ className?: string; strokeWidth?: number | string }>;
 }
-
-// Every sidebar glyph paints the same 1.25 device-px line. lucide strokes are
-// specified in 24px-viewBox units, so the rendered weight is
-// strokeWidth * renderedPx / 24: icons rendered at 16px (h-4 w-4) take 1.875,
-// and the 12px usage-widget icons in AgentTankSidebar take 2.5 — one painted
-// weight across the whole sidebar, not one shared prop value.
-const ICON_STROKE_16PX = 1.875;
 
 // Single badge component for all nav counts: forms a circle for one digit and
 // stretches horizontally for wider content (e.g. "99+") with the same radius and padding.
@@ -94,12 +88,23 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
   // first-class work type its own sidebar count.
   const displayTaskCount = Math.max(0, activeQueueCount - generatingPlansCount - activeGoalCount);
 
-  const navigation: NavItem[] = [
+  // The sidebar reads top-to-bottom as three logical zones: core workflow
+  // ("what am I doing today?"), technical resources ("what am I working
+  // with?"), and utility/ambient data ("how is the system configured?").
+  // Zones are separated by whitespace, never by divider lines.
+
+  // ZONE 1 — core workflow: the daily, high-frequency views.
+  const coreNavigation: NavItem[] = [
     { name: 'Dashboard', href: '/', icon: LayoutDashboard },
     { name: 'Inbox', href: '/inbox', icon: Inbox },
-    { name: 'Plans', href: '/plans', icon: ScrollText },
-    { name: 'Goals', href: '/goals', icon: Target },
     { name: 'Tasks', href: '/tasks', icon: ListTodo },
+    { name: 'Goals', href: '/goals', icon: Target },
+    { name: 'Plans', href: '/plans', icon: ScrollText },
+  ];
+
+  // ZONE 2 — technical resources: infrastructure that gets configured, not
+  // checked hourly.
+  const resourceNavigation: NavItem[] = [
     { name: 'Repositories', href: '/repositories', icon: BookMarked },
     ...(userHasPermission(user, 'instance.manage_agents')
       ? [{ name: 'Coding Agents', href: '/ai-agents', icon: Bot }]
@@ -107,6 +112,8 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
     { name: 'LLM Log', href: '/llm-logs', icon: Cpu },
   ];
 
+  // ZONE 3 — global configuration links, anchored to the bottom with the
+  // usage widget, metadata, and profile block.
   const utilityNavigation: NavItem[] = [
     { name: 'Settings', href: '/settings', icon: Settings },
     ...(userHasPermission(user, 'instance.manage_members')
@@ -215,15 +222,9 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
     setIsSidebarOpen(true);
   };
 
-  // Divider and hover inks for the bottom utility group: translucent inks on
-  // the desktop app's tinted macOS-style wash, opaque grays on the web's
-  // white sidebar.
-  // profileDivider also carries the group separation above the profile block:
-  // the desktop app draws a divider, while the web (whose footer text sits
-  // directly above) detaches the block with an mt-4 spacer instead.
-  const utilityInk = desktop
-    ? { tankBorder: 'border-slate-900/10', profileDivider: 'border-t border-slate-900/10', profileHover: 'hover:bg-slate-900/5' }
-    : { tankBorder: undefined, profileDivider: 'mt-4', profileHover: 'hover:bg-slate-100' };
+  // Hover ink for the account block: translucent on the desktop app's tinted
+  // macOS-style wash, opaque gray on the web's white sidebar.
+  const profileHoverInk = desktop ? 'hover:bg-slate-900/5' : 'hover:bg-slate-100';
 
   // Active rows pair the teal border / gray background with darker, medium-weight
   // text so the label keeps visual dominance over the low-contrast background.
@@ -235,7 +236,9 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
         // mx-2 + px-2 puts the pill's inner edges on the sidebar's shared
         // 16px rail, matching the web rows' px-4 (their border-l-4 is part
         // of the box, so trailing content ends at the same 16px boundary).
-        desktop ? 'mx-2 rounded-lg border-0 px-2 py-1.5' : 'border-l-4 px-4 py-2'
+        // Both shells share the same py-2 row height, so every active
+        // background is a uniformly sized, contained row.
+        desktop ? 'mx-2 rounded-lg border-0 px-2 py-2' : 'border-l-4 px-4 py-2'
       } ${
         isActive(item.href)
           ? desktop
@@ -249,7 +252,7 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
       }`}
     >
       <span className="flex min-w-0 items-center">
-        <item.icon className="mr-2.5 h-4 w-4 flex-none" strokeWidth={ICON_STROKE_16PX} />
+        <item.icon className={`${SIDEBAR_ICON_STROKE_CLASS} mr-2.5 h-4 w-4 flex-none`} strokeWidth={SIDEBAR_ICON_STROKE_WIDTH} />
         <span className="truncate">{item.name}</span>
       </span>
       {/* Single trailing slot: every badge and readiness dot right-aligns
@@ -304,23 +307,34 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
             className="lg:hidden text-gray-500 hover:text-gray-700 p-1"
             aria-label="Close menu"
           >
-            <CloseIcon className="w-6 h-6" />
+            <CloseIcon className={`${SIDEBAR_ICON_STROKE_CLASS} w-6 h-6`} />
           </button>
         </div>
         {desktop && <DesktopInstanceSelector transportReady={isConnected && user !== null} />}
         <div className="flex min-h-0 flex-1 flex-col">
-          <nav className="flex min-h-0 flex-col gap-0.5 overflow-y-auto py-1">
-            {navigation.map(renderNavigationItem)}
+          {/* pt-2 detaches the first row (and its active background) from the
+              logo header above, so an active first item reads as a contained
+              row rather than bleeding toward the logo area. */}
+          <nav className="flex min-h-0 flex-col overflow-y-auto pt-2 pb-1">
+            <div className="flex flex-col gap-0.5">
+              {coreNavigation.map(renderNavigationItem)}
+            </div>
+            {/* Whitespace spacer (no divider) between the core-workflow and
+                technical-resources zones. */}
+            <div className="mt-6 flex flex-col gap-0.5">
+              {resourceNavigation.map(renderNavigationItem)}
+            </div>
           </nav>
-          {/* Usage, settings, metadata, and profile travel together as one utility
-              group anchored to the bottom; mt-auto absorbs the flexible space, and
-              top margins (instead of dividers) separate the group's functional
-              clusters: data widget, global navigation, and meta-information. */}
+          {/* ZONE 3: usage, settings, metadata, and profile travel together as
+              one utility group anchored to the bottom; mt-auto absorbs the
+              flexible space, and top margins (instead of dividers) separate the
+              group's functional clusters: data widget, global navigation, and
+              meta-information. */}
           <div className="mt-auto flex flex-none flex-col">
           {(isDemoMode || userHasPermission(user, 'instance.manage_agents')) && (
-            <AgentTankSidebar allowManualRefresh={!isDemoMode} className={utilityInk.tankBorder} />
+            <AgentTankSidebar allowManualRefresh={!isDemoMode} />
           )}
-          <nav className="mt-6 flex flex-none flex-col gap-0.5 py-1" aria-label="Application settings">
+          <nav className="mt-4 flex flex-none flex-col gap-0.5 py-1" aria-label="Application settings">
             {utilityNavigation.map(renderNavigationItem)}
           </nav>
           {!desktop && <footer className="mt-6 px-4 pb-2 leading-tight space-y-1">
@@ -340,19 +354,19 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
             <div className="text-[11px] text-slate-400">© {new Date().getFullYear()} Rinalds Uzkalns</div>
           </footer>}
           {user && (
-            // The interactive account block is its own group: the web detaches
-            // it from the metadata footer above with a deliberate mt-4 spacer,
-            // the desktop app (which renders no footer) with a divider — both
-            // carried by utilityInk.profileDivider. pr-2.5 (10px) + the 6px
-            // glyph inset inside the 28px logout button puts the logout icon's
-            // right edge on the sidebar's shared 16px rail, aligned with the
-            // nav badges and the Usage refresh icon.
-            <div className={`desktop-sidebar-profile flex flex-none items-center justify-between gap-2 py-2 pl-3 pr-2.5 ${utilityInk.profileDivider}`}>
+            // The interactive account block is its own group, detached from
+            // whatever sits above it (the metadata footer on the web, the
+            // settings links in the desktop app) by an mt-4 whitespace spacer —
+            // zone separation is whitespace, never a line. pr-2.5 (10px) + the
+            // 6px glyph inset inside the 28px logout button puts the logout
+            // icon's right edge on the sidebar's shared 16px rail, aligned with
+            // the nav badges and the Usage refresh icon.
+            <div className="desktop-sidebar-profile mt-4 flex flex-none items-center justify-between gap-2 py-2 pl-3 pr-2.5">
               <a
                 href={`https://github.com/${user.username}`}
                 target="_blank"
                 rel="noopener noreferrer"
-                className={`group flex min-w-0 flex-1 items-center gap-2 rounded-md p-1 transition-colors ${utilityInk.profileHover}`}
+                className={`group flex min-w-0 flex-1 items-center gap-2 rounded-md p-1 transition-colors ${profileHoverInk}`}
               >
                 <UserAvatar
                   user={user}
@@ -373,9 +387,7 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
                 aria-label="Logout"
                 title="Logout"
               >
-                {/* Same rendered size and stroke as the nav icons; lucide scales
-                    stroke with the viewBox, so a smaller box would thin the line. */}
-                <LogOut className="h-4 w-4" strokeWidth={ICON_STROKE_16PX} aria-hidden="true" />
+                <LogOut className={`${SIDEBAR_ICON_STROKE_CLASS} h-4 w-4`} strokeWidth={SIDEBAR_ICON_STROKE_WIDTH} aria-hidden="true" />
               </button>
             </div>
           )}

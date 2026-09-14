@@ -3,15 +3,10 @@ import { ChevronDown, ChevronRight, RefreshCw } from 'lucide-react';
 import { getAgentTankUsage, refreshAgentTank, AgentTankUsageResponse, AgentUsageData } from '../api/revertApi';
 import { ProviderLogo } from './ui/ProviderLogo';
 import { getModelDisplayName } from '../utils/modelDisplay';
+import { SIDEBAR_ICON_STROKE_WIDTH, SIDEBAR_ICON_STROKE_CLASS } from './icons/sidebarIconStroke';
 
 // Refresh interval in milliseconds (60 seconds)
 const REFRESH_INTERVAL = 60000;
-
-// Every sidebar glyph paints the same 1.25 device-px line. lucide strokes are
-// specified in 24px-viewBox units, so the prop depends on rendered size:
-// these icons render at 12px (w-3), giving 1.25 * 24 / 12 = 2.5. The 16px nav
-// icons in Layout use 1.875 for the identical painted weight.
-const ICON_STROKE_12PX = 2.5;
 
 // Visible provider labels keyed by ProPR-facing provider key.
 const PROVIDER_DISPLAY_NAMES: Record<string, string> = {
@@ -239,8 +234,8 @@ const AgentRow: React.FC<AgentRowProps> = ({ agent, expanded, onToggle }) => {
           <span className="flex h-3.5 w-3.5 flex-none items-center justify-center">
             {expandable && (
               expanded
-                ? <ChevronDown className="w-3 h-3 text-gray-400" strokeWidth={ICON_STROKE_12PX} />
-                : <ChevronRight className="w-3 h-3 text-gray-400" strokeWidth={ICON_STROKE_12PX} />
+                ? <ChevronDown className={`${SIDEBAR_ICON_STROKE_CLASS} w-3 h-3 text-gray-400`} strokeWidth={SIDEBAR_ICON_STROKE_WIDTH} />
+                : <ChevronRight className={`${SIDEBAR_ICON_STROKE_CLASS} w-3 h-3 text-gray-400`} strokeWidth={SIDEBAR_ICON_STROKE_WIDTH} />
             )}
           </span>
           <ProviderLogo provider={agent.name} className="w-3.5 h-3.5 flex-none" />
@@ -356,10 +351,11 @@ const AgentTankSidebar: React.FC<AgentTankSidebarProps> = ({ allowManualRefresh 
   if (agents.length === 0) return null;
 
   return (
-    // The top border is the roof of the bottom-anchored utility group (the
-    // wrapper in Layout carries mt-auto): pt-4 gives the divider a standard
-    // 16px of air above the USAGE header instead of floating in the gap.
-    <div className={`px-4 pt-4 pb-3 border-t ${className || 'border-gray-200'}`}>
+    // In the sidebar, zone boundaries are whitespace, not rules: the utility
+    // group's mt-auto (in Layout) absorbs the flexible space above, so the
+    // widget draws no divider of its own. Surfaces that still want a rule
+    // (e.g. the mobile sheet) pass border classes via className.
+    <div className={`px-4 pt-4 pb-3 ${className || ''}`}>
       <div className="flex items-center justify-between mb-2">
         {/* Utility-header spec from the design system handover. */}
         <span className="text-[10px] uppercase font-bold tracking-widest text-slate-500">
@@ -372,7 +368,7 @@ const AgentTankSidebar: React.FC<AgentTankSidebarProps> = ({ allowManualRefresh 
             className="text-gray-400 hover:text-primary-600 disabled:opacity-50"
             title="Refresh usage"
           >
-            <RefreshCw className={`w-3 h-3 ${refreshing ? 'animate-spin' : ''}`} strokeWidth={ICON_STROKE_12PX} />
+            <RefreshCw className={`${SIDEBAR_ICON_STROKE_CLASS} w-3 h-3 ${refreshing ? 'animate-spin' : ''}`} strokeWidth={SIDEBAR_ICON_STROKE_WIDTH} />
           </button>
         )}
       </div>
