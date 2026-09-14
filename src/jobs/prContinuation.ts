@@ -13,6 +13,7 @@ export interface ContinuationRecord {
     continuation_pr: number | null;
     continuation_url: string | null;
     comment_id: number | null;
+    publication_bundle: string | null;
 }
 
 export interface Contribution {
@@ -48,7 +49,7 @@ export function continuationStatus(record?: ContinuationRecord): string {
         : '';
 }
 
-async function reserveContinuation(ref: PullRequestReference, source: Contribution): Promise<ContinuationRecord> {
+export async function reserveContinuation(ref: PullRequestReference, source: Contribution): Promise<ContinuationRecord> {
     if (!source.head.sha || !/^[a-f0-9]{40}$/i.test(source.head.sha)) throw new Error('Cannot continue contribution without its exact head SHA');
     const repository = repositoryKey(ref);
     await db('pr_continuations').insert({
@@ -116,7 +117,7 @@ async function ensurePullRequest(octokit: Octokit, record: ContinuationRecord): 
     return record;
 }
 
-async function announceContinuation(octokit: Octokit, record: ContinuationRecord): Promise<void> {
+export async function announceContinuation(octokit: Octokit, record: ContinuationRecord): Promise<void> {
     if (record.comment_id) return;
     const { repoOwner: owner, repoName: repo } = continuationTarget(record);
     const marker = `<!-- propr-continuation-link:${record.source_pr}:${record.continuation_pr} -->`;
@@ -126,7 +127,7 @@ async function announceContinuation(octokit: Octokit, record: ContinuationRecord
     const existing = comments.find(comment => comment.body?.includes(marker) && comment.user?.type === 'Bot');
     const comment = existing || (await octokit.request('POST /repos/{owner}/{repo}/issues/{issue_number}/comments', {
         owner, repo, issue_number: record.source_pr,
-        body: `${marker}\nProPR does not have permission to publish to this contribution's branch. ${continuationStatus(record)}\n\nImplementation will continue there, preserving the contributor's commits from source SHA \`${record.source_sha}\`. This PR will remain open. Later implementation requests here will be routed to the continuation.`,
+        body: `${marker}\nProPR does not have permission to publish to this contribution's branch. ${continuationStatus(record)}\n\nImplementation will continue there, preserving the contributor's commits from source SHA \`${record.source_sha}\`. This PR will remain open. Later implementation requests here will be routed to the continuation. Run /review, /fix, or /ultrafix on the continuation; automated review/fix cycles on this original PR will stop.`,
     })).data;
     await db('pr_continuations').where({ repository: record.repository, source_pr: record.source_pr }).update({ comment_id: comment.id });
     record.comment_id = comment.id;
@@ -137,7 +138,12 @@ async function announceContinuation(octokit: Octokit, record: ContinuationRecord
  */
 export async function ensurePRContinuation(octokit: Octokit, ref: PullRequestReference, source: Contribution): Promise<ContinuationRecord> {
     const record = await findPRContinuation(ref) || await reserveContinuation(ref, source);
-    const ready = await ensurePullRequest(octokit, record);
-    await announceContinuation(octokit, ready);
-    return ready;
+    return ensurePullRequest(octokit, record);
+}
+
+/** Store before adoption/publication; clear only after the remote contains the work. */
+export async function savePublicationCheckpoint(record: ContinuationRecord, bundle: string | null): Promise<void> {
+    await db('pr_continuations').where({ repository: record.repository, source_pr: record.source_pr })
+        .update({ publication_bundle: bundle });
+    record.publication_bundle = bundle;
 }

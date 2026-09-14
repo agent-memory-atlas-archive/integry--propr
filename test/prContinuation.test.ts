@@ -8,8 +8,11 @@ import { execFileSync } from 'node:child_process';
 import { createHooklessGit as realGit } from '../packages/core/src/git/hooklessGit.js';
 import { up, down } from '../packages/core/src/db/migrations/20260914000000_add_pr_continuations.js';
 
+import { up as checkpointUp, down as checkpointDown } from '../packages/core/src/db/migrations/20260914010000_add_pr_publication_checkpoint.js';
+
 const database = knex({ client: 'better-sqlite3', connection: { filename: ':memory:' }, useNullAsDefault: true });
 await up(database);
+await checkpointUp(database);
 const root = await mkdtemp(path.join(tmpdir(), 'pr-continuation-'));
 const git = (cwd: string, ...args: string[]) => execFileSync('git', ['-c', 'core.hooksPath=/dev/null', '-c', 'user.name=Test Worker', '-c', 'user.email=worker@example.test', ...args], { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
 // All repositories are disposable fixtures; no workspace Git metadata is modified.
@@ -30,6 +33,8 @@ git(seed, 'push', 'origin', 'HEAD:refs/pull/42/head');
 
 let probeError: Error | undefined;
 let finalPushError: Error | undefined;
+let continuationPushError: Error | undefined;
+let failPRCreate = false;
 let calls: Array<{ operation: string; args: unknown }> = [];
 let cloneIndex = 0;
 const token = 'ghs_worker_installation_token';
@@ -37,6 +42,7 @@ const repoPath = (owner: string) => path.join(root, owner === 'upstream' ? 'upst
 
 await mock.module('@propr/core', { namedExports: {
     db: database,
+    logger: { warn: () => undefined },
     getAuthenticatedOctokit: async () => octokit,
     getRepoUrl: ({ repoOwner }: { repoOwner: string }) => repoPath(repoOwner),
     createHooklessGit: (worktree: string) => {
@@ -45,6 +51,7 @@ await mock.module('@propr/core', { namedExports: {
             raw: async (args: string[]) => {
                 calls.push({ operation: 'git', args });
                 if (args.includes('--dry-run') && probeError) throw probeError;
+                if (args[0] === 'push' && args.includes('HEAD:refs/heads/propr/continuation-pr-42') && continuationPushError) throw continuationPushError;
                 return actual.raw(args);
             },
             revparse: (args: string[]) => actual.revparse(args),
@@ -73,7 +80,11 @@ await mock.module('@propr/core', { namedExports: {
 } });
 
 const { PullRequestPublication } = await import('../src/jobs/prPublication.js');
-const { ensurePRContinuation, findPRContinuation, continuationStatus } = await import('../src/jobs/prContinuation.js');
+const { ensurePRContinuation, announceContinuation, findPRContinuation, continuationStatus } = await import('../src/jobs/prContinuation.js');
+await mock.module('../src/jobs/ultrafixOrchestrationService.js', { namedExports: {
+    stopLoop: async (...args: unknown[]) => { calls.push({ operation: 'stopLoop', args }); },
+} });
+const { stopOriginalPRReviewCycle } = await import('../src/jobs/prContinuationReview.js');
 const { isPublicationPermissionDenied } = await import('../src/jobs/prPublicationGit.js');
 const ref = { repoOwner: 'upstream', repoName: 'project', pullRequestNumber: 42 };
 const source = {
@@ -104,6 +115,7 @@ const octokit = {
             return { data: { status: tip === sourceSha ? 'identical' : 'ahead' } };
         }
         if (endpoint === 'POST /repos/{owner}/{repo}/pulls') {
+            if (failPRCreate) throw new Error('PR creation network error');
             if (prs.length) throw Object.assign(new Error('PR already exists'), { status: 422 });
             const pr = { number: 100, state: 'open', html_url: 'https://github.com/upstream/project/pull/100', body: options.body, base: { ref: options.base }, head: { ref: options.head, repo: { full_name: 'upstream/project' } } };
             prs.push(pr);
@@ -129,9 +141,9 @@ beforeEach(async () => {
     git(repoPath('upstream'), 'update-ref', '-d', 'refs/heads/propr/continuation-pr-42');
     git(repoPath('contributor'), 'update-ref', 'refs/heads/contribution', sourceSha);
     calls = []; prs = []; comments = []; probeError = undefined; finalPushError = undefined;
-    loseCreateResponse = false; failComment = false;
+    loseCreateResponse = false; failComment = false; failPRCreate = false; continuationPushError = undefined;
 });
-after(async () => { await down(database); await database.destroy(); await rm(root, { recursive: true, force: true }); });
+after(async () => { await checkpointDown(database); await down(database); await database.destroy(); await rm(root, { recursive: true, force: true }); });
 
 async function implement(worktree: string) {
     await writeFile(path.join(worktree, 'implementation.txt'), 'implemented once\n');
@@ -209,11 +221,12 @@ test('duplicate/concurrent requests and a lost create response reuse one durable
 
 test('a failed announcement is repaired on retry without duplicating the continuation', async () => {
     failComment = true;
-    await assert.rejects(ensurePRContinuation(octokit as never, ref, source), /Comment network error/);
+    const record = await ensurePRContinuation(octokit as never, ref, source);
+    await assert.rejects(announceContinuation(octokit as never, record), /Comment network error/);
     assert.equal((await findPRContinuation(ref))?.continuation_pr, 100);
     failComment = false;
-    await ensurePRContinuation(octokit as never, ref, source);
-    await ensurePRContinuation(octokit as never, ref, source);
+    await announceContinuation(octokit as never, record);
+    await announceContinuation(octokit as never, record);
     assert.equal(prs.length, 1);
     assert.equal(comments.length, 1);
 });
@@ -309,4 +322,100 @@ test('same-repository permission failures never create a fork continuation', asy
     await assert.rejects(publication.push(prepared.worktreeInfo.worktreePath), /Write access/);
     assert.equal(await findPRContinuation(ref), undefined);
     assert.equal(prs.length, 0);
+});
+
+
+test('announcement failure after implementation cannot prevent publication and retries independently', async () => {
+    const publication = session();
+    const { worktreeInfo } = await publication.prepare('implementation-announcement');
+    const produced = await implement(worktreeInfo.worktreePath);
+    finalPushError = denial();
+    failComment = true;
+    const result = await publication.push(worktreeInfo.worktreePath);
+    assert.equal(result.commitHash, produced);
+    assert.equal(git(repoPath('upstream'), 'rev-parse', 'propr/continuation-pr-42'), produced);
+    assert.equal((await findPRContinuation(ref))?.comment_id, null);
+    await rm(worktreeInfo.worktreePath, { recursive: true, force: true });
+    failComment = false;
+    const later = await session().prepare('retry-announcement');
+    assert.equal(git(later.worktreeInfo.worktreePath, 'rev-parse', 'HEAD'), produced);
+    assert.equal(comments.length, 1);
+    assert.equal(prs.length, 1);
+});
+
+for (const failure of ['PR creation', 'continuation push']) {
+    test(`checkpoint restores completed work after ${failure} fails and the worktree is deleted`, async () => {
+        const publication = session();
+        const { worktreeInfo } = await publication.prepare('checkpoint');
+        const produced = await implement(worktreeInfo.worktreePath);
+        finalPushError = denial();
+        if (failure === 'PR creation') failPRCreate = true;
+        else continuationPushError = new Error('Connection timed out');
+        await assert.rejects(publication.push(worktreeInfo.worktreePath));
+        assert.ok((await findPRContinuation(ref))?.publication_bundle);
+        await rm(worktreeInfo.worktreePath, { recursive: true, force: true });
+        failPRCreate = false;
+        continuationPushError = undefined;
+        const later = await session().prepare('recover-checkpoint');
+        assert.equal(git(later.worktreeInfo.worktreePath, 'rev-parse', 'HEAD'), produced);
+        assert.equal(git(repoPath('upstream'), 'rev-parse', 'propr/continuation-pr-42'), produced);
+        assert.equal((await findPRContinuation(ref))?.publication_bundle, null);
+        assert.equal(prs.length, 1);
+    });
+}
+
+test('failed recovery keeps its checkpoint for another worker', async () => {
+    probeError = denial();
+    const publication = session();
+    const { worktreeInfo } = await publication.prepare('adopt-first');
+    const produced = await implement(worktreeInfo.worktreePath);
+    continuationPushError = new Error('Connection timed out');
+    await assert.rejects(publication.push(worktreeInfo.worktreePath));
+    await rm(worktreeInfo.worktreePath, { recursive: true, force: true });
+    await assert.rejects(session().prepare('recovery-fails'), /Connection timed out/);
+    assert.ok((await findPRContinuation(ref))?.publication_bundle);
+    continuationPushError = undefined;
+    const recovered = await session().prepare('recovery-succeeds');
+    assert.equal(git(recovered.worktreeInfo.worktreePath, 'rev-parse', 'HEAD'), produced);
+    assert.equal((await findPRContinuation(ref))?.publication_bundle, null);
+});
+
+for (const commandMode of ['review', 'fix']) {
+    test(`${commandMode} on original stops the loop and directs users to the continuation`, async () => {
+        const continuation = await ensurePRContinuation(octokit as never, ref, source);
+        const options = { ref, continuation, commandMode, ultrafix: true, redis: {} as never, octokit: octokit as never };
+        const body = await stopOriginalPRReviewCycle(options);
+        assert.match(body!, /pull\/100/);
+        assert.match(body!, /original discussion remains available/);
+        assert.equal(calls.filter(c => c.operation === 'stopLoop').length, 1);
+        const before = calls.length;
+        assert.equal(await stopOriginalPRReviewCycle({ ...options, ref: { ...ref, pullRequestNumber: 100 } }), undefined);
+        assert.equal(calls.length, before);
+        assert.equal(await stopOriginalPRReviewCycle({ ...options, commandMode: 'default', ultrafix: false }), undefined);
+        assert.equal(calls.length, before);
+    });
+}
+
+
+test('checkpoint recovery merges an advanced continuation without losing either commit', async () => {
+    const publication = session();
+    const { worktreeInfo } = await publication.prepare('checkpoint-concurrent');
+    const produced = await implement(worktreeInfo.worktreePath);
+    finalPushError = denial();
+    continuationPushError = new Error('Connection timed out');
+    await assert.rejects(publication.push(worktreeInfo.worktreePath));
+    await rm(worktreeInfo.worktreePath, { recursive: true, force: true });
+    const concurrentPath = path.join(root, `external-${++cloneIndex}`);
+    git(root, 'clone', '--branch', 'propr/continuation-pr-42', repoPath('upstream'), concurrentPath);
+    await writeFile(path.join(concurrentPath, 'external.txt'), 'other work\n');
+    git(concurrentPath, 'add', '.');
+    git(concurrentPath, 'commit', '-m', 'Concurrent work');
+    const concurrent = git(concurrentPath, 'rev-parse', 'HEAD');
+    git(concurrentPath, 'push', 'origin', 'HEAD');
+    continuationPushError = undefined;
+    await session().prepare('merge-checkpoint');
+    const tip = git(repoPath('upstream'), 'rev-parse', 'propr/continuation-pr-42');
+    git(repoPath('upstream'), 'merge-base', '--is-ancestor', produced, tip);
+    git(repoPath('upstream'), 'merge-base', '--is-ancestor', concurrent, tip);
+    assert.equal((await findPRContinuation(ref))?.publication_bundle, null);
 });

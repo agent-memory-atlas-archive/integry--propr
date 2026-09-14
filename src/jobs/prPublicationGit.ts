@@ -1,3 +1,6 @@
+import { mkdtemp, readFile, writeFile, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
 import { createHooklessGit, getRepoUrl } from '@propr/core';
 import type { PullRequestGitTarget } from './prGitTarget.js';
 
@@ -58,5 +61,37 @@ export async function pushContinuationHead(worktreePath: string, target: PullReq
         return { rebased: false, commitHash: (await git.revparse(['HEAD'])).trim() };
     } catch (error) {
         throw sanitizedError(error, token);
+    }
+}
+
+/** Only commits beyond the captured contribution are stored in the database. */
+export async function createPublicationBundle(worktreePath: string, sourceSha: string): Promise<string | null> {
+    const git = createHooklessGit(worktreePath);
+    if ((await git.revparse(['HEAD'])).trim() === sourceSha) return null;
+    const directory = await mkdtemp(path.join(tmpdir(), 'propr-publication-'));
+    const bundlePath = path.join(directory, 'publication.bundle');
+    try {
+        await git.raw(['bundle', 'create', bundlePath, 'HEAD', `^${sourceSha}`]);
+        return (await readFile(bundlePath)).toString('base64');
+    } finally {
+        await rm(directory, { recursive: true, force: true });
+    }
+}
+
+export async function restorePublicationBundle(worktreePath: string, bundle: string): Promise<void> {
+    const directory = await mkdtemp(path.join(tmpdir(), 'propr-publication-'));
+    const bundlePath = path.join(directory, 'publication.bundle');
+    const git = createHooklessGit(worktreePath);
+    try {
+        await writeFile(bundlePath, Buffer.from(bundle, 'base64'));
+        await git.raw(['fetch', bundlePath, 'HEAD']);
+        try {
+            await git.raw(['merge', '--no-edit', 'FETCH_HEAD']);
+        } catch (error) {
+            await git.raw(['merge', '--abort']).catch(() => undefined);
+            throw error;
+        }
+    } finally {
+        await rm(directory, { recursive: true, force: true });
     }
 }
