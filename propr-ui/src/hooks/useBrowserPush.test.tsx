@@ -271,6 +271,36 @@ describe('BrowserPushProvider enrollment', () => {
     expect(requestPermission).not.toHaveBeenCalled();
   });
 
+  test('recognition without owner metadata protects account changes when the ownership lookup is unavailable', async () => {
+    permission = 'granted';
+    getSubscription.mockResolvedValue(subscription);
+    mocks.listBackend.mockResolvedValue({ subscriptions: [{ endpoint: subscription.endpoint, revokedAt: null }] });
+    expect(localStorage.getItem('propr:push-subscription-owner')).toBeNull();
+    const { rerender } = render(
+      <AuthProvider user={user}><BrowserPushProvider><Probe /></BrowserPushProvider></AuthProvider>,
+    );
+
+    await screen.findByText('subscribed');
+    expect(mocks.listBackend).toHaveBeenCalledTimes(1);
+    expect(unsubscribeBrowser).not.toHaveBeenCalled();
+    expect(localStorage.getItem('propr:push-subscription-owner')).toBe(user.id);
+
+    mocks.listBackend.mockRejectedValue(new Error('Ownership lookup unavailable'));
+    rerender(
+      <AuthProvider user={{ ...user, id: 'user-2' }}><BrowserPushProvider><Probe /></BrowserPushProvider></AuthProvider>,
+    );
+
+    await screen.findByText('ready');
+    expect(unsubscribeBrowser).toHaveBeenCalledTimes(1);
+    expect(await registration.pushManager.getSubscription()).toBeNull();
+    expect(localStorage.getItem('propr:push-subscription-owner')).toBeNull();
+    expect(mocks.listBackend).toHaveBeenCalledTimes(1);
+    expect(mocks.registerBackend).not.toHaveBeenCalled();
+    expect(mocks.revokeBackend).not.toHaveBeenCalled();
+    expect(subscribeBrowser).not.toHaveBeenCalled();
+    expect(requestPermission).not.toHaveBeenCalled();
+  });
+
   test('disabled instance does not attempt enrollment even with an existing subscription and permission', async () => {
     permission = 'granted';
     getSubscription.mockResolvedValue(subscription);

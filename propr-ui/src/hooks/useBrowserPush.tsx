@@ -239,6 +239,8 @@ export const BrowserPushProvider: React.FC<{ children: React.ReactNode }> = ({ c
             await localSubscription.unsubscribe();
             storePushOwner(null);
             localSubscription = null;
+          } else {
+            storePushOwner(userId);
           }
         }
       } catch (error) {
