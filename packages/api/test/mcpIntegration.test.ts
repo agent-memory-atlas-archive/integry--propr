@@ -353,8 +353,10 @@ test('MCP task, goal and plan lists paginate in deterministic newest-first order
   const queryPlan = await db.raw(`EXPLAIN QUERY PLAN ${taskQuery.sql}`, taskQuery.bindings);
   const accessPlan = queryPlan.map((row: { detail: string }) => row.detail).join('\n');
   assert.doesNotMatch(accessPlan, /SCAN task_history|MATERIALIZE latest_history/);
-  assert.match(accessPlan, /SEARCH task_history USING INDEX task_history_task_id_index/);
-  assert.match(accessPlan, /SEARCH plan_issues USING COVERING INDEX plan_issues_task_id_index/);
+  // SQLite may choose a single-column or composite index, with or without covering it.
+  // Require task-ID lookups without tying the regression to a particular query planner.
+  assert.match(accessPlan, /SEARCH task_history USING (?:COVERING )?INDEX \S+ \(task_id=\?\)/);
+  assert.match(accessPlan, /SEARCH plan_issues USING (?:COVERING )?INDEX \S+ \(task_id=\?\)/);
   const taskPageTwo = await page('list_tasks', taskPageOne.nextOffset);
   assert.deepEqual(taskPageOne.tasks.map((task: { task_id: string }) => task.task_id), ['10151', '10150']);
   assert.deepEqual(taskPageTwo.tasks.map((task: { task_id: string }) => task.task_id), ['10149', '1024']);
