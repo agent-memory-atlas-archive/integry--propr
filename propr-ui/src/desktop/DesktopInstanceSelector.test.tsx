@@ -25,7 +25,7 @@ describe('desktop selector identity and actions', () => {
     expect(button).toHaveAttribute('aria-haspopup', 'dialog');
     expect(button).toHaveAccessibleDescription(/GitHub account: @preview-engineering-account\. Switch instance or GitHub account/);
     expect(screen.getByText(profile.name)).toHaveAttribute('title', profile.name);
-    expect(button).toHaveTextContent('Remote instance');
+    expect(button).toHaveAccessibleDescription(/^Remote instance\./);
     expect(screen.queryByText('Switch')).not.toBeInTheDocument();
     fireEvent.click(button);
     expect(value.openProfileManager).toHaveBeenCalledOnce();
