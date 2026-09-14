@@ -222,13 +222,21 @@ export const BrowserPushProvider: React.FC<{ children: React.ReactNode }> = ({ c
         ? registrationResult.reason
         : null;
 
-    if (localSubscription && capabilities?.push.configured) {
+    if (localSubscription) {
       try {
-        // Inspect ownership without creating enrollment. An existing browser
-        // subscription may belong to another account or instance.
-        const { subscriptions } = await listPushSubscriptions();
-        if (!subscriptions.some(subscription => subscription.endpoint === localSubscription!.endpoint
-          && subscription.revokedAt === null)) localSubscription = null;
+        const owner = storedPushOwner();
+        if (owner !== null && owner !== userId) {
+          // Stop the previous account's notifications without enrolling this one.
+          await localSubscription.unsubscribe();
+          storePushOwner(null);
+          localSubscription = null;
+        } else if (capabilities?.push.configured) {
+          // Inspect ownership without creating enrollment. An existing browser
+          // subscription may belong to another account or instance.
+          const { subscriptions } = await listPushSubscriptions();
+          if (!subscriptions.some(subscription => subscription.endpoint === localSubscription!.endpoint
+            && subscription.revokedAt === null)) localSubscription = null;
+        }
       } catch (error) {
         localSubscription = null;
         reconciliationError = error;

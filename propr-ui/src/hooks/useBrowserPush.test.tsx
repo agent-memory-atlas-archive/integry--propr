@@ -106,7 +106,10 @@ describe('BrowserPushProvider enrollment', () => {
       value: class PushManager {},
     });
 
-    unsubscribeBrowser = vi.fn().mockResolvedValue(true);
+    unsubscribeBrowser = vi.fn(async () => {
+      getSubscription.mockResolvedValue(null);
+      return true;
+    });
     subscription = {
       endpoint: 'https://fcm.googleapis.com/fcm/send/browser-1',
       expirationTime: null,
@@ -185,14 +188,50 @@ describe('BrowserPushProvider enrollment', () => {
     if (owner) localStorage.setItem('propr:push-subscription-owner', owner);
     render(<AuthProvider user={user}><BrowserPushProvider><Probe /></BrowserPushProvider></AuthProvider>);
     await screen.findByText('ready');
-    expect(mocks.listBackend).toHaveBeenCalledTimes(1);
+    expect(mocks.listBackend).toHaveBeenCalledTimes(owner === 'another-user' ? 0 : 1);
     expect(mocks.registerBackend).not.toHaveBeenCalled();
     expect(subscribeBrowser).not.toHaveBeenCalled();
-    expect(unsubscribeBrowser).not.toHaveBeenCalled();
+    expect(unsubscribeBrowser).toHaveBeenCalledTimes(owner === 'another-user' ? 1 : 0);
     expect(requestPermission).not.toHaveBeenCalled();
     fireEvent.click(screen.getByRole('button', { name: 'Enable' }));
     await screen.findByText('subscribed');
     expect(mocks.registerBackend).toHaveBeenCalledTimes(1);
+  });
+
+  test.each([true, false])('unsubscribes the previous account on user change with push configured=%s', async configured => {
+    permission = 'granted';
+    getSubscription.mockResolvedValue(subscription);
+    localStorage.setItem('propr:push-subscription-owner', user.id);
+    mocks.listBackend.mockResolvedValue({ subscriptions: [{ endpoint: subscription.endpoint, revokedAt: null }] });
+    const { rerender } = render(
+      <AuthProvider user={user}><BrowserPushProvider><Probe /></BrowserPushProvider></AuthProvider>,
+    );
+    await screen.findByText('subscribed');
+    expect(unsubscribeBrowser).not.toHaveBeenCalled();
+
+    mocks.getCapabilities.mockResolvedValue({
+      push: { configured, vapidPublicKey: configured ? 'AQID_v8' : null },
+    });
+    mocks.listBackend.mockResolvedValue({ subscriptions: [] });
+    rerender(
+      <AuthProvider user={{ ...user, id: 'user-2' }}><BrowserPushProvider><Probe /></BrowserPushProvider></AuthProvider>,
+    );
+
+    await screen.findByText('ready');
+    expect(unsubscribeBrowser).toHaveBeenCalledTimes(1);
+    expect(localStorage.getItem('propr:push-subscription-owner')).toBeNull();
+    expect(subscribeBrowser).not.toHaveBeenCalled();
+    expect(mocks.registerBackend).not.toHaveBeenCalled();
+    expect(mocks.revokeBackend).not.toHaveBeenCalled();
+    expect(requestPermission).not.toHaveBeenCalled();
+
+    if (configured) {
+      fireEvent.click(screen.getByRole('button', { name: 'Enable' }));
+      await screen.findByText('subscribed');
+      expect(subscribeBrowser).toHaveBeenCalledTimes(1);
+      expect(mocks.registerBackend).toHaveBeenCalledTimes(1);
+      expect(localStorage.getItem('propr:push-subscription-owner')).toBe('user-2');
+    }
   });
 
   test('an already enrolled browser is recognized through a read-only ownership check', async () => {
