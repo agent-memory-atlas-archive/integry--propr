@@ -271,27 +271,7 @@ async function handleSlashCommand(opts: SlashCommandHandlerOptions): Promise<voi
     }
 
     if (commandMeta.mode === 'merge') {
-        // Defense in depth: processCommentEvent already rejects unlabelled PRs, but never
-        // dispatch automated merge work unless the PR carries a valid trigger label.
-        const { prLabels } = prefetchedPRData ?? await getPRBranchAndLabels(eventContext.eventType, payload, { owner, repo, prNumber });
-        if (!await hasValidTriggerLabel(prLabels)) {
-            correlatedLogger.info({ pullRequestNumber: prNumber, commentId: comment.id, commentAuthor, prLabels: prLabels.map(l => l.name) }, '/merge command ignored: PR has no valid trigger label');
-            return;
-        }
-
-        correlatedLogger.info({ pullRequestNumber: prNumber, commentId: comment.id, commentAuthor }, '/merge command detected, enqueuing merge job');
-        try {
-            await handleMergeCommand({
-                owner,
-                repoName: repo,
-                prNumber,
-                ...(payload.sender?.id === undefined ? {} : { userId: String(payload.sender.id) }),
-                redisClient,
-                correlationId,
-            });
-        } catch (mergeError) {
-            correlatedLogger.error({ pullRequestNumber: prNumber, error: (mergeError as Error).message }, 'Failed to handle /merge command');
-        }
+        await handleMergeSlashCommand({ comment, commentAuthor, eventContext, payload, config, correlationId, correlatedLogger, prefetchedPRData });
         return;
     }
 
@@ -340,6 +320,36 @@ async function handleSlashCommand(opts: SlashCommandHandlerOptions): Promise<voi
     }
 
     await enqueueNewCommentJob(strippedComment, commentAuthor, eventContext, { payload, redisClient, PR_FOLLOWUP_TRIGGER_KEYWORDS: config.PR_FOLLOWUP_TRIGGER_KEYWORDS, MODEL_LABEL_PATTERN: config.MODEL_LABEL_PATTERN, correlationId, commandMeta, commentRevisionIdentity: manualTakeover?.commentRevisionIdentity });
+}
+
+type MergeCommandOptions = Omit<SlashCommandHandlerOptions, 'parsedCommand'>;
+
+async function handleMergeSlashCommand(opts: MergeCommandOptions): Promise<void> {
+    const { comment, commentAuthor, eventContext, payload, config, correlationId, correlatedLogger, prefetchedPRData } = opts;
+    const { prNumber, owner, repo } = eventContext;
+    const { redisClient } = config;
+
+    // Defense in depth: processCommentEvent already rejects unlabelled PRs, but never
+    // dispatch automated merge work unless the PR carries a valid trigger label.
+    const { prLabels } = prefetchedPRData ?? await getPRBranchAndLabels(eventContext.eventType, payload, { owner, repo, prNumber });
+    if (!await hasValidTriggerLabel(prLabels)) {
+        correlatedLogger.info({ pullRequestNumber: prNumber, commentId: comment.id, commentAuthor, prLabels: prLabels.map(l => l.name) }, '/merge command ignored: PR has no valid trigger label');
+        return;
+    }
+
+    correlatedLogger.info({ pullRequestNumber: prNumber, commentId: comment.id, commentAuthor }, '/merge command detected, enqueuing merge job');
+    try {
+        await handleMergeCommand({
+            owner,
+            repoName: repo,
+            prNumber,
+            ...(payload.sender?.id === undefined ? {} : { userId: String(payload.sender.id) }),
+            redisClient,
+            correlationId,
+        });
+    } catch (mergeError) {
+        correlatedLogger.error({ pullRequestNumber: prNumber, error: (mergeError as Error).message }, 'Failed to handle /merge command');
+    }
 }
 
 type SwitchCommandOptions = Omit<SlashCommandHandlerOptions, 'parsedCommand'> & { commandMeta: CommandMeta & { mode: 'switch' } };
