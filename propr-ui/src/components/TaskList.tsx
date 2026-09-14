@@ -4,7 +4,7 @@ import { Inbox } from 'lucide-react';
 import { getTasks, getRepositoryStats } from '../api/proprApi';
 import { useSocket } from '../contexts/useSocket';
 import type { RepoOption } from './RepositorySelector';
-import type { TaskListProps, LoadConfig } from './TaskList/types';
+import type { Task, TaskGroup, TaskListProps, LoadConfig } from './TaskList/types';
 import { Filters } from './TaskList/Filters';
 import { Pagination } from './TaskList/Pagination';
 import {
@@ -46,6 +46,32 @@ const createRepoOptions = (repositories: Array<{ repository: string; total: numb
   return [allOption, ...repoOptions];
 };
 
+type TaskScopeState =
+  | { kind: 'loading' }
+  | { kind: 'error'; message: string }
+  | { kind: 'ready'; tasks: Task[]; groups: TaskGroup[]; refreshError: string | null };
+
+function resolveTaskScopeState(
+  loadedScope: string | null,
+  queryScope: string,
+  tasks: Task[],
+  groups: TaskGroup[],
+  error: { scope: string; message: string } | null,
+): TaskScopeState {
+  const currentError = error?.scope === queryScope ? error.message : null;
+  if (loadedScope !== queryScope) return currentError ? { kind: 'error', message: currentError } : { kind: 'loading' };
+  if (currentError && tasks.length === 0) return { kind: 'error', message: currentError };
+  return { kind: 'ready', tasks, groups, refreshError: currentError };
+}
+
+const TaskBlockingState: React.FC<{
+  state: Extract<TaskScopeState, { kind: 'loading' | 'error' }>;
+  dashboard: boolean;
+}> = ({ state, dashboard }) => {
+  if (state.kind === 'loading') return dashboard ? <DashboardLoadingState /> : <FullPageLoadingState />;
+  return dashboard ? <DashboardErrorState error={state.message} /> : <FullPageErrorState error={state.message} />;
+};
+
 const TaskList: React.FC<TaskListProps> = ({ limit, showViewAll = false, hideFilters = false }) => {
   const [searchParams, setSearchParams] = useSearchParams();
   const navigate = useNavigate();
@@ -77,7 +103,7 @@ const TaskList: React.FC<TaskListProps> = ({ limit, showViewAll = false, hideFil
   const [debouncedSearch, setDebouncedSearch] = useState<string>(urlSearch);
   const isInitialMount = useRef(true);
 
-  const [tasks, setTasks] = useState<import('./TaskList/types').Task[]>([]);
+  const [tasks, setTasks] = useState<Task[]>([]);
   const [loading, setLoading] = useState<boolean>(true);
   const [refreshing, setRefreshing] = useState<boolean>(false);
   const [loadedScope, setLoadedScope] = useState<string | null>(null);
@@ -253,22 +279,16 @@ const TaskList: React.FC<TaskListProps> = ({ limit, showViewAll = false, hideFil
     navigate(`/tasks/${taskId}`);
   }, [navigate]);
 
-  const hasCurrentScopeData = loadedScope === queryScope;
-  const visibleTasks = hasCurrentScopeData ? tasks : [];
-  const currentError = error?.scope === queryScope ? error.message : null;
-  const visibleGroupedTasks = hasCurrentScopeData ? groupedTasks : [];
+  const scopeState = resolveTaskScopeState(loadedScope, queryScope, tasks, groupedTasks, error);
 
   // A scope that has not completed successfully is loading even during the
   // render before its effect starts. This prevents old rows or an empty state
-  // from flashing when URL filters change.
-  if (!hasCurrentScopeData && !currentError) {
-    return hideFilters ? <DashboardLoadingState /> : <FullPageLoadingState />;
+  // from flashing when URL filters change. Errors remain distinct from empty results.
+  if (scopeState.kind !== 'ready') {
+    return <TaskBlockingState state={scopeState} dashboard={hideFilters} />;
   }
 
-  // Error state
-  if (currentError && visibleTasks.length === 0) {
-    return hideFilters ? <DashboardErrorState error={currentError} /> : <FullPageErrorState error={currentError} />;
-  }
+  const { tasks: visibleTasks, groups: visibleGroupedTasks, refreshError: currentError } = scopeState;
 
   const totalPages = Math.ceil(totalTasks / tasksPerPage);
 

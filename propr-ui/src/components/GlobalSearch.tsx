@@ -56,6 +56,20 @@ interface GlobalSearchProps {
   inputRef?: React.RefObject<HTMLInputElement | null>;
 }
 
+type SearchResultState = 'loading' | 'error' | 'empty' | 'results' | 'idle';
+
+function getSearchResultState(
+  isLoading: boolean,
+  error: string | null,
+  query: string,
+  hasResults: boolean,
+): SearchResultState {
+  if (isLoading && !hasResults) return 'loading';
+  if (!isLoading && error) return 'error';
+  if (!isLoading && query.trim() && !hasResults) return 'empty';
+  return hasResults ? 'results' : 'idle';
+}
+
 const GlobalSearch: React.FC<GlobalSearchProps> = ({ inputRef: externalInputRef }) => {
   const navigate = useNavigate();
   const internalInputRef = useRef<HTMLInputElement>(null);
@@ -145,6 +159,7 @@ const GlobalSearch: React.FC<GlobalSearchProps> = ({ inputRef: externalInputRef 
 
   // Should show dropdown
   const showDropdown = isOpen && (hasResults || isLoading || query.trim());
+  const resultState = getSearchResultState(isLoading, error, query, hasResults);
 
   return (
     <div ref={containerRef} className="relative w-full max-w-md">
@@ -189,14 +204,14 @@ const GlobalSearch: React.FC<GlobalSearchProps> = ({ inputRef: externalInputRef 
           className="desktop-toolbar-popover absolute left-0 right-0 top-full z-50 mt-1 max-h-[480px] overflow-y-auto border border-slate-200 bg-white shadow-xl ring-1 ring-black/5"
         >
           {/* Loading state */}
-          {isLoading && !hasResults && (
+          {resultState === 'loading' && (
             <div className="px-4 py-8 text-center">
               <Loader2 className="w-6 h-6 text-slate-400 animate-spin mx-auto mb-2" />
               <p className="text-sm text-slate-500">Searching...</p>
             </div>
           )}
 
-          {!isLoading && error && (
+          {resultState === 'error' && (
             <div role="alert" className="px-4 py-8 text-center">
               <p className="text-sm font-medium text-red-700">Couldn’t search</p>
               <p className="mt-1 text-xs text-red-600">{error}</p>
@@ -204,7 +219,7 @@ const GlobalSearch: React.FC<GlobalSearchProps> = ({ inputRef: externalInputRef 
           )}
 
           {/* No results state */}
-          {!isLoading && !error && query.trim() && !hasResults && (
+          {resultState === 'empty' && (
             <div className="px-4 py-8 text-center">
               <Search className="w-6 h-6 text-slate-300 mx-auto mb-2" />
               <p className="text-sm text-slate-500">No results found for "{query}"</p>

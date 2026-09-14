@@ -2,7 +2,7 @@ import React, { useEffect, useState, useCallback, useMemo, useRef } from 'react'
 import { useSearchParams } from 'react-router-dom';
 import { useDocumentTitle } from '../hooks/useDocumentTitle';
 import { getLlmLogs, LlmLogEntry, LlmLogsPagination } from '../api/llmLogsApi';
-import { Filter, Clock, Cpu, Zap, Info, LoaderCircle, X } from 'lucide-react';
+import { Filter, Clock, Cpu, Zap, Info, X } from 'lucide-react';
 import {
   formatDuration,
   formatTimestamp,
@@ -18,12 +18,34 @@ import {
   ExpandedRowDetails,
   PaginationFooter,
   SyntheticRoutingModelSummary,
+  LlmLogsBlockingState,
 } from './LlmLogsPageComponents';
 import { UsageBadge } from '../components/ui/UsageBadge';
 import { useCurrentUser, userHasPermission } from '../contexts/AuthContext';
 import { useAgentTankSuggestion } from '../hooks/useAgentTankSuggestion';
 
 const DEFAULT_PAGE_SIZE = 20;
+
+type LlmLogsScopeState =
+  | { kind: 'loading' }
+  | { kind: 'error'; message: string }
+  | { kind: 'ready'; logs: LlmLogEntry[]; refreshError: string | null };
+
+function resolveLlmLogsScopeState(
+  loadedScope: string | null,
+  queryScope: string,
+  logs: LlmLogEntry[],
+  error: { scope: string; message: string } | null,
+): LlmLogsScopeState {
+  const currentError = error?.scope === queryScope ? error.message : null;
+  if (loadedScope !== queryScope) return currentError ? { kind: 'error', message: currentError } : { kind: 'loading' };
+  if (currentError && logs.length === 0) return { kind: 'error', message: currentError };
+  return { kind: 'ready', logs, refreshError: currentError };
+}
+
+function isRefreshPending(loading: boolean, refreshing: boolean): boolean {
+  return loading || refreshing;
+}
 
 const LlmLogsPage: React.FC = () => {
   useDocumentTitle('LLM Log');
@@ -166,36 +188,12 @@ const LlmLogsPage: React.FC = () => {
     });
   };
 
-  const hasCurrentScopeData = loadedScope === queryScope;
-  const visibleLogs = hasCurrentScopeData ? logs : [];
-  const currentError = error?.scope === queryScope ? error.message : null;
-
-  if (!hasCurrentScopeData && !currentError) {
-    return (
-      <div className="flex flex-col h-full">
-        <div className="flex-shrink-0 bg-slate-50 border-b border-gray-200 px-6 py-4">
-          <h1 className="text-2xl font-bold text-gray-800">LLM Log</h1>
-        </div>
-        <div className="flex-1 overflow-auto px-6 py-6">
-          <div role="status" className="flex items-center gap-2 text-gray-500"><LoaderCircle className="h-4 w-4 animate-spin" aria-hidden="true" />Loading logs...</div>
-        </div>
-      </div>
-    );
+  const scopeState = resolveLlmLogsScopeState(loadedScope, queryScope, logs, error);
+  if (scopeState.kind !== 'ready') {
+    return <LlmLogsBlockingState error={scopeState.kind === 'error' ? scopeState.message : undefined} />;
   }
 
-  if (currentError && visibleLogs.length === 0) {
-    return (
-      <div className="flex flex-col h-full">
-        <div className="flex-shrink-0 bg-slate-50 border-b border-gray-200 px-6 py-4">
-          <h1 className="text-2xl font-bold text-gray-800">LLM Log</h1>
-        </div>
-        <div className="flex-1 overflow-auto px-6 py-6">
-          <div className="p-4 bg-red-50 border border-red-200 rounded-lg text-red-700">{currentError}</div>
-        </div>
-      </div>
-    );
-  }
-
+  const { logs: visibleLogs, refreshError: currentError } = scopeState;
   const totalPages = pagination?.totalPages || 1;
 
   return (
@@ -264,7 +262,7 @@ const LlmLogsPage: React.FC = () => {
       {/* Scrollable Content Area */}
       <div className="flex-1 overflow-auto">
         {currentError && <div className="mx-4 mt-4 border-l-2 border-red-500 bg-red-50 p-3 text-sm text-red-700 sm:mx-6">Couldn’t refresh logs: {currentError}</div>}
-        {(loading || refreshing) && <div role="status" className="px-4 pt-3 text-xs text-slate-500 sm:px-6">Refreshing logs…</div>}
+        {isRefreshPending(loading, refreshing) && <div role="status" className="px-4 pt-3 text-xs text-slate-500 sm:px-6">Refreshing logs…</div>}
         {/* Agent Tank Suggestion Banner */}
         {canManageAgents && showAgentTankSuggestion && (
           <div className="mx-4 sm:mx-6 mt-4 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 flex items-start gap-3">

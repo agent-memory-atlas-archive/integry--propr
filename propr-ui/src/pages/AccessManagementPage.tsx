@@ -31,6 +31,14 @@ function auditDescription(entry: InstanceRoleAuditEntry): string {
   return `${entry.action.replace(/_/g, ' ')} for`;
 }
 
+type CollectionState = 'refreshing' | 'loading' | 'error' | 'empty' | 'ready';
+
+function getCollectionState(loading: boolean, itemCount: number, error: string): CollectionState {
+  if (loading) return itemCount > 0 ? 'refreshing' : 'loading';
+  if (error && itemCount === 0) return 'error';
+  return itemCount === 0 ? 'empty' : 'ready';
+}
+
 const AccessManagementPage: React.FC = () => {
   const currentUser = useCurrentUser();
   const refreshCurrentUser = useRefreshCurrentUser();
@@ -123,6 +131,8 @@ const AccessManagementPage: React.FC = () => {
 
   const canStoreBootstrapRole = currentUser?.authorizationSource === 'bootstrap'
     && !data.members.some(member => member.githubUserId === currentUser.id && member.role === 'admin');
+  const memberState = getCollectionState(loading, data.members.length, error);
+  const auditState = getCollectionState(auditLoading, auditEntries.length, auditError);
 
   return (
     <div className="mx-auto max-w-5xl px-4 py-8 sm:px-6">
@@ -211,11 +221,11 @@ const AccessManagementPage: React.FC = () => {
         <div className="border-b border-gray-200 px-5 py-4">
           <h2 className="font-medium text-gray-900">Explicit assignments</h2>
         </div>
-        {loading && data.members.length > 0 && <div role="status" className="border-b border-gray-100 px-5 py-2 text-xs text-gray-500">Refreshing assignments…</div>}
-        {loading && data.members.length === 0 ? (
+        {memberState === 'refreshing' && <div role="status" className="border-b border-gray-100 px-5 py-2 text-xs text-gray-500">Refreshing assignments…</div>}
+        {memberState === 'loading' ? (
           <div className="p-8 text-center text-sm text-gray-500">Loading access assignments…</div>
-        ) : error && data.members.length === 0 ? null
-        : data.members.length === 0 ? (
+        ) : memberState === 'error' ? null
+        : memberState === 'empty' ? (
           <div className="p-8 text-center text-sm text-gray-500">No durable assignments yet.</div>
         ) : (
           <ul className="divide-y divide-gray-200">
@@ -268,11 +278,11 @@ const AccessManagementPage: React.FC = () => {
           <h2 className="font-medium text-gray-900">Recent role changes</h2>
         </div>
         {auditError && <div role="alert" className="border-b border-red-200 bg-red-50 px-5 py-3 text-sm text-red-700">{auditError}</div>}
-        {auditLoading && auditEntries.length > 0 && <div role="status" className="border-b border-gray-100 px-5 py-2 text-xs text-gray-500">Refreshing role changes…</div>}
-        {auditLoading && auditEntries.length === 0 ? (
+        {auditState === 'refreshing' && <div role="status" className="border-b border-gray-100 px-5 py-2 text-xs text-gray-500">Refreshing role changes…</div>}
+        {auditState === 'loading' ? (
           <div className="p-6 text-sm text-gray-500">Loading role changes…</div>
-        ) : auditError && auditEntries.length === 0 ? null
-        : auditEntries.length === 0 ? (
+        ) : auditState === 'error' ? null
+        : auditState === 'empty' ? (
           <div className="p-6 text-sm text-gray-500">No role changes recorded yet.</div>
         ) : (
           <ul className="divide-y divide-gray-100">
