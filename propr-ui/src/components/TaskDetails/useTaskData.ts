@@ -20,6 +20,9 @@ import { useToast } from '../ui/useToast';
 import { useSocket } from '../../contexts/useSocket';
 import type { TaskUpdatePayload, TaskLiveUpdatePayload } from '@propr/shared';
 import { isAnalysisData, normalizeAnalysisData } from './apiDataGuards';
+import { useLiveRefreshScheduler } from '../../hooks/useLiveRefreshScheduler';
+import { useCurrentUser } from '../../contexts/AuthContext';
+import { getDesktopSocketConfigurationKey } from '../../api/apiClient';
 
 interface TaskHistoryData {
   history?: HistoryItem[];
@@ -147,19 +150,33 @@ export const useTaskData = (taskId: string | undefined) => {
   const [stopFailed, setStopFailed] = useState<boolean>(false);
   const [deletingTask, setDeletingTask] = useState<boolean>(false);
   const { addToast } = useToast();
+  const currentUser = useCurrentUser();
   const { subscribeToTask, unsubscribeFromTask, onTaskUpdate, isConnected, subscribeToTaskLive, unsubscribeFromTaskLive, onTaskLiveUpdate } = useSocket();
   // Track the last notified terminal state to avoid duplicate toasts
   const lastNotifiedStateRef = useRef<string | null>(null);
   // Track if we've received initial data from WebSocket (to distinguish initial vs incremental updates)
   const hasReceivedInitialDataRef = useRef<boolean>(false);
+  // A route parameter can change without unmounting this hook. Late responses
+  // from the previous task must never replace the newly selected task's data.
+  const activeTaskIdRef = useRef(taskId);
+  activeTaskIdRef.current = taskId;
+  const requestScopeKey = `${getDesktopSocketConfigurationKey()}\0${currentUser?.id ?? ''}\0${taskId ?? ''}`;
+  const activeRequestScopeRef = useRef(requestScopeKey);
+  activeRequestScopeRef.current = requestScopeKey;
+  const latestHistoryRef = useRef(history);
+  latestHistoryRef.current = history;
 
   // Fetch task history data
   const fetchTaskHistory = useCallback(async () => {
     if (!taskId) return;
+    const requestedScope = requestScopeKey;
 
     try {
       const data = await getTaskHistory(taskId) as TaskHistoryData;
-      setHistory(data.history || []);
+      if (activeRequestScopeRef.current !== requestedScope) return data;
+      const nextHistory = data.history || [];
+      latestHistoryRef.current = nextHistory;
+      setHistory(nextHistory);
       setTaskInfo(data.taskInfo || null);
       setUsageMetricRecords(data.usageMetricRecords || []);
       return data;
@@ -167,34 +184,54 @@ export const useTaskData = (taskId: string | undefined) => {
       console.error('Error fetching task history:', err);
       throw err;
     }
-  }, [taskId]);
+  }, [requestScopeKey, taskId]);
 
   const fetchPersistedLiveDetails = useCallback(async () => {
     if (!taskId) return null;
+    const requestedScope = requestScopeKey;
 
     try {
       const data = await getTaskLiveDetails(taskId) as LiveDetails;
-      setLiveDetails({
-        events: data.events || [],
-        todos: data.todos || [],
-        currentTask: data.currentTask || null,
-        tokenUsage: data.tokenUsage || null,
-      });
+      if (activeRequestScopeRef.current !== requestedScope) return data;
+      // The socket subscription is established in parallel with this fallback
+      // read. Never let an older HTTP snapshot replace a newer full/incremental
+      // socket payload that arrived while the request was pending.
+      if (!hasReceivedInitialDataRef.current) {
+        setLiveDetails({
+          events: data.events || [],
+          todos: data.todos || [],
+          currentTask: data.currentTask || null,
+          tokenUsage: data.tokenUsage || null,
+        });
+      }
       return data;
     } catch (err) {
       console.error('Error fetching persisted live details:', err);
       return null;
     }
-  }, [taskId]);
+  }, [requestScopeKey, taskId]);
+
+  const scheduleTaskHistoryRefresh = useLiveRefreshScheduler({
+    isConnected,
+    refresh: fetchTaskHistory,
+    scopeKey: requestScopeKey,
+  });
+
+  useEffect(() => {
+    lastNotifiedStateRef.current = null;
+    hasReceivedInitialDataRef.current = false;
+  }, [requestScopeKey]);
 
   // Handle task update from WebSocket
-  const handleTaskUpdate = useCallback(async (payload: TaskUpdatePayload) => {
-    if (payload.taskId !== taskId) return;
+  const handleTaskUpdate = useCallback((payload: TaskUpdatePayload) => {
+    if (payload.taskId !== activeTaskIdRef.current) return;
 
     console.log('[useTaskData] Received task update via WebSocket:', payload);
 
-    // Refresh task history when we receive an update
-    await fetchTaskHistory();
+    // A task can emit several state/progress notifications close together.
+    // Coalesce those invalidations and serialize a trailing read when a newer
+    // update arrives while the current request is pending.
+    scheduleTaskHistoryRefresh();
 
     // Check for terminal states and show toast notifications
     const state = payload.state?.toUpperCase() || '';
@@ -211,13 +248,13 @@ export const useTaskData = (taskId: string | undefined) => {
         message: 'Task execution failed',
       });
     }
-  }, [taskId, fetchTaskHistory, addToast]);
+  }, [scheduleTaskHistoryRefresh, addToast]);
 
   // Handle task live update from WebSocket
   // This updates the terminal output directly from WebSocket data - no HTTP calls needed
   // WebSocket sends full state on initial subscription, then only new events on updates
   const handleTaskLiveUpdate = useCallback((payload: TaskLiveUpdatePayload) => {
-    if (payload.taskId !== taskId) return;
+    if (payload.taskId !== activeTaskIdRef.current) return;
 
     const newEvents: LiveEvent[] = payload.events || [];
     const newTodos = normalizeLiveTodos(payload.todos || []);
@@ -242,23 +279,31 @@ export const useTaskData = (taskId: string | undefined) => {
 
   // Initial data fetch
   useEffect(() => {
+    let active = true;
     const fetchInitialData = async () => {
       if (!taskId) return;
 
       try {
         setLoading(true);
-        await fetchTaskHistory();
+        setError(null);
+        // Initial reads are immediate, but use the same coordinator as socket
+        // invalidations so an update during this request becomes one trailing
+        // authoritative read instead of an overlapping request.
+        await scheduleTaskHistoryRefresh.refreshNow();
+        if (!active) return;
         await fetchPersistedLiveDetails();
       } catch (err) {
+        if (!active) return;
         setError((err as Error).message);
         console.error('Error fetching task history:', err);
       } finally {
-        setLoading(false);
+        if (active) setLoading(false);
       }
     };
 
-    fetchInitialData();
-  }, [taskId, fetchTaskHistory, fetchPersistedLiveDetails]);
+    void fetchInitialData();
+    return () => { active = false; };
+  }, [taskId, scheduleTaskHistoryRefresh, fetchPersistedLiveDetails]);
 
   // Subscribe to WebSocket events for this task
   useEffect(() => {
@@ -284,7 +329,7 @@ export const useTaskData = (taskId: string | undefined) => {
       // Reset initial data flag on cleanup so re-subscription gets fresh state
       hasReceivedInitialDataRef.current = false;
     };
-  }, [taskId, isConnected, subscribeToTask, unsubscribeFromTask, subscribeToTaskLive, unsubscribeFromTaskLive, onTaskUpdate, onTaskLiveUpdate, handleTaskUpdate, handleTaskLiveUpdate]);
+  }, [requestScopeKey, taskId, isConnected, subscribeToTask, unsubscribeFromTask, subscribeToTaskLive, unsubscribeFromTaskLive, onTaskUpdate, onTaskLiveUpdate, handleTaskUpdate, handleTaskLiveUpdate]);
 
   // Fetch analysis data (separate from task updates, typically only needed once)
   useEffect(() => {
@@ -327,7 +372,7 @@ export const useTaskData = (taskId: string | undefined) => {
       const result: StopExecutionResponse = await stopTaskExecution(taskId);
 
       // Immediately refresh task history to show the new state
-      await fetchTaskHistory();
+      await scheduleTaskHistoryRefresh.refreshNow();
 
       // If container was stopped successfully, clear stopping state immediately
       // Otherwise, poll a couple more times to wait for state to update
@@ -338,10 +383,11 @@ export const useTaskData = (taskId: string | undefined) => {
         let pollCount = 0;
         const pollInterval = setInterval(async () => {
           pollCount++;
-          const updatedData = await fetchTaskHistory();
+          await scheduleTaskHistoryRefresh.refreshNow();
 
           // Check if task is now in a terminal state
-          const latestState = updatedData?.history?.[updatedData.history.length - 1]?.state?.toUpperCase();
+          const latestHistory = latestHistoryRef.current;
+          const latestState = latestHistory[latestHistory.length - 1]?.state?.toUpperCase();
           const isTerminal = ['COMPLETED', 'FAILED', 'CANCELLED'].includes(latestState || '');
 
           if (isTerminal || pollCount >= 5) {
