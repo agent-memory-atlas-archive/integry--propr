@@ -163,7 +163,7 @@ export function summarizeGoal(row: JsonObject, now = Date.now()): JsonObject {
   };
 }
 
-export function summarizePlan(row: JsonObject, issues: JsonObject[], now = Date.now(), relationLimit = RELATION_LIMIT): JsonObject {
+function summarizePlanIssues(issues: JsonObject[]) {
   const counts = { total: issues.length, pending: 0, active: 0, merged: 0, closed: 0 };
   const agentModels = new Map<string, { agent_alias: string; model_name: string }>();
   const pullRequests = new Map<number, string>();
@@ -179,6 +179,11 @@ export function summarizePlan(row: JsonObject, issues: JsonObject[], now = Date.
     const number = positiveInteger(issue.pr_number);
     if (number) pullRequests.set(number, pullRequestState(status, true)!);
   }
+  return { counts, agentModels, pullRequests };
+}
+
+export function summarizePlan(row: JsonObject, issues: JsonObject[], now = Date.now(), relationLimit = RELATION_LIMIT): JsonObject {
+  const { counts, agentModels, pullRequests } = summarizePlanIssues(issues);
   const status = text(row.status) ?? 'draft';
   const completedAt = status === 'merged' ? row.updated_at : null;
   const trace = parseObject(row.generation_trace);
