@@ -1,12 +1,14 @@
 /* eslint-disable max-lines -- stateful header projections stay together so partial refreshes commit atomically */
 import { useState, useEffect, useCallback, useRef } from 'react';
-import { getQueueStats, getTasks, getSystemStatus } from '../api/proprApi';
+import { getQueueStats, getTasks } from '../api/proprApi';
 import { getDrafts, DraftListItem } from '../api/plannerApi';
 import { useSocket } from '../contexts/useSocket';
 import { isDesktopRuntime } from '../config/runtimeMode';
 import type { DraftUpdatePayload, QueueStatsUpdatePayload, TaskUpdatePayload } from '@propr/shared';
 import { useCurrentUser } from '../contexts/AuthContext';
 import { getDesktopSocketConfigurationKey } from '../api/apiClient';
+import { useSharedSystemStatus } from '../contexts/SystemStatusContext';
+import type { SystemStatus } from '../api/proprTypes';
 import {
   coalesceHeaderStatsRead,
   type HeaderStatsResource,
@@ -123,6 +125,7 @@ export interface HeaderStats {
 
 export function useHeaderStats(): HeaderStats {
   const currentUser = useCurrentUser();
+  const { getStatus, refreshStatus } = useSharedSystemStatus();
   const requestIdentityKey = `${getDesktopSocketConfigurationKey()}\0${currentUser?.id ?? 'anonymous'}`;
   const [runningCount, setRunningCount] = useState<number>(0);
   const [runningItems, setRunningItems] = useState<RunningItem[]>([]);
@@ -276,7 +279,7 @@ export function useHeaderStats(): HeaderStats {
           ? coalesceHeaderStatsRead(requestIdentityKey, 'tasks', () =>
             getTasks({ limit: 30, forReview: true, excludeMerged: true })) : null,
         status: requested.has('status')
-          ? coalesceHeaderStatsRead(requestIdentityKey, 'status', getSystemStatus) : null,
+          ? coalesceHeaderStatsRead(requestIdentityKey, 'status', isInitialLoad ? getStatus : refreshStatus) : null,
       };
       const entries = await Promise.all((Object.entries(reads) as Array<[
         HeaderStatsResource, Promise<unknown> | null
@@ -343,7 +346,7 @@ export function useHeaderStats(): HeaderStats {
           setReviewGroups(reviewableGroups);
           setReviewCount(reviewableGroups.length);
         } else {
-          setSystemHealth(buildSystemHealth(value as Awaited<ReturnType<typeof getSystemStatus>>));
+          setSystemHealth(buildSystemHealth(value as SystemStatus));
         }
       }
 
@@ -390,7 +393,7 @@ export function useHeaderStats(): HeaderStats {
         setIsLoading(false);
       }
     }
-  }, [requestIdentityKey]);
+  }, [getStatus, refreshStatus, requestIdentityKey]);
   /* eslint-enable complexity */
 
   // Refresh function for manual refresh
