@@ -179,15 +179,15 @@ interface MetricRowProps {
 // into its own pill would erase the visible difference between single-digit
 // values (at 56px, 8% / 12% / 17% must resolve as 4.5 / 6.7 / 9.5px).
 const MetricRow: React.FC<MetricRowProps> = ({ metric, compact = false }) => (
-  <div className={`flex items-center justify-between ${compact ? 'h-5' : 'py-1'}`}>
+  <div className={`flex min-w-0 items-center gap-2 ${compact ? 'h-5' : 'py-1'}`}>
     <span
-      className="text-[10px] text-gray-500 truncate max-w-[100px]"
+      className="min-w-0 max-w-[100px] flex-1 truncate text-[10px] text-gray-500"
       title={metric.title ?? (metric.resetsIn ? `Resets in ${metric.resetsIn}` : metric.label)}
     >
       {metric.displayLabel ?? metric.label}
     </span>
-    <div className="flex items-center gap-1.5">
-      <div className="w-14 h-1.5 bg-gray-200 rounded-full overflow-hidden">
+    <div className="flex flex-none items-center gap-1">
+      <div className="h-1.5 w-14 flex-none overflow-hidden rounded-full bg-gray-200">
         <div
           className={`h-full ${getStatusColor(metric.percent)}`}
           style={{ width: `${Math.min(100, metric.percent)}%` }}
@@ -222,9 +222,9 @@ const AgentRow: React.FC<AgentRowProps> = ({ agent, expanded, onToggle }) => {
     ?? (agent.name.charAt(0).toUpperCase() + agent.name.slice(1));
 
   return (
-    <div className="py-1">
+    <div className="min-w-0 py-1">
       <div
-        className={`flex items-center justify-between ${expandable ? 'cursor-pointer hover:bg-slate-900/5 -mx-1 px-1 rounded' : ''}`}
+        className={`flex min-w-0 items-center gap-1 ${expandable ? 'cursor-pointer rounded hover:bg-slate-900/5 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-slate-400' : ''}`}
         onClick={expandable ? onToggle : undefined}
         role={expandable ? 'button' : undefined}
         tabIndex={expandable ? 0 : undefined}
@@ -236,7 +236,7 @@ const AgentRow: React.FC<AgentRowProps> = ({ agent, expanded, onToggle }) => {
           }
         } : undefined}
       >
-        <div className="flex items-center gap-1.5 text-gray-600">
+        <div className="flex min-w-0 flex-1 items-center gap-1.5 text-gray-600">
           {/* Fixed-size chevron slot keeps provider icons and labels on the same
               vertical axis; error-only rows leave the slot empty. */}
           <span className="flex h-3.5 w-3.5 flex-none items-center justify-center">
@@ -247,18 +247,18 @@ const AgentRow: React.FC<AgentRowProps> = ({ agent, expanded, onToggle }) => {
             )}
           </span>
           <ProviderLogo provider={agent.name} className="w-3.5 h-3.5 flex-none" />
-          <span className="text-xs leading-none">{displayName}</span>
+          <span className="min-w-0 truncate text-xs leading-none" title={displayName}>{displayName}</span>
         </div>
         {/* leading-none keeps the right-hand text boxes shorter than the 14px icon
             slot on the left, so the row height stays an even 14px and the chevron,
             provider icon, and label center on whole pixels. */}
         {agent.error ? (
-          <span className="text-[10px] leading-none text-red-500">Error</span>
+          <span className="flex-none text-[10px] leading-none text-red-500">Error</span>
         ) : primaryMetric && !expanded ? (
-          <div className="flex items-center gap-1.5">
+          <div className="flex flex-none items-center gap-1">
             {/* Same w-14 track and rectangular fill as MetricRow so a given
                 percentage paints the same pixels in every row. */}
-            <div className="w-14 h-1.5 bg-gray-200 rounded-full overflow-hidden">
+            <div className="h-1.5 w-14 flex-none overflow-hidden rounded-full bg-gray-200">
               <div
                 className={`h-full ${getStatusColor(primaryMetric.percent)}`}
                 style={{ width: `${Math.min(100, primaryMetric.percent)}%` }}
@@ -283,9 +283,9 @@ const AgentRow: React.FC<AgentRowProps> = ({ agent, expanded, onToggle }) => {
           label (chevron 14 + gap 6 + icon 14 + gap 6), matching standard
           tree-view text-under-text alignment. */}
       {expanded && metrics.length > 0 && (
-        <div className="ml-[7px] mt-0.5">
+        <div className="ml-[7px] mt-0.5 min-w-0">
           {metrics.map((metric, idx) => (
-            <div key={idx} className="relative pl-[33px]">
+            <div key={idx} className="relative min-w-0 pl-[33px]">
               <span
                 aria-hidden="true"
                 className={`absolute left-0 top-0 w-px bg-gray-200 ${
@@ -382,7 +382,9 @@ const AgentTankSidebar: React.FC<AgentTankSidebarProps> = ({ allowManualRefresh 
           </button>
         )}
       </div>
-      <div className={scrollable ? 'max-h-56 overflow-y-auto' : 'space-y-0'}>
+      <div className={scrollable
+        ? 'agent-tank-scrollport max-h-56 min-w-0 max-w-full overflow-x-hidden overflow-y-auto'
+        : 'agent-tank-scrollport min-w-0 max-w-full space-y-0'}>
         {agents.map(agent => (
           <AgentRow
             key={agent.name}
