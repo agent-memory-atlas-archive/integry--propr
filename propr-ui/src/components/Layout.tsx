@@ -33,6 +33,54 @@ interface NavItem {
   icon: React.FC<{ className?: string; strokeWidth?: number | string }>;
 }
 
+interface NavigationState {
+  currentPath: string;
+  desktop: boolean;
+  hasAgents: boolean;
+  hasRepos: boolean;
+  hasTasks: boolean;
+  taskCount: number;
+  goalCount: number;
+  generatingPlansCount: number;
+  unreadCount: number | null;
+}
+
+const CORE_NAVIGATION: NavItem[] = [
+  { name: 'Dashboard', href: '/', icon: LayoutDashboard },
+  { name: 'Inbox', href: '/inbox', icon: Inbox },
+  { name: 'Tasks', href: '/tasks', icon: ListTodo },
+  { name: 'Goals', href: '/goals', icon: Target },
+  { name: 'Plans', href: '/plans', icon: ScrollText },
+];
+
+function getResourceNavigation(canManageAgents: boolean, canManageMembers: boolean): NavItem[] {
+  const navigation: NavItem[] = [{ name: 'Repositories', href: '/repositories', icon: BookMarked }];
+  if (canManageAgents) navigation.push({ name: 'Coding Agents', href: '/ai-agents', icon: Bot });
+  navigation.push(
+    { name: 'LLM Log', href: '/llm-logs', icon: Cpu },
+    { name: 'Settings', href: '/settings', icon: Settings },
+  );
+  if (canManageMembers) navigation.push({ name: 'Access', href: '/admin/members', icon: ShieldCheck });
+  return navigation;
+}
+
+function isNavigationItemActive(currentPath: string, itemPath: string): boolean {
+  // Dashboard should only be active on exact match.
+  if (itemPath === '/') return currentPath === '/';
+
+  // Plans also owns studio routes.
+  if (itemPath === '/plans') {
+    return currentPath === '/plans' || currentPath.startsWith('/plans/') || currentPath.startsWith('/studio');
+  }
+
+  // Repository content browsing includes summaries routes.
+  if (itemPath === '/repositories') {
+    return currentPath === '/repositories' || currentPath.startsWith('/repositories/') || currentPath.startsWith('/summaries');
+  }
+
+  return currentPath === itemPath || currentPath.startsWith(itemPath + '/');
+}
+
 // Single badge component for all nav counts: forms a circle for one digit and
 // stretches horizontally for wider content (e.g. "99+") with the same radius and padding.
 // The parent nav row is `flex items-center justify-between`, which keeps the badge on
@@ -50,6 +98,72 @@ function WorkCountBadge({ name, taskCount, goalCount }: { name: string; taskCoun
   const count = name === 'Tasks' ? taskCount : name === 'Goals' ? goalCount : 0;
   if (count <= 0) return null;
   return <NavBadge>{count}</NavBadge>;
+}
+
+function getReadinessMessage(name: string, state: NavigationState): string | null {
+  if (name === 'Repositories' && !state.hasRepos) return 'No repositories configured';
+  if (name === 'Coding Agents' && !state.hasAgents) return 'No AI agents configured';
+  if (name === 'Tasks' && state.taskCount === 0 && !state.hasTasks && state.hasAgents && state.hasRepos) {
+    return 'No tasks created yet';
+  }
+  return null;
+}
+
+function ReadinessIndicator({ message, desktop }: { message: string | null; desktop: boolean }) {
+  if (!message) return null;
+  if (!desktop) return <span className="w-2 h-2 flex-none rounded-full bg-amber-500" title={message} />;
+  return (
+    <span className="flex h-4 w-4 flex-none items-center justify-center text-amber-600" role="img" aria-label={message} title={message}>
+      <TriangleAlert className={`${SIDEBAR_ICON_STROKE_CLASS} h-3.5 w-3.5`} strokeWidth={SIDEBAR_ICON_STROKE_WIDTH} aria-hidden="true" />
+    </span>
+  );
+}
+
+function InboxBadge({ name, unreadCount }: { name: string; unreadCount: number | null }) {
+  if (name !== 'Inbox' || unreadCount === null || unreadCount <= 0) return null;
+  return <NavBadge>{unreadCount > 99 ? '99+' : unreadCount}</NavBadge>;
+}
+
+function PlansBadge({ name, count }: { name: string; count: number }) {
+  if (name !== 'Plans' || count <= 0) return null;
+  return <NavBadge>{count}</NavBadge>;
+}
+
+function getNavigationItemClassName(desktop: boolean, active: boolean): string {
+  const dimensions = desktop
+    ? 'mx-2 rounded-[6px] border-0 px-2 py-1.5 tracking-tight'
+    : 'border-l-4 px-4 py-2';
+  if (active) {
+    return `${dimensions} ${desktop
+      ? 'bg-black/5 font-normal text-slate-900'
+      : 'bg-slate-50 font-medium text-slate-900 border-primary-600'}`;
+  }
+  return `${dimensions} ${desktop
+    ? 'font-normal text-slate-600 hover:bg-slate-900/5 hover:text-slate-900'
+    : 'font-normal text-gray-600 hover:bg-gray-50 hover:text-gray-900 border-transparent'}`;
+}
+
+function NavigationItem({ item, state }: { item: NavItem; state: NavigationState }) {
+  const readinessMessage = getReadinessMessage(item.name, state);
+  const active = isNavigationItemActive(state.currentPath, item.href);
+  return (
+    <Link
+      to={item.href}
+      className={`flex items-center justify-between text-[13px] leading-5 transition-colors duration-150 ${getNavigationItemClassName(state.desktop, active)}`}
+    >
+      <span className="flex min-w-0 items-center">
+        <item.icon className={`${SIDEBAR_ICON_STROKE_CLASS} mr-2.5 h-4 w-4 flex-none`} strokeWidth={SIDEBAR_ICON_STROKE_WIDTH} />
+        <span className="truncate">{item.name}</span>
+      </span>
+      {/* Counts and readiness indicators share the trailing rail. */}
+      <span className="flex flex-none items-center justify-end gap-1.5">
+        <ReadinessIndicator message={readinessMessage} desktop={state.desktop} />
+        <WorkCountBadge name={item.name} taskCount={state.taskCount} goalCount={state.goalCount} />
+        <InboxBadge name={item.name} unreadCount={state.unreadCount} />
+        <PlansBadge name={item.name} count={state.generatingPlansCount} />
+      </span>
+    </Link>
+  );
 }
 
 const Layout: React.FC<LayoutProps> = ({ children }) => {
@@ -90,57 +204,21 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
   // first-class work type its own sidebar count.
   const displayTaskCount = Math.max(0, activeQueueCount - generatingPlansCount - activeGoalCount);
 
-  // The sidebar reads top-to-bottom as three logical zones: core workflow
-  // ("what am I doing today?"), resources and configuration, and
-  // ambient usage data and account information.
-  // Zones are separated by whitespace, never by divider lines.
-
-  // ZONE 1 — core workflow: the daily, high-frequency views.
-  const coreNavigation: NavItem[] = [
-    { name: 'Dashboard', href: '/', icon: LayoutDashboard },
-    { name: 'Inbox', href: '/inbox', icon: Inbox },
-    { name: 'Tasks', href: '/tasks', icon: ListTodo },
-    { name: 'Goals', href: '/goals', icon: Target },
-    { name: 'Plans', href: '/plans', icon: ScrollText },
-  ];
-
-  // ZONE 2 — technical resources and global configuration.
-  const resourceNavigation: NavItem[] = [
-    { name: 'Repositories', href: '/repositories', icon: BookMarked },
-    ...(userHasPermission(user, 'instance.manage_agents')
-      ? [{ name: 'Coding Agents', href: '/ai-agents', icon: Bot }]
-      : []),
-    { name: 'LLM Log', href: '/llm-logs', icon: Cpu },
-    { name: 'Settings', href: '/settings', icon: Settings },
-    ...(userHasPermission(user, 'instance.manage_members')
-      ? [{ name: 'Access', href: '/admin/members', icon: ShieldCheck }]
-      : []),
-  ];
-
-  const isActive = (path: string): boolean => {
-    const currentPath = location.pathname;
-
-    // Dashboard should only be active on exact match
-    if (path === '/') {
-      return currentPath === '/';
-    }
-
-    // Plans should be active for /plans routes and /studio routes
-    if (path === '/plans') {
-      return currentPath === '/plans' ||
-             currentPath.startsWith('/plans/') ||
-             currentPath.startsWith('/studio');
-    }
-
-    // Repositories should be active for /repositories routes and /summaries routes (repo content browsing)
-    if (path === '/repositories') {
-      return currentPath === '/repositories' ||
-             currentPath.startsWith('/repositories/') ||
-             currentPath.startsWith('/summaries');
-    }
-
-    // All other menu items use prefix matching
-    return currentPath === path || currentPath.startsWith(path + '/');
+  const canManageAgents = userHasPermission(user, 'instance.manage_agents');
+  const resourceNavigation = getResourceNavigation(
+    canManageAgents,
+    userHasPermission(user, 'instance.manage_members'),
+  );
+  const navigationState: NavigationState = {
+    currentPath: location.pathname,
+    desktop: Boolean(desktop),
+    hasAgents,
+    hasRepos,
+    hasTasks,
+    taskCount: displayTaskCount,
+    goalCount: activeGoalCount,
+    generatingPlansCount,
+    unreadCount,
   };
 
   // Close sidebar on route change (mobile)
@@ -222,69 +300,6 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
   // macOS-style wash, opaque gray on the web's white sidebar.
   const profileHoverInk = desktop ? 'hover:bg-slate-900/5' : 'hover:bg-slate-100';
 
-  // Active rows pair the teal border / gray background with darker, medium-weight
-  // text so the label keeps visual dominance over the low-contrast background.
-  const renderNavigationItem = (item: NavItem) => {
-    const readinessMessage = item.name === 'Repositories' && !hasRepos
-      ? 'No repositories configured'
-      : item.name === 'Coding Agents' && !hasAgents
-        ? 'No AI agents configured'
-        : item.name === 'Tasks' && displayTaskCount === 0 && !hasTasks && hasAgents && hasRepos
-          ? 'No tasks created yet'
-          : null;
-    return (
-      <Link
-        key={item.name}
-        to={item.href}
-        className={`flex items-center justify-between text-[13px] leading-5 transition-colors duration-150 ${
-          // mx-2 + px-2 puts the selection's inner edges on the sidebar's shared
-          // 16px rail, matching the web rows' px-4 (their border-l-4 is part
-          // of the box, so trailing content ends at the same 16px boundary).
-          // Desktop rows use a uniform 32px height in every navigation state.
-          desktop ? 'mx-2 rounded-[6px] border-0 px-2 py-1.5 tracking-tight' : 'border-l-4 px-4 py-2'
-        } ${
-          isActive(item.href)
-            ? desktop
-              // Neutral inset selection keeps labels readable over the material.
-              ? 'bg-black/5 font-normal text-slate-900'
-              : 'bg-slate-50 font-medium text-slate-900 border-primary-600'
-            : desktop
-              ? 'font-normal text-slate-600 hover:bg-slate-900/5 hover:text-slate-900'
-              : 'font-normal text-gray-600 hover:bg-gray-50 hover:text-gray-900 border-transparent'
-        }`}
-      >
-        <span className="flex min-w-0 items-center">
-          <item.icon className={`${SIDEBAR_ICON_STROKE_CLASS} mr-2.5 h-4 w-4 flex-none`} strokeWidth={SIDEBAR_ICON_STROKE_WIDTH} />
-          <span className="truncate">{item.name}</span>
-        </span>
-        {/* Counts and readiness indicators share the trailing rail. */}
-        <span className="flex flex-none items-center justify-end gap-1.5">
-          {desktop && readinessMessage && (
-            <span className="flex h-4 w-4 flex-none items-center justify-center text-amber-600" role="img" aria-label={readinessMessage} title={readinessMessage}>
-              <TriangleAlert className={`${SIDEBAR_ICON_STROKE_CLASS} h-3.5 w-3.5`} strokeWidth={SIDEBAR_ICON_STROKE_WIDTH} aria-hidden="true" />
-            </span>
-          )}
-          <WorkCountBadge name={item.name} taskCount={displayTaskCount} goalCount={activeGoalCount} />
-          {item.name === 'Inbox' && unreadCount !== null && unreadCount > 0 && (
-            <NavBadge>{unreadCount > 99 ? '99+' : unreadCount}</NavBadge>
-          )}
-          {!desktop && item.name === 'Tasks' && displayTaskCount === 0 && !hasTasks && hasAgents && hasRepos && (
-            <span className="w-2 h-2 flex-none rounded-full bg-amber-500" title="No tasks created yet" />
-          )}
-          {item.name === 'Plans' && generatingPlansCount > 0 && (
-            <NavBadge>{generatingPlansCount}</NavBadge>
-          )}
-          {!desktop && item.name === 'Repositories' && !hasRepos && (
-            <span className="w-2 h-2 flex-none rounded-full bg-amber-500" title="No repositories configured" />
-          )}
-          {!desktop && item.name === 'Coding Agents' && !hasAgents && (
-            <span className="w-2 h-2 flex-none rounded-full bg-amber-500" title="No AI agents configured" />
-          )}
-        </span>
-      </Link>
-    );
-  };
-
   return (
     <div className={`${hideSidebar ? 'desktop-sidebar-hidden ' : ''}desktop-shell flex h-full min-h-0 flex-col overflow-hidden bg-light-100 relative`}>
       <div className="desktop-shell-content relative flex min-h-0 flex-1 overflow-hidden">
@@ -322,18 +337,18 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
           {/* Whitespace separates navigation from the workspace control. */}
           <nav className="flex min-h-0 flex-col overflow-y-auto pt-2 pb-1">
             <div className="flex flex-col gap-0.5">
-              {coreNavigation.map(renderNavigationItem)}
+              {CORE_NAVIGATION.map(item => <NavigationItem key={item.name} item={item} state={navigationState} />)}
             </div>
             {/* Whitespace spacer (no divider) between the core-workflow and
                 technical-resources zones. */}
             <div className="mt-6 flex flex-col gap-0.5">
-              {resourceNavigation.map(renderNavigationItem)}
+              {resourceNavigation.map(item => <NavigationItem key={item.name} item={item} state={navigationState} />)}
             </div>
           </nav>
           {/* Usage and account information stay at the bottom, with metadata
               last. mt-auto absorbs the space below navigation. */}
           <div className="mt-auto flex flex-none flex-col">
-          {(isDemoMode || userHasPermission(user, 'instance.manage_agents')) && (
+          {(isDemoMode || canManageAgents) && (
             <AgentTankSidebar allowManualRefresh={!isDemoMode} scrollable={Boolean(desktop)} className="desktop-sidebar-usage" />
           )}
           {user && (
