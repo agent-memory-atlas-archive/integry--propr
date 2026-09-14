@@ -28,7 +28,10 @@ describe('getInstanceCatalog', () => {
     const response = await getInstanceCatalog();
 
     expect(response).toEqual(catalog);
-    expect(fetchSpy).toHaveBeenCalledWith('/api/instance/catalog', { credentials: 'include' });
+    expect(fetchSpy).toHaveBeenCalledWith('/api/instance/catalog', {
+      credentials: 'include',
+      signal: expect.any(AbortSignal),
+    });
     expect(response.agents).toContainEqual(expect.objectContaining({ kind: 'synthetic' }));
   });
 });

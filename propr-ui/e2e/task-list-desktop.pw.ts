@@ -114,3 +114,28 @@ test('web retains its arrow column and mobile cards', async ({ page }) => {
   await expect(page.getByRole('table')).not.toBeVisible();
   await expect(page.getByText('Keep task history readable when resizing the desktop workspace').first()).toBeVisible();
 });
+
+test('desktop task list does not present an empty state while its scoped read is pending', async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 820 });
+  await fixture(page, 'macos');
+  let releaseTasks!: () => void;
+  const tasksPending = new Promise<void>(resolve => { releaseTasks = resolve; });
+  await page.route('**/api/tasks*', async route => {
+    await tasksPending;
+    await route.fulfill({ json: { tasks: [], total: 0 } });
+  });
+
+  await page.goto('/tasks');
+  await expect(page.getByText('Loading tasks...')).toBeVisible();
+  await expect(page.getByText(/No tasks found/)).toHaveCount(0);
+
+  if (process.env.PROPR_CAPTURE_PREVIEWS) {
+    const directory = path.resolve('../.propr/previews');
+    await mkdir(directory, { recursive: true });
+    await page.screenshot({ animations: 'disabled', path: path.join(directory, 'tasks-initial-loading.png') });
+  }
+
+  releaseTasks();
+  await expect(page.getByText(/No tasks found/)).toBeVisible();
+  await expect(page.getByText('Loading tasks...')).toHaveCount(0);
+});

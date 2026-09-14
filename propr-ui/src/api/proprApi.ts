@@ -1,14 +1,24 @@
 import { DESKTOP_LOGGED_OUT_EVENT } from '../desktop/types';
 import type { Task as ApiTask } from './tasks';
-import { API_BASE_URL, apiFetch, handleApiResponse, getDesktopConnectionScope, setDesktopConnectionScope } from './apiClient';
+import {
+  API_BASE_URL,
+  apiFetch,
+  getAuthenticatedApiReadScopeGeneration,
+  handleApiResponse,
+  getDesktopConnectionScope,
+  setAuthenticatedApiReadIdentity,
+  setDesktopConnectionScope,
+  shareInFlightApiRead,
+} from './apiClient';
 import { isHostedUiOrigin, pathWithActiveHostedTunnelFlow } from '../config/runtimeConfig';
-import { isAccountStatusTimestamp, isProprProxyUrl } from '@propr/shared';
+import { isProprProxyUrl } from '@propr/shared';
 import {
   reportPackagedAcceptanceCurrentUser,
   type PackagedAcceptanceCurrentUserClassification,
 } from '../desktop/packagedAcceptanceCurrentUserValidation';
 
 export * from './apiClient';
+export { getSystemStatus } from './systemStatusApi';
 
 export interface DemoModeStatus {
   demoMode: boolean;
@@ -18,9 +28,9 @@ export interface DemoModeStatus {
 export * from './proprTypes';
 
 import type {
-  SystemStatus, StatusResponse, TaskAnalysisResponse, QueueStats, GeneratingPlansResponse,
+  TaskAnalysisResponse, QueueStats, GeneratingPlansResponse,
   GetTasksOptions, StopExecutionResponse, DeleteTaskResponse, CurrentUser,
-  InstanceCatalogResponse, ConnectAccountStatus
+  InstanceCatalogResponse
 } from './proprTypes';
 
 export type { UserRepoPreferences } from './userRepoPreferencesApi';
@@ -30,127 +40,6 @@ export const getDemoModeStatus = async (): Promise<DemoModeStatus> => {
   await handleApiResponse(response);
   return response.json();
 };
-
-export const getSystemStatus = async (): Promise<SystemStatus> => {
-  const response = await apiFetch(`${API_BASE_URL}/api/status`, { credentials: 'include' });
-  await handleApiResponse(response);
-  const data: StatusResponse = await response.json();
-  const workers: { id: number; status: string }[] = [];
-  for (let i = 0; i < (data.workerCount || 0); i++) workers.push({ id: i + 1, status: 'active' });
-  const mapAuthStatus = (status?: string) => status === 'connected' ? 'Authenticated' : 'Failed';
-  const mapClaudeAuthStatus = (status?: string) => status === 'not_applicable'
-    ? 'Not applicable'
-    : mapAuthStatus(status);
-  const mapAgentStatus = (status?: string) => status === 'connected' ? 'Ready' : status === 'degraded' ? 'Degraded' : 'Failed';
-  const mapIndexingStatus = (status?: string) => {
-    switch (status) {
-      case 'active':
-        return 'Active';
-      case 'queued':
-        return 'Queued';
-      case 'idle':
-        return 'Idle';
-      case 'failed':
-        return 'Failed';
-      case 'connected':
-        return 'Connected';
-      case 'disconnected':
-        return 'Unavailable';
-      default:
-        return 'Unavailable';
-    }
-  };
-  // Human-readable label for the configured intake path. An unknown or absent
-  // mode (older backends) falls back to 'Unknown' so the UI never shows a raw key.
-  const intakeLabels: Record<string, string> = {
-    routing_websocket: 'ProPR Connect',
-    polling: 'Polling',
-    direct_webhook: 'Direct Webhook',
-  };
-  const mapIntakeLabel = (mode?: string) => (mode && intakeLabels[mode]) || 'Unknown';
-  const mapIntakeStatus = (status?: string) => {
-    switch (status) {
-      case 'connected':
-        return 'Connected';
-      case 'active':
-        return 'Active';
-      case 'disconnected':
-        return 'Disconnected';
-      default:
-        return 'Unknown';
-    }
-  };
-  const agents = (data.agents || []).map(agent => ({
-    ...agent,
-    status: mapAgentStatus(agent.status),
-  }));
-  const connectAccount = data.githubEventIntake === 'routing_websocket'
-    && data.githubEventIntakeStatus === 'connected'
-    ? parseConnectAccountStatus(data.connectAccount)
-    : undefined;
-  return {
-    daemon: data.daemon === 'running' ? 'Running' : 'Stopped',
-    workers,
-    redis: data.redis === 'connected' ? 'Connected' : 'Disconnected',
-    githubAuth: mapAuthStatus(data.githubAuth),
-    claudeAuth: mapClaudeAuthStatus(data.claudeAuth),
-    indexing: mapIndexingStatus(data.indexing),
-    githubEventIntake: mapIntakeLabel(data.githubEventIntake),
-    githubEventIntakeStatus: mapIntakeStatus(data.githubEventIntakeStatus),
-    agents,
-    warnings: data.warnings || [],
-    ...(connectAccount ? { connectAccount } : {}),
-  };
-};
-
-const isNonNegativeInteger = (value: unknown): value is number =>
-  Number.isSafeInteger(value) && (value as number) >= 0;
-
-const isAccountLogin = (value: unknown): value is string | null =>
-  value === null || (typeof value === 'string' && value.length > 0 && value.length <= 128);
-
-const isAccountPlan = (value: unknown): value is ConnectAccountStatus['plan'] =>
-  value === 'community' || value === 'plus';
-
-const hasValidSeatCounts = (account: Record<string, unknown>): boolean =>
-  isNonNegativeInteger(account.activeSeats)
-  && isNonNegativeInteger(account.allowedSeats)
-  && isNonNegativeInteger(account.seatsRemaining);
-
-function parseConnectAccountStatus(value: unknown): ConnectAccountStatus | undefined {
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined;
-  const account = value as Record<string, unknown>;
-  if (!Number.isSafeInteger(account.installationId) || (account.installationId as number) <= 0
-    || !isAccountLogin(account.accountLogin)
-    || !isAccountPlan(account.plan)
-    || typeof account.hasPlusAccess !== 'boolean'
-    || !hasValidSeatCounts(account)
-    || !isAccountStatusTimestamp(account.billingCycleResetAt)
-    || !(account.seatLimitBlockedAt === undefined
-      || account.seatLimitBlockedAt === null
-      || isAccountStatusTimestamp(account.seatLimitBlockedAt))
-    || !isAccountStatusTimestamp(account.sentAt)) return undefined;
-  if ((account.plan === 'plus') !== account.hasPlusAccess) return undefined;
-  if ((account.seatsRemaining as number) !== Math.max(
-    0,
-    (account.allowedSeats as number) - (account.activeSeats as number),
-  )) return undefined;
-
-  return {
-    installationId: account.installationId as number,
-    accountLogin: account.accountLogin,
-    plan: account.plan,
-    hasPlusAccess: account.hasPlusAccess,
-    activeSeats: account.activeSeats as number,
-    allowedSeats: account.allowedSeats as number,
-    seatsRemaining: account.seatsRemaining as number,
-    billingCycleResetAt: account.billingCycleResetAt,
-    ...(account.seatLimitBlockedAt !== undefined
-      ? { seatLimitBlockedAt: account.seatLimitBlockedAt }
-      : {}),
-    sentAt: account.sentAt,
-  };
-}
 
 export const getQueueStats = async (): Promise<QueueStats> => {
   const [queueResponse, generatingPlansResponse] = await Promise.all([
@@ -171,12 +60,20 @@ export const getQueueStats = async (): Promise<QueueStats> => {
 
 export interface GetTasksResponse { tasks: ApiTask[]; total?: number; offset?: number; limit?: number; }
 
-export const getTasks = async (
-  statusOrOptions: string | GetTasksOptions = 'all', limit = 50, offset = 0, repository = 'all', search = ''
+const normalizeGetTasksOptions = (
+  statusOrOptions: string | GetTasksOptions = 'all',
+  limit = 50,
+  offset = 0,
+  repository = 'all',
+  search = '',
+): GetTasksOptions => typeof statusOrOptions === 'object'
+  ? statusOrOptions
+  : { status: statusOrOptions, limit, offset, repository, search };
+
+const getTasksRequest = async (
+  options: GetTasksOptions,
+  signal?: AbortSignal,
 ): Promise<GetTasksResponse> => {
-  let options: GetTasksOptions;
-  if (typeof statusOrOptions === 'object') options = statusOrOptions;
-  else options = { status: statusOrOptions, limit, offset, repository, search };
   const params = new URLSearchParams({
     status: options.status || 'all', limit: (options.limit ?? 50).toString(),
     offset: (options.offset ?? 0).toString(), repository: options.repository || 'all'
@@ -184,10 +81,24 @@ export const getTasks = async (
   if (options.search) params.append('search', options.search);
   if (options.forReview) params.append('forReview', 'true');
   if (options.excludeMerged) params.append('excludeMerged', 'true');
-  const response = await apiFetch(`${API_BASE_URL}/api/tasks?${params.toString()}`, { credentials: 'include' });
+  const response = await apiFetch(`${API_BASE_URL}/api/tasks?${params.toString()}`, {
+    credentials: 'include',
+    ...(signal ? { signal } : {}),
+  });
   await handleApiResponse(response);
   return response.json();
 };
+
+export const getTasks = (
+  statusOrOptions: string | GetTasksOptions = 'all', limit = 50, offset = 0, repository = 'all', search = ''
+): Promise<GetTasksResponse> => getTasksRequest(
+  normalizeGetTasksOptions(statusOrOptions, limit, offset, repository, search),
+);
+
+/** The onboarding existence query is distinct from list and review task reads. */
+export const getReadinessTaskExistence = (): Promise<GetTasksResponse> =>
+  shareInFlightApiRead('readiness-task-existence', signal =>
+    getTasksRequest({ status: 'all', limit: 1, offset: 0, repository: 'all' }, signal));
 
 export const getTaskHistory = async (taskId: string): Promise<unknown> => {
   const response = await apiFetch(`${API_BASE_URL}/api/task/${taskId}/history`, { credentials: 'include' });
@@ -208,11 +119,11 @@ export const getTaskLiveDetails = async (taskId: string): Promise<unknown> => {
   return response.json();
 };
 
-export const getInstanceCatalog = async (): Promise<InstanceCatalogResponse> => {
-  const response = await apiFetch(`${API_BASE_URL}/api/instance/catalog`, { credentials: 'include' });
+export const getInstanceCatalog = (): Promise<InstanceCatalogResponse> => shareInFlightApiRead('instance-catalog', async signal => {
+  const response = await apiFetch(`${API_BASE_URL}/api/instance/catalog`, { credentials: 'include', signal });
   await handleApiResponse(response);
   return response.json();
-};
+});
 
 export const fetchPrompt = async (promptPath: string): Promise<string> => {
   const response = await apiFetch(`${API_BASE_URL}${promptPath}`, { credentials: 'include' });
@@ -292,6 +203,7 @@ const currentUserResponseClassification = async (
 };
 
 export const getCurrentUser = async (options: CurrentUserValidationOptions = {}): Promise<CurrentUser> => {
+  const authenticatedReadScopeGeneration = getAuthenticatedApiReadScopeGeneration();
   const requestedScopeGeneration = options.scopeGeneration;
   const scopeGeneration = typeof requestedScopeGeneration === 'number'
     && Number.isSafeInteger(requestedScopeGeneration) && requestedScopeGeneration >= 0
@@ -345,6 +257,7 @@ export const getCurrentUser = async (options: CurrentUserValidationOptions = {})
       responseStatus: response.status, classification, schemaAccepted: true,
     });
   }
+  setAuthenticatedApiReadIdentity(body.id, authenticatedReadScopeGeneration);
   return body;
 };
 
@@ -411,6 +324,7 @@ const desktopLogout = async (): Promise<void> => {
 };
 
 export const logout = (): void | Promise<void> => {
+  setAuthenticatedApiReadIdentity(null);
   if (typeof window !== 'undefined' && window.proprDesktop) {
     desktopLogoutInFlight ??= desktopLogout().finally(() => { desktopLogoutInFlight = null; });
     return desktopLogoutInFlight;
