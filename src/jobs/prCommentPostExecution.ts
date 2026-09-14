@@ -28,13 +28,11 @@ import { buildCommitMessage } from './prCommentJobUtils.js';
 import { markReviewFindingsProcessed } from './reviewCommentGatherer.js';
 import type { AIReviewComment } from './reviewCommentGatherer.js';
 import { resolveUltrafixHistoryMeta } from './ultrafixJobHelpers.js';
-import type { GitHubToken } from './githubTypes.js';
 import {
     isVisualPreviewUploadAuthenticationError,
     publishPullRequestCommentVisualPreviews,
 } from '../github/visualPreviewAttachments.js';
-import type { PullRequestGitTarget } from './prGitTarget.js';
-import { pushPullRequestHeadBranch } from './prGitOperations.js';
+import type { PullRequestPublication } from './prPublication.js';
 
 interface PostExecutionState {
     octokit: Awaited<ReturnType<typeof getAuthenticatedOctokit>> | null;
@@ -56,7 +54,7 @@ interface PostExecutionContext {
     pullRequestNumber: number;
     repoOwner: string;
     repoName: string;
-    gitTarget: PullRequestGitTarget;
+    publication: PullRequestPublication;
     correlatedLogger: Logger;
 }
 
@@ -84,22 +82,16 @@ interface UndoContextParams {
 
 async function commitAndPush(
     state: ReadyPostExecutionState,
-    issueRef: { repoOwner: string; repoName: string; pullRequestNumber: number },
-    gitTarget: PullRequestGitTarget,
+    context: PostExecutionContext,
     llm: string | null | undefined
 ) {
     const changesSummary = state.claudeResult.summary || state.claudeResult.finalResult?.result || '';
-    const commitMessage = buildCommitMessage({ changesSummary, unprocessedComments: state.unprocessedComments, pullRequestNumber: issueRef.pullRequestNumber, claudeResult: state.claudeResult, llm, authorsText: state.authorsText });
-    const commitResult = await commitChanges(state.worktreeInfo.worktreePath, commitMessage, AI_COMMIT_AUTHOR, { issueNumber: issueRef.pullRequestNumber, issueTitle: 'Follow-up changes' });
+    const commitMessage = buildCommitMessage({ changesSummary, unprocessedComments: state.unprocessedComments, pullRequestNumber: context.pullRequestNumber, claudeResult: state.claudeResult, llm, authorsText: state.authorsText });
+    const commitResult = await commitChanges(state.worktreeInfo.worktreePath, commitMessage, AI_COMMIT_AUTHOR, { issueNumber: context.pullRequestNumber, issueTitle: 'Follow-up changes' });
 
     if (commitResult) {
-        const githubToken = await state.octokit.auth({ type: "installation" }) as GitHubToken;
-        const pushResult = await pushPullRequestHeadBranch({
-            worktreePath: state.worktreeInfo.worktreePath,
-            target: gitTarget,
-            authToken: githubToken.token,
-        });
-        if (pushResult.rebased && pushResult.commitHash) {
+        const pushResult = await context.publication.push(state.worktreeInfo.worktreePath);
+        if (pushResult.commitHash) {
             commitResult.commitHash = pushResult.commitHash;
         }
     }
@@ -158,9 +150,9 @@ async function publishCompletionComment(options: CompletionCommentPublicationOpt
     const visualPreviewSection = hasVisualPreviewContent
         ? renderVisualPreviewSection({ assets: [], toolSuggestions: visualPreviewEvidence.toolSuggestions }, {})
         : '';
-    const undoContext = buildUndoContext({ commitResult, unprocessedComments: state.unprocessedComments, repoOwner, repoName, pullRequestNumber, branchName: state.worktreeInfo.branchName });
+    const undoContext = context.publication.continuation ? undefined : buildUndoContext({ commitResult, unprocessedComments: state.unprocessedComments, repoOwner, repoName, pullRequestNumber, branchName: state.worktreeInfo.branchName });
     const consumedReviewCommentIds = unprocessedReviewComments.length > 0 ? unprocessedReviewComments.map(comment => comment.id) : undefined;
-    const prCommentTemplate = await buildCompletionComment(commitResult, state.unprocessedComments, {
+    const completionBody = await buildCompletionComment(commitResult, state.unprocessedComments, {
         changesSummary,
         commitMessage,
         llm,
@@ -170,6 +162,7 @@ async function publishCompletionComment(options: CompletionCommentPublicationOpt
         consumedReviewCommentIds,
         visualPreviewSection: hasVisualPreviewContent ? VISUAL_PREVIEW_SLOT : undefined
     }, state.claudeResult);
+    const prCommentTemplate = [context.publication.status, completionBody].filter(Boolean).join('\n\n');
     const prCommentBody = appendVisualPreviewSection(prCommentTemplate, visualPreviewSection);
 
     if (visualPreviewEvidence.assets.length === 0) {
@@ -220,7 +213,7 @@ export async function handlePostExecution(params: PostExecutionParams, taskUrl: 
         prProcessingLockKey,
         prProcessingLockToken,
     } = params;
-    const { repoOwner, repoName, pullRequestNumber, gitTarget, correlatedLogger } = context;
+    const { repoOwner, repoName, pullRequestNumber, correlatedLogger } = context;
 
     requirePostExecutionState(state);
     const disposition = getPostExecutionDisposition(state.claudeResult);
@@ -237,7 +230,7 @@ export async function handlePostExecution(params: PostExecutionParams, taskUrl: 
             settings: await loadRepositoryVisualPreviewSettings(`${repoOwner}/${repoName}`),
             taskId
         });
-        const { commitResult, changesSummary, commitMessage } = await commitAndPush(state, { repoOwner, repoName, pullRequestNumber }, gitTarget, llm);
+        const { commitResult, changesSummary, commitMessage } = await commitAndPush(state, context, llm);
         if (partial && !commitResult) {
             throw new Error(`Agent execution ${terminationReason === 'timeout' ? 'timed out' : 'reached the maximum turn limit'} before producing changes to publish`);
         }
@@ -275,6 +268,7 @@ export async function handlePostExecution(params: PostExecutionParams, taskUrl: 
             commitHash: commitResult?.commitHash,
             historyMetadata: {
                 commandMode: job.data.commandMode || 'default',
+                continuation: context.publication.continuation,
                 githubComment: { url: completionComment.data.html_url, body: completionComment.data.body },
                 ...(unprocessedReviewComments.length > 0 && { consumedReviewCommentIds: unprocessedReviewComments.map(c => c.id) }),
                 ...(partial && { incompleteExecution: { reason: terminationReason } }),
