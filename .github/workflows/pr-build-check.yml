@@ -493,6 +493,16 @@ jobs:
             echo "✅ propr-cli release package verified"
           } > >(tee -a build_log.txt) 2>&1
 
+      - name: Ensure PR base is available for change detection
+        env:
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          # The event base can differ from the merge commit's first parent when
+          # the base branch advances, so a shallow checkout may not contain it.
+          if ! git cat-file -e "${PR_BASE_SHA}^{commit}" 2>/dev/null; then
+            git fetch --no-tags --depth=1 origin "$PR_BASE_SHA"
+          fi
+
       - name: Detect Changes
         id: filter
         uses: dorny/paths-filter@7b450fff21473bca461d4b92ce414b9d0420d706 # v4
