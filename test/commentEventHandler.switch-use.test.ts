@@ -115,6 +115,7 @@ await mock.module('../packages/core/src/config/configManager.js', {
         loadMonitoredRepos: mock.fn(async () => []),
         loadAiPrimaryTag: mock.fn(async () => 'AI'),
         loadPrimaryProcessingLabels: mock.fn(async () => ['AI']),
+        hasValidTriggerLabel: mock.fn(async (labels: Array<{ name: string } | string>) => (labels ?? []).some(l => (typeof l === 'string' ? l : l.name) === 'AI')),
         loadSettings: mock.fn(async () => ({})),
         loadAgentTankSettings: mock.fn(async () => ({})),
         getConfig: mock.fn(async () => null),
@@ -160,9 +161,10 @@ await mock.module('../packages/core/src/utils/github/labelOperations.js', {
 });
 
 // Mock mergeConflictDetector
+const mockHandleMergeCommand = mock.fn(async () => ({ outcome: 'queued', prNumber: 42, repository: 'test/repo' }));
 await mock.module('../packages/core/src/webhook/mergeConflictDetector.js', {
     namedExports: {
-        handleMergeCommand: mock.fn(async () => {}),
+        handleMergeCommand: mockHandleMergeCommand,
         handlePullRequestConflictDetection: mock.fn(async () => {}),
         handlePushConflictDetection: mock.fn(async () => {}),
     },
@@ -577,6 +579,62 @@ describe('commentEventHandler — /switch command', () => {
         assert.ok(comments[0].body.includes('First line'));
         assert.ok(comments[0].body.includes('Second line'));
         assert.ok(comments[0].body.includes('Third line'));
+    });
+});
+
+describe('commentEventHandler — /merge command trigger label gate', () => {
+    beforeEach(() => {
+        mockHandleMergeCommand.mock.resetCalls();
+        mockOctokit.request.mock.resetCalls();
+        mockQueueAdd.mock.resetCalls();
+        mockActiveJobs = [];
+        mockWaitingJobs = [];
+        mockDelayedJobs = [];
+    });
+
+    test('ignores /merge on a PR without a trigger label and does not claim the comment or a seat', async () => {
+        mockOctokit.request.mock.mockImplementation(async () => ({
+            data: { head: { ref: 'feature-branch' }, labels: [{ name: 'bug' }] },
+        }));
+        const config = createTestConfig();
+        const event = createPRCommentEvent('/merge');
+
+        const disposition = await processCommentEvent(event, 'issue_comment', 'corr-merge-unlabelled', config);
+
+        assert.deepStrictEqual(disposition, { status: 'ignored', reason: 'no_trigger_label' });
+        assert.strictEqual(mockHandleMergeCommand.mock.callCount(), 0);
+        assert.strictEqual(mockQueueAdd.mock.callCount(), 0);
+        const claimedKeys = [...config.redisClient._store.keys()].filter(k => k.startsWith('pr-comment-processed:'));
+        assert.deepStrictEqual(claimedKeys, [], 'unlabelled /merge must not claim the comment tracking key');
+    });
+
+    test('ignores /merge on a PR with no labels at all', async () => {
+        mockOctokit.request.mock.mockImplementation(async () => ({
+            data: { head: { ref: 'feature-branch' }, labels: [] },
+        }));
+        const event = createPRCommentEvent('/merge');
+
+        const disposition = await processCommentEvent(event, 'issue_comment', 'corr-merge-nolabels', createTestConfig());
+
+        assert.deepStrictEqual(disposition, { status: 'ignored', reason: 'no_trigger_label' });
+        assert.strictEqual(mockHandleMergeCommand.mock.callCount(), 0);
+    });
+
+    test('dispatches /merge on a PR carrying a valid trigger label', async () => {
+        mockOctokit.request.mock.mockImplementation(async () => ({
+            data: { head: { ref: 'feature-branch' }, labels: [{ name: 'AI' }] },
+        }));
+        const event = createPRCommentEvent('/merge');
+
+        const disposition = await processCommentEvent(event, 'issue_comment', 'corr-merge-labelled', createTestConfig());
+
+        assert.strictEqual(disposition.status, 'accepted');
+        assert.deepStrictEqual(disposition.billing, { seatConsumed: true });
+        assert.strictEqual(mockHandleMergeCommand.mock.callCount(), 1);
+        const mergeArgs = mockHandleMergeCommand.mock.calls[0].arguments[0] as { prNumber: number; owner: string; repoName: string };
+        assert.strictEqual(mergeArgs.prNumber, 42);
+        // The PR was fetched once for the gate and reused by the handler
+        assert.strictEqual(mockOctokit.request.mock.callCount(), 1);
     });
 });
 

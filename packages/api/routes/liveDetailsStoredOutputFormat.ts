@@ -170,6 +170,17 @@ function isCodexStoredOutputLine(parsed: StoredExecutionOutputLine): boolean {
   );
 }
 
+export function hasCodexAppServerNotification(output: string): boolean {
+  return output.split('\n').some(line => {
+    try {
+      const method = (JSON.parse(line) as { method?: unknown }).method;
+      return typeof method === 'string' && isCodexAppServerNotification(method);
+    } catch {
+      return false;
+    }
+  });
+}
+
 function isCodexAppServerNotification(method: string | undefined): boolean {
   return Boolean(method && [
     'error',

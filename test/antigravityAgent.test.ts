@@ -73,12 +73,14 @@ describe('AntigravityAgent Docker args', () => {
                     githubToken: string;
                     modelName?: string;
                     issueNumber: number;
+                    printTimeoutMs?: number;
                 }): string[];
             }).buildDockerArgs({
                 worktreePath: '/tmp/worktree',
                 githubToken: '',
                 modelName: 'antigravity-gemini-3.8-flash-high',
-                issueNumber: 0
+                issueNumber: 0,
+                printTimeoutMs: 1_800_000
             });
 
             // Omitting a prompt flag makes agy read non-TTY stdin. `--print -`
@@ -87,6 +89,7 @@ describe('AntigravityAgent Docker args', () => {
             assert.ok(shellCmd, 'shell command should invoke agy');
             assert.doesNotMatch(shellCmd, /--print|\s-p(?:\s|$)/, 'shell command must leave the prompt unset so agy reads stdin');
             assert.match(shellCmd, /--dangerously-skip-permissions "\$@"/);
+            assert.strictEqual(args[args.indexOf('--print-timeout') + 1], '1800s');
 
             // Model must be the canonical external ID, never the namespaced id.
             const modelIdx = args.indexOf('--model');

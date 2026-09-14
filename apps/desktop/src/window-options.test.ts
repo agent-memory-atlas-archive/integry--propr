@@ -42,12 +42,16 @@ describe('desktop BrowserWindow security', () => {
 
   it('integrates native window controls into the application shell', () => {
     const macOptions = createBrowserWindowOptions('/preload.cjs', false, normalWorkArea, 'darwin');
+    assert.equal(macOptions.vibrancy, 'sidebar');
+    assert.equal(macOptions.visualEffectState, 'followWindow');
+    assert.equal(macOptions.backgroundColor, '#00000000');
     assert.equal(macOptions.titleBarStyle, 'hiddenInset');
     assert.deepEqual(macOptions.titleBarOverlay, { height: DESKTOP_TITLE_BAR_HEIGHT });
     assert.equal(macOptions.frame, undefined);
     assert.equal(macOptions.transparent, undefined);
 
     const linuxOptions = createBrowserWindowOptions('/preload.cjs', false, normalWorkArea, 'linux', desktopIcon);
+    assert.equal(linuxOptions.vibrancy, undefined);
     assert.equal(linuxOptions.frame, false);
     // Linux renders its own accessible controls; WCO would duplicate them and
     // reintroduce GTK's padded frame on an opaque window.

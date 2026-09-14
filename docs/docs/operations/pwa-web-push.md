@@ -5,39 +5,88 @@ title: PWA, Web Push, and Badges
 
 # PWA, Web Push, and Badges
 
-ProPR's production UI is an installable Progressive Web App (PWA). Web Push is optional: the Inbox and live UI continue to work when Push is not configured or a browser lacks Push or Badging APIs. Outside `localhost`, both the UI and API must be reached over HTTPS.
+ProPR's production UI is an installable Progressive Web App (PWA). Web Push is optional: the Inbox and live UI continue to work when Push is unavailable or disabled or a browser lacks Push or Badging APIs. Outside `localhost`, both the UI and API must be reached over HTTPS.
 
 Web Push delivers **text notifications** and may display them while the PWA is backgrounded. It never carries briefing audio or starts speech playback. [Voice Briefings](../features/voice-briefings.md) fetch text only when a signed-in user requests it and use browser/OS speech capabilities only in the visible app; backgrounding or locking the device cancels listening and playback.
 
 ## Configure VAPID
 
-Generate one P-256 VAPID key pair for each ProPR installation on an administrator-controlled machine. From a ProPR source checkout with dependencies installed, use the repository's pinned `web-push` package:
+Web Push is ready automatically after successful API startup. No VAPID environment
+variables are required. Users still choose **Enable on this browser**, accept the
+browser permission prompt, and opt into their desired Push categories. Automatic
+instance setup never enables a user or category.
 
-```bash
-npx --no-install web-push generate-vapid-keys
-```
+The API generates one P-256 pair and stores it in `web-push/vapid.json` beside the
+SQLite database: the parent of `DB_FILENAME`, otherwise `DATA_DIR`, otherwise
+`./data`. This uses the existing instance data mount: the CLI/launcher stack's
+`data/`, development Compose's `./data`, and production Compose's
+`propr-sqlite-data` volume. Keep that mount across upgrades and container
+recreation. All API processes for an instance must share it. Creation publishes a
+complete, synced file atomically without overwriting another initializer's pair.
+Routes and delivery use the same configuration resolved during startup; reading
+capabilities does not create secrets or open a database.
 
-Run this only in a private terminal without session recording. Transfer the displayed values directly into the stack's protected `.env` or secret manager; do not redirect or pipe the output into build/deployment logs:
+The default subject is the origin of the configured public HTTPS `API_PUBLIC_URL`,
+then HTTPS `FRONTEND_URL`. Local/non-HTTPS installations fall back to the project's
+public contact URL, `https://propr.dev`. Request Host headers are never used. You
+can override the subject alone with `WEB_PUSH_VAPID_SUBJECT=https://your-instance.example.com`
+or a valid `mailto:` contact. Changing the subject or instance URL does not rotate keys.
 
-```bash
-WEB_PUSH_VAPID_SUBJECT=mailto:admin@example.com
-WEB_PUSH_VAPID_PUBLIC_KEY=<URL-safe-base64-public-key>
-WEB_PUSH_VAPID_PRIVATE_KEY=<URL-safe-base64-private-key>
-WEB_PUSH_ENABLED=true
-```
+### Explicit keys and disabling Push
 
-Set all three `WEB_PUSH_VAPID_*` values together. The subject must be an HTTPS contact URL or a `mailto:` address. `propr check` and both launcher paths reject an incomplete tuple, malformed keys or subject, and a public/private mismatch before startup.
+Existing valid manual keys continue to work. Supply both
+`WEB_PUSH_VAPID_PUBLIC_KEY` and `WEB_PUSH_VAPID_PRIVATE_KEY` from the same P-256
+pair in the protected stack `.env` or secret manager. The subject is optional and
+uses the same automatic default. An explicit pair takes precedence without
+writing or replacing the automatic file. Removing both overrides resumes the
+previously stored automatic pair, or creates one if none existed. Switching
+between different identities requires browsers to subscribe again.
 
-The **public key is intentionally browser-visible**: an authenticated browser obtains it from `GET /api/notifications/config` and supplies it when creating a subscription. The **private key is a server signing credential**. Keep it only in the protected stack `.env` or a server-side secret manager. Never commit it, copy it into `VITE_*`/`config.js`, put it on a command line, paste it into an issue, or print it in application or deployment logs. Restrict the deployed file to its service account (for example, `chmod 600 .env`) and rotate the pair if the private key is exposed. Rotation requires browsers to subscribe again.
+`propr check` and both launcher paths accept automatic and subject-only modes;
+they reject partial pairs, malformed subjects/keys and mismatched pairs without
+printing their values. They validate configuration without generating secrets;
+storage setup/diagnostics occur at API startup. Direct API startup fails closed
+for Push on these errors while unrelated API features remain available.
 
-The optional dispatcher interval, batch, lease, request-timeout, TTL, attempt, and retry variables are listed in [Configuration Reference](./configuration-reference.md). Validate and restart after any change:
+`WEB_PUSH_ENABLED=false` skips automatic key setup and disables enrollment and
+delivery without deleting preferences, subscriptions or stored keys. Launcher
+checks still reject invalid explicit settings, even while Push is disabled.
 
-```bash
-propr check
-propr start --restart
-```
+The **public key is intentionally browser-visible** through authenticated
+`GET /api/notifications/config`. The **private key is a server signing credential**:
+never commit it, copy it into `VITE_*`/`config.js`, put it on a command line, paste
+it into an issue, or print it in logs. Automatic storage uses directory mode 700
+and file mode 600; only the service account should have access. It uses filesystem
+protection independently of session/OAuth encryption secrets, so rotating those
+secrets cannot invalidate the Push identity. Protect backups as credentials too.
 
-Leaving all three VAPID values unset is a valid Push-disabled installation. `WEB_PUSH_ENABLED=false` pauses delivery without deleting preferences or subscriptions; it is not a substitute for removing or correcting a partial key tuple.
+### Backup, restore and deliberate rotation
+
+Back up the whole instance data directory, including `web-push/vapid.json`, along
+with the database. Restore the pair unchanged to the same relative location with
+its restrictive permissions and service-account ownership. Manual installations
+must also preserve their environment/secret-manager pair. Never display private
+file contents to troubleshoot.
+
+On invalid/corrupt storage or persistence failure, Push stays unavailable and the
+API emits a sanitized actionable diagnostic. It does not overwrite corrupt keys
+or advertise a temporary key. Repair permissions, disk space or mount access, or
+restore a known-good backup, then restart the API to retry. A failure after atomic
+publication retains the same complete pair for the next startup. Private temporary
+files left by a killed initializer can be removed while all API processes are
+stopped; they are never used as the active identity.
+
+To deliberately rotate after exposure, stop **all** API processes, securely archive
+or remove the automatic `web-push/vapid.json`, and restart to generate a new pair.
+For manual mode, replace both environment keys instead. Ensure no old API process
+is still signing with the previous pair. Every affected browser must disable and
+re-enable notifications to create a new subscription; user/category preferences
+are preserved. Deleting the data volume or removing manual overrides can also
+change the active identity, so neither is a routine restart procedure.
+
+The optional dispatcher interval, batch, lease, request-timeout, TTL, attempt, and
+retry variables are listed in [Configuration Reference](./configuration-reference.md).
+After configuration changes, run `propr check` and `propr start --restart`.
 
 ## Install and enable notifications
 

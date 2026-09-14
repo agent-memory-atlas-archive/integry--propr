@@ -85,6 +85,7 @@ describe('real packaged Linux setup lifecycle harness', () => {
     const wrapper = join(root, 'docker');
     const realDocker = join(root, 'real-docker');
     const eventsPath = join(root, 'events.jsonl');
+    const slowEventWriter = join(root, 'slow-event-writer.cjs');
     try {
       await writeFile(realDocker, `#!/usr/bin/env node
 'use strict';
@@ -115,7 +116,19 @@ process.stdout.write(JSON.stringify(process.argv.slice(2)));
         assert.deepEqual(await once(rejected, 'close'), [97, null]);
       }
 
-      const held = spawn(process.execPath, [wrapper, 'pull', 'propr/app:test']);
+      // Keep the child inside the event write long enough for the parent to
+      // signal it as soon as pull admission is visible, before startup resumes.
+      await writeFile(slowEventWriter, `
+const fs = require('node:fs');
+const appendFileSync = fs.appendFileSync;
+fs.appendFileSync = (...args) => {
+  appendFileSync(...args);
+  if (JSON.parse(args[1]).event === 'invoked') {
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 200);
+  }
+};
+`);
+      const held = spawn(process.execPath, ['--require', slowEventWriter, wrapper, 'pull', 'propr/app:test']);
       const events = await waitForEventCount(eventsPath, 9);
       assert.equal(events.at(-1).operation, 'pull');
       held.kill('SIGTERM');

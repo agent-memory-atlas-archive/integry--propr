@@ -304,7 +304,7 @@ export function resolveConfig(env = process.env, overrides = {}) {
     const authRateLimitWindowMs = overrides.authRateLimitWindowMs ?? get('PROPR_AUTH_RATE_LIMIT_WINDOW_MS') ?? '900000';
     const webhookRateLimitMax = overrides.webhookRateLimitMax ?? get('PROPR_WEBHOOK_RATE_LIMIT_MAX') ?? '300';
     const webhookRateLimitWindowMs = overrides.webhookRateLimitWindowMs ?? get('PROPR_WEBHOOK_RATE_LIMIT_WINDOW_MS') ?? '60000';
-    // Web Push is optional, but a partially configured VAPID identity is never
+    // Web Push is automatic by default, but a partially configured VAPID pair is never
     // useful. Resolve the three values here so both the host CLI and the
     // containerized launcher validate the exact stack environment before any
     // service starts. Key material is deliberately never included in errors.
@@ -2288,16 +2288,15 @@ export function validateVapidConfiguration(cfg) {
     const subject = cfg.webPushVapidSubject;
     const publicKeyValue = cfg.webPushVapidPublicKey;
     const privateKeyValue = cfg.webPushVapidPrivateKey;
-    const configuredValues = [subject, publicKeyValue, privateKeyValue]
-        .filter(value => typeof value === 'string' && value.length > 0).length;
-    if (configuredValues === 0) return null;
-    if (configuredValues !== 3) {
-        return 'Web Push VAPID configuration is incomplete: set WEB_PUSH_VAPID_SUBJECT, '
-            + 'WEB_PUSH_VAPID_PUBLIC_KEY, and WEB_PUSH_VAPID_PRIVATE_KEY together, or leave all three unset. '
-            + 'The public key is browser-visible; keep the private key secret and never commit or log it.';
-    }
-    if (!validVapidSubject(subject)) {
+    if (subject && !validVapidSubject(subject)) {
         return 'Web Push VAPID configuration is malformed: WEB_PUSH_VAPID_SUBJECT must be an HTTPS URL or mailto address.';
+    }
+    const configuredKeys = [publicKeyValue, privateKeyValue]
+        .filter(value => typeof value === 'string' && value.length > 0).length;
+    if (configuredKeys === 0) return null; // API startup resolves the durable automatic identity.
+    if (configuredKeys !== 2) {
+        return 'Web Push VAPID configuration is incomplete: set WEB_PUSH_VAPID_PUBLIC_KEY '
+            + 'and WEB_PUSH_VAPID_PRIVATE_KEY together, or remove both for automatic setup. Key values are not shown.';
     }
 
     const publicKey = decodeCanonicalBase64Url(publicKeyValue, 65);

@@ -493,12 +493,42 @@ function GoalList() {
   const newGoalButtonRef = useRef<HTMLButtonElement>(null);
   const [searchParams, setSearchParams] = useSearchParams();
   const [goals, setGoals] = useState<Goal[]>([]);
+  const [initialLoading, setInitialLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
+  const [hasSuccessfulRead, setHasSuccessfulRead] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [isCreating, setIsCreating] = useState(false);
+  const requestGenerationRef = useRef(0);
   const repositoryFilter = searchParams.get('repository') || 'all';
   useDocumentTitle('Goals');
-  const refresh = useCallback(() => listGoals().then(data => setGoals(data.goals)).catch(err => setError((err as Error).message)), []);
-  useEffect(() => { refresh(); const timer = window.setInterval(refresh, 10_000); return () => window.clearInterval(timer); }, [refresh]);
+  const refresh = useCallback(async (initial = false) => {
+    const generation = ++requestGenerationRef.current;
+    if (initial) setInitialLoading(true);
+    else setRefreshing(true);
+    setError(null);
+    try {
+      const data = await listGoals();
+      if (generation !== requestGenerationRef.current) return;
+      setGoals(data.goals);
+      setHasSuccessfulRead(true);
+    } catch (err) {
+      if (generation !== requestGenerationRef.current) return;
+      setError((err as Error).message);
+    } finally {
+      if (generation === requestGenerationRef.current) {
+        setInitialLoading(false);
+        setRefreshing(false);
+      }
+    }
+  }, []);
+  useEffect(() => {
+    void refresh(true);
+    const timer = window.setInterval(() => { void refresh(); }, 10_000);
+    return () => {
+      requestGenerationRef.current += 1;
+      window.clearInterval(timer);
+    };
+  }, [refresh]);
   const repositoryOptions = useMemo<RepoOption[]>(() => {
     const counts = new Map<string, number>();
     goals.forEach(goal => counts.set(goal.repository, (counts.get(goal.repository) || 0) + 1));
@@ -532,7 +562,7 @@ function GoalList() {
     {error && <p role="alert" className="mt-4 border-l-2 border-red-500 bg-red-50 p-3 text-sm text-red-700">{error}</p>}
     <section aria-labelledby="goal-work-queue-title" className="mt-5">
       <div className="flex flex-col gap-3 pb-3 sm:flex-row sm:items-center sm:justify-between">
-        <div className="flex items-baseline gap-2"><h2 id="goal-work-queue-title" className="text-base font-semibold text-slate-900">Work queue</h2><span className="text-xs text-slate-500">{visibleGoals.length} of {goals.length}</span></div>
+        <div className="flex items-baseline gap-2"><h2 id="goal-work-queue-title" className="text-base font-semibold text-slate-900">Work queue</h2>{hasSuccessfulRead && <span className="text-xs text-slate-500">{visibleGoals.length} of {goals.length}</span>}{refreshing && hasSuccessfulRead && <span role="status" className="text-xs text-slate-500">Refreshing…</span>}</div>
         <div className="flex min-w-0 flex-col gap-2 sm:flex-row sm:items-center">
           {goals.length > 0 && <div role="group" aria-label="Filter goals by repository" className="flex min-w-0 items-center gap-2">
             <Filter className="h-4 w-4 flex-none text-slate-400" aria-hidden="true" />
@@ -547,7 +577,11 @@ function GoalList() {
           <button ref={newGoalButtonRef} type="button" onClick={openCreator} className={`${buttonClass} min-h-10 justify-center bg-primary-600 text-white hover:bg-primary-700`}><Plus className="h-4 w-4" />New goal</button>
         </div>
       </div>
-      {goals.length === 0
+      {!hasSuccessfulRead && (initialLoading || refreshing)
+        ? <div role="status" className="flex items-center justify-center gap-2 border-y border-slate-200 py-10 text-sm text-slate-500"><LoaderCircle className="h-4 w-4 animate-spin" aria-hidden="true" />Loading goals…</div>
+        : error && goals.length === 0
+          ? null
+          : goals.length === 0
         ? <div className="border-y border-dashed border-slate-300 py-10 text-center"><p className="text-sm font-medium text-slate-700">No goals yet</p><p className="mt-1 text-sm text-slate-500">Start a goal to add dedicated agent work to this queue.</p></div>
         : visibleGoals.length === 0
           ? <div className="border-y border-dashed border-slate-300 py-10 text-center"><p className="text-sm font-medium text-slate-700">No goals in {repositoryFilter}</p><button type="button" onClick={() => setRepositoryFilter('all')} className="mt-2 text-sm font-medium text-primary-700 hover:underline">Show all goals</button></div>

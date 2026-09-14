@@ -12,7 +12,7 @@ import {
 } from "./checkCommands.js";
 
 test("propr check presents VAPID validation as a clear failure without key material", () => {
-  const detail = "Web Push VAPID configuration is incomplete: set all three variables together.";
+  const detail = "Web Push VAPID configuration is incomplete: set both key variables together, or remove both for automatic setup.";
 
   assert.deepEqual(configurationErrorCheck(detail), {
     name: "Web Push VAPID",

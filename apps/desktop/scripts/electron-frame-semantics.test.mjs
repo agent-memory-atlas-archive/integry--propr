@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
-import { describe, it } from 'node:test';
+import { before, describe, it } from 'node:test';
 import { prepareNativeElectronTest } from './electron-native-test-setup.mjs';
 
 const fixture = resolve(dirname(fileURLToPath(import.meta.url)), 'electron-frame-semantics-probe.cjs');
@@ -40,10 +40,15 @@ const runFixture = (command, args) => new Promise((resolveRun, rejectRun) => {
 });
 
 describe('Electron BrowserWindow lifecycle semantics', () => {
+  let setup;
+  // A cold Electron download belongs to setup, not the fixture's 25s budget.
+  before(() => {
+    setup = prepareNativeElectronTest();
+  }, { timeout: 120_000 });
+
   it('keeps initial frame identity stable and invalidates the window getter after destruction', {
     timeout: 25_000,
   }, async context => {
-    const setup = prepareNativeElectronTest();
     if ('skipReason' in setup) {
       context.skip(setup.skipReason);
       return;

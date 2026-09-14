@@ -102,6 +102,7 @@ interface AttemptOutcome {
 export interface WebPushDispatcherOptions {
   database: Knex;
   configuration?: WebPushServerConfiguration;
+  resolvedConfiguration?: ValidatedWebPushConfiguration;
   sender?: PushSender;
   now?: () => TimestampInput;
   generateId?: () => string;
@@ -122,6 +123,12 @@ export interface WebPushDispatcherOptions {
 export interface WebPushDispatcherStartResult {
   configured: boolean;
   publicKey: string | null;
+}
+
+function dispatcherConfiguration(options: WebPushDispatcherOptions): ValidatedWebPushConfiguration {
+  return options.resolvedConfiguration ?? validateWebPushConfiguration(
+    options.configuration ?? webPushConfigurationFromEnvironment(),
+  );
 }
 
 function positiveInteger(value: number | undefined, fallback: number, name: string): number {
@@ -429,9 +436,7 @@ export class WebPushDispatcher {
 
   constructor(options: WebPushDispatcherOptions) {
     this.database = options.database;
-    this.configuration = validateWebPushConfiguration(
-      options.configuration ?? webPushConfigurationFromEnvironment(),
-    );
+    this.configuration = dispatcherConfiguration(options);
     const insecureLocalhostRequested = options.allowInsecureLocalhost
       ?? parseTruthyEnvValue(process.env.PROPR_ALLOW_INSECURE_LOCAL_WEB_PUSH);
     this.allowInsecureLocalhost = insecureLocalhostRequested

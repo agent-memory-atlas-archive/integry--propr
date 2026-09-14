@@ -3,7 +3,7 @@ import windowSizing from '../window-sizing.json';
 
 export const PREFERRED_BROWSER_WINDOW_SIZE = Object.freeze({ ...windowSizing.preferred });
 export const MINIMUM_BROWSER_WINDOW_SIZE = Object.freeze({ ...windowSizing.minimum });
-export const DESKTOP_TITLE_BAR_HEIGHT = 56;
+export const DESKTOP_TITLE_BAR_HEIGHT = 44;
 
 type DisplaySelector = {
   getCursorScreenPoint: () => Point;
@@ -82,13 +82,15 @@ export const createBrowserWindowOptions = (
     ...sizing,
     x: workArea.x + Math.floor((workArea.width - sizing.width) / 2),
     y: workArea.y + Math.floor((workArea.height - sizing.height) / 2),
-    backgroundColor: platform === 'linux' ? '#00000000' : '#f8fafc',
+    backgroundColor: platform === 'linux' || platform === 'darwin' ? '#00000000' : '#f8fafc',
     show: false,
     // Avoid Electron's opaque GTK rim. The renderer paints the Linux edge;
     // Electron 44 retains a native 5px internal resize band for this mode.
     ...(platform === 'linux' ? { icon: desktopIcon, transparent: true } : {}),
     ...(platform === 'darwin'
       ? {
+          vibrancy: 'sidebar' as const,
+          visualEffectState: 'followWindow' as const,
           titleBarStyle: 'hiddenInset' as const,
           titleBarOverlay: { height: DESKTOP_TITLE_BAR_HEIGHT },
         }

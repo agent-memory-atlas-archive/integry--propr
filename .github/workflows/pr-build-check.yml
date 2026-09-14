@@ -871,6 +871,7 @@ jobs:
             echo "Fast tests: ${{ steps.unit_tests.outcome }}"
             echo "Hosted tunnel tests: ${{ steps.tunnel_tests.outcome }}"
             echo "CLI packaging: ${{ steps.cli_pack.outcome }}"
+            echo "Change detection: ${{ steps.filter.outcome }}"
             echo "Changed-area checks: ${{ steps.build.outcome }}"
           } >> build_log.txt
 
