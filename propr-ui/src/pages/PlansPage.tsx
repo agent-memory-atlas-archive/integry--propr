@@ -3,7 +3,7 @@ import React, { useEffect, useState, useMemo, useCallback, useRef } from 'react'
 import { useSearchParams, useNavigate } from 'react-router-dom';
 import { useDocumentTitle } from '../hooks/useDocumentTitle';
 import { getDrafts, deleteDraft, abortGeneration, DraftListItem, getDraftRepositories } from '../api/proprApi';
-import { Filter, Search, X } from 'lucide-react';
+import { Filter, LoaderCircle, Search, X } from 'lucide-react';
 import { RepositorySelector, type RepoOption } from '../components/RepositorySelector';
 import { EmptyState, PlansTable, PaginationControls } from './PlansPageComponents';
 import { useSocket } from '../contexts/useSocket';
@@ -31,7 +31,9 @@ const PlansPage: React.FC = () => {
 
   const [drafts, setDrafts] = useState<DraftListItem[]>([]);
   const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+  const [refreshing, setRefreshing] = useState(false);
+  const [loadedScope, setLoadedScope] = useState<string | null>(null);
+  const [error, setError] = useState<{ scope: string; message: string } | null>(null);
 
   // Pagination state
   const [totalDrafts, setTotalDrafts] = useState(0);
@@ -41,6 +43,12 @@ const PlansPage: React.FC = () => {
   const [allRepositories, setAllRepositories] = useState<{ repo: string; count: number }[]>([]);
   const [totalAllDrafts, setTotalAllDrafts] = useState(0);
   const liveDraftStatusesRef = useRef<Map<string, string>>(new Map());
+  const draftsRequestId = useRef(0);
+  const repositoriesRequestId = useRef(0);
+  const queryScope = useMemo(
+    () => JSON.stringify([currentPage, repoFilter, statusFilter, debouncedSearch]),
+    [currentPage, debouncedSearch, repoFilter, statusFilter]
+  );
 
   // Handler to navigate directly to new plan studio
   const handleNewPlan = useCallback(() => {
@@ -69,8 +77,10 @@ const PlansPage: React.FC = () => {
 
   // Fetch all repositories for the filter dropdown
   const loadAllRepositories = useCallback(async () => {
+    const requestId = ++repositoriesRequestId.current;
     try {
       const data = await getDraftRepositories();
+      if (requestId !== repositoriesRequestId.current) return;
       setAllRepositories(data.repositories);
       setTotalAllDrafts(data.total);
     } catch (err) {
@@ -79,33 +89,44 @@ const PlansPage: React.FC = () => {
   }, []);
 
   // Fetch drafts with pagination, filtering, and search
-  const loadDrafts = useCallback(async (page: number, repository: string, status: string, showLoading = true) => {
+  const loadDrafts = useCallback(async (
+    page: number,
+    repository: string,
+    status: string,
+    search: string,
+    showLoading = true
+  ) => {
+    const requestId = ++draftsRequestId.current;
     if (showLoading) {
       setLoading(true);
+    } else {
+      setRefreshing(true);
     }
+    setError(current => current?.scope === queryScope ? null : current);
     try {
       const data = await getDrafts({
         page,
         limit: DEFAULT_PAGE_SIZE,
         repository: repository === 'all' ? undefined : repository,
-        search: debouncedSearch || undefined,
+        search: search || undefined,
         status: status === 'all' ? undefined : status
       });
+      if (requestId !== draftsRequestId.current) return;
       setDrafts(data.drafts);
       setTotalDrafts(data.total);
       setHasMore(data.hasMore);
+      setLoadedScope(queryScope);
+      setError(null);
     } catch (err) {
-      if (showLoading) {
-        setError((err as Error).message || 'Failed to load plans');
-      } else {
-        console.error('Silent refresh failed:', err);
-      }
+      if (requestId !== draftsRequestId.current) return;
+      setError({ scope: queryScope, message: (err as Error).message || 'Failed to load plans' });
     } finally {
-      if (showLoading) {
+      if (requestId === draftsRequestId.current) {
         setLoading(false);
+        setRefreshing(false);
       }
     }
-  }, [debouncedSearch]);
+  }, [queryScope]);
 
   useEffect(() => {
     for (const draft of drafts) liveDraftStatusesRef.current.set(draft.draft_id, draft.status);
@@ -113,10 +134,10 @@ const PlansPage: React.FC = () => {
 
   const refreshLiveDrafts = useCallback(async () => {
     await Promise.all([
-      loadDrafts(currentPage, repoFilter, statusFilter, false),
+      loadDrafts(currentPage, repoFilter, statusFilter, debouncedSearch, false),
       loadAllRepositories(),
     ]);
-  }, [currentPage, loadAllRepositories, loadDrafts, repoFilter, statusFilter]);
+  }, [currentPage, debouncedSearch, loadAllRepositories, loadDrafts, repoFilter, statusFilter]);
   const scheduleLiveRefresh = useLiveRefreshScheduler({
     isConnected,
     refresh: refreshLiveDrafts,
@@ -129,7 +150,7 @@ const PlansPage: React.FC = () => {
 
   // Load drafts when page, filter, or search changes
   useEffect(() => {
-    loadDrafts(currentPage, repoFilter, statusFilter);
+    loadDrafts(currentPage, repoFilter, statusFilter, debouncedSearch);
   }, [currentPage, repoFilter, statusFilter, debouncedSearch, loadDrafts]);
 
   // Sync search input with URL on initial load
@@ -240,10 +261,10 @@ const PlansPage: React.FC = () => {
     try {
       await deleteDraft(id);
       await loadAllRepositories();
-      await loadDrafts(currentPage, repoFilter, statusFilter);
+      await loadDrafts(currentPage, repoFilter, statusFilter, debouncedSearch);
     } catch (err) {
-      setError((err as Error).message || 'Failed to delete plan');
-      await loadDrafts(currentPage, repoFilter, statusFilter);
+      setError({ scope: queryScope, message: (err as Error).message || 'Failed to delete plan' });
+      await loadDrafts(currentPage, repoFilter, statusFilter, debouncedSearch);
     }
   };
 
@@ -254,44 +275,53 @@ const PlansPage: React.FC = () => {
     try {
       await abortGeneration(id);
       await Promise.all([
-        loadDrafts(currentPage, repoFilter, statusFilter),
+        loadDrafts(currentPage, repoFilter, statusFilter, debouncedSearch),
         loadAllRepositories(),
       ]);
     } catch (err) {
-      setError((err as Error).message || 'Failed to stop generation');
+      setError({ scope: queryScope, message: (err as Error).message || 'Failed to stop generation' });
     } finally {
       setAbortingId(null);
     }
   };
 
-  if (loading && drafts.length === 0 && totalAllDrafts === 0) {
+  const hasCurrentScopeData = loadedScope === queryScope;
+  const visibleDrafts = hasCurrentScopeData ? drafts : [];
+  const currentError = error?.scope === queryScope ? error.message : null;
+
+  if (!hasCurrentScopeData && !currentError) {
     return (
       <div className="flex h-full w-full min-w-0 flex-col bg-white">
         <div className="flex-shrink-0 bg-slate-50 border-b border-gray-200 px-4 sm:px-6 py-2 sm:py-4">
-          <h1 className="text-xl sm:text-2xl font-bold text-gray-800">Implementation Plans</h1>
+          <h1 className="text-xl sm:text-2xl font-bold text-gray-800">Plans</h1>
         </div>
         <div className="flex-1 overflow-auto px-4 sm:px-6 py-4 sm:py-6">
-          <div className="text-gray-500">Loading plans...</div>
+          <div role="status" className="flex items-center gap-2 text-gray-500"><LoaderCircle className="h-4 w-4 animate-spin" aria-hidden="true" />Loading plans...</div>
         </div>
       </div>
     );
   }
 
-  if (error) {
+  if (currentError && visibleDrafts.length === 0) {
     return (
       <div className="flex h-full w-full min-w-0 flex-col bg-white">
         <div className="flex-shrink-0 bg-slate-50 border-b border-gray-200 px-4 sm:px-6 py-2 sm:py-4">
-          <h1 className="text-xl sm:text-2xl font-bold text-gray-800">Implementation Plans</h1>
+          <h1 className="text-xl sm:text-2xl font-bold text-gray-800">Plans</h1>
         </div>
         <div className="flex-1 overflow-auto px-4 sm:px-6 py-4 sm:py-6">
-          <div className="p-4 bg-red-50 border border-red-200 rounded-lg text-red-700">{error}</div>
+          <div className="p-4 bg-red-50 border border-red-200 rounded-lg text-red-700">{currentError}</div>
         </div>
       </div>
     );
   }
 
   const renderContent = () => {
-    if (totalAllDrafts === 0 && !loading && !debouncedSearch) {
+    if (visibleDrafts.length === 0
+      && totalDrafts === 0
+      && currentPage === 1
+      && repoFilter === 'all'
+      && statusFilter === 'all'
+      && !debouncedSearch) {
       return (
         <EmptyState
           type="no-plans"
@@ -300,7 +330,7 @@ const PlansPage: React.FC = () => {
       );
     }
 
-    if (drafts.length === 0 && !loading && debouncedSearch) {
+    if (visibleDrafts.length === 0 && debouncedSearch) {
       return (
         <EmptyState
           type="no-search-results"
@@ -311,7 +341,7 @@ const PlansPage: React.FC = () => {
       );
     }
 
-    if (drafts.length === 0 && !loading) {
+    if (visibleDrafts.length === 0) {
       return (
         <EmptyState
           type="no-filter-results"
@@ -323,7 +353,7 @@ const PlansPage: React.FC = () => {
 
     return (
       <PlansTable
-        drafts={drafts}
+        drafts={visibleDrafts}
         abortingId={abortingId}
         onDelete={handleDelete}
         onAbort={handleAbort}
@@ -392,11 +422,13 @@ const PlansPage: React.FC = () => {
 
       {/* Scrollable Content Area */}
       <div className="flex-1 overflow-y-auto overflow-x-hidden w-full max-w-full">
+        {currentError && <div className="mx-4 mt-4 border-l-2 border-red-500 bg-red-50 p-3 text-sm text-red-700 sm:mx-6">Couldn’t refresh plans: {currentError}</div>}
+        {(loading || refreshing) && <div role="status" className="px-4 pt-3 text-xs text-slate-500 sm:px-6">Refreshing plans…</div>}
         {renderContent()}
       </div>
 
       {/* Anchored Footer */}
-      {drafts.length > 0 && totalPages > 1 && (
+      {visibleDrafts.length > 0 && totalPages > 1 && (
         <div className="flex-shrink-0 bg-slate-50 border-t border-gray-200">
           <PaginationControls
             currentPage={currentPage}

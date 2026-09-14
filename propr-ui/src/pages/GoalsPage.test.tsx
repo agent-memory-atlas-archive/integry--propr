@@ -52,6 +52,16 @@ const goal: goalsApi.Goal = {
 
 const openGoalCreator = () => fireEvent.click(screen.getByRole('button', { name: 'New goal' }));
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
+
 describe('GoalsPage', () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -72,6 +82,29 @@ describe('GoalsPage', () => {
     vi.mocked(goalsApi.cancelGoal).mockResolvedValue({ goal: { ...goal, desiredState: 'cancelled', resultState: null } });
     vi.mocked(goalsApi.deleteGoal).mockResolvedValue();
     vi.mocked(goalsApi.requestGoalModel).mockResolvedValue({ goal: { ...goal, requestedModel: 'gpt-5.6-luna' } });
+  });
+
+  it('waits for a successful goal read before presenting the empty queue', async () => {
+    const request = deferred<Awaited<ReturnType<typeof goalsApi.listGoals>>>();
+    vi.mocked(goalsApi.listGoals).mockReturnValue(request.promise);
+    render(<MemoryRouter initialEntries={['/goals']}><Routes><Route path="/goals" element={<GoalsPage />} /></Routes></MemoryRouter>);
+
+    expect(screen.getByText('Loading goals…')).toBeInTheDocument();
+    expect(screen.queryByText('No goals yet')).not.toBeInTheDocument();
+
+    await act(async () => { request.resolve({ goals: [] }); });
+    expect(await screen.findByText('No goals yet')).toBeInTheDocument();
+  });
+
+  it('keeps a failed initial goal read as an error instead of an empty queue', async () => {
+    const request = deferred<Awaited<ReturnType<typeof goalsApi.listGoals>>>();
+    vi.mocked(goalsApi.listGoals).mockReturnValue(request.promise);
+    render(<MemoryRouter initialEntries={['/goals']}><Routes><Route path="/goals" element={<GoalsPage />} /></Routes></MemoryRouter>);
+
+    await act(async () => { request.reject(new Error('Goals unavailable')); });
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('Goals unavailable');
+    expect(screen.queryByText('No goals yet')).not.toBeInTheDocument();
   });
 
   it('creates exactly one native goal from repository, agent, model and objective', async () => {

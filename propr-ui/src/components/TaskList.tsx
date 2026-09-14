@@ -4,7 +4,7 @@ import { Inbox } from 'lucide-react';
 import { getTasks, getRepositoryStats } from '../api/proprApi';
 import { useSocket } from '../contexts/useSocket';
 import type { RepoOption } from './RepositorySelector';
-import type { TaskListProps, LoadConfig } from './TaskList/types';
+import type { Task, TaskGroup, TaskListProps, LoadConfig } from './TaskList/types';
 import { Filters } from './TaskList/Filters';
 import { Pagination } from './TaskList/Pagination';
 import {
@@ -46,6 +46,32 @@ const createRepoOptions = (repositories: Array<{ repository: string; total: numb
   return [allOption, ...repoOptions];
 };
 
+type TaskScopeState =
+  | { kind: 'loading' }
+  | { kind: 'error'; message: string }
+  | { kind: 'ready'; tasks: Task[]; groups: TaskGroup[]; refreshError: string | null };
+
+function resolveTaskScopeState(
+  loadedScope: string | null,
+  queryScope: string,
+  tasks: Task[],
+  groups: TaskGroup[],
+  error: { scope: string; message: string } | null,
+): TaskScopeState {
+  const currentError = error?.scope === queryScope ? error.message : null;
+  if (loadedScope !== queryScope) return currentError ? { kind: 'error', message: currentError } : { kind: 'loading' };
+  if (currentError && tasks.length === 0) return { kind: 'error', message: currentError };
+  return { kind: 'ready', tasks, groups, refreshError: currentError };
+}
+
+const TaskBlockingState: React.FC<{
+  state: Extract<TaskScopeState, { kind: 'loading' | 'error' }>;
+  dashboard: boolean;
+}> = ({ state, dashboard }) => {
+  if (state.kind === 'loading') return dashboard ? <DashboardLoadingState /> : <FullPageLoadingState />;
+  return dashboard ? <DashboardErrorState error={state.message} /> : <FullPageErrorState error={state.message} />;
+};
+
 const TaskList: React.FC<TaskListProps> = ({ limit, showViewAll = false, hideFilters = false }) => {
   const [searchParams, setSearchParams] = useSearchParams();
   const navigate = useNavigate();
@@ -77,9 +103,11 @@ const TaskList: React.FC<TaskListProps> = ({ limit, showViewAll = false, hideFil
   const [debouncedSearch, setDebouncedSearch] = useState<string>(urlSearch);
   const isInitialMount = useRef(true);
 
-  const [tasks, setTasks] = useState<import('./TaskList/types').Task[]>([]);
+  const [tasks, setTasks] = useState<Task[]>([]);
   const [loading, setLoading] = useState<boolean>(true);
-  const [error, setError] = useState<string | null>(null);
+  const [refreshing, setRefreshing] = useState<boolean>(false);
+  const [loadedScope, setLoadedScope] = useState<string | null>(null);
+  const [error, setError] = useState<{ scope: string; message: string } | null>(null);
 
   const [availableRepos, setAvailableRepos] = useState<RepoOption[]>([]);
   const [reposLoading, setReposLoading] = useState<boolean>(!hideFilters);
@@ -87,9 +115,14 @@ const TaskList: React.FC<TaskListProps> = ({ limit, showViewAll = false, hideFil
   const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set());
   const hasLoadedRepoStats = useRef(false);
   const repoStatsRequestId = useRef(0);
+  const tasksRequestId = useRef(0);
   const taskEventFingerprintsRef = useRef<Map<string, string>>(new Map());
 
   const tasksPerPage = limit;
+  const queryScope = useMemo(
+    () => JSON.stringify([filter, repoFilter, currentPage, debouncedSearch, tasksPerPage]),
+    [currentPage, debouncedSearch, filter, repoFilter, tasksPerPage]
+  );
 
   // Helper to update URL params (only used when useUrlState is true)
   const updateSearchParams = useCallback((updates: Record<string, string | null>) => {
@@ -171,22 +204,33 @@ const TaskList: React.FC<TaskListProps> = ({ limit, showViewAll = false, hideFil
 
   // Memoize fetchTasks to allow WebSocket handler to call it
   const fetchTasks = useCallback(async (loadConfig?: LoadConfig) => {
+    const requestId = ++tasksRequestId.current;
+    const showLoadingState = loadConfig?.setLoadingState ?? true;
     try {
-      setLoading(loadConfig?.setLoadingState ?? true);
+      if (showLoadingState) setLoading(true);
+      else setRefreshing(true);
+      setError(current => current?.scope === queryScope ? null : current);
       const offset = currentPage * tasksPerPage;
       // Fetch more tasks if we are doing grouping, as grouping reduces visible items
       // But for now respecting the limit passed to component to avoid breaking pagination logic entirely
       // Ideally pagination should be group-aware or fetch more to fill the page
       const data = await getTasks(filter, tasksPerPage * 2, offset, repoFilter, debouncedSearch);
+      if (requestId !== tasksRequestId.current) return;
       setTasks(data.tasks || []);
       setTotalTasks(data.total || 0);
+      setLoadedScope(queryScope);
+      setError(null);
     } catch (err) {
-      setError((err as Error).message);
+      if (requestId !== tasksRequestId.current) return;
+      setError({ scope: queryScope, message: (err as Error).message });
       console.error('Error fetching tasks:', err);
     } finally {
-      setLoading(false);
+      if (requestId === tasksRequestId.current) {
+        setLoading(false);
+        setRefreshing(false);
+      }
     }
-  }, [filter, tasksPerPage, currentPage, repoFilter, debouncedSearch]);
+  }, [filter, tasksPerPage, currentPage, repoFilter, debouncedSearch, queryScope]);
 
   // Refresh repository stats only on initial mount when filters are visible.
   useEffect(() => {
@@ -235,15 +279,16 @@ const TaskList: React.FC<TaskListProps> = ({ limit, showViewAll = false, hideFil
     navigate(`/tasks/${taskId}`);
   }, [navigate]);
 
-  // Loading state
-  if (loading && tasks.length === 0) {
-    return hideFilters ? <DashboardLoadingState /> : <FullPageLoadingState />;
+  const scopeState = resolveTaskScopeState(loadedScope, queryScope, tasks, groupedTasks, error);
+
+  // A scope that has not completed successfully is loading even during the
+  // render before its effect starts. This prevents old rows or an empty state
+  // from flashing when URL filters change. Errors remain distinct from empty results.
+  if (scopeState.kind !== 'ready') {
+    return <TaskBlockingState state={scopeState} dashboard={hideFilters} />;
   }
 
-  // Error state
-  if (error) {
-    return hideFilters ? <DashboardErrorState error={error} /> : <FullPageErrorState error={error} />;
-  }
+  const { tasks: visibleTasks, groups: visibleGroupedTasks, refreshError: currentError } = scopeState;
 
   const totalPages = Math.ceil(totalTasks / tasksPerPage);
 
@@ -263,7 +308,7 @@ const TaskList: React.FC<TaskListProps> = ({ limit, showViewAll = false, hideFil
 
   // Shared table content props
   const tableContentProps = {
-    groupedTasks,
+    groupedTasks: visibleGroupedTasks,
     expandedGroups,
     onRowClick: handleRowClick,
     onToggleGroup: toggleGroup,
@@ -275,7 +320,10 @@ const TaskList: React.FC<TaskListProps> = ({ limit, showViewAll = false, hideFil
       <div className="flex min-h-[18rem] w-full flex-1 flex-col">
         <Filters {...filterProps} />
 
-        {tasks.length === 0 ? (
+        {currentError && <DashboardErrorState error={currentError} />}
+        {refreshing && <div role="status" className="px-4 pb-2 text-xs text-slate-500">Refreshing tasks…</div>}
+
+        {visibleTasks.length === 0 ? (
           <div className="flex flex-1 flex-col items-center justify-center px-6 py-12 text-center">
             <Inbox className="mb-4 h-12 w-12 text-slate-200" aria-hidden="true" />
             <p className="max-w-md text-sm text-slate-500">No tasks found — try clearing filters, or start one by creating a plan or adding your ProPR trigger label to a GitHub issue.</p>
@@ -305,7 +353,9 @@ const TaskList: React.FC<TaskListProps> = ({ limit, showViewAll = false, hideFil
 
       {/* Scrollable Content Area */}
       <div className="flex-1 overflow-auto">
-        {tasks.length === 0 ? (
+        {currentError && <div className="px-4 pt-4 sm:px-6"><DashboardErrorState error={currentError} /></div>}
+        {(loading || refreshing) && <div role="status" className="px-4 pt-3 text-xs text-slate-500 sm:px-6">Refreshing tasks…</div>}
+        {visibleTasks.length === 0 ? (
           <div className="text-center py-20 mx-4 sm:mx-6 bg-gray-50 rounded-lg border border-dashed border-gray-300">
             <p className="text-gray-500">No tasks found — try clearing filters, or start one by creating a plan or adding your ProPR trigger label to a GitHub issue.</p>
           </div>
@@ -319,7 +369,7 @@ const TaskList: React.FC<TaskListProps> = ({ limit, showViewAll = false, hideFil
       </div>
 
       {/* Anchored Footer */}
-      {tasks.length > 0 && totalPages > 1 && (
+      {visibleTasks.length > 0 && totalPages > 1 && (
         <div className="flex-shrink-0 bg-slate-50 border-t border-gray-200">
           <Pagination
             hideFilters={false}

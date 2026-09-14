@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, waitFor, act } from '@testing-library/react';
+import { render, screen, waitFor, act, fireEvent } from '@testing-library/react';
 import { MemoryRouter, Route, Routes, useNavigate } from 'react-router-dom';
 import TaskList from './TaskList';
 import { getTasks, getRepositoryStats } from '../api/proprApi';
@@ -16,6 +16,11 @@ const repositoryStats = (repository: string, total: number) => ({
   inProgress: 0,
   successRate: 0,
 });
+
+const populatedTaskResponse = (): Awaited<ReturnType<typeof getTasks>> => ({
+  tasks: [{ id: 'task-1', repository: 'integry/propr', status: 'processing', createdAt: '2026-09-14T00:00:00Z' }],
+  total: 1,
+} as unknown as Awaited<ReturnType<typeof getTasks>>);
 
 let taskUpdateHandler: ((payload: TaskUpdatePayload) => void) | null = null;
 
@@ -157,5 +162,74 @@ describe('TaskList', () => {
 
     await waitFor(() => expect(mockGetTasks).toHaveBeenCalledTimes(2));
     expect(mockGetRepositoryStats).toHaveBeenCalledTimes(1);
+  });
+
+  it('shows loading until an initial empty read succeeds and never treats a failure as empty', async () => {
+    const taskRequest = deferred<Awaited<ReturnType<typeof getTasks>>>();
+    mockGetTasks.mockReturnValue(taskRequest.promise);
+    mockGetRepositoryStats.mockResolvedValue({ repositories: [] });
+
+    const view = render(<MemoryRouter><TaskList limit={10} /></MemoryRouter>);
+
+    expect(screen.getByText('page loading')).toBeInTheDocument();
+    expect(screen.queryByText(/No tasks found/)).not.toBeInTheDocument();
+
+    await act(async () => { taskRequest.resolve({ tasks: [], total: 0 }); });
+    expect(await screen.findByText(/No tasks found/)).toBeInTheDocument();
+
+    view.unmount();
+    const failedRequest = deferred<Awaited<ReturnType<typeof getTasks>>>();
+    mockGetTasks.mockReturnValue(failedRequest.promise);
+    render(<MemoryRouter><TaskList limit={10} /></MemoryRouter>);
+    await act(async () => { failedRequest.reject(new Error('Tasks unavailable')); });
+
+    expect(await screen.findByText('Tasks unavailable')).toBeInTheDocument();
+    expect(screen.queryByText(/No tasks found/)).not.toBeInTheDocument();
+  });
+
+  it('does not expose rows from the previous filter while the next scope is pending', async () => {
+    const nextScope = deferred<Awaited<ReturnType<typeof getTasks>>>();
+    mockGetTasks
+      .mockResolvedValueOnce(populatedTaskResponse())
+      .mockReturnValueOnce(nextScope.promise);
+    mockGetRepositoryStats.mockResolvedValue({ repositories: [] });
+
+    render(
+      <MemoryRouter initialEntries={['/tasks']}>
+        <Routes><Route path="/tasks" element={<NavigationHarness />} /></Routes>
+      </MemoryRouter>
+    );
+    expect(await screen.findByText('task table')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'change filters' }));
+    expect(await screen.findByText('page loading')).toBeInTheDocument();
+    expect(screen.queryByText('task table')).not.toBeInTheDocument();
+    expect(screen.queryByText(/No tasks found/)).not.toBeInTheDocument();
+
+    await act(async () => { nextScope.resolve({ tasks: [], total: 0 }); });
+    expect(await screen.findByText(/No tasks found/)).toBeInTheDocument();
+  });
+
+  it('keeps populated results visible during a same-scope live refresh', async () => {
+    const refreshRequest = deferred<Awaited<ReturnType<typeof getTasks>>>();
+    mockGetTasks
+      .mockResolvedValueOnce(populatedTaskResponse())
+      .mockReturnValueOnce(refreshRequest.promise);
+    mockGetRepositoryStats.mockResolvedValue({ repositories: [] });
+
+    render(<MemoryRouter><TaskList limit={10} /></MemoryRouter>);
+    expect(await screen.findByText('task table')).toBeInTheDocument();
+
+    act(() => taskUpdateHandler?.({
+      eventType: 'task:update', taskId: 'task-1', state: 'completed', previousState: 'processing',
+      repository: 'integry/propr', timestamp: '2026-09-14T00:00:01Z',
+    }));
+
+    expect(await screen.findByText('Refreshing tasks…')).toBeInTheDocument();
+    expect(screen.getByText('task table')).toBeInTheDocument();
+    expect(screen.queryByText(/No tasks found/)).not.toBeInTheDocument();
+
+    await act(async () => { refreshRequest.resolve({ tasks: [], total: 0 }); });
+    expect(await screen.findByText(/No tasks found/)).toBeInTheDocument();
   });
 });
