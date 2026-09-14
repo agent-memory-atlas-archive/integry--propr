@@ -196,7 +196,10 @@ export const SocketProvider: React.FC<SocketProviderProps> = ({
 
     const taskLiveUpdated = (payload: TaskLiveUpdatePayload) => {
       if (!isCurrentScope()) return;
-      console.log('[SocketContext] Received task live update:', payload);
+      // Live payloads can contain large command outputs. Logging the object
+      // makes Chromium retain and inspect that data on its main thread for
+      // every incremental event, competing with rendering and HTTP callbacks.
+      console.log(`[SocketContext] Received task live update: ${payload.events.length} event(s)`);
       taskLiveUpdateCallbacksRef.current.forEach((callback) => callback(payload));
     };
 

@@ -64,7 +64,11 @@ function appendModelSourceEvent(rawEvent: RawExecutionEvent, context: ClaudeMess
 }
 
 function appendCompletedCodexItem(rawEvent: RawExecutionEvent, context: ClaudeMessageContext, pendingCommandStarts: PendingCommandStarts): void {
-  if ((rawEvent.item?.type === 'reasoning' || rawEvent.item?.type === 'agent_message') && rawEvent.item.text) {
+  if (rawEvent.item?.type === 'reasoning' && rawEvent.item.text) {
+    context.events.push({ type: 'thought', content: rawEvent.item.text, internalReasoning: true, timestamp: context.timestamp });
+    return;
+  }
+  if (rawEvent.item?.type === 'agent_message' && rawEvent.item.text) {
     context.events.push({ type: 'thought', content: rawEvent.item.text, timestamp: context.timestamp });
     return;
   }
@@ -224,5 +228,12 @@ function appendErrorEvent(row: ExecutionDetailRow, timestamp: string, events: Ar
 
 function appendFallbackContentEvent(row: ExecutionDetailRow, timestamp: string, events: Array<Record<string, unknown>>): void {
   if (!row.content) return;
-  events.push({ type: row.tool_name ? 'tool_result' : 'thought', content: row.tool_name ? undefined : row.content, result: row.tool_name ? row.content : undefined, isError: Boolean(row.is_error), timestamp });
+  events.push({
+    type: row.tool_name ? 'tool_result' : 'thought',
+    content: row.tool_name ? undefined : row.content,
+    result: row.tool_name ? row.content : undefined,
+    isError: Boolean(row.is_error),
+    ...(!row.tool_name && row.event_type.toLowerCase().includes('reasoning') ? { internalReasoning: true } : {}),
+    timestamp,
+  });
 }

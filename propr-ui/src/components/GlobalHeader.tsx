@@ -22,6 +22,7 @@ interface GlobalHeaderProps {
   isDemoMode?: boolean;
   headerStatsOverride?: Pick<HeaderStats, 'runningCount' | 'runningItems' | 'activePlans' | 'reviewGroups' | 'systemHealth'> & {
     activityStatus?: HeaderStats['activityStatus'];
+    resourceStatuses?: HeaderStats['resourceStatuses'];
     dismissPlan?: HeaderStats['dismissPlan'];
     dismissTask?: HeaderStats['dismissTask'];
   };
@@ -37,6 +38,7 @@ function resolveHeaderStats(
     runningCount: override?.runningCount ?? stats.runningCount,
     runningItems: override?.runningItems ?? stats.runningItems,
     activityStatus: override?.activityStatus ?? stats.activityStatus,
+    resourceStatuses: override?.resourceStatuses ?? stats.resourceStatuses,
     activePlans: override?.activePlans ?? stats.activePlans,
     reviewGroups: override?.reviewGroups ?? stats.reviewGroups,
     systemHealth: override?.systemHealth ?? stats.systemHealth,
@@ -73,7 +75,7 @@ const GlobalHeader: React.FC<GlobalHeaderProps> = ({ user, onLogout, onMenuToggl
   const [searchRequest, setSearchRequest] = useState(0);
 
   const headerStats = useHeaderStats();
-  const { activePlans, reviewGroups, systemHealth, dismissPlan, dismissTask } = resolveHeaderStats(headerStatsOverride, headerStats);
+  const { activePlans, reviewGroups, systemHealth, dismissPlan, dismissTask, resourceStatuses } = resolveHeaderStats(headerStatsOverride, headerStats);
 
   const handleNewPlan = useCallback(() => {
     if (isDemoMode) return;
@@ -113,9 +115,9 @@ const GlobalHeader: React.FC<GlobalHeaderProps> = ({ user, onLogout, onMenuToggl
           </button>
         </div>
         <div className="flex items-stretch">
-          <ActivePlansButton activePlans={activePlans} onDismissPlan={dismissPlan} />
+          <ActivePlansButton activePlans={activePlans} onDismissPlan={dismissPlan} status={resourceStatuses?.drafts} />
           <div className="h-[60%] w-px self-center bg-slate-200" />
-          <TasksButton taskGroups={reviewGroups} onDismissTask={dismissTask} />
+          <TasksButton taskGroups={reviewGroups} onDismissTask={dismissTask} status={resourceStatuses?.tasks} />
         </div>
       </div>
 

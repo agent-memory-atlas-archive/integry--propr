@@ -92,8 +92,10 @@ export function useRepositoryManagement(): UseRepositoryManagementResult {
   const configurationReloadRequiredRef = useRef(false);
   const pendingOptimisticUpdatesRef = useRef<Set<string>>(new Set());
   const terminalSocketUpdatesRef = useRef<Set<string>>(new Set());
+  const reposRequestIdRef = useRef(0);
 
   const loadRepos = useCallback(async () => {
+    const requestId = ++reposRequestIdRef.current;
     try {
       setLoading(true);
       setError(null);
@@ -103,6 +105,7 @@ export function useRepositoryManagement(): UseRepositoryManagementResult {
           : getInstanceCatalog().then(catalog => ({ repos_to_monitor: catalog.repositories })),
         getUserRepoPreferences().catch(() => ({} as UserRepoPreferences))
       ]);
+      if (requestId !== reposRequestIdRef.current) return;
       const rawRepos = repoData.repos_to_monitor || [];
       setUserRepoPrefs(prefs);
       const seenKeys = new Set<string>();
@@ -139,10 +142,11 @@ export function useRepositoryManagement(): UseRepositoryManagementResult {
       setRepos(parsedRepos);
       configurationReloadRequiredRef.current = false;
     } catch (err) {
+      if (requestId !== reposRequestIdRef.current) return;
       setError((err as Error).message || 'Failed to load repositories');
       throw err;
     } finally {
-      setLoading(false);
+      if (requestId === reposRequestIdRef.current) setLoading(false);
     }
   }, [canManageRepositories]);
 
@@ -214,6 +218,8 @@ export function useRepositoryManagement(): UseRepositoryManagementResult {
     void loadAvailableRepos();
     void loadIndexingStatuses();
   }, [loadRepos, loadAvailableRepos, loadIndexingStatuses]);
+
+  useEffect(() => () => { reposRequestIdRef.current += 1; }, []);
 
   useEffect(() => {
     if (!isConnected) return;

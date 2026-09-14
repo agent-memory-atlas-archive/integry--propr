@@ -1,9 +1,18 @@
+/* eslint-disable max-lines -- stateful header projections stay together so partial refreshes commit atomically */
 import { useState, useEffect, useCallback, useRef } from 'react';
-import { getQueueStats, getTasks, getSystemStatus } from '../api/proprApi';
+import { getQueueStats, getTasks } from '../api/proprApi';
 import { getDrafts, DraftListItem } from '../api/plannerApi';
 import { useSocket } from '../contexts/useSocket';
 import { isDesktopRuntime } from '../config/runtimeMode';
-import type { QueueStatsUpdatePayload } from '@propr/shared';
+import type { DraftUpdatePayload, QueueStatsUpdatePayload, TaskUpdatePayload } from '@propr/shared';
+import { useCurrentUser } from '../contexts/AuthContext';
+import { getDesktopSocketConfigurationKey } from '../api/apiClient';
+import { useSharedSystemStatus } from '../contexts/SystemStatusContext';
+import type { SystemStatus } from '../api/proprTypes';
+import {
+  coalesceHeaderStatsRead,
+  type HeaderStatsResource,
+} from './headerStatsRequestCoordinator';
 import {
   buildReviewGroups,
   buildRunningItems,
@@ -27,8 +36,34 @@ export type { RunningItem } from './useHeaderStatsHelpers';
 
 const LIVE_INVALIDATION_COALESCE_MS = 100;
 const LIVE_REVALIDATION_RETRY_DELAYS_MS = [1_000, 3_000] as const;
+const FALLBACK_POLL_INTERVAL_MS = 30_000;
+const ALL_STATS_RESOURCES: readonly HeaderStatsResource[] = ['queue', 'drafts', 'tasks', 'status'];
 
-type FetchStatsOutcome = 'succeeded' | 'failed' | 'superseded';
+export type HeaderStatsResourceStatus = 'checking' | 'available' | 'unavailable';
+
+type ResourceRecord<T> = Record<HeaderStatsResource, T>;
+
+interface FetchStatsResult {
+  succeededResources: HeaderStatsResource[];
+  failedResources: HeaderStatsResource[];
+  supersededResources: HeaderStatsResource[];
+}
+
+const createResourceRecord = <T,>(value: T): ResourceRecord<T> => ({
+  queue: value,
+  drafts: value,
+  tasks: value,
+  status: value,
+});
+
+const getActivityStatus = (
+  statuses: ResourceRecord<HeaderStatsResourceStatus>,
+): HeaderStats['activityStatus'] => {
+  const activityStatuses = [statuses.queue, statuses.drafts];
+  if (activityStatuses.includes('unavailable')) return 'unavailable';
+  if (activityStatuses.every(status => status === 'available')) return 'available';
+  return 'checking';
+};
 
 const queueStatsFingerprint = (payload: QueueStatsUpdatePayload): string => JSON.stringify([
   payload.stats.waiting,
@@ -49,6 +84,9 @@ export interface HeaderStats {
 
   // Whether the active-work snapshot is current and complete.
   activityStatus: 'checking' | 'available' | 'unavailable';
+
+  // Whether each independently reconciled header resource has loaded.
+  resourceStatuses: ResourceRecord<HeaderStatsResourceStatus>;
 
   // Active plans (not merged, not closed), sorted by updated_at descending
   activePlans: DraftListItem[];
@@ -86,9 +124,14 @@ export interface HeaderStats {
 }
 
 export function useHeaderStats(): HeaderStats {
+  const currentUser = useCurrentUser();
+  const { getStatus, refreshStatus } = useSharedSystemStatus();
+  const requestIdentityKey = `${getDesktopSocketConfigurationKey()}\0${currentUser?.id ?? 'anonymous'}`;
   const [runningCount, setRunningCount] = useState<number>(0);
   const [runningItems, setRunningItems] = useState<RunningItem[]>([]);
-  const [activityStatus, setActivityStatus] = useState<HeaderStats['activityStatus']>('checking');
+  const [resourceStatuses, setResourceStatuses] = useState<ResourceRecord<HeaderStatsResourceStatus>>(
+    () => createResourceRecord('checking'),
+  );
   const [activePlans, setActivePlans] = useState<DraftListItem[]>([]);
   const [reviewCount, setReviewCount] = useState<number>(0);
   const [reviewGroups, setReviewGroups] = useState<TaskGroup[]>([]);
@@ -115,18 +158,52 @@ export function useHeaderStats(): HeaderStats {
 
   // Track if component is mounted
   const isMountedRef = useRef(true);
-  const statsRequestRef = useRef(0);
+  const statsRequestRef = useRef<ResourceRecord<number>>(createResourceRecord(0));
+  const resourceErrorsRef = useRef<ResourceRecord<string | null>>(createResourceRecord(null));
   const liveRefreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const liveRefreshInFlightRef = useRef(false);
-  const liveRefreshPendingRef = useRef(false);
+  const liveRefreshPendingRef = useRef<Set<HeaderStatsResource>>(new Set());
   const liveRefreshRetryAttemptRef = useRef(0);
   const lastQueueStatsFingerprintRef = useRef<string | null>(null);
   const pendingQueueStatsFingerprintRef = useRef<string | null>(null);
+  const draftsSnapshotRef = useRef<DraftListItem[]>([]);
+  const activeJobsSnapshotRef = useRef<Awaited<ReturnType<typeof getQueueStats>>['activeJobs']>([]);
+  const tasksSnapshotRef = useRef<Awaited<ReturnType<typeof getTasks>>>({ tasks: [] });
+  const draftStatusesRef = useRef<Map<string, string>>(new Map());
+  const taskFingerprintsRef = useRef<Map<string, string>>(new Map());
+  const previousRequestIdentityRef = useRef(requestIdentityKey);
+  const requestIdentityRef = useRef(requestIdentityKey);
 
   // WebSocket connection for real-time updates
   const { onTaskUpdate, onDraftUpdate, onQueueStatsUpdate, isConnected } = useSocket();
   const socketConnectedRef = useRef(isConnected);
   socketConnectedRef.current = isConnected;
+
+  // A mounted desktop renderer can switch instances/accounts without a page
+  // reload. Drop every account-derived snapshot before starting reads under
+  // the new coalescing key.
+  useEffect(() => {
+    if (previousRequestIdentityRef.current === requestIdentityKey) return;
+    previousRequestIdentityRef.current = requestIdentityKey;
+    requestIdentityRef.current = requestIdentityKey;
+    ALL_STATS_RESOURCES.forEach(resource => { statsRequestRef.current[resource] += 1; });
+    resourceErrorsRef.current = createResourceRecord(null);
+    draftsSnapshotRef.current = [];
+    activeJobsSnapshotRef.current = [];
+    tasksSnapshotRef.current = { tasks: [] };
+    draftStatusesRef.current.clear();
+    taskFingerprintsRef.current.clear();
+    lastQueueStatsFingerprintRef.current = null;
+    pendingQueueStatsFingerprintRef.current = null;
+    setRunningItems([]);
+    setRunningCount(0);
+    setActivePlans([]);
+    setReviewGroups([]);
+    setReviewCount(0);
+    setResourceStatuses(createResourceRecord('checking'));
+    setIsLoading(true);
+    setError(null);
+  }, [requestIdentityKey]);
 
   // Dismiss a plan
   const dismissPlan = useCallback((planId: string) => {
@@ -173,122 +250,194 @@ export function useHeaderStats(): HeaderStats {
   }, []);
 
   // Main fetch function
-  const fetchStats = useCallback(async (isInitialLoad = false): Promise<FetchStatsOutcome> => {
-    const request = ++statsRequestRef.current;
+  // Partial reconciliation has several deliberately independent failure paths.
+  /* eslint-disable complexity */
+  const fetchStats = useCallback(
+  async (
+    resources: readonly HeaderStatsResource[] = ALL_STATS_RESOURCES,
+    isInitialLoad = false,
+  ): Promise<FetchStatsResult> => {
+    const requestIdentity = requestIdentityKey;
+    const requestVersions = new Map(resources.map(resource => {
+      const version = statsRequestRef.current[resource] + 1;
+      statsRequestRef.current[resource] = version;
+      return [resource, version] as const;
+    }));
     try {
       if (isInitialLoad) {
         setIsLoading(true);
       }
 
-      // Fetch all data in parallel. Queue failure is isolated so unrelated
-      // generating/refining plan activity can still be represented.
-      const [queueResult, [draftsResponse, tasksResponse, statusResponse]] = await Promise.all([
-        getQueueStats().then(
-          value => ({ activeJobs: value.activeJobs || [], errorMessage: null }),
-          error => ({ activeJobs: [], errorMessage: (error as Error).message })
-        ),
-        Promise.all([
-          // Fetch active plans only (exclude merged at DB level - include executed and pr_created for Plans in Focus)
-          getDrafts({ limit: 20, excludeStatuses: 'merged' }),
-          // Fetch review-worthy tasks only (completed/failed, exclude merged at DB level)
-          getTasks({ limit: 30, forReview: true, excludeMerged: true }),
-          getSystemStatus(),
-        ]),
-      ]);
+      const requested = new Set(resources);
+      const reads = {
+        queue: requested.has('queue')
+          ? coalesceHeaderStatsRead(requestIdentityKey, 'queue', getQueueStats) : null,
+        drafts: requested.has('drafts')
+          ? coalesceHeaderStatsRead(requestIdentityKey, 'drafts', () =>
+            getDrafts({ limit: 20, excludeStatuses: 'merged' })) : null,
+        tasks: requested.has('tasks')
+          ? coalesceHeaderStatsRead(requestIdentityKey, 'tasks', () =>
+            getTasks({ limit: 30, forReview: true, excludeMerged: true })) : null,
+        status: requested.has('status')
+          ? coalesceHeaderStatsRead(requestIdentityKey, 'status', isInitialLoad ? getStatus : refreshStatus) : null,
+      };
+      const entries = await Promise.all((Object.entries(reads) as Array<[
+        HeaderStatsResource, Promise<unknown> | null
+      ]>).filter((entry): entry is [HeaderStatsResource, Promise<unknown>] => entry[1] !== null)
+        .map(async ([resource, promise]) => {
+          try {
+            return [resource, await promise, null] as const;
+          } catch (error) {
+            return [resource, null, error as Error] as const;
+          }
+        }));
 
-      if (!isMountedRef.current || request !== statsRequestRef.current) return 'superseded';
+      if (!isMountedRef.current || requestIdentityRef.current !== requestIdentity) {
+        return {
+          succeededResources: [],
+          failedResources: [],
+          supersededResources: [...resources],
+        };
+      }
 
-      // Build running activity from generating/refining plans and authoritative
-      // active queue jobs. Waiting and delayed jobs are intentionally excluded.
-      const runningItemsList = buildRunningItems(
-        draftsResponse.drafts,
-        queueResult.activeJobs
-      );
+      const result: FetchStatsResult = {
+        succeededResources: [],
+        failedResources: [],
+        supersededResources: [],
+      };
+      for (const [resource, value, resourceError] of entries) {
+        if (requestVersions.get(resource) !== statsRequestRef.current[resource]) {
+          result.supersededResources.push(resource);
+          continue;
+        }
+        if (resourceError) {
+          resourceErrorsRef.current[resource] = resourceError.message;
+          result.failedResources.push(resource);
+          setResourceStatuses(previous => ({ ...previous, [resource]: 'unavailable' }));
+          continue;
+        }
+        resourceErrorsRef.current[resource] = null;
+        result.succeededResources.push(resource);
+        setResourceStatuses(previous => ({
+          ...previous,
+          [resource]: resource === 'queue' && isDesktopRuntime() && !socketConnectedRef.current
+            ? 'unavailable'
+            : 'available',
+        }));
+        if (resource === 'queue') {
+          const queue = value as Awaited<ReturnType<typeof getQueueStats>>;
+          activeJobsSnapshotRef.current = queue.activeJobs || [];
+          if (pendingQueueStatsFingerprintRef.current !== null) {
+            lastQueueStatsFingerprintRef.current = pendingQueueStatsFingerprintRef.current;
+            pendingQueueStatsFingerprintRef.current = null;
+          }
+        } else if (resource === 'drafts') {
+          const response = value as Awaited<ReturnType<typeof getDrafts>>;
+          draftsSnapshotRef.current = response.drafts;
+          draftStatusesRef.current = new Map(response.drafts.map(draft => [draft.draft_id, draft.status]));
+          setActivePlans(filterActivePlans(response.drafts));
+        } else if (resource === 'tasks') {
+          const response = value as Awaited<ReturnType<typeof getTasks>>;
+          tasksSnapshotRef.current = response;
+          for (const task of response.tasks) {
+            taskFingerprintsRef.current.set(task.id, `${task.status}\0${task.repository ?? ''}\0${task.issueNumber ?? ''}`);
+          }
+          const reviewableGroups = buildReviewGroups(response);
+          setReviewGroups(reviewableGroups);
+          setReviewCount(reviewableGroups.length);
+        } else {
+          setSystemHealth(buildSystemHealth(value as SystemStatus));
+        }
+      }
 
-      setRunningItems(runningItemsList);
-      // Running count should match the actual running items to ensure consistency
-      setRunningCount(runningItemsList.length);
-      setActivityStatus(queueResult.errorMessage
-        || (isDesktopRuntime() && !socketConnectedRef.current)
-        ? 'unavailable'
-        : 'available');
-
-      setActivePlans(filterActivePlans(draftsResponse.drafts));
-
-      const reviewableGroups = buildReviewGroups(tasksResponse);
-      setReviewGroups(reviewableGroups);
-      setReviewCount(reviewableGroups.length);
-
-      setSystemHealth(buildSystemHealth(statusResponse));
-
-      setError(queueResult.errorMessage);
-      return queueResult.errorMessage ? 'failed' : 'succeeded';
+      if (result.succeededResources.some(resource => resource === 'queue' || resource === 'drafts')) {
+        const runningItemsList = buildRunningItems(
+          draftsSnapshotRef.current,
+          activeJobsSnapshotRef.current || [],
+        );
+        setRunningItems(runningItemsList);
+        setRunningCount(runningItemsList.length);
+      }
+      setError(ALL_STATS_RESOURCES
+        .map(resource => resourceErrorsRef.current[resource])
+        .find((message): message is string => message !== null) ?? null);
+      return result;
     } catch (err) {
-      if (!isMountedRef.current || request !== statsRequestRef.current) return 'superseded';
+      if (!isMountedRef.current || requestIdentityRef.current !== requestIdentity) {
+        return {
+          succeededResources: [],
+          failedResources: [],
+          supersededResources: [...resources],
+        };
+      }
       console.error('Failed to fetch header stats:', err);
-      setRunningItems([]);
-      setRunningCount(0);
-      setActivityStatus('unavailable');
+      const failedResources = resources.filter(resource =>
+        requestVersions.get(resource) === statsRequestRef.current[resource]);
+      failedResources.forEach(resource => {
+        resourceErrorsRef.current[resource] = (err as Error).message;
+      });
+      setResourceStatuses(previous => failedResources.reduce((next, resource) => ({
+        ...next,
+        [resource]: 'unavailable',
+      }), previous));
       setError((err as Error).message);
-      return 'failed';
+      return {
+        succeededResources: [],
+        failedResources,
+        supersededResources: resources.filter(resource => !failedResources.includes(resource)),
+      };
     } finally {
-      if (isMountedRef.current && request === statsRequestRef.current) {
+      if (isInitialLoad
+        && isMountedRef.current
+        && requestIdentityRef.current === requestIdentity) {
         setIsLoading(false);
       }
     }
-  }, []);
+  }, [getStatus, refreshStatus, requestIdentityKey]);
+  /* eslint-enable complexity */
 
   // Refresh function for manual refresh
   const refresh = useCallback(async () => {
-    await fetchStats(false);
+    await fetchStats(ALL_STATS_RESOURCES, false);
   }, [fetchStats]);
 
-  // Queue, task, and draft transitions are often emitted together. Treat them
-  // as invalidations and reconcile one authoritative snapshot after the burst
-  // instead of starting overlapping copies of the same five HTTP reads.
-  const scheduleLiveRefresh = useCallback(() => {
-    liveRefreshPendingRef.current = true;
+  // Queue, task, and draft transitions are often emitted together. Collect the
+  // affected resources and reconcile each at most once after the burst.
+  const scheduleLiveRefresh = useCallback((resources: readonly HeaderStatsResource[] = ALL_STATS_RESOURCES) => {
+    resources.forEach(resource => liveRefreshPendingRef.current.add(resource));
+    if (document.visibilityState === 'hidden') return;
     if (liveRefreshTimerRef.current !== null || liveRefreshInFlightRef.current) return;
 
     const armRefresh = (delayMs: number) => {
       liveRefreshTimerRef.current = setTimeout(async () => {
         liveRefreshTimerRef.current = null;
-        if (!isMountedRef.current || !liveRefreshPendingRef.current) return;
+        if (!isMountedRef.current || liveRefreshPendingRef.current.size === 0) return;
 
-        liveRefreshPendingRef.current = false;
+        const pendingResources = [...liveRefreshPendingRef.current];
+        liveRefreshPendingRef.current.clear();
         liveRefreshInFlightRef.current = true;
-        const reconciledQueueFingerprint = pendingQueueStatsFingerprintRef.current;
-        const outcome = await fetchStats(false);
+        const outcome = await fetchStats(pendingResources, false);
         liveRefreshInFlightRef.current = false;
 
         if (!isMountedRef.current) return;
-        if (outcome === 'succeeded') {
+        if (outcome.failedResources.length === 0) {
           liveRefreshRetryAttemptRef.current = 0;
-          if (reconciledQueueFingerprint !== null) {
-            lastQueueStatsFingerprintRef.current = reconciledQueueFingerprint;
-            if (pendingQueueStatsFingerprintRef.current === reconciledQueueFingerprint) {
-              pendingQueueStatsFingerprintRef.current = null;
-            }
-          }
-        } else if (outcome === 'failed'
-          && socketConnectedRef.current
+        } else if (socketConnectedRef.current
           && liveRefreshRetryAttemptRef.current < LIVE_REVALIDATION_RETRY_DELAYS_MS.length) {
           const retryDelay = LIVE_REVALIDATION_RETRY_DELAYS_MS[liveRefreshRetryAttemptRef.current];
           liveRefreshRetryAttemptRef.current += 1;
-          liveRefreshPendingRef.current = true;
-          armRefresh(retryDelay);
-        } else if (outcome === 'failed') {
+          outcome.failedResources.forEach(resource => liveRefreshPendingRef.current.add(resource));
+          if (document.visibilityState !== 'hidden') armRefresh(retryDelay);
+        } else {
           liveRefreshRetryAttemptRef.current = 0;
-          if (pendingQueueStatsFingerprintRef.current === reconciledQueueFingerprint) {
+          if (outcome.failedResources.includes('queue')) {
             pendingQueueStatsFingerprintRef.current = null;
           }
-        } else if (socketConnectedRef.current) {
-          // A newer fetch superseded this one. Revalidate once more so this live
-          // invalidation is only committed by a complete, current snapshot.
-          liveRefreshPendingRef.current = true;
         }
 
-        if (liveRefreshPendingRef.current && liveRefreshTimerRef.current === null) {
+        if (liveRefreshPendingRef.current.size > 0
+          && liveRefreshTimerRef.current === null
+          && document.visibilityState !== 'hidden') {
           armRefresh(LIVE_INVALIDATION_COALESCE_MS);
         }
       }, delayMs);
@@ -311,15 +460,15 @@ export function useHeaderStats(): HeaderStats {
         clearTimeout(liveRefreshTimerRef.current);
         liveRefreshTimerRef.current = null;
       }
-      liveRefreshPendingRef.current = false;
+      liveRefreshPendingRef.current.clear();
       liveRefreshRetryAttemptRef.current = 0;
       pendingQueueStatsFingerprintRef.current = null;
       lastQueueStatsFingerprintRef.current = null;
-      statsRequestRef.current += 1;
+      ALL_STATS_RESOURCES.forEach(resource => { statsRequestRef.current[resource] += 1; });
       if (isDesktopRuntime()) {
         setRunningItems([]);
         setRunningCount(0);
-        setActivityStatus('unavailable');
+        setResourceStatuses(previous => ({ ...previous, queue: 'unavailable' }));
         setIsLoading(false);
       }
       return;
@@ -328,19 +477,29 @@ export function useHeaderStats(): HeaderStats {
       lastQueueStatsFingerprintRef.current = null;
       pendingQueueStatsFingerprintRef.current = null;
       liveRefreshRetryAttemptRef.current = 0;
-      if (isDesktopRuntime()) setActivityStatus('checking');
-      scheduleLiveRefresh();
+      if (isDesktopRuntime()) {
+        setResourceStatuses(previous => ({ ...previous, queue: 'checking' }));
+      }
+      scheduleLiveRefresh(ALL_STATS_RESOURCES);
     }
   }, [isConnected, scheduleLiveRefresh]);
 
   // Initial load
   useEffect(() => {
     isMountedRef.current = true;
+    const pendingResources = liveRefreshPendingRef.current;
 
     // Initial fetch
-    void fetchStats(true).then(outcome => {
-      if (outcome === 'failed' && socketConnectedRef.current) scheduleLiveRefresh();
-    });
+    const initialResources = ALL_STATS_RESOURCES;
+    if (document.visibilityState === 'hidden') {
+      initialResources.forEach(resource => liveRefreshPendingRef.current.add(resource));
+    } else {
+      void fetchStats(initialResources, true).then(outcome => {
+        if (outcome.failedResources.length > 0 && socketConnectedRef.current) {
+          scheduleLiveRefresh(outcome.failedResources);
+        }
+      });
+    }
 
     return () => {
       isMountedRef.current = false;
@@ -348,7 +507,7 @@ export function useHeaderStats(): HeaderStats {
         clearTimeout(liveRefreshTimerRef.current);
         liveRefreshTimerRef.current = null;
       }
-      liveRefreshPendingRef.current = false;
+      pendingResources.clear();
     };
   }, [fetchStats, scheduleLiveRefresh]);
 
@@ -357,15 +516,25 @@ export function useHeaderStats(): HeaderStats {
     if (!isConnected) return;
 
     // Handle task updates - refresh stats when any task changes state
-    const handleTaskUpdate = () => {
-      console.log('[useHeaderStats] Received task update, scheduling stats refresh');
-      scheduleLiveRefresh();
+    const handleTaskUpdate = (payload: TaskUpdatePayload) => {
+      const state = payload.state.toLowerCase();
+      const previousState = payload.previousState?.toLowerCase();
+      const fingerprint = `${state}\0${payload.repository ?? ''}\0${payload.issueNumber ?? ''}`;
+      if (taskFingerprintsRef.current.get(payload.taskId) === fingerprint) return;
+      taskFingerprintsRef.current.set(payload.taskId, fingerprint);
+      const reviewStates = new Set(['completed', 'failed']);
+      const identityChanged = payload.metadata?.issueRefUpdated === true;
+      if (!identityChanged && !reviewStates.has(state) && !reviewStates.has(previousState ?? '')) return;
+      scheduleLiveRefresh(['tasks']);
     };
 
     // Handle draft updates - refresh stats when drafts change (affects active plans)
-    const handleDraftUpdate = () => {
-      console.log('[useHeaderStats] Received draft update, scheduling stats refresh');
-      scheduleLiveRefresh();
+    const handleDraftUpdate = (payload: DraftUpdatePayload) => {
+      if (!payload.draftStatus) return;
+      const previousStatus = draftStatusesRef.current.get(payload.draftId);
+      if (previousStatus === payload.draftStatus) return;
+      draftStatusesRef.current.set(payload.draftId, payload.draftStatus);
+      scheduleLiveRefresh(['drafts']);
     };
 
     const handleQueueStatsUpdate = (payload: QueueStatsUpdatePayload) => {
@@ -374,7 +543,7 @@ export function useHeaderStats(): HeaderStats {
         || fingerprint === pendingQueueStatsFingerprintRef.current) return;
       pendingQueueStatsFingerprintRef.current = fingerprint;
       console.log('[useHeaderStats] Received changed queue stats, scheduling stats refresh');
-      scheduleLiveRefresh();
+      scheduleLiveRefresh(['queue']);
     };
 
     // Subscribe to every event that can change active work.
@@ -389,19 +558,43 @@ export function useHeaderStats(): HeaderStats {
     };
   }, [isConnected, onTaskUpdate, onDraftUpdate, onQueueStatsUpdate, scheduleLiveRefresh]);
 
+  // Hidden tabs accumulate invalidations without issuing requests. Becoming
+  // visible (or receiving focus after a suspended socket) performs one full
+  // recovery snapshot. A disconnected visible tab keeps a bounded HTTP
+  // fallback so the UI cannot remain stale forever.
+  useEffect(() => {
+    const recoverVisible = () => {
+      if (document.visibilityState !== 'hidden') scheduleLiveRefresh(ALL_STATS_RESOURCES);
+    };
+    const fallbackPoll = window.setInterval(() => {
+      if (!socketConnectedRef.current && document.visibilityState !== 'hidden') {
+        scheduleLiveRefresh(ALL_STATS_RESOURCES);
+      }
+    }, FALLBACK_POLL_INTERVAL_MS);
+    document.addEventListener('visibilitychange', recoverVisible);
+    window.addEventListener('focus', recoverVisible);
+    return () => {
+      window.clearInterval(fallbackPoll);
+      document.removeEventListener('visibilitychange', recoverVisible);
+      window.removeEventListener('focus', recoverVisible);
+    };
+  }, [scheduleLiveRefresh]);
+
   // Re-filter when dismissed IDs or timestamps change
   useEffect(() => {
-    // Trigger a refresh when dismissal state changes
-    // This ensures the lists are updated when items are dismissed
     if (!isLoading) {
-      fetchStats(false);
+      setActivePlans(filterActivePlans(draftsSnapshotRef.current));
+      const reviewableGroups = buildReviewGroups(tasksSnapshotRef.current);
+      setReviewGroups(reviewableGroups);
+      setReviewCount(reviewableGroups.length);
     }
   }, [dismissedPlanIds.length, dismissedTaskIds.length, Object.keys(dismissedTaskTimestamps).length]); // eslint-disable-line react-hooks/exhaustive-deps
 
   return {
     runningCount,
     runningItems,
-    activityStatus,
+    activityStatus: getActivityStatus(resourceStatuses),
+    resourceStatuses,
     activePlans,
     reviewCount,
     reviewGroups,

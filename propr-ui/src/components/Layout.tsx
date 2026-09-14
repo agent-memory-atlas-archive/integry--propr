@@ -1,11 +1,12 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { Link, useLocation } from 'react-router-dom';
-import { ScrollText, ListTodo, BookMarked, Bot, Cpu, ShieldCheck, Inbox, LogOut, Target } from 'lucide-react';
+import { LayoutDashboard, ScrollText, ListTodo, BookMarked, Bot, Cpu, Settings, ShieldCheck, Inbox, LogOut, Target, TriangleAlert } from 'lucide-react';
 import { logout } from '../api/proprApi';
 import { useDynamicFavicon } from '../hooks/useDynamicFavicon';
 import { useSystemReadiness } from '../hooks/useSystemReadiness';
 import { useToast } from './ui/useToast';
-import { HomeIcon, SettingsIcon, MenuIcon, CloseIcon } from './icons/LayoutIcons';
+import { MenuIcon, CloseIcon } from './icons/LayoutIcons';
+import { SIDEBAR_ICON_STROKE_WIDTH, SIDEBAR_ICON_STROKE_CLASS } from './icons/sidebarIconStroke';
 import { DESKTOP_UI_COMMAND_EVENT } from '../desktop/useDesktopNativeCommands';
 import GlobalHeader from './GlobalHeader';
 import AgentTankSidebar from './AgentTankSidebar';
@@ -28,16 +29,144 @@ interface LayoutProps {
 interface NavItem {
   name: string;
   href: string;
-  icon: React.FC<{ className?: string }>;
+  // All nav icons come from lucide so a shared strokeWidth keeps line weights uniform.
+  icon: React.FC<{ className?: string; strokeWidth?: number | string }>;
+}
+
+interface NavigationState {
+  currentPath: string;
+  desktop: boolean;
+  hasAgents: boolean;
+  hasRepos: boolean;
+  hasTasks: boolean;
+  taskCount: number;
+  goalCount: number;
+  generatingPlansCount: number;
+  unreadCount: number | null;
+}
+
+const CORE_NAVIGATION: NavItem[] = [
+  { name: 'Dashboard', href: '/', icon: LayoutDashboard },
+  { name: 'Inbox', href: '/inbox', icon: Inbox },
+  { name: 'Tasks', href: '/tasks', icon: ListTodo },
+  { name: 'Goals', href: '/goals', icon: Target },
+  { name: 'Plans', href: '/plans', icon: ScrollText },
+];
+
+function getResourceNavigation(canManageAgents: boolean, canManageMembers: boolean): NavItem[] {
+  const navigation: NavItem[] = [{ name: 'Repositories', href: '/repositories', icon: BookMarked }];
+  if (canManageAgents) navigation.push({ name: 'Coding Agents', href: '/ai-agents', icon: Bot });
+  navigation.push(
+    { name: 'LLM Log', href: '/llm-logs', icon: Cpu },
+    { name: 'Settings', href: '/settings', icon: Settings },
+  );
+  if (canManageMembers) navigation.push({ name: 'Access', href: '/admin/members', icon: ShieldCheck });
+  return navigation;
+}
+
+function isNavigationItemActive(currentPath: string, itemPath: string): boolean {
+  // Dashboard should only be active on exact match.
+  if (itemPath === '/') return currentPath === '/';
+
+  // Plans also owns studio routes.
+  if (itemPath === '/plans') {
+    return currentPath === '/plans' || currentPath.startsWith('/plans/') || currentPath.startsWith('/studio');
+  }
+
+  // Repository content browsing includes summaries routes.
+  if (itemPath === '/repositories') {
+    return currentPath === '/repositories' || currentPath.startsWith('/repositories/') || currentPath.startsWith('/summaries');
+  }
+
+  return currentPath === itemPath || currentPath.startsWith(itemPath + '/');
+}
+
+// Single badge component for all nav counts: forms a circle for one digit and
+// stretches horizontally for wider content (e.g. "99+") with the same radius and padding.
+// The parent nav row is `flex items-center justify-between`, which keeps the badge on
+// the same horizontal center line as the label.
+//
+// The digits are centered by the flex box alone: `leading-none` collapses the line
+// box onto the glyphs (digits have no descender, so their ink already centers on the
+// em box), and no vertical nudge is applied on top of it — a nudge is what made the
+// numbers sit low in the pill.
+function NavBadge({ children }: { children: React.ReactNode }) {
+  return (
+    <span className="inline-flex h-4 min-w-4 flex-none items-center justify-center rounded-full bg-primary-500 px-1 text-[10px] font-bold leading-none text-white">
+      {children}
+    </span>
+  );
 }
 
 function WorkCountBadge({ name, taskCount, goalCount }: { name: string; taskCount: number; goalCount: number }) {
   const count = name === 'Tasks' ? taskCount : name === 'Goals' ? goalCount : 0;
   if (count <= 0) return null;
+  return <NavBadge>{count}</NavBadge>;
+}
+
+function getReadinessMessage(name: string, state: NavigationState): string | null {
+  if (name === 'Repositories' && !state.hasRepos) return 'No repositories configured';
+  if (name === 'Coding Agents' && !state.hasAgents) return 'No AI agents configured';
+  if (name === 'Tasks' && state.taskCount === 0 && !state.hasTasks && state.hasAgents && state.hasRepos) {
+    return 'No tasks created yet';
+  }
+  return null;
+}
+
+function ReadinessIndicator({ message, desktop }: { message: string | null; desktop: boolean }) {
+  if (!message) return null;
+  if (!desktop) return <span className="w-2 h-2 flex-none rounded-full bg-amber-500" title={message} />;
   return (
-    <span className="ml-auto inline-flex items-center justify-center h-5 w-5 rounded-full bg-primary-500 text-xs font-semibold text-white">
-      {count}
+    <span className="flex h-4 w-4 flex-none items-center justify-center text-amber-600" role="img" aria-label={message} title={message}>
+      <TriangleAlert className={`${SIDEBAR_ICON_STROKE_CLASS} h-3.5 w-3.5`} strokeWidth={SIDEBAR_ICON_STROKE_WIDTH} aria-hidden="true" />
     </span>
+  );
+}
+
+function InboxBadge({ name, unreadCount }: { name: string; unreadCount: number | null }) {
+  if (name !== 'Inbox' || unreadCount === null || unreadCount <= 0) return null;
+  return <NavBadge>{unreadCount > 99 ? '99+' : unreadCount}</NavBadge>;
+}
+
+function PlansBadge({ name, count }: { name: string; count: number }) {
+  if (name !== 'Plans' || count <= 0) return null;
+  return <NavBadge>{count}</NavBadge>;
+}
+
+function getNavigationItemClassName(desktop: boolean, active: boolean): string {
+  const dimensions = desktop
+    ? 'mx-2 rounded-[6px] border-0 px-2 py-1.5 tracking-tight'
+    : 'border-l-4 px-4 py-2';
+  if (active) {
+    return `${dimensions} ${desktop
+      ? 'bg-black/5 font-normal text-slate-900'
+      : 'bg-slate-50 font-medium text-slate-900 border-primary-600'}`;
+  }
+  return `${dimensions} ${desktop
+    ? 'font-normal text-slate-600 hover:bg-slate-900/5 hover:text-slate-900'
+    : 'font-normal text-gray-600 hover:bg-gray-50 hover:text-gray-900 border-transparent'}`;
+}
+
+function NavigationItem({ item, state }: { item: NavItem; state: NavigationState }) {
+  const readinessMessage = getReadinessMessage(item.name, state);
+  const active = isNavigationItemActive(state.currentPath, item.href);
+  return (
+    <Link
+      to={item.href}
+      className={`flex items-center justify-between text-[13px] leading-5 transition-colors duration-150 ${getNavigationItemClassName(state.desktop, active)}`}
+    >
+      <span className="flex min-w-0 items-center">
+        <item.icon className={`${SIDEBAR_ICON_STROKE_CLASS} mr-2.5 h-4 w-4 flex-none`} strokeWidth={SIDEBAR_ICON_STROKE_WIDTH} />
+        <span className="truncate">{item.name}</span>
+      </span>
+      {/* Counts and readiness indicators share the trailing rail. */}
+      <span className="flex flex-none items-center justify-end gap-1.5">
+        <ReadinessIndicator message={readinessMessage} desktop={state.desktop} />
+        <WorkCountBadge name={item.name} taskCount={state.taskCount} goalCount={state.goalCount} />
+        <InboxBadge name={item.name} unreadCount={state.unreadCount} />
+        <PlansBadge name={item.name} count={state.generatingPlansCount} />
+      </span>
+    </Link>
   );
 }
 
@@ -54,6 +183,7 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
   const desktop = useDesktop();
   const [desktopSidebarHidden, setDesktopSidebarHidden] = useState(false);
+  const hideSidebar = desktop && desktopSidebarHidden;
   useEffect(() => {
     if (!desktop) return;
     const handleCommand = (event: Event) => {
@@ -78,50 +208,21 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
   // first-class work type its own sidebar count.
   const displayTaskCount = Math.max(0, activeQueueCount - generatingPlansCount - activeGoalCount);
 
-  const navigation: NavItem[] = [
-    { name: 'Dashboard', href: '/', icon: HomeIcon },
-    { name: 'Inbox', href: '/inbox', icon: Inbox },
-    { name: 'Plans', href: '/plans', icon: ScrollText },
-    { name: 'Goals', href: '/goals', icon: Target },
-    { name: 'Tasks', href: '/tasks', icon: ListTodo },
-    { name: 'Repositories', href: '/repositories', icon: BookMarked },
-    ...(userHasPermission(user, 'instance.manage_agents')
-      ? [{ name: 'Coding Agents', href: '/ai-agents', icon: Bot }]
-      : []),
-    { name: 'LLM Log', href: '/llm-logs', icon: Cpu },
-  ];
-
-  const utilityNavigation: NavItem[] = [
-    { name: 'Settings', href: '/settings', icon: SettingsIcon },
-    ...(userHasPermission(user, 'instance.manage_members')
-      ? [{ name: 'Access', href: '/admin/members', icon: ShieldCheck }]
-      : []),
-  ];
-
-  const isActive = (path: string): boolean => {
-    const currentPath = location.pathname;
-
-    // Dashboard should only be active on exact match
-    if (path === '/') {
-      return currentPath === '/';
-    }
-
-    // Plans should be active for /plans routes and /studio routes
-    if (path === '/plans') {
-      return currentPath === '/plans' ||
-             currentPath.startsWith('/plans/') ||
-             currentPath.startsWith('/studio');
-    }
-
-    // Repositories should be active for /repositories routes and /summaries routes (repo content browsing)
-    if (path === '/repositories') {
-      return currentPath === '/repositories' ||
-             currentPath.startsWith('/repositories/') ||
-             currentPath.startsWith('/summaries');
-    }
-
-    // All other menu items use prefix matching
-    return currentPath === path || currentPath.startsWith(path + '/');
+  const canManageAgents = userHasPermission(user, 'instance.manage_agents');
+  const resourceNavigation = getResourceNavigation(
+    canManageAgents,
+    userHasPermission(user, 'instance.manage_members'),
+  );
+  const navigationState: NavigationState = {
+    currentPath: location.pathname,
+    desktop: Boolean(desktop),
+    hasAgents,
+    hasRepos,
+    hasTasks,
+    taskCount: displayTaskCount,
+    goalCount: activeGoalCount,
+    generatingPlansCount,
+    unreadCount,
   };
 
   // Close sidebar on route change (mobile)
@@ -199,49 +300,12 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
     setIsSidebarOpen(true);
   };
 
-  const renderNavigationItem = (item: NavItem) => (
-    <Link
-      key={item.name}
-      to={item.href}
-      className={`flex items-center text-sm font-medium transition-colors duration-150 ${
-        desktop ? 'mx-2 rounded-lg border-0 px-3 py-2.5' : 'border-r-2 px-4 py-3'
-      } ${
-        isActive(item.href)
-          ? desktop
-            ? 'bg-teal-50 text-teal-700'
-            : 'bg-red-50 text-primary-600 border-primary-600 font-medium'
-          : desktop
-            ? 'text-slate-600 hover:bg-slate-100 hover:text-slate-900'
-            : 'text-gray-600 hover:bg-gray-50 hover:text-gray-900 border-transparent'
-      }`}
-    >
-      <item.icon className="w-5 h-5 mr-3" />
-      {item.name}
-      <WorkCountBadge name={item.name} taskCount={displayTaskCount} goalCount={activeGoalCount} />
-      {item.name === 'Inbox' && unreadCount !== null && unreadCount > 0 && (
-        <span className="ml-auto inline-flex min-w-5 items-center justify-center rounded-full bg-primary-500 px-1.5 text-xs font-semibold leading-5 text-white">
-          {unreadCount > 99 ? '99+' : unreadCount}
-        </span>
-      )}
-      {item.name === 'Tasks' && displayTaskCount === 0 && !hasTasks && hasAgents && hasRepos && (
-        <span className="ml-auto w-2 h-2 rounded-full bg-amber-500" title="No tasks created yet" />
-      )}
-      {item.name === 'Plans' && generatingPlansCount > 0 && (
-        <span className="ml-auto inline-flex items-center justify-center h-5 w-5 rounded-full bg-primary-500 text-xs font-semibold text-white">
-          {generatingPlansCount}
-        </span>
-      )}
-      {item.name === 'Repositories' && !hasRepos && (
-        <span className="ml-auto w-2 h-2 rounded-full bg-amber-500" title="No repositories configured" />
-      )}
-      {item.name === 'Coding Agents' && !hasAgents && (
-        <span className="ml-auto w-2 h-2 rounded-full bg-amber-500" title="No AI agents configured" />
-      )}
-    </Link>
-  );
+  // Hover ink for the account block: translucent on the desktop app's tinted
+  // macOS-style wash, opaque gray on the web's white sidebar.
+  const profileHoverInk = desktop ? 'hover:bg-slate-900/5' : 'hover:bg-slate-100';
 
   return (
-    <div className={`${desktop && desktopSidebarHidden ? 'desktop-sidebar-hidden ' : ''}desktop-shell flex h-full min-h-0 flex-col overflow-hidden bg-light-100 relative`}>
+    <div className={`${hideSidebar ? 'desktop-sidebar-hidden ' : ''}desktop-shell flex h-full min-h-0 flex-col overflow-hidden bg-light-100 relative`}>
       <div className="desktop-shell-content relative flex min-h-0 flex-1 overflow-hidden">
       {desktop && <div className="desktop-connected-drag-region" aria-hidden="true" />}
       {/* Mobile Overlay */}
@@ -253,80 +317,102 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
       )}
 
       {/* Sidebar - Responsive */}
-      {!(desktop && desktopSidebarHidden) && <aside className={`
+      {!hideSidebar && <aside className={`
         fixed lg:static inset-y-0 left-0 z-30
         desktop-sidebar flex flex-col w-60 bg-white border-r border-gray-200 shadow-sm
         transform transition-transform duration-200 ease-in-out
         ${isSidebarOpen ? 'translate-x-0' : '-translate-x-full lg:translate-x-0'}
       `}>
-        <div className="desktop-sidebar-header flex flex-none items-center justify-between px-4 py-4 sm:py-6 h-12 sm:h-16">
+        {desktop && <div className="desktop-sidebar-drag-region" aria-hidden="true" />}
+        {!desktop && <div className="desktop-sidebar-header flex flex-none items-center justify-between px-4 py-4 sm:py-6 h-12 sm:h-16">
           <Link to="/" className="flex items-center" aria-label="ProPR dashboard">
-            <img src={publicAssetUrl(desktop ? '/media/logo-and-name-transparent.png' : '/media/logo-and-name.png')} alt="ProPR" className="h-8 w-auto" />
+            <img src={publicAssetUrl('/media/logo-and-name.png')} alt="ProPR" className="h-8 w-auto" />
           </Link>
           <button
             onClick={() => setIsSidebarOpen(false)}
             className="lg:hidden text-gray-500 hover:text-gray-700 p-1"
             aria-label="Close menu"
           >
-            <CloseIcon className="w-6 h-6" />
+            <CloseIcon className={`${SIDEBAR_ICON_STROKE_CLASS} w-6 h-6`} />
           </button>
-        </div>
+        </div>}
         {desktop && <DesktopInstanceSelector transportReady={isConnected && user !== null} />}
         <div className="flex min-h-0 flex-1 flex-col">
-          <nav className="flex flex-col gap-1 overflow-y-auto flex-1">
-            {navigation.map(renderNavigationItem)}
-          </nav>
-          {(isDemoMode || userHasPermission(user, 'instance.manage_agents')) && (
-            <AgentTankSidebar allowManualRefresh={!isDemoMode} />
-          )}
-          {!desktop && <footer className="px-4 py-3 border-t border-gray-100 text-[11px] leading-tight text-gray-400 space-y-1">
-            <div>
-              <a
-                href="https://propr.dev"
-                target="_blank"
-                rel="noopener noreferrer"
-                className="hover:text-gray-600 hover:underline"
-              >
-                ProPR
-              </a>{' '}
-              v{__APP_VERSION__}
+          {/* Whitespace separates navigation from the workspace control. */}
+          <nav className="flex min-h-0 flex-col overflow-y-auto pt-2 pb-1">
+            <div className="flex flex-col gap-0.5">
+              {CORE_NAVIGATION.map(item => <NavigationItem key={item.name} item={item} state={navigationState} />)}
             </div>
-            <div>© {new Date().getFullYear()} Rinalds Uzkalns</div>
-          </footer>}
-          <nav className="flex flex-none flex-col gap-1 border-t border-gray-100 py-1" aria-label="Application settings">
-            {utilityNavigation.map(renderNavigationItem)}
+            {/* Whitespace spacer (no divider) between the core-workflow and
+                technical-resources zones. */}
+            <div className="mt-6 flex flex-col gap-0.5">
+              {resourceNavigation.map(item => <NavigationItem key={item.name} item={item} state={navigationState} />)}
+            </div>
           </nav>
+          {/* Usage and account information stay at the bottom, with metadata
+              last. mt-auto absorbs the space below navigation. */}
+          <div className="mt-auto flex flex-none flex-col">
+          {(isDemoMode || canManageAgents) && (
+            <AgentTankSidebar allowManualRefresh={!isDemoMode} scrollable={Boolean(desktop)} className="desktop-sidebar-usage" />
+          )}
           {user && (
-            <div className="desktop-sidebar-profile flex flex-none items-center gap-2 border-t border-gray-200 px-3 py-3">
+            // The interactive account block is its own group, detached from
+            // the usage widget by an mt-4 whitespace spacer —
+            // zone separation is whitespace, never a line. pr-2.5 (10px) + the
+            // 6px glyph inset inside the 28px logout button puts the logout
+            // icon's right edge on the sidebar's shared 16px rail, aligned with
+            // the nav badges and the Usage refresh icon.
+            <div className="desktop-sidebar-profile mt-4 flex flex-none items-center justify-between gap-2 py-2 pl-3 pr-2.5">
               <a
                 href={`https://github.com/${user.username}`}
                 target="_blank"
                 rel="noopener noreferrer"
-                className="group flex min-w-0 flex-1 items-center gap-2 rounded-md p-1 transition-colors hover:bg-slate-100"
+                className={`group flex min-w-0 flex-1 items-center gap-2 rounded-md p-1 transition-colors ${profileHoverInk}`}
               >
                 <UserAvatar
                   user={user}
-                  className="flex h-8 w-8 flex-none items-center justify-center rounded-full border border-gray-200 object-cover text-xs font-bold transition-colors group-hover:border-gray-300"
+                  className="flex h-7 w-7 flex-none items-center justify-center rounded-full border border-gray-200 object-cover text-[10px] font-bold transition-colors group-hover:border-gray-300"
                   fallbackClassName="bg-primary-100 text-primary-600 group-hover:bg-primary-200"
                 />
                 <span className="min-w-0 leading-tight">
-                  <span className="block truncate text-sm font-semibold text-slate-700">
+                  <span className="block truncate text-[13px] font-medium text-slate-700">
                     {user.displayName || user.username}
                   </span>
-                  <span className="block truncate text-xs text-slate-500">@{user.username}</span>
+                  <span className="block truncate text-[11px] text-slate-500">@{user.username}</span>
                 </span>
               </a>
               <button
                 type="button"
                 onClick={logout}
-                className="flex h-9 w-9 flex-none items-center justify-center rounded-md text-slate-500 transition-colors hover:bg-red-50 hover:text-red-600"
+                className="flex h-7 w-7 flex-none items-center justify-center rounded-md text-slate-500 transition-colors hover:bg-red-50 hover:text-red-600"
                 aria-label="Logout"
                 title="Logout"
               >
-                <LogOut className="h-4 w-4" aria-hidden="true" />
+                <LogOut className={`${SIDEBAR_ICON_STROKE_CLASS} h-4 w-4`} strokeWidth={SIDEBAR_ICON_STROKE_WIDTH} aria-hidden="true" />
               </button>
             </div>
           )}
+          {/* Desktop keeps this metadata in the native About dialog. On web,
+              metadata sits flush on the sidebar's shared 16px left rail (the same
+              rail as the nav labels and the Usage heading) rather than being
+              indented to the profile's text column. */}
+          {!desktop && <footer className="mt-4 px-4 pb-2 leading-tight space-y-1">
+            {/* The version is the datum developers scan for, so it sits one
+                contrast step above the secondary copyright line. */}
+            <div className="text-[11px] text-slate-500">
+              <a
+                href="https://propr.dev"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="hover:text-slate-700 hover:underline"
+              >
+                ProPR
+              </a>{' '}
+              v{__APP_VERSION__}
+            </div>
+            <div className="text-[10px] text-slate-400">© {new Date().getFullYear()} Rinalds Uzkalns</div>
+          </footer>}
+          </div>
         </div>
       </aside>}
 

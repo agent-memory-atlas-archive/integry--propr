@@ -265,7 +265,7 @@ const MobileBottomNavigation: React.FC<MobileBottomNavigationProps> = ({
             {(isDemoMode || userHasPermission(user, 'instance.manage_agents')) && (
               <AgentTankSidebar
                 allowManualRefresh={!isDemoMode}
-                className="border-slate-100"
+                className="border-t border-slate-100"
               />
             )}
 

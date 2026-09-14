@@ -3,6 +3,7 @@ import { ChevronDown, ChevronRight, RefreshCw } from 'lucide-react';
 import { getAgentTankUsage, refreshAgentTank, AgentTankUsageResponse, AgentUsageData } from '../api/revertApi';
 import { ProviderLogo } from './ui/ProviderLogo';
 import { getModelDisplayName } from '../utils/modelDisplay';
+import { SIDEBAR_ICON_STROKE_WIDTH, SIDEBAR_ICON_STROKE_CLASS } from './icons/sidebarIconStroke';
 
 // Refresh interval in milliseconds (60 seconds)
 const REFRESH_INTERVAL = 60000;
@@ -50,18 +51,27 @@ function formatAntigravityModelLabel(fullName: string): { display: React.ReactNo
   return { display: withoutThinking, plain: withoutThinking };
 }
 
-// Get status color based on percentage
+// Quota consumed past half the budget is worth noticing, past four fifths is
+// worth acting on.
+const USAGE_WARNING_PERCENT = 50;
+const USAGE_CRITICAL_PERCENT = 80;
+
+// Capacity bars stay neutral for light usage; past the thresholds they take on
+// pastel orange then pastel red. The tints are deliberately soft — the sidebar
+// reports a level, it does not raise an alarm — but still separate clearly from
+// the gray-200 track behind them.
 function getStatusColor(percent: number): string {
-  if (percent <= 50) return 'bg-green-500';
-  if (percent <= 80) return 'bg-yellow-500';
-  return 'bg-red-500';
+  if (percent > USAGE_CRITICAL_PERCENT) return 'bg-red-400';
+  if (percent > USAGE_WARNING_PERCENT) return 'bg-orange-300';
+  return 'bg-slate-400';
 }
 
-// Get text color based on percentage
+// Text follows the same thresholds as the bar, but at a darker step: these are
+// 10px numerals, so they need readable contrast rather than the bar's pastel.
 function getTextColor(percent: number): string {
-  if (percent <= 50) return 'text-green-600';
-  if (percent <= 80) return 'text-yellow-600';
-  return 'text-red-600';
+  if (percent > USAGE_CRITICAL_PERCENT) return 'text-red-600';
+  if (percent > USAGE_WARNING_PERCENT) return 'text-orange-600';
+  return 'text-gray-500';
 }
 
 interface UsageMetric {
@@ -159,8 +169,17 @@ interface MetricRowProps {
   compact?: boolean;
 }
 
+// Compact rows (the expanded tree children) use a fixed 20px height rather
+// than padding so every child of the threading rail has a known center line.
+//
+// Capacity tracks are a shared w-14 (56px) everywhere so equal percentages
+// paint equal pixels across rows. The fill's width is pure math from the
+// datum (`${percent}%` of the track); only the track's outer pill is rounded —
+// the fill itself is a clipped rectangle, because rounding a few-px-wide fill
+// into its own pill would erase the visible difference between single-digit
+// values (at 56px, 8% / 12% / 17% must resolve as 4.5 / 6.7 / 9.5px).
 const MetricRow: React.FC<MetricRowProps> = ({ metric, compact = false }) => (
-  <div className={`flex items-center justify-between ${compact ? 'py-0.5' : 'py-1'}`}>
+  <div className={`flex items-center justify-between ${compact ? 'h-5' : 'py-1'}`}>
     <span
       className="text-[10px] text-gray-500 truncate max-w-[100px]"
       title={metric.title ?? (metric.resetsIn ? `Resets in ${metric.resetsIn}` : metric.label)}
@@ -168,13 +187,13 @@ const MetricRow: React.FC<MetricRowProps> = ({ metric, compact = false }) => (
       {metric.displayLabel ?? metric.label}
     </span>
     <div className="flex items-center gap-1.5">
-      <div className={`${compact ? 'w-10' : 'w-12'} h-1.5 bg-gray-200 rounded-full overflow-hidden`}>
+      <div className="w-14 h-1.5 bg-gray-200 rounded-full overflow-hidden">
         <div
-          className={`h-full rounded-full ${getStatusColor(metric.percent)}`}
+          className={`h-full ${getStatusColor(metric.percent)}`}
           style={{ width: `${Math.min(100, metric.percent)}%` }}
         />
       </div>
-      <span className={`text-[10px] font-medium w-7 text-right ${getTextColor(metric.percent)}`}>
+      <span className={`text-[10px] font-medium leading-none w-7 text-right ${getTextColor(metric.percent)}`}>
         {metric.percent}%
       </span>
     </div>
@@ -190,7 +209,12 @@ interface AgentRowProps {
 const AgentRow: React.FC<AgentRowProps> = ({ agent, expanded, onToggle }) => {
   const metrics = getAllMetrics(agent);
   const primaryMetric = getPrimaryMetric(agent);
-  const hasMultipleMetrics = metrics.length > 1;
+  // Every provider with usage data is the same kind of node — an accordion
+  // parent whose children are its metric rows — so every one of them gets a
+  // chevron, even with a single child. A provider must never look like a
+  // parent yet lack the parent's affordance. Only error-only rows (which
+  // render a status instead of data) are inert.
+  const expandable = metrics.length > 0;
 
   if (!primaryMetric && !agent.error) return null;
 
@@ -200,12 +224,12 @@ const AgentRow: React.FC<AgentRowProps> = ({ agent, expanded, onToggle }) => {
   return (
     <div className="py-1">
       <div
-        className={`flex items-center justify-between ${hasMultipleMetrics ? 'cursor-pointer hover:bg-gray-50 -mx-1 px-1 rounded' : ''}`}
-        onClick={hasMultipleMetrics ? onToggle : undefined}
-        role={hasMultipleMetrics ? 'button' : undefined}
-        tabIndex={hasMultipleMetrics ? 0 : undefined}
-        aria-expanded={hasMultipleMetrics ? expanded : undefined}
-        onKeyDown={hasMultipleMetrics ? event => {
+        className={`flex items-center justify-between ${expandable ? 'cursor-pointer hover:bg-slate-900/5 -mx-1 px-1 rounded' : ''}`}
+        onClick={expandable ? onToggle : undefined}
+        role={expandable ? 'button' : undefined}
+        tabIndex={expandable ? 0 : undefined}
+        aria-expanded={expandable ? expanded : undefined}
+        onKeyDown={expandable ? event => {
           if (event.key === 'Enter' || event.key === ' ') {
             event.preventDefault();
             onToggle();
@@ -213,34 +237,63 @@ const AgentRow: React.FC<AgentRowProps> = ({ agent, expanded, onToggle }) => {
         } : undefined}
       >
         <div className="flex items-center gap-1.5 text-gray-600">
-          {hasMultipleMetrics && (
-            expanded ? <ChevronDown className="w-3 h-3 text-gray-400" /> : <ChevronRight className="w-3 h-3 text-gray-400" />
-          )}
-          <ProviderLogo provider={agent.name} className="w-3.5 h-3.5" />
-          <span className="text-xs">{displayName}</span>
+          {/* Fixed-size chevron slot keeps provider icons and labels on the same
+              vertical axis; error-only rows leave the slot empty. */}
+          <span className="flex h-3.5 w-3.5 flex-none items-center justify-center">
+            {expandable && (
+              expanded
+                ? <ChevronDown className={`${SIDEBAR_ICON_STROKE_CLASS} w-3 h-3 text-gray-400`} strokeWidth={SIDEBAR_ICON_STROKE_WIDTH} />
+                : <ChevronRight className={`${SIDEBAR_ICON_STROKE_CLASS} w-3 h-3 text-gray-400`} strokeWidth={SIDEBAR_ICON_STROKE_WIDTH} />
+            )}
+          </span>
+          <ProviderLogo provider={agent.name} className="w-3.5 h-3.5 flex-none" />
+          <span className="text-xs leading-none">{displayName}</span>
         </div>
+        {/* leading-none keeps the right-hand text boxes shorter than the 14px icon
+            slot on the left, so the row height stays an even 14px and the chevron,
+            provider icon, and label center on whole pixels. */}
         {agent.error ? (
-          <span className="text-[10px] text-red-500">Error</span>
+          <span className="text-[10px] leading-none text-red-500">Error</span>
         ) : primaryMetric && !expanded ? (
           <div className="flex items-center gap-1.5">
-            <div className="w-10 h-1.5 bg-gray-200 rounded-full overflow-hidden">
+            {/* Same w-14 track and rectangular fill as MetricRow so a given
+                percentage paints the same pixels in every row. */}
+            <div className="w-14 h-1.5 bg-gray-200 rounded-full overflow-hidden">
               <div
-                className={`h-full rounded-full ${getStatusColor(primaryMetric.percent)}`}
+                className={`h-full ${getStatusColor(primaryMetric.percent)}`}
                 style={{ width: `${Math.min(100, primaryMetric.percent)}%` }}
               />
             </div>
-            <span className={`text-[10px] font-medium w-7 text-right ${getTextColor(primaryMetric.percent)}`}>
+            <span className={`text-[10px] font-medium leading-none w-7 text-right ${getTextColor(primaryMetric.percent)}`}>
               {primaryMetric.percent}%
             </span>
           </div>
         ) : null}
       </div>
 
-      {/* Expanded details */}
+      {/* Expanded details. The threading rail is drawn as one segment per
+          child, each anchored to its own relative row: full-height (top-0
+          bottom-0) for every child except the last, whose segment is h-1/2
+          (top half only). The segments abut into one continuous line that
+          terminates at exactly the vertical center of the final child — by
+          construction, independent of row count or row height, so it can
+          neither stop short nor overshoot into the space below. The rail
+          stays centered under the 14px chevron slot (7px), while the metric
+          text is padded to 33px so it lands on the 40px axis of the parent
+          label (chevron 14 + gap 6 + icon 14 + gap 6), matching standard
+          tree-view text-under-text alignment. */}
       {expanded && metrics.length > 0 && (
-        <div className="ml-5 mt-1 space-y-0.5 border-l border-gray-200 pl-2">
+        <div className="ml-[7px] mt-0.5">
           {metrics.map((metric, idx) => (
-            <MetricRow key={idx} metric={metric} compact />
+            <div key={idx} className="relative pl-[33px]">
+              <span
+                aria-hidden="true"
+                className={`absolute left-0 top-0 w-px bg-gray-200 ${
+                  idx === metrics.length - 1 ? 'h-1/2' : 'bottom-0'
+                }`}
+              />
+              <MetricRow metric={metric} compact />
+            </div>
           ))}
         </div>
       )}
@@ -251,9 +304,10 @@ const AgentRow: React.FC<AgentRowProps> = ({ agent, expanded, onToggle }) => {
 interface AgentTankSidebarProps {
   allowManualRefresh?: boolean;
   className?: string;
+  scrollable?: boolean;
 }
 
-const AgentTankSidebar: React.FC<AgentTankSidebarProps> = ({ allowManualRefresh = true, className }) => {
+const AgentTankSidebar: React.FC<AgentTankSidebarProps> = ({ allowManualRefresh = true, className = '', scrollable = false }) => {
   const [data, setData] = useState<AgentTankUsageResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -306,23 +360,29 @@ const AgentTankSidebar: React.FC<AgentTankSidebarProps> = ({ allowManualRefresh 
   if (agents.length === 0) return null;
 
   return (
-    <div className={`px-4 py-3 border-t ${className || 'border-gray-200'}`}>
-      <div className="flex items-center justify-between mb-2">
-        <span className="text-[10px] font-semibold uppercase tracking-wider text-gray-400">
+    // In the sidebar, zone boundaries are whitespace, not rules: the utility
+    // group's mt-auto (in Layout) absorbs the flexible space above, so the
+    // widget draws no divider of its own. Surfaces that still want a rule
+    // (e.g. the mobile sheet) pass border classes via className.
+    <div className={`px-4 pt-4 pb-3 ${className}`}>
+      <div className="mb-2 flex items-center justify-between">
+        <span className="text-[11px] uppercase font-bold tracking-wider text-slate-400">
           Usage
         </span>
         {allowManualRefresh && (
           <button
+            type="button"
             onClick={() => fetchUsage(true)}
             disabled={refreshing}
-            className="text-gray-400 hover:text-primary-600 disabled:opacity-50"
+            className="-my-1 -mr-1 rounded p-1 text-slate-400 hover:text-slate-600 focus-visible:outline focus-visible:outline-2 focus-visible:outline-slate-400 disabled:opacity-50"
             title="Refresh usage"
+            aria-label="Refresh usage"
           >
-            <RefreshCw className={`w-3 h-3 ${refreshing ? 'animate-spin' : ''}`} />
+            <RefreshCw className={`${SIDEBAR_ICON_STROKE_CLASS} w-3 h-3 ${refreshing ? 'animate-spin' : ''}`} strokeWidth={SIDEBAR_ICON_STROKE_WIDTH} aria-hidden="true" />
           </button>
         )}
       </div>
-      <div className="space-y-0">
+      <div className={scrollable ? 'max-h-56 overflow-y-auto' : 'space-y-0'}>
         {agents.map(agent => (
           <AgentRow
             key={agent.name}

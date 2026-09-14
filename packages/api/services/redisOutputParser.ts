@@ -5,6 +5,7 @@ import {
   normalizeOpenCodeTimestamp,
   normalizeOpenCodeUsage,
 } from '@propr/core';
+import { extractOpenCodeAssistantSegments } from '../routes/liveDetailsOpenCodeParser.js';
 import { parseVibeTranscriptOutput, processVibeEvent } from './redisOutputParserVibe.js';
 
 /** Result from parsing Redis output */
@@ -33,7 +34,7 @@ interface ParseState {
   codexTurnCompletedUsage: ParseState['tokenUsage'] | null;
   codexResultUsage: ParseState['tokenUsage'] | null;
   lastOpenCodeCumulativeTopLevelUsage: { input_tokens: number; output_tokens: number; cache_creation_input_tokens: number; cache_read_input_tokens: number } | null;
-  pendingAssistantMessage: string; pendingAssistantTimestamp: string | null;
+  pendingAssistantMessage: string; pendingAssistantTimestamp: string | null; pendingAssistantInternalReasoning: boolean;
   antigravityStreamActive: boolean;
   syntheticTimestampBaseMs: number | null;
   syntheticTimestampIndex: number;
@@ -130,7 +131,7 @@ function processCodexItem(
   switch (item.type) {
     case 'reasoning':
       if (item.text) {
-        events.push({ type: 'thought' as const, content: item.text, timestamp });
+        events.push({ type: 'thought' as const, content: item.text, internalReasoning: true, timestamp });
       }
       break;
     case 'command_execution':
@@ -271,7 +272,7 @@ function processAppServerItem(item: Record<string, unknown>, timestamp: string, 
   }
   if (type === 'reasoning') {
     const summary = Array.isArray(item.summary) ? item.summary.join('\n') : textFromValue(item.summary);
-    if (summary) state.events.push({ type: 'thought', content: truncateContent(summary), timestamp });
+    if (summary) state.events.push({ type: 'thought', content: truncateContent(summary), internalReasoning: true, reasoningSummary: true, timestamp });
     return;
   }
   if (type === 'commandExecution') {
@@ -402,14 +403,20 @@ function processOpenCodeEvent(
 ): boolean {
   if (!isOpenCodeEvent(event)) return false;
   const type = event.type?.toLowerCase();
-  const assistantText = extractOpenCodeAssistantText(event);
-  if (assistantText) {
+  for (const { content: assistantText, internalReasoning } of extractOpenCodeAssistantSegments(event, extractOpenCodeAssistantText)) {
     if (type === 'delta' || event.part || event.parts?.length) {
+      if (state.pendingAssistantInternalReasoning !== internalReasoning) flushPendingMessage(state, timestamp);
       state.pendingAssistantMessage += assistantText;
       state.pendingAssistantTimestamp ??= timestamp;
+      state.pendingAssistantInternalReasoning = internalReasoning;
     } else {
       flushPendingMessage(state, timestamp);
-      state.events.push({ type: 'thought' as const, content: assistantText, timestamp });
+      state.events.push({
+        type: 'thought' as const,
+        content: assistantText,
+        ...(internalReasoning ? { internalReasoning: true } : {}),
+        timestamp,
+      });
     }
   }
 
@@ -675,9 +682,15 @@ function hasRedisTokenUsage(usage: ParseState['tokenUsage']): boolean {
  */
 function flushPendingMessage(state: ParseState, timestamp: string): void {
   if (state.pendingAssistantMessage) {
-    state.events.push({ type: 'thought' as const, content: state.pendingAssistantMessage, timestamp: state.pendingAssistantTimestamp ?? timestamp });
+    state.events.push({
+      type: 'thought' as const,
+      content: state.pendingAssistantMessage,
+      ...(state.pendingAssistantInternalReasoning ? { internalReasoning: true } : {}),
+      timestamp: state.pendingAssistantTimestamp ?? timestamp,
+    });
     state.pendingAssistantMessage = '';
     state.pendingAssistantTimestamp = null;
+    state.pendingAssistantInternalReasoning = false;
   }
 }
 
@@ -812,6 +825,7 @@ export function parseRedisOutput(lines: string[], options: RedisOutputParseOptio
     lastOpenCodeCumulativeTopLevelUsage: null,
     pendingAssistantMessage: '',
     pendingAssistantTimestamp: null,
+    pendingAssistantInternalReasoning: false,
     antigravityStreamActive: false,
     syntheticTimestampBaseMs: Number.isNaN(executionStartMs) ? null : executionStartMs,
     syntheticTimestampIndex: 0,

@@ -150,17 +150,19 @@ const eventPath = ${JSON.stringify(eventPath)};
 const args = process.argv.slice(2);
 const operation = (${dockerOperation.toString()})(args);
 const record = event => appendFileSync(eventPath, JSON.stringify({ schemaVersion: 1, event, operation, pid: process.pid, ppid: process.ppid, time: Date.now() }) + '\\n', { encoding: 'utf8' });
-record('invoked');
 if (operation === 'pull') {
   const stop = signal => { record(signal); process.exit(signal === 'sigterm' ? 143 : 130); };
   process.once('SIGTERM', () => stop('sigterm'));
   process.once('SIGINT', () => stop('sigint'));
   setInterval(() => undefined, 1000);
-} else if (${JSON.stringify([...SAFE_DOCKER_OPERATIONS])}.includes(operation)) {
+}
+// Pull admission must only become visible once cancellation handlers are ready.
+record('invoked');
+if (${JSON.stringify([...SAFE_DOCKER_OPERATIONS])}.includes(operation)) {
   const result = spawnSync(realDocker, args, { stdio: 'inherit' });
   if (result.error) { record('delegate-error'); process.exit(96); }
   process.exit(Number.isInteger(result.status) ? result.status : 95);
-} else {
+} else if (operation !== 'pull') {
   record('rejected');
   process.exit(97);
 }

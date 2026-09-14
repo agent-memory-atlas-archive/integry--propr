@@ -6,6 +6,8 @@ import Layout from './Layout';
 import { DESKTOP_UI_COMMAND_EVENT } from '../desktop/useDesktopNativeCommands';
 
 const mocks = vi.hoisted(() => ({
+  canManage: false,
+  hasRepos: true,
   logout: vi.fn(),
   openProfileManager: vi.fn(),
   retry: vi.fn(),
@@ -25,7 +27,7 @@ const mocks = vi.hoisted(() => ({
 vi.mock('../api/proprApi', () => ({ logout: mocks.logout }));
 vi.mock('../hooks/useDynamicFavicon', () => ({ useDynamicFavicon: vi.fn() }));
 vi.mock('../hooks/useSystemReadiness', () => ({
-  useSystemReadiness: () => ({ hasAgents: true, hasRepos: true, hasTasks: true }),
+  useSystemReadiness: () => ({ hasAgents: true, hasRepos: mocks.hasRepos, hasTasks: true }),
 }));
 vi.mock('./ui/useToast', () => ({ useToast: () => ({ addToast: vi.fn() }) }));
 vi.mock('./GlobalHeader', () => ({ default: () => <header className="desktop-content-toolbar" aria-label="Application toolbar" data-testid="global-header">GitHub user</header> }));
@@ -34,7 +36,7 @@ vi.mock('../contexts/useSocket', () => ({ useSocket: () => mocks.socket }));
 vi.mock('../contexts/DemoModeContext', () => ({ useDemoMode: () => ({ isDemoMode: false }) }));
 vi.mock('../contexts/AuthContext', () => ({
   useCurrentUser: () => ({ id: 'user-1', username: 'octocat' }),
-  userHasPermission: () => false,
+  userHasPermission: () => mocks.canManage,
 }));
 vi.mock('./ConnectPlusBanner', () => ({ ConnectCapacityBanner: () => null }));
 vi.mock('../contexts/NotificationCenterContext', () => ({
@@ -71,20 +73,24 @@ describe('Layout desktop instance selector', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mocks.socket.isConnected = true;
+    mocks.canManage = false;
+    mocks.hasRepos = true;
   });
 
-  it('moves version and copyright out of desktop only and toggles the actual sidebar', () => {
+  it('keeps version and copyright on web but out of the desktop sidebar', () => {
     vi.stubGlobal('matchMedia', vi.fn(() => ({ matches: true })));
     const desktop = renderLayout(desktopValue());
     expect(document.querySelector('aside footer')).toBeNull();
+    expect(screen.queryByText(`ProPR v${__APP_VERSION__}`)).not.toBeInTheDocument();
     fireEvent(window, new CustomEvent(DESKTOP_UI_COMMAND_EVENT, { detail: 'toggle-sidebar' }));
     expect(document.querySelector('aside')).toBeNull();
     fireEvent(window, new CustomEvent(DESKTOP_UI_COMMAND_EVENT, { detail: 'toggle-sidebar' }));
     expect(screen.getByRole('link', { name: 'Dashboard' })).toBeInTheDocument();
     desktop.unmount();
     renderLayout(null);
-    expect(document.querySelector('aside footer')).toHaveTextContent('Rinalds Uzkalns');
-    expect(document.querySelector('aside footer')).toHaveTextContent(`v${__APP_VERSION__}`);
+    const webFooter = document.querySelector('aside footer');
+    expect(webFooter).toHaveTextContent('Rinalds Uzkalns');
+    expect(webFooter).toHaveTextContent(`v${__APP_VERSION__}`);
     fireEvent(window, new CustomEvent(DESKTOP_UI_COMMAND_EVENT, { detail: 'toggle-sidebar' }));
     expect(document.querySelector('aside')).not.toBeNull();
     vi.unstubAllGlobals();
@@ -102,21 +108,25 @@ describe('Layout desktop instance selector', () => {
     expect(toolbar.closest('.desktop-main-content')).not.toBeNull();
     const selector = screen.getByRole('button', { name: 'Connected: This computer' });
     expect(selector.closest('aside')).not.toBeNull();
-    expect(screen.getByText('Instance')).toBeInTheDocument();
-    expect(screen.getByText('Local instance')).toBeInTheDocument();
-    expect(screen.getByText('Connected')).toBeInTheDocument();
+    expect(screen.queryByRole('img', { name: 'ProPR' })).not.toBeInTheDocument();
+    expect(document.querySelector('.desktop-sidebar-header')).toBeNull();
+    expect(selector).toHaveAccessibleDescription(/Local instance/);
+    expect(selector.querySelector('small')).toBeNull();
+    expect(selector.querySelector('.desktop-connection-dot')).toHaveAttribute('title', 'Connected');
     expect(screen.getByRole('link', { name: 'Dashboard' })).toHaveClass(
       'mx-2',
-      'rounded-lg',
+      'rounded-[6px]',
       'border-0',
-      'bg-teal-50',
-      'text-teal-700',
+      'bg-black/5',
+      'text-slate-900',
     );
     expect(screen.getByRole('link', { name: 'Dashboard' }).className).not.toMatch(/\bborder-l(?:-|\b)/);
     expect(screen.getByTestId('global-header')).toHaveTextContent('GitHub user');
     const profile = screen.getByText('@octocat').closest('.desktop-sidebar-profile');
     expect(profile?.closest('aside')).not.toBeNull();
-    expect(profile?.previousElementSibling).toHaveAttribute('aria-label', 'Application settings');
+    expect(screen.getByRole('link', { name: 'LLM Log' }).nextElementSibling).toBe(
+      screen.getByRole('link', { name: 'Settings' }),
+    );
 
     fireEvent.click(screen.getByRole('button', { name: 'Logout' }));
     expect(mocks.logout).toHaveBeenCalledOnce();
@@ -126,7 +136,7 @@ describe('Layout desktop instance selector', () => {
     await waitFor(() => expect(mocks.reportConnectedRendererReady).toHaveBeenCalledOnce());
   });
 
-  it('preserves retry and ProPR Connect identity while offline', () => {
+  it('preserves instance management and ProPR Connect identity while offline', () => {
     renderLayout(desktopValue({
       profile: {
         id: 'connect',
@@ -138,11 +148,11 @@ describe('Layout desktop instance selector', () => {
     }));
 
     const selector = screen.getByRole('button', { name: 'Offline: Operations' });
-    expect(screen.getByText('ProPR Connect')).toBeInTheDocument();
-    expect(screen.getByText('Offline')).toBeInTheDocument();
+    expect(selector).toHaveAccessibleDescription(/ProPR Connect/);
+    expect(selector.querySelector('.desktop-connection-dot')).toHaveAttribute('title', 'Offline');
     fireEvent.click(selector);
-    expect(mocks.retry).toHaveBeenCalledOnce();
-    expect(mocks.openProfileManager).not.toHaveBeenCalled();
+    expect(mocks.openProfileManager).toHaveBeenCalledOnce();
+    expect(mocks.retry).not.toHaveBeenCalled();
   });
 
   it('uses the scoped transport for reconnecting and recovers without replacing the profile', async () => {
@@ -151,7 +161,7 @@ describe('Layout desktop instance selector', () => {
     const view = renderLayout(desktop);
 
     const reconnecting = screen.getByRole('button', { name: 'Reconnecting: This computer' });
-    expect(reconnecting).toHaveTextContent('Reconnecting');
+    expect(reconnecting.querySelector('.desktop-connection-dot')).toHaveAttribute('title', 'Reconnecting');
     fireEvent.click(reconnecting);
     expect(mocks.openProfileManager).toHaveBeenCalledOnce();
     expect(mocks.retry).not.toHaveBeenCalled();
@@ -169,11 +179,40 @@ describe('Layout desktop instance selector', () => {
     await waitFor(() => expect(mocks.reportConnectedRendererReady).toHaveBeenCalledOnce());
   });
 
+  it('keeps Coding Agents and Access in the resource group for permitted users', () => {
+    mocks.canManage = true;
+    renderLayout(desktopValue());
+    expect(screen.getByRole('link', { name: 'Coding Agents' })).toHaveAttribute('href', '/ai-agents');
+    expect(screen.getByRole('link', { name: 'Access' })).toHaveAttribute('href', '/admin/members');
+    expect(screen.getByRole('link', { name: 'Repositories' }).nextElementSibling).toBe(
+      screen.getByRole('link', { name: 'Coding Agents' }),
+    );
+  });
+
+  it('keeps restricted routes permission-gated on desktop', () => {
+    renderLayout(desktopValue());
+    expect(screen.queryByRole('link', { name: 'Coding Agents' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: 'Access' })).not.toBeInTheDocument();
+  });
+
+  it('labels repository setup warnings in the trailing rail without emphasizing inactive text', () => {
+    mocks.hasRepos = false;
+    renderLayout(desktopValue());
+    const indicator = screen.getByRole('img', { name: 'No repositories configured' });
+    const row = indicator.closest('a');
+    expect(indicator.parentElement).toBe(row?.lastElementChild);
+    expect(indicator.parentElement).toHaveClass('items-center', 'justify-end');
+    expect(indicator.querySelector('svg')).toHaveClass('lucide-triangle-alert');
+    expect(row).toHaveClass('text-slate-600', 'hover:text-slate-900');
+    expect(screen.getByText('Repositories')).not.toHaveClass('font-medium', 'text-slate-900');
+  });
+
   it('leaves the browser layout free of desktop-only instance controls', () => {
     renderLayout(null);
 
     expect(screen.queryByText('Instance')).not.toBeInTheDocument();
     expect(document.querySelector('.desktop-instance-selector')).not.toBeInTheDocument();
     expect(screen.getByText('Page content')).toBeInTheDocument();
+    expect(screen.getByRole('img', { name: 'ProPR' })).toBeInTheDocument();
   });
 });
