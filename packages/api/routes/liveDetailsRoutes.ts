@@ -16,7 +16,7 @@ import {
 import { parseAntigravityOutputToConversationResult, parseVibeOutputToConversationResult } from './liveDetailsOutputParsers.js';
 import { parseOpenCodeOutputToConversationResult } from './liveDetailsOpenCodeParser.js';
 import { parseExecutionDetailsRows, type ExecutionDetailRow } from './liveDetailsExecutionParser.js';
-import { detectStoredOutputFormat, type StoredOutputFormat } from './liveDetailsStoredOutputFormat.js';
+import { detectStoredOutputFormat, hasCodexAppServerNotification, type StoredOutputFormat } from './liveDetailsStoredOutputFormat.js';
 import { parseRedisOutput } from '../services/redisOutputParser.js';
 import { parseAgentStreamOutput } from '../services/agentStreamProjection.js';
 import { parseConversationFile } from '../services/conversationParser.js';
@@ -361,23 +361,6 @@ function parseStoredOutputWithFormat(output: string, format: StoredOutputFormat,
   }
   const parsed = parseStoredOutputForFormat(output, format);
   return { parsed: isConversationResultEmpty(parsed) ? null : parsed, rawFallback, format };
-}
-function hasCodexAppServerNotification(output: string): boolean {
-  return output.split('\n').some(line => {
-    try {
-      const method = (JSON.parse(line) as { method?: unknown }).method;
-      return typeof method === 'string' && [
-        'error',
-        'warning',
-        'item/',
-        'model/',
-        'thread/',
-        'turn/',
-      ].some(prefix => method === prefix || method.startsWith(prefix));
-    } catch {
-      return false;
-    }
-  });
 }
 function parseStoredOutputForFormat(output: string, format: StoredOutputFormat): ConversationResult | null {
   if (format === 'claude') return parseClaudeOutputToConversationResult(output);
