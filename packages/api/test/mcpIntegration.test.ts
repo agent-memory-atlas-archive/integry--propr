@@ -94,6 +94,13 @@ test('MCP list elapsed time treats naive database timestamps as UTC on non-UTC h
 });
 
 test('MCP list summaries bound natural-language fields and tolerate legacy task metadata', () => {
+  for (const character of ['x', '界', '😀', '"', '\\', '\u0000', '\b', '\u001f', '\ud800']) {
+    const characterBytes = Buffer.byteLength(JSON.stringify(character)) - 2;
+    const exactFit = character.repeat(12 / characterBytes);
+    assert.equal(compactText(exactFit, 12), exactFit);
+    const truncated = compactText(character.repeat(20), 12)!;
+    assert.equal(truncated, `${character.repeat(Math.floor((12 - 3) / characterBytes))}…`);
+  }
   const summary = compactText(`  ${'long context '.repeat(40)}  `)!;
   assert.ok(summary.length <= 240);
   assert.ok(summary.endsWith('…'));
@@ -143,7 +150,7 @@ test('MCP list summaries bound natural-language fields and tolerate legacy task 
 
 test('MCP task and goal pages with maximum-length summary fields stay below the response ceiling', () => {
   const now = Date.UTC(2026, 8, 1, 12, 0, 5);
-  for (const character of ['x', '界']) {
+  for (const character of ['x', '界', '"', '\\', '\u0000', '\b', '\u001f', '\ud800']) {
     const longText = character.repeat(1_000);
     const common = {
       repository: `${'r'.repeat(127)}/${'s'.repeat(127)}`,
@@ -166,7 +173,7 @@ test('MCP task and goal pages with maximum-length summary fields stay below the 
     }, now));
     for (const [name, items] of [['tasks', tasks], ['goals', goals]] as const) {
       const bytes = Buffer.byteLength(JSON.stringify({ [name]: items, nextOffset: 100 }));
-      assert.ok(bytes < 256 * 1024, `large ${name} page (${character}) is ${bytes} bytes`);
+      assert.ok(bytes < 256 * 1024, `large ${name} page (${JSON.stringify(character)}) is ${bytes} bytes`);
       assert.ok(items.every(item => item.failure_reason && item.summary && item.completed_at));
     }
   }

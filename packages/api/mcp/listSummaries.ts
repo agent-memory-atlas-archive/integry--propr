@@ -34,15 +34,20 @@ function text(value: unknown): string | null {
   return typeof value === 'string' && value.trim() ? value.trim() : null;
 }
 
+function jsonTextBytes(value: string): number {
+  // Budget serialized string content; surrounding quotes are fixed payload overhead.
+  return Buffer.byteLength(JSON.stringify(value)) - 2;
+}
+
 export function compactText(value: unknown, limit = SUMMARY_LIMIT): string | null {
   const normalized = text(value)?.replace(/\s+/g, ' ') ?? null;
-  if (!normalized || Buffer.byteLength(normalized) <= limit) return normalized;
+  if (!normalized || jsonTextBytes(normalized) <= limit) return normalized;
   const ellipsis = '…';
-  const byteLimit = Math.max(0, limit - Buffer.byteLength(ellipsis));
+  const byteLimit = Math.max(0, limit - jsonTextBytes(ellipsis));
   let bytes = 0;
   let truncated = '';
   for (const character of normalized) {
-    const characterBytes = Buffer.byteLength(character);
+    const characterBytes = jsonTextBytes(character);
     if (bytes + characterBytes > byteLimit) break;
     truncated += character;
     bytes += characterBytes;
