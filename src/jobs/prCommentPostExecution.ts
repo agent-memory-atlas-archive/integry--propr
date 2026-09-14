@@ -219,6 +219,16 @@ async function publishCompletionComment(options: CompletionCommentPublicationOpt
     }
 }
 
+function requirePartialExecutionChanges(
+    partial: boolean,
+    commitResult: Awaited<ReturnType<typeof commitChanges>>,
+    terminationReason: ReturnType<typeof resolveAgentTerminationReason>,
+): void {
+    if (partial && !commitResult) {
+        throw new Error(`Agent execution ${terminationReason === 'timeout' ? 'timed out' : 'reached the maximum turn limit'} before producing changes to publish`);
+    }
+}
+
 export async function handlePostExecution(params: PostExecutionParams, taskUrl: string): Promise<{ commitHash?: string; partial: boolean }> {
     const {
         state,
@@ -255,9 +265,7 @@ export async function handlePostExecution(params: PostExecutionParams, taskUrl: 
             unprocessedComments: state.unprocessedComments, startingWorkComment: state.startingWorkComment,
             unprocessedReviewComments, llm, taskUrl,
         });
-        if (partial && !commitResult) {
-            throw new Error(`Agent execution ${terminationReason === 'timeout' ? 'timed out' : 'reached the maximum turn limit'} before producing changes to publish`);
-        }
+        requirePartialExecutionChanges(partial, commitResult, terminationReason);
         if (commitResult?.filesChanged?.length) state.claudeResult.modifiedFiles = commitResult.filesChanged;
 
         const completionComment = await publishCompletionComment({
