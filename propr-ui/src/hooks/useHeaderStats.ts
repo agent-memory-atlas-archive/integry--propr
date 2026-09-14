@@ -37,7 +37,31 @@ const LIVE_REVALIDATION_RETRY_DELAYS_MS = [1_000, 3_000] as const;
 const FALLBACK_POLL_INTERVAL_MS = 30_000;
 const ALL_STATS_RESOURCES: readonly HeaderStatsResource[] = ['queue', 'drafts', 'tasks', 'status'];
 
-type FetchStatsOutcome = 'succeeded' | 'failed' | 'superseded';
+export type HeaderStatsResourceStatus = 'checking' | 'available' | 'unavailable';
+
+type ResourceRecord<T> = Record<HeaderStatsResource, T>;
+
+interface FetchStatsResult {
+  succeededResources: HeaderStatsResource[];
+  failedResources: HeaderStatsResource[];
+  supersededResources: HeaderStatsResource[];
+}
+
+const createResourceRecord = <T,>(value: T): ResourceRecord<T> => ({
+  queue: value,
+  drafts: value,
+  tasks: value,
+  status: value,
+});
+
+const getActivityStatus = (
+  statuses: ResourceRecord<HeaderStatsResourceStatus>,
+): HeaderStats['activityStatus'] => {
+  const activityStatuses = [statuses.queue, statuses.drafts];
+  if (activityStatuses.includes('unavailable')) return 'unavailable';
+  if (activityStatuses.every(status => status === 'available')) return 'available';
+  return 'checking';
+};
 
 const queueStatsFingerprint = (payload: QueueStatsUpdatePayload): string => JSON.stringify([
   payload.stats.waiting,
@@ -58,6 +82,9 @@ export interface HeaderStats {
 
   // Whether the active-work snapshot is current and complete.
   activityStatus: 'checking' | 'available' | 'unavailable';
+
+  // Whether each independently reconciled header resource has loaded.
+  resourceStatuses: ResourceRecord<HeaderStatsResourceStatus>;
 
   // Active plans (not merged, not closed), sorted by updated_at descending
   activePlans: DraftListItem[];
@@ -99,7 +126,9 @@ export function useHeaderStats(): HeaderStats {
   const requestIdentityKey = `${getDesktopSocketConfigurationKey()}\0${currentUser?.id ?? 'anonymous'}`;
   const [runningCount, setRunningCount] = useState<number>(0);
   const [runningItems, setRunningItems] = useState<RunningItem[]>([]);
-  const [activityStatus, setActivityStatus] = useState<HeaderStats['activityStatus']>('checking');
+  const [resourceStatuses, setResourceStatuses] = useState<ResourceRecord<HeaderStatsResourceStatus>>(
+    () => createResourceRecord('checking'),
+  );
   const [activePlans, setActivePlans] = useState<DraftListItem[]>([]);
   const [reviewCount, setReviewCount] = useState<number>(0);
   const [reviewGroups, setReviewGroups] = useState<TaskGroup[]>([]);
@@ -126,7 +155,8 @@ export function useHeaderStats(): HeaderStats {
 
   // Track if component is mounted
   const isMountedRef = useRef(true);
-  const statsRequestRef = useRef(0);
+  const statsRequestRef = useRef<ResourceRecord<number>>(createResourceRecord(0));
+  const resourceErrorsRef = useRef<ResourceRecord<string | null>>(createResourceRecord(null));
   const liveRefreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const liveRefreshInFlightRef = useRef(false);
   const liveRefreshPendingRef = useRef<Set<HeaderStatsResource>>(new Set());
@@ -139,6 +169,7 @@ export function useHeaderStats(): HeaderStats {
   const draftStatusesRef = useRef<Map<string, string>>(new Map());
   const taskFingerprintsRef = useRef<Map<string, string>>(new Map());
   const previousRequestIdentityRef = useRef(requestIdentityKey);
+  const requestIdentityRef = useRef(requestIdentityKey);
 
   // WebSocket connection for real-time updates
   const { onTaskUpdate, onDraftUpdate, onQueueStatsUpdate, isConnected } = useSocket();
@@ -151,7 +182,9 @@ export function useHeaderStats(): HeaderStats {
   useEffect(() => {
     if (previousRequestIdentityRef.current === requestIdentityKey) return;
     previousRequestIdentityRef.current = requestIdentityKey;
-    statsRequestRef.current += 1;
+    requestIdentityRef.current = requestIdentityKey;
+    ALL_STATS_RESOURCES.forEach(resource => { statsRequestRef.current[resource] += 1; });
+    resourceErrorsRef.current = createResourceRecord(null);
     draftsSnapshotRef.current = [];
     activeJobsSnapshotRef.current = [];
     tasksSnapshotRef.current = { tasks: [] };
@@ -164,7 +197,8 @@ export function useHeaderStats(): HeaderStats {
     setActivePlans([]);
     setReviewGroups([]);
     setReviewCount(0);
-    setActivityStatus('checking');
+    setResourceStatuses(createResourceRecord('checking'));
+    setIsLoading(true);
     setError(null);
   }, [requestIdentityKey]);
 
@@ -219,8 +253,13 @@ export function useHeaderStats(): HeaderStats {
   async (
     resources: readonly HeaderStatsResource[] = ALL_STATS_RESOURCES,
     isInitialLoad = false,
-  ): Promise<FetchStatsOutcome> => {
-    const request = ++statsRequestRef.current;
+  ): Promise<FetchStatsResult> => {
+    const requestIdentity = requestIdentityKey;
+    const requestVersions = new Map(resources.map(resource => {
+      const version = statsRequestRef.current[resource] + 1;
+      statsRequestRef.current[resource] = version;
+      return [resource, version] as const;
+    }));
     try {
       if (isInitialLoad) {
         setIsLoading(true);
@@ -250,20 +289,45 @@ export function useHeaderStats(): HeaderStats {
           }
         }));
 
-      if (!isMountedRef.current || request !== statsRequestRef.current) return 'superseded';
+      if (!isMountedRef.current || requestIdentityRef.current !== requestIdentity) {
+        return {
+          succeededResources: [],
+          failedResources: [],
+          supersededResources: [...resources],
+        };
+      }
 
-      let failure: Error | null = null;
+      const result: FetchStatsResult = {
+        succeededResources: [],
+        failedResources: [],
+        supersededResources: [],
+      };
       for (const [resource, value, resourceError] of entries) {
-        if (resourceError) {
-          failure ??= resourceError;
-          if (resource === 'queue' || resource === 'drafts') setActivityStatus('unavailable');
+        if (requestVersions.get(resource) !== statsRequestRef.current[resource]) {
+          result.supersededResources.push(resource);
           continue;
         }
+        if (resourceError) {
+          resourceErrorsRef.current[resource] = resourceError.message;
+          result.failedResources.push(resource);
+          setResourceStatuses(previous => ({ ...previous, [resource]: 'unavailable' }));
+          continue;
+        }
+        resourceErrorsRef.current[resource] = null;
+        result.succeededResources.push(resource);
+        setResourceStatuses(previous => ({
+          ...previous,
+          [resource]: resource === 'queue' && isDesktopRuntime() && !socketConnectedRef.current
+            ? 'unavailable'
+            : 'available',
+        }));
         if (resource === 'queue') {
           const queue = value as Awaited<ReturnType<typeof getQueueStats>>;
           activeJobsSnapshotRef.current = queue.activeJobs || [];
-          setActivityStatus(isDesktopRuntime() && !socketConnectedRef.current
-            ? 'unavailable' : 'available');
+          if (pendingQueueStatsFingerprintRef.current !== null) {
+            lastQueueStatsFingerprintRef.current = pendingQueueStatsFingerprintRef.current;
+            pendingQueueStatsFingerprintRef.current = null;
+          }
         } else if (resource === 'drafts') {
           const response = value as Awaited<ReturnType<typeof getDrafts>>;
           draftsSnapshotRef.current = response.drafts;
@@ -283,24 +347,46 @@ export function useHeaderStats(): HeaderStats {
         }
       }
 
-      const runningItemsList = buildRunningItems(
-        draftsSnapshotRef.current,
-        activeJobsSnapshotRef.current || [],
-      );
-      setRunningItems(runningItemsList);
-      setRunningCount(runningItemsList.length);
-      setError(failure?.message ?? null);
-      return failure ? 'failed' : 'succeeded';
+      if (result.succeededResources.some(resource => resource === 'queue' || resource === 'drafts')) {
+        const runningItemsList = buildRunningItems(
+          draftsSnapshotRef.current,
+          activeJobsSnapshotRef.current || [],
+        );
+        setRunningItems(runningItemsList);
+        setRunningCount(runningItemsList.length);
+      }
+      setError(ALL_STATS_RESOURCES
+        .map(resource => resourceErrorsRef.current[resource])
+        .find((message): message is string => message !== null) ?? null);
+      return result;
     } catch (err) {
-      if (!isMountedRef.current || request !== statsRequestRef.current) return 'superseded';
+      if (!isMountedRef.current || requestIdentityRef.current !== requestIdentity) {
+        return {
+          succeededResources: [],
+          failedResources: [],
+          supersededResources: [...resources],
+        };
+      }
       console.error('Failed to fetch header stats:', err);
-      setRunningItems([]);
-      setRunningCount(0);
-      setActivityStatus('unavailable');
+      const failedResources = resources.filter(resource =>
+        requestVersions.get(resource) === statsRequestRef.current[resource]);
+      failedResources.forEach(resource => {
+        resourceErrorsRef.current[resource] = (err as Error).message;
+      });
+      setResourceStatuses(previous => failedResources.reduce((next, resource) => ({
+        ...next,
+        [resource]: 'unavailable',
+      }), previous));
       setError((err as Error).message);
-      return 'failed';
+      return {
+        succeededResources: [],
+        failedResources,
+        supersededResources: resources.filter(resource => !failedResources.includes(resource)),
+      };
     } finally {
-      if (isMountedRef.current && request === statsRequestRef.current) {
+      if (isInitialLoad
+        && isMountedRef.current
+        && requestIdentityRef.current === requestIdentity) {
         setIsLoading(false);
       }
     }
@@ -327,35 +413,23 @@ export function useHeaderStats(): HeaderStats {
         const pendingResources = [...liveRefreshPendingRef.current];
         liveRefreshPendingRef.current.clear();
         liveRefreshInFlightRef.current = true;
-        const reconciledQueueFingerprint = pendingQueueStatsFingerprintRef.current;
         const outcome = await fetchStats(pendingResources, false);
         liveRefreshInFlightRef.current = false;
 
         if (!isMountedRef.current) return;
-        if (outcome === 'succeeded') {
+        if (outcome.failedResources.length === 0) {
           liveRefreshRetryAttemptRef.current = 0;
-          if (reconciledQueueFingerprint !== null) {
-            lastQueueStatsFingerprintRef.current = reconciledQueueFingerprint;
-            if (pendingQueueStatsFingerprintRef.current === reconciledQueueFingerprint) {
-              pendingQueueStatsFingerprintRef.current = null;
-            }
-          }
-        } else if (outcome === 'failed'
-          && socketConnectedRef.current
+        } else if (socketConnectedRef.current
           && liveRefreshRetryAttemptRef.current < LIVE_REVALIDATION_RETRY_DELAYS_MS.length) {
           const retryDelay = LIVE_REVALIDATION_RETRY_DELAYS_MS[liveRefreshRetryAttemptRef.current];
           liveRefreshRetryAttemptRef.current += 1;
-          pendingResources.forEach(resource => liveRefreshPendingRef.current.add(resource));
+          outcome.failedResources.forEach(resource => liveRefreshPendingRef.current.add(resource));
           if (document.visibilityState !== 'hidden') armRefresh(retryDelay);
-        } else if (outcome === 'failed') {
+        } else {
           liveRefreshRetryAttemptRef.current = 0;
-          if (pendingQueueStatsFingerprintRef.current === reconciledQueueFingerprint) {
+          if (outcome.failedResources.includes('queue')) {
             pendingQueueStatsFingerprintRef.current = null;
           }
-        } else if (socketConnectedRef.current) {
-          // A newer fetch superseded this one. Revalidate once more so this live
-          // invalidation is only committed by a complete, current snapshot.
-          pendingResources.forEach(resource => liveRefreshPendingRef.current.add(resource));
         }
 
         if (liveRefreshPendingRef.current.size > 0
@@ -387,11 +461,11 @@ export function useHeaderStats(): HeaderStats {
       liveRefreshRetryAttemptRef.current = 0;
       pendingQueueStatsFingerprintRef.current = null;
       lastQueueStatsFingerprintRef.current = null;
-      statsRequestRef.current += 1;
+      ALL_STATS_RESOURCES.forEach(resource => { statsRequestRef.current[resource] += 1; });
       if (isDesktopRuntime()) {
         setRunningItems([]);
         setRunningCount(0);
-        setActivityStatus('unavailable');
+        setResourceStatuses(previous => ({ ...previous, queue: 'unavailable' }));
         setIsLoading(false);
       }
       return;
@@ -400,7 +474,9 @@ export function useHeaderStats(): HeaderStats {
       lastQueueStatsFingerprintRef.current = null;
       pendingQueueStatsFingerprintRef.current = null;
       liveRefreshRetryAttemptRef.current = 0;
-      if (isDesktopRuntime()) setActivityStatus('checking');
+      if (isDesktopRuntime()) {
+        setResourceStatuses(previous => ({ ...previous, queue: 'checking' }));
+      }
       scheduleLiveRefresh(ALL_STATS_RESOURCES);
     }
   }, [isConnected, scheduleLiveRefresh]);
@@ -416,7 +492,9 @@ export function useHeaderStats(): HeaderStats {
       initialResources.forEach(resource => liveRefreshPendingRef.current.add(resource));
     } else {
       void fetchStats(initialResources, true).then(outcome => {
-        if (outcome === 'failed' && socketConnectedRef.current) scheduleLiveRefresh(initialResources);
+        if (outcome.failedResources.length > 0 && socketConnectedRef.current) {
+          scheduleLiveRefresh(outcome.failedResources);
+        }
       });
     }
 
@@ -512,7 +590,8 @@ export function useHeaderStats(): HeaderStats {
   return {
     runningCount,
     runningItems,
-    activityStatus,
+    activityStatus: getActivityStatus(resourceStatuses),
+    resourceStatuses,
     activePlans,
     reviewCount,
     reviewGroups,
