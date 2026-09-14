@@ -85,11 +85,15 @@ function isNavigationItemActive(currentPath: string, itemPath: string): boolean 
 // stretches horizontally for wider content (e.g. "99+") with the same radius and padding.
 // The parent nav row is `flex items-center justify-between`, which keeps the badge on
 // the same horizontal center line as the label.
+//
+// The digits are centered by the flex box alone: `leading-none` collapses the line
+// box onto the glyphs (digits have no descender, so their ink already centers on the
+// em box), and no vertical nudge is applied on top of it — a nudge is what made the
+// numbers sit low in the pill.
 function NavBadge({ children }: { children: React.ReactNode }) {
   return (
     <span className="inline-flex h-4 min-w-4 flex-none items-center justify-center rounded-full bg-primary-500 px-1 text-[10px] font-bold leading-none text-white">
-      {/* Offset the glyph ink within the centered line box for optical centering. */}
-      <span className="block translate-y-px">{children}</span>
+      {children}
     </span>
   );
 }
@@ -388,8 +392,10 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
               </button>
             </div>
           )}
-          {/* Match the profile text rail: 12px outer + 4px link inset + 28px avatar + 8px gap. */}
-          <footer className={`mt-4 pr-4 pb-2 leading-tight space-y-1 ${user ? 'pl-[52px]' : 'pl-4'}`}>
+          {/* Metadata sits flush on the sidebar's shared 16px left rail (the same
+              rail as the nav labels and the Usage heading) rather than being
+              indented to the profile's text column. */}
+          <footer className="mt-4 px-4 pb-2 leading-tight space-y-1">
             {/* The version is the datum developers scan for, so it sits one
                 contrast step above the secondary copyright line. */}
             <div className="text-[11px] text-slate-500">

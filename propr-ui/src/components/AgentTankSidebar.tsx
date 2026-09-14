@@ -51,18 +51,26 @@ function formatAntigravityModelLabel(fullName: string): { display: React.ReactNo
   return { display: withoutThinking, plain: withoutThinking };
 }
 
-// Capacity bars stay neutral for normal usage; color is reserved for
-// approaching (amber) or near-exhausted (red) quota.
+// Quota consumed past half the budget is worth noticing, past four fifths is
+// worth acting on.
+const USAGE_WARNING_PERCENT = 50;
+const USAGE_CRITICAL_PERCENT = 80;
+
+// Capacity bars stay neutral for light usage; past the thresholds they take on
+// pastel orange then pastel red. The tints are deliberately soft — the sidebar
+// reports a level, it does not raise an alarm — but still separate clearly from
+// the gray-200 track behind them.
 function getStatusColor(percent: number): string {
-  if (percent >= 90) return 'bg-red-500';
-  if (percent >= 75) return 'bg-amber-500';
+  if (percent > USAGE_CRITICAL_PERCENT) return 'bg-red-400';
+  if (percent > USAGE_WARNING_PERCENT) return 'bg-orange-300';
   return 'bg-slate-400';
 }
 
-// Text color follows the same quiet-until-warning rule as the bar.
+// Text follows the same thresholds as the bar, but at a darker step: these are
+// 10px numerals, so they need readable contrast rather than the bar's pastel.
 function getTextColor(percent: number): string {
-  if (percent >= 90) return 'text-red-600';
-  if (percent >= 75) return 'text-amber-600';
+  if (percent > USAGE_CRITICAL_PERCENT) return 'text-red-600';
+  if (percent > USAGE_WARNING_PERCENT) return 'text-orange-600';
   return 'text-gray-500';
 }
 
