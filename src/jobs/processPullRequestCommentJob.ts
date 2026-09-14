@@ -31,12 +31,8 @@ import { shouldDeferUltrafixReview } from './ultrafixReviewExecutionGate.js';
 import { handleNoAuthorizedFindings } from './prCommentNoAuthorizedFindings.js';
 import { handlePostExecution } from './prCommentPostExecution.js';
 import {
-    buildDeterministicPrTaskSubtitle,
-    buildPrTaskTitle,
-    buildPrTaskTitleContext,
-    buildPrTaskTitleContextHistoryMetadata,
-    getPrTaskWorkflowLabel,
-    resolvePrTaskWorkflow,
+    buildDeterministicPrTaskSubtitle, buildPrTaskTitle, buildPrTaskTitleContext,
+    buildPrTaskTitleContextHistoryMetadata, getPrTaskWorkflowLabel, resolvePrTaskWorkflow,
 } from './prTaskTitleHelpers.js';
 import type { GitHubToken } from './githubTypes.js';
 import {

@@ -36,9 +36,9 @@ export interface ExecuteProcessingParams {
     lockToken: string;
 }
 
-/** Recover under the shared PR lease, before comment filtering or review routing can skip completion. */
-export async function recoverPendingPublication(params: ExecuteProcessingParams, redisClient: Redis): Promise<JobResult | undefined> {
-    const { state, context, taskId, job, stateManager, lockKey, lockToken } = params;
+async function preparePendingPublication(
+    { state, context, stateManager }: Pick<ExecuteProcessingParams, 'state' | 'context' | 'stateManager'>,
+): Promise<PullRequestPublication | undefined> {
     const record = await findPRContinuation(context);
     if (!record?.publication_bundle && !record?.publication_completion) return;
     const savedCompletion = record.publication_completion
@@ -71,6 +71,15 @@ export async function recoverPendingPublication(params: ExecuteProcessingParams,
     } else {
         await publication.announce();
     }
+    return publication;
+}
+
+/** Recover under the shared PR lease, before comment filtering or review routing can skip completion. */
+export async function recoverPendingPublication(params: ExecuteProcessingParams, redisClient: Redis): Promise<JobResult | undefined> {
+    const publication = await preparePendingPublication(params);
+    if (!publication) return;
+    const { state, context, taskId, job, stateManager, lockKey, lockToken } = params;
+    const octokit = state.octokit!;
     const completion = publication.pendingCompletion;
     if (!completion) return; // Legacy bundles can be published but have no completion inputs.
     Object.assign(state, {
