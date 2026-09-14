@@ -235,7 +235,11 @@ export const BrowserPushProvider: React.FC<{ children: React.ReactNode }> = ({ c
           // subscription may belong to another account or instance.
           const { subscriptions } = await listPushSubscriptions();
           if (!subscriptions.some(subscription => subscription.endpoint === localSubscription!.endpoint
-            && subscription.revokedAt === null)) localSubscription = null;
+            && subscription.revokedAt === null)) {
+            await localSubscription.unsubscribe();
+            storePushOwner(null);
+            localSubscription = null;
+          }
         }
       } catch (error) {
         localSubscription = null;
