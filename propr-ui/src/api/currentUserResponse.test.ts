@@ -8,6 +8,7 @@ vi.mock('./apiClient', () => ({
   API_BASE_URL: 'https://example.test',
   apiFetch,
   handleApiResponse: vi.fn(async (response: Response) => response),
+  setAuthenticatedApiReadIdentity: vi.fn(),
 }));
 
 type AcceptanceWindow = Window & { __PROPR_PACKAGED_ACCEPTANCE__?: unknown };

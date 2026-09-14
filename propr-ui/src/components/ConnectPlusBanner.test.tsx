@@ -6,6 +6,7 @@ import { getSystemStatus } from '../api/proprApi';
 import type { ConnectAccountStatus, CurrentUser, SystemStatus } from '../api/proprTypes';
 import { AuthProvider } from '../contexts/AuthContext';
 import { ConnectAccountProvider, useConnectAccount } from '../contexts/ConnectAccountContext';
+import { SystemStatusProvider } from '../contexts/SystemStatusContext';
 import {
   ConnectCapacityBanner,
   ConnectSoftPromoBanner,
@@ -15,7 +16,10 @@ import {
   connectPlusDismissalKey,
 } from './connectPlusBannerState';
 
-vi.mock('../api/proprApi', () => ({ getSystemStatus: vi.fn() }));
+vi.mock('../api/proprApi', () => ({
+  getSystemStatus: vi.fn(),
+  INSTANCE_AUTHORIZATION_CHANGED_EVENT: 'propr:instance-authorization-changed',
+}));
 const mockGetSystemStatus = vi.mocked(getSystemStatus);
 
 const admin: CurrentUser = {
@@ -62,10 +66,12 @@ const status = (connectAccount?: ConnectAccountStatus): SystemStatus => ({
 const banners = (user: CurrentUser = admin, disabled = false) => (
   <MemoryRouter>
     <AuthProvider user={user}>
-      <ConnectAccountProvider disabled={disabled}>
-        <ConnectCapacityBanner />
-        <ConnectSoftPromoBanner />
-      </ConnectAccountProvider>
+      <SystemStatusProvider disabled={disabled}>
+        <ConnectAccountProvider disabled={disabled}>
+          <ConnectCapacityBanner />
+          <ConnectSoftPromoBanner />
+        </ConnectAccountProvider>
+      </SystemStatusProvider>
     </AuthProvider>
   </MemoryRouter>
 );
@@ -198,9 +204,11 @@ describe('Connect Plus banners', () => {
     render(
       <MemoryRouter initialEntries={['/?flow=connect&tunnel=old-stack']}>
         <AuthProvider user={admin}>
-          <ConnectAccountProvider>
-            <TunnelSwitchProbe observations={observations} />
-          </ConnectAccountProvider>
+          <SystemStatusProvider>
+            <ConnectAccountProvider>
+              <TunnelSwitchProbe observations={observations} />
+            </ConnectAccountProvider>
+          </SystemStatusProvider>
         </AuthProvider>
       </MemoryRouter>,
     );
@@ -432,9 +440,11 @@ describe('Connect Plus banners', () => {
     render(
       <MemoryRouter>
         <AuthProvider user={admin}>
-          <ConnectAccountProvider>
-            <CloseSoftBannerOnFirstRender onClose={onClose} />
-          </ConnectAccountProvider>
+          <SystemStatusProvider>
+            <ConnectAccountProvider>
+              <CloseSoftBannerOnFirstRender onClose={onClose} />
+            </ConnectAccountProvider>
+          </SystemStatusProvider>
         </AuthProvider>
       </MemoryRouter>,
     );

@@ -1,6 +1,14 @@
 import { DESKTOP_LOGGED_OUT_EVENT } from '../desktop/types';
 import type { Task as ApiTask } from './tasks';
-import { API_BASE_URL, apiFetch, handleApiResponse, getDesktopConnectionScope, setDesktopConnectionScope } from './apiClient';
+import {
+  API_BASE_URL,
+  apiFetch,
+  handleApiResponse,
+  getDesktopConnectionScope,
+  setAuthenticatedApiReadIdentity,
+  setDesktopConnectionScope,
+  shareInFlightApiRead,
+} from './apiClient';
 import { isHostedUiOrigin, pathWithActiveHostedTunnelFlow } from '../config/runtimeConfig';
 import { isAccountStatusTimestamp, isProprProxyUrl } from '@propr/shared';
 import {
@@ -31,8 +39,8 @@ export const getDemoModeStatus = async (): Promise<DemoModeStatus> => {
   return response.json();
 };
 
-export const getSystemStatus = async (): Promise<SystemStatus> => {
-  const response = await apiFetch(`${API_BASE_URL}/api/status`, { credentials: 'include' });
+export const getSystemStatus = (): Promise<SystemStatus> => shareInFlightApiRead('system-status', async signal => {
+  const response = await apiFetch(`${API_BASE_URL}/api/status`, { credentials: 'include', signal });
   await handleApiResponse(response);
   const data: StatusResponse = await response.json();
   const workers: { id: number; status: string }[] = [];
@@ -101,7 +109,7 @@ export const getSystemStatus = async (): Promise<SystemStatus> => {
     warnings: data.warnings || [],
     ...(connectAccount ? { connectAccount } : {}),
   };
-};
+});
 
 const isNonNegativeInteger = (value: unknown): value is number =>
   Number.isSafeInteger(value) && (value as number) >= 0;
@@ -171,12 +179,20 @@ export const getQueueStats = async (): Promise<QueueStats> => {
 
 export interface GetTasksResponse { tasks: ApiTask[]; total?: number; offset?: number; limit?: number; }
 
-export const getTasks = async (
-  statusOrOptions: string | GetTasksOptions = 'all', limit = 50, offset = 0, repository = 'all', search = ''
+const normalizeGetTasksOptions = (
+  statusOrOptions: string | GetTasksOptions = 'all',
+  limit = 50,
+  offset = 0,
+  repository = 'all',
+  search = '',
+): GetTasksOptions => typeof statusOrOptions === 'object'
+  ? statusOrOptions
+  : { status: statusOrOptions, limit, offset, repository, search };
+
+const getTasksRequest = async (
+  options: GetTasksOptions,
+  signal?: AbortSignal,
 ): Promise<GetTasksResponse> => {
-  let options: GetTasksOptions;
-  if (typeof statusOrOptions === 'object') options = statusOrOptions;
-  else options = { status: statusOrOptions, limit, offset, repository, search };
   const params = new URLSearchParams({
     status: options.status || 'all', limit: (options.limit ?? 50).toString(),
     offset: (options.offset ?? 0).toString(), repository: options.repository || 'all'
@@ -184,10 +200,24 @@ export const getTasks = async (
   if (options.search) params.append('search', options.search);
   if (options.forReview) params.append('forReview', 'true');
   if (options.excludeMerged) params.append('excludeMerged', 'true');
-  const response = await apiFetch(`${API_BASE_URL}/api/tasks?${params.toString()}`, { credentials: 'include' });
+  const response = await apiFetch(`${API_BASE_URL}/api/tasks?${params.toString()}`, {
+    credentials: 'include',
+    ...(signal ? { signal } : {}),
+  });
   await handleApiResponse(response);
   return response.json();
 };
+
+export const getTasks = (
+  statusOrOptions: string | GetTasksOptions = 'all', limit = 50, offset = 0, repository = 'all', search = ''
+): Promise<GetTasksResponse> => getTasksRequest(
+  normalizeGetTasksOptions(statusOrOptions, limit, offset, repository, search),
+);
+
+/** The onboarding existence query is distinct from list and review task reads. */
+export const getReadinessTaskExistence = (): Promise<GetTasksResponse> =>
+  shareInFlightApiRead('readiness-task-existence', signal =>
+    getTasksRequest({ status: 'all', limit: 1, offset: 0, repository: 'all' }, signal));
 
 export const getTaskHistory = async (taskId: string): Promise<unknown> => {
   const response = await apiFetch(`${API_BASE_URL}/api/task/${taskId}/history`, { credentials: 'include' });
@@ -208,11 +238,11 @@ export const getTaskLiveDetails = async (taskId: string): Promise<unknown> => {
   return response.json();
 };
 
-export const getInstanceCatalog = async (): Promise<InstanceCatalogResponse> => {
-  const response = await apiFetch(`${API_BASE_URL}/api/instance/catalog`, { credentials: 'include' });
+export const getInstanceCatalog = (): Promise<InstanceCatalogResponse> => shareInFlightApiRead('instance-catalog', async signal => {
+  const response = await apiFetch(`${API_BASE_URL}/api/instance/catalog`, { credentials: 'include', signal });
   await handleApiResponse(response);
   return response.json();
-};
+});
 
 export const fetchPrompt = async (promptPath: string): Promise<string> => {
   const response = await apiFetch(`${API_BASE_URL}${promptPath}`, { credentials: 'include' });
@@ -345,6 +375,7 @@ export const getCurrentUser = async (options: CurrentUserValidationOptions = {})
       responseStatus: response.status, classification, schemaAccepted: true,
     });
   }
+  setAuthenticatedApiReadIdentity(body.id);
   return body;
 };
 
@@ -411,6 +442,7 @@ const desktopLogout = async (): Promise<void> => {
 };
 
 export const logout = (): void | Promise<void> => {
+  setAuthenticatedApiReadIdentity(null);
   if (typeof window !== 'undefined' && window.proprDesktop) {
     desktopLogoutInFlight ??= desktopLogout().finally(() => { desktopLogoutInFlight = null; });
     return desktopLogoutInFlight;

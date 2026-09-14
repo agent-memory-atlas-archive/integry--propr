@@ -71,12 +71,27 @@ const fallbackResponses: Record<string, unknown> = {
   '/api/queue/stats': { active: 0, waiting: 0, completed: 0, failed: 0 },
   '/api/stats/generating-plans': { count: 0 },
   '/api/stats/repositories': { repositories: [] },
+  '/api/stats/tasks': {
+    dailyCounts: [], statusDistribution: [], avgProcessingTime: [],
+    summary: { total: 1, completed: 0, failed: 0 },
+  },
+  '/api/stats/overview': {
+    tasks: { completed: 0, planned: 1, pr_iterations_avg: 0, merged_prs: 0, total_followups: 0 },
+    usage: { total_tokens: 0, total_cost_usd: 0, models: {} },
+    system: { repos_indexed: 0 },
+  },
   '/api/planner/drafts': { drafts: [] },
   '/api/status': { status: 'ok' },
 };
 
+const scenarios = [
+  { name: 'dashboard', path: '/', chunk: 'Dashboard', listLimit: 20 },
+  { name: 'tasks', path: '/tasks', chunk: 'TasksPage', listLimit: 100 },
+] as const;
+
 for (const runtime of ['web', 'desktop'] as const) {
-  test(`${runtime} overlaps independent authenticated startup stages`, async ({ page }, testInfo) => {
+  for (const scenario of scenarios) {
+  test(`${runtime} ${scenario.name} deduplicates only same-scope startup reads`, async ({ page }, testInfo) => {
     await page.setViewportSize({ width: 1280, height: 800 });
     if (runtime === 'desktop') await installDesktopHarness(page);
 
@@ -101,7 +116,7 @@ for (const runtime of ['web', 'desktop'] as const) {
       timing[stage].ends.push(performance.now() - epoch);
     };
 
-    await page.route('**/assets/TasksPage-*.js', route => record('routeChunk', route));
+    await page.route(`**/assets/${scenario.chunk}-*.js`, route => record('routeChunk', route));
     await page.route('**/api/**', async route => {
       const url = new URL(route.request().url());
       apiRequests.push(`${url.pathname}${url.search}`);
@@ -111,7 +126,7 @@ for (const runtime of ['web', 'desktop'] as const) {
       return route.fulfill({ json: fallbackResponses[url.pathname] ?? {} });
     });
 
-    await page.goto('/tasks');
+    await page.goto(scenario.path);
     await expect(page.getByRole('table').getByText(task.title)).toBeVisible();
     const firstUsefulRenderMs = performance.now() - epoch;
     const browserResources = await page.evaluate(() => (
@@ -137,6 +152,28 @@ for (const runtime of ['web', 'desktop'] as const) {
     expect(firstUsefulDataStart).toBeGreaterThanOrEqual(timing.routeChunk.ends[0]);
     expect(apiRequests.filter(request => request === '/api/auth/demo-mode')).toHaveLength(1);
     expect(apiRequests.filter(request => request.startsWith('/api/auth/user'))).toHaveLength(1);
+    const taskRequests = apiRequests.filter(request => request.startsWith('/api/tasks?'));
+    const taskRequestParams = taskRequests.map(request => ({
+      request,
+      params: new URL(request, 'https://startup.propr.invalid').searchParams,
+    }));
+    const catalogRequests = apiRequests.filter(request => request === '/api/instance/catalog');
+    const statusRequests = apiRequests.filter(request => request === '/api/status');
+    const taskConsumers = {
+      list: taskRequestParams.filter(({ params }) => params.get('limit') === String(scenario.listLimit))
+        .map(({ request }) => request),
+      headerReview: taskRequestParams.filter(({ params }) => params.get('limit') === '30'
+        && params.get('forReview') === 'true' && params.get('excludeMerged') === 'true')
+        .map(({ request }) => request),
+      readinessExistence: taskRequestParams.filter(({ params }) => params.get('limit') === '1')
+        .map(({ request }) => request),
+    };
+    expect(catalogRequests).toHaveLength(1);
+    expect(statusRequests).toHaveLength(1);
+    expect(taskRequests).toHaveLength(3);
+    expect(taskConsumers.list).toHaveLength(1);
+    expect(taskConsumers.headerReview).toHaveLength(1);
+    expect(taskConsumers.readinessExistence).toHaveLength(1);
 
     const serialInjectedWaitMs = Object.values(delays).reduce((total, stage) => total + stage.total, 0);
     const overlappedInjectedWaitMs = Math.max(
@@ -150,10 +187,29 @@ for (const runtime of ['web', 'desktop'] as const) {
       timing.currentUser.ends[0],
       timing.routeChunk.ends[0],
     );
+    const baselineDuplicateReads = scenario.name === 'dashboard'
+      ? { instanceCatalog: 3, systemStatus: 2, readinessExistence: 2 }
+      : { instanceCatalog: 2, systemStatus: 2, readinessExistence: 1 };
+    const removedStartupReads = (baselineDuplicateReads.instanceCatalog - catalogRequests.length)
+      + (baselineDuplicateReads.systemStatus - statusRequests.length)
+      + (baselineDuplicateReads.readinessExistence - taskConsumers.readinessExistence.length);
     const measurement = {
       runtime,
+      route: scenario.name,
       conditions: delays,
       requestCountBeforeUsefulRender: apiRequests.length,
+      baselineRequestCountBeforeUsefulRender: apiRequests.length + removedStartupReads,
+      removedStartupReads,
+      baselineDuplicateReads,
+      sameScopeRequestCounts: {
+        instanceCatalog: catalogRequests.length,
+        systemStatus: statusRequests.length,
+      },
+      taskRequestConsumers: {
+        list: taskConsumers.list,
+        headerReview: taskConsumers.headerReview,
+        readinessExistence: taskConsumers.readinessExistence,
+      },
       criticalRequestCounts: {
         demoMode: timing.demoMode.starts.length,
         currentUser: timing.currentUser.starts.length,
@@ -174,12 +230,14 @@ for (const runtime of ['web', 'desktop'] as const) {
         'Playwright API delays represent response wait; declared Server-Timing separates the fixture server share.',
         'The static chunk delay occurs before route.continue(), so Chromium resource TTFB excludes that harness wait.',
         'Wall time includes local Chromium, bundle parsing, React work, and test routing overhead.',
+        'Task list, header review, and readiness existence are recorded as separate contracts and are not deduplicated with each other.',
       ],
     };
     console.log(`STARTUP_MEASUREMENT ${JSON.stringify(measurement)}`);
-    await testInfo.attach(`${runtime}-startup-measurement.json`, {
+    await testInfo.attach(`${runtime}-${scenario.name}-startup-measurement.json`, {
       body: JSON.stringify(measurement, null, 2),
       contentType: 'application/json',
     });
   });
+  }
 }

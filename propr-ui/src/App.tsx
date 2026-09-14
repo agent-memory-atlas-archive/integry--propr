@@ -22,6 +22,7 @@ import RouteChunkErrorBoundary from './components/RouteChunkErrorBoundary'
 import { ConnectAccountProvider } from './contexts/ConnectAccountContext'
 import { BrowserPushProvider } from './hooks/useBrowserPush'
 import { NotificationCenterProvider } from './contexts/NotificationCenterContext'
+import { SystemStatusProvider } from './contexts/SystemStatusContext'
 import { currentUiPathname, isDesktopRuntime, publicAssetUrl } from './config/runtimeMode'
 import { DesktopPresentationBoundary } from './desktop/DesktopPresentationBoundary'
 import { useCurrentUserBootstrap } from './hooks/useCurrentUserBootstrap'
@@ -172,6 +173,7 @@ const AppContent: React.FC = () => {
                   <Router>
                 <HostedFlowRouteSync />
                 {isDesktopRuntime() && <DesktopNativeNavigationObserver />}
+                <SystemStatusProvider disabled={currentUser === null}>
                 <ConnectAccountProvider disabled={isDemoMode || currentUser === null}>
                   <RouteChunkErrorBoundary>
                     <Suspense fallback={<LoadingSpinner />}>
@@ -294,6 +296,7 @@ const AppContent: React.FC = () => {
                     </Suspense>
                   </RouteChunkErrorBoundary>
                 </ConnectAccountProvider>
+                </SystemStatusProvider>
                   </Router>
                 </NotificationCenterProvider>
               </BrowserPushProvider>
