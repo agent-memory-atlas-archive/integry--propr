@@ -43,6 +43,33 @@ test('MCP list summaries report PR states only when supported by stored evidence
   }
 });
 
+test('MCP list elapsed time treats naive database timestamps as UTC on non-UTC hosts', () => {
+  const originalTZ = process.env.TZ;
+  const now = Date.UTC(2026, 8, 1, 12, 0, 5);
+  try {
+    for (const timezone of ['Etc/GMT+5', 'Etc/GMT-2']) {
+      process.env.TZ = timezone;
+      for (const startedAt of [
+        '2026-09-01 12:00:02', '2026-09-01T12:00:02',
+        '2026-09-01 12:00:02.000', '2026-09-01T12:00:02.000Z',
+        '2026-09-01T07:00:02-05:00', '2026-09-01T14:00:02+02:00',
+        now - 3_000, new Date(now - 3_000),
+      ]) {
+        const row = { created_at: startedAt, started_at: startedAt };
+        assert.equal(summarizeTask({ ...row, state: 'processing' }, now).elapsed_ms, 3_000);
+        assert.equal(summarizeGoal(row, now).elapsed_ms, 3_000);
+        assert.equal(summarizePlan(row, [], now).elapsed_ms, 3_000);
+      }
+      assert.equal(summarizeGoal({
+        started_at: '2026-09-01T12:00:02Z', completed_at: '2026-09-01 12:00:05',
+      }, now).elapsed_ms, 3_000);
+    }
+  } finally {
+    if (originalTZ === undefined) delete process.env.TZ;
+    else process.env.TZ = originalTZ;
+  }
+});
+
 test('MCP list summaries bound natural-language fields and tolerate legacy task metadata', () => {
   const summary = compactText(`  ${'long context '.repeat(40)}  `)!;
   assert.ok(summary.length <= 240);
@@ -53,7 +80,7 @@ test('MCP list summaries bound natural-language fields and tolerate legacy task 
   const task = summarizeTask({
     task_id: 'legacy-1', repository: 'acme/repo', issue_number: 19, task_type: 'issue',
     initial_job_data: '{invalid', created_at: '2026-09-01 12:00:00', state: 'pending',
-  }, new Date('2026-09-01 12:00:05').getTime());
+  }, Date.UTC(2026, 8, 1, 12, 0, 5));
   assert.equal(task.title, 'Issue #19');
   assert.equal(task.elapsed_ms, 5_000);
 
@@ -64,7 +91,7 @@ test('MCP list summaries bound natural-language fields and tolerate legacy task 
   const plan = summarizePlan({
     draft_id: 'plan-1', repository: 'acme/repo', name: 'Bounded relations',
     status: 'pr_created', created_at: '2026-09-01 12:00:00', updated_at: '2026-09-01 12:00:05',
-  }, issues, new Date('2026-09-01 12:00:05').getTime());
+  }, issues, Date.UTC(2026, 8, 1, 12, 0, 5));
   assert.equal(plan.agent_model_count, 12);
   assert.equal((plan.agent_models as unknown[]).length, 8);
   assert.equal(plan.pull_request_count, 12);

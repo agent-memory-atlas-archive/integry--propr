@@ -63,8 +63,15 @@ function positiveInteger(...values: unknown[]): number | null {
 }
 
 function elapsedMilliseconds(start: unknown, end: unknown): number | null {
-  const startMs = new Date(start as string | number | Date).getTime();
-  const endMs = new Date(end as string | number | Date).getTime();
+  const parseTimestamp = (value: unknown): number => {
+    // Database timestamps without an offset are stored in UTC.
+    if (typeof value === 'string' && /^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(?:\.\d+)?$/.test(value)) {
+      value = `${value.replace(' ', 'T')}Z`;
+    }
+    return new Date(value as string | number | Date).getTime();
+  };
+  const startMs = parseTimestamp(start);
+  const endMs = parseTimestamp(end);
   if (!Number.isFinite(startMs) || !Number.isFinite(endMs)) return null;
   return Math.max(0, endMs - startMs);
 }
