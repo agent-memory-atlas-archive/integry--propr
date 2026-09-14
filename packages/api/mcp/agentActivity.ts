@@ -120,10 +120,10 @@ function checkpointNarration(value: unknown): string | null {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
   const checkpoint = value as { checkpointReady?: unknown; message?: unknown; summary?: unknown };
   if (checkpoint.checkpointReady !== true || typeof checkpoint.message !== 'string') return null;
-  const summary = typeof checkpoint.summary === 'string' && checkpoint.summary.trim()
-    ? ` ${checkpoint.summary.trim()}`
-    : '';
-  return `Checkpoint ready: ${checkpoint.message.trim()}.${summary}`;
+  const message = compactNarration(checkpoint.message);
+  if (!message) return null;
+  const summary = typeof checkpoint.summary === 'string' ? compactNarration(checkpoint.summary) : null;
+  return `Checkpoint ready: ${message}.${summary ? ` ${summary}` : ''}`;
 }
 
 function withoutFencedPayloads(content: string): string {

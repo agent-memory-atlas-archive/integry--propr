@@ -301,6 +301,17 @@ test('activity removes fenced payloads and retains bracket-prefixed prose in liv
     ['```json\n{"checkpointReady":true,"message":"Parser updated","summary":"Tests passed."}\n```',
       'Checkpoint ready: Parser updated. Tests passed.'],
     ['{"checkpointReady":true,"message":"Parser updated"}', 'Checkpoint ready: Parser updated.'],
+    ...[
+      ['Parser updated', '~~~ts\nconst raw = 1;\n~~~', 'Checkpoint ready: Parser updated.'],
+      ['Parser updated\n```ts\nconst raw = 1;\n```', 'Tests passed.\n~~~ts\nconst raw = 2;\n~~~',
+        'Checkpoint ready: Parser updated. Tests passed.'],
+      ['Parser updated', '{"raw":"payload"}', 'Checkpoint ready: Parser updated.'],
+      ['```ts\nconst raw = 1;\n```', 'Tests passed.', null],
+      ['{"raw":"payload"}', 'Tests passed.', null],
+    ].flatMap(([message, summary, expected]): Array<[string, string | null]> => {
+      const checkpoint = JSON.stringify({ checkpointReady: true, message, summary });
+      return [[checkpoint, expected], [`\`\`\`json\n${checkpoint}\n\`\`\``, expected]];
+    }),
     ['{"raw":"payload"}', null],
     ['["raw", "payload"]', null],
     ['[{"unfinished":', null],
