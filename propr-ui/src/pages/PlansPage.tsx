@@ -8,6 +8,7 @@ import { RepositorySelector, type RepoOption } from '../components/RepositorySel
 import { EmptyState, PlansTable, PaginationControls } from './PlansPageComponents';
 import { useSocket } from '../contexts/useSocket';
 import type { DraftUpdatePayload } from '@propr/shared';
+import { useLiveRefreshScheduler } from '../hooks/useLiveRefreshScheduler';
 
 const DEFAULT_PAGE_SIZE = 50;
 
@@ -39,6 +40,7 @@ const PlansPage: React.FC = () => {
   // All repositories for filter dropdown (fetched once without filters)
   const [allRepositories, setAllRepositories] = useState<{ repo: string; count: number }[]>([]);
   const [totalAllDrafts, setTotalAllDrafts] = useState(0);
+  const liveDraftStatusesRef = useRef<Map<string, string>>(new Map());
 
   // Handler to navigate directly to new plan studio
   const handleNewPlan = useCallback(() => {
@@ -105,6 +107,21 @@ const PlansPage: React.FC = () => {
     }
   }, [debouncedSearch]);
 
+  useEffect(() => {
+    for (const draft of drafts) liveDraftStatusesRef.current.set(draft.draft_id, draft.status);
+  }, [drafts]);
+
+  const refreshLiveDrafts = useCallback(async () => {
+    await Promise.all([
+      loadDrafts(currentPage, repoFilter, statusFilter, false),
+      loadAllRepositories(),
+    ]);
+  }, [currentPage, loadAllRepositories, loadDrafts, repoFilter, statusFilter]);
+  const scheduleLiveRefresh = useLiveRefreshScheduler({
+    isConnected,
+    refresh: refreshLiveDrafts,
+  });
+
   // Initial load of all repositories for filter dropdown
   useEffect(() => {
     loadAllRepositories();
@@ -145,11 +162,11 @@ const PlansPage: React.FC = () => {
   }, [searchQuery, debouncedSearch, setSearchParams]);
 
   // Handle draft update from WebSocket - skip step-level generation progress events
-  const handleDraftUpdate = useCallback(async (payload: DraftUpdatePayload) => {
+  const handleDraftUpdate = useCallback((payload: DraftUpdatePayload) => {
     // Skip step-level churn during generation, but allow the initial transition into generating
     if (payload.draftStatus === 'generating') {
-      const existingDraft = drafts.find(d => d.draft_id === payload.draftId);
-      if (!existingDraft || existingDraft.status === 'generating') return;
+      const existingStatus = liveDraftStatusesRef.current.get(payload.draftId);
+      if (!existingStatus || existingStatus === 'generating') return;
     }
 
     const currentPageDraft = drafts.find(d => d.draft_id === payload.draftId);
@@ -159,12 +176,13 @@ const PlansPage: React.FC = () => {
     const couldAffectCurrentView = !isOnCurrentPage && !!payload.draftStatus && matchesStatusFilter;
 
     if ((isOnCurrentPage && matchesRepositoryFilter) || couldAffectCurrentView) {
-      await Promise.all([
-        loadDrafts(currentPage, repoFilter, statusFilter, false),
-        payload.draftStatus ? loadAllRepositories() : Promise.resolve(),
-      ]);
+      if (payload.draftStatus === liveDraftStatusesRef.current.get(payload.draftId)) return;
+      if (payload.draftStatus) {
+        liveDraftStatusesRef.current.set(payload.draftId, payload.draftStatus);
+      }
+      scheduleLiveRefresh();
     }
-  }, [currentPage, repoFilter, statusFilter, drafts, loadAllRepositories, loadDrafts]);
+  }, [repoFilter, statusFilter, drafts, scheduleLiveRefresh]);
 
   // Subscribe to WebSocket events for draft updates
   useEffect(() => {

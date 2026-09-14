@@ -1,5 +1,5 @@
 import { useEffect } from 'react';
-import { TASK_UPDATE } from '@propr/shared';
+import { TASK_LIVE_UPDATE, TASK_UPDATE } from '@propr/shared';
 import { act, cleanup, render } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { SocketProvider } from './SocketProvider';
@@ -233,6 +233,35 @@ describe('SocketProvider', () => {
     expect(observed).not.toHaveBeenCalled();
     act(() => { sockets[1].handlers.get(TASK_UPDATE)?.({ eventType: TASK_UPDATE } as never); });
     expect(observed).toHaveBeenCalledOnce();
+  });
+
+  it('delivers live events without logging their potentially large payload', () => {
+    const observed = vi.fn();
+    const log = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    const Observer = () => {
+      const { onTaskLiveUpdate } = useSocket();
+      useEffect(() => onTaskLiveUpdate(observed), [onTaskLiveUpdate]);
+      return null;
+    };
+    const payload = {
+      eventType: TASK_LIVE_UPDATE,
+      taskId: 'task-1',
+      events: [{ type: 'tool_result', result: 'large output' }],
+      todos: [],
+      currentTask: null,
+      tokenUsage: null,
+      timestamp: '2026-09-14T08:45:00.000Z',
+    };
+    state.scope = scope('profile-a', 'AAAAAAAAAAAAAAAAAAAAAA');
+    render(<SocketProvider><Observer /></SocketProvider>);
+
+    act(() => { sockets[0].handlers.get(TASK_LIVE_UPDATE)?.(payload); });
+
+    expect(observed).toHaveBeenCalledWith(payload);
+    expect(log.mock.calls.find(call => String(call[0]).startsWith(
+      '[SocketContext] Received task live update:',
+    ))).toEqual(['[SocketContext] Received task live update: 1 event(s)']);
+    log.mockRestore();
   });
 
   it('fully detaches listeners and disconnects on unmount', () => {

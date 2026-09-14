@@ -222,23 +222,13 @@ const computeSummaryMessage = (filteredEvents: LiveEvent[], lastThought: string 
 
 // Compute events with their previous tool_use reference for context
 const computeEventsWithContext = (
-  filteredEvents: LiveEvent[],
-  allEvents: LiveEvent[]
+  events: LiveEvent[],
 ): Array<{ event: LiveEvent; prevToolUse?: LiveEvent; originalIndex: number }> => {
-  return filteredEvents.map((event, index) => {
-    let prevToolUse: LiveEvent | undefined;
-    for (let i = index - 1; i >= 0; i--) {
-      if (filteredEvents[i].type === 'tool_use') {
-        prevToolUse = filteredEvents[i];
-        break;
-      }
-    }
-
-    return {
-      event,
-      prevToolUse,
-      originalIndex: allEvents.indexOf(event)
-    };
+  let previousToolUse: LiveEvent | undefined;
+  return events.map((event, originalIndex) => {
+    const eventWithContext = { event, prevToolUse: previousToolUse, originalIndex };
+    if (event.type === 'tool_use') previousToolUse = event;
+    return eventWithContext;
   });
 };
 
@@ -253,17 +243,18 @@ const ExecutionEventLog: React.FC<ExecutionEventLogProps> = ({
   // Note: isTaskActive is still passed for potential future use
   void _isTaskActive;
 
-  // No filtering - show all events
-  const filteredEvents = events;
-
   const summaryMessage = useMemo(
-    () => computeSummaryMessage(filteredEvents, lastThought),
-    [filteredEvents, lastThought]
+    () => computeSummaryMessage(events, lastThought),
+    [events, lastThought]
   );
 
+  // The log starts collapsed, so do not materialize its potentially large
+  // Markdown and syntax-highlighted history until the user opens it. Live
+  // socket updates otherwise rebuild the entire hidden tree on every event and
+  // can block unrelated response handling on the browser main thread.
   const eventsWithContext = useMemo(
-    () => computeEventsWithContext(filteredEvents, events),
-    [filteredEvents, events]
+    () => collapsed ? [] : computeEventsWithContext(events),
+    [collapsed, events]
   );
 
   if (events.length === 0) {
