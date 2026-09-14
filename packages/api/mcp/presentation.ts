@@ -35,9 +35,14 @@ function mutationSummary(tool: McpTool, data: Args, result: Args, targets: Resul
   return summary;
 }
 
+function agentActivitySummary(args: Args, result: Args): string {
+  const target = args.goalId ? `goal ${args.goalId}` : `task ${args.taskId}`;
+  return `${result.activity?.length || 0} recent activity entries for ${target}.`;
+}
+
 function readSummary(tool: McpTool, args: Args, result: Args): string {
   if (tool.name === 'get_task') return `Task ${args.taskId}: ${result.latestEvent?.state || 'no execution state yet'}.`;
-  if (tool.name === 'get_agent_activity') return `${result.activity?.length || 0} recent activity entries for ${args.goalId ? `goal ${args.goalId}` : `task ${args.taskId}`}.`;
+  if (tool.name === 'get_agent_activity') return agentActivitySummary(args, result);
   if (tool.name === 'get_plan') return `${result.name || 'Plan'}: ${result.status}, revision ${result.mcp_revision}.`;
   if (tool.name === 'get_goal') return `${result.goal?.title || 'Goal'}: ${result.goal?.resultState || result.goal?.desiredState || 'state unavailable'}.`;
   if (tool.name === 'get_connection') return `Connected as ${result.identity.username} to ${result.instanceId}. ${result.scopes.join(', ')} permissions.`;
