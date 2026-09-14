@@ -291,7 +291,7 @@ async function parseActiveExecutionOutput(redisClient: RedisClientType, db: Knex
     };
   }
   const parsedOutput = parseStoredOutputContent(output);
-  const result = parsedOutput.parsed ?? parsedOutput.rawFallback;
+  const result = projectStoredOutputResult(parsedOutput);
   return result
     ? withStableResultEventIds(taskId, 'redis', executionStartTimestamp ?? taskId, result)
     : null;
@@ -325,7 +325,14 @@ async function parsePersistedGoalOutput(db: Knex, taskId: string): Promise<Conve
   });
   if (records.length === 0) return null;
   const stored = parseStoredOutputContent(records.join('\n'));
-  return stored.parsed ?? stored.rawFallback;
+  return projectStoredOutputResult(stored);
+}
+function projectStoredOutputResult(stored: ParsedStoredOutput): ConversationResult | null {
+  if (stored.parsed) return stored.parsed;
+  return stored.rawFallback ? {
+    ...stored.rawFallback,
+    events: stored.rawFallback.events.map(event => ({ ...event, rawFallback: true })),
+  } : null;
 }
 export function parseStoredOutputContent(output: string): ParsedStoredOutput {
   if (!output.trim()) return { parsed: null, rawFallback: null, format: 'unknown' };

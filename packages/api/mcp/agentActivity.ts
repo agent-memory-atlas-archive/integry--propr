@@ -151,7 +151,7 @@ function projectNarration(
   includeReasoningSummaries = false,
 ): IndexedActivity[] {
   const projected = events.flatMap((event, index): IndexedActivity[] => {
-    if (!['thought', 'message'].includes(String(event.type))) return [];
+    if (!['thought', 'message'].includes(String(event.type)) || event.rawFallback === true) return [];
     if (event.internalReasoning === true && !(includeReasoningSummaries && event.reasoningSummary === true)) return [];
     const message = typeof event.content === 'string' ? compactNarration(event.content) : null;
     const timestamp = isoTimestamp(event.timestamp, fallbackTimestamp);

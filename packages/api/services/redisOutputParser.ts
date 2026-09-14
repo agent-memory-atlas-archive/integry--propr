@@ -5,6 +5,7 @@ import {
   normalizeOpenCodeTimestamp,
   normalizeOpenCodeUsage,
 } from '@propr/core';
+import { extractOpenCodeAssistantSegments } from '../routes/liveDetailsOpenCodeParser.js';
 import { parseVibeTranscriptOutput, processVibeEvent } from './redisOutputParserVibe.js';
 
 /** Result from parsing Redis output */
@@ -402,18 +403,18 @@ function processOpenCodeEvent(
 ): boolean {
   if (!isOpenCodeEvent(event)) return false;
   const type = event.type?.toLowerCase();
-  const assistantText = extractOpenCodeAssistantText(event);
-  if (assistantText) {
+  for (const { content: assistantText, internalReasoning } of extractOpenCodeAssistantSegments(event, extractOpenCodeAssistantText)) {
     if (type === 'delta' || event.part || event.parts?.length) {
+      if (state.pendingAssistantInternalReasoning !== internalReasoning) flushPendingMessage(state, timestamp);
       state.pendingAssistantMessage += assistantText;
       state.pendingAssistantTimestamp ??= timestamp;
-      state.pendingAssistantInternalReasoning ||= hasOpenCodeReasoning(event);
+      state.pendingAssistantInternalReasoning = internalReasoning;
     } else {
       flushPendingMessage(state, timestamp);
       state.events.push({
         type: 'thought' as const,
         content: assistantText,
-        ...(hasOpenCodeReasoning(event) ? { internalReasoning: true } : {}),
+        ...(internalReasoning ? { internalReasoning: true } : {}),
         timestamp,
       });
     }
@@ -558,12 +559,6 @@ function addOpenCodeRedisUsage(state: ParseState, usage: OpenCodeRedisEventUsage
 
 function hasOpenCodeSessionId(event: OpenCodeRedisEvent): boolean {
   return Boolean(event.sessionID || event.sessionId || event.session_id);
-}
-
-function hasOpenCodeReasoning(event: OpenCodeRedisEvent): boolean {
-  if (event.type?.toLowerCase() === 'reasoning') return true;
-  const parts = [event.part, ...(event.parts ?? []), ...(event.message?.parts ?? [])];
-  return parts.some(part => part?.type?.toLowerCase() === 'reasoning');
 }
 
 interface OpenCodeRedisToolTracker {

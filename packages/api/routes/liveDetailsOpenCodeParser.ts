@@ -37,16 +37,16 @@ export function parseOpenCodeOutputToConversationResult(output: string): Convers
   };
   for (const event of parsed.conversationLog) {
     const eventTimestamp = getOpenCodeEventTimestamp(event, timestamp);
-    const assistantMessage = extractOpenCodeAssistantMessage(event);
-    if (assistantMessage) {
+    for (const { content: assistantMessage, internalReasoning } of extractOpenCodeAssistantSegments(event)) {
       if (isOpenCodeStreamingTextEvent(event)) {
+        if (pendingAssistantInternalReasoning !== internalReasoning) flushPendingAssistantMessage(eventTimestamp);
         pendingAssistantMessage += assistantMessage;
         pendingAssistantTimestamp ??= eventTimestamp;
-        pendingAssistantInternalReasoning ||= hasOpenCodeReasoning(event);
+        pendingAssistantInternalReasoning = internalReasoning;
       } else {
         flushPendingAssistantMessage(eventTimestamp);
         hasAssistantMessageEvents = true;
-        events.push(buildOpenCodeAssistantTextEvent(event, assistantMessage, eventTimestamp));
+        events.push(buildOpenCodeAssistantTextEvent(event, assistantMessage, eventTimestamp, internalReasoning));
       }
     }
     if (event.type?.toLowerCase() === 'error' || event.error) {
@@ -60,7 +60,8 @@ export function parseOpenCodeOutputToConversationResult(output: string): Convers
     }
   }
   flushPendingAssistantMessage(timestamp);
-  if (!hasAssistantMessageEvents && parsed.summary) events.push({ type: 'thought', content: parsed.summary, timestamp });
+  // Without recognized assistant events, the summary can contain unparsed stdout.
+  if (!hasAssistantMessageEvents && parsed.summary) events.push({ type: 'thought', content: parsed.summary, rawFallback: true, timestamp });
   if (parsed.error && !events.some(event => event.type === 'tool_result' && event.result === parsed.error)) {
     events.push({ type: 'tool_result', result: parsed.error, isError: true, timestamp });
   }
@@ -68,17 +69,68 @@ export function parseOpenCodeOutputToConversationResult(output: string): Convers
   return events.length || tokenUsage ? { events, todos: [], currentTask: null, tokenUsage } : null;
 }
 
-function buildOpenCodeAssistantTextEvent(event: OpenCodeEvent, content: string, timestamp: string): Record<string, unknown> {
+function buildOpenCodeAssistantTextEvent(event: OpenCodeEvent, content: string, timestamp: string, internalReasoning: boolean): Record<string, unknown> {
   const type = event.message?.role === 'assistant' && event.type?.toLowerCase() === 'message'
     ? 'message'
     : 'thought';
-  return { type, content, ...(hasOpenCodeReasoning(event) ? { internalReasoning: true } : {}), timestamp };
+  return { type, content, ...(internalReasoning ? { internalReasoning: true } : {}), timestamp };
 }
 
-function hasOpenCodeReasoning(event: OpenCodeEvent): boolean {
-  if (event.type?.toLowerCase() === 'reasoning') return true;
-  const parts = [event.part, ...(event.parts ?? []), ...(event.message?.parts ?? [])];
-  return parts.some(part => part?.type?.toLowerCase() === 'reasoning');
+interface OpenCodeAssistantSegment {
+  content: string;
+  internalReasoning: boolean;
+}
+
+// Classify the text actually selected by the parser, rather than marking an
+// entire envelope as private when just one of its parts contains reasoning.
+export function extractOpenCodeAssistantSegments(
+  event: OpenCodeEvent,
+  extractText: (event: OpenCodeEvent) => string | null = extractOpenCodeAssistantMessage,
+): OpenCodeAssistantSegment[] {
+  const messageParts = event.message?.role === 'assistant' && event.message.parts?.length
+    ? event.message.parts : null;
+  const parts = messageParts ?? getOpenCodeEnvelopeTextParts(event);
+  const textParts = parts.filter(part => buildOpenCodeTextCandidate(part))
+    .map(part => !part.type && event.type?.toLowerCase() === 'reasoning' ? { ...part, type: 'reasoning' } : part);
+  if (!textParts.some(part => part.type?.toLowerCase() === 'reasoning')) {
+    const content = extractText(messageParts ? { ...event, part: undefined, parts: undefined } : event);
+    return content ? [{ content, internalReasoning: !textParts.length && event.type?.toLowerCase() === 'reasoning' }] : [];
+  }
+
+  const segments = groupOpenCodeTextParts(textParts).flatMap(group => {
+    const content = extractText({
+      ...event,
+      part: undefined,
+      parts: messageParts ? undefined : group.parts,
+      message: messageParts ? { ...event.message, parts: group.parts } : event.message && { role: event.message.role },
+      response: undefined,
+      text: undefined,
+      delta: isOpenCodeStreamingTextEvent(event) ? '' : undefined,
+      content: undefined,
+    });
+    return content ? [{ content, internalReasoning: group.internalReasoning }] : [];
+  });
+  // Message/response text is public even beside reasoning parts.
+  if (event.response || (!messageParts && event.message?.role === 'assistant')) {
+    const content = extractText({
+      ...event, part: undefined, parts: undefined,
+      message: messageParts ? { role: event.message?.role } : event.message,
+      text: undefined, delta: undefined, content: undefined,
+    });
+    if (content) segments.push({ content, internalReasoning: false });
+  }
+  return segments;
+}
+
+function groupOpenCodeTextParts(textParts: OpenCodeTextPart[]) {
+  const groups: Array<{ parts: OpenCodeTextPart[]; internalReasoning: boolean }> = [];
+  for (const part of textParts) {
+    const internalReasoning = part.type?.toLowerCase() === 'reasoning';
+    const previous = groups.at(-1);
+    if (previous?.internalReasoning === internalReasoning) previous.parts.push(part);
+    else groups.push({ parts: [part], internalReasoning });
+  }
+  return groups;
 }
 
 function getOpenCodeEventTimestamp(event: OpenCodeEvent, fallback: string): string {
