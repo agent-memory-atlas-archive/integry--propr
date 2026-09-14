@@ -205,7 +205,7 @@ async function executeProcessing(params: ExecuteProcessingParams): Promise<JobRe
         correlatedLogger,
     });
     let commentHistory = job.data.ultrafixMeta ? '' : buildCommentHistory(commentsByTime, prData!, correlationId);
-    commentHistory += await loadOriginalContributionDiscussion(state.octokit, context);
+    if (!job.data.ultrafixMeta) commentHistory += await loadOriginalContributionDiscussion(state.octokit, context);
 
     const {
         isFixMode,

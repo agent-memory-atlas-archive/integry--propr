@@ -49,7 +49,8 @@ export async function findPRContinuation(ref: PullRequestReference, octokit?: Oc
     const record = reservations.find(candidate =>
         pr.head.repo?.full_name.toLowerCase() === candidate.repository &&
         pr.base.ref === candidate.base_branch &&
-        (pr.head.ref === candidate.branch_name || pr.body?.includes(`<!-- propr-continuation:${candidate.source_pr}:${candidate.source_sha} -->`)));
+        pr.head.ref === candidate.branch_name &&
+        pr.body?.includes(`<!-- propr-continuation:${candidate.source_pr}:${candidate.source_sha} -->`));
     if (!record) return;
     await db('pr_continuations').where({ repository: record.repository, source_pr: record.source_pr })
         .whereNull('continuation_pr').update({ continuation_pr: pr.number, continuation_url: pr.html_url });

@@ -56,6 +56,9 @@ let prompts: string[] = [];
 let produced: string[] = [];
 let completionBodies: string[] = [];
 let failCompletion = false;
+let failTaskCompletion = false;
+const missingCommentIds = new Set<number>();
+let promptHistories: string[] = [];
 let partialResult = false;
 let completedCheckHeads = new Set<string>();
 let deferredReviews: Array<{ pr: number; nextAction: string; reason: string }> = [];
@@ -66,6 +69,7 @@ const taskStates = new Map<string, string>();
 const stateManager = {
     getTaskState: async (taskId: string) => taskStates.has(taskId) ? { state: taskStates.get(taskId) } : null, updateHistoryMetadata: noOp,
     updateTaskState: async (taskId: string, state: string, metadata: any) => {
+        if (state === 'completed' && failTaskCompletion) throw new Error('Task completion failed');
         if (taskStates.get(taskId) === 'failed' && !(state === 'processing' && metadata.isRetry === true)) return;
         taskStates.set(taskId, state);
         if (state === 'completed') { completions.push({ taskId, metadata }); events.push(`complete:${taskId}`); }
@@ -195,17 +199,18 @@ const octokit = {
             if (options.pull_number === 42) return { data: { ...source, labels: [{ name: 'propr' }] } };
             const pr = prs[0];
             if (pr.state === 'open') pr.head.sha = git(repoPath('upstream'), 'rev-parse', pr.head.ref);
-            return { data: pr };
+            return { data: { ...pr, labels: [{ name: 'propr' }] } };
         }
         if (endpoint.startsWith('PATCH')) {
-            if (failCompletion) throw new Error('Completion comment failed');
+            if (missingCommentIds.has(options.comment_id)) throw Object.assign(new Error('Not Found'), { status: 404 });
+            if (failCompletion) throw Object.assign(new Error('Completion comment failed'), { status: 503 });
             completionBodies.push(options.body);
             return { data: { html_url: `https://github.com/upstream/project/pull/42#issuecomment-${options.comment_id}`, body: options.body } };
         }
         if (endpoint.endsWith('/comments') && endpoint.startsWith('POST')) {
-            assert.equal(options.issue_number, 42);
+            assert.ok([42, 100].includes(options.issue_number));
             if (failComment) throw new Error('Comment network error');
-            const comment = { id: comments.length + 1, body: options.body, user: { type: 'Bot' } };
+            const comment = { id: comments.length + 1, html_url: `https://github.com/upstream/project/pull/${options.issue_number}#issuecomment-${comments.length + 1}`, body: options.body, user: { type: 'Bot' } };
             comments.push(comment);
             return { data: comment };
         }
@@ -216,13 +221,13 @@ const modules: Record<string, Record<string, unknown>> = {
     prCommentJobHelpers: {
         validateAndFilterComments: async (comments: unknown) => skipValidation ? [] : comments,
         filterUnprocessedComments: (comments: unknown) => comments,
-        fetchLinkedIssueContext: async () => ({ context: '' }), buildCommentHistory: () => '',
+        fetchLinkedIssueContext: async () => ({ context: '' }), buildCommentHistory: () => 'Prior review findings and scores',
         updateTaskTitleForPR: noOp, resolvePrReasoningLevelOverride: () => undefined,
     },
     issueJobHelpers: { localizeContentImages: async (body: string) => body },
     prCommentJobUtils: {
         buildCombinedComment: (comments: Array<{ body: string }>) => ({ combinedCommentBody: comments.map(c => c.body).join('\n'), commentAuthors: ['contributor'] }),
-        extractModelFromLabels: () => 'model', fetchAllComments: async () => [], buildPrompt: ({ combinedCommentBody }: { combinedCommentBody: string }) => combinedCommentBody,
+        extractModelFromLabels: () => 'model', fetchAllComments: async () => [], buildPrompt: ({ combinedCommentBody, commentHistory }: { combinedCommentBody: string; commentHistory: string }) => { promptHistories.push(commentHistory); return combinedCommentBody; },
         handleJobError: async (_error: unknown, job: { id: string }) => { taskStates.set(job.id, 'failed'); },
         cleanupJob: async ({ worktreeInfo, lockKey }: { worktreeInfo?: { worktreePath: string }; lockKey: string }) => { heldLocks.delete(lockKey); if (worktreeInfo) await rm(worktreeInfo.worktreePath, { recursive: true, force: true }); }, buildCommitMessage: () => 'Implementation', toClaudeResult: noOp, buildStartingWorkCommentBody: () => 'Starting work',
     },
@@ -267,6 +272,7 @@ const job = (id = 'task-1', commentId = 5, body = 'Original instructions') => ({
 const run = (request = job()) => processPullRequestCommentJob(request as never);
 const denial = () => new Error('remote: Write access to repository not granted. fatal: HTTP 403');
 beforeEach(async () => {
+    missingCommentIds.clear(); failTaskCompletion = false; promptHistories = [];
     heldLocks.clear(); losePushResponse = false; comparisonError = undefined; onPRCreated = undefined;
     completedCheckHeads = new Set([sourceSha]); deferredReviews = [];
     taskStates.clear(); pendingComments = []; restoredComments = []; skipValidation = false;
@@ -599,5 +605,65 @@ for (const verification of ['missing commit', 'unrelated head', 'API failure']) 
         assert.equal(retained.publication_completion, saved.publication_completion);
         assert.equal(prompts.length, 1);
         assert.equal(completions.length, 0);
+    });
+}
+
+for (const duringRecovery of [false, true]) {
+    test(`deleted starting comment is replaced and retained for completion retry (recovery: ${duringRecovery})`, async () => {
+        if (duringRecovery) {
+            continuationPushError = new Error('Connection timed out');
+            await assert.rejects(run(), /Connection timed out/);
+            await assertSavedCheckpoint();
+            continuationPushError = undefined;
+        }
+        missingCommentIds.add(1);
+        failTaskCompletion = true;
+        await assert.rejects(run(), /Task completion failed/);
+        const saved = JSON.parse((await findPRContinuation(ref))!.publication_completion!);
+        assert.notEqual(saved.startingWorkComment.data.id, 1);
+        const replacementId = saved.startingWorkComment.data.id;
+        const replacements = () => calls.filter(c => c.operation.startsWith('POST') && c.operation.endsWith('/comments') && (c.args as any).body.includes('Saved agent summary'));
+        assert.equal(replacements().length, 1);
+        assert.equal((replacements()[0].args as any).issue_number, 42);
+        assert.match(saved.startingWorkComment.data.html_url, /pull\/42#issuecomment-/);
+        failTaskCompletion = false;
+        assert.equal((await run()).status, 'complete');
+        assert.equal(replacements().length, 1);
+        assert.ok(calls.some(c => c.operation.startsWith('PATCH') && (c.args as any).comment_id === replacementId));
+        assert.equal(prompts.length, 1);
+        assert.equal(taskStates.get('task-1'), 'completed');
+        assert.equal((await findPRContinuation(ref))!.publication_completion, null);
+    });
+}
+
+for (const requestPR of [42, 100]) {
+    test(`review on PR ${requestPR} recovers a deleted completion target on the originating PR`, async () => {
+        failCompletion = true;
+        await assert.rejects(run(), /Completion comment failed/);
+        assert.equal(comments.length, 2, 'transient PATCH failure must not create a replacement');
+        missingCommentIds.add(1);
+        failCompletion = false;
+        const review = job('new-review', 6, '/review');
+        review.data.pullRequestNumber = requestPR;
+        review.data.commandMode = 'review';
+        await run(review);
+        const replacement = calls.find(c => c.operation.startsWith('POST') && c.operation.endsWith('/comments') && (c.args as any).body.includes('Saved agent summary'));
+        assert.equal((replacement!.args as any).issue_number, 42);
+        assert.equal(taskStates.get('task-1'), 'completed');
+        assert.equal((await findPRContinuation(ref))!.publication_completion, null);
+        assert.equal(prompts.length, 1);
+    });
+}
+
+for (const automatic of [false, true]) {
+    test(`continuation implementation includes original discussion only outside Ultrafix (automatic: ${automatic})`, async () => {
+        await run();
+        const request = job('continuation-task', 6, 'Selected findings');
+        request.data.pullRequestNumber = 100;
+        if (automatic) Object.assign(request.data, { ultrafixMeta: { mode: 'ultrafix', instructions: 'Selected findings' } });
+        await run(request);
+        assert.equal(promptHistories.length, 2);
+        if (automatic) assert.equal(promptHistories[1], '');
+        else assert.match(promptHistories[1], /Original contribution discussion.*\nPrior review findings and scores/s);
     });
 }

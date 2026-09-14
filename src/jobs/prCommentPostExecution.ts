@@ -33,6 +33,7 @@ import {
     publishPullRequestCommentVisualPreviews,
 } from '../github/visualPreviewAttachments.js';
 import type { PullRequestPublication } from './prPublication.js';
+import { savePublicationCheckpoint } from './prContinuation.js';
 
 interface PostExecutionState {
     octokit: Awaited<ReturnType<typeof getAuthenticatedOctokit>> | null;
@@ -160,6 +161,29 @@ interface CompletionCommentPublicationOptions {
     visualPreviewEvidence?: Awaited<ReturnType<typeof prepareVisualPreviewEvidence>>['evidence'];
 }
 
+async function updateCompletionComment(state: ReadyPostExecutionState, context: PostExecutionContext, body: string) {
+    const { repoOwner: owner, repoName: repo, pullRequestNumber: issue_number } = context;
+    try {
+        return await state.octokit.request('PATCH /repos/{owner}/{repo}/issues/comments/{comment_id}', {
+            owner, repo, comment_id: state.startingWorkComment.data.id, body,
+        });
+    } catch (error) {
+        if ((error as { status?: number }).status !== 404) throw error;
+        const replacement = await state.octokit.request('POST /repos/{owner}/{repo}/issues/{issue_number}/comments', {
+            owner, repo, issue_number, body,
+        });
+        state.startingWorkComment = { data: { id: replacement.data.id, html_url: replacement.data.html_url } };
+        const completion = context.publication.pendingCompletion;
+        if (completion) {
+            completion.startingWorkComment = state.startingWorkComment;
+            const record = context.publication.continuation!;
+            // Retain the replacement before later completion steps can fail and retry.
+            await savePublicationCheckpoint(record, record.publication_bundle, JSON.stringify(completion));
+        }
+        return replacement;
+    }
+}
+
 async function publishCompletionComment(options: CompletionCommentPublicationOptions): Promise<{ data: { html_url: string; body?: string } }> {
     const { state, context, commitResult, changesSummary, commitMessage, llm, taskUrl, unprocessedReviewComments, visualPreviewEvidence = { assets: [], toolSuggestions: [] } } = options;
     const { repoOwner, repoName, pullRequestNumber, correlatedLogger } = context;
@@ -184,12 +208,7 @@ async function publishCompletionComment(options: CompletionCommentPublicationOpt
     const prCommentBody = appendVisualPreviewSection(prCommentTemplate, visualPreviewSection);
 
     if (visualPreviewEvidence.assets.length === 0) {
-        return state.octokit.request('PATCH /repos/{owner}/{repo}/issues/comments/{comment_id}', {
-            owner: repoOwner,
-            repo: repoName,
-            comment_id: state.startingWorkComment.data.id,
-            body: prCommentBody
-        }) as Promise<{ data: { html_url: string; body?: string } }>;
+        return updateCompletionComment(state, context, prCommentBody);
     }
 
     if (!state.worktreeInfo) throw new Error('Cannot publish visual previews without a worktree');
@@ -207,15 +226,12 @@ async function publishCompletionComment(options: CompletionCommentPublicationOpt
         return { data: published };
     } catch (previewError) {
         correlatedLogger.warn({ pullRequestNumber, error: (previewError as Error).message }, 'Could not upload visual previews; publishing a text-only explanation');
-        return state.octokit.request('PATCH /repos/{owner}/{repo}/issues/comments/{comment_id}', {
-            owner: repoOwner,
-            repo: repoName,
-            comment_id: state.startingWorkComment.data.id,
-            body: appendVisualPreviewSection(prCommentTemplate, renderVisualPreviewUploadFailureSection(
+        return updateCompletionComment(state, context,
+            appendVisualPreviewSection(prCommentTemplate, renderVisualPreviewUploadFailureSection(
                 visualPreviewEvidence,
                 { authenticationFailure: isVisualPreviewUploadAuthenticationError(previewError) }
             ))
-        }) as Promise<{ data: { html_url: string; body?: string } }>;
+        );
     }
 }
 

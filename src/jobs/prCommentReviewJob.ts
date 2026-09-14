@@ -311,7 +311,7 @@ export async function executeReviewProcessing(params: ExecuteReviewParams): Prom
             maxContextTokens: reviewMaxContextTokens, correlationId, correlatedLogger,
         }
     );
-    const originalDiscussion = await fetchOriginalContributionDiscussion(state.octokit, context, correlationId);
+    const originalDiscussion = job.data.ultrafixMeta ? '' : await fetchOriginalContributionDiscussion(state.octokit, context, correlationId);
     job.data.reasoningLevel = resolvePrReasoningLevelOverride(prData!.data.labels, linkedIssueResult.linkedIssueLabels, {
         repoOwner,
         repoName,

@@ -83,7 +83,7 @@ await mock.module('@propr/core', { namedExports: {
 } });
 
 const { PullRequestPublication } = await import('../src/jobs/prPublication.js');
-const { ensurePRContinuation, announceContinuation, findPRContinuation, continuationStatus } = await import('../src/jobs/prContinuation.js');
+const { ensurePRContinuation, announceContinuation, findPRContinuation, continuationStatus, reserveContinuation } = await import('../src/jobs/prContinuation.js');
 await mock.module('../src/jobs/ultrafixOrchestrationService.js', { namedExports: {
     stopLoop: async (...args: unknown[]) => { calls.push({ operation: 'stopLoop', args }); },
 } });
@@ -433,3 +433,21 @@ test('checkpoint recovery merges an advanced continuation without losing either 
     git(repoPath('upstream'), 'merge-base', '--is-ancestor', concurrent, tip);
     assert.equal((await findPRContinuation(ref))?.publication_bundle, null);
 });
+
+for (const identity of ['both', 'branch only', 'marker only', 'wrong repository', 'wrong base']) {
+    test(`reservation discovery requires both identities and the Git target: ${identity}`, async () => {
+        const reservation = await reserveContinuation(ref, source);
+        prs.push({
+            number: 100, state: 'open', html_url: 'https://github.com/upstream/project/pull/100',
+            body: identity === 'branch only' ? '' : `<!-- propr-continuation:42:${sourceSha} -->`,
+            base: { ref: identity === 'wrong base' ? 'main' : reservation.base_branch },
+            head: {
+                ref: identity === 'marker only' ? 'unrelated' : reservation.branch_name,
+                repo: { full_name: identity === 'wrong repository' ? 'contributor/project' : reservation.repository },
+            },
+        });
+        const discovered = await findPRContinuation({ ...ref, pullRequestNumber: 100 }, octokit as never);
+        assert.equal(discovered?.continuation_pr, identity === 'both' ? 100 : undefined);
+        assert.equal((await findPRContinuation(ref))!.continuation_pr, identity === 'both' ? 100 : null);
+    });
+}
