@@ -37,7 +37,7 @@ export function createPreviewMediaReader(deps: Dependencies = {}) {
         const [owner, repo] = repository.split('/');
         const octokit = await getOctokit();
         const response = await octokit.request('GET /repos/{owner}/{repo}/pulls/{pull_number}', {
-          owner, repo, pull_number: prNumber, request: { timeout: 4000 },
+          owner, repo, pull_number: prNumber, request: { signal: AbortSignal.timeout(4000) },
         });
         const { parsePublishedVisualPreviews } = await import('@propr/core');
         return { previews: parsePublishedVisualPreviews(response.data.body) };
@@ -52,31 +52,62 @@ export function createPreviewMediaReader(deps: Dependencies = {}) {
     return entry.value;
   }
 
-  async function project(sources: readonly PreviewSource[], limit = 3): Promise<PreviewProjection[]> {
-    const enabled = await enabledRepositories(sources.filter(source => source.prNumbers.length).map(source => source.repository));
-    const reads = new Map<string, { repository: string; number: number }>();
-    const keys = sources.map(source => {
-      const repository = source.repository.trim().toLowerCase();
-      if (!enabled.has(repository) || !/^[a-z0-9_.-]+\/[a-z0-9_.-]+$/.test(repository) || repository.split('/').some(part => part === '.' || part === '..')) return [];
-      return [...new Set(source.prNumbers)].filter(number => Number.isSafeInteger(number) && number > 0).map(number => {
-        const key = `${repository}#${number}`;
-        reads.set(key, { repository, number });
-        return key;
-      });
-    });
-    const entries = [...reads.entries()];
+  async function project(
+    sources: readonly PreviewSource[], limit = 3, mode: 'list' | 'gallery' = 'list',
+  ): Promise<PreviewProjection[]> {
     const results = new Map<string, PreviewProjection>();
-    let next = 0;
-    // One batch response to clients, with deduplicated, bounded GitHub concurrency.
-    await Promise.all(Array.from({ length: Math.min(6, entries.length) }, async () => {
-      while (next < entries.length) {
-        const [key, source] = entries[next++];
-        results.set(key, await readPr(source.repository, source.number));
+    let keys: string[][] | undefined;
+    let expired = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    // The deadline covers policy loading as well as GitHub reads. Started reads
+    // may fill the cache, but no more work is scheduled after the list returns.
+    const deadline = mode === 'list' ? new Promise<void>(resolve => {
+      timer = setTimeout(() => { expired = true; resolve(); }, 1500);
+    }) : undefined;
+    const batch = (async () => {
+      const enabled = await enabledRepositories(sources.filter(source => source.prNumbers.length).map(source => source.repository));
+      if (expired) return;
+      const reads = new Map<string, { repository: string; number: number }>();
+      keys = sources.map(source => {
+        const repository = source.repository.trim().toLowerCase();
+        if (!enabled.has(repository) || !/^[a-z0-9_.-]+\/[a-z0-9_.-]+$/.test(repository) || repository.split('/').some(part => part === '.' || part === '..')) return [];
+        return [...new Set(source.prNumbers)].filter(number => Number.isSafeInteger(number) && number > 0).map(number => {
+          const key = `${repository}#${number}`;
+          reads.set(key, { repository, number });
+          return key;
+        });
+      });
+      const cached: Promise<void>[] = [];
+      const entries: Array<[string, { repository: string; number: number }]> = [];
+      for (const [key, source] of reads) {
+        const previous = cache.get(key);
+        if (previous && previous.expires > Date.now()) {
+          cached.push(previous.value.then(value => { results.set(key, value); }));
+        } else if (mode === 'gallery' || entries.length < 6) {
+          entries.push([key, source]);
+        }
       }
+      let next = 0;
+      // Only the explicit gallery can read all identities. List pages share a
+      // six-read allowance regardless of their row or goal-artifact count.
+      await Promise.all([...cached, ...Array.from({ length: Math.min(6, entries.length) }, async () => {
+        while (!expired && next < entries.length) {
+          const [key, source] = entries[next++];
+          results.set(key, await readPr(source.repository, source.number));
+        }
+      })]);
+    })();
+    try {
+      await (deadline ? Promise.race([batch, deadline]) : batch);
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
+    }
+    if (!keys) return sources.map(source => ({
+      previews: [], ...(source.prNumbers.length ? { unavailable: true } : {}),
     }));
     return keys.map(sourceKeys => ({
       previews: trustedPreviewMedia(sourceKeys.flatMap(key => results.get(key)?.previews ?? []), limit),
-      ...(sourceKeys.some(key => results.get(key)?.unavailable) ? { unavailable: true } : {}),
+      ...(sourceKeys.some(key => !results.has(key) || results.get(key)?.unavailable) ? { unavailable: true } : {}),
     }));
   }
 

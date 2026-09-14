@@ -76,6 +76,107 @@ test('batch projections preserve branch-sharing, gate cached media, deduplicate 
   assert.deepEqual(calls, [1]);
 });
 
+test('large task and goal pages cap new reads while retaining cached media beyond the allowance', async () => {
+  const { reader, calls } = fixture();
+  await reader.project([{ repository: 'acme/web', prNumbers: [200] }]);
+  const sources = [
+    goalPreviewSource({ repository: 'acme/web', final_pr_number: 1, artifact_refs: Array.from({ length: 100 }, (_, i) => ({
+      type: 'pull_request', number: i + 2, url: `https://github.com/acme/web/pull/${i + 2}`,
+    })) }),
+    ...Array.from({ length: 99 }, (_, i) => taskPreviewSource({ repository: 'acme/web', pr_number: i + 102 })),
+  ];
+  const media = await reader.project(sources);
+  assert.deepEqual(calls, [200, 1, 2, 3, 4, 5, 6]);
+  assert.equal(media[0].previews.length, 3);
+  assert.equal(media[0].unavailable, true);
+  assert.deepEqual(media[1], { previews: [], unavailable: true });
+  assert.equal(media.at(-1)?.previews.length, 3);
+  await reader.project(sources);
+  assert.deepEqual(calls, [200, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
+});
+
+test('stalled list reads return at one deadline and fill a shared cache for later polls', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const started = Promise.withResolvers<void>();
+  const response = Promise.withResolvers<{ data: { body: string } }>();
+  const calls: number[] = [];
+  const reader = createPreviewMediaReader({
+    loadRepos: async () => [{ name: 'acme/web', enabled: true, visualPreview: { enabled: true, types: ['image'] } }],
+    getOctokit: async () => ({ request: async (_route: string, params: { pull_number: number }) => {
+      calls.push(params.pull_number);
+      if (params.pull_number === 1) return { data: { body: body('cached') } };
+      if (calls.length === 7) started.resolve();
+      return response.promise;
+    } }) as never,
+  });
+  await reader.project([{ repository: 'acme/web', prNumbers: [1] }]);
+  const sources = Array.from({ length: 50 }, (_, i) => ({ repository: 'acme/web', prNumbers: [i + 1] }));
+  const pending = reader.project(sources);
+  await started.promise;
+  // A concurrent Inbox poll shares the in-flight reads and the same list budget.
+  const inbox = projectNotificationPreviews([{ ...notification(), target: {
+    type: 'task', repository: 'acme/web', taskId: 'task-2', prNumber: 2,
+  } } as Notification], reader);
+  await new Promise(resolve => setImmediate(resolve));
+  t.mock.timers.tick(1500);
+  const media = await pending;
+  assert.equal(media.length, 50);
+  assert.equal(media[0].previews.length, 3);
+  assert.ok(media.slice(1).every(item => item.unavailable && !item.previews.length));
+  assert.equal((await inbox)[0].previewMedia, undefined);
+  assert.deepEqual(calls, [1, 2, 3, 4, 5, 6, 7]);
+  response.resolve({ data: { body: body('late') } });
+  const later = await reader.project(sources.slice(0, 7));
+  assert.ok(later.every(item => item.previews.length === 3 && !item.unavailable));
+  assert.deepEqual(calls, [1, 2, 3, 4, 5, 6, 7]);
+  assert.equal(media[1].previews.length, 0);
+});
+
+test('the list deadline includes policy loading and prevents late GitHub work', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const repos = Promise.withResolvers<RepoToMonitor[]>();
+  let calls = 0;
+  const reader = createPreviewMediaReader({ loadRepos: () => repos.promise, getOctokit: async () => {
+    calls++;
+    throw new Error('must not read after deadline');
+  } });
+  const pending = reader.project([{ repository: 'acme/web', prNumbers: [1] }]);
+  t.mock.timers.tick(1500);
+  assert.deepEqual(await pending, [{ previews: [], unavailable: true }]);
+  repos.resolve([{ name: 'acme/web', enabled: true, visualPreview: { enabled: true, types: ['image'] } }]);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(calls, 0);
+});
+
+test('GitHub requests receive a four-second abort signal and cache aborted reads', async t => {
+  const controller = new AbortController();
+  t.mock.method(AbortSignal, 'timeout', (milliseconds: number) => {
+    assert.equal(milliseconds, 4000);
+    return controller.signal;
+  });
+  const started = Promise.withResolvers<void>();
+  let calls = 0;
+  const reader = createPreviewMediaReader({
+    loadRepos: async () => [{ name: 'acme/web', enabled: true, visualPreview: { enabled: true, types: ['image'] } }],
+    getOctokit: async () => ({ request: async (_route: string, params: { request: { signal: AbortSignal } }) => {
+      calls++;
+      assert.equal(params.request.signal, controller.signal);
+      assert.equal('timeout' in params.request, false);
+      return new Promise((_resolve, reject) => {
+        params.request.signal.addEventListener('abort', () => reject(params.request.signal.reason), { once: true });
+        started.resolve();
+      });
+    } }) as never,
+  });
+  const sources = [{ repository: 'acme/web', prNumbers: [1] }];
+  const pending = reader.project(sources);
+  await started.promise;
+  controller.abort();
+  assert.deepEqual(await pending, [{ previews: [], unavailable: true }]);
+  assert.deepEqual(await reader.project(sources), [{ previews: [], unavailable: true }]);
+  assert.equal(calls, 1);
+});
+
 test('strict published parser rejects unmarked, local, and untrusted Markdown; errors remain optional', async () => {
   const { reader } = fixture();
   assert.equal((await reader.project([{ repository: 'acme/web', prNumbers: [99] }]))[0].unavailable, true);
@@ -194,17 +295,20 @@ test('repository gallery scopes tasks and owned goals, paginates, reports empty/
     await db('tasks').insert({ task_id: 'foreign', repository: 'other/repo', pr_number: 80 });
     await db('tasks').insert({ task_id: 'private-goal-task', repository: 'acme/web', task_type: 'goal', pr_number: 81 });
     await db('goals').insert([
-      { goal_id: 'owned', owner_id: 'alice', repository: 'acme/web', final_pr_number: 2 },
+      { goal_id: 'owned', owner_id: 'alice', repository: 'acme/web', final_pr_number: 2,
+        artifact_refs: JSON.stringify(Array.from({ length: 8 }, (_, i) => ({
+          type: 'pull_request', number: i + 3, url: `https://github.com/acme/web/pull/${i + 3}`,
+        }))) },
       { goal_id: 'private', owner_id: 'bob', repository: 'acme/web', final_pr_number: 82 },
       { goal_id: 'failed-read', owner_id: 'alice', repository: 'acme/web', final_pr_number: 99 },
     ]);
     const route = createRepositoryMediaRoutes({ db, reader }).getMedia;
     const req = { user: { id: 'alice' }, query: { repository: 'acme/web' } } as unknown as Request;
     const first = response(); await route(req, first.res);
-    assert.equal(first.state.body.previews?.length, 10);
+    assert.equal(first.state.body.previews?.length, 50);
     assert.equal(first.state.body.unavailable, true);
     assert.equal(first.state.body.nextOffset, 24);
-    assert.deepEqual([...calls].sort((a, b) => a - b), [1, 2, 99]);
+    assert.deepEqual([...calls].sort((a, b) => a - b), [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 99]);
     const last = response(); await route({ ...req, query: { ...req.query, offset: '24' } } as Request, last.res);
     assert.equal(last.state.body.nextOffset, null);
     disable();
@@ -225,8 +329,8 @@ test('task list includes bounded media in the existing response and omits it aft
       table.string('task_id'); table.string('repository'); table.string('task_type'); table.integer('pr_number');
       table.text('initial_job_data'); table.text('final_result'); table.string('created_at'); table.integer('issue_number');
     });
-    await db.schema.createTable('task_history', table => { table.string('task_id'); table.string('state'); table.string('timestamp'); table.string('reason'); });
-    await db.schema.createTable('plan_issues', table => { table.string('task_id'); table.string('status'); });
+    await db.schema.createTable('task_history', table => { table.increments('history_id'); table.string('task_id'); table.string('state'); table.string('timestamp'); table.string('reason'); });
+    await db.schema.createTable('plan_issues', table => { table.increments('id'); table.string('task_id'); table.string('status'); });
     await db.schema.createTable('llm_executions', table => { table.string('task_id'); table.string('execution_id'); table.text('analysis_report'); });
     await db('tasks').insert({ task_id: 'task-1', repository: 'acme/web', pr_number: 1, created_at: '2026-09-13' });
     await db('task_history').insert({ task_id: 'task-1', state: 'completed', timestamp: '2026-09-13' });

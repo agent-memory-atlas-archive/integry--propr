@@ -29,7 +29,7 @@ export function createRepositoryMediaRoutes(deps: { db: Knex; reader?: typeof pr
             .select('repository', 'final_pr_number', 'artifact_refs'),
         ]);
         const sources = [...tasks.slice(0, PAGE_SIZE).map(taskPreviewSource), ...goals.slice(0, PAGE_SIZE).map(goalPreviewSource)];
-        const media = await reader.project(sources.flatMap(source => source.prNumbers.map(number => ({ repository: source.repository, prNumbers: [number] }))), 8);
+        const media = await reader.project(sources.flatMap(source => source.prNumbers.map(number => ({ repository: source.repository, prNumbers: [number] }))), 8, 'gallery');
         const previews = [...new Map(media.flatMap(item => item.previews).map(preview => [preview.url, preview])).values()];
         res.json({ previews, nextOffset: tasks.length > PAGE_SIZE || goals.length > PAGE_SIZE ? offset + PAGE_SIZE : null,
           ...(media.some(item => item.unavailable) ? { unavailable: true } : {}) });
