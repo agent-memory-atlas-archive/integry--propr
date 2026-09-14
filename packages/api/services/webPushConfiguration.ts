@@ -12,7 +12,9 @@ export type WebPushConfigurationIssue =
   | 'missing'
   | 'invalid_subject'
   | 'malformed'
-  | 'mismatched';
+  | 'mismatched'
+  | 'storage_invalid'
+  | 'storage_unavailable';
 
 export type ValidatedWebPushConfiguration =
   | { configured: false; issue: WebPushConfigurationIssue }
@@ -61,7 +63,7 @@ function decodeVapidKey(value: unknown, expectedBytes: number): Buffer | null {
     : null;
 }
 
-function validVapidSubject(value: unknown): value is string {
+export function validVapidSubject(value: unknown): value is string {
   if (typeof value !== 'string' || value.length === 0 || value !== value.trim()) return false;
   try {
     const url = new URL(value);
@@ -118,8 +120,10 @@ export function validateWebPushConfiguration(
 export const WEB_PUSH_CONFIGURATION_WARNINGS: Readonly<
   Record<Exclude<WebPushConfigurationIssue, 'disabled'>, string>
 > = {
-  missing: 'VAPID subject/public/private configuration is missing or incomplete',
-  invalid_subject: 'VAPID subject is malformed',
-  malformed: 'VAPID public/private keys are malformed',
-  mismatched: 'VAPID public/private keys do not match',
+  missing: 'VAPID key configuration is missing or incomplete; set both WEB_PUSH_VAPID_PUBLIC_KEY and WEB_PUSH_VAPID_PRIVATE_KEY, or remove both for automatic setup',
+  invalid_subject: 'VAPID subject is malformed; set WEB_PUSH_VAPID_SUBJECT to an HTTPS contact URL or mailto address',
+  malformed: 'VAPID public/private keys are malformed; correct both environment keys or remove both for automatic setup',
+  mismatched: 'VAPID public/private keys do not match; configure both keys from the same pair',
+  storage_invalid: 'Stored Web Push identity is invalid or has unsafe permissions; restore web-push/vapid.json from backup with directory mode 700 and file mode 600. No keys were replaced',
+  storage_unavailable: 'Web Push identity storage is unavailable; check the mounted instance database data directory, ownership, free space and write permissions, then restart. No transient key is advertised',
 };

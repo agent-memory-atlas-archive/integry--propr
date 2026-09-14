@@ -1,6 +1,13 @@
 /* eslint-disable max-lines -- dispatcher policy and delivery regressions share one fixture */
 import assert from 'node:assert/strict';
-import { createECDH } from 'node:crypto';
+import { createECDH, createPublicKey, verify } from 'node:crypto';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import type { Request, Response } from 'express';
+import webPush from 'web-push';
+import { resolveInstanceWebPushConfiguration } from '../services/instanceWebPushConfiguration.js';
+import { createNotificationRoutes } from '../routes/notificationRoutes.js';
 import { createServer } from 'node:http';
 import { after, afterEach, beforeEach, describe, test } from 'node:test';
 import knex, { type Knex } from 'knex';
@@ -163,6 +170,44 @@ function dispatcher(sender: {
 }
 
 describe('Web Push dispatcher', { concurrency: false }, () => {
+  test('automatic startup advertises the same key that verifies actual dispatcher VAPID signing', async t => {
+    const directory = mkdtempSync(join(tmpdir(), 'propr-push-signing-'));
+    t.after(() => rmSync(directory, { recursive: true, force: true }));
+    const resolved = resolveInstanceWebPushConfiguration({ DATA_DIR: directory, API_PUBLIC_URL: 'https://api.example.com' });
+    assert.ok(resolved.configured);
+    let advertised: { push: { configured: boolean; vapidPublicKey: string } } | undefined;
+    const routes = createNotificationRoutes({
+      resolvedWebPushConfiguration: resolved,
+      webPushDispatcherConfigured: true,
+      getWebPushConfiguration: () => { throw new Error('must not reread environment'); },
+    });
+    const response = { json: (value: typeof advertised) => { advertised = value; } } as Response;
+    await routes.getConfiguration({ user: { id: 'user' } } as Request, response);
+    assert.ok(advertised?.push.configured);
+    assert.equal(JSON.stringify(advertised).includes(resolved.privateKey), false);
+    await queuedEvent();
+    let signed = false;
+    const worker = dispatcher({ sendNotification: async (subscription, payload, options) => {
+      const request = webPush.generateRequestDetails(subscription, payload, options);
+      const authorization = String(request.headers.Authorization);
+      const match = /^vapid t=([^,]+), k=(.+)$/.exec(authorization);
+      assert.ok(match);
+      assert.equal(match[2], advertised!.push.vapidPublicKey);
+      const [header, claims, signature] = match[1].split('.');
+      const point = Buffer.from(advertised!.push.vapidPublicKey, 'base64url');
+      const publicKey = createPublicKey({ format: 'jwk', key: {
+        kty: 'EC', crv: 'P-256', x: point.subarray(1, 33).toString('base64url'), y: point.subarray(33).toString('base64url'),
+      } });
+      assert.ok(verify('sha256', Buffer.from(`${header}.${claims}`),
+        { key: publicKey, dsaEncoding: 'ieee-p1363' }, Buffer.from(signature, 'base64url')));
+      assert.equal(JSON.parse(Buffer.from(claims, 'base64url').toString()).sub, resolved.subject);
+      signed = true;
+      return success;
+    } }, { resolvedConfiguration: resolved });
+    assert.equal(await worker.runOnce(), 1);
+    assert.ok(signed);
+  });
+
   test('fans one eligible event out to every active subscription', async () => {
     userSequence += 1;
     const userId = `fanout-user-${userSequence}`;

@@ -10,9 +10,14 @@ import { NOTIFICATION_KINDS, parseNotificationPreferencesResponse,
 import { ensureAuthenticated } from '../auth.js';
 import { configureDemoMode, demoModeReadOnlyMiddleware, resetConfiguredDemoMode } from '../demoMode.js';
 import { createApiRequestRateLimiter } from '../requestRateLimits.js';
-import { createNotificationRoutes, type NotificationRouteService } from '../routes/notificationRoutes.js';
+import { createNotificationRoutes as buildNotificationRoutes, type NotificationRouteService } from '../routes/notificationRoutes.js';
 
 after(async () => closeConnection());
+
+function createNotificationRoutes(dependencies: Parameters<typeof buildNotificationRoutes>[0] = {}) {
+    return buildNotificationRoutes({ getWebPushConfiguration: createVapidConfiguration, ...dependencies });
+}
+
 
 function responseRecorder(): { response: Response; status: () => number; body: () => unknown;
     headers: () => Record<string, string> } {
@@ -273,6 +278,22 @@ describe('notification routes', () => {
             assert.deepEqual(body(), {
                 push: { configured: false, vapidPublicKey: null }
             });
+        }
+    });
+
+    test('disabled or failed startup blocks enrollment and never rereads environment', async () => {
+        for (const issue of ['disabled', 'storage_invalid', 'storage_unavailable', 'missing', 'malformed', 'mismatched'] as const) {
+            const routes = createNotificationRoutes({
+                resolvedWebPushConfiguration: { configured: false, issue },
+                getWebPushConfiguration: () => { throw new Error('must not reread configuration'); },
+                service: createService({ upsertPushSubscription: async () => { throw new Error('must not enroll'); } }),
+            });
+            const recorder = responseRecorder();
+            await routes.getConfiguration(authenticatedRequest(), recorder.response);
+            assert.deepEqual(recorder.body(), { push: { configured: false, vapidPublicKey: null } });
+            await routes.createPushSubscription(authenticatedRequest({ body: {} }), recorder.response);
+            assert.equal(recorder.status(), 503);
+            assert.deepEqual(recorder.body(), { error: 'Browser notifications are unavailable for this ProPR instance.' });
         }
     });
 
