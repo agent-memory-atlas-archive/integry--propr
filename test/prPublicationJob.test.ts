@@ -71,7 +71,7 @@ const modules: Record<string, Record<string, unknown>> = {
         status = '';
         async prepare() { events.push('prepare'); throw preparationError; }
     } },
-    prContinuation: { findPRContinuation: async () => { if (resolutionError) throw resolutionError; return continuation; }, continuationStatus: () => 'Continue at https://github.com/upstream/project/pull/100' },
+    prContinuation: { savePublicationCheckpoint: noOp, findPRContinuation: async () => { if (resolutionError) throw resolutionError; return continuation; }, continuationStatus: () => 'Continue at https://github.com/upstream/project/pull/100' },
 };
 for (const [name, namedExports] of Object.entries(modules)) {
     await mock.module(`../src/jobs/${name}.js`, { namedExports });

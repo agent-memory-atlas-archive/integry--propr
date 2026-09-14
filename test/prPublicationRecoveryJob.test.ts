@@ -54,6 +54,7 @@ let restoredComments: unknown[] = [];
 let skipValidation = false;
 let prompts: string[] = [];
 let produced: string[] = [];
+let expectedAgentHead: string | undefined;
 let completionBodies: string[] = [];
 let failCompletion = false;
 let failTaskCompletion = false;
@@ -84,7 +85,7 @@ await mock.module('@propr/core', { namedExports: {
     hashTaskAttemptToken: () => 'hash',
     retryConfigs: { githubApi: {} }, withRetry: async (fn: () => unknown) => fn(),
     runWithExecutionAbortSignal: async (_signal: unknown, fn: () => unknown) => fn(),
-    TaskStates: { PROCESSING: 'processing', COMPLETED: 'completed', CLAUDE_EXECUTION: 'claude_execution', FAILED: 'failed' },
+    TaskStates: { PROCESSING: 'processing', COMPLETED: 'completed', CLAUDE_EXECUTION: 'claude_execution', FAILED: 'failed', CANCELLED: 'cancelled' },
     ensureGitRepository: async () => { calls.push({ operation: 'ensureGitRepository', args: [] }); }, createLogFiles: noOp, UsageLimitError: class extends Error {},
     recordLLMMetrics: noOp, loadPrimaryProcessingLabels: async () => ['propr'],
     loadRepositoryVisualPreviewSettings: noOp,
@@ -237,7 +238,7 @@ const modules: Record<string, Record<string, unknown>> = {
         applyPendingCommentCommandContext: noOp,
     },
     prCommentReviewJob: { executeReviewProcessing: async (params: { context: { pullRequestNumber: number } }) => { events.push(`review:${params.context.pullRequestNumber}`); return { status: 'complete' }; } },
-    prCommentAgentUtils: { generateSummaryTitle: async () => 'Saved subtitle', resolveAndExecuteAgent: async ({ worktreePath, prompt }: { worktreePath: string; prompt: string }) => { events.push('agent'); prompts.push(prompt); if (produced.length) assert.equal(git(worktreePath, 'rev-parse', 'HEAD'), produced[0]); await writeFile(path.join(worktreePath, 'implementation.txt'), `execution ${prompts.length}\n`); return { claudeResult: { success: !partialResult, summary: 'Saved agent summary', sessionId: 'saved-session', model: 'saved-model' }, agentType: 'test' }; }, resolvePRCommentModelName: async () => 'model' },
+    prCommentAgentUtils: { generateSummaryTitle: async () => 'Saved subtitle', resolveAndExecuteAgent: async ({ worktreePath, prompt }: { worktreePath: string; prompt: string }) => { events.push('agent'); prompts.push(prompt); if (produced.length) assert.equal(git(worktreePath, 'rev-parse', 'HEAD'), expectedAgentHead ?? produced[0]); await writeFile(path.join(worktreePath, 'implementation.txt'), `execution ${prompts.length}\n`); return { claudeResult: { success: !partialResult, summary: 'Saved agent summary', sessionId: 'saved-session', model: 'saved-model' }, agentType: 'test' }; }, resolvePRCommentModelName: async () => 'model' },
     reviewCommentFormatter: { isReviewComment: () => false },
     reviewFindingSelector: { hasAuthorizedFixFeedback: () => true, prepareFixReviewFeedback: async () => ({ isFixMode: false, selectedReviewComments: [] }) },
     ultrafixOrchestrationService: {
@@ -272,6 +273,7 @@ const job = (id = 'task-1', commentId = 5, body = 'Original instructions') => ({
 const run = (request = job()) => processPullRequestCommentJob(request as never);
 const denial = () => new Error('remote: Write access to repository not granted. fatal: HTTP 403');
 beforeEach(async () => {
+    expectedAgentHead = undefined;
     missingCommentIds.clear(); failTaskCompletion = false; promptHistories = [];
     heldLocks.clear(); losePushResponse = false; comparisonError = undefined; onPRCreated = undefined;
     completedCheckHeads = new Set([sourceSha]); deferredReviews = [];
@@ -358,6 +360,7 @@ for (const initialChecksPassing of [true, false]) {
         continuationPushError = undefined;
         events = [];
 
+        pendingComments = [{ id: 7, body: 'Pending instructions', author: 'contributor', type: 'issue' }];
         const request = job('review-task', 6, '/ultrafix');
         const result = await run({ ...request, data: {
             ...request.data, pullRequestNumber: 100, commandMode: 'review',
@@ -366,6 +369,10 @@ for (const initialChecksPassing of [true, false]) {
 
         assert.equal(result.status, 'deferred');
         assert.equal(result.reason, 'ultrafix_waiting_for_exact_head_checks');
+        assert.deepEqual(restoredComments, pendingComments);
+        assert.equal(taskStates.get('review-task'), 'completed');
+        assert.equal(completions.find(c => c.taskId === 'review-task')?.metadata.historyMetadata.deferred, true);
+        assert.equal(heldLocks.size, 0);
         assert.equal(git(repoPath('upstream'), 'rev-parse', 'propr/continuation-pr-42'), produced[0]);
         const record = (await findPRContinuation(ref))!;
         assert.equal(record.publication_bundle, null);
@@ -667,3 +674,57 @@ for (const automatic of [false, true]) {
         else assert.match(promptHistories[1], /Original contribution discussion.*\nPrior review findings and scores/s);
     });
 }
+
+for (const failure of ['PR creation', 'continuation push']) {
+    test(`cancelled ${failure} checkpoint is retired before review and cannot replay during later preparation`, async () => {
+        if (failure === 'PR creation') failPRCreate = true;
+        else continuationPushError = new Error('Connection timed out');
+        await assert.rejects(run(), /network error|Connection timed out/);
+        await assertSavedCheckpoint();
+        taskStates.set('task-1', 'cancelled');
+        failPRCreate = false; continuationPushError = undefined;
+        calls = [];
+
+        for (const id of ['new-review', 'later-review']) {
+            const review = job(id, 6, '/review');
+            review.data.commandMode = 'review';
+            await run(review);
+            const record = (await findPRContinuation(ref))!;
+            assert.equal(record.publication_bundle, null);
+            assert.equal(record.publication_completion, null);
+            assert.equal(taskStates.get('task-1'), 'cancelled');
+            assert.equal(git(repoPath('upstream'), 'rev-parse', record.branch_name), sourceSha);
+        }
+        assert.ok(!calls.some(c => ['git', 'worktree', 'ensureGitRepository', 'auth'].includes(c.operation)));
+        assert.equal(completionBodies.length, 0);
+        assert.equal(prompts.length, 1);
+
+        expectedAgentHead = sourceSha;
+        const result = await run(job('new-implementation', 7, 'New instructions'));
+        assert.equal(result.status, 'complete');
+        assert.equal(prompts.length, 2);
+        assert.ok(!prompts[1].includes('Original instructions'));
+        assert.equal(taskStates.get('task-1'), 'cancelled');
+        assert.ok(!completions.some(c => c.taskId === 'task-1'));
+        assert.equal(git(repoPath('upstream'), 'rev-parse', 'propr/continuation-pr-42'), produced[1]);
+        assert.throws(() => git(repoPath('upstream'), 'merge-base', '--is-ancestor', produced[0], produced[1]));
+    });
+}
+
+test('cancelled completion-only checkpoint is retired without completing the originating task', async () => {
+    failCompletion = true;
+    await assert.rejects(run(), /Completion comment failed/);
+    assert.equal((await findPRContinuation(ref))!.publication_bundle, null);
+    assert.ok((await findPRContinuation(ref))!.publication_completion);
+    taskStates.set('task-1', 'cancelled');
+    failCompletion = false;
+    calls = [];
+    const review = job('new-review', 6, '/review');
+    review.data.commandMode = 'review';
+    await run(review);
+    assert.equal(taskStates.get('task-1'), 'cancelled');
+    assert.equal((await findPRContinuation(ref))!.publication_completion, null);
+    assert.equal(completionBodies.length, 0);
+    assert.equal(prompts.length, 1);
+    assert.ok(!calls.some(c => c.operation.startsWith('PATCH') || ['git', 'worktree', 'ensureGitRepository', 'auth'].includes(c.operation)));
+});

@@ -7,12 +7,12 @@ import {
 } from '@propr/core';
 import type { PRJobContext } from './prCommentReviewJob.js';
 import { createPRCommentTaskStateIfMissing } from './prCommentCollisionRecovery.js';
-import { handlePostExecution } from './prCommentPostExecution.js';
+import { handlePostExecution, type PublicationCompletion } from './prCommentPostExecution.js';
 import { restorePendingComments } from './prPendingComments.js';
 import { stopOriginalPRReviewCycle } from './prContinuationReview.js';
 import { handleUltrafixContinuation } from './ultrafixJobHelpers.js';
 import { PullRequestPublication } from './prPublication.js';
-import { findPRContinuation, type Contribution } from './prContinuation.js';
+import { findPRContinuation, savePublicationCheckpoint, type Contribution } from './prContinuation.js';
 
 export interface ProcessingState {
     publication?: PullRequestPublication;
@@ -41,6 +41,15 @@ export async function recoverPendingPublication(params: ExecuteProcessingParams,
     const { state, context, taskId, job, stateManager, lockKey, lockToken } = params;
     const record = await findPRContinuation(context);
     if (!record?.publication_bundle && !record?.publication_completion) return;
+    const savedCompletion = record.publication_completion
+        ? JSON.parse(record.publication_completion) as PublicationCompletion : undefined;
+    if (savedCompletion && (await stateManager.getTaskState(savedCompletion.taskId))?.state === TaskStates.CANCELLED) {
+        // Retire both inputs before any reconciliation or preparation. A later
+        // request's prepare() must not restore work the originating user cancelled.
+        await savePublicationCheckpoint(record, null, null);
+        context.correlatedLogger.info({ taskId: savedCompletion.taskId }, 'Retired cancelled publication checkpoint');
+        return;
+    }
     const octokit = state.octokit!;
     // Completion alone uses the retained destination and task metadata, even after
     // the continuation is merged and its branch is deleted.
