@@ -38,6 +38,10 @@ let probeError: Error | undefined;
 let finalPushError: Error | undefined;
 let continuationPushError: Error | undefined;
 let failPRCreate = false;
+let losePushResponse = false;
+let comparisonError: Error | undefined;
+let onPRCreated: (() => Promise<void>) | undefined;
+const heldLocks = new Set<string>();
 let forcePushBeforeClone = false;
 let calls: Array<{ operation: string; args: unknown }> = [];
 let cloneIndex = 0;
@@ -109,7 +113,9 @@ await mock.module('@propr/core', { namedExports: {
                 calls.push({ operation: 'git', args });
                 if (args.includes('--dry-run') && probeError) throw probeError;
                 if (args[0] === 'push' && args.includes('HEAD:refs/heads/propr/continuation-pr-42') && continuationPushError) throw continuationPushError;
-                return actual.raw(args);
+                const result = await actual.raw(args);
+                if (args[0] === 'push' && args.includes('HEAD:refs/heads/propr/continuation-pr-42') && losePushResponse) throw new Error('Lost push response');
+                return result;
             },
             revparse: (args: string[]) => actual.revparse(args),
         };
@@ -145,7 +151,7 @@ const source = {
     head: { ref: 'contribution', sha: sourceSha, repo: { owner: { login: 'contributor' }, name: 'project' } },
     base: { ref: 'release' }, title: 'Contribution', body: 'Original objective', user: { login: 'contributor' },
 };
-type FakePR = { number: number; state: string; html_url: string; body: string; base: { ref: string }; head: { ref: string; repo: { full_name: string } } };
+type FakePR = { number: number; state: string; html_url: string; body: string; base: { ref: string }; head: { ref: string; sha?: string; repo: { full_name: string } } };
 let prs: FakePR[] = [];
 let comments: Array<{ id: number; body: string; user: { type: string } }> = [];
 let loseCreateResponse = false;
@@ -165,18 +171,32 @@ const octokit = {
             throw Object.assign(new Error('Reference already exists'), { status: 422 });
         }
         if (endpoint.includes('/compare/')) {
-            const tip = git(repoPath('upstream'), 'rev-parse', 'refs/heads/propr/continuation-pr-42');
-            return { data: { status: tip === sourceSha ? 'identical' : 'ahead' } };
+            if (comparisonError) throw comparisonError;
+            const [base, head] = options.basehead.split('...');
+            let tip: string;
+            try {
+                git(repoPath('upstream'), 'cat-file', '-e', base);
+                tip = git(repoPath('upstream'), 'rev-parse', head);
+            } catch { throw Object.assign(new Error('Commit not found'), { status: 404 }); }
+            let status = 'diverged';
+            try { git(repoPath('upstream'), 'merge-base', '--is-ancestor', base, tip); status = base === tip ? 'identical' : 'ahead'; } catch { /* Not published. */ }
+            return { data: { status } };
         }
         if (endpoint === 'POST /repos/{owner}/{repo}/pulls') {
             if (failPRCreate) throw new Error('PR creation network error');
             if (prs.length) throw Object.assign(new Error('PR already exists'), { status: 422 });
             const pr = { number: 100, state: 'open', html_url: 'https://github.com/upstream/project/pull/100', body: options.body, base: { ref: options.base }, head: { ref: options.head, repo: { full_name: 'upstream/project' } } };
             prs.push(pr);
+            await onPRCreated?.();
             if (loseCreateResponse) { loseCreateResponse = false; throw new Error('ECONNRESET after create'); }
             return { data: pr };
         }
-        if (endpoint === 'GET /repos/{owner}/{repo}/pulls/{pull_number}') return { data: options.pull_number === 42 ? { ...source, labels: [{ name: 'propr' }] } : prs[0] };
+        if (endpoint === 'GET /repos/{owner}/{repo}/pulls/{pull_number}') {
+            if (options.pull_number === 42) return { data: { ...source, labels: [{ name: 'propr' }] } };
+            const pr = prs[0];
+            if (pr.state === 'open') pr.head.sha = git(repoPath('upstream'), 'rev-parse', pr.head.ref);
+            return { data: pr };
+        }
         if (endpoint.startsWith('PATCH')) {
             if (failCompletion) throw new Error('Completion comment failed');
             completionBodies.push(options.body);
@@ -204,7 +224,7 @@ const modules: Record<string, Record<string, unknown>> = {
         buildCombinedComment: (comments: Array<{ body: string }>) => ({ combinedCommentBody: comments.map(c => c.body).join('\n'), commentAuthors: ['contributor'] }),
         extractModelFromLabels: () => 'model', fetchAllComments: async () => [], buildPrompt: ({ combinedCommentBody }: { combinedCommentBody: string }) => combinedCommentBody,
         handleJobError: async (_error: unknown, job: { id: string }) => { taskStates.set(job.id, 'failed'); },
-        cleanupJob: async ({ worktreeInfo }: { worktreeInfo?: { worktreePath: string } }) => { if (worktreeInfo) await rm(worktreeInfo.worktreePath, { recursive: true, force: true }); }, buildCommitMessage: () => 'Implementation', toClaudeResult: noOp, buildStartingWorkCommentBody: () => 'Starting work',
+        cleanupJob: async ({ worktreeInfo, lockKey }: { worktreeInfo?: { worktreePath: string }; lockKey: string }) => { heldLocks.delete(lockKey); if (worktreeInfo) await rm(worktreeInfo.worktreePath, { recursive: true, force: true }); }, buildCommitMessage: () => 'Implementation', toClaudeResult: noOp, buildStartingWorkCommentBody: () => 'Starting work',
     },
     prPendingComments: {
         restorePendingComments: async (comments: unknown[]) => { restoredComments.push(...comments); },
@@ -223,11 +243,11 @@ const modules: Record<string, Record<string, unknown>> = {
     prCommentNoAuthorizedFindings: { handleNoAuthorizedFindings: noOp },
     prTaskTitleHelpers: Object.fromEntries(['buildDeterministicPrTaskSubtitle', 'buildPrTaskTitle', 'buildPrTaskTitleContext', 'buildPrTaskTitleContextHistoryMetadata', 'getPrTaskWorkflowLabel', 'resolvePrTaskWorkflow'].map(name => [name, noOp])),
     prProcessingLock: {
-        acquirePRProcessingLock: async (_redis: unknown, key: string) => { events.push(key); return true; },
-        ensurePRProcessingLockToken: async () => 'token', releasePRProcessingLock: noOp,
+        acquirePRProcessingLock: async (_redis: unknown, key: string) => { events.push(key); if (heldLocks.has(key)) return false; heldLocks.add(key); return true; },
+        ensurePRProcessingLockToken: async () => 'token', releasePRProcessingLock: async (_redis: unknown, key: string) => { heldLocks.delete(key); },
         startPRProcessingLockHeartbeat: () => noOp,
     },
-    prCommentCollisionRecovery: { createPRCommentTaskStateIfMissing: async ({ taskId }: { taskId: string }) => { if (!taskStates.has(taskId)) taskStates.set(taskId, 'processing'); }, evaluatePRCommentPreExecutionRecovery: async () => ({}), handlePRCommentLockContention: noOp },
+    prCommentCollisionRecovery: { createPRCommentTaskStateIfMissing: async ({ taskId }: { taskId: string }) => { if (!taskStates.has(taskId)) taskStates.set(taskId, 'processing'); }, evaluatePRCommentPreExecutionRecovery: async () => ({}), handlePRCommentLockContention: async () => ({ status: 'deferred' }) },
     prCompletionComment: { buildCompletionComment: async (commit: unknown, comments: unknown, options: unknown, result: unknown) => JSON.stringify({ commit, comments, options, result }) },
     reviewCommentGatherer: { markReviewFindingsProcessed: noOp },
 };
@@ -247,6 +267,7 @@ const job = (id = 'task-1', commentId = 5, body = 'Original instructions') => ({
 const run = (request = job()) => processPullRequestCommentJob(request as never);
 const denial = () => new Error('remote: Write access to repository not granted. fatal: HTTP 403');
 beforeEach(async () => {
+    heldLocks.clear(); losePushResponse = false; comparisonError = undefined; onPRCreated = undefined;
     completedCheckHeads = new Set([sourceSha]); deferredReviews = [];
     taskStates.clear(); pendingComments = []; restoredComments = []; skipValidation = false;
     await database('pr_continuations').delete();
@@ -496,3 +517,87 @@ test('a replacement request can finish after its own recovery attempt failed', a
     assert.equal(taskStates.get('replacement-task'), 'completed');
     assert.equal(prompts.length, 1);
 });
+
+for (const lostResponse of [false, true]) {
+    test(`an unmapped visible continuation contends on the creating worker's source lock (lost response: ${lostResponse})`, async () => {
+        loseCreateResponse = lostResponse;
+        let checkedContention = false;
+        onPRCreated = async () => {
+            assert.equal((await findPRContinuation(ref))!.continuation_pr, null);
+            const request = job('continuation-task', 6, '/review');
+            const result = await run({ ...request, data: { ...request.data, pullRequestNumber: 100, commandMode: 'review' } });
+            assert.equal(result.status, 'deferred');
+            assert.equal((await findPRContinuation(ref))!.continuation_pr, 100);
+            assert.equal(events.filter(event => event === 'lock:pr:upstream:project:42').length, 2);
+            assert.ok(!events.includes('lock:pr:upstream:project:100'));
+            assert.ok(!events.includes('review:100'));
+            checkedContention = true;
+        };
+        assert.equal((await run()).status, 'complete');
+        // PR creation recovery catches API errors, including a failed hook assertion.
+        assert.equal(checkedContention, true);
+        assert.equal(prompts.length, 1);
+    });
+}
+
+for (const failure of ['push acknowledgement', 'checkpoint clearing']) {
+    for (const advanced of [false, true]) {
+        test(`${failure}: retained ${advanced ? 'advanced' : 'identical'} PR head completes after merge and branch deletion`, async () => {
+            if (failure === 'push acknowledgement') losePushResponse = true;
+            else await database.raw("CREATE TRIGGER fail_checkpoint_clear BEFORE UPDATE OF publication_bundle ON pr_continuations WHEN OLD.publication_bundle IS NOT NULL AND NEW.publication_bundle IS NULL BEGIN SELECT RAISE(ABORT, 'Checkpoint clearing failed'); END");
+            try {
+                await assert.rejects(run(), /Lost push response|Checkpoint clearing failed/);
+                await assertSavedCheckpoint();
+            } finally {
+                await database.raw('DROP TRIGGER IF EXISTS fail_checkpoint_clear');
+            }
+            let publishedHead = produced[0];
+            if (advanced) {
+                git(seed, 'fetch', repoPath('upstream'), 'refs/heads/propr/continuation-pr-42');
+                publishedHead = git(seed, 'commit-tree', `${produced[0]}^{tree}`, '-p', produced[0], '-m', 'Later continuation commit');
+                git(seed, 'push', repoPath('upstream'), `${publishedHead}:refs/heads/propr/continuation-pr-42`);
+            }
+            prs[0].head.sha = publishedHead;
+            prs[0].state = 'closed';
+            git(repoPath('upstream'), 'update-ref', 'refs/pull/100/head', publishedHead);
+            git(repoPath('upstream'), 'update-ref', '-d', 'refs/heads/propr/continuation-pr-42');
+            calls = []; losePushResponse = false;
+            const result = await run();
+            assert.equal(result.status, 'complete');
+            assert.equal(result.commit, publishedHead);
+            assert.equal(prompts.length, 1);
+            assert.equal(taskStates.get('task-1'), 'completed');
+            assert.match(completionBodies[0], /Saved agent summary/);
+            assert.ok(!calls.some(c => ['git', 'worktree', 'ensureGitRepository', 'auth'].includes(c.operation)));
+            assert.equal((await findPRContinuation(ref))!.publication_bundle, null);
+            assert.equal((await findPRContinuation(ref))!.publication_completion, null);
+        });
+    }
+}
+
+for (const verification of ['missing commit', 'unrelated head', 'API failure']) {
+    test(`closed continuation retains checkpoint when publication cannot be verified: ${verification}`, async () => {
+        continuationPushError = new Error('Connection timed out');
+        await assert.rejects(run(), /Connection timed out/);
+        const saved = (await findPRContinuation(ref))!;
+        prs[0].head.sha = sourceSha;
+        prs[0].state = 'closed';
+        if (verification === 'unrelated head') {
+            // Make the saved commit visible remotely without putting it in the PR head.
+            const worktree = path.join(root, `verify-${++cloneIndex}`);
+            git(root, 'clone', '--branch', 'release', repoPath('upstream'), worktree);
+            await writeFile(path.join(worktree, 'checkpoint.bundle'), Buffer.from(saved.publication_bundle!, 'base64'));
+            git(worktree, 'fetch', 'checkpoint.bundle', 'HEAD');
+            git(worktree, 'push', 'origin', 'FETCH_HEAD:refs/heads/unrelated');
+        }
+        if (verification === 'missing commit') comparisonError = Object.assign(new Error('Commit not found'), { status: 404 });
+        if (verification === 'API failure') comparisonError = new Error('Comparison unavailable');
+        git(repoPath('upstream'), 'update-ref', '-d', 'refs/heads/propr/continuation-pr-42');
+        await assert.rejects(run(), /Continuation PR is closed|Comparison unavailable/);
+        const retained = (await findPRContinuation(ref))!;
+        assert.equal(retained.publication_bundle, saved.publication_bundle);
+        assert.equal(retained.publication_completion, saved.publication_completion);
+        assert.equal(prompts.length, 1);
+        assert.equal(completions.length, 0);
+    });
+}

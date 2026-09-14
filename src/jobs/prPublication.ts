@@ -56,6 +56,44 @@ export class PullRequestPublication {
         await this.announce();
     }
 
+    /** A push can succeed without its acknowledgement/checkpoint update. GitHub
+     * retains the PR head even after merge and branch deletion; compare against
+     * that commit before requiring an open PR or preparing a branch worktree.
+     */
+    async reconcilePublication(): Promise<void> {
+        const record = this.continuation;
+        if (!record?.publication_bundle) return;
+        // createPublicationBundle stores HEAD in the bundle header. Restrict the
+        // lookup to that header, never the binary pack or completion metadata.
+        const header = Buffer.from(record.publication_bundle, 'base64').toString('latin1').split('\n\n', 1)[0];
+        const checkpointHead = /^([a-f0-9]{40}) HEAD$/m.exec(header)?.[1];
+        if (!checkpointHead) throw new Error('Publication checkpoint has no valid HEAD');
+        const { repoOwner: owner, repoName: repo } = continuationTarget(record);
+        const pr = record.continuation_pr
+            ? (await this.octokit.request('GET /repos/{owner}/{repo}/pulls/{pull_number}', { owner, repo, pull_number: record.continuation_pr })).data
+            : (await this.octokit.paginate('GET /repos/{owner}/{repo}/pulls', {
+                owner, repo, head: `${owner}:${record.branch_name}`, state: 'all', per_page: 100,
+            })).find(pr => pr.body?.includes(`<!-- propr-continuation:${record.source_pr}:${record.source_sha} -->`));
+        if (!pr) return;
+        if (pr.head.ref !== record.branch_name || pr.base.ref !== record.base_branch || pr.head.repo?.full_name.toLowerCase() !== record.repository) {
+            throw new Error(`Continuation PR #${pr.number} has an unexpected Git target`);
+        }
+        if (!pr.head.sha || !/^[a-f0-9]{40}$/i.test(pr.head.sha)) throw new Error('Continuation PR has no valid head SHA');
+        const comparison = await this.octokit.request('GET /repos/{owner}/{repo}/compare/{basehead}', {
+            owner, repo, basehead: `${checkpointHead}...${pr.head.sha}`,
+        }).then(response => response.data).catch(error => {
+            // An unpublished checkpoint commit may not exist remotely yet.
+            if ((error as { status?: number }).status === 404) return undefined;
+            throw error;
+        });
+        if (!comparison) return;
+        if (comparison.status !== 'ahead' && comparison.status !== 'identical') return;
+        // Recover the mapping too when PR creation's acknowledgement was lost.
+        this.continuation = await findPRContinuation({ repoOwner: owner, repoName: repo, pullRequestNumber: pr.number }, this.octokit);
+        if (!this.continuation) throw new Error('Cannot resolve published continuation');
+        await this.markPublished(pr.head.sha);
+    }
+
     async prepare(worktreeDirName: string) {
         // Resolve an existing mapping before checking permissions: once adopted,
         // later requests must not silently switch back to the contributor's branch.

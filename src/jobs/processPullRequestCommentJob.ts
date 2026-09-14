@@ -371,16 +371,34 @@ export async function processPullRequestCommentJob(job: Job<CommentJobData>): Pr
     const taskId = job.id || `pr-comment-${pullRequestNumber}-${Date.now()}`;
     const stateManager = getStateManager();
     // Requests on either PR share the source lease so they cannot implement in parallel.
-    const continuation = await findPRContinuation(context);
-    const lockKey = `lock:pr:${repoOwner}:${repoName}:${continuation?.source_pr ?? pullRequestNumber}`;
+    const octokit = await getAuthenticatedOctokit();
+    const resolveLockKey = async () => {
+        const continuation = await findPRContinuation(context, octokit);
+        return `lock:pr:${repoOwner}:${repoName}:${continuation?.source_pr ?? pullRequestNumber}`;
+    };
+    let lockKey = await resolveLockKey();
     const lockToken = await ensurePRProcessingLockToken(job.data, correlationId, () => job.updateData(job.data));
 
-    const lockAcquired = await acquirePRLock({ lockKey, lockToken, correlatedLogger });
-    if (!lockAcquired) {
-        return handlePRCommentLockContention({
-            job, taskId, stateManager, redisClient, pickedUpComments: context.pickedUpComments,
-            correlatedLogger,
-        });
+    for (;;) {
+        const lockAcquired = await acquirePRLock({ lockKey, lockToken, correlatedLogger });
+        if (!lockAcquired) {
+            return handlePRCommentLockContention({
+                job, taskId, stateManager, redisClient, pickedUpComments: context.pickedUpComments,
+                correlatedLogger,
+            });
+        }
+        let resolvedLockKey: string;
+        try {
+            resolvedLockKey = await resolveLockKey();
+        } catch (error) {
+            await releasePRProcessingLock(redisClient, lockKey, lockToken);
+            throw error;
+        }
+        if (resolvedLockKey === lockKey) break;
+        // Adoption may have become visible while acquiring the lease. Do no work
+        // under the continuation's own lease; acquire and revalidate the source.
+        await releasePRProcessingLock(redisClient, lockKey, lockToken);
+        lockKey = resolvedLockKey;
     }
 
     const recovery = await evaluatePRCommentPreExecutionRecovery({
@@ -408,7 +426,7 @@ export async function processPullRequestCommentJob(job: Job<CommentJobData>): Pr
 
     try {
         // Re-read under the shared lease: implementation may have adopted while queued.
-        state.octokit = await getAuthenticatedOctokit();
+        state.octokit = octokit;
         const recovered = await runWithExecutionAbortSignal(executionController.signal,
             () => recoverPendingPublication({ job, context, llm, taskId, stateManager, state, lockKey, lockToken }, redisClient), hashTaskAttemptToken(lockToken));
         if (recovered) return recovered;

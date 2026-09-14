@@ -34,9 +34,26 @@ export interface PullRequestReference {
 type Octokit = Awaited<ReturnType<typeof getAuthenticatedOctokit>>;
 const repositoryKey = (ref: PullRequestReference) => `${ref.repoOwner}/${ref.repoName}`.toLowerCase();
 
-export async function findPRContinuation(ref: PullRequestReference): Promise<ContinuationRecord | undefined> {
-    return db<ContinuationRecord>('pr_continuations').where({ repository: repositoryKey(ref) })
+export async function findPRContinuation(ref: PullRequestReference, octokit?: Octokit): Promise<ContinuationRecord | undefined> {
+    const mapped = await db<ContinuationRecord>('pr_continuations').where({ repository: repositoryKey(ref) })
         .andWhere(builder => builder.where({ source_pr: ref.pullRequestNumber }).orWhere({ continuation_pr: ref.pullRequestNumber })).first();
+    if (mapped || !octokit) return mapped;
+    // GitHub can expose the PR before the creating worker receives its response.
+    // Resolve its durable reservation before choosing a processing lease.
+    const reservations = await db<ContinuationRecord>('pr_continuations')
+        .where({ repository: repositoryKey(ref) }).whereNull('continuation_pr');
+    if (!reservations.length) return;
+    const { data: pr } = await octokit.request('GET /repos/{owner}/{repo}/pulls/{pull_number}', {
+        owner: ref.repoOwner, repo: ref.repoName, pull_number: ref.pullRequestNumber,
+    });
+    const record = reservations.find(candidate =>
+        pr.head.repo?.full_name.toLowerCase() === candidate.repository &&
+        pr.base.ref === candidate.base_branch &&
+        (pr.head.ref === candidate.branch_name || pr.body?.includes(`<!-- propr-continuation:${candidate.source_pr}:${candidate.source_sha} -->`)));
+    if (!record) return;
+    await db('pr_continuations').where({ repository: record.repository, source_pr: record.source_pr })
+        .whereNull('continuation_pr').update({ continuation_pr: pr.number, continuation_url: pr.html_url });
+    return findPRContinuation(ref);
 }
 
 export function continuationTarget(record: ContinuationRecord): PullRequestGitTarget {

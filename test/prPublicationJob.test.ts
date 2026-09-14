@@ -4,6 +4,9 @@ import { beforeEach, mock, test } from 'node:test';
 let events: string[] = [];
 let continuation: { source_pr: number; continuation_pr: number; branch_name: string } | undefined;
 let preparationError: Error | undefined;
+let onLockAcquired: (() => void) | undefined;
+let blockedLock: string | undefined;
+let resolutionError: Error | undefined;
 let handledStartingComment: unknown;
 const log = { info() {}, warn() {}, error() {}, debug() {} };
 const stateManager = { updateTaskState: async () => {}, getTaskState: async () => null };
@@ -59,16 +62,16 @@ const modules: Record<string, Record<string, unknown>> = {
     prCommentPostExecution: { handlePostExecution: noOp },
     prTaskTitleHelpers: Object.fromEntries(['buildDeterministicPrTaskSubtitle', 'buildPrTaskTitle', 'buildPrTaskTitleContext', 'buildPrTaskTitleContextHistoryMetadata', 'getPrTaskWorkflowLabel', 'resolvePrTaskWorkflow'].map(name => [name, noOp])),
     prProcessingLock: {
-        acquirePRProcessingLock: async (_redis: unknown, key: string) => { events.push(key); return true; },
-        ensurePRProcessingLockToken: async () => 'token', releasePRProcessingLock: noOp,
+        acquirePRProcessingLock: async (_redis: unknown, key: string) => { events.push(key); if (key === blockedLock) return false; onLockAcquired?.(); return true; },
+        ensurePRProcessingLockToken: async () => 'token', releasePRProcessingLock: async (_redis: unknown, key: string) => { events.push(`release:${key}`); },
         startPRProcessingLockHeartbeat: () => noOp,
     },
-    prCommentCollisionRecovery: { createPRCommentTaskStateIfMissing: noOp, evaluatePRCommentPreExecutionRecovery: async () => ({}), handlePRCommentLockContention: noOp },
+    prCommentCollisionRecovery: { createPRCommentTaskStateIfMissing: noOp, evaluatePRCommentPreExecutionRecovery: async () => ({}), handlePRCommentLockContention: async () => ({ status: 'deferred' }) },
     prPublication: { PullRequestPublication: class {
         status = '';
         async prepare() { events.push('prepare'); throw preparationError; }
     } },
-    prContinuation: { findPRContinuation: async () => continuation, continuationStatus: () => 'Continue at https://github.com/upstream/project/pull/100' },
+    prContinuation: { findPRContinuation: async () => { if (resolutionError) throw resolutionError; return continuation; }, continuationStatus: () => 'Continue at https://github.com/upstream/project/pull/100' },
 };
 for (const [name, namedExports] of Object.entries(modules)) {
     await mock.module(`../src/jobs/${name}.js`, { namedExports });
@@ -79,6 +82,7 @@ const job = (commandMode = 'default', pullRequestNumber = 42) => ({
     data: { repoOwner: 'upstream', repoName: 'project', pullRequestNumber, commandMode, correlationId: 'correlation', commentId: 5, commentBody: 'Implement', commentAuthor: 'contributor' },
 });
 beforeEach(() => {
+    onLockAcquired = undefined; blockedLock = undefined; resolutionError = undefined;
     events = []; continuation = undefined; preparationError = undefined; handledStartingComment = undefined;
 });
 
@@ -113,4 +117,22 @@ test('review on the continuation keeps its own PR context and exact-head check g
     assert.ok(events.includes('check-gate'));
     assert.ok(events.includes('review:100'));
     assert.ok(!events.includes('stop'));
+});
+
+for (const contended of [false, true]) {
+    test(`mapping resolved after acquisition reacquires the source lock before processing (contention: ${contended})`, async () => {
+        onLockAcquired = () => { continuation = { source_pr: 42, continuation_pr: 100, branch_name: 'continuation' }; };
+        if (contended) blockedLock = 'lock:pr:upstream:project:42';
+        const result = await processPullRequestCommentJob(job('review', 100) as never);
+        assert.deepEqual(events.slice(0, 3), ['lock:pr:upstream:project:100', 'release:lock:pr:upstream:project:100', 'lock:pr:upstream:project:42']);
+        assert.equal(result.status, contended ? 'deferred' : 'complete');
+        assert.equal(events.includes('review:100'), !contended);
+        assert.ok(!events.includes('agent'));
+    });
+}
+
+test('failed mapping revalidation releases the acquired lock without processing', async () => {
+    onLockAcquired = () => { resolutionError = new Error('Mapping lookup failed'); };
+    await assert.rejects(processPullRequestCommentJob(job('review', 100) as never), /Mapping lookup failed/);
+    assert.deepEqual(events, ['lock:pr:upstream:project:100', 'release:lock:pr:upstream:project:100']);
 });

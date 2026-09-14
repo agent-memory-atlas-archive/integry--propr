@@ -53,7 +53,8 @@ export async function recoverPendingPublication(params: ExecuteProcessingParams,
     };
     const publication = state.publication = new PullRequestPublication(octokit, context, source as Contribution);
     publication.continuation = record;
-    if (record.publication_bundle) {
+    await publication.reconcilePublication();
+    if (publication.continuation.publication_bundle) {
         await ensureGitRepository(context.correlatedLogger);
         const prepared = await publication.prepare(`pr-${context.pullRequestNumber}-publication-${Date.now()}`);
         state.localRepoPath = prepared.localRepoPath;
