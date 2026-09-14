@@ -64,6 +64,7 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
   const desktop = useDesktop();
   const [desktopSidebarHidden, setDesktopSidebarHidden] = useState(false);
+  const hideSidebar = desktop && desktopSidebarHidden;
   useEffect(() => {
     if (!desktop) return;
     const handleCommand = (event: Event) => {
@@ -279,7 +280,7 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
   );
 
   return (
-    <div className={`${desktop && desktopSidebarHidden ? 'desktop-sidebar-hidden ' : ''}desktop-shell flex h-full min-h-0 flex-col overflow-hidden bg-light-100 relative`}>
+    <div className={`${hideSidebar ? 'desktop-sidebar-hidden ' : ''}desktop-shell flex h-full min-h-0 flex-col overflow-hidden bg-light-100 relative`}>
       <div className="desktop-shell-content relative flex min-h-0 flex-1 overflow-hidden">
       {desktop && <div className="desktop-connected-drag-region" aria-hidden="true" />}
       {/* Mobile Overlay */}
@@ -291,7 +292,7 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
       )}
 
       {/* Sidebar - Responsive */}
-      {!(desktop && desktopSidebarHidden) && <aside className={`
+      {!hideSidebar && <aside className={`
         fixed lg:static inset-y-0 left-0 z-30
         desktop-sidebar flex flex-col w-60 bg-white border-r border-gray-200 shadow-sm
         transform transition-transform duration-200 ease-in-out
