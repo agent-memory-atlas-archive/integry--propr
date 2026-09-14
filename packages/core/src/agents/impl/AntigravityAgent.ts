@@ -38,6 +38,7 @@ import {
 export { UsageLimitError };
 
 const ANALYSIS_AGENT_TANK_TIMEOUT_MS = parseInt(process.env.ANALYSIS_AGENT_TANK_TIMEOUT_MS || '2000', 10);
+const DEFAULT_ANTIGRAVITY_ANALYSIS_TIMEOUT_MS = 3600000;
 
 const DEFAULT_ANTIGRAVITY_TRANSCRIPT_ROOT = '/tmp/git-processor/propr-cache/transcripts/antigravity';
 
@@ -334,14 +335,15 @@ export class AntigravityAgent implements Agent {
         const startTime = Date.now();
         logger.info({ agentAlias: this.config.alias, promptLength: prompt.length, hasContext: !!context, requestedModel: model, taskId, executionType }, 'Running lightweight analysis via Antigravity agent...');
         const effectiveModel = model || 'antigravity-gemini-3.5-flash-medium';
+        const effectiveTimeoutMs = timeoutMs ?? DEFAULT_ANTIGRAVITY_ANALYSIS_TIMEOUT_MS;
         const suffix = buildAnalysisSafetySuffix(responseFormat, allowReadOnlyCommands, readOnlyWorkspacePath);
         const fullPrompt = context ? `${prompt}\n\nContext:\n${context}${suffix}` : `${prompt}${suffix}`;
         try {
-            const dockerArgs = this.buildDockerArgs({ worktreePath: readOnlyWorkspacePath || '/tmp/antigravity-analysis', githubToken: process.env.GITHUB_TOKEN || '', modelName: effectiveModel, issueNumber: 0, taskId, executionType, readOnlyWorkspace: !!readOnlyWorkspacePath, repositoryInspection: !!readOnlyWorkspacePath && allowReadOnlyCommands });
+            const dockerArgs = this.buildDockerArgs({ worktreePath: readOnlyWorkspacePath || '/tmp/antigravity-analysis', githubToken: process.env.GITHUB_TOKEN || '', modelName: effectiveModel, issueNumber: 0, taskId, executionType, readOnlyWorkspace: !!readOnlyWorkspacePath, repositoryInspection: !!readOnlyWorkspacePath && allowReadOnlyCommands, printTimeoutMs: effectiveTimeoutMs });
 
             const { result, usageMetrics } = await executeWithUsageTracking(
                 this.getRuntimeName(),
-                async () => executeDockerCommand('docker', dockerArgs, { timeout: timeoutMs ?? 1800000, stdinData: fullPrompt, taskId }),
+                async () => executeDockerCommand('docker', dockerArgs, { timeout: effectiveTimeoutMs, stdinData: fullPrompt, taskId }),
                 ANALYSIS_AGENT_TANK_TIMEOUT_MS
             );
             const executionTimeMs = Date.now() - startTime;
@@ -406,8 +408,8 @@ export class AntigravityAgent implements Agent {
         return ['set -e', `exec ${this.getCliCommand()} ${safetyArgs} "$@"`].join('\n');
     }
 
-    private buildDockerArgs(params: { worktreePath: string; githubToken: string; modelName?: string; issueNumber: number; environment?: Record<string, string>; taskId?: string; executionType?: string; transcriptPath?: string; readOnlyWorkspace?: boolean; repositoryInspection?: boolean; executionMode?: 'task' | 'goal'; resumeConversationId?: string }): string[] {
-        const { worktreePath, githubToken, modelName, issueNumber, environment, taskId, executionType, transcriptPath, readOnlyWorkspace = false, repositoryInspection = false, executionMode = 'task', resumeConversationId } = params;
+    private buildDockerArgs(params: { worktreePath: string; githubToken: string; modelName?: string; issueNumber: number; environment?: Record<string, string>; taskId?: string; executionType?: string; transcriptPath?: string; readOnlyWorkspace?: boolean; repositoryInspection?: boolean; executionMode?: 'task' | 'goal'; resumeConversationId?: string; printTimeoutMs?: number }): string[] {
+        const { worktreePath, githubToken, modelName, issueNumber, environment, taskId, executionType, transcriptPath, readOnlyWorkspace = false, repositoryInspection = false, executionMode = 'task', resumeConversationId, printTimeoutMs = this.timeoutMs } = params;
         const configPath = this.getHostConfigPath();
         const runtimeName = this.getRuntimeName();
         const dockerArgs = buildAntigravityDockerArgs({
@@ -420,6 +422,9 @@ export class AntigravityAgent implements Agent {
         // The prompt is delivered through non-TTY stdin, not as an argv element,
         // to avoid spawn E2BIG on large repo-context prompts. Only CLI flags such
         // as the model selection are appended here.
+        // Antigravity otherwise applies its own five-minute print-mode deadline,
+        // which can abort large plan prompts long before ProPR's execution timeout.
+        dockerArgs.push('--print-timeout', `${Math.max(1, Math.ceil(printTimeoutMs / 1000))}s`);
         if (modelName) {
             // Convert ProPR's namespaced id (e.g. 'antigravity-gpt-oss-120b-medium')
             // to the Antigravity CLI's native model name. Passing the prefixed id
