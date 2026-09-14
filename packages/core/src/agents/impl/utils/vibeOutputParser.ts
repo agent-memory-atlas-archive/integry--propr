@@ -206,7 +206,9 @@ function parseToolInput(input: unknown): unknown {
 }
 
 function buildTextItem(text: string, internalReasoning = false): ConversationContentItem {
-    return { type: 'text', text, ...(internalReasoning ? { internalReasoning: true } : {}) };
+    // Persist an explicit classification so narration is distinguishable from
+    // legacy Vibe text blocks that also contained unmarked reasoning.
+    return { type: 'text', text, internalReasoning };
 }
 
 function hasContentItems(items: ConversationContentItem[]): boolean {

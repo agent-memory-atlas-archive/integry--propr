@@ -221,7 +221,7 @@ describe('parseVibeOutput', () => {
             content: 'path: /home/node/workspace/vibe_test.py\ncontent: print("Hello from Vibe")',
             is_error: false
         }]);
-        assert.deepStrictEqual(conversationLog[3].message.content, [{ type: 'text', text: 'Updated vibe_test.py.' }]);
+        assert.deepStrictEqual(conversationLog[3].message.content, [{ type: 'text', text: 'Updated vibe_test.py.', internalReasoning: false }]);
         assert.ok(!JSON.stringify(conversationLog).includes('System prompt should not be logged'));
     });
 

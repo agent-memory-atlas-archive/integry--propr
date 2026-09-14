@@ -177,14 +177,44 @@ function compactNarration(content: string): string | null {
     : `${text.slice(0, MAX_ACTIVITY_MESSAGE_LENGTH - 1).trimEnd()}…`;
 }
 
+async function ambiguousPersistedText(deps: { db: Knex }, target: AgentActivityTarget): Promise<Set<string>> {
+  const ambiguous = new Set<string>();
+  if (!target.sessionId) return ambiguous;
+  const execution = await deps.db('llm_executions')
+    .where({ task_id: target.taskId, session_id: target.sessionId })
+    .orderBy('start_time', 'desc')
+    .first('execution_id');
+  if (!execution) return ambiguous;
+  const rows = await deps.db('llm_execution_details')
+    .where({ execution_id: execution.execution_id, event_type: 'assistant' })
+    .select('content', 'event_timestamp');
+  for (const row of rows) {
+    try {
+      const message = JSON.parse(row.content);
+      // Legacy Vibe messages persisted only id/content/usage, flattening both
+      // reasoning_content and narration into text. Without a classification
+      // these blocks are ambiguous; native Claude message envelopes retain role.
+      if (message?.role === 'assistant' || !Array.isArray(message?.content)) continue;
+      for (const block of message.content) {
+        if (block?.type === 'text' && block.internalReasoning === undefined && typeof block.text === 'string') {
+          ambiguous.add(JSON.stringify([isoTimestamp(row.event_timestamp, null), block.text]));
+        }
+      }
+    } catch { /* Malformed stored content is handled by the existing projection. */ }
+  }
+  return ambiguous;
+}
+
 function projectNarration(
   events: Array<Record<string, unknown>>,
   fallbackTimestamp: string | null,
   includeReasoningSummaries = false,
+  ambiguousText = new Set<string>(),
 ): IndexedActivity[] {
   const projected = events.flatMap((event, index): IndexedActivity[] => {
     if (!['thought', 'message'].includes(String(event.type)) || event.rawFallback === true) return [];
     if (event.internalReasoning === true && !(includeReasoningSummaries && event.reasoningSummary === true)) return [];
+    if (ambiguousText.has(JSON.stringify([isoTimestamp(event.timestamp, fallbackTimestamp), event.content]))) return [];
     const message = typeof event.content === 'string' ? compactNarration(event.content) : null;
     const timestamp = isoTimestamp(event.timestamp, fallbackTimestamp);
     return message && timestamp ? [{ index, timestamp, message }] : [];
@@ -210,7 +240,8 @@ export async function getAgentActivity(
     target.taskId,
     { sessionId: target.sessionId, limitEvents: false },
   );
-  const entries = projectNarration(live?.events ?? [], target.fallbackTimestamp, args.includeReasoningSummaries);
+  const ambiguousText = await ambiguousPersistedText(deps, target);
+  const entries = projectNarration(live?.events ?? [], target.fallbackTimestamp, args.includeReasoningSummaries, ambiguousText);
   const activity = entries
     .slice(args.offset, args.offset + args.limit)
     .map(({ timestamp, message }) => ({ timestamp, message }));

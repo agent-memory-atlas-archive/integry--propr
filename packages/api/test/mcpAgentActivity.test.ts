@@ -2,11 +2,12 @@ import assert from 'node:assert/strict';
 import test, { after } from 'node:test';
 import knex from 'knex';
 import type { RedisClientType } from 'redis';
-import { closeConnection } from '@propr/core';
+import { closeConnection, parseVibeConversationLog } from '@propr/core';
 import type { McpPolicy, McpPrincipal } from '../mcp/policy.js';
 import { createToolCatalog, type ToolDeps } from '../mcp/tools.js';
 import { getAgentActivity } from '../mcp/agentActivity.js';
 import { parseAgentStreamOutput } from '../services/agentStreamProjection.js';
+import { projectTaskLiveDetails } from '../routes/liveDetailsRoutes.js';
 
 const directGoalId = '11111111-1111-4111-8111-111111111111';
 const orchestratedGoalId = '22222222-2222-4222-8222-222222222222';
@@ -45,6 +46,10 @@ async function createActivityDatabase() {
     table.string('task_id');
     table.string('session_id');
     table.timestamp('start_time');
+    table.integer('input_tokens');
+    table.integer('output_tokens');
+    table.integer('cache_creation_input_tokens');
+    table.integer('cache_read_input_tokens');
   });
   await db.schema.createTable('llm_execution_details', table => {
     table.increments('detail_id').primary();
@@ -73,6 +78,62 @@ async function createActivityDatabase() {
   ]);
   return db;
 }
+
+test('activity database fallback excludes unclassified legacy Vibe text', async () => {
+  const db = await createActivityDatabase();
+  const redisClient = { get: async () => null } as unknown as RedisClientType;
+  const timestamp = '2026-09-13T10:00:01.000Z';
+  const sessionId = 'vibe-persisted-session';
+  // Pre-change parseVibeConversationLog output, serialized by the execution
+  // writer as JSON.stringify(step.message), with no original transcript metadata.
+  const legacyMessages = [
+    { id: 'provider-assigned-id', content: [
+      { type: 'text', text: 'Private reasoning from a legacy Vibe execution.' },
+      { type: 'text', text: 'Ambiguous legacy narration.' },
+      { type: 'tool_use', id: 'todo', name: 'TodoWrite', input: {
+        todos: [{ content: 'Verify persisted activity', status: 'in_progress' }],
+      } },
+    ], usage: { input_tokens: 10, output_tokens: 20 } },
+    { id: 'vibe-assistant-1', content: [{ type: 'text', text: 'Private reasoning without narration.' }] },
+  ];
+  const currentMessage = parseVibeConversationLog(JSON.stringify({
+    role: 'assistant', reasoning_content: 'Private reasoning from a new execution.',
+    content: 'Classified Vibe narration.',
+  }))[0].message;
+  const claudeMessage = {
+    id: 'msg-claude', type: 'message', role: 'assistant', model: 'claude',
+    content: [{ type: 'text', text: 'Persisted Claude narration.' }],
+  };
+  try {
+    await db('goals').where({ goal_id: directGoalId }).update({ session_id: sessionId });
+    await db('llm_executions').insert({
+      execution_id: 'vibe-execution', task_id: 'goal-task-direct', session_id: sessionId, start_time: timestamp,
+    });
+    await db('llm_execution_details').insert([...legacyMessages, currentMessage, claudeMessage].map((message, index) => ({
+      execution_id: 'vibe-execution', sequence_number: index, event_type: 'assistant',
+      event_timestamp: timestamp, content: JSON.stringify(message), metadata: null,
+    })));
+    const persisted = await projectTaskLiveDetails(redisClient, db, 'goal-task-direct', { sessionId });
+    assert.ok(persisted?.events.some(event => event.content === legacyMessages[0].content[0].text),
+      'exercise the actual execution-detail fallback, retaining legacy text for existing consumers');
+    for (const target of [{ goalId: directGoalId }, { taskId: 'goal-task-direct' }]) {
+      for (const includeReasoningSummaries of [false, true]) {
+        const result = await getAgentActivity({ db, redisClient }, {
+          repository, ...target, includeReasoningSummaries, offset: 0, limit: 20,
+        }, 'owner-1');
+        assert.deepEqual(result.activity, [
+          { timestamp, message: 'Persisted Claude narration.' },
+          { timestamp, message: 'Classified Vibe narration.' },
+        ]);
+        assert.equal(result.currentFocus, 'Verify persisted activity');
+        assert.equal(result.nextOffset, null);
+        assert.doesNotMatch(JSON.stringify(result), /Private reasoning|Ambiguous legacy narration/);
+      }
+    }
+  } finally {
+    await db.destroy();
+  }
+});
 
 test('get_agent_activity returns compact newest-first narration for direct and orchestrated goals', async () => {
   const db = await createActivityDatabase();
