@@ -4,7 +4,7 @@ import { createServer } from 'node:http';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { zstdCompressSync } from 'node:zlib';
-import { describe, it } from 'node:test';
+import { before, describe, it } from 'node:test';
 import { prepareNativeElectronTest } from './electron-native-test-setup.mjs';
 
 const fixture = resolve(dirname(fileURLToPath(import.meta.url)), 'electron-pairing-zstd-probe.cjs');
@@ -42,12 +42,17 @@ const runFixture = (command, args) => new Promise((resolveRun, rejectRun) => {
 });
 
 describe('Electron pairing response compression', () => {
+  let setup;
+  // A cold Electron download belongs to setup, not the fixture's 25s budget.
+  before(() => {
+    // This probe uses only the main-process Session API, so Chromium's native
+    // headless backend is sufficient when a Linux worker has no display.
+    setup = prepareNativeElectronTest({ allowHeadlessLinux: true });
+  }, { timeout: 120_000 });
+
   it('negotiates and transparently decodes zstd through defaultSession.fetch', {
     timeout: 25_000,
   }, async context => {
-    // This probe uses only the main-process Session API, so Chromium's native
-    // headless backend is sufficient when a Linux worker has no display.
-    const setup = prepareNativeElectronTest({ allowHeadlessLinux: true });
     if ('skipReason' in setup) {
       context.skip(setup.skipReason);
       return;

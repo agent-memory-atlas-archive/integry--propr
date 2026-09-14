@@ -124,34 +124,39 @@ describe('useHeaderStats live recovery', () => {
     vi.mocked(getDrafts).mockReturnValueOnce(initialDrafts.promise);
 
     const { result } = renderHook(() => useHeaderStats());
-    await waitFor(() => {
-      expect(getQueueStats).toHaveBeenCalledTimes(1);
-      expect(getDrafts).toHaveBeenCalledTimes(1);
-      expect(getTasks).toHaveBeenCalledTimes(1);
-      expect(getSystemStatus).toHaveBeenCalledTimes(1);
-    });
+    try {
+      await waitFor(() => {
+        expect(getQueueStats).toHaveBeenCalledTimes(1);
+        expect(getDrafts).toHaveBeenCalledTimes(1);
+        expect(getTasks).toHaveBeenCalledTimes(1);
+        expect(getSystemStatus).toHaveBeenCalledTimes(1);
+      });
 
-    act(() => socketState.queueCallbacks.forEach(callback => callback(queuePush(1))));
-    await waitFor(() => expect(getQueueStats).toHaveBeenCalledTimes(2));
-    expect(result.current.resourceStatuses.queue).toBe('available');
-    expect(result.current.resourceStatuses.drafts).toBe('checking');
-    expect(result.current.isLoading).toBe(true);
-
-    await act(async () => initialDrafts.resolve({
-      drafts: [{
-        draft_id: 'draft-from-initial-read',
-        repository: 'integry/propr',
-        name: 'Initial plan',
-        initial_prompt: 'Must not be discarded by the queue refresh',
-        status: 'generating',
-        created_at: '2026-09-13T00:00:00.000Z',
-        updated_at: '2026-09-13T00:00:00.000Z',
-      }],
-      total: 1,
-      page: 1,
-      limit: 20,
-      hasMore: false,
-    }));
+      act(() => socketState.queueCallbacks.forEach(callback => callback(queuePush(1))));
+      await waitFor(() => expect(getQueueStats).toHaveBeenCalledTimes(2));
+      // A request starting does not mean React has committed its response.
+      await waitFor(() => expect(result.current.resourceStatuses.queue).toBe('available'));
+      expect(result.current.resourceStatuses.drafts).toBe('checking');
+      expect(result.current.isLoading).toBe(true);
+    } finally {
+      // Always settle the shared read, even if an assertion fails. Otherwise
+      // the coordinator can keep later tests attached to this pending promise.
+      await act(async () => initialDrafts.resolve({
+        drafts: [{
+          draft_id: 'draft-from-initial-read',
+          repository: 'integry/propr',
+          name: 'Initial plan',
+          initial_prompt: 'Must not be discarded by the queue refresh',
+          status: 'generating',
+          created_at: '2026-09-13T00:00:00.000Z',
+          updated_at: '2026-09-13T00:00:00.000Z',
+        }],
+        total: 1,
+        page: 1,
+        limit: 20,
+        hasMore: false,
+      }));
+    }
 
     await waitFor(() => expect(result.current.activePlans.map(plan => plan.draft_id))
       .toEqual(['draft-from-initial-read']));
@@ -408,6 +413,8 @@ describe('useHeaderStats live recovery', () => {
       timestamp: '2026-09-13T00:01:05.000Z',
     })));
 
+    // Request counts can update before React commits the recovered snapshot.
+    // Wait for both state changes before checking the reconciliation counts.
     await waitFor(() => {
       expect(result.current.activePlans.map(draft => draft.draft_id)).toEqual(['draft-created-offline']);
       expect(result.current.systemHealth.redis).toBe('Disconnected');
