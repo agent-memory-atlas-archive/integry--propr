@@ -12,6 +12,7 @@ const socketState = vi.hoisted(() => ({
   draftCallbacks: new Set<(payload: DraftUpdatePayload) => void>(),
 }));
 const runtimeState = vi.hoisted(() => ({ isDesktop: true }));
+const identityState = vi.hoisted(() => ({ configuration: 'instance-a', userId: 'user-a' }));
 
 vi.mock('../api/proprApi', () => ({
   getQueueStats: vi.fn(),
@@ -20,7 +21,13 @@ vi.mock('../api/proprApi', () => ({
 }));
 
 vi.mock('../api/plannerApi', () => ({ getDrafts: vi.fn() }));
+vi.mock('../api/apiClient', () => ({
+  getDesktopSocketConfigurationKey: () => identityState.configuration,
+}));
 vi.mock('../config/runtimeMode', () => ({ isDesktopRuntime: () => runtimeState.isDesktop }));
+vi.mock('../contexts/AuthContext', () => ({
+  useCurrentUser: () => ({ id: identityState.userId }),
+}));
 vi.mock('../contexts/useSocket', () => ({
   useSocket: () => ({
     isConnected: socketState.isConnected,
@@ -98,6 +105,8 @@ describe('useHeaderStats live recovery', () => {
     socketState.taskCallbacks.clear();
     socketState.draftCallbacks.clear();
     runtimeState.isDesktop = true;
+    identityState.configuration = 'instance-a';
+    identityState.userId = 'user-a';
     vi.mocked(getQueueStats).mockResolvedValue(queueSnapshot([activeJob]) as never);
     vi.mocked(getDrafts).mockResolvedValue({ drafts: [], total: 0, page: 1, limit: 20, hasMore: false });
     vi.mocked(getTasks).mockResolvedValue({ tasks: [] });
@@ -108,6 +117,72 @@ describe('useHeaderStats live recovery', () => {
     vi.useRealTimers();
     vi.clearAllMocks();
     localStorage.clear();
+  });
+
+  it('commits untouched initial resources when a partial live refresh supersedes queue', async () => {
+    const initialDrafts = deferred<Awaited<ReturnType<typeof getDrafts>>>();
+    vi.mocked(getDrafts).mockReturnValueOnce(initialDrafts.promise);
+
+    const { result } = renderHook(() => useHeaderStats());
+    try {
+      await waitFor(() => {
+        expect(getQueueStats).toHaveBeenCalledTimes(1);
+        expect(getDrafts).toHaveBeenCalledTimes(1);
+        expect(getTasks).toHaveBeenCalledTimes(1);
+        expect(getSystemStatus).toHaveBeenCalledTimes(1);
+      });
+
+      act(() => socketState.queueCallbacks.forEach(callback => callback(queuePush(1))));
+      await waitFor(() => expect(getQueueStats).toHaveBeenCalledTimes(2));
+      // A request starting does not mean React has committed its response.
+      await waitFor(() => expect(result.current.resourceStatuses.queue).toBe('available'));
+      expect(result.current.resourceStatuses.drafts).toBe('checking');
+      expect(result.current.isLoading).toBe(true);
+    } finally {
+      // Always settle the shared read, even if an assertion fails. Otherwise
+      // the coordinator can keep later tests attached to this pending promise.
+      await act(async () => initialDrafts.resolve({
+        drafts: [{
+          draft_id: 'draft-from-initial-read',
+          repository: 'integry/propr',
+          name: 'Initial plan',
+          initial_prompt: 'Must not be discarded by the queue refresh',
+          status: 'generating',
+          created_at: '2026-09-13T00:00:00.000Z',
+          updated_at: '2026-09-13T00:00:00.000Z',
+        }],
+        total: 1,
+        page: 1,
+        limit: 20,
+        hasMore: false,
+      }));
+    }
+
+    await waitFor(() => expect(result.current.activePlans.map(plan => plan.draft_id))
+      .toEqual(['draft-from-initial-read']));
+    expect(result.current.resourceStatuses).toEqual({
+      queue: 'available', drafts: 'available', tasks: 'available', status: 'available',
+    });
+    expect(result.current.isLoading).toBe(false);
+    expect(getDrafts).toHaveBeenCalledTimes(1);
+    expect(getTasks).toHaveBeenCalledTimes(1);
+    expect(getSystemStatus).toHaveBeenCalledTimes(1);
+  });
+
+  it('retries only an independently failed initial resource', async () => {
+    vi.mocked(getDrafts)
+      .mockRejectedValueOnce(new Error('Drafts temporarily unavailable'))
+      .mockResolvedValueOnce({ drafts: [], total: 0, page: 1, limit: 20, hasMore: false });
+
+    const { result } = renderHook(() => useHeaderStats());
+
+    await waitFor(() => expect(getDrafts).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(result.current.resourceStatuses.drafts).toBe('available'));
+    expect(result.current.resourceStatuses.tasks).toBe('available');
+    expect(result.current.error).toBeNull();
+    expect(getQueueStats).toHaveBeenCalledTimes(1);
+    expect(getTasks).toHaveBeenCalledTimes(1);
+    expect(getSystemStatus).toHaveBeenCalledTimes(1);
   });
 
   it('reconciles a successful completion to zero from the queue subscription', async () => {
