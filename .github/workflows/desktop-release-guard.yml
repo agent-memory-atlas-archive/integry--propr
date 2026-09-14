@@ -234,7 +234,7 @@ jobs:
           test ! -e packages/shared/dist
           test ! -e packages/client/dist
           test ! -e apps/desktop/out
-          npm run desktop:package
+          bash scripts/retry-transient-download.sh npm run desktop:package
 
       - name: Verify packaged Linux and macOS native icon assets and metadata
         if: matrix.platform == 'linux' || matrix.platform == 'darwin'
@@ -738,7 +738,7 @@ jobs:
           test ! -e packages/shared/dist
           test ! -e packages/client/dist
           test ! -e apps/desktop/out
-          npm run desktop:package
+          bash scripts/retry-transient-download.sh npm run desktop:package
 
       - name: Verify signed packaged Linux and macOS native icon assets and metadata
         shell: bash
