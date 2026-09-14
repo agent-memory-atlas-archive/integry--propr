@@ -147,12 +147,14 @@ export function summarizeGoal(row: JsonObject, now = Date.now()): JsonObject {
   const artifacts = parseArray(row.artifact_refs);
   const prNumber = positiveInteger(row.final_pr_number);
   const finalPr = artifacts.find(artifact => artifact.type === 'pull_request' && positiveInteger(artifact.number) === prNumber);
+  const title = compactText(row.title, TITLE_LIMIT) ?? compactText(row.objective, TITLE_LIMIT) ?? 'Untitled goal';
+  const summary = compactText(row.objective);
 
   return {
     goal_id: row.goal_id,
     repository: row.repository,
-    title: compactText(row.title, TITLE_LIMIT) ?? compactText(row.objective, TITLE_LIMIT) ?? 'Untitled goal',
-    summary: compactText(row.objective),
+    title,
+    summary: summary === title ? null : summary,
     state,
     desired_state: row.desired_state,
     result_state: row.result_state ?? null,
@@ -229,11 +231,13 @@ export function summarizePlan(row: JsonObject, issues: JsonObject[], now = Date.
 
 export function summarizeTodo(row: JsonObject): JsonObject {
   const linkedPlanId = text(row.linked_draft_id);
+  const title = compactText(row.content, TITLE_LIMIT) ?? 'Untitled TODO';
+  const summary = compactText(row.content);
   return {
     todo_id: row.todo_id,
     repository: row.repository,
-    title: compactText(row.content, TITLE_LIMIT) ?? 'Untitled TODO',
-    summary: compactText(row.content),
+    title,
+    summary: summary === title ? null : summary,
     is_completed: Boolean(row.is_completed),
     category: row.category_id ? { id: row.category_id, name: compactText(row.category_name, 100) } : null,
     linked_plan: linkedPlanId ? {

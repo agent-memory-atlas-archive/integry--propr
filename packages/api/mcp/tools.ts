@@ -48,14 +48,17 @@ export interface McpTool {
 export interface ToolDeps { db: Knex; taskQueue: Queue; redisClient: RedisClientType; runtimeBuildQueue: Queue; policy: McpPolicy; goalServices?: Omit<Parameters<typeof createGoalRoutes>[0], 'db' | 'taskQueue' | 'redisClient'> }
 export const ok = (data: unknown): OperationResult => ({ status: 200, data });
 
-async function markMergedPullRequests(db: Knex, repository: string, items: Record<string, unknown>[]): Promise<void> {
-  const numbers = [...new Set(items.map(item => Number(item.pr_number))
+export async function markMergedPullRequests(
+  db: Knex, repository: string, items: Record<string, unknown>[],
+  fields = { number: 'pr_number', state: 'pr_state' },
+): Promise<void> {
+  const numbers = [...new Set(items.map(item => Number(item[fields.number]))
     .filter(number => Number.isSafeInteger(number) && number > 0))];
   if (!numbers.length) return;
   const rows = await db('notification_pull_request_state').where({ repository })
     .whereIn('pr_number', numbers).whereNotNull('merged_at').select('pr_number');
   const merged = new Set(rows.map(row => Number(row.pr_number)));
-  for (const item of items) if (merged.has(Number(item.pr_number))) item.pr_state = 'merged';
+  for (const item of items) if (merged.has(Number(item[fields.number]))) item[fields.state] = 'merged';
 }
 
 export function createToolCatalog(deps: ToolDeps): McpTool[] {
@@ -127,26 +130,28 @@ export function createToolCatalog(deps: ToolDeps): McpTool[] {
   const taskTarget = { table: 'tasks', column: 'task_id', arg: 'taskId' };
   const taskColumns = ['task_id', 'repository', 'issue_number', 'task_type', 'created_at'];
   tools.push({ name: 'list_tasks', description: 'List compact task summaries, execution timing and pull request context, excluding other users’ private goal tasks.', scope: 'read', readOnly: true, schema: z.object({ repository: repositorySchema, ...pageShape }).strict(), run: async ({ principal, args }) => {
-    const latestHistory = db('task_history').select('task_id', 'state', 'timestamp', 'reason', 'metadata',
-      db.raw('ROW_NUMBER() OVER(PARTITION BY task_id ORDER BY history_id DESC) AS row_number')).as('latest_history');
-    const taskStarts = db('task_history').select('task_id').min('timestamp as started_at')
-      .whereIn('state', ['processing', 'claude_execution', 'post_processing']).groupBy('task_id').as('task_starts');
-    const planIssues = db('plan_issues').select('task_id').max('pr_number as plan_pr_number')
-      .max('status as plan_issue_status').max('agent_alias as plan_agent_alias').max('model_name as plan_model_name')
-      .whereNotNull('task_id').groupBy('task_id').as('task_plan_issue');
-    const query = db('tasks').where({ 'tasks.repository': args.repository })
-      .leftJoin(latestHistory, join => join.on('latest_history.task_id', '=', 'tasks.task_id').andOn('latest_history.row_number', '=', db.raw('?', [1])))
-      .leftJoin(taskStarts, 'task_starts.task_id', 'tasks.task_id')
-      .leftJoin(planIssues, 'task_plan_issue.task_id', 'tasks.task_id');
+    // Correlated indexed lookups avoid materializing history for unrelated tasks.
+    const latestHistoryId = db('task_history').select('history_id')
+      .where('task_id', db.ref('tasks.task_id')).orderBy('history_id', 'desc').limit(1);
+    const taskStart = db('task_history').min('timestamp')
+      .where('task_id', db.ref('tasks.task_id')).whereIn('state', ['processing', 'claude_execution', 'post_processing']);
+    // Keep PR state and agent/model fields from the same latest relation row.
+    const latestPlanIssueId = db('plan_issues').select('id')
+      .where('task_id', db.ref('tasks.task_id')).orderBy('id', 'desc').limit(1);
+    const query = db('tasks').where({ 'tasks.repository': args.repository });
     query.whereNotIn('tasks.task_id', db('goals').select('current_task_id').whereNot('owner_id', principal.user.id).whereNotNull('current_task_id'));
     query.andWhere(builder => builder.whereNot('tasks.task_type', 'goal').orWhereIn('tasks.task_id', db('goals').select('current_task_id').where({ owner_id: principal.user.id })));
-    const rows = await query.select('tasks.task_id', 'tasks.repository', 'tasks.issue_number', 'tasks.task_type',
-      'tasks.model_name', 'tasks.pr_number', 'tasks.initial_job_data', 'tasks.created_at',
-      'latest_history.state', 'latest_history.timestamp as updated_at', 'latest_history.reason as state_reason',
-      'latest_history.metadata as state_metadata',
-      'task_starts.started_at', 'task_plan_issue.plan_pr_number', 'task_plan_issue.plan_issue_status',
-      'task_plan_issue.plan_agent_alias', 'task_plan_issue.plan_model_name')
-      .orderBy('tasks.created_at', 'desc').orderBy('tasks.task_id', 'desc').offset(args.offset).limit(args.limit);
+    // Apply visibility and pagination before looking up history or plan relations.
+    const taskPage = query.select(...taskColumns, 'model_name', 'pr_number', 'initial_job_data')
+      .orderBy('tasks.created_at', 'desc').orderBy('tasks.task_id', 'desc').offset(args.offset).limit(args.limit).as('tasks');
+    const rows = await db.from(taskPage)
+      .leftJoin('task_history as latest_history', 'latest_history.history_id', db.raw('(?)', [latestHistoryId]))
+      .leftJoin('plan_issues as task_plan_issue', 'task_plan_issue.id', db.raw('(?)', [latestPlanIssueId]))
+      .select('tasks.*', 'latest_history.state', 'latest_history.timestamp as updated_at', 'latest_history.reason as state_reason',
+        'latest_history.metadata as state_metadata', taskStart.as('started_at'),
+        'task_plan_issue.pr_number as plan_pr_number', 'task_plan_issue.status as plan_issue_status',
+        'task_plan_issue.agent_alias as plan_agent_alias', 'task_plan_issue.model_name as plan_model_name')
+      .orderBy('tasks.created_at', 'desc').orderBy('tasks.task_id', 'desc');
     const tasks = rows.map(row => summarizeTask(row));
     await markMergedPullRequests(db, args.repository, tasks);
     return ok({ tasks, nextOffset: rows.length === args.limit ? args.offset + args.limit : null });

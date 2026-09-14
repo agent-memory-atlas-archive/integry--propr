@@ -4,7 +4,7 @@ import { loadAgents, loadSyntheticAgents } from '@propr/core';
 import type { createPlannerRoutes } from '../routes/plannerRoutes.js';
 import { McpError } from './config.js';
 import { callWorkflow } from './adapter.js';
-import { type McpTool, type ToolDeps, planShape, mutationShape, pageShape, repositorySchema, textSchema, idSchema, ok, workflow } from './tools.js';
+import { type McpTool, type ToolDeps, planShape, mutationShape, pageShape, repositorySchema, textSchema, idSchema, ok, workflow, markMergedPullRequests } from './tools.js';
 import { planRelationLimit, summarizePlan } from './listSummaries.js';
 
 const target = { table: 'task_drafts', column: 'draft_id', arg: 'planId', owner: 'user_id' };
@@ -35,6 +35,8 @@ export function addPlanningTools(tools: McpTool[], deps: ToolDeps, planner: Retu
       const now = Date.now();
       const relationLimit = planRelationLimit(rows.length);
       const plans = rows.map(row => summarizePlan(row, issuesByPlan.get(row.draft_id) ?? [], now, relationLimit));
+      const pullRequests = plans.flatMap(plan => plan.pull_requests as Record<string, unknown>[]);
+      await markMergedPullRequests(db, args.repository, pullRequests, { number: 'number', state: 'state' });
       return ok({ plans, nextOffset: rows.length === args.limit ? args.offset + args.limit : null });
     } });
   tools.push({ name: 'get_plan', description: 'Read your plan, revision and published issue/task handles.', scope: 'read', readOnly: true, schema: z.object(planShape).strict(), target,

@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { after, test } from 'node:test';
 import { randomBytes } from 'node:crypto';
 import { createServer } from 'node:http';
+import { fileURLToPath } from 'node:url';
 import type { AddressInfo } from 'node:net';
 import express from 'express';
 import { Client, StreamableHTTPClientTransport } from '@modelcontextprotocol/client';
@@ -9,7 +10,7 @@ import { Client as LegacyClient } from '@modelcontextprotocol/sdk/client/index.j
 import { StreamableHTTPClientTransport as LegacyTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { createMcpHandler } from '@modelcontextprotocol/server';
 import { toNodeHandler } from '@modelcontextprotocol/node';
-import knex from 'knex';
+import knex, { type Knex } from 'knex';
 import { closeConnection } from '@propr/core';
 import { up as initial } from '../../core/src/db/migrations/20251216000000_initial_sqlite_schema.js';
 import { up as planIssues } from '../../core/src/db/migrations/20260120000000_add_plan_issues.js';
@@ -20,7 +21,7 @@ import { McpError } from '../mcp/config.js';
 import { McpPolicy, type McpPrincipal } from '../mcp/policy.js';
 import { buildMcpServer } from '../mcp/server.js';
 import { createToolCatalog, executeTool, type ToolDeps } from '../mcp/tools.js';
-import { compactText, planRelationLimit, summarizeGoal, summarizePlan, summarizeTask } from '../mcp/listSummaries.js';
+import { compactText, planRelationLimit, summarizeGoal, summarizePlan, summarizeTask, summarizeTodo } from '../mcp/listSummaries.js';
 
 after(async () => closeConnection());
 
@@ -140,6 +141,55 @@ test('MCP list summaries bound natural-language fields and tolerate legacy task 
   assert.ok(largePageBytes < 256 * 1024, `large plan page is ${largePageBytes} bytes`);
 });
 
+test('MCP task and goal pages with maximum-length summary fields stay below the response ceiling', () => {
+  const now = Date.UTC(2026, 8, 1, 12, 0, 5);
+  for (const character of ['x', '界']) {
+    const longText = character.repeat(1_000);
+    const common = {
+      repository: `${'r'.repeat(127)}/${'s'.repeat(127)}`,
+      created_at: '2026-09-01T12:00:00.000Z', updated_at: '2026-09-01T12:00:05.000Z',
+      started_at: '2026-09-01T12:00:01.000Z', completed_at: '2026-09-01T12:00:05.000Z',
+      model_name: longText, agent_alias: longText, failure_reason: longText,
+    };
+    const tasks = Array.from({ length: 100 }, (_, index) => summarizeTask({
+      ...common, task_id: `${index}`.padStart(255, 't'), task_type: 'pr_comment',
+      issue_number: Number.MAX_SAFE_INTEGER, pr_number: Number.MAX_SAFE_INTEGER, plan_issue_status: 'closed',
+      state: 'failed', state_reason: longText,
+      initial_job_data: { title: longText, subtitle: longText, agentAlias: longText },
+    }, now));
+    const goals = Array.from({ length: 100 }, (_, index) => summarizeGoal({
+      ...common, goal_id: `00000000-0000-4000-8000-${String(index).padStart(12, '0')}`,
+      current_task_id: `${index}`.padStart(255, 't'), title: longText, objective: longText,
+      desired_state: 'running', result_state: 'failed', effective_model: longText,
+      final_pr_number: Number.MAX_SAFE_INTEGER,
+      artifact_refs: [{ type: 'pull_request', number: Number.MAX_SAFE_INTEGER, state: 'closed' }],
+    }, now));
+    for (const [name, items] of [['tasks', tasks], ['goals', goals]] as const) {
+      const bytes = Buffer.byteLength(JSON.stringify({ [name]: items, nextOffset: 100 }));
+      assert.ok(bytes < 256 * 1024, `large ${name} page (${character}) is ${bytes} bytes`);
+      assert.ok(items.every(item => item.failure_reason && item.summary && item.completed_at));
+    }
+  }
+});
+
+test('MCP TODO and goal summaries omit duplicate text while retaining longer context', () => {
+  for (const content of ['Short item', '  Short   item  ', '界'.repeat(50)]) {
+    assert.equal(summarizeTodo({ content }).summary, null);
+    assert.equal(summarizeGoal({ title: null, objective: content }).summary, null);
+    assert.equal(summarizeGoal({ title: content, objective: content }).summary, null);
+  }
+  for (const content of ['x'.repeat(161), '界'.repeat(54), 'x'.repeat(1_000)]) {
+    for (const item of [summarizeTodo({ content }), summarizeGoal({ title: null, objective: content })]) {
+      assert.equal(item.title, compactText(content, 160));
+      assert.equal(item.summary, compactText(content));
+      assert.notEqual(item.summary, item.title);
+    }
+  }
+  assert.equal(summarizeGoal({ title: 'Short title', objective: 'Additional context' }).summary, 'Additional context');
+  assert.equal(summarizeTodo({}).summary, null);
+  assert.equal(summarizeGoal({}).summary, null);
+});
+
 test('both official SDK protocol eras execute real draft/revision/publication/task transitions over the same HTTP endpoint', async () => {
   const db = knex({ client: 'better-sqlite3', connection: { filename: ':memory:' }, useNullAsDefault: true });
   await initial(db); await planIssues(db); await mcpMigration(db);
@@ -223,83 +273,10 @@ test('both official SDK protocol eras execute real draft/revision/publication/ta
   } finally { server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())); await db.destroy(); }
 });
 
-test('MCP task, goal and plan lists paginate in deterministic newest-first order', async () => {
+test('MCP task, goal and plan lists paginate in deterministic newest-first order', async t => {
   const db = knex({ client: 'better-sqlite3', connection: { filename: ':memory:' }, useNullAsDefault: true });
-  await db.schema.createTable('tasks', table => {
-    table.string('task_id').primary();
-    table.string('repository').notNullable();
-    table.integer('issue_number');
-    table.string('task_type').notNullable();
-    table.string('model_name');
-    table.integer('pr_number');
-    table.text('initial_job_data');
-    table.timestamp('created_at').notNullable();
-  });
-  await db.schema.createTable('task_history', table => {
-    table.increments('history_id').primary();
-    table.string('task_id').notNullable();
-    table.string('state').notNullable();
-    table.timestamp('timestamp');
-    table.text('reason');
-    table.text('metadata');
-  });
-  await db.schema.createTable('goals', table => {
-    table.string('goal_id').primary();
-    table.string('owner_id').notNullable();
-    table.string('repository').notNullable();
-    table.string('title');
-    table.text('objective');
-    table.string('desired_state');
-    table.string('result_state');
-    table.string('current_task_id');
-    table.string('agent_alias');
-    table.string('requested_model');
-    table.string('effective_model');
-    table.integer('final_pr_number');
-    table.text('artifact_refs');
-    table.text('failure_reason');
-    table.timestamp('created_at').notNullable();
-    table.timestamp('updated_at').notNullable();
-    table.timestamp('started_at');
-    table.timestamp('completed_at');
-  });
-  await db.schema.createTable('task_drafts', table => {
-    table.string('draft_id').primary();
-    table.string('user_id').notNullable();
-    table.string('repository').notNullable();
-    table.string('name');
-    table.text('initial_prompt');
-    table.text('context_config');
-    table.text('generation_trace');
-    table.text('refinement_result');
-    table.string('status');
-    table.integer('mcp_revision');
-    table.boolean('paused');
-    table.timestamp('created_at').notNullable();
-    table.timestamp('updated_at').notNullable();
-  });
-  await db.schema.createTable('plan_issues', table => {
-    table.increments('id').primary();
-    table.string('draft_id');
-    table.string('task_id');
-    table.integer('pr_number');
-    table.string('status');
-    table.string('agent_alias');
-    table.string('model_name');
-  });
-  await db.schema.createTable('repo_todo_categories', table => {
-    table.increments('id').primary(); table.string('category_id'); table.string('user_id');
-    table.string('repository'); table.string('name'); table.integer('order_index');
-  });
-  await db.schema.createTable('repo_todos', table => {
-    table.increments('id').primary(); table.string('todo_id'); table.string('user_id');
-    table.string('repository'); table.string('category_id'); table.text('content');
-    table.integer('order_index'); table.boolean('is_completed'); table.string('linked_draft_id');
-    table.timestamp('created_at'); table.timestamp('updated_at');
-  });
-  await db.schema.createTable('notification_pull_request_state', table => {
-    table.string('repository'); table.integer('pr_number'); table.timestamp('merged_at');
-  });
+  t.after(() => db.destroy());
+  await db.migrate.latest({ directory: fileURLToPath(new URL('../../core/src/db/migrations/', import.meta.url)) });
 
   const repository = 'acme/repo';
   const newest = '2026-09-01 12:00:00';
@@ -313,6 +290,7 @@ test('MCP task, goal and plan lists paginate in deterministic newest-first order
       initial_job_data: JSON.stringify({ title: 'Make task lists self-explanatory', subtitle: 'Expose bounded lifecycle context', agentAlias: 'codex' }), created_at: newest },
   ]);
   await db('task_history').insert({ task_id: '10151', state: 'processing', timestamp: '2026-09-01 12:00:02' });
+  await db('task_history').insert({ task_id: '10151', state: 'claude_execution', timestamp: '2026-09-01 12:00:03' });
   await db('task_history').insert([
     ...['1024', '10149', '10150'].map(task_id => ({ task_id, state: 'completed', timestamp: newest })),
     { task_id: '10151', state: 'failed', timestamp: '2026-09-01 12:00:12', reason: 'Fixture agent stopped',
@@ -327,17 +305,31 @@ test('MCP task, goal and plan lists paginate in deterministic newest-first order
       desired_state: 'running', result_state: 'completed', current_task_id: 'goal-task-new-b', agent_alias: 'codex', requested_model: 'gpt-5.6',
       effective_model: 'gpt-5.6-codex', final_pr_number: 288, artifact_refs: JSON.stringify([{ type: 'pull_request', number: 288, state: 'closed' }]),
       created_at: newest, updated_at: '2026-09-01 12:00:20', started_at: '2026-09-01 12:00:01', completed_at: '2026-09-01 12:00:20' },
-  ]);
+  ].map(row => ({
+    desired_state: 'running', owner_login: 'tester', objective: 'Fixture objective', launch_strategy: 'direct', initial_prompt: 'Fixture prompt',
+    agent_id: 'codex', agent_alias: 'codex', agent_type: 'codex', requested_model: 'gpt-5.6', ...row,
+  })));
   await db('task_drafts').insert([
     { draft_id: 'plan-z-old', user_id: '123', repository, created_at: oldest, updated_at: oldest },
     { draft_id: 'plan-a-middle', user_id: '123', repository, created_at: middle, updated_at: middle },
-    { draft_id: 'plan-a-new', user_id: '123', repository, created_at: newest, updated_at: newest },
+    { draft_id: 'plan-a-new', user_id: '123', repository, status: 'failed',
+      generation_trace: JSON.stringify({}), refinement_result: JSON.stringify({ error: 'Refinement failed' }),
+      created_at: newest, updated_at: newest },
     { draft_id: 'plan-b-new', user_id: '123', repository, name: 'MCP list summaries', initial_prompt: 'Add compact summaries to list tools.',
       context_config: JSON.stringify({ generationModel: 'codex:gpt-5.6' }), status: 'merged', mcp_revision: 3, paused: false,
       created_at: newest, updated_at: '2026-09-01 12:00:30' },
+  ].map(row => ({ mcp_revision: 0, paused: false, ...row })));
+  await db('plan_issues').insert({ draft_id: 'plan-b-new', repository, issue_number: 88, task_id: '10151', pr_number: 188, status: 'closed', agent_alias: 'codex', model_name: 'gpt-5.6' });
+  await db('plan_issues').insert([
+    { draft_id: 'plan-a-middle', repository, issue_number: 90, task_id: '1024', pr_number: 999, status: 'merged', agent_alias: 'z-old', model_name: 'z-old' },
+    { draft_id: 'plan-a-middle', repository, issue_number: 91, task_id: '1024', pr_number: 288, status: 'closed', agent_alias: 'a-latest', model_name: 'a-latest' },
+    { draft_id: 'plan-a-middle', repository, issue_number: 92, pr_number: 289, status: 'under_review' },
   ]);
-  await db('plan_issues').insert({ draft_id: 'plan-b-new', task_id: '10151', pr_number: 188, status: 'closed', agent_alias: 'codex', model_name: 'gpt-5.6' });
-  await db('notification_pull_request_state').insert({ repository, pr_number: 288, merged_at: '2026-09-01 12:00:21' });
+  await db('notification_pull_request_state').insert([
+    { repository, pr_number: 288, merged_at: '2026-09-01T12:00:21.000Z' },
+    { repository, pr_number: 289, merged_at: '2026-09-01T12:00:21.000Z' },
+    { repository: 'other/repo', pr_number: 188, merged_at: '2026-09-01T12:00:21.000Z' },
+  ]);
   await db('repo_todo_categories').insert({ category_id: 'category-1', user_id: '123', repository, name: 'API', order_index: 0 });
   await db('repo_todos').insert({ todo_id: 'todo-1', user_id: '123', repository, category_id: 'category-1', content: 'Keep list payloads compact',
     order_index: 0, is_completed: false, linked_draft_id: 'plan-b-new', created_at: newest, updated_at: newest });
@@ -352,50 +344,69 @@ test('MCP task, goal and plan lists paginate in deterministic newest-first order
     return result.data as Record<string, any>; // eslint-disable-line @typescript-eslint/no-explicit-any
   };
 
-  try {
-    const taskPageOne = await page('list_tasks', 0);
-    const taskPageTwo = await page('list_tasks', taskPageOne.nextOffset);
-    assert.deepEqual(taskPageOne.tasks.map((task: { task_id: string }) => task.task_id), ['10151', '10150']);
-    assert.deepEqual(taskPageTwo.tasks.map((task: { task_id: string }) => task.task_id), ['10149', '1024']);
-    assert.equal(taskPageOne.tasks[1].pr_number, 188);
-    assert.equal(taskPageOne.tasks[1].pr_state, null);
-    assert.equal(taskPageTwo.tasks[0].pr_state, 'merged');
-    assert.deepEqual(taskPageOne.tasks[0], {
-      task_id: '10151', repository, issue_number: 88, task_type: 'issue', title: 'Make task lists self-explanatory',
-      summary: 'Expose bounded lifecycle context', state: 'failed', agent_alias: 'codex', model_name: 'gpt-5.6',
-      pr_number: 188, pr_state: 'closed', created_at: newest, updated_at: '2026-09-01 12:00:12',
-      started_at: '2026-09-01 12:00:02', completed_at: '2026-09-01 12:00:12', elapsed_ms: 10_000,
-      failure_reason: 'Agent exited before completing the requested edits',
-    });
+  const queries: Array<{ sql: string; bindings: readonly Knex.RawBinding[] }> = [];
+  const captureQuery = (query: { sql: string; bindings: readonly Knex.RawBinding[] }) => queries.push(query);
+  db.on('query', captureQuery);
+  const taskPageOne = await page('list_tasks', 0);
+  db.off('query', captureQuery);
+  const taskQuery = queries.find(query => query.sql.includes('latest_history'))!;
+  const queryPlan = await db.raw(`EXPLAIN QUERY PLAN ${taskQuery.sql}`, taskQuery.bindings);
+  const accessPlan = queryPlan.map((row: { detail: string }) => row.detail).join('\n');
+  assert.doesNotMatch(accessPlan, /SCAN task_history|MATERIALIZE latest_history/);
+  assert.match(accessPlan, /SEARCH task_history USING INDEX task_history_task_id_index/);
+  assert.match(accessPlan, /SEARCH plan_issues USING COVERING INDEX plan_issues_task_id_index/);
+  const taskPageTwo = await page('list_tasks', taskPageOne.nextOffset);
+  assert.deepEqual(taskPageOne.tasks.map((task: { task_id: string }) => task.task_id), ['10151', '10150']);
+  assert.deepEqual(taskPageTwo.tasks.map((task: { task_id: string }) => task.task_id), ['10149', '1024']);
+  assert.equal(taskPageOne.tasks[1].pr_number, 188);
+  assert.equal(taskPageOne.tasks[1].pr_state, null);
+  assert.equal(taskPageTwo.tasks[0].pr_state, 'merged');
+  assert.equal(taskPageTwo.tasks[1].pr_number, 288);
+  assert.equal(taskPageTwo.tasks[1].agent_alias, 'a-latest');
+  assert.equal(taskPageTwo.tasks[1].model_name, 'a-latest');
+  await db('notification_pull_request_state').where({ repository, pr_number: 288 }).delete();
+  assert.equal((await page('list_tasks', 2)).tasks[1].pr_state, 'closed');
+  await db('notification_pull_request_state').insert({ repository, pr_number: 288, merged_at: '2026-09-01T12:00:21.000Z' });
+  assert.deepEqual(taskPageOne.tasks[0], {
+    task_id: '10151', repository, issue_number: 88, task_type: 'issue', title: 'Make task lists self-explanatory',
+    summary: 'Expose bounded lifecycle context', state: 'failed', agent_alias: 'codex', model_name: 'gpt-5.6',
+    pr_number: 188, pr_state: 'closed', created_at: newest, updated_at: '2026-09-01 12:00:12',
+    started_at: '2026-09-01 12:00:02', completed_at: '2026-09-01 12:00:12', elapsed_ms: 10_000,
+    failure_reason: 'Agent exited before completing the requested edits',
+  });
 
-    const goalPageOne = await page('list_goals', 0);
-    const goalPageTwo = await page('list_goals', goalPageOne.nextOffset);
-    assert.deepEqual(goalPageOne.goals.map((goal: { goal_id: string }) => goal.goal_id), ['goal-b-new', 'goal-a-new']);
-    assert.deepEqual(goalPageTwo.goals.map((goal: { goal_id: string }) => goal.goal_id), ['goal-a-middle', 'goal-z-old']);
-    assert.equal(goalPageOne.goals[0].summary, 'Make every MCP list result understandable without another fetch.');
-    assert.equal(goalPageOne.goals[0].agent_alias, 'codex');
-    assert.equal(goalPageOne.goals[0].model_name, 'gpt-5.6-codex');
-    assert.equal(goalPageOne.goals[0].pr_state, 'merged');
-    assert.equal(goalPageOne.goals[1].pr_number, 189);
-    assert.equal(goalPageOne.goals[1].pr_state, null);
-    assert.equal(goalPageOne.goals[0].elapsed_ms, 19_000);
+  const goalPageOne = await page('list_goals', 0);
+  const goalPageTwo = await page('list_goals', goalPageOne.nextOffset);
+  assert.deepEqual(goalPageOne.goals.map((goal: { goal_id: string }) => goal.goal_id), ['goal-b-new', 'goal-a-new']);
+  assert.deepEqual(goalPageTwo.goals.map((goal: { goal_id: string }) => goal.goal_id), ['goal-a-middle', 'goal-z-old']);
+  assert.equal(goalPageOne.goals[0].summary, 'Make every MCP list result understandable without another fetch.');
+  assert.equal(goalPageOne.goals[0].agent_alias, 'codex');
+  assert.equal(goalPageOne.goals[0].model_name, 'gpt-5.6-codex');
+  assert.equal(goalPageOne.goals[0].pr_state, 'merged');
+  assert.equal(goalPageOne.goals[1].pr_number, 189);
+  assert.equal(goalPageOne.goals[1].pr_state, null);
+  assert.equal(goalPageOne.goals[0].elapsed_ms, 19_000);
 
-    const planPageOne = await page('list_plans', 0);
-    const planPageTwo = await page('list_plans', planPageOne.nextOffset);
-    assert.deepEqual(planPageOne.plans.map((plan: { draft_id: string }) => plan.draft_id), ['plan-b-new', 'plan-a-new']);
-    assert.deepEqual(planPageTwo.plans.map((plan: { draft_id: string }) => plan.draft_id), ['plan-a-middle', 'plan-z-old']);
-    assert.deepEqual(planPageOne.plans[0].issue_counts, { total: 1, pending: 0, active: 0, merged: 0, closed: 1 });
-    assert.deepEqual(planPageOne.plans[0].agent_models, [{ agent_alias: 'codex', model_name: 'gpt-5.6' }]);
-    assert.deepEqual(planPageOne.plans[0].pull_requests, [{ number: 188, state: 'closed' }]);
+  const planPageOne = await page('list_plans', 0);
+  const planPageTwo = await page('list_plans', planPageOne.nextOffset);
+  assert.deepEqual(planPageOne.plans.map((plan: { draft_id: string }) => plan.draft_id), ['plan-b-new', 'plan-a-new']);
+  assert.deepEqual(planPageTwo.plans.map((plan: { draft_id: string }) => plan.draft_id), ['plan-a-middle', 'plan-z-old']);
+  assert.deepEqual(planPageOne.plans[0].issue_counts, { total: 1, pending: 0, active: 0, merged: 0, closed: 1 });
+  assert.deepEqual(planPageOne.plans[0].agent_models, [{ agent_alias: 'codex', model_name: 'gpt-5.6' }]);
+  assert.deepEqual(planPageOne.plans[0].pull_requests, [{ number: 188, state: 'closed' }]);
 
-    const todos = await page('list_todos', 0);
-    assert.deepEqual(todos.items[0], {
-      todo_id: 'todo-1', repository, title: 'Keep list payloads compact', summary: 'Keep list payloads compact',
-      is_completed: false, category: { id: 'category-1', name: 'API' },
-      linked_plan: { id: 'plan-b-new', title: 'MCP list summaries', status: 'merged' },
-      order_index: 0, created_at: newest, updated_at: newest,
-    });
-  } finally {
-    await db.destroy();
-  }
+  assert.equal(planPageOne.plans[0].generation_model, 'codex:gpt-5.6');
+  assert.equal(planPageOne.plans[1].failure_reason, 'Refinement failed');
+  assert.deepEqual(planPageTwo.plans[0].pull_requests, [
+    { number: 999, state: 'merged' }, { number: 288, state: 'merged' }, { number: 289, state: 'merged' },
+  ]);
+
+  const todos = await page('list_todos', 0);
+  assert.deepEqual(todos.items[0], {
+    todo_id: 'todo-1', repository, title: 'Keep list payloads compact', summary: null,
+    is_completed: false, category: { id: 'category-1', name: 'API' },
+    linked_plan: { id: 'plan-b-new', title: 'MCP list summaries', status: 'merged' },
+    order_index: 0, created_at: newest, updated_at: newest,
+  });
+
 });
