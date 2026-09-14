@@ -32,6 +32,13 @@ interface NavItem {
   icon: React.FC<{ className?: string; strokeWidth?: number | string }>;
 }
 
+// Every sidebar glyph paints the same 1.25 device-px line. lucide strokes are
+// specified in 24px-viewBox units, so the rendered weight is
+// strokeWidth * renderedPx / 24: icons rendered at 16px (h-4 w-4) take 1.875,
+// and the 12px usage-widget icons in AgentTankSidebar take 2.5 — one painted
+// weight across the whole sidebar, not one shared prop value.
+const ICON_STROKE_16PX = 1.875;
+
 // Single badge component for all nav counts: forms a circle for one digit and
 // stretches horizontally for wider content (e.g. "99+") with the same radius and padding.
 // The parent nav row is `flex items-center justify-between`, which keeps the badge on
@@ -211,9 +218,12 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
   // Divider and hover inks for the bottom utility group: translucent inks on
   // the desktop app's tinted macOS-style wash, opaque grays on the web's
   // white sidebar.
+  // profileDivider also carries the group separation above the profile block:
+  // the desktop app draws a divider, while the web (whose footer text sits
+  // directly above) detaches the block with an mt-4 spacer instead.
   const utilityInk = desktop
     ? { tankBorder: 'border-slate-900/10', profileDivider: 'border-t border-slate-900/10', profileHover: 'hover:bg-slate-900/5' }
-    : { tankBorder: undefined, profileDivider: '', profileHover: 'hover:bg-slate-100' };
+    : { tankBorder: undefined, profileDivider: 'mt-4', profileHover: 'hover:bg-slate-100' };
 
   // Active rows pair the teal border / gray background with darker, medium-weight
   // text so the label keeps visual dominance over the low-contrast background.
@@ -239,7 +249,7 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
       }`}
     >
       <span className="flex min-w-0 items-center">
-        <item.icon className="mr-2.5 h-4 w-4 flex-none" strokeWidth={1.5} />
+        <item.icon className="mr-2.5 h-4 w-4 flex-none" strokeWidth={ICON_STROKE_16PX} />
         <span className="truncate">{item.name}</span>
       </span>
       {/* Single trailing slot: every badge and readiness dot right-aligns
@@ -330,11 +340,13 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
             <div className="text-[11px] text-slate-400">© {new Date().getFullYear()} Rinalds Uzkalns</div>
           </footer>}
           {user && (
-            // The profile block sits flush under the metadata footer on the web;
-            // only the desktop app (which renders no footer) draws a divider.
-            // pr-2.5 (10px) + the 6px glyph inset inside the 28px logout button
-            // puts the logout icon's right edge on the sidebar's shared 16px
-            // rail, aligned with the nav badges and the Usage refresh icon.
+            // The interactive account block is its own group: the web detaches
+            // it from the metadata footer above with a deliberate mt-4 spacer,
+            // the desktop app (which renders no footer) with a divider — both
+            // carried by utilityInk.profileDivider. pr-2.5 (10px) + the 6px
+            // glyph inset inside the 28px logout button puts the logout icon's
+            // right edge on the sidebar's shared 16px rail, aligned with the
+            // nav badges and the Usage refresh icon.
             <div className={`desktop-sidebar-profile flex flex-none items-center justify-between gap-2 py-2 pl-3 pr-2.5 ${utilityInk.profileDivider}`}>
               <a
                 href={`https://github.com/${user.username}`}
@@ -363,7 +375,7 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
               >
                 {/* Same rendered size and stroke as the nav icons; lucide scales
                     stroke with the viewBox, so a smaller box would thin the line. */}
-                <LogOut className="h-4 w-4" strokeWidth={1.5} aria-hidden="true" />
+                <LogOut className="h-4 w-4" strokeWidth={ICON_STROKE_16PX} aria-hidden="true" />
               </button>
             </div>
           )}

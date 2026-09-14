@@ -11,6 +11,13 @@ import {
 } from 'lucide-react';
 import { useDesktop } from './DesktopContext';
 
+// The selector sits inside the sidebar, whose glyphs all paint a 1.25
+// device-px line. lucide strokes are 24px-viewBox units, so the prop is
+// 1.25 * 24 / renderedPx: the status icon renders at 16px, the trailing
+// action icon at 14px (see .desktop-instance-icon / .desktop-instance-action).
+const STATUS_ICON_STROKE = 1.875;
+const ACTION_ICON_STROKE = (1.25 * 24) / 14;
+
 interface DesktopInstanceSelectorProps {
   /** Authenticated REST and Socket.IO are ready for the published desktop scope. */
   transportReady?: boolean;
@@ -60,7 +67,7 @@ export const DesktopInstanceSelector: React.FC<DesktopInstanceSelectorProps> = (
         title={action.title}
       >
         <span className="desktop-instance-icon" aria-hidden="true">
-          {connected ? <InstanceIcon /> : reconnecting ? <RefreshCw className="desktop-spin" /> : incompatible ? <CircleAlert /> : <CloudOff />}
+          {connected ? <InstanceIcon strokeWidth={STATUS_ICON_STROKE} /> : reconnecting ? <RefreshCw className="desktop-spin" strokeWidth={STATUS_ICON_STROKE} /> : incompatible ? <CircleAlert strokeWidth={STATUS_ICON_STROKE} /> : <CloudOff strokeWidth={STATUS_ICON_STROKE} />}
         </span>
         <span className="desktop-instance-copy">
           <strong title={desktop.profile.name}>{desktop.profile.name}</strong>
@@ -82,7 +89,7 @@ export const DesktopInstanceSelector: React.FC<DesktopInstanceSelectorProps> = (
             </span>
             <span className="desktop-instance-switch">
               {action.label}
-              <action.Icon className="desktop-instance-action" aria-hidden="true" />
+              <action.Icon className="desktop-instance-action" strokeWidth={ACTION_ICON_STROKE} aria-hidden="true" />
             </span>
           </span>
         </span>

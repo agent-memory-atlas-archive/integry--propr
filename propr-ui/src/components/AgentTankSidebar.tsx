@@ -7,6 +7,12 @@ import { getModelDisplayName } from '../utils/modelDisplay';
 // Refresh interval in milliseconds (60 seconds)
 const REFRESH_INTERVAL = 60000;
 
+// Every sidebar glyph paints the same 1.25 device-px line. lucide strokes are
+// specified in 24px-viewBox units, so the prop depends on rendered size:
+// these icons render at 12px (w-3), giving 1.25 * 24 / 12 = 2.5. The 16px nav
+// icons in Layout use 1.875 for the identical painted weight.
+const ICON_STROKE_12PX = 2.5;
+
 // Visible provider labels keyed by ProPR-facing provider key.
 const PROVIDER_DISPLAY_NAMES: Record<string, string> = {
   antigravity: 'Antigravity',
@@ -161,8 +167,14 @@ interface MetricRowProps {
 }
 
 // Compact rows (the expanded tree children) use a fixed 20px height rather
-// than padding so the threading rail can be sized deterministically: the rail
-// stops exactly half a row (10px) above the container's bottom edge.
+// than padding so every child of the threading rail has a known center line.
+//
+// Capacity tracks are a shared w-14 (56px) everywhere so equal percentages
+// paint equal pixels across rows. The fill's width is pure math from the
+// datum (`${percent}%` of the track); only the track's outer pill is rounded —
+// the fill itself is a clipped rectangle, because rounding a few-px-wide fill
+// into its own pill would erase the visible difference between single-digit
+// values (at 56px, 8% / 12% / 17% must resolve as 4.5 / 6.7 / 9.5px).
 const MetricRow: React.FC<MetricRowProps> = ({ metric, compact = false }) => (
   <div className={`flex items-center justify-between ${compact ? 'h-5' : 'py-1'}`}>
     <span
@@ -172,9 +184,9 @@ const MetricRow: React.FC<MetricRowProps> = ({ metric, compact = false }) => (
       {metric.displayLabel ?? metric.label}
     </span>
     <div className="flex items-center gap-1.5">
-      <div className={`${compact ? 'w-10' : 'w-12'} h-1.5 bg-gray-200 rounded-full overflow-hidden`}>
+      <div className="w-14 h-1.5 bg-gray-200 rounded-full overflow-hidden">
         <div
-          className={`h-full rounded-full ${getStatusColor(metric.percent)}`}
+          className={`h-full ${getStatusColor(metric.percent)}`}
           style={{ width: `${Math.min(100, metric.percent)}%` }}
         />
       </div>
@@ -194,7 +206,12 @@ interface AgentRowProps {
 const AgentRow: React.FC<AgentRowProps> = ({ agent, expanded, onToggle }) => {
   const metrics = getAllMetrics(agent);
   const primaryMetric = getPrimaryMetric(agent);
-  const hasMultipleMetrics = metrics.length > 1;
+  // Every provider with usage data is the same kind of node — an accordion
+  // parent whose children are its metric rows — so every one of them gets a
+  // chevron, even with a single child. A provider must never look like a
+  // parent yet lack the parent's affordance. Only error-only rows (which
+  // render a status instead of data) are inert.
+  const expandable = metrics.length > 0;
 
   if (!primaryMetric && !agent.error) return null;
 
@@ -204,12 +221,12 @@ const AgentRow: React.FC<AgentRowProps> = ({ agent, expanded, onToggle }) => {
   return (
     <div className="py-1">
       <div
-        className={`flex items-center justify-between ${hasMultipleMetrics ? 'cursor-pointer hover:bg-slate-900/5 -mx-1 px-1 rounded' : ''}`}
-        onClick={hasMultipleMetrics ? onToggle : undefined}
-        role={hasMultipleMetrics ? 'button' : undefined}
-        tabIndex={hasMultipleMetrics ? 0 : undefined}
-        aria-expanded={hasMultipleMetrics ? expanded : undefined}
-        onKeyDown={hasMultipleMetrics ? event => {
+        className={`flex items-center justify-between ${expandable ? 'cursor-pointer hover:bg-slate-900/5 -mx-1 px-1 rounded' : ''}`}
+        onClick={expandable ? onToggle : undefined}
+        role={expandable ? 'button' : undefined}
+        tabIndex={expandable ? 0 : undefined}
+        aria-expanded={expandable ? expanded : undefined}
+        onKeyDown={expandable ? event => {
           if (event.key === 'Enter' || event.key === ' ') {
             event.preventDefault();
             onToggle();
@@ -218,12 +235,12 @@ const AgentRow: React.FC<AgentRowProps> = ({ agent, expanded, onToggle }) => {
       >
         <div className="flex items-center gap-1.5 text-gray-600">
           {/* Fixed-size chevron slot keeps provider icons and labels on the same
-              vertical axis whether or not a row is expandable. */}
+              vertical axis; error-only rows leave the slot empty. */}
           <span className="flex h-3.5 w-3.5 flex-none items-center justify-center">
-            {hasMultipleMetrics && (
+            {expandable && (
               expanded
-                ? <ChevronDown className="w-3 h-3 text-gray-400" />
-                : <ChevronRight className="w-3 h-3 text-gray-400" />
+                ? <ChevronDown className="w-3 h-3 text-gray-400" strokeWidth={ICON_STROKE_12PX} />
+                : <ChevronRight className="w-3 h-3 text-gray-400" strokeWidth={ICON_STROKE_12PX} />
             )}
           </span>
           <ProviderLogo provider={agent.name} className="w-3.5 h-3.5 flex-none" />
@@ -236,9 +253,11 @@ const AgentRow: React.FC<AgentRowProps> = ({ agent, expanded, onToggle }) => {
           <span className="text-[10px] leading-none text-red-500">Error</span>
         ) : primaryMetric && !expanded ? (
           <div className="flex items-center gap-1.5">
-            <div className="w-10 h-1.5 bg-gray-200 rounded-full overflow-hidden">
+            {/* Same w-14 track and rectangular fill as MetricRow so a given
+                percentage paints the same pixels in every row. */}
+            <div className="w-14 h-1.5 bg-gray-200 rounded-full overflow-hidden">
               <div
-                className={`h-full rounded-full ${getStatusColor(primaryMetric.percent)}`}
+                className={`h-full ${getStatusColor(primaryMetric.percent)}`}
                 style={{ width: `${Math.min(100, primaryMetric.percent)}%` }}
               />
             </div>
@@ -249,23 +268,27 @@ const AgentRow: React.FC<AgentRowProps> = ({ agent, expanded, onToggle }) => {
         ) : null}
       </div>
 
-      {/* Expanded details. One continuous threading rail is anchored to the
-          relative container and sized calc(100% - 10px): each child row is a
-          fixed 20px (h-5), so stopping 10px short of the container's bottom
-          terminates the rail exactly at the vertical middle of the last child.
-          The rail stays centered under the 14px chevron slot (7px), while the
-          metric text is padded to 33px so it lands on the 40px axis of the
-          parent label (chevron 14 + gap 6 + icon 14 + gap 6), matching
-          standard tree-view text-under-text alignment. */}
+      {/* Expanded details. The threading rail is drawn as one segment per
+          child, each anchored to its own relative row: full-height (top-0
+          bottom-0) for every child except the last, whose segment is h-1/2
+          (top half only). The segments abut into one continuous line that
+          terminates at exactly the vertical center of the final child — by
+          construction, independent of row count or row height, so it can
+          neither stop short nor overshoot into the space below. The rail
+          stays centered under the 14px chevron slot (7px), while the metric
+          text is padded to 33px so it lands on the 40px axis of the parent
+          label (chevron 14 + gap 6 + icon 14 + gap 6), matching standard
+          tree-view text-under-text alignment. */}
       {expanded && metrics.length > 0 && (
-        <div className="relative ml-[7px] mt-0.5">
-          <span
-            aria-hidden="true"
-            className="absolute left-0 top-0 w-px bg-gray-200"
-            style={{ height: 'calc(100% - 10px)' }}
-          />
+        <div className="ml-[7px] mt-0.5">
           {metrics.map((metric, idx) => (
-            <div key={idx} className="pl-[33px]">
+            <div key={idx} className="relative pl-[33px]">
+              <span
+                aria-hidden="true"
+                className={`absolute left-0 top-0 w-px bg-gray-200 ${
+                  idx === metrics.length - 1 ? 'h-1/2' : 'bottom-0'
+                }`}
+              />
               <MetricRow metric={metric} compact />
             </div>
           ))}
@@ -349,7 +372,7 @@ const AgentTankSidebar: React.FC<AgentTankSidebarProps> = ({ allowManualRefresh 
             className="text-gray-400 hover:text-primary-600 disabled:opacity-50"
             title="Refresh usage"
           >
-            <RefreshCw className={`w-3 h-3 ${refreshing ? 'animate-spin' : ''}`} />
+            <RefreshCw className={`w-3 h-3 ${refreshing ? 'animate-spin' : ''}`} strokeWidth={ICON_STROKE_12PX} />
           </button>
         )}
       </div>
