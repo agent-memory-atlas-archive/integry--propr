@@ -255,13 +255,12 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
         <span className="flex min-w-0 items-center">
           <item.icon className={`${SIDEBAR_ICON_STROKE_CLASS} mr-2.5 h-4 w-4 flex-none`} strokeWidth={SIDEBAR_ICON_STROKE_WIDTH} />
           <span className={`truncate ${desktop && readinessMessage ? 'font-medium text-slate-900' : ''}`}>{item.name}</span>
-          {desktop && readinessMessage && (
-            <span className="ml-1.5 h-1.5 w-1.5 flex-none rounded-full bg-amber-500" role="img" aria-label={readinessMessage} title={readinessMessage} />
-          )}
         </span>
-        {/* Counts share the trailing rail. Desktop readiness stays beside
-            its label; web readiness retains the existing trailing position. */}
+        {/* Counts and readiness indicators share the trailing rail. */}
         <span className="flex flex-none items-center justify-end gap-1.5">
+          {desktop && readinessMessage && (
+            <span className="h-1.5 w-1.5 flex-none rounded-full bg-amber-500" role="img" aria-label={readinessMessage} title={readinessMessage} />
+          )}
           <WorkCountBadge name={item.name} taskCount={displayTaskCount} goalCount={activeGoalCount} />
           {item.name === 'Inbox' && unreadCount !== null && unreadCount > 0 && (
             <NavBadge>{unreadCount > 99 ? '99+' : unreadCount}</NavBadge>
@@ -332,7 +331,7 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
               last. mt-auto absorbs the space below navigation. */}
           <div className="mt-auto flex flex-none flex-col">
           {(isDemoMode || userHasPermission(user, 'instance.manage_agents')) && (
-            <AgentTankSidebar allowManualRefresh={!isDemoMode} collapsible={Boolean(desktop)} className="desktop-sidebar-usage" />
+            <AgentTankSidebar allowManualRefresh={!isDemoMode} scrollable={Boolean(desktop)} className="desktop-sidebar-usage" />
           )}
           {user && (
             // The interactive account block is its own group, detached from
