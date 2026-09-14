@@ -11,6 +11,7 @@ import type { createAgentRuntimeRoutes } from '../routes/agentRuntimeRoutes.js';
 import { callWorkflow } from './adapter.js';
 import { McpError } from './config.js';
 import { type McpTool, type ToolDeps, mutationShape, pageShape, repositorySchema, textSchema, idSchema, ok, workflow } from './tools.js';
+import { summarizeTodo } from './listSummaries.js';
 
 interface Handlers {
   todos: ReturnType<typeof createRepoTodoRoutes>;
@@ -23,8 +24,20 @@ export function addManagementTools(tools: McpTool[], deps: ToolDeps, { todos, no
   const { db } = deps;
   const todoTarget = { table: 'repo_todos', column: 'todo_id', arg: 'todoId', owner: 'user_id' };
   const categoryTarget = { table: 'repo_todo_categories', column: 'category_id', arg: 'categoryId', owner: 'user_id' };
-  for (const [name, table] of [['list_todos', 'repo_todos'], ['list_todo_categories', 'repo_todo_categories']] as const) tools.push({ name, description: 'List your repository TODO items or categories.', scope: 'read', readOnly: true, schema: z.object({ repository: repositorySchema, ...pageShape }).strict(), run: async ({ principal, args }) => {
-    const items = await db(table).where({ repository: args.repository, user_id: principal.user.id }).orderBy('order_index').orderBy('id').offset(args.offset).limit(args.limit);
+  tools.push({ name: 'list_todos', description: 'List compact summaries of your repository TODOs and their linked plans.', scope: 'read', readOnly: true, schema: z.object({ repository: repositorySchema, ...pageShape }).strict(), run: async ({ principal, args }) => {
+    const rows = await db('repo_todos as todo')
+      .leftJoin('repo_todo_categories as category', join => join.on('category.category_id', '=', 'todo.category_id').andOn('category.user_id', '=', 'todo.user_id'))
+      .leftJoin('task_drafts as plan', join => join.on('plan.draft_id', '=', 'todo.linked_draft_id').andOn('plan.user_id', '=', 'todo.user_id'))
+      .where({ 'todo.repository': args.repository, 'todo.user_id': principal.user.id })
+      .select('todo.todo_id', 'todo.repository', 'todo.content', 'todo.is_completed', 'todo.category_id',
+        'category.name as category_name', 'todo.linked_draft_id', 'plan.name as linked_plan_name',
+        'plan.status as linked_plan_status', 'todo.order_index', 'todo.created_at', 'todo.updated_at')
+      .orderBy('todo.order_index').orderBy('todo.id').offset(args.offset).limit(args.limit);
+    const items = rows.map(row => summarizeTodo(row));
+    return ok({ items, nextOffset: rows.length === args.limit ? args.offset + args.limit : null });
+  } });
+  tools.push({ name: 'list_todo_categories', description: 'List your repository TODO categories.', scope: 'read', readOnly: true, schema: z.object({ repository: repositorySchema, ...pageShape }).strict(), run: async ({ principal, args }) => {
+    const items = await db('repo_todo_categories').where({ repository: args.repository, user_id: principal.user.id }).orderBy('order_index').orderBy('id').offset(args.offset).limit(args.limit);
     return ok({ items, nextOffset: items.length === args.limit ? args.offset + args.limit : null });
   } });
   workflow(tools, { name: 'get_todo', description: 'Read one of your TODOs.', scope: 'read', readOnly: true, schema: z.object({ repository: repositorySchema, todoId: z.uuid() }).strict(), target: todoTarget }, todos.getTodo, args => ({ params: { todoId: args.todoId } }));
