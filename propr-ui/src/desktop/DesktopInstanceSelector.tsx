@@ -43,7 +43,6 @@ export const DesktopInstanceSelector: React.FC<DesktopInstanceSelectorProps> = (
 
   return (
     <div className="desktop-instance-selector">
-      <span className="desktop-instance-selector-label">Instance</span>
       <button
         type="button"
         className={`desktop-instance-selector-button desktop-connection-${connectionClass}`}
@@ -55,13 +54,12 @@ export const DesktopInstanceSelector: React.FC<DesktopInstanceSelectorProps> = (
       >
         <span className="desktop-instance-icon" aria-hidden="true">
           <InstanceIcon className={SIDEBAR_ICON_STROKE_CLASS} strokeWidth={SIDEBAR_ICON_STROKE_WIDTH} />
-          <span className="desktop-connection-dot" title={statusLabel} />
         </span>
         <span className="desktop-instance-copy">
           <strong title={desktop.profile.name}>{desktop.profile.name}</strong>
-          <small>{instanceLabel}</small>
         </span>
         <span className="desktop-instance-switch" aria-hidden="true">
+          <span className="desktop-connection-dot" title={statusLabel} />
           <ChevronDown className={`${SIDEBAR_ICON_STROKE_CLASS} desktop-instance-action`} strokeWidth={SIDEBAR_ICON_STROKE_WIDTH} />
         </span>
       </button>

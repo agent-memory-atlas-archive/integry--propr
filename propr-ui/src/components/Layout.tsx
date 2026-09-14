@@ -228,17 +228,16 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
       key={item.name}
       to={item.href}
       className={`flex items-center justify-between text-[13px] leading-5 transition-colors duration-150 ${
-        // mx-2 + px-2 puts the pill's inner edges on the sidebar's shared
+        // mx-2 + px-2 puts the selection's inner edges on the sidebar's shared
         // 16px rail, matching the web rows' px-4 (their border-l-4 is part
         // of the box, so trailing content ends at the same 16px boundary).
         // Desktop rows use a uniform 32px height in every navigation state.
-        desktop ? 'mx-2 rounded-md border-0 px-2 py-1.5' : 'border-l-4 px-4 py-2'
+        desktop ? 'mx-2 rounded-[6px] border-0 px-2 py-1.5 tracking-tight' : 'border-l-4 px-4 py-2'
       } ${
         isActive(item.href)
           ? desktop
-            // The desktop sidebar sits on a tinted macOS-style wash, so the
-            // pill fills use translucent inks that stay visible on that tint.
-            ? 'bg-primary-600/10 font-medium text-primary-700'
+            // Neutral inset selection keeps labels readable over the material.
+            ? 'bg-black/5 font-normal text-slate-900'
             : 'bg-slate-50 font-medium text-slate-900 border-primary-600'
           : desktop
             ? 'font-normal text-slate-700 hover:bg-slate-900/5 hover:text-slate-900'
@@ -293,9 +292,9 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
         ${isSidebarOpen ? 'translate-x-0' : '-translate-x-full lg:translate-x-0'}
       `}>
         {desktop && <div className="desktop-sidebar-drag-region" aria-hidden="true" />}
-        <div className="desktop-sidebar-header flex flex-none items-center justify-between px-4 py-4 sm:py-6 h-12 sm:h-16">
+        {!desktop && <div className="desktop-sidebar-header flex flex-none items-center justify-between px-4 py-4 sm:py-6 h-12 sm:h-16">
           <Link to="/" className="flex items-center" aria-label="ProPR dashboard">
-            <img src={publicAssetUrl(desktop ? '/media/logo-and-name-transparent.png' : '/media/logo-and-name.png')} alt="ProPR" className="h-8 w-auto" />
+            <img src={publicAssetUrl('/media/logo-and-name.png')} alt="ProPR" className="h-8 w-auto" />
           </Link>
           <button
             onClick={() => setIsSidebarOpen(false)}
@@ -304,12 +303,10 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
           >
             <CloseIcon className={`${SIDEBAR_ICON_STROKE_CLASS} w-6 h-6`} />
           </button>
-        </div>
+        </div>}
         {desktop && <DesktopInstanceSelector transportReady={isConnected && user !== null} />}
         <div className="flex min-h-0 flex-1 flex-col">
-          {/* pt-2 detaches the first row (and its active background) from the
-              logo header above, so an active first item reads as a contained
-              row rather than bleeding toward the logo area. */}
+          {/* Whitespace separates navigation from the workspace control. */}
           <nav className="flex min-h-0 flex-col overflow-y-auto pt-2 pb-1">
             <div className="flex flex-col gap-0.5">
               {coreNavigation.map(renderNavigationItem)}
@@ -324,7 +321,7 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
               last. mt-auto absorbs the space below navigation. */}
           <div className="mt-auto flex flex-none flex-col">
           {(isDemoMode || userHasPermission(user, 'instance.manage_agents')) && (
-            <AgentTankSidebar allowManualRefresh={!isDemoMode} />
+            <AgentTankSidebar allowManualRefresh={!isDemoMode} className="desktop-sidebar-usage" />
           )}
           {user && (
             // The interactive account block is its own group, detached from

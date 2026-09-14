@@ -47,9 +47,9 @@ it('keeps desktop selector identities, status and keyboard actions usable at nar
               openProfileManager: () => window.selectorActions.push('switch'),
               retry: () => window.selectorActions.push('retry'),
             };
-            root.render(<div className={'desktop-app desktop-platform-' + platform}>
+            root.render(<div className={'desktop-app desktop-platform-' + (platform === 'darwin' ? 'macos' : platform)}>
               <div className="desktop-shell-content"><aside style={{ width }}>
-                <div className="desktop-sidebar-header" />
+                <div className="desktop-sidebar-drag-region" />
                 <DesktopContext.Provider value={desktop}>
                   <DesktopInstanceSelector transportReady={transportReady} />
                 </DesktopContext.Provider>
@@ -89,9 +89,9 @@ it('keeps desktop selector identities, status and keyboard actions usable at nar
       await expect(selector.getByText('Switch', { exact: true })).toHaveCount(0);
       await expect(button).toHaveAttribute('aria-haspopup', 'dialog');
       await expect(selector.locator('.desktop-instance-icon .lucide-' + (state.kind === 'local' ? 'computer' : 'cloud'))).toHaveCount(1);
-      await expect(selector.locator('.desktop-instance-icon .desktop-connection-dot')).toHaveCount(1);
+      await expect(selector.locator('.desktop-instance-icon .desktop-connection-dot')).toHaveCount(0);
       await expect(selector.locator('.desktop-instance-switch > svg.lucide-chevron-down')).toHaveCount(1);
-      await expect(selector.locator('.desktop-instance-switch .desktop-connection-dot')).toHaveCount(0);
+      await expect(selector.locator('.desktop-instance-switch .desktop-connection-dot')).toHaveCount(1);
       await expect(selector.locator('.desktop-instance-action')).toHaveCSS('color', 'rgb(100, 116, 139)');
       const geometry = await selector.evaluate(element => {
         const box = element.getBoundingClientRect();
@@ -107,9 +107,9 @@ it('keeps desktop selector identities, status and keyboard actions usable at nar
           actionRightInset: button.right - action.right,
           copyWidth: copy.width,
           copyActionGap: action.left - copy.right,
-          statusBadged: dot.left < icon.right && dot.right > icon.right && dot.top < icon.bottom && dot.bottom > icon.bottom,
+          statusBeforeChevron: dot.left >= action.left && dot.right < element.querySelector('.desktop-instance-action').getBoundingClientRect().left,
           buttonHeight: button.height,
-          top: box.top, headerBottom: document.querySelector('.desktop-sidebar-header').getBoundingClientRect().bottom,
+          top: box.top, headerBottom: document.querySelector('.desktop-sidebar-drag-region').getBoundingClientRect().bottom,
           fits: selectors.every(selector => [...element.querySelectorAll(selector)].every(child => {
             const bounds = child.getBoundingClientRect();
             return bounds.left >= box.left && bounds.right <= box.right && child.scrollWidth <= child.clientWidth + 1;
@@ -120,12 +120,12 @@ it('keeps desktop selector identities, status and keyboard actions usable at nar
       assert.ok(geometry.fits, `No horizontal overflow for ${JSON.stringify(state)}`);
       assert.ok(geometry.top >= geometry.headerBottom, 'Selector stays below platform titlebar');
       assert.ok(geometry.nameHeight <= 20, 'Long instance names stay on one line');
-      assert.ok(geometry.buttonHeight <= 56, 'Selector stays compact with two text lines');
+      assert.equal(geometry.buttonHeight, 32, 'Selector is one compact popup row');
       assert.ok(geometry.rowCentered, 'Icon, copy and status/action share the row center');
-      assert.equal(geometry.actionRightInset, 4, 'Chevron sits at the compact right padding boundary');
+      assert.equal(geometry.actionRightInset, 9, 'Chevron sits at the compact right padding boundary');
       assert.equal(geometry.copyActionGap, 6, 'Text stretches to the chevron with a compact gap');
-      assert.ok(geometry.statusBadged, 'Status badges the bottom-right of the entity icon');
-      assert.ok(geometry.copyWidth >= state.width - 67, 'Text uses the available width, including at 176px');
+      assert.ok(geometry.statusBeforeChevron, 'Status stays beside the disclosure at the right edge');
+      assert.ok(geometry.copyWidth >= state.width - 87, `Text uses the available width: ${JSON.stringify({ state, geometry })}`);
       // Start from the document so Tab, not programmatic focus, enters the control.
       await page.evaluate(() => { document.body.tabIndex = -1; document.body.focus(); });
       await page.keyboard.press('Tab');

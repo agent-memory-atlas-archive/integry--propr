@@ -37,7 +37,7 @@ describe('desktop window chrome styles', () => {
     expect(desktopStyles).toMatch(/\.desktop-app \.desktop-content-toolbar :is\([^}]+\)\s*\{\s*-webkit-app-region: no-drag;/);
   });
 
-  it('reserves the native controls at the toolbar end and traffic-light clearance above the sidebar logo', () => {
+  it('reserves the native controls at the toolbar end and traffic-light clearance above the workspace selector', () => {
     expect(desktopStyles).toContain(
       '.desktop-app .desktop-content-toolbar {\n  padding-right: calc(var(--desktop-window-controls-end-inset) + var(--desktop-window-controls-gap));',
     );
@@ -46,9 +46,8 @@ describe('desktop window chrome styles', () => {
     expect(sidebarDragRule).toContain(
       'height: max(40px, var(--desktop-titlebar-height), env(titlebar-area-height, 0px))',
     );
-    const sidebarHeaderRule = ruleFor('.desktop-app .desktop-sidebar-header');
-    expect(sidebarHeaderRule).toContain('height: 40px');
-    expect(sidebarHeaderRule).toContain('min-height: 40px');
+    expect(ruleFor('.desktop-app.desktop-platform-macos')).toContain('--desktop-titlebar-height: 44px');
+    expect(ruleFor('.desktop-instance-selector-button')).toContain('-webkit-app-region: no-drag');
     expect(ruleFor('.desktop-window-controls')).toContain('-webkit-app-region: no-drag');
     expect(ruleFor('.desktop-window-controls')).toContain('height: var(--desktop-titlebar-height)');
   });

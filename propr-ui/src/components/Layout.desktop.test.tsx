@@ -102,15 +102,17 @@ describe('Layout desktop instance selector', () => {
     expect(toolbar.closest('.desktop-main-content')).not.toBeNull();
     const selector = screen.getByRole('button', { name: 'Connected: This computer' });
     expect(selector.closest('aside')).not.toBeNull();
-    expect(screen.getByText('Instance')).toBeInTheDocument();
-    expect(screen.getByText('Local instance')).toBeInTheDocument();
+    expect(screen.queryByRole('img', { name: 'ProPR' })).not.toBeInTheDocument();
+    expect(document.querySelector('.desktop-sidebar-header')).toBeNull();
+    expect(selector).toHaveAccessibleDescription(/Local instance/);
+    expect(selector.querySelector('small')).toBeNull();
     expect(selector.querySelector('.desktop-connection-dot')).toHaveAttribute('title', 'Connected');
     expect(screen.getByRole('link', { name: 'Dashboard' })).toHaveClass(
       'mx-2',
-      'rounded-md',
+      'rounded-[6px]',
       'border-0',
-      'bg-primary-600/10',
-      'text-primary-700',
+      'bg-black/5',
+      'text-slate-900',
     );
     expect(screen.getByRole('link', { name: 'Dashboard' }).className).not.toMatch(/\bborder-l(?:-|\b)/);
     expect(screen.getByTestId('global-header')).toHaveTextContent('GitHub user');
@@ -140,7 +142,7 @@ describe('Layout desktop instance selector', () => {
     }));
 
     const selector = screen.getByRole('button', { name: 'Offline: Operations' });
-    expect(screen.getByText('ProPR Connect')).toBeInTheDocument();
+    expect(selector).toHaveAccessibleDescription(/ProPR Connect/);
     expect(selector.querySelector('.desktop-connection-dot')).toHaveAttribute('title', 'Offline');
     fireEvent.click(selector);
     expect(mocks.openProfileManager).toHaveBeenCalledOnce();
@@ -177,5 +179,6 @@ describe('Layout desktop instance selector', () => {
     expect(screen.queryByText('Instance')).not.toBeInTheDocument();
     expect(document.querySelector('.desktop-instance-selector')).not.toBeInTheDocument();
     expect(screen.getByText('Page content')).toBeInTheDocument();
+    expect(screen.getByRole('img', { name: 'ProPR' })).toBeInTheDocument();
   });
 });
