@@ -12,6 +12,26 @@ export interface TaskQuery {
   excludeMerged?: boolean;
 }
 
+// The UI labels in-progress work "Active"/"Implementing" and queued work
+// "Waiting", but task_history only ever stores canonical worker lifecycle
+// states. Filtering on the label directly matched no rows, so map each label
+// onto the worker states it represents.
+const ACTIVE_WORKER_STATES = ['processing', 'claude_execution', 'post_processing', 'active'];
+const WAITING_WORKER_STATES = ['pending', 'queued', 'waiting'];
+
+function resolveStatusStates(status: string): string[] | null {
+  switch (status.trim().toLowerCase()) {
+    case 'active':
+    case 'implementing':
+      return ACTIVE_WORKER_STATES;
+    case 'waiting':
+    case 'pending':
+      return WAITING_WORKER_STATES;
+    default:
+      return null;
+  }
+}
+
 export async function getTasksFromDb(
   query: TaskQuery
 ): Promise<{ tasks: unknown[]; total: number; offset: number; limit: number }> {
@@ -35,7 +55,12 @@ export async function getTasksFromDb(
     `);
 
   if (status && status !== 'all') {
-    baseQuery.where('h.state', status);
+    const lifecycleStates = resolveStatusStates(status);
+    if (lifecycleStates) {
+      baseQuery.whereIn('h.state', lifecycleStates);
+    } else {
+      baseQuery.where('h.state', status);
+    }
   }
   if (repository && repository !== 'all') {
     baseQuery.where('t.repository', repository);

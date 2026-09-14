@@ -182,8 +182,8 @@ export interface FileChange {
 export interface ListTasksOptions {
   /** Filter by repository (full name like owner/repo) */
   project?: string;
-  /** Filter by task status */
-  status?: TaskStatus | 'all';
+  /** Filter by task status; lifecycle aliases map onto worker states server-side */
+  status?: TaskStatus | 'active' | 'implementing' | 'waiting' | 'all';
   /** Maximum number of tasks to return */
   limit?: number;
   /** Number of tasks to skip for pagination */

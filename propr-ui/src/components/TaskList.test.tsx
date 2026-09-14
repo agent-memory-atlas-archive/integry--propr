@@ -42,10 +42,22 @@ vi.mock('../contexts/useSocket', () => ({
 }));
 
 vi.mock('./TaskList/Filters', () => ({
-  Filters: ({ availableRepos, reposLoading }: { availableRepos: Array<{ name: string; count?: number }>; reposLoading: boolean }) => (
+  Filters: ({ availableRepos, reposLoading, filter, setFilter }: {
+    availableRepos: Array<{ name: string; count?: number }>;
+    reposLoading: boolean;
+    filter: string;
+    setFilter: (value: string) => void;
+  }) => (
     <div data-testid="filters">
       <span data-testid="repos-loading">{String(reposLoading)}</span>
       <span data-testid="repo-summary">{availableRepos.map(repo => `${repo.name}:${repo.count ?? 'na'}`).join('|')}</span>
+      <select data-testid="status-filter" value={filter} onChange={(e) => setFilter(e.target.value)}>
+        <option value="all">All Tasks</option>
+        <option value="active">Active</option>
+        <option value="completed">Completed</option>
+        <option value="failed">Failed</option>
+        <option value="waiting">Waiting</option>
+      </select>
     </div>
   ),
 }));
@@ -208,6 +220,40 @@ describe('TaskList', () => {
 
     await act(async () => { nextScope.resolve({ tasks: [], total: 0 }); });
     expect(await screen.findByText(/No tasks found/)).toBeInTheDocument();
+  });
+
+  it('requests and renders active tasks when the status filter is active', async () => {
+    mockGetTasks.mockResolvedValue(populatedTaskResponse());
+    mockGetRepositoryStats.mockResolvedValue({ repositories: [repositoryStats('integry/propr', 1)] });
+
+    render(
+      <MemoryRouter initialEntries={['/tasks?status=active']}>
+        <Routes><Route path="/tasks" element={<TaskList limit={10} />} /></Routes>
+      </MemoryRouter>
+    );
+
+    expect(await screen.findByText('task table')).toBeInTheDocument();
+    expect(screen.queryByText(/No tasks found/)).not.toBeInTheDocument();
+    expect(mockGetTasks).toHaveBeenCalledWith('active', 20, 0, 'all', '');
+  });
+
+  it('requests active tasks when Active is selected in the filter dropdown', async () => {
+    mockGetTasks.mockResolvedValue(populatedTaskResponse());
+    mockGetRepositoryStats.mockResolvedValue({ repositories: [repositoryStats('integry/propr', 1)] });
+
+    render(
+      <MemoryRouter initialEntries={['/tasks']}>
+        <Routes><Route path="/tasks" element={<TaskList limit={10} />} /></Routes>
+      </MemoryRouter>
+    );
+
+    expect(await screen.findByText('task table')).toBeInTheDocument();
+    expect(mockGetTasks).toHaveBeenLastCalledWith('all', 20, 0, 'all', '');
+
+    fireEvent.change(screen.getByTestId('status-filter'), { target: { value: 'active' } });
+
+    await waitFor(() => expect(mockGetTasks).toHaveBeenLastCalledWith('active', 20, 0, 'all', ''));
+    expect(await screen.findByText('task table')).toBeInTheDocument();
   });
 
   it('keeps populated results visible during a same-scope live refresh', async () => {
