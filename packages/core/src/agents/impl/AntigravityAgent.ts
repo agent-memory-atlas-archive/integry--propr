@@ -59,6 +59,10 @@ function getAntigravityTranscriptRoot(): string {
     return process.env.PROPR_ANTIGRAVITY_TRANSCRIPT_ROOT || DEFAULT_ANTIGRAVITY_TRANSCRIPT_ROOT;
 }
 
+function formatAnalysisFailure(protocolError: string | undefined, stderr: string): string {
+    return `Analysis failed: ${protocolError || stderr || 'No result returned'}`;
+}
+
 export class AntigravityAgent implements Agent {
     readonly config: AgentConfig;
     readonly goalCapable = true;
@@ -372,7 +376,7 @@ export class AntigravityAgent implements Agent {
                 return { response: analysisText, modelUsed: resolvedModel, executionTimeMs, success: true,
                     tokenUsage: antigravityTokenUsage, sessionId };
             }
-            return { response: '', modelUsed: resolvedModel, executionTimeMs, success: false, error: `Analysis failed: ${resolvedProtocolError || result.stderr || 'No result returned'}` };
+            return { response: '', modelUsed: resolvedModel, executionTimeMs, success: false, error: formatAnalysisFailure(resolvedProtocolError, result.stderr) };
         } catch (error) {
             const executionTimeMs = Date.now() - startTime;
             const err = error as Error;
