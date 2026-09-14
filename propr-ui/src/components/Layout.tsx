@@ -388,8 +388,9 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
               </button>
             </div>
           )}
-          {/* Match the profile text rail: 12px outer + 4px link inset + 28px avatar + 8px gap. */}
-          <footer className={`mt-4 pr-4 pb-2 leading-tight space-y-1 ${user ? 'pl-[52px]' : 'pl-4'}`}>
+          {/* Desktop keeps this metadata in the native About dialog. On web,
+              match the profile text rail: 12px outer + 4px link inset + 28px avatar + 8px gap. */}
+          {!desktop && <footer className={`mt-4 pr-4 pb-2 leading-tight space-y-1 ${user ? 'pl-[52px]' : 'pl-4'}`}>
             {/* The version is the datum developers scan for, so it sits one
                 contrast step above the secondary copyright line. */}
             <div className="text-[11px] text-slate-500">
@@ -403,8 +404,8 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
               </a>{' '}
               v{__APP_VERSION__}
             </div>
-            {!desktop && <div className="text-[10px] text-slate-400">© {new Date().getFullYear()} Rinalds Uzkalns</div>}
-          </footer>
+            <div className="text-[10px] text-slate-400">© {new Date().getFullYear()} Rinalds Uzkalns</div>
+          </footer>}
           </div>
         </div>
       </aside>}
