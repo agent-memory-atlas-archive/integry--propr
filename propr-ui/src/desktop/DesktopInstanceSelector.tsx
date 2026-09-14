@@ -1,7 +1,7 @@
 import React, { useEffect, useId } from 'react';
 import { parseProprConnectEndpoint } from '@propr/shared';
 import {
-  ChevronDown,
+  ChevronsUpDown,
   Cloud,
   Computer,
 } from 'lucide-react';
@@ -60,7 +60,7 @@ export const DesktopInstanceSelector: React.FC<DesktopInstanceSelectorProps> = (
         </span>
         <span className="desktop-instance-switch" aria-hidden="true">
           <span className="desktop-connection-dot" title={statusLabel} />
-          <ChevronDown className={`${SIDEBAR_ICON_STROKE_CLASS} desktop-instance-action`} strokeWidth={SIDEBAR_ICON_STROKE_WIDTH} />
+          <ChevronsUpDown className={`${SIDEBAR_ICON_STROKE_CLASS} desktop-instance-action`} strokeWidth={SIDEBAR_ICON_STROKE_WIDTH} />
         </span>
       </button>
       <span id={descriptionId} className="sr-only">

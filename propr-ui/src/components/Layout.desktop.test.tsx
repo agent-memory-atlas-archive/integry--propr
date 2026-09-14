@@ -6,6 +6,8 @@ import Layout from './Layout';
 import { DESKTOP_UI_COMMAND_EVENT } from '../desktop/useDesktopNativeCommands';
 
 const mocks = vi.hoisted(() => ({
+  canManage: false,
+  hasRepos: true,
   logout: vi.fn(),
   openProfileManager: vi.fn(),
   retry: vi.fn(),
@@ -25,7 +27,7 @@ const mocks = vi.hoisted(() => ({
 vi.mock('../api/proprApi', () => ({ logout: mocks.logout }));
 vi.mock('../hooks/useDynamicFavicon', () => ({ useDynamicFavicon: vi.fn() }));
 vi.mock('../hooks/useSystemReadiness', () => ({
-  useSystemReadiness: () => ({ hasAgents: true, hasRepos: true, hasTasks: true }),
+  useSystemReadiness: () => ({ hasAgents: true, hasRepos: mocks.hasRepos, hasTasks: true }),
 }));
 vi.mock('./ui/useToast', () => ({ useToast: () => ({ addToast: vi.fn() }) }));
 vi.mock('./GlobalHeader', () => ({ default: () => <header className="desktop-content-toolbar" aria-label="Application toolbar" data-testid="global-header">GitHub user</header> }));
@@ -34,7 +36,7 @@ vi.mock('../contexts/useSocket', () => ({ useSocket: () => mocks.socket }));
 vi.mock('../contexts/DemoModeContext', () => ({ useDemoMode: () => ({ isDemoMode: false }) }));
 vi.mock('../contexts/AuthContext', () => ({
   useCurrentUser: () => ({ id: 'user-1', username: 'octocat' }),
-  userHasPermission: () => false,
+  userHasPermission: () => mocks.canManage,
 }));
 vi.mock('./ConnectPlusBanner', () => ({ ConnectCapacityBanner: () => null }));
 vi.mock('../contexts/NotificationCenterContext', () => ({
@@ -71,12 +73,14 @@ describe('Layout desktop instance selector', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mocks.socket.isConnected = true;
+    mocks.canManage = false;
+    mocks.hasRepos = true;
   });
 
-  it('moves version and copyright out of desktop only and toggles the actual sidebar', () => {
+  it('keeps the version at the bottom on desktop and web and toggles the actual sidebar', () => {
     vi.stubGlobal('matchMedia', vi.fn(() => ({ matches: true })));
     const desktop = renderLayout(desktopValue());
-    expect(document.querySelector('aside footer')).toBeNull();
+    expect(document.querySelector('aside footer')).toHaveTextContent(`v${__APP_VERSION__}`);
     fireEvent(window, new CustomEvent(DESKTOP_UI_COMMAND_EVENT, { detail: 'toggle-sidebar' }));
     expect(document.querySelector('aside')).toBeNull();
     fireEvent(window, new CustomEvent(DESKTOP_UI_COMMAND_EVENT, { detail: 'toggle-sidebar' }));
@@ -171,6 +175,30 @@ describe('Layout desktop instance selector', () => {
 
     expect(screen.getByRole('button', { name: 'Connected: This computer' })).toBeInTheDocument();
     await waitFor(() => expect(mocks.reportConnectedRendererReady).toHaveBeenCalledOnce());
+  });
+
+  it('keeps Coding Agents and Access in the resource group for permitted users', () => {
+    mocks.canManage = true;
+    renderLayout(desktopValue());
+    expect(screen.getByRole('link', { name: 'Coding Agents' })).toHaveAttribute('href', '/ai-agents');
+    expect(screen.getByRole('link', { name: 'Access' })).toHaveAttribute('href', '/admin/members');
+    expect(screen.getByRole('link', { name: 'Repositories' }).nextElementSibling).toBe(
+      screen.getByRole('link', { name: 'Coding Agents' }),
+    );
+  });
+
+  it('keeps restricted routes permission-gated on desktop', () => {
+    renderLayout(desktopValue());
+    expect(screen.queryByRole('link', { name: 'Coding Agents' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: 'Access' })).not.toBeInTheDocument();
+  });
+
+  it('pairs repository readiness with the label', () => {
+    mocks.hasRepos = false;
+    renderLayout(desktopValue());
+    const indicator = screen.getByRole('img', { name: 'No repositories configured' });
+    expect(indicator.previousElementSibling).toHaveTextContent('Repositories');
+    expect(indicator.previousElementSibling).toHaveClass('font-medium', 'text-slate-900');
   });
 
   it('leaves the browser layout free of desktop-only instance controls', () => {

@@ -223,54 +223,65 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
 
   // Active rows pair the teal border / gray background with darker, medium-weight
   // text so the label keeps visual dominance over the low-contrast background.
-  const renderNavigationItem = (item: NavItem) => (
-    <Link
-      key={item.name}
-      to={item.href}
-      className={`flex items-center justify-between text-[13px] leading-5 transition-colors duration-150 ${
-        // mx-2 + px-2 puts the selection's inner edges on the sidebar's shared
-        // 16px rail, matching the web rows' px-4 (their border-l-4 is part
-        // of the box, so trailing content ends at the same 16px boundary).
-        // Desktop rows use a uniform 32px height in every navigation state.
-        desktop ? 'mx-2 rounded-[6px] border-0 px-2 py-1.5 tracking-tight' : 'border-l-4 px-4 py-2'
-      } ${
-        isActive(item.href)
-          ? desktop
-            // Neutral inset selection keeps labels readable over the material.
-            ? 'bg-black/5 font-normal text-slate-900'
-            : 'bg-slate-50 font-medium text-slate-900 border-primary-600'
-          : desktop
-            ? 'font-normal text-slate-700 hover:bg-slate-900/5 hover:text-slate-900'
-            : 'font-normal text-gray-600 hover:bg-gray-50 hover:text-gray-900 border-transparent'
-      }`}
-    >
-      <span className="flex min-w-0 items-center">
-        <item.icon className={`${SIDEBAR_ICON_STROKE_CLASS} mr-2.5 h-4 w-4 flex-none`} strokeWidth={SIDEBAR_ICON_STROKE_WIDTH} />
-        <span className="truncate">{item.name}</span>
-      </span>
-      {/* Single trailing slot: every badge and readiness dot right-aligns
-          against the row's shared boundary — no per-element right margins —
-          so all secondary indicators snap to one vertical axis. */}
-      <span className="flex flex-none items-center justify-end gap-1.5">
-        <WorkCountBadge name={item.name} taskCount={displayTaskCount} goalCount={activeGoalCount} />
-        {item.name === 'Inbox' && unreadCount !== null && unreadCount > 0 && (
-          <NavBadge>{unreadCount > 99 ? '99+' : unreadCount}</NavBadge>
-        )}
-        {item.name === 'Tasks' && displayTaskCount === 0 && !hasTasks && hasAgents && hasRepos && (
-          <span className="w-2 h-2 flex-none rounded-full bg-amber-500" title="No tasks created yet" />
-        )}
-        {item.name === 'Plans' && generatingPlansCount > 0 && (
-          <NavBadge>{generatingPlansCount}</NavBadge>
-        )}
-        {item.name === 'Repositories' && !hasRepos && (
-          <span className="w-2 h-2 flex-none rounded-full bg-amber-500" title="No repositories configured" />
-        )}
-        {item.name === 'Coding Agents' && !hasAgents && (
-          <span className="w-2 h-2 flex-none rounded-full bg-amber-500" title="No AI agents configured" />
-        )}
-      </span>
-    </Link>
-  );
+  const renderNavigationItem = (item: NavItem) => {
+    const readinessMessage = item.name === 'Repositories' && !hasRepos
+      ? 'No repositories configured'
+      : item.name === 'Coding Agents' && !hasAgents
+        ? 'No AI agents configured'
+        : item.name === 'Tasks' && displayTaskCount === 0 && !hasTasks && hasAgents && hasRepos
+          ? 'No tasks created yet'
+          : null;
+    return (
+      <Link
+        key={item.name}
+        to={item.href}
+        className={`flex items-center justify-between text-[13px] leading-5 transition-colors duration-150 ${
+          // mx-2 + px-2 puts the selection's inner edges on the sidebar's shared
+          // 16px rail, matching the web rows' px-4 (their border-l-4 is part
+          // of the box, so trailing content ends at the same 16px boundary).
+          // Desktop rows use a uniform 32px height in every navigation state.
+          desktop ? 'mx-2 rounded-[6px] border-0 px-2 py-1.5 tracking-tight' : 'border-l-4 px-4 py-2'
+        } ${
+          isActive(item.href)
+            ? desktop
+              // Neutral inset selection keeps labels readable over the material.
+              ? 'bg-black/5 font-normal text-slate-900'
+              : 'bg-slate-50 font-medium text-slate-900 border-primary-600'
+            : desktop
+              ? 'font-normal text-slate-700 hover:bg-slate-900/5 hover:text-slate-900'
+              : 'font-normal text-gray-600 hover:bg-gray-50 hover:text-gray-900 border-transparent'
+        }`}
+      >
+        <span className="flex min-w-0 items-center">
+          <item.icon className={`${SIDEBAR_ICON_STROKE_CLASS} mr-2.5 h-4 w-4 flex-none`} strokeWidth={SIDEBAR_ICON_STROKE_WIDTH} />
+          <span className={`truncate ${desktop && readinessMessage ? 'font-medium text-slate-900' : ''}`}>{item.name}</span>
+          {desktop && readinessMessage && (
+            <span className="ml-1.5 h-1.5 w-1.5 flex-none rounded-full bg-amber-500" role="img" aria-label={readinessMessage} title={readinessMessage} />
+          )}
+        </span>
+        {/* Counts share the trailing rail. Desktop readiness stays beside
+            its label; web readiness retains the existing trailing position. */}
+        <span className="flex flex-none items-center justify-end gap-1.5">
+          <WorkCountBadge name={item.name} taskCount={displayTaskCount} goalCount={activeGoalCount} />
+          {item.name === 'Inbox' && unreadCount !== null && unreadCount > 0 && (
+            <NavBadge>{unreadCount > 99 ? '99+' : unreadCount}</NavBadge>
+          )}
+          {!desktop && item.name === 'Tasks' && displayTaskCount === 0 && !hasTasks && hasAgents && hasRepos && (
+            <span className="w-2 h-2 flex-none rounded-full bg-amber-500" title="No tasks created yet" />
+          )}
+          {item.name === 'Plans' && generatingPlansCount > 0 && (
+            <NavBadge>{generatingPlansCount}</NavBadge>
+          )}
+          {!desktop && item.name === 'Repositories' && !hasRepos && (
+            <span className="w-2 h-2 flex-none rounded-full bg-amber-500" title="No repositories configured" />
+          )}
+          {!desktop && item.name === 'Coding Agents' && !hasAgents && (
+            <span className="w-2 h-2 flex-none rounded-full bg-amber-500" title="No AI agents configured" />
+          )}
+        </span>
+      </Link>
+    );
+  };
 
   return (
     <div className={`${hideSidebar ? 'desktop-sidebar-hidden ' : ''}desktop-shell flex h-full min-h-0 flex-col overflow-hidden bg-light-100 relative`}>
@@ -321,7 +332,7 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
               last. mt-auto absorbs the space below navigation. */}
           <div className="mt-auto flex flex-none flex-col">
           {(isDemoMode || userHasPermission(user, 'instance.manage_agents')) && (
-            <AgentTankSidebar allowManualRefresh={!isDemoMode} className="desktop-sidebar-usage" />
+            <AgentTankSidebar allowManualRefresh={!isDemoMode} collapsible={Boolean(desktop)} className="desktop-sidebar-usage" />
           )}
           {user && (
             // The interactive account block is its own group, detached from
@@ -360,7 +371,7 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
               </button>
             </div>
           )}
-          {!desktop && <footer className="mt-4 px-4 pb-2 leading-tight space-y-1">
+          <footer className="mt-4 px-4 pb-2 leading-tight space-y-1">
             {/* The version is the datum developers scan for, so it sits one
                 contrast step above the secondary copyright line. */}
             <div className="text-[11px] text-slate-500">
@@ -374,8 +385,8 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
               </a>{' '}
               v{__APP_VERSION__}
             </div>
-            <div className="text-[10px] text-slate-400">© {new Date().getFullYear()} Rinalds Uzkalns</div>
-          </footer>}
+            {!desktop && <div className="text-[10px] text-slate-400">© {new Date().getFullYear()} Rinalds Uzkalns</div>}
+          </footer>
           </div>
         </div>
       </aside>}

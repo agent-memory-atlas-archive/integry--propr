@@ -1,5 +1,5 @@
-import React, { useState, useEffect, useCallback } from 'react';
-import { ChevronDown, ChevronRight, RefreshCw } from 'lucide-react';
+import React, { useState, useEffect, useCallback, useId } from 'react';
+import { ChevronDown, ChevronRight, Gauge, RefreshCw } from 'lucide-react';
 import { getAgentTankUsage, refreshAgentTank, AgentTankUsageResponse, AgentUsageData } from '../api/revertApi';
 import { ProviderLogo } from './ui/ProviderLogo';
 import { getModelDisplayName } from '../utils/modelDisplay';
@@ -296,9 +296,12 @@ const AgentRow: React.FC<AgentRowProps> = ({ agent, expanded, onToggle }) => {
 interface AgentTankSidebarProps {
   allowManualRefresh?: boolean;
   className?: string;
+  collapsible?: boolean;
 }
 
-const AgentTankSidebar: React.FC<AgentTankSidebarProps> = ({ allowManualRefresh = true, className }) => {
+const AgentTankSidebar: React.FC<AgentTankSidebarProps> = ({ allowManualRefresh = true, className = '', collapsible = false }) => {
+  const [usageExpanded, setUsageExpanded] = useState(false);
+  const usageId = useId();
   const [data, setData] = useState<AgentTankUsageResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -355,13 +358,29 @@ const AgentTankSidebar: React.FC<AgentTankSidebarProps> = ({ allowManualRefresh 
     // group's mt-auto (in Layout) absorbs the flexible space above, so the
     // widget draws no divider of its own. Surfaces that still want a rule
     // (e.g. the mobile sheet) pass border classes via className.
-    <div className={`px-4 pt-4 pb-3 ${className || ''}`}>
-      <div className="flex items-center justify-between mb-2">
+    <div className={`px-4 pt-4 pb-3 ${className}`}>
+      <div className={`flex items-center justify-between ${collapsible ? '' : 'mb-2'}`}>
         {/* Utility-header spec from the design system handover. */}
-        <span className="text-[10px] uppercase font-bold tracking-widest text-slate-500">
-          Usage
-        </span>
-        {allowManualRefresh && (
+        {collapsible ? (
+          <button
+            type="button"
+            aria-expanded={usageExpanded}
+            aria-controls={usageId}
+            onClick={() => setUsageExpanded(value => !value)}
+            className="-mx-2 flex h-8 flex-1 items-center rounded-[6px] px-2 text-[13px] text-slate-700 hover:bg-black/5"
+          >
+            <Gauge className={`${SIDEBAR_ICON_STROKE_CLASS} mr-2.5 h-4 w-4`} strokeWidth={SIDEBAR_ICON_STROKE_WIDTH} aria-hidden="true" />
+            Usage
+            {usageExpanded
+              ? <ChevronDown className="ml-auto h-4 w-4" strokeWidth={SIDEBAR_ICON_STROKE_WIDTH} aria-hidden="true" />
+              : <ChevronRight className="ml-auto h-4 w-4" strokeWidth={SIDEBAR_ICON_STROKE_WIDTH} aria-hidden="true" />}
+          </button>
+        ) : (
+          <span className="text-[10px] uppercase font-bold tracking-widest text-slate-500">
+            Usage
+          </span>
+        )}
+        {allowManualRefresh && !collapsible && (
           <button
             onClick={() => fetchUsage(true)}
             disabled={refreshing}
@@ -372,7 +391,18 @@ const AgentTankSidebar: React.FC<AgentTankSidebarProps> = ({ allowManualRefresh 
           </button>
         )}
       </div>
-      <div className="space-y-0">
+      <div id={usageId} hidden={collapsible && !usageExpanded} className={collapsible ? 'max-h-56 overflow-y-auto pt-2' : 'space-y-0'}>
+        {collapsible && allowManualRefresh && (
+          <button
+            type="button"
+            onClick={() => fetchUsage(true)}
+            disabled={refreshing}
+            className="mb-2 flex items-center gap-2 text-[11px] text-slate-500 hover:text-slate-900 disabled:opacity-50"
+          >
+            <RefreshCw className={`${SIDEBAR_ICON_STROKE_CLASS} h-3 w-3 ${refreshing ? 'animate-spin' : ''}`} strokeWidth={SIDEBAR_ICON_STROKE_WIDTH} aria-hidden="true" />
+            Refresh usage
+          </button>
+        )}
         {agents.map(agent => (
           <AgentRow
             key={agent.name}

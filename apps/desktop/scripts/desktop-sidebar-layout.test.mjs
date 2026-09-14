@@ -90,9 +90,12 @@ it('keeps desktop selector identities, status and keyboard actions usable at nar
       await expect(button).toHaveAttribute('aria-haspopup', 'dialog');
       await expect(selector.locator('.desktop-instance-icon .lucide-' + (state.kind === 'local' ? 'computer' : 'cloud'))).toHaveCount(1);
       await expect(selector.locator('.desktop-instance-icon .desktop-connection-dot')).toHaveCount(0);
-      await expect(selector.locator('.desktop-instance-switch > svg.lucide-chevron-down')).toHaveCount(1);
+      await expect(selector.locator('.desktop-instance-switch > svg.lucide-chevrons-up-down')).toHaveCount(1);
       await expect(selector.locator('.desktop-instance-switch .desktop-connection-dot')).toHaveCount(1);
       await expect(selector.locator('.desktop-instance-action')).toHaveCSS('color', 'rgb(100, 116, 139)');
+      await expect(button).toHaveCSS('border-color', 'rgba(0, 0, 0, 0)');
+      await button.hover();
+      await expect(button).toHaveCSS('background-color', 'rgba(0, 0, 0, 0.05)');
       const geometry = await selector.evaluate(element => {
         const box = element.getBoundingClientRect();
         const selectors = ['button', '.desktop-instance-copy', '.desktop-instance-switch'];
@@ -122,10 +125,10 @@ it('keeps desktop selector identities, status and keyboard actions usable at nar
       assert.ok(geometry.nameHeight <= 20, 'Long instance names stay on one line');
       assert.equal(geometry.buttonHeight, 32, 'Selector is one compact popup row');
       assert.ok(geometry.rowCentered, 'Icon, copy and status/action share the row center');
-      assert.equal(geometry.actionRightInset, 9, 'Chevron sits at the compact right padding boundary');
-      assert.equal(geometry.copyActionGap, 6, 'Text stretches to the chevron with a compact gap');
+      assert.equal(geometry.actionRightInset, 8, 'Chevron sits at the compact right padding boundary');
+      assert.equal(geometry.copyActionGap, 10, 'Text stretches to the chevron with a compact gap');
       assert.ok(geometry.statusBeforeChevron, 'Status stays beside the disclosure at the right edge');
-      assert.ok(geometry.copyWidth >= state.width - 87, `Text uses the available width: ${JSON.stringify({ state, geometry })}`);
+      assert.ok(geometry.copyWidth >= state.width - 97, `Text uses the available width: ${JSON.stringify({ state, geometry })}`);
       // Start from the document so Tab, not programmatic focus, enters the control.
       await page.evaluate(() => { document.body.tabIndex = -1; document.body.focus(); });
       await page.keyboard.press('Tab');
