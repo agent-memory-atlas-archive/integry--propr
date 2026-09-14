@@ -192,7 +192,7 @@ function summarizePlanIssues(issues: JsonObject[]) {
 export function summarizePlan(row: JsonObject, issues: JsonObject[], now = Date.now(), relationLimit = RELATION_LIMIT): JsonObject {
   const { counts, agentModels, pullRequests } = summarizePlanIssues(issues);
   const status = text(row.status) ?? 'draft';
-  const completedAt = status === 'merged' ? row.updated_at : null;
+  const completedAt = ['executed', 'merged', 'failed'].includes(status) ? row.updated_at : null;
   const trace = parseObject(row.generation_trace);
   const refinement = parseObject(row.refinement_result);
   const context = parseObject(row.context_config);

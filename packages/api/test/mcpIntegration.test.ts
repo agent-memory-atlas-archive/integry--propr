@@ -43,6 +43,28 @@ test('MCP list summaries report PR states only when supported by stored evidence
   }
 });
 
+test('MCP plan summaries stop elapsed time when plans reach a terminal status', () => {
+  const row = {
+    created_at: '2026-09-01 12:00:00',
+    updated_at: '2026-09-01 12:00:30',
+    generation_trace: JSON.stringify({ error: 'Plan generation failed' }),
+  };
+  for (const status of ['executed', 'merged', 'failed']) {
+    for (const now of [Date.UTC(2026, 8, 1, 13), Date.UTC(2026, 11, 1)]) {
+      const plan = summarizePlan({ ...row, status }, [], now);
+      assert.deepEqual({
+        completed_at: plan.completed_at,
+        elapsed_ms: plan.elapsed_ms,
+        failure_reason: plan.failure_reason,
+      }, {
+        completed_at: row.updated_at,
+        elapsed_ms: 30_000,
+        failure_reason: status === 'failed' ? 'Plan generation failed' : null,
+      });
+    }
+  }
+});
+
 test('MCP list elapsed time treats naive database timestamps as UTC on non-UTC hosts', () => {
   const originalTZ = process.env.TZ;
   const now = Date.UTC(2026, 8, 1, 12, 0, 5);
