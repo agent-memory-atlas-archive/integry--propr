@@ -1,17 +1,12 @@
 import { Job } from 'bullmq';
 import type { Logger } from 'pino';
-import { getAuthenticatedOctokit, hashTaskAttemptToken, logger, retryConfigs, runWithExecutionAbortSignal, withRetry } from '@propr/core';
-import { getStateManager, TaskStates } from '@propr/core';
-import type { WorkerStateManager } from '@propr/core';
-import type { WorktreeInfo } from '@propr/core';
-import { ensureGitRepository } from '@propr/core';
-import { createLogFiles } from '@propr/core';
-import { UsageLimitError } from '@propr/core';
-import type { ClaudeCodeResponse } from '@propr/core';
-import { recordLLMMetrics } from '@propr/core';
-import type { CommentJobData, UnprocessedComment, JobResult } from '@propr/core';
+import {
+    getAuthenticatedOctokit, hashTaskAttemptToken, logger, retryConfigs, runWithExecutionAbortSignal, withRetry,
+    getStateManager, TaskStates, ensureGitRepository, createLogFiles, UsageLimitError, recordLLMMetrics,
+    loadPrimaryProcessingLabels, loadRepositoryVisualPreviewSettings,
+    type WorkerStateManager, type WorktreeInfo, type ClaudeCodeResponse, type CommentJobData, type UnprocessedComment, type JobResult,
+} from '@propr/core';
 import { Redis } from 'ioredis';
-import { loadPrimaryProcessingLabels, loadRepositoryVisualPreviewSettings } from '@propr/core';
 import {
     validateAndFilterComments, filterUnprocessedComments, fetchLinkedIssueContext,
     buildCommentHistory, updateTaskTitleForPR, resolvePrReasoningLevelOverride
@@ -22,7 +17,7 @@ import {
     handleJobError, cleanupJob, toClaudeResult, buildStartingWorkCommentBody
 } from './prCommentJobUtils.js';
 import { pickUpPendingCommentsWithClaim, applyPendingCommentCommandContext } from './prPendingComments.js';
-import { executeReviewProcessing } from './prCommentReviewJob.js';
+import { executeReviewProcessing, type PRJobContext } from './prCommentReviewJob.js';
 import { generateSummaryTitle, resolveAndExecuteAgent, resolvePRCommentModelName } from './prCommentAgentUtils.js';
 import { isReviewComment } from './reviewCommentFormatter.js';
 import { hasAuthorizedFixFeedback, prepareFixReviewFeedback } from './reviewFindingSelector.js';
@@ -63,19 +58,6 @@ const redisClient = new Redis({
 
 interface PRData { data: Contribution & { labels: Array<{ name: string }> } }
 interface PRComment { id: number; body: string; body_html?: string; user: { login: string; type?: string }; created_at: string; pull_request_review_id?: number }
-
-interface PRJobContext {
-    pullRequestNumber: number;
-    jobBranchName: string | undefined;
-    repoOwner: string;
-    repoName: string;
-    llm: string | null | undefined;
-    correlationId: string;
-    correlatedLogger: Logger;
-    primaryProcessingLabels: string[];
-    isBatchJob: boolean;
-    commentsToProcess: UnprocessedComment[];
-}
 
 interface ValidationResult {
     skip: boolean;

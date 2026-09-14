@@ -1,3 +1,5 @@
+import { findPRContinuation, type PullRequestReference } from './prContinuation.js';
+import { buildCommentHistory } from './prCommentJobHelpers.js';
 import type { Logger } from 'pino';
 import type { Job } from 'bullmq';
 import type { Redis } from 'ioredis';
@@ -16,6 +18,20 @@ import { buildWorkEvidenceMarker, filterRealComments } from '../shared/workEvide
 import type { ReasoningLevel } from '@propr/shared';
 import { releasePRProcessingLock } from './prProcessingLock.js';
 import { schedulePRCommentUsageLimitRetry } from './prCommentUsageLimitRecovery.js';
+
+export async function fetchOriginalContributionDiscussion(
+    octokit: Awaited<ReturnType<typeof getAuthenticatedOctokit>>,
+    ref: PullRequestReference,
+    correlationId: string,
+): Promise<string> {
+    const continuation = await findPRContinuation(ref);
+    if (!continuation || continuation.source_pr === ref.pullRequestNumber) return '';
+    const originalPR = await octokit.request('GET /repos/{owner}/{repo}/pulls/{pull_number}', {
+        owner: ref.repoOwner, repo: ref.repoName, pull_number: continuation.source_pr,
+    });
+    const originalComments = await fetchAllComments(octokit, ref.repoOwner, ref.repoName, continuation.source_pr);
+    return `\n\nOriginal contribution discussion (#${continuation.source_pr}):\n${buildCommentHistory(originalComments, originalPR, correlationId)}`;
+}
 
 export function toClaudeResult(response: ClaudeCodeResponse): ClaudeResult {
     return {

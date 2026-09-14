@@ -1,13 +1,10 @@
-import { findPRContinuation } from './prContinuation.js';
 import type { Logger } from 'pino';
 import type { Job } from 'bullmq';
-import { getAuthenticatedOctokit, retryConfigs, TaskStates, withRetry } from '@propr/core';
+import { AgentRegistry, getAuthenticatedOctokit, loadPrReviewModel, resolveLlmLabel, retryConfigs, TaskStates, withRetry } from '@propr/core';
 import type { WorkerStateManager, WorktreeInfo } from '@propr/core';
-import { AgentRegistry, resolveLlmLabel } from '@propr/core';
 import type { CommentJobData, UnprocessedComment } from '@propr/core';
-import { loadPrReviewModel } from '@propr/core';
-import { buildCommentHistory, resolvePrReasoningLevelOverride, updateTaskTitleForPR } from './prCommentJobHelpers.js';
-import { buildCombinedComment, fetchAllComments } from './prCommentJobUtils.js';
+import { resolvePrReasoningLevelOverride, updateTaskTitleForPR } from './prCommentJobHelpers.js';
+import { buildCombinedComment, fetchOriginalContributionDiscussion } from './prCommentJobUtils.js';
 import { fetchReviewContext, resolveReviewContextTokenBudget, type PRData } from './reviewContextHelpers.js';
 import { prepareRelatedReviewContext } from './reviewContextScout.js';
 import { loadReviewRuntimeSettings } from './reviewRuntimeSettings.js';
@@ -314,15 +311,7 @@ export async function executeReviewProcessing(params: ExecuteReviewParams): Prom
             maxContextTokens: reviewMaxContextTokens, correlationId, correlatedLogger,
         }
     );
-    let originalDiscussion = '';
-    const continuation = await findPRContinuation(context);
-    if (continuation && continuation.source_pr !== pullRequestNumber) {
-        const originalPR = await state.octokit.request('GET /repos/{owner}/{repo}/pulls/{pull_number}', {
-            owner: repoOwner, repo: repoName, pull_number: continuation.source_pr,
-        });
-        const originalComments = await fetchAllComments(state.octokit, repoOwner, repoName, continuation.source_pr);
-        originalDiscussion = `\n\nOriginal contribution discussion (#${continuation.source_pr}):\n${buildCommentHistory(originalComments, originalPR, correlationId)}`;
-    }
+    const originalDiscussion = await fetchOriginalContributionDiscussion(state.octokit, context, correlationId);
     job.data.reasoningLevel = resolvePrReasoningLevelOverride(prData!.data.labels, linkedIssueResult.linkedIssueLabels, {
         repoOwner,
         repoName,
