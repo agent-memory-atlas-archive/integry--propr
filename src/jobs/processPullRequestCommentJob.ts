@@ -47,6 +47,7 @@ import {
 } from './prProcessingLock.js';
 import { createPRCommentTaskStateIfMissing, evaluatePRCommentPreExecutionRecovery, handlePRCommentLockContention } from './prCommentCollisionRecovery.js';
 import { stopOriginalPRReviewCycle } from './prContinuationReview.js';
+import { loadOriginalContributionDiscussion } from './prContributionDiscussion.js';
 import { PullRequestPublication } from './prPublication.js';
 import { recoverPendingPublication, type ProcessingState, type ExecuteProcessingParams } from './prPublicationRecovery.js';
 import { findPRContinuation, type Contribution } from './prContinuation.js';
@@ -159,19 +160,6 @@ function getWebUiUrl(): string {
     return process.env.WEB_UI_URL || process.env.FRONTEND_URL || 'https://gitfix.dev';
 }
 
-
-async function loadOriginalContributionDiscussion(octokit: NonNullable<ProcessingState['octokit']>, context: PRJobContext): Promise<string> {
-    const { repoOwner, repoName, pullRequestNumber, correlationId } = context;
-    const continuation = await findPRContinuation(context);
-    if (continuation && continuation.source_pr !== pullRequestNumber) {
-        const sourceRef = { owner: repoOwner, repo: repoName, pull_number: continuation.source_pr };
-        const originalPR = await octokit.request('GET /repos/{owner}/{repo}/pulls/{pull_number}', sourceRef) as PRData;
-        const originalComments = await fetchAllComments(octokit, repoOwner, repoName, continuation.source_pr);
-        return `\n\nOriginal contribution discussion (#${continuation.source_pr}):\n${buildCommentHistory(originalComments, originalPR, correlationId)}`;
-    }
-    return '';
-}
-
 async function executeProcessing(params: ExecuteProcessingParams): Promise<JobResult> {
     const { job, context, taskId, stateManager, state, lockKey, lockToken } = params;
     let { llm } = params;
@@ -204,8 +192,11 @@ async function executeProcessing(params: ExecuteProcessingParams): Promise<JobRe
         pullRequestNumber,
         correlatedLogger,
     });
-    let commentHistory = job.data.ultrafixMeta ? '' : buildCommentHistory(commentsByTime, prData!, correlationId);
-    if (!job.data.ultrafixMeta) commentHistory += await loadOriginalContributionDiscussion(state.octokit, context);
+    let commentHistory = '';
+    if (!job.data.ultrafixMeta) {
+        commentHistory = buildCommentHistory(commentsByTime, prData!, correlationId);
+        commentHistory += await loadOriginalContributionDiscussion(state.octokit, context);
+    }
 
     const {
         isFixMode,
