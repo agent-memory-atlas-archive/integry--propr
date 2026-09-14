@@ -275,7 +275,7 @@ export const useTaskData = (taskId: string | undefined) => {
       console.log(`[useTaskData] Received incremental update via WebSocket: ${newEvents.length} new events`);
       setLiveDetails(prev => mergeIncrementalLiveDetails(prev, payload));
     }
-  }, [taskId]);
+  }, []);
 
   // Initial data fetch
   useEffect(() => {
