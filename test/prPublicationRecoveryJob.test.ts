@@ -53,6 +53,8 @@ let produced: string[] = [];
 let completionBodies: string[] = [];
 let failCompletion = false;
 let partialResult = false;
+let completedCheckHeads = new Set<string>();
+let deferredReviews: Array<{ pr: number; nextAction: string; reason: string }> = [];
 const log = { info() {}, warn() {}, error() {}, debug() {} };
 const noOp = async () => {};
 const completions: Array<{ taskId: string; metadata: any }> = [];
@@ -90,6 +92,15 @@ await mock.module('@propr/core', { namedExports: {
         return { commitHash: produced.at(-1), commitMessage: message, filesChanged: ['implementation.txt'] };
     },
     getAuthenticatedOctokit: async () => octokit,
+    getCurrentPRHead: async (_owner: string, _repo: string, pr: number) => {
+        assert.equal(pr, 100);
+        return git(repoPath('upstream'), 'rev-parse', 'refs/heads/propr/continuation-pr-42');
+    },
+    getCheckRunsStatus: async (_owner: string, _repo: string, sha: string) => {
+        events.push(`checks:${sha}`);
+        const allPassing = completedCheckHeads.has(sha);
+        return { count: 1, allPassing, anyPending: !allPassing, anyFailed: false };
+    },
     getRepoUrl: ({ repoOwner }: { repoOwner: string }) => repoPath(repoOwner),
     createHooklessGit: (worktree: string) => {
         const actual = realGit(worktree);
@@ -204,9 +215,11 @@ const modules: Record<string, Record<string, unknown>> = {
     prCommentAgentUtils: { generateSummaryTitle: async () => 'Saved subtitle', resolveAndExecuteAgent: async ({ worktreePath, prompt }: { worktreePath: string; prompt: string }) => { events.push('agent'); prompts.push(prompt); if (produced.length) assert.equal(git(worktreePath, 'rev-parse', 'HEAD'), produced[0]); await writeFile(path.join(worktreePath, 'implementation.txt'), `execution ${prompts.length}\n`); return { claudeResult: { success: !partialResult, summary: 'Saved agent summary', sessionId: 'saved-session', model: 'saved-model' }, agentType: 'test' }; }, resolvePRCommentModelName: async () => 'model' },
     reviewCommentFormatter: { isReviewComment: () => false },
     reviewFindingSelector: { hasAuthorizedFixFeedback: () => true, prepareFixReviewFeedback: async () => ({ isFixMode: false, selectedReviewComments: [] }) },
-    ultrafixOrchestrationService: { retainOriginalScope: noOp, stopLoop: async () => { events.push('stop'); } },
+    ultrafixOrchestrationService: {
+        retainOriginalScope: noOp, stopLoop: async () => { events.push('stop'); },
+        saveDeferredContinuation: async (_redis: unknown, deferred: typeof deferredReviews[number]) => { deferredReviews.push(deferred); },
+    },
     ultrafixJobHelpers: { resolveUltrafixHistoryMeta: async () => ({}), handleUltrafixContinuation: noOp, markSelectedUltrafixFindings: noOp, restorePendingCommentsIfUltrafixJobSuperseded: async () => false },
-    ultrafixReviewExecutionGate: { shouldDeferUltrafixReview: async () => { events.push('check-gate'); return false; } },
     prCommentNoAuthorizedFindings: { handleNoAuthorizedFindings: noOp },
     prTaskTitleHelpers: Object.fromEntries(['buildDeterministicPrTaskSubtitle', 'buildPrTaskTitle', 'buildPrTaskTitleContext', 'buildPrTaskTitleContextHistoryMetadata', 'getPrTaskWorkflowLabel', 'resolvePrTaskWorkflow'].map(name => [name, noOp])),
     prProcessingLock: {
@@ -234,6 +247,7 @@ const job = (id = 'task-1', commentId = 5, body = 'Original instructions') => ({
 const run = (request = job()) => processPullRequestCommentJob(request as never);
 const denial = () => new Error('remote: Write access to repository not granted. fatal: HTTP 403');
 beforeEach(async () => {
+    completedCheckHeads = new Set([sourceSha]); deferredReviews = [];
     taskStates.clear(); pendingComments = []; restoredComments = []; skipValidation = false;
     await database('pr_continuations').delete();
     await database('tasks').delete();
@@ -305,6 +319,41 @@ test('a new instruction first finishes the outstanding task and then runs only t
     assert.deepEqual(completions.map(c => c.taskId), ['task-1', 'task-2']);
     git(repoPath('upstream'), 'merge-base', '--is-ancestor', produced[0], produced[1]);
 });
+
+for (const initialChecksPassing of [true, false]) {
+    test(`continuation review recovers publication before deferring on pending checks (initial checks passing: ${initialChecksPassing})`, async () => {
+        continuationPushError = new Error('Connection timed out');
+        await assert.rejects(run(), /Connection timed out/);
+        await assertSavedCheckpoint();
+        assert.equal((await findPRContinuation(ref))!.continuation_pr, 100);
+        assert.equal(git(repoPath('upstream'), 'rev-parse', 'propr/continuation-pr-42'), sourceSha);
+        if (!initialChecksPassing) completedCheckHeads.clear();
+        continuationPushError = undefined;
+        events = [];
+
+        const request = job('review-task', 6, '/ultrafix');
+        const result = await run({ ...request, data: {
+            ...request.data, pullRequestNumber: 100, commandMode: 'review',
+            ultrafixMeta: { mode: 'ultrafix', instructions: '' },
+        } } as never);
+
+        assert.equal(result.status, 'deferred');
+        assert.equal(result.reason, 'ultrafix_waiting_for_exact_head_checks');
+        assert.equal(git(repoPath('upstream'), 'rev-parse', 'propr/continuation-pr-42'), produced[0]);
+        const record = (await findPRContinuation(ref))!;
+        assert.equal(record.publication_bundle, null);
+        assert.equal(record.publication_completion, null);
+        assert.equal(taskStates.get('task-1'), 'completed');
+        assert.deepEqual(events.filter(event => event.startsWith('checks:')), [`checks:${produced[0]}`]);
+        assert.ok(events.indexOf('complete:task-1') < events.indexOf(`checks:${produced[0]}`));
+        assert.equal(deferredReviews.length, 1);
+        assert.equal(deferredReviews[0].pr, 100);
+        assert.equal(deferredReviews[0].nextAction, 'review');
+        assert.equal(deferredReviews[0].reason, 'pre_execution_checks_not_passing');
+        assert.ok(!events.includes('review:100'));
+        assert.equal(prompts.length, 1);
+    });
+}
 
 test('repeated publication and completion failures retain the inputs without rerunning the agent', async () => {
     continuationPushError = new Error('Connection timed out');

@@ -361,9 +361,6 @@ async function executeProcessing(params: ExecuteProcessingParams): Promise<JobRe
 }
 
 export async function processPullRequestCommentJob(job: Job<CommentJobData>): Promise<JobResult> {
-    const initialContinuation = await findPRContinuation(job.data);
-    const reviewingOriginal = initialContinuation?.source_pr === job.data.pullRequestNumber;
-    if (!reviewingOriginal && await shouldDeferUltrafixReview(job, redisClient, logger.withCorrelation(job.data.correlationId))) return { status: 'deferred', reason: 'ultrafix_waiting_for_exact_head_checks' };
     const context = await initializePRJobContext(job);
     const { pullRequestNumber, repoOwner, repoName, correlationId, correlatedLogger, isBatchJob, commentsToProcess, jobBranchName, llm } = context;
     correlatedLogger.info({ pullRequestNumber, branchName: jobBranchName, llm, isBatchJob, commentsCount: commentsToProcess.length }, `Processing PR comment${isBatchJob ? 's batch' : ''} job...`);
@@ -425,6 +422,8 @@ export async function processPullRequestCommentJob(job: Job<CommentJobData>): Pr
         }
         // Branch early for review mode — read-only analysis, no commits or pushes
         if (job.data.commandMode === 'review') {
+            // Recovery can advance the continuation HEAD; gate its checks only after publication completes.
+            if (await shouldDeferUltrafixReview(job, redisClient, correlatedLogger)) return { status: 'deferred', reason: 'ultrafix_waiting_for_exact_head_checks' };
             return await runWithExecutionAbortSignal(executionController.signal, () => executeReviewProcessing({ job, context, llm, taskId, stateManager, state, redisClient, validatePRAndComments }), hashTaskAttemptToken(lockToken));
         }
         return await runWithExecutionAbortSignal(executionController.signal, () => executeProcessing({ job, context, llm, taskId, stateManager, state, lockKey, lockToken }), hashTaskAttemptToken(lockToken));
