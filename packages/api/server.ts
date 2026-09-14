@@ -71,7 +71,7 @@ import { handleWebhookRequest } from './webhookHandler.js';
 import { stopTaskExecution } from './routes/dockerRoutes.js';
 import { initializePushSubscriptionMaintenance } from './services/pushSubscriptionMaintenance.js';
 import { resolveInstanceWebPushConfiguration } from './services/instanceWebPushConfiguration.js';
-import type { ValidatedWebPushConfiguration } from './services/webPushConfiguration.js';
+import { WEB_PUSH_CONFIGURATION_WARNINGS, type ValidatedWebPushConfiguration } from './services/webPushConfiguration.js';
 import { assertInstanceAdministratorConfigured } from './authorization.js';
 import { resolveApiListenHost } from './listenAddress.js';
 import {
@@ -497,6 +497,11 @@ const httpServer: HttpServer = createServer(app);
 
 async function initializeNotificationBackground(): Promise<void> {
   resolvedWebPushConfiguration = resolveInstanceWebPushConfiguration();
+  if (!resolvedWebPushConfiguration.configured && resolvedWebPushConfiguration.issue !== 'disabled') {
+    console.warn(`[notifications] Web Push unavailable: ${
+      WEB_PUSH_CONFIGURATION_WARNINGS[resolvedWebPushConfiguration.issue]
+    }`);
+  }
   const vapidEnvironment = {
     WEB_PUSH_VAPID_SUBJECT: process.env.WEB_PUSH_VAPID_SUBJECT,
     WEB_PUSH_VAPID_PUBLIC_KEY: process.env.WEB_PUSH_VAPID_PUBLIC_KEY,
