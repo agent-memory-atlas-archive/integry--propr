@@ -117,7 +117,7 @@ async function exerciseChrome(context, native) {
         pixels = await sharp(pixels).resize(size.width, size.height).png().toBuffer();
         const controls = await sharp(pixels).extract({ left: 0, top: 0, width: 80, height: 56 }).removeAlpha().raw().toBuffer();
         const colors = new Set();
-        let controlsRight = 0;
+        let controlsBottom = 0;
         for (let y = 0; y < 56; y += 1) {
           for (let x = 0; x < 80; x += 1) {
             const offset = (y * 80 + x) * 3;
@@ -125,13 +125,13 @@ async function exerciseChrome(context, native) {
             const color = r > 180 && g < 140 && b < 140 ? 'red'
               : r > 180 && g > 140 && b < 100 ? 'yellow'
                 : g > 140 && r < 100 && b < 140 ? 'green' : null;
-            if (color) { colors.add(color); controlsRight = Math.max(controlsRight, x + 1); }
+            if (color) { colors.add(color); controlsBottom = Math.max(controlsBottom, y + 1); }
           }
         }
         assert.equal(colors.size, 3, 'OS capture must include all three native traffic lights');
         if (name === 'connected') {
           const logo = await page.locator('.desktop-sidebar-header img').boundingBox();
-          assert.ok(logo.x >= controlsRight + 8, 'Actual logo bounds must clear the captured native controls by 8px');
+          assert.ok(logo.y >= controlsBottom + 8, 'Logo must sit below the captured native controls with 8px clearance');
         }
         const rgb = async (bytes, x, y) => [...await sharp(bytes).extract({ left: x, top: y, width: 1, height: 1 }).removeAlpha().raw().toBuffer()];
         for (const x of [110, 220, 400, 700]) {
@@ -163,7 +163,7 @@ async function exerciseChrome(context, native) {
     await expect(page.locator('.desktop-sidebar-header')).toHaveCSS('background-color', 'rgba(0, 0, 0, 0)');
     await expect(page.locator('.desktop-sidebar')).toHaveCSS('background-color', 'rgb(242, 246, 246)');
     await expect(page.locator('.desktop-content-toolbar')).toHaveCSS('background-color', 'rgb(252, 253, 253)');
-    await capture('connected', 'macOS connected: logo clears the 80px traffic-light area');
+    await capture('connected', 'macOS connected: dedicated drag strip above the logo');
     for (const width of [1280, 880]) {
       if (native) await application.evaluate(({ BrowserWindow }, width) => BrowserWindow.getAllWindows()[0].setSize(width, 820), width);
       else await page.setViewportSize({ width, height: 820 });
@@ -179,10 +179,15 @@ async function exerciseChrome(context, native) {
         const box = await logo.boundingBox();
         const header = await page.locator('.desktop-sidebar-header').boundingBox();
         assert.ok(box && header);
-        assert.ok(box.x >= Math.max(80, inset ?? 0), `Logo intersects traffic-light exclusion area at width ${width}, inset ${inset}: ${box.x}`);
+        const drag = page.locator('.desktop-sidebar-drag-region');
+        const dragBox = await drag.boundingBox();
+        assert.ok(dragBox.height >= 40, 'Empty drag strip reserves native control clearance');
+        assert.equal(await drag.locator('*').count(), 0, 'Drag strip contains no interactive content');
+        assert.ok(box.y >= dragBox.y + dragBox.height, 'Logo stays below the drag strip');
+        assert.equal(box.x, header.x + 16, 'Logo aligns with the sidebar content rail');
         assert.equal(box.height, 32);
         assert.ok(box.x + box.width <= header.x + header.width, 'Entire logo fits inside the sidebar');
-        assert.ok(box.y >= 0 && box.y + box.height <= 56, 'Logo remains in the 56px toolbar');
+        assert.ok(box.y >= header.y && box.y + box.height <= header.y + header.height, 'Logo fits in its own header row');
         await style.evaluate(element => element.remove());
       }
     }

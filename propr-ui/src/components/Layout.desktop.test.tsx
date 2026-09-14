@@ -107,7 +107,7 @@ describe('Layout desktop instance selector', () => {
     expect(screen.getByText('Connected')).toBeInTheDocument();
     expect(screen.getByRole('link', { name: 'Dashboard' })).toHaveClass(
       'mx-2',
-      'rounded-lg',
+      'rounded-md',
       'border-0',
       'bg-primary-600/10',
       'text-primary-700',

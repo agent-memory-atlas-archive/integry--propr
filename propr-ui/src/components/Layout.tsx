@@ -236,9 +236,8 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
         // mx-2 + px-2 puts the pill's inner edges on the sidebar's shared
         // 16px rail, matching the web rows' px-4 (their border-l-4 is part
         // of the box, so trailing content ends at the same 16px boundary).
-        // Both shells share the same py-2 row height, so every active
-        // background is a uniformly sized, contained row.
-        desktop ? 'mx-2 rounded-lg border-0 px-2 py-2' : 'border-l-4 px-4 py-2'
+        // Desktop rows use a uniform 32px height in every navigation state.
+        desktop ? 'mx-2 rounded-md border-0 px-2 py-1.5' : 'border-l-4 px-4 py-2'
       } ${
         isActive(item.href)
           ? desktop
@@ -247,7 +246,7 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
             ? 'bg-primary-600/10 font-medium text-primary-700'
             : 'bg-slate-50 font-medium text-slate-900 border-primary-600'
           : desktop
-            ? 'font-normal text-slate-600 hover:bg-slate-900/5 hover:text-slate-900'
+            ? 'font-normal text-slate-700 hover:bg-slate-900/5 hover:text-slate-900'
             : 'font-normal text-gray-600 hover:bg-gray-50 hover:text-gray-900 border-transparent'
       }`}
     >
@@ -298,6 +297,7 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
         transform transition-transform duration-200 ease-in-out
         ${isSidebarOpen ? 'translate-x-0' : '-translate-x-full lg:translate-x-0'}
       `}>
+        {desktop && <div className="desktop-sidebar-drag-region" aria-hidden="true" />}
         <div className="desktop-sidebar-header flex flex-none items-center justify-between px-4 py-4 sm:py-6 h-12 sm:h-16">
           <Link to="/" className="flex items-center" aria-label="ProPR dashboard">
             <img src={publicAssetUrl(desktop ? '/media/logo-and-name-transparent.png' : '/media/logo-and-name.png')} alt="ProPR" className="h-8 w-auto" />
