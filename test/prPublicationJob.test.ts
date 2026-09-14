@@ -44,6 +44,7 @@ const modules: Record<string, Record<string, unknown>> = {
         cleanupJob: noOp, toClaudeResult: noOp, buildStartingWorkCommentBody: () => 'Starting work',
     },
     prPendingComments: {
+        restorePendingComments: noOp,
         pickUpPendingCommentsWithClaim: async (comments: unknown) => ({ commentsToProcess: comments, pickedUpComments: [] }),
         applyPendingCommentCommandContext: noOp,
     },

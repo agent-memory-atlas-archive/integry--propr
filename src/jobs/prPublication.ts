@@ -1,5 +1,6 @@
 import { cleanupWorktree, getAuthenticatedOctokit, logger } from '@propr/core';
 import { createPullRequestHeadWorktree, pushPullRequestHeadBranch } from './prGitOperations.js';
+import type { PublicationCompletion } from './prCommentPostExecution.js';
 import { resolvePullRequestGitTarget } from './prGitTarget.js';
 import {
     announceContinuation, continuationStatus, continuationTarget, ensurePRContinuation, findPRContinuation,
@@ -19,6 +20,15 @@ export class PullRequestPublication {
         private readonly ref: PullRequestReference,
         private readonly source: Contribution,
     ) {}
+
+    get pendingCompletion(): PublicationCompletion | undefined {
+        return this.continuation?.publication_completion
+            ? JSON.parse(this.continuation.publication_completion) as PublicationCompletion : undefined;
+    }
+
+    async finishCompletion() {
+        if (this.continuation) await savePublicationCheckpoint(this.continuation, null, null);
+    }
 
     get target() { return this.continuation ? continuationTarget(this.continuation) : resolvePullRequestGitTarget(this.source.head, this.ref); }
     get status() { return continuationStatus(this.continuation); }
@@ -40,8 +50,8 @@ export class PullRequestPublication {
     private async recover(worktreePath: string, token: string) {
         if (this.continuation?.publication_bundle) {
             await restorePublicationBundle(worktreePath, this.continuation.publication_bundle);
-            await pushContinuationHead(worktreePath, this.target, token);
-            await savePublicationCheckpoint(this.continuation, null);
+            const result = await pushContinuationHead(worktreePath, this.target, token);
+            await this.markPublished(result.commitHash);
         }
         await this.announce();
     }
@@ -74,7 +84,13 @@ export class PullRequestPublication {
         }
     }
 
-    async push(worktreePath: string) {
+    private async markPublished(commitHash: string) {
+        const completion = this.pendingCompletion;
+        if (completion?.commitResult) completion.commitResult.commitHash = commitHash;
+        await savePublicationCheckpoint(this.continuation!, null, completion ? JSON.stringify(completion) : undefined);
+    }
+
+    async push(worktreePath: string, completion?: PublicationCompletion) {
         const { token } = await this.octokit.auth({ type: 'installation' }) as { token: string };
         if (!this.continuation) {
             try {
@@ -83,15 +99,15 @@ export class PullRequestPublication {
                 if (!this.target.isFork || !isPublicationPermissionDenied(error)) throw error;
                 // Save the actual Git objects before any fallible adoption API request.
                 this.continuation = await findPRContinuation(this.ref) || await reserveContinuation(this.ref, this.source);
-                await savePublicationCheckpoint(this.continuation, await createPublicationBundle(worktreePath, this.continuation.source_sha));
+                await savePublicationCheckpoint(this.continuation, await createPublicationBundle(worktreePath, this.continuation.source_sha), completion ? JSON.stringify(completion) : undefined);
                 await this.adopt();
             }
         }
         // Publish the existing HEAD directly. No checkout, reset, cherry-pick or agent rerun.
         // Checkpoint continuation implementations too, including failed remote pushes.
-        await savePublicationCheckpoint(this.continuation!, await createPublicationBundle(worktreePath, this.continuation!.source_sha));
+        await savePublicationCheckpoint(this.continuation!, await createPublicationBundle(worktreePath, this.continuation!.source_sha), completion ? JSON.stringify(completion) : undefined);
         const result = await pushContinuationHead(worktreePath, this.target, token);
-        await savePublicationCheckpoint(this.continuation!, null);
+        await this.markPublished(result.commitHash);
         await this.announce();
         return result;
     }

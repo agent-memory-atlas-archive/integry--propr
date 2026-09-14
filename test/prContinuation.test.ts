@@ -10,9 +10,12 @@ import { up, down } from '../packages/core/src/db/migrations/20260914000000_add_
 
 import { up as checkpointUp, down as checkpointDown } from '../packages/core/src/db/migrations/20260914010000_add_pr_publication_checkpoint.js';
 
+import { up as completionUp, down as completionDown } from '../packages/core/src/db/migrations/20260914020000_add_pr_publication_completion.js';
+
 const database = knex({ client: 'better-sqlite3', connection: { filename: ':memory:' }, useNullAsDefault: true });
 await up(database);
 await checkpointUp(database);
+await completionUp(database);
 const root = await mkdtemp(path.join(tmpdir(), 'pr-continuation-'));
 const git = (cwd: string, ...args: string[]) => execFileSync('git', ['-c', 'core.hooksPath=/dev/null', '-c', 'user.name=Test Worker', '-c', 'user.email=worker@example.test', ...args], { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
 // All repositories are disposable fixtures; no workspace Git metadata is modified.
@@ -143,7 +146,7 @@ beforeEach(async () => {
     calls = []; prs = []; comments = []; probeError = undefined; finalPushError = undefined;
     loseCreateResponse = false; failComment = false; failPRCreate = false; continuationPushError = undefined;
 });
-after(async () => { await checkpointDown(database); await down(database); await database.destroy(); await rm(root, { recursive: true, force: true }); });
+after(async () => { await completionDown(database); await checkpointDown(database); await down(database); await database.destroy(); await rm(root, { recursive: true, force: true }); });
 
 async function implement(worktree: string) {
     await writeFile(path.join(worktree, 'implementation.txt'), 'implemented once\n');

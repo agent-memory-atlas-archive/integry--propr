@@ -58,7 +58,25 @@ interface PostExecutionContext {
     correlatedLogger: Logger;
 }
 
+/** Serializable inputs needed to finish the originating task after its worktree is gone. */
+export interface PublicationCompletion {
+    taskId: string;
+    instructionCommentIds: number[];
+    jobData: CommentJobData;
+    claudeResult: ClaudeCodeResponse;
+    authorsText: string;
+    unprocessedComments: UnprocessedComment[];
+    startingWorkComment: ReadyPostExecutionState['startingWorkComment'];
+    unprocessedReviewComments: AIReviewComment[];
+    llm?: string | null;
+    taskUrl: string;
+    commitResult: Awaited<ReturnType<typeof commitChanges>>;
+    changesSummary: string;
+    commitMessage: string;
+}
+
 interface PostExecutionParams {
+    recoveredCompletion?: PublicationCompletion;
     state: PostExecutionState;
     job: Job<CommentJobData>;
     taskId: string;
@@ -83,14 +101,15 @@ interface UndoContextParams {
 async function commitAndPush(
     state: ReadyPostExecutionState,
     context: PostExecutionContext,
-    llm: string | null | undefined
+    llm: string | null | undefined,
+    completionInputs: Omit<PublicationCompletion, 'commitResult' | 'changesSummary' | 'commitMessage'>
 ) {
     const changesSummary = state.claudeResult.summary || state.claudeResult.finalResult?.result || '';
     const commitMessage = buildCommitMessage({ changesSummary, unprocessedComments: state.unprocessedComments, pullRequestNumber: context.pullRequestNumber, claudeResult: state.claudeResult, llm, authorsText: state.authorsText });
     const commitResult = await commitChanges(state.worktreeInfo.worktreePath, commitMessage, AI_COMMIT_AUTHOR, { issueNumber: context.pullRequestNumber, issueTitle: 'Follow-up changes' });
 
     if (commitResult) {
-        const pushResult = await context.publication.push(state.worktreeInfo.worktreePath);
+        const pushResult = await context.publication.push(state.worktreeInfo.worktreePath, { ...completionInputs, commitResult, changesSummary, commitMessage });
         if (pushResult.commitHash) {
             commitResult.commitHash = pushResult.commitHash;
         }
@@ -230,7 +249,12 @@ export async function handlePostExecution(params: PostExecutionParams, taskUrl: 
             settings: await loadRepositoryVisualPreviewSettings(`${repoOwner}/${repoName}`),
             taskId
         });
-        const { commitResult, changesSummary, commitMessage } = await commitAndPush(state, context, llm);
+        const { commitResult, changesSummary, commitMessage } = params.recoveredCompletion ?? await commitAndPush(state, context, llm, {
+            taskId, instructionCommentIds: state.unprocessedComments.map(comment => comment.id),
+            jobData: job.data, claudeResult: state.claudeResult, authorsText: state.authorsText,
+            unprocessedComments: state.unprocessedComments, startingWorkComment: state.startingWorkComment,
+            unprocessedReviewComments, llm, taskUrl,
+        });
         if (partial && !commitResult) {
             throw new Error(`Agent execution ${terminationReason === 'timeout' ? 'timed out' : 'reached the maximum turn limit'} before producing changes to publish`);
         }
@@ -268,7 +292,9 @@ export async function handlePostExecution(params: PostExecutionParams, taskUrl: 
             commitHash: commitResult?.commitHash,
             historyMetadata: {
                 commandMode: job.data.commandMode || 'default',
-                continuation: context.publication.continuation,
+                continuation: context.publication.continuation ? {
+                    ...context.publication.continuation, publication_bundle: null, publication_completion: null,
+                } : undefined,
                 githubComment: { url: completionComment.data.html_url, body: completionComment.data.body },
                 ...(unprocessedReviewComments.length > 0 && { consumedReviewCommentIds: unprocessedReviewComments.map(c => c.id) }),
                 ...(partial && { incompleteExecution: { reason: terminationReason } }),

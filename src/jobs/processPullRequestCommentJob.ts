@@ -16,7 +16,7 @@ import {
     buildCombinedComment, extractModelFromLabels, fetchAllComments, buildPrompt,
     handleJobError, cleanupJob, toClaudeResult, buildStartingWorkCommentBody
 } from './prCommentJobUtils.js';
-import { pickUpPendingCommentsWithClaim, applyPendingCommentCommandContext } from './prPendingComments.js';
+import { pickUpPendingCommentsWithClaim, applyPendingCommentCommandContext, restorePendingComments } from './prPendingComments.js';
 import { executeReviewProcessing, type PRJobContext } from './prCommentReviewJob.js';
 import { generateSummaryTitle, resolveAndExecuteAgent, resolvePRCommentModelName } from './prCommentAgentUtils.js';
 import { isReviewComment } from './reviewCommentFormatter.js';
@@ -181,6 +181,82 @@ function getWebUiUrl(): string {
 }
 
 
+/** Recover under the shared PR lease, before comment filtering or review routing can skip completion. */
+async function recoverPendingPublication(params: ExecuteProcessingParams): Promise<JobResult | undefined> {
+    const { state, context, taskId, job, stateManager, lockKey, lockToken } = params;
+    const record = await findPRContinuation(context);
+    if (!record?.publication_bundle && !record?.publication_completion) return;
+    const octokit = state.octokit!;
+    const { data: source } = await octokit.request('GET /repos/{owner}/{repo}/pulls/{pull_number}', {
+        owner: context.repoOwner, repo: context.repoName, pull_number: context.pullRequestNumber,
+    });
+    const publication = state.publication = new PullRequestPublication(octokit, context, source as Contribution);
+    await ensureGitRepository(context.correlatedLogger);
+    const prepared = await publication.prepare(`pr-${context.pullRequestNumber}-publication-${Date.now()}`);
+    state.localRepoPath = prepared.localRepoPath;
+    state.worktreeInfo = prepared.worktreeInfo;
+    const completion = publication.pendingCompletion;
+    if (!completion) return; // Legacy bundles can be published but have no completion inputs.
+    Object.assign(state, {
+        claudeResult: completion.claudeResult, authorsText: completion.authorsText,
+        unprocessedComments: completion.unprocessedComments, startingWorkComment: completion.startingWorkComment,
+    });
+    const originalJob = { ...job, id: completion.taskId, data: completion.jobData } as Job<CommentJobData>;
+    const originalContext = { ...context, ...completion.jobData, publication };
+    const originalState = await stateManager.getTaskState(completion.taskId);
+    await createPRCommentTaskStateIfMissing({
+        job: originalJob, taskId: completion.taskId, stateManager, preexistingState: originalState,
+        modelName: completion.llm ?? null, correlatedLogger: context.correlatedLogger,
+    });
+    if (originalState?.state === TaskStates.FAILED) await stateManager.updateTaskState(completion.taskId, TaskStates.PROCESSING, {
+        reason: 'Retrying publication completion for the originating task', isRetry: true,
+    });
+    const result = await handlePostExecution({
+        state, job: originalJob, taskId: completion.taskId, stateManager, context: originalContext,
+        unprocessedReviewComments: completion.unprocessedReviewComments, llm: completion.llm,
+        redisClient, prProcessingLockKey: lockKey, prProcessingLockToken: lockToken,
+        recoveredCompletion: completion,
+    }, completion.taskUrl);
+    const stopped = await stopOriginalPRReviewCycle({
+        ref: originalContext, continuation: publication.continuation, commandMode: originalJob.data.commandMode,
+        ultrafix: Boolean(originalJob.data.ultrafixMeta), redis: redisClient, octokit,
+    });
+    if (!stopped) await handleUltrafixContinuation('fix', {
+        job: originalJob, stateManager, taskId: completion.taskId, redisClient,
+        repoOwner: originalContext.repoOwner, repoName: originalContext.repoName,
+        pullRequestNumber: originalContext.pullRequestNumber, correlatedLogger: context.correlatedLogger,
+        correlationId: originalContext.correlationId,
+    });
+    const completedIds = new Set(completion.instructionCommentIds);
+    context.commentsToProcess = context.commentsToProcess.filter(comment => !completedIds.has(comment.id));
+    if (taskId === completion.taskId && context.commentsToProcess.length > 0) {
+        // Newly claimed comments need their own task after this retry completes.
+        // cleanupJob schedules them from the pending list.
+        await restorePendingComments(context.commentsToProcess, { ...context, redisClient });
+        context.commentsToProcess = [];
+    }
+    if (taskId !== completion.taskId && (await stateManager.getTaskState(taskId))?.state === TaskStates.FAILED) {
+        await stateManager.updateTaskState(taskId, TaskStates.PROCESSING, {
+            reason: 'Retrying request after publication recovery', isRetry: true,
+        });
+    }
+    if (context.commentsToProcess.length === 0) {
+        if (taskId !== completion.taskId) await stateManager.updateTaskState(taskId, TaskStates.COMPLETED, {
+            reason: 'Recovered publication and completion of the originating task', commitHash: result.commitHash,
+            historyMetadata: { recoveryOfTaskId: completion.taskId },
+        });
+        await publication.finishCompletion();
+        return { status: result.partial ? 'partial' : 'complete', commit: result.commitHash,
+            pullRequestNumber: context.pullRequestNumber, claudeResult: { success: completion.claudeResult.success } };
+    }
+    await publication.finishCompletion();
+    // A new request continues on the recovered HEAD with only its remaining instructions.
+    state.claudeResult = null;
+    state.startingWorkComment = null;
+    state.unprocessedComments = [];
+    state.authorsText = '';
+}
+
 async function executeProcessing(params: ExecuteProcessingParams): Promise<JobResult> {
     const { job, context, taskId, stateManager, state, lockKey, lockToken } = params;
     let { llm } = params;
@@ -196,7 +272,7 @@ async function executeProcessing(params: ExecuteProcessingParams): Promise<JobRe
     const { prData, unprocessedComments: validUnprocessed, llm: resolvedLlm } = validation;
     state.unprocessedComments = validUnprocessed!;
     llm = resolvedLlm;
-    const publication = state.publication = new PullRequestPublication(state.octokit, context, prData!.data);
+    const publication = state.publication ??= new PullRequestPublication(state.octokit, context, prData!.data);
     const { combinedCommentBody, combinedBodyHtml, commentAuthors } = buildCombinedComment(state.unprocessedComments);
     state.authorsText = commentAuthors.map(a => `@${a}`).join(', ');
 
@@ -271,7 +347,8 @@ async function executeProcessing(params: ExecuteProcessingParams): Promise<JobRe
     });
     await ensureGitRepository(correlatedLogger);
     const timestamp = new Date().toISOString().replace(/[:.]/g, '-').substring(0, 19);
-    const prepared = await publication.prepare(`pr-${pullRequestNumber}-followup-${timestamp}`);
+    const prepared = state.worktreeInfo ? { localRepoPath: state.localRepoPath, worktreeInfo: state.worktreeInfo }
+        : await publication.prepare(`pr-${pullRequestNumber}-followup-${timestamp}`);
     state.localRepoPath = prepared.localRepoPath;
     state.worktreeInfo = prepared.worktreeInfo;
     const githubToken = await state.octokit.auth({ type: 'installation' }) as GitHubToken;
@@ -369,6 +446,7 @@ async function executeProcessing(params: ExecuteProcessingParams): Promise<JobRe
         ultrafix: Boolean(job.data.ultrafixMeta), redis: redisClient, octokit: state.octokit,
     });
     if (!stopped) await handleUltrafixContinuation('fix', { job, stateManager, taskId, redisClient, repoOwner, repoName, pullRequestNumber, correlatedLogger, correlationId });
+    await publication.finishCompletion();
 
     return { status: postResult.partial ? 'partial' : 'complete', commit: postResult.commitHash, pullRequestNumber, claudeResult: { success: state.claudeResult.success } };
 }
@@ -425,6 +503,9 @@ export async function processPullRequestCommentJob(job: Job<CommentJobData>): Pr
     try {
         // Re-read under the shared lease: implementation may have adopted while queued.
         state.octokit = await getAuthenticatedOctokit();
+        const recovered = await runWithExecutionAbortSignal(executionController.signal,
+            () => recoverPendingPublication({ job, context, llm, taskId, stateManager, state, lockKey, lockToken }), hashTaskAttemptToken(lockToken));
+        if (recovered) return recovered;
         const stopped = await stopOriginalPRReviewCycle({
             ref: context, continuation: await findPRContinuation(context), commandMode: job.data.commandMode,
             ultrafix: Boolean(job.data.ultrafixMeta), redis: redisClient, octokit: state.octokit,

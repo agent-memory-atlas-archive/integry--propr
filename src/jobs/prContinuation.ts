@@ -14,6 +14,7 @@ export interface ContinuationRecord {
     continuation_url: string | null;
     comment_id: number | null;
     publication_bundle: string | null;
+    publication_completion: string | null;
 }
 
 export interface Contribution {
@@ -142,8 +143,9 @@ export async function ensurePRContinuation(octokit: Octokit, ref: PullRequestRef
 }
 
 /** Store before adoption/publication; clear only after the remote contains the work. */
-export async function savePublicationCheckpoint(record: ContinuationRecord, bundle: string | null): Promise<void> {
+export async function savePublicationCheckpoint(record: ContinuationRecord, bundle: string | null, completion?: string | null): Promise<void> {
     await db('pr_continuations').where({ repository: record.repository, source_pr: record.source_pr })
-        .update({ publication_bundle: bundle });
+        .update({ publication_bundle: bundle, ...(completion !== undefined && { publication_completion: completion }) });
     record.publication_bundle = bundle;
+    if (completion !== undefined) record.publication_completion = completion;
 }
