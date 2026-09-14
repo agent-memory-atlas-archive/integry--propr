@@ -131,7 +131,9 @@ function withoutFencedPayloads(content: string): string {
   let fence: string | null = null;
   let payload: string[] = [];
   for (const line of content.split(/\r?\n/)) {
-    const marker = line.match(/^ {0,3}(`{3,}|~{3,})(.*)$/);
+    // Fences may follow nested quote/list markers or list continuation indentation.
+    // Match those prefixes only for fences so surrounding narration stays intact.
+    const marker = line.match(/^[ \t]*(?:>[ \t]*|(?:[-+*]|\d{1,9}[.)])[ \t]+)*(`{3,}|~{3,})(.*)$/);
     if (!fence) {
       if (marker) {
         fence = marker[1];
