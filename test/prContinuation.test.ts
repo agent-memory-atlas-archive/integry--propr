@@ -318,6 +318,17 @@ test('preflight adoption uses the captured contribution SHA even if the fork adv
     assert.equal(publication.continuation?.source_sha, sourceSha);
 });
 
+test('preparation rejects a rewritten head even when the captured commit remains in the clone', async () => {
+    git(repoPath('contributor'), 'update-ref', 'refs/heads/contribution', `${sourceSha}^`);
+    // Local cloning retains the old object, so existence alone cannot validate the baseline.
+    await assert.rejects(session().prepare('rewritten-fork'), /retry preparation before implementation/);
+    const worktree = calls.find(c => c.operation === 'worktree')!.args as { worktreePath: string };
+    git(worktree.worktreePath, 'cat-file', '-e', sourceSha);
+    assert.ok(calls.some(c => c.operation === 'cleanup'));
+    assert.ok(!calls.some(c => c.operation === 'git' && (c.args as string[]).includes('--dry-run')));
+    assert.equal(await findPRContinuation(ref), undefined);
+});
+
 test('same-repository permission failures never create a fork continuation', async () => {
     const publication = session({ ...source, head: { ref: 'release', sha: sourceSha, repo: { owner: { login: 'upstream' }, name: 'project' } } });
     const prepared = await publication.prepare('same-repository');

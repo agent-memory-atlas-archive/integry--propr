@@ -45,7 +45,6 @@ interface PostExecutionState {
 
 interface ReadyPostExecutionState extends PostExecutionState {
     octokit: Awaited<ReturnType<typeof getAuthenticatedOctokit>>;
-    worktreeInfo: WorktreeInfo;
     claudeResult: ClaudeCodeResponse;
     startingWorkComment: { data: { id: number; html_url: string } };
 }
@@ -104,6 +103,7 @@ async function commitAndPush(
     llm: string | null | undefined,
     completionInputs: Omit<PublicationCompletion, 'commitResult' | 'changesSummary' | 'commitMessage'>
 ) {
+    if (!state.worktreeInfo) throw new Error('Cannot commit PR comment changes without a worktree');
     const changesSummary = state.claudeResult.summary || state.claudeResult.finalResult?.result || '';
     const commitMessage = buildCommitMessage({ changesSummary, unprocessedComments: state.unprocessedComments, pullRequestNumber: context.pullRequestNumber, claudeResult: state.claudeResult, llm, authorsText: state.authorsText });
     const commitResult = await commitChanges(state.worktreeInfo.worktreePath, commitMessage, AI_COMMIT_AUTHOR, { issueNumber: context.pullRequestNumber, issueTitle: 'Follow-up changes' });
@@ -139,7 +139,6 @@ function buildUndoContext(params: UndoContextParams) {
 
 function requirePostExecutionState(state: PostExecutionState): asserts state is ReadyPostExecutionState {
     if (!state.claudeResult) throw new Error('Cannot finish PR comment processing before agent execution completes');
-    if (!state.worktreeInfo) throw new Error('Cannot finish PR comment processing without a worktree');
     if (!state.octokit) throw new Error('Cannot finish PR comment processing without an authenticated GitHub client');
     if (!state.startingWorkComment) throw new Error('Cannot finish PR comment processing without a starting work comment');
 }
@@ -158,18 +157,18 @@ interface CompletionCommentPublicationOptions {
     llm: string | null | undefined;
     taskUrl: string;
     unprocessedReviewComments: AIReviewComment[];
-    visualPreviewEvidence: Awaited<ReturnType<typeof prepareVisualPreviewEvidence>>['evidence'];
+    visualPreviewEvidence?: Awaited<ReturnType<typeof prepareVisualPreviewEvidence>>['evidence'];
 }
 
 async function publishCompletionComment(options: CompletionCommentPublicationOptions): Promise<{ data: { html_url: string; body?: string } }> {
-    const { state, context, commitResult, changesSummary, commitMessage, llm, taskUrl, unprocessedReviewComments, visualPreviewEvidence } = options;
+    const { state, context, commitResult, changesSummary, commitMessage, llm, taskUrl, unprocessedReviewComments, visualPreviewEvidence = { assets: [], toolSuggestions: [] } } = options;
     const { repoOwner, repoName, pullRequestNumber, correlatedLogger } = context;
     const hasVisualPreviewContent = visualPreviewEvidence.assets.length > 0
         || visualPreviewEvidence.toolSuggestions.length > 0;
     const visualPreviewSection = hasVisualPreviewContent
         ? renderVisualPreviewSection({ assets: [], toolSuggestions: visualPreviewEvidence.toolSuggestions }, {})
         : '';
-    const undoContext = context.publication.continuation ? undefined : buildUndoContext({ commitResult, unprocessedComments: state.unprocessedComments, repoOwner, repoName, pullRequestNumber, branchName: state.worktreeInfo.branchName });
+    const undoContext = context.publication.continuation || !state.worktreeInfo ? undefined : buildUndoContext({ commitResult, unprocessedComments: state.unprocessedComments, repoOwner, repoName, pullRequestNumber, branchName: state.worktreeInfo.branchName });
     const consumedReviewCommentIds = unprocessedReviewComments.length > 0 ? unprocessedReviewComments.map(comment => comment.id) : undefined;
     const completionBody = await buildCompletionComment(commitResult, state.unprocessedComments, {
         changesSummary,
@@ -193,6 +192,7 @@ async function publishCompletionComment(options: CompletionCommentPublicationOpt
         }) as Promise<{ data: { html_url: string; body?: string } }>;
     }
 
+    if (!state.worktreeInfo) throw new Error('Cannot publish visual previews without a worktree');
     try {
         const published = await publishPullRequestCommentVisualPreviews({
             owner: repoOwner,
@@ -229,6 +229,15 @@ function requirePartialExecutionChanges(
     }
 }
 
+async function preparePostExecutionPreviews(state: ReadyPostExecutionState, repository: string, taskId: string) {
+    if (!state.worktreeInfo) return;
+    return prepareVisualPreviewEvidence({
+        worktreePath: state.worktreeInfo.worktreePath,
+        settings: await loadRepositoryVisualPreviewSettings(repository),
+        taskId,
+    });
+}
+
 export async function handlePostExecution(params: PostExecutionParams, taskUrl: string): Promise<{ commitHash?: string; partial: boolean }> {
     const {
         state,
@@ -254,11 +263,7 @@ export async function handlePostExecution(params: PostExecutionParams, taskUrl: 
 
     let preparedVisualPreview: Awaited<ReturnType<typeof prepareVisualPreviewEvidence>> | undefined;
     try {
-        preparedVisualPreview = await prepareVisualPreviewEvidence({
-            worktreePath: state.worktreeInfo.worktreePath,
-            settings: await loadRepositoryVisualPreviewSettings(`${repoOwner}/${repoName}`),
-            taskId
-        });
+        preparedVisualPreview = await preparePostExecutionPreviews(state, `${repoOwner}/${repoName}`, taskId);
         const { commitResult, changesSummary, commitMessage } = params.recoveredCompletion ?? await commitAndPush(state, context, llm, {
             taskId, instructionCommentIds: state.unprocessedComments.map(comment => comment.id),
             jobData: job.data, claudeResult: state.claudeResult, authorsText: state.authorsText,
@@ -277,7 +282,7 @@ export async function handlePostExecution(params: PostExecutionParams, taskUrl: 
             llm,
             taskUrl,
             unprocessedReviewComments,
-            visualPreviewEvidence: preparedVisualPreview.evidence
+            visualPreviewEvidence: preparedVisualPreview?.evidence
         });
         correlatedLogger.info({ pullRequestNumber, commitHash: commitResult?.commitHash, commentUrl: completionComment.data.html_url, partial, terminationReason }, partial ? 'Published partial follow-up changes after interrupted execution' : 'Successfully applied follow-up changes');
 

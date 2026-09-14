@@ -5,6 +5,8 @@ const calls: Array<{ operation: string; arguments: unknown[] }> = [];
 
 await mock.module('@propr/core', {
     namedExports: {
+        createHooklessGit: () => ({ raw: async () => '' }),
+        cleanupWorktree: async () => {},
         getRepoUrl: mock.fn((repository: { repoOwner: string; repoName: string }) => {
             calls.push({ operation: 'getRepoUrl', arguments: [repository] });
             return `https://github.com/${repository.repoOwner}/${repository.repoName}.git`;

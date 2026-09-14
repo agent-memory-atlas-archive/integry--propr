@@ -15,7 +15,7 @@ export async function stopOriginalPRReviewCycle(options: {
     octokit: Awaited<ReturnType<typeof getAuthenticatedOctokit>>;
 }): Promise<string | undefined> {
     const { ref, continuation, commandMode, ultrafix, redis, octokit } = options;
-    if (!continuation || continuation.source_pr !== ref.pullRequestNumber
+    if (!continuation?.continuation_pr || continuation.source_pr !== ref.pullRequestNumber
         || (!ultrafix && commandMode !== 'review' && commandMode !== 'fix')) return;
     await stopLoop(redis, ref.repoOwner, ref.repoName, ref.pullRequestNumber);
     const destination = continuationStatus(continuation) || `Continuation branch: \`${continuation.branch_name}\`. Retry the implementation request to finish creating its PR.`;

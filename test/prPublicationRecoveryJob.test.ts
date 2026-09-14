@@ -38,6 +38,7 @@ let probeError: Error | undefined;
 let finalPushError: Error | undefined;
 let continuationPushError: Error | undefined;
 let failPRCreate = false;
+let forcePushBeforeClone = false;
 let calls: Array<{ operation: string; args: unknown }> = [];
 let cloneIndex = 0;
 const token = 'ghs_worker_installation_token';
@@ -74,10 +75,10 @@ await mock.module('@propr/core', { namedExports: {
     retryConfigs: { githubApi: {} }, withRetry: async (fn: () => unknown) => fn(),
     runWithExecutionAbortSignal: async (_signal: unknown, fn: () => unknown) => fn(),
     TaskStates: { PROCESSING: 'processing', COMPLETED: 'completed', CLAUDE_EXECUTION: 'claude_execution', FAILED: 'failed' },
-    ensureGitRepository: noOp, createLogFiles: noOp, UsageLimitError: class extends Error {},
+    ensureGitRepository: async () => { calls.push({ operation: 'ensureGitRepository', args: [] }); }, createLogFiles: noOp, UsageLimitError: class extends Error {},
     recordLLMMetrics: noOp, loadPrimaryProcessingLabels: async () => ['propr'],
     loadRepositoryVisualPreviewSettings: noOp,
-    prepareVisualPreviewEvidence: async () => ({ evidence: { assets: [], toolSuggestions: [] } }),
+    prepareVisualPreviewEvidence: async () => { calls.push({ operation: 'prepareVisualPreviewEvidence', args: [] }); return { evidence: { assets: [], toolSuggestions: [] } }; },
     cleanupPreparedVisualPreviewEvidence: noOp,
     appendVisualPreviewSection: (body: string) => body,
     renderVisualPreviewSection: () => '', renderVisualPreviewUploadFailureSection: () => '',
@@ -104,11 +105,15 @@ await mock.module('@propr/core', { namedExports: {
     },
     ensureRepoCloned: async ({ owner, authToken }: { owner: string; authToken: string }) => {
         assert.equal(authToken, token);
+        if (owner === 'contributor' && forcePushBeforeClone) {
+            git(repoPath(owner), 'update-ref', 'refs/heads/contribution', `${sourceSha}^`);
+        }
         return repoPath(owner);
     },
     createWorktreeFromExistingBranch: async (repo: string, branchName: string) => {
         const worktreePath = path.join(root, `work-${++cloneIndex}`);
-        git(root, 'clone', '--branch', branchName, repo, worktreePath);
+        git(root, 'clone', '--no-local', '--single-branch', '--branch', branchName, repo, worktreePath);
+        if (forcePushBeforeClone) assert.throws(() => git(worktreePath, 'cat-file', '-e', sourceSha));
         git(worktreePath, 'config', 'user.name', 'Test Worker');
         git(worktreePath, 'config', 'user.email', 'worker@example.test');
         calls.push({ operation: 'worktree', args: { repo, branchName, worktreePath } });
@@ -234,6 +239,8 @@ beforeEach(async () => {
     await database('tasks').delete();
     await database('tasks').insert({ task_id: 'task-1' });
     git(repoPath('upstream'), 'update-ref', '-d', 'refs/heads/propr/continuation-pr-42');
+    git(repoPath('contributor'), 'update-ref', 'refs/heads/contribution', sourceSha);
+    forcePushBeforeClone = false;
     calls = []; prs = []; comments = []; prompts = []; events = []; produced = []; completionBodies = []; completions.length = 0;
     probeError = undefined; finalPushError = denial(); continuationPushError = undefined;
     failPRCreate = false; failComment = false; loseCreateResponse = false; failCompletion = false; partialResult = false;
@@ -337,6 +344,74 @@ test('completion recovery runs even when the instruction comments would now be f
     assert.equal(taskStates.get('task-1'), 'completed');
     assert.equal(prompts.length, 1);
 });
+
+test('a force push that removes the captured baseline fails before execution and allows preparation retry', async () => {
+    forcePushBeforeClone = true;
+    await assert.rejects(run(), /retry preparation before implementation/);
+    assert.equal(prompts.length, 0);
+    assert.equal(await findPRContinuation(ref), undefined);
+    const worktree = calls.find(c => c.operation === 'worktree')!.args as { worktreePath: string };
+    await assert.rejects(import('node:fs/promises').then(fs => fs.access(worktree.worktreePath)), { code: 'ENOENT' });
+
+    forcePushBeforeClone = false;
+    git(repoPath('contributor'), 'update-ref', 'refs/heads/contribution', sourceSha);
+    failPRCreate = true;
+    await assert.rejects(run(job('retry-task')), /network error/);
+    assert.ok((await findPRContinuation(ref))!.publication_bundle);
+    failPRCreate = false;
+    assert.equal((await run(job('retry-task'))).status, 'complete');
+    assert.equal(prompts.length, 1);
+    assert.equal(git(repoPath('upstream'), 'rev-parse', 'propr/continuation-pr-42'), produced[0]);
+});
+
+test('/fix retries preflight adoption after PR creation fails, then stops once the destination exists', async () => {
+    probeError = denial();
+    failPRCreate = true;
+    const request = job();
+    request.data.commandMode = 'fix';
+    await assert.rejects(run(request), /PR creation network error/);
+    const reservation = (await findPRContinuation(ref))!;
+    assert.equal(reservation.continuation_pr, null);
+    assert.equal(reservation.publication_bundle, null);
+    assert.equal(reservation.publication_completion, null);
+    assert.equal(prompts.length, 0);
+    assert.ok(!events.includes('stop'));
+
+    failPRCreate = false;
+    assert.equal((await run({ ...request, id: 'retry-task' })).status, 'complete');
+    assert.equal(prompts.length, 1);
+    assert.equal(prs.length, 1);
+    assert.equal((await findPRContinuation(ref))!.continuation_pr, 100);
+    const next = job('task-2', 6);
+    next.data.commandMode = 'fix';
+    assert.equal((await run(next)).status, 'skipped');
+    assert.equal(prompts.length, 1);
+});
+
+for (const retryTaskId of ['task-1', 'replacement-task']) {
+    test(`published completion survives PR closure and branch deletion on retry ${retryTaskId}`, async () => {
+        failCompletion = true;
+        await assert.rejects(run(), /Completion comment failed/);
+        const record = (await findPRContinuation(ref))!;
+        assert.equal(record.publication_bundle, null);
+        assert.ok(record.publication_completion);
+        prs[0].state = 'closed';
+        git(repoPath('upstream'), 'update-ref', '-d', 'refs/heads/propr/continuation-pr-42');
+        calls = [];
+        failCompletion = false;
+        const result = await run(job(retryTaskId));
+        assert.equal(result.status, 'complete');
+        assert.equal(result.commit, produced[0]);
+        assert.equal(prompts.length, 1);
+        assert.equal(taskStates.get('task-1'), 'completed');
+        assert.equal(taskStates.get(retryTaskId), 'completed');
+        assert.match(completionBodies[0], /Saved agent summary/);
+        assert.match(completionBodies[0], /pull\/100/);
+        assert.ok(!calls.some(c => ['git', 'worktree', 'ensureGitRepository', 'prepareVisualPreviewEvidence', 'auth'].includes(c.operation)));
+        assert.ok(!calls.some(c => c.operation === 'GET /repos/{owner}/{repo}/pulls/{pull_number}'));
+        assert.equal((await findPRContinuation(ref))!.publication_completion, null);
+    });
+}
 
 test('a retry returns newly claimed instructions for a separate task without rerunning the original agent', async () => {
     failPRCreate = true;

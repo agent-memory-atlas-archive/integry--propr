@@ -42,14 +42,25 @@ export async function recoverPendingPublication(params: ExecuteProcessingParams,
     const record = await findPRContinuation(context);
     if (!record?.publication_bundle && !record?.publication_completion) return;
     const octokit = state.octokit!;
-    const { data: source } = await octokit.request('GET /repos/{owner}/{repo}/pulls/{pull_number}', {
+    // Completion alone uses the retained destination and task metadata, even after
+    // the continuation is merged and its branch is deleted.
+    const source = record.publication_bundle ? (await octokit.request('GET /repos/{owner}/{repo}/pulls/{pull_number}', {
         owner: context.repoOwner, repo: context.repoName, pull_number: context.pullRequestNumber,
-    });
+    })).data as Contribution : {
+        head: { ref: record.branch_name, sha: record.source_sha, repo: { full_name: record.repository } },
+        base: { ref: record.base_branch }, title: record.source_title,
+        body: record.source_body, user: { login: record.source_author },
+    };
     const publication = state.publication = new PullRequestPublication(octokit, context, source as Contribution);
-    await ensureGitRepository(context.correlatedLogger);
-    const prepared = await publication.prepare(`pr-${context.pullRequestNumber}-publication-${Date.now()}`);
-    state.localRepoPath = prepared.localRepoPath;
-    state.worktreeInfo = prepared.worktreeInfo;
+    publication.continuation = record;
+    if (record.publication_bundle) {
+        await ensureGitRepository(context.correlatedLogger);
+        const prepared = await publication.prepare(`pr-${context.pullRequestNumber}-publication-${Date.now()}`);
+        state.localRepoPath = prepared.localRepoPath;
+        state.worktreeInfo = prepared.worktreeInfo;
+    } else {
+        await publication.announce();
+    }
     const completion = publication.pendingCompletion;
     if (!completion) return; // Legacy bundles can be published but have no completion inputs.
     Object.assign(state, {
@@ -111,4 +122,3 @@ export async function recoverPendingPublication(params: ExecuteProcessingParams,
     state.unprocessedComments = [];
     state.authorsText = '';
 }
-

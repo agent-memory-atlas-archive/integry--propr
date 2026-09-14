@@ -60,8 +60,10 @@ export class PullRequestPublication {
         // Resolve an existing mapping before checking permissions: once adopted,
         // later requests must not silently switch back to the contributor's branch.
         if (await findPRContinuation(this.ref)) await this.adopt();
+        const checkpointBaseline = this.continuation?.source_sha ?? (this.target.isFork ? this.source.head.sha : undefined);
+        if (this.target.isFork && (!checkpointBaseline || !/^[a-f0-9]{40}$/i.test(checkpointBaseline))) throw new Error('Cannot prepare fork publication without its exact head SHA');
         const { token } = await this.octokit.auth({ type: 'installation' }) as { token: string };
-        let prepared = await createPullRequestHeadWorktree({ target: this.target, authToken: token, worktreeDirName });
+        let prepared = await createPullRequestHeadWorktree({ target: this.target, authToken: token, worktreeDirName, checkpointBaseline });
         if (!this.target.isFork) {
             try {
                 await this.recover(prepared.worktreeInfo.worktreePath, token);
@@ -79,7 +81,7 @@ export class PullRequestPublication {
             if (!isPublicationPermissionDenied(error)) throw error;
             await this.adopt();
             await this.announce();
-            prepared = await createPullRequestHeadWorktree({ target: this.target, authToken: token, worktreeDirName });
+            prepared = await createPullRequestHeadWorktree({ target: this.target, authToken: token, worktreeDirName, checkpointBaseline });
             return prepared;
         }
     }
