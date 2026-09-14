@@ -90,8 +90,8 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
   const displayTaskCount = Math.max(0, activeQueueCount - generatingPlansCount - activeGoalCount);
 
   // The sidebar reads top-to-bottom as three logical zones: core workflow
-  // ("what am I doing today?"), technical resources ("what am I working
-  // with?"), and utility/ambient data ("how is the system configured?").
+  // ("what am I doing today?"), resources and configuration, and
+  // ambient usage data and account information.
   // Zones are separated by whitespace, never by divider lines.
 
   // ZONE 1 — core workflow: the daily, high-frequency views.
@@ -103,19 +103,13 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
     { name: 'Plans', href: '/plans', icon: ScrollText },
   ];
 
-  // ZONE 2 — technical resources: infrastructure that gets configured, not
-  // checked hourly.
+  // ZONE 2 — technical resources and global configuration.
   const resourceNavigation: NavItem[] = [
     { name: 'Repositories', href: '/repositories', icon: BookMarked },
     ...(userHasPermission(user, 'instance.manage_agents')
       ? [{ name: 'Coding Agents', href: '/ai-agents', icon: Bot }]
       : []),
     { name: 'LLM Log', href: '/llm-logs', icon: Cpu },
-  ];
-
-  // ZONE 3 — global configuration links, anchored to the bottom with the
-  // usage widget, metadata, and profile block.
-  const utilityNavigation: NavItem[] = [
     { name: 'Settings', href: '/settings', icon: Settings },
     ...(userHasPermission(user, 'instance.manage_members')
       ? [{ name: 'Access', href: '/admin/members', icon: ShieldCheck }]
@@ -326,38 +320,15 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
               {resourceNavigation.map(renderNavigationItem)}
             </div>
           </nav>
-          {/* ZONE 3: usage, settings, metadata, and profile travel together as
-              one utility group anchored to the bottom; mt-auto absorbs the
-              flexible space, and top margins (instead of dividers) separate the
-              group's functional clusters: data widget, global navigation, and
-              meta-information. */}
+          {/* Usage and account information stay at the bottom, with metadata
+              last. mt-auto absorbs the space below navigation. */}
           <div className="mt-auto flex flex-none flex-col">
           {(isDemoMode || userHasPermission(user, 'instance.manage_agents')) && (
             <AgentTankSidebar allowManualRefresh={!isDemoMode} />
           )}
-          <nav className="mt-4 flex flex-none flex-col gap-0.5 py-1" aria-label="Application settings">
-            {utilityNavigation.map(renderNavigationItem)}
-          </nav>
-          {!desktop && <footer className="mt-6 px-4 pb-2 leading-tight space-y-1">
-            {/* The version is the datum developers scan for, so it sits one
-                contrast step above the secondary copyright line. */}
-            <div className="text-xs text-slate-500">
-              <a
-                href="https://propr.dev"
-                target="_blank"
-                rel="noopener noreferrer"
-                className="hover:text-slate-700 hover:underline"
-              >
-                ProPR
-              </a>{' '}
-              v{__APP_VERSION__}
-            </div>
-            <div className="text-[11px] text-slate-400">© {new Date().getFullYear()} Rinalds Uzkalns</div>
-          </footer>}
           {user && (
             // The interactive account block is its own group, detached from
-            // whatever sits above it (the metadata footer on the web, the
-            // settings links in the desktop app) by an mt-4 whitespace spacer —
+            // the usage widget by an mt-4 whitespace spacer —
             // zone separation is whitespace, never a line. pr-2.5 (10px) + the
             // 6px glyph inset inside the 28px logout button puts the logout
             // icon's right edge on the sidebar's shared 16px rail, aligned with
@@ -392,6 +363,22 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
               </button>
             </div>
           )}
+          {!desktop && <footer className="mt-4 px-4 pb-2 leading-tight space-y-1">
+            {/* The version is the datum developers scan for, so it sits one
+                contrast step above the secondary copyright line. */}
+            <div className="text-[11px] text-slate-500">
+              <a
+                href="https://propr.dev"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="hover:text-slate-700 hover:underline"
+              >
+                ProPR
+              </a>{' '}
+              v{__APP_VERSION__}
+            </div>
+            <div className="text-[10px] text-slate-400">© {new Date().getFullYear()} Rinalds Uzkalns</div>
+          </footer>}
           </div>
         </div>
       </aside>}

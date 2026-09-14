@@ -116,7 +116,9 @@ describe('Layout desktop instance selector', () => {
     expect(screen.getByTestId('global-header')).toHaveTextContent('GitHub user');
     const profile = screen.getByText('@octocat').closest('.desktop-sidebar-profile');
     expect(profile?.closest('aside')).not.toBeNull();
-    expect(profile?.previousElementSibling).toHaveAttribute('aria-label', 'Application settings');
+    expect(screen.getByRole('link', { name: 'LLM Log' }).nextElementSibling).toBe(
+      screen.getByRole('link', { name: 'Settings' }),
+    );
 
     fireEvent.click(screen.getByRole('button', { name: 'Logout' }));
     expect(mocks.logout).toHaveBeenCalledOnce();
