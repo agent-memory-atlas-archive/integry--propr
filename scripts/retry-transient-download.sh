@@ -6,8 +6,8 @@
 # github.com release downloads on every packaging run: electron 44 dropped the
 # postinstall download, so `npm ci` never warms the @electron/get cache. Those
 # fetches serve sustained 5xx often enough to fail otherwise-green desktop jobs
-# -- on 2026-09-14 the v44.0.0 arm64 assets returned 504 for eight minutes
-# straight, long enough to outlast a short retry window.
+# -- on 2026-09-14 the v44.0.0 arm64 assets returned 504 continuously from
+# 15:17:37Z to at least 15:20:25Z, outlasting an earlier 15s/30s retry window.
 #
 # Only failures whose output looks like a download problem are retried, so a
 # real build break still fails on the first attempt instead of burning the
