@@ -1,4 +1,4 @@
-import { useLayoutEffect } from 'react';
+import { useLayoutEffect, type ReactNode } from 'react';
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { MemoryRouter, useLocation, useNavigate } from 'react-router-dom';
@@ -7,14 +7,8 @@ import type { ConnectAccountStatus, CurrentUser, SystemStatus } from '../api/pro
 import { AuthProvider } from '../contexts/AuthContext';
 import { ConnectAccountProvider, useConnectAccount } from '../contexts/ConnectAccountContext';
 import { SystemStatusProvider } from '../contexts/SystemStatusContext';
-import {
-  ConnectCapacityBanner,
-  ConnectSoftPromoBanner,
-} from './ConnectPlusBanner';
-import {
-  capacityFingerprint,
-  connectPlusDismissalKey,
-} from './connectPlusBannerState';
+import { ConnectCapacityBanner, ConnectSoftPromoBanner } from './ConnectPlusBanner';
+import { capacityFingerprint, connectPlusDismissalKey } from './connectPlusBannerState';
 
 vi.mock('../api/proprApi', () => ({
   getSystemStatus: vi.fn(),
@@ -63,17 +57,26 @@ const status = (connectAccount?: ConnectAccountStatus): SystemStatus => ({
   githubEventIntakeStatus: 'Connected', agents: [], connectAccount,
 });
 
-const banners = (user: CurrentUser = admin, disabled = false) => (
-  <MemoryRouter>
+const TestProviders = ({ children, user = admin, disabled = false, initialEntries = ['/'] }: {
+  children: ReactNode;
+  user?: CurrentUser;
+  disabled?: boolean;
+  initialEntries?: string[];
+}) => (
+  <MemoryRouter initialEntries={initialEntries}>
     <AuthProvider user={user}>
       <SystemStatusProvider disabled={disabled}>
-        <ConnectAccountProvider disabled={disabled}>
-          <ConnectCapacityBanner />
-          <ConnectSoftPromoBanner />
-        </ConnectAccountProvider>
+        <ConnectAccountProvider disabled={disabled}>{children}</ConnectAccountProvider>
       </SystemStatusProvider>
     </AuthProvider>
   </MemoryRouter>
+);
+
+const banners = (user: CurrentUser = admin, disabled = false) => (
+  <TestProviders user={user} disabled={disabled}>
+    <ConnectCapacityBanner />
+    <ConnectSoftPromoBanner />
+  </TestProviders>
 );
 
 function renderBanners(user: CurrentUser = admin, disabled = false) {
@@ -202,15 +205,9 @@ describe('Connect Plus banners', () => {
       .mockResolvedValueOnce(status(community({ installationId: 42 })))
       .mockResolvedValueOnce(status());
     render(
-      <MemoryRouter initialEntries={['/?flow=connect&tunnel=old-stack']}>
-        <AuthProvider user={admin}>
-          <SystemStatusProvider>
-            <ConnectAccountProvider>
-              <TunnelSwitchProbe observations={observations} />
-            </ConnectAccountProvider>
-          </SystemStatusProvider>
-        </AuthProvider>
-      </MemoryRouter>,
+      <TestProviders initialEntries={['/?flow=connect&tunnel=old-stack']}>
+        <TunnelSwitchProbe observations={observations} />
+      </TestProviders>,
     );
     await screen.findByRole('link', { name: 'Explore Plus' });
 
@@ -438,15 +435,9 @@ describe('Connect Plus banners', () => {
     const onClose = vi.fn();
 
     render(
-      <MemoryRouter>
-        <AuthProvider user={admin}>
-          <SystemStatusProvider>
-            <ConnectAccountProvider>
-              <CloseSoftBannerOnFirstRender onClose={onClose} />
-            </ConnectAccountProvider>
-          </SystemStatusProvider>
-        </AuthProvider>
-      </MemoryRouter>,
+      <TestProviders>
+        <CloseSoftBannerOnFirstRender onClose={onClose} />
+      </TestProviders>,
     );
 
     await waitFor(() => expect(onClose).toHaveBeenCalledTimes(1));
