@@ -206,8 +206,7 @@ export async function getAgentActivity(
     deps.redisClient,
     deps.db,
     target.taskId,
-    target.sessionId,
-    { limitEvents: false },
+    { sessionId: target.sessionId, limitEvents: false },
   );
   const entries = projectNarration(live?.events ?? [], target.fallbackTimestamp, args.includeReasoningSummaries);
   const activity = entries

@@ -302,8 +302,7 @@ export async function projectTaskLiveDetails(
   redisClient: RedisClientType,
   db: Knex,
   taskId: string,
-  sessionId?: string | null,
-  options: AgentStreamParseOptions = {},
+  { sessionId, ...options }: AgentStreamParseOptions & { sessionId?: string | null } = {},
 ): Promise<(ConversationResult & { nativeGoal?: ReturnType<typeof parseRedisOutput>['nativeGoal'] }) | null> {
   const active = await parseActiveExecutionOutput(redisClient, db, taskId, options);
   if (active) return active;
