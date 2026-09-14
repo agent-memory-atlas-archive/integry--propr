@@ -3,7 +3,7 @@ import logger, { generateCorrelationId } from '../utils/logger.js';
 import { handleError } from '../utils/errorHandler.js';
 import { getIssueQueue, COMMENT_BATCH_DELAY_MS, type CommentJobData, type UnprocessedComment } from '../queue/taskQueue.js';
 import { filterCommentByAuthor, checkCommentTrigger, checkCommentIgnore } from '../utils/commentFilters.js';
-import { loadFollowupIgnoreKeywords, loadPrimaryProcessingLabels } from '../config/configManager.js';
+import { loadFollowupIgnoreKeywords, hasValidTriggerLabel } from '../config/configManager.js';
 import { getAuthenticatedOctokit } from '../auth/githubAuth.js';
 import { getPendingPrCommentsKey } from '../utils/constants.js';
 import { withRetry } from '../utils/retryHandler.js';
@@ -107,8 +107,7 @@ async function claimCommentForProcessing(redisClient: Redis, key: string): Promi
 }
 
 async function prHasProcessingLabel(prLabels: Label[]): Promise<boolean> {
-    const processingLabels = await loadPrimaryProcessingLabels();
-    return prLabels.some(label => processingLabels.includes(label.name));
+    return hasValidTriggerLabel(prLabels);
 }
 
 function getCommentEventDetails(
@@ -228,6 +227,8 @@ interface SlashCommandHandlerOptions {
     config: CommentEventConfig;
     correlationId: string;
     correlatedLogger: ReturnType<typeof logger.withCorrelation>;
+    /** PR branch/labels already fetched by the caller, so the handler can avoid a second GitHub request. */
+    prefetchedPRData?: PRBranchAndLabels;
 }
 
 type ManualCommandFenceOptions = Pick<SlashCommandHandlerOptions, 'comment' | 'eventContext' | 'config' | 'correlatedLogger'> & {
@@ -255,7 +256,7 @@ async function fenceManualCommand(opts: ManualCommandFenceOptions): Promise<Manu
 }
 
 async function handleSlashCommand(opts: SlashCommandHandlerOptions): Promise<void> {
-    const { parsedCommand, comment, commentAuthor, eventContext, payload, config, correlationId, correlatedLogger } = opts;
+    const { parsedCommand, comment, commentAuthor, eventContext, payload, config, correlationId, correlatedLogger, prefetchedPRData } = opts;
     const { prNumber, owner, repo } = eventContext;
     const { redisClient } = config;
     const commandMeta = buildCommandMeta(parsedCommand);
@@ -270,6 +271,14 @@ async function handleSlashCommand(opts: SlashCommandHandlerOptions): Promise<voi
     }
 
     if (commandMeta.mode === 'merge') {
+        // Defense in depth: processCommentEvent already rejects unlabelled PRs, but never
+        // dispatch automated merge work unless the PR carries a valid trigger label.
+        const { prLabels } = prefetchedPRData ?? await getPRBranchAndLabels(eventContext.eventType, payload, { owner, repo, prNumber });
+        if (!await hasValidTriggerLabel(prLabels)) {
+            correlatedLogger.info({ pullRequestNumber: prNumber, commentId: comment.id, commentAuthor, prLabels: prLabels.map(l => l.name) }, '/merge command ignored: PR has no valid trigger label');
+            return;
+        }
+
         correlatedLogger.info({ pullRequestNumber: prNumber, commentId: comment.id, commentAuthor }, '/merge command detected, enqueuing merge job');
         try {
             await handleMergeCommand({
@@ -665,6 +674,21 @@ export async function processCommentEvent(payload: IssueCommentEvent | PullReque
 
     // Parse slash commands (/review, /fix, /merge, /switch, /use) before generic follow-up logic
     if (parsedCommand) {
+        // /merge dispatches automated checkout/commit/push work, so it is only honoured on
+        // PRs that were opted into ProPR via a valid trigger label. Reject before claiming
+        // the comment or a billing seat so nothing is allocated for unlabelled PRs.
+        let prefetchedPRData: PRBranchAndLabels | undefined;
+        if (parsedCommand.command === 'merge') {
+            prefetchedPRData = await getPRBranchAndLabels(eventType, payload, { owner, repo, prNumber });
+            if (!await hasValidTriggerLabel(prefetchedPRData.prLabels)) {
+                correlatedLogger.info(
+                    { repository: repoFullName, pullRequestNumber: prNumber, commentId: comment.id, commentAuthor, prLabels: prefetchedPRData.prLabels.map(l => l.name) },
+                    '/merge command ignored: PR has no valid trigger label (AI, propr, or configured primary processing label)',
+                );
+                return { status: 'ignored', reason: 'no_trigger_label' };
+            }
+        }
+
         // Deduplicate redelivered webhooks and synthetic+webhook races. This must be
         // atomic: system-created commands can be processed locally before GitHub
         // delivers the real issue_comment.created webhook for the same comment.
@@ -675,7 +699,7 @@ export async function processCommentEvent(payload: IssueCommentEvent | PullReque
             return { status: 'ignored', reason: 'duplicate_delivery' };
         }
         try {
-            await handleSlashCommand({ parsedCommand, comment, commentAuthor, eventContext: { eventType, prNumber, owner, repo }, payload, config, correlationId, correlatedLogger });
+            await handleSlashCommand({ parsedCommand, comment, commentAuthor, eventContext: { eventType, prNumber, owner, repo }, payload, config, correlationId, correlatedLogger, prefetchedPRData });
         } catch (error) {
             await redisClient.del(slashCommentTrackingKey);
             throw error;
