@@ -28,9 +28,16 @@ after(async () => closeConnection());
 test('MCP list summaries report PR states only when supported by stored evidence', () => {
   for (const status of [undefined, null, 'pending', 'under_review', 'merged', 'closed']) {
     const expected = status === 'merged' || status === 'closed' ? status : null;
-    const task = { pr_number: 188, plan_issue_status: status };
+    const task = { pr_number: 188, plan_pr_number: 188, plan_issue_status: status };
     assert.equal(summarizeTask(task).pr_state, expected);
-    assert.equal(summarizeTask({ ...task, pr_number: null }).pr_state, null);
+    assert.equal(summarizeTask({ ...task, pr_number: null }).pr_state, expected);
+    assert.equal(summarizeTask({ ...task, plan_pr_number: '188' }).pr_state, expected);
+    for (const planPrNumber of [null, undefined, 288]) {
+      const summary = summarizeTask({ ...task, plan_pr_number: planPrNumber });
+      assert.equal(summary.pr_number, 188);
+      assert.equal(summary.pr_state, null);
+    }
+    assert.equal(summarizeTask({ ...task, pr_number: null, plan_pr_number: null }).pr_state, null);
     assert.deepEqual(summarizePlan({}, [{ pr_number: 188, status }]).pull_requests,
       [{ number: 188, state: expected }]);
   }
@@ -44,25 +51,52 @@ test('MCP list summaries report PR states only when supported by stored evidence
   }
 });
 
-test('MCP plan summaries stop elapsed time when plans reach a terminal status', () => {
+test('MCP terminal plan summaries leave completion timing unknown after later edits', () => {
   const row = {
     created_at: '2026-09-01 12:00:00',
     updated_at: '2026-09-01 12:00:30',
     generation_trace: JSON.stringify({ error: 'Plan generation failed' }),
   };
   for (const status of ['executed', 'merged', 'failed']) {
-    for (const now of [Date.UTC(2026, 8, 1, 13), Date.UTC(2026, 11, 1)]) {
-      const plan = summarizePlan({ ...row, status }, [], now);
+    for (const updatedAt of [row.updated_at, '2026-09-02 12:00:30']) {
+      const plan = summarizePlan({ ...row, status, name: 'Renamed plan', updated_at: updatedAt }, [], Date.UTC(2026, 11, 1));
+      assert.equal(plan.updated_at, updatedAt);
       assert.deepEqual({
         completed_at: plan.completed_at,
         elapsed_ms: plan.elapsed_ms,
         failure_reason: plan.failure_reason,
       }, {
-        completed_at: row.updated_at,
-        elapsed_ms: 30_000,
+        completed_at: null,
+        elapsed_ms: null,
         failure_reason: status === 'failed' ? 'Plan generation failed' : null,
       });
     }
+  }
+});
+
+test('MCP plan assignments retain full identities when display values are truncated', () => {
+  for (const field of ['agent_alias', 'model_name']) {
+    const first = { agent_alias: 'agent', model_name: 'model', [field]: `${'x'.repeat(100)}-first` };
+    const second = { ...first, [field]: `${'x'.repeat(100)}-second` };
+    const plan = summarizePlan({}, [first, second, { ...first }]);
+    assert.equal(plan.agent_model_count, 2);
+    assert.equal(plan.agent_alias, null);
+    assert.equal(plan.model_name, null);
+    const assignments = plan.agent_models as Array<Record<string, string>>;
+    assert.equal(assignments.length, 2);
+    assert.deepEqual(assignments[0], assignments[1]);
+    assert.ok(Buffer.byteLength(assignments[0][field]) <= 100);
+
+    const limitedPlan = summarizePlan({}, [first, second, { ...first }], Date.now(), 1);
+    assert.equal(limitedPlan.agent_model_count, 2);
+    assert.equal((limitedPlan.agent_models as unknown[]).length, 1);
+    assert.equal(limitedPlan.agent_alias, null);
+    assert.equal(limitedPlan.model_name, null);
+
+    const singlePlan = summarizePlan({}, [first, { ...first }]);
+    assert.equal(singlePlan.agent_model_count, 1);
+    assert.equal(singlePlan.agent_alias, compactText(first.agent_alias, 100));
+    assert.equal(singlePlan.model_name, compactText(first.model_name, 100));
   }
 });
 
@@ -376,6 +410,13 @@ test('MCP task, goal and plan lists paginate in deterministic newest-first order
   await db('notification_pull_request_state').where({ repository, pr_number: 288 }).delete();
   assert.equal((await page('list_tasks', 2)).tasks[1].pr_state, 'closed');
   await db('notification_pull_request_state').insert({ repository, pr_number: 288, merged_at: '2026-09-01T12:00:21.000Z' });
+  await db('tasks').where({ task_id: '1024' }).update({ pr_number: 188 });
+  const mismatchedTask = (await page('list_tasks', 2)).tasks[1];
+  assert.equal(mismatchedTask.pr_number, 188);
+  assert.equal(mismatchedTask.pr_state, null);
+  await db('notification_pull_request_state').insert({ repository, pr_number: 188, merged_at: '2026-09-01T12:00:21.000Z' });
+  assert.equal((await page('list_tasks', 2)).tasks[1].pr_state, 'merged');
+  await db('notification_pull_request_state').where({ repository, pr_number: 188 }).delete();
   assert.deepEqual(taskPageOne.tasks[0], {
     task_id: '10151', repository, issue_number: 88, task_type: 'issue', title: 'Make task lists self-explanatory',
     summary: 'Expose bounded lifecycle context', state: 'failed', agent_alias: 'codex', model_name: 'gpt-5.6',
@@ -406,6 +447,20 @@ test('MCP task, goal and plan lists paginate in deterministic newest-first order
 
   assert.equal(planPageOne.plans[0].generation_model, 'codex:gpt-5.6');
   assert.equal(planPageOne.plans[1].failure_reason, 'Refinement failed');
+  for (const plan of planPageOne.plans) {
+    assert.equal(plan.completed_at, null);
+    assert.equal(plan.elapsed_ms, null);
+  }
+  const renameResult = await catalog.find(tool => tool.name === 'update_plan')!.run({
+    principal, args: { repository, planId: 'plan-a-new', expectedRevision: 0, name: 'Renamed failed plan' },
+  });
+  assert.equal(renameResult.status, 200);
+  const renamedPlan = (await page('list_plans', 0)).plans.find((plan: { draft_id: string }) => plan.draft_id === 'plan-a-new');
+  assert.equal(renamedPlan.title, 'Renamed failed plan');
+  assert.equal(renamedPlan.status, 'failed');
+  assert.notEqual(renamedPlan.updated_at, planPageOne.plans[1].updated_at);
+  assert.equal(renamedPlan.completed_at, null);
+  assert.equal(renamedPlan.elapsed_ms, null);
   assert.deepEqual(planPageTwo.plans[0].pull_requests, [
     { number: 999, state: 'merged' }, { number: 288, state: 'merged' }, { number: 289, state: 'merged' },
   ]);

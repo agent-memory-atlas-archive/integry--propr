@@ -130,7 +130,7 @@ export function summarizeTask(row: JsonObject, now = Date.now()): JsonObject {
     agent_alias: compactText(job.agentAlias ?? issueRef.agentAlias ?? row.plan_agent_alias, 100),
     model_name: compactText(row.model_name ?? job.modelName ?? issueRef.modelName ?? row.plan_model_name, MODEL_LIMIT),
     pr_number: prNumber,
-    pr_state: pullRequestState(row.plan_issue_status, prNumber !== null),
+    pr_state: pullRequestState(row.plan_issue_status, prNumber !== null && prNumber === positiveInteger(row.plan_pr_number)),
     created_at: row.created_at,
     updated_at: updatedAt,
     started_at: startedAt,
@@ -189,7 +189,10 @@ function summarizePlanIssues(issues: JsonObject[]) {
     else counts.active += 1;
     const alias = compactText(issue.agent_alias, 100);
     const model = compactText(issue.model_name, MODEL_LIMIT);
-    if (alias && model) agentModels.set(`${alias}\u0000${model}`, { agent_alias: alias, model_name: model });
+    if (alias && model) {
+      const identity = JSON.stringify([issue.agent_alias, issue.model_name]);
+      agentModels.set(identity, { agent_alias: alias, model_name: model });
+    }
     const number = positiveInteger(issue.pr_number);
     if (number) pullRequests.set(number, pullRequestState(status, true));
   }
@@ -199,7 +202,7 @@ function summarizePlanIssues(issues: JsonObject[]) {
 export function summarizePlan(row: JsonObject, issues: JsonObject[], now = Date.now(), relationLimit = RELATION_LIMIT): JsonObject {
   const { counts, agentModels, pullRequests } = summarizePlanIssues(issues);
   const status = text(row.status) ?? 'draft';
-  const completedAt = ['executed', 'merged', 'failed'].includes(status) ? row.updated_at : null;
+  const isTerminal = ['executed', 'merged', 'failed'].includes(status);
   const trace = parseObject(row.generation_trace);
   const refinement = parseObject(row.refinement_result);
   const context = parseObject(row.context_config);
@@ -226,8 +229,9 @@ export function summarizePlan(row: JsonObject, issues: JsonObject[], now = Date.
     created_at: row.created_at,
     updated_at: row.updated_at,
     started_at: row.created_at,
-    completed_at: completedAt,
-    elapsed_ms: elapsedMilliseconds(row.created_at, completedAt ?? now),
+    // Plans do not persist a completion timestamp; updated_at can change after completion.
+    completed_at: null,
+    elapsed_ms: isTerminal ? null : elapsedMilliseconds(row.created_at, now),
     failure_reason: status === 'failed'
       ? compactText(trace.error ?? refinement.error, 500)
       : null,
