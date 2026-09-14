@@ -18,69 +18,23 @@ export async function getTasksFromDb(
   query: TaskQuery
 ): Promise<{ tasks: unknown[]; total: number; offset: number; limit: number }> {
   const { db, status, repository, limit, offset, search, forReview, excludeMerged } = query;
-  const latestHistorySubquery = db('task_history')
-    .select(
-      'task_id',
-      'state',
-      'timestamp',
-      'reason',
-      db.raw('ROW_NUMBER() OVER(PARTITION BY task_id ORDER BY timestamp DESC) as rn')
-    )
-    .as('h');
-
-  const planIssueStatusSubquery = db('plan_issues')
-    .select('task_id', 'status as plan_issue_status')
-    .whereNotNull('task_id')
-    .as('pi');
-
-  const critiqueScoreSubquerySql = `
-    LEFT JOIN (SELECT
-      task_id,
-      CASE
-        WHEN json_valid(analysis_report) = 1
-          AND json_extract(analysis_report, '$.report') IS NOT NULL
-          AND INSTR(json_extract(analysis_report, '$.report'), '{') > 0
-        THEN (
-          SELECT
-            CASE
-              WHEN json_valid(clean_json) = 1
-              THEN json_extract(clean_json, '$.implementation_critique_score')
-              ELSE NULL
-            END
-          FROM (
-            SELECT RTRIM(
-              SUBSTR(
-                json_extract(analysis_report, '$.report'),
-                INSTR(json_extract(analysis_report, '$.report'), '{')
-              ),
-              CHAR(10) || CHAR(13) || ' ' || '\`'
-            ) as clean_json
-          )
-        )
-        ELSE NULL
-      END as critique_score
-    FROM llm_executions le1
-    WHERE analysis_report IS NOT NULL
-      AND json_valid(analysis_report) = 1
-      AND json_extract(analysis_report, '$.report') IS NOT NULL
-      AND execution_id = (
-        SELECT MAX(le2.execution_id)
-        FROM llm_executions le2
-        WHERE le2.task_id = le1.task_id
-          AND le2.analysis_report IS NOT NULL
-          AND json_valid(le2.analysis_report) = 1
-      )
-    ) as cs_score ON cs_score.task_id = t.task_id
-  `;
-
+  // Resolve one history row per task with an indexed lookup. The former global
+  // ROW_NUMBER window materialized and sorted all task_history rows for every
+  // count and page request. timestamp remains the sole ordering key so equal
+  // timestamps retain SQLite's existing index/rowid tie behaviour.
   const baseQuery = db('tasks as t')
     .where(function() {
       this.whereNull('t.task_type').orWhereNot('t.task_type', 'goal');
     })
-    .join(latestHistorySubquery, function() {
-      this.on('t.task_id', '=', 'h.task_id').andOn('h.rn', '=', db!.raw('?', [1]));
-    })
-    .leftJoin(planIssueStatusSubquery, 'pi.task_id', 't.task_id');
+    .joinRaw(`
+      JOIN task_history AS h ON h.history_id = (
+        SELECT latest_h.history_id
+        FROM task_history AS latest_h
+        WHERE latest_h.task_id = t.task_id
+        ORDER BY latest_h.timestamp DESC
+        LIMIT 1
+      )
+    `);
 
   if (status && status !== 'all') {
     baseQuery.where('h.state', status);
@@ -100,8 +54,20 @@ export async function getTasksFromDb(
     baseQuery.whereIn('h.state', ['completed', 'failed']);
   }
   if (excludeMerged) {
+    // A task was included by the previous left join whenever it had no linked
+    // plan issue or at least one non-merged link. Express that as EXISTS so
+    // multiple plan_issues cannot duplicate task identities or inflate total.
     baseQuery.where(function() {
-      this.whereNull('pi.plan_issue_status').orWhereNot('pi.plan_issue_status', 'merged');
+      this.whereNotExists(
+        db('plan_issues as pi_any')
+          .select(db.raw('1'))
+          .whereRaw('pi_any.task_id = t.task_id')
+      ).orWhereExists(
+        db('plan_issues as pi_open')
+          .select(db.raw('1'))
+          .whereRaw('pi_open.task_id = t.task_id')
+          .whereNot('pi_open.status', 'merged')
+      );
     });
   }
 
@@ -113,35 +79,132 @@ export async function getTasksFromDb(
   );
   const total = parseInt(String(totalResult?.total || 0), 10);
 
-  const processingStartSubquery = db('task_history')
-    .select('task_id', db.raw('MIN(timestamp) as processing_start_timestamp'))
-    .whereIn('state', ['processing', 'claude_execution', 'post_processing'])
-    .groupBy('task_id')
-    .as('ps');
-
-  const completionSubquery = db('task_history')
-    .select('task_id', db.raw('MIN(timestamp) as completion_timestamp'))
-    .whereIn('state', ['completed', 'failed', 'cancelled'])
-    .groupBy('task_id')
-    .as('cs');
-
-  const dbTasks = await timeApiStage('sql.tasks.page', () => baseQuery
-    .leftJoin(processingStartSubquery, 'ps.task_id', 't.task_id')
-    .leftJoin(completionSubquery, 'cs.task_id', 't.task_id')
-    .joinRaw(critiqueScoreSubquerySql)
-    .select('t.*', 'h.state', 'h.timestamp as state_timestamp', 'h.reason as failedReason',
-            'ps.processing_start_timestamp', 'cs.completion_timestamp',
-            'pi.plan_issue_status', 'cs_score.critique_score')
+  // Apply ordering and pagination before presentation enrichment. This bounds
+  // aggregate and JSON work by the requested page rather than database size.
+  const pageTasks = await timeApiStage('sql.tasks.page', () => baseQuery
+    .select('t.*', 'h.state', 'h.timestamp as state_timestamp', 'h.reason as failedReason')
     .orderBy('t.created_at', 'desc')
     .limit(limit)
     .offset(offset));
 
-  const media = await (query.previewReader ?? previewMediaReader).project(dbTasks.map(taskPreviewSource), 3);
-  const tasks = dbTasks.map((row: Record<string, unknown>, index: number) => ({
-    ...mapDbTaskToResponse(row),
+  if (pageTasks.length === 0) return { tasks: [], total, offset, limit };
+
+  const taskIds = pageTasks.map((row: Record<string, unknown>) => String(row.task_id));
+  const { historyByTask, planStatusByTask, critiqueScoreByTask } = await timeApiStage(
+    'sql.tasks.enrichment',
+    async () => enrichTaskPage(db, taskIds, Boolean(excludeMerged))
+  );
+
+  const media = await (query.previewReader ?? previewMediaReader).project(pageTasks.map(taskPreviewSource), 3);
+  const tasks = pageTasks.map((row: Record<string, unknown>, index: number) => ({
+    ...mapDbTaskToResponse({
+      ...row,
+      ...historyByTask.get(String(row.task_id)),
+      plan_issue_status: planStatusByTask.get(String(row.task_id)) ?? null,
+      critique_score: critiqueScoreByTask.get(String(row.task_id)) ?? null,
+    }),
     ...(media[index].previews.length ? { previewMedia: media[index].previews } : {}),
   }));
   return { tasks, total, offset, limit };
+}
+
+interface TaskPageEnrichment {
+  historyByTask: Map<string, Record<string, unknown>>;
+  planStatusByTask: Map<string, unknown>;
+  critiqueScoreByTask: Map<string, unknown>;
+}
+
+async function enrichTaskPage(db: Knex, taskIds: string[], excludeMerged: boolean): Promise<TaskPageEnrichment> {
+  const historyRows = await db('task_history')
+    .whereIn('task_id', taskIds)
+    .select(
+      'task_id',
+      db.raw(`MIN(CASE
+        WHEN state IN ('processing', 'claude_execution', 'post_processing') THEN timestamp
+      END) AS processing_start_timestamp`),
+      db.raw(`MIN(CASE
+        WHEN state IN ('completed', 'failed', 'cancelled') THEN timestamp
+      END) AS completion_timestamp`)
+    )
+    .groupBy('task_id');
+
+  const planIssueQuery = db('plan_issues')
+    .whereIn('task_id', taskIds)
+    .whereNotNull('task_id')
+    .select('task_id', 'status')
+    .orderBy('task_id', 'asc')
+    .orderBy('id', 'asc');
+  if (excludeMerged) planIssueQuery.whereNot('status', 'merged');
+  const planIssueRows = await planIssueQuery;
+
+  // Fetch only executions belonging to this page. Selecting newest first lets
+  // the loop exactly mirror the old "latest valid outer analysis report"
+  // choice without evaluating SQLite JSON functions over unrelated tasks.
+  const executionRows = await db('llm_executions')
+    .whereIn('task_id', taskIds)
+    .whereNotNull('analysis_report')
+    .select('task_id', 'analysis_report')
+    .orderBy('task_id', 'asc')
+    .orderBy('execution_id', 'desc');
+
+  const historyByTask = new Map<string, Record<string, unknown>>();
+  for (const row of historyRows as Array<Record<string, unknown>>) {
+    historyByTask.set(String(row.task_id), row);
+  }
+
+  const planStatusByTask = new Map<string, unknown>();
+  for (const row of planIssueRows as Array<Record<string, unknown>>) {
+    const taskId = String(row.task_id);
+    if (!planStatusByTask.has(taskId)) planStatusByTask.set(taskId, row.status);
+  }
+
+  const critiqueScoreByTask = new Map<string, unknown>();
+  const tasksWithValidReport = new Set<string>();
+  for (const row of executionRows as Array<Record<string, unknown>>) {
+    const taskId = String(row.task_id);
+    if (tasksWithValidReport.has(taskId)) continue;
+    const analysisReport = parseAnalysisReport(row.analysis_report);
+    if (!analysisReport.valid) continue;
+    // The old MAX(execution_id) subquery chose the newest valid outer JSON
+    // before checking for $.report, so a valid report-less execution must not
+    // fall back to an older score.
+    tasksWithValidReport.add(taskId);
+    if (analysisReport.report !== null && analysisReport.report !== undefined) {
+      critiqueScoreByTask.set(taskId, extractCritiqueScore(analysisReport.report));
+    }
+  }
+
+  return { historyByTask, planStatusByTask, critiqueScoreByTask };
+}
+
+function parseAnalysisReport(value: unknown): { valid: boolean; report?: unknown } {
+  try {
+    const parsed = typeof value === 'string' ? JSON.parse(value) : value;
+    const report = parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed)
+      ? (parsed as Record<string, unknown>).report
+      : undefined;
+    return { valid: true, report };
+  } catch {
+    return { valid: false };
+  }
+}
+
+function extractCritiqueScore(report: unknown): unknown {
+  const reportText = typeof report === 'string' ? report : JSON.stringify(report);
+  const jsonStart = reportText.indexOf('{');
+  if (jsonStart < 0) return null;
+
+  // Match SQLite RTRIM(..., CHAR(10) || CHAR(13) || ' ' || '`').
+  const cleanJson = reportText.slice(jsonStart).replace(/[\n\r `]+$/g, '');
+  try {
+    const parsed = JSON.parse(cleanJson);
+    if (parsed === null || typeof parsed !== 'object') return null;
+    const score = (parsed as Record<string, unknown>).implementation_critique_score ?? null;
+    // SQLite json_extract represents JSON booleans as integer 1/0.
+    return typeof score === 'boolean' ? Number(score) : score;
+  } catch {
+    return null;
+  }
 }
 
 function parseRepositoryParts(repository: unknown): { owner: string | null; name: string | null } {

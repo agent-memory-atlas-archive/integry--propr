@@ -96,7 +96,7 @@ export function createToolCatalog(deps: ToolDeps): McpTool[] {
   addManagementTools(tools, deps, { todos, notifications, config, runtime });
 
   tools.push({ name: 'list_goals', description: 'List your goals in a repository, with durable continuation handles.', scope: 'read', readOnly: true, schema: z.object({ repository: repositorySchema, ...pageShape }).strict(), run: async ({ principal, args }) => {
-    const goals = await db('goals').where({ owner_id: principal.user.id, repository: args.repository }).select('goal_id', 'title', 'objective', 'desired_state', 'result_state', 'current_task_id', 'updated_at').orderBy('goal_id').offset(args.offset).limit(args.limit);
+    const goals = await db('goals').where({ owner_id: principal.user.id, repository: args.repository }).select('goal_id', 'title', 'objective', 'desired_state', 'result_state', 'current_task_id', 'updated_at').orderBy('created_at', 'desc').orderBy('goal_id', 'desc').offset(args.offset).limit(args.limit);
     return ok({ goals, nextOffset: goals.length === args.limit ? args.offset + args.limit : null });
   } });
   const goalTarget = { table: 'goals', column: 'goal_id', arg: 'goalId', owner: 'owner_id' };
@@ -113,7 +113,7 @@ export function createToolCatalog(deps: ToolDeps): McpTool[] {
     const query = db('tasks').where({ repository: args.repository });
     query.whereNotIn('task_id', db('goals').select('current_task_id').whereNot('owner_id', principal.user.id).whereNotNull('current_task_id'));
     query.andWhere(builder => builder.whereNot('task_type', 'goal').orWhereIn('task_id', db('goals').select('current_task_id').where({ owner_id: principal.user.id }))); 
-    const tasks = await query.select(taskColumns).select(db.raw('(SELECT state FROM task_history WHERE task_history.task_id = tasks.task_id ORDER BY history_id DESC LIMIT 1) AS state')).orderBy('task_id').offset(args.offset).limit(args.limit);
+    const tasks = await query.select(taskColumns).select(db.raw('(SELECT state FROM task_history WHERE task_history.task_id = tasks.task_id ORDER BY history_id DESC LIMIT 1) AS state')).orderBy('created_at', 'desc').orderBy('task_id', 'desc').offset(args.offset).limit(args.limit);
     return ok({ tasks, nextOffset: tasks.length === args.limit ? args.offset + args.limit : null });
   } });
   tools.push({ name: 'get_task', description: 'Read a task’s persisted state.', scope: 'read', readOnly: true, schema: z.object(taskShape).strict(), target: taskTarget, run: async ({ args }) => ok({ ...await db('tasks').where({ task_id: args.taskId }).first(taskColumns), latestEvent: await db('task_history').where({ task_id: args.taskId }).orderBy('history_id', 'desc').first('state', 'reason', 'timestamp') }) });

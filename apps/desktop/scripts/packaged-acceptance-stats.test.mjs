@@ -49,8 +49,8 @@ describe('packaged acceptance stats fixtures', () => {
       headerStatsSource,
       /getDrafts\(\{\s*limit:\s*20,\s*excludeStatuses:\s*'merged'\s*\}\)/
     );
-    assert.match(headerStatsSource, /buildRunningItems\(\s*draftsResponse\.drafts,/);
-    assert.match(headerStatsSource, /filterActivePlans\(draftsResponse\.drafts\)/);
+    assert.match(headerStatsSource, /buildRunningItems\(\s*draftsSnapshotRef\.current,/);
+    assert.match(headerStatsSource, /setActivePlans\(filterActivePlans\(response\.drafts\)\)/);
     assert.match(
       headerStatsHelpersSource,
       /export function filterActivePlans\([\s\S]*?return drafts\s*\.filter/

@@ -1,6 +1,9 @@
 import { expect, test, type Page } from '@playwright/test';
 import { mkdir } from 'node:fs/promises';
+import { fileURLToPath } from 'node:url';
 import type { CurrentUser, MonitoredRepo } from '../src/api/proprApi';
+
+const repositoryIconFixture = fileURLToPath(new URL('../public/logo.png', import.meta.url));
 
 async function stubRepositoryApis(page: Page, canManage = true, initialRepos?: MonitoredRepo[]) {
   let repos: MonitoredRepo[] = initialRepos ?? [
@@ -12,6 +15,10 @@ async function stubRepositoryApis(page: Page, canManage = true, initialRepos?: M
   let chatLoads = 0;
   const indexingWrites: { path: string; body: unknown }[] = [];
   await page.routeWebSocket('**/socket.io/**', socket => socket.close());
+  await page.route('https://raw.githubusercontent.com/**', route => route.fulfill({
+    path: repositoryIconFixture,
+    contentType: 'image/png',
+  }));
   await page.route('**/api/**', async route => {
     const path = new URL(route.request().url()).pathname;
     let json: unknown;
@@ -49,6 +56,7 @@ async function stubRepositoryApis(page: Page, canManage = true, initialRepos?: M
         json = { repositories: repos.map((repo, index) => ({
           full_name: repo.name, branch: repo.baseBranch || 'HEAD', indexing_status: 'completed',
           last_indexed_at: new Date(Date.now() - (index + 1) * 3600000).toISOString(), last_indexed_hash: '8a6fe50123456789', last_indexed_commit_message: 'Update repository',
+          icon_path: index < 2 ? 'public/logo.png' : null,
         })) };
         break;
       case '/api/repos/chat/messages': chatLoads++; json = { messages: [] }; break;
@@ -113,6 +121,15 @@ test('keeps navigation compact and saves settings for the selected repository', 
   await expect(page.getByRole('region', { name: /Settings for/ })).toHaveCount(0);
   const propr = page.getByRole('button', { name: 'Select integry/propr', exact: true });
   const sdk = page.getByRole('button', { name: 'Select integry/integration-sdk', exact: true });
+  await expect(propr.locator('../..').getByTestId('repository-icon-image')).toBeVisible();
+  await expect(propr.locator('../..').getByTestId('repository-icon-image')).toHaveAttribute(
+    'src',
+    /\/integry\/propr\/8a6fe50123456789\/public\/logo\.png$/,
+  );
+  if (process.env.PROPR_CAPTURE_PREVIEWS) {
+    await mkdir('../.propr/previews', { recursive: true });
+    await page.screenshot({ animations: 'disabled', path: '../.propr/previews/repository-icons-desktop.png' });
+  }
   const originalHeight = (await propr.locator('../..').boundingBox())!.height;
   expect(originalHeight).toBe((await sdk.locator('../..').boundingBox())!.height);
   await expect(propr.locator('../..').getByText('8a6fe50', { exact: true })).toBeVisible();
@@ -164,6 +181,11 @@ for (const width of [320, 390]) {
     await page.setViewportSize({ width, height: 844 });
     const api = await stubRepositoryApis(page);
     await page.goto('/repositories');
+    await expect(page.getByRole('button', { name: 'Select integry/propr', exact: true }).locator('..').getByTestId('repository-icon-image')).toBeVisible();
+    if (width === 390 && process.env.PROPR_CAPTURE_PREVIEWS) {
+      await mkdir('../.propr/previews', { recursive: true });
+      await page.screenshot({ animations: 'disabled', path: '../.propr/previews/repository-icons-mobile.png' });
+    }
     await page.getByRole('button', { name: 'Select integry/propr', exact: true }).click();
     const settings = page.getByRole('region', { name: 'Settings for integry/propr', exact: true });
     await expect(settings.getByRole('textbox')).toBeVisible();

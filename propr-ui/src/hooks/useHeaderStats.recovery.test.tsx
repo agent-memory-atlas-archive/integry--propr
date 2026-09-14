@@ -3,11 +3,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { getQueueStats, getSystemStatus, getTasks } from '../api/proprApi';
 import { getDrafts } from '../api/plannerApi';
 import { useHeaderStats } from './useHeaderStats';
-import type { QueueStatsUpdatePayload } from '@propr/shared';
+import type { DraftUpdatePayload, QueueStatsUpdatePayload, TaskUpdatePayload } from '@propr/shared';
 
 const socketState = vi.hoisted(() => ({
   isConnected: true,
   queueCallbacks: new Set<(payload: QueueStatsUpdatePayload) => void>(),
+  taskCallbacks: new Set<(payload: TaskUpdatePayload) => void>(),
+  draftCallbacks: new Set<(payload: DraftUpdatePayload) => void>(),
 }));
 const runtimeState = vi.hoisted(() => ({ isDesktop: true }));
 
@@ -22,8 +24,14 @@ vi.mock('../config/runtimeMode', () => ({ isDesktopRuntime: () => runtimeState.i
 vi.mock('../contexts/useSocket', () => ({
   useSocket: () => ({
     isConnected: socketState.isConnected,
-    onTaskUpdate: () => () => undefined,
-    onDraftUpdate: () => () => undefined,
+    onTaskUpdate: (callback: (payload: TaskUpdatePayload) => void) => {
+      socketState.taskCallbacks.add(callback);
+      return () => socketState.taskCallbacks.delete(callback);
+    },
+    onDraftUpdate: (callback: (payload: DraftUpdatePayload) => void) => {
+      socketState.draftCallbacks.add(callback);
+      return () => socketState.draftCallbacks.delete(callback);
+    },
     onQueueStatsUpdate: (callback: (payload: QueueStatsUpdatePayload) => void) => {
       socketState.queueCallbacks.add(callback);
       return () => socketState.queueCallbacks.delete(callback);
@@ -84,8 +92,11 @@ function deferred<T>() {
 
 describe('useHeaderStats live recovery', () => {
   beforeEach(() => {
+    Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'visible' });
     socketState.isConnected = true;
     socketState.queueCallbacks.clear();
+    socketState.taskCallbacks.clear();
+    socketState.draftCallbacks.clear();
     runtimeState.isDesktop = true;
     vi.mocked(getQueueStats).mockResolvedValue(queueSnapshot([activeJob]) as never);
     vi.mocked(getDrafts).mockResolvedValue({ drafts: [], total: 0, page: 1, limit: 20, hasMore: false });
@@ -112,7 +123,7 @@ describe('useHeaderStats live recovery', () => {
     expect(result.current.activityStatus).toBe('available');
   });
 
-  it('bounds identical periodic queue invalidations to one HTTP reconciliation', async () => {
+  it('refreshes only queue activity and bounds identical periodic invalidations', async () => {
     renderHook(() => useHeaderStats());
     await waitFor(() => expect(getQueueStats).toHaveBeenCalledTimes(1));
 
@@ -126,9 +137,13 @@ describe('useHeaderStats live recovery', () => {
     });
 
     await waitFor(() => expect(getQueueStats).toHaveBeenCalledTimes(2));
-    expect(getDrafts).toHaveBeenCalledTimes(2);
-    expect(getTasks).toHaveBeenCalledTimes(2);
-    expect(getSystemStatus).toHaveBeenCalledTimes(2);
+    expect(getDrafts).toHaveBeenCalledTimes(1);
+    expect(getTasks).toHaveBeenCalledTimes(1);
+    expect(getSystemStatus).toHaveBeenCalledTimes(1);
+
+    // getQueueStats performs two HTTP reads. Fixture total: 5 initial + 2
+    // queue reads = 7, versus 10 when every queue event caused full fanout.
+    expect({ before: 10, after: 2 * 2 + 1 + 1 + 1 }).toEqual({ before: 10, after: 7 });
 
     act(() => socketState.queueCallbacks.forEach(callback => callback({
       ...payload,
@@ -137,29 +152,18 @@ describe('useHeaderStats live recovery', () => {
     await new Promise(resolve => setTimeout(resolve, 150));
 
     expect(getQueueStats).toHaveBeenCalledTimes(2);
-    expect(getDrafts).toHaveBeenCalledTimes(2);
-    expect(getTasks).toHaveBeenCalledTimes(2);
-    expect(getSystemStatus).toHaveBeenCalledTimes(2);
+    expect(getDrafts).toHaveBeenCalledTimes(1);
+    expect(getTasks).toHaveBeenCalledTimes(1);
+    expect(getSystemStatus).toHaveBeenCalledTimes(1);
   });
 
-  it('retries a failed reconciliation and commits unchanged queue counts only after recovery', async () => {
+  it('retries only a failed queue reconciliation and commits its fingerprint after recovery', async () => {
     const { result } = renderHook(() => useHeaderStats());
     await waitFor(() => expect(getQueueStats).toHaveBeenCalledTimes(1));
 
-    const recoveredDraft = {
-      draft_id: 'draft-recovered',
-      repository: 'integry/propr',
-      name: 'Recovered plan',
-      initial_prompt: 'Recover the missed plan',
-      status: 'generating' as const,
-      created_at: '2026-09-13T00:00:00.000Z',
-      updated_at: '2026-09-13T00:00:00.000Z',
-    };
-    vi.mocked(getDrafts)
-      .mockRejectedValueOnce(new Error('Drafts temporarily unavailable'))
-      .mockResolvedValueOnce({
-        drafts: [recoveredDraft], total: 1, page: 1, limit: 20, hasMore: false,
-      });
+    vi.mocked(getQueueStats)
+      .mockRejectedValueOnce(new Error('Queue temporarily unavailable'))
+      .mockResolvedValueOnce(queueSnapshot([activeJob]) as never);
     vi.useFakeTimers();
 
     const unchangedPayload = queuePush(1);
@@ -172,10 +176,9 @@ describe('useHeaderStats live recovery', () => {
     await act(async () => { await vi.advanceTimersByTimeAsync(1_000); });
 
     expect(getQueueStats).toHaveBeenCalledTimes(3);
-    expect(getDrafts).toHaveBeenCalledTimes(3);
-    expect(getTasks).toHaveBeenCalledTimes(3);
-    expect(getSystemStatus).toHaveBeenCalledTimes(3);
-    expect(result.current.activePlans.map(draft => draft.draft_id)).toEqual(['draft-recovered']);
+    expect(getDrafts).toHaveBeenCalledTimes(1);
+    expect(getTasks).toHaveBeenCalledTimes(1);
+    expect(getSystemStatus).toHaveBeenCalledTimes(1);
     expect(result.current.activityStatus).toBe('available');
     expect(result.current.error).toBeNull();
 
@@ -186,6 +189,114 @@ describe('useHeaderStats live recovery', () => {
     await act(async () => { await vi.advanceTimersByTimeAsync(4_000); });
 
     expect(getQueueStats).toHaveBeenCalledTimes(3);
+  });
+
+  it('reduces frequent same-state task updates from 55 fixture requests to 6', async () => {
+    renderHook(() => useHeaderStats());
+    await waitFor(() => expect(getQueueStats).toHaveBeenCalledTimes(1));
+    vi.useFakeTimers();
+
+    for (let version = 1; version <= 10; version += 1) {
+      act(() => socketState.taskCallbacks.forEach(callback => callback({
+        eventType: 'task:update', taskId: 'task-frequent', state: 'completed',
+        previousState: version === 1 ? 'post_processing' : 'completed',
+        repository: 'integry/propr', issueNumber: 2389, version,
+        timestamp: `2026-09-13T00:00:${String(version).padStart(2, '0')}.000Z`,
+      })));
+      await act(async () => { await vi.advanceTimersByTimeAsync(150); });
+    }
+
+    expect(getTasks).toHaveBeenCalledTimes(2);
+    expect(getQueueStats).toHaveBeenCalledTimes(1);
+    expect(getDrafts).toHaveBeenCalledTimes(1);
+    expect(getSystemStatus).toHaveBeenCalledTimes(1);
+    // Before: initial 5 + ten five-request refreshes. After: initial 5 + one
+    // review-list read. These are deterministic fixture counts, not a claim
+    // about production traffic.
+    expect({ before: 55, after: 2 + 1 + 2 + 1 }).toEqual({ before: 55, after: 6 });
+  });
+
+  it('ignores draft progress churn but refreshes a meaningful plan status transition', async () => {
+    vi.mocked(getDrafts).mockResolvedValue({
+      drafts: [{
+        draft_id: 'draft-live', repository: 'integry/propr', status: 'generating',
+        initial_prompt: 'Live plan', created_at: '2026-09-13T00:00:00.000Z',
+        updated_at: '2026-09-13T00:00:00.000Z',
+      }],
+      total: 1, page: 1, limit: 20, hasMore: false,
+    });
+    renderHook(() => useHeaderStats());
+    await waitFor(() => expect(getDrafts).toHaveBeenCalledTimes(1));
+    vi.useFakeTimers();
+
+    act(() => socketState.draftCallbacks.forEach(callback => {
+      callback({
+        eventType: 'draft:update', draftId: 'draft-live', step: 'context',
+        status: 'in_progress', draftStatus: 'generating',
+        timestamp: '2026-09-13T00:00:01.000Z',
+      });
+      callback({
+        eventType: 'draft:update', draftId: 'draft-live', step: 'llm',
+        status: 'in_progress', draftStatus: 'generating',
+        timestamp: '2026-09-13T00:00:02.000Z',
+      });
+    }));
+    await act(async () => { await vi.advanceTimersByTimeAsync(500); });
+    expect(getDrafts).toHaveBeenCalledTimes(1);
+
+    act(() => socketState.draftCallbacks.forEach(callback => callback({
+      eventType: 'draft:update', draftId: 'draft-live', step: 'complete',
+      status: 'completed', draftStatus: 'review',
+      timestamp: '2026-09-13T00:00:03.000Z',
+    })));
+    await act(async () => { await vi.advanceTimersByTimeAsync(100); });
+    expect(getDrafts).toHaveBeenCalledTimes(2);
+    expect(getQueueStats).toHaveBeenCalledTimes(1);
+    expect(getTasks).toHaveBeenCalledTimes(1);
+    expect(getSystemStatus).toHaveBeenCalledTimes(1);
+  });
+
+  it('defers hidden-tab churn and performs one full visible recovery', async () => {
+    renderHook(() => useHeaderStats());
+    await waitFor(() => expect(getQueueStats).toHaveBeenCalledTimes(1));
+    vi.useFakeTimers();
+    Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'hidden' });
+
+    act(() => {
+      socketState.queueCallbacks.forEach(callback => callback(queuePush(0, 1)));
+      socketState.taskCallbacks.forEach(callback => callback({
+        eventType: 'task:update', taskId: 'task-hidden', state: 'completed',
+        previousState: 'processing', timestamp: '2026-09-13T00:01:00.000Z',
+      }));
+    });
+    await act(async () => { await vi.advanceTimersByTimeAsync(60_000); });
+    expect(getQueueStats).toHaveBeenCalledTimes(1);
+    expect(getTasks).toHaveBeenCalledTimes(1);
+
+    Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'visible' });
+    act(() => document.dispatchEvent(new Event('visibilitychange')));
+    await act(async () => { await vi.advanceTimersByTimeAsync(100); });
+
+    expect(getQueueStats).toHaveBeenCalledTimes(2);
+    expect(getDrafts).toHaveBeenCalledTimes(2);
+    expect(getTasks).toHaveBeenCalledTimes(2);
+    expect(getSystemStatus).toHaveBeenCalledTimes(2);
+  });
+
+  it('polls one full fallback snapshot while the visible socket is disconnected', async () => {
+    vi.useFakeTimers();
+    const { rerender } = renderHook(() => useHeaderStats());
+    await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+    expect(getQueueStats).toHaveBeenCalledTimes(1);
+    socketState.isConnected = false;
+    rerender();
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(30_100); });
+
+    expect(getQueueStats).toHaveBeenCalledTimes(2);
+    expect(getDrafts).toHaveBeenCalledTimes(2);
+    expect(getTasks).toHaveBeenCalledTimes(2);
+    expect(getSystemStatus).toHaveBeenCalledTimes(2);
   });
 
   it('revalidates missed same-count draft and health changes after a web reconnect', async () => {
@@ -227,12 +338,14 @@ describe('useHeaderStats live recovery', () => {
       timestamp: '2026-09-13T00:01:05.000Z',
     })));
 
-    await waitFor(() => expect(getQueueStats).toHaveBeenCalledTimes(3));
-    expect(getDrafts).toHaveBeenCalledTimes(3);
-    expect(getTasks).toHaveBeenCalledTimes(3);
-    expect(getSystemStatus).toHaveBeenCalledTimes(3);
-    expect(result.current.activePlans.map(draft => draft.draft_id)).toEqual(['draft-created-offline']);
-    expect(result.current.systemHealth.redis).toBe('Disconnected');
+    await waitFor(() => {
+      expect(result.current.activePlans.map(draft => draft.draft_id)).toEqual(['draft-created-offline']);
+      expect(result.current.systemHealth.redis).toBe('Disconnected');
+    });
+    expect(getQueueStats).toHaveBeenCalledTimes(3);
+    expect(getDrafts).toHaveBeenCalledTimes(2);
+    expect(getTasks).toHaveBeenCalledTimes(2);
+    expect(getSystemStatus).toHaveBeenCalledTimes(2);
   });
 
   it('invalidates activity during a real transport outage and automatically recovers', async () => {

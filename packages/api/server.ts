@@ -71,8 +71,6 @@ import type { WebhookEventType, DetectedIssue, CommentPayload, CommentEventConfi
 import { handleWebhookRequest } from './webhookHandler.js';
 import { stopTaskExecution } from './routes/dockerRoutes.js';
 import { initializePushSubscriptionMaintenance } from './services/pushSubscriptionMaintenance.js';
-import { NotificationProjectionService } from './services/notificationProjectionService.js';
-import { WebPushDispatcher } from './services/webPushDispatcher.js';
 import { assertInstanceAdministratorConfigured } from './authorization.js';
 import { resolveApiListenHost } from './listenAddress.js';
 import {
@@ -99,6 +97,10 @@ import {
   type VisualPreviewOAuthRefreshScheduler,
 } from './services/visualPreviewOAuth.js';
 import { createVoiceBriefingService } from './services/voiceBriefingService.js';
+import {
+  startNotificationBackgroundService,
+  type NotificationBackgroundService,
+} from './services/notificationBackgroundService.js';
 
 type ShutdownTask = { name: string; close: () => Promise<unknown> };
 
@@ -244,8 +246,8 @@ let redisClient: RedisClientType;
 let taskQueue: Queue;
 let runtimeBuildQueue: Queue;
 let configReloadSubscription: ConfigReloadSubscription | undefined;
-let notificationProjection: NotificationProjectionService | undefined;
-let webPushDispatcher: WebPushDispatcher | undefined;
+let invalidateStatusAgentCache: (() => void) | undefined;
+let notificationBackground: NotificationBackgroundService | undefined;
 let webPushDispatcherConfigured = false;
 let desktopPairingCleanupTimer: NodeJS.Timeout | undefined;
 let visualPreviewOAuthRefreshScheduler: VisualPreviewOAuthRefreshScheduler | undefined;
@@ -294,13 +296,14 @@ async function initRedis(): Promise<void> {
 function setupRoutes(): void {
   const statusRoutes = createStatusRoutes({
     redisClient,
-    ...(notificationProjection === undefined ? {} : {
+    ...(notificationBackground === undefined ? {} : {
       projectSystemSnapshot: (
         snapshot: Record<string, unknown> & { timestamp: string },
         additionalAdministratorIds: readonly string[],
-      ) => notificationProjection!.projectSystemSnapshot(snapshot, additionalAdministratorIds),
+      ) => notificationBackground!.projectSystemSnapshot(snapshot, additionalAdministratorIds),
     }),
   });
+  invalidateStatusAgentCache = statusRoutes.invalidateAgentStatusCache;
   const desktopAuthRoutes = createDesktopAuthRoutes();
   // INTENTIONALLY UNAUTHENTICATED: compatibility/discovery and the bounded
   // pairing bootstrap, poll, and browser entry are registered before the guard.
@@ -502,17 +505,8 @@ async function start(): Promise<void> {
     await assertInstanceAdministratorConfigured();
     await initRedis();
     if (!demoMode) {
-      try {
-        const dispatcher = new WebPushDispatcher({ database: db });
-        webPushDispatcherConfigured = dispatcher.start().configured;
-        webPushDispatcher = dispatcher;
-      } catch {
-        webPushDispatcher = undefined;
-        webPushDispatcherConfigured = false;
-        console.warn('[notifications] Web Push dispatcher disabled: invalid dispatcher tuning configuration');
-      }
-      notificationProjection = new NotificationProjectionService({ database: db });
-      notificationProjection.startStalledDetector();
+      notificationBackground = await startNotificationBackgroundService(db);
+      webPushDispatcherConfigured = notificationBackground.webPushDispatcherConfigured;
       // Every API process drops its MCP cache on a published config event, so an
       // admin toggle applies across processes rather than waiting out the TTL.
       // Re-resolve immediately: authRedirect and the CORS/header middleware read
@@ -522,6 +516,10 @@ async function start(): Promise<void> {
         invalidateMcpConfigCache();
         await resolveMcpConfig(db).catch(error => { console.error('Failed to resolve MCP configuration:', error); });
         await reloadConfigs();
+      }, console, subtype => {
+        if (subtype === 'agents_update' || subtype === 'synthetic_agents_update') {
+          invalidateStatusAgentCache?.();
+        }
       });
       // Subscribe first, then enqueue the initial load through the same serial
       // chain so no settings update can race with the startup snapshot.
@@ -570,7 +568,10 @@ async function start(): Promise<void> {
         authenticate: authenticateSocketRequest,
       });
       console.log('[WebSocket] Socket.IO server initialized');
-      socketService.initQueueFeatures({ taskQueue, redisClient, db, notificationProjection });
+      socketService.initQueueFeatures({
+        taskQueue, redisClient, db,
+        notificationProjection: notificationBackground,
+      });
       console.log('[WebSocket] Queue features initialized for real-time updates');
       await initializeUltrafix(getIoRedisClient());
       // Register the webhook processors in THIS (API) process ONLY when the API
@@ -615,7 +616,7 @@ async function start(): Promise<void> {
       if (desktopPairingCleanupTimer) clearInterval(desktopPairingCleanupTimer);
       if (!demoMode) {
         shutdownTasks.push(
-          { name: 'Web Push dispatcher', close: () => webPushDispatcher?.close() ?? Promise.resolve() },
+          { name: 'notification background service', close: () => notificationBackground?.close() ?? Promise.resolve() },
           { name: 'visual-preview OAuth refresh scheduler', close: () => visualPreviewOAuthRefreshScheduler?.close() ?? Promise.resolve() },
           { name: 'config reload subscriber', close: () => configReloadSubscription?.close() ?? Promise.resolve() },
           { name: 'ultrafix state redis', close: () => closeUltrafixStateRedis() },

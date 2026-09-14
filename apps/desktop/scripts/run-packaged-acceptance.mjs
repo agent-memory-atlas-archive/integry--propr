@@ -27,6 +27,7 @@ import {
   prepareAcceptanceArtifactDirectory,
   readPngDimensions,
   safeRemoveAcceptanceLeaf,
+  sanitizeAcceptanceTrace,
   scanAcceptancePaths,
   screenshotName,
   verifyAcceptanceArtifacts,
@@ -1594,6 +1595,7 @@ try {
     modalFocusRestore = await opener.evaluate(element => element === document.activeElement);
     await opener.click();
     await application.context.tracing.stop({ path: join(outputDirectory, 'sanitized-trace.zip') });
+    await sanitizeAcceptanceTrace(join(outputDirectory, 'sanitized-trace.zip'), SENTINELS);
     traceWritten = true;
   });
   await runJourney('offline', 'default', null, async page => {

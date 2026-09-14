@@ -30,10 +30,10 @@ test('generic task lists exclude native goal backing tasks', async () => {
       table.integer('issue_number'); table.integer('pr_number');
     });
     await database.schema.createTable('task_history', table => {
-      table.string('task_id'); table.string('state'); table.timestamp('timestamp'); table.text('reason');
+      table.increments('history_id'); table.string('task_id'); table.string('state'); table.timestamp('timestamp'); table.text('reason');
     });
     await database.schema.createTable('plan_issues', table => {
-      table.string('task_id'); table.string('status');
+      table.increments('id'); table.string('task_id'); table.string('status');
     });
     await database.schema.createTable('llm_executions', table => {
       table.increments('execution_id'); table.string('task_id'); table.text('analysis_report');
@@ -58,11 +58,12 @@ test('generic task lists exclude native goal backing tasks', async () => {
     });
     assert.equal(result.total, 2);
     assert.deepEqual(new Set((result.tasks as Array<{ id: string }>).map(task => task.id)), new Set(['ordinary-task', 'legacy-task']));
-    assert.equal(taskListSql.length, 2);
+    assert.equal(taskListSql.length, 5);
     assert.match(taskListSql[0], /count\(\*\)/i);
     assert.doesNotMatch(taskListSql[0], /processing_start_timestamp|completion_timestamp|critique_score/i);
-    assert.match(taskListSql[1], /processing_start_timestamp/i);
-    assert.match(taskListSql[1], /critique_score/i);
+    assert.doesNotMatch(taskListSql[1], /processing_start_timestamp|completion_timestamp|critique_score/i);
+    assert.match(taskListSql[2], /processing_start_timestamp/i);
+    assert.match(taskListSql[4], /analysis_report/i);
   } finally {
     await database.destroy();
   }

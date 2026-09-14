@@ -1,4 +1,5 @@
 import React from 'react';
+import { LoaderCircle } from 'lucide-react';
 import type { TaskGroup } from './types';
 import { ParentTaskRow, ChildTaskRow, CollapseToggleRow } from './TaskRows';
 import { MobileTaskCard } from './MobileTaskCard';
@@ -8,7 +9,7 @@ import './desktop-task-table.css';
 
 /** Renders a simple loading message for dashboard integration */
 export const DashboardLoadingState: React.FC = () => (
-  <div className="text-gray-500 p-4">Loading tasks...</div>
+  <div role="status" className="flex items-center gap-2 p-4 text-gray-500"><LoaderCircle className="h-4 w-4 animate-spin" aria-hidden="true" />Loading tasks...</div>
 );
 
 /** Renders a full-page loading state with header for the main Tasks page */
@@ -18,7 +19,7 @@ export const FullPageLoadingState: React.FC = () => (
       <h1 className="text-2xl font-bold text-gray-800">Tasks</h1>
     </div>
     <div className="flex-1 overflow-auto px-6 py-6">
-      <div className="text-gray-500">Loading tasks...</div>
+      <div role="status" className="flex items-center gap-2 text-gray-500"><LoaderCircle className="h-4 w-4 animate-spin" aria-hidden="true" />Loading tasks...</div>
     </div>
   </div>
 );
