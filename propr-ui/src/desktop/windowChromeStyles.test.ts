@@ -28,20 +28,26 @@ describe('desktop window chrome styles', () => {
     expect(desktopStyles).toContain('width: calc(100% - var(--desktop-window-controls-end-inset))');
   });
 
-  it('makes the compact toolbar draggable while keeping every interactive control no-drag', () => {
-    const chromeRule = ruleFor('.desktop-app .desktop-sidebar-header,\n.desktop-app .desktop-content-toolbar');
+  it('makes the sidebar strip and compact toolbar draggable while keeping every interactive control no-drag', () => {
+    const chromeRule = ruleFor('.desktop-app .desktop-content-toolbar');
     expect(chromeRule).toContain('height: var(--desktop-titlebar-height)');
     expect(chromeRule).toContain('-webkit-app-region: drag');
+    expect(ruleFor('.desktop-app .desktop-sidebar-drag-region')).toContain('-webkit-app-region: drag');
+    expect(desktopStyles).toMatch(/\.desktop-app \.desktop-sidebar-header :is\([^}]+\)\s*\{\s*-webkit-app-region: no-drag;/);
     expect(desktopStyles).toMatch(/\.desktop-app \.desktop-content-toolbar :is\([^}]+\)\s*\{\s*-webkit-app-region: no-drag;/);
   });
 
-  it('reserves the native controls at the toolbar end and the traffic lights at the macOS start', () => {
+  it('reserves the native controls at the toolbar end and traffic-light clearance above the workspace selector', () => {
     expect(desktopStyles).toContain(
       '.desktop-app .desktop-content-toolbar {\n  padding-right: calc(var(--desktop-window-controls-end-inset) + var(--desktop-window-controls-gap));',
     );
-    expect(ruleFor('.desktop-app.desktop-platform-macos .desktop-sidebar-header')).toContain(
-      'padding-left: max(80px, env(titlebar-area-x, 0px))',
+    const sidebarDragRule = ruleFor('.desktop-app .desktop-sidebar-drag-region');
+    expect(sidebarDragRule).toContain('flex: none');
+    expect(sidebarDragRule).toContain(
+      'height: max(40px, var(--desktop-titlebar-height), env(titlebar-area-height, 0px))',
     );
+    expect(ruleFor('.desktop-app.desktop-platform-macos')).toContain('--desktop-titlebar-height: 44px');
+    expect(ruleFor('.desktop-instance-selector-button')).toContain('-webkit-app-region: no-drag');
     expect(ruleFor('.desktop-window-controls')).toContain('-webkit-app-region: no-drag');
     expect(ruleFor('.desktop-window-controls')).toContain('height: var(--desktop-titlebar-height)');
   });

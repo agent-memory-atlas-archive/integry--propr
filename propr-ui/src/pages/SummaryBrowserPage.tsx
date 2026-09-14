@@ -14,6 +14,7 @@ const SummaryBrowserPage: React.FC = () => {
   const navigate = useNavigate();
   const [repos, setRepos] = useState<string[]>([]);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
 
   // Set document title with repository name or default
@@ -24,10 +25,12 @@ const SummaryBrowserPage: React.FC = () => {
     async function fetchRepos() {
       try {
         setLoading(true);
+        setError(null);
         const data = await getAvailableGithubRepos() as ReposResponse;
         setRepos(data.repos || []);
       } catch (err) {
         console.error('Failed to fetch repositories:', err);
+        setError(err instanceof Error ? err.message : 'Failed to load repositories');
       } finally {
         setLoading(false);
       }
@@ -85,6 +88,10 @@ const SummaryBrowserPage: React.FC = () => {
         <div className="flex items-center justify-center py-12">
           <Loader2 className="w-6 h-6 animate-spin text-gray-400" />
           <span className="ml-2 text-gray-500">Loading repositories...</span>
+        </div>
+      ) : error ? (
+        <div role="alert" className="border-l-2 border-red-500 bg-red-50 p-4 text-sm text-red-700">
+          Couldn’t load repositories: {error}
         </div>
       ) : filteredRepos.length === 0 ? (
         <div className="text-center py-12 bg-gray-50 rounded-lg border border-gray-200">

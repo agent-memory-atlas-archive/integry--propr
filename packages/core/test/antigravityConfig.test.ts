@@ -66,6 +66,7 @@ function buildDockerArgs(agent: AntigravityAgent, params: {
     modelName?: string;
     issueNumber?: number;
     taskId?: string;
+    printTimeoutMs?: number;
 } = {}): string[] {
     return (agent as unknown as {
         buildDockerArgs(params: {
@@ -74,13 +75,15 @@ function buildDockerArgs(agent: AntigravityAgent, params: {
             modelName?: string;
             issueNumber: number;
             taskId?: string;
+            printTimeoutMs?: number;
         }): string[];
     }).buildDockerArgs({
         worktreePath: params.worktreePath || '/tmp/workspace',
         githubToken: params.githubToken || 'token',
         modelName: params.modelName,
         issueNumber: params.issueNumber ?? 123,
-        taskId: params.taskId
+        taskId: params.taskId,
+        printTimeoutMs: params.printTimeoutMs
     });
 }
 
@@ -131,6 +134,17 @@ test('Antigravity execution lets agy read the prompt from non-TTY stdin', () => 
         assert.ok(!args.includes('--skip-trust'));
         assert.ok(args.includes('--model'));
         assert.equal(args[args.indexOf('--model') + 1], 'Gemini 3.1 Pro (High)');
+    });
+});
+
+test('Antigravity aligns its print-mode timeout with the ProPR execution timeout', () => {
+    withAntigravityEnv({}, () => {
+        const agent = new AntigravityAgent(createAntigravityConfig());
+        const args = buildDockerArgs(agent, { printTimeoutMs: 1_800_001 });
+
+        const timeoutIndex = args.indexOf('--print-timeout');
+        assert.ok(timeoutIndex > -1);
+        assert.equal(args[timeoutIndex + 1], '1801s');
     });
 });
 

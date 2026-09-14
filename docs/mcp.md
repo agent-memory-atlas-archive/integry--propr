@@ -212,6 +212,13 @@ assignments, and pull requests; TODO entries include their category and linked
 plan. Full objectives, prompts, and TODO bodies remain available from the
 corresponding `get_*` tool without inflating large list pages.
 
+`get_agent_activity` reads exactly one authorized `goalId` or `taskId`. It
+defaults to the 20 most recent entries and returns newest-first, timestamped
+pages with `nextOffset` for older narration. Each entry is whitespace-normalized
+and capped at 500 characters. The feed includes assistant progress commentary
+and a separate current-focus value when available; provider reasoning, raw
+protocol envelopes, tool inputs, and tool results are excluded.
+
 ## Resources, prompts, text and voice
 
 Resource URIs use `propr://instances/{instance_id}/`: `connection`,

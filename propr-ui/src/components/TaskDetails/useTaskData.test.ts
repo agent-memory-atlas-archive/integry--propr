@@ -1,10 +1,59 @@
-import { describe, expect, it } from 'vitest';
+import { act, renderHook } from '@testing-library/react';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { LiveDetails } from './types';
 import {
   mergeIncrementalLiveDetails,
   normalizeLiveTodos,
+  useTaskData,
   type IncrementalTaskLiveUpdatePayload,
 } from './useTaskData';
+
+const apiMocks = vi.hoisted(() => ({
+  getTaskHistory: vi.fn(),
+  getTaskAnalysis: vi.fn(),
+  getTaskLiveDetails: vi.fn(),
+  stopTaskExecution: vi.fn(),
+  deleteTask: vi.fn(),
+}));
+
+const socketMocks = vi.hoisted(() => {
+  const value = {
+    isConnected: true,
+    taskUpdateHandler: null as ((payload: { taskId: string; state?: string }) => void) | null,
+    liveUpdateHandler: null as ((payload: unknown) => void) | null,
+    subscribeToTask: vi.fn(),
+    unsubscribeFromTask: vi.fn(),
+    subscribeToTaskLive: vi.fn(),
+    unsubscribeFromTaskLive: vi.fn(),
+    onTaskUpdate: (handler: ((payload: { taskId: string; state?: string }) => void) | null) => {
+      value.taskUpdateHandler = handler;
+      return () => {
+        if (value.taskUpdateHandler === handler) value.taskUpdateHandler = null;
+      };
+    },
+    onTaskLiveUpdate: (handler: ((payload: unknown) => void) | null) => {
+      value.liveUpdateHandler = handler;
+      return () => {
+        if (value.liveUpdateHandler === handler) value.liveUpdateHandler = null;
+      };
+    },
+  };
+  return value;
+});
+
+const toastMocks = vi.hoisted(() => ({ addToast: vi.fn() }));
+
+vi.mock('../../api/proprApi', () => apiMocks);
+vi.mock('../ui/useToast', () => ({ useToast: () => toastMocks }));
+vi.mock('../../contexts/useSocket', () => ({
+  useSocket: () => socketMocks,
+}));
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>(complete => { resolve = complete; });
+  return { promise, resolve };
+}
 
 const previous: LiveDetails = {
   events: [{ type: 'thought', content: 'Existing event' }],
@@ -108,5 +157,88 @@ describe('incremental task live updates', () => {
     expect(normalizeLiveTodos([
       { id: 'server-todo-42', content: 'Keep this row', status: 'completed' },
     ])[0].id).toBe('server-todo-42');
+  });
+});
+
+describe('task detail history refreshes', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.clearAllMocks();
+    socketMocks.taskUpdateHandler = null;
+    socketMocks.liveUpdateHandler = null;
+    Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'visible' });
+    apiMocks.getTaskHistory.mockResolvedValue({ history: [], taskInfo: null, usageMetricRecords: [] });
+    apiMocks.getTaskLiveDetails.mockResolvedValue({ events: [], todos: [], currentTask: null });
+    apiMocks.getTaskAnalysis.mockResolvedValue({ analysis: null });
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('turns the fixture baseline of three burst invalidations into one additional history request', async () => {
+    renderHook(() => useTaskData('task-1'));
+    await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+    expect(apiMocks.getTaskHistory).toHaveBeenCalledTimes(1);
+
+    act(() => {
+      socketMocks.taskUpdateHandler?.({ taskId: 'task-1', state: 'processing' });
+      socketMocks.taskUpdateHandler?.({ taskId: 'task-1', state: 'processing' });
+      socketMocks.taskUpdateHandler?.({ taskId: 'task-1', state: 'processing' });
+    });
+    await act(async () => { await vi.advanceTimersByTimeAsync(100); });
+
+    // Fixture count: 1 initial + 1 coalesced live read (previously 1 + 3).
+    expect(apiMocks.getTaskHistory).toHaveBeenCalledTimes(2);
+  });
+
+  it('keeps data from a late old-task response out of the newly selected task', async () => {
+    const taskA = deferred<{ history: Array<{ state: string }>; taskInfo: null; usageMetricRecords: never[] }>();
+    apiMocks.getTaskHistory.mockImplementation((taskId: string) => taskId === 'task-a'
+      ? taskA.promise
+      : Promise.resolve({ history: [{ state: 'TASK_B' }], taskInfo: null, usageMetricRecords: [] }));
+    let taskId = 'task-a';
+    const { result, rerender } = renderHook(() => useTaskData(taskId));
+    await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+
+    taskId = 'task-b';
+    rerender();
+    await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+    expect(result.current.history).toEqual([{ state: 'TASK_B' }]);
+
+    await act(async () => {
+      taskA.resolve({ history: [{ state: 'TASK_A' }], taskInfo: null, usageMetricRecords: [] });
+      await taskA.promise;
+    });
+    expect(result.current.history).toEqual([{ state: 'TASK_B' }]);
+  });
+
+  it('does not replace newer socket logs with a persisted snapshot that finishes later', async () => {
+    const persisted = deferred<LiveDetails>();
+    apiMocks.getTaskLiveDetails.mockReturnValue(persisted.promise);
+    const { result } = renderHook(() => useTaskData('task-1'));
+    await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+
+    act(() => {
+      socketMocks.liveUpdateHandler?.({
+        taskId: 'task-1',
+        events: [{ id: 'new-event', type: 'thought', content: 'new socket log' }],
+        todos: [],
+        currentTask: 'new state',
+      });
+    });
+    await act(async () => {
+      persisted.resolve({
+        events: [{ id: 'old-event', type: 'thought', content: 'old persisted log' }],
+        todos: [],
+        currentTask: 'old state',
+      });
+      await persisted.promise;
+    });
+
+    expect(result.current.liveDetails.events).toEqual([
+      { id: 'new-event', type: 'thought', content: 'new socket log' },
+    ]);
+    expect(result.current.liveDetails.currentTask).toBe('new state');
   });
 });

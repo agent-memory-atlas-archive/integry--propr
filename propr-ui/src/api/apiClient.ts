@@ -13,9 +13,96 @@ export interface DesktopConnectionScope {
 
 let desktopConnectionScope: DesktopConnectionScope | null = null;
 let desktopScopeController = new AbortController();
+let authenticatedApiReadIdentity: string | null = null;
+let apiReadScopeGeneration = 0;
+let apiReadScopeController = new AbortController();
+const inFlightApiReads = new Map<string, Promise<unknown>>();
+
+const apiReadScopeChangedError = (): DOMException =>
+  new DOMException('Authenticated API scope changed', 'AbortError');
+
+const invalidateInFlightApiReads = (): void => {
+  apiReadScopeGeneration += 1;
+  apiReadScopeController.abort();
+  apiReadScopeController = new AbortController();
+  inFlightApiReads.clear();
+};
+
+export const getAuthenticatedApiReadScopeGeneration = (): number => apiReadScopeGeneration;
+
+/**
+ * Publish the validated browser/Desktop account that owns authenticated reads.
+ * A changed identity fences responses issued for the previous account. Desktop
+ * profile and transport changes are fenced separately below, before validation.
+ */
+export const setAuthenticatedApiReadIdentity = (
+  identity: string | null,
+  expectedGeneration: number = apiReadScopeGeneration,
+): void => {
+  if (expectedGeneration !== apiReadScopeGeneration) return;
+  if (authenticatedApiReadIdentity === identity) return;
+  authenticatedApiReadIdentity = identity;
+  invalidateInFlightApiReads();
+};
+
+/**
+ * Share only concurrent, explicitly selected reads in the current authenticated
+ * scope. Entries are removed after either success or failure; this is not a data
+ * cache, so a settled refresh always starts a fresh request.
+ */
+export const shareInFlightApiRead = <T>(
+  key: string,
+  load: (signal: AbortSignal) => Promise<T>,
+): Promise<T> => {
+  const existing = inFlightApiReads.get(key) as Promise<T> | undefined;
+  if (existing) return existing;
+
+  const generation = apiReadScopeGeneration;
+  const signal = apiReadScopeController.signal;
+  let loadPromise: Promise<T>;
+  try {
+    loadPromise = load(signal);
+  } catch (error) {
+    loadPromise = Promise.reject(error);
+  }
+
+  let abortListener: (() => void) | undefined;
+  const promise = new Promise<T>((resolve, reject) => {
+    let settled = false;
+    const finish = (callback: (value: T | unknown) => void, value: T | unknown) => {
+      if (settled) return;
+      settled = true;
+      if (abortListener) signal.removeEventListener('abort', abortListener);
+      callback(value);
+    };
+    abortListener = () => finish(reject, apiReadScopeChangedError());
+    signal.addEventListener('abort', abortListener, { once: true });
+    loadPromise.then(
+      value => {
+        if (signal.aborted || generation !== apiReadScopeGeneration) {
+          finish(reject, apiReadScopeChangedError());
+          return;
+        }
+        finish(resolve as (value: T | unknown) => void, value);
+      },
+      error => finish(reject, signal.aborted || generation !== apiReadScopeGeneration
+        ? apiReadScopeChangedError()
+        : error),
+    );
+  });
+
+  inFlightApiReads.set(key, promise);
+  void promise.then(
+    () => { if (inFlightApiReads.get(key) === promise) inFlightApiReads.delete(key); },
+    () => { if (inFlightApiReads.get(key) === promise) inFlightApiReads.delete(key); },
+  );
+  return promise;
+};
+
 const invalidateDesktopRequests = (): void => {
   desktopScopeController.abort();
   desktopScopeController = new AbortController();
+  invalidateInFlightApiReads();
 };
 const desktopScopeListeners = new Set<() => void>();
 const responseScopes = new WeakMap<Response, DesktopConnectionScope | null>();
@@ -196,6 +283,7 @@ export const handleDesktopAccessCode = async (
   if (!code) return 'retryable';
   if (AUTHORIZATION_CHANGE_CODES.has(code)) {
     if (!isCurrentDesktopScope(scope)) return 'retryable';
+    invalidateInFlightApiReads();
     window.dispatchEvent(new Event(INSTANCE_AUTHORIZATION_CHANGED_EVENT));
     return 'authorization-changed';
   }
@@ -225,6 +313,7 @@ const throwUnauthorizedResponse = async (data: ApiErrorBody | null, response: Re
   if (data?.code === TOKEN_REFRESHED_CODE) {
     throw new TokenRefreshRetryRequiredError(getApiErrorMessage(data));
   }
+  setAuthenticatedApiReadIdentity(null);
   if (isDesktopRuntime()) {
     await handleDesktopAccessCode(data?.code, scopeForResponse(response));
     throw new Error(data?.code === 'INVALID_INSTANCE_TOKEN'

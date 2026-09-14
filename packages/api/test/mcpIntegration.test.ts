@@ -28,7 +28,10 @@ test('both official SDK protocol eras execute real draft/revision/publication/ta
   const db = knex({ client: 'better-sqlite3', connection: { filename: ':memory:' }, useNullAsDefault: true });
   await initial(db); await planIssues(db); await mcpMigration(db);
   await db.schema.alterTable('task_drafts', table => table.boolean('paused').defaultTo(false));
-  await db.schema.createTable('goals', table => { table.string('goal_id'); table.string('owner_id'); table.string('current_task_id'); });
+  await db.schema.createTable('goals', table => {
+    table.string('goal_id'); table.string('owner_id'); table.string('repository'); table.string('current_task_id');
+    table.string('launch_strategy'); table.string('session_id'); table.timestamp('started_at'); table.timestamp('updated_at');
+  });
   const config = { origin: 'https://instance.example', resource: 'https://instance.example/api/mcp', instanceId: 'test-instance', encryptionKey: randomBytes(32) };
   const oauth = new McpOAuthProvider(new McpStore(db, config.encryptionKey), config);
   const policy = new McpPolicy(oauth, config);
@@ -41,7 +44,7 @@ test('both official SDK protocol eras execute real draft/revision/publication/ta
       assert.equal(route, 'POST /repos/{owner}/{repo}/issues');
       githubIssues.push(payload); return { data: { number: githubIssues.length, title: payload.title, html_url: `https://github.com/acme/repo/issues/${githubIssues.length}` } };
     } } as never };
-  const deps: ToolDeps = { db, policy, taskQueue: {} as never, redisClient: {} as never, runtimeBuildQueue: {} as never };
+  const deps: ToolDeps = { db, policy, taskQueue: {} as never, redisClient: { get: async () => null } as never, runtimeBuildQueue: {} as never };
   const catalog = createToolCatalog(deps);
   const app = express(); app.use(express.json());
   const wire: Array<{ method: string; version?: string }> = [];
@@ -63,6 +66,7 @@ test('both official SDK protocol eras execute real draft/revision/publication/ta
       try {
         const inventory = await client.listTools();
         assert.ok(inventory.tools.some(tool => tool.name === 'create_plan'));
+        assert.ok(inventory.tools.some(tool => tool.name === 'get_agent_activity'));
         assert.ok(!inventory.tools.some(tool => tool.name === 'merge_pull_request'));
         const resources = await client.listResources(); assert.equal(resources.resources.length, 3);
         const promptList = await client.listPrompts(); assert.equal(promptList.prompts.length, 7);
@@ -93,6 +97,9 @@ test('both official SDK protocol eras execute real draft/revision/publication/ta
         let task = await call('get_task', { repository: 'acme/repo', taskId: `task-${modern}` }); assert.equal(task.data.latestEvent.state, 'processing');
         await db('task_history').insert({ task_id: `task-${modern}`, state: 'completed' });
         task = await call('get_task', { repository: 'acme/repo', taskId: `task-${modern}` }); assert.equal(task.data.latestEvent.state, 'completed');
+        const activity = await call('get_agent_activity', { repository: 'acme/repo', taskId: `task-${modern}` });
+        assert.deepEqual(activity.data.activity, []);
+        assert.equal(activity.data.target.taskId, `task-${modern}`);
         authorized = false;
         const denied = await client.callTool({ name: 'get_plan', arguments: { repository: 'acme/repo', planId: id } }); assert.equal(denied.isError, true);
         authorized = true;

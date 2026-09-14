@@ -1,5 +1,5 @@
 import { DesktopNativeNavigationObserver } from './desktop/DesktopNativeNavigationObserver'
-import React, { lazy, Suspense, useEffect, useState } from 'react'
+import React, { Suspense, useEffect, useState } from 'react'
 import { BrowserRouter, HashRouter, Routes, Route, Link, useLocation, useNavigate } from 'react-router-dom'
 import Layout from './components/Layout'
 import { ToastProvider } from './components/ui/Toast'
@@ -22,28 +22,31 @@ import RouteChunkErrorBoundary from './components/RouteChunkErrorBoundary'
 import { ConnectAccountProvider } from './contexts/ConnectAccountContext'
 import { BrowserPushProvider } from './hooks/useBrowserPush'
 import { NotificationCenterProvider } from './contexts/NotificationCenterContext'
-import { isDesktopRuntime, publicAssetUrl } from './config/runtimeMode'
+import { SystemStatusProvider } from './contexts/SystemStatusContext'
+import { currentUiPathname, isDesktopRuntime, publicAssetUrl } from './config/runtimeMode'
 import { DesktopPresentationBoundary } from './desktop/DesktopPresentationBoundary'
 import { useCurrentUserBootstrap } from './hooks/useCurrentUserBootstrap'
 import { DesktopTaskNotificationAdapter } from './desktop/DesktopTaskNotificationAdapter'
+import {
+  AccessManagementPage,
+  AiAgentsPage,
+  Dashboard,
+  DesktopPairingPage,
+  GoalsPage,
+  InboxPage,
+  LlmLogsPage,
+  LoginPage,
+  PlansPage,
+  PlanStudioPage,
+  RepositoriesPage,
+  RevertPage,
+  SettingsPage,
+  SummaryBrowserPage,
+  TasksPage,
+  preloadInitialRouteChunk,
+} from './routeChunks'
 
 const Router = isDesktopRuntime() ? HashRouter : BrowserRouter;
-
-const AiAgentsPage = lazy(() => import('./pages/AiAgentsPage'))
-const AccessManagementPage = lazy(() => import('./pages/AccessManagementPage'))
-const Dashboard = lazy(() => import('./components/Dashboard'))
-const LlmLogsPage = lazy(() => import('./pages/LlmLogsPage'))
-const InboxPage = lazy(() => import('./pages/InboxPage'))
-const LoginPage = lazy(() => import('./pages/LoginPage'))
-const DesktopPairingPage = lazy(() => import('./pages/DesktopPairingPage'))
-const PlansPage = lazy(() => import('./pages/PlansPage'))
-const PlanStudioPage = lazy(() => import('./pages/PlanStudioPage'))
-const RepositoriesPage = lazy(() => import('./pages/RepositoriesPage'))
-const RevertPage = lazy(() => import('./pages/RevertPage'))
-const SettingsPage = lazy(() => import('./pages/SettingsPage'))
-const SummaryBrowserPage = lazy(() => import('./pages/SummaryBrowserPage'))
-const TasksPage = lazy(() => import('./pages/TasksPage'))
-const GoalsPage = lazy(() => import('./pages/GoalsPage'))
 
 type CompatibilityState = { status: 'checking' } | { status: 'ready' } | { status: 'blocked'; title: string; message: string };
 
@@ -150,7 +153,11 @@ const AppContent: React.FC = () => {
     currentUserLoading,
     isInitialLoading,
     refreshCurrentUser,
-  } = useCurrentUserBootstrap({ isDemoMode, isDemoModeLoading });
+  } = useCurrentUserBootstrap({ isDemoMode });
+
+  useEffect(() => {
+    preloadInitialRouteChunk(currentUiPathname());
+  }, []);
 
   // Keep the provider mounted for lifecycle attribution, but do not construct a
   // socket until the active desktop scope has an authenticated REST user.
@@ -166,6 +173,7 @@ const AppContent: React.FC = () => {
                   <Router>
                 <HostedFlowRouteSync />
                 {isDesktopRuntime() && <DesktopNativeNavigationObserver />}
+                <SystemStatusProvider disabled={currentUser === null}>
                 <ConnectAccountProvider disabled={isDemoMode || currentUser === null}>
                   <RouteChunkErrorBoundary>
                     <Suspense fallback={<LoadingSpinner />}>
@@ -288,6 +296,7 @@ const AppContent: React.FC = () => {
                     </Suspense>
                   </RouteChunkErrorBoundary>
                 </ConnectAccountProvider>
+                </SystemStatusProvider>
                   </Router>
                 </NotificationCenterProvider>
               </BrowserPushProvider>

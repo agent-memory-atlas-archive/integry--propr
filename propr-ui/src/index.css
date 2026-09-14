@@ -11,6 +11,15 @@ body {
   --mobile-bottom-navigation-height: calc(4rem + env(safe-area-inset-bottom));
 }
 
+/* Sidebar glyphs share one literal stroke weight. Without this, SVG stroke
+   width scales with the viewBox (a 24-unit icon rendered at 12px halves its
+   painted line), which is what made same-valued strokes look like they came
+   from different icon sets. non-scaling-stroke resolves the shared
+   stroke-width in CSS pixels regardless of rendered size. */
+.sidebar-icon-stroke * {
+  vector-effect: non-scaling-stroke;
+}
+
 /* Keep mobile route controls above the fixed primary navigation, including the
    additional home-indicator area on iPhones. */
 .mobile-content-clearance {
