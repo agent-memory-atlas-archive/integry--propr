@@ -1,4 +1,3 @@
-import { GitHubAccountIdentity } from '../components/GitHubAccountIdentity';
 import React, { useEffect, useId } from 'react';
 import { parseProprConnectEndpoint } from '@propr/shared';
 import {
@@ -45,8 +44,8 @@ export const DesktopInstanceSelector: React.FC<DesktopInstanceSelectorProps> = (
       : 'Remote instance';
   const InstanceIcon = desktop.profile.kind === 'local' ? Computer : Cloud;
   const action = activated
-    ? { onClick: desktop.openProfileManager, title: 'Manage instances', popup: 'dialog' as const, label: 'Switch', description: 'Switch instance or GitHub account.', Icon: ChevronDown }
-    : { onClick: desktop.retry, title: 'Retry connection', popup: undefined, label: 'Retry', description: 'Retry connection.', Icon: RefreshCw };
+    ? { onClick: desktop.openProfileManager, title: 'Manage instances', popup: 'dialog' as const, description: 'Switch instance or GitHub account.', Icon: ChevronDown }
+    : { onClick: desktop.retry, title: 'Retry connection', popup: undefined, description: 'Retry connection.', Icon: RefreshCw };
 
   return (
     <div className="desktop-instance-selector">
@@ -67,25 +66,9 @@ export const DesktopInstanceSelector: React.FC<DesktopInstanceSelectorProps> = (
           <strong title={desktop.profile.name}>{desktop.profile.name}</strong>
           <small>{instanceLabel}</small>
         </span>
-        <span className="desktop-instance-details">
-          {desktop.profile.account && (
-            <span className="desktop-instance-account">
-              <span className="desktop-instance-account-label">GitHub account</span>
-              <span className="desktop-instance-account-identity" title={`@${desktop.profile.account.username}`}>
-                <GitHubAccountIdentity account={desktop.profile.account} />
-              </span>
-            </span>
-          )}
-          <span className="desktop-instance-footer">
-            <span className="desktop-instance-status">
-              <span className="desktop-connection-dot" aria-hidden="true" />
-              {statusLabel}
-            </span>
-            <span className="desktop-instance-switch">
-              {action.label}
-              <action.Icon className={`${SIDEBAR_ICON_STROKE_CLASS} desktop-instance-action`} strokeWidth={SIDEBAR_ICON_STROKE_WIDTH} aria-hidden="true" />
-            </span>
-          </span>
+        <span className="desktop-instance-switch" aria-hidden="true">
+          <span className="desktop-connection-dot" title={statusLabel} />
+          <action.Icon className={`${SIDEBAR_ICON_STROKE_CLASS} desktop-instance-action`} strokeWidth={SIDEBAR_ICON_STROKE_WIDTH} />
         </span>
       </button>
       <span id={descriptionId} className="sr-only">

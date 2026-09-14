@@ -36,13 +36,13 @@ it('keeps desktop selector identities, status and keyboard actions usable at nar
           import { DesktopInstanceSelector } from './propr-ui/src/desktop/DesktopInstanceSelector';
           import './propr-ui/src/desktop/desktop.css';
           const root = createRoot(document.getElementById('root'));
-          window.renderSelector = ({ platform, width, name, username, avatar, status, transportReady }) => {
+          window.renderSelector = ({ platform, width, name, kind = 'remote', username, status, transportReady }) => {
             document.documentElement.dataset.desktopWindow = platform;
             window.selectorActions = [];
             const desktop = {
               isDesktop: true, platform: platform === 'darwin' ? 'macos' : platform,
-              profile: { id: 'preview', name, baseUrl: 'https://preview.example', kind: 'remote',
-                account: username ? { id: '101', username, avatarUrl: avatar ? 'https://preview.example/avatar.svg' : null } : undefined },
+              profile: { id: 'preview', name, baseUrl: 'https://preview.example', kind,
+                account: username ? { id: '101', username, avatarUrl: null } : undefined },
               connection: { status },
               openProfileManager: () => window.selectorActions.push('switch'),
               retry: () => window.selectorActions.push('retry'),
@@ -71,11 +71,11 @@ it('keeps desktop selector identities, status and keyboard actions usable at nar
     await page.addScriptTag({ path: join(directory, 'renderer.js') });
     const previews = [];
     const cases = [
-      { platform: 'darwin', width: 240, viewport: 1280, name: 'Team development', username: 'preview-developer', avatar: true, status: 'ready', transportReady: true },
-      { platform: 'linux', width: 240, viewport: 1024, name: 'Shared engineering development instance', username: 'preview-engineering-automation-account', avatar: true, status: 'ready', transportReady: true },
-      { platform: 'darwin', width: 200, viewport: 800, name: 'LongUnbrokenDevelopmentInstanceNameForPreview', username: 'preview-engineering-automation-account', avatar: false, status: 'ready', transportReady: false },
-      { platform: 'linux', width: 176, viewport: 640, name: 'LongUnbrokenDevelopmentInstanceNameForPreview', username: 'preview-engineering-automation-account', avatar: true, status: 'incompatible', transportReady: false },
-      { platform: 'linux', width: 200, viewport: 640, name: 'Team development', username: null, avatar: false, status: 'offline', transportReady: false },
+      { platform: 'darwin', width: 240, viewport: 1280, name: 'This computer', kind: 'local', username: 'preview-developer', status: 'ready', transportReady: true },
+      { platform: 'linux', width: 240, viewport: 1024, name: 'Shared engineering development instance', username: 'preview-engineering-automation-account', status: 'ready', transportReady: true },
+      { platform: 'darwin', width: 200, viewport: 800, name: 'LongUnbrokenDevelopmentInstanceNameForPreview', username: 'preview-engineering-automation-account', status: 'ready', transportReady: false },
+      { platform: 'linux', width: 176, viewport: 640, name: 'LongUnbrokenDevelopmentInstanceNameForPreview', username: 'preview-engineering-automation-account', status: 'incompatible', transportReady: false },
+      { platform: 'linux', width: 200, viewport: 640, name: 'Team development', username: null, status: 'offline', transportReady: false },
     ];
     for (const [index, state] of cases.entries()) {
       await page.setViewportSize({ width: state.viewport, height: 600 });
@@ -85,28 +85,34 @@ it('keeps desktop selector identities, status and keyboard actions usable at nar
       const label = state.status === 'incompatible' ? 'Update required' : state.status === 'offline' ? 'Offline' : state.transportReady ? 'Connected' : 'Reconnecting';
       await expect(button).toHaveAccessibleName(`${label}: ${state.name}`);
       await expect(button).toHaveAccessibleDescription(new RegExp(state.username || 'Retry connection'));
-      await expect(selector.locator('.desktop-instance-status')).toHaveText(label);
+      await expect(selector.locator('.desktop-connection-dot')).toHaveAttribute('title', label);
+      await expect(selector.getByText('Switch', { exact: true })).toHaveCount(0);
+      await expect(selector.locator('.desktop-instance-action')).toHaveCSS('color', 'rgb(100, 116, 139)');
       const geometry = await selector.evaluate(element => {
         const box = element.getBoundingClientRect();
-        const selectors = ['button', '.desktop-instance-copy', '.desktop-instance-account', '.desktop-instance-footer', '.desktop-instance-status', '.desktop-instance-switch'];
+        const selectors = ['button', '.desktop-instance-copy', '.desktop-instance-switch'];
+        const button = element.querySelector('button').getBoundingClientRect();
+        const icon = element.querySelector('.desktop-instance-icon').getBoundingClientRect();
+        const copy = element.querySelector('.desktop-instance-copy').getBoundingClientRect();
+        const action = element.querySelector('.desktop-instance-switch').getBoundingClientRect();
         return {
+          rowCentered: [icon, copy, action].every(bounds => Math.abs((bounds.top + bounds.bottom - button.top - button.bottom) / 2) < 1),
+          actionRightInset: button.right - action.right,
+          buttonHeight: button.height,
           top: box.top, headerBottom: document.querySelector('.desktop-sidebar-header').getBoundingClientRect().bottom,
           fits: selectors.every(selector => [...element.querySelectorAll(selector)].every(child => {
             const bounds = child.getBoundingClientRect();
             return bounds.left >= box.left && bounds.right <= box.right && child.scrollWidth <= child.clientWidth + 1;
           })),
-          statusBottom: element.querySelector('.desktop-instance-status').getBoundingClientRect().bottom,
-          identityBottom: element.querySelector('.desktop-instance-account')?.getBoundingClientRect().bottom,
           nameHeight: element.querySelector('strong').getBoundingClientRect().height,
         };
       });
       assert.ok(geometry.fits, `No horizontal overflow for ${JSON.stringify(state)}`);
       assert.ok(geometry.top >= geometry.headerBottom, 'Selector stays below platform titlebar');
-      assert.ok(geometry.nameHeight <= 40, 'Long instance names use at most two lines');
-      if (geometry.identityBottom) assert.ok(geometry.statusBottom > geometry.identityBottom, 'Status remains separate from account identity');
-      if (state.avatar) {
-        await expect(selector.locator('img')).toHaveCSS('width', '20px');
-      }
+      assert.ok(geometry.nameHeight <= 20, 'Long instance names stay on one line');
+      assert.ok(geometry.buttonHeight <= 56, 'Selector stays compact with two text lines');
+      assert.ok(geometry.rowCentered, 'Icon, copy and status/action share the row center');
+      assert.equal(geometry.actionRightInset, 8, 'Action sits at the right padding boundary');
       // Start from the document so Tab, not programmatic focus, enters the control.
       await page.evaluate(() => { document.body.tabIndex = -1; document.body.focus(); });
       await page.keyboard.press('Tab');
