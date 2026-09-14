@@ -104,7 +104,7 @@ describe('Layout desktop instance selector', () => {
     expect(selector.closest('aside')).not.toBeNull();
     expect(screen.getByText('Instance')).toBeInTheDocument();
     expect(screen.getByText('Local instance')).toBeInTheDocument();
-    expect(screen.getByText('Connected')).toBeInTheDocument();
+    expect(selector.querySelector('.desktop-connection-dot')).toHaveAttribute('title', 'Connected');
     expect(screen.getByRole('link', { name: 'Dashboard' })).toHaveClass(
       'mx-2',
       'rounded-md',
@@ -126,7 +126,7 @@ describe('Layout desktop instance selector', () => {
     await waitFor(() => expect(mocks.reportConnectedRendererReady).toHaveBeenCalledOnce());
   });
 
-  it('preserves retry and ProPR Connect identity while offline', () => {
+  it('preserves instance management and ProPR Connect identity while offline', () => {
     renderLayout(desktopValue({
       profile: {
         id: 'connect',
@@ -139,10 +139,10 @@ describe('Layout desktop instance selector', () => {
 
     const selector = screen.getByRole('button', { name: 'Offline: Operations' });
     expect(screen.getByText('ProPR Connect')).toBeInTheDocument();
-    expect(screen.getByText('Offline')).toBeInTheDocument();
+    expect(selector.querySelector('.desktop-connection-dot')).toHaveAttribute('title', 'Offline');
     fireEvent.click(selector);
-    expect(mocks.retry).toHaveBeenCalledOnce();
-    expect(mocks.openProfileManager).not.toHaveBeenCalled();
+    expect(mocks.openProfileManager).toHaveBeenCalledOnce();
+    expect(mocks.retry).not.toHaveBeenCalled();
   });
 
   it('uses the scoped transport for reconnecting and recovers without replacing the profile', async () => {
@@ -151,7 +151,7 @@ describe('Layout desktop instance selector', () => {
     const view = renderLayout(desktop);
 
     const reconnecting = screen.getByRole('button', { name: 'Reconnecting: This computer' });
-    expect(reconnecting).toHaveTextContent('Reconnecting');
+    expect(reconnecting.querySelector('.desktop-connection-dot')).toHaveAttribute('title', 'Reconnecting');
     fireEvent.click(reconnecting);
     expect(mocks.openProfileManager).toHaveBeenCalledOnce();
     expect(mocks.retry).not.toHaveBeenCalled();

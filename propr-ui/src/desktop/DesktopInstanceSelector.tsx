@@ -2,11 +2,8 @@ import React, { useEffect, useId } from 'react';
 import { parseProprConnectEndpoint } from '@propr/shared';
 import {
   ChevronDown,
-  CircleAlert,
   Cloud,
-  CloudOff,
   Computer,
-  RefreshCw,
 } from 'lucide-react';
 import { useDesktop } from './DesktopContext';
 import { SIDEBAR_ICON_STROKE_WIDTH, SIDEBAR_ICON_STROKE_CLASS } from '../components/icons/sidebarIconStroke';
@@ -43,9 +40,6 @@ export const DesktopInstanceSelector: React.FC<DesktopInstanceSelectorProps> = (
       ? 'Local instance'
       : 'Remote instance';
   const InstanceIcon = desktop.profile.kind === 'local' ? Computer : Cloud;
-  const action = activated
-    ? { onClick: desktop.openProfileManager, title: 'Manage instances', popup: 'dialog' as const, description: 'Switch instance or GitHub account.', Icon: ChevronDown }
-    : { onClick: desktop.retry, title: 'Retry connection', popup: undefined, description: 'Retry connection.', Icon: RefreshCw };
 
   return (
     <div className="desktop-instance-selector">
@@ -53,26 +47,26 @@ export const DesktopInstanceSelector: React.FC<DesktopInstanceSelectorProps> = (
       <button
         type="button"
         className={`desktop-instance-selector-button desktop-connection-${connectionClass}`}
-        onClick={action.onClick}
+        onClick={desktop.openProfileManager}
         aria-label={`${statusLabel}: ${desktop.profile.name}`}
         aria-describedby={descriptionId}
-        aria-haspopup={action.popup}
-        title={action.title}
+        aria-haspopup="dialog"
+        title="Manage instances"
       >
         <span className="desktop-instance-icon" aria-hidden="true">
-          {connected ? <InstanceIcon className={SIDEBAR_ICON_STROKE_CLASS} strokeWidth={SIDEBAR_ICON_STROKE_WIDTH} /> : reconnecting ? <RefreshCw className={`${SIDEBAR_ICON_STROKE_CLASS} desktop-spin`} strokeWidth={SIDEBAR_ICON_STROKE_WIDTH} /> : incompatible ? <CircleAlert className={SIDEBAR_ICON_STROKE_CLASS} strokeWidth={SIDEBAR_ICON_STROKE_WIDTH} /> : <CloudOff className={SIDEBAR_ICON_STROKE_CLASS} strokeWidth={SIDEBAR_ICON_STROKE_WIDTH} />}
+          <InstanceIcon className={SIDEBAR_ICON_STROKE_CLASS} strokeWidth={SIDEBAR_ICON_STROKE_WIDTH} />
+          <span className="desktop-connection-dot" title={statusLabel} />
         </span>
         <span className="desktop-instance-copy">
           <strong title={desktop.profile.name}>{desktop.profile.name}</strong>
           <small>{instanceLabel}</small>
         </span>
         <span className="desktop-instance-switch" aria-hidden="true">
-          <span className="desktop-connection-dot" title={statusLabel} />
-          <action.Icon className={`${SIDEBAR_ICON_STROKE_CLASS} desktop-instance-action`} strokeWidth={SIDEBAR_ICON_STROKE_WIDTH} />
+          <ChevronDown className={`${SIDEBAR_ICON_STROKE_CLASS} desktop-instance-action`} strokeWidth={SIDEBAR_ICON_STROKE_WIDTH} />
         </span>
       </button>
       <span id={descriptionId} className="sr-only">
-        {`${instanceLabel}. ${desktop.profile.account ? `GitHub account: @${desktop.profile.account.username}. ` : ''}${action.description}`}
+        {`${instanceLabel}. ${desktop.profile.account ? `GitHub account: @${desktop.profile.account.username}. ` : ''}Switch instance or GitHub account.`}
       </span>
     </div>
   );

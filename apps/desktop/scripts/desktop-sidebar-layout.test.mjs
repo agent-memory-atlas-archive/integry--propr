@@ -84,9 +84,14 @@ it('keeps desktop selector identities, status and keyboard actions usable at nar
       const button = selector.getByRole('button');
       const label = state.status === 'incompatible' ? 'Update required' : state.status === 'offline' ? 'Offline' : state.transportReady ? 'Connected' : 'Reconnecting';
       await expect(button).toHaveAccessibleName(`${label}: ${state.name}`);
-      await expect(button).toHaveAccessibleDescription(new RegExp(state.username || 'Retry connection'));
+      await expect(button).toHaveAccessibleDescription(new RegExp(state.username || 'Switch instance or GitHub account'));
       await expect(selector.locator('.desktop-connection-dot')).toHaveAttribute('title', label);
       await expect(selector.getByText('Switch', { exact: true })).toHaveCount(0);
+      await expect(button).toHaveAttribute('aria-haspopup', 'dialog');
+      await expect(selector.locator('.desktop-instance-icon .lucide-' + (state.kind === 'local' ? 'computer' : 'cloud'))).toHaveCount(1);
+      await expect(selector.locator('.desktop-instance-icon .desktop-connection-dot')).toHaveCount(1);
+      await expect(selector.locator('.desktop-instance-switch > svg.lucide-chevron-down')).toHaveCount(1);
+      await expect(selector.locator('.desktop-instance-switch .desktop-connection-dot')).toHaveCount(0);
       await expect(selector.locator('.desktop-instance-action')).toHaveCSS('color', 'rgb(100, 116, 139)');
       const geometry = await selector.evaluate(element => {
         const box = element.getBoundingClientRect();
@@ -95,9 +100,14 @@ it('keeps desktop selector identities, status and keyboard actions usable at nar
         const icon = element.querySelector('.desktop-instance-icon').getBoundingClientRect();
         const copy = element.querySelector('.desktop-instance-copy').getBoundingClientRect();
         const action = element.querySelector('.desktop-instance-switch').getBoundingClientRect();
+        const entity = element.querySelector('.desktop-instance-icon svg').getBoundingClientRect();
+        const dot = element.querySelector('.desktop-connection-dot').getBoundingClientRect();
         return {
-          rowCentered: [icon, copy, action].every(bounds => Math.abs((bounds.top + bounds.bottom - button.top - button.bottom) / 2) < 1),
+          rowCentered: [icon, entity, copy, action].every(bounds => Math.abs((bounds.top + bounds.bottom - button.top - button.bottom) / 2) < 1),
           actionRightInset: button.right - action.right,
+          copyWidth: copy.width,
+          copyActionGap: action.left - copy.right,
+          statusBadged: dot.left < icon.right && dot.right > icon.right && dot.top < icon.bottom && dot.bottom > icon.bottom,
           buttonHeight: button.height,
           top: box.top, headerBottom: document.querySelector('.desktop-sidebar-header').getBoundingClientRect().bottom,
           fits: selectors.every(selector => [...element.querySelectorAll(selector)].every(child => {
@@ -112,7 +122,10 @@ it('keeps desktop selector identities, status and keyboard actions usable at nar
       assert.ok(geometry.nameHeight <= 20, 'Long instance names stay on one line');
       assert.ok(geometry.buttonHeight <= 56, 'Selector stays compact with two text lines');
       assert.ok(geometry.rowCentered, 'Icon, copy and status/action share the row center');
-      assert.equal(geometry.actionRightInset, 8, 'Action sits at the right padding boundary');
+      assert.equal(geometry.actionRightInset, 4, 'Chevron sits at the compact right padding boundary');
+      assert.equal(geometry.copyActionGap, 6, 'Text stretches to the chevron with a compact gap');
+      assert.ok(geometry.statusBadged, 'Status badges the bottom-right of the entity icon');
+      assert.ok(geometry.copyWidth >= state.width - 67, 'Text uses the available width, including at 176px');
       // Start from the document so Tab, not programmatic focus, enters the control.
       await page.evaluate(() => { document.body.tabIndex = -1; document.body.focus(); });
       await page.keyboard.press('Tab');
@@ -121,7 +134,7 @@ it('keeps desktop selector identities, status and keyboard actions usable at nar
       await expect(button).toHaveCSS('outline-width', '2px');
       await page.keyboard.press('Enter');
       await page.keyboard.press('Space');
-      assert.deepEqual(await page.evaluate(() => window.selectorActions), Array(2).fill(state.status === 'ready' ? 'switch' : 'retry'));
+      assert.deepEqual(await page.evaluate(() => window.selectorActions), Array(2).fill('switch'));
       await page.addScriptTag({ content: axe.source });
       const accessibility = await page.evaluate(() => window.axe.run('.desktop-instance-selector', { runOnly: { type: 'tag', values: ['wcag2a', 'wcag2aa'] } }));
       assert.deepEqual(accessibility.violations.map(({ id }) => id), [], 'Selector passes focused accessibility checks');

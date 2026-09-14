@@ -32,15 +32,15 @@ describe('desktop selector identity and actions', () => {
     expect(value.retry).not.toHaveBeenCalled();
   });
 
-  it.each(['offline', 'incompatible'] as const)('distinguishes %s status from retry', status => {
+  it.each(['offline', 'incompatible'] as const)('keeps instance management available when %s', status => {
     const value = context({ connection: { status, message: 'Preview status' } });
     render(selector(value));
     const button = screen.getByRole('button');
-    expect(button).toHaveAccessibleDescription(/Retry connection/);
-    expect(button).not.toHaveAttribute('aria-haspopup');
+    expect(button).toHaveAccessibleDescription(/Switch instance or GitHub account/);
+    expect(button).toHaveAttribute('aria-haspopup', 'dialog');
     fireEvent.click(button);
-    expect(value.retry).toHaveBeenCalledOnce();
-    expect(value.openProfileManager).not.toHaveBeenCalled();
+    expect(value.openProfileManager).toHaveBeenCalledOnce();
+    expect(value.retry).not.toHaveBeenCalled();
   });
 
   it('updates the accessible account with the active profile and clears absent identity', () => {
