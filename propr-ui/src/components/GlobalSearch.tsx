@@ -68,6 +68,7 @@ const GlobalSearch: React.FC<GlobalSearchProps> = ({ inputRef: externalInputRef 
     results,
     isLoading,
     isOpen,
+    error,
     hasResults,
     setQuery,
     clearSearch,
@@ -195,8 +196,15 @@ const GlobalSearch: React.FC<GlobalSearchProps> = ({ inputRef: externalInputRef 
             </div>
           )}
 
+          {!isLoading && error && (
+            <div role="alert" className="px-4 py-8 text-center">
+              <p className="text-sm font-medium text-red-700">Couldn’t search</p>
+              <p className="mt-1 text-xs text-red-600">{error}</p>
+            </div>
+          )}
+
           {/* No results state */}
-          {!isLoading && query.trim() && !hasResults && (
+          {!isLoading && !error && query.trim() && !hasResults && (
             <div className="px-4 py-8 text-center">
               <Search className="w-6 h-6 text-slate-300 mx-auto mb-2" />
               <p className="text-sm text-slate-500">No results found for "{query}"</p>
