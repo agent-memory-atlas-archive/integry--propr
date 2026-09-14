@@ -20,9 +20,28 @@ import { McpError } from '../mcp/config.js';
 import { McpPolicy, type McpPrincipal } from '../mcp/policy.js';
 import { buildMcpServer } from '../mcp/server.js';
 import { createToolCatalog, executeTool, type ToolDeps } from '../mcp/tools.js';
-import { compactText, planRelationLimit, summarizePlan, summarizeTask } from '../mcp/listSummaries.js';
+import { compactText, planRelationLimit, summarizeGoal, summarizePlan, summarizeTask } from '../mcp/listSummaries.js';
 
 after(async () => closeConnection());
+
+test('MCP list summaries report PR states only when supported by stored evidence', () => {
+  for (const status of [undefined, null, 'pending', 'under_review', 'merged', 'closed']) {
+    const expected = status === 'merged' || status === 'closed' ? status : null;
+    const task = { pr_number: 188, plan_issue_status: status };
+    assert.equal(summarizeTask(task).pr_state, expected);
+    assert.equal(summarizeTask({ ...task, pr_number: null }).pr_state, null);
+    assert.deepEqual(summarizePlan({}, [{ pr_number: 188, status }]).pull_requests,
+      [{ number: 188, state: expected }]);
+  }
+
+  assert.equal(summarizeGoal({ final_pr_number: 188 }).pr_state, null);
+  for (const state of [undefined, null, '', 'open', 'closed', 'merged']) {
+    const artifact_refs = JSON.stringify([{ type: 'pull_request', number: 188, state }]);
+    assert.equal(summarizeGoal({ final_pr_number: 188, artifact_refs }).pr_state, state || null);
+    assert.equal(summarizeGoal({ final_pr_number: 189, artifact_refs }).pr_state, null);
+    assert.equal(summarizeGoal({ artifact_refs }).pr_state, null);
+  }
+});
 
 test('MCP list summaries bound natural-language fields and tolerate legacy task metadata', () => {
   const summary = compactText(`  ${'long context '.repeat(40)}  `)!;
@@ -239,8 +258,8 @@ test('MCP task, goal and plan lists paginate in deterministic newest-first order
   const oldest = '2026-06-01 12:00:00';
   await db('tasks').insert([
     { task_id: '1024', repository, task_type: 'issue', created_at: oldest },
-    { task_id: '10149', repository, task_type: 'issue', created_at: middle },
-    { task_id: '10150', repository, task_type: 'issue', created_at: newest },
+    { task_id: '10149', repository, task_type: 'pr_comment', pr_number: 288, created_at: middle },
+    { task_id: '10150', repository, task_type: 'review', pr_number: 188, created_at: newest },
     { task_id: '10151', repository, issue_number: 88, task_type: 'issue', model_name: 'gpt-5.6', pr_number: 188,
       initial_job_data: JSON.stringify({ title: 'Make task lists self-explanatory', subtitle: 'Expose bounded lifecycle context', agentAlias: 'codex' }), created_at: newest },
   ]);
@@ -253,7 +272,8 @@ test('MCP task, goal and plan lists paginate in deterministic newest-first order
   await db('goals').insert([
     { goal_id: 'goal-z-old', owner_id: '123', repository, current_task_id: 'goal-task-old', created_at: oldest, updated_at: oldest },
     { goal_id: 'goal-a-middle', owner_id: '123', repository, current_task_id: 'goal-task-middle', created_at: middle, updated_at: middle },
-    { goal_id: 'goal-a-new', owner_id: '123', repository, current_task_id: 'goal-task-new-a', created_at: newest, updated_at: newest },
+    { goal_id: 'goal-a-new', owner_id: '123', repository, current_task_id: 'goal-task-new-a', final_pr_number: 189,
+      artifact_refs: JSON.stringify([{ type: 'pull_request', number: 189 }]), created_at: newest, updated_at: newest },
     { goal_id: 'goal-b-new', owner_id: '123', repository, title: 'Enrich MCP list results', objective: 'Make every MCP list result understandable without another fetch.',
       desired_state: 'running', result_state: 'completed', current_task_id: 'goal-task-new-b', agent_alias: 'codex', requested_model: 'gpt-5.6',
       effective_model: 'gpt-5.6-codex', final_pr_number: 288, artifact_refs: JSON.stringify([{ type: 'pull_request', number: 288, state: 'closed' }]),
@@ -288,6 +308,9 @@ test('MCP task, goal and plan lists paginate in deterministic newest-first order
     const taskPageTwo = await page('list_tasks', taskPageOne.nextOffset);
     assert.deepEqual(taskPageOne.tasks.map((task: { task_id: string }) => task.task_id), ['10151', '10150']);
     assert.deepEqual(taskPageTwo.tasks.map((task: { task_id: string }) => task.task_id), ['10149', '1024']);
+    assert.equal(taskPageOne.tasks[1].pr_number, 188);
+    assert.equal(taskPageOne.tasks[1].pr_state, null);
+    assert.equal(taskPageTwo.tasks[0].pr_state, 'merged');
     assert.deepEqual(taskPageOne.tasks[0], {
       task_id: '10151', repository, issue_number: 88, task_type: 'issue', title: 'Make task lists self-explanatory',
       summary: 'Expose bounded lifecycle context', state: 'failed', agent_alias: 'codex', model_name: 'gpt-5.6',
@@ -304,6 +327,8 @@ test('MCP task, goal and plan lists paginate in deterministic newest-first order
     assert.equal(goalPageOne.goals[0].agent_alias, 'codex');
     assert.equal(goalPageOne.goals[0].model_name, 'gpt-5.6-codex');
     assert.equal(goalPageOne.goals[0].pr_state, 'merged');
+    assert.equal(goalPageOne.goals[1].pr_number, 189);
+    assert.equal(goalPageOne.goals[1].pr_state, null);
     assert.equal(goalPageOne.goals[0].elapsed_ms, 19_000);
 
     const planPageOne = await page('list_plans', 0);

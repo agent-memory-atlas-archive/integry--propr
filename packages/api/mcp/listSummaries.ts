@@ -84,7 +84,7 @@ function taskFallbackTitle(row: JsonObject, prNumber: number | null): string {
 function pullRequestState(planIssueStatus: unknown, hasPullRequest: boolean): string | null {
   if (!hasPullRequest) return null;
   if (planIssueStatus === 'merged' || planIssueStatus === 'closed') return planIssueStatus;
-  return 'open';
+  return null;
 }
 
 export function summarizeTask(row: JsonObject, now = Date.now()): JsonObject {
@@ -153,7 +153,7 @@ export function summarizeGoal(row: JsonObject, now = Date.now()): JsonObject {
     agent_alias: compactText(row.agent_alias, 100),
     model_name: compactText(row.effective_model ?? row.requested_model, MODEL_LIMIT),
     pr_number: prNumber,
-    pr_state: prNumber ? text(finalPr?.state) ?? 'open' : null,
+    pr_state: prNumber ? text(finalPr?.state) : null,
     created_at: row.created_at,
     updated_at: row.updated_at,
     started_at: startedAt,
@@ -166,7 +166,7 @@ export function summarizeGoal(row: JsonObject, now = Date.now()): JsonObject {
 function summarizePlanIssues(issues: JsonObject[]) {
   const counts = { total: issues.length, pending: 0, active: 0, merged: 0, closed: 0 };
   const agentModels = new Map<string, { agent_alias: string; model_name: string }>();
-  const pullRequests = new Map<number, string>();
+  const pullRequests = new Map<number, string | null>();
   for (const issue of issues) {
     const status = text(issue.status) ?? 'pending';
     if (status === 'pending') counts.pending += 1;
@@ -177,7 +177,7 @@ function summarizePlanIssues(issues: JsonObject[]) {
     const model = compactText(issue.model_name, MODEL_LIMIT);
     if (alias && model) agentModels.set(`${alias}\u0000${model}`, { agent_alias: alias, model_name: model });
     const number = positiveInteger(issue.pr_number);
-    if (number) pullRequests.set(number, pullRequestState(status, true)!);
+    if (number) pullRequests.set(number, pullRequestState(status, true));
   }
   return { counts, agentModels, pullRequests };
 }
