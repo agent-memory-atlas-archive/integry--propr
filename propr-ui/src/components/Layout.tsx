@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { Link, useLocation } from 'react-router-dom';
-import { LayoutDashboard, ScrollText, ListTodo, BookMarked, Bot, Cpu, Settings, ShieldCheck, Inbox, LogOut, Target } from 'lucide-react';
+import { LayoutDashboard, ScrollText, ListTodo, BookMarked, Bot, Cpu, Settings, ShieldCheck, Inbox, LogOut, Target, TriangleAlert } from 'lucide-react';
 import { logout } from '../api/proprApi';
 import { useDynamicFavicon } from '../hooks/useDynamicFavicon';
 import { useSystemReadiness } from '../hooks/useSystemReadiness';
@@ -40,7 +40,8 @@ interface NavItem {
 function NavBadge({ children }: { children: React.ReactNode }) {
   return (
     <span className="inline-flex h-4 min-w-4 flex-none items-center justify-center rounded-full bg-primary-500 px-1 text-[10px] font-bold leading-none text-white">
-      {children}
+      {/* Offset the glyph ink within the centered line box for optical centering. */}
+      <span className="block translate-y-px">{children}</span>
     </span>
   );
 }
@@ -248,18 +249,20 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
               ? 'bg-black/5 font-normal text-slate-900'
               : 'bg-slate-50 font-medium text-slate-900 border-primary-600'
             : desktop
-              ? 'font-normal text-slate-700 hover:bg-slate-900/5 hover:text-slate-900'
+              ? 'font-normal text-slate-600 hover:bg-slate-900/5 hover:text-slate-900'
               : 'font-normal text-gray-600 hover:bg-gray-50 hover:text-gray-900 border-transparent'
         }`}
       >
         <span className="flex min-w-0 items-center">
           <item.icon className={`${SIDEBAR_ICON_STROKE_CLASS} mr-2.5 h-4 w-4 flex-none`} strokeWidth={SIDEBAR_ICON_STROKE_WIDTH} />
-          <span className={`truncate ${desktop && readinessMessage ? 'font-medium text-slate-900' : ''}`}>{item.name}</span>
+          <span className="truncate">{item.name}</span>
         </span>
         {/* Counts and readiness indicators share the trailing rail. */}
         <span className="flex flex-none items-center justify-end gap-1.5">
           {desktop && readinessMessage && (
-            <span className="h-1.5 w-1.5 flex-none rounded-full bg-amber-500" role="img" aria-label={readinessMessage} title={readinessMessage} />
+            <span className="flex h-4 w-4 flex-none items-center justify-center text-amber-600" role="img" aria-label={readinessMessage} title={readinessMessage}>
+              <TriangleAlert className={`${SIDEBAR_ICON_STROKE_CLASS} h-3.5 w-3.5`} strokeWidth={SIDEBAR_ICON_STROKE_WIDTH} aria-hidden="true" />
+            </span>
           )}
           <WorkCountBadge name={item.name} taskCount={displayTaskCount} goalCount={activeGoalCount} />
           {item.name === 'Inbox' && unreadCount !== null && unreadCount > 0 && (
@@ -370,7 +373,8 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
               </button>
             </div>
           )}
-          <footer className="mt-4 px-4 pb-2 leading-tight space-y-1">
+          {/* Match the profile text rail: 12px outer + 4px link inset + 28px avatar + 8px gap. */}
+          <footer className={`mt-4 pr-4 pb-2 leading-tight space-y-1 ${user ? 'pl-[52px]' : 'pl-4'}`}>
             {/* The version is the datum developers scan for, so it sits one
                 contrast step above the secondary copyright line. */}
             <div className="text-[11px] text-slate-500">

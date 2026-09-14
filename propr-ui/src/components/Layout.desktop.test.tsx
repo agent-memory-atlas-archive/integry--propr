@@ -193,14 +193,16 @@ describe('Layout desktop instance selector', () => {
     expect(screen.queryByRole('link', { name: 'Access' })).not.toBeInTheDocument();
   });
 
-  it('anchors repository readiness in the trailing badge rail', () => {
+  it('labels repository setup warnings in the trailing rail without emphasizing inactive text', () => {
     mocks.hasRepos = false;
     renderLayout(desktopValue());
     const indicator = screen.getByRole('img', { name: 'No repositories configured' });
     const row = indicator.closest('a');
     expect(indicator.parentElement).toBe(row?.lastElementChild);
     expect(indicator.parentElement).toHaveClass('items-center', 'justify-end');
-    expect(screen.getByText('Repositories')).toHaveClass('font-medium', 'text-slate-900');
+    expect(indicator.querySelector('svg')).toHaveClass('lucide-triangle-alert');
+    expect(row).toHaveClass('text-slate-600', 'hover:text-slate-900');
+    expect(screen.getByText('Repositories')).not.toHaveClass('font-medium', 'text-slate-900');
   });
 
   it('leaves the browser layout free of desktop-only instance controls', () => {
