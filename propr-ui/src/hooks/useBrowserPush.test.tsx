@@ -148,6 +148,7 @@ describe('BrowserPushProvider enrollment', () => {
       <div>
         <span>{push.isLoading ? 'loading' : push.subscription ? 'subscribed' : 'ready'}</span>
         <span data-testid="push-permission">{push.permission}</span>
+        {push.error && <span role="alert">{push.error}</span>}
         <button type="button" onClick={() => void push.enable().catch(() => undefined)}>Enable</button>
         <button type="button" onClick={() => void push.disable().catch(() => undefined)}>Disable</button>
       </div>
@@ -240,17 +241,21 @@ describe('BrowserPushProvider enrollment', () => {
     }
   });
 
-  test('does not unsubscribe an unknown owner when the ownership lookup fails', async () => {
+  test.each([null, user.id])('preserves browser enrollment with stored owner %s when the ownership lookup fails', async owner => {
     permission = 'granted';
     getSubscription.mockResolvedValue(subscription);
+    if (owner) localStorage.setItem('propr:push-subscription-owner', owner);
     mocks.listBackend.mockRejectedValueOnce(new Error('Ownership lookup unavailable'));
     render(<AuthProvider user={user}><BrowserPushProvider><Probe /></BrowserPushProvider></AuthProvider>);
 
-    await screen.findByText('ready');
+    await screen.findByText(owner === user.id ? 'subscribed' : 'ready');
+    expect(screen.getByRole('alert')).toHaveTextContent('Ownership lookup unavailable');
+    expect(localStorage.getItem('propr:push-subscription-owner')).toBe(owner);
     expect(mocks.listBackend).toHaveBeenCalledTimes(1);
     expect(unsubscribeBrowser).not.toHaveBeenCalled();
     expect(subscribeBrowser).not.toHaveBeenCalled();
     expect(mocks.registerBackend).not.toHaveBeenCalled();
+    expect(mocks.revokeBackend).not.toHaveBeenCalled();
     expect(requestPermission).not.toHaveBeenCalled();
   });
 

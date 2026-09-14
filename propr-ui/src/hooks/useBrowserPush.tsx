@@ -223,8 +223,8 @@ export const BrowserPushProvider: React.FC<{ children: React.ReactNode }> = ({ c
         : null;
 
     if (localSubscription) {
+      const owner = storedPushOwner();
       try {
-        const owner = storedPushOwner();
         if (owner !== null && owner !== userId) {
           // Stop the previous account's notifications without enrolling this one.
           await localSubscription.unsubscribe();
@@ -242,7 +242,8 @@ export const BrowserPushProvider: React.FC<{ children: React.ReactNode }> = ({ c
           }
         }
       } catch (error) {
-        localSubscription = null;
+        // A failed lookup does not invalidate known current-user enrollment.
+        if (owner !== userId) localSubscription = null;
         reconciliationError = error;
       }
     }
