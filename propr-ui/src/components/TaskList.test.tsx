@@ -271,8 +271,10 @@ describe('TaskList', () => {
       repository: 'integry/propr', timestamp: '2026-09-14T00:00:01Z',
     }));
 
-    expect(await screen.findByText('Refreshing tasks…')).toBeInTheDocument();
+    await waitFor(() => expect(mockGetTasks).toHaveBeenCalledTimes(2));
     expect(screen.getByText('task table')).toBeInTheDocument();
+    expect(screen.queryByText(/Refreshing tasks/)).not.toBeInTheDocument();
+    expect(screen.queryByRole('status')).not.toBeInTheDocument();
     expect(screen.queryByText(/No tasks found/)).not.toBeInTheDocument();
 
     await act(async () => { refreshRequest.resolve({ tasks: [], total: 0 }); });
