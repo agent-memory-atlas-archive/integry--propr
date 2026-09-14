@@ -3,6 +3,7 @@ import type { Task as ApiTask } from './tasks';
 import {
   API_BASE_URL,
   apiFetch,
+  getAuthenticatedApiReadScopeGeneration,
   handleApiResponse,
   getDesktopConnectionScope,
   setAuthenticatedApiReadIdentity,
@@ -202,6 +203,7 @@ const currentUserResponseClassification = async (
 };
 
 export const getCurrentUser = async (options: CurrentUserValidationOptions = {}): Promise<CurrentUser> => {
+  const authenticatedReadScopeGeneration = getAuthenticatedApiReadScopeGeneration();
   const requestedScopeGeneration = options.scopeGeneration;
   const scopeGeneration = typeof requestedScopeGeneration === 'number'
     && Number.isSafeInteger(requestedScopeGeneration) && requestedScopeGeneration >= 0
@@ -255,7 +257,7 @@ export const getCurrentUser = async (options: CurrentUserValidationOptions = {})
       responseStatus: response.status, classification, schemaAccepted: true,
     });
   }
-  setAuthenticatedApiReadIdentity(body.id);
+  setAuthenticatedApiReadIdentity(body.id, authenticatedReadScopeGeneration);
   return body;
 };
 

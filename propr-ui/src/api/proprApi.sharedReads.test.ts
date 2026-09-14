@@ -1,8 +1,10 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
+  getCurrentUser,
   getInstanceCatalog,
   getReadinessTaskExistence,
   getTasks,
+  setApiBaseUrl,
   setAuthenticatedApiReadIdentity,
   setDesktopConnectionScope,
 } from './proprApi';
@@ -10,6 +12,18 @@ import {
 const catalog = (name: string) => ({
   agents: [],
   repositories: [{ name, enabled: true }],
+});
+
+const user = (id: string) => ({
+  id,
+  login: id,
+  username: id,
+  displayName: id,
+  email: null,
+  avatarUrl: null,
+  role: 'admin' as const,
+  permissions: ['instance.manage_settings' as const],
+  authorizationSource: 'local' as const,
 });
 
 const jsonResponse = (body: unknown, status = 200) => new Response(JSON.stringify(body), {
@@ -27,6 +41,14 @@ const deferred = <T,>() => {
   return { promise, resolve, reject };
 };
 
+const deferredJsonResponse = () => {
+  const body = deferred<unknown>();
+  const response = jsonResponse({});
+  const json = vi.fn(() => body.promise);
+  Object.defineProperty(response, 'json', { configurable: true, value: json });
+  return { body, response, json };
+};
+
 const desktopScope = (name: string) => ({
   bridge: {} as never,
   profileId: `profile-${name}`,
@@ -35,6 +57,7 @@ const desktopScope = (name: string) => ({
 
 afterEach(() => {
   setDesktopConnectionScope(null);
+  setApiBaseUrl('');
   setAuthenticatedApiReadIdentity(null);
   vi.restoreAllMocks();
 });
@@ -94,6 +117,87 @@ describe('same-scope startup reads', () => {
     accountB.resolve(jsonResponse(catalog('account-b/private')));
     await oldReadRejected;
     await expect(newRead).resolves.toEqual(catalog('account-b/private'));
+  });
+
+  it('does not let stale current-user JSON reset a newer account read scope', async () => {
+    setAuthenticatedApiReadIdentity('account-a');
+    const accountAUser = deferredJsonResponse();
+    const accountB = deferred<Response>();
+    vi.spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(accountAUser.response)
+      .mockReturnValueOnce(accountB.promise);
+
+    const oldCurrentUser = getCurrentUser();
+    await vi.waitFor(() => expect(accountAUser.json).toHaveBeenCalledOnce());
+    setAuthenticatedApiReadIdentity('account-b');
+    const accountBRead = getInstanceCatalog();
+    expect(getInstanceCatalog()).toBe(accountBRead);
+    const accountBResult = expect(accountBRead).resolves.toEqual(catalog('account-b/private'));
+
+    accountAUser.body.resolve(user('account-a'));
+    await expect(oldCurrentUser).resolves.toEqual(user('account-a'));
+    expect(getInstanceCatalog()).toBe(accountBRead);
+    accountB.resolve(jsonResponse(catalog('account-b/private')));
+    await accountBResult;
+  });
+
+  it('still accepts a fresh current user as the authenticated read identity', async () => {
+    setAuthenticatedApiReadIdentity('account-a');
+    const accountA = deferred<Response>();
+    vi.spyOn(globalThis, 'fetch')
+      .mockReturnValueOnce(accountA.promise)
+      .mockResolvedValueOnce(jsonResponse(user('account-b')))
+      .mockResolvedValueOnce(jsonResponse(catalog('account-b/private')));
+
+    const accountARead = getInstanceCatalog();
+    const accountARejected = expect(accountARead).rejects.toMatchObject({ name: 'AbortError' });
+    await expect(getCurrentUser()).resolves.toEqual(user('account-b'));
+    await accountARejected;
+    await expect(getInstanceCatalog()).resolves.toEqual(catalog('account-b/private'));
+  });
+
+  it('does not let late current-user parsing disturb reads after an API endpoint rotation', async () => {
+    setApiBaseUrl('https://account-a.example.test');
+    setAuthenticatedApiReadIdentity('account-a');
+    const accountAUser = deferredJsonResponse();
+    const accountB = deferred<Response>();
+    vi.spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(accountAUser.response)
+      .mockReturnValueOnce(accountB.promise);
+
+    const oldCurrentUser = getCurrentUser();
+    await vi.waitFor(() => expect(accountAUser.json).toHaveBeenCalledOnce());
+    setApiBaseUrl('https://account-b.example.test');
+    setAuthenticatedApiReadIdentity('account-b');
+    const accountBRead = getInstanceCatalog();
+    const accountBResult = expect(accountBRead).resolves.toEqual(catalog('account-b/private'));
+
+    accountAUser.body.resolve(user('account-a'));
+    await expect(oldCurrentUser).resolves.toEqual(user('account-a'));
+    accountB.resolve(jsonResponse(catalog('account-b/private')));
+    await accountBResult;
+  });
+
+  it('keeps new Desktop endpoint and transport reads isolated from late current-user JSON', async () => {
+    setDesktopConnectionScope(desktopScope('a'), 'https://account-a.example.test');
+    setAuthenticatedApiReadIdentity('account-a');
+    const accountAUser = deferredJsonResponse();
+    const accountB = deferred<Response>();
+    vi.spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(accountAUser.response)
+      .mockReturnValueOnce(accountB.promise);
+
+    const oldCurrentUser = getCurrentUser();
+    await vi.waitFor(() => expect(accountAUser.json).toHaveBeenCalledOnce());
+    setDesktopConnectionScope(desktopScope('b'), 'https://account-b.example.test');
+    setAuthenticatedApiReadIdentity('account-b');
+    const accountBRead = getInstanceCatalog();
+    const accountBResult = expect(accountBRead).resolves.toEqual(catalog('account-b/private'));
+
+    accountAUser.body.resolve(user('account-a'));
+    await expect(oldCurrentUser).rejects.toThrow('Current-user response schema was invalid.');
+    accountB.resolve(jsonResponse(catalog('account-b/private')));
+    await accountBResult;
   });
 
   it('starts fresh reads after a Desktop reconnect rotates its transport scope', async () => {

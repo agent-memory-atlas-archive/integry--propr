@@ -28,12 +28,18 @@ const invalidateInFlightApiReads = (): void => {
   inFlightApiReads.clear();
 };
 
+export const getAuthenticatedApiReadScopeGeneration = (): number => apiReadScopeGeneration;
+
 /**
  * Publish the validated browser/Desktop account that owns authenticated reads.
  * A changed identity fences responses issued for the previous account. Desktop
  * profile and transport changes are fenced separately below, before validation.
  */
-export const setAuthenticatedApiReadIdentity = (identity: string | null): void => {
+export const setAuthenticatedApiReadIdentity = (
+  identity: string | null,
+  expectedGeneration: number = apiReadScopeGeneration,
+): void => {
+  if (expectedGeneration !== apiReadScopeGeneration) return;
   if (authenticatedApiReadIdentity === identity) return;
   authenticatedApiReadIdentity = identity;
   invalidateInFlightApiReads();
