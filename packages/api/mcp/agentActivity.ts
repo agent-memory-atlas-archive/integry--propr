@@ -10,6 +10,7 @@ interface AgentActivityArgs {
   repository: string;
   goalId?: string;
   taskId?: string;
+  includeReasoningSummaries?: boolean;
   offset: number;
   limit: number;
 }
@@ -147,9 +148,11 @@ function compactNarration(content: string): string | null {
 function projectNarration(
   events: Array<Record<string, unknown>>,
   fallbackTimestamp: string | null,
+  includeReasoningSummaries = false,
 ): IndexedActivity[] {
   const projected = events.flatMap((event, index): IndexedActivity[] => {
-    if (!['thought', 'message'].includes(String(event.type)) || event.internalReasoning === true) return [];
+    if (!['thought', 'message'].includes(String(event.type))) return [];
+    if (event.internalReasoning === true && !(includeReasoningSummaries && event.reasoningSummary === true)) return [];
     const message = typeof event.content === 'string' ? compactNarration(event.content) : null;
     const timestamp = isoTimestamp(event.timestamp, fallbackTimestamp);
     return message && timestamp ? [{ index, timestamp, message }] : [];
@@ -175,7 +178,7 @@ export async function getAgentActivity(
     target.taskId,
     target.sessionId,
   );
-  const entries = projectNarration(live?.events ?? [], target.fallbackTimestamp);
+  const entries = projectNarration(live?.events ?? [], target.fallbackTimestamp, args.includeReasoningSummaries);
   const activity = entries
     .slice(args.offset, args.offset + args.limit)
     .map(({ timestamp, message }) => ({ timestamp, message }));

@@ -41,6 +41,7 @@ const agentActivitySchema = z.object({
   repository: repositorySchema,
   goalId: z.uuid().optional(),
   taskId: idSchema.optional(),
+  includeReasoningSummaries: z.boolean().default(false).describe('Include Codex app-server reasoning summaries as compact narration. Raw reasoning remains excluded.'),
   ...pageShape,
 }).strict().refine(
   args => Number(Boolean(args.goalId)) + Number(Boolean(args.taskId)) === 1,
@@ -129,7 +130,7 @@ export function createToolCatalog(deps: ToolDeps): McpTool[] {
   tools.push({ name: 'get_task', description: 'Read a task’s persisted state.', scope: 'read', readOnly: true, schema: z.object(taskShape).strict(), target: taskTarget, run: async ({ args }) => ok({ ...await db('tasks').where({ task_id: args.taskId }).first(taskColumns), latestEvent: await db('task_history').where({ task_id: args.taskId }).orderBy('history_id', 'desc').first('state', 'reason', 'timestamp') }) });
   tools.push({
     name: 'get_agent_activity',
-    description: 'Read recent compact agent narration for exactly one goal or task, newest first. Excludes reasoning and raw tool logs; use offset for older entries.',
+    description: 'Read recent compact agent narration for exactly one goal or task, newest first. Opt in to Codex app-server summaries with includeReasoningSummaries; raw reasoning and tool logs are always excluded. Use offset for older entries.',
     scope: 'read',
     readOnly: true,
     schema: agentActivitySchema,

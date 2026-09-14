@@ -134,7 +134,7 @@ test('stored Codex App Server output renders semantic events instead of JSON-RPC
   assert.equal(stored.format, 'codex');
   assert.deepEqual(stored.parsed, {
     events: [
-      { type: 'thought', content: 'Inspecting the parser', internalReasoning: true, timestamp: timestamp(1) },
+      { type: 'thought', content: 'Inspecting the parser', internalReasoning: true, reasoningSummary: true, timestamp: timestamp(1) },
       { type: 'tool_use', toolName: 'Bash', input: { command: 'npm test' }, timestamp: timestamp(3) },
       { type: 'tool_result', result: 'passed', isError: false, timestamp: timestamp(3) },
     ],

@@ -114,6 +114,7 @@ test('get_agent_activity returns compact newest-first narration for direct and o
 
   try {
     const defaults = tool.schema.parse({ repository, goalId: directGoalId });
+    assert.equal(defaults.includeReasoningSummaries, false);
     const direct = (await tool.run({ principal, args: defaults })).data as Record<string, any>; // eslint-disable-line @typescript-eslint/no-explicit-any
     assert.deepEqual(direct.target, {
       type: 'goal', goalId: directGoalId, taskId: 'goal-task-direct', launchStrategy: 'direct',
@@ -143,7 +144,7 @@ test('get_agent_activity returns compact newest-first narration for direct and o
     const secondPage = (await tool.run({ principal, args: secondPageArgs })).data as Record<string, any>; // eslint-disable-line @typescript-eslint/no-explicit-any
     assert.equal(secondPage.activity[0].timestamp, '2026-09-13T10:00:03.000Z');
 
-    const orchestratedArgs = tool.schema.parse({ repository, goalId: orchestratedGoalId });
+    const orchestratedArgs = tool.schema.parse({ repository, goalId: orchestratedGoalId, includeReasoningSummaries: true });
     const orchestrated = (await tool.run({ principal, args: orchestratedArgs })).data as Record<string, any>; // eslint-disable-line @typescript-eslint/no-explicit-any
     assert.equal(orchestrated.target.launchStrategy, 'orchestrate');
     assert.equal(orchestrated.currentFocus, 'Verify orchestrated activity');
@@ -165,6 +166,61 @@ test('get_agent_activity returns compact newest-first narration for direct and o
       () => tool.schema.parse({ repository, goalId: directGoalId, taskId: 'goal-task-direct' }),
       /Provide exactly one/,
     );
+  } finally {
+    await db.destroy();
+  }
+});
+
+test('get_agent_activity opts in to only Codex summaries for live and persisted activity', async () => {
+  const db = await createActivityDatabase();
+  const summary = `Inspecting the parser.\n\n${'Checking narration. '.repeat(40)}`;
+  const output = [
+    { method: 'item/completed', params: { item: { type: 'agentMessage', text: 'Starting the task.' } }, emittedAtMs: Date.parse('2026-09-13T10:00:00.000Z') },
+    { method: 'item/completed', params: { item: { type: 'reasoning', summary: [summary], content: ['Hidden raw content'], text: 'Hidden raw text' } }, emittedAtMs: Date.parse('2026-09-13T10:00:01.000Z') },
+    { method: 'item/completed', params: { item: { type: 'reasoning', summary: [], content: ['Hidden content without summary'], text: 'Hidden text without summary' } } },
+    { type: 'item.completed', item: { type: 'reasoning', text: 'Hidden legacy reasoning' } },
+    { method: 'item/reasoning/textDelta', params: { delta: 'Hidden reasoning delta' } },
+    { method: 'item/completed', params: { item: { type: 'commandExecution', command: 'Hidden command', aggregatedOutput: 'Hidden output' } } },
+  ].map(event => JSON.stringify(event));
+  let live = true;
+  const redisClient = {
+    get: async (key: string) => live && key === 'agent:output:goal-task-direct' ? output.join('\n') : null,
+  } as unknown as RedisClientType;
+  const tool = createToolCatalog({
+    db, redisClient, policy: {} as McpPolicy, taskQueue: {} as never, runtimeBuildQueue: {} as never,
+  }).find(candidate => candidate.name === 'get_agent_activity');
+  assert.ok(tool);
+  const principal = { user: { id: 'owner-1' } } as McpPrincipal;
+  const read = async (args: Record<string, unknown>) =>
+    (await tool.run({ principal, args: tool.schema.parse({ repository, ...args }) })).data as Record<string, any>; // eslint-disable-line @typescript-eslint/no-explicit-any
+
+  try {
+    await db('task_history').where({ task_id: 'goal-task-direct' }).update({
+      metadata: JSON.stringify({ goalOutputRecords: output }),
+    });
+    for (const useLiveOutput of [true, false]) {
+      live = useLiveOutput;
+      for (const target of [{ goalId: directGoalId }, { taskId: 'goal-task-direct' }]) {
+        for (const option of [{}, { includeReasoningSummaries: false }]) {
+          const defaults = await read({ ...target, ...option });
+          assert.deepEqual(defaults.activity, [{ timestamp: '2026-09-13T10:00:00.000Z', message: 'Starting the task.' }]);
+        }
+        const included = await read({ ...target, includeReasoningSummaries: true });
+        assert.equal(included.activity.length, 2);
+        assert.equal(included.activity[0].timestamp, '2026-09-13T10:00:01.000Z');
+        assert.match(included.activity[0].message, /^Inspecting the parser\. Checking narration\./);
+        assert.equal(included.activity[0].message.length, 500);
+        assert.match(included.activity[0].message, /…$/);
+        assert.doesNotMatch(JSON.stringify(included), /Hidden/);
+        const first = await read({ ...target, includeReasoningSummaries: true, limit: 1 });
+        assert.deepEqual(first.activity, [included.activity[0]]);
+        assert.equal(first.nextOffset, 1);
+        const second = await read({ ...target, includeReasoningSummaries: true, limit: 1, offset: first.nextOffset });
+        assert.deepEqual(second.activity, [included.activity[1]]);
+        assert.equal(second.nextOffset, null);
+      }
+    }
+    assert.throws(() => tool.schema.parse({ repository, goalId: directGoalId, includeReasoningSummaries: 'true' }));
   } finally {
     await db.destroy();
   }

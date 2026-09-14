@@ -271,7 +271,7 @@ function processAppServerItem(item: Record<string, unknown>, timestamp: string, 
   }
   if (type === 'reasoning') {
     const summary = Array.isArray(item.summary) ? item.summary.join('\n') : textFromValue(item.summary);
-    if (summary) state.events.push({ type: 'thought', content: truncateContent(summary), internalReasoning: true, timestamp });
+    if (summary) state.events.push({ type: 'thought', content: truncateContent(summary), internalReasoning: true, reasoningSummary: true, timestamp });
     return;
   }
   if (type === 'commandExecution') {
