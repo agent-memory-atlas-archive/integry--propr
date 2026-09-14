@@ -204,6 +204,14 @@ No tool downloads arbitrary remote URLs. Secret entry and browser push/login
 flows stay in the browser. Tool responses are bounded at 256 KiB and redact
 credential fields and recognizable token strings.
 
+List tools return bounded summaries rather than requiring one read per item.
+Task and goal entries include a concise title/summary, agent and model, linked
+pull request state, lifecycle timestamps, elapsed milliseconds, and a failure
+reason when applicable. Plan entries aggregate issue progress, agent/model
+assignments, and pull requests; TODO entries include their category and linked
+plan. Full objectives, prompts, and TODO bodies remain available from the
+corresponding `get_*` tool without inflating large list pages.
+
 `get_agent_activity` reads exactly one authorized `goalId` or `taskId`. It
 defaults to the 20 most recent entries and returns newest-first, timestamped
 pages with `nextOffset` for older narration. Each entry is whitespace-normalized

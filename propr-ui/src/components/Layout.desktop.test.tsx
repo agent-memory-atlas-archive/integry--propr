@@ -77,18 +77,20 @@ describe('Layout desktop instance selector', () => {
     mocks.hasRepos = true;
   });
 
-  it('keeps the version at the bottom on desktop and web and toggles the actual sidebar', () => {
+  it('keeps version and copyright on web but out of the desktop sidebar', () => {
     vi.stubGlobal('matchMedia', vi.fn(() => ({ matches: true })));
     const desktop = renderLayout(desktopValue());
-    expect(document.querySelector('aside footer')).toHaveTextContent(`v${__APP_VERSION__}`);
+    expect(document.querySelector('aside footer')).toBeNull();
+    expect(screen.queryByText(`ProPR v${__APP_VERSION__}`)).not.toBeInTheDocument();
     fireEvent(window, new CustomEvent(DESKTOP_UI_COMMAND_EVENT, { detail: 'toggle-sidebar' }));
     expect(document.querySelector('aside')).toBeNull();
     fireEvent(window, new CustomEvent(DESKTOP_UI_COMMAND_EVENT, { detail: 'toggle-sidebar' }));
     expect(screen.getByRole('link', { name: 'Dashboard' })).toBeInTheDocument();
     desktop.unmount();
     renderLayout(null);
-    expect(document.querySelector('aside footer')).toHaveTextContent('Rinalds Uzkalns');
-    expect(document.querySelector('aside footer')).toHaveTextContent(`v${__APP_VERSION__}`);
+    const webFooter = document.querySelector('aside footer');
+    expect(webFooter).toHaveTextContent('Rinalds Uzkalns');
+    expect(webFooter).toHaveTextContent(`v${__APP_VERSION__}`);
     fireEvent(window, new CustomEvent(DESKTOP_UI_COMMAND_EVENT, { detail: 'toggle-sidebar' }));
     expect(document.querySelector('aside')).not.toBeNull();
     vi.unstubAllGlobals();

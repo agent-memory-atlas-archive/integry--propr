@@ -1816,7 +1816,11 @@ if (!hasSingleInstanceLock) {
     desktopNativeCommands = createDesktopNativeCommandDispatcher({
       showAbout: () => {
         const detail = applicationAboutDetails(app.getVersion(), process.platform, process.arch, process.versions);
-        void showApplicationAbout({ showMessageBox: options => dialog.showMessageBox(options), copy: text => clipboard.writeText(text) }, detail)
+        void showApplicationAbout({
+          showMessageBox: options => dialog.showMessageBox(options),
+          copy: text => clipboard.writeText(text),
+          openExternal: openAllowedExternalUrl,
+        }, detail)
           .catch(() => log('warn', 'desktop.about.open_failed'));
       },
       openExternal: openAllowedExternalUrl,

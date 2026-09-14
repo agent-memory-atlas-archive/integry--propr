@@ -61,7 +61,8 @@ it('Linux/macOS menu dispatch reaches actual search, sidebar, task creation, con
       await page.getByRole('button', { name: 'Back', exact: true }).click();
       await page.getByRole('button', { name: 'This computer Local instance' }).click();
       await expect(page.locator('.desktop-sidebar')).toBeVisible();
-      await expect(page.locator('.desktop-sidebar footer')).toContainText('v0.8.15');
+      await expect(page.locator('.desktop-sidebar footer')).toHaveCount(0);
+      await expect(page.locator('.desktop-sidebar')).not.toContainText('v0.8.15');
       const iconRails = await page.locator('.desktop-sidebar').evaluate(sidebar => {
         const selectors = ['.desktop-instance-icon svg', 'a[href="#/"] svg', 'a[href="#/inbox"] svg'];
         return selectors.map(selector => {
@@ -70,7 +71,7 @@ it('Linux/macOS menu dispatch reaches actual search, sidebar, task creation, con
         });
       });
       expect(new Set(iconRails).size).toBe(1);
-      await capture('sidebar', page.locator('.desktop-sidebar'), 'Desktop sidebar with version at the bottom');
+      await capture('sidebar', page.locator('.desktop-sidebar'), 'Desktop sidebar without version metadata');
       await click('Toggle Sidebar');
       await expect(page.locator('.desktop-sidebar')).toHaveCount(0);
       await capture('sidebar-hidden', page.locator('.desktop-shell'), 'View → Toggle Sidebar: content expands');

@@ -392,10 +392,11 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
               </button>
             </div>
           )}
-          {/* Metadata sits flush on the sidebar's shared 16px left rail (the same
+          {/* Desktop keeps this metadata in the native About dialog. On web,
+              metadata sits flush on the sidebar's shared 16px left rail (the same
               rail as the nav labels and the Usage heading) rather than being
               indented to the profile's text column. */}
-          <footer className="mt-4 px-4 pb-2 leading-tight space-y-1">
+          {!desktop && <footer className="mt-4 px-4 pb-2 leading-tight space-y-1">
             {/* The version is the datum developers scan for, so it sits one
                 contrast step above the secondary copyright line. */}
             <div className="text-[11px] text-slate-500">
@@ -409,8 +410,8 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
               </a>{' '}
               v{__APP_VERSION__}
             </div>
-            {!desktop && <div className="text-[10px] text-slate-400">© {new Date().getFullYear()} Rinalds Uzkalns</div>}
-          </footer>
+            <div className="text-[10px] text-slate-400">© {new Date().getFullYear()} Rinalds Uzkalns</div>
+          </footer>}
           </div>
         </div>
       </aside>}
