@@ -136,7 +136,7 @@ export async function serializeGoal(
   source: GoalProjectionRow,
 ) {
   const row = source;
-  const live = await projectTaskLiveDetails(redis, db, row.current_task_id, row.session_id);
+  const live = await projectTaskLiveDetails(redis, db, row.current_task_id, { sessionId: row.session_id });
   const latestHistory = await db('task_history')
     .where({ task_id: row.current_task_id })
     .orderBy('timestamp', 'desc')

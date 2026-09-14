@@ -27,6 +27,7 @@ import { addAdministrationTools } from './toolsAdministration.js';
 import { addArtifactTools } from './toolsArtifacts.js';
 import { addManagementTools } from './toolsManagement.js';
 import { presentResult, type PresentedResult } from './presentation.js';
+import { getAgentActivity } from './agentActivity.js';
 
 export const repositorySchema = z.string().regex(/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/).max(255);
 export const idSchema = z.string().min(1).max(255);
@@ -36,6 +37,16 @@ export const mutationShape = { idempotencyKey: z.string().regex(/^[\w.-]{8,128}$
 export const planShape = { repository: repositorySchema, planId: z.uuid() };
 export const goalShape = { repository: repositorySchema, goalId: z.uuid() };
 export const taskShape = { repository: repositorySchema, taskId: idSchema };
+const agentActivitySchema = z.object({
+  repository: repositorySchema,
+  goalId: z.uuid().optional(),
+  taskId: idSchema.optional(),
+  includeReasoningSummaries: z.boolean().default(false).describe('Include Codex app-server reasoning summaries as compact narration. Raw reasoning remains excluded.'),
+  ...pageShape,
+}).strict().refine(
+  args => Number(Boolean(args.goalId)) + Number(Boolean(args.taskId)) === 1,
+  { message: 'Provide exactly one of goalId or taskId.' },
+);
 export type Args = Record<string, any>; // eslint-disable-line @typescript-eslint/no-explicit-any -- Zod validates each concrete tool schema before dispatch
 export interface ToolContext { principal: McpPrincipal; args: Args; operationId?: string }
 export interface McpTool {
@@ -117,6 +128,18 @@ export function createToolCatalog(deps: ToolDeps): McpTool[] {
     return ok({ tasks, nextOffset: tasks.length === args.limit ? args.offset + args.limit : null });
   } });
   tools.push({ name: 'get_task', description: 'Read a task’s persisted state.', scope: 'read', readOnly: true, schema: z.object(taskShape).strict(), target: taskTarget, run: async ({ args }) => ok({ ...await db('tasks').where({ task_id: args.taskId }).first(taskColumns), latestEvent: await db('task_history').where({ task_id: args.taskId }).orderBy('history_id', 'desc').first('state', 'reason', 'timestamp') }) });
+  tools.push({
+    name: 'get_agent_activity',
+    description: 'Read recent compact agent narration for exactly one goal or task, newest first. Opt in to Codex app-server summaries with includeReasoningSummaries; raw reasoning and tool logs are always excluded. Use offset for older entries.',
+    scope: 'read',
+    readOnly: true,
+    schema: agentActivitySchema,
+    run: async ({ principal, args }) => ok(await getAgentActivity(
+      { db, redisClient },
+      args as z.infer<typeof agentActivitySchema>,
+      principal.user.id,
+    )),
+  });
   tools.push({ name: 'get_task_events', description: 'Read bounded task history; use offset for continuation.', scope: 'read', readOnly: true, schema: z.object({ ...taskShape, ...pageShape }).strict(), target: taskTarget, run: async ({ args }) => {
     const events = await db('task_history').where({ task_id: args.taskId }).orderBy('history_id').offset(args.offset).limit(args.limit);
     return ok({ events, nextOffset: events.length === args.limit ? args.offset + args.limit : null });
