@@ -32,10 +32,6 @@ export interface TaskListProps {
   hideFilters?: boolean;
 }
 
-export interface LoadConfig {
-  setLoadingState?: boolean;
-}
-
 export interface TaskGroup {
   key: string;
   repoOwner: string;

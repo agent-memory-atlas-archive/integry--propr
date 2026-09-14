@@ -91,8 +91,10 @@ export const getStatusPill = (status: string) => {
         </span>
       );
     case 'active':
+    case 'implementing':
     case 'claude_execution':
     case 'processing':
+    case 'post_processing':
       return (
         <span className={`${baseClasses} bg-teal-50 text-teal-700 border border-teal-200`}>
            <span className="w-1.5 h-1.5 rounded-full bg-teal-500 animate-pulse"></span>
@@ -101,6 +103,7 @@ export const getStatusPill = (status: string) => {
       );
     case 'waiting':
     case 'pending':
+    case 'queued':
       return (
         <span className={`${baseClasses} bg-purple-50 text-purple-700 border border-purple-200`}>
            <span className="w-1.5 h-1.5 rounded-full bg-purple-500"></span>

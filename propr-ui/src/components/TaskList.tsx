@@ -4,7 +4,7 @@ import { Inbox } from 'lucide-react';
 import { getTasks, getRepositoryStats } from '../api/proprApi';
 import { useSocket } from '../contexts/useSocket';
 import type { RepoOption } from './RepositorySelector';
-import type { Task, TaskGroup, TaskListProps, LoadConfig } from './TaskList/types';
+import type { Task, TaskGroup, TaskListProps } from './TaskList/types';
 import { Filters } from './TaskList/Filters';
 import { Pagination } from './TaskList/Pagination';
 import {
@@ -104,8 +104,6 @@ const TaskList: React.FC<TaskListProps> = ({ limit, showViewAll = false, hideFil
   const isInitialMount = useRef(true);
 
   const [tasks, setTasks] = useState<Task[]>([]);
-  const [loading, setLoading] = useState<boolean>(true);
-  const [refreshing, setRefreshing] = useState<boolean>(false);
   const [loadedScope, setLoadedScope] = useState<string | null>(null);
   const [error, setError] = useState<{ scope: string; message: string } | null>(null);
 
@@ -203,12 +201,9 @@ const TaskList: React.FC<TaskListProps> = ({ limit, showViewAll = false, hideFil
   useDebouncedCallback(searchQuery, handleSearchChange, 400);
 
   // Memoize fetchTasks to allow WebSocket handler to call it
-  const fetchTasks = useCallback(async (loadConfig?: LoadConfig) => {
+  const fetchTasks = useCallback(async () => {
     const requestId = ++tasksRequestId.current;
-    const showLoadingState = loadConfig?.setLoadingState ?? true;
     try {
-      if (showLoadingState) setLoading(true);
-      else setRefreshing(true);
       setError(current => current?.scope === queryScope ? null : current);
       const offset = currentPage * tasksPerPage;
       // Fetch more tasks if we are doing grouping, as grouping reduces visible items
@@ -224,17 +219,12 @@ const TaskList: React.FC<TaskListProps> = ({ limit, showViewAll = false, hideFil
       if (requestId !== tasksRequestId.current) return;
       setError({ scope: queryScope, message: (err as Error).message });
       console.error('Error fetching tasks:', err);
-    } finally {
-      if (requestId === tasksRequestId.current) {
-        setLoading(false);
-        setRefreshing(false);
-      }
     }
   }, [filter, tasksPerPage, currentPage, repoFilter, debouncedSearch, queryScope]);
 
   // Refresh repository stats only on initial mount when filters are visible.
   useEffect(() => {
-    fetchTasks({ setLoadingState: true });
+    fetchTasks();
   }, [fetchTasks]);
 
   useEffect(() => {
@@ -245,7 +235,7 @@ const TaskList: React.FC<TaskListProps> = ({ limit, showViewAll = false, hideFil
 
   const refreshLiveTasks = useCallback(async () => {
     await Promise.all([
-      fetchTasks({ setLoadingState: false }),
+      fetchTasks(),
       refreshRepositoryStats(false),
     ]);
   }, [fetchTasks, refreshRepositoryStats]);
@@ -321,7 +311,6 @@ const TaskList: React.FC<TaskListProps> = ({ limit, showViewAll = false, hideFil
         <Filters {...filterProps} />
 
         {currentError && <DashboardErrorState error={currentError} />}
-        {refreshing && <div role="status" className="px-4 pb-2 text-xs text-slate-500">Refreshing tasks…</div>}
 
         {visibleTasks.length === 0 ? (
           <div className="flex flex-1 flex-col items-center justify-center px-6 py-12 text-center">
@@ -354,7 +343,6 @@ const TaskList: React.FC<TaskListProps> = ({ limit, showViewAll = false, hideFil
       {/* Scrollable Content Area */}
       <div className="flex-1 overflow-auto">
         {currentError && <div className="px-4 pt-4 sm:px-6"><DashboardErrorState error={currentError} /></div>}
-        {(loading || refreshing) && <div role="status" className="px-4 pt-3 text-xs text-slate-500 sm:px-6">Refreshing tasks…</div>}
         {visibleTasks.length === 0 ? (
           <div className="text-center py-20 mx-4 sm:mx-6 bg-gray-50 rounded-lg border border-dashed border-gray-300">
             <p className="text-gray-500">No tasks found — try clearing filters, or start one by creating a plan or adding your ProPR trigger label to a GitHub issue.</p>

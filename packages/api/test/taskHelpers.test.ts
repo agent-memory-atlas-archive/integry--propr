@@ -199,3 +199,57 @@ test('task history migration replaces the redundant index and satisfies latest-s
   assert.ok(rolledBack.some(index => index.name === 'task_history_task_id_index'));
   assert.ok(!rolledBack.some(index => index.name === 'task_history_task_id_timestamp_index'));
 });
+
+test('lifecycle filters map UI labels onto the worker states stored in history', async () => {
+  const database = await createDatabase();
+  await addTaskHistoryLookupIndex(database);
+
+  await database('tasks').insert([
+    { task_id: 'processing-task', repository: 'acme/widget', task_type: 'issue', created_at: '2026-09-14T06:00:00.000Z' },
+    { task_id: 'claude-task', repository: 'acme/widget', task_type: 'issue', created_at: '2026-09-14T05:00:00.000Z' },
+    { task_id: 'post-processing-task', repository: 'acme/widget', task_type: 'issue', created_at: '2026-09-14T04:00:00.000Z' },
+    { task_id: 'queued-task', repository: 'acme/widget', task_type: 'issue', created_at: '2026-09-14T03:00:00.000Z' },
+    { task_id: 'pending-task', repository: 'acme/widget', task_type: 'issue', created_at: '2026-09-14T02:00:00.000Z' },
+    { task_id: 'completed-task', repository: 'acme/widget', task_type: 'issue', created_at: '2026-09-14T01:00:00.000Z' },
+    { task_id: 'failed-task', repository: 'acme/widget', task_type: 'issue', created_at: '2026-09-14T00:00:00.000Z' },
+  ]);
+  await database('task_history').insert([
+    // The completed task passed through an active state first; only its latest
+    // state may decide whether the Active filter includes it.
+    { task_id: 'completed-task', state: 'claude_execution', timestamp: '2026-09-14T01:01:00.000Z' },
+    { task_id: 'completed-task', state: 'completed', timestamp: '2026-09-14T01:02:00.000Z' },
+    { task_id: 'processing-task', state: 'processing', timestamp: '2026-09-14T06:01:00.000Z' },
+    { task_id: 'claude-task', state: 'claude_execution', timestamp: '2026-09-14T05:01:00.000Z' },
+    { task_id: 'post-processing-task', state: 'post_processing', timestamp: '2026-09-14T04:01:00.000Z' },
+    { task_id: 'queued-task', state: 'queued', timestamp: '2026-09-14T03:01:00.000Z' },
+    { task_id: 'pending-task', state: 'pending', timestamp: '2026-09-14T02:01:00.000Z' },
+    { task_id: 'failed-task', state: 'failed', timestamp: '2026-09-14T00:01:00.000Z' },
+  ]);
+
+  const idsFor = async (status: string) => {
+    const page = await getTasksFromDb({
+      db: database, status, repository: 'all', limit: 10, offset: 0,
+    });
+    return { total: page.total, ids: (page.tasks as Array<{ id: string }>).map(task => task.id) };
+  };
+
+  const activeIds = ['processing-task', 'claude-task', 'post-processing-task'];
+  const active = await idsFor('active');
+  assert.equal(active.total, 3);
+  assert.deepEqual(active.ids, activeIds);
+  // 'Implementing' is the label the task list renders for the same filter.
+  assert.deepEqual(await idsFor('implementing'), active);
+  assert.deepEqual(await idsFor('Implementing'), active);
+
+  const waitingIds = ['queued-task', 'pending-task'];
+  const waiting = await idsFor('waiting');
+  assert.equal(waiting.total, 2);
+  assert.deepEqual(waiting.ids, waitingIds);
+  assert.deepEqual(await idsFor('pending'), waiting);
+
+  // Terminal and granular states keep matching exactly.
+  assert.deepEqual((await idsFor('completed')).ids, ['completed-task']);
+  assert.deepEqual((await idsFor('failed')).ids, ['failed-task']);
+  assert.deepEqual((await idsFor('claude_execution')).ids, ['claude-task']);
+  assert.equal((await idsFor('all')).total, 7);
+});
