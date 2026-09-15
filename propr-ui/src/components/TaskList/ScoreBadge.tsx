@@ -38,10 +38,8 @@ export const ScoreBadge: React.FC<ScoreBadgeProps> = ({ score, dimmed = false, c
       className={`inline-flex justify-center items-center gap-0.5 w-12 min-w-12 max-w-12 py-0.5 font-mono text-sm font-bold tabular-nums ${colorClasses} ${dimmed ? 'opacity-40' : ''} ${className}`}
       title={`Code Quality Score: ${score}/10`}
     >
-      <span aria-hidden="true" className="text-slate-400">[</span>
       <ShapeIcon size={8} className="shrink-0" fill="currentColor" aria-hidden="true" />
       <span>{score}</span>
-      <span aria-hidden="true" className="text-slate-400">]</span>
     </span>
   );
 };
