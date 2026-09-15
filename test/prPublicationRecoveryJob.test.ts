@@ -25,6 +25,7 @@ const seed = path.join(root, 'seed');
 await writeFile(path.join(seed, 'base.txt'), 'base\n');
 git(seed, 'add', '.'); git(seed, 'commit', '-m', 'Base');
 git(seed, 'branch', '-M', 'release'); git(seed, 'push', 'origin', 'release');
+const baseSha = git(seed, 'rev-parse', 'HEAD');
 git(root, 'clone', '--bare', path.join(root, 'upstream.git'), 'fork.git');
 git(seed, 'checkout', '-b', 'contribution');
 await writeFile(path.join(seed, 'contributor.txt'), 'contribution\n');
@@ -55,6 +56,7 @@ let skipValidation = false;
 let prompts: string[] = [];
 let produced: string[] = [];
 let expectedAgentHead: string | undefined;
+let afterAgentExecution: (() => Promise<void>) | undefined;
 let completionBodies: string[] = [];
 let failCompletion = false;
 let failTaskCompletion = false;
@@ -190,6 +192,9 @@ const octokit = {
         if (endpoint === 'POST /repos/{owner}/{repo}/pulls') {
             if (failPRCreate) throw new Error('PR creation network error');
             if (prs.length) throw Object.assign(new Error('PR already exists'), { status: 422 });
+            // GitHub rejects a head with no commits ahead of the base.
+            const emptyHead = (() => { try { git(repoPath('upstream'), 'merge-base', '--is-ancestor', `refs/heads/${options.head}`, `refs/heads/${options.base}`); return true; } catch { return false; } })();
+            if (emptyHead) throw Object.assign(new Error('Validation Failed'), { status: 422, response: { data: { errors: [{ message: `No commits between ${options.base} and ${options.head}` }] } } });
             const pr = { number: 100, state: 'open', html_url: 'https://github.com/upstream/project/pull/100', body: options.body, base: { ref: options.base }, head: { ref: options.head, repo: { full_name: 'upstream/project' } } };
             prs.push(pr);
             await onPRCreated?.();
@@ -238,7 +243,7 @@ const modules: Record<string, Record<string, unknown>> = {
         applyPendingCommentCommandContext: noOp,
     },
     prCommentReviewJob: { executeReviewProcessing: async (params: { context: { pullRequestNumber: number } }) => { events.push(`review:${params.context.pullRequestNumber}`); return { status: 'complete' }; } },
-    prCommentAgentUtils: { generateSummaryTitle: async () => 'Saved subtitle', resolveAndExecuteAgent: async ({ worktreePath, prompt }: { worktreePath: string; prompt: string }) => { events.push('agent'); prompts.push(prompt); if (produced.length) assert.equal(git(worktreePath, 'rev-parse', 'HEAD'), expectedAgentHead ?? produced[0]); await writeFile(path.join(worktreePath, 'implementation.txt'), `execution ${prompts.length}\n`); return { claudeResult: { success: !partialResult, summary: 'Saved agent summary', sessionId: 'saved-session', model: 'saved-model' }, agentType: 'test' }; }, resolvePRCommentModelName: async () => 'model' },
+    prCommentAgentUtils: { generateSummaryTitle: async () => 'Saved subtitle', resolveAndExecuteAgent: async ({ worktreePath, prompt }: { worktreePath: string; prompt: string }) => { events.push('agent'); prompts.push(prompt); await afterAgentExecution?.(); if (produced.length) assert.equal(git(worktreePath, 'rev-parse', 'HEAD'), expectedAgentHead ?? produced[0]); await writeFile(path.join(worktreePath, 'implementation.txt'), `execution ${prompts.length}\n`); return { claudeResult: { success: !partialResult, summary: 'Saved agent summary', sessionId: 'saved-session', model: 'saved-model' }, agentType: 'test' }; }, resolvePRCommentModelName: async () => 'model' },
     reviewCommentFormatter: { isReviewComment: () => false },
     reviewFindingSelector: { hasAuthorizedFixFeedback: () => true, prepareFixReviewFeedback: async () => ({ isFixMode: false, selectedReviewComments: [] }) },
     ultrafixOrchestrationService: {
@@ -273,7 +278,7 @@ const job = (id = 'task-1', commentId = 5, body = 'Original instructions') => ({
 const run = (request = job()) => processPullRequestCommentJob(request as never);
 const denial = () => new Error('remote: Write access to repository not granted. fatal: HTTP 403');
 beforeEach(async () => {
-    expectedAgentHead = undefined;
+    expectedAgentHead = undefined; afterAgentExecution = undefined;
     missingCommentIds.clear(); failTaskCompletion = false; promptHistories = [];
     heldLocks.clear(); losePushResponse = false; comparisonError = undefined; onPRCreated = undefined;
     completedCheckHeads = new Set([sourceSha]); deferredReviews = [];
@@ -282,6 +287,7 @@ beforeEach(async () => {
     await database('tasks').delete();
     await database('tasks').insert({ task_id: 'task-1' });
     git(repoPath('upstream'), 'update-ref', '-d', 'refs/heads/propr/continuation-pr-42');
+    git(repoPath('upstream'), 'update-ref', 'refs/heads/release', baseSha);
     git(repoPath('contributor'), 'update-ref', 'refs/heads/contribution', sourceSha);
     forcePushBeforeClone = false;
     calls = []; prs = []; comments = []; prompts = []; events = []; produced = []; completionBodies = []; completions.length = 0;
@@ -470,6 +476,62 @@ test('/fix retries preflight adoption after PR creation fails, then stops once t
     assert.equal((await run(next)).status, 'skipped');
     assert.equal(prompts.length, 1);
 });
+
+test('preflight denial after the base incorporated the source SHA defers PR creation until implementation is published', async () => {
+    probeError = denial();
+    git(repoPath('upstream'), 'update-ref', 'refs/heads/release', sourceSha);
+    const result = await run();
+    assert.equal(result.status, 'complete');
+    assert.equal(result.commit, produced[0]);
+    assert.equal(prompts.length, 1);
+    assert.equal(prs.length, 1);
+    const record = (await findPRContinuation(ref))!;
+    assert.equal(record.continuation_pr, 100);
+    assert.equal(record.publication_bundle, null);
+    assert.equal(record.publication_completion, null);
+    assert.equal(git(repoPath('upstream'), 'rev-parse', 'propr/continuation-pr-42'), produced[0]);
+    // Implementation ran on the reserved upstream branch, never on the contributor's fork.
+    assert.deepEqual(calls.filter(c => c.operation === 'worktree').map(c => (c.args as any).branchName), ['contribution', 'propr/continuation-pr-42']);
+    assert.ok(!calls.some(c => c.operation === 'forkPush'));
+    // The preflight create was rejected as empty; the PR exists only after the implementation HEAD was published.
+    const creates = calls.map((c, index) => ({ ...c, index })).filter(c => c.operation === 'POST /repos/{owner}/{repo}/pulls');
+    assert.ok(creates.length >= 2);
+    assert.ok(creates.at(-1)!.index > calls.findIndex(c => c.operation === 'git' && (c.args as string[])[0] === 'push' && (c.args as string[]).includes('HEAD:refs/heads/propr/continuation-pr-42')));
+    assert.ok(comments.some(c => c.body.includes('propr-continuation-link:42:100')));
+    assert.match(completionBodies[0], /pull\/100/);
+    assert.equal(taskStates.get('task-1'), 'completed');
+});
+
+for (const interruption of ['agent failure', 'PR creation failure', 'continuation push failure']) {
+    test(`deferred preflight PR creation recovers after ${interruption} with at most one successful agent execution`, async () => {
+        probeError = denial();
+        git(repoPath('upstream'), 'update-ref', 'refs/heads/release', sourceSha);
+        if (interruption === 'agent failure') afterAgentExecution = async () => { throw new Error('Agent crashed'); };
+        if (interruption === 'PR creation failure') afterAgentExecution = async () => { failPRCreate = true; };
+        if (interruption === 'continuation push failure') continuationPushError = new Error('Connection timed out');
+        await assert.rejects(run(), /Agent crashed|PR creation network error|Connection timed out/);
+        assert.equal(prompts.length, 1);
+        const reservation = (await findPRContinuation(ref))!;
+        assert.equal(reservation.continuation_pr, null);
+        assert.equal(prs.length, 0);
+        assert.equal(git(repoPath('upstream'), 'rev-parse', 'propr/continuation-pr-42'), sourceSha);
+        if (interruption === 'agent failure') assert.equal(reservation.publication_bundle, null);
+        else await assertSavedCheckpoint();
+
+        afterAgentExecution = undefined; failPRCreate = false; continuationPushError = undefined;
+        const result = await run(job('retry-task'));
+        assert.equal(result.status, 'complete');
+        assert.equal(prompts.length, interruption === 'agent failure' ? 2 : 1);
+        assert.equal(prs.length, 1);
+        assert.equal((await findPRContinuation(ref))!.continuation_pr, 100);
+        assert.equal((await findPRContinuation(ref))!.publication_bundle, null);
+        assert.equal(git(repoPath('upstream'), 'rev-parse', 'propr/continuation-pr-42'), produced.at(-1));
+        assert.equal(result.commit, produced.at(-1));
+        assert.equal(taskStates.get('task-1'), interruption === 'agent failure' ? 'failed' : 'completed');
+        assert.equal(taskStates.get('retry-task'), 'completed');
+        assert.ok(comments.some(c => c.body.includes('propr-continuation-link:42:100')));
+    });
+}
 
 for (const retryTaskId of ['task-1', 'replacement-task']) {
     test(`published completion survives PR closure and branch deletion on retry ${retryTaskId}`, async () => {

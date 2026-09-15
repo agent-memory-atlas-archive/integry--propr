@@ -2,14 +2,18 @@ import assert from 'node:assert/strict';
 import { beforeEach, mock, test } from 'node:test';
 
 let events: string[] = [];
-let continuation: { source_pr: number; continuation_pr: number; branch_name: string } | undefined;
+let continuation: { source_pr: number; continuation_pr: number; branch_name: string; publication_bundle?: string; publication_completion?: string } | undefined;
 let preparationError: Error | undefined;
 let onLockAcquired: (() => void) | undefined;
 let blockedLock: string | undefined;
 let resolutionError: Error | undefined;
 let handledStartingComment: unknown;
 const log = { info() {}, warn() {}, error() {}, debug() {} };
-const stateManager = { updateTaskState: async () => {}, getTaskState: async () => null };
+const failedTasks = new Set<string>();
+const stateManager = {
+    updateTaskState: async (taskId: string, state: string, metadata?: { isRetry?: boolean }) => { events.push(`state:${taskId}:${state}${metadata?.isRetry ? ':retry' : ''}`); },
+    getTaskState: async (taskId: string) => failedTasks.has(taskId) ? { state: 'failed' } : null,
+};
 const octokit = {
     auth: async () => ({ token: 'fixture-token' }),
     request: async (route: string, params: Record<string, unknown>) => {
@@ -27,7 +31,7 @@ await mock.module('@propr/core', { namedExports: {
     hashTaskAttemptToken: () => 'hash', logger: { ...log, withCorrelation: () => log },
     retryConfigs: { githubApi: {} }, withRetry: async (fn: () => unknown) => fn(),
     runWithExecutionAbortSignal: async (_signal: unknown, fn: () => unknown) => fn(),
-    getStateManager: () => stateManager, TaskStates: { PROCESSING: 'processing', COMPLETED: 'completed' },
+    getStateManager: () => stateManager, TaskStates: { PROCESSING: 'processing', COMPLETED: 'completed', FAILED: 'failed', CANCELLED: 'cancelled' },
     ensureGitRepository: noOp, createLogFiles: noOp, UsageLimitError: class extends Error {},
     recordLLMMetrics: noOp, loadPrimaryProcessingLabels: async () => ['propr'],
     loadRepositoryVisualPreviewSettings: noOp,
@@ -69,6 +73,10 @@ const modules: Record<string, Record<string, unknown>> = {
     prCommentCollisionRecovery: { createPRCommentTaskStateIfMissing: noOp, evaluatePRCommentPreExecutionRecovery: async () => ({}), handlePRCommentLockContention: async () => ({ status: 'deferred' }) },
     prPublication: { PullRequestPublication: class {
         status = '';
+        continuation: typeof continuation;
+        get pendingCompletion() { return this.continuation?.publication_completion ? JSON.parse(this.continuation.publication_completion) : undefined; }
+        async reconcilePublication() { events.push('reconcile'); }
+        async announce() {}
         async prepare() { events.push('prepare'); throw preparationError; }
     } },
     prContinuation: { savePublicationCheckpoint: noOp, findPRContinuation: async () => { if (resolutionError) throw resolutionError; return continuation; }, continuationStatus: () => 'Continue at https://github.com/upstream/project/pull/100' },
@@ -82,7 +90,7 @@ const job = (commandMode = 'default', pullRequestNumber = 42) => ({
     data: { repoOwner: 'upstream', repoName: 'project', pullRequestNumber, commandMode, correlationId: 'correlation', commentId: 5, commentBody: 'Implement', commentAuthor: 'contributor' },
 });
 beforeEach(() => {
-    onLockAcquired = undefined; blockedLock = undefined; resolutionError = undefined;
+    onLockAcquired = undefined; blockedLock = undefined; resolutionError = undefined; failedTasks.clear();
     events = []; continuation = undefined; preparationError = undefined; handledStartingComment = undefined;
 });
 
@@ -92,6 +100,24 @@ for (const error of ['Preflight network error', 'Continuation creation failed'])
         await assert.rejects(processPullRequestCommentJob(job() as never), new RegExp(error));
         assert.ok(events.indexOf('comment:42') < events.indexOf('prepare'));
         assert.deepEqual(handledStartingComment, { data: { id: 123, html_url: 'https://github.com/upstream/project/issues/42#issuecomment-123' } });
+        assert.ok(!events.includes('agent'));
+    });
+}
+
+const savedStartingComment = { data: { id: 777, html_url: 'https://github.com/upstream/project/pull/42#issuecomment-777' } };
+for (const retryTaskId of ['task-1', 'replacement-task']) {
+    test(`recovery preparation failure reaches the saved originating comment on retry ${retryTaskId}`, async () => {
+        continuation = {
+            source_pr: 42, continuation_pr: 100, branch_name: 'continuation', publication_bundle: 'bundle',
+            publication_completion: JSON.stringify({ taskId: 'task-1', authorsText: '@contributor', unprocessedComments: [{ id: 5 }], startingWorkComment: savedStartingComment, jobData: {} }),
+        };
+        failedTasks.add('task-1');
+        preparationError = new Error('Continuation creation failed');
+        await assert.rejects(processPullRequestCommentJob({ ...job(), id: retryTaskId } as never), /Continuation creation failed/);
+        assert.deepEqual(handledStartingComment, savedStartingComment);
+        assert.ok(!events.includes('comment:42'));
+        assert.ok(events.indexOf('state:task-1:processing:retry') < events.indexOf('reconcile'));
+        assert.ok(events.indexOf('reconcile') < events.indexOf('prepare'));
         assert.ok(!events.includes('agent'));
     });
 }

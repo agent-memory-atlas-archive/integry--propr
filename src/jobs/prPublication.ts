@@ -4,7 +4,7 @@ import type { PublicationCompletion } from './prCommentPostExecution.js';
 import { resolvePullRequestGitTarget } from './prGitTarget.js';
 import {
     announceContinuation, continuationStatus, continuationTarget, ensurePRContinuation, findPRContinuation,
-    reserveContinuation, savePublicationCheckpoint,
+    isEmptyPullRequestError, reserveContinuation, savePublicationCheckpoint,
     type ContinuationRecord, type Contribution, type PublishContinuationHead, type PullRequestReference,
 } from './prContinuation.js';
 import { checkPullRequestHeadWritable, createPublicationBundle, restorePublicationBundle, isPublicationPermissionDenied, pushContinuationHead } from './prPublicationGit.js';
@@ -35,6 +35,22 @@ export class PullRequestPublication {
 
     private async adopt(publishHead?: PublishContinuationHead) {
         this.continuation = await ensurePRContinuation(this.octokit, this.ref, this.source, publishHead);
+    }
+
+    /** Before implementation there is no HEAD that could make the continuation PR
+     * non-empty. When the base already contains the captured SHA, GitHub rejects the
+     * PR; keep the reservation and its branch as the destination and let push() create
+     * the PR once implementation has a checkpointed HEAD.
+     */
+    private async adoptBeforeImplementation() {
+        try {
+            await this.adopt();
+        } catch (error) {
+            if (!isEmptyPullRequestError(error)) throw error;
+            const reservation = await findPRContinuation(this.ref);
+            if (!reservation) throw error;
+            this.continuation = reservation;
+        }
     }
 
     async announce() {
@@ -123,10 +139,14 @@ export class PullRequestPublication {
                 // A checkpoint without a PR means creation failed earlier. If the base now
                 // contains the captured SHA, GitHub rejects the branch as empty; the saved
                 // commits are published first. The checkpoint stays until both succeed.
-                await this.adopt(existing.publication_bundle ? async () => {
-                    prepared = await this.createWorktree(worktreeDirName, token);
-                    await this.publishCheckpoint(prepared.worktreeInfo.worktreePath, token);
-                } : undefined);
+                if (existing.publication_bundle) {
+                    await this.adopt(async () => {
+                        prepared = await this.createWorktree(worktreeDirName, token);
+                        await this.publishCheckpoint(prepared.worktreeInfo.worktreePath, token);
+                    });
+                } else {
+                    await this.adoptBeforeImplementation();
+                }
             }
             prepared ??= await this.createWorktree(worktreeDirName, token);
             if (!this.target.isFork) {
@@ -143,7 +163,7 @@ export class PullRequestPublication {
         } catch (error) {
             await discard();
             if (!isPublicationPermissionDenied(error)) throw error;
-            await this.adopt();
+            await this.adoptBeforeImplementation();
             await this.announce();
             return this.createWorktree(worktreeDirName, token);
         }
@@ -162,17 +182,17 @@ export class PullRequestPublication {
                 return await pushPullRequestHeadBranch({ worktreePath, target: this.target, authToken: token });
             } catch (error) {
                 if (!this.target.isFork || !isPublicationPermissionDenied(error)) throw error;
-                // Save the actual Git objects before any fallible adoption API request.
                 this.continuation = await findPRContinuation(this.ref) || await reserveContinuation(this.ref, this.source);
-                await savePublicationCheckpoint(this.continuation, await createPublicationBundle(worktreePath, this.continuation.source_sha), completion ? JSON.stringify(completion) : undefined);
-                // If the base already contains the captured SHA, this HEAD is published to
-                // the reserved branch first so GitHub does not reject the PR as empty.
-                await this.adopt(target => pushContinuationHead(worktreePath, target, token));
             }
         }
-        // Publish the existing HEAD directly. No checkout, reset, cherry-pick or agent rerun.
-        // Checkpoint continuation implementations too, including failed remote pushes.
+        // Save the actual Git objects before any fallible adoption API request. Checkpoint
+        // continuation implementations too, including failed remote pushes.
         await savePublicationCheckpoint(this.continuation!, await createPublicationBundle(worktreePath, this.continuation!.source_sha), completion ? JSON.stringify(completion) : undefined);
+        // A reservation without a PR comes from final-push adoption or from a preflight
+        // where the base already contained the captured SHA. This HEAD is published to
+        // the reserved branch first when GitHub would otherwise reject the PR as empty.
+        if (!this.continuation!.continuation_pr) await this.adopt(target => pushContinuationHead(worktreePath, target, token));
+        // Publish the existing HEAD directly. No checkout, reset, cherry-pick or agent rerun.
         const result = await pushContinuationHead(worktreePath, this.target, token);
         await this.markPublished(result.commitHash);
         await this.announce();
