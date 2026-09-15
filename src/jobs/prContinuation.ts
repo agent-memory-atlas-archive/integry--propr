@@ -32,7 +32,13 @@ export interface PullRequestReference {
 }
 
 type Octokit = Awaited<ReturnType<typeof getAuthenticatedOctokit>>;
+/** Publishes saved implementation commits to the reserved branch when GitHub would
+ * otherwise reject the continuation PR as having no commits ahead of its base.
+ */
+export type PublishContinuationHead = (target: PullRequestGitTarget) => Promise<unknown>;
 const repositoryKey = (ref: PullRequestReference) => `${ref.repoOwner}/${ref.repoName}`.toLowerCase();
+/** GitHub rejects pull request bodies above this many characters. */
+export const MAX_PULL_REQUEST_BODY_LENGTH = 65536;
 
 export async function findPRContinuation(ref: PullRequestReference, octokit?: Octokit): Promise<ContinuationRecord | undefined> {
     const mapped = await db<ContinuationRecord>('pr_continuations').where({ repository: repositoryKey(ref) })
@@ -97,7 +103,33 @@ async function ensureBranch(octokit: Octokit, record: ContinuationRecord): Promi
     }
 }
 
-async function ensurePullRequest(octokit: Octokit, record: ContinuationRecord): Promise<ContinuationRecord> {
+/** GitHub's 422 for a head with no commits ahead of the base, from either the error
+ * message or the validation error list, in the API's own wording.
+ */
+export function isEmptyPullRequestError(error: unknown): boolean {
+    const { status, message, response } = error as {
+        status?: number; message?: string; response?: { data?: { errors?: Array<{ message?: string } | string> } };
+    };
+    if (status !== 422) return false;
+    const details = (response?.data?.errors ?? []).map(detail => typeof detail === 'string' ? detail : detail?.message);
+    return [message, ...details].some(text => /no commits between/i.test(text ?? ''));
+}
+
+/** The stored source_body stays complete for execution context; only the displayed
+ * copy is bounded so a valid original body can never make PR creation fail.
+ */
+export function continuationBody(record: Pick<ContinuationRecord, 'repository' | 'source_pr' | 'source_sha' | 'source_author' | 'source_body'>, marker: string): string {
+    const sourceUrl = `https://github.com/${record.repository}/pull/${record.source_pr}`;
+    const prefix = `${marker}\nContinuation of ${sourceUrl}, contributed by @${record.source_author}.\n\nSource SHA: \`${record.source_sha}\`\n\nProPR cannot push to the contributor's branch. Implementation will continue here. Contributor commits and attribution are preserved; the original PR remains open and its discussion remains available.\n\nOriginal objective:\n`;
+    if (prefix.length + record.source_body.length <= MAX_PULL_REQUEST_BODY_LENGTH) return prefix + record.source_body;
+    const notice = `\n\n_The original objective is truncated here. Read the complete text on ${sourceUrl}._`;
+    let excerpt = record.source_body.slice(0, MAX_PULL_REQUEST_BODY_LENGTH - prefix.length - notice.length);
+    // Never end on half of a surrogate pair.
+    if (/[\uD800-\uDBFF]$/.test(excerpt)) excerpt = excerpt.slice(0, -1);
+    return prefix + excerpt + notice;
+}
+
+async function ensurePullRequest(octokit: Octokit, record: ContinuationRecord, publishHead?: PublishContinuationHead): Promise<ContinuationRecord> {
     const { repoOwner: owner, repoName: repo } = continuationTarget(record);
     const marker = `<!-- propr-continuation:${record.source_pr}:${record.source_sha} -->`;
     const findExisting = async () => {
@@ -113,13 +145,22 @@ async function ensurePullRequest(octokit: Octokit, record: ContinuationRecord): 
         : await findExisting();
     if (!pr) {
         await ensureBranch(octokit, record);
-        const sourceUrl = `https://github.com/${record.repository}/pull/${record.source_pr}`;
+        const create = async () => (await octokit.request('POST /repos/{owner}/{repo}/pulls', {
+            owner, repo, head: record.branch_name, base: record.base_branch,
+            title: `Continue #${record.source_pr}: ${record.source_title}`.slice(0, 256),
+            body: continuationBody(record, marker),
+        })).data;
         try {
-            pr = (await octokit.request('POST /repos/{owner}/{repo}/pulls', {
-                owner, repo, head: record.branch_name, base: record.base_branch,
-                title: `Continue #${record.source_pr}: ${record.source_title}`.slice(0, 256),
-                body: `${marker}\nContinuation of ${sourceUrl}, contributed by @${record.source_author}.\n\nSource SHA: \`${record.source_sha}\`\n\nProPR cannot push to the contributor's branch. Implementation will continue here. Contributor commits and attribution are preserved; the original PR remains open and its discussion remains available.\n\nOriginal objective:\n${record.source_body}`,
-            })).data;
+            try {
+                pr = await create();
+            } catch (error) {
+                // The base may contain the captured SHA by now (for example after the
+                // contribution merged), so the branch alone has nothing ahead of it. The
+                // saved implementation makes it non-empty: publish that HEAD, then create again.
+                if (!publishHead || !isEmptyPullRequestError(error)) throw error;
+                await publishHead(continuationTarget(record));
+                pr = await create();
+            }
         } catch (error) {
             // Covers competing creates and a lost response after successful publication.
             // GitHub enforces one open PR for this head. A lookup never creates a second PR.
@@ -155,9 +196,9 @@ export async function announceContinuation(octokit: Octokit, record: Continuatio
 /** The caller holds the source PR processing lease. The durable reservation, stable
  * branch and GitHub's head uniqueness also recover partial creates and races.
  */
-export async function ensurePRContinuation(octokit: Octokit, ref: PullRequestReference, source: Contribution): Promise<ContinuationRecord> {
+export async function ensurePRContinuation(octokit: Octokit, ref: PullRequestReference, source: Contribution, publishHead?: PublishContinuationHead): Promise<ContinuationRecord> {
     const record = await findPRContinuation(ref) || await reserveContinuation(ref, source);
-    return ensurePullRequest(octokit, record);
+    return ensurePullRequest(octokit, record, publishHead);
 }
 
 /** Store before adoption/publication; clear only after the remote contains the work. */

@@ -24,6 +24,7 @@ git(root, 'clone', path.join(root, 'upstream.git'), 'seed');
 const seed = path.join(root, 'seed');
 await writeFile(path.join(seed, 'base.txt'), 'base\n');
 git(seed, 'add', '.'); git(seed, 'commit', '-m', 'Base');
+const baseSha = git(seed, 'rev-parse', 'HEAD');
 git(seed, 'branch', '-M', 'release'); git(seed, 'push', 'origin', 'release');
 git(root, 'clone', '--bare', path.join(root, 'upstream.git'), 'fork.git');
 git(seed, 'checkout', '-b', 'contribution');
@@ -37,7 +38,8 @@ git(seed, 'push', 'origin', 'HEAD:refs/pull/42/head');
 let probeError: Error | undefined;
 let finalPushError: Error | undefined;
 let continuationPushError: Error | undefined;
-let failPRCreate = false;
+let failPRCreate: boolean | 'after-publish' = false;
+let createAttempts = 0;
 let calls: Array<{ operation: string; args: unknown }> = [];
 let cloneIndex = 0;
 const token = 'ghs_worker_installation_token';
@@ -83,7 +85,7 @@ await mock.module('@propr/core', { namedExports: {
 } });
 
 const { PullRequestPublication } = await import('../src/jobs/prPublication.js');
-const { ensurePRContinuation, announceContinuation, findPRContinuation, continuationStatus, reserveContinuation } = await import('../src/jobs/prContinuation.js');
+const { ensurePRContinuation, announceContinuation, findPRContinuation, continuationStatus, reserveContinuation, continuationBody, MAX_PULL_REQUEST_BODY_LENGTH } = await import('../src/jobs/prContinuation.js');
 await mock.module('../src/jobs/ultrafixOrchestrationService.js', { namedExports: {
     stopLoop: async (...args: unknown[]) => { calls.push({ operation: 'stopLoop', args }); },
 } });
@@ -118,8 +120,14 @@ const octokit = {
             return { data: { status: tip === sourceSha ? 'identical' : 'ahead' } };
         }
         if (endpoint === 'POST /repos/{owner}/{repo}/pulls') {
-            if (failPRCreate) throw new Error('PR creation network error');
+            createAttempts += 1;
+            if (failPRCreate === true || (failPRCreate === 'after-publish' && createAttempts > 1)) throw new Error('PR creation network error');
             if (prs.length) throw Object.assign(new Error('PR already exists'), { status: 422 });
+            // GitHub's own validation: a head with nothing ahead of the base, and the body size limit.
+            if (isUpstreamAncestor(`refs/heads/${options.head}`, `refs/heads/${options.base}`)) {
+                throw Object.assign(new Error('Validation Failed'), { status: 422, response: { data: { errors: [{ resource: 'PullRequest', code: 'custom', message: `No commits between ${options.base} and ${options.head}` }] } } });
+            }
+            if (options.body.length > 65536) throw Object.assign(new Error('Validation Failed: body is too long (maximum is 65536 characters)'), { status: 422 });
             const pr = { number: 100, state: 'open', html_url: 'https://github.com/upstream/project/pull/100', body: options.body, base: { ref: options.base }, head: { ref: options.head, repo: { full_name: 'upstream/project' } } };
             prs.push(pr);
             if (loseCreateResponse) { loseCreateResponse = false; throw new Error('ECONNRESET after create'); }
@@ -136,15 +144,19 @@ const octokit = {
         throw new Error(`Unexpected endpoint: ${endpoint}`);
     },
 };
+const isUpstreamAncestor = (ancestor: string, descendant: string) => {
+    try { git(repoPath('upstream'), 'merge-base', '--is-ancestor', ancestor, descendant); return true; } catch { return false; }
+};
 const session = (contribution = source) => new PullRequestPublication(octokit as never, ref, contribution);
 const denial = () => new Error('remote: Write access to repository not granted. fatal: HTTP 403');
 
 beforeEach(async () => {
     await database('pr_continuations').delete();
     git(repoPath('upstream'), 'update-ref', '-d', 'refs/heads/propr/continuation-pr-42');
+    git(repoPath('upstream'), 'update-ref', 'refs/heads/release', baseSha);
     git(repoPath('contributor'), 'update-ref', 'refs/heads/contribution', sourceSha);
     calls = []; prs = []; comments = []; probeError = undefined; finalPushError = undefined;
-    loseCreateResponse = false; failComment = false; failPRCreate = false; continuationPushError = undefined;
+    loseCreateResponse = false; failComment = false; failPRCreate = false; createAttempts = 0; continuationPushError = undefined;
 });
 after(async () => { await completionDown(database); await checkpointDown(database); await down(database); await database.destroy(); await rm(root, { recursive: true, force: true }); });
 
@@ -377,6 +389,80 @@ for (const failure of ['PR creation', 'continuation push']) {
         assert.equal(prs.length, 1);
     });
 }
+
+test('final push denial publishes the saved implementation before creating a PR the base would reject as empty', async () => {
+    const publication = session();
+    const { worktreeInfo } = await publication.prepare('merged-base');
+    const produced = await implement(worktreeInfo.worktreePath);
+    // The contribution is merged into the base while the agent runs.
+    git(repoPath('upstream'), 'update-ref', 'refs/heads/release', sourceSha);
+    finalPushError = denial();
+    const pushed = await publication.push(worktreeInfo.worktreePath);
+    assert.equal(pushed.commitHash, produced);
+    assert.equal(prs.length, 1);
+    assert.equal(createAttempts, 2);
+    assert.equal(git(repoPath('upstream'), 'rev-parse', 'propr/continuation-pr-42'), produced);
+    assert.equal((calls.find(c => c.operation.endsWith('/git/refs'))!.args as any).sha, sourceSha);
+    const record = (await findPRContinuation(ref))!;
+    assert.equal(record.continuation_pr, 100);
+    assert.equal(record.publication_bundle, null);
+});
+
+test('recovery publishes the checkpoint before creating a PR the base would reject as empty', async () => {
+    const publication = session();
+    const { worktreeInfo } = await publication.prepare('merged-base-recovery');
+    const produced = await implement(worktreeInfo.worktreePath);
+    finalPushError = denial();
+    failPRCreate = true;
+    await assert.rejects(publication.push(worktreeInfo.worktreePath), /network error/);
+    await rm(worktreeInfo.worktreePath, { recursive: true, force: true });
+    git(repoPath('upstream'), 'update-ref', 'refs/heads/release', sourceSha);
+    failPRCreate = false; calls = [];
+    const later = await session().prepare('recover-merged-base');
+    assert.equal(git(later.worktreeInfo.worktreePath, 'rev-parse', 'HEAD'), produced);
+    assert.equal(git(repoPath('upstream'), 'rev-parse', 'propr/continuation-pr-42'), produced);
+    assert.equal(prs.length, 1);
+    assert.equal(calls.filter(c => c.operation === 'worktree').length, 1);
+    assert.ok(!calls.some(c => c.operation === 'cleanup'));
+    const record = (await findPRContinuation(ref))!;
+    assert.equal(record.continuation_pr, 100);
+    assert.equal(record.publication_bundle, null);
+});
+
+test('checkpoint is retained when PR creation still fails after publishing the saved implementation', async () => {
+    const publication = session();
+    const { worktreeInfo } = await publication.prepare('merged-base-retained');
+    const produced = await implement(worktreeInfo.worktreePath);
+    git(repoPath('upstream'), 'update-ref', 'refs/heads/release', sourceSha);
+    finalPushError = denial();
+    failPRCreate = 'after-publish';
+    await assert.rejects(publication.push(worktreeInfo.worktreePath), /network error/);
+    assert.equal(git(repoPath('upstream'), 'rev-parse', 'propr/continuation-pr-42'), produced);
+    assert.equal(prs.length, 0);
+    assert.ok((await findPRContinuation(ref))?.publication_bundle);
+    await rm(worktreeInfo.worktreePath, { recursive: true, force: true });
+    failPRCreate = false;
+    const later = await session().prepare('recover-merged-base-retained');
+    assert.equal(git(later.worktreeInfo.worktreePath, 'rev-parse', 'HEAD'), produced);
+    assert.equal(prs.length, 1);
+    assert.equal((await findPRContinuation(ref))?.publication_bundle, null);
+});
+
+test('an oversized original body is bounded in the continuation PR while the stored objective stays complete', async () => {
+    const body = 'objective '.repeat(7000);
+    const record = await ensurePRContinuation(octokit as never, ref, { ...source, body });
+    assert.equal(prs.length, 1);
+    assert.ok(prs[0].body.length <= MAX_PULL_REQUEST_BODY_LENGTH);
+    assert.ok(prs[0].body.startsWith(`<!-- propr-continuation:42:${sourceSha} -->`));
+    assert.match(prs[0].body, /Read the complete text on https:\/\/github\.com\/upstream\/project\/pull\/42\._$/);
+    assert.equal(record.source_body, body);
+    assert.equal((await findPRContinuation({ ...ref, pullRequestNumber: 100 }))?.source_body, body);
+    const short = continuationBody({ ...record, source_body: 'Original objective' }, '<!-- marker -->');
+    assert.ok(short.endsWith('Original objective:\nOriginal objective'));
+    const emoji = continuationBody({ ...record, source_body: '😀'.repeat(40000) }, '<!-- marker -->');
+    assert.ok(emoji.length <= MAX_PULL_REQUEST_BODY_LENGTH);
+    assert.equal(Buffer.from(emoji, 'utf8').toString('utf8'), emoji);
+});
 
 test('failed recovery keeps its checkpoint for another worker', async () => {
     probeError = denial();

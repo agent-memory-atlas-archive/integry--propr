@@ -5,7 +5,7 @@ import { resolvePullRequestGitTarget } from './prGitTarget.js';
 import {
     announceContinuation, continuationStatus, continuationTarget, ensurePRContinuation, findPRContinuation,
     reserveContinuation, savePublicationCheckpoint,
-    type ContinuationRecord, type Contribution, type PullRequestReference,
+    type ContinuationRecord, type Contribution, type PublishContinuationHead, type PullRequestReference,
 } from './prContinuation.js';
 import { checkPullRequestHeadWritable, createPublicationBundle, restorePublicationBundle, isPublicationPermissionDenied, pushContinuationHead } from './prPublicationGit.js';
 
@@ -33,8 +33,8 @@ export class PullRequestPublication {
     get target() { return this.continuation ? continuationTarget(this.continuation) : resolvePullRequestGitTarget(this.source.head, this.ref); }
     get status() { return continuationStatus(this.continuation); }
 
-    private async adopt() {
-        this.continuation = await ensurePRContinuation(this.octokit, this.ref, this.source);
+    private async adopt(publishHead?: PublishContinuationHead) {
+        this.continuation = await ensurePRContinuation(this.octokit, this.ref, this.source, publishHead);
     }
 
     async announce() {
@@ -47,10 +47,17 @@ export class PullRequestPublication {
         }
     }
 
+    /** Restores the checkpoint into the worktree and publishes it. Idempotent: a
+     * branch that already contains the commits merges and pushes as up to date.
+     */
+    private async publishCheckpoint(worktreePath: string, token: string) {
+        await restorePublicationBundle(worktreePath, this.continuation!.publication_bundle!);
+        return pushContinuationHead(worktreePath, this.target, token);
+    }
+
     private async recover(worktreePath: string, token: string) {
         if (this.continuation?.publication_bundle) {
-            await restorePublicationBundle(worktreePath, this.continuation.publication_bundle);
-            const result = await pushContinuationHead(worktreePath, this.target, token);
+            const result = await this.publishCheckpoint(worktreePath, token);
             await this.markPublished(result.commitHash);
         }
         await this.announce();
@@ -94,33 +101,51 @@ export class PullRequestPublication {
         await this.markPublished(pr.head.sha);
     }
 
-    async prepare(worktreeDirName: string) {
-        // Resolve an existing mapping before checking permissions: once adopted,
-        // later requests must not silently switch back to the contributor's branch.
-        if (await findPRContinuation(this.ref)) await this.adopt();
+    private createWorktree(worktreeDirName: string, token: string) {
         const checkpointBaseline = this.continuation?.source_sha ?? (this.target.isFork ? this.source.head.sha : undefined);
         if (this.target.isFork && (!checkpointBaseline || !/^[a-f0-9]{40}$/i.test(checkpointBaseline))) throw new Error('Cannot prepare fork publication without its exact head SHA');
+        return createPullRequestHeadWorktree({ target: this.target, authToken: token, worktreeDirName, checkpointBaseline });
+    }
+
+    async prepare(worktreeDirName: string) {
         const { token } = await this.octokit.auth({ type: 'installation' }) as { token: string };
-        let prepared = await createPullRequestHeadWorktree({ target: this.target, authToken: token, worktreeDirName, checkpointBaseline });
-        if (!this.target.isFork) {
-            try {
+        let prepared: Awaited<ReturnType<typeof createPullRequestHeadWorktree>> | undefined;
+        const discard = async () => {
+            if (prepared) await cleanupWorktree(prepared.localRepoPath, prepared.worktreeInfo.worktreePath, prepared.worktreeInfo.branchName);
+            prepared = undefined;
+        };
+        try {
+            // Resolve an existing mapping before checking permissions: once adopted,
+            // later requests must not silently switch back to the contributor's branch.
+            const existing = await findPRContinuation(this.ref);
+            if (existing) {
+                this.continuation = existing;
+                // A checkpoint without a PR means creation failed earlier. If the base now
+                // contains the captured SHA, GitHub rejects the branch as empty; the saved
+                // commits are published first. The checkpoint stays until both succeed.
+                await this.adopt(existing.publication_bundle ? async () => {
+                    prepared = await this.createWorktree(worktreeDirName, token);
+                    await this.publishCheckpoint(prepared.worktreeInfo.worktreePath, token);
+                } : undefined);
+            }
+            prepared ??= await this.createWorktree(worktreeDirName, token);
+            if (!this.target.isFork) {
                 await this.recover(prepared.worktreeInfo.worktreePath, token);
                 return prepared;
-            } catch (error) {
-                await cleanupWorktree(prepared.localRepoPath, prepared.worktreeInfo.worktreePath, prepared.worktreeInfo.branchName);
-                throw error;
             }
+        } catch (error) {
+            await discard();
+            throw error;
         }
         try {
             await checkPullRequestHeadWritable(prepared.worktreeInfo.worktreePath, this.target, token);
             return prepared;
         } catch (error) {
-            await cleanupWorktree(prepared.localRepoPath, prepared.worktreeInfo.worktreePath, prepared.worktreeInfo.branchName);
+            await discard();
             if (!isPublicationPermissionDenied(error)) throw error;
             await this.adopt();
             await this.announce();
-            prepared = await createPullRequestHeadWorktree({ target: this.target, authToken: token, worktreeDirName, checkpointBaseline });
-            return prepared;
+            return this.createWorktree(worktreeDirName, token);
         }
     }
 
@@ -140,7 +165,9 @@ export class PullRequestPublication {
                 // Save the actual Git objects before any fallible adoption API request.
                 this.continuation = await findPRContinuation(this.ref) || await reserveContinuation(this.ref, this.source);
                 await savePublicationCheckpoint(this.continuation, await createPublicationBundle(worktreePath, this.continuation.source_sha), completion ? JSON.stringify(completion) : undefined);
-                await this.adopt();
+                // If the base already contains the captured SHA, this HEAD is published to
+                // the reserved branch first so GitHub does not reject the PR as empty.
+                await this.adopt(target => pushContinuationHead(worktreePath, target, token));
             }
         }
         // Publish the existing HEAD directly. No checkout, reset, cherry-pick or agent rerun.
