@@ -5,9 +5,10 @@ import { Triangle, Square, Diamond, Circle } from 'lucide-react';
 interface ScoreBadgeProps {
   score: number | null | undefined;
   dimmed?: boolean;
+  className?: string;
 }
 
-export const ScoreBadge: React.FC<ScoreBadgeProps> = ({ score, dimmed = false }) => {
+export const ScoreBadge: React.FC<ScoreBadgeProps> = ({ score, dimmed = false, className = '' }) => {
   if (score === null || score === undefined) return null;
 
   // Determine color and shape based on score using 4-tier grading scale
@@ -34,7 +35,7 @@ export const ScoreBadge: React.FC<ScoreBadgeProps> = ({ score, dimmed = false })
 
   return (
     <span
-      className={`ml-auto inline-flex justify-start items-center gap-1 w-12 min-w-12 max-w-12 pl-2 py-0.5 rounded-full ${colorClasses} ${dimmed ? 'opacity-40' : ''}`}
+      className={`inline-flex justify-start items-center gap-1 w-12 min-w-12 max-w-12 pl-2 py-0.5 rounded-full ${colorClasses} ${dimmed ? 'opacity-40' : ''} ${className}`}
       title={`Code Quality Score: ${score}/10`}
     >
       <ShapeIcon size={8} fill="currentColor" />

@@ -1,11 +1,12 @@
 import { PreviewThumbnails } from '../PreviewMedia';
 import React from 'react';
-import { ChevronRight, GitPullRequest, CircleDot } from 'lucide-react';
+import { ChevronRight } from 'lucide-react';
 import type { Task, TaskGroup } from './types';
-import { getTaskTypeInfo, getStatusPill, formatRelativeTime, formatDuration, shouldDimTask } from './utils.tsx';
+import { getTaskTypeInfo, getStatusPill, formatRelativeTime, formatDuration, shouldDimTask, getParentDisplayTitle, getChildDisplayTitle } from './utils.tsx';
 import { TaskTypeBadge } from './TaskTypeBadge';
 import { ScoreBadge } from './ScoreBadge';
 import { ProviderLogo } from '../ui/ProviderLogo';
+import { TaskReferenceChips } from './ReferenceChips';
 
 interface ParentTaskRowProps {
   group: TaskGroup;
@@ -36,44 +37,34 @@ const TaskTitle: React.FC<{ title: string; taskId: string; desktopLayout: boolea
   </button>
 ) : <>{title}</>;
 
-const renderTaskBadges = (task: Task, prNumber?: number | null, forceIssueWithPr = false): React.ReactNode[] => {
-  const badges: React.ReactNode[] = [];
-
-  if (prNumber) {
-    badges.push(
-      <span key="pr" className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-slate-100 text-xs font-mono font-medium text-slate-700 border border-slate-200">
-        <GitPullRequest size={12} className="text-purple-600" />
-        #{prNumber}
-      </span>
-    );
-  }
-
-  const issueToShow = task.linkedIssueNumber || task.issueNumber;
-
-  if (issueToShow && (forceIssueWithPr || issueToShow !== prNumber)) {
-    badges.push(
-      <span key="issue" className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-slate-100 text-xs font-mono font-medium text-slate-700 border border-slate-200">
-        <CircleDot size={12} className="text-green-600" />
-        #{issueToShow}
-      </span>
-    );
-  }
-
-  if (badges.length === 0) {
-    badges.push(
-      <span key="fallback" className="inline-flex items-center px-1.5 py-0.5 rounded bg-slate-100 text-xs font-mono font-medium text-slate-700 border border-slate-200">
-        #{task.id.substring(0, 8)}
-      </span>
-    );
-  }
-
-  return badges;
-};
+/**
+ * Trailing meta locked to a fixed column grid so the status pill, score, and
+ * timestamp never shift horizontally between rows (a missing score keeps its slot).
+ */
+const TaskMetaCells: React.FC<{ task: Task; isDimmed: boolean }> = ({ task, isDimmed }) => (
+  <>
+    <td className="task-status py-3 px-4 align-top">
+      <div className="task-meta-grid grid grid-cols-[7rem_3.5rem] items-center">
+        <div className="task-meta-status w-28 flex justify-start">{getStatusPill(task.status)}</div>
+        <div className="task-meta-score w-14 flex justify-center">
+          <ScoreBadge score={task.critiqueScore} dimmed={isDimmed} />
+        </div>
+      </div>
+    </td>
+    <td className="task-metadata w-24 py-3 px-4 align-top text-right whitespace-nowrap">
+      <div className="text-sm text-gray-800 tabular-nums" title={new Date(task.createdAt).toLocaleString()}>
+        {formatRelativeTime(task.createdAt)}
+      </div>
+      <div className="text-xs text-slate-400 font-mono">
+        {formatDuration(task.processedAt || task.createdAt, task.completedAt)}
+      </div>
+    </td>
+  </>
+);
 
 export const ParentTaskRow: React.FC<ParentTaskRowProps> = ({ group, task, onRowClick, isDuplicateRepo = false, desktopLayout = false }) => {
   const typeInfo = getTaskTypeInfo(task);
   const isDimmed = shouldDimTask(task);
-  const showIssueWithPr = task.status === 'completed' || typeInfo.type === 'followup';
 
   return (
     <tr
@@ -90,12 +81,12 @@ export const ParentTaskRow: React.FC<ParentTaskRowProps> = ({ group, task, onRow
         <div className="flex flex-col gap-1">
           {desktopLayout && <div className="task-inline-repository">{group.repoOwner}/{group.repoName}</div>}
           <div className="task-badges flex items-center gap-2">
-            {renderTaskBadges(task, group.prNumber, showIssueWithPr)}
-            <TaskTypeBadge type={typeInfo.type} />
+            <TaskReferenceChips task={task} prNumber={group.prNumber} />
+            <TaskTypeBadge type={typeInfo.type} label={typeInfo.workflowLabel} />
           </div>
           <div className="text-sm text-gray-900 font-medium">
             <TaskTitle
-              title={(typeInfo.type === 'followup' && task.subtitle) || typeInfo.cleanTitle || task.subtitle || 'No title'}
+              title={getParentDisplayTitle(task)}
               taskId={task.id}
               desktopLayout={desktopLayout}
               onRowClick={onRowClick}
@@ -121,20 +112,7 @@ export const ParentTaskRow: React.FC<ParentTaskRowProps> = ({ group, task, onRow
           })()}
         </div>
       </td>
-      <td className="task-status py-3 px-4 align-top">
-        <div className="flex items-center justify-between">
-          {getStatusPill(task.status)}
-          <ScoreBadge score={task.critiqueScore} dimmed={isDimmed} />
-        </div>
-      </td>
-      <td className="task-metadata py-3 px-4 align-top">
-        <div className="text-sm text-gray-800" title={new Date(task.createdAt).toLocaleString()}>
-          {formatRelativeTime(task.createdAt)}
-        </div>
-        <div className="text-xs text-slate-400 font-mono">
-          {formatDuration(task.processedAt || task.createdAt, task.completedAt)}
-        </div>
-      </td>
+      <TaskMetaCells task={task} isDimmed={isDimmed} />
       {!desktopLayout && <td className="py-3 px-6 align-top text-right">
         <button className="p-1 text-gray-400 hover:text-gray-600 hover:bg-gray-100 rounded transition-colors opacity-0 group-hover:opacity-100">
           <ChevronRight size={16} />
@@ -157,15 +135,8 @@ interface ChildTaskRowExtraProps extends ChildTaskRowProps {
 export const ChildTaskRow: React.FC<ChildTaskRowExtraProps> = ({ task, onRowClick, isLastChild = false, desktopLayout = false }) => {
   const childTypeInfo = getTaskTypeInfo(task);
   const isDimmed = shouldDimTask(task);
-  const showIssueWithPr = task.status === 'completed' || childTypeInfo.type === 'followup';
-  const childDisplayTitle = (() => {
-    // For followup tasks, prefer subtitle if available
-    if (childTypeInfo.type === 'followup' && task.subtitle) {
-      return task.subtitle;
-    }
-    // Otherwise use the clean title
-    return childTypeInfo.cleanTitle || task.subtitle || 'Update';
-  })();
+  // Children show the delta (the specific fix/review/follow-up request), never the parent PR title.
+  const childDisplayTitle = getChildDisplayTitle(task);
 
   return (
     <tr
@@ -183,8 +154,8 @@ export const ChildTaskRow: React.FC<ChildTaskRowExtraProps> = ({ task, onRowClic
 
         <div className="flex flex-col gap-1 pl-6 py-3">
           <div className="task-badges flex items-center gap-2 pl-4">
-            {renderTaskBadges(task, task.prNumber, showIssueWithPr)}
-            <TaskTypeBadge type={childTypeInfo.type} />
+            <TaskReferenceChips task={task} prNumber={task.prNumber} />
+            <TaskTypeBadge type={childTypeInfo.type} label={childTypeInfo.workflowLabel} />
           </div>
           <div className="flex items-start gap-2 pl-4">
             <span className={`text-sm text-gray-600 ${desktopLayout ? 'min-w-0' : 'line-clamp-1'}`}><TaskTitle title={childDisplayTitle} taskId={task.id} desktopLayout={desktopLayout} onRowClick={onRowClick} /></span>
@@ -209,20 +180,7 @@ export const ChildTaskRow: React.FC<ChildTaskRowExtraProps> = ({ task, onRowClic
           })()}
         </div>
       </td>
-      <td className="task-status py-3 px-4 align-top">
-        <div className="flex items-center justify-between">
-          {getStatusPill(task.status)}
-          <ScoreBadge score={task.critiqueScore} dimmed={isDimmed} />
-        </div>
-      </td>
-      <td className="task-metadata py-3 px-4 align-top">
-        <div className="text-sm text-gray-800" title={new Date(task.createdAt).toLocaleString()}>
-          {formatRelativeTime(task.createdAt)}
-        </div>
-        <div className="text-xs text-slate-400 font-mono">
-          {formatDuration(task.processedAt || task.createdAt, task.completedAt)}
-        </div>
-      </td>
+      <TaskMetaCells task={task} isDimmed={isDimmed} />
       {!desktopLayout && <td className="py-3 px-6 align-top text-right">
          <button className="p-1 text-gray-400 hover:text-gray-600 hover:bg-gray-100 rounded transition-colors opacity-0 group-hover:opacity-100">
             <ChevronRight size={16} />
