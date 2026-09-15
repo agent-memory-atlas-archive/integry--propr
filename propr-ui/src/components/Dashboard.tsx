@@ -84,7 +84,6 @@ export const StatsGrid: React.FC<StatsGridProps> = ({ queueStats, taskStats, ove
         <StatItem
           label="Success"
           value={calculateSuccessRate(taskStats)}
-          color="text-blue-600"
           isLoading={statsLoading && !taskStats}
         />
       </div>

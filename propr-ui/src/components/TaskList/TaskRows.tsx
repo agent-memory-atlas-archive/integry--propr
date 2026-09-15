@@ -7,6 +7,7 @@ import { TaskTypeBadge } from './TaskTypeBadge';
 import { ScoreBadge } from './ScoreBadge';
 import { ProviderLogo } from '../ui/ProviderLogo';
 import { TaskReferenceChips } from './ReferenceChips';
+import { getModelDisplayName } from '../../utils/modelDisplay';
 
 interface ParentTaskRowProps {
   group: TaskGroup;
@@ -15,6 +16,17 @@ interface ParentTaskRowProps {
   onRowClick: (taskId: string) => void;
   isDuplicateRepo?: boolean;
 }
+
+// Prefer catalog labels (including version punctuation), with a readable fallback
+// for custom models. The logo already identifies the provider.
+const getTaskModelLabel = (model: string, provider: string): string => {
+  if (!model) return provider;
+  const name = getModelDisplayName(model, { compactAntigravity: true });
+  const label = name.replace(/^(?:claude|anthropic|openai|google|opencode|antigravity)[ /-]+/i, '');
+  return name === model
+    ? label.replace(/[-_]+/g, ' ').replace(/\b[a-z]/g, letter => letter.toUpperCase())
+    : label;
+};
 
 // Keep text selection and nested controls independent of the row click target.
 const openDesktopRow = (event: React.MouseEvent, taskId: string, onRowClick: (id: string) => void) => {
@@ -72,15 +84,15 @@ export const ParentTaskRow: React.FC<ParentTaskRowProps> = ({ group, task, onRow
       onClick={event => desktopLayout ? openDesktopRow(event, task.id, onRowClick) : onRowClick(task.id)}
     >
       <td className="task-repository py-3 px-6 align-top">
-        <div className={`flex flex-col ${isDuplicateRepo ? 'opacity-30' : ''}`}>
+        {!isDuplicateRepo && <div className="flex flex-col">
           <span className="text-xs text-gray-400 font-normal">{group.repoOwner}</span>
           <span className="text-sm font-bold text-gray-800">{group.repoName}</span>
-        </div>
+        </div>}
       </td>
       <td className="task-summary py-3 px-4 align-top">
         <div className="flex flex-col gap-1">
           {desktopLayout && <div className="task-inline-repository">{group.repoOwner}/{group.repoName}</div>}
-          <div className="task-badges flex items-center gap-2">
+          <div className="task-badges flex flex-wrap items-center gap-1.5">
             <TaskReferenceChips task={task} prNumber={group.prNumber} />
             <TaskTypeBadge type={typeInfo.type} label={typeInfo.workflowLabel} />
           </div>
@@ -98,7 +110,7 @@ export const ParentTaskRow: React.FC<ParentTaskRowProps> = ({ group, task, onRow
             const agent = task.llmProvider || '';
             const model = task.model || task.modelName || '';
             if (agent || model) {
-              const displayText = agent && model ? `${agent} ${model}` : agent || model;
+              const displayText = getTaskModelLabel(model, agent);
               return (
                 <div className="flex items-center gap-1 text-xs">
                   <span className="task-model inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-gray-100 text-gray-600 border border-gray-200">
@@ -147,13 +159,9 @@ export const ChildTaskRow: React.FC<ChildTaskRowExtraProps> = ({ task, onRowClic
          {/* Visual connector line placeholder if we wanted one spanning rows */}
       </td>
       <td className="task-summary py-0 px-4 align-top relative">
-        {/* Vertical line - positioned absolutely to span across td boundaries with z-index to sit above row borders */}
-        <div className="absolute left-6 top-0 bottom-0 w-0.5 bg-gray-200 z-10" style={{ height: isLastChild ? 'calc(0.75rem + 0.5em + 1px)' : 'calc(100% + 1px)', top: '-1px' }}></div>
-        {/* Horizontal arm - aligned with the middle of the text content */}
-        <div className="absolute left-6 w-4 h-0.5 bg-gray-200 z-10" style={{ top: 'calc(0.75rem + 0.5em)' }}></div>
-
-        <div className="flex flex-col gap-1 pl-6 py-3">
-          <div className="task-badges flex items-center gap-2 pl-4">
+        <div className="relative flex flex-col gap-1 pl-6 py-3">
+          {!isLastChild && <div aria-hidden="true" className="absolute left-2 -top-px -bottom-px w-0.5 bg-gray-200" />}
+          <div className="task-thread-anchor task-badges relative flex flex-wrap items-center gap-1.5 ml-4">
             <TaskReferenceChips task={task} prNumber={task.prNumber} />
             <TaskTypeBadge type={childTypeInfo.type} label={childTypeInfo.workflowLabel} />
           </div>
@@ -166,7 +174,7 @@ export const ChildTaskRow: React.FC<ChildTaskRowExtraProps> = ({ task, onRowClic
             const agent = task.llmProvider || '';
             const model = task.model || task.modelName || '';
             if (agent || model) {
-              const displayText = agent && model ? `${agent} ${model}` : agent || model;
+              const displayText = getTaskModelLabel(model, agent);
               return (
                 <div className="flex items-center gap-1 text-xs pl-4">
                   <span className="task-model inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-gray-100 text-gray-600 border border-gray-200">
@@ -203,18 +211,15 @@ export const CollapseToggleRow: React.FC<CollapseToggleRowProps> = ({ groupKey, 
        {/* Empty cell for repository column alignment */}
     </td>
     <td colSpan={desktopLayout ? 3 : 4} className="py-0 px-4 align-top text-xs relative">
-       {/* Vertical line connecting to the tree structure - extends from top to the horizontal arm with z-index to sit above row borders */}
-       <div className="absolute left-6 top-0 w-0.5 bg-gray-200 z-10" style={{ height: 'calc(0.75rem + 0.5rem + 0.5em - 2px)', top: '-1px' }}></div>
-       {/* Horizontal arm - aligned with the middle of the button text */}
-       <div className="absolute left-6 w-4 h-0.5 bg-gray-200 z-10" style={{ top: 'calc(0.75rem + 0.5rem + 0.5em - 3px)' }}></div>
-
        <div className="pl-6 py-3">
+         <div className="task-thread-anchor relative ml-4">
          <button
            onClick={(e) => onToggle(groupKey, e)}
-           className="flex items-center gap-1 text-blue-600 hover:text-blue-700 font-medium py-1 px-2 hover:bg-blue-50 rounded transition-colors pl-4"
+           className="flex items-center gap-1 text-blue-600 hover:text-blue-700 font-medium py-1 px-2 hover:bg-blue-50 rounded transition-colors"
          >
            Show {hiddenCount} older updates...
          </button>
+         </div>
        </div>
     </td>
   </tr>

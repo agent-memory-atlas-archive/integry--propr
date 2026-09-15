@@ -1,3 +1,17 @@
+/* Anchor the elbow to the actual badge/button row, including wrapped chips.
+   Its stem joins the preceding row; the arm ends with an 8px chip gutter. */
+.task-thread-anchor::before {
+  content: '';
+  position: absolute;
+  pointer-events: none;
+  left: -2rem;
+  width: 1.5rem;
+  top: calc(-.75rem - 1px);
+  bottom: calc(50% - 1px);
+  border-left: 2px solid #e5e7eb;
+  border-bottom: 2px solid #e5e7eb;
+}
+
 /* Opted into by the macOS/Linux desktop context, including Recent Activity.
    Respond to the list's available width, not the app window: the dashboard
    shares its content area with an analytics rail. */
