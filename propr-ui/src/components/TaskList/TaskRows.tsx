@@ -1,3 +1,4 @@
+import { PreviewThumbnails } from '../PreviewMedia';
 import React from 'react';
 import { ChevronRight, GitPullRequest, CircleDot } from 'lucide-react';
 import type { Task, TaskGroup } from './types';
@@ -100,6 +101,7 @@ export const ParentTaskRow: React.FC<ParentTaskRowProps> = ({ group, task, onRow
               onRowClick={onRowClick}
             />
           </div>
+          <PreviewThumbnails media={task.previewMedia} />
           {(() => {
             // Show agent/model info if available
             const agent = task.llmProvider || '';
@@ -187,6 +189,7 @@ export const ChildTaskRow: React.FC<ChildTaskRowExtraProps> = ({ task, onRowClic
           <div className="flex items-start gap-2 pl-4">
             <span className={`text-sm text-gray-600 ${desktopLayout ? 'min-w-0' : 'line-clamp-1'}`}><TaskTitle title={childDisplayTitle} taskId={task.id} desktopLayout={desktopLayout} onRowClick={onRowClick} /></span>
           </div>
+          <PreviewThumbnails media={task.previewMedia} />
           {(() => {
             // Show agent/model info if available
             const agent = task.llmProvider || '';

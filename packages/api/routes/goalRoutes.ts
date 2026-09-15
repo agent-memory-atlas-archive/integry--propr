@@ -1,3 +1,4 @@
+import { goalPreviewSource, previewMediaReader } from '../services/previewMediaProjection.js';
 /* eslint-disable max-lines -- goal creation and lifecycle controls share one owner-scoped HTTP boundary */
 import { createHash, randomUUID } from 'node:crypto';
 import type { Request, Response } from 'express';
@@ -45,6 +46,7 @@ import {
 
 interface GoalRoutesDeps {
   db: Knex;
+  previewReader?: typeof previewMediaReader;
   taskQueue: Queue;
   redisClient: RedisClientType;
   getCapabilities?: (options?: { force?: boolean }) => Promise<GoalCapability[]>;
@@ -322,7 +324,10 @@ export function createGoalRoutes(deps: GoalRoutesDeps) {
     const goals = await timeApiStage('goals.projection', () =>
       Promise.all(rows.map(row => serializeGoal(deps.db, deps.redisClient, row)))
     );
-    res.json({ goals });
+    const media = await (deps.previewReader ?? previewMediaReader).project(rows.map(goalPreviewSource), 3);
+    res.json({ goals: goals.map((goal, index) => ({ ...goal,
+      ...(media[index].previews.length ? { previewMedia: media[index].previews } : {}),
+    })) });
   };
 
   const get = async (req: Request, res: Response) => {
@@ -333,7 +338,7 @@ export function createGoalRoutes(deps: GoalRoutesDeps) {
   const previews = async (req: Request, res: Response) => {
     const row = await findOwnedGoal(deps.db, req, res);
     if (!row) return;
-    if (!row.final_pr_number) return void res.json({ previews: [] });
+    if (!(await loadVisualPreviewSettings(row.repository)).enabled || !row.final_pr_number) return void res.json({ previews: [] });
     try {
       const [owner, repo] = row.repository.split('/');
       const octokit = await getOctokit();
