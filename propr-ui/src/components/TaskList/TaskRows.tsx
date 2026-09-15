@@ -113,7 +113,7 @@ export const ParentTaskRow: React.FC<ParentTaskRowProps> = ({ group, task, onRow
               const displayText = getTaskModelLabel(model, agent);
               return (
                 <div className="flex items-center gap-1 text-xs">
-                  <span className="task-model inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-gray-100 text-gray-600 border border-gray-200">
+                  <span className="task-model inline-flex items-center gap-1 px-2 py-0.5 rounded-sm bg-gray-100 text-gray-600 border border-gray-200">
                     <ProviderLogo provider={agent} className="w-3.5 h-3.5" />
                     <span>{displayText}</span>
                   </span>
@@ -177,7 +177,7 @@ export const ChildTaskRow: React.FC<ChildTaskRowExtraProps> = ({ task, onRowClic
               const displayText = getTaskModelLabel(model, agent);
               return (
                 <div className="flex items-center gap-1 text-xs pl-4">
-                  <span className="task-model inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-gray-100 text-gray-600 border border-gray-200">
+                  <span className="task-model inline-flex items-center gap-1 px-2 py-0.5 rounded-sm bg-gray-100 text-gray-600 border border-gray-200">
                     <ProviderLogo provider={agent} className="w-3.5 h-3.5" />
                     <span>{displayText}</span>
                   </span>

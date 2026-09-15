@@ -10,7 +10,7 @@ interface TaskTypeBadgeProps {
 export const TaskTypeBadge: React.FC<TaskTypeBadgeProps> = ({ type, label }) => {
   if (type === 'new-issue') {
     return (
-      <span className="inline-flex items-center font-mono px-2 py-0.5 rounded text-xs font-medium bg-green-100 text-green-800 border border-green-200">
+      <span className="inline-flex items-center font-mono px-2 py-0.5 rounded-sm text-xs font-medium bg-slate-100 text-slate-700 border border-slate-200">
         New Issue
       </span>
     );
@@ -18,7 +18,7 @@ export const TaskTypeBadge: React.FC<TaskTypeBadgeProps> = ({ type, label }) => 
 
   if (type === 'followup') {
     return (
-      <span className="inline-flex items-center font-mono px-2 py-0.5 rounded text-xs font-medium bg-gray-100 text-gray-700 border border-gray-300">
+      <span className="inline-flex items-center font-mono px-2 py-0.5 rounded-sm text-xs font-medium bg-slate-100 text-slate-700 border border-slate-200">
         Followup
       </span>
     );
