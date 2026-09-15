@@ -13,6 +13,9 @@ import { stopOriginalPRReviewCycle } from './prContinuationReview.js';
 import { handleUltrafixContinuation } from './ultrafixJobHelpers.js';
 import { PullRequestPublication } from './prPublication.js';
 import { findPRContinuation, savePublicationCheckpoint, type ContinuationRecord, type Contribution } from './prContinuation.js';
+import { sanitizeErrorMessage } from './errorSanitizer.js';
+
+const TERMINAL_STATES: ReadonlySet<string> = new Set([TaskStates.COMPLETED, TaskStates.FAILED, TaskStates.CANCELLED]);
 
 export interface ProcessingState {
     publication?: PullRequestPublication;
@@ -81,10 +84,49 @@ async function preparePendingPublication(
     return publication;
 }
 
+/**
+ * The job's error handler only finalizes the triggering task. When it recovers another
+ * task's completion, that task was moved back to PROCESSING and nothing else closes its
+ * attempt, so it is finalized here before the error reaches the job.
+ */
+async function finalizeOriginatingTask({ stateManager, context, taskId }: ExecuteProcessingParams, originatingTaskId: string, error: Error): Promise<void> {
+    try {
+        const current = await stateManager.getTaskState(originatingTaskId);
+        if (!current || TERMINAL_STATES.has(current.state)) {
+            context.correlatedLogger.info({ taskId: originatingTaskId, currentState: current?.state ?? null }, 'Originating task already final after recovery failure, skipping state update');
+            return;
+        }
+        // Cancelling the recovering request does not cancel the originating task: a
+        // CANCELLED originating task retires its checkpoint on the next attempt, while
+        // FAILED keeps the published work recoverable by a later request.
+        const cancelled = error.message?.includes('aborted by user');
+        await stateManager.updateTaskState(originatingTaskId, TaskStates.FAILED, {
+            reason: cancelled ? 'Publication recovery was cancelled by user' : 'Publication recovery failed',
+            error: { message: sanitizeErrorMessage(error.message) },
+            historyMetadata: { recoveredByTaskId: taskId },
+        });
+        context.correlatedLogger.info({ taskId: originatingTaskId, recoveredByTaskId: taskId }, 'Marked originating task as failed after recovery failure');
+    } catch (finalizeError) {
+        context.correlatedLogger.error({ taskId: originatingTaskId, error: (finalizeError as Error).message }, 'Failed to finalize originating task after recovery failure');
+    }
+}
+
 /** Recover under the shared PR lease, before comment filtering or review routing can skip completion. */
 export async function recoverPendingPublication(params: ExecuteProcessingParams, redisClient: Redis): Promise<JobResult | undefined> {
     const pending = await loadPendingPublication(params);
     if (!pending) return;
+    const originatingTaskId = pending.completion?.taskId;
+    try {
+        return await completePendingPublication(params, redisClient, pending);
+    } catch (error) {
+        if (originatingTaskId && originatingTaskId !== params.taskId) await finalizeOriginatingTask(params, originatingTaskId, error as Error);
+        throw error;
+    }
+}
+
+async function completePendingPublication(
+    params: ExecuteProcessingParams, redisClient: Redis, pending: NonNullable<Awaited<ReturnType<typeof loadPendingPublication>>>,
+): Promise<JobResult | undefined> {
     const { state, context, taskId, job, stateManager, lockKey, lockToken } = params;
     const octokit = state.octokit!;
     const saved = pending.completion;
