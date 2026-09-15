@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { after, beforeEach, mock, test } from 'node:test';
 import knex from 'knex';
 import { mkdtemp, writeFile, rm } from 'node:fs/promises';
+import { randomBytes } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
@@ -149,6 +150,8 @@ const isUpstreamAncestor = (ancestor: string, descendant: string) => {
 };
 const session = (contribution = source) => new PullRequestPublication(octokit as never, ref, contribution);
 const denial = () => new Error('remote: Write access to repository not granted. fatal: HTTP 403');
+const bundlePrerequisites = (bundle: string) => Buffer.from(bundle, 'base64').toString('latin1').split('\n\n', 1)[0]
+    .split('\n').filter(line => line.startsWith('-')).map(line => line.slice(1, 41));
 
 beforeEach(async () => {
     await database('pr_continuations').delete();
@@ -378,7 +381,10 @@ for (const failure of ['PR creation', 'continuation push']) {
         if (failure === 'PR creation') failPRCreate = true;
         else continuationPushError = new Error('Connection timed out');
         await assert.rejects(publication.push(worktreeInfo.worktreePath));
-        assert.ok((await findPRContinuation(ref))?.publication_bundle);
+        const bundle = (await findPRContinuation(ref))?.publication_bundle;
+        assert.ok(bundle);
+        // Upstream only holds the captured SHA (through the PR ref); the fork tip is no prerequisite.
+        assert.deepEqual(bundlePrerequisites(bundle), [sourceSha]);
         await rm(worktreeInfo.worktreePath, { recursive: true, force: true });
         failPRCreate = false;
         continuationPushError = undefined;
@@ -518,6 +524,65 @@ test('checkpoint recovery merges an advanced continuation without losing either 
     git(repoPath('upstream'), 'merge-base', '--is-ancestor', produced, tip);
     git(repoPath('upstream'), 'merge-base', '--is-ancestor', concurrent, tip);
     assert.equal((await findPRContinuation(ref))?.publication_bundle, null);
+});
+
+test('follow-up checkpoints on an existing continuation exclude its published history', async () => {
+    probeError = denial();
+    const first = session();
+    const initial = await first.prepare('incremental-first');
+    const produced = await implement(initial.worktreeInfo.worktreePath);
+    await first.push(initial.worktreeInfo.worktreePath);
+    probeError = undefined;
+    // A maintainer updates the continuation from its base, bringing in a large blob.
+    const maintainer = path.join(root, `maintainer-${++cloneIndex}`);
+    git(root, 'clone', '--branch', 'release', repoPath('upstream'), maintainer);
+    await writeFile(path.join(maintainer, 'base-update.bin'), randomBytes(256 * 1024));
+    git(maintainer, 'add', '.'); git(maintainer, 'commit', '-m', 'Base update');
+    git(maintainer, 'push', 'origin', 'HEAD:refs/heads/release');
+    git(maintainer, 'checkout', '-b', 'continuation', 'origin/propr/continuation-pr-42');
+    git(maintainer, 'merge', '--no-edit', 'release');
+    const updated = git(maintainer, 'rev-parse', 'HEAD');
+    git(maintainer, 'push', 'origin', 'HEAD:refs/heads/propr/continuation-pr-42');
+    const later = session();
+    const followup = await later.prepare('incremental-followup');
+    assert.equal(git(followup.worktreeInfo.worktreePath, 'rev-parse', 'HEAD'), updated);
+    await writeFile(path.join(followup.worktreeInfo.worktreePath, 'second.txt'), 'second implementation\n');
+    git(followup.worktreeInfo.worktreePath, 'add', '.'); git(followup.worktreeInfo.worktreePath, 'commit', '-m', 'Second implementation');
+    const second = git(followup.worktreeInfo.worktreePath, 'rev-parse', 'HEAD');
+    continuationPushError = new Error('Connection timed out');
+    await assert.rejects(later.push(followup.worktreeInfo.worktreePath), /Connection timed out/);
+    const bundle = (await findPRContinuation(ref))!.publication_bundle!;
+    assert.deepEqual(bundlePrerequisites(bundle), [updated]);
+    assert.match(Buffer.from(bundle, 'base64').toString('latin1'), new RegExp(`^${second} HEAD$`, 'm'));
+    // Neither the earlier implementation nor the base update is stored again.
+    assert.ok(Buffer.from(bundle, 'base64').length < 64 * 1024);
+    await rm(followup.worktreeInfo.worktreePath, { recursive: true, force: true });
+    continuationPushError = undefined;
+    const recovered = await session().prepare('incremental-recovery');
+    assert.equal(git(recovered.worktreeInfo.worktreePath, 'rev-parse', 'HEAD'), second);
+    assert.equal(git(repoPath('upstream'), 'rev-parse', 'propr/continuation-pr-42'), second);
+    git(repoPath('upstream'), 'merge-base', '--is-ancestor', produced, second);
+    assert.equal((await findPRContinuation(ref))?.publication_bundle, null);
+});
+
+test('a follow-up whose checkpoint was already published stores no bundle on retry', async () => {
+    probeError = denial();
+    const first = session();
+    const initial = await first.prepare('published-first');
+    const produced = await implement(initial.worktreeInfo.worktreePath);
+    continuationPushError = new Error('Connection timed out');
+    await assert.rejects(first.push(initial.worktreeInfo.worktreePath), /Connection timed out/);
+    await rm(initial.worktreeInfo.worktreePath, { recursive: true, force: true });
+    continuationPushError = undefined;
+    const later = session();
+    const recovered = await later.prepare('published-recovery');
+    assert.equal(git(repoPath('upstream'), 'rev-parse', 'propr/continuation-pr-42'), produced);
+    // HEAD is exactly the published tip: an empty checkpoint is a null bundle, not a Git error.
+    calls = [];
+    const result = await later.push(recovered.worktreeInfo.worktreePath);
+    assert.equal(result.commitHash, produced);
+    assert.equal((await findPRContinuation(ref))?.publication_bundle, null);
+    assert.ok(!calls.some(c => c.operation === 'git' && (c.args as string[])[0] === 'bundle'));
 });
 
 for (const identity of ['both', 'branch only', 'marker only', 'wrong repository', 'wrong base']) {

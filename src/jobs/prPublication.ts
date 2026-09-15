@@ -1,4 +1,4 @@
-import { cleanupWorktree, getAuthenticatedOctokit, logger } from '@propr/core';
+import { cleanupWorktree, createHooklessGit, getAuthenticatedOctokit, logger } from '@propr/core';
 import { createPullRequestHeadWorktree, pushPullRequestHeadBranch } from './prGitOperations.js';
 import type { PublicationCompletion } from './prCommentPostExecution.js';
 import { resolvePullRequestGitTarget } from './prGitTarget.js';
@@ -14,6 +14,12 @@ import { checkPullRequestHeadWritable, createPublicationBundle, restorePublicati
  */
 export class PullRequestPublication {
     continuation?: ContinuationRecord;
+    /** Continuation commit the worktree started from or last published. Everything
+     * reachable from it is already on the destination branch, so checkpoints exclude it.
+     * Unset for a contributor-branch worktree: after final-push adoption only the
+     * captured SHA is known to exist upstream.
+     */
+    private publishedHead?: string;
 
     constructor(
         private readonly octokit: Awaited<ReturnType<typeof getAuthenticatedOctokit>>,
@@ -68,7 +74,9 @@ export class PullRequestPublication {
      */
     private async publishCheckpoint(worktreePath: string, token: string) {
         await restorePublicationBundle(worktreePath, this.continuation!.publication_bundle!);
-        return pushContinuationHead(worktreePath, this.target, token);
+        const result = await pushContinuationHead(worktreePath, this.target, token);
+        this.publishedHead = result.commitHash;
+        return result;
     }
 
     private async recover(worktreePath: string, token: string) {
@@ -117,10 +125,13 @@ export class PullRequestPublication {
         await this.markPublished(pr.head.sha);
     }
 
-    private createWorktree(worktreeDirName: string, token: string) {
+    private async createWorktree(worktreeDirName: string, token: string) {
         const checkpointBaseline = this.continuation?.source_sha ?? (this.target.isFork ? this.source.head.sha : undefined);
         if (this.target.isFork && (!checkpointBaseline || !/^[a-f0-9]{40}$/i.test(checkpointBaseline))) throw new Error('Cannot prepare fork publication without its exact head SHA');
-        return createPullRequestHeadWorktree({ target: this.target, authToken: token, worktreeDirName, checkpointBaseline });
+        const prepared = await createPullRequestHeadWorktree({ target: this.target, authToken: token, worktreeDirName, checkpointBaseline });
+        // The worktree was just fetched from the continuation branch, so its HEAD is published.
+        this.publishedHead = this.continuation ? (await createHooklessGit(prepared.worktreeInfo.worktreePath).revparse(['HEAD'])).trim() : undefined;
+        return prepared;
     }
 
     async prepare(worktreeDirName: string) {
@@ -186,8 +197,11 @@ export class PullRequestPublication {
             }
         }
         // Save the actual Git objects before any fallible adoption API request. Checkpoint
-        // continuation implementations too, including failed remote pushes.
-        await savePublicationCheckpoint(this.continuation!, await createPublicationBundle(worktreePath, this.continuation!.source_sha), completion ? JSON.stringify(completion) : undefined);
+        // continuation implementations too, including failed remote pushes. Follow-ups on
+        // an existing continuation bundle only commits beyond its published tip, never the
+        // whole history since the captured contribution.
+        const bundle = await createPublicationBundle(worktreePath, this.continuation!.source_sha, this.publishedHead ? [this.publishedHead] : []);
+        await savePublicationCheckpoint(this.continuation!, bundle, completion ? JSON.stringify(completion) : undefined);
         // A reservation without a PR comes from final-push adoption or from a preflight
         // where the base already contained the captured SHA. This HEAD is published to
         // the reserved branch first when GitHub would otherwise reject the PR as empty.

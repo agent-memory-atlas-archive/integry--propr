@@ -64,14 +64,22 @@ export async function pushContinuationHead(worktreePath: string, target: PullReq
     }
 }
 
-/** Only commits beyond the captured contribution are stored in the database. */
-export async function createPublicationBundle(worktreePath: string, sourceSha: string): Promise<string | null> {
+/** Only commits the destination lacks are stored in the database: those beyond the
+ * captured contribution and beyond any continuation history that is already published.
+ * Every excluded commit must exist in the recovering worktree, which fetches only the
+ * destination branch: the captured SHA is reachable through the PR ref or the
+ * continuation branch, and a published tip stays on that branch. A base-branch tip
+ * has no such guarantee, so an agent-side base merge is bundled once and then excluded
+ * by the next follow-up's published tip.
+ */
+export async function createPublicationBundle(worktreePath: string, sourceSha: string, publishedTips: readonly string[] = []): Promise<string | null> {
     const git = createHooklessGit(worktreePath);
-    if ((await git.revparse(['HEAD'])).trim() === sourceSha) return null;
+    const exclusions = [...new Set([sourceSha, ...publishedTips])].map(sha => `^${sha}`);
+    if (Number((await git.raw(['rev-list', '--count', 'HEAD', ...exclusions])).trim()) === 0) return null;
     const directory = await mkdtemp(path.join(tmpdir(), 'propr-publication-'));
     const bundlePath = path.join(directory, 'publication.bundle');
     try {
-        await git.raw(['bundle', 'create', bundlePath, 'HEAD', `^${sourceSha}`]);
+        await git.raw(['bundle', 'create', bundlePath, 'HEAD', ...exclusions]);
         return (await readFile(bundlePath)).toString('base64');
     } finally {
         await rm(directory, { recursive: true, force: true });
