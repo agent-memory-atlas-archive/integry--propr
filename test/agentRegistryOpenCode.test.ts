@@ -510,10 +510,17 @@ for (const owner of [false, true]) {
             const status = registry.getOperationalStatus();
 
             await internal.startWorkerOwnedImageRecovery();
+            await registry.recoverImagesAndRefresh();
             await registry.ensureInitialized();
             await registry.ensureInitialized();
 
             assert.strictEqual(enqueuePreparation.mock.callCount(), 0);
+            assert.deepStrictEqual(registry.getOperationalStatus(), status);
+            assert.strictEqual(prepare.mock.callCount(), 0);
+            // Startup can fail before initialization completes. An automatic
+            // queue request must still preserve that failure and its circuit.
+            internal.initialized = false;
+            await registry.recoverImagesAndRefresh();
             assert.deepStrictEqual(registry.getOperationalStatus(), status);
             assert.strictEqual(prepare.mock.callCount(), 0);
         });
@@ -743,7 +750,7 @@ for (const owner of [false, true]) {
             t.mock.timers.tick(1_000);
             internal.recordUnavailableUnifiedAgentImage(imageTag, 'not prepared', false);
             assert.strictEqual(registry.getOperationalStatus().unifiedAgentImage.nextRetryAt, deadline);
-            await Promise.all([registry.ensureInitialized(), registry.ensureInitialized()]);
+            await Promise.all([registry.ensureInitialized(), registry.recoverImagesAndRefresh()]);
             assert.strictEqual(attempts, 1);
             t.mock.timers.tick(4_000);
             await internal.pendingBackgroundRefresh;
@@ -920,3 +927,24 @@ for (const replacement of ['ready-b', 'unavailable-b', 'ready-a']) {
         }
     });
 }
+
+test('guarded recovery discovers an uninitialized registry before preparing its missing image', async () => {
+    const registry = AgentRegistry.getInstance();
+    const modes: boolean[] = [];
+    const internal = registry as unknown as {
+        ensureUnifiedAgentImage: (_configs: AgentConfig[], prepare: boolean) => Promise<string | null>;
+        recordUnavailableUnifiedAgentImage: (tag: string, error: string, attempted: boolean) => void;
+        markUnifiedAgentImageReady: (tag: string) => string;
+    };
+    internal.ensureUnifiedAgentImage = async (_configs, prepare) => {
+        modes.push(prepare);
+        if (prepare) return internal.markUnifiedAgentImageReady('propr/agent:required');
+        internal.recordUnavailableUnifiedAgentImage('propr/agent:required', 'not prepared', false);
+        return null;
+    };
+    await registry.recoverImagesAndRefresh();
+    assert.deepStrictEqual(modes, [false, true]);
+    assert.strictEqual(registry.isInitialized(), true);
+    assert.strictEqual(registry.getOperationalStatus().unifiedAgentImage.status, 'ready');
+    assert.strictEqual(enqueuePreparation.mock.callCount(), 0);
+});

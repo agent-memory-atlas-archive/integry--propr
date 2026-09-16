@@ -1,5 +1,5 @@
 import { setTimeout } from 'node:timers/promises';
-import type { Job } from 'bullmq';
+import { DelayedError, type Job } from 'bullmq';
 import { AgentRegistry, logger, ensureAgentBundleImage, type AgentImagePreparationJobData } from '@propr/core';
 
 export async function prepareAgentRegistryAtStartup(): Promise<AgentRegistry> {
@@ -35,9 +35,20 @@ export async function processAgentImagePreparationJob(job: Job<AgentImagePrepara
     if (job.data.versions && job.data.contentHash) {
         const result = await ensureAgentBundleImage(job.data.versions, job.data.contentHash);
         if (!result.success) throw new Error(result.error || `Agent image ${job.data.imageTag} is unavailable`);
+        await workerRegistry.refresh();
         return;
     }
-    await workerRegistry.prepareImagesAndRefresh();
+    const previous = workerRegistry.getOperationalStatus().unifiedAgentImage;
+    if (!previous.circuitBreakerOpen && (previous.retryCount ?? 0) > 0 && previous.nextRetryAt) {
+        const deadline = Date.parse(previous.nextRetryAt);
+        if (deadline > Date.now()) {
+            // Preserve the owner's retry deadline without occupying the consumer
+            // that also serves explicit operator builds.
+            await job.moveToDelayed(deadline, job.token);
+            throw new DelayedError();
+        }
+    }
+    await workerRegistry.recoverImagesAndRefresh();
     const status = workerRegistry.getOperationalStatus().unifiedAgentImage;
     if (status.status !== 'ready') {
         throw new Error(status.error || `Unified agent image ${status.imageTag || job.data.imageTag} is unavailable`);

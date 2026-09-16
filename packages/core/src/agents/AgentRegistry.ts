@@ -86,6 +86,12 @@ export class AgentRegistry {
         return this.requestRefresh(true);
     }
 
+    /** Runs automatic preparation through this registry's backoff and circuit. */
+    async recoverImagesAndRefresh(): Promise<void> {
+        if (!this.initialized && !this.unavailableUnifiedAgentImage) await this.refresh();
+        await this.startWorkerOwnedImageRecovery();
+    }
+
     /**
      * Marks this process as the single owner allowed to prepare Docker images.
      * The main worker sets this before startup preparation; API/analysis
