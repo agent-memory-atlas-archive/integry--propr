@@ -221,7 +221,7 @@ test('real implementation completion persists one PR event and projects one trus
     assert.equal(completion.kind, 'pull_request');
     assert.equal(completion.severity, 'info');
     assert.deepEqual(completion.target, { type: 'pull_request', repository: 'Acme/Web', prNumber: 1 });
-    assert.deepEqual(completion.metadata, { completedImplementationTaskId: 'implementation-1' });
+    assert.deepEqual(completion.metadata, { completedImplementationTaskId: 'implementation-1', completionType: 'implementation' });
     assert.deepEqual(completion.actions, ['open_pr', 'dismiss']);
     assert.equal(completion.action?.href, 'https://github.com/Acme/Web/pull/1');
     // The immutable event retains its original PR even if the task subsequently changes.
