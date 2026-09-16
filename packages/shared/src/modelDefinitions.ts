@@ -157,7 +157,7 @@ export const AGENT_DEFAULTS: Record<AgentType, {
     defaultModels: CLAUDE_MODELS.map(m => m.id),
     defaultAlias: 'claude',
     npmPackage: '@anthropic-ai/claude-code',
-    defaultCliVersion: '2.1.263'
+    defaultCliVersion: '2.1.273'
   },
   codex: {
     dockerImage: 'propr/agent:latest',
@@ -165,7 +165,7 @@ export const AGENT_DEFAULTS: Record<AgentType, {
     defaultModels: CODEX_MODELS.map(m => m.id),
     defaultAlias: 'codex',
     npmPackage: '@openai/codex',
-    defaultCliVersion: '0.153.4'
+    defaultCliVersion: '0.154.0'
   },
   antigravity: {
     dockerImage: 'propr/agent:latest',
@@ -173,7 +173,7 @@ export const AGENT_DEFAULTS: Record<AgentType, {
     defaultModels: ANTIGRAVITY_MODELS.map(m => m.id),
     defaultAlias: 'antigravity',
     npmPackage: 'https://antigravity.google/cli/install.sh',
-    defaultCliVersion: '1.1.27'
+    defaultCliVersion: '1.2.4'
   },
   opencode: {
     dockerImage: 'propr/agent:latest',
@@ -181,7 +181,7 @@ export const AGENT_DEFAULTS: Record<AgentType, {
     defaultModels: OPENCODE_MODELS.map(m => m.id),
     defaultAlias: 'opencode',
     npmPackage: 'opencode-ai',
-    defaultCliVersion: '1.18.29'
+    defaultCliVersion: '1.18.31'
   },
   vibe: {
     dockerImage: 'propr/agent:latest',
@@ -189,7 +189,7 @@ export const AGENT_DEFAULTS: Record<AgentType, {
     defaultModels: VIBE_MODELS.map(m => m.id),
     defaultAlias: 'vibe',
     npmPackage: 'mistral-vibe',
-    defaultCliVersion: '2.25.0'
+    defaultCliVersion: '2.25.4'
   }
 };
 
