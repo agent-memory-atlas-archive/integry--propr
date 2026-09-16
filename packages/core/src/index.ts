@@ -90,7 +90,7 @@ export { cleanupExistingBranch, createWorktreeFromExistingBranch } from './git/w
 export { cleanupWorktree, cleanupExpiredWorktrees, safePruneWorktrees, setupWorktreePermissions, addToSafeDirectories, verifyWorktreeCreation, setupWorktreeRemote, getWorktreePath } from './git/worktreeOperations.js';
 export { isGitCorruptionError, GIT_CORRUPTION_PATTERNS, getCorruptionPatternStrings } from './git/gitCorruption.js';
 export { assertCommitIsAncestor, mergeBaseIntoBranch } from './git/mergeOperations.js';
-export type { MergeOutcome, MergeResult } from './git/mergeOperations.js';
+export type { MergeOutcome, MergeResult, MergeBaseIntoBranchOptions } from './git/mergeOperations.js';
 
 export {
     issueQueue,

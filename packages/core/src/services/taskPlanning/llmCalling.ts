@@ -14,10 +14,11 @@ import { enforceGranularity } from './granularity.js';
 import type { Plan } from '../../claude/prompts/plannerPrompts.js';
 import type { CallLLMOptions, CallLLMForPlanResult } from './types.js';
 
-const MAX_JSON_REPAIR_RESPONSE_CHARS = 20000;
-
 export async function callLLMForPlan(opts: CallLLMOptions): Promise<CallLLMForPlanResult> {
-  const { draftId, runId, fullContext, worktreePath, githubToken, repository, correlationId, tokenLimit, model, granularity } = opts;
+  const {
+    draftId, runId, fullContext, worktreePath, githubToken, repository,
+    correlationId, tokenLimit, model, repairModel, granularity,
+  } = opts;
   const correlatedLogger = correlationId ? logger.withCorrelation(correlationId) : logger;
   if (!model) throw new PlanningFailedError('No model configured for plan generation. Select a Planning Model in Settings.');
 
@@ -100,43 +101,72 @@ export async function callLLMForPlan(opts: CallLLMOptions): Promise<CallLLMForPl
     plan = parseLlmJson<PlanItem[]>(response);
   } catch (error) {
     if (error instanceof JsonParseError) {
-      correlatedLogger.warn({ error: error.message, responseLength: response.length }, 'Failed to parse LLM response, attempting repair');
+      correlatedLogger.warn({
+        error: error.message,
+        responseLength: response.length,
+        generationModel: model,
+        repairModel,
+      }, 'Failed to parse LLM response, attempting repair with the default coding model');
 
-      if (response.length > MAX_JSON_REPAIR_RESPONSE_CHARS) {
-        correlatedLogger.warn({
-          error: error.message,
-          responseLength: response.length,
-          maxRepairResponseChars: MAX_JSON_REPAIR_RESPONSE_CHARS
-        }, 'Skipping JSON repair for oversized LLM response');
-        throw new PlanningFailedError(`Failed to parse plan: ${error.message}`);
-      }
-
-      // Try to repair the JSON by asking the same LLM to fix it
       const repairPrompt = `The following JSON array is malformed and cannot be parsed.
 Error: ${error.message}
 
 Please fix the JSON syntax errors and return ONLY the corrected JSON array.
 Do not include any explanation, markdown formatting, or code fences.
+Preserve every object, field, and string value; do not rewrite, summarize, or omit content.
 Ensure all strings are properly escaped (especially quotes and newlines within string values).
 
 Broken JSON:
 ${response}`;
 
+      const repairRawInputCharLimit = getRawInputCharLimit(repairModel);
+      if (repairRawInputCharLimit !== null && repairPrompt.length > repairRawInputCharLimit) {
+        throw new PlanningFailedError(
+          `Generated plan is too large to repair with the default coding model: ` +
+          `${repairPrompt.length} characters (limit: ${repairRawInputCharLimit}).`
+        );
+      }
+
+      const repairModelHardLimit = getModelHardLimit(repairModel);
+      const repairValidation = await validatePromptTokens(
+        repairPrompt,
+        repairModelHardLimit,
+        correlatedLogger,
+        repairModel,
+      );
+      if (!repairValidation.valid) {
+        throw new PlanningFailedError(
+          `Generated plan is too large to repair with the default coding model: ` +
+          `${repairValidation.tokenCount} tokens (model limit: ${repairModelHardLimit - CLAUDE_CODE_OVERHEAD}).`
+        );
+      }
+
       try {
         const repairedResponse = await runLightweightLLMAnalysis({
           prompt: repairPrompt,
-          model,
+          model: repairModel,
           correlationId: correlationId ? `${correlationId}-repair` : 'plan-generation-repair',
           worktreePath,
           githubToken,
           issueRef,
           taskId: draftId,
           executionType: 'plan-generation',
-          routingSession: opts.routingSession?.fork()
+          metadata: {
+            ...planGenerationMetadata,
+            jsonRepair: true,
+            sourceModel: model,
+            sourceResponseLength: response.length,
+          },
+          routingSession: opts.repairRoutingSession,
         });
 
         plan = parseLlmJson<PlanItem[]>(repairedResponse);
-        correlatedLogger.info({ originalError: error.message }, 'Successfully repaired JSON response');
+        correlatedLogger.info({
+          originalError: error.message,
+          generationModel: model,
+          repairModel,
+          responseLength: response.length,
+        }, 'Successfully repaired JSON response with the default coding model');
       } catch (repairError) {
         correlatedLogger.error({
           originalError: error.message,

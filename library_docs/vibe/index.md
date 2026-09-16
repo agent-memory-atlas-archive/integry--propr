@@ -7,7 +7,7 @@ project context.
 > **Scope:** This file documents ProPR-specific integration behavior — how
 > ProPR installs, configures, and invokes the Vibe CLI. It is **not**
 > authoritative upstream documentation. Settings and config paths below were
-> observed against `mistral-vibe==2.25.0` (the version pinned in
+> observed against `mistral-vibe==2.25.4` (the version pinned in
 > `Dockerfile.agent`) and may differ in other releases. Always verify against
 > your installed version with `vibe --help`.
 
@@ -23,7 +23,7 @@ project context.
 Install from PyPI with uv:
 
 ```bash
-uv tool install mistral-vibe==2.25.0
+uv tool install mistral-vibe==2.25.4
 ```
 
 ## Get started
@@ -72,7 +72,7 @@ export MISTRAL_API_KEY=your-api-key-here
 
 ## Models
 
-Vibe 2.25.0 ships one hosted model and a local llama.cpp option. ProPR catalogs
+Vibe 2.25.4 ships one hosted model and a local llama.cpp option. ProPR catalogs
 only the hosted model by default.
 
 | Model ID | Name | Context Window |

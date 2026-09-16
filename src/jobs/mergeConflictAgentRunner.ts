@@ -9,11 +9,11 @@ import {
     createLogFiles,
     db,
     getAuthenticatedOctokit,
-    pushBranch,
     recordLLMMetrics,
 } from '@propr/core';
 import type { ClaudeCodeResponse, JobResult, WorkerStateManager, WorktreeInfo } from '@propr/core';
 import { createContainerIdCallbackForPR, createSessionIdCallbackForPR } from './prCommentJobHelpers.js';
+import type { PullRequestPublication } from './prPublication.js';
 import { AI_COMMIT_AUTHOR } from './commitAuthor.js';
 import { agentResultToClaudeResponse, toClaudeResult } from './prCommentJobUtils.js';
 import {
@@ -114,11 +114,11 @@ async function verifyNoConflictMarkers(worktreeInfo: WorktreeInfo, pullRequestNu
 export async function handleMergeWithAgent(options: {
     conflictedFiles?: string[];
     worktreeInfo: WorktreeInfo;
-    branchName: string;
+    /** Owns the mutable destination and adopts an unpushable fork into a continuation. */
+    publication: PullRequestPublication;
     baseBranch: string;
     baseCommit: string;
     pullRequestNumber: number;
-    repoUrl: string;
     repoOwner: string;
     repoName: string;
     githubToken: GitHubToken;
@@ -130,9 +130,10 @@ export async function handleMergeWithAgent(options: {
     correlatedLogger: Logger;
     redisClient: Redis;
 }): Promise<JobResult> {
-    const { conflictedFiles, worktreeInfo, branchName, baseBranch, baseCommit, pullRequestNumber, repoUrl,
+    const { conflictedFiles, worktreeInfo, publication, baseBranch, baseCommit, pullRequestNumber,
         repoOwner, repoName, githubToken, octokit, startingCommentId,
         stateManager, taskId, correlationId, correlatedLogger, redisClient } = options;
+    const branchName = publication.target.branchName;
 
     const prompt = buildConflictResolutionPrompt({
         pullRequestNumber, baseBranch, headBranch: branchName, conflictedFiles, worktreeInfo, repoOwner, repoName,
@@ -186,37 +187,47 @@ export async function handleMergeWithAgent(options: {
     const { simpleGit } = await import('simple-git');
     const finalCommitHash = commitResult?.commitHash || (await simpleGit({ baseDir: worktreeInfo.worktreePath }).revparse(['HEAD'])).trim();
     await assertCommitIsAncestor(worktreeInfo.worktreePath, baseCommit);
-    await pushBranch(worktreeInfo.worktreePath, branchName, { repoUrl, authToken: githubToken.token });
+    // A final fork rejection can be stricter than the dry-run preflight (for example,
+    // when this merge introduces workflow commits). Preserve this exact HEAD and adopt
+    // it into a ProPR-owned continuation rather than rerunning conflict resolution.
+    const pushResult = await publication.push(worktreeInfo.worktreePath, undefined, {
+        // Rebasing replays individual commits and can drop the merge commit that proves
+        // the fetched base was incorporated.
+        rebaseOnNonFastForward: false,
+    });
+    const publishedCommitHash = pushResult.commitHash || finalCommitHash;
+    const publishedBranchName = publication.target.branchName;
     const taskUrl = `${process.env.WEB_UI_URL || process.env.FRONTEND_URL || 'https://gitfix.dev'}/tasks/${taskId}`;
-    const comment = buildMergeConflictComment({
+    let comment = buildMergeConflictComment({
         wasCleanMerge,
-        commitHash: finalCommitHash, baseBranch, headBranch: branchName, conflictedFiles,
+        commitHash: publishedCommitHash, baseBranch, headBranch: publishedBranchName, conflictedFiles,
         resolutionSummary: claudeResult.summary, model: claudeResult.model || resolvedModel,
         executionTimeMs: claudeResult.executionTime, taskUrl,
     });
+    if (publication.status) comment += `\n\n${publication.status}`;
 
     await octokit.request('PATCH /repos/{owner}/{repo}/issues/comments/{comment_id}', {
         owner: repoOwner, repo: repoName, comment_id: startingCommentId, body: comment,
     });
     await stateManager.updateTaskState(taskId, TaskStates.COMPLETED, {
-        reason: 'Merge conflict resolution completed successfully', commitHash: finalCommitHash,
+        reason: 'Merge conflict resolution completed successfully', commitHash: publishedCommitHash,
         historyMetadata: await buildMergeCompletionHistoryMetadata({
-            stateManager, taskId, pullRequestNumber, baseBranch, headBranch: branchName,
-            model: claudeResult.model || resolvedModel, commitHash: finalCommitHash, correlatedLogger,
+            stateManager, taskId, pullRequestNumber, baseBranch, headBranch: publishedBranchName,
+            model: claudeResult.model || resolvedModel, commitHash: publishedCommitHash, correlatedLogger,
         }),
     });
     try {
-        await db('tasks').where({ task_id: taskId }).update({ commit_hash: finalCommitHash });
+        await db('tasks').where({ task_id: taskId }).update({ commit_hash: publishedCommitHash });
     } catch (dbError) {
         correlatedLogger.warn({ taskId, error: (dbError as Error).message }, 'Failed to save commit hash to database');
     }
 
     correlatedLogger.info({
-        pullRequestNumber, commitHash: finalCommitHash, baseBranch, conflictedFiles, model: claudeResult.model || resolvedModel,
+        pullRequestNumber, commitHash: publishedCommitHash, baseBranch, conflictedFiles, model: claudeResult.model || resolvedModel,
     }, 'Merge conflict resolution completed successfully');
     return {
         status: 'complete',
-        commit: finalCommitHash,
+        commit: publishedCommitHash,
         pullRequestNumber,
         mergeType: conflictedFiles && conflictedFiles.length > 0 ? 'conflict_resolved' : 'clean',
         claudeResult: { success: claudeResult.success },

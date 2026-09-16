@@ -155,12 +155,16 @@ export interface CallLLMOptions {
   tokenLimit: number;
   /** Model to use for plan generation (e.g., 'opus', 'claude:claude-opus-4-5-20251101') */
   model: string;
+  /** Configured default coding model used to repair malformed planner JSON. */
+  repairModel: string;
   /** Optional context from additional repositories (marked as example/reference only) */
   additionalContext?: string;
   /** Granularity setting for task enforcement */
   granularity: Granularity;
   /** Route selected before planner context/token budgets were calculated. */
   routingSession?: SyntheticRoutingSession;
+  /** Independent route for JSON repair so a malformed planner is not asked to repair itself. */
+  repairRoutingSession?: SyntheticRoutingSession;
 }
 
 export interface CallLLMForPlanResult {

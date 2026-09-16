@@ -84,9 +84,17 @@ export async function generatePlan(options: GeneratePlanOptions): Promise<Plan> 
   const settings = await loadSettings();
   const requestedContextModel = await resolveConfiguredModel(settings.planner_context_model);
   const requestedDefaultGenerationModel = await resolveConfiguredModel(settings.planner_generation_model);
+  // JSON repair is deliberately handled by the configured default coding model,
+  // independently of whichever model was selected to generate the plan.
+  const requestedRepairModel = await resolveConfiguredModel();
   const registry = AgentRegistry.getInstance();
   await registry.ensureInitialized();
-  correlatedLogger.info({ draftId, contextModel: requestedContextModel, defaultGenerationModel: requestedDefaultGenerationModel }, 'Starting plan generation');
+  correlatedLogger.info({
+    draftId,
+    contextModel: requestedContextModel,
+    defaultGenerationModel: requestedDefaultGenerationModel,
+    jsonRepairModel: requestedRepairModel,
+  }, 'Starting plan generation');
 
   const draft = await db<TaskDraft>('task_drafts').where({ draft_id: draftId }).first();
   if (!draft) throw new Error(`Draft not found: ${draftId}`);
@@ -98,6 +106,9 @@ export async function generatePlan(options: GeneratePlanOptions): Promise<Plan> 
   const generationRoute = registry.beginRoutingSession(parseRoutingModel(requestedGenerationModel));
   const generationSelection = await generationRoute.select();
   const generationModel = `${generationSelection.physicalAgentAlias}:${generationSelection.physicalModel}`;
+  // Keep this route lazy: selecting it is only necessary when generated JSON
+  // is malformed, and must not consume routing capacity for successful plans.
+  const repairRoute = registry.beginRoutingSession(parseRoutingModel(requestedRepairModel));
   const contextRoute = registry.beginRoutingSession(parseRoutingModel(requestedContextModel));
   const contextSelection = await contextRoute.select();
   const contextModel = `${contextSelection.physicalAgentAlias}:${contextSelection.physicalModel}`;
@@ -163,8 +174,8 @@ export async function generatePlan(options: GeneratePlanOptions): Promise<Plan> 
 
   const { plan, enforcementMetadata } = await callLLMForPlan({
     draftId, runId, fullContext: fullContext!, worktreePath, githubToken, repository: draft.repository,
-    correlationId, tokenLimit: config.tokenLimit, model: generationModel, granularity: config.granularity,
-    routingSession: generationRoute,
+    correlationId, tokenLimit: config.tokenLimit, model: generationModel, repairModel: requestedRepairModel,
+    granularity: config.granularity, routingSession: generationRoute, repairRoutingSession: repairRoute,
   });
 
   correlatedLogger.info({ taskCount: plan.length }, 'Validating and repairing file paths');
