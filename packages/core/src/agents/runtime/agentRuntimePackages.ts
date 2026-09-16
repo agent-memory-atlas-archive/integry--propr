@@ -385,11 +385,7 @@ export async function resolveAgentRuntimeImage(
     const existing = state.images[baseImage];
     if (existing?.baseImageId === inspected.id && await imageExists(existing.image)) return existing.image;
     if (options.buildMissing === false) {
-        logger.warn(
-            { baseImage },
-            'Agent runtime image is not ready locally; using the base image until the runtime build worker completes',
-        );
-        return baseImage;
+        throw new Error(`Agent runtime image for ${baseImage} has not been prepared by the worker`);
     }
 
     const built = await buildAgentRuntimeImage({

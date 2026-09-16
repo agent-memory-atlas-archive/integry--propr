@@ -365,17 +365,7 @@ export class AgentRegistry {
         // worker owner. API/analysis processes never start a Docker build.
         if (!(await this.registeredAgentImagesAvailable())) {
             logger.warn('Requesting worker-owned agent image preparation because a registered image is unavailable locally');
-            if (this.imagePreparationOwner) {
-                if (!this.pendingBackgroundRefresh) {
-                    this.pendingBackgroundRefresh = this.prepareImagesAndRefresh()
-                        .finally(() => {
-                            this.pendingBackgroundRefresh = null;
-                        });
-                }
-                await this.pendingBackgroundRefresh;
-            } else {
-                await this.startWorkerOwnedImageRecovery();
-            }
+            await this.startWorkerOwnedImageRecovery();
             return;
         }
 
@@ -424,7 +414,7 @@ export class AgentRegistry {
         if (!result.image) {
             const error = result.error || 'Unified agent image is unavailable';
             logger.error({ error, imageTag: result.imageTag }, 'Failed to resolve unified agent image');
-            this.recordUnavailableUnifiedAgentImage(result.imageTag, error);
+            this.recordUnavailableUnifiedAgentImage(result.imageTag, error, prepareImages || !!this.pendingBackgroundRefresh);
             return null;
         }
         return this.markUnifiedAgentImageReady(result.image);
@@ -455,8 +445,9 @@ export class AgentRegistry {
             pendingBackgroundRefresh: this.pendingBackgroundRefresh,
             imageTag,
             clearRetry: () => this.clearUnifiedAgentImageRetry(),
-            enqueuePreparation: enqueueAgentImagePreparation,
-            refresh: () => this.refresh(),
+            enqueuePreparation: this.imagePreparationOwner
+                ? () => this.prepareImagesAndRefresh() : enqueueAgentImagePreparation,
+            refresh: () => this.imagePreparationOwner ? Promise.resolve() : this.refresh(),
             recordFailure: (failedImageTag, error) => this.recordUnavailableUnifiedAgentImage(failedImageTag, error),
             setPendingBackgroundRefresh: promise => { this.pendingBackgroundRefresh = promise; },
         });
@@ -472,7 +463,7 @@ export class AgentRegistry {
         const result = await resolveDefaultAgentConfig(prepareImages);
         if (!result.config) {
             const error = result.error || 'Default agent image is unavailable';
-            this.recordUnavailableUnifiedAgentImage(result.imageTag, error);
+            this.recordUnavailableUnifiedAgentImage(result.imageTag, error, prepareImages || !!this.pendingBackgroundRefresh);
             logger.error({ dockerImage: result.imageTag, error }, 'Failed to resolve default Claude agent image');
             return;
         }
@@ -495,18 +486,19 @@ export class AgentRegistry {
         }, 'Default Claude agent registered');
     }
 
-    private recordUnavailableUnifiedAgentImage(imageTag: string | undefined, error: string): void {
+    private recordUnavailableUnifiedAgentImage(imageTag: string | undefined, error: string, attemptFailed = true): void {
         const diskPressure = isAgentImageDiskPressureError(error);
         const result = recordUnifiedAgentImageFailure({
             previous: this.unavailableUnifiedAgentImage,
             imageTag,
             error,
             diskPressure,
+            attemptFailed,
         });
+        this.clearUnifiedAgentImageRetry();
         this.unavailableUnifiedAgentImage = result.state;
         if (!result.shouldRetry) {
-            this.clearUnifiedAgentImageRetry();
-            logUnifiedAgentImageCircuitOpen(imageTag, error, result.state.retryCount, diskPressure);
+            logUnifiedAgentImageCircuitOpen(imageTag, error, result.state.retryCount, !!result.state.operatorActionRequired);
             return;
         }
         this.scheduleUnifiedAgentImageRetry();

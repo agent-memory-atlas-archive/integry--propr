@@ -13,6 +13,20 @@ await mock.module('../packages/core/src/agents/agentImagePreparationQueue.js', {
     },
 });
 
+const dockerCommand = mock.fn(async (_command: string, _args: string[]): Promise<import('../packages/core/src/claude/docker/dockerExecutor.js').ExecutionResult> => {
+    throw new Error('Unexpected Docker command');
+});
+const unexpectedBuild = mock.fn(async () => { throw new Error('Consumers must not build images'); });
+await mock.module('../packages/core/src/claude/docker/dockerExecutor.js', {
+    namedExports: {
+        executeDockerCommand: dockerCommand,
+        agentDockerImageExists: async () => true,
+        ensureAgentBundleImage: unexpectedBuild,
+        ensureAgentDockerImage: unexpectedBuild,
+        getDockerRootDir: async () => '/docker/storage',
+    },
+});
+
 process.env.NODE_ENV = 'test';
 const testDataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'propr-agent-registry-'));
 process.env.DATA_DIR = testDataDir;
@@ -313,7 +327,8 @@ for (const failurePath of ['enqueue', 'refresh'] as const) {
         }
         internal.recordUnavailableUnifiedAgentImage(imageTag, error);
         try {
-            const recovery = internal.startWorkerOwnedImageRecovery();
+            t.mock.timers.tick(getUnifiedAgentImageRetryDelay(1, () => 0.5));
+            const recovery = internal.pendingBackgroundRefresh;
             assert.strictEqual(internal.startWorkerOwnedImageRecovery(), recovery);
             await recovery;
             for (let retryCount = 2; retryCount < UNIFIED_AGENT_IMAGE_RETRY_MAX_ATTEMPTS; retryCount += 1) {
@@ -339,30 +354,34 @@ for (const failurePath of ['enqueue', 'refresh'] as const) {
     });
 }
 
-for (const error of ['temporary download failure', 'docker build failed: no space left on device']) {
-    test(`AgentRegistry blocks on-demand recovery with an open circuit: ${error}`, async () => {
-        const registry = AgentRegistry.getInstance();
-        registry.setImagePreparationOwner(false);
-        const internal = registry as unknown as {
-            initialized: boolean;
-            recordUnavailableUnifiedAgentImage: (imageTag: string, error: string) => void;
-            startWorkerOwnedImageRecovery: () => Promise<void>;
-            registeredAgentImagesAvailable: () => Promise<boolean>;
-        };
-        internal.initialized = true;
-        internal.registeredAgentImagesAvailable = async () => false;
-        do {
-            internal.recordUnavailableUnifiedAgentImage('propr/agent:bundle-retry', error);
-        } while (!registry.getOperationalStatus().unifiedAgentImage.circuitBreakerOpen);
-        const status = registry.getOperationalStatus();
+for (const owner of [false, true]) {
+    for (const error of ['temporary download failure', 'docker build failed: no space left on device']) {
+        test(`AgentRegistry blocks on-demand recovery with an open circuit (owner=${owner}): ${error}`, async () => {
+            const registry = AgentRegistry.getInstance();
+            registry.setImagePreparationOwner(owner);
+            const prepare = mock.method(registry, 'prepareImagesAndRefresh', async () => {});
+            const internal = registry as unknown as {
+                initialized: boolean;
+                recordUnavailableUnifiedAgentImage: (imageTag: string, error: string) => void;
+                startWorkerOwnedImageRecovery: () => Promise<void>;
+                registeredAgentImagesAvailable: () => Promise<boolean>;
+            };
+            internal.initialized = true;
+            internal.registeredAgentImagesAvailable = async () => false;
+            do {
+                internal.recordUnavailableUnifiedAgentImage('propr/agent:bundle-retry', error);
+            } while (!registry.getOperationalStatus().unifiedAgentImage.circuitBreakerOpen);
+            const status = registry.getOperationalStatus();
 
-        await internal.startWorkerOwnedImageRecovery();
-        await registry.ensureInitialized();
-        await registry.ensureInitialized();
+            await internal.startWorkerOwnedImageRecovery();
+            await registry.ensureInitialized();
+            await registry.ensureInitialized();
 
-        assert.strictEqual(enqueuePreparation.mock.callCount(), 0);
-        assert.deepStrictEqual(registry.getOperationalStatus(), status);
-    });
+            assert.strictEqual(enqueuePreparation.mock.callCount(), 0);
+            assert.deepStrictEqual(registry.getOperationalStatus(), status);
+            assert.strictEqual(prepare.mock.callCount(), 0);
+        });
+    }
 }
 
 test('AgentRegistry opens a circuit after bounded transient failures', () => {
@@ -408,7 +427,7 @@ test('AgentRegistry clears failure state after successful preparation', () => {
         markUnifiedAgentImageReady: (imageTag: string) => string;
     };
 
-    internal.recordUnavailableUnifiedAgentImage('propr/agent:bundle-recovered', 'temporary download failure');
+    internal.recordUnavailableUnifiedAgentImage('propr/agent:bundle-recovered', 'ENOSPC');
     assert.strictEqual(internal.markUnifiedAgentImageReady('propr/agent:bundle-recovered'), 'propr/agent:bundle-recovered');
     assert.deepStrictEqual(registry.getOperationalStatus(), {
         unifiedAgentImage: { status: 'ready' }
@@ -553,3 +572,124 @@ test('AgentRegistry keeps default Claude fallback when no agents are configured'
     assert.strictEqual(defaultAgent.config.type, 'claude');
     assert.strictEqual(defaultAgent.config.alias, 'default');
 });
+
+for (const owner of [false, true]) {
+    test(`AgentRegistry honors retry deadlines for removed images (owner=${owner})`, async t => {
+        t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: 1_000 });
+        t.mock.method(Math, 'random', () => 0.5);
+        const registry = AgentRegistry.getInstance();
+        registry.setImagePreparationOwner(owner);
+        const imageTag = 'propr/agent:removed';
+        const internal = registry as unknown as {
+            ensureUnifiedAgentImage: () => Promise<string | null>;
+            registeredAgentImagesAvailable: () => Promise<boolean>;
+            recordUnavailableUnifiedAgentImage: (tag: string, error: string, attemptFailed?: boolean) => void;
+            pendingBackgroundRefresh: Promise<void> | null;
+            clearUnifiedAgentImageRetry: () => void;
+        };
+        internal.ensureUnifiedAgentImage = async () => imageTag;
+        await registry.refresh();
+        internal.registeredAgentImagesAvailable = async () => false;
+        let attempts = 0;
+        internal.ensureUnifiedAgentImage = async () => {
+            attempts += 1;
+            internal.recordUnavailableUnifiedAgentImage(imageTag, 'temporary build failure');
+            return null;
+        };
+        enqueuePreparation.mock.mockImplementation(async () => {
+            attempts += 1;
+            throw new Error('temporary build failure');
+        });
+        try {
+            await registry.ensureInitialized();
+            assert.strictEqual(attempts, 1);
+            const deadline = registry.getOperationalStatus().unifiedAgentImage.nextRetryAt;
+            t.mock.timers.tick(1_000);
+            internal.recordUnavailableUnifiedAgentImage(imageTag, 'not prepared', false);
+            assert.strictEqual(registry.getOperationalStatus().unifiedAgentImage.nextRetryAt, deadline);
+            await Promise.all([registry.ensureInitialized(), registry.ensureInitialized()]);
+            assert.strictEqual(attempts, 1);
+            t.mock.timers.tick(4_000);
+            await internal.pendingBackgroundRefresh;
+            await registry.ensureInitialized();
+            assert.strictEqual(attempts, 2);
+            assert.strictEqual(registry.getOperationalStatus().unifiedAgentImage.retryCount, 2);
+        } finally {
+            internal.clearUnifiedAgentImageRetry();
+        }
+    });
+}
+
+test('AgentRegistry preserves disk-pressure circuit on inspect-only observations of the same image', async () => {
+    const registry = AgentRegistry.getInstance();
+    registry.setImagePreparationOwner(false);
+    const internal = registry as unknown as {
+        recordUnavailableUnifiedAgentImage: (tag: string, error: string, attemptFailed?: boolean) => void;
+        startWorkerOwnedImageRecovery: () => Promise<void>;
+        clearUnifiedAgentImageRetry: () => void;
+    };
+    internal.recordUnavailableUnifiedAgentImage('propr/agent:full', 'ENOSPC');
+    internal.recordUnavailableUnifiedAgentImage('propr/agent:full', 'not prepared', false);
+    const status = registry.getOperationalStatus().unifiedAgentImage;
+    assert.strictEqual(status.circuitBreakerOpen, true);
+    assert.strictEqual(status.operatorActionRequired, true);
+    assert.strictEqual(status.nextRetryAt, undefined);
+    await internal.startWorkerOwnedImageRecovery();
+    assert.strictEqual(enqueuePreparation.mock.callCount(), 0);
+    internal.recordUnavailableUnifiedAgentImage('propr/agent:different', 'not prepared', false);
+    assert.strictEqual(registry.getOperationalStatus().unifiedAgentImage.circuitBreakerOpen, undefined);
+    assert.strictEqual(registry.getOperationalStatus().unifiedAgentImage.operatorActionRequired, undefined);
+    internal.clearUnifiedAgentImageRetry();
+});
+
+for (const useDefault of [false, true]) {
+    test(`AgentRegistry queues missing runtime packages on first use (default=${useDefault})`, async () => {
+        const registry = AgentRegistry.getInstance();
+        registry.setImagePreparationOwner(false);
+        if (useDefault) await saveAgents([]);
+        const previousImage = process.env.AGENT_DOCKER_IMAGE;
+        if (useDefault) process.env.AGENT_DOCKER_IMAGE = 'custom/agent:default';
+        const state = {
+            installationId: 'test-runtime', packages: ['jq'], activePackages: ['jq'],
+            status: 'ready' as const, images: {}, updatedAt: new Date().toISOString(),
+        };
+        await saveAgentRuntimePackageState(state);
+        unexpectedBuild.mock.resetCalls();
+        dockerCommand.mock.mockImplementation(async (_command, args) => ({
+            exitCode: 0, stderr: '', messageTimestamps: new Map(),
+            stdout: args[0] === 'run' ? 'apt\nPRETTY_NAME="Debian"' : 'sha256:base\t"node"',
+        }));
+        let finishPreparation!: () => void;
+        const preparationGate = new Promise<void>(resolve => { finishPreparation = resolve; });
+        let requested!: () => void;
+        const requestStarted = new Promise<void>(resolve => { requested = resolve; });
+        enqueuePreparation.mock.mockImplementation(async imageTag => {
+            requested();
+            await preparationGate;
+            await saveAgentRuntimePackageState({
+                ...state,
+                images: { [imageTag]: {
+                    baseImage: imageTag, baseImageId: 'sha256:base', image: 'propr/runtime-agent:ready',
+                    packageManager: 'apt', builtAt: new Date().toISOString(),
+                } },
+            });
+        });
+        try {
+            const initialization = registry.ensureInitialized();
+            await requestStarted;
+            assert.strictEqual(registry.getOperationalStatus().unifiedAgentImage.status, 'unavailable');
+            assert.strictEqual(registry.getAllAgents().length, 0);
+            finishPreparation();
+            await initialization;
+            assert.strictEqual(enqueuePreparation.mock.callCount(), 1);
+            assert.strictEqual(unexpectedBuild.mock.callCount(), 0);
+            assert.strictEqual(registry.getOperationalStatus().unifiedAgentImage.status, 'ready');
+            assert.strictEqual(registry.getAgentByAlias(useDefault ? 'default' : 'opencode')?.config.dockerImage,
+                'propr/runtime-agent:ready');
+        } finally {
+            finishPreparation();
+            if (previousImage === undefined) delete process.env.AGENT_DOCKER_IMAGE;
+            else process.env.AGENT_DOCKER_IMAGE = previousImage;
+        }
+    });
+}

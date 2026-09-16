@@ -43,7 +43,9 @@ export function scheduleUnifiedAgentImageRetry(options: {
         || (unavailable.retryCount ?? 0) >= UNIFIED_AGENT_IMAGE_RETRY_MAX_ATTEMPTS
     ) return;
 
-    const delay = getUnifiedAgentImageRetryDelay(unavailable.retryCount ?? 1);
+    const delay = unavailable.nextRetryAt
+        ? Math.max(0, Date.parse(unavailable.nextRetryAt) - Date.now())
+        : getUnifiedAgentImageRetryDelay(unavailable.retryCount ?? 1);
     unavailable.nextRetryAt = new Date(Date.now() + delay).toISOString();
     const timer = setTimeout(() => {
         options.setRetryTimer(null);
@@ -58,17 +60,26 @@ export function recordUnifiedAgentImageFailure(options: {
     imageTag: string | undefined;
     error: string;
     diskPressure: boolean;
+    attemptFailed?: boolean;
 }): { state: UnavailableUnifiedAgentImage; shouldRetry: boolean } {
     const sameImage = options.previous?.imageTag === options.imageTag;
-    const retryCount = sameImage ? (options.previous?.retryCount ?? 0) + 1 : 1;
-    const circuitBreakerOpen = options.diskPressure || retryCount >= UNIFIED_AGENT_IMAGE_RETRY_MAX_ATTEMPTS;
+    const previous = sameImage ? options.previous : null;
+    const attemptFailed = options.attemptFailed ?? true;
+    const retryCount = (previous?.retryCount ?? 0) + (attemptFailed ? 1 : 0);
+    const circuitBreakerOpen = previous?.circuitBreakerOpen
+        || options.diskPressure || retryCount >= UNIFIED_AGENT_IMAGE_RETRY_MAX_ATTEMPTS;
+    const operatorActionRequired = previous?.operatorActionRequired || options.diskPressure;
+    const nextRetryAt = attemptFailed
+        ? new Date(Date.now() + getUnifiedAgentImageRetryDelay(retryCount)).toISOString()
+        : previous?.nextRetryAt;
     const state: UnavailableUnifiedAgentImage = {
         imageTag: options.imageTag,
         error: options.error,
         recordedAt: new Date().toISOString(),
         retryCount,
         circuitBreakerOpen: circuitBreakerOpen || undefined,
-        operatorActionRequired: options.diskPressure || undefined,
+        operatorActionRequired: operatorActionRequired || undefined,
+        nextRetryAt: circuitBreakerOpen ? undefined : nextRetryAt,
     };
     return { state, shouldRetry: !circuitBreakerOpen };
 }
@@ -98,7 +109,15 @@ export function startUnifiedAgentImageRecovery(options: {
     setPendingBackgroundRefresh: (promise: Promise<void> | null) => void;
 }): Promise<void> {
     if (options.pendingBackgroundRefresh) return options.pendingBackgroundRefresh;
-    if (!options.imageTag || options.unavailable?.circuitBreakerOpen) return Promise.resolve();
+    if (!options.imageTag) return Promise.resolve();
+    const unavailable = options.unavailable?.imageTag === options.imageTag ? options.unavailable : null;
+    // Inspect-only discovery has not attempted preparation yet. Let the first
+    // attempt proceed, then enforce its deadline for both owners and consumers.
+    if (unavailable?.circuitBreakerOpen || (
+        (unavailable?.retryCount ?? 0) > 0
+        && unavailable?.nextRetryAt
+        && Date.parse(unavailable.nextRetryAt) > Date.now()
+    )) return Promise.resolve();
 
     options.clearRetry();
     const recovery = options.enqueuePreparation(options.imageTag)
