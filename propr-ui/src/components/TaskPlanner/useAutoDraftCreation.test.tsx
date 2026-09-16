@@ -312,4 +312,60 @@ describe('useAutoDraftCreation', () => {
     });
     expect(mockCreateDraft).toHaveBeenCalledTimes(1);
   });
+
+  it('does not reuse or apply a pending draft creation from a previous selection', async () => {
+    const onDraftCreatedInPlace = vi.fn();
+    let resolveFirstDraft: (draft: Awaited<ReturnType<typeof createDraft>>) => void = () => {};
+    mockCreateDraft
+      .mockImplementationOnce(() => new Promise((resolve) => { resolveFirstDraft = resolve; }))
+      .mockResolvedValueOnce({
+        draft_id: 'draft-b',
+        repository: 'integry/other',
+        initial_prompt: 'Test prompt',
+        status: 'draft',
+        attachments: [],
+        created_at: '2026-05-06T00:00:00Z',
+      });
+
+    const { result, rerender } = renderHook((props: { selectedRepo: string }) => useAutoDraftCreation({
+      isNewMode: true,
+      selectedRepo: props.selectedRepo,
+      resolvedBaseBranch: 'main',
+      prompt: 'Test prompt',
+      localFiles: [],
+      onDraftCreatedInPlace,
+      navigate: vi.fn(),
+    }), { initialProps: { selectedRepo: 'integry/propr' } });
+
+    await flushAutoCreate();
+    expect(mockCreateDraft).toHaveBeenCalledWith('integry/propr', 'Test prompt', expect.anything());
+
+    rerender({ selectedRepo: 'integry/other' });
+
+    let created: Awaited<ReturnType<typeof result.current.ensureDraftCreated>> = null;
+    await act(async () => {
+      created = await result.current.ensureDraftCreated();
+    });
+    expect(created).toEqual(expect.objectContaining({ draft_id: 'draft-b' }));
+    expect(mockCreateDraft).toHaveBeenLastCalledWith('integry/other', 'Test prompt', expect.anything());
+
+    await act(async () => {
+      resolveFirstDraft({
+        draft_id: 'draft-a',
+        repository: 'integry/propr',
+        initial_prompt: 'Test prompt',
+        status: 'draft',
+        attachments: [],
+        created_at: '2026-05-06T00:00:00Z',
+      });
+      await vi.advanceTimersByTimeAsync(0);
+    });
+
+    expect(onDraftCreatedInPlace).toHaveBeenCalledTimes(1);
+    expect(onDraftCreatedInPlace).toHaveBeenCalledWith(expect.objectContaining({ draft_id: 'draft-b' }));
+    await act(async () => {
+      await expect(result.current.ensureDraftCreated()).resolves.toEqual(expect.objectContaining({ draft_id: 'draft-b' }));
+    });
+    expect(mockCreateDraft).toHaveBeenCalledTimes(2);
+  });
 });
