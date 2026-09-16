@@ -171,22 +171,26 @@ function record(value: unknown): Record<string, unknown> {
   } catch { return {}; }
 }
 
-/** Follow-up runs share their PR with the run that created it, but not its published description. */
-function isFollowUpTask(row: Record<string, unknown>): boolean {
+/**
+ * Follow-up runs share their PR with the run that created it, but not its published description.
+ * Job data identifies a follow-up the same way the task history API does, including the nested issue reference.
+ */
+function isFollowUpTask(row: Record<string, unknown>, initial: Record<string, unknown>): boolean {
   return row.task_type === 'pr-comment' || row.task_type === 'review'
-    || (typeof row.task_id === 'string' && row.task_id.startsWith('pr-comments-batch-'));
+    || (typeof row.task_id === 'string' && row.task_id.startsWith('pr-comments-batch-'))
+    || !!initial.pullRequestNumber || !!record(initial.issueRef).pullRequestNumber;
 }
 
 export function taskPreviewSource(row: Record<string, unknown>): PreviewSource {
   const initial = record(row.initial_job_data);
   const result = record(row.final_result);
-  if (isFollowUpTask(row)) {
+  if (isFollowUpTask(row, initial)) {
     const comment = record(record(row.latest_metadata).githubComment);
     const commentBody = typeof comment.body === 'string' && comment.body.includes(VISUAL_PREVIEW_MARKER) ? comment.body : undefined;
     return { repository: String(row.repository ?? ''), prNumbers: [], isFollowUp: true, ...(commentBody ? { commentBody } : {}) };
   }
   return { repository: String(row.repository ?? ''), prNumbers: [
-    row.pr_number || initial.pullRequestNumber || record(record(result.postProcessing).pr).number,
+    row.pr_number || record(record(result.postProcessing).pr).number,
   ].filter((number): number is number => typeof number === 'number' && Number.isSafeInteger(number) && number > 0) };
 }
 

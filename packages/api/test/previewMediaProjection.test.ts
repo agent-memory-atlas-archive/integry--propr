@@ -360,14 +360,14 @@ test('follow-up runs never inherit PR description previews and only project thei
   const fix = taskPreviewSource({ task_id: 'fix', repository: 'acme/web', task_type: 'pr-comment', pr_number: 1,
     latest_metadata: comment(body('fix')) });
   const batch = taskPreviewSource({ task_id: 'pr-comments-batch-1', repository: 'acme/web', pr_number: 1 });
-  assert.deepEqual(review, { repository: 'acme/web', prNumbers: [], isFollowUp: true });
+  const [direct, nested] = [JSON.stringify({ pullRequestNumber: 7 }), { issueRef: { pullRequestNumber: 7 } }].map(initial_job_data => taskPreviewSource({ repository: 'acme/web', task_type: null, initial_job_data }));
+  [review, batch, direct, nested].forEach(source => assert.deepEqual(source, { repository: 'acme/web', prNumbers: [], isFollowUp: true }));
   assert.deepEqual(fix.prNumbers, []);
-  assert.equal(batch.isFollowUp, true);
-  const media = await reader.project([initial, review, fix, batch]);
+  const media = await reader.project([initial, review, fix, batch, direct, nested]);
   assert.deepEqual(media[0].previews.map(item => item.url), [url('1-0'), url('1-1'), url('1-2')]);
   assert.deepEqual(media[1], { previews: [] });
   assert.deepEqual(media[2].previews.map(item => item.url), [url('fix-0'), url('fix-1'), url('fix-2')]);
-  assert.deepEqual(media[3], { previews: [] });
+  assert.deepEqual(media.slice(3), [{ previews: [] }, { previews: [] }, { previews: [] }]);
   assert.deepEqual(calls, [1]);
   disable();
   assert.deepEqual((await reader.project([fix]))[0], { previews: [] });
