@@ -8,7 +8,7 @@ import type { PullRequestGitTarget } from './prGitTarget.js';
 export function isPublicationPermissionDenied(error: unknown): boolean {
     const message = error instanceof Error ? error.message : String(error);
     if (/rate limit|abuse detection|secondary rate|non-fast-forward|fetch first|GH013|GH006/i.test(message)) return false;
-    return /write access to repository not granted|permission to .+ denied to |resource not accessible by integration|you are not allowed to push code to this project|not authorized to push|permission denied.*refs\/heads/i.test(message);
+    return /write access to repository not granted|permission to .+ denied to |resource not accessible by integration|you are not allowed to push code to this project|not authorized to push|permission denied.*refs\/heads|refusing to allow a GitHub App to create or update workflow .+ without [`'"]?workflows[`'"]? permission/i.test(message);
 }
 
 function authenticatedUrl(target: PullRequestGitTarget, token: string): string {

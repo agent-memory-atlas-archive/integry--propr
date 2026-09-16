@@ -18,9 +18,10 @@ import {
     updateMergeTaskWithKnownPRInfo,
 } from './mergeConflictHelpers.js';
 import { handleMergeWithAgent } from './mergeConflictAgentRunner.js';
-import { createPullRequestHeadWorktree, resolvePullRequestGitTarget } from './prGitOperations.js';
+import { resolvePullRequestGitTarget } from './prGitOperations.js';
 import type { PullRequestGitTarget } from './prGitOperations.js';
-import { checkPullRequestHeadWritable, isPublicationPermissionDenied } from './prPublicationGit.js';
+import { PullRequestPublication } from './prPublication.js';
+import type { Contribution } from './prContinuation.js';
 import { generateSummaryTitle, resolveDefaultAgentAndModel } from './prCommentAgentUtils.js';
 import { fetchAllComments } from './prCommentJobUtils.js';
 import {
@@ -35,10 +36,8 @@ import type { GitHubToken } from './githubTypes.js';
 const DEFAULT_MODEL_NAME = process.env.DEFAULT_CLAUDE_MODEL || getDefaultModel() || null;
 type MergeResult = Awaited<ReturnType<typeof mergeBaseIntoBranch>>;
 type MergeTaskPrInfo = { prTitle: string; linkedIssueNumber: number | null };
-type LivePullRequest = {
-    body?: string | null;
-    title?: string;
-    head: Parameters<typeof resolvePullRequestGitTarget>[0] & { sha: string };
+type LivePullRequest = Contribution & {
+    head: Contribution['head'] & { sha: string };
 };
 
 const redisClient = new Redis({
@@ -138,30 +137,6 @@ async function updateMergeTaskBeforeLocalMerge(options: {
         });
     } catch (titleError) {
         correlatedLogger.warn({ taskId, error: (titleError as Error).message }, 'Failed to update merge task title before local merge');
-    }
-}
-
-/**
- * ProPR publishes the merge with its own credentials. A fork whose branch it cannot
- * push must fail before the agent runs, never by silently writing somewhere else.
- */
-async function assertMergeTargetWritable(
-    worktreePath: string,
-    target: PullRequestGitTarget,
-    token: string,
-    correlatedLogger: Logger,
-): Promise<void> {
-    if (!target.isFork) return;
-    try {
-        await checkPullRequestHeadWritable(worktreePath, target, token);
-    } catch (error) {
-        if (!isPublicationPermissionDenied(error)) {
-            correlatedLogger.warn({
-                headRepository: `${target.repoOwner}/${target.repoName}`, error: (error as Error).message,
-            }, 'Could not verify write access to the fork head; continuing to the merge');
-            return;
-        }
-        throw new Error(`ProPR cannot push to the pull request head branch \`${target.branchName}\` in fork \`${target.repoOwner}/${target.repoName}\`. Grant ProPR write access to that fork, or merge \`${target.branchName}\` manually.`);
     }
 }
 
@@ -336,6 +311,7 @@ export async function processMergeConflictJob(job: Job<MergeConflictJobData>): P
     let prDescription: string | null | undefined;
     let recentComments: Awaited<ReturnType<typeof fetchAllComments>> = [];
     let target: PullRequestGitTarget | undefined;
+    let publication: PullRequestPublication | undefined;
     let jobSucceeded = false;
 
     try {
@@ -352,6 +328,9 @@ export async function processMergeConflictJob(job: Job<MergeConflictJobData>): P
             octokit, pullRequestNumber, repoOwner, repoName, headBranch, headSha, correlationId, correlatedLogger,
         });
         target = head.target;
+        publication = new PullRequestPublication(octokit, {
+            repoOwner, repoName, pullRequestNumber,
+        }, head.prData);
 
         ({ prInfo, prDescription, recentComments } = await fetchMergeTitleContextInfo({
             octokit, pullRequestNumber, repoOwner, repoName, taskId, prData: head.prData, correlatedLogger,
@@ -365,21 +344,13 @@ export async function processMergeConflictJob(job: Job<MergeConflictJobData>): P
         await ensureGitRepository(correlatedLogger);
 
         const timestamp = new Date().toISOString().replace(/[:.]/g, '-').substring(0, 19);
-        ({ localRepoPath, worktreeInfo } = await createPullRequestHeadWorktree({
-            target,
-            authToken: githubToken.token,
-            worktreeDirName: `pr-${pullRequestNumber}-merge-${timestamp}`,
-            requiredHeadSha: head.headSha,
-        }));
+        ({ localRepoPath, worktreeInfo } = await publication.prepare(`pr-${pullRequestNumber}-merge-${timestamp}`));
+        target = publication.target;
 
         correlatedLogger.info({
             worktreePath: worktreeInfo.worktreePath, branchName: worktreeInfo.branchName,
             headRepository: `${target.repoOwner}/${target.repoName}`,
         }, 'Created worktree for merge conflict resolution');
-
-        // A fork head is only mergeable when ProPR's own credentials may push it back.
-        // Detect that before spending an agent run that could never be published.
-        await assertMergeTargetWritable(worktreeInfo.worktreePath, target, githubToken.token, correlatedLogger);
 
         const mergeResult = await mergeBaseIntoBranch(worktreeInfo.worktreePath, baseBranch, target.isFork
             ? { baseRepoUrl: getRepoUrl({ repoOwner, repoName }), authToken: githubToken.token }
@@ -414,7 +385,7 @@ export async function processMergeConflictJob(job: Job<MergeConflictJobData>): P
 
         const result = await handleMergeWithAgent({
             conflictedFiles: mergeResult.conflictedFiles,
-            worktreeInfo, target, baseBranch, baseCommit: mergeResult.baseCommit,
+            worktreeInfo, publication, baseBranch, baseCommit: mergeResult.baseCommit,
             pullRequestNumber, repoOwner, repoName,
             githubToken, octokit, startingCommentId,
             stateManager, taskId, correlationId, correlatedLogger, redisClient,
@@ -425,7 +396,7 @@ export async function processMergeConflictJob(job: Job<MergeConflictJobData>): P
     } catch (error) {
         return await handleMergeJobError(error as Error, {
             octokit, startingCommentId, stateManager, taskId,
-            repoOwner, repoName, baseBranch, headBranch: target?.branchName ?? headBranch,
+            repoOwner, repoName, baseBranch, headBranch: publication?.target.branchName ?? target?.branchName ?? headBranch,
             pullRequestNumber, correlatedLogger,
         });
     } finally {

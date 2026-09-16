@@ -77,7 +77,7 @@ await mock.module('@propr/core', { namedExports: {
         return { worktreePath, branchName };
     },
     cleanupWorktree: async (...args: unknown[]) => { calls.push({ operation: 'cleanup', args }); },
-    pushBranch: async (worktree: string, branchName: string, options: { repoUrl: string; authToken: string }) => {
+    pushBranch: async (worktree: string, branchName: string, options: { repoUrl: string; authToken: string; rebaseOnNonFastForward?: boolean }) => {
         assert.equal(options.authToken, token);
         calls.push({ operation: 'forkPush', args: { worktree, branchName, options } });
         if (finalPushError) throw finalPushError;
@@ -184,6 +184,15 @@ test('writable forks use installation auth for preflight and publish on the orig
     assert.equal(calls.filter(c => c.operation === 'auth').length, 2);
 });
 
+test('merge publication can disable non-fast-forward rebasing without disabling continuation adoption', async () => {
+    const publication = session();
+    const prepared = await publication.prepare('merge-no-rebase');
+    await implement(prepared.worktreeInfo.worktreePath);
+    await publication.push(prepared.worktreeInfo.worktreePath, undefined, { rebaseOnNonFastForward: false });
+    const forkPush = calls.find(call => call.operation === 'forkPush');
+    assert.equal((forkPush?.args as { options: { rebaseOnNonFastForward?: boolean } }).options.rebaseOnNonFastForward, false);
+});
+
 test('denial before execution starts upstream at the exact source SHA, preserving attribution and base', async () => {
     probeError = denial();
     const publication = session();
@@ -211,6 +220,20 @@ test('final push denial publishes the existing implementation commit without rer
     assert.equal(calls.filter(c => c.operation === 'worktree').length, 1);
     const createRef = calls.find(c => c.operation.endsWith('/git/refs'))!;
     assert.equal((createRef.args as any).sha, sourceSha);
+});
+
+test('workflow-permission denial on the final fork push publishes through the continuation', async () => {
+    const publication = session();
+    const { worktreeInfo } = await publication.prepare('workflow-permission-revoked');
+    const produced = await implement(worktreeInfo.worktreePath);
+    finalPushError = new Error("remote: refusing to allow a GitHub App to create or update workflow `.github/workflows/pr-build-check.yml` without `workflows` permission");
+
+    const pushed = await publication.push(worktreeInfo.worktreePath);
+
+    assert.equal(pushed.commitHash, produced);
+    assert.equal(git(repoPath('upstream'), 'rev-parse', 'propr/continuation-pr-42'), produced);
+    assert.equal(prs.length, 1);
+    assert.match(publication.status, /pull\/100/);
 });
 
 for (const message of ['Could not resolve host github.com', 'Connection timed out', 'non-fast-forward', 'Authentication failed', 'HTTP 403 rate limit', 'remote: GH013: Repository rule violations', 'Repository not found']) {
@@ -278,7 +301,11 @@ test('closed continuations remain mapped and are never replaced', async () => {
 });
 
 test('permission classification is narrow and rejects generic HTTP status failures', () => {
-    for (const message of ['Permission to contributor/project.git denied to propr[bot].', 'Resource not accessible by integration']) {
+    for (const message of [
+        'Permission to contributor/project.git denied to propr[bot].',
+        'Resource not accessible by integration',
+        "remote: refusing to allow a GitHub App to create or update workflow `.github/workflows/pr-build-check.yml` without `workflows` permission",
+    ]) {
         assert.equal(isPublicationPermissionDenied(new Error(message)), true);
     }
     assert.equal(isPublicationPermissionDenied(new Error('The requested URL returned error: 403')), false);

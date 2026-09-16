@@ -205,14 +205,23 @@ export class PullRequestPublication {
         await savePublicationCheckpoint(this.continuation!, bundle, completion ? JSON.stringify(completion) : undefined);
     }
 
-    async push(worktreePath: string, completion?: PublicationCompletion) {
+    async push(
+        worktreePath: string,
+        completion?: PublicationCompletion,
+        options: { rebaseOnNonFastForward?: boolean } = {},
+    ) {
         // An adopted continuation already has committed work in the worktree; a rejected
         // token refresh must not lose it once the worktree is cleaned up.
         if (this.continuation) await this.checkpoint(worktreePath, completion);
         const { token } = await this.octokit.auth({ type: 'installation' }) as { token: string };
         if (!this.continuation) {
             try {
-                return await pushPullRequestHeadBranch({ worktreePath, target: this.target, authToken: token });
+                return await pushPullRequestHeadBranch({
+                    worktreePath,
+                    target: this.target,
+                    authToken: token,
+                    rebaseOnNonFastForward: options.rebaseOnNonFastForward,
+                });
             } catch (error) {
                 if (!this.target.isFork || !isPublicationPermissionDenied(error)) throw error;
                 this.continuation = await findPRContinuation(this.ref) || await reserveContinuation(this.ref, this.source);
