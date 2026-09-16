@@ -20,7 +20,7 @@ const runLightweightLLMAnalysis = mock.fn(async (options: AnalysisCall) => {
 });
 
 await mock.module('../packages/core/src/claude/claudeService.js', {
-  exports: { runLightweightLLMAnalysis },
+  namedExports: { runLightweightLLMAnalysis },
 });
 
 const correlatedLogger = {
@@ -29,16 +29,14 @@ const correlatedLogger = {
   error: mock.fn(),
 };
 await mock.module('../packages/core/src/utils/logger.js', {
-  exports: {
-    default: {
-      ...correlatedLogger,
-      withCorrelation: mock.fn(() => correlatedLogger),
-    },
+  defaultExport: {
+    ...correlatedLogger,
+    withCorrelation: mock.fn(() => correlatedLogger),
   },
 });
 
 await mock.module('../packages/core/src/utils/llmEstimation.js', {
-  exports: {
+  namedExports: {
     estimateLlmDuration: mock.fn(async () => ({
       estimatedDurationMs: 1,
       isHistoricalEstimate: false,
@@ -56,7 +54,7 @@ class PlanningFailedError extends Error {
 }
 
 await mock.module('../packages/core/src/services/planning/index.js', {
-  exports: {
+  namedExports: {
     updateTraceForRun: mock.fn(async () => undefined),
     validatePromptTokens: mock.fn(async (prompt: string, _limit: number, _logger: unknown, model?: string) => {
       tokenValidationCalls.push({ prompt, model });
