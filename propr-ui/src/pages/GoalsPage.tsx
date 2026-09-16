@@ -1,3 +1,4 @@
+import { PreviewThumbnails } from '../components/PreviewMedia';
 /* eslint-disable max-lines -- goal list and split-pane console intentionally share this route-level surface */
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
@@ -454,6 +455,7 @@ function GoalQueueRow({ goal, goalAgents }: { goal: Goal; goalAgents: Array<{ ty
       <div className="col-span-2 min-w-0 xl:col-span-1">
         <h3 className="line-clamp-2 font-semibold leading-5 text-slate-900" title={goal.title}>{goal.title}</h3>
         <p className="mt-1 line-clamp-2 text-sm leading-5 text-slate-500" title={goal.objective}>{goal.objective}</p>
+        <PreviewThumbnails media={goal.previewMedia} />
       </div>
       <div className="min-w-0">
         <span className="mb-1.5 block text-[10px] font-bold uppercase tracking-wider text-slate-400 xl:hidden">Status</span>

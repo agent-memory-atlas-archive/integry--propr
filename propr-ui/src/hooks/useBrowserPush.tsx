@@ -123,6 +123,16 @@ function currentPermission(): BrowserNotificationPermission {
   return browserSupportsNotifications() ? Notification.permission : 'unsupported';
 }
 
+async function getExistingPushSubscription(
+  registration: ServiceWorkerRegistration | null,
+  serviceWorkerSupported: boolean,
+  pushApiSupported: boolean,
+): Promise<globalThis.PushSubscription | null> {
+  return registration && serviceWorkerSupported && pushApiSupported && registration.pushManager
+    ? await registration.pushManager.getSubscription().catch(() => null)
+    : null;
+}
+
 function initialState(): BrowserPushState {
   const isIos = typeof navigator !== 'undefined' && isIosBrowser();
   const isInstalled = typeof navigator !== 'undefined' && isStandaloneWebApp();
@@ -210,12 +220,9 @@ export const BrowserPushProvider: React.FC<{ children: React.ReactNode }> = ({ c
     const registration = registrationResult.status === 'fulfilled'
       ? registrationResult.value
       : null;
-    let localSubscription = registration
-      && serviceWorkerSupported
-      && pushApiSupported
-      && registration.pushManager
-      ? await registration.pushManager.getSubscription().catch(() => null)
-      : null;
+    let localSubscription = await getExistingPushSubscription(
+      registration, serviceWorkerSupported, pushApiSupported,
+    );
     let reconciliationError: unknown = capabilityResult.status === 'rejected'
       ? capabilityResult.reason
       : registrationResult.status === 'rejected'

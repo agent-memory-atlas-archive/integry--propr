@@ -1,4 +1,6 @@
+import type { PublishedVisualPreview } from '@propr/shared';
 export interface Task {
+  previewMedia?: PublishedVisualPreview[];
   id: string;
   repository?: string;
   repositoryOwner?: string | null;

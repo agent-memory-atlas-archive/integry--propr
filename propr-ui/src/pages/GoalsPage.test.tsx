@@ -84,6 +84,15 @@ describe('GoalsPage', () => {
     vi.mocked(goalsApi.requestGoalModel).mockResolvedValue({ goal: { ...goal, requestedModel: 'gpt-5.6-luna' } });
   });
 
+  it('renders up to three inline previews in the responsive goal row without per-row requests', async () => {
+    const previewMedia = Array.from({ length: 5 }, (_, index) => ({ type: 'image' as const, title: `Preview ${index}`, url: `https://github.com/user-attachments/assets/goal-${index}` }));
+    vi.mocked(goalsApi.listGoals).mockResolvedValue({ goals: [{ ...goal, previewMedia }] });
+    render(<MemoryRouter><GoalsPage /></MemoryRouter>);
+    await screen.findByRole('heading', { name: goal.title });
+    expect(screen.getAllByRole('img', { name: /Preview/ })).toHaveLength(3);
+    expect(goalsApi.getGoalVisualPreviews).not.toHaveBeenCalled();
+  });
+
   it('waits for a successful goal read before presenting the empty queue', async () => {
     const request = deferred<Awaited<ReturnType<typeof goalsApi.listGoals>>>();
     vi.mocked(goalsApi.listGoals).mockReturnValue(request.promise);

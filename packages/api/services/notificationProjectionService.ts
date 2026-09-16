@@ -720,6 +720,8 @@ export class NotificationProjectionService {
         },
         title: context.description ?? `PR #${prNumber} ready for review`,
         body: `PR #${prNumber} is ready for review.`,
+        // Persist only the completing implementation identity, never arbitrary task metadata.
+        metadata: { completedImplementationTaskId: payload.taskId },
         actions: [
           ...(pullRequestUrl === undefined ? [] : ['open_pr' as const]),
           'dismiss',

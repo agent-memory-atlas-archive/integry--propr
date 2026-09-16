@@ -1,8 +1,10 @@
+import { previewMediaReader, taskPreviewSource } from '../services/previewMediaProjection.js';
 import { Knex } from 'knex';
 import { timeApiStage } from '../apiPerformanceTiming.js';
 
 export interface TaskQuery {
   db: Knex;
+  previewReader?: typeof previewMediaReader;
   status: string;
   repository: string;
   limit: number;
@@ -118,11 +120,15 @@ export async function getTasksFromDb(
     async () => enrichTaskPage(db, taskIds, Boolean(excludeMerged))
   );
 
-  const tasks = pageTasks.map((row: Record<string, unknown>) => mapDbTaskToResponse({
-    ...row,
-    ...historyByTask.get(String(row.task_id)),
-    plan_issue_status: planStatusByTask.get(String(row.task_id)) ?? null,
-    critique_score: critiqueScoreByTask.get(String(row.task_id)) ?? null,
+  const media = await (query.previewReader ?? previewMediaReader).project(pageTasks.map(taskPreviewSource), 3);
+  const tasks = pageTasks.map((row: Record<string, unknown>, index: number) => ({
+    ...mapDbTaskToResponse({
+      ...row,
+      ...historyByTask.get(String(row.task_id)),
+      plan_issue_status: planStatusByTask.get(String(row.task_id)) ?? null,
+      critique_score: critiqueScoreByTask.get(String(row.task_id)) ?? null,
+    }),
+    ...(media[index].previews.length ? { previewMedia: media[index].previews } : {}),
   }));
   return { tasks, total, offset, limit };
 }
