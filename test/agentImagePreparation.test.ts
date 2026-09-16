@@ -30,6 +30,7 @@ await mock.module('../packages/core/src/claude/docker/dockerExecutor.js', {
 const queue = {
     getJob: mock.fn(async (_jobId: string): Promise<unknown> => undefined),
     add: mock.fn(async (..._args: unknown[]): Promise<unknown> => undefined),
+    getWorkersCount: mock.fn(async () => 1),
     close: async () => {},
 };
 await mock.module('bullmq', {
@@ -208,6 +209,41 @@ for (const state of ['waiting', 'active', 'delayed', 'prioritized', 'waiting-chi
         assert.strictEqual(queue.add.mock.callCount(), 0);
     });
 }
+
+test('preparation fails instead of waiting forever when no worker consumes the queue', async () => {
+    const timeout = new Error('Job wait prepare-unified-agent-image timed out before finishing, no finish notification arrived');
+    const job = {
+        id: 'prepare-orphaned',
+        getState: async () => 'waiting',
+        waitUntilFinished: mock.fn(async () => { throw timeout; }),
+    };
+    queue.getJob.mock.mockImplementation(async () => job);
+    queue.getWorkersCount.mock.mockImplementationOnce(async () => 0);
+    await assert.rejects(
+        enqueueAgentImagePreparation('propr/agent:orphaned'),
+        /prepare-orphaned is waiting but no worker is consuming the agent-image-preparation queue/,
+    );
+    assert.strictEqual(job.waitUntilFinished.mock.callCount(), 1);
+});
+
+test('preparation wait has an overall deadline even while a worker is attached', async t => {
+    t.mock.timers.enable({ apis: ['Date'] });
+    const timeout = new Error('Job wait prepare-unified-agent-image timed out before finishing, no finish notification arrived');
+    const budgets: number[] = [];
+    const job = {
+        id: 'prepare-stuck',
+        getState: async () => 'active',
+        waitUntilFinished: mock.fn(async (_events: unknown, budget: number) => {
+            budgets.push(budget);
+            t.mock.timers.tick(budget);
+            throw timeout;
+        }),
+    };
+    queue.getJob.mock.mockImplementation(async () => job);
+    await assert.rejects(enqueueAgentImagePreparation('propr/agent:stuck'), /prepare-stuck did not finish within/);
+    assert.strictEqual(budgets.length, 3);
+    assert.ok(budgets.every(budget => budget === budgets[0]));
+});
 
 test('preparation propagates worker failures without extending the wait', async () => {
     const failure = new Error('Docker build failed: no space left on device');

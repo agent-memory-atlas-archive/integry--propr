@@ -6,8 +6,10 @@ import type { AgentCliVersionMatrix } from './version/versionService.js';
 export const AGENT_IMAGE_PREPARATION_QUEUE_NAME = 'agent-image-preparation';
 // A configuration refresh can prepare both a base and a runtime image, each
 // with a lease wait and a 20-minute build, plus pulls and inspection overhead.
-// This is a status-check interval, not a deadline on time spent in the queue.
+// This is a status-check interval; a job may also queue behind other
+// preparations, so the overall wait allows a few intervals before failing.
 const AGENT_IMAGE_PREPARATION_TIMEOUT_MS = 2 * (AGENT_IMAGE_BUILD_LOCK_ACQUIRE_TIMEOUT_MS + 20 * 60_000) + 15 * 60_000;
+const AGENT_IMAGE_PREPARATION_MAX_STATUS_CHECKS = 3;
 const PENDING_STATES = ['waiting', 'active', 'delayed', 'prioritized', 'waiting-children'];
 
 export interface AgentImagePreparationJobData {
@@ -61,9 +63,15 @@ async function getRequestEvents(): Promise<QueueEvents> {
 
 async function waitForPreparation(job: Job<AgentImagePreparationJobData>): Promise<void> {
     const events = await getRequestEvents();
+    const deadline = Date.now() + AGENT_IMAGE_PREPARATION_MAX_STATUS_CHECKS * AGENT_IMAGE_PREPARATION_TIMEOUT_MS;
     while (true) {
+        const remaining = deadline - Date.now();
+        if (remaining <= 0) {
+            throw new Error(`Agent image preparation job ${job.id} did not finish within `
+                + `${Math.round(AGENT_IMAGE_PREPARATION_MAX_STATUS_CHECKS * AGENT_IMAGE_PREPARATION_TIMEOUT_MS / 60_000)} minutes`);
+        }
         try {
-            await job.waitUntilFinished(events, AGENT_IMAGE_PREPARATION_TIMEOUT_MS);
+            await job.waitUntilFinished(events, Math.min(AGENT_IMAGE_PREPARATION_TIMEOUT_MS, remaining));
             return;
         } catch (error) {
             if (!(error instanceof Error) || !error.message.startsWith('Job wait ')
@@ -72,6 +80,12 @@ async function waitForPreparation(job: Job<AgentImagePreparationJobData>): Promi
             // Queue/lease waiting is not a preparation failure. Reattach to
             // live jobs; for a terminal race, read the actual completion result.
             if (!PENDING_STATES.includes(state) && state !== 'completed' && state !== 'failed') throw error;
+            // A job nobody consumes would otherwise keep callers (and the
+            // registry's recovery circuit) waiting until the overall deadline.
+            if (state !== 'active' && PENDING_STATES.includes(state) && await getRequestQueue().getWorkersCount() === 0) {
+                throw new Error(`Agent image preparation job ${job.id} is ${state} but no worker is consuming `
+                    + `the ${AGENT_IMAGE_PREPARATION_QUEUE_NAME} queue`);
+            }
         }
     }
 }
