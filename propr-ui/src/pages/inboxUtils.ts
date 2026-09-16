@@ -1,5 +1,5 @@
 import type { Notification } from '@propr/shared';
-import { summaryBrowserPath } from '../utils/summaryBrowser';
+import { summaryBrowserPath, summaryHrefWithBranch } from '../utils/summaryBrowser';
 
 export const INBOX_GROUPS = [
   'Needs attention',
@@ -44,7 +44,15 @@ export function notificationRepository(notification: Notification): string {
 }
 
 export function notificationHref(notification: Notification): string {
-  if (notification.action?.type === 'navigate') return notification.action.href;
+  if (notification.action?.type === 'navigate') {
+    return notification.target.type === 'indexing'
+      ? summaryHrefWithBranch(
+        notification.action.href,
+        notification.target.repository,
+        notification.target.branch,
+      )
+      : notification.action.href;
+  }
   switch (notification.target.type) {
     case 'plan': return `/studio/${encodeURIComponent(notification.target.draftId)}`;
     case 'task': return `/tasks/${encodeURIComponent(notification.target.taskId)}`;

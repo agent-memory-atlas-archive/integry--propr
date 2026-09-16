@@ -26,3 +26,30 @@ export function summaryBrowserPath(owner: string, repo: string, branch?: string 
   const normalizedBranch = normalizeSummaryBranch(branch);
   return normalizedBranch ? `${path}?branch=${encodeURIComponent(normalizedBranch)}` : path;
 }
+
+/**
+ * Appends the branch to an application-relative href that opens the
+ * repository's summary page without an explicit branch query. Explicit
+ * `?branch=` queries, other parameters, and unrelated links pass through
+ * unchanged.
+ */
+export function summaryHrefWithBranch(
+  href: string,
+  repository: string,
+  branch?: string | null,
+): string {
+  const normalizedBranch = normalizeSummaryBranch(branch);
+  if (!normalizedBranch) return href;
+  const [owner, repo] = repository.split('/');
+  if (!owner || !repo) return href;
+  let url: URL;
+  try {
+    url = new URL(href, 'https://propr.invalid');
+  } catch {
+    return href;
+  }
+  const summaryPath = `/summaries/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`;
+  if (url.pathname !== summaryPath || url.searchParams.has('branch')) return href;
+  url.searchParams.append('branch', normalizedBranch);
+  return `${url.pathname}${url.search}${url.hash}`;
+}

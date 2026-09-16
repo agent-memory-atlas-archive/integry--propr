@@ -297,6 +297,51 @@ describe('Web Push dispatcher', { concurrency: false }, () => {
     assert.equal(deepLink.searchParams.get('branch'), 'release/2026 Q1');
   });
 
+  test('appends the indexing branch to branchless Browse navigate actions', async () => {
+    userSequence += 1;
+    const userId = `indexing-action-user-${userSequence}`;
+    await notifications.updateNotificationPreferences(userId, {
+      preferences: { indexing: { pushEnabled: true } },
+    });
+    await notifications.upsertPushSubscription(userId, {
+      endpoint: `https://fcm.googleapis.com/fcm/send/${userId}`,
+      expirationTime: null,
+      keys: { p256dh: browserPublicKey(), auth: 'A'.repeat(22) },
+    });
+    await notifications.createNotificationEvent({
+      deduplicationKey: `indexing-action-dispatcher:${userId}`,
+      kind: 'indexing',
+      severity: 'error',
+      target: { type: 'indexing', repository: 'integry/propr', branch: 'release/2026' },
+      title: 'Repository indexing failed',
+      body: 'Indexing failed.',
+      action: { type: 'navigate', label: 'Browse summaries', href: '/summaries/integry/propr' },
+      actions: [],
+      recipients: [{ userId, pushEnabled: true }],
+    });
+
+    const payloads: string[] = [];
+    const worker = dispatcher({
+      sendNotification: async (_subscription, payload) => {
+        payloads.push(payload);
+        return success;
+      },
+    });
+
+    assert.equal(await worker.runOnce(), 1);
+    const payload = JSON.parse(payloads[0]) as {
+      deepLink: string;
+      actions: Array<{ url: string }>;
+    };
+    const deepLink = new URL(payload.deepLink);
+    assert.equal(deepLink.pathname, '/summaries/integry/propr');
+    assert.equal(deepLink.searchParams.get('branch'), 'release/2026');
+    assert.equal(deepLink.searchParams.get('tenant'), 'installation-1');
+    const actionUrl = new URL(payload.actions[0].url);
+    assert.equal(actionUrl.pathname, '/summaries/integry/propr');
+    assert.equal(actionUrl.searchParams.get('branch'), 'release/2026');
+  });
+
   test('never turns an advertised stop into a push-click action', async () => {
     await queuedEvent({ advertiseStop: true });
     const payloads: string[] = [];

@@ -62,6 +62,24 @@ describe('Inbox notification presentation', () => {
     }))).toBe('/summaries/integry/propr?branch=feature%2Fui');
   });
 
+  test('carries the indexing branch into branchless Browse actions', () => {
+    expect(notificationHref(item({
+      kind: 'indexing',
+      target: { type: 'indexing', repository: 'integry/propr', branch: 'release/2026' },
+      action: { type: 'navigate', label: 'Browse', href: '/summaries/integry/propr' },
+    }))).toBe('/summaries/integry/propr?branch=release%2F2026');
+    expect(notificationHref(item({
+      kind: 'indexing',
+      target: { type: 'indexing', repository: 'integry/propr', branch: 'release/2026' },
+      action: { type: 'navigate', label: 'Browse', href: '/summaries/integry/propr?branch=feature%2Fui' },
+    }))).toBe('/summaries/integry/propr?branch=feature%2Fui');
+    expect(notificationHref(item({
+      kind: 'indexing',
+      target: { type: 'indexing', repository: 'integry/propr', branch: 'release/2026' },
+      action: { type: 'navigate', label: 'Retry', href: '/repositories' },
+    }))).toBe('/repositories');
+  });
+
   test('accepts only matching HTTPS GitHub pull-request actions', () => {
     const target = {
       type: 'task', repository: 'integry/propr', taskId: 'task-1', prNumber: 1724,
