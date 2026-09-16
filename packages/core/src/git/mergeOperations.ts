@@ -1,6 +1,7 @@
 import { SimpleGit } from 'simple-git';
 import logger from '../utils/logger.js';
 import { AI_COMMIT_AUTHOR } from './commitOperations.js';
+import { redactAuthenticatedGitUrl } from './redactGitUrl.js';
 import { createHooklessGit } from './hooklessGit.js';
 
 export type MergeOutcome = 'clean' | 'conflicts' | 'failed';
@@ -39,6 +40,15 @@ export async function assertCommitIsAncestor(
     }
 }
 
+export interface MergeBaseIntoBranchOptions {
+    /** Repository that owns the base branch. Required when the worktree was created
+     * from a fork: the fork's own `origin/<baseBranch>` is a different branch that
+     * merely shares the name, so the base must be fetched from the base repository. */
+    baseRepoUrl?: string;
+    /** Installation token for `baseRepoUrl`; omit for public base repositories. */
+    authToken?: string;
+}
+
 /**
  * Fetches the latest base branch and merges it into the current branch in the worktree.
  * Returns a structured outcome indicating whether the merge was clean, has conflicts, or failed.
@@ -46,20 +56,29 @@ export async function assertCommitIsAncestor(
 export async function mergeBaseIntoBranch(
     worktreePath: string,
     baseBranch: string,
+    options: MergeBaseIntoBranchOptions = {},
 ): Promise<MergeResult> {
     const git: SimpleGit = createHooklessGit(worktreePath);
+    // A fork worktree keeps its own origin, so the base is fetched from the base
+    // repository into a namespace that cannot collide with the fork's branches.
+    const baseRemote = options.baseRepoUrl && options.authToken
+        ? options.baseRepoUrl.replace('https://', `https://x-access-token:${options.authToken}@`)
+        : options.baseRepoUrl ?? 'origin';
+    const baseRef = options.baseRepoUrl
+        ? `refs/remotes/propr-base/${baseBranch}`
+        : `refs/remotes/origin/${baseBranch}`;
 
     try {
         // Fetch the latest base branch
-        logger.info({ worktreePath, baseBranch }, 'Fetching latest base branch for merge');
-        await git.raw(['fetch', 'origin', `+refs/heads/${baseBranch}:refs/remotes/origin/${baseBranch}`, '--prune']);
+        logger.info({ worktreePath, baseBranch, baseRepoUrl: options.baseRepoUrl }, 'Fetching latest base branch for merge');
+        await git.raw(['fetch', baseRemote, `+refs/heads/${baseBranch}:${baseRef}`, '--prune']);
         const baseCommit = (await git.raw([
             'rev-parse',
             '--verify',
-            `refs/remotes/origin/${baseBranch}^{commit}`,
+            `${baseRef}^{commit}`,
         ])).trim();
         if (!baseCommit) {
-            throw new Error(`Failed to resolve fetched base branch origin/${baseBranch}`);
+            throw new Error(`Failed to resolve fetched base branch ${baseRef}`);
         }
 
         // Configure merge author
@@ -74,7 +93,7 @@ export async function mergeBaseIntoBranch(
         logger.info({ worktreePath, baseBranch }, 'Merging base branch into current branch');
         let mergeError: Error | null = null;
         try {
-            await git.raw(['merge', `origin/${baseBranch}`, '--no-edit']);
+            await git.raw(['merge', baseRef, '--no-edit']);
         } catch (err) {
             mergeError = err as Error;
         }
@@ -102,7 +121,7 @@ export async function mergeBaseIntoBranch(
 
         // If merge threw an error but no conflicts detected, it's a genuine failure
         if (mergeError) {
-            const errorMessage = mergeError.message || '';
+            const errorMessage = redactAuthenticatedGitUrl(mergeError.message || '');
             logger.error({ worktreePath, baseBranch, error: errorMessage }, 'Merge failed unexpectedly');
 
             // Abort the failed merge to leave worktree in a clean state
@@ -121,7 +140,7 @@ export async function mergeBaseIntoBranch(
         logger.info({ worktreePath, baseBranch }, 'Merge completed cleanly');
         return { outcome: 'clean', baseCommit };
     } catch (error) {
-        const errorMessage = (error as Error).message || 'Unknown error';
+        const errorMessage = redactAuthenticatedGitUrl((error as Error).message || 'Unknown error');
         logger.error({ worktreePath, baseBranch, error: errorMessage }, 'Failed to execute merge operation');
         return {
             outcome: 'failed',

@@ -934,6 +934,60 @@ describe('mergePR', () => {
     });
 });
 
+// ============= deleteBranch Tests =============
+
+describe('deleteBranch', () => {
+    function mockPullRequestHead(head: Record<string, unknown>) {
+        mockOctokit.request.mock.mockImplementation(async (endpoint: string) => {
+            if (endpoint.startsWith('GET')) return { data: { head } };
+            return { data: {} };
+        });
+    }
+
+    function deleteRefCall() {
+        return mockOctokit.request.mock.calls.find((call: { arguments: [string, Record<string, unknown>] }) =>
+            call.arguments[0].startsWith('DELETE'));
+    }
+
+    test('deletes the branch when the head is in the base repository', async () => {
+        resetMocks();
+        mockPullRequestHead({ ref: 'feature', repo: { full_name: 'test-owner/test-repo', owner: { login: 'test-owner' } } });
+
+        await deleteBranch('test-owner', 'test-repo', 42, mockLogger);
+
+        const call = deleteRefCall();
+        assert.ok(call, 'Expected the branch ref to be deleted');
+        assert.strictEqual(call.arguments[1].ref, 'heads/feature');
+    });
+
+    test('keeps a same-owner fork branch, which is a different repository', async () => {
+        resetMocks();
+        mockPullRequestHead({ ref: 'feature', repo: { full_name: 'test-owner/test-repo-fork', owner: { login: 'test-owner' } } });
+
+        await deleteBranch('test-owner', 'test-repo', 42, mockLogger);
+
+        assert.strictEqual(deleteRefCall(), undefined, 'Expected no branch deletion for a same-owner fork');
+    });
+
+    test('keeps a different-owner fork branch', async () => {
+        resetMocks();
+        mockPullRequestHead({ ref: 'feature', repo: { full_name: 'contributor/test-repo', owner: { login: 'contributor' } } });
+
+        await deleteBranch('test-owner', 'test-repo', 42, mockLogger);
+
+        assert.strictEqual(deleteRefCall(), undefined, 'Expected no branch deletion for a fork');
+    });
+
+    test('keeps the branch when the head repository has been deleted', async () => {
+        resetMocks();
+        mockPullRequestHead({ ref: 'feature', repo: null });
+
+        await deleteBranch('test-owner', 'test-repo', 42, mockLogger);
+
+        assert.strictEqual(deleteRefCall(), undefined, 'Expected no branch deletion without a head repository');
+    });
+});
+
 // ============= getFirstCommitMessage Tests =============
 
 describe('getFirstCommitMessage', () => {
@@ -1449,7 +1503,7 @@ describe('handleCheckRunEvent', () => {
                         mergeable: true,
                         mergeable_state: 'clean',
                         base: { ref: 'main' },
-                        head: { ref: 'feature', sha: 'abc123sha', repo: { owner: { login: 'test-owner' } } },
+                        head: { ref: 'feature', sha: 'abc123sha', repo: { full_name: 'test-owner/test-repo', owner: { login: 'test-owner' } } },
                         body: ''
                     }
                 };

@@ -5,7 +5,7 @@ import { getAuthenticatedOctokit } from '@propr/core';
 import { withRetry, retryConfigs } from '@propr/core';
 import { getStateManager, TaskStates } from '@propr/core';
 import type { WorkerStateManager } from '@propr/core';
-import { ensureRepoCloned, createWorktreeFromExistingBranch, getRepoUrl, mergeBaseIntoBranch } from '@propr/core';
+import { getRepoUrl, mergeBaseIntoBranch } from '@propr/core';
 import type { WorktreeInfo } from '@propr/core';
 import { ensureGitRepository } from '@propr/core';
 import { UsageLimitError, AgentRegistry } from '@propr/core';
@@ -18,6 +18,9 @@ import {
     updateMergeTaskWithKnownPRInfo,
 } from './mergeConflictHelpers.js';
 import { handleMergeWithAgent } from './mergeConflictAgentRunner.js';
+import { createPullRequestHeadWorktree, resolvePullRequestGitTarget } from './prGitOperations.js';
+import type { PullRequestGitTarget } from './prGitOperations.js';
+import { checkPullRequestHeadWritable, isPublicationPermissionDenied } from './prPublicationGit.js';
 import { generateSummaryTitle, resolveDefaultAgentAndModel } from './prCommentAgentUtils.js';
 import { fetchAllComments } from './prCommentJobUtils.js';
 import {
@@ -32,6 +35,11 @@ import type { GitHubToken } from './githubTypes.js';
 const DEFAULT_MODEL_NAME = process.env.DEFAULT_CLAUDE_MODEL || getDefaultModel() || null;
 type MergeResult = Awaited<ReturnType<typeof mergeBaseIntoBranch>>;
 type MergeTaskPrInfo = { prTitle: string; linkedIssueNumber: number | null };
+type LivePullRequest = {
+    body?: string | null;
+    title?: string;
+    head: Parameters<typeof resolvePullRequestGitTarget>[0] & { sha: string };
+};
 
 const redisClient = new Redis({
     host: process.env.REDIS_HOST || '127.0.0.1',
@@ -133,17 +141,82 @@ async function updateMergeTaskBeforeLocalMerge(options: {
     }
 }
 
+/**
+ * ProPR publishes the merge with its own credentials. A fork whose branch it cannot
+ * push must fail before the agent runs, never by silently writing somewhere else.
+ */
+async function assertMergeTargetWritable(
+    worktreePath: string,
+    target: PullRequestGitTarget,
+    token: string,
+    correlatedLogger: Logger,
+): Promise<void> {
+    if (!target.isFork) return;
+    try {
+        await checkPullRequestHeadWritable(worktreePath, target, token);
+    } catch (error) {
+        if (!isPublicationPermissionDenied(error)) {
+            correlatedLogger.warn({
+                headRepository: `${target.repoOwner}/${target.repoName}`, error: (error as Error).message,
+            }, 'Could not verify write access to the fork head; continuing to the merge');
+            return;
+        }
+        throw new Error(`ProPR cannot push to the pull request head branch \`${target.branchName}\` in fork \`${target.repoOwner}/${target.repoName}\`. Grant ProPR write access to that fork, or merge \`${target.branchName}\` manually.`);
+    }
+}
+
+/**
+ * Resolves the repository that actually owns the PR head. Merge work must run in, and
+ * push to, that repository: a fork's branch is not the base repository's same-named
+ * branch. The live head SHA is returned so the prepared worktree can be verified
+ * against the branch GitHub reports for this PR.
+ */
+async function resolveMergeJobHead(options: {
+    octokit: Awaited<ReturnType<typeof getAuthenticatedOctokit>>;
+    pullRequestNumber: number;
+    repoOwner: string;
+    repoName: string;
+    headBranch: string;
+    headSha: string;
+    correlationId: string;
+    correlatedLogger: Logger;
+}): Promise<{ target: PullRequestGitTarget; headSha: string; prData: LivePullRequest }> {
+    const { octokit, pullRequestNumber, repoOwner, repoName, headBranch, headSha, correlationId, correlatedLogger } = options;
+    const prResponse = await withRetry(
+        () => octokit.request('GET /repos/{owner}/{repo}/pulls/{pull_number}', {
+            owner: repoOwner, repo: repoName, pull_number: pullRequestNumber,
+        }),
+        { ...retryConfigs.githubApi, correlationId },
+        'get_pull_request_for_merge',
+    ) as { data: LivePullRequest };
+    const prData = prResponse.data;
+    const target = resolvePullRequestGitTarget(prData.head, { repoOwner, repoName });
+    if (target.branchName !== headBranch || prData.head.sha !== headSha) {
+        // The queued snapshot may be stale; the live head decides what gets merged.
+        correlatedLogger.info({
+            pullRequestNumber, queuedHeadBranch: headBranch, queuedHeadSha: headSha,
+            headBranch: target.branchName, headSha: prData.head.sha,
+        }, 'Merge job head moved since the job was queued; using the live pull request head');
+    }
+    if (target.isFork) {
+        correlatedLogger.info({
+            pullRequestNumber, headRepository: `${target.repoOwner}/${target.repoName}`, headBranch: target.branchName,
+        }, 'Merge job head lives in a fork; operating on the fork repository');
+    }
+    return { target, headSha: prData.head.sha, prData };
+}
+
 async function fetchMergeTitleContextInfo(options: {
     octokit: Awaited<ReturnType<typeof getAuthenticatedOctokit>>;
     pullRequestNumber: number;
     repoOwner: string;
     repoName: string;
     taskId: string;
+    prData: LivePullRequest;
     correlatedLogger: Logger;
 }): Promise<{ prInfo: MergeTaskPrInfo | undefined; prDescription: string | null | undefined; recentComments: Awaited<ReturnType<typeof fetchAllComments>> }> {
-    const { octokit, pullRequestNumber, repoOwner, repoName, taskId, correlatedLogger } = options;
+    const { octokit, pullRequestNumber, repoOwner, repoName, taskId, prData, correlatedLogger } = options;
     let prInfo: MergeTaskPrInfo | undefined;
-    let prDescription: string | null | undefined;
     let recentComments: Awaited<ReturnType<typeof fetchAllComments>> = [];
 
     try {
@@ -151,22 +224,14 @@ async function fetchMergeTitleContextInfo(options: {
     } catch (prError) {
         correlatedLogger.warn({ taskId, error: (prError as Error).message }, 'Failed to fetch PR info for merge task');
     }
-    try {
-        const prResponse = await octokit.request('GET /repos/{owner}/{repo}/pulls/{pull_number}', {
-            owner: repoOwner, repo: repoName, pull_number: pullRequestNumber,
-        }) as { data: { body: string | null; title?: string } };
-        prDescription = prResponse.data.body;
-        prInfo ??= { prTitle: prResponse.data.title || 'Untitled pull request', linkedIssueNumber: null };
-    } catch (prContextError) {
-        correlatedLogger.warn({ taskId, error: (prContextError as Error).message }, 'Failed to fetch PR description for merge task title context');
-    }
+    prInfo ??= { prTitle: prData.title || 'Untitled pull request', linkedIssueNumber: null };
     try {
         recentComments = await fetchAllComments(octokit, repoOwner, repoName, pullRequestNumber);
     } catch (commentsError) {
         correlatedLogger.warn({ taskId, error: (commentsError as Error).message }, 'Failed to fetch recent comments for merge task title context');
     }
 
-    return { prInfo, prDescription, recentComments };
+    return { prInfo, prDescription: prData.body ?? null, recentComments };
 }
 
 async function updateMergeTaskAfterLocalMerge(options: {
@@ -270,12 +335,12 @@ export async function processMergeConflictJob(job: Job<MergeConflictJobData>): P
     let prInfo: MergeTaskPrInfo | undefined;
     let prDescription: string | null | undefined;
     let recentComments: Awaited<ReturnType<typeof fetchAllComments>> = [];
+    let target: PullRequestGitTarget | undefined;
     let jobSucceeded = false;
 
     try {
         octokit = await withRetry(() => getAuthenticatedOctokit(), { ...retryConfigs.githubApi, correlationId }, 'get_authenticated_octokit');
         const githubToken = await octokit.auth({ type: "installation" }) as GitHubToken;
-        const repoUrl = getRepoUrl({ repoOwner, repoName });
 
         const startingComment = await octokit.request('POST /repos/{owner}/{repo}/issues/{issue_number}/comments', {
             owner: repoOwner, repo: repoName, issue_number: pullRequestNumber,
@@ -283,26 +348,42 @@ export async function processMergeConflictJob(job: Job<MergeConflictJobData>): P
         });
         startingCommentId = (startingComment as { data: { id: number } }).data.id;
 
+        const head = await resolveMergeJobHead({
+            octokit, pullRequestNumber, repoOwner, repoName, headBranch, headSha, correlationId, correlatedLogger,
+        });
+        target = head.target;
+
         ({ prInfo, prDescription, recentComments } = await fetchMergeTitleContextInfo({
-            octokit, pullRequestNumber, repoOwner, repoName, taskId, correlatedLogger,
+            octokit, pullRequestNumber, repoOwner, repoName, taskId, prData: head.prData, correlatedLogger,
         }));
         await updateMergeTaskBeforeLocalMerge({
-            prInfo, stateManager, taskId, pullRequestNumber, repoOwner, repoName, baseBranch, headBranch, correlatedLogger,
+            prInfo, stateManager, taskId, pullRequestNumber, repoOwner, repoName, baseBranch,
+            headBranch: target.branchName, correlatedLogger,
         });
 
         await stateManager.updateTaskState(taskId, TaskStates.PROCESSING, { reason: 'Starting merge conflict resolution' });
         await ensureGitRepository(correlatedLogger);
-        localRepoPath = await ensureRepoCloned({ repoUrl, owner: repoOwner, repoName, authToken: githubToken.token });
 
         const timestamp = new Date().toISOString().replace(/[:.]/g, '-').substring(0, 19);
-        worktreeInfo = await createWorktreeFromExistingBranch(localRepoPath, headBranch, {
+        ({ localRepoPath, worktreeInfo } = await createPullRequestHeadWorktree({
+            target,
+            authToken: githubToken.token,
             worktreeDirName: `pr-${pullRequestNumber}-merge-${timestamp}`,
-            owner: repoOwner, repoName,
-        });
+            requiredHeadSha: head.headSha,
+        }));
 
-        correlatedLogger.info({ worktreePath: worktreeInfo.worktreePath, branchName: worktreeInfo.branchName }, 'Created worktree for merge conflict resolution');
+        correlatedLogger.info({
+            worktreePath: worktreeInfo.worktreePath, branchName: worktreeInfo.branchName,
+            headRepository: `${target.repoOwner}/${target.repoName}`,
+        }, 'Created worktree for merge conflict resolution');
 
-        const mergeResult = await mergeBaseIntoBranch(worktreeInfo.worktreePath, baseBranch);
+        // A fork head is only mergeable when ProPR's own credentials may push it back.
+        // Detect that before spending an agent run that could never be published.
+        await assertMergeTargetWritable(worktreeInfo.worktreePath, target, githubToken.token, correlatedLogger);
+
+        const mergeResult = await mergeBaseIntoBranch(worktreeInfo.worktreePath, baseBranch, target.isFork
+            ? { baseRepoUrl: getRepoUrl({ repoOwner, repoName }), authToken: githubToken.token }
+            : {});
 
         if (mergeResult.outcome === 'failed') {
             throw new Error(`Merge failed: ${mergeResult.error}`);
@@ -325,7 +406,7 @@ export async function processMergeConflictJob(job: Job<MergeConflictJobData>): P
                 repoOwner,
                 repoName,
                 baseBranch,
-                headBranch,
+                headBranch: target.branchName,
                 correlationId,
                 correlatedLogger,
             });
@@ -333,8 +414,8 @@ export async function processMergeConflictJob(job: Job<MergeConflictJobData>): P
 
         const result = await handleMergeWithAgent({
             conflictedFiles: mergeResult.conflictedFiles,
-            worktreeInfo, branchName: headBranch, baseBranch, baseCommit: mergeResult.baseCommit,
-            pullRequestNumber, repoUrl, repoOwner, repoName,
+            worktreeInfo, target, baseBranch, baseCommit: mergeResult.baseCommit,
+            pullRequestNumber, repoOwner, repoName,
             githubToken, octokit, startingCommentId,
             stateManager, taskId, correlationId, correlatedLogger, redisClient,
         });
@@ -344,7 +425,8 @@ export async function processMergeConflictJob(job: Job<MergeConflictJobData>): P
     } catch (error) {
         return await handleMergeJobError(error as Error, {
             octokit, startingCommentId, stateManager, taskId,
-            repoOwner, repoName, baseBranch, headBranch, pullRequestNumber, correlatedLogger,
+            repoOwner, repoName, baseBranch, headBranch: target?.branchName ?? headBranch,
+            pullRequestNumber, correlatedLogger,
         });
     } finally {
         const lockOwner = await redisClient.get(lockKey);

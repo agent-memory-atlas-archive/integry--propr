@@ -93,14 +93,14 @@ describe('mergeBaseIntoBranch', () => {
             c.arguments[0][0] === 'merge'
         );
         assert.ok(mergeCall, 'Expected a merge call');
-        assert.ok(mergeCall.arguments[0].includes('origin/main'));
+        assert.ok(mergeCall.arguments[0].includes('refs/remotes/origin/main'));
     });
 
     test('returns conflicts outcome when merge has conflicts', async () => {
         let callCount = 0;
         mockGitInstance.raw.mock.mockImplementation(async (args: string[]) => {
             if (args[0] === 'rev-parse') return 'base-commit-sha\n';
-            if (args[0] === 'merge' && args[1]?.startsWith('origin/')) {
+            if (args[0] === 'merge' && args[1]?.startsWith('refs/remotes/')) {
                 throw new Error('CONFLICT (content): Merge conflict in src/index.ts\nAutomatic merge failed; fix conflicts and then commit the result.');
             }
             return '';
@@ -146,10 +146,50 @@ describe('mergeBaseIntoBranch', () => {
         assert.ok(result.error?.includes('could not read from remote'));
     });
 
+    test('fetches and merges the base repository when the worktree origin is a fork', async () => {
+        const result = await mergeBaseIntoBranch('/tmp/worktree', 'main', {
+            baseRepoUrl: 'https://github.com/upstream/project.git',
+            authToken: 'installation-token',
+        });
+
+        assert.strictEqual(result.outcome, 'clean');
+        const rawCalls = mockGitInstance.raw.mock.calls;
+        const fetchCall = rawCalls.find((c: { arguments: string[][] }) => c.arguments[0][0] === 'fetch');
+        assert.ok(fetchCall, 'Expected a fetch call');
+        assert.deepStrictEqual(fetchCall.arguments[0], [
+            'fetch',
+            'https://x-access-token:installation-token@github.com/upstream/project.git',
+            '+refs/heads/main:refs/remotes/propr-base/main',
+            '--prune',
+        ]);
+        // The fork's own origin/main is a different branch that merely shares the name.
+        const mergeCall = rawCalls.find((c: { arguments: string[][] }) => c.arguments[0][0] === 'merge');
+        assert.ok(mergeCall, 'Expected a merge call');
+        assert.deepStrictEqual(mergeCall.arguments[0], ['merge', 'refs/remotes/propr-base/main', '--no-edit']);
+    });
+
+    test('keeps the base repository token out of reported merge errors', async () => {
+        mockGitInstance.raw.mock.mockImplementation(async (args: string[]) => {
+            if (args[0] === 'fetch') {
+                throw new Error('fatal: could not read from https://x-access-token:ghs_secrettokenvalue@github.com/upstream/project.git');
+            }
+            return '';
+        });
+
+        const result = await mergeBaseIntoBranch('/tmp/worktree', 'main', {
+            baseRepoUrl: 'https://github.com/upstream/project.git',
+            authToken: 'ghs_secrettokenvalue',
+        });
+
+        assert.strictEqual(result.outcome, 'failed');
+        assert.ok(!result.error?.includes('ghs_secrettokenvalue'), 'Expected the token to be redacted');
+        assert.ok(result.error?.includes('[REDACTED]'));
+    });
+
     test('aborts merge on non-conflict failure', async () => {
         mockGitInstance.raw.mock.mockImplementation(async (args: string[]) => {
             if (args[0] === 'rev-parse') return 'base-commit-sha\n';
-            if (args[0] === 'merge' && args[1]?.startsWith('origin/')) {
+            if (args[0] === 'merge' && args[1]?.startsWith('refs/remotes/')) {
                 throw new Error('fatal: some other merge error');
             }
             return '';

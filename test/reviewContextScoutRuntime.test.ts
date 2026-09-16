@@ -24,8 +24,8 @@ import type { AgentConfig } from '../packages/core/src/agents/types.js';
 after(async () => closeConnection());
 
 const ensureGitRepositoryMock = mock.fn();
-const ensureRepoClonedMock = mock.fn(async () => '/tmp/review-context-repository');
-const createWorktreeFromExistingBranchMock = mock.fn(async () => ({ worktreePath: '/tmp' }));
+const ensureRepoClonedMock = mock.fn(async (_options?: Record<string, unknown>) => '/tmp/review-context-repository');
+const createWorktreeFromExistingBranchMock = mock.fn(async (..._args: unknown[]) => ({ worktreePath: '/tmp' }));
 let loadedSettings: Record<string, unknown> = {};
 const loadSettingsMock = mock.fn(async () => loadedSettings);
 const resolveLlmLabelMock = mock.fn(async (label: string) => {
@@ -37,7 +37,10 @@ await mock.module('@propr/core', {
         createWorktreeFromExistingBranch: createWorktreeFromExistingBranchMock,
         ensureGitRepository: ensureGitRepositoryMock,
         ensureRepoCloned: ensureRepoClonedMock,
-        getRepoUrl: mock.fn(),
+        getRepoUrl: mock.fn((repository: { repoOwner: string; repoName: string }) => `https://github.com/${repository.repoOwner}/${repository.repoName}.git`),
+        cleanupWorktree: mock.fn(async () => {}),
+        pushBranch: mock.fn(async () => ({ rebased: false })),
+        createHooklessGit: mock.fn(() => ({ raw: async (args: string[]) => (args[0] === 'merge-base' ? args[1] : '') })),
         loadSettings: loadSettingsMock,
         resolveLlmLabel: resolveLlmLabelMock,
     },
@@ -156,7 +159,7 @@ test('context scout considers dedicated, fast, and reviewer candidates before de
         fastAnalysisModel: 'fast:analysis-model',
         state: { localRepoPath: undefined, worktreeInfo: undefined },
         githubToken: 'github-secret',
-        branchName: 'feature',
+        target: { branchName: 'feature', repoOwner: 'integry', repoName: 'propr', isFork: false },
         prDiff: 'diff',
         changedFiles: ['src/changed.ts'],
         originalTaskSpec: 'objective',
@@ -215,7 +218,7 @@ test('context scout continues after an unsafe route and an exhausted synthetic f
         fastAnalysisModel: 'fast:analysis-model',
         state: { localRepoPath: undefined, worktreeInfo: undefined },
         githubToken: 'github-secret',
-        branchName: 'feature',
+        target: { branchName: 'feature', repoOwner: 'integry', repoName: 'propr', isFork: false },
         prDiff: 'diff',
         changedFiles: ['src/changed.ts'],
         originalTaskSpec: 'objective',
@@ -236,6 +239,52 @@ test('context scout continues after an unsafe route and an exhausted synthetic f
     assert.equal(eligibility(agents.get('reviewer')), true);
     assert.equal(eligibility(agents.get('unsafe')), false);
     assert.equal(reviewerAnalyze.mock.callCount(), 1);
+});
+
+test('context scout inspects the fork that owns a fork PR head', async () => {
+    const logger = { info: mock.fn(), warn: mock.fn(), error: mock.fn(), debug: mock.fn() };
+    const initialCloneCalls = ensureRepoClonedMock.mock.callCount();
+    const initialWorktreeCalls = createWorktreeFromExistingBranchMock.mock.callCount();
+    const analyze = mock.fn(async () => ({
+        success: true,
+        response: '{"references":[]}',
+        modelUsed: 'reviewer-model',
+        executionTimeMs: 1,
+    }));
+    const agents = new Map([['reviewer', { config: { type: 'claude', alias: 'reviewer' }, analyze }]]);
+    const beginRoutingSession = mock.fn(() => ({
+        select: mock.fn(async () => ({ physicalAgentAlias: 'reviewer', physicalModel: 'reviewer-model' })),
+        analyze,
+    }));
+
+    const result = await prepareRelatedReviewContext({
+        registry: { getAgentByAlias: (alias: string) => agents.get(alias), beginRoutingSession } as never,
+        fallbackAssignment: { agentAlias: 'reviewer', model: 'reviewer-model' },
+        configuredModel: '',
+        fastAnalysisModel: '',
+        state: { localRepoPath: undefined, worktreeInfo: undefined },
+        githubToken: 'github-secret',
+        // A same-named branch in the base repository would supply unrelated context.
+        target: { branchName: 'feature', repoOwner: 'contributor', repoName: 'propr', isFork: true },
+        prDiff: 'diff',
+        changedFiles: ['src/changed.ts'],
+        originalTaskSpec: 'objective',
+        pullRequestNumber: 1762,
+        repoOwner: 'integry',
+        repoName: 'propr',
+        taskId: 'task-fork',
+        correlationId: 'correlation-fork',
+        correlatedLogger: logger as never,
+    });
+
+    assert.equal(result, '');
+    const cloneOptions = ensureRepoClonedMock.mock.calls[initialCloneCalls].arguments[0] as { owner: string; repoName: string };
+    assert.equal(cloneOptions.owner, 'contributor');
+    assert.equal(cloneOptions.repoName, 'propr');
+    const worktreeArgs = createWorktreeFromExistingBranchMock.mock.calls[initialWorktreeCalls].arguments as [string, string, { owner: string; repoName: string }];
+    assert.equal(worktreeArgs[1], 'feature');
+    assert.equal(worktreeArgs[2].owner, 'contributor');
+    assert.equal(worktreeArgs[2].repoName, 'propr');
 });
 
 test('Claude scout Docker args expose only the confined repository MCP tools', () => {

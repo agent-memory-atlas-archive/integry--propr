@@ -95,11 +95,14 @@ export async function deleteBranch(
         });
 
         const branchName = prResponse.data.head.ref;
-        const branchOwner = prResponse.data.head.repo?.owner?.login;
+        // Comparing owners alone would delete a same-named base branch for an
+        // org/project-fork -> org/project pull request, so compare both repositories.
+        const headRepository = prResponse.data.head.repo?.full_name;
+        const baseRepository = `${owner}/${repoName}`;
 
         // Only delete if the branch is in the same repo (not a fork)
-        if (branchOwner !== owner) {
-            log.debug({ owner, repoName, prNumber, branchOwner }, 'Branch is from a fork, not deleting');
+        if (headRepository?.toLowerCase() !== baseRepository.toLowerCase()) {
+            log.debug({ owner, repoName, prNumber, headRepository }, 'Branch is from a fork, not deleting');
             return;
         }
 

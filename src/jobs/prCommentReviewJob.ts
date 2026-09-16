@@ -6,6 +6,7 @@ import type { CommentJobData, UnprocessedComment } from '@propr/core';
 import { resolvePrReasoningLevelOverride, updateTaskTitleForPR } from './prCommentJobHelpers.js';
 import { buildCombinedComment, fetchOriginalContributionDiscussion } from './prCommentJobUtils.js';
 import { fetchReviewContext, resolveReviewContextTokenBudget, type PRData } from './reviewContextHelpers.js';
+import { resolvePullRequestGitTarget } from './prGitTarget.js';
 import { prepareRelatedReviewContext } from './reviewContextScout.js';
 import { loadReviewRuntimeSettings } from './reviewRuntimeSettings.js';
 import { getNextAuthenticatedActionableFindingNumber } from './reviewCommentFormatter.js';
@@ -372,7 +373,10 @@ export async function executeReviewProcessing(params: ExecuteReviewParams): Prom
                 fastAnalysisModel,
                 state,
                 githubToken: githubToken.token,
-                branchName: context.jobBranchName || prData!.data.head.ref,
+                // The reviewed head decides the repository, so a fork PR is scouted in
+                // the contributor's repository rather than a same-named base branch.
+                target: resolvePullRequestGitTarget(prData!.data.head, { repoOwner, repoName }),
+                headSha: prData!.data.head.sha,
                 prDiff,
                 changedFiles: changedFilePaths,
                 originalTaskSpec,

@@ -3,10 +3,16 @@ import { beforeEach, describe, mock, test } from 'node:test';
 
 const calls: Array<{ operation: string; arguments: unknown[] }> = [];
 
+let mergeBaseResult: (commit: string) => string = commit => commit;
+
 await mock.module('@propr/core', {
     namedExports: {
-        createHooklessGit: () => ({ raw: async () => '' }),
-        cleanupWorktree: async () => {},
+        createHooklessGit: () => ({
+            raw: async (args: string[]) => (args[0] === 'merge-base' ? mergeBaseResult(args[1]) : ''),
+        }),
+        cleanupWorktree: mock.fn(async (...args: unknown[]) => {
+            calls.push({ operation: 'cleanupWorktree', arguments: args });
+        }),
         getRepoUrl: mock.fn((repository: { repoOwner: string; repoName: string }) => {
             calls.push({ operation: 'getRepoUrl', arguments: [repository] });
             return `https://github.com/${repository.repoOwner}/${repository.repoName}.git`;
@@ -38,6 +44,36 @@ const forkTarget = {
 describe('fork PR git operations', () => {
     beforeEach(() => {
         calls.length = 0;
+        mergeBaseResult = commit => commit;
+    });
+
+    test('accepts a prepared branch that contains the live PR head', async () => {
+        const result = await createPullRequestHeadWorktree({
+            target: forkTarget,
+            authToken: 'installation-token',
+            worktreeDirName: 'pr-42-followup',
+            requiredHeadSha: 'abc123',
+        });
+
+        assert.equal(result.worktreeInfo.branchName, 'feature/fork');
+        assert.ok(!calls.some(call => call.operation === 'cleanupWorktree'));
+    });
+
+    test('discards a same-named branch that does not contain the live PR head', async () => {
+        // A branch of the same name in another repository has unrelated history.
+        mergeBaseResult = () => 'unrelated-sha';
+
+        await assert.rejects(
+            createPullRequestHeadWorktree({
+                target: forkTarget,
+                authToken: 'installation-token',
+                worktreeDirName: 'pr-42-followup',
+                requiredHeadSha: 'abc123',
+            }),
+            /does not contain the pull request head abc123/,
+        );
+
+        assert.ok(calls.some(call => call.operation === 'cleanupWorktree'), 'Expected the rejected worktree to be discarded');
     });
 
     test('clones and creates the worktree from the PR head repository', async () => {
