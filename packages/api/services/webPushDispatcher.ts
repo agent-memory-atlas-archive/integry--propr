@@ -272,13 +272,37 @@ function targetPath(target: NotificationTarget): string {
       : '/tasks';
     case 'indexing': {
       const [owner, repository] = target.repository.split('/');
-      return owner && repository
-        ? `/summaries/${encodeURIComponent(owner)}/${encodeURIComponent(repository)}`
-        : '/repositories';
+      if (!owner || !repository) return '/repositories';
+      const path = `/summaries/${encodeURIComponent(owner)}/${encodeURIComponent(repository)}`;
+      return target.branch
+        ? `${path}?branch=${encodeURIComponent(target.branch)}`
+        : path;
     }
     case 'pull_request': return '/repositories';
     case 'system_failure': return '/';
   }
+}
+
+/**
+ * Appends the indexing target's branch to a navigate href that opens the
+ * target repository's summary page without an explicit branch query, so
+ * explicit Browse actions keep the notification's branch. Explicit branch
+ * queries, other parameters, and unrelated links pass through unchanged.
+ */
+function navigateHrefWithTargetBranch(href: string, target: NotificationTarget): string {
+  if (target.type !== 'indexing' || target.branch === undefined) return href;
+  const [owner, repository] = target.repository.split('/');
+  if (!owner || !repository) return href;
+  let url: URL;
+  try {
+    url = new URL(href, 'https://propr.invalid');
+  } catch {
+    return href;
+  }
+  const summaryPath = `/summaries/${encodeURIComponent(owner)}/${encodeURIComponent(repository)}`;
+  if (url.pathname !== summaryPath || url.searchParams.has('branch')) return href;
+  url.searchParams.append('branch', target.branch);
+  return `${url.pathname}${url.search}${url.hash}`;
 }
 
 function absoluteUiUrl(baseValue: string, path: string): string {
@@ -292,10 +316,11 @@ function absoluteUiUrl(baseValue: string, path: string): string {
 
 function notificationActionUrl(
   action: NotificationAction,
+  target: NotificationTarget,
   frontendUrl: string,
 ): string {
   return action.type === 'navigate'
-    ? absoluteUiUrl(frontendUrl, action.href)
+    ? absoluteUiUrl(frontendUrl, navigateHrefWithTargetBranch(action.href, target))
     : action.href;
 }
 
@@ -330,7 +355,7 @@ function buildSafePayload(
     : parseNotificationEventActions(parseStoredJson(row.advertised_actions_json));
   const fallbackDeepLink = absoluteUiUrl(frontendUrl, targetPath(target));
   const deepLink = action?.type === 'navigate'
-    ? notificationActionUrl(action, frontendUrl)
+    ? notificationActionUrl(action, target, frontendUrl)
     : fallbackDeepLink;
   const planActions = target.type === 'plan' ? advertisedActions.flatMap(advertised => {
     if (advertised === 'refine') {
@@ -354,7 +379,7 @@ function buildSafePayload(
     : action === null ? [] : [{
       action: 'view',
       title: 'View details',
-      url: notificationActionUrl(action, frontendUrl),
+      url: notificationActionUrl(action, target, frontendUrl),
     }];
   const summary = row.severity === 'error' || row.severity === 'warning'
     ? 'An operational alert needs your attention.'

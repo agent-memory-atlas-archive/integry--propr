@@ -1,4 +1,5 @@
 import { expect, test, type Page } from '@playwright/test';
+import { browserVoicePreferenceKey } from '../src/voice/voicePreferenceKey';
 
 const timestamp = '2026-09-11T00:00:00.000Z';
 const user = {
@@ -74,8 +75,14 @@ async function expectNoPageOverflow(page: Page): Promise<void> {
   expect(dimensions.documentWidth).toBeLessThanOrEqual(dimensions.viewportWidth);
 }
 
-test('keeps the Playground usable at 320px', async ({ page }) => {
+test('keeps the Playground usable at 320px', async ({ page, baseURL }) => {
   await page.setViewportSize({ width: 320, height: 720 });
+  // Voice briefings are opt-in, so this layout check enables them for this
+  // account and instance before asserting that the launcher clears the composer.
+  await page.addInitScript(
+    key => localStorage.setItem(key, 'true'),
+    browserVoicePreferenceKey(new URL(baseURL!).origin, user.id),
+  );
   await stubAiAgentsApis(page);
   await page.goto('/ai-agents');
 
