@@ -429,7 +429,7 @@ function notificationPath(notification: Notification): string {
       const [owner, name] = repository.split('/');
       const path = `/summaries/${safePathSegment(owner)}/${safePathSegment(name)}`;
       return target.branch
-        ? `${path}?branch=${safePathSegment(target.branch)}`
+        ? `${path}?branch=${encodeURIComponent(target.branch)}`
         : path;
     }
     case 'system_failure': return '/';

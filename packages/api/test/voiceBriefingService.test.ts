@@ -372,6 +372,28 @@ test('advertises notification mutations only for canonical task and draft target
   assert.deepEqual(actionsById['draft-target'], ['open', 'follow_up']);
 });
 
+test('indexing notification links preserve internal Unicode whitespace in branch names', async () => {
+  const queue: VoiceBriefingQueueSnapshot = { active: [], waiting: [], delayed: [] };
+  const notifications = [notification({
+    id: 'indexing-unicode-branch',
+    severity: 'warning',
+    title: 'Indexing needs attention',
+    target: { type: 'indexing', repository: 'integry/propr', branch: 'feature/a\u00a0b' },
+    occurredAt: '2026-09-07T01:19:00.000Z',
+  })];
+  const service = new VoiceBriefingService({
+    loaders: loaders({ queue, notifications }),
+    now: () => NOW,
+  });
+
+  const briefing = await service.getBriefing('authenticated-user');
+
+  assert.equal(
+    briefing.items.find(item => item.id === 'indexing-unicode-branch')?.href,
+    '/summaries/integry/propr?branch=feature%2Fa%C2%A0b',
+  );
+});
+
 test('running scope retains an active task that also has an attention notification', async () => {
   const queue: VoiceBriefingQueueSnapshot = {
     active: [job('active-task', 'Active task', '2026-09-07T01:20:00.000Z')],
