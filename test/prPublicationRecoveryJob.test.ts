@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { createHooklessGit as realGit } from '../packages/core/src/git/hooklessGit.js';
+import { sanitizeAgentReport } from '../packages/core/src/agents/agentReportSanitizer.js';
 import { up, down } from '../packages/core/src/db/migrations/20260914000000_add_pr_continuations.js';
 
 import { up as checkpointUp, down as checkpointDown } from '../packages/core/src/db/migrations/20260914010000_add_pr_publication_checkpoint.js';
@@ -89,7 +90,7 @@ await mock.module('@propr/core', { namedExports: {
     runWithExecutionAbortSignal: async (_signal: unknown, fn: () => unknown) => fn(),
     TaskStates: { PROCESSING: 'processing', COMPLETED: 'completed', CLAUDE_EXECUTION: 'claude_execution', FAILED: 'failed', CANCELLED: 'cancelled' },
     ensureGitRepository: async () => { calls.push({ operation: 'ensureGitRepository', args: [] }); }, createLogFiles: noOp, UsageLimitError: class extends Error {},
-    recordLLMMetrics: noOp, loadPrimaryProcessingLabels: async () => ['propr'],
+    recordLLMMetrics: noOp, loadPrimaryProcessingLabels: async () => ['propr'], sanitizeAgentReport,
     loadRepositoryVisualPreviewSettings: noOp,
     prepareVisualPreviewEvidence: async () => { calls.push({ operation: 'prepareVisualPreviewEvidence', args: [] }); return { evidence: { assets: [], toolSuggestions: [] } }; },
     cleanupPreparedVisualPreviewEvidence: noOp,

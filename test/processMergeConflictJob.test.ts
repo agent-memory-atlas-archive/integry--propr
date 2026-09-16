@@ -1,5 +1,6 @@
 import { test, mock, describe, beforeEach } from 'node:test';
 import assert from 'node:assert';
+import { sanitizeAgentReport } from '../packages/core/src/agents/agentReportSanitizer.js';
 
 // --- Mock Setup ---
 
@@ -224,6 +225,7 @@ await mock.module('@propr/core', {
             migrate: { latest: mock.fn(async () => {}) }
         }),
         cleanupWorktree: mockCleanupWorktree,
+        sanitizeAgentReport,
         generateCorrelationId: mock.fn(() => 'test-correlation-id'),
         AI_COMMIT_AUTHOR: { name: 'ProPR AI', email: 'ai@propr.dev' },
     }
