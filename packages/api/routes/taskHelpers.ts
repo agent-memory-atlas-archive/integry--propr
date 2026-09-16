@@ -1,4 +1,4 @@
-import { previewMediaReader, taskPreviewSource } from '../services/previewMediaProjection.js';
+import { latestCommentMetadata, previewMediaReader, taskPreviewSource } from '../services/previewMediaProjection.js';
 import { Knex } from 'knex';
 import { timeApiStage } from '../apiPerformanceTiming.js';
 
@@ -107,7 +107,7 @@ export async function getTasksFromDb(
   // Apply ordering and pagination before presentation enrichment. This bounds
   // aggregate and JSON work by the requested page rather than database size.
   const pageTasks = await timeApiStage('sql.tasks.page', () => baseQuery
-    .select('t.*', 'h.state', 'h.timestamp as state_timestamp', 'h.reason as failedReason', 'h.metadata as latest_metadata')
+    .select('t.*', 'h.state', 'h.timestamp as state_timestamp', 'h.reason as failedReason')
     .orderBy('t.created_at', 'desc')
     .limit(limit)
     .offset(offset));
@@ -115,12 +115,14 @@ export async function getTasksFromDb(
   if (pageTasks.length === 0) return { tasks: [], total, offset, limit };
 
   const taskIds = pageTasks.map((row: Record<string, unknown>) => String(row.task_id));
-  const { historyByTask, planStatusByTask, critiqueScoreByTask } = await timeApiStage(
+  const { historyByTask, planStatusByTask, critiqueScoreByTask, commentMetadataByTask } = await timeApiStage(
     'sql.tasks.enrichment',
     async () => enrichTaskPage(db, taskIds, Boolean(excludeMerged))
   );
 
-  const media = await (query.previewReader ?? previewMediaReader).project(pageTasks.map(taskPreviewSource), 3);
+  // Completion comments stay with their run even when later entries (e.g. cleanup) carry no metadata.
+  const media = await (query.previewReader ?? previewMediaReader).project(pageTasks.map((row: Record<string, unknown>) =>
+    taskPreviewSource({ ...row, latest_metadata: commentMetadataByTask.get(String(row.task_id)) })), 3);
   const tasks = pageTasks.map((row: Record<string, unknown>, index: number) => ({
     ...mapDbTaskToResponse({
       ...row,
@@ -137,6 +139,7 @@ interface TaskPageEnrichment {
   historyByTask: Map<string, Record<string, unknown>>;
   planStatusByTask: Map<string, unknown>;
   critiqueScoreByTask: Map<string, unknown>;
+  commentMetadataByTask: Map<string, unknown>;
 }
 
 async function enrichTaskPage(db: Knex, taskIds: string[], excludeMerged: boolean): Promise<TaskPageEnrichment> {
@@ -172,6 +175,19 @@ async function enrichTaskPage(db: Knex, taskIds: string[], excludeMerged: boolea
     .orderBy('task_id', 'asc')
     .orderBy('execution_id', 'desc');
 
+  // Only rows that may carry a completion comment are read; the helper confirms the parsed shape.
+  const commentRows = await db('task_history')
+    .whereIn('task_id', taskIds)
+    .where('metadata', 'like', '%githubComment%')
+    .select('task_id', 'metadata')
+    .orderBy('timestamp', 'asc')
+    .orderBy('history_id', 'asc');
+  const commentMetadataByTask = new Map<string, unknown>();
+  for (const row of commentRows as Array<Record<string, unknown>>) {
+    const metadata = latestCommentMetadata([row]);
+    if (metadata !== undefined) commentMetadataByTask.set(String(row.task_id), metadata);
+  }
+
   const historyByTask = new Map<string, Record<string, unknown>>();
   for (const row of historyRows as Array<Record<string, unknown>>) {
     historyByTask.set(String(row.task_id), row);
@@ -199,7 +215,7 @@ async function enrichTaskPage(db: Knex, taskIds: string[], excludeMerged: boolea
     }
   }
 
-  return { historyByTask, planStatusByTask, critiqueScoreByTask };
+  return { historyByTask, planStatusByTask, critiqueScoreByTask, commentMetadataByTask };
 }
 
 function parseAnalysisReport(value: unknown): { valid: boolean; report?: unknown } {

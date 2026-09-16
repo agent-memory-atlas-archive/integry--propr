@@ -130,20 +130,34 @@ export function createPreviewMediaReader(deps: Dependencies = {}) {
 
 export const previewMediaReader = createPreviewMediaReader();
 
-/** Visual previews are optional evidence; failures must never hide the task history. */
+/** Returns the newest history metadata carrying a completion comment, independent of the current lifecycle row. */
+export function latestCommentMetadata(historyRecords: ReadonlyArray<Record<string, unknown>>): unknown {
+  for (let index = historyRecords.length - 1; index >= 0; index--) {
+    if (record(historyRecords[index].metadata).githubComment) return historyRecords[index].metadata;
+  }
+  return undefined;
+}
+
+/** Visual previews are optional evidence; failures or stalls must never hide the task history. */
 export async function projectTaskPreviewMedia(
   task: Record<string, unknown>,
   historyRecords: Array<Record<string, unknown>>,
   reader: Pick<typeof previewMediaReader, 'project'> = previewMediaReader,
+  deadlineMs = 5000,
 ): Promise<PublishedVisualPreview[]> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
   try {
-    // Prefer the newest record that carries this run's completion comment.
-    const latestRecord = [...historyRecords].reverse().find(entry => record(entry.metadata).githubComment)
-      ?? historyRecords[historyRecords.length - 1];
-    const [projection] = await reader.project([taskPreviewSource({ ...task, latest_metadata: latestRecord?.metadata })], 8, 'gallery');
+    // Gallery reads have no internal deadline, so bound the whole enrichment here.
+    const expired = new Promise<PreviewProjection[]>(resolve => { timer = setTimeout(() => resolve([]), deadlineMs); });
+    const [projection] = await Promise.race([
+      reader.project([taskPreviewSource({ ...task, latest_metadata: latestCommentMetadata(historyRecords) })], 8, 'gallery'),
+      expired,
+    ]);
     return projection?.previews ?? [];
   } catch {
     return [];
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
   }
 }
 
