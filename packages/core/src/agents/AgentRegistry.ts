@@ -47,6 +47,7 @@ export class AgentRegistry {
     private unavailableUnifiedAgentImage: UnavailableUnifiedAgentImage | null = null;
     private unifiedAgentImageRetryTimer: NodeJS.Timeout | null = null;
     private imagePreparationOwner = false;
+    private imageRecoveryGeneration = 0;
     private goalCapabilityProbe = new GoalCapabilityProbe();
     private syntheticAgents = new SyntheticAgentRegistry(this.agents, this.agentsByAlias);
 
@@ -140,8 +141,7 @@ export class AgentRegistry {
                 // runtime to prepare. This keeps no-work installations alive
                 // without weakening the empty-config default-agent fallback or
                 // any startup that has an enabled direct agent.
-                this.clearUnifiedAgentImageRetry();
-                this.unavailableUnifiedAgentImage = null;
+                this.markUnifiedAgentImageReady('');
                 this.agents.clear();
                 this.agentsByAlias.clear();
                 this.goalCapabilityProbe.clear();
@@ -421,7 +421,7 @@ export class AgentRegistry {
         return this.markUnifiedAgentImageReady(result.image);
     }
 
-    private markUnifiedAgentImageReady(image: string): string { this.clearUnifiedAgentImageRetry(); this.unavailableUnifiedAgentImage = null; return image; }
+    private markUnifiedAgentImageReady(image: string): string { this.imageRecoveryGeneration += 1; this.clearUnifiedAgentImageRetry(); this.unavailableUnifiedAgentImage = null; return image; }
 
     /**
      * Request a single worker-owned preparation and refresh this process after
@@ -431,7 +431,6 @@ export class AgentRegistry {
     private scheduleUnifiedAgentImageRetry(): void {
         scheduleUnifiedAgentImageRetry({
             unavailable: this.unavailableUnifiedAgentImage,
-            imagePreparationOwner: this.imagePreparationOwner,
             retryTimer: this.unifiedAgentImageRetryTimer,
             startRecovery: fromTimer => this.startWorkerOwnedImageRecovery(fromTimer),
             setRetryTimer: timer => { this.unifiedAgentImageRetryTimer = timer; },
@@ -441,12 +440,14 @@ export class AgentRegistry {
     private startWorkerOwnedImageRecovery(fromTimer = false): Promise<void> {
         const firstAgent = this.agents.values().next().value as Agent | undefined;
         const imageTag = this.unavailableUnifiedAgentImage?.imageTag || firstAgent?.config.dockerImage;
+        const generation = this.imageRecoveryGeneration;
         return startUnifiedAgentImageRecovery({
             fromTimer,
             scheduleRetry: () => this.scheduleUnifiedAgentImageRetry(),
             unavailable: this.unavailableUnifiedAgentImage,
             pendingBackgroundRefresh: this.pendingBackgroundRefresh,
             imageTag,
+            isCurrent: () => generation === this.imageRecoveryGeneration,
             clearRetry: () => this.clearUnifiedAgentImageRetry(),
             enqueuePreparation: this.imagePreparationOwner
                 ? () => this.prepareImagesAndRefresh() : enqueueAgentImagePreparation,
@@ -471,8 +472,7 @@ export class AgentRegistry {
             return;
         }
 
-        this.clearUnifiedAgentImageRetry();
-        this.unavailableUnifiedAgentImage = null;
+        this.markUnifiedAgentImageReady(result.config.dockerImage || '');
         this.agents.clear();
         this.agentsByAlias.clear();
         this.goalCapabilityProbe.clear();
@@ -490,6 +490,7 @@ export class AgentRegistry {
     }
 
     private recordUnavailableUnifiedAgentImage(imageTag: string | undefined, error: string, attemptFailed = true): void {
+        if (this.unavailableUnifiedAgentImage?.imageTag !== imageTag) this.imageRecoveryGeneration += 1;
         const diskPressure = isAgentImageDiskPressureError(error);
         const result = recordUnifiedAgentImageFailure({
             previous: this.unavailableUnifiedAgentImage,

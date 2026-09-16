@@ -208,7 +208,7 @@ for (const diskPressure of [false, true]) {
         await saveAgents([opencodeConfig]);
         await registry.prepareImagesAndRefresh();
         assert.deepStrictEqual(registry.getAllAgents(), []);
-        assert.strictEqual(internal.unifiedAgentImageRetryTimer, null);
+        assert.strictEqual(!!internal.unifiedAgentImageRetryTimer, !diskPressure);
 
         await registry.ensureInitialized();
         t.mock.timers.tick(4_999);
@@ -826,6 +826,97 @@ for (const useDefault of [false, true]) {
             finishPreparation();
             if (previousImage === undefined) delete process.env.AGENT_DOCKER_IMAGE;
             else process.env.AGENT_DOCKER_IMAGE = previousImage;
+        }
+    });
+}
+
+
+for (const recover of [true, false]) {
+    test(`worker retries a failed configuration while retaining working agents (recover=${recover})`, async t => {
+        t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: 1_000 });
+        t.mock.method(Math, 'random', () => 0.5);
+        const registry = AgentRegistry.getInstance();
+        const internal = registry as unknown as {
+            ensureUnifiedAgentImage: (_configs: AgentConfig[], prepare: boolean) => Promise<string | null>;
+            registeredAgentImagesAvailable: () => Promise<boolean>;
+            recordUnavailableUnifiedAgentImage: (tag: string, error: string) => void;
+            markUnifiedAgentImageReady: (tag: string) => string;
+            pendingBackgroundRefresh: Promise<void> | null;
+            clearUnifiedAgentImageRetry: () => void;
+        };
+        internal.ensureUnifiedAgentImage = async () => internal.markUnifiedAgentImageReady('propr/agent:a');
+        internal.registeredAgentImagesAvailable = async () => true;
+        await registry.prepareImagesAndRefresh();
+        let attempts = 0;
+        internal.ensureUnifiedAgentImage = async (_configs, prepare) => {
+            assert.strictEqual(prepare, true);
+            attempts += 1;
+            if (recover && attempts === 3) return internal.markUnifiedAgentImageReady('propr/agent:b');
+            internal.recordUnavailableUnifiedAgentImage('propr/agent:b', 'temporary download failure');
+            return null;
+        };
+        try {
+            await registry.prepareImagesAndRefresh();
+            assert.strictEqual(registry.getAgentByAlias('opencode')?.config.dockerImage, 'propr/agent:a');
+            for (let count = 1; count < (recover ? 3 : 5); count += 1) {
+                await registry.ensureInitialized();
+                assert.strictEqual(attempts, count, 'executions respect the retry deadline');
+                t.mock.timers.tick(getUnifiedAgentImageRetryDelay(count, () => 0.5));
+                await internal.pendingBackgroundRefresh;
+            }
+            const status = registry.getOperationalStatus().unifiedAgentImage;
+            assert.strictEqual(status.status, recover ? 'ready' : 'unavailable');
+            assert.strictEqual(status.circuitBreakerOpen, recover ? undefined : true);
+            assert.strictEqual(registry.getAgentByAlias('opencode')?.config.dockerImage, recover ? 'propr/agent:b' : 'propr/agent:a');
+            t.mock.timers.tick(10 * 60_000);
+            await internal.pendingBackgroundRefresh;
+            assert.strictEqual(attempts, recover ? 3 : 5);
+            assert.strictEqual(enqueuePreparation.mock.callCount(), 0);
+        } finally {
+            internal.clearUnifiedAgentImageRetry();
+        }
+    });
+}
+
+for (const replacement of ['ready-b', 'unavailable-b', 'ready-a']) {
+    test(`obsolete ENOSPC recovery cannot overwrite ${replacement}`, async () => {
+        const registry = AgentRegistry.getInstance();
+        registry.setImagePreparationOwner(false);
+        const internal = registry as unknown as {
+            ensureUnifiedAgentImage: () => Promise<string | null>;
+            recordUnavailableUnifiedAgentImage: (tag: string, error: string, attempted?: boolean) => void;
+            markUnifiedAgentImageReady: (tag: string) => string;
+            startWorkerOwnedImageRecovery: () => Promise<void>;
+            clearUnifiedAgentImageRetry: () => void;
+        };
+        internal.ensureUnifiedAgentImage = async () => internal.markUnifiedAgentImageReady('propr/agent:a');
+        await registry.refresh();
+        internal.recordUnavailableUnifiedAgentImage('propr/agent:a', 'not prepared', false);
+        let fail!: (error: Error) => void;
+        enqueuePreparation.mock.mockImplementation(() => new Promise<void>((_resolve, reject) => { fail = reject; }));
+        const recovery = internal.startWorkerOwnedImageRecovery();
+        const image = replacement === 'ready-a' ? 'propr/agent:a' : 'propr/agent:b';
+        internal.ensureUnifiedAgentImage = async () => {
+            if (replacement === 'unavailable-b') {
+                internal.recordUnavailableUnifiedAgentImage(image, 'not prepared', false);
+                return null;
+            }
+            return internal.markUnifiedAgentImageReady(image);
+        };
+        try {
+            await registry.refresh();
+            const currentStatus = registry.getOperationalStatus();
+            fail(new Error('ENOSPC from superseded preparation'));
+            await recovery;
+            assert.deepStrictEqual(registry.getOperationalStatus(), currentStatus);
+            internal.recordUnavailableUnifiedAgentImage(image, 'removed again', false);
+            enqueuePreparation.mock.mockImplementation(async () => { throw new Error('temporary failure'); });
+            await internal.startWorkerOwnedImageRecovery();
+            assert.strictEqual(enqueuePreparation.mock.calls.at(-1)?.arguments[0], image);
+            assert.strictEqual(registry.getOperationalStatus().unifiedAgentImage.retryCount, 1);
+            assert.strictEqual(registry.getOperationalStatus().unifiedAgentImage.circuitBreakerOpen, undefined);
+        } finally {
+            internal.clearUnifiedAgentImageRetry();
         }
     });
 }

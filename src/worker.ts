@@ -1,5 +1,5 @@
 import 'dotenv/config';
-import { Queue, Worker, type Job } from 'bullmq';
+import { Queue, Worker } from 'bullmq';
 import { Redis } from 'ioredis';
 import { GITHUB_ISSUE_QUEUE_NAME, closeStateManager, createWorker, getStateManager, runMigrations } from '@propr/core';
 import { logger } from '@propr/core';
@@ -18,7 +18,6 @@ import {
     AGENT_IMAGE_PREPARATION_QUEUE_NAME,
     createAgentImagePreparationQueue,
     closeAgentImageBuildLock,
-    ensureAgentBundleImage,
     type AgentImagePreparationJobData,
 } from '@propr/core';
 import { setCheckRunDeps } from './jobs/ultrafixLoopContinuation.js';
@@ -37,7 +36,7 @@ import {
 } from './jobs/prCommentTaskStateFinalizers.js';
 import { startWorkerTaskStateRecovery } from './workerTaskStateRecovery.js';
 import { recoverNonterminalGoals } from './goalRecovery.js';
-import { prepareAgentRegistryAtStartup } from './workerAgentPreparation.js';
+import { prepareAgentRegistryAtStartup, processAgentImagePreparationJob } from './workerAgentPreparation.js';
 
 process.on('uncaughtException', (error: Error) => {
     logger.fatal({ error: error.message, stack: error.stack }, 'Uncaught exception in worker');
@@ -180,22 +179,6 @@ async function refreshAgentRegistryForConfigUpdate(subtype: string): Promise<voi
     }
 }
 
-async function processAgentImagePreparationJob(job: Job<AgentImagePreparationJobData>): Promise<void> {
-    logger.info({ imageTag: job.data.imageTag }, 'Preparing unified agent image in the worker-owned path');
-    const workerRegistry = AgentRegistry.getInstance();
-    workerRegistry.setImagePreparationOwner(true);
-    if (job.data.versions && job.data.contentHash) {
-        const result = await ensureAgentBundleImage(job.data.versions, job.data.contentHash);
-        if (!result.success) throw new Error(result.error || `Agent image ${job.data.imageTag} is unavailable`);
-        return;
-    }
-    await workerRegistry.prepareImagesAndRefresh();
-    const status = workerRegistry.getOperationalStatus().unifiedAgentImage;
-    if (status.status !== 'ready') {
-        throw new Error(status.error || `Unified agent image ${status.imageTag || job.data.imageTag} is unavailable`);
-    }
-}
-
 export interface StartedWorker {
     worker: MainWorker;
     runtimeBuildWorker: Worker<AgentRuntimeBuildJobData>;
@@ -245,6 +228,27 @@ async function startWorker(options: WorkerOptions = {}): Promise<StartedWorker> 
         concurrency: workerConcurrency,
         resetPerformed: options.reset || false
     }, 'Starting GitHub Issue Worker...');
+
+    const agentImagePreparationQueue: Queue<AgentImagePreparationJobData> = createAgentImagePreparationQueue();
+    await agentImagePreparationQueue.setGlobalConcurrency(1);
+    const agentImagePreparationWorker = new Worker<AgentImagePreparationJobData>(
+        AGENT_IMAGE_PREPARATION_QUEUE_NAME,
+        async (job) => {
+            await processAgentImagePreparationJob(job);
+            logger.info({ requestedImageTag: job.data.imageTag }, 'Worker-owned unified agent image preparation completed');
+        },
+        {
+            connection: {
+                host: process.env.REDIS_HOST || 'localhost',
+                port: parseInt(process.env.REDIS_PORT || '6379', 10),
+                maxRetriesPerRequest: null,
+            },
+            concurrency: 1,
+        },
+    );
+    agentImagePreparationWorker.on('failed', (job, error) => {
+        logger.error({ imageTag: job?.data.imageTag, error: error.message }, 'Worker-owned unified agent image preparation failed');
+    });
 
     // Do not advertise or claim task capacity while an image is still building.
     await prepareAgentRegistryAtStartup();
@@ -379,27 +383,6 @@ async function startWorker(options: WorkerOptions = {}): Promise<StartedWorker> 
     );
     runtimeBuildWorker.on('failed', (job, error) => {
         logger.error({ buildId: job?.data.buildId, error: error.message }, 'Agent runtime package build failed');
-    });
-
-    const agentImagePreparationQueue: Queue<AgentImagePreparationJobData> = createAgentImagePreparationQueue();
-    await agentImagePreparationQueue.setGlobalConcurrency(1);
-    const agentImagePreparationWorker = new Worker<AgentImagePreparationJobData>(
-        AGENT_IMAGE_PREPARATION_QUEUE_NAME,
-        async (job) => {
-            await processAgentImagePreparationJob(job);
-            logger.info({ requestedImageTag: job.data.imageTag }, 'Worker-owned unified agent image preparation completed');
-        },
-        {
-            connection: {
-                host: process.env.REDIS_HOST || 'localhost',
-                port: parseInt(process.env.REDIS_PORT || '6379', 10),
-                maxRetriesPerRequest: null,
-            },
-            concurrency: 1,
-        },
-    );
-    agentImagePreparationWorker.on('failed', (job, error) => {
-        logger.error({ imageTag: job?.data.imageTag, error: error.message }, 'Worker-owned unified agent image preparation failed');
     });
 
     const close = async (): Promise<void> => {

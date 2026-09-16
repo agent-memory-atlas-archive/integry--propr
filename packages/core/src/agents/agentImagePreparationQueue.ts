@@ -1,5 +1,5 @@
 import crypto from 'node:crypto';
-import { Queue, QueueEvents, type Job } from 'bullmq';
+import { ErrorCode, Queue, QueueEvents, type Job } from 'bullmq';
 import { AGENT_IMAGE_BUILD_LOCK_ACQUIRE_TIMEOUT_MS } from './agentImageBuildLock.js';
 import type { AgentCliVersionMatrix } from './version/versionService.js';
 
@@ -89,9 +89,21 @@ export async function enqueueAgentImagePreparation(
     const jobId = agentImagePreparationJobId(imageTag, options);
     const existing = await queue.getJob(jobId);
     let job = existing;
-    if (job && !PENDING_STATES.includes(await job.getState())) {
-        await job.remove().catch(() => undefined);
-        job = undefined;
+    if (job) {
+        const state = await job.getState();
+        if (state === 'completed' || state === 'failed') {
+            // BullMQ atomically verifies the terminal state and moves the same
+            // job to waiting. A stale caller cannot remove another request.
+            try {
+                await job.retry(state);
+            } catch (error) {
+                const code = (error as { code?: number }).code;
+                if (code !== ErrorCode.JobNotInState && code !== ErrorCode.JobNotExist) throw error;
+                job = await queue.getJob(jobId);
+            }
+        } else if (state === 'unknown') {
+            job = undefined;
+        }
     }
     job ??= await queue.add('prepare-unified-agent-image', {
         imageTag,

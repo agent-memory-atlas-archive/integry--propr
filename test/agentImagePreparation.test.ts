@@ -34,6 +34,7 @@ const queue = {
 };
 await mock.module('bullmq', {
     namedExports: {
+        ErrorCode: { JobNotExist: -1, JobNotInState: -3 },
         Queue: class { constructor() { return queue; } },
         QueueEvents: class {
             async waitUntilReady() {}
@@ -82,7 +83,7 @@ for (const state of ['completed', 'failed', 'unknown', 'waiting', 'active', 'del
     test(`worker-owned preparation handles an existing ${state} job`, async () => {
         const existing = {
             getState: async () => state,
-            remove: mock.fn(async () => {}),
+            retry: mock.fn(async (_state: string) => {}),
             waitUntilFinished: mock.fn(async () => {}),
         };
         const fresh = { waitUntilFinished: mock.fn(async () => {}) };
@@ -93,8 +94,10 @@ for (const state of ['completed', 'failed', 'unknown', 'waiting', 'active', 'del
 
         await enqueueAgentImagePreparation(imageTag);
 
-        const replace = ['completed', 'failed', 'unknown'].includes(state);
-        assert.strictEqual(existing.remove.mock.callCount(), replace ? 1 : 0);
+        const replace = state === 'unknown';
+        const retry = state === 'completed' || state === 'failed';
+        assert.strictEqual(existing.retry.mock.callCount(), retry ? 1 : 0);
+        if (retry) assert.deepStrictEqual(existing.retry.mock.calls[0].arguments, [state]);
         assert.strictEqual(queue.add.mock.callCount(), replace ? 1 : 0);
         assert.strictEqual(existing.waitUntilFinished.mock.callCount(), replace ? 0 : 1);
         assert.strictEqual(fresh.waitUntilFinished.mock.callCount(), replace ? 1 : 0);
@@ -215,4 +218,47 @@ test('preparation propagates worker failures without extending the wait', async 
     queue.getJob.mock.mockImplementation(async () => job);
     await assert.rejects(enqueueAgentImagePreparation('propr/agent:failed'), error => error === failure);
     assert.strictEqual(job.waitUntilFinished.mock.callCount(), 1);
+});
+
+
+for (const terminal of ['completed', 'failed']) {
+    test(`concurrent callers atomically retry the same ${terminal} job without deleting it`, async () => {
+        let state = terminal;
+        let transitions = 0;
+        let readers = 0;
+        let release!: () => void;
+        const bothRead = new Promise<void>(resolve => { release = resolve; });
+        const existing = {
+            getState: async () => {
+                const observed = state;
+                if (++readers === 2) release();
+                await bothRead;
+                return observed;
+            },
+            retry: async (expected: string) => {
+                if (state !== expected) throw Object.assign(new Error('Job is not in terminal state'), { code: -3 });
+                state = 'waiting';
+                transitions += 1;
+            },
+            waitUntilFinished: mock.fn(async () => { assert.strictEqual(state, 'waiting'); }),
+        };
+        queue.getJob.mock.mockImplementation(async () => existing);
+        queue.add.mock.resetCalls();
+        await Promise.all([
+            enqueueAgentImagePreparation('propr/agent:concurrent'),
+            enqueueAgentImagePreparation('propr/agent:concurrent'),
+        ]);
+        assert.strictEqual(transitions, 1);
+        assert.strictEqual(existing.waitUntilFinished.mock.callCount(), 2);
+        assert.strictEqual(queue.add.mock.callCount(), 0);
+    });
+}
+
+test('terminal retry propagates Redis failures', async () => {
+    const failure = new Error('Redis disconnected');
+    queue.getJob.mock.mockImplementation(async () => ({
+        getState: async () => 'failed',
+        retry: async () => { throw failure; },
+    }));
+    await assert.rejects(enqueueAgentImagePreparation('propr/agent:redis-failure'), error => error === failure);
 });

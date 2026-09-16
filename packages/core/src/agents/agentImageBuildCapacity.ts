@@ -1,5 +1,5 @@
-import fs from 'node:fs/promises';
-import { getDockerRootDir } from '../claude/docker/dockerExecutor.js';
+import type { DockerRootExecutor } from '../claude/docker/dockerRootDir.js';
+import { executeDockerCommand, getDockerRootDir } from '../claude/docker/dockerExecutor.js';
 
 /**
  * Runtime-agent builds install roughly 4 GB of packages and can temporarily
@@ -56,15 +56,34 @@ export class AgentImageBuildStorageError extends Error {
 
 /**
  * Docker image/build storage can be separate from the ProPR application
- * filesystem. Inspect only the resolved daemon root, never PROPR_ROOT or cwd.
+ * filesystem, and its root path belongs to the daemon mount namespace.
+ * Bind it in a short-lived helper even when the same path exists locally.
  */
 export async function readAgentImageBuildDiskSpace(
     rootPath: string,
+    executor: DockerRootExecutor = executeDockerCommand,
 ): Promise<AgentImageBuildDiskSpace> {
-    const stats = await fs.statfs(rootPath);
+    // Pin the multi-platform BusyBox 1.37.0 manifest. Docker pulls it only if
+    // absent; measurement failures (including pull failures) still fail closed.
+    const image = 'busybox:1.37.0@sha256:9db7b59979c38555a39def84a31fb98b5296952f9e3afd4f6f11f05b07adfab0';
+    const source = `"source=${rootPath.replaceAll('"', '""')}"`;
+    const result = await executor('docker', [
+        'run', '--rm', '--network=none', '--read-only',
+        '--mount', `type=bind,${source},target=/docker-root,readonly,bind-recursive=disabled`,
+        image, 'stat', '-f', '-c', '%a %S %c %d', '/docker-root',
+    ], { timeout: 60_000 });
+    const values = result.stdout.trim().split(/\s+/);
+    if (result.exitCode !== 0 || values.length !== 4 || values.some(value => !/^\d+$/.test(value))) {
+        throw new Error(`Docker storage measurement failed: ${result.stderr.trim() || result.stdout.trim()}`);
+    }
+    const [bavail, bsize, files, ffree] = values.map(Number);
+    if (!values.every(value => Number.isSafeInteger(Number(value))) || bsize === 0) {
+        throw new Error('Docker storage measurement returned invalid filesystem counters');
+    }
     return {
-        availableBytes: Number(stats.bavail) * Number(stats.bsize),
-        freeInodes: Number(stats.ffree),
+        availableBytes: bavail * bsize,
+        // Dynamic-inode filesystems such as btrfs report both counters as 0.
+        freeInodes: files === 0 ? Number.POSITIVE_INFINITY : ffree,
     };
 }
 

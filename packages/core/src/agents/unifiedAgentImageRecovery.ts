@@ -29,15 +29,13 @@ export function getUnifiedAgentImageRetryDelay(
 
 export function scheduleUnifiedAgentImageRetry(options: {
     unavailable: UnavailableUnifiedAgentImage | null;
-    imagePreparationOwner: boolean;
     retryTimer: NodeJS.Timeout | null;
     startRecovery: (fromTimer: boolean) => Promise<void>;
     setRetryTimer: (timer: NodeJS.Timeout | null) => void;
 }): void {
     const { unavailable } = options;
     if (
-        options.imagePreparationOwner
-        || options.retryTimer
+        options.retryTimer
         || !unavailable
         || unavailable.circuitBreakerOpen
         || (unavailable.retryCount ?? 0) >= UNIFIED_AGENT_IMAGE_RETRY_MAX_ATTEMPTS
@@ -104,6 +102,7 @@ export function startUnifiedAgentImageRecovery(options: {
     unavailable: UnavailableUnifiedAgentImage | null;
     pendingBackgroundRefresh: Promise<void> | null;
     imageTag: string | undefined;
+    isCurrent: () => boolean;
     clearRetry: () => void;
     enqueuePreparation: (imageTag: string) => Promise<unknown>;
     refresh: () => Promise<void>;
@@ -131,8 +130,9 @@ export function startUnifiedAgentImageRecovery(options: {
 
     options.clearRetry();
     const recovery = options.enqueuePreparation(options.imageTag)
-        .then(() => options.refresh())
+        .then(() => options.isCurrent() ? options.refresh() : undefined)
         .catch(error => {
+            if (!options.isCurrent()) return;
             const message = error instanceof Error ? error.message : String(error);
             options.recordFailure(options.imageTag as string, message);
             logger.error({ imageTag: options.imageTag, error: message }, 'Worker-owned unified agent image recovery failed');
