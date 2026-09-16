@@ -12,9 +12,11 @@ import VoiceBriefingControl, {
   VOICE_RECOGNITION_DISCLOSURE_STORAGE_KEY,
 } from './VoiceBriefingControl';
 
-vi.mock('../hooks/useDesktopVoicePreference', async importOriginal => ({
-  ...await importOriginal<typeof import('../hooks/useDesktopVoicePreference')>(),
-  useDesktopVoicePreference: () => ({ enabled: true, isEnabled: () => true, key: null, connection: null }),
+let voicePreference: { enabled: boolean; isEnabled: () => boolean; key: string | null; connection: null };
+
+vi.mock('../hooks/useVoicePreference', async importOriginal => ({
+  ...await importOriginal<typeof import('../hooks/useVoicePreference')>(),
+  useVoicePreference: () => voicePreference,
 }));
 
 vi.mock('../hooks/useVoiceBriefing', () => ({
@@ -79,6 +81,16 @@ describe('VoiceBriefingControl', () => {
     vi.clearAllMocks();
     vi.mocked(useVoiceBriefing).mockReset();
     window.localStorage.clear();
+    voicePreference = { enabled: true, isEnabled: () => true, key: null, connection: null };
+  });
+
+  it('renders no entry point and mounts no controller while the preference is off', () => {
+    voicePreference = { enabled: false, isEnabled: () => false, key: null, connection: null };
+    renderControl(controller());
+
+    expect(screen.queryByRole('button', { name: 'Voice briefing' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    expect(useVoiceBriefing).not.toHaveBeenCalled();
   });
 
   it('offers a separate desktop microphone check without advertising recognition support', () => {

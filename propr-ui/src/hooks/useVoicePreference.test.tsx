@@ -5,16 +5,17 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { VoiceBriefingResponse } from '@propr/shared';
 import { AuthProvider } from '../contexts/AuthContext';
 import { DesktopContext, type DesktopContextValue } from '../desktop/DesktopContext';
-import { getDesktopConnectionScope, setDesktopConnectionScope } from '../api/apiClient';
+import { API_BASE_URL, getDesktopConnectionScope, setDesktopConnectionScope } from '../api/apiClient';
 import type { CurrentUser } from '../api/proprTypes';
 import * as runtimeMode from '../config/runtimeMode';
 import { getVoiceBriefing } from '../api/voiceApi';
 import { getDraftWithPlan, refinePlan, stopTaskExecution } from '../api/proprApi';
 import { listenOnce, speakOnce } from '../voice/browserSpeech';
 import VoiceBriefingControl from '../components/VoiceBriefingControl';
-import DesktopVoiceSettingsSection from '../pages/SettingsPage/DesktopVoiceSettingsSection';
+import VoiceSettingsSection from '../pages/SettingsPage/VoiceSettingsSection';
 import { useVoiceBriefing } from './useVoiceBriefing';
-import { desktopVoicePreferenceKey, saveDesktopVoicePreference, useDesktopVoicePreference } from './useDesktopVoicePreference';
+import { saveVoicePreference, useVoicePreference } from './useVoicePreference';
+import { browserVoicePreferenceKey, voicePreferenceKey } from '../voice/voicePreferenceKey';
 
 vi.mock('../api/voiceApi', () => ({ getVoiceBriefing: vi.fn() }));
 vi.mock('../api/proprApi', () => ({
@@ -29,9 +30,11 @@ vi.mock('../voice/browserSpeech', async importOriginal => ({
 
 const profile = { id: 'local', name: 'Local instance', baseUrl: 'http://localhost:4400', kind: 'local' as const };
 const user = { id: 'account-a', username: 'example', permissions: [] } as unknown as CurrentUser;
-const key = desktopVoicePreferenceKey(profile.id, profile.baseUrl, user.id);
+const key = voicePreferenceKey(profile.id, profile.baseUrl, user.id);
+// The browser scope follows the instance the Web UI is actually signed in to.
+const browserKey = (userId = user.id) => browserVoicePreferenceKey(API_BASE_URL || window.location.origin, userId);
 let activeUser: CurrentUser | null;
-let desktop: DesktopContextValue;
+let desktop: DesktopContextValue | null;
 const briefing = {
   scope: 'all', headline: 'Your briefing', speechText: 'One running task.',
   counts: { total: 1, running: 1, queued: 0, attention: 0, plans: 0 },
@@ -49,8 +52,13 @@ function Wrapper({ children }: { children: ReactNode }) {
     <MemoryRouter>{children}</MemoryRouter>
   </AuthProvider></DesktopContext.Provider>;
 }
-function enable() { act(() => saveDesktopVoicePreference(key, true)); }
-function disable() { act(() => saveDesktopVoicePreference(key, false)); }
+function switchToBrowserRuntime() {
+  vi.mocked(runtimeMode.isDesktopRuntime).mockReturnValue(false);
+  desktop = null;
+  act(() => setDesktopConnectionScope(null));
+}
+function enable() { act(() => saveVoicePreference(key, true)); }
+function disable() { act(() => saveVoicePreference(key, false)); }
 
 const mediaDescriptor = Object.getOwnPropertyDescriptor(navigator, 'mediaDevices');
 beforeEach(() => {
@@ -74,12 +82,12 @@ afterEach(() => {
   act(() => setDesktopConnectionScope(null));
 });
 
-describe('experimental desktop voice preference', () => {
+describe('experimental voice briefing preference', () => {
   it.each([null, 'false', 'yes', '1', '{broken'])('defaults off with stored value %s, including existing disclosure acknowledgement', async stored => {
     if (stored !== null) localStorage.setItem(key, stored);
     localStorage.setItem('propr.voice-recognition-disclosure.v1', 'acknowledged');
-    render(<><DesktopVoiceSettingsSection /><VoiceBriefingControl /></>, { wrapper: Wrapper });
-    expect(screen.getByRole('checkbox', { name: 'Enable experimental desktop voice' })).not.toBeChecked();
+    render(<><VoiceSettingsSection /><VoiceBriefingControl /></>, { wrapper: Wrapper });
+    expect(screen.getByRole('checkbox', { name: 'Enable voice briefings' })).not.toBeChecked();
     expect(screen.queryByRole('button', { name: /Voice Briefing/i })).not.toBeInTheDocument();
     const { result } = renderHook(useVoiceBriefing, { wrapper: Wrapper });
     await act(async () => {
@@ -96,7 +104,7 @@ describe('experimental desktop voice preference', () => {
   });
 
   it('persists explicit opt-in and opt-out across remounts without starting voice on enable', () => {
-    const view = render(<><DesktopVoiceSettingsSection /><VoiceBriefingControl /></>, { wrapper: Wrapper });
+    const view = render(<><VoiceSettingsSection /><VoiceBriefingControl /></>, { wrapper: Wrapper });
     const toggle = screen.getByRole('checkbox');
     expect(toggle).toHaveAccessibleDescription(/Off by default/);
     fireEvent.click(toggle);
@@ -107,21 +115,78 @@ describe('experimental desktop voice preference', () => {
     expect(speakOnce).not.toHaveBeenCalled();
     expect(window.proprDesktop!.voice!.requestMicrophone).not.toHaveBeenCalled();
     view.unmount();
-    const reloaded = render(<><DesktopVoiceSettingsSection /><VoiceBriefingControl /></>, { wrapper: Wrapper });
+    const reloaded = render(<><VoiceSettingsSection /><VoiceBriefingControl /></>, { wrapper: Wrapper });
     expect(screen.getByRole('checkbox')).toBeChecked();
     fireEvent.click(screen.getByRole('checkbox'));
     expect(screen.queryByRole('button', { name: /Voice Briefing/i })).not.toBeInTheDocument();
     reloaded.unmount();
-    render(<DesktopVoiceSettingsSection />, { wrapper: Wrapper });
+    render(<VoiceSettingsSection />, { wrapper: Wrapper });
     expect(screen.getByRole('checkbox')).not.toBeChecked();
   });
 
-  it('keeps browser behavior independent of the desktop preference', async () => {
-    vi.mocked(runtimeMode.isDesktopRuntime).mockReturnValue(false);
-    const { result } = renderHook(useVoiceBriefing);
-    await act(async () => result.current.requestBriefing());
-    expect(getVoiceBriefing).toHaveBeenCalledOnce();
-    expect(speakOnce).toHaveBeenCalledOnce();
+  it('stays off by default in the browser runtime until the signed-in user opts in', async () => {
+    switchToBrowserRuntime();
+    localStorage.setItem('propr.voice-recognition-disclosure.v1', 'acknowledged');
+    render(<><VoiceSettingsSection /><VoiceBriefingControl /></>, { wrapper: Wrapper });
+    const toggle = screen.getByRole('checkbox', { name: 'Enable voice briefings' });
+    expect(toggle).not.toBeChecked();
+    expect(screen.queryByRole('button', { name: /Voice briefing/i })).not.toBeInTheDocument();
+
+    const { result } = renderHook(useVoiceBriefing, { wrapper: Wrapper });
+    await act(async () => {
+      await result.current.requestBriefing();
+      await result.current.repeatBriefing();
+      await result.current.startListening();
+      await result.current.handleTranscript('catch me up');
+    });
+    expect(getVoiceBriefing).not.toHaveBeenCalled();
+    expect(speakOnce).not.toHaveBeenCalled();
+    expect(listenOnce).not.toHaveBeenCalled();
+
+    fireEvent.click(toggle);
+    expect(toggle).toBeChecked();
+    expect(localStorage.getItem(browserKey())).toBe('true');
+    expect(screen.getByRole('button', { name: /Voice briefing/i })).toBeInTheDocument();
+    // Opting in reveals the entry point without starting any voice activity.
+    expect(getVoiceBriefing).not.toHaveBeenCalled();
+    expect(speakOnce).not.toHaveBeenCalled();
+
+    fireEvent.click(toggle);
+    expect(screen.queryByRole('button', { name: /Voice briefing/i })).not.toBeInTheDocument();
+  });
+
+  it('does not reuse a browser opt-in for another signed-in account', () => {
+    switchToBrowserRuntime();
+    act(() => saveVoicePreference(browserKey(), true));
+    const hook = renderHook(useVoicePreference, { wrapper: Wrapper });
+    expect(hook.result.current.enabled).toBe(true);
+    activeUser = { ...user, id: 'account-b' };
+    hook.rerender();
+    expect(hook.result.current.enabled).toBe(false);
+    activeUser = null;
+    hook.rerender();
+    expect(hook.result.current.enabled).toBe(false);
+    expect(hook.result.current.available).toBe(false);
+    act(() => saveVoicePreference(browserKey(), false));
+  });
+
+  it('cancels an in-flight browser briefing when the preference is turned off', async () => {
+    switchToBrowserRuntime();
+    act(() => saveVoicePreference(browserKey(), true));
+    const pending = deferred<VoiceBriefingResponse>();
+    vi.mocked(getVoiceBriefing).mockReturnValue(pending.promise);
+    const { result } = renderHook(useVoiceBriefing, { wrapper: Wrapper });
+    let operation!: Promise<void>;
+    act(() => { operation = result.current.requestBriefing(); });
+    const signal = vi.mocked(getVoiceBriefing).mock.calls[0][1]!;
+    act(() => {
+      saveVoicePreference(browserKey(), false);
+      expect(signal.aborted).toBe(true);
+    });
+    await act(async () => { pending.resolve(briefing); await operation; });
+    expect(result.current.briefing).toBeNull();
+    expect(speakOnce).not.toHaveBeenCalled();
+    expect(result.current.phase).toBe('idle');
   });
 
   it('aborts an in-flight briefing immediately and rejects late results even after re-enabling', async () => {
@@ -133,7 +198,7 @@ describe('experimental desktop voice preference', () => {
     act(() => { operation = result.current.requestBriefing(); });
     const signal = vi.mocked(getVoiceBriefing).mock.calls[0][1]!;
     act(() => {
-      saveDesktopVoicePreference(key, false);
+      saveVoicePreference(key, false);
       expect(signal.aborted).toBe(true);
     });
     enable();
@@ -153,7 +218,7 @@ describe('experimental desktop voice preference', () => {
     await act(async () => { operation = result.current.requestBriefing(); });
     expect(result.current.phase).toBe('speaking');
     act(() => {
-      saveDesktopVoicePreference(key, false);
+      saveVoicePreference(key, false);
       expect(cancel).toHaveBeenCalledOnce();
     });
     await act(async () => operation);
@@ -262,9 +327,9 @@ describe('experimental desktop voice preference', () => {
 
   it('does not reuse an opt-in for a changed instance URL', () => {
     enable();
-    const hook = renderHook(useDesktopVoicePreference, { wrapper: Wrapper });
+    const hook = renderHook(useVoicePreference, { wrapper: Wrapper });
     expect(hook.result.current.enabled).toBe(true);
-    desktop = { ...desktop, profile: { ...profile, baseUrl: 'https://another.example.test' } };
+    desktop = { ...desktop!, profile: { ...profile, baseUrl: 'https://another.example.test' } };
     hook.rerender();
     expect(hook.result.current.enabled).toBe(false);
   });
@@ -275,7 +340,7 @@ describe('experimental desktop voice preference', () => {
     const cancel = vi.fn(() => playback.resolve());
     vi.mocked(speakOnce).mockReturnValue({ promise: playback.promise, cancel });
     const hook = renderHook(useVoiceBriefing, { wrapper: Wrapper });
-    render(<DesktopVoiceSettingsSection />, { wrapper: Wrapper });
+    render(<VoiceSettingsSection />, { wrapper: Wrapper });
     let operation!: Promise<void>;
     await act(async () => { operation = hook.result.current.requestBriefing(); });
     const write = vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => { throw new Error('Unavailable'); });
@@ -292,7 +357,7 @@ describe('experimental desktop voice preference', () => {
     enable();
     const pending = deferred<VoiceBriefingResponse>();
     vi.mocked(getVoiceBriefing).mockReturnValue(pending.promise);
-    const hook = renderHook(() => ({ voice: useVoiceBriefing(), preference: useDesktopVoicePreference() }), { wrapper: Wrapper });
+    const hook = renderHook(() => ({ voice: useVoiceBriefing(), preference: useVoicePreference() }), { wrapper: Wrapper });
     let operation!: Promise<void>;
     act(() => { operation = hook.result.current.voice.requestBriefing(); });
     const signal = vi.mocked(getVoiceBriefing).mock.calls[0][1]!;
@@ -301,7 +366,7 @@ describe('experimental desktop voice preference', () => {
       expect(signal.aborted).toBe(true);
     });
     activeUser = { ...user, id: 'account-b' };
-    desktop = { ...desktop, connection: { status: 'ready', transportScope: 'transport-b' } };
+    desktop = { ...desktop!, connection: { status: 'ready', transportScope: 'transport-b' } };
     hook.rerender();
     expect(hook.result.current.preference.enabled).toBe(false);
     await act(async () => { pending.resolve(briefing); await operation; });

@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Voice Briefings are opt-in everywhere**: the experimental feature is now off by
+  default in the browser, the installed PWA, and the desktop app. Enable
+  **Voice briefings · Experimental** in Settings (under *Integrations* for
+  administrators, in personal settings for members) to show the launcher. While it is
+  off, no voice entry point renders, no `/api/voice/*` request is issued, and no
+  speech or microphone API is touched. Browser and PWA users who used Voice Briefings
+  before this release must opt in once per account, instance, and device; existing
+  desktop opt-ins are preserved.
+
 ## [0.8.15] - 2026-08-15
 
 ProPR 0.8.15 is the first public release.
