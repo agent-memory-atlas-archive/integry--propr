@@ -5,6 +5,20 @@ import os from 'os';
 import path from 'path';
 import type { AgentConfig } from '../packages/core/src/agents/types.js';
 
+// Keep the logging transport worker out of tests that replace the clock and
+// timers. Its asynchronous flush can otherwise keep this process alive after
+// every registry assertion and database cleanup have completed.
+await mock.module('../packages/core/src/utils/logger.js', {
+    defaultExport: {
+        trace: () => {},
+        debug: () => {},
+        info: () => {},
+        warn: () => {},
+        error: () => {},
+        fatal: () => {},
+    },
+});
+
 const enqueuePreparation = mock.fn(async (_imageTag: string): Promise<void> => {});
 await mock.module('../packages/core/src/agents/agentImagePreparationQueue.js', {
     namedExports: {

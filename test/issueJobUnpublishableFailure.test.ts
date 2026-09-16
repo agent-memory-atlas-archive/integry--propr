@@ -24,6 +24,7 @@ await mock.module('@propr/core', {
         linkPRToPlanIssue: mock.fn(),
         safeUpdateLabels,
         generateCompletionComment,
+        sanitizeAgentReport: (value: string | null | undefined) => value ?? '',
         redactSecrets: (value: string) => value.replace('secret-token', '[REDACTED]'),
         validatePRCreation: mock.fn(),
     },

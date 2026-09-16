@@ -195,6 +195,7 @@ await mock.module('@propr/core', {
             migrate: { latest: mock.fn(async () => {}) }
         }),
         cleanupWorktree: mockCleanupWorktree,
+        sanitizeAgentReport: (value: string | null | undefined) => value ?? '',
         generateCorrelationId: mock.fn(() => 'test-correlation-id'),
         AI_COMMIT_AUTHOR: { name: 'ProPR AI', email: 'ai@propr.dev' },
     }
