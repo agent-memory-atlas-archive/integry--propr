@@ -56,6 +56,18 @@ function publicationSucceeded(publication: TaskStatePublicationResult): boolean 
     return publication.historyPersisted && publication.eventPublished;
 }
 
+function completedResultRecap(status: string | undefined, reason: string | undefined): string {
+    if (reason === 'review_moved_to_continuation') {
+        return 'Review processing moved to the continuation pull request.';
+    }
+    if (reason === 'ultrafix_waiting_for_exact_head_checks') {
+        return 'Review deferred until the continuation pull request passes its exact-head checks.';
+    }
+    if (status === 'partial') return 'Published the partial pull request follow-up result.';
+    if (status === 'skipped') return 'Skipped the pull request follow-up because no further work was needed.';
+    return 'Completed the pull request follow-up.';
+}
+
 async function waitForFinalizationRetry(attempt: number): Promise<void> {
     const delayMs = Math.min(10 * (2 ** attempt), MAX_FINALIZATION_RETRY_DELAY_MS);
     await new Promise(resolve => setTimeout(resolve, delayMs));
@@ -69,6 +81,7 @@ function completedTransition(result: JobResult | undefined): FinalTransition {
         finalizedBy: 'bullmq_completed',
         jobResultStatus: safeStatus ?? null,
         jobResultReason: reason ?? null,
+        notificationRecap: completedResultRecap(safeStatus, reason),
     };
 
     switch (status) {

@@ -232,7 +232,10 @@ async function completePendingPublication(
     if (context.commentsToProcess.length === 0) {
         if (taskId !== completion.taskId) await stateManager.updateTaskState(taskId, TaskStates.COMPLETED, {
             reason: 'Recovered publication and completion of the originating task', commitHash: result.commitHash,
-            historyMetadata: { recoveryOfTaskId: completion.taskId },
+            historyMetadata: {
+                recoveryOfTaskId: completion.taskId,
+                notificationRecap: 'Recovered and published the pending follow-up result.',
+            },
         });
         await publication.finishCompletion();
         return { status: result.partial ? 'partial' : 'complete', commit: result.commitHash,

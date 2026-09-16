@@ -23,7 +23,7 @@ const notifications = [
     target: { type: 'pull_request', repository: 'integry/propr', prNumber: 81 },
     metadata: { completedImplementationTaskId: 'fix-task-81', completionType: 'fix' },
     title: 'Fix run completed for PR #81',
-    body: 'Corrected the unread-count race and added touch gesture regression coverage.',
+    body: 'No files were changed because no authorized review findings were selected.',
     actions: ['open_pr', 'dismiss'],
     action: { type: 'external_link', label: 'Open pull request', href: 'https://github.com/integry/propr/pull/81' },
     occurredAt: '2026-09-16T19:55:00.000Z', createdAt: '2026-09-16T19:55:00.000Z',
@@ -106,6 +106,8 @@ test('desktop dismissal keeps rich recaps visible and offers Undo', async ({ pag
   await page.setViewportSize({ width: 1280, height: 800 });
   await stubInbox(page);
   await page.goto('/inbox');
+  await expect(page.getByText('No files were changed because no authorized review findings were selected.')).toBeVisible();
+  await capture(page, 'inbox-no-change-fix-desktop.png');
   const dismissButton = page.getByRole('button', { name: 'Dismiss Fix run completed for PR #81' });
   await expect(dismissButton).toBeVisible();
   await dismissButton.focus();

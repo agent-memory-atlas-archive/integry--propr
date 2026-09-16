@@ -46,12 +46,19 @@ import {
 import { publishGoalVisualPreviews } from './goalVisualPreviewPublisher.js';
 import { labelCompletedGoalPullRequest } from './goalPullRequestLabel.js';
 import { updateCompletedGoalPullRequest } from './goalPullRequestCompletion.js';
+import { buildWorkNotificationRecap } from './notificationRecap.js';
 
 function isRecoverableInterruption(result: AgentExecutionResult): boolean {
     if (result.terminationReason) return true;
     if (result.exitCode != null && [125, 137, 143].includes(result.exitCode)) return true;
     return /(?:docker|container|socket hang up|ECONNRESET|ECONNREFUSED|SIGKILL|terminated|execution aborted|App Server exited)/i
         .test(result.error || '');
+}
+
+function goalNotificationSummary(result: AgentExecutionResult): string | undefined {
+    const checkpoint = parseGoalCheckpointDeclaration(result.summary);
+    if (checkpoint && !('rejected' in checkpoint)) return checkpoint.summary ?? checkpoint.message;
+    return result.summary;
 }
 
 async function ensureGoalWorktree(
@@ -555,6 +562,10 @@ async function handleGoalResult(
         await operations.labelPullRequest(goal.repository, artifacts.finalPr.number);
         const task = await operations.stateManager().markTaskCompleted(goal.current_task_id, {
             prNumber: artifacts.finalPr.number, prUrl: artifacts.finalPr.url,
+            notificationRecap: buildWorkNotificationRecap(goalNotificationSummary(result), {
+                filesChanged: new Set(result.modifiedFiles).size,
+                createdPullRequest: true,
+            }),
         });
         if (task.state !== TaskStates.COMPLETED) throw new Error('Completed goal could not reconcile its backing task');
         await operations.markTaskReconciled(data, resultState);

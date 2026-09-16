@@ -41,7 +41,12 @@ export async function handleNoAuthorizedFindings(params: NoAuthorizedFindingsPar
         ));
         await stateManager.updateTaskState(taskId, TaskStates.COMPLETED, {
             reason: 'Ultrafix fix skipped because no authorized review findings remained',
-            historyMetadata: { commandMode: 'fix', ultrafixCycle: true, ultrafixNoAuthorizedFindings: true },
+            historyMetadata: {
+                commandMode: 'fix',
+                notificationRecap: 'No files were changed because no actionable review findings remained.',
+                ultrafixCycle: true,
+                ultrafixNoAuthorizedFindings: true,
+            },
         });
         await handleUltrafixContinuation('fix', {
             job, stateManager, taskId, redisClient, repoOwner, repoName,
@@ -63,6 +68,7 @@ export async function handleNoAuthorizedFindings(params: NoAuthorizedFindingsPar
         reason: 'Manual fix skipped because no authorized review findings were selected',
         historyMetadata: {
             commandMode: 'fix',
+            notificationRecap: 'No files were changed because no authorized review findings were selected.',
             noAuthorizedReviewFindings: true,
             githubComment: { url: completionComment.data.html_url, body: completionComment.data.body ?? body },
         },
