@@ -39,6 +39,7 @@ git(seed, 'push', 'origin', 'HEAD:refs/pull/42/head');
 let probeError: Error | undefined;
 let finalPushError: Error | undefined;
 let continuationPushError: Error | undefined;
+let authError: Error | undefined;
 let failPRCreate: boolean | 'after-publish' = false;
 let createAttempts = 0;
 let calls: Array<{ operation: string; args: unknown }> = [];
@@ -106,6 +107,7 @@ const octokit = {
     auth: async (options: unknown) => {
         calls.push({ operation: 'auth', args: options });
         assert.deepEqual(options, { type: 'installation' });
+        if (authError) throw authError;
         return { token };
     },
     paginate: async (endpoint: string) => endpoint.endsWith('/pulls') ? [...prs] : [...comments],
@@ -159,7 +161,7 @@ beforeEach(async () => {
     git(repoPath('upstream'), 'update-ref', 'refs/heads/release', baseSha);
     git(repoPath('contributor'), 'update-ref', 'refs/heads/contribution', sourceSha);
     calls = []; prs = []; comments = []; probeError = undefined; finalPushError = undefined;
-    loseCreateResponse = false; failComment = false; failPRCreate = false; createAttempts = 0; continuationPushError = undefined;
+    loseCreateResponse = false; failComment = false; failPRCreate = false; createAttempts = 0; continuationPushError = undefined; authError = undefined;
 });
 after(async () => { await completionDown(database); await checkpointDown(database); await down(database); await database.destroy(); await rm(root, { recursive: true, force: true }); });
 
@@ -599,6 +601,36 @@ test('follow-up checkpoints on an existing continuation exclude its published hi
     assert.equal(git(repoPath('upstream'), 'rev-parse', 'propr/continuation-pr-42'), second);
     git(repoPath('upstream'), 'merge-base', '--is-ancestor', produced, second);
     assert.equal((await findPRContinuation(ref))?.publication_bundle, null);
+});
+
+test('a rejected credential refresh on an adopted continuation keeps a recoverable checkpoint', async () => {
+    probeError = denial();
+    const first = session();
+    const initial = await first.prepare('auth-rejected');
+    probeError = undefined;
+    const produced = await implement(initial.worktreeInfo.worktreePath);
+    const completion = { commitResult: { commitHash: produced }, taskId: 'task-1' };
+    authError = new Error('Installation token refresh rejected');
+    calls = [];
+    await assert.rejects(first.push(initial.worktreeInfo.worktreePath, completion as never), /token refresh rejected/);
+    // The bundle was written before the credential request, so nothing was pushed with it.
+    assert.ok(calls.some(c => c.operation === 'git' && (c.args as string[])[0] === 'bundle'));
+    assert.ok(!calls.some(c => c.operation === 'git' && (c.args as string[])[0] === 'push'));
+    const record = await findPRContinuation(ref);
+    assert.ok(record?.publication_bundle);
+    assert.deepEqual(bundlePrerequisites(record.publication_bundle), [sourceSha]);
+    assert.equal(JSON.parse(record.publication_completion!).taskId, 'task-1');
+    assert.equal(git(repoPath('upstream'), 'rev-parse', 'propr/continuation-pr-42'), sourceSha);
+    await rm(initial.worktreeInfo.worktreePath, { recursive: true, force: true });
+    authError = undefined;
+    const later = session();
+    const recovered = await later.prepare('auth-recovery');
+    // The exact committed HEAD is restored and published; no implementation reruns.
+    assert.equal(git(recovered.worktreeInfo.worktreePath, 'rev-parse', 'HEAD'), produced);
+    assert.equal(git(repoPath('upstream'), 'rev-parse', 'propr/continuation-pr-42'), produced);
+    assert.equal((await findPRContinuation(ref))?.publication_bundle, null);
+    assert.equal(later.pendingCompletion?.commitResult?.commitHash, produced);
+    assert.equal(prs.length, 1);
 });
 
 test('a follow-up whose checkpoint was already published stores no bundle on retry', async () => {

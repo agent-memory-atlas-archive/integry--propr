@@ -195,7 +195,20 @@ export class PullRequestPublication {
         await savePublicationCheckpoint(this.continuation!, null, completion ? JSON.stringify(completion) : undefined);
     }
 
+    /** Saves the actual Git objects before any fallible request, including the
+     * credential refresh. Checkpoint continuation implementations too, including failed
+     * remote pushes. Follow-ups on an existing continuation bundle only commits beyond
+     * its published tip, never the whole history since the captured contribution.
+     */
+    private async checkpoint(worktreePath: string, completion?: PublicationCompletion) {
+        const bundle = await createPublicationBundle(worktreePath, this.continuation!.source_sha, this.publishedHead ? [this.publishedHead] : []);
+        await savePublicationCheckpoint(this.continuation!, bundle, completion ? JSON.stringify(completion) : undefined);
+    }
+
     async push(worktreePath: string, completion?: PublicationCompletion) {
+        // An adopted continuation already has committed work in the worktree; a rejected
+        // token refresh must not lose it once the worktree is cleaned up.
+        if (this.continuation) await this.checkpoint(worktreePath, completion);
         const { token } = await this.octokit.auth({ type: 'installation' }) as { token: string };
         if (!this.continuation) {
             try {
@@ -204,13 +217,8 @@ export class PullRequestPublication {
                 if (!this.target.isFork || !isPublicationPermissionDenied(error)) throw error;
                 this.continuation = await findPRContinuation(this.ref) || await reserveContinuation(this.ref, this.source);
             }
+            await this.checkpoint(worktreePath, completion);
         }
-        // Save the actual Git objects before any fallible adoption API request. Checkpoint
-        // continuation implementations too, including failed remote pushes. Follow-ups on
-        // an existing continuation bundle only commits beyond its published tip, never the
-        // whole history since the captured contribution.
-        const bundle = await createPublicationBundle(worktreePath, this.continuation!.source_sha, this.publishedHead ? [this.publishedHead] : []);
-        await savePublicationCheckpoint(this.continuation!, bundle, completion ? JSON.stringify(completion) : undefined);
         // A reservation without a PR comes from final-push adoption or from a preflight
         // where the base already contained the captured SHA. This HEAD is published to
         // the reserved branch first when GitHub would otherwise reject the PR as empty.
