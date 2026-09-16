@@ -268,6 +268,28 @@ async function updateMergeTaskAfterLocalMerge(options: {
     }
 }
 
+async function mergeBaseIntoTarget(options: {
+    worktreePath: string;
+    baseBranch: string;
+    target: PullRequestGitTarget;
+    repoOwner: string;
+    repoName: string;
+    githubToken: GitHubToken;
+}): Promise<MergeResult & { baseCommit: string }> {
+    const { worktreePath, baseBranch, target, repoOwner, repoName, githubToken } = options;
+    const mergeResult = await mergeBaseIntoBranch(worktreePath, baseBranch, target.isFork
+        ? { baseRepoUrl: getRepoUrl({ repoOwner, repoName }), authToken: githubToken.token }
+        : {});
+
+    if (mergeResult.outcome === 'failed') {
+        throw new Error(`Merge failed: ${mergeResult.error}`);
+    }
+    if (!mergeResult.baseCommit) {
+        throw new Error(`Merge did not identify the fetched base commit for ${baseBranch}`);
+    }
+    return { ...mergeResult, baseCommit: mergeResult.baseCommit };
+}
+
 /**
  * Processes a merge conflict resolution job.
  * This job:
@@ -352,16 +374,9 @@ export async function processMergeConflictJob(job: Job<MergeConflictJobData>): P
             headRepository: `${target.repoOwner}/${target.repoName}`,
         }, 'Created worktree for merge conflict resolution');
 
-        const mergeResult = await mergeBaseIntoBranch(worktreeInfo.worktreePath, baseBranch, target.isFork
-            ? { baseRepoUrl: getRepoUrl({ repoOwner, repoName }), authToken: githubToken.token }
-            : {});
-
-        if (mergeResult.outcome === 'failed') {
-            throw new Error(`Merge failed: ${mergeResult.error}`);
-        }
-        if (!mergeResult.baseCommit) {
-            throw new Error(`Merge did not identify the fetched base commit for ${baseBranch}`);
-        }
+        const mergeResult = await mergeBaseIntoTarget({
+            worktreePath: worktreeInfo.worktreePath, baseBranch, target, repoOwner, repoName, githubToken,
+        });
 
         if ((mergeResult.conflictedFiles?.length ?? 0) > 0 || prInfo) {
             await updateMergeTaskAfterLocalMerge({
