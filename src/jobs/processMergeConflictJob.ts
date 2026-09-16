@@ -290,6 +290,29 @@ async function mergeBaseIntoTarget(options: {
     return { ...mergeResult, baseCommit: mergeResult.baseCommit };
 }
 
+async function releaseMergeJobResources(options: {
+    lockKey: string;
+    correlationId: string;
+    localRepoPath: string | undefined;
+    worktreeInfo: WorktreeInfo | undefined;
+    jobSucceeded: boolean;
+    correlatedLogger: Logger;
+}): Promise<void> {
+    const { lockKey, correlationId, localRepoPath, worktreeInfo, jobSucceeded, correlatedLogger } = options;
+    const lockOwner = await redisClient.get(lockKey);
+    if (lockOwner === correlationId) {
+        await redisClient.del(lockKey);
+    }
+
+    if (localRepoPath && worktreeInfo) {
+        try {
+            await cleanupWorktree(localRepoPath, worktreeInfo.worktreePath, worktreeInfo.branchName, { deleteBranch: false, success: jobSucceeded });
+        } catch (cleanupError) {
+            correlatedLogger.warn({ error: (cleanupError as Error).message }, 'Failed to cleanup worktree');
+        }
+    }
+}
+
 /**
  * Processes a merge conflict resolution job.
  * This job:
@@ -415,17 +438,6 @@ export async function processMergeConflictJob(job: Job<MergeConflictJobData>): P
             pullRequestNumber, correlatedLogger,
         });
     } finally {
-        const lockOwner = await redisClient.get(lockKey);
-        if (lockOwner === correlationId) {
-            await redisClient.del(lockKey);
-        }
-
-        if (localRepoPath && worktreeInfo) {
-            try {
-                await cleanupWorktree(localRepoPath, worktreeInfo.worktreePath, worktreeInfo.branchName, { deleteBranch: false, success: jobSucceeded });
-            } catch (cleanupError) {
-                correlatedLogger.warn({ error: (cleanupError as Error).message }, 'Failed to cleanup worktree');
-            }
-        }
+        await releaseMergeJobResources({ lockKey, correlationId, localRepoPath, worktreeInfo, jobSucceeded, correlatedLogger });
     }
 }
