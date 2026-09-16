@@ -1,5 +1,6 @@
 import fs from 'node:fs/promises';
 import { getDockerRootDir } from '../claude/docker/dockerExecutor.js';
+import logger from '../utils/logger.js';
 
 /**
  * Runtime-agent builds install roughly 4 GB of packages and can temporarily
@@ -56,9 +57,7 @@ export class AgentImageBuildStorageError extends Error {
 
 /**
  * Docker image/build storage can be separate from the ProPR application
- * filesystem. Query Docker's daemon root through its info API and statfs that
- * path. If the daemon root cannot be resolved, fail closed: falling back to
- * PROPR_ROOT or cwd could approve a build while Docker's filesystem is full.
+ * filesystem. Inspect only the resolved daemon root, never PROPR_ROOT or cwd.
  */
 export async function readAgentImageBuildDiskSpace(
     rootPath: string,
@@ -70,12 +69,17 @@ export async function readAgentImageBuildDiskSpace(
     };
 }
 
+/**
+ * Discovery failures and measured low capacity block builds. A daemon root
+ * inaccessible in this process's mount namespace skips the check with a
+ * warning and returns undefined (for example, a socket-only service container).
+ */
 export async function assertAgentImageBuildCapacity(options: {
     minFreeBytes?: number;
     minFreeInodes?: number;
     readDiskSpace?: (rootPath: string) => Promise<AgentImageBuildDiskSpace>;
     getDockerRootDir?: () => Promise<string>;
-} = {}): Promise<AgentImageBuildDiskSpace> {
+} = {}): Promise<AgentImageBuildDiskSpace | undefined> {
     const minFreeBytes = options.minFreeBytes ?? AGENT_IMAGE_BUILD_MIN_FREE_BYTES;
     const minFreeInodes = options.minFreeInodes ?? AGENT_IMAGE_BUILD_MIN_FREE_INODES;
     let dockerRootDir: string;
@@ -87,7 +91,21 @@ export async function assertAgentImageBuildCapacity(options: {
     if (!dockerRootDir.trim()) {
         throw new AgentImageBuildStorageError(new Error('Docker info returned an empty DockerRootDir'));
     }
-    const diskSpace = await (options.readDiskSpace ?? readAgentImageBuildDiskSpace)(dockerRootDir);
+    let diskSpace: AgentImageBuildDiskSpace;
+    try {
+        diskSpace = await (options.readDiskSpace ?? readAgentImageBuildDiskSpace)(dockerRootDir);
+    } catch (error) {
+        const code = (error as NodeJS.ErrnoException | null)?.code;
+        if (code !== 'ENOENT' && code !== 'EACCES' && code !== 'ENOTDIR') throw error;
+        logger.warn(
+            { dockerRootDir, code },
+            'Cannot inspect Docker storage from this process; proceeding with agent image preparation '
+            + 'without a capacity check. The Docker daemon may use a different mount namespace. '
+            + 'To enable the check, mount the daemon storage filesystem at its DockerRootDir '
+            + 'in the ProPR service container and grant access to that path.',
+        );
+        return undefined;
+    }
     if (diskSpace.availableBytes < minFreeBytes || diskSpace.freeInodes < minFreeInodes) {
         throw new AgentImageBuildCapacityError(diskSpace, minFreeBytes, minFreeInodes);
     }

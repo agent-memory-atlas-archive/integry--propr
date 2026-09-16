@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { getDockerRootDir } from '../packages/core/src/claude/docker/dockerExecutor.js';
+import logger from '../packages/core/src/utils/logger.js';
 import {
     AGENT_IMAGE_BUILD_MIN_FREE_BYTES,
     AGENT_IMAGE_BUILD_MIN_FREE_INODES,
@@ -32,6 +33,7 @@ test('agent image preparation stats Docker storage, not PROPR_ROOT or cwd', asyn
         },
     });
 
+    assert.ok(diskSpace);
     assert.strictEqual(diskSpace.availableBytes, AGENT_IMAGE_BUILD_MIN_FREE_BYTES + 1);
     assert.deepStrictEqual(inspectedPaths, ['/docker/storage']);
 });
@@ -68,7 +70,50 @@ test('healthy Docker storage permits image preparation', async () => {
         },
     });
 
+    assert.ok(diskSpace);
     assert.ok(diskSpace.availableBytes > AGENT_IMAGE_BUILD_MIN_FREE_BYTES);
+});
+
+for (const code of ['ENOENT', 'EACCES', 'ENOTDIR']) {
+    test(`inaccessible daemon root (${code}) warns and permits build work`, async t => {
+        const warn = t.mock.method(logger, 'warn', () => {});
+        const inspectedPaths: string[] = [];
+        let buildCalled = false;
+        const prepare = async () => {
+            const diskSpace = await assertAgentImageBuildCapacity({
+                getDockerRootDir: async () => '/daemon/docker',
+                readDiskSpace: async rootPath => {
+                    inspectedPaths.push(rootPath);
+                    throw Object.assign(new Error(`statfs failed: ${code}`), { code });
+                },
+            });
+            assert.strictEqual(diskSpace, undefined);
+            buildCalled = true;
+        };
+
+        await prepare();
+
+        assert.strictEqual(buildCalled, true);
+        assert.deepStrictEqual(inspectedPaths, ['/daemon/docker']);
+        assert.strictEqual(warn.mock.callCount(), 1);
+        const [context, message] = warn.mock.calls[0].arguments;
+        assert.deepStrictEqual(context, { dockerRootDir: '/daemon/docker', code });
+        assert.match(message, /proceeding.*without a capacity check/);
+        assert.match(message, /mount the daemon storage filesystem.*grant access/);
+    });
+}
+
+test('unexpected statfs errors still block image preparation', async t => {
+    const warn = t.mock.method(logger, 'warn', () => {});
+    const failure = Object.assign(new Error('I/O failure'), { code: 'EIO' });
+    await assert.rejects(
+        () => assertAgentImageBuildCapacity({
+            getDockerRootDir: async () => '/daemon/docker',
+            readDiskSpace: async () => { throw failure; },
+        }),
+        error => error === failure,
+    );
+    assert.strictEqual(warn.mock.callCount(), 0);
 });
 
 test('agent image preparation fails before Docker work when inodes are low', async () => {
