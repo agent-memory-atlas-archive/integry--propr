@@ -1,8 +1,10 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { chmodSync, existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { chmodSync, copyFileSync, existsSync, linkSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { stripTypeScriptTypes } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { test } from 'node:test';
 import { AUTOMATIC_VAPID_SUBJECT, resolveInstanceWebPushConfiguration } from '../services/instanceWebPushConfiguration.js';
 import { WEB_PUSH_CONFIGURATION_WARNINGS, validateWebPushConfiguration } from '../services/webPushConfiguration.js';
@@ -129,12 +131,35 @@ test('failed persistence advertises no transient key; retries reuse an already p
   assert.ok(resolveInstanceWebPushConfiguration(environment).configured);
 });
 
-function child(environment: NodeJS.ProcessEnv, uid?: number): Promise<string> {
+const SERVICES = fileURLToPath(new URL('../services/', import.meta.url));
+
+// Root-run CI keeps node, tsx and the checkout under a private home directory, so an
+// unprivileged child needs its own world-readable copy of the runtime and resolver.
+function unprivilegedRuntime(t: { after: (fn: () => void) => void }) {
+  const directory = mkdtempSync(join(tmpdir(), 'propr-vapid-runtime-'));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  chmodSync(directory, 0o755);
+  const executable = join(directory, 'node');
+  try { linkSync(process.execPath, executable); } catch { copyFileSync(process.execPath, executable); }
+  chmodSync(executable, 0o755);
+  writeFileSync(join(directory, 'package.json'), '{"type":"module"}', { mode: 0o644 });
+  for (const name of ['instanceWebPushConfiguration', 'webPushConfiguration']) {
+    const source = readFileSync(join(SERVICES, `${name}.ts`), 'utf8');
+    writeFileSync(join(directory, `${name}.js`), stripTypeScriptTypes(source), { mode: 0o644 });
+  }
+  return { directory, executable };
+}
+
+function child(environment: NodeJS.ProcessEnv, unprivileged?: { uid: number; directory: string; executable: string }): Promise<string> {
   return new Promise((resolve, reject) => {
-    const script = `import { resolveInstanceWebPushConfiguration as resolve } from './packages/api/services/instanceWebPushConfiguration.ts';
+    const resolver = unprivileged ? './instanceWebPushConfiguration.js' : './packages/api/services/instanceWebPushConfiguration.ts';
+    const script = `import { resolveInstanceWebPushConfiguration as resolve } from '${resolver}';
       const result = resolve(JSON.parse(process.argv[1]));
       process.stdout.write(JSON.stringify(result.configured ? { publicKey: result.publicKey } : result));`;
-    const processChild = spawn(process.execPath, ['--import', 'tsx', '--input-type=module', '-e', script, JSON.stringify(environment)], { uid, stdio: ['ignore', 'pipe', 'pipe'] });
+    const args = [...(unprivileged ? [] : ['--import', 'tsx']), '--input-type=module', '-e', script, JSON.stringify(environment)];
+    const processChild = unprivileged
+      ? spawn(unprivileged.executable, args, { uid: unprivileged.uid, gid: unprivileged.uid, cwd: unprivileged.directory, stdio: ['ignore', 'pipe', 'pipe'] })
+      : spawn(process.execPath, args, { stdio: ['ignore', 'pipe', 'pipe'] });
     let output = '';
     processChild.stdout.on('data', data => { output += data; });
     processChild.stderr.resume(); // Never relay raw child errors that might contain secret material.
@@ -154,10 +179,11 @@ test('independent concurrent processes and recreated processes converge on one c
 
 test('unwritable mount fails safely; retry after permissions repair succeeds', async t => {
   const { environment, directory } = fixture(t);
+  // Drop root in the child so this verifies real EACCES even in root-run CI.
+  const unprivileged = process.getuid?.() === 0 ? { uid: 65534, ...unprivilegedRuntime(t) } : undefined;
   chmodSync(directory, 0o555);
   try {
-    // Drop root in the child so this verifies real EACCES even in root-run CI.
-    assert.deepEqual(JSON.parse(await child(environment, process.getuid?.() === 0 ? 65534 : undefined)),
+    assert.deepEqual(JSON.parse(await child(environment, unprivileged)),
       { configured: false, issue: 'storage_unavailable' });
   } finally { chmodSync(directory, 0o700); }
   assert.deepEqual(readdirSync(directory), []);
