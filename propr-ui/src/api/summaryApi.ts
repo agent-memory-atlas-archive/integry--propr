@@ -75,12 +75,14 @@ export async function getDirectoryTree(
  * @param owner - Repository owner
  * @param repo - Repository name
  * @param path - Path to the file or directory
+ * @param branch - Optional repository branch
  * @returns Summary information for the path
  */
 export async function getPathSummary(
   owner: string,
   repo: string,
-  path: string
+  path: string,
+  branch?: string
 ): Promise<PathSummaryResponse> {
   if (!path) {
     throw new Error('Path is required to fetch summary');
@@ -89,7 +91,8 @@ export async function getPathSummary(
   const encodedOwner = encodeURIComponent(owner);
   const encodedRepo = encodeURIComponent(repo);
   const encodedPath = encodeURIComponent(path);
-  const url = `${API_BASE_URL}/api/summaries/${encodedOwner}/${encodedRepo}/summary/${encodedPath}`;
+  const branchQuery = branch ? `?branch=${encodeURIComponent(branch)}` : '';
+  const url = `${API_BASE_URL}/api/summaries/${encodedOwner}/${encodedRepo}/summary/${encodedPath}${branchQuery}`;
 
   const response = await apiFetch(url, {
     method: 'GET',
@@ -138,19 +141,21 @@ export async function getIndexingStatus(
  * @param owner - Repository owner
  * @param repo - Repository name
  * @param maxDepth - Maximum depth to fetch (default: 3)
+ * @param branch - Optional repository branch
  * @returns Flat array of all entries up to maxDepth
  */
 export async function getFullTree(
   owner: string,
   repo: string,
-  maxDepth: number = 3
+  maxDepth: number = 3,
+  branch?: string
 ): Promise<SummaryEntry[]> {
   const allEntries: SummaryEntry[] = [];
 
   async function fetchLevel(path: string, depth: number): Promise<void> {
     if (depth > maxDepth) return;
 
-    const tree = await getDirectoryTree(owner, repo, path);
+    const tree = await getDirectoryTree(owner, repo, path, branch);
 
     for (const entry of tree.entries) {
       allEntries.push(entry);

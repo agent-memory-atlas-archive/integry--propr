@@ -19,6 +19,12 @@ const DEFAULT_STALLED_AFTER_MS = 30 * 60 * 1000;
 const MIN_STALLED_CHECK_INTERVAL_MS = 5_000;
 const MAX_STALLED_CHECK_INTERVAL_MS = 60_000;
 const TERMINAL_ACTIVITY_STATUSES = new Set(['completed', 'failed', 'cancelled']);
+const SQLITE_CONTENTION_RETRY_DELAYS_MS = [
+  10, 25, 50, 100, 250, 500, 1_000, 2_000, 4_000, 8_000, 8_000, 8_000,
+] as const;
+const SQLITE_CONTENTION_CODES = new Set([
+  'SQLITE_BUSY', 'SQLITE_BUSY_SNAPSHOT', 'SQLITE_LOCKED', 'SQLITE_LOCKED_SHAREDCACHE',
+]);
 
 type SourceActivityStatus = 'queued' | 'processing' | 'completed' | 'failed' | 'cancelled';
 
@@ -39,6 +45,7 @@ export interface NotificationProjectionOptions {
   stalledAfterMs?: number;
   stalledCheckIntervalMs?: number;
   logger?: ProjectionLogger;
+  contentionRetryDelaysMs?: readonly number[];
 }
 
 export interface SystemHealthSnapshot {
@@ -106,6 +113,29 @@ function positiveInteger(value: unknown): number | undefined {
   return typeof value === 'number' && Number.isSafeInteger(value) && value > 0
     ? value
     : undefined;
+}
+
+function sqliteErrorCode(error: unknown): string | undefined {
+  return error instanceof Error && 'code' in error
+    ? String((error as Error & { code?: unknown }).code)
+    : undefined;
+}
+
+function isSqliteContention(error: unknown): boolean {
+  return SQLITE_CONTENTION_CODES.has(sqliteErrorCode(error) ?? '');
+}
+
+function wait(delayMs: number, signal: AbortSignal): Promise<void> {
+  if (signal.aborted) return Promise.resolve();
+  return new Promise(resolve => {
+    const complete = (): void => {
+      clearTimeout(timer);
+      signal.removeEventListener('abort', complete);
+      resolve();
+    };
+    const timer = setTimeout(complete, delayMs);
+    signal.addEventListener('abort', complete, { once: true });
+  });
 }
 
 function parseJsonObject(value: unknown): Record<string, unknown> {
@@ -292,6 +322,8 @@ export class NotificationProjectionService {
   private readonly stalledAfterMs: number;
   private readonly stalledCheckIntervalMs: number;
   private readonly logger: ProjectionLogger;
+  private readonly contentionRetryDelaysMs: readonly number[];
+  private readonly closeController = new AbortController();
   private stalledTimer: NodeJS.Timeout | undefined;
 
   constructor(options: NotificationProjectionOptions) {
@@ -305,15 +337,30 @@ export class NotificationProjectionService {
       Math.max(MIN_STALLED_CHECK_INTERVAL_MS, Math.floor(this.stalledAfterMs / 2)),
     );
     this.logger = options.logger ?? console;
+    this.contentionRetryDelaysMs = options.contentionRetryDelaysMs
+      ?? SQLITE_CONTENTION_RETRY_DELAYS_MS;
   }
 
   async bestEffort(label: string, projection: () => Promise<void>): Promise<void> {
-    try {
-      await projection();
-    } catch {
-      // Persistence errors may embed SQL bindings containing notification or
-      // prompt text, so this boundary logs only the fixed projection label.
-      this.logger.warn(`[NotificationProjection] Failed to project ${label}`);
+    for (let attempt = 0; ; attempt += 1) {
+      if (this.closeController.signal.aborted) return;
+      try {
+        await projection();
+        return;
+      } catch (error) {
+        const retryDelay = this.contentionRetryDelaysMs[attempt];
+        if (isSqliteContention(error) && retryDelay !== undefined) {
+          // The API's dedicated background connection uses busy_timeout=0.
+          // Yield between attempts so foreground reads continue while another
+          // process owns SQLite's writer lock.
+          await wait(retryDelay, this.closeController.signal);
+          continue;
+        }
+        // Persistence errors may embed SQL bindings containing notification or
+        // prompt text, so this boundary logs only the fixed projection label.
+        this.logger.warn(`[NotificationProjection] Failed to project ${label}`);
+        return;
+      }
     }
   }
 
@@ -331,6 +378,7 @@ export class NotificationProjectionService {
   close(): void {
     if (this.stalledTimer) clearInterval(this.stalledTimer);
     this.stalledTimer = undefined;
+    this.closeController.abort();
   }
 
   async projectDraftUpdate(payload: DraftUpdatePayload): Promise<void> {
@@ -672,6 +720,8 @@ export class NotificationProjectionService {
         },
         title: context.description ?? `PR #${prNumber} ready for review`,
         body: `PR #${prNumber} is ready for review.`,
+        // Persist only the completing implementation identity, never arbitrary task metadata.
+        metadata: { completedImplementationTaskId: payload.taskId },
         actions: [
           ...(pullRequestUrl === undefined ? [] : ['open_pr' as const]),
           'dismiss',

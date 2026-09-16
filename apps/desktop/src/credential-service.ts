@@ -615,7 +615,9 @@ export class DesktopCredentialService {
 
       const response = await this.#authenticatedFetch(
         active,
-        '/api/desktop/active-work',
+        // Older servers ignore this query and return their strict v2 shape;
+        // current servers use it as the explicit opt-in for executing goals.
+        '/api/desktop/active-work?schemaVersion=3',
         { cache: 'no-store', signal },
         8_000,
       );
@@ -1590,9 +1592,9 @@ export class DesktopCredentialService {
 
     // Chromium can cache Local Network Access after activation is discarded.
     // The live main renderer must therefore remain pinned to the exact current
-    // origin even for sanitized traffic that does not carry a transport scope.
-    const publicGitHubAvatarRequest = activeIsCurrent
-      && !markedRestRequest
+    // origin even for sanitized traffic that does not carry a transport scope,
+    // apart from this exact credentialless public-image exception.
+    const publicGitHubAvatarRequest = !markedRestRequest
       && !isSocketCandidate
       && isPublicGitHubAvatarRequest(target, details.resourceType);
     if (details.rendererOwned === true && target

@@ -13,7 +13,7 @@ import {
   refinePlan,
   stopTaskExecution,
 } from '../api/proprApi';
-import { useDesktopVoicePreference, subscribeDesktopVoicePreference } from './useDesktopVoicePreference';
+import { useVoicePreference, subscribeVoicePreference } from './useVoicePreference';
 import { subscribeDesktopConnectionScope } from '../api/apiClient';
 import { isDesktopRuntime } from '../config/runtimeMode';
 import { getVoiceBriefing } from '../api/voiceApi';
@@ -165,7 +165,7 @@ async function executePlanAction(
 export function useVoiceBriefing(
   options: UseVoiceBriefingOptions = {},
 ): VoiceBriefingController {
-  const preference = useDesktopVoicePreference();
+  const preference = useVoicePreference();
   const preferenceRef = useRef(preference);
   preferenceRef.current = preference;
   const [phase, setPhaseState] = useState<VoiceBriefingPhase>('idle');
@@ -564,7 +564,7 @@ export function useVoiceBriefing(
   // Subscribe directly as well as rendering the preference. Opt-out must cancel
   // work synchronously, before React commits the hidden entry points.
   useLayoutEffect(() => {
-    const unsubscribePreference = subscribeDesktopVoicePreference(() => {
+    const unsubscribePreference = subscribeVoicePreference(() => {
       if (!preferenceRef.current.isEnabled()) resetSession();
     });
     const unsubscribeConnection = subscribeDesktopConnectionScope(resetSession);

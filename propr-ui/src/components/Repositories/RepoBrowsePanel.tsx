@@ -34,7 +34,12 @@ const RepoBrowsePanel: React.FC<RepoBrowsePanelProps> = ({ owner, repo, branch }
 
   return (
     <div className="h-full overflow-auto bg-slate-50">
-      <SummaryBrowser owner={owner} repo={repo} branch={branch} />
+      <SummaryBrowser
+        key={`${owner}/${repo}:${branch || 'HEAD'}`}
+        owner={owner}
+        repo={repo}
+        branch={branch}
+      />
     </div>
   );
 };

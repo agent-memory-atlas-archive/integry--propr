@@ -117,14 +117,14 @@ describe('Notification Settings browser enrollment guidance', () => {
     expect(screen.getByLabelText('Push notifications for Plans')).toBeEnabled();
   });
 
-  test('shows VAPID configuration guidance on a capable HTTPS browser', async () => {
+  test('shows plain availability wording on a capable HTTPS browser', async () => {
     mocks.push = pushState({
       capabilities: { push: { configured: false, vapidPublicKey: null } },
     });
 
     render(<NotificationSettingsSection />);
 
-    expect(await screen.findByText(/Web Push is not configured for this ProPR instance/))
+    expect(await screen.findByText(/Browser notifications are unavailable for this ProPR instance/))
       .toBeInTheDocument();
     expect(screen.queryByText(/Native desktop notifications/)).not.toBeInTheDocument();
   });

@@ -1,3 +1,4 @@
+import { projectNotificationPreviews } from '../services/previewMediaProjection.js';
 import type { Request, Response } from 'express';
 import {
     decodeNotificationCursor,
@@ -22,6 +23,7 @@ import {
     validateWebPushConfiguration,
     WEB_PUSH_CONFIGURATION_WARNINGS,
     webPushConfigurationFromEnvironment,
+    type ValidatedWebPushConfiguration,
     type WebPushServerConfiguration
 } from '../services/webPushConfiguration.js';
 
@@ -42,6 +44,7 @@ export type NotificationRouteService = Pick<
 
 export interface NotificationRouteDependencies {
     service?: NotificationRouteService;
+    resolvedWebPushConfiguration?: ValidatedWebPushConfiguration;
     getWebPushConfiguration?: () => WebPushServerConfiguration;
     webPushDispatcherConfigured?: boolean;
     logWarning?: (message: string) => void;
@@ -159,7 +162,8 @@ export function createNotificationRoutes(
     const logWarning = dependencies.logWarning ?? (() => undefined);
     // VAPID configuration is process-static. Validate the key pair once when the
     // routes are constructed instead of repeating P-256 derivation per request.
-    const vapidValidation = validateWebPushConfiguration(getWebPushConfiguration());
+    const vapidValidation = dependencies.resolvedWebPushConfiguration
+        ?? validateWebPushConfiguration(getWebPushConfiguration());
     if (!vapidValidation.configured && vapidValidation.issue !== 'disabled') {
         logWarning(`[notifications] Web Push disabled: ${
             WEB_PUSH_CONFIGURATION_WARNINGS[vapidValidation.issue]
@@ -184,7 +188,7 @@ export function createNotificationRoutes(
                 limit: parseNotificationListLimit(req.query.limit),
                 includeDismissed: parseIncludeDismissed(req.query.includeDismissed)
             });
-            res.json(response);
+            res.json({ ...response, notifications: await projectNotificationPreviews(response.notifications) });
         } catch (error) {
             handleRouteError(res, error, 'list notifications');
         }
@@ -294,6 +298,11 @@ export function createNotificationRoutes(
     async function createPushSubscription(req: Request, res: Response): Promise<void> {
         const userId = authenticatedUserId(req, res);
         if (!userId) return;
+
+        if (!pushConfigured) {
+            res.status(503).json({ error: 'Browser notifications are unavailable for this ProPR instance.' });
+            return;
+        }
 
         try {
             const userAgent = typeof req.get === 'function'

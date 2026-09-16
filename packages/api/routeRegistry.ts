@@ -1,6 +1,7 @@
 import type { Express, RequestHandler } from 'express';
 import type {
   createAdminRoutes,
+  createAdminMcpRoutes,
   createAgentLoginRoutes,
   createAgentRuntimeRoutes,
   createAgentVersionRoutes,
@@ -15,6 +16,7 @@ import {
   requireManageRuntime,
   requireManageSettings,
 } from './permissionGuards.js';
+import { timeApiRouteHandler } from './apiPerformanceTiming.js';
 
 export type RouteMethod = 'get' | 'post' | 'put' | 'patch' | 'delete';
 // A route matrix contains handlers with different inferred parameter shapes.
@@ -23,6 +25,7 @@ export type RouteEntry = [RouteMethod, string, ...RequestHandler<never>[]];
 
 interface ManagementRouteDeps {
   adminRoutes: ReturnType<typeof createAdminRoutes>;
+  adminMcpRoutes: ReturnType<typeof createAdminMcpRoutes>;
   agentLoginRoutes: ReturnType<typeof createAgentLoginRoutes>;
   agentRuntimeRoutes: ReturnType<typeof createAgentRuntimeRoutes>;
   agentVersionRoutes: ReturnType<typeof createAgentVersionRoutes>;
@@ -36,6 +39,7 @@ interface MemberCatalogRouteDeps {
 
 export function createManagementRouteEntries({
   adminRoutes,
+  adminMcpRoutes,
   agentLoginRoutes,
   agentRuntimeRoutes,
   agentVersionRoutes,
@@ -86,6 +90,10 @@ export function createManagementRouteEntries({
     ['patch', '/api/admin/members/:githubUserId', requireManageMembers, adminRoutes.updateMemberRole],
     ['delete', '/api/admin/members/:githubUserId', requireManageMembers, adminRoutes.removeMember],
 
+    ['get', '/api/admin/mcp', requireManageSettings, adminMcpRoutes.getSettings],
+    ['put', '/api/admin/mcp', requireManageSettings, adminMcpRoutes.putSettings],
+    ['post', '/api/admin/mcp/revoke-all', requireManageSettings, adminMcpRoutes.revokeAll],
+
     ['get', '/api/agent-runtime/packages', requireManageRuntime, agentRuntimeRoutes.getRuntimePackages],
     ['get', '/api/agent-runtime/packages/search', requireManageRuntime, agentRuntimeRoutes.searchRuntimePackages],
     ['post', '/api/agent-runtime/packages/validate', requireManageRuntime, agentRuntimeRoutes.validateRuntimePackages],
@@ -128,6 +136,12 @@ export function assertNoDuplicateRoutes(routes: RouteEntry[]): void {
 
 export function registerRouteEntries(app: Express, routes: RouteEntry[]): void {
   routes.forEach(([method, path, ...handlers]) => {
-    app[method](path, ...handlers);
+    const finalHandler = handlers.at(-1);
+    if (!finalHandler) return;
+    app[method](
+      path,
+      ...handlers.slice(0, -1),
+      timeApiRouteHandler(method, path, finalHandler as RequestHandler) as RequestHandler<never>,
+    );
   });
 }

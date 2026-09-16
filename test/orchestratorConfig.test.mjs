@@ -51,6 +51,24 @@ test('validateEnv accepts absent or complete matching VAPID configuration', () =
   assert.deepEqual(validateEnv(cfg).errors.filter(error => /VAPID/.test(error)), []);
 });
 
+test('validateEnv accepts automatic subject-only and manual pair-only modes, but checks invalid overrides even when disabled', () => {
+  const pair = vapidKeyPair();
+  for (const env of [
+    { WEB_PUSH_VAPID_SUBJECT: 'https://contact.example/push' },
+    { WEB_PUSH_VAPID_PUBLIC_KEY: pair.publicKey, WEB_PUSH_VAPID_PRIVATE_KEY: pair.privateKey },
+  ]) {
+    assert.deepEqual(validateEnv(resolveConfig(env, { manifestPath })).errors.filter(error => /VAPID/.test(error)), []);
+  }
+  for (const env of [
+    { WEB_PUSH_VAPID_SUBJECT: 'invalid-subject' },
+    { WEB_PUSH_VAPID_PRIVATE_KEY: pair.privateKey },
+  ]) {
+    const errors = validateEnv(resolveConfig({ ...env, WEB_PUSH_ENABLED: 'false' }, { manifestPath })).errors;
+    assert.ok(errors.some(error => /VAPID/.test(error)));
+    assert.ok(!errors.join('').includes(pair.privateKey));
+  }
+});
+
 test('validateEnv fails safely when only one VAPID key is configured', () => {
   const privateKey = vapidKeyPair().privateKey;
   const cfg = resolveConfig({ WEB_PUSH_VAPID_PRIVATE_KEY: privateKey }, { manifestPath });

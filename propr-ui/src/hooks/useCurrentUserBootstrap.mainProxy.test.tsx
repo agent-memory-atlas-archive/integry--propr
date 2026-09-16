@@ -77,7 +77,6 @@ describe('desktop current-user bootstrap main-proxy integration', () => {
 
     const { result } = renderHook(() => useCurrentUserBootstrap({
       isDemoMode: false,
-      isDemoModeLoading: false,
     }));
 
     await waitFor(() => expect(result.current.currentUser).toEqual(user));

@@ -7,7 +7,12 @@ import { DESKTOP_RENDERER_ORIGIN } from '@propr/shared';
 import cors from 'cors';
 import express from 'express';
 import { Server as SocketIOServer } from 'socket.io';
-import { corsRejectionHandler, createCorsOriginValidator } from '../corsValidation.js';
+import {
+  CORS_PREFLIGHT_MAX_AGE_SECONDS,
+  corsRejectionHandler,
+  createCorsOriginValidator,
+  isTrustedMcpWebOrigin,
+} from '../corsValidation.js';
 
 // Helper that runs the validator synchronously and reports whether the origin
 // was allowed.
@@ -34,6 +39,15 @@ test('CORS rejects unrelated origins under proxy mode', () => {
   // A look-alike subdomain of the hosted UI is not the exact origin and must be
   // rejected when COOKIE_DOMAIN is unset.
   assert.equal(isAllowed(validate, 'https://app.propr.dev.evil.example.com'), false);
+});
+
+test('Claude web origin is trusted only at the bearer-authenticated MCP endpoint', () => {
+  assert.equal(isTrustedMcpWebOrigin('/api/mcp', 'https://claude.ai'), true);
+  assert.equal(isTrustedMcpWebOrigin('/api/mcp/', 'https://claude.ai'), false);
+  assert.equal(isTrustedMcpWebOrigin('/api/tasks', 'https://claude.ai'), false);
+  assert.equal(isTrustedMcpWebOrigin('/api/mcp', 'https://claude.ai.evil.example'), false);
+  assert.equal(isTrustedMcpWebOrigin('/api/mcp', 'https://www.claude.ai'), false);
+  assert.equal(isTrustedMcpWebOrigin('/api/mcp', undefined), false);
 });
 
 test('CORS allows requests with no origin', () => {
@@ -109,6 +123,7 @@ async function withCorsBoundary(
   app.use(cors({
     origin: createCorsOriginValidator('https://app.propr.dev', '.preview.example.com'),
     credentials: true,
+    maxAge: CORS_PREFLIGHT_MAX_AGE_SECONDS,
   }));
   app.use(corsRejectionHandler);
   app.get('/api/compatibility', (_req, res) => res.json({ compatibility: 'public' }));
@@ -184,6 +199,10 @@ for (const runtimeMode of ['development', 'production'] as const) {
       assert.equal(
         allowedPreflight.headers.get('access-control-allow-headers'),
         'X-ProPR-Desktop-Transport-Scope, Content-Type',
+      );
+      assert.equal(
+        allowedPreflight.headers.get('access-control-max-age'),
+        CORS_PREFLIGHT_MAX_AGE_SECONDS.toString(),
       );
     });
   });

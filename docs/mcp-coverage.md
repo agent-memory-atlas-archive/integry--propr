@@ -24,9 +24,9 @@ remain separate gates.
 | Publish GitHub issues | `publish_plan`; publication does not start implementation |
 | Selected issues, model, epic, bounded ultrafix and explicit auto-merge | `implement_plan` |
 | Plan scheduling | `pause_plan`, `resume_plan` |
-| Native goal capabilities/start/read/input | `get_goal_capabilities`, `create_goal`, `list_goals`, `get_goal`, `send_goal_input` |
+| Native goal capabilities/start/read/input | `get_goal_capabilities`, `create_goal`, `list_goals`, `get_goal`, `get_agent_activity`, `send_goal_input` |
 | Goal controls/model changes | `pause_goal`, `resume_goal`, `cancel_goal`, `set_goal_model` |
-| Task progress, history and bounded execution logs | `list_tasks`, `get_task`, `get_task_events`, `get_task_logs` |
+| Task progress, narrated agent activity, history and bounded execution logs | `list_tasks`, `get_task`, `get_agent_activity`, `get_task_events`, `get_task_logs` |
 | File changes and followup | `get_task_changes`, `send_task_followup` |
 | Task/operation cancellation and receipts | `cancel_task`, `get_operation`, `cancel_operation` |
 | Delete inactive task history | `delete_task`; bulk cleanup uses explicit individual handles |

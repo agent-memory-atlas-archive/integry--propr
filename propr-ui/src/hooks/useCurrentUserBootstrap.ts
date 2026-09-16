@@ -13,7 +13,6 @@ const AUTHORIZATION_REFRESH_INTERVAL_MS = 60_000;
 
 interface CurrentUserBootstrapOptions {
   isDemoMode: boolean;
-  isDemoModeLoading: boolean;
 }
 
 interface CurrentUserBootstrapResult {
@@ -37,7 +36,6 @@ interface RefreshRequest {
  */
 export const useCurrentUserBootstrap = ({
   isDemoMode,
-  isDemoModeLoading,
 }: CurrentUserBootstrapOptions): CurrentUserBootstrapResult => {
   const desktopRuntime = isDesktopRuntime();
   const socketConfigurationKey = useSyncExternalStore(
@@ -139,8 +137,9 @@ export const useCurrentUserBootstrap = ({
   }, [desktopRuntime]);
 
   useEffect(() => {
-    if (isDemoModeLoading) return;
-
+    // Demo status does not change how this validation is issued. Start both
+    // independent reads in the mounting commit; AppContent still waits for
+    // both, and SocketProvider remains disabled until both gates are settled.
     const checkSession = async () => {
       if (currentUiPathname() === '/login') {
         setIsInitialLoading(false);
@@ -160,7 +159,7 @@ export const useCurrentUserBootstrap = ({
     };
 
     void checkSession();
-  }, [currentConfigurationKey, isDemoModeLoading, refreshCurrentUser]);
+  }, [currentConfigurationKey, refreshCurrentUser]);
 
   useEffect(() => {
     const handleAuthorizationChanged = () => {
@@ -208,4 +207,3 @@ export const useCurrentUserBootstrap = ({
     refreshCurrentUser,
   };
 };
-

@@ -1,7 +1,9 @@
+import { createRepositoryMediaRoutes } from './routes/repositoryMediaRoutes.js';
 import { ROUTING_STATUS_REDIS_KEY } from '@propr/shared';
 /* eslint-disable max-lines -- route registration and coordinated shutdown share startup state */
 import express, { Request, Response } from 'express';
 import { mountMcp, mcpResponseHeaders } from './mcp/server.js';
+import { getMcpOriginSync, isMcpEnabledSync, invalidateMcpConfigCache, resolveMcpConfig } from './mcp/configResolver.js';
 import { createServer, Server as HttpServer } from 'http';
 import cors from 'cors';
 import { createClient, RedisClientType } from 'redis';
@@ -12,7 +14,7 @@ import { authenticateSocketRequest, setupAuth } from './auth.js';
 import { configureDemoMode, createDemoRedisClient, demoModeReadOnlyMiddleware } from './demoMode.js';
 import { resolveGithubAuthMode, resolveGithubEventIntakeMode, validateIntakeModePrerequisites } from '@propr/shared';
 import { initSocketService, closeSocketService } from './services/socketService.js';
-import { corsRejectionHandler, createCorsOriginValidator } from './corsValidation.js';
+import { CORS_PREFLIGHT_MAX_AGE_SECONDS, corsRejectionHandler, createCorsOriginValidator, isTrustedMcpWebOrigin, type CorsOriginValidator } from './corsValidation.js';
 import {
   createStatusRoutes, createTaskRoutes,
   createTaskHistoryRoutes, createLiveDetailsRoutes,
@@ -33,6 +35,7 @@ import {
   createUserRepoPreferencesRoutes,
   createAgentRuntimeRoutes, createNotificationRoutes,
   createAdminRoutes,
+  createAdminMcpRoutes,
   createGoalRoutes,
   createVisualPreviewAuthRoutes,
   createVoiceRoutes,
@@ -68,8 +71,8 @@ import type { WebhookEventType, DetectedIssue, CommentPayload, CommentEventConfi
 import { handleWebhookRequest } from './webhookHandler.js';
 import { stopTaskExecution } from './routes/dockerRoutes.js';
 import { initializePushSubscriptionMaintenance } from './services/pushSubscriptionMaintenance.js';
-import { NotificationProjectionService } from './services/notificationProjectionService.js';
-import { WebPushDispatcher } from './services/webPushDispatcher.js';
+import { resolveInstanceWebPushConfiguration } from './services/instanceWebPushConfiguration.js';
+import { WEB_PUSH_CONFIGURATION_WARNINGS, type ValidatedWebPushConfiguration } from './services/webPushConfiguration.js';
 import { assertInstanceAdministratorConfigured } from './authorization.js';
 import { resolveApiListenHost } from './listenAddress.js';
 import {
@@ -80,6 +83,7 @@ import {
 } from './requestRateLimits.js';
 import { desktopAuthService } from './desktopAuthService.js';
 import { prohibitApiResponseCaching } from './apiCacheControl.js';
+import { createApiPerformanceTimingMiddleware } from './apiPerformanceTiming.js';
 import { startConfigReloadSubscription, type ConfigReloadSubscription } from './services/configReloadSubscription.js';
 import {
   assertNoDuplicateRoutes,
@@ -95,6 +99,10 @@ import {
   type VisualPreviewOAuthRefreshScheduler,
 } from './services/visualPreviewOAuth.js';
 import { createVoiceBriefingService } from './services/voiceBriefingService.js';
+import {
+  startNotificationBackgroundService,
+  type NotificationBackgroundService,
+} from './services/notificationBackgroundService.js';
 
 type ShutdownTask = { name: string; close: () => Promise<unknown> };
 
@@ -169,6 +177,10 @@ configureApiProxyTrust(app);
 // be cached by a browser or intermediary.
 app.use('/api', prohibitApiResponseCaching);
 
+// Disabled by default. When sampled, this remains ahead of CORS, limiting, body
+// parsing, sessions and Passport without recording any request contents.
+app.use('/api', createApiPerformanceTimingMiddleware());
+
 if (!process.env.FRONTEND_URL) {
   console.error('FRONTEND_URL environment variable is required');
   process.exit(1);
@@ -187,14 +199,34 @@ try {
 }
 
 // Mark even parser/rate-limit/error responses at the instance boundary.
-if (process.env.MCP_ENABLED === 'true') app.use('/api/mcp', mcpResponseHeaders);
+app.use('/api/mcp', (req, res, next) => { if (isMcpEnabledSync()) { mcpResponseHeaders(req, res, next); } else { next(); } });
 
 app.use((req, res, next) => {
   // Server-rendered MCP consent forms submit on the API's own public origin,
-  // which can differ from FRONTEND_URL. Keep other API CORS policy intact.
-  const mcpOrigin = process.env.MCP_ENABLED === 'true' ? process.env.MCP_PUBLIC_ORIGIN?.replace(/\/$/, '') : undefined;
-  const consentOrigin = req.path.startsWith('/mcp/') && mcpOrigin && req.get('origin') === mcpOrigin;
-  cors({ origin: consentOrigin ? mcpOrigin : validateCorsOrigin, credentials: true })(req, res, next);
+  // which can differ from FRONTEND_URL. Known remote MCP web clients also need
+  // their exact origin accepted at the bearer-authenticated MCP endpoint. Keep
+  // the cookie-authenticated REST and Socket.IO CORS policy intact.
+  // Validate inside the callback and never pass a request-derived string as
+  // the `origin` option: the `cors` package echoes an allowed origin back
+  // verbatim, so reflecting `req.get('origin')` would read as a permissive,
+  // user-controlled configuration even when it is gated by an allowlist.
+  const mcpOrigin = getMcpOriginSync();
+  const validateRequestCorsOrigin: CorsOriginValidator = (origin, callback) => {
+    if (req.path.startsWith('/mcp/') && mcpOrigin && origin === mcpOrigin) {
+      callback(null, true);
+      return;
+    }
+    if (isTrustedMcpWebOrigin(req.path, origin)) {
+      callback(null, true);
+      return;
+    }
+    validateCorsOrigin(origin, callback);
+  };
+  cors({
+    origin: validateRequestCorsOrigin,
+    credentials: true,
+    maxAge: CORS_PREFLIGHT_MAX_AGE_SECONDS,
+  })(req, res, next);
 });
 // The `cors` package forwards rejected origins as middleware errors. Handle
 // those immediately so Express never renders its development HTML error page
@@ -216,9 +248,10 @@ let redisClient: RedisClientType;
 let taskQueue: Queue;
 let runtimeBuildQueue: Queue;
 let configReloadSubscription: ConfigReloadSubscription | undefined;
-let notificationProjection: NotificationProjectionService | undefined;
-let webPushDispatcher: WebPushDispatcher | undefined;
+let invalidateStatusAgentCache: (() => void) | undefined;
+let notificationBackground: NotificationBackgroundService | undefined;
 let webPushDispatcherConfigured = false;
+let resolvedWebPushConfiguration: ValidatedWebPushConfiguration = { configured: false, issue: 'disabled' };
 let desktopPairingCleanupTimer: NodeJS.Timeout | undefined;
 let visualPreviewOAuthRefreshScheduler: VisualPreviewOAuthRefreshScheduler | undefined;
 
@@ -266,13 +299,14 @@ async function initRedis(): Promise<void> {
 function setupRoutes(): void {
   const statusRoutes = createStatusRoutes({
     redisClient,
-    ...(notificationProjection === undefined ? {} : {
+    ...(notificationBackground === undefined ? {} : {
       projectSystemSnapshot: (
         snapshot: Record<string, unknown> & { timestamp: string },
         additionalAdministratorIds: readonly string[],
-      ) => notificationProjection!.projectSystemSnapshot(snapshot, additionalAdministratorIds),
+      ) => notificationBackground!.projectSystemSnapshot(snapshot, additionalAdministratorIds),
     }),
   });
+  invalidateStatusAgentCache = statusRoutes.invalidateAgentStatusCache;
   const desktopAuthRoutes = createDesktopAuthRoutes();
   // INTENTIONALLY UNAUTHENTICATED: compatibility/discovery and the bounded
   // pairing bootstrap, poll, and browser entry are registered before the guard.
@@ -294,6 +328,7 @@ function setupRoutes(): void {
   app.post('/api/desktop/pairings/:pairingId/approve', desktopAuthRoutes.browserSessionGuard, desktopAuthRoutes.approvalOriginGuard, desktopAuthRoutes.approvePairing);
   app.get('/api/desktop/tokens', desktopAuthRoutes.listTokens);
   app.delete('/api/desktop/tokens/:tokenId', desktopAuthRoutes.revokeToken);
+  const repositoryMediaRoutes = createRepositoryMediaRoutes({ db });
   const taskRoutes = createTaskRoutes({ db, taskQueue });
   const taskHistoryRoutes = createTaskHistoryRoutes({ redisClient, taskQueue, db });
   const liveDetailsRoutes = createLiveDetailsRoutes({ redisClient, db });
@@ -316,7 +351,7 @@ function setupRoutes(): void {
   const repoTodoRoutes = createRepoTodoRoutes();
   const userRepoPreferencesRoutes = createUserRepoPreferencesRoutes();
   const agentRuntimeRoutes = createAgentRuntimeRoutes({ getRuntimeBuildQueue: () => runtimeBuildQueue });
-  const notificationRoutes = createNotificationRoutes({ webPushDispatcherConfigured });
+  const notificationRoutes = createNotificationRoutes({ webPushDispatcherConfigured, resolvedWebPushConfiguration });
   const voiceBriefingService = createVoiceBriefingService({
     database: db,
     taskQueue,
@@ -324,6 +359,7 @@ function setupRoutes(): void {
   });
   const voiceRoutes = createVoiceRoutes({ briefingService: voiceBriefingService });
   const adminRoutes = createAdminRoutes();
+  const adminMcpRoutes = createAdminMcpRoutes({ database: db, redisClient });
   const visualPreviewAuthRoutes = createVisualPreviewAuthRoutes({
     managedStorage: createManagedPreviewStorageClient(() => redisClient.get(ROUTING_STATUS_REDIS_KEY)),
   });
@@ -356,6 +392,7 @@ function setupRoutes(): void {
     ['get', SUMMARY_TREE_ROUTE_PATH, summaryBrowserRoutes.getDirectoryTree], ['get', SUMMARY_PATH_ROUTE_PATH, summaryBrowserRoutes.getPathSummary], ['post', '/api/repos/chat', repoChatRoutes.postChat], ['get', '/api/repos/chat/messages', repoChatRoutes.getMessages],
     ['post', '/api/repos/chat/messages', repoChatRoutes.saveMessages], ['delete', '/api/repos/chat/messages/:messageId', repoChatRoutes.deleteMessage], ['delete', '/api/repos/chat/messages', repoChatRoutes.clearMessages], ['post', '/api/repos/improvements', repoImprovementsRoutes.postImprovements],
     ['get', '/api/voice/capabilities', voiceRoutes.getCapabilities], ['get', '/api/voice/briefing', voiceRoutes.getBriefing],
+    ['get', '/api/repos/media', repositoryMediaRoutes.getMedia],
     ['get', '/api/repos/todos/categories', repoTodoRoutes.getCategories], ['post', '/api/repos/todos/categories', repoTodoRoutes.createCategory], ['put', '/api/repos/todos/categories/:categoryId', repoTodoRoutes.updateCategory], ['delete', '/api/repos/todos/categories/:categoryId', repoTodoRoutes.deleteCategory],
     ['post', '/api/repos/todos/categories/reorder', repoTodoRoutes.reorderCategories], ['get', '/api/repos/todos', repoTodoRoutes.getTodos], ['get', '/api/repos/todos/:todoId', repoTodoRoutes.getTodo], ['post', '/api/repos/todos', repoTodoRoutes.createTodo],
     ['put', '/api/repos/todos/:todoId', repoTodoRoutes.updateTodo], ['delete', '/api/repos/todos/:todoId', repoTodoRoutes.deleteTodo], ['post', '/api/repos/todos/reorder', repoTodoRoutes.reorderTodos], ['get', '/api/user/repo-preferences', userRepoPreferencesRoutes.getRepoPreferences],
@@ -367,6 +404,7 @@ function setupRoutes(): void {
     ...createMemberCatalogRouteEntries({ instanceCatalogRoutes }),
     ...createManagementRouteEntries({
       adminRoutes,
+      adminMcpRoutes,
       agentLoginRoutes,
       agentRuntimeRoutes,
       agentVersionRoutes,
@@ -462,6 +500,36 @@ app.get('/health', (_req: Request, res: Response) => { res.json({ status: 'ok' }
 // Create HTTP server to wrap Express app (required for Socket.IO)
 const httpServer: HttpServer = createServer(app);
 
+async function initializeNotificationBackground(): Promise<void> {
+  resolvedWebPushConfiguration = resolveInstanceWebPushConfiguration();
+  if (!resolvedWebPushConfiguration.configured && resolvedWebPushConfiguration.issue !== 'disabled') {
+    console.warn(`[notifications] Web Push unavailable: ${
+      WEB_PUSH_CONFIGURATION_WARNINGS[resolvedWebPushConfiguration.issue]
+    }`);
+  }
+  const vapidEnvironment = {
+    WEB_PUSH_VAPID_SUBJECT: process.env.WEB_PUSH_VAPID_SUBJECT,
+    WEB_PUSH_VAPID_PUBLIC_KEY: process.env.WEB_PUSH_VAPID_PUBLIC_KEY,
+    WEB_PUSH_VAPID_PRIVATE_KEY: process.env.WEB_PUSH_VAPID_PRIVATE_KEY,
+  };
+  try {
+    // Both background implementations read their startup configuration from
+    // the environment; the worker copies it before loading the dispatcher.
+    if (resolvedWebPushConfiguration.configured) {
+      process.env.WEB_PUSH_VAPID_SUBJECT = resolvedWebPushConfiguration.subject;
+      process.env.WEB_PUSH_VAPID_PUBLIC_KEY = resolvedWebPushConfiguration.publicKey;
+      process.env.WEB_PUSH_VAPID_PRIVATE_KEY = resolvedWebPushConfiguration.privateKey;
+    }
+    notificationBackground = await startNotificationBackgroundService(db);
+    webPushDispatcherConfigured = notificationBackground.webPushDispatcherConfigured;
+  } finally {
+    for (const [name, value] of Object.entries(vapidEnvironment)) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+  }
+}
+
 async function start(): Promise<void> {
   try {
     console.log('SQLite persistence is enabled');
@@ -470,18 +538,21 @@ async function start(): Promise<void> {
     await assertInstanceAdministratorConfigured();
     await initRedis();
     if (!demoMode) {
-      try {
-        const dispatcher = new WebPushDispatcher({ database: db });
-        webPushDispatcherConfigured = dispatcher.start().configured;
-        webPushDispatcher = dispatcher;
-      } catch {
-        webPushDispatcher = undefined;
-        webPushDispatcherConfigured = false;
-        console.warn('[notifications] Web Push dispatcher disabled: invalid dispatcher tuning configuration');
-      }
-      notificationProjection = new NotificationProjectionService({ database: db });
-      notificationProjection.startStalledDetector();
-      configReloadSubscription = await startConfigReloadSubscription(redisClient, reloadConfigs);
+      await initializeNotificationBackground();
+      // Every API process drops its MCP cache on a published config event, so an
+      // admin toggle applies across processes rather than waiting out the TTL.
+      // Re-resolve immediately: authRedirect and the CORS/header middleware read
+      // the resolved state synchronously and cannot trigger a resolve themselves,
+      // so dropping the cache alone would leave them on the pre-change values.
+      configReloadSubscription = await startConfigReloadSubscription(redisClient, async () => {
+        invalidateMcpConfigCache();
+        await resolveMcpConfig(db).catch(error => { console.error('Failed to resolve MCP configuration:', error); });
+        await reloadConfigs();
+      }, console, subtype => {
+        if (subtype === 'agents_update' || subtype === 'synthetic_agents_update') {
+          invalidateStatusAgentCache?.();
+        }
+      });
       // Subscribe first, then enqueue the initial load through the same serial
       // chain so no settings update can race with the startup snapshot.
       await configReloadSubscription.reload();
@@ -497,6 +568,21 @@ async function start(): Promise<void> {
       }
     } else {
       console.log('Demo mode: skipped startup config initialization; API config reads use the curated database directly');
+    }
+    // Prime MCP config cache before route registration so authRedirect and CORS
+    // middleware see the correct origin on the first request after startup.
+    // The env-managed path keeps its pre-toggle behavior: an invalid MCP_* value,
+    // or MCP_ENABLED=true in demo mode, aborts startup through start()'s catch
+    // rather than leaving the MCP server silently 404ing everywhere.
+    if (process.env.MCP_ENABLED === 'true' && demoMode) {
+      throw new Error('MCP_ENABLED cannot be enabled in demo mode. Demo remains read-only.');
+    }
+    if (!demoMode) {
+      if (process.env.MCP_ENABLED === 'true') {
+        await resolveMcpConfig(db);
+      } else {
+        await resolveMcpConfig(db).catch(error => { console.error('Failed to resolve MCP configuration:', error); });
+      }
     }
     setupRoutes();
     if (!demoMode) {
@@ -514,7 +600,10 @@ async function start(): Promise<void> {
         authenticate: authenticateSocketRequest,
       });
       console.log('[WebSocket] Socket.IO server initialized');
-      socketService.initQueueFeatures({ taskQueue, redisClient, db, notificationProjection });
+      socketService.initQueueFeatures({
+        taskQueue, redisClient, db,
+        notificationProjection: notificationBackground,
+      });
       console.log('[WebSocket] Queue features initialized for real-time updates');
       await initializeUltrafix(getIoRedisClient());
       // Register the webhook processors in THIS (API) process ONLY when the API
@@ -559,7 +648,7 @@ async function start(): Promise<void> {
       if (desktopPairingCleanupTimer) clearInterval(desktopPairingCleanupTimer);
       if (!demoMode) {
         shutdownTasks.push(
-          { name: 'Web Push dispatcher', close: () => webPushDispatcher?.close() ?? Promise.resolve() },
+          { name: 'notification background service', close: () => notificationBackground?.close() ?? Promise.resolve() },
           { name: 'visual-preview OAuth refresh scheduler', close: () => visualPreviewOAuthRefreshScheduler?.close() ?? Promise.resolve() },
           { name: 'config reload subscriber', close: () => configReloadSubscription?.close() ?? Promise.resolve() },
           { name: 'ultrafix state redis', close: () => closeUltrafixStateRedis() },

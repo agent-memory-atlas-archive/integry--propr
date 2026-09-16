@@ -1,6 +1,7 @@
 import React, { useState, useRef, useEffect, useMemo, useCallback } from 'react';
 import { Search, Star, ChevronDown, X, Github, Loader2 } from 'lucide-react';
 import { fetchEnabledRepos } from '../utils/repoHelpers';
+import { RepositoryIcon } from './RepositoryIcon';
 
 export interface RepoOption {
   name: string;
@@ -8,6 +9,8 @@ export interface RepoOption {
   baseBranch?: string;
   starred?: boolean;
   iconPath?: string | null;
+  /** Commit or branch from which iconPath was discovered. */
+  iconRevision?: string | null;
   /** Custom label shown instead of the owner/repo name. */
   displayName?: string;
   /** Count badge rendered next to the label. */
@@ -39,23 +42,6 @@ interface RepositorySelectorProps {
   className?: string;
   labelLayout?: 'inline' | 'stacked';
 }
-
-const getIconUrl = (repoName: string, iconPath: string): string => {
-  const [owner, repo] = repoName.split('/');
-  if (!owner || !repo) return '';
-  return `https://raw.githubusercontent.com/${owner}/${repo}/HEAD/${iconPath}`;
-};
-
-const RepoIcon: React.FC<{
-  repoName: string;
-  iconPath?: string | null;
-  size?: 'sm' | 'md';
-}> = ({ repoName, iconPath, size = 'sm' }) => {
-  const [hasError, setHasError] = useState(false);
-  const sizeClass = size === 'sm' ? 'w-4 h-4' : 'w-5 h-5';
-  if (iconPath && !hasError) return <img src={getIconUrl(repoName, iconPath)} alt="" className={`${sizeClass} rounded flex-shrink-0 object-contain`} onError={() => setHasError(true)} />;
-  return <Github className={`${sizeClass} text-gray-400 flex-shrink-0`} />;
-};
 
 const FormatRepoName: React.FC<{ name: string }> = ({ name }) => {
   const parts = name.split('/');
@@ -103,7 +89,7 @@ const RepoItem: React.FC<{
     }`}
     onClick={() => onSelect(repo)}
   >
-    <RepoIcon repoName={repo.name} iconPath={repo.iconPath} />
+    <RepositoryIcon repository={repo.name} iconPath={repo.iconPath} revision={repo.iconRevision || repo.baseBranch} />
     <span className={`flex-1 min-w-0 ${labelLayout === 'stacked' ? '' : 'truncate text-sm font-mono'}`}>
       <RepoLabel repo={repo} labelLayout={labelLayout} />
     </span>
@@ -222,7 +208,7 @@ const BreadcrumbTrigger: React.FC<{
 }> = ({ selectedRepoData, selectedRepo, placeholder, reposCount, disabled, isOpen, onClick }) => (
   <>
     <button type="button" onClick={onClick} disabled={disabled || reposCount === 0} className="appearance-none bg-transparent border-none text-sm pr-5 py-0.5 font-mono text-gray-700 hover:text-indigo-600 focus:outline-none cursor-pointer transition-colors truncate max-w-full min-w-0 flex items-center gap-1.5 disabled:cursor-not-allowed disabled:opacity-50" title={getBreadcrumbTitle(selectedRepoData, selectedRepo, placeholder, reposCount)}>
-      {selectedRepoData ? <RepoIcon repoName={selectedRepoData.name} iconPath={selectedRepoData.iconPath} /> : <Github className="w-4 h-4 text-gray-500 flex-shrink-0" />}
+      {selectedRepoData ? <RepositoryIcon repository={selectedRepoData.name} iconPath={selectedRepoData.iconPath} revision={selectedRepoData.iconRevision || selectedRepoData.baseBranch} /> : <Github className="w-4 h-4 text-gray-500 flex-shrink-0" />}
       <span className="truncate">{getBreadcrumbLabel(selectedRepoData, selectedRepo, placeholder, reposCount)}</span>
     </button>
     <ChevronDown className={`w-3.5 h-3.5 text-gray-400 absolute right-0 top-1/2 -translate-y-1/2 pointer-events-none transition-transform ${isOpen ? 'rotate-180' : ''}`} />
@@ -243,7 +229,7 @@ const DefaultTrigger: React.FC<{
   <button type="button" onClick={onClick} disabled={disabled || isLoading || reposCount === 0} className={`w-full min-w-0 px-3 ${labelLayout === 'stacked' ? 'py-1' : 'py-2'} bg-white text-gray-900 border border-gray-300 rounded-md focus:ring-2 focus:ring-primary-500 focus:border-primary-500 flex items-center gap-2 disabled:cursor-not-allowed disabled:bg-gray-50 disabled:text-gray-500`}>
     {selectedRepoData ? (
       <>
-        <RepoIcon repoName={selectedRepoData.name} iconPath={selectedRepoData.iconPath} />
+        <RepositoryIcon repository={selectedRepoData.name} iconPath={selectedRepoData.iconPath} revision={selectedRepoData.iconRevision || selectedRepoData.baseBranch} />
         <span className={`flex-1 min-w-0 text-left ${labelLayout === 'stacked' ? '' : 'truncate text-sm'}`}>
           <RepoLabel repo={selectedRepoData} labelLayout={labelLayout} />
         </span>

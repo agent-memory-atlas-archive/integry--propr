@@ -16,6 +16,8 @@ import { Loader2, ChevronRight } from 'lucide-react';
 import { useSocket } from '../contexts/useSocket';
 import { useCurrentUser, userHasPermission } from '../contexts/AuthContext';
 import { ConnectSoftPromoBanner } from './ConnectPlusBanner';
+import { useLiveRefreshScheduler } from '../hooks/useLiveRefreshScheduler';
+import type { TaskUpdatePayload } from '@propr/shared';
 
 interface QueueStats {
   active: number;
@@ -32,13 +34,14 @@ interface StatItemProps {
   isLoading?: boolean;
 }
 
-const StatItem: React.FC<StatItemProps> = ({ label, value, color = 'text-gray-900', isLoading }) => (
+// Metric values are data, not display type: standard sans-serif, semibold, tabular digits.
+const StatItem: React.FC<StatItemProps> = ({ label, value, color = 'text-slate-900', isLoading }) => (
   <div className="flex flex-col items-start">
     <span className="text-[10px] font-bold text-gray-500 uppercase">{label}</span>
     {isLoading ? (
       <Loader2 className="w-4 h-4 animate-spin text-gray-400 mt-0.5" />
     ) : (
-      <span className={`text-xl font-bold ${color}`}>{value}</span>
+      <span className={`font-sans text-xl font-semibold tabular-nums ${color}`}>{value}</span>
     )}
   </div>
 );
@@ -81,7 +84,6 @@ export const StatsGrid: React.FC<StatsGridProps> = ({ queueStats, taskStats, ove
         <StatItem
           label="Success"
           value={calculateSuccessRate(taskStats)}
-          color="text-blue-600"
           isLoading={statsLoading && !taskStats}
         />
       </div>
@@ -106,7 +108,7 @@ export const StatsGrid: React.FC<StatsGridProps> = ({ queueStats, taskStats, ove
       <StatItem
         label="Total Cost"
         value={formatCost(overviewStats)}
-        color="text-violet-600"
+        color="text-slate-900"
         isLoading={statsLoading && !overviewStats}
       />
     </div>
@@ -131,6 +133,7 @@ const Dashboard: React.FC = () => {
 
   // WebSocket for real-time updates
   const { onTaskUpdate, isConnected } = useSocket();
+  const taskEventFingerprintsRef = React.useRef<Map<string, string>>(new Map());
 
   // Fetch all stats
   const fetchAllStats = useCallback(async (isInitialLoad = false) => {
@@ -152,6 +155,10 @@ const Dashboard: React.FC = () => {
       setStatsLoading(false);
     }
   }, []);
+  const scheduleLiveStatsRefresh = useLiveRefreshScheduler({
+    isConnected,
+    refresh: () => fetchAllStats(false),
+  });
 
   // Initial load
   useEffect(() => {
@@ -163,9 +170,11 @@ const Dashboard: React.FC = () => {
     if (!isConnected) return;
 
     // Handle task updates - refresh stats when any task changes state
-    const handleTaskUpdate = () => {
-      console.log('[Dashboard] Received task update, refreshing stats');
-      fetchAllStats(false);
+    const handleTaskUpdate = (payload: TaskUpdatePayload) => {
+      const fingerprint = `${payload.state}\0${payload.repository ?? ''}\0${payload.issueNumber ?? ''}`;
+      if (taskEventFingerprintsRef.current.get(payload.taskId) === fingerprint) return;
+      taskEventFingerprintsRef.current.set(payload.taskId, fingerprint);
+      scheduleLiveStatsRefresh();
     };
 
     const unsubscribe = onTaskUpdate(handleTaskUpdate);
@@ -173,7 +182,7 @@ const Dashboard: React.FC = () => {
     return () => {
       unsubscribe();
     };
-  }, [isConnected, onTaskUpdate, fetchAllStats]);
+  }, [isConnected, onTaskUpdate, scheduleLiveStatsRefresh]);
 
   // Format date for sparkline display
   const formatDate = (dateStr: string): string => {

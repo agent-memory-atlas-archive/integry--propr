@@ -4,7 +4,7 @@ import { lstat, mkdir, readFile, readdir, realpath, rm, writeFile } from 'node:f
 import { tmpdir } from 'node:os';
 import { basename, dirname, isAbsolute, join, parse, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { inflateRawSync } from 'node:zlib';
+import { deflateRawSync, inflateRawSync } from 'node:zlib';
 import { PACKAGED_ACCEPTANCE_TIME } from './packaged-acceptance-clock.mjs';
 
 export const FIXED_TIME = PACKAGED_ACCEPTANCE_TIME;
@@ -285,6 +285,73 @@ const readZipEntries = bytes => {
   }
   if (offset !== centralOffset + centralSize) throw new Error('Acceptance trace ZIP directory size changed');
   return entries;
+};
+
+// Short and outside every generic pattern's character classes, so redaction can never mint a new match.
+export const ACCEPTANCE_REDACTION_PLACEHOLDER = 'propr-redacted';
+
+const redactSecretText = (text, sentinels) => {
+  let redacted = text;
+  for (const sentinel of sentinels) {
+    if (sentinel) redacted = redacted.split(sentinel).join(ACCEPTANCE_REDACTION_PLACEHOLDER);
+  }
+  for (const pattern of genericSecretPatterns) {
+    pattern.lastIndex = 0;
+    redacted = redacted.replace(pattern, ACCEPTANCE_REDACTION_PLACEHOLDER);
+  }
+  return redacted;
+};
+
+const buildZipBytes = entries => {
+  const localParts = [];
+  const centralParts = [];
+  let offset = 0;
+  for (const { name, value } of entries) {
+    const filename = Buffer.from(name, 'utf8');
+    const checksum = crc32(value);
+    const compressed = deflateRawSync(value, { level: 9 });
+    const local = Buffer.alloc(30);
+    local.writeUInt32LE(0x04034b50, 0);
+    local.writeUInt16LE(20, 4);
+    local.writeUInt16LE(8, 8);
+    local.writeUInt32LE(checksum, 14);
+    local.writeUInt32LE(compressed.length, 18);
+    local.writeUInt32LE(value.length, 22);
+    local.writeUInt16LE(filename.length, 26);
+    localParts.push(local, filename, compressed);
+    const central = Buffer.alloc(46);
+    central.writeUInt32LE(0x02014b50, 0);
+    central.writeUInt16LE(20, 4);
+    central.writeUInt16LE(20, 6);
+    central.writeUInt16LE(8, 10);
+    central.writeUInt32LE(checksum, 16);
+    central.writeUInt32LE(compressed.length, 20);
+    central.writeUInt32LE(value.length, 24);
+    central.writeUInt16LE(filename.length, 28);
+    central.writeUInt32LE(offset, 42);
+    centralParts.push(central, filename);
+    offset += 30 + filename.length + compressed.length;
+  }
+  const centralBytes = Buffer.concat(centralParts);
+  const end = Buffer.alloc(22);
+  end.writeUInt32LE(0x06054b50, 0);
+  end.writeUInt16LE(entries.length, 8);
+  end.writeUInt16LE(entries.length, 10);
+  end.writeUInt32LE(centralBytes.length, 12);
+  end.writeUInt32LE(offset, 16);
+  return Buffer.concat([...localParts, centralBytes, end]);
+};
+
+// Playwright traces record whatever authenticated requests happen to overlap the tracing
+// window, so the published trace must be actively redacted before the sentinel scan runs.
+export const sanitizeAcceptanceTrace = async (file, sentinels = []) => {
+  const entries = readZipEntries(await readFile(file));
+  const sanitized = entries.map(({ name, value }) => ({
+    name,
+    // latin1 round-trips every byte, so entries without secrets are preserved exactly.
+    value: Buffer.from(redactSecretText(value.toString('latin1'), sentinels), 'latin1'),
+  }));
+  await writeFile(file, buildZipBytes(sanitized), { mode: 0o600 });
 };
 
 const scanZip = async (file, sentinels, ocr) => {

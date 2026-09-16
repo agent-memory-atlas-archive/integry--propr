@@ -1,5 +1,5 @@
 import React from 'react';
-import { CheckCircle, XCircle, ChevronDown, ChevronUp, ChevronLeft, ChevronRight } from 'lucide-react';
+import { CheckCircle, XCircle, ChevronDown, ChevronUp, ChevronLeft, ChevronRight, LoaderCircle } from 'lucide-react';
 import { Link } from 'react-router-dom';
 import { LlmLogEntry, LlmLogsPagination } from '../api/llmLogsApi';
 import { getWorkTypeLabel } from './llmLogsUtils';
@@ -11,6 +11,23 @@ export const StatusIcon: React.FC<{ success: boolean }> = ({ success }) => {
   }
   return <XCircle size={18} className="text-red-500" />;
 };
+
+export const LlmLogsBlockingState: React.FC<{ error?: string }> = ({ error }) => (
+  <div className="flex flex-col h-full">
+    <div className="flex-shrink-0 bg-slate-50 border-b border-gray-200 px-6 py-4">
+      <h1 className="text-2xl font-bold text-gray-800">LLM Log</h1>
+    </div>
+    <div className="flex-1 overflow-auto px-6 py-6">
+      {error ? (
+        <div className="p-4 bg-red-50 border border-red-200 rounded-lg text-red-700">{error}</div>
+      ) : (
+        <div role="status" className="flex items-center gap-2 text-gray-500">
+          <LoaderCircle className="h-4 w-4 animate-spin" aria-hidden="true" />Loading logs...
+        </div>
+      )}
+    </div>
+  </div>
+);
 
 // Expand/Collapse button component
 export const ExpandButton: React.FC<{

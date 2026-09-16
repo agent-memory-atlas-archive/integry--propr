@@ -24,6 +24,7 @@ const deferred = <T,>(): Deferred<T> => {
 const scopeListeners = vi.hoisted(() => new Set<() => void>());
 const state = vi.hoisted(() => ({
   scope: null as null | { bridge: never; profileId: string; transportScope: string },
+  pathname: '/',
 }));
 const getCurrentUser = vi.hoisted(() => vi.fn());
 const sockets = vi.hoisted(() => [] as Array<{
@@ -62,7 +63,7 @@ vi.mock('../api/apiClient', () => ({
 }));
 
 vi.mock('../config/runtimeMode', () => ({
-  currentUiPathname: () => '/',
+  currentUiPathname: () => state.pathname,
   isDesktopRuntime: () => true,
 }));
 
@@ -95,6 +96,7 @@ describe('desktop current-user bootstrap', () => {
   afterEach(() => {
     cleanup();
     state.scope = null;
+    state.pathname = '/';
     scopeListeners.clear();
     getCurrentUser.mockReset();
     connectSocket.mockClear();
@@ -109,7 +111,6 @@ describe('desktop current-user bootstrap', () => {
 
     const { result } = renderHook(() => useCurrentUserBootstrap({
       isDemoMode: false,
-      isDemoModeLoading: false,
     }));
     await waitFor(() => expect(getCurrentUser).toHaveBeenCalledOnce());
     expect(getCurrentUser).toHaveBeenNthCalledWith(1, {
@@ -149,7 +150,6 @@ describe('desktop current-user bootstrap', () => {
       .mockReturnValueOnce(currentA.promise);
     const { result } = renderHook(() => useCurrentUserBootstrap({
       isDemoMode: false,
-      isDemoModeLoading: false,
     }));
     await waitFor(() => expect(getCurrentUser).toHaveBeenCalledOnce());
 
@@ -188,7 +188,7 @@ describe('desktop current-user bootstrap', () => {
 
     let latestBootstrap: ReturnType<typeof useCurrentUserBootstrap> | undefined;
     const Harness = () => {
-      const bootstrap = useCurrentUserBootstrap({ isDemoMode: false, isDemoModeLoading: false });
+      const bootstrap = useCurrentUserBootstrap({ isDemoMode: false });
       latestBootstrap = bootstrap;
       const disableReasons = {
         demoModeLoading: false,
@@ -250,12 +250,12 @@ describe('desktop current-user bootstrap', () => {
     expect(sockets[0].disconnect).not.toHaveBeenCalled();
   });
 
-  it('waits for demo-mode loading before one active-on-mount validation and Manager in StrictMode', async () => {
+  it('overlaps validation with demo-mode loading but keeps Manager disabled until mode resolves in StrictMode', async () => {
     getCurrentUser.mockResolvedValue(user);
     state.scope = activeScope;
 
     const Harness = ({ isDemoModeLoading }: { isDemoModeLoading: boolean }) => {
-      const bootstrap = useCurrentUserBootstrap({ isDemoMode: false, isDemoModeLoading });
+      const bootstrap = useCurrentUserBootstrap({ isDemoMode: false });
       const disableReasons = {
         demoModeLoading: isDemoModeLoading,
         demoMode: false,
@@ -275,13 +275,7 @@ describe('desktop current-user bootstrap', () => {
       </StrictMode>,
     );
 
-    // Let an immediately resolved local validation fully settle if an effect
-    // incorrectly owns active-scope bootstrap while demo mode is still loading.
-    await act(async () => {
-      await Promise.resolve();
-      await Promise.resolve();
-    });
-    expect(getCurrentUser).not.toHaveBeenCalled();
+    await waitFor(() => expect(getCurrentUser).toHaveBeenCalledOnce());
     expect(connectSocket).not.toHaveBeenCalled();
 
     rerender(
@@ -300,6 +294,43 @@ describe('desktop current-user bootstrap', () => {
     expect(sockets[0].connect).not.toHaveBeenCalled();
   });
 
+  it('does not activate a socket when the overlapping bootstrap resolves into true demo mode', async () => {
+    getCurrentUser.mockResolvedValue(user);
+    state.scope = activeScope;
+
+    const Harness = ({ isDemoModeLoading }: { isDemoModeLoading: boolean }) => {
+      const bootstrap = useCurrentUserBootstrap({ isDemoMode: true });
+      const disableReasons = {
+        demoModeLoading: isDemoModeLoading,
+        demoMode: true,
+        currentUserLoading: bootstrap.currentUserLoading,
+        currentUserAbsent: bootstrap.currentUserAbsent,
+      };
+      return (
+        <SocketProvider disabled={Object.values(disableReasons).some(Boolean)} disableReasons={disableReasons}>
+          <div>demo</div>
+        </SocketProvider>
+      );
+    };
+
+    const { rerender } = render(<Harness isDemoModeLoading />);
+    await waitFor(() => expect(getCurrentUser).toHaveBeenCalledOnce());
+    rerender(<Harness isDemoModeLoading={false} />);
+    await act(async () => { await Promise.resolve(); });
+
+    expect(connectSocket).not.toHaveBeenCalled();
+  });
+
+  it('leaves login session recovery to LoginPage without issuing a bootstrap validation', async () => {
+    state.pathname = '/login';
+
+    const { result } = renderHook(() => useCurrentUserBootstrap({ isDemoMode: false }));
+
+    await waitFor(() => expect(result.current.isInitialLoading).toBe(false));
+    expect(getCurrentUser).not.toHaveBeenCalled();
+    expect(result.current.currentUserAbsent).toBe(true);
+  });
+
   it('constructs once after activated validation and removes that Manager when revalidation fails', async () => {
     vi.spyOn(console, 'error').mockImplementation(() => undefined);
     getCurrentUser
@@ -310,7 +341,7 @@ describe('desktop current-user bootstrap', () => {
 
     let latestBootstrap: ReturnType<typeof useCurrentUserBootstrap> | undefined;
     const Harness = () => {
-      const bootstrap = useCurrentUserBootstrap({ isDemoMode: false, isDemoModeLoading: false });
+      const bootstrap = useCurrentUserBootstrap({ isDemoMode: false });
       latestBootstrap = bootstrap;
       const disableReasons = {
         demoModeLoading: false,

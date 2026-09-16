@@ -26,7 +26,9 @@ import { addContextTools } from './toolsContext.js';
 import { addAdministrationTools } from './toolsAdministration.js';
 import { addArtifactTools } from './toolsArtifacts.js';
 import { addManagementTools } from './toolsManagement.js';
-import { presentResult } from './presentation.js';
+import { presentResult, type PresentedResult } from './presentation.js';
+import { summarizeGoal, summarizeTask } from './listSummaries.js';
+import { getAgentActivity } from './agentActivity.js';
 
 export const repositorySchema = z.string().regex(/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/).max(255);
 export const idSchema = z.string().min(1).max(255);
@@ -36,6 +38,16 @@ export const mutationShape = { idempotencyKey: z.string().regex(/^[\w.-]{8,128}$
 export const planShape = { repository: repositorySchema, planId: z.uuid() };
 export const goalShape = { repository: repositorySchema, goalId: z.uuid() };
 export const taskShape = { repository: repositorySchema, taskId: idSchema };
+const agentActivitySchema = z.object({
+  repository: repositorySchema,
+  goalId: z.uuid().optional(),
+  taskId: idSchema.optional(),
+  includeReasoningSummaries: z.boolean().default(false).describe('Include Codex app-server reasoning summaries as compact narration. Raw reasoning remains excluded.'),
+  ...pageShape,
+}).strict().refine(
+  args => Number(Boolean(args.goalId)) + Number(Boolean(args.taskId)) === 1,
+  { message: 'Provide exactly one of goalId or taskId.' },
+);
 export type Args = Record<string, any>; // eslint-disable-line @typescript-eslint/no-explicit-any -- Zod validates each concrete tool schema before dispatch
 export interface ToolContext { principal: McpPrincipal; args: Args; operationId?: string }
 export interface McpTool {
@@ -46,6 +58,19 @@ export interface McpTool {
 }
 export interface ToolDeps { db: Knex; taskQueue: Queue; redisClient: RedisClientType; runtimeBuildQueue: Queue; policy: McpPolicy; goalServices?: Omit<Parameters<typeof createGoalRoutes>[0], 'db' | 'taskQueue' | 'redisClient'> }
 export const ok = (data: unknown): OperationResult => ({ status: 200, data });
+
+export async function markMergedPullRequests(
+  db: Knex, repository: string, items: Record<string, unknown>[],
+  fields = { number: 'pr_number', state: 'pr_state' },
+): Promise<void> {
+  const numbers = [...new Set(items.map(item => Number(item[fields.number]))
+    .filter(number => Number.isSafeInteger(number) && number > 0))];
+  if (!numbers.length) return;
+  const rows = await db('notification_pull_request_state').where({ repository })
+    .whereIn('pr_number', numbers).whereNotNull('merged_at').select('pr_number');
+  const merged = new Set(rows.map(row => Number(row.pr_number)));
+  for (const item of items) if (merged.has(Number(item[fields.number]))) item[fields.state] = 'merged';
+}
 
 export function createToolCatalog(deps: ToolDeps): McpTool[] {
   const { db, taskQueue, redisClient, policy } = deps;
@@ -95,9 +120,15 @@ export function createToolCatalog(deps: ToolDeps): McpTool[] {
   addContextTools(tools, deps);
   addManagementTools(tools, deps, { todos, notifications, config, runtime });
 
-  tools.push({ name: 'list_goals', description: 'List your goals in a repository, with durable continuation handles.', scope: 'read', readOnly: true, schema: z.object({ repository: repositorySchema, ...pageShape }).strict(), run: async ({ principal, args }) => {
-    const goals = await db('goals').where({ owner_id: principal.user.id, repository: args.repository }).select('goal_id', 'title', 'objective', 'desired_state', 'result_state', 'current_task_id', 'updated_at').orderBy('goal_id').offset(args.offset).limit(args.limit);
-    return ok({ goals, nextOffset: goals.length === args.limit ? args.offset + args.limit : null });
+  tools.push({ name: 'list_goals', description: 'List compact goal summaries, progress, runtime and pull request context in a repository.', scope: 'read', readOnly: true, schema: z.object({ repository: repositorySchema, ...pageShape }).strict(), run: async ({ principal, args }) => {
+    const rows = await db('goals').where({ owner_id: principal.user.id, repository: args.repository })
+      .select('goal_id', 'repository', 'title', 'objective', 'desired_state', 'result_state', 'current_task_id',
+        'agent_alias', 'requested_model', 'effective_model', 'final_pr_number', 'artifact_refs', 'failure_reason',
+        'created_at', 'updated_at', 'started_at', 'completed_at')
+      .orderBy('created_at', 'desc').orderBy('goal_id', 'desc').offset(args.offset).limit(args.limit);
+    const goals = rows.map(row => summarizeGoal(row));
+    await markMergedPullRequests(db, args.repository, goals);
+    return ok({ goals, nextOffset: rows.length === args.limit ? args.offset + args.limit : null });
   } });
   const goalTarget = { table: 'goals', column: 'goal_id', arg: 'goalId', owner: 'owner_id' };
   workflow(tools, { name: 'get_goal', description: 'Read a goal and its current progress.', scope: 'read', readOnly: true, schema: z.object(goalShape).strict(), target: goalTarget }, goals.get, args => ({ params: { goalId: args.goalId } }));
@@ -109,14 +140,46 @@ export function createToolCatalog(deps: ToolDeps): McpTool[] {
 
   const taskTarget = { table: 'tasks', column: 'task_id', arg: 'taskId' };
   const taskColumns = ['task_id', 'repository', 'issue_number', 'task_type', 'created_at'];
-  tools.push({ name: 'list_tasks', description: 'List tasks in an authorized repository, excluding other users’ private goal tasks.', scope: 'read', readOnly: true, schema: z.object({ repository: repositorySchema, ...pageShape }).strict(), run: async ({ principal, args }) => {
-    const query = db('tasks').where({ repository: args.repository });
-    query.whereNotIn('task_id', db('goals').select('current_task_id').whereNot('owner_id', principal.user.id).whereNotNull('current_task_id'));
-    query.andWhere(builder => builder.whereNot('task_type', 'goal').orWhereIn('task_id', db('goals').select('current_task_id').where({ owner_id: principal.user.id }))); 
-    const tasks = await query.select(taskColumns).select(db.raw('(SELECT state FROM task_history WHERE task_history.task_id = tasks.task_id ORDER BY history_id DESC LIMIT 1) AS state')).orderBy('task_id').offset(args.offset).limit(args.limit);
-    return ok({ tasks, nextOffset: tasks.length === args.limit ? args.offset + args.limit : null });
+  tools.push({ name: 'list_tasks', description: 'List compact task summaries, execution timing and pull request context, excluding other users’ private goal tasks.', scope: 'read', readOnly: true, schema: z.object({ repository: repositorySchema, ...pageShape }).strict(), run: async ({ principal, args }) => {
+    // Correlated indexed lookups avoid materializing history for unrelated tasks.
+    const latestHistoryId = db('task_history').select('history_id')
+      .where('task_id', db.ref('tasks.task_id')).orderBy('history_id', 'desc').limit(1);
+    const taskStart = db('task_history').min('timestamp')
+      .where('task_id', db.ref('tasks.task_id')).whereIn('state', ['processing', 'claude_execution', 'post_processing']);
+    // Keep PR state and agent/model fields from the same latest relation row.
+    const latestPlanIssueId = db('plan_issues').select('id')
+      .where('task_id', db.ref('tasks.task_id')).orderBy('id', 'desc').limit(1);
+    const query = db('tasks').where({ 'tasks.repository': args.repository });
+    query.whereNotIn('tasks.task_id', db('goals').select('current_task_id').whereNot('owner_id', principal.user.id).whereNotNull('current_task_id'));
+    query.andWhere(builder => builder.whereNot('tasks.task_type', 'goal').orWhereIn('tasks.task_id', db('goals').select('current_task_id').where({ owner_id: principal.user.id })));
+    // Apply visibility and pagination before looking up history or plan relations.
+    const taskPage = query.select(...taskColumns, 'model_name', 'pr_number', 'initial_job_data')
+      .orderBy('tasks.created_at', 'desc').orderBy('tasks.task_id', 'desc').offset(args.offset).limit(args.limit).as('tasks');
+    const rows = await db.from(taskPage)
+      .leftJoin('task_history as latest_history', 'latest_history.history_id', db.raw('(?)', [latestHistoryId]))
+      .leftJoin('plan_issues as task_plan_issue', 'task_plan_issue.id', db.raw('(?)', [latestPlanIssueId]))
+      .select('tasks.*', 'latest_history.state', 'latest_history.timestamp as updated_at', 'latest_history.reason as state_reason',
+        'latest_history.metadata as state_metadata', taskStart.as('started_at'),
+        'task_plan_issue.pr_number as plan_pr_number', 'task_plan_issue.status as plan_issue_status',
+        'task_plan_issue.agent_alias as plan_agent_alias', 'task_plan_issue.model_name as plan_model_name')
+      .orderBy('tasks.created_at', 'desc').orderBy('tasks.task_id', 'desc');
+    const tasks = rows.map(row => summarizeTask(row));
+    await markMergedPullRequests(db, args.repository, tasks);
+    return ok({ tasks, nextOffset: rows.length === args.limit ? args.offset + args.limit : null });
   } });
   tools.push({ name: 'get_task', description: 'Read a task’s persisted state.', scope: 'read', readOnly: true, schema: z.object(taskShape).strict(), target: taskTarget, run: async ({ args }) => ok({ ...await db('tasks').where({ task_id: args.taskId }).first(taskColumns), latestEvent: await db('task_history').where({ task_id: args.taskId }).orderBy('history_id', 'desc').first('state', 'reason', 'timestamp') }) });
+  tools.push({
+    name: 'get_agent_activity',
+    description: 'Read recent compact agent narration for exactly one goal or task, newest first. Opt in to Codex app-server summaries with includeReasoningSummaries; raw reasoning and tool logs are always excluded. Use offset for older entries.',
+    scope: 'read',
+    readOnly: true,
+    schema: agentActivitySchema,
+    run: async ({ principal, args }) => ok(await getAgentActivity(
+      { db, redisClient },
+      args as z.infer<typeof agentActivitySchema>,
+      principal.user.id,
+    )),
+  });
   tools.push({ name: 'get_task_events', description: 'Read bounded task history; use offset for continuation.', scope: 'read', readOnly: true, schema: z.object({ ...taskShape, ...pageShape }).strict(), target: taskTarget, run: async ({ args }) => {
     const events = await db('task_history').where({ task_id: args.taskId }).orderBy('history_id').offset(args.offset).limit(args.limit);
     return ok({ events, nextOffset: events.length === args.limit ? args.offset + args.limit : null });
@@ -252,7 +315,7 @@ async function authorizeTarget(tool: McpTool, args: Args, principal: McpPrincipa
   }
 }
 
-export async function executeTool(tool: McpTool, raw: unknown, principal: McpPrincipal, deps: ToolDeps): Promise<Record<string, unknown>> {
+export async function executeTool(tool: McpTool, raw: unknown, principal: McpPrincipal, deps: ToolDeps): Promise<PresentedResult> {
   const args = tool.schema.parse(raw) as Args;
   deps.policy.requireScope(principal, tool.scope);
   if (tool.permission) deps.policy.requirePermission(principal, tool.permission);

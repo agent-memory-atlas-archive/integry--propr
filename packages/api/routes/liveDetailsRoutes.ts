@@ -16,8 +16,9 @@ import {
 import { parseAntigravityOutputToConversationResult, parseVibeOutputToConversationResult } from './liveDetailsOutputParsers.js';
 import { parseOpenCodeOutputToConversationResult } from './liveDetailsOpenCodeParser.js';
 import { parseExecutionDetailsRows, type ExecutionDetailRow } from './liveDetailsExecutionParser.js';
-import { detectStoredOutputFormat, type StoredOutputFormat } from './liveDetailsStoredOutputFormat.js';
+import { detectStoredOutputFormat, hasCodexAppServerNotification, type StoredOutputFormat } from './liveDetailsStoredOutputFormat.js';
 import { parseRedisOutput } from '../services/redisOutputParser.js';
+import { parseAgentStreamOutput, type AgentStreamParseOptions } from '../services/agentStreamProjection.js';
 import { parseConversationFile } from '../services/conversationParser.js';
 import { withStableLiveEventIds, type LiveEventSource } from '../services/liveEventIds.js';
 
@@ -269,11 +270,11 @@ async function loadStoredExecutionOutput(redisClient: RedisClientType, sessionId
   const output = await fs.readFile(outputPath, 'utf8');
   return parseStoredOutputContent(output);
 }
-async function parseActiveExecutionOutput(redisClient: RedisClientType, db: Knex, taskId: string): Promise<(ConversationResult & { nativeGoal?: ReturnType<typeof parseRedisOutput>['nativeGoal'] }) | null> {
+async function parseActiveExecutionOutput(redisClient: RedisClientType, db: Knex, taskId: string, options: AgentStreamParseOptions = {}): Promise<(ConversationResult & { nativeGoal?: ReturnType<typeof parseRedisOutput>['nativeGoal'] }) | null> {
   const output = await redisClient.get(`agent:output:${taskId}`);
   if (!output?.trim()) return null;
   const executionStartTimestamp = await findExecutionStartTimestamp(redisClient, db, taskId);
-  const redisParsed = parseRedisOutput(output.split('\n').filter(line => line.trim()), { executionStartTimestamp });
+  const redisParsed = parseAgentStreamOutput(output, { ...options, executionStartTimestamp });
   if (redisParsed.events.length > 0 || redisParsed.todos.length > 0 || redisParsed.currentTask || redisParsed.tokenUsage) {
     return {
       events: withStableLiveEventIds({
@@ -290,7 +291,7 @@ async function parseActiveExecutionOutput(redisClient: RedisClientType, db: Knex
     };
   }
   const parsedOutput = parseStoredOutputContent(output);
-  const result = parsedOutput.parsed ?? parsedOutput.rawFallback;
+  const result = projectStoredOutputResult(parsedOutput);
   return result
     ? withStableResultEventIds(taskId, 'redis', executionStartTimestamp ?? taskId, result)
     : null;
@@ -301,9 +302,9 @@ export async function projectTaskLiveDetails(
   redisClient: RedisClientType,
   db: Knex,
   taskId: string,
-  sessionId?: string | null,
+  { sessionId, ...options }: AgentStreamParseOptions & { sessionId?: string | null } = {},
 ): Promise<(ConversationResult & { nativeGoal?: ReturnType<typeof parseRedisOutput>['nativeGoal'] }) | null> {
-  const active = await parseActiveExecutionOutput(redisClient, db, taskId);
+  const active = await parseActiveExecutionOutput(redisClient, db, taskId, options);
   if (active) return active;
   try {
     const details = sessionId ? await parseExecutionDetailsFromDb(db, taskId, sessionId) : null;
@@ -324,7 +325,14 @@ async function parsePersistedGoalOutput(db: Knex, taskId: string): Promise<Conve
   });
   if (records.length === 0) return null;
   const stored = parseStoredOutputContent(records.join('\n'));
-  return stored.parsed ?? stored.rawFallback;
+  return projectStoredOutputResult(stored);
+}
+function projectStoredOutputResult(stored: ParsedStoredOutput): ConversationResult | null {
+  if (stored.parsed) return stored.parsed;
+  return stored.rawFallback ? {
+    ...stored.rawFallback,
+    events: stored.rawFallback.events.map(event => ({ ...event, rawFallback: true })),
+  } : null;
 }
 export function parseStoredOutputContent(output: string): ParsedStoredOutput {
   if (!output.trim()) return { parsed: null, rawFallback: null, format: 'unknown' };
@@ -353,23 +361,6 @@ function parseStoredOutputWithFormat(output: string, format: StoredOutputFormat,
   }
   const parsed = parseStoredOutputForFormat(output, format);
   return { parsed: isConversationResultEmpty(parsed) ? null : parsed, rawFallback, format };
-}
-function hasCodexAppServerNotification(output: string): boolean {
-  return output.split('\n').some(line => {
-    try {
-      const method = (JSON.parse(line) as { method?: unknown }).method;
-      return typeof method === 'string' && [
-        'error',
-        'warning',
-        'item/',
-        'model/',
-        'thread/',
-        'turn/',
-      ].some(prefix => method === prefix || method.startsWith(prefix));
-    } catch {
-      return false;
-    }
-  });
 }
 function parseStoredOutputForFormat(output: string, format: StoredOutputFormat): ConversationResult | null {
   if (format === 'claude') return parseClaudeOutputToConversationResult(output);

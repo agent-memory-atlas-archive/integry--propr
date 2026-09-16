@@ -7,6 +7,8 @@ import { OAuthClientMetadataSchema, type OAuthClientInformationFull } from '@mod
 import type { OAuthRegisteredClientsStore } from '@modelcontextprotocol/sdk/server/auth/clients.js';
 import { McpStore } from './store.js';
 
+const PUBLIC_GRANT_TYPES = ['authorization_code', 'refresh_token'];
+
 function publicAddress(address: string): boolean {
   // Reject special-use ranges and IPv6 transition/mapped forms. DNS is pinned
   // to the validated address for the HTTPS connection, preventing rebinding.
@@ -67,12 +69,26 @@ export function validatePublicClient(client: OAuthClientInformationFull): OAuthC
   return { ...client, client_secret: undefined, grant_types: ['authorization_code', 'refresh_token'], response_types: ['code'] };
 }
 
+function selectGrantTypes(advertised: unknown): string[] | undefined {
+  if (advertised === undefined) return undefined;
+  if (!Array.isArray(advertised) || !advertised.length || advertised.length > 32
+    || advertised.some(grant => typeof grant !== 'string' || !grant || /\s/.test(grant))) {
+    throw new InvalidClientMetadataError('Malformed client grant capabilities');
+  }
+  const selected = PUBLIC_GRANT_TYPES.filter(grant => advertised.includes(grant));
+  if (!selected.includes('authorization_code')) {
+    throw new InvalidClientMetadataError('Client does not support authorization-code grants');
+  }
+  return selected;
+}
+
 export function parseClientMetadataDocument(document: Record<string, unknown>, id: string): OAuthClientInformationFull {
   if (document.client_id !== id) throw new InvalidClientMetadataError('Client metadata ID mismatch');
-  // SEP-3149 clients advertise supported methods separately from the legacy
-  // preference. Intersect with this server's public-client-only policy.
+  // CIMD fields advertise the client's capabilities, which can be broader than
+  // this authorization server. Intersect them with the flows we actually use.
   const supported = document.token_endpoint_auth_methods_supported;
   const preference = document.token_endpoint_auth_method;
+  const advertisedGrants = document.grant_types;
   if (supported !== undefined && (!Array.isArray(supported) || !supported.length || supported.length > 32
     || supported.some(method => typeof method !== 'string' || !method || /\s/.test(method)) || !supported.includes('none'))) {
     throw new InvalidClientMetadataError('Client does not support public PKCE authentication or has malformed capabilities');
@@ -80,8 +96,10 @@ export function parseClientMetadataDocument(document: Record<string, unknown>, i
   if (preference !== undefined && (typeof preference !== 'string' || !preference || /\s/.test(preference))) {
     throw new InvalidClientMetadataError('Invalid legacy authentication method preference');
   }
+  const grantTypes = selectGrantTypes(advertisedGrants);
   const parsed = OAuthClientMetadataSchema.parse({ ...document,
     ...(Array.isArray(supported) || preference === undefined ? { token_endpoint_auth_method: 'none' } : {}),
+    ...(grantTypes ? { grant_types: grantTypes } : {}),
   });
   return validatePublicClient({ ...parsed, client_id: id });
 }

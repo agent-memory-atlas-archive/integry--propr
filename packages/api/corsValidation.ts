@@ -17,11 +17,27 @@ import {
 export type CorsOriginCallback = (err: Error | null, allow?: boolean) => void;
 export type CorsOriginValidator = (origin: string | undefined, callback: CorsOriginCallback) => void;
 
+// Desktop REST requests carry a scoped authentication marker, so browsers
+// preflight them. Cache successful policy checks briefly to avoid repeating an
+// OPTIONS request for every read while still revalidating policy changes within
+// a bounded interval.
+export const CORS_PREFLIGHT_MAX_AGE_SECONDS = 10 * 60;
+
 export class CorsOriginError extends Error {
   constructor() {
     super('CORS origin rejected');
     this.name = 'CorsOriginError';
   }
+}
+
+// Remote MCP clients can execute requests from a browser-originated fetch even
+// though their OAuth exchange runs in the provider's cloud. Keep this exception
+// to the exact MCP endpoint and known product origin; it must never widen the
+// cookie-authenticated REST or Socket.IO boundaries.
+const MCP_WEB_CLIENT_ORIGINS = new Set(['https://claude.ai']);
+
+export function isTrustedMcpWebOrigin(path: string, origin: string | undefined): origin is string {
+  return path === '/api/mcp' && origin !== undefined && MCP_WEB_CLIENT_ORIGINS.has(origin);
 }
 
 /**

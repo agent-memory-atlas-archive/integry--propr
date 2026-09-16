@@ -22,6 +22,7 @@ import type { Agent, AgentConfig, AgentRegistryOperationalStatus } from '@propr/
 import type { SyntheticAgentConfig } from '@propr/shared';
 import { applyRoutingStatus, parseConnectAccountStatus, type RoutingState } from './connectAccountStatus.js';
 import { getOrCreatePublicInstanceIdentity } from '../publicInstanceIdentity.js';
+import { timeApiStage } from '../apiPerformanceTiming.js';
 
 interface StatusRoutesDeps {
   redisClient: RedisClientType;
@@ -30,7 +31,9 @@ interface StatusRoutesDeps {
   loadSyntheticAgents?: () => Promise<SyntheticAgentConfig[]>;
   getIndexingQueue?: () => Promise<IndexingStatusQueue>;
   agentStatusCacheTtlMs?: number;
+  agentStatusCacheMaxAgeMs?: number;
   agentHealthTimeoutMs?: number;
+  statusDependencyTimeoutMs?: number;
   now?: () => number;
   loadSummarizationRuntimeState?: typeof loadSummarizationRuntimeState;
   projectSystemSnapshot?: (
@@ -64,6 +67,96 @@ interface AgentStatusSnapshot {
   claudeAuth: Extract<ServiceStatus, 'connected' | 'disconnected' | 'unknown' | 'not_applicable'>;
 }
 
+interface AgentStatusSnapshotDeps {
+  loadAgents: () => Promise<AgentConfig[]>;
+  loadSyntheticAgents: () => Promise<SyntheticAgentConfig[]>;
+  registry: StatusAgentRegistry;
+  healthTimeoutMs: number;
+  dependencyTimeoutMs: number;
+}
+
+interface RuntimeStatusSnapshot {
+  redis: 'connected' | 'disconnected';
+  daemon: 'running' | 'stopped' | 'unknown';
+  worker: 'running' | 'stopped' | 'unknown';
+  workerCount?: number;
+  routing?: RoutingState;
+}
+
+interface BoundedFreshValue<T> {
+  value: T;
+  freshUntil: number;
+  expiresAt: number;
+}
+
+/**
+ * Serve a recently measured value while one caller refreshes it in the
+ * background. The hard expiry prevents a failing or stuck dependency from
+ * making the status response indefinitely stale, while the generation keeps a
+ * pre-invalidation refresh from repopulating the cache with the old identity.
+ */
+function createBoundedFreshCache<T>({
+  load,
+  now,
+  freshForMs,
+  maxAgeMs,
+}: {
+  load: () => Promise<T>;
+  now: () => number;
+  freshForMs: number;
+  maxAgeMs: number;
+}) {
+  let cached: BoundedFreshValue<T> | undefined;
+  let generation = 0;
+  let pending: { generation: number; promise: Promise<T> } | undefined;
+
+  function refresh(): Promise<T> {
+    const refreshGeneration = generation;
+    if (pending?.generation === refreshGeneration) return pending.promise;
+
+    const refreshState = {
+      generation: refreshGeneration,
+      promise: Promise.resolve().then(load).then(value => {
+        if (generation === refreshGeneration) {
+          const completedAt = now();
+          cached = {
+            value,
+            freshUntil: completedAt + freshForMs,
+            expiresAt: completedAt + Math.max(freshForMs, maxAgeMs),
+          };
+        }
+        return value;
+      }),
+    };
+    pending = refreshState;
+    void refreshState.promise.finally(() => {
+      if (pending === refreshState) pending = undefined;
+    }).catch(() => undefined);
+    return refreshState.promise;
+  }
+
+  return {
+    read(): Promise<T> {
+      const currentTime = now();
+      const cachedAtRead = cached;
+      if (cachedAtRead && cachedAtRead.freshUntil > currentTime) {
+        return Promise.resolve(cachedAtRead.value);
+      }
+      const refreshPromise = refresh();
+      if (cachedAtRead && cachedAtRead.expiresAt > currentTime) {
+        // The refresh is intentionally detached for stale-while-refresh reads.
+        // Its rejection is observed above; a hard-expired reader will retry.
+        return Promise.resolve(cachedAtRead.value);
+      }
+      return refreshPromise;
+    },
+    invalidate(): void {
+      generation += 1;
+      cached = undefined;
+    },
+  };
+}
+
 export function createStatusRoutes(deps: StatusRoutesDeps) {
   const {
     redisClient,
@@ -72,7 +165,9 @@ export function createStatusRoutes(deps: StatusRoutesDeps) {
     loadSyntheticAgents: configuredSyntheticLoader,
     getIndexingQueue = loadIndexingQueue,
     agentStatusCacheTtlMs = 5000,
+    agentStatusCacheMaxAgeMs = 30_000,
     agentHealthTimeoutMs = 1500,
+    statusDependencyTimeoutMs = 250,
     now = Date.now,
     loadSummarizationRuntimeState: loadSummarizationRuntimeStateDep = loadSummarizationRuntimeState,
     projectSystemSnapshot,
@@ -83,7 +178,34 @@ export function createStatusRoutes(deps: StatusRoutesDeps) {
   // it explicitly supplies one; production still uses persisted configuration.
   const loadSyntheticAgents = configuredSyntheticLoader
     ?? (deps.loadAgents ? async () => [] : loadSyntheticAgentConfigs);
-  let agentStatusCache: { expiresAt: number; snapshot: AgentStatusSnapshot } | undefined;
+  const agentStatusCache = createBoundedFreshCache({
+    load: () => getAgentStatusSnapshot({
+      loadAgents,
+      loadSyntheticAgents,
+      registry: agentRegistry,
+      healthTimeoutMs: agentHealthTimeoutMs,
+      dependencyTimeoutMs: statusDependencyTimeoutMs,
+    }),
+    now,
+    freshForMs: agentStatusCacheTtlMs,
+    maxAgeMs: agentStatusCacheMaxAgeMs,
+  });
+  const indexingStatusCache = createBoundedFreshCache({
+    load: () => timeApiStage('status.indexing', () => withTimeout(
+      getIndexingStatus(getIndexingQueue), statusDependencyTimeoutMs, 'disconnected',
+    )),
+    now,
+    freshForMs: agentStatusCacheTtlMs,
+    maxAgeMs: agentStatusCacheMaxAgeMs,
+  });
+  const systemWarningsCache = createBoundedFreshCache({
+    load: () => timeApiStage('status.system-warnings', () => withTimeout(
+      getSystemWarnings(loadSummarizationRuntimeStateDep), statusDependencyTimeoutMs, [],
+    )),
+    now,
+    freshForMs: agentStatusCacheTtlMs,
+    maxAgeMs: agentStatusCacheMaxAgeMs,
+  });
 
   function getCompatibility(_req: Request, res: Response): void {
     res.json(getProprCompatibilityMetadata(!isDemoMode()));
@@ -158,19 +280,8 @@ export function createStatusRoutes(deps: StatusRoutesDeps) {
         timestamp: new Date().toISOString()
       };
 
-      try {
-        await redisClient.ping();
-        status.redis = 'connected';
-
-        const daemonHeartbeat = await redisClient.get('system:status:daemon');
-        status.daemon = (daemonHeartbeat && Date.now() - parseInt(daemonHeartbeat) < 120000) ? 'running' : 'stopped';
-
-        const activeWorkers = await redisClient.sCard('system:status:workers');
-        status.worker = activeWorkers > 0 ? 'running' : 'stopped';
-        status.workerCount = activeWorkers;
-      } catch {
-        status.redis = 'disconnected';
-      }
+      const runtimeStatus = await getRuntimeStatusSnapshot(redisClient);
+      Object.assign(status, runtimeStatus);
 
       // Auth mode (how ProPR authenticates to GitHub) and event intake mode (how
       // GitHub events arrive) are independent — surface both so operators can tell
@@ -190,7 +301,9 @@ export function createStatusRoutes(deps: StatusRoutesDeps) {
       // Routing WebSocket runtime state, published to Redis by the daemon when the
       // default routing_websocket intake path is active. Included only when present
       // so non-routing deployments don't carry an empty field.
-      const routing = await getRoutingState(redisClient);
+      // Routing remains independently observable when another Redis operation
+      // fails, matching the previous partial-failure behavior.
+      const routing = runtimeStatus.routing;
       applyRoutingStatus(status, intakeMode, routing);
 
       // The intake status is a stable, mode-aware health signal for the active
@@ -198,11 +311,17 @@ export function createStatusRoutes(deps: StatusRoutesDeps) {
       // stalled one independent of the intake method name.
       status.githubEventIntakeStatus = resolveIntakeStatus(intakeMode, routing, status.daemon);
 
-      const agentSnapshot = await getCachedAgentStatusSnapshot();
+      const [agentSnapshot, indexing, cachedWarnings] = await Promise.all([
+        timeApiStage('status.agent-health', agentStatusCache.read),
+        indexingStatusCache.read(),
+        systemWarningsCache.read(),
+      ]);
       status.agents = agentSnapshot.agents;
       status.claudeAuth = agentSnapshot.claudeAuth;
-      status.indexing = await getIndexingStatus(getIndexingQueue);
-      const warnings = await getSystemWarnings(loadSummarizationRuntimeStateDep);
+      status.indexing = indexing;
+      // The operational warning below is request-local; never mutate the cached
+      // summarization warning array.
+      const warnings = [...cachedWarnings];
       const agentRuntime = agentRegistry.getOperationalStatus?.();
       if (agentRuntime) {
         status.agentRuntime = agentRuntime;
@@ -235,23 +354,12 @@ export function createStatusRoutes(deps: StatusRoutesDeps) {
     }
   }
 
-  return { getCompatibility, getDesktopDiscovery, getStatus };
-
-  async function getCachedAgentStatusSnapshot(): Promise<AgentStatusSnapshot> {
-    const currentTime = now();
-    if (agentStatusCache && agentStatusCache.expiresAt > currentTime) {
-      return agentStatusCache.snapshot;
-    }
-
-    const snapshot = await getAgentStatusSnapshot(
-      loadAgents, loadSyntheticAgents, agentRegistry, agentHealthTimeoutMs,
-    );
-    agentStatusCache = {
-      snapshot,
-      expiresAt: currentTime + agentStatusCacheTtlMs
-    };
-    return snapshot;
-  }
+  return {
+    getCompatibility,
+    getDesktopDiscovery,
+    getStatus,
+    invalidateAgentStatusCache: agentStatusCache.invalidate,
+  };
 }
 
 function resolveAuthMode(): string {
@@ -322,6 +430,31 @@ async function getRoutingState(redisClient: RedisClientType): Promise<RoutingSta
   } catch {
     return undefined;
   }
+}
+
+async function getRuntimeStatusSnapshot(redisClient: RedisClientType): Promise<RuntimeStatusSnapshot> {
+  const [pingResult, daemonResult, workerResult, routingResult] = await Promise.allSettled([
+    redisClient.ping(),
+    redisClient.get('system:status:daemon'),
+    redisClient.sCard('system:status:workers'),
+    getRoutingState(redisClient),
+  ]);
+  const routing = routingResult.status === 'fulfilled' ? routingResult.value : undefined;
+  const routingField = routing ? { routing } : {};
+  if (pingResult.status === 'rejected'
+    || daemonResult.status === 'rejected'
+    || workerResult.status === 'rejected') {
+    return { redis: 'disconnected', daemon: 'unknown', worker: 'unknown', ...routingField };
+  }
+  const daemonHeartbeat = daemonResult.value;
+  const activeWorkers = workerResult.value;
+  return {
+    redis: 'connected',
+    daemon: daemonHeartbeat && Date.now() - parseInt(daemonHeartbeat) < 120000 ? 'running' : 'stopped',
+    worker: activeWorkers > 0 ? 'running' : 'stopped',
+    workerCount: activeWorkers,
+    ...routingField,
+  };
 }
 
 function parseRoutingState(value: unknown): RoutingState | undefined {
@@ -403,39 +536,55 @@ function formatCooldownUntil(until: string): string {
   });
 }
 
-async function getAgentStatusSnapshot(
-  loadAgents: () => Promise<AgentConfig[]>,
-  loadSyntheticAgents: () => Promise<SyntheticAgentConfig[]>,
-  registry: StatusAgentRegistry,
-  healthTimeoutMs: number
-): Promise<AgentStatusSnapshot> {
-  let configuredAgents: AgentConfig[];
-  let syntheticAgents: SyntheticAgentConfig[] = [];
-  try {
-    configuredAgents = await loadAgents();
-  } catch (error) {
+async function getAgentStatusSnapshot({
+  loadAgents,
+  loadSyntheticAgents,
+  registry,
+  healthTimeoutMs,
+  dependencyTimeoutMs,
+}: AgentStatusSnapshotDeps): Promise<AgentStatusSnapshot> {
+  // These are independent persisted documents. Loading them together avoids
+  // adding two database/contention waits to the critical path.
+  const [configuredResult, syntheticResult] = await Promise.allSettled([
+    timeApiStage('status.config', () => withTimeout(
+      loadAgents(), dependencyTimeoutMs, undefined,
+    )),
+    timeApiStage('status.config', () => withTimeout(
+      loadSyntheticAgents(), dependencyTimeoutMs, undefined,
+    )),
+  ]);
+  if (configuredResult.status === 'rejected') {
+    const error = configuredResult.reason;
     console.error('Error loading agent status configuration:', error);
     // Configuration availability is part of applicability. Do not mistake a
     // read failure for a known Codex-only instance and hide a possible Claude
     // auth problem.
     return { agents: [], claudeAuth: 'unknown' };
   }
-  try {
-    syntheticAgents = await loadSyntheticAgents();
-  } catch (error) {
+  if (configuredResult.value === undefined) {
+    console.error('Timed out loading agent status configuration');
+    return { agents: [], claudeAuth: 'unknown' };
+  }
+  const configuredAgents = configuredResult.value;
+  let syntheticAgents: SyntheticAgentConfig[] = [];
+  if (syntheticResult.status === 'fulfilled' && syntheticResult.value !== undefined) {
+    syntheticAgents = syntheticResult.value;
+  } else if (syntheticResult.status === 'fulfilled') {
+    console.error('Timed out loading synthetic agent status configuration');
+  } else {
     // Synthetic configuration availability must not suppress or downgrade
     // unrelated direct-agent health.
-    console.error('Error loading synthetic agent status configuration:', error);
+    console.error('Error loading synthetic agent status configuration:', syntheticResult.reason);
   }
 
-  try {
-    await registry.ensureInitialized();
-  } catch (error) {
-    console.error('Error initializing agent registry for status:', error);
-  }
-
-  const registeredById = new Map(registry.getAllAgents().map(agent => [agent.config.id, agent]));
-  const registeredByAlias = new Map(registry.getAllAgents().map(agent => [agent.config.alias, agent]));
+  // Status is diagnostic and must not initialize or repair the execution
+  // runtime. AgentRegistry.ensureInitialized() performs Docker image inspection
+  // (and can prepare images on first use), which made a read-only status request
+  // contend with real work. Probe the already-live registry when available and
+  // use the persisted configuration fallback otherwise.
+  const registeredAgents = registry.getAllAgents();
+  const registeredById = new Map(registeredAgents.map(agent => [agent.config.id, agent]));
+  const registeredByAlias = new Map(registeredAgents.map(agent => [agent.config.alias, agent]));
 
   // With no persisted configs the registry still supports the legacy,
   // environment-configured Claude runtime. Only surface the concrete enabled
@@ -449,17 +598,23 @@ async function getAgentStatusSnapshot(
     ? legacyClaudeAgent
     : undefined;
 
-  const directStatuses = await Promise.all(configuredAgents
+  const directStatusesPromise = Promise.all(configuredAgents
     .filter(agent => agent.enabled)
     .map(async (config) => {
       const registeredAgent = registeredById.get(config.id) ?? registeredByAlias.get(config.alias);
       if (!registeredAgent) {
         return buildConfiguredAgentStatus(config, registry, healthTimeoutMs);
       }
-      return buildRegisteredAgentStatus(registeredAgent, healthTimeoutMs);
+      if (!registeredAgentMatchesConfig(registeredAgent, config)) {
+        // The persisted change reached this process before its live registry
+        // refresh. Report the new identity conservatively instead of probing an
+        // old credential path/runtime and presenting that result as the new one.
+        return buildDisconnectedAgentStatus(config);
+      }
+      return buildRegisteredAgentStatus(registeredAgent, healthTimeoutMs, config);
     }));
 
-  const syntheticStatuses = await Promise.all(syntheticAgents
+  const syntheticStatusesPromise = Promise.all(syntheticAgents
     .filter(pool => pool.enabled)
     .map(async pool => {
       const registered = registeredById.get(pool.id) ?? registeredByAlias.get(pool.alias);
@@ -478,9 +633,20 @@ async function getAgentStatusSnapshot(
       };
     }));
 
-  const legacyClaudeStatuses = enabledLegacyClaudeAgent
-    ? [await buildRegisteredAgentStatus(enabledLegacyClaudeAgent, healthTimeoutMs)]
-    : [];
+  const legacyClaudeStatusesPromise = enabledLegacyClaudeAgent
+    ? buildRegisteredAgentStatus(enabledLegacyClaudeAgent, healthTimeoutMs).then(status => [status])
+    : Promise.resolve([] as AgentStatus[]);
+  // Direct, legacy, and synthetic checks do not depend on each other. Keeping
+  // them in one stage makes the route latency the slowest bounded probe rather
+  // than the sum of up to three probe groups.
+  const [directStatuses, legacyClaudeStatuses, syntheticStatuses] = await timeApiStage(
+    'status.health-probes',
+    () => Promise.all([
+      directStatusesPromise,
+      legacyClaudeStatusesPromise,
+      syntheticStatusesPromise,
+    ]),
+  );
   const agents = [...directStatuses, ...legacyClaudeStatuses, ...syntheticStatuses];
   const claudeApplicable = configuredAgents.some(agent => agent.enabled && agent.type === 'claude')
     || enabledLegacyClaudeAgent !== undefined;
@@ -498,6 +664,28 @@ function hasExplicitLegacyClaudeConfiguration(): boolean {
   return Boolean(process.env.AGENT_DOCKER_IMAGE?.trim() || process.env.CLAUDE_CONFIG_PATH?.trim());
 }
 
+function registeredAgentMatchesConfig(agent: Agent, config: AgentConfig): boolean {
+  // The registry deliberately rewrites dockerImage to the effective unified
+  // bundle tag, so it is excluded. Every other persisted field identifies the
+  // logical runtime whose health is being attributed.
+  const fingerprint = (value: AgentConfig): string => JSON.stringify([
+    value.id,
+    value.type,
+    value.alias,
+    value.enabled,
+    value.configPath,
+    value.supportedModels,
+    value.defaultModel,
+    value.envVars,
+    value.modelCustomLabels,
+    value.modelReasoningLevels,
+    value.cliVersionType,
+    value.cliVersion,
+    value.cliVersionResolved,
+  ]);
+  return fingerprint(agent.config) === fingerprint(config);
+}
+
 async function buildConfiguredAgentStatus(
   config: AgentConfig,
   registry: StatusAgentRegistry,
@@ -511,7 +699,11 @@ async function buildConfiguredAgentStatus(
   }
 }
 
-async function buildRegisteredAgentStatus(agent: Agent, healthTimeoutMs: number): Promise<AgentStatus> {
+async function buildRegisteredAgentStatus(
+  agent: Agent,
+  healthTimeoutMs: number,
+  identity: AgentConfig = agent.config,
+): Promise<AgentStatus> {
   let healthy = false;
   try {
     healthy = await withTimeout(agent.healthCheck(), healthTimeoutMs, false);
@@ -519,9 +711,12 @@ async function buildRegisteredAgentStatus(agent: Agent, healthTimeoutMs: number)
     healthy = false;
   }
   return {
-    id: agent.config.id,
-    type: agent.config.type,
-    alias: agent.config.alias,
+    // Persisted configuration owns the public identity. A registry refresh and
+    // a status refresh can overlap, but an old runtime must never leak its old
+    // alias/type into a snapshot for the new configuration.
+    id: identity.id,
+    type: identity.type,
+    alias: identity.alias,
     status: healthy ? 'connected' : 'disconnected'
   };
 }

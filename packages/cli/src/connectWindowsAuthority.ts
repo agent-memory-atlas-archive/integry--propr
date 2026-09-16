@@ -82,7 +82,7 @@ function Read-ProprUInt32([IntPtr]$pointer,[int]$offset){
 export const WINDOWS_UINT64_COMPOSER_SOURCE = String.raw`
 function Join-ProprUInt64([uint32]$low,[uint32]$high){
   if(-not [BitConverter]::IsLittleEndian){exit $stage}
-  $bytes=New-Object byte[] 8
+  $bytes=[byte[]]::new(8)
   [Array]::Copy([BitConverter]::GetBytes([uint32]$low),0,$bytes,0,4)
   [Array]::Copy([BitConverter]::GetBytes([uint32]$high),0,$bytes,4,4)
   [BitConverter]::ToUInt64($bytes,0)
@@ -90,9 +90,12 @@ function Join-ProprUInt64([uint32]$low,[uint32]$high){
 
 // Reflection.Emit keeps the fixed P/Invoke surface in memory. Add-Type and its
 // writable compiler workspace are deliberately absent.
+// Use direct constructors: New-Object triggers Utility module discovery in a
+// fresh ordinary-user process, before the native probe can reach Reflection.Emit.
 export const WINDOWS_INSPECTION_SOURCE = String.raw`
 $ErrorActionPreference='Stop'
 $ProgressPreference='SilentlyContinue'
+$PSModuleAutoLoadingPreference='None'
 Set-StrictMode -Version 2
 ${WINDOWS_UNSIGNED_FIELD_DECODER_SOURCE}
 ${WINDOWS_UINT64_COMPOSER_SOURCE}
@@ -103,7 +106,7 @@ try {
   if($PSVersionTable.PSVersion.Major-ne 5-or $PSVersionTable.PSVersion.Minor-ne 1-or
      $PSVersionTable.PSEdition-ne 'Desktop'-or -not [Environment]::Is64BitProcess){exit $stage}
   $assembly=[AppDomain]::CurrentDomain.DefineDynamicAssembly(
-    (New-Object Reflection.AssemblyName('ProprReadOnlyAuthorityAssembly')),
+    [Reflection.AssemblyName]::new('ProprReadOnlyAuthorityAssembly'),
     [Reflection.Emit.AssemblyBuilderAccess]::Run)
   $module=$assembly.DefineDynamicModule('ProprReadOnlyAuthorityModule')
   $builder=$module.DefineType('ProprReadOnlyAuthority',[Reflection.TypeAttributes]'Public,Abstract,Sealed')
@@ -151,7 +154,7 @@ try {
   try {
     if([ProprReadOnlyAuthority]::GetSecurityInfo($privateHandle,1,5,[ref]$owner,[ref]$group,[ref]$dacl,[ref]$sacl,[ref]$descriptor)-ne 0){exit $stage}
     if($owner-eq [IntPtr]::Zero-or $dacl-eq [IntPtr]::Zero-or $descriptor-eq [IntPtr]::Zero){exit $stage}
-    $ownerSid=(New-Object Security.Principal.SecurityIdentifier($owner)).Value
+    $ownerSid=[Security.Principal.SecurityIdentifier]::new($owner).Value
     $control=[uint16]0;$revision=[uint32]0
     if(-not [ProprReadOnlyAuthority]::GetSecurityDescriptorControl($descriptor,[ref]$control,[ref]$revision)){exit $stage}
     $stage=76
@@ -162,7 +165,7 @@ try {
     if($aceCount-gt 128-or $aclBytes-lt 8-or $aclBytes-gt 65535){exit $stage}
     $aclRevision=[Runtime.InteropServices.Marshal]::ReadByte($dacl,0)
     if(($aclRevision-ne 2-and $aclRevision-ne 4)-or [Runtime.InteropServices.Marshal]::ReadByte($dacl,1)-ne 0){exit $stage}
-    $rules=New-Object Collections.Generic.List[object]
+    $rules=[Collections.Generic.List[object]]::new()
     for($aceIndex=0;$aceIndex-lt $aceCount;$aceIndex++){
       $ace=[IntPtr]::Zero
       if(-not [ProprReadOnlyAuthority]::GetAce($dacl,$aceIndex,[ref]$ace)-or $ace-eq [IntPtr]::Zero){exit $stage}
@@ -170,7 +173,7 @@ try {
       $aceSize=[uint16][Runtime.InteropServices.Marshal]::ReadInt16($ace,2)
       if(($aceType-ne 0-and $aceType-ne 1)-or ($flags-band 0xE0)-ne 0-or $aceSize-lt 16-or $aceSize-gt 4096){exit $stage}
       $mask=Read-ProprUInt32 $ace 4
-      $sidPointer=[IntPtr]::Add($ace,8);$sid=New-Object Security.Principal.SecurityIdentifier($sidPointer)
+      $sidPointer=[IntPtr]::Add($ace,8);$sid=[Security.Principal.SecurityIdentifier]::new($sidPointer)
       if($sid.BinaryLength-gt ($aceSize-8)){exit $stage}
       $rules.Add([pscustomobject][ordered]@{
         identitySid=$sid.Value;inherited=[bool](($flags-band 0x10)-ne 0)
@@ -221,9 +224,10 @@ try {
     verifiedFileId=$afterIdDecimal;rules=$rulesArray
   }
   $stage=77
-  $json=ConvertTo-Json ([pscustomobject][ordered]@{version=1;entries=@($entry)}) -Compress -Depth 5
+  Import-Module -Name "$PSHOME\Modules\Microsoft.PowerShell.Utility\Microsoft.PowerShell.Utility.psd1" -ErrorAction Stop
+  $json=Microsoft.PowerShell.Utility\ConvertTo-Json ([pscustomobject][ordered]@{version=1;entries=@($entry)}) -Compress -Depth 5
   if([Text.Encoding]::UTF8.GetByteCount($json)-gt 131072){exit $stage}
-  [Console]::OutputEncoding=New-Object Text.UTF8Encoding($false,$true)
+  [Console]::OutputEncoding=[Text.UTF8Encoding]::new($false,$true)
   [Console]::Out.Write($json)
   exit 0
 }catch{exit $stage}
@@ -249,6 +253,7 @@ export type WindowsNativeTimingBucket = (typeof WINDOWS_NATIVE_TIMING_BUCKETS)[n
 export const WINDOWS_NATIVE_TIMING_PROBE_SOURCE = String.raw`
 $ErrorActionPreference='Stop'
 $ProgressPreference='SilentlyContinue'
+$PSModuleAutoLoadingPreference='None'
 Set-StrictMode -Version 2
 ${WINDOWS_UNSIGNED_FIELD_DECODER_SOURCE}
 ${WINDOWS_UINT64_COMPOSER_SOURCE}
@@ -270,7 +275,7 @@ try {
   Write-ProprMilestone 'constant-json'
   $stage=93
   $assembly=[AppDomain]::CurrentDomain.DefineDynamicAssembly(
-    (New-Object Reflection.AssemblyName('ProprNativeTimingProbeAssembly')),
+    [Reflection.AssemblyName]::new('ProprNativeTimingProbeAssembly'),
     [Reflection.Emit.AssemblyBuilderAccess]::Run)
   $module=$assembly.DefineDynamicModule('ProprNativeTimingProbeModule')
   $builder=$module.DefineType('ProprNativeTimingProbe',[Reflection.TypeAttributes]'Public,Abstract,Sealed')

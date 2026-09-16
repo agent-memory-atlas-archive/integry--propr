@@ -1,4 +1,6 @@
+import type { PublishedVisualPreview } from '@propr/shared';
 export interface Task {
+  previewMedia?: PublishedVisualPreview[];
   id: string;
   repository?: string;
   repositoryOwner?: string | null;
@@ -19,21 +21,21 @@ export interface Task {
   critiqueScore?: number | null;
 }
 
-export type TaskType = 'new-issue' | 'followup' | 'unknown';
+export type TaskType = 'new-issue' | 'followup' | 'pr-workflow' | 'unknown';
 
 export interface TaskTypeInfo {
   type: TaskType;
   cleanTitle: string;
+  /** Workflow verb for PR-scoped tasks (Fix, Review, Follow-up, Ultrafix, Merge). */
+  workflowLabel?: string;
+  /** Pull request number parsed from a PR-scoped task title. */
+  workflowPrNumber?: number;
 }
 
 export interface TaskListProps {
   limit: number;
   showViewAll?: boolean;
   hideFilters?: boolean;
-}
-
-export interface LoadConfig {
-  setLoadingState?: boolean;
 }
 
 export interface TaskGroup {

@@ -1,6 +1,13 @@
 /* eslint-disable max-lines -- dispatcher policy and delivery regressions share one fixture */
 import assert from 'node:assert/strict';
-import { createECDH } from 'node:crypto';
+import { createECDH, createPublicKey, verify } from 'node:crypto';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import type { Request, Response } from 'express';
+import webPush from 'web-push';
+import { resolveInstanceWebPushConfiguration } from '../services/instanceWebPushConfiguration.js';
+import { createNotificationRoutes } from '../routes/notificationRoutes.js';
 import { createServer } from 'node:http';
 import { after, afterEach, beforeEach, describe, test } from 'node:test';
 import knex, { type Knex } from 'knex';
@@ -163,6 +170,44 @@ function dispatcher(sender: {
 }
 
 describe('Web Push dispatcher', { concurrency: false }, () => {
+  test('automatic startup advertises the same key that verifies actual dispatcher VAPID signing', async t => {
+    const directory = mkdtempSync(join(tmpdir(), 'propr-push-signing-'));
+    t.after(() => rmSync(directory, { recursive: true, force: true }));
+    const resolved = resolveInstanceWebPushConfiguration({ DATA_DIR: directory, API_PUBLIC_URL: 'https://api.example.com' });
+    assert.ok(resolved.configured);
+    let advertised: { push: { configured: boolean; vapidPublicKey: string } } | undefined;
+    const routes = createNotificationRoutes({
+      resolvedWebPushConfiguration: resolved,
+      webPushDispatcherConfigured: true,
+      getWebPushConfiguration: () => { throw new Error('must not reread environment'); },
+    });
+    const response = { json: (value: typeof advertised) => { advertised = value; } } as Response;
+    await routes.getConfiguration({ user: { id: 'user' } } as Request, response);
+    assert.ok(advertised?.push.configured);
+    assert.equal(JSON.stringify(advertised).includes(resolved.privateKey), false);
+    await queuedEvent();
+    let signed = false;
+    const worker = dispatcher({ sendNotification: async (subscription, payload, options) => {
+      const request = webPush.generateRequestDetails(subscription, payload, options);
+      const authorization = String(request.headers.Authorization);
+      const match = /^vapid t=([^,]+), k=(.+)$/.exec(authorization);
+      assert.ok(match);
+      assert.equal(match[2], advertised!.push.vapidPublicKey);
+      const [header, claims, signature] = match[1].split('.');
+      const point = Buffer.from(advertised!.push.vapidPublicKey, 'base64url');
+      const publicKey = createPublicKey({ format: 'jwk', key: {
+        kty: 'EC', crv: 'P-256', x: point.subarray(1, 33).toString('base64url'), y: point.subarray(33).toString('base64url'),
+      } });
+      assert.ok(verify('sha256', Buffer.from(`${header}.${claims}`),
+        { key: publicKey, dsaEncoding: 'ieee-p1363' }, Buffer.from(signature, 'base64url')));
+      assert.equal(JSON.parse(Buffer.from(claims, 'base64url').toString()).sub, resolved.subject);
+      signed = true;
+      return success;
+    } }, { resolvedConfiguration: resolved });
+    assert.equal(await worker.runOnce(), 1);
+    assert.ok(signed);
+  });
+
   test('fans one eligible event out to every active subscription', async () => {
     userSequence += 1;
     const userId = `fanout-user-${userSequence}`;
@@ -214,6 +259,87 @@ describe('Web Push dispatcher', { concurrency: false }, () => {
     const job = await database('push_delivery_jobs').first();
     assert.equal(job.status, 'delivered');
     assert.equal(job.attempt_count, 1);
+  });
+
+  test('keeps the indexing branch in the web-push Browse deep link', async () => {
+    userSequence += 1;
+    const userId = `indexing-push-user-${userSequence}`;
+    await notifications.updateNotificationPreferences(userId, {
+      preferences: { indexing: { pushEnabled: true } },
+    });
+    await notifications.upsertPushSubscription(userId, {
+      endpoint: `https://fcm.googleapis.com/fcm/send/${userId}`,
+      expirationTime: null,
+      keys: { p256dh: browserPublicKey(), auth: 'A'.repeat(22) },
+    });
+    await notifications.createNotificationEvent({
+      deduplicationKey: `indexing-dispatcher:${userId}`,
+      kind: 'indexing',
+      severity: 'error',
+      target: { type: 'indexing', repository: 'integry/propr', branch: 'release/2026 Q1' },
+      title: 'Repository indexing failed',
+      body: 'Indexing failed.',
+      actions: [],
+      recipients: [{ userId, pushEnabled: true }],
+    });
+
+    const payloads: string[] = [];
+    const worker = dispatcher({
+      sendNotification: async (_subscription, payload) => {
+        payloads.push(payload);
+        return success;
+      },
+    });
+
+    assert.equal(await worker.runOnce(), 1);
+    const deepLink = new URL((JSON.parse(payloads[0]) as { deepLink: string }).deepLink);
+    assert.equal(deepLink.pathname, '/summaries/integry/propr');
+    assert.equal(deepLink.searchParams.get('branch'), 'release/2026 Q1');
+  });
+
+  test('appends the indexing branch to branchless Browse navigate actions', async () => {
+    userSequence += 1;
+    const userId = `indexing-action-user-${userSequence}`;
+    await notifications.updateNotificationPreferences(userId, {
+      preferences: { indexing: { pushEnabled: true } },
+    });
+    await notifications.upsertPushSubscription(userId, {
+      endpoint: `https://fcm.googleapis.com/fcm/send/${userId}`,
+      expirationTime: null,
+      keys: { p256dh: browserPublicKey(), auth: 'A'.repeat(22) },
+    });
+    await notifications.createNotificationEvent({
+      deduplicationKey: `indexing-action-dispatcher:${userId}`,
+      kind: 'indexing',
+      severity: 'error',
+      target: { type: 'indexing', repository: 'integry/propr', branch: 'release/2026' },
+      title: 'Repository indexing failed',
+      body: 'Indexing failed.',
+      action: { type: 'navigate', label: 'Browse summaries', href: '/summaries/integry/propr' },
+      actions: [],
+      recipients: [{ userId, pushEnabled: true }],
+    });
+
+    const payloads: string[] = [];
+    const worker = dispatcher({
+      sendNotification: async (_subscription, payload) => {
+        payloads.push(payload);
+        return success;
+      },
+    });
+
+    assert.equal(await worker.runOnce(), 1);
+    const payload = JSON.parse(payloads[0]) as {
+      deepLink: string;
+      actions: Array<{ url: string }>;
+    };
+    const deepLink = new URL(payload.deepLink);
+    assert.equal(deepLink.pathname, '/summaries/integry/propr');
+    assert.equal(deepLink.searchParams.get('branch'), 'release/2026');
+    assert.equal(deepLink.searchParams.get('tenant'), 'installation-1');
+    const actionUrl = new URL(payload.actions[0].url);
+    assert.equal(actionUrl.pathname, '/summaries/integry/propr');
+    assert.equal(actionUrl.searchParams.get('branch'), 'release/2026');
   });
 
   test('never turns an advertised stop into a push-click action', async () => {

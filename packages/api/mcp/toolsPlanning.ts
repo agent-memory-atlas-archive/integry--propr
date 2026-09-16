@@ -4,7 +4,8 @@ import { loadAgents, loadSyntheticAgents } from '@propr/core';
 import type { createPlannerRoutes } from '../routes/plannerRoutes.js';
 import { McpError } from './config.js';
 import { callWorkflow } from './adapter.js';
-import { type McpTool, type ToolDeps, planShape, mutationShape, pageShape, repositorySchema, textSchema, idSchema, ok, workflow } from './tools.js';
+import { type McpTool, type ToolDeps, planShape, mutationShape, pageShape, repositorySchema, textSchema, idSchema, ok, workflow, markMergedPullRequests } from './tools.js';
+import { planRelationLimit, summarizePlan } from './listSummaries.js';
 
 const target = { table: 'task_drafts', column: 'draft_id', arg: 'planId', owner: 'user_id' };
 const columns = ['draft_id', 'repository', 'name', 'initial_prompt', 'plan_json', 'attachments', 'status', 'mcp_revision', 'paused', 'created_at', 'updated_at'];
@@ -14,10 +15,29 @@ export function addPlanningTools(tools: McpTool[], deps: ToolDeps, planner: Retu
   const plan = z.array(planTask).min(1).max(20);
   
   const { db, policy } = deps;
-  tools.push({ name: 'list_plans', description: 'List your plans in an authorized repository.', scope: 'read', readOnly: true,
+  tools.push({ name: 'list_plans', description: 'List compact plan summaries with issue progress, agent assignments and pull requests.', scope: 'read', readOnly: true,
     schema: z.object({ repository: repositorySchema, ...pageShape }).strict(), run: async ({ principal, args }) => {
-      const plans = await db('task_drafts').where({ repository: args.repository, user_id: principal.user.id }).select(columns.filter(column => !['plan_json', 'attachments'].includes(column))).orderBy('draft_id').offset(args.offset).limit(args.limit);
-      return ok({ plans, nextOffset: plans.length === args.limit ? args.offset + args.limit : null });
+      const rows = await db('task_drafts').where({ repository: args.repository, user_id: principal.user.id })
+        .select('draft_id', 'repository', 'name', 'initial_prompt', 'context_config', 'generation_trace',
+          'refinement_result', 'status', 'mcp_revision', 'paused', 'created_at', 'updated_at')
+        .orderBy('created_at', 'desc').orderBy('draft_id', 'desc').offset(args.offset).limit(args.limit);
+      const planIds = rows.map(row => row.draft_id);
+      const issueRows = planIds.length
+        ? await db('plan_issues').whereIn('draft_id', planIds)
+          .select('draft_id', 'pr_number', 'status', 'agent_alias', 'model_name').orderBy('id')
+        : [];
+      const issuesByPlan = new Map<string, Record<string, unknown>[]>();
+      for (const issue of issueRows) {
+        const issues = issuesByPlan.get(issue.draft_id) ?? [];
+        issues.push(issue);
+        issuesByPlan.set(issue.draft_id, issues);
+      }
+      const now = Date.now();
+      const relationLimit = planRelationLimit(rows.length);
+      const plans = rows.map(row => summarizePlan(row, issuesByPlan.get(row.draft_id) ?? [], now, relationLimit));
+      const pullRequests = plans.flatMap(plan => plan.pull_requests as Record<string, unknown>[]);
+      await markMergedPullRequests(db, args.repository, pullRequests, { number: 'number', state: 'state' });
+      return ok({ plans, nextOffset: rows.length === args.limit ? args.offset + args.limit : null });
     } });
   tools.push({ name: 'get_plan', description: 'Read your plan, revision and published issue/task handles.', scope: 'read', readOnly: true, schema: z.object(planShape).strict(), target,
     run: async ({ args }) => {

@@ -1,3 +1,4 @@
+import { PreviewThumbnails } from '../components/PreviewMedia';
 /* eslint-disable max-lines -- goal list and split-pane console intentionally share this route-level surface */
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
@@ -193,6 +194,10 @@ function CreateGoalForm({ onCancel, onCreated, onDirtyChange, onSubmittingChange
   const [rechecking, setRechecking] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const selectedAgent = agents.find(agent => agent.agentId === agentId);
+  const objectiveCharacters = Array.from(objective).length;
+  const objectiveMaxCharacters = selectedAgent?.objectiveMaxCharacters ?? null;
+  const objectiveTooLong = objectiveMaxCharacters !== null
+    && objectiveCharacters > objectiveMaxCharacters;
   const unsupportedAgents = agents.filter(agent => !agent.goalCapable);
   const showRuntimeDiagnostics = agents.length > 0 && unsupportedAgents.length === agents.length;
   const repositoryOptions = useMemo<RepoOption[]>(() => repositories.map(repo => ({
@@ -239,6 +244,10 @@ function CreateGoalForm({ onCancel, onCreated, onDirtyChange, onSubmittingChange
   const submit = async (event: React.FormEvent) => {
     event.preventDefault();
     if (isDemoMode) return;
+    if (objectiveTooLong) {
+      setError(`Objective exceeds this coding agent's ${objectiveMaxCharacters?.toLocaleString('en-US')} character limit.`);
+      return;
+    }
     setSubmitting(true);
     onSubmittingChange(true);
     setError(null);
@@ -325,13 +334,17 @@ function CreateGoalForm({ onCancel, onCreated, onDirtyChange, onSubmittingChange
         <p className="mt-2 text-xs text-slate-500">Guidance for the agent, not a timer. ProPR commits only when the agent declares a coherent checkpoint ready.</p>
         </div>}
         <div className="mt-4 text-sm font-medium text-slate-700">Objective
-        <textarea aria-label="Objective" value={objective} onChange={event => { markDirty(); setObjective(event.target.value); }} onPaste={event => {
+        <textarea aria-label="Objective" aria-invalid={objectiveTooLong || undefined} aria-describedby={objectiveMaxCharacters === null ? undefined : 'goal-objective-limit'} value={objective} onChange={event => { markDirty(); setObjective(event.target.value); }} onPaste={event => {
           const pasted = clipboardImageFiles(event);
           if (!pasted.length) return;
           event.preventDefault();
           markDirty();
           void addGoalFiles(files, pasted, setFiles, setError);
-        }} rows={5} className="mt-1 w-full rounded-md border border-slate-300 p-2" required />
+        }} rows={5} className={`mt-1 w-full rounded-md border p-2 ${objectiveTooLong ? 'border-red-500' : 'border-slate-300'}`} required />
+        {objectiveMaxCharacters !== null && <div id="goal-objective-limit" className={`mt-1 flex flex-wrap items-center justify-between gap-x-3 text-xs ${objectiveTooLong ? 'text-red-600' : 'text-slate-500'}`}>
+          <span>{selectedAgent?.agentType === 'codex' ? 'Codex' : selectedAgent?.agentAlias} accepts up to {objectiveMaxCharacters.toLocaleString('en-US')} Unicode characters for the objective.</span>
+          <output aria-label="Objective character count" aria-live="polite">{objectiveCharacters.toLocaleString('en-US')} / {objectiveMaxCharacters.toLocaleString('en-US')} characters</output>
+        </div>}
         <GoalAttachmentInput files={files} onFilesSelected={markDirty} onChange={nextFiles => { markDirty(); setFiles(nextFiles); }} onError={setError} disabled={submitting} />
         </div>
         <label className="mt-3 flex items-center gap-2 text-sm text-slate-700"><input type="checkbox" checked={ultrafix} onChange={event => { markDirty(); setUltrafix(event.target.checked); }} /> Ask the coding agent to use Ultrafix</label>
@@ -339,7 +352,7 @@ function CreateGoalForm({ onCancel, onCreated, onDirtyChange, onSubmittingChange
       </div>
       <div className="flex flex-none justify-end gap-3 border-t border-slate-200 bg-slate-50 px-5 py-4 sm:px-7">
         <button type="button" onClick={onCancel} disabled={submitting} className={`${buttonClass} border border-slate-300 bg-white text-slate-700 hover:bg-slate-50`}>Cancel</button>
-        <button type="submit" disabled={isDemoMode || submitting || !repository || !agentId || !model || !objective.trim() || !selectedAgent?.goalCapable} title={isDemoMode ? 'Demo mode is read-only' : undefined} className={`${buttonClass} bg-primary-600 text-white hover:bg-primary-700`}>{submitting ? 'Starting…' : 'Start goal'}</button>
+        <button type="submit" disabled={isDemoMode || submitting || objectiveTooLong || !repository || !agentId || !model || !objective.trim() || !selectedAgent?.goalCapable} title={isDemoMode ? 'Demo mode is read-only' : undefined} className={`${buttonClass} bg-primary-600 text-white hover:bg-primary-700`}>{submitting ? 'Starting…' : 'Start goal'}</button>
       </div>
     </form>
   );
@@ -442,6 +455,7 @@ function GoalQueueRow({ goal, goalAgents }: { goal: Goal; goalAgents: Array<{ ty
       <div className="col-span-2 min-w-0 xl:col-span-1">
         <h3 className="line-clamp-2 font-semibold leading-5 text-slate-900" title={goal.title}>{goal.title}</h3>
         <p className="mt-1 line-clamp-2 text-sm leading-5 text-slate-500" title={goal.objective}>{goal.objective}</p>
+        <PreviewThumbnails media={goal.previewMedia} />
       </div>
       <div className="min-w-0">
         <span className="mb-1.5 block text-[10px] font-bold uppercase tracking-wider text-slate-400 xl:hidden">Status</span>
@@ -481,12 +495,42 @@ function GoalList() {
   const newGoalButtonRef = useRef<HTMLButtonElement>(null);
   const [searchParams, setSearchParams] = useSearchParams();
   const [goals, setGoals] = useState<Goal[]>([]);
+  const [initialLoading, setInitialLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
+  const [hasSuccessfulRead, setHasSuccessfulRead] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [isCreating, setIsCreating] = useState(false);
+  const requestGenerationRef = useRef(0);
   const repositoryFilter = searchParams.get('repository') || 'all';
   useDocumentTitle('Goals');
-  const refresh = useCallback(() => listGoals().then(data => setGoals(data.goals)).catch(err => setError((err as Error).message)), []);
-  useEffect(() => { refresh(); const timer = window.setInterval(refresh, 10_000); return () => window.clearInterval(timer); }, [refresh]);
+  const refresh = useCallback(async (initial = false) => {
+    const generation = ++requestGenerationRef.current;
+    if (initial) setInitialLoading(true);
+    else setRefreshing(true);
+    setError(null);
+    try {
+      const data = await listGoals();
+      if (generation !== requestGenerationRef.current) return;
+      setGoals(data.goals);
+      setHasSuccessfulRead(true);
+    } catch (err) {
+      if (generation !== requestGenerationRef.current) return;
+      setError((err as Error).message);
+    } finally {
+      if (generation === requestGenerationRef.current) {
+        setInitialLoading(false);
+        setRefreshing(false);
+      }
+    }
+  }, []);
+  useEffect(() => {
+    void refresh(true);
+    const timer = window.setInterval(() => { void refresh(); }, 10_000);
+    return () => {
+      requestGenerationRef.current += 1;
+      window.clearInterval(timer);
+    };
+  }, [refresh]);
   const repositoryOptions = useMemo<RepoOption[]>(() => {
     const counts = new Map<string, number>();
     goals.forEach(goal => counts.set(goal.repository, (counts.get(goal.repository) || 0) + 1));
@@ -520,7 +564,7 @@ function GoalList() {
     {error && <p role="alert" className="mt-4 border-l-2 border-red-500 bg-red-50 p-3 text-sm text-red-700">{error}</p>}
     <section aria-labelledby="goal-work-queue-title" className="mt-5">
       <div className="flex flex-col gap-3 pb-3 sm:flex-row sm:items-center sm:justify-between">
-        <div className="flex items-baseline gap-2"><h2 id="goal-work-queue-title" className="text-base font-semibold text-slate-900">Work queue</h2><span className="text-xs text-slate-500">{visibleGoals.length} of {goals.length}</span></div>
+        <div className="flex items-baseline gap-2"><h2 id="goal-work-queue-title" className="text-base font-semibold text-slate-900">Work queue</h2>{hasSuccessfulRead && <span className="text-xs text-slate-500">{visibleGoals.length} of {goals.length}</span>}{refreshing && hasSuccessfulRead && <span role="status" className="text-xs text-slate-500">Refreshing…</span>}</div>
         <div className="flex min-w-0 flex-col gap-2 sm:flex-row sm:items-center">
           {goals.length > 0 && <div role="group" aria-label="Filter goals by repository" className="flex min-w-0 items-center gap-2">
             <Filter className="h-4 w-4 flex-none text-slate-400" aria-hidden="true" />
@@ -535,7 +579,11 @@ function GoalList() {
           <button ref={newGoalButtonRef} type="button" onClick={openCreator} className={`${buttonClass} min-h-10 justify-center bg-primary-600 text-white hover:bg-primary-700`}><Plus className="h-4 w-4" />New goal</button>
         </div>
       </div>
-      {goals.length === 0
+      {!hasSuccessfulRead && (initialLoading || refreshing)
+        ? <div role="status" className="flex items-center justify-center gap-2 border-y border-slate-200 py-10 text-sm text-slate-500"><LoaderCircle className="h-4 w-4 animate-spin" aria-hidden="true" />Loading goals…</div>
+        : error && goals.length === 0
+          ? null
+          : goals.length === 0
         ? <div className="border-y border-dashed border-slate-300 py-10 text-center"><p className="text-sm font-medium text-slate-700">No goals yet</p><p className="mt-1 text-sm text-slate-500">Start a goal to add dedicated agent work to this queue.</p></div>
         : visibleGoals.length === 0
           ? <div className="border-y border-dashed border-slate-300 py-10 text-center"><p className="text-sm font-medium text-slate-700">No goals in {repositoryFilter}</p><button type="button" onClick={() => setRepositoryFilter('all')} className="mt-2 text-sm font-medium text-primary-700 hover:underline">Show all goals</button></div>

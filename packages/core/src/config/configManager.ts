@@ -295,6 +295,45 @@ export async function savePrimaryProcessingLabels(primaryLabels: string[] | stri
     return true;
 }
 
+/**
+ * Resolves the full set of labels that opt a pull request into ProPR automation.
+ * Combines the primary processing labels, the PR label, and the AI primary tag
+ * into a deduplicated list of non-empty strings.
+ */
+export async function loadValidTriggerLabels(): Promise<string[]> {
+    const [primaryLabels, prLabel, aiPrimaryTag] = await Promise.all([
+        loadPrimaryProcessingLabels(),
+        loadPrLabel(),
+        loadAiPrimaryTag(),
+    ]);
+
+    const candidates = [...(Array.isArray(primaryLabels) ? primaryLabels : []), prLabel, aiPrimaryTag];
+    const unique = new Set<string>();
+    for (const candidate of candidates) {
+        if (typeof candidate !== 'string') continue;
+        const trimmed = candidate.trim();
+        if (trimmed) unique.add(trimmed);
+    }
+    return [...unique];
+}
+
+/**
+ * Returns true when at least one of the given PR labels is a valid trigger label.
+ * Matching is case-sensitive, mirroring how GitHub labels are compared elsewhere.
+ * Accepts label objects (`{ name }`) or plain strings; null/undefined yields false.
+ */
+export async function hasValidTriggerLabel(labels: Array<{ name: string } | string> | null | undefined): Promise<boolean> {
+    if (!labels || !Array.isArray(labels) || labels.length === 0) return false;
+
+    const labelNames = labels
+        .map(label => (typeof label === 'string' ? label : label?.name))
+        .filter((name): name is string => typeof name === 'string' && name.length > 0);
+    if (labelNames.length === 0) return false;
+
+    const triggerLabels = await loadValidTriggerLabels();
+    return labelNames.some(name => triggerLabels.includes(name));
+}
+
 export {
     loadPrReviewModel,
     savePrReviewModel,

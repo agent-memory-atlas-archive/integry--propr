@@ -31,6 +31,7 @@ const capability = {
   lifecycle: { launch: 'native-goal', resume: 'native-goal', runningInput: 'live-steer' } as const,
   controls: { liveInput: true, inputAtBoundary: true, modelAtBoundary: true, pauseAtBoundary: true },
   models: ['gpt-5.6-sol', 'gpt-5.6-luna'], defaultModel: 'gpt-5.6-sol',
+  objectiveMaxCharacters: 3_994,
 };
 const goal: goalsApi.Goal = {
   id: 'goal-1', owner: 'owner', repository: 'acme/web', title: 'Launch Customer Analytics Dashboard', objective: 'Ship the dashboard',
@@ -50,6 +51,16 @@ const goal: goalsApi.Goal = {
 };
 
 const openGoalCreator = () => fireEvent.click(screen.getByRole('button', { name: 'New goal' }));
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
 
 describe('GoalsPage', () => {
   beforeEach(() => {
@@ -73,6 +84,38 @@ describe('GoalsPage', () => {
     vi.mocked(goalsApi.requestGoalModel).mockResolvedValue({ goal: { ...goal, requestedModel: 'gpt-5.6-luna' } });
   });
 
+  it('renders up to three inline previews in the responsive goal row without per-row requests', async () => {
+    const previewMedia = Array.from({ length: 5 }, (_, index) => ({ type: 'image' as const, title: `Preview ${index}`, url: `https://github.com/user-attachments/assets/goal-${index}` }));
+    vi.mocked(goalsApi.listGoals).mockResolvedValue({ goals: [{ ...goal, previewMedia }] });
+    render(<MemoryRouter><GoalsPage /></MemoryRouter>);
+    await screen.findByRole('heading', { name: goal.title });
+    expect(screen.getAllByRole('img', { name: /Preview/ })).toHaveLength(3);
+    expect(goalsApi.getGoalVisualPreviews).not.toHaveBeenCalled();
+  });
+
+  it('waits for a successful goal read before presenting the empty queue', async () => {
+    const request = deferred<Awaited<ReturnType<typeof goalsApi.listGoals>>>();
+    vi.mocked(goalsApi.listGoals).mockReturnValue(request.promise);
+    render(<MemoryRouter initialEntries={['/goals']}><Routes><Route path="/goals" element={<GoalsPage />} /></Routes></MemoryRouter>);
+
+    expect(screen.getByText('Loading goals…')).toBeInTheDocument();
+    expect(screen.queryByText('No goals yet')).not.toBeInTheDocument();
+
+    await act(async () => { request.resolve({ goals: [] }); });
+    expect(await screen.findByText('No goals yet')).toBeInTheDocument();
+  });
+
+  it('keeps a failed initial goal read as an error instead of an empty queue', async () => {
+    const request = deferred<Awaited<ReturnType<typeof goalsApi.listGoals>>>();
+    vi.mocked(goalsApi.listGoals).mockReturnValue(request.promise);
+    render(<MemoryRouter initialEntries={['/goals']}><Routes><Route path="/goals" element={<GoalsPage />} /></Routes></MemoryRouter>);
+
+    await act(async () => { request.reject(new Error('Goals unavailable')); });
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('Goals unavailable');
+    expect(screen.queryByText('No goals yet')).not.toBeInTheDocument();
+  });
+
   it('creates exactly one native goal from repository, agent, model and objective', async () => {
     vi.mocked(goalsApi.createGoal).mockResolvedValue({ goal });
     render(<MemoryRouter initialEntries={['/goals']}><Routes><Route path="/goals" element={<GoalsPage />} /><Route path="/goals/:goalId" element={<div>Goal detail</div>} /></Routes></MemoryRouter>);
@@ -86,6 +129,41 @@ describe('GoalsPage', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Start goal' }));
     await waitFor(() => expect(goalsApi.createGoal).toHaveBeenCalledWith(expect.objectContaining({ repository: 'acme/web', agentId: 'agent-1', model: 'gpt-5.6-sol', objective: 'Ship the dashboard', launchStrategy: 'orchestrate' })));
     expect(await screen.findByText('Goal detail')).toBeInTheDocument();
+  });
+
+  it('counts Unicode characters and applies only the selected provider objective limit', async () => {
+    const claudeCapability = {
+      ...capability,
+      agentId: 'agent-2',
+      agentAlias: 'claude',
+      agentType: 'claude',
+      models: ['claude-sonnet-4-6'],
+      defaultModel: 'claude-sonnet-4-6',
+      objectiveMaxCharacters: null,
+    };
+    vi.mocked(goalsApi.getGoalCapabilities).mockResolvedValue({ agents: [capability, claudeCapability] });
+    render(<MemoryRouter initialEntries={['/goals']}><Routes><Route path="/goals" element={<GoalsPage />} /></Routes></MemoryRouter>);
+    openGoalCreator();
+    await screen.findByRole('option', { name: 'Codex' });
+
+    const objective = screen.getByLabelText('Objective');
+    const exactCodexObjective = `${'x'.repeat(3_993)}😀`;
+    fireEvent.change(objective, { target: { value: exactCodexObjective } });
+    expect(screen.getByLabelText('Objective character count')).toHaveTextContent('3,994 / 3,994 characters');
+    expect(screen.getByRole('button', { name: 'Start goal' })).toBeEnabled();
+
+    fireEvent.change(objective, { target: { value: `${exactCodexObjective}x` } });
+    expect(objective).toHaveAttribute('aria-invalid', 'true');
+    expect(screen.getByLabelText('Objective character count')).toHaveTextContent('3,995 / 3,994 characters');
+    expect(screen.getByRole('button', { name: 'Start goal' })).toBeDisabled();
+    fireEvent.submit(screen.getByRole('button', { name: 'Start goal' }).closest('form')!);
+    expect(goalsApi.createGoal).not.toHaveBeenCalled();
+
+    fireEvent.change(screen.getByLabelText('Coding agent'), { target: { value: 'agent-2' } });
+    await waitFor(() => expect(screen.getByLabelText('Model')).toHaveValue('claude-sonnet-4-6'));
+    expect(screen.queryByLabelText('Objective character count')).not.toBeInTheDocument();
+    expect(objective).not.toHaveAttribute('aria-invalid');
+    expect(screen.getByRole('button', { name: 'Start goal' })).toBeEnabled();
   });
 
   it('keeps goal creation read-only in demo mode', async () => {
@@ -119,6 +197,7 @@ describe('GoalsPage', () => {
       agentType: 'claude',
       models: ['claude-sonnet-4-6', 'claude-opus-4-6'],
       defaultModel: 'claude-sonnet-4-6',
+      objectiveMaxCharacters: null,
     };
     vi.mocked(goalsApi.getGoalCapabilities).mockResolvedValue({ agents: [capability, claudeCapability] });
     vi.mocked(getInstanceCatalog).mockResolvedValue({

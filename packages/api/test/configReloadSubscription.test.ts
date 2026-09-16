@@ -94,6 +94,23 @@ test('API config subscription ignores unrelated and malformed events', async () 
   assert.equal(errors.length, 1);
 });
 
+test('API config subscription exposes agent updates for status-cache invalidation', async () => {
+  const subscriber = new FakeSubscriber();
+  const updates: string[] = [];
+  const subscription = await startConfigReloadSubscription(
+    { duplicate: () => subscriber },
+    async () => undefined,
+    console,
+    subtype => { updates.push(subtype); },
+  );
+
+  subscriber.listener?.(JSON.stringify({ type: 'config_update', subtype: 'agents_update' }));
+  subscriber.listener?.(JSON.stringify({ type: 'config_update', subtype: 'synthetic_agents_update' }));
+  await subscription.close();
+
+  assert.deepEqual(updates, ['agents_update', 'synthetic_agents_update']);
+});
+
 test('a failed API settings reload does not block the next notification', async () => {
   const subscriber = new FakeSubscriber();
   let reloads = 0;

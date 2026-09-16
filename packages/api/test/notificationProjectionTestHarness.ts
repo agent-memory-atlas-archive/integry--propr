@@ -17,7 +17,7 @@ export interface ActiveNotificationReceipt {
   occurred_at: string;
 }
 
-async function createProjectionTables(database: Knex): Promise<void> {
+export async function createProjectionTables(database: Knex): Promise<void> {
   await database.schema.createTable('tasks', table => {
     table.text('task_id').primary();
     table.text('repository').notNullable();
