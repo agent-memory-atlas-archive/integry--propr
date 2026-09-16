@@ -31,7 +31,7 @@ export function scheduleUnifiedAgentImageRetry(options: {
     unavailable: UnavailableUnifiedAgentImage | null;
     imagePreparationOwner: boolean;
     retryTimer: NodeJS.Timeout | null;
-    startRecovery: () => Promise<void>;
+    startRecovery: (fromTimer: boolean) => Promise<void>;
     setRetryTimer: (timer: NodeJS.Timeout | null) => void;
 }): void {
     const { unavailable } = options;
@@ -49,7 +49,7 @@ export function scheduleUnifiedAgentImageRetry(options: {
     unavailable.nextRetryAt = new Date(Date.now() + delay).toISOString();
     const timer = setTimeout(() => {
         options.setRetryTimer(null);
-        if (!unavailable.circuitBreakerOpen) void options.startRecovery();
+        if (!unavailable.circuitBreakerOpen) void options.startRecovery(true);
     }, delay);
     timer.unref?.();
     options.setRetryTimer(timer);
@@ -99,6 +99,8 @@ export function logUnifiedAgentImageCircuitOpen(
 }
 
 export function startUnifiedAgentImageRecovery(options: {
+    fromTimer?: boolean;
+    scheduleRetry: () => void;
     unavailable: UnavailableUnifiedAgentImage | null;
     pendingBackgroundRefresh: Promise<void> | null;
     imageTag: string | undefined;
@@ -108,13 +110,21 @@ export function startUnifiedAgentImageRecovery(options: {
     recordFailure: (imageTag: string, error: string) => void;
     setPendingBackgroundRefresh: (promise: Promise<void> | null) => void;
 }): Promise<void> {
-    if (options.pendingBackgroundRefresh) return options.pendingBackgroundRefresh;
+    if (options.pendingBackgroundRefresh) {
+        // The timer has been consumed. Re-evaluate the current failure state
+        // after the refresh settles so an overlapping refresh cannot drop it.
+        return options.fromTimer
+            ? options.pendingBackgroundRefresh.then(options.scheduleRetry, options.scheduleRetry)
+            : options.pendingBackgroundRefresh;
+    }
     if (!options.imageTag) return Promise.resolve();
     const unavailable = options.unavailable?.imageTag === options.imageTag ? options.unavailable : null;
     // Inspect-only discovery has not attempted preparation yet. Let the first
     // attempt proceed, then enforce its deadline for both owners and consumers.
+    // A fired timer already waited; its clock can lead Date.now() slightly.
     if (unavailable?.circuitBreakerOpen || (
-        (unavailable?.retryCount ?? 0) > 0
+        !options.fromTimer
+        && (unavailable?.retryCount ?? 0) > 0
         && unavailable?.nextRetryAt
         && Date.parse(unavailable.nextRetryAt) > Date.now()
     )) return Promise.resolve();

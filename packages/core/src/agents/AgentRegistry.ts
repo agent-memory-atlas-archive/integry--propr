@@ -361,10 +361,11 @@ export class AgentRegistry {
             return;
         }
 
-        // If an image disappears after initialization, restore it through the
-        // worker owner. API/analysis processes never start a Docker build.
-        if (!(await this.registeredAgentImagesAvailable())) {
-            logger.warn('Requesting worker-owned agent image preparation because a registered image is unavailable locally');
+        // Recover missing images, including a registry left empty by a failed
+        // first preparation. API/analysis processes never start a Docker build.
+        if ((this.agents.size === 0 && this.unavailableUnifiedAgentImage)
+            || !(await this.registeredAgentImagesAvailable())) {
+            logger.warn('Requesting worker-owned agent image preparation because the execution image is unavailable locally');
             await this.startWorkerOwnedImageRecovery();
             return;
         }
@@ -432,15 +433,17 @@ export class AgentRegistry {
             unavailable: this.unavailableUnifiedAgentImage,
             imagePreparationOwner: this.imagePreparationOwner,
             retryTimer: this.unifiedAgentImageRetryTimer,
-            startRecovery: () => this.startWorkerOwnedImageRecovery(),
+            startRecovery: fromTimer => this.startWorkerOwnedImageRecovery(fromTimer),
             setRetryTimer: timer => { this.unifiedAgentImageRetryTimer = timer; },
         });
     }
 
-    private startWorkerOwnedImageRecovery(): Promise<void> {
+    private startWorkerOwnedImageRecovery(fromTimer = false): Promise<void> {
         const firstAgent = this.agents.values().next().value as Agent | undefined;
         const imageTag = this.unavailableUnifiedAgentImage?.imageTag || firstAgent?.config.dockerImage;
         return startUnifiedAgentImageRecovery({
+            fromTimer,
+            scheduleRetry: () => this.scheduleUnifiedAgentImageRetry(),
             unavailable: this.unavailableUnifiedAgentImage,
             pendingBackgroundRefresh: this.pendingBackgroundRefresh,
             imageTag,

@@ -167,6 +167,53 @@ test('AgentRegistry treats an explicitly all-disabled configuration as no work w
     });
 });
 
+for (const diskPressure of [false, true]) {
+    test(`AgentRegistry recovers an empty worker after enabling its first agent (diskPressure=${diskPressure})`, async t => {
+        t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: 1_000 });
+        t.mock.method(Math, 'random', () => 0.5);
+        await saveAgents([{ ...opencodeConfig, enabled: false }]);
+        const registry = AgentRegistry.getInstance();
+        const internal = registry as unknown as {
+            ensureUnifiedAgentImage: (_configs: AgentConfig[], prepareImages: boolean) => Promise<string | null>;
+            recordUnavailableUnifiedAgentImage: (imageTag: string, error: string) => void;
+            markUnifiedAgentImageReady: (imageTag: string) => string;
+            unifiedAgentImageRetryTimer: NodeJS.Timeout | null;
+        };
+        const preparationModes: boolean[] = [];
+        internal.ensureUnifiedAgentImage = async (_configs, prepareImages) => {
+            preparationModes.push(prepareImages);
+            if (preparationModes.length === 1) {
+                internal.recordUnavailableUnifiedAgentImage('propr/agent:first', diskPressure ? 'ENOSPC' : 'temporary failure');
+                return null;
+            }
+            return internal.markUnifiedAgentImageReady('propr/agent:first');
+        };
+        await registry.ensureInitialized();
+        await registry.ensureInitialized();
+        assert.deepStrictEqual(preparationModes, []);
+        await saveAgents([opencodeConfig]);
+        await registry.prepareImagesAndRefresh();
+        assert.deepStrictEqual(registry.getAllAgents(), []);
+        assert.strictEqual(internal.unifiedAgentImageRetryTimer, null);
+
+        await registry.ensureInitialized();
+        t.mock.timers.tick(4_999);
+        await registry.ensureInitialized();
+        assert.deepStrictEqual(preparationModes, [true], 'initialization respects the retry deadline');
+        t.mock.timers.tick(1);
+        await registry.ensureInitialized();
+        assert.deepStrictEqual(preparationModes, diskPressure ? [true] : [true, true]);
+        assert.strictEqual(enqueuePreparation.mock.callCount(), 0);
+        if (diskPressure) {
+            assert.strictEqual(registry.getOperationalStatus().unifiedAgentImage.circuitBreakerOpen, true);
+            assert.deepStrictEqual(registry.getAllAgents(), []);
+        } else {
+            assert.strictEqual(registry.getOperationalStatus().unifiedAgentImage.status, 'ready');
+            assert.strictEqual(registry.getAgentByAlias('opencode')?.config.dockerImage, 'propr/agent:first');
+        }
+    });
+}
+
 test('AgentRegistry prepares an execution image on first-use initialization', async () => {
     const registry = AgentRegistry.getInstance();
     const preparationModes: boolean[] = [];
@@ -349,6 +396,81 @@ for (const failurePath of ['enqueue', 'refresh'] as const) {
             assert.strictEqual(internal.unifiedAgentImageRetryTimer, null);
             assert.strictEqual(enqueuePreparation.mock.callCount(), UNIFIED_AGENT_IMAGE_RETRY_MAX_ATTEMPTS - 1);
         } finally {
+            internal.clearUnifiedAgentImageRetry();
+        }
+    });
+}
+
+test('AgentRegistry continues recovery when the retry timer fires one millisecond before the wall-clock deadline', async t => {
+    t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: 1_000 });
+    t.mock.method(Math, 'random', () => 0.5);
+    const registry = AgentRegistry.getInstance();
+    registry.setImagePreparationOwner(false);
+    const internal = registry as unknown as {
+        recordUnavailableUnifiedAgentImage: (imageTag: string, error: string) => void;
+        pendingBackgroundRefresh: Promise<void> | null;
+        unifiedAgentImageRetryTimer: NodeJS.Timeout | null;
+        clearUnifiedAgentImageRetry: () => void;
+    };
+    enqueuePreparation.mock.mockImplementation(async () => { throw new Error('temporary failure'); });
+    internal.recordUnavailableUnifiedAgentImage('propr/agent:early-timer', 'temporary failure');
+    const deadline = Date.parse(registry.getOperationalStatus().unifiedAgentImage.nextRetryAt!);
+    t.mock.method(Date, 'now', () => deadline - 1);
+    try {
+        t.mock.timers.tick(5_000);
+        await internal.pendingBackgroundRefresh;
+        assert.strictEqual(enqueuePreparation.mock.callCount(), 1);
+        assert.strictEqual(registry.getOperationalStatus().unifiedAgentImage.retryCount, 2);
+        assert.ok(internal.unifiedAgentImageRetryTimer);
+    } finally {
+        internal.clearUnifiedAgentImageRetry();
+    }
+});
+
+for (const outcome of ['unavailable', 'ready', 'circuit-open'] as const) {
+    test(`AgentRegistry re-evaluates a consumed timer after an overlapping refresh becomes ${outcome}`, async t => {
+        t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: 1_000 });
+        t.mock.method(Math, 'random', () => 0.5);
+        const registry = AgentRegistry.getInstance();
+        registry.setImagePreparationOwner(false);
+        const internal = registry as unknown as {
+            recordUnavailableUnifiedAgentImage: (imageTag: string, error: string) => void;
+            markUnifiedAgentImageReady: (imageTag: string) => string;
+            pendingBackgroundRefresh: Promise<void> | null;
+            unifiedAgentImageRetryTimer: NodeJS.Timeout | null;
+            clearUnifiedAgentImageRetry: () => void;
+        };
+        let release!: () => void;
+        const imageTag = 'propr/agent:overlapping-refresh';
+        internal.pendingBackgroundRefresh = new Promise<void>(resolve => { release = resolve; })
+            .then(() => {
+                if (outcome === 'ready') internal.markUnifiedAgentImageReady(imageTag);
+                if (outcome === 'circuit-open') internal.recordUnavailableUnifiedAgentImage(imageTag, 'ENOSPC');
+            })
+            .finally(() => { internal.pendingBackgroundRefresh = null; });
+        internal.recordUnavailableUnifiedAgentImage(imageTag, 'temporary failure');
+        enqueuePreparation.mock.mockImplementation(async () => { throw new Error('temporary failure'); });
+        try {
+            t.mock.timers.tick(5_000);
+            assert.strictEqual(enqueuePreparation.mock.callCount(), 0);
+            assert.strictEqual(internal.unifiedAgentImageRetryTimer, null);
+            const refresh = internal.pendingBackgroundRefresh;
+            release();
+            await refresh;
+            await new Promise<void>(resolve => setImmediate(resolve));
+            if (outcome === 'unavailable') {
+                assert.ok(internal.unifiedAgentImageRetryTimer);
+                t.mock.timers.tick(1);
+                await internal.pendingBackgroundRefresh;
+                assert.strictEqual(enqueuePreparation.mock.callCount(), 1);
+                assert.ok(internal.unifiedAgentImageRetryTimer);
+                assert.strictEqual(registry.getOperationalStatus().unifiedAgentImage.retryCount, 2);
+            } else {
+                assert.strictEqual(internal.unifiedAgentImageRetryTimer, null);
+                assert.strictEqual(enqueuePreparation.mock.callCount(), 0);
+            }
+        } finally {
+            release();
             internal.clearUnifiedAgentImageRetry();
         }
     });
