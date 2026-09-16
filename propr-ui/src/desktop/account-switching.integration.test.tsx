@@ -20,7 +20,7 @@ import { AuthProvider } from '../contexts/AuthContext';
 import type { CurrentUser } from '../api/proprTypes';
 import { DesktopContext, type DesktopContextValue } from './DesktopContext';
 import VoiceBriefingControl from '../components/VoiceBriefingControl';
-import DesktopVoiceSettingsSection from '../pages/SettingsPage/DesktopVoiceSettingsSection';
+import VoiceSettingsSection from '../pages/SettingsPage/VoiceSettingsSection';
 import SettingsNavigation from '../pages/SettingsPage/SettingsNavigation';
 import { DESKTOP_LOGGED_OUT_EVENT } from './types';
 
@@ -176,14 +176,14 @@ it('pairs two users through the production bridge, fences late A traffic, logs B
     view = render(<StrictMode><DesktopContext.Provider value={desktop}>
       <AuthProvider user={{ ...accounts[0], permissions: [] } as CurrentUser}><MemoryRouter>
         <SettingsNavigation sections={[{
-          id: 'desktop-voice', category: 'integrations', searchText: 'desktop voice experimental',
-          content: <DesktopVoiceSettingsSection />,
+          id: 'voice-briefings', category: 'integrations', searchText: 'voice briefings experimental',
+          content: <VoiceSettingsSection />,
         }]} />
         <VoiceBriefingControl />
       </MemoryRouter></AuthProvider>
     </DesktopContext.Provider></StrictMode>);
     fireEvent.change(screen.getByRole('searchbox', { name: 'Search settings' }), { target: { value: 'voice' } });
-    const toggle = screen.getByRole('checkbox', { name: 'Enable experimental desktop voice' });
+    const toggle = screen.getByRole('checkbox', { name: 'Enable voice briefings' });
     expect(toggle).not.toBeChecked();
     fireEvent.click(toggle);
     expect(toggle).toBeChecked();

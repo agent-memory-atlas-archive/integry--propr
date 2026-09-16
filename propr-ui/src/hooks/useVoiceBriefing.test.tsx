@@ -21,9 +21,9 @@ import { useVoiceBriefing } from './useVoiceBriefing';
 
 let currentVisibility: DocumentVisibilityState = 'visible';
 
-vi.mock('./useDesktopVoicePreference', async importOriginal => ({
-  ...await importOriginal<typeof import('./useDesktopVoicePreference')>(),
-  useDesktopVoicePreference: () => ({ enabled: true, isEnabled: () => true, key: null, connection: null }),
+vi.mock('./useVoicePreference', async importOriginal => ({
+  ...await importOriginal<typeof import('./useVoicePreference')>(),
+  useVoicePreference: () => ({ enabled: true, isEnabled: () => true, key: null, connection: null }),
 }));
 
 vi.mock('../api/proprApi', () => ({

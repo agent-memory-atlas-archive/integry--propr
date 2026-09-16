@@ -1,4 +1,41 @@
+import { mkdir } from 'node:fs/promises';
+import path from 'node:path';
 import { expect, test, type Page } from '@playwright/test';
+import { browserVoicePreferenceKey } from '../src/voice/voicePreferenceKey';
+
+interface SmokeUser {
+  id: string;
+  login: string;
+  username: string;
+  displayName: string;
+  email: string | null;
+  avatarUrl: string | null;
+  role: string;
+  permissions: string[];
+  authorizationSource: string;
+}
+
+const member: SmokeUser = {
+  id: 'preview-user',
+  login: 'preview',
+  username: 'preview',
+  displayName: 'Preview User',
+  email: null,
+  avatarUrl: null,
+  role: 'member',
+  permissions: [],
+  authorizationSource: 'local',
+};
+
+const administrator: SmokeUser = { ...member, role: 'admin', permissions: ['instance.manage_settings'] };
+
+/** Preview evidence is written only when a capture run asks for it. */
+async function capturePreview(page: Page, name: string): Promise<void> {
+  if (!process.env.PROPR_CAPTURE_PREVIEWS) return;
+  const directory = path.resolve('../.propr/previews');
+  await mkdir(directory, { recursive: true });
+  await page.screenshot({ animations: 'disabled', path: path.join(directory, name) });
+}
 
 const timestamp = '2026-09-07T09:35:00.000Z';
 const notificationPreferences = {
@@ -66,17 +103,23 @@ const briefing = {
 
 async function stubVoiceBriefingSmokeApis(
   page: Page,
-  onBriefingRequest: (request: { method: string; scope: string | null }) => void,
+  onVoiceRequest: (request: { method: string; pathname: string; scope: string | null }) => void,
+  user: SmokeUser = member,
 ): Promise<void> {
   await page.route('**/api/**', async route => {
     const request = route.request();
     const url = new URL(request.url());
     const { pathname } = url;
 
-    // Match the demo authentication and notification stubs used by the PWA
-    // browser smoke suite so this remains independent of a running backend.
+    // Match the authentication and notification stubs used by the PWA browser
+    // smoke suite so this remains independent of a running backend. A signed-in
+    // account is required because the voice opt-in is scoped to one.
     if (pathname === '/api/auth/demo-mode') {
-      await route.fulfill({ json: { demoMode: true } });
+      await route.fulfill({ json: { demoMode: false } });
+      return;
+    }
+    if (pathname === '/api/auth/user') {
+      await route.fulfill({ json: user });
       return;
     }
     if (pathname === '/api/notifications/unread-count') {
@@ -94,12 +137,14 @@ async function stubVoiceBriefingSmokeApis(
       return;
     }
     if (pathname === '/api/voice/capabilities') {
+      onVoiceRequest({ method: request.method(), pathname, scope: null });
       await route.fulfill({ json: voiceCapabilities });
       return;
     }
     if (pathname === '/api/voice/briefing') {
-      onBriefingRequest({
+      onVoiceRequest({
         method: request.method(),
+        pathname,
         scope: url.searchParams.get('scope'),
       });
       await route.fulfill({ json: briefing });
@@ -114,8 +159,8 @@ async function stubVoiceBriefingSmokeApis(
   });
 }
 
-test('keeps the Voice Briefing text fallback usable on a narrow mobile viewport', async ({ page }) => {
-  const briefingRequests: Array<{ method: string; scope: string | null }> = [];
+test('keeps Voice Briefings off until opt-in, then usable on a narrow mobile viewport', async ({ page }) => {
+  const voiceRequests: Array<{ method: string; pathname: string; scope: string | null }> = [];
 
   await page.setViewportSize({ width: 320, height: 720 });
   await page.addInitScript(() => {
@@ -134,11 +179,33 @@ test('keeps the Voice Briefing text fallback usable on a narrow mobile viewport'
       });
     }
   });
-  await stubVoiceBriefingSmokeApis(page, request => briefingRequests.push(request));
+  await stubVoiceBriefingSmokeApis(page, request => voiceRequests.push(request));
   await page.goto('/inbox');
 
   const mobileNavigation = page.getByRole('navigation', { name: 'Primary navigation' });
   const launcher = page.getByRole('button', { name: 'Voice briefing' });
+  await expect(mobileNavigation).toBeVisible();
+  // Experimental and off by default: no entry point and no voice traffic at all.
+  await expect(launcher).toBeHidden();
+  expect(voiceRequests).toEqual([]);
+  await capturePreview(page, 'mobile-inbox-voice-disabled.png');
+
+  await page.goto('/settings');
+  const optIn = page.getByRole('checkbox', { name: 'Enable voice briefings' });
+  await expect(optIn).not.toBeChecked();
+  await capturePreview(page, 'mobile-settings-voice-off.png');
+  await optIn.check();
+  // The launcher appears for the opt-in itself, without reloading the page.
+  await expect(launcher).toBeVisible();
+  expect(voiceRequests).toEqual([]);
+  expect(await page.evaluate(
+    key => localStorage.getItem(key),
+    browserVoicePreferenceKey(new URL(page.url()).origin, member.id),
+  )).toBe('true');
+
+  await capturePreview(page, 'mobile-settings-voice-on.png');
+
+  await page.goto('/inbox');
   await expect(mobileNavigation).toBeVisible();
   await expect(launcher).toBeVisible();
 
@@ -165,7 +232,7 @@ test('keeps the Voice Briefing text fallback usable on a narrow mobile viewport'
   expect(placement.launcher.bottom).toBeLessThanOrEqual(placement.navigationTop);
   expect(placement.launcher.bottom).toBeLessThanOrEqual(placement.viewport.height);
 
-  expect(briefingRequests).toHaveLength(0);
+  expect(voiceRequests).toEqual([]);
   await launcher.click();
 
   const dialog = page.getByRole('dialog', { name: 'Voice briefing' });
@@ -174,14 +241,16 @@ test('keeps the Voice Briefing text fallback usable on a narrow mobile viewport'
   await expect(page.getByRole('button', { name: 'Listen' })).toBeDisabled();
   await expect(page.getByText(/Voice commands aren’t supported/)).toBeVisible();
   await expect(page.getByText(/Spoken playback isn’t supported/)).toBeVisible();
-  expect(briefingRequests).toHaveLength(0);
+  expect(voiceRequests).toEqual([]);
 
   await page.getByRole('button', { name: 'I understand' }).click();
   await expect(page.getByRole('heading', { name: 'Before you use voice recognition' })).toBeHidden();
-  expect(briefingRequests).toHaveLength(0);
+  expect(voiceRequests).toEqual([]);
 
   await page.getByRole('button', { name: 'Catch me up' }).click();
-  await expect.poll(() => briefingRequests).toEqual([{ method: 'GET', scope: 'all' }]);
+  await expect.poll(() => voiceRequests).toEqual([
+    { method: 'GET', pathname: '/api/voice/briefing', scope: 'all' },
+  ]);
   await expect(page.getByRole('heading', { name: briefing.headline })).toBeVisible();
 
   const briefingItems = page.getByRole('list', { name: 'Briefing items' });
@@ -213,4 +282,27 @@ test('keeps the Voice Briefing text fallback usable on a narrow mobile viewport'
   await expect(activityLink).toBeVisible();
   await activityLink.click();
   await expect(page).toHaveURL(/\/tasks$/);
+
+  await page.goto('/settings');
+  await expect(page.getByRole('checkbox', { name: 'Enable voice briefings' })).toBeChecked();
+  await page.getByRole('checkbox', { name: 'Enable voice briefings' }).uncheck();
+  await expect(launcher).toBeHidden();
+  await page.goto('/inbox');
+  await expect(mobileNavigation).toBeVisible();
+  await expect(launcher).toBeHidden();
+});
+
+test('shows the administrator opt-in under Integrations', async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 820 });
+  await stubVoiceBriefingSmokeApis(page, () => undefined, administrator);
+  await page.goto('/settings?tab=integrations');
+
+  const optIn = page.getByRole('checkbox', { name: 'Enable voice briefings' });
+  await expect(page.getByRole('heading', { name: 'Voice briefings · Experimental' })).toBeVisible();
+  await expect(optIn).not.toBeChecked();
+  await expect(page.getByRole('button', { name: 'Voice briefing' })).toBeHidden();
+
+  await optIn.check();
+  await expect(page.getByRole('button', { name: 'Voice briefing' })).toBeVisible();
+  await capturePreview(page, 'desktop-settings-voice-on.png');
 });

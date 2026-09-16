@@ -4,9 +4,39 @@ title: Voice Briefings
 
 # Voice Briefings
 
-Voice Briefings give you a short, on-demand status snapshot while several tasks or plans are running. Open **Voice briefing** from the Web UI and choose **Catch me up**. ProPR fetches the current state, displays the briefing as text, and, when the browser supports it, asks the browser or operating system to read that text aloud.
+Voice Briefings give you a short, on-demand status snapshot while several tasks or plans are running. They are **experimental and off by default**; once you enable them in Settings, open **Voice briefing** from the Web UI and choose **Catch me up**. ProPR fetches the current state, displays the briefing as text, and, when the browser supports it, asks the browser or operating system to read that text aloud.
 
 This is a **pull-based** workflow. Each briefing is a snapshot requested by the signed-in user, which makes it useful for checking parallel or long-running work without watching the dashboard. ProPR does not keep a telephone call, WebRTC session, speech session, polling loop, or background listener open while work runs. Request another briefing when you want a newer snapshot.
+
+## Enabling Voice Briefings
+
+Voice Briefings are **experimental and off by default in every runtime**: the browser
+Web UI, the installed PWA, and the desktop app. Until a signed-in user turns them on
+there is no launcher to open, the vendor-processing disclosure cannot be reached, no
+`GET /api/voice/capabilities` or `GET /api/voice/briefing` request is issued, and no
+speech-synthesis, speech-recognition, or microphone API is touched.
+
+To turn them on, open **Settings** and enable **Voice briefings · Experimental**.
+Administrators find it under **Integrations**; members find it in their personal
+settings view. The launcher appears immediately, without reloading the page.
+
+Enabling the option does not start audio or request microphone access. Turning it off
+hides the entry points, aborts in-flight briefing requests, cancels active speech and
+microphone checks, releases media tracks (including streams that arrive after
+cancellation), clears pending confirmations, and rejects late results. An already
+submitted, confirmed task action cannot be undone; turning the option off prevents its
+follow-on voice refresh or playback.
+
+The choice is stored locally on the device and scoped to the signed-in account and the
+connected instance, so it is never shared across devices, browsers, accounts, or
+instances. Switching accounts or instances loads that scope's own choice and cancels the
+previous voice session. This is a client-side experience gate only: `/api/voice/capabilities`
+and `/api/voice/briefing` remain authenticated read-only endpoints.
+
+**After upgrading**, browser and installed-PWA users who previously had Voice Briefings
+available must opt in once for each account, instance, and device. An existing voice
+disclosure acknowledgement does not enable the feature. An existing desktop opt-in is
+kept.
 
 ## Data flow, cost, and privacy
 
@@ -73,13 +103,17 @@ Use a test account and non-sensitive spoken phrases on a real HTTPS staging orig
 
 ### Desktop browser
 
-1. Open **Voice briefing**, verify the vendor-processing disclosure appears before the first recognition attempt, and verify that no microphone prompt appears until **I understand** and then **Listen** are selected.
-2. Select **Catch me up**. Verify one `GET /api/voice/briefing?scope=all` returns JSON, the same briefing is visible as text, and supported speech playback starts only from that user action.
-3. Select **Listen**, grant microphone permission, and exercise a briefing command, a numbered `open` command, and `repeat`.
-4. Stage `stop task N` or `follow up task N to ...`. Verify no mutation request occurs before a separate **Confirm action** selection or recognized `confirm`; verify `cancel` leaves state unchanged. After confirmation, verify a text request uses the normal task or plan API and no request contains raw audio.
-5. Deny microphone permission in a fresh browser profile. Verify the UI reports that access was not allowed, still provides the text briefing, and does not repeatedly or silently prompt.
-6. Test a browser without `SpeechRecognition`/`webkitSpeechRecognition`. Verify **Listen** is disabled with unsupported guidance and **Catch me up** still provides the text fallback.
-7. Start playback and then start recognition in separate attempts; background the tab during each. Verify playback/listening is cancelled, does not resume automatically, and no action is executed.
+1. In a fresh browser profile, verify that no **Voice briefing** launcher is rendered and
+   that no `/api/voice/capabilities` or `/api/voice/briefing` request is issued. Enable
+   **Voice briefings · Experimental** in Settings, verify the launcher appears without a
+   reload, and verify that it survives a full page reload.
+2. Open **Voice briefing**, verify the vendor-processing disclosure appears before the first recognition attempt, and verify that no microphone prompt appears until **I understand** and then **Listen** are selected.
+3. Select **Catch me up**. Verify one `GET /api/voice/briefing?scope=all` returns JSON, the same briefing is visible as text, and supported speech playback starts only from that user action.
+4. Select **Listen**, grant microphone permission, and exercise a briefing command, a numbered `open` command, and `repeat`.
+5. Stage `stop task N` or `follow up task N to ...`. Verify no mutation request occurs before a separate **Confirm action** selection or recognized `confirm`; verify `cancel` leaves state unchanged. After confirmation, verify a text request uses the normal task or plan API and no request contains raw audio.
+6. Deny microphone permission in a fresh browser profile. Verify the UI reports that access was not allowed, still provides the text briefing, and does not repeatedly or silently prompt.
+7. Test a browser without `SpeechRecognition`/`webkitSpeechRecognition`. Verify **Listen** is disabled with unsupported guidance and **Catch me up** still provides the text fallback.
+8. Start playback and then start recognition in separate attempts; background the tab during each. Verify playback/listening is cancelled, does not resume automatically, and no action is executed.
 
 ### Android installed PWA
 
@@ -128,22 +162,15 @@ not deploy or replace that runtime. Source revisions were checked during this
 fix; no live user instance endpoint was available to independently inspect its
 currently deployed responses.
 
-### Experimental desktop preference
+### The opt-in also gates the desktop app
 
-Desktop voice is **Experimental and off by default**, including installations
-that have already acknowledged the voice disclosure. Enable **Experimental desktop
-voice** in Settings (under **Integrations** for administrators). This explicit
-choice is saved locally for the signed-in account and instance on this device.
-Switching accounts or instances cancels the previous voice session and loads that
-account's own choice. Browser voice behavior is independent of this preference.
-
-Enabling the option does not start audio or ask for microphone permission. While
-off, voice entry points are hidden and the controller cannot request briefings,
-start playback, or request microphone access. Disabling aborts briefing requests,
-cancels active speech and microphone checks, releases tracks (including streams
-that arrive after cancellation), clears pending actions, and rejects late results.
-An already submitted, confirmed task action cannot be undone; disabling prevents
-its follow-on voice refresh or playback.
+The desktop app uses the same **Voice briefings · Experimental** opt-in as every
+other runtime; see [Enabling Voice Briefings](#enabling-voice-briefings). Desktop
+installations that had already acknowledged the voice disclosure are still off
+until that explicit choice is made, and the choice is scoped to the signed-in
+account, the selected instance, and this device. While the option is off, voice
+entry points are hidden and the controller cannot request briefings, start
+playback, or request microphone access.
 
 ### Microphone access is separate from recognition
 

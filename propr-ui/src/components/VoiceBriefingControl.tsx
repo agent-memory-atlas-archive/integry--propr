@@ -14,7 +14,7 @@ import {
   X,
 } from 'lucide-react';
 import type { VoiceBriefingItem } from '@propr/shared';
-import { useDesktopVoicePreference } from '../hooks/useDesktopVoicePreference';
+import { useVoicePreference } from '../hooks/useVoicePreference';
 import { isDesktopRuntime } from '../config/runtimeMode';
 import { useVoiceBriefing, type VoiceBriefingPhase } from '../hooks/useVoiceBriefing';
 
@@ -87,7 +87,7 @@ function BriefingItem({ item, onOpen }: { item: VoiceBriefingItem; onOpen: () =>
 }
 
 export default function VoiceBriefingControl() {
-  const { enabled, key, connection } = useDesktopVoicePreference();
+  const { enabled, key, connection } = useVoicePreference();
   return enabled ? <EnabledVoiceBriefingControl key={`${key}:${connection?.transportScope}`} /> : null;
 }
 
