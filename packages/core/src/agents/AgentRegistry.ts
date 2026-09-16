@@ -14,11 +14,9 @@ import { closeAgentImagePreparationQueue, enqueueAgentImagePreparation } from '.
 import { isAgentImageDiskPressureError } from './agentImageBuildCapacity.js';
 import { areAgentImagesAvailable, captureRuntimePackageStateVersion, hasRuntimePackageStateChanged } from './agentRegistryRuntimeState.js';
 import {
-    logUnifiedAgentImageCircuitOpen,
-    recordUnifiedAgentImageFailure,
-    scheduleUnifiedAgentImageRetry,
-    startUnifiedAgentImageRecovery,
-    type UnavailableUnifiedAgentImage,
+    deferCircuitOpenInspection, inspectUnifiedAgentImageWhileCircuitOpen, logUnifiedAgentImageCircuitOpen,
+    recordUnifiedAgentImageFailure, scheduleUnifiedAgentImageRetry, startUnifiedAgentImageRecovery,
+    type CircuitOpenInspectionState, type UnavailableUnifiedAgentImage,
 } from './unifiedAgentImageRecovery.js';
 
 export type { AgentRegistryOperationalStatus } from './agentRegistryTypes.js';
@@ -48,6 +46,7 @@ export class AgentRegistry {
     private unifiedAgentImageRetryTimer: NodeJS.Timeout | null = null;
     private imagePreparationOwner = false;
     private imageRecoveryGeneration = 0;
+    private circuitOpenInspection: CircuitOpenInspectionState = { after: 0, pending: null };
     private goalCapabilityProbe = new GoalCapabilityProbe();
     private syntheticAgents = new SyntheticAgentRegistry(this.agents, this.agentsByAlias);
 
@@ -444,6 +443,7 @@ export class AgentRegistry {
     }
 
     private startWorkerOwnedImageRecovery(fromTimer = false): Promise<void> {
+        if (this.unavailableUnifiedAgentImage?.circuitBreakerOpen) return inspectUnifiedAgentImageWhileCircuitOpen(this.circuitOpenInspection, this.pendingBackgroundRefresh, () => this.refresh());
         const firstAgent = this.agents.values().next().value as Agent | undefined;
         const imageTag = this.unavailableUnifiedAgentImage?.imageTag || firstAgent?.config.dockerImage;
         const generation = this.imageRecoveryGeneration;
@@ -507,10 +507,8 @@ export class AgentRegistry {
         });
         this.clearUnifiedAgentImageRetry();
         this.unavailableUnifiedAgentImage = result.state;
-        if (!result.shouldRetry) {
-            logUnifiedAgentImageCircuitOpen(imageTag, error, result.state.retryCount, !!result.state.operatorActionRequired);
-            return;
-        }
+        deferCircuitOpenInspection(this.circuitOpenInspection);
+        if (!result.shouldRetry) return logUnifiedAgentImageCircuitOpen(imageTag, error, result.state.retryCount, !!result.state.operatorActionRequired);
         this.scheduleUnifiedAgentImageRetry();
     }
 

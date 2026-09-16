@@ -4,6 +4,41 @@ export const UNIFIED_AGENT_IMAGE_RETRY_BASE_DELAY_MS = 5_000;
 export const UNIFIED_AGENT_IMAGE_RETRY_MAX_DELAY_MS = 5 * 60_000;
 export const UNIFIED_AGENT_IMAGE_RETRY_MAX_ATTEMPTS = 5;
 const UNIFIED_AGENT_IMAGE_RETRY_JITTER_RATIO = 0.25;
+export const UNIFIED_AGENT_IMAGE_CIRCUIT_INSPECTION_INTERVAL_MS = 60_000;
+
+export interface CircuitOpenInspectionState {
+    after: number;
+    pending: Promise<void> | null;
+}
+
+/** The caller just observed the image missing locally; hold the next circuit-open inspection for a full interval. */
+export function deferCircuitOpenInspection(state: CircuitOpenInspectionState): void {
+    state.after = Date.now() + UNIFIED_AGENT_IMAGE_CIRCUIT_INSPECTION_INTERVAL_MS;
+}
+
+/**
+ * An open circuit only stops preparation requests and retry timers; it must
+ * not leave a consumer process permanently degraded after the worker has
+ * prepared the image. Re-inspect local Docker state on a bounded interval so
+ * a successful inspect-only refresh can clear the failure; this performs no
+ * Docker build and no queue work.
+ */
+export function inspectUnifiedAgentImageWhileCircuitOpen(
+    state: CircuitOpenInspectionState,
+    pendingBackgroundRefresh: Promise<void> | null,
+    refresh: () => Promise<void>,
+): Promise<void> {
+    if (pendingBackgroundRefresh) return pendingBackgroundRefresh;
+    if (state.pending) return state.pending;
+    if (Date.now() < state.after) return Promise.resolve();
+    deferCircuitOpenInspection(state);
+    state.pending = refresh()
+        .catch(error => {
+            logger.error({ error: (error as Error).message }, 'Inspect-only agent image check failed while the recovery circuit is open');
+        })
+        .finally(() => { state.pending = null; });
+    return state.pending;
+}
 
 export interface UnavailableUnifiedAgentImage {
     imageTag?: string;
