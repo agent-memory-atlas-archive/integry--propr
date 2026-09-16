@@ -1,8 +1,12 @@
 export const LEGACY_SUMMARY_BRANCH = 'HEAD';
 
+// Git forbids ASCII whitespace in refs, but Unicode whitespace (e.g. U+00A0)
+// is a valid branch character and must survive normalization.
+const ASCII_WHITESPACE_EDGES = /^[ \t\n\r\f\v]+|[ \t\n\r\f\v]+$/g;
+
 export function normalizeSummaryBranch(branch: string | null | undefined): string | undefined {
   if (typeof branch !== 'string') return undefined;
-  const normalized = branch.trim();
+  const normalized = branch.replace(ASCII_WHITESPACE_EDGES, '');
   return normalized || undefined;
 }
 

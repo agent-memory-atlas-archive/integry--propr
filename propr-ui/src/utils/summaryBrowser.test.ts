@@ -16,4 +16,11 @@ describe('summary browser branch resolution', () => {
     expect(summaryBrowserPath('integry', 'propr', 'release/2026 Q1'))
       .toBe('/summaries/integry/propr?branch=release%2F2026%20Q1');
   });
+
+  test('preserves Unicode whitespace that Git allows in branch names', () => {
+    expect(resolveSummaryBranch('feature/a\u00a0', undefined)).toBe('feature/a\u00a0');
+    expect(resolveSummaryBranch(undefined, '\tfeature/a\u00a0\n')).toBe('feature/a\u00a0');
+    expect(summaryBrowserPath('integry', 'propr', 'feature/a\u00a0'))
+      .toBe('/summaries/integry/propr?branch=feature%2Fa%C2%A0');
+  });
 });
