@@ -5,8 +5,7 @@ import { RedisClientType } from 'redis';
 import { Queue, Job } from 'bullmq';
 import { Knex } from 'knex';
 import { sendSafeJson } from './jsonResponse.js';
-import { previewMediaReader, taskPreviewSource } from '../services/previewMediaProjection.js';
-import type { PublishedVisualPreview } from '@propr/shared';
+import { previewMediaReader, projectTaskPreviewMedia } from '../services/previewMediaProjection.js';
 
 interface JobData {
     repoOwner?: string; repoName?: string; number?: number;
@@ -29,8 +28,7 @@ interface JobReturnValue {
 interface TaskHistoryRoutesDeps { redisClient: RedisClientType; taskQueue: Queue; db: Knex; previewReader?: typeof previewMediaReader }
 
 export function createTaskHistoryRoutes(deps: TaskHistoryRoutesDeps) {
-  const { redisClient, taskQueue, db } = deps;
-  const previewReader = deps.previewReader ?? previewMediaReader;
+  const { redisClient, taskQueue, db, previewReader = previewMediaReader } = deps;
 
   async function getTaskHistory(req: FlatRequest, res: Response): Promise<void> {
     try {
@@ -38,14 +36,7 @@ export function createTaskHistoryRoutes(deps: TaskHistoryRoutesDeps) {
 
       const dbResult = await getHistoryFromDb(db, taskId, previewReader);
       if (dbResult) {
-        sendSafeJson(res, redactVisualPreviewValue({
-          taskId,
-          history: dbResult.history,
-          taskInfo: dbResult.taskInfo,
-          usageMetrics: dbResult.usageMetrics,
-          usageMetricRecords: dbResult.usageMetricRecords,
-          ...(dbResult.previewMedia.length ? { previewMedia: dbResult.previewMedia } : {})
-        }));
+        sendSafeJson(res, redactVisualPreviewValue({ taskId, ...dbResult }));
         return;
       }
       let history: Array<Record<string, unknown>> = [];
@@ -114,16 +105,12 @@ async function fetchUsageMetrics(
   return { usageMetrics, usageMetricRecords };
 }
 
-async function getHistoryFromDb(
-  db: Knex,
-  taskId: string,
-  previewReader: typeof previewMediaReader
-): Promise<{
+async function getHistoryFromDb(db: Knex, taskId: string, previewReader: typeof previewMediaReader): Promise<{
   history: Array<Record<string, unknown>>;
   taskInfo: Record<string, unknown>;
   usageMetrics: Record<string, unknown> | null;
   usageMetricRecords: Array<{ agent: string; metricKey: string; metricValue: number }>;
-  previewMedia: PublishedVisualPreview[];
+  previewMedia?: Awaited<ReturnType<typeof projectTaskPreviewMedia>>;
 } | null> {
   try {
     const task = await db('tasks').where({ task_id: taskId }).first();
@@ -150,32 +137,10 @@ async function getHistoryFromDb(
 
     applyMetadataFlags(taskInfo, history);
 
-    return { history, taskInfo, ...usage, previewMedia };
+    return { history, taskInfo, ...usage, ...(previewMedia.length ? { previewMedia } : {}) };
   } catch (error) {
     console.error('Error fetching task history from SQLite:', error);
     return null;
-  }
-}
-
-/** Visual previews are optional evidence; failures must never hide the task history. */
-async function projectTaskPreviewMedia(
-  task: Record<string, unknown>,
-  historyRecords: Array<Record<string, unknown>>,
-  previewReader: typeof previewMediaReader
-): Promise<PublishedVisualPreview[]> {
-  try {
-    // Prefer the newest record that carries this run's completion comment.
-    const latestRecord = [...historyRecords].reverse().find(record => {
-      try {
-        const metadata = typeof record.metadata === 'string' ? JSON.parse(record.metadata) : record.metadata;
-        return Boolean(metadata?.githubComment);
-      } catch { return false; }
-    }) ?? historyRecords[historyRecords.length - 1];
-    const source = taskPreviewSource({ ...task, latest_metadata: latestRecord?.metadata });
-    const [projection] = await previewReader.project([source], 8, 'gallery');
-    return projection?.previews ?? [];
-  } catch {
-    return [];
   }
 }
 

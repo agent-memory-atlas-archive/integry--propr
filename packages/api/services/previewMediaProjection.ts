@@ -130,6 +130,23 @@ export function createPreviewMediaReader(deps: Dependencies = {}) {
 
 export const previewMediaReader = createPreviewMediaReader();
 
+/** Visual previews are optional evidence; failures must never hide the task history. */
+export async function projectTaskPreviewMedia(
+  task: Record<string, unknown>,
+  historyRecords: Array<Record<string, unknown>>,
+  reader: Pick<typeof previewMediaReader, 'project'> = previewMediaReader,
+): Promise<PublishedVisualPreview[]> {
+  try {
+    // Prefer the newest record that carries this run's completion comment.
+    const latestRecord = [...historyRecords].reverse().find(entry => record(entry.metadata).githubComment)
+      ?? historyRecords[historyRecords.length - 1];
+    const [projection] = await reader.project([taskPreviewSource({ ...task, latest_metadata: latestRecord?.metadata })], 8, 'gallery');
+    return projection?.previews ?? [];
+  } catch {
+    return [];
+  }
+}
+
 // Mirrors the core renderer's marker; kept local so identity parsing stays independent of core services.
 const VISUAL_PREVIEW_MARKER = '<!-- propr-visual-preview -->';
 
