@@ -181,6 +181,14 @@ function taskDescription(initial: Record<string, unknown>): string | undefined {
     ?? cleanTaskDescription(issueRef.title);
 }
 
+function resolveCommandMode(
+  historyMetadata: Record<string, unknown>,
+  initial: Record<string, unknown>,
+): string | undefined {
+  if (typeof historyMetadata.commandMode === 'string') return historyMetadata.commandMode;
+  return typeof initial.commandMode === 'string' ? initial.commandMode : undefined;
+}
+
 function notificationRecap(metadata: Record<string, unknown>): string | undefined {
   const direct = compactDisplayText(metadata.notificationRecap);
   if (direct) return direct;
@@ -783,6 +791,15 @@ export class NotificationProjectionService {
     );
   }
 
+  private async loadCompletedHistoryMetadata(payload: TaskUpdatePayload): Promise<Record<string, unknown>> {
+    if (payload.state !== 'completed') return {};
+    const history = await this.database('task_history')
+      .select('metadata')
+      .where({ task_id: payload.taskId, timestamp: payload.timestamp })
+      .first() as { metadata?: unknown } | undefined;
+    return parseJsonObject(history?.metadata);
+  }
+
   private async loadTaskContext(payload: TaskUpdatePayload): Promise<TaskContext | undefined> {
     const task = await this.database('tasks')
       .select('repository', 'issue_number', 'pr_number', 'task_type', 'initial_job_data')
@@ -790,13 +807,7 @@ export class NotificationProjectionService {
       .first() as Record<string, unknown> | undefined;
     if (!task) return undefined;
     const initial = parseJsonObject(task.initial_job_data);
-    const history = payload.state === 'completed'
-      ? await this.database('task_history')
-        .select('metadata')
-        .where({ task_id: payload.taskId, timestamp: payload.timestamp })
-        .first() as { metadata?: unknown } | undefined
-      : undefined;
-    const historyMetadata = parseJsonObject(history?.metadata);
+    const historyMetadata = await this.loadCompletedHistoryMetadata(payload);
     const prResult = typeof historyMetadata.prResult === 'object' && historyMetadata.prResult !== null
       ? historyMetadata.prResult as Record<string, unknown>
       : {};
@@ -815,11 +826,7 @@ export class NotificationProjectionService {
       ?? positiveInteger(prResult.prNumber)
       ?? (isPullRequestTask ? positiveInteger(initial.number) : undefined);
     const isReview = taskType === 'review' || historyMetadata.commandMode === 'review';
-    const commandMode = typeof historyMetadata.commandMode === 'string'
-      ? historyMetadata.commandMode
-      : typeof initial.commandMode === 'string'
-        ? initial.commandMode
-        : undefined;
+    const commandMode = resolveCommandMode(historyMetadata, initial);
     const storedIssueNumber = positiveInteger(task.issue_number);
     const issueNumber = positiveInteger(payload.issueNumber) ?? storedIssueNumber;
     return {

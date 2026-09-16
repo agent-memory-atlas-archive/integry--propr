@@ -32,6 +32,19 @@ type TerminalStateParams = Pick<
   'stateManager' | 'taskId' | 'claudeResult' | 'postProcessingResult' | 'commitResult'
 >;
 
+function buildTerminalNotificationRecap(params: TerminalStateParams, status: string) {
+  const { claudeResult, postProcessingResult, commitResult } = params;
+  return buildWorkNotificationRecap(
+    claudeResult?.summary ?? claudeResult?.finalResult?.result ?? commitResult?.commitMessage,
+    {
+      filesChanged: claudeResult?.modifiedFiles.length,
+      createdPullRequest: Boolean(postProcessingResult?.pr),
+      noChanges: !commitResult && !postProcessingResult?.pr,
+      partial: status === 'partial_with_pr'
+    }
+  );
+}
+
 export async function markTaskTerminalState(params: TerminalStateParams): Promise<void> {
   const { stateManager, taskId, claudeResult, postProcessingResult, commitResult } = params;
   const status = getTaskCompletionStatus(claudeResult, postProcessingResult);
@@ -45,15 +58,7 @@ export async function markTaskTerminalState(params: TerminalStateParams): Promis
     prNumber: postProcessingResult?.pr?.number ?? undefined,
     prUrl: postProcessingResult?.pr?.url ?? undefined,
     commitResult: commitResultData,
-    notificationRecap: buildWorkNotificationRecap(
-      claudeResult?.summary ?? claudeResult?.finalResult?.result ?? commitResult?.commitMessage,
-      {
-        filesChanged: claudeResult?.modifiedFiles.length,
-        createdPullRequest: Boolean(postProcessingResult?.pr),
-        noChanges: !commitResult && !postProcessingResult?.pr,
-        partial: status === 'partial_with_pr'
-      }
-    )
+    notificationRecap: buildTerminalNotificationRecap(params, status)
   };
 
   if (status === 'claude_processing_failed') {

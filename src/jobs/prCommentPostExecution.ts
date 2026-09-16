@@ -256,6 +256,20 @@ async function preparePostExecutionPreviews(state: ReadyPostExecutionState, repo
     });
 }
 
+function buildPostExecutionRecap(
+    jobData: CommentJobData,
+    completion: Pick<PublicationCompletion, 'commitResult' | 'changesSummary'>,
+    partial: boolean,
+): string {
+    const { commitResult, changesSummary } = completion;
+    return buildWorkNotificationRecap(changesSummary, {
+        commandMode: jobData.commandMode || 'default',
+        filesChanged: commitResult?.filesChanged?.length,
+        noChanges: !commitResult,
+        partial,
+    });
+}
+
 export async function handlePostExecution(params: PostExecutionParams, taskUrl: string): Promise<{ commitHash?: string; partial: boolean }> {
     const {
         state,
@@ -327,12 +341,7 @@ export async function handlePostExecution(params: PostExecutionParams, taskUrl: 
                     ...context.publication.continuation, publication_bundle: null, publication_completion: null,
                 } : undefined,
                 githubComment: { url: completionComment.data.html_url, body: completionComment.data.body },
-                notificationRecap: buildWorkNotificationRecap(changesSummary, {
-                    commandMode: job.data.commandMode || 'default',
-                    filesChanged: commitResult?.filesChanged?.length,
-                    noChanges: !commitResult,
-                    partial,
-                }),
+                notificationRecap: buildPostExecutionRecap(job.data, { commitResult, changesSummary }, partial),
                 ...(unprocessedReviewComments.length > 0 && { consumedReviewCommentIds: unprocessedReviewComments.map(c => c.id) }),
                 ...(partial && { incompleteExecution: { reason: terminationReason } }),
                 ...ultrafixHistoryMeta,
