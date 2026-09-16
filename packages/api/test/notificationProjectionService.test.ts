@@ -34,6 +34,8 @@ describe('notification lifecycle projection', { concurrency: false }, () => {
   test('creates exactly one plan-ready event for the draft owner', async () => {
     await database('task_drafts').insert({
       draft_id: 'draft-1', user_id: 'draft-owner', repository: 'integry/propr',
+      name: 'Improve Inbox notifications',
+      plan_json: JSON.stringify([{ title: 'Swipe dismissal' }, { title: 'Rich recaps' }]),
     });
     const payload = {
       eventType: DRAFT_UPDATE,
@@ -51,6 +53,10 @@ describe('notification lifecycle projection', { concurrency: false }, () => {
 
     const events = await database('notification_events').select('*');
     assert.deepEqual(events.map(event => event.kind), ['plan']);
+    assert.equal(
+      events[0].body,
+      '“Improve Inbox notifications” is ready with 2 planned tasks.',
+    );
     assert.deepEqual(JSON.parse(events[0].advertised_actions_json), ['refine', 'approve_execute', 'dismiss']);
     assert.doesNotMatch(JSON.stringify(events[0]), /SECRET|run-secret/);
     assert.deepEqual(
@@ -72,7 +78,11 @@ describe('notification lifecycle projection', { concurrency: false }, () => {
     await database('task_history').insert({
       task_id: 'implementation-1', state: 'completed', timestamp: implementationAt,
       metadata: JSON.stringify({
-        prResult: { prNumber: 42, prUrl: 'https://evil.example/SECRET-token' },
+        prResult: {
+          prNumber: 42,
+          prUrl: 'https://evil.example/SECRET-token',
+          notificationRecap: 'Added notification deduplication and covered the refresh race.',
+        },
         error: { stack: 'SECRET STACK' },
       }),
     });
@@ -102,7 +112,10 @@ describe('notification lifecycle projection', { concurrency: false }, () => {
     });
     await database('task_history').insert({
       task_id: 'pr-comments-batch-integry-propr-7', state: 'completed',
-      timestamp: reviewAt, metadata: JSON.stringify({ commandMode: 'review' }),
+      timestamp: reviewAt, metadata: JSON.stringify({
+        commandMode: 'review',
+        notificationRecap: 'Score 8/10 · 1 issue found: Restore unread count on undo',
+      }),
     });
     await projection.projectTaskUpdate({
       eventType: TASK_UPDATE,
@@ -124,11 +137,11 @@ describe('notification lifecycle projection', { concurrency: false }, () => {
     assert.deepEqual(events.map(event => ({ title: event.title, body: event.body })), [
       {
         title: 'Keep only the newest actionable Inbox update.',
-        body: 'PR #42 is ready for review.',
+        body: 'Added notification deduplication and covered the refresh race.',
       },
       {
         title: 'Review completed for PR #7',
-        body: 'Review PR #7 notification behavior',
+        body: 'Score 8/10 · 1 issue found: Restore unread count on undo',
       },
     ]);
     const implementationPrEvent = events.find(event =>
@@ -139,6 +152,47 @@ describe('notification lifecycle projection', { concurrency: false }, () => {
     );
     assert.doesNotMatch(JSON.stringify(events), /evil\.example|SECRET/);
     assert.equal(await countNotificationEvents(database), 2);
+  });
+
+  test('persists the actual fix and merge outcomes in completed PR notifications', async () => {
+    const completions = [
+      {
+        taskId: 'fix-pr-81', commandMode: 'fix', timestamp: iso(),
+        recap: 'Corrected the stale unread count and added a regression test.',
+        title: 'Fix run completed for PR #81',
+      },
+      {
+        taskId: 'merge-pr-81', commandMode: 'merge', timestamp: iso(1_000),
+        recap: 'Merged main into feature/inbox and resolved conflicts in 2 files.',
+        title: 'Merge completed for PR #81',
+      },
+    ];
+    await database('tasks').insert(completions.map(completion => ({
+      task_id: completion.taskId, repository: 'integry/propr', issue_number: 81,
+      pr_number: 81, task_type: 'pr-comment', initial_job_data: '{}',
+    })));
+    await database('task_history').insert(completions.map(completion => ({
+      task_id: completion.taskId, state: 'completed', timestamp: completion.timestamp,
+      metadata: JSON.stringify({
+        commandMode: completion.commandMode,
+        notificationRecap: completion.recap,
+      }),
+    })));
+
+    for (const completion of completions) {
+      clock = Date.parse(completion.timestamp);
+      await projection.projectTaskUpdate({
+        eventType: TASK_UPDATE, taskId: completion.taskId, state: 'completed',
+        repository: 'integry/propr', timestamp: completion.timestamp,
+      });
+    }
+
+    const events = await database('notification_events')
+      .where({ kind: 'pull_request' })
+      .orderBy('occurred_at')
+      .select('title', 'body');
+    assert.deepEqual(events, completions.map(({ title, recap }) => ({ title, body: recap })));
+    assert.equal(await countUndismissedNotificationReceipts(database, 'pull_request'), 2);
   });
 
   test('ignores stale task transitions and emits one stalled event per unchanged activity', async () => {
@@ -333,6 +387,10 @@ describe('notification lifecycle projection', { concurrency: false }, () => {
     await projection.projectIndexingUpdate(payload);
 
     assert.equal(await countNotificationEvents(database), 1);
+    assert.equal(
+      (await database('notification_events').first('body')).body,
+      'Indexing branch 1719/safe-branch stopped before completion.',
+    );
     assert.deepEqual(
       await database('notification_user_states').pluck('user_id'),
       ['admin-user'],
@@ -469,6 +527,8 @@ describe('notification lifecycle projection', { concurrency: false }, () => {
 
     let events = await database('notification_events').where({ kind: 'system_failure' });
     assert.equal(events.length, 1);
+    assert.equal(events[0].title, 'System component unhealthy: redis');
+    assert.equal(events[0].body, 'redis reported “disconnected”; administrator attention may be required.');
     assert.equal(
       await countUndismissedNotificationReceipts(database, 'system_failure'),
       0,

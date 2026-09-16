@@ -41,11 +41,22 @@ describe('Inbox notification presentation', () => {
       'Plan ready',
       'Implementation completed',
       'Review completed',
-      'PR attention',
+      'PR ready',
       'Indexing failed',
       'System failure',
     ]);
     expect(new Set(notifications.map(notificationGroup))).toEqual(new Set(INBOX_GROUPS));
+  });
+
+  test('labels completed pull-request follow-ups by their persisted outcome type', () => {
+    const pullRequest = {
+      kind: 'pull_request', severity: 'info',
+      target: { type: 'pull_request', repository: 'i/p', prNumber: 2 },
+    };
+    expect(notificationKindLabel(item({ ...pullRequest, metadata: { completionType: 'fix' } })))
+      .toBe('Fix completed');
+    expect(notificationKindLabel(item({ ...pullRequest, metadata: { completionType: 'merge' } })))
+      .toBe('Merge completed');
   });
 
   test('prefers server actions and derives stable fallback destinations', () => {

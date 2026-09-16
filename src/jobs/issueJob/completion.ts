@@ -15,6 +15,7 @@ import {
 import type { CommitResult, ClaudeCodeResponse } from '@propr/core';
 import type { PostProcessingResult } from '../issueJobHelpers.js';
 import type { TaskCompletionParams } from './types.js';
+import { buildWorkNotificationRecap } from '../notificationRecap.js';
 
 export function getTaskCompletionStatus(claudeResult: ClaudeCodeResponse | null, postProcessingResult: PostProcessingResult | null): string {
   if (postProcessingResult?.pr && claudeResult && resolveAgentTerminationReason(claudeResult)) {
@@ -43,7 +44,16 @@ export async function markTaskTerminalState(params: TerminalStateParams): Promis
     prCreated: !!postProcessingResult?.pr,
     prNumber: postProcessingResult?.pr?.number ?? undefined,
     prUrl: postProcessingResult?.pr?.url ?? undefined,
-    commitResult: commitResultData
+    commitResult: commitResultData,
+    notificationRecap: buildWorkNotificationRecap(
+      claudeResult?.summary ?? claudeResult?.finalResult?.result ?? commitResult?.commitMessage,
+      {
+        filesChanged: claudeResult?.modifiedFiles.length,
+        createdPullRequest: Boolean(postProcessingResult?.pr),
+        noChanges: !commitResult && !postProcessingResult?.pr,
+        partial: status === 'partial_with_pr'
+      }
+    )
   };
 
   if (status === 'claude_processing_failed') {

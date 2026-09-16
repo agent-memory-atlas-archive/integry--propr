@@ -342,6 +342,15 @@ describe('notification service', { concurrency: false }, () => {
             dismissed?.notification.dismissedAt
         );
 
+        const restored = await service.restoreNotification('user-a', 'event-b');
+        assert.equal(restored?.notification.dismissedAt, null);
+        assert.equal(restored?.unreadCount, 2);
+        const restoredAgain = await service.restoreNotification('user-a', 'event-b');
+        assert.equal(restoredAgain?.notification.dismissedAt, null);
+        assert.equal(await service.restoreNotification('user-b', 'event-a'), null);
+
+        await service.dismissNotification('user-a', 'event-b');
+
         assert.deepEqual(
             (await service.listNotifications('user-a')).notifications.map(item => item.id),
             ['event-c', 'event-a']

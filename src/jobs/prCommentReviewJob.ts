@@ -26,6 +26,7 @@ import {
 } from './prTaskTitleHelpers.js';
 import type { Redis } from 'ioredis';
 import { buildWorkEvidenceMarker, filterRealComments } from '../shared/workEvidenceMarker.js';
+import { buildReviewNotificationRecap } from './notificationRecap.js';
 
 export type { ReviewAssignment, ReviewResult } from './prReviewRunner.js';
 
@@ -388,6 +389,7 @@ export async function executeReviewProcessing(params: ExecuteReviewParams): Prom
                 model: r.assignment.model, label: r.assignment.label,
                 success: r.analysisResult.success, commentId: r.commentId, commentUrl: r.commentUrl, error: r.error,
             })),
+            notificationRecap: buildReviewNotificationRecap(reviewResults),
             ...ultrafixHistoryMeta,
         },
     });

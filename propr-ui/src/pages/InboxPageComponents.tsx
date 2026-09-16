@@ -1,5 +1,5 @@
 import { PreviewThumbnails } from '../components/PreviewMedia';
-import React from 'react';
+import React, { useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { isNotificationPreviewEligible, type Notification } from '@propr/shared';
 import {
@@ -11,6 +11,7 @@ import {
   Loader2,
   RefreshCw,
   ServerCrash,
+  Trash2,
 } from 'lucide-react';
 import NotificationActions from '../components/Inbox/NotificationActions';
 import type { InboxGroup } from './inboxUtils';
@@ -66,59 +67,152 @@ export const InboxCard: React.FC<{
   mutationsEnabled: boolean;
 }> = ({ notification, onDismiss, onOpen, onChanged, mutationsEnabled }) => {
   const unread = notification.readAt === null;
+  const canSwipeDismiss = mutationsEnabled && notification.actions.includes('dismiss');
+  const [swipeOffset, setSwipeOffset] = useState(0);
+  const [dragging, setDragging] = useState(false);
+  const gestureRef = useRef<{
+    pointerId: number;
+    startX: number;
+    startY: number;
+    horizontal: boolean | null;
+  } | null>(null);
+  const suppressClickRef = useRef(false);
+  const dismissThreshold = 96;
+
+  const finishSwipe = (commit: boolean) => {
+    const wasHorizontal = gestureRef.current?.horizontal === true;
+    gestureRef.current = null;
+    setDragging(false);
+    if (wasHorizontal) {
+      suppressClickRef.current = true;
+      window.setTimeout(() => { suppressClickRef.current = false; }, 250);
+    }
+    if (commit) {
+      setSwipeOffset(Math.max(window.innerWidth, 480));
+      void onDismiss(notification.id);
+    } else {
+      setSwipeOffset(0);
+    }
+  };
+
+  const onPointerDown = (event: React.PointerEvent<HTMLDivElement>) => {
+    if (!canSwipeDismiss || (event.pointerType !== 'touch' && event.pointerType !== 'pen')) return;
+    gestureRef.current = {
+      pointerId: event.pointerId,
+      startX: event.clientX,
+      startY: event.clientY,
+      horizontal: null,
+    };
+    event.currentTarget.setPointerCapture?.(event.pointerId);
+  };
+
+  const onPointerMove = (event: React.PointerEvent<HTMLDivElement>) => {
+    const gesture = gestureRef.current;
+    if (!gesture || gesture.pointerId !== event.pointerId) return;
+    const deltaX = event.clientX - gesture.startX;
+    const deltaY = event.clientY - gesture.startY;
+    if (gesture.horizontal === null && Math.max(Math.abs(deltaX), Math.abs(deltaY)) >= 8) {
+      gesture.horizontal = deltaX > 0 && Math.abs(deltaX) > Math.abs(deltaY) * 1.15;
+      if (!gesture.horizontal) {
+        finishSwipe(false);
+        return;
+      }
+      setDragging(true);
+    }
+    if (gesture.horizontal) {
+      event.preventDefault();
+      const width = event.currentTarget.getBoundingClientRect().width || window.innerWidth;
+      setSwipeOffset(Math.min(Math.max(0, deltaX), width));
+    }
+  };
+
+  const onPointerUp = (event: React.PointerEvent<HTMLDivElement>) => {
+    const gesture = gestureRef.current;
+    if (gesture?.pointerId !== event.pointerId) return;
+    finishSwipe(gesture.horizontal === true && event.clientX - gesture.startX >= dismissThreshold);
+  };
+
+  const onClickCapture = (event: React.MouseEvent<HTMLDivElement>) => {
+    if (!suppressClickRef.current) return;
+    suppressClickRef.current = false;
+    event.preventDefault();
+    event.stopPropagation();
+  };
+
   return (
-    <article className={`relative overflow-hidden rounded-xl border shadow-sm transition-colors ${
-      unread ? 'border-teal-200 bg-teal-50/40' : 'border-slate-200 bg-white'
-    }`}>
-      {unread && <span className="absolute inset-y-0 left-0 w-1 bg-teal-500" aria-hidden="true" />}
-      <DetailLink
-        notification={notification}
-        onOpen={onOpen}
-        className="block min-w-0 px-4 pb-2 pt-4 focus:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-teal-500"
+    <div
+      className="relative overflow-hidden rounded-xl bg-red-600"
+      style={{ touchAction: canSwipeDismiss ? 'pan-y' : undefined }}
+      onPointerDown={onPointerDown}
+      onPointerMove={onPointerMove}
+      onPointerUp={onPointerUp}
+      onPointerCancel={() => finishSwipe(false)}
+      onClickCapture={onClickCapture}
+    >
+      <div
+        className="pointer-events-none absolute inset-y-0 left-0 flex items-center gap-1.5 whitespace-nowrap px-3 text-sm font-semibold text-white"
+        aria-hidden="true"
       >
-        <div className="flex min-w-0 items-start gap-2">
-          <div className="min-w-0 flex-1">
-            <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs">
-              {unread && (
-                <span className="inline-flex items-center gap-1 font-semibold text-teal-700">
-                  <span className="h-2 w-2 rounded-full bg-teal-500" aria-hidden="true" />
-                  Unread
-                </span>
-              )}
-              <span className="font-medium text-slate-600">{notificationRepository(notification)}</span>
-              <span className="text-slate-300" aria-hidden="true">·</span>
-              <time dateTime={notification.occurredAt} title={new Date(notification.occurredAt).toLocaleString()} className="text-slate-500">
-                {formatRelativeTime(notification.occurredAt)}
-              </time>
-            </div>
-            <div className="mt-2 inline-flex rounded-md bg-slate-100 px-2 py-1 text-[11px] font-semibold uppercase tracking-wide text-slate-600">
-              {notificationKindLabel(notification)}
-            </div>
-            <h3 className={`mt-2 break-words text-sm leading-5 ${unread ? 'font-semibold text-slate-950' : 'font-medium text-slate-800'}`}>
-              {notification.title}
-            </h3>
-            <p className="mt-1 break-words text-sm leading-5 text-slate-600">{notification.body}</p>
-            {isNotificationPreviewEligible(notification) && <PreviewThumbnails media={notification.previewMedia} limit={1} />}
-          </div>
-          <ChevronRight className="mt-1 h-4 w-4 flex-none text-slate-400" aria-hidden="true" />
-        </div>
-      </DetailLink>
-      <div className="flex flex-wrap items-center justify-between gap-2 border-t border-slate-100 px-4 py-2.5">
+        <Trash2 className="h-4 w-4 shrink-0" />
+        <span>{swipeOffset >= dismissThreshold ? 'Release' : 'Dismiss'}</span>
+      </div>
+      <article
+        aria-label={notification.title}
+        style={{ transform: `translate3d(${swipeOffset}px, 0, 0)` }}
+        className={`relative overflow-hidden rounded-xl border shadow-sm transition-[transform,background-color,border-color] ${
+          dragging ? 'duration-0' : 'duration-200 ease-out'
+        } ${unread ? 'border-teal-200 bg-teal-50' : 'border-slate-200 bg-white'}`}
+      >
+        {unread && <span className="absolute inset-y-0 left-0 w-1 bg-teal-500" aria-hidden="true" />}
         <DetailLink
           notification={notification}
           onOpen={onOpen}
-          className="inline-flex min-h-11 items-center gap-1.5 rounded-md px-2 text-xs font-semibold text-teal-700 hover:bg-teal-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-teal-500"
+          className="block min-w-0 px-4 pb-2 pt-4 focus:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-teal-500"
         >
-          View details
+          <div className="flex min-w-0 items-start gap-2">
+            <div className="min-w-0 flex-1">
+              <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs">
+                {unread && (
+                  <span className="inline-flex items-center gap-1 font-semibold text-teal-700">
+                    <span className="h-2 w-2 rounded-full bg-teal-500" aria-hidden="true" />
+                    Unread
+                  </span>
+                )}
+                <span className="font-medium text-slate-600">{notificationRepository(notification)}</span>
+                <span className="text-slate-300" aria-hidden="true">·</span>
+                <time dateTime={notification.occurredAt} title={new Date(notification.occurredAt).toLocaleString()} className="text-slate-500">
+                  {formatRelativeTime(notification.occurredAt)}
+                </time>
+              </div>
+              <div className="mt-2 inline-flex rounded-md bg-slate-100 px-2 py-1 text-[11px] font-semibold uppercase tracking-wide text-slate-600">
+                {notificationKindLabel(notification)}
+              </div>
+              <h3 className={`mt-2 break-words text-sm leading-5 ${unread ? 'font-semibold text-slate-950' : 'font-medium text-slate-800'}`}>
+                {notification.title}
+              </h3>
+              <p className="mt-1 line-clamp-2 break-words text-sm leading-5 text-slate-600">{notification.body}</p>
+              {isNotificationPreviewEligible(notification) && <PreviewThumbnails media={notification.previewMedia} limit={1} />}
+            </div>
+            <ChevronRight className="mt-1 h-4 w-4 flex-none text-slate-400" aria-hidden="true" />
+          </div>
         </DetailLink>
-        <NotificationActions
-          notification={notification}
-          mutationsEnabled={mutationsEnabled}
-          onDismiss={() => onDismiss(notification.id)}
-          onChanged={onChanged}
-        />
-      </div>
-    </article>
+        <div className="flex flex-wrap items-center justify-between gap-2 border-t border-slate-100 px-4 py-2.5">
+          <DetailLink
+            notification={notification}
+            onOpen={onOpen}
+            className="inline-flex min-h-11 items-center gap-1.5 rounded-md px-2 text-xs font-semibold text-teal-700 hover:bg-teal-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-teal-500"
+          >
+            View details
+          </DetailLink>
+          <NotificationActions
+            notification={notification}
+            mutationsEnabled={mutationsEnabled}
+            onDismiss={() => onDismiss(notification.id)}
+            onChanged={onChanged}
+          />
+        </div>
+      </article>
+    </div>
   );
 };
 

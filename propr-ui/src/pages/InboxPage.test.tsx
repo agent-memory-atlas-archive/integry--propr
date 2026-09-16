@@ -10,6 +10,7 @@ import {
   dismissNotification,
   listNotifications,
   markNotificationRead,
+  restoreNotification,
 } from '../api/notificationApi';
 import { postTaskFollowup, stopTaskExecution } from '../api/proprApi';
 
@@ -29,6 +30,7 @@ vi.mock('../api/notificationApi', () => ({
   dismissAllNotifications: vi.fn(),
   dismissNotification: vi.fn(),
   markNotificationRead: vi.fn(),
+  restoreNotification: vi.fn(),
 }));
 vi.mock('../api/proprApi', () => ({
   postTaskFollowup: vi.fn(),
@@ -90,6 +92,7 @@ describe('Inbox page', () => {
     vi.mocked(dismissAllNotifications).mockReset();
     vi.mocked(dismissNotification).mockReset();
     vi.mocked(markNotificationRead).mockReset();
+    vi.mocked(restoreNotification).mockReset();
     vi.mocked(postTaskFollowup).mockReset();
     vi.mocked(stopTaskExecution).mockReset();
     commitUnreadCount.mockReset();
@@ -259,6 +262,79 @@ describe('Inbox page', () => {
     expect(await screen.findByText('Task one failed')).toBeInTheDocument();
     expect(screen.getByText(/Couldn't dismiss the notification/)).toBeInTheDocument();
     expect(refreshUnreadCount).toHaveBeenCalledTimes(1);
+  });
+
+  test('offers undo after dismissal and restores the notification without refetching it', async () => {
+    const notification = item('event-undo', 'Undo this dismissal');
+    vi.mocked(listNotifications).mockResolvedValue({ notifications: [notification], unreadCount: 1, nextCursor: null });
+    vi.mocked(dismissNotification).mockResolvedValue({
+      notification: notificationSchema.parse({
+        ...notification,
+        dismissedAt: '2026-08-24T12:01:00.000Z',
+      }),
+      unreadCount: 0,
+    });
+    vi.mocked(restoreNotification).mockResolvedValue({ notification, unreadCount: 1 });
+    renderInbox();
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Dismiss Undo this dismissal' }));
+    expect(screen.queryByText('Undo this dismissal')).not.toBeInTheDocument();
+    fireEvent.click(await screen.findByRole('button', { name: 'Undo' }));
+
+    expect(restoreNotification).toHaveBeenCalledWith('event-undo');
+    expect(await screen.findByText('Undo this dismissal')).toBeInTheDocument();
+    expect(commitUnreadCount).toHaveBeenCalledWith(1);
+  });
+
+  test('keeps an undone notification when an older refresh finishes afterward', async () => {
+    const notification = item('event-undo-race', 'Keep restored notification');
+    const staleRefresh = deferred<Awaited<ReturnType<typeof listNotifications>>>();
+    vi.mocked(listNotifications)
+      .mockResolvedValueOnce({ notifications: [notification], unreadCount: 1, nextCursor: null })
+      .mockReturnValueOnce(staleRefresh.promise);
+    vi.mocked(dismissNotification).mockResolvedValue({
+      notification: notificationSchema.parse({
+        ...notification,
+        dismissedAt: '2026-08-24T12:01:00.000Z',
+      }),
+      unreadCount: 0,
+    });
+    vi.mocked(restoreNotification).mockResolvedValue({ notification, unreadCount: 1 });
+    renderInbox();
+
+    await screen.findByText('Keep restored notification');
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh Inbox' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Dismiss Keep restored notification' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Undo' }));
+    expect(await screen.findByText('Keep restored notification')).toBeInTheDocument();
+
+    commitUnreadCount.mockClear();
+    await act(async () => staleRefresh.resolve({ notifications: [], unreadCount: 0, nextCursor: null }));
+    expect(screen.getByText('Keep restored notification')).toBeInTheDocument();
+    expect(commitUnreadCount).not.toHaveBeenCalledWith(0);
+  });
+
+  test('reveals a dismissal affordance while swiping right and dismisses past the threshold', async () => {
+    const notification = item('event-swipe', 'Swipe this notification');
+    vi.mocked(listNotifications).mockResolvedValue({ notifications: [notification], unreadCount: 1, nextCursor: null });
+    vi.mocked(dismissNotification).mockResolvedValue({
+      notification: notificationSchema.parse({
+        ...notification,
+        dismissedAt: '2026-08-24T12:01:00.000Z',
+      }),
+      unreadCount: 0,
+    });
+    renderInbox();
+
+    const surface = (await screen.findByRole('article', { name: 'Swipe this notification' })).parentElement!;
+    fireEvent.pointerDown(surface, { pointerId: 1, pointerType: 'touch', clientX: 12, clientY: 20 });
+    fireEvent.pointerMove(surface, { pointerId: 1, pointerType: 'touch', clientX: 132, clientY: 22 });
+    expect(screen.getByText('Release')).toBeInTheDocument();
+    fireEvent.pointerUp(surface, { pointerId: 1, pointerType: 'touch', clientX: 132, clientY: 22 });
+
+    expect(screen.queryByText('Swipe this notification')).not.toBeInTheDocument();
+    await waitFor(() => expect(dismissNotification).toHaveBeenCalledWith('event-swipe'));
+    expect(await screen.findByRole('button', { name: 'Undo' })).toBeInTheDocument();
   });
 
   test('confirms and clears all notifications, including unloaded pages', async () => {

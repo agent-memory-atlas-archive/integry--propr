@@ -24,6 +24,7 @@ import {
 } from './mergeConflictHelpers.js';
 import { resolveDefaultAgentAndModel } from './prCommentAgentUtils.js';
 import type { GitHubToken } from './githubTypes.js';
+import { buildMergeNotificationRecap } from './notificationRecap.js';
 
 const MAX_CONFLICT_MARKER_SCAN_BYTES = 1024 * 1024;
 async function buildMergeCompletionHistoryMetadata(options: {
@@ -34,6 +35,8 @@ async function buildMergeCompletionHistoryMetadata(options: {
     headBranch: string;
     model: string;
     commitHash: string;
+    conflictedFiles?: readonly string[];
+    summary?: unknown;
     correlatedLogger: Logger;
 }): Promise<Record<string, unknown>> {
     let previousHistoryMetadata: Record<string, unknown> = {};
@@ -63,6 +66,12 @@ async function buildMergeCompletionHistoryMetadata(options: {
         headBranch: options.headBranch,
         model: options.model,
         commitHash: options.commitHash,
+        notificationRecap: buildMergeNotificationRecap({
+            baseBranch: options.baseBranch,
+            headBranch: options.headBranch,
+            conflictedFiles: options.conflictedFiles,
+            summary: options.summary,
+        }),
     };
 }
 
@@ -213,7 +222,8 @@ export async function handleMergeWithAgent(options: {
         reason: 'Merge conflict resolution completed successfully', commitHash: publishedCommitHash,
         historyMetadata: await buildMergeCompletionHistoryMetadata({
             stateManager, taskId, pullRequestNumber, baseBranch, headBranch: publishedBranchName,
-            model: claudeResult.model || resolvedModel, commitHash: publishedCommitHash, correlatedLogger,
+            model: claudeResult.model || resolvedModel, commitHash: publishedCommitHash,
+            conflictedFiles, summary: claudeResult.summary, correlatedLogger,
         }),
     });
     try {

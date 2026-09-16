@@ -79,6 +79,12 @@ export function dismissNotification(id: string): Promise<NotificationStateRespon
   });
 }
 
+export function restoreNotification(id: string): Promise<NotificationStateResponse> {
+  return requestJson(`/${encodeURIComponent(id)}/restore`, notificationStateResponseSchema, {
+    method: 'POST',
+  });
+}
+
 export function dismissAllNotifications(): Promise<NotificationUnreadCountResponse> {
   return requestJson('/dismiss-all', notificationUnreadCountResponseSchema, {
     method: 'POST',

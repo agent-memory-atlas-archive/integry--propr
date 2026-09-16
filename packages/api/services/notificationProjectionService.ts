@@ -58,6 +58,8 @@ interface TaskContext {
   issueNumber?: number;
   prNumber?: number;
   description?: string;
+  recap?: string;
+  commandMode?: string;
   isReview: boolean;
   followupEligible: boolean;
   reviewFollowupEligible: boolean;
@@ -177,6 +179,37 @@ function taskDescription(initial: Record<string, unknown>): string | undefined {
   return cleanTaskDescription(initial.subtitle)
     ?? cleanTaskDescription(initial.title)
     ?? cleanTaskDescription(issueRef.title);
+}
+
+function notificationRecap(metadata: Record<string, unknown>): string | undefined {
+  const direct = compactDisplayText(metadata.notificationRecap);
+  if (direct) return direct;
+  const prResult = typeof metadata.prResult === 'object'
+    && metadata.prResult !== null
+    && !Array.isArray(metadata.prResult)
+    ? metadata.prResult as Record<string, unknown>
+    : {};
+  return compactDisplayText(prResult.notificationRecap);
+}
+
+function planItemCount(value: unknown): number | undefined {
+  const parsed = typeof value === 'string' ? (() => {
+    try { return JSON.parse(value) as unknown; } catch { return undefined; }
+  })() : value;
+  return Array.isArray(parsed) ? parsed.length : undefined;
+}
+
+function quotedDescription(description: string | undefined): string | undefined {
+  return description ? `“${description}”` : undefined;
+}
+
+function completedPullRequestTitle(context: TaskContext, prNumber: number): string {
+  switch (context.commandMode) {
+    case 'fix': return `Fix run completed for PR #${prNumber}`;
+    case 'merge': return `Merge completed for PR #${prNumber}`;
+    case 'switch': return `Model switch completed for PR #${prNumber}`;
+    default: return context.description ?? `PR #${prNumber} ready for review`;
+  }
 }
 
 function stableKey(scope: string, ...parts: unknown[]): string {
@@ -384,11 +417,16 @@ export class NotificationProjectionService {
   async projectDraftUpdate(payload: DraftUpdatePayload): Promise<void> {
     if (!(payload.status === 'completed' && payload.draftStatus === 'review')) return;
     const draft = await this.database('task_drafts')
-      .select('user_id', 'repository')
+      .select('user_id', 'repository', 'name', 'plan_json')
       .where({ draft_id: payload.draftId })
-      .first() as { user_id?: unknown; repository?: unknown } | undefined;
+      .first() as {
+        user_id?: unknown; repository?: unknown; name?: unknown; plan_json?: unknown;
+      } | undefined;
     if (typeof draft?.user_id !== 'string' || typeof draft.repository !== 'string') return;
     const occurredAt = normalizeISO8601Timestamp(payload.timestamp);
+    const name = compactDisplayText(draft.name);
+    const itemCount = planItemCount(draft.plan_json);
+    const planIdentity = name && name !== 'Untitled Plan' ? `“${name}”` : 'The plan';
 
     await this.notifications.createNotificationEvent({
       deduplicationKey: stableKey('plan-ready', payload.draftId, 'review', occurredAt),
@@ -396,7 +434,9 @@ export class NotificationProjectionService {
       severity: 'success',
       target: { type: 'plan', repository: draft.repository, draftId: payload.draftId },
       title: 'Plan ready for review',
-      body: `A plan for ${draft.repository} is ready for review.`,
+      body: itemCount === undefined
+        ? `${planIdentity} is ready for review.`
+        : `${planIdentity} is ready with ${itemCount} planned ${itemCount === 1 ? 'task' : 'tasks'}.`,
       actions: ['refine', 'approve_execute', 'dismiss'],
       occurredAt,
     }, [{ userId: draft.user_id, pushEnabled: true }]);
@@ -412,6 +452,7 @@ export class NotificationProjectionService {
       ...(context.issueNumber === undefined ? {} : { issueNumber: context.issueNumber }),
       ...(context.prNumber === undefined ? {} : { prNumber: context.prNumber }),
       isReview: context.isReview,
+      ...(context.description === undefined ? {} : { description: context.description }),
     };
     const accepted = await this.upsertSourceActivity({
       type: 'task',
@@ -475,7 +516,7 @@ export class NotificationProjectionService {
         ...(payload.branch === undefined ? {} : { branch: payload.branch }),
       },
       title: 'Repository indexing failed',
-      body: `Indexing did not complete for ${payload.repository}.`,
+      body: `Indexing ${payload.branch ? `branch ${payload.branch}` : 'the repository'} stopped before completion.`,
       actions: ['dismiss'],
       occurredAt,
     }, recipients);
@@ -498,6 +539,7 @@ export class NotificationProjectionService {
       if (row.activity_type === 'task') {
         const issueNumber = positiveInteger(metadata.issueNumber);
         const prNumber = positiveInteger(metadata.prNumber);
+        const description = compactDisplayText(metadata.description);
         await this.notifications.createSourceActivityNotificationEvent({
           type: 'task', key: row.activity_key, repository: row.repository,
           lastActivityAt: row.last_activity_at,
@@ -513,7 +555,9 @@ export class NotificationProjectionService {
             ...(prNumber === undefined ? {} : { prNumber }),
           },
           title: 'Task appears stalled',
-          body: `Active work for ${row.repository} has not reported progress.`,
+          body: description
+            ? `${quotedDescription(description)} has not reported progress.`
+            : `Active work for ${row.repository} has not reported progress.`,
           actions: taskActions({ active: true }),
           occurredAt: row.last_activity_at,
         }, await this.loadInstanceMemberRecipients());
@@ -533,7 +577,7 @@ export class NotificationProjectionService {
             ...(row.branch === null ? {} : { branch: row.branch }),
           },
           title: 'Repository indexing appears stalled',
-          body: `Indexing for ${row.repository} has not reported progress.`,
+          body: `Indexing ${row.branch ? `branch ${row.branch}` : row.repository} has not reported progress.`,
           actions: ['dismiss'],
           occurredAt: row.last_activity_at,
         }, await this.loadAdministratorRecipients());
@@ -586,10 +630,11 @@ export class NotificationProjectionService {
     for (const [component, healthyValues] of Object.entries(SYSTEM_HEALTH_RULES)) {
       const rawStatus = snapshot[component];
       if (typeof rawStatus !== 'string') continue;
+      const status = compactDisplayText(rawStatus) ?? 'unknown';
       const healthy = healthyValues.has(rawStatus);
       await this.notifications.reconcileSystemFailureTransition({
         component,
-        status: rawStatus,
+        status,
         healthy,
         snapshotAt,
         eventFor: (status, failureStartedAt) => ({
@@ -599,8 +644,8 @@ export class NotificationProjectionService {
           kind: 'system_failure',
           severity: 'error',
           target: { type: 'system_failure', component },
-          title: 'System component unhealthy',
-          body: `${component} is not reporting a healthy status.`,
+          title: `System component unhealthy: ${component}`,
+          body: `${component} reported “${status}”; administrator attention may be required.`,
           actions: ['dismiss'],
           occurredAt: failureStartedAt,
         }),
@@ -641,7 +686,9 @@ export class NotificationProjectionService {
         : context.issueNumber !== undefined
           ? `Task failed for issue #${context.issueNumber}`
           : 'Task failed',
-      body: context.description ?? `Work for ${context.repository} did not complete.`,
+      body: context.description
+        ? `Could not complete ${quotedDescription(context.description)}.`
+        : `Work for ${context.repository} did not complete.`,
       actions: taskActions({
         followup: context.followupEligible,
         hasPullRequest: pullRequestUrl !== undefined,
@@ -664,7 +711,7 @@ export class NotificationProjectionService {
         prNumber, taskId: payload.taskId,
       },
       title: `Review completed for PR #${prNumber}`,
-      body: context.description ?? `Review of PR #${prNumber} is complete.`,
+      body: context.recap ?? `Review of PR #${prNumber} completed; open details for the full findings.`,
       actions: taskActions({
         followup: context.reviewFollowupEligible,
         hasPullRequest: pullRequestUrl !== undefined,
@@ -690,9 +737,9 @@ export class NotificationProjectionService {
       title: context.description ?? (context.issueNumber === undefined
         ? 'Implementation completed'
         : `Issue #${context.issueNumber} implementation completed`),
-      body: context.issueNumber === undefined
+      body: context.recap ?? (context.issueNumber === undefined
         ? 'Open task details to review the completed work.'
-        : `Issue #${context.issueNumber} is complete. Open task details to review the result.`,
+        : `Issue #${context.issueNumber} is complete. Open task details to review the result.`),
       actions: taskActions({
         followup: context.followupEligible,
         hasPullRequest: pullRequestUrl !== undefined,
@@ -718,10 +765,13 @@ export class NotificationProjectionService {
         target: {
           type: 'pull_request', repository: context.repository, prNumber,
         },
-        title: context.description ?? `PR #${prNumber} ready for review`,
-        body: `PR #${prNumber} is ready for review.`,
+        title: completedPullRequestTitle(context, prNumber),
+        body: context.recap ?? `PR #${prNumber} is ready for review.`,
         // Persist only the completing implementation identity, never arbitrary task metadata.
-        metadata: { completedImplementationTaskId: payload.taskId },
+        metadata: {
+          completedImplementationTaskId: payload.taskId,
+          completionType: context.commandMode ?? 'implementation',
+        },
         actions: [
           ...(pullRequestUrl === undefined ? [] : ['open_pr' as const]),
           'dismiss',
@@ -765,6 +815,11 @@ export class NotificationProjectionService {
       ?? positiveInteger(prResult.prNumber)
       ?? (isPullRequestTask ? positiveInteger(initial.number) : undefined);
     const isReview = taskType === 'review' || historyMetadata.commandMode === 'review';
+    const commandMode = typeof historyMetadata.commandMode === 'string'
+      ? historyMetadata.commandMode
+      : typeof initial.commandMode === 'string'
+        ? initial.commandMode
+        : undefined;
     const storedIssueNumber = positiveInteger(task.issue_number);
     const issueNumber = positiveInteger(payload.issueNumber) ?? storedIssueNumber;
     return {
@@ -772,6 +827,8 @@ export class NotificationProjectionService {
       issueNumber,
       prNumber,
       description: taskDescription(initial),
+      recap: notificationRecap(historyMetadata),
+      commandMode,
       isReview,
       followupEligible: supportsTaskFollowup(task, issueNumber),
       reviewFollowupEligible: supportsTaskFollowup(task, prNumber),

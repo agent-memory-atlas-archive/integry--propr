@@ -35,6 +35,7 @@ import {
 } from '../github/visualPreviewAttachments.js';
 import type { PullRequestPublication } from './prPublication.js';
 import { savePublicationCheckpoint } from './prContinuation.js';
+import { buildWorkNotificationRecap } from './notificationRecap.js';
 
 interface PostExecutionState {
     octokit: Awaited<ReturnType<typeof getAuthenticatedOctokit>> | null;
@@ -326,6 +327,12 @@ export async function handlePostExecution(params: PostExecutionParams, taskUrl: 
                     ...context.publication.continuation, publication_bundle: null, publication_completion: null,
                 } : undefined,
                 githubComment: { url: completionComment.data.html_url, body: completionComment.data.body },
+                notificationRecap: buildWorkNotificationRecap(changesSummary, {
+                    commandMode: job.data.commandMode || 'default',
+                    filesChanged: commitResult?.filesChanged?.length,
+                    noChanges: !commitResult,
+                    partial,
+                }),
                 ...(unprocessedReviewComments.length > 0 && { consumedReviewCommentIds: unprocessedReviewComments.map(c => c.id) }),
                 ...(partial && { incompleteExecution: { reason: terminationReason } }),
                 ...ultrafixHistoryMeta,

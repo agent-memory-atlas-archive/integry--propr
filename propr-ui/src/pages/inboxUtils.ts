@@ -25,7 +25,13 @@ export function notificationKindLabel(notification: Notification): string {
   switch (notification.kind) {
     case 'plan': return 'Plan ready';
     case 'review': return 'Review completed';
-    case 'pull_request': return 'PR attention';
+    case 'pull_request': {
+      const completionType = notification.metadata?.completionType;
+      if (completionType === 'fix') return 'Fix completed';
+      if (completionType === 'merge') return 'Merge completed';
+      if (completionType === 'switch') return 'Model switched';
+      return 'PR ready';
+    }
     case 'system_failure': return 'System failure';
     case 'indexing': return notification.severity === 'warning'
       ? 'Indexing stalled'
