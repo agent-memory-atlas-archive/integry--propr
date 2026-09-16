@@ -283,4 +283,33 @@ describe('useAutoDraftCreation', () => {
     expect(result.current.autoCreateWarning).toContain('failed to save setup settings including base branch "develop"');
     expect(navigate).not.toHaveBeenCalled();
   });
+  it('ensureDraftCreated skips the debounce and returns the persisted draft once', async () => {
+    const onDraftCreatedInPlace = vi.fn();
+    const { result } = renderHook(() => useAutoDraftCreation({
+      isNewMode: true,
+      selectedRepo: 'integry/propr',
+      resolvedBaseBranch: 'develop',
+      prompt: 'Test prompt',
+      localFiles: [],
+      onDraftCreatedInPlace,
+      navigate: vi.fn(),
+    }));
+
+    let created: Awaited<ReturnType<typeof result.current.ensureDraftCreated>> = null;
+    await act(async () => {
+      const [first, second] = await Promise.all([result.current.ensureDraftCreated(), result.current.ensureDraftCreated()]);
+      created = first;
+      expect(second).toBe(first);
+    });
+
+    expect(created).toEqual(expect.objectContaining({ draft_id: 'draft-1' }));
+    expect(onDraftCreatedInPlace).toHaveBeenCalledTimes(1);
+
+    await flushAutoCreate();
+    expect(mockCreateDraft).toHaveBeenCalledTimes(1);
+    await act(async () => {
+      await expect(result.current.ensureDraftCreated()).resolves.toEqual(expect.objectContaining({ draft_id: 'draft-1' }));
+    });
+    expect(mockCreateDraft).toHaveBeenCalledTimes(1);
+  });
 });

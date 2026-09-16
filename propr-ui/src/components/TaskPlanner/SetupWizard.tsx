@@ -50,7 +50,7 @@ interface SetupWizardProps {
   onGenerationStarted?: (runId: string) => void;
 }
 
-type SetupWizardContentProps = { isNewMode: boolean; draft: PlannerDraft | undefined; config: PlannerConfig; setConfig: React.Dispatch<React.SetStateAction<PlannerConfig>>; repoLoader: ReturnType<typeof useRepositoryLoader>; newModeBranches: ReturnType<typeof useBranchesLoader>; repoInfo: ReturnType<typeof useRepoInfoLoader>; fileHandling: ReturnType<typeof useFileHandling>; generationPolling: ReturnType<typeof useGenerationPolling>; contextExport: ReturnType<typeof useContextExport>; contextRefresh: ReturnType<typeof useContextRefresh>; generationHandlers: ReturnType<typeof useGenerationHandlers>; autoResize: () => void; textareaRef: React.RefObject<HTMLTextAreaElement | null>; fileInputRef: React.RefObject<HTMLInputElement | null>; error: string | null; branchError: string | null; isCreating: boolean; initialConfiguredBaseBranch: string; handleRepoChangeInEditMode: (repo: string, selection?: RepoSelection) => Promise<void>; handleFileInputChange: (e: React.ChangeEvent<HTMLInputElement>) => Promise<void>; handleExportContext: () => void; handleGenerate: () => Promise<void>; agents: ReturnType<typeof useAgentsLoader>; availableRepos: ReturnType<typeof useIndexedRepositoriesLoader>; previewTrace?: GenerationTrace };
+type SetupWizardContentProps = { isNewMode: boolean; draft: PlannerDraft | undefined; config: PlannerConfig; setConfig: React.Dispatch<React.SetStateAction<PlannerConfig>>; repoLoader: ReturnType<typeof useRepositoryLoader>; newModeBranches: ReturnType<typeof useBranchesLoader>; repoInfo: ReturnType<typeof useRepoInfoLoader>; fileHandling: ReturnType<typeof useFileHandling>; generationPolling: ReturnType<typeof useGenerationPolling>; contextExport: ReturnType<typeof useContextExport>; contextRefresh: ReturnType<typeof useContextRefresh>; generationHandlers: ReturnType<typeof useGenerationHandlers>; autoResize: () => void; textareaRef: React.RefObject<HTMLTextAreaElement | null>; fileInputRef: React.RefObject<HTMLInputElement | null>; error: string | null; branchError: string | null; isCreating: boolean; initialConfiguredBaseBranch: string; handleRepoChangeInEditMode: (repo: string, selection?: RepoSelection) => Promise<void>; handleFileInputChange: (e: React.ChangeEvent<HTMLInputElement>) => Promise<void>; handleExportContext: () => void; handleGenerate: () => Promise<void>; handleManualRefresh: () => Promise<void>; agents: ReturnType<typeof useAgentsLoader>; availableRepos: ReturnType<typeof useIndexedRepositoriesLoader>; previewTrace?: GenerationTrace };
 
 function getContentModeValues({ isNewMode, draft, repoLoader, newModeBranches, repoInfo, initialConfiguredBaseBranch, handleRepoChangeInEditMode }: Pick<SetupWizardContentProps, 'isNewMode' | 'draft' | 'repoLoader' | 'newModeBranches' | 'repoInfo' | 'initialConfiguredBaseBranch' | 'handleRepoChangeInEditMode'>) {
   const draftContextConfig = getDraftContextConfig(draft);
@@ -84,7 +84,7 @@ function getGenerateDisabledState(props: SetupWizardContentProps, promptTrimmed:
 const shouldShowPreviewProgress = (isGenerating: boolean, isMobile: boolean) => !isGenerating || !isMobile;
 
 const SetupWizardContent: React.FC<SetupWizardContentProps> = (props) => {
-  const { isNewMode, draft, config, setConfig, repoLoader, newModeBranches, repoInfo, fileHandling, generationPolling, contextExport, contextRefresh, generationHandlers, autoResize, textareaRef, fileInputRef, error, branchError, isCreating, initialConfiguredBaseBranch, handleRepoChangeInEditMode, handleFileInputChange, handleExportContext, handleGenerate, agents, availableRepos, previewTrace } = props;
+  const { isNewMode, draft, config, setConfig, repoLoader, newModeBranches, repoInfo, fileHandling, generationPolling, contextExport, contextRefresh, generationHandlers, autoResize, textareaRef, fileInputRef, error, branchError, isCreating, initialConfiguredBaseBranch, handleRepoChangeInEditMode, handleFileInputChange, handleExportContext, handleGenerate, handleManualRefresh, agents, availableRepos, previewTrace } = props;
   const { isDemoMode } = useDemoMode();
   const modeValues = getContentModeValues({ isNewMode, draft, repoLoader, newModeBranches, repoInfo, initialConfiguredBaseBranch, handleRepoChangeInEditMode });
   const promptTrimmed = config.prompt.trim();
@@ -159,9 +159,7 @@ const SetupWizardContent: React.FC<SetupWizardContentProps> = (props) => {
           preview={contextRefresh.preview}
           isContextStale={contextRefresh.isContextStale}
           timeUntilRefresh={contextRefresh.timeUntilRefresh}
-          isPaused={contextRefresh.isPaused}
-          onTogglePause={contextRefresh.togglePause}
-          onManualRefresh={contextRefresh.handleManualRefresh}
+          onManualRefresh={promptTrimmed ? handleManualRefresh : undefined}
           isNewMode={isNewMode}
           previewTrace={previewTrace}
           showPreviewProgress={showPreviewProgress}
@@ -379,7 +377,7 @@ export const SetupWizard: React.FC<SetupWizardProps> = ({ draft, onGenerateCompl
   const draftId = draft?.draft_id ?? '';
   const generationPolling = useGenerationPolling({ draftId, onComplete: handleGenerateComplete });
   const contextExport = useContextExport(setError);
-  const contextRefresh = useContextRefresh({ draftId, config, onBranchError: setBranchError });
+  const contextRefresh = useContextRefresh({ draftId, config, onBranchError: setBranchError, autoRefresh: false });
   const previewTrace = usePreviewTrace(draft, draftId, contextRefresh.preview.isLoading);
   const setupSnapshot = useMemo(() => getDraftSetupSnapshot(config), [config]);
   const generationHandlers = useGenerationHandlers({ draft, config, branchError, contextHelpers: { isContextStale: contextRefresh.isContextStale, clearCountdown: contextRefresh.clearCountdown, fetchPreview: contextRefresh.fetchPreview },
@@ -389,7 +387,7 @@ export const SetupWizard: React.FC<SetupWizardProps> = ({ draft, onGenerateCompl
     selectedRepo: repoLoader.selectedRepo, config, localFiles: fileHandling.localFiles,
     onDraftCreated, navigate, setError, setIsCreating, todoIds
   });
-  const { isAutoCreating, autoCreateError, autoCreateWarning } = useAutoDraftCreation({ isNewMode, selectedRepo: repoLoader.selectedRepo, resolvedBaseBranch: config.baseBranch, setupSnapshot, prompt: config.prompt, localFiles: fileHandling.localFiles, onDraftCreated, onDraftCreatedInPlace, navigate, todoIds });
+  const { isAutoCreating, autoCreateError, autoCreateWarning, ensureDraftCreated } = useAutoDraftCreation({ isNewMode, selectedRepo: repoLoader.selectedRepo, resolvedBaseBranch: config.baseBranch, setupSnapshot, prompt: config.prompt, localFiles: fileHandling.localFiles, onDraftCreated, onDraftCreatedInPlace, navigate, todoIds });
   const autoResize = useAutoResize(textareaRef);
   const handleRepoChangeInEditMode = useRepoChangeInEditMode({ draft, config, locationTodoIds: locationState?.todoIds, navigate, onDraftCreated, setError, setIsCreating });
   const handleFileInputChange = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -401,6 +399,12 @@ export const SetupWizard: React.FC<SetupWizardProps> = ({ draft, onGenerateCompl
     contextExport.exportContext({ draftId: draft.draft_id, prompt: config.prompt, baseBranch: config.baseBranch, granularity: config.granularity, contextLevel: config.contextLevel, compress: config.compress, files: config.files });
   }, [contextExport, draft, config]);
   const handleGenerate = useCallback(async () => { await (isNewMode ? handleCreateDraftAndGenerate() : generationHandlers.handleGenerateForExistingDraft()); }, [isNewMode, handleCreateDraftAndGenerate, generationHandlers]);
+  const { handleManualRefresh: refreshContext } = contextRefresh;
+  const handleManualRefresh = useCallback(async () => {
+    // In new mode, persist the draft first and pass its ID directly since the draftId prop has not propagated yet
+    const draftIdForPreview = isNewMode ? (await ensureDraftCreated())?.draft_id : draftId;
+    if (draftIdForPreview) await refreshContext(draftIdForPreview);
+  }, [isNewMode, ensureDraftCreated, draftId, refreshContext]);
   useSetupWizardEffects({ autoResize, prompt: config.prompt, generationError: generationPolling.generationError, repoLoadError: repoLoader.loadError, autoCreateError, autoCreateWarning, baseBranchPersistenceWarning: locationState?.baseBranchPersistenceWarning, addToast, setError });
   return (
     <SetupWizardContent
@@ -412,7 +416,7 @@ export const SetupWizard: React.FC<SetupWizardProps> = ({ draft, onGenerateCompl
       textareaRef={textareaRef} fileInputRef={fileInputRef} error={error} branchError={branchError}
       isCreating={isCreating || isAutoCreating} initialConfiguredBaseBranch={initialConfiguredBaseBranch}
       handleRepoChangeInEditMode={handleRepoChangeInEditMode} handleFileInputChange={handleFileInputChange}
-      handleExportContext={handleExportContext} handleGenerate={handleGenerate} agents={agents}
+      handleExportContext={handleExportContext} handleGenerate={handleGenerate} handleManualRefresh={handleManualRefresh} agents={agents}
       availableRepos={availableRepos} previewTrace={previewTrace}
     />
   );
