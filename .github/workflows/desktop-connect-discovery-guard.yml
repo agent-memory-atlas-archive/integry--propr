@@ -84,7 +84,25 @@ jobs:
         run: node --test apps/desktop/scripts/windows-packaged-connect-staging.test.mjs
 
       - name: Package the target-native desktop app
-        run: npm run desktop:package
+        shell: bash
+        run: |
+          set -euo pipefail
+          # electron-forge fetches the Electron runtime zip from GitHub
+          # releases on a cache miss, and that download returns a transient 5xx
+          # often enough to fail otherwise-green matrix legs. Only the download
+          # is unreliable, so retry the whole package rather than the job.
+          for attempt in 1 2 3; do
+            if npm run desktop:package; then
+              exit 0
+            fi
+            if [ "$attempt" -eq 3 ]; then
+              echo "Packaging failed after $attempt attempts." >&2
+              exit 1
+            fi
+            delay=$((attempt * 15))
+            echo "Package attempt $attempt failed; retrying in $delay seconds..." >&2
+            sleep "$delay"
+          done
 
       - name: Verify Connect account confirmation and pairing regressions
         if: matrix.platform == 'linux' || matrix.platform == 'darwin'

@@ -23,10 +23,11 @@ export interface ConfigReloadSubscription {
 
 const RELOADABLE_SUBTYPES = ['settings_update', 'repos_update', 'mcp_settings_update'];
 
-function isReloadableConfigUpdate(message: string): boolean {
+function parseConfigUpdateSubtype(message: string): string | undefined {
   const event = JSON.parse(message) as { type?: unknown; subtype?: unknown };
-  return event.type === 'config_update'
-    && RELOADABLE_SUBTYPES.includes(event.subtype as string);
+  return event.type === 'config_update' && typeof event.subtype === 'string'
+    ? event.subtype
+    : undefined;
 }
 
 /**
@@ -38,6 +39,7 @@ export async function startConfigReloadSubscription(
   redisClient: DuplicableRedisClient,
   reloadConfig: () => Promise<void>,
   logger: SubscriptionLogger = console,
+  onConfigUpdate?: (subtype: string) => void,
 ): Promise<ConfigReloadSubscription> {
   const subscriber = redisClient.duplicate();
   let closed = false;
@@ -56,12 +58,16 @@ export async function startConfigReloadSubscription(
     await subscriber.connect();
     await subscriber.subscribe(CONFIG_EVENT_CHANNEL, message => {
       if (closed) return;
+      let subtype: string | undefined;
       try {
-        if (!isReloadableConfigUpdate(message)) return;
+        subtype = parseConfigUpdateSubtype(message);
       } catch (error) {
         logger.error('Failed to parse API config update event:', error);
         return;
       }
+      if (!subtype) return;
+      onConfigUpdate?.(subtype);
+      if (!RELOADABLE_SUBTYPES.includes(subtype)) return;
       void enqueueReload();
     });
   } catch (error) {

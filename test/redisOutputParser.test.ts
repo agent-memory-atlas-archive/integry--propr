@@ -173,6 +173,7 @@ test('parseRedisOutput emits Vibe live events from a partial JSON transcript arr
 
     assert.deepStrictEqual(parsed.events.map(event => event.type), ['thought', 'tool_use', 'tool_result', 'thought']);
     assert.strictEqual(parsed.events[0].content, 'I will inspect the file.');
+    assert.equal(parsed.events[0].internalReasoning, true);
     assert.strictEqual(parsed.events[1].toolName, 'read_file');
     assert.deepStrictEqual(parsed.events[1].input, { path: 'vibe_test.py' });
     assert.strictEqual(parsed.events[2].toolUseId, 'tool-1');

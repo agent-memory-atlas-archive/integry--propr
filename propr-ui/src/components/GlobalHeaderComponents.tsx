@@ -2,10 +2,12 @@ import React, { useState, useEffect, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Activity, Users, X, Inbox, CornerDownRight, ScrollText, ListTodo, CheckCircle, Rocket, ExternalLink, Layers3 } from 'lucide-react';
 import { HeaderStats } from '../hooks/useHeaderStats';
+import type { HeaderStatsResourceStatus } from '../hooks/useHeaderStats';
 import { DraftListItem } from '../api/plannerApi';
 import { getStatusBadgeStyle } from './headerUtils';
 import { formatAgentLabel } from '../utils/agentStatus';
 import { ProviderLogo } from './ui/ProviderLogo';
+import HeaderResourceStatus from './HeaderResourceStatus';
 
 interface TaskGroup { key: string; repoOwner: string; repoName: string; prNumber?: number; issueNumber?: number; latestTask: { id: string; status: string; createdAt: string; title?: string; }; allTasks: unknown[]; }
 
@@ -252,9 +254,10 @@ const TasksDropdown: React.FC<TasksDropdownProps> = ({ taskGroups, isOpen, onClo
   );
 };
 
-export const TasksButton: React.FC<{ taskGroups: TaskGroup[]; onDismissTask: (taskGroupKey: string, latestTaskCreatedAt: string) => void }> = ({ taskGroups, onDismissTask }) => {
+export const TasksButton: React.FC<{ taskGroups: TaskGroup[]; onDismissTask: (taskGroupKey: string, latestTaskCreatedAt: string) => void; status?: HeaderStatsResourceStatus }> = ({ taskGroups, onDismissTask, status = 'available' }) => {
   const [isOpen, setIsOpen] = useState(false);
   const containerRef = useClickOutside(() => setIsOpen(false), isOpen);
+  if (status !== 'available') return <HeaderResourceStatus label="Tasks" status={status} />;
   return (
     <div className="relative h-full" ref={containerRef}>
       <button
@@ -391,9 +394,10 @@ export const SystemHealth: React.FC<{ systemHealth: HeaderStats['systemHealth'] 
   );
 };
 
-export const ActivePlansButton: React.FC<{ activePlans: DraftListItem[]; onDismissPlan: (planId: string) => void }> = ({ activePlans, onDismissPlan }) => {
+export const ActivePlansButton: React.FC<{ activePlans: DraftListItem[]; onDismissPlan: (planId: string) => void; status?: HeaderStatsResourceStatus }> = ({ activePlans, onDismissPlan, status = 'available' }) => {
   const [isOpen, setIsOpen] = useState(false);
   const containerRef = useClickOutside(() => setIsOpen(false), isOpen);
+  if (status !== 'available') return <HeaderResourceStatus label="Plans" status={status} />;
   return (
     <div className="relative h-full" ref={containerRef}>
       <button

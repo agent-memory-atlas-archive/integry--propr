@@ -113,6 +113,10 @@ export interface IndexingUpdatePayload {
 export interface ConversationEvent {
   type: 'thought' | 'tool_use' | 'tool_result';
   content?: string;
+  /** Provider-labelled reasoning is excluded from concise external activity feeds by default. */
+  internalReasoning?: boolean;
+  /** Content comes exclusively from a Codex app-server reasoning item's summary. */
+  reasoningSummary?: boolean;
   toolName?: string;
   input?: Record<string, unknown>;
   id?: string;

@@ -17,6 +17,8 @@ import {
 } from "./connectRootAuthority.js";
 import {
   parseWindowsNativeProbeOutput,
+  runWindowsNativeTimingProbe,
+  runWindowsReadOnlyInspection,
   WINDOWS_INSPECTION_CUMULATIVE_TIMEOUT_MS,
   WINDOWS_INSPECTION_SOURCE,
   WINDOWS_INSPECTION_TIMEOUT_MS,
@@ -344,7 +346,7 @@ test("Windows production isolates entry fields and retains private handle lifeti
   assert.doesNotMatch(composedIdentity, /ToString|\$entry=/);
   assert.doesNotMatch(WINDOWS_INSPECTION_SOURCE, /4294967296|\[uint64\]\$(?:before|after)High\*/);
   assert.match(WINDOWS_UINT64_COMPOSER_SOURCE,
-    /function Join-ProprUInt64\(\[uint32\]\$low,\[uint32\]\$high\)\{\n  if\(-not \[BitConverter\]::IsLittleEndian\)\{exit \$stage\}\n  \$bytes=New-Object byte\[\] 8\n  \[Array\]::Copy\(\[BitConverter\]::GetBytes\(\[uint32\]\$low\),0,\$bytes,0,4\)\n  \[Array\]::Copy\(\[BitConverter\]::GetBytes\(\[uint32\]\$high\),0,\$bytes,4,4\)\n  \[BitConverter\]::ToUInt64\(\$bytes,0\)\n\}/);
+    /function Join-ProprUInt64\(\[uint32\]\$low,\[uint32\]\$high\)\{\n  if\(-not \[BitConverter\]::IsLittleEndian\)\{exit \$stage\}\n  \$bytes=\[byte\[\]\]::new\(8\)\n  \[Array\]::Copy\(\[BitConverter\]::GetBytes\(\[uint32\]\$low\),0,\$bytes,0,4\)\n  \[Array\]::Copy\(\[BitConverter\]::GetBytes\(\[uint32\]\$high\),0,\$bytes,4,4\)\n  \[BitConverter\]::ToUInt64\(\$bytes,0\)\n\}/);
   const unsignedDecimal = (value: number): string => {
     const bytes = Buffer.alloc(4);
     bytes.writeInt32LE(value, 0);
@@ -389,6 +391,37 @@ test("Windows PowerShell boundary retains a derived minimal environment and no f
   assert.equal(WINDOWS_INSPECTOR_TRANSPORT, "inherited-standard-handle");
   for (const source of [WINDOWS_INSPECTION_SOURCE, WINDOWS_NATIVE_TIMING_PROBE_SOURCE]) {
     assert.doesNotMatch(source, /Add-Type|Start-Process|Set-Content|Out-File|New-Item|Remove-Item|Invoke-Expression/i);
+    assert.doesNotMatch(source, /New-Object/i);
+    assert.match(source, /\$PSModuleAutoLoadingPreference='None'/);
+  }
+  assert.doesNotMatch(WINDOWS_NATIVE_TIMING_PROBE_SOURCE, /Import-Module|ConvertTo-Json/);
+  assert.match(WINDOWS_INSPECTION_SOURCE,
+    /Import-Module -Name "\$PSHOME\\Modules\\Microsoft\.PowerShell\.Utility\\Microsoft\.PowerShell\.Utility\.psd1" -ErrorAction Stop/);
+  assert.match(WINDOWS_INSPECTION_SOURCE, /\$json=Microsoft\.PowerShell\.Utility\\ConvertTo-Json /);
+
+  // Exercise both complete scripts on Windows, including JSON serialization
+  // after automatic module loading has been disabled. No ACL policy is needed
+  // here: this tests the native transport and the identity of our held file.
+  if (process.platform === "win32") {
+    const directory = mkdtempSync(join(tmpdir(), "propr-windows-module-loading-"));
+    const path = join(directory, "entry");
+    writeFileSync(path, "fixture");
+    const fd = openSync(path, "r");
+    try {
+      const proof = runWindowsNativeTimingProbe(fd);
+      assert.equal(proof.outcome, "complete");
+      assert.equal(proof.lastMilestone, "standard-handle-identity");
+      const expectedIdentity = stableAuthorityIdentity(fd);
+      const entries = runWindowsReadOnlyInspection([
+        { path, kind: "env", pinnedFd: fd, expectedIdentity },
+      ]);
+      assert.equal(entries.length, 1);
+      assert.equal(entries[0].volumeSerialNumber, expectedIdentity.device);
+      assert.equal(entries[0].fileId, expectedIdentity.file);
+    } finally {
+      closeSync(fd);
+      rmSync(directory, { recursive: true, force: true });
+    }
   }
 });
 

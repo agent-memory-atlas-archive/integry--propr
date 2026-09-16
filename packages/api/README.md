@@ -158,10 +158,28 @@ non-production `NODE_ENV` and a loopback `API_PUBLIC_URL` (or its unset localhos
 default), so the flag is ineffective on remote preview/staging URLs. The SQLite
 constraint is deliberately stable across restarts and permits loopback rows;
 the authenticated service deployment checks are the enrollment policy boundary.
-Set `WEB_PUSH_VAPID_SUBJECT`, `WEB_PUSH_VAPID_PUBLIC_KEY`, and
-`WEB_PUSH_VAPID_PRIVATE_KEY` to enable delivery. Missing, malformed, and
-mismatched VAPID configuration is reported with one sanitized startup warning
-that never includes the subject or either key. Provider throttling, server
+At startup, Web Push automatically generates and atomically persists a P-256 pair
+in `web-push/vapid.json` beside the SQLite database (`DB_FILENAME`, otherwise
+`DATA_DIR` or `./data`). The startup result is shared by enrollment/capability
+routes and dispatcher signing; capability requests never generate keys. Back up
+and restore this directory with the instance data, preserving directory mode 700
+and file mode 600. The private key is never serialized in API responses or logs.
+
+A valid explicit `WEB_PUSH_VAPID_PUBLIC_KEY` / `WEB_PUSH_VAPID_PRIVATE_KEY` pair
+wins without overwriting the stored pair. `WEB_PUSH_VAPID_SUBJECT` is independently
+optional: by default use the configured HTTPS `API_PUBLIC_URL` or `FRONTEND_URL`
+origin, falling back to the project contact URL `https://propr.dev`.
+`WEB_PUSH_ENABLED=false` skips setup and disables enrollment/delivery without
+changing subscriptions or preferences. Browser permission and category opt-in
+remain explicit. Partial, malformed or mismatched keys, corrupt storage and
+persistence failures disable Push with a sanitized startup diagnostic while the
+rest of the API remains available. Repair/restore and restart to retry; no
+transient key is advertised and no corrupt identity is silently replaced.
+See [operations](../../docs/docs/operations/pwa-web-push.md#configure-vapid) for
+manual overrides, backup/restore and deliberate rotation (browsers must subscribe
+again when the key changes).
+
+Provider throttling, server
 errors, and network failures use capped exponential retry scheduling; HTTP 404
 and 410 responses revoke and erase the subscription.
 

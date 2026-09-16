@@ -336,7 +336,9 @@ describe('desktop pairing service IPC native shutdown lifecycle', () => {
           counts.rendererPublication += 1;
           return { status: 'fulfilled' as const, value };
         }, error => ({ status: 'rejected' as const, error }));
-        await bounded(barrier.promise);
+        // Reaching activation includes durable profile I/O and can contend with
+        // the rest of the desktop suite. Protocol deadlines remain virtual.
+        await bounded(barrier.promise, 5_000);
 
         const provisionalCouldExist = ['activate', 'cancel'].includes(scenario.endpoint);
         const pendingBeforeShutdown = await store.pendingRevocations();
@@ -490,7 +492,11 @@ describe('desktop pairing service IPC native shutdown lifecycle', () => {
         console.log(`NATIVE_PAIRING_SHUTDOWN ${scenario.name}`);
       } finally {
         process.removeListener('unhandledRejection', onUnhandled);
-        await service?.dispose().catch(() => undefined);
+        const disposal = service?.dispose().catch(() => undefined);
+        // A failed assertion can enter cleanup while disposal is waiting on a
+        // deterministic protocol deadline, which does not keep Node alive.
+        await clock.advance(2_000);
+        await disposal;
         await rm(directory, { recursive: true, force: true });
       }
     });

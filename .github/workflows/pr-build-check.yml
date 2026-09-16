@@ -310,6 +310,9 @@ jobs:
       - name: Checkout repository
         id: checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          # Include the PR merge commit's parents for local change detection.
+          fetch-depth: 2
 
       - name: Initialize diagnostic log
         if: always()
@@ -495,34 +498,38 @@ jobs:
 
       - name: Detect Changes
         id: filter
-        uses: dorny/paths-filter@7b450fff21473bca461d4b92ce414b9d0420d706 # v4
-        with:
-          list-files: json
-          filters: |
-            core:
-              - 'src/**'
-              - 'Dockerfile*'
-              - 'package*.json'
-              - 'packages/core/**'
-              - 'packages/shared/**'
-            ui:
-              - 'propr-ui/**'
-              - 'packages/client/**'
-              - 'packages/shared/**'
-            docs:
-              - 'docs/**'
-            cli:
-              - 'packages/cli/**'
-            api:
-              - 'packages/api/**'
-              - 'packages/core/**'
-              - 'packages/shared/**'
-            core_package:
-              - 'packages/core/**'
-              - 'packages/shared/**'
-            core_package_source:
-              - added|modified: 'packages/core/src/**/*.js'
-              - added|modified: 'packages/core/src/**/*.ts'
+        run: |
+          # Compare against the base actually used by the checked-out merge.
+          # The event base SHA can differ and be absent from a shallow checkout.
+          node --input-type=module <<'NODE'
+          import { execFileSync } from 'node:child_process';
+          import { appendFileSync } from 'node:fs';
+
+          const diff = execFileSync('git', [
+            'diff', '--no-renames', '--name-status', '-z',
+            'HEAD^1', 'HEAD', '--',
+          ], { encoding: 'utf8' }).split('\0');
+          const files = [];
+          for (let i = 0; i + 1 < diff.length; i += 2) {
+            files.push({ status: diff[i], path: diff[i + 1] });
+          }
+          const filters = {
+            core: ({ path }) => /^(src\/|Dockerfile[^/]*$|package[^/]*\.json$|packages\/(core|shared)\/)/.test(path),
+            ui: ({ path }) => /^(propr-ui\/|packages\/(client|shared)\/)/.test(path),
+            docs: ({ path }) => path.startsWith('docs/'),
+            cli: ({ path }) => path.startsWith('packages/cli/'),
+            api: ({ path }) => /^packages\/(api|core|shared)\//.test(path),
+            core_package: ({ path }) => /^packages\/(core|shared)\//.test(path),
+            core_package_source: ({ status, path }) =>
+              ['A', 'M'].includes(status) && /^packages\/core\/src\/.*\.(js|ts)$/.test(path),
+          };
+          for (const [name, matches] of Object.entries(filters)) {
+            const paths = files.filter(matches).map(file => file.path);
+            appendFileSync(process.env.GITHUB_OUTPUT,
+              `${name}=${paths.length > 0}\n${name}_files=${JSON.stringify(paths)}\n`);
+            console.log(`${name}: ${paths.length} matching files`);
+          }
+          NODE
 
       - name: Run Notification Regression Tests
         if: steps.filter.outputs.ui == 'true' || steps.filter.outputs.api == 'true' || steps.filter.outputs.core_package == 'true'
@@ -864,6 +871,7 @@ jobs:
             echo "Fast tests: ${{ steps.unit_tests.outcome }}"
             echo "Hosted tunnel tests: ${{ steps.tunnel_tests.outcome }}"
             echo "CLI packaging: ${{ steps.cli_pack.outcome }}"
+            echo "Change detection: ${{ steps.filter.outcome }}"
             echo "Changed-area checks: ${{ steps.build.outcome }}"
           } >> build_log.txt
 

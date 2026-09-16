@@ -70,6 +70,8 @@ import type { WebhookEventType, DetectedIssue, CommentPayload, CommentEventConfi
 import { handleWebhookRequest } from './webhookHandler.js';
 import { stopTaskExecution } from './routes/dockerRoutes.js';
 import { initializePushSubscriptionMaintenance } from './services/pushSubscriptionMaintenance.js';
+import { resolveInstanceWebPushConfiguration } from './services/instanceWebPushConfiguration.js';
+import { WEB_PUSH_CONFIGURATION_WARNINGS, type ValidatedWebPushConfiguration } from './services/webPushConfiguration.js';
 import { assertInstanceAdministratorConfigured } from './authorization.js';
 import { resolveApiListenHost } from './listenAddress.js';
 import {
@@ -245,8 +247,10 @@ let redisClient: RedisClientType;
 let taskQueue: Queue;
 let runtimeBuildQueue: Queue;
 let configReloadSubscription: ConfigReloadSubscription | undefined;
+let invalidateStatusAgentCache: (() => void) | undefined;
 let notificationBackground: NotificationBackgroundService | undefined;
 let webPushDispatcherConfigured = false;
+let resolvedWebPushConfiguration: ValidatedWebPushConfiguration = { configured: false, issue: 'disabled' };
 let desktopPairingCleanupTimer: NodeJS.Timeout | undefined;
 let visualPreviewOAuthRefreshScheduler: VisualPreviewOAuthRefreshScheduler | undefined;
 
@@ -301,6 +305,7 @@ function setupRoutes(): void {
       ) => notificationBackground!.projectSystemSnapshot(snapshot, additionalAdministratorIds),
     }),
   });
+  invalidateStatusAgentCache = statusRoutes.invalidateAgentStatusCache;
   const desktopAuthRoutes = createDesktopAuthRoutes();
   // INTENTIONALLY UNAUTHENTICATED: compatibility/discovery and the bounded
   // pairing bootstrap, poll, and browser entry are registered before the guard.
@@ -344,7 +349,7 @@ function setupRoutes(): void {
   const repoTodoRoutes = createRepoTodoRoutes();
   const userRepoPreferencesRoutes = createUserRepoPreferencesRoutes();
   const agentRuntimeRoutes = createAgentRuntimeRoutes({ getRuntimeBuildQueue: () => runtimeBuildQueue });
-  const notificationRoutes = createNotificationRoutes({ webPushDispatcherConfigured });
+  const notificationRoutes = createNotificationRoutes({ webPushDispatcherConfigured, resolvedWebPushConfiguration });
   const voiceBriefingService = createVoiceBriefingService({
     database: db,
     taskQueue,
@@ -492,6 +497,36 @@ app.get('/health', (_req: Request, res: Response) => { res.json({ status: 'ok' }
 // Create HTTP server to wrap Express app (required for Socket.IO)
 const httpServer: HttpServer = createServer(app);
 
+async function initializeNotificationBackground(): Promise<void> {
+  resolvedWebPushConfiguration = resolveInstanceWebPushConfiguration();
+  if (!resolvedWebPushConfiguration.configured && resolvedWebPushConfiguration.issue !== 'disabled') {
+    console.warn(`[notifications] Web Push unavailable: ${
+      WEB_PUSH_CONFIGURATION_WARNINGS[resolvedWebPushConfiguration.issue]
+    }`);
+  }
+  const vapidEnvironment = {
+    WEB_PUSH_VAPID_SUBJECT: process.env.WEB_PUSH_VAPID_SUBJECT,
+    WEB_PUSH_VAPID_PUBLIC_KEY: process.env.WEB_PUSH_VAPID_PUBLIC_KEY,
+    WEB_PUSH_VAPID_PRIVATE_KEY: process.env.WEB_PUSH_VAPID_PRIVATE_KEY,
+  };
+  try {
+    // Both background implementations read their startup configuration from
+    // the environment; the worker copies it before loading the dispatcher.
+    if (resolvedWebPushConfiguration.configured) {
+      process.env.WEB_PUSH_VAPID_SUBJECT = resolvedWebPushConfiguration.subject;
+      process.env.WEB_PUSH_VAPID_PUBLIC_KEY = resolvedWebPushConfiguration.publicKey;
+      process.env.WEB_PUSH_VAPID_PRIVATE_KEY = resolvedWebPushConfiguration.privateKey;
+    }
+    notificationBackground = await startNotificationBackgroundService(db);
+    webPushDispatcherConfigured = notificationBackground.webPushDispatcherConfigured;
+  } finally {
+    for (const [name, value] of Object.entries(vapidEnvironment)) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+  }
+}
+
 async function start(): Promise<void> {
   try {
     console.log('SQLite persistence is enabled');
@@ -500,8 +535,7 @@ async function start(): Promise<void> {
     await assertInstanceAdministratorConfigured();
     await initRedis();
     if (!demoMode) {
-      notificationBackground = await startNotificationBackgroundService(db);
-      webPushDispatcherConfigured = notificationBackground.webPushDispatcherConfigured;
+      await initializeNotificationBackground();
       // Every API process drops its MCP cache on a published config event, so an
       // admin toggle applies across processes rather than waiting out the TTL.
       // Re-resolve immediately: authRedirect and the CORS/header middleware read
@@ -511,6 +545,10 @@ async function start(): Promise<void> {
         invalidateMcpConfigCache();
         await resolveMcpConfig(db).catch(error => { console.error('Failed to resolve MCP configuration:', error); });
         await reloadConfigs();
+      }, console, subtype => {
+        if (subtype === 'agents_update' || subtype === 'synthetic_agents_update') {
+          invalidateStatusAgentCache?.();
+        }
       });
       // Subscribe first, then enqueue the initial load through the same serial
       // chain so no settings update can race with the startup snapshot.

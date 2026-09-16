@@ -94,8 +94,8 @@ const EnrollmentControl: React.FC = () => {
   if (!push.capabilities?.push.configured) {
     return (
       <div className="rounded-md border border-amber-200 bg-amber-50 p-3 text-xs text-amber-800">
-        Web Push is not configured for this ProPR instance. An administrator must configure
-        the VAPID keys before this browser can be enabled.
+        Browser notifications are unavailable for this ProPR instance. Try again later or contact
+        your administrator.
       </div>
     );
   }

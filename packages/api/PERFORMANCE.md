@@ -36,6 +36,45 @@ A deployment comparison should repeat the issue's exact credential, endpoints,
 parameters, ordering and three-round method, with a temporary bounded timing
 sample enabled to attribute any remaining delay.
 
+## Issue #2390 bounded-fresh status
+
+The follow-up production trace showed that a five-second single-flight cache
+still made every consumer in an expired-cache burst wait for registry lifecycle
+work and serial groups of agent probes. Status no longer calls
+`AgentRegistry.ensureInitialized()`: that execution-lifecycle method can inspect
+or prepare Docker images and does not belong on a diagnostic read path. Direct,
+synthetic, and legacy probes now run together, as do Redis status reads, indexing,
+summarization warnings, and agent health. Configuration, indexing, and warning
+reads have a 250 ms diagnostic deadline; a timeout projects their existing
+failure value (`unknown`, `disconnected`, or no warnings) and a later refresh
+can recover.
+
+Agent, indexing, and warning measurements use a five-second fresh window and a
+30-second hard age. A stale read returns the last measured result while one
+background refresh runs; after the hard age, a reader waits for that bounded
+probe result instead of extending stale data indefinitely. Agent configuration
+events clear the agent measurement immediately. Cache generations ensure a
+refresh begun before invalidation cannot overwrite or be joined by the new
+configuration identity.
+
+Focused fixture evidence:
+
+| Fixture | Work / latency assertion |
+| --- | --- |
+| 12 simultaneous stale-cache consumers | 1 refresh probe; all 12 return the prior measured status without waiting for its gate |
+| Never-resolving health check | 0 registry initializations; disconnected result at the configured 25 ms probe timeout (asserted 10–200 ms locally) |
+| Hard-expired cache with refresh in flight | 1 refresh probe; reader joins it and receives its 40 ms timeout result (asserted 10–200 ms locally) |
+| Direct + synthetic health, direct + synthetic config, indexing, warnings | all 6 fixture operations start before the shared gate is released |
+| Configuration invalidated during an old refresh | new identity is returned immediately; the late old generation cannot replace it |
+| Persisted config newer than the live registry | old runtime receives 0 probes and the new identity is reported disconnected until registry synchronization |
+| Unavailable direct-agent configuration read | returns `agents: []` and `claudeAuth: unknown` at the 25 ms fixture deadline |
+
+These timings are deterministic fixture bounds, not production latency claims.
+Promise timeouts cannot interrupt synchronous event-loop stalls, and the first
+or hard-expired read can still wait for up to the 250 ms configuration deadline
+plus the configured 1.5-second health-probe bound. Root must validate actual
+latency and contention after deployment.
+
 ## Issue #2376 active-update contention
 
 The remaining capture had several unrelated, lightweight reads begin together

@@ -110,6 +110,7 @@ await mock.module('../packages/core/src/config/configManager.js', {
         loadMonitoredRepos: mock.fn(async () => []),
         loadAiPrimaryTag: mock.fn(async () => 'AI'),
         loadPrimaryProcessingLabels: mock.fn(async () => ['AI']),
+        hasValidTriggerLabel: mock.fn(async (labels: Array<{ name: string } | string>) => (labels ?? []).some(l => (typeof l === 'string' ? l : l.name) === 'AI')),
         loadSettings: mock.fn(async () => ({})),
         getConfig: mock.fn(async () => null),
         saveConfig: mock.fn(async () => true),

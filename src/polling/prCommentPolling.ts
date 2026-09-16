@@ -4,7 +4,7 @@ import { handleError } from '@propr/core';
 import { getIssueQueue, COMMENT_BATCH_DELAY_MS, type CommentJobData, type UnprocessedComment } from '@propr/core';
 import { filterCommentByAuthor, checkCommentTrigger } from '@propr/core';
 import { extractLlmFromLabels, resolveModelAlias } from '@propr/core';
-import { loadPrimaryProcessingLabels } from '@propr/core';
+import { hasValidTriggerLabel } from '@propr/core';
 import type { Redis } from 'ioredis';
 
 type Octokit = {
@@ -205,9 +205,7 @@ function extractModelFromPRLabels(pr: PullRequest, modelLabelPattern: string, co
 }
 
 async function prHasProcessingLabel(pr: PullRequest): Promise<boolean> {
-    const processingLabels = await loadPrimaryProcessingLabels();
-    const prLabelNames = pr.labels?.map(l => typeof l === 'string' ? l : l.name) || [];
-    return prLabelNames.some(name => processingLabels.includes(name));
+    return hasValidTriggerLabel(pr.labels || []);
 }
 
 async function collectUnprocessedComments(
