@@ -107,7 +107,7 @@ export async function getTasksFromDb(
   // Apply ordering and pagination before presentation enrichment. This bounds
   // aggregate and JSON work by the requested page rather than database size.
   const pageTasks = await timeApiStage('sql.tasks.page', () => baseQuery
-    .select('t.*', 'h.state', 'h.timestamp as state_timestamp', 'h.reason as failedReason')
+    .select('t.*', 'h.state', 'h.timestamp as state_timestamp', 'h.reason as failedReason', 'h.metadata as latest_metadata')
     .orderBy('t.created_at', 'desc')
     .limit(limit)
     .offset(offset));

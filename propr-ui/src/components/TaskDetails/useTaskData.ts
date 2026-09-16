@@ -18,7 +18,7 @@ import {
 } from './types';
 import { useToast } from '../ui/useToast';
 import { useSocket } from '../../contexts/useSocket';
-import type { TaskUpdatePayload, TaskLiveUpdatePayload } from '@propr/shared';
+import { trustedPreviewMedia, type PublishedVisualPreview, type TaskUpdatePayload, type TaskLiveUpdatePayload } from '@propr/shared';
 import { isAnalysisData, normalizeAnalysisData } from './apiDataGuards';
 import { useLiveRefreshScheduler } from '../../hooks/useLiveRefreshScheduler';
 import { useCurrentUser } from '../../contexts/AuthContext';
@@ -28,6 +28,7 @@ interface TaskHistoryData {
   history?: HistoryItem[];
   taskInfo?: TaskInfo | null;
   usageMetricRecords?: UsageMetricRecord[];
+  previewMedia?: PublishedVisualPreview[];
 }
 
 const normalizeTodoStatus = (status: string): TodoItem['status'] => {
@@ -141,6 +142,7 @@ export const useTaskData = (taskId: string | undefined) => {
   const [history, setHistory] = useState<HistoryItem[]>([]);
   const [taskInfo, setTaskInfo] = useState<TaskInfo | null>(null);
   const [usageMetricRecords, setUsageMetricRecords] = useState<UsageMetricRecord[]>([]);
+  const [previewMedia, setPreviewMedia] = useState<PublishedVisualPreview[]>([]);
   const [loading, setLoading] = useState<boolean>(true);
   const [error, setError] = useState<string | null>(null);
   const [liveDetails, setLiveDetails] = useState<LiveDetails>({ events: [], todos: [], currentTask: null });
@@ -179,6 +181,8 @@ export const useTaskData = (taskId: string | undefined) => {
       setHistory(nextHistory);
       setTaskInfo(data.taskInfo || null);
       setUsageMetricRecords(data.usageMetricRecords || []);
+      // Only trusted GitHub attachment URLs may become media sources.
+      setPreviewMedia(trustedPreviewMedia(data.previewMedia || data.taskInfo?.previewMedia, 8));
       return data;
     } catch (err) {
       console.error('Error fetching task history:', err);
@@ -428,6 +432,7 @@ export const useTaskData = (taskId: string | undefined) => {
     history,
     taskInfo,
     usageMetricRecords,
+    previewMedia,
     loading,
     error,
     liveDetails,

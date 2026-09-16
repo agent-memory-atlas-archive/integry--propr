@@ -30,7 +30,7 @@ test('generic task lists exclude native goal backing tasks', async () => {
       table.integer('issue_number'); table.integer('pr_number');
     });
     await database.schema.createTable('task_history', table => {
-      table.increments('history_id'); table.string('task_id'); table.string('state'); table.timestamp('timestamp'); table.text('reason');
+      table.increments('history_id'); table.string('task_id'); table.string('state'); table.timestamp('timestamp'); table.text('reason'); table.text('metadata');
     });
     await database.schema.createTable('plan_issues', table => {
       table.increments('id'); table.string('task_id'); table.string('status');

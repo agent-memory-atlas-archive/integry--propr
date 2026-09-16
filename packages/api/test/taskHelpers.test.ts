@@ -33,6 +33,7 @@ async function createDatabase(): Promise<Knex> {
     table.string('state');
     table.timestamp('timestamp');
     table.text('reason');
+    table.text('metadata');
     table.index('task_id');
     table.index('state');
     table.index('timestamp');

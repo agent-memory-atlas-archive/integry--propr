@@ -3,6 +3,7 @@ import { MemoryRouter } from 'react-router-dom';
 import { describe, expect, it, vi } from 'vitest';
 import { parseISO8601Timestamp, type Notification } from '@propr/shared';
 import { PreviewThumbnails } from './PreviewMedia';
+import { downsampleToCanvas } from './previewDownsampling';
 import { ParentTaskRow, ChildTaskRow } from './TaskList/TaskRows';
 import { MobileTaskCard } from './TaskList/MobileTaskCard';
 import { InboxCard } from '../pages/InboxPageComponents';
@@ -66,5 +67,60 @@ describe('preview thumbnails', () => {
     expect(details).toHaveAttribute('href', '/repositories');
     fireEvent.click(details);
     expect(onOpen).toHaveBeenCalledWith(notification.id);
+  });
+});
+
+describe('compact preview downsampling', () => {
+  function mockCanvasContexts() {
+    const draws: Array<{ target: HTMLCanvasElement; width: number; height: number; quality: string }> = [];
+    const getContext = vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockImplementation(function (this: HTMLCanvasElement) {
+      const context = {
+        canvas: this, imageSmoothingEnabled: false, imageSmoothingQuality: 'low', clearRect: vi.fn(),
+        drawImage: (...args: number[]) => draws.push({ target: context.canvas, width: args[7], height: args[8], quality: context.imageSmoothingQuality }),
+      };
+      return context as unknown as CanvasRenderingContext2D;
+    } as never);
+    return { draws, restore: () => getContext.mockRestore() };
+  }
+  function sourceImage(width: number, height: number) {
+    const image = document.createElement('img');
+    Object.defineProperty(image, 'naturalWidth', { value: width });
+    Object.defineProperty(image, 'naturalHeight', { value: height });
+    return image;
+  }
+
+  it('halves 4K captures in steps and draws a contain-fit, device-pixel-ratio backing store with high smoothing', () => {
+    const { draws, restore } = mockCanvasContexts();
+    const originalRatio = window.devicePixelRatio;
+    Object.defineProperty(window, 'devicePixelRatio', { configurable: true, value: 2 });
+    try {
+      const canvas = document.createElement('canvas');
+      expect(downsampleToCanvas(sourceImage(3840, 2160), canvas, 80, 56)).toBe(true);
+      // Contain fit: a 16:9 capture in an 80x56 box is 80x45 CSS pixels, 160x90 device pixels.
+      expect(canvas.style.width).toBe('80px');
+      expect(canvas.style.height).toBe('45px');
+      expect([canvas.width, canvas.height]).toEqual([160, 90]);
+      expect(draws.map(draw => [draw.width, draw.height])).toEqual([[1920, 1080], [960, 540], [480, 270], [240, 135], [160, 90]]);
+      expect(draws.every(draw => draw.quality === 'high')).toBe(true);
+      expect(draws.at(-1)?.target).toBe(canvas);
+    } finally {
+      Object.defineProperty(window, 'devicePixelRatio', { configurable: true, value: originalRatio });
+      restore();
+    }
+  });
+
+  it('keeps the lazy accessible image with aspect-preserving layout and a presentation-only canvas', () => {
+    render(<PreviewThumbnails media={[media[0]]} />);
+    const image = screen.getByAltText('Published screen 0');
+    expect(image).toHaveAttribute('loading', 'lazy');
+    expect(image).toHaveClass('object-contain');
+    expect(image).not.toHaveClass('object-cover');
+    expect(screen.getByTestId('preview-thumbnail-canvas')).toHaveAttribute('aria-hidden', 'true');
+  });
+
+  it('falls back to the native image when no canvas context is available', () => {
+    const canvas = document.createElement('canvas');
+    vi.spyOn(canvas, 'getContext').mockReturnValue(null);
+    expect(downsampleToCanvas(sourceImage(1920, 1080), canvas, 80, 56)).toBe(false);
   });
 });

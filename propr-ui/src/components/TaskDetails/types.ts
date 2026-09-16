@@ -1,3 +1,5 @@
+import type { PublishedVisualPreview } from '@propr/shared';
+
 export interface TokenUsage {
   input_tokens?: number | null;
   output_tokens?: number | null;
@@ -70,6 +72,7 @@ export interface TaskInfo {
   llmProvider?: string;
   commandMode?: 'default' | 'review' | 'fix' | 'switch' | 'use' | 'ultrafix';
   ultrafixCycle?: boolean;
+  previewMedia?: PublishedVisualPreview[];
 }
 
 export interface PromptData {
