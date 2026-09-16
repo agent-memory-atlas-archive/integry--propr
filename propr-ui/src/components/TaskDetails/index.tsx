@@ -16,6 +16,7 @@ import TaskHeader from './TaskHeader';
 import ProgressBar from './ProgressBar';
 import LeftPaneBody from './LeftPaneBody';
 import SectionLabelHeader from './SectionLabelHeader';
+import TaskVisualPreviews from './TaskVisualPreviews';
 import { useTaskData, usePromptData, useLogFilesData } from './hooks';
 import { useThinkingLog } from './useThinkingLog';
 import { getHistoryDerivedData } from './useHistoryData';
@@ -286,6 +287,7 @@ const TaskDetails: React.FC = () => {
                 aria-label="Task analysis and implementation log"
                 className="min-w-0 overflow-x-hidden scrollbar-stealth lg:min-h-0 lg:flex-1 lg:overflow-y-auto lg:overscroll-contain"
               >
+                <TaskVisualPreviews previews={taskData.previewMedia} />
                 {(taskData.analysis || taskData.analysisLoading || thinkingLog.extractedSummary) && (
                   <ResultOverview
                     analysis={taskData.analysis}

@@ -10,7 +10,7 @@ import knex from 'knex';
 import type { Request, Response } from 'express';
 import { closeConnection, NotificationService, type RepoToMonitor } from '@propr/core';
 import { parseNotification, TASK_UPDATE, trustedPreviewMedia, type Notification, type PublishedVisualPreview } from '@propr/shared';
-import { createPreviewMediaReader, goalPreviewSource, projectNotificationPreviews, taskPreviewSource } from '../services/previewMediaProjection.js';
+import { createPreviewMediaReader, goalPreviewSource, projectNotificationPreviews, projectTaskPreviewMedia, taskPreviewSource } from '../services/previewMediaProjection.js';
 import { createRepositoryMediaRoutes } from '../routes/repositoryMediaRoutes.js';
 import { getTasksFromDb } from '../routes/taskHelpers.js';
 import { createNotificationProjectionTestHarness, countNotificationEvents } from './notificationProjectionTestHarness.js';
@@ -321,17 +321,21 @@ test('repository gallery scopes tasks and owned goals, paginates, reports empty/
   } finally { await db.destroy(); }
 });
 
+async function createTaskListSchema(db: ReturnType<typeof knex>) {
+  await db.schema.createTable('tasks', table => {
+    table.string('task_id'); table.string('repository'); table.string('task_type'); table.integer('pr_number');
+    table.text('initial_job_data'); table.text('final_result'); table.string('created_at'); table.integer('issue_number');
+  });
+  await db.schema.createTable('task_history', table => { table.increments('history_id'); table.string('task_id'); table.string('state'); table.string('timestamp'); table.string('reason'); table.text('metadata'); });
+  await db.schema.createTable('plan_issues', table => { table.increments('id'); table.string('task_id'); table.string('status'); });
+  await db.schema.createTable('llm_executions', table => { table.string('task_id'); table.string('execution_id'); table.text('analysis_report'); });
+}
+
 test('task list includes bounded media in the existing response and omits it after disabling', async () => {
   const db = knex({ client: 'better-sqlite3', connection: { filename: ':memory:' }, useNullAsDefault: true });
   const { reader, disable } = fixture();
   try {
-    await db.schema.createTable('tasks', table => {
-      table.string('task_id'); table.string('repository'); table.string('task_type'); table.integer('pr_number');
-      table.text('initial_job_data'); table.text('final_result'); table.string('created_at'); table.integer('issue_number');
-    });
-    await db.schema.createTable('task_history', table => { table.increments('history_id'); table.string('task_id'); table.string('state'); table.string('timestamp'); table.string('reason'); });
-    await db.schema.createTable('plan_issues', table => { table.increments('id'); table.string('task_id'); table.string('status'); });
-    await db.schema.createTable('llm_executions', table => { table.string('task_id'); table.string('execution_id'); table.text('analysis_report'); });
+    await createTaskListSchema(db);
     await db('tasks').insert({ task_id: 'task-1', repository: 'acme/web', pr_number: 1, created_at: '2026-09-13' });
     await db('task_history').insert({ task_id: 'task-1', state: 'completed', timestamp: '2026-09-13' });
     const olderNotification = notification();
@@ -345,4 +349,78 @@ test('task list includes bounded media in the existing response and omits it aft
     const disabled = await getTasksFromDb(query);
     assert.equal('previewMedia' in (disabled.tasks[0] as object), false);
   } finally { await db.destroy(); }
+});
+
+test('follow-up runs never inherit PR description previews and only project their own completion comment', async () => {
+  const { reader, calls, disable } = fixture();
+  const comment = (body: string) => JSON.stringify({ commandMode: 'review', githubComment: { url: 'https://github.com/acme/web/pull/1#c', body } });
+  const initial = taskPreviewSource({ task_id: 'initial', repository: 'acme/web', task_type: 'issue', pr_number: 1 });
+  const review = taskPreviewSource({ task_id: 'review', repository: 'acme/web', task_type: 'pr-comment', pr_number: 1,
+    initial_job_data: JSON.stringify({ pullRequestNumber: 1 }), latest_metadata: comment('Review complete, no visual changes.') });
+  const fix = taskPreviewSource({ task_id: 'fix', repository: 'acme/web', task_type: 'pr-comment', pr_number: 1,
+    latest_metadata: comment(body('fix')) });
+  const batch = taskPreviewSource({ task_id: 'pr-comments-batch-1', repository: 'acme/web', pr_number: 1 });
+  const [direct, nested] = [JSON.stringify({ pullRequestNumber: 7 }), { issueRef: { pullRequestNumber: 7 } }].map(initial_job_data => taskPreviewSource({ repository: 'acme/web', task_type: null, initial_job_data }));
+  [review, batch, direct, nested].forEach(source => assert.deepEqual(source, { repository: 'acme/web', prNumbers: [], isFollowUp: true }));
+  assert.deepEqual(fix.prNumbers, []);
+  const media = await reader.project([initial, review, fix, batch, direct, nested]);
+  assert.deepEqual(media[0].previews.map(item => item.url), [url('1-0'), url('1-1'), url('1-2')]);
+  assert.deepEqual(media[1], { previews: [] });
+  assert.deepEqual(media[2].previews.map(item => item.url), [url('fix-0'), url('fix-1'), url('fix-2')]);
+  assert.deepEqual(media.slice(3), [{ previews: [] }, { previews: [] }, { previews: [] }]);
+  assert.deepEqual(calls, [1]);
+  disable();
+  assert.deepEqual((await reader.project([fix]))[0], { previews: [] });
+});
+
+test('task list isolates previews for follow-up runs sharing a PR', async () => {
+  const db = knex({ client: 'better-sqlite3', connection: { filename: ':memory:' }, useNullAsDefault: true });
+  const { reader, calls } = fixture();
+  try {
+    await createTaskListSchema(db);
+    await db('tasks').insert([
+      { task_id: 'initial', repository: 'acme/web', task_type: 'issue', pr_number: 1, created_at: '2026-09-13T00:00:00.000Z' },
+      { task_id: 'review', repository: 'acme/web', task_type: 'pr-comment', pr_number: 1, created_at: '2026-09-13T01:00:00.000Z' },
+      { task_id: 'fix', repository: 'acme/web', task_type: 'pr-comment', pr_number: 1, created_at: '2026-09-13T02:00:00.000Z' },
+    ]);
+    await db('task_history').insert([
+      { task_id: 'initial', state: 'completed', timestamp: '2026-09-13T00:30:00.000Z' },
+      { task_id: 'review', state: 'completed', timestamp: '2026-09-13T01:30:00.000Z', metadata: JSON.stringify({ githubComment: { body: 'No visual changes' } }) },
+      { task_id: 'fix', state: 'completed', timestamp: '2026-09-13T02:30:00.000Z', metadata: JSON.stringify({ githubComment: { body: body('fix') } }) },
+    ]);
+    const result = await getTasksFromDb({ db, previewReader: reader, status: 'all', repository: 'all', offset: 0, limit: 10 });
+    const byId = new Map((result.tasks as Array<{ id: string; previewMedia?: PublishedVisualPreview[] }>).map(task => [task.id, task.previewMedia]));
+    assert.deepEqual(byId.get('initial')?.map(item => item.url), [url('1-0'), url('1-1'), url('1-2')]);
+    assert.equal(byId.get('review'), undefined);
+    assert.deepEqual(byId.get('fix')?.map(item => item.url), [url('fix-0'), url('fix-1'), url('fix-2')]);
+    assert.deepEqual(calls, [1]);
+  } finally { await db.destroy(); }
+});
+
+test('task list keeps a completion comment preview after a later cleanup entry without metadata', async () => {
+  const db = knex({ client: 'better-sqlite3', connection: { filename: ':memory:' }, useNullAsDefault: true });
+  const { reader, calls } = fixture();
+  const at = (minute: number) => `2026-09-16T00:0${minute}:00.000Z`;
+  try {
+    await createTaskListSchema(db);
+    await db('tasks').insert(['fix', 'review'].map((id, i) => ({ task_id: id, repository: 'acme/web', task_type: 'pr-comment', pr_number: 1, created_at: at(i * 2) })));
+    await db('task_history').insert([['fix', body('fix')], ['review', 'No changes']].flatMap(([id, comment], i) => [
+      { task_id: id, state: 'completed', timestamp: at(i * 2), metadata: JSON.stringify({ githubComment: { body: comment } }) },
+      { task_id: id, state: 'cleanup', timestamp: at(i * 2 + 1), metadata: '{}' },
+    ]));
+    const result = await getTasksFromDb({ db, previewReader: reader, status: 'all', repository: 'all', offset: 0, limit: 10 });
+    const byId = new Map((result.tasks as Array<{ id: string; status: string; previewMedia?: PublishedVisualPreview[] }>).map(task => [task.id, task]));
+    assert.equal(byId.get('fix')?.status, 'cleanup');
+    assert.deepEqual(byId.get('fix')?.previewMedia?.map(item => item.url), [url('fix-0'), url('fix-1'), url('fix-2')]);
+    assert.deepEqual([byId.get('review')?.previewMedia, calls], [undefined, []]);
+  } finally { await db.destroy(); }
+});
+
+test('task history preview enrichment keeps the gallery limit and returns empty media when the reader never settles', async () => {
+  const gallery = Array.from({ length: 10 }, (_, i) => `### Fix ${i}\n\n![Preview](${url(`fix-${i}`)})\n`).join('\n');
+  const history = [{ metadata: JSON.stringify({ githubComment: { body: `<!-- propr-visual-preview -->\n${gallery}` } }) }, { metadata: '{}' }];
+  assert.equal((await projectTaskPreviewMedia({ task_id: 'fix', repository: 'acme/web', task_type: 'pr-comment' }, history, fixture().reader)).length, 8);
+  const started = Date.now();
+  assert.deepEqual(await projectTaskPreviewMedia({ task_id: 'fix', repository: 'acme/web', task_type: 'pr-comment' }, history, { project: () => new Promise<never>(() => {}) }, 20), []);
+  assert.ok(Date.now() - started < 1000);
 });
