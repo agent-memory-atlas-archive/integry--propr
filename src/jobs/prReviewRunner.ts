@@ -147,3 +147,53 @@ export async function runSingleReview(
         return { assignment, analysisResult: { response: '', modelUsed: model, executionTimeMs: 0, success: false, error: errorMsg }, commentId: errorComment?.data.id, commentUrl: errorComment?.data.html_url, error: errorMsg, prompt: reviewPrompt };
     }
 }
+
+type ReviewRoutingOutcome = { status: 'routed'; assignment: ReviewAssignment }
+    | { status: 'failed'; result: ReviewResult };
+
+export async function routeReviewAssignments(
+    registry: AgentRegistry, assignments: ReviewAssignment[], pullRequestNumber: number, correlatedLogger: Logger,
+): Promise<ReviewRoutingOutcome[]> {
+    return Promise.all(assignments.map(async assignment => {
+        try {
+            const routingSession = registry.beginRoutingSession({ requestedAgentAlias: assignment.agentAlias, requestedModel: assignment.model });
+            const selection = await routingSession.select();
+            return {
+                status: 'routed' as const,
+                assignment: { ...assignment, routingSession,
+                    physicalAgentAlias: selection.physicalAgentAlias,
+                    physicalModel: selection.physicalModel },
+            };
+        } catch (routingError) {
+            const error = `Failed to route review assignment '${assignment.label}': ${(routingError as Error).message}`;
+            correlatedLogger.warn({ pullRequestNumber, agentAlias: assignment.agentAlias,
+                model: assignment.model, error: (routingError as Error).message,
+            }, 'Review assignment unavailable; continuing with remaining reviewers');
+            return {
+                status: 'failed' as const,
+                result: { assignment,
+                    analysisResult: { response: '', modelUsed: assignment.model,
+                        executionTimeMs: 0, success: false, error }, error },
+            };
+        }
+    }));
+}
+
+export async function runReviewRoutingOutcomes(
+    routingOutcomes: ReviewRoutingOutcome[], reviewCtx: RunReviewsContext, firstFindingNumber: number,
+): Promise<ReviewResult[]> {
+    const reviewResults: ReviewResult[] = [];
+    let nextFindingNumber = firstFindingNumber;
+    for (const outcome of routingOutcomes) {
+        if (outcome.status === 'failed') {
+            reviewResults.push(outcome.result);
+            continue;
+        }
+        const result = await runSingleReview(outcome.assignment, {
+            ...reviewCtx, findingStartNumber: nextFindingNumber,
+        });
+        reviewResults.push(result);
+        nextFindingNumber += result.findingCount ?? 0;
+    }
+    return reviewResults;
+}
