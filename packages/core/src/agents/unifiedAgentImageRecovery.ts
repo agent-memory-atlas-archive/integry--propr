@@ -31,7 +31,6 @@ export function scheduleUnifiedAgentImageRetry(options: {
     unavailable: UnavailableUnifiedAgentImage | null;
     imagePreparationOwner: boolean;
     retryTimer: NodeJS.Timeout | null;
-    pendingBackgroundRefresh: Promise<void> | null;
     startRecovery: () => Promise<void>;
     setRetryTimer: (timer: NodeJS.Timeout | null) => void;
 }): void {
@@ -39,7 +38,6 @@ export function scheduleUnifiedAgentImageRetry(options: {
     if (
         options.imagePreparationOwner
         || options.retryTimer
-        || options.pendingBackgroundRefresh
         || !unavailable
         || unavailable.circuitBreakerOpen
         || (unavailable.retryCount ?? 0) >= UNIFIED_AGENT_IMAGE_RETRY_MAX_ATTEMPTS
@@ -90,6 +88,7 @@ export function logUnifiedAgentImageCircuitOpen(
 }
 
 export function startUnifiedAgentImageRecovery(options: {
+    unavailable: UnavailableUnifiedAgentImage | null;
     pendingBackgroundRefresh: Promise<void> | null;
     imageTag: string | undefined;
     clearRetry: () => void;
@@ -99,7 +98,7 @@ export function startUnifiedAgentImageRecovery(options: {
     setPendingBackgroundRefresh: (promise: Promise<void> | null) => void;
 }): Promise<void> {
     if (options.pendingBackgroundRefresh) return options.pendingBackgroundRefresh;
-    if (!options.imageTag) return Promise.resolve();
+    if (!options.imageTag || options.unavailable?.circuitBreakerOpen) return Promise.resolve();
 
     options.clearRetry();
     const recovery = options.enqueuePreparation(options.imageTag)

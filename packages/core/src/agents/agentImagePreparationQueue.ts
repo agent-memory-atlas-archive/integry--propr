@@ -60,7 +60,8 @@ export async function enqueueAgentImagePreparation(
     const jobId = agentImagePreparationJobId(imageTag);
     const existing = await queue.getJob(jobId);
     let job = existing;
-    if (job && (await job.getState()) === 'failed') {
+    const pendingStates = ['waiting', 'active', 'delayed', 'prioritized', 'waiting-children'];
+    if (job && !pendingStates.includes(await job.getState())) {
         await job.remove().catch(() => undefined);
         job = undefined;
     }

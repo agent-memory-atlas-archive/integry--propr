@@ -442,7 +442,6 @@ export class AgentRegistry {
             unavailable: this.unavailableUnifiedAgentImage,
             imagePreparationOwner: this.imagePreparationOwner,
             retryTimer: this.unifiedAgentImageRetryTimer,
-            pendingBackgroundRefresh: this.pendingBackgroundRefresh,
             startRecovery: () => this.startWorkerOwnedImageRecovery(),
             setRetryTimer: timer => { this.unifiedAgentImageRetryTimer = timer; },
         });
@@ -452,6 +451,7 @@ export class AgentRegistry {
         const firstAgent = this.agents.values().next().value as Agent | undefined;
         const imageTag = this.unavailableUnifiedAgentImage?.imageTag || firstAgent?.config.dockerImage;
         return startUnifiedAgentImageRecovery({
+            unavailable: this.unavailableUnifiedAgentImage,
             pendingBackgroundRefresh: this.pendingBackgroundRefresh,
             imageTag,
             clearRetry: () => this.clearUnifiedAgentImageRetry(),

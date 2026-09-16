@@ -1,9 +1,17 @@
-import { after, before, beforeEach, test } from 'node:test';
+import { after, before, beforeEach, mock, test } from 'node:test';
 import assert from 'node:assert';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import type { AgentConfig } from '../packages/core/src/agents/types.js';
+
+const enqueuePreparation = mock.fn(async (_imageTag: string): Promise<void> => {});
+await mock.module('../packages/core/src/agents/agentImagePreparationQueue.js', {
+    namedExports: {
+        enqueueAgentImagePreparation: enqueuePreparation,
+        closeAgentImagePreparationQueue: async () => {},
+    },
+});
 
 process.env.NODE_ENV = 'test';
 const testDataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'propr-agent-registry-'));
@@ -44,6 +52,8 @@ before(async () => {
 });
 
 beforeEach(async () => {
+    enqueuePreparation.mock.resetCalls();
+    enqueuePreparation.mock.mockImplementation(async () => {});
     (AgentRegistry as unknown as { instance?: unknown }).instance = undefined;
     await saveAgents([opencodeConfig]);
     await saveSettings({ default_agent_alias: null });
@@ -276,6 +286,84 @@ test('AgentRegistry API recovery requests one worker-owned preparation', async (
     assert.deepStrictEqual(preparationModes, [false]);
     assert.strictEqual(recoveryRequests, 1);
 });
+
+for (const failurePath of ['enqueue', 'refresh'] as const) {
+    test(`AgentRegistry re-arms retries after ${failurePath} failures until the circuit opens`, async t => {
+        t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: 1_000 });
+        t.mock.method(Math, 'random', () => 0.5);
+        const registry = AgentRegistry.getInstance();
+        registry.setImagePreparationOwner(false);
+        const internal = registry as unknown as {
+            startWorkerOwnedImageRecovery: () => Promise<void>;
+            recordUnavailableUnifiedAgentImage: (imageTag: string, error: string) => void;
+            ensureUnifiedAgentImage: () => Promise<string | null>;
+            pendingBackgroundRefresh: Promise<void> | null;
+            unifiedAgentImageRetryTimer: NodeJS.Timeout | null;
+            clearUnifiedAgentImageRetry: () => void;
+        };
+        const imageTag = 'propr/agent:bundle-retry';
+        const error = 'temporary download failure';
+        if (failurePath === 'enqueue') {
+            enqueuePreparation.mock.mockImplementation(async () => { throw new Error(error); });
+        } else {
+            internal.ensureUnifiedAgentImage = async () => {
+                internal.recordUnavailableUnifiedAgentImage(imageTag, error);
+                return null;
+            };
+        }
+        internal.recordUnavailableUnifiedAgentImage(imageTag, error);
+        try {
+            const recovery = internal.startWorkerOwnedImageRecovery();
+            assert.strictEqual(internal.startWorkerOwnedImageRecovery(), recovery);
+            await recovery;
+            for (let retryCount = 2; retryCount < UNIFIED_AGENT_IMAGE_RETRY_MAX_ATTEMPTS; retryCount += 1) {
+                const status = registry.getOperationalStatus().unifiedAgentImage;
+                const delay = getUnifiedAgentImageRetryDelay(retryCount, () => 0.5);
+                assert.strictEqual(status.retryCount, retryCount);
+                assert.strictEqual(status.nextRetryAt, new Date(Date.now() + delay).toISOString());
+                assert.ok(internal.unifiedAgentImageRetryTimer);
+                assert.strictEqual(internal.pendingBackgroundRefresh, null);
+                assert.strictEqual(enqueuePreparation.mock.callCount(), retryCount - 1);
+                t.mock.timers.tick(delay);
+                await internal.pendingBackgroundRefresh;
+            }
+            const status = registry.getOperationalStatus().unifiedAgentImage;
+            assert.strictEqual(status.retryCount, UNIFIED_AGENT_IMAGE_RETRY_MAX_ATTEMPTS);
+            assert.strictEqual(status.circuitBreakerOpen, true);
+            assert.strictEqual(status.nextRetryAt, undefined);
+            assert.strictEqual(internal.unifiedAgentImageRetryTimer, null);
+            assert.strictEqual(enqueuePreparation.mock.callCount(), UNIFIED_AGENT_IMAGE_RETRY_MAX_ATTEMPTS - 1);
+        } finally {
+            internal.clearUnifiedAgentImageRetry();
+        }
+    });
+}
+
+for (const error of ['temporary download failure', 'docker build failed: no space left on device']) {
+    test(`AgentRegistry blocks on-demand recovery with an open circuit: ${error}`, async () => {
+        const registry = AgentRegistry.getInstance();
+        registry.setImagePreparationOwner(false);
+        const internal = registry as unknown as {
+            initialized: boolean;
+            recordUnavailableUnifiedAgentImage: (imageTag: string, error: string) => void;
+            startWorkerOwnedImageRecovery: () => Promise<void>;
+            registeredAgentImagesAvailable: () => Promise<boolean>;
+        };
+        internal.initialized = true;
+        internal.registeredAgentImagesAvailable = async () => false;
+        do {
+            internal.recordUnavailableUnifiedAgentImage('propr/agent:bundle-retry', error);
+        } while (!registry.getOperationalStatus().unifiedAgentImage.circuitBreakerOpen);
+        const status = registry.getOperationalStatus();
+
+        await internal.startWorkerOwnedImageRecovery();
+        await registry.ensureInitialized();
+        await registry.ensureInitialized();
+
+        assert.strictEqual(enqueuePreparation.mock.callCount(), 0);
+        assert.deepStrictEqual(registry.getOperationalStatus(), status);
+    });
+}
 
 test('AgentRegistry opens a circuit after bounded transient failures', () => {
     const registry = AgentRegistry.getInstance();
