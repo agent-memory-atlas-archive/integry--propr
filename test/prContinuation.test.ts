@@ -396,6 +396,42 @@ for (const failure of ['PR creation', 'continuation push']) {
     });
 }
 
+for (const failure of ['PR creation', 'continuation push']) {
+    test(`a rejected publish guard after ${failure} failure keeps the checkpoint unpublished and discards the worktree`, async () => {
+        const publication = session();
+        const { worktreeInfo } = await publication.prepare('guarded-checkpoint');
+        const produced = await implement(worktreeInfo.worktreePath);
+        finalPushError = denial();
+        if (failure === 'PR creation') failPRCreate = true;
+        else continuationPushError = new Error('Connection timed out');
+        await assert.rejects(publication.push(worktreeInfo.worktreePath));
+        await rm(worktreeInfo.worktreePath, { recursive: true, force: true });
+        failPRCreate = false;
+        continuationPushError = undefined;
+        const cancelled = new Error('originating task cancelled');
+        let guardedAfterWorktree = false;
+        const beforePublish = async () => {
+            // The guard runs after the asynchronous worktree preparation, before any push.
+            guardedAfterWorktree = calls.some(call => call.operation === 'worktree');
+            throw cancelled;
+        };
+        calls = [];
+        await assert.rejects(session().prepare('cancelled-recovery', { beforePublish }), error => error === cancelled);
+        assert.ok(guardedAfterWorktree);
+        assert.equal(calls.filter(call => call.operation === 'cleanup').length, 1);
+        assert.ok(!calls.some(call => call.operation === 'git' && (call.args as string[])[0] === 'push'));
+        assert.equal(git(repoPath('upstream'), 'rev-parse', 'propr/continuation-pr-42'), sourceSha);
+        assert.ok((await findPRContinuation(ref))?.publication_bundle);
+        // The continuation PR is created before the push; it holds only the contribution until recovery.
+        assert.equal(prs.length, 1);
+        // The retained checkpoint is still recoverable by a later request.
+        const later = await session().prepare('recover-after-guard');
+        assert.equal(git(later.worktreeInfo.worktreePath, 'rev-parse', 'HEAD'), produced);
+        assert.equal(git(repoPath('upstream'), 'rev-parse', 'propr/continuation-pr-42'), produced);
+        assert.equal((await findPRContinuation(ref))?.publication_bundle, null);
+    });
+}
+
 test('final push denial publishes the saved implementation before creating a PR the base would reject as empty', async () => {
     const publication = session();
     const { worktreeInfo } = await publication.prepare('merged-base');

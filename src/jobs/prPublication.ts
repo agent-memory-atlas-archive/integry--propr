@@ -9,6 +9,9 @@ import {
 } from './prContinuation.js';
 import { checkPullRequestHeadWritable, createPublicationBundle, restorePublicationBundle, isPublicationPermissionDenied, pushContinuationHead } from './prPublicationGit.js';
 
+/** Runs before a saved checkpoint is pushed; reject to keep it unpublished. */
+export type PublishGuard = () => Promise<void>;
+
 /** One publication session spans preflight, agent execution and the final push.
  * Discussion/comment identity stays with the request; only the mutable Git target changes.
  */
@@ -71,17 +74,20 @@ export class PullRequestPublication {
 
     /** Restores the checkpoint into the worktree and publishes it. Idempotent: a
      * branch that already contains the commits merges and pushes as up to date.
+     * Worktree preparation takes time; the guard runs right before the restore and
+     * push so a task cancelled meanwhile is never published.
      */
-    private async publishCheckpoint(worktreePath: string, token: string) {
+    private async publishCheckpoint(worktreePath: string, token: string, beforePublish?: PublishGuard) {
+        await beforePublish?.();
         await restorePublicationBundle(worktreePath, this.continuation!.publication_bundle!);
         const result = await pushContinuationHead(worktreePath, this.target, token);
         this.publishedHead = result.commitHash;
         return result;
     }
 
-    private async recover(worktreePath: string, token: string) {
+    private async recover(worktreePath: string, token: string, beforePublish?: PublishGuard) {
         if (this.continuation?.publication_bundle) {
-            const result = await this.publishCheckpoint(worktreePath, token);
+            const result = await this.publishCheckpoint(worktreePath, token, beforePublish);
             await this.markPublished(result.commitHash);
         }
         await this.announce();
@@ -134,7 +140,10 @@ export class PullRequestPublication {
         return prepared;
     }
 
-    async prepare(worktreeDirName: string) {
+    /** `beforePublish` runs after the worktree exists and before a saved checkpoint is
+     * restored and pushed. Its rejection discards the worktree and leaves the checkpoint.
+     */
+    async prepare(worktreeDirName: string, { beforePublish }: { beforePublish?: PublishGuard } = {}) {
         const { token } = await this.octokit.auth({ type: 'installation' }) as { token: string };
         let prepared: Awaited<ReturnType<typeof createPullRequestHeadWorktree>> | undefined;
         const discard = async () => {
@@ -153,7 +162,7 @@ export class PullRequestPublication {
                 if (existing.publication_bundle) {
                     await this.adopt(async () => {
                         prepared = await this.createWorktree(worktreeDirName, token);
-                        await this.publishCheckpoint(prepared.worktreeInfo.worktreePath, token);
+                        await this.publishCheckpoint(prepared.worktreeInfo.worktreePath, token, beforePublish);
                     });
                 } else {
                     await this.adoptBeforeImplementation();
@@ -161,7 +170,7 @@ export class PullRequestPublication {
             }
             prepared ??= await this.createWorktree(worktreeDirName, token);
             if (!this.target.isFork) {
-                await this.recover(prepared.worktreeInfo.worktreePath, token);
+                await this.recover(prepared.worktreeInfo.worktreePath, token, beforePublish);
                 return prepared;
             }
         } catch (error) {

@@ -17,6 +17,13 @@ import { sanitizeErrorMessage } from './errorSanitizer.js';
 
 const TERMINAL_STATES: ReadonlySet<string> = new Set([TaskStates.COMPLETED, TaskStates.FAILED, TaskStates.CANCELLED]);
 
+/** Thrown by the publish guard when the originating task was cancelled after recovery began. */
+class RecoveryCancelledError extends Error {
+    constructor(readonly originatingTaskId: string) {
+        super('Publication recovery stopped: the originating task was cancelled');
+    }
+}
+
 export interface ProcessingState {
     publication?: PullRequestPublication;
     octokit: Awaited<ReturnType<typeof getAuthenticatedOctokit>> | null;
@@ -39,6 +46,16 @@ export interface ExecuteProcessingParams {
     lockToken: string;
 }
 
+async function isOriginatingTaskCancelled(stateManager: WorkerStateManager, taskId: string): Promise<boolean> {
+    return (await stateManager.getTaskState(taskId))?.state === TaskStates.CANCELLED;
+}
+
+/** Retire both inputs so no later request restores work the originating user cancelled. */
+async function retireCancelledCheckpoint(context: PRJobContext, record: ContinuationRecord, taskId: string): Promise<void> {
+    await savePublicationCheckpoint(record, null, null);
+    context.correlatedLogger.info({ taskId }, 'Retired cancelled publication checkpoint');
+}
+
 /** Reads the saved checkpoint and retires a cancelled one. No Git or GitHub work happens here. */
 async function loadPendingPublication(
     { context, stateManager }: Pick<ExecuteProcessingParams, 'context' | 'stateManager'>,
@@ -47,18 +64,17 @@ async function loadPendingPublication(
     if (!record?.publication_bundle && !record?.publication_completion) return;
     const completion = record.publication_completion
         ? JSON.parse(record.publication_completion) as PublicationCompletion : undefined;
-    if (completion && (await stateManager.getTaskState(completion.taskId))?.state === TaskStates.CANCELLED) {
-        // Retire both inputs before any reconciliation or preparation. A later
-        // request's prepare() must not restore work the originating user cancelled.
-        await savePublicationCheckpoint(record, null, null);
-        context.correlatedLogger.info({ taskId: completion.taskId }, 'Retired cancelled publication checkpoint');
+    if (completion && await isOriginatingTaskCancelled(stateManager, completion.taskId)) {
+        // Retire before any reconciliation or preparation.
+        await retireCancelledCheckpoint(context, record, completion.taskId);
         return;
     }
     return { record, completion };
 }
 
 async function preparePendingPublication(
-    { state, context }: Pick<ExecuteProcessingParams, 'state' | 'context'>, record: ContinuationRecord,
+    { state, context, stateManager }: Pick<ExecuteProcessingParams, 'state' | 'context' | 'stateManager'>,
+    record: ContinuationRecord, originatingTaskId: string | undefined,
 ): Promise<PullRequestPublication> {
     const octokit = state.octokit!;
     // Completion alone uses the retained destination and task metadata, even after
@@ -75,7 +91,12 @@ async function preparePendingPublication(
     await publication.reconcilePublication();
     if (publication.continuation.publication_bundle) {
         await ensureGitRepository(context.correlatedLogger);
-        const prepared = await publication.prepare(`pr-${context.pullRequestNumber}-publication-${Date.now()}`);
+        // Worktree preparation is slow enough for the originating task to be cancelled
+        // meanwhile; check once more right before the saved commits are pushed.
+        const beforePublish = async () => {
+            if (originatingTaskId && await isOriginatingTaskCancelled(stateManager, originatingTaskId)) throw new RecoveryCancelledError(originatingTaskId);
+        };
+        const prepared = await publication.prepare(`pr-${context.pullRequestNumber}-publication-${Date.now()}`, { beforePublish });
         state.localRepoPath = prepared.localRepoPath;
         state.worktreeInfo = prepared.worktreeInfo;
     } else {
@@ -124,32 +145,55 @@ export async function recoverPendingPublication(params: ExecuteProcessingParams,
     }
 }
 
+/**
+ * Source lookup, reconciliation, continuation creation and Git publication can all
+ * fail during recovery. The job's error handler must already know the originating
+ * comment, and the same task's retry must no longer sit in its earlier FAILED state,
+ * or that comment never receives the recovery failure. Returns false when the
+ * originating task was cancelled since the checkpoint was loaded: nothing of it may
+ * be published, so the checkpoint is retired instead.
+ */
+async function resumeOriginatingTask(
+    { state, context, job, stateManager }: ExecuteProcessingParams, record: ContinuationRecord, saved: PublicationCompletion,
+): Promise<boolean> {
+    const originalState = await stateManager.getTaskState(saved.taskId);
+    if (originalState?.state === TaskStates.CANCELLED) {
+        await retireCancelledCheckpoint(context, record, saved.taskId);
+        return false;
+    }
+    Object.assign(state, {
+        authorsText: saved.authorsText, unprocessedComments: saved.unprocessedComments,
+        startingWorkComment: saved.startingWorkComment,
+    });
+    await createPRCommentTaskStateIfMissing({
+        job: { ...job, id: saved.taskId, data: saved.jobData } as Job<CommentJobData>, taskId: saved.taskId,
+        stateManager, preexistingState: originalState,
+        modelName: saved.llm ?? null, correlatedLogger: context.correlatedLogger,
+    });
+    if (originalState?.state === TaskStates.FAILED) await stateManager.updateTaskState(saved.taskId, TaskStates.PROCESSING, {
+        reason: 'Retrying publication completion for the originating task', isRetry: true,
+    });
+    return true;
+}
+
 async function completePendingPublication(
     params: ExecuteProcessingParams, redisClient: Redis, pending: NonNullable<Awaited<ReturnType<typeof loadPendingPublication>>>,
 ): Promise<JobResult | undefined> {
     const { state, context, taskId, job, stateManager, lockKey, lockToken } = params;
     const octokit = state.octokit!;
     const saved = pending.completion;
-    if (saved) {
-        // Source lookup, reconciliation, continuation creation and Git publication can
-        // all fail below. The job's error handler must already know the originating
-        // comment, and the same task's retry must no longer sit in its earlier FAILED
-        // state, or that comment never receives the recovery failure.
-        Object.assign(state, {
-            authorsText: saved.authorsText, unprocessedComments: saved.unprocessedComments,
-            startingWorkComment: saved.startingWorkComment,
-        });
-        const originalState = await stateManager.getTaskState(saved.taskId);
-        await createPRCommentTaskStateIfMissing({
-            job: { ...job, id: saved.taskId, data: saved.jobData } as Job<CommentJobData>, taskId: saved.taskId,
-            stateManager, preexistingState: originalState,
-            modelName: saved.llm ?? null, correlatedLogger: context.correlatedLogger,
-        });
-        if (originalState?.state === TaskStates.FAILED) await stateManager.updateTaskState(saved.taskId, TaskStates.PROCESSING, {
-            reason: 'Retrying publication completion for the originating task', isRetry: true,
-        });
+    if (saved && !(await resumeOriginatingTask(params, pending.record, saved))) return;
+    let publication: PullRequestPublication;
+    try {
+        publication = await preparePendingPublication(params, pending.record, saved?.taskId);
+    } catch (error) {
+        if (!(error instanceof RecoveryCancelledError)) throw error;
+        // prepare() already discarded its worktree. The request continues as a fresh
+        // one, so it must not inherit the cancelled task's comment, authors or session.
+        await retireCancelledCheckpoint(context, state.publication?.continuation ?? pending.record, error.originatingTaskId);
+        Object.assign(state, { publication: undefined, authorsText: '', unprocessedComments: [], startingWorkComment: null });
+        return;
     }
-    const publication = await preparePendingPublication(params, pending.record);
     // Publication can update the saved commit hash; read the completion again.
     const completion = publication.pendingCompletion;
     if (!completion) return; // Legacy bundles can be published but have no completion inputs.
