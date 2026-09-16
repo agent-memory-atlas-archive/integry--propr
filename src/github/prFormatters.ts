@@ -1,4 +1,4 @@
-import { redactSecrets, getDetailedUsageStats, getModelPricing, getOpenRouterId, calculateCostWithCachePricing, formatSubscriptionUsage } from '@propr/core';
+import { redactSecrets, getDetailedUsageStats, getModelPricing, getOpenRouterId, calculateCostWithCachePricing, formatSubscriptionUsage, sanitizeAgentReport } from '@propr/core';
 import type { DetailedUsageStats, SubscriptionUsageMetrics } from '@propr/core';
 import { buildSlashCommandsBlock } from '../shared/slashCommandsBlock.js';
 
@@ -98,12 +98,14 @@ export async function generatePRBody(issueNumber: number, issueTitle: string, co
     }
 
     body += `\n### 💬 Implementation Details\n\n`;
-    if (commitMessage) {
-        body += `**Commit Message:**\n\`\`\`\n${commitMessage}\n\`\`\`\n\n`;
+    const publishableCommitMessage = sanitizeAgentReport(commitMessage);
+    if (publishableCommitMessage) {
+        body += `**Commit Message:**\n\`\`\`\n${publishableCommitMessage}\n\`\`\`\n\n`;
     }
 
-    if (claudeResult?.summary) {
-        body += `**Summary:**\n${claudeResult.summary}\n\n`;
+    const publishableSummary = sanitizeAgentReport(claudeResult?.summary);
+    if (publishableSummary) {
+        body += `**Summary:**\n${publishableSummary}\n\n`;
     }
 
     body += `**Note:** Detailed conversation logs and execution details will be added as a comment below.\n\n`;

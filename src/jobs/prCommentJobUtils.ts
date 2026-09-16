@@ -8,6 +8,7 @@ import {
     formatResetTime, recordLLMMetrics, issueQueue, TaskStates, getDefaultModel,
     resolveModelAlias, getPendingPrCommentsKey,
     buildVisualPreviewPrompt, describeAgentTermination, resolveAgentTerminationReason,
+    sanitizeAgentReport,
     type WorktreeInfo, type ClaudeCodeResponse, type ClaudeResult,
     type CommentJobData, type UnprocessedComment, type WorkerStateManager, type VisualPreviewSettings,
 } from '@propr/core';
@@ -120,15 +121,16 @@ export interface CommitMessageOptions {
 
 export function buildCommitMessage(options: CommitMessageOptions): string {
     const { changesSummary, unprocessedComments, pullRequestNumber, claudeResult, llm, authorsText } = options;
+    const publishableSummary = sanitizeAgentReport(changesSummary);
 
     const commentReferences = unprocessedComments.map(c => `Comment by: @${c.author} (ID: ${c.id})`).join('\n');
     const terminationReason = resolveAgentTerminationReason(claudeResult);
     const partialExecutionNote = terminationReason
         ? `\n\nPartial execution: ${describeAgentTermination(terminationReason)}`
         : '';
-    return `feat(ai): ${changesSummary ? changesSummary.split('\n')[0] : 'Apply follow-up changes from PR comment'}
+    return `feat(ai): ${publishableSummary ? publishableSummary.split('\n')[0] : 'Apply follow-up changes from PR comment'}
 
-${changesSummary ? changesSummary : `Implemented changes requested by ${authorsText}`}
+${publishableSummary || `Implemented changes requested by ${authorsText}`}
 
 PR: #${pullRequestNumber}
 ${commentReferences}
@@ -164,6 +166,7 @@ ${reviewCommentsSection
         : '- Implement ONLY the changes requested in the **New Request(s)** section.'}
 - Treat the original PR objective as immutable context, not as permission to expand the requested work.
 - DO NOT commit your changes - the system will handle the commit for you
+- Do not inspect or repair .git permissions. In your final response, do not mention that changes are uncommitted or that you did not create a commit; ProPR creates and reports the commit after you finish.
 - DO NOT create a new pull request
 - The repository is ${repoOwner}/${repoName}
 ${environmentRepairInstructions}

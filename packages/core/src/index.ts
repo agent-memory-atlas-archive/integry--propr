@@ -22,6 +22,7 @@ export { IdempotentGitHubOps, IdempotentGitOps } from './utils/idempotentOps.js'
 export { estimateTokens, countTokens, getUsageStats, getDetailedUsageStats, getCachePricingMultipliers, calculateCostWithCachePricing } from './utils/tokenCalculation.js';
 export type { DetailedUsageStats, CachePricingMultipliers } from './utils/tokenCalculation.js';
 export { buildAnalysisSafetySuffix } from './agents/impl/utils/analysisPromptSafety.js';
+export { sanitizeAgentReport } from './agents/agentReportSanitizer.js';
 export { formatResetTime, addModelSpecificDelay, parseResetTimeFromMessage, calculateNextRoundHourPlus2Minutes, formatRetryTime, hoursUntil } from './utils/scheduling.js';
 export { filterCommentByAuthor, checkCommentTrigger, checkCommentIgnore } from './utils/commentFilters.js';
 export { ensureGitRepository } from './utils/git/gitValidation.js';

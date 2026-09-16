@@ -12,6 +12,7 @@ import {
     renderVisualPreviewSection,
     renderVisualPreviewUploadFailureSection,
     resolveAgentTerminationReason,
+    sanitizeAgentReport,
     TaskStates,
     VISUAL_PREVIEW_SLOT,
 } from '@propr/core';
@@ -105,7 +106,7 @@ async function commitAndPush(
     completionInputs: Omit<PublicationCompletion, 'commitResult' | 'changesSummary' | 'commitMessage'>
 ) {
     if (!state.worktreeInfo) throw new Error('Cannot commit PR comment changes without a worktree');
-    const changesSummary = state.claudeResult.summary || state.claudeResult.finalResult?.result || '';
+    const changesSummary = sanitizeAgentReport(state.claudeResult.summary || state.claudeResult.finalResult?.result || '');
     const commitMessage = buildCommitMessage({ changesSummary, unprocessedComments: state.unprocessedComments, pullRequestNumber: context.pullRequestNumber, claudeResult: state.claudeResult, llm, authorsText: state.authorsText });
     const commitResult = await commitChanges(state.worktreeInfo.worktreePath, commitMessage, AI_COMMIT_AUTHOR, { issueNumber: context.pullRequestNumber, issueTitle: 'Follow-up changes' });
 

@@ -7,7 +7,8 @@ import {
     loadRepositoryVisualPreviewSettings, prepareVisualPreviewEvidence, pushBranch,
     TaskStates,
     describeAgentTermination,
-    resolveAgentTerminationReason
+    resolveAgentTerminationReason,
+    sanitizeAgentReport,
 } from '@propr/core';
 import { getAuthenticatedOctokit, linkPRToPlanIssue } from '@propr/core';
 import { safeUpdateLabels } from '@propr/core';
@@ -40,6 +41,8 @@ function buildImplementationCompletionNote(claudeResult: ClaudeCodeResponse): st
         ? 'Implementation completed successfully.'
         : 'Implementation attempted - see PR comments for details.';
 }
+
+function resolveAgentCommitMessage(candidate: string, fallback: string): string { return sanitizeAgentReport(candidate) || fallback; }
 
 function hasPublishableAgentWork(claudeResult: ClaudeCodeResponse | null): boolean {
     if (!claudeResult) return false;
@@ -202,7 +205,7 @@ export async function performPostProcessing(options: PostProcessOptions): Promis
         let commitMessage = `fix(ai): Resolve issue #${issueRef.number} - ${currentIssueData.data.title.substring(0, 50)}\n\nImplemented by ProPR AI using ${modelName} model.\n\n${completionNote}`;
 
         if (claudeResult?.commitMessage) {
-            commitMessage = claudeResult.commitMessage;
+            commitMessage = resolveAgentCommitMessage(claudeResult.commitMessage, commitMessage);
         }
 
         preparedVisualPreview = await prepareVisualPreviewEvidence({

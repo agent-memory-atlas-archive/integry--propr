@@ -20,7 +20,7 @@ const goal = {
 const result = {
   success: true,
   logs: '',
-  summary: 'Implemented the focused settings layout.\n.propr/previews/desktop.png',
+  summary: 'Implemented the focused settings layout.\nChanges are uncommitted.\n.propr/previews/desktop.png',
   modifiedFiles: ['src/settings.ts', 'src/settings.test.ts'],
   cost: 1.25,
   modelUsed: 'gpt-5.6',
@@ -33,6 +33,7 @@ test('completed goal PR body summarizes work and execution stats', () => {
 
   assert.match(body, /^## Goal Implementation Summary/);
   assert.match(body, /Implemented the focused settings layout\./);
+  assert.doesNotMatch(body, /uncommitted/i);
   assert.doesNotMatch(body, /\.propr\/previews/);
   assert.match(body, /## Files Changed/);
   assert.match(body, /`src\/settings\.ts`/);

@@ -52,6 +52,8 @@ describe('buildConflictResolutionPrompt', () => {
         assert.ok(prompt.includes('/tmp/worktree/test'));
         assert.ok(prompt.includes('test-owner/test-repo'));
         assert.ok(prompt.includes('DO NOT commit'));
+        assert.ok(prompt.includes('Do not inspect or repair .git permissions'));
+        assert.ok(prompt.includes('do not mention that changes are uncommitted'));
         assert.ok(prompt.includes('conflict markers'));
     });
 
@@ -134,6 +136,7 @@ describe('buildMergeConflictComment', () => {
             model: 'claude-sonnet-4-20250514',
             executionTimeMs: 125000,
             taskUrl: 'https://gitfix.dev/tasks/test-123',
+            resolutionSummary: 'Kept both compatible changes.\nNo commits created.',
         });
 
         assert.ok(comment.includes('Resolved merge conflicts'));
@@ -143,6 +146,8 @@ describe('buildMergeConflictComment', () => {
         assert.ok(comment.includes('claude-sonnet-4-20250514'));
         assert.ok(comment.includes('2m 5s'));
         assert.ok(comment.includes('https://gitfix.dev/tasks/test-123'));
+        assert.ok(comment.includes('Kept both compatible changes.'));
+        assert.doesNotMatch(comment, /No commits created/i);
         assert.ok(comment.includes('System-triggered'));
     });
 

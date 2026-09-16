@@ -10,6 +10,7 @@ import type { DetailedUsageStats, ClaudeResult as TokenCalcClaudeResult } from '
 import { formatSubscriptionUsage } from './formatSubscriptionUsage.js';
 import type { SubscriptionUsageMetrics } from './formatSubscriptionUsage.js';
 import { describeAgentTermination, resolveAgentTerminationReason } from '../../agents/termination.js';
+import { sanitizeAgentReport } from '../../agents/agentReportSanitizer.js';
 import { redactVisualPreviewPaths } from '../../services/visualPreviewPaths.js';
 
 interface IssueRef {
@@ -386,8 +387,9 @@ function buildSummarySection(claudeResult: ClaudeResult): string {
         const changedFiles = claudeResult.modifiedFiles || [];
         let section = `> [!WARNING]\n> **This implementation may be incomplete.** ${describeAgentTermination(terminationReason)} Partial changes were preserved instead of discarded.\n\n`;
         section += '**Work completed before interruption:**\n';
-        if (claudeResult.summary?.trim()) {
-            section += `${redactSecrets(claudeResult.summary.trim()).slice(0, 6000)}\n\n`;
+        const publishableSummary = sanitizeAgentReport(claudeResult.summary);
+        if (publishableSummary) {
+            section += `${redactSecrets(publishableSummary).slice(0, 6000)}\n\n`;
         } else if (changedFiles.length > 0) {
             section += `Changes were committed in ${changedFiles.length} file${changedFiles.length === 1 ? '' : 's'}:\n`;
             section += changedFiles.slice(0, 20).map(file => `- \`${file}\``).join('\n');
@@ -402,7 +404,8 @@ function buildSummarySection(claudeResult: ClaudeResult): string {
     }
 
     let section = '';
-    if (claudeResult?.summary) section += `**Summary:**\n${redactSecrets(claudeResult.summary)}\n\n`;
+    const publishableSummary = sanitizeAgentReport(claudeResult.summary);
+    if (publishableSummary) section += `**Summary:**\n${redactSecrets(publishableSummary)}\n\n`;
     if (claudeResult?.finalResult?.subtype === 'error_max_turns') {
         section += `**Max Turns Reached**: Claude reached the maximum number of conversation turns (${claudeResult.finalResult.num_turns}) before completing all tasks. Consider increasing the turn limit or breaking down the task into smaller parts.\n\n`;
     }
