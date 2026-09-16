@@ -1,12 +1,11 @@
 import {
-    createWorktreeFromExistingBranch,
     ensureGitRepository,
-    ensureRepoCloned,
-    getRepoUrl,
     resolveLlmLabel,
 } from '@propr/core';
 import type { Agent, AgentRegistry, AnalysisResult, AnalyzeOptions, SyntheticRoutingSession, WorktreeInfo } from '@propr/core';
 import type { Logger } from 'pino';
+import { createPullRequestHeadWorktree } from './prGitOperations.js';
+import type { PullRequestGitTarget } from './prGitTarget.js';
 import { validateAndExtractScoutContext } from './reviewContextScoutValidation.js';
 
 const MAX_SCOUT_DIFF_CHARS = 120_000;
@@ -56,7 +55,11 @@ interface PrepareRelatedReviewContextOptions {
     fastAnalysisModel: string;
     state: { localRepoPath: string | undefined; worktreeInfo: WorktreeInfo | undefined };
     githubToken: string;
-    branchName: string;
+    /** Repository and branch that own the reviewed head. Cloning the base repository and
+     * checking out head.ref would inspect an unrelated same-named branch for a fork PR. */
+    target: PullRequestGitTarget;
+    /** Head commit the review is about; the prepared worktree must contain it. */
+    headSha?: string;
     prDiff: string;
     changedFiles: string[];
     originalTaskSpec: string;
@@ -245,19 +248,15 @@ export async function prepareRelatedReviewContext(options: PrepareRelatedReviewC
     const { agent, model, routingSession } = selection;
 
     await ensureGitRepository(options.correlatedLogger);
-    const repoUrl = getRepoUrl({ repoOwner: options.repoOwner, repoName: options.repoName });
-    options.state.localRepoPath = await ensureRepoCloned({
-        repoUrl,
-        owner: options.repoOwner,
-        repoName: options.repoName,
-        authToken: options.githubToken,
-    });
     const timestamp = new Date().toISOString().replace(/[:.]/g, '-').substring(0, 19);
-    options.state.worktreeInfo = await createWorktreeFromExistingBranch(options.state.localRepoPath, options.branchName, {
+    const prepared = await createPullRequestHeadWorktree({
+        target: options.target,
+        authToken: options.githubToken,
         worktreeDirName: `pr-${options.pullRequestNumber}-review-context-${timestamp}`,
-        owner: options.repoOwner,
-        repoName: options.repoName,
+        requiredHeadSha: options.headSha,
     });
+    options.state.localRepoPath = prepared.localRepoPath;
+    options.state.worktreeInfo = prepared.worktreeInfo;
     const result = await gatherReviewContext({
         agent,
         model,

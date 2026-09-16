@@ -21,6 +21,17 @@ test('authenticated Git URL redaction removes modern installation tokens', () =>
     assert.match(result, /raw \[REDACTED_GITHUB_TOKEN\]/);
 });
 
+test('authenticated Git URL redaction stays linear on repeated credential prefixes', () => {
+    // A quadratic pattern needs minutes on this input; the linear one needs milliseconds.
+    const payload = 'https://x-access-token:'.repeat(40000);
+    const started = process.hrtime.bigint();
+    const result = redactAuthenticatedGitUrl(payload);
+    const elapsedMs = Number(process.hrtime.bigint() - started) / 1e6;
+
+    assert.strictEqual(result, payload);
+    assert.ok(elapsedMs < 2000, `redaction took ${elapsedMs}ms on repeated credential prefixes`);
+});
+
 async function git(cwd: string, args: string[]): Promise<string> {
     const { stdout } = await execGit('git', args, { cwd });
     return stdout.trim();

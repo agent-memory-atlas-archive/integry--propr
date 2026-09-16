@@ -16,6 +16,18 @@ interface CreatePullRequestHeadWorktreeOptions {
     authToken: string;
     worktreeDirName: string;
     checkpointBaseline?: string;
+    /** Commit the live PR head advertises. Requiring it proves the checked-out branch
+     * is the PR's own branch rather than a same-named branch in another repository. */
+    requiredHeadSha?: string;
+}
+
+async function containsCommit(worktreePath: string, commit: string): Promise<boolean> {
+    try {
+        const mergeBase = await createHooklessGit(worktreePath).raw(['merge-base', commit, 'HEAD']);
+        return mergeBase.trim() === commit.toLowerCase();
+    } catch {
+        return false;
+    }
 }
 
 export async function createPullRequestHeadWorktree(
@@ -34,20 +46,17 @@ export async function createPullRequestHeadWorktree(
         owner: target.repoOwner,
         repoName: target.repoName,
     });
-    if (options.checkpointBaseline) {
-        try {
-            // A fresh clone may no longer contain a head captured before a force push.
-            // Require its history before implementation can create checkpointable work.
-            const mergeBase = await createHooklessGit(worktreeInfo.worktreePath).raw([
-                'merge-base', options.checkpointBaseline, 'HEAD',
-            ]);
-            if (mergeBase.trim() !== options.checkpointBaseline.toLowerCase()) {
-                throw new Error('Captured contribution is not an ancestor of the prepared head');
-            }
-        } catch (error) {
-            await cleanupWorktree(localRepoPath, worktreeInfo.worktreePath, worktreeInfo.branchName);
-            throw new Error('PR head no longer contains the captured checkpoint baseline; retry preparation before implementation', { cause: error });
-        }
+    const discardAndFail = async (message: string) => {
+        await cleanupWorktree(localRepoPath, worktreeInfo.worktreePath, worktreeInfo.branchName);
+        throw new Error(message);
+    };
+    if (options.requiredHeadSha && !await containsCommit(worktreeInfo.worktreePath, options.requiredHeadSha)) {
+        await discardAndFail(`Prepared ${target.repoOwner}/${target.repoName} branch ${target.branchName} does not contain the pull request head ${options.requiredHeadSha}`);
+    }
+    if (options.checkpointBaseline && !await containsCommit(worktreeInfo.worktreePath, options.checkpointBaseline)) {
+        // A fresh clone may no longer contain a head captured before a force push.
+        // Require its history before implementation can create checkpointable work.
+        await discardAndFail('PR head no longer contains the captured checkpoint baseline; retry preparation before implementation');
     }
     return { localRepoPath, worktreeInfo };
 }
@@ -56,14 +65,17 @@ interface PushPullRequestHeadBranchOptions {
     worktreePath: string;
     target: PullRequestGitTarget;
     authToken: string;
+    /** Rebasing replays commits individually, which would drop a merge commit, so
+     * callers that publish a merge keep the non-fast-forward rejection instead. */
+    rebaseOnNonFastForward?: boolean;
 }
 
 export async function pushPullRequestHeadBranch(options: PushPullRequestHeadBranchOptions) {
-    const { worktreePath, target, authToken } = options;
+    const { worktreePath, target, authToken, rebaseOnNonFastForward = true } = options;
     const repoUrl = getRepoUrl({ repoOwner: target.repoOwner, repoName: target.repoName });
     return pushBranch(worktreePath, target.branchName, {
         repoUrl,
         authToken,
-        rebaseOnNonFastForward: true,
+        rebaseOnNonFastForward,
     });
 }

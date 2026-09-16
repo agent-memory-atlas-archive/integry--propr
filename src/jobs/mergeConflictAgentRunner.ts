@@ -9,11 +9,12 @@ import {
     createLogFiles,
     db,
     getAuthenticatedOctokit,
-    pushBranch,
     recordLLMMetrics,
 } from '@propr/core';
 import type { ClaudeCodeResponse, JobResult, WorkerStateManager, WorktreeInfo } from '@propr/core';
 import { createContainerIdCallbackForPR, createSessionIdCallbackForPR } from './prCommentJobHelpers.js';
+import { pushPullRequestHeadBranch } from './prGitOperations.js';
+import type { PullRequestGitTarget } from './prGitTarget.js';
 import { AI_COMMIT_AUTHOR } from './commitAuthor.js';
 import { agentResultToClaudeResponse, toClaudeResult } from './prCommentJobUtils.js';
 import {
@@ -114,11 +115,11 @@ async function verifyNoConflictMarkers(worktreeInfo: WorktreeInfo, pullRequestNu
 export async function handleMergeWithAgent(options: {
     conflictedFiles?: string[];
     worktreeInfo: WorktreeInfo;
-    branchName: string;
+    /** Repository and branch that own the PR head; a fork is not the base repository. */
+    target: PullRequestGitTarget;
     baseBranch: string;
     baseCommit: string;
     pullRequestNumber: number;
-    repoUrl: string;
     repoOwner: string;
     repoName: string;
     githubToken: GitHubToken;
@@ -130,9 +131,10 @@ export async function handleMergeWithAgent(options: {
     correlatedLogger: Logger;
     redisClient: Redis;
 }): Promise<JobResult> {
-    const { conflictedFiles, worktreeInfo, branchName, baseBranch, baseCommit, pullRequestNumber, repoUrl,
+    const { conflictedFiles, worktreeInfo, target, baseBranch, baseCommit, pullRequestNumber,
         repoOwner, repoName, githubToken, octokit, startingCommentId,
         stateManager, taskId, correlationId, correlatedLogger, redisClient } = options;
+    const branchName = target.branchName;
 
     const prompt = buildConflictResolutionPrompt({
         pullRequestNumber, baseBranch, headBranch: branchName, conflictedFiles, worktreeInfo, repoOwner, repoName,
@@ -186,7 +188,11 @@ export async function handleMergeWithAgent(options: {
     const { simpleGit } = await import('simple-git');
     const finalCommitHash = commitResult?.commitHash || (await simpleGit({ baseDir: worktreeInfo.worktreePath }).revparse(['HEAD'])).trim();
     await assertCommitIsAncestor(worktreeInfo.worktreePath, baseCommit);
-    await pushBranch(worktreeInfo.worktreePath, branchName, { repoUrl, authToken: githubToken.token });
+    // Publishes to the head repository, which for a fork PR is not the base repository.
+    await pushPullRequestHeadBranch({
+        worktreePath: worktreeInfo.worktreePath, target, authToken: githubToken.token,
+        rebaseOnNonFastForward: false,
+    });
     const taskUrl = `${process.env.WEB_UI_URL || process.env.FRONTEND_URL || 'https://gitfix.dev'}/tasks/${taskId}`;
     const comment = buildMergeConflictComment({
         wasCleanMerge,

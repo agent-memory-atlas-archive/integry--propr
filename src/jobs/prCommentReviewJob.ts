@@ -6,10 +6,11 @@ import type { CommentJobData, UnprocessedComment } from '@propr/core';
 import { resolvePrReasoningLevelOverride, updateTaskTitleForPR } from './prCommentJobHelpers.js';
 import { buildCombinedComment, fetchOriginalContributionDiscussion } from './prCommentJobUtils.js';
 import { fetchReviewContext, resolveReviewContextTokenBudget, type PRData } from './reviewContextHelpers.js';
+import { resolvePullRequestGitTarget } from './prGitTarget.js';
 import { prepareRelatedReviewContext } from './reviewContextScout.js';
 import { loadReviewRuntimeSettings } from './reviewRuntimeSettings.js';
 import { getNextAuthenticatedActionableFindingNumber } from './reviewCommentFormatter.js';
-import { runSingleReview, type ReviewAssignment, type ReviewResult, type RunReviewsContext } from './prReviewRunner.js';
+import { routeReviewAssignments, runReviewRoutingOutcomes, type ReviewAssignment, type ReviewResult, type RunReviewsContext } from './prReviewRunner.js';
 import { recordReviewMetrics } from './reviewResultMetrics.js';
 import { generateSummaryTitle, resolveDefaultAgentAndModel } from './prCommentAgentUtils.js';
 import { continueUltrafixLoop } from './ultrafixLoopContinuation.js';
@@ -75,56 +76,6 @@ export interface JobResult {
     reviewsPosted?: number;
     reviewsFailed?: number;
     [key: string]: unknown;
-}
-
-type ReviewRoutingOutcome = { status: 'routed'; assignment: ReviewAssignment }
-    | { status: 'failed'; result: ReviewResult };
-
-async function routeReviewAssignments(
-    registry: AgentRegistry, assignments: ReviewAssignment[], pullRequestNumber: number, correlatedLogger: Logger,
-): Promise<ReviewRoutingOutcome[]> {
-    return Promise.all(assignments.map(async assignment => {
-        try {
-            const routingSession = registry.beginRoutingSession({ requestedAgentAlias: assignment.agentAlias, requestedModel: assignment.model });
-            const selection = await routingSession.select();
-            return {
-                status: 'routed' as const,
-                assignment: { ...assignment, routingSession,
-                    physicalAgentAlias: selection.physicalAgentAlias,
-                    physicalModel: selection.physicalModel },
-            };
-        } catch (routingError) {
-            const error = `Failed to route review assignment '${assignment.label}': ${(routingError as Error).message}`;
-            correlatedLogger.warn({ pullRequestNumber, agentAlias: assignment.agentAlias,
-                model: assignment.model, error: (routingError as Error).message,
-            }, 'Review assignment unavailable; continuing with remaining reviewers');
-            return {
-                status: 'failed' as const,
-                result: { assignment,
-                    analysisResult: { response: '', modelUsed: assignment.model,
-                        executionTimeMs: 0, success: false, error }, error },
-            };
-        }
-    }));
-}
-
-async function runReviewRoutingOutcomes(
-    routingOutcomes: ReviewRoutingOutcome[], reviewCtx: RunReviewsContext, firstFindingNumber: number,
-): Promise<ReviewResult[]> {
-    const reviewResults: ReviewResult[] = [];
-    let nextFindingNumber = firstFindingNumber;
-    for (const outcome of routingOutcomes) {
-        if (outcome.status === 'failed') {
-            reviewResults.push(outcome.result);
-            continue;
-        }
-        const result = await runSingleReview(outcome.assignment, {
-            ...reviewCtx, findingStartNumber: nextFindingNumber,
-        });
-        reviewResults.push(result);
-        nextFindingNumber += result.findingCount ?? 0;
-    }
-    return reviewResults;
 }
 
 export async function resolveReviewAssignments(
@@ -372,7 +323,10 @@ export async function executeReviewProcessing(params: ExecuteReviewParams): Prom
                 fastAnalysisModel,
                 state,
                 githubToken: githubToken.token,
-                branchName: context.jobBranchName || prData!.data.head.ref,
+                // The reviewed head decides the repository, so a fork PR is scouted in
+                // the contributor's repository rather than a same-named base branch.
+                target: resolvePullRequestGitTarget(prData!.data.head, { repoOwner, repoName }),
+                headSha: prData!.data.head.sha,
                 prDiff,
                 changedFiles: changedFilePaths,
                 originalTaskSpec,

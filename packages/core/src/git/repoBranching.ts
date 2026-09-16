@@ -4,15 +4,12 @@ import { handleError } from '../utils/errorHandler.js';
 import { withRetry, retryConfigs } from '../utils/retryHandler.js';
 import { getAuthenticatedOctokit } from '../auth/githubAuth.js';
 import { createHooklessGit } from './hooklessGit.js';
+import { redactAuthenticatedGitUrl } from './redactGitUrl.js';
+
+export { redactAuthenticatedGitUrl };
 
 interface InstallationAuth {
     token: string;
-}
-
-export function redactAuthenticatedGitUrl(message: string): string {
-    return message
-        .replace(/https:\/\/x-access-token:[^@\s'"]+@github\.com\//g, 'https://x-access-token:[REDACTED]@github.com/')
-        .replace(/\b(?:ghs|ghp|gho|ghu|ghr|github_pat)_[A-Za-z0-9_.-]+/g, '[REDACTED_GITHUB_TOKEN]');
 }
 
 export async function setupAuthenticatedRemote(git: SimpleGit, repoUrl: string, authToken: string): Promise<void> {
