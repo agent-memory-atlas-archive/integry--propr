@@ -34,6 +34,7 @@ const RepositoriesPage: React.FC = () => {
   const [newAlias, setNewAlias] = useState<string>('');
   const [newBaseBranch, setNewBaseBranch] = useState<string>('');
   const [autoFollowupOnFailedCi, setAutoFollowupOnFailedCi] = useState<boolean>(false);
+  const [visualPreviewEnabled, setVisualPreviewEnabled] = useState<boolean>(false);
   const [isModalOpen, setIsModalOpen] = useState<boolean>(false);
   const [selectedRepoId, setSelectedRepoId] = useState<string | null>(null);
   const [navActiveTab, setNavActiveTab] = useState<'chat' | 'improve' | 'browse' | 'todos' | undefined>(undefined);
@@ -60,6 +61,7 @@ const RepositoriesPage: React.FC = () => {
     setNewAlias('');
     setNewBaseBranch('');
     setAutoFollowupOnFailedCi(false);
+    setVisualPreviewEnabled(false);
     setIsModalOpen(true);
   };
 
@@ -69,15 +71,17 @@ const RepositoriesPage: React.FC = () => {
     setNewAlias('');
     setNewBaseBranch('');
     setAutoFollowupOnFailedCi(false);
+    setVisualPreviewEnabled(false);
   };
 
   const handleAddRepoSubmit = () => {
     if (isReadOnly) return;
-    if (handleAddRepo(newRepo, newAlias, newBaseBranch, autoFollowupOnFailedCi)) {
+    if (handleAddRepo(newRepo, newAlias, newBaseBranch, autoFollowupOnFailedCi, visualPreviewEnabled)) {
       setNewRepo('');
       setNewAlias('');
       setNewBaseBranch('');
       setAutoFollowupOnFailedCi(false);
+    setVisualPreviewEnabled(false);
       setIsModalOpen(false);
     }
   };
@@ -195,11 +199,13 @@ const RepositoriesPage: React.FC = () => {
         newAlias={newAlias}
         newBaseBranch={newBaseBranch}
         autoFollowupOnFailedCi={autoFollowupOnFailedCi}
+        visualPreviewEnabled={visualPreviewEnabled}
         availableRepos={availableRepos}
         onRepoChange={setNewRepo}
         onAliasChange={setNewAlias}
         onBaseBranchChange={setNewBaseBranch}
         onAutoFollowupOnFailedCiChange={setAutoFollowupOnFailedCi}
+        onVisualPreviewEnabledChange={setVisualPreviewEnabled}
         onAdd={handleAddRepoSubmit}
         onClose={handleCloseModal}
         isReadOnly={isReadOnly}

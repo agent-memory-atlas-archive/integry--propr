@@ -16,11 +16,13 @@ function renderModal(overrides: Partial<React.ComponentProps<typeof AddRepositor
     newAlias: '',
     newBaseBranch: '',
     autoFollowupOnFailedCi: false,
+    visualPreviewEnabled: false,
     availableRepos: ['integry/propr'],
     onRepoChange: vi.fn(),
     onAliasChange: vi.fn(),
     onBaseBranchChange: vi.fn(),
     onAutoFollowupOnFailedCiChange: vi.fn(),
+    onVisualPreviewEnabledChange: vi.fn(),
     onAdd: vi.fn(),
     onClose: vi.fn(),
     ...overrides,
@@ -42,6 +44,7 @@ describe('AddRepositoryModal', () => {
     expect(screen.getByLabelText('Alias (optional)')).toBeEnabled();
     expect(screen.getByRole('button', { name: 'Base Branch (optional)' })).toBeDisabled();
     expect(screen.getByRole('checkbox', { name: /Automatic CI follow-up/ })).toBeEnabled();
+    expect(screen.getByRole('checkbox', { name: /Visual previews/ })).toBeEnabled();
     expect(screen.getByRole('button', { name: 'Add Repository' })).toBeDisabled();
 
     fireEvent.click(screen.getByRole('button', { name: 'Close Add Repository' }));
@@ -76,11 +79,13 @@ describe('AddRepositoryModal', () => {
       newAlias="Production"
       newBaseBranch="release/2026.09"
       autoFollowupOnFailedCi
+      visualPreviewEnabled
       availableRepos={['integry/propr']}
       onRepoChange={vi.fn()}
       onAliasChange={vi.fn()}
       onBaseBranchChange={onBaseBranchChange}
       onAutoFollowupOnFailedCiChange={vi.fn()}
+      onVisualPreviewEnabledChange={vi.fn()}
       onAdd={onAdd}
       onClose={vi.fn()}
     />);
@@ -89,6 +94,14 @@ describe('AddRepositoryModal', () => {
     expect(submit).toHaveAttribute('type', 'submit');
     fireEvent.click(submit);
     await waitFor(() => expect(onAdd).toHaveBeenCalledOnce());
+  });
+
+  it('reports visual preview selection changes', () => {
+    const onVisualPreviewEnabledChange = vi.fn();
+    renderModal({ onVisualPreviewEnabledChange });
+
+    fireEvent.click(screen.getByRole('checkbox', { name: /Visual previews/ }));
+    expect(onVisualPreviewEnabledChange).toHaveBeenCalledWith(true);
   });
 
   it('preserves read-only permissions for every mutating control', () => {
@@ -101,6 +114,7 @@ describe('AddRepositoryModal', () => {
     expect(screen.getByLabelText('Alias (optional)')).toBeDisabled();
     expect(screen.getByRole('button', { name: 'Base Branch (optional)' })).toBeDisabled();
     expect(screen.getByRole('checkbox', { name: /Automatic CI follow-up/ })).toBeDisabled();
+    expect(screen.getByRole('checkbox', { name: /Visual previews/ })).toBeDisabled();
     expect(screen.getByRole('button', { name: 'Add Repository' })).toBeDisabled();
     fireEvent.submit(screen.getByRole('button', { name: 'Add Repository' }).closest('form')!);
     expect(props.onAdd).not.toHaveBeenCalled();
