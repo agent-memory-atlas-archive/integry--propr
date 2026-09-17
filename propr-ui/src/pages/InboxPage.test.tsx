@@ -95,41 +95,53 @@ describe('Inbox page', () => {
     demoState.isDemoMode = false;
   });
 
-  test('renders notifications in the four operational groups with System collapsed by default', async () => {
-    const attention = item('event-attention', 'Task needs attention');
-    const review = item('event-plan', 'Plan ready', null, {
+  test('renders activity as one newest-first list with only System kept apart and collapsed', async () => {
+    const at = (minutes: number) => new Date(Date.parse('2026-08-24T12:00:00.000Z') + minutes * 60_000).toISOString();
+    const failed = item('event-failed', 'Guard empty recap metadata', null, {
+      occurredAt: at(0), createdAt: at(0),
+      target: { type: 'task', repository: 'integry/propr', taskId: 'task-failed', issueNumber: 12 },
+    });
+    const plan = item('event-plan', 'Improve Inbox notifications', null, {
       kind: 'plan',
       severity: 'info',
       target: { type: 'plan', repository: 'integry/propr', draftId: 'draft-1' },
+      occurredAt: at(2), createdAt: at(2),
     });
-    const completed = item('event-completed', 'Task completed', null, { severity: 'success' });
+    const review = item('event-review', 'Add swipe dismissal', '2026-08-24T12:10:00.000Z', {
+      kind: 'review',
+      severity: 'success',
+      target: { type: 'review', repository: 'integry/propr', prNumber: 81, taskId: 'task-review' },
+      occurredAt: at(1), createdAt: at(1),
+    });
     const system = item('event-system', 'System failure', null, {
       kind: 'system_failure',
       severity: 'error',
       target: { type: 'system_failure', component: 'dispatcher' },
+      occurredAt: at(3), createdAt: at(3),
     });
     vi.mocked(listNotifications).mockResolvedValue({
-      notifications: [attention, review, completed, system],
-      unreadCount: 4,
+      notifications: [system, plan, review, failed],
+      unreadCount: 3,
       nextCursor: null,
     });
 
     renderInbox();
 
-    await screen.findByRole('heading', { level: 2, name: 'Needs attention' });
-    const headings = screen.getAllByRole('heading', { level: 2 });
-    expect(headings.map(heading => heading.textContent)).toEqual([
-      'Needs attention',
-      'Ready for review',
-      'Completed',
-      'System',
+    await screen.findByRole('heading', { level: 3, name: 'Improve Inbox notifications' });
+    expect(screen.getAllByRole('heading', { level: 2 }).map(heading => heading.textContent)).toEqual(['System']);
+    expect(screen.getAllByRole('article').map(article => article.getAttribute('aria-label'))).toEqual([
+      'Improve Inbox notifications',
+      'Add swipe dismissal',
+      'Guard empty recap metadata',
     ]);
-    expect(screen.getByRole('heading', { level: 3, name: 'Task needs attention' }).closest('section'))
-      .toHaveAccessibleName('Needs attention');
-    expect(screen.getByRole('heading', { level: 3, name: 'Plan ready' }).closest('section'))
-      .toHaveAccessibleName('Ready for review');
-    expect(screen.getByRole('heading', { level: 3, name: 'Task completed' }).closest('section'))
-      .toHaveAccessibleName('Completed');
+    const reviewCard = screen.getByRole('article', { name: 'Add swipe dismissal' });
+    expect(reviewCard).toHaveTextContent('Review completed');
+    expect(screen.getByTitle('Pull Request #81')).toHaveTextContent('PR81');
+    expect(screen.getByTitle('Issue #12')).toHaveTextContent('#12');
+    for (const article of screen.getAllByRole('article')) {
+      expect(article.className).toContain('bg-white');
+      expect(article.className).not.toMatch(/bg-(teal|red|amber|emerald)-/);
+    }
     expect(screen.queryByRole('heading', { level: 3, name: 'System failure' })).not.toBeInTheDocument();
 
     const systemToggle = screen.getByRole('button', { name: /System/ });

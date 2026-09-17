@@ -1,24 +1,29 @@
 import type { Notification } from '@propr/shared';
 import { summaryBrowserPath, summaryHrefWithBranch } from '../utils/summaryBrowser';
 
-export const INBOX_GROUPS = [
-  'Needs attention',
-  'Ready for review',
-  'Completed',
-  'System',
-] as const;
+/** System and indexing updates are kept apart from the linear activity feed. */
+export function isSystemNotification(notification: Notification): boolean {
+  return notification.kind === 'system_failure' || notification.kind === 'indexing';
+}
 
-export type InboxGroup = (typeof INBOX_GROUPS)[number];
+export interface NotificationReference {
+  label: string;
+  title: string;
+}
 
-export function notificationGroup(notification: Notification): InboxGroup {
-  switch (notification.kind) {
-    case 'plan': return 'Ready for review';
-    case 'review': return 'Completed';
-    case 'pull_request': return 'Needs attention';
-    case 'indexing':
-    case 'system_failure': return 'System';
-    case 'task': return notification.severity === 'success' ? 'Completed' : 'Needs attention';
+/** The PR or issue a notification is about, labelled like the task context strip chips. */
+export function notificationReference(notification: Notification): NotificationReference | null {
+  const { target } = notification;
+  if (target.type === 'review' || target.type === 'pull_request') {
+    return { label: `PR${target.prNumber}`, title: `Pull Request #${target.prNumber}` };
   }
+  if (target.type !== 'task') return null;
+  if (target.prNumber !== undefined) {
+    return { label: `PR${target.prNumber}`, title: `Pull Request #${target.prNumber}` };
+  }
+  return target.issueNumber === undefined
+    ? null
+    : { label: `#${target.issueNumber}`, title: `Issue #${target.issueNumber}` };
 }
 
 export function notificationKindLabel(notification: Notification): string {

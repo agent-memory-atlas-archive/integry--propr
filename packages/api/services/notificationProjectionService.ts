@@ -59,6 +59,8 @@ interface TaskContext {
   issueNumber?: number;
   prNumber?: number;
   description?: string;
+  /** The underlying PR or issue title, without workflow prefixes. */
+  subjectTitle?: string;
   recap?: string;
   commandMode?: string;
   isReview: boolean;
@@ -185,6 +187,18 @@ function taskDescription(initial: Record<string, unknown>): string | undefined {
     ?? cleanTaskDescription(issueRef.title);
 }
 
+const TASK_TITLE_PREFIX = /^(?:new issue:|(?:follow-up|fix|review|ultrafix|merge) pr #\d+:)\s*/i;
+
+function subjectTitle(initial: Record<string, unknown>): string | undefined {
+  const issueRef = typeof initial.issueRef === 'object'
+    && initial.issueRef !== null
+    && !Array.isArray(initial.issueRef)
+    ? initial.issueRef as Record<string, unknown>
+    : {};
+  const title = compactDisplayText(initial.title ?? issueRef.title)?.replace(TASK_TITLE_PREFIX, '').trim();
+  return title && !/^untitled pull request$/i.test(title) ? title : undefined;
+}
+
 function resolveCommandMode(
   historyMetadata: Record<string, unknown>,
   initial: Record<string, unknown>,
@@ -215,7 +229,16 @@ function quotedDescription(description: string | undefined): string | undefined 
   return description ? `“${description}”` : undefined;
 }
 
+/** A task summary worth showing beneath the subject title, if it adds anything. */
+function distinctDescription(context: TaskContext): string | undefined {
+  const { subjectTitle, description } = context;
+  if (!subjectTitle || !description) return undefined;
+  const normalize = (value: string) => value.replace(TASK_TITLE_PREFIX, '').trim().toLowerCase();
+  return normalize(description) === normalize(subjectTitle) ? undefined : description;
+}
+
 function completedPullRequestTitle(context: TaskContext, prNumber: number): string {
+  if (context.subjectTitle) return context.subjectTitle;
   switch (context.commandMode) {
     case 'fix': return `Fix run completed for PR #${prNumber}`;
     case 'merge': return `Merge completed for PR #${prNumber}`;
@@ -452,17 +475,17 @@ export class NotificationProjectionService {
     const occurredAt = normalizeISO8601Timestamp(payload.timestamp);
     const name = compactDisplayText(draft.name);
     const itemCount = planItemCount(draft.plan_json);
-    const planIdentity = name && name !== 'Untitled Plan' ? `“${name}”` : 'The plan';
+    const planName = name && name !== 'Untitled Plan' ? name : undefined;
 
     await this.notifications.createNotificationEvent({
       deduplicationKey: stableKey('plan-ready', payload.draftId, 'review', occurredAt),
       kind: 'plan',
       severity: 'success',
       target: { type: 'plan', repository: draft.repository, draftId: payload.draftId },
-      title: 'Plan ready for review',
+      title: planName ?? 'Plan ready for review',
       body: itemCount === undefined
-        ? `${planIdentity} is ready for review.`
-        : `${planIdentity} is ready with ${itemCount} planned ${itemCount === 1 ? 'task' : 'tasks'}.`,
+        ? 'Ready for review.'
+        : `Ready for review with ${itemCount} planned ${itemCount === 1 ? 'task' : 'tasks'}.`,
       actions: ['refine', 'approve_execute', 'dismiss'],
       occurredAt,
     }, [{ userId: draft.user_id, pushEnabled: true }]);
@@ -711,11 +734,11 @@ export class NotificationProjectionService {
         ...(context.issueNumber === undefined ? {} : { issueNumber: context.issueNumber }),
         ...(context.prNumber === undefined ? {} : { prNumber: context.prNumber }),
       },
-      title: context.prNumber !== undefined
+      title: context.subjectTitle ?? (context.prNumber !== undefined
         ? `Task failed for PR #${context.prNumber}`
         : context.issueNumber !== undefined
           ? `Task failed for issue #${context.issueNumber}`
-          : 'Task failed',
+          : 'Task failed'),
       body: context.description
         ? `Could not complete ${quotedDescription(context.description)}.`
         : `Work for ${context.repository} did not complete.`,
@@ -740,7 +763,7 @@ export class NotificationProjectionService {
         type: 'review', repository: context.repository,
         prNumber, taskId: payload.taskId,
       },
-      title: `Review completed for PR #${prNumber}`,
+      title: context.subjectTitle ?? `Review completed for PR #${prNumber}`,
       body: context.recap ?? `Review of PR #${prNumber} completed; open details for the full findings.`,
       actions: taskActions({
         followup: context.reviewFollowupEligible,
@@ -764,10 +787,10 @@ export class NotificationProjectionService {
         ...(context.issueNumber === undefined ? {} : { issueNumber: context.issueNumber }),
         ...(context.prNumber === undefined ? {} : { prNumber: context.prNumber }),
       },
-      title: context.description ?? (context.issueNumber === undefined
+      title: context.subjectTitle ?? context.description ?? (context.issueNumber === undefined
         ? 'Implementation completed'
         : `Issue #${context.issueNumber} implementation completed`),
-      body: context.recap ?? (context.issueNumber === undefined
+      body: context.recap ?? distinctDescription(context) ?? (context.issueNumber === undefined
         ? 'Open task details to review the completed work.'
         : `Issue #${context.issueNumber} is complete. Open task details to review the result.`),
       actions: taskActions({
@@ -857,6 +880,7 @@ export class NotificationProjectionService {
       issueNumber,
       prNumber,
       description: taskDescription(initial),
+      subjectTitle: subjectTitle(initial),
       recap: notificationRecap(historyMetadata),
       commandMode,
       isReview,

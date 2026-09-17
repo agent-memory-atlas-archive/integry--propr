@@ -92,7 +92,7 @@ for (const width of [390, 1440]) {
     await expect(completion.getByRole('link')).toHaveAttribute('href', notification.action.href);
     await expect(completion.getByRole('button')).toHaveCount(1);
     await expect(completion.getByRole('button', { name: `Dismiss ${notification.title}` })).toBeEnabled();
-    await expect(page.getByRole('region', { name: 'Needs attention', exact: true }).getByRole('article')).toHaveCount(2);
+    await expect(page.getByRole('article')).toHaveCount(2);
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
     await capture(page, `completion-inbox-${width}`);
     api.disable();

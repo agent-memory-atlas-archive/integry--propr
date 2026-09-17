@@ -2,8 +2,8 @@ import React, { useEffect, useMemo, useRef } from 'react';
 import { RefreshCw, Trash2, WifiOff } from 'lucide-react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { useDocumentTitle } from '../hooks/useDocumentTitle';
-import { InboxGroupSection, InboxState } from './InboxPageComponents';
-import { INBOX_GROUPS, notificationGroup } from './inboxUtils';
+import { InboxList, InboxState, InboxSystemSection } from './InboxPageComponents';
+import { isSystemNotification } from './inboxUtils';
 import { useInboxNotifications, type InboxNotificationsState } from './useInboxNotifications';
 
 const InboxHeaderActions: React.FC<{ inbox: InboxNotificationsState }> = ({ inbox }) => {
@@ -59,10 +59,15 @@ const InboxPage: React.FC = () => {
     void dismiss(notificationId);
   }, [dismiss, location.hash, location.pathname, location.search, navigate]);
 
-  const grouped = useMemo(() => INBOX_GROUPS.map(group => ({
-    group,
-    notifications: inbox.notifications.filter(notification => notificationGroup(notification) === group),
-  })).filter(section => section.notifications.length > 0), [inbox.notifications]);
+  const [activity, system] = useMemo(() => [
+    inbox.notifications.filter(notification => !isSystemNotification(notification)),
+    inbox.notifications.filter(isSystemNotification),
+  ], [inbox.notifications]);
+  const listProps = {
+    onDismiss: inbox.dismiss,
+    onOpen: inbox.open,
+    mutationsEnabled: inbox.mutationsEnabled && !inbox.clearing,
+  };
 
   const showState = inbox.initialLoading && inbox.notifications.length === 0
     ? 'loading'
@@ -97,18 +102,9 @@ const InboxPage: React.FC = () => {
       {showState ? (
         <InboxState kind={showState} message={inbox.error ?? undefined} onRefresh={() => void inbox.refresh()} />
       ) : (
-        <div className="space-y-6">
-          {grouped.map(section => (
-            <InboxGroupSection
-              key={section.group}
-              group={section.group}
-              notifications={section.notifications}
-              onDismiss={inbox.dismiss}
-              onOpen={inbox.open}
-              mutationsEnabled={inbox.mutationsEnabled && !inbox.clearing}
-              collapsible={section.group === 'System'}
-            />
-          ))}
+        <div className="space-y-4">
+          <InboxSystemSection notifications={system} {...listProps} />
+          <InboxList notifications={activity} {...listProps} />
           {inbox.hasMore && (
             <button
               type="button"

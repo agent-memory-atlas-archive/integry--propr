@@ -3,38 +3,25 @@ import React, { useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { isNotificationPreviewEligible, type Notification } from '@propr/shared';
 import {
-  AlertTriangle,
-  CheckCircle2,
   ChevronDown,
-  CircleAlert,
   Inbox,
   Loader2,
   RefreshCw,
-  ServerCrash,
   X,
 } from 'lucide-react';
 import NotificationActions from '../components/Inbox/NotificationActions';
-import type { InboxGroup } from './inboxUtils';
 import {
   formatRelativeTime,
   notificationHref,
   notificationKindLabel,
+  notificationReference,
   notificationRepository,
 } from './inboxUtils';
 
-const GROUP_ICON: Record<InboxGroup, React.FC<{ className?: string }>> = {
-  'Needs attention': CircleAlert,
-  'Ready for review': AlertTriangle,
-  Completed: CheckCircle2,
-  System: ServerCrash,
-};
-
-const GROUP_STYLE: Record<InboxGroup, string> = {
-  'Needs attention': 'text-red-700 bg-red-50 border-red-100',
-  'Ready for review': 'text-amber-700 bg-amber-50 border-amber-100',
-  Completed: 'text-emerald-700 bg-emerald-50 border-emerald-100',
-  System: 'text-slate-700 bg-slate-100 border-slate-200',
-};
+// Separator dot between metadata items, as in the task context strip.
+const Dot: React.FC = () => (
+  <span className="text-gray-300" aria-hidden="true">•</span>
+);
 
 function DetailLink({
   notification,
@@ -153,16 +140,25 @@ export const InboxCard: React.FC<{
   const dismiss = () => { void onDismiss(notification.id); };
   const swipe = useSwipeToDismiss(canDismiss, dismiss);
   const inPlace = expandsInPlace(notification);
+  const reference = notificationReference(notification);
 
   const content = (
     <>
-      <div className="flex flex-wrap items-center gap-x-2 gap-y-1 pr-8 text-xs">
+      <div className="flex flex-wrap items-center gap-x-1.5 gap-y-1 pr-8 text-xs">
         {unread && <span className="h-2 w-2 rounded-full bg-teal-500" role="img" aria-label="Unread" />}
-        <span className="font-semibold text-slate-700">{notificationKindLabel(notification)}</span>
-        <span className="text-slate-300" aria-hidden="true">·</span>
-        <span className="min-w-0 truncate text-slate-500">{notificationRepository(notification)}</span>
-        <span className="text-slate-300" aria-hidden="true">·</span>
-        <time dateTime={notification.occurredAt} title={new Date(notification.occurredAt).toLocaleString()} className="text-slate-500">
+        <span className="font-medium text-gray-700">{notificationKindLabel(notification)}</span>
+        <Dot />
+        <span className="min-w-0 truncate text-gray-500">{notificationRepository(notification)}</span>
+        {reference && (
+          <>
+            <Dot />
+            <span className="rounded bg-gray-100 px-1.5 py-0.5 font-mono text-xs text-gray-700" title={reference.title}>
+              {reference.label}
+            </span>
+          </>
+        )}
+        <Dot />
+        <time dateTime={notification.occurredAt} title={new Date(notification.occurredAt).toLocaleString()} className="text-gray-500">
           {formatRelativeTime(notification.occurredAt)}
         </time>
       </div>
@@ -184,9 +180,9 @@ export const InboxCard: React.FC<{
       <article
         aria-label={notification.title}
         style={{ transform: `translate3d(${swipe.offset}px, 0, 0)` }}
-        className={`relative overflow-hidden rounded-xl border shadow-sm transition-transform ${
+        className={`relative overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm transition-transform ${
           swipe.dragging ? 'duration-0' : 'duration-200 ease-out'
-        } ${unread ? 'border-teal-200 bg-teal-50' : 'border-slate-200 bg-white'}`}
+        }`}
       >
         {inPlace ? (
           <button
@@ -224,57 +220,39 @@ export const InboxCard: React.FC<{
   );
 };
 
-export const InboxGroupSection: React.FC<{
-  group: InboxGroup;
+interface InboxListProps {
   notifications: Notification[];
   onDismiss: (id: string) => Promise<void>;
   onOpen: (id: string) => void;
   mutationsEnabled: boolean;
-  collapsible?: boolean;
-}> = ({ group, notifications, onDismiss, onOpen, mutationsEnabled, collapsible = false }) => {
-  const Icon = GROUP_ICON[group];
-  const headingId = `inbox-${group.replace(/ /g, '-').toLowerCase()}`;
-  const listId = `${headingId}-list`;
-  const [expanded, setExpanded] = useState(!collapsible);
-  const header = (
-    <>
-      <Icon className="h-4 w-4" aria-hidden="true" />
-      <h2 id={headingId} className="text-xs font-bold uppercase tracking-wider">
-        {group}
-      </h2>
-      <span className="ml-auto text-xs font-semibold">{notifications.length}</span>
-    </>
-  );
-  const headerClass = `mb-2 flex w-full items-center gap-2 rounded-lg border px-3 py-2 ${GROUP_STYLE[group]}`;
+}
+
+export const InboxList: React.FC<InboxListProps & { id?: string }> = ({ id, notifications, ...cardProps }) => (
+  <div id={id} className="space-y-2">
+    {notifications.map(notification => (
+      <InboxCard key={notification.id} notification={notification} {...cardProps} />
+    ))}
+  </div>
+);
+
+/** System updates stay out of the activity feed until the operator expands them. */
+export const InboxSystemSection: React.FC<InboxListProps> = ({ notifications, ...listProps }) => {
+  const [expanded, setExpanded] = useState(false);
+  if (notifications.length === 0) return null;
   return (
-    <section aria-labelledby={headingId}>
-      {collapsible ? (
-        <button
-          type="button"
-          aria-expanded={expanded}
-          aria-controls={listId}
-          onClick={() => setExpanded(value => !value)}
-          className={`${headerClass} text-left focus:outline-none focus-visible:ring-2 focus-visible:ring-teal-500`}
-        >
-          {header}
-          <ChevronDown className={`h-4 w-4 transition-transform ${expanded ? 'rotate-180' : ''}`} aria-hidden="true" />
-        </button>
-      ) : (
-        <div className={headerClass}>{header}</div>
-      )}
-      {expanded && (
-        <div id={listId} className="space-y-2">
-          {notifications.map(notification => (
-            <InboxCard
-              key={notification.id}
-              notification={notification}
-              onDismiss={onDismiss}
-              onOpen={onOpen}
-              mutationsEnabled={mutationsEnabled}
-            />
-          ))}
-        </div>
-      )}
+    <section aria-labelledby="inbox-system">
+      <button
+        type="button"
+        aria-expanded={expanded}
+        aria-controls="inbox-system-list"
+        onClick={() => setExpanded(value => !value)}
+        className="mb-2 flex w-full items-center gap-2 py-2 text-left text-slate-500 hover:text-slate-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-teal-500"
+      >
+        <h2 id="inbox-system" className="text-xs font-bold uppercase tracking-widest">System</h2>
+        <span className="text-xs font-semibold">{notifications.length}</span>
+        <ChevronDown className={`ml-auto h-4 w-4 transition-transform ${expanded ? 'rotate-180' : ''}`} aria-hidden="true" />
+      </button>
+      {expanded && <InboxList id="inbox-system-list" notifications={notifications} {...listProps} />}
     </section>
   );
 };
