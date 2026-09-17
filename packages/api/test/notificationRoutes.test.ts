@@ -68,7 +68,6 @@ function createService(overrides: Partial<NotificationRouteService> = {}): Notif
         getUnreadNotificationCount: async () => 0,
         markNotificationRead: async () => null,
         dismissNotification: async () => null,
-        restoreNotification: async () => null,
         dismissAllNotifications: async () => ({ unreadCount: 0 }),
         getNotificationPreferences: async () => preferences,
         updateNotificationPreferences: async () => preferences,
@@ -165,27 +164,6 @@ describe('notification routes', () => {
         const { response, status } = responseRecorder();
 
         await routes.markRead(authenticatedRequest({
-            params: { id: 'event-1' },
-            body: { userId: 'victim-user' }
-        }), response);
-
-        assert.deepEqual(received, ['authenticated-user', 'event-1']);
-        assert.equal(status(), 404);
-    });
-
-    test('restores only the authenticated user notification receipt', async () => {
-        let received: [string, string] | undefined;
-        const routes = createNotificationRoutes({
-            service: createService({
-                restoreNotification: async (userId, eventId) => {
-                    received = [userId, eventId];
-                    return null;
-                }
-            })
-        });
-        const { response, status } = responseRecorder();
-
-        await routes.restore(authenticatedRequest({
             params: { id: 'event-1' },
             body: { userId: 'victim-user' }
         }), response);

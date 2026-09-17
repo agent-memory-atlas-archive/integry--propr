@@ -33,7 +33,6 @@ export type NotificationRouteService = Pick<
     | 'getUnreadNotificationCount'
     | 'markNotificationRead'
     | 'dismissNotification'
-    | 'restoreNotification'
     | 'dismissAllNotifications'
     | 'getNotificationPreferences'
     | 'updateNotificationPreferences'
@@ -245,25 +244,6 @@ export function createNotificationRoutes(
         }
     }
 
-    async function restore(req: Request, res: Response): Promise<void> {
-        const userId = authenticatedUserId(req, res);
-        if (!userId) return;
-
-        try {
-            const response = await service.restoreNotification(
-                userId,
-                eventIdFromRequest(req)
-            );
-            if (!response) {
-                res.status(404).json({ error: 'Notification not found' });
-                return;
-            }
-            res.json(response);
-        } catch (error) {
-            handleRouteError(res, error, 'restore notification');
-        }
-    }
-
     async function dismissAll(req: Request, res: Response): Promise<void> {
         const userId = authenticatedUserId(req, res);
         if (!userId) return;
@@ -394,7 +374,6 @@ export function createNotificationRoutes(
         getUnreadCount,
         markRead,
         dismiss,
-        restore,
         dismissAll,
         getConfiguration,
         getCapabilities: getConfiguration,

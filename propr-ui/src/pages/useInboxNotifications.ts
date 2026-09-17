@@ -5,7 +5,6 @@ import {
   dismissNotification,
   listNotifications,
   markNotificationRead,
-  restoreNotification,
 } from '../api/notificationApi';
 import { useNotificationCenter } from '../contexts/NotificationCenterContext';
 import { useToast } from '../components/ui/useToast';
@@ -48,7 +47,6 @@ export function useInboxNotifications(): InboxNotificationsState {
   const loadMoreGenerationRef = useRef(0);
   const notificationsRef = useRef(notifications);
   const dismissingRef = useRef(new Set<string>());
-  const restoringRef = useRef(new Set<string>());
   const hiddenIdsRef = useRef(new Set<string>());
   const dismissSnapshotsRef = useRef(new Map<string, Notification>());
   const readOverridesRef = useRef(new Map<string, Notification>());
@@ -150,31 +148,6 @@ export function useInboxNotifications(): InboxNotificationsState {
     }
   }, [commitUnreadCount, initialLoading, loadingMore, nextCursor, reconcileIncoming, refreshing]);
 
-  const restore = useCallback(async (id: string) => {
-    if (isDemoMode || restoringRef.current.has(id)) return;
-    restoringRef.current.add(id);
-    mutationEpochRef.current += 1;
-    try {
-      const response = await restoreNotification(id);
-      hiddenIdsRef.current.delete(id);
-      if (mountedRef.current) {
-        setNotifications(current => mergeNotifications(current, [response.notification]));
-      }
-      commitUnreadCount(response.unreadCount);
-    } catch (restoreError) {
-      if (isActiveIdentity()) {
-        addToast({
-          type: 'error',
-          message: `Couldn't restore the notification. ${messageFrom(restoreError)}`,
-        });
-      }
-    } finally {
-      mutationEpochRef.current += 1;
-      restoringRef.current.delete(id);
-      void refreshUnreadCount().catch(() => undefined);
-    }
-  }, [addToast, commitUnreadCount, isActiveIdentity, isDemoMode, refreshUnreadCount]);
-
   const dismiss = useCallback(async (id: string) => {
     if (isDemoMode || dismissingRef.current.has(id)) return;
     const clearEpoch = clearEpochRef.current;
@@ -190,17 +163,8 @@ export function useInboxNotifications(): InboxNotificationsState {
     }
     try {
       const response = await dismissNotification(id);
+      // Notifications are disposable: dismissal is silent and final.
       if (clearEpoch === clearEpochRef.current) commitUnreadCount(response.unreadCount);
-      if (clearEpoch === clearEpochRef.current && isActiveIdentity()) {
-        addToast({
-          type: 'undo',
-          message: 'Notification dismissed.',
-          duration: 6000,
-          onUndo: () => {
-            if (clearEpoch === clearEpochRef.current && isActiveIdentity()) void restore(id);
-          },
-        });
-      }
     } catch (dismissError) {
       if (clearEpoch !== clearEpochRef.current) return;
       hiddenIdsRef.current.delete(id);
@@ -221,7 +185,7 @@ export function useInboxNotifications(): InboxNotificationsState {
       dismissSnapshotsRef.current.delete(id);
       void refreshUnreadCount().catch(() => undefined);
     }
-  }, [addToast, commitUnreadCount, isActiveIdentity, isDemoMode, refreshUnreadCount, restore, unreadCount]);
+  }, [addToast, commitUnreadCount, isActiveIdentity, isDemoMode, refreshUnreadCount, unreadCount]);
 
   const clearAll = useCallback(async () => {
     if (isDemoMode || clearingRef.current) return;

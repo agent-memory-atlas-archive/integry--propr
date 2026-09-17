@@ -854,42 +854,6 @@ export class NotificationService {
         return this.updateInboxTimestamp(userId, eventId, 'dismissed_at');
     }
 
-    /** Restore one dismissed Inbox receipt owned by the requesting user. */
-    async restoreNotification(
-        userId: string,
-        eventId: string
-    ): Promise<NotificationStateResponse | null> {
-        assertIdentifier(userId, 'notification userId');
-        assertIdentifier(eventId, 'notification eventId');
-
-        return this.database.transaction(async transaction => {
-            await transaction('notification_user_states')
-                .where({
-                    event_id: eventId,
-                    user_id: userId,
-                    inbox_enabled: true
-                })
-                .whereNotNull('dismissed_at')
-                .update({ dismissed_at: null });
-
-            const row = await transaction('notification_user_states as receipt')
-                .join('notification_events as event', 'event.event_id', 'receipt.event_id')
-                .select(eventSelectColumns())
-                .where({
-                    'receipt.event_id': eventId,
-                    'receipt.user_id': userId,
-                    'receipt.inbox_enabled': true
-                })
-                .first() as NotificationRow | undefined;
-            if (!row) return null;
-
-            return parseNotificationStateResponse({
-                notification: toNotification(row),
-                unreadCount: await unreadCount(transaction, userId)
-            });
-        });
-    }
-
     /** Dismiss every active Inbox receipt owned by one user. */
     async dismissAllNotifications(
         userId: string
@@ -1328,8 +1292,6 @@ export const markNotificationRead = notificationService.markNotificationRead
     .bind(notificationService) as NotificationService['markNotificationRead'];
 export const dismissNotification = notificationService.dismissNotification
     .bind(notificationService) as NotificationService['dismissNotification'];
-export const restoreNotification = notificationService.restoreNotification
-    .bind(notificationService) as NotificationService['restoreNotification'];
 export const dismissAllNotifications = notificationService.dismissAllNotifications
     .bind(notificationService) as NotificationService['dismissAllNotifications'];
 export const dismissNotificationReceipts = notificationService.dismissNotificationReceipts

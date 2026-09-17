@@ -462,6 +462,103 @@ describe('notification lifecycle projection', { concurrency: false }, () => {
     assert.equal(await countNotificationEvents(database), 2);
   });
 
+  test('removes the Connect seat-limit card once seats are available again', async () => {
+    const connectAccount = {
+      installationId: 42, activeSeats: 2, allowedSeats: 2, seatsRemaining: 0,
+      billingCycleResetAt: iso(30 * 24 * 60 * 60 * 1_000), seatLimitBlockedAt: iso(-5_000),
+    };
+    await projection.projectSystemSnapshot({ timestamp: iso(), connectAccount });
+    assert.equal(await countUndismissedNotificationReceipts(database, 'system_failure'), 1);
+
+    clock += 1_000;
+    await projection.projectSystemSnapshot({
+      timestamp: iso(),
+      connectAccount: { ...connectAccount, activeSeats: 1, seatsRemaining: 1 },
+    });
+
+    assert.equal(await countNotificationEvents(database), 1);
+    assert.equal(await countUndismissedNotificationReceipts(database, 'system_failure'), 0);
+  });
+
+  test('removes failure cards once the same task or indexing source later completes', async () => {
+    await database('tasks').insert({
+      task_id: 'task-retried', repository: 'integry/propr', issue_number: 51,
+      pr_number: null, task_type: 'issue', initial_job_data: '{}',
+    });
+    await projection.projectTaskUpdate({
+      eventType: TASK_UPDATE, taskId: 'task-retried', state: 'failed',
+      repository: 'integry/propr', issueNumber: 51, timestamp: iso(),
+    });
+    await projection.projectIndexingUpdate({
+      eventType: INDEXING_UPDATE, repository: 'integry/propr', branch: 'main',
+      phase: 'failed', timestamp: iso(),
+    });
+    await projection.projectIndexingUpdate({
+      eventType: INDEXING_UPDATE, repository: 'integry/propr', branch: 'feature',
+      phase: 'failed', timestamp: iso(),
+    });
+    assert.equal(await countUndismissedNotificationReceipts(database, 'task'), 2);
+    assert.equal(await countUndismissedNotificationReceipts(database, 'indexing'), 2);
+
+    for (const state of ['processing', 'completed'] as const) {
+      clock += 1_000;
+      await projection.projectTaskUpdate({
+        eventType: TASK_UPDATE, taskId: 'task-retried', state,
+        repository: 'integry/propr', issueNumber: 51, timestamp: iso(),
+      });
+    }
+    for (const phase of ['indexing', 'completed'] as const) {
+      clock += 1_000;
+      await projection.projectIndexingUpdate({
+        eventType: INDEXING_UPDATE, repository: 'integry/propr', branch: 'main',
+        phase, timestamp: iso(),
+      });
+    }
+
+    const activeTaskTitles = await database('notification_user_states as receipt')
+      .join('notification_events as event', 'event.event_id', 'receipt.event_id')
+      .where({ 'event.kind': 'task' })
+      .whereNull('receipt.dismissed_at')
+      .distinct('event.title')
+      .pluck('event.title');
+    assert.deepEqual(activeTaskTitles, ['Issue #51 implementation completed']);
+    const activeIndexingTargets = await database('notification_user_states as receipt')
+      .join('notification_events as event', 'event.event_id', 'receipt.event_id')
+      .where({ 'event.kind': 'indexing' })
+      .whereNull('receipt.dismissed_at')
+      .pluck('event.target_json');
+    assert.deepEqual(activeIndexingTargets.map(target => JSON.parse(target).branch), ['feature']);
+  });
+
+  test('advertises PR commands only when the completed task can post to that pull request', async () => {
+    const completions = [
+      { taskId: 'implementation-with-pr', issueNumber: 70, prNumber: 71, timestamp: iso() },
+      { taskId: 'implementation-invalid-repo', issueNumber: 72, prNumber: 73, timestamp: iso(1_000) },
+    ];
+    await database('tasks').insert(completions.map(completion => ({
+      task_id: completion.taskId,
+      repository: completion.taskId === 'implementation-invalid-repo' ? 'integry$/propr' : 'integry/propr',
+      issue_number: completion.issueNumber, pr_number: completion.prNumber,
+      task_type: 'issue', initial_job_data: '{}',
+    })));
+    for (const completion of completions) {
+      clock = Date.parse(completion.timestamp);
+      await projection.projectTaskUpdate({
+        eventType: TASK_UPDATE, taskId: completion.taskId, state: 'completed',
+        repository: 'integry/propr', timestamp: completion.timestamp,
+      });
+    }
+
+    const events = await database('notification_events')
+      .where({ kind: 'pull_request' })
+      .orderBy('occurred_at')
+      .select('advertised_actions_json');
+    assert.deepEqual(events.map(event => JSON.parse(event.advertised_actions_json)), [
+      ['follow_up', 'open_pr', 'dismiss'],
+      ['dismiss'],
+    ]);
+  });
+
   test('ignores absent or malformed Connect seat-limit block signals', async () => {
     await projection.projectSystemSnapshot({
       timestamp: iso(),

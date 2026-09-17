@@ -65,7 +65,13 @@ export function notificationHref(notification: Notification): string {
     case 'review': return notification.target.taskId
       ? `/tasks/${encodeURIComponent(notification.target.taskId)}`
       : '/tasks';
-    case 'pull_request': return '/repositories';
+    case 'pull_request': {
+      const completedTaskId = notification.metadata?.completedImplementationTaskId;
+      return notificationPullRequestUrl(notification)
+        ?? (typeof completedTaskId === 'string' && completedTaskId
+          ? `/tasks/${encodeURIComponent(completedTaskId)}`
+          : '/repositories');
+    }
     case 'indexing': {
       const [owner, repository] = notification.target.repository.split('/');
       return owner && repository
@@ -118,6 +124,36 @@ export function notificationPullRequestUrl(notification: Notification): string |
   } catch {
     return null;
   }
+}
+
+export interface NotificationFollowupCommand {
+  taskId: string;
+  prNumber: number;
+  commands: readonly string[];
+}
+
+/**
+ * The only buttons an Inbox card offers: the common next command after a
+ * finished review (/fix) or a finished PR run (/review, /ultrafix).
+ */
+export function notificationFollowupCommand(notification: Notification): NotificationFollowupCommand | null {
+  if (!notification.actions.includes('follow_up')) return null;
+  if (notification.target.type === 'review' && notification.target.taskId) {
+    return {
+      taskId: notification.target.taskId,
+      prNumber: notification.target.prNumber,
+      commands: ['/fix'],
+    };
+  }
+  const completedTaskId = notification.metadata?.completedImplementationTaskId;
+  if (notification.target.type === 'pull_request' && typeof completedTaskId === 'string' && completedTaskId) {
+    return {
+      taskId: completedTaskId,
+      prNumber: notification.target.prNumber,
+      commands: ['/review', '/ultrafix'],
+    };
+  }
+  return null;
 }
 
 export function formatRelativeTime(timestamp: string, now = Date.now()): string {

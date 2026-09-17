@@ -17,7 +17,19 @@ interface TaskRecord {
   task_id: string;
   repository: string;
   issue_number: number;
+  pr_number?: number | null;
   task_type: string;
+}
+
+/**
+ * Resolves the GitHub thread a follow-up comment is posted to. PR commands go
+ * to the task's pull request; implementation tasks keep their source issue in
+ * issue_number and the created PR in pr_number.
+ */
+function resolveFollowupThread(task: TaskRecord, targetsPullRequest: boolean): { number?: number; error: string } {
+  return targetsPullRequest
+    ? { number: task.pr_number ?? task.issue_number, error: 'Task does not have a valid GitHub pull request' }
+    : { number: task.issue_number, error: 'Task does not have valid GitHub issue information' };
 }
 
 export function createTaskRoutes(deps: TaskRoutesDeps) {
@@ -285,7 +297,7 @@ export function createTaskRoutes(deps: TaskRoutesDeps) {
   async function postFollowup(req: Request, res: Response): Promise<void> {
     try {
       const { taskId } = req.params;
-      const { body } = req.body;
+      const { body, target } = req.body;
       const userId = req.user?.id;
       if (!userId) {
         res.status(401).json({ error: 'Unable to determine requesting user ID' });
@@ -311,6 +323,12 @@ export function createTaskRoutes(deps: TaskRoutesDeps) {
         return;
       }
 
+      if (target !== undefined && target !== 'pull_request') {
+        res.status(400).json({ error: 'Follow-up target must be "pull_request" when provided' });
+        return;
+      }
+      const targetsPullRequest = target === 'pull_request';
+
       // Get task info from database
       const task = await db('tasks').where({ task_id: taskId }).first() as TaskRecord | undefined;
       if (!task) {
@@ -319,10 +337,11 @@ export function createTaskRoutes(deps: TaskRoutesDeps) {
       }
 
       const [repoOwner, repoName] = (task.repository as string).split('/');
-      const issueNumber = task.issue_number;
+      const thread = resolveFollowupThread(task, targetsPullRequest);
+      const issueNumber = thread.number;
 
       if (!repoOwner || !repoName || !issueNumber) {
-        res.status(400).json({ error: 'Task does not have valid GitHub issue information' });
+        res.status(400).json({ error: thread.error });
         return;
       }
 
@@ -342,7 +361,7 @@ export function createTaskRoutes(deps: TaskRoutesDeps) {
 
       // Get branch name for PR-based tasks
       let branchName: string | undefined;
-      if (task.task_type === 'pr-comment') {
+      if (targetsPullRequest || task.task_type === 'pr-comment') {
         try {
           const { data: prData } = await octokit.request('GET /repos/{owner}/{repo}/pulls/{pull_number}', {
             owner: repoOwner,

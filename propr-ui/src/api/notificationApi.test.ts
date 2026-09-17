@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test, vi } from 'vitest';
-import { dismissAllNotifications, dismissNotification, markNotificationRead, restoreNotification } from './notificationApi';
+import { dismissAllNotifications, dismissNotification, markNotificationRead } from './notificationApi';
 
 const event = {
   id: 'event:token-refresh',
@@ -33,27 +33,22 @@ function state(readAt: string | null, dismissedAt: string | null, unreadCount: n
 describe('notification mutation API', () => {
   afterEach(() => vi.restoreAllMocks());
 
-  test('replays bodyless read, dismiss, and restore mutations after token refresh', async () => {
+  test('replays bodyless read and dismiss mutations after token refresh', async () => {
     const fetchMock = vi.spyOn(globalThis, 'fetch')
       .mockResolvedValueOnce(tokenRefreshed())
       .mockResolvedValueOnce(state('2026-08-24T12:01:00.000Z', null, 1))
       .mockResolvedValueOnce(tokenRefreshed())
-      .mockResolvedValueOnce(state('2026-08-24T12:01:00.000Z', '2026-08-24T12:02:00.000Z', 0))
-      .mockResolvedValueOnce(tokenRefreshed())
-      .mockResolvedValueOnce(state('2026-08-24T12:01:00.000Z', null, 1));
+      .mockResolvedValueOnce(state('2026-08-24T12:01:00.000Z', '2026-08-24T12:02:00.000Z', 0));
 
     await expect(markNotificationRead(event.id)).resolves.toMatchObject({ unreadCount: 1 });
     await expect(dismissNotification(event.id)).resolves.toMatchObject({ unreadCount: 0 });
-    await expect(restoreNotification(event.id)).resolves.toMatchObject({ unreadCount: 1 });
 
-    expect(fetchMock).toHaveBeenCalledTimes(6);
+    expect(fetchMock).toHaveBeenCalledTimes(4);
     expect(fetchMock.mock.calls.map(([url]) => String(url))).toEqual([
       expect.stringContaining('/api/notifications/event%3Atoken-refresh/read'),
       expect.stringContaining('/api/notifications/event%3Atoken-refresh/read'),
       expect.stringContaining('/api/notifications/event%3Atoken-refresh/dismiss'),
       expect.stringContaining('/api/notifications/event%3Atoken-refresh/dismiss'),
-      expect.stringContaining('/api/notifications/event%3Atoken-refresh/restore'),
-      expect.stringContaining('/api/notifications/event%3Atoken-refresh/restore'),
     ]);
     for (const [, init] of fetchMock.mock.calls) {
       expect(init).toMatchObject({ method: 'POST', credentials: 'include' });

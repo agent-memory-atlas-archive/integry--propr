@@ -255,6 +255,14 @@ export async function handlePlanPRUpdate(
                 // issue or chained-plan merge handling below.
                 log.warn({ error, repository, prNumber }, 'Failed to dismiss merged PR notifications');
             }
+        } else if (action === 'closed') {
+            try {
+                // A closed pull request has no remaining follow-up, so its
+                // Inbox cards are no longer relevant.
+                await notificationService.dismissNotificationsForPullRequest(repository, prNumber);
+            } catch (error) {
+                log.warn({ error, repository, prNumber }, 'Failed to dismiss closed PR notifications');
+            }
         }
 
         await checkRenamesFromPRBody(payload, repository, prNumber, log);

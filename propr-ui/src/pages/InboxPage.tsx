@@ -105,8 +105,8 @@ const InboxPage: React.FC = () => {
               notifications={section.notifications}
               onDismiss={inbox.dismiss}
               onOpen={inbox.open}
-              onChanged={inbox.refresh}
               mutationsEnabled={inbox.mutationsEnabled && !inbox.clearing}
+              collapsible={section.group === 'System'}
             />
           ))}
           {inbox.hasMore && (

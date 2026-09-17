@@ -36,7 +36,8 @@ type NotificationEventWriter = Pick<NotificationService,
   'createNotificationEvent' | 'createPullRequestNotificationEvent'
   | 'createPullRequestAttentionNotificationEvent'
   | 'createSourceActivityNotificationEvent'
-  | 'reconcileSystemFailureTransition'>;
+  | 'reconcileSystemFailureTransition'
+  | 'dismissSystemFailureNotifications'>;
 
 export interface NotificationProjectionOptions {
   database: Knex;
@@ -63,6 +64,7 @@ interface TaskContext {
   isReview: boolean;
   followupEligible: boolean;
   reviewFollowupEligible: boolean;
+  pullRequestFollowupEligible: boolean;
 }
 
 interface TaskEventProjection {
@@ -95,6 +97,8 @@ interface ConnectSeatLimitBlock {
   billingCycleResetAt: string;
   blockedAt: string;
 }
+
+const CONNECT_SEAT_LIMIT_COMPONENT = 'propr-connect-seat-limit';
 
 const SYSTEM_HEALTH_RULES: Readonly<Record<string, ReadonlySet<string>>> = {
   api: new Set(['healthy']),
@@ -280,6 +284,16 @@ function supportsTaskFollowup(
     && storedIssueNumber === projectedIssueNumber;
 }
 
+/** Mirrors the pull request the task follow-up route resolves for PR commands. */
+function supportsPullRequestFollowup(
+  task: Record<string, unknown>,
+  projectedPrNumber: number | undefined,
+): boolean {
+  if (typeof task.repository !== 'string' || !isValidGithubRepository(task.repository)) return false;
+  const followupPrNumber = positiveInteger(task.pr_number) ?? positiveInteger(task.issue_number);
+  return followupPrNumber !== undefined && followupPrNumber === projectedPrNumber;
+}
+
 function safeGithubPullRequestUrl(repository: string, prNumber: number): string | undefined {
   if (!isValidGithubRepository(repository)) return undefined;
   const parts = repository.split('/');
@@ -324,11 +338,15 @@ function normalizedTimestamp(value: unknown): string | undefined {
   }
 }
 
-function connectSeatLimitBlock(snapshot: SystemHealthSnapshot): ConnectSeatLimitBlock | undefined {
-  if (typeof snapshot.connectAccount !== 'object'
-    || snapshot.connectAccount === null
-    || Array.isArray(snapshot.connectAccount)) return undefined;
-  const account = snapshot.connectAccount as Record<string, unknown>;
+function connectAccount(snapshot: SystemHealthSnapshot): Record<string, unknown> | undefined {
+  return typeof snapshot.connectAccount === 'object'
+    && snapshot.connectAccount !== null
+    && !Array.isArray(snapshot.connectAccount)
+    ? snapshot.connectAccount as Record<string, unknown>
+    : undefined;
+}
+
+function connectSeatLimitBlock(account: Record<string, unknown>): ConnectSeatLimitBlock | undefined {
   const installationId = positiveInteger(account.installationId);
   const activeSeats = nonNegativeInteger(account.activeSeats);
   const allowedSeats = nonNegativeInteger(account.allowedSeats);
@@ -610,8 +628,12 @@ export class NotificationProjectionService {
     const snapshotAt = normalizeISO8601Timestamp(snapshot.timestamp);
     const recipients = await this.loadAdministratorRecipients(additionalAdministratorIds);
 
-    const seatLimitBlock = connectSeatLimitBlock(snapshot);
-    if (seatLimitBlock && seatLimitBlock.blockedAt <= snapshotAt) {
+    const account = connectAccount(snapshot);
+    const seatLimitBlock = account && connectSeatLimitBlock(account);
+    if (account && !(seatLimitBlock && seatLimitBlock.seatsRemaining === 0)) {
+      // Seats are available again, so an earlier seat-limit card is stale.
+      await this.notifications.dismissSystemFailureNotifications(CONNECT_SEAT_LIMIT_COMPONENT);
+    } else if (seatLimitBlock && seatLimitBlock.blockedAt <= snapshotAt) {
       await this.notifications.createNotificationEvent({
         deduplicationKey: stableKey(
           'connect-seat-limit-blocked',
@@ -620,7 +642,7 @@ export class NotificationProjectionService {
         ),
         kind: 'system_failure',
         severity: 'warning',
-        target: { type: 'system_failure', component: 'propr-connect-seat-limit' },
+        target: { type: 'system_failure', component: CONNECT_SEAT_LIMIT_COMPONENT },
         title: 'GitHub event blocked by seat limit',
         body: `No developer seat was available when ProPR Connect received a GitHub event. Current usage is ${seatLimitBlock.activeSeats} of ${seatLimitBlock.allowedSeats}; the billing cycle resets at ${seatLimitBlock.billingCycleResetAt}.`,
         actions: ['dismiss'],
@@ -781,6 +803,7 @@ export class NotificationProjectionService {
           completionType: context.commandMode ?? 'implementation',
         },
         actions: [
+          ...(context.pullRequestFollowupEligible ? ['follow_up' as const] : []),
           ...(pullRequestUrl === undefined ? [] : ['open_pr' as const]),
           'dismiss',
         ],
@@ -839,6 +862,7 @@ export class NotificationProjectionService {
       isReview,
       followupEligible: supportsTaskFollowup(task, issueNumber),
       reviewFollowupEligible: supportsTaskFollowup(task, prNumber),
+      pullRequestFollowupEligible: supportsPullRequestFollowup(task, prNumber),
     };
   }
 
@@ -917,27 +941,36 @@ export class NotificationProjectionService {
     transaction: Knex.Transaction,
   ): Promise<number> {
     const timestamp = normalizeISO8601Timestamp(this.now());
+    // Stalled warnings resolve on any terminal transition; failures resolve
+    // once the same task or indexing source later completes successfully.
+    const resolvedActivity = (
+      activity: Knex.QueryBuilder,
+      type: 'task' | 'indexing',
+    ): Knex.QueryBuilder => activity
+      .select(transaction.raw('1'))
+      .from('notification_source_activity as activity')
+      .where({ 'activity.activity_type': type })
+      .whereNotNull('activity.completed_at')
+      .andWhere((resolution) => {
+        resolution.where({ 'event.severity': 'warning' }).orWhere((recovery) => {
+          recovery.where({ 'event.severity': 'error', 'activity.status': 'completed' })
+            .whereRaw('activity.last_activity_at > event.occurred_at');
+        });
+      });
     const resolvedEvents = transaction('notification_events as event')
       .select('event.event_id')
-      .where({ 'event.severity': 'warning' })
-      .andWhere((warning) => {
-        warning.where((task) => {
+      .whereIn('event.severity', ['warning', 'error'])
+      .andWhere((resolvable) => {
+        resolvable.where((task) => {
           task.where({ 'event.kind': 'task' }).whereExists(function resolvedTask() {
-            this.select(transaction.raw('1'))
-              .from('notification_source_activity as activity')
-              .where({ 'activity.activity_type': 'task' })
-              .whereNotNull('activity.completed_at')
-              .whereRaw(
-                "activity.activity_key = json_extract(event.target_json, '$.taskId')",
-              );
+            resolvedActivity(this, 'task').whereRaw(
+              "activity.activity_key = json_extract(event.target_json, '$.taskId')",
+            );
           });
         }).orWhere((indexing) => {
           indexing.where({ 'event.kind': 'indexing' })
             .whereExists(function resolvedIndexing() {
-              this.select(transaction.raw('1'))
-                .from('notification_source_activity as activity')
-                .where({ 'activity.activity_type': 'indexing' })
-                .whereNotNull('activity.completed_at')
+              resolvedActivity(this, 'indexing')
                 .whereRaw(
                   "activity.repository = json_extract(event.target_json, '$.repository')",
                 )
