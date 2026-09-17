@@ -146,6 +146,8 @@ describe('Inbox page', () => {
 
     const systemToggle = screen.getByRole('button', { name: /System/ });
     expect(systemToggle).toHaveAttribute('aria-expanded', 'false');
+    const lastActivity = screen.getByRole('article', { name: 'Guard empty recap metadata' });
+    expect(lastActivity.compareDocumentPosition(systemToggle) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     fireEvent.click(systemToggle);
     expect(screen.getByRole('heading', { level: 3, name: 'System failure' }).closest('section'))
       .toHaveAccessibleName('System');
@@ -288,7 +290,7 @@ describe('Inbox page', () => {
     renderInbox();
 
     await screen.findByText('Stay dismissed');
-    fireEvent.click(screen.getByRole('button', { name: 'Refresh Inbox' }));
+    fireEvent.focus(window);
     fireEvent.click(screen.getByRole('button', { name: 'Dismiss Stay dismissed' }));
     await waitFor(() => expect(dismissNotification).toHaveBeenCalledWith('event-refresh-race'));
 
@@ -346,7 +348,7 @@ describe('Inbox page', () => {
 
     fireEvent.click(clearAll);
     expect(dismissAllNotifications).toHaveBeenCalledTimes(1);
-    expect(await screen.findByRole('button', { name: 'Clearing…' })).toBeDisabled();
+    await waitFor(() => expect(clearAll).toBeDisabled());
     await act(async () => clearRequest.resolve({ unreadCount: 0 }));
 
     expect(await screen.findByText('You’re all caught up')).toBeInTheDocument();
@@ -502,7 +504,7 @@ describe('Inbox page', () => {
 
     await screen.findByText('Read race notification');
     commitUnreadCount.mockClear();
-    fireEvent.click(screen.getByRole('button', { name: 'Refresh Inbox' }));
+    fireEvent.focus(window);
     await waitFor(() => expect(listNotifications).toHaveBeenCalledTimes(2));
     fireEvent.click(screen.getByRole('link', { name: /Read race notification/ }));
     await waitFor(() => expect(markNotificationRead).toHaveBeenCalledWith('event-read-race'));
@@ -510,6 +512,32 @@ describe('Inbox page', () => {
 
     await waitFor(() => expect(screen.queryByRole('img', { name: 'Unread' })).not.toBeInTheDocument());
     expect(commitUnreadCount).not.toHaveBeenCalledWith(9);
+  });
+
+  test('keeps the header minimal and refreshes automatically without dropping loaded pages', async () => {
+    const first = item('event-first', 'First page item', null, { occurredAt: '2026-08-24T12:02:00.000Z', createdAt: '2026-08-24T12:02:00.000Z' });
+    const older = item('event-older', 'Older page item', null, { occurredAt: '2026-08-24T11:00:00.000Z', createdAt: '2026-08-24T11:00:00.000Z' });
+    const newest = item('event-newest', 'Newest item', null, { occurredAt: '2026-08-24T12:30:00.000Z', createdAt: '2026-08-24T12:30:00.000Z' });
+    vi.mocked(listNotifications)
+      .mockResolvedValueOnce({ notifications: [first], unreadCount: 1, nextCursor: 'cursor-1' })
+      .mockResolvedValueOnce({ notifications: [older], unreadCount: 2, nextCursor: null })
+      .mockResolvedValueOnce({ notifications: [newest, first], unreadCount: 3, nextCursor: 'cursor-new' });
+    renderInbox();
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Load more' }));
+    await screen.findByText('Older page item');
+    expect(screen.queryByRole('button', { name: /Refresh/ })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Clear all' })).not.toHaveTextContent(/\S/);
+    expect(screen.queryByText(/in one place/)).not.toBeInTheDocument();
+
+    fireEvent.focus(window);
+    await screen.findByText('Newest item');
+    expect(screen.getAllByRole('article').map(article => article.getAttribute('aria-label'))).toEqual([
+      'Newest item',
+      'First page item',
+      'Older page item',
+    ]);
+    expect(screen.queryByRole('button', { name: 'Load more' })).not.toBeInTheDocument();
   });
 
   test('ignores an error from load-more after a refresh supersedes it', async () => {
@@ -526,7 +554,7 @@ describe('Inbox page', () => {
     renderInbox();
 
     fireEvent.click(await screen.findByRole('button', { name: 'Load more' }));
-    fireEvent.click(screen.getByRole('button', { name: 'Refresh Inbox' }));
+    fireEvent.focus(window);
     expect(await screen.findByText('Refreshed item')).toBeInTheDocument();
     const refreshedLoadMore = screen.getByRole('button', { name: 'Load more' });
     expect(refreshedLoadMore).toBeEnabled();

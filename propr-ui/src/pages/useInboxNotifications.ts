@@ -12,6 +12,7 @@ import { useDemoMode } from '../contexts/DemoModeContext';
 import { mergeNotifications } from './inboxUtils';
 
 const PAGE_SIZE = 25;
+const AUTO_REFRESH_INTERVAL_MS = 60_000;
 
 export interface InboxNotificationsState {
   notifications: Notification[];
@@ -54,6 +55,7 @@ export function useInboxNotifications(): InboxNotificationsState {
   const clearEpochRef = useRef(0);
   const clearingRef = useRef(false);
   const mountedRef = useRef(true);
+  const extraPagesLoadedRef = useRef(false);
   const {
     unreadCount,
     commitUnreadCount,
@@ -83,6 +85,8 @@ export function useInboxNotifications(): InboxNotificationsState {
     const generation = ++requestGenerationRef.current;
     loadMoreGenerationRef.current += 1;
     const mutationEpoch = mutationEpochRef.current;
+    // Keep pages the user already scrolled through; only fold in the newest page.
+    const keepLoadedPages = isRefresh && extraPagesLoadedRef.current;
     setLoadingMore(false);
     if (isRefresh) setRefreshing(true);
     else setInitialLoading(true);
@@ -91,10 +95,10 @@ export function useInboxNotifications(): InboxNotificationsState {
       const response = await listNotifications({ limit: PAGE_SIZE });
       if (generation !== requestGenerationRef.current) return;
       setNotifications(current => mergeNotifications(
-        mutationEpoch === mutationEpochRef.current ? [] : current,
+        mutationEpoch === mutationEpochRef.current && !keepLoadedPages ? [] : current,
         reconcileIncoming(response.notifications),
       ));
-      setNextCursor(response.nextCursor);
+      if (!keepLoadedPages) setNextCursor(response.nextCursor);
       if (mutationEpoch === mutationEpochRef.current) commitUnreadCount(response.unreadCount);
     } catch (loadError) {
       if (generation === requestGenerationRef.current) setError(messageFrom(loadError));
@@ -124,6 +128,21 @@ export function useInboxNotifications(): InboxNotificationsState {
 
   const refresh = useCallback(() => loadFirstPage(true), [loadFirstPage]);
 
+  useEffect(() => {
+    const refreshWhenVisible = () => {
+      if (document.visibilityState !== 'visible' || !navigator.onLine || clearingRef.current) return;
+      void refresh();
+    };
+    const interval = window.setInterval(refreshWhenVisible, AUTO_REFRESH_INTERVAL_MS);
+    window.addEventListener('focus', refreshWhenVisible);
+    document.addEventListener('visibilitychange', refreshWhenVisible);
+    return () => {
+      window.clearInterval(interval);
+      window.removeEventListener('focus', refreshWhenVisible);
+      document.removeEventListener('visibilitychange', refreshWhenVisible);
+    };
+  }, [refresh]);
+
   const loadMore = useCallback(async () => {
     if (!nextCursor || loadingMore || refreshing || initialLoading) return;
     const cursor = nextCursor;
@@ -140,6 +159,7 @@ export function useInboxNotifications(): InboxNotificationsState {
         reconcileIncoming(response.notifications),
       ));
       setNextCursor(response.nextCursor);
+      extraPagesLoadedRef.current = true;
       if (mutationEpoch === mutationEpochRef.current) commitUnreadCount(response.unreadCount);
     } catch (loadError) {
       if (generation === requestGenerationRef.current) setError(messageFrom(loadError));
@@ -199,6 +219,7 @@ export function useInboxNotifications(): InboxNotificationsState {
       loadMoreGenerationRef.current += 1;
       setNotifications([]);
       setNextCursor(null);
+      extraPagesLoadedRef.current = false;
       setLoadingMore(false);
       commitUnreadCount(response.unreadCount);
       if (isActiveIdentity()) {

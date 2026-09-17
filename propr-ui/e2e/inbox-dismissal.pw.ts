@@ -147,3 +147,22 @@ test('desktop shows one newest-first list titled by PR, with only System collaps
   await expect(page.getByRole('button', { name: 'Undo' })).toHaveCount(0);
   await expect(page.getByText('Notification dismissed.')).toHaveCount(0);
 });
+
+test('header keeps only an icon Clear all, and System sits in a grey panel below the feed', async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await stubInbox(page);
+  await page.goto('/inbox');
+  await expect(page.getByText('Fixed 2 review findings in 3 files; tests pass.')).toBeVisible();
+  await expect(page.getByRole('button', { name: /Refresh/ })).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'Clear all' })).toHaveText('');
+  await expect(page.getByText(/in one place/)).toHaveCount(0);
+
+  const systemToggle = page.getByRole('button', { name: 'System 1' });
+  const lastCard = page.getByRole('article').last();
+  expect((await systemToggle.boundingBox())!.y).toBeGreaterThan((await lastCard.boundingBox())!.y);
+  await expect(page.locator('section[aria-labelledby="inbox-system"]')).toHaveCSS('background-color', 'rgb(248, 250, 252)');
+  await systemToggle.click();
+  await expect(page.getByRole('article', { name: 'System component unhealthy: redis' })).toBeVisible();
+  await page.getByRole('article', { name: 'System component unhealthy: redis' }).scrollIntoViewIfNeeded();
+  await capture(page, 'inbox-header-system-desktop.png');
+});

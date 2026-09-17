@@ -235,24 +235,28 @@ export const InboxList: React.FC<InboxListProps & { id?: string }> = ({ id, noti
   </div>
 );
 
-/** System updates stay out of the activity feed until the operator expands them. */
+/** System updates sit below the activity feed, collapsed until the operator expands them. */
 export const InboxSystemSection: React.FC<InboxListProps> = ({ notifications, ...listProps }) => {
   const [expanded, setExpanded] = useState(false);
   if (notifications.length === 0) return null;
   return (
-    <section aria-labelledby="inbox-system">
+    <section aria-labelledby="inbox-system" className="rounded-xl border border-slate-200 bg-slate-50">
       <button
         type="button"
         aria-expanded={expanded}
         aria-controls="inbox-system-list"
         onClick={() => setExpanded(value => !value)}
-        className="mb-2 flex w-full items-center gap-2 py-2 text-left text-slate-500 hover:text-slate-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-teal-500"
+        className="flex w-full items-center gap-2 rounded-xl px-4 py-2.5 text-left text-slate-500 hover:text-slate-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-teal-500"
       >
         <h2 id="inbox-system" className="text-xs font-bold uppercase tracking-widest">System</h2>
         <span className="text-xs font-semibold">{notifications.length}</span>
         <ChevronDown className={`ml-auto h-4 w-4 transition-transform ${expanded ? 'rotate-180' : ''}`} aria-hidden="true" />
       </button>
-      {expanded && <InboxList id="inbox-system-list" notifications={notifications} {...listProps} />}
+      {expanded && (
+        <div className="px-2 pb-2">
+          <InboxList id="inbox-system-list" notifications={notifications} {...listProps} />
+        </div>
+      )}
     </section>
   );
 };

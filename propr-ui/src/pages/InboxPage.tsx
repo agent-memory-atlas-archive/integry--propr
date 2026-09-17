@@ -6,35 +6,23 @@ import { InboxList, InboxState, InboxSystemSection } from './InboxPageComponents
 import { isSystemNotification } from './inboxUtils';
 import { useInboxNotifications, type InboxNotificationsState } from './useInboxNotifications';
 
-const InboxHeaderActions: React.FC<{ inbox: InboxNotificationsState }> = ({ inbox }) => {
+const InboxClearAllButton: React.FC<{ inbox: InboxNotificationsState }> = ({ inbox }) => {
+  if (inbox.notifications.length === 0 || !inbox.mutationsEnabled) return null;
   const clearAll = () => {
     if (window.confirm('Clear all notifications from your Inbox?')) void inbox.clearAll();
   };
 
   return (
-    <div className="flex flex-none items-center gap-2">
-      {inbox.notifications.length > 0 && inbox.mutationsEnabled && (
-        <button
-          type="button"
-          onClick={clearAll}
-          disabled={inbox.clearing || inbox.refreshing || inbox.loadingMore}
-          className="inline-flex min-h-10 items-center gap-2 rounded-lg border border-red-200 bg-white px-3 text-sm font-semibold text-red-700 shadow-sm hover:bg-red-50 disabled:cursor-wait disabled:opacity-60"
-        >
-          <Trash2 className="h-4 w-4" aria-hidden="true" />
-          {inbox.clearing ? 'Clearing…' : 'Clear all'}
-        </button>
-      )}
-      <button
-        type="button"
-        onClick={() => void inbox.refresh()}
-        disabled={inbox.refreshing || inbox.initialLoading || inbox.clearing}
-        className="inline-flex min-h-10 items-center gap-2 rounded-lg border border-slate-300 bg-white px-3 text-sm font-semibold text-slate-700 shadow-sm hover:bg-slate-50 disabled:cursor-wait disabled:opacity-60"
-        aria-label="Refresh Inbox"
-      >
-        <RefreshCw className={`h-4 w-4 ${inbox.refreshing ? 'animate-spin' : ''}`} aria-hidden="true" />
-        <span className="hidden min-[360px]:inline">Refresh</span>
-      </button>
-    </div>
+    <button
+      type="button"
+      onClick={clearAll}
+      disabled={inbox.clearing || inbox.refreshing || inbox.loadingMore}
+      className="inline-flex h-9 w-9 flex-none items-center justify-center rounded-full text-slate-400 hover:bg-slate-100 hover:text-red-600 focus:outline-none focus-visible:ring-2 focus-visible:ring-teal-500 disabled:cursor-wait disabled:opacity-60"
+      aria-label="Clear all"
+      title="Clear all"
+    >
+      <Trash2 className="h-4 w-4" aria-hidden="true" />
+    </button>
   );
 };
 
@@ -79,12 +67,9 @@ const InboxPage: React.FC = () => {
 
   return (
     <div className="min-h-full w-full min-w-0 bg-white p-4 sm:p-6">
-      <div className="mb-4 flex items-start justify-between gap-3 sm:mb-6">
-        <div className="min-w-0">
-          <h1 className="text-xl font-bold text-slate-950 sm:text-2xl">Inbox</h1>
-          <p className="mt-1 text-sm leading-5 text-slate-500">Plans, tasks, reviews, and system updates in one place.</p>
-        </div>
-        <InboxHeaderActions inbox={inbox} />
+      <div className="mb-4 flex items-center justify-between gap-3 sm:mb-6">
+        <h1 className="min-w-0 text-xl font-bold text-slate-950 sm:text-2xl">Inbox</h1>
+        <InboxClearAllButton inbox={inbox} />
       </div>
 
       {!inbox.isOnline && inbox.notifications.length > 0 && (
@@ -95,7 +80,7 @@ const InboxPage: React.FC = () => {
       )}
       {inbox.error && inbox.notifications.length > 0 && (
         <div role="alert" className="mb-4 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
-          {inbox.error} Use Refresh to try again.
+          {inbox.error} Retrying automatically.
         </div>
       )}
 
@@ -103,7 +88,6 @@ const InboxPage: React.FC = () => {
         <InboxState kind={showState} message={inbox.error ?? undefined} onRefresh={() => void inbox.refresh()} />
       ) : (
         <div className="space-y-4">
-          <InboxSystemSection notifications={system} {...listProps} />
           <InboxList notifications={activity} {...listProps} />
           {inbox.hasMore && (
             <button
@@ -116,6 +100,7 @@ const InboxPage: React.FC = () => {
               {inbox.loadingMore ? 'Loading…' : 'Load more'}
             </button>
           )}
+          <InboxSystemSection notifications={system} {...listProps} />
         </div>
       )}
     </div>
