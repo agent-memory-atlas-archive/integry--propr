@@ -88,8 +88,10 @@ for (const width of [390, 1440]) {
     await expect(completion.getByRole('img', { name: 'Task queue', exact: true })).toBeVisible();
     await expect(completion.locator('img')).toHaveCount(1);
     await expect(unrelated.locator('img')).toHaveCount(0);
-    await expect(completion.getByRole('link', { name: 'View details' })).toHaveAttribute('href', '/repositories');
-    await expect(completion.getByRole('button', { name: `Open pull request for ${notification.title}` })).toBeEnabled();
+    // The whole card opens the pull request; the only button left is the dismiss control.
+    await expect(completion.getByRole('link')).toHaveAttribute('href', notification.action.href);
+    await expect(completion.getByRole('button')).toHaveCount(1);
+    await expect(completion.getByRole('button', { name: `Dismiss ${notification.title}` })).toBeEnabled();
     await expect(page.getByRole('region', { name: 'Needs attention', exact: true }).getByRole('article')).toHaveCount(2);
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
     await capture(page, `completion-inbox-${width}`);
