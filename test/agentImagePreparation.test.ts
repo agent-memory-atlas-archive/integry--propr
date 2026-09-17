@@ -33,12 +33,24 @@ const queue = {
     getWorkersCount: mock.fn(async () => 1),
     close: async () => {},
 };
+type MockedConnection = { maxRetriesPerRequest?: number | null };
+const queueConnections: MockedConnection[] = [];
+const eventsConnections: MockedConnection[] = [];
+let eventsReady: () => Promise<void> = async () => {};
 await mock.module('bullmq', {
     namedExports: {
         ErrorCode: { JobNotExist: -1, JobNotInState: -3 },
-        Queue: class { constructor() { return queue; } },
+        Queue: class {
+            constructor(_name: string, options?: { connection?: MockedConnection }) {
+                if (options?.connection) queueConnections.push(options.connection);
+                return queue;
+            }
+        },
         QueueEvents: class {
-            async waitUntilReady() {}
+            constructor(_name: string, options?: { connection?: MockedConnection }) {
+                if (options?.connection) eventsConnections.push(options.connection);
+            }
+            async waitUntilReady() { return eventsReady(); }
             async close() {}
         },
     },
@@ -160,28 +172,25 @@ test('explicit version builds coalesce only with requests for the same preparati
 });
 
 test('preparation can wait 18 minutes for the slot and then build for 10 minutes', async t => {
-    t.mock.timers.enable({ apis: ['setTimeout'] });
+    t.mock.timers.enable({ apis: ['Date'] });
+    const timeout = new Error('Job wait prepare-unified-agent-image timed out before finishing, no finish notification arrived');
+    const finishAt = Date.now() + 28 * 60_000;
+    const budgets: number[] = [];
     const job = {
         getState: async () => 'active',
-        waitUntilFinished: mock.fn(async (_events: unknown, timeout: number) => {
-            assert.ok(timeout >= 2 * (60 + 20) * 60_000, 'budget covers both lease waits and builds');
-            await new Promise<void>((resolve, reject) => {
-                const deadline = setTimeout(() => reject(new Error('completion deadline exceeded')), timeout);
-                setTimeout(() => { clearTimeout(deadline); resolve(); }, 28 * 60_000);
-            });
+        waitUntilFinished: mock.fn(async (_events: unknown, budget: number) => {
+            budgets.push(budget);
+            if (Date.now() + budget < finishAt) {
+                t.mock.timers.tick(budget);
+                throw timeout;
+            }
+            t.mock.timers.tick(finishAt - Date.now());
         }),
     };
     queue.getJob.mock.mockImplementation(async () => job);
-    let finished = false;
-    const preparation = enqueueAgentImagePreparation('propr/agent:serialized')
-        .then(() => { finished = true; });
-    await new Promise<void>(resolve => setImmediate(resolve));
-    t.mock.timers.tick(25 * 60_000);
-    await new Promise<void>(resolve => setImmediate(resolve));
-    assert.strictEqual(finished, false);
-    t.mock.timers.tick(3 * 60_000);
-    await preparation;
-    assert.strictEqual(finished, true);
+    await enqueueAgentImagePreparation('propr/agent:serialized');
+    assert.ok(budgets.length >= 28, 'the job state is re-evaluated at least once a minute');
+    assert.ok(budgets.every(budget => budget <= 60_000), 'each probe stays on the registry backoff scale');
 });
 
 for (const state of ['waiting', 'active', 'delayed', 'prioritized', 'waiting-children', 'completed', 'failed', 'unknown']) {
@@ -240,9 +249,10 @@ test('preparation wait has an overall deadline even while a worker is attached',
         }),
     };
     queue.getJob.mock.mockImplementation(async () => job);
-    await assert.rejects(enqueueAgentImagePreparation('propr/agent:stuck'), /prepare-stuck did not finish within/);
-    assert.strictEqual(budgets.length, 3);
-    assert.ok(budgets.every(budget => budget === budgets[0]));
+    await assert.rejects(enqueueAgentImagePreparation('propr/agent:stuck'), /prepare-stuck did not finish within 175 minutes/);
+    assert.ok(budgets.every(budget => budget <= 60_000), 'a stuck job cannot suppress state re-evaluation for hours');
+    assert.strictEqual(budgets.reduce((sum, budget) => sum + budget, 0), 2 * (60 + 20) * 60_000 + 15 * 60_000,
+        'short probes still consume the full lease/build budget before the deadline fails the wait');
 });
 
 test('preparation propagates worker failures without extending the wait', async () => {
@@ -297,4 +307,38 @@ test('terminal retry propagates Redis failures', async () => {
         retry: async () => { throw failure; },
     }));
     await assert.rejects(enqueueAgentImagePreparation('propr/agent:redis-failure'), error => error === failure);
+});
+
+test('enqueue fails instead of waiting forever when the events connection cannot become ready', async t => {
+    t.mock.timers.enable({ apis: ['setTimeout'] });
+    eventsReady = () => new Promise<never>(() => {});
+    const job = {
+        getState: async () => 'waiting',
+        waitUntilFinished: mock.fn(async () => {}),
+    };
+    queue.getJob.mock.mockImplementation(async () => job);
+    try {
+        const preparation = assert.rejects(
+            enqueueAgentImagePreparation('propr/agent:redis-outage'),
+            /events for the agent-image-preparation queue were not ready within/,
+        );
+        await new Promise<void>(resolve => setImmediate(resolve));
+        t.mock.timers.tick(30_000);
+        await preparation;
+        assert.strictEqual(job.waitUntilFinished.mock.callCount(), 0);
+    } finally {
+        eventsReady = async () => {};
+    }
+});
+
+test('producer connections bound Redis request retries while event connections stay blocking', () => {
+    assert.ok(queueConnections.length > 0 && eventsConnections.length > 0);
+    for (const producer of queueConnections) {
+        assert.ok(typeof producer.maxRetriesPerRequest === 'number' && producer.maxRetriesPerRequest > 0,
+            'producer commands must reject during a Redis outage');
+    }
+    for (const events of eventsConnections) {
+        assert.strictEqual(events.maxRetriesPerRequest, null,
+            'the blocking events connection must keep unlimited per-request retries');
+    }
 });

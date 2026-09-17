@@ -250,6 +250,38 @@ async function startWorker(options: WorkerOptions = {}): Promise<StartedWorker> 
         logger.error({ imageTag: job?.data.imageTag, error: error.message }, 'Worker-owned unified agent image preparation failed');
     });
 
+    // Runtime-package preparation must stay available while startup waits for
+    // readiness: rebuilding a missing runtime image (and the registry refresh
+    // after it succeeds) can be exactly what establishes readiness.
+    const runtimeBuildWorker = new Worker<AgentRuntimeBuildJobData>(
+        AGENT_RUNTIME_BUILD_QUEUE_NAME,
+        async (job) => {
+            logger.info({ buildId: job.data.buildId, packages: job.data.packages }, 'Building agent runtime package profile');
+            await job.updateProgress(5);
+            const state = await buildAgentRuntimePackageProfile(job.data);
+            if (state.buildId !== job.data.buildId) {
+                logger.info({ buildId: job.data.buildId, currentBuildId: state.buildId }, 'Agent runtime build was superseded');
+                return state;
+            }
+            await job.updateProgress(90);
+            await AgentRegistry.getInstance().refresh();
+            await job.updateProgress(100);
+            logger.info({ buildId: job.data.buildId, imageCount: Object.keys(state.images).length }, 'Agent runtime package profile activated');
+            return state;
+        },
+        {
+            connection: {
+                host: process.env.REDIS_HOST || 'localhost',
+                port: parseInt(process.env.REDIS_PORT || '6379', 10),
+                maxRetriesPerRequest: null
+            },
+            concurrency: 1
+        }
+    );
+    runtimeBuildWorker.on('failed', (job, error) => {
+        logger.error({ buildId: job?.data.buildId, error: error.message }, 'Agent runtime package build failed');
+    });
+
     // Do not advertise or claim task capacity while an image is still building.
     await prepareAgentRegistryAtStartup();
 
@@ -354,35 +386,6 @@ async function startWorker(options: WorkerOptions = {}): Promise<StartedWorker> 
     const taskStateRecovery = await startWorkerTaskStateRecovery({
         stateManager,
         recoverGoals: () => recoverNonterminalGoals(),
-    });
-
-    const runtimeBuildWorker = new Worker<AgentRuntimeBuildJobData>(
-        AGENT_RUNTIME_BUILD_QUEUE_NAME,
-        async (job) => {
-            logger.info({ buildId: job.data.buildId, packages: job.data.packages }, 'Building agent runtime package profile');
-            await job.updateProgress(5);
-            const state = await buildAgentRuntimePackageProfile(job.data);
-            if (state.buildId !== job.data.buildId) {
-                logger.info({ buildId: job.data.buildId, currentBuildId: state.buildId }, 'Agent runtime build was superseded');
-                return state;
-            }
-            await job.updateProgress(90);
-            await AgentRegistry.getInstance().refresh();
-            await job.updateProgress(100);
-            logger.info({ buildId: job.data.buildId, imageCount: Object.keys(state.images).length }, 'Agent runtime package profile activated');
-            return state;
-        },
-        {
-            connection: {
-                host: process.env.REDIS_HOST || 'localhost',
-                port: parseInt(process.env.REDIS_PORT || '6379', 10),
-                maxRetriesPerRequest: null
-            },
-            concurrency: 1
-        }
-    );
-    runtimeBuildWorker.on('failed', (job, error) => {
-        logger.error({ buildId: job?.data.buildId, error: error.message }, 'Agent runtime package build failed');
     });
 
     const close = async (): Promise<void> => {

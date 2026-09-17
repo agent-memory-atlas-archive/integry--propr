@@ -375,6 +375,14 @@ export class AgentRegistry {
             return;
         }
 
+        // A failed replacement configuration can leave retained agents serving
+        // an older, still-available image while the recovery circuit is open.
+        // Keep them available and run the throttled inspect-only check in the
+        // background so a worker-prepared image can still clear the circuit.
+        if (this.unavailableUnifiedAgentImage?.circuitBreakerOpen) {
+            void this.startWorkerOwnedImageRecovery();
+        }
+
         const now = Date.now();
         if (now < this.runtimePackageStateCheckAfter) return;
         this.runtimePackageStateCheckAfter = now + RUNTIME_PACKAGE_STATE_CHECK_INTERVAL_MS;

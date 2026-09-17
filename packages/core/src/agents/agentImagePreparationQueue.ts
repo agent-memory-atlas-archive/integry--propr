@@ -6,10 +6,13 @@ import type { AgentCliVersionMatrix } from './version/versionService.js';
 export const AGENT_IMAGE_PREPARATION_QUEUE_NAME = 'agent-image-preparation';
 // A configuration refresh can prepare both a base and a runtime image, each
 // with a lease wait and a 20-minute build, plus pulls and inspection overhead.
-// This is a status-check interval; a job may also queue behind other
-// preparations, so the overall wait allows a few intervals before failing.
+// The lease-wait allowance also covers queueing behind other preparations.
 const AGENT_IMAGE_PREPARATION_TIMEOUT_MS = 2 * (AGENT_IMAGE_BUILD_LOCK_ACQUIRE_TIMEOUT_MS + 20 * 60_000) + 15 * 60_000;
-const AGENT_IMAGE_PREPARATION_MAX_STATUS_CHECKS = 3;
+// Each completion wait is a short probe so job-state re-evaluation and the
+// no-worker check run promptly; only an attached, progressing preparation may
+// consume the full lease/build budget above.
+const AGENT_IMAGE_PREPARATION_POLL_INTERVAL_MS = 30_000;
+const AGENT_IMAGE_PREPARATION_EVENTS_READY_TIMEOUT_MS = 30_000;
 const PENDING_STATES = ['waiting', 'active', 'delayed', 'prioritized', 'waiting-children'];
 
 export interface AgentImagePreparationJobData {
@@ -22,8 +25,14 @@ export interface AgentImagePreparationJobData {
 const connection = {
     host: process.env.REDIS_HOST || '127.0.0.1',
     port: parseInt(process.env.REDIS_PORT || '6379', 10),
-    maxRetriesPerRequest: null,
 };
+
+// Producer commands must reject during a Redis outage so API requests and
+// registry recovery settle into their bounded failure paths instead of
+// pending indefinitely. Blocking event connections require unlimited
+// per-request retries and are configured separately.
+const producerConnection = { ...connection, maxRetriesPerRequest: 5 };
+const eventsConnection = { ...connection, maxRetriesPerRequest: null };
 
 type PreparationOptions = Pick<AgentImagePreparationJobData, 'versions' | 'contentHash'>;
 
@@ -38,7 +47,7 @@ export function agentImagePreparationJobId(imageTag: string, options: Preparatio
 
 export function createAgentImagePreparationQueue(): Queue<AgentImagePreparationJobData> {
     return new Queue<AgentImagePreparationJobData>(AGENT_IMAGE_PREPARATION_QUEUE_NAME, {
-        connection,
+        connection: producerConnection,
         defaultJobOptions: {
             attempts: 1,
             removeOnComplete: { age: 60 * 60, count: 100 },
@@ -56,22 +65,42 @@ function getRequestQueue(): Queue<AgentImagePreparationJobData> {
 }
 
 async function getRequestEvents(): Promise<QueueEvents> {
-    requestEvents ??= new QueueEvents(AGENT_IMAGE_PREPARATION_QUEUE_NAME, { connection });
-    await requestEvents.waitUntilReady();
-    return requestEvents;
+    requestEvents ??= new QueueEvents(AGENT_IMAGE_PREPARATION_QUEUE_NAME, { connection: eventsConnection });
+    const events = requestEvents;
+    // The events connection reconnects forever; bound only this caller's wait
+    // so a Redis outage rejects into the registry's recovery backoff. The
+    // instance stays cached and can become ready for a later request.
+    const readiness = events.waitUntilReady();
+    readiness.catch(() => {});
+    let readyTimer: NodeJS.Timeout | undefined;
+    try {
+        await Promise.race([
+            readiness,
+            new Promise<never>((_resolve, reject) => {
+                readyTimer = setTimeout(() => reject(new Error(
+                    `Agent image preparation events for the ${AGENT_IMAGE_PREPARATION_QUEUE_NAME} queue `
+                    + `were not ready within ${AGENT_IMAGE_PREPARATION_EVENTS_READY_TIMEOUT_MS}ms`,
+                )), AGENT_IMAGE_PREPARATION_EVENTS_READY_TIMEOUT_MS);
+                readyTimer.unref?.();
+            }),
+        ]);
+    } finally {
+        if (readyTimer) clearTimeout(readyTimer);
+    }
+    return events;
 }
 
 async function waitForPreparation(job: Job<AgentImagePreparationJobData>): Promise<void> {
     const events = await getRequestEvents();
-    const deadline = Date.now() + AGENT_IMAGE_PREPARATION_MAX_STATUS_CHECKS * AGENT_IMAGE_PREPARATION_TIMEOUT_MS;
+    const deadline = Date.now() + AGENT_IMAGE_PREPARATION_TIMEOUT_MS;
     while (true) {
         const remaining = deadline - Date.now();
         if (remaining <= 0) {
             throw new Error(`Agent image preparation job ${job.id} did not finish within `
-                + `${Math.round(AGENT_IMAGE_PREPARATION_MAX_STATUS_CHECKS * AGENT_IMAGE_PREPARATION_TIMEOUT_MS / 60_000)} minutes`);
+                + `${Math.round(AGENT_IMAGE_PREPARATION_TIMEOUT_MS / 60_000)} minutes`);
         }
         try {
-            await job.waitUntilFinished(events, Math.min(AGENT_IMAGE_PREPARATION_TIMEOUT_MS, remaining));
+            await job.waitUntilFinished(events, Math.min(AGENT_IMAGE_PREPARATION_POLL_INTERVAL_MS, remaining));
             return;
         } catch (error) {
             if (!(error instanceof Error) || !error.message.startsWith('Job wait ')

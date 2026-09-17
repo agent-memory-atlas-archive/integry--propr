@@ -579,6 +579,52 @@ for (const error of ['temporary download failure', 'docker build failed: no spac
     });
 }
 
+test('AgentRegistry inspects an open circuit in the background while retained agents remain usable', async t => {
+    t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: 1_000 });
+    const registry = AgentRegistry.getInstance();
+    registry.setImagePreparationOwner(false);
+    const internal = registry as unknown as {
+        ensureUnifiedAgentImage: () => Promise<string | null>;
+        registeredAgentImagesAvailable: () => Promise<boolean>;
+        recordUnavailableUnifiedAgentImage: (tag: string, error: string, attemptFailed?: boolean) => void;
+        markUnifiedAgentImageReady: (tag: string) => string;
+        circuitOpenInspection: { after: number; pending: Promise<void> | null };
+        clearUnifiedAgentImageRetry: () => void;
+    };
+    internal.registeredAgentImagesAvailable = async () => true;
+    internal.ensureUnifiedAgentImage = async () => internal.markUnifiedAgentImageReady('propr/agent:a');
+    await registry.refresh();
+    assert.strictEqual(registry.getAgentByAlias('opencode')?.config.dockerImage, 'propr/agent:a');
+    let available = false;
+    internal.ensureUnifiedAgentImage = async () => {
+        if (available) return internal.markUnifiedAgentImageReady('propr/agent:b');
+        internal.recordUnavailableUnifiedAgentImage('propr/agent:b', 'not prepared', false);
+        return null;
+    };
+    do {
+        internal.recordUnavailableUnifiedAgentImage('propr/agent:b', 'temporary download failure');
+    } while (!registry.getOperationalStatus().unifiedAgentImage.circuitBreakerOpen);
+    try {
+        // Inside the inspection interval the open circuit stays quiet and the
+        // retained agents keep serving their available image.
+        await registry.ensureInitialized();
+        assert.strictEqual(internal.circuitOpenInspection.pending, null);
+        assert.strictEqual(registry.getAgentByAlias('opencode')?.config.dockerImage, 'propr/agent:a');
+        assert.strictEqual(registry.getOperationalStatus().unifiedAgentImage.circuitBreakerOpen, true);
+        // Once the worker has prepared the replacement image, a later guard
+        // adopts it through the background inspection without a build request.
+        t.mock.timers.tick(60_000);
+        available = true;
+        await registry.ensureInitialized();
+        await internal.circuitOpenInspection.pending;
+        assert.deepStrictEqual(registry.getOperationalStatus(), { unifiedAgentImage: { status: 'ready' } });
+        assert.strictEqual(registry.getAgentByAlias('opencode')?.config.dockerImage, 'propr/agent:b');
+        assert.strictEqual(enqueuePreparation.mock.callCount(), 0);
+    } finally {
+        internal.clearUnifiedAgentImageRetry();
+    }
+});
+
 test('AgentRegistry opens a circuit after bounded transient failures', () => {
     const registry = AgentRegistry.getInstance();
     registry.setImagePreparationOwner(false);
