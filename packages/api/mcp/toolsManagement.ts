@@ -2,10 +2,9 @@ import { addConfigurationTools } from './toolsConfiguration.js';
 import { configRevision } from '../routes/configRevision.js';
 import { z } from 'zod';
 import { loadMonitoredReposRaw } from '@propr/core';
-import { NOTIFICATION_KINDS, REASONING_LEVELS } from '@propr/shared';
+import { REASONING_LEVELS } from '@propr/shared';
 import { createUserRepoPreferencesRoutes } from '../routes/userRepoPreferencesRoutes.js';
 import type { createRepoTodoRoutes } from '../routes/repoTodoRoutes.js';
-import type { createNotificationRoutes } from '../routes/notificationRoutes.js';
 import type { createConfigRoutes } from '../routes/configRoutes.js';
 import type { createAgentRuntimeRoutes } from '../routes/agentRuntimeRoutes.js';
 import { callWorkflow } from './adapter.js';
@@ -15,12 +14,11 @@ import { summarizeTodo } from './listSummaries.js';
 
 interface Handlers {
   todos: ReturnType<typeof createRepoTodoRoutes>;
-  notifications: ReturnType<typeof createNotificationRoutes>;
   config: ReturnType<typeof createConfigRoutes>;
   runtime: ReturnType<typeof createAgentRuntimeRoutes>;
 }
 
-export function addManagementTools(tools: McpTool[], deps: ToolDeps, { todos, notifications, config, runtime }: Handlers): void {
+export function addManagementTools(tools: McpTool[], deps: ToolDeps, { todos, config, runtime }: Handlers): void {
   const { db } = deps;
   const todoTarget = { table: 'repo_todos', column: 'todo_id', arg: 'todoId', owner: 'user_id' };
   const categoryTarget = { table: 'repo_todo_categories', column: 'category_id', arg: 'categoryId', owner: 'user_id' };
@@ -59,28 +57,6 @@ export function addManagementTools(tools: McpTool[], deps: ToolDeps, { todos, no
   tools.push({ name: 'update_repository_preferences', description: 'Change your repository star/hidden preferences.', scope: 'plan', schema: z.object({ ...mutationShape, repository: repositorySchema, starred: z.boolean().optional(), hidden: z.boolean().optional() }).strict(), run: async ({ principal, args }) => {
     await callWorkflow(preferences.updateRepoPreferences, principal, { body: { preferences: { [args.repository]: { starred: args.starred, hidden: args.hidden } } } });
     return ok({ repository: args.repository, updated: true });
-  } });
-
-  tools.push({ name: 'list_notifications', description: 'Read your notifications limited to an authorized repository.', scope: 'read', readOnly: true, schema: z.object({ repository: repositorySchema, cursor: z.string().max(512).optional(), limit: z.number().int().min(1).max(100).default(20) }).strict(), run: async ({ principal, args }) => {
-    const response = await callWorkflow(notifications.getNotifications, principal, { query: { cursor: args.cursor, limit: String(args.limit) } });
-    const data = response.data as { notifications: Array<{ target: { repository?: string } }>; nextCursor: string | null };
-    return ok({ notifications: data.notifications.filter(notification => notification.target.repository === args.repository), nextCursor: data.nextCursor });
-  } });
-  for (const action of ['read', 'dismiss'] as const) tools.push({ name: action === 'read' ? 'mark_notification_read' : 'dismiss_notification', description: `${action} one of your repository notifications.`, scope: 'plan', schema: z.object({ ...mutationShape, repository: repositorySchema, notificationId: idSchema }).strict(), run: async ({ principal, args }) => {
-    const row = await db('notification_events').where({ event_id: args.notificationId }).first('target_json');
-    if (!row || JSON.parse(row.target_json).repository !== args.repository) throw new McpError('NOT_FOUND', 'Notification not found.', 404);
-    const response = await callWorkflow(action === 'read' ? notifications.markRead : notifications.dismiss, principal, { params: { id: args.notificationId } });
-    return ok({ notification: (response.data as { notification: unknown }).notification });
-  } });
-  workflow(tools, { name: 'get_notification_preferences', description: 'Read your notification preferences.', scope: 'read', readOnly: true, schema: z.object({}).strict() }, notifications.getPreferences, () => ({}));
-  workflow(tools, { name: 'set_notification_category_preferences', description: 'Enable or disable inbox and push delivery for a notification category. Browser push subscription requires browser setup.', scope: 'plan', schema: z.object({ ...mutationShape, category: z.enum(NOTIFICATION_KINDS), inboxEnabled: z.boolean().optional(), pushEnabled: z.boolean().optional() }).strict() }, notifications.updatePreferences, args => ({ body: { preferences: { [args.category]: { inboxEnabled: args.inboxEnabled, pushEnabled: args.pushEnabled } } } }));
-  workflow(tools, { name: 'update_notification_preferences', description: 'Update your badge and quiet-hours preferences. Null start/end clears quiet hours.', scope: 'plan', schema: z.object({ ...mutationShape, badgeEnabled: z.boolean().optional(), quietHours: z.object({ start: z.string().regex(/^(?:[01]\d|2[0-3]):[0-5]\d$/).nullable().optional(), end: z.string().regex(/^(?:[01]\d|2[0-3]):[0-5]\d$/).nullable().optional(), timezone: z.string().max(100).optional() }).strict().optional() }).strict() }, notifications.updatePreferences, args => ({ body: { badgeEnabled: args.badgeEnabled, quietHours: args.quietHours } }));
-  tools.push({ name: 'update_notifications', description: 'Read or dismiss an explicit bounded set of your notifications in one authorized repository.', scope: 'plan', schema: z.object({ ...mutationShape, repository: repositorySchema, notificationIds: z.array(idSchema).min(1).max(100), action: z.enum(['read', 'dismiss']) }).strict(), run: async ({ principal, args }) => {
-    const ids = [...new Set<string>(args.notificationIds)];
-    const rows = await db('notification_events').whereIn('event_id', ids).select('event_id', 'target_json');
-    if (rows.length !== ids.length || rows.some(row => JSON.parse(row.target_json).repository !== args.repository)) throw new McpError('NOT_FOUND', 'One or more notifications are outside this repository.', 404);
-    for (const id of ids) await callWorkflow(args.action === 'read' ? notifications.markRead : notifications.dismiss, principal, { params: { id } });
-    return ok({ action: args.action, notificationIds: ids });
   } });
 
   const settingsShape = { worker_concurrency: z.number().int().min(1).max(100).optional(), analysis_model_fast: z.string().max(256).optional(), planner_context_model: z.string().max(256).optional(), pr_review_prompt: z.string().max(65536).optional(), pr_review_context_enabled: z.boolean().optional(), pr_review_context_model: z.string().max(256).optional(), pr_review_max_context_tokens: z.union([z.literal(0), z.number().int().min(10000).max(2000000)]).optional(), default_agent_alias: idSchema.optional(), planner_generation_model: idSchema.optional(), model_reasoning_level: z.enum(REASONING_LEVELS).optional(), pr_review_model: z.string().max(256).optional(), ultrafix_rating_goal: z.number().int().min(1).max(10).optional(), ultrafix_max_cycles: z.number().int().min(1).max(10).optional(), ultrafix_pause_seconds: z.number().int().min(0).max(3600).optional(), auto_followup_score_threshold: z.number().int().min(0).max(9).optional(), auto_resolve_merge_conflicts: z.boolean().optional() };

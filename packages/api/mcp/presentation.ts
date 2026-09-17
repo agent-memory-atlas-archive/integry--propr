@@ -18,6 +18,8 @@ function resultLinks(tool: McpTool, args: Args, result: Args, config: Pick<McpCo
   else if (taskId) { resource = `tasks/${encodeURIComponent(taskId)}`; ui = `${frontend}/tasks/${encodeURIComponent(taskId)}`; }
   else if (args.pullRequest) { resource = `repositories/${args.repository}/pulls/${args.pullRequest}`; ui = `https://github.com/${args.repository}/pull/${args.pullRequest}`; }
   else if (args.artifactId || result.artifactId) { const id = args.artifactId || result.artifactId; resource = `artifacts/${id}`; ui = `${origin}/mcp/artifacts/${id}`; }
+  else if (args.notificationId) { resource = `notifications/${encodeURIComponent(args.notificationId)}`; ui = `${frontend}/inbox`; }
+  else if (tool.name.includes('notification') && !tool.name.includes('preferences')) { resource = 'notifications'; ui = `${frontend}/inbox`; }
   else if (tool.name === 'list_repositories') resource = 'repositories';
   else if (tool.name === 'list_models') resource = 'models';
   return { instance: origin, ui, resource: `propr://instances/${instanceId}/${resource}` };
@@ -46,6 +48,8 @@ function readSummary(tool: McpTool, args: Args, result: Args): string {
   if (tool.name === 'get_plan') return `${result.name || 'Plan'}: ${result.status}, revision ${result.mcp_revision}.`;
   if (tool.name === 'get_goal') return `${result.goal?.title || 'Goal'}: ${result.goal?.resultState || result.goal?.desiredState || 'state unavailable'}.`;
   if (tool.name === 'get_connection') return `Connected as ${result.identity.username} to ${result.instanceId}. ${result.scopes.join(', ')} permissions.`;
+  if (tool.name === 'get_notification') return `${result.notification.title}: ${result.notification.severity} ${result.notification.kind}, ${result.notification.dismissedAt ? 'dismissed' : result.notification.readAt ? 'read' : 'unread'}.`;
+  if (tool.name === 'get_notification_unread_count') return `${result.unreadCount} unread notifications.`;
   if (tool.name === 'resolve_reference') return result.match === 'ambiguous' || result.match === 'candidates' ? `${result.candidates.length} candidates. Choose an exact handle before acting.` : `${result.match.replaceAll('_', ' ')}: ${result.candidates.length} candidates.`;
   const list = Object.values(result).find(Array.isArray);
   return list ? `${tool.name.replaceAll('_', ' ')}: ${list.length} items in this page.` : `${tool.name.replaceAll('_', ' ')}: retrieved.`;
