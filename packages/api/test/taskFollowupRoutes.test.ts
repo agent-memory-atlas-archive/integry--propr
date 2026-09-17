@@ -23,9 +23,10 @@ await database.schema.createTable('tasks', table => {
   table.integer('pr_number').nullable();
   table.text('task_type').notNullable();
 });
-await database('tasks').insert({
-  task_id: 'task-without-pr', repository: 'integry/propr', issue_number: null, pr_number: null, task_type: 'issue',
-});
+await database('tasks').insert([
+  { task_id: 'task-without-pr', repository: 'integry/propr', issue_number: null, pr_number: null, task_type: 'issue' },
+  { task_id: 'issue-task-without-pr', repository: 'integry/propr', issue_number: 12, pr_number: null, task_type: 'issue' },
+]);
 
 after(async () => {
   await database.destroy();
@@ -37,14 +38,14 @@ after(async () => {
   else process.env.DB_FILENAME = originalDbFilename;
 });
 
-async function postFollowup(body: Record<string, unknown>): Promise<{ status: number; json: unknown }> {
+async function postFollowup(body: Record<string, unknown>, taskId = 'task-without-pr'): Promise<{ status: number; json: unknown }> {
   const result = { status: 200, json: undefined as unknown };
   const response = {
     status(code: number) { result.status = code; return this; },
     json(payload: unknown) { result.json = payload; return this; },
   } as unknown as Response;
   await createTaskRoutes({ db: database }).postFollowup({
-    params: { taskId: 'task-without-pr' },
+    params: { taskId },
     body,
     user: { id: 'user-1' },
   } as unknown as Request, response);
@@ -60,6 +61,13 @@ test('rejects unknown follow-up targets before posting anything', async () => {
 
 test('requires a pull request when a follow-up command targets one', async () => {
   assert.deepEqual(await postFollowup({ body: '/review', target: 'pull_request' }), {
+    status: 400,
+    json: { error: 'Task does not have a valid GitHub pull request' },
+  });
+});
+
+test('does not post a pull request command onto the issue of an issue task without a PR', async () => {
+  assert.deepEqual(await postFollowup({ body: '/review', target: 'pull_request' }, 'issue-task-without-pr'), {
     status: 400,
     json: { error: 'Task does not have a valid GitHub pull request' },
   });

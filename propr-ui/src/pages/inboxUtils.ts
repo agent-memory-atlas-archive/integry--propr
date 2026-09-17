@@ -182,13 +182,33 @@ export function formatRelativeTime(timestamp: string, now = Date.now()): string 
   return `${Math.floor(months / 12)}y ago`;
 }
 
+function compareNewestFirst(left: Notification, right: Notification): number {
+  return right.occurredAt.localeCompare(left.occurredAt) || right.id.localeCompare(left.id);
+}
+
 export function mergeNotifications(
   current: readonly Notification[],
   incoming: readonly Notification[],
 ): Notification[] {
   const byId = new Map(current.map(notification => [notification.id, notification]));
   for (const notification of incoming) byId.set(notification.id, notification);
-  return [...byId.values()].sort((left, right) => (
-    right.occurredAt.localeCompare(left.occurredAt) || right.id.localeCompare(left.id)
-  ));
+  return [...byId.values()].sort(compareNewestFirst);
+}
+
+/**
+ * Folds a fresh first page into a list that also holds older pages. Loaded
+ * notifications inside the page's range that the server no longer returns were
+ * dismissed elsewhere, so they are dropped; older pages are kept as they are.
+ * `boundary` is the oldest notification the server returned, or null when the
+ * page is the whole Inbox.
+ */
+export function replaceNotificationRange(
+  current: readonly Notification[],
+  incoming: readonly Notification[],
+  boundary: Notification | null,
+): Notification[] {
+  const older = boundary
+    ? current.filter(notification => compareNewestFirst(notification, boundary) > 0)
+    : [];
+  return mergeNotifications(older, incoming);
 }

@@ -142,6 +142,9 @@ export const InboxCard: React.FC<{
   const swipe = useSwipeToDismiss(canDismiss, dismiss);
   const inPlace = expandsInPlace(notification);
   const reference = notificationReference(notification);
+  // A button may only hold phrasing content, so in-place cards keep the title
+  // as text; the article is still named by it.
+  const Title = inPlace ? 'span' : 'h3';
 
   const content = (
     <>
@@ -163,9 +166,9 @@ export const InboxCard: React.FC<{
           {formatRelativeTime(notification.occurredAt)}
         </time>
       </div>
-      <h3 className={`mt-1.5 break-words text-sm leading-5 ${unread ? 'font-semibold text-slate-950' : 'font-medium text-slate-800'}`}>
+      <Title className={`mt-1.5 block break-words text-sm leading-5 ${unread ? 'font-semibold text-slate-950' : 'font-medium text-slate-800'}`}>
         {notification.title}
-      </h3>
+      </Title>
       <p className={`mt-0.5 break-words text-sm leading-5 text-slate-600 ${expanded ? '' : 'line-clamp-2'}`}>{notification.body}</p>
       {isNotificationPreviewEligible(notification) && <PreviewThumbnails media={notification.previewMedia} limit={1} />}
     </>
@@ -228,8 +231,8 @@ interface InboxListProps {
   mutationsEnabled: boolean;
 }
 
-export const InboxList: React.FC<InboxListProps & { id?: string }> = ({ id, notifications, ...cardProps }) => (
-  <div id={id} className="space-y-2">
+export const InboxList: React.FC<InboxListProps> = ({ notifications, ...cardProps }) => (
+  <div className="space-y-2">
     {notifications.map(notification => (
       <InboxCard key={notification.id} notification={notification} {...cardProps} />
     ))}
@@ -242,22 +245,22 @@ export const InboxSystemSection: React.FC<InboxListProps> = ({ notifications, ..
   if (notifications.length === 0) return null;
   return (
     <section aria-labelledby="inbox-system" className="rounded-xl border border-slate-200 bg-slate-50">
-      <button
-        type="button"
-        aria-expanded={expanded}
-        aria-controls="inbox-system-list"
-        onClick={() => setExpanded(value => !value)}
-        className="flex w-full items-center gap-2 rounded-xl px-4 py-2.5 text-left text-slate-500 hover:text-slate-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-teal-500"
-      >
-        <h2 id="inbox-system" className="text-xs font-bold uppercase tracking-widest">System</h2>
-        <span className="text-xs font-semibold">{notifications.length}</span>
-        <ChevronDown className={`ml-auto h-4 w-4 transition-transform ${expanded ? 'rotate-180' : ''}`} aria-hidden="true" />
-      </button>
-      {expanded && (
-        <div className="px-2 pb-2">
-          <InboxList id="inbox-system-list" notifications={notifications} {...listProps} />
-        </div>
-      )}
+      <h2>
+        <button
+          type="button"
+          aria-expanded={expanded}
+          aria-controls="inbox-system-list"
+          onClick={() => setExpanded(value => !value)}
+          className="flex w-full items-center gap-2 rounded-xl px-4 py-2.5 text-left text-slate-500 hover:text-slate-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-teal-500"
+        >
+          <span id="inbox-system" className="text-xs font-bold uppercase tracking-widest">System</span>
+          <span className="text-xs font-semibold">{notifications.length}</span>
+          <ChevronDown className={`ml-auto h-4 w-4 transition-transform ${expanded ? 'rotate-180' : ''}`} aria-hidden="true" />
+        </button>
+      </h2>
+      <div id="inbox-system-list" hidden={!expanded} className="px-2 pb-2">
+        {expanded && <InboxList notifications={notifications} {...listProps} />}
+      </div>
     </section>
   );
 };

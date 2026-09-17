@@ -23,13 +23,26 @@ export function compactNotificationRecap(value: unknown): string | undefined {
             .replace(/^\s{0,3}#{1,6}\s+/, '')
             .replace(/^\s*(?:[-*+] |\d+[.)]\s+)/, '')
             .replace(/^\s*>+\s?/, '')
-            .replace(/[*_~`]/g, '')
+            // Unwrap paired emphasis only, so snake_case identifiers keep their underscores.
+            .replace(/`/g, '')
+            .replace(/(\*{1,2}|~~)(?=\S)(.+?)(?<=\S)\1/g, '$2')
+            .replace(/(^|\W)(_{1,2})(?=\S)(.+?)(?<=\S)\2(?!\w)/g, '$1$3')
             .replace(/^summary(?: of changes)?\s*:?\s*/i, '')
             .trim())
         .filter(line => line && !/^[-=:|\s]+$/.test(line));
     const compact = lines.join(' · ').replace(/\s+/g, ' ').trim();
     return compact ? truncateAtWord(compact) : undefined;
 }
+
+/** Task history metadata for a review that moved to its continuation pull request. */
+export function stoppedReviewRecap(reason: string): { notificationRecap: string | undefined } {
+    return { notificationRecap: compactNotificationRecap(reason) };
+}
+
+/** Task history metadata for an ultrafix review waiting on exact-head checks. */
+export const deferredUltrafixReviewRecap = {
+    notificationRecap: 'Review deferred until the continuation pull request passes its exact-head checks.',
+} as const;
 
 interface ReviewRecapResult {
     analysisResult: { success: boolean; response: string };

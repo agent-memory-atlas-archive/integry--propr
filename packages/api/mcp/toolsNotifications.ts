@@ -125,12 +125,14 @@ export function addNotificationTools(tools: McpTool[], deps: ToolDeps, notificat
     for (const id of ids) await update(args.action, principal, id);
     return ok({ action: args.action, notificationIds: ids });
   } });
-  for (const action of ['dismiss', 'read'] as const) tools.push({ name: action === 'dismiss' ? 'clear_notifications' : 'mark_all_notifications_read', description: `${action === 'dismiss' ? 'Dismiss (clear) every active notification' : 'Mark every unread notification read'} in the Inbox, optionally limited to one repository or to kinds. Without repository this covers system notifications and every repository in this grant. Processes up to ${BULK_LIMIT} per call; call again while hasMore is true.`, scope: 'plan', schema: z.object({ ...mutationShape, repository: repositorySchema.optional(), kinds: kindsSchema }).strict(), run: async ({ principal, args }) => {
+  for (const action of ['dismiss', 'read'] as const) tools.push({ name: action === 'dismiss' ? 'clear_notifications' : 'mark_all_notifications_read', description: `${action === 'dismiss' ? 'Dismiss (clear) every active notification' : 'Mark every unread notification read'} in the Inbox, optionally limited to one repository or to kinds. Without repository this covers system notifications and every repository in this grant. Processes up to ${BULK_LIMIT} per call and scans a bounded window; while hasMore is true, call again with cursor set to the returned nextCursor.`, scope: 'plan', schema: z.object({ ...mutationShape, repository: repositorySchema.optional(), kinds: kindsSchema, cursor: cursorSchema }).strict(), run: async ({ principal, args }) => {
     const access = notificationAccess(deps, principal, args.repository, true);
-    const { items, nextCursor } = await scanNotifications(principal, { includeDismissed: false, limit: BULK_LIMIT, match: async notification =>
+    // Resume from the cursor so a window of non-matching notifications (other
+    // repositories or kinds, or already read) cannot be rescanned forever.
+    const { items, nextCursor } = await scanNotifications(principal, { cursor: args.cursor, includeDismissed: false, limit: BULK_LIMIT, match: async notification =>
       (!args.kinds || args.kinds.includes(notification.kind)) && (action === 'dismiss' || !notification.readAt) && access(repositoryOf(notification)) });
     for (const notification of items) await update(action, principal, notification.id);
-    return ok({ action, count: items.length, notificationIds: items.map(notification => notification.id), hasMore: nextCursor !== null });
+    return ok({ action, count: items.length, notificationIds: items.map(notification => notification.id), nextCursor, hasMore: nextCursor !== null });
   } });
 
   workflow(tools, { name: 'get_notification_preferences', description: 'Read your notification preferences.', scope: 'read', readOnly: true, schema: z.object({}).strict() }, notifications.getPreferences, () => ({}));

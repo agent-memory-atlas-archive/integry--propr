@@ -9,10 +9,13 @@ import {
 import { useNotificationCenter } from '../contexts/NotificationCenterContext';
 import { useToast } from '../components/ui/useToast';
 import { useDemoMode } from '../contexts/DemoModeContext';
-import { mergeNotifications } from './inboxUtils';
+import { mergeNotifications, replaceNotificationRange } from './inboxUtils';
 
 const PAGE_SIZE = 25;
 const AUTO_REFRESH_INTERVAL_MS = 60_000;
+
+/** Background refreshes run silently: no busy state, and errors stay until one succeeds. */
+type FirstPageLoad = 'initial' | 'refresh' | 'background';
 
 export interface InboxNotificationsState {
   notifications: Notification[];
@@ -81,25 +84,31 @@ export function useInboxNotifications(): InboxNotificationsState {
     return [readOverridesRef.current.get(notification.id) ?? notification];
   }), []);
 
-  const loadFirstPage = useCallback(async (isRefresh: boolean) => {
+  const loadFirstPage = useCallback(async (mode: FirstPageLoad) => {
     const generation = ++requestGenerationRef.current;
     loadMoreGenerationRef.current += 1;
     const mutationEpoch = mutationEpochRef.current;
-    // Keep pages the user already scrolled through; only fold in the newest page.
-    const keepLoadedPages = isRefresh && extraPagesLoadedRef.current;
+    // Keep pages the user already scrolled through; only replace the newest page.
+    const keepLoadedPages = mode !== 'initial' && extraPagesLoadedRef.current;
     setLoadingMore(false);
-    if (isRefresh) setRefreshing(true);
-    else setInitialLoading(true);
-    setError(null);
+    if (mode === 'refresh') setRefreshing(true);
+    if (mode === 'initial') setInitialLoading(true);
+    if (mode !== 'background') setError(null);
     try {
       const response = await listNotifications({ limit: PAGE_SIZE });
       if (generation !== requestGenerationRef.current) return;
-      setNotifications(current => mergeNotifications(
-        mutationEpoch === mutationEpochRef.current && !keepLoadedPages ? [] : current,
-        reconcileIncoming(response.notifications),
-      ));
-      if (!keepLoadedPages) setNextCursor(response.nextCursor);
-      if (mutationEpoch === mutationEpochRef.current) commitUnreadCount(response.unreadCount);
+      const incoming = reconcileIncoming(response.notifications);
+      const settled = mutationEpoch === mutationEpochRef.current;
+      const boundary = response.nextCursor === null ? null : response.notifications.at(-1);
+      setNotifications(current => {
+        if (!settled || (keepLoadedPages && boundary === undefined)) return mergeNotifications(current, incoming);
+        return keepLoadedPages
+          ? replaceNotificationRange(current, incoming, boundary ?? null)
+          : mergeNotifications([], incoming);
+      });
+      if (!keepLoadedPages || (settled && boundary === null)) setNextCursor(response.nextCursor);
+      if (settled) commitUnreadCount(response.unreadCount);
+      setError(null);
     } catch (loadError) {
       if (generation === requestGenerationRef.current) setError(messageFrom(loadError));
     } finally {
@@ -111,7 +120,7 @@ export function useInboxNotifications(): InboxNotificationsState {
   }, [commitUnreadCount, reconcileIncoming]);
 
   useEffect(() => {
-    void loadFirstPage(false);
+    void loadFirstPage('initial');
     return () => { requestGenerationRef.current += 1; };
   }, [loadFirstPage]);
 
@@ -126,12 +135,12 @@ export function useInboxNotifications(): InboxNotificationsState {
     };
   }, []);
 
-  const refresh = useCallback(() => loadFirstPage(true), [loadFirstPage]);
+  const refresh = useCallback(() => loadFirstPage('refresh'), [loadFirstPage]);
 
   useEffect(() => {
     const refreshWhenVisible = () => {
       if (document.visibilityState !== 'visible' || !navigator.onLine || clearingRef.current) return;
-      void refresh();
+      void loadFirstPage('background');
     };
     const interval = window.setInterval(refreshWhenVisible, AUTO_REFRESH_INTERVAL_MS);
     window.addEventListener('focus', refreshWhenVisible);
@@ -141,12 +150,14 @@ export function useInboxNotifications(): InboxNotificationsState {
       window.removeEventListener('focus', refreshWhenVisible);
       document.removeEventListener('visibilitychange', refreshWhenVisible);
     };
-  }, [refresh]);
+  }, [loadFirstPage]);
 
   const loadMore = useCallback(async () => {
     if (!nextCursor || loadingMore || refreshing || initialLoading) return;
     const cursor = nextCursor;
-    const generation = requestGenerationRef.current;
+    // Supersede any silent background refresh so its first page cannot replace
+    // the list (and cursor) after this page lands.
+    const generation = ++requestGenerationRef.current;
     const loadMoreGeneration = ++loadMoreGenerationRef.current;
     const mutationEpoch = mutationEpochRef.current;
     setLoadingMore(true);

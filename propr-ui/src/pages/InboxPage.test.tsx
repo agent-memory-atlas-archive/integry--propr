@@ -1,5 +1,5 @@
 /* eslint-disable max-lines */
-import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom';
 import { beforeEach, describe, expect, test, vi } from 'vitest';
 import { notificationSchema, type Notification } from '@propr/shared';
@@ -128,7 +128,7 @@ describe('Inbox page', () => {
     renderInbox();
 
     await screen.findByRole('heading', { level: 3, name: 'Improve Inbox notifications' });
-    expect(screen.getAllByRole('heading', { level: 2 }).map(heading => heading.textContent)).toEqual(['System']);
+    expect(screen.getAllByRole('heading', { level: 2 }).map(heading => heading.textContent)).toEqual(['System1']);
     expect(screen.getAllByRole('article').map(article => article.getAttribute('aria-label'))).toEqual([
       'Improve Inbox notifications',
       'Add swipe dismissal',
@@ -146,11 +146,14 @@ describe('Inbox page', () => {
 
     const systemToggle = screen.getByRole('button', { name: /System/ });
     expect(systemToggle).toHaveAttribute('aria-expanded', 'false');
+    expect(document.getElementById(systemToggle.getAttribute('aria-controls')!)).not.toBeVisible();
     const lastActivity = screen.getByRole('article', { name: 'Guard empty recap metadata' });
     expect(lastActivity.compareDocumentPosition(systemToggle) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     fireEvent.click(systemToggle);
-    expect(screen.getByRole('heading', { level: 3, name: 'System failure' }).closest('section'))
-      .toHaveAccessibleName('System');
+    expect(document.getElementById(systemToggle.getAttribute('aria-controls')!)).toBeVisible();
+    const systemCard = screen.getByRole('article', { name: 'System failure' });
+    expect(systemCard.closest('section')).toHaveAccessibleName('System');
+    expect(within(systemCard).queryByRole('heading')).not.toBeInTheDocument();
   });
 
   test('keeps cards free of generic buttons apart from the always-visible dismiss control', async () => {
@@ -538,6 +541,53 @@ describe('Inbox page', () => {
       'Older page item',
     ]);
     expect(screen.queryByRole('button', { name: 'Load more' })).not.toBeInTheDocument();
+  });
+
+  test('drops loaded cards the server dismissed when refreshing after load more', async () => {
+    const at = (minute: number) => `2026-08-24T12:${String(minute).padStart(2, '0')}:00.000Z`;
+    const kept = item('event-kept', 'Still active', null, { occurredAt: at(30), createdAt: at(30) });
+    const closed = item('event-closed', 'PR closed elsewhere', null, { occurredAt: at(20), createdAt: at(20) });
+    const boundary = item('event-boundary', 'Page boundary', null, { occurredAt: at(10), createdAt: at(10) });
+    const older = item('event-older', 'Older page item', null, { occurredAt: at(1), createdAt: at(1) });
+    vi.mocked(listNotifications)
+      .mockResolvedValueOnce({ notifications: [kept, closed, boundary], unreadCount: 4, nextCursor: 'cursor-1' })
+      .mockResolvedValueOnce({ notifications: [older], unreadCount: 4, nextCursor: 'cursor-2' })
+      .mockResolvedValueOnce({ notifications: [kept, boundary], unreadCount: 3, nextCursor: 'cursor-new' })
+      .mockResolvedValueOnce({ notifications: [kept], unreadCount: 1, nextCursor: null });
+    renderInbox();
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Load more' }));
+    await screen.findByText('Older page item');
+    fireEvent.focus(window);
+    await waitFor(() => expect(screen.queryByText('PR closed elsewhere')).not.toBeInTheDocument());
+    expect(screen.getAllByRole('article').map(article => article.getAttribute('aria-label'))).toEqual([
+      'Still active',
+      'Page boundary',
+      'Older page item',
+    ]);
+    expect(screen.getByRole('button', { name: 'Load more' })).toBeInTheDocument();
+
+    fireEvent.focus(window);
+    await waitFor(() => expect(screen.getAllByRole('article')).toHaveLength(1));
+    expect(screen.queryByRole('button', { name: 'Load more' })).not.toBeInTheDocument();
+  });
+
+  test('refreshes in the background without disabling Clear all or hiding the error', async () => {
+    const notification = item('event-1', 'Loaded item');
+    const refreshRequest = deferred<Awaited<ReturnType<typeof listNotifications>>>();
+    vi.mocked(listNotifications)
+      .mockResolvedValueOnce({ notifications: [notification], unreadCount: 1, nextCursor: 'cursor-1' })
+      .mockRejectedValueOnce(new Error('Page failed'))
+      .mockReturnValueOnce(refreshRequest.promise);
+    renderInbox();
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Load more' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent('Page failed');
+    fireEvent.focus(window);
+    expect(screen.getByRole('button', { name: 'Clear all' })).toBeEnabled();
+    expect(screen.getByRole('alert')).toHaveTextContent('Page failed');
+    await act(async () => refreshRequest.resolve({ notifications: [notification], unreadCount: 1, nextCursor: 'cursor-1' }));
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
   });
 
   test('ignores an error from load-more after a refresh supersedes it', async () => {

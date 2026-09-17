@@ -28,7 +28,8 @@ interface TaskRecord {
  */
 function resolveFollowupThread(task: TaskRecord, targetsPullRequest: boolean): { number?: number; error: string } {
   return targetsPullRequest
-    ? { number: task.pr_number ?? task.issue_number, error: 'Task does not have a valid GitHub pull request' }
+    // PR comment tasks record their pull request as the issue number; other tasks must have a PR of their own.
+    ? { number: task.pr_number ?? (task.task_type === 'pr-comment' ? task.issue_number : undefined), error: 'Task does not have a valid GitHub pull request' }
     : { number: task.issue_number, error: 'Task does not have valid GitHub issue information' };
 }
 

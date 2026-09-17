@@ -654,8 +654,11 @@ export class NotificationProjectionService {
     const account = connectAccount(snapshot);
     const seatLimitBlock = account && connectSeatLimitBlock(account);
     if (account && !(seatLimitBlock && seatLimitBlock.seatsRemaining === 0)) {
-      // Seats are available again, so an earlier seat-limit card is stale.
-      await this.notifications.dismissSystemFailureNotifications(CONNECT_SEAT_LIMIT_COMPONENT);
+      // Seats are available again, so an earlier seat-limit card is stale. Most
+      // health ticks have no such card; read first to keep them write-free.
+      if (await this.hasActiveSystemFailureReceipt(CONNECT_SEAT_LIMIT_COMPONENT)) {
+        await this.notifications.dismissSystemFailureNotifications(CONNECT_SEAT_LIMIT_COMPONENT);
+      }
     } else if (seatLimitBlock && seatLimitBlock.blockedAt <= snapshotAt) {
       await this.notifications.createNotificationEvent({
         deduplicationKey: stableKey(
@@ -1015,6 +1018,16 @@ export class NotificationProjectionService {
         ),
       });
     return Number(changed);
+  }
+
+  private async hasActiveSystemFailureReceipt(component: string): Promise<boolean> {
+    const receipt = await this.database('notification_user_states as receipt')
+      .join('notification_events as event', 'event.event_id', 'receipt.event_id')
+      .where({ 'receipt.inbox_enabled': true, 'event.kind': 'system_failure' })
+      .whereNull('receipt.dismissed_at')
+      .whereRaw("json_extract(event.target_json, '$.component') = ?", [component])
+      .first('receipt.event_id');
+    return receipt !== undefined;
   }
 
   private async loadInstanceMemberRecipients(): Promise<NotificationRecipient[]> {

@@ -33,8 +33,10 @@ export async function verifyInboxNotifications({ call, client, modern, repositor
   const allRead = await call('mark_all_notifications_read', {}, true);
   assert.deepEqual(allRead.result.notificationIds, [review.id]);
   assert.deepEqual((await call('list_notifications', { unreadOnly: true })).notifications, []);
+  const resumed = await call('clear_notifications', { cursor: firstPage.nextCursor }, true);
+  assert.deepEqual([resumed.result.notificationIds, resumed.result.nextCursor, resumed.result.hasMore], [[review.id], null, false]);
   const cleared = await call('clear_notifications', {}, true);
-  assert.deepEqual([cleared.result.notificationIds, cleared.result.hasMore], [[system.id, review.id], false]);
+  assert.deepEqual([cleared.result.notificationIds, cleared.result.hasMore], [[system.id], false]);
   assert.deepEqual((await call('list_notifications', {})).notifications, []);
   assert.equal((await call('get_notification', { notificationId: review.id })).notification.dismissedAt !== null, true);
   assert.equal((await notificationService.getNotification('123', foreign.id))!.dismissedAt, null);

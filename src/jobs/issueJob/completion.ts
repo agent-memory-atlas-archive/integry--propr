@@ -37,7 +37,7 @@ function buildTerminalNotificationRecap(params: TerminalStateParams, status: str
   return buildWorkNotificationRecap(
     claudeResult?.summary ?? claudeResult?.finalResult?.result ?? commitResult?.commitMessage,
     {
-      filesChanged: claudeResult?.modifiedFiles.length,
+      filesChanged: claudeResult?.modifiedFiles?.length,
       createdPullRequest: Boolean(postProcessingResult?.pr),
       noChanges: !commitResult && !postProcessingResult?.pr,
       partial: status === 'partial_with_pr'

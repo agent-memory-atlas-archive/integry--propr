@@ -39,6 +39,10 @@ describe('notification recaps', () => {
             'Added swipe dismissal · Added Undo support',
         );
         assert.equal(
+            compactNotificationRecap('Updated `notification_user_states` in __init_db.ts__ and _src/snake_case_file.ts_ ~~twice~~ *once*'),
+            'Updated notification_user_states in init_db.ts and src/snake_case_file.ts twice once',
+        );
+        assert.equal(
             buildWorkNotificationRecap('', { commandMode: 'fix', filesChanged: 2 }),
             'Applied the requested review fixes across 2 files.',
         );

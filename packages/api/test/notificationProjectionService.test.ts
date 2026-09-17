@@ -1,6 +1,6 @@
 /* eslint-disable max-lines -- lifecycle projection regressions share one database fixture */
 import assert from 'node:assert/strict';
-import { after, afterEach, beforeEach, describe, test } from 'node:test';
+import { after, afterEach, beforeEach, describe, mock, test } from 'node:test';
 import type { Knex } from 'knex';
 import { closeConnection, NotificationService } from '@propr/core';
 import { DRAFT_UPDATE, INDEXING_UPDATE, TASK_UPDATE } from '@propr/shared';
@@ -516,6 +516,18 @@ describe('notification lifecycle projection', { concurrency: false }, () => {
 
     assert.equal(await countNotificationEvents(database), 1);
     assert.equal(await countUndismissedNotificationReceipts(database, 'system_failure'), 0);
+
+    // Later healthy ticks find no active card and skip the dismissal write.
+    const notificationService = new NotificationService({ database, now: () => new Date(clock) });
+    const dismissals = mock.method(notificationService, 'dismissSystemFailureNotifications');
+    const quietProjection = new NotificationProjectionService({ database, notificationService, now: () => new Date(clock) });
+    clock += 1_000;
+    await quietProjection.projectSystemSnapshot({
+      timestamp: iso(),
+      connectAccount: { ...connectAccount, activeSeats: 1, seatsRemaining: 1 },
+    });
+    quietProjection.close();
+    assert.equal(dismissals.mock.callCount(), 0);
   });
 
   test('removes failure cards once the same task or indexing source later completes', async () => {

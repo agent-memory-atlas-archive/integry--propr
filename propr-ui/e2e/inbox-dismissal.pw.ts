@@ -121,7 +121,7 @@ test('desktop shows one newest-first list titled by PR, with only System collaps
   const systemToggle = page.getByRole('button', { name: 'System 1' });
   await expect(systemToggle).toHaveAttribute('aria-expanded', 'false');
   await expect(page.getByRole('article', { name: 'System component unhealthy: redis' })).toHaveCount(0);
-  await expect(page.getByRole('heading', { level: 2 })).toHaveText(['System']);
+  await expect(page.getByRole('heading', { level: 2 })).toContainText(['System']);
 
   const articles = page.getByRole('article');
   await expect(articles).toHaveCount(3);
