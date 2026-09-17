@@ -47,6 +47,7 @@ test('both SDK eras drive persisted goal, TODO, notification, settings and guard
     createAbortRefinementHandler: (db: ToolDeps['db']) => abortHandlers.createAbortRefinementHandler(db, signals),
   } });
   const { verifyCancellation } = await import('./fixtures/mcpCancellation.js');
+  const { verifyInboxNotifications } = await import('./fixtures/mcpNotifications.js');
   const { McpStore } = await import('../mcp/store.js');
   const { McpOAuthProvider } = await import('../mcp/oauth.js');
   const { McpPolicy } = await import('../mcp/policy.js');
@@ -265,6 +266,7 @@ test('both SDK eras drive persisted goal, TODO, notification, settings and guard
         await call('mark_notification_read', { repository, notificationId: event.id }, true);
         await call('dismiss_notification', { repository, notificationId: event.id }, true);
         assert.ok(!(await call('list_notifications', { repository })).notifications.some((item: { id: string }) => item.id === event.id));
+        await verifyInboxNotifications({ call, client, modern, repository, instanceId: config.instanceId });
         const settings = await call('update_execution_settings', { settings: { ultrafix_max_cycles: 3 } }, true); assert.equal(settings.state, 'completed', JSON.stringify(settings));
         assert.equal((await call('get_execution_settings', {})).ultrafix_max_cycles, 3);
         await call('update_repository_preferences', { repository, starred: true }, true);

@@ -1,5 +1,5 @@
 /* eslint-disable max-lines */
-import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom';
 import { beforeEach, describe, expect, test, vi } from 'vitest';
 import { notificationSchema, type Notification } from '@propr/shared';
@@ -11,7 +11,7 @@ import {
   listNotifications,
   markNotificationRead,
 } from '../api/notificationApi';
-import { postTaskFollowup, stopTaskExecution } from '../api/proprApi';
+import { postTaskFollowup } from '../api/proprApi';
 
 const commitUnreadCount = vi.fn();
 const refreshUnreadCount = vi.fn(async () => undefined);
@@ -32,7 +32,6 @@ vi.mock('../api/notificationApi', () => ({
 }));
 vi.mock('../api/proprApi', () => ({
   postTaskFollowup: vi.fn(),
-  stopTaskExecution: vi.fn(),
 }));
 vi.mock('../contexts/DemoModeContext', () => ({ useDemoMode: () => demoState }));
 
@@ -91,160 +90,158 @@ describe('Inbox page', () => {
     vi.mocked(dismissNotification).mockReset();
     vi.mocked(markNotificationRead).mockReset();
     vi.mocked(postTaskFollowup).mockReset();
-    vi.mocked(stopTaskExecution).mockReset();
     commitUnreadCount.mockReset();
     refreshUnreadCount.mockClear();
     demoState.isDemoMode = false;
   });
 
-  test('renders notifications in the four operational groups and omits empty groups', async () => {
-    const attention = item('event-attention', 'Task needs attention');
-    const review = item('event-plan', 'Plan ready', null, {
+  test('renders activity as one newest-first list with only System kept apart and collapsed', async () => {
+    const at = (minutes: number) => new Date(Date.parse('2026-08-24T12:00:00.000Z') + minutes * 60_000).toISOString();
+    const failed = item('event-failed', 'Guard empty recap metadata', null, {
+      occurredAt: at(0), createdAt: at(0),
+      target: { type: 'task', repository: 'integry/propr', taskId: 'task-failed', issueNumber: 12 },
+    });
+    const plan = item('event-plan', 'Improve Inbox notifications', null, {
       kind: 'plan',
       severity: 'info',
       target: { type: 'plan', repository: 'integry/propr', draftId: 'draft-1' },
+      occurredAt: at(2), createdAt: at(2),
     });
-    const completed = item('event-completed', 'Task completed', null, { severity: 'success' });
+    const review = item('event-review', 'Add swipe dismissal', '2026-08-24T12:10:00.000Z', {
+      kind: 'review',
+      severity: 'success',
+      target: { type: 'review', repository: 'integry/propr', prNumber: 81, taskId: 'task-review' },
+      occurredAt: at(1), createdAt: at(1),
+    });
     const system = item('event-system', 'System failure', null, {
       kind: 'system_failure',
       severity: 'error',
       target: { type: 'system_failure', component: 'dispatcher' },
+      occurredAt: at(3), createdAt: at(3),
     });
     vi.mocked(listNotifications).mockResolvedValue({
-      notifications: [attention, review, completed, system],
-      unreadCount: 4,
+      notifications: [system, plan, review, failed],
+      unreadCount: 3,
       nextCursor: null,
     });
 
     renderInbox();
 
-    await screen.findByRole('heading', { level: 2, name: 'Needs attention' });
-    const headings = screen.getAllByRole('heading', { level: 2 });
-    expect(headings.map(heading => heading.textContent)).toEqual([
-      'Needs attention',
-      'Ready for review',
-      'Completed',
-      'System',
+    await screen.findByRole('heading', { level: 3, name: 'Improve Inbox notifications' });
+    expect(screen.getAllByRole('heading', { level: 2 }).map(heading => heading.textContent)).toEqual(['System1']);
+    expect(screen.getAllByRole('article').map(article => article.getAttribute('aria-label'))).toEqual([
+      'Improve Inbox notifications',
+      'Add swipe dismissal',
+      'Guard empty recap metadata',
     ]);
-    expect(screen.getByRole('heading', { level: 3, name: 'Task needs attention' }).closest('section'))
-      .toHaveAccessibleName('Needs attention');
-    expect(screen.getByRole('heading', { level: 3, name: 'Plan ready' }).closest('section'))
-      .toHaveAccessibleName('Ready for review');
-    expect(screen.getByRole('heading', { level: 3, name: 'Task completed' }).closest('section'))
-      .toHaveAccessibleName('Completed');
-    expect(screen.getByRole('heading', { level: 3, name: 'System failure' }).closest('section'))
-      .toHaveAccessibleName('System');
+    const reviewCard = screen.getByRole('article', { name: 'Add swipe dismissal' });
+    expect(reviewCard).toHaveTextContent('Review completed');
+    expect(screen.getByTitle('Pull Request #81')).toHaveTextContent('PR81');
+    expect(screen.getByTitle('Issue #12')).toHaveTextContent('#12');
+    for (const article of screen.getAllByRole('article')) {
+      expect(article.className).toContain('bg-white');
+      expect(article.className).not.toMatch(/bg-(teal|red|amber|emerald)-/);
+    }
+    expect(screen.queryByRole('heading', { level: 3, name: 'System failure' })).not.toBeInTheDocument();
+
+    const systemToggle = screen.getByRole('button', { name: /System/ });
+    expect(systemToggle).toHaveAttribute('aria-expanded', 'false');
+    expect(document.getElementById(systemToggle.getAttribute('aria-controls')!)).not.toBeVisible();
+    const lastActivity = screen.getByRole('article', { name: 'Guard empty recap metadata' });
+    expect(lastActivity.compareDocumentPosition(systemToggle) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    fireEvent.click(systemToggle);
+    expect(document.getElementById(systemToggle.getAttribute('aria-controls')!)).toBeVisible();
+    const systemCard = screen.getByRole('article', { name: 'System failure' });
+    expect(systemCard.closest('section')).toHaveAccessibleName('System');
+    expect(within(systemCard).queryByRole('heading')).not.toBeInTheDocument();
   });
 
-  test('renders only advertised actions and requires confirmation before stopping', async () => {
+  test('keeps cards free of generic buttons apart from the always-visible dismiss control', async () => {
     const notification = item('event-stalled', 'Stalled task', null, {
       severity: 'warning',
-      actions: ['stop', 'dismiss'],
+      target: { type: 'task', repository: 'integry/propr', taskId: 'task-event-stalled', prNumber: 1724 },
+      actions: ['stop', 'follow_up', 'open_pr', 'dismiss'],
+      action: {
+        type: 'external_link', label: 'Open pull request', href: 'https://github.com/integry/propr/pull/1724',
+      },
     });
     vi.mocked(listNotifications).mockResolvedValue({ notifications: [notification], unreadCount: 1, nextCursor: null });
-    vi.mocked(stopTaskExecution).mockResolvedValue({
-      success: true,
-      message: 'Stopping',
-      containerStopped: true,
-    });
-    const confirm = vi.spyOn(window, 'confirm').mockReturnValueOnce(false).mockReturnValueOnce(true);
     renderInbox();
 
-    expect(await screen.findByRole('button', { name: 'Stop Stalled task' })).toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: /Follow up on/ })).not.toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: /Open pull request/ })).not.toBeInTheDocument();
-    fireEvent.click(screen.getByRole('button', { name: 'Stop Stalled task' }));
-    expect(stopTaskExecution).not.toHaveBeenCalled();
-
-    fireEvent.click(screen.getByRole('button', { name: 'Stop Stalled task' }));
-    await waitFor(() => expect(stopTaskExecution).toHaveBeenCalledTimes(1));
-    expect(stopTaskExecution).toHaveBeenCalledWith('task-event-stalled');
-    await waitFor(() => expect(listNotifications).toHaveBeenCalledTimes(2));
-    expect(await screen.findByText('Stop requested successfully.')).toBeInTheDocument();
-    confirm.mockRestore();
+    const card = await screen.findByRole('article', { name: 'Stalled task' });
+    expect(Array.from(card.querySelectorAll('button')).map(button => button.getAttribute('aria-label')))
+      .toEqual(['Dismiss Stalled task']);
+    expect(screen.getByRole('link', { name: /Stalled task/ })).toHaveAttribute('href', '/tasks/task-event-stalled');
   });
 
-  test('posts one follow-up, closes the modal after success, and refreshes the Inbox', async () => {
-    const notification = item('event-followup', 'Completed task', null, {
+  test('sends /fix from a completed review to its pull request and clears the card', async () => {
+    const notification = item('event-review', 'Review completed for PR #1724', null, {
+      kind: 'review',
       severity: 'success',
-      actions: ['follow_up', 'dismiss'],
+      target: { type: 'review', repository: 'integry/propr', prNumber: 1724, taskId: 'task-review' },
+      actions: ['follow_up', 'open_pr', 'dismiss'],
     });
     const request = deferred<Awaited<ReturnType<typeof postTaskFollowup>>>();
     vi.mocked(listNotifications).mockResolvedValue({ notifications: [notification], unreadCount: 1, nextCursor: null });
     vi.mocked(postTaskFollowup).mockReturnValue(request.promise);
+    vi.mocked(dismissNotification).mockResolvedValue({ notification, unreadCount: 0 });
     renderInbox();
 
-    fireEvent.click(await screen.findByRole('button', { name: 'Follow up on Completed task' }));
-    const comment = screen.getByRole('textbox', { name: 'Comment' });
-    fireEvent.change(comment, { target: { value: 'Please add a regression test.' } });
-    const submit = screen.getByRole('button', { name: 'Post Comment' });
-    fireEvent.click(submit);
-    fireEvent.click(submit);
+    const fix = await screen.findByRole('button', { name: 'Send /fix to PR #1724' });
+    expect(screen.queryByRole('button', { name: /Send \/review/ })).not.toBeInTheDocument();
+    fireEvent.click(fix);
+    fireEvent.click(fix);
     expect(postTaskFollowup).toHaveBeenCalledTimes(1);
-    expect(postTaskFollowup).toHaveBeenCalledWith('task-event-followup', 'Please add a regression test.');
-    expect(await screen.findByRole('button', { name: 'Posting...' })).toBeDisabled();
+    expect(postTaskFollowup).toHaveBeenCalledWith('task-review', '/fix', 'pull_request');
 
     await act(async () => request.resolve({ success: true, message: 'Posted' }));
-    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
-    expect(listNotifications).toHaveBeenCalledTimes(2);
-    expect(screen.getByText('Follow-up posted successfully.')).toBeInTheDocument();
+    expect(await screen.findByText('Sent /fix to PR #1724.')).toBeInTheDocument();
+    await waitFor(() => expect(dismissNotification).toHaveBeenCalledWith('event-review'));
+    expect(screen.queryByRole('article', { name: 'Review completed for PR #1724' })).not.toBeInTheDocument();
   });
 
-  test('opens only matching HTTPS GitHub pull-request URLs in a safe new context', async () => {
-    const valid = item('event-pr', 'Valid PR', null, {
-      target: {
-        type: 'task', repository: 'integry/propr', taskId: 'task-event-pr', prNumber: 1724,
-      },
-      actions: ['open_pr'],
+  test('offers /review and /ultrafix after a PR run and opens the pull request on click', async () => {
+    const notification = item('event-pr', 'Fix run completed for PR #1724', null, {
+      kind: 'pull_request',
+      severity: 'info',
+      target: { type: 'pull_request', repository: 'integry/propr', prNumber: 1724 },
+      metadata: { completedImplementationTaskId: 'task-fix', completionType: 'fix' },
+      actions: ['follow_up', 'open_pr', 'dismiss'],
       action: {
         type: 'external_link', label: 'Open pull request', href: 'https://github.com/integry/propr/pull/1724',
       },
     });
-    vi.mocked(listNotifications).mockResolvedValue({ notifications: [valid], unreadCount: 1, nextCursor: null });
-    const open = vi.spyOn(window, 'open').mockImplementation(() => null);
-    const view = renderInbox();
-
-    fireEvent.click(await screen.findByRole('button', { name: 'Open pull request for Valid PR' }));
-    expect(screen.queryByRole('button', { name: 'Dismiss Valid PR' })).not.toBeInTheDocument();
-    expect(open).toHaveBeenCalledWith(
-      'https://github.com/integry/propr/pull/1724',
-      '_blank',
-      'noopener,noreferrer',
-    );
-
-    view.unmount();
-    open.mockClear();
-    const actionless = item('event-actionless-pr', 'Actionless PR', null, {
-      target: {
-        type: 'task', repository: 'integry/propr', taskId: 'task-event-actionless-pr', prNumber: 1724,
-      },
-      actions: [],
-      action: {
-        type: 'external_link', label: 'Open pull request', href: 'https://github.com/integry/propr/pull/1724',
-      },
-    });
-    vi.mocked(listNotifications).mockResolvedValue({ notifications: [actionless], unreadCount: 1, nextCursor: null });
-    const actionlessView = renderInbox();
-    expect(await screen.findByText('Actionless PR')).toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: 'Open pull request for Actionless PR' }))
-      .not.toBeInTheDocument();
-    expect(open).not.toHaveBeenCalled();
-
-    actionlessView.unmount();
-    open.mockClear();
-    const invalid = item('event-invalid-pr', 'Invalid PR', null, {
-      actions: ['open_pr'],
-      action: {
-        type: 'external_link', label: 'Open pull request', href: 'https://example.com/integry/propr/pull/1724',
-      },
-    });
-    vi.mocked(listNotifications).mockResolvedValue({ notifications: [invalid], unreadCount: 1, nextCursor: null });
+    vi.mocked(listNotifications).mockResolvedValue({ notifications: [notification], unreadCount: 1, nextCursor: null });
+    vi.mocked(postTaskFollowup).mockRejectedValue(new Error('GitHub unavailable'));
     renderInbox();
-    expect(await screen.findByText('Invalid PR')).toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: 'Open pull request for Invalid PR' }))
-      .not.toBeInTheDocument();
-    expect(open).not.toHaveBeenCalled();
-    open.mockRestore();
+
+    const link = await screen.findByRole('link', { name: /Fix run completed for PR #1724/ });
+    expect(link).toHaveAttribute('href', 'https://github.com/integry/propr/pull/1724');
+    expect(link).toHaveAttribute('target', '_blank');
+    expect(link).toHaveAttribute('rel', 'noopener noreferrer');
+    expect(screen.getByRole('button', { name: 'Send /review to PR #1724' })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Send /ultrafix to PR #1724' }));
+
+    await waitFor(() => expect(postTaskFollowup).toHaveBeenCalledWith('task-fix', '/ultrafix', 'pull_request'));
+    expect(await screen.findByText(/Couldn't send \/ultrafix to PR #1724.*GitHub unavailable/)).toBeInTheDocument();
+    expect(screen.getByRole('article', { name: 'Fix run completed for PR #1724' })).toBeInTheDocument();
+    expect(dismissNotification).not.toHaveBeenCalled();
+  });
+
+  test('expands a system notification in place instead of navigating', async () => {
+    const notification = item('event-system', 'System component unhealthy: redis', null, {
+      kind: 'system_failure',
+      target: { type: 'system_failure', component: 'redis' },
+    });
+    vi.mocked(listNotifications).mockResolvedValue({ notifications: [notification], unreadCount: 1, nextCursor: null });
+    vi.mocked(markNotificationRead).mockResolvedValue({ notification, unreadCount: 0 });
+    renderInbox();
+
+    fireEvent.click(await screen.findByRole('button', { name: /System/ }));
+    const card = screen.getByRole('button', { name: /System component unhealthy: redis/, expanded: false });
+    fireEvent.click(card);
+    expect(card).toHaveAttribute('aria-expanded', 'true');
+    expect(markNotificationRead).toHaveBeenCalledWith('event-system');
   });
 
   test('optimistically dismisses and restores an item advertising dismiss when the request fails', async () => {
@@ -259,6 +256,80 @@ describe('Inbox page', () => {
     expect(await screen.findByText('Task one failed')).toBeInTheDocument();
     expect(screen.getByText(/Couldn't dismiss the notification/)).toBeInTheDocument();
     expect(refreshUnreadCount).toHaveBeenCalledTimes(1);
+  });
+
+  test('dismisses silently without an undo toast', async () => {
+    const notification = item('event-silent', 'Kick this out');
+    vi.mocked(listNotifications).mockResolvedValue({ notifications: [notification], unreadCount: 1, nextCursor: null });
+    vi.mocked(dismissNotification).mockResolvedValue({
+      notification: notificationSchema.parse({
+        ...notification,
+        dismissedAt: '2026-08-24T12:01:00.000Z',
+      }),
+      unreadCount: 0,
+    });
+    renderInbox();
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Dismiss Kick this out' }));
+    expect(screen.queryByText('Kick this out')).not.toBeInTheDocument();
+    await waitFor(() => expect(commitUnreadCount).toHaveBeenCalledWith(0));
+    expect(screen.queryByRole('button', { name: 'Undo' })).not.toBeInTheDocument();
+    expect(screen.queryByText(/dismissed/i)).not.toBeInTheDocument();
+  });
+
+  test('does not reinsert a dismissed notification when an older refresh finishes afterward', async () => {
+    const notification = item('event-refresh-race', 'Stay dismissed');
+    const staleRefresh = deferred<Awaited<ReturnType<typeof listNotifications>>>();
+    vi.mocked(listNotifications)
+      .mockResolvedValueOnce({ notifications: [notification], unreadCount: 1, nextCursor: null })
+      .mockReturnValueOnce(staleRefresh.promise);
+    vi.mocked(dismissNotification).mockResolvedValue({
+      notification: notificationSchema.parse({
+        ...notification,
+        dismissedAt: '2026-08-24T12:01:00.000Z',
+      }),
+      unreadCount: 0,
+    });
+    renderInbox();
+
+    await screen.findByText('Stay dismissed');
+    fireEvent.focus(window);
+    fireEvent.click(screen.getByRole('button', { name: 'Dismiss Stay dismissed' }));
+    await waitFor(() => expect(dismissNotification).toHaveBeenCalledWith('event-refresh-race'));
+
+    await act(async () => staleRefresh.resolve({ notifications: [notification], unreadCount: 1, nextCursor: null }));
+    expect(screen.queryByText('Stay dismissed')).not.toBeInTheDocument();
+  });
+
+  test('swipes a card out in either direction past the threshold without extra affordances', async () => {
+    const first = item('event-swipe-right', 'Swipe right');
+    const second = item('event-swipe-left', 'Swipe left');
+    const short = item('event-swipe-short', 'Short swipe');
+    vi.mocked(listNotifications).mockResolvedValue({ notifications: [first, second, short], unreadCount: 3, nextCursor: null });
+    vi.mocked(dismissNotification).mockImplementation(async id => ({
+      notification: [first, second].find(candidate => candidate.id === id)!,
+      unreadCount: 1,
+    }));
+    renderInbox();
+
+    const swipe = async (name: string, toX: number) => {
+      const surface = (await screen.findByRole('article', { name })).parentElement!;
+      fireEvent.pointerDown(surface, { pointerId: 1, pointerType: 'touch', clientX: 150, clientY: 20 });
+      fireEvent.pointerMove(surface, { pointerId: 1, pointerType: 'touch', clientX: toX, clientY: 22 });
+      expect(surface.textContent).not.toMatch(/Release|Dismiss/);
+      fireEvent.pointerUp(surface, { pointerId: 1, pointerType: 'touch', clientX: toX, clientY: 22 });
+    };
+
+    await swipe('Swipe right', 270);
+    await swipe('Swipe left', 30);
+    await swipe('Short swipe', 200);
+
+    expect(screen.queryByText('Swipe right')).not.toBeInTheDocument();
+    expect(screen.queryByText('Swipe left')).not.toBeInTheDocument();
+    expect(screen.getByText('Short swipe')).toBeInTheDocument();
+    await waitFor(() => expect(dismissNotification).toHaveBeenCalledTimes(2));
+    expect(dismissNotification).not.toHaveBeenCalledWith('event-swipe-short');
+    expect(screen.queryByRole('button', { name: 'Undo' })).not.toBeInTheDocument();
   });
 
   test('confirms and clears all notifications, including unloaded pages', async () => {
@@ -280,7 +351,7 @@ describe('Inbox page', () => {
 
     fireEvent.click(clearAll);
     expect(dismissAllNotifications).toHaveBeenCalledTimes(1);
-    expect(await screen.findByRole('button', { name: 'Clearing…' })).toBeDisabled();
+    await waitFor(() => expect(clearAll).toBeDisabled());
     await act(async () => clearRequest.resolve({ unreadCount: 0 }));
 
     expect(await screen.findByText('You’re all caught up')).toBeInTheDocument();
@@ -436,14 +507,87 @@ describe('Inbox page', () => {
 
     await screen.findByText('Read race notification');
     commitUnreadCount.mockClear();
-    fireEvent.click(screen.getByRole('button', { name: 'Refresh Inbox' }));
+    fireEvent.focus(window);
     await waitFor(() => expect(listNotifications).toHaveBeenCalledTimes(2));
     fireEvent.click(screen.getByRole('link', { name: /Read race notification/ }));
     await waitFor(() => expect(markNotificationRead).toHaveBeenCalledWith('event-read-race'));
     await act(async () => staleRefresh.resolve({ notifications: [notification], unreadCount: 9, nextCursor: null }));
 
-    await waitFor(() => expect(screen.queryByText('Unread')).not.toBeInTheDocument());
+    await waitFor(() => expect(screen.queryByRole('img', { name: 'Unread' })).not.toBeInTheDocument());
     expect(commitUnreadCount).not.toHaveBeenCalledWith(9);
+  });
+
+  test('keeps the header minimal and refreshes automatically without dropping loaded pages', async () => {
+    const first = item('event-first', 'First page item', null, { occurredAt: '2026-08-24T12:02:00.000Z', createdAt: '2026-08-24T12:02:00.000Z' });
+    const older = item('event-older', 'Older page item', null, { occurredAt: '2026-08-24T11:00:00.000Z', createdAt: '2026-08-24T11:00:00.000Z' });
+    const newest = item('event-newest', 'Newest item', null, { occurredAt: '2026-08-24T12:30:00.000Z', createdAt: '2026-08-24T12:30:00.000Z' });
+    vi.mocked(listNotifications)
+      .mockResolvedValueOnce({ notifications: [first], unreadCount: 1, nextCursor: 'cursor-1' })
+      .mockResolvedValueOnce({ notifications: [older], unreadCount: 2, nextCursor: null })
+      .mockResolvedValueOnce({ notifications: [newest, first], unreadCount: 3, nextCursor: 'cursor-new' });
+    renderInbox();
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Load more' }));
+    await screen.findByText('Older page item');
+    expect(screen.queryByRole('button', { name: /Refresh/ })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Clear all' })).not.toHaveTextContent(/\S/);
+    expect(screen.queryByText(/in one place/)).not.toBeInTheDocument();
+
+    fireEvent.focus(window);
+    await screen.findByText('Newest item');
+    expect(screen.getAllByRole('article').map(article => article.getAttribute('aria-label'))).toEqual([
+      'Newest item',
+      'First page item',
+      'Older page item',
+    ]);
+    expect(screen.queryByRole('button', { name: 'Load more' })).not.toBeInTheDocument();
+  });
+
+  test('drops loaded cards the server dismissed when refreshing after load more', async () => {
+    const at = (minute: number) => `2026-08-24T12:${String(minute).padStart(2, '0')}:00.000Z`;
+    const kept = item('event-kept', 'Still active', null, { occurredAt: at(30), createdAt: at(30) });
+    const closed = item('event-closed', 'PR closed elsewhere', null, { occurredAt: at(20), createdAt: at(20) });
+    const boundary = item('event-boundary', 'Page boundary', null, { occurredAt: at(10), createdAt: at(10) });
+    const older = item('event-older', 'Older page item', null, { occurredAt: at(1), createdAt: at(1) });
+    vi.mocked(listNotifications)
+      .mockResolvedValueOnce({ notifications: [kept, closed, boundary], unreadCount: 4, nextCursor: 'cursor-1' })
+      .mockResolvedValueOnce({ notifications: [older], unreadCount: 4, nextCursor: 'cursor-2' })
+      .mockResolvedValueOnce({ notifications: [kept, boundary], unreadCount: 3, nextCursor: 'cursor-new' })
+      .mockResolvedValueOnce({ notifications: [kept], unreadCount: 1, nextCursor: null });
+    renderInbox();
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Load more' }));
+    await screen.findByText('Older page item');
+    fireEvent.focus(window);
+    await waitFor(() => expect(screen.queryByText('PR closed elsewhere')).not.toBeInTheDocument());
+    expect(screen.getAllByRole('article').map(article => article.getAttribute('aria-label'))).toEqual([
+      'Still active',
+      'Page boundary',
+      'Older page item',
+    ]);
+    expect(screen.getByRole('button', { name: 'Load more' })).toBeInTheDocument();
+
+    fireEvent.focus(window);
+    await waitFor(() => expect(screen.getAllByRole('article')).toHaveLength(1));
+    expect(screen.queryByRole('button', { name: 'Load more' })).not.toBeInTheDocument();
+  });
+
+  test('refreshes in the background without disabling Clear all or hiding the error', async () => {
+    const notification = item('event-1', 'Loaded item');
+    const refreshRequest = deferred<Awaited<ReturnType<typeof listNotifications>>>();
+    vi.mocked(listNotifications)
+      .mockResolvedValueOnce({ notifications: [notification], unreadCount: 1, nextCursor: 'cursor-1' })
+      .mockRejectedValueOnce(new Error('Page failed'))
+      .mockReturnValueOnce(refreshRequest.promise);
+    renderInbox();
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Load more' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent('Page failed');
+    fireEvent.focus(window);
+    expect(screen.getByRole('button', { name: 'Clear all' })).toBeEnabled();
+    expect(screen.getByRole('alert')).toHaveTextContent('Page failed');
+    await act(async () => refreshRequest.resolve({ notifications: [notification], unreadCount: 1, nextCursor: 'cursor-1' }));
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
   });
 
   test('ignores an error from load-more after a refresh supersedes it', async () => {
@@ -460,7 +604,7 @@ describe('Inbox page', () => {
     renderInbox();
 
     fireEvent.click(await screen.findByRole('button', { name: 'Load more' }));
-    fireEvent.click(screen.getByRole('button', { name: 'Refresh Inbox' }));
+    fireEvent.focus(window);
     expect(await screen.findByText('Refreshed item')).toBeInTheDocument();
     const refreshedLoadMore = screen.getByRole('button', { name: 'Load more' });
     expect(refreshedLoadMore).toBeEnabled();

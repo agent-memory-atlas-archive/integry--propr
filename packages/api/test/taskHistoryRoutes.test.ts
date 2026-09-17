@@ -200,3 +200,45 @@ test('task history emits HTML-significant values as escaped JSON wire bytes', as
   assert.equal(body.taskInfo.title, attackerValue);
   assert.equal(body.history[0].metadata.nested.previewPath, '[local preview omitted]');
 });
+
+test('task history returns run-scoped preview media and omits it for runs without previews', async () => {
+  const database = await createHistoryDatabase();
+  const asset = (id: string) => `https://github.com/user-attachments/assets/${id}`;
+  const comment = `Applied fixes\n<!-- propr-visual-preview -->\n### Fixed dialog\n\n![Fixed dialog](${asset('fix')})\nThe dialog after the fix\n`;
+  const sources: unknown[] = [];
+  const previewReader = {
+    enabledRepositories: async () => new Set(['acme/repo']),
+    project: async (input: Array<{ commentBody?: string; prNumbers: number[] }>, limit: number, mode: string) => {
+      sources.push({ input, limit, mode });
+      return input.map(source => ({ previews: source.commentBody
+        ? [{ type: 'image' as const, title: 'Fixed dialog', description: 'The dialog after the fix', url: asset('fix') }]
+        : [] }));
+    },
+  };
+  try {
+    await database('tasks').insert([
+      { task_id: 'fix-run', repository: 'acme/repo', task_type: 'pr-comment', issue_number: 7, initial_job_data: JSON.stringify({ pullRequestNumber: 7 }) },
+      { task_id: 'review-run', repository: 'acme/repo', task_type: 'pr-comment', issue_number: 7, initial_job_data: JSON.stringify({ pullRequestNumber: 7 }) },
+    ]);
+    await database('task_history').insert([
+      { task_id: 'fix-run', state: 'completed', timestamp: '2026-09-16T00:00:00.000Z', metadata: JSON.stringify({ githubComment: { body: comment } }) },
+      { task_id: 'fix-run', state: 'cleanup', timestamp: '2026-09-16T00:01:00.000Z', metadata: '{}' },
+      { task_id: 'review-run', state: 'completed', timestamp: '2026-09-16T00:00:00.000Z', metadata: JSON.stringify({ githubComment: { body: 'No changes' } }) },
+    ]);
+    const routes = createTaskHistoryRoutes({
+      db: database, redisClient: { get: async () => null } as unknown as RedisClientType, taskQueue: {} as never,
+      previewReader: previewReader as never,
+    });
+    const fix = responseRecorder();
+    await routes.getTaskHistory({ params: { taskId: 'fix-run' } } as unknown as FlatRequest, fix.response);
+    assert.deepEqual((fix.body() as { previewMedia: unknown }).previewMedia, [
+      { type: 'image', title: 'Fixed dialog', description: 'The dialog after the fix', url: asset('fix') },
+    ]);
+    assert.deepEqual(sources[0], { input: [{ repository: 'acme/repo', prNumbers: [], isFollowUp: true, commentBody: comment }], limit: 8, mode: 'gallery' });
+    const review = responseRecorder();
+    await routes.getTaskHistory({ params: { taskId: 'review-run' } } as unknown as FlatRequest, review.response);
+    assert.equal('previewMedia' in (review.body() as object), false);
+  } finally {
+    await database.destroy();
+  }
+});

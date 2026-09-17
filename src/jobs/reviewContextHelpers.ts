@@ -10,13 +10,14 @@ import {
 import type { AnalysisResult } from '@propr/core';
 import { fetchLinkedIssueContext, buildCommentHistory } from './prCommentJobHelpers.js';
 import { fetchAllComments, fetchPRFiles, fetchPRFileContents, formatPRDiffWithMetadata, formatFileContents } from './prCommentJobUtils.js';
+import type { PullRequestHead } from './prGitTarget.js';
 import {
     currentHeadChecksHaveFailures,
     formatCurrentHeadCheckSummary,
     type ReviewCheckRun,
 } from './reviewCheckSummary.js';
 
-export interface PRData { data: { head: { ref: string; sha?: string }; body: string | null; labels: Array<{ name: string }>; user: { login: string }; title: string } }
+export interface PRData { data: { head: PullRequestHead & { sha?: string }; body: string | null; labels: Array<{ name: string }>; user: { login: string }; title: string } }
 
 async function fetchCurrentHeadCheckSummary(
     octokit: Awaited<ReturnType<typeof getAuthenticatedOctokit>>,

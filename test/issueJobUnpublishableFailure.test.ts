@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { mock, test } from 'node:test';
+import { sanitizeAgentReport } from '../packages/core/src/agents/agentReportSanitizer.js';
 
 const commitChanges = mock.fn(async () => null);
 const pushBranch = mock.fn(async () => undefined);
@@ -23,6 +24,7 @@ await mock.module('@propr/core', {
         getAuthenticatedOctokit: mock.fn(),
         linkPRToPlanIssue: mock.fn(),
         safeUpdateLabels,
+        sanitizeAgentReport,
         generateCompletionComment,
         sanitizeAgentReport: (value: string | null | undefined) => value ?? '',
         redactSecrets: (value: string) => value.replace('secret-token', '[REDACTED]'),

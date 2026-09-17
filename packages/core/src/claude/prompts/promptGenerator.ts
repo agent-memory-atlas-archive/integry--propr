@@ -129,6 +129,7 @@ ${visualPreviewInstructions}
 **IMPORTANT NOTES:**
 - **DO NOT** worry about git operations (add, commit, push, PR creation)
 - **DO NOT** use git commands or GitHub CLI for workflow operations
+- **DO NOT** report that changes are uncommitted or that you did not create a commit; ProPR creates and reports the commit after you finish
 - **FOCUS ONLY** on implementing the solution to the problem
 - You are working in a git worktree environment with the codebase ready
 - Make your changes directly to the files that need modification

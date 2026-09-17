@@ -1,12 +1,13 @@
 import { describe, expect, test } from 'vitest';
 import { notificationSchema, type Notification } from '@propr/shared';
 import {
-  INBOX_GROUPS,
+  isSystemNotification,
   mergeNotifications,
-  notificationGroup,
   notificationHref,
+  notificationIndicatorClass,
   notificationKindLabel,
   notificationPullRequestUrl,
+  notificationReference,
 } from './inboxUtils';
 
 function item(overrides: Record<string, unknown>): Notification {
@@ -27,7 +28,7 @@ function item(overrides: Record<string, unknown>): Notification {
 }
 
 describe('Inbox notification presentation', () => {
-  test('covers every event kind with a visible label and required group', () => {
+  test('covers every event kind with a visible label and keeps only system updates apart', () => {
     const notifications = [
       item({ kind: 'plan', target: { type: 'plan', repository: 'i/p', draftId: 'd1' } }),
       item({ id: 'task-ok', severity: 'success' }),
@@ -41,11 +42,47 @@ describe('Inbox notification presentation', () => {
       'Plan ready',
       'Implementation completed',
       'Review completed',
-      'PR attention',
+      'PR ready',
       'Indexing failed',
       'System failure',
     ]);
-    expect(new Set(notifications.map(notificationGroup))).toEqual(new Set(INBOX_GROUPS));
+    expect(notifications.map(isSystemNotification)).toEqual([false, false, false, false, true, true]);
+  });
+
+  test('colours the unread indicator by severity', () => {
+    expect(notificationIndicatorClass(item({
+      kind: 'system_failure', severity: 'error', target: { type: 'system_failure', component: 'redis' },
+    }))).toBe('bg-red-500');
+    expect(notificationIndicatorClass(item({ severity: 'warning' }))).toBe('bg-orange-500');
+    expect(notificationIndicatorClass(item({
+      kind: 'review', severity: 'success', target: { type: 'review', repository: 'i/p', prNumber: 81 },
+    }))).toBe('bg-teal-500');
+  });
+
+  test('keeps the PR or issue number visible as a reference chip', () => {
+    expect(notificationReference(item({
+      kind: 'review', severity: 'success', target: { type: 'review', repository: 'i/p', prNumber: 81 },
+    }))).toEqual({ label: 'PR81', title: 'Pull Request #81' });
+    expect(notificationReference(item({
+      target: { type: 'task', repository: 'i/p', taskId: 't', issueNumber: 12, prNumber: 42 },
+    }))).toEqual({ label: 'PR42', title: 'Pull Request #42' });
+    expect(notificationReference(item({
+      target: { type: 'task', repository: 'i/p', taskId: 't', issueNumber: 12 },
+    }))).toEqual({ label: '#12', title: 'Issue #12' });
+    expect(notificationReference(item({
+      kind: 'plan', target: { type: 'plan', repository: 'i/p', draftId: 'd1' },
+    }))).toBeNull();
+  });
+
+  test('labels completed pull-request follow-ups by their persisted outcome type', () => {
+    const pullRequest = {
+      kind: 'pull_request', severity: 'info',
+      target: { type: 'pull_request', repository: 'i/p', prNumber: 2 },
+    };
+    expect(notificationKindLabel(item({ ...pullRequest, metadata: { completionType: 'fix' } })))
+      .toBe('Fix completed');
+    expect(notificationKindLabel(item({ ...pullRequest, metadata: { completionType: 'merge' } })))
+      .toBe('Merge completed');
   });
 
   test('prefers server actions and derives stable fallback destinations', () => {

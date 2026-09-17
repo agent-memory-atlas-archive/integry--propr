@@ -49,7 +49,7 @@ export function buildMcpServer(principal: McpPrincipal, deps: ToolDeps, catalog:
     });
   }
   const prefix = `propr://instances/${deps.policy.config.instanceId}`;
-  for (const [path, name] of [['connection', 'get_connection'], ['repositories', 'list_repositories'], ['models', 'list_models']] as const) {
+  for (const [path, name] of [['connection', 'get_connection'], ['repositories', 'list_repositories'], ['models', 'list_models'], ['notifications', 'list_notifications']] as const) {
     server.registerResource(path, `${prefix}/${path}`, { mimeType: 'application/json' }, async uri => ({ contents: [{ uri: uri.href, mimeType: 'application/json', text: JSON.stringify(await call(name, {})) }] }));
   }
   for (const [path, tool, table, column, argument] of [
@@ -64,6 +64,7 @@ export function buildMcpServer(principal: McpPrincipal, deps: ToolDeps, catalog:
   }
   server.registerResource('repository_context', new ResourceTemplate(`${prefix}/repositories/{owner}/{repo}`, { list: undefined }), { mimeType: 'application/json' }, async (uri, vars) => ({ contents: [{ uri: uri.href, mimeType: 'application/json', text: JSON.stringify(await call('get_repository_context', { repository: `${vars.owner}/${vars.repo}` })) }] }));
   server.registerResource('pull_request', new ResourceTemplate(`${prefix}/repositories/{owner}/{repo}/pulls/{number}`, { list: undefined }), { mimeType: 'application/json' }, async (uri, vars) => ({ contents: [{ uri: uri.href, mimeType: 'application/json', text: JSON.stringify(await call('get_pull_request', { repository: `${vars.owner}/${vars.repo}`, pullRequest: Number(vars.number) })) }] }));
+  server.registerResource('notification', new ResourceTemplate(`${prefix}/notifications/{id}`, { list: undefined }), { mimeType: 'application/json' }, async (uri, vars) => ({ contents: [{ uri: uri.href, mimeType: 'application/json', text: JSON.stringify(await call('get_notification', { notificationId: vars.id })) }] }));
   server.registerResource('artifact', new ResourceTemplate(`${prefix}/artifacts/{id}`, { list: undefined }), { mimeType: 'application/json' }, async (uri, vars) => ({ contents: [{ uri: uri.href, mimeType: 'application/json', text: JSON.stringify(await call('get_artifact', { artifactId: vars.id })) }] }));
   server.registerResource('attachment', new ResourceTemplate(`${prefix}/{kind}/{parentId}/attachments/{id}`, { list: undefined }), { mimeType: 'application/json' }, async (uri, vars) => {
     if (vars.kind !== 'plans' && vars.kind !== 'goals') throw new McpError('NOT_FOUND', 'Attachment parent not found.', 404);

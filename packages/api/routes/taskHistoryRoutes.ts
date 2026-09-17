@@ -5,6 +5,7 @@ import { RedisClientType } from 'redis';
 import { Queue, Job } from 'bullmq';
 import { Knex } from 'knex';
 import { sendSafeJson } from './jsonResponse.js';
+import { previewMediaReader, projectTaskPreviewMedia } from '../services/previewMediaProjection.js';
 
 interface JobData {
     repoOwner?: string; repoName?: string; number?: number;
@@ -24,24 +25,18 @@ interface JobReturnValue {
     };
 }
 
-interface TaskHistoryRoutesDeps { redisClient: RedisClientType; taskQueue: Queue; db: Knex }
+interface TaskHistoryRoutesDeps { redisClient: RedisClientType; taskQueue: Queue; db: Knex; previewReader?: typeof previewMediaReader }
 
 export function createTaskHistoryRoutes(deps: TaskHistoryRoutesDeps) {
-  const { redisClient, taskQueue, db } = deps;
+  const { redisClient, taskQueue, db, previewReader = previewMediaReader } = deps;
 
   async function getTaskHistory(req: FlatRequest, res: Response): Promise<void> {
     try {
       const { taskId } = req.params;
 
-      const dbResult = await getHistoryFromDb(db, taskId);
+      const dbResult = await getHistoryFromDb(db, taskId, previewReader);
       if (dbResult) {
-        sendSafeJson(res, redactVisualPreviewValue({
-          taskId,
-          history: dbResult.history,
-          taskInfo: dbResult.taskInfo,
-          usageMetrics: dbResult.usageMetrics,
-          usageMetricRecords: dbResult.usageMetricRecords
-        }));
+        sendSafeJson(res, redactVisualPreviewValue({ taskId, ...dbResult }));
         return;
       }
       let history: Array<Record<string, unknown>> = [];
@@ -110,14 +105,12 @@ async function fetchUsageMetrics(
   return { usageMetrics, usageMetricRecords };
 }
 
-async function getHistoryFromDb(
-  db: Knex,
-  taskId: string
-): Promise<{
+async function getHistoryFromDb(db: Knex, taskId: string, previewReader: typeof previewMediaReader): Promise<{
   history: Array<Record<string, unknown>>;
   taskInfo: Record<string, unknown>;
   usageMetrics: Record<string, unknown> | null;
   usageMetricRecords: Array<{ agent: string; metricKey: string; metricValue: number }>;
+  previewMedia?: Awaited<ReturnType<typeof projectTaskPreviewMedia>>;
 } | null> {
   try {
     const task = await db('tasks').where({ task_id: taskId }).first();
@@ -126,9 +119,10 @@ async function getHistoryFromDb(
 
     const taskInfo = buildTaskInfoFromDb(taskId, task, parseJobData(task.initial_job_data));
 
-    const [llmExecutions, usage] = await Promise.all([
+    const [llmExecutions, usage, previewMedia] = await Promise.all([
       db('llm_executions').where({ task_id: taskId }).orderBy('start_time', 'asc'),
       fetchUsageMetrics(db, taskId),
+      projectTaskPreviewMedia(task, historyRecords, previewReader),
     ]);
 
     const executionsByHistoryId = new Map<number, Record<string, unknown>>();
@@ -143,7 +137,7 @@ async function getHistoryFromDb(
 
     applyMetadataFlags(taskInfo, history);
 
-    return { history, taskInfo, ...usage };
+    return { history, taskInfo, ...usage, ...(previewMedia.length ? { previewMedia } : {}) };
   } catch (error) {
     console.error('Error fetching task history from SQLite:', error);
     return null;

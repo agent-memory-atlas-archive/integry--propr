@@ -2,7 +2,11 @@ import type { Knex } from 'knex';
 import type { getAuthenticatedOctokit, loadMonitoredReposRaw, GoalArtifact } from '@propr/core';
 import { isNotificationPreviewEligible, trustedPreviewMedia, type Notification, type PublishedVisualPreview } from '@propr/shared';
 
-export interface PreviewSource { repository: string; prNumbers: number[] }
+/**
+ * `commentBody` scopes a follow-up run to the completion comment it published;
+ * such sources never inherit the PR description shared by earlier runs.
+ */
+export interface PreviewSource { repository: string; prNumbers: number[]; commentBody?: string; isFollowUp?: boolean }
 export interface PreviewProjection { previews: PublishedVisualPreview[]; unavailable?: boolean }
 interface Dependencies {
   loadRepos?: typeof loadMonitoredReposRaw;
@@ -65,12 +69,22 @@ export function createPreviewMediaReader(deps: Dependencies = {}) {
       timer = setTimeout(() => { expired = true; resolve(); }, 1500);
     }) : undefined;
     const batch = (async () => {
-      const enabled = await enabledRepositories(sources.filter(source => source.prNumbers.length).map(source => source.repository));
+      const enabled = await enabledRepositories(sources.filter(source => source.prNumbers.length || source.commentBody).map(source => source.repository));
+      if (expired) return;
+      const parseComment = sources.some(source => source.commentBody && enabled.has(source.repository.trim().toLowerCase()))
+        ? (await import('@propr/core')).parsePublishedVisualPreviews : undefined;
       if (expired) return;
       const reads = new Map<string, { repository: string; number: number }>();
-      keys = sources.map(source => {
+      keys = sources.map((source, index) => {
         const repository = source.repository.trim().toLowerCase();
         if (!enabled.has(repository) || !/^[a-z0-9_.-]+\/[a-z0-9_.-]+$/.test(repository) || repository.split('/').some(part => part === '.' || part === '..')) return [];
+        if (source.commentBody) {
+          // Run-scoped media is already stored with the task; no GitHub read is needed.
+          const key = `comment:${index}`;
+          results.set(key, { previews: parseComment?.(source.commentBody) ?? [] });
+          return [key];
+        }
+        if (source.isFollowUp) return [];
         return [...new Set(source.prNumbers)].filter(number => Number.isSafeInteger(number) && number > 0).map(number => {
           const key = `${repository}#${number}`;
           reads.set(key, { repository, number });
@@ -103,7 +117,7 @@ export function createPreviewMediaReader(deps: Dependencies = {}) {
       if (timer !== undefined) clearTimeout(timer);
     }
     if (!keys) return sources.map(source => ({
-      previews: [], ...(source.prNumbers.length ? { unavailable: true } : {}),
+      previews: [], ...(source.prNumbers.length || source.commentBody ? { unavailable: true } : {}),
     }));
     return keys.map(sourceKeys => ({
       previews: trustedPreviewMedia(sourceKeys.flatMap(key => results.get(key)?.previews ?? []), limit),
@@ -116,6 +130,40 @@ export function createPreviewMediaReader(deps: Dependencies = {}) {
 
 export const previewMediaReader = createPreviewMediaReader();
 
+/** Returns the newest history metadata carrying a completion comment, independent of the current lifecycle row. */
+export function latestCommentMetadata(historyRecords: ReadonlyArray<Record<string, unknown>>): unknown {
+  for (let index = historyRecords.length - 1; index >= 0; index--) {
+    if (record(historyRecords[index].metadata).githubComment) return historyRecords[index].metadata;
+  }
+  return undefined;
+}
+
+/** Visual previews are optional evidence; failures or stalls must never hide the task history. */
+export async function projectTaskPreviewMedia(
+  task: Record<string, unknown>,
+  historyRecords: Array<Record<string, unknown>>,
+  reader: Pick<typeof previewMediaReader, 'project'> = previewMediaReader,
+  deadlineMs = 5000,
+): Promise<PublishedVisualPreview[]> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    // Gallery reads have no internal deadline, so bound the whole enrichment here.
+    const expired = new Promise<PreviewProjection[]>(resolve => { timer = setTimeout(() => resolve([]), deadlineMs); });
+    const [projection] = await Promise.race([
+      reader.project([taskPreviewSource({ ...task, latest_metadata: latestCommentMetadata(historyRecords) })], 8, 'gallery'),
+      expired,
+    ]);
+    return projection?.previews ?? [];
+  } catch {
+    return [];
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+}
+
+// Mirrors the core renderer's marker; kept local so identity parsing stays independent of core services.
+const VISUAL_PREVIEW_MARKER = '<!-- propr-visual-preview -->';
+
 function record(value: unknown): Record<string, unknown> {
   try {
     const parsed = typeof value === 'string' ? JSON.parse(value) : value;
@@ -123,11 +171,26 @@ function record(value: unknown): Record<string, unknown> {
   } catch { return {}; }
 }
 
+/**
+ * Follow-up runs share their PR with the run that created it, but not its published description.
+ * Job data identifies a follow-up the same way the task history API does, including the nested issue reference.
+ */
+function isFollowUpTask(row: Record<string, unknown>, initial: Record<string, unknown>): boolean {
+  return row.task_type === 'pr-comment' || row.task_type === 'review'
+    || (typeof row.task_id === 'string' && row.task_id.startsWith('pr-comments-batch-'))
+    || !!initial.pullRequestNumber || !!record(initial.issueRef).pullRequestNumber;
+}
+
 export function taskPreviewSource(row: Record<string, unknown>): PreviewSource {
   const initial = record(row.initial_job_data);
   const result = record(row.final_result);
+  if (isFollowUpTask(row, initial)) {
+    const comment = record(record(row.latest_metadata).githubComment);
+    const commentBody = typeof comment.body === 'string' && comment.body.includes(VISUAL_PREVIEW_MARKER) ? comment.body : undefined;
+    return { repository: String(row.repository ?? ''), prNumbers: [], isFollowUp: true, ...(commentBody ? { commentBody } : {}) };
+  }
   return { repository: String(row.repository ?? ''), prNumbers: [
-    row.pr_number || initial.pullRequestNumber || record(record(result.postProcessing).pr).number,
+    row.pr_number || record(record(result.postProcessing).pr).number,
   ].filter((number): number is number => typeof number === 'number' && Number.isSafeInteger(number) && number > 0) };
 }
 

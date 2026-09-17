@@ -171,7 +171,7 @@ vi.mock('./setupWizardHooks', () => ({
   useAutoDraftCreation: () => ({
     isAutoCreating: false,
     autoCreateError: null,
-    autoCreateWarning: null,
+    autoCreateWarning: null, ensureDraftCreated: vi.fn(),
   }),
   useDraftContextConfigSync: vi.fn(),
   useDraftSettingsPersistence: vi.fn(),

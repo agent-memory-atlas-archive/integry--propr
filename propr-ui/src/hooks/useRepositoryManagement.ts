@@ -61,7 +61,7 @@ export interface UseRepositoryManagementResult {
   loadRepos: () => Promise<void>;
   handleStopIndexing: (repoName: string, baseBranch?: string) => Promise<void>;
   handleReindexRepo: (repoName: string, baseBranch?: string) => Promise<void>;
-  handleAddRepo: (newRepo: string, newAlias: string, newBaseBranch: string, autoFollowupOnFailedCi: boolean) => boolean;
+  handleAddRepo: (newRepo: string, newAlias: string, newBaseBranch: string, autoFollowupOnFailedCi: boolean, newVisualPreview?: VisualPreviewSettings) => boolean;
   handleRemoveRepo: (repoId: string) => void;
   handleToggleRepo: (repoId: string) => void;
   handleToggleAutoCiFollowup: (repoId: string) => void;
@@ -310,7 +310,7 @@ export function useRepositoryManagement(): UseRepositoryManagementResult {
     }
   };
 
-  const handleAddRepo = (newRepo: string, newAlias: string, newBaseBranch: string, autoFollowupOnFailedCi: boolean): boolean => {
+  const handleAddRepo = (newRepo: string, newAlias: string, newBaseBranch: string, autoFollowupOnFailedCi: boolean, newVisualPreview = defaultVisualPreview()): boolean => {
     if (!canManageRepositories || !newRepo) return false;
     const isDuplicate = repos.some(r => r.name === newRepo && (r.baseBranch || '') === (newBaseBranch || ''));
     if (isDuplicate) {
@@ -319,19 +319,33 @@ export function useRepositoryManagement(): UseRepositoryManagementResult {
       return false;
     }
     const repositoryKey = getRepositoryConfigKey(newRepo);
-    const existingVisualPreview = repos.find(repo => getRepositoryConfigKey(repo.name) === repositoryKey)?.visualPreview;
+    const existingVisualPreview = buildRepositoriesForDisplay(repos)
+      .find(repo => getRepositoryConfigKey(repo.name) === repositoryKey)?.visualPreview || defaultVisualPreview();
+    // Visual preview settings are shared by every branch of a repository, so blank instructions keep the existing ones.
+    const visualPreview = newVisualPreview.enabled
+      ? parseVisualPreview({
+        ...existingVisualPreview,
+        enabled: true,
+        types: newVisualPreview.types,
+        instructions: newVisualPreview.instructions?.trim() || existingVisualPreview.instructions
+      })
+      : existingVisualPreview;
     const newEntry: Repo = {
       id: generateId(),
       name: newRepo,
       enabled: true,
       autoFollowupOnFailedCi,
-      visualPreview: existingVisualPreview || defaultVisualPreview(),
+      visualPreview,
       alias: newAlias.trim() || undefined,
       baseBranch: newBaseBranch.trim() || undefined
     };
     const newRepos = [
       ...repos.map(repo => getRepositoryConfigKey(repo.name) === repositoryKey
-        ? { ...repo, autoFollowupOnFailedCi: repo.autoFollowupOnFailedCi || autoFollowupOnFailedCi }
+        ? {
+          ...repo,
+          autoFollowupOnFailedCi: repo.autoFollowupOnFailedCi || autoFollowupOnFailedCi,
+          ...(newVisualPreview.enabled ? { visualPreview } : {})
+        }
         : repo),
       newEntry
     ];

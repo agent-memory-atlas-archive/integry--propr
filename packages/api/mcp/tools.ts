@@ -26,6 +26,7 @@ import { addContextTools } from './toolsContext.js';
 import { addAdministrationTools } from './toolsAdministration.js';
 import { addArtifactTools } from './toolsArtifacts.js';
 import { addManagementTools } from './toolsManagement.js';
+import { addNotificationTools } from './toolsNotifications.js';
 import { presentResult, type PresentedResult } from './presentation.js';
 import { summarizeGoal, summarizeTask } from './listSummaries.js';
 import { getAgentActivity } from './agentActivity.js';
@@ -118,7 +119,8 @@ export function createToolCatalog(deps: ToolDeps): McpTool[] {
   addArtifactTools(tools, deps, planner, goals);
   addPullRequestTools(tools, deps);
   addContextTools(tools, deps);
-  addManagementTools(tools, deps, { todos, notifications, config, runtime });
+  addManagementTools(tools, deps, { todos, config, runtime });
+  addNotificationTools(tools, deps, notifications);
 
   tools.push({ name: 'list_goals', description: 'List compact goal summaries, progress, runtime and pull request context in a repository.', scope: 'read', readOnly: true, schema: z.object({ repository: repositorySchema, ...pageShape }).strict(), run: async ({ principal, args }) => {
     const rows = await db('goals').where({ owner_id: principal.user.id, repository: args.repository })

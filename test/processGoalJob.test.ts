@@ -206,6 +206,7 @@ test('goal processing defers the PR label until successful terminal reconciliati
     run_generation: data.generation, run_claim: data.claimId,
   };
   const events: string[] = [];
+  let completedTaskResult: Record<string, unknown> | undefined;
   const dependencies = {
     claim: async () => goal,
     withHeartbeat: async (_job: GoalJobData, operation: () => Promise<unknown>) => operation(),
@@ -213,7 +214,10 @@ test('goal processing defers the PR label until successful terminal reconciliati
       goal, agent: {}, githubToken: 'token',
       worktree: { worktreePath: '/tmp/worktree', branchName: 'goal/ship-it' }, pendingInput: null,
     } }),
-    execute: async () => ({ success: true, modelUsed: 'gpt-5.6', executionTimeMs: 1, logs: '', modifiedFiles: [] }),
+    execute: async () => ({
+      success: true, modelUsed: 'gpt-5.6', executionTimeMs: 1, logs: '',
+      modifiedFiles: ['src/inbox.tsx'], summary: 'Added swipe dismissal, Undo, and compact notification recaps.',
+    }),
     result: {
       loadGoal: async () => goal, fencedGoal: async () => goal, acknowledgeInput: async () => {},
       recordMetrics: async () => {}, handleStopped: async () => null,
@@ -227,7 +231,11 @@ test('goal processing defers the PR label until successful terminal reconciliati
       labelPullRequest: async (repository: string, prNumber: number) => { events.push(`labeled:${repository}#${prNumber}`); },
       markTaskReconciled: async () => { events.push('reconciled'); },
       stateManager: () => ({
-        markTaskCompleted: async () => { events.push('task-completed'); return { state: 'completed' }; },
+        markTaskCompleted: async (_taskId: string, result: Record<string, unknown>) => {
+          completedTaskResult = result;
+          events.push('task-completed');
+          return { state: 'completed' };
+        },
         markTaskFailed: async () => ({ state: 'failed' }),
       }),
     },
@@ -237,6 +245,10 @@ test('goal processing defers the PR label until successful terminal reconciliati
 
   assert.deepEqual(outcome, { status: 'complete', goalId: 'goal-complete' });
   assert.deepEqual(events, ['previews:42', 'finalized', 'description:42', 'labeled:acme/repo#42', 'task-completed', 'reconciled']);
+  assert.equal(
+    completedTaskResult?.notificationRecap,
+    'Added swipe dismissal, Undo, and compact notification recaps.',
+  );
 });
 
 test('goal execution keeps initial prompt identity separate from FIFO continuation input', async () => {

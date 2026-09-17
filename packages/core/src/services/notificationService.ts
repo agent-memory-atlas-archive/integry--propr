@@ -840,6 +840,25 @@ export class NotificationService {
         return unreadCount(this.database, userId);
     }
 
+    /** Read one Inbox receipt owned by a user, including a dismissed one. */
+    async getNotification(
+        userId: string,
+        eventId: string
+    ): Promise<Notification | null> {
+        assertIdentifier(userId, 'notification userId');
+        assertIdentifier(eventId, 'notification eventId');
+        const row = await this.database('notification_user_states as receipt')
+            .join('notification_events as event', 'event.event_id', 'receipt.event_id')
+            .select(eventSelectColumns())
+            .where({
+                'receipt.event_id': eventId,
+                'receipt.user_id': userId,
+                'receipt.inbox_enabled': true
+            })
+            .first() as NotificationRow | undefined;
+        return row ? toNotification(row) : null;
+    }
+
     async markNotificationRead(
         userId: string,
         eventId: string

@@ -22,6 +22,7 @@ export { IdempotentGitHubOps, IdempotentGitOps } from './utils/idempotentOps.js'
 export { estimateTokens, countTokens, getUsageStats, getDetailedUsageStats, getCachePricingMultipliers, calculateCostWithCachePricing } from './utils/tokenCalculation.js';
 export type { DetailedUsageStats, CachePricingMultipliers } from './utils/tokenCalculation.js';
 export { buildAnalysisSafetySuffix } from './agents/impl/utils/analysisPromptSafety.js';
+export { sanitizeAgentReport } from './agents/agentReportSanitizer.js';
 export { formatResetTime, addModelSpecificDelay, parseResetTimeFromMessage, calculateNextRoundHourPlus2Minutes, formatRetryTime, hoursUntil } from './utils/scheduling.js';
 export { filterCommentByAuthor, checkCommentTrigger, checkCommentIgnore } from './utils/commentFilters.js';
 export { ensureGitRepository } from './utils/git/gitValidation.js';
@@ -90,7 +91,7 @@ export { cleanupExistingBranch, createWorktreeFromExistingBranch } from './git/w
 export { cleanupWorktree, cleanupExpiredWorktrees, safePruneWorktrees, setupWorktreePermissions, addToSafeDirectories, verifyWorktreeCreation, setupWorktreeRemote, getWorktreePath } from './git/worktreeOperations.js';
 export { isGitCorruptionError, GIT_CORRUPTION_PATTERNS, getCorruptionPatternStrings } from './git/gitCorruption.js';
 export { assertCommitIsAncestor, mergeBaseIntoBranch } from './git/mergeOperations.js';
-export type { MergeOutcome, MergeResult } from './git/mergeOperations.js';
+export type { MergeOutcome, MergeResult, MergeBaseIntoBranchOptions } from './git/mergeOperations.js';
 
 export {
     issueQueue,

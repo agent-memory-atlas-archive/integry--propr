@@ -1,10 +1,26 @@
 import { test, mock, describe, beforeEach } from 'node:test';
 import assert from 'node:assert';
+import { sanitizeAgentReport } from '../packages/core/src/agents/agentReportSanitizer.js';
 
 // --- Mock Setup ---
 
+function defaultOctokitRequest(route: string) {
+    if (route === 'GET /repos/{owner}/{repo}/pulls/{pull_number}') {
+        return {
+            data: {
+                head: mockPullRequestHead,
+                base: { ref: 'main' },
+                title: 'Contribution',
+                body: 'PR body',
+                user: { login: 'contributor' },
+            },
+        };
+    }
+    return { data: { id: 100, html_url: 'https://github.com/test' } };
+}
+
 const mockOctokit = {
-    request: mock.fn(async () => ({ data: { id: 100, html_url: 'https://github.com/test' } })),
+    request: mock.fn(async (route: string, ..._args: unknown[]) => defaultOctokitRequest(route)),
     auth: mock.fn(async () => ({ token: 'mock-github-token' })),
 };
 
@@ -115,11 +131,25 @@ let mockMergeResult: {
 } = { outcome: 'clean', baseCommit: 'base-sha-456' };
 const mockMergeBaseIntoBranch = mock.fn(async () => mockMergeResult);
 const mockCommitChanges = mock.fn(async () => ({ commitHash: 'abc1234567890', commitMessage: 'test commit' }));
-const mockPushBranch = mock.fn(async () => {});
+const mockPushBranch = mock.fn(async () => ({ commitHash: 'abc1234567890', rebased: false }));
 const mockAssertCommitIsAncestor = mock.fn(async () => {});
 const mockStageChanges = mock.fn(async () => {});
-const mockEnsureRepoCloned = mock.fn(async () => '/tmp/repos/test');
-const mockCreateWorktreeFromExistingBranch = mock.fn(async () => ({ worktreePath: '/tmp/worktrees/test', branchName: 'feature-branch' }));
+const mockEnsureRepoCloned = mock.fn(async (_options?: Record<string, unknown>) => '/tmp/repos/test');
+const mockCreateWorktreeFromExistingBranch = mock.fn(async (..._args: unknown[]) => ({ worktreePath: '/tmp/worktrees/test', branchName: 'feature-branch' }));
+
+// The live PR head decides which repository merge work is prepared in and pushed to.
+let mockPullRequestHead: {
+    ref: string;
+    sha: string;
+    repo: { name: string; full_name: string; owner: { login: string } } | null;
+} = {
+    ref: 'feature-branch',
+    sha: 'head-sha-123',
+    repo: { name: 'test-repo', full_name: 'test-owner/test-repo', owner: { login: 'test-owner' } },
+};
+let mockGitRawImplementation: (args: string[]) => Promise<string> = async (args: string[]) =>
+    args[0] === 'merge-base' ? args[1] : '';
+const mockGitRaw = mock.fn(async (args: string[]) => mockGitRawImplementation(args));
 const mockCleanupWorktree = mock.fn(async () => {});
 const mockEnsureGitRepository = mock.fn(async () => {});
 const mockGetRepoUrl = mock.fn(() => 'https://github.com/test-owner/test-repo.git');
@@ -174,7 +204,7 @@ await mock.module('@propr/core', {
         createWorktreeFromExistingBranch: mockCreateWorktreeFromExistingBranch,
         getRepoUrl: mockGetRepoUrl,
         commitChanges: mockCommitChanges,
-        createHooklessGit: mock.fn(() => ({ add: mockStageChanges })),
+        createHooklessGit: mock.fn(() => ({ add: mockStageChanges, raw: mockGitRaw })),
         pushBranch: mockPushBranch,
         assertCommitIsAncestor: mockAssertCommitIsAncestor,
         mergeBaseIntoBranch: mockMergeBaseIntoBranch,
@@ -195,7 +225,7 @@ await mock.module('@propr/core', {
             migrate: { latest: mock.fn(async () => {}) }
         }),
         cleanupWorktree: mockCleanupWorktree,
-        sanitizeAgentReport: (value: string | null | undefined) => value ?? '',
+        sanitizeAgentReport,
         generateCorrelationId: mock.fn(() => 'test-correlation-id'),
         AI_COMMIT_AUTHOR: { name: 'ProPR AI', email: 'ai@propr.dev' },
     }
@@ -228,6 +258,93 @@ await mock.module('../src/jobs/prCommentJobUtils.js', {
             rawOutput: r.rawOutput,
         })),
     }
+});
+
+function isMockPublicationPermissionDenied(error: unknown): boolean {
+    const message = error instanceof Error ? error.message : String(error);
+    return /write access to repository not granted|resource not accessible by integration|refusing to allow a GitHub App to create or update workflow .+ without [`'"]?workflows[`'"]? permission/i.test(message);
+}
+
+class MockPullRequestPublication {
+    target: { repoOwner: string; repoName: string; branchName: string; isFork: boolean };
+    status = '';
+
+    constructor(
+        private readonly _octokit: unknown,
+        private readonly ref: { repoOwner: string; repoName: string; pullRequestNumber: number },
+        private readonly source: { head: typeof mockPullRequestHead },
+    ) {
+        const [fullNameOwner, fullNameRepo] = source.head.repo?.full_name.split('/', 2) ?? [];
+        this.target = {
+            repoOwner: source.head.repo?.owner.login || fullNameOwner,
+            repoName: source.head.repo?.name || fullNameRepo,
+            branchName: source.head.ref,
+            isFork: source.head.repo?.owner.login !== ref.repoOwner || source.head.repo?.name !== ref.repoName,
+        };
+    }
+
+    private async createWorktree(worktreeDirName: string) {
+        const localRepoPath = await mockEnsureRepoCloned({
+            owner: this.target.repoOwner,
+            repoName: this.target.repoName,
+            authToken: 'mock-github-token',
+        });
+        const worktreeInfo = await mockCreateWorktreeFromExistingBranch(localRepoPath, this.target.branchName, {
+            worktreeDirName,
+            owner: this.target.repoOwner,
+            repoName: this.target.repoName,
+        });
+        const mergeBase = await mockGitRaw(['merge-base', this.source.head.sha, 'HEAD']);
+        if (mergeBase.trim() !== this.source.head.sha.toLowerCase()) {
+            await mockCleanupWorktree(localRepoPath, worktreeInfo.worktreePath, worktreeInfo.branchName);
+            throw new Error(`Prepared ${this.target.repoOwner}/${this.target.repoName} branch ${this.target.branchName} does not contain the pull request head ${this.source.head.sha}`);
+        }
+        return { localRepoPath, worktreeInfo };
+    }
+
+    private adoptContinuation() {
+        this.target = {
+            repoOwner: this.ref.repoOwner,
+            repoName: this.ref.repoName,
+            branchName: `propr/continuation-pr-${this.ref.pullRequestNumber}`,
+            isFork: false,
+        };
+        this.status = `Implementation destination: [continuation PR #100](https://github.com/${this.ref.repoOwner}/${this.ref.repoName}/pull/100).`;
+    }
+
+    async prepare(worktreeDirName: string) {
+        let prepared = await this.createWorktree(worktreeDirName);
+        if (!this.target.isFork) return prepared;
+        try {
+            await mockGitRaw(['push', '--dry-run', '--porcelain', 'mock-fork-url', `HEAD:refs/heads/${this.target.branchName}`]);
+            return prepared;
+        } catch (error) {
+            if (!isMockPublicationPermissionDenied(error)) throw error;
+            await mockCleanupWorktree(prepared.localRepoPath, prepared.worktreeInfo.worktreePath, prepared.worktreeInfo.branchName);
+            this.adoptContinuation();
+            prepared = await this.createWorktree(worktreeDirName);
+            return prepared;
+        }
+    }
+
+    async push(worktreePath: string) {
+        const push = () => mockPushBranch(worktreePath, this.target.branchName, {
+            repoUrl: `https://github.com/${this.target.repoOwner}/${this.target.repoName}.git`,
+            authToken: 'mock-github-token',
+            rebaseOnNonFastForward: false,
+        });
+        try {
+            return await push();
+        } catch (error) {
+            if (!this.target.isFork || !isMockPublicationPermissionDenied(error)) throw error;
+            this.adoptContinuation();
+            return push();
+        }
+    }
+}
+
+await mock.module('../src/jobs/prPublication.js', {
+    namedExports: { PullRequestPublication: MockPullRequestPublication },
 });
 
 // Import the module under test
@@ -264,11 +381,21 @@ function resetAllMocks() {
     mockMergeBaseIntoBranch.mock.resetCalls();
     mockCommitChanges.mock.resetCalls();
     mockPushBranch.mock.resetCalls();
+    mockPushBranch.mock.mockImplementation(async () => ({ commitHash: 'abc1234567890', rebased: false }));
     mockAssertCommitIsAncestor.mock.resetCalls();
     mockStageChanges.mock.resetCalls();
     mockAgent.executeTask.mock.resetCalls();
     mockConfiguredAgent.executeTask.mock.resetCalls();
     mockCleanupWorktree.mock.resetCalls();
+    mockEnsureRepoCloned.mock.resetCalls();
+    mockCreateWorktreeFromExistingBranch.mock.resetCalls();
+    mockGitRaw.mock.resetCalls();
+    mockGitRawImplementation = async (args: string[]) => (args[0] === 'merge-base' ? args[1] : '');
+    mockPullRequestHead = {
+        ref: 'feature-branch',
+        sha: 'head-sha-123',
+        repo: { name: 'test-repo', full_name: 'test-owner/test-repo', owner: { login: 'test-owner' } },
+    };
     mockRedisStore.clear();
     mockSettings = {};
 }
@@ -280,7 +407,7 @@ describe('processMergeConflictJob', () => {
         mockMergeResult = { outcome: 'clean', baseCommit: 'base-sha-456' };
         mockMergeBaseIntoBranch.mock.mockImplementation(async () => mockMergeResult);
         mockStateManager.getTaskState.mock.mockImplementation(async () => null);
-        mockOctokit.request.mock.mockImplementation(async () => ({ data: { id: 100, html_url: 'https://github.com/test' } }));
+        mockOctokit.request.mock.mockImplementation(async (route: string) => defaultOctokitRequest(route));
     });
 
     test('clean merge: commits and pushes after agent verification', async () => {
@@ -415,6 +542,10 @@ describe('processMergeConflictJob', () => {
         assert.strictEqual(metadata.sessionId, 'session-123');
         assert.strictEqual(metadata.conversationId, 'conv-123');
         assert.strictEqual(metadata.commitHash, 'abc1234567890');
+        assert.strictEqual(
+            metadata.notificationRecap,
+            'Merged main into feature-branch and resolved conflicts in 1 file. Resolved merge conflicts'
+        );
     });
 
     test('records the model from configured default agent in initial task state', async () => {
@@ -537,6 +668,125 @@ describe('processMergeConflictJob', () => {
         // Worktree should be cleaned up
         assert.strictEqual(mockCleanupWorktree.mock.callCount(), 1);
         assert.strictEqual(mockCleanupWorktree.mock.calls[0].arguments[3].success, true);
+    });
+
+    test('fork head: prepares, merges and pushes in the contributor repository', async () => {
+        mockPullRequestHead = {
+            ref: 'feature-branch',
+            sha: 'fork-head-sha',
+            repo: { name: 'test-repo', full_name: 'contributor/test-repo', owner: { login: 'contributor' } },
+        };
+
+        const result = await processMergeConflictJob(createMockJob());
+
+        assert.strictEqual(result.status, 'complete');
+        // The clone and worktree come from the fork, never from the base repository.
+        assert.strictEqual(mockEnsureRepoCloned.mock.calls[0].arguments[0].owner, 'contributor');
+        assert.strictEqual(mockEnsureRepoCloned.mock.calls[0].arguments[0].repoName, 'test-repo');
+        assert.deepStrictEqual(mockCreateWorktreeFromExistingBranch.mock.calls[0].arguments[2], {
+            worktreeDirName: mockCreateWorktreeFromExistingBranch.mock.calls[0].arguments[2].worktreeDirName,
+            owner: 'contributor',
+            repoName: 'test-repo',
+        });
+        // The base branch is fetched from the base repository, not from the fork's origin.
+        const mergeOptions = mockMergeBaseIntoBranch.mock.calls[0].arguments[2] as { baseRepoUrl?: string; authToken?: string };
+        assert.strictEqual(mergeOptions.baseRepoUrl, 'https://github.com/test-owner/test-repo.git');
+        assert.strictEqual(mergeOptions.authToken, 'mock-github-token');
+        assert.strictEqual(mockPushBranch.mock.callCount(), 1);
+        // A merge commit cannot be replayed by rebase, so a diverged head must fail loudly.
+        assert.strictEqual(mockPushBranch.mock.calls[0].arguments[2].rebaseOnNonFastForward, false);
+    });
+
+    test('same-repository head: keeps fetching the base branch from origin', async () => {
+        await processMergeConflictJob(createMockJob());
+
+        assert.deepStrictEqual(mockMergeBaseIntoBranch.mock.calls[0].arguments[2], {});
+        assert.strictEqual(mockEnsureRepoCloned.mock.calls[0].arguments[0].owner, 'test-owner');
+    });
+
+    test('fails without running the agent when the prepared branch lacks the PR head', async () => {
+        mockPullRequestHead = {
+            ref: 'feature-branch',
+            sha: 'fork-head-sha',
+            repo: { name: 'test-repo', full_name: 'contributor/test-repo', owner: { login: 'contributor' } },
+        };
+        // A same-named branch in an unrelated repository does not contain the PR head.
+        mockGitRawImplementation = async (args: string[]) => (args[0] === 'merge-base' ? 'unrelated-sha' : '');
+
+        await assert.rejects(
+            async () => processMergeConflictJob(createMockJob()),
+            /does not contain the pull request head fork-head-sha/
+        );
+
+        assert.strictEqual(mockAgent.executeTask.mock.callCount(), 0);
+        assert.strictEqual(mockMergeBaseIntoBranch.mock.callCount(), 0);
+        assert.strictEqual(mockPushBranch.mock.callCount(), 0);
+    });
+
+    test('preflight permission denial adopts a self-owned continuation before the agent runs', async () => {
+        mockPullRequestHead = {
+            ref: 'feature-branch',
+            sha: 'fork-head-sha',
+            repo: { name: 'test-repo', full_name: 'contributor/test-repo', owner: { login: 'contributor' } },
+        };
+        mockGitRawImplementation = async (args: string[]) => {
+            if (args[0] === 'merge-base') return args[1];
+            if (args[0] === 'push') throw new Error('remote: Write access to repository not granted.');
+            return '';
+        };
+
+        const result = await processMergeConflictJob(createMockJob());
+
+        assert.strictEqual(result.status, 'complete');
+        assert.strictEqual(mockAgent.executeTask.mock.callCount(), 1);
+        assert.strictEqual(mockPushBranch.mock.callCount(), 1);
+        assert.strictEqual(mockPushBranch.mock.calls[0].arguments[1], 'propr/continuation-pr-42');
+        const completionComment = mockOctokit.request.mock.calls.find(
+            (c: { arguments: [string, Record<string, unknown>] }) =>
+                c.arguments[0] === 'PATCH /repos/{owner}/{repo}/issues/comments/{comment_id}' &&
+                (c.arguments[1].body as string).includes('continuation PR #100')
+        );
+        assert.ok(completionComment, 'Expected the successful continuation destination to be reported on the PR');
+    });
+
+    test('workflow-permission rejection on final fork push preserves the resolved merge in a continuation', async () => {
+        mockPullRequestHead = {
+            ref: 'feature-branch',
+            sha: 'fork-head-sha',
+            repo: { name: 'test-repo', full_name: 'contributor/test-repo', owner: { login: 'contributor' } },
+        };
+        mockMergeResult = { outcome: 'conflicts', baseCommit: 'base-sha-456', conflictedFiles: ['src/index.ts'] };
+        mockMergeBaseIntoBranch.mock.mockImplementation(async () => mockMergeResult);
+        mockPushBranch.mock.mockImplementationOnce(async () => {
+            throw new Error("remote: refusing to allow a GitHub App to create or update workflow `.github/workflows/pr-build-check.yml` without `workflows` permission");
+        });
+
+        const result = await processMergeConflictJob(createMockJob());
+
+        assert.strictEqual(result.status, 'complete');
+        assert.strictEqual(mockAgent.executeTask.mock.callCount(), 1, 'the resolved merge must not be regenerated');
+        assert.strictEqual(mockCommitChanges.mock.callCount(), 1, 'the resolved merge must be committed once');
+        assert.strictEqual(mockPushBranch.mock.callCount(), 2);
+        assert.strictEqual(mockPushBranch.mock.calls[0].arguments[1], 'feature-branch');
+        assert.strictEqual(mockPushBranch.mock.calls[1].arguments[1], 'propr/continuation-pr-42');
+        const completionComment = mockOctokit.request.mock.calls.find(
+            (c: { arguments: [string, Record<string, unknown>] }) =>
+                c.arguments[0] === 'PATCH /repos/{owner}/{repo}/issues/comments/{comment_id}' &&
+                (c.arguments[1].body as string).includes('continuation PR #100')
+        );
+        assert.ok(completionComment);
+    });
+
+    test('fails when the head repository has been deleted', async () => {
+        mockPullRequestHead = { ref: 'feature-branch', sha: 'fork-head-sha', repo: null };
+
+        await assert.rejects(
+            async () => processMergeConflictJob(createMockJob()),
+            /head repository is unavailable or has been deleted/
+        );
+
+        assert.strictEqual(mockEnsureRepoCloned.mock.callCount(), 0);
+        assert.strictEqual(mockAgent.executeTask.mock.callCount(), 0);
     });
 
     test('failed merge: marks cleanup as unsuccessful', async () => {

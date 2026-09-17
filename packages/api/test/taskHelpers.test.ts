@@ -33,6 +33,7 @@ async function createDatabase(): Promise<Knex> {
     table.string('state');
     table.timestamp('timestamp');
     table.text('reason');
+    table.text('metadata');
     table.index('task_id');
     table.index('state');
     table.index('timestamp');
@@ -162,7 +163,7 @@ test('presentation enrichment queries are constrained to the selected page', asy
   database.on('query', event => queries.push({ sql: event.sql, bindings: event.bindings ?? [] }));
   await getTasksFromDb({ db: database, status: 'all', repository: 'all', limit: 1, offset: 0 });
 
-  assert.equal(queries.length, 5);
+  assert.equal(queries.length, 6);
   assert.doesNotMatch(queries[0].sql, /ROW_NUMBER|processing_start_timestamp|analysis_report/i);
   assert.doesNotMatch(queries[1].sql, /ROW_NUMBER|processing_start_timestamp|analysis_report/i);
   for (const query of queries.slice(2)) {

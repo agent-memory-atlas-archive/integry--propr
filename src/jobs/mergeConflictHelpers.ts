@@ -3,7 +3,7 @@ import type { WorktreeInfo } from '@propr/core';
 import type { AutoResolveContext } from '@propr/core';
 import { getAuthenticatedOctokit } from '@propr/core';
 import type { WorkerStateManager } from '@propr/core';
-import { db, TaskStates } from '@propr/core';
+import { db, sanitizeAgentReport, TaskStates } from '@propr/core';
 import { buildDeterministicPrTaskSubtitle, buildPrTaskTitle } from './prTaskTitleHelpers.js';
 
 const RESTRICTED_FAILURE_DETAIL = 'Agent execution failed; detailed output is available in restricted logs.';
@@ -70,6 +70,7 @@ ${hasKnownConflicts ? `**Known Conflicted Files:**\n${fileList}\n` : ''}
 **CRITICAL INSTRUCTIONS:**
 - You are in directory: ${worktreeInfo.worktreePath}
 - DO NOT commit your changes - the system will handle the commit for you.
+- Do not inspect or repair .git permissions. In your final response, do not mention that changes are uncommitted or that you did not create a commit; ProPR creates and reports the commit after you finish.
 - DO NOT create a new pull request.
 - The repository is ${repoOwner}/${repoName}.
 - Focus ONLY on finding and resolving merge conflicts. Do not make unrelated changes.
@@ -158,8 +159,9 @@ export function buildMergeConflictComment(options: {
         comment += '\n\n';
     }
 
-    if (resolutionSummary) {
-        comment += `### Resolution Summary\n\n${resolutionSummary}\n\n`;
+    const publishableSummary = sanitizeAgentReport(resolutionSummary);
+    if (publishableSummary) {
+        comment += `### Resolution Summary\n\n${publishableSummary}\n\n`;
     } else {
         comment += `An AI agent resolved the merge conflicts while preserving the PR intent.\n\n`;
     }

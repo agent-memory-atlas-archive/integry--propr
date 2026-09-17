@@ -6,6 +6,7 @@ import {
     getModelName,
     logger,
     redactSecrets,
+    sanitizeAgentReport,
     retryConfigs,
     VISUAL_PREVIEW_DIRECTORY,
     VISUAL_PREVIEW_MARKER,
@@ -46,7 +47,7 @@ function formatDuration(milliseconds: number): string {
 
 function cleanSummary(summary: string | undefined): string {
     if (!summary?.trim()) return 'The goal agent completed the requested implementation.';
-    return redactSecrets(summary)
+    return sanitizeAgentReport(redactSecrets(summary))
         .split('\n')
         .filter(line => !line.replaceAll('\\', '/').includes(`${VISUAL_PREVIEW_DIRECTORY}/`))
         .join('\n')

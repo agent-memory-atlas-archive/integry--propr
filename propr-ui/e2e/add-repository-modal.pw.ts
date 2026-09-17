@@ -82,6 +82,7 @@ test('bounds the dialog and keeps every control keyboard-reachable at 900x500 wi
   const alias = dialog.getByLabel('Alias (optional)');
   const branch = dialog.getByRole('button', { name: 'Base Branch (optional)' });
   const followup = dialog.getByRole('checkbox', { name: /Automatic CI follow-up/ });
+  const visualPreviews = dialog.getByRole('checkbox', { name: /Visual previews/ });
   const cancel = dialog.getByRole('button', { name: 'Cancel' });
   const submit = dialog.getByRole('button', { name: 'Add Repository', exact: true });
 
@@ -115,6 +116,16 @@ test('bounds the dialog and keeps every control keyboard-reachable at 900x500 wi
   await expect(followup).toBeFocused();
   await page.keyboard.press('Space');
   await page.keyboard.press('Tab');
+  await expect(visualPreviews).toBeFocused();
+  await page.keyboard.press('Space');
+  await expect(visualPreviews).toBeChecked();
+  await page.keyboard.press('Tab');
+  await expect(dialog.getByRole('button', { name: 'Images' })).toBeFocused();
+  await page.keyboard.press('Tab');
+  await expect(dialog.getByRole('button', { name: 'Videos' })).toBeFocused();
+  await page.keyboard.press('Tab');
+  await expect(dialog.getByLabel('Preview instructions (optional)')).toBeFocused();
+  await page.keyboard.press('Tab');
   await expect(cancel).toBeFocused();
   await page.keyboard.press('Tab');
   await expect(submit).toBeFocused();
@@ -129,9 +140,9 @@ test('bounds the dialog and keeps every control keyboard-reachable at 900x500 wi
   expect((await footer.boundingBox())?.y).toBe(footerBefore?.y);
   expect(await body.evaluate(element => element.scrollTop)).toBeGreaterThan(0);
 
-  await page.keyboard.press('Shift+Tab');
-  await page.keyboard.press('Shift+Tab');
-  await page.keyboard.press('Shift+Tab');
+  for (let step = 0; step < 7; step += 1) {
+    await page.keyboard.press('Shift+Tab');
+  }
   await expect(branch).toBeFocused();
   await page.keyboard.press('Enter');
   const branchFilter = dialog.getByRole('combobox', { name: 'Base Branch (optional)' });

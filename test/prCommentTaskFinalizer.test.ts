@@ -109,6 +109,31 @@ test('completed PR comment results close nonterminal task states', async (t) => 
             );
             assert.equal(result.outcome, 'finalized');
             assert.equal(store.current().state, testCase.expected);
+            if (testCase.expected === TaskStates.COMPLETED) {
+                assert.equal(
+                    store.current().history.at(-1)?.metadata?.notificationRecap,
+                    testCase.status === 'partial'
+                        ? 'Published the partial pull request follow-up result.'
+                        : testCase.status === 'skipped'
+                            ? 'Skipped the pull request follow-up because no further work was needed.'
+                            : 'Completed the pull request follow-up.',
+                );
+            }
+        });
+    }
+});
+
+test('completed PR comment recovery explains known continuation outcomes', async (t) => {
+    const cases = [
+        ['review_moved_to_continuation', 'Review processing moved to the continuation pull request.'],
+        ['ultrafix_waiting_for_exact_head_checks', 'Review deferred until the continuation pull request passes its exact-head checks.'],
+    ] as const;
+
+    for (const [reason, expectedRecap] of cases) {
+        await t.test(reason, async () => {
+            const store = createStore(makeTask());
+            await finalizeCompletedPRCommentTask('task-123', { status: 'skipped', reason }, store);
+            assert.equal(store.current().history.at(-1)?.metadata?.notificationRecap, expectedRecap);
         });
     }
 });

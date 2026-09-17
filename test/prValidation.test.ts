@@ -48,6 +48,9 @@ describe('PR Validation Utils', () => {
         assert.ok(prompt.includes('gh issue view 123'));
         assert.ok(prompt.includes('gh issue view 123 --comments'));
         assert.ok(prompt.includes('read all issue comments for additional context'));
+        assert.ok(prompt.includes('Do not commit them; ProPR handles commits'));
+        assert.ok(prompt.includes('Do not create a Pull Request'));
+        assert.ok(prompt.includes('do not report that changes are uncommitted'));
     });
 
     test('generateEnhancedClaudePrompt should handle missing issue body gracefully', () => {

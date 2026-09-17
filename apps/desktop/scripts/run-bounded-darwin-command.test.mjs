@@ -232,17 +232,22 @@ test('a throwing readiness hook cleans up the owned process group', async () => 
 test('timeout remains primary while TERM runs the wrapper cleanup', async () => {
   const fixtureRoot = await mkdtemp(join(tmpdir(), 'propr-darwin-cleanup-'));
   const cleanupPath = join(fixtureRoot, 'cleanup.txt');
+  const readyPath = join(fixtureRoot, 'ready.pid');
   try {
     await assert.rejects(runBoundedProcess({
       executable: '/bin/bash',
       arguments: ['-c', [
         'trap \"printf CLEANED > \\\"$1\\\"; exit 143\" TERM',
+        'printf %s \"$$\" > \"$2\"',
         'sleep 30 &',
         'wait',
-      ].join('\n'), 'bash', cleanupPath],
+      ].join('\n'), 'bash', cleanupPath, readyPath],
       timeoutMs: 300,
       terminationGraceMs: 1_000,
       maxOutputBytes: 1_024,
+      // Start the timeout only after bash has installed its TERM trap, so a slow
+      // runner cannot deliver TERM to a shell that has no cleanup handler yet.
+      onSpawn: () => { waitForFixtureProcessId(readyPath); },
     }), error => error instanceof BoundedProcessError
       && error.reason === 'timeout'
       && error.result.exitCode === 143);
