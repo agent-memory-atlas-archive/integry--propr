@@ -14,7 +14,7 @@ import { closeAgentImagePreparationQueue, enqueueAgentImagePreparation } from '.
 import { isAgentImageDiskPressureError } from './agentImageBuildCapacity.js';
 import { areAgentImagesAvailable, captureRuntimePackageStateVersion, hasRuntimePackageStateChanged } from './agentRegistryRuntimeState.js';
 import {
-    deferCircuitOpenInspection, inspectUnifiedAgentImageWhileCircuitOpen, logUnifiedAgentImageCircuitOpen,
+    deferCircuitOpenInspection, inspectUnifiedAgentImageWhileCircuitOpen, mustStayInspectOnly,
     recordUnifiedAgentImageFailure, scheduleUnifiedAgentImageRetry, startUnifiedAgentImageRecovery,
     type CircuitOpenInspectionState, type UnavailableUnifiedAgentImage,
 } from './unifiedAgentImageRecovery.js';
@@ -23,7 +23,7 @@ export type { AgentRegistryOperationalStatus } from './agentRegistryTypes.js';
 
 const RUNTIME_PACKAGE_STATE_CHECK_INTERVAL_MS = 5000;
 
-export { getUnifiedAgentImageRetryDelay, UNIFIED_AGENT_IMAGE_RETRY_MAX_ATTEMPTS } from './unifiedAgentImageRecovery.js';
+export { getUnifiedAgentImageRetryDelay, UNIFIED_AGENT_IMAGE_CIRCUIT_COOLDOWN_MS, UNIFIED_AGENT_IMAGE_RETRY_MAX_ATTEMPTS } from './unifiedAgentImageRecovery.js';
 
 /**
  * AgentRegistry manages the lifecycle of agent instances.
@@ -408,6 +408,14 @@ export class AgentRegistry {
 
     async waitForPendingRefresh(): Promise<void> { await this.pendingBackgroundRefresh; }
 
+    /**
+     * Throttled, inspect-only availability check for callers that are blocked
+     * on a missing image. It never enqueues preparation and never starts a
+     * Docker build, so an image repaired by another process can clear this
+     * process's failure without bypassing the recovery circuit.
+     */
+    inspectAgentImageAvailability(): Promise<void> { return this.initialized && !this.unavailableUnifiedAgentImage ? Promise.resolve() : inspectUnifiedAgentImageWhileCircuitOpen(this.circuitOpenInspection, this.pendingBackgroundRefresh, () => this.refresh()); }
+
     private async captureRuntimePackageStateVersion(): Promise<void> {
         await captureRuntimePackageStateVersion((updatedAt, unavailable) => {
             this.runtimePackagesUpdatedAt = updatedAt;
@@ -451,7 +459,9 @@ export class AgentRegistry {
     }
 
     private startWorkerOwnedImageRecovery(fromTimer = false): Promise<void> {
-        if (this.unavailableUnifiedAgentImage?.circuitBreakerOpen) return inspectUnifiedAgentImageWhileCircuitOpen(this.circuitOpenInspection, this.pendingBackgroundRefresh, () => this.refresh());
+        // A circuit opened by transient failures reopens for a fresh attempt
+        // once its cooldown has elapsed; disk pressure keeps it closed.
+        if (mustStayInspectOnly(this.unavailableUnifiedAgentImage)) return inspectUnifiedAgentImageWhileCircuitOpen(this.circuitOpenInspection, this.pendingBackgroundRefresh, () => this.refresh());
         const firstAgent = this.agents.values().next().value as Agent | undefined;
         const imageTag = this.unavailableUnifiedAgentImage?.imageTag || firstAgent?.config.dockerImage;
         const generation = this.imageRecoveryGeneration;
@@ -516,7 +526,9 @@ export class AgentRegistry {
         this.clearUnifiedAgentImageRetry();
         this.unavailableUnifiedAgentImage = result.state;
         deferCircuitOpenInspection(this.circuitOpenInspection);
-        if (!result.shouldRetry) return logUnifiedAgentImageCircuitOpen(imageTag, error, result.state.retryCount, !!result.state.operatorActionRequired);
+        // Scheduling arms the retry backoff, or the bounded cooldown that
+        // half-opens a circuit opened by transient failures; an open circuit
+        // that requires operator action stays closed to new attempts.
         this.scheduleUnifiedAgentImageRetry();
     }
 

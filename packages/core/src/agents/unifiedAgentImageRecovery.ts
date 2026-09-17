@@ -5,6 +5,7 @@ export const UNIFIED_AGENT_IMAGE_RETRY_MAX_DELAY_MS = 5 * 60_000;
 export const UNIFIED_AGENT_IMAGE_RETRY_MAX_ATTEMPTS = 5;
 const UNIFIED_AGENT_IMAGE_RETRY_JITTER_RATIO = 0.25;
 export const UNIFIED_AGENT_IMAGE_CIRCUIT_INSPECTION_INTERVAL_MS = 60_000;
+export const UNIFIED_AGENT_IMAGE_CIRCUIT_COOLDOWN_MS = UNIFIED_AGENT_IMAGE_RETRY_MAX_DELAY_MS;
 
 export interface CircuitOpenInspectionState {
     after: number;
@@ -47,7 +48,48 @@ export interface UnavailableUnifiedAgentImage {
     retryCount?: number;
     nextRetryAt?: string;
     circuitBreakerOpen?: boolean;
+    circuitOpenedAt?: string;
     operatorActionRequired?: boolean;
+}
+
+/** Time left before a transient open circuit may attempt preparation again. */
+export function remainingUnifiedAgentImageCircuitCooldown(
+    unavailable: UnavailableUnifiedAgentImage,
+    now = Date.now(),
+): number {
+    const openedAt = unavailable.circuitOpenedAt ? Date.parse(unavailable.circuitOpenedAt) : Number.NaN;
+    if (!Number.isFinite(openedAt)) return 0;
+    return Math.max(0, openedAt + UNIFIED_AGENT_IMAGE_CIRCUIT_COOLDOWN_MS - now);
+}
+
+/**
+ * Half-opens a bounded circuit and reports whether recovery must remain
+ * inspect-only because the circuit is still open.
+ */
+export function mustStayInspectOnly(unavailable: UnavailableUnifiedAgentImage | null): boolean {
+    halfOpenUnifiedAgentImageCircuit(unavailable);
+    return !!unavailable?.circuitBreakerOpen;
+}
+
+/**
+ * Bounded half-open transition. Disk pressure needs an operator and stays open,
+ * but a circuit opened by transient failures must not disable preparation for
+ * the lifetime of the process: after the cooldown the next attempt is allowed
+ * through with a fresh retry budget. Returns true when the circuit was closed.
+ */
+export function halfOpenUnifiedAgentImageCircuit(
+    unavailable: UnavailableUnifiedAgentImage | null | undefined,
+    now = Date.now(),
+): boolean {
+    if (!unavailable?.circuitBreakerOpen || unavailable.operatorActionRequired) return false;
+    if (remainingUnifiedAgentImageCircuitCooldown(unavailable, now) > 0) return false;
+    unavailable.circuitBreakerOpen = undefined;
+    unavailable.circuitOpenedAt = undefined;
+    unavailable.retryCount = 0;
+    unavailable.nextRetryAt = undefined;
+    logger.warn({ imageTag: unavailable.imageTag, error: unavailable.error },
+        'Unified agent image recovery circuit half-opened after its cooldown; resuming preparation attempts');
+    return true;
 }
 
 export function getUnifiedAgentImageRetryDelay(
@@ -62,30 +104,54 @@ export function getUnifiedAgentImageRetryDelay(
     return Math.round(exponentialDelay * jitter);
 }
 
-export function scheduleUnifiedAgentImageRetry(options: {
+interface UnifiedAgentImageRetryOptions {
     unavailable: UnavailableUnifiedAgentImage | null;
     retryTimer: NodeJS.Timeout | null;
     startRecovery: (fromTimer: boolean) => Promise<void>;
     setRetryTimer: (timer: NodeJS.Timeout | null) => void;
-}): void {
+}
+
+function armUnifiedAgentImageRetryTimer(
+    options: UnifiedAgentImageRetryOptions,
+    unavailable: UnavailableUnifiedAgentImage,
+    delay: number,
+): void {
+    const timer = setTimeout(() => {
+        options.setRetryTimer(null);
+        if (unavailable.circuitBreakerOpen && !halfOpenUnifiedAgentImageCircuit(unavailable)) return;
+        void options.startRecovery(true);
+    }, delay);
+    timer.unref?.();
+    options.setRetryTimer(timer);
+}
+
+export function scheduleUnifiedAgentImageRetry(options: UnifiedAgentImageRetryOptions): void {
     const { unavailable } = options;
-    if (
-        options.retryTimer
-        || !unavailable
-        || unavailable.circuitBreakerOpen
-        || (unavailable.retryCount ?? 0) >= UNIFIED_AGENT_IMAGE_RETRY_MAX_ATTEMPTS
-    ) return;
+    if (options.retryTimer || !unavailable) return;
+
+    if (unavailable.circuitBreakerOpen) {
+        // Only an operator can clear disk pressure. Every other open circuit is
+        // released by its own timer so transient failures stay recoverable.
+        if (unavailable.operatorActionRequired) return;
+        armUnifiedAgentImageRetryTimer(options, unavailable, remainingUnifiedAgentImageCircuitCooldown(unavailable));
+        return;
+    }
+    if ((unavailable.retryCount ?? 0) >= UNIFIED_AGENT_IMAGE_RETRY_MAX_ATTEMPTS) return;
 
     const delay = unavailable.nextRetryAt
         ? Math.max(0, Date.parse(unavailable.nextRetryAt) - Date.now())
         : getUnifiedAgentImageRetryDelay(unavailable.retryCount ?? 1);
     unavailable.nextRetryAt = new Date(Date.now() + delay).toISOString();
-    const timer = setTimeout(() => {
-        options.setRetryTimer(null);
-        if (!unavailable.circuitBreakerOpen) void options.startRecovery(true);
-    }, delay);
-    timer.unref?.();
-    options.setRetryTimer(timer);
+    armUnifiedAgentImageRetryTimer(options, unavailable, delay);
+}
+
+/**
+ * Inspect-only observations while the circuit is open must not extend the
+ * cooldown, so an already-open circuit keeps its original opening time.
+ */
+function circuitOpenedAt(open: boolean, previous: UnavailableUnifiedAgentImage | null): string | undefined {
+    if (!open) return undefined;
+    return previous?.circuitOpenedAt ?? new Date().toISOString();
 }
 
 export function recordUnifiedAgentImageFailure(options: {
@@ -111,9 +177,13 @@ export function recordUnifiedAgentImageFailure(options: {
         recordedAt: new Date().toISOString(),
         retryCount,
         circuitBreakerOpen: circuitBreakerOpen || undefined,
+        circuitOpenedAt: circuitOpenedAt(circuitBreakerOpen, previous),
         operatorActionRequired: operatorActionRequired || undefined,
         nextRetryAt: circuitBreakerOpen ? undefined : nextRetryAt,
     };
+    if (circuitBreakerOpen) {
+        logUnifiedAgentImageCircuitOpen(options.imageTag, options.error, retryCount, !!operatorActionRequired);
+    }
     return { state, shouldRetry: !circuitBreakerOpen };
 }
 

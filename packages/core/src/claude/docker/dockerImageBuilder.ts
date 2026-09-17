@@ -87,7 +87,11 @@ async function buildBundle(
             basePath
         ], { timeout: 20 * 60 * 1000 });
         if (result.exitCode !== 0) {
-            const error = `Build failed with exit code ${result.exitCode}: ${result.stderr}`;
+            // Docker reports disk pressure on either stream depending on the
+            // builder and progress mode. Both are kept so the message-based
+            // disk-pressure classification cannot miss `no space left on device`.
+            const output = [result.stderr, result.stdout].map(stream => stream?.trim()).filter(Boolean).join('\n');
+            const error = `Build failed with exit code ${result.exitCode}: ${output}`;
             logger.error({ imageTag, versions, error }, 'Failed to build unified agent image');
             return { success: false, imageTag, error };
         }

@@ -67,6 +67,7 @@ let saveSettings: typeof import('../packages/core/src/config/configManager.js').
 let saveAgentRuntimePackageState: typeof import('../packages/core/src/agents/runtime/agentRuntimePackages.js').saveAgentRuntimePackageState;
 let getUnifiedAgentImageRetryDelay: typeof import('../packages/core/src/agents/AgentRegistry.js').getUnifiedAgentImageRetryDelay;
 let UNIFIED_AGENT_IMAGE_RETRY_MAX_ATTEMPTS: typeof import('../packages/core/src/agents/AgentRegistry.js').UNIFIED_AGENT_IMAGE_RETRY_MAX_ATTEMPTS;
+let UNIFIED_AGENT_IMAGE_CIRCUIT_COOLDOWN_MS: typeof import('../packages/core/src/agents/AgentRegistry.js').UNIFIED_AGENT_IMAGE_CIRCUIT_COOLDOWN_MS;
 
 before(async () => {
     ({ AgentRegistry } = await import('../packages/core/src/agents/AgentRegistry.js'));
@@ -75,7 +76,11 @@ before(async () => {
     ({ runMigrations, closeConnection } = await import('../packages/core/src/db/connection.js'));
     ({ saveAgents, loadAgents, saveSettings } = await import('../packages/core/src/config/configManager.js'));
     ({ saveAgentRuntimePackageState } = await import('../packages/core/src/agents/runtime/agentRuntimePackages.js'));
-    ({ getUnifiedAgentImageRetryDelay, UNIFIED_AGENT_IMAGE_RETRY_MAX_ATTEMPTS } = await import('../packages/core/src/agents/AgentRegistry.js'));
+    ({
+        getUnifiedAgentImageRetryDelay,
+        UNIFIED_AGENT_IMAGE_RETRY_MAX_ATTEMPTS,
+        UNIFIED_AGENT_IMAGE_CIRCUIT_COOLDOWN_MS,
+    } = await import('../packages/core/src/agents/AgentRegistry.js'));
     await runMigrations();
 });
 
@@ -407,8 +412,18 @@ for (const failurePath of ['enqueue', 'refresh'] as const) {
             assert.strictEqual(status.retryCount, UNIFIED_AGENT_IMAGE_RETRY_MAX_ATTEMPTS);
             assert.strictEqual(status.circuitBreakerOpen, true);
             assert.strictEqual(status.nextRetryAt, undefined);
-            assert.strictEqual(internal.unifiedAgentImageRetryTimer, null);
+            assert.strictEqual(status.circuitOpenedAt, new Date().toISOString());
             assert.strictEqual(enqueuePreparation.mock.callCount(), UNIFIED_AGENT_IMAGE_RETRY_MAX_ATTEMPTS - 1);
+            // A circuit opened by transient failures is bounded: its cooldown
+            // timer half-opens it and preparation resumes with a fresh budget.
+            assert.ok(internal.unifiedAgentImageRetryTimer);
+            t.mock.timers.tick(UNIFIED_AGENT_IMAGE_CIRCUIT_COOLDOWN_MS);
+            await internal.pendingBackgroundRefresh;
+            const halfOpened = registry.getOperationalStatus().unifiedAgentImage;
+            assert.strictEqual(halfOpened.circuitBreakerOpen, undefined);
+            assert.strictEqual(halfOpened.circuitOpenedAt, undefined);
+            assert.strictEqual(halfOpened.retryCount, 1);
+            assert.strictEqual(enqueuePreparation.mock.callCount(), UNIFIED_AGENT_IMAGE_RETRY_MAX_ATTEMPTS);
         } finally {
             internal.clearUnifiedAgentImageRetry();
         }
@@ -619,6 +634,114 @@ test('AgentRegistry inspects an open circuit in the background while retained ag
         await internal.circuitOpenInspection.pending;
         assert.deepStrictEqual(registry.getOperationalStatus(), { unifiedAgentImage: { status: 'ready' } });
         assert.strictEqual(registry.getAgentByAlias('opencode')?.config.dockerImage, 'propr/agent:b');
+        assert.strictEqual(enqueuePreparation.mock.callCount(), 0);
+    } finally {
+        internal.clearUnifiedAgentImageRetry();
+    }
+});
+
+for (const error of ['temporary download failure', 'docker build failed: no space left on device']) {
+    test(`AgentRegistry bounds a transient open circuit but keeps disk pressure open: ${error}`, async t => {
+        t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: 1_000 });
+        const registry = AgentRegistry.getInstance();
+        registry.setImagePreparationOwner(false);
+        const internal = registry as unknown as {
+            initialized: boolean;
+            ensureUnifiedAgentImage: () => Promise<string | null>;
+            recordUnavailableUnifiedAgentImage: (tag: string, error: string, attemptFailed?: boolean) => void;
+            startWorkerOwnedImageRecovery: () => Promise<void>;
+            registeredAgentImagesAvailable: () => Promise<boolean>;
+            pendingBackgroundRefresh: Promise<void> | null;
+            clearUnifiedAgentImageRetry: () => void;
+        };
+        const imageTag = 'propr/agent:cooldown';
+        const operatorActionRequired = error.includes('no space');
+        internal.initialized = true;
+        internal.registeredAgentImagesAvailable = async () => false;
+        internal.ensureUnifiedAgentImage = async () => {
+            internal.recordUnavailableUnifiedAgentImage(imageTag, 'not prepared', false);
+            return null;
+        };
+        enqueuePreparation.mock.mockImplementation(async () => { throw new Error(error); });
+        do {
+            internal.recordUnavailableUnifiedAgentImage(imageTag, error);
+        } while (!registry.getOperationalStatus().unifiedAgentImage.circuitBreakerOpen);
+        try {
+            const opened = registry.getOperationalStatus().unifiedAgentImage;
+            assert.strictEqual(opened.operatorActionRequired, operatorActionRequired || undefined);
+            assert.strictEqual(opened.circuitOpenedAt, new Date().toISOString());
+
+            // Inside the cooldown the circuit stays open, and the inspect-only
+            // observations it permits must not push the cooldown out.
+            t.mock.timers.tick(UNIFIED_AGENT_IMAGE_CIRCUIT_COOLDOWN_MS - 1);
+            await internal.startWorkerOwnedImageRecovery();
+            await internal.pendingBackgroundRefresh;
+            const waiting = registry.getOperationalStatus().unifiedAgentImage;
+            assert.strictEqual(waiting.circuitBreakerOpen, true);
+            assert.strictEqual(waiting.circuitOpenedAt, opened.circuitOpenedAt);
+            assert.strictEqual(enqueuePreparation.mock.callCount(), 0);
+
+            // Once the cooldown elapses, only an operator can release disk
+            // pressure; a transient circuit resumes with a fresh retry budget.
+            t.mock.timers.tick(1);
+            await internal.startWorkerOwnedImageRecovery();
+            await internal.pendingBackgroundRefresh;
+            const resumed = registry.getOperationalStatus().unifiedAgentImage;
+            assert.strictEqual(enqueuePreparation.mock.callCount(), operatorActionRequired ? 0 : 1);
+            assert.strictEqual(resumed.circuitBreakerOpen, operatorActionRequired ? true : undefined);
+            if (!operatorActionRequired) assert.strictEqual(resumed.retryCount, 1);
+        } finally {
+            internal.clearUnifiedAgentImageRetry();
+        }
+    });
+}
+
+test('AgentRegistry exposes a throttled inspect-only availability check for a blocked startup', async t => {
+    t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: 1_000 });
+    const registry = AgentRegistry.getInstance();
+    registry.setImagePreparationOwner(true);
+    const prepare = t.mock.method(registry, 'prepareImagesAndRefresh', async () => {});
+    const refreshes = t.mock.method(registry, 'refresh');
+    const internal = registry as unknown as {
+        ensureUnifiedAgentImage: () => Promise<string | null>;
+        recordUnavailableUnifiedAgentImage: (tag: string, error: string, attemptFailed?: boolean) => void;
+        registeredAgentImagesAvailable: () => Promise<boolean>;
+        markUnifiedAgentImageReady: (tag: string) => string;
+        circuitOpenInspection: { after: number; pending: Promise<void> | null };
+        clearUnifiedAgentImageRetry: () => void;
+    };
+    const imageTag = 'propr/agent:startup';
+    let available = false;
+    internal.registeredAgentImagesAvailable = async () => available;
+    internal.ensureUnifiedAgentImage = async () => {
+        if (available) return internal.markUnifiedAgentImageReady(imageTag);
+        internal.recordUnavailableUnifiedAgentImage(imageTag, 'not prepared', false);
+        return null;
+    };
+    do {
+        internal.recordUnavailableUnifiedAgentImage(imageTag, 'temporary download failure');
+    } while (!registry.getOperationalStatus().unifiedAgentImage.circuitBreakerOpen);
+    try {
+        // The startup gate polls every second; the check stays throttled and
+        // never requests a build of its own.
+        for (let poll = 0; poll < 3; poll += 1) await registry.inspectAgentImageAvailability();
+        assert.strictEqual(registry.getOperationalStatus().unifiedAgentImage.status, 'unavailable');
+        assert.strictEqual(refreshes.mock.callCount(), 0);
+
+        // An image prepared by another process clears the failure through the
+        // inspect-only refresh, without bypassing the recovery circuit.
+        t.mock.timers.tick(60_000);
+        available = true;
+        await registry.inspectAgentImageAvailability();
+        await internal.circuitOpenInspection.pending;
+        assert.deepStrictEqual(registry.getOperationalStatus(), { unifiedAgentImage: { status: 'ready' } });
+        assert.strictEqual(refreshes.mock.callCount(), 1);
+
+        // A ready registry needs no further inspection.
+        t.mock.timers.tick(60_000);
+        await registry.inspectAgentImageAvailability();
+        assert.strictEqual(refreshes.mock.callCount(), 1);
+        assert.strictEqual(prepare.mock.callCount(), 0);
         assert.strictEqual(enqueuePreparation.mock.callCount(), 0);
     } finally {
         internal.clearUnifiedAgentImageRetry();
@@ -975,7 +1098,11 @@ for (const recover of [true, false]) {
             assert.strictEqual(registry.getAgentByAlias('opencode')?.config.dockerImage, recover ? 'propr/agent:b' : 'propr/agent:a');
             t.mock.timers.tick(10 * 60_000);
             await internal.pendingBackgroundRefresh;
-            assert.strictEqual(attempts, recover ? 3 : 5);
+            // A transient circuit half-opens after its cooldown, so the owner
+            // makes one further attempt instead of staying degraded forever.
+            assert.strictEqual(attempts, recover ? 3 : 6);
+            assert.strictEqual(registry.getOperationalStatus().unifiedAgentImage.circuitBreakerOpen, undefined);
+            assert.strictEqual(registry.getAgentByAlias('opencode')?.config.dockerImage, recover ? 'propr/agent:b' : 'propr/agent:a');
             assert.strictEqual(enqueuePreparation.mock.callCount(), 0);
         } finally {
             internal.clearUnifiedAgentImageRetry();

@@ -7,6 +7,7 @@ export interface AgentRegistryOperationalStatus {
         retryCount?: number;
         nextRetryAt?: string;
         circuitBreakerOpen?: boolean;
+        circuitOpenedAt?: string;
         operatorActionRequired?: boolean;
     };
 }

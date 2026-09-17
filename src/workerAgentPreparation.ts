@@ -17,9 +17,11 @@ export async function prepareAgentRegistryAtStartup(): Promise<AgentRegistry> {
     }
     // Owner retries are bounded by the registry backoff/circuit. Queued
     // preparation and config recovery can also establish readiness; polling
-    // here only observes status and never starts another build.
+    // here adds a throttled inspect-only check so an image prepared by another
+    // process still clears this failure, and never starts another build.
     while (!registry.isInitialized() || registry.getOperationalStatus().unifiedAgentImage.status !== 'ready') {
         await setTimeout(1_000);
+        await registry.inspectAgentImageAvailability();
     }
     logger.info({
         agentCount: registry.getAllAgents().length,

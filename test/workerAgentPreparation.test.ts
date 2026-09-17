@@ -16,6 +16,7 @@ const refresh = mock.fn(async () => {
     initialized = true;
     ready = builtImage === 'required';
 });
+const inspect = mock.fn(async () => {});
 let initialized = false;
 let resumePoll: (() => void) | undefined;
 const prepare = mock.fn(async () => { initialized = true; });
@@ -24,6 +25,7 @@ const registry = {
     prepareImagesAndRefresh: prepare,
     recoverImagesAndRefresh: recover,
     refresh,
+    inspectAgentImageAvailability: inspect,
     isInitialized: () => initialized,
     getOperationalStatus: () => ({
         unifiedAgentImage: ready
@@ -52,7 +54,7 @@ beforeEach(() => {
     initialized = false;
     builtImage = undefined;
     failure = { status: 'unavailable', error: 'ENOSPC', retryCount: 1, circuitBreakerOpen: true, operatorActionRequired: true };
-    for (const fn of [prepare, recover, refresh, ensureBundle]) fn.mock.resetCalls();
+    for (const fn of [prepare, recover, refresh, ensureBundle, inspect]) fn.mock.resetCalls();
 });
 
 for (const throws of [false, true]) {
@@ -71,11 +73,13 @@ for (const throws of [false, true]) {
         assert.strictEqual(prepare.mock.callCount(), 1);
 
         // The startup gate yields while the independent preparation consumer
-        // serves requests. Status polling itself must never start more builds.
+        // serves requests. Status polling runs the throttled inspect-only
+        // availability check and must never start more builds.
         resumePoll!();
         await new Promise<void>(resolve => setImmediate(resolve));
         assert.strictEqual(taskCapacityStarted, false);
         assert.strictEqual(prepare.mock.callCount(), 1);
+        assert.strictEqual(inspect.mock.callCount(), 1);
 
         // The preparation processor remains usable while startup is waiting
         // and returns the underlying error to the requesting API registry.
