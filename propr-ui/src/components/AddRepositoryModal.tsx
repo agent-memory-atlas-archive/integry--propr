@@ -1,6 +1,8 @@
 // CI retrigger
 import React from 'react';
+import { Image, Video } from 'lucide-react';
 import { BaseBranchSelector } from './BaseBranchSelector';
+import type { VisualPreviewSettings } from '../hooks/repositoryVisualPreview';
 
 const FOCUSABLE_SELECTOR = [
   'a[href]',
@@ -17,13 +19,13 @@ interface AddRepositoryModalProps {
   newAlias: string;
   newBaseBranch: string;
   autoFollowupOnFailedCi: boolean;
-  visualPreviewEnabled: boolean;
+  visualPreview: VisualPreviewSettings;
   availableRepos: string[];
   onRepoChange: (value: string) => void;
   onAliasChange: (value: string) => void;
   onBaseBranchChange: (value: string) => void;
   onAutoFollowupOnFailedCiChange: (value: boolean) => void;
-  onVisualPreviewEnabledChange: (value: boolean) => void;
+  onVisualPreviewChange: (value: VisualPreviewSettings) => void;
   onAdd: () => void;
   onClose: () => void;
   isReadOnly?: boolean;
@@ -35,13 +37,13 @@ export const AddRepositoryModal: React.FC<AddRepositoryModalProps> = ({
   newAlias,
   newBaseBranch,
   autoFollowupOnFailedCi,
-  visualPreviewEnabled,
+  visualPreview,
   availableRepos,
   onRepoChange,
   onAliasChange,
   onBaseBranchChange,
   onAutoFollowupOnFailedCiChange,
-  onVisualPreviewEnabledChange,
+  onVisualPreviewChange,
   onAdd,
   onClose,
   isReadOnly = false,
@@ -53,6 +55,7 @@ export const AddRepositoryModal: React.FC<AddRepositoryModalProps> = ({
   const baseBranchId = React.useId();
   const baseBranchLabelId = React.useId();
   const baseBranchDescriptionId = React.useId();
+  const previewInstructionsId = React.useId();
   const dialogRef = React.useRef<HTMLDivElement>(null);
   const repositoryInputRef = React.useRef<HTMLInputElement>(null);
 
@@ -106,6 +109,21 @@ export const AddRepositoryModal: React.FC<AddRepositoryModalProps> = ({
     if (isReadOnly) return;
     onAdd();
   };
+
+  const togglePreviewType = (type: 'image' | 'video') => {
+    const selected = visualPreview.types.includes(type);
+    if (selected && visualPreview.types.length === 1) return;
+    onVisualPreviewChange({
+      ...visualPreview,
+      types: selected ? visualPreview.types.filter(candidate => candidate !== type) : [...visualPreview.types, type]
+    });
+  };
+
+  const previewTypeButtonClassName = (type: 'image' | 'video') => `inline-flex items-center gap-1 rounded-md border px-2 py-1 text-xs transition-colors focus:outline-none focus:ring-2 focus:ring-primary-500 ${
+    visualPreview.types.includes(type)
+      ? 'border-teal-300 bg-teal-50 text-teal-700'
+      : 'border-gray-300 bg-white text-gray-500'
+  }`;
 
   const handleBackdropClick = (e: React.MouseEvent) => {
     if (e.target === e.currentTarget) {
@@ -206,26 +224,69 @@ export const AddRepositoryModal: React.FC<AddRepositoryModalProps> = ({
               <span>
                 <span className="block text-sm font-medium text-gray-700">Automatic CI follow-up</span>
                 <span className="block text-xs text-gray-500 mt-0.5">
-                  Start an automatic follow-up when this repository's CI fails. Off by default.
+                  Start an automatic follow-up when this repository's CI fails.
                 </span>
               </span>
             </label>
 
-            <label className="flex items-start gap-3">
-              <input
-                type="checkbox"
-                checked={visualPreviewEnabled}
-                onChange={(e) => onVisualPreviewEnabledChange(e.target.checked)}
-                disabled={isReadOnly}
-                className="mt-0.5 h-4 w-4 rounded border-gray-300 text-primary-600 focus:ring-primary-500"
-              />
-              <span>
-                <span className="block text-sm font-medium text-gray-700">Visual previews</span>
-                <span className="block text-xs text-gray-500 mt-0.5">
-                  Add rendered previews of visual changes to this repository's pull requests. Off by default.
+            <div>
+              <label className="flex items-start gap-3">
+                <input
+                  type="checkbox"
+                  checked={visualPreview.enabled}
+                  onChange={(e) => onVisualPreviewChange({ ...visualPreview, enabled: e.target.checked })}
+                  disabled={isReadOnly}
+                  className="mt-0.5 h-4 w-4 rounded border-gray-300 text-primary-600 focus:ring-primary-500"
+                />
+                <span>
+                  <span className="block text-sm font-medium text-gray-700">Visual previews</span>
+                  <span className="block text-xs text-gray-500 mt-0.5">
+                    Add rendered previews of visual changes to this repository's pull requests.
+                  </span>
                 </span>
-              </span>
-            </label>
+              </label>
+
+              {visualPreview.enabled && (
+                <div className="ml-7 mt-3 space-y-3">
+                  <div role="group" aria-label="Preview types" className="flex flex-wrap items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => togglePreviewType('image')}
+                      disabled={isReadOnly}
+                      aria-pressed={visualPreview.types.includes('image')}
+                      title={visualPreview.types.length === 1 && visualPreview.types.includes('image') ? 'At least one preview type is required' : 'Include image previews'}
+                      className={previewTypeButtonClassName('image')}
+                    >
+                      <Image className="h-3 w-3" aria-hidden="true" /> Images
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => togglePreviewType('video')}
+                      disabled={isReadOnly}
+                      aria-pressed={visualPreview.types.includes('video')}
+                      title={visualPreview.types.length === 1 && visualPreview.types.includes('video') ? 'At least one preview type is required' : 'Include video previews'}
+                      className={previewTypeButtonClassName('video')}
+                    >
+                      <Video className="h-3 w-3" aria-hidden="true" /> Videos
+                    </button>
+                  </div>
+
+                  <div>
+                    <label htmlFor={previewInstructionsId} className="block text-sm font-medium text-gray-700 mb-1">Preview instructions (optional)</label>
+                    <textarea
+                      id={previewInstructionsId}
+                      value={visualPreview.instructions || ''}
+                      onChange={(e) => onVisualPreviewChange({ ...visualPreview, instructions: e.target.value })}
+                      disabled={isReadOnly}
+                      maxLength={4000}
+                      rows={2}
+                      placeholder="e.g., Capture separate desktop and mobile views"
+                      className="w-full resize-y px-3 py-2 bg-white text-gray-900 border border-gray-300 rounded-md text-sm focus:ring-2 focus:ring-primary-500 focus:border-primary-500"
+                    />
+                  </div>
+                </div>
+              )}
+            </div>
           </div>
 
           {/* Modal Footer */}

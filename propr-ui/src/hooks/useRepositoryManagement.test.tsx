@@ -296,12 +296,12 @@ describe('useRepositoryManagement', () => {
     await waitFor(() => expect(result.current.loading).toBe(false));
 
     act(() => {
-      result.current.handleAddRepo('integry/propr', '', 'release', false, true);
+      result.current.handleAddRepo('integry/propr', '', 'release', false, { enabled: true, types: ['image', 'video'], instructions: '  ' });
     });
     await waitFor(() => expect(mockUpdateRepoConfig).toHaveBeenCalledTimes(1));
 
     const savedRepos = mockUpdateRepoConfig.mock.calls[0][0];
-    const expectedPreview = { enabled: true, types: ['video'], instructions: 'Capture mobile.' };
+    const expectedPreview = { enabled: true, types: ['image', 'video'], instructions: 'Capture mobile.' };
     expect(savedRepos[0].visualPreview).toEqual(expectedPreview);
     expect(savedRepos[1].visualPreview).toEqual({ enabled: false, types: ['image'] });
     expect(savedRepos[2]).toMatchObject({ name: 'integry/propr', baseBranch: 'release', visualPreview: expectedPreview });
@@ -318,12 +318,33 @@ describe('useRepositoryManagement', () => {
     await waitFor(() => expect(result.current.loading).toBe(false));
 
     act(() => {
-      result.current.handleAddRepo('integry/propr', '', 'release', false, false);
+      result.current.handleAddRepo('integry/propr', '', 'release', false, { enabled: false, types: ['video'], instructions: 'Ignored.' });
     });
     await waitFor(() => expect(mockUpdateRepoConfig).toHaveBeenCalledTimes(1));
 
     const savedRepos = mockUpdateRepoConfig.mock.calls[0][0];
-    expect(savedRepos.map(repo => repo.visualPreview?.enabled)).toEqual([true, true]);
+    expect(savedRepos.map(repo => repo.visualPreview)).toEqual([
+      { enabled: true, types: ['image'] },
+      { enabled: true, types: ['image'] }
+    ]);
+  });
+
+  it('saves the selected preview types and trimmed instructions when adding a repository', async () => {
+    mockGetRepoConfig.mockResolvedValue({ repos_to_monitor: [] });
+
+    const { result } = renderHook(() => useRepositoryManagement());
+    await waitFor(() => expect(result.current.loading).toBe(false));
+
+    act(() => {
+      result.current.handleAddRepo('integry/new', '', '', false, { enabled: true, types: ['video'], instructions: '  Capture desktop and mobile.  ' });
+    });
+    await waitFor(() => expect(mockUpdateRepoConfig).toHaveBeenCalledTimes(1));
+
+    expect(mockUpdateRepoConfig.mock.calls[0][0][0].visualPreview).toEqual({
+      enabled: true,
+      types: ['video'],
+      instructions: 'Capture desktop and mobile.'
+    });
   });
 
   it('toggles automatic CI follow-up for one repository without changing others', async () => {

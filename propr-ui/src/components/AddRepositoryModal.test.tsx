@@ -16,13 +16,13 @@ function renderModal(overrides: Partial<React.ComponentProps<typeof AddRepositor
     newAlias: '',
     newBaseBranch: '',
     autoFollowupOnFailedCi: false,
-    visualPreviewEnabled: false,
+    visualPreview: { enabled: false, types: ['image'] },
     availableRepos: ['integry/propr'],
     onRepoChange: vi.fn(),
     onAliasChange: vi.fn(),
     onBaseBranchChange: vi.fn(),
     onAutoFollowupOnFailedCiChange: vi.fn(),
-    onVisualPreviewEnabledChange: vi.fn(),
+    onVisualPreviewChange: vi.fn(),
     onAdd: vi.fn(),
     onClose: vi.fn(),
     ...overrides,
@@ -79,13 +79,13 @@ describe('AddRepositoryModal', () => {
       newAlias="Production"
       newBaseBranch="release/2026.09"
       autoFollowupOnFailedCi
-      visualPreviewEnabled
+      visualPreview={{ enabled: true, types: ['image'] }}
       availableRepos={['integry/propr']}
       onRepoChange={vi.fn()}
       onAliasChange={vi.fn()}
       onBaseBranchChange={onBaseBranchChange}
       onAutoFollowupOnFailedCiChange={vi.fn()}
-      onVisualPreviewEnabledChange={vi.fn()}
+      onVisualPreviewChange={vi.fn()}
       onAdd={onAdd}
       onClose={vi.fn()}
     />);
@@ -97,11 +97,30 @@ describe('AddRepositoryModal', () => {
   });
 
   it('reports visual preview selection changes', () => {
-    const onVisualPreviewEnabledChange = vi.fn();
-    renderModal({ onVisualPreviewEnabledChange });
+    const onVisualPreviewChange = vi.fn();
+    renderModal({ onVisualPreviewChange });
 
+    expect(screen.queryByRole('button', { name: 'Images' })).not.toBeInTheDocument();
+    expect(screen.queryByLabelText('Preview instructions (optional)')).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole('checkbox', { name: /Visual previews/ }));
-    expect(onVisualPreviewEnabledChange).toHaveBeenCalledWith(true);
+    expect(onVisualPreviewChange).toHaveBeenCalledWith({ enabled: true, types: ['image'] });
+  });
+
+  it('shows preview types and instructions once visual previews are enabled', () => {
+    const onVisualPreviewChange = vi.fn();
+    renderModal({ visualPreview: { enabled: true, types: ['image'] }, onVisualPreviewChange });
+
+    expect(screen.getByRole('button', { name: 'Images' })).toHaveAttribute('aria-pressed', 'true');
+    expect(screen.getByRole('button', { name: 'Videos' })).toHaveAttribute('aria-pressed', 'false');
+
+    fireEvent.click(screen.getByRole('button', { name: 'Images' }));
+    expect(onVisualPreviewChange).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Videos' }));
+    expect(onVisualPreviewChange).toHaveBeenLastCalledWith({ enabled: true, types: ['image', 'video'] });
+
+    fireEvent.change(screen.getByLabelText('Preview instructions (optional)'), { target: { value: 'Capture mobile.' } });
+    expect(onVisualPreviewChange).toHaveBeenLastCalledWith({ enabled: true, types: ['image'], instructions: 'Capture mobile.' });
   });
 
   it('preserves read-only permissions for every mutating control', () => {
