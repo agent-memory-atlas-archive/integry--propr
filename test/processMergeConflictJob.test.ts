@@ -542,6 +542,10 @@ describe('processMergeConflictJob', () => {
         assert.strictEqual(metadata.sessionId, 'session-123');
         assert.strictEqual(metadata.conversationId, 'conv-123');
         assert.strictEqual(metadata.commitHash, 'abc1234567890');
+        assert.strictEqual(
+            metadata.notificationRecap,
+            'Merged main into feature-branch and resolved conflicts in 1 file. Resolved merge conflicts'
+        );
     });
 
     test('records the model from configured default agent in initial task state', async () => {

@@ -331,6 +331,12 @@ for (const failure of ['PR creation', 'continuation push']) {
             assert.ok(completions.some(c => c.taskId === 'task-1'));
             assert.equal(taskStates.get('task-1'), 'completed');
             assert.equal(taskStates.get(retryTaskId), 'completed');
+            if (retryTaskId !== 'task-1') {
+                assert.equal(
+                    completions.find(c => c.taskId === retryTaskId)?.metadata.historyMetadata.notificationRecap,
+                    'Recovered and published the pending follow-up result.',
+                );
+            }
             assert.equal((await database('tasks').first()).commit_hash, produced[0]);
             assert.match(completionBodies[0], /Saved agent summary/);
             assert.match(completionBodies[0], /saved-session/);
@@ -379,6 +385,10 @@ for (const initialChecksPassing of [true, false]) {
         assert.deepEqual(restoredComments, pendingComments);
         assert.equal(taskStates.get('review-task'), 'completed');
         assert.equal(completions.find(c => c.taskId === 'review-task')?.metadata.historyMetadata.deferred, true);
+        assert.equal(
+            completions.find(c => c.taskId === 'review-task')?.metadata.historyMetadata.notificationRecap,
+            'Review deferred until the continuation pull request passes its exact-head checks.',
+        );
         assert.equal(heldLocks.size, 0);
         assert.equal(git(repoPath('upstream'), 'rev-parse', 'propr/continuation-pr-42'), produced[0]);
         const record = (await findPRContinuation(ref))!;
@@ -476,6 +486,10 @@ test('/fix retries preflight adoption after PR creation fails, then stops once t
     next.data.commandMode = 'fix';
     assert.equal((await run(next)).status, 'skipped');
     assert.equal(prompts.length, 1);
+    assert.match(
+        completions.find(c => c.taskId === 'task-2')?.metadata.historyMetadata.notificationRecap,
+        /Automated review\/fix processing has stopped on this original PR/,
+    );
 });
 
 test('preflight denial after the base incorporated the source SHA defers PR creation until implementation is published', async () => {

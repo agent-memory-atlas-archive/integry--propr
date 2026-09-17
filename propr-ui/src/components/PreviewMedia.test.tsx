@@ -41,7 +41,7 @@ describe('preview thumbnails', () => {
   it.each([['task', 'success', 1], ['task', 'error', 0], ['task', 'warning', 0], ['review', 'success', 0], ['plan', 'success', 0]])('Inbox %s/%s shows %s previews', (kind, severity, count) => {
     const notification = { id: 'n-1', kind, severity, target: { type: kind, repository: 'acme/web', taskId: 'task-1' }, readAt: null,
       title: 'Task completed', body: 'Ready to review', occurredAt: '2026-09-13', previewMedia: media } as Notification;
-    render(<MemoryRouter><InboxCard notification={notification} onDismiss={vi.fn()} onOpen={vi.fn()} onChanged={vi.fn()} mutationsEnabled={false} /></MemoryRouter>);
+    render(<MemoryRouter><InboxCard notification={notification} onDismiss={vi.fn()} onOpen={vi.fn()} mutationsEnabled={false} /></MemoryRouter>);
     expect(screen.queryAllByRole('img', { name: /Published screen/ })).toHaveLength(count);
   });
   it.each([
@@ -61,10 +61,10 @@ describe('preview thumbnails', () => {
       ...(completion ? { metadata: { completedImplementationTaskId: 'implementation-1' } } : {}),
       ...(enabled ? { previewMedia: media } : {}),
     };
-    render(<MemoryRouter><InboxCard notification={notification} onDismiss={vi.fn()} onOpen={onOpen} onChanged={vi.fn()} mutationsEnabled={false} /></MemoryRouter>);
+    render(<MemoryRouter><InboxCard notification={notification} onDismiss={vi.fn()} onOpen={onOpen} mutationsEnabled={false} /></MemoryRouter>);
     expect(screen.queryAllByRole('img', { name: /Published screen/ })).toHaveLength(count);
-    const details = screen.getByRole('link', { name: 'View details' });
-    expect(details).toHaveAttribute('href', '/repositories');
+    const details = screen.getByRole('link', { name: /Implement repository media/ });
+    expect(details).toHaveAttribute('href', 'https://github.com/acme/web/pull/42');
     fireEvent.click(details);
     expect(onOpen).toHaveBeenCalledWith(notification.id);
   });

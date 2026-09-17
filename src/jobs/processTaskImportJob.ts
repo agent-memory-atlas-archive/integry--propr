@@ -19,6 +19,7 @@ import { handleSimpleUsageLimitError } from './issueJobHelpers.js';
 import type { TaskImportJobData, JobResult } from '@propr/core';
 import type { GitHubToken } from './githubTypes.js';
 import { resolveDefaultAgentAndModel } from './prCommentAgentUtils.js';
+import { compactNotificationRecap } from './notificationRecap.js';
 
 interface TaskImportResult extends JobResult {
     repository?: string;
@@ -29,6 +30,17 @@ interface TaskImportResult extends JobResult {
         conversationTurns?: number;
         stdout?: string;
     };
+}
+
+function taskImportNotificationRecap(
+    result: { summary?: string; success: boolean },
+    repository: string,
+): string {
+    const summary = compactNotificationRecap(result.summary);
+    if (summary) return summary;
+    return result.success
+        ? `Imported repository tasks for ${repository}.`
+        : `Task import finished without importing tasks for ${repository}.`;
 }
 
 export async function processTaskImportJob(job: Job<TaskImportJobData>): Promise<TaskImportResult> {
@@ -139,7 +151,11 @@ export async function processTaskImportJob(job: Job<TaskImportJobData>): Promise
         }
 
         await stateManager.updateTaskState(taskId, TaskStates.POST_PROCESSING, { reason: 'Cleaning up worktree' });
-        await stateManager.markTaskCompleted(taskId, { status: 'complete', repository });
+        await stateManager.markTaskCompleted(taskId, {
+            status: 'complete',
+            repository,
+            notificationRecap: taskImportNotificationRecap(agentResult, repository),
+        });
 
         return {
             status: 'complete',

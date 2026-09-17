@@ -78,5 +78,6 @@ describe('issue job terminal state', () => {
     assert.equal(taskId, 'partial-agent-task');
     assert.equal(result.status, 'partial_with_pr');
     assert.equal(result.prNumber, 42);
+    assert.equal(result.notificationRecap, 'Partial result: Partial implementation');
   });
 });

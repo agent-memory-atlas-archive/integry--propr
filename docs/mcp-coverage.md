@@ -39,7 +39,7 @@ remain separate gates.
 | Repository TODO CRUD/category CRUD | `list_todos`, `get_todo`, `create_todo`, `update_todo`, `delete_todo`, `list_todo_categories`, `create_todo_category`, `update_todo_category`, `delete_todo_category` |
 | TODO category movement/order | `move_todo`; order fields on TODO/category update |
 | Star/hidden repository preferences | `get_repository_preferences`, `update_repository_preferences` |
-| Notifications read/dismiss/bounded bulk update | `list_notifications`, `mark_notification_read`, `dismiss_notification`, `update_notifications` |
+| Inbox notifications read/dismiss/clear | `list_notifications`, `get_notification`, `get_notification_unread_count`, `mark_notification_read`, `dismiss_notification`, `update_notifications`, `mark_all_notifications_read`, `clear_notifications`; without `repository` these cover system notifications and every repository in the grant; `notifications` and `notifications/{id}` resources |
 | Notification preferences, categories and quiet hours | `get_notification_preferences`, `update_notification_preferences`, `set_notification_category_preferences` |
 | Bounded plan/goal attachments and owned upload artifacts | `upload_attachment`, `get_artifact`, `get_attachment`; authenticated download links, no remote URL download |
 | Execution/model settings | `get_execution_settings`, `update_execution_settings` |

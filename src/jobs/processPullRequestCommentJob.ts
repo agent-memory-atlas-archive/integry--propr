@@ -47,6 +47,7 @@ import { loadOriginalContributionDiscussion } from './prContributionDiscussion.j
 import { PullRequestPublication } from './prPublication.js';
 import { recoverPendingPublication, type ProcessingState, type ExecuteProcessingParams } from './prPublicationRecovery.js';
 import { findPRContinuation, type Contribution } from './prContinuation.js';
+import { deferredUltrafixReviewRecap, stoppedReviewRecap } from './notificationRecap.js';
 
 const redisClient = new Redis({
     host: process.env.REDIS_HOST || '127.0.0.1',
@@ -422,7 +423,7 @@ export async function processPullRequestCommentJob(job: Job<CommentJobData>): Pr
             ultrafix: Boolean(job.data.ultrafixMeta), redis: redisClient, octokit: state.octokit,
         });
         if (stopped) {
-            await stateManager.updateTaskState(taskId, TaskStates.COMPLETED, { reason: stopped });
+            await stateManager.updateTaskState(taskId, TaskStates.COMPLETED, { reason: stopped, historyMetadata: stoppedReviewRecap(stopped) });
             return { status: 'skipped', reason: 'review_moved_to_continuation', pullRequestNumber };
         }
         // Branch early for review mode — read-only analysis, no commits or pushes
@@ -432,7 +433,7 @@ export async function processPullRequestCommentJob(job: Job<CommentJobData>): Pr
                 await restorePendingComments(context.pickedUpComments, { ...context, redisClient });
                 await stateManager.updateTaskState(taskId, TaskStates.COMPLETED, {
                     reason: 'Ultrafix review deferred until exact-head checks pass',
-                    historyMetadata: { deferred: true, recoveryReason: 'ultrafix_waiting_for_exact_head_checks' },
+                    historyMetadata: { deferred: true, recoveryReason: 'ultrafix_waiting_for_exact_head_checks', ...deferredUltrafixReviewRecap },
                 });
                 return { status: 'deferred', reason: 'ultrafix_waiting_for_exact_head_checks' };
             }

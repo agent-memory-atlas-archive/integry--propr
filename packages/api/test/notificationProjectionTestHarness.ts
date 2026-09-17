@@ -37,6 +37,8 @@ export async function createProjectionTables(database: Knex): Promise<void> {
     table.text('draft_id').primary();
     table.text('user_id').notNullable();
     table.text('repository').notNullable();
+    table.text('name').nullable();
+    table.text('plan_json').nullable();
   });
   await database.schema.createTable('instance_members', table => {
     table.text('github_user_id').primary();

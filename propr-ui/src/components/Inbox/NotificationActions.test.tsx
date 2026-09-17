@@ -1,115 +1,83 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { notificationSchema } from '@propr/shared';
 import { beforeEach, describe, expect, test, vi } from 'vitest';
-import { postTaskFollowup, stopTaskExecution } from '../../api/proprApi';
+import { postTaskFollowup } from '../../api/proprApi';
 import { ToastProvider } from '../ui/Toast';
+import { notificationFollowupCommand } from '../../pages/inboxUtils';
 import NotificationActions from './NotificationActions';
-import { MemoryRouter } from 'react-router-dom';
 
 vi.mock('../../api/proprApi', () => ({
   postTaskFollowup: vi.fn(),
-  stopTaskExecution: vi.fn(),
 }));
 
-function notification(title: string, actions: string[]) {
+function notification(overrides: Record<string, unknown>) {
   return notificationSchema.parse({
-    id: `event-${title}`,
-    deduplicationKey: `key-${title}`,
+    id: 'event-1',
+    deduplicationKey: 'key-1',
     kind: 'task',
     severity: 'success',
-    target: { type: 'task', repository: 'integry/propr', taskId: `task-${title}` },
-    title,
+    target: { type: 'task', repository: 'integry/propr', taskId: 'task-1', issueNumber: 7 },
+    title: 'Task',
     body: 'Task lifecycle update.',
     occurredAt: '2026-08-24T12:00:00.000Z',
     createdAt: '2026-08-24T12:00:00.000Z',
     readAt: null,
     dismissedAt: null,
-    actions,
+    actions: ['follow_up', 'stop', 'open_pr', 'dismiss'],
+    ...overrides,
   });
 }
 
-function renderActions(actions: string[], onChanged: () => Promise<void>) {
-  render(
-    <ToastProvider>
-      <NotificationActions
-        notification={notification('Task', actions)}
-        mutationsEnabled
-        onDismiss={vi.fn()}
-        onChanged={onChanged}
-      />
-    </ToastProvider>,
-  );
-}
+const review = notification({
+  kind: 'review',
+  title: 'Review completed for PR #12',
+  target: { type: 'review', repository: 'integry/propr', prNumber: 12, taskId: 'task-review' },
+});
 
-describe('Notification actions reconciliation', () => {
+describe('Notification follow-up commands', () => {
   beforeEach(() => {
     vi.mocked(postTaskFollowup).mockReset();
-    vi.mocked(stopTaskExecution).mockReset();
   });
 
-  test('keeps a posted follow-up successful when Inbox reconciliation fails', async () => {
+  test('offers commands only for finished reviews and pull-request runs', () => {
+    expect(notificationFollowupCommand(notification({}))).toBeNull();
+    expect(notificationFollowupCommand(review)?.commands).toEqual(['/fix']);
+    expect(notificationFollowupCommand(notification({ ...review, actions: ['dismiss'] }))).toBeNull();
+    expect(notificationFollowupCommand(notification({
+      kind: 'pull_request',
+      severity: 'info',
+      target: { type: 'pull_request', repository: 'integry/propr', prNumber: 12 },
+      metadata: { completedImplementationTaskId: 'task-implementation' },
+    }))).toEqual({ taskId: 'task-implementation', prNumber: 12, commands: ['/review', '/ultrafix'] });
+    expect(notificationFollowupCommand(notification({
+      kind: 'pull_request',
+      severity: 'info',
+      target: { type: 'pull_request', repository: 'integry/propr', prNumber: 12 },
+    }))).toBeNull();
+  });
+
+  test('sends the command to the pull request and hands the finished card back for removal', async () => {
     vi.mocked(postTaskFollowup).mockResolvedValue({ success: true, message: 'Posted' });
-    const onChanged = vi.fn().mockRejectedValue(new Error('Refresh unavailable'));
-    renderActions(['follow_up', 'dismiss'], onChanged);
-
-    fireEvent.click(screen.getByRole('button', { name: 'Follow up on Task' }));
-    fireEvent.change(screen.getByRole('textbox', { name: 'Comment' }), {
-      target: { value: 'Please add a regression test.' },
-    });
-    fireEvent.click(screen.getByRole('button', { name: 'Post Comment' }));
-
-    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
-    expect(postTaskFollowup).toHaveBeenCalledTimes(1);
-    expect(onChanged).toHaveBeenCalledTimes(1);
-    expect(screen.getByText('Follow-up posted successfully.')).toBeInTheDocument();
-    expect(await screen.findByText(/Follow-up was posted, but the Inbox couldn't refresh/))
-      .toBeInTheDocument();
-    expect(screen.queryByText(/Couldn't post the follow-up/)).not.toBeInTheDocument();
-  });
-
-  test('does not report a successful stop as failed when Inbox reconciliation fails', async () => {
-    vi.mocked(stopTaskExecution).mockResolvedValue({
-      success: true,
-      message: 'Stopping',
-      containerStopped: true,
-    });
-    const onChanged = vi.fn().mockRejectedValue(new Error('Refresh unavailable'));
-    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(true);
-    renderActions(['stop', 'dismiss'], onChanged);
-
-    fireEvent.click(screen.getByRole('button', { name: 'Stop Task' }));
-
-    expect(await screen.findByText('Stop requested successfully.')).toBeInTheDocument();
-    expect(onChanged).toHaveBeenCalledTimes(1);
-    expect(await screen.findByText(/Stop was requested, but the Inbox couldn't refresh/))
-      .toBeInTheDocument();
-    expect(screen.queryByText(/Couldn't stop the task/)).not.toBeInTheDocument();
-    confirm.mockRestore();
-  });
-
-  test('offers plan-specific refine and confirmation-gated approval destinations', () => {
-    const plan = notificationSchema.parse({
-      ...notification('Plan ready', []),
-      kind: 'plan',
-      target: { type: 'plan', repository: 'integry/propr', draftId: 'draft/one' },
-      actions: ['refine', 'approve_execute', 'dismiss'],
-    });
+    const onCommandSent = vi.fn().mockResolvedValue(undefined);
     render(
-      <MemoryRouter>
-        <ToastProvider>
-          <NotificationActions
-            notification={plan}
-            mutationsEnabled
-            onDismiss={vi.fn()}
-            onChanged={vi.fn()}
-          />
-        </ToastProvider>
-      </MemoryRouter>,
+      <ToastProvider>
+        <NotificationActions notification={review} mutationsEnabled onCommandSent={onCommandSent} />
+      </ToastProvider>,
     );
 
-    expect(screen.getByRole('link', { name: 'Refine Plan ready' }))
-      .toHaveAttribute('href', '/studio/draft%2Fone?intent=refine');
-    expect(screen.getByRole('link', { name: 'Approve or execute Plan ready' }))
-      .toHaveAttribute('href', '/studio/draft%2Fone?intent=approve_execute');
+    fireEvent.click(screen.getByRole('button', { name: 'Send /fix to PR #12' }));
+
+    await waitFor(() => expect(onCommandSent).toHaveBeenCalledTimes(1));
+    expect(postTaskFollowup).toHaveBeenCalledWith('task-review', '/fix', 'pull_request');
+    expect(screen.getByText('Sent /fix to PR #12.')).toBeInTheDocument();
+  });
+
+  test('renders nothing in read-only mode', () => {
+    render(
+      <ToastProvider>
+        <NotificationActions notification={review} mutationsEnabled={false} onCommandSent={vi.fn()} />
+      </ToastProvider>,
+    );
+    expect(screen.queryByRole('button')).not.toBeInTheDocument();
   });
 });
