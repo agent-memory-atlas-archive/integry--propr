@@ -220,6 +220,31 @@ for (const width of [320, 390]) {
   });
 }
 
+test('enables visual previews while adding a repository', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  const api = await stubRepositoryApis(page);
+  await page.goto('/repositories');
+  await page.getByRole('button', { name: '+ Add Repository' }).first().click();
+  const dialog = page.getByRole('dialog', { name: 'Add Repository' });
+  await dialog.getByLabel('Repository *').fill('integry/new-app');
+  await dialog.getByRole('checkbox', { name: /Automatic CI follow-up/ }).check();
+  await dialog.getByRole('checkbox', { name: /Visual previews/ }).check();
+  await dialog.getByRole('button', { name: 'Videos' }).click();
+  await dialog.getByLabel('Preview instructions (optional)').fill('Capture desktop and mobile views.');
+  if (process.env.PROPR_CAPTURE_PREVIEWS) {
+    await mkdir('../.propr/previews', { recursive: true });
+    await dialog.screenshot({ animations: 'disabled', path: '../.propr/previews/add-repository-visual-previews.png' });
+  }
+
+  await dialog.getByRole('button', { name: 'Add Repository', exact: true }).click();
+  await expect(dialog).toHaveCount(0);
+  await expect.poll(() => api.writes.at(-1)?.at(-1)).toMatchObject({
+    name: 'integry/new-app',
+    autoFollowupOnFailedCi: true,
+    visualPreview: { enabled: true, types: ['image', 'video'], instructions: 'Capture desktop and mobile views.' },
+  });
+});
+
 test('keeps repository and indexing changes unavailable to read-only users', async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
   await stubRepositoryApis(page, false);

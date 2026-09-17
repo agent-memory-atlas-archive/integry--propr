@@ -4,7 +4,7 @@ import { Panel, PanelGroup, PanelResizeHandle } from 'react-resizable-panels';
 import { GripVertical, ArrowLeft } from 'lucide-react';
 import { useDocumentTitle } from '../hooks/useDocumentTitle';
 import { useRepositoryManagement } from '../hooks/useRepositoryManagement';
-import { buildRepositoriesForDisplay } from '../hooks/repositoryVisualPreview';
+import { buildRepositoriesForDisplay, defaultVisualPreview, type VisualPreviewSettings } from '../hooks/repositoryVisualPreview';
 import { AddRepositoryModal } from '../components/AddRepositoryModal';
 import { RepoActionContainer } from '../components/Repositories';
 import { RepositorySaveStatusFooter } from '../components/RepositorySaveStatusFooter';
@@ -34,6 +34,7 @@ const RepositoriesPage: React.FC = () => {
   const [newAlias, setNewAlias] = useState<string>('');
   const [newBaseBranch, setNewBaseBranch] = useState<string>('');
   const [autoFollowupOnFailedCi, setAutoFollowupOnFailedCi] = useState<boolean>(false);
+  const [newVisualPreview, setNewVisualPreview] = useState<VisualPreviewSettings>(defaultVisualPreview);
   const [isModalOpen, setIsModalOpen] = useState<boolean>(false);
   const [selectedRepoId, setSelectedRepoId] = useState<string | null>(null);
   const [navActiveTab, setNavActiveTab] = useState<'chat' | 'improve' | 'browse' | 'todos' | undefined>(undefined);
@@ -60,6 +61,7 @@ const RepositoriesPage: React.FC = () => {
     setNewAlias('');
     setNewBaseBranch('');
     setAutoFollowupOnFailedCi(false);
+    setNewVisualPreview(defaultVisualPreview());
     setIsModalOpen(true);
   };
 
@@ -69,15 +71,17 @@ const RepositoriesPage: React.FC = () => {
     setNewAlias('');
     setNewBaseBranch('');
     setAutoFollowupOnFailedCi(false);
+    setNewVisualPreview(defaultVisualPreview());
   };
 
   const handleAddRepoSubmit = () => {
     if (isReadOnly) return;
-    if (handleAddRepo(newRepo, newAlias, newBaseBranch, autoFollowupOnFailedCi)) {
+    if (handleAddRepo(newRepo, newAlias, newBaseBranch, autoFollowupOnFailedCi, newVisualPreview)) {
       setNewRepo('');
       setNewAlias('');
       setNewBaseBranch('');
       setAutoFollowupOnFailedCi(false);
+      setNewVisualPreview(defaultVisualPreview());
       setIsModalOpen(false);
     }
   };
@@ -195,11 +199,13 @@ const RepositoriesPage: React.FC = () => {
         newAlias={newAlias}
         newBaseBranch={newBaseBranch}
         autoFollowupOnFailedCi={autoFollowupOnFailedCi}
+        visualPreview={newVisualPreview}
         availableRepos={availableRepos}
         onRepoChange={setNewRepo}
         onAliasChange={setNewAlias}
         onBaseBranchChange={setNewBaseBranch}
         onAutoFollowupOnFailedCiChange={setAutoFollowupOnFailedCi}
+        onVisualPreviewChange={setNewVisualPreview}
         onAdd={handleAddRepoSubmit}
         onClose={handleCloseModal}
         isReadOnly={isReadOnly}
