@@ -26,6 +26,13 @@ export function notificationReference(notification: Notification): NotificationR
     : { label: `#${target.issueNumber}`, title: `Issue #${target.issueNumber}` };
 }
 
+/** Unread indicator colour: failures red, warnings orange, everything else teal. */
+export function notificationIndicatorClass(notification: Notification): string {
+  if (notification.severity === 'error') return 'bg-red-500';
+  if (notification.severity === 'warning') return 'bg-orange-500';
+  return 'bg-teal-500';
+}
+
 export function notificationKindLabel(notification: Notification): string {
   switch (notification.kind) {
     case 'plan': return 'Plan ready';

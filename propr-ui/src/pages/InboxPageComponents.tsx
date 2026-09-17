@@ -13,6 +13,7 @@ import NotificationActions from '../components/Inbox/NotificationActions';
 import {
   formatRelativeTime,
   notificationHref,
+  notificationIndicatorClass,
   notificationKindLabel,
   notificationReference,
   notificationRepository,
@@ -145,7 +146,7 @@ export const InboxCard: React.FC<{
   const content = (
     <>
       <div className="flex flex-wrap items-center gap-x-1.5 gap-y-1 pr-8 text-xs">
-        {unread && <span className="h-2 w-2 rounded-full bg-teal-500" role="img" aria-label="Unread" />}
+        {unread && <span className={`h-2 w-2 rounded-full ${notificationIndicatorClass(notification)}`} role="img" aria-label="Unread" />}
         <span className="font-medium text-gray-700">{notificationKindLabel(notification)}</span>
         <Dot />
         <span className="min-w-0 truncate text-gray-500">{notificationRepository(notification)}</span>

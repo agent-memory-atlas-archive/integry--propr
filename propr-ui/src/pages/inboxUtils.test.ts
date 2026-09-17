@@ -4,6 +4,7 @@ import {
   isSystemNotification,
   mergeNotifications,
   notificationHref,
+  notificationIndicatorClass,
   notificationKindLabel,
   notificationPullRequestUrl,
   notificationReference,
@@ -46,6 +47,16 @@ describe('Inbox notification presentation', () => {
       'System failure',
     ]);
     expect(notifications.map(isSystemNotification)).toEqual([false, false, false, false, true, true]);
+  });
+
+  test('colours the unread indicator by severity', () => {
+    expect(notificationIndicatorClass(item({
+      kind: 'system_failure', severity: 'error', target: { type: 'system_failure', component: 'redis' },
+    }))).toBe('bg-red-500');
+    expect(notificationIndicatorClass(item({ severity: 'warning' }))).toBe('bg-orange-500');
+    expect(notificationIndicatorClass(item({
+      kind: 'review', severity: 'success', target: { type: 'review', repository: 'i/p', prNumber: 81 },
+    }))).toBe('bg-teal-500');
   });
 
   test('keeps the PR or issue number visible as a reference chip', () => {
