@@ -31,12 +31,14 @@ const queue = {
     getJob: mock.fn(async (_jobId: string): Promise<unknown> => undefined),
     add: mock.fn(async (..._args: unknown[]): Promise<unknown> => undefined),
     getWorkersCount: mock.fn(async () => 1),
+    waitUntilReady: async () => producerReady(),
     close: async () => {},
 };
 type MockedConnection = { maxRetriesPerRequest?: number | null };
 const queueConnections: MockedConnection[] = [];
 const eventsConnections: MockedConnection[] = [];
 let eventsReady: () => Promise<void> = async () => {};
+let producerReady: () => Promise<void> = async () => {};
 await mock.module('bullmq', {
     namedExports: {
         ErrorCode: { JobNotExist: -1, JobNotInState: -3 },
@@ -328,6 +330,28 @@ test('enqueue fails instead of waiting forever when the events connection cannot
         assert.strictEqual(job.waitUntilFinished.mock.callCount(), 0);
     } finally {
         eventsReady = async () => {};
+    }
+});
+
+test('enqueue fails instead of waiting forever when the producer connection cannot become ready', async t => {
+    t.mock.timers.enable({ apis: ['setTimeout'] });
+    // Redis is unavailable when the producer is first constructed.
+    await closeAgentImagePreparationQueue();
+    producerReady = () => new Promise<never>(() => {});
+    queue.getJob.mock.resetCalls();
+    queue.add.mock.resetCalls();
+    try {
+        const preparation = assert.rejects(
+            enqueueAgentImagePreparation('propr/agent:redis-down-at-start'),
+            /producer connections for the agent-image-preparation queue were not ready within/,
+        );
+        await new Promise<void>(resolve => setImmediate(resolve));
+        t.mock.timers.tick(30_000);
+        await preparation;
+        assert.strictEqual(queue.getJob.mock.callCount(), 0);
+        assert.strictEqual(queue.add.mock.callCount(), 0);
+    } finally {
+        producerReady = async () => {};
     }
 });
 

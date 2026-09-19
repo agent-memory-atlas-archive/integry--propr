@@ -12,7 +12,7 @@ const AGENT_IMAGE_PREPARATION_TIMEOUT_MS = 2 * (AGENT_IMAGE_BUILD_LOCK_ACQUIRE_T
 // no-worker check run promptly; only an attached, progressing preparation may
 // consume the full lease/build budget above.
 const AGENT_IMAGE_PREPARATION_POLL_INTERVAL_MS = 30_000;
-const AGENT_IMAGE_PREPARATION_EVENTS_READY_TIMEOUT_MS = 30_000;
+const AGENT_IMAGE_PREPARATION_READY_TIMEOUT_MS = 30_000;
 const PENDING_STATES = ['waiting', 'active', 'delayed', 'prioritized', 'waiting-children'];
 
 export interface AgentImagePreparationJobData {
@@ -64,13 +64,16 @@ function getRequestQueue(): Queue<AgentImagePreparationJobData> {
     return requestQueue;
 }
 
-async function getRequestEvents(): Promise<QueueEvents> {
-    requestEvents ??= new QueueEvents(AGENT_IMAGE_PREPARATION_QUEUE_NAME, { connection: eventsConnection });
-    const events = requestEvents;
-    // The events connection reconnects forever; bound only this caller's wait
-    // so a Redis outage rejects into the registry's recovery backoff. The
-    // instance stays cached and can become ready for a later request.
-    const readiness = events.waitUntilReady();
+// Both connections reconnect forever and BullMQ holds commands until the
+// initial connection is ready; `maxRetriesPerRequest` does not bound that
+// wait. Bound only this caller's wait so a Redis outage rejects into the
+// registry's recovery backoff. Instances stay cached and can become ready for
+// a later request.
+async function waitUntilReadyWithin(
+    resource: { waitUntilReady(): Promise<unknown> },
+    description: string,
+): Promise<void> {
+    const readiness = resource.waitUntilReady();
     readiness.catch(() => {});
     let readyTimer: NodeJS.Timeout | undefined;
     try {
@@ -78,15 +81,21 @@ async function getRequestEvents(): Promise<QueueEvents> {
             readiness,
             new Promise<never>((_resolve, reject) => {
                 readyTimer = setTimeout(() => reject(new Error(
-                    `Agent image preparation events for the ${AGENT_IMAGE_PREPARATION_QUEUE_NAME} queue `
-                    + `were not ready within ${AGENT_IMAGE_PREPARATION_EVENTS_READY_TIMEOUT_MS}ms`,
-                )), AGENT_IMAGE_PREPARATION_EVENTS_READY_TIMEOUT_MS);
+                    `Agent image preparation ${description} for the ${AGENT_IMAGE_PREPARATION_QUEUE_NAME} queue `
+                    + `were not ready within ${AGENT_IMAGE_PREPARATION_READY_TIMEOUT_MS}ms`,
+                )), AGENT_IMAGE_PREPARATION_READY_TIMEOUT_MS);
                 readyTimer.unref?.();
             }),
         ]);
     } finally {
         if (readyTimer) clearTimeout(readyTimer);
     }
+}
+
+async function getRequestEvents(): Promise<QueueEvents> {
+    requestEvents ??= new QueueEvents(AGENT_IMAGE_PREPARATION_QUEUE_NAME, { connection: eventsConnection });
+    const events = requestEvents;
+    await waitUntilReadyWithin(events, 'events');
     return events;
 }
 
@@ -129,6 +138,7 @@ export async function enqueueAgentImagePreparation(
     options: PreparationOptions = {},
 ): Promise<void> {
     const queue = getRequestQueue();
+    await waitUntilReadyWithin(queue, 'producer connections');
     const jobId = agentImagePreparationJobId(imageTag, options);
     const existing = await queue.getJob(jobId);
     let job = existing;
