@@ -9,6 +9,17 @@ const pullGate = new Promise<void>(resolve => {
     releasePull = resolve;
 });
 
+// The real logger's pino transport worker stays referenced until its READY
+// flush completes, and that flush polls with setTimeout. If READY arrives
+// while a test mocks setTimeout, the poll is lost and the worker keeps the
+// test process alive after every test has passed.
+const noop = () => {};
+const silentLogger = { info: noop, warn: noop, error: noop, debug: noop, trace: noop, fatal: noop };
+await mock.module('../packages/core/src/utils/logger.js', {
+    defaultExport: { ...silentLogger, child: () => silentLogger },
+    namedExports: { generateCorrelationId: () => 'test-correlation-id', createCorrelatedLogger: () => silentLogger },
+});
+
 await mock.module('../packages/core/src/claude/docker/dockerExecutor.js', {
     namedExports: {
         getDockerRootDir: mock.fn(async () => '/docker/storage'),
