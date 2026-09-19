@@ -22,6 +22,7 @@ import {
 } from "../../packages/cli/src/api/implement.js";
 import { findUnclaimedModelTask } from "./taskMatching.js";
 import { parseModelTaskTimeoutMs } from "./modelTaskTimeout.js";
+import { isProviderUsageLimitFailure } from "./providerUsageLimit.js";
 
 // ---------------------------------------------------------------------------
 // Environment
@@ -282,17 +283,34 @@ export async function pollTasksToCompletion(
   );
 }
 
+function describeModelTask(result: ModelTestResult): string {
+  const state = result.finalState ?? "unknown";
+  const reason = result.failureReason?.replace(/\s+/g, " ").trim();
+  return `${result.agent_alias}/${result.model_name}: ${state}${reason ? ` — ${reason.slice(0, 300)}` : ""}`;
+}
+
+/**
+ * Requires every model task to complete. Tasks that failed only because the
+ * provider account ran out of credits are reported but tolerated, as long as
+ * at least one model completed so the run still validated a live model.
+ */
 export function assertModelTasksSucceeded(results: ModelTestResult[]): void {
   const unsuccessful = results.filter((result) => result.finalState !== "completed");
   if (unsuccessful.length === 0) return;
 
-  const details = unsuccessful.map((result) => {
-    const state = result.finalState ?? "unknown";
-    const reason = result.failureReason?.replace(/\s+/g, " ").trim();
-    return `${result.agent_alias}/${result.model_name}: ${state}${reason ? ` — ${reason.slice(0, 300)}` : ""}`;
-  });
+  const usageLimited = unsuccessful.filter((result) =>
+    isProviderUsageLimitFailure(result.finalState, result.failureReason));
+  const unexpected = unsuccessful.filter((result) => !usageLimited.includes(result));
+
+  if (unexpected.length === 0 && usageLimited.length < results.length) {
+    console.log(
+      `    WARNING: ${usageLimited.length}/${results.length} model task(s) hit provider usage limits: ${usageLimited.map(describeModelTask).join("; ")}`,
+    );
+    return;
+  }
+
   throw new Error(
-    `${unsuccessful.length}/${results.length} model task(s) did not complete successfully: ${details.join("; ")}`,
+    `${unsuccessful.length}/${results.length} model task(s) did not complete successfully: ${unsuccessful.map(describeModelTask).join("; ")}`,
   );
 }
 
