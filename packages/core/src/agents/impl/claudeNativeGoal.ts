@@ -32,6 +32,8 @@ const CONTROL_POLL_MS = 400;
 const MAX_UNEXPLAINED_TURN_ENDS = 3;
 const LOCAL_COMMAND_TIMEOUT_MS = 30_000;
 const CONTEXT_TURN_TIMEOUT_MS = 5 * 60 * 1000;
+const TRANSCRIPT_READ_ATTEMPTS = 3;
+const TRANSCRIPT_RETRY_MS = 250;
 /** Claude stores transcripts under a slug of the container workspace path. */
 const CLAUDE_WORKSPACE_PROJECT_SLUG = '-home-node-workspace';
 
@@ -330,6 +332,8 @@ type GoalControlSnapshotState = 'paused' | 'cancelled';
 interface InitialMessage {
     text: string | null;
     inputId?: string;
+    /** Stream text position captured before the turn's initiating message was sent. */
+    cursor?: number;
 }
 
 function impossibleGoalError(state: ClaudeGoalState): string {
@@ -362,8 +366,19 @@ class ClaudeGoalProtocol {
         return `${this.context.sessionId}:${this.turn}`;
     }
 
+    /** Read the transcript goal state, retrying a bounded number of times while it is unreadable. */
     private async goalState(): Promise<ClaudeGoalState> {
-        return loadClaudeGoalState(this.context.transcriptPath, this.context.condition);
+        let state = await loadClaudeGoalState(this.context.transcriptPath, this.context.condition);
+        for (let attempt = 1; state.status === 'unknown' && attempt < TRANSCRIPT_READ_ATTEMPTS; attempt += 1) {
+            await new Promise(resolve => setTimeout(resolve, TRANSCRIPT_RETRY_MS));
+            state = await loadClaudeGoalState(this.context.transcriptPath, this.context.condition);
+        }
+        return state;
+    }
+
+    private async requestedStop(): Promise<GoalControlSnapshotState | null> {
+        const { desiredState } = await this.control.load();
+        return desiredState === 'running' ? null : desiredState;
     }
 
     private recordGoal(status: string, state?: ClaudeGoalState): void {
@@ -393,14 +408,22 @@ class ClaudeGoalProtocol {
         return null;
     }
 
-    private async observeTurn(turnId: string): Promise<TurnObservation> {
+    /**
+     * Observe a turn whose initiating message was sent at `cursor`, so text
+     * that arrived during earlier awaited control operations is still seen.
+     */
+    private async observeTurn(turnId: string, cursor: number): Promise<TurnObservation> {
         await this.control.setActiveTurn(turnId);
-        const cursor = this.stream.textCursor;
         let stopRequested: GoalControlSnapshotState | null = null;
         let interrupted = false;
         let declaration: TurnObservation['declaration'] = null;
         while (true) {
             const result = this.stream.takeResult();
+            // Inspect buffered text before honouring a result, so a checkpoint
+            // that arrived together with the turn end is still published.
+            if (!declaration) {
+                declaration = parseGoalCheckpointDeclaration(this.stream.textsAfter(cursor).join('\n'));
+            }
             if (result) {
                 await this.control.setActiveTurn(null);
                 return { result, stopRequested, declaration };
@@ -450,6 +473,31 @@ class ClaudeGoalProtocol {
         return { status: 'interrupted', error: 'Goal stopped at a provider turn boundary' };
     }
 
+    /**
+     * Run the acknowledgement-only delivery-context turn while observing
+     * controls, interrupting it when a pause or cancel is requested.
+     */
+    private async runContextTurn(text: string): Promise<{
+        result: ClaudeTurnResult;
+        stopRequested: GoalControlSnapshotState | null;
+    }> {
+        this.stream.send(text);
+        const deadline = Date.now() + CONTEXT_TURN_TIMEOUT_MS;
+        let stopRequested: GoalControlSnapshotState | null = null;
+        while (true) {
+            const result = this.stream.takeResult();
+            if (result) return { result, stopRequested };
+            if (this.stream.closeError) throw this.stream.closeError;
+            if (Date.now() >= deadline) throw new Error('Claude goal session did not finish its turn in time');
+            await this.stream.waitForActivity(Math.min(CONTROL_POLL_MS, deadline - Date.now()));
+            await this.control.heartbeat();
+            if (!stopRequested) {
+                stopRequested = await this.requestedStop();
+                if (stopRequested) this.stream.interrupt();
+            }
+        }
+    }
+
     /** Establish the goal in this session and return the first steering message, if any. */
     private async start(state: ClaudeGoalState): Promise<ClaudeGoalCompletion | InitialMessage> {
         const { options } = this;
@@ -473,18 +521,24 @@ class ClaudeGoalProtocol {
         // A fresh session receives its launch context before the goal exists,
         // so the goal's first turn already works under ProPR's delivery policy.
         if (text && !options.resumeSessionId) {
-            const acknowledged = await this.runBoundedTurn(`${CLAUDE_GOAL_CONTEXT_PREAMBLE}\n\n${text}`, CONTEXT_TURN_TIMEOUT_MS);
-            if (acknowledged.isError) {
-                return { status: 'failed', error: acknowledged.text || 'Claude could not accept the goal delivery context' };
+            const context = await this.runContextTurn(`${CLAUDE_GOAL_CONTEXT_PREAMBLE}\n\n${text}`);
+            if (context.stopRequested) return this.stop(context.stopRequested, state);
+            if (context.result.isError) {
+                return { status: 'failed', error: context.result.text || 'Claude could not accept the goal delivery context' };
             }
             if (inputId) await this.control.markInputDelivered(inputId, `${this.context.sessionId}:context`);
+            // Controls may have changed while the context turn was finishing.
+            const stopRequested = await this.requestedStop();
+            if (stopRequested) return this.stop(stopRequested, state);
+            const cursor = this.stream.textCursor;
             this.stream.send(this.context.command);
-            return { text: null };
+            return { text: null, cursor };
         }
         // A resumed session without a live goal (cleared, or created before
         // native goals) sets it again and then receives its pending message.
+        const cursor = this.stream.textCursor;
         this.stream.send(this.context.command);
-        return { text: text ?? null, inputId };
+        return { text: text ?? null, inputId, cursor };
     }
 
     /**
@@ -492,14 +546,19 @@ class ClaudeGoalProtocol {
      * or continues with checkpoint feedback or a nudge.
      */
     private async settleTurn(
-        { result, stopRequested, declaration }: TurnObservation,
+        { result, stopRequested }: TurnObservation,
         feedback: string | undefined,
     ): Promise<ClaudeGoalCompletion | { next: string; nudge: boolean }> {
         const state = await this.goalState();
-        // Without a readable transcript, an uninterrupted successful turn
-        // end can only mean the Stop hook released the goal.
-        if (state.status === 'complete'
-            || (state.status === 'unknown' && !result.isError && !declaration && !stopRequested)) {
+        // Completion requires Claude's recorded verdict; a successful turn
+        // end alone can still leave the goal unmet.
+        if (state.status === 'unknown') {
+            return {
+                status: 'failed',
+                error: 'Could not verify the Claude native goal verdict: the session transcript is unreadable',
+            };
+        }
+        if (state.status === 'complete') {
             this.recordGoal('complete', state);
             return { status: 'completed' };
         }
@@ -509,7 +568,7 @@ class ClaudeGoalProtocol {
         }
         const snapshot = await this.control.load();
         if (snapshot.desiredState !== 'running') return this.stop(snapshot.desiredState, state);
-        if (state.status !== 'active' && state.status !== 'unknown') {
+        if (state.status !== 'active') {
             this.recordGoal('cleared', state);
             return {
                 status: 'failed',
@@ -526,21 +585,22 @@ class ClaudeGoalProtocol {
 
     async run(): Promise<ClaudeGoalCompletion> {
         const initialState = await this.goalState();
-        if ((await this.control.load()).desiredState !== 'running') {
-            return { status: 'interrupted', error: 'Goal stopped before provider turn observation' };
-        }
+        // A restored session stopped before observation still clears an active goal on cancel.
+        const stopRequested = await this.requestedStop();
+        if (stopRequested) return this.stop(stopRequested, initialState);
         const started = await this.start(initialState);
         if ('status' in started) return started;
         this.recordGoal('active', { ...initialState, status: 'active' });
-        let next: InitialMessage | null = started;
+        let next: InitialMessage = started;
         let nudges = 0;
         while (true) {
             const turnId = this.nextTurnId();
-            if (next?.text) {
+            const cursor = next.cursor ?? this.stream.textCursor;
+            if (next.text) {
                 this.stream.send(next.text);
                 if (next.inputId) await this.control.markInputDelivered(next.inputId, turnId);
             }
-            const turn = await this.observeTurn(turnId);
+            const turn = await this.observeTurn(turnId, cursor);
             const feedback = turn.declaration ? await this.publishDeclaration(turn.declaration, turnId) : undefined;
             const settled = await this.settleTurn(turn, feedback);
             if ('status' in settled) return settled;

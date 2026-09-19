@@ -210,6 +210,26 @@ describe('Claude native /goal protocol', () => {
     assert.equal(fake.sent.includes('/goal clear'), false, 'a checkpoint boundary must keep the goal set');
   });
 
+  test('a checkpoint declared while the turn is being registered and ending with it is still published', async () => {
+    const { fake, sessionId } = session((current, text) => {
+      if (text === COMMAND) {
+        current.say('{"checkpointReady":true,"message":"feat: first half","include":["part1.txt"]}');
+        current.transcript(GOAL_NOT_MET);
+        current.endTurn();
+        return;
+      }
+      assert.match(text, /ProPR accepted and published your checkpoint as commit abc123/);
+      current.transcript(GOAL_MET);
+      current.endTurn();
+    });
+    const control = fakeControl();
+    // Let the whole turn land in the buffer before observation starts.
+    control.setActiveTurn = async () => { await new Promise(resolve => setTimeout(resolve, 10)); };
+
+    assert.deepEqual(await run(fake, sessionId, control), { status: 'completed' });
+    assert.deepEqual(control.published, [{ commitMessage: 'feat: first half', include: ['part1.txt'] }]);
+  });
+
   test('a malformed checkpoint declaration is rejected and the agent is told to correct it', async () => {
     const { fake, sessionId } = session((current, text) => {
       if (text === COMMAND) return current.say('{"checkpointReady":true,"message":""}');
@@ -269,6 +289,67 @@ describe('Claude native /goal protocol', () => {
     assert.equal(completion.status, 'interrupted');
     assert.deepEqual(fake.sent, [COMMAND, '/goal clear']);
     assert.equal(fake.goalRecords.at(-1)?.status, 'cleared');
+  });
+
+  test('pause during the delivery-context turn interrupts it and never sets the goal', async () => {
+    const control = fakeControl();
+    const { fake, sessionId } = session((_current, text) => {
+      if (text.startsWith(CLAUDE_GOAL_CONTEXT_PREAMBLE)) control.snapshot.desiredState = 'paused';
+    });
+
+    const completion = await run(fake, sessionId, control, {
+      initialControlInputId: 'context-1', initialControlInputMessage: 'Launch policy',
+    });
+
+    assert.equal(completion.status, 'interrupted');
+    assert.equal(fake.interrupts, 1);
+    assert.deepEqual(fake.sent, [`${CLAUDE_GOAL_CONTEXT_PREAMBLE}\n\nLaunch policy`]);
+    assert.deepEqual(control.delivered, []);
+  });
+
+  test('cancel requested as the delivery-context turn finishes does not send the goal', async () => {
+    const control = fakeControl();
+    const { fake, sessionId } = session((current, text) => {
+      if (!text.startsWith(CLAUDE_GOAL_CONTEXT_PREAMBLE)) return;
+      control.snapshot.desiredState = 'cancelled';
+      current.endTurn({ text: 'Acknowledged.' });
+    });
+
+    const completion = await run(fake, sessionId, control, {
+      initialControlInputId: 'context-1', initialControlInputMessage: 'Launch policy',
+    });
+
+    assert.equal(completion.status, 'interrupted');
+    assert.equal(fake.sent.includes(COMMAND), false);
+  });
+
+  test('a restored session cancelled before observation clears its live goal', async () => {
+    const control = fakeControl();
+    control.snapshot.desiredState = 'cancelled';
+    const { fake, sessionId } = session((current, text) => {
+      if (text === '/goal clear') current.endTurn();
+    }, { transcript: GOAL_SET + GOAL_NOT_MET });
+
+    const completion = await run(fake, sessionId, control, { resumeSessionId: sessionId });
+
+    assert.equal(completion.status, 'interrupted');
+    assert.deepEqual(fake.sent, ['/goal clear']);
+    assert.equal(fake.goalRecords.at(-1)?.status, 'cleared');
+  });
+
+  test('an unreadable transcript after a successful turn is a verification failure, not completion', async () => {
+    const { fake, sessionId } = session((current, text) => {
+      if (text !== COMMAND) return;
+      // A directory in place of the transcript file makes every read fail.
+      rmSync(current.transcriptPath, { force: true });
+      mkdirSync(current.transcriptPath);
+      current.endTurn();
+    });
+
+    const completion = await run(fake, sessionId, fakeControl());
+
+    assert.equal(completion.status, 'failed');
+    assert.match(completion.error || '', /Could not verify the Claude native goal verdict/);
   });
 
   test('a resumed session with a live goal continues without setting the goal again', async () => {
