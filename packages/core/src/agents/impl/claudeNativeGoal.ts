@@ -182,6 +182,9 @@ export class ClaudeGoalStream {
         readline.createInterface({ input: child.stdout! }).on('line', line => this.onLine(line));
         child.once('close', code => this.close(new Error(`Claude goal session container exited before its turn completed (exit ${code ?? 'unknown'})`)));
         child.once('error', error => this.close(error));
+        // Claude closing its input pipe surfaces as an asynchronous stdin error;
+        // fail the session with it instead of letting it reach the worker.
+        child.stdin?.on('error', error => this.close(error));
     }
 
     get rawOutput(): string { return this.output.raw; }
@@ -190,6 +193,8 @@ export class ClaudeGoalStream {
     get exitCode(): number | null { return this.child.exitCode; }
     get tokenUsage(): TokenUsage { return { ...this.usage }; }
     get textCursor(): number { return this.texts.length; }
+    /** Whether a turn result is already buffered, without consuming it. */
+    get hasResult(): boolean { return this.results.length > 0; }
 
     textsAfter(cursor: number): string[] {
         return this.texts.slice(cursor);
@@ -234,8 +239,13 @@ export class ClaudeGoalStream {
     }
 
     private write(message: Record<string, unknown>): void {
-        if (!this.child.stdin?.writable) throw this.closedError ?? new Error('Claude goal session stdin is closed');
-        this.child.stdin.write(`${JSON.stringify(message)}\n`);
+        const stdin = this.child.stdin;
+        if (!stdin?.writable) throw this.closedError ?? new Error('Claude goal session stdin is closed');
+        // A write that fails after it was accepted fails the session, so the
+        // protocol sees it at its next stream check.
+        stdin.write(`${JSON.stringify(message)}\n`, error => {
+            if (error) this.close(error);
+        });
     }
 
     send(text: string): void {
@@ -306,7 +316,7 @@ export class ClaudeGoalStream {
 /** The live-session surface the protocol drives; tests substitute a scripted session. */
 export type ClaudeGoalSession = Pick<ClaudeGoalStream,
     'closeError' | 'textCursor' | 'textsAfter' | 'send' | 'interrupt' | 'appendGoalRecord'
-    | 'takeResult' | 'waitForActivity' | 'waitForResult'>;
+    | 'hasResult' | 'takeResult' | 'waitForActivity' | 'waitForResult'>;
 
 export interface ClaudeGoalCompletion {
     status: 'completed' | 'failed' | 'interrupted';
@@ -329,9 +339,14 @@ interface TurnObservation {
 
 type GoalControlSnapshotState = 'paused' | 'cancelled';
 
-interface InitialMessage {
-    text: string | null;
+interface GoalMessage {
+    text: string;
+    /** Pending-input id acknowledged only once this exact message is written. */
     inputId?: string;
+}
+
+interface InitialMessage {
+    messages: GoalMessage[];
     /** Stream text position captured before the turn's initiating message was sent. */
     cursor?: number;
 }
@@ -402,6 +417,9 @@ class ClaudeGoalProtocol {
         const snapshot = await this.control.load();
         if (snapshot.desiredState !== 'running') return snapshot.desiredState;
         for (const input of snapshot.pendingInputs) {
+            // The turn can end while earlier inputs are being acknowledged;
+            // anything left stays pending for the turn that will observe it.
+            if (this.stream.hasResult) break;
             this.stream.send(input.message);
             await this.control.markInputDelivered(input.id, turnId);
         }
@@ -434,6 +452,9 @@ class ClaudeGoalProtocol {
             if (!declaration) {
                 declaration = parseGoalCheckpointDeclaration(this.stream.textsAfter(cursor).join('\n'));
             }
+            // The turn may have ended while we waited. Settle it first and leave
+            // queued input pending, rather than starting an unobserved turn.
+            if (this.stream.hasResult) continue;
             if (!stopRequested) stopRequested = await this.deliverInputs(turnId);
             // A checkpoint declaration ends the agent's turn; interrupting the
             // pending Stop-hook evaluation gives ProPR the same boundary Codex
@@ -498,11 +519,18 @@ class ClaudeGoalProtocol {
         }
     }
 
-    /** Establish the goal in this session and return the first steering message, if any. */
+    /** Establish the goal in this session and return the first steering messages, if any. */
     private async start(state: ClaudeGoalState): Promise<ClaudeGoalCompletion | InitialMessage> {
         const { options } = this;
         const inputId = options.initialControlInputId;
-        const text = options.initialGoalFeedback ?? options.initialControlInputMessage;
+        const inputMessage = options.initialControlInputMessage;
+        // Checkpoint feedback and a queued input are distinct messages: the
+        // input's id is acknowledged only against the message that carries it,
+        // so an input that is not written here stays pending for a later turn.
+        const pending: GoalMessage[] = [
+            ...(options.initialGoalFeedback ? [{ text: options.initialGoalFeedback }] : []),
+            ...(inputMessage ? [{ text: inputMessage, ...(inputId ? { inputId } : {}) }] : []),
+        ];
         if (state.status === 'complete') {
             if (inputId) {
                 await this.control.markInputUndeliverable(
@@ -517,28 +545,34 @@ class ClaudeGoalProtocol {
             this.recordGoal('failed', state);
             return { status: 'failed', error: impossibleGoalError(state) };
         }
-        if (state.status === 'active') return { text: text ?? GOAL_CONTINUE_INPUT, inputId };
+        if (state.status === 'active') {
+            return { messages: pending.length ? pending : [{ text: GOAL_CONTINUE_INPUT }] };
+        }
         // A fresh session receives its launch context before the goal exists,
         // so the goal's first turn already works under ProPR's delivery policy.
-        if (text && !options.resumeSessionId) {
-            const context = await this.runContextTurn(`${CLAUDE_GOAL_CONTEXT_PREAMBLE}\n\n${text}`);
+        if (pending.length && !options.resumeSessionId) {
+            const launch = pending.map(message => message.text).join('\n\n');
+            const context = await this.runContextTurn(`${CLAUDE_GOAL_CONTEXT_PREAMBLE}\n\n${launch}`);
             if (context.stopRequested) return this.stop(context.stopRequested, state);
             if (context.result.isError) {
                 return { status: 'failed', error: context.result.text || 'Claude could not accept the goal delivery context' };
             }
-            if (inputId) await this.control.markInputDelivered(inputId, `${this.context.sessionId}:context`);
+            // The context turn carried the queued input itself, so it is settled here.
+            if (inputId && inputMessage) {
+                await this.control.markInputDelivered(inputId, `${this.context.sessionId}:context`);
+            }
             // Controls may have changed while the context turn was finishing.
             const stopRequested = await this.requestedStop();
             if (stopRequested) return this.stop(stopRequested, state);
             const cursor = this.stream.textCursor;
             this.stream.send(this.context.command);
-            return { text: null, cursor };
+            return { messages: [], cursor };
         }
         // A resumed session without a live goal (cleared, or created before
-        // native goals) sets it again and then receives its pending message.
+        // native goals) sets it again and then receives its pending messages.
         const cursor = this.stream.textCursor;
         this.stream.send(this.context.command);
-        return { text: text ?? null, inputId, cursor };
+        return { messages: pending, cursor };
     }
 
     /**
@@ -596,9 +630,9 @@ class ClaudeGoalProtocol {
         while (true) {
             const turnId = this.nextTurnId();
             const cursor = next.cursor ?? this.stream.textCursor;
-            if (next.text) {
-                this.stream.send(next.text);
-                if (next.inputId) await this.control.markInputDelivered(next.inputId, turnId);
+            for (const message of next.messages) {
+                this.stream.send(message.text);
+                if (message.inputId) await this.control.markInputDelivered(message.inputId, turnId);
             }
             const turn = await this.observeTurn(turnId, cursor);
             const feedback = turn.declaration ? await this.publishDeclaration(turn.declaration, turnId) : undefined;
@@ -608,7 +642,7 @@ class ClaudeGoalProtocol {
             if (nudges > MAX_UNEXPLAINED_TURN_ENDS) {
                 return { status: 'failed', error: 'Claude repeatedly ended its turn while the native goal remained unmet' };
             }
-            next = { text: settled.next };
+            next = { messages: [{ text: settled.next }] };
         }
     }
 }

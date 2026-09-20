@@ -60,6 +60,7 @@ class FakeClaudeSession implements ClaudeGoalSession {
   ) {}
 
   get textCursor(): number { return this.texts.length; }
+  get hasResult(): boolean { return this.results.length > 0; }
   textsAfter(cursor: number): string[] { return this.texts.slice(cursor); }
   appendGoalRecord(goal: Record<string, unknown>): void { this.goalRecords.push(goal); }
   takeResult(): ClaudeTurnResult | undefined { return this.results.shift(); }
@@ -365,6 +366,44 @@ describe('Claude native /goal protocol', () => {
 
     assert.deepEqual(completion, { status: 'completed' });
     assert.equal(fake.sent.some(text => text.startsWith('/goal')), false);
+  });
+
+  test('a resumed session delivers checkpoint feedback and a queued input as separate messages', async () => {
+    const { fake, sessionId } = session((current, text) => {
+      if (text !== 'Also update the changelog.') return;
+      current.transcript(GOAL_MET);
+      current.endTurn();
+    }, { transcript: GOAL_SET + GOAL_NOT_MET });
+    const control = fakeControl();
+
+    const completion = await run(fake, sessionId, control, {
+      resumeSessionId: sessionId,
+      initialGoalFeedback: 'ProPR accepted and published your checkpoint as commit abc.',
+      initialControlInputId: 'input-4',
+      initialControlInputMessage: 'Also update the changelog.',
+    });
+
+    assert.deepEqual(completion, { status: 'completed' });
+    assert.deepEqual(fake.sent, [
+      'ProPR accepted and published your checkpoint as commit abc.',
+      'Also update the changelog.',
+    ]);
+    assert.deepEqual(control.delivered, [{ inputId: 'input-4', turnId: `${sessionId}:1` }]);
+  });
+
+  test('input queued as the turn ends stays pending instead of starting an unobserved turn', async () => {
+    const control = fakeControl();
+    const { fake, sessionId } = session((current, text) => {
+      if (text !== COMMAND) return;
+      // The queued input and the turn's final result land together.
+      control.snapshot.pendingInputs = [{ id: 'input-5', message: 'Late note.' }];
+      current.transcript(GOAL_MET);
+      current.endTurn();
+    });
+
+    assert.deepEqual(await run(fake, sessionId, control), { status: 'completed' });
+    assert.deepEqual(fake.sent, [COMMAND]);
+    assert.deepEqual(control.delivered, []);
   });
 
   test('a resumed session whose goal already completed marks queued input undeliverable', async () => {

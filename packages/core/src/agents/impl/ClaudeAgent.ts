@@ -192,7 +192,10 @@ export class ClaudeAgent implements Agent {
      * the session's stream-json stdin and resumes the exact session later.
      */
     private async executeNativeGoal(options: AgentTaskOptions, model: string): Promise<AgentExecutionResult> {
-        const { worktreePath, issueRef, githubToken, environment, taskId, reasoningLevel, resumeSessionId } = options;
+        const {
+            worktreePath, issueRef, githubToken, systemPrompt, tools, environment, taskId,
+            reasoningLevel, resumeSessionId,
+        } = options;
         const startTime = Date.now();
         try {
             await setWorktreeOwnership(worktreePath, issueRef.number, {
@@ -207,7 +210,8 @@ export class ClaudeAgent implements Agent {
             const resumable = Boolean(resumeSessionId) && await claudeSessionTranscriptExists(transcriptPath);
             const dockerArgs = buildDockerArgs(this.config, this.maxTurns, {
                 worktreePath, githubToken, modelName: model, issueNumber: issueRef.number,
-                environment, taskId, reasoningLevel: effectiveReasoningLevel, executionMode: 'goal',
+                systemPrompt, tools, environment, taskId,
+                reasoningLevel: effectiveReasoningLevel, executionMode: 'goal',
                 ...(resumable ? { resumeSessionId: sessionId } : { sessionId }),
             });
             const response = await executeClaudeNativeGoal(
