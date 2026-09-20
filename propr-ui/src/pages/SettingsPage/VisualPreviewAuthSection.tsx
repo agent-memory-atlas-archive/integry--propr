@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { Check, KeyRound, LoaderCircle, Unplug, X } from 'lucide-react';
+import { SettingsSection, SettingsStatus } from './SettingsLayout';
 import {
   disconnectVisualPreviewAuth,
   getVisualPreviewAuthStatus,
@@ -59,14 +60,14 @@ const VisualPreviewAuthControls: React.FC<VisualPreviewAuthControlsProps> = ({
   };
 
   return (
-    <div className="mt-3">
-      <div className="flex flex-wrap items-center gap-2">
+    <div>
+      <div className="flex max-w-2xl flex-wrap items-center gap-2">
         {canConnectCurrentLogin && (
           <button
             type="button"
             onClick={() => void onConnectCurrentLogin()}
             disabled={saving}
-            className="inline-flex items-center gap-1.5 rounded bg-gray-900 px-3 py-1.5 text-xs font-medium text-white hover:bg-gray-800 disabled:opacity-50"
+            className="inline-flex items-center gap-1.5 rounded bg-slate-900 px-3 py-1.5 text-xs font-medium text-white hover:bg-slate-800 disabled:opacity-50"
           >
             {saving ? <LoaderCircle size={13} className="animate-spin" /> : <Check size={13} />}
             Use my GitHub login
@@ -76,7 +77,7 @@ const VisualPreviewAuthControls: React.FC<VisualPreviewAuthControlsProps> = ({
           type="button"
           onClick={() => { setEditingToken(value => !value); onClearError(); }}
           disabled={saving}
-          className={`${canConnectCurrentLogin ? 'border border-gray-300 text-gray-600 hover:bg-gray-50' : 'bg-gray-900 text-white hover:bg-gray-800'} inline-flex items-center gap-1.5 rounded px-3 py-1.5 text-xs font-medium disabled:opacity-50`}
+          className={`${canConnectCurrentLogin ? 'border border-slate-300 text-slate-600 hover:bg-slate-50' : 'bg-slate-900 text-white hover:bg-slate-800'} inline-flex items-center gap-1.5 rounded px-3 py-1.5 text-xs font-medium disabled:opacity-50`}
         >
           {editingToken ? <X size={13} /> : <KeyRound size={13} />}
           {editingToken ? 'Cancel' : active || status?.configured ? 'Replace token' : 'Add personal access token'}
@@ -86,7 +87,7 @@ const VisualPreviewAuthControls: React.FC<VisualPreviewAuthControlsProps> = ({
             type="button"
             onClick={() => void onDisconnect()}
             disabled={saving}
-            className="inline-flex items-center gap-1.5 rounded border border-gray-300 px-3 py-1.5 text-xs font-medium text-gray-600 hover:bg-gray-50 disabled:opacity-50"
+            className="inline-flex items-center gap-1.5 rounded border border-slate-300 px-3 py-1.5 text-xs font-medium text-slate-600 hover:bg-slate-50 disabled:opacity-50"
           >
             <Unplug size={13} />
             Disconnect
@@ -95,8 +96,8 @@ const VisualPreviewAuthControls: React.FC<VisualPreviewAuthControlsProps> = ({
       </div>
 
       {editingToken && (
-        <form onSubmit={(event) => void submit(event)} className="mt-3 rounded border border-gray-200 bg-gray-50 p-3">
-          <label htmlFor="visual-preview-token" className="block text-xs font-medium text-gray-700">
+        <form onSubmit={(event) => void submit(event)} className="mt-4 max-w-2xl border-t border-slate-200 pt-4">
+          <label htmlFor="visual-preview-token" className="block text-sm font-medium text-slate-900">
             GitHub personal access token
           </label>
           <div className="mt-1.5 flex flex-col gap-2 sm:flex-row">
@@ -109,25 +110,25 @@ const VisualPreviewAuthControls: React.FC<VisualPreviewAuthControlsProps> = ({
               spellCheck={false}
               maxLength={512}
               placeholder="github_pat_… or ghp_…"
-              className="min-w-0 flex-1 rounded border border-gray-300 bg-white px-2.5 py-1.5 text-xs text-gray-900 focus:border-gray-500 focus:outline-none"
+              className="min-w-0 flex-1 rounded border border-slate-300 bg-white px-2.5 py-1.5 text-sm text-slate-900 shadow-sm focus:border-primary-500 focus:outline-none focus:ring-1 focus:ring-primary-500"
             />
             <button
               type="submit"
               disabled={saving || !token.trim()}
-              className="inline-flex items-center justify-center gap-1.5 rounded bg-gray-900 px-3 py-1.5 text-xs font-medium text-white hover:bg-gray-800 disabled:opacity-50"
+              className="inline-flex items-center justify-center gap-1.5 rounded bg-slate-900 px-3 py-1.5 text-xs font-medium text-white hover:bg-slate-800 disabled:opacity-50"
             >
               {saving && <LoaderCircle size={13} className="animate-spin" />}
               Save token
             </button>
           </div>
-          <div className="mt-3 rounded border border-gray-200 bg-white p-3 text-[11px] leading-4 text-gray-600">
-            <p className="font-semibold text-gray-700">Fine-grained token requirements</p>
+          <div className="mt-4 text-[12px] leading-5 text-slate-500">
+            <p className="text-[11px] font-bold uppercase tracking-widest text-slate-500">Fine-grained token requirements</p>
             <ol className="mt-1.5 list-decimal space-y-1 pl-4">
               <li>Choose the organization or user that owns the repositories as the resource owner.</li>
               <li>Select every repository where ProPR will upload visual previews.</li>
               <li>
-                Under repository permissions, set <span className="font-medium text-gray-700">Pull requests</span> to{' '}
-                <span className="font-medium text-gray-700">Read and write</span>. Metadata read access is added automatically;
+                Under repository permissions, set <span className="font-medium text-slate-700">Pull requests</span> to{' '}
+                <span className="font-medium text-slate-700">Read and write</span>. Metadata read access is added automatically;
                 no other repository permission is required.
               </li>
               <li>
@@ -141,18 +142,18 @@ const VisualPreviewAuthControls: React.FC<VisualPreviewAuthControlsProps> = ({
                 href={FINE_GRAINED_TOKEN_URL}
                 target="_blank"
                 rel="noreferrer"
-                className="font-medium text-gray-700 underline hover:text-gray-900"
+                className="font-medium text-slate-700 underline hover:text-slate-900"
               >
                 Create token on GitHub
               </a>
             </p>
-            <p className="mt-2 text-gray-500">
+            <p className="mt-2 text-slate-500">
               A fine-grained token can cover only one resource owner. If preview-enabled repositories span multiple owners, use a
               classic token with <code className="font-mono">repo</code>, or <code className="font-mono">public_repo</code> when
               every repository is public.
             </p>
           </div>
-          <p className="mt-2 text-[11px] leading-4 text-gray-500">
+          <p className="mt-3 text-[12px] leading-5 text-slate-500">
             The token is sent once, validated with GitHub, and encrypted at rest. It is never displayed again after saving.
           </p>
         </form>
@@ -221,9 +222,12 @@ const VisualPreviewAuthSection: React.FC = () => {
 
   if (loading) {
     return (
-      <div className="border-t border-gray-200 pt-6 text-xs text-gray-500">
-        Loading visual preview upload status...
-      </div>
+      <SettingsSection
+        title="Visual preview uploads"
+        status={<SettingsStatus tone="pending" role="status">Loading…</SettingsStatus>}
+      >
+        <p className="max-w-2xl text-[12px] leading-5 text-slate-500">Loading visual preview upload status...</p>
+      </SettingsSection>
     );
   }
 
@@ -231,19 +235,15 @@ const VisualPreviewAuthSection: React.FC = () => {
   const environmentManaged = status?.source === 'environment';
 
   return (
-    <div className="border-t border-gray-200 pt-6">
-      <div className="mb-2 flex items-center justify-between gap-3">
-        <h4 className="text-[10px] font-bold uppercase tracking-wider text-gray-500">Visual preview uploads</h4>
-        <span className={`flex items-center gap-1.5 text-[11px] ${active ? 'text-green-700' : 'text-amber-700'}`}>
-          <span className={`h-1.5 w-1.5 rounded-full ${active ? 'bg-green-500' : 'bg-amber-500'}`} />
+    <SettingsSection
+      title="Visual preview uploads"
+      description={statusDescription(status)}
+      status={
+        <SettingsStatus tone={active ? 'ok' : 'warn'} role="status">
           {active ? 'Connected' : status?.status === 'reauth_required' ? 'Reconnect required' : 'Not connected'}
-        </span>
-      </div>
-
-      <p className="text-xs leading-5 text-gray-600">
-        {statusDescription(status)}
-      </p>
-
+        </SettingsStatus>
+      }
+    >
       {!environmentManaged && (
         <VisualPreviewAuthControls
           status={status}
@@ -255,8 +255,8 @@ const VisualPreviewAuthSection: React.FC = () => {
         />
       )}
 
-      {error && <p className="mt-2 text-xs text-red-600">{error}</p>}
-    </div>
+      {error && <p className="mt-3 max-w-2xl text-[12px] leading-5 text-red-600">{error}</p>}
+    </SettingsSection>
   );
 };
 

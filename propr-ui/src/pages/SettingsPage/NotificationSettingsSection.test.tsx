@@ -129,6 +129,20 @@ describe('Notification Settings browser enrollment guidance', () => {
     expect(screen.queryByText(/Native desktop notifications/)).not.toBeInTheDocument();
   });
 
+  test('aligns the inbox and push checkboxes under their own column headers', async () => {
+    render(<NotificationSettingsSection />);
+
+    const inbox = await screen.findByLabelText('Inbox notifications for Plans');
+    const header = screen.getByText('Inbox').parentElement;
+    const row = inbox.closest('label')?.parentElement;
+
+    // Header and row share one grid template, so the columns cannot drift apart.
+    const template = 'grid-cols-[minmax(0,1fr)_4.5rem_4.5rem]';
+    expect(header).toHaveClass('grid', template);
+    expect(row).toHaveClass('grid', template, 'items-center');
+    expect(inbox.closest('label')).toHaveClass('justify-self-center');
+  });
+
   test('offers enrollment on a capable, configured HTTPS browser', async () => {
     render(<NotificationSettingsSection />);
 

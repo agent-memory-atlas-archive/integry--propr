@@ -19,6 +19,7 @@ import ManagedPreviewStorageSection from './ManagedPreviewStorageSection';
 import SettingsNavigation, { type SettingsNavigationSection } from './SettingsNavigation';
 import McpServerSection from './McpServerSection';
 import { useSettingsCategoryRoute } from './useSettingsCategoryRoute';
+import SettingsSaveStatusBar from './SettingsSaveStatusBar';
 
 const AdminSettingsPage: React.FC = () => {
   const { isDemoMode } = useDemoMode();
@@ -150,7 +151,7 @@ const AdminSettingsPage: React.FC = () => {
     {
       id: 'general-configuration',
       category: 'automation',
-      searchText: 'general configuration worker concurrency auto followup score threshold resolve merge conflicts ultrafix rating goal maximum cycles pause seconds',
+      searchText: 'general configuration processing worker concurrency auto followup score threshold resolve merge conflicts ultrafix rating goal maximum cycles pause seconds',
       content: (
         <GeneralSettingsSection
           settings={{
@@ -180,6 +181,7 @@ const AdminSettingsPage: React.FC = () => {
           onAddItem={addWhitelistItem}
           onRemoveItem={removeWhitelistItem}
           placeholder="e.g., octocat"
+          addLabel="GitHub username"
           emptyMessage="Allowed for all users (Empty whitelist)."
         />
       )
@@ -198,6 +200,7 @@ const AdminSettingsPage: React.FC = () => {
           onAddItem={addPrimaryLabel}
           onRemoveItem={removePrimaryLabel}
           placeholder="e.g., AI"
+          addLabel="Label name"
           emptyMessage="No labels configured."
           helperText="State labels (-processing, -done) are generated automatically."
         />
@@ -229,8 +232,8 @@ const AdminSettingsPage: React.FC = () => {
           onAddItem={addKeyword}
           onRemoveItem={removeKeyword}
           placeholder="e.g., PROPR"
+          addLabel="Keyword"
           emptyMessage="No keywords configured."
-          showEmptyIcon={true}
         />
       )
     },
@@ -248,8 +251,8 @@ const AdminSettingsPage: React.FC = () => {
           onAddItem={addIgnoreKeyword}
           onRemoveItem={removeIgnoreKeyword}
           placeholder="e.g., Deployment In Progress"
+          addLabel="Ignored phrase"
           emptyMessage="No ignore keywords configured."
-          showEmptyIcon={true}
         />
       )
     },
@@ -277,7 +280,12 @@ const AdminSettingsPage: React.FC = () => {
       id: 'visual-preview-uploads',
       category: 'integrations',
       searchText: 'visual preview upload screenshots videos GitHub login personal access token PAT credential authentication connect managed storage quota retention Plus originals',
-      content: <><VisualPreviewAuthSection /><ManagedPreviewStorageSection /></>
+      content: (
+        <div className="space-y-10">
+          <VisualPreviewAuthSection />
+          <ManagedPreviewStorageSection />
+        </div>
+      )
     },
     {
       id: 'voice-briefings',
@@ -308,13 +316,15 @@ const AdminSettingsPage: React.FC = () => {
   return (
     <div className="flex flex-col h-full bg-white">
       {/* Anchored Header */}
-      <div className="flex-shrink-0 px-6 py-4">
-        <h2 className="text-gray-900 text-xl font-semibold">Settings</h2>
-        {isDemoMode && (
-          <p className="mt-1 text-xs text-amber-700">
-            Demo mode is read-only. Settings can be inspected but not saved.
-          </p>
-        )}
+      <div className="flex-shrink-0 px-4 pb-4 pt-6">
+        <div className="mx-auto max-w-4xl">
+          <h2 className="text-xl font-semibold text-slate-900">Settings</h2>
+          {isDemoMode && (
+            <p className="mt-1 text-[12px] text-amber-700">
+              Demo mode is read-only. Settings can be inspected but not saved.
+            </p>
+          )}
+        </div>
       </div>
 
       <SettingsNavigation
@@ -323,52 +333,7 @@ const AdminSettingsPage: React.FC = () => {
         {...categoryRoute}
       />
 
-      {/* Anchored Footer - Status Bar */}
-      <div className="flex-shrink-0 border-t border-gray-200 px-6 py-3 bg-gray-50">
-        <div className="flex items-center justify-between">
-          {/* Left Side - Status Message */}
-          <div className="flex items-center gap-2">
-            {saveStatus === 'saving' && (
-              <span className="flex items-center gap-1.5 text-xs text-gray-500 font-mono">
-                <svg className="animate-spin h-3 w-3 text-gray-400" fill="none" viewBox="0 0 24 24">
-                  <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-                  <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
-                </svg>
-                Saving changes...
-              </span>
-            )}
-            {saveStatus === 'saved' && (
-              <span className="flex items-center gap-1.5 text-xs text-gray-500 font-mono">
-                <span className="w-1.5 h-1.5 rounded-full bg-green-500"></span>
-                Settings auto-saved
-              </span>
-            )}
-            {saveStatus === 'error' && globalError && (
-              <span className="flex items-center gap-1.5 text-xs text-red-600 font-mono">
-                <span className="w-1.5 h-1.5 rounded-full bg-red-500"></span>
-                {globalError}
-              </span>
-            )}
-            {saveStatus === 'warning' && globalError && (
-              <span className="flex items-center gap-1.5 text-xs text-amber-700 font-mono">
-                <span className="w-1.5 h-1.5 rounded-full bg-amber-500"></span>
-                Saved with warning: {globalError}
-              </span>
-            )}
-            {saveStatus === 'idle' && (
-              <span className="flex items-center gap-1.5 text-xs text-gray-400 font-mono">
-                <span className="w-1.5 h-1.5 rounded-full bg-gray-300"></span>
-                All changes saved
-              </span>
-            )}
-          </div>
-
-          {/* Right Side - Reserved for action buttons if not using auto-save */}
-          <div className="flex items-center gap-2">
-            {/* Action buttons would go here if needed */}
-          </div>
-        </div>
-      </div>
+      <SettingsSaveStatusBar saveStatus={saveStatus} globalError={globalError} />
     </div>
   );
 };
@@ -385,21 +350,19 @@ const SettingsPage: React.FC = () => {
 
   return (
     <div className="flex h-full flex-col bg-white">
-      <div className="flex-shrink-0 border-b border-gray-200 px-6 py-4">
-        <h2 className="text-xl font-semibold text-gray-900">Settings</h2>
-        <p className="mt-1 text-xs text-gray-500">Preferences for {user?.displayName || user?.username || 'your account'}.</p>
+      <div className="flex-shrink-0 border-b border-slate-200 px-4 pb-4 pt-6">
+        <div className="mx-auto max-w-4xl">
+          <h2 className="text-xl font-semibold text-slate-900">Settings</h2>
+          <p className="mt-1 text-[12px] text-slate-500">Preferences for {user?.displayName || user?.username || 'your account'}.</p>
+        </div>
       </div>
       <fieldset
         disabled={isDemoMode}
-        className={`flex-1 overflow-y-auto p-6 ${isDemoMode ? 'opacity-70' : ''}`}
+        className={`flex-1 overflow-y-auto ${isDemoMode ? 'opacity-70' : ''}`}
       >
-        <div className="mx-auto max-w-2xl">
+        <div className="mx-auto max-w-4xl space-y-10 px-4 py-8">
           <VoiceSettingsSection />
-          <div className="my-6 border-t border-gray-200" />
-          {desktop && <>
-            <DesktopNotificationSettingsSection />
-            <div className="my-6 border-t border-gray-200" />
-          </>}
+          {desktop && <DesktopNotificationSettingsSection />}
           <NotificationSettingsSection />
         </div>
       </fieldset>

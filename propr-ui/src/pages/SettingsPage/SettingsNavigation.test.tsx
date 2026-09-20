@@ -55,7 +55,12 @@ describe('SettingsNavigation', () => {
     expect(modelsTab).toHaveAttribute('aria-selected', 'true');
     expect(modelsTab).toHaveClass('border-teal-600', 'text-teal-700');
     expect(modelsTab).not.toHaveClass('bg-gray-900', 'rounded-md');
-    expect(modelsTab.querySelector('span')).toHaveClass('bg-slate-100', 'text-slate-500');
+    // Tabs carry no count pill: a number beside a tab reads as an alert, and a
+    // section count is not actionable.
+    for (const tab of screen.getAllByRole('tab')) {
+      expect(tab.querySelector('span')).toBeNull();
+      expect(tab.textContent).not.toMatch(/\d/);
+    }
     const navigationRow = screen.getByRole('tablist', { name: 'Settings categories' }).parentElement?.parentElement;
     expect(navigationRow).toHaveClass(
       'w-full',
@@ -75,14 +80,14 @@ describe('SettingsNavigation', () => {
       'sm:ml-auto',
       'sm:w-64'
     );
-    expect(container.querySelector('[data-settings-section="model-selection"]')).toHaveClass(
-      '[&_select]:max-w-md',
-      '[&_select]:border',
-      '[&_select]:border-slate-300',
-      '[&_select]:bg-white',
-      '[&_select]:shadow-sm'
-    );
-    expect(container.querySelector('[data-settings-section="model-selection"]')).not.toHaveClass('rounded-lg', 'border', 'shadow-sm');
+    // Settings are held to a readable measure instead of stretching across the
+    // canvas, and section blocks stay flat — no card border, no rounded box.
+    expect(screen.getByRole('tablist', { name: 'Settings categories' }).closest('div.border-b'))
+      .toHaveClass('mx-auto', 'max-w-4xl');
+    expect(container.querySelector('[data-settings-section="model-selection"]')?.parentElement)
+      .toHaveClass('space-y-10');
+    expect(container.querySelector('[data-settings-section="model-selection"]'))
+      .not.toHaveClass('rounded-lg', 'border', 'shadow-sm');
     expect(screen.getByText('Model controls')).toBeVisible();
     expect(screen.getByText('Merge controls')).not.toBeVisible();
 
