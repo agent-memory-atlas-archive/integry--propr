@@ -45,28 +45,38 @@ interface LookaheadPages {
   nextCursor: string | null;
   unreadCount: number;
   pagesLoaded: number;
+  /** Set when a lookahead page failed; nextCursor then still points at that page. */
+  error?: unknown;
 }
 
 /**
- * Keeps following the cursor while the pages read so far hold only System
- * events, so the activity feed is not left blank. Resolves null once superseded.
+ * Keeps following the cursor while the pages read so far hold no visible
+ * activity, so the activity feed is not left blank. Lookahead is best-effort:
+ * a failed page keeps what was read and its cursor. Resolves null once superseded.
  */
 async function readPastSystemPages(
   pages: LookaheadPages,
+  hasVisibleActivity: (notifications: readonly Notification[]) => boolean,
   isCurrent: () => boolean,
 ): Promise<LookaheadPages | null> {
   const result = { ...pages, notifications: [...pages.notifications] };
   while (
     result.nextCursor !== null
     && result.pagesLoaded < MAX_AUTO_PAGE_LOOKAHEAD
-    && !hasActivity(result.notifications)
+    && !hasVisibleActivity(result.notifications)
   ) {
-    result.pagesLoaded += 1;
-    const page = await listNotifications({ cursor: result.nextCursor, limit: PAGE_SIZE });
-    if (!isCurrent()) return null;
-    result.notifications.push(...page.notifications);
-    result.nextCursor = page.nextCursor;
-    result.unreadCount = page.unreadCount;
+    try {
+      const page = await listNotifications({ cursor: result.nextCursor, limit: PAGE_SIZE });
+      if (!isCurrent()) return null;
+      result.pagesLoaded += 1;
+      result.notifications.push(...page.notifications);
+      result.nextCursor = page.nextCursor;
+      result.unreadCount = page.unreadCount;
+    } catch (error) {
+      if (!isCurrent()) return null;
+      result.error = error;
+      break;
+    }
   }
   return result;
 }
@@ -121,6 +131,11 @@ export function useInboxNotifications(): InboxNotificationsState {
     return [readOverridesRef.current.get(notification.id) ?? notification];
   }), []);
 
+  /** Activity that survives reconciliation, so dismissed items do not end lookahead. */
+  const hasVisibleActivity = useCallback((incoming: readonly Notification[]) => incoming.some(
+    notification => !hiddenIdsRef.current.has(notification.id) && !isSystemNotification(notification),
+  ), []);
+
   const loadFirstPage = useCallback(async (mode: FirstPageLoad) => {
     const generation = ++requestGenerationRef.current;
     loadMoreGenerationRef.current += 1;
@@ -134,11 +149,15 @@ export function useInboxNotifications(): InboxNotificationsState {
     try {
       const response = await listNotifications({ limit: PAGE_SIZE });
       if (generation !== requestGenerationRef.current) return;
-      const firstPage = { ...response, pagesLoaded: 1 };
+      const firstPage: LookaheadPages = { ...response, pagesLoaded: 1 };
       // Older loaded pages that already show activity make reading ahead pointless.
       const pages = keepLoadedPages && hasActivity(notificationsRef.current)
         ? firstPage
-        : await readPastSystemPages(firstPage, () => generation === requestGenerationRef.current);
+        : await readPastSystemPages(
+          firstPage,
+          hasVisibleActivity,
+          () => generation === requestGenerationRef.current,
+        );
       if (!pages) return;
       const {
         notifications: rawNotifications,
@@ -157,7 +176,7 @@ export function useInboxNotifications(): InboxNotificationsState {
       });
       if (!keepLoadedPages || (settled && boundary === null)) setNextCursor(latestNextCursor);
       if (settled) commitUnreadCount(latestUnreadCount);
-      setError(null);
+      setError(pages.error === undefined ? null : messageFrom(pages.error));
     } catch (loadError) {
       if (generation === requestGenerationRef.current) setError(messageFrom(loadError));
     } finally {
@@ -166,7 +185,7 @@ export function useInboxNotifications(): InboxNotificationsState {
         setRefreshing(false);
       }
     }
-  }, [commitUnreadCount, reconcileIncoming]);
+  }, [commitUnreadCount, hasVisibleActivity, reconcileIncoming]);
 
   useEffect(() => {
     void loadFirstPage('initial');
@@ -216,16 +235,27 @@ export function useInboxNotifications(): InboxNotificationsState {
       let currentCursor: string | null = cursor;
       let latestUnreadCount: number | null = null;
       let pagesLoaded = 0;
+      let lookaheadError: unknown;
       // Skip past pages of only System events so Load more always surfaces activity
       // when there is some within the lookahead bound.
       while (currentCursor !== null && pagesLoaded < MAX_AUTO_PAGE_LOOKAHEAD) {
-        pagesLoaded += 1;
-        const response = await listNotifications({ cursor: currentCursor, limit: PAGE_SIZE });
+        let response;
+        try {
+          response = await listNotifications({ cursor: currentCursor, limit: PAGE_SIZE });
+        } catch (pageError) {
+          // The requested page itself failing leaves nothing to keep.
+          if (pagesLoaded === 0) throw pageError;
+          // Later pages are best-effort: keep what loaded and the failed page's cursor.
+          if (generation !== requestGenerationRef.current) return;
+          lookaheadError = pageError;
+          break;
+        }
         if (generation !== requestGenerationRef.current) return;
+        pagesLoaded += 1;
         rawNewNotifications.push(...response.notifications);
         currentCursor = response.nextCursor;
         latestUnreadCount = response.unreadCount;
-        if (hasActivity(rawNewNotifications)) break;
+        if (hasVisibleActivity(rawNewNotifications)) break;
       }
       setNotifications(current => mergeNotifications(
         current,
@@ -236,12 +266,21 @@ export function useInboxNotifications(): InboxNotificationsState {
       if (latestUnreadCount !== null && mutationEpoch === mutationEpochRef.current) {
         commitUnreadCount(latestUnreadCount);
       }
+      if (lookaheadError !== undefined) setError(messageFrom(lookaheadError));
     } catch (loadError) {
       if (generation === requestGenerationRef.current) setError(messageFrom(loadError));
     } finally {
       if (loadMoreGeneration === loadMoreGenerationRef.current) setLoadingMore(false);
     }
-  }, [commitUnreadCount, initialLoading, loadingMore, nextCursor, reconcileIncoming, refreshing]);
+  }, [
+    commitUnreadCount,
+    hasVisibleActivity,
+    initialLoading,
+    loadingMore,
+    nextCursor,
+    reconcileIncoming,
+    refreshing,
+  ]);
 
   const dismiss = useCallback(async (id: string) => {
     if (isDemoMode || dismissingRef.current.has(id)) return;
