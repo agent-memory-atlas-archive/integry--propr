@@ -101,20 +101,20 @@ export const getReadinessTaskExistence = (): Promise<GetTasksResponse> =>
     getTasksRequest({ status: 'all', limit: 1, offset: 0, repository: 'all' }, signal));
 
 export const getTaskHistory = async (taskId: string): Promise<unknown> => {
-  const response = await apiFetch(`${API_BASE_URL}/api/task/${taskId}/history`, { credentials: 'include' });
+  const response = await apiFetch(`${API_BASE_URL}/api/task/${encodeURIComponent(taskId)}/history`, { credentials: 'include' });
   await handleApiResponse(response);
   return response.json();
 };
 
 export const getTaskAnalysis = async (taskId: string): Promise<TaskAnalysisResponse> => {
-  const response = await apiFetch(`${API_BASE_URL}/api/task/${taskId}/analysis`, { credentials: 'include' });
+  const response = await apiFetch(`${API_BASE_URL}/api/task/${encodeURIComponent(taskId)}/analysis`, { credentials: 'include' });
   if (response.status === 202) return { analysis: null, message: 'Analysis pending...' };
   await handleApiResponse(response);
   return response.json();
 };
 
 export const getTaskLiveDetails = async (taskId: string): Promise<unknown> => {
-  const response = await apiFetch(`${API_BASE_URL}/api/task/${taskId}/live-details`, { credentials: 'include' });
+  const response = await apiFetch(`${API_BASE_URL}/api/task/${encodeURIComponent(taskId)}/live-details`, { credentials: 'include' });
   await handleApiResponse(response);
   return response.json();
 };
@@ -144,13 +144,14 @@ export const fetchLogFile = async (logFilePath: string): Promise<string> => {
 };
 
 export const stopTaskExecution = async (taskId: string): Promise<StopExecutionResponse> => {
-  const response = await apiFetch(`${API_BASE_URL}/api/task/${taskId}/stop`, { method: 'POST', credentials: 'include' });
+  const response = await apiFetch(`${API_BASE_URL}/api/task/${encodeURIComponent(taskId)}/stop`, { method: 'POST', credentials: 'include' });
   await handleApiResponse(response);
   return response.json();
 };
 
 export const deleteTask = async (taskId: string, force?: boolean): Promise<void> => {
-  const url = force ? `${API_BASE_URL}/api/tasks/${taskId}?force=true` : `${API_BASE_URL}/api/tasks/${taskId}`;
+  const encodedTaskId = encodeURIComponent(taskId);
+  const url = force ? `${API_BASE_URL}/api/tasks/${encodedTaskId}?force=true` : `${API_BASE_URL}/api/tasks/${encodedTaskId}`;
   const response = await apiFetch(url, { method: 'DELETE', credentials: 'include' });
   if (response.status === 204) return;
   if (response.status === 400) {

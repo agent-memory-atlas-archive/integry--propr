@@ -1,6 +1,7 @@
 import { Request, Response } from 'express';
 import { RedisClientType } from 'redis';
 import { Job, Queue } from 'bullmq';
+import { buildIssueTaskId } from '@propr/shared';
 import { timeApiStage } from '../apiPerformanceTiming.js';
 
 interface LiveQueueJob {
@@ -156,7 +157,7 @@ function getNavigationTaskId(jobName: string, jobId: string, data: Record<string
   const model = nonEmptyString(data.modelName);
   const correlationId = nonEmptyString(data.correlationId);
   return owner && repo && number && agent && model && correlationId
-    ? `${owner}-${repo}-${number}-${agent}-${model}-${correlationId}`
+    ? buildIssueTaskId({ repoOwner: owner, repoName: repo, issueNumber: number, agentAlias: agent, modelName: model, correlationId })
     : undefined;
 }
 

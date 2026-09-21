@@ -42,7 +42,7 @@ test('/api/queue/stats represents every active job once and exposes only safe pr
             repoName: 'propr',
             number: 1906,
             agentAlias: 'codex',
-            modelName: 'gpt-5.6-sol',
+            modelName: 'opencode-openai/gpt-5.6-luna',
             correlationId: 'corr-1',
             isChildJob: true,
             issuePayload: { title: 'Use live queue jobs' },
@@ -107,7 +107,7 @@ test('/api/queue/stats represents every active job once and exposes only safe pr
     activeJobs: [
       {
         id: 'issue-job-1',
-        taskId: 'integry-propr-1906-codex-gpt-5.6-sol-corr-1',
+        taskId: 'integry-propr-1906-codex-opencode-openai-gpt-5.6-luna-corr-1',
         name: 'processGitHubIssue',
         title: 'Use live queue jobs',
         repository: 'integry/propr',

@@ -168,7 +168,7 @@ export const FollowupCount: React.FC<FollowupCountProps> = ({ count }) => (
 );
 
 export interface ViewProgressLinkProps { taskId: string; }
-export const ViewProgressLink: React.FC<ViewProgressLinkProps> = ({ taskId }) => (<Link to={`/tasks/${taskId}`} className="inline-flex items-center gap-1 font-mono text-xs px-1.5 py-0.5 bg-blue-50 border border-blue-200 rounded-sm text-blue-700 hover:bg-blue-100 hover:border-blue-300 transition-colors" onClick={(e) => e.stopPropagation()}><Eye size={12} />View Progress</Link>);
+export const ViewProgressLink: React.FC<ViewProgressLinkProps> = ({ taskId }) => (<Link to={`/tasks/${encodeURIComponent(taskId)}`} className="inline-flex items-center gap-1 font-mono text-xs px-1.5 py-0.5 bg-blue-50 border border-blue-200 rounded-sm text-blue-700 hover:bg-blue-100 hover:border-blue-300 transition-colors" onClick={(e) => e.stopPropagation()}><Eye size={12} />View Progress</Link>);
 
 export interface RowActionsProps {
   isPending: boolean;

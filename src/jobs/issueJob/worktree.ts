@@ -17,7 +17,7 @@ export async function executeWorktreeOperations(params: ExecuteWorktreeParams): 
 
   // Construct the task dashboard URL
   const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:5173';
-  const taskUrl = `${frontendUrl}/tasks/${taskId}`;
+  const taskUrl = `${frontendUrl}/tasks/${encodeURIComponent(taskId)}`;
 
   await octokit.request('POST /repos/{owner}/{repo}/issues/{issue_number}/comments', {
     owner: issueRef.repoOwner, repo: issueRef.repoName, issue_number: issueRef.number,

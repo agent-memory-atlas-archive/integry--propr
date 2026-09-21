@@ -180,7 +180,7 @@ async function updateReviewCompletionComment(
 
 function getWebUiTaskUrl(taskId: string): string {
     const webUiUrl = process.env.WEB_UI_URL || process.env.FRONTEND_URL || 'https://gitfix.dev';
-    return `${webUiUrl}/tasks/${taskId}`;
+    return `${webUiUrl}/tasks/${encodeURIComponent(taskId)}`;
 }
 
 async function handleUltrafixContinuation(

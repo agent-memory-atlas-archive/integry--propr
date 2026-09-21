@@ -37,4 +37,17 @@ describe("E2E model task matching", () => {
     assert.equal(findUnclaimedModelTask(tasks, result, new Set([tasks[0].id])), undefined);
     assert.equal(findUnclaimedModelTask(tasks, { ...result, issueNumber: 716 }, new Set()), undefined);
   });
+
+  test("matches provider-qualified models against sanitized task IDs", () => {
+    const task = {
+      id: "integry-propr-test-715-opencode-opencode-openai-gpt-5.6-luna-correlation-three",
+      issueNumber: 715,
+    };
+
+    assert.equal(findUnclaimedModelTask([task], {
+      agent_alias: "opencode",
+      model_name: "opencode-openai/gpt-5.6-luna",
+      issueNumber: 715,
+    }, new Set())?.id, task.id);
+  });
 });

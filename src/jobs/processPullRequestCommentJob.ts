@@ -176,7 +176,7 @@ async function executeProcessing(params: ExecuteProcessingParams): Promise<JobRe
     const { combinedCommentBody, combinedBodyHtml, commentAuthors } = buildCombinedComment(state.unprocessedComments);
     state.authorsText = commentAuthors.map(a => `@${a}`).join(', ');
 
-    const taskUrl = `${getWebUiUrl()}/tasks/${taskId}`;
+    const taskUrl = `${getWebUiUrl()}/tasks/${encodeURIComponent(taskId)}`;
 
     const allComments = await fetchAllComments(state.octokit, repoOwner, repoName, pullRequestNumber);
     const commentsByTime = allComments
