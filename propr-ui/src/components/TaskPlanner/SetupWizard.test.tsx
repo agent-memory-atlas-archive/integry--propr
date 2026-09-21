@@ -188,7 +188,7 @@ vi.mock('./setupWizardHooks', () => ({
   persistDraftSetupSnapshot: (draftId: string, setupSnapshot?: Record<string, unknown>) => updateDraft(draftId, {
     context_config: setupSnapshot
   }),
-  usePromptPersistence: vi.fn(),
+  usePromptPersistence: () => ({ flushPrompt: vi.fn() }),
   computeIsGenerateDisabled: () => false,
   computeCanExport: () => false,
   useAutoResize: () => vi.fn(),
