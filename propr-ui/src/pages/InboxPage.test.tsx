@@ -619,6 +619,79 @@ describe('Inbox page', () => {
     expect(listNotifications).toHaveBeenLastCalledWith({ cursor: 'cursor-2', limit: 25 });
   });
 
+  test('looks past a first page of only system notifications until activity appears', async () => {
+    const indexing = (id: string) => item(id, `Indexed ${id}`, null, {
+      kind: 'indexing',
+      severity: 'info',
+      target: { type: 'indexing', repository: 'integry/propr' },
+    });
+    const activity = item('event-task', 'Actual activity');
+    vi.mocked(listNotifications)
+      .mockResolvedValueOnce({ notifications: [indexing('index-1'), indexing('index-2')], unreadCount: 99, nextCursor: 'cursor-1' })
+      .mockResolvedValueOnce({ notifications: [indexing('index-3')], unreadCount: 99, nextCursor: 'cursor-2' })
+      .mockResolvedValueOnce({ notifications: [activity], unreadCount: 100, nextCursor: 'cursor-3' });
+    renderInbox();
+
+    expect(await screen.findByRole('article', { name: 'Actual activity' })).toBeInTheDocument();
+    expect(listNotifications).toHaveBeenCalledTimes(3);
+    expect(listNotifications).toHaveBeenNthCalledWith(1, { limit: 25 });
+    expect(listNotifications).toHaveBeenNthCalledWith(2, { cursor: 'cursor-1', limit: 25 });
+    expect(listNotifications).toHaveBeenNthCalledWith(3, { cursor: 'cursor-2', limit: 25 });
+    expect(screen.getByRole('button', { name: /System/ })).toHaveTextContent('3');
+    expect(commitUnreadCount).toHaveBeenLastCalledWith(100);
+    expect(screen.getByRole('button', { name: 'Load more' })).toBeInTheDocument();
+  });
+
+  test('keeps loading more past consecutive system-only pages until activity appears', async () => {
+    const failure = (id: string) => item(id, `Failure ${id}`, null, {
+      kind: 'system_failure',
+      target: { type: 'system_failure', component: 'dispatcher' },
+    });
+    vi.mocked(listNotifications)
+      .mockResolvedValueOnce({ notifications: [item('event-first', 'First task')], unreadCount: 5, nextCursor: 'cursor-1' })
+      .mockResolvedValueOnce({ notifications: [failure('failure-1')], unreadCount: 5, nextCursor: 'cursor-2' })
+      .mockResolvedValueOnce({ notifications: [failure('failure-2')], unreadCount: 5, nextCursor: 'cursor-3' })
+      .mockResolvedValueOnce({ notifications: [item('event-older', 'Older task')], unreadCount: 6, nextCursor: 'cursor-4' });
+    renderInbox();
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Load more' }));
+    expect(await screen.findByRole('article', { name: 'Older task' })).toBeInTheDocument();
+    expect(listNotifications).toHaveBeenCalledTimes(4);
+    expect(listNotifications).toHaveBeenLastCalledWith({ cursor: 'cursor-3', limit: 25 });
+    expect(commitUnreadCount).toHaveBeenLastCalledWith(6);
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Load more' })).toBeEnabled());
+
+    vi.mocked(listNotifications).mockResolvedValueOnce({ notifications: [], unreadCount: 6, nextCursor: null });
+    fireEvent.click(screen.getByRole('button', { name: 'Load more' }));
+    await waitFor(() => expect(listNotifications).toHaveBeenLastCalledWith({ cursor: 'cursor-4', limit: 25 }));
+  });
+
+  test('stops looking ahead after four pages of only system notifications', async () => {
+    let page = 0;
+    vi.mocked(listNotifications).mockImplementation(async () => {
+      page += 1;
+      return {
+        notifications: [item(`failure-${page}`, `Failure ${page}`, null, {
+          kind: 'system_failure',
+          target: { type: 'system_failure', component: 'dispatcher' },
+        })],
+        unreadCount: 99,
+        nextCursor: `cursor-${page}`,
+      };
+    });
+    renderInbox();
+
+    const loadMore = await screen.findByRole('button', { name: 'Load more' });
+    expect(listNotifications).toHaveBeenCalledTimes(4);
+    expect(screen.getByRole('button', { name: /System/ })).toHaveTextContent('4');
+
+    fireEvent.click(loadMore);
+    await waitFor(() => expect(listNotifications).toHaveBeenCalledTimes(8));
+    await waitFor(() => expect(screen.getByRole('button', { name: /System/ })).toHaveTextContent('8'));
+    expect(listNotifications).toHaveBeenLastCalledWith({ cursor: 'cursor-7', limit: 25 });
+    expect(screen.getByRole('button', { name: 'Load more' })).toBeEnabled();
+  });
+
   test('keeps demo Inbox navigation read-only and hides dismissal', async () => {
     demoState.isDemoMode = true;
     const notification = item('event-demo', 'Demo notification');

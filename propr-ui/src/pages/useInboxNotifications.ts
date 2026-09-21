@@ -9,9 +9,11 @@ import {
 import { useNotificationCenter } from '../contexts/NotificationCenterContext';
 import { useToast } from '../components/ui/useToast';
 import { useDemoMode } from '../contexts/DemoModeContext';
-import { mergeNotifications, replaceNotificationRange } from './inboxUtils';
+import { isSystemNotification, mergeNotifications, replaceNotificationRange } from './inboxUtils';
 
 const PAGE_SIZE = 25;
+/** Most pages fetched in one go while looking past system-only pages for activity. */
+const MAX_AUTO_PAGE_LOOKAHEAD = 4;
 const AUTO_REFRESH_INTERVAL_MS = 60_000;
 
 /** Background refreshes run silently: no busy state, and errors stay until one succeeds. */
@@ -32,6 +34,41 @@ export interface InboxNotificationsState {
   dismiss: (id: string) => Promise<void>;
   clearAll: () => Promise<void>;
   open: (id: string) => void;
+}
+
+const hasActivity = (notifications: readonly Notification[]) => notifications.some(
+  notification => !isSystemNotification(notification),
+);
+
+interface LookaheadPages {
+  notifications: Notification[];
+  nextCursor: string | null;
+  unreadCount: number;
+  pagesLoaded: number;
+}
+
+/**
+ * Keeps following the cursor while the pages read so far hold only System
+ * events, so the activity feed is not left blank. Resolves null once superseded.
+ */
+async function readPastSystemPages(
+  pages: LookaheadPages,
+  isCurrent: () => boolean,
+): Promise<LookaheadPages | null> {
+  const result = { ...pages, notifications: [...pages.notifications] };
+  while (
+    result.nextCursor !== null
+    && result.pagesLoaded < MAX_AUTO_PAGE_LOOKAHEAD
+    && !hasActivity(result.notifications)
+  ) {
+    result.pagesLoaded += 1;
+    const page = await listNotifications({ cursor: result.nextCursor, limit: PAGE_SIZE });
+    if (!isCurrent()) return null;
+    result.notifications.push(...page.notifications);
+    result.nextCursor = page.nextCursor;
+    result.unreadCount = page.unreadCount;
+  }
+  return result;
 }
 
 function messageFrom(error: unknown): string {
@@ -97,17 +134,29 @@ export function useInboxNotifications(): InboxNotificationsState {
     try {
       const response = await listNotifications({ limit: PAGE_SIZE });
       if (generation !== requestGenerationRef.current) return;
-      const incoming = reconcileIncoming(response.notifications);
+      const firstPage = { ...response, pagesLoaded: 1 };
+      // Older loaded pages that already show activity make reading ahead pointless.
+      const pages = keepLoadedPages && hasActivity(notificationsRef.current)
+        ? firstPage
+        : await readPastSystemPages(firstPage, () => generation === requestGenerationRef.current);
+      if (!pages) return;
+      const {
+        notifications: rawNotifications,
+        nextCursor: latestNextCursor,
+        unreadCount: latestUnreadCount,
+      } = pages;
+      if (pages.pagesLoaded > 1) extraPagesLoadedRef.current = true;
+      const incoming = reconcileIncoming(rawNotifications);
       const settled = mutationEpoch === mutationEpochRef.current;
-      const boundary = response.nextCursor === null ? null : response.notifications.at(-1);
+      const boundary = latestNextCursor === null ? null : rawNotifications.at(-1);
       setNotifications(current => {
         if (!settled || (keepLoadedPages && boundary === undefined)) return mergeNotifications(current, incoming);
         return keepLoadedPages
           ? replaceNotificationRange(current, incoming, boundary ?? null)
           : mergeNotifications([], incoming);
       });
-      if (!keepLoadedPages || (settled && boundary === null)) setNextCursor(response.nextCursor);
-      if (settled) commitUnreadCount(response.unreadCount);
+      if (!keepLoadedPages || (settled && boundary === null)) setNextCursor(latestNextCursor);
+      if (settled) commitUnreadCount(latestUnreadCount);
       setError(null);
     } catch (loadError) {
       if (generation === requestGenerationRef.current) setError(messageFrom(loadError));
@@ -163,15 +212,30 @@ export function useInboxNotifications(): InboxNotificationsState {
     setLoadingMore(true);
     setError(null);
     try {
-      const response = await listNotifications({ cursor, limit: PAGE_SIZE });
-      if (generation !== requestGenerationRef.current) return;
+      const rawNewNotifications: Notification[] = [];
+      let currentCursor: string | null = cursor;
+      let latestUnreadCount: number | null = null;
+      let pagesLoaded = 0;
+      // Skip past pages of only System events so Load more always surfaces activity
+      // when there is some within the lookahead bound.
+      while (currentCursor !== null && pagesLoaded < MAX_AUTO_PAGE_LOOKAHEAD) {
+        pagesLoaded += 1;
+        const response = await listNotifications({ cursor: currentCursor, limit: PAGE_SIZE });
+        if (generation !== requestGenerationRef.current) return;
+        rawNewNotifications.push(...response.notifications);
+        currentCursor = response.nextCursor;
+        latestUnreadCount = response.unreadCount;
+        if (hasActivity(rawNewNotifications)) break;
+      }
       setNotifications(current => mergeNotifications(
         current,
-        reconcileIncoming(response.notifications),
+        reconcileIncoming(rawNewNotifications),
       ));
-      setNextCursor(response.nextCursor);
+      setNextCursor(currentCursor);
       extraPagesLoadedRef.current = true;
-      if (mutationEpoch === mutationEpochRef.current) commitUnreadCount(response.unreadCount);
+      if (latestUnreadCount !== null && mutationEpoch === mutationEpochRef.current) {
+        commitUnreadCount(latestUnreadCount);
+      }
     } catch (loadError) {
       if (generation === requestGenerationRef.current) setError(messageFrom(loadError));
     } finally {
