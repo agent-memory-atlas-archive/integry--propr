@@ -153,6 +153,58 @@ describe('summary miner batch fallback', () => {
     assert.notEqual(state.warning?.mode, 'cooldown');
   });
 
+  test('retries only files omitted from an otherwise valid batch response', async () => {
+    const prompts: string[] = [];
+    const primaryAgent = createAgent('primary', 'primary-model', async (prompt) => {
+      prompts.push(prompt);
+      return {
+        success: true,
+        response: JSON.stringify({
+          summaries: prompts.length === 1
+            ? [{ path: 'src/a.ts', summary: 'Exports the A helper used by the application.' }]
+            : [{ path: 'config.xml', summary: 'Configures the application metadata and runtime preferences.' }]
+        }),
+        modelUsed: 'primary-model',
+        executionTimeMs: 1
+      };
+    });
+
+    const result = await processSingleBatch({
+      fullName: 'integry/forex',
+      batch: [
+        { path: 'src/a.ts', content: 'export const a = 1;', blobHash: 'abc123' },
+        { path: 'config.xml', content: '<widget id="forex" />', blobHash: 'def456' }
+      ],
+      agent: primaryAgent as never,
+      log: log as never,
+      modelUsed: 'primary-model',
+      primaryAgentAliasSetting: 'primary',
+      branch: 'main'
+    });
+
+    assert.equal(result.success, true);
+    assert.equal(result.stopProcessing, false);
+    assert.equal(prompts.length, 2);
+    assert.match(prompts[0], /--- START src\/a\.ts ---/);
+    assert.match(prompts[0], /--- START config\.xml ---/);
+    assert.doesNotMatch(prompts[1], /--- START src\/a\.ts ---/);
+    assert.match(prompts[1], /--- START config\.xml ---/);
+
+    const saved = await db('file_summaries')
+      .where({ branch: 'main' })
+      .whereIn('path', ['integry/forex/src/a.ts', 'integry/forex/config.xml'])
+      .orderBy('path');
+    assert.equal(saved.length, 2);
+    assert.deepEqual(saved.map(row => row.path), [
+      'integry/forex/config.xml',
+      'integry/forex/src/a.ts'
+    ]);
+    assert.ok(saved.every(row => row.model_used === 'primary-model'));
+
+    const state = await loadSummarizationRuntimeState();
+    assert.equal(Object.keys(state.cooldowns).length, 0);
+  });
+
   test('uses fallback when the primary returns unusable output', async () => {
     let primaryCalls = 0;
     let fallbackCalls = 0;
@@ -765,6 +817,60 @@ describe('summary miner batch fallback', () => {
     assert.equal(Object.keys(state.cooldowns).length, 0);
     assert.equal(state.primary_quota_failures, 0);
     assert.equal(state.warning?.mode, 'fallback_degraded');
+  });
+
+  test('directory batch retries only directories omitted from a valid response', async () => {
+    const prompts: string[] = [];
+    const primaryAgent = createAgent('primary', 'primary-model', async (prompt) => {
+      prompts.push(prompt);
+      return {
+        success: true,
+        response: JSON.stringify({
+          summaries: prompts.length === 1
+            ? [{ path: 'integry/propr/src', summary: 'Contains the application source modules.' }]
+            : [{ path: 'integry/propr/test', summary: 'Contains automated tests for the application.' }]
+        }),
+        modelUsed: 'primary-model',
+        executionTimeMs: 1
+      };
+    });
+
+    const result = await processDirectoryBatch({
+      directories: [
+        {
+          dirPath: 'integry/propr/src',
+          childFiles: [{ path: 'integry/propr/src/a.ts', summary: 'Exports A.' }],
+          childDirs: [],
+          newHash: 'hash-src'
+        },
+        {
+          dirPath: 'integry/propr/test',
+          childFiles: [{ path: 'integry/propr/test/a.test.ts', summary: 'Tests A.' }],
+          childDirs: [],
+          newHash: 'hash-test'
+        }
+      ],
+      agent: primaryAgent as never,
+      log: log as never,
+      modelUsed: 'primary-model',
+      primaryAgentAliasSetting: 'primary',
+      fullName: 'integry/propr',
+      branch: 'main'
+    });
+
+    assert.equal(result.stopProcessing, false);
+    assert.equal(prompts.length, 2);
+    assert.match(prompts[0], /--- DIRECTORY: integry\/propr\/src ---/);
+    assert.match(prompts[0], /--- DIRECTORY: integry\/propr\/test ---/);
+    assert.doesNotMatch(prompts[1], /--- DIRECTORY: integry\/propr\/src ---/);
+    assert.match(prompts[1], /--- DIRECTORY: integry\/propr\/test ---/);
+    assert.deepEqual(result.map(({ dirPath, summary }) => ({ dirPath, summary })), [
+      { dirPath: 'integry/propr/src', summary: 'Contains the application source modules.' },
+      { dirPath: 'integry/propr/test', summary: 'Contains automated tests for the application.' }
+    ]);
+
+    const state = await loadSummarizationRuntimeState();
+    assert.equal(Object.keys(state.cooldowns).length, 0);
   });
 
   test('records cooldown after unusable directory output when no fallback is configured', async () => {
