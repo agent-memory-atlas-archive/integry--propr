@@ -7,6 +7,10 @@ import type {
 } from '../../../../apps/desktop/src/shared/contract';
 import { useCurrentUser } from '../../contexts/AuthContext';
 import { useDesktop } from '../../desktop/DesktopContext';
+import { SettingsSection, SettingsStatus } from './SettingsLayout';
+
+/** Shared by the enable row and every event row so the toggles line up. */
+const EVENT_GRID = 'grid grid-cols-[minmax(0,1fr)_4.5rem] items-center gap-x-4';
 
 const EVENT_OPTIONS: Array<{
   key: keyof Omit<DesktopNotificationPreferences, 'enabled'>;
@@ -25,13 +29,13 @@ const Toggle: React.FC<{
   label: string;
   onChange(checked: boolean): void;
 }> = ({ checked, disabled, label, onChange }) => (
-  <label className="inline-flex items-center gap-1.5 text-xs text-gray-600">
+  <label className="inline-flex items-center justify-self-center">
     <input
       type="checkbox"
       checked={checked}
       disabled={disabled}
       onChange={event => onChange(event.target.checked)}
-      className="h-4 w-4 rounded border-gray-300 text-primary-600 focus:ring-primary-500"
+      className="h-4 w-4 flex-shrink-0 rounded border-slate-300 text-primary-600 focus:ring-primary-500"
     />
     <span className="sr-only">{label}</span>
   </label>
@@ -154,76 +158,76 @@ const DesktopNotificationSettingsSection: React.FC = () => {
   const disabled = busy || !settings || unsupported;
 
   return (
-    <section aria-labelledby="desktop-notification-settings-heading">
-      <div className="mb-4 flex items-center gap-2">
-        <BellRing className="h-4 w-4 text-gray-500" />
-        <h4 id="desktop-notification-settings-heading" className="text-[10px] font-bold uppercase tracking-wider text-gray-500">
-          Desktop notifications
-        </h4>
-        {(!settings || busy) && <Loader2 aria-label="Loading desktop notification preferences" className="h-3.5 w-3.5 animate-spin text-gray-400" />}
-      </div>
-
-      <p className="mb-3 text-[11px] leading-5 text-gray-500">
-        Native task alerts for {desktop.profile.name} on this device. These are separate from Browser push and inbox preferences.
-      </p>
-
+    <SettingsSection
+      title="Desktop notifications"
+      icon={<BellRing aria-hidden="true" className="h-3.5 w-3.5 text-slate-400" />}
+      description={`Native task alerts for ${desktop.profile.name} on this device. These are separate from Browser push and inbox preferences.`}
+      status={(!settings || busy)
+        ? <SettingsStatus tone="pending" role="status">
+            <span aria-hidden="true">Syncing…</span>
+            <Loader2 aria-label="Loading desktop notification preferences" className="h-3 w-3 animate-spin text-slate-400" />
+          </SettingsStatus>
+        : undefined}
+    >
       {unsupported ? (
-        <div className="rounded-md border border-gray-200 bg-gray-50 p-3 text-xs leading-5 text-gray-700">
+        <p className="max-w-2xl text-[12px] leading-5 text-slate-500">
           {windowsDeferred
             ? 'Native task notifications are currently available on Linux and macOS. Windows support is planned.'
             : 'Native notifications are not available in this desktop environment.'}
-        </div>
+        </p>
       ) : (
-        <div className="space-y-4">
-          <div className="flex flex-wrap items-center justify-between gap-3 rounded-md border border-gray-200 bg-gray-50 p-3">
-            <div>
-              <p className="text-xs font-medium text-gray-700">Enable on this device</p>
-              <p className="mt-0.5 text-[11px] text-gray-500">Off until you choose to enable it. ProPR never prompts on launch.</p>
-            </div>
-            <Toggle
-              label="Enable desktop notifications on this device"
-              checked={settings?.preferences.enabled ?? false}
-              disabled={disabled}
-              onChange={enabled => void update({ enabled })}
-            />
-          </div>
-
-          <div className="divide-y divide-gray-100 border-y border-gray-100">
-            {EVENT_OPTIONS.map(option => (
-              <div key={option.key} className="flex items-center justify-between gap-4 py-2.5">
-                <div>
-                  <p className="text-xs font-medium text-gray-700">{option.label}</p>
-                  <p className="text-[11px] text-gray-500">{option.description}</p>
-                </div>
-                <Toggle
-                  label={`Desktop notification for ${option.label}`}
-                  checked={settings?.preferences[option.key] ?? false}
-                  disabled={disabled}
-                  onChange={checked => void update({ [option.key]: checked })}
-                />
+        <>
+          <div className="mb-6 max-w-2xl">
+            <div className={`${EVENT_GRID} border-b border-slate-200 pb-3`}>
+              <div className="min-w-0">
+                <p className="text-sm font-medium text-slate-900">Enable on this device</p>
+                <p className="mt-0.5 text-[12px] leading-5 text-slate-500">Off until you choose to enable it. ProPR never prompts on launch.</p>
               </div>
-            ))}
+              <Toggle
+                label="Enable desktop notifications on this device"
+                checked={settings?.preferences.enabled ?? false}
+                disabled={disabled}
+                onChange={enabled => void update({ enabled })}
+              />
+            </div>
+
+            <div className="divide-y divide-slate-100">
+              {EVENT_OPTIONS.map(option => (
+                <div key={option.key} className={`${EVENT_GRID} py-3`}>
+                  <div className="min-w-0">
+                    <p className="text-sm font-medium text-slate-900">{option.label}</p>
+                    <p className="mt-0.5 text-[12px] leading-5 text-slate-500">{option.description}</p>
+                  </div>
+                  <Toggle
+                    label={`Desktop notification for ${option.label}`}
+                    checked={settings?.preferences[option.key] ?? false}
+                    disabled={disabled}
+                    onChange={checked => void update({ [option.key]: checked })}
+                  />
+                </div>
+              ))}
+            </div>
           </div>
 
-          <div className="flex flex-wrap items-center gap-3">
+          <div className="mb-6 flex max-w-2xl flex-wrap items-center gap-3">
             <button
               type="button"
               disabled={disabled || !settings?.preferences.enabled}
               onClick={() => void test()}
-              className="rounded-md border border-gray-300 bg-white px-3 py-2 text-xs font-medium text-gray-700 hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-primary-500 focus:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
+              className="rounded border border-slate-300 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 shadow-sm hover:bg-slate-50 focus:outline-none focus:ring-2 focus:ring-primary-500 focus:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
             >
               Send test notification
             </button>
-            <span className="text-[11px] leading-5 text-gray-500">
+            <span className="text-[12px] leading-5 text-slate-500">
               OS notification settings, Focus, and Do Not Disturb can suppress banners.
             </span>
           </div>
-        </div>
+        </>
       )}
 
-      {testResult && <p role="status" className="mt-3 text-xs text-gray-700">{testResult}</p>}
-      {error && <p role="alert" className="mt-3 text-xs text-red-600">{error}</p>}
-    </section>
+      {testResult && <p role="status" className="max-w-2xl text-[12px] leading-5 text-slate-600">{testResult}</p>}
+      {error && <p role="alert" className="mt-2 max-w-2xl text-[12px] leading-5 text-red-600">{error}</p>}
+    </SettingsSection>
   );
 };
 

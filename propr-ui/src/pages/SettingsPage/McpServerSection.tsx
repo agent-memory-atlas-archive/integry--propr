@@ -8,6 +8,7 @@ import {
   MCP_ALL_SCOPES,
 } from '../../api/adminMcpApi';
 import { useDemoMode } from '../../contexts/DemoModeContext';
+import { SettingsSection, SettingsStatus, type SettingsStatusTone } from './SettingsLayout';
 
 function statusLabel(data: McpAdminResponse | null): string {
   if (!data) return 'Loading…';
@@ -21,13 +22,12 @@ function statusLabel(data: McpAdminResponse | null): string {
   return status.enabled ? 'Enabled' : 'Disabled';
 }
 
-function statusColor(data: McpAdminResponse | null): string {
-  if (!data) return 'text-gray-400';
+function statusTone(data: McpAdminResponse | null): SettingsStatusTone {
+  if (!data) return 'pending';
   const { status } = data;
-  if (status.enabled) return 'text-green-700';
-  if (status.operatorForced === 'on') return 'text-green-700';
-  if (status.keyChanged || status.missingHttpsOrigin || status.missingSecretChain) return 'text-red-600';
-  return 'text-gray-500';
+  if (status.enabled || status.operatorForced === 'on') return 'ok';
+  if (status.keyChanged || status.missingHttpsOrigin || status.missingSecretChain) return 'error';
+  return 'pending';
 }
 
 function statusDescriptionSuffix(data: McpAdminResponse | null): string {
@@ -53,7 +53,7 @@ interface EnableToggleProps {
 function EnableToggle({ isEnabled, saving, canToggle, confirmEnable, onToggle, onCancelConfirm }: EnableToggleProps) {
   if (confirmEnable) {
     return (
-      <div className="rounded border border-amber-200 bg-amber-50 p-3 text-xs text-amber-900">
+      <div className="max-w-2xl border-l-2 border-amber-400 pl-3 text-[12px] leading-5 text-amber-900">
         <p className="font-medium">Enable MCP server?</p>
         <p className="mt-1">This will expose an OAuth endpoint and allow AI clients to access this ProPR instance on behalf of your users.</p>
         <div className="mt-2 flex gap-2">
@@ -65,7 +65,7 @@ function EnableToggle({ isEnabled, saving, canToggle, confirmEnable, onToggle, o
           >
             {saving ? 'Enabling…' : 'Enable'}
           </button>
-          <button type="button" onClick={onCancelConfirm} className="rounded border border-gray-300 px-3 py-1.5">
+          <button type="button" onClick={onCancelConfirm} className="rounded border border-slate-300 bg-white px-3 py-1.5 text-slate-700 hover:bg-slate-50">
             Cancel
           </button>
         </div>
@@ -73,15 +73,15 @@ function EnableToggle({ isEnabled, saving, canToggle, confirmEnable, onToggle, o
     );
   }
   return (
-    <label className="flex cursor-pointer items-center gap-2">
+    <label className="flex cursor-pointer items-center gap-3">
       <input
         type="checkbox"
         checked={isEnabled}
         disabled={saving || !canToggle}
         onChange={e => onToggle(e.target.checked)}
-        className="h-4 w-4 rounded border-gray-300"
+        className="h-4 w-4 flex-shrink-0 rounded border-slate-300 text-primary-600 focus:ring-primary-500"
       />
-      <span className="text-sm text-gray-700">Enable MCP server</span>
+      <span className="text-sm font-medium text-slate-900">Enable MCP server</span>
     </label>
   );
 }
@@ -101,32 +101,32 @@ function McpDetails({ data, saving, revoking, isOperatorManaged, onUpdateScopes,
   return (
     <>
       {connectionUrl && (
-        <div className="mt-4 rounded border border-gray-200 bg-gray-50 p-3">
-          <p className="text-xs font-medium text-gray-700">Connection URL</p>
-          <div className="mt-1 flex items-center gap-2">
-            <code className="flex-1 break-all rounded bg-white px-2 py-1 text-xs text-gray-900 ring-1 ring-gray-200">
+        <div className="mb-6 max-w-2xl">
+          <p className="text-sm font-medium text-slate-900">Connection URL</p>
+          <div className="mt-1.5 flex items-center gap-2">
+            <code className="min-w-0 flex-1 break-all rounded border border-slate-300 bg-white px-2.5 py-1.5 text-xs text-slate-900 shadow-sm">
               {connectionUrl}
             </code>
             <button
               type="button"
               onClick={() => { void navigator.clipboard.writeText(connectionUrl); }}
-              className="shrink-0 text-xs text-gray-500 underline hover:text-gray-700"
+              className="shrink-0 text-[12px] text-slate-600 underline hover:text-slate-900"
             >
               Copy
             </button>
           </div>
-          <p className="mt-2 text-[11px] text-gray-500">
-            Claude Code: <code className="text-gray-700">claude mcp add --transport http propr {connectionUrl}</code>
+          <p className="mt-1.5 text-[12px] leading-5 text-slate-500">
+            Claude Code: <code className="text-slate-700">claude mcp add --transport http propr {connectionUrl}</code>
           </p>
         </div>
       )}
       {settings.scopeCeiling && !isOperatorManaged && (
-        <div className="mt-4">
-          <p className="text-xs font-medium text-gray-700">Scope ceiling</p>
-          <p className="mt-1 text-xs text-gray-500">Clients cannot be granted scopes beyond this ceiling.</p>
-          <div className="mt-2 flex flex-wrap gap-2">
+        <div className="mb-6 max-w-2xl">
+          <p className="text-sm font-medium text-slate-900">Scope ceiling</p>
+          <p className="mt-1.5 text-[12px] leading-5 text-slate-500">Clients cannot be granted scopes beyond this ceiling.</p>
+          <div className="mt-2 flex flex-wrap gap-x-4 gap-y-2">
             {MCP_ALL_SCOPES.map(scope => (
-              <label key={scope} className="flex items-center gap-1.5 text-xs">
+              <label key={scope} className="flex items-center gap-2 text-[12px] text-slate-700">
                 <input
                   type="checkbox"
                   checked={settings.scopeCeiling.includes(scope)}
@@ -137,7 +137,7 @@ function McpDetails({ data, saving, revoking, isOperatorManaged, onUpdateScopes,
                       : settings.scopeCeiling.filter(s => s !== scope);
                     onUpdateScopes(updated);
                   }}
-                  className="h-3.5 w-3.5 rounded border-gray-300"
+                  className="h-3.5 w-3.5 flex-shrink-0 rounded border-slate-300 text-primary-600 focus:ring-primary-500"
                 />
                 {scope}
               </label>
@@ -145,11 +145,11 @@ function McpDetails({ data, saving, revoking, isOperatorManaged, onUpdateScopes,
           </div>
         </div>
       )}
-      <div className="mt-4 flex items-center justify-between gap-3 border-t border-gray-100 pt-4">
+      <div className="flex max-w-2xl items-center justify-between gap-3 border-t border-slate-200 pt-4">
         {/* The /mcp/apps page is served by the API app, whose origin can differ
             from the SPA origin, so the link must target the resolved MCP origin. */}
         {status.origin ? (
-          <a href={`${status.origin}/mcp/apps`} className="text-xs text-blue-600 hover:underline">
+          <a href={`${status.origin}/mcp/apps`} className="text-[12px] text-primary-600 underline hover:text-primary-700">
             View connected apps →
           </a>
         ) : (
@@ -159,7 +159,7 @@ function McpDetails({ data, saving, revoking, isOperatorManaged, onUpdateScopes,
           type="button"
           disabled={revoking}
           onClick={onRevokeAll}
-          className="text-xs text-red-600 underline disabled:opacity-50 hover:text-red-800"
+          className="text-[12px] text-red-600 underline disabled:opacity-50 hover:text-red-800"
         >
           {revoking ? 'Revoking…' : 'Revoke all connections'}
         </button>
@@ -175,7 +175,7 @@ interface KeyRotationNoticeProps {
 
 function KeyRotationNotice({ revoking, onRevokeAll }: KeyRotationNoticeProps) {
   return (
-    <div className="mt-4 rounded border border-amber-200 bg-amber-50 p-3 text-xs text-amber-900">
+    <div className="mb-6 max-w-2xl border-l-2 border-amber-400 pl-3 text-[12px] leading-5 text-amber-900">
       <p className="font-medium">Encryption key changed</p>
       <p className="mt-1">
         Existing connections were encrypted with the previous secret and can no longer be used. Revoke them to clear this
@@ -287,29 +287,24 @@ export default function McpServerSection({ onError }: McpServerSectionProps) {
   const canToggle = !isDemoMode && !isOperatorManaged && !data?.status.missingHttpsOrigin && !data?.status.missingSecretChain;
 
   return (
-    <section aria-labelledby="mcp-server-heading" className="mt-6 border-t border-gray-200 pt-6">
-      <div className="flex items-center justify-between gap-3">
-        <h4 id="mcp-server-heading" className="text-[10px] font-bold uppercase tracking-wider text-gray-500">MCP Server</h4>
-        <span className={`text-[11px] font-medium ${statusColor(data)}`} role="status">
-          {statusLabel(data)}
-        </span>
-      </div>
-
-      <p className="mt-2 text-xs leading-5 text-gray-600">
+    <SettingsSection
+      title="MCP Server"
+      description={<>
         Allows AI assistants like Claude Code and Claude.ai to connect to this ProPR instance via the Model Context Protocol.
         {statusDescriptionSuffix(data)}
-      </p>
-
+      </>}
+      status={<SettingsStatus tone={statusTone(data)} role="status">{statusLabel(data)}</SettingsStatus>}
+    >
       {successMessage && (
-        <p className="mt-2 text-xs text-green-700" role="status">{successMessage}</p>
+        <p className="mb-4 max-w-2xl text-[12px] leading-5 text-slate-500" role="status">{successMessage}</p>
       )}
 
       {errorMessage && (
-        <p className="mt-2 text-xs text-red-600" role="alert">{errorMessage}</p>
+        <p className="mb-4 max-w-2xl text-[12px] leading-5 text-red-600" role="alert">{errorMessage}</p>
       )}
 
       {!isOperatorManaged && (
-        <div className="mt-4 flex items-center gap-3">
+        <div className="mb-6 flex max-w-2xl items-center gap-3">
           <EnableToggle
             isEnabled={isEnabled}
             saving={saving}
@@ -335,6 +330,6 @@ export default function McpServerSection({ onError }: McpServerSectionProps) {
           onRevokeAll={() => void handleRevokeAll()}
         />
       )}
-    </section>
+    </SettingsSection>
   );
 }

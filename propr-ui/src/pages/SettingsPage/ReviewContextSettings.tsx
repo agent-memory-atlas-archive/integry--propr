@@ -1,5 +1,7 @@
 import React from 'react';
 import { buildPrReviewOptions, type ModelSelectionAgent } from './modelSelectionHelpers';
+import { SettingsCheckboxField, SettingsField } from './SettingsLayout';
+import { SETTINGS_CONTROL } from './settingsStyles';
 
 interface ReviewContextSettingsProps {
   settings: {
@@ -14,51 +16,21 @@ interface ReviewContextSettingsProps {
   onMaxContextTokensBlur: () => void;
 }
 
-const Row = ({ label, htmlFor, helperText, children }: {
-  label: string;
-  htmlFor: string;
-  helperText?: string;
-  children: React.ReactNode;
-}) => (
-  <div className="grid grid-cols-1 md:grid-cols-[minmax(0,2fr)_minmax(0,3fr)] gap-2 md:gap-4 items-start">
-    <label className="block text-xs font-medium text-gray-600 md:pt-1.5" htmlFor={htmlFor}>{label}</label>
-    <div>
-      {children}
-      {helperText && <p className="mt-1 text-[11px] text-slate-500">{helperText}</p>}
-    </div>
-  </div>
-);
-
 const ReviewContextSettings: React.FC<ReviewContextSettingsProps> = ({
   settings, agents, onSettingChange, onEnabledChange, onMaxContextTokensChange, onMaxContextTokensBlur
 }) => {
   const options = buildPrReviewOptions(agents.filter(agent => agent.enabled));
   return (
     <>
-      <Row
-        label="Related Code Context"
-        htmlFor="pr_review_context_enabled"
-      >
-        <div className="flex items-start gap-2">
-          <input
-            id="pr_review_context_enabled"
-            type="checkbox"
-            checked={settings.pr_review_context_enabled}
-            onChange={(event) => onEnabledChange(event.target.checked)}
-            className="mt-0.5 h-4 w-4 flex-shrink-0 rounded border-gray-300 text-primary-600 focus:ring-primary-500"
-          />
-          <div className="min-w-0">
-            <label htmlFor="pr_review_context_enabled" className="block text-sm text-gray-700">
-              Gather related unchanged code
-            </label>
-            <p className="mt-1 text-[11px] text-slate-500">
-              Lets a read-only scout locate relevant unchanged callers, consumers, contracts, configuration, and tests before the review. Scout failure never blocks the review.
-            </p>
-          </div>
-        </div>
-      </Row>
+      <SettingsCheckboxField
+        id="pr_review_context_enabled"
+        label="Gather related unchanged code"
+        helperText="Lets a read-only scout locate relevant unchanged callers, consumers, contracts, configuration, and tests before the review. Scout failure never blocks the review."
+        checked={settings.pr_review_context_enabled}
+        onChange={(event) => onEnabledChange(event.target.checked)}
+      />
 
-      <Row
+      <SettingsField
         label="Context Scout Model"
         htmlFor="pr_review_context_model"
         helperText="A fast coding-agent model used only to find relevant file ranges. If unset, ProPR uses the Fast Analysis Model, then the review model."
@@ -69,7 +41,7 @@ const ReviewContextSettings: React.FC<ReviewContextSettingsProps> = ({
           value={settings.pr_review_context_model}
           onChange={onSettingChange}
           disabled={!settings.pr_review_context_enabled || options.length === 0}
-          className="w-full rounded border-gray-300 focus:border-primary-500 focus:ring-primary-500 text-sm px-2.5 py-1.5 border disabled:bg-gray-100 disabled:text-gray-500"
+          className={SETTINGS_CONTROL}
         >
           <option value="">Use Fast Analysis Model</option>
           {options.map(option => (
@@ -78,9 +50,9 @@ const ReviewContextSettings: React.FC<ReviewContextSettingsProps> = ({
             </option>
           ))}
         </select>
-      </Row>
+      </SettingsField>
 
-      <Row
+      <SettingsField
         label="Maximum Review Context"
         htmlFor="pr_review_max_context_tokens"
         helperText="Maximum input context per review request, in tokens. Use 0 for the selected review model's automatic safe limit; explicit values are still capped at the model's hard limit."
@@ -95,9 +67,9 @@ const ReviewContextSettings: React.FC<ReviewContextSettingsProps> = ({
           value={settings.pr_review_max_context_tokens}
           onChange={(event) => onMaxContextTokensChange(Number(event.target.value))}
           onBlur={onMaxContextTokensBlur}
-          className="w-full rounded border-gray-300 focus:border-primary-500 focus:ring-primary-500 text-sm px-2.5 py-1.5 border"
+          className={SETTINGS_CONTROL}
         />
-      </Row>
+      </SettingsField>
     </>
   );
 };

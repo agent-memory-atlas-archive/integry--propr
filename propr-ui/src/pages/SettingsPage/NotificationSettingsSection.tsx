@@ -13,6 +13,14 @@ import {
 import { useCurrentUser } from '../../contexts/AuthContext';
 import { useBrowserPush } from '../../hooks/useBrowserPush';
 import { useNotificationCenter } from '../../contexts/NotificationCenterContext';
+import { SettingsSection, SettingsStatus } from './SettingsLayout';
+import { SETTINGS_CONTROL, SETTINGS_LABEL } from './settingsStyles';
+
+/**
+ * One grid template drives both the matrix header and every matrix row, so the
+ * Inbox and Push checkboxes stay centred under their own column headers.
+ */
+const MATRIX_GRID = 'grid grid-cols-[minmax(0,1fr)_4.5rem_4.5rem] items-center gap-x-4';
 
 const CATEGORY_LABELS: Record<NotificationKind, { label: string; description: string }> = {
   plan: { label: 'Plans', description: 'Plan generation and execution updates.' },
@@ -57,13 +65,17 @@ const Toggle: React.FC<{
   label: string;
   onChange: (checked: boolean) => void;
 }> = ({ checked, disabled, hideLabel = false, label, onChange }) => (
-  <label className="inline-flex items-center gap-1.5 text-xs text-gray-600">
+  <label
+    className={`inline-flex items-center gap-3 text-sm font-medium text-slate-900 ${
+      hideLabel ? 'justify-self-center' : ''
+    }`}
+  >
     <input
       type="checkbox"
       checked={checked}
       disabled={disabled}
       onChange={event => onChange(event.target.checked)}
-      className="h-4 w-4 rounded border-gray-300 text-primary-600 focus:ring-primary-500"
+      className="h-4 w-4 flex-shrink-0 rounded border-slate-300 text-primary-600 focus:ring-primary-500"
     />
     <span className={hideLabel ? 'sr-only' : ''}>{label}</span>
   </label>
@@ -74,44 +86,44 @@ const EnrollmentControl: React.FC = () => {
   const busy = push.operation !== 'idle';
 
   if (push.isLoading) {
-    return <p className="text-xs text-gray-500">Checking this browser...</p>;
+    return <p className="text-[12px] leading-5 text-slate-500">Checking this browser...</p>;
   }
   if (push.requiresIosInstallation) {
     return (
-      <div className="rounded-md border border-blue-200 bg-blue-50 p-3 text-xs leading-5 text-blue-800">
+      <p className="border-l-2 border-slate-300 pl-3 text-[12px] leading-5 text-slate-600">
         On iPhone and iPad, Safari only allows Web Push for Home Screen apps. Open the Share
-        menu, choose <strong>Add to Home Screen</strong>, then open ProPR from its new icon.
-      </div>
+        menu, choose <strong className="font-medium text-slate-900">Add to Home Screen</strong>, then open ProPR from its new icon.
+      </p>
     );
   }
   if (!push.serviceWorkerSupported || !push.pushApiSupported || !push.notificationApiSupported) {
     return (
-      <div className="rounded-md border border-gray-200 bg-gray-50 p-3 text-xs text-gray-700">
+      <p className="text-[12px] leading-5 text-slate-500">
         This browser does not support the service worker and Push APIs required for notifications.
-      </div>
+      </p>
     );
   }
   if (!push.capabilities?.push.configured) {
     return (
-      <div className="rounded-md border border-amber-200 bg-amber-50 p-3 text-xs text-amber-800">
+      <p className="border-l-2 border-amber-400 pl-3 text-[12px] leading-5 text-amber-800">
         Browser notifications are unavailable for this ProPR instance. Try again later or contact
         your administrator.
-      </div>
+      </p>
     );
   }
   if (push.permission === 'denied') {
     return (
-      <div className="rounded-md border border-red-200 bg-red-50 p-3 text-xs leading-5 text-red-800">
+      <p className="border-l-2 border-red-400 pl-3 text-[12px] leading-5 text-red-700">
         Notifications are blocked for this site. Open your browser’s site settings, allow
         notifications for ProPR, and then reload this page.
-      </div>
+      </p>
     );
   }
   if (!push.serviceWorkerRegistration) {
     return (
-      <div className="rounded-md border border-gray-200 bg-gray-50 p-3 text-xs text-gray-700">
+      <p className="text-[12px] leading-5 text-slate-500">
         The ProPR service worker is unavailable. Reload the page and try again.
-      </div>
+      </p>
     );
   }
 
@@ -121,9 +133,9 @@ const EnrollmentControl: React.FC = () => {
         type="button"
         disabled={busy}
         onClick={() => void (push.subscription ? push.disable() : push.enable()).catch(() => undefined)}
-        className={`inline-flex items-center gap-2 rounded-md px-3 py-2 text-xs font-medium text-white focus:outline-none focus:ring-2 focus:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-60 ${
+        className={`inline-flex items-center gap-2 rounded px-3 py-1.5 text-xs font-medium text-white focus:outline-none focus:ring-2 focus:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-60 ${
           push.subscription
-            ? 'bg-gray-700 hover:bg-gray-800 focus:ring-gray-500'
+            ? 'bg-slate-700 hover:bg-slate-800 focus:ring-slate-500'
             : 'bg-primary-600 hover:bg-primary-700 focus:ring-primary-500'
         }`}
       >
@@ -132,9 +144,9 @@ const EnrollmentControl: React.FC = () => {
           ? push.operation === 'disabling' ? 'Disabling...' : 'Disable on this browser'
           : push.operation === 'enabling' ? 'Enabling...' : 'Enable on this browser'}
       </button>
-      <span className={`text-xs ${push.subscription ? 'text-green-700' : 'text-gray-500'}`}>
-        {push.subscription ? 'This browser is subscribed.' : 'Your browser will ask for permission.'}
-      </span>
+      {push.subscription
+        ? <SettingsStatus tone="ok">This browser is subscribed.</SettingsStatus>
+        : <span className="text-[12px] text-slate-500">Your browser will ask for permission.</span>}
     </div>
   );
 };
@@ -194,38 +206,45 @@ const NotificationSettingsSection: React.FC = () => {
   const disabled = loading || saving || snapshot === null;
 
   return (
-    <section aria-labelledby="notification-settings-heading">
-      <div className="mb-4 flex items-center gap-2">
-        <Bell className="h-4 w-4 text-gray-500" />
-        <h4 id="notification-settings-heading" className="text-[10px] font-bold uppercase tracking-wider text-gray-500">
-          Personal notifications
-        </h4>
-        {(loading || saving) && <Loader2 aria-label="Saving notification preferences" className="h-3.5 w-3.5 animate-spin text-gray-400" />}
-      </div>
-
-      <div className="space-y-5">
-        {push.serviceWorkerOriginSupported && (
-          <div>
-            <p className="mb-2 text-xs font-medium text-gray-700">Browser push</p>
+    <div className="space-y-10">
+      {push.serviceWorkerOriginSupported && (
+        <SettingsSection
+          title="Browser push"
+          icon={<Bell aria-hidden="true" className="h-3.5 w-3.5 text-slate-400" />}
+          description="Enroll this browser so ProPR can deliver push notifications while the app is closed."
+        >
+          <div className="max-w-2xl">
             <EnrollmentControl />
-            {push.error && <p role="alert" className="mt-2 text-xs text-red-600">{push.error}</p>}
+            {push.error && <p role="alert" className="mt-2 text-[12px] leading-5 text-red-600">{push.error}</p>}
           </div>
-        )}
+        </SettingsSection>
+      )}
 
-        <div>
-          <div className="mb-2 grid grid-cols-[1fr_auto_auto] gap-4 border-b border-gray-200 pb-2 text-[10px] font-semibold uppercase tracking-wide text-gray-400">
+      <SettingsSection
+        title="Personal notifications"
+        icon={<Bell aria-hidden="true" className="h-3.5 w-3.5 text-slate-400" />}
+        description="Choose where each kind of update is delivered."
+        status={(loading || saving)
+          ? <SettingsStatus tone="pending" role="status">
+              <span aria-hidden="true">Saving…</span>
+              <Loader2 aria-label="Saving notification preferences" className="h-3 w-3 animate-spin text-slate-400" />
+            </SettingsStatus>
+          : undefined}
+      >
+        <div className="mb-6 max-w-2xl">
+          <div className={`${MATRIX_GRID} border-b border-slate-200 pb-2 text-[10px] font-bold uppercase tracking-widest text-slate-500`}>
             <span>Category</span>
-            <span>Inbox</span>
-            <span>Push</span>
+            <span className="text-center">Inbox</span>
+            <span className="text-center">Push</span>
           </div>
-          <div className="divide-y divide-gray-100">
+          <div className="divide-y divide-slate-100">
             {NOTIFICATION_KINDS.map(kind => {
               const preference = snapshot?.preferences[kind];
               return (
-                <div key={kind} className="grid grid-cols-[1fr_auto_auto] items-center gap-4 py-2.5">
-                  <div>
-                    <p className="text-xs font-medium text-gray-700">{CATEGORY_LABELS[kind].label}</p>
-                    <p className="text-[11px] text-gray-500">{CATEGORY_LABELS[kind].description}</p>
+                <div key={kind} className={`${MATRIX_GRID} py-3`}>
+                  <div className="min-w-0">
+                    <p className="text-sm font-medium text-slate-900">{CATEGORY_LABELS[kind].label}</p>
+                    <p className="mt-0.5 text-[12px] leading-5 text-slate-500">{CATEGORY_LABELS[kind].description}</p>
                   </div>
                   <Toggle
                     label={`Inbox notifications for ${CATEGORY_LABELS[kind].label}`}
@@ -247,7 +266,7 @@ const NotificationSettingsSection: React.FC = () => {
           </div>
         </div>
 
-        <div className="border-t border-gray-200 pt-4">
+        <div className="mb-6 max-w-2xl">
           <Toggle
             label="Show an unread-count badge on the installed app"
             checked={snapshot?.badgeEnabled ?? true}
@@ -256,7 +275,14 @@ const NotificationSettingsSection: React.FC = () => {
           />
         </div>
 
-        <div className="border-t border-gray-200 pt-4">
+        {error && <p role="alert" className="max-w-2xl text-[12px] leading-5 text-red-600">{error}</p>}
+      </SettingsSection>
+
+      <SettingsSection
+        title="Quiet hours"
+        description="Push deliveries wait until quiet hours end. Inbox items still appear immediately."
+      >
+        <div className="mb-6 max-w-2xl">
           <Toggle
             label="Use quiet hours"
             checked={quietHoursEnabled}
@@ -271,45 +297,47 @@ const NotificationSettingsSection: React.FC = () => {
                 : { start: null, end: null },
             })}
           />
-          <p className="mt-1 text-[11px] text-gray-500">Push deliveries wait until quiet hours end. Inbox items still appear immediately.</p>
-          <div className="mt-3 grid grid-cols-2 gap-3">
-            <label className="text-xs font-medium text-gray-700">
-              Start
-              <input
-                type="time"
-                value={snapshot?.quietHours.start ?? '22:00'}
-                disabled={disabled || !quietHoursEnabled}
-                onChange={event => void save({ quietHours: { start: event.target.value } })}
-                className="mt-1 block w-full rounded border border-gray-300 px-2 py-1.5 text-sm focus:border-primary-500 focus:ring-primary-500"
-              />
-            </label>
-            <label className="text-xs font-medium text-gray-700">
-              End
-              <input
-                type="time"
-                value={snapshot?.quietHours.end ?? '07:00'}
-                disabled={disabled || !quietHoursEnabled}
-                onChange={event => void save({ quietHours: { end: event.target.value } })}
-                className="mt-1 block w-full rounded border border-gray-300 px-2 py-1.5 text-sm focus:border-primary-500 focus:ring-primary-500"
-              />
-            </label>
-          </div>
-          <label className="mt-3 block text-xs font-medium text-gray-700">
-            Timezone
-            <select
-              value={snapshot?.quietHours.timezone ?? 'UTC'}
-              disabled={disabled}
-              onChange={event => void save({ quietHours: { timezone: event.target.value } })}
-              className="mt-1 block w-full rounded border border-gray-300 px-2 py-1.5 text-sm focus:border-primary-500 focus:ring-primary-500"
-            >
-              {timezones.map(timezone => <option key={timezone} value={timezone}>{timezone}</option>)}
-            </select>
-          </label>
         </div>
 
-        {error && <p role="alert" className="text-xs text-red-600">{error}</p>}
-      </div>
-    </section>
+        <div className="mb-6 grid max-w-2xl grid-cols-1 gap-4 sm:grid-cols-2">
+          <div>
+            <label className={SETTINGS_LABEL} htmlFor="quiet-hours-start">Start</label>
+            <input
+              id="quiet-hours-start"
+              type="time"
+              value={snapshot?.quietHours.start ?? '22:00'}
+              disabled={disabled || !quietHoursEnabled}
+              onChange={event => void save({ quietHours: { start: event.target.value } })}
+              className={`mt-1.5 ${SETTINGS_CONTROL}`}
+            />
+          </div>
+          <div>
+            <label className={SETTINGS_LABEL} htmlFor="quiet-hours-end">End</label>
+            <input
+              id="quiet-hours-end"
+              type="time"
+              value={snapshot?.quietHours.end ?? '07:00'}
+              disabled={disabled || !quietHoursEnabled}
+              onChange={event => void save({ quietHours: { end: event.target.value } })}
+              className={`mt-1.5 ${SETTINGS_CONTROL}`}
+            />
+          </div>
+        </div>
+
+        <div className="mb-6 max-w-2xl">
+          <label className={SETTINGS_LABEL} htmlFor="quiet-hours-timezone">Timezone</label>
+          <select
+            id="quiet-hours-timezone"
+            value={snapshot?.quietHours.timezone ?? 'UTC'}
+            disabled={disabled}
+            onChange={event => void save({ quietHours: { timezone: event.target.value } })}
+            className={`mt-1.5 ${SETTINGS_CONTROL}`}
+          >
+            {timezones.map(timezone => <option key={timezone} value={timezone}>{timezone}</option>)}
+          </select>
+        </div>
+      </SettingsSection>
+    </div>
   );
 };
 
