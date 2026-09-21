@@ -16,7 +16,7 @@ export interface FileChangesResponse {
 }
 
 export const getFileChanges = async (taskId: string): Promise<FileChangesResponse> => {
-  const response = await apiFetch(`${API_BASE_URL}/api/task/${taskId}/file-changes`, {
+  const response = await apiFetch(`${API_BASE_URL}/api/task/${encodeURIComponent(taskId)}/file-changes`, {
     credentials: 'include'
   });
   await handleApiResponse(response);

@@ -169,7 +169,7 @@ export const enableAgentTank = async (url: string): Promise<{ success: boolean }
 
 export interface PostFollowupResponse { success: boolean; message: string; }
 export const postTaskFollowup = async (taskId: string, body: string, target?: 'pull_request'): Promise<PostFollowupResponse> => {
-  const response = await apiFetch(`${API_BASE_URL}/api/tasks/${taskId}/followup`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(target ? { body, target } : { body }), credentials: 'include' });
+  const response = await apiFetch(`${API_BASE_URL}/api/tasks/${encodeURIComponent(taskId)}/followup`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(target ? { body, target } : { body }), credentials: 'include' });
   await handleApiResponse(response);
   return response.json();
 };

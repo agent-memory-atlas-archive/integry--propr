@@ -266,7 +266,7 @@ const TaskList: React.FC<TaskListProps> = ({ limit, showViewAll = false, hideFil
   const toggleGroup = useMemo(() => createToggleGroupHandler(setExpandedGroups), []);
 
   const handleRowClick = useCallback((taskId: string) => {
-    navigate(`/tasks/${taskId}`);
+    navigate(`/tasks/${encodeURIComponent(taskId)}`);
   }, [navigate]);
 
   const scopeState = resolveTaskScopeState(loadedScope, queryScope, tasks, groupedTasks, error);

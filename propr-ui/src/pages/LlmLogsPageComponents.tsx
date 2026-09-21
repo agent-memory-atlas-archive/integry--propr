@@ -107,7 +107,7 @@ const WorkReferenceSection: React.FC<{ log: LlmLogEntry }> = ({ log }) => {
           <div>
             <span className="text-gray-500">Task ID:</span>{' '}
             <Link
-              to={`/tasks/${log.taskId}`}
+              to={`/tasks/${encodeURIComponent(log.taskId)}`}
               className="font-mono text-teal-600 hover:text-teal-800 hover:underline"
               onClick={(e) => e.stopPropagation()}
             >

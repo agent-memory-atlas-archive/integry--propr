@@ -1,3 +1,5 @@
+import { sanitizeTaskIdComponent } from '@propr/shared';
+
 export interface ModelTaskIdentity {
   agent_alias: string;
   model_name: string;
@@ -15,7 +17,7 @@ export function findUnclaimedModelTask<T extends ModelTaskSummary>(
   result: ModelTaskIdentity,
   claimedTaskIds: ReadonlySet<string>,
 ): T | undefined {
-  const taskIdMarker = `-${result.agent_alias}-${result.model_name}-`;
+  const taskIdMarker = `-${sanitizeTaskIdComponent(result.agent_alias, 'agent')}-${sanitizeTaskIdComponent(result.model_name, 'model')}-`;
   return tasks.find((task) =>
     task.issueNumber === result.issueNumber
     && !claimedTaskIds.has(task.id)

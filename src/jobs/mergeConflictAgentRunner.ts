@@ -206,7 +206,7 @@ export async function handleMergeWithAgent(options: {
     });
     const publishedCommitHash = pushResult.commitHash || finalCommitHash;
     const publishedBranchName = publication.target.branchName;
-    const taskUrl = `${process.env.WEB_UI_URL || process.env.FRONTEND_URL || 'https://gitfix.dev'}/tasks/${taskId}`;
+    const taskUrl = `${process.env.WEB_UI_URL || process.env.FRONTEND_URL || 'https://gitfix.dev'}/tasks/${encodeURIComponent(taskId)}`;
     let comment = buildMergeConflictComment({
         wasCleanMerge,
         commitHash: publishedCommitHash, baseBranch, headBranch: publishedBranchName, conflictedFiles,

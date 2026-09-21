@@ -3,6 +3,7 @@ import type { Job, Queue } from 'bullmq';
 import type { Knex } from 'knex';
 import type { NotificationService } from '@propr/core';
 import {
+  buildIssueTaskId,
   normalizeISO8601Timestamp,
   VOICE_BRIEFING_MAX_ITEMS,
   voiceBriefingResponseSchema,
@@ -488,7 +489,7 @@ function taskIdFromJob(
   const model = nonEmptyString(data.modelName);
   const correlationId = nonEmptyString(data.correlationId);
   return owner && repository && number && agent && model && correlationId
-    ? `${owner}-${repository}-${number}-${agent}-${model}-${correlationId}`
+    ? buildIssueTaskId({ repoOwner: owner, repoName: repository, issueNumber: number, agentAlias: agent, modelName: model, correlationId })
     : undefined;
 }
 

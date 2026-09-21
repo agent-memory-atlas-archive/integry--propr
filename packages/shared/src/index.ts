@@ -246,6 +246,15 @@ export {
 } from './taskLifecycle.js';
 
 export {
+  buildIssueTaskId,
+  isLegacyProviderTaskId,
+  sanitizeTaskIdComponent,
+  MAX_TASK_ID_LENGTH,
+  TASK_ID_PATTERN,
+  type IssueTaskIdParts,
+} from './taskIdentifiers.js';
+
+export {
   AGENT_LOGIN_DESCRIPTORS,
   LOGINABLE_AGENT_TYPES,
   MANAGED_AGENT_CREDENTIALS_PREFIX,

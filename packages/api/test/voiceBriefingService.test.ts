@@ -72,6 +72,41 @@ function loaders(input: {
   };
 }
 
+test('provider-qualified issue models produce safe queue task IDs', async () => {
+  const correlationId = '99667e8e-59a6-4aa2-9e2f-448fa02827ef';
+  const queue: VoiceBriefingQueueSnapshot = {
+    active: [{
+      id: 'issue-job',
+      name: 'processGitHubIssue',
+      timestamp: Date.parse('2026-09-07T01:20:00.000Z'),
+      data: {
+        isChildJob: true,
+        repoOwner: 'integry',
+        repoName: 'propr-test',
+        number: 1511,
+        agentAlias: 'opencode',
+        modelName: 'opencode-openai/gpt-5.6-luna',
+        correlationId,
+        title: 'Run OpenCode task',
+      },
+    } as VoiceBriefingQueueJob],
+    waiting: [],
+    delayed: [],
+  };
+  const service = new VoiceBriefingService({ loaders: loaders({ queue }), now: () => NOW });
+
+  const briefing = await service.getBriefing('user-1');
+
+  assert.equal(
+    briefing.items[0]?.id,
+    `integry-propr-test-1511-opencode-opencode-openai-gpt-5.6-luna-${correlationId}`,
+  );
+  assert.equal(
+    briefing.items[0]?.href,
+    `/tasks/integry-propr-test-1511-opencode-opencode-openai-gpt-5.6-luna-${correlationId}`,
+  );
+});
+
 test('briefing preserves complete job counts, prioritizes attention, deduplicates tasks, and caps details at eight', async () => {
   const queue: VoiceBriefingQueueSnapshot = {
     active: [

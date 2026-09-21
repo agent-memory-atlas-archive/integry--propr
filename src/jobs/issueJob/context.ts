@@ -6,6 +6,7 @@ import { Job } from 'bullmq';
 import {
   logger, generateCorrelationId, getStateManager, loadSettings, resolveLlmLabel, AgentRegistry, NoDefaultModelConfiguredError
 } from '@propr/core';
+import { buildIssueTaskId } from '@propr/shared';
 import type { IssueJobData, Agent } from '@propr/core';
 import type { JobContext } from './types.js';
 import { getPrimaryProcessingLabels, getPrLabel } from './config.js';
@@ -75,7 +76,14 @@ export async function initializeJobContext(job: Job<IssueJobData>): Promise<JobC
     throw new NoDefaultModelConfiguredError();
   }
 
-  const taskId = `${issueRef.repoOwner}-${issueRef.repoName}-${issueRef.number}-${agentAlias}-${modelName}-${correlationId}`;
+  const taskId = buildIssueTaskId({
+    repoOwner: issueRef.repoOwner,
+    repoName: issueRef.repoName,
+    issueNumber: issueRef.number,
+    agentAlias,
+    modelName,
+    correlationId,
+  });
 
   return {
     jobId, jobName, issueRef, correlationId, correlatedLogger, stateManager, agentAlias, modelName, taskId,
