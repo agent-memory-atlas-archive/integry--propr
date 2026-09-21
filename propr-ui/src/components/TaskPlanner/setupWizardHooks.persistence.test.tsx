@@ -7,7 +7,7 @@ import {
   usePromptPersistence,
   type PlannerConfig,
 } from './setupWizardHooks';
-import { updateDraft } from '../../api/proprApi';
+import { updateDraft, type PlannerDraft } from '../../api/proprApi';
 import { baseConfig, makeDraft } from './setupWizardHooks.testUtils';
 
 vi.mock('../../api/proprApi', () => ({
@@ -42,6 +42,57 @@ const mockUpdateDraft = vi.mocked(updateDraft);
 describe('setupWizardHooks persistence', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+  });
+
+  it('preserves prompt edits made while an in-place draft is being created', async () => {
+    type HookProps = { draft: PlannerDraft | undefined };
+    const staleCreatedDraft = makeDraft({
+      draft_id: 'draft-2',
+      initial_prompt: 'Prompt captured when creation started',
+      context_config: { baseBranch: 'release' },
+    });
+    const { result, rerender } = renderHook(({ draft }: HookProps) => {
+      const [config, setConfig] = useState<PlannerConfig>({
+        ...baseConfig,
+        prompt: 'Prompt including everything typed while creation was pending',
+      });
+      useDraftContextConfigSync(draft, setConfig, true);
+      return config;
+    }, { initialProps: { draft: undefined } as HookProps });
+
+    rerender({ draft: staleCreatedDraft });
+
+    await waitFor(() => {
+      expect(result.current.prompt).toBe('Prompt including everything typed while creation was pending');
+      expect(result.current.baseBranch).toBe('release');
+    });
+  });
+
+  it('persists the preserved prompt when the in-place draft id arrives', async () => {
+    vi.useFakeTimers();
+    try {
+      type HookProps = { draftId: string | undefined; initialPrompt: string | undefined };
+      const prompt = 'Prompt including later input';
+      const { rerender } = renderHook(
+        ({ draftId, initialPrompt }: HookProps) => {
+          usePromptPersistence(draftId, prompt, initialPrompt, true);
+        },
+        { initialProps: { draftId: undefined, initialPrompt: undefined } as HookProps }
+      );
+
+      rerender({
+        draftId: 'draft-2',
+        initialPrompt: 'Prompt captured when creation started',
+      });
+      await vi.advanceTimersByTimeAsync(1_100);
+
+      expect(mockUpdateDraft).toHaveBeenCalledWith('draft-2', {
+        initial_prompt: prompt,
+        name: prompt,
+      });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('preserves same-draft setup after a full replacement snapshot rerenders as sparse server data', async () => {

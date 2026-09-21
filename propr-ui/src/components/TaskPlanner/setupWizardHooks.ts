@@ -224,6 +224,11 @@ export function useGenerationHandlers({ draft, config, branchError, contextHelpe
     setError(null);
     setGenerationError(null);
     try {
+      const prompt = config.prompt.trim();
+      await updateDraft(draft.draft_id, {
+        initial_prompt: prompt,
+        name: truncateToSentences(prompt),
+      });
       if (contextHelpers.isContextStale) {
         contextHelpers.clearCountdown();
         const previewReady = await contextHelpers.fetchPreview();
@@ -300,16 +305,30 @@ export function useAutoResize(textareaRef: React.RefObject<HTMLTextAreaElement |
   }, [textareaRef]);
 }
 
-export function useDraftContextConfigSync(draft: PlannerDraft | undefined, setConfig: PlannerConfigSetter) {
+export function useDraftContextConfigSync(
+  draft: PlannerDraft | undefined,
+  setConfig: PlannerConfigSetter,
+  preserveLocalPromptOnInitialDraft = false,
+) {
   const draftSnapshot = getHydratedDraftConfigSnapshot(draft);
   const previousDraftIdRef = useRef<string | undefined>(undefined);
+  const mountedWithoutDraftRef = useRef(!draft);
   useEffect(() => {
     if (!draftSnapshot) return;
     const draftChanged = previousDraftIdRef.current !== draft?.draft_id;
+    const isInitialInPlaceDraft = preserveLocalPromptOnInitialDraft
+      && mountedWithoutDraftRef.current
+      && previousDraftIdRef.current === undefined;
     previousDraftIdRef.current = draft?.draft_id;
+    mountedWithoutDraftRef.current = false;
     if (!draftChanged) return;
-    setConfig(prev => matchesDraftConfig(prev, draftSnapshot) ? prev : draftSnapshot);
-  }, [draft?.draft_id, draftSnapshot, setConfig]);
+    setConfig(prev => {
+      const nextConfig = isInitialInPlaceDraft
+        ? { ...draftSnapshot, prompt: prev.prompt }
+        : draftSnapshot;
+      return matchesDraftConfig(prev, nextConfig) ? prev : nextConfig;
+    });
+  }, [draft?.draft_id, draftSnapshot, preserveLocalPromptOnInitialDraft, setConfig]);
 }
 
 export function useSetupWizardEffects({ autoResize, prompt, generationError, repoLoadError, autoCreateError, autoCreateWarning, baseBranchPersistenceWarning, addToast, setError }: { autoResize: () => void; prompt: string; generationError: string | null; repoLoadError: string | null; autoCreateError?: string | null; autoCreateWarning?: string | null; baseBranchPersistenceWarning?: string | null; addToast: ({ type, message }: { type: 'error' | 'warning'; message: string }) => void; setError: React.Dispatch<React.SetStateAction<string | null>>; }) {
@@ -321,14 +340,21 @@ export function useSetupWizardEffects({ autoResize, prompt, generationError, rep
   useEffect(() => { if (baseBranchPersistenceWarning) addToast({ type: 'warning', message: baseBranchPersistenceWarning }); }, [baseBranchPersistenceWarning, addToast]);
 }
 
-export function usePromptPersistence(draftId: string | undefined, prompt: string, initialPrompt: string | undefined) {
+export function usePromptPersistence(
+  draftId: string | undefined,
+  prompt: string,
+  initialPrompt: string | undefined,
+  persistOnInitialDraft = false,
+) {
   const trimmedPrompt = prompt.trim();
   const { debounceTimerRef, isMountedRef, lastSavedValueRef, previousDraftIdRef } = useDebouncedDraftPersistence((initialPrompt || '').trim(), draftId);
   useEffect(() => {
     if (!draftId) return;
-    const draftChanged = previousDraftIdRef.current !== draftId;
+    const previousDraftId = previousDraftIdRef.current;
+    const draftChanged = previousDraftId !== draftId;
+    const shouldPersistInitialDraft = persistOnInitialDraft && previousDraftId === undefined;
     previousDraftIdRef.current = draftId;
-    if (draftChanged || trimmedPrompt === lastSavedValueRef.current) return;
+    if ((draftChanged && !shouldPersistInitialDraft) || trimmedPrompt === lastSavedValueRef.current) return;
     if (debounceTimerRef.current) clearTimeout(debounceTimerRef.current);
     const timeoutId = setTimeout(async () => {
       if (!isMountedRef.current) return;
@@ -344,7 +370,7 @@ export function usePromptPersistence(draftId: string | undefined, prompt: string
       clearTimeout(timeoutId);
       if (debounceTimerRef.current === timeoutId) debounceTimerRef.current = null;
     };
-  }, [draftId, trimmedPrompt, debounceTimerRef, isMountedRef, lastSavedValueRef, previousDraftIdRef]);
+  }, [draftId, trimmedPrompt, persistOnInitialDraft, debounceTimerRef, isMountedRef, lastSavedValueRef, previousDraftIdRef]);
 }
 export function useDraftSettingsPersistence(draftId: string | undefined, config: PlannerConfig, draft: PlannerDraft | undefined) {
   const { baseBranch, granularity, contextLevel, compress, contextRepositories, generationModel, manualFiles, excludedFiles } = config;

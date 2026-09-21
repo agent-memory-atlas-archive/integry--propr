@@ -301,7 +301,7 @@ interface SetupWizardLoadersParams {
   setConfig: React.Dispatch<React.SetStateAction<PlannerConfig>>;
 }
 
-function useSetupWizardLoaders({ isNewMode, draft, locationState, savedSettings, config, setConfig }: SetupWizardLoadersParams) {
+function useSetupWizardLoaders({ isNewMode, draft, locationState, savedSettings, config, setConfig }: SetupWizardLoadersParams, persistPromptOnInitialDraft: boolean) {
   const initialRepository = locationState?.initialRepository ?? savedSettings.lastRepository;
   const initialBaseBranch = locationState?.initialBaseBranch ?? savedSettings.lastBaseBranch;
   const repoLoader = useRepositoryLoader(true, initialRepository ?? undefined, initialBaseBranch ?? undefined);
@@ -317,7 +317,7 @@ function useSetupWizardLoaders({ isNewMode, draft, locationState, savedSettings,
     repoLoader.selectedRepo,
     repoLoader.selectedBaseBranch
   );
-  usePromptPersistence(draft?.draft_id, config.prompt, draft?.initial_prompt);
+  usePromptPersistence(draft?.draft_id, config.prompt, draft?.initial_prompt, persistPromptOnInitialDraft);
   useDraftSettingsPersistence(draft?.draft_id, config, draft);
 
   return { repoLoader, newModeBranches, repoInfo, agents, availableRepos };
@@ -360,7 +360,7 @@ export const SetupWizard: React.FC<SetupWizardProps> = ({ draft, onGenerateCompl
   const [branchError, setBranchError] = useState<string | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
-  useDraftContextConfigSync(draft, setConfig);
+  useDraftContextConfigSync(draft, setConfig, Boolean(onDraftCreatedInPlace));
   const { repoLoader, newModeBranches, repoInfo, agents, availableRepos } = useSetupWizardLoaders({
     isNewMode,
     draft,
@@ -368,7 +368,7 @@ export const SetupWizard: React.FC<SetupWizardProps> = ({ draft, onGenerateCompl
     savedSettings,
     config,
     setConfig
-  });
+  }, Boolean(onDraftCreatedInPlace));
   const fileHandling = useFileHandling(isNewMode, draft, setConfig, setError);
   const handleGenerateComplete = useCallback(() => {
     addToast({ type: 'success', message: 'Plan generated successfully' });
