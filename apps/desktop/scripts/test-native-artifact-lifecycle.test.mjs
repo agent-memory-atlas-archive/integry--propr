@@ -542,15 +542,42 @@ describe('native staged artifact lifecycle authority', () => {
     unregisterFailure.registered = true;
     await assert.rejects(unregisterFailure.unregister(), /injected unregister failure/);
 
+    const staleWaits = [];
+    let staleDumps = 0;
     const stale = new LaunchServicesAuthority(applicationRoot, {}, {
-      runCommand: async () => ({
-        stdout: Buffer.from(`path: ${applicationRoot}\n`),
-        stderr: Buffer.alloc(0),
-      }),
+      runCommand: async () => {
+        staleDumps += 1;
+        return { stdout: Buffer.from(`path: ${applicationRoot}\n`), stderr: Buffer.alloc(0) };
+      },
+      wait: async milliseconds => { staleWaits.push(milliseconds); },
+      absenceAttempts: 3,
     });
     stale.registered = true;
     await assert.rejects(stale.assertGone(), /remained registered/);
     assert.equal(stale.registered, true);
+    assert.equal(staleDumps, 3);
+    assert.deepEqual(staleWaits, [1_000, 1_000]);
+  });
+
+  test('re-probes LaunchServices until a lagging unregister is reflected in the dump', async () => {
+    const applicationRoot = '/private/copied/ProPR Desktop.app';
+    const dumps = [`path: ${applicationRoot}\n`, `path: ${applicationRoot}\n`, 'path: /Applications/Other.app\n'];
+    const waits = [];
+    const authority = new LaunchServicesAuthority(applicationRoot, {}, {
+      runCommand: async (_file, args) => {
+        assert.deepEqual(args, ['-dump']);
+        return { stdout: Buffer.from(dumps.shift()), stderr: Buffer.alloc(0) };
+      },
+      wait: async milliseconds => { waits.push(milliseconds); },
+      absenceAttempts: 3,
+    });
+    authority.registered = true;
+
+    await authority.assertGone();
+
+    assert.equal(authority.registered, false);
+    assert.equal(dumps.length, 0);
+    assert.deepEqual(waits, [1_000, 1_000]);
   });
 
   test('registers before dispatching through the exact copied macOS application path', async () => {

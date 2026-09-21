@@ -973,11 +973,22 @@ const linuxProtocolDispatch = async ({ application, profile, link, env, processG
 
 const LAUNCH_SERVICES = '/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister';
 
+// lsregister -u can return before -dump reflects the removal, so absence is
+// re-probed for a bounded window before the copied app is declared stale.
+const LAUNCH_SERVICES_ABSENCE_ATTEMPTS = 10;
+const LAUNCH_SERVICES_ABSENCE_INTERVAL_MS = 1_000;
+
 export class LaunchServicesAuthority {
-  constructor(applicationRoot, environment, { runCommand = run } = {}) {
+  constructor(applicationRoot, environment, {
+    runCommand = run,
+    wait = delay,
+    absenceAttempts = LAUNCH_SERVICES_ABSENCE_ATTEMPTS,
+  } = {}) {
     this.applicationRoot = applicationRoot;
     this.environment = environment;
     this.runCommand = runCommand;
+    this.wait = wait;
+    this.absenceAttempts = absenceAttempts;
     this.registered = false;
   }
 
@@ -1001,9 +1012,9 @@ export class LaunchServicesAuthority {
     await this.runCommand(LAUNCH_SERVICES, ['-u', this.applicationRoot], { env: this.environment, timeout: 30_000 });
   }
 
-  async assertGone() {
+  async isListed() {
     const result = await this.runCommand(LAUNCH_SERVICES, ['-dump'], { env: this.environment, timeout: 30_000 });
-    if (result.stdout.toString('utf8').split(/\r?\n/).some(line => {
+    return result.stdout.toString('utf8').split(/\r?\n/).some(line => {
       const record = line.trim();
       const index = record.indexOf(this.applicationRoot);
       if (index < 0) return false;
@@ -1011,8 +1022,15 @@ export class LaunchServicesAuthority {
       const after = record[index + this.applicationRoot.length];
       return (index === 0 || /[\s:"'=]/.test(before))
         && (after === undefined || /[\s"',)]/.test(after));
-    })) {
-      throw new Error('Copied application remained registered with LaunchServices');
+    });
+  }
+
+  async assertGone() {
+    for (let attempt = 1; await this.isListed(); attempt += 1) {
+      if (attempt >= this.absenceAttempts) {
+        throw new Error('Copied application remained registered with LaunchServices');
+      }
+      await this.wait(LAUNCH_SERVICES_ABSENCE_INTERVAL_MS);
     }
     this.registered = false;
   }
