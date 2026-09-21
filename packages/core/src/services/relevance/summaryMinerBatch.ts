@@ -97,7 +97,7 @@ export async function processSingleBatch(options: ProcessSingleBatchOptions): Pr
 
   try {
     const summaries = await analyzeBatchWithFallback({
-      prompt, batch, agent, log, modelUsed, primaryAgentAliasSetting,
+      prompt, batch, agent, log, modelUsed, customPrompt, primaryAgentAliasSetting,
       fallbackAgent, fallbackModelOverride, fallbackModelUsed, fallbackAgentAliasSetting, fullName, branch,
       routingSession: options.routingSession,
       fallbackRoutingSession,

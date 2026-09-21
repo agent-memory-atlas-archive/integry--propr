@@ -942,6 +942,47 @@ describe('summary miner batch fallback', () => {
     assert.doesNotMatch(receivedPrompt, /Your task is to create concise/);
   });
 
+  test('preserves custom prompt when retrying omitted files', async () => {
+    const prompts: string[] = [];
+    const customPrompt = 'Use security-focused summaries for every file.';
+    const primaryAgent = createAgent('primary', 'primary-model', async (prompt) => {
+      prompts.push(prompt);
+      return {
+        success: true,
+        response: JSON.stringify({
+          summaries: prompts.length === 1
+            ? [{ path: 'src/a.ts', summary: 'Exports a security-sensitive helper.' }]
+            : [{ path: 'config.xml', summary: 'Configures the application metadata and runtime preferences.' }]
+        }),
+        modelUsed: 'primary-model',
+        executionTimeMs: 1
+      };
+    });
+
+    const result = await processSingleBatch({
+      fullName: 'integry/forex',
+      batch: [
+        { path: 'src/a.ts', content: 'export const a = 1;', blobHash: 'abc123' },
+        { path: 'config.xml', content: '<widget id="forex" />', blobHash: 'def456' }
+      ],
+      agent: primaryAgent as never,
+      log: log as never,
+      modelUsed: 'primary-model',
+      customPrompt,
+      primaryAgentAliasSetting: 'primary',
+      branch: 'main'
+    });
+
+    assert.equal(result.success, true);
+    assert.equal(prompts.length, 2);
+    assert.doesNotMatch(prompts[1], /--- START src\/a\.ts ---/);
+    assert.match(prompts[1], /--- START config\.xml ---/);
+    for (const prompt of prompts) {
+      assert.match(prompt, new RegExp(customPrompt));
+      assert.doesNotMatch(prompt, /Your task is to create concise/);
+    }
+  });
+
   test('records cooldown and stops after non-quota fallback failure', async () => {
     const primaryAgent = createAgent('primary', 'primary-model', async () => ({
       success: false,
