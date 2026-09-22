@@ -386,31 +386,45 @@ async function analyzeDirectoryBatchWithAgent(options: {
   routingSession?: SyntheticRoutingSession;
 }): Promise<DirectoryResult[]> {
   const { prompt, directories, agent, model, context, fullName, retryOptions = SUMMARIZATION_RETRY, routingSession } = options;
+  const summariesByPath = new Map<string, string>();
+  let pendingDirectories = directories;
+
   return withRetry(
     async () => {
+      const activeDirectories = pendingDirectories;
+      const activePrompt = activeDirectories.length === directories.length
+        ? prompt
+        : buildBatchDirectoryPrompt(activeDirectories);
       const analyzeOptions: AnalyzeOptions = {
         model,
         responseFormat: 'json',
         executionType: 'summarization',
         repository: fullName,
-        metadata: { phase: 'directory_aggregation', directoryCount: directories.length },
+        metadata: { phase: 'directory_aggregation', directoryCount: activeDirectories.length },
         suppressLlmLog: true
       };
       const analysisResult = routingSession
-        ? await routingSession.analyze(prompt, analyzeOptions)
-        : await agent.analyze(prompt, analyzeOptions);
+        ? await routingSession.analyze(activePrompt, analyzeOptions)
+        : await agent.analyze(activePrompt, analyzeOptions);
       if (!analysisResult.success) {
         throw new Error(analysisResult.error || 'Directory summarization agent analysis failed');
       }
-      const parsed = parseBatchDirectoryResponse(analysisResult.response, directories.map(d => d.dirPath));
-      if (!parsed.some(r => r.summary !== null)) {
-        throw new RetryableSummarizationResponseError(`No valid directory summaries parsed for batch of ${directories.length} directories`);
+      const parsed = parseBatchDirectoryResponse(analysisResult.response, activeDirectories.map(d => d.dirPath));
+      const validResults = parsed.filter((result): result is { dirPath: string; summary: string } => result.summary !== null);
+      if (validResults.length === 0) {
+        throw new RetryableSummarizationResponseError(`No valid directory summaries parsed for batch of ${activeDirectories.length} directories`);
       }
-      const missingDirs = parsed.filter(result => result.summary === null).map(result => result.dirPath);
+      for (const result of validResults) summariesByPath.set(result.dirPath, result.summary);
+
+      pendingDirectories = directories.filter(directory => !summariesByPath.has(directory.dirPath));
+      const missingDirs = pendingDirectories.map(directory => directory.dirPath);
       if (missingDirs.length > 0) {
         throw new RetryableSummarizationResponseError(`Missing summaries for ${missingDirs.length} of ${directories.length} directories: ${missingDirs.slice(0, 5).join(', ')}`);
       }
-      return parsed;
+      return directories.map(directory => ({
+        dirPath: directory.dirPath,
+        summary: summariesByPath.get(directory.dirPath) as string
+      }));
     },
     retryOptions,
     context

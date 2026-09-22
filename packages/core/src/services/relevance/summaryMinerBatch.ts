@@ -97,7 +97,7 @@ export async function processSingleBatch(options: ProcessSingleBatchOptions): Pr
 
   try {
     const summaries = await analyzeBatchWithFallback({
-      prompt, batch, agent, log, modelUsed, primaryAgentAliasSetting,
+      prompt, batch, agent, log, modelUsed, customPrompt, primaryAgentAliasSetting,
       fallbackAgent, fallbackModelOverride, fallbackModelUsed, fallbackAgentAliasSetting, fullName, branch,
       routingSession: options.routingSession,
       fallbackRoutingSession,
@@ -151,6 +151,7 @@ async function analyzeBatchWithFallback(
   try {
     const results = await analyzeBatchWithAgent({
       prompt, batch, agent, model: modelUsed, context: `batch_summarization:${fullName}`, fullName,
+      customPrompt: options.customPrompt,
       routingSession: options.routingSession,
     });
     // Clearing quota-failure bookkeeping is best-effort: a transient runtime-state
@@ -246,6 +247,7 @@ async function analyzeBatchAfterPrimaryFailure(
       model: fallbackModelUsed ?? fallbackModelOverride,
       context: `batch_summarization_fallback:${fullName}`,
       fullName,
+      customPrompt: options.customPrompt,
       retryOptions: SUMMARIZATION_FALLBACK_RETRY,
       routingSession: fallbackRoutingSession,
     });
@@ -312,6 +314,7 @@ async function analyzeBatchWithInvalidResponseFallback(
     model: fallbackModelUsed ?? fallbackModelOverride,
     context: `batch_summarization_fallback:${fullName}`,
     fullName,
+    customPrompt: options.customPrompt,
     retryOptions: SUMMARIZATION_FALLBACK_RETRY,
     routingSession: fallbackRoutingSession,
   });
@@ -379,36 +382,49 @@ async function analyzeBatchWithAgent(options: {
   model?: string;
   context: string;
   fullName: string;
+  customPrompt?: string;
   retryOptions?: RetryOptions;
   routingSession?: SyntheticRoutingSession;
 }): Promise<SummaryResult[]> {
-  const { prompt, batch, agent, model, context, fullName, retryOptions = SUMMARIZATION_RETRY, routingSession } = options;
+  const {
+    prompt, batch, agent, model, context, fullName, customPrompt,
+    retryOptions = SUMMARIZATION_RETRY, routingSession
+  } = options;
+  const summariesByPath = new Map<string, SummaryResult>();
+  let pendingBatch = batch;
+
   return withRetry(
     async () => {
+      const activeBatch = pendingBatch;
+      const activePrompt = activeBatch.length === batch.length
+        ? prompt
+        : buildBatchPrompt(activeBatch, customPrompt);
       const analyzeOptions: AnalyzeOptions = {
         model,
         responseFormat: 'json',
         executionType: 'summarization',
         repository: fullName,
-        metadata: { phase: 'batch_summarization', fileCount: batch.length },
+        metadata: { phase: 'batch_summarization', fileCount: activeBatch.length },
         suppressLlmLog: true
       };
       const analysisResult = routingSession
-        ? await routingSession.analyze(prompt, analyzeOptions)
-        : await agent.analyze(prompt, analyzeOptions);
+        ? await routingSession.analyze(activePrompt, analyzeOptions)
+        : await agent.analyze(activePrompt, analyzeOptions);
       if (!analysisResult.success) {
         throw new Error(analysisResult.error || 'Summarization agent analysis failed');
       }
-      const parsed = parseBatchResponse(analysisResult.response, batch.map(file => file.path));
+      const parsed = parseBatchResponse(analysisResult.response, activeBatch.map(file => file.path));
       if (parsed.length === 0) {
-        throw new RetryableSummarizationResponseError(`No valid summaries parsed for batch of ${batch.length} files`);
+        throw new RetryableSummarizationResponseError(`No valid summaries parsed for batch of ${activeBatch.length} files`);
       }
-      const summarizedPaths = new Set(parsed.map(result => result.path));
-      const missingPaths = batch.map(file => file.path).filter(filePath => !summarizedPaths.has(filePath));
+      for (const result of parsed) summariesByPath.set(result.path, result);
+
+      pendingBatch = batch.filter(file => !summariesByPath.has(file.path));
+      const missingPaths = pendingBatch.map(file => file.path);
       if (missingPaths.length > 0) {
         throw new RetryableSummarizationResponseError(`Missing summaries for ${missingPaths.length} of ${batch.length} files: ${missingPaths.slice(0, 5).join(', ')}`);
       }
-      return parsed;
+      return batch.map(file => summariesByPath.get(file.path) as SummaryResult);
     },
     retryOptions,
     context
