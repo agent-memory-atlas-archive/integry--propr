@@ -9,6 +9,7 @@ import type { FileChangesData } from '@propr/core';
 import { loadAgents, loadSyntheticAgents, loadMonitoredReposRaw } from '@propr/core';
 import { createPlannerRoutes } from '../routes/plannerRoutes.js';
 import { createGoalRoutes } from '../routes/goalRoutes.js';
+import type { createTaskSubmissionRoutes } from '../routes/taskSubmissionRoutes.js';
 import { createTaskRoutes } from '../routes/taskRoutes.js';
 import { createDockerRoutes, stopTaskExecution } from '../routes/dockerRoutes.js';
 import { createFileChangesRoutes } from '../routes/fileChangesRoutes.js';
@@ -20,6 +21,7 @@ import { McpError, type McpScope } from './config.js';
 import { McpPolicy, type McpPrincipal } from './policy.js';
 import { McpOperations, type OperationResult, type Operation } from './operations.js';
 import { callWorkflow, redact, type WorkflowHandler } from './adapter.js';
+import { addTaskSubmissionTools, trackTaskSubmission } from './toolsTaskSubmissions.js';
 import { addPlanningTools } from './toolsPlanning.js';
 import { addPullRequestTools } from './toolsPullRequests.js';
 import { addContextTools } from './toolsContext.js';
@@ -57,7 +59,7 @@ export interface McpTool {
   target?: { table: string; column: string; arg: string; owner?: string };
   run: (context: ToolContext) => Promise<OperationResult>;
 }
-export interface ToolDeps { db: Knex; taskQueue: Queue; redisClient: RedisClientType; runtimeBuildQueue: Queue; policy: McpPolicy; goalServices?: Omit<Parameters<typeof createGoalRoutes>[0], 'db' | 'taskQueue' | 'redisClient'> }
+export interface ToolDeps { db: Knex; taskQueue: Queue; redisClient: RedisClientType; runtimeBuildQueue: Queue; policy: McpPolicy; taskSubmissionServices?: Parameters<typeof createTaskSubmissionRoutes>[0]['services']; goalServices?: Omit<Parameters<typeof createGoalRoutes>[0], 'db' | 'taskQueue' | 'redisClient'> }
 export const ok = (data: unknown): OperationResult => ({ status: 200, data });
 
 export async function markMergedPullRequests(
@@ -114,6 +116,7 @@ export function createToolCatalog(deps: ToolDeps): McpTool[] {
       ...synthetic.filter(agent => agent.enabled).map(agent => ({ id: agent.id, alias: agent.alias, models: agent.models.filter(model => model.enabled).map(model => model.id), defaultModel: agent.defaultModel }))] });
   } });
 
+  addTaskSubmissionTools(tools, deps);
   addPlanningTools(tools, deps, planner);
   addAdministrationTools(tools, deps);
   addArtifactTools(tools, deps, planner, goals);
@@ -225,6 +228,7 @@ export function createToolCatalog(deps: ToolDeps): McpTool[] {
     if (continuation.goalId) receipt.targetState = await db('goals').where({ goal_id: continuation.goalId, owner_id: principal.user.id }).first('desired_state', 'result_state', 'current_task_id');
     if (continuation.taskId) receipt.targetState = await db('task_history').where({ task_id: continuation.taskId }).orderBy('history_id', 'desc').first('state', 'timestamp');
     updateReceiptState(row, receipt);
+    await trackTaskSubmission(deps, row, principal, receipt);
     await trackExecution(deps, row, principal, receipt);
     await trackCancellation(deps, row, principal, receipt);
     if (row.state === 'accepted' && row.tool === 'implement_plan' && Array.isArray(result.issues)) {
