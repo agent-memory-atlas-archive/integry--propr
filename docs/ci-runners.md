@@ -179,7 +179,10 @@ coordinator that runs several shards inside one job. Each shard job:
    own `PLAYWRIGHT_BROWSERS_PATH`.
 3. Starts its own Redis (`CI_REDIS_INSTANCE=shard-N`, above) and runs its
    share of the suite with `scripts/run-test-suite.mjs`. Files still run one
-   at a time inside the shard.
+   at a time inside the shard. Each native Vitest/Jest workspace (`propr-ui`)
+   runs as four `--shard` parts, one per CI shard. On a worker capped at two
+   CPUs, Vitest runs a single worker, and the whole `propr-ui` suite took
+   longer than the 180 s per-unit timeout. A part takes about a quarter of that.
 4. Uploads `full-test-output-<run>-<attempt>-shard-N`, with `summary.json`,
    sanitized output and `stages.json`. `stages.json` also records the
    runner's name and environment.

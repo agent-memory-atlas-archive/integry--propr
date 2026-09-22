@@ -5,8 +5,10 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, test } from 'node:test';
 import {
+    NATIVE_WORKSPACE_PARTS,
     buildManifest,
     buildTestArguments,
+    buildWorkspaceCommand,
     discoverNativeWorkspaceTests,
     discoverTestFiles,
     discoverWorkspaceTestRoots,
@@ -182,14 +184,18 @@ describe('release test-suite runner', () => {
         assert.equal(usesNativeWorkspaceTestRunner({ name: 'service', scripts: { test: 'node --test one.test.ts' } }), false);
         assert.equal(usesNativeWorkspaceTestRunner({ name: 'shared' }), false);
     });
-    test('partitions every discovered file and native workspace into exactly one shard', () => {
+    test('partitions every discovered file and native workspace part into exactly one shard', () => {
         const root = createFixtureRepository();
         try {
             const unsharded = planRun({ root });
             const allKeys = unsharded.allUnits.map(unitKey);
-            assert.equal(allKeys.length, 15);
-            assert.ok(allKeys.includes('workspace:apps/desktop'));
-            assert.ok(allKeys.includes('workspace:apps/web'));
+            assert.equal(allKeys.length, 21);
+            for (const workspace of ['apps/desktop', 'apps/web']) {
+                for (let part = 1; part <= NATIVE_WORKSPACE_PARTS; part += 1) {
+                    assert.ok(allKeys.includes(`workspace:${workspace}#${part}/${NATIVE_WORKSPACE_PARTS}`));
+                }
+            }
+            assert.ok(!allKeys.includes('workspace:apps/web'), 'a native workspace never runs whole');
             assert.ok(!allKeys.some(key => key.includes('e2e.test.ts')));
             assert.ok(!allKeys.some(key => key.includes('native-owned')), 'native workspace files belong to their workspace runner');
 
@@ -204,7 +210,7 @@ describe('release test-suite runner', () => {
                         owners.set(unitKey(unit), index);
                     }
                     const sizes = shard.units.length;
-                    assert.ok(sizes >= Math.floor(15 / count) && sizes <= Math.ceil(15 / count));
+                    assert.ok(sizes >= Math.floor(21 / count) && sizes <= Math.ceil(21 / count));
                 }
                 assert.deepEqual([...owners.keys()].sort(), [...allKeys].sort());
             }
@@ -222,8 +228,20 @@ describe('release test-suite runner', () => {
         const verification = verifyShardSummaries(summaries, unsharded.allUnits, 4);
         assert.deepEqual(verification.errors, []);
         assert.equal(verification.units, unsharded.allUnits.length);
-        const workspaceRuns = summaries.flatMap(summary => summary.results.filter(result => result.kind === 'workspace'));
-        assert.deepEqual(workspaceRuns.map(result => result.id).sort(), nativeWorkspaces);
+        const workspaceParts = summaries.map(summary => summary.results.filter(result => result.kind === 'workspace').map(result => result.id));
+        assert.deepEqual(workspaceParts.flat().sort(), nativeWorkspaces.flatMap(workspace => (
+            Array.from({ length: NATIVE_WORKSPACE_PARTS }, (_value, index) => `${workspace}#${index + 1}/${NATIVE_WORKSPACE_PARTS}`)
+        )).sort());
+        // propr-ui outlasted the per-unit timeout as one unit on a two-CPU
+        // worker; its parts must spread across the CI shards.
+        assert.ok(workspaceParts.every(parts => parts.length === nativeWorkspaces.length), JSON.stringify(workspaceParts));
+    });
+
+    test('runs each native workspace part through the package runner shard option', () => {
+        const [part] = planRun().allUnits.filter(unit => unit.kind === 'workspace');
+        assert.deepEqual(part, { kind: 'workspace', id: `propr-ui#1/${NATIVE_WORKSPACE_PARTS}`, workspace: 'propr-ui', part: `1/${NATIVE_WORKSPACE_PARTS}` });
+        assert.deepEqual(buildWorkspaceCommand(part, 'linux'), ['npm', ['test', '--workspace=propr-ui', '--', `--shard=1/${NATIVE_WORKSPACE_PARTS}`]]);
+        assert.equal(buildWorkspaceCommand(part, 'win32')[0], 'npm.cmd');
     });
 
     test('rejects invalid or partial shard configuration', () => {
@@ -255,7 +273,7 @@ describe('release test-suite runner', () => {
     test('rejects shards that would run nothing and conflicting shard sources', async () => {
         const root = createFixtureRepository();
         try {
-            assert.throws(() => planRun({ root, shard: { index: 16, count: 16 } }), /has no test units/);
+            assert.throws(() => planRun({ root, shard: { index: 32, count: 32 } }), /has no test units/);
         } finally {
             rmSync(root, { recursive: true, force: true });
         }
@@ -271,7 +289,7 @@ describe('release test-suite runner', () => {
         try {
             const manifest = buildManifest(planRun({ root, shard: { index: 2, count: 4 } }));
             assert.deepEqual(manifest.shard, { index: 2, count: 4 });
-            assert.equal(manifest.totalUnits, 15);
+            assert.equal(manifest.totalUnits, 21);
             assert.ok(manifest.units.every(unit => Object.keys(unit).sort().join() === 'id,kind'));
         } finally {
             rmSync(root, { recursive: true, force: true });
@@ -337,7 +355,7 @@ describe('release test-suite runner', () => {
             passed: 2,
             results: [
                 { kind: 'file', id: 'test/fast.test.ts', status: 'passed', durationMs: 500 },
-                { kind: 'workspace', id: 'propr-ui', status: 'failed', durationMs: 3000 },
+                { kind: 'workspace', id: 'propr-ui#2/4', status: 'failed', durationMs: 3000 },
                 { kind: 'file', id: 'test/medium.test.ts', status: 'passed', durationMs: 1000 },
             ],
         }, 2);
@@ -345,7 +363,7 @@ describe('release test-suite runner', () => {
         assert.match(report, /Assigned 3 of 9 discovered units/);
         const rows = report.split('\n').filter(line => line.startsWith('| ') && line.includes('`'));
         assert.deepEqual(rows, [
-            '| 3.0s | failed | `propr-ui` (workspace) |',
+            '| 3.0s | failed | `propr-ui#2/4` (workspace) |',
             '| 1.0s | passed | `test/medium.test.ts` |',
         ]);
     });

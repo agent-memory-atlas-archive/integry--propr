@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-// Runs the non-live test suite one file (or native workspace) at a time.
+// Runs the non-live test suite one file (or native workspace part) at a time.
 //
 //   node scripts/run-test-suite.mjs [files...]    run all or the given files
 //   --shard=INDEX/COUNT                           run one deterministic shard of the
@@ -28,6 +28,11 @@ const IGNORED_DIRECTORIES = new Set(['.git', 'coverage', 'dist', 'node_modules']
 const MAX_SHARD_COUNT = 64;
 const SHARD_NUMBER_PATTERN = /^[1-9][0-9]*$/;
 const SLOWEST_RUNS_REPORTED = 15;
+// Each native Jest/Vitest workspace runs as this many `--shard` parts. As one
+// unit, propr-ui alone took 88s on a hosted runner and more than the per-unit
+// timeout on a worker limited to two CPUs. Parts keep every unit well inside
+// the timeout and let consecutive parts land in different CI shards.
+export const NATIVE_WORKSPACE_PARTS = 4;
 
 export function usesNativeWorkspaceTestRunner(workspacePackage) {
     const testScript = workspacePackage.scripts?.test;
@@ -188,13 +193,23 @@ export function parseCliArguments(argv) {
     return { files, list, shard, verifyShardSummaries };
 }
 
-// A test run unit is either one Node-compatible test file or one native
-// Jest/Vitest workspace. Identifiers are repository-relative so manifests from
-// different machines and checkouts are comparable.
+// A test run unit is either one Node-compatible test file or one `--shard`
+// part of a native Jest/Vitest workspace. Identifiers are repository-relative
+// so manifests from different machines and checkouts are comparable.
 export function buildRunUnits(testFiles, nativeWorkspaces, root = ROOT) {
     return [
         ...testFiles.map(file => ({ kind: 'file', id: relative(root, file).replaceAll('\\', '/'), path: file })),
-        ...nativeWorkspaces.map(workspace => ({ kind: 'workspace', id: workspace })),
+        ...nativeWorkspaces.flatMap(workspace => Array.from({ length: NATIVE_WORKSPACE_PARTS }, (_value, position) => {
+            const part = `${position + 1}/${NATIVE_WORKSPACE_PARTS}`;
+            return { kind: 'workspace', id: `${workspace}#${part}`, workspace, part };
+        })),
+    ];
+}
+
+export function buildWorkspaceCommand(unit, platform = process.platform) {
+    return [
+        platform === 'win32' ? 'npm.cmd' : 'npm',
+        ['test', `--workspace=${unit.workspace}`, '--', `--shard=${unit.part}`],
     ];
 }
 
@@ -487,7 +502,7 @@ export async function runSuite(argv = process.argv.slice(2), env = process.env) 
             const label = unit.kind === 'workspace' ? `${unit.id} (workspace test script)` : unit.id;
             console.log(`\n[${index + 1}/${units.length}] ${label}`);
             const [command, args] = unit.kind === 'workspace'
-                ? [process.platform === 'win32' ? 'npm.cmd' : 'npm', ['test', `--workspace=${unit.id}`]]
+                ? buildWorkspaceCommand(unit)
                 : [tsx, buildTestArguments(unit.path)];
 
             const unitStartedAt = Date.now();
@@ -557,7 +572,7 @@ export async function runSuite(argv = process.argv.slice(2), env = process.env) 
 
     const fileCount = results.filter(result => result.kind === 'file').length;
     const workspaceCount = results.length - fileCount;
-    console.log(`\nAll ${fileCount} non-live test files and ${workspaceCount} native workspace suites passed${scope} in ${durationSeconds}s.`);
+    console.log(`\nAll ${fileCount} non-live test files and ${workspaceCount} native workspace suite parts passed${scope} in ${durationSeconds}s.`);
     return 0;
 }
 
