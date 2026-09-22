@@ -335,13 +335,19 @@ describe('PR check routing', () => {
             assert.match(block, /- name: Isolate job state from the shared host\n\s+if: runner\.environment == 'self-hosted'\n/, name);
             const isolate = extractRunBlock(block, 'Isolate job state from the shared host');
             assert.match(isolate, /^job_root="\$RUNNER_TEMP\/ci"$/m, name);
-            for (const variable of ['HOME', 'TMPDIR', 'XDG_CONFIG_HOME', 'XDG_CACHE_HOME', 'PLAYWRIGHT_BROWSERS_PATH']) {
+            for (const variable of ['HOME', 'XDG_CONFIG_HOME', 'XDG_CACHE_HOME', 'PLAYWRIGHT_BROWSERS_PATH']) {
                 assert.match(isolate, new RegExp(`echo "${variable}=\\$job_root/`), `${name} ${variable}`);
             }
+            // The runner tree can have a group-writable ancestor that the CLI's
+            // private-directory checks reject, so TMPDIR is a private mktemp
+            // directory under the sticky /tmp, as on hosted runners.
+            assert.match(isolate, /^tmp_dir="\$\(mktemp -d \/tmp\/propr-ci\.XXXXXX\)"$/m, name);
+            assert.match(isolate, /echo "TMPDIR=\$tmp_dir"\n\s+echo "PROPR_CI_TMPDIR=\$tmp_dir"\n/, name);
+            assert.doesNotMatch(isolate, /\$job_root\/tmp/, name);
             assert.match(block, /- name: Record runner placement\n(?:\s+env:\n\s+PROPR_EVIDENCE_LABEL: [^\n]+\n)?\s+run: \.\/scripts\/ci-runner-evidence\.sh\n/, name);
             assert.doesNotMatch(block, /--with-deps/, `${name} never apt-installs onto the host`);
             const cleanup = block.slice(block.indexOf('- name: Remove job files from the persistent workspace'));
-            assert.match(cleanup, /^- name: Remove job files from the persistent workspace\n\s+if: always\(\) && runner\.environment == 'self-hosted'\n\s+run: git -C "\$GITHUB_WORKSPACE" clean -ffdxq\n/, name);
+            assert.match(cleanup, /^- name: Remove job files from the persistent workspace\n\s+if: always\(\) && runner\.environment == 'self-hosted'\n\s+run: \|\n\s+git -C "\$GITHUB_WORKSPACE" clean -ffdxq\n\s+case "\$\{PROPR_CI_TMPDIR:-\}" in \/tmp\/propr-ci\.\*\) rm -rf -- "\$PROPR_CI_TMPDIR" ;; esac\n/, name);
             assert.doesNotMatch(cleanup.slice(cleanup.indexOf('\n')), /- name: /, `${name} cleans up after its uploads, as the last step`);
         }
         assert.match(extractRunBlock(jobBlock(fullSuite, 'docs'), 'Isolate job state from the shared host'), /echo "PROPR_CACHE_DIR=\$job_root\/setup"/);

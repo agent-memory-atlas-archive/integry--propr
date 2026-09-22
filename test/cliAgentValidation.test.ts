@@ -169,9 +169,16 @@ const kind = isDocker
   ? (args.includes("--network=none") ? "image-version" : "image-check")
   : (args[0] === "--version" ? "host-version" : "host-check");
 const delay = { "host-version": 5, "host-check": 20, "image-check": 40, "image-version": 90 }[kind];
-const record = event => fs.appendFileSync(process.env.PROPR_VALIDATION_EVENT_LOG,
-  [event, kind, process.pid, process.cwd()].join("|") + "\\n");
-process.on("SIGTERM", () => setTimeout(() => { record("exit"); process.exit(0); }, delay));
+const log = process.env.PROPR_VALIDATION_EVENT_LOG;
+const record = (event, ...extra) => fs.appendFileSync(log,
+  [event, kind, process.pid, process.cwd(), ...extra].join("|") + "\\n");
+// Each child reports whether the validation temporary root (the host check's
+// parent directory) still exists at the moment it closes.
+const temporaryRootPresent = () => {
+  const hostCheck = fs.readFileSync(log, "utf8").split("\\n").find(line => line.startsWith("start|host-check|"));
+  return hostCheck ? fs.existsSync(path.dirname(hostCheck.split("|")[3])) : "unknown";
+};
+process.on("SIGTERM", () => setTimeout(() => { record("exit", "root=" + temporaryRootPresent()); process.exit(0); }, delay));
 record("start");
 setInterval(() => undefined, 1000);
 `;
@@ -190,13 +197,30 @@ setInterval(() => undefined, 1000);
   const controller = new AbortController();
   const cancellation = Object.assign(new Error("staggered cancellation"), { name: "AbortError" });
   let validation: Promise<unknown> | undefined;
-  let settled = false;
+  let logAtSettlement: string | undefined;
+  let runningAtSettlement: string[] | undefined;
   try {
     validation = validateAgents(fakeOrchestrator(), fakeConfig({ hostClaudeDir: hostDir }), {
       agents: ["claude"],
       signal: controller.signal,
     });
-    void validation.then(() => { settled = true; }, () => { settled = true; });
+    // Snapshot the children at settlement instead of polling for an
+    // intermediate state, so a stalled event loop on a loaded runner cannot
+    // make the ordering checks below miss or misread it. A child counts as
+    // closed once it is gone, whether it exited on SIGTERM or was escalated
+    // to SIGKILL after the grace period.
+    const snapshot = () => {
+      logAtSettlement = existsSync(eventLog) ? readFileSync(eventLog, "utf8") : "";
+      runningAtSettlement = logAtSettlement.split("\n").filter(line => line.startsWith("start|")).filter(line => {
+        try {
+          process.kill(Number(line.split("|")[2]), 0);
+          return true;
+        } catch (error) {
+          return (error as NodeJS.ErrnoException).code !== "ESRCH";
+        }
+      });
+    };
+    void validation.then(snapshot, snapshot);
     const started = await waitForLog(eventLog, contents =>
       ["host-version", "host-check", "image-version", "image-check"]
         .every(kind => contents.includes(`start|${kind}|`))
@@ -206,16 +230,16 @@ setInterval(() => undefined, 1000);
     const temporaryRoot = dirname(hostCheck.split("|")[3]);
 
     controller.abort(cancellation);
-    const partiallyClosed = await waitForLog(eventLog, contents => contents.includes("exit|image-check|"));
-    assert.doesNotMatch(partiallyClosed, /exit\|image-version\|/);
-    assert.equal(settled, false, "cancellation settled before the slow version child closed");
-    assert.equal(existsSync(temporaryRoot), true, "temporary validation resources were removed while a child was still running");
-
     await assert.rejects(validation, error => error === cancellation);
-    const completed = readFileSync(eventLog, "utf8");
-    for (const kind of ["host-version", "host-check", "image-version", "image-check"]) {
-      assert.match(completed, new RegExp(`exit\\|${kind}\\|`));
+    assert.ok(logAtSettlement !== undefined && runningAtSettlement !== undefined);
+    assert.equal(logAtSettlement.split("\n").filter(line => line.startsWith("start|")).length, 4);
+    assert.deepEqual(runningAtSettlement, [], `cancellation settled before every child closed:\n${logAtSettlement}`);
+    const exits = logAtSettlement.split("\n").filter(line => line.startsWith("exit|"));
+    assert.ok(exits.length > 0, `no child drained on SIGTERM:\n${logAtSettlement}`);
+    for (const exit of exits) {
+      assert.ok(exit.endsWith("|root=true"), `temporary validation resources were removed while a child was still running:\n${logAtSettlement}`);
     }
+    const completed = readFileSync(eventLog, "utf8");
     assert.equal(existsSync(temporaryRoot), false);
     for (const line of completed.split("\n").filter(line => line.startsWith("start|"))) {
       const pid = Number(line.split("|")[2]);

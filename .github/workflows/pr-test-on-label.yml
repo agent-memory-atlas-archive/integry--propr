@@ -47,18 +47,25 @@ jobs:
 
       # Self-hosted only: RUNNER_TEMP is private to this job on this runner
       # worker and emptied by the runner, so nothing below reads or writes the
-      # host's /root, shared /tmp caches or another worker's state. Short
-      # directory names keep Unix socket paths under TMPDIR within limits.
+      # host's /root, shared caches or another worker's state. TMPDIR is this
+      # job's own directory under /tmp, removed by the last step.
       - name: Isolate job state from the shared host
         if: runner.environment == 'self-hosted'
         run: |
           set -euo pipefail
           job_root="$RUNNER_TEMP/ci"
           rm -rf -- "$job_root"
-          mkdir -p "$job_root/home" "$job_root/tmp" "$job_root/pw"
+          mkdir -p "$job_root/home" "$job_root/pw"
+          # TMPDIR is a private 0700 directory directly under the sticky /tmp,
+          # the same ancestry tests get on hosted runners. The runner's own
+          # tree can have a group-writable ancestor, which the CLI's private
+          # directory checks rightly reject, and its long path overflows
+          # Chromium's singleton socket path.
+          tmp_dir="$(mktemp -d /tmp/propr-ci.XXXXXX)"
           {
             echo "HOME=$job_root/home"
-            echo "TMPDIR=$job_root/tmp"
+            echo "TMPDIR=$tmp_dir"
+            echo "PROPR_CI_TMPDIR=$tmp_dir"
             echo "XDG_CONFIG_HOME=$job_root/home/.config"
             echo "XDG_CACHE_HOME=$job_root/home/.cache"
             echo "PLAYWRIGHT_BROWSERS_PATH=$job_root/pw"
@@ -190,7 +197,9 @@ jobs:
       # persistent workspace. .git stays for the checkout post step.
       - name: Remove job files from the persistent workspace
         if: always() && runner.environment == 'self-hosted'
-        run: git -C "$GITHUB_WORKSPACE" clean -ffdxq
+        run: |
+          git -C "$GITHUB_WORKSPACE" clean -ffdxq
+          case "${PROPR_CI_TMPDIR:-}" in /tmp/propr-ci.*) rm -rf -- "$PROPR_CI_TMPDIR" ;; esac
 
   docs:
     name: Validate Test Preparation and Docs
@@ -215,18 +224,25 @@ jobs:
 
       # Self-hosted only: RUNNER_TEMP is private to this job on this runner
       # worker and emptied by the runner, so nothing below reads or writes the
-      # host's /root, shared /tmp caches or another worker's state. Short
-      # directory names keep Unix socket paths under TMPDIR within limits.
+      # host's /root, shared caches or another worker's state. TMPDIR is this
+      # job's own directory under /tmp, removed by the last step.
       - name: Isolate job state from the shared host
         if: runner.environment == 'self-hosted'
         run: |
           set -euo pipefail
           job_root="$RUNNER_TEMP/ci"
           rm -rf -- "$job_root"
-          mkdir -p "$job_root/home" "$job_root/tmp" "$job_root/pw" "$job_root/setup"
+          mkdir -p "$job_root/home" "$job_root/pw" "$job_root/setup"
+          # TMPDIR is a private 0700 directory directly under the sticky /tmp,
+          # the same ancestry tests get on hosted runners. The runner's own
+          # tree can have a group-writable ancestor, which the CLI's private
+          # directory checks rightly reject, and its long path overflows
+          # Chromium's singleton socket path.
+          tmp_dir="$(mktemp -d /tmp/propr-ci.XXXXXX)"
           {
             echo "HOME=$job_root/home"
-            echo "TMPDIR=$job_root/tmp"
+            echo "TMPDIR=$tmp_dir"
+            echo "PROPR_CI_TMPDIR=$tmp_dir"
             echo "XDG_CONFIG_HOME=$job_root/home/.config"
             echo "XDG_CACHE_HOME=$job_root/home/.cache"
             echo "PLAYWRIGHT_BROWSERS_PATH=$job_root/pw"
@@ -272,7 +288,9 @@ jobs:
       # persistent workspace. .git stays for the checkout post step.
       - name: Remove job files from the persistent workspace
         if: always() && runner.environment == 'self-hosted'
-        run: git -C "$GITHUB_WORKSPACE" clean -ffdxq
+        run: |
+          git -C "$GITHUB_WORKSPACE" clean -ffdxq
+          case "${PROPR_CI_TMPDIR:-}" in /tmp/propr-ci.*) rm -rf -- "$PROPR_CI_TMPDIR" ;; esac
 
   native-electron:
     # Electron cannot launch on the self-hosted workers (its tests skip there

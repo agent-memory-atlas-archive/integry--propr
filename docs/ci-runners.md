@@ -79,14 +79,22 @@ any script a routed job runs.
   receive no repository secrets. They get only a read-only `GITHUB_TOKEN`.
   `actions/checkout` runs with `persist-credentials: false`, so the token is
   not left in the persistent workspace's `.git/config`.
-- Routed jobs point `HOME`, `TMPDIR`, `XDG_*`, the npm and Playwright caches
-  and `.propr/setup.sh`'s cache at `$RUNNER_TEMP/ci`. `RUNNER_TEMP` belongs to
+- Routed jobs point `HOME`, `XDG_*`, the npm and Playwright caches and
+  `.propr/setup.sh`'s cache at `$RUNNER_TEMP/ci`. `RUNNER_TEMP` belongs to
   one worker's work directory and the runner empties it between jobs. Tests
   never see the host's `/root` (agent credentials such as `~/.codex`), shared
-  `/tmp` caches or another worker's files. The short directory names keep Unix
-  socket paths under `TMPDIR` within the kernel's 108-byte limit. Root can
-  still reach the Docker daemon and the rest of the file system, so this
-  protects against accidents, not against malicious code.
+  caches or another worker's files. Root can still reach the Docker daemon
+  and the rest of the file system, so this protects against accidents, not
+  against malicious code.
+- `TMPDIR` is a fresh private (0700) `mktemp -d /tmp/propr-ci.XXXXXX`
+  directory, exported as `PROPR_CI_TMPDIR` and removed by the job's last
+  step. This gives tests the ancestry they have on hosted runners: `/` and
+  the sticky `/tmp`. Under the runner's install tree, a group-writable
+  ancestor made the CLI's private-directory checks reject
+  `packages/cli/src/commands/initStack.test.ts`, which is correct product
+  behaviour. The long path also pushed Chromium's `SingletonSocket` past the
+  kernel's 108-byte Unix socket limit. If a worker dies before cleanup, its
+  directory stays in `/tmp` until the host's normal tmp cleanup.
 - Routed jobs never `apt-get install` onto the host: `scripts/ci-install-chromium.sh`
   passes `--with-deps` only on GitHub-hosted runners, and the full-suite jobs
   download only the browser. They never run machine-wide Docker cleanup. The
@@ -130,8 +138,9 @@ at the same time.
   failure and cancellation, each routed job runs
   `git -C "$GITHUB_WORKSPACE" clean -ffdxq`. That removes its own
   `node_modules`, build output and logs from its own workspace. `.git` stays
-  so the checkout post step still works. Nothing outside the job's workspace
-  and `RUNNER_TEMP` is deleted.
+  so the checkout post step still works. The same step removes the job's
+  `PROPR_CI_TMPDIR` (only when it matches `/tmp/propr-ci.*`). Nothing outside
+  the job's workspace, `RUNNER_TEMP` and that directory is deleted.
 
 ## Browser sandbox and non-root requirements
 
