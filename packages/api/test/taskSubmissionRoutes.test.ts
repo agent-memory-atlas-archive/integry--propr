@@ -5,7 +5,7 @@ import fs from 'fs-extra';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import type { Request, Response } from 'express';
-import { closeConnection } from '@propr/core';
+import { closeConnection, insertTaskSubmission } from '@propr/core';
 import { up } from '../../core/src/db/migrations/20260922000000_add_task_submissions.js';
 import { up as identityMigration } from '../../core/src/db/migrations/20260922010000_preserve_task_submission_identity.js';
 import { createTaskSubmissionRoutes, authorizeTaskSubmissionRepository } from '../routes/taskSubmissionRoutes.js';
@@ -42,6 +42,7 @@ test('route preserves instructions, validates before creation, publishes routing
     getOctokit: async () => ({ request: async (route: string, body: Record<string, unknown>) => {
       calls.push({ route, body });
       if (route.endsWith('/issues')) return { data: { number: 42, html_url: 'https://github.com/owner/repo/issues/42' } };
+      if (route.endsWith('/timeline')) return { data: [] };
       return { data: {} };
     } }) as never,
     processingLabels: async () => ['AI'],
@@ -136,6 +137,7 @@ test('attachment processing persists worker-readable bytes before publishing the
           assert.ok(issueBody.includes('invoice.txt'));
           assert.equal((await db('task_submissions').first()).issue_number, 42);
         }
+        if (route.endsWith('/timeline')) return { data: [] };
         return { data: {} };
       } }) as never,
     } });
@@ -146,4 +148,60 @@ test('attachment processing persists worker-readable bytes before publishing the
     assert.equal(value.state.body.state, 'queued');
     assert.equal(await fs.pathExists(filename), false);
   } finally { await fs.remove(filename); await db.destroy(); }
+});
+
+
+test('interrupted dispatch reconciles published triggers and receipts before resuming the same issue', async () => {
+  configureDemoMode(false);
+  for (const stage of ['before-trigger', 'after-trigger', 'after-enqueue', 'after-receipt', 'after-task', 'unconfirmed-trigger']) {
+    const db = await fixture();
+    const calls: string[] = [];
+    const jobs = new Set(stage === 'after-enqueue' ? ['issue-owner-repo-42'] : []);
+    let queues = 0;
+    try {
+      const row = await insertTaskSubmission(db, {
+        user_id: 'alice', submission_key: 'stable-key', payload_hash: 'hash', repository: 'owner/repo', attachments: '[]',
+        payload: JSON.stringify({ trigger: 'AI', routingLabel: 'llm-agent-model', baseBranch: 'release' }),
+      });
+      await db('task_submissions').where({ id: row.id }).update({
+        issue_number: 42, state: 'issue_created', dispatch_claim: 'interrupted-attempt',
+        dispatch_complete: stage === 'after-receipt', task_id: stage === 'after-task' ? 'existing-task' : null,
+      });
+      const routes = createTaskSubmissionRoutes({ db, services: {
+        authorize: async () => ({ id: 'repo', name: 'owner/repo', enabled: true }),
+        routing: async () => ({ agentAlias: 'agent', model: 'model', routingLabel: 'llm-agent-model' }),
+        getOctokit: async () => ({ request: async (route: string, params: Record<string, unknown>) => {
+          calls.push(route);
+          assert.equal(params.issue_number, 42);
+          if (route.endsWith('/timeline')) {
+            if (stage === 'unconfirmed-trigger') throw new Error('GitHub unavailable');
+            if (stage === 'before-trigger') return { data: [] };
+            // The original label is no longer present, but its event remains on page two.
+            if (params.page === 1) return { data: Array.from({ length: 100 }, () => ({ event: 'commented' })) };
+            return { data: [{ event: 'labeled', label: { name: 'AI' } }] };
+          }
+          assert.ok(route.endsWith('/labels'));
+          return { data: {} };
+        } }) as never,
+        enqueue: async args => {
+          queues++;
+          assert.equal(args.correlationId, row.id);
+          jobs.add(`issue-${args.owner}-${args.repo}-${args.issueNumber}`);
+        },
+      } });
+      const value = response();
+      await routes.retry(request({}), value.res);
+      assert.equal(value.state.status, 200, stage);
+      assert.equal(value.state.body.issueNumber, 42);
+      assert.equal(await db('task_submissions').count('* as count').first().then(result => result?.count), 1);
+      assert.equal(calls.filter(route => route.endsWith('/labels')).length, stage === 'before-trigger' ? 3 : 0);
+      const shouldEnqueue = ['before-trigger', 'after-trigger', 'after-enqueue'].includes(stage);
+      assert.equal(queues, shouldEnqueue ? 1 : 0);
+      assert.equal(jobs.size, shouldEnqueue ? 1 : 0);
+      if (stage === 'unconfirmed-trigger') {
+        assert.equal(value.state.body.state, 'failed');
+        assert.match(String(value.state.body.error), /GitHub unavailable/);
+      }
+    } finally { await db.destroy(); }
+  }
 });

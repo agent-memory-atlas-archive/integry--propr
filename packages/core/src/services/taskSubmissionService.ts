@@ -1,4 +1,4 @@
-import type { Knex } from 'knex';
+import knex, { type Knex } from 'knex';
 import { randomUUID } from 'node:crypto';
 import fs from 'fs-extra';
 import path from 'node:path';
@@ -64,7 +64,37 @@ export async function materializeSubmissionAttachments(issue: IssueJobData, root
 interface SubmissionServices {
   createIssue: (row: TaskSubmission) => Promise<{ number: number; url: string }>;
   reconcileIssue: (row: TaskSubmission) => Promise<{ number: number; url: string } | null>;
-  dispatch: (row: TaskSubmission) => Promise<void>;
+  dispatch: (row: TaskSubmission, recovering: boolean) => Promise<void>;
+}
+
+// A separate SQLite file keeps dispatch exclusion independent of task writes.
+// The OS releases its write lock on process death; a slow live attempt never expires.
+// Keep these files: unlinking a lock file would let callers lock different inodes.
+const memoryDispatchLocks = new WeakMap<Knex, Set<string>>();
+async function acquireDispatchLock(database: Knex, id: string): Promise<(() => Promise<void>) | null> {
+  const filename = database.client.config.connection?.filename as string | undefined;
+  if (!filename || filename === ':memory:') {
+    let locks = memoryDispatchLocks.get(database);
+    if (!locks) { locks = new Set(); memoryDispatchLocks.set(database, locks); }
+    if (locks.has(id)) return null;
+    locks.add(id);
+    return async () => { locks.delete(id); };
+  }
+  const directory = `${filename}.submission-locks`;
+  await fs.ensureDir(directory);
+  const lock = knex({ client: 'better-sqlite3', connection: { filename: path.join(directory, `${id}.sqlite`) },
+    useNullAsDefault: true, pool: { min: 1, max: 1 } });
+  try {
+    await lock.raw('PRAGMA busy_timeout = 0');
+    await lock.raw('BEGIN IMMEDIATE');
+    return async () => {
+      try { await lock.raw('ROLLBACK'); } finally { await lock.destroy(); }
+    };
+  } catch (error) {
+    await lock.destroy();
+    if ((error as { code?: string }).code === 'SQLITE_BUSY') return null;
+    throw error;
+  }
 }
 
 /** A single CAS authorizes creation. An ambiguous response NEVER authorizes another POST. */
@@ -90,27 +120,27 @@ export async function resumeTaskSubmission(database: Knex, id: string, services:
     row = await read();
   }
   if (row.state === 'queued' || row.dispatch_complete) return row;
+  const release = await acquireDispatchLock(database, id);
+  if (!release) return read();
   const claim = randomUUID();
-  const won = await database('task_submissions').where({ id, dispatch_complete: false })
-    .whereNot('state', 'queued').whereNull('dispatch_claim').update({ dispatch_claim: claim });
-  if (!won) return read();
   try {
-    // Re-read inside the durable claim: a webhook may have completed dispatch
-    // while this caller was acquiring it. A replay must never reapply the trigger.
+    // With no live owner, an interrupted claim is safe to replace. Reconcile
+    // receipts before external effects, including work started by a webhook.
     row = await read();
     if (row.state === 'queued' || row.dispatch_complete || row.task_id) return row;
-    const pending = await database('task_submissions').where({ id, dispatch_claim: claim, dispatch_complete: false })
-      .whereNot('state', 'queued').whereNull('task_id').update({ state: 'issue_created', error: null });
+    const recovering = Boolean(row.dispatch_claim) || row.state === 'failed';
+    const pending = await database('task_submissions').where({ id, dispatch_complete: false })
+      .whereNot('state', 'queued').whereNull('task_id').update({ dispatch_claim: claim, state: 'issue_created', error: null });
     if (!pending) return read();
-    await services.dispatch(row);
+    await services.dispatch(row, recovering);
     await database('task_submissions').where({ id, dispatch_claim: claim, state: 'issue_created' }).update({ state: 'queued', error: null });
   } catch (error) {
     await database('task_submissions').where({ id, dispatch_claim: claim, dispatch_complete: false }).whereNot('state', 'queued')
       .update({ state: 'failed', error: (error as Error).message });
   } finally {
-    // Do not expire a live or interrupted claim: GitHub cannot fence a delayed
-    // label write. A crash can still be resolved by the ordinary issue dispatcher.
-    await database('task_submissions').where({ id, dispatch_claim: claim }).update({ dispatch_claim: null });
+    try {
+      await database('task_submissions').where({ id, dispatch_claim: claim }).update({ dispatch_claim: null });
+    } finally { await release(); }
   }
   return read();
 }

@@ -68,6 +68,7 @@ async function fixture() {
           return { data: issue };
         }
         if (route === 'GET /repos/{owner}/{repo}/issues') return { data: [{ ...issue, body: calls.find(call => call.route.startsWith('POST') && call.route.endsWith('/issues'))!.body.body }] };
+        if (route.endsWith('/timeline')) return { data: [] };
         return { data: {} };
       } }) as never,
       processingLabels: async () => ['AI'],

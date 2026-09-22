@@ -102,13 +102,27 @@ function submissionServices(octokit: Awaited<ReturnType<typeof getAuthenticatedO
         if (data.length < 100) return null;
       }
     },
-    async dispatch(row: TaskSubmission) {
+    async dispatch(row: TaskSubmission, recovering: boolean) {
       const payload = JSON.parse(row.payload) as SubmissionPayload;
-      const context = { octokit, ...coordinates(row), issueNumber: row.issue_number!, logger: logger.withCorrelation(row.id) };
-      for (const label of [payload.routingLabel, ...(payload.baseBranch ? [`base-${payload.baseBranch}`] : [])]) {
-        if (!await safeAddLabel(context, label)) throw new Error('Could not apply task routing. Retry to start the existing issue.');
+      // A trigger can already have been consumed and removed by a worker. Check
+      // the timeline, not just current labels, before replaying an interrupted write.
+      let triggered = false;
+      if (recovering) {
+        for (let page = 1; ; page++) {
+          const { data } = await octokit.request('GET /repos/{owner}/{repo}/issues/{issue_number}/timeline', {
+            ...coordinates(row), issue_number: row.issue_number!, per_page: 100, page,
+          });
+          triggered = data.some(event => event.event === 'labeled' && 'label' in event && event.label?.name === payload.trigger);
+          if (triggered || data.length < 100) break;
+        }
       }
-      if (!await safeAddLabel(context, payload.trigger)) throw new Error('Could not trigger implementation. Retry to start the existing issue.');
+      const context = { octokit, ...coordinates(row), issueNumber: row.issue_number!, logger: logger.withCorrelation(row.id) };
+      if (!triggered) {
+        for (const label of [payload.routingLabel, ...(payload.baseBranch ? [`base-${payload.baseBranch}`] : [])]) {
+          if (!await safeAddLabel(context, label)) throw new Error('Could not apply task routing. Retry to start the existing issue.');
+        }
+        if (!await safeAddLabel(context, payload.trigger)) throw new Error('Could not trigger implementation. Retry to start the existing issue.');
+      }
       await enqueue({ ...coordinates(row), issueNumber: row.issue_number!, userId: row.user_id, triggeringLabel: payload.trigger, correlationId: row.id });
     },
   };
