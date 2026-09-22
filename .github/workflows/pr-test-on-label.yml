@@ -507,14 +507,24 @@ jobs:
             const summary = failedStages.length > 0
               ? `Validation failed during: ${failedStages.join(', ')}.`
               : `Validation did not complete successfully (shards: ${process.env.SHARD_RESULT || 'unknown'}, docs: ${process.env.DOCS_JOB_RESULT || 'unknown'}).`;
-            const budget = Math.floor(56000 / Math.max(failedOutputs.length, 1));
-            const outputs = failedOutputs.flatMap(([index, output]) => {
-              let text = output.replace(/~~~/g, '~~​~');
-              if (text.length > budget) text = '...(truncated)\n\n' + text.slice(-budget);
-              return ['<details>', `<summary>View shard ${index}/${shardCount} output</summary>`, '', '~~~text', text, '~~~', '</details>', ''];
-            });
+            // Reserve the footer and truncation notice before adding any content.
+            // String.length counts UTF-16 units, conservatively bounding characters.
+            const limit = 65536;
+            const footer = `\n**[View Workflow](${runUrl})**\n[View uploaded artifacts](${runUrl}#artifacts)`;
+            const notice = '\nDetails truncated; see the uploaded artifacts for complete failure rows and logs.\n';
+            const contentLimit = limit - footer.length - notice.length;
+            let body = '';
+            let truncated = false;
+            const append = (text, ceiling) => {
+              if (body.length + text.length > ceiling) {
+                truncated = true;
+                return false;
+              }
+              body += text;
+              return true;
+            };
             const marker = '<!-- propr-full-test-results -->';
-            const body = [
+            const reportLines = [
               marker,
               '### Full Test Suite Results',
               '',
@@ -525,9 +535,27 @@ jobs:
               ...(process.env.ELECTRON_RESULT && process.env.ELECTRON_RESULT !== 'skipped' ? [`- Hosted native Electron units: ${process.env.ELECTRON_RESULT}`] : []),
               ...lines,
               '',
-              ...outputs,
-              `**[View Workflow](${runUrl})**`,
-            ].join('\n');
+            ];
+            // Keep whole rows when they fit, leaving space for log excerpts.
+            for (const line of reportLines) append(`${line}\n`, Math.min(24000, contentLimit));
+            for (const [position, [index, output]] of failedOutputs.entries()) {
+              const prefix = `<details>\n<summary>View shard ${index}/${shardCount} output</summary>\n\n~~~text\n`;
+              const suffix = '\n~~~\n</details>\n\n';
+              const budget = Math.floor((contentLimit - body.length) / (failedOutputs.length - position)) - prefix.length - suffix.length;
+              const omitted = '...(truncated)\n\n';
+              if (budget < omitted.length) {
+                truncated = true;
+                continue;
+              }
+              let text = output.replace(/~~~/g, '~~​~');
+              if (text.length > budget) {
+                truncated = true;
+                const tailLength = budget - omitted.length;
+                text = omitted + (tailLength > 0 ? text.slice(-tailLength) : '');
+              }
+              append(prefix + text + suffix, contentLimit);
+            }
+            body += (truncated ? notice : '') + footer;
             await github.rest.issues.createComment({
               owner: context.repo.owner,
               repo: context.repo.repo,

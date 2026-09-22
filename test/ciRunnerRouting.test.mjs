@@ -48,6 +48,28 @@ function extractRunBlock(block, stepName) {
     return result.join('\n');
 }
 
+function runFailureComment(directory, comment) {
+    const lines = comment.split('\n');
+    const start = lines.findIndex(line => /^\s+script: \|$/.test(line)) + 1;
+    const indent = lines[start].match(/^\s*/)[0];
+    const end = lines.findIndex((line, index) => index > start && line.trim() !== '' && !line.startsWith(indent));
+    const script = lines.slice(start, end === -1 ? undefined : end).map(line => line.slice(indent.length)).join('\n');
+    writeFileSync(join(directory, 'harness.cjs'), `
+        let body;
+        const github = { rest: { issues: { createComment: async request => { body = request.body; } } } };
+        const context = { runId: 1, repo: { owner: 'o', repo: 'r' }, issue: { number: 1 } };
+        new (Object.getPrototypeOf(async () => {}).constructor)('require', 'github', 'context', process.argv[2])(require, github, context)
+            .then(() => process.stdout.write(body));
+    `);
+    const result = spawnSync(process.execPath, ['harness.cjs', script], {
+        cwd: directory,
+        encoding: 'utf8',
+        env: { PATH: process.env.PATH, PROPR_TEST_SHARD_COUNT: '4', COVERAGE_RESULT: 'failure', SHARD_RESULT: 'failure' },
+    });
+    assert.equal(result.status, 0, result.stderr);
+    return result.stdout;
+}
+
 // Minimal Docker CLI double for scripts/ci-redis.sh: containers are files
 // holding their labels, and every removal is logged.
 function createFakeDocker() {
@@ -430,11 +452,6 @@ describe('PR check routing', () => {
         const comment = jobBlock(fullSuite, 'comment');
         assert.match(comment, /\$\{\{ always\(\) && !cancelled\(\) && github\.event_name == 'pull_request' &&\n/);
 
-        const lines = comment.split('\n');
-        const start = lines.findIndex(line => /^\s+script: \|$/.test(line)) + 1;
-        const indent = lines[start].match(/^\s*/)[0];
-        const end = lines.findIndex((line, index) => index > start && line.trim() !== '' && !line.startsWith(indent));
-        const script = lines.slice(start, end === -1 ? undefined : end).map(line => line.slice(indent.length)).join('\n');
         const directory = freshDirectory('report');
         const writeShard = (shard, stages, summary) => {
             const output = join(directory, 'shard-artifacts', `shard-${shard}`);
@@ -449,20 +466,7 @@ describe('PR check routing', () => {
         writeShard(3, { 'Dependency install': 'success', 'Test shard': 'failure' }, {
             shard: { index: 3 }, durationMs: 2000, results: [{ id: 'test/a.test.ts', status: 'failed', reason: 'exit 1' }],
         });
-        writeFileSync(join(directory, 'harness.cjs'), `
-            let body;
-            const github = { rest: { issues: { createComment: async request => { body = request.body; } } } };
-            const context = { runId: 1, repo: { owner: 'o', repo: 'r' }, issue: { number: 1 } };
-            new (Object.getPrototypeOf(async () => {}).constructor)('require', 'github', 'context', process.argv[2])(require, github, context)
-                .then(() => process.stdout.write(body));
-        `);
-        const result = spawnSync(process.execPath, ['harness.cjs', script], {
-            cwd: directory,
-            encoding: 'utf8',
-            env: { PATH: process.env.PATH, PROPR_TEST_SHARD_COUNT: '4', COVERAGE_RESULT: 'failure', SHARD_RESULT: 'failure' },
-        });
-        assert.equal(result.status, 0, result.stderr);
-        const body = result.stdout;
+        const body = runFailureComment(directory, comment);
         assert.match(body, /^- Shard 1\/4: passed in 1\.0s on worker-1$/m);
         assert.match(body, /^- Shard 2\/4: cancelled during Test shard on worker-2$/m);
         assert.match(body, /^- Shard 3\/4: failed during Test shard in 2\.0s on worker-3$/m);
@@ -471,6 +475,51 @@ describe('PR check routing', () => {
         assert.match(body, /Validation failed during: Test shard \(shard 2, cancelled\), Test shard \(shard 3\), Shard coverage verification\./);
         assert.match(body, /View shard 2\/4 output[\s\S]*shard 2 output/);
         assert.doesNotMatch(body, /shard 1 output/);
+        assert.doesNotMatch(body, /truncated/);
+        assert.ok(body.length <= 65536);
+    });
+
+    test('bounds the entire failure comment with many rows, huge reasons and expanded log fences', async (t) => {
+        const comment = jobBlock(fullSuite, 'comment');
+        for (const scenario of ['many failures and logs', 'oversized reason', 'rows without logs', 'oversized summary']) {
+            await t.test(scenario, () => {
+                const directory = freshDirectory('bounded-report');
+                const hasLogs = scenario !== 'rows without logs';
+                for (let shard = 1; shard <= 4; shard += 1) {
+                    const output = join(directory, 'shard-artifacts', `shard-${shard}`);
+                    mkdirSync(output, { recursive: true });
+                    const stages = scenario === 'oversized summary'
+                        ? { ['stage'.repeat(20000)]: 'failure' }
+                        : hasLogs ? { 'Test shard': 'failure' } : {};
+                    writeFileSync(join(output, 'stages.json'), JSON.stringify({ shard, stages }));
+                    const results = scenario === 'oversized reason'
+                        ? [{ id: 'test/huge.test.ts', status: 'failed', reason: 'reason'.repeat(20000) }]
+                        : Array.from({ length: 500 }, (_, index) => ({
+                            id: `test/shard-${shard}-unit-${index}.test.ts`,
+                            status: 'failed',
+                            reason: `exit 1: ${'failure detail '.repeat(10)}`,
+                        }));
+                    writeFileSync(join(output, 'summary.json'), JSON.stringify({ durationMs: 1000, results }));
+                    if (hasLogs) writeFileSync(join(output, 'test_output.sanitized.txt'),
+                        '~~~ 💥 test output\n'.repeat(10000) + `shard ${shard} log tail`);
+                }
+                const body = runFailureComment(directory, comment);
+                assert.ok(body.length <= 65536, `complete body has ${body.length} UTF-16 units`);
+                assert.match(body, /^<!-- propr-full-test-results -->\n### Full Test Suite Results/);
+                assert.match(body, /Details truncated; see the uploaded artifacts/);
+                assert.ok(body.endsWith('[View uploaded artifacts](https://github.com/o/r/actions/runs/1#artifacts)'));
+                assert.match(body, /\*\*\[View Workflow\]\(https:\/\/github.com\/o\/r\/actions\/runs\/1\)\*\*/);
+                assert.equal((body.match(/^<details>$/gm) ?? []).length, hasLogs ? 4 : 0);
+                assert.equal((body.match(/^<\/details>$/gm) ?? []).length, hasLogs ? 4 : 0);
+                assert.equal((body.match(/^~~~(?:text)?$/gm) ?? []).length, hasLogs ? 8 : 0);
+                if (hasLogs) {
+                    for (let shard = 1; shard <= 4; shard += 1) {
+                        assert.ok(body.includes(`View shard ${shard}/4 output`));
+                        assert.ok(body.includes(`shard ${shard} log tail`));
+                    }
+                }
+            });
+        }
     });
 
     test('keeps Validate Changes and every other build check on its hosted platform', () => {
