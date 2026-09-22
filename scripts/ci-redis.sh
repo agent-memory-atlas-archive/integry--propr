@@ -4,29 +4,53 @@ set -euo pipefail
 
 ACTION="${1:-}"
 IMAGE="${CI_REDIS_IMAGE:-redis:7-alpine@sha256:e7723ff73d963f5cc6d9c4643ea3d989527a402a319239054e9472a7fb9219a2}"
-RUN_KEY="${GITHUB_RUN_ID:-local}-${GITHUB_JOB:-job}"
-SAFE_RUN_KEY="$(printf '%s' "$RUN_KEY" | tr -c 'A-Za-z0-9_.-' '-')"
-CONTAINER_NAME="propr-ci-redis-${SAFE_RUN_KEY}"
-STATE_DIR="${RUNNER_TEMP:-${TMPDIR:-/tmp}}"
-STATE_FILE="${STATE_DIR}/${CONTAINER_NAME}.name"
+RUN_ID="${GITHUB_RUN_ID:-local}"
+JOB_ID="${GITHUB_JOB:-job}"
+RUN_ATTEMPT="${GITHUB_RUN_ATTEMPT:-1}"
+# Matrix entries and local shards share GITHUB_RUN_ID and GITHUB_JOB, so
+# concurrent callers on one host must name their own instance. Unset keeps the
+# single-Redis-per-job behaviour of existing callers.
+INSTANCE="${CI_REDIS_INSTANCE:-}"
 
-write_github_env() {
+if [[ -n "$INSTANCE" && ! "$INSTANCE" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]{0,62}$ ]]; then
+  # Rejected rather than sanitized: rewriting characters could map two
+  # instances to one container name.
+  echo "CI_REDIS_INSTANCE must match [A-Za-z0-9][A-Za-z0-9_.-]{0,62}, got: $INSTANCE" >&2
+  exit 2
+fi
+if [[ ! "$RUN_ATTEMPT" =~ ^[1-9][0-9]*$ ]]; then
+  echo "GITHUB_RUN_ATTEMPT must be a positive integer, got: $RUN_ATTEMPT" >&2
+  exit 2
+fi
+
+RUN_KEY="${RUN_ID}-${JOB_ID}${INSTANCE:+-${INSTANCE}}"
+SAFE_RUN_KEY="$(printf '%s' "$RUN_KEY" | tr -c 'A-Za-z0-9_.-' '-')"
+CONTAINER_NAME="propr-ci-redis-${SAFE_RUN_KEY}-a${RUN_ATTEMPT}"
+STATE_DIR="${CI_REDIS_STATE_DIR:-${RUNNER_TEMP:-${TMPDIR:-/tmp}}}"
+STATE_FILE="${STATE_DIR}/${CONTAINER_NAME}.name"
+# Owner labels identify exactly this run, job and instance. Label values are
+# compared verbatim, so sanitizing the name cannot widen the match.
+LABEL_RUN="propr.ci.redis.run=${RUN_ID}"
+LABEL_JOB="propr.ci.redis.job=${JOB_ID}"
+LABEL_INSTANCE="propr.ci.redis.instance=${INSTANCE:-default}"
+
+write_env() {
   local key="$1"
   local value="$2"
 
-  if [[ -n "${GITHUB_ENV:-}" ]]; then
+  # CI_REDIS_ENV_FILE lets one job start several instances without their
+  # connection settings overwriting each other in the shared GITHUB_ENV.
+  if [[ -n "${CI_REDIS_ENV_FILE:-}" ]]; then
+    printf '%s=%s\n' "$key" "$value" >> "$CI_REDIS_ENV_FILE"
+  elif [[ -n "${GITHUB_ENV:-}" ]]; then
     printf '%s=%s\n' "$key" "$value" >> "$GITHUB_ENV"
   else
     printf '%s=%s\n' "$key" "$value"
   fi
 }
 
-stop_redis() {
-  local name="$CONTAINER_NAME"
-
-  if [[ -f "$STATE_FILE" ]]; then
-    name="$(<"$STATE_FILE")"
-  fi
+remove_container() {
+  local name="$1"
 
   case "$name" in
     propr-ci-redis-*) ;;
@@ -40,22 +64,52 @@ stop_redis() {
     docker rm --force "$name" >/dev/null
     echo "Stopped Redis container $name"
   fi
+}
 
+stop_redis() {
+  local name="$CONTAINER_NAME"
+
+  if [[ -f "$STATE_FILE" ]]; then
+    name="$(<"$STATE_FILE")"
+  fi
+  if [[ "$name" != "$CONTAINER_NAME" ]]; then
+    echo "Refusing to remove $name: this caller owns $CONTAINER_NAME" >&2
+    return 1
+  fi
+
+  remove_container "$name"
   rm -f "$STATE_FILE"
+}
+
+# A cancelled earlier attempt of this same run, job and instance may have left
+# its container behind. Attempts of one run never overlap, so removing those is
+# safe; other runs, jobs and instances never match all three labels.
+remove_previous_attempts() {
+  local name
+  while IFS= read -r name; do
+    [[ -n "$name" && "$name" != "$CONTAINER_NAME" ]] || continue
+    remove_container "$name"
+  done < <(docker ps --all --format '{{.Names}}' \
+    --filter "label=${LABEL_RUN}" \
+    --filter "label=${LABEL_JOB}" \
+    --filter "label=${LABEL_INSTANCE}")
 }
 
 start_redis() {
   mkdir -p "$STATE_DIR"
 
-  # The attempt-independent name lets a rerun remove a container left by a
-  # cancelled attempt without touching another run or job's Redis instance.
   stop_redis
+  remove_previous_attempts
 
   docker run \
     --detach \
     --rm \
     --name "$CONTAINER_NAME" \
     --label propr.ci.redis=true \
+    --label "$LABEL_RUN" \
+    --label "$LABEL_JOB" \
+    --label "$LABEL_INSTANCE" \
+    --label "propr.ci.redis.attempt=${RUN_ATTEMPT}" \
     --publish 127.0.0.1::6379 \
     --health-cmd 'redis-cli ping' \
     --health-interval 2s \
@@ -91,18 +145,20 @@ start_redis() {
     return 1
   fi
 
-  write_github_env REDIS_HOST 127.0.0.1
-  write_github_env REDIS_PORT "$port"
-  write_github_env REDIS_CONTAINER_NAME "$CONTAINER_NAME"
-  write_github_env PROPR_TEST_REDIS_ISOLATION flush
+  write_env REDIS_HOST 127.0.0.1
+  write_env REDIS_PORT "$port"
+  write_env REDIS_CONTAINER_NAME "$CONTAINER_NAME"
+  # Flushing is only enabled for the Redis this script just created.
+  write_env PROPR_TEST_REDIS_ISOLATION flush
   echo "Redis is healthy on 127.0.0.1:${port} ($CONTAINER_NAME)"
 }
 
 case "$ACTION" in
   start) start_redis ;;
   stop) stop_redis ;;
+  name) printf '%s\n' "$CONTAINER_NAME" ;;
   *)
-    echo "Usage: $0 start|stop" >&2
+    echo "Usage: $0 start|stop|name" >&2
     exit 2
     ;;
 esac

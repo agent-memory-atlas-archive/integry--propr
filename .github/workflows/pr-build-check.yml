@@ -300,7 +300,11 @@ jobs:
 
   validate:
     name: Validate Changes
-    runs-on: ubuntu-latest
+    # Same-repository PRs run on the gitfix.dev self-hosted runner; fork and
+    # Dependabot PRs (and PROPR_SELF_HOSTED_PR_CHECKS=false) stay hosted. The
+    # expression matches pr-test-on-label.yml and is routing, not a security
+    # boundary: see docs/ci-runners.md.
+    runs-on: ${{ (vars.PROPR_SELF_HOSTED_PR_CHECKS != 'false' && (github.event_name == 'workflow_dispatch' || (github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.user.login != 'dependabot[bot]'))) && fromJSON('["self-hosted","linux","x64","propr"]') || 'ubuntu-latest' }}
     env:
       ACTIONLINT_IMAGE: rhysd/actionlint@sha256:b1934ee5f1c509618f2508e6eb47ee0d3520686341fec936f3b79331f9315667
     permissions:
@@ -313,6 +317,25 @@ jobs:
         with:
           # Include the PR merge commit's parents for local change detection.
           fetch-depth: 2
+          # Do not leave the token in .git/config on a persistent runner.
+          persist-credentials: false
+
+      - name: Isolate job state from the shared host
+        if: runner.environment == 'self-hosted'
+        run: |
+          set -euo pipefail
+          # RUNNER_TEMP is private to this job and emptied by the runner, so
+          # tests never read or write the host's /root or shared caches.
+          job_root="$RUNNER_TEMP/propr-validate"
+          rm -rf -- "$job_root"
+          mkdir -p "$job_root/home" "$job_root/tmp" "$job_root/playwright"
+          {
+            echo "HOME=$job_root/home"
+            echo "TMPDIR=$job_root/tmp"
+            echo "XDG_CONFIG_HOME=$job_root/home/.config"
+            echo "XDG_CACHE_HOME=$job_root/home/.cache"
+            echo "PLAYWRIGHT_BROWSERS_PATH=$job_root/playwright"
+          } >> "$GITHUB_ENV"
 
       - name: Initialize diagnostic log
         if: always()
@@ -366,6 +389,7 @@ jobs:
               "$ACTIONLINT_IMAGE" \
               --exclude=SC2016 \
               scripts/build-images.sh \
+              scripts/ci-install-chromium.sh \
               scripts/ci-redis.sh \
               scripts/smoke-test-images.sh \
               scripts/smoke-test-preview-runtime-images.sh \
@@ -427,7 +451,7 @@ jobs:
 
       - name: Install Chromium for required MCP consent tests
         id: mcp_browser_setup
-        run: npx playwright install --with-deps chromium
+        run: ./scripts/ci-install-chromium.sh
 
       - name: Verify core MCP OAuth, workflows, browser and security
         id: mcp_tests
@@ -549,7 +573,7 @@ jobs:
 
       - name: Install Chromium for PWA Smoke Test
         if: steps.filter.outputs.ui == 'true'
-        run: npx playwright install --with-deps chromium
+        run: ./scripts/ci-install-chromium.sh
 
       - name: Run PWA and Mobile Browser Smoke Test
         if: steps.filter.outputs.ui == 'true'

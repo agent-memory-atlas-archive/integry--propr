@@ -146,6 +146,44 @@ describe('native Electron test setup', () => {
     }]);
   });
 
+  it('fails instead of skipping when the worker is required to launch Electron', () => {
+    const required = { PATH: '/tools', PROPR_REQUIRE_NATIVE_ELECTRON: '1' };
+    assert.throws(() => prepareNativeElectronTest({
+      environment: required,
+      findExecutable: () => '/tools/xvfb-run',
+      platform: 'linux',
+      probeLaunch: () => 'Electron cannot start on this worker (exit 127)',
+      resolveElectron: () => '/electron',
+    }), /PROPR_REQUIRE_NATIVE_ELECTRON=1 but Electron cannot start on this worker \(exit 127\)/);
+    assert.throws(() => prepareNativeElectronTest({
+      allowHeadlessLinux: true,
+      environment: { ...required, PATH: '/missing' },
+      findExecutable: () => undefined,
+      platform: 'linux',
+      probeLaunch: () => 'Electron cannot start on this worker (exit 127)',
+      resolveElectron: () => '/electron',
+    }), /PROPR_REQUIRE_NATIVE_ELECTRON=1 but Electron cannot start/);
+    assert.throws(() => prepareNativeElectronTest({
+      environment: { ...required, PATH: '/missing' },
+      findExecutable: () => undefined,
+      platform: 'linux',
+      resolveElectron: () => assert.fail('headless workers must not resolve Electron'),
+    }), /PROPR_REQUIRE_NATIVE_ELECTRON=1 but Electron needs DISPLAY or xvfb-run on Linux/);
+    // Platform scoping is not a worker defect and still skips.
+    assert.deepEqual(prepareNativeElectronTest({
+      environment: required,
+      linuxOnly: true,
+      platform: 'darwin',
+    }), { skipReason: 'This native Electron probe is Linux-specific' });
+    assert.deepEqual(prepareNativeElectronTest({
+      environment: { ...required, PROPR_REQUIRE_NATIVE_ELECTRON: '0' },
+      findExecutable: () => '/tools/xvfb-run',
+      platform: 'linux',
+      probeLaunch: () => 'Electron cannot start on this worker (exit 127)',
+      resolveElectron: () => '/electron',
+    }), { skipReason: 'Electron cannot start on this worker (exit 127)' });
+  });
+
   it('runs one Electron preflight before starting parallel test workers', async () => {
     const packageJson = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8'));
     const testCommand = packageJson.scripts.test;

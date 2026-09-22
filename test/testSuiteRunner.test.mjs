@@ -51,19 +51,6 @@ function passingSummary(plan, runAttempt = 1) {
     };
 }
 
-function extractRunBlock(workflow, stepName) {
-    const lines = workflow.slice(workflow.indexOf(`- name: ${stepName}`)).split('\n');
-    const runLine = lines.findIndex(line => line.trim() === 'run: |');
-    assert.ok(runLine > 0, `${stepName} must use a run block`);
-    const indent = lines[runLine + 1].match(/^ */)[0].length;
-    const block = [];
-    for (const line of lines.slice(runLine + 1)) {
-        if (line.trim() !== '' && line.match(/^ */)[0].length < indent) break;
-        block.push(line.slice(indent));
-    }
-    return block.join('\n');
-}
-
 describe('release test-suite runner', () => {
     test('prepares desktop runtime dependencies before clean desktop and full-suite tests', () => {
         const rootPackage = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
@@ -363,7 +350,7 @@ describe('release test-suite runner', () => {
         ]);
     });
 
-    test('keeps the required full-suite check as a strict aggregate gate over isolated shards', () => {
+    test('keeps the hosted shard matrix complete and isolated for untrusted PRs', () => {
         const workflow = readFileSync(new URL('../.github/workflows/pr-test-on-label.yml', import.meta.url), 'utf8');
         const shardCount = Number(workflow.match(/PROPR_TEST_SHARD_COUNT: '(\d+)'/)[1]);
         const matrix = workflow.match(/shard: \[([\d, ]+)\]/)[1].split(',').map(Number);
@@ -372,45 +359,27 @@ describe('release test-suite runner', () => {
         assert.equal(shardCount, 4);
         assert.match(workflow, /fail-fast: false/);
         assert.match(workflow, /cancel-in-progress: true/);
-        assert.doesNotMatch(workflow, /self-hosted/, 'PR shards must stay on GitHub-hosted runners');
         assert.doesNotMatch(workflow, /secrets\./, 'PR full-suite jobs must stay secretless');
         assert.match(workflow, /PROPR_TEST_SHARD_INDEX: \$\{\{ matrix\.shard \}\}/);
         assert.match(workflow, /name: full-test-output-\$\{\{ github\.run_id \}\}-\$\{\{ github\.run_attempt \}\}-shard-\$\{\{ matrix\.shard \}\}/);
-        assert.match(workflow, /\.\/scripts\/ci-redis\.sh start/);
+        // Matrix entries share GITHUB_JOB, so each names its own Redis instance
+        // for both start and stop.
+        assert.equal(workflow.match(/CI_REDIS_INSTANCE: shard-\$\{\{ matrix\.shard \}\}\n\s+run: \.\/scripts\/ci-redis\.sh (?:start|stop)/g).length, 2);
         assert.match(workflow, /scripts\/sanitize-ci-output\.mjs test_output\.txt shard-output\/test_output\.sanitized\.txt/);
-        assert.equal(workflow.match(/\.\/\.propr\/setup\.sh/g).length, 1, 'docs validation runs once, not per shard');
+        assert.equal(workflow.match(/\.\/\.propr\/setup\.sh/g).length, 2, 'docs validation runs once per route, not per shard');
 
+        const shardJob = workflow.slice(workflow.indexOf('\n  shard:\n'), workflow.indexOf('\n  docs:\n'));
+        assert.match(shardJob, /runs-on: ubuntu-latest\n/, 'fork PR shards stay on GitHub-hosted runners');
         const gate = workflow.slice(workflow.indexOf('\n  test:\n'), workflow.indexOf('\n  comment:\n'));
         assert.match(gate, /name: Run Full Test Suite\n/);
-        assert.match(gate, /needs: \[shard, docs\]/);
         assert.match(gate, /always\(\) &&\s+\(github\.event_name == 'workflow_dispatch' \|\| !github\.event\.pull_request\.draft\)/);
         assert.match(gate, /--verify-shard-summaries/);
-        for (const job of ['shard', 'docs']) {
+        for (const job of ['shard', 'docs', 'local', 'native-electron']) {
             const start = workflow.indexOf(`\n  ${job}:\n`);
             const header = workflow.slice(start, workflow.indexOf('steps:', start));
-            assert.match(header, /if: github\.event_name == 'workflow_dispatch' \|\| !github\.event\.pull_request\.draft/);
+            assert.match(header, /\(github\.event_name == 'workflow_dispatch' \|\| !github\.event\.pull_request\.draft\) &&/);
         }
-
-        const enforce = extractRunBlock(gate, 'Enforce shard and docs results');
-        const runGate = env => spawnSync('bash', ['-e', '-c', enforce], {
-            encoding: 'utf8',
-            env: { PATH: process.env.PATH, SHARD_RESULT: 'success', DOCS_RESULT: 'success', COVERAGE_RESULT: 'success', ...env },
-        });
-        assert.equal(runGate({}).status, 0);
-        for (const [env, message] of [
-            [{ SHARD_RESULT: 'failure' }, /shards finished with result 'failure'/],
-            [{ SHARD_RESULT: 'cancelled' }, /shards finished with result 'cancelled'/],
-            [{ SHARD_RESULT: 'skipped' }, /shards finished with result 'skipped'/],
-            [{ SHARD_RESULT: '' }, /shards finished with result ''/],
-            [{ DOCS_RESULT: 'failure' }, /docs validation finished with result 'failure'/],
-            [{ DOCS_RESULT: 'cancelled' }, /docs validation finished with result 'cancelled'/],
-            [{ COVERAGE_RESULT: 'failure' }, /coverage verification finished with result 'failure'/],
-            [{ COVERAGE_RESULT: 'skipped' }, /coverage verification finished with result 'skipped'/],
-        ]) {
-            const result = runGate(env);
-            assert.equal(result.status, 1, JSON.stringify(env));
-            assert.match(result.stdout, message);
-        }
+        // Route-aware gate enforcement is covered in test/ciLocalShards.test.mjs.
     });
 
     test('serializes nightly validation without cancelling an active live run', () => {
