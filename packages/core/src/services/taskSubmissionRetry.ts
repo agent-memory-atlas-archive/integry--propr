@@ -15,6 +15,26 @@ function timestampMillis(value: unknown): number {
   return Date.parse(/(?:Z|[+-]\d{2}:?\d{2})$/i.test(timestamp) ? timestamp : `${timestamp}Z`);
 }
 
+async function latestProcessingLabelEvent(
+  submission: TaskSubmission,
+  triggers: Set<string>,
+  getOctokit: typeof getAuthenticatedOctokit,
+): Promise<LabelEvent | undefined> {
+  const [owner, repo] = submission.repository.split('/');
+  const octokit = await getOctokit();
+  let event: LabelEvent | undefined;
+  for (let page = 1; ; page++) {
+    const { data } = await octokit.request('GET /repos/{owner}/{repo}/issues/{issue_number}/timeline', {
+      owner, repo, issue_number: submission.issue_number!, per_page: 100, page,
+    });
+    for (const item of data as LabelEvent[]) {
+      if (item.event === 'labeled' && item.label && triggers.has(item.label.name)) event = item;
+    }
+    if (data.length < 100) break;
+  }
+  return event;
+}
+
 /** A fresh trigger after terminal work is ordinary issue follow-up, not a launch retry. */
 export async function resolveTaskSubmissionRetry(
   submission: TaskSubmission,
@@ -29,18 +49,7 @@ export async function resolveTaskSubmissionRetry(
   const terminalTime = timestampMillis(latest.timestamp);
   if (!Number.isFinite(terminalTime)) return null;
   const triggers = new Set(await processingLabels());
-  const [owner, repo] = submission.repository.split('/');
-  const octokit = await getOctokit();
-  let event: LabelEvent | undefined;
-  for (let page = 1; ; page++) {
-    const { data } = await octokit.request('GET /repos/{owner}/{repo}/issues/{issue_number}/timeline', {
-      owner, repo, issue_number: submission.issue_number!, per_page: 100, page,
-    });
-    for (const item of data as LabelEvent[]) {
-      if (item.event === 'labeled' && item.label && triggers.has(item.label.name)) event = item;
-    }
-    if (data.length < 100) break;
-  }
+  const event = await latestProcessingLabelEvent(submission, triggers, getOctokit);
   const eventTime = timestampMillis(event?.created_at);
   if (!event?.id || !event.created_at || String(event.id) === submission.retry_event_id
     || !Number.isFinite(eventTime) || eventTime <= terminalTime) return null;
