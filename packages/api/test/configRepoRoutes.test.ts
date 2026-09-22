@@ -293,7 +293,7 @@ function createRepoPostRoutes(previousRepos: RepoToMonitor[], saveMonitoredRepos
 }
 
 test('POST repository config applies a notification opt-out to every branch entry of the repository', async () => {
-  const saveMonitoredRepos = mock.fn(async (_repos: RepoToMonitor[]) => true);
+  const saveMonitoredRepos = mock.fn<(repos: RepoToMonitor[]) => Promise<boolean>>(async () => true);
   const routes = createRepoPostRoutes([
     { id: 'repo-main', name: 'integry/propr', enabled: true, baseBranch: 'main' },
     { id: 'repo-release', name: 'INTEGRY/PROPR', enabled: true, baseBranch: 'release' },
@@ -319,7 +319,7 @@ test('POST repository config applies a notification opt-out to every branch entr
 });
 
 test('POST repository config preserves a stored notification opt-out when the client omits it', async () => {
-  const saveMonitoredRepos = mock.fn(async (_repos: RepoToMonitor[]) => true);
+  const saveMonitoredRepos = mock.fn<(repos: RepoToMonitor[]) => Promise<boolean>>(async () => true);
   const routes = createRepoPostRoutes([
     { id: 'repo-main', name: 'integry/propr', enabled: true, notificationsEnabled: false },
     { id: 'repo-other', name: 'integry/other', enabled: true }
