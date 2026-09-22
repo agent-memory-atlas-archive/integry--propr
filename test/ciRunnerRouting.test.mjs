@@ -373,7 +373,7 @@ describe('PR check routing', () => {
 
     test('keeps the redundant native Electron fallback inert while shards run hosted', () => {
         const electron = jobBlock(fullSuite, 'native-electron');
-        assert.match(electron, /\n    if: \$\{\{ false \}\}\n/);
+        assert.match(electron, /\n    if: \$\{\{ !always\(\) \}\}\n/);
         assert.match(electron, /PROPR_REQUIRE_NATIVE_ELECTRON: '1'/);
         const run = extractRunBlock(electron, 'Run native Electron units without skipping');
         const units = spawnSync('bash', ['-c', `${run.split('\n').filter(line => line.startsWith('mapfile')).join('\n')}\nprintf '%s\\n' "\${files[@]}"`], {
