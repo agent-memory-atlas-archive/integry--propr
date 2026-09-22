@@ -303,7 +303,8 @@ Examples:
     .action(
       async (
         fullName: string,
-        options: { alias?: string; branch?: string; autoCiFollowup?: boolean; notifications?: boolean; visualPreviews?: boolean; previewTypes?: string; previewInstructions?: string; githubAttachmentPlan?: string }
+        options: { alias?: string; branch?: string; autoCiFollowup?: boolean; notifications?: boolean; visualPreviews?: boolean; previewTypes?: string; previewInstructions?: string; githubAttachmentPlan?: string },
+        command: Command
       ) => {
         try {
           if (!fullName.includes("/")) {
@@ -325,6 +326,12 @@ Examples:
 
           console.log(`Adding repository: ${fullName}...`);
 
+          // Commander defaults --no-notifications to true; only send an explicit
+          // value when the flag was given so the server can inherit the stored
+          // repository-wide setting.
+          const notificationsEnabled = command.getOptionValueSource("notifications") === "cli"
+            ? options.notifications !== false
+            : undefined;
           const previewRequested = options.visualPreviews === true || options.previewTypes !== undefined || options.previewInstructions !== undefined;
 
           const result = await addRepo(fullName, {
@@ -332,7 +339,7 @@ Examples:
             baseBranch: options.branch,
             enabled: true,
             autoFollowupOnFailedCi: options.autoCiFollowup ?? false,
-            notificationsEnabled: options.notifications !== false,
+            notificationsEnabled,
             visualPreview: {
               ...(options.githubAttachmentPlan !== undefined ? { githubAttachmentPlan: parseAttachmentPlan(options.githubAttachmentPlan) } : {}),
               enabled: previewRequested,
@@ -353,7 +360,8 @@ Examples:
             console.log(
               `  Automatic CI follow-up: ${formatEnabled(options.autoCiFollowup ?? false)}`
             );
-            console.log(`  Notifications: ${formatEnabled(options.notifications !== false)}`);
+            const savedRepo = result.repos_to_monitor.find((r) => r.name.toLowerCase() === fullName.toLowerCase());
+            console.log(`  Notifications: ${formatEnabled((savedRepo?.notificationsEnabled ?? notificationsEnabled) !== false)}`);
             console.log(`  Visual previews: ${formatVisualPreview({
               ...(options.githubAttachmentPlan !== undefined ? { githubAttachmentPlan: parseAttachmentPlan(options.githubAttachmentPlan) } : {}),
               enabled: previewRequested,

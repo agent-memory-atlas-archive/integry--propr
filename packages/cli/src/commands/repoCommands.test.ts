@@ -140,7 +140,7 @@ test("repo add and toggle configure repository notifications", async () => {
   const existing: MonitoredRepo = { id: "repo-1", name: "integry/propr", enabled: true, autoFollowupOnFailedCi: false };
 
   const defaulted = await runRepoWrite(["add", "integry/defaulted"], [existing]);
-  assert.equal(defaulted[1]?.notificationsEnabled, true);
+  assert.equal(defaulted[1]?.notificationsEnabled, undefined);
 
   const silenced = await runRepoWrite(["add", "integry/silenced", "--no-notifications"], [existing]);
   assert.equal(silenced[0]?.notificationsEnabled, undefined);
@@ -155,4 +155,13 @@ test("repo add and toggle configure repository notifications", async () => {
 
   const unrelated = await runRepoWrite(["toggle", "integry/propr", "--disable"], toggledOff);
   assert.equal(unrelated[0]?.notificationsEnabled, false);
+});
+
+test("repo add omits notifications without a flag so the server inherits a muted repository", async () => {
+  const muted: MonitoredRepo = { id: "repo-1", name: "integry/propr", enabled: true, autoFollowupOnFailedCi: false, notificationsEnabled: false };
+
+  const added = await runRepoWrite(["add", "integry/other", "--branch", "next"], [muted]);
+  assert.equal(added[0]?.notificationsEnabled, false);
+  assert.equal(added[1]?.baseBranch, "next");
+  assert.equal("notificationsEnabled" in (added[1] ?? {}), false);
 });

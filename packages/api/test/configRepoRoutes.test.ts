@@ -344,6 +344,32 @@ test('POST repository config preserves a stored notification opt-out when the cl
   );
 });
 
+test('POST repository config keeps a muted repository muted when a branch entry is added without the setting', async () => {
+  const saveMonitoredRepos = mock.fn<(repos: RepoToMonitor[]) => Promise<boolean>>(async () => true);
+  const routes = createRepoPostRoutes([
+    { id: 'repo-main', name: 'integry/propr', enabled: true, baseBranch: 'main', notificationsEnabled: false },
+    { id: 'repo-other', name: 'integry/other', enabled: true }
+  ], saveMonitoredRepos);
+  const response = createResponse();
+
+  // Shape sent by CLI/Web clients: stored entries echoed from GET, new branch entry without the field.
+  await routes.postRepos({
+    body: {
+      repos_to_monitor: [
+        { id: 'repo-main', name: 'integry/propr', enabled: true, baseBranch: 'main', notificationsEnabled: false },
+        { id: 'repo-other', name: 'integry/other', enabled: true, notificationsEnabled: true },
+        { id: 'repo-release', name: 'integry/propr', enabled: true, baseBranch: 'release' }
+      ]
+    }
+  } as never, response as never);
+
+  assert.equal(response.statusCode, 200);
+  assert.deepEqual(
+    saveMonitoredRepos.mock.calls[0]?.arguments[0].map(repo => [repo.id, repo.notificationsEnabled]),
+    [['repo-main', false], ['repo-other', true], ['repo-release', false]]
+  );
+});
+
 test('GET settings exposes configured override and effective detection for every repository', async () => {
   for (const detectedPlan of ['unknown', 'free', 'paid'] as const) {
     const calls: Array<[string | undefined, string | undefined]> = [];

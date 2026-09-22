@@ -29,6 +29,14 @@ test('addRepo preserves existing failed-CI options and defaults the new reposito
   assert.equal(postedRepos()[0]?.autoFollowupOnFailedCi, true);
   assert.equal(postedRepos()[1]?.autoFollowupOnFailedCi, false);
   assert.deepEqual(postedRepos()[1]?.visualPreview, { enabled: false, types: ['image'] });
+  assert.equal('notificationsEnabled' in postedRepos()[1], false);
+});
+
+test('addRepo sends notificationsEnabled only when explicitly provided', async () => {
+  const { client, postedRepos } = createClient([]);
+
+  await addRepo('integry/muted', { notificationsEnabled: false }, client);
+  assert.equal(postedRepos()[0]?.notificationsEnabled, false);
 });
 
 test('updateRepo merges visual preview fields without dropping existing instructions', async () => {

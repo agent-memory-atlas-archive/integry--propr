@@ -236,7 +236,10 @@ export interface AddRepoOptions {
    */
   autoFollowupOnFailedCi?: boolean;
 
-  /** Whether Inbox and push notifications are generated. Defaults to true. */
+  /**
+   * Whether Inbox and push notifications are generated. When omitted, the
+   * server inherits the repository-wide value, defaulting to true.
+   */
   notificationsEnabled?: boolean;
 
   /** Visual preview policy. Defaults to disabled with image capture selected. */
@@ -356,7 +359,8 @@ export async function addRepo(
     name: fullName,
     enabled: options.enabled ?? true,
     autoFollowupOnFailedCi: options.autoFollowupOnFailedCi ?? false,
-    notificationsEnabled: options.notificationsEnabled ?? true,
+    // Omitted so the server inherits the repository-wide value (enabled for new repositories).
+    ...(options.notificationsEnabled !== undefined && { notificationsEnabled: options.notificationsEnabled }),
     visualPreview: options.visualPreview ?? { enabled: false, types: ['image'] },
     alias: options.alias?.trim() || undefined,
     baseBranch: options.baseBranch?.trim() || undefined,
