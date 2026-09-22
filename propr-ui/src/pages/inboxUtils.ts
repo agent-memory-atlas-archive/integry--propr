@@ -182,7 +182,7 @@ export function formatRelativeTime(timestamp: string, now = Date.now()): string 
   return `${Math.floor(months / 12)}y ago`;
 }
 
-function compareNewestFirst(left: Notification, right: Notification): number {
+export function compareNewestFirst(left: Notification, right: Notification): number {
   return right.occurredAt.localeCompare(left.occurredAt) || right.id.localeCompare(left.id);
 }
 

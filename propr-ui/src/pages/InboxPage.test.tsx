@@ -785,6 +785,43 @@ describe('Inbox page', () => {
     await act(async () => dismissal.resolve({ unreadCount: 1 } as Awaited<ReturnType<typeof dismissNotification>>));
   });
 
+  test('advances the cursor when a refresh looks ahead past the loaded pages', async () => {
+    const at = (minute: number) => `2026-08-24T12:${String(minute).padStart(2, '0')}:00.000Z`;
+    const indexing = (id: string, minute: number) => item(id, `Indexed ${id}`, null, {
+      kind: 'indexing',
+      severity: 'info',
+      target: { type: 'indexing', repository: 'integry/propr' },
+      occurredAt: at(minute),
+      createdAt: at(minute),
+    });
+    const activity = item('event-task', 'Only activity', null, { occurredAt: at(40), createdAt: at(40) });
+    vi.mocked(dismissNotification).mockResolvedValueOnce(
+      { unreadCount: 0 } as Awaited<ReturnType<typeof dismissNotification>>,
+    );
+    vi.mocked(listNotifications)
+      .mockResolvedValueOnce({ notifications: [indexing('index-1', 50)], unreadCount: 2, nextCursor: 'cursor-1' })
+      .mockResolvedValueOnce({ notifications: [activity], unreadCount: 2, nextCursor: 'cursor-2' })
+      .mockResolvedValueOnce({ notifications: [indexing('index-1', 50)], unreadCount: 1, nextCursor: 'cursor-1' })
+      .mockResolvedValueOnce({ notifications: [activity], unreadCount: 1, nextCursor: 'cursor-2' })
+      .mockResolvedValueOnce({ notifications: [indexing('index-3', 30)], unreadCount: 1, nextCursor: 'cursor-3' })
+      .mockResolvedValueOnce({ notifications: [indexing('index-4', 20)], unreadCount: 1, nextCursor: 'cursor-4' });
+    renderInbox();
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Dismiss Only activity' }));
+    await waitFor(() => expect(dismissNotification).toHaveBeenCalledWith('event-task'));
+    await waitFor(() => expect(refreshUnreadCount).toHaveBeenCalled());
+    fireEvent.focus(window);
+
+    await waitFor(() => expect(listNotifications).toHaveBeenCalledTimes(6));
+    await waitFor(() => expect(screen.getByRole('button', { name: /System/ })).toHaveTextContent('3'));
+    expect(listNotifications).toHaveBeenLastCalledWith({ cursor: 'cursor-3', limit: 25 });
+
+    vi.mocked(listNotifications).mockResolvedValueOnce({ notifications: [], unreadCount: 1, nextCursor: null });
+    fireEvent.click(screen.getByRole('button', { name: 'Load more' }));
+    await waitFor(() => expect(listNotifications).toHaveBeenCalledTimes(7));
+    expect(listNotifications).toHaveBeenLastCalledWith({ cursor: 'cursor-4', limit: 25 });
+  });
+
   test('keeps demo Inbox navigation read-only and hides dismissal', async () => {
     demoState.isDemoMode = true;
     const notification = item('event-demo', 'Demo notification');

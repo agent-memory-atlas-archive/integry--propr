@@ -9,7 +9,12 @@ import {
 import { useNotificationCenter } from '../contexts/NotificationCenterContext';
 import { useToast } from '../components/ui/useToast';
 import { useDemoMode } from '../contexts/DemoModeContext';
-import { isSystemNotification, mergeNotifications, replaceNotificationRange } from './inboxUtils';
+import {
+  compareNewestFirst,
+  isSystemNotification,
+  mergeNotifications,
+  replaceNotificationRange,
+} from './inboxUtils';
 
 const PAGE_SIZE = 25;
 /** Most pages fetched in one go while looking past system-only pages for activity. */
@@ -81,6 +86,15 @@ async function readPastSystemPages(
   return result;
 }
 
+/**
+ * Whether a refreshed range read as deep as the loaded pages, or deeper, so its
+ * cursor marks the end of the loaded range. `boundary` is null for the whole Inbox.
+ */
+function reachesFrontier(boundary: Notification | null | undefined, frontier: Notification | null): boolean {
+  if (boundary === null) return true;
+  return boundary !== undefined && frontier !== null && compareNewestFirst(boundary, frontier) >= 0;
+}
+
 function messageFrom(error: unknown): string {
   return error instanceof Error ? error.message : 'The Inbox could not be loaded.';
 }
@@ -106,6 +120,8 @@ export function useInboxNotifications(): InboxNotificationsState {
   const clearingRef = useRef(false);
   const mountedRef = useRef(true);
   const extraPagesLoadedRef = useRef(false);
+  /** Oldest notification read so far, i.e. where nextCursor continues from. */
+  const frontierRef = useRef<Notification | null>(null);
   const {
     unreadCount,
     commitUnreadCount,
@@ -174,7 +190,10 @@ export function useInboxNotifications(): InboxNotificationsState {
           ? replaceNotificationRange(current, incoming, boundary ?? null)
           : mergeNotifications([], incoming);
       });
-      if (!keepLoadedPages || (settled && boundary === null)) setNextCursor(latestNextCursor);
+      if (!keepLoadedPages || (settled && reachesFrontier(boundary, frontierRef.current))) {
+        setNextCursor(latestNextCursor);
+        frontierRef.current = boundary ?? null;
+      }
       if (settled) commitUnreadCount(latestUnreadCount);
       setError(pages.error === undefined ? null : messageFrom(pages.error));
     } catch (loadError) {
@@ -264,6 +283,7 @@ export function useInboxNotifications(): InboxNotificationsState {
         reconcileIncoming(rawNewNotifications),
       ));
       setNextCursor(currentCursor);
+      frontierRef.current = rawNewNotifications.at(-1) ?? frontierRef.current;
       extraPagesLoadedRef.current = true;
       if (latestUnreadCount !== null && mutationEpoch === mutationEpochRef.current) {
         commitUnreadCount(latestUnreadCount);
@@ -335,6 +355,7 @@ export function useInboxNotifications(): InboxNotificationsState {
       loadMoreGenerationRef.current += 1;
       setNotifications([]);
       setNextCursor(null);
+      frontierRef.current = null;
       extraPagesLoadedRef.current = false;
       setLoadingMore(false);
       commitUnreadCount(response.unreadCount);
