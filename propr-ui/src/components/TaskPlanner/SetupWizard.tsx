@@ -301,7 +301,7 @@ interface SetupWizardLoadersParams {
   setConfig: React.Dispatch<React.SetStateAction<PlannerConfig>>;
 }
 
-function useSetupWizardLoaders({ isNewMode, draft, locationState, savedSettings, config, setConfig }: SetupWizardLoadersParams) {
+function useSetupWizardLoaders({ isNewMode, draft, locationState, savedSettings, config, setConfig }: SetupWizardLoadersParams, persistPromptOnInitialDraft: boolean) {
   const initialRepository = locationState?.initialRepository ?? savedSettings.lastRepository;
   const initialBaseBranch = locationState?.initialBaseBranch ?? savedSettings.lastBaseBranch;
   const repoLoader = useRepositoryLoader(true, initialRepository ?? undefined, initialBaseBranch ?? undefined);
@@ -317,10 +317,10 @@ function useSetupWizardLoaders({ isNewMode, draft, locationState, savedSettings,
     repoLoader.selectedRepo,
     repoLoader.selectedBaseBranch
   );
-  usePromptPersistence(draft?.draft_id, config.prompt, draft?.initial_prompt);
+  const { flushPrompt } = usePromptPersistence(draft?.draft_id, config.prompt, draft?.initial_prompt, persistPromptOnInitialDraft);
   useDraftSettingsPersistence(draft?.draft_id, config, draft);
 
-  return { repoLoader, newModeBranches, repoInfo, agents, availableRepos };
+  return { repoLoader, newModeBranches, repoInfo, agents, availableRepos, flushPrompt };
 }
 
 function useRepoChangeInEditMode({ draft, config, locationTodoIds, navigate, onDraftCreated, setError, setIsCreating }: RepoChangeHandlerParams) {
@@ -360,15 +360,15 @@ export const SetupWizard: React.FC<SetupWizardProps> = ({ draft, onGenerateCompl
   const [branchError, setBranchError] = useState<string | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
-  useDraftContextConfigSync(draft, setConfig);
-  const { repoLoader, newModeBranches, repoInfo, agents, availableRepos } = useSetupWizardLoaders({
+  useDraftContextConfigSync(draft, setConfig, Boolean(onDraftCreatedInPlace));
+  const { repoLoader, newModeBranches, repoInfo, agents, availableRepos, flushPrompt } = useSetupWizardLoaders({
     isNewMode,
     draft,
     locationState,
     savedSettings,
     config,
     setConfig
-  });
+  }, Boolean(onDraftCreatedInPlace));
   const fileHandling = useFileHandling(isNewMode, draft, setConfig, setError);
   const handleGenerateComplete = useCallback(() => {
     addToast({ type: 'success', message: 'Plan generated successfully' });
@@ -380,7 +380,7 @@ export const SetupWizard: React.FC<SetupWizardProps> = ({ draft, onGenerateCompl
   const contextRefresh = useContextRefresh({ draftId, config, onBranchError: setBranchError, autoRefresh: false });
   const previewTrace = usePreviewTrace(draft, draftId, contextRefresh.preview.isLoading);
   const setupSnapshot = useMemo(() => getDraftSetupSnapshot(config), [config]);
-  const generationHandlers = useGenerationHandlers({ draft, config, branchError, contextHelpers: { isContextStale: contextRefresh.isContextStale, clearCountdown: contextRefresh.clearCountdown, fetchPreview: contextRefresh.fetchPreview },
+  const generationHandlers = useGenerationHandlers({ draft, config, branchError, flushPrompt, contextHelpers: { isContextStale: contextRefresh.isContextStale, clearCountdown: contextRefresh.clearCountdown, fetchPreview: contextRefresh.fetchPreview },
     startPolling: generationPolling.startPolling, stopPolling: generationPolling.stopPolling, onGenerationStarted, setError, setGenerationError: generationPolling.setGenerationError });
   const todoIds = locationState?.todoIds;
   const handleCreateDraftAndGenerate = useDraftCreation({

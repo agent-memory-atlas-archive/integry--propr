@@ -4,11 +4,12 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   useDraftContextConfigSync,
   useDraftSettingsPersistence,
+  useGenerationHandlers,
   usePromptPersistence,
   type PlannerConfig,
 } from './setupWizardHooks';
-import { updateDraft } from '../../api/proprApi';
-import { baseConfig, makeDraft } from './setupWizardHooks.testUtils';
+import { generatePlan, updateDraft, type PlannerDraft } from '../../api/proprApi';
+import { baseConfig, createDeferred, makeDraft } from './setupWizardHooks.testUtils';
 
 vi.mock('../../api/proprApi', () => ({
   uploadAttachment: vi.fn(),
@@ -38,10 +39,110 @@ vi.mock('./imageUtils', () => ({
 }));
 
 const mockUpdateDraft = vi.mocked(updateDraft);
+const mockGeneratePlan = vi.mocked(generatePlan);
 
 describe('setupWizardHooks persistence', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+  });
+
+  it('preserves prompt edits made while an in-place draft is being created', async () => {
+    type HookProps = { draft: PlannerDraft | undefined };
+    const staleCreatedDraft = makeDraft({
+      draft_id: 'draft-2',
+      initial_prompt: 'Prompt captured when creation started',
+      context_config: { baseBranch: 'release' },
+    });
+    const { result, rerender } = renderHook(({ draft }: HookProps) => {
+      const [config, setConfig] = useState<PlannerConfig>({
+        ...baseConfig,
+        prompt: 'Prompt including everything typed while creation was pending',
+      });
+      useDraftContextConfigSync(draft, setConfig, true);
+      return config;
+    }, { initialProps: { draft: undefined } as HookProps });
+
+    rerender({ draft: staleCreatedDraft });
+
+    await waitFor(() => {
+      expect(result.current.prompt).toBe('Prompt including everything typed while creation was pending');
+      expect(result.current.baseBranch).toBe('release');
+    });
+  });
+
+  it('persists the preserved prompt when the in-place draft id arrives', async () => {
+    vi.useFakeTimers();
+    try {
+      type HookProps = { draftId: string | undefined; initialPrompt: string | undefined };
+      const prompt = 'Prompt including later input';
+      const { rerender } = renderHook(
+        ({ draftId, initialPrompt }: HookProps) => {
+          usePromptPersistence(draftId, prompt, initialPrompt, true);
+        },
+        { initialProps: { draftId: undefined, initialPrompt: undefined } as HookProps }
+      );
+
+      rerender({
+        draftId: 'draft-2',
+        initialPrompt: 'Prompt captured when creation started',
+      });
+      await vi.advanceTimersByTimeAsync(1_100);
+
+      expect(mockUpdateDraft).toHaveBeenCalledWith('draft-2', {
+        initial_prompt: prompt,
+        name: prompt,
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('waits for an in-flight autosave and cancels the queued debounce before saving the final prompt', async () => {
+    vi.useFakeTimers();
+    try {
+      const olderAutosave = createDeferred<void>();
+      mockGeneratePlan.mockResolvedValue({ success: true, status: 'generating', message: 'Plan generation started', runId: 'generation-run-1' });
+      mockUpdateDraft.mockImplementationOnce(() => olderAutosave.promise);
+      const draft = makeDraft({ initial_prompt: 'Original prompt' }) as never;
+      const { result, rerender } = renderHook(({ prompt }: { prompt: string }) => {
+        const { flushPrompt } = usePromptPersistence('draft-1', prompt, 'Original prompt');
+        return useGenerationHandlers({
+          draft,
+          config: { ...baseConfig, prompt },
+          branchError: null,
+          flushPrompt,
+          contextHelpers: { isContextStale: false, clearCountdown: vi.fn(), fetchPreview: vi.fn() },
+          startPolling: vi.fn(),
+          stopPolling: vi.fn(),
+          setError: vi.fn(),
+          setGenerationError: vi.fn(),
+        });
+      }, { initialProps: { prompt: 'Older prompt' } });
+
+      await vi.advanceTimersByTimeAsync(1_100);
+      expect(mockUpdateDraft).toHaveBeenCalledTimes(1);
+      expect(mockUpdateDraft).toHaveBeenLastCalledWith('draft-1', { initial_prompt: 'Older prompt', name: 'Older prompt' });
+
+      rerender({ prompt: 'Latest prompt' });
+      let generation!: Promise<void>;
+      act(() => {
+        generation = result.current.handleGenerateForExistingDraft();
+      });
+      await act(async () => Promise.resolve());
+      expect(mockUpdateDraft).toHaveBeenCalledTimes(1);
+      expect(mockGeneratePlan).not.toHaveBeenCalled();
+
+      olderAutosave.resolve();
+      await act(async () => generation);
+      await vi.advanceTimersByTimeAsync(1_100);
+
+      expect(mockUpdateDraft).toHaveBeenCalledTimes(2);
+      expect(mockUpdateDraft).toHaveBeenLastCalledWith('draft-1', { initial_prompt: 'Latest prompt', name: 'Latest prompt' });
+      expect(mockGeneratePlan).toHaveBeenCalledOnce();
+      expect(mockUpdateDraft.mock.invocationCallOrder[1]).toBeLessThan(mockGeneratePlan.mock.invocationCallOrder[0]);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('preserves same-draft setup after a full replacement snapshot rerenders as sparse server data', async () => {

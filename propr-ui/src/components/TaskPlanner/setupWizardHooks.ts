@@ -27,7 +27,7 @@ export interface Repo { name: string; enabled: boolean; baseBranch?: string; sta
 export interface PlannerConfig { prompt: string; baseBranch: string; granularity: Granularity; contextLevel: number; compress: boolean; files: PlannerAttachment[]; contextRepositories: { repository: string; branch?: string }[]; generationModel: string | null; manualFiles: string[]; excludedFiles: string[]; }
 
 interface RepoInfoState { isLoading: boolean; error: string | null; }
-interface GenerationHandlersParams { draft: PlannerDraft | undefined; config: PlannerConfig; branchError: string | null; contextHelpers: { isContextStale: boolean; clearCountdown: () => void; fetchPreview: () => Promise<boolean> }; startPolling: (runId?: string) => void; stopPolling: () => void; onGenerationStarted?: (runId: string) => void; setError: React.Dispatch<React.SetStateAction<string | null>>; setGenerationError: (error: string | null) => void; }
+interface GenerationHandlersParams { draft: PlannerDraft | undefined; config: PlannerConfig; branchError: string | null; flushPrompt?: (draftId: string, prompt: string) => Promise<void>; contextHelpers: { isContextStale: boolean; clearCountdown: () => void; fetchPreview: () => Promise<boolean> }; startPolling: (runId?: string) => void; stopPolling: () => void; onGenerationStarted?: (runId: string) => void; setError: React.Dispatch<React.SetStateAction<string | null>>; setGenerationError: (error: string | null) => void; }
 interface DraftCreationParams { selectedRepo: string; config: PlannerConfig; localFiles: File[]; onDraftCreated?: (draftId: string) => void; navigate: (path: string, options?: { replace?: boolean; state?: unknown }) => void; setError: React.Dispatch<React.SetStateAction<string | null>>; setIsCreating: React.Dispatch<React.SetStateAction<boolean>>; todoIds?: string[]; }
 interface GenerateDisabledParams { isNewMode: boolean; isCreating: boolean; selectedRepo: string; promptTrimmed: string; reposLoading: boolean; isGenerating: boolean; branchError: string | null; repoInfoLoading: boolean; repoError: string | null; baseBranch: string; }
 
@@ -213,9 +213,16 @@ export function useFileHandling(isNewMode: boolean, draft: PlannerDraft | undefi
   }, [handleUpload, setError]);
   return { localFiles, isUploading, handleUpload, handleRemoveFile, handleRemoveLocalFile, handlePaste };
 }
-export function useGenerationHandlers({ draft, config, branchError, contextHelpers, startPolling, stopPolling, onGenerationStarted, setError, setGenerationError }: GenerationHandlersParams) {
+const savePromptDirectly = async (draftId: string, prompt: string) => {
+  const trimmedPrompt = prompt.trim();
+  await updateDraft(draftId, { initial_prompt: trimmedPrompt, name: truncateToSentences(trimmedPrompt) });
+};
+
+export function useGenerationHandlers({ draft, config, branchError, flushPrompt = savePromptDirectly, contextHelpers, startPolling, stopPolling, onGenerationStarted, setError, setGenerationError }: GenerationHandlersParams) {
   const [isStartingGeneration, setIsStartingGeneration] = useState(false);
   const isStartingGenerationRef = useRef(false);
+  const contextHelpersRef = useRef(contextHelpers);
+  contextHelpersRef.current = contextHelpers;
   const handleGenerateForExistingDraft = useCallback(async () => {
     if (!draft || isStartingGenerationRef.current) return;
     if (branchError) return void setError('Please fix the branch name before generating');
@@ -224,9 +231,11 @@ export function useGenerationHandlers({ draft, config, branchError, contextHelpe
     setError(null);
     setGenerationError(null);
     try {
-      if (contextHelpers.isContextStale) {
-        contextHelpers.clearCountdown();
-        const previewReady = await contextHelpers.fetchPreview();
+      await flushPrompt(draft.draft_id, config.prompt);
+      const latestContextHelpers = contextHelpersRef.current;
+      if (latestContextHelpers.isContextStale) {
+        latestContextHelpers.clearCountdown();
+        const previewReady = await latestContextHelpers.fetchPreview();
         if (!previewReady) {
           setError('Context preview did not complete. Please refresh it before generating.');
           return;
@@ -242,7 +251,7 @@ export function useGenerationHandlers({ draft, config, branchError, contextHelpe
       isStartingGenerationRef.current = false;
       setIsStartingGeneration(false);
     }
-  }, [draft, config, branchError, contextHelpers, startPolling, stopPolling, onGenerationStarted, setError, setGenerationError]);
+  }, [draft, config, branchError, flushPrompt, startPolling, stopPolling, onGenerationStarted, setError, setGenerationError]);
   const handleAbortGeneration = useCallback(async () => {
     if (!draft) return;
     try {
@@ -300,16 +309,30 @@ export function useAutoResize(textareaRef: React.RefObject<HTMLTextAreaElement |
   }, [textareaRef]);
 }
 
-export function useDraftContextConfigSync(draft: PlannerDraft | undefined, setConfig: PlannerConfigSetter) {
+export function useDraftContextConfigSync(
+  draft: PlannerDraft | undefined,
+  setConfig: PlannerConfigSetter,
+  preserveLocalPromptOnInitialDraft = false,
+) {
   const draftSnapshot = getHydratedDraftConfigSnapshot(draft);
   const previousDraftIdRef = useRef<string | undefined>(undefined);
+  const mountedWithoutDraftRef = useRef(!draft);
   useEffect(() => {
     if (!draftSnapshot) return;
     const draftChanged = previousDraftIdRef.current !== draft?.draft_id;
+    const isInitialInPlaceDraft = preserveLocalPromptOnInitialDraft
+      && mountedWithoutDraftRef.current
+      && previousDraftIdRef.current === undefined;
     previousDraftIdRef.current = draft?.draft_id;
+    mountedWithoutDraftRef.current = false;
     if (!draftChanged) return;
-    setConfig(prev => matchesDraftConfig(prev, draftSnapshot) ? prev : draftSnapshot);
-  }, [draft?.draft_id, draftSnapshot, setConfig]);
+    setConfig(prev => {
+      const nextConfig = isInitialInPlaceDraft
+        ? { ...draftSnapshot, prompt: prev.prompt }
+        : draftSnapshot;
+      return matchesDraftConfig(prev, nextConfig) ? prev : nextConfig;
+    });
+  }, [draft?.draft_id, draftSnapshot, preserveLocalPromptOnInitialDraft, setConfig]);
 }
 
 export function useSetupWizardEffects({ autoResize, prompt, generationError, repoLoadError, autoCreateError, autoCreateWarning, baseBranchPersistenceWarning, addToast, setError }: { autoResize: () => void; prompt: string; generationError: string | null; repoLoadError: string | null; autoCreateError?: string | null; autoCreateWarning?: string | null; baseBranchPersistenceWarning?: string | null; addToast: ({ type, message }: { type: 'error' | 'warning'; message: string }) => void; setError: React.Dispatch<React.SetStateAction<string | null>>; }) {
@@ -321,20 +344,40 @@ export function useSetupWizardEffects({ autoResize, prompt, generationError, rep
   useEffect(() => { if (baseBranchPersistenceWarning) addToast({ type: 'warning', message: baseBranchPersistenceWarning }); }, [baseBranchPersistenceWarning, addToast]);
 }
 
-export function usePromptPersistence(draftId: string | undefined, prompt: string, initialPrompt: string | undefined) {
+export function usePromptPersistence(
+  draftId: string | undefined,
+  prompt: string,
+  initialPrompt: string | undefined,
+  persistOnInitialDraft = false,
+) {
   const trimmedPrompt = prompt.trim();
   const { debounceTimerRef, isMountedRef, lastSavedValueRef, previousDraftIdRef } = useDebouncedDraftPersistence((initialPrompt || '').trim(), draftId);
+  const saveQueueRef = useRef<Promise<void>>(Promise.resolve());
+  const enqueuePromptSave = useCallback((targetDraftId: string, value: string) => {
+    const save = saveQueueRef.current.then(async () => {
+      await updateDraft(targetDraftId, { initial_prompt: value, name: truncateToSentences(value) });
+      lastSavedValueRef.current = value;
+    });
+    saveQueueRef.current = save.catch(() => undefined);
+    return save;
+  }, [lastSavedValueRef]);
+  const flushPrompt = useCallback((targetDraftId: string, value: string) => {
+    if (debounceTimerRef.current) clearTimeout(debounceTimerRef.current);
+    debounceTimerRef.current = null;
+    return enqueuePromptSave(targetDraftId, value.trim());
+  }, [debounceTimerRef, enqueuePromptSave]);
   useEffect(() => {
     if (!draftId) return;
-    const draftChanged = previousDraftIdRef.current !== draftId;
+    const previousDraftId = previousDraftIdRef.current;
+    const draftChanged = previousDraftId !== draftId;
+    const shouldPersistInitialDraft = persistOnInitialDraft && previousDraftId === undefined;
     previousDraftIdRef.current = draftId;
-    if (draftChanged || trimmedPrompt === lastSavedValueRef.current) return;
+    if ((draftChanged && !shouldPersistInitialDraft) || trimmedPrompt === lastSavedValueRef.current) return;
     if (debounceTimerRef.current) clearTimeout(debounceTimerRef.current);
     const timeoutId = setTimeout(async () => {
       if (!isMountedRef.current) return;
       try {
-        await updateDraft(draftId, { initial_prompt: trimmedPrompt, name: truncateToSentences(trimmedPrompt) });
-        lastSavedValueRef.current = trimmedPrompt;
+        await enqueuePromptSave(draftId, trimmedPrompt);
       } catch (err) {
         console.error('Failed to persist prompt:', err);
       }
@@ -344,7 +387,8 @@ export function usePromptPersistence(draftId: string | undefined, prompt: string
       clearTimeout(timeoutId);
       if (debounceTimerRef.current === timeoutId) debounceTimerRef.current = null;
     };
-  }, [draftId, trimmedPrompt, debounceTimerRef, isMountedRef, lastSavedValueRef, previousDraftIdRef]);
+  }, [draftId, trimmedPrompt, persistOnInitialDraft, enqueuePromptSave, debounceTimerRef, isMountedRef, lastSavedValueRef, previousDraftIdRef]);
+  return { flushPrompt };
 }
 export function useDraftSettingsPersistence(draftId: string | undefined, config: PlannerConfig, draft: PlannerDraft | undefined) {
   const { baseBranch, granularity, contextLevel, compress, contextRepositories, generationModel, manualFiles, excludedFiles } = config;
