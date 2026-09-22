@@ -135,3 +135,33 @@ test('repo list displays the override and unresolved conservative fallback', asy
   assert.match(output.join('\n'), /auto: Auto unresolved; using conservative Free limits/);
   assert.match(output.join('\n'), /Images: 10 MiB; videos: 10 MiB/);
 });
+
+test("repo add and toggle configure repository notifications", async () => {
+  const existing: MonitoredRepo = { id: "repo-1", name: "integry/propr", enabled: true, autoFollowupOnFailedCi: false };
+
+  const defaulted = await runRepoWrite(["add", "integry/defaulted"], [existing]);
+  assert.equal(defaulted[1]?.notificationsEnabled, undefined);
+
+  const silenced = await runRepoWrite(["add", "integry/silenced", "--no-notifications"], [existing]);
+  assert.equal(silenced[0]?.notificationsEnabled, undefined);
+  assert.equal(silenced[1]?.notificationsEnabled, false);
+
+  const toggledOff = await runRepoWrite(["toggle", "integry/propr", "--no-notifications"], [existing]);
+  assert.equal(toggledOff[0]?.notificationsEnabled, false);
+  assert.equal(toggledOff[0]?.enabled, true);
+
+  const toggledOn = await runRepoWrite(["toggle", "integry/propr", "--notifications"], toggledOff);
+  assert.equal(toggledOn[0]?.notificationsEnabled, true);
+
+  const unrelated = await runRepoWrite(["toggle", "integry/propr", "--disable"], toggledOff);
+  assert.equal(unrelated[0]?.notificationsEnabled, false);
+});
+
+test("repo add omits notifications without a flag so the server inherits a muted repository", async () => {
+  const muted: MonitoredRepo = { id: "repo-1", name: "integry/propr", enabled: true, autoFollowupOnFailedCi: false, notificationsEnabled: false };
+
+  const added = await runRepoWrite(["add", "integry/other", "--branch", "next"], [muted]);
+  assert.equal(added[0]?.notificationsEnabled, false);
+  assert.equal(added[1]?.baseBranch, "next");
+  assert.equal("notificationsEnabled" in (added[1] ?? {}), false);
+});

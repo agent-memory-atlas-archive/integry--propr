@@ -40,6 +40,10 @@ export async function createProjectionTables(database: Knex): Promise<void> {
     table.text('name').nullable();
     table.text('plan_json').nullable();
   });
+  await database.schema.createTable('system_configs', table => {
+    table.text('key').primary();
+    table.text('value').nullable();
+  });
   await database.schema.createTable('instance_members', table => {
     table.text('github_user_id').primary();
     table.text('role').notNullable();

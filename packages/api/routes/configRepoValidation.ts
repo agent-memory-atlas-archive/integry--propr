@@ -73,6 +73,7 @@ export function withDefaultRepoAutoFollowup(repo: RepoToMonitor): RepoToMonitor 
 export function withDefaultRepoOptions(repo: RepoToMonitor): RepoToMonitor {
   return {
     ...withDefaultRepoAutoFollowup(repo),
+    notificationsEnabled: repo.notificationsEnabled !== false,
     visualPreview: normalizeStoredVisualPreviewSettings(repo.visualPreview)
   };
 }
@@ -87,6 +88,63 @@ export function preserveRepoAutoFollowup(
     if (incomingRepo.autoFollowupOnFailedCi !== undefined) return repo;
     const previousRepo = previousRepos.find(candidate => candidate.id === repo.id);
     return { ...repo, autoFollowupOnFailedCi: previousRepo?.autoFollowupOnFailedCi === true };
+  });
+}
+
+function repositoryKeyOf(name: string): string {
+  return name.trim().toLowerCase();
+}
+
+/**
+ * Resolve the repository-wide notification state from all stored entries of a
+ * repository. Notifications are disabled only when every entry is explicitly
+ * false; a missing field or any `true` entry keeps them enabled (fail open).
+ * Mirrored by the notification projection filter and the Web UI.
+ */
+export function resolveStoredRepoNotificationsEnabled(entries: readonly RepoToMonitor[]): boolean {
+  return entries.length === 0 || entries.some(entry => entry.notificationsEnabled !== false);
+}
+
+/**
+ * Notifications are a repository-wide setting shared by every branch entry.
+ * An explicit change on any entry is applied to all entries of the same
+ * repository; entries submitted without the field (partial or legacy clients)
+ * keep the stored repository value instead of silently re-enabling it.
+ */
+export function preserveRepoNotifications(
+  previousRepos: RepoToMonitor[],
+  normalizedRepos: RepoToMonitor[],
+  incomingRepos: unknown[]
+): RepoToMonitor[] {
+  const storedByRepository = new Map<string, boolean>();
+  for (const key of new Set(previousRepos.map(repo => repositoryKeyOf(repo.name)))) {
+    storedByRepository.set(key, resolveStoredRepoNotificationsEnabled(
+      previousRepos.filter(repo => repositoryKeyOf(repo.name) === key)
+    ));
+  }
+
+  const changedByRepository = new Map<string, boolean>();
+  normalizedRepos.forEach((repo, index) => {
+    const incoming = incomingRepos[index] as Partial<RepoToMonitor>;
+    if (typeof incoming?.notificationsEnabled !== 'boolean') return;
+    const repositoryKey = repositoryKeyOf(repo.name);
+    if (changedByRepository.has(repositoryKey)) return;
+    const previousEntry = previousRepos.find(candidate => candidate.id === repo.id);
+    const previousValue = previousEntry
+      ? previousEntry.notificationsEnabled !== false
+      : storedByRepository.get(repositoryKey);
+    if (previousValue !== incoming.notificationsEnabled) {
+      changedByRepository.set(repositoryKey, incoming.notificationsEnabled);
+    }
+  });
+
+  return normalizedRepos.map((repo, index) => {
+    const repositoryKey = repositoryKeyOf(repo.name);
+    const changed = changedByRepository.get(repositoryKey);
+    if (changed !== undefined) return { ...repo, notificationsEnabled: changed };
+    const incoming = incomingRepos[index] as Partial<RepoToMonitor>;
+    if (typeof incoming?.notificationsEnabled === 'boolean') return repo;
+    return { ...repo, notificationsEnabled: storedByRepository.get(repositoryKey) ?? true };
   });
 }
 
@@ -203,6 +261,9 @@ export function normalizeRepoConfig(repo: unknown): ValidationResult<RepoToMonit
   if (candidate.autoFollowupOnFailedCi !== undefined && typeof candidate.autoFollowupOnFailedCi !== 'boolean') {
     return failure(`Invalid autoFollowupOnFailedCi format for ${name}: must be a boolean`);
   }
+  if (candidate.notificationsEnabled !== undefined && typeof candidate.notificationsEnabled !== 'boolean') {
+    return failure(`Invalid notificationsEnabled format for ${name}: must be a boolean`);
+  }
   const visualPreview = normalizeVisualPreview(candidate.visualPreview, name);
   if (!visualPreview.ok) return visualPreview;
 
@@ -211,6 +272,7 @@ export function normalizeRepoConfig(repo: unknown): ValidationResult<RepoToMonit
     name,
     enabled,
     autoFollowupOnFailedCi: candidate.autoFollowupOnFailedCi ?? false,
+    notificationsEnabled: candidate.notificationsEnabled !== false,
     visualPreview: visualPreview.value,
     alias: alias.value,
     baseBranch: baseBranch.value,

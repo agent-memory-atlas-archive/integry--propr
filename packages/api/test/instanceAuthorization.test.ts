@@ -286,7 +286,8 @@ describe('instance catalog', () => {
             repositories: [{
                 name: 'integry/propr',
                 enabled: true,
-                baseBranch: 'main'
+                baseBranch: 'main',
+                notificationsEnabled: true
             }],
             defaultAgentAlias: 'default'
         });

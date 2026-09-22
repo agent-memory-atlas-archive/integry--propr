@@ -47,6 +47,7 @@ test('GET repository config returns false for legacy entries with a missing opti
       name: 'integry/propr',
       enabled: true,
       autoFollowupOnFailedCi: false,
+      notificationsEnabled: true,
       visualPreview: { enabled: false, types: ['image'], githubAttachmentPlan: 'auto', githubAttachmentCapacity: resolveGitHubAttachmentCapacity() }
     }]
   });
@@ -90,6 +91,7 @@ test('POST repository config persists an enabled option without enabling other r
       name: 'integry/propr',
       enabled: true,
       autoFollowupOnFailedCi: true,
+      notificationsEnabled: true,
       visualPreview: { enabled: false, types: ['image'] },
       alias: undefined,
       baseBranch: undefined,
@@ -100,6 +102,7 @@ test('POST repository config persists an enabled option without enabling other r
       name: 'integry/other',
       enabled: true,
       autoFollowupOnFailedCi: false,
+      notificationsEnabled: true,
       visualPreview: { enabled: false, types: ['image'] },
       alias: undefined,
       baseBranch: undefined,
@@ -266,6 +269,104 @@ test('POST repository config preserves an omitted option for existing repositori
       { id: 'repo-2', autoFollowupOnFailedCi: false },
       { id: 'repo-3', autoFollowupOnFailedCi: false }
     ]
+  );
+});
+
+function createRepoPostRoutes(previousRepos: RepoToMonitor[], saveMonitoredRepos: ReturnType<typeof mock.fn>) {
+  return createConfigRoutes({
+    redisClient: {
+      set: mock.fn(async () => 'OK'),
+      eval: mock.fn(async () => 1),
+      publish: mock.fn(async () => 1),
+      lPush: mock.fn(async () => 1),
+      lTrim: mock.fn(async () => 'OK')
+    } as never,
+    configStore: {
+      loadMonitoredReposRaw: async () => previousRepos,
+      saveMonitoredRepos,
+      clearRemovedRepositoryIndexData: async () => {}
+    } as never,
+    database: {
+      transaction: async (callback: (transaction: never) => Promise<unknown>) => callback({} as never)
+    } as never
+  });
+}
+
+test('POST repository config applies a notification opt-out to every branch entry of the repository', async () => {
+  const saveMonitoredRepos = mock.fn<(repos: RepoToMonitor[]) => Promise<boolean>>(async () => true);
+  const routes = createRepoPostRoutes([
+    { id: 'repo-main', name: 'integry/propr', enabled: true, baseBranch: 'main' },
+    { id: 'repo-release', name: 'INTEGRY/PROPR', enabled: true, baseBranch: 'release' },
+    { id: 'repo-other', name: 'integry/other', enabled: true }
+  ], saveMonitoredRepos);
+  const response = createResponse();
+
+  await routes.postRepos({
+    body: {
+      repos_to_monitor: [
+        { id: 'repo-main', name: 'integry/propr', enabled: true, baseBranch: 'main', notificationsEnabled: false },
+        { id: 'repo-release', name: 'INTEGRY/PROPR', enabled: true, baseBranch: 'release', notificationsEnabled: true },
+        { id: 'repo-other', name: 'integry/other', enabled: true, notificationsEnabled: true }
+      ]
+    }
+  } as never, response as never);
+
+  assert.equal(response.statusCode, 200);
+  assert.deepEqual(
+    saveMonitoredRepos.mock.calls[0]?.arguments[0].map(repo => [repo.id, repo.notificationsEnabled]),
+    [['repo-main', false], ['repo-release', false], ['repo-other', true]]
+  );
+});
+
+test('POST repository config preserves a stored notification opt-out when the client omits it', async () => {
+  const saveMonitoredRepos = mock.fn<(repos: RepoToMonitor[]) => Promise<boolean>>(async () => true);
+  const routes = createRepoPostRoutes([
+    { id: 'repo-main', name: 'integry/propr', enabled: true, notificationsEnabled: false },
+    { id: 'repo-other', name: 'integry/other', enabled: true }
+  ], saveMonitoredRepos);
+  const response = createResponse();
+
+  await routes.postRepos({
+    body: {
+      repos_to_monitor: [
+        { id: 'repo-main', name: 'integry/propr', enabled: false },
+        { id: 'repo-branch', name: 'integry/propr', enabled: true, baseBranch: 'next' },
+        { id: 'repo-other', name: 'integry/other', enabled: true },
+        { id: 'repo-new', name: 'integry/new', enabled: true }
+      ]
+    }
+  } as never, response as never);
+
+  assert.equal(response.statusCode, 200);
+  assert.deepEqual(
+    saveMonitoredRepos.mock.calls[0]?.arguments[0].map(repo => [repo.id, repo.notificationsEnabled]),
+    [['repo-main', false], ['repo-branch', false], ['repo-other', true], ['repo-new', true]]
+  );
+});
+
+test('POST repository config keeps a muted repository muted when a branch entry is added without the setting', async () => {
+  const saveMonitoredRepos = mock.fn<(repos: RepoToMonitor[]) => Promise<boolean>>(async () => true);
+  const routes = createRepoPostRoutes([
+    { id: 'repo-main', name: 'integry/propr', enabled: true, baseBranch: 'main', notificationsEnabled: false },
+    { id: 'repo-other', name: 'integry/other', enabled: true }
+  ], saveMonitoredRepos);
+  const response = createResponse();
+
+  // Shape sent by CLI/Web clients: stored entries echoed from GET, new branch entry without the field.
+  await routes.postRepos({
+    body: {
+      repos_to_monitor: [
+        { id: 'repo-main', name: 'integry/propr', enabled: true, baseBranch: 'main', notificationsEnabled: false },
+        { id: 'repo-other', name: 'integry/other', enabled: true, notificationsEnabled: true },
+        { id: 'repo-release', name: 'integry/propr', enabled: true, baseBranch: 'release' }
+      ]
+    }
+  } as never, response as never);
+
+  assert.equal(response.statusCode, 200);
+  assert.deepEqual(
+    saveMonitoredRepos.mock.calls[0]?.arguments[0].map(repo => [repo.id, repo.notificationsEnabled]),
+    [['repo-main', false], ['repo-other', true], ['repo-release', false]]
   );
 });
 

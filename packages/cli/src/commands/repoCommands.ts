@@ -181,6 +181,10 @@ function displayReposTable(repos: MonitoredRepo[]): void {
     "Auto CI follow-up".length,
     ...repos.map((r) => formatEnabled(r.autoFollowupOnFailedCi).length)
   );
+  const notificationsWidth = Math.max(
+    "Notifications".length,
+    ...repos.map((r) => formatEnabled(r.notificationsEnabled !== false).length)
+  );
   const visualPreviewWidth = Math.max(
     "Visual previews".length,
     ...repos.map((r) => formatVisualPreview(r.visualPreview).length)
@@ -192,6 +196,7 @@ function displayReposTable(repos: MonitoredRepo[]): void {
     "Branch".padEnd(branchWidth),
     "Status".padEnd(statusWidth),
     "Auto CI follow-up".padEnd(autoCiFollowupWidth),
+    "Notifications".padEnd(notificationsWidth),
     "Visual previews".padEnd(visualPreviewWidth),
   ].join("  ");
 
@@ -205,6 +210,7 @@ function displayReposTable(repos: MonitoredRepo[]): void {
       (truncate(repo.baseBranch, 20) || "-").padEnd(branchWidth),
       formatEnabled(repo.enabled).padEnd(statusWidth),
       formatEnabled(repo.autoFollowupOnFailedCi).padEnd(autoCiFollowupWidth),
+      formatEnabled(repo.notificationsEnabled !== false).padEnd(notificationsWidth),
       formatVisualPreview(repo.visualPreview).padEnd(visualPreviewWidth),
     ].join("  ");
 
@@ -278,6 +284,7 @@ Examples:
     .option("-a, --alias <alias>", "Display alias for the repository")
     .option("-b, --branch <branch>", "Base branch name (default: main/master)")
     .option("--auto-ci-followup", "Enable automatic follow-up when CI fails (default: off)")
+    .option("--no-notifications", "Do not generate Inbox or push notifications for this repository (default: on)")
     .option("--visual-previews", "Enable visual previews for user-visible changes")
     .option("--github-attachment-plan <plan>", "GitHub attachment capacity: auto, free, paid (default: auto)")
     .option("--preview-types <types>", "Comma-separated preview types: image,video")
@@ -290,12 +297,14 @@ Examples:
   $ propr repo add myorg/myrepo
   $ propr repo add myorg/myrepo -a "My Project" -b develop
   $ propr repo add myorg/myrepo --auto-ci-followup
+  $ propr repo add myorg/myrepo --no-notifications
   $ propr repo add myorg/myrepo --visual-previews --preview-types image,video
 `)
     .action(
       async (
         fullName: string,
-        options: { alias?: string; branch?: string; autoCiFollowup?: boolean; visualPreviews?: boolean; previewTypes?: string; previewInstructions?: string; githubAttachmentPlan?: string }
+        options: { alias?: string; branch?: string; autoCiFollowup?: boolean; notifications?: boolean; visualPreviews?: boolean; previewTypes?: string; previewInstructions?: string; githubAttachmentPlan?: string },
+        command: Command
       ) => {
         try {
           if (!fullName.includes("/")) {
@@ -317,6 +326,12 @@ Examples:
 
           console.log(`Adding repository: ${fullName}...`);
 
+          // Commander defaults --no-notifications to true; only send an explicit
+          // value when the flag was given so the server can inherit the stored
+          // repository-wide setting.
+          const notificationsEnabled = command.getOptionValueSource("notifications") === "cli"
+            ? options.notifications !== false
+            : undefined;
           const previewRequested = options.visualPreviews === true || options.previewTypes !== undefined || options.previewInstructions !== undefined;
 
           const result = await addRepo(fullName, {
@@ -324,6 +339,7 @@ Examples:
             baseBranch: options.branch,
             enabled: true,
             autoFollowupOnFailedCi: options.autoCiFollowup ?? false,
+            notificationsEnabled,
             visualPreview: {
               ...(options.githubAttachmentPlan !== undefined ? { githubAttachmentPlan: parseAttachmentPlan(options.githubAttachmentPlan) } : {}),
               enabled: previewRequested,
@@ -344,6 +360,8 @@ Examples:
             console.log(
               `  Automatic CI follow-up: ${formatEnabled(options.autoCiFollowup ?? false)}`
             );
+            const savedRepo = result.repos_to_monitor.find((r) => r.name.toLowerCase() === fullName.toLowerCase());
+            console.log(`  Notifications: ${formatEnabled((savedRepo?.notificationsEnabled ?? notificationsEnabled) !== false)}`);
             console.log(`  Visual previews: ${formatVisualPreview({
               ...(options.githubAttachmentPlan !== undefined ? { githubAttachmentPlan: parseAttachmentPlan(options.githubAttachmentPlan) } : {}),
               enabled: previewRequested,
@@ -456,11 +474,13 @@ Example:
   // repo toggle
   repo
     .command("toggle <fullName>")
-    .description("Update monitoring, automatic CI follow-up, or visual previews for a repository")
+    .description("Update monitoring, automatic CI follow-up, notifications, or visual previews for a repository")
     .option("--enable", "Enable monitoring for the repository")
     .option("--disable", "Disable monitoring for the repository")
     .option("--auto-ci-followup", "Enable automatic follow-up when CI fails")
     .option("--no-auto-ci-followup", "Disable automatic follow-up when CI fails")
+    .option("--notifications", "Generate Inbox and push notifications for the repository")
+    .option("--no-notifications", "Stop generating Inbox and push notifications for the repository")
     .option("--visual-previews", "Enable visual previews")
     .option("--no-visual-previews", "Disable visual previews")
     .option("--github-attachment-plan <plan>", "GitHub attachment capacity: auto, free, paid (default: auto)")
@@ -471,19 +491,20 @@ Argument:
   fullName    Repository in owner/repo format
 
 Note:
-  Specify at least one monitoring, automatic CI follow-up, or visual preview option.
+  Specify at least one monitoring, automatic CI follow-up, notification, or visual preview option.
 
 Examples:
   $ propr repo toggle myorg/myrepo --enable
   $ propr repo toggle myorg/myrepo --disable
   $ propr repo toggle myorg/myrepo --auto-ci-followup
   $ propr repo toggle myorg/myrepo --no-auto-ci-followup
+  $ propr repo toggle myorg/myrepo --no-notifications
   $ propr repo toggle myorg/myrepo --visual-previews --preview-types image,video
 `)
     .action(
       async (
         fullName: string,
-        options: { enable?: boolean; disable?: boolean; autoCiFollowup?: boolean; visualPreviews?: boolean; previewTypes?: string; previewInstructions?: string; githubAttachmentPlan?: string }
+        options: { enable?: boolean; disable?: boolean; autoCiFollowup?: boolean; notifications?: boolean; visualPreviews?: boolean; previewTypes?: string; previewInstructions?: string; githubAttachmentPlan?: string }
       ) => {
         try {
           if (options.enable && options.disable) {
@@ -493,9 +514,9 @@ Examples:
             process.exit(1);
           }
 
-          if (!options.enable && !options.disable && options.autoCiFollowup === undefined && options.visualPreviews === undefined && options.previewTypes === undefined && options.previewInstructions === undefined && options.githubAttachmentPlan === undefined) {
+          if (!options.enable && !options.disable && options.autoCiFollowup === undefined && options.notifications === undefined && options.visualPreviews === undefined && options.previewTypes === undefined && options.previewInstructions === undefined && options.githubAttachmentPlan === undefined) {
             console.error(
-              "Error: Must specify a monitoring, automatic CI follow-up, or visual preview option."
+              "Error: Must specify a monitoring, automatic CI follow-up, notification, or visual preview option."
             );
             console.log("");
             console.log("Usage:");
@@ -503,6 +524,7 @@ Examples:
             console.log(`  propr repo toggle ${fullName} --disable`);
             console.log(`  propr repo toggle ${fullName} --auto-ci-followup`);
             console.log(`  propr repo toggle ${fullName} --no-auto-ci-followup`);
+            console.log(`  propr repo toggle ${fullName} --no-notifications`);
             console.log(`  propr repo toggle ${fullName} --visual-previews --preview-types image,video`);
             process.exit(1);
           }
@@ -532,6 +554,7 @@ Examples:
             ...(options.autoCiFollowup !== undefined && {
               autoFollowupOnFailedCi: options.autoCiFollowup,
             }),
+            ...(options.notifications !== undefined && { notificationsEnabled: options.notifications }),
             ...(visualPreviewUpdate && { visualPreview: visualPreviewUpdate }),
           });
 
@@ -545,6 +568,9 @@ Examples:
               console.log(
                 `  Automatic CI follow-up: ${formatEnabled(options.autoCiFollowup)}`
               );
+            }
+            if (options.notifications !== undefined) {
+              console.log(`  Notifications: ${formatEnabled(options.notifications)}`);
             }
             if (visualPreviewUpdate) {
               const previewState = options.visualPreviews === false

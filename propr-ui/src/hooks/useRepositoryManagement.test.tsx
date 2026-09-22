@@ -405,6 +405,83 @@ describe('useRepositoryManagement', () => {
     expect(savedRepos.map(repo => repo.autoFollowupOnFailedCi)).toEqual([false, true]);
   });
 
+  it('defaults notifications on for legacy entries and writes the toggle to every branch entry', async () => {
+    mockGetRepoConfig.mockResolvedValue({
+      repos_to_monitor: [
+        { id: 'repo-main', name: 'integry/propr', enabled: true, baseBranch: 'main' },
+        { id: 'repo-release', name: 'INTEGRY/PROPR', enabled: true, baseBranch: 'release' },
+        { id: 'repo-other', name: 'integry/other', enabled: true },
+        'integry/legacy' as never
+      ]
+    });
+
+    const { result } = renderHook(() => useRepositoryManagement());
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    expect(result.current.filteredRepos.map(repo => repo.notificationsEnabled)).toEqual([true, true, true, true]);
+
+    act(() => result.current.handleToggleNotifications('repo-main'));
+    await waitFor(() => expect(mockUpdateRepoConfig).toHaveBeenCalledTimes(1));
+
+    const savedRepos = mockUpdateRepoConfig.mock.calls[0][0];
+    expect(savedRepos.map(repo => repo.notificationsEnabled)).toEqual([false, false, true, true]);
+  });
+
+  it('keeps notifications enabled unless every branch entry opts out', async () => {
+    mockGetRepoConfig.mockResolvedValue({
+      repos_to_monitor: [
+        { id: 'repo-main', name: 'integry/propr', enabled: true, baseBranch: 'main', notificationsEnabled: false },
+        { id: 'repo-release', name: 'integry/propr', enabled: true, baseBranch: 'release' },
+        { id: 'repo-other', name: 'integry/other', enabled: true, notificationsEnabled: false }
+      ]
+    });
+
+    const { result } = renderHook(() => useRepositoryManagement());
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    expect(result.current.filteredRepos.map(repo => repo.notificationsEnabled)).toEqual([true, true, false]);
+
+    act(() => result.current.handleToggleNotifications('repo-release'));
+    await waitFor(() => expect(mockUpdateRepoConfig).toHaveBeenCalledTimes(1));
+    expect(mockUpdateRepoConfig.mock.calls[0][0].map(repo => repo.notificationsEnabled)).toEqual([false, false, false]);
+  });
+
+  it('does not save notification changes for read-only users', async () => {
+    authState.permissions = [];
+    mockGetInstanceCatalog.mockResolvedValue({
+      agents: [],
+      repositories: [{ name: 'integry/propr', enabled: true, notificationsEnabled: false }]
+    });
+
+    const { result } = renderHook(() => useRepositoryManagement());
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    expect(result.current.repos[0].notificationsEnabled).toBe(false);
+
+    act(() => result.current.handleToggleNotifications(result.current.repos[0].id));
+    expect(mockUpdateRepoConfig).not.toHaveBeenCalled();
+  });
+
+  it('persists new repositories with notifications enabled and new branches with the shared setting', async () => {
+    mockGetRepoConfig.mockResolvedValue({
+      repos_to_monitor: [
+        { id: 'repo-main', name: 'integry/propr', enabled: true, baseBranch: 'main', notificationsEnabled: false }
+      ]
+    });
+
+    const { result } = renderHook(() => useRepositoryManagement());
+    await waitFor(() => expect(result.current.loading).toBe(false));
+
+    act(() => { result.current.handleAddRepo('integry/new', '', '', false); });
+    await waitFor(() => expect(mockUpdateRepoConfig).toHaveBeenCalledTimes(1));
+    act(() => { result.current.handleAddRepo('integry/propr', '', 'release', false); });
+    await waitFor(() => expect(mockUpdateRepoConfig).toHaveBeenCalledTimes(2));
+
+    const savedRepos = mockUpdateRepoConfig.mock.calls[1][0];
+    expect(savedRepos.map(repo => [repo.name, repo.baseBranch, repo.notificationsEnabled])).toEqual([
+      ['integry/propr', 'main', false],
+      ['integry/new', undefined, true],
+      ['integry/propr', 'release', false]
+    ]);
+  });
+
   it('reloads authoritative repositories before surfacing a committed-write warning', async () => {
     mockGetRepoConfig
       .mockResolvedValueOnce({ repos_to_monitor: [{ id: 'repo-1', name: 'integry/propr', enabled: true, baseBranch: 'release/2026' }] })
