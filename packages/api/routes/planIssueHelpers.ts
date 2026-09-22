@@ -53,12 +53,13 @@ export interface EpicPRParams {
   labelLogger: ReturnType<typeof logger.withCorrelation>;
 }
 
-async function enqueueIssueImplementationJob(params: {
+export async function enqueueIssueImplementationJob(params: {
   owner: string;
   repo: string;
   issueNumber: number;
   userId: string;
   triggeringLabel: string;
+  correlationId?: string;
 }): Promise<void> {
   const { owner, repo, issueNumber, userId, triggeringLabel } = params;
   const queue = await getIssueQueue();
@@ -69,7 +70,7 @@ async function enqueueIssueImplementationJob(params: {
     number: issueNumber,
     userId,
     triggeringLabel,
-    correlationId: generateCorrelationId()
+    correlationId: params.correlationId || generateCorrelationId()
   }, {
     jobId,
     attempts: 3,

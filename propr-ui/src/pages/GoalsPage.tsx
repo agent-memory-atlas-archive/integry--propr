@@ -514,6 +514,11 @@ function GoalList() {
   const [isCreating, setIsCreating] = useState(false);
   const requestGenerationRef = useRef(0);
   const repositoryFilter = searchParams.get('repository') || 'all';
+  useEffect(() => {
+    if (searchParams.get('new') !== '1') return;
+    setIsCreating(true);
+    setSearchParams(current => { const next = new URLSearchParams(current); next.delete('new'); return next; }, { replace: true });
+  }, [searchParams, setSearchParams]);
   useDocumentTitle('Goals');
   const refresh = useCallback(async (initial = false) => {
     const generation = ++requestGenerationRef.current;
