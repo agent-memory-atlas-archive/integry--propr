@@ -141,25 +141,51 @@ start_redis() {
   stop_redis
   remove_previous_attempts
 
-  docker run \
-    --detach \
-    --rm \
-    --name "$CONTAINER_NAME" \
-    --label propr.ci.redis=true \
-    --label "$LABEL_RUN" \
-    --label "$LABEL_JOB" \
-    --label "$LABEL_INSTANCE" \
-    --label "propr.ci.redis.attempt=${RUN_ATTEMPT}" \
-    --memory "$MEMORY_LIMIT" \
-    --memory-swap "$MEMORY_LIMIT" \
-    --cpus "$CPU_LIMIT" \
-    --pids-limit "$PIDS_LIMIT" \
-    --publish 127.0.0.1::6379 \
-    --health-cmd 'redis-cli ping' \
-    --health-interval 2s \
-    --health-timeout 2s \
-    --health-retries 15 \
-    "$IMAGE" >/dev/null
+  # Independent rootless daemons can each auto-allocate the same port (32768)
+  # inside their namespaces, then collide when RootlessKit binds the host port.
+  # Keep automatic allocation first; on a bind conflict, spread explicit high
+  # port candidates by owner and retry. A runner-local free-port probe cannot
+  # see listeners in the host namespace, so Docker's bind is authoritative.
+  local publish_port="" run_error run_status port_attempt
+  for port_attempt in 1 2 3 4 5; do
+    if run_error="$(docker run \
+      --detach \
+      --rm \
+      --name "$CONTAINER_NAME" \
+      --label propr.ci.redis=true \
+      --label "$LABEL_RUN" \
+      --label "$LABEL_JOB" \
+      --label "$LABEL_INSTANCE" \
+      --label "propr.ci.redis.attempt=${RUN_ATTEMPT}" \
+      --memory "$MEMORY_LIMIT" \
+      --memory-swap "$MEMORY_LIMIT" \
+      --cpus "$CPU_LIMIT" \
+      --pids-limit "$PIDS_LIMIT" \
+      --publish "127.0.0.1:${publish_port}:6379" \
+      --health-cmd 'redis-cli ping' \
+      --health-interval 2s \
+      --health-timeout 2s \
+      --health-retries 15 \
+      "$IMAGE" 2>&1 >/dev/null)"; then
+      break
+    else
+      run_status=$?
+    fi
+    printf '%s\n' "$run_error" >&2
+    # Failed starts can leave a created container even with --rm. Recheck
+    # every ownership label and remove by immutable ID before reusing its name.
+    remove_container "$CONTAINER_NAME" || return 1
+    if [[ "$run_status" != 125 || ( "$run_error" != *'bind: address already in use'* && "$run_error" != *'port is already allocated'* ) ]]; then
+      return "$run_status"
+    fi
+    if (( port_attempt == 5 )); then
+      echo 'Redis port allocation failed after 5 attempts' >&2
+      return "$run_status"
+    fi
+    # The odd stride visits different candidates within 49152..65535.
+    publish_port=$((49152 + (16#${OWNER_HASH:0:8} + port_attempt * 7919) % 16384))
+    echo "Retrying Redis startup with loopback port $publish_port" >&2
+  done
 
   printf '%s\n' "$CONTAINER_NAME" > "$STATE_FILE"
 

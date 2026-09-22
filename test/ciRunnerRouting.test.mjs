@@ -98,6 +98,19 @@ case "$command" in
     printf '%s\\n' "\${labels[@]}" > "$state/$name"
     printf '%s\\n' "\${arguments[@]}" > "$state/.args-$name"
     echo "run $name" >> "$state/.log"
+    publish=""
+    for ((i=0; i<\${#arguments[@]}; i++)); do
+      if [[ "\${arguments[i]}" == --publish ]]; then publish="\${arguments[i+1]}"; fi
+    done
+    echo "$publish" >> "$state/.ports-$name"
+    attempts=$(wc -l < "$state/.ports-$name")
+    if (( attempts <= \${FAKE_RUN_FAILURES:-0} )); then
+      if [[ -n "\${FAKE_FOREIGN_OWNER:-}" ]]; then
+        sed -i 's/propr.ci.redis.job=.*/propr.ci.redis.job=foreign/' "$state/$name"
+      fi
+      echo "\${FAKE_RUN_ERROR:-error while calling RootlessKit PortManager.AddPort(): listen tcp4 127.0.0.1:32768: bind: address already in use}" >&2
+      exit 125
+    fi
     ;;
   inspect)
     name="\${@: -1}"; name="\${name#id-}"
@@ -116,7 +129,12 @@ case "$command" in
     echo "rm $name" >> "$state/.log"
     ;;
   port)
-    printf '127.0.0.1:%s\\n' "$(( $(printf '%s' "$1" | cksum | cut -d' ' -f1) % 20000 + 20000 ))"
+    publish=$(tail -1 "$state/.ports-$1")
+    if [[ "$publish" == 127.0.0.1::6379 ]]; then
+      printf '127.0.0.1:%s\\n' "$(( $(printf '%s' "$1" | cksum | cut -d' ' -f1) % 20000 + 20000 ))"
+    else
+      echo "\${publish%:6379}"
+    fi
     ;;
   ps)
     filters=()
@@ -145,7 +163,8 @@ esac
     const removals = () => (existsSync(join(state, '.log')) ? readFileSync(join(state, '.log'), 'utf8') : '')
         .split('\n').filter(line => line.startsWith('rm ')).map(line => line.slice(3));
     const runArguments = name => readFileSync(join(state, `.args-${name}`), 'utf8').trim().split('\n');
-    return { bin, state, containers, removals, runArguments };
+    const publishedPorts = name => readFileSync(join(state, `.ports-${name}`), 'utf8').trim().split('\n');
+    return { bin, state, containers, removals, runArguments, publishedPorts };
 }
 
 function runRedis(docker, action, env) {
@@ -176,6 +195,64 @@ function startRedis(docker, env) {
 }
 
 describe('scripts/ci-redis.sh shared-host isolation', () => {
+    test('recovers a RootlessKit host port collision and exports the successful mapping', () => {
+        const docker = createFakeDocker();
+        const other = startRedis(docker, { CI_REDIS_INSTANCE: 'shard-1' });
+        const file = join(docker.state, '../shard-2.env');
+        const env = { CI_REDIS_INSTANCE: 'shard-2', CI_REDIS_ENV_FILE: file, FAKE_RUN_FAILURES: '2' };
+        const name = startRedis(docker, env);
+        const ports = docker.publishedPorts(name);
+        assert.equal(ports.length, 3);
+        assert.equal(ports[0], '127.0.0.1::6379');
+        assert.notEqual(ports[1], ports[2]);
+        for (const mapping of ports.slice(1)) {
+            assert.match(mapping, /^127\.0\.0\.1:\d+:6379$/);
+            const port = Number(mapping.split(':')[1]);
+            assert.ok(port >= 49152 && port <= 65535);
+        }
+        assert.deepEqual(docker.removals(), [name, name]);
+        assert.deepEqual(docker.containers(), [other, name].sort());
+        assert.match(readFileSync(file, 'utf8'), new RegExp(`^REDIS_PORT=${ports[2].split(':')[1]}$`, 'm'));
+        assert.equal(runRedis(docker, 'stop', env).status, 0);
+        assert.deepEqual(docker.containers(), [other]);
+    });
+
+    test('bounds port conflict retries, cleans failed containers and exports no connection settings', () => {
+        const docker = createFakeDocker();
+        const file = join(docker.state, '../failed.env');
+        const env = { CI_REDIS_ENV_FILE: file, FAKE_RUN_FAILURES: '99' };
+        const result = runRedis(docker, 'start', env);
+        const name = redisName(docker, env);
+        assert.equal(result.status, 125, result.stderr);
+        assert.match(result.stderr, /Redis port allocation failed after 5 attempts/);
+        assert.equal(docker.publishedPorts(name).length, 5);
+        assert.equal(new Set(docker.publishedPorts(name)).size, 5);
+        assert.equal(docker.removals().length, 5);
+        assert.deepEqual(docker.containers(), []);
+        assert.equal(existsSync(file), false);
+        assert.equal(existsSync(join(docker.state, '../redis-state', `${name}.name`)), false);
+    });
+
+    test('does not retry unrelated Docker failures or remove a foreign container during retry cleanup', () => {
+        for (const extra of [{ FAKE_RUN_ERROR: 'OCI runtime create failed: permission denied' }, { FAKE_FOREIGN_OWNER: 'true' }]) {
+            const docker = createFakeDocker();
+            const env = { FAKE_RUN_FAILURES: '1', ...extra };
+            const result = runRedis(docker, 'start', env);
+            const name = redisName(docker, env);
+            assert.notEqual(result.status, 0);
+            assert.equal(docker.publishedPorts(name).length, 1);
+            if (extra.FAKE_FOREIGN_OWNER) {
+                assert.match(result.stderr, /Refusing to remove/);
+                assert.deepEqual(docker.removals(), []);
+                assert.deepEqual(docker.containers(), [name]);
+            } else {
+                assert.equal(result.status, 125);
+                assert.match(result.stderr, /OCI runtime create failed/);
+                assert.deepEqual(docker.containers(), []);
+            }
+        }
+    });
+
     test('gives every matrix shard its own container, port and connection file', () => {
         const docker = createFakeDocker();
         const settings = [];
