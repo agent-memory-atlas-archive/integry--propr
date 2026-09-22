@@ -221,6 +221,8 @@ const savePromptDirectly = async (draftId: string, prompt: string) => {
 export function useGenerationHandlers({ draft, config, branchError, flushPrompt = savePromptDirectly, contextHelpers, startPolling, stopPolling, onGenerationStarted, setError, setGenerationError }: GenerationHandlersParams) {
   const [isStartingGeneration, setIsStartingGeneration] = useState(false);
   const isStartingGenerationRef = useRef(false);
+  const contextHelpersRef = useRef(contextHelpers);
+  contextHelpersRef.current = contextHelpers;
   const handleGenerateForExistingDraft = useCallback(async () => {
     if (!draft || isStartingGenerationRef.current) return;
     if (branchError) return void setError('Please fix the branch name before generating');
@@ -230,9 +232,10 @@ export function useGenerationHandlers({ draft, config, branchError, flushPrompt 
     setGenerationError(null);
     try {
       await flushPrompt(draft.draft_id, config.prompt);
-      if (contextHelpers.isContextStale) {
-        contextHelpers.clearCountdown();
-        const previewReady = await contextHelpers.fetchPreview();
+      const latestContextHelpers = contextHelpersRef.current;
+      if (latestContextHelpers.isContextStale) {
+        latestContextHelpers.clearCountdown();
+        const previewReady = await latestContextHelpers.fetchPreview();
         if (!previewReady) {
           setError('Context preview did not complete. Please refresh it before generating.');
           return;
@@ -248,7 +251,7 @@ export function useGenerationHandlers({ draft, config, branchError, flushPrompt 
       isStartingGenerationRef.current = false;
       setIsStartingGeneration(false);
     }
-  }, [draft, config, branchError, flushPrompt, contextHelpers, startPolling, stopPolling, onGenerationStarted, setError, setGenerationError]);
+  }, [draft, config, branchError, flushPrompt, startPolling, stopPolling, onGenerationStarted, setError, setGenerationError]);
   const handleAbortGeneration = useCallback(async () => {
     if (!draft) return;
     try {

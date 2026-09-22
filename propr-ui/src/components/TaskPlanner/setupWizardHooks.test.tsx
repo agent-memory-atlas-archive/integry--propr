@@ -68,6 +68,39 @@ describe('useGenerationHandlers', () => {
     expect(mockUpdateDraft.mock.invocationCallOrder[0]).toBeLessThan(mockGeneratePlan.mock.invocationCallOrder[0]);
   });
 
+  it('rechecks context freshness after the prompt save completes', async () => {
+    const promptPersistence = createDeferred<void>();
+    mockUpdateDraft.mockImplementationOnce(() => promptPersistence.promise);
+    const clearCountdown = vi.fn();
+    const fetchPreview = vi.fn(async () => true);
+    const startPolling = vi.fn();
+    const draft = makeDraft() as never;
+    const { result, rerender } = renderHook(({ isContextStale }) => useGenerationHandlers({
+      draft,
+      config: baseConfig,
+      branchError: null,
+      contextHelpers: { isContextStale, clearCountdown, fetchPreview },
+      startPolling,
+      stopPolling: vi.fn(),
+      setError: vi.fn(),
+      setGenerationError: vi.fn(),
+    }), { initialProps: { isContextStale: false } });
+
+    let generation!: Promise<void>;
+    act(() => {
+      generation = result.current.handleGenerateForExistingDraft();
+    });
+    rerender({ isContextStale: true });
+
+    promptPersistence.resolve();
+    await act(async () => generation);
+
+    expect(clearCountdown).toHaveBeenCalledOnce();
+    expect(fetchPreview).toHaveBeenCalledOnce();
+    expect(fetchPreview.mock.invocationCallOrder[0]).toBeLessThan(mockGeneratePlan.mock.invocationCallOrder[0]);
+    expect(startPolling).toHaveBeenCalledWith('generation-run-1');
+  });
+
   it('waits for a stale context preview before starting generation', async () => {
     const preview = createDeferred<boolean>();
     const startPolling = vi.fn();
