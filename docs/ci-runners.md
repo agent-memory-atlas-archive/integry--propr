@@ -200,6 +200,11 @@ shard was skipped, cancelled or failed, or a summary is missing, the gate
 fails. Re-running failed jobs reuses the newest attempt of each shard's
 artifact.
 
+When a newer push cancels a run, the gate still fails that superseded commit.
+The `comment` job only posts for runs that were not cancelled. In the comment,
+a shard whose step was cancelled (for example by a timeout) is reported as
+cancelled, not passed.
+
 ### Placement evidence
 
 Every routed job runs `scripts/ci-runner-evidence.sh`. It is read-only and

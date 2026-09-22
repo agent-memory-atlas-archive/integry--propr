@@ -419,6 +419,56 @@ describe('PR check routing', () => {
         }
     });
 
+    test('reports cancelled shards as cancelled and posts no report for a superseded run', () => {
+        const gate = jobBlock(fullSuite, 'test');
+        assert.match(gate, /\$\{\{ always\(\) &&\n/, 'the gate still fails a cancelled run closed');
+        assert.doesNotMatch(gate, /cancelled\(\)/);
+        const comment = jobBlock(fullSuite, 'comment');
+        assert.match(comment, /\$\{\{ always\(\) && !cancelled\(\) && github\.event_name == 'pull_request' &&\n/);
+
+        const lines = comment.split('\n');
+        const start = lines.findIndex(line => /^\s+script: \|$/.test(line)) + 1;
+        const indent = lines[start].match(/^\s*/)[0];
+        const end = lines.findIndex((line, index) => index > start && line.trim() !== '' && !line.startsWith(indent));
+        const script = lines.slice(start, end === -1 ? undefined : end).map(line => line.slice(indent.length)).join('\n');
+        const directory = freshDirectory('report');
+        const writeShard = (shard, stages, summary) => {
+            const output = join(directory, 'shard-artifacts', `shard-${shard}`);
+            mkdirSync(output, { recursive: true });
+            writeFileSync(join(output, 'stages.json'), JSON.stringify({ shard, runAttempt: 1, runner: { name: `worker-${shard}` }, stages }));
+            if (summary) writeFileSync(join(output, 'summary.json'), JSON.stringify(summary));
+            writeFileSync(join(output, 'test_output.sanitized.txt'), `shard ${shard} output`);
+        };
+        const passedStages = { 'Dependency install': 'success', 'Test shard': 'success' };
+        writeShard(1, passedStages, { shard: { index: 1 }, durationMs: 1000, results: [] });
+        writeShard(2, { 'Dependency install': 'success', 'Test shard': 'cancelled' });
+        writeShard(3, { 'Dependency install': 'success', 'Test shard': 'failure' }, {
+            shard: { index: 3 }, durationMs: 2000, results: [{ id: 'test/a.test.ts', status: 'failed', reason: 'exit 1' }],
+        });
+        writeFileSync(join(directory, 'harness.cjs'), `
+            let body;
+            const github = { rest: { issues: { createComment: async request => { body = request.body; } } } };
+            const context = { runId: 1, repo: { owner: 'o', repo: 'r' }, issue: { number: 1 } };
+            new (Object.getPrototypeOf(async () => {}).constructor)('require', 'github', 'context', process.argv[2])(require, github, context)
+                .then(() => process.stdout.write(body));
+        `);
+        const result = spawnSync(process.execPath, ['harness.cjs', script], {
+            cwd: directory,
+            encoding: 'utf8',
+            env: { PATH: process.env.PATH, PROPR_TEST_SHARD_COUNT: '4', COVERAGE_RESULT: 'failure', SHARD_RESULT: 'failure' },
+        });
+        assert.equal(result.status, 0, result.stderr);
+        const body = result.stdout;
+        assert.match(body, /^- Shard 1\/4: passed in 1\.0s on worker-1$/m);
+        assert.match(body, /^- Shard 2\/4: cancelled during Test shard on worker-2$/m);
+        assert.match(body, /^- Shard 3\/4: failed during Test shard in 2\.0s on worker-3$/m);
+        assert.match(body, /^  - `test\/a\.test\.ts`: exit 1$/m);
+        assert.match(body, /^- Shard 4\/4: no output uploaded/m);
+        assert.match(body, /Validation failed during: Test shard \(shard 2, cancelled\), Test shard \(shard 3\), Shard coverage verification\./);
+        assert.match(body, /View shard 2\/4 output[\s\S]*shard 2 output/);
+        assert.doesNotMatch(body, /shard 1 output/);
+    });
+
     test('routes Validate Changes and keeps every other build check on its hosted platform', () => {
         const validate = jobBlock(buildCheck, 'validate');
         assert.ok(validate.includes(`\n    ${ROUTED_RUNS_ON}\n`));

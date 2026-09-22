@@ -427,10 +427,13 @@ jobs:
           exit "$status"
 
   comment:
+    # The gate above still runs, and fails, when a newer push cancels this
+    # run. Only runs that were not cancelled post a report, so a superseded
+    # commit's cancelled shards are not reported as a test failure.
     name: Report Full Test Failure
     needs: [shard, docs, native-electron, test]
     if: >-
-      ${{ always() && github.event_name == 'pull_request' &&
+      ${{ always() && !cancelled() && github.event_name == 'pull_request' &&
           needs.test.result == 'failure' &&
           github.event.pull_request.head.repo.full_name == github.repository }}
     runs-on: ubuntu-latest
@@ -496,14 +499,19 @@ jobs:
                 continue;
               }
               const failed = Object.entries(shard.stages).filter(([, outcome]) => outcome === 'failure').map(([stage]) => stage);
+              // A step stopped by a timeout records 'cancelled', not 'failure'.
+              const cancelled = Object.entries(shard.stages).filter(([, outcome]) => outcome === 'cancelled').map(([stage]) => stage);
               failedStages.push(...failed.map(stage => `${stage} (shard ${index})`));
+              failedStages.push(...cancelled.map(stage => `${stage} (shard ${index}, cancelled)`));
               const failures = (shard.summary?.results ?? []).filter(result => result.status === 'failed');
               const duration = shard.summary ? ` in ${(shard.summary.durationMs / 1000).toFixed(1)}s` : '';
-              const status = failed.length === 0 ? 'passed' : `failed during ${failed.join(', ')}`;
+              const status = failed.length > 0
+                ? `failed during ${failed.join(', ')}`
+                : cancelled.length > 0 ? `cancelled during ${cancelled.join(', ')}` : 'passed';
               const runner = shard.runner?.name ? ` on ${shard.runner.name}` : '';
               lines.push(`- Shard ${index}/${shardCount}: ${status}${duration}${runner}`);
               for (const failure of failures) lines.push(`  - \`${failure.id}\`${failure.kind === 'workspace' ? ' (workspace)' : ''}: ${failure.reason}`);
-              if (failed.length > 0) failedOutputs.push([index, shard.output ?? 'Output file not available.']);
+              if (failed.length > 0 || cancelled.length > 0) failedOutputs.push([index, shard.output ?? 'Output file not available.']);
             }
             if (process.env.COVERAGE_RESULT === 'failure') failedStages.push('Shard coverage verification');
             if (['failure', 'cancelled'].includes(process.env.ELECTRON_RESULT)) failedStages.push('Hosted native Electron units');
