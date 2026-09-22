@@ -28,6 +28,7 @@ import {
   runningProcessGroupMembersFromPs,
   waitForEvents,
   waitForWarmOpenEvidence,
+  withDeadline,
 } from './test-native-artifact-lifecycle.mjs';
 
 describe('native staged artifact lifecycle authority', () => {
@@ -751,6 +752,49 @@ describe('native staged artifact lifecycle authority', () => {
       await assert.rejects(assertSafeExtractedTree(root), /symlink to an unsupported filesystem entry/);
     } finally {
       await rm(parent, { recursive: true, force: true });
+    }
+  });
+
+  test('clears lifecycle deadlines once the raced operation settles', async () => {
+    const pendingTimeouts = () => process.getActiveResourcesInfo().filter(type => type === 'Timeout').length;
+    const before = pendingTimeouts();
+    assert.equal(await withDeadline(Promise.resolve('done'), 600_000, 'unused deadline'), 'done');
+    await assert.rejects(withDeadline(Promise.reject(new Error('operation failed')), 600_000, 'unused'), /operation failed/);
+    assert.equal(pendingTimeouts(), before, 'a settled operation left its deadline timer active');
+    await assert.rejects(withDeadline(new Promise(() => {}), 10, 'bounded deadline expired'), /bounded deadline expired/);
+  });
+
+  test('exits promptly after successful RPM extraction with a long deadline', { skip: process.platform === 'win32' }, async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'propr-native-rpm-exit-'));
+    const converter = join(directory, 'converter.sh');
+    const extractor = join(directory, 'extractor.sh');
+    try {
+      await writeFile(converter, '#!/bin/sh\nprintf archive\n');
+      await writeFile(extractor, '#!/bin/sh\ncat >/dev/null\n');
+      await chmod(converter, 0o700);
+      await chmod(extractor, 0o700);
+      const moduleUrl = new URL('./test-native-artifact-lifecycle.mjs', import.meta.url).href;
+      // Reproduces the release-guard lifecycle process: the extraction succeeds
+      // quickly, so the process must not wait for the unused ten-minute deadline.
+      const script = `const { extractRpm } = await import(${JSON.stringify(moduleUrl)});
+        await extractRpm('fixture.rpm', ${JSON.stringify(directory)}, {
+          converterFile: ${JSON.stringify(converter)},
+          extractorFile: ${JSON.stringify(extractor)},
+          timeout: 600000,
+        });`;
+      const child = spawn(process.execPath, ['--input-type=module', '--eval', script], { stdio: ['ignore', 'ignore', 'pipe'] });
+      let stderr = '';
+      child.stderr.on('data', chunk => { stderr += chunk; });
+      const started = Date.now();
+      const exited = await Promise.race([
+        new Promise(resolve => child.once('close', code => resolve(code))),
+        new Promise(resolve => setTimeout(() => resolve('lingering'), 20_000).unref()),
+      ]);
+      if (exited === 'lingering') child.kill('SIGKILL');
+      assert.equal(exited, 0, stderr);
+      assert.ok(Date.now() - started < 20_000);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
     }
   });
 
