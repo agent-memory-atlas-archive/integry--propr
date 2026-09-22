@@ -114,6 +114,36 @@ test('shows and updates shared settings while preserving the selected branch', a
   });
 });
 
+test('silences notifications for every branch entry of the selected repository', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  const api = await stubRepositoryApis(page, true, [
+    { id: 'propr-main', name: 'integry/propr', baseBranch: 'main', enabled: true, visualPreview: { enabled: false, types: ['image'] } },
+    { id: 'propr-release', name: 'integry/propr', baseBranch: 'release', enabled: true, visualPreview: { enabled: false, types: ['image'] } },
+    { id: 'sdk', name: 'integry/integration-sdk', enabled: true, visualPreview: { enabled: false, types: ['image'] } },
+  ]);
+  await page.goto('/repositories');
+  await page.getByRole('button', { name: 'Select integry/propr', exact: true }).first().click();
+  const settings = page.getByRole('region', { name: 'Settings for integry/propr', exact: true });
+  const notifications = settings.getByRole('checkbox', { name: 'Notifications for integry/propr', exact: true });
+  await expect(notifications).toBeChecked();
+  await expect(settings.getByText('Generate Inbox and push notifications for this repository.', { exact: false })).toBeVisible();
+
+  await settings.locator('label', { has: page.getByRole('checkbox', { name: 'Notifications for integry/propr', exact: true }) }).click();
+  await expect(notifications).not.toBeChecked();
+  await expect.poll(() => api.writes.at(-1)?.map(repo => [repo.id, repo.notificationsEnabled])).toEqual([
+    ['propr-main', false], ['propr-release', false], ['sdk', true],
+  ]);
+  await expect(page.getByText('Saved', { exact: true }).filter({ visible: true })).toBeVisible();
+  if (process.env.PROPR_CAPTURE_PREVIEWS) {
+    await mkdir('../.propr/previews', { recursive: true });
+    await page.screenshot({ animations: 'disabled', path: '../.propr/previews/repository-notifications-disabled.png' });
+  }
+
+  await page.reload();
+  await page.getByRole('button', { name: 'Select integry/propr', exact: true }).first().click();
+  await expect(page.getByRole('checkbox', { name: 'Notifications for integry/propr', exact: true })).not.toBeChecked();
+});
+
 test('keeps navigation compact and saves settings for the selected repository', async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
   const api = await stubRepositoryApis(page);
@@ -227,6 +257,7 @@ test('enables visual previews while adding a repository', async ({ page }) => {
   await page.getByRole('button', { name: '+ Add Repository' }).first().click();
   const dialog = page.getByRole('dialog', { name: 'Add Repository' });
   await dialog.getByLabel('Repository *').fill('integry/new-app');
+  await expect(dialog.getByRole('checkbox', { name: /Notifications/ })).toHaveCount(0);
   await dialog.getByRole('checkbox', { name: /Automatic CI follow-up/ }).check();
   await dialog.getByRole('checkbox', { name: /Visual previews/ }).check();
   await dialog.getByRole('button', { name: 'Videos' }).click();
@@ -241,13 +272,14 @@ test('enables visual previews while adding a repository', async ({ page }) => {
   await expect.poll(() => api.writes.at(-1)?.at(-1)).toMatchObject({
     name: 'integry/new-app',
     autoFollowupOnFailedCi: true,
+    notificationsEnabled: true,
     visualPreview: { enabled: true, types: ['image', 'video'], instructions: 'Capture desktop and mobile views.' },
   });
 });
 
 test('keeps repository and indexing changes unavailable to read-only users', async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
-  await stubRepositoryApis(page, false);
+  const api = await stubRepositoryApis(page, false);
   await page.goto('/repositories');
   await page.getByRole('button', { name: 'Select integry/propr', exact: true }).click();
   await expect(page.getByRole('button', { name: 'Chat', exact: true })).toBeVisible();
@@ -258,6 +290,12 @@ test('keeps repository and indexing changes unavailable to read-only users', asy
   await expect(page.getByRole('button', { name: 'Reindex repository', exact: true })).toBeDisabled();
   await expect(page.getByRole('button', { name: 'Remove repository from ProPR', exact: true })).toBeDisabled();
   await expect(page.getByRole('checkbox', { name: /Automatic CI follow-up|Visual previews/ })).toHaveCount(0);
+  const notifications = page.getByRole('checkbox', { name: 'Notifications for integry/propr', exact: true });
+  await expect(notifications).toBeDisabled();
+  // Playwright treats a disabled control's label as disabled; force the click to prove it is inert.
+  await page.locator('label', { has: notifications }).click({ force: true });
+  await expect(notifications).toBeChecked();
+  expect(api.writes).toHaveLength(0);
 });
 
 

@@ -135,3 +135,24 @@ test('repo list displays the override and unresolved conservative fallback', asy
   assert.match(output.join('\n'), /auto: Auto unresolved; using conservative Free limits/);
   assert.match(output.join('\n'), /Images: 10 MiB; videos: 10 MiB/);
 });
+
+test("repo add and toggle configure repository notifications", async () => {
+  const existing: MonitoredRepo = { id: "repo-1", name: "integry/propr", enabled: true, autoFollowupOnFailedCi: false };
+
+  const defaulted = await runRepoWrite(["add", "integry/defaulted"], [existing]);
+  assert.equal(defaulted[1]?.notificationsEnabled, true);
+
+  const silenced = await runRepoWrite(["add", "integry/silenced", "--no-notifications"], [existing]);
+  assert.equal(silenced[0]?.notificationsEnabled, undefined);
+  assert.equal(silenced[1]?.notificationsEnabled, false);
+
+  const toggledOff = await runRepoWrite(["toggle", "integry/propr", "--no-notifications"], [existing]);
+  assert.equal(toggledOff[0]?.notificationsEnabled, false);
+  assert.equal(toggledOff[0]?.enabled, true);
+
+  const toggledOn = await runRepoWrite(["toggle", "integry/propr", "--notifications"], toggledOff);
+  assert.equal(toggledOn[0]?.notificationsEnabled, true);
+
+  const unrelated = await runRepoWrite(["toggle", "integry/propr", "--disable"], toggledOff);
+  assert.equal(unrelated[0]?.notificationsEnabled, false);
+});

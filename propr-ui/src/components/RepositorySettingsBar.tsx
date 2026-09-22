@@ -46,13 +46,14 @@ interface RepositorySettingsBarProps {
   onToggleStar: (repoId: string) => void;
   onToggleHidden: (repoId: string) => void;
   onToggleAutoCiFollowup: (repoId: string) => void;
+  onToggleNotifications: (repoId: string) => void;
   onUpdateVisualPreview: (repoId: string, settings: RepositoryVisualPreviewSettings) => void;
   isReadOnly: boolean;
 }
 
 export const RepositorySettingsBar: React.FC<RepositorySettingsBarProps> = ({
   repo, indexingStatus, onToggle, onRemove, onStopIndexing, onReindex,
-  onToggleStar, onToggleHidden, onToggleAutoCiFollowup, onUpdateVisualPreview, isReadOnly,
+  onToggleStar, onToggleHidden, onToggleAutoCiFollowup, onToggleNotifications, onUpdateVisualPreview, isReadOnly,
 }) => {
   const [isDeleteDialogOpen, setIsDeleteDialogOpen] = useState(false);
   const [isDeleting, setIsDeleting] = useState(false);
@@ -93,6 +94,18 @@ export const RepositorySettingsBar: React.FC<RepositorySettingsBarProps> = ({
           <label className="flex items-center justify-between gap-4 py-2 text-xs text-slate-600">
             <span className="min-w-0">Hide repository</span>
             <input type="checkbox" checked={repo.hidden === true} onChange={() => onToggleHidden(repo.id)} disabled={isReadOnly} aria-label="Hide repository" className="sr-only peer" />
+            <span className={toggleClassName} />
+          </label>
+        </div>
+
+        <div className="mt-8 border-t border-slate-200 pt-6">
+          <h3 className="mb-2 text-[10px] uppercase font-bold tracking-widest text-slate-500">Notifications</h3>
+          <label className="flex items-center justify-between gap-4 py-2 text-xs text-slate-600">
+            <span className="min-w-0">
+              <span className="block">Notifications</span>
+              <span className="mt-1 block text-slate-500">Generate Inbox and push notifications for this repository. Turning this off silences plan, task, review, pull request, and indexing notifications without changing automation.</span>
+            </span>
+            <input type="checkbox" checked={repo.notificationsEnabled !== false} onChange={() => onToggleNotifications(repo.id)} disabled={isReadOnly} aria-label={`Notifications for ${repo.name}`} className="sr-only peer" />
             <span className={toggleClassName} />
           </label>
         </div>

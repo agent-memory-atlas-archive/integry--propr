@@ -56,6 +56,7 @@ function catalogRepository(repository: RepoToMonitor): InstanceCatalogRepository
     enabled: true,
     ...(repository.alias ? { alias: repository.alias } : {}),
     ...(repository.baseBranch ? { baseBranch: repository.baseBranch } : {}),
+    notificationsEnabled: repository.notificationsEnabled !== false,
   };
 }
 

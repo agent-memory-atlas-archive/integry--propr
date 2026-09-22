@@ -44,6 +44,30 @@ export function updateRepositoryVisualPreview(
     : repo);
 }
 
+/**
+ * Resolve the repository-wide notification state from all of its branch entries.
+ * Kept identical to the server filter: notifications are disabled only when every
+ * entry is explicitly false, so legacy or partially configured entries stay on.
+ */
+export function resolveRepositoryNotificationsEnabled(
+  repos: readonly ManagedRepo[],
+  repositoryKey: string
+): boolean {
+  const entries = repos.filter(repo => getRepositoryConfigKey(repo.name) === repositoryKey);
+  return entries.length === 0 || entries.some(repo => repo.notificationsEnabled !== false);
+}
+
+/** Flip the resolved repository-wide value so every branch entry converges on one state. */
+export function toggleRepositoryNotifications(repos: ManagedRepo[], repoId: string): ManagedRepo[] {
+  const targetRepo = repos.find(repo => repo.id === repoId);
+  if (!targetRepo) return repos;
+  const repositoryKey = getRepositoryConfigKey(targetRepo.name);
+  const notificationsEnabled = !resolveRepositoryNotificationsEnabled(repos, repositoryKey);
+  return repos.map(repo => getRepositoryConfigKey(repo.name) === repositoryKey
+    ? { ...repo, notificationsEnabled }
+    : repo);
+}
+
 export function buildRepositoriesForDisplay(repos: ManagedRepo[]): ManagedRepo[] {
   const autoCiFollowupByRepository = new Map<string, boolean>();
   const visualPreviewByRepository = new Map<string, VisualPreviewSettings>();
@@ -59,6 +83,7 @@ export function buildRepositoriesForDisplay(repos: ManagedRepo[]): ManagedRepo[]
   return repos.map(repo => ({
     ...repo,
     autoFollowupOnFailedCi: autoCiFollowupByRepository.get(getRepositoryConfigKey(repo.name)) === true,
+    notificationsEnabled: resolveRepositoryNotificationsEnabled(repos, getRepositoryConfigKey(repo.name)),
     visualPreview: visualPreviewByRepository.get(getRepositoryConfigKey(repo.name)) || defaultVisualPreview()
   }));
 }

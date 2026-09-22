@@ -16,6 +16,8 @@ export interface InstanceCatalogRepository {
   enabled: boolean;
   alias?: string;
   baseBranch?: string;
+  /** Repository-wide notification filter. Omitted by older servers; treat omission as enabled. */
+  notificationsEnabled?: boolean;
 }
 
 export interface InstanceCatalogResponse {

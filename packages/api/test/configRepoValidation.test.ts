@@ -12,6 +12,7 @@ test('repository config defaults missing automatic failed-CI follow-up to false'
   assert.equal(normalized.ok, true);
   if (normalized.ok) {
     assert.equal(normalized.value.autoFollowupOnFailedCi, false);
+    assert.equal(normalized.value.notificationsEnabled, true);
     assert.deepEqual(normalized.value.visualPreview, { enabled: false, types: ['image'] });
   }
 });
@@ -116,5 +117,21 @@ test('validates attachment override and ignores client-supplied effective capaci
   for (const plan of ['invalid', '', null, true, 100]) {
     const result = normalizeRepoConfig({ id: 'repo-1', name: 'integry/propr', enabled: true, visualPreview: { enabled: true, types: ['video'], githubAttachmentPlan: plan } });
     assert.equal(result.ok, false);
+  }
+});
+
+test('repository config accepts an explicit notification opt-out', () => {
+  for (const notificationsEnabled of [true, false]) {
+    const normalized = normalizeRepoConfig({ id: 'repo-1', name: 'integry/propr', enabled: true, notificationsEnabled });
+    assert.equal(normalized.ok, true);
+    if (normalized.ok) assert.equal(normalized.value.notificationsEnabled, notificationsEnabled);
+  }
+});
+
+test('repository config rejects non-boolean notificationsEnabled values', () => {
+  for (const notificationsEnabled of ['false', 0, null, {}]) {
+    const normalized = normalizeRepoConfig({ id: 'repo-1', name: 'integry/propr', enabled: true, notificationsEnabled });
+    assert.equal(normalized.ok, false);
+    if (!normalized.ok) assert.match(normalized.error, /notificationsEnabled.*must be a boolean/);
   }
 });

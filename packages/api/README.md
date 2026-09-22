@@ -109,6 +109,14 @@ recipient assignments must always provide `pushEnabled`; the string shorthand
 is explicitly Inbox-only. Production lifecycle projections select Push as an
 eligible channel, but the user opt-in remains authoritative.
 
+Repository-scoped lifecycle notifications (`plan`, `task`, `review`,
+`pull_request`, and `indexing`, including stalled-activity cards) are also gated
+by the monitored repository's `notificationsEnabled` setting. It defaults to
+`true`; a repository is silenced only when every configured branch entry sets it
+to `false`, and no event (and therefore no Push delivery) is created for it.
+The lookup fails open if the configuration cannot be read. `system_failure`
+notifications are not repository-scoped and are never filtered.
+
 The API owns a Web Push dispatcher that fans eligible events out to every
 subscription active at assignment time. It applies both quiet-hour boundaries
 in the stored IANA timezone at claim time (including retries and DST

@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Per-repository notifications**: Repositories → Settings now has a
+  **Notifications** toggle that stops Inbox and push notifications for plan, task,
+  review, pull request, and indexing activity in that repository while automation
+  keeps running. The setting is on by default, shared by every branch entry of the
+  repository, and available through `POST /api/config/repos`, the MCP
+  `update_repository_configuration` tool, and `propr repo add|toggle
+  --no-notifications`. System-health notifications are unaffected, and existing
+  notifications stay in the Inbox.
+
 ### Changed
 
 - **Voice Briefings are opt-in everywhere**: the experimental feature is now off by

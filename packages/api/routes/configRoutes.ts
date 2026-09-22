@@ -12,7 +12,7 @@ import { saveSettingsWithRollback } from './configRoutesSettings.js';
 import { saveThenPublishConfigUpdate } from './configRoutesPersistence.js';
 import type { AgentPreparationDeps } from './configRoutesAgentsTypes.js';
 import type { Knex } from 'knex';
-import { normalizeRepoConfig, preserveRepoAutoFollowup, preserveRepoVisualPreview } from './configRepoValidation.js';
+import { normalizeRepoConfig, preserveRepoAutoFollowup, preserveRepoNotifications, preserveRepoVisualPreview } from './configRepoValidation.js';
 import { loadReposWithAttachmentCapacity } from './configRoutesRepos.js';
 
 interface ConfigRoutesDeps {
@@ -217,7 +217,8 @@ export function createConfigRoutes(deps: ConfigRoutesDeps) {
     const result = await withConfigLock(redisClient, 'config:repos:lock', async lock => {
       const previousRepos = await configStore.loadMonitoredReposRaw(); assertConfigRevision(req.body.expectedRevision, previousRepos);
       const withPreservedAutoFollowup = preserveRepoAutoFollowup(previousRepos, validatedRepos, repos_to_monitor);
-      const processedRepos = preserveRepoVisualPreview(previousRepos, withPreservedAutoFollowup, repos_to_monitor);
+      const withPreservedNotifications = preserveRepoNotifications(previousRepos, withPreservedAutoFollowup, repos_to_monitor);
+      const processedRepos = preserveRepoVisualPreview(previousRepos, withPreservedNotifications, repos_to_monitor);
       return saveThenPublishConfigUpdate({
         save: async () => {
           await database.transaction(async trx => {

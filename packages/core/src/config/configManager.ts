@@ -29,6 +29,7 @@ export interface RepoToMonitor {
     name: string;            // owner/repo
     enabled: boolean;
     autoFollowupOnFailedCi?: boolean; // Defaults to false for legacy configurations
+    notificationsEnabled?: boolean; // Defaults to true; undefined (legacy configurations) reads as enabled
     visualPreview?: VisualPreviewSettings; // Defaults to disabled for legacy configurations
     alias?: string;          // Optional display name
     baseBranch?: string;     // Optional specific branch to monitor
