@@ -20,7 +20,7 @@ interface McpConnectedAppRowProps {
   revoking?: boolean;
 }
 
-const sectionLabelClass = 'mb-1.5 text-[11px] font-semibold uppercase tracking-wide text-slate-400';
+const sectionLabelClass = 'mb-1.5 text-[10px] font-bold uppercase tracking-wider text-slate-500';
 
 export const McpConnectedAppRow: React.FC<McpConnectedAppRowProps> = ({ app, onRevoke, revoking = false }) => {
   const [expanded, setExpanded] = useState(false);
@@ -64,7 +64,7 @@ export const McpConnectedAppRow: React.FC<McpConnectedAppRowProps> = ({ app, onR
           </>
         )}
         <span aria-hidden="true">•</span>
-        <span className="min-w-0 max-w-full truncate">ID: <span className="font-mono text-slate-600" title={app.id}>{app.id}</span></span>
+        <span className="inline-flex min-w-0 max-w-full items-center gap-1">ID: <CodeChip title={app.id}>{app.id}</CodeChip></span>
       </p>
 
       <div className="mt-3 space-y-3 pl-[38px]">

@@ -47,12 +47,14 @@ describe('mcpAppPresentation', () => {
 });
 
 describe('McpConnectedAppRow', () => {
-  it('renders the header, metadata and a monospace grant id', () => {
+  it('renders the header, metadata and the grant id as a code chip', () => {
     renderRow(makeApp());
     expect(screen.getByRole('heading', { name: 'Claude' })).toBeInTheDocument();
     expect(screen.getByText('Connected 2h ago')).toBeInTheDocument();
     expect(screen.getByText('Last used 1h ago')).toBeInTheDocument();
-    expect(screen.getByText('mcp-8f72a')).toHaveClass('font-mono');
+    const id = screen.getByText('mcp-8f72a');
+    expect(id).toHaveClass('font-mono', 'bg-slate-100', 'border', 'border-slate-200', 'rounded-sm', 'truncate');
+    expect(id).toHaveAttribute('title', 'mcp-8f72a');
   });
 
   it('shows "Never used" when the app has never been used', () => {
@@ -67,6 +69,7 @@ describe('McpConnectedAppRow', () => {
     const badges = within(group).getAllByRole('listitem').map(item => item.textContent);
     expect(badges).toEqual(['read', 'plan', 'execute', 'merge', 'custom']);
     expect(within(group).getByText('read')).toHaveClass('uppercase', 'text-[10px]', 'font-bold', 'text-slate-500', 'bg-slate-50');
+    expect(screen.getByText('Permissions')).toHaveClass('uppercase', 'text-[10px]', 'font-bold', 'tracking-wider', 'text-slate-500');
   });
 
   it('collapses 25 repositories to 10 chips and toggles in place', () => {

@@ -31,7 +31,7 @@ test('connected app rows are structured, escaped and individually addressable', 
   assert.match(html, /<h2 title="Claude &lt;b&gt;">Claude &lt;b&gt;<\/h2>/);
   assert.match(html, /aria-label="Revoke access for Claude &lt;b&gt; \(ID: grant-1\)">Revoke access<\/button>/);
   assert.match(html, /Connected 2h ago/);
-  assert.match(html, /ID: <code>grant-1<\/code>/);
+  assert.match(html, /ID: <span class="chip" title="grant-1">grant-1<\/span>/);
   assert.deepEqual([...html.matchAll(/class="scope">([^<]+)</g)].map(match => match[1]), ['read', 'plan', 'merge']);
   assert.match(html, /<span class="chip" title="integry\/mcptest">integry\/mcptest<\/span>/);
   assert.doesNotMatch(html, /<details/);
@@ -39,7 +39,7 @@ test('connected app rows are structured, escaped and individually addressable', 
 
 test('repository lists collapse after ten chips behind a native toggle', () => {
   const html = renderConnectedApp(grant({ repositories: [...repos(25), 'INTEGRY/REPO-1'] }), '');
-  const [visible, hidden] = html.split('<details');
+  const [visible, hidden] = html.slice(html.indexOf('>Repositories<')).split('<details');
   assert.equal(visible.match(/class="chip"/g)?.length, 10);
   assert.equal(hidden.match(/class="chip"/g)?.length, 15);
   assert.match(hidden, /\+ 15 more repositories<\/span><span class="expanded">Show fewer/);
