@@ -17,6 +17,8 @@ import {
   extractRpm,
   inspectRunningProcessGroupMembers,
   LaunchServicesAuthority,
+  linuxProtocolDispatch,
+  NativeLifecycleCommandFailure,
   NativeLifecycleEvidenceWaitFailure,
   NativeLifecycleFailure,
   NativeLifecycleOperationFailure,
@@ -26,11 +28,94 @@ import {
   removeLifecycleRootsWithAuthority,
   removeAuthorizedProfile,
   runningProcessGroupMembersFromPs,
+  runNativeLifecycleCommand,
   waitForEvents,
   waitForWarmOpenEvidence,
 } from './test-native-artifact-lifecycle.mjs';
 
 describe('native staged artifact lifecycle authority', () => {
+  test('classifies command failures without exposing command arguments or output', async () => {
+    const secret = 'https://secret.invalid/private-profile';
+    const cases = [
+      [process.execPath, ['-e', `console.error(${JSON.stringify(secret)}); process.exit(7)`], {}, 'COMMAND_FAILED'],
+      [`/missing/${secret}`, [], {}, 'COMMAND_SPAWN_FAILED'],
+      [process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { timeout: 100 }, 'COMMAND_DEADLINE'],
+      ...(process.platform === 'win32' ? [] : [
+        [process.execPath, ['-e', "process.kill(process.pid, 'SIGTERM')"], {}, 'COMMAND_SIGNALLED'],
+      ]),
+    ];
+    for (const [file, args, options, expected] of cases) {
+      await assert.rejects(runNativeLifecycleCommand(file, args, options), error => {
+        assert.ok(error instanceof NativeLifecycleCommandFailure);
+        assert.equal(error.resultClass, expected);
+        const failure = new NativeLifecycleOperationFailure('PROTOCOL_LAUNCH', error);
+        assert.equal(failure.resultClass, expected);
+        assert.match(failure.message, new RegExp(expected));
+        const combined = new NativeLifecycleFailure(failure, [{ label: 'profile-api', error: new Error(secret) }]);
+        assert.match(combined.message, new RegExp(expected));
+        assert.doesNotMatch(inspect(error) + inspect(failure) + inspect(combined), /secret\.invalid/);
+        return true;
+      });
+    }
+    assert.throws(() => new NativeLifecycleCommandFailure(secret), /result class is invalid/);
+    const success = await runNativeLifecycleCommand(process.execPath, ['-e', "process.stdout.write('ready')"]);
+    assert.equal(success.stdout.toString(), 'ready');
+  });
+
+  test('identifies each Linux protocol failure and still requires the registered handler and GIO dispatch', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'propr-native-protocol-'));
+    const source = join(directory, 'source.desktop');
+    const parameters = {
+      application: { desktopFile: source, executable: join(directory, 'propr-desktop') },
+      profile: { xdgData: join(directory, 'data'), userData: join(directory, 'profile') },
+      link: 'propr://connect?api=https%3A%2F%2Fsecret.invalid',
+      env: { PRIVATE: 'secret.invalid' },
+    };
+    const stages = ['PROTOCOL_DATABASE', 'PROTOCOL_REGISTER', 'PROTOCOL_QUERY', 'PROTOCOL_LAUNCH'];
+    try {
+      await writeFile(source, '[Desktop Entry]\nName=ProPR Desktop\nExec=propr-desktop %U\nType=Application\n');
+      for (const [failedIndex, stage] of stages.entries()) {
+        let calls = 0;
+        await assert.rejects(linuxProtocolDispatch(parameters, {
+          runCommand: async () => {
+            if (calls++ === failedIndex) throw new NativeLifecycleCommandFailure('COMMAND_FAILED');
+            return { stdout: Buffer.from('propr-desktop.desktop\n') };
+          },
+        }), error => {
+          assert.equal(error.stage, stage);
+          assert.equal(error.resultClass, 'COMMAND_FAILED');
+          assert.doesNotMatch(inspect(error), /secret\.invalid/);
+          return true;
+        });
+        assert.equal(calls, failedIndex + 1);
+      }
+      const calls = [];
+      await assert.rejects(linuxProtocolDispatch(parameters, {
+        runCommand: async (file, args) => {
+          calls.push(file);
+          return { stdout: Buffer.from(args[0] === 'query' ? 'secret.invalid.desktop' : '') };
+        },
+      }), error => {
+        assert.equal(error.stage, 'PROTOCOL_QUERY');
+        assert.equal(error.resultClass, 'UNEXPECTED_OUTPUT');
+        assert.doesNotMatch(inspect(error), /secret\.invalid/);
+        return true;
+      });
+      assert.equal(calls.length, 3);
+      calls.length = 0;
+      assert.match(await linuxProtocolDispatch(parameters, {
+        runCommand: async (file, args) => {
+          calls.push([file, args]);
+          return { stdout: Buffer.from('propr-desktop.desktop\n') };
+        },
+      }), /xdg-mime-registration\+gio-dispatch/);
+      assert.equal(calls.length, 4);
+      assert.deepEqual(calls.at(-1), ['/usr/bin/gio', ['open', parameters.link]]);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   test('signs only copied Darwin apps with the shared disposable identity and verifies stability', async () => {
     const source = await readFile(new URL('./test-native-artifact-lifecycle.mjs', import.meta.url), 'utf8');
     assert.match(source, /signDarwinPackagedConnectApplication/);
