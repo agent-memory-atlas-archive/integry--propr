@@ -3,9 +3,9 @@
 set -euo pipefail
 
 # Records where a CI job actually ran: the runner worker, the user its steps
-# run as and the cgroup v2 limits of its process tree. On the self-hosted
-# workers the runner service's CPUQuota/MemoryHigh/MemoryMax show up here.
-# Docker containers are not in this cgroup; ci-redis.sh limits its own.
+# run as and visible cgroup v2 limits. A container cgroup namespace can hide
+# the parent user slice that caps this runner plus sibling Docker workloads.
+# These observations do not verify host-wide containment or effective limits.
 # Read-only: it changes nothing on the host.
 
 read_limit() {
@@ -22,8 +22,8 @@ if [[ -r /proc/self/cgroup ]]; then
   CGROUP_PATH="$(sed -n 's/^0:://p' /proc/self/cgroup | head -n 1)"
 fi
 CGROUP_DIR=""
-# The step's shell sits in the runner service's cgroup (or a child of it), so
-# walk up to the nearest level that sets a limit.
+# Walk to the nearest visible level that sets a limit. Container namespace
+# roots may hide stricter host-side ancestors.
 if [[ -n "$CGROUP_PATH" && -d "/sys/fs/cgroup$CGROUP_PATH" ]]; then
   CGROUP_DIR="/sys/fs/cgroup$CGROUP_PATH"
   while [[ "$CGROUP_DIR" != /sys/fs/cgroup && "$(read_limit memory.max)" == max && "$(read_limit cpu.max)" == max* ]]; do
@@ -49,10 +49,12 @@ report="$(cat <<REPORT
 | Run attempt | \`${GITHUB_RUN_ATTEMPT:-unknown}\` |
 | Logical CPUs visible | \`$(nproc 2>/dev/null || echo unknown)\` |
 | Process cgroup | \`${CGROUP_PATH:-unavailable}\` |
-| Limiting cgroup | \`${LIMITING_CGROUP:-unavailable}\` |
+| Visible limiting cgroup | \`${LIMITING_CGROUP:-unavailable}\` |
 | cpu.max | \`$(read_limit cpu.max)\` |
 | memory.high | \`$(read_limit memory.high)\` |
 | memory.max | \`$(read_limit memory.max)\` |
+
+Container-visible cgroups may hide ancestor limits; host pilot evidence is required for the combined per-user cap.
 REPORT
 )"
 

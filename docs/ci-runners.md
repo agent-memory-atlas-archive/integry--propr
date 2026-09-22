@@ -1,66 +1,36 @@
 # CI runner routing
 
-Compatible Linux x64 PR checks support the four gitfix.dev workers labelled
-`[self-hosted, Linux, X64, propr]`. There are four independent matrix shard
-jobs, one job per available worker, and no nested shard coordinator. Other
-eligible jobs share the same pool and can queue ahead of shards; four shards
-are not guaranteed to start simultaneously.
+The owner chose rootless Docker isolation on gitfix.dev instead of VM migration
+for this pilot. Compatible Linux x64 checks support four workers labelled
+`[self-hosted, Linux, X64, propr-rootless]`. Four independent matrix shard jobs
+remain, one job per available worker, without a nested coordinator. Other
+eligible jobs share this pool, so simultaneous shard starts are not guaranteed.
+These PR check jobs never select the old generic `propr` label.
 
-**Activation is gated pending independent fork-access verification.**
-`PROPR_SELF_HOSTED_PR_ACCESS_VERIFIED` must be explicitly `true`, and
-`PROPR_SELF_HOSTED_PR_CHECKS` must not be `false`. Without that opt-in the
-checks use GitHub-hosted runners. The older switch alone cannot activate
-routing. Neither variable nor the routing expression is an access-control
-boundary: a PR can replace the entire workflow.
+**Leave `PROPR_ROOTLESS_PR_CHECKS` unset until the owner supplies host pilot
+evidence.** Only the explicit value `true` opts in; unset, empty or `false`
+selects GitHub-hosted runners. Set it to `false` or remove it as the operational
+off switch. This implementation does not set repository variables, provision
+host services, change GitHub permissions, merge or deploy.
 
-## Fork exclusion and administrator prerequisite
+## Approval-based trust model
 
-Read-only inspection on 2026-09-22 confirmed that `integry/propr` is a public,
-user-owned repository. The available integration received HTTP 403 for:
+The owner reports enabling manual approval for all external contributors.
+Fork workflows require manual approval and their ordinary route is hosted.
+Approval must include review of workflow edits and requested runner labels:
+PR-editable routing is **not strict admission control**. An approved fork can
+edit its workflow to request these labels directly. The flag signifies rootless
+execution, not independently enforced fork exclusion. Neither setting nor
+requiring `PROPR_SELF_HOSTED_PR_ACCESS_VERIFIED` would establish that guarantee;
+it is no longer consulted. The previous `PROPR_SELF_HOSTED_PR_CHECKS` flag also
+has no effect on these routes.
 
-- `GET /repos/integry/propr/actions/runners`
-- `GET /repos/integry/propr/actions/permissions/fork-pr-contributor-approval`
-- `GET /repos/integry/propr/actions/permissions/fork-pr-workflows-private-repos`
-- `GET /repos/integry/propr/actions/variables`
-
-The private-repository fork setting is not a solution for this public repo.
-SSH inspection could not run because this editing environment has no SSH
-client. The owner's report of four online workers is therefore provisioning
-context, not an independently verified runner-access policy. No settings,
-services, registration, permissions or production data were changed.
-
-Before activation, an administrator must establish and demonstrate a denial
-of **all fork-origin jobs before any PR-controlled code executes** on all
-four workers, including a fork workflow that directly requests the labels,
-removes the routing expression, or uses an `always()` step or job container.
-Workflow approval for outside contributors is insufficient: an approved fork
-run still must not execute on this host. The rule must cover repeat
-contributors, collaborators' forks and reruns, not only first-time authors.
-
-A concrete GitHub-native prerequisite is organization/enterprise runner-group
-access restricted to selected, reviewed **workflow file + immutable SHA**
-entries, with no unrestricted repository-runner registration exposing these
-workers. GitHub's [runner-group access controls](https://docs.github.com/en/actions/how-tos/manage-runners/self-hosted-runners/manage-access)
-apply to jobs defined in the selected workflows. A trusted reusable workflow
-entrypoint must reject fork events before scheduling its self-hosted jobs and
-bind its checkout to the validated same-repository event. Allowing arbitrary
-PR merge refs or just a workflow filename would defeat that restriction.
-
-That option requires administrator-managed organization runner access and
-trusted entrypoints; this public user-owned repository does not establish
-those controls today. This change restores the direct-job routing support,
-but does not supply that infrastructure or claim a runner-group policy was
-verified. An existing independent runner admission mechanism is acceptable
-only after an administrator demonstrates the same pre-execution denial,
-including containers/actions and cleanup steps. A check inside this repo's
-workflow cannot substitute for it.
-
-Keep `PROPR_SELF_HOSTED_PR_ACCESS_VERIFIED` unset/false until the administrator
-records the effective registration/access policy, its trusted policy revision,
-and denial evidence for those fork cases on every worker. Only then set it to
-`true` and validate same-repository placement at the resulting PR head. If the
-restriction cannot be established, activation remains blocked. The switch is
-an operational acknowledgement of that prerequisite, not its enforcement.
+Rootless contains processes under dedicated unprivileged host accounts. It is
+not a VM, does not provide a separate kernel, and is not a guarantee against
+kernel exploits or cross-job persistence. Jobs with a worker's Docker socket
+control that user's daemon and can leave containers or other state behind.
+Job cleanup is hygiene, not a security boundary. Approval settings are an owner
+report, not independently verified security evidence from this implementation.
 
 ## Placement after activation
 
@@ -71,9 +41,9 @@ for consistency across all eligible jobs.
 
 | Workflow | Jobs | Activated placement |
 | --- | --- | --- |
-| `pr-test-on-label.yml` | `shard` (four entries), `docs` | gitfix.dev pool |
-| `pr-build-check.yml` | `validate`, `visual-previews`, `cli-node-matrix`, `cli-init-json` | gitfix.dev pool |
-| `cli-node-compatibility.yml` | `project-options` | gitfix.dev pool |
+| `pr-test-on-label.yml` | `shard` (four entries), `docs` | gitfix.dev rootless pool |
+| `pr-build-check.yml` | `validate`, `visual-previews`, `cli-node-matrix`, `cli-init-json` | gitfix.dev rootless pool |
+| `cli-node-compatibility.yml` | `project-options` | gitfix.dev rootless pool |
 | `pr-test-on-label.yml` | `native-electron` | Hosted Ubuntu, mandatory native assertions |
 | `pr-build-check.yml` | `cli-agent-skill-glibc-231` | Hosted Ubuntu; disposable glibc 2.31 container and ordinary-user ownership changes |
 | Native macOS, Windows and ARM64 checks | Existing platform jobs | Matching hosted platforms |
@@ -81,40 +51,87 @@ for consistency across all eligible jobs.
 | Aggregate gate and failure reporters | `test`, `comment` | Hosted control/reporting jobs |
 
 Build/lint/docs coverage is unchanged. No `pull_request_target` execution or
-permission expansion is introduced. Release/deployment workflows are unchanged.
+permission expansion is introduced. Release/deployment workflows, including the
+separate label-authorized PR Preview deployment, are unchanged.
 The glibc and desktop exceptions retain their existing environment validation;
-they are not weakened to fit a root-run host.
+they are not weakened to fit the rootless pilot.
 
-## Four-worker capacity and isolation
+## Expected pilot topology and workflow prerequisites
 
-The provisioned contract is a separate runner installation/work directory for
-each worker, `CPUQuota=200%`, `MemoryHigh=6G`, and `MemoryMax=8G`. This bounds
-four runner process trees to eight CPU equivalents and 32 GiB. The workflows
-do not change those service settings. Each eligible job records observed
-runner name, environment, uid and cgroup limits with
-`scripts/ci-runner-evidence.sh`; the administrator must check the actual limits.
+Host provisioning and validation are separate owner-managed work. This is the
+expected contract, not a claim that the workers are configured or validated:
 
-Every eligible job uses a clean checkout with `persist-credentials: false`.
-On self-hosted runners it isolates HOME, XDG state, npm and Playwright caches
-under its worker's job-local `RUNNER_TEMP`. A private `mktemp` directory under
-`/tmp` avoids shared state and long Chromium socket paths. Docs setup also
-gets a job-local `PROPR_CACHE_DIR`. The shard build verifies old `dist` output
-is absent and fresh output exists. Chromium system packages are installed
-only on disposable hosted runners; required shared-host libraries must already
-be provisioned. Missing prerequisites fail checks rather than trigger host
-package installation.
+- Each worker has a dedicated unprivileged host user, a user-scoped rootless
+  Docker daemon, and its own runner installation, work and temporary directories.
+  The runner executes in a container on that daemon and connects only to that
+  daemon's socket. Production `/var/run/docker.sock`, production credentials,
+  other users' sockets and host Docker client credentials are never mounted.
+- Export an explicit `DOCKER_HOST=unix:///run/user/<host-uid>/docker.sock` in the
+  runner container, with its own socket mounted at that path. Unset
+  `DOCKER_CONTEXT`, `DOCKER_TLS_VERIFY` and `DOCKER_CERT_PATH`. Job setup replaces
+  HOME and Docker client config, so a saved HOME-based Docker context is not a
+  reliable endpoint. `ci-rootless-preflight.sh` rejects default/remote/production
+  endpoints, checks the daemon reports rootless, and requires cgroup v2/systemd.
+  It does not prove socket ownership, host mount isolation or effective limits.
+- CI paths used as Docker bind sources must contain the same files at the same
+  absolute path inside the runner and the daemon's host mount namespace. Map
+  the workspace, work/temp roots and any bind-source scratch paths accordingly;
+  runner-only container paths do not satisfy sibling-container binds. The lint
+  tools use read-only `--mount` binds, which fail for missing source directories
+  rather than creating empty host directories. Pilot evidence must also prove
+  file identity, not merely that a path exists.
+- The runner uses `--network host` inside its own daemon's RootlessKit network
+  namespace, **not production host networking**. Redis publishes a dynamically
+  assigned loopback port; the runner must be able to reach that port. Validate
+  this with the actual Docker version and network driver. Ordinary bridge
+  networking gives the runner a different loopback and breaks this assumption.
+- Per-user cgroup limits cap the runner and sibling Docker workloads together:
+  target `CPUQuota=200%`, `MemoryHigh=6G`, `MemoryMax=8G` per worker, at most eight
+  CPU equivalents and 32 GiB across four users. Delegate the controllers needed
+  for CPU, memory and PID limits. The workflow does not configure these limits.
+  Redis keeps `--memory 512m --memory-swap 512m --cpus 1 --pids-limit 64`;
+  lint tool containers keep `--memory 1g --memory-swap 1g --cpus 1
+  --pids-limit 256`, `--network none` and `--rm`. Individual limits supplement
+  the combined user cap. Daemon metadata alone cannot prove their enforcement.
+
+The runner image must already provide Bash, Git, Docker CLI, curl, tar, gzip,
+unzip, Python 3, make, g++, sha256sum, timeout and bootstrap Node/npm (Node 22+
+for pre-setup diagnostics). Setup-node selects each job's requested Node version;
+its tool cache and the workspace/temp paths must be writable by the runner's
+container user. Browser libraries, CA certificates and native build dependencies
+belong in the runner image. Jobs install npm packages and browser binaries into
+job state; they never apt-install system packages into the production host.
+Missing prerequisites fail rather than trigger host provisioning.
+
+Container UID 0 is not proof of host root, and nonzero UID is not proof of a
+rootless daemon. Record both the runner-visible UID and the externally verified
+host user/daemon mapping. Native Electron and desktop checks retain their hosted
+ordinary-user sandbox/session environments; no sandbox flags or assertions are
+weakened for the pilot.
+
+Every eligible job uses clean checkout and `persist-credentials: false`. HOME,
+XDG state, Docker client config, npm and Playwright caches are job-local under
+`RUNNER_TEMP`; docs also gets `PROPR_CACHE_DIR`. A private `/tmp/propr-ci.*`
+directory avoids long Chromium socket paths. The shard build verifies old dist
+output is absent and fresh output exists.
 
 Final `always()` steps remove generated files only from the job's own workspace
-and private temporary directory. Shards stop their own Redis on cancellation
-and failure. Runner-managed process cleanup and `RUNNER_TEMP` cleanup remain
-in effect. Hard host failure/forced termination can bypass cleanup; a later
-attempt recovers only its own older Redis containers. There is no global prune.
+and private temp directory. Shards stop only owned Redis containers, on the
+validated rootless daemon; failed preflight cannot enable Docker cleanup.
+Runner-managed process/temp cleanup still applies. Hard failure can bypass
+cleanup; recovery removes only the same owner's older Redis attempts. No global
+prune or cleanup of other workers/daemons is introduced.
 
-Docker containers run outside the worker service cgroups. Redis explicitly
-uses `--memory 512m --memory-swap 512m --cpus 1 --pids-limit 64` per container.
-The validation tool containers use `--memory 1g --memory-swap 1g --cpus 1
---pids-limit 256`, `--network none`, read-only checkout mounts and `--rm`.
-These ceilings are additional to the runner process-tree limits.
+Before activation, the owner supplies all four user/daemon/runner mappings,
+mount and file-identity evidence, Redis loopback reachability, effective per-user
+and per-container resource enforcement (including concurrent workloads), and
+network/production-access evidence. `ci-runner-evidence.sh` records placement
+and container-visible cgroups; hidden parent limits require host-side evidence.
+No activation or completed security checks are claimed by this design.
+
+Docker's [rootless client and resource-limit documentation](https://docs.docker.com/engine/security/rootless/tips/)
+and [networking limitations](https://docs.docker.com/engine/security/rootless/troubleshoot/)
+explain the endpoint, delegation and namespace assumptions.
 
 ## Redis ownership
 
@@ -163,8 +180,8 @@ its gate fails closed and its failure reporter avoids posting a stale comment.
 
 ## Verification and timing evidence
 
-Local validation of this follow-up covers Redis ownership, routing activation
-and fork/default-branch cases, coverage verification, partial reruns, mandatory
+Local regression validation covers Redis ownership, rootless prerequisites,
+routing activation and fork/default-branch cases, coverage verification, partial reruns, mandatory
 Electron enforcement, sanitization and cleanup. Docker ownership tests use a
 CLI double; no real Docker daemon or gitfix.dev execution was available here.
 
@@ -209,7 +226,7 @@ from an older head as proof. **Resulting-head CI and gitfix.dev placement remain
 pending activation and a new run.**
 
 There is no automatic fallback when activated workers are busy/offline. Set
-`PROPR_SELF_HOSTED_PR_CHECKS=false` to route new jobs hosted; already queued jobs
+`PROPR_ROOTLESS_PR_CHECKS=false` to route new jobs hosted; already queued jobs
 need cancellation/restart. For partial failures rerun failed jobs and verify
 the aggregate gate, including prior successful shard artifacts.
 
@@ -218,6 +235,6 @@ the aggregate gate, including prior successful shard artifacts.
 `test-nightly.yml` keeps its unsharded full suite/live E2E and existing
 self-hosted labels. Scheduled/manual runs across refs share
 `nightly-test-suite` with `cancel-in-progress: false`: one active run, at most
-one pending run. This does not serialize other workflows; nightly and PR
-checks compete for the worker pool. Nightly also receives the Redis ownership
-fix. This follow-up does not activate or change nightly runner access.
+one pending run. This does not serialize other workflows; nightly retains the
+legacy pool while PR checks select only the rootless label. Nightly also
+receives the Redis ownership fix. This follow-up does not activate or change nightly runner access.

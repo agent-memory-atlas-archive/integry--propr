@@ -349,28 +349,38 @@ describe('PR check routing', () => {
             assert.ok(expression, `${name} has gated routing`);
             return expression;
         });
+        for (const expression of expressions) {
+            assert.doesNotMatch(expression, /PROPR_SELF_HOSTED_PR_ACCESS_VERIFIED|PROPR_SELF_HOSTED_PR_CHECKS|"propr"/);
+        }
         assert.equal(new Set(expressions).size, 1, 'all routing uses the same conditions');
         const evaluate = new Function('vars', 'github', 'fromJSON', 'format', `return ${expressions[0]}`);
         const github = {
             actor: 'maintainer', repository: 'integry/propr', event_name: 'pull_request', ref: 'refs/pull/2466/merge',
-            event: { repository: { default_branch: 'main' }, pull_request: { head: { repo: { full_name: 'integry/propr' } } } },
+            event: { repository: { default_branch: 'main' }, pull_request: { user: { login: 'maintainer' }, head: { repo: { full_name: 'integry/propr' } } } },
         };
-        const enabled = { PROPR_SELF_HOSTED_PR_ACCESS_VERIFIED: 'true' };
+        const enabled = { PROPR_ROOTLESS_PR_CHECKS: 'true' };
         const cases = [
             [enabled, github, true],
             [{}, github, false],
             [{ PROPR_SELF_HOSTED_PR_CHECKS: 'true' }, github, false],
-            [{ ...enabled, PROPR_SELF_HOSTED_PR_CHECKS: 'false' }, github, false],
+            [{ PROPR_ROOTLESS_PR_CHECKS: 'false' }, github, false],
+            [{ PROPR_ROOTLESS_PR_CHECKS: '' }, github, false],
+            [{ PROPR_ROOTLESS_PR_CHECKS: '1' }, github, false],
+            [{ PROPR_SELF_HOSTED_PR_ACCESS_VERIFIED: 'true', PROPR_SELF_HOSTED_PR_CHECKS: 'true' }, github, false],
+            [{ ...enabled, PROPR_SELF_HOSTED_PR_ACCESS_VERIFIED: 'false' }, github, true],
             [{ PROPR_SELF_HOSTED_PR_ACCESS_VERIFIED: 'false' }, github, false],
             [enabled, { ...github, actor: 'dependabot[bot]' }, false],
-            [enabled, { ...github, event: { pull_request: { head: { repo: { full_name: 'fork/propr' } } } } }, false],
+            [enabled, { ...github, event: { ...github.event, pull_request: { ...github.event.pull_request, user: { login: 'dependabot[bot]' } } } }, false],
+            [enabled, { ...github, event: { pull_request: { user: { login: 'contributor' }, head: { repo: { full_name: 'fork/propr' } } } } }, false],
             [enabled, { ...github, event_name: 'workflow_dispatch', ref: 'refs/heads/main' }, true],
             [enabled, { ...github, event_name: 'workflow_dispatch', ref: 'refs/heads/unreviewed' }, false],
             [enabled, { ...github, event_name: 'push' }, false],
+            [enabled, { ...github, event_name: 'pull_request_target' }, false],
+            [enabled, { ...github, event_name: 'schedule' }, false],
         ];
         for (const [vars, context, selfHosted] of cases) {
             assert.deepEqual(evaluate(vars, context, JSON.parse, (pattern, value) => pattern.replace('{0}', value)),
-                selfHosted ? ['self-hosted', 'Linux', 'X64', 'propr'] : ['ubuntu-latest'], JSON.stringify({ vars, context }));
+                selfHosted ? ['self-hosted', 'Linux', 'X64', 'propr-rootless'] : ['ubuntu-latest'], JSON.stringify({ vars, context }));
         }
     });
 
@@ -396,6 +406,8 @@ describe('PR check routing', () => {
             assert.doesNotMatch(block, /clean: false/, `${name} keeps the clean checkout`);
             assert.match(block, /- name: Isolate job state from the shared host\n\s+if: runner\.environment == 'self-hosted'\n/, name);
             const isolate = extractRunBlock(block, 'Isolate job state from the shared host');
+            assert.ok(isolate.indexOf('./scripts/ci-rootless-preflight.sh') < isolate.indexOf('echo "HOME='), name);
+            assert.match(isolate, /echo "DOCKER_CONFIG=\$job_root\/home\/\.docker"/, name);
             assert.match(isolate, /^job_root="\$RUNNER_TEMP\/ci"$/m, name);
             for (const variable of ['HOME', 'XDG_CONFIG_HOME', 'XDG_CACHE_HOME', 'PLAYWRIGHT_BROWSERS_PATH']) {
                 assert.match(isolate, new RegExp(`echo "${variable}=\\$job_root/`), `${name} ${variable}`);
@@ -421,7 +433,7 @@ describe('PR check routing', () => {
     test('isolates each shard Redis by shard and attempt and records the worker that ran it', () => {
         const shard = jobBlock(fullSuite, 'shard');
         assert.equal(shard.match(/CI_REDIS_INSTANCE: shard-\$\{\{ matrix\.shard \}\}\n\s+run: \.\/scripts\/ci-redis\.sh (?:start|stop)/g).length, 2);
-        assert.match(shard, /- name: Stop isolated Redis\n\s+if: always\(\)\n/);
+        assert.match(shard, /- name: Stop isolated Redis\n\s+if: always\(\) && \(runner.environment != 'self-hosted' \|\| env.PROPR_ROOTLESS_DOCKER_READY == 'true'\)\n/);
         assert.match(shard, /PROPR_EVIDENCE_LABEL: shard \$\{\{ matrix\.shard \}\}\/4\n/);
         const stages = shard.slice(shard.indexOf('- name: Record shard stage outcomes'), shard.indexOf('- name: Sanitize test output'));
         assert.match(stages, /const runner = \{ name: env\.RUNNER_NAME, environment: env\.RUNNER_ENVIRONMENT \};/);
@@ -555,9 +567,11 @@ describe('PR check routing', () => {
         assert.equal(validate.split('./scripts/ci-install-chromium.sh').length - 1, 2);
         const toolContainers = validate.match(/docker run [^\n]*\n[^\n]*\n/g);
         assert.equal(toolContainers.length, 2);
+        assert.equal(validate.match(/--mount "type=bind,source=\$GITHUB_WORKSPACE,target=\/work,readonly"/g).length, 2);
+        assert.doesNotMatch(validate, /--volume/);
         for (const container of toolContainers) {
             assert.match(container, /--rm/);
-            assert.match(container, /--network none --memory 1g --memory-swap 1g --cpus 1 --pids-limit 256/, 'tool containers run outside the runner cgroup, so they carry their own limits');
+            assert.match(container, /--network none --memory 1g --memory-swap 1g --cpus 1 --pids-limit 256/, 'tool containers retain individual limits in addition to the per-user cap');
         }
         const expected = {
             'cli-agent-skill-glibc-231': 'ubuntu-latest',
@@ -600,6 +614,65 @@ describe('PR check routing', () => {
         assert.equal(install(undefined), 'npx playwright install chromium');
         for (const [name, block] of routedJobs()) {
             assert.doesNotMatch(block, /--with-deps/, name);
+        }
+    });
+});
+
+describe('rootless runner prerequisites', () => {
+    function preflight(overrides = {}) {
+        const root = freshDirectory('rootless');
+        const bin = join(root, 'bin');
+        mkdirSync(bin);
+        writeFileSync(join(bin, 'docker'), `#!/usr/bin/env bash
+set -eu
+[[ "$DOCKER_HOST" == unix:///run/user/1001/docker.sock ]]
+[[ "$DOCKER_CONFIG" == "$RUNNER_TEMP/propr-docker-client" ]]
+[[ "$(cat "$DOCKER_CONFIG/config.json")" == '{"auths":{}}' ]]
+case "$*" in
+  *SecurityOptions*) echo "\${FAKE_SECURITY-name=rootless}" ;;
+  *CgroupVersion*) echo "\${FAKE_CGROUPS-2/systemd}" ;;
+  *) exit 90 ;;
+esac
+`);
+        chmodSync(join(bin, 'docker'), 0o755);
+        // Image executables are prerequisites, not dependencies of this test host.
+        for (const executable of ['git', 'curl', 'tar', 'gzip', 'unzip', 'python3', 'make', 'g++', 'sha256sum', 'timeout', 'node', 'npm']) {
+            writeFileSync(join(bin, executable), '#!/usr/bin/env bash\nexit 0\n');
+            chmodSync(join(bin, executable), 0o755);
+        }
+        const envFile = join(root, 'env');
+        writeFileSync(envFile, '');
+        const result = spawnSync('bash', [join(REPOSITORY, 'scripts/ci-rootless-preflight.sh')], {
+            encoding: 'utf8',
+            env: { PATH: `${bin}:${process.env.PATH}`, HOME: root, RUNNER_TEMP: root,
+                GITHUB_WORKSPACE: root, GITHUB_ENV: envFile,
+                DOCKER_HOST: 'unix:///run/user/1001/docker.sock', ...overrides },
+        });
+        return { ...result, exported: readFileSync(envFile, 'utf8') };
+    }
+
+    test('pins only the explicit rootless daemon across HOME changes without inherited client credentials', () => {
+        const result = preflight({ DOCKER_CONFIG: '/unrelated/client/config' });
+        assert.equal(result.status, 0, result.stderr);
+        assert.match(result.exported, /^DOCKER_HOST=unix:\/\/\/run\/user\/1001\/docker.sock$/m);
+        assert.match(result.exported, /^DOCKER_CONTEXT=$/m);
+        assert.match(result.exported, /^PROPR_ROOTLESS_DOCKER_READY=true$/m);
+        assert.match(result.stdout, /still require pilot evidence/);
+    });
+
+    test('fails before enabling cleanup for missing, conflicting, rootful or unbounded Docker endpoints', () => {
+        for (const overrides of [
+            { DOCKER_HOST: '' }, { DOCKER_HOST: 'unix:///var/run/docker.sock' },
+            { DOCKER_HOST: 'unix:///run/docker.sock' }, { DOCKER_HOST: 'tcp://localhost:2375' },
+            { DOCKER_CONTEXT: 'production' }, { DOCKER_TLS_VERIFY: '1' },
+            { FAKE_SECURITY: 'name=seccomp' }, { FAKE_CGROUPS: '2/none' },
+            { FAKE_CGROUPS: '1/systemd' }, { GITHUB_WORKSPACE: '/nonexistent-propr-workspace' },
+        ]) {
+            const result = preflight(overrides);
+            assert.notEqual(result.status, 0, JSON.stringify(overrides));
+            assert.match(result.stderr, /Rootless runner prerequisite:/);
+            assert.doesNotMatch(result.stderr, /missing .* in the runner image/);
+            assert.equal(result.exported, '', JSON.stringify(overrides));
         }
     });
 });

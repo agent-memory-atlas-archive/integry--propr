@@ -15,14 +15,14 @@ env:
   PROPR_TEST_SHARD_COUNT: '4'
 
 # Four workers, one matrix shard per worker. The opt-in is an activation gate,
-# not an access-control boundary; forks must be denied outside PR-editable YAML.
+# not an access-control boundary; editable fork workflows require careful approval.
 
 jobs:
   shard:
     name: Full Test Suite Shard ${{ matrix.shard }}/4
     if: ${{ github.event_name == 'workflow_dispatch' || !github.event.pull_request.draft }}
-    # Activation requires independently enforced fork exclusion; see docs/ci-runners.md.
-    runs-on: ${{ fromJSON(vars.PROPR_SELF_HOSTED_PR_ACCESS_VERIFIED == 'true' && vars.PROPR_SELF_HOSTED_PR_CHECKS != 'false' && github.actor != 'dependabot[bot]' && ((github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) || (github.event_name == 'workflow_dispatch' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch))) && '["self-hosted","Linux","X64","propr"]' || '["ubuntu-latest"]') }}
+    # Rootless opt-in; approval-based trust, not strict admission control. See docs/ci-runners.md.
+    runs-on: ${{ fromJSON(vars.PROPR_ROOTLESS_PR_CHECKS == 'true' && github.actor != 'dependabot[bot]' && ((github.event_name == 'pull_request' && github.event.pull_request.user.login != 'dependabot[bot]' && github.event.pull_request.head.repo.full_name == github.repository) || (github.event_name == 'workflow_dispatch' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch))) && '["self-hosted","Linux","X64","propr-rootless"]' || '["ubuntu-latest"]') }}
     timeout-minutes: 45
     permissions:
       contents: read
@@ -48,6 +48,7 @@ jobs:
         if: runner.environment == 'self-hosted'
         run: |
           set -euo pipefail
+          ./scripts/ci-rootless-preflight.sh
           job_root="$RUNNER_TEMP/ci"
           rm -rf -- "$job_root"
           mkdir -p "$job_root/home" "$job_root/pw"
@@ -59,6 +60,7 @@ jobs:
           tmp_dir="$(mktemp -d /tmp/propr-ci.XXXXXX)"
           {
             echo "HOME=$job_root/home"
+            echo "DOCKER_CONFIG=$job_root/home/.docker"
             echo "TMPDIR=$tmp_dir"
             echo "PROPR_CI_TMPDIR=$tmp_dir"
             echo "XDG_CONFIG_HOME=$job_root/home/.config"
@@ -182,7 +184,7 @@ jobs:
       # Stops only this shard's own container for this attempt, also on
       # failure and cancellation.
       - name: Stop isolated Redis
-        if: always()
+        if: always() && (runner.environment != 'self-hosted' || env.PROPR_ROOTLESS_DOCKER_READY == 'true')
         env:
           CI_REDIS_INSTANCE: shard-${{ matrix.shard }}
         run: ./scripts/ci-redis.sh stop
@@ -199,8 +201,8 @@ jobs:
   docs:
     name: Validate Test Preparation and Docs
     if: ${{ github.event_name == 'workflow_dispatch' || !github.event.pull_request.draft }}
-    # Activation requires independently enforced fork exclusion; see docs/ci-runners.md.
-    runs-on: ${{ fromJSON(vars.PROPR_SELF_HOSTED_PR_ACCESS_VERIFIED == 'true' && vars.PROPR_SELF_HOSTED_PR_CHECKS != 'false' && github.actor != 'dependabot[bot]' && ((github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) || (github.event_name == 'workflow_dispatch' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch))) && '["self-hosted","Linux","X64","propr"]' || '["ubuntu-latest"]') }}
+    # Rootless opt-in; approval-based trust, not strict admission control. See docs/ci-runners.md.
+    runs-on: ${{ fromJSON(vars.PROPR_ROOTLESS_PR_CHECKS == 'true' && github.actor != 'dependabot[bot]' && ((github.event_name == 'pull_request' && github.event.pull_request.user.login != 'dependabot[bot]' && github.event.pull_request.head.repo.full_name == github.repository) || (github.event_name == 'workflow_dispatch' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch))) && '["self-hosted","Linux","X64","propr-rootless"]' || '["ubuntu-latest"]') }}
     timeout-minutes: 30
     permissions:
       contents: read
@@ -226,6 +228,7 @@ jobs:
         if: runner.environment == 'self-hosted'
         run: |
           set -euo pipefail
+          ./scripts/ci-rootless-preflight.sh
           job_root="$RUNNER_TEMP/ci"
           rm -rf -- "$job_root"
           mkdir -p "$job_root/home" "$job_root/pw" "$job_root/setup"
@@ -237,6 +240,7 @@ jobs:
           tmp_dir="$(mktemp -d /tmp/propr-ci.XXXXXX)"
           {
             echo "HOME=$job_root/home"
+            echo "DOCKER_CONFIG=$job_root/home/.docker"
             echo "TMPDIR=$tmp_dir"
             echo "PROPR_CI_TMPDIR=$tmp_dir"
             echo "XDG_CONFIG_HOME=$job_root/home/.config"
@@ -289,7 +293,7 @@ jobs:
           case "${PROPR_CI_TMPDIR:-}" in /tmp/propr-ci.*) rm -rf -- "$PROPR_CI_TMPDIR" ;; esac
 
   native-electron:
-    # This environment is unavailable on the root-run shared host. Require
+    # The rootless pilot does not provide the native sandbox/session contract. Require
     # actual native assertions on hosted runners on either shard route.
     name: Full Test Suite Native Electron (hosted)
     if: ${{ github.event_name == 'workflow_dispatch' || !github.event.pull_request.draft }}

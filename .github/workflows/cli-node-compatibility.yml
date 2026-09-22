@@ -16,8 +16,8 @@ concurrency:
 jobs:
   project-options:
     name: Project options (Node ${{ matrix.node-version }})
-    # Activation requires independently enforced fork exclusion; see docs/ci-runners.md.
-    runs-on: ${{ fromJSON(vars.PROPR_SELF_HOSTED_PR_ACCESS_VERIFIED == 'true' && vars.PROPR_SELF_HOSTED_PR_CHECKS != 'false' && github.actor != 'dependabot[bot]' && ((github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) || (github.event_name == 'workflow_dispatch' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch))) && '["self-hosted","Linux","X64","propr"]' || '["ubuntu-latest"]') }}
+    # Rootless opt-in; approval-based trust, not strict admission control. See docs/ci-runners.md.
+    runs-on: ${{ fromJSON(vars.PROPR_ROOTLESS_PR_CHECKS == 'true' && github.actor != 'dependabot[bot]' && ((github.event_name == 'pull_request' && github.event.pull_request.user.login != 'dependabot[bot]' && github.event.pull_request.head.repo.full_name == github.repository) || (github.event_name == 'workflow_dispatch' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch))) && '["self-hosted","Linux","X64","propr-rootless"]' || '["ubuntu-latest"]') }}
     strategy:
       fail-fast: false
       matrix:
@@ -36,6 +36,7 @@ jobs:
         if: runner.environment == 'self-hosted'
         run: |
           set -euo pipefail
+          ./scripts/ci-rootless-preflight.sh
           job_root="$RUNNER_TEMP/ci"
           rm -rf -- "$job_root"
           mkdir -p "$job_root/home" "$job_root/pw"
@@ -47,6 +48,7 @@ jobs:
           tmp_dir="$(mktemp -d /tmp/propr-ci.XXXXXX)"
           {
             echo "HOME=$job_root/home"
+            echo "DOCKER_CONFIG=$job_root/home/.docker"
             echo "TMPDIR=$tmp_dir"
             echo "PROPR_CI_TMPDIR=$tmp_dir"
             echo "XDG_CONFIG_HOME=$job_root/home/.config"
