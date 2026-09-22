@@ -3,12 +3,13 @@ import { Film, ImageOff } from 'lucide-react';
 import { trustedPreviewMedia, type PublishedVisualPreview } from '@propr/shared';
 import { downsampleToCanvas } from './previewDownsampling';
 
-export function PreviewImage({ preview, compact = false }: { preview: PublishedVisualPreview; compact?: boolean }) {
+/** `className` replaces the default full-size sizing classes; compact thumbnails keep their fixed sizing. */
+export function PreviewImage({ preview, compact = false, className: sizing }: { preview: PublishedVisualPreview; compact?: boolean; className?: string }) {
   const [failed, setFailed] = useState(false);
   const [downsampled, setDownsampled] = useState(false);
   const imageRef = useRef<HTMLImageElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const className = compact ? 'h-12 w-full object-contain bg-slate-900/5 sm:h-14' : 'aspect-video w-full object-contain';
+  const className = compact ? 'h-12 w-full object-contain bg-slate-900/5 sm:h-14' : sizing ?? 'aspect-video w-full object-contain';
 
   const draw = useCallback(() => {
     const image = imageRef.current;
