@@ -39,7 +39,40 @@ export default function PreviewLightbox({ previews, index, onIndexChange, onClos
     closeRef.current?.focus();
     const { overflow } = document.body.style;
     document.body.style.overflow = 'hidden';
+    // Guard focus at the document boundary: app-level shortcuts (e.g. Ctrl/Cmd+K) can focus background
+    // content directly, after which the dialog's own handlers would no longer see keyboard events.
+    let lastInside: HTMLElement | null = closeRef.current;
+    const handleFocusIn = (event: FocusEvent) => {
+      const dialog = dialogRef.current;
+      const target = event.target as HTMLElement;
+      if (!dialog || dialog.contains(target)) {
+        lastInside = target;
+        return;
+      }
+      const restore = lastInside?.isConnected && lastInside.matches(FOCUSABLE) ? lastInside : closeRef.current;
+      restore?.focus();
+    };
+    const handleTab = (event: globalThis.KeyboardEvent) => {
+      if (event.key !== 'Tab') return;
+      const focusable = [...(dialogRef.current?.querySelectorAll<HTMLElement>(FOCUSABLE) ?? [])];
+      if (!focusable.length) return;
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      const active = document.activeElement;
+      const outside = !focusable.includes(active as HTMLElement);
+      if (event.shiftKey && (active === first || outside)) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && (active === last || outside)) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
+    document.addEventListener('focusin', handleFocusIn);
+    document.addEventListener('keydown', handleTab, true);
     return () => {
+      document.removeEventListener('focusin', handleFocusIn);
+      document.removeEventListener('keydown', handleTab, true);
       document.body.style.overflow = overflow;
       returnFocusTo?.focus();
     };
@@ -66,20 +99,6 @@ export default function PreviewLightbox({ previews, index, onIndexChange, onClos
       zoom.zoomOut();
     } else if (event.key === '0') {
       zoom.reset();
-    } else if (event.key === 'Tab') {
-      const focusable = [...(dialogRef.current?.querySelectorAll<HTMLElement>(FOCUSABLE) ?? [])];
-      if (!focusable.length) return;
-      const first = focusable[0];
-      const last = focusable[focusable.length - 1];
-      const active = document.activeElement;
-      const outside = !focusable.includes(active as HTMLElement);
-      if (event.shiftKey && (active === first || outside)) {
-        event.preventDefault();
-        last.focus();
-      } else if (!event.shiftKey && (active === last || outside)) {
-        event.preventDefault();
-        first.focus();
-      }
     }
   };
 

@@ -175,4 +175,31 @@ describe('PreviewLightbox', () => {
     expect(opener).toHaveFocus();
     opener.remove();
   });
+  it('keeps focus in the dialog when background content is focused by a document-level shortcut', () => {
+    const search = document.createElement('input');
+    document.body.appendChild(search);
+    const focusSearch = (event: KeyboardEvent) => {
+      if (event.ctrlKey && event.key === 'k') search.focus();
+    };
+    document.addEventListener('keydown', focusSearch);
+    const { unmount } = render(<Harness />);
+    const zoomIn = screen.getByRole('button', { name: 'Zoom in' });
+    zoomIn.focus();
+    fireEvent.keyDown(zoomIn, { key: 'k', ctrlKey: true });
+    expect(search).not.toHaveFocus();
+    expect(zoomIn).toHaveFocus();
+
+    act(() => { search.focus(); });
+    expect(zoomIn).toHaveFocus();
+    // With nothing focused, the next Tab still lands inside the dialog.
+    zoomIn.blur();
+    fireEvent.keyDown(document.body, { key: 'Tab' });
+    expect(screen.getByRole('dialog').contains(document.activeElement)).toBe(true);
+
+    unmount();
+    search.focus();
+    expect(search).toHaveFocus();
+    document.removeEventListener('keydown', focusSearch);
+    search.remove();
+  });
 });
