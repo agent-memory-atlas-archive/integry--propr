@@ -11,6 +11,7 @@ import { up as identityMigration } from '../src/db/migrations/20260922010000_pre
 import { closeConnection } from '../src/db/connection.js';
 import { associateSubmissionTask, insertTaskSubmission, resumeTaskSubmission, findIssueSubmission, materializeSubmissionAttachments, submissionAssetPath } from '../src/services/taskSubmissionService.js';
 import { handleDispatchWithDeps } from '../../../src/jobs/issueJobDispatcher.js';
+import { resolveTaskSubmissionRetry } from '../src/services/taskSubmissionRetry.js';
 import type { IssueJobData } from '@propr/core';
 import type { Job } from 'bullmq';
 
@@ -34,10 +35,12 @@ test('concurrent submissions, response loss, dispatch retry and a late webhook c
     let failDispatch = true;
     const children = new Map<string, IssueJobData>();
     const queuedOptions: Array<{ removeOnComplete: boolean }> = [];
+    const events = [{ id: 1, event: 'labeled', created_at: '2026-09-22T10:00:00Z', label: { name: 'AI' }, actor: { id: 123 } as { id: number } | undefined }];
     const deps = {
-      resolveSubmissionRetry: async () => null,
+      resolveSubmissionRetry: (submission: Parameters<typeof resolveTaskSubmissionRetry>[0]) => resolveTaskSubmissionRetry(submission, database,
+        async () => ({ request: async () => ({ data: events }) }) as never, async () => ['AI']),
       findSubmission: (issue: IssueJobData) => findIssueSubmission(issue, database),
-      recordDispatch: async (id: string) => { await database('task_submissions').where({ id }).update({ dispatch_complete: true }); },
+      recordDispatch: async (id: string, eventId?: string) => { await database('task_submissions').where({ id }).update({ dispatch_complete: true, retry_event_id: eventId }); },
       recordDispatchFailure: async () => undefined,
       getAuthenticatedOctokit: async () => ({ request: async () => ({ data: { labels: [{ name: 'AI' }, { name: 'llm-chosen' }, { name: 'base-release' }] } }) }),
       withRetry: async (operation: () => Promise<unknown>) => operation(), retryConfigs: { githubApi: {} },
@@ -74,10 +77,32 @@ test('concurrent submissions, response loss, dispatch retry and a late webhook c
     assert.equal(child.modelName, 'chosen-model');
     assert.equal(child.isChildJob, true);
     assert.ok(queuedOptions.every(options => !options.removeOnComplete));
+    assert.equal((await database('task_submissions').first()).retry_event_id, '1');
     // Completed jobs may disappear; the durable receipt still suppresses a late webhook.
     children.clear();
     assert.equal((await dispatch()).status, 'skipped');
     assert.equal(children.size, 0);
+    await database.schema.createTable('task_history', table => {
+      table.increments('history_id'); table.string('task_id'); table.string('state'); table.timestamp('timestamp');
+    });
+    await associateSubmissionTask(database, row.id, 'initial-task');
+    await database('task_history').insert({ task_id: 'initial-task', state: 'completed', timestamp: '2026-09-22T10:00:00Z' });
+    // The initial label and completion share a second: redelivery is still skipped.
+    assert.equal((await dispatch()).status, 'skipped');
+    for (const [index, actor] of [{ id: 456 }, undefined].entries()) {
+      const eventId = index + 2;
+      // A relabel after completion can have the same truncated timestamp,
+      // including a timestamp earlier than the terminal milliseconds.
+      await database('task_history').update({ timestamp: index ? '2026-09-22T10:00:00.789Z' : '2026-09-22T10:00:00Z' });
+      events.push({ ...events[0], id: eventId, actor });
+      assert.equal((await dispatch()).status, 'dispatched');
+      const [childId, retryChild] = [...children.entries()].at(-1)!;
+      assert.equal(retryChild.userId, 'alice');
+      assert.equal(retryChild.correlationId, `${row.id}-${eventId}`);
+      assert.ok(childId.endsWith(`-trigger-${eventId}`));
+      assert.equal((await database('task_submissions').first()).retry_event_id, String(eventId));
+      assert.equal((await dispatch()).status, 'skipped');
+    }
     assert.equal((await resumeTaskSubmission(database, row.id, services)).state, 'queued');
     assert.equal(creates, 1);
     await assert.rejects(insertTaskSubmission(database, { ...input, payload_hash: 'different' }), /different content/);
@@ -133,7 +158,7 @@ test('a deliberate label retry after terminal work is distinct from delayed init
     const read = async () => (await database('task_submissions').first())!;
     assert.equal(await resolveTaskSubmissionRetry(await read(), database, octokit, async () => labels), null);
     eventId = 2; timestamp = '2026-09-22T10:01:00Z';
-    assert.deepEqual(await resolveTaskSubmissionRetry(await read(), database, octokit, async () => labels), { eventId: '2', userId: '123' });
+    assert.deepEqual(await resolveTaskSubmissionRetry(await read(), database, octokit, async () => labels), { eventId: '2' });
     await associateSubmissionTask(database, row.id, 'retry-task');
     assert.equal((await read()).task_id, 'initial-task');
     assert.equal((await read()).latest_task_id, 'retry-task');
@@ -143,11 +168,11 @@ test('a deliberate label retry after terminal work is distinct from delayed init
     eventId = 3; timestamp = '2026-09-22T10:02:00Z';
     assert.equal(await resolveTaskSubmissionRetry(await read(), database, octokit, async () => labels), null);
     await database('task_history').insert({ task_id: 'retry-task', state: 'completed', timestamp: '2026-09-22T10:01:30Z' });
-    assert.deepEqual(await resolveTaskSubmissionRetry(await read(), database, octokit, async () => labels), { eventId: '3', userId: '123' });
+    assert.deepEqual(await resolveTaskSubmissionRetry(await read(), database, octokit, async () => labels), { eventId: '3' });
     label = 'implement';
-    assert.deepEqual(await resolveTaskSubmissionRetry(await read(), database, octokit, async () => labels), { eventId: '3', userId: '123' });
+    assert.deepEqual(await resolveTaskSubmissionRetry(await read(), database, octokit, async () => labels), { eventId: '3' });
     labels = ['replacement']; label = 'replacement';
-    assert.deepEqual(await resolveTaskSubmissionRetry(await read(), database, octokit, async () => labels), { eventId: '3', userId: '123' });
+    assert.deepEqual(await resolveTaskSubmissionRetry(await read(), database, octokit, async () => labels), { eventId: '3' });
     await database('task_submissions').where({ id: row.id }).update({ retry_event_id: '3' });
     assert.equal(await resolveTaskSubmissionRetry(await read(), database, octokit, async () => labels), null);
     eventId = 4; label = 'unrelated';
@@ -222,7 +247,7 @@ test('retry timestamps use SQLite dates and UTC SQL defaults, and invalid dates 
       table.increments('history_id'); table.string('task_id'); table.string('state');
       table.timestamp('timestamp').defaultTo(database.fn.now());
     });
-    const row = { ...await insertTaskSubmission(database, input), task_id: 'task', issue_number: 17 };
+    const row = { ...await insertTaskSubmission(database, input), task_id: 'task', issue_number: 17, dispatch_complete: true };
     let timestamp = '';
     const octokit = async () => ({ request: async () => ({ data: [
       { id: 2, event: 'labeled', created_at: timestamp, label: { name: 'AI' } },

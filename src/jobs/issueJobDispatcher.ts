@@ -34,7 +34,7 @@ type IssueQueueAdd = typeof issueQueue.add;
 
 interface DispatcherDeps {
     findSubmission: typeof findIssueSubmission;
-    recordDispatch: (id: string, retryEventId?: string) => Promise<void>;
+    recordDispatch: (id: string, triggerEventId?: string) => Promise<void>;
     resolveSubmissionRetry: typeof resolveTaskSubmissionRetry;
     recordDispatchFailure: (id: string, error: string) => Promise<void>;
     getAuthenticatedOctokit: typeof getAuthenticatedOctokit;
@@ -82,7 +82,7 @@ export async function handleDispatch(job: Job<IssueJobData>): Promise<JobResult>
         findSubmission: findIssueSubmission,
         resolveSubmissionRetry: resolveTaskSubmissionRetry,
         recordDispatchFailure: async (id, error) => { await db('task_submissions').where({ id, dispatch_complete: false }).update({ state: 'failed', error }); },
-        recordDispatch: async (id, retryEventId) => { await db('task_submissions').where({ id }).update({ dispatch_complete: true, state: 'queued', error: null, ...(retryEventId ? { retry_event_id: retryEventId } : {}) }); },
+        recordDispatch: async (id, triggerEventId) => { await db('task_submissions').where({ id }).update({ dispatch_complete: true, state: 'queued', error: null, ...(triggerEventId ? { retry_event_id: triggerEventId } : {}) }); },
         getAuthenticatedOctokit,
         withRetry,
         retryConfigs,
@@ -190,11 +190,12 @@ async function resolveDispatchTargets(
 export async function handleDispatchWithDeps(job: Job<IssueJobData>, deps: DispatcherDeps): Promise<JobResult> {
     const { id: jobId, name: jobName, data: issueRef } = job;
     const submission = await deps.findSubmission(issueRef);
-    const retry = submission?.dispatch_complete ? await deps.resolveSubmissionRetry(submission) : null;
+    const trigger = submission ? await deps.resolveSubmissionRetry(submission) : null;
+    const retry = submission?.dispatch_complete ? trigger : null;
     if (submission?.dispatch_complete && !retry) return { status: 'skipped', reason: 'submission_already_dispatched', issueNumber: issueRef.number };
     if (submission) {
         [issueRef.repoOwner, issueRef.repoName] = submission.repository.split('/');
-        issueRef.userId = retry ? retry.userId : submission.user_id;
+        issueRef.userId = submission.user_id;
         issueRef.correlationId = retry ? `${submission.id}-${retry.eventId}` : submission.id;
     }
     const correlationId = issueRef.correlationId || generateCorrelationId();
@@ -272,7 +273,7 @@ export async function handleDispatchWithDeps(job: Job<IssueJobData>, deps: Dispa
             }
         }
 
-        if (submission) await deps.recordDispatch(submission.id, retry?.eventId);
+        if (submission) await deps.recordDispatch(submission.id, trigger?.eventId);
         correlatedLogger.info({ jobId, issue: issueRef.number, jobsEnqueued }, 'Matrix dispatcher job complete.');
         return { status: 'dispatched', jobsEnqueued, issueNumber: issueRef.number };
 

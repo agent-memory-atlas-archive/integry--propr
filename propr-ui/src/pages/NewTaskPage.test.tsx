@@ -6,7 +6,7 @@ import { API_BASE_URL } from '../api/apiClient';
 import * as submissions from '../api/taskSubmissions';
 import * as planner from '../api/plannerApi';
 
-vi.mock('../api/taskSubmissions', () => ({ submitTask: vi.fn(), getTaskSubmission: vi.fn(), retryTaskSubmission: vi.fn(), taskSnapshotStorage: vi.fn().mockResolvedValue(undefined) }));
+vi.mock('../api/taskSubmissions', () => ({ submitTask: vi.fn(), getTaskSubmission: vi.fn(), retryTaskSubmission: vi.fn(), listTaskSnapshots: vi.fn().mockResolvedValue([]), taskSnapshotStorage: vi.fn().mockResolvedValue(undefined) }));
 vi.mock('../api/plannerApi', () => ({ createDraft: vi.fn(), uploadAttachment: vi.fn() }));
 vi.mock('../api/proprApi', () => ({ getInstanceCatalog: vi.fn().mockResolvedValue({ repositories: [{ name: 'acme/billing', enabled: true }], agents: [{ alias: 'issue-only', enabled: true, supportedModels: ['model-1'], defaultModel: 'model-1' }] }) }));
 vi.mock('../contexts/AuthContext', () => ({ useCurrentUser: () => ({ id: 'alice' }) }));
@@ -16,7 +16,7 @@ function Destination() { const location = useLocation(); return <div data-testid
 const pending = { id: 'submission', state: 'failed' as const, issueNumber: 42, issueUrl: 'https://github.com/acme/billing/issues/42', taskId: null, error: 'Queue unavailable' };
 const renderPage = () => render(<MemoryRouter initialEntries={[{ pathname: '/tasks/new', state: { initialRepository: 'acme/billing', initialPrompt: 'Fix invoice dates', todoIds: ['todo-1'] } }]}><Routes><Route path="/tasks/new" element={<NewTaskPage />} /><Route path="*" element={<Destination />} /></Routes></MemoryRouter>);
 
-beforeEach(() => { vi.clearAllMocks(); localStorage.clear(); sessionStorage.clear(); vi.mocked(submissions.taskSnapshotStorage).mockResolvedValue(undefined); });
+beforeEach(() => { vi.clearAllMocks(); localStorage.clear(); sessionStorage.clear(); vi.mocked(submissions.taskSnapshotStorage).mockResolvedValue(undefined); vi.mocked(submissions.listTaskSnapshots).mockResolvedValue([]); });
 describe('New Task issue launcher', () => {
   it('retains the issue and request on failure, retries that submission, then opens the ordinary task', async () => {
     vi.mocked(submissions.submitTask).mockResolvedValue(pending);
@@ -112,6 +112,47 @@ describe('New Task issue launcher', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Start over' }));
     await waitFor(() => expect(screen.getByLabelText('Instruction')).toBeEnabled());
     expect(submissions.taskSnapshotStorage).not.toHaveBeenCalledWith(`${API_BASE_URL}:alice`, key, null);
+  });
+
+  it('reopens unresolved work after starting another request and reloading, preserving its key and files', async () => {
+    const saved = new Map<string, submissions.TaskSnapshot>();
+    vi.mocked(submissions.taskSnapshotStorage).mockImplementation(async (_scope, key, value) => {
+      if (value === null) saved.delete(key!);
+      else if (value) saved.set(key!, value);
+      else return saved.get(key!);
+    });
+    vi.mocked(submissions.listTaskSnapshots).mockImplementation(async () => [...saved.values()]);
+    vi.mocked(submissions.submitTask).mockRejectedValue(new Error('Response lost'));
+    vi.mocked(submissions.getTaskSubmission).mockRejectedValue(new Error('Offline'));
+    const page = renderPage();
+    const file = new File(['Expected invoice date'], 'invoice.txt', { type: 'text/plain' });
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Run task' })).toBeEnabled());
+    await act(async () => fireEvent.change(screen.getByLabelText('Attach files'), { target: { files: [file] } }));
+    fireEvent.click(screen.getByRole('button', { name: 'Run task' }));
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Start over' })).toBeEnabled());
+    const original = vi.mocked(submissions.submitTask).mock.calls[0];
+    fireEvent.click(screen.getByRole('button', { name: 'Start over' }));
+    expect(await screen.findByRole('region', { name: 'Unresolved submissions' })).toHaveTextContent('Fix invoice dates');
+    fireEvent.change(screen.getByLabelText('Instruction'), { target: { value: 'Another request' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Run task' }));
+    await waitFor(() => expect(submissions.submitTask).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Start over' })).toBeEnabled());
+    fireEvent.click(screen.getByRole('button', { name: 'Start over' }));
+    await waitFor(() => expect(screen.getAllByRole('button', { name: 'Reopen submission' })).toHaveLength(2));
+    page.unmount();
+    renderPage();
+    const reopen = await screen.findAllByRole('button', { name: 'Reopen submission' });
+    fireEvent.click(reopen[0]);
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Retry submission' })).toBeEnabled());
+    expect(screen.getByLabelText('Instruction')).toHaveValue('Fix invoice dates');
+    expect(screen.getByText('invoice.txt')).toBeInTheDocument();
+    expect(submissions.getTaskSubmission).toHaveBeenLastCalledWith(original[0]);
+    vi.mocked(submissions.submitTask).mockResolvedValue({ ...pending, state: 'queued', taskId: 'recovered-task', error: null });
+    fireEvent.click(screen.getByRole('button', { name: 'Retry submission' }));
+    expect(await screen.findByTestId('destination')).toHaveTextContent('/tasks/recovered-task');
+    expect(vi.mocked(submissions.submitTask).mock.calls[2]).toEqual(original);
+    expect(saved.has(original[0])).toBe(false);
+    expect(saved.size).toBe(1);
   });
 
 });

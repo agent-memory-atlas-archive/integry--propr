@@ -61,3 +61,30 @@ export async function taskSnapshotStorage(scope: string, key?: string, value?: T
     });
   } finally { database.close(); }
 }
+
+/** Discover retained requests even after the active tab starts another request. */
+export async function listTaskSnapshots(scope: string): Promise<TaskSnapshot[]> {
+  const database = await new Promise<IDBDatabase>((resolve, reject) => {
+    const request = indexedDB.open('propr-task-launcher', 1);
+    request.onupgradeneeded = () => request.result.createObjectStore('submissions');
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error);
+  });
+  try {
+    return await new Promise((resolve, reject) => {
+      const transaction = database.transaction('submissions', 'readonly');
+      const request = transaction.objectStore('submissions').openCursor();
+      const snapshots = new Map<string, TaskSnapshot>();
+      request.onsuccess = () => {
+        const cursor = request.result;
+        if (!cursor) return;
+        const snapshot = cursor.value as TaskSnapshot;
+        if (cursor.key === scope || cursor.key === JSON.stringify([scope, snapshot.key])) snapshots.set(snapshot.key, snapshot);
+        cursor.continue();
+      };
+      transaction.oncomplete = () => resolve([...snapshots.values()]);
+      transaction.onerror = () => reject(transaction.error);
+      transaction.onabort = () => reject(transaction.error || new Error('Could not read task recovery data'));
+    });
+  } finally { database.close(); }
+}

@@ -5,7 +5,7 @@ import { getInstanceCatalog } from '../api/proprApi';
 import type { InstanceCatalogResponse } from '../api/proprTypes';
 import { createDraft, uploadAttachment } from '../api/plannerApi';
 import { API_BASE_URL } from '../api/apiClient';
-import { getTaskSubmission, retryTaskSubmission, submitTask, taskSnapshotStorage, type TaskSnapshot, type TaskSubmission } from '../api/taskSubmissions';
+import { getTaskSubmission, retryTaskSubmission, submitTask, taskSnapshotStorage, listTaskSnapshots, type TaskSnapshot, type TaskSubmission } from '../api/taskSubmissions';
 import { RepositorySelector } from '../components/RepositorySelector';
 import { clipboardImageFiles } from '../components/Goals/goalAttachmentUtils';
 import { resizeImage } from '../components/TaskPlanner/imageUtils';
@@ -41,6 +41,7 @@ function useNewTaskLauncher(scope: string) {
   const [model, setModel] = useState(saved.model || '');
   const [catalog, setCatalog] = useState<InstanceCatalogResponse>();
   const [snapshot, setSnapshot] = useState<TaskSnapshot>();
+  const [recoverable, setRecoverable] = useState<TaskSnapshot[]>([]);
   const activeStorageKey = `task-active-submission:${scope}`;
   const [result, setResult] = useState<TaskSubmission>();
   const [busy, setBusy] = useState(false);
@@ -56,6 +57,7 @@ function useNewTaskLauncher(scope: string) {
   useEffect(() => {
     let active = true;
     void getInstanceCatalog().then(value => { if (active) setCatalog(value); }).catch(error => { if (active) setError(error.message); });
+    void listTaskSnapshots(scope).then(values => { if (active) setRecoverable(values); }).catch(error => { if (active) setError(error.message); });
     const key = sessionStorage.getItem(activeStorageKey);
     void taskSnapshotStorage(scope, key || undefined).then(value => {
       if (!active || !value) return;
@@ -116,10 +118,30 @@ function useNewTaskLauncher(scope: string) {
     try {
       // Confirmed failures can be discarded. Keep uncertain submissions stored
       // with their original identity when starting unrelated work.
-      if (result?.state === 'prepared' || result?.state === 'failed') await taskSnapshotStorage(scope, snapshot.key, null);
+      if (result?.state === 'prepared' || result?.state === 'failed') {
+        await taskSnapshotStorage(scope, snapshot.key, null);
+        setRecoverable(current => current.filter(value => value.key !== snapshot.key));
+      } else {
+        setRecoverable(current => [...current.filter(value => value.key !== snapshot.key), snapshot]);
+      }
       sessionStorage.removeItem(activeStorageKey);
       if (result?.state !== 'prepared') { setInstruction(''); setFiles([]); setTodoIds(undefined); }
       setSnapshot(undefined); setResult(undefined); setError(null);
+    } catch (error) { setError((error as Error).message); }
+    finally { submitting.current = false; setBusy(false); }
+  };
+  const reopen = async (key: string) => {
+    if (submitting.current || snapshot || planDraft || isDemoMode) return;
+    submitting.current = true; setBusy(true); setError(null);
+    try {
+      const value = await taskSnapshotStorage(scope, key);
+      if (!value) { setRecoverable(current => current.filter(item => item.key !== key)); return; }
+      sessionStorage.setItem(activeStorageKey, value.key);
+      setSnapshot(value); setResult(undefined);
+      setRepository(value.payload.repository); setInstruction(value.payload.instruction);
+      setTodoIds(value.payload.todoIds); setFiles(value.files);
+      setAgent(value.payload.agentAlias || ''); setModel(value.payload.model || '');
+      try { setResult(await getTaskSubmission(value.key)); } catch { /* Retry the saved request with its original key. */ }
     } catch (error) { setError((error as Error).message); }
     finally { submitting.current = false; setBusy(false); }
   };
@@ -143,7 +165,7 @@ function useNewTaskLauncher(scope: string) {
     repository, setRepository, instruction, setInstruction, files, setFiles,
     agentAlias, setAgent, model, setModel, catalog, selection, invalidRouting,
     snapshot, result, busy, processingFiles, setProcessingFiles, planDraft,
-    ready, error, setError, run, startOver, planFirst, locked, isDemoMode,
+    ready, error, setError, run, startOver, planFirst, locked, isDemoMode, recoverable, reopen,
   };
 }
 
@@ -200,6 +222,14 @@ function NewTaskLauncher({ scope }: { scope: string }) {
   return <main className="mx-auto w-full max-w-3xl px-4 pt-6 pb-28 sm:px-8 md:py-10">
     <h1 className="flex items-center gap-2 text-2xl font-semibold text-slate-900"><Zap className="h-6 w-6 text-teal-600" />New task</h1>
     <p className="mt-2 text-sm leading-6 text-slate-600">Describe the change you want. Run task creates a GitHub issue and starts implementation using the repository’s settings.</p>
+    {!snapshot && !launcher.planDraft && launcher.recoverable.length > 0 && <section aria-label="Unresolved submissions" className="mt-6 rounded-md border border-amber-200 bg-amber-50 p-4 text-sm text-slate-700">
+      <h2 className="font-semibold">Unresolved submissions</h2>
+      <p className="mt-1">Reopen a previous request to check its status and finish starting the task.</p>
+      <ul className="mt-3 space-y-3">{launcher.recoverable.map(value => <li key={value.key} className="flex items-center justify-between gap-3">
+        <div className="min-w-0"><p className="font-medium">{value.payload.repository}</p><p className="truncate">{value.payload.instruction}</p></div>
+        <button type="button" disabled={!launcher.ready || launcher.busy || processingFiles || isDemoMode} onClick={() => void launcher.reopen(value.key)} className={`${button} shrink-0 border-slate-300 bg-white`}>Reopen submission</button>
+      </li>)}</ul>
+    </section>}
     <form className="mt-6 space-y-5" onSubmit={event => { event.preventDefault(); void run(); }}>
       <fieldset disabled={locked || isDemoMode} className="space-y-5">
         <div><label className="mb-2 block text-sm font-medium text-slate-700">Repository</label><RepositorySelector repos={catalog?.repositories} selectedRepo={repository} onRepoChange={setRepository} disabled={locked || isDemoMode} placeholder="Select a repository" /></div>

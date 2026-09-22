@@ -4,7 +4,7 @@ import { getAuthenticatedOctokit } from '../auth/githubAuth.js';
 import { loadPrimaryProcessingLabels } from '../config/configManager.js';
 import type { TaskSubmission } from './taskSubmissionService.js';
 
-export interface SubmissionRetry { eventId: string; userId?: string }
+export interface SubmissionRetry { eventId: string }
 interface LabelEvent { id?: number; event: string; created_at?: string; label?: { name: string }; actor?: { id: number } }
 
 function timestampMillis(value: unknown): number {
@@ -35,13 +35,17 @@ async function latestProcessingLabelEvent(
   return event;
 }
 
-/** A fresh trigger after terminal work is ordinary issue follow-up, not a launch retry. */
+/** Capture the initial trigger, or recognize a fresh trigger after terminal work. */
 export async function resolveTaskSubmissionRetry(
   submission: TaskSubmission,
   database: Knex = db,
   getOctokit = getAuthenticatedOctokit,
   processingLabels = loadPrimaryProcessingLabels,
 ): Promise<SubmissionRetry | null> {
+  if (!submission.dispatch_complete) {
+    const event = await latestProcessingLabelEvent(submission, new Set(await processingLabels()), getOctokit);
+    return event?.id ? { eventId: String(event.id) } : null;
+  }
   const taskId = submission.latest_task_id || submission.task_id;
   if (!taskId) return null;
   const latest = await database('task_history').where({ task_id: taskId }).orderBy('history_id', 'desc').first('state', 'timestamp');
@@ -51,7 +55,11 @@ export async function resolveTaskSubmissionRetry(
   const triggers = new Set(await processingLabels());
   const event = await latestProcessingLabelEvent(submission, triggers, getOctokit);
   const eventTime = timestampMillis(event?.created_at);
-  if (!event?.id || !event.created_at || String(event.id) === submission.retry_event_id
-    || !Number.isFinite(eventTime) || eventTime <= terminalTime) return null;
-  return { eventId: String(event.id), ...(event.actor?.id ? { userId: String(event.actor.id) } : {}) };
+  // GitHub truncates event times to seconds. Within the terminal second,
+  // a different consumed identity distinguishes a relabel from redelivery.
+  const terminalSecond = Math.floor(terminalTime / 1000) * 1000;
+  if (!event?.id || String(event.id) === submission.retry_event_id
+    || !Number.isFinite(eventTime) || eventTime < terminalSecond
+    || (eventTime <= terminalTime && !submission.retry_event_id)) return null;
+  return { eventId: String(event.id) };
 }
