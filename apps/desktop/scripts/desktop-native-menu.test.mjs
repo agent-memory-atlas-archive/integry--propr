@@ -92,9 +92,13 @@ it('Linux/macOS menu dispatch reaches actual search, sidebar, task creation, con
       await capture('diagnostics', page.getByRole('dialog', { name: 'Connection Diagnostics' }), 'Help → Connection Diagnostics');
       await page.getByRole('button', { name: 'Close', exact: true }).click();
       await click('New Task…');
-      await expect(page.getByRole('heading', { name: 'New Task', exact: true })).toBeVisible();
-      await expect(page.getByRole('button', { name: 'Single', exact: true })).toHaveCSS('color', 'rgb(29, 138, 138)');
-      await capture('new-task', page.locator('.planner-studio-viewport > div').first(), 'File → New Task enters single-task creation');
+      await expect(page).toHaveURL(/#\/tasks\/new$/);
+      const launcher = page.locator('main').filter({ has: page.getByRole('heading', { name: 'New task', exact: true }) }).last();
+      await expect(launcher.getByRole('heading', { name: 'New task', exact: true })).toBeVisible();
+      await expect(launcher.getByRole('textbox', { name: 'Instruction', exact: true })).toBeVisible();
+      await expect(launcher.getByRole('button', { name: 'Run task', exact: true })).toBeVisible();
+      await expect(launcher.getByRole('button', { name: 'Plan first', exact: true })).toBeVisible();
+      await capture('new-task', launcher, 'File → New Task opens the GitHub issue task launcher');
       await page.close();
     }
     if (process.env.PROPR_DESKTOP_MENU_PREVIEWS) await writeFile(resolve(root, process.env.PROPR_DESKTOP_MENU_PREVIEWS, 'manifest.json'), JSON.stringify({ previews, toolSuggestions: [{ name: 'macOS Electron runner', reason: 'Verify native menu appearance, accelerator handling and About copy action using the next signed Mac build; retain the existing test login.' }] }, null, 2));
