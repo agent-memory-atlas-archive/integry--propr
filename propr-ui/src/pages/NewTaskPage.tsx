@@ -183,10 +183,12 @@ function TaskSubmissionFeedback({ busy, result, snapshot, error, invalidRouting 
 
 function TaskLauncherActions({ snapshot, result, startOver, planFirst, ready, busy, processingFiles, isDemoMode, repository, instruction, planDraft, invalidRouting }:
   Pick<LauncherState, 'snapshot' | 'result' | 'startOver' | 'planFirst' | 'ready' | 'busy' | 'processingFiles' | 'isDemoMode' | 'repository' | 'instruction' | 'planDraft' | 'invalidRouting'>) {
+  const launchDisabled = !ready || busy || processingFiles || isDemoMode || !repository || !instruction.trim();
+
   return <div className="flex flex-wrap justify-end gap-3">
     {snapshot && <button type="button" onClick={() => void startOver()} disabled={busy || isDemoMode} className={`${button} border-slate-300 bg-white text-slate-700`}>{result?.state === 'prepared' ? 'Edit request' : 'Start over'}</button>}
-    {!snapshot && <button type="button" onClick={() => void planFirst()} disabled={!ready || busy || processingFiles || isDemoMode || !repository || !instruction.trim()} className={`${button} border-slate-300 bg-white text-slate-700`}><ScrollText size={16} />Plan first</button>}
-    {result?.state !== 'queued' && <button type="submit" disabled={!ready || busy || processingFiles || Boolean(planDraft) || isDemoMode || !repository || !instruction.trim() || invalidRouting} className={`${button} border-teal-600 bg-teal-600 text-white hover:bg-teal-700`}><Play size={16} />{busy ? 'Submitting…' : snapshot ? 'Retry submission' : 'Run task'}</button>}
+    {!snapshot && <button type="button" onClick={() => void planFirst()} disabled={launchDisabled} className={`${button} border-slate-300 bg-white text-slate-700`}><ScrollText size={16} />Plan first</button>}
+    {result?.state !== 'queued' && <button type="submit" disabled={launchDisabled || Boolean(planDraft) || invalidRouting} className={`${button} border-teal-600 bg-teal-600 text-white hover:bg-teal-700`}><Play size={16} />{busy ? 'Submitting…' : snapshot ? 'Retry submission' : 'Run task'}</button>}
   </div>;
 }
 
