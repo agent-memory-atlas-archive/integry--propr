@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { ScrollText } from 'lucide-react';
+import { Zap } from 'lucide-react';
 import { DESKTOP_UI_COMMAND_EVENT } from '../desktop/useDesktopNativeCommands';
 import { useDesktop } from '../desktop/DesktopContext';
 import GlobalSearch from './GlobalSearch';
@@ -79,7 +79,7 @@ const GlobalHeader: React.FC<GlobalHeaderProps> = ({ user, onLogout, onMenuToggl
 
   const handleNewPlan = useCallback(() => {
     if (isDemoMode) return;
-    navigate('/studio/new');
+    navigate('/tasks/new');
   }, [isDemoMode, navigate]);
 
   useHeaderKeyboardShortcuts(searchInputRef, setQuickAddOpen);
@@ -97,7 +97,7 @@ const GlobalHeader: React.FC<GlobalHeaderProps> = ({ user, onLogout, onMenuToggl
   }, [searchRequest]);
 
   const newPlanBg = newPlanPressedOverride ? 'bg-teal-800' : 'bg-teal-600';
-  const newPlanTitle = isDemoMode ? 'Demo mode is read-only' : 'New Plan';
+  const newPlanTitle = isDemoMode ? 'Demo mode is read-only' : 'New Task';
 
   return (
     <>
@@ -142,10 +142,17 @@ const GlobalHeader: React.FC<GlobalHeaderProps> = ({ user, onLogout, onMenuToggl
             title={newPlanTitle}
             className={`flex items-center gap-2 whitespace-nowrap rounded-lg border-0 px-3 py-1.5 text-white text-sm font-medium hover:bg-teal-700 transition-colors disabled:bg-gray-300 disabled:cursor-not-allowed xl:px-4 ${newPlanBg}`}
           >
-            <ScrollText className="w-4 h-4" />
-            <span>New Plan</span>
+            <Zap className="w-4 h-4" />
+            <span>New Task</span>
           </button>
         </div>
+        <details className="relative self-center text-sm">
+          <summary aria-label="More creation options" className="list-none cursor-pointer px-2 py-2">⌄</summary>
+          <div className="absolute right-0 w-36 rounded border border-slate-200 bg-white p-1 shadow-lg">
+            <button disabled={isDemoMode} onClick={() => navigate('/studio/new')} className="block w-full p-2 text-left hover:bg-slate-50">New Plan</button>
+            <button disabled={isDemoMode} onClick={() => navigate('/goals?new=1')} className="block w-full p-2 text-left hover:bg-slate-50">New Goal</button>
+          </div>
+        </details>
         <SystemHealth systemHealth={systemHealth} />
       </div>
     </header>

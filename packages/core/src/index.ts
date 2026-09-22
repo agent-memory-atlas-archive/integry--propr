@@ -467,3 +467,5 @@ export type { RepositoryRenameResult, MigrationResult } from './services/reposit
 export * from './services/visualPreviewCapacityService.js';
 export * from './services/previewStorage/v1.js';
 export { createManagedPreviewStorageClient } from './services/previewStorage/runtime.js';
+export * from './services/taskSubmissionService.js';
+export * from './services/taskSubmissionRetry.js';

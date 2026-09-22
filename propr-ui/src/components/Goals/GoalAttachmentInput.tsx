@@ -9,6 +9,7 @@ interface GoalAttachmentInputProps {
   files: File[];
   onChange: (files: File[]) => void;
   onFilesSelected?: () => void;
+  onProcessingChange?: (processing: boolean) => void;
   onError: (message: string) => void;
   disabled?: boolean;
   compact?: boolean;
@@ -31,13 +32,14 @@ function SelectedFile({ file, onRemove, disabled }: { file: File; onRemove: () =
   </div>;
 }
 
-export function GoalAttachmentInput({ files, onChange, onFilesSelected, onError, disabled = false, compact = false }: GoalAttachmentInputProps) {
+export function GoalAttachmentInput({ files, onChange, onFilesSelected, onProcessingChange, onError, disabled = false, compact = false }: GoalAttachmentInputProps) {
   const inputId = useId();
   const inputRef = useRef<HTMLInputElement>(null);
   const [processing, setProcessing] = useState(false);
   const [dragging, setDragging] = useState(false);
 
   const addFiles = useCallback(async (incoming: File[]) => {
+    if (disabled || processing) return;
     if (files.length + incoming.length > MAX_FILES) {
       onError(`Attach up to ${MAX_FILES} files to each prompt.`);
       return;
@@ -45,15 +47,17 @@ export function GoalAttachmentInput({ files, onChange, onFilesSelected, onError,
     if (incoming.length === 0) return;
     onFilesSelected?.();
     setProcessing(true);
+    onProcessingChange?.(true);
     try {
       onChange([...files, ...await Promise.all(incoming.map(resizeImage))]);
     } catch {
       onError('Could not process the selected files.');
     } finally {
       setProcessing(false);
+      onProcessingChange?.(false);
       if (inputRef.current) inputRef.current.value = '';
     }
-  }, [files, onChange, onError, onFilesSelected]);
+  }, [files, onChange, onError, onFilesSelected, onProcessingChange, disabled, processing]);
 
   const chooseFiles = (event: React.ChangeEvent<HTMLInputElement>) => {
     void addFiles(Array.from(event.target.files || []));

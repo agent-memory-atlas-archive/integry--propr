@@ -128,7 +128,24 @@ const appendBounded = (current, chunk) => {
   return next.length <= OUTPUT_CAP ? next : next.subarray(next.length - OUTPUT_CAP);
 };
 
-const run = (file, args, { cwd, env, timeout = COMMAND_TIMEOUT_MS, input } = {}) => new Promise((resolveRun, reject) => {
+const COMMAND_RESULT_CLASSES = Object.freeze([
+  'COMMAND_FAILED', 'COMMAND_SIGNALLED', 'COMMAND_DEADLINE', 'COMMAND_SPAWN_FAILED', 'UNEXPECTED_OUTPUT',
+]);
+
+export class NativeLifecycleCommandFailure extends Error {
+  constructor(resultClass) {
+    if (!COMMAND_RESULT_CLASSES.includes(resultClass)) {
+      throw new Error('Native lifecycle command result class is invalid');
+    }
+    super(`Native lifecycle command failed [result:${resultClass}]`);
+    this.name = 'NativeLifecycleCommandFailure';
+    this.resultClass = resultClass;
+  }
+}
+
+export const runNativeLifecycleCommand = (file, args, {
+  cwd, env, timeout = COMMAND_TIMEOUT_MS, input,
+} = {}) => new Promise((resolveRun, reject) => {
   const child = spawn(file, args, {
     cwd,
     env,
@@ -148,20 +165,27 @@ const run = (file, args, { cwd, env, timeout = COMMAND_TIMEOUT_MS, input } = {})
     stderr = appendBounded(stderr, chunk);
   });
   if (input !== undefined) child.stdin.end(input);
-  const timer = setTimeout(() => child.kill('SIGKILL'), timeout);
-  child.once('error', error => {
+  let timedOut = false;
+  const timer = setTimeout(() => {
+    timedOut = true;
+    child.kill('SIGKILL');
+  }, timeout);
+  child.once('error', () => {
     clearTimeout(timer);
-    reject(error);
+    reject(new NativeLifecycleCommandFailure('COMMAND_SPAWN_FAILED'));
   });
   child.once('close', (code, signal) => {
     clearTimeout(timer);
     if (code !== 0) {
-      reject(new Error(`${basename(file)} failed with code ${code ?? 'null'} signal ${signal ?? 'none'}`));
+      reject(new NativeLifecycleCommandFailure(timedOut ? 'COMMAND_DEADLINE'
+        : signal ? 'COMMAND_SIGNALLED' : 'COMMAND_FAILED'));
       return;
     }
     resolveRun({ stderr, stderrOverflow, stdout, stdoutOverflow });
   });
 });
+
+const run = runNativeLifecycleCommand;
 
 const delay = milliseconds => new Promise(resolveDelay => setTimeout(resolveDelay, milliseconds));
 
@@ -185,6 +209,10 @@ export const NATIVE_LIFECYCLE_OPERATION_STAGES = Object.freeze([
   'WARM_MANUAL_DISPATCH',
   'WARM_MANUAL_EVIDENCE',
   'PROTOCOL_DISPATCH',
+  'PROTOCOL_DATABASE',
+  'PROTOCOL_REGISTER',
+  'PROTOCOL_QUERY',
+  'PROTOCOL_LAUNCH',
   'LS_REGISTER',
   'OPEN_DISPATCH',
   'PROTOCOL_EVIDENCE',
@@ -284,8 +312,10 @@ export class NativeLifecycleOperationFailure extends Error {
     // Preserve the wait outcome at later stages too, without exposing the
     // underlying error or any child output, arguments, URLs, or profile paths.
     const resultClass = evidenceClassification?.resultClass
-      ?? (operationError instanceof NativeLifecycleEvidenceWaitFailure ? operationError.resultClass : undefined);
-    if (resultClass !== undefined && !NATIVE_LIFECYCLE_EVIDENCE_RESULT_CLASSES.includes(resultClass)) {
+      ?? (operationError instanceof NativeLifecycleEvidenceWaitFailure
+        || operationError instanceof NativeLifecycleCommandFailure ? operationError.resultClass : undefined);
+    if (resultClass !== undefined && !NATIVE_LIFECYCLE_EVIDENCE_RESULT_CLASSES.includes(resultClass)
+      && !COMMAND_RESULT_CLASSES.includes(resultClass)) {
       throw new Error('Native lifecycle evidence result class is invalid');
     }
     const classification = [
@@ -946,7 +976,9 @@ const dispatchDirect = async (application, userData, link, env, processGroups, l
   await group.waitForSuccessfulExit(15_000);
 };
 
-const linuxProtocolDispatch = async ({ application, profile, link, env, processGroups }) => {
+export const linuxProtocolDispatch = async ({ application, profile, link, env, processGroups }, {
+  runCommand = run,
+} = {}) => {
   if (!application.desktopFile) {
     await dispatchDirect(application, profile.userData, link, env, processGroups);
     return 'direct-second-instance; ZIP has no OS launcher registration';
@@ -961,13 +993,24 @@ const linuxProtocolDispatch = async ({ application, profile, link, env, processG
   );
   if (relocated === source) throw new Error('Linux launcher relocation did not replace exactly one Exec declaration');
   await writeFile(registered, relocated, { mode: 0o600 });
-  await run('/usr/bin/update-desktop-database', [applications], { env });
-  await run('/usr/bin/xdg-mime', ['default', `${EXECUTABLE}.desktop`, 'x-scheme-handler/propr'], { env });
-  const query = await run('/usr/bin/xdg-mime', ['query', 'default', 'x-scheme-handler/propr'], { env });
-  if (query.stdout.toString().trim() !== `${EXECUTABLE}.desktop`) {
-    throw new Error('Linux native protocol registration query did not resolve the installed launcher');
+  // Keep the command and outcome visible without printing child output, URLs,
+  // or private profile paths. A stage-only PROTOCOL_DISPATCH failure cannot
+  // distinguish registration failures from a GIO launch failure or deadline.
+  let stage = 'PROTOCOL_DATABASE';
+  try {
+    await runCommand('/usr/bin/update-desktop-database', [applications], { env });
+    stage = 'PROTOCOL_REGISTER';
+    await runCommand('/usr/bin/xdg-mime', ['default', `${EXECUTABLE}.desktop`, 'x-scheme-handler/propr'], { env });
+    stage = 'PROTOCOL_QUERY';
+    const query = await runCommand('/usr/bin/xdg-mime', ['query', 'default', 'x-scheme-handler/propr'], { env });
+    if (query.stdout.toString().trim() !== `${EXECUTABLE}.desktop`) {
+      throw new NativeLifecycleCommandFailure('UNEXPECTED_OUTPUT');
+    }
+    stage = 'PROTOCOL_LAUNCH';
+    await runCommand('/usr/bin/gio', ['open', link], { env, timeout: 15_000 });
+  } catch (error) {
+    throw new NativeLifecycleOperationFailure(stage, error);
   }
-  await run('/usr/bin/gio', ['open', link], { env, timeout: 15_000 });
   return 'xdg-mime-registration+gio-dispatch (CI-relocated package launcher)';
 };
 

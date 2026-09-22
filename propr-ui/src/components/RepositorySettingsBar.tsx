@@ -1,3 +1,5 @@
+import { useDemoMode } from '../contexts/DemoModeContext';
+import { Link } from 'react-router-dom';
 import React, { useState } from 'react';
 import { RefreshCw, Square, Trash2 } from 'lucide-react';
 import type { MonitoredRepo, RepositoryIndexingStatus } from '../api/proprApi';
@@ -55,6 +57,7 @@ export const RepositorySettingsBar: React.FC<RepositorySettingsBarProps> = ({
   repo, indexingStatus, onToggle, onRemove, onStopIndexing, onReindex,
   onToggleStar, onToggleHidden, onToggleAutoCiFollowup, onToggleNotifications, onUpdateVisualPreview, isReadOnly,
 }) => {
+  const { isDemoMode } = useDemoMode();
   const [isDeleteDialogOpen, setIsDeleteDialogOpen] = useState(false);
   const [isDeleting, setIsDeleting] = useState(false);
   const isIndexing = indexingStatus?.indexing_status === 'indexing';
@@ -76,6 +79,7 @@ export const RepositorySettingsBar: React.FC<RepositorySettingsBarProps> = ({
       className="h-full overflow-y-auto scrollbar-stealth bg-white"
     >
       <div className="w-full max-w-3xl px-4 py-3 sm:px-6">
+        {!isDemoMode && <Link to="/tasks/new" state={{ initialRepository: repo.name }} className="mb-5 inline-flex rounded-md bg-teal-600 px-4 py-2 text-sm font-medium text-white">New task</Link>}
         <div>
           <h3 className="mb-2 text-[10px] uppercase font-bold tracking-widest text-slate-500">Repository</h3>
           <label className="flex items-center justify-between gap-4 py-2 text-xs text-slate-600">

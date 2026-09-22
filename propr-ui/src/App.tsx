@@ -1,3 +1,4 @@
+import NewTaskPage from './pages/NewTaskPage';
 import { DesktopNativeNavigationObserver } from './desktop/DesktopNativeNavigationObserver'
 import React, { Suspense, useEffect, useState } from 'react'
 import { BrowserRouter, HashRouter, Routes, Route, Link, useLocation, useNavigate } from 'react-router-dom'
@@ -206,6 +207,7 @@ const AppContent: React.FC = () => {
                         </Layout>
                       }
                     />
+                    <Route path="/tasks/new" element={<Layout><NewTaskPage /></Layout>} />
                     <Route
                       path="/tasks/:taskId"
                       element={

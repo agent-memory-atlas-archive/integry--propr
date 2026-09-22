@@ -5,7 +5,7 @@ import type { McpPrincipal } from './policy.js';
 import { McpError } from './config.js';
 
 const commentTools = ['review_pull_request', 'fix_review_findings', 'run_ultrafix'];
-const trackedTools = [...commentTools, 'send_task_followup', 'revert_pull_request_commit', 'index_repository'];
+const trackedTools = ['create_task', 'retry_task_submission', ...commentTools, 'send_task_followup', 'revert_pull_request_commit', 'index_repository'];
 const terminalStates = ['completed', 'failed', 'cancelled'];
 
 /** Resolve only an owned target in the receipt's currently authorized repository. */
@@ -74,6 +74,7 @@ export async function trackExecution(deps: ToolDeps, row: Operation, principal: 
   if (!trackedTools.includes(row.tool) || !row.result) return;
   const { db } = deps;
   const result = JSON.parse(row.result);
+  if (['create_task', 'retry_task_submission'].includes(row.tool) && !result.continuation?.taskId) return;
   if (result.error || (result.executionResolved && terminalStates.includes(row.state))) return;
   const task = row.tool === 'index_repository' ? undefined : await findExecutionTask(deps, row, result);
   if (task) await trackTask(deps, row, { task, result, receipt });
@@ -128,6 +129,8 @@ async function findExecutionTask(deps: ToolDeps, row: Operation, result: Executi
     } else {
       query.whereRaw(`json_extract(${data}, '$.commandMode') = ?`, [row.tool === 'review_pull_request' ? 'review' : 'fix']);
     }
+  } else if (['create_task', 'retry_task_submission'].includes(row.tool)) {
+    query.where('task_id', continuation.taskId);
   } else {
     query.andWhere(builder => builder.where('task_id', result.jobId || continuation.taskId).orWhere('job_id', result.jobId || continuation.jobId));
   }

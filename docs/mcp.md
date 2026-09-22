@@ -49,6 +49,35 @@ GitHub credentials are separately encrypted server-side and never returned
 to clients. Instance membership, allowlist and repository access are checked
 again for every call. The connected-app page is `/mcp/apps`. Consent shows each requested permission with optional scopes unchecked initially. Keep them unchecked for read-only access; select a requested subset when needed. Consent and refresh cannot add unrequested permissions.
 
+## Start a one-off task
+
+Call `create_task` with execute scope, an enabled `repository`, an `instruction`
+(up to 50,000 characters), and a stable `idempotencyKey`. This creates a GitHub
+issue and starts the ordinary issue implementation workflow immediately, without
+a plan or goal. Repository write access is required. Optional `agentAlias` and
+`model` select supported routing; otherwise instance defaults apply.
+
+```json
+{
+  "repository": "owner/repo",
+  "instruction": "Fix the invoice date format",
+  "idempotencyKey": "invoice-date-fix-001"
+}
+```
+
+The receipt includes `submissionId`, `submissionState`, the GitHub issue URL
+when known, and `taskId` once associated. Acceptance or queueing is not task
+completion. Poll `get_operation` using its suggested delay, or read
+`get_task_submission` with `repository` and `submissionId`. Once a task is
+associated, the ordinary task progress, logs and cancellation tools apply.
+
+If submission fails or issue creation is uncertain, use `retry_task_submission`
+with the same `repository` and `submissionId` and a new mutation
+`idempotencyKey`. It reconciles or dispatches the existing submission safely.
+Repeating `create_task` with its original key returns its durable receipt;
+using a different key starts a separate request. MCP direct task submission
+currently accepts text instructions; file uploads remain available in the UI.
+
 ## Client compatibility and verified upstream details
 
 Verified against published npm packages on 2026-09-10:

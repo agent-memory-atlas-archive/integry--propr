@@ -26,6 +26,7 @@ remain separate gates.
 | Plan scheduling | `pause_plan`, `resume_plan` |
 | Native goal capabilities/start/read/input | `get_goal_capabilities`, `create_goal`, `list_goals`, `get_goal`, `get_agent_activity`, `send_goal_input` |
 | Goal controls/model changes | `pause_goal`, `resume_goal`, `cancel_goal`, `set_goal_model` |
+| Start one-off work through a new GitHub issue | `create_task`, `get_task_submission`, `retry_task_submission`; ordinary issue execution without a plan or goal |
 | Task progress, narrated agent activity, history and bounded execution logs | `list_tasks`, `get_task`, `get_agent_activity`, `get_task_events`, `get_task_logs` |
 | File changes and followup | `get_task_changes`, `send_task_followup` |
 | Task/operation cancellation and receipts | `cancel_task`, `get_operation`, `cancel_operation` |

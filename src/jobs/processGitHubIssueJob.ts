@@ -5,7 +5,7 @@
 
 import { Job } from 'bullmq';
 import {
-  logger, TaskStates, ensureRepoCloned, getRepoUrl, safeAddLabel, safeRemoveLabel, ensureGitRepository,
+  db, associateSubmissionTask, findIssueSubmission, logger, TaskStates, ensureRepoCloned, getRepoUrl, safeAddLabel, safeRemoveLabel, ensureGitRepository,
   UsageLimitError, validateRepositoryInfo, addModelSpecificDelay, withRetry, retryConfigs, updatePlanIssueTaskId
 } from '@propr/core';
 import type { IssueJobData, JobResult, WorktreeInfo, ClaudeCodeResponse, CommitResult, RepoValidationResult } from '@propr/core';
@@ -37,6 +37,9 @@ export async function processGitHubIssueJob(job: Job<IssueJobData>): Promise<Job
   } catch (stateError) {
     correlatedLogger.warn({ taskId, error: (stateError as Error).message }, 'Failed to create task state, continuing anyway');
   }
+
+  const submission = await findIssueSubmission(issueRef);
+  if (submission) await associateSubmissionTask(db, submission.id, taskId);
 
   // Update plan issue with task_id for progress tracking
   const repository = `${issueRef.repoOwner}/${issueRef.repoName}`;

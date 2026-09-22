@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { Link, useLocation, useNavigate } from 'react-router-dom';
 import {
   Activity,
+  Zap,
   BookMarked,
   Bot,
   ChevronDown,
@@ -44,10 +45,10 @@ const pathMatches = (pathname: string, path: string): boolean =>
   pathname === path || pathname.startsWith(`${path}/`);
 
 const getNavigationState = (pathname: string) => {
-  const newPlan = pathname === '/studio/new';
+  const newPlan = pathname === '/tasks/new';
   return {
     inbox: pathMatches(pathname, '/inbox'),
-    activity: pathMatches(pathname, '/tasks'),
+    activity: pathMatches(pathname, '/tasks') && !newPlan,
     newPlan,
     repositories: pathMatches(pathname, '/repositories') || pathMatches(pathname, '/summaries'),
     more: pathname === '/' || pathMatches(pathname, '/plans') ||
@@ -59,6 +60,8 @@ const getNavigationState = (pathname: string) => {
 
 const getMoreItems = (user: CurrentUser | null) => [
   { label: 'Dashboard', to: '/', icon: Home },
+  { label: 'New Plan', to: '/studio/new', icon: ScrollText },
+  { label: 'New Goal', to: '/goals?new=1', icon: Target },
   { label: 'Plans', to: '/plans', icon: ScrollText },
   { label: 'Goals', to: '/goals', icon: Target },
   ...(userHasPermission(user, 'instance.manage_agents')
@@ -320,19 +323,19 @@ const MobileBottomNavigation: React.FC<MobileBottomNavigationProps> = ({
         <button
           type="button"
           onClick={() => {
-            if (!isDemoMode) navigate('/studio/new');
+            if (!isDemoMode) navigate('/tasks/new');
           }}
           disabled={isDemoMode}
           aria-current={active.newPlan ? 'page' : undefined}
-          aria-label={isDemoMode ? 'New Plan unavailable in demo mode' : 'New Plan'}
+          aria-label={isDemoMode ? 'New Task unavailable in demo mode' : 'New Task'}
           className={`flex min-w-0 flex-1 flex-col items-center justify-center gap-0.5 px-1 text-[11px] font-semibold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-primary-500 disabled:text-slate-400 ${
             active.newPlan ? 'text-primary-800' : 'text-primary-700'
           }`}
         >
           <span className={`flex h-8 w-9 items-center justify-center rounded-lg ${isDemoMode ? 'bg-slate-200' : 'bg-primary-600 text-white shadow-sm'}`}>
-            <ScrollText className="h-4 w-4" aria-hidden="true" />
+            <Zap className="h-4 w-4" aria-hidden="true" />
           </span>
-          <span className="truncate">New Plan</span>
+          <span className="truncate">New Task</span>
         </button>
         <MobileNavLink
           to="/repositories"
