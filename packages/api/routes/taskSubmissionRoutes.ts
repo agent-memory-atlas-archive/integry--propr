@@ -114,6 +114,31 @@ function submissionServices(octokit: Awaited<ReturnType<typeof getAuthenticatedO
   };
 }
 
+interface SubmissionRequest {
+  repository: string;
+  instruction: string;
+  agentAlias?: string;
+  model?: string;
+  todoIds?: string[];
+}
+
+function invalidSubmissionOptions(body: SubmissionRequest) {
+  return (body.agentAlias !== undefined && typeof body.agentAlias !== 'string')
+    || (body.model !== undefined && typeof body.model !== 'string')
+    || (body.todoIds !== undefined && (!Array.isArray(body.todoIds) || body.todoIds.some((id: unknown) => typeof id !== 'string')));
+}
+
+function parseSubmissionRequest(req: Request): { body: SubmissionRequest; key: string } {
+  const body = typeof req.body?.payload === 'string' ? JSON.parse(req.body.payload) : (req.body || {});
+  const key = req.get('Idempotency-Key');
+  if (!body || typeof body !== 'object' || !key || key.length > 255 || typeof body.repository !== 'string' || !/^[\w.-]+\/[\w.-]+$/.test(body.repository)
+    || typeof body.instruction !== 'string' || !body.instruction.trim() || body.instruction.length > 50_000
+    || invalidSubmissionOptions(body)) {
+    throw Object.assign(new Error('A submission identity, repository and instruction (up to 50,000 characters) are required'), { status: 400 });
+  }
+  return { body, key };
+}
+
 export function createTaskSubmissionRoutes({ db, services = {} }: { db: Knex; services?: Partial<{
   authorize: typeof authorizeTaskSubmissionRepository;
   routing: typeof routing;
@@ -135,14 +160,7 @@ export function createTaskSubmissionRoutes({ db, services = {} }: { db: Knex; se
     try {
       if (!req.user) { res.status(401).json({ error: 'Authentication required' }); return; }
       if (isDemoMode()) { res.status(403).json({ error: 'Demo mode is read-only' }); return; }
-      const body = typeof req.body?.payload === 'string' ? JSON.parse(req.body.payload) : (req.body || {});
-      const key = req.get('Idempotency-Key');
-      if (!body || typeof body !== 'object' || !key || key.length > 255 || typeof body.repository !== 'string' || !/^[\w.-]+\/[\w.-]+$/.test(body.repository)
-        || typeof body.instruction !== 'string' || !body.instruction.trim() || body.instruction.length > 50_000
-        || (body.agentAlias !== undefined && typeof body.agentAlias !== 'string') || (body.model !== undefined && typeof body.model !== 'string')
-        || (body.todoIds !== undefined && (!Array.isArray(body.todoIds) || body.todoIds.some((id: unknown) => typeof id !== 'string')))) {
-        res.status(400).json({ error: 'A submission identity, repository and instruction (up to 50,000 characters) are required' }); return;
-      }
+      const { body, key } = parseSubmissionRequest(req);
       const repository = body.repository.toLowerCase();
       const config = await checkAccess(req, repository);
       const payloadHash = fingerprint({ repository, instruction: body.instruction, agentAlias: body.agentAlias || '', model: body.model || '', todoIds: body.todoIds || [], files: await goalUploadIdentity(files) });

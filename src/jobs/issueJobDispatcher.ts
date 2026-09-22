@@ -96,6 +96,97 @@ export async function handleDispatch(job: Job<IssueJobData>): Promise<JobResult>
     });
 }
 
+async function resolveDispatchTargets(
+    context: { currentIssueData: CurrentIssueData; repoValidation: RepoValidation; issueNumber: number },
+    deps: DispatcherDeps,
+    correlatedLogger: Logger,
+) {
+    const { currentIssueData, repoValidation, issueNumber } = context;
+    const defaultBranch = repoValidation.repoData?.defaultBranch || 'main';
+    const labels = currentIssueData.data.labels.map(l => l.name);
+
+    const baseLabels = labels.filter(l => l.startsWith('base-'));
+    const llmLabels = labels.filter(l => l.startsWith('llm-'));
+    const reasoningLevel = parseReasoningLevelFromLabels(currentIssueData.data.labels);
+    const reasoningLevelLabels = labels.filter(isReasoningLevelLabel);
+    if (reasoningLevelLabels.length > 1) {
+        correlatedLogger.warn({
+            issue: issueNumber,
+            reasoningLevel,
+            labels: reasoningLevelLabels
+        }, 'Multiple reasoning level labels found; using highest-priority label');
+    }
+
+    // Get all configured custom labels from agents
+    const customLabels = await deps.getAllCustomLabels();
+    const customLabelMatches = labels.filter(l =>
+        customLabels.some(cl => cl.toLowerCase() === l.toLowerCase())
+    );
+
+    const basesToProcess: BaseToProcess[] = baseLabels.length > 0
+        ? baseLabels.map(l => ({ branch: l.substring('base-'.length), label: l }))
+        : [{ branch: defaultBranch, label: null }];
+
+    // Resolve LLM labels and custom labels to agent + model pairs
+    const agentModelsToProcess: AgentModelToProcess[] = [];
+
+    // First, process standard llm- prefixed labels
+    if (llmLabels.length > 0) {
+        for (const label of llmLabels) {
+            const llmPart = label.substring('llm-'.length);
+            const resolution = await deps.resolveLlmLabel(llmPart);
+            agentModelsToProcess.push({
+                agentAlias: resolution.agentAlias,
+                model: resolution.model,
+                label
+            });
+            correlatedLogger.debug({
+                label,
+                resolvedAgent: resolution.agentAlias,
+                resolvedModel: resolution.model
+            }, 'Resolved LLM label');
+        }
+    }
+
+    // Then, process custom labels (that don't overlap with llm- labels)
+    if (customLabelMatches.length > 0) {
+        for (const label of customLabelMatches) {
+            const resolution = await deps.resolveCustomLabel(label);
+            if (resolution) {
+                agentModelsToProcess.push({
+                    agentAlias: resolution.agentAlias,
+                    model: resolution.model,
+                    label
+                });
+                correlatedLogger.debug({
+                    label,
+                    resolvedAgent: resolution.agentAlias,
+                    resolvedModel: resolution.model
+                }, 'Resolved custom label');
+            }
+        }
+    }
+
+    // If no LLM or custom labels found, use the default agent
+    if (agentModelsToProcess.length === 0) {
+        // No LLM or custom labels - use default agent from settings
+        const { agentAlias, modelToUse } = await deps.resolveDefaultAgentForDispatcher(correlatedLogger);
+        const resolvedModel = modelToUse || process.env.DEFAULT_CLAUDE_MODEL || deps.getDefaultModel();
+
+        if (!resolvedModel) {
+            throw new NoDefaultModelConfiguredError();
+        }
+
+        agentModelsToProcess.push({
+            agentAlias,
+            model: resolvedModel,
+            label: null
+        });
+    }
+
+    return { basesToProcess, agentModelsToProcess, reasoningLevel };
+}
+
 export async function handleDispatchWithDeps(job: Job<IssueJobData>, deps: DispatcherDeps): Promise<JobResult> {
     const { id: jobId, name: jobName, data: issueRef } = job;
     const submission = await deps.findSubmission(issueRef);
@@ -137,87 +228,9 @@ export async function handleDispatchWithDeps(job: Job<IssueJobData>, deps: Dispa
             throw new Error(errorMessage);
         }
 
-        const defaultBranch = repoValidation.repoData?.defaultBranch || 'main';
-        const labels = currentIssueData.data.labels.map(l => l.name);
-
-        const baseLabels = labels.filter(l => l.startsWith('base-'));
-        const llmLabels = labels.filter(l => l.startsWith('llm-'));
-        const reasoningLevel = parseReasoningLevelFromLabels(currentIssueData.data.labels);
-        const reasoningLevelLabels = labels.filter(isReasoningLevelLabel);
-        if (reasoningLevelLabels.length > 1) {
-            correlatedLogger.warn({
-                issue: issueRef.number,
-                reasoningLevel,
-                labels: reasoningLevelLabels
-            }, 'Multiple reasoning level labels found; using highest-priority label');
-        }
-
-        // Get all configured custom labels from agents
-        const customLabels = await deps.getAllCustomLabels();
-        const customLabelMatches = labels.filter(l =>
-            customLabels.some(cl => cl.toLowerCase() === l.toLowerCase())
+        const { basesToProcess, agentModelsToProcess, reasoningLevel } = await resolveDispatchTargets(
+            { currentIssueData, repoValidation, issueNumber: issueRef.number }, deps, correlatedLogger,
         );
-
-        const basesToProcess: BaseToProcess[] = baseLabels.length > 0
-            ? baseLabels.map(l => ({ branch: l.substring('base-'.length), label: l }))
-            : [{ branch: defaultBranch, label: null }];
-
-        // Resolve LLM labels and custom labels to agent + model pairs
-        const agentModelsToProcess: AgentModelToProcess[] = [];
-
-        // First, process standard llm- prefixed labels
-        if (llmLabels.length > 0) {
-            for (const label of llmLabels) {
-                const llmPart = label.substring('llm-'.length);
-                const resolution = await deps.resolveLlmLabel(llmPart);
-                agentModelsToProcess.push({
-                    agentAlias: resolution.agentAlias,
-                    model: resolution.model,
-                    label
-                });
-                correlatedLogger.debug({
-                    label,
-                    resolvedAgent: resolution.agentAlias,
-                    resolvedModel: resolution.model
-                }, 'Resolved LLM label');
-            }
-        }
-
-        // Then, process custom labels (that don't overlap with llm- labels)
-        if (customLabelMatches.length > 0) {
-            for (const label of customLabelMatches) {
-                const resolution = await deps.resolveCustomLabel(label);
-                if (resolution) {
-                    agentModelsToProcess.push({
-                        agentAlias: resolution.agentAlias,
-                        model: resolution.model,
-                        label
-                    });
-                    correlatedLogger.debug({
-                        label,
-                        resolvedAgent: resolution.agentAlias,
-                        resolvedModel: resolution.model
-                    }, 'Resolved custom label');
-                }
-            }
-        }
-
-        // If no LLM or custom labels found, use the default agent
-        if (agentModelsToProcess.length === 0) {
-            // No LLM or custom labels - use default agent from settings
-            const { agentAlias, modelToUse } = await deps.resolveDefaultAgentForDispatcher(correlatedLogger);
-            const resolvedModel = modelToUse || process.env.DEFAULT_CLAUDE_MODEL || deps.getDefaultModel();
-
-            if (!resolvedModel) {
-                throw new NoDefaultModelConfiguredError();
-            }
-
-            agentModelsToProcess.push({
-                agentAlias,
-                model: resolvedModel,
-                label: null
-            });
-        }
 
         let jobsEnqueued = 0;
         for (const base of basesToProcess) {

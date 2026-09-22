@@ -26,7 +26,7 @@ export default function NewTaskPage() {
   return <NewTaskLauncher key={scope} scope={scope} />;
 }
 
-function NewTaskLauncher({ scope }: { scope: string }) {
+function useNewTaskLauncher(scope: string) {
   useDocumentTitle('New Task');
   const navigate = useNavigate();
   const location = useLocation();
@@ -117,7 +117,60 @@ function NewTaskLauncher({ scope }: { scope: string }) {
     finally { submitting.current = false; setBusy(false); }
   };
   const locked = busy || Boolean(snapshot) || Boolean(planDraft);
-  const status = busy ? 'Submitting…' : result?.state === 'queued' ? 'Queued — waiting for task details' : result?.state === 'prepared' ? 'Could not create issue' : result?.state === 'failed' ? 'Could not start task' : result?.issueUrl ? 'Issue created — starting task' : snapshot ? 'Confirming submission with GitHub' : null;
+  return {
+    repository, setRepository, instruction, setInstruction, files, setFiles,
+    agentAlias, setAgent, model, setModel, catalog, selection, invalidRouting,
+    snapshot, result, busy, processingFiles, setProcessingFiles, planDraft,
+    ready, error, setError, run, planFirst, locked, isDemoMode,
+  };
+}
+
+type LauncherState = ReturnType<typeof useNewTaskLauncher>;
+
+function TaskRoutingOptions({ agentAlias, setAgent, model, setModel, catalog, selection, invalidRouting }:
+  Pick<LauncherState, 'agentAlias' | 'setAgent' | 'model' | 'setModel' | 'catalog' | 'selection' | 'invalidRouting'>) {
+  return <details className="border-y border-slate-200 py-4" open={invalidRouting || undefined}>
+    <summary className="cursor-pointer text-sm font-medium text-slate-700">Options <span className="ml-2 font-normal text-slate-500">{agentAlias || 'Default agent'} · {model || 'Default model'}</span></summary>
+    <div className="mt-4 grid gap-4 sm:grid-cols-2">
+      <label className="text-sm text-slate-700">Agent<select aria-label="Agent" value={agentAlias} onChange={event => { setAgent(event.target.value); setModel(''); }} className="mt-1 w-full rounded border border-slate-300 p-2"><option value="">Instance default</option>{invalidRouting && !selection && <option value={agentAlias}>{agentAlias} (unavailable)</option>}{catalog?.agents.map(agent => <option key={agent.alias} value={agent.alias}>{agent.alias}</option>)}</select></label>
+      <label className="text-sm text-slate-700">Model<select aria-label="Model" value={model} disabled={!agentAlias} onChange={event => setModel(event.target.value)} className="mt-1 w-full rounded border border-slate-300 p-2"><option value="">Agent default</option>{model && !selection?.supportedModels.includes(model) && <option value={model}>{model} (unavailable)</option>}{selection?.supportedModels.map(model => <option key={model}>{model}</option>)}</select></label>
+    </div>
+    <p className="mt-3 text-xs text-slate-500">Base branch and automatic review settings follow the repository’s issue workflow.</p>
+  </details>;
+}
+
+function submissionStatus(busy: boolean, result?: TaskSubmission, snapshot?: TaskSnapshot) {
+  if (busy) return 'Submitting…';
+  if (result?.state === 'queued') return 'Queued — waiting for task details';
+  if (result?.state === 'prepared') return 'Could not create issue';
+  if (result?.state === 'failed') return 'Could not start task';
+  if (result?.issueUrl) return 'Issue created — starting task';
+  return snapshot ? 'Confirming submission with GitHub' : null;
+}
+
+function TaskSubmissionFeedback({ busy, result, snapshot, error, invalidRouting }:
+  Pick<LauncherState, 'busy' | 'result' | 'snapshot' | 'error' | 'invalidRouting'>) {
+  const status = submissionStatus(busy, result, snapshot);
+
+  return <>
+    {invalidRouting && <p role="alert" className="text-sm text-red-700">The saved agent or model is unavailable. Choose a supported selection in Options.</p>}
+    {(error || result?.error) && <p role="alert" className="break-words rounded-md bg-red-50 p-3 text-sm text-red-800">{error || result?.error}</p>}
+    {status && <div role="status" className="rounded-md border border-teal-200 bg-teal-50 p-4 text-sm text-slate-700"><p className="font-semibold">{status}</p>{result?.issueUrl && <a href={result.issueUrl} target="_blank" rel="noreferrer" className="mt-2 inline-block text-teal-700 underline">Open issue #{result.issueNumber}</a>}{snapshot && !result?.issueUrl && <p className="mt-2">Retry checks this submission before creating anything else.</p>}</div>}
+  </>;
+}
+
+function TaskLauncherActions({ snapshot, result, planFirst, ready, busy, processingFiles, isDemoMode, repository, instruction, planDraft, invalidRouting }:
+  Pick<LauncherState, 'snapshot' | 'result' | 'planFirst' | 'ready' | 'busy' | 'processingFiles' | 'isDemoMode' | 'repository' | 'instruction' | 'planDraft' | 'invalidRouting'>) {
+  return <div className="flex flex-wrap justify-end gap-3">
+    {!snapshot && <button type="button" onClick={() => void planFirst()} disabled={!ready || busy || processingFiles || isDemoMode || !repository || !instruction.trim()} className={`${button} border-slate-300 bg-white text-slate-700`}><ScrollText size={16} />Plan first</button>}
+    {result?.state !== 'queued' && <button type="submit" disabled={!ready || busy || processingFiles || Boolean(planDraft) || isDemoMode || !repository || !instruction.trim() || invalidRouting} className={`${button} border-teal-600 bg-teal-600 text-white hover:bg-teal-700`}><Play size={16} />{busy ? 'Submitting…' : snapshot ? 'Retry submission' : 'Run task'}</button>}
+  </div>;
+}
+
+function NewTaskLauncher({ scope }: { scope: string }) {
+  const launcher = useNewTaskLauncher(scope);
+  const { catalog, repository, setRepository, instruction, setInstruction, files, setFiles,
+    setError, processingFiles, setProcessingFiles, locked, isDemoMode, run, snapshot } = launcher;
 
   return <main className="mx-auto w-full max-w-3xl px-4 pt-6 pb-28 sm:px-8 md:py-10">
     <h1 className="flex items-center gap-2 text-2xl font-semibold text-slate-900"><Zap className="h-6 w-6 text-teal-600" />New task</h1>
@@ -137,22 +190,10 @@ function NewTaskLauncher({ scope }: { scope: string }) {
           }} rows={7} placeholder="Fix the invoice date format…" className="w-full rounded-md border border-slate-300 p-3 text-sm leading-6 focus:border-teal-500 focus:outline-none focus:ring-1 focus:ring-teal-500" />
           <GoalAttachmentInput files={files} onChange={setFiles} onError={setError} onProcessingChange={setProcessingFiles} disabled={locked || processingFiles || isDemoMode} />
         </div>
-        <details className="border-y border-slate-200 py-4" open={invalidRouting || undefined}>
-          <summary className="cursor-pointer text-sm font-medium text-slate-700">Options <span className="ml-2 font-normal text-slate-500">{agentAlias || 'Default agent'} · {model || 'Default model'}</span></summary>
-          <div className="mt-4 grid gap-4 sm:grid-cols-2">
-            <label className="text-sm text-slate-700">Agent<select aria-label="Agent" value={agentAlias} onChange={event => { setAgent(event.target.value); setModel(''); }} className="mt-1 w-full rounded border border-slate-300 p-2"><option value="">Instance default</option>{invalidRouting && !selection && <option value={agentAlias}>{agentAlias} (unavailable)</option>}{catalog?.agents.map(agent => <option key={agent.alias} value={agent.alias}>{agent.alias}</option>)}</select></label>
-            <label className="text-sm text-slate-700">Model<select aria-label="Model" value={model} disabled={!agentAlias} onChange={event => setModel(event.target.value)} className="mt-1 w-full rounded border border-slate-300 p-2"><option value="">Agent default</option>{model && !selection?.supportedModels.includes(model) && <option value={model}>{model} (unavailable)</option>}{selection?.supportedModels.map(model => <option key={model}>{model}</option>)}</select></label>
-          </div>
-          <p className="mt-3 text-xs text-slate-500">Base branch and automatic review settings follow the repository’s issue workflow.</p>
-        </details>
+        <TaskRoutingOptions {...launcher} />
       </fieldset>
-      {invalidRouting && <p role="alert" className="text-sm text-red-700">The saved agent or model is unavailable. Choose a supported selection in Options.</p>}
-      {(error || result?.error) && <p role="alert" className="break-words rounded-md bg-red-50 p-3 text-sm text-red-800">{error || result?.error}</p>}
-      {status && <div role="status" className="rounded-md border border-teal-200 bg-teal-50 p-4 text-sm text-slate-700"><p className="font-semibold">{status}</p>{result?.issueUrl && <a href={result.issueUrl} target="_blank" rel="noreferrer" className="mt-2 inline-block text-teal-700 underline">Open issue #{result.issueNumber}</a>}{snapshot && !result?.issueUrl && <p className="mt-2">Retry checks this submission before creating anything else.</p>}</div>}
-      <div className="flex flex-wrap justify-end gap-3">
-        {!snapshot && <button type="button" onClick={() => void planFirst()} disabled={!ready || busy || processingFiles || isDemoMode || !repository || !instruction.trim()} className={`${button} border-slate-300 bg-white text-slate-700`}><ScrollText size={16} />Plan first</button>}
-        {result?.state !== 'queued' && <button type="submit" disabled={!ready || busy || processingFiles || Boolean(planDraft) || isDemoMode || !repository || !instruction.trim() || invalidRouting} className={`${button} border-teal-600 bg-teal-600 text-white hover:bg-teal-700`}><Play size={16} />{busy ? 'Submitting…' : snapshot ? 'Retry submission' : 'Run task'}</button>}
-      </div>
+      <TaskSubmissionFeedback {...launcher} />
+      <TaskLauncherActions {...launcher} />
     </form>
     {!snapshot && <div className="mt-8 grid gap-3 border-t border-slate-200 pt-6 sm:grid-cols-2"><Link to="/studio/new" className="rounded-lg border border-slate-200 p-4 text-sm"><strong>New Plan</strong><p className="mt-1 text-slate-500">Plan and review work before implementation.</p></Link><Link to="/goals?new=1" className="rounded-lg border border-slate-200 p-4 text-sm"><strong>New Goal</strong><p className="mt-1 text-slate-500">Start an ongoing agent session.</p></Link></div>}
   </main>;
