@@ -220,6 +220,16 @@ function invoke(
     env: {
       ...process.env,
       PATH: bin,
+      // This subprocess uses fake Docker. Runner transport settings (including
+      // the rootless preflight's empty DOCKER_CONTEXT) are not fixture inputs.
+      // Transport-specific cases supply their own values below.
+      DOCKER_HOST: undefined,
+      DOCKER_CONTEXT: undefined,
+      DOCKER_TLS: undefined,
+      DOCKER_TLS_VERIFY: undefined,
+      DOCKER_CERT_PATH: undefined,
+      DOCKER_CONFIG: undefined,
+      SSH_AUTH_SOCK: undefined,
       HOME: join(privateParent, 'home-private-SENTINEL'),
       PROPR_TEST_OS_HOME: join(privateParent, 'isolated-os-home'),
       PROPR_TEST_DISCOVERY_MODE: mode,
@@ -289,6 +299,47 @@ function invoke(
   }
   return { status: result.status, stdout: result.stdout, stderr: result.stderr, document };
 }
+
+test('the built CLI fixture isolates rootless runner Docker transport settings', async () => {
+  const parent = mkdtempSync(join(tmpdir(), 'propr-built-connect-rootless-'));
+  const ambientTransport = {
+    DOCKER_HOST: 'unix:///run/propr/docker.sock',
+    DOCKER_CONTEXT: '',
+    DOCKER_TLS: '',
+    DOCKER_TLS_VERIFY: '',
+    DOCKER_CERT_PATH: join(parent, 'runner-certs'),
+    DOCKER_CONFIG: join(parent, 'runner-docker-config'),
+    SSH_AUTH_SOCK: join(parent, 'runner-ssh-agent'),
+  };
+  const previous = Object.fromEntries(
+    Object.keys(ambientTransport).map(name => [name, process.env[name]]),
+  );
+  try {
+    chmodSync(parent, 0o700);
+    const bin = installFakeDocker(parent);
+    for (const name of ['isolated-os-home', 'home-private-SENTINEL', 'hostile-cwd']) {
+      mkdirSync(join(parent, name), { mode: 0o700 });
+    }
+    const root = makeRoot(parent, 'root');
+    await getOrCreatePublicInstanceIdentity(join(root, 'data'), () => IDENTITY);
+    const alias = join(parent, 'root-alias');
+    symlinkSync(root, alias, 'dir');
+    Object.assign(process.env, ambientTransport);
+
+    const ready = invoke(root, 'ready', bin, parent);
+    assert.equal(ready.status, 0, JSON.stringify(ready.document));
+    assert.equal(ready.document.status, 'ready');
+    const invalid = invoke(alias, 'ready', bin, parent);
+    assert.equal(invalid.status, 1);
+    assert.deepEqual(invalid.document.reasonCodes, ['INVALID_ROOT']);
+  } finally {
+    for (const [name, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+    rmSync(parent, { recursive: true, force: true });
+  }
+});
 
 test('the built CLI emits one bounded secret-free JSON document for every exit class', async () => {
   const parent = mkdtempSync(join(tmpdir(), 'propr-built-connect-cli-'));
