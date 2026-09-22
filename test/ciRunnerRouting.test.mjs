@@ -9,8 +9,6 @@ import { after, describe, test } from 'node:test';
 const REPOSITORY = fileURLToPath(new URL('..', import.meta.url));
 const CI_REDIS = join(REPOSITORY, 'scripts', 'ci-redis.sh');
 const CI_RUNNER_EVIDENCE = join(REPOSITORY, 'scripts', 'ci-runner-evidence.sh');
-const TRUSTED = "vars.PROPR_SELF_HOSTED_PR_CHECKS != 'false' && (github.event_name == 'workflow_dispatch' || (github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.user.login != 'dependabot[bot]'))";
-const ROUTED_RUNS_ON = `runs-on: \${{ (${TRUSTED}) && fromJSON('["self-hosted","linux","x64","propr"]') || 'ubuntu-latest' }}`;
 
 const scratch = mkdtempSync(join(tmpdir(), 'propr-ci-runner-routing-'));
 after(() => rmSync(scratch, { recursive: true, force: true }));
@@ -48,17 +46,6 @@ function extractRunBlock(block, stepName) {
         result.push(line.slice(indent));
     }
     return result.join('\n');
-}
-
-// Evaluates the routing expression the way Actions does for these operand
-// types: missing properties are null and comparisons are strict.
-function evaluateRoute(expression, { github, vars = {} }) {
-    const javascript = expression
-        .replaceAll('==', '===')
-        .replaceAll('!===', '!==')
-        .replace(/\bvars\.([A-Z_]+)/g, (_match, name) => `(vars[${JSON.stringify(name)}] ?? null)`)
-        .replace(/\bgithub\.([a-z_.]+)/g, (_match, path) => `(${path.split('.').reduce((code, key) => `${code}?.[${JSON.stringify(key)}]`, 'github')} ?? null)`);
-    return Function('github', 'vars', `return (${javascript});`)(github, vars);
 }
 
 // Minimal Docker CLI double for scripts/ci-redis.sh: containers are files
@@ -212,6 +199,38 @@ describe('scripts/ci-redis.sh shared-host isolation', () => {
         assert.deepEqual(docker.containers(), []);
     });
 
+    for (const namedFirst of [false, true]) {
+        test(`isolates omitted and explicit default instances (${namedFirst ? 'named' : 'omitted'} first)`, () => {
+            const docker = createFakeDocker();
+            const instances = namedFirst ? [{ CI_REDIS_INSTANCE: 'default' }, {}] : [{}, { CI_REDIS_INSTANCE: 'default' }];
+            const omitted = 'propr-ci-redis-777-shard-a1';
+            const named = 'propr-ci-redis-777-shard-default-a1';
+            for (const env of instances) {
+                const result = runRedis(docker, 'start', env);
+                assert.equal(result.status, 0, result.stderr);
+            }
+            assert.deepEqual(docker.containers(), [omitted, named]);
+            assert.deepEqual(docker.removals(), []);
+
+            const retried = [];
+            for (const env of instances) {
+                const previous = env.CI_REDIS_INSTANCE ? named : omitted;
+                const current = previous.replace(/a1$/, 'a2');
+                const result = runRedis(docker, 'start', { ...env, GITHUB_RUN_ATTEMPT: '2' });
+                assert.equal(result.status, 0, result.stderr);
+                retried.push(previous);
+                assert.deepEqual(docker.removals(), retried);
+                assert.deepEqual(docker.containers(), [omitted, named].map(name => retried.includes(name) ? name.replace(/a1$/, 'a2') : name).sort());
+                assert.ok(docker.containers().includes(current));
+            }
+            for (const env of instances) {
+                const result = runRedis(docker, 'stop', { ...env, GITHUB_RUN_ATTEMPT: '2' });
+                assert.equal(result.status, 0, result.stderr);
+            }
+            assert.deepEqual(docker.containers(), []);
+        });
+    }
+
     test('rejects instance names that sanitizing could collide', () => {
         const docker = createFakeDocker();
         for (const instance of ['shard/1', 'shard 1', '-shard', 'a'.repeat(64)]) {
@@ -281,44 +300,29 @@ describe('scripts/ci-runner-evidence.sh', () => {
 describe('PR check routing', () => {
     const fullSuite = readWorkflow('pr-test-on-label.yml');
     const buildCheck = readWorkflow('pr-build-check.yml');
-    const selfHostedJobs = () => [
+    const hostedJobs = () => [
         ['pr-test-on-label.yml shard', jobBlock(fullSuite, 'shard')],
         ['pr-test-on-label.yml docs', jobBlock(fullSuite, 'docs')],
         ['pr-build-check.yml validate', jobBlock(buildCheck, 'validate')],
     ];
 
-    test('uses one identical routing expression everywhere it chooses a runner', () => {
-        const count = (workflow) => workflow.split(TRUSTED).length - 1;
-        assert.equal(count(fullSuite), 4, 'shard and docs runners, native-electron and the gate');
-        assert.equal(count(buildCheck), 1, 'validate');
+    test('pins PR checks to hosted runners regardless of PR origin or repository variables', () => {
+        for (const [name, block] of hostedJobs()) {
+            assert.match(block, /\n    runs-on: ubuntu-latest\n/, name);
+        }
         for (const workflow of [fullSuite, buildCheck]) {
-            const variants = workflow.match(/vars\.PROPR_SELF_HOSTED_PR_CHECKS[^\n]*/g);
-            for (const variant of variants) assert.ok(variant.includes(TRUSTED), variant);
+            assert.doesNotMatch(workflow, /PROPR_SELF_HOSTED_PR_CHECKS/);
         }
     });
 
-    test('routes only trusted same-repository PRs and dispatches to the self-hosted runner', () => {
-        const pr = (headRepository, author = 'propr-dev[bot]') => ({
-            event_name: 'pull_request',
-            repository: 'integry/propr',
-            event: { pull_request: { head: { repo: { full_name: headRepository } }, user: { login: author } } },
-        });
-        assert.equal(evaluateRoute(TRUSTED, { github: pr('integry/propr') }), true);
-        assert.equal(evaluateRoute(TRUSTED, { github: pr('someone/propr') }), false, 'fork PRs stay hosted');
-        assert.equal(evaluateRoute(TRUSTED, { github: pr('integry/propr', 'dependabot[bot]') }), false, 'dependency update PRs stay hosted');
-        assert.equal(evaluateRoute(TRUSTED, { github: { event_name: 'workflow_dispatch', repository: 'integry/propr', event: {} } }), true);
-        assert.equal(evaluateRoute(TRUSTED, { github: pr('integry/propr'), vars: { PROPR_SELF_HOSTED_PR_CHECKS: 'false' } }), false, 'maintainers can route everything back to hosted');
-        assert.equal(evaluateRoute(TRUSTED, { github: pr('integry/propr'), vars: { PROPR_SELF_HOSTED_PR_CHECKS: 'true' } }), true);
-    });
-
-    test('runs the four shard matrix jobs and docs on the routed runner, one job per worker', () => {
+    test('runs the four shard matrix jobs and docs on independent hosted runners', () => {
         assert.deepEqual(jobNames(fullSuite), ['shard', 'docs', 'native-electron', 'test', 'comment']);
         const shard = jobBlock(fullSuite, 'shard');
         assert.match(shard, /matrix:\n\s+shard: \[1, 2, 3, 4\]\n/);
         for (const job of ['shard', 'docs']) {
             const block = jobBlock(fullSuite, job);
-            assert.ok(block.includes(`\n    ${ROUTED_RUNS_ON}\n`), `${job} is routed`);
-            assert.match(block, /\n {4}if: \$\{\{ github\.event_name == 'workflow_dispatch' \|\| !github\.event\.pull_request\.draft \}\}\n/, `${job} runs on both routes`);
+            assert.match(block, /\n    runs-on: ubuntu-latest\n/, `${job} is hosted`);
+            assert.match(block, /\n {4}if: \$\{\{ github\.event_name == 'workflow_dispatch' \|\| !github\.event\.pull_request\.draft \}\}\n/, `${job} runs for ready PRs and dispatches`);
         }
         for (const job of ['native-electron', 'test', 'comment']) assert.match(jobBlock(fullSuite, job), /\n {4}runs-on: ubuntu-latest\n/);
         assert.doesNotMatch(fullSuite, /runs-on: \[/, 'no job is pinned to self-hosted regardless of trust');
@@ -328,8 +332,8 @@ describe('PR check routing', () => {
         assert.doesNotMatch(fullSuite, /secrets\./);
     });
 
-    test('keeps every self-hosted job isolated, evidenced and self-cleaning', () => {
-        for (const [name, block] of selfHostedJobs()) {
+    test('leaves self-hosted isolation and cleanup guarded and inert on hosted jobs', () => {
+        for (const [name, block] of hostedJobs()) {
             assert.match(block, /persist-credentials: false/, name);
             assert.doesNotMatch(block, /clean: false/, `${name} keeps the clean checkout`);
             assert.match(block, /- name: Isolate job state from the shared host\n\s+if: runner\.environment == 'self-hosted'\n/, name);
@@ -367,9 +371,9 @@ describe('PR check routing', () => {
         assert.match(jobBlock(fullSuite, 'comment'), /\$\{shard\.runner\.name\}/, 'the failure comment names each shard\'s worker');
     });
 
-    test('runs the Electron units that cannot launch on the self-hosted runner on a hosted runner without skipping', () => {
+    test('keeps the redundant native Electron fallback inert while shards run hosted', () => {
         const electron = jobBlock(fullSuite, 'native-electron');
-        assert.ok(electron.includes(`(${TRUSTED})`));
+        assert.match(electron, /\n    if: \$\{\{ false \}\}\n/);
         assert.match(electron, /PROPR_REQUIRE_NATIVE_ELECTRON: '1'/);
         const run = extractRunBlock(electron, 'Run native Electron units without skipping');
         const units = spawnSync('bash', ['-c', `${run.split('\n').filter(line => line.startsWith('mapfile')).join('\n')}\nprintf '%s\\n' "\${files[@]}"`], {
@@ -389,7 +393,7 @@ describe('PR check routing', () => {
         const gate = jobBlock(fullSuite, 'test');
         assert.match(gate, /name: Run Full Test Suite\n/);
         assert.match(gate, /needs: \[shard, docs, native-electron\]/);
-        assert.ok(gate.includes(`ROUTE: \${{ (${TRUSTED}) && 'self-hosted' || 'hosted' }}`));
+        assert.match(gate, /\n          ROUTE: hosted\n/);
         const enforce = extractRunBlock(gate, 'Enforce shard and docs results');
         const runGate = env => spawnSync('bash', ['-e', '-c', enforce], {
             encoding: 'utf8',
@@ -469,9 +473,9 @@ describe('PR check routing', () => {
         assert.doesNotMatch(body, /shard 1 output/);
     });
 
-    test('routes Validate Changes and keeps every other build check on its hosted platform', () => {
+    test('keeps Validate Changes and every other build check on its hosted platform', () => {
         const validate = jobBlock(buildCheck, 'validate');
-        assert.ok(validate.includes(`\n    ${ROUTED_RUNS_ON}\n`));
+        assert.match(validate, /\n    runs-on: ubuntu-latest\n/);
         assert.equal(validate.split('./scripts/ci-install-chromium.sh').length - 1, 2);
         const toolContainers = validate.match(/docker run [^\n]*\n[^\n]*\n/g);
         assert.equal(toolContainers.length, 2);
@@ -509,7 +513,7 @@ describe('PR check routing', () => {
         assert.equal(install('github-hosted'), 'npx playwright install --with-deps chromium');
         assert.equal(install('self-hosted'), 'npx playwright install chromium');
         assert.equal(install(undefined), 'npx playwright install chromium');
-        for (const [name, block] of selfHostedJobs()) {
+        for (const [name, block] of hostedJobs()) {
             assert.doesNotMatch(block, /--with-deps/, name);
         }
     });

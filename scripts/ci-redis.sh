@@ -42,7 +42,9 @@ STATE_FILE="${STATE_DIR}/${CONTAINER_NAME}.name"
 # compared verbatim, so sanitizing the name cannot widen the match.
 LABEL_RUN="propr.ci.redis.run=${RUN_ID}"
 LABEL_JOB="propr.ci.redis.job=${JOB_ID}"
-LABEL_INSTANCE="propr.ci.redis.instance=${INSTANCE:-default}"
+# A colon cannot occur in a valid instance name, so the omitted instance
+# cannot share ownership with any explicit name (including "default").
+LABEL_INSTANCE="propr.ci.redis.instance=${INSTANCE:-:omitted}"
 
 write_env() {
   local key="$1"

@@ -368,7 +368,7 @@ describe('release test-suite runner', () => {
         ]);
     });
 
-    test('keeps the shard matrix complete and isolated on both routes', () => {
+    test('keeps the hosted shard matrix complete and isolated', () => {
         const workflow = readFileSync(new URL('../.github/workflows/pr-test-on-label.yml', import.meta.url), 'utf8');
         const shardCount = Number(workflow.match(/PROPR_TEST_SHARD_COUNT: '(\d+)'/)[1]);
         const matrix = workflow.match(/shard: \[([\d, ]+)\]/)[1].split(',').map(Number);
@@ -387,23 +387,23 @@ describe('release test-suite runner', () => {
         assert.equal(workflow.match(/\.\/\.propr\/setup\.sh/g).length, 1, 'docs validation runs once, not per shard');
 
         const shardJob = workflow.slice(workflow.indexOf('\n  shard:\n'), workflow.indexOf('\n  docs:\n'));
-        assert.match(shardJob, /\|\| 'ubuntu-latest' \}\}\n/, 'fork PR shards stay on GitHub-hosted runners');
+        assert.match(shardJob, /\n    runs-on: ubuntu-latest\n/, 'all PR shards stay on GitHub-hosted runners');
         const gate = workflow.slice(workflow.indexOf('\n  test:\n'), workflow.indexOf('\n  comment:\n'));
         assert.match(gate, /name: Run Full Test Suite\n/);
         assert.match(gate, /always\(\) &&\s+\(github\.event_name == 'workflow_dispatch' \|\| !github\.event\.pull_request\.draft\)/);
         assert.match(gate, /--verify-shard-summaries/);
-        for (const job of ['shard', 'docs', 'native-electron']) {
+        for (const job of ['shard', 'docs']) {
             const start = workflow.indexOf(`\n  ${job}:\n`);
             const header = workflow.slice(start, workflow.indexOf('steps:', start));
             assert.match(header, /github\.event_name == 'workflow_dispatch' \|\| !github\.event\.pull_request\.draft/, `${job} skips draft PRs`);
         }
-        // Routing and route-aware gate enforcement are covered in test/ciRunnerRouting.test.mjs.
+        // Hosted placement and gate enforcement are covered in test/ciRunnerRouting.test.mjs.
     });
 
     test('serializes nightly validation without cancelling an active live run', () => {
         const workflow = readFileSync(new URL('../.github/workflows/test-nightly.yml', import.meta.url), 'utf8');
         const concurrency = workflow.slice(workflow.indexOf('\nconcurrency:\n'), workflow.indexOf('\njobs:\n'));
-        assert.match(concurrency, /group: nightly-test-suite-\$\{\{ github\.ref \}\}/);
+        assert.match(concurrency, /^  group: nightly-test-suite$/m);
         assert.match(concurrency, /cancel-in-progress: false/);
         assert.doesNotMatch(workflow, /PROPR_TEST_SHARD_/, 'nightly keeps the unsharded full suite');
         assert.match(workflow, /npm run test:full:prepared/);

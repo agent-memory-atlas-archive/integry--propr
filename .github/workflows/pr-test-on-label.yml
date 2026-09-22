@@ -14,20 +14,13 @@ env:
   # this many shard summaries together ran every discovered test unit once.
   PROPR_TEST_SHARD_COUNT: '4'
 
-# Routing (see docs/ci-runners.md). The shard matrix and docs validation
-# run on the gitfix.dev self-hosted runner workers for same-repository PRs and
-# manual dispatches, one job per worker, and on GitHub-hosted runners for fork
-# PRs, Dependabot PRs and runs with the repository variable
-# PROPR_SELF_HOSTED_PR_CHECKS=false. This expression chooses where PR code
-# runs; it is NOT a security boundary, because a PR can edit this file.
-# Keeping fork code off the host relies on the repository's fork-PR workflow
-# approval setting. Every copy of the routing expression must stay identical.
+# PR code runs on disposable GitHub-hosted runners, including all four shards.
 
 jobs:
   shard:
     name: Full Test Suite Shard ${{ matrix.shard }}/4
     if: ${{ github.event_name == 'workflow_dispatch' || !github.event.pull_request.draft }}
-    runs-on: ${{ (vars.PROPR_SELF_HOSTED_PR_CHECKS != 'false' && (github.event_name == 'workflow_dispatch' || (github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.user.login != 'dependabot[bot]'))) && fromJSON('["self-hosted","linux","x64","propr"]') || 'ubuntu-latest' }}
+    runs-on: ubuntu-latest
     timeout-minutes: 45
     permissions:
       contents: read
@@ -204,7 +197,7 @@ jobs:
   docs:
     name: Validate Test Preparation and Docs
     if: ${{ github.event_name == 'workflow_dispatch' || !github.event.pull_request.draft }}
-    runs-on: ${{ (vars.PROPR_SELF_HOSTED_PR_CHECKS != 'false' && (github.event_name == 'workflow_dispatch' || (github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.user.login != 'dependabot[bot]'))) && fromJSON('["self-hosted","linux","x64","propr"]') || 'ubuntu-latest' }}
+    runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
       contents: read
@@ -293,15 +286,10 @@ jobs:
           case "${PROPR_CI_TMPDIR:-}" in /tmp/propr-ci.*) rm -rf -- "$PROPR_CI_TMPDIR" ;; esac
 
   native-electron:
-    # Electron cannot launch on the self-hosted workers (its tests skip there
-    # with "Electron cannot start on this worker"), and they run as root, so
-    # Electron's Chromium sandbox could not be exercised there anyway. These
-    # units run again here with skipping disabled, so self-hosted routing
-    # loses no coverage.
+    # Inert fallback for self-hosted shards. The hosted shard matrix already
+    # runs these units, so no additional Electron job is needed.
     name: Full Test Suite Native Electron (hosted)
-    if: >-
-      ${{ (github.event_name == 'workflow_dispatch' || !github.event.pull_request.draft) &&
-          (vars.PROPR_SELF_HOSTED_PR_CHECKS != 'false' && (github.event_name == 'workflow_dispatch' || (github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.user.login != 'dependabot[bot]'))) }}
+    if: ${{ false }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
@@ -393,7 +381,7 @@ jobs:
 
       - name: Enforce shard and docs results
         env:
-          ROUTE: ${{ (vars.PROPR_SELF_HOSTED_PR_CHECKS != 'false' && (github.event_name == 'workflow_dispatch' || (github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.user.login != 'dependabot[bot]'))) && 'self-hosted' || 'hosted' }}
+          ROUTE: hosted
           SHARD_RESULT: ${{ needs.shard.result }}
           DOCS_RESULT: ${{ needs.docs.result }}
           ELECTRON_RESULT: ${{ needs.native-electron.result }}
@@ -407,9 +395,8 @@ jobs:
             fi
           }
           # A matrix result is success only when every shard succeeded;
-          # failure, cancelled and skipped all block the merge. The route is
-          # recomputed here, so the hosted Electron job may only be skipped
-          # when the shards ran on hosted runners, where Electron launches.
+          # failure, cancelled and skipped all block the merge. Hosted shards
+          # already run the Electron units, so their fallback job stays skipped.
           require "Full test suite shards" "$SHARD_RESULT"
           require "Test preparation and docs validation" "$DOCS_RESULT"
           case "$ROUTE" in

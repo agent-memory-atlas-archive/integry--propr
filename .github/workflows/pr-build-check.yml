@@ -300,11 +300,8 @@ jobs:
 
   validate:
     name: Validate Changes
-    # Same-repository PRs run on a gitfix.dev self-hosted runner worker; fork and
-    # Dependabot PRs (and PROPR_SELF_HOSTED_PR_CHECKS=false) stay hosted. The
-    # expression matches pr-test-on-label.yml and is routing, not a security
-    # boundary: see docs/ci-runners.md.
-    runs-on: ${{ (vars.PROPR_SELF_HOSTED_PR_CHECKS != 'false' && (github.event_name == 'workflow_dispatch' || (github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.user.login != 'dependabot[bot]'))) && fromJSON('["self-hosted","linux","x64","propr"]') || 'ubuntu-latest' }}
+    # Keep PR code on a disposable GitHub-hosted runner.
+    runs-on: ubuntu-latest
     env:
       ACTIONLINT_IMAGE: rhysd/actionlint@sha256:b1934ee5f1c509618f2508e6eb47ee0d3520686341fec936f3b79331f9315667
     permissions:

@@ -8,10 +8,10 @@ on:
     # Allow manual trigger for testing
 
 # Scheduled and manual runs share the self-hosted runner and the live E2E
-# target, so they must never overlap on the same ref. An active run is never
+# target, so they must never overlap, even across refs. An active run is never
 # cancelled; GitHub keeps at most one newer run pending until it finishes.
 concurrency:
-  group: nightly-test-suite-${{ github.ref }}
+  group: nightly-test-suite
   cancel-in-progress: false
 
 jobs:
