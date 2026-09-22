@@ -666,6 +666,26 @@ describe('Inbox page', () => {
     await waitFor(() => expect(listNotifications).toHaveBeenLastCalledWith({ cursor: 'cursor-4', limit: 25 }));
   });
 
+  test('keeps loading more past overlapping activity that is already loaded', async () => {
+    const failure = (id: string) => item(id, `Failure ${id}`, null, {
+      kind: 'system_failure',
+      target: { type: 'system_failure', component: 'dispatcher' },
+    });
+    const first = item('event-first', 'First task');
+    vi.mocked(listNotifications)
+      .mockResolvedValueOnce({ notifications: [first], unreadCount: 5, nextCursor: 'cursor-1' })
+      .mockResolvedValueOnce({ notifications: [first, failure('failure-1')], unreadCount: 5, nextCursor: 'cursor-2' })
+      .mockResolvedValueOnce({ notifications: [item('event-older', 'Older task')], unreadCount: 6, nextCursor: 'cursor-3' });
+    renderInbox();
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Load more' }));
+    expect(await screen.findByRole('article', { name: 'Older task' })).toBeInTheDocument();
+    expect(listNotifications).toHaveBeenCalledTimes(3);
+    expect(listNotifications).toHaveBeenLastCalledWith({ cursor: 'cursor-2', limit: 25 });
+    expect(screen.getAllByRole('article', { name: 'First task' })).toHaveLength(1);
+    expect(screen.getByRole('button', { name: /System/ })).toHaveTextContent('1');
+  });
+
   test('stops looking ahead after four pages of only system notifications', async () => {
     let page = 0;
     vi.mocked(listNotifications).mockImplementation(async () => {

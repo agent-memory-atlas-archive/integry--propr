@@ -255,7 +255,9 @@ export function useInboxNotifications(): InboxNotificationsState {
         rawNewNotifications.push(...response.notifications);
         currentCursor = response.nextCursor;
         latestUnreadCount = response.unreadCount;
-        if (hasVisibleActivity(rawNewNotifications)) break;
+        // Overlapping pages can repeat activity already shown; only new activity ends lookahead.
+        const loadedIds = new Set(notificationsRef.current.map(notification => notification.id));
+        if (hasVisibleActivity(rawNewNotifications.filter(notification => !loadedIds.has(notification.id)))) break;
       }
       setNotifications(current => mergeNotifications(
         current,
