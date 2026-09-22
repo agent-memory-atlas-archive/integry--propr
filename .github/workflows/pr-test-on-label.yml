@@ -316,6 +316,8 @@ jobs:
         env:
           NODE_ENV: test
           PROPR_REQUIRE_NATIVE_ELECTRON: '1'
+          # Clears the workflow-level count: these units run unsharded.
+          PROPR_TEST_SHARD_COUNT: ''
         run: |
           set -euo pipefail
           mapfile -t files < <(grep -l 'prepareNativeElectronTest(' apps/desktop/scripts/*.test.mjs | grep -v '/electron-native-test-setup\.test\.mjs$')

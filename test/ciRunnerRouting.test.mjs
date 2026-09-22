@@ -21,6 +21,7 @@ const freshDirectory = (name) => {
     mkdirSync(directory, { recursive: true });
     return directory;
 };
+const escapeRegExp = text => text.replace(/[\\^$.*+?()[\]{}|]/g, '\\$&');
 const readWorkflow = name => readFileSync(join(REPOSITORY, '.github', 'workflows', name), 'utf8');
 
 function jobBlock(workflow, job) {
@@ -273,7 +274,7 @@ describe('scripts/ci-runner-evidence.sh', () => {
         assert.match(report, /\| Runner environment \| `self-hosted` \|/);
         assert.match(report, new RegExp(`\\| User \\(uid\\) \\| \`[^\`]+\` \\(\`${process.getuid()}\`\\) \\|`));
         assert.match(report, /\| Run attempt \| `2` \|/);
-        for (const limit of ['cpu.max', 'memory.high', 'memory.max']) assert.match(report, new RegExp(`\\| ${limit.replace('.', '\\.')} \\| \`[^\`]+\` \\|`));
+        for (const limit of ['cpu.max', 'memory.high', 'memory.max']) assert.match(report, new RegExp(`\\| ${escapeRegExp(limit)} \\| \`[^\`]+\` \\|`));
     });
 });
 
@@ -374,6 +375,8 @@ describe('PR check routing', () => {
             'apps/desktop/scripts/electron-pairing-zstd.test.mjs',
         ]);
         assert.match(run, /node scripts\/run-test-suite\.mjs "\$\{files\[@\]\}"/);
+        // The workflow-level shard count must not reach this unsharded run.
+        assert.match(electron, /PROPR_TEST_SHARD_COUNT: ''\n/);
     });
 
     test('fails the required gate closed on the selected route', () => {
