@@ -16,17 +16,46 @@ concurrency:
 jobs:
   project-options:
     name: Project options (Node ${{ matrix.node-version }})
-    runs-on: ubuntu-latest
+    # Activation requires independently enforced fork exclusion; see docs/ci-runners.md.
+    runs-on: ${{ fromJSON(vars.PROPR_SELF_HOSTED_PR_ACCESS_VERIFIED == 'true' && vars.PROPR_SELF_HOSTED_PR_CHECKS != 'false' && github.actor != 'dependabot[bot]' && ((github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) || (github.event_name == 'workflow_dispatch' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch))) && '["self-hosted","Linux","X64","propr"]' || '["ubuntu-latest"]') }}
     strategy:
       fail-fast: false
       matrix:
         node-version: [22, 24]
+    timeout-minutes: 30
     permissions:
       contents: read
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Isolate job state from the shared host
+        if: runner.environment == 'self-hosted'
+        run: |
+          set -euo pipefail
+          job_root="$RUNNER_TEMP/ci"
+          rm -rf -- "$job_root"
+          mkdir -p "$job_root/home" "$job_root/pw"
+          # TMPDIR is a private 0700 directory directly under the sticky /tmp,
+          # the same ancestry tests get on hosted runners. The runner's own
+          # tree can have a group-writable ancestor, which the CLI's private
+          # directory checks rightly reject, and its long path overflows
+          # Chromium's singleton socket path.
+          tmp_dir="$(mktemp -d /tmp/propr-ci.XXXXXX)"
+          {
+            echo "HOME=$job_root/home"
+            echo "TMPDIR=$tmp_dir"
+            echo "PROPR_CI_TMPDIR=$tmp_dir"
+            echo "XDG_CONFIG_HOME=$job_root/home/.config"
+            echo "XDG_CACHE_HOME=$job_root/home/.cache"
+            echo "PLAYWRIGHT_BROWSERS_PATH=$job_root/pw"
+          } >> "$GITHUB_ENV"
+
+      - name: Record runner placement
+        run: ./scripts/ci-runner-evidence.sh
 
       - name: Set up Node.js
         uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
@@ -50,3 +79,9 @@ jobs:
           packages/cli/src/utils/resolveProject.test.ts
           packages/cli/src/commands/configCommands.test.ts
           packages/cli/src/commands/implementCommands.test.ts
+
+      - name: Remove job files from the persistent workspace
+        if: always() && runner.environment == 'self-hosted'
+        run: |
+          git -C "$GITHUB_WORKSPACE" clean -ffdxq
+          case "${PROPR_CI_TMPDIR:-}" in /tmp/propr-ci.*) rm -rf -- "$PROPR_CI_TMPDIR" ;; esac

@@ -14,13 +14,15 @@ env:
   # this many shard summaries together ran every discovered test unit once.
   PROPR_TEST_SHARD_COUNT: '4'
 
-# PR code runs on disposable GitHub-hosted runners, including all four shards.
+# Four workers, one matrix shard per worker. The opt-in is an activation gate,
+# not an access-control boundary; forks must be denied outside PR-editable YAML.
 
 jobs:
   shard:
     name: Full Test Suite Shard ${{ matrix.shard }}/4
     if: ${{ github.event_name == 'workflow_dispatch' || !github.event.pull_request.draft }}
-    runs-on: ubuntu-latest
+    # Activation requires independently enforced fork exclusion; see docs/ci-runners.md.
+    runs-on: ${{ fromJSON(vars.PROPR_SELF_HOSTED_PR_ACCESS_VERIFIED == 'true' && vars.PROPR_SELF_HOSTED_PR_CHECKS != 'false' && github.actor != 'dependabot[bot]' && ((github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) || (github.event_name == 'workflow_dispatch' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch))) && '["self-hosted","Linux","X64","propr"]' || '["ubuntu-latest"]') }}
     timeout-minutes: 45
     permissions:
       contents: read
@@ -197,7 +199,8 @@ jobs:
   docs:
     name: Validate Test Preparation and Docs
     if: ${{ github.event_name == 'workflow_dispatch' || !github.event.pull_request.draft }}
-    runs-on: ubuntu-latest
+    # Activation requires independently enforced fork exclusion; see docs/ci-runners.md.
+    runs-on: ${{ fromJSON(vars.PROPR_SELF_HOSTED_PR_ACCESS_VERIFIED == 'true' && vars.PROPR_SELF_HOSTED_PR_CHECKS != 'false' && github.actor != 'dependabot[bot]' && ((github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) || (github.event_name == 'workflow_dispatch' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch))) && '["self-hosted","Linux","X64","propr"]' || '["ubuntu-latest"]') }}
     timeout-minutes: 30
     permissions:
       contents: read
@@ -286,11 +289,10 @@ jobs:
           case "${PROPR_CI_TMPDIR:-}" in /tmp/propr-ci.*) rm -rf -- "$PROPR_CI_TMPDIR" ;; esac
 
   native-electron:
-    # Inert fallback for self-hosted shards. The hosted shard matrix already
-    # runs these units, so no additional Electron job is needed.
+    # This environment is unavailable on the root-run shared host. Require
+    # actual native assertions on hosted runners on either shard route.
     name: Full Test Suite Native Electron (hosted)
-    # Negating always() keeps this disabled without actionlint's constant-if error.
-    if: ${{ !always() }}
+    if: ${{ github.event_name == 'workflow_dispatch' || !github.event.pull_request.draft }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
@@ -382,7 +384,6 @@ jobs:
 
       - name: Enforce shard and docs results
         env:
-          ROUTE: hosted
           SHARD_RESULT: ${{ needs.shard.result }}
           DOCS_RESULT: ${{ needs.docs.result }}
           ELECTRON_RESULT: ${{ needs.native-electron.result }}
@@ -395,19 +396,11 @@ jobs:
               status=1
             fi
           }
-          # A matrix result is success only when every shard succeeded;
-          # failure, cancelled and skipped all block the merge. Hosted shards
-          # already run the Electron units, so their fallback job stays skipped.
+          # A matrix result is success only when every shard succeeded.
+          # Missing/skipped native assertions fail closed on either route.
           require "Full test suite shards" "$SHARD_RESULT"
           require "Test preparation and docs validation" "$DOCS_RESULT"
-          case "$ROUTE" in
-            self-hosted) require "Hosted native Electron units" "$ELECTRON_RESULT" ;;
-            hosted) ;;
-            *)
-              echo "::error::Unknown full-suite route '$ROUTE'."
-              status=1
-              ;;
-          esac
+          require "Hosted native Electron units" "$ELECTRON_RESULT"
           if [ "$COVERAGE_RESULT" != success ]; then
             echo "::error::Shard coverage verification finished with result '$COVERAGE_RESULT'."
             status=1

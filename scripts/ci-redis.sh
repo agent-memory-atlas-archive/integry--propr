@@ -33,13 +33,15 @@ if [[ ! "$RUN_ATTEMPT" =~ ^[1-9][0-9]*$ ]]; then
   exit 2
 fi
 
-RUN_KEY="${RUN_ID}-${JOB_ID}${INSTANCE:+-${INSTANCE}}"
-SAFE_RUN_KEY="$(printf '%s' "$RUN_KEY" | tr -c 'A-Za-z0-9_.-' '-')"
-CONTAINER_NAME="propr-ci-redis-${SAFE_RUN_KEY}-a${RUN_ATTEMPT}"
+# NUL separates fields unambiguously (environment variables cannot contain it).
+# Hash the raw values, including the empty instance and the attempt; never
+# concatenate/sanitize components, which aliases shard/default and shard-default.
+OWNER_HASH="$(printf '%s\0' "$RUN_ID" "$JOB_ID" "$INSTANCE" "$RUN_ATTEMPT" | sha256sum)"
+CONTAINER_NAME="propr-ci-redis-${OWNER_HASH%% *}"
 STATE_DIR="${CI_REDIS_STATE_DIR:-${RUNNER_TEMP:-${TMPDIR:-/tmp}}}"
 STATE_FILE="${STATE_DIR}/${CONTAINER_NAME}.name"
 # Owner labels identify exactly this run, job and instance. Label values are
-# compared verbatim, so sanitizing the name cannot widen the match.
+# compared verbatim before every removal, independently of the container name.
 LABEL_RUN="propr.ci.redis.run=${RUN_ID}"
 LABEL_JOB="propr.ci.redis.job=${JOB_ID}"
 # A colon cannot occur in a valid instance name, so the omitted instance
@@ -62,7 +64,7 @@ write_env() {
 }
 
 remove_container() {
-  local name="$1"
+  local name="$1" mode="${2:-current}" id key expected actual attempt
 
   case "$name" in
     propr-ci-redis-*) ;;
@@ -72,10 +74,36 @@ remove_container() {
       ;;
   esac
 
-  if docker inspect "$name" >/dev/null 2>&1; then
-    docker rm --force "$name" >/dev/null
-    echo "Stopped Redis container $name"
+  # Resolve once and remove by immutable ID, so a replacement under the same
+  # name cannot be deleted between the ownership check and docker rm.
+  id="$(docker inspect --format '{{.Id}}' "$name" 2>/dev/null)" || return 0
+  for key in propr.ci.redis propr.ci.redis.run propr.ci.redis.job propr.ci.redis.instance; do
+    case "$key" in
+      propr.ci.redis) expected=true ;;
+      propr.ci.redis.run) expected="$RUN_ID" ;;
+      propr.ci.redis.job) expected="$JOB_ID" ;;
+      propr.ci.redis.instance) expected="${INSTANCE:-:omitted}" ;;
+    esac
+    actual="$(docker inspect --format "{{ index .Config.Labels \"$key\" }}" "$id")" || return 1
+    if [[ "$actual" != "$expected" ]]; then
+      echo "Refusing to remove $name: ownership label $key does not match" >&2
+      return 1
+    fi
+  done
+  attempt="$(docker inspect --format '{{ index .Config.Labels "propr.ci.redis.attempt" }}' "$id")" || return 1
+  if [[ ! "$attempt" =~ ^[1-9][0-9]*$ ]]; then
+    echo "Refusing to remove $name: missing or invalid attempt label" >&2
+    return 1
   fi
+  if [[ "$mode" == previous ]]; then
+    # Never let a delayed cleanup from an earlier attempt delete a newer one.
+    (( attempt < RUN_ATTEMPT )) || return 0
+  elif [[ "$attempt" != "$RUN_ATTEMPT" ]]; then
+    echo "Refusing to remove $name: attempt label does not match" >&2
+    return 1
+  fi
+  docker rm --force "$id" >/dev/null || return 1
+  echo "Stopped Redis container $name"
 }
 
 stop_redis() {
@@ -89,22 +117,22 @@ stop_redis() {
     return 1
   fi
 
-  remove_container "$name"
+  remove_container "$name" || return 1
   rm -f "$STATE_FILE"
 }
 
-# A cancelled earlier attempt of this same run, job and instance may have left
-# its container behind. Attempts of one run never overlap, so removing those is
-# safe; other runs, jobs and instances never match all three labels.
+# Recover only older attempts owned by this exact run, job and instance.
+# Filters narrow discovery; inspection by immutable ID authorizes removal.
 remove_previous_attempts() {
-  local name
-  while IFS= read -r name; do
-    [[ -n "$name" && "$name" != "$CONTAINER_NAME" ]] || continue
-    remove_container "$name"
-  done < <(docker ps --all --format '{{.Names}}' \
+  local name candidates
+  candidates="$(docker ps --all --format '{{.Names}}' \
     --filter "label=${LABEL_RUN}" \
     --filter "label=${LABEL_JOB}" \
-    --filter "label=${LABEL_INSTANCE}")
+    --filter "label=${LABEL_INSTANCE}")" || return 1
+  while IFS= read -r name; do
+    [[ -n "$name" && "$name" != "$CONTAINER_NAME" ]] || continue
+    remove_container "$name" previous || return 1
+  done <<< "$candidates"
 }
 
 start_redis() {

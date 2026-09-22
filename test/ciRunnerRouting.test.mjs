@@ -100,12 +100,18 @@ case "$command" in
     echo "run $name" >> "$state/.log"
     ;;
   inspect)
-    name="\${@: -1}"
+    name="\${@: -1}"; name="\${name#id-}"
     [[ -e "$state/$name" ]] || exit 1
-    if [[ "\${1:-}" == --format ]]; then echo healthy; fi
+    if [[ "\${1:-}" == --format ]]; then
+      case "$2" in
+        '{{.Id}}') echo "id-$name" ;;
+        '{{.State.Health.Status}}') echo healthy ;;
+        *) key="$(printf '%s' "$2" | cut -d'"' -f2)"; sed -n "s/^$key=//p" "$state/$name" ;;
+      esac
+    fi
     ;;
   rm)
-    name="\${@: -1}"
+    name="\${@: -1}"; [[ "$name" == id-* ]] || exit 9; name="\${name#id-}"
     rm -f "$state/$name"
     echo "rm $name" >> "$state/.log"
     ;;
@@ -156,140 +162,148 @@ function runRedis(docker, action, env) {
     });
 }
 
+function redisName(docker, env = {}) {
+    const result = runRedis(docker, 'name', env);
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout.trim(), /^propr-ci-redis-[a-f0-9]{64}$/);
+    return result.stdout.trim();
+}
+
+function startRedis(docker, env) {
+    const result = runRedis(docker, 'start', env);
+    assert.equal(result.status, 0, result.stderr);
+    return redisName(docker, env);
+}
+
 describe('scripts/ci-redis.sh shared-host isolation', () => {
-    test('gives every matrix shard its own container, port and connection file within one run and job', () => {
+    test('gives every matrix shard its own container, port and connection file', () => {
         const docker = createFakeDocker();
-        const envFiles = {};
+        const settings = [];
         for (const instance of ['shard-1', 'shard-2']) {
-            envFiles[instance] = join(docker.state, `../${instance}.env`);
-            const result = runRedis(docker, 'start', { CI_REDIS_INSTANCE: instance, CI_REDIS_ENV_FILE: envFiles[instance] });
-            assert.equal(result.status, 0, result.stderr);
+            const file = join(docker.state, `../${instance}.env`);
+            const name = startRedis(docker, { CI_REDIS_INSTANCE: instance, CI_REDIS_ENV_FILE: file });
+            settings.push(Object.fromEntries(readFileSync(file, 'utf8').trim().split('\n').map(line => line.split('='))));
+            assert.equal(settings.at(-1).REDIS_CONTAINER_NAME, name);
+            assert.equal(settings.at(-1).PROPR_TEST_REDIS_ISOLATION, 'flush');
         }
-        assert.deepEqual(docker.containers(), [
-            'propr-ci-redis-777-shard-shard-1-a1',
-            'propr-ci-redis-777-shard-shard-2-a1',
-        ]);
-        const settings = Object.fromEntries(Object.entries(envFiles).map(([instance, file]) => [
-            instance,
-            Object.fromEntries(readFileSync(file, 'utf8').trim().split('\n').map(line => line.split('='))),
-        ]));
-        assert.notEqual(settings['shard-1'].REDIS_PORT, settings['shard-2'].REDIS_PORT);
-        assert.equal(settings['shard-1'].REDIS_CONTAINER_NAME, 'propr-ci-redis-777-shard-shard-1-a1');
-        assert.equal(settings['shard-1'].PROPR_TEST_REDIS_ISOLATION, 'flush');
-
-        const stop = runRedis(docker, 'stop', { CI_REDIS_INSTANCE: 'shard-1' });
-        assert.equal(stop.status, 0, stop.stderr);
-        assert.deepEqual(docker.containers(), ['propr-ci-redis-777-shard-shard-2-a1']);
-        assert.deepEqual(docker.removals(), ['propr-ci-redis-777-shard-shard-1-a1']);
-        assert.equal(runRedis(docker, 'name', { CI_REDIS_INSTANCE: 'shard-2' }).stdout.trim(), 'propr-ci-redis-777-shard-shard-2-a1');
+        assert.notEqual(settings[0].REDIS_PORT, settings[1].REDIS_PORT);
+        assert.equal(docker.containers().length, 2);
+        assert.equal(runRedis(docker, 'stop', { CI_REDIS_INSTANCE: 'shard-1' }).status, 0);
+        assert.deepEqual(docker.containers(), [settings[1].REDIS_CONTAINER_NAME]);
+        assert.deepEqual(docker.removals(), [settings[0].REDIS_CONTAINER_NAME]);
     });
 
-    test('keys containers by attempt and only replaces this instance\'s earlier attempt', () => {
+    test('recovers only older attempts of this run, job and instance', () => {
         const docker = createFakeDocker();
-        for (const env of [
-            { CI_REDIS_INSTANCE: 'shard-1' },
+        const own = { CI_REDIS_INSTANCE: 'shard-1' };
+        const previous = startRedis(docker, own);
+        const preserved = [
             { CI_REDIS_INSTANCE: 'shard-2' },
-            { CI_REDIS_INSTANCE: 'shard-1', GITHUB_RUN_ID: '778' },
-            { CI_REDIS_INSTANCE: 'shard-1', GITHUB_JOB: 'other' },
-        ]) {
-            assert.equal(runRedis(docker, 'start', { ...env, CI_REDIS_ENV_FILE: join(docker.state, '../ignored.env') }).status, 0);
-        }
-        const retry = runRedis(docker, 'start', {
-            CI_REDIS_INSTANCE: 'shard-1',
-            GITHUB_RUN_ATTEMPT: '2',
-            CI_REDIS_ENV_FILE: join(docker.state, '../retry.env'),
-        });
-        assert.equal(retry.status, 0, retry.stderr);
-        assert.deepEqual(docker.removals(), ['propr-ci-redis-777-shard-shard-1-a1']);
-        assert.deepEqual(docker.containers(), [
-            'propr-ci-redis-777-other-shard-1-a1',
-            'propr-ci-redis-777-shard-shard-1-a2',
-            'propr-ci-redis-777-shard-shard-2-a1',
-            'propr-ci-redis-778-shard-shard-1-a1',
-        ]);
+            { ...own, GITHUB_RUN_ID: '778' },
+            { ...own, GITHUB_JOB: 'other' },
+        ].map(env => startRedis(docker, env));
+        const current = startRedis(docker, { ...own, GITHUB_RUN_ATTEMPT: '2' });
+        assert.deepEqual(docker.removals(), [previous]);
+        assert.deepEqual(docker.containers(), [...preserved, current].sort());
+        // Delayed old-attempt start/stop must also leave the new attempt alone.
+        startRedis(docker, own);
+        assert.ok(docker.containers().includes(current));
+        assert.equal(runRedis(docker, 'stop', own).status, 0);
+        assert.deepEqual(docker.containers(), [...preserved, current].sort());
     });
 
-    test('keeps the single-Redis behaviour for existing callers without an instance', () => {
+    test('keeps existing callers without an instance and exports to GITHUB_ENV', () => {
         const docker = createFakeDocker();
-        const githubEnv = join(docker.state, '../github.env');
-        writeFileSync(githubEnv, '');
-        assert.equal(runRedis(docker, 'start', { GITHUB_JOB: 'e2e-tests', GITHUB_ENV: githubEnv }).status, 0);
-        assert.deepEqual(docker.containers(), ['propr-ci-redis-777-e2e-tests-a1']);
-        assert.match(readFileSync(githubEnv, 'utf8'), /^REDIS_PORT=\d+$/m);
-        assert.match(readFileSync(githubEnv, 'utf8'), /^PROPR_TEST_REDIS_ISOLATION=flush$/m);
-        assert.equal(runRedis(docker, 'stop', { GITHUB_JOB: 'e2e-tests' }).status, 0);
+        const file = join(docker.state, '../github.env');
+        const env = { GITHUB_JOB: 'e2e-tests', GITHUB_ENV: file };
+        const name = startRedis(docker, env);
+        assert.deepEqual(docker.containers(), [name]);
+        assert.match(readFileSync(file, 'utf8'), /^REDIS_PORT=\d+$/m);
+        assert.equal(runRedis(docker, 'stop', env).status, 0);
         assert.deepEqual(docker.containers(), []);
     });
 
-    for (const namedFirst of [false, true]) {
-        test(`isolates omitted and explicit default instances (${namedFirst ? 'named' : 'omitted'} first)`, () => {
-            const docker = createFakeDocker();
-            const instances = namedFirst ? [{ CI_REDIS_INSTANCE: 'default' }, {}] : [{}, { CI_REDIS_INSTANCE: 'default' }];
-            const omitted = 'propr-ci-redis-777-shard-a1';
-            const named = 'propr-ci-redis-777-shard-default-a1';
-            for (const env of instances) {
-                const result = runRedis(docker, 'start', env);
-                assert.equal(result.status, 0, result.stderr);
-            }
-            assert.deepEqual(docker.containers(), [omitted, named]);
-            assert.deepEqual(docker.removals(), []);
-
-            const retried = [];
-            for (const env of instances) {
-                const previous = env.CI_REDIS_INSTANCE ? named : omitted;
-                const current = previous.replace(/a1$/, 'a2');
-                const result = runRedis(docker, 'start', { ...env, GITHUB_RUN_ATTEMPT: '2' });
-                assert.equal(result.status, 0, result.stderr);
-                retried.push(previous);
-                assert.deepEqual(docker.removals(), retried);
-                assert.deepEqual(docker.containers(), [omitted, named].map(name => retried.includes(name) ? name.replace(/a1$/, 'a2') : name).sort());
-                assert.ok(docker.containers().includes(current));
-            }
-            for (const env of instances) {
-                const result = runRedis(docker, 'stop', { ...env, GITHUB_RUN_ATTEMPT: '2' });
-                assert.equal(result.status, 0, result.stderr);
-            }
-            assert.deepEqual(docker.containers(), []);
-        });
+    for (const other of [{}, { GITHUB_JOB: 'shard-default' }]) {
+        for (const reverse of [false, true]) {
+            test(`shard/default coexists with ${other.GITHUB_JOB || 'shard'}/omitted; reverse=${reverse}`, () => {
+                const docker = createFakeDocker();
+                const owners = [{ CI_REDIS_INSTANCE: 'default' }, other];
+                if (reverse) owners.reverse();
+                const names = owners.map(env => startRedis(docker, env));
+                assert.notEqual(names[0], names[1]);
+                assert.deepEqual(docker.containers(), [...names].sort());
+                assert.deepEqual(docker.removals(), []);
+                assert.equal(runRedis(docker, 'stop', owners[0]).status, 0);
+                assert.deepEqual(docker.containers(), [names[1]]);
+                assert.equal(runRedis(docker, 'stop', owners[1]).status, 0);
+                assert.deepEqual(docker.containers(), []);
+            });
+        }
     }
 
-    test('rejects instance names that sanitizing could collide', () => {
+    test('does not alias field boundaries, punctuation, empty instances or attempts', () => {
         const docker = createFakeDocker();
-        for (const instance of ['shard/1', 'shard 1', '-shard', 'a'.repeat(64)]) {
-            const result = runRedis(docker, 'start', { CI_REDIS_INSTANCE: instance });
-            assert.equal(result.status, 2, instance);
-            assert.match(result.stderr, /CI_REDIS_INSTANCE must match/);
+        const owners = [
+            { GITHUB_RUN_ID: 'a-b', GITHUB_JOB: 'c' },
+            { GITHUB_RUN_ID: 'a', GITHUB_JOB: 'b-c' },
+            { GITHUB_JOB: 'shard/a' }, { GITHUB_JOB: 'shard-a' },
+            {}, { CI_REDIS_INSTANCE: 'default' }, { GITHUB_RUN_ATTEMPT: '2' },
+        ];
+        assert.equal(new Set(owners.map(env => redisName(docker, env))).size, owners.length);
+    });
+
+    for (const label of ['propr.ci.redis', 'propr.ci.redis.run', 'propr.ci.redis.job', 'propr.ci.redis.instance', 'propr.ci.redis.attempt']) {
+        for (const action of ['start', 'stop']) {
+            test(`${action} refuses a matching name with a foreign ${label} label`, () => {
+                const docker = createFakeDocker();
+                const name = startRedis(docker, {});
+                const file = join(docker.state, name);
+                const labels = readFileSync(file, 'utf8').split('\n').map(line => line.startsWith(`${label}=`) ? `${label}=${label.endsWith('attempt') ? '2' : 'foreign'}` : line).join('\n');
+                writeFileSync(file, labels);
+                const result = runRedis(docker, action, {});
+                assert.equal(result.status, 1, result.stderr);
+                assert.match(result.stderr, /Refusing to remove/);
+                assert.deepEqual(docker.containers(), [name]);
+                assert.deepEqual(docker.removals(), []);
+            });
         }
-        assert.equal(runRedis(docker, 'start', { GITHUB_RUN_ATTEMPT: '0' }).status, 2);
+    }
+
+    test('rechecks ownership of previous-attempt candidates and rejects tampered state files', () => {
+        const docker = createFakeDocker();
+        const name = startRedis(docker, {});
+        const file = join(docker.state, name);
+        writeFileSync(file, readFileSync(file, 'utf8').replace('propr.ci.redis=true', 'propr.ci.redis=false'));
+        assert.equal(runRedis(docker, 'start', { GITHUB_RUN_ATTEMPT: '2' }).status, 1);
+        assert.deepEqual(docker.removals(), []);
+        const other = startRedis(docker, { GITHUB_JOB: 'other' });
+        writeFileSync(join(docker.state, '../redis-state', `${other}.name`), name);
+        assert.equal(runRedis(docker, 'stop', { GITHUB_JOB: 'other' }).status, 1);
+        assert.deepEqual(docker.containers(), [name, other].sort());
+    });
+
+    test('rejects invalid instances, attempts and Docker limits', () => {
+        const docker = createFakeDocker();
+        for (const env of [
+            ...['shard/1', 'shard 1', '-shard', 'a'.repeat(64)].map(CI_REDIS_INSTANCE => ({ CI_REDIS_INSTANCE })),
+            { GITHUB_RUN_ATTEMPT: '0' }, { CI_REDIS_MEMORY: 'unlimited' },
+            { CI_REDIS_MEMORY: '0m' }, { CI_REDIS_CPUS: '-1' }, { CI_REDIS_PIDS_LIMIT: '0' },
+        ]) assert.equal(runRedis(docker, 'start', env).status, 2, JSON.stringify(env));
         assert.deepEqual(docker.containers(), []);
     });
 
-    test('bounds every Redis container with explicit Docker limits outside the runner cgroup', () => {
+    test('bounds Redis outside the runner cgroup and binds only a dynamic loopback port', () => {
         const docker = createFakeDocker();
-        assert.equal(runRedis(docker, 'start', { CI_REDIS_INSTANCE: 'shard-1', CI_REDIS_ENV_FILE: join(docker.state, '../limits.env') }).status, 0);
-        const argumentsOf = docker.runArguments('propr-ci-redis-777-shard-shard-1-a1');
-        const option = name => argumentsOf[argumentsOf.indexOf(name) + 1];
+        const args = docker.runArguments(startRedis(docker, {}));
+        const option = name => args[args.indexOf(name) + 1];
         assert.equal(option('--memory'), '512m');
-        assert.equal(option('--memory-swap'), '512m', 'no swap beyond the memory limit');
+        assert.equal(option('--memory-swap'), '512m');
         assert.equal(option('--cpus'), '1');
         assert.equal(option('--pids-limit'), '64');
-        assert.equal(option('--publish'), '127.0.0.1::6379', 'loopback only, with a Docker-assigned port');
-
-        assert.equal(runRedis(docker, 'start', {
-            CI_REDIS_INSTANCE: 'shard-2',
-            CI_REDIS_ENV_FILE: join(docker.state, '../limits.env'),
-            CI_REDIS_MEMORY: '1g',
-            CI_REDIS_CPUS: '0.5',
-        }).status, 0);
-        const overridden = docker.runArguments('propr-ci-redis-777-shard-shard-2-a1');
+        assert.equal(option('--publish'), '127.0.0.1::6379');
+        const overridden = docker.runArguments(startRedis(docker, { CI_REDIS_INSTANCE: 'limits', CI_REDIS_MEMORY: '1g', CI_REDIS_CPUS: '0.5' }));
         assert.equal(overridden[overridden.indexOf('--memory') + 1], '1g');
         assert.equal(overridden[overridden.indexOf('--cpus') + 1], '0.5');
-
-        for (const env of [{ CI_REDIS_MEMORY: 'unlimited' }, { CI_REDIS_MEMORY: '0m' }, { CI_REDIS_CPUS: '-1' }, { CI_REDIS_PIDS_LIMIT: '0' }]) {
-            const result = runRedis(docker, 'start', { CI_REDIS_INSTANCE: 'shard-3', ...env });
-            assert.equal(result.status, 2, JSON.stringify(env));
-        }
-        assert.ok(!docker.containers().includes('propr-ci-redis-777-shard-shard-3-a1'));
     });
 });
 describe('scripts/ci-runner-evidence.sh', () => {
@@ -322,40 +336,62 @@ describe('scripts/ci-runner-evidence.sh', () => {
 describe('PR check routing', () => {
     const fullSuite = readWorkflow('pr-test-on-label.yml');
     const buildCheck = readWorkflow('pr-build-check.yml');
-    const hostedJobs = () => [
+    const routedJobs = () => [
         ['pr-test-on-label.yml shard', jobBlock(fullSuite, 'shard')],
         ['pr-test-on-label.yml docs', jobBlock(fullSuite, 'docs')],
-        ['pr-build-check.yml validate', jobBlock(buildCheck, 'validate')],
+        ...['validate', 'visual-previews', 'cli-node-matrix', 'cli-init-json'].map(job => [`pr-build-check.yml ${job}`, jobBlock(buildCheck, job)]),
+        ['cli-node-compatibility.yml project-options', jobBlock(readWorkflow('cli-node-compatibility.yml'), 'project-options')],
     ];
 
-    test('pins PR checks to hosted runners regardless of PR origin or repository variables', () => {
-        for (const [name, block] of hostedJobs()) {
-            assert.match(block, /\n    runs-on: ubuntu-latest\n/, name);
-        }
-        for (const workflow of [fullSuite, buildCheck]) {
-            assert.doesNotMatch(workflow, /PROPR_SELF_HOSTED_PR_CHECKS/);
+    test('routes compatible work only after explicit activation, with forks and untrusted dispatches hosted', () => {
+        const expressions = routedJobs().map(([name, block]) => {
+            const expression = block.match(/runs-on: \$\{\{ (fromJSON\(.+\)) \}\}/)?.[1];
+            assert.ok(expression, `${name} has gated routing`);
+            return expression;
+        });
+        assert.equal(new Set(expressions).size, 1, 'all routing uses the same conditions');
+        const evaluate = new Function('vars', 'github', 'fromJSON', 'format', `return ${expressions[0]}`);
+        const github = {
+            actor: 'maintainer', repository: 'integry/propr', event_name: 'pull_request', ref: 'refs/pull/2466/merge',
+            event: { repository: { default_branch: 'main' }, pull_request: { head: { repo: { full_name: 'integry/propr' } } } },
+        };
+        const enabled = { PROPR_SELF_HOSTED_PR_ACCESS_VERIFIED: 'true' };
+        const cases = [
+            [enabled, github, true],
+            [{}, github, false],
+            [{ PROPR_SELF_HOSTED_PR_CHECKS: 'true' }, github, false],
+            [{ ...enabled, PROPR_SELF_HOSTED_PR_CHECKS: 'false' }, github, false],
+            [{ PROPR_SELF_HOSTED_PR_ACCESS_VERIFIED: 'false' }, github, false],
+            [enabled, { ...github, actor: 'dependabot[bot]' }, false],
+            [enabled, { ...github, event: { pull_request: { head: { repo: { full_name: 'fork/propr' } } } } }, false],
+            [enabled, { ...github, event_name: 'workflow_dispatch', ref: 'refs/heads/main' }, true],
+            [enabled, { ...github, event_name: 'workflow_dispatch', ref: 'refs/heads/unreviewed' }, false],
+            [enabled, { ...github, event_name: 'push' }, false],
+        ];
+        for (const [vars, context, selfHosted] of cases) {
+            assert.deepEqual(evaluate(vars, context, JSON.parse, (pattern, value) => pattern.replace('{0}', value)),
+                selfHosted ? ['self-hosted', 'Linux', 'X64', 'propr'] : ['ubuntu-latest'], JSON.stringify({ vars, context }));
         }
     });
 
-    test('runs the four shard matrix jobs and docs on independent hosted runners', () => {
+    test('keeps four independent shard jobs and a separate docs job', () => {
         assert.deepEqual(jobNames(fullSuite), ['shard', 'docs', 'native-electron', 'test', 'comment']);
         const shard = jobBlock(fullSuite, 'shard');
         assert.match(shard, /matrix:\n\s+shard: \[1, 2, 3, 4\]\n/);
         for (const job of ['shard', 'docs']) {
             const block = jobBlock(fullSuite, job);
-            assert.match(block, /\n    runs-on: ubuntu-latest\n/, `${job} is hosted`);
+            assert.match(block, /runs-on: \$\{\{ fromJSON\(/, `${job} supports both routes`);
             assert.match(block, /\n {4}if: \$\{\{ github\.event_name == 'workflow_dispatch' \|\| !github\.event\.pull_request\.draft \}\}\n/, `${job} runs for ready PRs and dispatches`);
         }
         for (const job of ['native-electron', 'test', 'comment']) assert.match(jobBlock(fullSuite, job), /\n {4}runs-on: ubuntu-latest\n/);
-        assert.doesNotMatch(fullSuite, /runs-on: \[/, 'no job is pinned to self-hosted regardless of trust');
         assert.doesNotMatch(fullSuite, /run-local-shards|LOCAL_SHARD/, 'no nested local shard coordinator');
         assert.ok(!existsSync(join(REPOSITORY, 'scripts', 'run-local-shards.mjs')));
         assert.doesNotMatch(fullSuite, /pull_request_target/);
         assert.doesNotMatch(fullSuite, /secrets\./);
     });
 
-    test('leaves self-hosted isolation and cleanup guarded and inert on hosted jobs', () => {
-        for (const [name, block] of hostedJobs()) {
+    test('isolates every eligible job and cleans up even on failure or cancellation', () => {
+        for (const [name, block] of routedJobs()) {
             assert.match(block, /persist-credentials: false/, name);
             assert.doesNotMatch(block, /clean: false/, `${name} keeps the clean checkout`);
             assert.match(block, /- name: Isolate job state from the shared host\n\s+if: runner\.environment == 'self-hosted'\n/, name);
@@ -393,9 +429,9 @@ describe('PR check routing', () => {
         assert.match(jobBlock(fullSuite, 'comment'), /\$\{shard\.runner\.name\}/, 'the failure comment names each shard\'s worker');
     });
 
-    test('keeps the redundant native Electron fallback inert while shards run hosted', () => {
+    test('requires real hosted native Electron assertions on both routes', () => {
         const electron = jobBlock(fullSuite, 'native-electron');
-        assert.match(electron, /\n    if: \$\{\{ !always\(\) \}\}\n/);
+        assert.match(electron, /if: \$\{\{ github\.event_name == 'workflow_dispatch' \|\| !github\.event\.pull_request\.draft \}\}/);
         assert.match(electron, /PROPR_REQUIRE_NATIVE_ELECTRON: '1'/);
         const run = extractRunBlock(electron, 'Run native Electron units without skipping');
         const units = spawnSync('bash', ['-c', `${run.split('\n').filter(line => line.startsWith('mapfile')).join('\n')}\nprintf '%s\\n' "\${files[@]}"`], {
@@ -411,37 +447,28 @@ describe('PR check routing', () => {
         assert.match(electron, /PROPR_TEST_SHARD_COUNT: ''\n/);
     });
 
-    test('fails the required gate closed on the selected route', () => {
+    test('fails the required gate closed for shards, docs, coverage and native Electron', () => {
         const gate = jobBlock(fullSuite, 'test');
         assert.match(gate, /name: Run Full Test Suite\n/);
         assert.match(gate, /needs: \[shard, docs, native-electron\]/);
-        assert.match(gate, /\n          ROUTE: hosted\n/);
         const enforce = extractRunBlock(gate, 'Enforce shard and docs results');
         const runGate = env => spawnSync('bash', ['-e', '-c', enforce], {
             encoding: 'utf8',
             env: { PATH: process.env.PATH, COVERAGE_RESULT: 'success', ...env },
         });
-        const selfHosted = { ROUTE: 'self-hosted', SHARD_RESULT: 'success', DOCS_RESULT: 'success', ELECTRON_RESULT: 'success' };
-        const hosted = { ROUTE: 'hosted', SHARD_RESULT: 'success', DOCS_RESULT: 'success', ELECTRON_RESULT: 'skipped' };
-        assert.equal(runGate(selfHosted).status, 0);
-        assert.equal(runGate(hosted).status, 0);
-        for (const [env, message] of [
-            [{ ...selfHosted, SHARD_RESULT: 'failure' }, /shards finished with result 'failure'/],
-            [{ ...selfHosted, SHARD_RESULT: 'cancelled' }, /shards finished with result 'cancelled'/],
-            [{ ...selfHosted, SHARD_RESULT: 'skipped' }, /shards finished with result 'skipped'/],
-            [{ ...selfHosted, DOCS_RESULT: 'skipped' }, /docs validation finished with result 'skipped'/],
-            [{ ...selfHosted, ELECTRON_RESULT: 'skipped' }, /native Electron units finished with result 'skipped'/],
-            [{ ...selfHosted, ELECTRON_RESULT: 'failure' }, /native Electron units finished with result 'failure'/],
-            [{ ...hosted, SHARD_RESULT: 'skipped' }, /shards finished with result 'skipped'/],
-            [{ ...hosted, SHARD_RESULT: 'failure' }, /shards finished with result 'failure'/],
-            [{ ...hosted, DOCS_RESULT: 'cancelled' }, /docs validation finished with result 'cancelled'/],
-            [{ ...selfHosted, COVERAGE_RESULT: 'failure' }, /coverage verification finished with result 'failure'/],
-            [{ ...hosted, COVERAGE_RESULT: 'skipped' }, /coverage verification finished with result 'skipped'/],
-            [{ ...hosted, ROUTE: '' }, /Unknown full-suite route ''/],
+        const passed = { SHARD_RESULT: 'success', DOCS_RESULT: 'success', ELECTRON_RESULT: 'success', COVERAGE_RESULT: 'success' };
+        assert.equal(runGate(passed).status, 0);
+        for (const [variable, message] of [
+            ['SHARD_RESULT', /shards finished with result/],
+            ['DOCS_RESULT', /docs validation finished with result/],
+            ['ELECTRON_RESULT', /native Electron units finished with result/],
+            ['COVERAGE_RESULT', /coverage verification finished with result/],
         ]) {
-            const result = runGate(env);
-            assert.equal(result.status, 1, JSON.stringify(env));
-            assert.match(result.stdout, message);
+            for (const outcome of ['failure', 'cancelled', 'skipped', '']) {
+                const result = runGate({ ...passed, [variable]: outcome });
+                assert.equal(result.status, 1, `${variable}=${outcome}`);
+                assert.match(result.stdout, message);
+            }
         }
     });
 
@@ -522,9 +549,9 @@ describe('PR check routing', () => {
         }
     });
 
-    test('keeps Validate Changes and every other build check on its hosted platform', () => {
+    test('routes compatible build checks while keeping native and ordinary-user checks hosted', () => {
         const validate = jobBlock(buildCheck, 'validate');
-        assert.match(validate, /\n    runs-on: ubuntu-latest\n/);
+        assert.match(validate, /runs-on: \$\{\{ fromJSON\(/);
         assert.equal(validate.split('./scripts/ci-install-chromium.sh').length - 1, 2);
         const toolContainers = validate.match(/docker run [^\n]*\n[^\n]*\n/g);
         assert.equal(toolContainers.length, 2);
@@ -533,22 +560,31 @@ describe('PR check routing', () => {
             assert.match(container, /--network none --memory 1g --memory-swap 1g --cpus 1 --pids-limit 256/, 'tool containers run outside the runner cgroup, so they carry their own limits');
         }
         const expected = {
-            'visual-previews': 'ubuntu-latest',
-            'cli-node-matrix': 'ubuntu-latest',
             'cli-agent-skill-glibc-231': 'ubuntu-latest',
             'cli-agent-skill-darwin': 'macos-15',
             'windows-connect-discovery': 'windows-2025',
             'connect-authority-darwin': 'macos-15',
-            'cli-init-json': 'ubuntu-latest',
             comment: 'ubuntu-latest',
         };
-        assert.deepEqual(jobNames(buildCheck).sort(), [...Object.keys(expected), 'validate'].sort());
+        assert.deepEqual(jobNames(buildCheck).sort(), [...Object.keys(expected), 'validate', 'visual-previews', 'cli-node-matrix', 'cli-init-json'].sort());
         for (const [job, runner] of Object.entries(expected)) {
             assert.match(jobBlock(buildCheck, job), new RegExp(`\n    runs-on: ${runner}\n`), job);
         }
-        for (const desktop of ['desktop-release-guard.yml', 'desktop-connect-discovery-guard.yml', 'cli-node-compatibility.yml']) {
+        for (const desktop of ['desktop-release-guard.yml', 'desktop-connect-discovery-guard.yml']) {
             assert.doesNotMatch(readWorkflow(desktop), /self-hosted/, `${desktop} stays hosted`);
         }
+    });
+
+    test('keeps sanitized artifacts and selects earlier successful shard attempts on partial reruns', () => {
+        const shard = jobBlock(fullSuite, 'shard');
+        assert.match(shard, /sanitize-ci-output\.mjs test_output\.txt shard-output\/test_output\.sanitized\.txt/);
+        assert.match(shard, /name: full-test-output-\$\{\{ github.run_id \}\}-\$\{\{ github.run_attempt \}\}-shard-/);
+        for (const job of ['test', 'comment']) assert.match(jobBlock(fullSuite, job), /pattern: full-test-output-\$\{\{ github.run_id \}\}-\*-shard-\*/);
+        const validate = jobBlock(buildCheck, 'validate');
+        assert.match(validate, /sanitize-ci-output\.mjs build_log\.txt build_log\.sanitized\.txt/);
+        assert.match(validate, /path: build_log\.sanitized\.txt/);
+        assert.doesNotMatch(validate, /path: build_log\.txt/);
+        assert.match(jobBlock(buildCheck, 'comment'), /readFileSync\('build_log\.sanitized\.txt'/);
     });
 
     test('installs Chromium system packages only on disposable hosted runners', () => {
@@ -562,7 +598,7 @@ describe('PR check routing', () => {
         assert.equal(install('github-hosted'), 'npx playwright install --with-deps chromium');
         assert.equal(install('self-hosted'), 'npx playwright install chromium');
         assert.equal(install(undefined), 'npx playwright install chromium');
-        for (const [name, block] of hostedJobs()) {
+        for (const [name, block] of routedJobs()) {
             assert.doesNotMatch(block, /--with-deps/, name);
         }
     });
