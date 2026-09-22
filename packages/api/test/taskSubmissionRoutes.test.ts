@@ -7,6 +7,7 @@ import { randomUUID } from 'node:crypto';
 import type { Request, Response } from 'express';
 import { closeConnection } from '@propr/core';
 import { up } from '../../core/src/db/migrations/20260922000000_add_task_submissions.js';
+import { up as identityMigration } from '../../core/src/db/migrations/20260922010000_preserve_task_submission_identity.js';
 import { createTaskSubmissionRoutes, authorizeTaskSubmissionRepository } from '../routes/taskSubmissionRoutes.js';
 import { configureDemoMode } from '../demoMode.js';
 
@@ -22,6 +23,7 @@ function response() {
 async function fixture() {
   const db = knex({ client: 'better-sqlite3', connection: { filename: ':memory:' }, useNullAsDefault: true });
   await up(db);
+  await identityMigration(db);
   return db;
 }
 

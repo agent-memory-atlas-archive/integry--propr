@@ -12,8 +12,9 @@ export async function resolveTaskSubmissionRetry(
   database: Knex = db,
   getOctokit = getAuthenticatedOctokit,
 ): Promise<SubmissionRetry | null> {
-  if (!submission.task_id) return null;
-  const latest = await database('task_history').where({ task_id: submission.task_id }).orderBy('timestamp', 'desc').first('state', 'timestamp');
+  const taskId = submission.latest_task_id || submission.task_id;
+  if (!taskId) return null;
+  const latest = await database('task_history').where({ task_id: taskId }).orderBy('timestamp', 'desc').first('state', 'timestamp');
   if (!latest || !['completed', 'failed', 'cancelled'].includes(String(latest.state).toLowerCase())) return null;
   const trigger = (JSON.parse(submission.payload) as SubmissionPayload).trigger;
   const [owner, repo] = submission.repository.split('/');

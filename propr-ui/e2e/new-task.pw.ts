@@ -24,7 +24,7 @@ async function fixture(page: Page, failDispatch = false) {
       '/api/auth/demo-mode': { demoMode: false },
       '/api/auth/user': { id: 'preview-user', login: 'operator', username: 'operator', displayName: 'Operator', email: null, avatarUrl: null, role: 'admin', permissions: ['instance.manage_settings'], authorizationSource: 'local' },
       '/api/instance/catalog': { repositories: [{ id: 'billing', name: 'acme/billing', enabled: true, baseBranch: 'main' }], agents: [{ alias: 'codex', enabled: true, supportedModels: ['gpt-6-astra'], defaultModel: 'gpt-6-astra' }], defaultAgentAlias: 'codex' },
-      '/api/config/repos': { success: true, repos_to_monitor: [{ id: 'billing', name: 'acme/billing', enabled: true }] },
+      '/api/config/repos': { success: true, repos_to_monitor: [{ id: 'billing', name: 'acme/billing', alias: 'Billing service', enabled: true }] },
       '/api/repositories/indexing-status': { repositories: [] },
       '/api/repos/chat/messages': { messages: [] },
       '/api/repos/todos/categories': { categories: [] },
@@ -96,6 +96,8 @@ test('repository and todo launchers prefill the request without completing the t
   await page.getByRole('button', { name: `Select todo: ${title}` }).click();
   await page.getByRole('button', { name: 'Run task', exact: true }).click();
   await expect(page.getByLabel('Instruction')).toHaveValue(title);
+  await expect(page.getByText('billing', { exact: true })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Run task', exact: true })).toBeEnabled();
   expect(requests.filter(request => /^(POST|PATCH|PUT|DELETE) \/api\/repos\/todos/.test(request))).toEqual([]);
 });
 
@@ -117,5 +119,117 @@ test('mobile dispatch error keeps the issue, instruction and attachments availab
   const retryBox = await page.getByRole('button', { name: 'Retry submission' }).boundingBox();
   const navigationBox = await page.locator('.mobile-bottom-navigation').boundingBox();
   expect(retryBox!.y + retryBox!.height).toBeLessThanOrEqual(navigationBox!.y);
+  await expect(page.getByRole('button', { name: 'Start over' })).toBeEnabled();
   await screenshot(page, 'new-task-error-mobile');
+  await page.getByRole('button', { name: 'Start over' }).click();
+  await expect(page.getByLabel('Instruction')).toBeEnabled();
+  await expect(page.getByLabel('Instruction')).toHaveValue('');
+  await expect(page.getByText('invoice-example.txt')).toHaveCount(0);
+});
+
+for (const [device, viewport] of Object.entries({ desktop: { width: 1440, height: 960 }, mobile: { width: 390, height: 844 } })) {
+  test(`a rejected creation can be edited and submitted with a new identity on ${device}`, async ({ page }) => {
+    await page.setViewportSize(viewport);
+    await fixture(page);
+    const keys: string[] = [];
+    await page.route('**/api/task-submissions', route => {
+      keys.push(route.request().headers()['idempotency-key']);
+      return route.fulfill({ json: { id: 'rejected', state: 'prepared', issueNumber: null, issueUrl: null, taskId: null, error: 'GitHub rejected issue creation. Update the request and try again.' } });
+    });
+    await page.goto('/tasks/new');
+    await page.getByText('Select a repository', { exact: true }).click();
+    await page.getByRole('button', { name: /acme.*billing/ }).click();
+    await page.getByLabel('Instruction').fill(title);
+    await page.getByRole('button', { name: 'Run task', exact: true }).click();
+    await expect(page.getByRole('button', { name: 'Edit request' })).toBeEnabled();
+    await page.getByRole('button', { name: 'Edit request' }).scrollIntoViewIfNeeded();
+    await screenshot(page, `new-task-rejected-${device}`);
+    // Restore the definitive rejection from the submission endpoint.
+    await page.route('**/api/task-submissions/*', route => route.fulfill({ json: { id: 'rejected', state: 'prepared', issueNumber: null, issueUrl: null, taskId: null, error: 'GitHub rejected issue creation.' } }));
+    await page.reload();
+    await page.getByRole('button', { name: 'Edit request' }).click();
+    await expect(page.getByLabel('Instruction')).toBeEnabled();
+    await expect(page.getByLabel('Instruction')).toHaveValue(title);
+    await page.getByLabel('Instruction').fill(`${title}. Use the account locale.`);
+    await page.getByRole('button', { name: 'Run task', exact: true }).click();
+    await expect(page.getByRole('button', { name: 'Edit request' })).toBeEnabled();
+    expect(keys).toHaveLength(2);
+    expect(keys[1]).not.toBe(keys[0]);
+  });
+}
+
+test('completing one tab preserves another tab’s lost-response request and attachment bytes', async ({ page, context }) => {
+  const other = await context.newPage();
+  await fixture(page, true);
+  await fixture(other, true);
+  const keys: string[] = [];
+  page.on('request', request => { if (new URL(request.url()).pathname === '/api/task-submissions') keys[0] = request.headers()['idempotency-key']; });
+  other.on('request', request => { if (new URL(request.url()).pathname === '/api/task-submissions') keys[1] = request.headers()['idempotency-key']; });
+  await other.route('**/api/task-submissions**', route => route.fulfill({ status: 503, json: { error: 'Response lost; retry this submission to recover.' } }));
+  // Both launchers are open before either writes recovery data.
+  await Promise.all([page.goto('/tasks/new'), other.goto('/tasks/new')]);
+  for (const tab of [page, other]) {
+    await tab.getByText('Select a repository', { exact: true }).click();
+    await tab.getByRole('button', { name: /acme.*billing/ }).click();
+    await tab.getByLabel('Instruction').fill(title);
+  }
+  await other.getByLabel('Attach files', { exact: true }).setInputFiles({ name: 'recovery.txt', mimeType: 'text/plain', buffer: Buffer.from('Retain these recovery bytes') });
+  await page.getByRole('button', { name: 'Run task', exact: true }).click();
+  await expect(page.getByRole('button', { name: 'Retry submission' })).toBeEnabled();
+  await other.getByRole('button', { name: 'Run task', exact: true }).click();
+  await expect(other.getByRole('alert')).toContainText('HTTP 503');
+  expect(keys[1]).not.toBe(keys[0]);
+  await page.route('**/api/task-submissions/*', route => route.fulfill({ json: { id: 'completed', state: 'queued', issueNumber: 42, issueUrl: null, taskId, error: null } }));
+  await page.reload();
+  await expect(page).toHaveURL(new RegExp(`/tasks/${taskId}$`));
+  await other.reload();
+  await expect(other.getByLabel('Instruction')).toHaveValue(title);
+  await expect(other.getByText('recovery.txt')).toBeVisible();
+  const saved = await other.evaluate(async () => {
+    const db = await new Promise<IDBDatabase>(resolve => { const request = indexedDB.open('propr-task-launcher', 1); request.onsuccess = () => resolve(request.result); });
+    try {
+      const rows = await new Promise<Array<{ key: string; files: File[] }>>(resolve => { const request = db.transaction('submissions').objectStore('submissions').getAll(); request.onsuccess = () => resolve(request.result); });
+      return Promise.all(rows.map(async row => ({ key: row.key, bytes: await row.files[0].text() })));
+    } finally { db.close(); }
+  });
+  expect(saved).toEqual([{ key: keys[1], bytes: 'Retain these recovery bytes' }]);
+  await other.getByRole('button', { name: 'Retry submission' }).click();
+  await expect(other.getByRole('alert')).toContainText('HTTP 503');
+  expect(keys[1]).toBe(saved[0].key);
+});
+
+test('legacy recovery snapshots are adopted and discarded only with their matching identity', async ({ page }) => {
+  await fixture(page, true);
+  await page.goto('/tasks/new');
+  await page.getByText('Select a repository', { exact: true }).click();
+  await page.getByRole('button', { name: /acme.*billing/ }).click();
+  await page.getByLabel('Instruction').fill(title);
+  await page.getByRole('button', { name: 'Run task', exact: true }).click();
+  await expect(page.getByRole('button', { name: 'Retry submission' })).toBeEnabled();
+  await page.evaluate(async () => {
+    const db = await new Promise<IDBDatabase>(resolve => { const request = indexedDB.open('propr-task-launcher', 1); request.onsuccess = () => resolve(request.result); });
+    try {
+      await new Promise<void>(resolve => {
+        const tx = db.transaction('submissions', 'readwrite');
+        const store = tx.objectStore('submissions');
+        const request = store.openCursor();
+        request.onsuccess = () => {
+          const cursor = request.result!;
+          const [scope] = JSON.parse(String(cursor.key));
+          store.put(cursor.value, scope);
+          cursor.delete();
+          sessionStorage.removeItem(`task-active-submission:${scope}`);
+        };
+        tx.oncomplete = () => resolve();
+      });
+    } finally { db.close(); }
+  });
+  await page.reload();
+  await expect(page.getByLabel('Instruction')).toHaveValue(title);
+  await expect(page.getByRole('button', { name: 'Start over' })).toBeEnabled();
+  await page.getByRole('button', { name: 'Start over' }).click();
+  await expect(page.getByLabel('Instruction')).toBeEnabled();
+  await page.reload();
+  await expect(page.getByLabel('Instruction')).toHaveValue('');
+  await expect(page.getByRole('button', { name: 'Retry submission' })).toHaveCount(0);
 });

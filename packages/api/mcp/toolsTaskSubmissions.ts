@@ -72,9 +72,11 @@ export async function trackTaskSubmission(deps: ToolDeps, row: Operation, princi
   if (!result.submissionId || result.executionResolved) return;
   const submission = await ownedSubmission(deps, principal, row.repository!, result.submissionId);
   const current = projectSubmission(submission);
+  const taskId = result.continuation?.taskId || submission.task_id;
+  if (taskId) { current.taskId = taskId; current.continuation.taskId = taskId; }
   receipt.state = current.state;
   receipt.result = current;
-  receipt.targetState = { submissionId: submission.id, state: submission.state, taskId: submission.task_id };
+  receipt.targetState = { submissionId: submission.id, state: submission.state, taskId };
   // Feed the newly associated task into ordinary execution tracking in this same poll.
   row.result = JSON.stringify(current);
   row.state = current.state;

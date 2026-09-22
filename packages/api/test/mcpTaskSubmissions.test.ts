@@ -3,9 +3,10 @@ import { after, test } from 'node:test';
 import { randomBytes } from 'node:crypto';
 import knex from 'knex';
 import { z } from 'zod';
-import { closeConnection } from '@propr/core';
+import { associateSubmissionTask, closeConnection } from '@propr/core';
 import { up as mcpMigration } from '../../core/src/db/migrations/20260910220000_add_mcp.js';
 import { up as submissionMigration } from '../../core/src/db/migrations/20260922000000_add_task_submissions.js';
+import { up as identityMigration } from '../../core/src/db/migrations/20260922010000_preserve_task_submission_identity.js';
 import { createToolCatalog, executeTool, type ToolDeps } from '../mcp/tools.js';
 import { McpPolicy, type McpPrincipal } from '../mcp/policy.js';
 import { McpError } from '../mcp/config.js';
@@ -33,6 +34,7 @@ async function fixture() {
   await db.schema.createTable('task_drafts', table => { table.string('draft_id').primary(); });
   await mcpMigration(db);
   await submissionMigration(db);
+  await identityMigration(db);
   await db.schema.createTable('tasks', table => {
     table.string('task_id').primary(); table.string('repository'); table.string('task_type');
     table.string('initial_job_data'); table.timestamp('created_at').defaultTo(db.fn.now());
@@ -170,5 +172,26 @@ test('MCP validates direct task inputs and enforces execute scope, repository wr
       await assert.rejects(f.call(tool, { ...input, repository: 'owner/other' }), /not found/);
     }
     assert.equal(f.enqueues(), 1);
+  } finally { await f.db.destroy(); }
+});
+
+
+test('an unpolled launch receipt stays with its original execution after an issue retry starts', async () => {
+  const f = await fixture();
+  try {
+    const receipt = (await f.call('create_task', { repository: 'owner/repo', instruction: 'Fix dates', idempotencyKey: 'unpolled-launch' })).data as Receipt;
+    const submission = await f.db('task_submissions').first();
+    await f.db('tasks').insert([
+      { task_id: 'first-task', repository: 'owner/repo', task_type: 'issue' },
+      { task_id: 'later-task', repository: 'owner/repo', task_type: 'issue' },
+    ]);
+    await associateSubmissionTask(f.db, submission.id, 'first-task');
+    await f.db('task_history').insert({ task_id: 'first-task', state: 'completed' });
+    await associateSubmissionTask(f.db, submission.id, 'later-task');
+    await f.db('task_history').insert({ task_id: 'later-task', state: 'processing' });
+    const result = (await f.call('get_operation', { operationId: receipt.operationId })).data as Receipt;
+    assert.equal(result.state, 'completed');
+    assert.equal(result.result.continuation.taskId, 'first-task');
+    assert.equal((await f.db('task_submissions').first()).latest_task_id, 'later-task');
   } finally { await f.db.destroy(); }
 });

@@ -36,10 +36,12 @@ function useNewTaskLauncher(scope: string) {
   const [repository, setRepository] = useState(prefill.initialRepository || '');
   const [instruction, setInstruction] = useState(prefill.initialPrompt || '');
   const [files, setFiles] = useState<File[]>([]);
+  const [todoIds, setTodoIds] = useState(prefill.todoIds);
   const [agentAlias, setAgent] = useState(saved.agentAlias || '');
   const [model, setModel] = useState(saved.model || '');
   const [catalog, setCatalog] = useState<InstanceCatalogResponse>();
   const [snapshot, setSnapshot] = useState<TaskSnapshot>();
+  const activeStorageKey = `task-active-submission:${scope}`;
   const [result, setResult] = useState<TaskSubmission>();
   const [busy, setBusy] = useState(false);
   const [processingFiles, setProcessingFiles] = useState(false);
@@ -54,36 +56,43 @@ function useNewTaskLauncher(scope: string) {
   useEffect(() => {
     let active = true;
     void getInstanceCatalog().then(value => { if (active) setCatalog(value); }).catch(error => { if (active) setError(error.message); });
-    void taskSnapshotStorage(scope).then(value => {
+    const key = sessionStorage.getItem(activeStorageKey);
+    void taskSnapshotStorage(scope, key || undefined).then(value => {
       if (!active || !value) return;
+      sessionStorage.setItem(activeStorageKey, value.key);
+      setTodoIds(value.payload.todoIds);
       setSnapshot(value); setRepository(value.payload.repository); setInstruction(value.payload.instruction);
       setAgent(value.payload.agentAlias || ''); setModel(value.payload.model || ''); setFiles(value.files);
-      void getTaskSubmission(value.key).then(row => { if (active) setResult(row); }).catch(() => undefined);
+      void getTaskSubmission(value.key).then(row => { if (active && sessionStorage.getItem(activeStorageKey) === value.key) setResult(row); }).catch(() => undefined);
     }).catch(() => undefined).finally(() => { if (active) setReady(true); });
     return () => { active = false; };
-  }, [scope]);
+  }, [scope, activeStorageKey]);
 
   useEffect(() => {
     if (!snapshot || !result) return;
     if (result.taskId) {
       let active = true;
-      void taskSnapshotStorage(scope, null).catch(() => undefined).then(() => { if (active) navigate(`/tasks/${encodeURIComponent(result.taskId!)}`, { replace: true }); });
+      void taskSnapshotStorage(scope, snapshot.key, null).then(() => {
+        if (sessionStorage.getItem(activeStorageKey) === snapshot.key) sessionStorage.removeItem(activeStorageKey);
+      }).catch(() => undefined).then(() => { if (active) navigate(`/tasks/${encodeURIComponent(result.taskId!)}`, { replace: true }); });
       return () => { active = false; };
     }
     if (result.state !== 'queued' && result.state !== 'issue_created' && result.state !== 'creating') return;
+    let active = true;
     const timer = setInterval(() => {
-      void getTaskSubmission(snapshot.key).then(setResult).catch(error => setError(error.message));
+      void getTaskSubmission(snapshot.key).then(value => { if (active) setResult(value); }).catch(error => { if (active) setError(error.message); });
     }, 2000);
-    return () => clearInterval(timer);
-  }, [snapshot, result, navigate, scope]);
+    return () => { active = false; clearInterval(timer); };
+  }, [snapshot, result, navigate, scope, activeStorageKey]);
 
   const run = async () => {
     if (submitting.current || processingFiles || isDemoMode) return;
     submitting.current = true; setBusy(true); setError(null);
-    const current = snapshot || { key: crypto.randomUUID(), payload: { repository, instruction, ...(agentAlias ? { agentAlias } : {}), ...(model ? { model } : {}), todoIds: prefill.todoIds }, files };
+    const current = snapshot || { key: crypto.randomUUID(), payload: { repository, instruction, ...(agentAlias ? { agentAlias } : {}), ...(model ? { model } : {}), todoIds }, files };
     try {
       // Persist before the network mutation. A reload can safely repeat this exact request.
-      await taskSnapshotStorage(scope, current);
+      await taskSnapshotStorage(scope, current.key, current);
+      sessionStorage.setItem(activeStorageKey, current.key);
       setSnapshot(current);
       const next = result ? await retryTaskSubmission(current.key) : await submitTask(current.key, current.payload, current.files);
       setResult(next);
@@ -94,19 +103,32 @@ function useNewTaskLauncher(scope: string) {
       setError((error as Error).message);
       const status = (error as { status?: number }).status;
       if (!snapshot && status && [400, 401, 403, 404].includes(status)) {
-        await taskSnapshotStorage(scope, null); setSnapshot(undefined);
+        await taskSnapshotStorage(scope, current.key, null); sessionStorage.removeItem(activeStorageKey); setSnapshot(undefined);
         return;
       }
       // A lost response is resolved via the same key, never a new submission.
       try { setResult(await getTaskSubmission(current.key)); } catch { /* Retain the exact request for retry. */ }
     } finally { submitting.current = false; setBusy(false); }
   };
+  const startOver = async () => {
+    if (submitting.current || !snapshot) return;
+    submitting.current = true; setBusy(true);
+    try {
+      // Confirmed failures can be discarded. Keep uncertain submissions stored
+      // with their original identity when starting unrelated work.
+      if (result?.state === 'prepared' || result?.state === 'failed') await taskSnapshotStorage(scope, snapshot.key, null);
+      sessionStorage.removeItem(activeStorageKey);
+      if (result?.state !== 'prepared') { setInstruction(''); setFiles([]); setTodoIds(undefined); }
+      setSnapshot(undefined); setResult(undefined); setError(null);
+    } catch (error) { setError((error as Error).message); }
+    finally { submitting.current = false; setBusy(false); }
+  };
   const planFirst = async () => {
     if (submitting.current || processingFiles || isDemoMode) return;
-    if (!files.length) { navigate('/studio/new', { state: { initialRepository: repository, initialPrompt: instruction, todoIds: prefill.todoIds } }); return; }
+    if (!files.length) { navigate('/studio/new', { state: { initialRepository: repository, initialPrompt: instruction, todoIds } }); return; }
     submitting.current = true; setBusy(true); setError(null);
     try {
-      const id = planDraft || (await createDraft(repository, instruction, { todoIds: prefill.todoIds })).draft_id;
+      const id = planDraft || (await createDraft(repository, instruction, { todoIds })).draft_id;
       setPlanDraft(id);
       while (transferredFiles.current < files.length) {
         await uploadAttachment(id, files[transferredFiles.current]);
@@ -121,7 +143,7 @@ function useNewTaskLauncher(scope: string) {
     repository, setRepository, instruction, setInstruction, files, setFiles,
     agentAlias, setAgent, model, setModel, catalog, selection, invalidRouting,
     snapshot, result, busy, processingFiles, setProcessingFiles, planDraft,
-    ready, error, setError, run, planFirst, locked, isDemoMode,
+    ready, error, setError, run, startOver, planFirst, locked, isDemoMode,
   };
 }
 
@@ -155,13 +177,14 @@ function TaskSubmissionFeedback({ busy, result, snapshot, error, invalidRouting 
   return <>
     {invalidRouting && <p role="alert" className="text-sm text-red-700">The saved agent or model is unavailable. Choose a supported selection in Options.</p>}
     {(error || result?.error) && <p role="alert" className="break-words rounded-md bg-red-50 p-3 text-sm text-red-800">{error || result?.error}</p>}
-    {status && <div role="status" className="rounded-md border border-teal-200 bg-teal-50 p-4 text-sm text-slate-700"><p className="font-semibold">{status}</p>{result?.issueUrl && <a href={result.issueUrl} target="_blank" rel="noreferrer" className="mt-2 inline-block text-teal-700 underline">Open issue #{result.issueNumber}</a>}{snapshot && !result?.issueUrl && <p className="mt-2">Retry checks this submission before creating anything else.</p>}</div>}
+    {status && <div role="status" className="rounded-md border border-teal-200 bg-teal-50 p-4 text-sm text-slate-700"><p className="font-semibold">{status}</p>{result?.issueUrl && <a href={result.issueUrl} target="_blank" rel="noreferrer" className="mt-2 inline-block text-teal-700 underline">Open issue #{result.issueNumber}</a>}{snapshot && !result?.issueUrl && <p className="mt-2">Retry checks this submission before creating anything else.</p>}{snapshot && result?.state !== 'prepared' && <p className="mt-2">Start over opens a new request. It does not cancel this submission.</p>}</div>}
   </>;
 }
 
-function TaskLauncherActions({ snapshot, result, planFirst, ready, busy, processingFiles, isDemoMode, repository, instruction, planDraft, invalidRouting }:
-  Pick<LauncherState, 'snapshot' | 'result' | 'planFirst' | 'ready' | 'busy' | 'processingFiles' | 'isDemoMode' | 'repository' | 'instruction' | 'planDraft' | 'invalidRouting'>) {
+function TaskLauncherActions({ snapshot, result, startOver, planFirst, ready, busy, processingFiles, isDemoMode, repository, instruction, planDraft, invalidRouting }:
+  Pick<LauncherState, 'snapshot' | 'result' | 'startOver' | 'planFirst' | 'ready' | 'busy' | 'processingFiles' | 'isDemoMode' | 'repository' | 'instruction' | 'planDraft' | 'invalidRouting'>) {
   return <div className="flex flex-wrap justify-end gap-3">
+    {snapshot && <button type="button" onClick={() => void startOver()} disabled={busy || isDemoMode} className={`${button} border-slate-300 bg-white text-slate-700`}>{result?.state === 'prepared' ? 'Edit request' : 'Start over'}</button>}
     {!snapshot && <button type="button" onClick={() => void planFirst()} disabled={!ready || busy || processingFiles || isDemoMode || !repository || !instruction.trim()} className={`${button} border-slate-300 bg-white text-slate-700`}><ScrollText size={16} />Plan first</button>}
     {result?.state !== 'queued' && <button type="submit" disabled={!ready || busy || processingFiles || Boolean(planDraft) || isDemoMode || !repository || !instruction.trim() || invalidRouting} className={`${button} border-teal-600 bg-teal-600 text-white hover:bg-teal-700`}><Play size={16} />{busy ? 'Submitting…' : snapshot ? 'Retry submission' : 'Run task'}</button>}
   </div>;

@@ -367,7 +367,7 @@ const RepoActionContainer: React.FC<RepoActionContainerProps> = ({ selectedRepo,
         })()}
         {activeTab === 'todos' && (
           <RepoTodosPanel
-            repositoryName={selectedRepo.alias || selectedRepo.name}
+            repositoryName={selectedRepo.name}
             repositoryId={selectedRepo.name}
             disabled={isDemoMode}
           />

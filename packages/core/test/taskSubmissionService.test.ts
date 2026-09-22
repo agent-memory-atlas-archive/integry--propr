@@ -5,8 +5,9 @@ import fs from 'fs-extra';
 import os from 'node:os';
 import path from 'node:path';
 import { up } from '../src/db/migrations/20260922000000_add_task_submissions.js';
+import { up as identityMigration } from '../src/db/migrations/20260922010000_preserve_task_submission_identity.js';
 import { closeConnection } from '../src/db/connection.js';
-import { insertTaskSubmission, resumeTaskSubmission, findIssueSubmission, materializeSubmissionAttachments, submissionAssetPath } from '../src/services/taskSubmissionService.js';
+import { associateSubmissionTask, insertTaskSubmission, resumeTaskSubmission, findIssueSubmission, materializeSubmissionAttachments, submissionAssetPath } from '../src/services/taskSubmissionService.js';
 import { handleDispatchWithDeps } from '../../../src/jobs/issueJobDispatcher.js';
 import type { IssueJobData } from '@propr/core';
 import type { Job } from 'bullmq';
@@ -16,6 +17,7 @@ const input = { user_id: 'alice', submission_key: 'request-1', payload_hash: 'ha
 async function fixture() {
   const database = knex({ client: 'better-sqlite3', connection: { filename: ':memory:' }, useNullAsDefault: true });
   await up(database);
+  await identityMigration(database);
   return database;
 }
 
@@ -128,11 +130,16 @@ test('a deliberate label retry after terminal work is distinct from delayed init
     assert.equal(await resolveTaskSubmissionRetry(await read(), database, octokit), null);
     eventId = 2; timestamp = '2026-09-22T10:01:00Z';
     assert.deepEqual(await resolveTaskSubmissionRetry(await read(), database, octokit), { eventId: '2', userId: '123' });
+    await associateSubmissionTask(database, row.id, 'retry-task');
+    assert.equal((await read()).task_id, 'initial-task');
+    assert.equal((await read()).latest_task_id, 'retry-task');
+    await database('task_history').insert({ task_id: 'retry-task', state: 'processing', timestamp: '2026-09-22T10:01:30Z' });
     await database('task_submissions').where({ id: row.id }).update({ retry_event_id: '2' });
     assert.equal(await resolveTaskSubmissionRetry(await read(), database, octokit), null);
     eventId = 3; timestamp = '2026-09-22T10:02:00Z';
-    await database('task_history').insert({ task_id: 'initial-task', state: 'processing', timestamp: '2026-09-22T10:01:30Z' });
     assert.equal(await resolveTaskSubmissionRetry(await read(), database, octokit), null);
+    await database('task_history').insert({ task_id: 'retry-task', state: 'completed', timestamp: '2026-09-22T10:01:45Z' });
+    assert.deepEqual(await resolveTaskSubmissionRetry(await read(), database, octokit), { eventId: '3', userId: '123' });
   } finally { await database.destroy(); }
 });
 
@@ -156,4 +163,36 @@ test('a definitive GitHub rejection can retry creation with the same identity', 
     assert.equal(success.state, 'queued');
     assert.equal(attempts, 2);
   } finally { await database.destroy(); }
+});
+
+
+test('a durable dispatch claim excludes overlapping resumes and completed replays', async () => {
+  const database = await fixture();
+  let release!: () => void;
+  const held = new Promise<void>(resolve => { release = resolve; });
+  let entered!: () => void;
+  const started = new Promise<void>(resolve => { entered = resolve; });
+  let dispatches = 0;
+  try {
+    const row = await insertTaskSubmission(database, input);
+    await database('task_submissions').where({ id: row.id }).update({ state: 'issue_created', issue_number: 17 });
+    const services = {
+      createIssue: async () => { throw new Error('must not create'); },
+      reconcileIssue: async () => null,
+      dispatch: async () => { dispatches++; entered(); await held; },
+    };
+    const first = resumeTaskSubmission(database, row.id, services);
+    await started;
+    assert.ok((await database('task_submissions').first()).dispatch_claim);
+    await Promise.all(Array.from({ length: 8 }, () => resumeTaskSubmission(database, row.id, services)));
+    assert.equal(dispatches, 1);
+    // The child can finish before the original API caller returns.
+    await associateSubmissionTask(database, row.id, 'finished-task');
+    await database('task_submissions').where({ id: row.id }).update({ dispatch_complete: true, state: 'queued' });
+    release();
+    await first;
+    await resumeTaskSubmission(database, row.id, services);
+    assert.equal(dispatches, 1);
+    assert.equal((await database('task_submissions').first()).dispatch_claim, null);
+  } finally { release(); await database.destroy(); }
 });

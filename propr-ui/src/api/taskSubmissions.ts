@@ -31,7 +31,8 @@ export const retryTaskSubmission = (key: string) => request(`/${encodeURICompone
 
 export interface TaskSnapshot { key: string; payload: TaskRequest; files: File[] }
 /** Structured cloning preserves File bytes for lost-response/reload recovery. */
-export async function taskSnapshotStorage(scope: string, value?: TaskSnapshot | null): Promise<TaskSnapshot | undefined> {
+export async function taskSnapshotStorage(scope: string, key?: string, value?: TaskSnapshot | null): Promise<TaskSnapshot | undefined> {
+  if (value !== undefined && !key) throw new Error('A submission identity is required');
   const database = await new Promise<IDBDatabase>((resolve, reject) => {
     const request = indexedDB.open('propr-task-launcher', 1);
     request.onupgradeneeded = () => request.result.createObjectStore('submissions');
@@ -40,11 +41,23 @@ export async function taskSnapshotStorage(scope: string, value?: TaskSnapshot | 
   });
   try {
     return await new Promise((resolve, reject) => {
-      const transaction = database.transaction('submissions', value === undefined ? 'readonly' : 'readwrite');
+      const transaction = database.transaction('submissions', value === undefined && key ? 'readonly' : 'readwrite');
       const store = transaction.objectStore('submissions');
-      const request = value === undefined ? store.get(scope) : value === null ? store.delete(scope) : store.put(value, scope);
+      const identity = key ? JSON.stringify([scope, key]) : scope;
+      const request = value === undefined ? store.get(identity) : value === null ? store.delete(identity) : store.put(value, identity);
+      // Keep legacy recovery available across concurrent mounts (including
+      // StrictMode). Completion removes the legacy copy only for its identity.
+      if (!key) request.onsuccess = () => {
+        const legacy = request.result as TaskSnapshot | undefined;
+        if (legacy) store.put(legacy, JSON.stringify([scope, legacy.key]));
+      };
+      if (value === null) {
+        const legacy = store.get(scope);
+        legacy.onsuccess = () => { if (legacy.result?.key === key) store.delete(scope); };
+      }
       transaction.oncomplete = () => resolve(value === undefined ? request.result : undefined);
       transaction.onerror = () => reject(transaction.error);
+      transaction.onabort = () => reject(transaction.error || new Error('Could not save task recovery data'));
     });
   } finally { database.close(); }
 }

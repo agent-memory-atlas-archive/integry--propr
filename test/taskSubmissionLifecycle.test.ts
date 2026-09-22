@@ -18,7 +18,7 @@ const stateManager = {
 };
 await mock.module('@propr/core', { namedExports: {
   ...core,
-  db: () => ({ where: () => ({ update: async (fields: { task_id: string }) => { taskLinks.push(fields.task_id); } }) }),
+  associateSubmissionTask: async (_database: unknown, _id: string, taskId: string) => { taskLinks.push(taskId); },
   findIssueSubmission: async () => submitted ? { id: 'submission' } : undefined,
   logger: { ...log, withCorrelation: () => log },
   addModelSpecificDelay: async () => undefined,

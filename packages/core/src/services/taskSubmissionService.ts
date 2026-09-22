@@ -24,6 +24,8 @@ export interface TaskSubmission {
   issue_number: number | null;
   issue_url: string | null;
   task_id: string | null;
+  latest_task_id: string | null;
+  dispatch_claim: string | null;
   retry_event_id: string | null;
   dispatch_complete: boolean;
   error: string | null;
@@ -88,12 +90,27 @@ export async function resumeTaskSubmission(database: Knex, id: string, services:
     row = await read();
   }
   if (row.state === 'queued' || row.dispatch_complete) return row;
+  const claim = randomUUID();
+  const won = await database('task_submissions').where({ id, dispatch_complete: false })
+    .whereNot('state', 'queued').whereNull('dispatch_claim').update({ dispatch_claim: claim });
+  if (!won) return read();
   try {
-    await database('task_submissions').where({ id }).whereNot('state', 'queued').update({ state: 'issue_created', error: null });
+    // Re-read inside the durable claim: a webhook may have completed dispatch
+    // while this caller was acquiring it. A replay must never reapply the trigger.
+    row = await read();
+    if (row.state === 'queued' || row.dispatch_complete || row.task_id) return row;
+    const pending = await database('task_submissions').where({ id, dispatch_claim: claim, dispatch_complete: false })
+      .whereNot('state', 'queued').whereNull('task_id').update({ state: 'issue_created', error: null });
+    if (!pending) return read();
     await services.dispatch(row);
-    await database('task_submissions').where({ id, state: 'issue_created' }).update({ state: 'queued', error: null });
+    await database('task_submissions').where({ id, dispatch_claim: claim, state: 'issue_created' }).update({ state: 'queued', error: null });
   } catch (error) {
-    await database('task_submissions').where({ id }).whereNot('state', 'queued').update({ state: 'failed', error: (error as Error).message });
+    await database('task_submissions').where({ id, dispatch_claim: claim, dispatch_complete: false }).whereNot('state', 'queued')
+      .update({ state: 'failed', error: (error as Error).message });
+  } finally {
+    // Do not expire a live or interrupted claim: GitHub cannot fence a delayed
+    // label write. A crash can still be resolved by the ordinary issue dispatcher.
+    await database('task_submissions').where({ id, dispatch_claim: claim }).update({ dispatch_claim: null });
   }
   return read();
 }
@@ -103,4 +120,12 @@ export async function insertTaskSubmission(database: Knex, input: Pick<TaskSubmi
   const row = (await database<TaskSubmission>('task_submissions').where({ user_id: input.user_id, submission_key: input.submission_key }).first())!;
   if (row.payload_hash !== input.payload_hash) throw Object.assign(new Error('Submission identity was already used with different content'), { status: 409 });
   return row;
+}
+
+/** Receipts follow the first execution; label retries follow the latest execution. */
+export async function associateSubmissionTask(database: Knex, id: string, taskId: string): Promise<void> {
+  await database('task_submissions').where({ id }).update({
+    task_id: database.raw('coalesce(task_id, ?)', [taskId]),
+    latest_task_id: taskId,
+  });
 }
