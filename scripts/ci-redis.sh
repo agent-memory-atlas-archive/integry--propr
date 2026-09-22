@@ -7,15 +7,25 @@ IMAGE="${CI_REDIS_IMAGE:-redis:7-alpine@sha256:e7723ff73d963f5cc6d9c4643ea3d9895
 RUN_ID="${GITHUB_RUN_ID:-local}"
 JOB_ID="${GITHUB_JOB:-job}"
 RUN_ATTEMPT="${GITHUB_RUN_ATTEMPT:-1}"
-# Matrix entries and local shards share GITHUB_RUN_ID and GITHUB_JOB, so
-# concurrent callers on one host must name their own instance. Unset keeps the
-# single-Redis-per-job behaviour of existing callers.
+# Matrix entries share GITHUB_RUN_ID and GITHUB_JOB and may run concurrently
+# on one host (one per self-hosted runner worker), so each must name its own
+# instance. Unset keeps the single-Redis-per-job behaviour of existing callers.
 INSTANCE="${CI_REDIS_INSTANCE:-}"
+# The Docker daemon runs containers outside the runner service's cgroup, so
+# the runner's CPU and memory quotas do not cover this container. These
+# explicit limits bound it instead; test data sets are small.
+MEMORY_LIMIT="${CI_REDIS_MEMORY:-512m}"
+CPU_LIMIT="${CI_REDIS_CPUS:-1}"
+PIDS_LIMIT="${CI_REDIS_PIDS_LIMIT:-64}"
 
 if [[ -n "$INSTANCE" && ! "$INSTANCE" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]{0,62}$ ]]; then
   # Rejected rather than sanitized: rewriting characters could map two
   # instances to one container name.
   echo "CI_REDIS_INSTANCE must match [A-Za-z0-9][A-Za-z0-9_.-]{0,62}, got: $INSTANCE" >&2
+  exit 2
+fi
+if [[ ! "$MEMORY_LIMIT" =~ ^[1-9][0-9]*[kmg]$ || ! "$CPU_LIMIT" =~ ^[0-9]+(\.[0-9]+)?$ || ! "$PIDS_LIMIT" =~ ^[1-9][0-9]*$ ]]; then
+  echo "CI_REDIS_MEMORY, CI_REDIS_CPUS and CI_REDIS_PIDS_LIMIT must be a Docker size (e.g. 512m), CPU count and positive integer" >&2
   exit 2
 fi
 if [[ ! "$RUN_ATTEMPT" =~ ^[1-9][0-9]*$ ]]; then
@@ -110,6 +120,10 @@ start_redis() {
     --label "$LABEL_JOB" \
     --label "$LABEL_INSTANCE" \
     --label "propr.ci.redis.attempt=${RUN_ATTEMPT}" \
+    --memory "$MEMORY_LIMIT" \
+    --memory-swap "$MEMORY_LIMIT" \
+    --cpus "$CPU_LIMIT" \
+    --pids-limit "$PIDS_LIMIT" \
     --publish 127.0.0.1::6379 \
     --health-cmd 'redis-cli ping' \
     --health-interval 2s \

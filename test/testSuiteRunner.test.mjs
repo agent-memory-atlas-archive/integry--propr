@@ -350,7 +350,7 @@ describe('release test-suite runner', () => {
         ]);
     });
 
-    test('keeps the hosted shard matrix complete and isolated for untrusted PRs', () => {
+    test('keeps the shard matrix complete and isolated on both routes', () => {
         const workflow = readFileSync(new URL('../.github/workflows/pr-test-on-label.yml', import.meta.url), 'utf8');
         const shardCount = Number(workflow.match(/PROPR_TEST_SHARD_COUNT: '(\d+)'/)[1]);
         const matrix = workflow.match(/shard: \[([\d, ]+)\]/)[1].split(',').map(Number);
@@ -366,20 +366,20 @@ describe('release test-suite runner', () => {
         // for both start and stop.
         assert.equal(workflow.match(/CI_REDIS_INSTANCE: shard-\$\{\{ matrix\.shard \}\}\n\s+run: \.\/scripts\/ci-redis\.sh (?:start|stop)/g).length, 2);
         assert.match(workflow, /scripts\/sanitize-ci-output\.mjs test_output\.txt shard-output\/test_output\.sanitized\.txt/);
-        assert.equal(workflow.match(/\.\/\.propr\/setup\.sh/g).length, 2, 'docs validation runs once per route, not per shard');
+        assert.equal(workflow.match(/\.\/\.propr\/setup\.sh/g).length, 1, 'docs validation runs once, not per shard');
 
         const shardJob = workflow.slice(workflow.indexOf('\n  shard:\n'), workflow.indexOf('\n  docs:\n'));
-        assert.match(shardJob, /runs-on: ubuntu-latest\n/, 'fork PR shards stay on GitHub-hosted runners');
+        assert.match(shardJob, /\|\| 'ubuntu-latest' \}\}\n/, 'fork PR shards stay on GitHub-hosted runners');
         const gate = workflow.slice(workflow.indexOf('\n  test:\n'), workflow.indexOf('\n  comment:\n'));
         assert.match(gate, /name: Run Full Test Suite\n/);
         assert.match(gate, /always\(\) &&\s+\(github\.event_name == 'workflow_dispatch' \|\| !github\.event\.pull_request\.draft\)/);
         assert.match(gate, /--verify-shard-summaries/);
-        for (const job of ['shard', 'docs', 'local', 'native-electron']) {
+        for (const job of ['shard', 'docs', 'native-electron']) {
             const start = workflow.indexOf(`\n  ${job}:\n`);
             const header = workflow.slice(start, workflow.indexOf('steps:', start));
-            assert.match(header, /\(github\.event_name == 'workflow_dispatch' \|\| !github\.event\.pull_request\.draft\) &&/);
+            assert.match(header, /github\.event_name == 'workflow_dispatch' \|\| !github\.event\.pull_request\.draft/, `${job} skips draft PRs`);
         }
-        // Route-aware gate enforcement is covered in test/ciLocalShards.test.mjs.
+        // Routing and route-aware gate enforcement are covered in test/ciRunnerRouting.test.mjs.
     });
 
     test('serializes nightly validation without cancelling an active live run', () => {

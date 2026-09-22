@@ -300,7 +300,7 @@ jobs:
 
   validate:
     name: Validate Changes
-    # Same-repository PRs run on the gitfix.dev self-hosted runner; fork and
+    # Same-repository PRs run on a gitfix.dev self-hosted runner worker; fork and
     # Dependabot PRs (and PROPR_SELF_HOSTED_PR_CHECKS=false) stay hosted. The
     # expression matches pr-test-on-label.yml and is routing, not a security
     # boundary: see docs/ci-runners.md.
@@ -324,18 +324,23 @@ jobs:
         if: runner.environment == 'self-hosted'
         run: |
           set -euo pipefail
-          # RUNNER_TEMP is private to this job and emptied by the runner, so
-          # tests never read or write the host's /root or shared caches.
-          job_root="$RUNNER_TEMP/propr-validate"
+          # RUNNER_TEMP is private to this job on this runner worker and
+          # emptied by the runner, so tests never read or write the host's
+          # /root or shared caches. Short names keep Unix socket paths under
+          # TMPDIR within limits.
+          job_root="$RUNNER_TEMP/ci"
           rm -rf -- "$job_root"
-          mkdir -p "$job_root/home" "$job_root/tmp" "$job_root/playwright"
+          mkdir -p "$job_root/home" "$job_root/tmp" "$job_root/pw"
           {
             echo "HOME=$job_root/home"
             echo "TMPDIR=$job_root/tmp"
             echo "XDG_CONFIG_HOME=$job_root/home/.config"
             echo "XDG_CACHE_HOME=$job_root/home/.cache"
-            echo "PLAYWRIGHT_BROWSERS_PATH=$job_root/playwright"
+            echo "PLAYWRIGHT_BROWSERS_PATH=$job_root/pw"
           } >> "$GITHUB_ENV"
+
+      - name: Record runner placement
+        run: ./scripts/ci-runner-evidence.sh
 
       - name: Initialize diagnostic log
         if: always()
@@ -353,6 +358,8 @@ jobs:
             echo "--- GitHub Actions workflow lint ---"
             # Standalone shellcheck below owns the release scripts; disabling
             # actionlint's embedded shellcheck keeps this focused on workflows.
+            # Docker runs tool containers outside the runner service's cgroup,
+            # so they carry their own limits and no network.
             if ! docker image inspect "$ACTIONLINT_IMAGE" >/dev/null 2>&1; then
               for attempt in 1 2 3; do
                 if docker pull "$ACTIONLINT_IMAGE"; then
@@ -368,6 +375,7 @@ jobs:
               done
             fi
             docker run --rm --pull=never \
+              --network none --memory 1g --memory-swap 1g --cpus 1 --pids-limit 256 \
               --volume "$GITHUB_WORKSPACE:/work:ro" \
               --workdir /work \
               "$ACTIONLINT_IMAGE" \
@@ -383,6 +391,7 @@ jobs:
             echo
             echo "--- Release shell script lint ---"
             docker run --rm \
+              --network none --memory 1g --memory-swap 1g --cpus 1 --pids-limit 256 \
               --volume "$GITHUB_WORKSPACE:/work:ro" \
               --workdir /work \
               --entrypoint shellcheck \
@@ -391,6 +400,7 @@ jobs:
               scripts/build-images.sh \
               scripts/ci-install-chromium.sh \
               scripts/ci-redis.sh \
+              scripts/ci-runner-evidence.sh \
               scripts/smoke-test-images.sh \
               scripts/smoke-test-preview-runtime-images.sh \
               scripts/smoke-test-sqlite-startup.sh \
@@ -921,6 +931,13 @@ jobs:
       - name: Fail Job
         if: steps.build.outcome == 'failure'
         run: exit 1
+
+      # Self-hosted only, also on failure and cancellation: removes this job's
+      # untracked and ignored files (node_modules, dist, logs) from its own
+      # persistent workspace. .git stays for the checkout post step.
+      - name: Remove job files from the persistent workspace
+        if: always() && runner.environment == 'self-hosted'
+        run: git -C "$GITHUB_WORKSPACE" clean -ffdxq
 
   cli-init-json:
     name: CLI init JSON (Node ${{ matrix.node-version }})

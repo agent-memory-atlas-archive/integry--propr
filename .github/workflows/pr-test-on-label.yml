@@ -10,27 +10,24 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  # Must match the shard matrix and the local shard coordinator below. The
-  # aggregate gate proves that exactly this many shard summaries together ran
-  # every discovered test unit once.
+  # Must match the shard matrix below. The aggregate gate proves that exactly
+  # this many shard summaries together ran every discovered test unit once.
   PROPR_TEST_SHARD_COUNT: '4'
 
-# Routing (see docs/ci-runners.md). Same-repository PRs and manual dispatches
-# run the four shards concurrently in one job on the gitfix.dev self-hosted
-# runner (`local`); fork PRs, Dependabot PRs and runs with the repository
-# variable PROPR_SELF_HOSTED_PR_CHECKS=false use the hosted matrix (`shard`,
-# `docs`). This expression chooses where PR code runs; it is NOT a security
-# boundary, because a PR can edit this file. Keeping fork code off the host
-# relies on the repository's fork-PR workflow approval setting.
-# Every copy of the routing expression in this file must stay identical.
+# Routing (see docs/ci-runners.md). The shard matrix and docs validation
+# run on the gitfix.dev self-hosted runner workers for same-repository PRs and
+# manual dispatches, one job per worker, and on GitHub-hosted runners for fork
+# PRs, Dependabot PRs and runs with the repository variable
+# PROPR_SELF_HOSTED_PR_CHECKS=false. This expression chooses where PR code
+# runs; it is NOT a security boundary, because a PR can edit this file.
+# Keeping fork code off the host relies on the repository's fork-PR workflow
+# approval setting. Every copy of the routing expression must stay identical.
 
 jobs:
   shard:
     name: Full Test Suite Shard ${{ matrix.shard }}/4
-    if: >-
-      ${{ (github.event_name == 'workflow_dispatch' || !github.event.pull_request.draft) &&
-          !(vars.PROPR_SELF_HOSTED_PR_CHECKS != 'false' && (github.event_name == 'workflow_dispatch' || (github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.user.login != 'dependabot[bot]'))) }}
-    runs-on: ubuntu-latest
+    if: ${{ github.event_name == 'workflow_dispatch' || !github.event.pull_request.draft }}
+    runs-on: ${{ (vars.PROPR_SELF_HOSTED_PR_CHECKS != 'false' && (github.event_name == 'workflow_dispatch' || (github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.user.login != 'dependabot[bot]'))) && fromJSON('["self-hosted","linux","x64","propr"]') || 'ubuntu-latest' }}
     timeout-minutes: 45
     permissions:
       contents: read
@@ -42,6 +39,37 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          # Keep the token out of .git/config in a persistent runner workspace.
+          # The default clean checkout also removes files left there by an
+          # earlier job (node_modules, dist).
+          persist-credentials: false
+
+      # Self-hosted only: RUNNER_TEMP is private to this job on this runner
+      # worker and emptied by the runner, so nothing below reads or writes the
+      # host's /root, shared /tmp caches or another worker's state. Short
+      # directory names keep Unix socket paths under TMPDIR within limits.
+      - name: Isolate job state from the shared host
+        if: runner.environment == 'self-hosted'
+        run: |
+          set -euo pipefail
+          job_root="$RUNNER_TEMP/ci"
+          rm -rf -- "$job_root"
+          mkdir -p "$job_root/home" "$job_root/tmp" "$job_root/pw"
+          {
+            echo "HOME=$job_root/home"
+            echo "TMPDIR=$job_root/tmp"
+            echo "XDG_CONFIG_HOME=$job_root/home/.config"
+            echo "XDG_CACHE_HOME=$job_root/home/.cache"
+            echo "PLAYWRIGHT_BROWSERS_PATH=$job_root/pw"
+          } >> "$GITHUB_ENV"
+
+      # Placement evidence for docs/ci-runners.md: which worker ran this job,
+      # as which user, and the limits of the cgroup its processes run in.
+      - name: Record runner placement
+        env:
+          PROPR_EVIDENCE_LABEL: shard ${{ matrix.shard }}/4
+        run: ./scripts/ci-runner-evidence.sh
 
       - name: Set up Node.js
         uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
@@ -60,6 +88,8 @@ jobs:
         id: install
         run: npm ci
 
+      # The clean checkout must have removed any earlier job's output, so a
+      # stale build can never stand in for one that did not run.
       - name: Build workspace packages
         id: build
         run: |
@@ -70,11 +100,16 @@ jobs:
           test -f packages/client/dist/index.js
 
       # Browser-backed server tests need the same Chromium that the docs
-      # validation job installs through .propr/setup.sh.
+      # validation job installs through .propr/setup.sh. Only the browser is
+      # downloaded (into PLAYWRIGHT_BROWSERS_PATH on self-hosted workers);
+      # system packages are never installed on the shared host.
       - name: Install Chromium for browser tests
         id: browser
         run: npm exec --workspace propr-ui -- playwright install chromium
 
+      # Matrix entries share GITHUB_RUN_ID and GITHUB_JOB and may run on the
+      # same host, so the instance names the shard; ci-redis.sh adds the run
+      # attempt and applies explicit Docker resource limits.
       - name: Start isolated Redis
         id: redis
         env:
@@ -114,7 +149,8 @@ jobs:
               "Redis startup": env.REDIS_RESULT,
               "Test shard": env.TEST_RESULT,
             };
-            const record = { shard: Number(env.SHARD), runAttempt: Number(env.GITHUB_RUN_ATTEMPT), stages };
+            const runner = { name: env.RUNNER_NAME, environment: env.RUNNER_ENVIRONMENT };
+            const record = { shard: Number(env.SHARD), runAttempt: Number(env.GITHUB_RUN_ATTEMPT), runner, stages };
             require("fs").writeFileSync("shard-output/stages.json", JSON.stringify(record, null, 2));
           '
 
@@ -141,18 +177,25 @@ jobs:
         if: steps.tests.outcome == 'failure'
         run: exit 1
 
+      # Stops only this shard's own container for this attempt, also on
+      # failure and cancellation.
       - name: Stop isolated Redis
         if: always()
         env:
           CI_REDIS_INSTANCE: shard-${{ matrix.shard }}
         run: ./scripts/ci-redis.sh stop
 
+      # Self-hosted only, also on failure and cancellation: removes this job's
+      # untracked and ignored files (node_modules, dist, outputs) from its own
+      # persistent workspace. .git stays for the checkout post step.
+      - name: Remove job files from the persistent workspace
+        if: always() && runner.environment == 'self-hosted'
+        run: git -C "$GITHUB_WORKSPACE" clean -ffdxq
+
   docs:
     name: Validate Test Preparation and Docs
-    if: >-
-      ${{ (github.event_name == 'workflow_dispatch' || !github.event.pull_request.draft) &&
-          !(vars.PROPR_SELF_HOSTED_PR_CHECKS != 'false' && (github.event_name == 'workflow_dispatch' || (github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.user.login != 'dependabot[bot]'))) }}
-    runs-on: ubuntu-latest
+    if: ${{ github.event_name == 'workflow_dispatch' || !github.event.pull_request.draft }}
+    runs-on: ${{ (vars.PROPR_SELF_HOSTED_PR_CHECKS != 'false' && (github.event_name == 'workflow_dispatch' || (github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.user.login != 'dependabot[bot]'))) && fromJSON('["self-hosted","linux","x64","propr"]') || 'ubuntu-latest' }}
     timeout-minutes: 30
     permissions:
       contents: read
@@ -164,6 +207,36 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          # Keep the token out of .git/config in a persistent runner workspace.
+          # The default clean checkout also removes files left there by an
+          # earlier job (node_modules, dist).
+          persist-credentials: false
+
+      # Self-hosted only: RUNNER_TEMP is private to this job on this runner
+      # worker and emptied by the runner, so nothing below reads or writes the
+      # host's /root, shared /tmp caches or another worker's state. Short
+      # directory names keep Unix socket paths under TMPDIR within limits.
+      - name: Isolate job state from the shared host
+        if: runner.environment == 'self-hosted'
+        run: |
+          set -euo pipefail
+          job_root="$RUNNER_TEMP/ci"
+          rm -rf -- "$job_root"
+          mkdir -p "$job_root/home" "$job_root/tmp" "$job_root/pw" "$job_root/setup"
+          {
+            echo "HOME=$job_root/home"
+            echo "TMPDIR=$job_root/tmp"
+            echo "XDG_CONFIG_HOME=$job_root/home/.config"
+            echo "XDG_CACHE_HOME=$job_root/home/.cache"
+            echo "PLAYWRIGHT_BROWSERS_PATH=$job_root/pw"
+            echo "PROPR_CACHE_DIR=$job_root/setup"
+          } >> "$GITHUB_ENV"
+
+      # Placement evidence for docs/ci-runners.md: which worker ran this job,
+      # as which user, and the limits of the cgroup its processes run in.
+      - name: Record runner placement
+        run: ./scripts/ci-runner-evidence.sh
 
       - name: Set up Node.js
         uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
@@ -194,187 +267,19 @@ jobs:
           PROPR_WORKSPACE_PREPARED: 'true'
         run: ./.propr/setup.sh
 
-  local:
-    # One job on the single gitfix.dev runner worker runs all four shards
-    # concurrently in isolated workspaces (scripts/run-local-shards.mjs).
-    # Four matrix jobs would serialize on that one worker instead.
-    name: Full Test Suite (self-hosted, 4 local shards)
-    if: >-
-      ${{ (github.event_name == 'workflow_dispatch' || !github.event.pull_request.draft) &&
-          (vars.PROPR_SELF_HOSTED_PR_CHECKS != 'false' && (github.event_name == 'workflow_dispatch' || (github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.user.login != 'dependabot[bot]'))) }}
-    runs-on: [self-hosted, linux, x64, propr]
-    timeout-minutes: 45
-    permissions:
-      contents: read
-    outputs:
-      install_result: ${{ steps.install.outcome }}
-      build_result: ${{ steps.build.outcome }}
-      docs_result: ${{ steps.docs.outcome }}
-
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          # The default clean checkout removes untracked and ignored files
-          # (node_modules, dist) left in the persistent runner workspace.
-          clean: true
-          # Keep the token out of .git/config, which each shard copy inherits.
-          persist-credentials: false
-
-      - name: Isolate job state from the shared host
-        run: |
-          set -euo pipefail
-          # RUNNER_TEMP is private to this job and emptied by the runner, so
-          # nothing below reads or writes the host's /root, /tmp caches or
-          # another job's state.
-          job_root="$RUNNER_TEMP/propr-full-suite"
-          rm -rf -- "$job_root"
-          mkdir -p "$job_root/home" "$job_root/tmp" "$job_root/playwright" "$job_root/setup-cache"
-          {
-            echo "HOME=$job_root/home"
-            echo "TMPDIR=$job_root/tmp"
-            echo "XDG_CONFIG_HOME=$job_root/home/.config"
-            echo "XDG_CACHE_HOME=$job_root/home/.cache"
-            echo "PLAYWRIGHT_BROWSERS_PATH=$job_root/playwright"
-            echo "PROPR_CACHE_DIR=$job_root/setup-cache"
-            echo "LOCAL_SHARD_WORK_ROOT=$job_root/shards"
-            echo "LOCAL_SHARD_OUTPUT=$job_root/output"
-          } >> "$GITHUB_ENV"
-
-      - name: Set up Node.js
-        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
-        with:
-          node-version-file: '.nvmrc'
-          cache: 'npm'
-          cache-dependency-path: |
-            package-lock.json
-            propr-ui/package-lock.json
-            docs/package-lock.json
-            packages/shared/package-lock.json
-            packages/api/package-lock.json
-            packages/core/package-lock.json
-
-      - name: Install Dependencies
-        id: install
-        run: npm ci
-
-      - name: Build workspace packages
-        id: build
-        run: |
-          # Stale output in a persistent workspace must neither fail these
-          # checks nor stand in for a build that did not run.
-          rm -rf packages/shared/dist packages/client/dist packages/core/dist packages/local-setup/dist packages/cli/dist
-          test ! -e packages/shared/dist
-          test ! -e packages/client/dist
-          npm run test:prepare
-          test -f packages/shared/dist/index.js
-          test -f packages/client/dist/index.js
-
-      # Installs into this job's PLAYWRIGHT_BROWSERS_PATH, shared read-only by
-      # the shards. System libraries are never apt-installed on the shared host.
-      - name: Install Chromium for browser tests
-        id: browser
-        run: npm exec --workspace propr-ui -- playwright install chromium
-
-      - name: Run Full Test Suite shards
-        id: tests
-        continue-on-error: true
-        env:
-          GITHUB_TOKEN_TO_REDACT: ${{ github.token }}
-        run: >-
-          exec node scripts/run-local-shards.mjs run
-          --source="$GITHUB_WORKSPACE"
-          --work-root="$LOCAL_SHARD_WORK_ROOT"
-          --output="$LOCAL_SHARD_OUTPUT"
-
-      - name: Show shard output
-        if: always()
-        run: |
-          shopt -s nullglob
-          for output in "$LOCAL_SHARD_OUTPUT"/shard-*/test_output.sanitized.txt; do
-            echo "::group::$(basename "$(dirname "$output")") output"
-            cat -- "$output"
-            echo "::endgroup::"
-          done
-
-      # Runs after the shards so the shard copies do not include docs builds.
-      - name: Validate docs site
-        id: docs
-        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
-        continue-on-error: true
-        env:
-          PROPR_WORKSPACE: ${{ github.workspace }}
-          PROPR_WORKSPACE_PREPARED: 'true'
-        run: ./.propr/setup.sh
-
-      - name: Upload shard 1 output
-        if: always()
-        continue-on-error: true
-        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
-        with:
-          name: full-test-output-${{ github.run_id }}-${{ github.run_attempt }}-shard-1
-          path: ${{ env.LOCAL_SHARD_OUTPUT }}/shard-1/
-          if-no-files-found: ignore
-
-      - name: Upload shard 2 output
-        if: always()
-        continue-on-error: true
-        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
-        with:
-          name: full-test-output-${{ github.run_id }}-${{ github.run_attempt }}-shard-2
-          path: ${{ env.LOCAL_SHARD_OUTPUT }}/shard-2/
-          if-no-files-found: ignore
-
-      - name: Upload shard 3 output
-        if: always()
-        continue-on-error: true
-        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
-        with:
-          name: full-test-output-${{ github.run_id }}-${{ github.run_attempt }}-shard-3
-          path: ${{ env.LOCAL_SHARD_OUTPUT }}/shard-3/
-          if-no-files-found: ignore
-
-      - name: Upload shard 4 output
-        if: always()
-        continue-on-error: true
-        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
-        with:
-          name: full-test-output-${{ github.run_id }}-${{ github.run_attempt }}-shard-4
-          path: ${{ env.LOCAL_SHARD_OUTPUT }}/shard-4/
-          if-no-files-found: ignore
-
-      - name: Upload coordinator timing
-        if: always()
-        continue-on-error: true
-        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
-        with:
-          name: full-test-timing-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ env.LOCAL_SHARD_OUTPUT }}/coordinator.json
-          if-no-files-found: ignore
-
-      # Also runs on cancellation: kills only processes carrying this run's
-      # owner marker, stops only this run's shard Redis containers and removes
-      # only this job's shard work root.
-      - name: Clean up shard processes and Redis
-        if: always()
-        run: >-
-          node scripts/run-local-shards.mjs cleanup
-          --source="$GITHUB_WORKSPACE"
-          --work-root="$LOCAL_SHARD_WORK_ROOT"
-
-      - name: Fail Job
-        if: steps.tests.outcome != 'success' || steps.docs.outcome != 'success'
-        env:
-          TEST_RESULT: ${{ steps.tests.outcome }}
-          DOCS_RESULT: ${{ steps.docs.outcome }}
-        run: |
-          echo "::error::Local shards finished with '$TEST_RESULT' and docs validation with '$DOCS_RESULT'."
-          exit 1
+      # Self-hosted only, also on failure and cancellation: removes this job's
+      # untracked and ignored files (node_modules, dist, outputs) from its own
+      # persistent workspace. .git stays for the checkout post step.
+      - name: Remove job files from the persistent workspace
+        if: always() && runner.environment == 'self-hosted'
+        run: git -C "$GITHUB_WORKSPACE" clean -ffdxq
 
   native-electron:
-    # The self-hosted runner cannot launch Electron (its tests skip there with
-    # "Electron cannot start on this worker"). These units run again here
-    # with skipping disabled, so self-hosted routing loses no coverage.
+    # Electron cannot launch on the self-hosted workers (its tests skip there
+    # with "Electron cannot start on this worker"), and they run as root, so
+    # Electron's Chromium sandbox could not be exercised there anyway. These
+    # units run again here with skipping disabled, so self-hosted routing
+    # loses no coverage.
     name: Full Test Suite Native Electron (hosted)
     if: >-
       ${{ (github.event_name == 'workflow_dispatch' || !github.event.pull_request.draft) &&
@@ -425,7 +330,7 @@ jobs:
     # Required status check. Keep this name stable: it aggregates the shards
     # and docs validation so branch protection keeps the same merge gate.
     name: Run Full Test Suite
-    needs: [shard, docs, local, native-electron]
+    needs: [shard, docs, native-electron]
     if: >-
       ${{ always() &&
           (github.event_name == 'workflow_dispatch' || !github.event.pull_request.draft) }}
@@ -471,7 +376,6 @@ jobs:
           ROUTE: ${{ (vars.PROPR_SELF_HOSTED_PR_CHECKS != 'false' && (github.event_name == 'workflow_dispatch' || (github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.user.login != 'dependabot[bot]'))) && 'self-hosted' || 'hosted' }}
           SHARD_RESULT: ${{ needs.shard.result }}
           DOCS_RESULT: ${{ needs.docs.result }}
-          LOCAL_RESULT: ${{ needs.local.result }}
           ELECTRON_RESULT: ${{ needs.native-electron.result }}
           COVERAGE_RESULT: ${{ steps.coverage.outcome }}
         run: |
@@ -482,18 +386,15 @@ jobs:
               status=1
             fi
           }
-          # The route is recomputed here, so a skipped path only passes when it
-          # was not the selected one. A matrix result is success only when every
-          # shard succeeded; failure, cancelled and skipped all block the merge.
+          # A matrix result is success only when every shard succeeded;
+          # failure, cancelled and skipped all block the merge. The route is
+          # recomputed here, so the hosted Electron job may only be skipped
+          # when the shards ran on hosted runners, where Electron launches.
+          require "Full test suite shards" "$SHARD_RESULT"
+          require "Test preparation and docs validation" "$DOCS_RESULT"
           case "$ROUTE" in
-            self-hosted)
-              require "Self-hosted local shards and docs validation" "$LOCAL_RESULT"
-              require "Hosted native Electron units" "$ELECTRON_RESULT"
-              ;;
-            hosted)
-              require "Full test suite shards" "$SHARD_RESULT"
-              require "Test preparation and docs validation" "$DOCS_RESULT"
-              ;;
+            self-hosted) require "Hosted native Electron units" "$ELECTRON_RESULT" ;;
+            hosted) ;;
             *)
               echo "::error::Unknown full-suite route '$ROUTE'."
               status=1
@@ -507,7 +408,7 @@ jobs:
 
   comment:
     name: Report Full Test Failure
-    needs: [shard, docs, local, native-electron, test]
+    needs: [shard, docs, native-electron, test]
     if: >-
       ${{ always() && github.event_name == 'pull_request' &&
           needs.test.result == 'failure' &&
@@ -530,12 +431,12 @@ jobs:
       - name: Post result comment
         uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
         env:
-          SHARD_RESULT: ${{ needs.shard.result != 'skipped' && needs.shard.result || needs.local.result }}
-          DOCS_JOB_RESULT: ${{ needs.docs.result != 'skipped' && needs.docs.result || needs.local.result }}
+          SHARD_RESULT: ${{ needs.shard.result }}
+          DOCS_JOB_RESULT: ${{ needs.docs.result }}
           ELECTRON_RESULT: ${{ needs.native-electron.result }}
-          INSTALL_RESULT: ${{ needs.docs.outputs.install_result || needs.local.outputs.install_result }}
-          BUILD_RESULT: ${{ needs.docs.outputs.build_result || needs.local.outputs.build_result }}
-          DOCS_RESULT: ${{ needs.docs.outputs.docs_result || needs.local.outputs.docs_result }}
+          INSTALL_RESULT: ${{ needs.docs.outputs.install_result }}
+          BUILD_RESULT: ${{ needs.docs.outputs.build_result }}
+          DOCS_RESULT: ${{ needs.docs.outputs.docs_result }}
           COVERAGE_RESULT: ${{ needs.test.outputs.coverage_result }}
         with:
           script: |
@@ -554,7 +455,7 @@ jobs:
               const shard = stages?.shard ?? summary?.shard?.index;
               const runAttempt = stages?.runAttempt ?? summary?.runAttempt ?? 1;
               if (!shard || (shards.get(shard)?.runAttempt ?? 0) > runAttempt) continue;
-              shards.set(shard, { runAttempt, stages: stages?.stages ?? {}, summary, output: read(path.join(directory, 'test_output.sanitized.txt')) });
+              shards.set(shard, { runAttempt, runner: stages?.runner, stages: stages?.stages ?? {}, summary, output: read(path.join(directory, 'test_output.sanitized.txt')) });
             }
 
             const docsOutcomes = {
@@ -579,7 +480,8 @@ jobs:
               const failures = (shard.summary?.results ?? []).filter(result => result.status === 'failed');
               const duration = shard.summary ? ` in ${(shard.summary.durationMs / 1000).toFixed(1)}s` : '';
               const status = failed.length === 0 ? 'passed' : `failed during ${failed.join(', ')}`;
-              lines.push(`- Shard ${index}/${shardCount}: ${status}${duration}`);
+              const runner = shard.runner?.name ? ` on ${shard.runner.name}` : '';
+              lines.push(`- Shard ${index}/${shardCount}: ${status}${duration}${runner}`);
               for (const failure of failures) lines.push(`  - \`${failure.id}\`${failure.kind === 'workspace' ? ' (workspace)' : ''}: ${failure.reason}`);
               if (failed.length > 0) failedOutputs.push([index, shard.output ?? 'Output file not available.']);
             }
