@@ -4,6 +4,7 @@ import { after, test } from 'node:test';
 process.env.PROPR_DEMO_MODE = 'true';
 
 const {
+    getCancelCiDuringFollowupWorkflowsForRepository,
     getReposFromEnv,
     isAutoCiFollowupEnabledForRepository,
     isMonitoredRepository,
@@ -80,4 +81,32 @@ test('automatic CI follow-up aggregates duplicate branch configurations independ
         'repo',
         async () => [enabledBranch, disabledBranch],
     ), true);
+});
+
+test('the selected follow-up CI cancellation workflows are read across the branch entries of a repository', async () => {
+    const withoutSelection = { id: 'repo-main', name: 'owner/repo', enabled: true, baseBranch: 'main' };
+    const withSelection = {
+        id: 'repo-release',
+        name: 'OWNER/REPO',
+        enabled: true,
+        baseBranch: 'release',
+        cancelCiDuringFollowup: true,
+        cancelCiDuringFollowupWorkflows: [' pr-build-check.yml ', 'PR-BUILD-CHECK.YML', 'Full Test Suite', ''],
+    };
+    const otherRepository = { id: 'other', name: 'owner/other', enabled: true, cancelCiDuringFollowupWorkflows: ['deploy.yml'] };
+
+    assert.deepEqual(
+        await getCancelCiDuringFollowupWorkflowsForRepository('owner', 'repo', async () => [withoutSelection, withSelection, otherRepository] as never),
+        ['pr-build-check.yml', 'Full Test Suite'],
+    );
+    // A repository that selected nothing selects nothing, which cancels nothing.
+    assert.deepEqual(
+        await getCancelCiDuringFollowupWorkflowsForRepository('owner', 'repo', async () => [withoutSelection] as never),
+        [],
+    );
+    // An unreadable configuration must never be read as permission to cancel.
+    assert.deepEqual(
+        await getCancelCiDuringFollowupWorkflowsForRepository('owner', 'repo', async () => { throw new Error('database is down'); }),
+        [],
+    );
 });

@@ -23,6 +23,8 @@ import {
   defaultVisualPreview,
   getRepositoryConfigKey,
   parseVisualPreview,
+  parseWorkflowSelection,
+  updateRepositoryCancelCiWorkflows,
   resolveRepositoryNotificationsEnabled,
   toggleRepositoryCancelCiDuringFollowup,
   toggleRepositoryNotifications,
@@ -70,6 +72,7 @@ export interface UseRepositoryManagementResult {
   handleToggleRepo: (repoId: string) => void;
   handleToggleAutoCiFollowup: (repoId: string) => void;
   handleToggleCancelCiDuringFollowup: (repoId: string) => void;
+  handleUpdateCancelCiWorkflows: (repoId: string, workflows: string[]) => void;
   handleToggleNotifications: (repoId: string) => void;
   handleUpdateVisualPreview: (repoId: string, settings: VisualPreviewSettings) => void;
   handleToggleStar: (repoId: string) => Promise<void>;
@@ -119,13 +122,14 @@ export function useRepositoryManagement(): UseRepositoryManagementResult {
         .map((repo: unknown): Repo | null => {
           if (typeof repo === 'string') {
             const userPref = prefs[repo] || {};
-            return { id: generateId(), name: repo, enabled: true, autoFollowupOnFailedCi: false, cancelCiDuringFollowup: false, notificationsEnabled: true, visualPreview: defaultVisualPreview(), starred: userPref.starred, hidden: userPref.hidden };
+            return { id: generateId(), name: repo, enabled: true, autoFollowupOnFailedCi: false, cancelCiDuringFollowup: false, cancelCiDuringFollowupWorkflows: [], notificationsEnabled: true, visualPreview: defaultVisualPreview(), starred: userPref.starred, hidden: userPref.hidden };
           } else if (repo && typeof repo === 'object') {
             const repoObj = repo as Record<string, unknown>;
             const name = (repoObj.name as string) || (repoObj.full_name as string);
             const enabled = typeof repoObj.enabled === 'boolean' ? repoObj.enabled : true;
             const autoFollowupOnFailedCi = repoObj.autoFollowupOnFailedCi === true;
             const cancelCiDuringFollowup = repoObj.cancelCiDuringFollowup === true;
+            const cancelCiDuringFollowupWorkflows = parseWorkflowSelection(repoObj.cancelCiDuringFollowupWorkflows);
             // An absent field means enabled: the product default and legacy behaviour.
             const notificationsEnabled = repoObj.notificationsEnabled !== false;
             const visualPreview = parseVisualPreview(repoObj.visualPreview);
@@ -134,7 +138,7 @@ export function useRepositoryManagement(): UseRepositoryManagementResult {
             const baseBranch = repoObj.baseBranch as string | undefined;
             const userPref = name ? (prefs[name] || {}) : {};
             if (name) {
-              return { id, name, enabled, autoFollowupOnFailedCi, cancelCiDuringFollowup, notificationsEnabled, visualPreview, alias, baseBranch, starred: userPref.starred, hidden: userPref.hidden };
+              return { id, name, enabled, autoFollowupOnFailedCi, cancelCiDuringFollowup, cancelCiDuringFollowupWorkflows, notificationsEnabled, visualPreview, alias, baseBranch, starred: userPref.starred, hidden: userPref.hidden };
             }
           }
           return null;
@@ -348,6 +352,9 @@ export function useRepositoryManagement(): UseRepositoryManagementResult {
       cancelCiDuringFollowup: repos.some(repo =>
         getRepositoryConfigKey(repo.name) === repositoryKey && repo.cancelCiDuringFollowup
       ),
+      cancelCiDuringFollowupWorkflows: repos.find(repo =>
+        getRepositoryConfigKey(repo.name) === repositoryKey && repo.cancelCiDuringFollowupWorkflows.length > 0
+      )?.cancelCiDuringFollowupWorkflows ?? [],
       // Not in the Add Repository modal: new repositories default on; new branches inherit.
       notificationsEnabled: resolveRepositoryNotificationsEnabled(repos, repositoryKey),
       visualPreview,
@@ -401,6 +408,14 @@ export function useRepositoryManagement(): UseRepositoryManagementResult {
   const handleToggleCancelCiDuringFollowup = (repoId: string) => {
     if (!canManageRepositories) return;
     const newRepos = toggleRepositoryCancelCiDuringFollowup(repos, repoId);
+    if (newRepos === repos) return;
+    setRepos(newRepos);
+    performAutoSave(newRepos);
+  };
+
+  const handleUpdateCancelCiWorkflows = (repoId: string, workflows: string[]) => {
+    if (!canManageRepositories) return;
+    const newRepos = updateRepositoryCancelCiWorkflows(repos, repoId, workflows);
     if (newRepos === repos) return;
     setRepos(newRepos);
     performAutoSave(newRepos);
@@ -462,7 +477,7 @@ export function useRepositoryManagement(): UseRepositoryManagementResult {
   return {
     repos, loading, error, availableRepos, indexingStatuses, saveStatus, showHiddenRepos,
     filteredRepos, hiddenCount, loadRepos, handleStopIndexing, handleReindexRepo, handleAddRepo,
-    handleRemoveRepo, handleToggleRepo, handleToggleAutoCiFollowup, handleToggleCancelCiDuringFollowup, handleToggleNotifications, handleUpdateVisualPreview, handleToggleStar, handleToggleHidden, handleToggleShowHidden,
+    handleRemoveRepo, handleToggleRepo, handleToggleAutoCiFollowup, handleToggleCancelCiDuringFollowup, handleUpdateCancelCiWorkflows, handleToggleNotifications, handleUpdateVisualPreview, handleToggleStar, handleToggleHidden, handleToggleShowHidden,
     handleRetry, setError
   };
 }

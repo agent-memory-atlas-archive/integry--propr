@@ -74,6 +74,7 @@ export function withDefaultRepoOptions(repo: RepoToMonitor): RepoToMonitor {
   return {
     ...withDefaultRepoAutoFollowup(repo),
     cancelCiDuringFollowup: repo.cancelCiDuringFollowup === true,
+    cancelCiDuringFollowupWorkflows: normalizeStoredWorkflowSelection(repo.cancelCiDuringFollowupWorkflows),
     notificationsEnabled: repo.notificationsEnabled !== false,
     visualPreview: normalizeStoredVisualPreviewSettings(repo.visualPreview)
   };
@@ -97,6 +98,34 @@ export function preserveRepoCancelCiDuringFollowup(
   incomingRepos: unknown[]
 ): RepoToMonitor[] {
   return preserveRepoBooleanOption(previousRepos, normalizedRepos, incomingRepos, 'cancelCiDuringFollowup');
+}
+
+/**
+ * The selected workflows are the permission to cancel them, so a client that
+ * does not know the field must never drop the operator's selection either.
+ */
+export function preserveRepoCancelCiWorkflows(
+  previousRepos: RepoToMonitor[],
+  normalizedRepos: RepoToMonitor[],
+  incomingRepos: unknown[]
+): RepoToMonitor[] {
+  return normalizedRepos.map((repo, index) => {
+    const incomingRepo = incomingRepos[index] as Partial<RepoToMonitor>;
+    if (incomingRepo.cancelCiDuringFollowupWorkflows !== undefined) return repo;
+    const previousRepo = previousRepos.find(candidate => candidate.id === repo.id);
+    return { ...repo, cancelCiDuringFollowupWorkflows: normalizeStoredWorkflowSelection(previousRepo?.cancelCiDuringFollowupWorkflows) };
+  });
+}
+
+/** Keeps a stored selection usable regardless of how it was written: trimmed, de-duplicated, empty entries dropped. */
+export function normalizeStoredWorkflowSelection(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  const selection: string[] = [];
+  for (const entry of value) {
+    const workflow = typeof entry === 'string' ? entry.trim() : '';
+    if (workflow && !selection.some(existing => existing.toLowerCase() === workflow.toLowerCase())) selection.push(workflow);
+  }
+  return selection;
 }
 
 function preserveRepoBooleanOption(
@@ -263,6 +292,38 @@ function normalizeVisualPreview(value: unknown, repoName: string): ValidationRes
   });
 }
 
+/** Upper bounds on the stored selection: a workflow identity is a path, a file name, a display name or a numeric ID. */
+const MAX_CANCEL_CI_WORKFLOWS = 50;
+const MAX_CANCEL_CI_WORKFLOW_LENGTH = 255;
+
+/**
+ * The exact workflows follow-up CI cancellation may cancel for a repository.
+ * Only explicit, complete identities are accepted — never a pattern — because
+ * everything on this list is permission to cancel that workflow's runs.
+ */
+function normalizeWorkflowSelection(value: unknown, repoName: string): ValidationResult<string[]> {
+  if (value === undefined || value === null) return success([]);
+  if (!Array.isArray(value)) {
+    return failure(`Invalid cancelCiDuringFollowupWorkflows format for ${repoName}: must be an array of workflow names, paths or IDs`);
+  }
+  if (value.length > MAX_CANCEL_CI_WORKFLOWS) {
+    return failure(`Invalid cancelCiDuringFollowupWorkflows format for ${repoName}: at most ${MAX_CANCEL_CI_WORKFLOWS} workflows`);
+  }
+  const selection: string[] = [];
+  for (const entry of value) {
+    if (typeof entry !== 'string') {
+      return failure(`Invalid cancelCiDuringFollowupWorkflows format for ${repoName}: every workflow must be a string`);
+    }
+    const workflow = entry.trim();
+    if (!workflow) continue;
+    if (workflow.length > MAX_CANCEL_CI_WORKFLOW_LENGTH) {
+      return failure(`Invalid cancelCiDuringFollowupWorkflows format for ${repoName}: a workflow must be ${MAX_CANCEL_CI_WORKFLOW_LENGTH} characters or fewer`);
+    }
+    if (!selection.some(existing => existing.toLowerCase() === workflow.toLowerCase())) selection.push(workflow);
+  }
+  return success(selection);
+}
+
 export function normalizeRepoConfig(repo: unknown): ValidationResult<RepoToMonitor> {
   const candidateResult = parseRepoObject(repo);
   if (!candidateResult.ok) return candidateResult;
@@ -289,6 +350,8 @@ export function normalizeRepoConfig(repo: unknown): ValidationResult<RepoToMonit
   if (candidate.notificationsEnabled !== undefined && typeof candidate.notificationsEnabled !== 'boolean') {
     return failure(`Invalid notificationsEnabled format for ${name}: must be a boolean`);
   }
+  const cancelCiWorkflows = normalizeWorkflowSelection(candidate.cancelCiDuringFollowupWorkflows, name);
+  if (!cancelCiWorkflows.ok) return cancelCiWorkflows;
   const visualPreview = normalizeVisualPreview(candidate.visualPreview, name);
   if (!visualPreview.ok) return visualPreview;
 
@@ -298,6 +361,7 @@ export function normalizeRepoConfig(repo: unknown): ValidationResult<RepoToMonit
     enabled,
     autoFollowupOnFailedCi: candidate.autoFollowupOnFailedCi ?? false,
     cancelCiDuringFollowup: candidate.cancelCiDuringFollowup ?? false,
+    cancelCiDuringFollowupWorkflows: cancelCiWorkflows.value,
     notificationsEnabled: candidate.notificationsEnabled !== false,
     visualPreview: visualPreview.value,
     alias: alias.value,

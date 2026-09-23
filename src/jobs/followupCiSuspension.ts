@@ -7,9 +7,10 @@ import { delay, resolveLog, resolveOctokit, type CiSuspensionDeps } from './foll
 import { cancellationState, cancelPendingRuns } from './followupCiSuspensionCancel.js';
 import {
     deleteSuspension, loadSuspension, loadSuspensions, nowMs, parseCancelledRuns, saveCancelledRuns, splitRepository,
-    SUSPENSION_ACTIVE, SUSPENSION_RESTORING, suspensionKey, targetOf, withSuspensionLock,
+    SUSPENSION_ACTIVE, SUSPENSION_RESTORING, suspensionKey, targetOf,
     type CancelledRun, type CiSuspensionRecord,
 } from './followupCiSuspensionStore.js';
+import { SuspensionLeaseLostError, SuspensionLeaseUnavailableError, withSuspensionLease } from './followupCiSuspensionLease.js';
 
 /**
  * Cancels the GitHub Actions validation of a pull request head that a follow-up
@@ -19,13 +20,16 @@ import {
  * Opt-in per repository ("Cancel CI while follow-up implementation is in
  * progress") and strictly scoped: only queued/in-progress runs that GitHub
  * itself associates with the captured pull request and captured head SHA, and
- * whose workflow is eligible under the validation workflow policy, are touched.
- * Preview, deployment, manual, branch and other-pull-request runs, other
- * revisions and non-Actions checks are not.
+ * whose workflow the repository's operator explicitly selected, are touched.
+ * Workflows nobody selected — preview and deployment workflows among them, and
+ * any workflow whose name merely sounds like validation — are never cancelled,
+ * and neither are manual, branch and other-pull-request runs, other revisions
+ * or non-Actions checks.
  *
  * Every step of one pull request's suspension — begin, sweep, restore, release —
- * runs under the same in-worker lock and writes with the generation it read, so
- * the job finalizer and the periodic recovery pass can never fight over it.
+ * runs while holding the same shared lease and writes with the generation it
+ * read, so the job finalizer of one worker and the periodic recovery pass of
+ * another can never fight over it.
  */
 
 const TERMINAL_TASK_STATES: ReadonlySet<string> = new Set([TaskStates.COMPLETED, TaskStates.FAILED, TaskStates.CANCELLED]);
@@ -38,18 +42,25 @@ const DEFAULT_RESTORE_BUDGET_MS = 15_000;
 const DEFAULT_POLL_INTERVAL_MS = 2_000;
 
 export interface SweepSuspensionResult {
-    reason: 'swept' | 'head_replaced' | 'pull_request_closed' | 'superseded';
+    reason: 'swept' | 'head_replaced' | 'pull_request_closed' | 'superseded' | 'busy';
     cancelledRunIds: number[];
 }
 
 export interface RestoreSuspensionResult {
-    reason: 'restarted' | 'head_replaced' | 'pull_request_closed' | 'pending' | 'permission_denied' | 'superseded' | 'abandoned';
+    reason: 'restarted' | 'head_replaced' | 'pull_request_closed' | 'pending' | 'permission_denied' | 'superseded'
+        | 'abandoned' | 'busy';
     restartedRunIds: number[];
     pendingRunIds: number[];
 }
 
 export { CiActionsPermissionError, isCancelableValidationRun } from './followupCiSuspensionRuns.js';
-export { isEligibleValidationWorkflow, loadValidationWorkflowPolicy, VALIDATION_WORKFLOW_ALLOWLIST_ENV } from './followupCiSuspensionPolicy.js';
+export {
+    createValidationWorkflowPolicy, isEligibleValidationWorkflow, loadValidationWorkflowPolicyFromEnv,
+    NO_VALIDATION_WORKFLOWS_SELECTED, parseWorkflowSelection, resolveValidationWorkflowPolicy,
+    VALIDATION_WORKFLOW_ALLOWLIST_ENV,
+} from './followupCiSuspensionPolicy.js';
+export { PR_CI_SUSPENSION_LEASES_TABLE, SuspensionLeaseUnavailableError } from './followupCiSuspensionLease.js';
+export type { ValidationWorkflowPolicy } from './followupCiSuspensionPolicy.js';
 export {
     beginFollowupCiSuspension, resolveFollowupCiSuspensionTarget, suspendObsoleteValidationForImplementation,
 } from './followupCiSuspensionCancel.js';
@@ -69,7 +80,14 @@ export async function sweepFollowupCiSuspension(
     record: CiSuspensionRecord,
     deps: CiSuspensionDeps = {},
 ): Promise<SweepSuspensionResult> {
-    return withSuspensionLock(suspensionKey(record), () => sweepSuspension(record, deps));
+    try {
+        return await withSuspensionLease(deps, suspensionKey(record), () => sweepSuspension(record, deps));
+    } catch (error) {
+        if (!(error instanceof SuspensionLeaseUnavailableError)) throw error;
+        // Whoever holds the lease is already deciding what this pull request
+        // needs; sweeping next to them could cancel what they are restoring.
+        return { reason: 'busy', cancelledRunIds: [] };
+    }
 }
 
 async function sweepSuspension(record: CiSuspensionRecord, deps: CiSuspensionDeps): Promise<SweepSuspensionResult> {
@@ -177,12 +195,26 @@ export async function restoreFollowupCiSuspension(
     record: CiSuspensionRecord,
     deps: CiSuspensionDeps = {},
 ): Promise<RestoreSuspensionResult> {
-    return withSuspensionLock(suspensionKey(record), () => restoreSuspension(record, deps));
+    try {
+        return await withSuspensionLease(deps, suspensionKey(record), lease => restoreSuspension(record, deps, lease));
+    } catch (error) {
+        // Either another worker holds the lease, or this one waited for a
+        // cancellation long enough to lose it. Both leave the obligation
+        // recorded for whoever holds the lease next.
+        if (!(error instanceof SuspensionLeaseUnavailableError) && !(error instanceof SuspensionLeaseLostError)) throw error;
+        resolveLog(deps).info({ repository: record.repository, pullRequest: record.pull_request, error: (error as Error).message },
+            'Another worker holds this pull request suspension; its restart continues on the next reconciliation');
+        return { reason: 'busy', restartedRunIds: [], pendingRunIds: parseCancelledRuns(record).filter(run => !run.restarted).map(run => run.id) };
+    }
 }
 
 const SUPERSEDED: RestoreSuspensionResult = { reason: 'superseded', restartedRunIds: [], pendingRunIds: [] };
 
-async function restoreSuspension(record: CiSuspensionRecord, deps: CiSuspensionDeps): Promise<RestoreSuspensionResult> {
+async function restoreSuspension(
+    record: CiSuspensionRecord,
+    deps: CiSuspensionDeps,
+    lease?: { assertHeld: () => Promise<void> },
+): Promise<RestoreSuspensionResult> {
     const log = resolveLog(deps);
     // Work from the row as it is now: what the caller was handed may already
     // belong to a newer implementation of the same pull request.
@@ -229,6 +261,10 @@ async function restoreSuspension(record: CiSuspensionRecord, deps: CiSuspensionD
                 return await deferRestore({ record: current, runs, pending, restartedRunIds, attempts }, deps);
             }
             await delay(deps, deps.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS);
+            // Waiting is where a lease expires. Renew it and prove it is still
+            // this worker's before requesting another rerun, so a restart that
+            // somebody else took over is never duplicated from here.
+            await lease?.assertHeld();
             // The head can be replaced while this pass waits for cancellations to
             // finish, so it is read again before any further rerun.
             const replaced = await releaseObsoleteHead(
@@ -346,11 +382,11 @@ export async function reconcileFollowupCiSuspensions(
             if (await keepsSuppressing(record, deps, enabled)) {
                 const swept = await sweepFollowupCiSuspension(record, deps);
                 if (swept.reason === 'swept') summary.swept += 1;
-                else if (swept.reason !== 'superseded') summary.released += 1;
+                else if (swept.reason !== 'superseded' && swept.reason !== 'busy') summary.released += 1;
                 continue;
             }
             const restored = await restoreFollowupCiSuspension(record, deps);
-            if (restored.reason !== 'pending' && restored.reason !== 'superseded') summary.released += 1;
+            if (!['pending', 'superseded', 'busy'].includes(restored.reason)) summary.released += 1;
             if (restored.restartedRunIds.length > 0) summary.restored += 1;
         } catch (error) {
             summary.errors += 1;

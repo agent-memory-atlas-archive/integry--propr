@@ -3,15 +3,27 @@ import type { MonitoredRepo } from '../api/proprApi';
 
 export type VisualPreviewSettings = NonNullable<MonitoredRepo['visualPreview']>;
 
-export type ManagedRepo = Omit<MonitoredRepo, 'autoFollowupOnFailedCi' | 'cancelCiDuringFollowup' | 'visualPreview'> & {
+export type ManagedRepo = Omit<MonitoredRepo, 'autoFollowupOnFailedCi' | 'cancelCiDuringFollowup' | 'cancelCiDuringFollowupWorkflows' | 'visualPreview'> & {
   autoFollowupOnFailedCi: boolean;
   cancelCiDuringFollowup: boolean;
+  cancelCiDuringFollowupWorkflows: string[];
   visualPreview: VisualPreviewSettings;
 };
 
 export const getRepositoryConfigKey = (name: string): string => name.trim().toLowerCase();
 
 export const defaultVisualPreview = (): VisualPreviewSettings => ({ enabled: false, types: ['image'] });
+
+/** Stored selections are exact workflow identities: trimmed, de-duplicated, never empty strings. */
+export function parseWorkflowSelection(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  const selection: string[] = [];
+  for (const entry of value) {
+    const workflow = typeof entry === 'string' ? entry.trim() : '';
+    if (workflow && !selection.some(existing => existing.toLowerCase() === workflow.toLowerCase())) selection.push(workflow);
+  }
+  return selection;
+}
 
 export function parseVisualPreview(value: unknown): VisualPreviewSettings {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return defaultVisualPreview();
@@ -69,6 +81,17 @@ export function toggleRepositoryNotifications(repos: ManagedRepo[], repoId: stri
     : repo);
 }
 
+/** Every branch entry of a repository shares one workflow selection, like the option it belongs to. */
+export function updateRepositoryCancelCiWorkflows(repos: ManagedRepo[], repoId: string, workflows: string[]): ManagedRepo[] {
+  const targetRepo = repos.find(repo => repo.id === repoId);
+  if (!targetRepo) return repos;
+  const repositoryKey = getRepositoryConfigKey(targetRepo.name);
+  const selection = parseWorkflowSelection(workflows);
+  return repos.map(repo => getRepositoryConfigKey(repo.name) === repositoryKey
+    ? { ...repo, cancelCiDuringFollowupWorkflows: selection }
+    : repo);
+}
+
 /** Flip the resolved repository-wide value so every branch entry converges on one state. */
 export function toggleRepositoryCancelCiDuringFollowup(repos: ManagedRepo[], repoId: string): ManagedRepo[] {
   const targetRepo = repos.find(repo => repo.id === repoId);
@@ -85,11 +108,18 @@ export function toggleRepositoryCancelCiDuringFollowup(repos: ManagedRepo[], rep
 export function buildRepositoriesForDisplay(repos: ManagedRepo[]): ManagedRepo[] {
   const autoCiFollowupByRepository = new Map<string, boolean>();
   const cancelCiByRepository = new Map<string, boolean>();
+  const cancelCiWorkflowsByRepository = new Map<string, string[]>();
   const visualPreviewByRepository = new Map<string, VisualPreviewSettings>();
   for (const repo of repos) {
     const key = getRepositoryConfigKey(repo.name);
     autoCiFollowupByRepository.set(key, autoCiFollowupByRepository.get(key) === true || repo.autoFollowupOnFailedCi);
     cancelCiByRepository.set(key, cancelCiByRepository.get(key) === true || repo.cancelCiDuringFollowup);
+    // Branch entries written before the selection existed hold none; the first
+    // entry that carries one speaks for the repository.
+    const knownWorkflows = cancelCiWorkflowsByRepository.get(key);
+    if (!knownWorkflows || knownWorkflows.length === 0) {
+      cancelCiWorkflowsByRepository.set(key, parseWorkflowSelection(repo.cancelCiDuringFollowupWorkflows));
+    }
     const previousPreview = visualPreviewByRepository.get(key);
     if (!previousPreview || (!previousPreview.enabled && repo.visualPreview.enabled)) {
       visualPreviewByRepository.set(key, repo.visualPreview);
@@ -100,6 +130,7 @@ export function buildRepositoriesForDisplay(repos: ManagedRepo[]): ManagedRepo[]
     ...repo,
     autoFollowupOnFailedCi: autoCiFollowupByRepository.get(getRepositoryConfigKey(repo.name)) === true,
     cancelCiDuringFollowup: cancelCiByRepository.get(getRepositoryConfigKey(repo.name)) === true,
+    cancelCiDuringFollowupWorkflows: cancelCiWorkflowsByRepository.get(getRepositoryConfigKey(repo.name)) ?? [],
     notificationsEnabled: resolveRepositoryNotificationsEnabled(repos, getRepositoryConfigKey(repo.name)),
     visualPreview: visualPreviewByRepository.get(getRepositoryConfigKey(repo.name)) || defaultVisualPreview()
   }));

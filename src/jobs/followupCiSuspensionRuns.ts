@@ -4,7 +4,7 @@
  * rerun one run. Nothing here decides when those operations are allowed.
  */
 
-import { isEligibleValidationWorkflow, loadValidationWorkflowPolicy, type ValidationWorkflowPolicy } from './followupCiSuspensionPolicy.js';
+import { isEligibleValidationWorkflow, type ValidationWorkflowPolicy } from './followupCiSuspensionPolicy.js';
 
 /** Runs in these statuses have not produced a result yet, so cancelling one only discards work a new commit would invalidate. */
 const CANCELABLE_RUN_STATUSES: ReadonlySet<string> = new Set(['queued', 'in_progress', 'waiting', 'pending', 'requested']);
@@ -63,15 +63,15 @@ function isMissing(error: unknown): boolean {
 
 /**
  * Ownership is proven by GitHub's own pull request association plus an exact
- * head SHA match, and the workflow itself must be eligible under the validation
- * workflow policy: an event alone never qualifies a run, and a branch name
- * never does either.
+ * head SHA match, and the workflow itself must be one the operator selected: an
+ * event alone never qualifies a run, a workflow name never does, and a branch
+ * name never does either.
  */
 export function isCancelableValidationRun(
     run: WorkflowRunSummary,
-    target: { pullRequestNumber: number; headSha: string; policy?: ValidationWorkflowPolicy },
+    target: { pullRequestNumber: number; headSha: string; policy: ValidationWorkflowPolicy },
 ): boolean {
-    if (!isEligibleValidationWorkflow(run, target.policy ?? loadValidationWorkflowPolicy())) return false;
+    if (!isEligibleValidationWorkflow(run, target.policy)) return false;
     if (!CANCELABLE_RUN_STATUSES.has((run.status ?? '').toLowerCase())) return false;
     if (!sameSha(run.head_sha, target.headSha)) return false;
     return (run.pull_requests ?? []).some(pullRequest => pullRequest?.number === target.pullRequestNumber);

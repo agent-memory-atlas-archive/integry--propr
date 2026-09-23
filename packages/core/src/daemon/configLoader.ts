@@ -58,6 +58,41 @@ export async function isCancelCiDuringFollowupEnabledForRepository(
     return isRepositoryOptionEnabled({ owner, repo, option: 'cancelCiDuringFollowup', description: 'follow-up CI cancellation' }, loadConfiguredRepos);
 }
 
+/**
+ * The validation workflows an operator selected for a repository, which are the
+ * only workflows follow-up CI cancellation may ever cancel. Branch-specific
+ * entries share a repository name, so every entry's selection counts; an
+ * unreadable configuration selects nothing, which cancels nothing.
+ */
+export async function getCancelCiDuringFollowupWorkflowsForRepository(
+    owner: string,
+    repo: string,
+    loadConfiguredRepos: typeof loadMonitoredReposRaw = loadMonitoredReposRaw,
+): Promise<string[]> {
+    const repository = `${owner.trim()}/${repo.trim()}`.toLowerCase();
+    if (repository === '/') return [];
+
+    try {
+        const configuredRepos = await loadConfiguredRepos();
+        const selected: string[] = [];
+        for (const candidate of configuredRepos) {
+            if (candidate.name.trim().toLowerCase() !== repository) continue;
+            for (const workflow of candidate.cancelCiDuringFollowupWorkflows ?? []) {
+                const normalized = String(workflow ?? '').trim();
+                if (normalized && !selected.some(entry => entry.toLowerCase() === normalized.toLowerCase())) {
+                    selected.push(normalized);
+                }
+            }
+        }
+        return selected;
+    } catch (error) {
+        const err = error as Error;
+        logger.warn({ repository, error: err.message },
+            'Failed to load the follow-up CI cancellation workflow selection; cancelling nothing');
+        return [];
+    }
+}
+
 async function isRepositoryOptionEnabled(
     params: {
         owner: string;

@@ -3,9 +3,11 @@ import { after, beforeEach, describe, mock, test } from 'node:test';
 import knex from 'knex';
 import { readFile } from 'node:fs/promises';
 import { up } from '../packages/core/src/db/migrations/20260923010000_add_pr_ci_suspensions.js';
+import { up as createLeases } from '../packages/core/src/db/migrations/20260923020000_add_pr_ci_suspension_leases.js';
 
 const database = knex({ client: 'better-sqlite3', connection: { filename: ':memory:' }, useNullAsDefault: true });
 await up(database);
+await createLeases(database);
 
 await mock.module('@propr/core', {
     namedExports: {
@@ -14,6 +16,7 @@ await mock.module('@propr/core', {
         getAuthenticatedOctokit: async () => { throw new Error('the test must inject its own Octokit'); },
         getStateManager: () => ({ getTaskState: async () => null }),
         isCancelCiDuringFollowupEnabledForRepository: async () => true,
+        getCancelCiDuringFollowupWorkflowsForRepository: async () => [],
         TaskStates: {
             PENDING: 'pending', PROCESSING: 'processing', CLAUDE_EXECUTION: 'claude_execution',
             POST_PROCESSING: 'post_processing', COMPLETED: 'completed', FAILED: 'failed', CANCELLED: 'cancelled',
@@ -23,13 +26,16 @@ await mock.module('@propr/core', {
 
 const {
     beginFollowupCiSuspension,
+    createValidationWorkflowPolicy,
     isCancelableValidationRun,
     isEligibleValidationWorkflow,
-    loadValidationWorkflowPolicy,
+    loadValidationWorkflowPolicyFromEnv,
+    PR_CI_SUSPENSION_LEASES_TABLE,
     PR_CI_SUSPENSIONS_TABLE,
     reconcileFollowupCiSuspensions,
     releaseFollowupCiSuspensionsForTask,
     resolveFollowupCiSuspensionTarget,
+    resolveValidationWorkflowPolicy,
     restoreFollowupCiSuspension,
     sweepFollowupCiSuspension,
     VALIDATION_WORKFLOW_ALLOWLIST_ENV,
@@ -39,6 +45,9 @@ const HEAD = 'a'.repeat(40);
 const NEW_HEAD = 'b'.repeat(40);
 const TARGET = { owner: 'integry', repo: 'propr', pullRequestNumber: 2485 };
 const TASK_ID = 'task-2485';
+/** The workflow the operator selected in most tests. Everything else is deliberately not selected. */
+const VALIDATION_WORKFLOW = { name: 'Build & Lint Check', path: '.github/workflows/pr-build-check.yml' };
+const SELECTED_WORKFLOWS = ['pr-build-check.yml'];
 
 interface FakeRun {
     id: number;
@@ -70,12 +79,15 @@ interface GitHubOptions {
     headSha?: string;
     /** Runs returned per page, to exercise pagination. */
     perPage?: number;
+    /** Shared, ordered record of what every coordinator asked GitHub, across clients. */
+    journal?: Array<{ coordinator: string; route: string; runId?: number }>;
+    coordinator?: string;
 }
 
 function run(overrides: Partial<FakeRun> & { id: number }): FakeRun {
     return {
-        name: `check-${overrides.id}`,
-        path: `.github/workflows/check-${overrides.id}.yml`,
+        name: VALIDATION_WORKFLOW.name,
+        path: VALIDATION_WORKFLOW.path,
         event: 'pull_request',
         status: 'in_progress',
         conclusion: null,
@@ -96,6 +108,7 @@ function createGitHub(runs: FakeRun[], options: GitHubOptions = {}) {
         request: async (route: string, parameters: Record<string, unknown> = {}) => {
             const runId = parameters.run_id as number | undefined;
             calls.push({ route, runId });
+            options.journal?.push({ coordinator: options.coordinator ?? 'default', route, runId });
             await options.onRequest?.(route);
             if (route === 'GET /repos/{owner}/{repo}/pulls/{pull_number}') {
                 return { data: { state: head.state, head: { sha: head.sha } } };
@@ -153,6 +166,7 @@ function deps(github: ReturnType<typeof createGitHub>, overrides: Record<string,
         octokit: github.octokit,
         database,
         isEnabled: async () => true,
+        loadSelectedWorkflows: async () => SELECTED_WORKFLOWS,
         restoreBudgetMs: 0,
         pollIntervalMs: 0,
         sleep: async () => undefined,
@@ -171,6 +185,7 @@ async function storedRunIds(): Promise<number[]> {
 
 beforeEach(async () => {
     await database(PR_CI_SUSPENSIONS_TABLE).delete();
+    await database(PR_CI_SUSPENSION_LEASES_TABLE).delete();
 });
 
 after(async () => {
@@ -190,32 +205,36 @@ describe('follow-up CI suspension targeting', () => {
             run({ id: 8, pull_requests: [] }),
             run({ id: 9, head_sha: NEW_HEAD }),
             run({ id: 10, status: 'completed', conclusion: 'success' }),
-            // A pull request event on a workflow that deploys is not validation.
+            // Nobody selected these two, whatever their names suggest they do.
             run({ id: 11, name: 'PR Preview', path: '.github/workflows/pr-preview.yml', event: 'pull_request_target', status: 'queued' }),
-            run({ id: 12, name: 'Full Test Suite', path: '.github/workflows/pr-test-on-label.yml', status: 'queued' }),
+            run({ id: 12, name: 'CI', path: '.github/workflows/ci.yml', status: 'queued' }),
+            run({ id: 13, name: 'Full Test Suite', path: '.github/workflows/pr-test-on-label.yml', status: 'queued' }),
         ];
         const github = createGitHub(runs);
 
-        const result = await beginFollowupCiSuspension({ target: TARGET, taskId: TASK_ID }, deps(github));
+        const result = await beginFollowupCiSuspension({ target: TARGET, taskId: TASK_ID }, deps(github, {
+            loadSelectedWorkflows: async () => ['pr-build-check.yml', '.github/workflows/pr-test-on-label.yml'],
+        }));
 
         assert.equal(result.suspended, true);
-        assert.deepEqual(result.cancelledRunIds.sort((a, b) => a - b), [1, 2, 12]);
-        assert.deepEqual(github.cancelled().sort((a, b) => (a ?? 0) - (b ?? 0)), [1, 2, 12]);
+        assert.deepEqual(result.cancelledRunIds.sort((a, b) => a - b), [1, 2, 13]);
+        assert.deepEqual(github.cancelled().sort((a, b) => (a ?? 0) - (b ?? 0)), [1, 2, 13]);
         const [record] = await records();
         assert.equal(record.repository, 'integry/propr');
         assert.equal(record.pull_request, TARGET.pullRequestNumber);
         assert.equal(record.head_sha, HEAD);
         assert.equal(record.task_id, TASK_ID);
-        assert.deepEqual(await storedRunIds(), [1, 2, 12]);
+        assert.deepEqual(await storedRunIds(), [1, 2, 13]);
     });
 
     test('never qualifies a run by branch name alone', () => {
+        const policy = createValidationWorkflowPolicy(['build & lint check'], 'repository');
         const branchOnly = {
             id: 1, name: 'Build & Lint Check', event: 'pull_request', status: 'queued', head_sha: HEAD, pull_requests: [],
         };
-        assert.equal(isCancelableValidationRun(branchOnly, { pullRequestNumber: 2485, headSha: HEAD }), false);
+        assert.equal(isCancelableValidationRun(branchOnly, { pullRequestNumber: 2485, headSha: HEAD, policy }), false);
         assert.equal(
-            isCancelableValidationRun({ ...branchOnly, pull_requests: [{ number: 2485 }] }, { pullRequestNumber: 2485, headSha: HEAD }),
+            isCancelableValidationRun({ ...branchOnly, pull_requests: [{ number: 2485 }] }, { pullRequestNumber: 2485, headSha: HEAD, policy }),
             true,
         );
     });
@@ -250,6 +269,34 @@ describe('follow-up CI suspension targeting', () => {
 
         assert.equal(result.reason, 'permission_denied');
         assert.equal(result.suspended, false);
+        assert.deepEqual(await records(), []);
+    });
+
+    test('a refused retry keeps the restart obligations its previous attempt left behind', async () => {
+        const runs = [run({ id: 1 }), run({ id: 2, status: 'queued' })];
+        // GitHub accepts both cancellations; cancelling is asynchronous, so the
+        // runs are still finishing when the job is redelivered.
+        const first = createGitHub(runs, { asyncCancellation: true });
+        const begun = await beginFollowupCiSuspension({ target: TARGET, taskId: TASK_ID }, deps(first));
+        assert.deepEqual(begun.cancelledRunIds, [1, 2]);
+
+        // The retry runs after the installation lost Actions write access.
+        const retried = createGitHub(runs, { asyncCancellation: true, cancelStatus: 403 });
+        const result = await beginFollowupCiSuspension({ target: TARGET, taskId: TASK_ID }, deps(retried));
+
+        assert.equal(result.reason, 'permission_denied');
+        // The refusal proves this attempt cancelled nothing. It proves nothing
+        // about the two cancellations GitHub already accepted.
+        assert.deepEqual(await storedRunIds(), [1, 2]);
+        const [stored] = await records();
+        assert.deepEqual(JSON.parse(stored.cancelled_runs).map((entry: { restarted: boolean }) => entry.restarted), [false, false]);
+
+        // GitHub finishes both cancellations; the obligation is still there to honour.
+        runs.forEach(candidate => { candidate.status = 'completed'; candidate.conclusion = 'cancelled'; });
+        const recovery = createGitHub(runs);
+        const summary = await reconcileFollowupCiSuspensions(deps(recovery, { getTaskState: async () => null }));
+        assert.equal(summary.restored, 1);
+        assert.deepEqual(recovery.rerun().sort((a, b) => (a ?? 0) - (b ?? 0)), [1, 2]);
         assert.deepEqual(await records(), []);
     });
 
@@ -323,49 +370,97 @@ describe('follow-up CI suspension targeting', () => {
     });
 });
 
-describe('eligible validation workflows', () => {
-    const eligible = (workflow: { name: string; path: string; event?: string }, policy?: unknown) =>
+describe('selected validation workflows', () => {
+    const eligible = (workflow: { name: string; path: string; event?: string; workflow_id?: number }, policy?: unknown) =>
         isEligibleValidationWorkflow({ event: 'pull_request', ...workflow }, policy as never);
 
-    test('accepts this repository\'s pull request validation workflows', () => {
-        assert.equal(eligible({ name: 'Build & Lint Check', path: '.github/workflows/pr-build-check.yml' }), true);
-        assert.equal(eligible({ name: 'Full Test Suite', path: '.github/workflows/pr-test-on-label.yml' }), true);
-        assert.equal(eligible({ name: 'CodeQL', path: '.github/workflows/codeql.yml' }), true);
-        assert.equal(eligible({ name: 'Dependency Review', path: '.github/workflows/dependency-review.yml' }), true);
-        assert.equal(eligible({ name: 'CLI Node Compatibility', path: '.github/workflows/cli-node-compatibility.yml' }), true);
-        assert.equal(eligible({ name: 'Desktop Package and Release', path: '.github/workflows/desktop-release-guard.yml' }), true);
-    });
-
-    test('never accepts a preview or deployment workflow, whichever pull request event it uses', () => {
-        assert.equal(eligible({ name: 'PR Preview', path: '.github/workflows/pr-preview.yml', event: 'pull_request_target' }), false);
-        assert.equal(eligible({ name: 'PR Preview', path: '.github/workflows/pr-preview.yml' }), false);
-        assert.equal(eligible({ name: 'Deploy to Staging', path: '.github/workflows/deploy-staging.yml' }), false);
-        assert.equal(eligible({ name: 'Publish Preview Images', path: '.github/workflows/preview-runtime-images.yml' }), false);
-        // A `pull_request_target` workflow is never qualified by its event alone.
-        assert.equal(eligible({ name: 'Build & Lint Check', path: '.github/workflows/pr-build-check.yml', event: 'pull_request_target' }), false);
-        // Neither is a workflow that says nothing about validating the revision.
-        assert.equal(eligible({ name: 'Label Sync', path: '.github/workflows/label-sync.yml' }), false);
-    });
-
-    test('an explicit allowlist decides on its own, by name, path or file name', () => {
-        const policy = loadValidationWorkflowPolicy({
-            [VALIDATION_WORKFLOW_ALLOWLIST_ENV]: 'Label Sync, pr-preview.yml , .github/workflows/pr-test-on-label.yml',
-        });
-        assert.equal(eligible({ name: 'Label Sync', path: '.github/workflows/label-sync.yml' }, policy), true);
+    test('accepts only the workflows an operator selected, by name, path, file name or ID', () => {
+        const policy = createValidationWorkflowPolicy(
+            ['Full Test Suite', ' PR-BUILD-CHECK.YML ', '.github/workflows/codeql.yml', 'dependency-review', '425'],
+            'repository',
+        );
         assert.equal(eligible({ name: 'Full Test Suite', path: '.github/workflows/pr-test-on-label.yml' }, policy), true);
-        // Listed deliberately, including its `pull_request_target` event.
-        assert.equal(eligible({ name: 'PR Preview', path: '.github/workflows/pr-preview.yml', event: 'pull_request_target' }, policy), true);
-        // Everything the operator did not list stays out, defaults included.
-        assert.equal(eligible({ name: 'Build & Lint Check', path: '.github/workflows/pr-build-check.yml' }, policy), false);
+        assert.equal(eligible({ name: 'Build & Lint Check', path: '.github/workflows/pr-build-check.yml' }, policy), true);
+        assert.equal(eligible({ name: 'CodeQL', path: '.github/workflows/codeql.yml' }, policy), true);
+        assert.equal(eligible({ name: 'Dependency Review', path: '.github/workflows/dependency-review.yml' }, policy), true);
+        assert.equal(eligible({ name: 'Nightly', path: '.github/workflows/nightly.yml', workflow_id: 425 }, policy), true);
+        // A selected workflow stays selected on the event its operator chose it for.
+        assert.equal(eligible({ name: 'Full Test Suite', path: '.github/workflows/pr-test-on-label.yml', event: 'pull_request_target' }, policy), true);
+        // ...but never outside a pull request.
+        assert.equal(eligible({ name: 'Full Test Suite', path: '.github/workflows/pr-test-on-label.yml', event: 'push' }, policy), false);
     });
 
-    test('cancels exactly the allowlisted workflow of a pull request head', async () => {
+    test('never infers permission to cancel a workflow from its name', () => {
+        const policy = createValidationWorkflowPolicy(['pr-build-check.yml'], 'repository');
+        // A `Build`/`CI` workflow is free to deploy; only an operator knows.
+        assert.equal(eligible({ name: 'CI', path: '.github/workflows/ci.yml' }, policy), false);
+        assert.equal(eligible({ name: 'Build', path: '.github/workflows/build.yml' }, policy), false);
+        assert.equal(eligible({ name: 'Full Test Suite', path: '.github/workflows/pr-test-on-label.yml' }, policy), false);
+        assert.equal(eligible({ name: 'PR Preview', path: '.github/workflows/pr-preview.yml', event: 'pull_request_target' }, policy), false);
+        // Substrings are not identities: selecting one workflow selects exactly it.
+        assert.equal(eligible({ name: 'PR Build Check (matrix)', path: '.github/workflows/pr-build-check-matrix.yml' }, policy), false);
+    });
+
+    test('selects nothing at all while nothing was selected', () => {
+        assert.equal(eligible({ name: 'Build & Lint Check', path: '.github/workflows/pr-build-check.yml' }), false);
+        assert.equal(eligible({ name: 'Build & Lint Check', path: '.github/workflows/pr-build-check.yml' }, resolveValidationWorkflowPolicy([], {})), false);
+        assert.equal(resolveValidationWorkflowPolicy(undefined, {}).source, 'none');
+        assert.equal(resolveValidationWorkflowPolicy(['  ', ''], {}).selected.size, 0);
+    });
+
+    test('the repository selection wins over the documented environment fallback', () => {
+        const env = { [VALIDATION_WORKFLOW_ALLOWLIST_ENV]: 'pr-preview.yml' };
+        const repository = resolveValidationWorkflowPolicy(['pr-build-check.yml'], env);
+        assert.equal(repository.source, 'repository');
+        assert.equal(eligible({ name: 'Build & Lint Check', path: '.github/workflows/pr-build-check.yml' }, repository), true);
+        assert.equal(eligible({ name: 'PR Preview', path: '.github/workflows/pr-preview.yml' }, repository), false);
+
+        const fallback = resolveValidationWorkflowPolicy([], env);
+        assert.equal(fallback.source, 'environment');
+        assert.equal(eligible({ name: 'PR Preview', path: '.github/workflows/pr-preview.yml' }, fallback), true);
+        assert.equal(loadValidationWorkflowPolicyFromEnv({}).selected.size, 0);
+    });
+
+    test('an unselected CI workflow that deploys keeps running while the selected validation is cancelled', async () => {
+        const runs = [
+            // Named like validation, deploys in reality, and nobody selected it.
+            run({ id: 1, name: 'CI', path: '.github/workflows/ci.yml', status: 'queued' }),
+            run({ id: 2, name: 'Build', path: '.github/workflows/build-and-deploy.yml', status: 'queued' }),
+            run({ id: 3, name: 'PR Preview', path: '.github/workflows/pr-preview.yml', event: 'pull_request_target', status: 'queued' }),
+            run({ id: 4, name: 'Full Test Suite', path: '.github/workflows/pr-test-on-label.yml', status: 'queued' }),
+        ];
+        const github = createGitHub(runs);
+
+        const result = await beginFollowupCiSuspension({ target: TARGET, taskId: TASK_ID }, deps(github, {
+            loadSelectedWorkflows: async () => ['pr-test-on-label.yml'],
+        }));
+
+        assert.deepEqual(result.cancelledRunIds, [4], 'only the selected validation workflow was cancelled');
+        assert.deepEqual(github.cancelled(), [4]);
+        assert.deepEqual(await storedRunIds(), [4]);
+        assert.deepEqual(runs.filter(candidate => candidate.id !== 4).map(candidate => candidate.status), ['queued', 'queued', 'queued']);
+    });
+
+    test('cancels nothing and records nothing while the repository selected no workflows', async () => {
+        const github = createGitHub([run({ id: 1 })]);
+
+        const result = await beginFollowupCiSuspension({ target: TARGET, taskId: TASK_ID }, deps(github, {
+            loadSelectedWorkflows: async () => [],
+        }));
+
+        assert.equal(result.reason, 'no_workflows_selected');
+        assert.equal(result.suspended, false);
+        assert.deepEqual(github.calls, [], 'an empty selection never even asks GitHub for the runs');
+        assert.deepEqual(await records(), []);
+    });
+
+    test('falls back to the documented environment selection when the repository selected nothing', async () => {
         const runs = [
             run({ id: 1, name: 'Build & Lint Check', path: '.github/workflows/pr-build-check.yml', status: 'queued' }),
             run({ id: 2, name: 'PR Preview', path: '.github/workflows/pr-preview.yml', event: 'pull_request_target', status: 'queued' }),
         ];
         const github = createGitHub(runs);
-        const policy = loadValidationWorkflowPolicy({ [VALIDATION_WORKFLOW_ALLOWLIST_ENV]: 'pr-preview.yml' });
+        const policy = resolveValidationWorkflowPolicy([], { [VALIDATION_WORKFLOW_ALLOWLIST_ENV]: 'pr-preview.yml' });
 
         const result = await beginFollowupCiSuspension({ target: TARGET, taskId: TASK_ID }, deps(github, { workflowPolicy: policy }));
 
@@ -610,6 +705,157 @@ describe('concurrent owners of one pull request suspension', () => {
         assert.equal(current.head_sha, NEW_HEAD);
         assert.equal(current.state, 'active');
         assert.deepEqual(await storedRunIds(), [2]);
+    });
+});
+
+describe('coordinators in separate worker processes', () => {
+    const tick = () => new Promise<void>(resolve => { setTimeout(resolve, 10); });
+
+    test('a sweep and a release that share only the database never interleave, and nothing is cancelled after a restart', async () => {
+        const journal: Array<{ coordinator: string; route: string; runId?: number }> = [];
+        const runs = [run({ id: 1 })];
+        const setup = createGitHub(runs, { journal, coordinator: 'setup' });
+        await beginFollowupCiSuspension({ target: TARGET, taskId: TASK_ID }, deps(setup, { leaseHolder: 'worker-a' }));
+        // What worker A's reconciliation pass read before it started sweeping.
+        const [active] = await records();
+        runs.push(run({ id: 2, status: 'queued' }));
+
+        let reachedCancel!: () => void;
+        const sweepIsInsideItsCancel = new Promise<void>(resolve => { reachedCancel = resolve; });
+        let letSweepFinish!: () => void;
+        const sweepMayContinue = new Promise<void>(resolve => { letSweepFinish = resolve; });
+        let paused = false;
+        const workerA = createGitHub(runs, {
+            journal,
+            coordinator: 'worker-a',
+            onRequest: async route => {
+                if (paused || !route.endsWith('/cancel')) return;
+                paused = true;
+                reachedCancel();
+                await sweepMayContinue;
+            },
+        });
+        const workerB = createGitHub(runs, { journal, coordinator: 'worker-b' });
+
+        // Worker A is inside the cancel request for the late run when worker B's
+        // job finalizer starts releasing the very same pull request.
+        const sweep = sweepFollowupCiSuspension(active, deps(workerA, { leaseHolder: 'worker-a' }));
+        await sweepIsInsideItsCancel;
+        const release = releaseFollowupCiSuspensionsForTask({ taskId: TASK_ID }, deps(workerB, { leaseHolder: 'worker-b' }));
+
+        // Nothing but the database is shared, and it is what holds worker B back.
+        await tick();
+        assert.deepEqual(workerB.calls, [], 'worker B does not touch GitHub while worker A holds the lease');
+        const lease = await database(PR_CI_SUSPENSION_LEASES_TABLE).first();
+        assert.equal(lease.holder, 'worker-a');
+        assert.equal(lease.lease_key, 'integry/propr#2485');
+
+        letSweepFinish();
+        const [swept, released] = await Promise.all([sweep, release]);
+
+        assert.equal(swept.reason, 'swept');
+        assert.deepEqual(swept.cancelledRunIds, [2]);
+        assert.equal(released[0].reason, 'restarted');
+        assert.deepEqual(released[0].restartedRunIds.sort((a, b) => a - b), [1, 2], 'everything the sweep cancelled was restarted');
+
+        // Worker A's reconciliation arrives once more with the state it read before
+        // any of this: it must not cancel the validation worker B just restarted.
+        const late = createGitHub(runs, { journal, coordinator: 'worker-a-late' });
+        const lateSweep = await sweepFollowupCiSuspension(active, deps(late, { leaseHolder: 'worker-a' }));
+
+        assert.equal(lateSweep.reason, 'superseded');
+        assert.deepEqual(late.cancelled(), []);
+        const lastCancel = journal.map(entry => entry.route).lastIndexOf('POST /repos/{owner}/{repo}/actions/runs/{run_id}/cancel');
+        const firstRerun = journal.map(entry => entry.route).indexOf('POST /repos/{owner}/{repo}/actions/runs/{run_id}/rerun');
+        assert.ok(firstRerun > 0 && lastCancel < firstRerun, 'no run was cancelled after a restart had started');
+        assert.deepEqual(await records(), []);
+        assert.deepEqual(await database(PR_CI_SUSPENSION_LEASES_TABLE).select('*'), [], 'every holder released its lease');
+    });
+
+    test('leaves a pull request alone while another worker holds its lease', async () => {
+        const runs = [run({ id: 1 })];
+        const github = createGitHub(runs);
+        await beginFollowupCiSuspension({ target: TARGET, taskId: TASK_ID }, deps(github));
+        const [active] = await records();
+        runs.push(run({ id: 2, status: 'queued' }));
+
+        // Another worker is in the middle of its own pass over this pull request.
+        await database(PR_CI_SUSPENSION_LEASES_TABLE).insert({
+            lease_key: 'integry/propr#2485', token: 'other-worker', holder: 'worker-b',
+            acquired_at: Date.now(), expires_at: Date.now() + 60_000,
+        });
+
+        const busyDeps = deps(github, { leaseAcquireTimeoutMs: 0 });
+        const swept = await sweepFollowupCiSuspension(active, busyDeps);
+        const restored = await restoreFollowupCiSuspension(active, busyDeps);
+        const begun = await beginFollowupCiSuspension({ target: TARGET, taskId: TASK_ID }, busyDeps);
+
+        assert.equal(swept.reason, 'busy');
+        assert.equal(restored.reason, 'busy');
+        assert.deepEqual(restored.pendingRunIds, [1], 'the obligation stays with the record for the next pass');
+        assert.equal(begun.reason, 'busy');
+        assert.deepEqual(github.cancelled(), [1], 'only the original suspension cancelled anything');
+        assert.deepEqual(github.rerun(), []);
+        // The other worker's lease is untouched, and the record is still there.
+        const [lease] = await database(PR_CI_SUSPENSION_LEASES_TABLE).select('*');
+        assert.equal(lease.token, 'other-worker');
+        assert.equal((await records()).length, 1);
+    });
+
+    test('a restore that loses its lease while waiting stops instead of restarting anything else', async () => {
+        const runs = [run({ id: 1 }), run({ id: 2, status: 'queued' })];
+        const github = createGitHub(runs, { asyncCancellation: true });
+        await beginFollowupCiSuspension({ target: TARGET, taskId: TASK_ID }, deps(github));
+        // The first cancellation finished; the second run is still finishing, so
+        // the restore has to wait for it.
+        runs[0].status = 'completed';
+        runs[0].conclusion = 'cancelled';
+        const [record] = await records();
+
+        const result = await restoreFollowupCiSuspension(record, deps(github, {
+            restoreBudgetMs: 60_000,
+            // While this restore waits, its lease expires and another worker takes it.
+            sleep: async () => {
+                await database(PR_CI_SUSPENSION_LEASES_TABLE)
+                    .update({ token: 'other-worker', holder: 'worker-b', expires_at: Date.now() + 60_000 });
+            },
+        }));
+
+        assert.equal(result.reason, 'busy');
+        assert.deepEqual(github.rerun(), [1], 'nothing was restarted after the lease was gone');
+        assert.equal((await records()).length, 1, 'the obligation waits for whoever holds the lease now');
+        const [lease] = await database(PR_CI_SUSPENSION_LEASES_TABLE).select('*');
+        assert.equal(lease.token, 'other-worker', 'a lost lease is never released by its previous holder');
+    });
+
+    test('leaves CI untouched and the implementation running when the lease cannot be taken at all', async () => {
+        const github = createGitHub([run({ id: 1 })]);
+
+        // Every query fails, the way a database outage looks.
+        const unavailableDatabase = () => { throw new Error('database is down'); };
+        const result = await beginFollowupCiSuspension({ target: TARGET, taskId: TASK_ID },
+            deps(github, { database: unavailableDatabase as never, leaseAcquireTimeoutMs: 0 }));
+
+        assert.equal(result.suspended, false);
+        assert.equal(result.reason, 'error');
+        assert.deepEqual(github.cancelled(), []);
+        assert.deepEqual(await records(), []);
+    });
+
+    test('takes over the lease of a worker that died holding it', async () => {
+        const runs = [run({ id: 1 })];
+        const github = createGitHub(runs);
+        await beginFollowupCiSuspension({ target: TARGET, taskId: TASK_ID }, deps(github));
+        await database(PR_CI_SUSPENSION_LEASES_TABLE).insert({
+            lease_key: 'integry/propr#2485', token: 'dead-worker', holder: 'worker-b',
+            acquired_at: Date.now() - 600_000, expires_at: Date.now() - 300_000,
+        });
+
+        const [result] = await releaseFollowupCiSuspensionsForTask({ taskId: TASK_ID }, deps(github, { leaseAcquireTimeoutMs: 0 }));
+
+        assert.equal(result.reason, 'restarted');
+        assert.deepEqual(github.rerun(), [1]);
+        assert.deepEqual(await database(PR_CI_SUSPENSION_LEASES_TABLE).select('*'), []);
     });
 });
 

@@ -1,6 +1,6 @@
 import { useDemoMode } from '../contexts/DemoModeContext';
 import { Link } from 'react-router-dom';
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { RefreshCw, Square, Trash2 } from 'lucide-react';
 import type { MonitoredRepo, RepositoryIndexingStatus } from '../api/proprApi';
 import { RepositoryVisualPreviewControl, type RepositoryVisualPreviewSettings } from './RepositoryVisualPreviewControl';
@@ -38,32 +38,86 @@ const AutoCiFollowupControl: React.FC<{
   );
 };
 
+/** Splits what an operator typed into exact workflow identities; order and spelling are theirs, duplicates are not. */
+const parseWorkflowInput = (value: string): string[] => {
+  const selection: string[] = [];
+  for (const entry of value.split(/[,\n]/)) {
+    const workflow = entry.trim();
+    if (workflow && !selection.some(existing => existing.toLowerCase() === workflow.toLowerCase())) selection.push(workflow);
+  }
+  return selection;
+};
+
 const CancelCiDuringFollowupControl: React.FC<{
   repo: MonitoredRepo;
   onToggle: (repoId: string) => void;
+  onUpdateWorkflows: (repoId: string, workflows: string[]) => void;
   isReadOnly: boolean;
-}> = ({ repo, onToggle, isReadOnly }) => {
+}> = ({ repo, onToggle, onUpdateWorkflows, isReadOnly }) => {
+  const selected = repo.cancelCiDuringFollowupWorkflows ?? [];
+  // Compared by value, never by array identity: a poll that re-renders this bar
+  // must not wipe what the operator is halfway through typing.
+  const storedSelection = selected.join(', ');
+  const [workflows, setWorkflows] = useState(storedSelection);
+
+  useEffect(() => setWorkflows(storedSelection), [repo.id, storedSelection]);
+
   if (isReadOnly) return null;
 
+  const enabled = repo.cancelCiDuringFollowup === true;
+  const commitWorkflows = () => {
+    const next = parseWorkflowInput(workflows);
+    if (next.join('\u0000').toLowerCase() !== selected.join('\u0000').toLowerCase()) onUpdateWorkflows(repo.id, next);
+  };
+
   return (
-    <label
-      className="flex items-center justify-between gap-4 py-2 text-xs text-slate-600 cursor-pointer"
-      title="Cancel CI while follow-up implementation is in progress"
-      onClick={(e) => e.stopPropagation()}
-    >
-      <span className="min-w-0">
-        <span className="block">Cancel CI while follow-up implementation is in progress</span>
-        <span className="mt-1 block text-slate-500">Stops the validation workflows already running on the commit ProPR is about to replace; preview and deployment workflows keep running. Checks start again on the new commit, or resume on the current one if no commit is produced.</span>
-      </span>
-      <input
-        type="checkbox"
-        checked={repo.cancelCiDuringFollowup === true}
-        onChange={() => onToggle(repo.id)}
-        className="sr-only peer"
-        aria-label={`Cancel CI during follow-up implementation for ${repo.name}`}
-      />
-      <span className={toggleClassName} />
-    </label>
+    <div className="w-full min-w-0 text-xs text-slate-600" onClick={(event) => event.stopPropagation()}>
+      <label
+        className="flex items-center justify-between gap-4 py-2 cursor-pointer"
+        title="Cancel CI while follow-up implementation is in progress"
+      >
+        <span className="min-w-0">
+          <span className="block">Cancel CI while follow-up implementation is in progress</span>
+          <span className="mt-1 block text-slate-500">Only the validation workflows you select below are cancelled on the commit ProPR is about to replace. Every other workflow, deployments and previews included, keeps running. Checks start again on the new commit, or resume on the current one if no commit is produced.</span>
+        </span>
+        <input
+          type="checkbox"
+          checked={enabled}
+          onChange={() => onToggle(repo.id)}
+          className="sr-only peer"
+          aria-label={`Cancel CI during follow-up implementation for ${repo.name}`}
+        />
+        <span className={toggleClassName} />
+      </label>
+
+      {enabled && (
+        <div className="ml-4 mt-1 mb-2 flex min-w-0 flex-col items-stretch gap-1 border-l-2 border-slate-200 pl-4">
+          <label className="block w-full min-w-0">
+            <span className="mb-1 block">Validation workflows to cancel</span>
+            <input
+              type="text"
+              value={workflows}
+              onChange={(event) => setWorkflows(event.target.value)}
+              onBlur={commitWorkflows}
+              onKeyDown={(event) => { if (event.key === 'Enter') event.currentTarget.blur(); }}
+              maxLength={4000}
+              aria-label={`Validation workflows to cancel for ${repo.name}`}
+              className="min-w-0 w-full rounded border border-slate-200 bg-white px-2 py-1.5 text-xs text-slate-700 placeholder:text-slate-400 focus:border-teal-400 focus:outline-none focus:ring-1 focus:ring-teal-400"
+              placeholder="pr-build-check.yml, Full Test Suite"
+            />
+          </label>
+          {selected.length === 0 ? (
+            <p role="status" className="text-amber-700">
+              No workflows selected, so nothing is cancelled. Add each validation workflow by its file name, its path or the name shown on the pull request — for example <code>pr-build-check.yml</code>.
+            </p>
+          ) : (
+            <p role="status" className="text-slate-500">
+              Cancels exactly {selected.length === 1 ? 'this workflow' : `these ${selected.length} workflows`}: {selected.join(', ')}. A workflow that is not listed is never cancelled, whatever it is called.
+            </p>
+          )}
+        </div>
+      )}
+    </div>
   );
 };
 
@@ -78,6 +132,7 @@ interface RepositorySettingsBarProps {
   onToggleHidden: (repoId: string) => void;
   onToggleAutoCiFollowup: (repoId: string) => void;
   onToggleCancelCiDuringFollowup: (repoId: string) => void;
+  onUpdateCancelCiWorkflows: (repoId: string, workflows: string[]) => void;
   onToggleNotifications: (repoId: string) => void;
   onUpdateVisualPreview: (repoId: string, settings: RepositoryVisualPreviewSettings) => void;
   isReadOnly: boolean;
@@ -85,7 +140,8 @@ interface RepositorySettingsBarProps {
 
 export const RepositorySettingsBar: React.FC<RepositorySettingsBarProps> = ({
   repo, indexingStatus, onToggle, onRemove, onStopIndexing, onReindex,
-  onToggleStar, onToggleHidden, onToggleAutoCiFollowup, onToggleCancelCiDuringFollowup, onToggleNotifications, onUpdateVisualPreview, isReadOnly,
+  onToggleStar, onToggleHidden, onToggleAutoCiFollowup, onToggleCancelCiDuringFollowup, onUpdateCancelCiWorkflows,
+  onToggleNotifications, onUpdateVisualPreview, isReadOnly,
 }) => {
   const { isDemoMode } = useDemoMode();
   const [isDeleteDialogOpen, setIsDeleteDialogOpen] = useState(false);
@@ -149,7 +205,13 @@ export const RepositorySettingsBar: React.FC<RepositorySettingsBarProps> = ({
             <h3 className="mb-2 text-[10px] uppercase font-bold tracking-widest text-slate-500">Automation</h3>
             <div className="flex flex-col">
               <AutoCiFollowupControl repo={repo} onToggle={onToggleAutoCiFollowup} isReadOnly={isReadOnly} />
-              <CancelCiDuringFollowupControl repo={repo} onToggle={onToggleCancelCiDuringFollowup} isReadOnly={isReadOnly} />
+              <CancelCiDuringFollowupControl
+                key={repo.id}
+                repo={repo}
+                onToggle={onToggleCancelCiDuringFollowup}
+                onUpdateWorkflows={onUpdateCancelCiWorkflows}
+                isReadOnly={isReadOnly}
+              />
               <RepositoryVisualPreviewControl key={repo.id} repo={repo} onUpdate={onUpdateVisualPreview} isReadOnly={isReadOnly} />
             </div>
           </div>

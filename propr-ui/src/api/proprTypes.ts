@@ -124,6 +124,8 @@ export interface MonitoredRepo {
   autoFollowupOnFailedCi?: boolean;
   /** Whether obsolete PR checks are cancelled while a follow-up implements. Missing legacy values are off. */
   cancelCiDuringFollowup?: boolean;
+  /** Exactly which validation workflows that option may cancel: file names, paths, display names or IDs. Empty cancels nothing. */
+  cancelCiDuringFollowupWorkflows?: string[];
   /** Whether Inbox and push notifications are generated for this repository. Missing values are on. */
   notificationsEnabled?: boolean;
   /** Generated media to embed in PRs when a change has a visible result. */

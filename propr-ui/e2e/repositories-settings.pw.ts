@@ -70,25 +70,46 @@ async function stubRepositoryApis(page: Page, canManage = true, initialRepos?: M
   return { writes, indexingWrites, chatLoads: () => chatLoads };
 }
 
-test('shows and updates the follow-up CI cancellation option for every branch entry', async ({ page }) => {
+test('shows and updates the follow-up CI cancellation option and its workflow selection', async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
   const api = await stubRepositoryApis(page, true, [
-    { id: 'propr-main', name: 'integry/propr', baseBranch: 'main', enabled: true, cancelCiDuringFollowup: true, visualPreview: { enabled: false, types: ['image'] } },
+    {
+      id: 'propr-main', name: 'integry/propr', baseBranch: 'main', enabled: true,
+      cancelCiDuringFollowup: true, cancelCiDuringFollowupWorkflows: ['pr-build-check.yml'],
+      visualPreview: { enabled: false, types: ['image'] }
+    },
     { id: 'propr-release', name: 'integry/propr', baseBranch: 'release', enabled: true, visualPreview: { enabled: false, types: ['image'] } },
   ]);
   await page.goto('/repositories');
   await page.getByRole('button', { name: 'Select integry/propr', exact: true }).nth(1).click();
   const settings = page.getByRole('region', { name: 'Settings for integry/propr', exact: true });
   const cancelCi = settings.getByRole('checkbox', { name: 'Cancel CI during follow-up implementation for integry/propr', exact: true });
+  const workflows = settings.getByRole('textbox', { name: 'Validation workflows to cancel for integry/propr', exact: true });
   await expect(cancelCi).toBeChecked();
-  await expect(settings.getByText(/Checks start again on the new commit, or resume on the current one if no commit is produced\./)).toBeVisible();
+  await expect(workflows).toHaveValue('pr-build-check.yml');
+  await expect(settings.getByText(/Cancels exactly this workflow: pr-build-check\.yml\./)).toBeVisible();
   if (process.env.PROPR_CAPTURE_PREVIEWS) {
     await mkdir('../.propr/previews', { recursive: true });
-    await page.screenshot({ animations: 'disabled', path: '../.propr/previews/repository-cancel-ci-during-followup.png' });
+    await page.screenshot({ animations: 'disabled', path: '../.propr/previews/repository-cancel-ci-workflow-selection.png' });
+  }
+
+  // The selection is stored for every branch entry of the repository.
+  await workflows.fill('pr-build-check.yml, .github/workflows/pr-test-on-label.yml');
+  await workflows.blur();
+  await expect.poll(() => api.writes.at(-1)?.map(repo => repo.cancelCiDuringFollowupWorkflows))
+    .toEqual([['pr-build-check.yml', '.github/workflows/pr-test-on-label.yml'], ['pr-build-check.yml', '.github/workflows/pr-test-on-label.yml']]);
+
+  // Clearing it says so, and says what to do about it.
+  await workflows.fill('');
+  await workflows.blur();
+  await expect(settings.getByText(/No workflows selected, so nothing is cancelled\./)).toBeVisible();
+  if (process.env.PROPR_CAPTURE_PREVIEWS) {
+    await page.screenshot({ animations: 'disabled', path: '../.propr/previews/repository-cancel-ci-empty-selection.png' });
   }
 
   await settings.getByText('Cancel CI while follow-up implementation is in progress', { exact: true }).click();
   await expect(cancelCi).not.toBeChecked();
+  await expect(workflows).toBeHidden();
   await expect.poll(() => api.writes.at(-1)?.map(repo => repo.cancelCiDuringFollowup)).toEqual([false, false]);
 });
 

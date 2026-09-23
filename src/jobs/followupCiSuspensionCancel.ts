@@ -10,14 +10,16 @@ import {
     type SuspensionTarget,
 } from './followupCiSuspensionRuns.js';
 import { resolveLog, resolveOctokit, resolvePolicy, type CiSuspensionDeps } from './followupCiSuspensionContext.js';
+import { SuspensionLeaseUnavailableError, withSuspensionLease } from './followupCiSuspensionLease.js';
 import {
     deleteSuspension, repositoryKey, reserveSuspension, saveCancelledRuns, splitRepository, suspensionKey, targetOf,
-    withSuspensionLock, type CancelledRun, type CiSuspensionRecord,
+    type CancelledRun, type CiSuspensionRecord,
 } from './followupCiSuspensionStore.js';
 
 export interface BeginSuspensionResult {
     suspended: boolean;
-    reason: 'suspended' | 'disabled' | 'no_destination' | 'head_unavailable' | 'permission_denied' | 'superseded' | 'error';
+    reason: 'suspended' | 'disabled' | 'no_workflows_selected' | 'no_destination' | 'head_unavailable'
+        | 'permission_denied' | 'superseded' | 'busy' | 'error';
     cancelledRunIds: number[];
 }
 
@@ -29,10 +31,22 @@ export interface CancellationState {
     cancelledRunIds: number[];
     /** Set when a newer owner took the row over; this pass must stop touching CI it no longer owns. */
     ownershipLost: boolean;
+    /**
+     * Runs a previous invocation recorded and nobody has resolved yet. Their
+     * cancel requests may well have landed, so no outcome of *this* invocation
+     * can prove they need no restart.
+     */
+    inheritedObligations: number[];
 }
 
 export function cancellationState(record: CiSuspensionRecord, runs: CancelledRun[]): CancellationState {
-    return { record, runs, cancelledRunIds: [], ownershipLost: false };
+    return {
+        record,
+        runs,
+        cancelledRunIds: [],
+        ownershipLost: false,
+        inheritedObligations: runs.filter(run => run.restarted !== true).map(run => run.id),
+    };
 }
 
 /**
@@ -66,22 +80,24 @@ export async function cancelPendingRuns(state: CancellationState, deps: CiSuspen
     const { record, runs } = state;
     const octokit = await resolveOctokit(deps);
     const headSha = record.head_sha;
-    const policy = resolvePolicy(deps);
     const target = targetOf(record);
+    const policy = await resolvePolicy(deps, target);
+    if (policy.selected.size === 0) return;
     for (const run of await listRunsForSha(octokit, target, headSha)) {
         if (!isCancelableValidationRun(run, { pullRequestNumber: target.pullRequestNumber, headSha, policy })) continue;
         const known = runs.find(entry => entry.id === run.id);
         if (known) {
-            // A run recorded as restored that is pending again is being cancelled anew.
-            if (known.restarted !== false) {
-                known.restarted = false;
-                known.attempt = run.run_attempt ?? known.attempt;
-                if (!await persistIntent(state, deps)) return;
-            }
+            // Known and pending again — restarted or never cancelled — so this is a
+            // fresh obligation on the current attempt either way.
+            known.restarted = false;
+            known.attempt = run.run_attempt ?? known.attempt;
         } else {
             runs.push({ id: run.id, name: run.name ?? undefined, workflowId: run.workflow_id, attempt: run.run_attempt, restarted: false });
-            if (!await persistIntent(state, deps)) return;
         }
+        // Written before every single cancel request, including for a run that is
+        // already known: the write is also the ownership check that proves this
+        // pass still owns the suspension at the moment it acts on GitHub.
+        if (!await persistIntent(state, deps)) return;
         if (await cancelRun(octokit, target, run.id)) state.cancelledRunIds.push(run.id);
     }
 }
@@ -109,8 +125,23 @@ export async function beginFollowupCiSuspension(
     deps: CiSuspensionDeps = {},
 ): Promise<BeginSuspensionResult> {
     const { target } = params;
-    const key = suspensionKey({ repository: repositoryKey(target.owner, target.repo), pull_request: target.pullRequestNumber });
-    return withSuspensionLock(key, () => beginSuspension(params, deps));
+    const repository = repositoryKey(target.owner, target.repo);
+    const key = suspensionKey({ repository, pull_request: target.pullRequestNumber });
+    try {
+        return await withSuspensionLease(deps, key, () => beginSuspension(params, deps));
+    } catch (error) {
+        // Only the lease itself can fail out here; beginSuspension handles its own
+        // failures. Another worker sweeping, restoring or releasing this pull
+        // request right now — or a lease that cannot be taken at all — leaves CI
+        // untouched, because cancelling next to that worker could cancel what it
+        // is bringing back. The implementation keeps running either way.
+        const busy = error instanceof SuspensionLeaseUnavailableError;
+        resolveLog(deps).warn({ repository, pullRequest: target.pullRequestNumber, taskId: params.taskId, error: (error as Error).message },
+            busy
+                ? 'Skipping follow-up CI suspension: another worker holds this pull request suspension'
+                : 'Skipping follow-up CI suspension: its lease could not be taken. Implementation continues with CI untouched');
+        return { suspended: false, reason: busy ? 'busy' : 'error', cancelledRunIds: [] };
+    }
 }
 
 async function beginSuspension(
@@ -126,6 +157,13 @@ async function beginSuspension(
         if (!await isEnabled(target.owner, target.repo)) {
             return { suspended: false, reason: 'disabled', cancelledRunIds: [] };
         }
+        const policy = await resolvePolicy(deps, target);
+        if (policy.selected.size === 0) {
+            log.info({ repository, pullRequest: target.pullRequestNumber, taskId },
+                'Skipping follow-up CI cancellation: no validation workflows are selected for this repository. '
+                + 'Select the workflows to cancel next to the repository option, or set CANCEL_CI_FOLLOWUP_WORKFLOWS');
+            return { suspended: false, reason: 'no_workflows_selected', cancelledRunIds: [] };
+        }
         const octokit = await resolveOctokit(deps);
         const live = await getPullRequestHead(octokit, target);
         if (!live?.open) {
@@ -135,22 +173,21 @@ async function beginSuspension(
         const headSha = live.sha;
         const reserved = await reserveSuspension({ target, headSha, taskId, correlationId }, deps);
         state = cancellationState(reserved.record, reserved.runs);
-        await cancelPendingRuns(state, { ...deps, octokit });
+        await cancelPendingRuns(state, { ...deps, octokit, workflowPolicy: policy });
         if (state.ownershipLost) return { suspended: false, reason: 'superseded', cancelledRunIds: state.cancelledRunIds };
         log.info({ repository, pullRequest: target.pullRequestNumber, headSha, taskId, cancelledRunIds: state.cancelledRunIds },
             'Suspended pull request validation for the duration of the follow-up implementation');
         return { suspended: true, reason: 'suspended', cancelledRunIds: state.cancelledRunIds };
     } catch (error) {
         const permission = error instanceof CiActionsPermissionError;
-        // Every run whose cancellation may have landed has to be restored, so the
-        // record stays and reconciliation takes it over. A refused request is the one
-        // failure that proves nothing was cancelled: an Actions API this installation
-        // cannot use must not leave an obligation behind to retry forever.
-        const nothingCancelled = state && state.cancelledRunIds.length === 0 && (permission || state.runs.length === 0);
-        if (state && nothingCancelled && !state.ownershipLost) {
+        if (state && leavesNothingToRestore(state, permission)) {
             await deleteSuspension(deps, state.record).catch(() => undefined);
         }
-        const details = { repository, pullRequest: target.pullRequestNumber, taskId, error: (error as Error).message, pendingRestore: state?.runs.length ?? 0 };
+        const details = {
+            repository, pullRequest: target.pullRequestNumber, taskId, error: (error as Error).message,
+            pendingRestore: state?.runs.filter(run => run.restarted !== true).length ?? 0,
+            inheritedRestore: state?.inheritedObligations.length ?? 0,
+        };
         if (permission) {
             log.error(details, 'Cannot cancel pull request validation: the GitHub App needs Actions "Read and write" access. Implementation continues with CI untouched');
         } else {
@@ -158,6 +195,21 @@ async function beginSuspension(
         }
         return { suspended: false, reason: permission ? 'permission_denied' : 'error', cancelledRunIds: [] };
     }
+}
+
+/**
+ * Whether a failed start can drop its reservation instead of leaving an
+ * obligation behind. Every run whose cancellation may have landed has to be
+ * restored, so the record normally stays and reconciliation takes it over. A
+ * refused request is the one failure that proves *this* invocation cancelled
+ * nothing: an Actions API this installation cannot use must not leave an
+ * obligation to retry forever. It proves nothing about the requests a previous
+ * invocation already sent, so an inherited obligation always survives it.
+ */
+function leavesNothingToRestore(state: CancellationState, permission: boolean): boolean {
+    if (state.ownershipLost || state.cancelledRunIds.length > 0) return false;
+    if (state.inheritedObligations.length > 0) return false;
+    return permission || state.runs.length === 0;
 }
 
 /** Resolves the destination and suspends its validation; used by the implementation path. */

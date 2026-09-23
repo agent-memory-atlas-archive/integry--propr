@@ -9,9 +9,10 @@ import { sameSha, type SuspensionTarget } from './followupCiSuspensionRuns.js';
  *
  * Every write carries the generation it was read at and the task that owns it,
  * so a slow operation working from a stale read can neither overwrite nor
- * delete the state of a newer owner: its update simply matches no row. Within
- * one worker the operations of a single pull request are additionally
- * serialized by {@link withSuspensionLock}.
+ * delete the state of a newer owner: its update simply matches no row. Across
+ * workers the operations of a single pull request are additionally serialized
+ * by the shared lease in `followupCiSuspensionLease.ts`, which is what keeps
+ * their external cancel and rerun requests from interleaving.
  */
 
 export const PR_CI_SUSPENSIONS_TABLE = 'pr_ci_suspensions';
@@ -71,28 +72,6 @@ export function targetOf(record: CiSuspensionRecord): SuspensionTarget {
 
 export function suspensionKey(record: Pick<CiSuspensionRecord, 'repository' | 'pull_request'>): string {
     return `${record.repository}#${record.pull_request}`;
-}
-
-/**
- * Serializes begin, sweep, restore and release of one pull request inside this
- * worker, so the job finalizer and the periodic recovery pass never interleave:
- * without it a sweep can re-cancel a run a restore is bringing back. Operations
- * of different pull requests never wait for each other.
- */
-const suspensionChains = new Map<string, Promise<unknown>>();
-
-export async function withSuspensionLock<T>(key: string, operation: () => Promise<T>): Promise<T> {
-    const previous = suspensionChains.get(key) ?? Promise.resolve();
-    const current = previous.then(operation, operation);
-    const settled = current.then(() => undefined, () => undefined);
-    suspensionChains.set(key, settled);
-    try {
-        return await current;
-    } finally {
-        // The chain entry only exists to make the next caller wait; once this
-        // operation finished and nobody queued behind it, it can go.
-        if (suspensionChains.get(key) === settled) suspensionChains.delete(key);
-    }
 }
 
 export function parseCancelledRuns(record: Pick<CiSuspensionRecord, 'cancelled_runs'>): CancelledRun[] {

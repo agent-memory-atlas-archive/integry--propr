@@ -13,6 +13,7 @@ const repo: MonitoredRepo = {
 
 function renderBar(overrides: Partial<MonitoredRepo> = {}, isReadOnly = false) {
   const onToggleCancelCiDuringFollowup = vi.fn();
+  const onUpdateCancelCiWorkflows = vi.fn();
   render(
     <MemoryRouter>
       <RepositorySettingsBar
@@ -26,16 +27,18 @@ function renderBar(overrides: Partial<MonitoredRepo> = {}, isReadOnly = false) {
         onToggleHidden={vi.fn()}
         onToggleAutoCiFollowup={vi.fn()}
         onToggleCancelCiDuringFollowup={onToggleCancelCiDuringFollowup}
+        onUpdateCancelCiWorkflows={onUpdateCancelCiWorkflows}
         onToggleNotifications={vi.fn()}
         onUpdateVisualPreview={vi.fn()}
         isReadOnly={isReadOnly}
       />
     </MemoryRouter>
   );
-  return { onToggleCancelCiDuringFollowup };
+  return { onToggleCancelCiDuringFollowup, onUpdateCancelCiWorkflows };
 }
 
 const controlName = 'Cancel CI during follow-up implementation for integry/propr';
+const workflowsName = 'Validation workflows to cancel for integry/propr';
 
 describe('RepositorySettingsBar follow-up CI cancellation', () => {
   it('renders the option off by default with helper text about restarting checks', () => {
@@ -44,7 +47,46 @@ describe('RepositorySettingsBar follow-up CI cancellation', () => {
     const toggle = screen.getByRole('checkbox', { name: controlName });
     expect(toggle).not.toBeChecked();
     expect(screen.getByText('Cancel CI while follow-up implementation is in progress')).toBeInTheDocument();
+    expect(screen.getByText(/Only the validation workflows you select below are cancelled/)).toBeInTheDocument();
     expect(screen.getByText(/Checks start again on the new commit, or resume on the current one if no commit is produced\./)).toBeInTheDocument();
+    // The selection belongs to the enabled option; nothing to select while it is off.
+    expect(screen.queryByRole('textbox', { name: workflowsName })).not.toBeInTheDocument();
+  });
+
+  it('asks for a selection with an actionable message while the enabled option selects nothing', () => {
+    renderBar({ cancelCiDuringFollowup: true });
+
+    expect(screen.getByRole('textbox', { name: workflowsName })).toHaveValue('');
+    expect(screen.getByText(/No workflows selected, so nothing is cancelled\./)).toBeInTheDocument();
+    expect(screen.getByText(/pr-build-check\.yml/)).toBeInTheDocument();
+  });
+
+  it('shows the selected workflows and reports an edited selection as exact identities', () => {
+    const { onUpdateCancelCiWorkflows } = renderBar({
+      cancelCiDuringFollowup: true,
+      cancelCiDuringFollowupWorkflows: ['pr-build-check.yml', 'Full Test Suite']
+    });
+
+    const input = screen.getByRole('textbox', { name: workflowsName });
+    expect(input).toHaveValue('pr-build-check.yml, Full Test Suite');
+    expect(screen.getByText(/Cancels exactly these 2 workflows: pr-build-check\.yml, Full Test Suite\./)).toBeInTheDocument();
+    expect(screen.getByText(/A workflow that is not listed is never cancelled/)).toBeInTheDocument();
+
+    fireEvent.change(input, { target: { value: ' pr-build-check.yml , .github/workflows/pr-test-on-label.yml, PR-BUILD-CHECK.YML ' } });
+    fireEvent.blur(input);
+    expect(onUpdateCancelCiWorkflows).toHaveBeenCalledWith('repo-1', ['pr-build-check.yml', '.github/workflows/pr-test-on-label.yml']);
+  });
+
+  it('does not report a selection that did not change', () => {
+    const { onUpdateCancelCiWorkflows } = renderBar({
+      cancelCiDuringFollowup: true,
+      cancelCiDuringFollowupWorkflows: ['pr-build-check.yml']
+    });
+
+    const input = screen.getByRole('textbox', { name: workflowsName });
+    fireEvent.change(input, { target: { value: 'pr-build-check.yml ' } });
+    fireEvent.blur(input);
+    expect(onUpdateCancelCiWorkflows).not.toHaveBeenCalled();
   });
 
   it('reflects the stored value and reports a toggle', () => {
@@ -58,8 +100,9 @@ describe('RepositorySettingsBar follow-up CI cancellation', () => {
   });
 
   it('hides the option for viewers who cannot manage repositories', () => {
-    renderBar({}, true);
+    renderBar({ cancelCiDuringFollowup: true, cancelCiDuringFollowupWorkflows: ['pr-build-check.yml'] }, true);
 
     expect(screen.queryByRole('checkbox', { name: controlName })).not.toBeInTheDocument();
+    expect(screen.queryByRole('textbox', { name: workflowsName })).not.toBeInTheDocument();
   });
 });

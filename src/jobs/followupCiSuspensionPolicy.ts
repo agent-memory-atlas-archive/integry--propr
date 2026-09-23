@@ -2,52 +2,56 @@
  * Decides which workflows may have their runs cancelled while a follow-up
  * implementation replaces a pull request head.
  *
- * A trigger event is not a workflow classification: preview, deployment and
+ * Eligibility is never inferred. A trigger event is not a workflow
+ * classification and neither is a workflow's name: preview, deployment and
  * publication workflows use `pull_request` and `pull_request_target` like
- * validation workflows do, and cancelling one of those can tear down an
- * environment instead of freeing a runner. Eligibility is therefore an explicit
- * policy: either the exact workflows an operator listed, or — with nothing
- * configured — only `pull_request` workflows whose name or file identifies them
- * as validation and never as publication.
+ * validation workflows do, and a workflow called `Build` or `CI` is free to
+ * deploy. Cancelling one of those tears down an environment instead of freeing
+ * a runner. Only the exact workflows an operator selected are eligible; with
+ * nothing selected nothing is ever cancelled.
  */
 
-/** Both pull request events exist; only an explicit allowlist can qualify `pull_request_target`. */
+/** Both pull request events qualify once a workflow was selected; nothing else does, whatever it is called. */
 const PULL_REQUEST_EVENTS: ReadonlySet<string> = new Set(['pull_request', 'pull_request_target']);
-/**
- * `pull_request_target` runs against the base branch with repository secrets,
- * which is how preview and deployment automation is written (this repository's
- * own "PR Preview" is one), so the default policy never qualifies it.
- */
-const DEFAULT_EVENTS: ReadonlySet<string> = new Set(['pull_request']);
 
-/** A workflow that states it validates the revision: these are the runs a replacement commit makes obsolete. */
-const VALIDATION_WORKFLOW_PATTERN = /(^|[^a-z])(ci|checks?|tests?|testing|lint|linting|build|builds|compile|validate|validation|verify|verification|typecheck|types|unit|e2e|integration|compat|compatibility|coverage|guard|guards|review|audit|scan|scanning|analysis|analyze|analyse|codeql|quality|format|formatting|spell|security)([^a-z]|$)/;
-/** A workflow that publishes something. Cancelling one can leave an environment half-updated, so it is never eligible by default. */
-const PUBLICATION_WORKFLOW_PATTERN = /(^|[^a-z])(deploy|deploys|deployment|deployments|preview|previews|publish|publishes|publishing|release-please|provision|promote|promotion|rollout|staging|production|pages|announce|upload|uploads|npm|dockerhub)([^a-z]|$)/;
-
-/** Operator-listed workflows, by display name, workflow file path or file name. */
+/** Operator-selected workflows, as a documented fallback for repositories configured outside the UI. */
 export const VALIDATION_WORKFLOW_ALLOWLIST_ENV = 'CANCEL_CI_FOLLOWUP_WORKFLOWS';
 
+/** Where a selection came from, so logs and the UI can say what to change. */
+export type ValidationWorkflowPolicySource = 'repository' | 'environment' | 'none';
+
 export interface ValidationWorkflowPolicy {
-    /** Explicitly eligible workflow identities; empty means the documented default policy applies. */
-    allowlist: ReadonlySet<string>;
+    /** Exact workflow identities selected by an operator. Empty means nothing is eligible. */
+    selected: ReadonlySet<string>;
+    source: ValidationWorkflowPolicySource;
 }
+
+/** No selection: the safe state this feature starts in and falls back to. */
+export const NO_VALIDATION_WORKFLOWS_SELECTED: ValidationWorkflowPolicy = { selected: new Set(), source: 'none' };
 
 export interface WorkflowRunIdentity {
     name?: string | null;
     path?: string | null;
     event?: string | null;
+    /** GitHub's numeric workflow ID, which an operator may select instead of a path. */
+    workflow_id?: number | null;
 }
 
 function normalize(value: string | null | undefined): string {
     return (value ?? '').trim().toLowerCase();
 }
 
-/** Every spelling one workflow can be referred to by: its display name, its file path, and that file's name with and without extension. */
+/**
+ * The spellings one selected workflow can be written as: its numeric ID, its
+ * workflow file path, that file's name with and without extension, and its
+ * display name. Every one of them identifies exactly one workflow — none of
+ * them is a substring match.
+ */
 export function workflowIdentities(run: WorkflowRunIdentity): string[] {
     const identities = new Set<string>();
     const name = normalize(run.name);
     if (name) identities.add(name);
+    if (typeof run.workflow_id === 'number' && Number.isFinite(run.workflow_id)) identities.add(String(run.workflow_id));
     const path = normalize(run.path);
     if (path) {
         identities.add(path);
@@ -60,38 +64,52 @@ export function workflowIdentities(run: WorkflowRunIdentity): string[] {
     return [...identities].filter(Boolean);
 }
 
-/**
- * Reads the configured allowlist. Unset or empty means the default policy;
- * entries are matched case-insensitively against the workflow's name, path or
- * file name.
- */
-export function loadValidationWorkflowPolicy(env: NodeJS.ProcessEnv = process.env): ValidationWorkflowPolicy {
-    const configured = (env[VALIDATION_WORKFLOW_ALLOWLIST_ENV] ?? '')
-        .split(',')
-        .map(entry => normalize(entry))
-        .filter(Boolean);
-    return { allowlist: new Set(configured) };
+/** Normalizes what an operator typed or stored into comparable workflow identities. */
+export function parseWorkflowSelection(values: Iterable<string | null | undefined> | null | undefined): string[] {
+    const selection: string[] = [];
+    for (const value of values ?? []) {
+        const identity = normalize(value);
+        if (identity && !selection.includes(identity)) selection.push(identity);
+    }
+    return selection;
+}
+
+export function createValidationWorkflowPolicy(
+    selection: Iterable<string | null | undefined> | null | undefined,
+    source: Exclude<ValidationWorkflowPolicySource, 'none'>,
+): ValidationWorkflowPolicy {
+    const selected = parseWorkflowSelection(selection);
+    return selected.length === 0 ? NO_VALIDATION_WORKFLOWS_SELECTED : { selected: new Set(selected), source };
 }
 
 /**
- * Whether this workflow's runs may be cancelled for an obsolete head. With an
- * allowlist configured only those workflows qualify — including
- * `pull_request_target` ones, which the operator named deliberately. Without
- * one, a `pull_request` workflow qualifies when its name or file says it
- * validates the revision and says nothing about publishing it.
+ * The documented fallback for instances that configure repositories outside the
+ * Web UI: the same explicit selection, read from the environment. It applies
+ * only to repositories that selected no workflows themselves.
+ */
+export function loadValidationWorkflowPolicyFromEnv(env: NodeJS.ProcessEnv = process.env): ValidationWorkflowPolicy {
+    return createValidationWorkflowPolicy((env[VALIDATION_WORKFLOW_ALLOWLIST_ENV] ?? '').split(','), 'environment');
+}
+
+/** The repository's own selection decides; the environment fallback applies only when it selected nothing. */
+export function resolveValidationWorkflowPolicy(
+    repositorySelection: readonly string[] | null | undefined,
+    env: NodeJS.ProcessEnv = process.env,
+): ValidationWorkflowPolicy {
+    const repository = createValidationWorkflowPolicy(repositorySelection, 'repository');
+    return repository.selected.size > 0 ? repository : loadValidationWorkflowPolicyFromEnv(env);
+}
+
+/**
+ * Whether this workflow's runs may be cancelled for an obsolete head: only when
+ * the operator selected this exact workflow, and only for a pull request event.
+ * An unselected workflow is never cancelled, whatever its name suggests it does.
  */
 export function isEligibleValidationWorkflow(
     run: WorkflowRunIdentity,
-    policy: ValidationWorkflowPolicy = loadValidationWorkflowPolicy(),
+    policy: ValidationWorkflowPolicy = NO_VALIDATION_WORKFLOWS_SELECTED,
 ): boolean {
-    const event = normalize(run.event);
-    if (!PULL_REQUEST_EVENTS.has(event)) return false;
-    const identities = workflowIdentities(run);
-    if (identities.length === 0) return false;
-    if (policy.allowlist.size > 0) {
-        return identities.some(identity => policy.allowlist.has(identity));
-    }
-    if (!DEFAULT_EVENTS.has(event)) return false;
-    if (identities.some(identity => PUBLICATION_WORKFLOW_PATTERN.test(identity))) return false;
-    return identities.some(identity => VALIDATION_WORKFLOW_PATTERN.test(identity));
+    if (policy.selected.size === 0) return false;
+    if (!PULL_REQUEST_EVENTS.has(normalize(run.event))) return false;
+    return workflowIdentities(run).some(identity => policy.selected.has(identity));
 }
