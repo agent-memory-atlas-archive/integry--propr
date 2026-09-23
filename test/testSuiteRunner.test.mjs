@@ -24,6 +24,7 @@ import {
     usesNativeWorkspaceTestRunner,
     verifyShardSummaries,
 } from '../scripts/run-test-suite.mjs';
+import { RENDERER_WORKSPACES } from '../apps/desktop/scripts/prepare-renderer.mjs';
 
 const writeJson = (path, value) => writeFileSync(path, JSON.stringify(value));
 
@@ -67,8 +68,11 @@ describe('release test-suite runner', () => {
         assert.ok(fullSuitePreparation.indexOf(sharedBuild) >= 0);
         assert.ok(fullSuitePreparation.indexOf(clientBuild) > fullSuitePreparation.indexOf(sharedBuild));
         assert.equal(desktopPackage.scripts.pretest, 'npm run prepare:renderer');
-        assert.ok(desktopPreparation.indexOf('npm run build -w @propr/client')
-            > desktopPreparation.indexOf('npm run build -w @propr/shared'));
+        // The four builds moved into a script that reuses an identical build
+        // within a job; their dependency order still has to hold.
+        assert.equal(desktopPreparation, 'node scripts/prepare-renderer.mjs');
+        const rendererOrder = RENDERER_WORKSPACES.map(workspace => workspace.name);
+        assert.deepEqual(rendererOrder, ['@propr/shared', '@propr/local-setup', '@propr/cli', '@propr/client']);
 
         const cleanSharedDist = workflow.indexOf('test ! -e packages/shared/dist');
         const cleanClientDist = workflow.indexOf('test ! -e packages/client/dist');

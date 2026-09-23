@@ -42,7 +42,7 @@ for consistency across all eligible jobs.
 | Workflow | Jobs | Activated placement |
 | --- | --- | --- |
 | `pr-test-on-label.yml` | `shard` (four entries), `docs` | gitfix.dev rootless pool |
-| `pr-build-check.yml` | `validate`, `visual-previews`, `cli-node-matrix`, `cli-init-json` | gitfix.dev rootless pool |
+| `pr-build-check.yml` | `validate`, `cli-node-matrix` | gitfix.dev rootless pool |
 | `cli-node-compatibility.yml` | `project-options` | gitfix.dev rootless pool |
 | `pr-test-on-label.yml` | `native-electron` | Hosted Ubuntu, mandatory native assertions |
 | `pr-build-check.yml` | `cli-agent-skill-glibc-231` | Hosted Ubuntu; disposable glibc 2.31 container and ordinary-user ownership changes |
@@ -50,7 +50,9 @@ for consistency across all eligible jobs.
 | Desktop Linux x64 packaging/acceptance | Existing desktop jobs | Hosted: ordinary-user sandbox, desktop/session and clean-environment requirements remain |
 | Aggregate gate and failure reporters | `test`, `comment` | Hosted control/reporting jobs |
 
-Build/lint/docs coverage is unchanged. No `pull_request_target` execution or
+Build/lint/docs coverage is unchanged in kind; see
+[Deduplicated validation](#deduplicated-validation) for the invocations that
+moved rather than disappeared. No `pull_request_target` execution or
 permission expansion is introduced. Release/deployment workflows, including the
 separate label-authorized PR Preview deployment, are unchanged.
 The glibc and desktop exceptions retain their existing environment validation;
@@ -133,6 +135,116 @@ Docker's [rootless client and resource-limit documentation](https://docs.docker.
 and [networking limitations](https://docs.docker.com/engine/security/rootless/troubleshoot/)
 explain the endpoint, delegation and namespace assumptions.
 
+## Deduplicated validation
+
+Eight rootless jobs now serve a pull request instead of eleven: four shards,
+docs, `validate`, and the two `cli-node-matrix` entries. The three that went
+away — `visual-previews` and both `cli-init-json` matrix entries — did so
+because another enforced check already ran the same assertions in at least as
+capable an environment. Nothing was made optional, and no timeout, shard count
+or worker count changed.
+
+### Focused suites the full suite already covers
+
+`Run Full Test Suite` discovers every `*.test.*`/`*.spec.*` file under `test/`
+and under each non-native workspace, and runs `propr-ui` as four vitest
+`--shard` parts. `Build & Lint Check` used to re-run five focused subsets of
+exactly that set.
+
+| Removed invocation | Units | Covering gate | Environment |
+| --- | --- | --- | --- |
+| `visual-previews` job (`npm run test:visual-previews`) | 17 server files + 7 `propr-ui` files | Shards + `propr-ui` parts | Job-level `PROPR_DEMO_MODE=true` was inert: both tests that depend on it set it themselves. The shards additionally provide isolated Redis. |
+| `npm run test:notifications` | 12 server files + 15 `propr-ui` files | Shards + `propr-ui` parts | Identical (`NODE_ENV=test`) |
+| `npm run test:mcp` and `test:mcp:browser` | 12 files | Shards | The shard job installs the same Chromium |
+| `npm run test:unit` | 35 files | Shards | Identical |
+| Hosted tunnel step, now `npm run test:hosted-tunnel` | 12 server files + 2 `propr-ui` files | Shards + `propr-ui` parts | `PROPR_DEMO_MODE=true` was inert: these tests inject the value through fixtures |
+
+Branch protection was inspected before removing anything. The repository
+ruleset on `main` carries only `deletion` and `non_fast_forward`, and
+`gh pr checks <pr> --required` reports no required status checks on the branch,
+so no named check in this repository is a configured merge gate today. The
+names are still treated as the merge contract: `Run Full Test Suite`,
+`Validate Changes`, `CLI Agent Skill (Node 22)` and `CLI Agent Skill (Node 24)`
+are unchanged, and the two removed names — `Visual preview release matrix` and
+`CLI init JSON (Node 22|24)` — were removed rather than left as empty
+always-green jobs, because a green placeholder would assert validation that no
+longer runs there.
+
+`test/ciWorkflowDeduplication.test.mjs` re-derives the full-suite manifest and
+fails if any named file stops being discovered, if a focused package script
+disappears, if the build check starts running one of them again, or if the full
+suite acquires a path filter that could hide the gate. All the focused scripts
+remain in `package.json` for local runs.
+
+The full suite skips shards on draft pull requests, as it did before; the build
+check has never been the gate that drafts rely on for test results, and a draft
+cannot be merged.
+
+### Assertions that stay in the build check
+
+The PWA and mobile browser smoke test runs Playwright `*.pw.ts` specs. Those
+match neither full-suite discovery nor the `propr-ui` vitest config, so it is
+not duplicated and keeps its own Chromium install. CLI release packaging,
+release-candidate metadata, workflow lint, release shell lint and the
+changed-area lint/typecheck/build gate are likewise unique and unchanged, and
+`Validate Changes` still fails closed on the changed-area result.
+
+### One Linux CLI job per Node version
+
+`CLI init JSON (Node 22)` and `CLI init JSON (Node 24)` ran a second `npm ci`
+and a second `@propr/shared` + `@propr/local-setup` build purely to execute one
+test file. That command is now a step of the existing `CLI Agent Skill (Node N)`
+job, whose check name is unchanged; the Node 22 and Node 24 matrix entries both
+remain, and the native glibc 2.31, Darwin and Windows proofs are untouched.
+
+The Agent Skill suite, the init JSON test and the CLI build each keep their own
+step and outcome, so a failure in one still reports the others exactly as two
+independent jobs did. The final gate is fail-closed: any constituent that is
+not an explicit `success` — failed, cancelled, skipped or never run — fails the
+check and is named in an `::error::` annotation.
+
+### Work removed inside a job
+
+`Validate Changes` built `@propr/shared` up to three times per run. The MCP
+preparation build (`npm run test:prepare`) went away with the MCP step; the CLI
+packaging step already builds `@propr/shared` and `@propr/local-setup` from the
+same checkout, on the same runner, with the same toolchain, so the changed-area
+checks and the Playwright smoke test reuse them. Reuse requires both the
+recorded success of that step and the presence of the built entry point, and
+falls back to building otherwise. The root `tsc` build's dependency on
+`@propr/local-setup` — `packages/api` imports it through its published types,
+while `@propr/core` and `@propr/shared` are mapped to their sources by the root
+tsconfig — is now explicit instead of relying on a preparation step.
+
+The desktop `prepare:renderer` script builds four workspaces and is a
+pre-script of `package`, `typecheck`, `test`, `make` and
+`test:native-durability`. A single packaging job therefore ran those four `tsc`
+builds up to four times over byte-identical sources.
+`apps/desktop/scripts/prepare-renderer.mjs` now records a stamp keyed to the
+source files git reports for every built workspace, the assets the CLI build
+copies in, the root manifest and lockfile, and the running Node version,
+platform and architecture, and skips a rebuild only when that key still matches
+and every declared output is present. A failed or output-less build writes no
+stamp.
+
+Nothing is cached, uploaded or downloaded: the stamp lives under
+`node_modules/.cache`, which `npm ci`, a clean checkout and the self-hosted
+`git clean -ffdxq` all discard, so no build output crosses a job, a machine or
+a trust boundary. The full suite still asserts `test ! -e packages/shared/dist`
+before preparing its own workspace.
+
+### Desktop latency floor
+
+Desktop validation is a separate gate from the Linux pull-request checks and it
+is not redesigned here. macOS x64 (`macos-15-intel`) remains the longest
+desktop path: it must package natively, make and mount a DMG, run the packaged
+inspection and the packaged Connect lifecycle, and none of that has a
+demonstrably safe shortcut that keeps the native architecture, install,
+deep-link, relaunch, removal, signing and acceptance assertions intact. Only
+the repeated renderer preparation was removed. Desktop therefore remains a
+multi-minute gate on any pull request that touches its path filters, and total
+pull-request wall-clock time is still bounded by it.
+
 ## Redis ownership
 
 `scripts/ci-redis.sh` computes `propr-ci-redis-<sha256>` from the NUL-delimited
@@ -205,6 +317,26 @@ succeeded, with API creation-to-final-update duration **5m37s**.
 succeeded in **5m16s** by the same measure. All executed jobs in these two runs
 were hosted; native Electron was disabled in that earlier head. These are not
 claims that this follow-up's required checks have passed.
+
+### Expected effect of the deduplication
+
+The pre-change reference for this follow-up is PR #2469 head
+`0d08e4dc09ba18a2850fc02720c138d1af0ed910`:
+[full suite 35841864469](https://github.com/integry/propr/actions/runs/35841864469)
+15m39s with shards of 406/427/400/391 s started after 133/417/527/134 s of
+queueing, [build/lint 35841864435](https://github.com/integry/propr/actions/runs/35841864435)
+585 s on one worker, and
+[desktop 35841864440](https://github.com/integry/propr/actions/runs/35841864440)
+13m51s dominated by macOS x64 at 684 s.
+
+The changes here remove three rootless jobs (eleven to eight on four workers)
+and the notification, MCP, fast-unit, hosted-tunnel and visual-preview
+invocations plus one `@propr/shared` build from `Validate Changes`. Queue time
+is a function of pool occupancy, so the expected effect is shorter shard
+queueing and a shorter build/lint job — **these are projections until a real
+run on the rootless pool is measured, not results.** Desktop is untouched apart
+from renderer preparation and remains an approximately fourteen-minute gate, so
+no claim about total pull-request time below that figure is warranted.
 
 After publication and authorized activation, capture the exact PR head and
 query runs filtered by that full SHA, then every attempt's paginated jobs:
