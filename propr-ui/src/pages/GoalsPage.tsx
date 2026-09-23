@@ -27,6 +27,7 @@ import { formatAgentLabel } from '../utils/agentStatus';
 import { getModelDisplayName } from '../utils/modelDisplay';
 import { GoalAttachmentInput } from '../components/Goals/GoalAttachmentInput';
 import { clipboardImageFiles } from '../components/Goals/goalAttachmentUtils';
+import { mergeGoalTimeline } from '../components/Goals/goalTimeline';
 import { resizeImage } from '../components/TaskPlanner/imageUtils';
 import { useDemoMode } from '../contexts/DemoModeContext';
 
@@ -633,6 +634,15 @@ function GoalDetails({ goalId }: { goalId: string }) {
     ? [{ state: 'CLAUDE_EXECUTION', timestamp: goal.startedAt }]
     : [], [goal?.startedAt]);
   const thinkingLog = useThinkingLog(live, goalHistory);
+  // Operator corrections live outside the provider stdout stream, so both views merge them in.
+  const readableTimeline = useMemo(
+    () => mergeGoalTimeline(thinkingLog.thinkingLogWithTimestamps, goal?.inputs, { executionStartTime: goal?.startedAt }),
+    [goal?.inputs, goal?.startedAt, thinkingLog.thinkingLogWithTimestamps],
+  );
+  const terminalTimeline = useMemo(
+    () => mergeGoalTimeline(live.events, goal?.inputs),
+    [goal?.inputs, live.events],
+  );
   useDocumentTitle(goal?.title || 'Goal');
 
   const refresh = useCallback(async () => {
@@ -807,11 +817,11 @@ function GoalDetails({ goalId }: { goalId: string }) {
             </div>
           </header>
           {outputMode === 'readable'
-            ? <div className="min-h-32 py-4">{thinkingLog.thinkingLogWithTimestamps.length > 0
-              ? <ThinkingLog events={thinkingLog.thinkingLogWithTimestamps} todos={live.todos} />
+            ? <div className="min-h-32 py-4">{readableTimeline.length > 0
+              ? <ThinkingLog events={readableTimeline} todos={live.todos} />
               : <p className="text-sm text-slate-500">No human-readable output yet.</p>}</div>
-            : <div className="mt-4 min-h-32 bg-slate-950 p-4 text-slate-100">{live.events.length > 0
-              ? <ExecutionEventLog events={live.events} collapsed={false} onToggleCollapse={() => undefined} lastThought={thinkingLog.lastThought} isTaskActive={mutable && goal.desiredState === 'running'} taskInfo={null} />
+            : <div className="mt-4 min-h-32 bg-slate-950 p-4 text-slate-100">{terminalTimeline.length > 0
+              ? <ExecutionEventLog events={terminalTimeline} collapsed={false} onToggleCollapse={() => undefined} lastThought={thinkingLog.lastThought} isTaskActive={mutable && goal.desiredState === 'running'} taskInfo={null} />
               : <p className="text-sm text-slate-400">No terminal output yet.</p>}</div>}
         </section>
       </main>

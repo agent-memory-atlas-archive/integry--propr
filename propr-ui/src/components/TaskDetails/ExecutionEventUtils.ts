@@ -164,6 +164,10 @@ export const formatToolResult = (result: unknown): string => {
 // Uses readable colors against the dark zinc-900 background
 // Sky-300 used for thought labels for better legibility (accessibility fix for blue on black)
 export const getCategoryDisplay = (event: LiveEvent): { label: string; color: string } => {
+  if (event.type === 'user_input') {
+    // Warm amber marks operator steering so it never reads as agent output
+    return { label: 'YOU', color: 'text-amber-300' };
+  }
   if (event.type === 'thought') {
     // Light Sky Blue for AI thoughts - better legibility against dark backgrounds
     return { label: 'THOUGHT', color: 'text-sky-300' };
@@ -181,7 +185,8 @@ export const getCategoryDisplay = (event: LiveEvent): { label: string; color: st
 };
 
 // Get event icon type for rendering
-export const getEventIconType = (event: LiveEvent): 'thought' | 'tool' | 'success' | 'error' | 'default' => {
+export const getEventIconType = (event: LiveEvent): 'thought' | 'tool' | 'success' | 'error' | 'user' | 'default' => {
+  if (event.type === 'user_input') return 'user';
   if (event.type === 'thought') return 'thought';
   if (event.type === 'tool_use') return 'tool';
   if (event.type === 'tool_result') {
@@ -192,6 +197,11 @@ export const getEventIconType = (event: LiveEvent): 'thought' | 'tool' | 'succes
 
 // Extract summary from event content
 export const extractEventSummary = (event: LiveEvent): string => {
+  if (event.type === 'user_input') {
+    const firstLine = (event.content || '').split('\n').find(line => line.trim()) || '(empty message)';
+    return firstLine.length > 60 ? firstLine.substring(0, 57) + '...' : firstLine;
+  }
+
   if (event.type === 'thought' && event.content) {
     const firstLine = event.content.split('\n')[0];
     return firstLine.length > 60 ? firstLine.substring(0, 57) + '...' : firstLine;

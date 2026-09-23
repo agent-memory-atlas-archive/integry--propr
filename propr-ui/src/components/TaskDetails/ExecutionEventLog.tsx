@@ -54,6 +54,39 @@ const ToolUseDetails: React.FC<{ event: LiveEvent; taskInfo: TaskInfo | null }> 
   </div>
 );
 
+// Operator steering message - rendered verbatim with an amber accent so it never
+// reads as provider output. Only the goal timeline produces these events.
+const UserInputContent: React.FC<{ event: LiveEvent }> = ({ event }) => (
+  <div className="border-l-2 border-amber-400/70 bg-amber-400/5 pl-2 py-1 text-xs text-amber-50/90 overflow-hidden font-mono whitespace-pre-wrap break-words">
+    {event.content}
+    {event.truncated && <span className="text-amber-300/70"> … (truncated)</span>}
+  </div>
+);
+
+// Queued / attachment metadata for an operator message
+const UserInputBadges: React.FC<{ event: LiveEvent }> = ({ event }) => {
+  if (event.type !== 'user_input') return null;
+  return (
+    <>
+      {event.inputState === 'pending' && (
+        <span className="rounded border border-amber-400/50 px-1 text-[10px] font-bold uppercase tracking-wider text-amber-300">
+          Queued
+        </span>
+      )}
+      {event.inputState === 'undeliverable' && (
+        <span className="rounded border border-red-400/50 px-1 text-[10px] font-bold uppercase tracking-wider text-red-300">
+          Not delivered
+        </span>
+      )}
+      {!!event.attachmentCount && (
+        <span className="text-[10px] text-amber-200/80">
+          {event.attachmentCount} attachment{event.attachmentCount === 1 ? '' : 's'}
+        </span>
+      )}
+    </>
+  );
+};
+
 // Separate component for tool result rendering
 const ToolResultContent: React.FC<{ resultText: string; language: string }> = ({ resultText, language }) => (
   <div className="mt-1">
@@ -68,6 +101,10 @@ const ExpandedContent: React.FC<{
   resultText: string;
   language: string;
 }> = ({ event, taskInfo, resultText, language }) => {
+  if (event.type === 'user_input') {
+    return <UserInputContent event={event} />;
+  }
+
   if (event.type === 'thought' && event.content) {
     return <ThoughtContent content={event.content} />;
   }
@@ -86,6 +123,7 @@ const ExpandedContent: React.FC<{
 // Check if event has expandable content
 const hasExpandableContent = (event: LiveEvent, resultText: string): boolean => {
   return (
+    (event.type === 'user_input' && !!event.content) ||
     (event.type === 'thought' && !!event.content && event.content.length > 60) ||
     (event.type === 'tool_result' && resultText.length > 0) ||
     (event.type === 'tool_use' && !!(event.input?.command || event.input?.file_path))
@@ -100,7 +138,8 @@ const EventHeader: React.FC<{
   expandable: boolean;
   isCollapsed: boolean;
   onToggle?: () => void;
-}> = ({ categoryDisplay, eventIndex, summary, expandable, isCollapsed, onToggle }) => (
+  badges?: React.ReactNode;
+}> = ({ categoryDisplay, eventIndex, summary, expandable, isCollapsed, onToggle, badges }) => (
   <div
     className={`flex items-center gap-2 flex-wrap font-mono ${expandable ? 'cursor-pointer' : ''}`}
     onClick={onToggle}
@@ -114,6 +153,7 @@ const EventHeader: React.FC<{
     <span className="text-[12px] text-zinc-200 truncate flex-1">
       {summary}
     </span>
+    {badges}
     {expandable && (
       <span className="text-zinc-600">
         {isCollapsed ? <ChevronRight className="h-3 w-3" /> : <ChevronDown className="h-3 w-3" />}
@@ -168,6 +208,7 @@ const TerminalEventItem: React.FC<TerminalEventItemProps> = ({
             expandable={expandable}
             isCollapsed={isCollapsed}
             onToggle={handleToggle}
+            badges={<UserInputBadges event={event} />}
           />
 
           {!isCollapsed && expandable && (

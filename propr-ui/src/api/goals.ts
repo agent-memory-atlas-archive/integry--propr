@@ -36,6 +36,17 @@ export interface GoalAttachment {
 
 export type GoalVisualPreview = PublishedVisualPreview;
 
+/** An operator-authored steering message, projected onto the goal detail timeline. */
+export interface GoalInput {
+  id: string;
+  message: string;
+  truncated: boolean;
+  attachmentCount: number;
+  state: 'pending' | 'delivered' | 'undeliverable';
+  createdAt: string | null;
+  deliveredAt: string | null;
+}
+
 export interface Goal {
   previewMedia?: PublishedVisualPreview[];
   id: string;
@@ -84,6 +95,8 @@ export interface Goal {
     } | null;
   } | null;
   artifacts: unknown[];
+  /** Present on single-goal responses only; the goal list omits it. */
+  inputs?: GoalInput[];
   artifactStats: { issues: number; openIssues: number; pullRequests: number; openPullRequests: number };
   liveSummary: {
     currentTask: string | null;

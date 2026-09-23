@@ -321,7 +321,7 @@ export function createGoalRoutes(deps: GoalRoutesDeps) {
       deps.db<GoalRow>('goals').where({ owner_id: ownerId }).orderBy('updated_at', 'desc').limit(200)
     );
     const goals = await timeApiStage('goals.projection', () =>
-      Promise.all(rows.map(row => serializeGoal(deps.db, deps.redisClient, row)))
+      Promise.all(rows.map(row => serializeGoal(deps.db, deps.redisClient, row, { includeInputs: false })))
     );
     const media = await (deps.previewReader ?? previewMediaReader).project(rows.map(goalPreviewSource), 3);
     res.json({ goals: goals.map((goal, index) => ({ ...goal,

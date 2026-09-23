@@ -8,6 +8,7 @@ import {
 } from '@propr/core';
 
 export const MAX_GOAL_ATTACHMENTS_PER_PROMPT = 10;
+export const GOAL_ATTACHMENT_SECTION_HEADING = 'Files uploaded with this prompt are available at these paths:';
 const GOAL_ATTACHMENT_STORAGE_ROOT = path.join('/tmp/git-processor', 'goal-attachments');
 
 export type GoalAttachment = Attachment;
@@ -49,7 +50,23 @@ export function appendGoalAttachments(message: string, attachments: readonly Goa
   const entries = attachments.map(attachment => (
     `- ${JSON.stringify(attachment.originalName)} (${attachment.mimeType}): ${absoluteAttachmentPath(attachment)}`
   ));
-  return `${message.trimEnd()}\n\nFiles uploaded with this prompt are available at these paths:\n${entries.join('\n')}`;
+  return `${message.trimEnd()}\n\n${GOAL_ATTACHMENT_SECTION_HEADING}\n${entries.join('\n')}`;
+}
+
+/**
+ * Inverse of {@link appendGoalAttachments} for read paths. The stored message keeps absolute
+ * `storedPath` values so the provider can open the files; projections must report only how many
+ * files travelled with the message.
+ */
+export function stripGoalAttachmentSection(message: string): { message: string; attachmentCount: number } {
+  const marker = `\n\n${GOAL_ATTACHMENT_SECTION_HEADING}\n`;
+  const index = message.lastIndexOf(marker);
+  if (index === -1) return { message, attachmentCount: 0 };
+  const attachmentCount = message.slice(index + marker.length)
+    .split('\n')
+    .filter(line => line.trimStart().startsWith('- '))
+    .length;
+  return { message: message.slice(0, index), attachmentCount };
 }
 
 export async function goalUploadIdentity(files: readonly MulterFile[]): Promise<Array<Record<string, unknown>>> {

@@ -116,7 +116,8 @@ export interface TodoItem {
 }
 
 export interface LiveEvent {
-  type: 'thought' | 'tool_use' | 'tool_result';
+  // `user_input` is produced only by the goal timeline merge; provider streams never emit it.
+  type: 'thought' | 'tool_use' | 'tool_result' | 'user_input';
   content?: string;
   timestamp?: string;
   toolName?: string;
@@ -126,6 +127,12 @@ export interface LiveEvent {
   result?: unknown;
   isError?: boolean;
   isSubagentSummary?: boolean;
+  /** Delivery state of a `user_input` event. */
+  inputState?: 'pending' | 'delivered' | 'undeliverable';
+  /** Number of files sent alongside a `user_input` message. */
+  attachmentCount?: number;
+  /** Set when a `user_input` message body was clipped by the projection. */
+  truncated?: boolean;
 }
 
 export interface LiveDetails {

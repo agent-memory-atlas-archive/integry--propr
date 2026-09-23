@@ -15,7 +15,8 @@ import {
   XCircle,
   Wrench,
   Lightbulb,
-  Globe
+  Globe,
+  MessageSquare
 } from 'lucide-react';
 import {
   getFileIconType,
@@ -67,6 +68,9 @@ export const EventIcon: React.FC<{ event: LiveEvent }> = ({ event }) => {
   const iconType = getEventIconType(event);
 
   switch (iconType) {
+    case 'user':
+      // Amber marks operator steering apart from every agent-produced row
+      return <MessageSquare className="h-3.5 w-3.5 text-amber-300" />;
     case 'thought':
       // Readable gray-blue for AI thoughts
       return <Lightbulb className="h-3.5 w-3.5 text-slate-300" />;
