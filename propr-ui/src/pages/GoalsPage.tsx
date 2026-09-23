@@ -21,6 +21,8 @@ import TodoList from '../components/TaskDetails/TodoList';
 import ExecutionEventLog from '../components/TaskDetails/ExecutionEventLog';
 import ThinkingLog from '../components/TaskDetails/ThinkingLog';
 import { useThinkingLog } from '../components/TaskDetails/useThinkingLog';
+import { trustedPreviewMedia } from '@propr/shared';
+import VisualPreviewGallery from '../components/VisualPreviewGallery';
 import { RepositorySelector, type RepoOption } from '../components/RepositorySelector';
 import { ProviderLogo } from '../components/ui/ProviderLogo';
 import { RepositoryChip } from '../components/ui/RepositoryChip';
@@ -884,7 +886,8 @@ function GoalDetails({ goalId }: { goalId: string }) {
     }
     let active = true;
     const refreshPreviews = () => getGoalVisualPreviews(goalId)
-      .then(data => { if (active && !data.unavailable) setVisualPreviews(data.previews); })
+      // Filtered at the client boundary so only trusted GitHub attachments reach the gallery and lightbox.
+      .then(data => { if (active && !data.unavailable) setVisualPreviews(trustedPreviewMedia(data.previews, 8)); })
       .catch(() => { /* Keep the last successfully fetched GitHub previews. */ });
     void refreshPreviews();
     const timer = window.setInterval(refreshPreviews, 30_000);
@@ -1026,17 +1029,8 @@ function GoalDetails({ goalId }: { goalId: string }) {
             </div>
             <span className="text-xs text-slate-400">From GitHub</span>
           </div>
-          <div className="mt-4 grid gap-4 sm:grid-cols-2">
-            {visualPreviews.map((preview, index) => <figure key={`${preview.url}-${index}`} className="overflow-hidden rounded-lg border border-slate-200 bg-slate-50">
-              {preview.type === 'image'
-                ? <img src={preview.url} alt={preview.title} loading="lazy" className="aspect-video w-full bg-white object-contain" />
-                : <video src={preview.url} aria-label={preview.title} controls preload="metadata" className="aspect-video w-full bg-slate-950 object-contain" />}
-              <figcaption className="border-t border-slate-200 px-3 py-2.5">
-                <p className="text-sm font-medium text-slate-800">{preview.title}</p>
-                {preview.description && <p className="mt-1 text-xs leading-5 text-slate-500">{preview.description}</p>}
-              </figcaption>
-            </figure>)}
-          </div>
+          {/* Same evidence surface as the task detail screen: full-width media with lightbox support. */}
+          <VisualPreviewGallery previews={visualPreviews} className="mt-4" />
         </section>}
 
         {/* A settled goal is not waiting for anything: with no queue on record the section goes away

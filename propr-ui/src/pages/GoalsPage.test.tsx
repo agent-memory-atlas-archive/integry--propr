@@ -744,6 +744,40 @@ describe('GoalsPage', () => {
     expect(goalsApi.getGoalVisualPreviews).toHaveBeenCalledWith('goal-1');
   });
 
+  it('stacks goal previews full width and opens images in the shared lightbox', async () => {
+    vi.mocked(goalsApi.getGoal).mockResolvedValue({
+      goal: { ...goal, finalPr: { number: 42, url: 'https://github.com/acme/web/pull/42' } },
+    });
+    vi.mocked(goalsApi.getGoalVisualPreviews).mockResolvedValue({
+      previews: [
+        { type: 'image', title: 'Dashboard filters', url: 'https://github.com/user-attachments/assets/preview-1' },
+        { type: 'video', title: 'Filter walkthrough', url: 'https://github.com/user-attachments/assets/preview-2' },
+        { type: 'image', title: 'Untrusted', url: 'https://evil.test/preview.png' },
+      ],
+    });
+
+    const { container } = render(<MemoryRouter initialEntries={['/goals/goal-1']}><Routes><Route path="/goals/:goalId" element={<GoalsPage />} /></Routes></MemoryRouter>);
+
+    await screen.findByRole('heading', { name: 'Visual previews' });
+    const figures = container.querySelectorAll('figure');
+    expect(figures).toHaveLength(2);
+    figures.forEach(figure => expect(figure).toHaveClass('w-full'));
+    expect(figures[0].parentElement).toHaveClass('flex-col');
+    expect(figures[0].parentElement?.className).not.toMatch(/grid-cols/);
+    expect(screen.getByAltText('Dashboard filters')).toHaveClass('max-h-[65vh]', 'w-full', 'object-contain');
+    expect(container.querySelector('video')).toHaveClass('w-full');
+    expect(screen.queryByText('Untrusted')).toBeNull();
+
+    const trigger = screen.getByRole('button', { name: 'Open full-size preview: Dashboard filters' });
+    trigger.focus();
+    fireEvent.click(trigger);
+    const dialog = screen.getByRole('dialog', { name: 'Dashboard filters' });
+    expect(within(dialog).getByAltText('Dashboard filters')).toHaveAttribute('src', 'https://github.com/user-attachments/assets/preview-1');
+    fireEvent.keyDown(dialog, { key: 'Escape' });
+    expect(screen.queryByRole('dialog')).toBeNull();
+    expect(document.activeElement).toBe(trigger);
+  });
+
   it('sends files and pasted images with a running goal correction', async () => {
     render(<MemoryRouter initialEntries={['/goals/goal-1']}><Routes><Route path="/goals/:goalId" element={<GoalsPage />} /></Routes></MemoryRouter>);
     const correction = await screen.findByLabelText('Correction or follow-up');
