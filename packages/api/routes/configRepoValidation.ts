@@ -324,6 +324,18 @@ function normalizeWorkflowSelection(value: unknown, repoName: string): Validatio
   return success(selection);
 }
 
+/** Optional booleans that are rejected when present with a non-boolean value. */
+const OPTIONAL_BOOLEAN_FIELDS = ['autoFollowupOnFailedCi', 'cancelCiDuringFollowup', 'notificationsEnabled'] as const;
+
+function validateOptionalBooleans(candidate: Partial<RepoToMonitor>, repoName: string): ValidationResult<undefined> {
+  for (const field of OPTIONAL_BOOLEAN_FIELDS) {
+    if (candidate[field] !== undefined && typeof candidate[field] !== 'boolean') {
+      return failure(`Invalid ${field} format for ${repoName}: must be a boolean`);
+    }
+  }
+  return success(undefined);
+}
+
 export function normalizeRepoConfig(repo: unknown): ValidationResult<RepoToMonitor> {
   const candidateResult = parseRepoObject(repo);
   if (!candidateResult.ok) return candidateResult;
@@ -341,15 +353,8 @@ export function normalizeRepoConfig(repo: unknown): ValidationResult<RepoToMonit
   if (!baseBranch.ok) return baseBranch;
   const defaultBranch = normalizeOptionalBranchName(candidate.defaultBranch, 'defaultBranch', name);
   if (!defaultBranch.ok) return defaultBranch;
-  if (candidate.autoFollowupOnFailedCi !== undefined && typeof candidate.autoFollowupOnFailedCi !== 'boolean') {
-    return failure(`Invalid autoFollowupOnFailedCi format for ${name}: must be a boolean`);
-  }
-  if (candidate.cancelCiDuringFollowup !== undefined && typeof candidate.cancelCiDuringFollowup !== 'boolean') {
-    return failure(`Invalid cancelCiDuringFollowup format for ${name}: must be a boolean`);
-  }
-  if (candidate.notificationsEnabled !== undefined && typeof candidate.notificationsEnabled !== 'boolean') {
-    return failure(`Invalid notificationsEnabled format for ${name}: must be a boolean`);
-  }
+  const booleans = validateOptionalBooleans(candidate, name);
+  if (!booleans.ok) return booleans;
   const cancelCiWorkflows = normalizeWorkflowSelection(candidate.cancelCiDuringFollowupWorkflows, name);
   if (!cancelCiWorkflows.ok) return cancelCiWorkflows;
   const visualPreview = normalizeVisualPreview(candidate.visualPreview, name);
@@ -368,4 +373,21 @@ export function normalizeRepoConfig(repo: unknown): ValidationResult<RepoToMonit
     baseBranch: baseBranch.value,
     defaultBranch: defaultBranch.value
   });
+}
+
+/**
+ * Every per-repository option whose absence from a write must not clear it.
+ * Callers apply the whole chain so a new option cannot be forgotten at one
+ * call site and silently reset by partial or legacy clients.
+ */
+export function preserveRepoSettings(
+  previousRepos: RepoToMonitor[],
+  normalizedRepos: RepoToMonitor[],
+  incomingRepos: unknown[]
+): RepoToMonitor[] {
+  let repos = preserveRepoAutoFollowup(previousRepos, normalizedRepos, incomingRepos);
+  repos = preserveRepoCancelCiDuringFollowup(previousRepos, repos, incomingRepos);
+  repos = preserveRepoCancelCiWorkflows(previousRepos, repos, incomingRepos);
+  repos = preserveRepoNotifications(previousRepos, repos, incomingRepos);
+  return preserveRepoVisualPreview(previousRepos, repos, incomingRepos);
 }
