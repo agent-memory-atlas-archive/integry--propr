@@ -286,6 +286,44 @@ describe('Dashboard studio design rules', () => {
     }
   });
 
+  it('keeps an attention row\'s entity chip beside its repository, not on its own line', async () => {
+    mockAttention.mockResolvedValue(attentionResponse([attentionItem()]));
+
+    renderDashboard();
+    await waitForSections();
+
+    // The panel lives in the narrow column. A wrapping metadata line drops the
+    // entity chip onto a row of its own and makes every item here a line
+    // taller than the identical row in the main column.
+    const panel = await screen.findByTestId('needs-attention-panel');
+    const meta = (await within(panel).findByText('Run failed')).parentElement;
+    expect(meta?.className).toMatch(/flex-nowrap/);
+    expect(meta?.className).not.toMatch(/flex-wrap/);
+    expect(meta).toContainElement(within(panel).getByTitle('Issue #42'));
+    expect(meta).toContainElement(within(panel).getAllByTitle('acme/app')[0]);
+  });
+
+  it('gives every outcome state an icon, not only the successful ones', async () => {
+    mockOutcomes.mockResolvedValue(outcomesResponse([
+      outcomeItem({ id: 'out-merged', kind: 'merged' }),
+      outcomeItem({ id: 'out-completed', taskId: 'done-2', kind: 'completed' }),
+      outcomeItem({ id: 'out-failed', taskId: 'done-3', kind: 'failed' }),
+      outcomeItem({ id: 'out-cancelled', taskId: 'done-4', kind: 'cancelled' }),
+      outcomeItem({ id: 'out-closed', taskId: 'done-5', kind: 'closed' }),
+    ]));
+
+    renderDashboard();
+    await waitForSections();
+
+    // Iconography is symmetrical down the status column: a glyph on some rows
+    // and bare text on others reads as a missing asset, not as a distinction.
+    const feed = await screen.findByTestId('recent-outcomes-list');
+    for (const label of ['Merged', 'Completed', 'Failed', 'Cancelled', 'Closed']) {
+      const status = await within(feed).findByText(label);
+      expect(status.querySelector('svg')).not.toBeNull();
+    }
+  });
+
   it('gives every attention action the same fixed-width verb', async () => {
     // Two different verbs in the same column is the case that used to ragged
     // the left edge, so both kinds are on screen for this assertion.

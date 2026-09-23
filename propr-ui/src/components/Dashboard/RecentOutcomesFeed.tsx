@@ -8,7 +8,7 @@
  */
 
 import React, { useCallback, useMemo, useState } from 'react';
-import { Check } from 'lucide-react';
+import { Check, CircleSlash, X, type LucideIcon } from 'lucide-react';
 import { getDashboardOutcomes, type DashboardOutcomesResponse, type OutcomeItem, type OutcomeKind } from '../../api/dashboardApi';
 import { ScoreBadge } from '../TaskList/ScoreBadge';
 import {
@@ -62,8 +62,20 @@ const KIND_CLASSES: Record<OutcomeKind, string> = {
   closed: 'text-slate-500',
 };
 
-/** Successful end states carry a checkmark instead of a colour. */
-const SUCCESS_KINDS: ReadonlySet<OutcomeKind> = new Set<OutcomeKind>(['completed', 'merged']);
+/**
+ * Every outcome carries a glyph, because a status column where only some
+ * states have an icon reads as a rendering bug rather than as a distinction:
+ * the eye sees a ragged column, not "these two are successes". The glyph is
+ * what separates the end states; colour is still spent only on failure, and
+ * the two successful states share one glyph so they stay indistinguishable.
+ */
+const KIND_ICONS: Record<OutcomeKind, LucideIcon> = {
+  completed: Check,
+  merged: Check,
+  failed: X,
+  cancelled: CircleSlash,
+  closed: CircleSlash,
+};
 
 function outcomeTitle(item: OutcomeItem): string {
   if (item.title) return item.title;
@@ -71,6 +83,17 @@ function outcomeTitle(item: OutcomeItem): string {
   if (item.issueNumber) return `Issue #${item.issueNumber}`;
   return 'Untitled work';
 }
+
+/** The status cell: one glyph plus one word, the same shape for every kind. */
+const OutcomeKindLabel: React.FC<{ kind: OutcomeKind }> = ({ kind }) => {
+  const Icon = KIND_ICONS[kind];
+  return (
+    <span className={`inline-flex items-center gap-1 font-medium ${KIND_CLASSES[kind]}`}>
+      <Icon className="h-3 w-3 flex-none" aria-hidden="true" />
+      {KIND_LABELS[kind]}
+    </span>
+  );
+};
 
 const OutcomeRow: React.FC<{ item: OutcomeItem }> = ({ item }) => (
   <li className="border-b border-slate-100 last:border-b-0">
@@ -80,10 +103,7 @@ const OutcomeRow: React.FC<{ item: OutcomeItem }> = ({ item }) => (
     >
       <span className="min-w-0 flex-1">
         <RowMeta>
-          <span className={`inline-flex items-center gap-1 font-medium ${KIND_CLASSES[item.kind]}`}>
-            {SUCCESS_KINDS.has(item.kind) && <Check className="h-3 w-3 flex-none" aria-hidden="true" />}
-            {KIND_LABELS[item.kind]}
-          </span>
+          <OutcomeKindLabel kind={item.kind} />
           <Dot />
           <RepositoryLabel repository={item.repository} />
           <WorkReference issueNumber={item.issueNumber} prNumber={item.prNumber} />

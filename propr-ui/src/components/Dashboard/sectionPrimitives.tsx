@@ -135,9 +135,23 @@ export const SectionSkeleton: React.FC<{ rows?: number }> = ({ rows = 3 }) => (
   </div>
 );
 
-/** Metadata line above a title. Secondary facts wrap or drop before a title truncates. */
-export const RowMeta: React.FC<{ children: React.ReactNode }> = ({ children }) => (
-  <span className="flex min-w-0 flex-wrap items-center gap-x-1.5 gap-y-1 text-xs">{children}</span>
+/**
+ * Metadata line above a title. Secondary facts wrap or drop before a title truncates.
+ *
+ * `wrap={false}` keeps the whole line on one row in a narrow column: the
+ * repository chip is the only shrinkable child (it carries `min-w-0` and
+ * truncates behind its own tooltip), so the entity chip stays beside the
+ * repository instead of being pushed onto a line of its own and making every
+ * row in the column a line taller.
+ */
+export const RowMeta: React.FC<{ children: React.ReactNode; wrap?: boolean }> = ({ children, wrap = true }) => (
+  <span
+    className={`flex min-w-0 items-center gap-x-1.5 text-xs ${
+      wrap ? 'flex-wrap gap-y-1' : 'flex-nowrap overflow-hidden'
+    }`}
+  >
+    {children}
+  </span>
 );
 
 /** Titles wrap to two lines rather than being cut off mid-word. */

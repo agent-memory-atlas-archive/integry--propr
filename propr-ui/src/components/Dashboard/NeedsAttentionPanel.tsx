@@ -88,8 +88,19 @@ const AttentionRow: React.FC<{ item: AttentionItem }> = ({ item }) => {
   return (
     <li className="border-b border-slate-100 last:border-b-0">
       <div className="px-3 py-2.5">
-        <RowMeta>
-          <span className={`font-semibold ${item.category === 'blocked' ? 'text-amber-700' : 'text-slate-700'}`}>
+        {/*
+          One line, like the row in "Happening now": reason, repository, entity.
+          The panel lives in the narrow column, so without `wrap={false}` the
+          entity chip drops to a line of its own and every row here is a line
+          taller than the same row in the main column. The repository chip
+          gives up width first and keeps its full name in its tooltip.
+        */}
+        <RowMeta wrap={false}>
+          <span
+            className={`flex-none whitespace-nowrap font-semibold ${
+              item.category === 'blocked' ? 'text-amber-700' : 'text-slate-700'
+            }`}
+          >
             {REASON_LABELS[item.kind]}
           </span>
           <Dot />
