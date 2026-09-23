@@ -288,6 +288,12 @@ Files run serially within each shard with fresh data directories and an
 isolated Redis flush between files. Native workspace suites such as `propr-ui`
 are split into four workspace parts. Docs preparation runs once in its own job.
 
+Every unit is bounded by the same per-unit timeout (`PROPR_TEST_TIMEOUT_MS`,
+180s by default). `propr-ui` once crossed it as a single unit and failed the
+nightly suite with no earlier signal, so the timing report now also lists the
+units that passed while using 60% or more of that budget, and each one becomes
+a run annotation. A unit listed there is the next one to split.
+
 The required **Run Full Test Suite** name stays unchanged. Its gate requires
 all shards, docs, complete summary verification, and the hosted native Electron
 job to succeed. Electron runs on hosted Ubuntu on both routes with

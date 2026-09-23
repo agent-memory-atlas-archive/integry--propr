@@ -6,12 +6,14 @@ import { join } from 'node:path';
 import { describe, test } from 'node:test';
 import {
     NATIVE_WORKSPACE_PARTS,
+    TIMEOUT_MARGIN_RATIO,
     buildManifest,
     buildTestArguments,
     buildWorkspaceCommand,
     discoverNativeWorkspaceTests,
     discoverTestFiles,
     discoverWorkspaceTestRoots,
+    formatTimeoutRiskWarning,
     formatTimingReport,
     parseCliArguments,
     parseShardConfig,
@@ -19,6 +21,7 @@ import {
     runSuite,
     runTestProcess,
     selectTestFiles,
+    selectTimeoutRisks,
     shouldFlushRedis,
     unitKey,
     usesNativeWorkspaceTestRunner,
@@ -370,6 +373,83 @@ describe('release test-suite runner', () => {
             '| 3.0s | failed | `propr-ui#2/4` (workspace) |',
             '| 1.0s | passed | `test/medium.test.ts` |',
         ]);
+        assert.doesNotMatch(report, /per-unit timeout/, 'a report without a timeout budget stays quiet');
+    });
+
+    // propr-ui stayed healthy and simply grew until it outlasted the per-unit
+    // timeout and failed the nightly suite. A unit that already spends most of
+    // its budget is reported while it still passes.
+    test('warns about passing units that are close to the per-unit timeout', () => {
+        const summary = {
+            shard: null,
+            timeoutMs: 180_000,
+            totalUnits: 4,
+            durationMs: 300_000,
+            passed: 3,
+            results: [
+                { kind: 'file', id: 'test/quick.test.ts', status: 'passed', durationMs: 107_999 },
+                { kind: 'workspace', id: 'propr-ui#2/4', status: 'passed', durationMs: 108_000 },
+                { kind: 'file', id: 'test/slow.test.ts', status: 'passed', durationMs: 171_000 },
+                { kind: 'workspace', id: 'propr-ui#3/4', status: 'failed', durationMs: 180_000 },
+            ],
+        };
+
+        assert.equal(TIMEOUT_MARGIN_RATIO, 0.6);
+        // The unit that timed out is left to the failure list; the units that
+        // still pass are the ones worth splitting now.
+        assert.deepEqual(selectTimeoutRisks(summary).map(result => result.id), ['test/slow.test.ts', 'propr-ui#2/4']);
+        assert.deepEqual(selectTimeoutRisks(summary, 0.9).map(result => result.id), ['test/slow.test.ts']);
+        assert.deepEqual(selectTimeoutRisks({ ...summary, timeoutMs: undefined }), [], 'no budget, nothing to measure against');
+
+        const report = formatTimingReport(summary);
+        assert.match(report, /Passing units at or above 60% of the 180\.0s per-unit timeout\. Split or speed these up before they fail:/);
+        assert.match(report, /^- `test\/slow\.test\.ts` used 95% \(171\.0s\)$/m);
+        assert.match(report, /^- `propr-ui#2\/4` used 60% \(108\.0s\)$/m);
+        assert.doesNotMatch(report, /^- `test\/quick\.test\.ts`/m);
+        assert.doesNotMatch(report, /^- `propr-ui#3\/4`/m);
+
+        const [risk] = selectTimeoutRisks(summary);
+        assert.equal(
+            formatTimeoutRiskWarning(risk, summary.timeoutMs, { GITHUB_ACTIONS: 'true' }),
+            '::warning title=Test unit near the per-unit timeout::test/slow.test.ts used 95% (171.0s) of the 180.0s per-unit timeout',
+        );
+        assert.equal(
+            formatTimeoutRiskWarning(risk, summary.timeoutMs, {}),
+            'Warning: test/slow.test.ts used 95% (171.0s) of the 180.0s per-unit timeout',
+        );
+    });
+
+    test('records the per-unit timeout every unit was measured against', () => {
+        const summaryDirectory = mkdtempSync(join(tmpdir(), 'propr-runner-summary-'));
+        const summaryFile = join(summaryDirectory, 'summary.json');
+        const env = {
+            ...process.env,
+            PROPR_TEST_SHARD_INDEX: '',
+            PROPR_TEST_SHARD_COUNT: '',
+            PROPR_TEST_REDIS_ISOLATION: '',
+            PROPR_TEST_SUMMARY_FILE: summaryFile,
+            GITHUB_STEP_SUMMARY: '',
+            GITHUB_ACTIONS: '',
+        };
+        // Inheriting this file's own test-runner marker would make the nested
+        // run skip the test file instead of executing it.
+        delete env.NODE_TEST_CONTEXT;
+        try {
+            const run = spawnSync(process.execPath, ['scripts/run-test-suite.mjs', 'test/minimal.test.ts'], {
+                cwd: new URL('..', import.meta.url),
+                encoding: 'utf8',
+                env,
+            });
+            assert.equal(run.status, 0, run.stderr);
+            const summary = JSON.parse(readFileSync(summaryFile, 'utf8'));
+            assert.equal(summary.timeoutMs, 180_000);
+            assert.equal(summary.results.length, 1);
+            assert.deepEqual(selectTimeoutRisks(summary), [], 'a fast unit must not be reported as near the timeout');
+            assert.doesNotMatch(run.stdout, /per-unit timeout/);
+            assert.doesNotMatch(run.stderr, /Warning:/);
+        } finally {
+            rmSync(summaryDirectory, { recursive: true, force: true });
+        }
     });
 
     test('keeps the four-shard matrix complete and isolated on either route', () => {
