@@ -223,9 +223,24 @@ builds up to four times over byte-identical sources.
 `apps/desktop/scripts/prepare-renderer.mjs` now records a stamp keyed to the
 source files git reports for every built workspace, the assets the CLI build
 copies in, the root manifest and lockfile, and the running Node version,
-platform and architecture, and skips a rebuild only when that key still matches
-and every declared output is present. A failed or output-less build writes no
-stamp.
+platform and architecture. A failed or output-less build writes no stamp.
+
+Reuse requires two things to still hold. The key must match: any changed byte,
+Node major, platform or architecture rebuilds, and so does a source that git
+still lists but that no longer exists on disk — a deletion or rename that has
+not been staged is keyed as absent, which invalidates the stamp and lets the
+compiler judge the new tree instead of aborting the hash. A read failure that
+is not a missing file (a permission denial, a directory where a file belongs)
+still fails the script rather than granting reuse.
+
+The generated tree must also be exactly the one that was built. The stamp
+carries the complete inventory — every file under each workspace's `dist`,
+with its size, so nested modules, their declarations and the copied asset trees
+are all covered, not only the entry points a later step loads by name. Removing
+or replacing any of them rebuilds. Incremental `.tsbuildinfo` state is excluded
+from both the inventory and the key, because `tsc --noEmit` rewrites it without
+producing output. The declared `outputs` list remains as the post-build check
+that fails a build which exits 0 without emitting what later steps load.
 
 Nothing is cached, uploaded or downloaded: the stamp lives under
 `node_modules/.cache`, which `npm ci`, a clean checkout and the self-hosted
