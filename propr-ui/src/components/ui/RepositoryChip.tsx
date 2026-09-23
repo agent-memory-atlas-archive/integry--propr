@@ -3,7 +3,7 @@ import { RepositoryIcon } from '../RepositoryIcon';
 
 interface RepositoryChipProps {
   repository: string;
-  /** Repository-relative path to a custom icon; falls back to the GitHub mark when absent. */
+  /** Repository-relative path to a custom icon; the chip shows no icon at all when absent. */
   iconPath?: string | null;
   revision?: string | null;
   className?: string;
@@ -11,9 +11,10 @@ interface RepositoryChipProps {
 }
 
 /**
- * Shared monospace code chip for a repository identity: the repository icon plus `owner/name`.
- * The chip is inline so the background hugs the text instead of stretching across its column;
- * long names truncate inside it and stay reachable through the tooltip.
+ * Shared monospace code chip for a repository identity: `owner/name`, preceded by the repository's
+ * own icon when it has one. Repositories without a fetched icon render no mark rather than a wall of
+ * repeated GitHub logos. The chip is inline so the background hugs the text instead of stretching
+ * across its column; long names truncate inside it and stay reachable through the tooltip.
  */
 export const RepositoryChip: React.FC<RepositoryChipProps> = ({
   repository,
@@ -32,7 +33,7 @@ export const RepositoryChip: React.FC<RepositoryChipProps> = ({
       iconPath={iconPath}
       revision={revision}
       className="h-3.5 w-3.5"
-      fallbackClassName="text-slate-400"
+      fallback="none"
     />
     <span className="truncate font-mono">{repository}</span>
   </span>

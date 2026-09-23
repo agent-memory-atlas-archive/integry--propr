@@ -4,7 +4,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import {
   Activity, AlertTriangle, CheckCircle2, CircleDot, CirclePause, CirclePlay, CircleSlash, CircleStop,
-  ExternalLink, FileText, Filter, GitPullRequest, ListTodo, LoaderCircle, Plus, Send,
+  ExternalLink, FileText, Filter, GitPullRequest, LoaderCircle, Plus, Send,
   MoreHorizontal, Terminal, Trash2, X,
 } from 'lucide-react';
 import { getInstanceCatalog } from '../api/proprApi';
@@ -485,9 +485,15 @@ function CreateGoalDialog({ isOpen, onClose, onCreated }: CreateGoalDialogProps)
   </div>;
 }
 
-// Goal 40% · Repository 15% · Status 15% · Tokens 10% · Active time 10% · Output 10%.
-const queueGridColumns = 'xl:grid-cols-[minmax(0,2.8fr)_minmax(0,1.05fr)_minmax(0,1.05fr)_minmax(64px,0.7fr)_minmax(72px,0.7fr)_minmax(84px,0.7fr)]';
-const queueCellLabel = 'mb-1 block text-[10px] font-bold uppercase tracking-wider text-slate-400 xl:hidden';
+// Goal 35% · Repository 15% · Status 20% · Tokens 10% · Active time 10% · Output 10%.
+// Status is the widest secondary column because it carries the running task beside its badge.
+// A narrow desktop keeps the table and drops the two secondary measures instead of unfolding into
+// cards: the columns that survive are the ones the queue is scanned by.
+const queueGridColumns = 'lg:grid-cols-[minmax(0,2.45fr)_minmax(0,1.05fr)_minmax(0,1.4fr)_minmax(84px,0.7fr)] '
+  + 'xl:grid-cols-[minmax(0,2.45fr)_minmax(0,1.05fr)_minmax(0,1.4fr)_minmax(64px,0.7fr)_minmax(72px,0.7fr)_minmax(84px,0.7fr)]';
+// Tokens and active time are the first columns to go when the table narrows.
+const queueSecondaryCell = 'min-w-0 lg:hidden xl:block xl:text-right';
+const queueCellLabel = 'mb-1 block text-[10px] font-bold uppercase tracking-wider text-slate-400 lg:hidden';
 
 function GoalQueueRow({ goal, goalAgents }: { goal: Goal; goalAgents: Array<{ type: string; alias: string }> }) {
   // Live progress, never a second copy of the status: a settled goal has no current activity.
@@ -502,18 +508,20 @@ function GoalQueueRow({ goal, goalAgents }: { goal: Goal; goalAgents: Array<{ ty
   const agentLabel = formatAgentLabel(goal.agent, goalAgents);
   const modelName = getModelDisplayName(goal.requestedModel);
   return <li className="border-b border-slate-200 last:border-b-0">
-    <Link to={`/goals/${goal.id}`} className={`grid min-w-0 grid-cols-2 gap-x-4 gap-y-3 px-4 py-3 transition-colors hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-primary-500 sm:px-6 ${queueGridColumns} xl:items-center xl:gap-x-4 xl:gap-y-0 xl:py-2.5`}>
-      <div className="col-span-2 min-w-0 xl:col-span-1">
+    <Link to={`/goals/${goal.id}`} className={`grid min-w-0 grid-cols-2 gap-x-4 gap-y-3 px-4 py-3 transition-colors hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-primary-500 sm:px-6 ${queueGridColumns} lg:h-16 lg:items-center lg:gap-x-4 lg:gap-y-0 lg:py-0`}>
+      <div className="col-span-2 min-w-0 lg:col-span-1">
         <div className="flex min-w-0 items-center gap-2">
           <h3 className="min-w-0 truncate text-sm font-semibold leading-5 text-slate-900" title={goal.title}>{goal.title}</h3>
           <PreviewThumbnails media={goal.previewMedia} size="micro" />
         </div>
-        <p className="truncate text-xs leading-5 text-slate-500" title={goal.objective}>{goal.objective}</p>
-        <span className="flex min-w-0 items-center gap-1.5 text-xs leading-5 text-slate-500" title={`${agentLabel} · ${modelName}`}>
+        {/* Runtime and objective share one truncated line so every row keeps the same two-line height. */}
+        <p className="flex min-w-0 items-center gap-1.5 text-xs leading-5 text-slate-500">
           <ProviderLogo provider={goal.agent.type} className="h-3.5 w-3.5 flex-none" />
           <span className="sr-only">{agentLabel}</span>
-          <span className="truncate">{modelName}</span>
-        </span>
+          <span className="flex-none" title={`${agentLabel} · ${modelName}`}>{modelName}</span>
+          <span aria-hidden="true" className="flex-none text-slate-300">·</span>
+          <span className="truncate" title={goal.objective}>{goal.objective}</span>
+        </p>
       </div>
       <div className="min-w-0">
         <span className={queueCellLabel}>Repository</span>
@@ -522,24 +530,23 @@ function GoalQueueRow({ goal, goalAgents }: { goal: Goal; goalAgents: Array<{ ty
       <div className="min-w-0">
         <span className={queueCellLabel}>Status</span>
         <GoalState goal={goal} />
-        {activity && <span className="mt-1 flex min-w-0 items-center gap-1.5 text-xs text-slate-500">
-          <Activity className="h-3 w-3 flex-none text-blue-500" />
-          <span className="truncate" title={activity}>{activity}</span>
-        </span>}
-        {unsettled && goal.liveSummary.todos.length > 0 && <span className="mt-0.5 flex min-w-0 items-center gap-1.5 text-xs text-slate-400">
-          <ListTodo className="h-3 w-3 flex-none" />
-          <span className="truncate">{openTodos} open of {goal.liveSummary.todos.length} steps</span>
+        {/* One neutral sub-status line: the running task and its step count never push the row taller. */}
+        {(activity || (unsettled && goal.liveSummary.todos.length > 0)) && <span className="mt-1 flex min-w-0 items-center gap-1.5 text-xs leading-5 text-slate-500">
+          <Activity aria-hidden="true" className="h-3 w-3 flex-none text-slate-400" />
+          {activity && <span className="truncate" title={activity}>{activity}</span>}
+          {activity && unsettled && goal.liveSummary.todos.length > 0 && <span aria-hidden="true" className="flex-none text-slate-300">·</span>}
+          {unsettled && goal.liveSummary.todos.length > 0 && <span className="flex-none tabular-nums" title={`${openTodos} open of ${goal.liveSummary.todos.length} steps`}>{openTodos}/{goal.liveSummary.todos.length} steps</span>}
         </span>}
       </div>
-      <div className="min-w-0 xl:text-right">
+      <div className={queueSecondaryCell}>
         <span className={queueCellLabel}>Tokens</span>
         <span className="block truncate font-mono text-xs tabular-nums text-slate-700" title={`${tokens.toLocaleString('en-US')} tokens`}>{compactCount(tokens)}</span>
       </div>
-      <div className="min-w-0 xl:text-right">
+      <div className={queueSecondaryCell}>
         <span className={queueCellLabel}>Active time</span>
         <span className="block truncate font-mono text-xs tabular-nums text-slate-700">{duration(activeMs)}</span>
       </div>
-      <div className="min-w-0 xl:text-right">
+      <div className="min-w-0 lg:text-right">
         <span className={queueCellLabel}>Output</span>
         {pullRequests === 0 && issues === 0
           ? <span className="block text-xs text-slate-400" title="No issues or pull requests yet">—</span>
@@ -654,8 +661,11 @@ function GoalList() {
         : visibleGoals.length === 0
           ? <div className="border-y border-dashed border-slate-300 py-10 text-center"><p className="text-sm font-medium text-slate-700">No goals in {repositoryFilter}</p><button type="button" onClick={() => setRepositoryFilter('all')} className="mt-2 text-sm font-medium text-primary-700 hover:underline">Show all goals</button></div>
           : <div className="border-y border-slate-200 bg-white">
-            <div aria-hidden="true" data-testid="goal-queue-columns" className={`hidden gap-x-4 border-b border-slate-200 bg-slate-50 px-6 py-2 text-[10px] font-bold uppercase tracking-wider text-slate-500 ${queueGridColumns} xl:grid`}>
-              <span>Goal</span><span>Repository</span><span>Status</span><span className="text-right">Tokens</span><span className="text-right">Active time</span><span className="text-right">Output</span>
+            <div aria-hidden="true" data-testid="goal-queue-columns" className={`hidden gap-x-4 border-b border-slate-200 bg-slate-50 px-6 py-2 text-[10px] font-bold uppercase tracking-wider text-slate-500 ${queueGridColumns} lg:grid`}>
+              <span>Goal</span><span>Repository</span><span>Status</span>
+              <span data-testid="goal-queue-column-tokens" className="hidden text-right xl:block">Tokens</span>
+              <span data-testid="goal-queue-column-active-time" className="hidden text-right xl:block">Active time</span>
+              <span className="text-right">Output</span>
             </div>
             <ul aria-label="Goal work queue">{visibleGoals.map(goal => <GoalQueueRow key={goal.id} goal={goal} goalAgents={goalAgents} />)}</ul>
           </div>}

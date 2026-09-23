@@ -66,7 +66,13 @@ async function stubGoalApis(page: Page): Promise<void> {
       return;
     }
     if (pathname === '/api/goals' && route.request().method() === 'GET') {
-      await route.fulfill({ json: { goals: [goal, { ...goal, id: 'goal-2', repository: 'acme/api', title: 'Prepare Billing API' }] } });
+      // A busy row beside a settled one: both must measure the same on the desktop table.
+      await route.fulfill({ json: { goals: [goal, {
+        ...goal, id: 'goal-2', repository: 'acme/api', title: 'Prepare Billing API',
+        resultState: 'completed',
+        artifactStats: { issues: 0, openIssues: 0, pullRequests: 0, openPullRequests: 0 },
+        liveSummary: { ...goal.liveSummary, currentTask: null, todos: [] },
+      }] } });
       return;
     }
     if (pathname === '/api/tasks') {
@@ -105,6 +111,14 @@ async function contentWidths(page: Page) {
   });
 }
 
+// Every desktop row holds the same height, whatever its status, activity or artifact counts.
+async function rowHeights(page: Page) {
+  return page.evaluate(() => Array.from(
+    document.querySelectorAll('[aria-label="Goal work queue"] a'),
+    row => Math.round(row.getBoundingClientRect().height),
+  ));
+}
+
 test.beforeEach(async ({ page }) => {
   await stubGoalApis(page);
 });
@@ -119,10 +133,17 @@ test('keeps the goal work queue within the available 1024px desktop content widt
 
   expect(dimensions.queueScrollWidth).toBeLessThanOrEqual(dimensions.queueClientWidth);
   expect(dimensions.mainScrollWidth).toBeLessThanOrEqual(dimensions.mainClientWidth);
-  await expect(page.getByTestId('goal-queue-columns')).toBeHidden();
+  // A narrow desktop keeps the table and drops the two secondary measures instead of stacking cards.
+  await expect(page.getByTestId('goal-queue-columns')).toBeVisible();
+  await expect(page.getByTestId('goal-queue-column-tokens')).toBeHidden();
+  await expect(page.getByTestId('goal-queue-column-active-time')).toBeHidden();
+  expect(await rowHeights(page)).toEqual([64, 64]);
 
   await page.setViewportSize({ width: 1280, height: 820 });
   await expect(page.getByTestId('goal-queue-columns')).toBeVisible();
+  await expect(page.getByTestId('goal-queue-column-tokens')).toBeVisible();
+  await expect(page.getByTestId('goal-queue-column-active-time')).toBeVisible();
+  expect(await rowHeights(page)).toEqual([64, 64]);
   const wideDimensions = await contentWidths(page);
   expect(wideDimensions.queueScrollWidth).toBeLessThanOrEqual(wideDimensions.queueClientWidth);
   expect(wideDimensions.mainScrollWidth).toBeLessThanOrEqual(wideDimensions.mainClientWidth);

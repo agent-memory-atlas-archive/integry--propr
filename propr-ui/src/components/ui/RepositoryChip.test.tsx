@@ -3,7 +3,7 @@ import { render, screen } from '@testing-library/react';
 import { RepositoryChip } from './RepositoryChip';
 
 describe('RepositoryChip', () => {
-  it('renders a monospace chip that hugs the repository name and carries the repository icon', () => {
+  it('renders a monospace chip that hugs the repository name without a repeated GitHub mark', () => {
     render(<RepositoryChip repository="integry/propr" />);
 
     const chip = screen.getByTestId('repository-chip');
@@ -12,7 +12,8 @@ describe('RepositoryChip', () => {
     expect(chip).not.toHaveClass('block', 'w-full');
     expect(chip).toHaveAttribute('title', 'integry/propr');
     expect(chip).toHaveTextContent('integry/propr');
-    expect(screen.getByTestId('repository-icon-fallback')).toBeInTheDocument();
+    // A wall of identical GitHub logos is noise in a dense list: the slug stands alone.
+    expect(screen.queryByTestId('repository-icon-fallback')).not.toBeInTheDocument();
   });
 
   it('shows the repository-provided icon when one is configured', () => {

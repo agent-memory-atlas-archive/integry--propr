@@ -365,10 +365,11 @@ describe('GoalsPage', () => {
     expect(within(queue).getAllByRole('link')).toHaveLength(4);
     expect(screen.getByText('4 of 4')).toBeInTheDocument();
     expect(screen.queryByText(longTodo)).not.toBeInTheDocument();
-    expect(screen.getAllByText('2 open of 2 steps')).toHaveLength(4);
+    expect(screen.getAllByText('2/2 steps')).toHaveLength(4);
 
     const firstLink = within(queue).getAllByRole('link')[0];
-    expect(firstLink).toHaveClass('grid', 'grid-cols-2', 'xl:items-center');
+    expect(firstLink).toHaveClass('grid', 'grid-cols-2', 'lg:items-center');
+    expect(firstLink.className).toContain('lg:grid-cols-[');
     expect(firstLink.className).toContain('xl:grid-cols-[');
     expect(queue.parentElement).toHaveClass('border-y');
     expect(queue.parentElement).not.toHaveClass('rounded-lg', 'shadow-sm');
@@ -512,7 +513,7 @@ describe('GoalsPage', () => {
     });
   });
 
-  it('shows the repository as a hugging monospace chip with its icon', async () => {
+  it('shows the repository as a hugging monospace chip with no repeated GitHub fallback mark', async () => {
     vi.mocked(goalsApi.listGoals).mockResolvedValue({ goals: [goal] });
     render(<MemoryRouter initialEntries={['/goals']}><Routes><Route path="/goals" element={<GoalsPage />} /></Routes></MemoryRouter>);
 
@@ -520,7 +521,39 @@ describe('GoalsPage', () => {
     expect(chip).toHaveClass('inline-flex', 'font-mono', 'bg-slate-100', 'border', 'border-slate-200', 'rounded-sm');
     expect(chip).not.toHaveClass('block', 'w-full');
     expect(chip).toHaveTextContent('acme/web');
-    expect(within(chip).getByTestId('repository-icon-fallback')).toBeInTheDocument();
+    // Repositories without their own icon leave the slug alone instead of repeating the GitHub logo.
+    expect(within(chip).queryByTestId('repository-icon-fallback')).not.toBeInTheDocument();
+  });
+
+  it('holds one uniform row height with a single neutral sub-status line', async () => {
+    vi.mocked(goalsApi.listGoals).mockResolvedValue({ goals: [
+      { ...goal, id: 'goal-running' },
+      {
+        ...goal,
+        id: 'goal-settled',
+        resultState: 'completed' as const,
+        artifactStats: { issues: 0, openIssues: 0, pullRequests: 0, openPullRequests: 0 },
+      },
+    ] });
+    render(<MemoryRouter initialEntries={['/goals']}><Routes><Route path="/goals" element={<GoalsPage />} /></Routes></MemoryRouter>);
+
+    const queue = await screen.findByRole('list', { name: 'Goal work queue' });
+    // A busy row and a settled row are the same height on the desktop table.
+    within(queue).getAllByRole('link').forEach(row => expect(row).toHaveClass('lg:h-16', 'lg:items-center'));
+
+    // Status, running task and step count share one line, and the sub-status stays neutral slate.
+    const activity = screen.getByText('Implement API');
+    const subStatus = activity.parentElement as HTMLElement;
+    expect(subStatus).toHaveClass('flex', 'items-center', 'text-slate-500');
+    expect(subStatus).not.toHaveClass('text-blue-500', 'text-blue-600');
+    expect(activity).toHaveClass('truncate');
+    expect(within(subStatus).getByText('1/1 steps')).toHaveAttribute('title', '1 open of 1 steps');
+    expect(subStatus.querySelector('.text-blue-500')).toBeNull();
+
+    // The goal cell keeps its model beside the objective rather than adding a third line.
+    const objective = screen.getAllByText(goal.objective)[0];
+    expect(objective).toHaveClass('truncate');
+    expect(within(objective.parentElement as HTMLElement).getByText('GPT-5.6 Sol')).toBeInTheDocument();
   });
 
   it('keeps completed rows quiet, gray and free of a repeated activity column', async () => {
@@ -537,7 +570,7 @@ describe('GoalsPage', () => {
     expect(completed).not.toHaveClass('bg-green-100');
     // A settled goal has no live activity or open checklist to report.
     expect(screen.queryByText('Implement API')).not.toBeInTheDocument();
-    expect(screen.queryByText('1 open of 1 steps')).not.toBeInTheDocument();
+    expect(screen.queryByText('1/1 steps')).not.toBeInTheDocument();
     expect(screen.getByText('—')).toBeInTheDocument();
   });
 

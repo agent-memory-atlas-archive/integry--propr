@@ -8,6 +8,11 @@ interface RepositoryIconProps {
   revision?: string | null;
   className?: string;
   fallbackClassName?: string;
+  /**
+   * What to draw when the repository has no reachable icon of its own. Dense lists pass `none`:
+   * repeating the GitHub mark on every row is noise, so the repository slug stands alone instead.
+   */
+  fallback?: 'github' | 'none';
 }
 
 export const RepositoryIcon: React.FC<RepositoryIconProps> = ({
@@ -16,6 +21,7 @@ export const RepositoryIcon: React.FC<RepositoryIconProps> = ({
   revision,
   className = 'w-4 h-4',
   fallbackClassName = 'text-gray-400',
+  fallback = 'github',
 }) => {
   const imageUrl = useMemo(
     () => iconPath ? buildRepositoryIconUrl(repository, iconPath, revision || 'HEAD') : null,
@@ -35,6 +41,7 @@ export const RepositoryIcon: React.FC<RepositoryIconProps> = ({
     );
   }
 
+  if (fallback === 'none') return null;
   return (
     <Github
       data-testid="repository-icon-fallback"
