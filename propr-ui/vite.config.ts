@@ -48,6 +48,9 @@ export default defineConfig({
   plugins: [react(), pwaShellAssetManifest()],
   test: {
     environment: 'jsdom',
+    // Rootless CI workers see 12 host CPUs but share a two-CPU cgroup quota.
+    // Bound concurrent transforms and jsdom instances without relaxing deadlines.
+    maxWorkers: process.env.CI ? 2 : undefined,
     exclude: [...configDefaults.exclude, 'scripts/docker-context-inputs.test.mjs'],
     globals: true,
     setupFiles: ['./src/test/setup.ts'],

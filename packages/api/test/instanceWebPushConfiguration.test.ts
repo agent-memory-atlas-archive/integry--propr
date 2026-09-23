@@ -3,14 +3,14 @@ import { spawn } from 'node:child_process';
 import { chmodSync, copyFileSync, existsSync, linkSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { stripTypeScriptTypes } from 'node:module';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { test } from 'node:test';
 import { AUTOMATIC_VAPID_SUBJECT, resolveInstanceWebPushConfiguration } from '../services/instanceWebPushConfiguration.js';
 import { WEB_PUSH_CONFIGURATION_WARNINGS, validateWebPushConfiguration } from '../services/webPushConfiguration.js';
 
-function fixture(t: { after: (fn: () => void) => void }) {
-  const directory = mkdtempSync(join(tmpdir(), 'propr-vapid-'));
+function fixture(t: { after: (fn: () => void) => void }, root = tmpdir()) {
+  const directory = mkdtempSync(join(root, 'propr-vapid-'));
   t.after(() => rmSync(directory, { recursive: true, force: true }));
   return { directory, environment: { DATA_DIR: directory }, filename: join(directory, 'web-push/vapid.json') };
 }
@@ -133,10 +133,20 @@ test('failed persistence advertises no transient key; retries reuse an already p
 
 const SERVICES = fileURLToPath(new URL('../services/', import.meta.url));
 
+// Self-hosted CI sets TMPDIR to a private 0700 directory, which an unprivileged child
+// cannot traverse. Use its nearest ancestor that every path component lets others search.
+function traversableTemporaryRoot() {
+  let candidate = tmpdir();
+  for (let current = candidate; ; current = dirname(current)) {
+    if ((statSync(current).mode & 0o001) === 0) candidate = dirname(current);
+    if (current === dirname(current)) return candidate;
+  }
+}
+
 // Root-run CI keeps node, tsx and the checkout under a private home directory, so an
 // unprivileged child needs its own world-readable copy of the runtime and resolver.
-function unprivilegedRuntime(t: { after: (fn: () => void) => void }) {
-  const directory = mkdtempSync(join(tmpdir(), 'propr-vapid-runtime-'));
+function unprivilegedRuntime(t: { after: (fn: () => void) => void }, root: string) {
+  const directory = mkdtempSync(join(root, 'propr-vapid-runtime-'));
   t.after(() => rmSync(directory, { recursive: true, force: true }));
   chmodSync(directory, 0o755);
   const executable = join(directory, 'node');
@@ -178,9 +188,11 @@ test('independent concurrent processes and recreated processes converge on one c
 });
 
 test('unwritable mount fails safely; retry after permissions repair succeeds', async t => {
-  const { environment, directory } = fixture(t);
-  // Drop root in the child so this verifies real EACCES even in root-run CI.
-  const unprivileged = process.getuid?.() === 0 ? { uid: 65534, ...unprivilegedRuntime(t) } : undefined;
+  // Drop root in the child so this verifies real EACCES even in root-run CI. The mount
+  // and runtime must be reachable, so only the 0555 mount itself can deny the write.
+  const root = process.getuid?.() === 0 ? traversableTemporaryRoot() : undefined;
+  const { environment, directory } = fixture(t, root);
+  const unprivileged = root ? { uid: 65534, ...unprivilegedRuntime(t, root) } : undefined;
   chmodSync(directory, 0o555);
   try {
     assert.deepEqual(JSON.parse(await child(environment, unprivileged)),

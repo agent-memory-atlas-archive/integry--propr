@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 
 const memoryStorage = (initial: Record<string, string> = {}) => {
   const values = new Map(Object.entries(initial));
@@ -79,6 +79,13 @@ const importProprApi = async () => {
 };
 
 describe('logout', () => {
+  beforeAll(async () => {
+    // Keep the cold API module transform outside the first test's timeout.
+    await importProprApi();
+    // Each test must still initialize the API from its own window and env.
+    vi.resetModules();
+  });
+
   afterEach(() => {
     vi.restoreAllMocks();
     vi.resetModules();

@@ -189,6 +189,17 @@ const run = runNativeLifecycleCommand;
 
 const delay = milliseconds => new Promise(resolveDelay => setTimeout(resolveDelay, milliseconds));
 
+// Races an operation against a deadline and always clears the deadline timer.
+// An uncleared deadline keeps Node alive after the lifecycle already
+// succeeded, which previously held CI for the full ten-minute RPM deadline.
+export const withDeadline = (operation, milliseconds, message) => {
+  let timer;
+  const deadline = new Promise((_resolveDeadline, rejectDeadline) => {
+    timer = setTimeout(() => rejectDeadline(new Error(message)), milliseconds);
+  });
+  return Promise.race([operation, deadline]).finally(() => clearTimeout(timer));
+};
+
 const errorFrom = (error, fallback) => error instanceof Error ? error : new Error(fallback);
 
 export const NATIVE_LIFECYCLE_OPERATION_STAGES = Object.freeze([
@@ -440,10 +451,7 @@ class OwnedProcessGroup {
 
   async waitForClose(timeout) {
     if (this.closed) return this.result;
-    return Promise.race([
-      this.closePromise,
-      delay(timeout).then(() => { throw new Error('Native application close deadline expired'); }),
-    ]);
+    return withDeadline(this.closePromise, timeout, 'Native application close deadline expired');
   }
 
   async terminate() {
@@ -669,13 +677,11 @@ const stopPipelineProcess = async (child, completion) => {
   const running = child.exitCode === null
     && (child.signalCode === undefined || child.signalCode === null);
   if (running) child.kill('SIGTERM');
-  const result = await Promise.race([completion, delay(CLEANUP_GRACE_MS).then(() => null)]);
+  const result = await withDeadline(completion, CLEANUP_GRACE_MS, 'RPM extraction process stop grace expired')
+    .catch(() => null);
   if (result) return result;
   child.kill('SIGKILL');
-  return Promise.race([
-    completion,
-    delay(CLEANUP_GRACE_MS).then(() => { throw new Error('RPM extraction process cleanup deadline expired'); }),
-  ]);
+  return withDeadline(completion, CLEANUP_GRACE_MS, 'RPM extraction process cleanup deadline expired');
 };
 
 export const extractRpm = async (artifact, root, {
@@ -705,15 +711,16 @@ export const extractRpm = async (artifact, root, {
 
   let results;
   try {
-    results = await Promise.race([
+    results = await withDeadline(
       Promise.all([
         converterCompletion,
         extractorCompletion,
         stopExtractorOnConverterFailure,
         stopConverterOnExtractorFailure,
       ]).then(([converterResult, extractorResult]) => [converterResult, extractorResult]),
-      delay(timeout).then(() => { throw new Error('RPM extraction deadline expired'); }),
-    ]);
+      timeout,
+      'RPM extraction deadline expired',
+    );
   } catch (error) {
     const cleanup = await Promise.allSettled([
       stopPipelineProcess(converter, converterCompletion),
@@ -1282,12 +1289,13 @@ export const closeProfileApi = async ({ server, port }, {
       });
     }
     try {
-      await Promise.race([
+      await withDeadline(
         new Promise((resolveClose, rejectClose) => server.close(error => (
           error ? rejectClose(error) : resolveClose()
         ))),
-        delay(closeDeadline).then(() => { throw new Error('Native profile API close deadline expired'); }),
-      ]);
+        closeDeadline,
+        'Native profile API close deadline expired',
+      );
     } catch (error) {
       closeError = errorFrom(error, 'Native profile API close failed');
     }
