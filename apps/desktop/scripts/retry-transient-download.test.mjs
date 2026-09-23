@@ -19,6 +19,7 @@ import {
 
 const execFileAsync = promisify(execFile);
 const retryScript = fileURLToPath(new URL('./retry-transient-download.mjs', import.meta.url));
+const shasumsUrl = 'https://github.com/electron/electron/releases/download/v44.0.0/SHASUMS256.txt';
 
 const scriptedSpawn = outcomes => {
   const invocations = [];
@@ -117,6 +118,9 @@ describe('transient download retries', () => {
       'Failed to download Electron zip',
       'Received status code 503 from the server',
       'UND_ERR_CONNECT_TIMEOUT',
+      `HTTPError: Response code 500 (Internal Server Error) for ${shasumsUrl}`,
+      `✖ Packaging for x64 on linux [FAILED: Response code 500 (Internal Server Error) for ${shasumsUrl}]`,
+      'npm error code ETIMEDOUT\nnpm error syscall read\nnpm error errno -60\nnpm error network read ETIMEDOUT',
     ]) assert.ok(isTransientDownloadFailure(output), `expected transient: ${output}`);
 
     for (const output of [
@@ -124,8 +128,38 @@ describe('transient download retries', () => {
       'error TS2345: Argument of type string is not assignable',
       '✖ 1 test failed',
       'Received status code 404 from the server',
+      `HTTPError: Response code 404 (Not Found) for ${shasumsUrl}`,
+      'npm error `npm ci` can only install packages when your package.json and package-lock.json are in sync.',
       'Packaged darwin desktop icon failed native metadata verification',
     ]) assert.ok(!isTransientDownloadFailure(output), `expected permanent: ${output}`);
+  });
+
+  test('retries a locked install interrupted by a registry read timeout, but not a lockfile defect', async () => {
+    const registryTimeout = [
+      'npm error code ETIMEDOUT',
+      'npm error syscall read',
+      'npm error errno -60',
+      'npm error network read ETIMEDOUT',
+      'npm error network This is a problem related to network connectivity.',
+      '',
+    ].join('\n');
+    const install = { command: 'npm', arguments: ['ci'] };
+    const timedOut = await run([
+      { exitCode: 196, stderr: registryTimeout },
+      { exitCode: 0, stdout: 'added 1841 packages' },
+    ], install);
+    assert.equal(timedOut.exitCode, 0);
+    assert.equal(timedOut.invocations.length, 2);
+    assert.deepEqual(timedOut.invocations[1], install);
+    assert.deepEqual(timedOut.delays, [DEFAULT_BACKOFF_MS]);
+
+    const outOfSync = await run([
+      { exitCode: 1, stderr: 'npm error `npm ci` can only install packages when your package.json and package-lock.json are in sync.\n' },
+      { exitCode: 0 },
+    ], install);
+    assert.equal(outOfSync.exitCode, 1);
+    assert.equal(outOfSync.invocations.length, 1);
+    assert.deepEqual(outOfSync.logs, ['Command failed without a transient download signature; not retrying.']);
   });
 
   test('parses the command after the first separator and keeps nested separators', () => {

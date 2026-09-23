@@ -1,10 +1,11 @@
 #!/usr/bin/env node
 
 // electron-forge fetches the Electron runtime archive and native dependency headers from the
-// Electron release endpoints on every cache miss. Those downloads fail transiently (`fetch
-// failed`, reset sockets, 5xx) often enough to fail otherwise-green matrix legs, so retry the
-// whole packaging command for that failure class only. Any failure without a transient download
-// signature - a real build, test, or packaging defect - exits on the first attempt.
+// Electron release endpoints on every cache miss, and `npm ci` fetches the locked tarballs from
+// the registry. Those downloads fail transiently (`fetch failed`, reset sockets, read timeouts,
+// 5xx) often enough to fail otherwise-green matrix legs, so retry the whole wrapped command for
+// that failure class only. Any failure without a transient download signature - a real build,
+// test, packaging, or lockfile defect - exits on the first attempt.
 
 import { spawn as nodeSpawn } from 'node:child_process';
 import { setTimeout as sleep } from 'node:timers/promises';
@@ -20,7 +21,9 @@ export const TRANSIENT_DOWNLOAD_PATTERNS = [
   /network (?:timeout|error)/i,
   /(?:failed|unable) to download/i,
   /\b(?:ECONNRESET|ECONNREFUSED|EAI_AGAIN|ENOTFOUND|ETIMEDOUT|EPIPE|UND_ERR_(?:CONNECT_TIMEOUT|SOCKET|HEADERS_TIMEOUT))\b/,
-  /\b(?:status|statusCode|HTTP)\b[^\n]{0,20}\b5\d{2}\b/i,
+  // `@electron/get` surfaces release-endpoint outages as `HTTPError: Response code 500 (...)`,
+  // where `HTTP` carries no trailing word boundary, so match the reported code phrase too.
+  /\b(?:status|statusCode|HTTP|response code)\b[^\n]{0,20}\b5\d{2}\b/i,
   /getaddrinfo/i,
 ];
 
