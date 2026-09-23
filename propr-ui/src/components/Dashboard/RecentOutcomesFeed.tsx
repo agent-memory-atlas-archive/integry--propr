@@ -20,6 +20,8 @@ import {
   RowTitle,
   SectionEmpty,
   SectionError,
+  SectionFooter,
+  SectionFooterButton,
   SectionHeading,
   SectionSkeleton,
   WorkReference,
@@ -35,6 +37,9 @@ import {
 /** Outcomes read per request; the window and the visible count narrow it further. */
 const FETCH_LIMIT = 50;
 const VISIBLE_ITEMS = 8;
+
+/** Rows drawn rather than folded behind a toggle, as in "Happening now". */
+const OVERFLOW_SLACK = 1;
 
 type OutcomeWindow = '24h' | '7d';
 
@@ -150,7 +155,9 @@ export const RecentOutcomesFeed: React.FC<DashboardSectionProps> = ({ repository
     return (data?.items ?? []).filter(item => Date.parse(item.occurredAt) >= cutoff);
   }, [data, now, range]);
 
-  const visible = showAll ? items : items.slice(0, VISIBLE_ITEMS);
+  const canCollapse = items.length > VISIBLE_ITEMS + OVERFLOW_SLACK;
+  const overflowCount = canCollapse ? items.length - VISIBLE_ITEMS : 0;
+  const visible = showAll || !canCollapse ? items : items.slice(0, VISIBLE_ITEMS);
 
   const body = () => {
     if (loading) return <SectionSkeleton rows={4} />;
@@ -167,14 +174,18 @@ export const RecentOutcomesFeed: React.FC<DashboardSectionProps> = ({ repository
             <OutcomeRow key={item.id} item={item} />
           ))}
         </ul>
-        {items.length > VISIBLE_ITEMS && (
-          <button
-            type="button"
-            onClick={() => setShowAll(value => !value)}
-            className="w-full px-3 py-2 text-left text-xs font-semibold text-slate-600 transition-colors hover:bg-slate-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-teal-500"
-          >
-            {showAll ? 'Show fewer' : `Show ${items.length - VISIBLE_ITEMS} more`}
-          </button>
+        {/*
+          The expand control closes the pane as a footer bar rather than
+          floating as a centred link in the white space under the last row.
+        */}
+        {overflowCount > 0 && (
+          <SectionFooter data-testid="recent-outcomes-footer">
+            <span className="ml-auto">
+              <SectionFooterButton expanded={showAll} onClick={() => setShowAll(value => !value)}>
+                {showAll ? 'Show fewer' : `Show ${overflowCount} more`}
+              </SectionFooterButton>
+            </span>
+          </SectionFooter>
         )}
       </>
     );

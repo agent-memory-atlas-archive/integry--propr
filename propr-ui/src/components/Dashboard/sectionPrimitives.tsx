@@ -37,10 +37,19 @@ export const Dot: React.FC = () => <span className="text-gray-300" aria-hidden="
  * A repository is a technical entity, so it gets the same chip treatment as an
  * issue or a pull request rather than reading as prose. The icon rides inside
  * the chip so the two never separate when the metadata line wraps.
+ *
+ * `short` drops the owner and draws only the repository name. It is for the
+ * narrow right rail, where `example/workspace` has to be cut to
+ * `example/workspa…` to fit beside a status and an entity chip — eight
+ * characters of organisation spent to make the eight characters that identify
+ * the repository unreadable. The owner is the constant in any one instance, so
+ * it is the part that can go; the full slug stays in the tooltip and in the
+ * icon beside it.
  */
-export const RepositoryLabel: React.FC<{ repository: string }> = ({ repository }) => {
+export const RepositoryLabel: React.FC<{ repository: string; short?: boolean }> = ({ repository, short = false }) => {
   const icons = useContext(RepositoryIconContext);
   const icon = icons.get(repository);
+  const label = short ? repository.slice(repository.lastIndexOf('/') + 1) : repository;
   return (
     <span
       className="inline-flex min-w-0 items-center gap-1 whitespace-nowrap rounded-sm border border-slate-200 bg-slate-100 px-1.5 py-0.5 font-mono text-[12px] leading-4 text-slate-800"
@@ -52,7 +61,7 @@ export const RepositoryLabel: React.FC<{ repository: string }> = ({ repository }
         revision={icon?.revision}
         className="h-3.5 w-3.5 flex-none"
       />
-      <span className="truncate">{repository}</span>
+      <span className="truncate">{label}</span>
     </span>
   );
 };
@@ -111,6 +120,45 @@ export const SectionLink: React.FC<{ to: string; children: React.ReactNode }> = 
   </Link>
 );
 
+/**
+ * The bar that closes a list.
+ *
+ * Everything a section has to say after its last row — how much work is
+ * queued, how many rows are still folded away — is said here, in one tinted
+ * bar flush with the pane. A "Show N more" link left to float on its own
+ * between the last row and a footer bar reads as a stray link dropped into
+ * white space rather than as a control belonging to the list, so the section
+ * gets one footer and the expand action lives inside it. The tint is what
+ * marks it as a footer; it does not also need a rule above it.
+ */
+export const SectionFooter: React.FC<{
+  children: React.ReactNode;
+  'data-testid'?: string;
+}> = ({ children, ...rest }) => (
+  <div
+    className="flex flex-wrap items-center gap-x-3 gap-y-1 bg-slate-50 px-3 py-2 text-xs text-slate-600"
+    {...rest}
+  >
+    {children}
+  </div>
+);
+
+/** The expand/collapse control, sized and weighted to sit in a footer bar. */
+export const SectionFooterButton: React.FC<{
+  onClick: () => void;
+  expanded: boolean;
+  children: React.ReactNode;
+}> = ({ onClick, expanded, children }) => (
+  <button
+    type="button"
+    aria-expanded={expanded}
+    onClick={onClick}
+    className="-mx-1 rounded-sm px-1 font-medium text-slate-600 transition-colors hover:text-slate-900 focus:outline-none focus-visible:ring-2 focus-visible:ring-teal-500"
+  >
+    {children}
+  </button>
+);
+
 /** Quiet, non-alarming empty state. An empty list is normal operation. */
 export const SectionEmpty: React.FC<{ children: React.ReactNode }> = ({ children }) => (
   <p className="px-4 py-6 text-center text-sm text-slate-500">{children}</p>
@@ -138,16 +186,22 @@ export const SectionSkeleton: React.FC<{ rows?: number }> = ({ rows = 3 }) => (
 /**
  * Metadata line above a title. Secondary facts wrap or drop before a title truncates.
  *
- * `wrap={false}` keeps the whole line on one row in a narrow column: the
- * repository chip is the only shrinkable child (it carries `min-w-0` and
- * truncates behind its own tooltip), so the entity chip stays beside the
- * repository instead of being pushed onto a line of its own and making every
- * row in the column a line taller.
+ * `wrap={false}` keeps the whole line on one row from `lg` up, where the
+ * attention panel is a 22rem column beside the main one: the repository chip
+ * is the only shrinkable child (it carries `min-w-0` and truncates behind its
+ * own tooltip), so the entity chip stays beside the repository instead of
+ * being pushed onto a line of its own and making every row in that column a
+ * line taller.
+ *
+ * Below `lg` the same panel is the full width of a phone, and forcing one row
+ * there buys nothing: the row is already as tall as its title, and the only
+ * effect is to cut the chips down to `design-s…`. So the line wraps at small
+ * widths and only refuses to wrap where the column is what constrains it.
  */
 export const RowMeta: React.FC<{ children: React.ReactNode; wrap?: boolean }> = ({ children, wrap = true }) => (
   <span
-    className={`flex min-w-0 items-center gap-x-1.5 text-xs ${
-      wrap ? 'flex-wrap gap-y-1' : 'flex-nowrap overflow-hidden'
+    className={`flex min-w-0 flex-wrap items-center gap-x-1.5 gap-y-1 text-xs ${
+      wrap ? '' : 'lg:flex-nowrap lg:gap-y-0 lg:overflow-hidden'
     }`}
   >
     {children}

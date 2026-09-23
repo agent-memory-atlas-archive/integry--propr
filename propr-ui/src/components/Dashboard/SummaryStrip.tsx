@@ -4,8 +4,12 @@
  * These are four single numbers, so they get one line — not four boxes, and
  * not four cells with a rule between each pair. Space separates them. The
  * strip is a real piece of chrome rather than loose text between the
- * breadcrumb bar and the feed: a 40px tinted bar with its own bottom rule, so
- * it reads as the console's status/filter bar. Counts stay neutral; only
+ * breadcrumb bar and the feed: a 40px tinted bar with its own bottom rule,
+ * sitting against the white toolbar above it, so both of its edges are
+ * visible. Its tint is a step darker than the pane headings beneath it —
+ * white toolbar, slate-100 console bar, slate-50 pane headers, white rows —
+ * so the one bar that speaks for the whole console is not mistaken for one
+ * more pane heading. Counts stay neutral; only
  * "Needs attention" takes colour, and only when it is non-zero — if everything
  * is emphasised, nothing is.
  *
@@ -42,7 +46,7 @@ const SummaryCount: React.FC<SummaryCountProps> = ({ label, value, href, title, 
     data-testid={testId}
     data-emphasis={emphasised ? 'true' : 'false'}
     className={`flex min-w-0 items-baseline gap-2 px-3 py-2.5 transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-teal-500 ${
-      emphasised ? 'hover:bg-amber-100/60' : 'hover:bg-slate-100'
+      emphasised ? 'hover:bg-amber-100' : 'hover:bg-slate-200/70'
     }`}
   >
     <span
@@ -75,7 +79,7 @@ export const SummaryStrip: React.FC<DashboardSectionProps> = ({ repository, refr
     <div
       aria-label="Work summary"
       data-testid="summary-strip"
-      className="flex min-h-10 flex-wrap items-stretch border-b border-slate-200 bg-slate-50"
+      className="flex min-h-10 flex-wrap items-stretch border-b border-slate-200 bg-slate-100"
     >
       <SummaryCount
         testId="summary-needs-attention"

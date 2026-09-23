@@ -221,8 +221,17 @@ describe('Dashboard studio design rules', () => {
     // strip is real chrome: a fixed-height tinted bar closed by a rule.
     const strip = screen.getByTestId('summary-strip');
     expect(strip.className).toMatch(/min-h-10/);
-    expect(strip.className).toMatch(/bg-slate-50/);
+    // A step darker than the pane headings below, which are bg-slate-50: the
+    // console's own bar outranks a pane's heading.
+    expect(strip.className).toMatch(/bg-slate-100/);
     expect(strip.className).toMatch(/border-b/);
+    // A bar is only a bar if its edges are visible. When the toolbar above
+    // carried the same tint the two merged into one band and the counts read
+    // as loose text again, so the toolbar stays on the canvas.
+    const toolbar = strip.previousElementSibling as HTMLElement | null;
+    expect(toolbar).not.toBeNull();
+    expect(toolbar).toContainElement(screen.getByTestId('live-status'));
+    expect(toolbar?.className).not.toMatch(/bg-slate-50|bg-gray-50/);
     // The four counts are spaced apart, not ruled apart: the strip closes the
     // toolbar band with one rule and draws no internal ones.
     for (const testId of ['summary-needs-attention', 'summary-running', 'summary-queued', 'summary-completed']) {
@@ -338,8 +347,10 @@ describe('Dashboard studio design rules', () => {
     // taller than the identical row in the main column.
     const panel = await screen.findByTestId('needs-attention-panel');
     const meta = (await within(panel).findByText('Run failed')).parentElement;
-    expect(meta?.className).toMatch(/flex-nowrap/);
-    expect(meta?.className).not.toMatch(/flex-wrap/);
+    // Only from `lg`, where the column is what constrains the line. On a phone
+    // the same panel is full width and wrapping costs nothing.
+    expect(meta?.className).toMatch(/lg:flex-nowrap/);
+    expect(meta?.className).not.toMatch(/lg:flex-wrap/);
     expect(meta).toContainElement(within(panel).getByTitle('Issue #42'));
     expect(meta).toContainElement(within(panel).getAllByTitle('acme/app')[0]);
   });
@@ -385,5 +396,58 @@ describe('Dashboard studio design rules', () => {
       // The face of the button is one verb; the entity is announced, not drawn.
       expect(action.firstChild?.textContent).toMatch(/^(Open|Review)$/);
     }
+  });
+
+  it('drops the owner from the repository chip in the narrow attention column', async () => {
+    mockAttention.mockResolvedValue(attentionResponse([attentionItem()]));
+
+    renderDashboard();
+    await waitForSections();
+
+    // Three chips do not fit the right rail at full length, and the truncation
+    // lands on the half of the slug that identifies the repository. The owner
+    // is the same on every row, so it is the part that goes — and it stays in
+    // the tooltip.
+    const panel = await screen.findByTestId('needs-attention-panel');
+    const chip = within(panel).getAllByTitle('acme/app')[0];
+    expect(chip).toHaveTextContent(/^app$/);
+    expect(chip.textContent).not.toMatch(/acme/);
+
+    // The main column is wide enough for the whole slug, so it keeps it.
+    const active = screen.getByTestId('happening-now-section');
+    expect(within(active).getAllByTitle('acme/app')[0]).toHaveTextContent('acme/app');
+  });
+
+  it('closes a list with one footer bar instead of a floating expand link', async () => {
+    mockActive.mockResolvedValue(activeResponse(
+      Array.from({ length: 9 }, (_, index) => activeItem({ id: `active-${index}`, taskId: `t-${index}` })),
+      [activeItem({ id: 'task:q', taskId: 'q', state: 'pending', phase: 'Waiting' })],
+    ));
+
+    renderDashboard();
+    await waitForSections();
+
+    // The queue summary and the expand control are the same bar: a centred
+    // link hovering above a tinted strip reads as a stray link, not as the
+    // end of the list.
+    const footer = await screen.findByTestId('happening-now-footer');
+    expect(footer.className).toMatch(/bg-slate-50/);
+    expect(footer).toContainElement(screen.getByTestId('queue-summary'));
+    expect(footer).toContainElement(screen.getByRole('button', { name: 'Show 4 more' }));
+  });
+
+  it('draws a single overflow row rather than folding it behind a toggle', async () => {
+    mockActive.mockResolvedValue(activeResponse(
+      Array.from({ length: 6 }, (_, index) => activeItem({ id: `active-${index}`, taskId: `t-${index}` })),
+    ));
+
+    renderDashboard();
+    await waitForSections();
+
+    // "Show 1 more" spends a line of chrome and a click to reveal a line of
+    // content, in a column that has the room for it.
+    const list = await screen.findByTestId('happening-now-list');
+    expect(list.children).toHaveLength(6);
+    expect(screen.queryByRole('button', { name: /Show 1 more/ })).toBeNull();
   });
 });

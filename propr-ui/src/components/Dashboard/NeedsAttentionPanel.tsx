@@ -92,8 +92,14 @@ const AttentionRow: React.FC<{ item: AttentionItem }> = ({ item }) => {
           One line, like the row in "Happening now": reason, repository, entity.
           The panel lives in the narrow column, so without `wrap={false}` the
           entity chip drops to a line of its own and every row here is a line
-          taller than the same row in the main column. The repository chip
-          gives up width first and keeps its full name in its tooltip.
+          taller than the same row in the main column.
+
+          Three chips do not fit 320px at full length, and the one that loses
+          the fight is the repository: `example/workspa…` identifies nothing.
+          So the chip here is `short` — the repository name without its owner,
+          which is the same eight characters on every row of a given instance.
+          That buys the line enough room for all three chips to sit whole,
+          with the full slug still in the chip's tooltip.
         */}
         <RowMeta wrap={false}>
           <span
@@ -104,7 +110,7 @@ const AttentionRow: React.FC<{ item: AttentionItem }> = ({ item }) => {
             {REASON_LABELS[item.kind]}
           </span>
           <Dot />
-          <RepositoryLabel repository={item.repository} />
+          <RepositoryLabel repository={item.repository} short />
           <WorkReference issueNumber={item.issueNumber} prNumber={item.prNumber} />
         </RowMeta>
         <RowTitle>{itemTitle(item)}</RowTitle>

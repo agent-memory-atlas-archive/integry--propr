@@ -19,6 +19,8 @@ import {
   RowTitle,
   SectionEmpty,
   SectionError,
+  SectionFooter,
+  SectionFooterButton,
   SectionHeading,
   SectionLink,
   SectionSkeleton,
@@ -36,6 +38,15 @@ import {
 
 /** Active rows shown before the list has to be expanded. */
 const VISIBLE_ITEMS = 5;
+
+/**
+ * Rows the list will simply draw rather than fold behind a control.
+ *
+ * A "Show 1 more" toggle costs a line of chrome to save a line of content and
+ * asks for a click to reveal a single row. Past the slack the toggle earns its
+ * place; at or below it the row is just shown.
+ */
+const OVERFLOW_SLACK = 1;
 
 const itemKey = (item: ActiveItem): string => item.id;
 
@@ -97,35 +108,49 @@ const ActiveRow: React.FC<{
 );
 
 /**
- * Waiting work, summarised rather than listed, with the real reason when known.
+ * The one footer under the running list.
  *
- * The tint is what marks it as a footer rather than one more row; it does not
- * also need a rule above it to say the same thing twice.
+ * Waiting work is summarised rather than listed, and the control that unfolds
+ * the rest of the list rides in the same bar. Two pieces of after-the-list
+ * chrome — a floating link above a tinted strip — read as an accident; one bar
+ * reads as the end of the pane.
  */
-const QueueSummary: React.FC<{ queuedCount: number; reason: string | null; repository: string }> = ({
-  queuedCount,
-  reason,
-  repository,
-}) => {
-  if (queuedCount === 0) return null;
+const HappeningNowFooter: React.FC<{
+  queuedCount: number;
+  reason: string | null;
+  repository: string;
+  overflowCount: number;
+  expanded: boolean;
+  onToggle: () => void;
+}> = ({ queuedCount, reason, repository, overflowCount, expanded, onToggle }) => {
+  const showToggle = overflowCount > 0;
+  if (queuedCount === 0 && !showToggle) return null;
   return (
-    <div
-      data-testid="queue-summary"
-      className="flex flex-wrap items-center gap-x-1.5 gap-y-1 bg-slate-50 px-3 py-2 text-xs text-slate-600"
-    >
-      <span className="font-medium text-slate-700">
-        {queuedCount} queued
-      </span>
-      {reason && (
-        <>
-          <Dot />
-          <span>{reason}</span>
-        </>
+    <SectionFooter data-testid="happening-now-footer">
+      {queuedCount > 0 && (
+        <span data-testid="queue-summary" className="flex flex-wrap items-center gap-x-1.5 gap-y-1">
+          <span className="font-medium text-slate-700">
+            {queuedCount} queued
+          </span>
+          {reason && (
+            <>
+              <Dot />
+              <span>{reason}</span>
+            </>
+          )}
+        </span>
       )}
-      <span className="ml-auto">
-        <SectionLink to={filteredTasksHref('waiting', repository)}>View queue</SectionLink>
+      <span className="ml-auto flex items-center gap-x-3">
+        {showToggle && (
+          <SectionFooterButton expanded={expanded} onClick={onToggle}>
+            {expanded ? 'Show fewer' : `Show ${overflowCount} more`}
+          </SectionFooterButton>
+        )}
+        {queuedCount > 0 && (
+          <SectionLink to={filteredTasksHref('waiting', repository)}>View queue</SectionLink>
+        )}
       </span>
-    </div>
+    </SectionFooter>
   );
 };
 
@@ -144,6 +169,10 @@ export const HappeningNowSection: React.FC<DashboardSectionProps> = ({ repositor
 
   const running = useMemo(() => data?.running ?? [], [data]);
   const orderedRunning = useStableOrder(running, itemKey);
+  // One row over the limit is drawn, not folded: see OVERFLOW_SLACK.
+  const canCollapse = orderedRunning.length > VISIBLE_ITEMS + OVERFLOW_SLACK;
+  const collapsedLimit = canCollapse ? VISIBLE_ITEMS : orderedRunning.length;
+  const overflowCount = canCollapse ? orderedRunning.length - VISIBLE_ITEMS : 0;
 
   const toggleExpanded = useCallback((id: string) => {
     setExpandedIds(previous => {
@@ -171,29 +200,18 @@ export const HappeningNowSection: React.FC<DashboardSectionProps> = ({ repositor
       return <SectionEmpty>No work running</SectionEmpty>;
     }
 
-    const visible = showAll ? orderedRunning : orderedRunning.slice(0, VISIBLE_ITEMS);
+    const visible = showAll ? orderedRunning : orderedRunning.slice(0, collapsedLimit);
     return (
-      <>
-        <ul data-testid="happening-now-list">
-          {visible.map(item => (
-            <ActiveRow
-              key={item.id}
-              item={item}
-              expanded={expandedIds.has(item.id)}
-              onToggle={toggleExpanded}
-            />
-          ))}
-        </ul>
-        {orderedRunning.length > VISIBLE_ITEMS && (
-          <button
-            type="button"
-            onClick={() => setShowAll(value => !value)}
-            className="w-full px-3 py-2 text-left text-xs font-semibold text-slate-600 transition-colors hover:bg-slate-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-teal-500"
-          >
-            {showAll ? 'Show fewer' : `Show ${orderedRunning.length - VISIBLE_ITEMS} more`}
-          </button>
-        )}
-      </>
+      <ul data-testid="happening-now-list">
+        {visible.map(item => (
+          <ActiveRow
+            key={item.id}
+            item={item}
+            expanded={expandedIds.has(item.id)}
+            onToggle={toggleExpanded}
+          />
+        ))}
+      </ul>
     );
   };
 
@@ -206,10 +224,13 @@ export const HappeningNowSection: React.FC<DashboardSectionProps> = ({ repositor
       {heading}
       {body()}
       {data && (
-        <QueueSummary
+        <HappeningNowFooter
           queuedCount={data.queue.queuedCount}
           reason={data.queue.reason}
           repository={repository}
+          overflowCount={overflowCount}
+          expanded={showAll}
+          onToggle={() => setShowAll(value => !value)}
         />
       )}
     </section>

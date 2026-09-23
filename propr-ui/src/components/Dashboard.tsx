@@ -173,11 +173,15 @@ const Dashboard: React.FC = () => {
         )}
 
         {/*
-          The toolbar and the summary strip are one chrome band, so only the
-          strip below closes it with a rule. A line between two bars of the
-          same tint divides nothing.
+          The live/filter toolbar stays on the canvas tint. It used to share
+          `bg-slate-50` with the summary strip below it, which dissolved the
+          strip: one continuous band of tint reads as one bar, so the four
+          counts looked like loose text floating under the connection status
+          rather than a status bar of their own. White here, tint plus a rule
+          there — the tint change is the boundary, and no extra rule is spent
+          to say it twice.
         */}
-        <div className="flex flex-wrap items-center justify-between gap-2 bg-slate-50 px-4 py-2 sm:px-6">
+        <div className="flex flex-wrap items-center justify-between gap-2 bg-white px-4 py-2 sm:px-6">
           <LiveStatus isConnected={isConnected} lastUpdatedAt={lastUpdatedAt} />
           {(reposLoading || repoOptions.length > 1) && (
             <RepositorySelector
@@ -193,8 +197,10 @@ const Dashboard: React.FC = () => {
         </div>
 
         {/*
-          The status bar for the whole console, anchored directly above the
-          panes rather than floating between the toolbar and the feed.
+          The status bar for the whole console: a tinted, ruled bar anchored
+          directly above the panes, not loose text between the toolbar and the
+          feed. It carries the same tint and the same 40px height as the pane
+          headers below it, so the console reads as one piece of chrome.
         */}
         <SummaryStrip {...sectionProps} />
 

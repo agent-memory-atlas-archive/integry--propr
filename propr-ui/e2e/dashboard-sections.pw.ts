@@ -12,6 +12,9 @@ const running = [
   { id: 'task:run-4', taskId: 'run-4', repository: 'example/workspace', issueNumber: 2455, prNumber: null, title: 'Cache repository icons across dashboard sections', state: 'claude_execution', phase: 'Implementing', progressLine: 'Running tests', createdAt: minutesAgo(7), updatedAt: minutesAgo(1) },
   { id: 'task:run-5', taskId: 'run-5', repository: 'example/docs', issueNumber: 61, prNumber: null, title: 'Document the dashboard data contracts', state: 'claude_execution', phase: 'Implementing', progressLine: null, createdAt: minutesAgo(4), updatedAt: minutesAgo(1) },
   { id: 'task:run-6', taskId: 'run-6', repository: 'example/docs', issueNumber: 62, prNumber: null, title: 'Explain the attention rules in the operations guide', state: 'processing', phase: 'Preparing', progressLine: null, createdAt: minutesAgo(2), updatedAt: minutesAgo(1) },
+  // Seven, not six: one row over the visible five is simply drawn, so the
+  // expand control only appears — and only has to be tested — past that.
+  { id: 'task:run-7', taskId: 'run-7', repository: 'example/design-system', issueNumber: 119, prNumber: null, title: 'Unify the empty and unavailable states across panels', state: 'processing', phase: 'Preparing', progressLine: null, createdAt: minutesAgo(1), updatedAt: minutesAgo(1) },
 ];
 
 const attention = [
@@ -181,10 +184,25 @@ test('desktop shows every section with running work in the main column', async (
   expect(actionLefts.length).toBeGreaterThan(1);
   expect(new Set(actionLefts).size).toBe(1);
 
+  // The repository chip in the narrow column drops its owner so all three
+  // chips fit the line whole; nothing in the column is cut off.
+  const attentionPanel = page.getByTestId('needs-attention-panel');
+  await expect(attentionPanel.getByTitle('example/workspace').first()).toHaveText('workspace');
+  const clipped = await attentionPanel.locator('.truncate').evaluateAll(nodes =>
+    nodes.filter(node => node.scrollWidth > node.clientWidth + 1).map(node => node.textContent ?? ''));
+  expect(clipped).toEqual([]);
+
+  // One footer closes the running list: the queue summary and the expand
+  // control share the bar instead of the link floating above it.
+  const footer = page.getByTestId('happening-now-footer');
+  await expect(footer.getByTestId('queue-summary')).toBeVisible();
+  await expect(footer.getByRole('button', { name: 'Show 2 more' })).toBeVisible();
+
   await capture(page, 'dashboard-desktop');
 
-  await page.getByRole('button', { name: 'Show 1 more' }).click();
-  await expect(page.getByTestId('happening-now-list').locator('li')).toHaveCount(6);
+  await footer.getByRole('button', { name: 'Show 2 more' }).click();
+  await expect(page.getByTestId('happening-now-list').locator('li')).toHaveCount(7);
+  await expect(footer.getByRole('button', { name: 'Show fewer' })).toBeVisible();
 });
 
 test('an empty attention list removes the panel from the desktop DOM', async ({ page }) => {
