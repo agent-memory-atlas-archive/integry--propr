@@ -122,6 +122,8 @@ export interface MonitoredRepo {
   enabled: boolean;
   /** Whether failed CI triggers an automatic follow-up. Missing legacy values are off. */
   autoFollowupOnFailedCi?: boolean;
+  /** Whether obsolete PR checks are cancelled while a follow-up implements. Missing legacy values are off. */
+  cancelCiDuringFollowup?: boolean;
   /** Whether Inbox and push notifications are generated for this repository. Missing values are on. */
   notificationsEnabled?: boolean;
   /** Generated media to embed in PRs when a change has a visible result. */

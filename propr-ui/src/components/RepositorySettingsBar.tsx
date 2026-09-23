@@ -38,6 +38,35 @@ const AutoCiFollowupControl: React.FC<{
   );
 };
 
+const CancelCiDuringFollowupControl: React.FC<{
+  repo: MonitoredRepo;
+  onToggle: (repoId: string) => void;
+  isReadOnly: boolean;
+}> = ({ repo, onToggle, isReadOnly }) => {
+  if (isReadOnly) return null;
+
+  return (
+    <label
+      className="flex items-center justify-between gap-4 py-2 text-xs text-slate-600 cursor-pointer"
+      title="Cancel CI while follow-up implementation is in progress"
+      onClick={(e) => e.stopPropagation()}
+    >
+      <span className="min-w-0">
+        <span className="block">Cancel CI while follow-up implementation is in progress</span>
+        <span className="mt-1 block text-slate-500">Stops checks that are already running on the commit ProPR is about to replace. Checks start again on the new commit, or resume on the current one if no commit is produced.</span>
+      </span>
+      <input
+        type="checkbox"
+        checked={repo.cancelCiDuringFollowup === true}
+        onChange={() => onToggle(repo.id)}
+        className="sr-only peer"
+        aria-label={`Cancel CI during follow-up implementation for ${repo.name}`}
+      />
+      <span className={toggleClassName} />
+    </label>
+  );
+};
+
 interface RepositorySettingsBarProps {
   repo: MonitoredRepo;
   indexingStatus: RepositoryIndexingStatus | undefined;
@@ -48,6 +77,7 @@ interface RepositorySettingsBarProps {
   onToggleStar: (repoId: string) => void;
   onToggleHidden: (repoId: string) => void;
   onToggleAutoCiFollowup: (repoId: string) => void;
+  onToggleCancelCiDuringFollowup: (repoId: string) => void;
   onToggleNotifications: (repoId: string) => void;
   onUpdateVisualPreview: (repoId: string, settings: RepositoryVisualPreviewSettings) => void;
   isReadOnly: boolean;
@@ -55,7 +85,7 @@ interface RepositorySettingsBarProps {
 
 export const RepositorySettingsBar: React.FC<RepositorySettingsBarProps> = ({
   repo, indexingStatus, onToggle, onRemove, onStopIndexing, onReindex,
-  onToggleStar, onToggleHidden, onToggleAutoCiFollowup, onToggleNotifications, onUpdateVisualPreview, isReadOnly,
+  onToggleStar, onToggleHidden, onToggleAutoCiFollowup, onToggleCancelCiDuringFollowup, onToggleNotifications, onUpdateVisualPreview, isReadOnly,
 }) => {
   const { isDemoMode } = useDemoMode();
   const [isDeleteDialogOpen, setIsDeleteDialogOpen] = useState(false);
@@ -119,6 +149,7 @@ export const RepositorySettingsBar: React.FC<RepositorySettingsBarProps> = ({
             <h3 className="mb-2 text-[10px] uppercase font-bold tracking-widest text-slate-500">Automation</h3>
             <div className="flex flex-col">
               <AutoCiFollowupControl repo={repo} onToggle={onToggleAutoCiFollowup} isReadOnly={isReadOnly} />
+              <CancelCiDuringFollowupControl repo={repo} onToggle={onToggleCancelCiDuringFollowup} isReadOnly={isReadOnly} />
               <RepositoryVisualPreviewControl key={repo.id} repo={repo} onUpdate={onUpdateVisualPreview} isReadOnly={isReadOnly} />
             </div>
           </div>

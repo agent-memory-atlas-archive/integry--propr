@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { normalizeRepoConfig } from '../routes/configRepoValidation.js';
+import { normalizeRepoConfig, preserveRepoCancelCiDuringFollowup, withDefaultRepoOptions } from '../routes/configRepoValidation.js';
 
 test('repository config defaults missing automatic failed-CI follow-up to false', () => {
   const normalized = normalizeRepoConfig({
@@ -134,4 +134,55 @@ test('repository config rejects non-boolean notificationsEnabled values', () => 
     assert.equal(normalized.ok, false);
     if (!normalized.ok) assert.match(normalized.error, /notificationsEnabled.*must be a boolean/);
   }
+});
+
+test('repository config defaults and accepts the follow-up CI cancellation option', () => {
+  const normalized = normalizeRepoConfig({ id: 'repo-1', name: 'integry/propr', enabled: true });
+  assert.equal(normalized.ok, true);
+  if (normalized.ok) assert.equal(normalized.value.cancelCiDuringFollowup, false);
+
+  for (const cancelCiDuringFollowup of [true, false]) {
+    const explicit = normalizeRepoConfig({
+      id: `repo-${cancelCiDuringFollowup}`,
+      name: 'integry/propr',
+      enabled: true,
+      cancelCiDuringFollowup
+    });
+    assert.equal(explicit.ok, true);
+    if (explicit.ok) assert.equal(explicit.value.cancelCiDuringFollowup, cancelCiDuringFollowup);
+  }
+});
+
+test('repository config rejects a non-boolean follow-up CI cancellation option', () => {
+  const normalized = normalizeRepoConfig({
+    id: 'repo-1',
+    name: 'integry/propr',
+    enabled: true,
+    cancelCiDuringFollowup: 'yes'
+  });
+
+  assert.equal(normalized.ok, false);
+  if (!normalized.ok) assert.match(normalized.error, /cancelCiDuringFollowup/);
+});
+
+test('an omitted follow-up CI cancellation option keeps the stored value', () => {
+  const previous = [
+    { id: 'repo-1', name: 'integry/propr', enabled: true, cancelCiDuringFollowup: true }
+  ] as never;
+  const normalized = normalizeRepoConfig({ id: 'repo-1', name: 'integry/propr', enabled: true });
+  assert.equal(normalized.ok, true);
+  if (!normalized.ok) return;
+
+  const preserved = preserveRepoCancelCiDuringFollowup(
+    previous,
+    [normalized.value],
+    [{ id: 'repo-1', name: 'integry/propr', enabled: true }]
+  );
+
+  assert.equal(preserved[0].cancelCiDuringFollowup, true);
+});
+
+test('repository defaults materialize the follow-up CI cancellation option for legacy entries', () => {
+  const materialized = withDefaultRepoOptions({ id: 'repo-1', name: 'integry/propr', enabled: true } as never);
+  assert.equal(materialized.cancelCiDuringFollowup, false);
 });

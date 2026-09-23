@@ -70,6 +70,28 @@ async function stubRepositoryApis(page: Page, canManage = true, initialRepos?: M
   return { writes, indexingWrites, chatLoads: () => chatLoads };
 }
 
+test('shows and updates the follow-up CI cancellation option for every branch entry', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  const api = await stubRepositoryApis(page, true, [
+    { id: 'propr-main', name: 'integry/propr', baseBranch: 'main', enabled: true, cancelCiDuringFollowup: true, visualPreview: { enabled: false, types: ['image'] } },
+    { id: 'propr-release', name: 'integry/propr', baseBranch: 'release', enabled: true, visualPreview: { enabled: false, types: ['image'] } },
+  ]);
+  await page.goto('/repositories');
+  await page.getByRole('button', { name: 'Select integry/propr', exact: true }).nth(1).click();
+  const settings = page.getByRole('region', { name: 'Settings for integry/propr', exact: true });
+  const cancelCi = settings.getByRole('checkbox', { name: 'Cancel CI during follow-up implementation for integry/propr', exact: true });
+  await expect(cancelCi).toBeChecked();
+  await expect(settings.getByText(/Checks start again on the new commit, or resume on the current one if no commit is produced\./)).toBeVisible();
+  if (process.env.PROPR_CAPTURE_PREVIEWS) {
+    await mkdir('../.propr/previews', { recursive: true });
+    await page.screenshot({ animations: 'disabled', path: '../.propr/previews/repository-cancel-ci-during-followup.png' });
+  }
+
+  await settings.getByText('Cancel CI while follow-up implementation is in progress', { exact: true }).click();
+  await expect(cancelCi).not.toBeChecked();
+  await expect.poll(() => api.writes.at(-1)?.map(repo => repo.cancelCiDuringFollowup)).toEqual([false, false]);
+});
+
 test('shows and updates shared settings while preserving the selected branch', async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
   const sharedPreview = { enabled: true, types: ['video'], instructions: 'Capture the repository settings.' } satisfies NonNullable<MonitoredRepo['visualPreview']>;

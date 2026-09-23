@@ -3,8 +3,9 @@ import type { MonitoredRepo } from '../api/proprApi';
 
 export type VisualPreviewSettings = NonNullable<MonitoredRepo['visualPreview']>;
 
-export type ManagedRepo = Omit<MonitoredRepo, 'autoFollowupOnFailedCi' | 'visualPreview'> & {
+export type ManagedRepo = Omit<MonitoredRepo, 'autoFollowupOnFailedCi' | 'cancelCiDuringFollowup' | 'visualPreview'> & {
   autoFollowupOnFailedCi: boolean;
+  cancelCiDuringFollowup: boolean;
   visualPreview: VisualPreviewSettings;
 };
 
@@ -68,12 +69,27 @@ export function toggleRepositoryNotifications(repos: ManagedRepo[], repoId: stri
     : repo);
 }
 
+/** Flip the resolved repository-wide value so every branch entry converges on one state. */
+export function toggleRepositoryCancelCiDuringFollowup(repos: ManagedRepo[], repoId: string): ManagedRepo[] {
+  const targetRepo = repos.find(repo => repo.id === repoId);
+  if (!targetRepo) return repos;
+  const repositoryKey = getRepositoryConfigKey(targetRepo.name);
+  const cancelCiDuringFollowup = !repos.some(repo =>
+    getRepositoryConfigKey(repo.name) === repositoryKey && repo.cancelCiDuringFollowup
+  );
+  return repos.map(repo => getRepositoryConfigKey(repo.name) === repositoryKey
+    ? { ...repo, cancelCiDuringFollowup }
+    : repo);
+}
+
 export function buildRepositoriesForDisplay(repos: ManagedRepo[]): ManagedRepo[] {
   const autoCiFollowupByRepository = new Map<string, boolean>();
+  const cancelCiByRepository = new Map<string, boolean>();
   const visualPreviewByRepository = new Map<string, VisualPreviewSettings>();
   for (const repo of repos) {
     const key = getRepositoryConfigKey(repo.name);
     autoCiFollowupByRepository.set(key, autoCiFollowupByRepository.get(key) === true || repo.autoFollowupOnFailedCi);
+    cancelCiByRepository.set(key, cancelCiByRepository.get(key) === true || repo.cancelCiDuringFollowup);
     const previousPreview = visualPreviewByRepository.get(key);
     if (!previousPreview || (!previousPreview.enabled && repo.visualPreview.enabled)) {
       visualPreviewByRepository.set(key, repo.visualPreview);
@@ -83,6 +99,7 @@ export function buildRepositoriesForDisplay(repos: ManagedRepo[]): ManagedRepo[]
   return repos.map(repo => ({
     ...repo,
     autoFollowupOnFailedCi: autoCiFollowupByRepository.get(getRepositoryConfigKey(repo.name)) === true,
+    cancelCiDuringFollowup: cancelCiByRepository.get(getRepositoryConfigKey(repo.name)) === true,
     notificationsEnabled: resolveRepositoryNotificationsEnabled(repos, getRepositoryConfigKey(repo.name)),
     visualPreview: visualPreviewByRepository.get(getRepositoryConfigKey(repo.name)) || defaultVisualPreview()
   }));

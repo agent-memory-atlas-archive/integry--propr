@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Cancel CI while follow-up implementation is in progress**: a new per-repository
+  option (Repositories → Automation, off by default, also available through
+  `POST /api/config/repos`) cancels the queued and running GitHub Actions
+  validation of the exact pull request head a follow-up is about to replace, once
+  that follow-up is authorized and actually implementing. Runs of other events,
+  other pull requests and other revisions are never touched. A replacement commit
+  gets its normal CI; a run that ends without one has its cancelled checks
+  restarted for the still-current head, including after a worker restart. Requires
+  the GitHub App installation to have Actions "Read and write"; without it the
+  option is inert and logged.
 - **Claude Opus 5.5**: added to the Claude model catalog (`llm-claude-opus55`, 1M
   context) and made the default Claude model and the target of the plain `opus`
   alias. The bundled Claude Code CLI moves to 2.1.280, which is the first release

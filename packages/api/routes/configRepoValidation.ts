@@ -73,6 +73,7 @@ export function withDefaultRepoAutoFollowup(repo: RepoToMonitor): RepoToMonitor 
 export function withDefaultRepoOptions(repo: RepoToMonitor): RepoToMonitor {
   return {
     ...withDefaultRepoAutoFollowup(repo),
+    cancelCiDuringFollowup: repo.cancelCiDuringFollowup === true,
     notificationsEnabled: repo.notificationsEnabled !== false,
     visualPreview: normalizeStoredVisualPreviewSettings(repo.visualPreview)
   };
@@ -83,11 +84,32 @@ export function preserveRepoAutoFollowup(
   normalizedRepos: RepoToMonitor[],
   incomingRepos: unknown[]
 ): RepoToMonitor[] {
+  return preserveRepoBooleanOption(previousRepos, normalizedRepos, incomingRepos, 'autoFollowupOnFailedCi');
+}
+
+/**
+ * Clients that do not know the option (older UIs, the CLI, scripts) submit
+ * repositories without it; their writes must never silently switch it off.
+ */
+export function preserveRepoCancelCiDuringFollowup(
+  previousRepos: RepoToMonitor[],
+  normalizedRepos: RepoToMonitor[],
+  incomingRepos: unknown[]
+): RepoToMonitor[] {
+  return preserveRepoBooleanOption(previousRepos, normalizedRepos, incomingRepos, 'cancelCiDuringFollowup');
+}
+
+function preserveRepoBooleanOption(
+  previousRepos: RepoToMonitor[],
+  normalizedRepos: RepoToMonitor[],
+  incomingRepos: unknown[],
+  option: 'autoFollowupOnFailedCi' | 'cancelCiDuringFollowup'
+): RepoToMonitor[] {
   return normalizedRepos.map((repo, index) => {
     const incomingRepo = incomingRepos[index] as Partial<RepoToMonitor>;
-    if (incomingRepo.autoFollowupOnFailedCi !== undefined) return repo;
+    if (incomingRepo[option] !== undefined) return repo;
     const previousRepo = previousRepos.find(candidate => candidate.id === repo.id);
-    return { ...repo, autoFollowupOnFailedCi: previousRepo?.autoFollowupOnFailedCi === true };
+    return { ...repo, [option]: previousRepo?.[option] === true };
   });
 }
 
@@ -261,6 +283,9 @@ export function normalizeRepoConfig(repo: unknown): ValidationResult<RepoToMonit
   if (candidate.autoFollowupOnFailedCi !== undefined && typeof candidate.autoFollowupOnFailedCi !== 'boolean') {
     return failure(`Invalid autoFollowupOnFailedCi format for ${name}: must be a boolean`);
   }
+  if (candidate.cancelCiDuringFollowup !== undefined && typeof candidate.cancelCiDuringFollowup !== 'boolean') {
+    return failure(`Invalid cancelCiDuringFollowup format for ${name}: must be a boolean`);
+  }
   if (candidate.notificationsEnabled !== undefined && typeof candidate.notificationsEnabled !== 'boolean') {
     return failure(`Invalid notificationsEnabled format for ${name}: must be a boolean`);
   }
@@ -272,6 +297,7 @@ export function normalizeRepoConfig(repo: unknown): ValidationResult<RepoToMonit
     name,
     enabled,
     autoFollowupOnFailedCi: candidate.autoFollowupOnFailedCi ?? false,
+    cancelCiDuringFollowup: candidate.cancelCiDuringFollowup ?? false,
     notificationsEnabled: candidate.notificationsEnabled !== false,
     visualPreview: visualPreview.value,
     alias: alias.value,

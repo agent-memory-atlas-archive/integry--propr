@@ -60,4 +60,17 @@ For more autonomous cleanup, `/ultrafix` alternates review and fix cycles until 
 
 Full syntax, parameters, and trigger rules for every command are in [PR Comment Commands](./pr-commands.md).
 
+## Cancelling Obsolete Checks During Follow-Up
+
+While a follow-up implements, the checks running on the commit it is about to replace are already obsolete, and on a busy repository they keep runners occupied for work nobody will read. GitHub's own `cancel-in-progress` concurrency only helps once a replacement workflow starts, which is after the new commit is pushed.
+
+The repository setting **Cancel CI while follow-up implementation is in progress** (Repositories → repository → Automation, off by default) closes that window:
+
+- Cancellation happens only once a follow-up is authorized and actually implementing, including `/fix`. Comments, pending requests, reviews and rejected requests never cancel anything.
+- Only queued or running GitHub Actions runs of `pull_request`/`pull_request_target` workflows that GitHub associates with that exact pull request and that exact head commit are cancelled. Release, deployment, manual, branch and other pull requests' runs, other revisions and non-Actions checks are never touched, and a branch name alone never qualifies a run.
+- When implementation pushes a replacement commit, its checks run normally. When it produces no commit, fails or is cancelled, ProPR restarts the cancelled runs for the still-current commit — after re-reading the live pull request head, and without duplicating a run GitHub already restarted. Cancellations stay visibly cancelled in the meantime; ProPR never reports a check as successful and never relaxes required checks.
+- The obligation is stored durably, so a worker restart still restores the checks; reconciliation also picks up runs that GitHub queued after the cancellation, and releases the suspension if you switch the option off mid-task.
+
+Prerequisite: the GitHub App installation needs **Actions: Read and write**. With read-only Actions access the option is inert — the attempt is logged as a permission error and implementation continues with CI untouched. Fork contributions that ProPR publishes to a continuation pull request are handled through that continuation; runs GitHub does not associate with a pull request are left alone.
+
 {/* VIDEO PLACEHOLDER: Record a 45-second clip: post a natural follow-up comment on a ProPR-created PR, show the task appearing in the Web UI task list, then return to the PR to show the new commit and the completion comment. Show the completion comment's expandable slash-command block as the key moment. */}

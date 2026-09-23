@@ -42,6 +42,32 @@ export async function isAutoCiFollowupEnabledForRepository(
     repo: string,
     loadConfiguredRepos: typeof loadMonitoredReposRaw = loadMonitoredReposRaw,
 ): Promise<boolean> {
+    return isRepositoryOptionEnabled({ owner, repo, option: 'autoFollowupOnFailedCi', description: 'automatic CI follow-up' }, loadConfiguredRepos);
+}
+
+/**
+ * Returns whether obsolete pull request validation may be cancelled while a
+ * follow-up implementation runs for a repository. Defaults to disabled so CI
+ * behaviour never changes for a repository that did not opt in.
+ */
+export async function isCancelCiDuringFollowupEnabledForRepository(
+    owner: string,
+    repo: string,
+    loadConfiguredRepos: typeof loadMonitoredReposRaw = loadMonitoredReposRaw,
+): Promise<boolean> {
+    return isRepositoryOptionEnabled({ owner, repo, option: 'cancelCiDuringFollowup', description: 'follow-up CI cancellation' }, loadConfiguredRepos);
+}
+
+async function isRepositoryOptionEnabled(
+    params: {
+        owner: string;
+        repo: string;
+        option: 'autoFollowupOnFailedCi' | 'cancelCiDuringFollowup';
+        description: string;
+    },
+    loadConfiguredRepos: typeof loadMonitoredReposRaw,
+): Promise<boolean> {
+    const { owner, repo, option, description } = params;
     const repository = `${owner.trim()}/${repo.trim()}`.toLowerCase();
     if (repository === '/') return false;
 
@@ -53,11 +79,11 @@ export async function isAutoCiFollowupEnabledForRepository(
         // synchronized on subsequent writes.
         return configuredRepos.some(candidate =>
             candidate.name.trim().toLowerCase() === repository
-            && candidate.autoFollowupOnFailedCi === true
+            && candidate[option] === true
         );
     } catch (error) {
         const err = error as Error;
-        logger.warn({ repository, error: err.message }, 'Failed to load automatic CI follow-up repository configuration; treating it as disabled');
+        logger.warn({ repository, error: err.message }, `Failed to load ${description} repository configuration; treating it as disabled`);
         return false;
     }
 }
