@@ -1,4 +1,5 @@
 import logger from '../../utils/logger.js';
+import { extractJsonCandidates } from '../../utils/jsonUtils.js';
 import { resolveExpectedSummaryPath } from './summaryMinerDirectoryHelpers.js';
 import type { SummaryResult } from './summaryMinerBatchPersistence.js';
 
@@ -44,32 +45,54 @@ FILES:
 ${filesContent}`;
 }
 
+/**
+ * Collects the summary entries of a parsed candidate, unwrapping the array
+ * wrappers (`[{ "summaries": [...] }]`) some agents emit around the envelope.
+ */
+function collectSummaryEntries(parsed: unknown): unknown[] {
+  if (Array.isArray(parsed)) return parsed.flatMap(entry => collectSummaryEntries(entry));
+  const summaries = (parsed as { summaries?: unknown } | null)?.summaries;
+  return Array.isArray(summaries) ? summaries : [];
+}
+
 export function parseBatchResponse(response: string, expectedPaths?: string[]): SummaryResult[] {
-  try {
-    const jsonMatch = response.match(/\{[\s\S]*"summaries"[\s\S]*\}/);
-    if (!jsonMatch) {
-      logger.warn('No JSON found in batch response');
-      return [];
-    }
-
-    const parsed = JSON.parse(jsonMatch[0]) as { summaries: SummaryResult[] };
-    if (!Array.isArray(parsed.summaries)) {
-      logger.warn('Invalid summaries format in response');
-      return [];
-    }
-
-    return parsed.summaries
-      .filter(summary => typeof summary.path === 'string' && typeof summary.summary === 'string'
-        && summary.path.trim().length > 0 && summary.summary.trim().length > 0)
-      .map(summary => {
-        const expectedPath = expectedPaths
-          ? resolveExpectedSummaryPath(summary.path, expectedPaths)
-          : summary.path.trim();
-        return expectedPath ? { path: expectedPath, summary: summary.summary.trim() } : null;
-      })
-      .filter((summary): summary is SummaryResult => summary !== null);
-  } catch (error) {
-    logger.warn({ error: (error as Error).message }, 'Failed to parse batch response');
+  // Some agents (seen with Antigravity/Gemini) emit the whole JSON document
+  // twice back to back, so parse each balanced JSON value instead of matching
+  // greedily from the first `{` to the last `}`.
+  const candidates = extractJsonCandidates(response).filter(candidate => candidate.includes('"summaries"'));
+  if (candidates.length === 0) {
+    logger.warn('No JSON found in batch response');
     return [];
   }
+
+  const results = new Map<string, SummaryResult>();
+  let lastError: Error | undefined;
+  for (const candidate of candidates) {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(candidate);
+    } catch (error) {
+      lastError = error as Error;
+      continue;
+    }
+    const entries = collectSummaryEntries(parsed);
+    if (entries.length === 0) continue;
+
+    for (const summary of entries as SummaryResult[]) {
+      if (typeof summary?.path !== 'string' || typeof summary.summary !== 'string'
+        || summary.path.trim().length === 0 || summary.summary.trim().length === 0) continue;
+      const expectedPath = expectedPaths
+        ? resolveExpectedSummaryPath(summary.path, expectedPaths)
+        : summary.path.trim();
+      if (expectedPath && !results.has(expectedPath)) {
+        results.set(expectedPath, { path: expectedPath, summary: summary.summary.trim() });
+      }
+    }
+  }
+
+  if (results.size === 0) {
+    if (lastError) logger.warn({ error: lastError.message }, 'Failed to parse batch response');
+    else logger.warn('Invalid summaries format in response');
+  }
+  return [...results.values()];
 }
