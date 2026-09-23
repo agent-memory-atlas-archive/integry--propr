@@ -3,8 +3,8 @@ import { PreviewThumbnails } from '../components/PreviewMedia';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import {
-  Activity, CheckCircle2, CircleDot, CirclePause, CirclePlay, CircleStop, Clock3,
-  Coins, ExternalLink, FileText, Filter, GitPullRequest, Github, ListTodo, LoaderCircle, Plus, Send,
+  Activity, CheckCircle2, CircleDot, CirclePause, CirclePlay, CircleStop,
+  ExternalLink, FileText, Filter, GitPullRequest, ListTodo, LoaderCircle, Plus, Send,
   MoreHorizontal, Terminal, Trash2, X,
 } from 'lucide-react';
 import { getInstanceCatalog } from '../api/proprApi';
@@ -119,6 +119,24 @@ const tokenTotal = (usage: { input_tokens?: number | null; output_tokens?: numbe
     + (usage.cache_creation_input_tokens || 0) + (usage.cache_read_input_tokens || 0)
   : 0;
 
+// Each threshold rounds up into the unit above it, so a count never reads as "1000K".
+const compactUnits = [
+  { threshold: 999_500_000, divisor: 1_000_000_000, suffix: 'B' },
+  { threshold: 999_500, divisor: 1_000_000, suffix: 'M' },
+  { threshold: 999.5, divisor: 1_000, suffix: 'K' },
+];
+
+/** Dashboard counts scan by magnitude: `101,280,735` reads as `101M`, with the exact value on hover. */
+const compactCount = (value: number) => {
+  const safe = Number.isFinite(value) && value > 0 ? value : 0;
+  const unit = compactUnits.find(candidate => safe >= candidate.threshold);
+  if (!unit) return Math.round(safe).toLocaleString('en-US');
+  const scaled = safe / unit.divisor;
+  return `${scaled >= 9.95 ? Math.round(scaled) : Number(scaled.toFixed(1))}${unit.suffix}`;
+};
+
+const plural = (count: number, noun: string) => `${count} ${noun}${count === 1 ? '' : 's'}`;
+
 // Codex counts the objective in Unicode code points; Claude Code's `/goal`
 // counts its (trimmed) condition in UTF-16 units, so an emoji counts as two.
 const objectiveLength = (objective: string, agentType: string | undefined) => agentType === 'claude'
@@ -143,9 +161,11 @@ function GoalState({ goal, quietCompleted = false }: { goal: Goal; quietComplete
       Completed
     </span>;
   }
-  const color = state === 'completed' ? 'bg-green-100 text-green-800' : state === 'failed' || state === 'cancelled' ? 'bg-red-100 text-red-800' : state === 'paused' || state === 'cancelling' ? 'bg-amber-100 text-amber-800' : 'bg-blue-100 text-blue-800';
-  return <span className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-semibold capitalize ${color}`}>
-    {state === 'running' && <LoaderCircle className="h-3.5 w-3.5 animate-spin" />}
+  // Success is quiet: only active work and failures may spend colour.
+  const color = state === 'completed' ? 'bg-slate-100 text-slate-600' : state === 'failed' || state === 'cancelled' ? 'bg-red-100 text-red-800' : state === 'paused' || state === 'cancelling' ? 'bg-amber-100 text-amber-800' : 'bg-blue-100 text-blue-800';
+  return <span className={`inline-flex items-center gap-1.5 rounded-full px-2 py-0.5 text-xs font-semibold capitalize ${color}`}>
+    {state === 'running' && <LoaderCircle className="h-3 w-3 animate-spin" />}
+    {state === 'completed' && <CheckCircle2 className="h-3 w-3" />}
     {state}
   </span>;
 }
@@ -455,48 +475,68 @@ function CreateGoalDialog({ isOpen, onClose, onCreated }: CreateGoalDialogProps)
   </div>;
 }
 
+// Goal 40% · Repository 15% · Status 15% · Tokens 10% · Active time 10% · Output 10%.
+const queueGridColumns = 'xl:grid-cols-[minmax(0,2.8fr)_minmax(0,1.05fr)_minmax(0,1.05fr)_minmax(64px,0.7fr)_minmax(72px,0.7fr)_minmax(84px,0.7fr)]';
+const queueCellLabel = 'mb-1 block text-[10px] font-bold uppercase tracking-wider text-slate-400 xl:hidden';
+
 function GoalQueueRow({ goal, goalAgents }: { goal: Goal; goalAgents: Array<{ type: string; alias: string }> }) {
-  const activity = goal.liveSummary.currentTask
-    || goal.liveSummary.todos.find(todo => todo.status === 'in_progress')?.content
-    || goal.taskState;
+  // Live progress, never a second copy of the status: a settled goal has no current activity.
+  const unsettled = !goal.resultState;
+  const activity = unsettled
+    ? goal.liveSummary.currentTask || goal.liveSummary.todos.find(todo => todo.status === 'in_progress')?.content || null
+    : null;
   const openTodos = goal.liveSummary.todos.filter(todo => todo.status !== 'completed').length;
   const tokens = goal.liveSummary.nativeGoal?.tokensUsed ?? tokenTotal(goal.liveSummary.tokenUsage);
   const activeMs = goal.liveSummary.nativeGoal ? goal.liveSummary.nativeGoal.timeUsedSeconds * 1000 : goal.activeMs;
+  const { issues, openIssues, pullRequests, openPullRequests } = goal.artifactStats;
+  const agentLabel = formatAgentLabel(goal.agent, goalAgents);
+  const modelName = getModelDisplayName(goal.requestedModel);
   return <li className="border-b border-slate-200 last:border-b-0">
-    <Link to={`/goals/${goal.id}`} className="grid min-w-0 grid-cols-2 gap-x-4 gap-y-4 px-4 py-4 transition-colors hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-primary-500 sm:px-5 xl:grid-cols-[minmax(240px,2fr)_120px_minmax(140px,1fr)_minmax(180px,1.4fr)_160px] xl:items-center xl:gap-x-5 xl:gap-y-0 xl:py-3.5">
+    <Link to={`/goals/${goal.id}`} className={`grid min-w-0 grid-cols-2 gap-x-4 gap-y-3 px-4 py-3 transition-colors hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-primary-500 sm:px-6 ${queueGridColumns} xl:items-center xl:gap-x-4 xl:gap-y-0 xl:py-2.5`}>
       <div className="col-span-2 min-w-0 xl:col-span-1">
-        <h3 className="line-clamp-2 font-semibold leading-5 text-slate-900" title={goal.title}>{goal.title}</h3>
-        <p className="mt-1 line-clamp-2 text-sm leading-5 text-slate-500" title={goal.objective}>{goal.objective}</p>
-        <PreviewThumbnails media={goal.previewMedia} />
-      </div>
-      <div className="min-w-0">
-        <span className="mb-1.5 block text-[10px] font-bold uppercase tracking-wider text-slate-400 xl:hidden">Status</span>
-        <GoalState goal={goal} />
-        <span className="mt-2 flex min-w-0 items-center gap-1.5 text-xs text-slate-500">
+        <div className="flex min-w-0 items-center gap-2">
+          <h3 className="min-w-0 truncate text-sm font-semibold leading-5 text-slate-900" title={goal.title}>{goal.title}</h3>
+          <PreviewThumbnails media={goal.previewMedia} size="micro" />
+        </div>
+        <p className="truncate text-xs leading-5 text-slate-500" title={goal.objective}>{goal.objective}</p>
+        <span className="flex min-w-0 items-center gap-1.5 text-xs leading-5 text-slate-500" title={`${agentLabel} · ${modelName}`}>
           <ProviderLogo provider={goal.agent.type} className="h-3.5 w-3.5 flex-none" />
-          <span className="truncate">{formatAgentLabel(goal.agent, goalAgents)}</span>
+          <span className="sr-only">{agentLabel}</span>
+          <span className="truncate">{modelName}</span>
         </span>
-        <span className="mt-0.5 block truncate text-xs text-slate-500" title={getModelDisplayName(goal.requestedModel)}>{getModelDisplayName(goal.requestedModel)}</span>
       </div>
       <div className="min-w-0">
-        <span className="mb-1.5 block text-[10px] font-bold uppercase tracking-wider text-slate-400 xl:hidden">Repository</span>
-        <span className="flex min-w-0 items-center gap-1.5 text-sm text-slate-700"><Github className="h-3.5 w-3.5 flex-none text-slate-400" /><span className="truncate" title={goal.repository}>{goal.repository}</span></span>
+        <span className={queueCellLabel}>Repository</span>
+        <code className="block truncate rounded-sm bg-slate-100 px-1.5 py-0.5 font-mono text-xs text-slate-700" title={goal.repository}>{goal.repository}</code>
       </div>
-      <div className="col-span-2 min-w-0 xl:col-span-1">
-        <span className="mb-1.5 block text-[10px] font-bold uppercase tracking-wider text-slate-400 xl:hidden">Current activity</span>
-        <span className="flex min-w-0 items-start gap-1.5 text-sm text-slate-700"><Activity className="mt-0.5 h-3.5 w-3.5 flex-none text-blue-500" /><span className="line-clamp-2" title={activity}>{activity}</span></span>
-        {goal.liveSummary.todos.length > 0 && <span className="mt-1 flex items-center gap-1.5 text-xs text-slate-500"><ListTodo className="h-3.5 w-3.5" />{openTodos} open of {goal.liveSummary.todos.length} steps</span>}
+      <div className="min-w-0">
+        <span className={queueCellLabel}>Status</span>
+        <GoalState goal={goal} />
+        {activity && <span className="mt-1 flex min-w-0 items-center gap-1.5 text-xs text-slate-500">
+          <Activity className="h-3 w-3 flex-none text-blue-500" />
+          <span className="truncate" title={activity}>{activity}</span>
+        </span>}
+        {unsettled && goal.liveSummary.todos.length > 0 && <span className="mt-0.5 flex min-w-0 items-center gap-1.5 text-xs text-slate-400">
+          <ListTodo className="h-3 w-3 flex-none" />
+          <span className="truncate">{openTodos} open of {goal.liveSummary.todos.length} steps</span>
+        </span>}
       </div>
-      <div className="col-span-2 min-w-0 xl:col-span-1">
-        <span className="mb-1.5 block text-[10px] font-bold uppercase tracking-wider text-slate-400 xl:hidden">Usage</span>
-        <span className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-slate-600">
-          <span className="inline-flex items-center gap-1"><Coins className="h-3.5 w-3.5 text-amber-500" />{tokens.toLocaleString()} tokens</span>
-          <span className="inline-flex items-center gap-1"><Clock3 className="h-3.5 w-3.5 text-indigo-500" />{duration(activeMs)} active</span>
-        </span>
-        <span className="mt-1.5 flex flex-wrap gap-x-2 gap-y-1 text-xs text-slate-500">
-          <span className="inline-flex items-center gap-1"><CircleDot className="h-3.5 w-3.5" />{goal.artifactStats.openIssues}/{goal.artifactStats.issues} open issues</span>
-          <span className="inline-flex items-center gap-1"><GitPullRequest className="h-3.5 w-3.5" />{goal.artifactStats.openPullRequests}/{goal.artifactStats.pullRequests} open PRs</span>
-        </span>
+      <div className="min-w-0 xl:text-right">
+        <span className={queueCellLabel}>Tokens</span>
+        <span className="block truncate font-mono text-xs tabular-nums text-slate-700" title={`${tokens.toLocaleString('en-US')} tokens`}>{compactCount(tokens)}</span>
+      </div>
+      <div className="min-w-0 xl:text-right">
+        <span className={queueCellLabel}>Active time</span>
+        <span className="block truncate font-mono text-xs tabular-nums text-slate-700">{duration(activeMs)}</span>
+      </div>
+      <div className="min-w-0 xl:text-right">
+        <span className={queueCellLabel}>Output</span>
+        {pullRequests === 0 && issues === 0
+          ? <span className="block text-xs text-slate-400" title="No issues or pull requests yet">—</span>
+          : <>
+            <span className="block truncate text-xs tabular-nums text-slate-700" title={`${openPullRequests} of ${pullRequests} open`}>{plural(pullRequests, 'PR')}</span>
+            <span className="block truncate text-xs tabular-nums text-slate-500" title={`${openIssues} of ${issues} open`}>{plural(issues, 'issue')}</span>
+          </>}
       </div>
     </Link>
   </li>;
@@ -574,27 +614,26 @@ function GoalList() {
     newGoalButtonRef.current?.focus();
   }, []);
   const openCreator = useCallback(() => setIsCreating(true), []);
-  return <div className="min-h-full w-full min-w-0 bg-white p-4 sm:p-6">
-    <div className="border-b border-slate-200 pb-5">
-      <div><h1 className="text-2xl font-bold text-slate-900">Goals</h1><p className="mt-1 text-sm text-slate-600">Long-running work kept in one exact coding-agent session.</p></div>
+  return <div className="min-h-full w-full min-w-0 bg-white pb-6">
+    <div className="flex flex-wrap items-start justify-between gap-3 px-4 pb-3 pt-4 sm:px-6">
+      <div className="min-w-0"><h1 className="text-xl font-bold text-slate-900">Goals</h1><p className="mt-0.5 text-sm text-slate-600">Long-running work kept in one exact coding-agent session.</p></div>
+      <button ref={newGoalButtonRef} type="button" onClick={openCreator} className={`${buttonClass} min-h-10 flex-none justify-center bg-primary-600 text-white hover:bg-primary-700`}><Plus className="h-4 w-4" />New goal</button>
     </div>
-    {error && <p role="alert" className="mt-4 border-l-2 border-red-500 bg-red-50 p-3 text-sm text-red-700">{error}</p>}
-    <section aria-labelledby="goal-work-queue-title" className="mt-5">
-      <div className="flex flex-col gap-3 pb-3 sm:flex-row sm:items-center sm:justify-between">
-        <div className="flex items-baseline gap-2"><h2 id="goal-work-queue-title" className="text-base font-semibold text-slate-900">Work queue</h2>{hasSuccessfulRead && <span className="text-xs text-slate-500">{visibleGoals.length} of {goals.length}</span>}{refreshing && hasSuccessfulRead && <span role="status" className="text-xs text-slate-500">Refreshing…</span>}</div>
-        <div className="flex min-w-0 flex-col gap-2 sm:flex-row sm:items-center">
-          {goals.length > 0 && <div role="group" aria-label="Filter goals by repository" className="flex min-w-0 items-center gap-2">
-            <Filter className="h-4 w-4 flex-none text-slate-400" aria-hidden="true" />
-            <RepositorySelector
-              repos={repositoryOptions}
-              selectedRepo={repositoryFilter}
-              onRepoChange={setRepositoryFilter}
-              labelLayout="stacked"
-              className="min-w-0 flex-1 sm:w-[240px] sm:flex-none"
-            />
-          </div>}
-          <button ref={newGoalButtonRef} type="button" onClick={openCreator} className={`${buttonClass} min-h-10 justify-center bg-primary-600 text-white hover:bg-primary-700`}><Plus className="h-4 w-4" />New goal</button>
-        </div>
+    {error && <p role="alert" className="mx-4 mb-3 border-l-2 border-red-500 bg-red-50 p-3 text-sm text-red-700 sm:mx-6">{error}</p>}
+    <section aria-labelledby="goal-work-queue-title">
+      {/* One toolbar rail: the queue count sits with the filter that changes it. The list border below closes the bar. */}
+      <div className="flex flex-col gap-2 border-t border-slate-200 bg-slate-50 px-4 py-2 sm:flex-row sm:items-center sm:justify-between sm:px-6">
+        <div className="flex items-baseline gap-2"><h2 id="goal-work-queue-title" className="text-[10px] font-bold uppercase tracking-wider text-slate-500">Work queue</h2>{hasSuccessfulRead && <span className="text-xs tabular-nums text-slate-500">{visibleGoals.length} of {goals.length}</span>}{refreshing && hasSuccessfulRead && <span role="status" className="text-xs text-slate-500">Refreshing…</span>}</div>
+        {goals.length > 0 && <div role="group" aria-label="Filter goals by repository" className="flex min-w-0 items-center gap-2">
+          <Filter className="h-4 w-4 flex-none text-slate-400" aria-hidden="true" />
+          <RepositorySelector
+            repos={repositoryOptions}
+            selectedRepo={repositoryFilter}
+            onRepoChange={setRepositoryFilter}
+            labelLayout="stacked"
+            className="min-w-0 flex-1 sm:w-[240px] sm:flex-none"
+          />
+        </div>}
       </div>
       {!hasSuccessfulRead && (initialLoading || refreshing)
         ? <div role="status" className="flex items-center justify-center gap-2 border-y border-slate-200 py-10 text-sm text-slate-500"><LoaderCircle className="h-4 w-4 animate-spin" aria-hidden="true" />Loading goals…</div>
@@ -605,8 +644,8 @@ function GoalList() {
         : visibleGoals.length === 0
           ? <div className="border-y border-dashed border-slate-300 py-10 text-center"><p className="text-sm font-medium text-slate-700">No goals in {repositoryFilter}</p><button type="button" onClick={() => setRepositoryFilter('all')} className="mt-2 text-sm font-medium text-primary-700 hover:underline">Show all goals</button></div>
           : <div className="border-y border-slate-200 bg-white">
-            <div aria-hidden="true" className="hidden grid-cols-[minmax(240px,2fr)_120px_minmax(140px,1fr)_minmax(180px,1.4fr)_160px] gap-x-5 border-b border-slate-200 bg-slate-50 px-5 py-2 text-[10px] font-bold uppercase tracking-wider text-slate-500 xl:grid">
-              <span>Goal</span><span>Status / runtime</span><span>Repository</span><span>Current activity</span><span>Usage</span>
+            <div aria-hidden="true" data-testid="goal-queue-columns" className={`hidden gap-x-4 border-b border-slate-200 bg-slate-50 px-6 py-2 text-[10px] font-bold uppercase tracking-wider text-slate-500 ${queueGridColumns} xl:grid`}>
+              <span>Goal</span><span>Repository</span><span>Status</span><span className="text-right">Tokens</span><span className="text-right">Active time</span><span className="text-right">Output</span>
             </div>
             <ul aria-label="Goal work queue">{visibleGoals.map(goal => <GoalQueueRow key={goal.id} goal={goal} goalAgents={goalAgents} />)}</ul>
           </div>}

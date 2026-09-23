@@ -372,7 +372,8 @@ describe('GoalsPage', () => {
     expect(firstLink.className).toContain('xl:grid-cols-[');
     expect(queue.parentElement).toHaveClass('border-y');
     expect(queue.parentElement).not.toHaveClass('rounded-lg', 'shadow-sm');
-    expect(screen.getByText(queueGoals[0].objective)).toHaveClass('line-clamp-2');
+    expect(screen.getByText(queueGoals[0].objective)).toHaveClass('truncate');
+    expect(screen.getByText(queueGoals[0].title)).toHaveClass('truncate', 'text-sm', 'font-semibold');
   });
 
   it('confirms discarding unsaved creation input and restores focus on cancel or Escape', async () => {
@@ -462,15 +463,49 @@ describe('GoalsPage', () => {
       },
     }] });
     render(<MemoryRouter initialEntries={['/goals']}><Routes><Route path="/goals" element={<GoalsPage />} /></Routes></MemoryRouter>);
-    expect(await screen.findByText('330 tokens')).toBeInTheDocument();
-    expect(screen.getByText('42s active')).toBeInTheDocument();
-    expect(screen.getByText('1/1 open issues')).toBeInTheDocument();
-    expect(screen.getByText('1/1 open PRs')).toBeInTheDocument();
+    expect(await screen.findByText('330')).toBeInTheDocument();
+    expect(screen.getByText('42s')).toBeInTheDocument();
+    expect(screen.getByText('1 issue')).toBeInTheDocument();
+    expect(screen.getByText('1 PR')).toBeInTheDocument();
     expect(screen.getByText('Implement API')).toBeInTheDocument();
-    expect(screen.getByText(goal.title)).toHaveClass('line-clamp-2');
-    expect(screen.getByText(goal.objective)).toHaveClass('line-clamp-2');
-    expect(screen.getByText('Codex')).toBeInTheDocument();
+    expect(screen.getByText(goal.title)).toHaveClass('truncate');
+    expect(screen.getByText(goal.objective)).toHaveClass('truncate');
+    expect(screen.getByText('acme/web')).toHaveClass('font-mono');
+    expect(screen.getByText('Codex')).toHaveClass('sr-only');
     expect(screen.getByText('GPT-5.6 Sol')).toBeInTheDocument();
+  });
+
+  it('abbreviates large token counts and keeps the exact total on hover', async () => {
+    vi.mocked(goalsApi.listGoals).mockResolvedValue({ goals: [{
+      ...goal,
+      liveSummary: {
+        ...goal.liveSummary,
+        nativeGoal: { objective: goal.objective, status: 'active', tokenBudget: 0, tokensUsed: 101_280_735, timeUsedSeconds: 75 },
+      },
+    }] });
+    render(<MemoryRouter initialEntries={['/goals']}><Routes><Route path="/goals" element={<GoalsPage />} /></Routes></MemoryRouter>);
+
+    const tokens = await screen.findByText('101M');
+    expect(tokens).toHaveAttribute('title', '101,280,735 tokens');
+    expect(screen.getByText('1m 15s')).toBeInTheDocument();
+  });
+
+  it('keeps completed rows quiet, gray and free of a repeated activity column', async () => {
+    vi.mocked(goalsApi.listGoals).mockResolvedValue({ goals: [{
+      ...goal,
+      desiredState: 'running' as const,
+      resultState: 'completed' as const,
+      artifactStats: { issues: 0, openIssues: 0, pullRequests: 0, openPullRequests: 0 },
+    }] });
+    render(<MemoryRouter initialEntries={['/goals']}><Routes><Route path="/goals" element={<GoalsPage />} /></Routes></MemoryRouter>);
+
+    const completed = await screen.findByText('completed');
+    expect(completed).toHaveClass('bg-slate-100', 'text-slate-600');
+    expect(completed).not.toHaveClass('bg-green-100');
+    // A settled goal has no live activity or open checklist to report.
+    expect(screen.queryByText('Implement API')).not.toBeInTheDocument();
+    expect(screen.queryByText('1 open of 1 steps')).not.toBeInTheDocument();
+    expect(screen.getByText('—')).toBeInTheDocument();
   });
 
   it('filters goals by repository and stores the selection in the URL', async () => {

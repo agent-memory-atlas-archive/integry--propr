@@ -119,10 +119,10 @@ test('keeps the goal work queue within the available 1024px desktop content widt
 
   expect(dimensions.queueScrollWidth).toBeLessThanOrEqual(dimensions.queueClientWidth);
   expect(dimensions.mainScrollWidth).toBeLessThanOrEqual(dimensions.mainClientWidth);
-  await expect(page.getByText('Status / runtime')).toBeHidden();
+  await expect(page.getByTestId('goal-queue-columns')).toBeHidden();
 
   await page.setViewportSize({ width: 1280, height: 820 });
-  await expect(page.getByText('Status / runtime')).toBeVisible();
+  await expect(page.getByTestId('goal-queue-columns')).toBeVisible();
   const wideDimensions = await contentWidths(page);
   expect(wideDimensions.queueScrollWidth).toBeLessThanOrEqual(wideDimensions.queueClientWidth);
   expect(wideDimensions.mainScrollWidth).toBeLessThanOrEqual(wideDimensions.mainClientWidth);
