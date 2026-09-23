@@ -48,17 +48,22 @@ describe('RepositorySettingsBar follow-up CI cancellation', () => {
     expect(toggle).not.toBeChecked();
     expect(screen.getByText('Cancel CI while follow-up implementation is in progress')).toBeInTheDocument();
     expect(screen.getByText(/Only the validation workflows you select below are cancelled/)).toBeInTheDocument();
+    expect(screen.getByText(/If you select nothing here, the instance-wide/)).toBeInTheDocument();
     expect(screen.getByText(/Checks start again on the new commit, or resume on the current one if no commit is produced\./)).toBeInTheDocument();
     // The selection belongs to the enabled option; nothing to select while it is off.
     expect(screen.queryByRole('textbox', { name: workflowsName })).not.toBeInTheDocument();
   });
 
-  it('asks for a selection with an actionable message while the enabled option selects nothing', () => {
+  it('asks for a selection and discloses the instance fallback while the enabled option selects nothing', () => {
     renderBar({ cancelCiDuringFollowup: true });
 
     expect(screen.getByRole('textbox', { name: workflowsName })).toHaveValue('');
-    expect(screen.getByText(/No workflows selected, so nothing is cancelled\./)).toBeInTheDocument();
-    expect(screen.getByText(/pr-build-check\.yml/)).toBeInTheDocument();
+    // Clearing the selection hands the decision to the environment fallback, so
+    // the empty state must not promise that nothing is cancelled.
+    expect(screen.getByText(/No workflows selected for this repository, so the instance-wide/)).toBeInTheDocument();
+    expect(screen.getByText(/nothing is cancelled when your operator left it unset/)).toBeInTheDocument();
+    expect(screen.getAllByText('CANCEL_CI_FOLLOWUP_WORKFLOWS').length).toBeGreaterThan(0);
+    expect(screen.getByText('pr-build-check.yml')).toBeInTheDocument();
   });
 
   it('shows the selected workflows and reports an edited selection as exact identities', () => {

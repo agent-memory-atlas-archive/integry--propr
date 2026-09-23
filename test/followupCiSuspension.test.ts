@@ -597,6 +597,69 @@ describe('restoring cancelled validation', () => {
         assert.deepEqual(await records(), []);
     });
 
+    test('a run of another event or another pull request never stands in for the cancelled validation', async () => {
+        const runs = [run({ id: 1 })];
+        const github = createGitHub(runs, { asyncCancellation: true });
+        await beginFollowupCiSuspension({ target: TARGET, taskId: TASK_ID }, deps(github));
+
+        runs[0].status = 'completed';
+        runs[0].conclusion = 'cancelled';
+        // Same workflow and same commit, but neither run validates this pull
+        // request: the push run skips everything the pull request event checks.
+        runs.push(run({ id: 98, workflow_id: 1, status: 'queued', event: 'push', pull_requests: [] }));
+        runs.push(run({ id: 97, workflow_id: 1, status: 'queued', pull_requests: [{ number: 9999 }] }));
+        const [result] = await releaseFollowupCiSuspensionsForTask({ taskId: TASK_ID }, deps(github));
+
+        assert.equal(result.reason, 'restarted');
+        assert.deepEqual(result.restartedRunIds, [1]);
+        assert.deepEqual(github.rerun(), [1], 'the cancelled pull request validation was brought back itself');
+        assert.deepEqual(await records(), []);
+    });
+
+    test('a refused rerun keeps the obligation and restores the checks once access is granted back', async () => {
+        const runs = [run({ id: 1 }), run({ id: 2, status: 'queued' })];
+        const denied = createGitHub(runs, { rerunStatus: 403 });
+        await beginFollowupCiSuspension({ target: TARGET, taskId: TASK_ID }, deps(denied));
+
+        const [result] = await releaseFollowupCiSuspensionsForTask({ taskId: TASK_ID }, deps(denied));
+
+        assert.equal(result.reason, 'permission_denied');
+        assert.deepEqual(result.pendingRunIds, [1, 2]);
+        // The checks ProPR cancelled are still cancelled, so the obligation to
+        // bring them back must survive the refusal.
+        const [blocked] = await records();
+        assert.equal(blocked.state, 'blocked');
+        assert.deepEqual(await storedRunIds(), [1, 2]);
+        assert.deepEqual(JSON.parse(blocked.cancelled_runs).map((entry: { restarted: boolean }) => entry.restarted), [false, false]);
+        // A refusal never reached GitHub, so it must not spend the restart budget.
+        assert.equal(blocked.attempts, 0);
+
+        // Actions access is granted back; the next reconciliation honours the obligation.
+        const restored = createGitHub(runs);
+        const summary = await reconcileFollowupCiSuspensions(deps(restored, { getTaskState: async () => null }));
+
+        assert.equal(summary.restored, 1);
+        assert.deepEqual(restored.rerun().sort((a, b) => (a ?? 0) - (b ?? 0)), [1, 2]);
+        assert.deepEqual(await records(), []);
+    });
+
+    test('a refused rerun releases its obligation once the cancelled head is obsolete', async () => {
+        const runs = [run({ id: 1 })];
+        const denied = createGitHub(runs, { rerunStatus: 403 });
+        await beginFollowupCiSuspension({ target: TARGET, taskId: TASK_ID }, deps(denied));
+        const [result] = await releaseFollowupCiSuspensionsForTask({ taskId: TASK_ID }, deps(denied));
+        assert.equal(result.reason, 'permission_denied');
+        assert.equal((await records())[0].state, 'blocked');
+
+        // A replacement commit is published: the cancelled revision is obsolete.
+        const replaced = createGitHub(runs, { headSha: NEW_HEAD, rerunStatus: 403 });
+        const summary = await reconcileFollowupCiSuspensions(deps(replaced, { getTaskState: async () => null }));
+
+        assert.equal(summary.released, 1);
+        assert.deepEqual(replaced.rerun(), []);
+        assert.deepEqual(await records(), []);
+    });
+
     test('a rerun whose response was lost is not requested again once the run proves it restarted', async () => {
         const runs = [run({ id: 1 })];
         const github = createGitHub(runs, {

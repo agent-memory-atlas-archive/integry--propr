@@ -99,10 +99,12 @@ test('shows and updates the follow-up CI cancellation option and its workflow se
   await expect.poll(() => api.writes.at(-1)?.map(repo => repo.cancelCiDuringFollowupWorkflows))
     .toEqual([['pr-build-check.yml', '.github/workflows/pr-test-on-label.yml'], ['pr-build-check.yml', '.github/workflows/pr-test-on-label.yml']]);
 
-  // Clearing it says so, and says what to do about it.
+  // Clearing it hands the decision to the environment fallback, which the empty
+  // state discloses instead of promising that nothing is cancelled.
   await workflows.fill('');
   await workflows.blur();
-  await expect(settings.getByText(/No workflows selected, so nothing is cancelled\./)).toBeVisible();
+  await expect(settings.getByText(/No workflows selected for this repository, so the instance-wide/)).toBeVisible();
+  await expect(settings.getByText(/nothing is cancelled when your operator left it unset/)).toBeVisible();
   if (process.env.PROPR_CAPTURE_PREVIEWS) {
     await page.screenshot({ animations: 'disabled', path: '../.propr/previews/repository-cancel-ci-empty-selection.png' });
   }

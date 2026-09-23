@@ -1,13 +1,13 @@
 import { getStateManager, isCancelCiDuringFollowupEnabledForRepository, TaskStates } from '@propr/core';
 import {
-    CiActionsPermissionError, getPullRequestHead, getRun, listRunsForSha, PENDING_RUN_STATUSES, rerunRun, sameSha,
+    CiActionsPermissionError, getPullRequestHead, getRun, isReplacementValidationRun, listRunsForSha, rerunRun, sameSha,
     type CiSuspensionOctokit, type SuspensionTarget, type WorkflowRunSummary,
 } from './followupCiSuspensionRuns.js';
 import { delay, resolveLog, resolveOctokit, type CiSuspensionDeps } from './followupCiSuspensionContext.js';
 import { cancellationState, cancelPendingRuns } from './followupCiSuspensionCancel.js';
 import {
     deleteSuspension, loadSuspension, loadSuspensions, nowMs, parseCancelledRuns, saveCancelledRuns, splitRepository,
-    SUSPENSION_ACTIVE, SUSPENSION_RESTORING, suspensionKey, targetOf,
+    SUSPENSION_ACTIVE, SUSPENSION_BLOCKED, SUSPENSION_RESTORING, suspensionKey, targetOf,
     type CancelledRun, type CiSuspensionRecord,
 } from './followupCiSuspensionStore.js';
 import { SuspensionLeaseLostError, SuspensionLeaseUnavailableError, withSuspensionLease } from './followupCiSuspensionLease.js';
@@ -64,7 +64,9 @@ export type { ValidationWorkflowPolicy } from './followupCiSuspensionPolicy.js';
 export {
     beginFollowupCiSuspension, resolveFollowupCiSuspensionTarget, suspendObsoleteValidationForImplementation,
 } from './followupCiSuspensionCancel.js';
-export { PR_CI_SUSPENSIONS_TABLE, SUSPENSION_ACTIVE, SUSPENSION_RESTORING } from './followupCiSuspensionStore.js';
+export {
+    PR_CI_SUSPENSIONS_TABLE, SUSPENSION_ACTIVE, SUSPENSION_BLOCKED, SUSPENSION_RESTORING,
+} from './followupCiSuspensionStore.js';
 export type { BeginSuspensionResult } from './followupCiSuspensionCancel.js';
 export type { CiSuspensionDeps } from './followupCiSuspensionContext.js';
 export type { SuspensionTarget } from './followupCiSuspensionRuns.js';
@@ -121,8 +123,9 @@ async function sweepSuspension(record: CiSuspensionRecord, deps: CiSuspensionDep
 /**
  * Decides what one cancelled run still needs. Runs that are still finishing stay
  * pending; runs that produced their own result, disappeared, or already have a
- * fresh run of the same workflow need no restart. A rerun whose response was
- * lost counts as restarted only when the run itself proves it.
+ * fresh run of the same workflow validating the same pull request head need no
+ * restart. A rerun whose response was lost counts as restarted only when the run
+ * itself proves it.
  */
 async function restartCancelledRun(
     run: CancelledRun,
@@ -147,10 +150,13 @@ async function restartPass(
 ): Promise<boolean> {
     const { target, octokit, headSha, restartedRunIds } = context;
     // Re-read the live runs of the captured head on every pass so validation
-    // GitHub already restarted is never duplicated.
+    // GitHub already restarted is never duplicated. Only a run that validates
+    // *this* pull request head on the pull request's own event counts as that
+    // replacement: an unrelated push or another pull request's run of the same
+    // commit never settles the obligation to restart what ProPR cancelled.
     const liveRuns = await listRunsForSha(octokit, target, headSha);
     const activeWorkflowIds = new Set(liveRuns
-        .filter(run => PENDING_RUN_STATUSES.has((run.status ?? '').toLowerCase()) && sameSha(run.head_sha, headSha))
+        .filter(run => isReplacementValidationRun(run, { pullRequestNumber: target.pullRequestNumber, headSha }))
         .map(run => run.workflow_id)
         .filter((id): id is number => typeof id === 'number'));
     let progressed = false;
@@ -221,6 +227,9 @@ async function restoreSuspension(
     const loaded = await loadSuspension(deps, record);
     if (!loaded || loaded.task_id !== record.task_id || !sameSha(loaded.head_sha, record.head_sha)) return SUPERSEDED;
     let current = loaded;
+    // A refused attempt never reached GitHub, so it must not consume the budget
+    // of attempts that eventually gives up on a run that keeps finishing.
+    const attemptsBeforeRestore = loaded.attempts;
     const target = targetOf(current);
     const octokit = await resolveOctokit(deps);
     const attempts = current.attempts + 1;
@@ -272,14 +281,39 @@ async function restoreSuspension(
             if (replaced) return replaced;
         }
     } catch (error) {
-        const saved = await saveCancelledRuns(deps, current, runs, { state: SUSPENSION_RESTORING, attempts }).catch(() => null);
-        if (saved) current = saved;
-        if (!(error instanceof CiActionsPermissionError)) throw error;
-        log.error({ repository: current.repository, pullRequest: current.pull_request, error: error.message },
-            'Cannot restart cancelled pull request validation: the GitHub App needs Actions "Read and write" access');
-        await deleteSuspension(deps, current).catch(() => undefined);
-        return { reason: 'permission_denied', restartedRunIds, pendingRunIds: runs.filter(run => !run.restarted).map(run => run.id) };
+        if (!(error instanceof CiActionsPermissionError)) {
+            const saved = await saveCancelledRuns(deps, current, runs, { state: SUSPENSION_RESTORING, attempts }).catch(() => null);
+            if (saved) current = saved;
+            throw error;
+        }
+        return await blockRestore(
+            { record: current, runs, restartedRunIds, attempts: attemptsBeforeRestore, error }, deps);
     }
+}
+
+/**
+ * Keeps the obligation alive when GitHub refuses the rerun. A refusal can be
+ * temporary and Actions access can be granted back, so everything ProPR
+ * cancelled stays recorded in the durable blocked state that every later
+ * reconciliation retries: only a confirmed restart, a closed pull request or a
+ * replaced head may clear it. Dropping the record here would leave the current
+ * head's checks cancelled with nothing left to restore them.
+ */
+async function blockRestore(
+    params: { record: CiSuspensionRecord; runs: CancelledRun[]; restartedRunIds: number[]; attempts: number; error: Error },
+    deps: CiSuspensionDeps,
+): Promise<RestoreSuspensionResult> {
+    const { record, runs, restartedRunIds, attempts, error } = params;
+    const pendingRunIds = runs.filter(run => !run.restarted).map(run => run.id);
+    const retained = await saveCancelledRuns(deps, record, runs, { state: SUSPENSION_BLOCKED, attempts }).catch(() => null);
+    resolveLog(deps).error(
+        {
+            repository: record.repository, pullRequest: record.pull_request, headSha: record.head_sha,
+            pendingRunIds, error: error.message, retained: retained !== null,
+        },
+        'Cannot restart cancelled pull request validation: the GitHub App needs Actions "Read and write" access. '
+        + 'The cancelled runs stay recorded and every reconciliation retries them until access is restored or the head is replaced');
+    return { reason: 'permission_denied', restartedRunIds, pendingRunIds };
 }
 
 /** Hands the unfinished part of a restart to the next reconciliation pass, or gives up loudly. */
@@ -386,7 +420,8 @@ export async function reconcileFollowupCiSuspensions(
                 continue;
             }
             const restored = await restoreFollowupCiSuspension(record, deps);
-            if (!['pending', 'superseded', 'busy'].includes(restored.reason)) summary.released += 1;
+            // A denied restore released nothing: its obligation is still recorded.
+            if (!['pending', 'permission_denied', 'superseded', 'busy'].includes(restored.reason)) summary.released += 1;
             if (restored.restartedRunIds.length > 0) summary.restored += 1;
         } catch (error) {
             summary.errors += 1;

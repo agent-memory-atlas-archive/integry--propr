@@ -64,6 +64,15 @@ export function workflowIdentities(run: WorkflowRunIdentity): string[] {
     return [...identities].filter(Boolean);
 }
 
+/**
+ * Whether this run was triggered by the pull request itself. A `push`, `schedule`
+ * or `workflow_dispatch` run of the same commit validates something else: it can
+ * neither be cancelled as pull request validation nor stand in for it.
+ */
+export function isPullRequestValidationEvent(event: string | null | undefined): boolean {
+    return PULL_REQUEST_EVENTS.has(normalize(event));
+}
+
 /** Normalizes what an operator typed or stored into comparable workflow identities. */
 export function parseWorkflowSelection(values: Iterable<string | null | undefined> | null | undefined): string[] {
     const selection: string[] = [];
@@ -110,6 +119,6 @@ export function isEligibleValidationWorkflow(
     policy: ValidationWorkflowPolicy = NO_VALIDATION_WORKFLOWS_SELECTED,
 ): boolean {
     if (policy.selected.size === 0) return false;
-    if (!PULL_REQUEST_EVENTS.has(normalize(run.event))) return false;
+    if (!isPullRequestValidationEvent(run.event)) return false;
     return workflowIdentities(run).some(identity => policy.selected.has(identity));
 }

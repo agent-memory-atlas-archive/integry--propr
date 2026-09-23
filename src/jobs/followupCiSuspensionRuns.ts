@@ -4,7 +4,9 @@
  * rerun one run. Nothing here decides when those operations are allowed.
  */
 
-import { isEligibleValidationWorkflow, type ValidationWorkflowPolicy } from './followupCiSuspensionPolicy.js';
+import {
+    isEligibleValidationWorkflow, isPullRequestValidationEvent, type ValidationWorkflowPolicy,
+} from './followupCiSuspensionPolicy.js';
 
 /** Runs in these statuses have not produced a result yet, so cancelling one only discards work a new commit would invalidate. */
 const CANCELABLE_RUN_STATUSES: ReadonlySet<string> = new Set(['queued', 'in_progress', 'waiting', 'pending', 'requested']);
@@ -73,6 +75,24 @@ export function isCancelableValidationRun(
 ): boolean {
     if (!isEligibleValidationWorkflow(run, target.policy)) return false;
     if (!CANCELABLE_RUN_STATUSES.has((run.status ?? '').toLowerCase())) return false;
+    if (!sameSha(run.head_sha, target.headSha)) return false;
+    return (run.pull_requests ?? []).some(pullRequest => pullRequest?.number === target.pullRequestNumber);
+}
+
+/**
+ * Whether this live run is proof that the validation of a cancelled run already
+ * exists again. Only a run of the same workflow that GitHub associates with the
+ * captured pull request, carries the captured head and was triggered by the pull
+ * request itself qualifies: a `push` run of the same commit, or a run of another
+ * pull request, validates something else and can never settle the obligation to
+ * restart what ProPR cancelled.
+ */
+export function isReplacementValidationRun(
+    run: WorkflowRunSummary,
+    target: { pullRequestNumber: number; headSha: string },
+): boolean {
+    if (!PENDING_RUN_STATUSES.has((run.status ?? '').toLowerCase())) return false;
+    if (!isPullRequestValidationEvent(run.event)) return false;
     if (!sameSha(run.head_sha, target.headSha)) return false;
     return (run.pull_requests ?? []).some(pullRequest => pullRequest?.number === target.pullRequestNumber);
 }

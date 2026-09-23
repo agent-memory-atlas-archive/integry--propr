@@ -78,7 +78,7 @@ const CancelCiDuringFollowupControl: React.FC<{
       >
         <span className="min-w-0">
           <span className="block">Cancel CI while follow-up implementation is in progress</span>
-          <span className="mt-1 block text-slate-500">Only the validation workflows you select below are cancelled on the commit ProPR is about to replace. Every other workflow, deployments and previews included, keeps running. Checks start again on the new commit, or resume on the current one if no commit is produced.</span>
+          <span className="mt-1 block text-slate-500">Only the validation workflows you select below are cancelled on the commit ProPR is about to replace. Every other workflow, deployments and previews included, keeps running. If you select nothing here, the instance-wide <code>CANCEL_CI_FOLLOWUP_WORKFLOWS</code> fallback applies instead, and only what it lists is cancelled. Checks start again on the new commit, or resume on the current one if no commit is produced.</span>
         </span>
         <input
           type="checkbox"
@@ -108,7 +108,7 @@ const CancelCiDuringFollowupControl: React.FC<{
           </label>
           {selected.length === 0 ? (
             <p role="status" className="text-amber-700">
-              No workflows selected, so nothing is cancelled. Add each validation workflow by its file name, its path or the name shown on the pull request — for example <code>pr-build-check.yml</code>.
+              No workflows selected for this repository, so the instance-wide <code>CANCEL_CI_FOLLOWUP_WORKFLOWS</code> fallback decides what is cancelled: whatever it lists is cancelled here, and nothing is cancelled when your operator left it unset. Select the workflows to cancel by file name, path or the name shown on the pull request — for example <code>pr-build-check.yml</code>.
             </p>
           ) : (
             <p role="status" className="text-slate-500">

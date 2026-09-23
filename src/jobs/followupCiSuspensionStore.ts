@@ -18,6 +18,8 @@ import { sameSha, type SuspensionTarget } from './followupCiSuspensionRuns.js';
 export const PR_CI_SUSPENSIONS_TABLE = 'pr_ci_suspensions';
 export const SUSPENSION_ACTIVE = 'active';
 export const SUSPENSION_RESTORING = 'restoring';
+/** Restoration was refused by GitHub. The obligation stays recorded and every reconciliation retries it. */
+export const SUSPENSION_BLOCKED = 'blocked';
 
 export interface CiSuspensionRecord {
     repository: string;
