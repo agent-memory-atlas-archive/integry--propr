@@ -9,6 +9,7 @@ import { useDemoMode } from '../../contexts/DemoModeContext';
 import { PlanEditorDesktopLayout } from './PlanEditorDesktopLayout';
 import { PlanEditorMobileLayout } from './PlanEditorMobileLayout';
 import PlanIntentConfirmationDialog from './PlanIntentConfirmationDialog';
+import { getDraftDisplayName } from './planDisplayName';
 import {
   describePlanPrBehavior,
   type PlanNotificationIntent,
@@ -37,7 +38,7 @@ const parseInitialPlan = (planJson: DraftWithPlan['plan_json'] | string): PlanTa
   return Array.isArray(parsedPlan) ? parsedPlan as PlanTask[] : [];
 };
 
-const getPlanName = (draft: DraftWithPlan) => draft.name || draft.initial_prompt || 'Untitled Plan';
+const getPlanName = (draft: DraftWithPlan) => getDraftDisplayName(draft, 'Untitled Plan');
 const getBaseBranch = (draft: DraftWithPlan) => draft.context_config?.baseBranch || 'main';
 
 export const PlanEditor: React.FC<PlanEditorProps> = ({

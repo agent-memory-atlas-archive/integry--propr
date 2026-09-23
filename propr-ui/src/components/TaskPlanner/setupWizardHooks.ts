@@ -26,6 +26,7 @@ export { getDraftSetupSnapshot } from './setupWizardPayloads';
 export interface Repo { name: string; enabled: boolean; baseBranch?: string; starred?: boolean; iconPath?: string | null; }
 export interface PlannerConfig { prompt: string; baseBranch: string; granularity: Granularity; contextLevel: number; compress: boolean; files: PlannerAttachment[]; contextRepositories: { repository: string; branch?: string }[]; generationModel: string | null; manualFiles: string[]; excludedFiles: string[]; }
 
+export interface PromptPersistedUpdate { draftId: string; initial_prompt: string; name: string; }
 interface RepoInfoState { isLoading: boolean; error: string | null; }
 interface GenerationHandlersParams { draft: PlannerDraft | undefined; config: PlannerConfig; branchError: string | null; flushPrompt?: (draftId: string, prompt: string) => Promise<void>; contextHelpers: { isContextStale: boolean; clearCountdown: () => void; fetchPreview: () => Promise<boolean> }; startPolling: (runId?: string) => void; stopPolling: () => void; onGenerationStarted?: (runId: string) => void; setError: React.Dispatch<React.SetStateAction<string | null>>; setGenerationError: (error: string | null) => void; }
 interface DraftCreationParams { selectedRepo: string; config: PlannerConfig; localFiles: File[]; onDraftCreated?: (draftId: string) => void; navigate: (path: string, options?: { replace?: boolean; state?: unknown }) => void; setError: React.Dispatch<React.SetStateAction<string | null>>; setIsCreating: React.Dispatch<React.SetStateAction<boolean>>; todoIds?: string[]; }
@@ -109,12 +110,7 @@ function useDebouncedDraftPersistence(savedValue: string, draftId: string | unde
   const isMountedRef = useRef(true);
   const lastSavedValueRef = useRef(savedValue);
   const previousDraftIdRef = useRef<string | undefined>(draftId);
-  useEffect(() => {
-    isMountedRef.current = true;
-    return () => {
-      isMountedRef.current = false;
-    };
-  }, []);
+  useEffect(() => { isMountedRef.current = true; return () => { isMountedRef.current = false; }; }, []);
   useEffect(() => {
     lastSavedValueRef.current = savedValue;
     if (debounceTimerRef.current) clearTimeout(debounceTimerRef.current);
@@ -213,10 +209,7 @@ export function useFileHandling(isNewMode: boolean, draft: PlannerDraft | undefi
   }, [handleUpload, setError]);
   return { localFiles, isUploading, handleUpload, handleRemoveFile, handleRemoveLocalFile, handlePaste };
 }
-const savePromptDirectly = async (draftId: string, prompt: string) => {
-  const trimmedPrompt = prompt.trim();
-  await updateDraft(draftId, { initial_prompt: trimmedPrompt, name: truncateToSentences(trimmedPrompt) });
-};
+const savePromptDirectly = async (draftId: string, prompt: string) => { const trimmed = prompt.trim(); await updateDraft(draftId, { initial_prompt: trimmed, name: truncateToSentences(trimmed) }); };
 
 export function useGenerationHandlers({ draft, config, branchError, flushPrompt = savePromptDirectly, contextHelpers, startPolling, stopPolling, onGenerationStarted, setError, setGenerationError }: GenerationHandlersParams) {
   const [isStartingGeneration, setIsStartingGeneration] = useState(false);
@@ -349,14 +342,20 @@ export function usePromptPersistence(
   prompt: string,
   initialPrompt: string | undefined,
   persistOnInitialDraft = false,
+  onPersisted?: (update: PromptPersistedUpdate) => void,
 ) {
   const trimmedPrompt = prompt.trim();
   const { debounceTimerRef, isMountedRef, lastSavedValueRef, previousDraftIdRef } = useDebouncedDraftPersistence((initialPrompt || '').trim(), draftId);
   const saveQueueRef = useRef<Promise<void>>(Promise.resolve());
+  // Kept in a ref so an inline callback does not recreate enqueuePromptSave
+  const onPersistedRef = useRef(onPersisted);
+  onPersistedRef.current = onPersisted;
   const enqueuePromptSave = useCallback((targetDraftId: string, value: string) => {
     const save = saveQueueRef.current.then(async () => {
-      await updateDraft(targetDraftId, { initial_prompt: value, name: truncateToSentences(value) });
+      const name = truncateToSentences(value);
+      await updateDraft(targetDraftId, { initial_prompt: value, name });
       lastSavedValueRef.current = value;
+      onPersistedRef.current?.({ draftId: targetDraftId, initial_prompt: value, name });
     });
     saveQueueRef.current = save.catch(() => undefined);
     return save;

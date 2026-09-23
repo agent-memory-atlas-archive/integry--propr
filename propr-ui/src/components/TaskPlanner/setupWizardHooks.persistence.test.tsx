@@ -97,6 +97,47 @@ describe('setupWizardHooks persistence', () => {
     }
   });
 
+  it('reports the derived name to onPersisted after each successful save', async () => {
+    vi.useFakeTimers();
+    try {
+      const onPersisted = vi.fn();
+      renderHook(() =>
+        usePromptPersistence('draft-1', 'Add dark mode toggle to settings. Keep it simple. Ignore this sentence.', 'Add', false, onPersisted)
+      );
+
+      await vi.advanceTimersByTimeAsync(1_100);
+
+      expect(mockUpdateDraft).toHaveBeenCalledWith('draft-1', {
+        initial_prompt: 'Add dark mode toggle to settings. Keep it simple. Ignore this sentence.',
+        name: 'Add dark mode toggle to settings. Keep it simple.',
+      });
+      expect(onPersisted).toHaveBeenCalledWith({
+        draftId: 'draft-1',
+        initial_prompt: 'Add dark mode toggle to settings. Keep it simple. Ignore this sentence.',
+        name: 'Add dark mode toggle to settings. Keep it simple.',
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('reports the derived name to onPersisted when the prompt is flushed before generation', async () => {
+    const onPersisted = vi.fn();
+    const { result } = renderHook(() =>
+      usePromptPersistence('draft-1', 'Add', 'Add', false, onPersisted)
+    );
+
+    await act(async () => {
+      await result.current.flushPrompt('draft-1', 'Add dark mode toggle to settings.');
+    });
+
+    expect(onPersisted).toHaveBeenCalledWith({
+      draftId: 'draft-1',
+      initial_prompt: 'Add dark mode toggle to settings.',
+      name: 'Add dark mode toggle to settings.',
+    });
+  });
+
   it('waits for an in-flight autosave and cancels the queued debounce before saving the final prompt', async () => {
     vi.useFakeTimers();
     try {

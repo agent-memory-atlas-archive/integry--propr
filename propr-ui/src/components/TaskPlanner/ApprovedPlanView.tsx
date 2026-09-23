@@ -6,6 +6,7 @@ import { DraftWithPlan, deleteDraft } from '../../api/proprApi';
 import DeletePlanDialog from './DeletePlanDialog';
 import RevisePlanDialog from './RevisePlanDialog';
 import PlanIssuesManager from './PlanIssuesManager';
+import { getDraftDisplayName } from './planDisplayName';
 import { PlanTask, reviseDraft, pauseDraft, resumeDraft, updateExecutionSettings } from '../../api/plannerApi';
 import { PlanIssue } from '../../api/planIssuesApi';
 import { useToast } from '../ui/useToast';
@@ -264,7 +265,7 @@ export const ApprovedPlanView: React.FC<ApprovedPlanViewProps> = ({
   const [pendingExecutionSettingsSaves, setPendingExecutionSettingsSaves] = useState(0);
   const isSavingExecutionSettings = pendingExecutionSettingsSaves > 0;
 
-  const planName = draft.name || draft.initial_prompt || 'Untitled Plan';
+  const planName = getDraftDisplayName(draft, 'Untitled Plan');
   const repository = draft.repository || '';
   const baseBranch = draft.context_config?.baseBranch || 'main';
   const repoUrl = draft.repository ? `https://github.com/${draft.repository}/issues` : null;
