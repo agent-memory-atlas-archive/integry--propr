@@ -3,11 +3,18 @@
  *
  * The list is derived from work state, never from notification state, so
  * dismissing something in the inbox does not make a blocker disappear here.
- * When it is empty the panel gets out of the way entirely rather than
- * occupying a column with a reassuring graphic.
+ *
+ * The panel is a fixed structural block, not a conditional one. It is the top
+ * module of the console's right column, and unmounting it when the list
+ * empties collapsed that column: the stats panel floated up into the triage
+ * slot, the row rule the two columns share went with it, and the bottom of
+ * the rail became a band of white with a vertical rule running down through
+ * it. So an empty list is drawn, not removed — one quiet line inside the same
+ * heading, holding the same geometry as four rows would.
  */
 
-import React, { useCallback, useEffect } from 'react';
+import React, { useCallback } from 'react';
+import { Check } from 'lucide-react';
 import { getDashboardAttention, type AttentionItem, type DashboardAttentionResponse } from '../../api/dashboardApi';
 import {
   Dot,
@@ -135,26 +142,27 @@ const AttentionRow: React.FC<{ item: AttentionItem }> = ({ item }) => {
   );
 };
 
-interface NeedsAttentionPanelProps extends DashboardSectionProps {
-  /** Lets the layout drop the column entirely once the list is known empty. */
-  onEmptyChange?: (empty: boolean) => void;
-  /**
-   * Whether an empty list leaves the DOM entirely.
-   *
-   * Nothing to attend to is the normal case, so by default the section is
-   * simply absent rather than occupying a column with a reassuring graphic.
-   * A caller that has room for one quiet line — the dashboard's mobile column,
-   * where the panel is the only thing between two rules — opts out.
-   */
-  hideWhenEmpty?: boolean;
-}
+/**
+ * Nothing to do, said quietly.
+ *
+ * One line, the same height as a row, in the panel's own voice: a tick and a
+ * sentence, no illustration and no celebration. It reports a state; it is not
+ * a reward.
+ */
+const AllClear: React.FC = () => (
+  <p
+    data-testid="needs-attention-empty"
+    className="flex items-start gap-1.5 px-3 py-3 text-sm leading-5 text-slate-500"
+  >
+    <Check className="mt-0.5 h-4 w-4 flex-none text-teal-600" aria-hidden="true" />
+    All clear — no tasks require operator intervention
+  </p>
+);
 
-export const NeedsAttentionPanel: React.FC<NeedsAttentionPanelProps> = ({
+export const NeedsAttentionPanel: React.FC<DashboardSectionProps> = ({
   repository,
   refreshToken,
   onLoaded,
-  onEmptyChange,
-  hideWhenEmpty = true,
 }) => {
   const load = useCallback(() => getDashboardAttention(repository), [repository]);
   const { data, error, loading, reload } = useDashboardSection<DashboardAttentionResponse>(
@@ -167,48 +175,43 @@ export const NeedsAttentionPanel: React.FC<NeedsAttentionPanelProps> = ({
   useNowTick();
 
   const items = data?.items ?? [];
-  const isEmpty = data !== null && items.length === 0;
-  useEffect(() => {
-    onEmptyChange?.(isEmpty);
-  }, [isEmpty, onEmptyChange]);
-
-  if (loading) return <SectionSkeleton rows={2} />;
-
-  if (error && items.length === 0) {
-    return (
-      <section aria-labelledby="needs-attention-heading" data-testid="needs-attention-panel" className="min-w-0 bg-white">
-        <SectionHeading id="needs-attention-heading" title="Needs attention" />
-        <SectionError message="Unable to load what needs attention" onRetry={reload} />
-      </section>
-    );
-  }
-
-  // Nothing to do: no panel at all on desktop, one quiet line on mobile.
-  if (items.length === 0) {
-    if (hideWhenEmpty) return null;
-    return (
-      <p data-testid="needs-attention-empty" className="px-3 py-3 text-sm text-slate-500 lg:hidden">
-        Nothing needs your attention
-      </p>
-    );
-  }
-
+  const unavailable = Boolean(error) && items.length === 0;
   const visible = items.slice(0, VISIBLE_ITEMS);
 
+  /*
+    Heading first, always — including while the first read is in flight and
+    when it fails. The heading is what holds the top of the right column on
+    the same line as the top of the main column, so it cannot be something
+    the panel only draws once it has rows.
+  */
   return (
     <section
       aria-labelledby="needs-attention-heading"
       data-testid="needs-attention-panel"
       className="min-w-0 bg-white"
     >
-      <SectionHeading id="needs-attention-heading" title="Needs attention" count={items.length}>
-        <SectionLink to={filteredTasksHref('attention', repository)}>View all</SectionLink>
+      <SectionHeading
+        id="needs-attention-heading"
+        title="Needs attention"
+        count={loading || unavailable ? null : items.length}
+      >
+        {items.length > 0 && (
+          <SectionLink to={filteredTasksHref('attention', repository)}>View all</SectionLink>
+        )}
       </SectionHeading>
-      <ul>
-        {visible.map(item => (
-          <AttentionRow key={item.id} item={item} />
-        ))}
-      </ul>
+
+      {loading && <SectionSkeleton rows={2} />}
+      {!loading && unavailable && (
+        <SectionError message="Unable to load what needs attention" onRetry={reload} />
+      )}
+      {!loading && !unavailable && items.length === 0 && <AllClear />}
+      {!loading && items.length > 0 && (
+        <ul>
+          {visible.map(item => (
+            <AttentionRow key={item.id} item={item} />
+          ))}
+        </ul>
+      )}
     </section>
   );
 };

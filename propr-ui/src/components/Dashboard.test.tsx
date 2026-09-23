@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, waitFor, act, fireEvent } from '@testing-library/react';
+import { render, screen, waitFor, within, act, fireEvent } from '@testing-library/react';
 import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom';
 import Dashboard from './Dashboard';
 import { NeedsAttentionPanel } from './Dashboard/NeedsAttentionPanel';
@@ -123,55 +123,66 @@ describe('Dashboard', () => {
     mockStats.mockResolvedValue(statsResponse());
   });
 
-  it('drops the attention panel entirely when nothing needs attention, keeping a quiet line for mobile', async () => {
+  it('keeps the attention section in place with an all-clear line when nothing needs attention', async () => {
     renderDashboard();
     await waitForSections();
 
-    expect(screen.queryByTestId('needs-attention-panel')).not.toBeInTheDocument();
-    expect(screen.getByTestId('needs-attention-empty')).toHaveTextContent('Nothing needs your attention');
+    // The section is structure, not a conditional decoration: unmounting it
+    // collapsed the right column and left the stats panel alone at the top of
+    // a rail of white space.
+    const panel = screen.getByTestId('needs-attention-panel');
+    expect(panel).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: /Needs attention/ })).toHaveTextContent('Needs attention (0)');
+    expect(screen.getByTestId('needs-attention-empty')).toHaveTextContent(
+      'All clear — no tasks require operator intervention',
+    );
+    // Nothing to view, so no "View all" link into an empty list.
+    expect(within(panel).queryByRole('link', { name: 'View all' })).not.toBeInTheDocument();
     expect(screen.getByTestId('summary-needs-attention')).toHaveAttribute('data-emphasis', 'false');
   });
 
-  it('renders nothing at all for an empty attention list when the caller hides it', async () => {
-    mockAttention.mockResolvedValue(attentionResponse([]));
-    const { container } = render(
+  it('draws the attention heading before its first read lands, so the column never jumps', async () => {
+    let resolveAttention: (value: ReturnType<typeof attentionResponse>) => void = () => {};
+    mockAttention.mockReturnValue(new Promise(resolve => { resolveAttention = resolve; }));
+
+    render(
       <MemoryRouter>
-        <NeedsAttentionPanel repository="all" refreshToken={0} hideWhenEmpty />
+        <NeedsAttentionPanel repository="all" refreshToken={0} />
       </MemoryRouter>,
     );
 
-    await waitFor(() => expect(mockAttention).toHaveBeenCalledTimes(1));
-    // Absent from the DOM, not hidden by a class: an empty panel that is still
-    // rendered keeps its border and its grid cell, which is the space the
-    // section is supposed to give back.
-    await waitFor(() => expect(container.querySelector('[data-testid="section-skeleton"]')).toBeNull());
-    expect(container).toBeEmptyDOMElement();
-    expect(container.textContent).toBe('');
-    expect(container.querySelector('h2')).toBeNull();
-    expect(screen.queryByText('Needs attention')).not.toBeInTheDocument();
-    expect(screen.queryByText('Nothing needs your attention')).not.toBeInTheDocument();
+    // A skeleton under the real heading, not instead of the whole section.
+    expect(screen.getByTestId('needs-attention-panel')).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: 'Needs attention' })).toBeInTheDocument();
+    expect(screen.getByTestId('section-skeleton')).toBeInTheDocument();
+    // No count until there is one to report: "(0)" while loading would claim
+    // the panel had looked and found nothing.
+    expect(screen.getByRole('heading', { name: 'Needs attention' })).not.toHaveTextContent('(0)');
+
+    resolveAttention(attentionResponse([]));
+    await waitFor(() => expect(screen.getByTestId('needs-attention-empty')).toBeInTheDocument());
   });
 
-  it('keeps one quiet line for an empty attention list when the caller has room for it', async () => {
-    mockAttention.mockResolvedValue(attentionResponse([]));
-    const { container } = render(
+  it('keeps the heading and offers a retry when the attention read fails', async () => {
+    mockAttention.mockRejectedValue(new Error('attention unavailable'));
+    render(
       <MemoryRouter>
-        <NeedsAttentionPanel repository="all" refreshToken={0} hideWhenEmpty={false} />
+        <NeedsAttentionPanel repository="all" refreshToken={0} />
       </MemoryRouter>,
     );
 
-    await waitFor(() => expect(screen.getByTestId('needs-attention-empty')).toBeInTheDocument());
-    expect(screen.getByTestId('needs-attention-empty')).toHaveTextContent('Nothing needs your attention');
-    // Still no heading and no list: one line is the whole empty state.
-    expect(container.querySelector('h2')).toBeNull();
-    expect(container.querySelector('ul')).toBeNull();
+    await waitFor(() => expect(screen.getByText('Unable to load what needs attention')).toBeInTheDocument());
+    // "We could not find out" is not "there is nothing to do".
+    expect(screen.getByTestId('needs-attention-panel')).toBeInTheDocument();
+    expect(screen.queryByTestId('needs-attention-empty')).not.toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: 'Needs attention' })).not.toHaveTextContent('(0)');
   });
 
   it('shows the attention list whatever the caller asked for when work is blocked', async () => {
     mockAttention.mockResolvedValue(attentionResponse([attentionItem()]));
     render(
       <MemoryRouter>
-        <NeedsAttentionPanel repository="all" refreshToken={0} hideWhenEmpty />
+        <NeedsAttentionPanel repository="all" refreshToken={0} />
       </MemoryRouter>,
     );
 

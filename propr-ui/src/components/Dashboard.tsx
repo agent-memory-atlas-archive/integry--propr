@@ -146,7 +146,6 @@ const Dashboard: React.FC = () => {
     return onTaskUpdate(handleTaskUpdate);
   }, [isConnected, onTaskUpdate, scheduleLiveRefresh]);
 
-  const [attentionEmpty, setAttentionEmpty] = useState(false);
   const sectionProps = { repository, refreshToken, onLoaded: markLoaded };
 
   return (
@@ -197,51 +196,44 @@ const Dashboard: React.FC = () => {
         </div>
 
         {/*
-          The status bar for the whole console: a tinted, ruled bar anchored
-          directly above the panes, not loose text between the toolbar and the
-          feed. It carries the same tint and the same 40px height as the pane
-          headers below it, so the console reads as one piece of chrome.
+          The status bar for the whole console: a tinted bar ruled on both
+          edges and anchored directly above the panes, not loose text between
+          the toolbar and the feed.
         */}
         <SummaryStrip {...sectionProps} />
 
         {/*
           Mobile keeps the DOM order: attention, happening now, recent
-          outcomes, historical stats. Desktop places running work and outcomes
-          in the main column and the two supporting panels in a narrower right
-          column; with nothing to attend to, that panel leaves the layout and
-          the stats move up into its place.
+          outcomes, historical stats. Desktop puts running work and outcomes in
+          the main column and the two supporting panels in a narrower right
+          column, in that same order of priority: triage at the top of the
+          rail, background numbers underneath it.
+
+          Every cell is unconditional. An earlier version dropped the attention
+          panel from the desktop grid once its list was empty and moved the
+          stats panel up into row one; the right column then ended where the
+          stats did, roughly a third of the way down, and the rule between the
+          columns carried on alone through the white space below it. A pane
+          that comes and goes with its data is not structure, so the panel
+          stays and says "all clear" instead.
 
           Placement is explicit rather than nested so that DOM order can serve
-          mobile while the columns stay real columns. Cells stretch, which is
-          what keeps the two columns' row rules on one continuous horizon.
+          mobile while the columns stay real columns. Cells stretch, so row one
+          is as tall as the taller of its two panes and the rule beneath it is
+          one continuous line across both columns.
 
           `flex-1` plus a last row of `minmax(min-content,1fr)` is what makes
-          the divider continuous: the bottom row grows into whatever height is
-          left — and never shrinks below its content, so a long feed still
-          scrolls rather than clipping — so the `lg:border-r` hanging off the
-          main column reaches the bottom of the viewport instead of ending
-          wherever the content happened to stop. The
-          divider hangs off the main column, not the supporting one, because
-          the main column is always the taller of the two.
+          the vertical divider continuous: the bottom row grows into whatever
+          height is left — and never shrinks below its content, so a long feed
+          still scrolls rather than clipping — so the `lg:border-r` hanging off
+          the main column reaches the bottom of the viewport instead of ending
+          wherever the content happened to stop. The divider hangs off the main
+          column, not the supporting one, because the main column is always the
+          taller of the two.
         */}
         <div className="grid flex-1 grid-cols-1 lg:grid-cols-[minmax(0,1fr)_22rem] lg:grid-rows-[auto_minmax(min-content,1fr)]">
-          <div
-            className={`min-w-0 border-b border-slate-200 lg:col-start-2 lg:row-start-1 ${
-              attentionEmpty ? 'lg:hidden' : ''
-            }`}
-          >
-            {/*
-              The dashboard keeps the one quiet mobile line, so it opts out of
-              the panel's default disappearing act; the wrapper's `lg:hidden`
-              removes both from the desktop layout instead. Whether the panel
-              is empty is a data fact the panel itself reports, so this stays a
-              CSS decision rather than a measured viewport one.
-            */}
-            <NeedsAttentionPanel
-              {...sectionProps}
-              onEmptyChange={setAttentionEmpty}
-              hideWhenEmpty={false}
-            />
+          <div className="min-w-0 border-b border-slate-200 lg:col-start-2 lg:row-start-1">
+            <NeedsAttentionPanel {...sectionProps} />
           </div>
 
           <div className="min-w-0 border-b border-slate-200 lg:col-start-1 lg:row-start-1 lg:border-r">
@@ -252,11 +244,7 @@ const Dashboard: React.FC = () => {
             <RecentOutcomesFeed {...sectionProps} />
           </div>
 
-          <div
-            className={`min-w-0 border-b border-slate-200 lg:col-start-2 lg:border-b-0 ${
-              attentionEmpty ? 'lg:row-start-1' : 'lg:row-start-2'
-            }`}
-          >
+          <div className="min-w-0 border-b border-slate-200 lg:col-start-2 lg:row-start-2 lg:border-b-0">
             <HistoricalStatsPanel {...sectionProps} />
           </div>
         </div>

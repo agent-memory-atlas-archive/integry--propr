@@ -242,20 +242,30 @@ test('the wide layout keeps live work in the main column and the supporting pane
   await capture(page, 'dashboard-responsive-1440');
 });
 
-test('an empty attention list leaves no heading and no gap in the wide layout', async ({ page }) => {
+test('an empty attention list holds the right column instead of collapsing it', async ({ page }) => {
   await openDashboard(page, 1440, []);
 
-  // Absent from the DOM rather than hidden: there is no heading to find and no
-  // panel to measure.
-  await expect(page.getByTestId('needs-attention-panel')).toHaveCount(0);
-  await expect(page.getByRole('heading', { name: 'Needs attention' })).toHaveCount(0);
+  // Drawn, not removed: the section that triages work is the top module of the
+  // right column at every count, including zero.
+  await expect(page.getByTestId('needs-attention-panel')).toBeVisible();
+  await expect(page.getByRole('heading', { name: /Needs attention/ })).toHaveText('Needs attention (0)');
+  await expect(page.getByTestId('needs-attention-empty')).toBeVisible();
   await expect(page.getByTestId('summary-needs-attention')).toHaveAttribute('data-emphasis', 'false');
 
-  // The stats panel takes the space the attention panel would have used, so
-  // its header lands on the same horizon as the main column's.
-  const horizons = await page.evaluate(() => ['happening-now-section', 'historical-stats-section']
-    .map(id => Math.round((document.querySelector(`[data-testid="${id}"]`) as HTMLElement).getBoundingClientRect().top)));
-  expect(horizons[0]).toBe(horizons[1]);
+  const boxes = await page.evaluate(() => Object.fromEntries(
+    ['needs-attention-panel', 'happening-now-section', 'recent-outcomes-section', 'historical-stats-section'].map(id => {
+      const rect = (document.querySelector(`[data-testid="${id}"]`) as HTMLElement).getBoundingClientRect();
+      return [id, { top: Math.round(rect.top), bottom: Math.round(rect.bottom), left: Math.round(rect.left) }];
+    }),
+  ));
+
+  // One horizon per row across both columns: attention beside running work,
+  // stats beside the outcome feed.
+  expect(boxes['needs-attention-panel'].top).toBe(boxes['happening-now-section'].top);
+  expect(boxes['historical-stats-section'].top).toBe(boxes['recent-outcomes-section'].top);
+  // The supporting column is still one column, and stats are still under it.
+  expect(boxes['historical-stats-section'].left).toBe(boxes['needs-attention-panel'].left);
+  expect(boxes['historical-stats-section'].top).toBeGreaterThan(boxes['needs-attention-panel'].top);
 
   const overflow = await horizontalOverflow(page);
   expect(overflow.documentScrollWidth).toBeLessThanOrEqual(overflow.innerWidth);

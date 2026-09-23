@@ -218,16 +218,19 @@ describe('Dashboard studio design rules', () => {
     await waitForSections();
 
     // Loose text between the toolbar and the feed reads as an orphan, so the
-    // strip is real chrome: a fixed-height tinted bar closed by a rule.
+    // strip is real chrome: a tinted bar of its own height, ruled on both
+    // edges and padded to the console's left rail.
     const strip = screen.getByTestId('summary-strip');
-    expect(strip.className).toMatch(/min-h-10/);
+    expect(strip.className).toMatch(/min-h-9/);
     // A step darker than the pane headings below, which are bg-slate-50: the
     // console's own bar outranks a pane's heading.
     expect(strip.className).toMatch(/bg-slate-100/);
-    expect(strip.className).toMatch(/border-b/);
-    // A bar is only a bar if its edges are visible. When the toolbar above
-    // carried the same tint the two merged into one band and the counts read
-    // as loose text again, so the toolbar stays on the canvas.
+    expect(strip.className).toMatch(/px-3/);
+    // Both edges, not just the bottom one: a bar that is open at the top bleeds
+    // into the white toolbar above it and reads as loose text again.
+    expect(strip.className).toMatch(/border-y/);
+    // The toolbar above stays on the canvas so the bar's top rule has white to
+    // sit against rather than more tint.
     const toolbar = strip.previousElementSibling as HTMLElement | null;
     expect(toolbar).not.toBeNull();
     expect(toolbar).toContainElement(screen.getByTestId('live-status'));

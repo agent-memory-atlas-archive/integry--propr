@@ -88,7 +88,9 @@ export const WorkReference: React.FC<{ issueNumber?: number | null; prNumber?: n
  * A ruled strip across the full width of its column, not the title of a
  * floating card: tinted background, a 1px rule beneath it, and the section's
  * own count carried inline as `HAPPENING NOW (6)` so a top-level number never
- * needs a box of its own.
+ * needs a box of its own. Zero is a count like any other: `NEEDS ATTENTION (0)`
+ * above an all-clear line says the section looked and found nothing, where a
+ * bare title leaves it ambiguous whether it ever loaded.
  *
  * `min-h-10` is the horizon line. Two panes sit side by side, and only some of
  * them carry a segmented control; without a shared minimum the header in one
@@ -106,7 +108,7 @@ export const SectionHeading: React.FC<{
   <div className="flex min-h-10 flex-wrap items-center justify-between gap-x-3 gap-y-1 border-b border-slate-200 bg-slate-50 px-3 py-1.5">
     <h2 id={id} className="text-[10px] font-bold uppercase tracking-wider text-slate-500">
       {title}
-      {count !== undefined && count !== null && count > 0 && (
+      {count !== undefined && count !== null && (
         <span className="tabular-nums"> ({count})</span>
       )}
     </h2>

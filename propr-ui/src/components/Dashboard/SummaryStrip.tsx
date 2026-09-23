@@ -2,23 +2,28 @@
  * Summary sub-toolbar: four counts, each one a door into the list behind it.
  *
  * These are four single numbers, so they get one line — not four boxes, and
- * not four cells with a rule between each pair. Space separates them. The
- * strip is a real piece of chrome rather than loose text between the
- * breadcrumb bar and the feed: a 40px tinted bar with its own bottom rule,
- * sitting against the white toolbar above it, so both of its edges are
- * visible. Its tint is a step darker than the pane headings beneath it —
- * white toolbar, slate-100 console bar, slate-50 pane headers, white rows —
- * so the one bar that speaks for the whole console is not mistaken for one
- * more pane heading. Counts stay neutral; only
- * "Needs attention" takes colour, and only when it is non-zero — if everything
- * is emphasised, nothing is.
+ * not four cells with a rule between each pair. Space separates them.
  *
- * The first count carries the same `px-3` left rail as every section heading
- * below it, so `NEEDS ATTENTION` in the bar sits on the same vertical line as
- * `HAPPENING NOW` in the pane underneath.
+ * The strip is a container, not a line of text that happens to sit between the
+ * connection status and the first pane. It is a 36px bar with a rule on both
+ * edges and its own tint, so the white toolbar above it and the white canvas
+ * of the panes below it both stop at a visible line: without the top rule the
+ * bar bled upwards into the toolbar and the counts read as loose text hovering
+ * under "Reconnecting". The tint is a step darker than the pane headings
+ * underneath it — white toolbar, slate-100 console bar, slate-50 pane headers,
+ * white rows — because the one bar that speaks for the whole console should
+ * not be mistaken for one more pane heading. Counts stay neutral; only "Needs
+ * attention" takes colour, and only when it is non-zero — if everything is
+ * emphasised, nothing is.
+ *
+ * The bar's own `px-3` left rail is the same one every section heading below
+ * it uses, so `NEEDS ATTENTION` in the bar sits on the same vertical line as
+ * `HAPPENING NOW` in the pane underneath. The counts themselves carry no
+ * padding of their own, only a hover inset, so that rail is not doubled.
  *
  * It wraps below `sm`, where four counts cannot share 320px, so the bar grows
- * to two rows instead of scrolling sideways.
+ * to two rows instead of scrolling sideways — `min-h-9` rather than a fixed
+ * height is what lets it.
  */
 
 import React, { useCallback } from 'react';
@@ -45,8 +50,8 @@ const SummaryCount: React.FC<SummaryCountProps> = ({ label, value, href, title, 
     title={title}
     data-testid={testId}
     data-emphasis={emphasised ? 'true' : 'false'}
-    className={`flex min-w-0 items-baseline gap-2 px-3 py-2.5 transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-teal-500 ${
-      emphasised ? 'hover:bg-amber-100' : 'hover:bg-slate-200/70'
+    className={`-mx-1 flex min-w-0 items-baseline gap-1.5 rounded-sm px-1 py-0.5 transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-teal-500 ${
+      emphasised ? 'hover:bg-amber-100' : 'hover:bg-slate-200/80'
     }`}
   >
     <span
@@ -79,7 +84,7 @@ export const SummaryStrip: React.FC<DashboardSectionProps> = ({ repository, refr
     <div
       aria-label="Work summary"
       data-testid="summary-strip"
-      className="flex min-h-10 flex-wrap items-stretch border-b border-slate-200 bg-slate-100"
+      className="flex min-h-9 flex-wrap items-center gap-x-5 gap-y-1 border-y border-slate-200 bg-slate-100 px-3 py-1.5"
     >
       <SummaryCount
         testId="summary-needs-attention"

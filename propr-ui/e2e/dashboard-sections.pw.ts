@@ -205,14 +205,36 @@ test('desktop shows every section with running work in the main column', async (
   await expect(footer.getByRole('button', { name: 'Show fewer' })).toBeVisible();
 });
 
-test('an empty attention list removes the panel from the desktop DOM', async ({ page }) => {
+test('an empty attention list keeps the panel in place with an all-clear line', async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 1400 });
   await fixture(page, []);
   await page.goto('/');
 
   await expect(page.getByTestId('happening-now-section')).toBeVisible();
-  await expect(page.getByTestId('needs-attention-panel')).toHaveCount(0);
+
+  // The triage panel holds the top of the right column whatever the count is.
+  const panel = page.getByTestId('needs-attention-panel');
+  await expect(panel).toBeVisible();
+  await expect(panel.getByRole('heading')).toHaveText('Needs attention (0)');
+  await expect(page.getByTestId('needs-attention-empty'))
+    .toHaveText('All clear — no tasks require operator intervention');
   await expect(page.getByTestId('summary-needs-attention')).toHaveAttribute('data-emphasis', 'false');
+
+  const geometry = await page.evaluate(() => Object.fromEntries(
+    ['needs-attention-panel', 'happening-now-section', 'recent-outcomes-section', 'historical-stats-section'].map(id => {
+      const rect = (document.querySelector(`[data-testid="${id}"]`) as HTMLElement).getBoundingClientRect();
+      return [id, { top: Math.round(rect.top), bottom: Math.round(rect.bottom) }];
+    }),
+  ));
+
+  // Row one starts on one horizon and row two starts on one horizon, so the
+  // rule between them is a single line across both columns rather than a step.
+  expect(geometry['needs-attention-panel'].top).toBe(geometry['happening-now-section'].top);
+  expect(geometry['historical-stats-section'].top).toBe(geometry['recent-outcomes-section'].top);
+  // Stats stay in the second tier; triage keeps the top of the rail.
+  expect(geometry['historical-stats-section'].top)
+    .toBeGreaterThan(geometry['needs-attention-panel'].bottom - 1);
+
   await capture(page, 'dashboard-desktop-no-attention');
 });
 
