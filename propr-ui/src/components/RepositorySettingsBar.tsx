@@ -53,7 +53,7 @@ const CancelCiDuringFollowupControl: React.FC<{
     >
       <span className="min-w-0">
         <span className="block">Cancel CI while follow-up implementation is in progress</span>
-        <span className="mt-1 block text-slate-500">Stops checks that are already running on the commit ProPR is about to replace. Checks start again on the new commit, or resume on the current one if no commit is produced.</span>
+        <span className="mt-1 block text-slate-500">Stops the validation workflows already running on the commit ProPR is about to replace; preview and deployment workflows keep running. Checks start again on the new commit, or resume on the current one if no commit is produced.</span>
       </span>
       <input
         type="checkbox"

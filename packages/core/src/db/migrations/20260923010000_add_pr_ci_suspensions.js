@@ -12,6 +12,10 @@ export async function up(knex) {
         table.string('state', 32).notNullable().defaultTo('active');
         table.text('cancelled_runs').notNullable().defaultTo('[]');
         table.integer('attempts').notNullable().defaultTo(0);
+        // Optimistic-concurrency token: every write of a row bumps it, so an
+        // update or delete made from a stale read matches nothing and a newer
+        // owner's state survives concurrent finalizer and recovery passes.
+        table.integer('generation').notNullable().defaultTo(0);
         // Epoch milliseconds: compared against Date.now() on every backend.
         table.bigInteger('created_at').notNullable();
         table.bigInteger('updated_at').notNullable();

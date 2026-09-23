@@ -13,9 +13,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   option (Repositories → Automation, off by default, also available through
   `POST /api/config/repos`) cancels the queued and running GitHub Actions
   validation of the exact pull request head a follow-up is about to replace, once
-  that follow-up is authorized and actually implementing. Runs of other events,
-  other pull requests and other revisions are never touched. A replacement commit
-  gets its normal CI; a run that ends without one has its cancelled checks
+  that follow-up is authorized and actually implementing. Only workflows eligible
+  under an explicit validation policy are cancelled: by default `pull_request`
+  runs whose workflow name or file identifies validation and not publication, so
+  preview and deployment workflows — including `pull_request_target` ones — keep
+  running; `CANCEL_CI_FOLLOWUP_WORKFLOWS` replaces that default with an exact
+  allowlist. Runs of other pull requests and other revisions are never touched.
+  Each run is recorded before its cancel request is sent, so a crash or a lost
+  response cannot leave CI cancelled without a restart obligation. A replacement
+  commit gets its normal CI; a run that ends without one has its cancelled checks
   restarted for the still-current head, including after a worker restart. Requires
   the GitHub App installation to have Actions "Read and write"; without it the
   option is inert and logged.

@@ -6,6 +6,12 @@ import { sameSha, type SuspensionTarget } from './followupCiSuspensionRuns.js';
  * Durable ownership of the pull request validation ProPR cancelled for a
  * follow-up implementation. The row survives worker retries and crashes, so the
  * obligation to restart or drop that validation is never lost.
+ *
+ * Every write carries the generation it was read at and the task that owns it,
+ * so a slow operation working from a stale read can neither overwrite nor
+ * delete the state of a newer owner: its update simply matches no row. Within
+ * one worker the operations of a single pull request are additionally
+ * serialized by {@link withSuspensionLock}.
  */
 
 export const PR_CI_SUSPENSIONS_TABLE = 'pr_ci_suspensions';
@@ -21,6 +27,8 @@ export interface CiSuspensionRecord {
     state: string;
     cancelled_runs: string;
     attempts: number;
+    /** Incremented by every successful write; the optimistic-concurrency token of this row. */
+    generation: number;
     created_at: number;
     updated_at: number;
 }
@@ -30,6 +38,8 @@ export interface CancelledRun {
     id: number;
     name?: string;
     workflowId?: number;
+    /** Attempt number at cancellation time; a higher one later proves a rerun landed. */
+    attempt?: number;
     restarted?: boolean;
 }
 
@@ -59,6 +69,32 @@ export function targetOf(record: CiSuspensionRecord): SuspensionTarget {
     return { ...splitRepository(record.repository), pullRequestNumber: record.pull_request };
 }
 
+export function suspensionKey(record: Pick<CiSuspensionRecord, 'repository' | 'pull_request'>): string {
+    return `${record.repository}#${record.pull_request}`;
+}
+
+/**
+ * Serializes begin, sweep, restore and release of one pull request inside this
+ * worker, so the job finalizer and the periodic recovery pass never interleave:
+ * without it a sweep can re-cancel a run a restore is bringing back. Operations
+ * of different pull requests never wait for each other.
+ */
+const suspensionChains = new Map<string, Promise<unknown>>();
+
+export async function withSuspensionLock<T>(key: string, operation: () => Promise<T>): Promise<T> {
+    const previous = suspensionChains.get(key) ?? Promise.resolve();
+    const current = previous.then(operation, operation);
+    const settled = current.then(() => undefined, () => undefined);
+    suspensionChains.set(key, settled);
+    try {
+        return await current;
+    } finally {
+        // The chain entry only exists to make the next caller wait; once this
+        // operation finished and nobody queued behind it, it can go.
+        if (suspensionChains.get(key) === settled) suspensionChains.delete(key);
+    }
+}
+
 export function parseCancelledRuns(record: Pick<CiSuspensionRecord, 'cancelled_runs'>): CancelledRun[] {
     try {
         const parsed = JSON.parse(record.cancelled_runs) as unknown;
@@ -75,24 +111,69 @@ export async function loadSuspensions(deps: CiSuspensionStoreDeps, filter?: { ta
     return filter ? query.where({ task_id: filter.taskId }) : query.select('*');
 }
 
-export async function deleteSuspension(
+/** Reads the row as it is right now; every operation starts from this inside the lock rather than from what it was handed. */
+export async function loadSuspension(
     deps: CiSuspensionStoreDeps,
-    record: Pick<CiSuspensionRecord, 'repository' | 'pull_request'>,
-): Promise<void> {
-    await resolveDatabase(deps)(PR_CI_SUSPENSIONS_TABLE)
-        .where({ repository: record.repository, pull_request: record.pull_request })
-        .delete();
+    key: Pick<CiSuspensionRecord, 'repository' | 'pull_request'>,
+): Promise<CiSuspensionRecord | undefined> {
+    return resolveDatabase(deps)<CiSuspensionRecord>(PR_CI_SUSPENSIONS_TABLE)
+        .where({ repository: key.repository, pull_request: key.pull_request })
+        .first();
 }
 
+/**
+ * Deletes the suspension only while it is still the one the caller read.
+ * Returns false when another owner or a newer generation took the row over, so
+ * a stale finalizer can never drop a newer task's obligation.
+ */
+export async function deleteSuspension(
+    deps: CiSuspensionStoreDeps,
+    record: Pick<CiSuspensionRecord, 'repository' | 'pull_request' | 'task_id' | 'generation'>,
+): Promise<boolean> {
+    const deleted = await resolveDatabase(deps)(PR_CI_SUSPENSIONS_TABLE)
+        .where({
+            repository: record.repository,
+            pull_request: record.pull_request,
+            task_id: record.task_id,
+            generation: record.generation,
+        })
+        .delete();
+    return deleted > 0;
+}
+
+/**
+ * Writes the cancelled runs and any state change of the record the caller read,
+ * returning the record at its new generation, or null when the row moved on
+ * without this caller. Callers must continue with the returned record.
+ */
 export async function saveCancelledRuns(
     deps: CiSuspensionStoreDeps,
-    record: Pick<CiSuspensionRecord, 'repository' | 'pull_request'>,
+    record: CiSuspensionRecord,
     runs: CancelledRun[],
     changes: Partial<Pick<CiSuspensionRecord, 'state' | 'attempts'>> = {},
-): Promise<void> {
-    await resolveDatabase(deps)(PR_CI_SUSPENSIONS_TABLE)
-        .where({ repository: record.repository, pull_request: record.pull_request })
-        .update({ cancelled_runs: JSON.stringify(runs), updated_at: nowMs(deps), ...changes });
+): Promise<CiSuspensionRecord | null> {
+    const next: CiSuspensionRecord = {
+        ...record,
+        ...changes,
+        cancelled_runs: JSON.stringify(runs),
+        updated_at: nowMs(deps),
+        generation: record.generation + 1,
+    };
+    const updated = await resolveDatabase(deps)(PR_CI_SUSPENSIONS_TABLE)
+        .where({
+            repository: record.repository,
+            pull_request: record.pull_request,
+            task_id: record.task_id,
+            generation: record.generation,
+        })
+        .update({
+            cancelled_runs: next.cancelled_runs,
+            updated_at: next.updated_at,
+            generation: next.generation,
+            state: next.state,
+            attempts: next.attempts,
+        });
+    return updated > 0 ? next : null;
 }
 
 /**
@@ -104,28 +185,29 @@ export async function saveCancelledRuns(
 export async function reserveSuspension(
     params: { target: SuspensionTarget; headSha: string; taskId: string; correlationId?: string },
     deps: CiSuspensionStoreDeps,
-): Promise<CancelledRun[]> {
+): Promise<{ record: CiSuspensionRecord; runs: CancelledRun[] }> {
     const { target, headSha, taskId, correlationId } = params;
     const repository = repositoryKey(target.owner, target.repo);
-    const existing = await resolveDatabase(deps)<CiSuspensionRecord>(PR_CI_SUSPENSIONS_TABLE)
-        .where({ repository, pull_request: target.pullRequestNumber })
-        .first();
+    const existing = await loadSuspension(deps, { repository, pull_request: target.pullRequestNumber });
     const timestamp = nowMs(deps);
-    const inherited = existing && sameSha(existing.head_sha, headSha) ? parseCancelledRuns(existing) : [];
+    const runs = existing && sameSha(existing.head_sha, headSha) ? parseCancelledRuns(existing) : [];
+    const record: CiSuspensionRecord = {
+        repository,
+        pull_request: target.pullRequestNumber,
+        head_sha: headSha,
+        task_id: taskId,
+        correlation_id: correlationId ?? null,
+        state: SUSPENSION_ACTIVE,
+        cancelled_runs: JSON.stringify(runs),
+        attempts: 0,
+        // Taking the row over from any previous owner invalidates its in-flight writes.
+        generation: (existing?.generation ?? 0) + 1,
+        created_at: existing?.created_at ?? timestamp,
+        updated_at: timestamp,
+    };
     await resolveDatabase(deps)(PR_CI_SUSPENSIONS_TABLE)
-        .insert({
-            repository,
-            pull_request: target.pullRequestNumber,
-            head_sha: headSha,
-            task_id: taskId,
-            correlation_id: correlationId ?? null,
-            state: SUSPENSION_ACTIVE,
-            cancelled_runs: JSON.stringify(inherited),
-            attempts: 0,
-            created_at: existing?.created_at ?? timestamp,
-            updated_at: timestamp,
-        })
+        .insert(record)
         .onConflict(['repository', 'pull_request'])
-        .merge(['head_sha', 'task_id', 'correlation_id', 'state', 'cancelled_runs', 'attempts', 'updated_at']);
-    return inherited;
+        .merge(['head_sha', 'task_id', 'correlation_id', 'state', 'cancelled_runs', 'attempts', 'generation', 'updated_at']);
+    return { record, runs };
 }
