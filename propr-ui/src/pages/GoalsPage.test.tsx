@@ -625,11 +625,11 @@ describe('GoalsPage', () => {
         startedAt,
         inputs: [
           {
-            id: 'input-1', message: 'Use the existing design tokens', truncated: false, attachmentCount: 2,
+            id: 'input-1', message: 'Use the existing design tokens', attachmentCount: 2,
             state: 'delivered', createdAt: '2026-09-22T10:00:30.000Z', deliveredAt: '2026-09-22T10:01:00.000Z',
           },
           {
-            id: 'input-2', message: 'Also update the changelog', truncated: false, attachmentCount: 0,
+            id: 'input-2', message: 'Also update the changelog', attachmentCount: 0,
             state: 'pending', createdAt: '2026-09-22T10:00:10.000Z', deliveredAt: null,
           },
         ],

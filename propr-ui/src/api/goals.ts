@@ -40,7 +40,6 @@ export type GoalVisualPreview = PublishedVisualPreview;
 export interface GoalInput {
   id: string;
   message: string;
-  truncated: boolean;
   attachmentCount: number;
   state: 'pending' | 'delivered' | 'undeliverable';
   createdAt: string | null;

@@ -29,7 +29,6 @@ const toTimelineEvent = (input: GoalInput, startMs: number | null): GoalTimeline
     timestamp,
     inputState: input.state,
     attachmentCount: input.attachmentCount,
-    truncated: input.truncated,
     relativeTime: startMs !== null && eventMs !== null ? formatRelativeTime(eventMs - startMs) : null,
   };
 };

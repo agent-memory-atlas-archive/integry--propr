@@ -183,7 +183,7 @@ test('goal projection exposes operator inputs and hides ProPR control-plane rows
 
     assert.deepEqual(projected.inputs?.map(entry => entry.id), ['input-1', 'input-2', 'input-3']);
     assert.deepEqual(projected.inputs?.[0], {
-      id: 'input-1', message: 'Focus on the API first', truncated: false, attachmentCount: 0,
+      id: 'input-1', message: 'Focus on the API first', attachmentCount: 0,
       state: 'delivered', createdAt: '2026-09-22T00:00:01.000Z', deliveredAt: '2026-09-22T00:00:02.000Z',
     });
     assert.equal(projected.inputs?.[1].state, 'pending');
@@ -269,11 +269,15 @@ test('goal projection strips appended attachment paths from rows stored before d
   }
 });
 
-test('goal projection bounds the input list and each message body', async () => {
+test('goal projection bounds the input list but never clips a message body', async () => {
   const database = await inputProjectionDatabase();
   try {
+    // 65,536 is the longest body the goal input route accepts.
+    const longest = 'x'.repeat(65_536);
     const rows = Array.from({ length: 205 }, (_, index) => goalInputRow({
-      input_id: `input-${index}`, message: index === 204 ? 'x'.repeat(5_000) : `message ${index}`,
+      input_id: `input-${index}`,
+      message: index === 204 ? longest : `message ${index}`,
+      display_message: index === 204 ? longest : `message ${index}`,
     }));
     await database('goal_inputs').insert(rows);
 
@@ -283,8 +287,7 @@ test('goal projection bounds the input list and each message body', async () => 
     assert.equal(projected.inputs?.[0].id, 'input-5');
     const last = projected.inputs?.[199];
     assert.equal(last?.id, 'input-204');
-    assert.equal(last?.message.length, 4_000);
-    assert.equal(last?.truncated, true);
+    assert.equal(last?.message, longest);
   } finally {
     await database.destroy();
   }

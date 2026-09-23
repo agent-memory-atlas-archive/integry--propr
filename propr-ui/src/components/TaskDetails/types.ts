@@ -131,8 +131,6 @@ export interface LiveEvent {
   inputState?: 'pending' | 'delivered' | 'undeliverable';
   /** Number of files sent alongside a `user_input` message. */
   attachmentCount?: number;
-  /** Set when a `user_input` message body was clipped by the projection. */
-  truncated?: boolean;
 }
 
 export interface LiveDetails {

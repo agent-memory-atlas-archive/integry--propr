@@ -59,7 +59,6 @@ const ToolUseDetails: React.FC<{ event: LiveEvent; taskInfo: TaskInfo | null }> 
 const UserInputContent: React.FC<{ event: LiveEvent }> = ({ event }) => (
   <div className="border-l-2 border-amber-400/70 bg-amber-400/5 pl-2 py-1 text-xs text-amber-50/90 overflow-hidden font-mono whitespace-pre-wrap break-words">
     {event.content}
-    {event.truncated && <span className="text-amber-300/70"> … (truncated)</span>}
   </div>
 );
 

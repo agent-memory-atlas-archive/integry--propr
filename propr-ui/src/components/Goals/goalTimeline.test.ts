@@ -9,7 +9,6 @@ const event = (timestamp: string | undefined, content: string): LiveEvent => ({
 
 const input = (overrides: Partial<GoalInput> & { id: string }): GoalInput => ({
   message: `message ${overrides.id}`,
-  truncated: false,
   attachmentCount: 0,
   state: 'delivered',
   createdAt: '2026-09-22T10:00:00.000Z',
@@ -96,17 +95,23 @@ describe('mergeGoalTimeline', () => {
     expect(contents(merged)).toEqual(['provider turn', 'unparsable', 'queued']);
   });
 
-  it('carries attachment counts, truncation and relative stamps onto the merged event', () => {
+  it('carries attachment counts and relative stamps onto the merged event', () => {
     const merged = mergeGoalTimeline([], [
-      input({ id: 'a', message: 'with files', attachmentCount: 2, truncated: true, deliveredAt: '2026-09-22T10:01:30.000Z' }),
+      input({ id: 'a', message: 'with files', attachmentCount: 2, deliveredAt: '2026-09-22T10:01:30.000Z' }),
     ], { executionStartTime: '2026-09-22T10:00:00.000Z' });
 
     expect(merged[0]).toMatchObject({
       type: 'user_input',
       id: 'goal-input-a',
       attachmentCount: 2,
-      truncated: true,
       relativeTime: '1m 30s',
     });
+  });
+
+  it('keeps a long operator message verbatim on the merged event', () => {
+    const long = 'x'.repeat(10_000);
+    const merged = mergeGoalTimeline([], [input({ id: 'a', message: long })]);
+
+    expect(merged[0].content).toBe(long);
   });
 });

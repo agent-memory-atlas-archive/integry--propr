@@ -80,7 +80,6 @@ const UserMessageEntry: React.FC<{ event: ThinkingLogEvent }> = ({ event }) => (
         <div className="border-l-2 border-amber-400 bg-amber-50/60 px-3 py-2">
           <p className="m-0 whitespace-pre-wrap break-words text-sm leading-relaxed text-slate-800">
             {event.content}
-            {event.truncated && <span className="text-slate-500"> … (truncated)</span>}
           </p>
           {(event.inputState === 'pending' || event.inputState === 'undeliverable' || !!event.attachmentCount) && (
             <div className="mt-1.5 flex flex-wrap items-center gap-2">

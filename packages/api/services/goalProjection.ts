@@ -74,7 +74,6 @@ export interface GoalProjectionRow {
 export interface GoalInputProjection {
   id: string;
   message: string;
-  truncated: boolean;
   attachmentCount: number;
   state: 'pending' | 'delivered' | 'undeliverable';
   createdAt: string | null;
@@ -93,7 +92,6 @@ interface GoalInputRow {
 
 /** Newest rows win when a long-running goal has been steered many times. */
 const GOAL_INPUT_PROJECTION_LIMIT = 200;
-const GOAL_INPUT_MESSAGE_LIMIT = 4_000;
 const SQLITE_TIMESTAMP = /^(\d{4}-\d{2}-\d{2}) (\d{2}:\d{2}:\d{2}(?:\.\d+)?)$/;
 
 function isoTimestamp(value: string | Date | number | null | undefined): string | null {
@@ -121,13 +119,12 @@ function goalInputBody(row: GoalInputRow): { message: string; attachmentCount: n
   return stripGoalAttachmentSection(row.message ?? '');
 }
 
+/** Bodies are projected verbatim: the timeline is evidence of what the operator actually sent. */
 function projectGoalInput(row: GoalInputRow): GoalInputProjection {
   const { message, attachmentCount } = goalInputBody(row);
-  const truncated = message.length > GOAL_INPUT_MESSAGE_LIMIT;
   return {
     id: row.input_id,
-    message: truncated ? message.slice(0, GOAL_INPUT_MESSAGE_LIMIT) : message,
-    truncated,
+    message,
     attachmentCount,
     state: goalInputState(row.state),
     createdAt: isoTimestamp(row.created_at),
