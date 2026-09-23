@@ -43,6 +43,8 @@ async function fixture(page: Page) {
       '/api/auth/demo-mode': { demoMode: true },
       '/api/instance/catalog': { agents: [], repositories: [{ name: 'acme/web', enabled: true }] },
       '/api/goals/capabilities': { agents: [] },
+      '/api/goals': { goals: [goal] },
+      '/api/tasks': { tasks: [], total: 0 },
       [`/api/goals/${goalId}`]: { goal },
       [`/api/goals/${goalId}/previews`]: { previews: showPreviews ? previews : [] },
       '/api/task/goal-task-1/live-details': { events: [], todos: [], currentTask: null },
@@ -52,8 +54,9 @@ async function fixture(page: Page) {
     return route.fulfill(path in responses ? { json: responses[path] } : { status: 503, json: { error: 'Unavailable in goal preview fixture' } });
   });
   // Publish a real rendered application screen as the image fixture rather than invented artwork.
+  // The goal queue, not this screen: evidence of previews must not be a picture of the page showing it.
   await page.setViewportSize({ width: 1440, height: 900 });
-  await page.goto(`/goals/${goalId}`);
+  await page.goto('/goals');
   await expect(page.getByRole('heading', { name: goal.title })).toBeVisible();
   image = await page.screenshot();
   showPreviews = true;
@@ -83,11 +86,24 @@ for (const width of [390, 1024, 1440]) {
       if (index) expect(box.top).toBeGreaterThanOrEqual(boxes[index - 1].bottom);
     }
     await expect(section.locator('video[controls]')).toHaveCount(1);
+    // The stack stays in the goal reading column, between the context block and the execution queue.
+    const placement = await page.evaluate(() => {
+      const column = document.querySelector('main[aria-label="Goal monitor"]')!;
+      const order = [...column.children].map(child => child.getAttribute('aria-labelledby'));
+      const box = (selector: string) => {
+        const rect = column.querySelector(selector)!.getBoundingClientRect();
+        return { left: Math.round(rect.left), width: Math.round(rect.width) };
+      };
+      return { order: order.slice(0, 3), previews: box('[aria-labelledby="goal-visual-previews-heading"]'), context: box('[aria-labelledby="goal-context-heading"]') };
+    });
+    expect(placement.order).toEqual(['goal-context-heading', 'goal-visual-previews-heading', 'live-progress-heading']);
+    expect(placement.previews).toEqual(placement.context);
     const imageBox = await section.getByAltText('Goal dashboard at desktop width').boundingBox();
     expect(imageBox!.height).toBeLessThanOrEqual(900 * 0.65 + 1);
     expect(await noHorizontalOverflow(page)).toBe(true);
     if (width === 390 || width === 1440) {
-      await section.scrollIntoViewIfNeeded();
+      // Frame the whole screen, so the evidence shows where the stack sits rather than one lone figure.
+      await page.evaluate(() => window.scrollTo(0, 0));
       await capture(page, `goal-visual-previews-${width}`);
     }
   });

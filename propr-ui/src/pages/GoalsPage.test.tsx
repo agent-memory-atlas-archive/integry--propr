@@ -778,6 +778,92 @@ describe('GoalsPage', () => {
     expect(document.activeElement).toBe(trigger);
   });
 
+  it('keeps the preview stack in the goal reading column between the context and the queue', async () => {
+    vi.mocked(goalsApi.getGoal).mockResolvedValue({
+      goal: { ...goal, finalPr: { number: 42, url: 'https://github.com/acme/web/pull/42' } },
+    });
+    vi.mocked(goalsApi.getGoalVisualPreviews).mockResolvedValue({
+      previews: [{ type: 'image', title: 'Dashboard filters', url: 'https://github.com/user-attachments/assets/preview-1' }],
+    });
+
+    const { container } = render(<MemoryRouter initialEntries={['/goals/goal-1']}><Routes><Route path="/goals/:goalId" element={<GoalsPage />} /></Routes></MemoryRouter>);
+
+    await screen.findByRole('heading', { name: 'Visual previews' });
+    const column = container.querySelector('main[aria-label="Goal monitor"]')!;
+    const sections = [...column.children].map(child => child.getAttribute('aria-labelledby'));
+    expect(sections.slice(0, 3)).toEqual(['goal-context-heading', 'goal-visual-previews-heading', 'live-progress-heading']);
+    // The evidence belongs to the reading column, not to the steering rail beside it.
+    expect(column.querySelector('section[aria-labelledby="goal-visual-previews-heading"] figure')).toBeInTheDocument();
+    expect(container.querySelector('aside[aria-label="Steering console"] figure')).toBeNull();
+  });
+
+  it('highlights only the running queue step and never a second row beside it', async () => {
+    vi.mocked(getTaskLiveDetails).mockResolvedValue({
+      events: [],
+      // A provider can name a different current activity than the step it flagged in progress.
+      currentTask: 'Align the metadata row',
+      todos: [
+        { id: 'todo-1', content: 'Align the metadata row', status: 'completed' },
+        { id: 'todo-2', content: 'Clip the session identifier inside its metric column', status: 'in_progress' },
+        { id: 'todo-3', content: 'Publish the evidence', status: 'in_progress' },
+        { id: 'todo-4', content: 'Neutralize the pending rows', status: 'pending' },
+      ],
+      tokenUsage: null,
+    });
+
+    const { container } = render(<MemoryRouter initialEntries={['/goals/goal-1']}><Routes><Route path="/goals/:goalId" element={<GoalsPage />} /></Routes></MemoryRouter>);
+
+    await screen.findByText('Clip the session identifier inside its metric column');
+    const queue = container.querySelector('section[aria-labelledby="live-progress-heading"]')!;
+    const highlighted = [...queue.querySelectorAll('li')].filter(item => item.className.includes('bg-blue-50'));
+    expect(highlighted).toHaveLength(1);
+    expect(highlighted[0]).toHaveTextContent('Clip the session identifier inside its metric column');
+    expect(highlighted[0]).toHaveAttribute('aria-current', 'step');
+    // The queue carries no second active surface: the banner would restate what the row already says.
+    expect(screen.queryByText('Current:')).toBeNull();
+    expect(screen.getByText('Publish the evidence').closest('li')).not.toHaveClass('bg-blue-50');
+    expect(screen.getByText('Neutralize the pending rows').closest('li')).not.toHaveClass('bg-blue-50');
+  });
+
+  it('names the current activity only while no queue row is running', async () => {
+    vi.mocked(getTaskLiveDetails).mockResolvedValue({
+      events: [],
+      currentTask: 'Collecting the evidence',
+      todos: [
+        { id: 'todo-1', content: 'Align the metadata row', status: 'completed' },
+        { id: 'todo-2', content: 'Publish the evidence', status: 'pending' },
+      ],
+      tokenUsage: null,
+    });
+
+    const { container } = render(<MemoryRouter initialEntries={['/goals/goal-1']}><Routes><Route path="/goals/:goalId" element={<GoalsPage />} /></Routes></MemoryRouter>);
+
+    await screen.findByText('Align the metadata row');
+    const queue = container.querySelector('section[aria-labelledby="live-progress-heading"]')!;
+    expect(within(queue as HTMLElement).getByText('Collecting the evidence')).toBeInTheDocument();
+    expect([...queue.querySelectorAll('li')].filter(item => item.className.includes('bg-blue-50'))).toHaveLength(0);
+  });
+
+  it('leaves every queue row neutral once the goal has settled', async () => {
+    vi.mocked(goalsApi.getGoal).mockResolvedValue({ goal: { ...goal, resultState: 'completed' as const, taskState: 'completed', completedAt: new Date().toISOString() } });
+    vi.mocked(getTaskLiveDetails).mockResolvedValue({
+      events: [],
+      currentTask: 'Publish the evidence',
+      todos: [
+        { id: 'todo-1', content: 'Align the metadata row', status: 'completed' },
+        { id: 'todo-2', content: 'Publish the evidence', status: 'in_progress' },
+      ],
+      tokenUsage: null,
+    });
+
+    const { container } = render(<MemoryRouter initialEntries={['/goals/goal-1']}><Routes><Route path="/goals/:goalId" element={<GoalsPage />} /></Routes></MemoryRouter>);
+
+    await screen.findByText('Publish the evidence');
+    const queue = container.querySelector('section[aria-labelledby="live-progress-heading"]')!;
+    expect([...queue.querySelectorAll('li')].filter(item => item.className.includes('bg-blue-50'))).toHaveLength(0);
+    expect(screen.queryByText('Current:')).toBeNull();
+  });
+
   it('sends files and pasted images with a running goal correction', async () => {
     render(<MemoryRouter initialEntries={['/goals/goal-1']}><Routes><Route path="/goals/:goalId" element={<GoalsPage />} /></Routes></MemoryRouter>);
     const correction = await screen.findByLabelText('Correction or follow-up');
