@@ -137,6 +137,14 @@ function getOpenRouterId(internalModelId: ModelId): string {
     // OpenRouter slug so pricing/cost still resolves.
     const openCodeGoId = toOpenCodeGoOpenRouterId(internalModelId);
     if (openCodeGoId) return openCodeGoId;
+    // An agent can be configured with an alias ("fable", "fable51", "opus55"),
+    // and that raw string is what gets recorded against a run. Resolve it so
+    // cost uses the model's own published rates instead of falling through to
+    // OpenRouter's generic pricing for an ID it does not know.
+    if (internalModelId) {
+        const aliasedInfo = MODEL_INFO_MAP[resolveModelAlias(internalModelId)];
+        if (aliasedInfo?.openRouterId) return aliasedInfo.openRouterId;
+    }
     return internalModelId;
 }
 

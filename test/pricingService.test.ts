@@ -5,6 +5,7 @@ import {
   getOfficialModelPricing,
 } from '../packages/core/src/services/pricingService.js';
 import { calculateCostWithCachePricing } from '../packages/core/src/utils/tokenCalculation.js';
+import { getOpenRouterId } from '../packages/core/src/config/modelAliases.js';
 
 after(async () => {
   const { db } = await import('../packages/core/src/db/connection.js');
@@ -26,6 +27,34 @@ describe('provider API pricing', () => {
       pricing,
       'official pricing should resolve without relying on the OpenRouter cache',
     );
+  });
+
+  test('uses the published Claude Fable 5 rates, including prompt cache prices', () => {
+    assert.deepStrictEqual(getOfficialModelPricing('anthropic/claude-fable-5'), {
+      prompt: 10 / 1_000_000,
+      completion: 50 / 1_000_000,
+      cacheCreation: 12.5 / 1_000_000,
+      cacheRead: 1 / 1_000_000,
+    });
+  });
+
+  test('prices alias-configured Fable agents at the Fable rates', () => {
+    const expected = {
+      fable: 'anthropic/claude-fable-5.1',
+      fable51: 'anthropic/claude-fable-5.1',
+      'claude-fable': 'anthropic/claude-fable-5.1',
+      fable5: 'anthropic/claude-fable-5',
+      'fable-5': 'anthropic/claude-fable-5',
+    };
+
+    for (const [alias, openRouterId] of Object.entries(expected)) {
+      assert.strictEqual(getOpenRouterId(alias), openRouterId, `alias ${alias} should price as ${openRouterId}`);
+      assert.deepStrictEqual(
+        getOfficialModelPricing(getOpenRouterId(alias)),
+        getOfficialModelPricing(openRouterId),
+        `alias ${alias} should not fall back to default pricing`,
+      );
+    }
   });
 
   test('prices a cache-heavy Fable run using each reported token category', () => {
