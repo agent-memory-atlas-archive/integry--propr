@@ -138,6 +138,21 @@ const compactCount = (value: number) => {
   return `${scaled >= 9.95 ? Math.round(scaled) : Number(scaled.toFixed(1))}${unit.suffix}`;
 };
 
+// The metric block has room the queue column does not, so it keeps one decimal: `34,562,641` reads as `34.5M`.
+const preciseUnits = [
+  { divisor: 1_000_000_000, suffix: 'B' },
+  { divisor: 1_000_000, suffix: 'M' },
+  { divisor: 1_000, suffix: 'K' },
+];
+
+/** Truncated rather than rounded, so an abbreviated total never reads as more spend than was used. Exact value on hover. */
+const metricCount = (value: number) => {
+  const safe = Number.isFinite(value) && value > 0 ? value : 0;
+  const unit = preciseUnits.find(candidate => safe >= candidate.divisor);
+  if (!unit) return Math.round(safe).toLocaleString('en-US');
+  return `${Math.floor((safe / unit.divisor) * 10) / 10}${unit.suffix}`;
+};
+
 const plural = (count: number, noun: string) => `${count} ${noun}${count === 1 ? '' : 's'}`;
 
 // Codex counts the objective in Unicode code points; Claude Code's `/goal`
@@ -226,7 +241,7 @@ function GoalState({ goal, quietCompleted = false }: { goal: Goal; quietComplete
   </span>;
 }
 
-function CheckpointDeclaration({ checkpoint }: { checkpoint: NonNullable<Goal['checkpoint']> }) {
+function CheckpointDeclaration({ checkpoint, active }: { checkpoint: NonNullable<Goal['checkpoint']>; active: boolean }) {
   const latest = checkpoint.latest;
   if (!latest || latest.kind !== 'agent') return null;
   const badgeClass = latest.state === 'completed'
@@ -236,9 +251,9 @@ function CheckpointDeclaration({ checkpoint }: { checkpoint: NonNullable<Goal['c
       : 'bg-amber-100 text-amber-800';
   const paths = (label: string, values: string[] | null) => values && <div>
     <dt className="text-[10px] font-bold uppercase tracking-widest text-slate-500">{label}</dt>
-    <dd className="mt-1 flex flex-wrap gap-1.5">{values.map(value => <code key={value} className="rounded border border-slate-200 bg-white px-1.5 py-0.5 font-mono text-[12px] text-slate-700">{value}</code>)}</dd>
+    <dd className="mt-1 flex flex-wrap gap-1.5">{values.map(value => <code key={value} className="rounded border border-slate-200 bg-slate-100 px-1.5 py-0.5 font-mono text-[12px] text-slate-800">{value}</code>)}</dd>
   </div>;
-  return <section aria-label="Latest checkpoint declaration" className="mt-3 border-t border-blue-200 pt-3 text-slate-800">
+  return <section aria-label="Latest checkpoint declaration" className={`mt-3 border-t pt-3 text-slate-800 ${active ? 'border-blue-200' : 'border-slate-200'}`}>
     <div className="flex flex-wrap items-center justify-between gap-2">
       <h2 className="font-semibold">Latest checkpoint declaration</h2>
       <span className={`rounded-full px-2 py-0.5 text-xs font-semibold capitalize ${badgeClass}`}>{latest.state}</span>
@@ -530,6 +545,10 @@ function CreateGoalDialog({ isOpen, onClose, onCreated }: CreateGoalDialogProps)
     </div>
   </div>;
 }
+
+// The steering rail pads its own rows so the separating rules reach both edges of the pane.
+const railInset = 'px-4 sm:px-6';
+const railMetricLabel = 'text-[10px] font-bold uppercase tracking-widest text-slate-500';
 
 // Goal 35% · Repository 15% · Status 20% · Tokens 10% · Active time 10% · Output 10%.
 // Status is the widest secondary column because it carries the running task beside its badge.
@@ -865,6 +884,17 @@ function GoalDetails({ goalId }: { goalId: string }) {
   const canMutate = mutable && !isDemoMode;
   const strategyLabel = goal.launchStrategy === 'direct' ? 'Direct' : 'ProPR orchestrated';
   const currentModel = getModelDisplayName(goal.effectiveModel || goal.requestedModel);
+  // The locked-console state is a header note, not a sticky footer bar: it needs no screen real estate of its own.
+  const correctionsNote = canMutate
+    ? null
+    : isDemoMode && mutable
+      ? 'Demo mode is read-only. Corrections disabled.'
+      : goal.resultState === 'completed'
+        ? 'Goal completed. Corrections disabled.'
+        : 'Goal closed. Corrections disabled.';
+  const artifactLinks = goal.artifacts
+    .map(artifact => artifact as { type?: string; number?: number; url?: string })
+    .filter(artifact => Boolean(artifact.url));
   return <div className="min-h-full bg-white text-slate-900">
     <header className="w-full border-b border-slate-200 px-4 py-3 sm:px-6 lg:px-8">
       <div className="mx-auto max-w-7xl">
@@ -874,20 +904,21 @@ function GoalDetails({ goalId }: { goalId: string }) {
         <div className="mt-2 flex flex-wrap items-center gap-3">
           <h1 className="text-2xl font-bold tracking-tight text-slate-950 sm:text-3xl">{goal.title}</h1>
           <GoalState goal={goal} quietCompleted />
+          {correctionsNote && <span className="text-xs text-slate-500">{correctionsNote}</span>}
         </div>
         <div className="mt-2 flex flex-wrap items-center justify-between gap-x-4 gap-y-3">
+          {/* Self-evident values carry no uppercase key, so the row reads as one sentence instead of stuttering label/value pairs. */}
           <div className="flex flex-wrap items-center gap-x-2 gap-y-2 text-sm text-slate-700">
-            <span className="text-[10px] font-bold uppercase tracking-widest text-slate-500">Strategy</span>
-            <span className="font-medium">{strategyLabel}</span>
+            <span className="font-medium" title={`${strategyLabel} launch strategy`}>{strategyLabel}</span>
             <span aria-hidden="true" className="text-slate-300">•</span>
-            <span className="text-[10px] font-bold uppercase tracking-widest text-slate-500">Model</span>
-            <code className="rounded bg-slate-100 px-2 py-1 font-mono text-xs font-semibold text-slate-700">{currentModel}</code>
+            <span className="inline-flex items-center gap-1.5 font-medium" title={`Model: ${currentModel}`}>
+              <ProviderLogo provider={goal.agent.type} className="h-3.5 w-3.5 flex-none" />
+              {currentModel}
+            </span>
             <span aria-hidden="true" className="text-slate-300">•</span>
-            <span className="text-[10px] font-bold uppercase tracking-widest text-slate-500">Elapsed</span>
-            <span className="font-mono text-xs font-semibold text-slate-700">{duration(goal.elapsedMs)}</span>
+            <span className="font-mono text-xs font-semibold text-slate-700" title="Elapsed time">{duration(goal.elapsedMs)}</span>
             <span aria-hidden="true" className="hidden text-slate-300 sm:inline">•</span>
             <RepositoryChip repository={goal.repository} />
-            <span className="text-xs text-slate-500">{goal.agent.alias}</span>
           </div>
           <div className="flex flex-wrap items-center justify-end gap-2">
             {goal.desiredState === 'running' && canMutate && <button disabled={busy} onClick={() => act(() => pauseGoal(goal.id))} className={`${buttonClass} border border-amber-300 text-amber-800 hover:bg-amber-50`}><CirclePause className="h-4 w-4" />Pause</button>}
@@ -935,14 +966,15 @@ function GoalDetails({ goalId }: { goalId: string }) {
           </details>
         </section>
 
-        {goal.checkpoint && <section className="mb-6 mt-3 bg-blue-50 p-4 text-sm text-blue-950">
+        {/* Colour is reserved for active work: once the goal settles, the checkpoint panel reads as history. */}
+        {goal.checkpoint && <section className={`mb-6 mt-3 border p-4 text-sm ${mutable ? 'border-blue-200 bg-blue-50 text-blue-950' : 'border-slate-200 bg-slate-50 text-slate-700'}`}>
           <div className="flex items-start gap-3">
-            <CircleDot className="mt-0.5 h-4 w-4 flex-none text-blue-600" />
+            <CircleDot className={`mt-0.5 h-4 w-4 flex-none ${mutable ? 'text-blue-600' : 'text-slate-400'}`} />
             <div className="min-w-0">
-              <p className="font-medium">{goal.checkpoint.count} checkpoint commit{goal.checkpoint.count === 1 ? '' : 's'}{goal.checkpoint.lastAt ? ` · last ${new Date(goal.checkpoint.lastAt).toLocaleString()}` : ''}</p>
-              <p className="mt-1 text-blue-800">Target cadence: about every {goal.checkpoint.intervalMinutes || 15} minutes. <span className="text-xs">The agent declares when coherent work is ready.</span></p>
+              <p className={`font-medium ${mutable ? '' : 'text-slate-800'}`}>{goal.checkpoint.count} checkpoint commit{goal.checkpoint.count === 1 ? '' : 's'}{goal.checkpoint.lastAt ? ` · last ${new Date(goal.checkpoint.lastAt).toLocaleString()}` : ''}</p>
+              <p className={`mt-1 ${mutable ? 'text-blue-800' : 'text-slate-500'}`}>Target cadence: about every {goal.checkpoint.intervalMinutes || 15} minutes. <span className="text-xs">The agent declares when coherent work is ready.</span></p>
               {goal.checkpoint.error && !goal.checkpoint.latest?.error && <p className="mt-2 text-red-700">Checkpoint error: {goal.checkpoint.error}</p>}
-              <CheckpointDeclaration checkpoint={goal.checkpoint} />
+              <CheckpointDeclaration checkpoint={goal.checkpoint} active={mutable} />
             </div>
           </div>
         </section>}
@@ -968,8 +1000,6 @@ function GoalDetails({ goalId }: { goalId: string }) {
           </div>
         </section>}
 
-        {goal.artifacts.length > 0 && <div className="my-5 flex flex-wrap gap-2 text-xs text-slate-600">{goal.artifacts.map((artifact, index) => { const item = artifact as { type?: string; number?: number; url?: string }; return item.url ? <a key={item.url} href={item.url} target="_blank" rel="noreferrer" className="rounded bg-slate-100 px-2 py-1 hover:underline">{item.type === 'pull_request' ? 'PR' : 'Issue'} #{item.number}</a> : <span key={index} />; })}</div>}
-
         <section aria-labelledby="live-progress-heading" className="mt-6">
           <div className="flex items-center gap-2">
             <h2 id="live-progress-heading" className="text-[11px] font-bold uppercase tracking-widest text-slate-500">Execution queue</h2>
@@ -979,8 +1009,12 @@ function GoalDetails({ goalId }: { goalId: string }) {
         </section>
 
         <section className="mt-8 border-t border-slate-200 pt-5">
+          {/* One header row owns both the label and the control that switches what sits under it. */}
           <header className="flex items-center justify-between gap-3">
-            <h2 className="text-[10px] font-bold uppercase tracking-widest text-slate-500">Goal output</h2>
+            <div className="flex items-center gap-2">
+              <h2 className="text-[10px] font-bold uppercase tracking-widest text-slate-500">Implementation log</h2>
+              {readableTimeline.length > 0 && <span className="rounded border border-slate-200 bg-slate-50 px-2 py-0.5 font-mono text-[10px] font-bold text-slate-500">{readableTimeline.length}</span>}
+            </div>
             <div role="group" aria-label="Goal output view" className="inline-flex rounded-md border border-slate-200 bg-slate-50 p-1">
               <button type="button" aria-pressed={outputMode === 'readable'} onClick={() => setOutputMode('readable')} className={`inline-flex items-center gap-1.5 rounded px-2.5 py-1.5 text-xs font-medium transition ${outputMode === 'readable' ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}><FileText className="h-3.5 w-3.5" />Human readable</button>
               <button type="button" aria-pressed={outputMode === 'terminal'} onClick={() => setOutputMode('terminal')} className={`inline-flex items-center gap-1.5 rounded px-2.5 py-1.5 text-xs font-medium transition ${outputMode === 'terminal' ? 'bg-slate-800 text-white shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}><Terminal className="h-3.5 w-3.5" />Raw terminal</button>
@@ -988,7 +1022,7 @@ function GoalDetails({ goalId }: { goalId: string }) {
           </header>
           {outputMode === 'readable'
             ? <div className="min-h-32 py-4">{readableTimeline.length > 0
-              ? <ThinkingLog events={readableTimeline} todos={live.todos} />
+              ? <ThinkingLog events={readableTimeline} todos={live.todos} showHeader={false} />
               : <p className="text-sm text-slate-500">No human-readable output yet.</p>}</div>
             : <div className="mt-4 min-h-32 bg-slate-950 p-4 text-slate-100">{terminalTimeline.length > 0
               ? <ExecutionEventLog events={terminalTimeline} collapsed={false} onToggleCollapse={() => undefined} lastThought={thinkingLog.lastThought} isTaskActive={mutable && goal.desiredState === 'running'} taskInfo={null} />
@@ -996,23 +1030,58 @@ function GoalDetails({ goalId }: { goalId: string }) {
         </section>
       </main>
 
-      <aside aria-label="Steering console" className="flex min-w-0 flex-col border-t border-slate-200 bg-slate-50 px-4 py-6 sm:px-6 lg:border-l lg:border-t-0">
+      <aside aria-label="Steering console" className="flex min-w-0 flex-col border-t border-slate-200 bg-slate-50 py-6 lg:border-l lg:border-t-0">
+        {/* The rail is one slate-50 canvas. Nothing here is boxed in white: rows are separated by rules that span the pane. */}
         <section aria-labelledby="goal-metrics-heading">
-          <h2 id="goal-metrics-heading" className="text-[10px] font-bold uppercase tracking-widest text-slate-500">Metrics</h2>
-          <dl className="mt-3 grid grid-cols-2 border-y border-slate-200">
-            <div className="border-b border-r border-slate-200 py-4 pr-4"><dt className="text-[10px] font-bold uppercase tracking-widest text-slate-500">Usage</dt><dd className="mt-1 text-2xl font-bold tracking-tight text-slate-950">{totalTokens.toLocaleString()}</dd><dd className="text-xs text-slate-500">tokens</dd>{goal.liveSummary.nativeGoal && <dd className="mt-1 text-xs text-slate-500">{goal.liveSummary.nativeGoal.status} · {duration(goal.liveSummary.nativeGoal.timeUsedSeconds * 1000)}</dd>}</div>
-            <div className="border-b border-slate-200 py-4 pl-4"><dt className="text-[10px] font-bold uppercase tracking-widest text-slate-500">Session</dt><dd className="mt-2 break-all"><code className="rounded bg-white px-2 py-1 font-mono text-xs text-slate-700 shadow-sm">{goal.sessionId || 'Waiting for provider identity'}</code></dd></div>
-            <div className="border-r border-slate-200 py-4 pr-4"><dt className="text-[10px] font-bold uppercase tracking-widest text-slate-500">Active</dt><dd className="mt-1 font-mono text-sm font-semibold text-slate-800">{duration(goal.activeMs)}</dd><dd className="mt-1 text-xs text-slate-500">{duration(goal.pausedMs)} paused</dd></div>
-            <div className="py-4 pl-4"><dt className="text-[10px] font-bold uppercase tracking-widest text-slate-500">Artifacts</dt><dd className="mt-1 text-sm font-semibold text-slate-800">{goal.artifactStats.openPullRequests}/{goal.artifactStats.pullRequests} PRs</dd><dd className="mt-1 text-xs text-slate-500">{goal.artifactStats.openIssues}/{goal.artifactStats.issues} open issues</dd></div>
+          <h2 id="goal-metrics-heading" className={`${railInset} text-[10px] font-bold uppercase tracking-widest text-slate-500`}>Metrics</h2>
+          <dl className="mt-3 border-t border-slate-200">
+            <div className={`${railInset} grid grid-cols-2 gap-x-6 border-b border-slate-200 py-4`}>
+              <div className="min-w-0">
+                <dt className={railMetricLabel}>Usage</dt>
+                <dd className="mt-1 text-2xl font-bold tracking-tight text-slate-950" title={`${totalTokens.toLocaleString()} tokens`}>{metricCount(totalTokens)}</dd>
+                <dd className="text-xs text-slate-500">tokens</dd>
+                {goal.liveSummary.nativeGoal && <dd className="mt-1 text-xs text-slate-500">{goal.liveSummary.nativeGoal.status} · {duration(goal.liveSummary.nativeGoal.timeUsedSeconds * 1000)}</dd>}
+              </div>
+              <div className="min-w-0">
+                <dt className={railMetricLabel}>Active</dt>
+                <dd className="mt-1 font-mono text-sm font-semibold text-slate-800">{duration(goal.activeMs)}</dd>
+                <dd className="mt-1 text-xs text-slate-500">{duration(goal.pausedMs)} paused</dd>
+              </div>
+            </div>
+            <div className={`${railInset} grid grid-cols-2 gap-x-6 border-b border-slate-200 py-4`}>
+              <div className="min-w-0">
+                <dt className={railMetricLabel}>Artifacts</dt>
+                <dd className="mt-1 text-sm font-semibold text-slate-800">{goal.artifactStats.openPullRequests}/{goal.artifactStats.pullRequests} PRs</dd>
+                <dd className="mt-1 text-xs text-slate-500">{goal.artifactStats.openIssues}/{goal.artifactStats.issues} open issues</dd>
+              </div>
+              <div className="min-w-0">
+                <dt className={railMetricLabel}>Session</dt>
+                <dd className="mt-1 break-all font-mono text-xs text-slate-700">{goal.sessionId || 'Waiting for provider identity'}</dd>
+              </div>
+            </div>
           </dl>
         </section>
 
-        {canMutate && <section aria-labelledby="quick-actions-heading" className="mt-7">
-          <h2 id="quick-actions-heading" className="text-[10px] font-bold uppercase tracking-widest text-slate-500">Quick actions</h2>
-          <div className="mt-3 flex flex-wrap gap-2"><button disabled={busy} onClick={() => continueWith({ canned: 'done' })} className={`${buttonClass} border border-slate-200 bg-white text-slate-700 shadow-sm hover:border-slate-300 hover:bg-slate-50`}>What's done?</button><button disabled={busy} onClick={() => continueWith({ canned: 'left' })} className={`${buttonClass} border border-slate-200 bg-white text-slate-700 shadow-sm hover:border-slate-300 hover:bg-slate-50`}>What's left?</button></div>
+        {/* Orphaned PR and issue chips belong to a labelled section here, not adrift in the reading column. */}
+        {artifactLinks.length > 0 && <section aria-labelledby="goal-artifacts-heading" className={`${railInset} mt-7`}>
+          <h2 id="goal-artifacts-heading" className="text-[10px] font-bold uppercase tracking-widest text-slate-500">Related artifacts</h2>
+          <ul className="mt-3 flex flex-wrap gap-2">{artifactLinks.map(artifact => <li key={artifact.url}>
+            <a href={artifact.url} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1.5 rounded border border-slate-200 px-2 py-1 text-xs text-slate-700 transition hover:border-slate-300 hover:text-primary-700">
+              {artifact.type === 'pull_request'
+                ? <GitPullRequest className="h-3.5 w-3.5 flex-none text-slate-400" />
+                : <CircleDot className="h-3.5 w-3.5 flex-none text-slate-400" />}
+              {artifact.type === 'pull_request' ? 'PR' : 'Issue'} #{artifact.number}
+            </a>
+          </li>)}</ul>
         </section>}
 
-        {canMutate ? <section aria-labelledby="correction-heading" className="sticky bottom-0 mt-auto pt-10">
+        {canMutate && <section aria-labelledby="quick-actions-heading" className={`${railInset} mt-7`}>
+          <h2 id="quick-actions-heading" className="text-[10px] font-bold uppercase tracking-widest text-slate-500">Quick actions</h2>
+          <div className="mt-3 flex flex-wrap gap-2"><button disabled={busy} onClick={() => continueWith({ canned: 'done' })} className={`${buttonClass} border border-slate-300 text-slate-700 hover:bg-slate-100`}>What's done?</button><button disabled={busy} onClick={() => continueWith({ canned: 'left' })} className={`${buttonClass} border border-slate-300 text-slate-700 hover:bg-slate-100`}>What's left?</button></div>
+        </section>}
+
+        {/* A closed goal gets no footer bar: the locked state is already stated beside the status badge. */}
+        {canMutate && <section aria-labelledby="correction-heading" className={`${railInset} sticky bottom-0 mt-auto bg-slate-50 pb-1 pt-10`}>
           <div className="mb-2 flex flex-col items-end gap-1">
             <label htmlFor="goal-continuation-model" className="text-xs text-slate-500">Model for next continuation</label>
             <select id="goal-continuation-model" value={goal.requestedModel} onChange={event => act(() => requestGoalModel(goal.id, event.target.value))} className="max-w-48 rounded-md border border-slate-200 bg-white px-2 py-1.5 text-xs font-medium text-slate-700 shadow-sm">{models.map(item => <option key={item} value={item}>{getModelDisplayName(item)}</option>)}</select>
@@ -1028,14 +1097,6 @@ function GoalDetails({ goalId }: { goalId: string }) {
             <GoalAttachmentInput files={files} onChange={setFiles} onError={setError} disabled={busy} compact />
             <div className="mt-2 flex justify-end"><button disabled={busy || !message.trim()} onClick={() => continueWith({ message }, files)} className={`${buttonClass} bg-primary-600 text-white hover:bg-primary-700`}><Send className="h-4 w-4" />Send</button></div>
           </div>
-        </section> : <section aria-label="Correction command bar" className="sticky bottom-0 mt-auto pt-10">
-          <input
-            aria-label="Correction or follow-up"
-            type="text"
-            disabled
-            className="w-full cursor-not-allowed rounded-md border border-slate-200 bg-slate-100 px-3 py-3 text-sm text-slate-500 shadow-sm placeholder:text-slate-500 disabled:opacity-100"
-            placeholder={isDemoMode && mutable ? 'Demo mode is read-only. Corrections disabled.' : goal.resultState === 'completed' ? 'Goal completed. Corrections disabled.' : 'Goal closed. Corrections disabled.'}
-          />
         </section>}
       </aside>
     </div>
