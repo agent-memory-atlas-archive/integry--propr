@@ -102,7 +102,12 @@ const MobileNavLink: React.FC<MobileNavLinkProps> = ({
       active ? 'text-primary-700' : 'text-slate-500 hover:text-slate-800'
     }`}
   >
-    <span className="relative">
+    {/*
+      A fixed icon slot, the height of the New Task button's pill. Without one
+      the four icon-only items were 20px tall and New Task was 32px, so every
+      label on the bar sat on a different baseline from its neighbour's.
+    */}
+    <span className="relative flex h-8 w-9 items-center justify-center">
       {icon}
       {badge}
     </span>
@@ -211,7 +216,7 @@ const MobileBottomNavigation: React.FC<MobileBottomNavigationProps> = ({
   const active = getNavigationState(location.pathname);
 
   const unreadBadge = unreadCount !== null && unreadCount > 0 ? (
-    <span className="absolute -right-2.5 -top-1.5 inline-flex min-w-4 items-center justify-center rounded-full bg-primary-500 px-1 text-[9px] font-bold leading-4 text-white">
+    <span className="absolute right-0 top-0 inline-flex min-w-4 items-center justify-center rounded-full bg-primary-500 px-1 text-[9px] font-bold leading-4 text-white">
       {unreadCount > 99 ? '99+' : unreadCount}
     </span>
   ) : undefined;

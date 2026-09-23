@@ -21,9 +21,13 @@
  * `HAPPENING NOW` in the pane underneath. The counts themselves carry no
  * padding of their own, only a hover inset, so that rail is not doubled.
  *
- * It wraps below `sm`, where four counts cannot share 320px, so the bar grows
- * to two rows instead of scrolling sideways — `min-h-9` rather than a fixed
- * height is what lets it.
+ * Below `sm` the same four counts become a four-column micro-grid rather than
+ * a wrapping line. Four labelled counts cannot share 320px on one row, and
+ * letting them wrap dropped `COMPLETED TODAY 2` onto an orphaned second line,
+ * left-aligned under nothing, which read as a spill rather than as a bar. In
+ * the grid each count is a column of its own: the number, then a single word
+ * under it. The long labels ("Needs attention", "Completed today") are what
+ * would not fit, so the phone gets one word and the desktop keeps the phrase.
  */
 
 import React, { useCallback } from 'react';
@@ -37,6 +41,8 @@ import {
 
 interface SummaryCountProps {
   label: string;
+  /** The one-word form used in the phone's four-column grid. */
+  shortLabel: string;
   value: number | null;
   href: string;
   title: string;
@@ -44,22 +50,36 @@ interface SummaryCountProps {
   testId: string;
 }
 
-const SummaryCount: React.FC<SummaryCountProps> = ({ label, value, href, title, emphasised = false, testId }) => (
+const SummaryCount: React.FC<SummaryCountProps> = ({
+  label,
+  shortLabel,
+  value,
+  href,
+  title,
+  emphasised = false,
+  testId,
+}) => (
   <Link
     to={href}
     title={title}
     data-testid={testId}
     data-emphasis={emphasised ? 'true' : 'false'}
-    className={`-mx-1 flex min-w-0 items-baseline gap-1.5 rounded-sm px-1 py-0.5 transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-teal-500 ${
+    /*
+      `flex-col-reverse` stacks the number over its word on a phone without
+      reordering the markup, so the label still precedes its value for anything
+      reading the document rather than looking at it.
+    */
+    className={`-mx-1 flex min-w-0 flex-col-reverse items-center rounded-sm px-1 py-0.5 text-center transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-teal-500 sm:flex-row sm:items-baseline sm:gap-1.5 sm:text-left ${
       emphasised ? 'hover:bg-amber-100' : 'hover:bg-slate-200/80'
     }`}
   >
     <span
-      className={`truncate text-[10px] font-bold uppercase tracking-wider ${
+      className={`w-full truncate text-[10px] font-bold uppercase tracking-wider sm:w-auto ${
         emphasised ? 'text-amber-700' : 'text-slate-500'
       }`}
     >
-      {label}
+      <span className="sm:hidden">{shortLabel}</span>
+      <span className="hidden sm:inline">{label}</span>
     </span>
     <span
       className={`font-mono text-sm font-semibold tabular-nums ${
@@ -84,11 +104,12 @@ export const SummaryStrip: React.FC<DashboardSectionProps> = ({ repository, refr
     <div
       aria-label="Work summary"
       data-testid="summary-strip"
-      className="flex min-h-9 flex-wrap items-center gap-x-5 gap-y-1 border-y border-slate-200 bg-slate-100 px-3 py-1.5"
+      className="grid min-h-9 grid-cols-4 items-center gap-x-2 border-y border-slate-200 bg-slate-100 px-3 py-1.5 sm:flex sm:flex-wrap sm:gap-x-5 sm:gap-y-1"
     >
       <SummaryCount
         testId="summary-needs-attention"
         label="Needs attention"
+        shortLabel="Attention"
         value={counts?.needsAttention ?? null}
         emphasised={(counts?.needsAttention ?? 0) > 0}
         href={filteredTasksHref('attention', repository)}
@@ -97,6 +118,7 @@ export const SummaryStrip: React.FC<DashboardSectionProps> = ({ repository, refr
       <SummaryCount
         testId="summary-running"
         label="Running"
+        shortLabel="Running"
         value={counts?.running ?? null}
         href={filteredTasksHref('active', repository)}
         title="Work running right now"
@@ -104,6 +126,7 @@ export const SummaryStrip: React.FC<DashboardSectionProps> = ({ repository, refr
       <SummaryCount
         testId="summary-queued"
         label="Queued"
+        shortLabel="Queued"
         value={counts?.queued ?? null}
         href={filteredTasksHref('waiting', repository)}
         title="Work waiting for an agent"
@@ -111,6 +134,7 @@ export const SummaryStrip: React.FC<DashboardSectionProps> = ({ repository, refr
       <SummaryCount
         testId="summary-completed"
         label={windowHours === 24 ? 'Completed today' : `Completed (${windowHours}h)`}
+        shortLabel="Done"
         value={counts?.completedRecently ?? null}
         href={filteredTasksHref('completed', repository)}
         title={`Work completed in the last ${windowHours} hours`}

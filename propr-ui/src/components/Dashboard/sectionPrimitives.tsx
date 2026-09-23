@@ -29,8 +29,6 @@ export const RepositoryIconProvider: React.FC<{
   <RepositoryIconContext.Provider value={icons}>{children}</RepositoryIconContext.Provider>
 );
 
-export const Dot: React.FC = () => <span className="text-gray-300" aria-hidden="true">•</span>;
-
 /**
  * Repository slug as a monospace code chip.
  *
@@ -45,11 +43,19 @@ export const Dot: React.FC = () => <span className="text-gray-300" aria-hidden="
  * the repository unreadable. The owner is the constant in any one instance, so
  * it is the part that can go; the full slug stays in the tooltip and in the
  * icon beside it.
+ *
+ * `shortOnMobile` applies the same reasoning to a phone. A 320px row is as
+ * narrow as the right rail is on a desktop, so the main column's chips earn
+ * their owner back only once there is width for it.
  */
-export const RepositoryLabel: React.FC<{ repository: string; short?: boolean }> = ({ repository, short = false }) => {
+export const RepositoryLabel: React.FC<{
+  repository: string;
+  short?: boolean;
+  shortOnMobile?: boolean;
+}> = ({ repository, short = false, shortOnMobile = false }) => {
   const icons = useContext(RepositoryIconContext);
   const icon = icons.get(repository);
-  const label = short ? repository.slice(repository.lastIndexOf('/') + 1) : repository;
+  const name = repository.slice(repository.lastIndexOf('/') + 1);
   return (
     <span
       className="inline-flex min-w-0 items-center gap-1 whitespace-nowrap rounded-sm border border-slate-200 bg-slate-100 px-1.5 py-0.5 font-mono text-[12px] leading-4 text-slate-800"
@@ -61,7 +67,14 @@ export const RepositoryLabel: React.FC<{ repository: string; short?: boolean }> 
         revision={icon?.revision}
         className="h-3.5 w-3.5 flex-none"
       />
-      <span className="truncate">{label}</span>
+      {short && <span className="truncate">{name}</span>}
+      {!short && shortOnMobile && (
+        <>
+          <span className="truncate sm:hidden">{name}</span>
+          <span className="hidden truncate sm:inline">{repository}</span>
+        </>
+      )}
+      {!short && !shortOnMobile && <span className="truncate">{repository}</span>}
     </span>
   );
 };
@@ -105,7 +118,7 @@ export const SectionHeading: React.FC<{
   count?: number | null;
   children?: React.ReactNode;
 }> = ({ id, title, count, children }) => (
-  <div className="flex min-h-10 flex-wrap items-center justify-between gap-x-3 gap-y-1 border-b border-slate-200 bg-slate-50 px-3 py-1.5">
+  <div className="flex min-h-10 flex-none flex-wrap items-center justify-between gap-x-3 gap-y-1 border-b border-slate-200 bg-slate-50 px-3 py-1.5">
     <h2 id={id} className="text-[10px] font-bold uppercase tracking-wider text-slate-500">
       {title}
       {count !== undefined && count !== null && (
@@ -167,6 +180,33 @@ export const SectionEmpty: React.FC<{ children: React.ReactNode }> = ({ children
 );
 
 /**
+ * The empty state for a pane whose height is fixed by the pane beside it.
+ *
+ * A pane in a split-pane console cannot shrink to its content: the attention
+ * panel is as tall as the running feed it shares a row with, whether it holds
+ * four items or none. A single line of text pinned to the top of that pane
+ * leaves 250px of unexplained white below it, which reads as content that
+ * failed to load rather than as nothing to do.
+ *
+ * So the zero-state occupies the pane instead of sitting in it — a quiet glyph
+ * above a sentence, centred on both axes. The height then looks deliberate,
+ * and the pane still says the same thing it always said.
+ */
+export const SectionZeroState: React.FC<{
+  icon: React.ReactNode;
+  children: React.ReactNode;
+  'data-testid'?: string;
+}> = ({ icon, children, ...rest }) => (
+  <p
+    className="flex h-full flex-1 flex-col items-center justify-center gap-2 px-4 py-12 text-center text-sm leading-5 text-slate-400"
+    {...rest}
+  >
+    {icon}
+    <span>{children}</span>
+  </p>
+);
+
+/**
  * A failed read. This is deliberately worded and styled differently from an
  * empty list: "nothing is happening" and "we could not find out" are not the
  * same fact, and only one of them offers a retry.
@@ -202,11 +242,48 @@ export const SectionSkeleton: React.FC<{ rows?: number }> = ({ rows = 3 }) => (
  */
 export const RowMeta: React.FC<{ children: React.ReactNode; wrap?: boolean }> = ({ children, wrap = true }) => (
   <span
-    className={`flex min-w-0 flex-wrap items-center gap-x-1.5 gap-y-1 text-xs ${
+    className={`flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 text-xs ${
       wrap ? '' : 'lg:flex-nowrap lg:gap-y-0 lg:overflow-hidden'
     }`}
   >
     {children}
+  </span>
+);
+
+/**
+ * Metadata for a feed row in the wide column: two strict lines on a phone, one
+ * line from `sm` up.
+ *
+ * The horizontal stream that reads well at 1440px explodes on a 390px screen.
+ * Status, repository, entity and elapsed time wrapped wherever they ran out of
+ * room, so a single item spent three lines on metadata before its title, and
+ * the interpunct that separated two facts wrapped with the second one and
+ * started a line as an orphaned bullet.
+ *
+ * So the phone gets an explicit structure instead of whatever `flex-wrap`
+ * produces: what it is and how long it has been are the first line, opposite
+ * ends; the entities it concerns are the second. `sm:contents` dissolves that
+ * pairing above the breakpoint and the ordering classes put the four facts
+ * back into one stream, so the desktop line is unchanged.
+ *
+ * Nothing here is separated by a typed `•`. An interpunct is an inline
+ * separator, and an inline separator that can wrap eventually does; space and
+ * the chips' own borders say the same thing and cannot wrap away from what
+ * they separate.
+ */
+export const RowMetaLines: React.FC<{
+  status: React.ReactNode;
+  entities: React.ReactNode;
+  trailing?: React.ReactNode;
+}> = ({ status, entities, trailing }) => (
+  <span className="flex flex-col gap-1 text-xs sm:flex-row sm:flex-wrap sm:items-center sm:gap-x-2 sm:gap-y-1">
+    <span className="flex items-center justify-between gap-2 sm:contents">
+      <span className="flex min-w-0 items-center sm:order-1">{status}</span>
+      {trailing && (
+        <span className="flex-none whitespace-nowrap text-gray-500 sm:order-3">{trailing}</span>
+      )}
+    </span>
+    <span className="flex min-w-0 items-center gap-1.5 sm:order-2">{entities}</span>
   </span>
 );
 
@@ -217,8 +294,15 @@ export const RowTitle: React.FC<{ children: React.ReactNode; strong?: boolean }>
   </span>
 );
 
+/**
+ * The secondary line under a title, held to one line unless expanded.
+ *
+ * `block` and `line-clamp-1` both set `display`, and `block` was winning, so
+ * the clamp drew no line at all and a long progress line quietly wrapped to
+ * three. Only one of the two is applied.
+ */
 export const RowDetail: React.FC<{ children: React.ReactNode; clamp?: boolean }> = ({ children, clamp = true }) => (
-  <span className={`mt-0.5 block break-words text-xs leading-5 text-slate-500 ${clamp ? 'line-clamp-1' : ''}`}>
+  <span className={`mt-0.5 break-words text-xs leading-5 text-slate-500 ${clamp ? 'line-clamp-1' : 'block'}`}>
     {children}
   </span>
 );

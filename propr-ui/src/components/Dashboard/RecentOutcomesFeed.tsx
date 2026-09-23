@@ -12,11 +12,10 @@ import { Check, CircleSlash, X, type LucideIcon } from 'lucide-react';
 import { getDashboardOutcomes, type DashboardOutcomesResponse, type OutcomeItem, type OutcomeKind } from '../../api/dashboardApi';
 import { ScoreBadge } from '../TaskList/ScoreBadge';
 import {
-  Dot,
   RepositoryLabel,
   RowDetail,
   RowLink,
-  RowMeta,
+  RowMetaLines,
   RowTitle,
   SectionEmpty,
   SectionError,
@@ -107,16 +106,20 @@ const OutcomeRow: React.FC<{ item: OutcomeItem }> = ({ item }) => (
       className="flex min-w-0 items-start gap-2 px-3 py-2.5 text-left transition-colors hover:bg-slate-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-teal-500"
     >
       <span className="min-w-0 flex-1">
-        <RowMeta>
-          <OutcomeKindLabel kind={item.kind} />
-          <Dot />
-          <RepositoryLabel repository={item.repository} />
-          <WorkReference issueNumber={item.issueNumber} prNumber={item.prNumber} />
-          <Dot />
-          <time dateTime={item.occurredAt} title={new Date(item.occurredAt).toLocaleString()} className="whitespace-nowrap text-gray-500">
-            {elapsedLabel(item.occurredAt)} ago
-          </time>
-        </RowMeta>
+        <RowMetaLines
+          status={<OutcomeKindLabel kind={item.kind} />}
+          entities={(
+            <>
+              <RepositoryLabel repository={item.repository} shortOnMobile />
+              <WorkReference issueNumber={item.issueNumber} prNumber={item.prNumber} />
+            </>
+          )}
+          trailing={(
+            <time dateTime={item.occurredAt} title={new Date(item.occurredAt).toLocaleString()}>
+              {elapsedLabel(item.occurredAt)} ago
+            </time>
+          )}
+        />
         <RowTitle>{outcomeTitle(item)}</RowTitle>
         {item.detail && <RowDetail>{item.detail}</RowDetail>}
       </span>
@@ -127,9 +130,13 @@ const OutcomeRow: React.FC<{ item: OutcomeItem }> = ({ item }) => (
         label, never as visible `/10` prose: floating prose next to a
         fixed-width badge puts variable-width glyphs outside the w-12 box and
         makes the right rail shift by a pixel or two between 7, 8 and 9.
+
+        On a phone the badge centres against the row rather than hanging off
+        its first line, where it used to crowd the status word and push the
+        timestamp onto a line of its own.
       */}
       {item.score !== null && item.score !== undefined && (
-        <span className="mt-0.5 flex flex-none items-baseline" data-testid="outcome-score">
+        <span className="flex flex-none items-baseline self-center sm:mt-0.5 sm:self-start" data-testid="outcome-score">
           <ScoreBadge score={item.score} bracketed />
           <span className="sr-only">Code quality score {item.score} out of 10</span>
         </span>

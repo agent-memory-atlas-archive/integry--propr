@@ -21,7 +21,7 @@ import {
 import {
   CURRENT_DAY_FILL,
   PAST_DAY_FILL,
-  dailyBarFill,
+  dailyPointFill,
   utcToday,
 } from './Dashboard/chartPalette';
 import {
@@ -192,10 +192,10 @@ describe('Dashboard studio design rules', () => {
 
   it('colours only the in-progress day of the historical chart', () => {
     const today = utcToday();
-    expect(dailyBarFill(today, today)).toBe(CURRENT_DAY_FILL);
-    expect(dailyBarFill('2026-09-17', today)).toBe(PAST_DAY_FILL);
+    expect(dailyPointFill(today, today)).toBe(CURRENT_DAY_FILL);
+    expect(dailyPointFill('2026-09-17', today)).toBe(PAST_DAY_FILL);
     // A settled day stays neutral no matter how many completions it holds.
-    expect(dailyBarFill('2020-01-01', today)).toBe(PAST_DAY_FILL);
+    expect(dailyPointFill('2020-01-01', today)).toBe(PAST_DAY_FILL);
   });
 
   it('spends one compact row on the four top-level counts', async () => {
@@ -207,10 +207,54 @@ describe('Dashboard studio design rules', () => {
       const count = screen.getByTestId(testId);
       expect(strip).toContainElement(count);
       // A count is a label beside a number, not a card wrapping one.
-      expect(count.className).toMatch(/items-baseline/);
+      expect(count.className).toMatch(/sm:items-baseline/);
       expect(count.className).not.toMatch(/rounded-(?:md|lg|xl)/);
-      expect(count.className).not.toMatch(/flex-col/);
+      expect(count.className).not.toMatch(/shadow/);
     }
+  });
+
+  it('lays the four counts out as a micro-grid on a phone rather than letting them wrap', async () => {
+    renderDashboard();
+    await waitForSections();
+
+    // Four labelled counts do not fit one 320px row, and wrapping dropped the
+    // fourth onto an orphaned second line under nothing. Four columns, a
+    // number over a single word in each.
+    const strip = screen.getByTestId('summary-strip');
+    expect(strip.className).toMatch(/grid-cols-4/);
+    expect(strip.className).toMatch(/sm:flex/);
+
+    for (const [testId, short, long] of [
+      ['summary-needs-attention', 'Attention', 'Needs attention'],
+      ['summary-completed', 'Done', 'Completed today'],
+    ] as const) {
+      const count = screen.getByTestId(testId);
+      // Stacked on a phone, back on one line from `sm`.
+      expect(count.className).toMatch(/flex-col-reverse/);
+      expect(count.className).toMatch(/sm:flex-row/);
+      // The long phrase is what will not fit, so the phone gets one word.
+      expect(within(count).getByText(short).className).toMatch(/sm:hidden/);
+      expect(within(count).getByText(long).className).toMatch(/hidden/);
+    }
+  });
+
+  it('locks the page header into two ruled tiers instead of floating it', async () => {
+    renderDashboard();
+    await waitForSections();
+
+    // Tier one carries the page, the connection state and the filter; tier two
+    // carries the counts. Each closes with a rule, so the top of the canvas has
+    // structure before the first row of content rather than three loose bands.
+    const strip = screen.getByTestId('summary-strip');
+    const toolbar = strip.previousElementSibling as HTMLElement | null;
+    expect(toolbar).not.toBeNull();
+    expect(toolbar).toContainElement(screen.getByTestId('live-status'));
+    expect(toolbar).toContainElement(screen.getByRole('heading', { name: 'Dashboard', level: 1 }));
+    expect(toolbar?.className).toMatch(/border-b/);
+    // Both tiers share the panes' left rail, so nothing in the header starts
+    // on a vertical of its own.
+    expect(toolbar?.className).toMatch(/px-3/);
+    expect(strip.className).toMatch(/px-3/);
   });
 
   it('anchors the summary counts in a sub-toolbar rather than floating them', async () => {
@@ -240,6 +284,59 @@ describe('Dashboard studio design rules', () => {
     for (const testId of ['summary-needs-attention', 'summary-running', 'summary-queued', 'summary-completed']) {
       expect(screen.getByTestId(testId).className).not.toMatch(/border-[rlbt]\b/);
     }
+  });
+
+  it('fills the attention pane with its zero-state instead of stranding one line at the top', async () => {
+    renderDashboard();
+    await waitForSections();
+
+    // The pane is as tall as the running feed beside it whatever its count, so
+    // a single line pinned to its ceiling leaves a cavern of white that reads
+    // as content that failed to load. The zero-state occupies the pane.
+    const empty = screen.getByTestId('needs-attention-empty');
+    expect(empty.className).toMatch(/h-full/);
+    expect(empty.className).toMatch(/flex-1/);
+    expect(empty.className).toMatch(/items-center/);
+    expect(empty.className).toMatch(/justify-center/);
+    // A glyph above the sentence, quiet enough not to read as a reward.
+    expect(empty.querySelector('svg')).not.toBeNull();
+
+    // The panel has to be a full-height column for the state to centre in it.
+    const panel = screen.getByTestId('needs-attention-panel');
+    expect(panel.className).toMatch(/h-full/);
+    expect(panel.className).toMatch(/flex-col/);
+  });
+
+  it('never separates two facts in a row with a bullet that can wrap away from them', async () => {
+    mockActive.mockResolvedValue(activeResponse([activeItem()], [activeItem({ id: 'task:q', taskId: 'q' })]));
+
+    renderDashboard();
+    await waitForSections();
+
+    // An interpunct is an inline separator. When the line wrapped it went with
+    // the fact after it and started the next line as an orphaned bullet, which
+    // reads as an unparsed template string. Space and borders separate instead.
+    for (const testId of ['happening-now-section', 'recent-outcomes-section', 'needs-attention-panel']) {
+      expect(screen.getByTestId(testId).textContent).not.toMatch(/•/);
+    }
+  });
+
+  it('collapses a raw repository path in a progress line on a phone only', async () => {
+    mockActive.mockResolvedValue(activeResponse([
+      activeItem({ progressLine: 'Editing propr-ui/src/components/Dashboard/HappeningNowSection.tsx now' }),
+    ]));
+
+    renderDashboard();
+    await waitForSections();
+
+    // 110 characters of path wrapped to three lines of the densest text on the
+    // screen. Someone triaging on a phone needs the file, not the route to it.
+    const section = screen.getByTestId('happening-now-section');
+    const short = within(section).getByText('Editing …/HappeningNowSection.tsx now');
+    expect(short.className).toMatch(/sm:hidden/);
+    const full = within(section).getByText('Editing propr-ui/src/components/Dashboard/HappeningNowSection.tsx now');
+    expect(full.className).toMatch(/hidden/);
+    expect(full.className).toMatch(/sm:inline/);
   });
 
   it('separates rows with space instead of drawing a rule under every one', async () => {

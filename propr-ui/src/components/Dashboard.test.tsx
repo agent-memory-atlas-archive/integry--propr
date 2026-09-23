@@ -134,7 +134,7 @@ describe('Dashboard', () => {
     expect(panel).toBeInTheDocument();
     expect(screen.getByRole('heading', { name: /Needs attention/ })).toHaveTextContent('Needs attention (0)');
     expect(screen.getByTestId('needs-attention-empty')).toHaveTextContent(
-      'All clear — no tasks require operator intervention',
+      'All tasks operational — no attention required',
     );
     // Nothing to view, so no "View all" link into an empty list.
     expect(within(panel).queryByRole('link', { name: 'View all' })).not.toBeInTheDocument();

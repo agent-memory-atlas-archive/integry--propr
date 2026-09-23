@@ -132,6 +132,21 @@ export function elapsedLabel(since: string): string {
   return relative.replace(/ ago$/, '');
 }
 
+/**
+ * Directory paths in a progress line collapsed to their file name.
+ *
+ * `Editing propr-ui/src/components/Dashboard/HappeningNowSection.tsx` is a
+ * useful thing to read at 1440px and three wrapped lines of dense monospace on
+ * a 390px screen. The file is the fact; the route to it is not, to someone who
+ * is triaging rather than reviewing.
+ *
+ * Only tokens with at least two separators are touched, because `src/retry.ts`
+ * is already as short as `…/retry.ts` and loses information to say it.
+ */
+export function shortenPaths(text: string): string {
+  return text.replace(/\S+\/\S+\/\S+/g, match => `…/${match.slice(match.lastIndexOf('/') + 1)}`);
+}
+
 /** Precise elapsed time for running work, where minutes and seconds both matter. */
 export const elapsedRunning = (since: string): string => formatDuration(since, null);
 

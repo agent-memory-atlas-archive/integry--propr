@@ -172,16 +172,24 @@ const Dashboard: React.FC = () => {
         )}
 
         {/*
-          The live/filter toolbar stays on the canvas tint. It used to share
-          `bg-slate-50` with the summary strip below it, which dissolved the
-          strip: one continuous band of tint reads as one bar, so the four
-          counts looked like loose text floating under the connection status
-          rather than a status bar of their own. White here, tint plus a rule
-          there — the tint change is the boundary, and no extra rule is spent
-          to say it twice.
+          Tier one of the page toolbar: what this page is, whether it is live,
+          and what it is filtered to.
+
+          It carries its own bottom rule. Without one the row floated: the
+          connection status bled into the summary counts, which bled into the
+          first pane heading, and the top of the console had no structure at
+          all until the first row of content. The rule is what turns two loose
+          rows into a two-tier toolbar — this tier on the canvas, the counts
+          below it on tint, each one closed by a line.
+
+          It shares the panes' `px-3` left rail, so "Dashboard", the first
+          summary count and `HAPPENING NOW` all start on the same vertical.
         */}
-        <div className="flex flex-wrap items-center justify-between gap-2 bg-white px-4 py-2 sm:px-6">
-          <LiveStatus isConnected={isConnected} lastUpdatedAt={lastUpdatedAt} />
+        <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-2 border-b border-slate-200 bg-white px-3 py-2">
+          <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1">
+            <h1 className="text-[13px] font-semibold text-slate-800">Dashboard</h1>
+            <LiveStatus isConnected={isConnected} lastUpdatedAt={lastUpdatedAt} />
+          </div>
           {(reposLoading || repoOptions.length > 1) && (
             <RepositorySelector
               repos={repoOptions}
@@ -196,9 +204,9 @@ const Dashboard: React.FC = () => {
         </div>
 
         {/*
-          The status bar for the whole console: a tinted bar ruled on both
-          edges and anchored directly above the panes, not loose text between
-          the toolbar and the feed.
+          Tier two: the status bar for the whole console — a tinted bar ruled on
+          both edges and anchored directly above the panes, not loose text
+          between the toolbar and the feed.
         */}
         <SummaryStrip {...sectionProps} />
 

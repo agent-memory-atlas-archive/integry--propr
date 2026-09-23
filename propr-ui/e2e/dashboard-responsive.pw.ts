@@ -29,6 +29,8 @@ const WIDE_WIDTHS = [1024, 1440] as const;
 const LONG_TITLE = 'Keep the retry budget from leaking into post-processing';
 const LONG_PROGRESS_LINE =
   'Editing propr-ui/src/components/Dashboard/HappeningNowSection.tsx and re-running the dashboard section suite';
+/** The same line with the directories collapsed, which is what a phone shows. */
+const SHORT_PROGRESS_LINE = 'Editing …/HappeningNowSection.tsx and re-running the dashboard section suite';
 
 const running = [
   { id: 'task:run-1', taskId: 'run-1', repository: 'example/workspace', issueNumber: 2480, prNumber: null, title: LONG_TITLE, state: 'claude_execution', phase: 'Implementing', progressLine: LONG_PROGRESS_LINE, createdAt: minutesAgo(26), updatedAt: minutesAgo(1) },
@@ -335,17 +337,90 @@ test('a long title wraps to two lines while the secondary line gives way first',
   expect(measured.textOverflow).not.toBe('ellipsis');
 
   // The progress line is secondary, so it is the one held to a single line
-  // even though its text is longer than the title's.
-  const detail = row.getByText(LONG_PROGRESS_LINE);
-  const detailLines = await detail.evaluate(node => {
-    const range = document.createRange();
-    range.selectNodeContents(node);
-    return range.getClientRects().length;
-  });
+  // even though its text is longer than the title's — and on a phone it is the
+  // path inside it that gives way first, down to the file it names.
+  await expect(row.getByText(SHORT_PROGRESS_LINE)).toBeVisible();
+  await expect(row.getByText(LONG_PROGRESS_LINE)).toBeHidden();
+  const detail = row.getByText(SHORT_PROGRESS_LINE).locator('xpath=..');
   expect(LONG_PROGRESS_LINE.length).toBeGreaterThan(LONG_TITLE.length);
-  expect(detailLines).toBeGreaterThan(measured.lines);
   await expect(detail).toHaveClass(/line-clamp-1/);
+  const detailBox = await detail.evaluate(node => ({
+    height: node.getBoundingClientRect().height,
+    lineHeight: parseFloat(window.getComputedStyle(node).lineHeight),
+  }));
+  // One line on screen, however many the text would take unclamped: the clamp
+  // has to actually clip, which it does not if `block` wins the `display` it
+  // is fighting the clamp for.
+  expect(detailBox.height).toBeLessThanOrEqual(detailBox.lineHeight + 1);
+  expect(measured.lines).toBeGreaterThan(1);
 
   const overflow = await horizontalOverflow(page);
   expect(overflow.wide).toEqual([]);
 });
+
+for (const width of NARROW_WIDTHS) {
+  test(`a running item spends two metadata lines, not four, at ${width}px`, async ({ page }) => {
+    await openDashboard(page, width);
+
+    const row = page.getByTestId('happening-now-list').locator('li').first();
+
+    // Row one: what it is on the left, how long it has been on the right. Row
+    // two: the entities. A naive wrap used to spread the same four facts over
+    // three lines before the title was even reached.
+    const geometry = await row.evaluate(node => {
+      const box = (selector: string) => {
+        const rect = (node.querySelector(selector) as HTMLElement).getBoundingClientRect();
+        return { top: Math.round(rect.top), left: Math.round(rect.left), right: Math.round(rect.right) };
+      };
+      return {
+        status: box('[class*="sm:order-1"]'),
+        elapsed: box('[class*="sm:order-3"]'),
+        entities: box('[class*="sm:order-2"]'),
+        title: (node.querySelector('.line-clamp-2') as HTMLElement).getBoundingClientRect().top,
+      };
+    });
+
+    // Status and elapsed share a line; the elapsed time is flush right of it.
+    expect(geometry.status.top).toBe(geometry.elapsed.top);
+    expect(geometry.elapsed.left).toBeGreaterThan(geometry.status.right);
+    // The entities are the next line down, and the title follows them.
+    expect(geometry.entities.top).toBeGreaterThan(geometry.status.top);
+    expect(geometry.title).toBeGreaterThan(geometry.entities.top);
+    // Both metadata lines start on the row's own left edge.
+    expect(geometry.entities.left).toBe(geometry.status.left);
+
+    // The owner is dropped here for the same reason it is in the right rail.
+    // `useInnerText` because the full slug is still in the DOM for wider
+    // viewports, hidden by CSS rather than removed.
+    await expect(row.getByTitle('example/workspace')).toHaveText('workspace', { useInnerText: true });
+
+    // No typed separator survives to wrap onto a line of its own.
+    expect(await page.getByTestId('happening-now-section').textContent()).not.toContain('•');
+    expect(await page.getByTestId('recent-outcomes-section').textContent()).not.toContain('•');
+  });
+
+  test(`the four summary counts hold one row as a micro-grid at ${width}px`, async ({ page }) => {
+    await openDashboard(page, width);
+
+    const counts = await page.evaluate(() => ['summary-needs-attention', 'summary-running', 'summary-queued', 'summary-completed']
+      .map(id => {
+        const node = document.querySelector(`[data-testid="${id}"]`) as HTMLElement;
+        const rect = node.getBoundingClientRect();
+        // innerText, so the labels CSS hides at this width are not counted.
+        return { id, top: Math.round(rect.top), width: Math.round(rect.width), text: node.innerText.trim() };
+      }));
+
+    // One row of four equal columns: "Completed today" used to wrap onto an
+    // orphaned second line with nothing beside it.
+    expect(new Set(counts.map(count => count.top)).size).toBe(1);
+    expect(new Set(counts.map(count => count.width)).size).toBe(1);
+    // One word per column on a phone, and never the phrase that would not fit.
+    // The labels are uppercased by CSS, which `innerText` reports as rendered.
+    const spoken = counts.map(count => count.text.toLowerCase());
+    for (const [index, word] of ['attention', 'running', 'queued', 'done'].entries()) {
+      expect(spoken[index]).toContain(word);
+    }
+    expect(spoken[0]).not.toContain('needs attention');
+    expect(spoken[3]).not.toContain('completed today');
+  });
+}

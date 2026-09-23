@@ -14,10 +14,9 @@
  */
 
 import React, { useCallback } from 'react';
-import { Check } from 'lucide-react';
+import { ShieldCheck } from 'lucide-react';
 import { getDashboardAttention, type AttentionItem, type DashboardAttentionResponse } from '../../api/dashboardApi';
 import {
-  Dot,
   RepositoryLabel,
   RowLink,
   RowMeta,
@@ -26,6 +25,7 @@ import {
   SectionHeading,
   SectionLink,
   SectionSkeleton,
+  SectionZeroState,
   WorkReference,
 } from './sectionPrimitives';
 import {
@@ -116,7 +116,6 @@ const AttentionRow: React.FC<{ item: AttentionItem }> = ({ item }) => {
           >
             {REASON_LABELS[item.kind]}
           </span>
-          <Dot />
           <RepositoryLabel repository={item.repository} short />
           <WorkReference issueNumber={item.issueNumber} prNumber={item.prNumber} />
         </RowMeta>
@@ -143,20 +142,23 @@ const AttentionRow: React.FC<{ item: AttentionItem }> = ({ item }) => {
 };
 
 /**
- * Nothing to do, said quietly.
+ * Nothing to do, said quietly — and said across the whole pane.
  *
- * One line, the same height as a row, in the panel's own voice: a tick and a
- * sentence, no illustration and no celebration. It reports a state; it is not
- * a reward.
+ * This panel is the top of the right column, and its height is set by the
+ * running feed beside it rather than by its own content. One line of text at
+ * the top of that pane left a 250px cavern beneath it that read as a failed
+ * render, so the line is centred in the space it has to fill instead.
+ *
+ * A shield rather than a tick: the tone is "nothing is wrong", not "well
+ * done". It reports a state; it is not a reward.
  */
 const AllClear: React.FC = () => (
-  <p
+  <SectionZeroState
     data-testid="needs-attention-empty"
-    className="flex items-start gap-1.5 px-3 py-3 text-sm leading-5 text-slate-500"
+    icon={<ShieldCheck className="h-6 w-6 text-slate-300" aria-hidden="true" />}
   >
-    <Check className="mt-0.5 h-4 w-4 flex-none text-teal-600" aria-hidden="true" />
-    All clear — no tasks require operator intervention
-  </p>
+    All tasks operational — no attention required
+  </SectionZeroState>
 );
 
 export const NeedsAttentionPanel: React.FC<DashboardSectionProps> = ({
@@ -188,7 +190,7 @@ export const NeedsAttentionPanel: React.FC<DashboardSectionProps> = ({
     <section
       aria-labelledby="needs-attention-heading"
       data-testid="needs-attention-panel"
-      className="min-w-0 bg-white"
+      className="flex h-full min-w-0 flex-col bg-white"
     >
       <SectionHeading
         id="needs-attention-heading"

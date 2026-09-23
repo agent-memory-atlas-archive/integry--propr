@@ -217,7 +217,7 @@ test('an empty attention list keeps the panel in place with an all-clear line', 
   await expect(panel).toBeVisible();
   await expect(panel.getByRole('heading')).toHaveText('Needs attention (0)');
   await expect(page.getByTestId('needs-attention-empty'))
-    .toHaveText('All clear — no tasks require operator intervention');
+    .toHaveText('All tasks operational — no attention required');
   await expect(page.getByTestId('summary-needs-attention')).toHaveAttribute('data-emphasis', 'false');
 
   const geometry = await page.evaluate(() => Object.fromEntries(
@@ -236,6 +236,30 @@ test('an empty attention list keeps the panel in place with an all-clear line', 
     .toBeGreaterThan(geometry['needs-attention-panel'].bottom - 1);
 
   await capture(page, 'dashboard-desktop-no-attention');
+});
+
+test('the historical chart carries a scale rather than seven unlabelled shapes', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 1400 });
+  await fixture(page);
+  await page.goto('/');
+  await expect(page.getByTestId('daily-completions-chart')).toBeVisible();
+  await page.locator('.recharts-surface').first().waitFor({ state: 'visible' });
+
+  // Height means nothing without a number attached to it: the fixture's
+  // busiest day is 8 completions, so the top gridline says 8 and the baseline
+  // says 0. Without them the tallest point could be 8 or 800.
+  const chart = page.getByTestId('daily-completions-chart');
+  const ticks = chart.locator('.recharts-yAxis-tick-labels .recharts-cartesian-axis-tick-value');
+  await expect(ticks).toHaveCount(2);
+  expect((await ticks.allTextContents()).map(text => text.trim()).sort()).toEqual(['0', '8']);
+
+  // A line, not a row of bars: a trend over days is a continuous quantity.
+  await expect(chart.locator('.recharts-area-curve')).toBeVisible();
+  await expect(chart.locator('.recharts-bar')).toHaveCount(0);
+  // Both gridlines are drawn, and dashed so they stay behind the data.
+  const grid = chart.locator('.recharts-cartesian-grid-horizontal line');
+  await expect(grid).toHaveCount(2);
+  expect(await grid.first().getAttribute('stroke-dasharray')).toBe('3 3');
 });
 
 test('the dashboard fits a 320px viewport without horizontal overflow', async ({ page }) => {

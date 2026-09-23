@@ -11,11 +11,10 @@ import React, { useCallback, useMemo, useState } from 'react';
 import { ChevronDown, Loader2 } from 'lucide-react';
 import { getDashboardActive, type ActiveItem, type DashboardActiveResponse } from '../../api/dashboardApi';
 import {
-  Dot,
   RepositoryLabel,
   RowDetail,
   RowLink,
-  RowMeta,
+  RowMetaLines,
   RowTitle,
   SectionEmpty,
   SectionError,
@@ -30,6 +29,7 @@ import {
   type DashboardSectionProps,
   elapsedRunning,
   filteredTasksHref,
+  shortenPaths,
   useDashboardSection,
   useNowTick,
   useStableOrder,
@@ -61,25 +61,44 @@ const ActiveRow: React.FC<{
   <li>
     <div className="flex min-w-0 items-start gap-1">
       <RowLink href={workHref(item)} className="block min-w-0 flex-1 px-3 py-2.5 text-left transition-colors hover:bg-slate-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-teal-500">
-        <RowMeta>
-          {/*
+        <RowMetaLines
+          /*
             A spinner, not a dot: a filled circle reads as a status light, and a
             green one reads as "done". Motion is unambiguous about work in flight.
-          */}
-          <span className="inline-flex items-center gap-1.5 font-medium text-teal-700">
-            <Loader2 className="h-3 w-3 flex-none animate-spin" aria-hidden="true" />
-            {item.phase || 'Running'}
-          </span>
-          <Dot />
-          <RepositoryLabel repository={item.repository} />
-          <WorkReference issueNumber={item.issueNumber} prNumber={item.prNumber} />
-          <Dot />
-          <span className="whitespace-nowrap text-gray-500" title={`Started ${new Date(item.createdAt).toLocaleString()}`}>
-            {elapsedRunning(item.createdAt)}
-          </span>
-        </RowMeta>
+          */
+          status={(
+            <span className="inline-flex min-w-0 items-center gap-1.5 font-medium text-teal-700">
+              <Loader2 className="h-3 w-3 flex-none animate-spin" aria-hidden="true" />
+              <span className="truncate">{item.phase || 'Running'}</span>
+            </span>
+          )}
+          entities={(
+            <>
+              <RepositoryLabel repository={item.repository} shortOnMobile />
+              <WorkReference issueNumber={item.issueNumber} prNumber={item.prNumber} />
+            </>
+          )}
+          trailing={(
+            <span title={`Started ${new Date(item.createdAt).toLocaleString()}`}>
+              {elapsedRunning(item.createdAt)}
+            </span>
+          )}
+        />
         <RowTitle>{itemTitle(item)}</RowTitle>
-        {item.progressLine && <RowDetail clamp={!expanded}>{item.progressLine}</RowDetail>}
+        {/*
+          The progress line is a sentence with a repository path in it, and on a
+          phone the path is most of the sentence: 110 characters of
+          `propr-ui/src/components/…` wrapped to three lines of the densest text
+          on the screen. Someone triaging on a phone needs the file, not the
+          route to it, so the directories collapse below `sm` and come back
+          whole where there is width for them.
+        */}
+        {item.progressLine && (
+          <RowDetail clamp={!expanded}>
+            <span className="sm:hidden">{shortenPaths(item.progressLine)}</span>
+            <span className="hidden sm:inline">{item.progressLine}</span>
+          </RowDetail>
+        )}
       </RowLink>
       <button
         type="button"
@@ -128,16 +147,11 @@ const HappeningNowFooter: React.FC<{
   return (
     <SectionFooter data-testid="happening-now-footer">
       {queuedCount > 0 && (
-        <span data-testid="queue-summary" className="flex flex-wrap items-center gap-x-1.5 gap-y-1">
-          <span className="font-medium text-slate-700">
+        <span data-testid="queue-summary" className="flex flex-wrap items-center gap-x-2 gap-y-1">
+          <span className={`font-medium text-slate-700 ${reason ? 'border-r border-slate-300 pr-2' : ''}`}>
             {queuedCount} queued
           </span>
-          {reason && (
-            <>
-              <Dot />
-              <span>{reason}</span>
-            </>
-          )}
+          {reason && <span>{reason}</span>}
         </span>
       )}
       <span className="ml-auto flex items-center gap-x-3">
