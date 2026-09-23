@@ -17,6 +17,7 @@ import {
   extractRpm,
   inspectRunningProcessGroupMembers,
   LaunchServicesAuthority,
+  launchServicesRecordMatchesApplication,
   linuxProtocolDispatch,
   NativeLifecycleCommandFailure,
   NativeLifecycleEvidenceWaitFailure,
@@ -29,6 +30,7 @@ import {
   removeAuthorizedProfile,
   runningProcessGroupMembersFromPs,
   runNativeLifecycleCommand,
+  scanCommandLinesForMatch,
   waitForEvents,
   waitForWarmOpenEvidence,
 } from './test-native-artifact-lifecycle.mjs';
@@ -628,11 +630,17 @@ describe('native staged artifact lifecycle authority', () => {
     await assert.rejects(unregisterFailure.unregister(), /injected unregister failure/);
 
     const staleWaits = [];
+    const staleUnregisters = [];
     let staleDumps = 0;
     const stale = new LaunchServicesAuthority(applicationRoot, {}, {
-      runCommand: async () => {
+      runCommand: async (_file, args) => {
+        staleUnregisters.push(args[0]);
+        return { stdout: Buffer.alloc(0), stderr: Buffer.alloc(0) };
+      },
+      scanCommand: async (_file, args, _options, matchesLine) => {
+        assert.deepEqual(args, ['-dump']);
         staleDumps += 1;
-        return { stdout: Buffer.from(`path: ${applicationRoot}\n`), stderr: Buffer.alloc(0) };
+        return { matched: matchesLine(`\tpath: ${applicationRoot}`) };
       },
       wait: async milliseconds => { staleWaits.push(milliseconds); },
       absenceAttempts: 3,
@@ -642,16 +650,27 @@ describe('native staged artifact lifecycle authority', () => {
     assert.equal(stale.registered, true);
     assert.equal(staleDumps, 3);
     assert.deepEqual(staleWaits, [1_000, 1_000]);
+    // Each re-probe re-issues the removal, because opening the bundle lets the
+    // system re-register it after the first unregister returns.
+    assert.deepEqual(staleUnregisters, ['-u', '-u']);
   });
 
   test('re-probes LaunchServices until a lagging unregister is reflected in the dump', async () => {
     const applicationRoot = '/private/copied/ProPR Desktop.app';
-    const dumps = [`path: ${applicationRoot}\n`, `path: ${applicationRoot}\n`, 'path: /Applications/Other.app\n'];
+    const dumps = [
+      `\tpath: ${applicationRoot}`,
+      `\tpath: ${applicationRoot}`,
+      '\tpath: /Applications/Other.app',
+    ];
     const waits = [];
     const authority = new LaunchServicesAuthority(applicationRoot, {}, {
       runCommand: async (_file, args) => {
+        assert.deepEqual(args, ['-u', applicationRoot]);
+        return { stdout: Buffer.alloc(0), stderr: Buffer.alloc(0) };
+      },
+      scanCommand: async (_file, args, _options, matchesLine) => {
         assert.deepEqual(args, ['-dump']);
-        return { stdout: Buffer.from(dumps.shift()), stderr: Buffer.alloc(0) };
+        return { matched: matchesLine(dumps.shift()) };
       },
       wait: async milliseconds => { waits.push(milliseconds); },
       absenceAttempts: 3,
@@ -663,6 +682,89 @@ describe('native staged artifact lifecycle authority', () => {
     assert.equal(authority.registered, false);
     assert.equal(dumps.length, 0);
     assert.deepEqual(waits, [1_000, 1_000]);
+  });
+
+  test('matches only the exact copied bundle path record in an lsregister dump', () => {
+    const applicationRoot = '/private/copied/ProPR Desktop.app';
+    for (const listed of [
+      `path:                   ${applicationRoot}`,
+      `\tpath: ${applicationRoot}`,
+      `path: ${applicationRoot} (0x1234)`,
+    ]) {
+      assert.equal(launchServicesRecordMatchesApplication(listed, applicationRoot), true);
+    }
+    for (const absent of [
+      `path: ${applicationRoot}.backup`,
+      `path: ${applicationRoot}/Contents/Frameworks/Helper.app`,
+      'path: /Applications/Other.app',
+      // A claimed-scheme or binding cache line can echo the path long after the
+      // bundle record is unregistered; it is not proof of registration.
+      `claimed scheme propr -> ${applicationRoot}`,
+      `bindings: ${applicationRoot}`,
+      '',
+    ]) {
+      assert.equal(launchServicesRecordMatchesApplication(absent, applicationRoot), false);
+    }
+  });
+
+  test('scans an unbounded dump in full without a truncation window deciding the answer', async () => {
+    const applicationRoot = '/private/copied/ProPR Desktop.app';
+    const filler = `${'x'.repeat(4_096)}\n`;
+    const emit = (target, repeats) => [
+      process.execPath,
+      ['-e', `const filler=${JSON.stringify(filler)};`
+        + `for(let i=0;i<${repeats};i+=1)process.stdout.write(filler);`
+        + `process.stdout.write(${JSON.stringify(`\tpath: ${target}\n`)});`
+        + `for(let i=0;i<${repeats};i+=1)process.stdout.write(filler);`],
+    ];
+    const matchesLine = line => launchServicesRecordMatchesApplication(line, applicationRoot);
+
+    // The record sits far outside the trailing OUTPUT_CAP window that the shared
+    // bounded runner would have retained, and is still found.
+    assert.deepEqual(
+      await scanCommandLinesForMatch(...emit(applicationRoot, 64), {}, matchesLine),
+      { matched: true },
+    );
+    assert.deepEqual(
+      await scanCommandLinesForMatch(...emit('/Applications/Other.app', 64), {}, matchesLine),
+      { matched: false },
+    );
+
+    // The shared bounded runner cannot answer this probe: it reports overflow and
+    // retains only a trailing window that no longer holds the bundle record.
+    const bounded = await runNativeLifecycleCommand(...emit(applicationRoot, 64));
+    assert.equal(bounded.stdoutOverflow, true);
+    assert.equal(bounded.stdout.toString('utf8').split('\n').some(matchesLine), false);
+
+    // A final record without a trailing newline is still scanned.
+    assert.deepEqual(
+      await scanCommandLinesForMatch(
+        process.execPath,
+        ['-e', `process.stdout.write(${JSON.stringify(`\tpath: ${applicationRoot}`)})`],
+        {},
+        matchesLine,
+      ),
+      { matched: true },
+    );
+
+    // Probe failures stay classified and never leak the scanned output.
+    await assert.rejects(
+      scanCommandLinesForMatch(process.execPath, ['-e', 'process.exit(7)'], {}, matchesLine),
+      error => error instanceof NativeLifecycleCommandFailure && error.resultClass === 'COMMAND_FAILED',
+    );
+    await assert.rejects(
+      scanCommandLinesForMatch('/missing/lsregister', [], {}, matchesLine),
+      error => error instanceof NativeLifecycleCommandFailure && error.resultClass === 'COMMAND_SPAWN_FAILED',
+    );
+    await assert.rejects(
+      scanCommandLinesForMatch(
+        process.execPath,
+        ['-e', 'setInterval(() => {}, 1000)'],
+        { timeout: 100 },
+        matchesLine,
+      ),
+      error => error instanceof NativeLifecycleCommandFailure && error.resultClass === 'COMMAND_DEADLINE',
+    );
   });
 
   test('registers before dispatching through the exact copied macOS application path', async () => {
@@ -697,6 +799,10 @@ describe('native staged artifact lifecycle authority', () => {
         calls.push([file, ...args]);
         if (args[0] === '-f') throw new Error('injected partial registration failure');
         return { stdout: Buffer.alloc(0), stderr: Buffer.alloc(0) };
+      },
+      scanCommand: async (file, args) => {
+        calls.push([file, ...args]);
+        return { matched: false };
       },
     });
 
