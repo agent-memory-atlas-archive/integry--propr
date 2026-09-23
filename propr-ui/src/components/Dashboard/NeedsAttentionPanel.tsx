@@ -86,7 +86,7 @@ const AttentionRow: React.FC<{ item: AttentionItem }> = ({ item }) => {
   const href = actionHref(item);
   const external = isExternalHref(href);
   return (
-    <li className="border-b border-slate-100 last:border-b-0">
+    <li>
       <div className="px-3 py-2.5">
         {/*
           One line, like the row in "Happening now": reason, repository, entity.
@@ -119,7 +119,7 @@ const AttentionRow: React.FC<{ item: AttentionItem }> = ({ item }) => {
           <RowLink
             href={href}
             aria-label={`${actionLabel(item)} ${actionContext(item)}${external ? ' (opens GitHub)' : ''}`}
-            className="inline-flex min-h-8 w-20 flex-none items-center justify-center rounded-sm border border-slate-200 bg-white px-2 text-xs font-semibold text-slate-700 transition-colors hover:bg-slate-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-teal-500"
+            className="inline-flex min-h-8 w-20 flex-none items-center justify-center rounded-sm bg-slate-100 px-2 text-xs font-semibold text-slate-700 transition-colors hover:bg-slate-200 focus:outline-none focus-visible:ring-2 focus-visible:ring-teal-500"
           >
             {actionLabel(item)}
           </RowLink>

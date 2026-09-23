@@ -96,7 +96,7 @@ const OutcomeKindLabel: React.FC<{ kind: OutcomeKind }> = ({ kind }) => {
 };
 
 const OutcomeRow: React.FC<{ item: OutcomeItem }> = ({ item }) => (
-  <li className="border-b border-slate-100 last:border-b-0">
+  <li>
     <RowLink
       href={workHref(item)}
       className="flex min-w-0 items-start gap-2 px-3 py-2.5 text-left transition-colors hover:bg-slate-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-teal-500"
@@ -171,7 +171,7 @@ export const RecentOutcomesFeed: React.FC<DashboardSectionProps> = ({ repository
           <button
             type="button"
             onClick={() => setShowAll(value => !value)}
-            className="w-full border-t border-slate-100 px-3 py-2 text-left text-xs font-semibold text-slate-600 transition-colors hover:bg-slate-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-teal-500"
+            className="w-full px-3 py-2 text-left text-xs font-semibold text-slate-600 transition-colors hover:bg-slate-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-teal-500"
           >
             {showAll ? 'Show fewer' : `Show ${items.length - VISIBLE_ITEMS} more`}
           </button>
@@ -187,7 +187,7 @@ export const RecentOutcomesFeed: React.FC<DashboardSectionProps> = ({ repository
       className="min-w-0 bg-white"
     >
       <SectionHeading id="recent-outcomes-heading" title="Recent outcomes">
-        <div className="inline-flex rounded-sm border border-slate-200 bg-white p-0.5" role="group" aria-label="Outcome window">
+        <div className="inline-flex rounded-sm bg-slate-200/70 p-0.5" role="group" aria-label="Outcome window">
           {(Object.keys(WINDOW_LABELS) as OutcomeWindow[]).map(option => (
             <button
               key={option}
@@ -195,7 +195,7 @@ export const RecentOutcomesFeed: React.FC<DashboardSectionProps> = ({ repository
               aria-pressed={range === option}
               onClick={() => { setRange(option); setShowAll(false); }}
               className={`rounded-sm px-2 py-0.5 text-[11px] font-semibold transition-colors ${
-                range === option ? 'bg-slate-100 text-slate-800' : 'text-slate-500 hover:text-slate-700'
+                range === option ? 'bg-white text-slate-800' : 'text-slate-500 hover:text-slate-700'
               }`}
             >
               {WINDOW_LABELS[option]}

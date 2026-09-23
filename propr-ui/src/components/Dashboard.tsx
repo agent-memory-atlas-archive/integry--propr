@@ -10,11 +10,14 @@
  * subscription that keeps every section current, and the responsive layout.
  * Each section reads its own slice of the dashboard API.
  *
- * The layout is a split-pane console, not a tray of cards. There are no boxes:
- * the two columns are separated by one continuous vertical rule that runs the
- * full height of the canvas, sub-sections are separated by edge-to-edge
- * horizontal rules, and the panes share row lines so the dividers in the two
- * columns land on the same pixel. The console fills the viewport — the last
+ * The layout is a split-pane console, not a tray of cards. There are no boxes,
+ * and a rule is spent only where a pane actually ends: one continuous vertical
+ * rule between the columns, one horizontal rule under each pane header and
+ * between the stacked panes. Everything inside a pane — rows, counts, metrics,
+ * segmented controls — is separated by space and tint instead, because a rule
+ * repeated on every row stops reading as structure and starts reading as
+ * texture. The panes share row lines so the dividers in the two columns land
+ * on the same pixel. The console fills the viewport — the last
  * grid row absorbs the leftover height — so the pane divider never stops
  * halfway down the screen above a band of dead white space.
  */
@@ -169,7 +172,12 @@ const Dashboard: React.FC = () => {
           </div>
         )}
 
-        <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-200 bg-slate-50 px-4 py-2 sm:px-6">
+        {/*
+          The toolbar and the summary strip are one chrome band, so only the
+          strip below closes it with a rule. A line between two bars of the
+          same tint divides nothing.
+        */}
+        <div className="flex flex-wrap items-center justify-between gap-2 bg-slate-50 px-4 py-2 sm:px-6">
           <LiveStatus isConnected={isConnected} lastUpdatedAt={lastUpdatedAt} />
           {(reposLoading || repoOptions.length > 1) && (
             <RepositorySelector

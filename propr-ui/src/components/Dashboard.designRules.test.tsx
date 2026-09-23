@@ -221,8 +221,49 @@ describe('Dashboard studio design rules', () => {
     // strip is real chrome: a fixed-height tinted bar closed by a rule.
     const strip = screen.getByTestId('summary-strip');
     expect(strip.className).toMatch(/min-h-10/);
-    expect(strip.className).toMatch(/bg-slate-50\/50/);
+    expect(strip.className).toMatch(/bg-slate-50/);
     expect(strip.className).toMatch(/border-b/);
+    // The four counts are spaced apart, not ruled apart: the strip closes the
+    // toolbar band with one rule and draws no internal ones.
+    for (const testId of ['summary-needs-attention', 'summary-running', 'summary-queued', 'summary-completed']) {
+      expect(screen.getByTestId(testId).className).not.toMatch(/border-[rlbt]\b/);
+    }
+  });
+
+  it('separates rows with space instead of drawing a rule under every one', async () => {
+    mockActive.mockResolvedValue(activeResponse([
+      activeItem({ id: 'active-1', taskId: 'active-1' }),
+      activeItem({ id: 'active-2', taskId: 'active-2' }),
+    ]));
+    mockOutcomes.mockResolvedValue(outcomesResponse([
+      outcomeItem({ id: 'out-1' }),
+      outcomeItem({ id: 'out-2', taskId: 'done-2' }),
+    ]));
+    mockAttention.mockResolvedValue(attentionResponse([
+      attentionItem(),
+      attentionItem({ id: 'task_failed:t-9', taskId: 't-9' }),
+    ]));
+
+    renderDashboard();
+    await waitForSections();
+
+    // A hairline repeated once per row stops reading as structure and becomes
+    // texture, which is what made the console look like ruled paper. Rules are
+    // spent on pane edges and pane headers only.
+    const lists = [
+      await screen.findByTestId('happening-now-list'),
+      await screen.findByTestId('recent-outcomes-list'),
+      screen.getByTestId('needs-attention-panel').querySelector('ul'),
+    ];
+    for (const list of lists) {
+      const rows = [...(list?.children ?? [])] as HTMLElement[];
+      expect(rows.length).toBeGreaterThan(1);
+      for (const row of rows) expect(row.className).not.toMatch(/border/);
+    }
+
+    // The same rule applies to the metric row: three numbers, no ruled cells.
+    const stats = screen.getByTestId('historical-stats-section');
+    expect(stats.querySelector('[class*="divide-x"]')).toBeNull();
   });
 
   it('divides the two panes with one continuous rule instead of boxing each quadrant', async () => {

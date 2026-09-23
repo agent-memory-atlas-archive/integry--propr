@@ -1,7 +1,8 @@
 /**
  * Summary sub-toolbar: four counts, each one a door into the list behind it.
  *
- * These are four single numbers, so they get one line — not four boxes. The
+ * These are four single numbers, so they get one line — not four boxes, and
+ * not four cells with a rule between each pair. Space separates them. The
  * strip is a real piece of chrome rather than loose text between the
  * breadcrumb bar and the feed: a 40px tinted bar with its own bottom rule, so
  * it reads as the console's status/filter bar. Counts stay neutral; only
@@ -40,7 +41,7 @@ const SummaryCount: React.FC<SummaryCountProps> = ({ label, value, href, title, 
     title={title}
     data-testid={testId}
     data-emphasis={emphasised ? 'true' : 'false'}
-    className={`flex min-w-0 items-baseline gap-2 border-r border-slate-200 px-3 py-2.5 last:border-r-0 transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-teal-500 ${
+    className={`flex min-w-0 items-baseline gap-2 px-3 py-2.5 transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-teal-500 ${
       emphasised ? 'hover:bg-amber-100/60' : 'hover:bg-slate-100'
     }`}
   >
@@ -74,7 +75,7 @@ export const SummaryStrip: React.FC<DashboardSectionProps> = ({ repository, refr
     <div
       aria-label="Work summary"
       data-testid="summary-strip"
-      className="flex min-h-10 flex-wrap items-stretch border-b border-slate-200 bg-slate-50/50"
+      className="flex min-h-10 flex-wrap items-stretch border-b border-slate-200 bg-slate-50"
     >
       <SummaryCount
         testId="summary-needs-attention"

@@ -47,7 +47,7 @@ const ActiveRow: React.FC<{
   expanded: boolean;
   onToggle: (id: string) => void;
 }> = ({ item, expanded, onToggle }) => (
-  <li className="border-b border-slate-100 last:border-b-0">
+  <li>
     <div className="flex min-w-0 items-start gap-1">
       <RowLink href={workHref(item)} className="block min-w-0 flex-1 px-3 py-2.5 text-left transition-colors hover:bg-slate-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-teal-500">
         <RowMeta>
@@ -96,7 +96,12 @@ const ActiveRow: React.FC<{
   </li>
 );
 
-/** Waiting work, summarised rather than listed, with the real reason when known. */
+/**
+ * Waiting work, summarised rather than listed, with the real reason when known.
+ *
+ * The tint is what marks it as a footer rather than one more row; it does not
+ * also need a rule above it to say the same thing twice.
+ */
 const QueueSummary: React.FC<{ queuedCount: number; reason: string | null; repository: string }> = ({
   queuedCount,
   reason,
@@ -106,7 +111,7 @@ const QueueSummary: React.FC<{ queuedCount: number; reason: string | null; repos
   return (
     <div
       data-testid="queue-summary"
-      className="flex flex-wrap items-center gap-x-1.5 gap-y-1 border-t border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-600"
+      className="flex flex-wrap items-center gap-x-1.5 gap-y-1 bg-slate-50 px-3 py-2 text-xs text-slate-600"
     >
       <span className="font-medium text-slate-700">
         {queuedCount} queued
@@ -183,7 +188,7 @@ export const HappeningNowSection: React.FC<DashboardSectionProps> = ({ repositor
           <button
             type="button"
             onClick={() => setShowAll(value => !value)}
-            className="w-full border-t border-slate-100 px-3 py-2 text-left text-xs font-semibold text-slate-600 transition-colors hover:bg-slate-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-teal-500"
+            className="w-full px-3 py-2 text-left text-xs font-semibold text-slate-600 transition-colors hover:bg-slate-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-teal-500"
           >
             {showAll ? 'Show fewer' : `Show ${orderedRunning.length - VISIBLE_ITEMS} more`}
           </button>
