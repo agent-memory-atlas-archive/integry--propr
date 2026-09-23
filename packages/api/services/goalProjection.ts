@@ -90,8 +90,6 @@ interface GoalInputRow {
   delivered_at: string | Date | number | null;
 }
 
-/** Newest rows win when a long-running goal has been steered many times. */
-const GOAL_INPUT_PROJECTION_LIMIT = 200;
 const SQLITE_TIMESTAMP = /^(\d{4}-\d{2}-\d{2}) (\d{2}:\d{2}:\d{2}(?:\.\d+)?)$/;
 
 function isoTimestamp(value: string | Date | number | null | undefined): string | null {
@@ -135,16 +133,17 @@ function projectGoalInput(row: GoalInputRow): GoalInputProjection {
 /**
  * Only `kind = 'input'` rows are operator-authored. ProPR's own `context` delivery policy,
  * the synthetic `resume` nudge and empty `control` bookkeeping rows stay out of the timeline.
+ * Every operator correction is returned: the timeline is the evidence that a steering message
+ * was persisted, so nothing may silently fall off the end of a long-running goal.
  */
 export async function loadGoalInputs(db: Knex, goalId: string, ownerId: string): Promise<GoalInputProjection[]> {
   const rows = await db('goal_inputs')
     .where({ goal_id: goalId, owner_id: ownerId, kind: 'input' })
-    .orderBy('sequence', 'desc')
-    .limit(GOAL_INPUT_PROJECTION_LIMIT)
+    .orderBy('sequence', 'asc')
     .select(
       'input_id', 'message', 'display_message', 'attachment_count', 'state', 'created_at', 'delivered_at',
     ) as GoalInputRow[];
-  return rows.reverse().map(projectGoalInput);
+  return rows.map(projectGoalInput);
 }
 
 function parseStats(value: GoalProjectionRow['artifact_stats']): GoalArtifactStats {
@@ -281,7 +280,9 @@ export async function serializeGoal(
     pausedAt: row.paused_at,
     completedAt: row.completed_at,
     ...timing,
-    ...optionalInputs,
   };
-  return redactVisualPreviewValue(projection) as typeof projection;
+  // Preview redaction rewrites runtime paths inside arbitrary strings, so it runs before the
+  // already-sanitized operator bodies are attached: the timeline must show what was sent verbatim.
+  const redacted = redactVisualPreviewValue(projection) as typeof projection;
+  return { ...redacted, ...optionalInputs };
 }

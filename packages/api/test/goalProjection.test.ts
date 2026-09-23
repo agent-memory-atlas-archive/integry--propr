@@ -269,7 +269,7 @@ test('goal projection strips appended attachment paths from rows stored before d
   }
 });
 
-test('goal projection bounds the input list but never clips a message body', async () => {
+test('goal projection keeps every persisted correction and never clips a message body', async () => {
   const database = await inputProjectionDatabase();
   try {
     // 65,536 is the longest body the goal input route accepts.
@@ -283,11 +283,33 @@ test('goal projection bounds the input list but never clips a message body', asy
 
     const projected = await serializeGoal(database, emptyRedis, inputGoalRow);
 
-    assert.equal(projected.inputs?.length, 200);
-    assert.equal(projected.inputs?.[0].id, 'input-5');
-    const last = projected.inputs?.[199];
+    assert.equal(projected.inputs?.length, 205);
+    // The oldest correction stays visible however many times the goal has been steered since.
+    assert.equal(projected.inputs?.[0].id, 'input-0');
+    assert.equal(projected.inputs?.[0].message, 'message 0');
+    const last = projected.inputs?.[204];
     assert.equal(last?.id, 'input-204');
     assert.equal(last?.message, longest);
+  } finally {
+    await database.destroy();
+  }
+});
+
+test('goal projection leaves an operator-authored preview path in the message untouched', async () => {
+  const database = await inputProjectionDatabase();
+  try {
+    const authored = 'The screenshot at .propr/previews/dashboard.png is stale — recapture it.';
+    await database('goal_inputs').insert(goalInputRow({
+      input_id: 'input-1', message: authored, display_message: authored, attachment_count: 0,
+    }));
+
+    const projected = await serializeGoal(database, emptyRedis, {
+      ...inputGoalRow, failure_reason: 'Publishing .propr/previews/dashboard.png failed',
+    });
+
+    assert.equal(projected.inputs?.[0].message, authored);
+    // Redaction still covers everything ProPR itself writes into the projection.
+    assert.equal(projected.failureReason, 'Publishing [local preview omitted] failed');
   } finally {
     await database.destroy();
   }
