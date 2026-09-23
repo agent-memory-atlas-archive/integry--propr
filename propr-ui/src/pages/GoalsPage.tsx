@@ -3,8 +3,8 @@ import { PreviewThumbnails } from '../components/PreviewMedia';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import {
-  Activity, AlertTriangle, CheckCircle2, CircleDot, CirclePause, CirclePlay, CircleSlash, CircleStop,
-  ExternalLink, FileText, Filter, GitPullRequest, LoaderCircle, Plus, Search, Send,
+  Activity, AlertTriangle, Check, CheckCircle2, CircleDot, CirclePause, CirclePlay, CircleSlash, CircleStop,
+  Copy, ExternalLink, FileText, Filter, GitPullRequest, LoaderCircle, Plus, Search, Send,
   MoreHorizontal, Terminal, Trash2, X,
 } from 'lucide-react';
 import { getInstanceCatalog } from '../api/proprApi';
@@ -550,6 +550,40 @@ function CreateGoalDialog({ isOpen, onClose, onCreated }: CreateGoalDialogProps)
 const railInset = 'px-4 sm:px-6';
 const railMetricLabel = 'text-[10px] font-bold uppercase tracking-widest text-slate-500';
 
+/**
+ * Identifiers are scanned by their ends, never read as prose. A 36-character UUID printed in full
+ * wraps across the metric column and breaks the 2×2 grid, so the rail prints the ends and hands the
+ * whole value over through the tooltip and the copy control beside it.
+ */
+const shortIdentifier = (value: string) => value.length > 20
+  ? `${value.slice(0, 8)}...${value.slice(-4)}`
+  : value;
+
+/** Sits quiet until the metric is hovered or the control is focused; the truncated id stays readable either way. */
+const CopyIdentifierButton: React.FC<{ value: string; label: string }> = ({ value, label }) => {
+  const [copied, setCopied] = useState(false);
+  useEffect(() => {
+    if (!copied) return;
+    const timer = window.setTimeout(() => setCopied(false), 1_500);
+    return () => window.clearTimeout(timer);
+  }, [copied]);
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(value);
+      setCopied(true);
+    } catch { /* No clipboard permission: the full value is still on the tooltip. */ }
+  };
+  return <button
+    type="button"
+    onClick={() => void copy()}
+    aria-label={copied ? `${label} — copied` : label}
+    title={label}
+    className="flex-none rounded p-0.5 text-slate-400 opacity-0 transition hover:bg-slate-200 hover:text-slate-700 focus-visible:opacity-100 group-hover:opacity-100"
+  >
+    {copied ? <Check className="h-3 w-3 text-emerald-600" /> : <Copy className="h-3 w-3" />}
+  </button>;
+};
+
 // Goal 35% · Repository 15% · Status 20% · Tokens 10% · Active time 10% · Output 10%.
 // Status is the widest secondary column because it carries the running task beside its badge.
 // A narrow desktop keeps the table and drops the two secondary measures instead of unfolding into
@@ -907,16 +941,21 @@ function GoalDetails({ goalId }: { goalId: string }) {
           {correctionsNote && <span className="text-xs text-slate-500">{correctionsNote}</span>}
         </div>
         <div className="mt-2 flex flex-wrap items-center justify-between gap-x-4 gap-y-3">
-          {/* Self-evident values carry no uppercase key, so the row reads as one sentence instead of stuttering label/value pairs. */}
-          <div className="flex flex-wrap items-center gap-x-2 gap-y-2 text-sm text-slate-700">
+          {/* Self-evident values carry no uppercase key, so the row reads as one sentence instead of stuttering label/value pairs.
+              The row aligns on baselines, not on box centres: the chip's border and padding make it taller
+              than the text beside it, and centring boxes of 14px prose against 12px mono still leaves their
+              baselines a pixel apart. Every item exports the baseline of its own text (the logo and the
+              repository mark centre themselves instead), so the whole row reads along one straight line.
+              Each raw value still carries the chip's 1.375rem line box, so the row's rhythm stays even. */}
+          <div className="flex flex-wrap items-baseline gap-x-2 gap-y-2 text-sm leading-[1.375rem] text-slate-700">
             <span className="font-medium" title={`${strategyLabel} launch strategy`}>{strategyLabel}</span>
             <span aria-hidden="true" className="text-slate-300">•</span>
-            <span className="inline-flex items-center gap-1.5 font-medium" title={`Model: ${currentModel}`}>
-              <ProviderLogo provider={goal.agent.type} className="h-3.5 w-3.5 flex-none" />
+            <span className="inline-flex items-baseline gap-1.5 font-medium" title={`Model: ${currentModel}`}>
+              <ProviderLogo provider={goal.agent.type} className="h-3.5 w-3.5 flex-none self-center" />
               {currentModel}
             </span>
             <span aria-hidden="true" className="text-slate-300">•</span>
-            <span className="font-mono text-xs font-semibold text-slate-700" title="Elapsed time">{duration(goal.elapsedMs)}</span>
+            <span className="font-mono text-xs font-semibold leading-[1.375rem] text-slate-700" title="Elapsed time">{duration(goal.elapsedMs)}</span>
             <span aria-hidden="true" className="hidden text-slate-300 sm:inline">•</span>
             <RepositoryChip repository={goal.repository} />
           </div>
@@ -1000,13 +1039,15 @@ function GoalDetails({ goalId }: { goalId: string }) {
           </div>
         </section>}
 
-        <section aria-labelledby="live-progress-heading" className="mt-6">
+        {/* A settled goal is not waiting for anything: with no queue on record the section goes away
+            rather than telling a finished goal it has "no provider todos yet". */}
+        {(live.todos.length > 0 || mutable) && <section aria-labelledby="live-progress-heading" className="mt-6">
           <div className="flex items-center gap-2">
             <h2 id="live-progress-heading" className="text-[11px] font-bold uppercase tracking-widest text-slate-500">Execution queue</h2>
             {mutable && goal.desiredState === 'running' && <span className="relative flex h-2 w-2"><span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-blue-400 opacity-75" /><span className="relative inline-flex h-2 w-2 rounded-full bg-blue-500" /></span>}
           </div>
           {live.todos.length ? <div className="[&>div]:border-t-0 [&>div]:pt-3 [&>div>h4]:hidden"><TodoList liveDetails={live} history={[{ state: goal.taskState }]} /></div> : <p className="mt-3 text-sm text-slate-500">No provider todos yet.</p>}
-        </section>
+        </section>}
 
         <section className="mt-8 border-t border-slate-200 pt-5">
           {/* One header row owns both the label and the control that switches what sits under it. */}
@@ -1054,9 +1095,15 @@ function GoalDetails({ goalId }: { goalId: string }) {
                 <dd className="mt-1 text-sm font-semibold text-slate-800">{goal.artifactStats.openPullRequests}/{goal.artifactStats.pullRequests} PRs</dd>
                 <dd className="mt-1 text-xs text-slate-500">{goal.artifactStats.openIssues}/{goal.artifactStats.issues} open issues</dd>
               </div>
-              <div className="min-w-0">
+              {/* The id clips inside its half of the grid instead of wrapping and stretching the row. */}
+              <div className="group min-w-0">
                 <dt className={railMetricLabel}>Session</dt>
-                <dd className="mt-1 break-all font-mono text-xs text-slate-700">{goal.sessionId || 'Waiting for provider identity'}</dd>
+                {goal.sessionId
+                  ? <dd className="mt-1 flex items-center gap-1">
+                    <span className="truncate font-mono text-xs text-slate-700" title={goal.sessionId}>{shortIdentifier(goal.sessionId)}</span>
+                    <CopyIdentifierButton value={goal.sessionId} label="Copy session id" />
+                  </dd>
+                  : <dd className="mt-1 truncate text-xs text-slate-500">Waiting for provider identity</dd>}
               </div>
             </div>
           </dl>

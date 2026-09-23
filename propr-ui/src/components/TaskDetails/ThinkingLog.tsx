@@ -17,6 +17,11 @@ interface ThinkingLogEvent extends LiveEvent {
   relativeTime?: string | null;
 }
 
+// The entry's first line on the right is 14px text on `leading-relaxed`, i.e. a 1.4219rem line box.
+// The gutter's label row claims exactly that box and centres in it, so `ACTION` and the first line of
+// the entry start on the same horizontal line instead of the label floating a couple of pixels above.
+const gutterLabelRow = 'flex min-h-[1.4219rem] items-center gap-1.5';
+
 interface ThinkingLogProps {
   events: ThinkingLogEvent[];
   todos?: TodoItem[];
@@ -134,8 +139,8 @@ const TerminalLogEntry: React.FC<TerminalLogEntryProps> = ({ event, todoContext,
       <div className="flex items-start gap-3">
         {/* Left Gutter (100px) - Icon, Category Label, Timestamp */}
         <div className="flex-shrink-0 w-[100px] flex flex-col items-start">
-          {/* Icon + Category Label Row */}
-          <div className="flex items-center gap-1.5">
+          {/* Icon + Category Label Row, on the same line box as the entry's first line of text */}
+          <div className={gutterLabelRow}>
             <Icon className={`h-3 w-3 ${categoryInfo.iconColor}`} />
             <span className="text-[11px] font-mono font-bold uppercase tracking-tighter text-slate-500">
               {categoryInfo.label}

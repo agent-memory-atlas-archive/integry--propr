@@ -895,6 +895,43 @@ describe('GoalsPage', () => {
     expect(within(screen.getByRole('main', { name: 'Goal monitor' })).queryByText(/#2472/)).not.toBeInTheDocument();
   });
 
+  it('clips a provider UUID into the metric column and hands the whole value over on request', async () => {
+    const sessionId = '91e05dd0-c5e0-4491-95ea-cf1596f1278b';
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true });
+    vi.mocked(goalsApi.getGoal).mockResolvedValue({ goal: { ...goal, sessionId } });
+    render(<MemoryRouter initialEntries={['/goals/goal-1']}><Routes><Route path="/goals/:goalId" element={<GoalsPage />} /></Routes></MemoryRouter>);
+
+    // The ends identify the session; the middle would only wrap and buckle the 2×2 metric grid.
+    const printed = await screen.findByText('91e05dd0...278b');
+    expect(printed).toHaveClass('truncate', 'font-mono');
+    expect(printed).toHaveAttribute('title', sessionId);
+    expect(screen.queryByText(sessionId)).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Copy session id' }));
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith(sessionId));
+    expect(await screen.findByRole('button', { name: 'Copy session id — copied' })).toBeInTheDocument();
+  });
+
+  it('drops the execution queue from a settled goal instead of claiming it has no todos yet', async () => {
+    vi.mocked(getTaskLiveDetails).mockResolvedValue({ events: [], todos: [], currentTask: null, tokenUsage: null });
+    vi.mocked(goalsApi.getGoal).mockResolvedValue({ goal: { ...goal, resultState: 'completed' } });
+    render(<MemoryRouter initialEntries={['/goals/goal-1']}><Routes><Route path="/goals/:goalId" element={<GoalsPage />} /></Routes></MemoryRouter>);
+
+    await screen.findByRole('heading', { name: 'Implementation log' });
+    expect(screen.queryByRole('heading', { name: 'Execution queue' })).not.toBeInTheDocument();
+    expect(screen.queryByText('No provider todos yet.')).not.toBeInTheDocument();
+  });
+
+  it('still tells a running goal its provider queue has not arrived', async () => {
+    vi.mocked(getTaskLiveDetails).mockResolvedValue({ events: [], todos: [], currentTask: null, tokenUsage: null });
+    vi.mocked(goalsApi.getGoal).mockResolvedValue({ goal });
+    render(<MemoryRouter initialEntries={['/goals/goal-1']}><Routes><Route path="/goals/:goalId" element={<GoalsPage />} /></Routes></MemoryRouter>);
+
+    expect(await screen.findByRole('heading', { name: 'Execution queue' })).toBeInTheDocument();
+    expect(screen.getByText('No provider todos yet.')).toBeInTheDocument();
+  });
+
   it('keeps a settled goal\'s checkpoint panel neutral instead of tinting it blue', async () => {
     vi.mocked(goalsApi.getGoal).mockResolvedValue({
       goal: {
