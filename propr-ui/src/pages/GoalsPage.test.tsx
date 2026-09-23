@@ -658,7 +658,7 @@ describe('GoalsPage', () => {
     expect(within(log).getAllByText('YOU')).toHaveLength(2);
     expect(within(delivered.closest('[data-testid="goal-user-message"]')!).queryByText('Queued')).not.toBeInTheDocument();
     expect(within(delivered.closest('[data-testid="goal-user-message"]')!).getByText('2 attachments')).toBeInTheDocument();
-    const pending = screen.getByText('Also update the changelog').closest('[data-testid="goal-user-message"]')!;
+    const pending = screen.getByText('Also update the changelog').closest<HTMLElement>('[data-testid="goal-user-message"]')!;
     expect(within(pending).getByText('Queued')).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole('button', { name: 'Raw terminal' }));
