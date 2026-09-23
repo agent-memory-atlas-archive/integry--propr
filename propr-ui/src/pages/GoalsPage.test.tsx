@@ -1,6 +1,6 @@
 /* eslint-disable max-lines -- list and detail behavior share one focused route-level suite */
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
-import { MemoryRouter, Route, Routes } from 'react-router-dom';
+import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import GoalsPage from './GoalsPage';
 import * as goalsApi from '../api/goals';
@@ -49,6 +49,9 @@ const goal: goalsApi.Goal = {
   taskState: 'claude_execution', createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
   startedAt: new Date().toISOString(), pausedAt: null, completedAt: null, elapsedMs: 1000, activeMs: 1000, pausedMs: 0,
 };
+
+/** Surfaces the query string so filter tests can assert what a shared goals URL carries. */
+const LocationProbe = () => <span data-testid="location-search">{useLocation().search}</span>;
 
 const openGoalCreator = () => fireEvent.click(screen.getByRole('button', { name: 'New goal' }));
 
@@ -609,6 +612,73 @@ describe('GoalsPage', () => {
 
     expect(await screen.findByText(goal.title)).toBeInTheDocument();
     expect(screen.getByText('1 of 1')).toBeInTheDocument();
+  });
+
+  it('filters goals by status, folds cancelling into cancelled, and stores the selection in the URL', async () => {
+    const pausedGoal = { ...goal, id: 'goal-2', title: 'Tune Billing Retries', desiredState: 'paused' as const };
+    const cancellingGoal = { ...goal, id: 'goal-3', title: 'Retire Legacy Worker', desiredState: 'cancelled' as const, resultState: null };
+    vi.mocked(goalsApi.listGoals).mockResolvedValue({ goals: [goal, pausedGoal, cancellingGoal] });
+
+    render(<MemoryRouter initialEntries={['/goals?status=paused']}><Routes><Route path="/goals" element={<><GoalsPage /><LocationProbe /></>} /></Routes></MemoryRouter>);
+
+    expect(await screen.findByText(pausedGoal.title)).toBeInTheDocument();
+    expect(screen.queryByText(goal.title)).not.toBeInTheDocument();
+    expect(screen.getByText('1 of 3')).toBeInTheDocument();
+
+    const statusFilter = screen.getByRole('combobox', { name: 'Filter goals by status' });
+    fireEvent.change(statusFilter, { target: { value: 'cancelled' } });
+
+    expect(await screen.findByText(cancellingGoal.title)).toBeInTheDocument();
+    expect(screen.queryByText(pausedGoal.title)).not.toBeInTheDocument();
+    expect(screen.getByTestId('location-search')).toHaveTextContent('status=cancelled');
+
+    fireEvent.change(statusFilter, { target: { value: 'all' } });
+
+    expect(await screen.findByText(goal.title)).toBeInTheDocument();
+    expect(screen.getByText('3 of 3')).toBeInTheDocument();
+    expect(screen.getByTestId('location-search')).not.toHaveTextContent('status=');
+  });
+
+  it('narrows the queue by every search keyword and mirrors the query in the URL', async () => {
+    const apiGoal = {
+      ...goal,
+      id: 'goal-2',
+      repository: 'acme/api',
+      title: 'Launch Billing API',
+      objective: 'Ship the billing API',
+    };
+    vi.mocked(goalsApi.listGoals).mockResolvedValue({ goals: [goal, apiGoal] });
+
+    render(<MemoryRouter initialEntries={['/goals']}><Routes><Route path="/goals" element={<><GoalsPage /><LocationProbe /></>} /></Routes></MemoryRouter>);
+
+    expect(await screen.findByText(goal.title)).toBeInTheDocument();
+    fireEvent.change(screen.getByRole('textbox', { name: 'Search goals' }), { target: { value: 'billing api' } });
+
+    await waitFor(() => expect(screen.queryByText(goal.title)).not.toBeInTheDocument());
+    expect(screen.getByText(apiGoal.title)).toBeInTheDocument();
+    expect(screen.getByText('1 of 2')).toBeInTheDocument();
+    expect(screen.getByTestId('location-search')).toHaveTextContent('search=billing+api');
+
+    fireEvent.click(screen.getByRole('button', { name: 'Clear search' }));
+
+    expect(await screen.findByText(goal.title)).toBeInTheDocument();
+    expect(screen.getByText('2 of 2')).toBeInTheDocument();
+    expect(screen.getByTestId('location-search')).not.toHaveTextContent('search=');
+  });
+
+  it('names the search that emptied the queue and resets every filter at once', async () => {
+    vi.mocked(goalsApi.listGoals).mockResolvedValue({ goals: [goal] });
+
+    render(<MemoryRouter initialEntries={['/goals?repository=acme/web&status=failed&search=nothing%20here']}><Routes><Route path="/goals" element={<GoalsPage />} /></Routes></MemoryRouter>);
+
+    expect(await screen.findByText('No goals match “nothing here”')).toBeInTheDocument();
+    expect(screen.getByText('0 of 1')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Show all goals' }));
+
+    expect(await screen.findByText(goal.title)).toBeInTheDocument();
+    expect(screen.getByRole('textbox', { name: 'Search goals' })).toHaveValue('');
+    expect(screen.getByRole('combobox', { name: 'Filter goals by status' })).toHaveValue('all');
   });
 
   it('renders existing task live details and sends canned status input through the same session', async () => {

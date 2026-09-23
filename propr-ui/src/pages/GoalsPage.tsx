@@ -4,7 +4,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import {
   Activity, AlertTriangle, CheckCircle2, CircleDot, CirclePause, CirclePlay, CircleSlash, CircleStop,
-  ExternalLink, FileText, Filter, GitPullRequest, LoaderCircle, Plus, Send,
+  ExternalLink, FileText, Filter, GitPullRequest, LoaderCircle, Plus, Search, Send,
   MoreHorizontal, Terminal, Trash2, X,
 } from 'lucide-react';
 import { getInstanceCatalog } from '../api/proprApi';
@@ -15,6 +15,7 @@ import {
   getGoalAttachmentUrl,
   type Goal, type GoalCapability, type GoalLaunchStrategy, type GoalVisualPreview,
 } from '../api/goals';
+import { useDebouncedCallback } from '../components/TaskList/hooks';
 import { useTaskLiveData } from '../components/TaskDetails/useTaskLiveData';
 import TodoList from '../components/TaskDetails/TodoList';
 import ExecutionEventLog from '../components/TaskDetails/ExecutionEventLog';
@@ -165,8 +166,52 @@ const goalStateBadges: Record<string, { Icon: typeof CheckCircle2; color: string
   cancelled: { Icon: CircleSlash, color: 'bg-red-100 text-red-800' },
 };
 
+/** The one state a goal reads as: a settled result first, then the state it is being driven to. */
+const goalLifecycleState = (goal: Goal): string => goal.resultState
+  || (goal.desiredState === 'cancelled' ? 'cancelling' : goal.desiredState);
+
+// The status filter mirrors the Tasks and Plans dropdowns: one option per state a row can show,
+// with the transient "cancelling" rows kept beside the cancelled work they are becoming.
+const goalStatusFilters: Array<{ value: string; label: string }> = [
+  { value: 'all', label: 'All Statuses' },
+  { value: 'running', label: 'Running' },
+  { value: 'paused', label: 'Paused' },
+  { value: 'completed', label: 'Completed' },
+  { value: 'failed', label: 'Failed' },
+  { value: 'cancelled', label: 'Cancelled' },
+];
+
+const matchesGoalStatus = (goal: Goal, status: string): boolean => {
+  if (status === 'all') return true;
+  const state = goalLifecycleState(goal);
+  if (status === 'cancelled') return state === 'cancelled' || state === 'cancelling';
+  return state === status;
+};
+
+/** Every keyword has to land somewhere in the goal, so extra words narrow the queue instead of widening it. */
+const matchesGoalSearch = (goal: Goal, terms: string[]): boolean => {
+  if (terms.length === 0) return true;
+  const haystack = `${goal.title} ${goal.objective} ${goal.repository}`.toLowerCase();
+  return terms.every(term => haystack.includes(term));
+};
+
+const filterGoals = (goals: Goal[], repository: string, status: string, terms: string[]): Goal[] => goals.filter(goal =>
+  (repository === 'all' || goal.repository === repository)
+  && matchesGoalStatus(goal, status)
+  && matchesGoalSearch(goal, terms));
+
+/** One sentence for whichever filter emptied the queue, narrowest first. */
+const emptyQueueReason = (search: string, status: string, repository: string): string => {
+  if (search) return `No goals match “${search}”`;
+  if (status !== 'all') {
+    const label = goalStatusFilters.find(option => option.value === status)?.label || status;
+    return `No ${label.toLowerCase()} goals`;
+  }
+  return `No goals in ${repository}`;
+};
+
 function GoalState({ goal, quietCompleted = false }: { goal: Goal; quietCompleted?: boolean }) {
-  const state = goal.resultState || (goal.desiredState === 'cancelled' ? 'cancelling' : goal.desiredState);
+  const state = goalLifecycleState(goal);
   if (quietCompleted && state === 'completed') {
     return <span className="inline-flex items-center gap-1.5 text-sm font-medium text-slate-500">
       <CheckCircle2 className="h-4 w-4" />
@@ -571,6 +616,11 @@ function GoalList() {
   const [isCreating, setIsCreating] = useState(false);
   const requestGenerationRef = useRef(0);
   const repositoryFilter = searchParams.get('repository') || 'all';
+  const statusFilter = searchParams.get('status') || 'all';
+  const urlSearch = searchParams.get('search') || '';
+  // The input stays instant while the URL and the filtered queue follow one debounce behind it.
+  const [searchQuery, setSearchQuery] = useState(urlSearch);
+  const [debouncedSearch, setDebouncedSearch] = useState(urlSearch);
   useEffect(() => {
     if (searchParams.get('new') !== '1') return;
     setIsCreating(true);
@@ -614,17 +664,47 @@ function GoalList() {
         .sort((left, right) => left.name.localeCompare(right.name)),
     ];
   }, [goals]);
-  const visibleGoals = repositoryFilter === 'all'
-    ? goals
-    : goals.filter(goal => goal.repository === repositoryFilter);
-  const setRepositoryFilter = useCallback((repository: string) => {
+  const searchTerms = useMemo(
+    () => debouncedSearch.toLowerCase().split(/\s+/).filter(Boolean),
+    [debouncedSearch],
+  );
+  const visibleGoals = useMemo(
+    () => filterGoals(goals, repositoryFilter, statusFilter, searchTerms),
+    [goals, repositoryFilter, searchTerms, statusFilter],
+  );
+  const updateFilterParams = useCallback((updates: Record<string, string | null>) => {
     setSearchParams(current => {
       const next = new URLSearchParams(current);
-      if (repository === 'all') next.delete('repository');
-      else next.set('repository', repository);
+      Object.entries(updates).forEach(([key, value]) => {
+        if (!value || value === 'all') next.delete(key);
+        else next.set(key, value);
+      });
       return next;
     }, { replace: true });
   }, [setSearchParams]);
+  const setRepositoryFilter = useCallback(
+    (repository: string) => updateFilterParams({ repository }),
+    [updateFilterParams],
+  );
+  const setStatusFilter = useCallback(
+    (status: string) => updateFilterParams({ status }),
+    [updateFilterParams],
+  );
+  const commitSearch = useCallback((value: string) => {
+    setDebouncedSearch(value);
+    updateFilterParams({ search: value.trim() || null });
+  }, [updateFilterParams]);
+  useDebouncedCallback(searchQuery, commitSearch, 400);
+  const clearSearch = useCallback(() => {
+    setSearchQuery('');
+    commitSearch('');
+  }, [commitSearch]);
+  const clearFilters = useCallback(() => {
+    setSearchQuery('');
+    setDebouncedSearch('');
+    updateFilterParams({ repository: null, status: null, search: null });
+  }, [updateFilterParams]);
+  const queueEmptyReason = emptyQueueReason(debouncedSearch, statusFilter, repositoryFilter);
   const goalAgents = goals.map(goal => ({ type: goal.agent.type, alias: goal.agent.alias }));
   const closeCreator = useCallback(() => {
     setIsCreating(false);
@@ -641,15 +721,45 @@ function GoalList() {
       {/* One toolbar rail: the queue count sits with the filter that changes it. The list border below closes the bar. */}
       <div className="flex flex-col gap-2 border-t border-slate-200 bg-slate-50 px-4 py-2 sm:flex-row sm:items-center sm:justify-between sm:px-6">
         <div className="flex items-baseline gap-2"><h2 id="goal-work-queue-title" className="text-[10px] font-bold uppercase tracking-wider text-slate-500">Work queue</h2>{hasSuccessfulRead && <span className="text-xs tabular-nums text-slate-500">{visibleGoals.length} of {goals.length}</span>}{refreshing && hasSuccessfulRead && <span role="status" className="text-xs text-slate-500">Refreshing…</span>}</div>
-        {goals.length > 0 && <div role="group" aria-label="Filter goals by repository" className="flex min-w-0 items-center gap-2">
-          <Filter className="h-4 w-4 flex-none text-slate-400" aria-hidden="true" />
-          <RepositorySelector
-            repos={repositoryOptions}
-            selectedRepo={repositoryFilter}
-            onRepoChange={setRepositoryFilter}
-            labelLayout="stacked"
-            className="min-w-0 flex-1 sm:w-[240px] sm:flex-none"
-          />
+        {goals.length > 0 && <div className="flex min-w-0 flex-col gap-2 sm:flex-row sm:items-center sm:gap-3">
+          <div className="relative min-w-0 sm:w-64">
+            <Search aria-hidden="true" className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
+            <input
+              type="text"
+              value={searchQuery}
+              onChange={event => setSearchQuery(event.target.value)}
+              aria-label="Search goals"
+              placeholder="Search goals..."
+              className="w-full rounded-md border border-slate-300 bg-white py-1.5 pl-9 pr-8 text-sm text-slate-700 focus:border-primary-500 focus:outline-none focus:ring-2 focus:ring-primary-500"
+            />
+            {searchQuery && <button
+              type="button"
+              onClick={clearSearch}
+              title="Clear search"
+              aria-label="Clear search"
+              className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600"
+            ><X className="h-4 w-4" /></button>}
+          </div>
+          <div className="flex min-w-0 items-center gap-2">
+            <Filter className="h-4 w-4 flex-none text-slate-400" aria-hidden="true" />
+            <select
+              value={statusFilter}
+              onChange={event => setStatusFilter(event.target.value)}
+              aria-label="Filter goals by status"
+              className="flex-none rounded-md border border-slate-300 bg-white px-2 py-1.5 text-sm text-slate-700 focus:border-primary-500 focus:outline-none focus:ring-2 focus:ring-primary-500"
+            >
+              {goalStatusFilters.map(option => <option key={option.value} value={option.value}>{option.label}</option>)}
+            </select>
+            <div role="group" aria-label="Filter goals by repository" className="min-w-0 flex-1 sm:w-[240px] sm:flex-none">
+              <RepositorySelector
+                repos={repositoryOptions}
+                selectedRepo={repositoryFilter}
+                onRepoChange={setRepositoryFilter}
+                labelLayout="stacked"
+                className="w-full min-w-0"
+              />
+            </div>
+          </div>
         </div>}
       </div>
       {!hasSuccessfulRead && (initialLoading || refreshing)
@@ -659,7 +769,7 @@ function GoalList() {
           : goals.length === 0
         ? <div className="border-y border-dashed border-slate-300 py-10 text-center"><p className="text-sm font-medium text-slate-700">No goals yet</p><p className="mt-1 text-sm text-slate-500">Start a goal to add dedicated agent work to this queue.</p></div>
         : visibleGoals.length === 0
-          ? <div className="border-y border-dashed border-slate-300 py-10 text-center"><p className="text-sm font-medium text-slate-700">No goals in {repositoryFilter}</p><button type="button" onClick={() => setRepositoryFilter('all')} className="mt-2 text-sm font-medium text-primary-700 hover:underline">Show all goals</button></div>
+          ? <div className="border-y border-dashed border-slate-300 py-10 text-center"><p className="text-sm font-medium text-slate-700">{queueEmptyReason}</p><button type="button" onClick={clearFilters} className="mt-2 text-sm font-medium text-primary-700 hover:underline">Show all goals</button></div>
           : <div className="border-y border-slate-200 bg-white">
             <div aria-hidden="true" data-testid="goal-queue-columns" className={`hidden gap-x-4 border-b border-slate-200 bg-slate-50 px-6 py-2 text-[10px] font-bold uppercase tracking-wider text-slate-500 ${queueGridColumns} lg:grid`}>
               <span>Goal</span><span>Repository</span><span>Status</span>
