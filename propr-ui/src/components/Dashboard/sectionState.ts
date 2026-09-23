@@ -147,6 +147,26 @@ export function shortenPaths(text: string): string {
   return text.replace(/\S+\/\S+\/\S+/g, match => `…/${match.slice(match.lastIndexOf('/') + 1)}`);
 }
 
+/** Where a progress sentence stops being its primary action. */
+const CLAUSE_BREAK = /(?:,|;| and | then | while | before | after )\s*/i;
+
+/**
+ * The first clause of a progress line, for viewports that can only show one.
+ *
+ * Collapsing the paths in `Editing …/HappeningNowSection.tsx and re-running the
+ * dashboard section suite` still leaves more sentence than a 390px row can
+ * draw, so the clamp cut it at `and re…` — which reads as a string that was
+ * sliced by accident rather than as a line that was shortened on purpose.
+ *
+ * A phone gets the primary action and the file it names, and stops there. The
+ * trailing clause is not lost: the wider viewport still renders the whole
+ * sentence, and so does the task the row links to.
+ */
+export function primaryClause(text: string): string {
+  const match = CLAUSE_BREAK.exec(text);
+  return match ? text.slice(0, match.index).trim() : text;
+}
+
 /** Precise elapsed time for running work, where minutes and seconds both matter. */
 export const elapsedRunning = (since: string): string => formatDuration(since, null);
 

@@ -436,25 +436,6 @@ describe('Dashboard studio design rules', () => {
     }
   });
 
-  it('keeps an attention row\'s entity chip beside its repository, not on its own line', async () => {
-    mockAttention.mockResolvedValue(attentionResponse([attentionItem()]));
-
-    renderDashboard();
-    await waitForSections();
-
-    // The panel lives in the narrow column. A wrapping metadata line drops the
-    // entity chip onto a row of its own and makes every item here a line
-    // taller than the identical row in the main column.
-    const panel = await screen.findByTestId('needs-attention-panel');
-    const meta = (await within(panel).findByText('Run failed')).parentElement;
-    // Only from `lg`, where the column is what constrains the line. On a phone
-    // the same panel is full width and wrapping costs nothing.
-    expect(meta?.className).toMatch(/lg:flex-nowrap/);
-    expect(meta?.className).not.toMatch(/lg:flex-wrap/);
-    expect(meta).toContainElement(within(panel).getByTitle('Issue #42'));
-    expect(meta).toContainElement(within(panel).getAllByTitle('acme/app')[0]);
-  });
-
   it('gives every outcome state an icon, not only the successful ones', async () => {
     mockOutcomes.mockResolvedValue(outcomesResponse([
       outcomeItem({ id: 'out-merged', kind: 'merged' }),

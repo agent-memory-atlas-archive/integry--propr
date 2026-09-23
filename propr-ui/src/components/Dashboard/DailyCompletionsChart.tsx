@@ -75,7 +75,14 @@ export const DailyCompletionsChart: React.FC<{ data: DailyCompletion[] }> = ({ d
     <div className="mt-3" data-testid="daily-completions-chart">
       <div className="h-24 w-full">
         <ResponsiveContainer width="100%" height="100%">
-          <AreaChart data={points} margin={{ top: 6, right: 4, left: 0, bottom: 10 }}>
+          {/*
+            The right margin is the marker's own radius plus its halo, not a
+            token gutter. The last day carries a filled 3.5px dot with a 1.5px
+            white ring, and plotting it against the viewBox edge pushed its
+            right half outside the plot area — a teal crescent hanging past the
+            vertical that the period toggle and the analytics link sit on.
+          */}
+          <AreaChart data={points} margin={{ top: 6, right: 8, left: 0, bottom: 10 }}>
             <defs>
               <linearGradient id="dailyCompletionsGradient" x1="0" y1="0" x2="0" y2="1">
                 <stop offset="0%" stopColor={CURRENT_DAY_FILL} stopOpacity={0.18} />
@@ -122,7 +129,7 @@ export const DailyCompletionsChart: React.FC<{ data: DailyCompletion[] }> = ({ d
         </ResponsiveContainer>
       </div>
       {/* The date rail is inset by the y-axis gutter so it sits under the plot. */}
-      <div className="flex justify-between pl-6 pr-1 pt-1 text-[10px] text-slate-400">
+      <div className="flex justify-between pl-6 pr-2 pt-1 text-[10px] text-slate-400">
         <span>{first}</span>
         <span>{last}</span>
       </div>

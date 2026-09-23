@@ -3,9 +3,14 @@
  *
  * Every metric is nullable, and a metric the instance cannot report renders as
  * unavailable rather than as zero — an instance that records no cost has not
- * spent $0, and a period where nothing finished has no success rate. Cost is
- * labelled "Recorded spend" because only executions that recorded a cost
- * contribute to it.
+ * spent $0, and a period where nothing finished has no success rate.
+ *
+ * The metric labels are single words. Three of them share a row that is 22rem
+ * wide in the right rail and a third of a phone on mobile, and "RECORDED
+ * SPEND" does not fit either: it rendered as `RECORDED SP…`, which reads as a
+ * broken grid rather than as a heading. The qualification the longer label
+ * carried — that only executions which reported a cost contribute — is a
+ * footnote about the number, so it lives in the metric's tooltip.
  */
 
 import React, { useCallback, useState } from 'react';
@@ -54,12 +59,18 @@ function comparison(current: number | null, previous: number | null, suffix = ''
 
 const Metric: React.FC<{
   label: string;
+  hint?: string;
   value: string;
   change: string | null;
   testId: string;
-}> = ({ label, value, change, testId }) => (
+}> = ({ label, hint, value, change, testId }) => (
   <div className="min-w-0">
-    <div className="truncate text-[10px] font-bold uppercase tracking-wide text-gray-500">{label}</div>
+    {/*
+      No `truncate`: a structural label in a data grid must never end in an
+      ellipsis, so the copy is short enough to fit the narrowest column the
+      grid ever has rather than being cut to fit it.
+    */}
+    <div className="text-[10px] font-bold uppercase tracking-wide text-gray-500" title={hint}>{label}</div>
     <div
       data-testid={testId}
       className={`text-lg font-semibold tabular-nums ${value === UNAVAILABLE ? 'text-slate-300' : 'text-slate-900'}`}
@@ -115,18 +126,21 @@ export const HistoricalStatsPanel: React.FC<DashboardSectionProps> = ({ reposito
             <Metric
               testId="stat-completed"
               label="Completed"
+              hint="Runs that finished successfully in the period"
               value={formatCount(data.completed)}
               change={comparison(data.completed, data.previous.completed)}
             />
             <Metric
               testId="stat-success-rate"
-              label="Success rate"
+              label="Success"
+              hint="Share of finished runs that succeeded"
               value={formatRate(data.successRate)}
               change={comparison(data.successRate, data.previous.successRate, '%')}
             />
             <Metric
               testId="stat-spend"
-              label="Recorded spend"
+              label="Spend"
+              hint="Recorded spend: only executions that reported a cost contribute"
               value={formatSpend(data.recordedSpend)}
               change={comparison(data.recordedSpend, data.previous.recordedSpend)}
             />

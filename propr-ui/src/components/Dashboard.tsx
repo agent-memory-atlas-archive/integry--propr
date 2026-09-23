@@ -51,6 +51,20 @@ import type { TaskUpdatePayload } from '@propr/shared';
  *
  * A dropped socket never blanks the dashboard: the last known rows stay on
  * screen and this line says how old they are.
+ *
+ * The status owns a rule of its own rather than butting against the page
+ * title. Read left to right the toolbar was `Dashboard ● Reconnecting ·
+ * Last updated 2m`, and the connection light — a 6px filled circle — was doing
+ * duty as a heavy bullet between two facts while an interpunct separated the
+ * next two. Two different glyphs, one string, and neither of them was a
+ * delimiter by design. The rule separates the toolbar's items; the interpunct
+ * is the one glyph that separates facts inside a string, here and everywhere
+ * else in the app; and the dot goes back to being only a status light.
+ *
+ * A phone has no room for the rule and the two facts on one line, so the
+ * status takes a line of its own there — which is what the 320px header
+ * already did once it wrapped, and the light then starts a line rather than
+ * separating two.
  */
 const LiveStatus: React.FC<{ isConnected: boolean; lastUpdatedAt: string | null }> = ({
   isConnected,
@@ -61,7 +75,7 @@ const LiveStatus: React.FC<{ isConnected: boolean; lastUpdatedAt: string | null 
 
   if (isConnected) {
     return (
-      <p className="flex items-center gap-1.5 text-xs text-gray-500" data-testid="live-status">
+      <p className="flex items-center gap-1.5 text-xs text-gray-500 w-full sm:w-auto sm:border-l sm:border-slate-200 sm:pl-3" data-testid="live-status">
         <span className="h-1.5 w-1.5 rounded-full bg-teal-500" aria-hidden="true" />
         Live
       </p>
@@ -69,7 +83,7 @@ const LiveStatus: React.FC<{ isConnected: boolean; lastUpdatedAt: string | null 
   }
 
   return (
-    <p className="flex items-center gap-1.5 text-xs text-amber-700" data-testid="live-status" role="status">
+    <p className="flex items-center gap-1.5 text-xs text-amber-700 w-full sm:w-auto sm:border-l sm:border-slate-200 sm:pl-3" data-testid="live-status" role="status">
       <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-amber-500" aria-hidden="true" />
       Reconnecting
       {lastUpdatedAt && <> · Last updated {formatRelativeTime(lastUpdatedAt)}</>}
@@ -150,7 +164,16 @@ const Dashboard: React.FC = () => {
 
   return (
     <RepositoryIconProvider icons={repositoryIcons}>
-      <div className="flex min-h-full flex-col bg-white">
+      {/*
+        The phone gets a gap under the last pane. The app shell already pads
+        the scrolling canvas by exactly the height of the fixed bottom
+        navigation, which clears the bar to the pixel and leaves the final
+        metric row and the daily chart sitting flush against its top rule — the
+        last thing on the page reads as something the navigation is cutting
+        off. A little more than the bar's own height is what makes the end of
+        the console look like the end of the console.
+      */}
+      <div className="flex min-h-full flex-col bg-white pb-6 md:pb-0">
         <ConnectSoftPromoBanner />
 
         {canManageAgents && !readinessLoading && (!hasAgents || !hasDefaultModel) && (

@@ -226,31 +226,6 @@ export const SectionSkeleton: React.FC<{ rows?: number }> = ({ rows = 3 }) => (
 );
 
 /**
- * Metadata line above a title. Secondary facts wrap or drop before a title truncates.
- *
- * `wrap={false}` keeps the whole line on one row from `lg` up, where the
- * attention panel is a 22rem column beside the main one: the repository chip
- * is the only shrinkable child (it carries `min-w-0` and truncates behind its
- * own tooltip), so the entity chip stays beside the repository instead of
- * being pushed onto a line of its own and making every row in that column a
- * line taller.
- *
- * Below `lg` the same panel is the full width of a phone, and forcing one row
- * there buys nothing: the row is already as tall as its title, and the only
- * effect is to cut the chips down to `design-s…`. So the line wraps at small
- * widths and only refuses to wrap where the column is what constrains it.
- */
-export const RowMeta: React.FC<{ children: React.ReactNode; wrap?: boolean }> = ({ children, wrap = true }) => (
-  <span
-    className={`flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 text-xs ${
-      wrap ? '' : 'lg:flex-nowrap lg:gap-y-0 lg:overflow-hidden'
-    }`}
-  >
-    {children}
-  </span>
-);
-
-/**
  * Metadata for a feed row in the wide column: two strict lines on a phone, one
  * line from `sm` up.
  *
@@ -266,9 +241,10 @@ export const RowMeta: React.FC<{ children: React.ReactNode; wrap?: boolean }> = 
  * pairing above the breakpoint and the ordering classes put the four facts
  * back into one stream, so the desktop line is unchanged.
  *
- * Nothing here is separated by a typed `•`. An interpunct is an inline
- * separator, and an inline separator that can wrap eventually does; space and
- * the chips' own borders say the same thing and cannot wrap away from what
+ * Nothing here is separated by a typed delimiter. The app's one separator
+ * glyph is the interpunct `·`, but an inline separator that can wrap
+ * eventually does, and it starts the next line as an orphan; space and the
+ * chips' own borders say the same thing here and cannot wrap away from what
  * they separate.
  */
 export const RowMetaLines: React.FC<{
@@ -295,14 +271,15 @@ export const RowTitle: React.FC<{ children: React.ReactNode; strong?: boolean }>
 );
 
 /**
- * The secondary line under a title, held to one line unless expanded.
+ * The secondary line under a title, always held to one line.
  *
  * `block` and `line-clamp-1` both set `display`, and `block` was winning, so
  * the clamp drew no line at all and a long progress line quietly wrapped to
- * three. Only one of the two is applied.
+ * three. Only the clamp is applied. Nothing on the dashboard unfolds this line
+ * any more: the row links to the work, which carries it whole.
  */
-export const RowDetail: React.FC<{ children: React.ReactNode; clamp?: boolean }> = ({ children, clamp = true }) => (
-  <span className={`mt-0.5 break-words text-xs leading-5 text-slate-500 ${clamp ? 'line-clamp-1' : 'block'}`}>
+export const RowDetail: React.FC<{ children: React.ReactNode }> = ({ children }) => (
+  <span className="mt-0.5 line-clamp-1 break-words text-xs leading-5 text-slate-500">
     {children}
   </span>
 );

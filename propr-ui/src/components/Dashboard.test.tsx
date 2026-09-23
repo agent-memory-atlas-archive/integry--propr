@@ -278,7 +278,7 @@ describe('Dashboard', () => {
     expect(mockOutcomes).toHaveBeenCalledTimes(2);
   });
 
-  it('does not reorder running work while a row is expanded', async () => {
+  it('does not reorder running work under a pointer when live updates arrive', async () => {
     const first = activeItem({ id: 'task:a', taskId: 'a', title: 'Alpha work' });
     const second = activeItem({ id: 'task:b', taskId: 'b', title: 'Beta work' });
     mockActive.mockResolvedValue(activeResponse([first, second]));
@@ -287,8 +287,10 @@ describe('Dashboard', () => {
     await waitForSections();
     await waitFor(() => expect(screen.getByText('Alpha work')).toBeInTheDocument());
 
-    fireEvent.click(screen.getByRole('button', { name: /Expand Alpha work/ }));
-    expect(screen.getByRole('button', { name: /Collapse Alpha work/ })).toBeInTheDocument();
+    // Every row is a link to its work, so the row under the pointer is the
+    // thing that must not move between the press and the release.
+    const rows = within(screen.getByTestId('happening-now-list')).getAllByRole('link');
+    fireEvent.mouseOver(rows[0]);
 
     // The server now reports the rows the other way round.
     mockActive.mockResolvedValue(activeResponse([second, first]));
@@ -368,7 +370,11 @@ describe('Dashboard', () => {
     await waitFor(() => expect(screen.getByTestId('stat-success-rate')).toHaveTextContent('—'));
     expect(screen.getByTestId('stat-success-rate')).not.toHaveTextContent('0%');
     expect(screen.getByTestId('stat-spend')).toHaveTextContent('—');
-    expect(screen.getByTestId('historical-stats-section')).toHaveTextContent('Recorded spend');
+    // One word per metric: a label that truncates to `RECORDED SP…` in a
+    // three-column grid reads as a broken grid, so the qualification moved to
+    // the tooltip.
+    const spendLabel = screen.getByTestId('historical-stats-section').querySelector('[title^="Recorded spend"]');
+    expect(spendLabel).toHaveTextContent('Spend');
   });
 
   it('summarises the queue with the reason work is waiting', async () => {

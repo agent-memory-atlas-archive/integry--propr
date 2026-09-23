@@ -19,7 +19,6 @@ import { getDashboardAttention, type AttentionItem, type DashboardAttentionRespo
 import {
   RepositoryLabel,
   RowLink,
-  RowMeta,
   RowTitle,
   SectionError,
   SectionHeading,
@@ -94,48 +93,60 @@ const AttentionRow: React.FC<{ item: AttentionItem }> = ({ item }) => {
   const external = isExternalHref(href);
   return (
     <li>
-      <div className="px-3 py-2.5">
-        {/*
-          One line, like the row in "Happening now": reason, repository, entity.
-          The panel lives in the narrow column, so without `wrap={false}` the
-          entity chip drops to a line of its own and every row here is a line
-          taller than the same row in the main column.
+      {/*
+        One schema for a work row, at every width and in every section.
 
-          Three chips do not fit 320px at full length, and the one that loses
-          the fight is the repository: `example/workspa…` identifies nothing.
-          So the chip here is `short` — the repository name without its owner,
-          which is the same eight characters on every row of a given instance.
-          That buys the line enough room for all three chips to sit whole,
-          with the full slug still in the chip's tooltip.
-        */}
-        <RowMeta wrap={false}>
-          <span
-            className={`flex-none whitespace-nowrap font-semibold ${
-              item.category === 'blocked' ? 'text-amber-700' : 'text-slate-700'
-            }`}
-          >
-            {REASON_LABELS[item.kind]}
-          </span>
+        Below `lg` this is exactly the shape the running feed and the outcome
+        feed use — status opposite elapsed time, then the entities, then the
+        title — because three sections stacked down a phone with three
+        different hierarchies made the reading plane jump on every scroll.
+        Chips sat on line one here and on line two there; the eye had to find
+        the pattern again at each heading.
+
+        At `lg` the same five facts re-flow for the narrow rail: status and
+        chips share the first line, the title takes the second, and the waiting
+        time and its action close the row. Same DOM, same reading order, placed
+        rather than duplicated — so nothing is rendered twice and hidden.
+
+        Three chips do not fit 320px at full length, and the one that loses the
+        fight is the repository: `example/workspa…` identifies nothing. So the
+        chip here is `short` — the repository name without its owner, which is
+        the same eight characters on every row of a given instance, with the
+        full slug still in the chip's tooltip.
+      */}
+      <div className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-x-2 gap-y-1 px-3 py-2.5 text-xs lg:grid-cols-[auto_minmax(0,1fr)]">
+        <span
+          className={`min-w-0 truncate whitespace-nowrap font-semibold lg:col-start-1 lg:row-start-1 ${
+            item.category === 'blocked' ? 'text-amber-700' : 'text-slate-700'
+          }`}
+        >
+          {REASON_LABELS[item.kind]}
+        </span>
+        <time
+          dateTime={item.since}
+          title={new Date(item.since).toLocaleString()}
+          className="min-w-0 justify-self-end truncate whitespace-nowrap text-gray-500 lg:col-start-1 lg:row-start-3 lg:justify-self-start"
+        >
+          Waiting {elapsedLabel(item.since)}
+        </time>
+        <span className="flex min-w-0 items-center gap-1.5 lg:col-start-2 lg:row-start-1">
           <RepositoryLabel repository={item.repository} short />
           <WorkReference issueNumber={item.issueNumber} prNumber={item.prNumber} />
-        </RowMeta>
-        <RowTitle>{itemTitle(item)}</RowTitle>
-        <div className="mt-1.5 flex items-center justify-between gap-2">
-          <time dateTime={item.since} title={new Date(item.since).toLocaleString()} className="min-w-0 truncate text-xs text-gray-500">
-            Waiting {elapsedLabel(item.since)}
-          </time>
-          {/*
-            Fixed w-20 and centred: every button in the column starts and ends
-            on the same two vertical lines whatever its verb.
-          */}
-          <RowLink
-            href={href}
-            aria-label={`${actionLabel(item)} ${actionContext(item)}${external ? ' (opens GitHub)' : ''}`}
-            className="inline-flex min-h-8 w-20 flex-none items-center justify-center rounded-sm bg-slate-100 px-2 text-xs font-semibold text-slate-700 transition-colors hover:bg-slate-200 focus:outline-none focus-visible:ring-2 focus-visible:ring-teal-500"
-          >
-            {actionLabel(item)}
-          </RowLink>
-        </div>
+        </span>
+        {/*
+          Fixed w-20 and centred: every button in the column starts and ends on
+          the same two vertical lines whatever its verb.
+        */}
+        <RowLink
+          href={href}
+          aria-label={`${actionLabel(item)} ${actionContext(item)}${external ? ' (opens GitHub)' : ''}`}
+          className="inline-flex min-h-8 w-20 flex-none items-center justify-center justify-self-end rounded-sm bg-slate-100 px-2 font-semibold text-slate-700 transition-colors hover:bg-slate-200 focus:outline-none focus-visible:ring-2 focus-visible:ring-teal-500 lg:col-start-2 lg:row-start-3"
+        >
+          {actionLabel(item)}
+        </RowLink>
+        <span className="col-span-2 min-w-0 lg:col-start-1 lg:row-start-2">
+          <RowTitle>{itemTitle(item)}</RowTitle>
+        </span>
       </div>
     </li>
   );

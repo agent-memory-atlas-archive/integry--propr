@@ -29,8 +29,12 @@ const WIDE_WIDTHS = [1024, 1440] as const;
 const LONG_TITLE = 'Keep the retry budget from leaking into post-processing';
 const LONG_PROGRESS_LINE =
   'Editing propr-ui/src/components/Dashboard/HappeningNowSection.tsx and re-running the dashboard section suite';
-/** The same line with the directories collapsed, which is what a phone shows. */
-const SHORT_PROGRESS_LINE = 'Editing …/HappeningNowSection.tsx and re-running the dashboard section suite';
+/**
+ * What a phone shows: the directories collapsed and the sentence stopped at
+ * its first clause. Clamping the full line cut it at `and re…`, which reads as
+ * a string sliced by accident rather than as a line shortened on purpose.
+ */
+const SHORT_PROGRESS_LINE = 'Editing …/HappeningNowSection.tsx';
 
 const running = [
   { id: 'task:run-1', taskId: 'run-1', repository: 'example/workspace', issueNumber: 2480, prNumber: null, title: LONG_TITLE, state: 'claude_execution', phase: 'Implementing', progressLine: LONG_PROGRESS_LINE, createdAt: minutesAgo(26), updatedAt: minutesAgo(1) },
@@ -397,6 +401,109 @@ for (const width of NARROW_WIDTHS) {
     // No typed separator survives to wrap onto a line of its own.
     expect(await page.getByTestId('happening-now-section').textContent()).not.toContain('•');
     expect(await page.getByTestId('recent-outcomes-section').textContent()).not.toContain('•');
+  });
+
+  test(`no disclosure control crowds the elapsed time at ${width}px`, async ({ page }) => {
+    await openDashboard(page, width);
+
+    // The row is a link to its work, not an accordion. A chevron on its right
+    // edge promised a fold the row does not have and left two pixels between
+    // itself and the elapsed time it was crowding.
+    const list = page.getByTestId('happening-now-list');
+    await expect(list.getByRole('button')).toHaveCount(0);
+    await expect(list.locator('[aria-expanded]')).toHaveCount(0);
+
+    const row = list.locator('li').first();
+    const clearance = await row.evaluate(node => {
+      const link = node.querySelector('a') as HTMLElement;
+      const elapsed = node.querySelector('[class*="sm:order-3"]') as HTMLElement;
+      const padding = parseFloat(window.getComputedStyle(link).paddingRight);
+      return Math.round(link.getBoundingClientRect().right - elapsed.getBoundingClientRect().right - padding);
+    });
+    // The elapsed time now ends on the row's own inner edge.
+    expect(clearance).toBe(0);
+  });
+
+  test(`every section stacks the same three lines at ${width}px`, async ({ page }) => {
+    await openDashboard(page, width);
+
+    // Status opposite time, entities opposite whatever acts on the row, then
+    // the title. Three sections with three hierarchies made the reading plane
+    // jump at every heading as the page scrolled.
+    const schema = await page.evaluate(() => {
+      const box = (node: Element) => {
+        const rect = node.getBoundingClientRect();
+        return {
+          top: Math.round(rect.top),
+          left: Math.round(rect.left),
+          right: Math.round(rect.right),
+          middle: Math.round(rect.top + rect.height / 2),
+        };
+      };
+      const attentionRow = document.querySelector('[data-testid="needs-attention-panel"] li > div') as HTMLElement;
+      const activeRow = document.querySelector('[data-testid="happening-now-list"] li') as HTMLElement;
+      return {
+        attention: {
+          status: box(attentionRow.children[0]),
+          time: box(attentionRow.children[1]),
+          entities: box(attentionRow.children[2]),
+          action: box(attentionRow.children[3]),
+          title: box(attentionRow.querySelector('.line-clamp-2') as HTMLElement),
+        },
+        active: {
+          status: box(activeRow.querySelector('[class*="sm:order-1"]') as HTMLElement),
+          time: box(activeRow.querySelector('[class*="sm:order-3"]') as HTMLElement),
+          entities: box(activeRow.querySelector('[class*="sm:order-2"]') as HTMLElement),
+          title: box(activeRow.querySelector('.line-clamp-2') as HTMLElement),
+        },
+      };
+    });
+
+    for (const section of [schema.attention, schema.active]) {
+      // Line one: what it is, and how long it has been, at opposite ends.
+      expect(section.status.top).toBe(section.time.top);
+      expect(section.time.left).toBeGreaterThan(section.status.right);
+      // Line two: the entities, starting on the row's own left edge.
+      expect(section.entities.top).toBeGreaterThan(section.status.top);
+      expect(section.entities.left).toBe(section.status.left);
+      // Line three: the title.
+      expect(section.title.top).toBeGreaterThan(section.entities.top);
+    }
+
+    // The attention row's action is the right-hand end of line two, where the
+    // outcome feed puts its score. It is a 32px tap target beside a 20px chip,
+    // so the two share a centre line rather than a top edge.
+    expect(schema.attention.action.middle).toBe(schema.attention.entities.middle);
+    expect(schema.attention.action.left).toBeGreaterThan(schema.attention.entities.right);
+  });
+
+  test(`the last pane clears the fixed bottom navigation at ${width}px`, async ({ page }) => {
+    await openDashboard(page, width);
+
+    const navigation = page.locator('.mobile-bottom-navigation');
+    await expect(navigation).toBeVisible();
+    await page.evaluate(() => {
+      const scroller = document.querySelector('main') as HTMLElement;
+      scroller.scrollTop = scroller.scrollHeight;
+    });
+
+    // Scrolled to the end, the chart and the metric row it belongs to are both
+    // above the bar with a gap under them: content stopping exactly on the
+    // bar's top rule reads as content the bar is cutting off.
+    const geometry = await page.evaluate(() => {
+      const rect = (selector: string) => (document.querySelector(selector) as HTMLElement).getBoundingClientRect();
+      return {
+        stats: Math.round(rect('[data-testid="historical-stats-section"]').bottom),
+        chart: Math.round(rect('[data-testid="daily-completions-chart"]').bottom),
+        navigation: Math.round(rect('.mobile-bottom-navigation').top),
+      };
+    });
+    expect(geometry.chart).toBeLessThan(geometry.navigation);
+    expect(geometry.navigation - geometry.stats).toBeGreaterThanOrEqual(16);
+
+    // The page scrolls inside `main`, so the end of the console is only ever
+    // in a shot taken from the end of the scroll.
+    await capture(page, `dashboard-responsive-${width}-end`);
   });
 
   test(`the four summary counts hold one row as a micro-grid at ${width}px`, async ({ page }) => {

@@ -8,7 +8,7 @@
  */
 
 import React, { useCallback, useMemo, useState } from 'react';
-import { ChevronDown, Loader2 } from 'lucide-react';
+import { Loader2 } from 'lucide-react';
 import { getDashboardActive, type ActiveItem, type DashboardActiveResponse } from '../../api/dashboardApi';
 import {
   RepositoryLabel,
@@ -29,6 +29,7 @@ import {
   type DashboardSectionProps,
   elapsedRunning,
   filteredTasksHref,
+  primaryClause,
   shortenPaths,
   useDashboardSection,
   useNowTick,
@@ -53,76 +54,59 @@ const itemKey = (item: ActiveItem): string => item.id;
 const itemTitle = (item: ActiveItem): string =>
   item.title || (item.prNumber ? `Pull request #${item.prNumber}` : item.issueNumber ? `Issue #${item.issueNumber}` : 'Untitled work');
 
-const ActiveRow: React.FC<{
-  item: ActiveItem;
-  expanded: boolean;
-  onToggle: (id: string) => void;
-}> = ({ item, expanded, onToggle }) => (
+/**
+ * One running row: the whole row is the link to the work it names.
+ *
+ * There is no disclosure chevron. A chevron on the edge of a feed row promises
+ * an accordion, and this row does not open one — clicking it navigates to the
+ * task, which is where the phase history, the timings and the full progress
+ * line already live. Drawing both a link and a fold made the row claim two
+ * different behaviours, and on a phone the arrow also sat two pixels from the
+ * elapsed time it was crowding. The row has one behaviour and the space back.
+ */
+const ActiveRow: React.FC<{ item: ActiveItem }> = ({ item }) => (
   <li>
-    <div className="flex min-w-0 items-start gap-1">
-      <RowLink href={workHref(item)} className="block min-w-0 flex-1 px-3 py-2.5 text-left transition-colors hover:bg-slate-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-teal-500">
-        <RowMetaLines
-          /*
-            A spinner, not a dot: a filled circle reads as a status light, and a
-            green one reads as "done". Motion is unambiguous about work in flight.
-          */
-          status={(
-            <span className="inline-flex min-w-0 items-center gap-1.5 font-medium text-teal-700">
-              <Loader2 className="h-3 w-3 flex-none animate-spin" aria-hidden="true" />
-              <span className="truncate">{item.phase || 'Running'}</span>
-            </span>
-          )}
-          entities={(
-            <>
-              <RepositoryLabel repository={item.repository} shortOnMobile />
-              <WorkReference issueNumber={item.issueNumber} prNumber={item.prNumber} />
-            </>
-          )}
-          trailing={(
-            <span title={`Started ${new Date(item.createdAt).toLocaleString()}`}>
-              {elapsedRunning(item.createdAt)}
-            </span>
-          )}
-        />
-        <RowTitle>{itemTitle(item)}</RowTitle>
-        {/*
-          The progress line is a sentence with a repository path in it, and on a
-          phone the path is most of the sentence: 110 characters of
-          `propr-ui/src/components/…` wrapped to three lines of the densest text
-          on the screen. Someone triaging on a phone needs the file, not the
-          route to it, so the directories collapse below `sm` and come back
-          whole where there is width for them.
-        */}
-        {item.progressLine && (
-          <RowDetail clamp={!expanded}>
-            <span className="sm:hidden">{shortenPaths(item.progressLine)}</span>
-            <span className="hidden sm:inline">{item.progressLine}</span>
-          </RowDetail>
+    <RowLink href={workHref(item)} className="block min-w-0 px-3 py-2.5 text-left transition-colors hover:bg-slate-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-teal-500">
+      <RowMetaLines
+        /*
+          A spinner, not a dot: a filled circle reads as a status light, and a
+          green one reads as "done". Motion is unambiguous about work in flight.
+        */
+        status={(
+          <span className="inline-flex min-w-0 items-center gap-1.5 font-medium text-teal-700">
+            <Loader2 className="h-3 w-3 flex-none animate-spin" aria-hidden="true" />
+            <span className="truncate">{item.phase || 'Running'}</span>
+          </span>
         )}
-      </RowLink>
-      <button
-        type="button"
-        aria-expanded={expanded}
-        aria-label={`${expanded ? 'Collapse' : 'Expand'} ${itemTitle(item)}`}
-        onClick={() => onToggle(item.id)}
-        className="mt-1.5 mr-1 inline-flex h-8 w-8 flex-none items-center justify-center rounded-sm text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-teal-500"
-      >
-        <ChevronDown className={`h-4 w-4 transition-transform ${expanded ? 'rotate-180' : ''}`} aria-hidden="true" />
-      </button>
-    </div>
-    {expanded && (
-      <dl className="grid grid-cols-[auto,1fr] gap-x-3 gap-y-1 px-3 pb-3 text-xs text-slate-600">
-        <dt className="text-gray-500">Phase</dt>
-        <dd>{item.phase || 'Running'}</dd>
-        <dt className="text-gray-500">Started</dt>
-        <dd>{new Date(item.createdAt).toLocaleString()}</dd>
-        <dt className="text-gray-500">Last update</dt>
-        <dd>{new Date(item.updatedAt).toLocaleString()}</dd>
-        <dt className="text-gray-500">Progress</dt>
-        {/* An absent progress line is unknown progress, not a stall. */}
-        <dd>{item.progressLine || 'No progress reported yet'}</dd>
-      </dl>
-    )}
+        entities={(
+          <>
+            <RepositoryLabel repository={item.repository} shortOnMobile />
+            <WorkReference issueNumber={item.issueNumber} prNumber={item.prNumber} />
+          </>
+        )}
+        trailing={(
+          <span title={`Started ${new Date(item.createdAt).toLocaleString()}`}>
+            {elapsedRunning(item.createdAt)}
+          </span>
+        )}
+      />
+      <RowTitle>{itemTitle(item)}</RowTitle>
+      {/*
+        The progress line is a sentence with a repository path in it, and on a
+        phone the path is most of the sentence: 110 characters of
+        `propr-ui/src/components/…` wrapped to three lines of the densest text
+        on the screen. Someone triaging on a phone needs the file, not the
+        route to it, so the directories collapse below `sm` and come back
+        whole where there is width for them — and the sentence stops at its
+        first clause rather than being cut mid-word by the clamp.
+      */}
+      {item.progressLine && (
+        <RowDetail>
+          <span className="sm:hidden">{shortenPaths(primaryClause(item.progressLine))}</span>
+          <span className="hidden sm:inline">{item.progressLine}</span>
+        </RowDetail>
+      )}
+    </RowLink>
   </li>
 );
 
@@ -177,7 +161,6 @@ export const HappeningNowSection: React.FC<DashboardSectionProps> = ({ repositor
     onLoaded,
   );
   const [showAll, setShowAll] = useState(false);
-  const [expandedIds, setExpandedIds] = useState<Set<string>>(new Set());
   // Elapsed times advance between reads.
   useNowTick();
 
@@ -187,15 +170,6 @@ export const HappeningNowSection: React.FC<DashboardSectionProps> = ({ repositor
   const canCollapse = orderedRunning.length > VISIBLE_ITEMS + OVERFLOW_SLACK;
   const collapsedLimit = canCollapse ? VISIBLE_ITEMS : orderedRunning.length;
   const overflowCount = canCollapse ? orderedRunning.length - VISIBLE_ITEMS : 0;
-
-  const toggleExpanded = useCallback((id: string) => {
-    setExpandedIds(previous => {
-      const next = new Set(previous);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
-      return next;
-    });
-  }, []);
 
   const heading = (
     <SectionHeading id="happening-now-heading" title="Happening now" count={data?.counts.running ?? null}>
@@ -218,12 +192,7 @@ export const HappeningNowSection: React.FC<DashboardSectionProps> = ({ repositor
     return (
       <ul data-testid="happening-now-list">
         {visible.map(item => (
-          <ActiveRow
-            key={item.id}
-            item={item}
-            expanded={expandedIds.has(item.id)}
-            onToggle={toggleExpanded}
-          />
+          <ActiveRow key={item.id} item={item} />
         ))}
       </ul>
     );

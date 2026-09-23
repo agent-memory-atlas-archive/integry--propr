@@ -167,7 +167,10 @@ test('desktop shows every section with running work in the main column', async (
   await expect(page.getByTestId('happening-now-section')).toContainText('Implementing');
   await expect(page.getByTestId('queue-summary')).toContainText('All agents are busy');
   await expect(page.getByTestId('recent-outcomes-section')).toContainText('Merged');
-  await expect(page.getByTestId('historical-stats-section')).toContainText('Recorded spend');
+  // One word per metric label: `RECORDED SPEND` does not fit a third of this
+  // column, and a heading cut to `RECORDED SP…` reads as a broken grid.
+  await expect(page.getByTestId('historical-stats-section')).toContainText('Spend');
+  await expect(page.getByTestId('historical-stats-section')).not.toContainText('RECORDED SP');
 
   // Five active rows before the list is expanded.
   await expect(page.getByTestId('happening-now-list').locator('li')).toHaveCount(5);
@@ -260,6 +263,20 @@ test('the historical chart carries a scale rather than seven unlabelled shapes',
   const grid = chart.locator('.recharts-cartesian-grid-horizontal line');
   await expect(grid).toHaveCount(2);
   expect(await grid.first().getAttribute('stroke-dasharray')).toBe('3 3');
+
+  // The marker for the latest day is filled and ringed, and it is plotted on
+  // the right edge of the plot area: without a margin the size of its own
+  // radius, half of it hangs past the vertical that the period toggle and the
+  // analytics link sit on.
+  const markers = chart.locator('.recharts-area-dots circle');
+  const lastMarker = await markers.last().boundingBox();
+  const plot = await chart.boundingBox();
+  const railRight = await page.getByTestId('historical-stats-section')
+    .locator('a', { hasText: 'Full analytics' })
+    .evaluate(node => Math.round(node.getBoundingClientRect().right));
+  expect(lastMarker).not.toBeNull();
+  expect(Math.round(lastMarker!.x + lastMarker!.width)).toBeLessThanOrEqual(Math.round(plot!.x + plot!.width));
+  expect(Math.round(lastMarker!.x + lastMarker!.width)).toBeLessThanOrEqual(railRight);
 });
 
 test('the dashboard fits a 320px viewport without horizontal overflow', async ({ page }) => {
