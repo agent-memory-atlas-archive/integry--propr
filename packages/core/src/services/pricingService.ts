@@ -63,6 +63,10 @@ const OFFICIAL_MODEL_PRICING: Readonly<Record<string, ModelPricing>> = {
         prompt: perMillion(10), completion: perMillion(50),
         cacheCreation: perMillion(12.5), cacheRead: perMillion(1)
     },
+    'anthropic/claude-opus-5.5': {
+        prompt: perMillion(4), completion: perMillion(20),
+        cacheCreation: perMillion(5), cacheRead: perMillion(0.2)
+    },
     'anthropic/claude-opus-5': {
         prompt: perMillion(5), completion: perMillion(25),
         cacheCreation: perMillion(6.25), cacheRead: perMillion(0.5)

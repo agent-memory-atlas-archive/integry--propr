@@ -306,6 +306,30 @@ function updateCodexDefaults(agent: AgentConfig): boolean {
     return migrated;
 }
 
+/**
+ * Moves Claude agents still pinned to the previous canonical "opus" model onto
+ * the current default Claude model. Deliberate picks in other tiers (Fable,
+ * Sonnet, Haiku) are left untouched.
+ */
+function updateClaudeDefaults(agent: AgentConfig): boolean {
+    if (agent.type !== 'claude') {
+        return false;
+    }
+
+    if (agent.defaultModel && agent.defaultModel !== 'claude-opus-5') {
+        return false;
+    }
+
+    const defaultModel = AGENT_DEFAULTS.claude.defaultModels[0];
+    if (agent.defaultModel === defaultModel) {
+        return false;
+    }
+
+    agent.defaultModel = defaultModel;
+    logger.info({ agentAlias: agent.alias, defaultModel }, 'Updated Claude default model');
+    return true;
+}
+
 function updateDefaultCliVersion(agent: AgentConfig): boolean {
     if (agent.cliVersionType !== 'default') return false;
     const defaultVersion = AGENT_DEFAULT_VERSIONS[agent.type];
@@ -443,6 +467,7 @@ export function migrateAgentConfig(agent: AgentConfig): boolean {
     }
 
     migrated = updateCodexDefaults(agent) || migrated;
+    migrated = updateClaudeDefaults(agent) || migrated;
     migrated = updateDefaultCliVersion(agent) || migrated;
     migrated = updateAntigravityDefaults(agent) || migrated;
     migrated = normalizeOpenCodeModelIds(agent) || migrated;

@@ -109,6 +109,7 @@ You supply your own provider credentials. The full model catalog, per-agent cred
 
 Add an `llm-<agent>-<model>` label to an issue to choose who processes it:
 
+- `llm-claude-opus55` — Claude Opus 5.5 (the default Claude model)
 - `llm-claude-fable51` — Claude Fable 5.1
 - `llm-codex-astra` — Codex GPT-6 Astra
 - `llm-opencode-big-pickle` — OpenCode Big Pickle

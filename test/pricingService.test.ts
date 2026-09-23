@@ -44,6 +44,22 @@ describe('provider API pricing', () => {
     assert.ok(Math.abs(cost - 41.5840275) < 1e-10);
   });
 
+  test('uses the published Claude Opus 5.5 rates, including prompt cache prices', async () => {
+    const pricing = getOfficialModelPricing('anthropic/claude-opus-5.5');
+
+    assert.deepStrictEqual(pricing, {
+      prompt: 4 / 1_000_000,
+      completion: 20 / 1_000_000,
+      cacheCreation: 5 / 1_000_000,
+      cacheRead: 0.2 / 1_000_000,
+    });
+    assert.strictEqual(
+      await getModelPricing('anthropic/claude-opus-5.5'),
+      pricing,
+      'official pricing should resolve without relying on the OpenRouter cache',
+    );
+  });
+
   test('uses the permanent published Claude Sonnet 5 rates', () => {
     const pricing = getOfficialModelPricing('anthropic/claude-sonnet-5');
 

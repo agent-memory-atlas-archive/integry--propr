@@ -71,8 +71,13 @@ const MODEL_ALIASES: Record<ModelAlias, ModelId> = {
     'claude-fable-5': 'claude-fable-5',
 
     // Default aliases point to latest tier models
-    'opus': 'claude-opus-5',
-    'claude-opus': 'claude-opus-5',
+    'opus': 'claude-opus-5-5',
+    'claude-opus': 'claude-opus-5-5',
+
+    // Explicit 5.5 aliases
+    'opus55': 'claude-opus-5-5',
+    'opus-5-5': 'claude-opus-5-5',
+    'claude-opus-5-5': 'claude-opus-5-5',
 
     // Explicit 5 aliases
     'opus5': 'claude-opus-5',

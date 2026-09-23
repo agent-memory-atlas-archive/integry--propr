@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Claude Opus 5.5**: added to the Claude model catalog (`llm-claude-opus55`, 1M
+  context) and made the default Claude model and the target of the plain `opus`
+  alias. The bundled Claude Code CLI moves to 2.1.280, which is the first release
+  that serves Opus 5.5. Claude agents still defaulting to Opus 5 are migrated to
+  Opus 5.5 on startup; deliberate picks in other tiers are left alone.
 - **Per-repository notifications**: Repositories → Settings now has a
   **Notifications** toggle that stops Inbox and push notifications for plan, task,
   review, pull request, and indexing activity in that repository while automation
