@@ -18,6 +18,20 @@ describe('RepositoryIcon', () => {
     expect(buildRepositoryIconUrl('integry/propr', '/logo.svg')).toBeNull();
   });
 
+  it('renders nothing instead of the GitHub mark when a dense surface opts out of the fallback', () => {
+    const { rerender } = render(<RepositoryIcon repository="integry/propr" fallback="none" />);
+    expect(screen.queryByTestId('repository-icon-fallback')).not.toBeInTheDocument();
+
+    // A repository that does have an icon still renders it.
+    rerender(<RepositoryIcon repository="integry/propr" iconPath="public/logo.svg" revision="main" fallback="none" />);
+    expect(screen.getByTestId('repository-icon-image')).toBeInTheDocument();
+
+    // A broken image collapses back to no mark at all rather than to the GitHub logo.
+    fireEvent.error(screen.getByTestId('repository-icon-image'));
+    expect(screen.queryByTestId('repository-icon-fallback')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('repository-icon-image')).not.toBeInTheDocument();
+  });
+
   it('falls back after an image error and retries when the repository image changes', () => {
     const { rerender } = render(
       <RepositoryIcon repository="integry/one" iconPath="public/favicon.svg" revision="abc123" />,
