@@ -8,7 +8,11 @@ import {
   type GoalLaunchStrategy,
 } from '@propr/core';
 import { projectTaskLiveDetails } from '../routes/liveDetailsRoutes.js';
-import { parseGoalAttachments, publicGoalAttachments } from './goalAttachmentService.js';
+import {
+  parseGoalAttachments,
+  publicGoalAttachments,
+  stripGoalAttachmentSection,
+} from './goalAttachmentService.js';
 
 export interface GoalProjectionRow {
   goal_id: string;
@@ -64,6 +68,82 @@ export interface GoalProjectionRow {
   last_checkpoint_commit_sha: string | null;
   checkpoint_count: number;
   checkpoint_error: string | null;
+}
+
+/** Operator-authored steering message, projected for the goal detail timeline. */
+export interface GoalInputProjection {
+  id: string;
+  message: string;
+  attachmentCount: number;
+  state: 'pending' | 'delivered' | 'undeliverable';
+  createdAt: string | null;
+  deliveredAt: string | null;
+}
+
+interface GoalInputRow {
+  input_id: string;
+  message: string | null;
+  display_message: string | null;
+  attachment_count: number | null;
+  state: string | null;
+  created_at: string | Date | number | null;
+  delivered_at: string | Date | number | null;
+}
+
+const SQLITE_TIMESTAMP = /^(\d{4}-\d{2}-\d{2}) (\d{2}:\d{2}:\d{2}(?:\.\d+)?)$/;
+
+function isoTimestamp(value: string | Date | number | null | undefined): string | null {
+  if (value == null) return null;
+  if (value instanceof Date) return Number.isNaN(value.getTime()) ? null : value.toISOString();
+  if (typeof value === 'number') return Number.isFinite(value) ? new Date(value).toISOString() : null;
+  // SQLite stores `knex.fn.now()` as a UTC datetime without a zone designator.
+  const sqlite = SQLITE_TIMESTAMP.exec(value);
+  return sqlite ? `${sqlite[1]}T${sqlite[2]}Z` : value;
+}
+
+function goalInputState(value: string | null): GoalInputProjection['state'] {
+  return value === 'delivered' || value === 'undeliverable' ? value : 'pending';
+}
+
+/**
+ * `display_message` holds exactly what the operator typed; `message` additionally carries the
+ * attachment paths handed to the provider. Rows written before that column existed are parsed
+ * back apart, which only drops a trailing block of generated attachment entries.
+ */
+function goalInputBody(row: GoalInputRow): { message: string; attachmentCount: number } {
+  if (typeof row.display_message === 'string') {
+    return { message: row.display_message, attachmentCount: Number(row.attachment_count ?? 0) };
+  }
+  return stripGoalAttachmentSection(row.message ?? '');
+}
+
+/** Bodies are projected verbatim: the timeline is evidence of what the operator actually sent. */
+function projectGoalInput(row: GoalInputRow): GoalInputProjection {
+  const { message, attachmentCount } = goalInputBody(row);
+  return {
+    id: row.input_id,
+    message,
+    attachmentCount,
+    state: goalInputState(row.state),
+    createdAt: isoTimestamp(row.created_at),
+    deliveredAt: isoTimestamp(row.delivered_at),
+  };
+}
+
+/**
+ * Only `kind = 'input'` rows are operator-authored. ProPR's own `context` delivery policy,
+ * the synthetic `resume` nudge and empty `control` bookkeeping rows stay out of the timeline.
+ * Every operator correction is returned: the timeline is the evidence that a steering message
+ * was persisted, so nothing may silently fall off the end of a long-running goal.
+ */
+export async function loadGoalInputs(db: Knex, goalId: string, ownerId: string): Promise<GoalInputProjection[]> {
+  const rows = await db('goal_inputs')
+    .where({ goal_id: goalId, owner_id: ownerId, kind: 'input' })
+    .orderBy('sequence', 'asc')
+    .select(
+      'input_id', 'message', 'display_message', 'attachment_count', 'state', 'created_at', 'delivered_at',
+    ) as GoalInputRow[];
+  return rows.map(projectGoalInput);
 }
 
 function parseStats(value: GoalProjectionRow['artifact_stats']): GoalArtifactStats {
@@ -130,12 +210,20 @@ function liveSummary(live: Awaited<ReturnType<typeof projectTaskLiveDetails>>) {
   };
 }
 
+export interface SerializeGoalOptions {
+  /** The goal list projects hundreds of rows; only single-goal responses pay for the timeline. */
+  includeInputs?: boolean;
+}
+
 export async function serializeGoal(
   db: Knex,
   redis: RedisClientType,
   source: GoalProjectionRow,
+  options: SerializeGoalOptions = {},
 ) {
   const row = source;
+  const includeInputs = options.includeInputs !== false;
+  const inputs = includeInputs ? await loadGoalInputs(db, row.goal_id, row.owner_id) : [];
   const live = await projectTaskLiveDetails(redis, db, row.current_task_id, { sessionId: row.session_id });
   const latestHistory = await db('task_history')
     .where({ task_id: row.current_task_id })
@@ -150,6 +238,7 @@ export async function serializeGoal(
       .whereIn('state', ['pending', 'processing']).first('checkpoint_id')
     : null;
   const timing = goalTiming(row);
+  const optionalInputs: { inputs?: GoalInputProjection[] } = includeInputs ? { inputs } : {};
   const projection = {
     id: row.goal_id,
     owner: row.owner_login,
@@ -192,5 +281,8 @@ export async function serializeGoal(
     completedAt: row.completed_at,
     ...timing,
   };
-  return redactVisualPreviewValue(projection) as typeof projection;
+  // Preview redaction rewrites runtime paths inside arbitrary strings, so it runs before the
+  // already-sanitized operator bodies are attached: the timeline must show what was sent verbatim.
+  const redacted = redactVisualPreviewValue(projection) as typeof projection;
+  return { ...redacted, ...optionalInputs };
 }

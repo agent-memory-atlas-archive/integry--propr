@@ -1027,16 +1027,96 @@ const LAUNCH_SERVICES = '/System/Library/Frameworks/CoreServices.framework/Frame
 // re-probed for a bounded window before the copied app is declared stale.
 const LAUNCH_SERVICES_ABSENCE_ATTEMPTS = 10;
 const LAUNCH_SERVICES_ABSENCE_INTERVAL_MS = 1_000;
+// lsregister -dump emits megabytes, so a dump record is never read back through
+// the shared bounded-output helper: that would reduce the probe to whichever
+// records happened to land in the retained OUTPUT_CAP tail.
+const LAUNCH_SERVICES_DUMP_LINE_CAP = 64 * 1024;
+
+export const launchServicesRecordMatchesApplication = (line, applicationRoot) => {
+  const record = line.trim();
+  if (!record.startsWith('path:')) return false;
+  const value = record.slice('path:'.length).trim();
+  if (!value.startsWith(applicationRoot)) return false;
+  const after = value[applicationRoot.length];
+  return after === undefined || /[\s"',)]/.test(after);
+};
+
+// Streams a command's stdout line by line and stops at the first match. Only one
+// bounded line is ever retained, so an unbounded dump is scanned in full without
+// buffering it and without a truncation window deciding the answer.
+export const scanCommandLinesForMatch = (file, args, { env, timeout } = {}, matchesLine) =>
+  new Promise((resolveScan, reject) => {
+    const child = spawn(file, args, { env, shell: false, stdio: ['ignore', 'pipe', 'ignore'] });
+    let carry = '';
+    let matched = false;
+    let settled = false;
+    const settle = (error, value) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (error) reject(error); else resolveScan(value);
+    };
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      child.kill('SIGKILL');
+    }, timeout ?? COMMAND_TIMEOUT_MS);
+    const consume = line => {
+      if (matchesLine(line)) {
+        matched = true;
+        child.kill('SIGKILL');
+      }
+    };
+    child.stdout.setEncoding('utf8');
+    // Stopping early kills the producer mid-write, so a torn read after a match
+    // is the expected end of the scan rather than a failed probe.
+    child.stdout.on('error', () => {
+      if (matched) settle(null, { matched: true });
+      else settle(new NativeLifecycleCommandFailure('COMMAND_FAILED'));
+    });
+    child.stdout.on('data', chunk => {
+      if (matched) return;
+      carry += chunk;
+      let newline = carry.indexOf('\n');
+      while (newline >= 0 && !matched) {
+        consume(carry.slice(0, newline));
+        carry = carry.slice(newline + 1);
+        newline = carry.indexOf('\n');
+      }
+      // A record longer than the cap cannot be a bundle path record; drop it
+      // rather than letting one pathological line grow without bound.
+      if (!matched && carry.length > LAUNCH_SERVICES_DUMP_LINE_CAP) carry = '';
+    });
+    child.once('error', () => settle(new NativeLifecycleCommandFailure('COMMAND_SPAWN_FAILED')));
+    child.once('close', (code, signal) => {
+      if (matched) {
+        settle(null, { matched: true });
+        return;
+      }
+      if (timedOut) {
+        settle(new NativeLifecycleCommandFailure('COMMAND_DEADLINE'));
+        return;
+      }
+      if (code !== 0) {
+        settle(new NativeLifecycleCommandFailure(signal ? 'COMMAND_SIGNALLED' : 'COMMAND_FAILED'));
+        return;
+      }
+      if (carry) consume(carry);
+      settle(null, { matched });
+    });
+  });
 
 export class LaunchServicesAuthority {
   constructor(applicationRoot, environment, {
     runCommand = run,
+    scanCommand = scanCommandLinesForMatch,
     wait = delay,
     absenceAttempts = LAUNCH_SERVICES_ABSENCE_ATTEMPTS,
   } = {}) {
     this.applicationRoot = applicationRoot;
     this.environment = environment;
     this.runCommand = runCommand;
+    this.scanCommand = scanCommand;
     this.wait = wait;
     this.absenceAttempts = absenceAttempts;
     this.registered = false;
@@ -1063,16 +1143,13 @@ export class LaunchServicesAuthority {
   }
 
   async isListed() {
-    const result = await this.runCommand(LAUNCH_SERVICES, ['-dump'], { env: this.environment, timeout: 30_000 });
-    return result.stdout.toString('utf8').split(/\r?\n/).some(line => {
-      const record = line.trim();
-      const index = record.indexOf(this.applicationRoot);
-      if (index < 0) return false;
-      const before = record[index - 1];
-      const after = record[index + this.applicationRoot.length];
-      return (index === 0 || /[\s:"'=]/.test(before))
-        && (after === undefined || /[\s"',)]/.test(after));
-    });
+    const { matched } = await this.scanCommand(
+      LAUNCH_SERVICES,
+      ['-dump'],
+      { env: this.environment, timeout: 30_000 },
+      line => launchServicesRecordMatchesApplication(line, this.applicationRoot),
+    );
+    return matched;
   }
 
   async assertGone() {
@@ -1081,6 +1158,10 @@ export class LaunchServicesAuthority {
         throw new Error('Copied application remained registered with LaunchServices');
       }
       await this.wait(LAUNCH_SERVICES_ABSENCE_INTERVAL_MS);
+      // A bundle opened through LaunchServices can be re-registered by the
+      // system after -u returns, so each re-probe re-issues the removal instead
+      // of only waiting for the first one to be reflected.
+      await this.unregister();
     }
     this.registered = false;
   }

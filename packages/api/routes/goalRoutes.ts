@@ -321,7 +321,7 @@ export function createGoalRoutes(deps: GoalRoutesDeps) {
       deps.db<GoalRow>('goals').where({ owner_id: ownerId }).orderBy('updated_at', 'desc').limit(200)
     );
     const goals = await timeApiStage('goals.projection', () =>
-      Promise.all(rows.map(row => serializeGoal(deps.db, deps.redisClient, row)))
+      Promise.all(rows.map(row => serializeGoal(deps.db, deps.redisClient, row, { includeInputs: false })))
     );
     const media = await (deps.previewReader ?? previewMediaReader).project(rows.map(goalPreviewSource), 3);
     res.json({ goals: goals.map((goal, index) => ({ ...goal,
@@ -577,6 +577,8 @@ export function createGoalRoutes(deps: GoalRoutesDeps) {
     row: GoalRow;
     key: string;
     message: string;
+    /** Operator-authored body shown in the goal timeline, without the appended attachment paths. */
+    displayMessage?: string;
     kind: 'input' | 'resume';
     payloadHash?: string;
     attachments?: GoalAttachment[];
@@ -597,6 +599,8 @@ export function createGoalRoutes(deps: GoalRoutesDeps) {
           payload_hash: payloadHash,
           kind,
           message,
+          display_message: options.displayMessage ?? null,
+          attachment_count: options.attachments?.length ?? 0,
           state: 'pending',
           created_at: trx.fn.now(),
         });
@@ -887,7 +891,8 @@ export function createGoalRoutes(deps: GoalRoutesDeps) {
           return void res.status(400).json({ error: 'Message and attachment references are too long' });
         }
         inputDisposition = await addGoalInput({
-          row, key, message: deliveredMessage, kind: 'input', payloadHash, attachments,
+          row, key, message: deliveredMessage, displayMessage: message.trim(),
+          kind: 'input', payloadHash, attachments,
         });
         if (inputDisposition !== 'inserted') await deleteGoalAttachments(attachments);
       }

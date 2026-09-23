@@ -617,6 +617,58 @@ describe('GoalsPage', () => {
     expect(screen.getAllByText('npm test')).toHaveLength(2);
   });
 
+  it('merges operator corrections into the human readable and raw terminal goal output', async () => {
+    const startedAt = '2026-09-22T10:00:00.000Z';
+    vi.mocked(goalsApi.getGoal).mockResolvedValue({
+      goal: {
+        ...goal,
+        startedAt,
+        inputs: [
+          {
+            id: 'input-1', message: 'Use the existing design tokens', attachmentCount: 2,
+            state: 'delivered', createdAt: '2026-09-22T10:00:30.000Z', deliveredAt: '2026-09-22T10:01:00.000Z',
+          },
+          {
+            id: 'input-2', message: 'Also update the changelog', attachmentCount: 0,
+            state: 'pending', createdAt: '2026-09-22T10:00:10.000Z', deliveredAt: null,
+          },
+        ],
+      },
+    });
+    vi.mocked(getTaskLiveDetails).mockResolvedValue({
+      events: [
+        { id: 'thought-1', type: 'thought', content: 'Starting on the dashboard filters.', timestamp: '2026-09-22T10:00:20.000Z' },
+        { id: 'thought-2', type: 'thought', content: 'Applying the correction now.', timestamp: '2026-09-22T10:02:00.000Z' },
+      ],
+      todos: [],
+      currentTask: 'Run tests',
+      tokenUsage: null,
+    });
+
+    render(<MemoryRouter initialEntries={['/goals/goal-1']}><Routes><Route path="/goals/:goalId" element={<GoalsPage />} /></Routes></MemoryRouter>);
+
+    await screen.findByText('Applying the correction now.');
+    const delivered = screen.getByText('Use the existing design tokens');
+    const log = document.getElementById('thinking-log-section')!;
+    const text = log.textContent || '';
+    // Delivered corrections sit at their delivery time; pending ones wait at the end.
+    expect(text.indexOf('Use the existing design tokens')).toBeGreaterThan(text.indexOf('Starting on the dashboard filters.'));
+    expect(text.indexOf('Applying the correction now.')).toBeGreaterThan(text.indexOf('Use the existing design tokens'));
+    expect(text.indexOf('Also update the changelog')).toBeGreaterThan(text.indexOf('Applying the correction now.'));
+    expect(within(log).getAllByText('YOU')).toHaveLength(2);
+    expect(within(delivered.closest('[data-testid="goal-user-message"]')!).queryByText('Queued')).not.toBeInTheDocument();
+    expect(within(delivered.closest('[data-testid="goal-user-message"]')!).getByText('2 attachments')).toBeInTheDocument();
+    const pending = screen.getByText('Also update the changelog').closest<HTMLElement>('[data-testid="goal-user-message"]')!;
+    expect(within(pending).getByText('Queued')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Raw terminal' }));
+
+    expect(screen.getAllByText('YOU')).toHaveLength(2);
+    expect(screen.getAllByText('Use the existing design tokens').length).toBeGreaterThan(0);
+    expect(screen.getAllByText('Also update the changelog').length).toBeGreaterThan(0);
+    expect(screen.getByText('Queued')).toBeInTheDocument();
+  });
+
   it('uses the refined completed-goal hierarchy and locked command bar', async () => {
     const startedAt = '2026-09-09T10:00:00.000Z';
     vi.mocked(goalsApi.getGoal).mockResolvedValue({

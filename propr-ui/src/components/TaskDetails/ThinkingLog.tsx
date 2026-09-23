@@ -1,7 +1,7 @@
 import React, { useMemo } from 'react';
 import { LiveEvent, TodoItem } from './types';
 import { renderMarkdown } from './renderMarkdown';
-import { Lightbulb, Wrench, Search, CheckCircle2 } from 'lucide-react';
+import { Lightbulb, Wrench, Search, CheckCircle2, MessageSquare } from 'lucide-react';
 import { formatReviewPromptOverview } from './reviewPromptOverview';
 
 // Simple thought type detection based on content
@@ -55,6 +55,57 @@ const getCategoryInfo = (type: 'analysis' | 'action' | 'summary' | 'search') => 
   }
 };
 
+// Operator steering message. Only the goal timeline merges these in; task detail
+// streams never contain a `user_input` event, so this branch stays unreachable there.
+const UserMessageEntry: React.FC<{ event: ThinkingLogEvent }> = ({ event }) => (
+  <div data-testid="goal-user-message" className="py-3 border-b border-slate-50 last:border-b-0">
+    <div className="flex items-start gap-3">
+      {/* Left Gutter - distinct YOU label and icon */}
+      <div className="flex-shrink-0 w-[100px] flex flex-col items-start">
+        <div className="flex items-center gap-1.5">
+          <MessageSquare className="h-3 w-3 text-amber-500" />
+          <span className="text-[11px] font-mono font-bold uppercase tracking-tighter text-amber-600">
+            YOU
+          </span>
+        </div>
+        {event.relativeTime && (
+          <span className="font-mono text-[10px] text-slate-500 mt-0.5 ml-[18px]">
+            {event.relativeTime}
+          </span>
+        )}
+      </div>
+
+      {/* Right Pane - the message exactly as it was sent */}
+      <div className="flex-1 min-w-0 overflow-hidden">
+        <div className="border-l-2 border-amber-400 bg-amber-50/60 px-3 py-2">
+          <p className="m-0 whitespace-pre-wrap break-words text-sm leading-relaxed text-slate-800">
+            {event.content}
+          </p>
+          {(event.inputState === 'pending' || event.inputState === 'undeliverable' || !!event.attachmentCount) && (
+            <div className="mt-1.5 flex flex-wrap items-center gap-2">
+              {event.inputState === 'pending' && (
+                <span className="rounded border border-amber-300 bg-white px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wider text-amber-700">
+                  Queued
+                </span>
+              )}
+              {event.inputState === 'undeliverable' && (
+                <span className="rounded border border-red-200 bg-white px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wider text-red-600">
+                  Not delivered
+                </span>
+              )}
+              {!!event.attachmentCount && (
+                <span className="text-[10px] text-slate-500">
+                  {event.attachmentCount} attachment{event.attachmentCount === 1 ? '' : 's'}
+                </span>
+              )}
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  </div>
+);
+
 interface TerminalLogEntryProps {
   event: ThinkingLogEvent;
   todoContext?: string;
@@ -62,6 +113,10 @@ interface TerminalLogEntryProps {
 }
 
 const TerminalLogEntry: React.FC<TerminalLogEntryProps> = ({ event, todoContext, isHighlighted }) => {
+  if (event.type === 'user_input') {
+    return <UserMessageEntry event={event} />;
+  }
+
   const displayContent = formatReviewPromptOverview(event.content) ?? event.content;
   const thoughtType = detectThoughtType(displayContent || '');
   const categoryInfo = getCategoryInfo(thoughtType);
