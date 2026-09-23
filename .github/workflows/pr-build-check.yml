@@ -9,64 +9,6 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  visual-previews:
-    name: Visual preview release matrix
-    # Rootless opt-in; approval-based trust, not strict admission control. See docs/ci-runners.md.
-    runs-on: ${{ fromJSON(vars.PROPR_ROOTLESS_PR_CHECKS == 'true' && github.actor != 'dependabot[bot]' && ((github.event_name == 'pull_request' && github.event.pull_request.user.login != 'dependabot[bot]' && github.event.pull_request.head.repo.full_name == github.repository) || (github.event_name == 'workflow_dispatch' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch))) && '["self-hosted","Linux","X64","propr-rootless"]' || '["ubuntu-latest"]') }}
-    timeout-minutes: 30
-    permissions:
-      contents: read
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with:
-          persist-credentials: false
-
-      - name: Isolate job state from the shared host
-        if: runner.environment == 'self-hosted'
-        run: |
-          set -euo pipefail
-          ./scripts/ci-rootless-preflight.sh
-          job_root="$RUNNER_TEMP/ci"
-          rm -rf -- "$job_root"
-          mkdir -p "$job_root/home" "$job_root/pw"
-          # TMPDIR is a private 0700 directory directly under the sticky /tmp,
-          # the same ancestry tests get on hosted runners. The runner's own
-          # tree can have a group-writable ancestor, which the CLI's private
-          # directory checks rightly reject, and its long path overflows
-          # Chromium's singleton socket path.
-          tmp_dir="$(mktemp -d /tmp/propr-ci.XXXXXX)"
-          {
-            echo "HOME=$job_root/home"
-            echo "DOCKER_CONFIG=$job_root/home/.docker"
-            echo "TMPDIR=$tmp_dir"
-            echo "PROPR_CI_TMPDIR=$tmp_dir"
-            echo "XDG_CONFIG_HOME=$job_root/home/.config"
-            echo "XDG_CACHE_HOME=$job_root/home/.cache"
-            echo "PLAYWRIGHT_BROWSERS_PATH=$job_root/pw"
-          } >> "$GITHUB_ENV"
-
-      - name: Record runner placement
-        run: ./scripts/ci-runner-evidence.sh
-      - name: Set up Node.js
-        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
-        with:
-          node-version: 22
-          cache: npm
-      - name: Install dependencies
-        run: npm ci
-      - name: Validate mocked Connect and GitHub release paths
-        env:
-          NODE_ENV: test
-          PROPR_DEMO_MODE: 'true'
-        run: npm run test:visual-previews
-
-      - name: Remove job files from the persistent workspace
-        if: always() && runner.environment == 'self-hosted'
-        run: |
-          git -C "$GITHUB_WORKSPACE" clean -ffdxq
-          case "${PROPR_CI_TMPDIR:-}" in /tmp/propr-ci.*) rm -rf -- "$PROPR_CI_TMPDIR" ;; esac
-
   cli-node-matrix:
     name: CLI Agent Skill (Node ${{ matrix.node }})
     # Rootless opt-in; approval-based trust, not strict admission control. See docs/ci-runners.md.
@@ -120,15 +62,39 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Build and test the CLI Agent Skill
+      # One clean install and one dependency build now serve every Linux CLI
+      # command for this Node version. The commands that used to run as the
+      # separate `CLI init JSON (Node N)` job are constituents below: each
+      # keeps its own step and outcome, and the gate at the end fails this
+      # check closed if any of them failed or did not run.
+      - name: Build workspace dependencies
+        id: workspace_build
         run: |
           npm run build -w @propr/shared
           npm run build -w @propr/local-setup
+
+      - name: Typecheck and test the CLI Agent Skill
+        id: agent_skill
+        continue-on-error: true
+        run: |
           npm run typecheck -w @propr/cli
           npx tsx --experimental-test-module-mocks --test \
             packages/cli/src/agentSkill.test.ts \
             packages/cli/src/agentSkill.forceRace.test.ts \
             packages/cli/src/commands/setupCommand.test.ts
+
+      # Ran as its own job and its own `npm ci` until this consolidation. It
+      # needs exactly the dependency build above, so it stays independent of
+      # the Agent Skill result: both constituents report on every run.
+      - name: Parse init JSON output
+        id: init_json
+        continue-on-error: true
+        run: npx tsx --test packages/cli/src/commands/initCommands.test.ts
+
+      - name: Build the CLI and verify packaged skill and native assets
+        id: cli_build
+        continue-on-error: true
+        run: |
           npm run build -w @propr/cli
           test -f packages/cli/dist/skill/propr/SKILL.md
           test -f packages/cli/dist/skill/propr/agents/openai.yaml
@@ -138,6 +104,30 @@ jobs:
           test -f packages/cli/dist/native/prebuilds/linux-x64/directory-operations.node
           test -f packages/cli/dist/native/prebuilds/darwin-arm64/connect-authority-broker
           test -f packages/cli/dist/native/prebuilds/darwin-x64/connect-authority-broker
+
+      # Fails closed: anything other than an explicit success for a
+      # constituent, including a skipped or cancelled step, fails the check.
+      - name: Enforce combined CLI validation results
+        if: always()
+        env:
+          WORKSPACE_BUILD_RESULT: ${{ steps.workspace_build.outcome }}
+          AGENT_SKILL_RESULT: ${{ steps.agent_skill.outcome }}
+          INIT_JSON_RESULT: ${{ steps.init_json.outcome }}
+          CLI_BUILD_RESULT: ${{ steps.cli_build.outcome }}
+        run: |
+          status=0
+          require() {
+            echo "$1: ${2:-did not run}"
+            if [ "${2:-}" != success ]; then
+              echo "::error::$1 finished with result '${2:-did not run}'."
+              status=1
+            fi
+          }
+          require "Workspace dependency build" "$WORKSPACE_BUILD_RESULT"
+          require "CLI Agent Skill typecheck and tests" "$AGENT_SKILL_RESULT"
+          require "CLI init JSON output" "$INIT_JSON_RESULT"
+          require "CLI build and packaged asset assertions" "$CLI_BUILD_RESULT"
+          exit "$status"
 
       - name: Remove job files from the persistent workspace
         if: always() && runner.environment == 'self-hosted'
@@ -536,69 +526,17 @@ jobs:
           RELEASE_CANDIDATE: 'true'
         run: npm run release:verify
 
-      - name: Build MCP test dependencies
-        id: mcp_prepare
-        run: npm run test:prepare
+      # The focused MCP, fast-unit, hosted-tunnel and notification suites used
+      # to run here as well. `Run Full Test Suite` discovers and runs every one
+      # of those files, plus the propr-ui vitest files their UI halves name, on
+      # every pull request. test/ciWorkflowDeduplication.test.mjs proves that
+      # mapping file by file and fails if any of them stops being covered.
+      # `npm run test:unit`, `test:mcp`, `test:hosted-tunnel`,
+      # `test:notifications` and `test:visual-previews` stay available for
+      # local, focused runs.
 
-      - name: Install Chromium for required MCP consent tests
-        id: mcp_browser_setup
-        run: ./scripts/ci-install-chromium.sh
-
-      - name: Verify core MCP OAuth, workflows, browser and security
-        id: mcp_tests
-        env:
-          DATA_DIR: ${{ runner.temp }}/mcp-ci
-          DB_FILENAME: ${{ runner.temp }}/mcp-ci/isolated.sqlite
-        run: |
-          set -euo pipefail
-          mkdir -p "$DATA_DIR"
-          {
-            npm run test:mcp
-            npm run test:mcp:browser
-          } > >(tee -a build_log.txt) 2>&1
-
-      - name: Run Fast Unit Tests
-        id: unit_tests
-        run: |
-          set -euo pipefail
-          {
-            echo
-            echo "--- Fast unit tests ---"
-            echo "Running fast unit tests (no Redis/Docker dependencies)..."
-            npm run test:unit
-            echo "✅ Fast unit tests passed"
-          } > >(tee -a build_log.txt) 2>&1
-
-      - name: Run Hosted Tunnel Regression Tests
-        id: tunnel_tests
-        run: |
-          set -euo pipefail
-          {
-            echo
-            echo "--- Hosted tunnel regression tests ---"
-            echo "Running hosted tunnel regression tests..."
-            # Build workspace dependencies first: the tsx and UI tests below import
-            # from them, so a stale or missing dist in a clean checkout would fail
-            # or use old output. Build once, up front, before their consumers.
-            npm run build -w @propr/shared
-            npm run build -w @propr/local-setup
-            PROPR_DEMO_MODE=true npx tsx --test \
-              test/orchestratorConfig.test.mjs \
-              packages/cli/src/commands/setup/engine.test.ts \
-              packages/cli/src/commands/setup/sequential.test.ts \
-              packages/cli/src/commands/setupCommand.test.ts \
-              packages/cli/src/tui/SetupApp.test.tsx \
-              packages/cli/src/commands/tunnelCommand.test.ts \
-              test/orchestratorTunnelLifecycle.test.mjs \
-              test/orchestratorTunnelStatus.test.mjs \
-              test/orchestratorProprUrlsDrift.test.ts \
-              test/routingWebSocketProtocol.test.ts \
-              test/routingWebSocketIntakeService.test.ts \
-              packages/api/test/corsValidation.test.ts
-            npm --workspace propr-ui test -- runtimeConfig.test.ts compatibility.test.ts
-            echo "✅ Hosted tunnel regression tests passed"
-          } > >(tee -a build_log.txt) 2>&1
-
+      # cli:pack builds @propr/shared, @propr/local-setup and @propr/cli into
+      # the staging package itself, so it needs no separate workspace build.
       - name: Verify CLI Release Package
         id: cli_pack
         run: |
@@ -610,6 +548,13 @@ jobs:
             npm run cli:pack
             echo "✅ propr-cli release package verified"
           } > >(tee -a build_log.txt) 2>&1
+          # cli:pack builds @propr/shared, @propr/local-setup and @propr/cli.
+          # Recorded only after it succeeded, so the changed-area checks below
+          # can reuse this job's own output instead of running tsc over
+          # byte-identical sources again. Nothing is shared between jobs,
+          # runners or commits: the flag lives in this job's environment and is
+          # re-verified against the built files on use.
+          echo "PROPR_CLI_WORKSPACE_DIST_READY=1" >> "$GITHUB_ENV"
 
       - name: Ensure PR base is available for change detection
         env:
@@ -656,19 +601,25 @@ jobs:
           }
           NODE
 
-      - name: Run Notification Regression Tests
-        if: steps.filter.outputs.ui == 'true' || steps.filter.outputs.api == 'true' || steps.filter.outputs.core_package == 'true'
-        env:
-          NODE_ENV: test
-        run: npm run test:notifications
-
+      # The PWA and mobile browser smoke test below runs Playwright `*.pw.ts`
+      # specs. Full-suite discovery matches only `*.test.*`/`*.spec.*`, and the
+      # propr-ui vitest config excludes the Playwright directory, so these
+      # assertions exist nowhere else and stay here.
       - name: Install Chromium for PWA Smoke Test
         if: steps.filter.outputs.ui == 'true'
         run: ./scripts/ci-install-chromium.sh
 
       - name: Run PWA and Mobile Browser Smoke Test
         if: steps.filter.outputs.ui == 'true'
-        run: npm run test:browser --workspace=propr-ui
+        run: |
+          set -euo pipefail
+          # The Playwright web server builds propr-ui, which imports
+          # @propr/shared through its package main. CLI packaging above already
+          # built it from this same checkout and toolchain; build it here only
+          # if that output is not present. @propr/client needs no build: the UI
+          # vite config aliases it to the workspace source.
+          test -f packages/shared/dist/index.js || npm run build -w @propr/shared
+          npm run test:browser --workspace=propr-ui
 
       - name: Run Checks
         id: build
@@ -682,8 +633,24 @@ jobs:
           echo "Starting changed-area validation process..." >> build_log.txt
           SHARED_BUILT=0
           SHARED_FAILED=0
+          LOCAL_SETUP_BUILT=0
+          LOCAL_SETUP_FAILED=0
           CORE_BUILD_ATTEMPTED=0
           CORE_BUILD_FAILED=0
+
+          # The CLI packaging step above already built @propr/shared and
+          # @propr/local-setup from this job's own checkout, on this runner,
+          # with this toolchain, and no step since then changed their sources.
+          # Reuse them only when that step recorded success and the built entry
+          # point is actually present; otherwise build here as before.
+          if [ "${PROPR_CLI_WORKSPACE_DIST_READY:-}" = '1' ] && [ -f packages/shared/dist/index.js ]; then
+            SHARED_BUILT=1
+            echo "Reusing this job's @propr/shared build from CLI packaging." >> build_log.txt
+          fi
+          if [ "${PROPR_CLI_WORKSPACE_DIST_READY:-}" = '1' ] && [ -f packages/local-setup/dist/index.js ]; then
+            LOCAL_SETUP_BUILT=1
+            echo "Reusing this job's @propr/local-setup build from CLI packaging." >> build_log.txt
+          fi
 
           build_shared_once() {
             if [ $SHARED_BUILT -eq 1 ]; then
@@ -698,6 +665,22 @@ jobs:
             }
 
             SHARED_BUILT=1
+            return 0
+          }
+
+          build_local_setup_once() {
+            if [ $LOCAL_SETUP_BUILT -eq 1 ]; then
+              return $LOCAL_SETUP_FAILED
+            fi
+
+            echo "Building @propr/local-setup (dependency)..."
+            LOCAL_SETUP_OUTPUT=$(npm run build -w @propr/local-setup 2>&1) || {
+              LOCAL_SETUP_FAILED=1
+              LOCAL_SETUP_BUILT=1
+              return 1
+            }
+
+            LOCAL_SETUP_BUILT=1
             return 0
           }
 
@@ -731,6 +714,16 @@ jobs:
             }
             if [ $CORE_FAILED -eq 0 ]; then
               echo "✅ Core Lint passed" >> build_log.txt
+            fi
+
+            # The root tsconfig maps @propr/core and @propr/shared to their
+            # sources, but packages/api imports @propr/local-setup through its
+            # published types, so that one has to exist as built output.
+            if ! build_local_setup_once; then
+              echo "❌ Local Setup Package Build FAILED (core dependency)" >> build_log.txt
+              echo "$LOCAL_SETUP_OUTPUT" >> build_log.txt
+              CORE_FAILED=1
+              EXIT_CODE=1
             fi
 
             BUILD_OUTPUT=$(npm run build 2>&1) || {
@@ -990,11 +983,6 @@ jobs:
             echo "Toolchain: ${{ steps.toolchain.outcome }}"
             echo "Dependency install: ${{ steps.install.outcome }}"
             echo "Release metadata: ${{ steps.release_metadata.outcome }}"
-            echo "MCP dependency build: ${{ steps.mcp_prepare.outcome }}"
-            echo "MCP browser setup: ${{ steps.mcp_browser_setup.outcome }}"
-            echo "Core MCP tests: ${{ steps.mcp_tests.outcome }}"
-            echo "Fast tests: ${{ steps.unit_tests.outcome }}"
-            echo "Hosted tunnel tests: ${{ steps.tunnel_tests.outcome }}"
             echo "CLI packaging: ${{ steps.cli_pack.outcome }}"
             echo "Change detection: ${{ steps.filter.outcome }}"
             echo "Changed-area checks: ${{ steps.build.outcome }}"
@@ -1026,75 +1014,6 @@ jobs:
       # Self-hosted only, also on failure and cancellation: removes this job's
       # untracked and ignored files (node_modules, dist, logs) from its own
       # persistent workspace. .git stays for the checkout post step.
-      - name: Remove job files from the persistent workspace
-        if: always() && runner.environment == 'self-hosted'
-        run: |
-          git -C "$GITHUB_WORKSPACE" clean -ffdxq
-          case "${PROPR_CI_TMPDIR:-}" in /tmp/propr-ci.*) rm -rf -- "$PROPR_CI_TMPDIR" ;; esac
-
-  cli-init-json:
-    name: CLI init JSON (Node ${{ matrix.node-version }})
-    # Rootless opt-in; approval-based trust, not strict admission control. See docs/ci-runners.md.
-    runs-on: ${{ fromJSON(vars.PROPR_ROOTLESS_PR_CHECKS == 'true' && github.actor != 'dependabot[bot]' && ((github.event_name == 'pull_request' && github.event.pull_request.user.login != 'dependabot[bot]' && github.event.pull_request.head.repo.full_name == github.repository) || (github.event_name == 'workflow_dispatch' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch))) && '["self-hosted","Linux","X64","propr-rootless"]' || '["ubuntu-latest"]') }}
-    timeout-minutes: 30
-    permissions:
-      contents: read
-    strategy:
-      fail-fast: false
-      matrix:
-        node-version: [22, 24]
-
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with:
-          persist-credentials: false
-
-      - name: Isolate job state from the shared host
-        if: runner.environment == 'self-hosted'
-        run: |
-          set -euo pipefail
-          ./scripts/ci-rootless-preflight.sh
-          job_root="$RUNNER_TEMP/ci"
-          rm -rf -- "$job_root"
-          mkdir -p "$job_root/home" "$job_root/pw"
-          # TMPDIR is a private 0700 directory directly under the sticky /tmp,
-          # the same ancestry tests get on hosted runners. The runner's own
-          # tree can have a group-writable ancestor, which the CLI's private
-          # directory checks rightly reject, and its long path overflows
-          # Chromium's singleton socket path.
-          tmp_dir="$(mktemp -d /tmp/propr-ci.XXXXXX)"
-          {
-            echo "HOME=$job_root/home"
-            echo "DOCKER_CONFIG=$job_root/home/.docker"
-            echo "TMPDIR=$tmp_dir"
-            echo "PROPR_CI_TMPDIR=$tmp_dir"
-            echo "XDG_CONFIG_HOME=$job_root/home/.config"
-            echo "XDG_CACHE_HOME=$job_root/home/.cache"
-            echo "PLAYWRIGHT_BROWSERS_PATH=$job_root/pw"
-          } >> "$GITHUB_ENV"
-
-      - name: Record runner placement
-        run: ./scripts/ci-runner-evidence.sh
-
-      - name: Set up Node.js ${{ matrix.node-version }}
-        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
-        with:
-          node-version: ${{ matrix.node-version }}
-          cache: npm
-          cache-dependency-path: package-lock.json
-
-      - name: Install dependencies
-        run: npm ci
-
-      - name: Build workspace dependencies
-        run: |
-          npm run build --workspace=@propr/shared
-          npm run build --workspace=@propr/local-setup
-
-      - name: Parse init JSON output
-        run: npx tsx --test packages/cli/src/commands/initCommands.test.ts
-
       - name: Remove job files from the persistent workspace
         if: always() && runner.environment == 'self-hosted'
         run: |

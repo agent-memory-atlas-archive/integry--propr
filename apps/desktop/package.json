@@ -16,7 +16,7 @@
   "type": "module",
   "main": ".vite/build/main.cjs",
   "scripts": {
-    "prepare:renderer": "npm run build -w @propr/shared && npm run build -w @propr/local-setup && npm run build -w @propr/cli && npm run build -w @propr/client",
+    "prepare:renderer": "node scripts/prepare-renderer.mjs",
     "predev": "npm run prepare:renderer",
     "dev": "electron-forge start",
     "pretypecheck": "npm run prepare:renderer",

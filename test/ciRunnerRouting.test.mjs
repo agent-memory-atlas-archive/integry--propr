@@ -416,7 +416,7 @@ describe('PR check routing', () => {
     const routedJobs = () => [
         ['pr-test-on-label.yml shard', jobBlock(fullSuite, 'shard')],
         ['pr-test-on-label.yml docs', jobBlock(fullSuite, 'docs')],
-        ...['validate', 'visual-previews', 'cli-node-matrix', 'cli-init-json'].map(job => [`pr-build-check.yml ${job}`, jobBlock(buildCheck, job)]),
+        ...['validate', 'cli-node-matrix'].map(job => [`pr-build-check.yml ${job}`, jobBlock(buildCheck, job)]),
         ['cli-node-compatibility.yml project-options', jobBlock(readWorkflow('cli-node-compatibility.yml'), 'project-options')],
     ];
 
@@ -641,7 +641,8 @@ describe('PR check routing', () => {
     test('routes compatible build checks while keeping native and ordinary-user checks hosted', () => {
         const validate = jobBlock(buildCheck, 'validate');
         assert.match(validate, /runs-on: \$\{\{ fromJSON\(/);
-        assert.equal(validate.split('./scripts/ci-install-chromium.sh').length - 1, 2);
+        // One install, for the Playwright smoke test that nothing else covers.
+        assert.equal(validate.split('./scripts/ci-install-chromium.sh').length - 1, 1);
         const toolContainers = validate.match(/docker run [^\n]*\n[^\n]*\n/g);
         assert.equal(toolContainers.length, 2);
         assert.equal(validate.match(/--mount "type=bind,source=\$GITHUB_WORKSPACE,target=\/work,readonly"/g).length, 2);
@@ -657,13 +658,60 @@ describe('PR check routing', () => {
             'connect-authority-darwin': 'macos-15',
             comment: 'ubuntu-latest',
         };
-        assert.deepEqual(jobNames(buildCheck).sort(), [...Object.keys(expected), 'validate', 'visual-previews', 'cli-node-matrix', 'cli-init-json'].sort());
+        assert.deepEqual(jobNames(buildCheck).sort(), [...Object.keys(expected), 'validate', 'cli-node-matrix'].sort());
         for (const [job, runner] of Object.entries(expected)) {
             assert.match(jobBlock(buildCheck, job), new RegExp(`\n    runs-on: ${runner}\n`), job);
         }
         for (const desktop of ['desktop-release-guard.yml', 'desktop-connect-discovery-guard.yml']) {
             assert.doesNotMatch(readWorkflow(desktop), /self-hosted/, `${desktop} stays hosted`);
         }
+    });
+
+    test('consolidates the Linux CLI checks into one install with every constituent reported', () => {
+        const cli = jobBlock(buildCheck, 'cli-node-matrix');
+        assert.match(cli, /name: CLI Agent Skill \(Node \$\{\{ matrix\.node \}\}\)\n/, 'the check name is unchanged');
+        assert.match(cli, /matrix:\n\s+node: \[22, 24\]\n/, 'both Node versions still run');
+        assert.equal(cli.match(/run: npm ci\n/g).length, 1, 'one clean install serves every constituent');
+        assert.equal(cli.match(/npm run build -w @propr\/shared\n/g).length, 1, 'one dependency build');
+        // The former `CLI init JSON (Node N)` job's command, with the same
+        // dependency build it used to make for itself.
+        assert.match(cli, /- name: Parse init JSON output\n\s+id: init_json\n\s+continue-on-error: true\n\s+run: npx tsx --test packages\/cli\/src\/commands\/initCommands\.test\.ts\n/);
+        assert.ok(!jobNames(buildCheck).includes('cli-init-json'));
+        // Constituents do not mask each other: a failing Agent Skill suite
+        // still lets init JSON and the CLI build report their own results.
+        for (const id of ['agent_skill', 'init_json', 'cli_build']) {
+            assert.match(cli, new RegExp(`id: ${id}\\n\\s+continue-on-error: true\\n`), id);
+        }
+
+        const gate = extractRunBlock(cli, 'Enforce combined CLI validation results');
+        assert.match(cli, /- name: Enforce combined CLI validation results\n\s+if: always\(\)\n/);
+        const outcomes = ['WORKSPACE_BUILD_RESULT', 'AGENT_SKILL_RESULT', 'INIT_JSON_RESULT', 'CLI_BUILD_RESULT'];
+        const labels = [
+            'Workspace dependency build',
+            'CLI Agent Skill typecheck and tests',
+            'CLI init JSON output',
+            'CLI build and packaged asset assertions',
+        ];
+        const evaluate = environment => spawnSync('bash', ['-c', gate], {
+            encoding: 'utf8',
+            env: { PATH: process.env.PATH, ...environment },
+        });
+        const allSucceeded = Object.fromEntries(outcomes.map(name => [name, 'success']));
+
+        const passing = evaluate(allSucceeded);
+        assert.equal(passing.status, 0, passing.stderr);
+        for (const label of labels) assert.ok(passing.stdout.includes(`${label}: success`), label);
+
+        // Missing, failed, cancelled and skipped validation all fail closed.
+        for (const name of outcomes) {
+            for (const outcome of ['failure', 'cancelled', 'skipped', '']) {
+                const result = evaluate({ ...allSucceeded, [name]: outcome });
+                assert.equal(result.status, 1, `${name}=${JSON.stringify(outcome)}`);
+                assert.match(result.stdout, /::error::/);
+            }
+        }
+        const reported = evaluate({ ...allSucceeded, AGENT_SKILL_RESULT: 'failure' }).stdout;
+        for (const label of labels) assert.ok(reported.includes(label), `${label} is still reported`);
     });
 
     test('keeps sanitized artifacts and selects earlier successful shard attempts on partial reruns', () => {

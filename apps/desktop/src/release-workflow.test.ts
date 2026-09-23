@@ -409,13 +409,18 @@ describe('desktop trusted release workflow', () => {
       validation,
       /- name: Make macOS validation packages[\s\S]*?node apps\/desktop\/scripts\/retry-transient-download\.mjs \\\n\s+-- npm run make -w @propr\/desktop -- --arch=\$\{\{ matrix\.arch \}\}\n\s+npm run make:dmg -w @propr\/desktop -- --arch=\$\{\{ matrix\.arch \}\}\n/,
     );
-    assert.equal(validation.match(/retry-transient-download\.mjs/g)?.length, 3);
+    assert.match(
+      validation,
+      /- name: Install locked dependencies\n\s+shell: bash\n\s+run: node apps\/desktop\/scripts\/retry-transient-download\.mjs -- npm ci\n/,
+    );
+    assert.equal(validation.match(/retry-transient-download\.mjs/g)?.length, 4);
     assert.ok(!job('release-package', 'release-finalize').includes('retry-transient-download.mjs'),
       'signed production packaging must not silently repeat signing or notarization');
     assert.match(retryTransientDownload, /export const DEFAULT_ATTEMPTS = 3;/);
     assert.match(retryTransientDownload, /if \(!isTransientDownloadFailure\(output\.text\(\)\)\) \{\n\s+log\('Command failed without a transient download signature; not retrying\.'\);\n\s+return exitCode;/);
     assert.match(retryTransientDownload, /if \(attempt >= attempts\) \{/);
     assert.match(retryTransientDownload, /\/fetch failed\/i/);
+    assert.match(retryTransientDownload, /response code\)\\b\[\^\\n\]\{0,20\}\\b5\\d\{2\}\\b\/i/);
   });
 
   test('keeps complete Windows validation assertions dormant and outside production', () => {

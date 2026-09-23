@@ -189,7 +189,8 @@ jobs:
           npm run desktop:audit:packaging
 
       - name: Install locked dependencies
-        run: npm ci
+        shell: bash
+        run: node apps/desktop/scripts/retry-transient-download.mjs -- npm ci
 
       - name: Provision pinned WiX 3.14.1 binaries for Windows ARM64
         if: matrix.platform == 'win32' && matrix.arch == 'arm64'
