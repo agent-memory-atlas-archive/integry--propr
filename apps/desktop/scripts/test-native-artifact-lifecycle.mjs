@@ -350,9 +350,18 @@ export class NativeLifecycleOperationFailure extends Error {
   }
 }
 
+// A cleanup label alone cannot say why the step failed, so a fixed reason code
+// is carried alongside it when the failure classified itself. The shape guard
+// keeps foreign error text out of the rendered aggregate.
+const cleanupFailureDescriptor = ({ label, error }) => (
+  typeof error?.resultClass === 'string' && /^[A-Z][A-Z0-9_]*$/.test(error.resultClass)
+    ? `${label} [result:${error.resultClass}]`
+    : label
+);
+
 export class NativeLifecycleFailure extends AggregateError {
   constructor(primaryError, cleanupFailures) {
-    const cleanupLabels = cleanupFailures.map(failure => failure.label).sort();
+    const cleanupLabels = cleanupFailures.map(cleanupFailureDescriptor).sort();
     const classification = primaryError instanceof NativeLifecycleOperationFailure
       ? [
           ` [stage:${primaryError.stage}]`,
@@ -1024,13 +1033,27 @@ export const linuxProtocolDispatch = async ({ application, profile, link, env, p
 const LAUNCH_SERVICES = '/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister';
 
 // lsregister -u can return before -dump reflects the removal, so absence is
-// re-probed for a bounded window before the copied app is declared stale.
-const LAUNCH_SERVICES_ABSENCE_ATTEMPTS = 10;
+// re-probed for a bounded window before the copied app is declared stale. The
+// window is a deadline rather than a probe count: one -dump costs milliseconds
+// on an idle host and seconds on a loaded CI runner, so counting probes gives
+// the shortest window exactly where LaunchServices is slowest to settle.
+const LAUNCH_SERVICES_ABSENCE_BUDGET_MS = 120_000;
 const LAUNCH_SERVICES_ABSENCE_INTERVAL_MS = 1_000;
 // lsregister -dump emits megabytes, so a dump record is never read back through
 // the shared bounded-output helper: that would reduce the probe to whichever
 // records happened to land in the retained OUTPUT_CAP tail.
 const LAUNCH_SERVICES_DUMP_LINE_CAP = 64 * 1024;
+
+// A record that outlives the window is reported with a fixed reason code, so an
+// aggregated cleanup failure states whether the registration itself persisted or
+// the bounded probe never answered.
+export class LaunchServicesAbsenceFailure extends Error {
+  constructor() {
+    super('Copied application remained registered with LaunchServices');
+    this.name = 'LaunchServicesAbsenceFailure';
+    this.resultClass = 'RECORD_PERSISTED';
+  }
+}
 
 export const launchServicesRecordMatchesApplication = (line, applicationRoot) => {
   const record = line.trim();
@@ -1111,14 +1134,16 @@ export class LaunchServicesAuthority {
     runCommand = run,
     scanCommand = scanCommandLinesForMatch,
     wait = delay,
-    absenceAttempts = LAUNCH_SERVICES_ABSENCE_ATTEMPTS,
+    now = Date.now,
+    absenceBudgetMs = LAUNCH_SERVICES_ABSENCE_BUDGET_MS,
   } = {}) {
     this.applicationRoot = applicationRoot;
     this.environment = environment;
     this.runCommand = runCommand;
     this.scanCommand = scanCommand;
     this.wait = wait;
-    this.absenceAttempts = absenceAttempts;
+    this.now = now;
+    this.absenceBudgetMs = absenceBudgetMs;
     this.registered = false;
   }
 
@@ -1153,10 +1178,11 @@ export class LaunchServicesAuthority {
   }
 
   async assertGone() {
-    for (let attempt = 1; await this.isListed(); attempt += 1) {
-      if (attempt >= this.absenceAttempts) {
-        throw new Error('Copied application remained registered with LaunchServices');
-      }
+    const deadline = this.now() + this.absenceBudgetMs;
+    // The deadline is only consulted after a probe answered, so the window
+    // always closes on evidence rather than on an unprobed timer.
+    while (await this.isListed()) {
+      if (this.now() >= deadline) throw new LaunchServicesAbsenceFailure();
       await this.wait(LAUNCH_SERVICES_ABSENCE_INTERVAL_MS);
       // A bundle opened through LaunchServices can be re-registered by the
       // system after -u returns, so each re-probe re-issues the removal instead
