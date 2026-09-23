@@ -53,20 +53,27 @@ export function appendGoalAttachments(message: string, attachments: readonly Goa
   return `${message.trimEnd()}\n\n${GOAL_ATTACHMENT_SECTION_HEADING}\n${entries.join('\n')}`;
 }
 
+/** Matches one `appendGoalAttachments` entry: a JSON-quoted name, its media type and a stored path. */
+const GOAL_ATTACHMENT_ENTRY = /^- ".*" \([^()]+\): (\/.+)$/;
+
+function isGeneratedAttachmentEntry(line: string): boolean {
+  const entry = GOAL_ATTACHMENT_ENTRY.exec(line);
+  if (!entry) return false;
+  return entry[1].startsWith(`${path.resolve(GOAL_ATTACHMENT_STORAGE_ROOT)}${path.sep}`);
+}
+
 /**
- * Inverse of {@link appendGoalAttachments} for read paths. The stored message keeps absolute
- * `storedPath` values so the provider can open the files; projections must report only how many
- * files travelled with the message.
+ * Inverse of {@link appendGoalAttachments} for rows written before `goal_inputs.display_message`
+ * existed. Only a trailing block where every line is a generated entry counts as metadata, so an
+ * operator who happens to quote the heading keeps their text intact.
  */
 export function stripGoalAttachmentSection(message: string): { message: string; attachmentCount: number } {
   const marker = `\n\n${GOAL_ATTACHMENT_SECTION_HEADING}\n`;
   const index = message.lastIndexOf(marker);
   if (index === -1) return { message, attachmentCount: 0 };
-  const attachmentCount = message.slice(index + marker.length)
-    .split('\n')
-    .filter(line => line.trimStart().startsWith('- '))
-    .length;
-  return { message: message.slice(0, index), attachmentCount };
+  const entries = message.slice(index + marker.length).split('\n');
+  if (!entries.every(isGeneratedAttachmentEntry)) return { message, attachmentCount: 0 };
+  return { message: message.slice(0, index), attachmentCount: entries.length };
 }
 
 export async function goalUploadIdentity(files: readonly MulterFile[]): Promise<Array<Record<string, unknown>>> {

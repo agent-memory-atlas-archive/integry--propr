@@ -10,6 +10,7 @@ import { up as addGoalCheckpoints } from '../../core/src/db/migrations/202609030
 import { up as addGoalCheckpointDeclarations } from '../../core/src/db/migrations/20260906000000_add_goal_checkpoint_declarations.js';
 import { up as addGoalTitles } from '../../core/src/db/migrations/20260907000000_add_goal_titles.js';
 import { up as addGoalAttachments } from '../../core/src/db/migrations/20260908000000_add_goal_attachments.js';
+import { up as addGoalInputDisplayBody } from '../../core/src/db/migrations/20260923000000_add_goal_input_display_body.js';
 import { createGoalRoutes } from '../routes/goalRoutes.js';
 
 function request(userId: string, params: Record<string, string> = {}, body: unknown = {}): Request {
@@ -43,6 +44,7 @@ test('goal routes keep metadata owner-scoped and queue ordinary input on the sam
         await addGoalCheckpointDeclarations(database);
         await addGoalTitles(database);
         await addGoalAttachments(database);
+        await addGoalInputDisplayBody(database);
         await database.schema.createTable('task_history', table => {
             table.increments('id');
             table.string('task_id');
@@ -337,6 +339,8 @@ test('goal routes keep metadata owner-scoped and queue ordinary input on the sam
         assert.equal(typeof queued[0].data.claimId, 'string');
         const savedInput = await database('goal_inputs').where({ goal_id: 'goal-1' }).first();
         assert.equal(savedInput.message, 'Focus on the API first.');
+        assert.equal(savedInput.display_message, 'Focus on the API first.');
+        assert.equal(savedInput.attachment_count, 0);
         assert.equal(savedInput.state, 'pending');
         const duplicateInput = response();
         await routes.input(inputRequest, duplicateInput.res);
@@ -367,6 +371,8 @@ test('goal routes keep metadata owner-scoped and queue ordinary input on the sam
         assert.match(storedAttachmentInput.message, /Match the attached reference/);
         assert.match(storedAttachmentInput.message, /reference\.png/);
         assert.match(storedAttachmentInput.message, /\/tmp\/git-processor\/goal-attachments\/goal-8/);
+        assert.equal(storedAttachmentInput.display_message, 'Match the attached reference.');
+        assert.equal(storedAttachmentInput.attachment_count, 1);
         assert.equal(JSON.parse((await database('goals').where({ goal_id: 'goal-8' }).first()).attachments).length, 1);
         await routes.input(attachmentInput, response().res);
         assert.equal(attachmentProcessCount, 1);

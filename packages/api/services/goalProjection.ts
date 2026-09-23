@@ -84,6 +84,8 @@ export interface GoalInputProjection {
 interface GoalInputRow {
   input_id: string;
   message: string | null;
+  display_message: string | null;
+  attachment_count: number | null;
   state: string | null;
   created_at: string | Date | number | null;
   delivered_at: string | Date | number | null;
@@ -107,8 +109,20 @@ function goalInputState(value: string | null): GoalInputProjection['state'] {
   return value === 'delivered' || value === 'undeliverable' ? value : 'pending';
 }
 
+/**
+ * `display_message` holds exactly what the operator typed; `message` additionally carries the
+ * attachment paths handed to the provider. Rows written before that column existed are parsed
+ * back apart, which only drops a trailing block of generated attachment entries.
+ */
+function goalInputBody(row: GoalInputRow): { message: string; attachmentCount: number } {
+  if (typeof row.display_message === 'string') {
+    return { message: row.display_message, attachmentCount: Number(row.attachment_count ?? 0) };
+  }
+  return stripGoalAttachmentSection(row.message ?? '');
+}
+
 function projectGoalInput(row: GoalInputRow): GoalInputProjection {
-  const { message, attachmentCount } = stripGoalAttachmentSection(row.message ?? '');
+  const { message, attachmentCount } = goalInputBody(row);
   const truncated = message.length > GOAL_INPUT_MESSAGE_LIMIT;
   return {
     id: row.input_id,
@@ -130,7 +144,9 @@ export async function loadGoalInputs(db: Knex, goalId: string, ownerId: string):
     .where({ goal_id: goalId, owner_id: ownerId, kind: 'input' })
     .orderBy('sequence', 'desc')
     .limit(GOAL_INPUT_PROJECTION_LIMIT)
-    .select('input_id', 'message', 'state', 'created_at', 'delivered_at') as GoalInputRow[];
+    .select(
+      'input_id', 'message', 'display_message', 'attachment_count', 'state', 'created_at', 'delivered_at',
+    ) as GoalInputRow[];
   return rows.reverse().map(projectGoalInput);
 }
 

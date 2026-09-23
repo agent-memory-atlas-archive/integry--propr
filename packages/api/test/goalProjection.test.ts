@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { after, test } from 'node:test';
 import knex from 'knex';
 import type { RedisClientType } from 'redis';
-import { appendGoalAttachments } from '../services/goalAttachmentService.js';
+import { appendGoalAttachments, GOAL_ATTACHMENT_SECTION_HEADING } from '../services/goalAttachmentService.js';
 import { serializeGoal, type GoalProjectionRow } from '../services/goalProjection.js';
 
 after(async () => {
@@ -28,6 +28,8 @@ test('goal projection redacts nested failure, checkpoint, and provider live-summ
       table.text('owner_id');
       table.text('kind');
       table.text('message');
+      table.text('display_message');
+      table.integer('attachment_count');
       table.text('state');
       table.text('created_at');
       table.text('delivered_at');
@@ -146,6 +148,8 @@ async function inputProjectionDatabase() {
     table.text('owner_id');
     table.text('kind');
     table.text('message');
+    table.text('display_message');
+    table.integer('attachment_count');
     table.text('state');
     table.text('created_at');
     table.text('delivered_at');
@@ -191,7 +195,56 @@ test('goal projection exposes operator inputs and hides ProPR control-plane rows
   }
 });
 
-test('goal projection strips appended attachment paths and reports a count instead', async () => {
+test('goal projection keeps operator text that quotes the attachment heading', async () => {
+  const database = await inputProjectionDatabase();
+  try {
+    const authored = [
+      'Reword the upload hint.',
+      '',
+      `${GOAL_ATTACHMENT_SECTION_HEADING}`,
+      'That sentence reads badly — say "attached files" instead.',
+    ].join('\n');
+    await database('goal_inputs').insert([
+      goalInputRow({ input_id: 'input-1', message: authored, display_message: authored, attachment_count: 0 }),
+      // Written before `display_message` existed, so the projection still parses the stored prompt.
+      goalInputRow({ input_id: 'input-2', message: authored }),
+    ]);
+
+    const projected = await serializeGoal(database, emptyRedis, inputGoalRow);
+
+    assert.equal(projected.inputs?.[0].message, authored);
+    assert.equal(projected.inputs?.[0].attachmentCount, 0);
+    assert.equal(projected.inputs?.[1].message, authored);
+    assert.equal(projected.inputs?.[1].attachmentCount, 0);
+  } finally {
+    await database.destroy();
+  }
+});
+
+test('goal projection reports attachment counts without the delivered storage paths', async () => {
+  const database = await inputProjectionDatabase();
+  try {
+    const stored = appendGoalAttachments('Use these mockups', [
+      {
+        id: 'attachment-1', originalName: 'one.png', storedPath: '/tmp/git-processor/goal-attachments/goal-2467/one.webp',
+        mimeType: 'image/webp', size: 10, tokenEstimate: 5, type: 'image' as const,
+      },
+    ]);
+    await database('goal_inputs').insert(goalInputRow({
+      input_id: 'input-1', message: stored, display_message: 'Use these mockups', attachment_count: 1,
+    }));
+
+    const projected = await serializeGoal(database, emptyRedis, inputGoalRow);
+
+    assert.equal(JSON.stringify(projected).includes('/tmp/git-processor/goal-attachments'), false);
+    assert.equal(projected.inputs?.[0].message, 'Use these mockups');
+    assert.equal(projected.inputs?.[0].attachmentCount, 1);
+  } finally {
+    await database.destroy();
+  }
+});
+
+test('goal projection strips appended attachment paths from rows stored before display bodies', async () => {
   const database = await inputProjectionDatabase();
   try {
     const stored = appendGoalAttachments('Use these mockups', [

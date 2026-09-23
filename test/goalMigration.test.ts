@@ -8,6 +8,7 @@ import { down as downDeclarations, up as upDeclarations } from '../packages/core
 import { down as downGoalTitles, up as upGoalTitles } from '../packages/core/src/db/migrations/20260907000000_add_goal_titles.js';
 import { down as downGoalAttachments, up as upGoalAttachments } from '../packages/core/src/db/migrations/20260908000000_add_goal_attachments.js';
 import { down as downGoalAttachmentsRepair, up as upGoalAttachmentsRepair } from '../packages/core/src/db/migrations/20260908010000_ensure_goal_attachments.js';
+import { down as downGoalInputDisplayBody, up as upGoalInputDisplayBody } from '../packages/core/src/db/migrations/20260923000000_add_goal_input_display_body.js';
 
 test('goal migration stores only the durable owner/session execution envelope', async () => {
     const database = knex({
@@ -30,6 +31,7 @@ test('goal migration stores only the durable owner/session execution envelope', 
         await upGoalTitles(database);
         await upGoalAttachments(database);
         await upGoalAttachmentsRepair(database);
+        await upGoalInputDisplayBody(database);
         const columns = await database('goals').columnInfo();
         assert.deepEqual(
             ['goal_id', 'owner_id', 'repository', 'title', 'objective', 'launch_strategy', 'initial_prompt', 'agent_id', 'requested_model', 'desired_state', 'current_task_id', 'session_id', 'worktree_path']
@@ -43,7 +45,7 @@ test('goal migration stores only the durable owner/session execution envelope', 
         );
         const inputColumns = await database('goal_inputs').columnInfo();
         assert.deepEqual(
-            ['sequence', 'input_id', 'goal_id', 'owner_id', 'idempotency_key', 'operation', 'payload_hash', 'kind', 'message', 'state', 'delivered_generation', 'delivered_claim', 'delivered_turn_id', 'delivery_error']
+            ['sequence', 'input_id', 'goal_id', 'owner_id', 'idempotency_key', 'operation', 'payload_hash', 'kind', 'message', 'display_message', 'attachment_count', 'state', 'delivered_generation', 'delivered_claim', 'delivered_turn_id', 'delivery_error']
                 .filter(column => !inputColumns[column]),
             [],
         );
@@ -70,6 +72,8 @@ test('goal migration stores only the durable owner/session execution envelope', 
             database('goals').insert({ ...base, goal_id: 'goal-2' }),
             /unique/i,
         );
+        await downGoalInputDisplayBody(database);
+        assert.equal((await database('goal_inputs').columnInfo()).display_message, undefined);
         await downGoalAttachmentsRepair(database);
         await downGoalAttachments(database);
         await downGoalTitles(database);
