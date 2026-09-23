@@ -3,7 +3,7 @@ import { PreviewThumbnails } from '../components/PreviewMedia';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import {
-  Activity, CheckCircle2, CircleDot, CirclePause, CirclePlay, CircleStop,
+  Activity, AlertTriangle, CheckCircle2, CircleDot, CirclePause, CirclePlay, CircleSlash, CircleStop,
   ExternalLink, FileText, Filter, GitPullRequest, ListTodo, LoaderCircle, Plus, Send,
   MoreHorizontal, Terminal, Trash2, X,
 } from 'lucide-react';
@@ -22,6 +22,7 @@ import ThinkingLog from '../components/TaskDetails/ThinkingLog';
 import { useThinkingLog } from '../components/TaskDetails/useThinkingLog';
 import { RepositorySelector, type RepoOption } from '../components/RepositorySelector';
 import { ProviderLogo } from '../components/ui/ProviderLogo';
+import { RepositoryChip } from '../components/ui/RepositoryChip';
 import { useDocumentTitle } from '../hooks/useDocumentTitle';
 import { formatAgentLabel } from '../utils/agentStatus';
 import { getModelDisplayName } from '../utils/modelDisplay';
@@ -153,6 +154,17 @@ const capabilityAgentLabel = (agent: GoalCapability, agents: GoalCapability[]) =
   agents.map(candidate => ({ type: candidate.agentType, alias: candidate.agentAlias })),
 );
 
+// Every status badge carries the same geometry: one icon, then the label. Success is quiet,
+// so only active work, pauses and failures spend colour.
+const goalStateBadges: Record<string, { Icon: typeof CheckCircle2; color: string; spin?: boolean }> = {
+  running: { Icon: LoaderCircle, color: 'bg-blue-100 text-blue-800', spin: true },
+  cancelling: { Icon: LoaderCircle, color: 'bg-amber-100 text-amber-800', spin: true },
+  paused: { Icon: CirclePause, color: 'bg-amber-100 text-amber-800' },
+  completed: { Icon: CheckCircle2, color: 'bg-slate-100 text-slate-600' },
+  failed: { Icon: AlertTriangle, color: 'bg-red-100 text-red-800' },
+  cancelled: { Icon: CircleSlash, color: 'bg-red-100 text-red-800' },
+};
+
 function GoalState({ goal, quietCompleted = false }: { goal: Goal; quietCompleted?: boolean }) {
   const state = goal.resultState || (goal.desiredState === 'cancelled' ? 'cancelling' : goal.desiredState);
   if (quietCompleted && state === 'completed') {
@@ -161,11 +173,9 @@ function GoalState({ goal, quietCompleted = false }: { goal: Goal; quietComplete
       Completed
     </span>;
   }
-  // Success is quiet: only active work and failures may spend colour.
-  const color = state === 'completed' ? 'bg-slate-100 text-slate-600' : state === 'failed' || state === 'cancelled' ? 'bg-red-100 text-red-800' : state === 'paused' || state === 'cancelling' ? 'bg-amber-100 text-amber-800' : 'bg-blue-100 text-blue-800';
+  const { Icon, color, spin } = goalStateBadges[state] ?? { Icon: CircleDot, color: 'bg-blue-100 text-blue-800' };
   return <span className={`inline-flex items-center gap-1.5 rounded-full px-2 py-0.5 text-xs font-semibold capitalize ${color}`}>
-    {state === 'running' && <LoaderCircle className="h-3 w-3 animate-spin" />}
-    {state === 'completed' && <CheckCircle2 className="h-3 w-3" />}
+    <Icon aria-hidden="true" className={`h-3 w-3 flex-none ${spin ? 'animate-spin' : ''}`.trim()} />
     {state}
   </span>;
 }
@@ -507,7 +517,7 @@ function GoalQueueRow({ goal, goalAgents }: { goal: Goal; goalAgents: Array<{ ty
       </div>
       <div className="min-w-0">
         <span className={queueCellLabel}>Repository</span>
-        <code className="block truncate rounded-sm bg-slate-100 px-1.5 py-0.5 font-mono text-xs text-slate-700" title={goal.repository}>{goal.repository}</code>
+        <RepositoryChip repository={goal.repository} />
       </div>
       <div className="min-w-0">
         <span className={queueCellLabel}>Status</span>
@@ -746,7 +756,8 @@ function GoalDetails({ goalId }: { goalId: string }) {
             <span className="text-[10px] font-bold uppercase tracking-widest text-slate-500">Elapsed</span>
             <span className="font-mono text-xs font-semibold text-slate-700">{duration(goal.elapsedMs)}</span>
             <span aria-hidden="true" className="hidden text-slate-300 sm:inline">•</span>
-            <span className="text-xs text-slate-500">{goal.repository} · {goal.agent.alias}</span>
+            <RepositoryChip repository={goal.repository} />
+            <span className="text-xs text-slate-500">{goal.agent.alias}</span>
           </div>
           <div className="flex flex-wrap items-center justify-end gap-2">
             {goal.desiredState === 'running' && canMutate && <button disabled={busy} onClick={() => act(() => pauseGoal(goal.id))} className={`${buttonClass} border border-amber-300 text-amber-800 hover:bg-amber-50`}><CirclePause className="h-4 w-4" />Pause</button>}

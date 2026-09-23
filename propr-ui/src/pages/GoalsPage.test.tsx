@@ -490,6 +490,39 @@ describe('GoalsPage', () => {
     expect(screen.getByText('1m 15s')).toBeInTheDocument();
   });
 
+  it('gives every status badge the same icon-plus-label geometry', async () => {
+    const states = [
+      { id: 'goal-running', desiredState: 'running' as const, resultState: null, label: 'running' },
+      { id: 'goal-completed', desiredState: 'running' as const, resultState: 'completed' as const, label: 'completed' },
+      { id: 'goal-failed', desiredState: 'running' as const, resultState: 'failed' as const, label: 'failed' },
+      { id: 'goal-paused', desiredState: 'paused' as const, resultState: null, label: 'paused' },
+      { id: 'goal-cancelled', desiredState: 'cancelled' as const, resultState: 'cancelled' as const, label: 'cancelled' },
+      { id: 'goal-cancelling', desiredState: 'cancelled' as const, resultState: null, label: 'cancelling' },
+    ];
+    vi.mocked(goalsApi.listGoals).mockResolvedValue({
+      goals: states.map(({ id, desiredState, resultState }) => ({ ...goal, id, desiredState, resultState })),
+    });
+    render(<MemoryRouter initialEntries={['/goals']}><Routes><Route path="/goals" element={<GoalsPage />} /></Routes></MemoryRouter>);
+
+    await screen.findByText('running');
+    states.forEach(({ label }) => {
+      const badge = screen.getByText(label);
+      expect(badge).toHaveClass('inline-flex', 'items-center', 'gap-1.5', 'rounded-full', 'px-2', 'py-0.5', 'text-xs');
+      expect(badge.querySelector('svg')).not.toBeNull();
+    });
+  });
+
+  it('shows the repository as a hugging monospace chip with its icon', async () => {
+    vi.mocked(goalsApi.listGoals).mockResolvedValue({ goals: [goal] });
+    render(<MemoryRouter initialEntries={['/goals']}><Routes><Route path="/goals" element={<GoalsPage />} /></Routes></MemoryRouter>);
+
+    const chip = await screen.findByTestId('repository-chip');
+    expect(chip).toHaveClass('inline-flex', 'font-mono', 'bg-slate-100', 'border', 'border-slate-200', 'rounded-sm');
+    expect(chip).not.toHaveClass('block', 'w-full');
+    expect(chip).toHaveTextContent('acme/web');
+    expect(within(chip).getByTestId('repository-icon-fallback')).toBeInTheDocument();
+  });
+
   it('keeps completed rows quiet, gray and free of a repeated activity column', async () => {
     vi.mocked(goalsApi.listGoals).mockResolvedValue({ goals: [{
       ...goal,
