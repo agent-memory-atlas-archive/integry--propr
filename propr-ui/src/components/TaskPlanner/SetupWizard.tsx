@@ -37,7 +37,7 @@ import {
   useAutoResize,
   useDraftContextConfigSync,
   usePreviewTrace,
-  useSetupWizardEffects
+  useSetupWizardEffects, type PromptPersistedUpdate
 } from './setupWizardHooks';
 import { getDraftSetupSnapshot } from './setupWizardPayloads';
 import { getDraftContextConfig } from './setupWizardDraftConfig';
@@ -48,6 +48,7 @@ interface SetupWizardProps {
   onDraftCreated?: (draftId: string) => void;
   onDraftCreatedInPlace?: (draft: PlannerDraft) => void;
   onGenerationStarted?: (runId: string) => void;
+  onDraftMetadataPersisted?: (update: PromptPersistedUpdate) => void;
 }
 
 type SetupWizardContentProps = { isNewMode: boolean; draft: PlannerDraft | undefined; config: PlannerConfig; setConfig: React.Dispatch<React.SetStateAction<PlannerConfig>>; repoLoader: ReturnType<typeof useRepositoryLoader>; newModeBranches: ReturnType<typeof useBranchesLoader>; repoInfo: ReturnType<typeof useRepoInfoLoader>; fileHandling: ReturnType<typeof useFileHandling>; generationPolling: ReturnType<typeof useGenerationPolling>; contextExport: ReturnType<typeof useContextExport>; contextRefresh: ReturnType<typeof useContextRefresh>; generationHandlers: ReturnType<typeof useGenerationHandlers>; autoResize: () => void; textareaRef: React.RefObject<HTMLTextAreaElement | null>; fileInputRef: React.RefObject<HTMLInputElement | null>; error: string | null; branchError: string | null; isCreating: boolean; initialConfiguredBaseBranch: string; handleRepoChangeInEditMode: (repo: string, selection?: RepoSelection) => Promise<void>; handleFileInputChange: (e: React.ChangeEvent<HTMLInputElement>) => Promise<void>; handleExportContext: () => void; handleGenerate: () => Promise<void>; handleManualRefresh: () => Promise<void>; agents: ReturnType<typeof useAgentsLoader>; availableRepos: ReturnType<typeof useIndexedRepositoriesLoader>; previewTrace?: GenerationTrace };
@@ -292,16 +293,9 @@ function useSetupWizardConfig(draft: PlannerDraft | undefined, locationState: Lo
   return { config, setConfig, savedSettings, draftContextConfig, initialConfiguredBaseBranch };
 }
 
-interface SetupWizardLoadersParams {
-  isNewMode: boolean;
-  draft: PlannerDraft | undefined;
-  locationState: LocationState | undefined;
-  savedSettings: ReturnType<typeof getPlannerSettings>;
-  config: PlannerConfig;
-  setConfig: React.Dispatch<React.SetStateAction<PlannerConfig>>;
-}
+interface SetupWizardLoadersParams { isNewMode: boolean; draft: PlannerDraft | undefined; locationState: LocationState | undefined; savedSettings: ReturnType<typeof getPlannerSettings>; config: PlannerConfig; setConfig: React.Dispatch<React.SetStateAction<PlannerConfig>>; }
 
-function useSetupWizardLoaders({ isNewMode, draft, locationState, savedSettings, config, setConfig }: SetupWizardLoadersParams, persistPromptOnInitialDraft: boolean) {
+function useSetupWizardLoaders({ isNewMode, draft, locationState, savedSettings, config, setConfig }: SetupWizardLoadersParams, persistPromptOnInitialDraft: boolean, onDraftMetadataPersisted?: (update: PromptPersistedUpdate) => void) {
   const initialRepository = locationState?.initialRepository ?? savedSettings.lastRepository;
   const initialBaseBranch = locationState?.initialBaseBranch ?? savedSettings.lastBaseBranch;
   const repoLoader = useRepositoryLoader(true, initialRepository ?? undefined, initialBaseBranch ?? undefined);
@@ -317,7 +311,7 @@ function useSetupWizardLoaders({ isNewMode, draft, locationState, savedSettings,
     repoLoader.selectedRepo,
     repoLoader.selectedBaseBranch
   );
-  const { flushPrompt } = usePromptPersistence(draft?.draft_id, config.prompt, draft?.initial_prompt, persistPromptOnInitialDraft);
+  const { flushPrompt } = usePromptPersistence(draft?.draft_id, config.prompt, draft?.initial_prompt, persistPromptOnInitialDraft, onDraftMetadataPersisted);
   useDraftSettingsPersistence(draft?.draft_id, config, draft);
 
   return { repoLoader, newModeBranches, repoInfo, agents, availableRepos, flushPrompt };
@@ -348,7 +342,7 @@ function useRepoChangeInEditMode({ draft, config, locationTodoIds, navigate, onD
   }, [config, draft, locationTodoIds, navigate, onDraftCreated, setError, setIsCreating]);
 }
 
-export const SetupWizard: React.FC<SetupWizardProps> = ({ draft, onGenerateComplete, onDraftCreated, onDraftCreatedInPlace, onGenerationStarted }) => {
+export const SetupWizard: React.FC<SetupWizardProps> = ({ draft, onGenerateComplete, onDraftCreated, onDraftCreatedInPlace, onGenerationStarted, onDraftMetadataPersisted }) => {
   const navigate = useNavigate();
   const location = useLocation();
   const locationState = location.state as LocationState | undefined;
@@ -368,7 +362,7 @@ export const SetupWizard: React.FC<SetupWizardProps> = ({ draft, onGenerateCompl
     savedSettings,
     config,
     setConfig
-  }, Boolean(onDraftCreatedInPlace));
+  }, Boolean(onDraftCreatedInPlace), onDraftMetadataPersisted);
   const fileHandling = useFileHandling(isNewMode, draft, setConfig, setError);
   const handleGenerateComplete = useCallback(() => {
     addToast({ type: 'success', message: 'Plan generated successfully' });
