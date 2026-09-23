@@ -1,4 +1,4 @@
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { ExternalLink } from 'lucide-react';
 import type { PublishedVisualPreview } from '@propr/shared';
 import { PreviewImage } from './PreviewMedia';
@@ -10,16 +10,23 @@ import PreviewLightbox from './PreviewLightbox';
  * Callers pass media that already passed `trustedPreviewMedia`.
  */
 export default function VisualPreviewGallery({ previews, className = '' }: { previews: PublishedVisualPreview[]; className?: string }) {
-  const [openIndex, setOpenIndex] = useState<number | null>(null);
+  // The open preview is tracked by url, not index: polling refreshes reorder and replace the list, and
+  // an index would silently swap the image under the reader.
+  const [openUrl, setOpenUrl] = useState<string | null>(null);
   const opener = useRef<HTMLButtonElement | null>(null);
   // Videos keep their native controls inline; only images form the lightbox sequence.
   const images = previews.filter(preview => preview.type === 'image');
+  const openIndex = openUrl === null ? -1 : images.findIndex(image => image.url === openUrl);
+  // A refresh can drop the open preview; clear the selection so a later refresh cannot reopen it unasked.
+  useEffect(() => {
+    if (openUrl !== null && openIndex < 0) setOpenUrl(null);
+  }, [openUrl, openIndex]);
   if (!previews.length) return null;
   return <div className={`flex min-w-0 flex-col gap-4 ${className}`}>
     {previews.map(preview => <figure key={preview.url} className="w-full min-w-0 overflow-hidden rounded-lg border border-slate-200 bg-white shadow-sm">
       {preview.type === 'image'
         ? <button type="button" aria-haspopup="dialog" aria-label={`Open full-size preview: ${preview.title}`}
-          onClick={event => { opener.current = event.currentTarget; setOpenIndex(images.indexOf(preview)); }}
+          onClick={event => { opener.current = event.currentTarget; setOpenUrl(preview.url); }}
           className="block w-full cursor-zoom-in bg-slate-50 focus-visible:outline focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-sky-500">
           <PreviewImage preview={preview} className="max-h-[65vh] w-full object-contain" />
         </button>
@@ -35,7 +42,7 @@ export default function VisualPreviewGallery({ previews, className = '' }: { pre
         {preview.description && <p className="mt-1 break-words text-xs leading-5 text-slate-500">{preview.description}</p>}
       </figcaption>
     </figure>)}
-    {openIndex !== null && images[openIndex] && <PreviewLightbox previews={images} index={openIndex} onIndexChange={setOpenIndex}
-      onClose={() => setOpenIndex(null)} returnFocusTo={opener.current} />}
+    {openIndex >= 0 && <PreviewLightbox previews={images} index={openIndex} onIndexChange={index => setOpenUrl(images[index]?.url ?? null)}
+      onClose={() => setOpenUrl(null)} returnFocusTo={opener.current} />}
   </div>;
 }
