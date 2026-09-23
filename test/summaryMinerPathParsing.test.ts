@@ -142,6 +142,12 @@ describe('summary miner path parsing', () => {
     assert.deepEqual(parsed, [{ path: 'src/a.ts', summary: 'Summary.' }]);
   });
 
+  test('parses file summaries wrapped in an array', () => {
+    const doc = JSON.stringify([{ summaries: [{ path: 'src/a.ts', summary: 'Summary.' }] }]);
+    const parsed = parseBatchResponse(doc, ['src/a.ts']);
+    assert.deepEqual(parsed, [{ path: 'src/a.ts', summary: 'Summary.' }]);
+  });
+
   test('parses directory summaries when the agent emits the JSON document twice', () => {
     const doc = JSON.stringify({ summaries: [{ path: 'integry/propr/src', summary: 'Source root directory.' }] });
     const results = parseBatchDirectoryResponse(`${doc}\n${doc}`, ['integry/propr/src']);

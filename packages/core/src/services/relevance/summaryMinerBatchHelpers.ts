@@ -45,6 +45,16 @@ FILES:
 ${filesContent}`;
 }
 
+/**
+ * Collects the summary entries of a parsed candidate, unwrapping the array
+ * wrappers (`[{ "summaries": [...] }]`) some agents emit around the envelope.
+ */
+function collectSummaryEntries(parsed: unknown): unknown[] {
+  if (Array.isArray(parsed)) return parsed.flatMap(entry => collectSummaryEntries(entry));
+  const summaries = (parsed as { summaries?: unknown } | null)?.summaries;
+  return Array.isArray(summaries) ? summaries : [];
+}
+
 export function parseBatchResponse(response: string, expectedPaths?: string[]): SummaryResult[] {
   // Some agents (seen with Antigravity/Gemini) emit the whole JSON document
   // twice back to back, so parse each balanced JSON value instead of matching
@@ -58,16 +68,17 @@ export function parseBatchResponse(response: string, expectedPaths?: string[]): 
   const results = new Map<string, SummaryResult>();
   let lastError: Error | undefined;
   for (const candidate of candidates) {
-    let parsed: { summaries?: unknown };
+    let parsed: unknown;
     try {
-      parsed = JSON.parse(candidate) as { summaries?: unknown };
+      parsed = JSON.parse(candidate);
     } catch (error) {
       lastError = error as Error;
       continue;
     }
-    if (!Array.isArray(parsed.summaries)) continue;
+    const entries = collectSummaryEntries(parsed);
+    if (entries.length === 0) continue;
 
-    for (const summary of parsed.summaries as SummaryResult[]) {
+    for (const summary of entries as SummaryResult[]) {
       if (typeof summary?.path !== 'string' || typeof summary.summary !== 'string'
         || summary.path.trim().length === 0 || summary.summary.trim().length === 0) continue;
       const expectedPath = expectedPaths
