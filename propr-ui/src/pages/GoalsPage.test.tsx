@@ -1,6 +1,6 @@
 /* eslint-disable max-lines -- list and detail behavior share one focused route-level suite */
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
-import { MemoryRouter, Route, Routes } from 'react-router-dom';
+import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import GoalsPage from './GoalsPage';
 import * as goalsApi from '../api/goals';
@@ -49,6 +49,9 @@ const goal: goalsApi.Goal = {
   taskState: 'claude_execution', createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
   startedAt: new Date().toISOString(), pausedAt: null, completedAt: null, elapsedMs: 1000, activeMs: 1000, pausedMs: 0,
 };
+
+/** Surfaces the query string so filter tests can assert what a shared goals URL carries. */
+const LocationProbe = () => <span data-testid="location-search">{useLocation().search}</span>;
 
 const openGoalCreator = () => fireEvent.click(screen.getByRole('button', { name: 'New goal' }));
 
@@ -365,14 +368,16 @@ describe('GoalsPage', () => {
     expect(within(queue).getAllByRole('link')).toHaveLength(4);
     expect(screen.getByText('4 of 4')).toBeInTheDocument();
     expect(screen.queryByText(longTodo)).not.toBeInTheDocument();
-    expect(screen.getAllByText('2 open of 2 steps')).toHaveLength(4);
+    expect(screen.getAllByText('2/2 steps')).toHaveLength(4);
 
     const firstLink = within(queue).getAllByRole('link')[0];
-    expect(firstLink).toHaveClass('grid', 'grid-cols-2', 'xl:items-center');
+    expect(firstLink).toHaveClass('grid', 'grid-cols-2', 'lg:items-center');
+    expect(firstLink.className).toContain('lg:grid-cols-[');
     expect(firstLink.className).toContain('xl:grid-cols-[');
     expect(queue.parentElement).toHaveClass('border-y');
     expect(queue.parentElement).not.toHaveClass('rounded-lg', 'shadow-sm');
-    expect(screen.getByText(queueGoals[0].objective)).toHaveClass('line-clamp-2');
+    expect(screen.getByText(queueGoals[0].objective)).toHaveClass('truncate');
+    expect(screen.getByText(queueGoals[0].title)).toHaveClass('truncate', 'text-sm', 'font-semibold');
   });
 
   it('confirms discarding unsaved creation input and restores focus on cancel or Escape', async () => {
@@ -462,15 +467,114 @@ describe('GoalsPage', () => {
       },
     }] });
     render(<MemoryRouter initialEntries={['/goals']}><Routes><Route path="/goals" element={<GoalsPage />} /></Routes></MemoryRouter>);
-    expect(await screen.findByText('330 tokens')).toBeInTheDocument();
-    expect(screen.getByText('42s active')).toBeInTheDocument();
-    expect(screen.getByText('1/1 open issues')).toBeInTheDocument();
-    expect(screen.getByText('1/1 open PRs')).toBeInTheDocument();
+    expect(await screen.findByText('330')).toBeInTheDocument();
+    expect(screen.getByText('42s')).toBeInTheDocument();
+    expect(screen.getByText('1 issue')).toBeInTheDocument();
+    expect(screen.getByText('1 PR')).toBeInTheDocument();
     expect(screen.getByText('Implement API')).toBeInTheDocument();
-    expect(screen.getByText(goal.title)).toHaveClass('line-clamp-2');
-    expect(screen.getByText(goal.objective)).toHaveClass('line-clamp-2');
-    expect(screen.getByText('Codex')).toBeInTheDocument();
+    expect(screen.getByText(goal.title)).toHaveClass('truncate');
+    expect(screen.getByText(goal.objective)).toHaveClass('truncate');
+    expect(screen.getByText('acme/web')).toHaveClass('font-mono');
+    expect(screen.getByText('Codex')).toHaveClass('sr-only');
     expect(screen.getByText('GPT-5.6 Sol')).toBeInTheDocument();
+  });
+
+  it('abbreviates large token counts and keeps the exact total on hover', async () => {
+    vi.mocked(goalsApi.listGoals).mockResolvedValue({ goals: [{
+      ...goal,
+      liveSummary: {
+        ...goal.liveSummary,
+        nativeGoal: { objective: goal.objective, status: 'active', tokenBudget: 0, tokensUsed: 101_280_735, timeUsedSeconds: 75 },
+      },
+    }] });
+    render(<MemoryRouter initialEntries={['/goals']}><Routes><Route path="/goals" element={<GoalsPage />} /></Routes></MemoryRouter>);
+
+    const tokens = await screen.findByText('101M');
+    expect(tokens).toHaveAttribute('title', '101,280,735 tokens');
+    expect(screen.getByText('1m 15s')).toBeInTheDocument();
+  });
+
+  it('gives every status badge the same icon-plus-label geometry', async () => {
+    const states = [
+      { id: 'goal-running', desiredState: 'running' as const, resultState: null, label: 'running' },
+      { id: 'goal-completed', desiredState: 'running' as const, resultState: 'completed' as const, label: 'completed' },
+      { id: 'goal-failed', desiredState: 'running' as const, resultState: 'failed' as const, label: 'failed' },
+      { id: 'goal-paused', desiredState: 'paused' as const, resultState: null, label: 'paused' },
+      { id: 'goal-cancelled', desiredState: 'cancelled' as const, resultState: 'cancelled' as const, label: 'cancelled' },
+      { id: 'goal-cancelling', desiredState: 'cancelled' as const, resultState: null, label: 'cancelling' },
+    ];
+    vi.mocked(goalsApi.listGoals).mockResolvedValue({
+      goals: states.map(({ id, desiredState, resultState }) => ({ ...goal, id, desiredState, resultState })),
+    });
+    render(<MemoryRouter initialEntries={['/goals']}><Routes><Route path="/goals" element={<GoalsPage />} /></Routes></MemoryRouter>);
+
+    await screen.findByText('running');
+    states.forEach(({ label }) => {
+      const badge = screen.getByText(label);
+      expect(badge).toHaveClass('inline-flex', 'items-center', 'gap-1.5', 'rounded-full', 'px-2', 'py-0.5', 'text-xs');
+      expect(badge.querySelector('svg')).not.toBeNull();
+    });
+  });
+
+  it('shows the repository as a hugging monospace chip with no repeated GitHub fallback mark', async () => {
+    vi.mocked(goalsApi.listGoals).mockResolvedValue({ goals: [goal] });
+    render(<MemoryRouter initialEntries={['/goals']}><Routes><Route path="/goals" element={<GoalsPage />} /></Routes></MemoryRouter>);
+
+    const chip = await screen.findByTestId('repository-chip');
+    expect(chip).toHaveClass('inline-flex', 'font-mono', 'bg-slate-100', 'border', 'border-slate-200', 'rounded-sm');
+    expect(chip).not.toHaveClass('block', 'w-full');
+    expect(chip).toHaveTextContent('acme/web');
+    // Repositories without their own icon leave the slug alone instead of repeating the GitHub logo.
+    expect(within(chip).queryByTestId('repository-icon-fallback')).not.toBeInTheDocument();
+  });
+
+  it('holds one uniform row height with a single neutral sub-status line', async () => {
+    vi.mocked(goalsApi.listGoals).mockResolvedValue({ goals: [
+      { ...goal, id: 'goal-running' },
+      {
+        ...goal,
+        id: 'goal-settled',
+        resultState: 'completed' as const,
+        artifactStats: { issues: 0, openIssues: 0, pullRequests: 0, openPullRequests: 0 },
+      },
+    ] });
+    render(<MemoryRouter initialEntries={['/goals']}><Routes><Route path="/goals" element={<GoalsPage />} /></Routes></MemoryRouter>);
+
+    const queue = await screen.findByRole('list', { name: 'Goal work queue' });
+    // A busy row and a settled row are the same height on the desktop table.
+    within(queue).getAllByRole('link').forEach(row => expect(row).toHaveClass('lg:h-16', 'lg:items-center'));
+
+    // Status, running task and step count share one line, and the sub-status stays neutral slate.
+    const activity = screen.getByText('Implement API');
+    const subStatus = activity.parentElement as HTMLElement;
+    expect(subStatus).toHaveClass('flex', 'items-center', 'text-slate-500');
+    expect(subStatus).not.toHaveClass('text-blue-500', 'text-blue-600');
+    expect(activity).toHaveClass('truncate');
+    expect(within(subStatus).getByText('1/1 steps')).toHaveAttribute('title', '1 open of 1 steps');
+    expect(subStatus.querySelector('.text-blue-500')).toBeNull();
+
+    // The goal cell keeps its model beside the objective rather than adding a third line.
+    const objective = screen.getAllByText(goal.objective)[0];
+    expect(objective).toHaveClass('truncate');
+    expect(within(objective.parentElement as HTMLElement).getByText('GPT-5.6 Sol')).toBeInTheDocument();
+  });
+
+  it('keeps completed rows quiet, gray and free of a repeated activity column', async () => {
+    vi.mocked(goalsApi.listGoals).mockResolvedValue({ goals: [{
+      ...goal,
+      desiredState: 'running' as const,
+      resultState: 'completed' as const,
+      artifactStats: { issues: 0, openIssues: 0, pullRequests: 0, openPullRequests: 0 },
+    }] });
+    render(<MemoryRouter initialEntries={['/goals']}><Routes><Route path="/goals" element={<GoalsPage />} /></Routes></MemoryRouter>);
+
+    const completed = await screen.findByText('completed');
+    expect(completed).toHaveClass('bg-slate-100', 'text-slate-600');
+    expect(completed).not.toHaveClass('bg-green-100');
+    // A settled goal has no live activity or open checklist to report.
+    expect(screen.queryByText('Implement API')).not.toBeInTheDocument();
+    expect(screen.queryByText('1/1 steps')).not.toBeInTheDocument();
+    expect(screen.getByText('—')).toBeInTheDocument();
   });
 
   it('filters goals by repository and stores the selection in the URL', async () => {
@@ -510,6 +614,74 @@ describe('GoalsPage', () => {
     expect(screen.getByText('1 of 1')).toBeInTheDocument();
   });
 
+  it('filters goals by status, folds cancelling into cancelled, and stores the selection in the URL', async () => {
+    const pausedGoal = { ...goal, id: 'goal-2', title: 'Tune Billing Retries', desiredState: 'paused' as const };
+    const cancellingGoal = { ...goal, id: 'goal-3', title: 'Retire Legacy Worker', desiredState: 'cancelled' as const, resultState: null };
+    vi.mocked(goalsApi.listGoals).mockResolvedValue({ goals: [goal, pausedGoal, cancellingGoal] });
+
+    render(<MemoryRouter initialEntries={['/goals?status=paused']}><Routes><Route path="/goals" element={<><GoalsPage /><LocationProbe /></>} /></Routes></MemoryRouter>);
+
+    expect(await screen.findByText(pausedGoal.title)).toBeInTheDocument();
+    expect(screen.queryByText(goal.title)).not.toBeInTheDocument();
+    expect(screen.getByText('1 of 3')).toBeInTheDocument();
+
+    const statusFilter = screen.getByRole('combobox', { name: 'Filter goals by status' });
+    fireEvent.change(statusFilter, { target: { value: 'cancelled' } });
+
+    expect(await screen.findByText(cancellingGoal.title)).toBeInTheDocument();
+    expect(screen.queryByText(pausedGoal.title)).not.toBeInTheDocument();
+    expect(screen.getByTestId('location-search')).toHaveTextContent('status=cancelled');
+
+    fireEvent.change(statusFilter, { target: { value: 'all' } });
+
+    expect(await screen.findByText(goal.title)).toBeInTheDocument();
+    expect(screen.getByText('3 of 3')).toBeInTheDocument();
+    expect(screen.getByTestId('location-search')).not.toHaveTextContent('status=');
+  });
+
+  it('narrows the queue by every search keyword and mirrors the query in the URL', async () => {
+    const apiGoal = {
+      ...goal,
+      id: 'goal-2',
+      repository: 'acme/api',
+      title: 'Launch Billing API',
+      objective: 'Ship the billing API',
+    };
+    vi.mocked(goalsApi.listGoals).mockResolvedValue({ goals: [goal, apiGoal] });
+
+    render(<MemoryRouter initialEntries={['/goals']}><Routes><Route path="/goals" element={<><GoalsPage /><LocationProbe /></>} /></Routes></MemoryRouter>);
+
+    expect(await screen.findByText(goal.title)).toBeInTheDocument();
+    fireEvent.change(screen.getByRole('textbox', { name: 'Search goals' }), { target: { value: 'billing api' } });
+
+    await waitFor(() => expect(screen.queryByText(goal.title)).not.toBeInTheDocument());
+    expect(screen.getByText(apiGoal.title)).toBeInTheDocument();
+    expect(screen.getByText('1 of 2')).toBeInTheDocument();
+    // The debounced navigation lands in a transition, so the router commits it after the filtered list.
+    await waitFor(() => expect(screen.getByTestId('location-search')).toHaveTextContent('search=billing+api'));
+
+    fireEvent.click(screen.getByRole('button', { name: 'Clear search' }));
+
+    expect(await screen.findByText(goal.title)).toBeInTheDocument();
+    expect(screen.getByText('2 of 2')).toBeInTheDocument();
+    expect(screen.getByTestId('location-search')).not.toHaveTextContent('search=');
+  });
+
+  it('names the search that emptied the queue and resets every filter at once', async () => {
+    vi.mocked(goalsApi.listGoals).mockResolvedValue({ goals: [goal] });
+
+    render(<MemoryRouter initialEntries={['/goals?repository=acme/web&status=failed&search=nothing%20here']}><Routes><Route path="/goals" element={<GoalsPage />} /></Routes></MemoryRouter>);
+
+    expect(await screen.findByText('No goals match “nothing here”')).toBeInTheDocument();
+    expect(screen.getByText('0 of 1')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Show all goals' }));
+
+    expect(await screen.findByText(goal.title)).toBeInTheDocument();
+    expect(screen.getByRole('textbox', { name: 'Search goals' })).toHaveValue('');
+    expect(screen.getByRole('combobox', { name: 'Filter goals by status' })).toHaveValue('all');
+  });
+
   it('renders existing task live details and sends canned status input through the same session', async () => {
     render(<MemoryRouter initialEntries={['/goals/goal-1']}><Routes><Route path="/goals/:goalId" element={<GoalsPage />} /></Routes></MemoryRouter>);
     expect((await screen.findAllByText('Implement API')).length).toBeGreaterThan(0);
@@ -532,11 +704,11 @@ describe('GoalsPage', () => {
     demoState.isDemoMode = true;
     render(<MemoryRouter initialEntries={['/goals/goal-1']}><Routes><Route path="/goals/:goalId" element={<GoalsPage />} /></Routes></MemoryRouter>);
 
-    expect(await screen.findByPlaceholderText('Demo mode is read-only. Corrections disabled.')).toBeDisabled();
+    expect(await screen.findByText('Demo mode is read-only. Corrections disabled.')).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Pause' })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Cancel' })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: "What's done?" })).not.toBeInTheDocument();
-    expect(screen.getByLabelText('Correction or follow-up')).toBeDisabled();
+    expect(screen.queryByLabelText('Correction or follow-up')).not.toBeInTheDocument();
     expect(screen.queryByLabelText('Model for next continuation')).not.toBeInTheDocument();
 
     fireEvent.click(screen.getByLabelText('More goal actions'));
@@ -573,6 +745,126 @@ describe('GoalsPage', () => {
     expect(goalsApi.getGoalVisualPreviews).toHaveBeenCalledWith('goal-1');
   });
 
+  it('stacks goal previews full width and opens images in the shared lightbox', async () => {
+    vi.mocked(goalsApi.getGoal).mockResolvedValue({
+      goal: { ...goal, finalPr: { number: 42, url: 'https://github.com/acme/web/pull/42' } },
+    });
+    vi.mocked(goalsApi.getGoalVisualPreviews).mockResolvedValue({
+      previews: [
+        { type: 'image', title: 'Dashboard filters', url: 'https://github.com/user-attachments/assets/preview-1' },
+        { type: 'video', title: 'Filter walkthrough', url: 'https://github.com/user-attachments/assets/preview-2' },
+        { type: 'image', title: 'Untrusted', url: 'https://evil.test/preview.png' },
+      ],
+    });
+
+    const { container } = render(<MemoryRouter initialEntries={['/goals/goal-1']}><Routes><Route path="/goals/:goalId" element={<GoalsPage />} /></Routes></MemoryRouter>);
+
+    await screen.findByRole('heading', { name: 'Visual previews' });
+    const figures = container.querySelectorAll('figure');
+    expect(figures).toHaveLength(2);
+    figures.forEach(figure => expect(figure).toHaveClass('w-full'));
+    expect(figures[0].parentElement).toHaveClass('flex-col');
+    expect(figures[0].parentElement?.className).not.toMatch(/grid-cols/);
+    expect(screen.getByAltText('Dashboard filters')).toHaveClass('max-h-[65vh]', 'w-full', 'object-contain');
+    expect(container.querySelector('video')).toHaveClass('w-full');
+    expect(screen.queryByText('Untrusted')).toBeNull();
+
+    const trigger = screen.getByRole('button', { name: 'Open full-size preview: Dashboard filters' });
+    trigger.focus();
+    fireEvent.click(trigger);
+    const dialog = screen.getByRole('dialog', { name: 'Dashboard filters' });
+    expect(within(dialog).getByAltText('Dashboard filters')).toHaveAttribute('src', 'https://github.com/user-attachments/assets/preview-1');
+    fireEvent.keyDown(dialog, { key: 'Escape' });
+    expect(screen.queryByRole('dialog')).toBeNull();
+    expect(document.activeElement).toBe(trigger);
+  });
+
+  it('keeps the preview stack in the goal reading column between the context and the queue', async () => {
+    vi.mocked(goalsApi.getGoal).mockResolvedValue({
+      goal: { ...goal, finalPr: { number: 42, url: 'https://github.com/acme/web/pull/42' } },
+    });
+    vi.mocked(goalsApi.getGoalVisualPreviews).mockResolvedValue({
+      previews: [{ type: 'image', title: 'Dashboard filters', url: 'https://github.com/user-attachments/assets/preview-1' }],
+    });
+
+    const { container } = render(<MemoryRouter initialEntries={['/goals/goal-1']}><Routes><Route path="/goals/:goalId" element={<GoalsPage />} /></Routes></MemoryRouter>);
+
+    await screen.findByRole('heading', { name: 'Visual previews' });
+    const column = container.querySelector('main[aria-label="Goal monitor"]')!;
+    const sections = [...column.children].map(child => child.getAttribute('aria-labelledby'));
+    expect(sections.slice(0, 3)).toEqual(['goal-context-heading', 'goal-visual-previews-heading', 'live-progress-heading']);
+    // The evidence belongs to the reading column, not to the steering rail beside it.
+    expect(column.querySelector('section[aria-labelledby="goal-visual-previews-heading"] figure')).toBeInTheDocument();
+    expect(container.querySelector('aside[aria-label="Steering console"] figure')).toBeNull();
+  });
+
+  it('highlights only the running queue step and never a second row beside it', async () => {
+    vi.mocked(getTaskLiveDetails).mockResolvedValue({
+      events: [],
+      // A provider can name a different current activity than the step it flagged in progress.
+      currentTask: 'Align the metadata row',
+      todos: [
+        { id: 'todo-1', content: 'Align the metadata row', status: 'completed' },
+        { id: 'todo-2', content: 'Clip the session identifier inside its metric column', status: 'in_progress' },
+        { id: 'todo-3', content: 'Publish the evidence', status: 'in_progress' },
+        { id: 'todo-4', content: 'Neutralize the pending rows', status: 'pending' },
+      ],
+      tokenUsage: null,
+    });
+
+    const { container } = render(<MemoryRouter initialEntries={['/goals/goal-1']}><Routes><Route path="/goals/:goalId" element={<GoalsPage />} /></Routes></MemoryRouter>);
+
+    await screen.findByText('Clip the session identifier inside its metric column');
+    const queue = container.querySelector('section[aria-labelledby="live-progress-heading"]')!;
+    const highlighted = [...queue.querySelectorAll('li')].filter(item => item.className.includes('bg-blue-50'));
+    expect(highlighted).toHaveLength(1);
+    expect(highlighted[0]).toHaveTextContent('Clip the session identifier inside its metric column');
+    expect(highlighted[0]).toHaveAttribute('aria-current', 'step');
+    // The queue carries no second active surface: the banner would restate what the row already says.
+    expect(screen.queryByText('Current:')).toBeNull();
+    expect(screen.getByText('Publish the evidence').closest('li')).not.toHaveClass('bg-blue-50');
+    expect(screen.getByText('Neutralize the pending rows').closest('li')).not.toHaveClass('bg-blue-50');
+  });
+
+  it('names the current activity only while no queue row is running', async () => {
+    vi.mocked(getTaskLiveDetails).mockResolvedValue({
+      events: [],
+      currentTask: 'Collecting the evidence',
+      todos: [
+        { id: 'todo-1', content: 'Align the metadata row', status: 'completed' },
+        { id: 'todo-2', content: 'Publish the evidence', status: 'pending' },
+      ],
+      tokenUsage: null,
+    });
+
+    const { container } = render(<MemoryRouter initialEntries={['/goals/goal-1']}><Routes><Route path="/goals/:goalId" element={<GoalsPage />} /></Routes></MemoryRouter>);
+
+    await screen.findByText('Align the metadata row');
+    const queue = container.querySelector('section[aria-labelledby="live-progress-heading"]')!;
+    expect(within(queue as HTMLElement).getByText('Collecting the evidence')).toBeInTheDocument();
+    expect([...queue.querySelectorAll('li')].filter(item => item.className.includes('bg-blue-50'))).toHaveLength(0);
+  });
+
+  it('leaves every queue row neutral once the goal has settled', async () => {
+    vi.mocked(goalsApi.getGoal).mockResolvedValue({ goal: { ...goal, resultState: 'completed' as const, taskState: 'completed', completedAt: new Date().toISOString() } });
+    vi.mocked(getTaskLiveDetails).mockResolvedValue({
+      events: [],
+      currentTask: 'Publish the evidence',
+      todos: [
+        { id: 'todo-1', content: 'Align the metadata row', status: 'completed' },
+        { id: 'todo-2', content: 'Publish the evidence', status: 'in_progress' },
+      ],
+      tokenUsage: null,
+    });
+
+    const { container } = render(<MemoryRouter initialEntries={['/goals/goal-1']}><Routes><Route path="/goals/:goalId" element={<GoalsPage />} /></Routes></MemoryRouter>);
+
+    await screen.findByText('Publish the evidence');
+    const queue = container.querySelector('section[aria-labelledby="live-progress-heading"]')!;
+    expect([...queue.querySelectorAll('li')].filter(item => item.className.includes('bg-blue-50'))).toHaveLength(0);
+    expect(screen.queryByText('Current:')).toBeNull();
+  });
+
   it('sends files and pasted images with a running goal correction', async () => {
     render(<MemoryRouter initialEntries={['/goals/goal-1']}><Routes><Route path="/goals/:goalId" element={<GoalsPage />} /></Routes></MemoryRouter>);
     const correction = await screen.findByLabelText('Correction or follow-up');
@@ -606,7 +898,8 @@ describe('GoalsPage', () => {
     render(<MemoryRouter initialEntries={['/goals/goal-1']}><Routes><Route path="/goals/:goalId" element={<GoalsPage />} /></Routes></MemoryRouter>);
 
     await waitFor(() => expect(screen.getByText('Implemented the dashboard filters.')).toBeInTheDocument());
-    expect(screen.getByText('IMPLEMENTATION LOG')).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: 'Implementation log' })).toBeInTheDocument();
+    expect(screen.queryByText('IMPLEMENTATION LOG')).not.toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Human readable' })).toHaveAttribute('aria-pressed', 'true');
     expect(screen.getByRole('button', { name: 'Raw terminal' })).toHaveAttribute('aria-pressed', 'false');
     expect(screen.queryByText('npm test')).not.toBeInTheDocument();
@@ -687,9 +980,92 @@ describe('GoalsPage', () => {
     expect(completedStatus).toHaveClass('text-slate-500');
     expect(completedStatus).not.toHaveClass('bg-green-100');
     expect(screen.getByRole('complementary', { name: 'Steering console' })).toHaveClass('bg-slate-50');
-    expect(screen.getByRole('heading', { name: 'Goal output' })).toHaveClass('text-[10px]', 'uppercase', 'font-bold', 'text-slate-500');
+    expect(screen.getByRole('heading', { name: 'Implementation log' })).toHaveClass('text-[10px]', 'uppercase', 'font-bold', 'text-slate-500');
     expect(screen.queryByText("Follow the agent's progress or inspect the raw provider stream.")).not.toBeInTheDocument();
-    expect(screen.getByPlaceholderText('Goal completed. Corrections disabled.')).toBeDisabled();
+    // The locked state reads beside the status badge instead of occupying a sticky footer bar.
+    expect(within(title.parentElement!).getByText('Goal completed. Corrections disabled.')).toBeInTheDocument();
+    expect(screen.queryByLabelText('Correction or follow-up')).not.toBeInTheDocument();
+  });
+
+  it('prints the metrics rail straight onto the console canvas and parks artifacts beside it', async () => {
+    vi.mocked(goalsApi.getGoal).mockResolvedValue({
+      goal: {
+        ...goal,
+        resultState: 'completed',
+        artifacts: [{ type: 'pull_request', number: 2472, url: 'https://github.com/acme/web/pull/2472' }],
+      },
+    });
+    vi.mocked(getTaskLiveDetails).mockResolvedValue({
+      events: [], todos: [], currentTask: null,
+      tokenUsage: { input_tokens: 34_000_000, output_tokens: 562_641, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 },
+    });
+    render(<MemoryRouter initialEntries={['/goals/goal-1']}><Routes><Route path="/goals/:goalId" element={<GoalsPage />} /></Routes></MemoryRouter>);
+
+    // Executive metrics abbreviate by magnitude and keep the raw integer on hover.
+    const usage = await screen.findByText('34.5M');
+    expect(usage).toHaveAttribute('title', '34,562,641 tokens');
+    // No metric sits in a white card: the rail is one slate-50 canvas with full-width row rules.
+    const metrics = screen.getByRole('heading', { name: 'Metrics' }).parentElement!;
+    expect(metrics.querySelector('.bg-white')).toBeNull();
+    expect(screen.getByText('thread-1')).toHaveClass('font-mono');
+
+    // The orphaned PR chip now belongs to a labelled section in the rail, not the reading column.
+    const artifacts = screen.getByRole('heading', { name: 'Related artifacts' }).parentElement!;
+    expect(within(artifacts).getByRole('link', { name: 'PR #2472' }))
+      .toHaveAttribute('href', 'https://github.com/acme/web/pull/2472');
+    expect(within(screen.getByRole('main', { name: 'Goal monitor' })).queryByText(/#2472/)).not.toBeInTheDocument();
+  });
+
+  it('clips a provider UUID into the metric column and hands the whole value over on request', async () => {
+    const sessionId = '91e05dd0-c5e0-4491-95ea-cf1596f1278b';
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true });
+    vi.mocked(goalsApi.getGoal).mockResolvedValue({ goal: { ...goal, sessionId } });
+    render(<MemoryRouter initialEntries={['/goals/goal-1']}><Routes><Route path="/goals/:goalId" element={<GoalsPage />} /></Routes></MemoryRouter>);
+
+    // The ends identify the session; the middle would only wrap and buckle the 2×2 metric grid.
+    const printed = await screen.findByText('91e05dd0...278b');
+    expect(printed).toHaveClass('truncate', 'font-mono');
+    expect(printed).toHaveAttribute('title', sessionId);
+    expect(screen.queryByText(sessionId)).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Copy session id' }));
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith(sessionId));
+    expect(await screen.findByRole('button', { name: 'Copy session id — copied' })).toBeInTheDocument();
+  });
+
+  it('drops the execution queue from a settled goal instead of claiming it has no todos yet', async () => {
+    vi.mocked(getTaskLiveDetails).mockResolvedValue({ events: [], todos: [], currentTask: null, tokenUsage: null });
+    vi.mocked(goalsApi.getGoal).mockResolvedValue({ goal: { ...goal, resultState: 'completed' } });
+    render(<MemoryRouter initialEntries={['/goals/goal-1']}><Routes><Route path="/goals/:goalId" element={<GoalsPage />} /></Routes></MemoryRouter>);
+
+    await screen.findByRole('heading', { name: 'Implementation log' });
+    expect(screen.queryByRole('heading', { name: 'Execution queue' })).not.toBeInTheDocument();
+    expect(screen.queryByText('No provider todos yet.')).not.toBeInTheDocument();
+  });
+
+  it('still tells a running goal its provider queue has not arrived', async () => {
+    vi.mocked(getTaskLiveDetails).mockResolvedValue({ events: [], todos: [], currentTask: null, tokenUsage: null });
+    vi.mocked(goalsApi.getGoal).mockResolvedValue({ goal });
+    render(<MemoryRouter initialEntries={['/goals/goal-1']}><Routes><Route path="/goals/:goalId" element={<GoalsPage />} /></Routes></MemoryRouter>);
+
+    expect(await screen.findByRole('heading', { name: 'Execution queue' })).toBeInTheDocument();
+    expect(screen.getByText('No provider todos yet.')).toBeInTheDocument();
+  });
+
+  it('keeps a settled goal\'s checkpoint panel neutral instead of tinting it blue', async () => {
+    vi.mocked(goalsApi.getGoal).mockResolvedValue({
+      goal: {
+        ...goal,
+        resultState: 'completed',
+        checkpoint: { intervalMinutes: 5, count: 3, lastAt: null, lastCommitSha: null, error: null, pending: false, latest: null },
+      },
+    });
+    render(<MemoryRouter initialEntries={['/goals/goal-1']}><Routes><Route path="/goals/:goalId" element={<GoalsPage />} /></Routes></MemoryRouter>);
+
+    const panel = (await screen.findByText('3 checkpoint commits')).closest('section')!;
+    expect(panel).toHaveClass('bg-slate-50', 'border-slate-200');
+    expect(panel.className).not.toContain('bg-blue-50');
   });
 
   it('keeps readable log gutter metadata quiet but legible', () => {
@@ -720,7 +1096,7 @@ describe('GoalsPage', () => {
     expect(await screen.findByText('cancelling')).toBeInTheDocument();
     expect(screen.getByText(/Cancelling at the provider boundary/)).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Cancel' })).not.toBeInTheDocument();
-    expect(screen.getByPlaceholderText('Goal closed. Corrections disabled.')).toBeDisabled();
+    expect(screen.getByText('Goal closed. Corrections disabled.')).toBeInTheDocument();
     expect(screen.queryByLabelText('Model for next continuation')).not.toBeInTheDocument();
   });
 

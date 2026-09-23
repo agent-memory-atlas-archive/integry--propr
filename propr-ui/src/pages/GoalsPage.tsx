@@ -3,8 +3,8 @@ import { PreviewThumbnails } from '../components/PreviewMedia';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import {
-  Activity, CheckCircle2, CircleDot, CirclePause, CirclePlay, CircleStop, Clock3,
-  Coins, ExternalLink, FileText, Filter, GitPullRequest, Github, ListTodo, LoaderCircle, Plus, Send,
+  Activity, AlertTriangle, Check, CheckCircle2, CircleDot, CirclePause, CirclePlay, CircleSlash, CircleStop,
+  Copy, ExternalLink, FileText, Filter, GitPullRequest, LoaderCircle, Plus, Search, Send,
   MoreHorizontal, Terminal, Trash2, X,
 } from 'lucide-react';
 import { getInstanceCatalog } from '../api/proprApi';
@@ -15,13 +15,17 @@ import {
   getGoalAttachmentUrl,
   type Goal, type GoalCapability, type GoalLaunchStrategy, type GoalVisualPreview,
 } from '../api/goals';
+import { useDebouncedCallback } from '../components/TaskList/hooks';
 import { useTaskLiveData } from '../components/TaskDetails/useTaskLiveData';
 import TodoList from '../components/TaskDetails/TodoList';
 import ExecutionEventLog from '../components/TaskDetails/ExecutionEventLog';
 import ThinkingLog from '../components/TaskDetails/ThinkingLog';
 import { useThinkingLog } from '../components/TaskDetails/useThinkingLog';
+import { trustedPreviewMedia } from '@propr/shared';
+import VisualPreviewGallery from '../components/VisualPreviewGallery';
 import { RepositorySelector, type RepoOption } from '../components/RepositorySelector';
 import { ProviderLogo } from '../components/ui/ProviderLogo';
+import { RepositoryChip } from '../components/ui/RepositoryChip';
 import { useDocumentTitle } from '../hooks/useDocumentTitle';
 import { formatAgentLabel } from '../utils/agentStatus';
 import { getModelDisplayName } from '../utils/modelDisplay';
@@ -120,6 +124,39 @@ const tokenTotal = (usage: { input_tokens?: number | null; output_tokens?: numbe
     + (usage.cache_creation_input_tokens || 0) + (usage.cache_read_input_tokens || 0)
   : 0;
 
+// Each threshold rounds up into the unit above it, so a count never reads as "1000K".
+const compactUnits = [
+  { threshold: 999_500_000, divisor: 1_000_000_000, suffix: 'B' },
+  { threshold: 999_500, divisor: 1_000_000, suffix: 'M' },
+  { threshold: 999.5, divisor: 1_000, suffix: 'K' },
+];
+
+/** Dashboard counts scan by magnitude: `101,280,735` reads as `101M`, with the exact value on hover. */
+const compactCount = (value: number) => {
+  const safe = Number.isFinite(value) && value > 0 ? value : 0;
+  const unit = compactUnits.find(candidate => safe >= candidate.threshold);
+  if (!unit) return Math.round(safe).toLocaleString('en-US');
+  const scaled = safe / unit.divisor;
+  return `${scaled >= 9.95 ? Math.round(scaled) : Number(scaled.toFixed(1))}${unit.suffix}`;
+};
+
+// The metric block has room the queue column does not, so it keeps one decimal: `34,562,641` reads as `34.5M`.
+const preciseUnits = [
+  { divisor: 1_000_000_000, suffix: 'B' },
+  { divisor: 1_000_000, suffix: 'M' },
+  { divisor: 1_000, suffix: 'K' },
+];
+
+/** Truncated rather than rounded, so an abbreviated total never reads as more spend than was used. Exact value on hover. */
+const metricCount = (value: number) => {
+  const safe = Number.isFinite(value) && value > 0 ? value : 0;
+  const unit = preciseUnits.find(candidate => safe >= candidate.divisor);
+  if (!unit) return Math.round(safe).toLocaleString('en-US');
+  return `${Math.floor((safe / unit.divisor) * 10) / 10}${unit.suffix}`;
+};
+
+const plural = (count: number, noun: string) => `${count} ${noun}${count === 1 ? '' : 's'}`;
+
 // Codex counts the objective in Unicode code points; Claude Code's `/goal`
 // counts its (trimmed) condition in UTF-16 units, so an emoji counts as two.
 const objectiveLength = (objective: string, agentType: string | undefined) => agentType === 'claude'
@@ -136,22 +173,77 @@ const capabilityAgentLabel = (agent: GoalCapability, agents: GoalCapability[]) =
   agents.map(candidate => ({ type: candidate.agentType, alias: candidate.agentAlias })),
 );
 
+// Every status badge carries the same geometry: one icon, then the label. Success is quiet,
+// so only active work, pauses and failures spend colour.
+const goalStateBadges: Record<string, { Icon: typeof CheckCircle2; color: string; spin?: boolean }> = {
+  running: { Icon: LoaderCircle, color: 'bg-blue-100 text-blue-800', spin: true },
+  cancelling: { Icon: LoaderCircle, color: 'bg-amber-100 text-amber-800', spin: true },
+  paused: { Icon: CirclePause, color: 'bg-amber-100 text-amber-800' },
+  completed: { Icon: CheckCircle2, color: 'bg-slate-100 text-slate-600' },
+  failed: { Icon: AlertTriangle, color: 'bg-red-100 text-red-800' },
+  cancelled: { Icon: CircleSlash, color: 'bg-red-100 text-red-800' },
+};
+
+/** The one state a goal reads as: a settled result first, then the state it is being driven to. */
+const goalLifecycleState = (goal: Goal): string => goal.resultState
+  || (goal.desiredState === 'cancelled' ? 'cancelling' : goal.desiredState);
+
+// The status filter mirrors the Tasks and Plans dropdowns: one option per state a row can show,
+// with the transient "cancelling" rows kept beside the cancelled work they are becoming.
+const goalStatusFilters: Array<{ value: string; label: string }> = [
+  { value: 'all', label: 'All Statuses' },
+  { value: 'running', label: 'Running' },
+  { value: 'paused', label: 'Paused' },
+  { value: 'completed', label: 'Completed' },
+  { value: 'failed', label: 'Failed' },
+  { value: 'cancelled', label: 'Cancelled' },
+];
+
+const matchesGoalStatus = (goal: Goal, status: string): boolean => {
+  if (status === 'all') return true;
+  const state = goalLifecycleState(goal);
+  if (status === 'cancelled') return state === 'cancelled' || state === 'cancelling';
+  return state === status;
+};
+
+/** Every keyword has to land somewhere in the goal, so extra words narrow the queue instead of widening it. */
+const matchesGoalSearch = (goal: Goal, terms: string[]): boolean => {
+  if (terms.length === 0) return true;
+  const haystack = `${goal.title} ${goal.objective} ${goal.repository}`.toLowerCase();
+  return terms.every(term => haystack.includes(term));
+};
+
+const filterGoals = (goals: Goal[], repository: string, status: string, terms: string[]): Goal[] => goals.filter(goal =>
+  (repository === 'all' || goal.repository === repository)
+  && matchesGoalStatus(goal, status)
+  && matchesGoalSearch(goal, terms));
+
+/** One sentence for whichever filter emptied the queue, narrowest first. */
+const emptyQueueReason = (search: string, status: string, repository: string): string => {
+  if (search) return `No goals match “${search}”`;
+  if (status !== 'all') {
+    const label = goalStatusFilters.find(option => option.value === status)?.label || status;
+    return `No ${label.toLowerCase()} goals`;
+  }
+  return `No goals in ${repository}`;
+};
+
 function GoalState({ goal, quietCompleted = false }: { goal: Goal; quietCompleted?: boolean }) {
-  const state = goal.resultState || (goal.desiredState === 'cancelled' ? 'cancelling' : goal.desiredState);
+  const state = goalLifecycleState(goal);
   if (quietCompleted && state === 'completed') {
     return <span className="inline-flex items-center gap-1.5 text-sm font-medium text-slate-500">
       <CheckCircle2 className="h-4 w-4" />
       Completed
     </span>;
   }
-  const color = state === 'completed' ? 'bg-green-100 text-green-800' : state === 'failed' || state === 'cancelled' ? 'bg-red-100 text-red-800' : state === 'paused' || state === 'cancelling' ? 'bg-amber-100 text-amber-800' : 'bg-blue-100 text-blue-800';
-  return <span className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-semibold capitalize ${color}`}>
-    {state === 'running' && <LoaderCircle className="h-3.5 w-3.5 animate-spin" />}
+  const { Icon, color, spin } = goalStateBadges[state] ?? { Icon: CircleDot, color: 'bg-blue-100 text-blue-800' };
+  return <span className={`inline-flex items-center gap-1.5 rounded-full px-2 py-0.5 text-xs font-semibold capitalize ${color}`}>
+    <Icon aria-hidden="true" className={`h-3 w-3 flex-none ${spin ? 'animate-spin' : ''}`.trim()} />
     {state}
   </span>;
 }
 
-function CheckpointDeclaration({ checkpoint }: { checkpoint: NonNullable<Goal['checkpoint']> }) {
+function CheckpointDeclaration({ checkpoint, active }: { checkpoint: NonNullable<Goal['checkpoint']>; active: boolean }) {
   const latest = checkpoint.latest;
   if (!latest || latest.kind !== 'agent') return null;
   const badgeClass = latest.state === 'completed'
@@ -161,9 +253,9 @@ function CheckpointDeclaration({ checkpoint }: { checkpoint: NonNullable<Goal['c
       : 'bg-amber-100 text-amber-800';
   const paths = (label: string, values: string[] | null) => values && <div>
     <dt className="text-[10px] font-bold uppercase tracking-widest text-slate-500">{label}</dt>
-    <dd className="mt-1 flex flex-wrap gap-1.5">{values.map(value => <code key={value} className="rounded border border-slate-200 bg-white px-1.5 py-0.5 font-mono text-[12px] text-slate-700">{value}</code>)}</dd>
+    <dd className="mt-1 flex flex-wrap gap-1.5">{values.map(value => <code key={value} className="rounded border border-slate-200 bg-slate-100 px-1.5 py-0.5 font-mono text-[12px] text-slate-800">{value}</code>)}</dd>
   </div>;
-  return <section aria-label="Latest checkpoint declaration" className="mt-3 border-t border-blue-200 pt-3 text-slate-800">
+  return <section aria-label="Latest checkpoint declaration" className={`mt-3 border-t pt-3 text-slate-800 ${active ? 'border-blue-200' : 'border-slate-200'}`}>
     <div className="flex flex-wrap items-center justify-between gap-2">
       <h2 className="font-semibold">Latest checkpoint declaration</h2>
       <span className={`rounded-full px-2 py-0.5 text-xs font-semibold capitalize ${badgeClass}`}>{latest.state}</span>
@@ -456,48 +548,113 @@ function CreateGoalDialog({ isOpen, onClose, onCreated }: CreateGoalDialogProps)
   </div>;
 }
 
+// The steering rail pads its own rows so the separating rules reach both edges of the pane.
+const railInset = 'px-4 sm:px-6';
+const railMetricLabel = 'text-[10px] font-bold uppercase tracking-widest text-slate-500';
+
+/**
+ * Identifiers are scanned by their ends, never read as prose. A 36-character UUID printed in full
+ * wraps across the metric column and breaks the 2×2 grid, so the rail prints the ends and hands the
+ * whole value over through the tooltip and the copy control beside it.
+ */
+const shortIdentifier = (value: string) => value.length > 20
+  ? `${value.slice(0, 8)}...${value.slice(-4)}`
+  : value;
+
+/** Sits quiet until the metric is hovered or the control is focused; the truncated id stays readable either way. */
+const CopyIdentifierButton: React.FC<{ value: string; label: string }> = ({ value, label }) => {
+  const [copied, setCopied] = useState(false);
+  useEffect(() => {
+    if (!copied) return;
+    const timer = window.setTimeout(() => setCopied(false), 1_500);
+    return () => window.clearTimeout(timer);
+  }, [copied]);
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(value);
+      setCopied(true);
+    } catch { /* No clipboard permission: the full value is still on the tooltip. */ }
+  };
+  return <button
+    type="button"
+    onClick={() => void copy()}
+    aria-label={copied ? `${label} — copied` : label}
+    title={label}
+    className="flex-none rounded p-0.5 text-slate-400 opacity-0 transition hover:bg-slate-200 hover:text-slate-700 focus-visible:opacity-100 group-hover:opacity-100"
+  >
+    {copied ? <Check className="h-3 w-3 text-emerald-600" /> : <Copy className="h-3 w-3" />}
+  </button>;
+};
+
+// Goal 35% · Repository 15% · Status 20% · Tokens 10% · Active time 10% · Output 10%.
+// Status is the widest secondary column because it carries the running task beside its badge.
+// A narrow desktop keeps the table and drops the two secondary measures instead of unfolding into
+// cards: the columns that survive are the ones the queue is scanned by.
+const queueGridColumns = 'lg:grid-cols-[minmax(0,2.45fr)_minmax(0,1.05fr)_minmax(0,1.4fr)_minmax(84px,0.7fr)] '
+  + 'xl:grid-cols-[minmax(0,2.45fr)_minmax(0,1.05fr)_minmax(0,1.4fr)_minmax(64px,0.7fr)_minmax(72px,0.7fr)_minmax(84px,0.7fr)]';
+// Tokens and active time are the first columns to go when the table narrows.
+const queueSecondaryCell = 'min-w-0 lg:hidden xl:block xl:text-right';
+const queueCellLabel = 'mb-1 block text-[10px] font-bold uppercase tracking-wider text-slate-400 lg:hidden';
+
 function GoalQueueRow({ goal, goalAgents }: { goal: Goal; goalAgents: Array<{ type: string; alias: string }> }) {
-  const activity = goal.liveSummary.currentTask
-    || goal.liveSummary.todos.find(todo => todo.status === 'in_progress')?.content
-    || goal.taskState;
+  // Live progress, never a second copy of the status: a settled goal has no current activity.
+  const unsettled = !goal.resultState;
+  const activity = unsettled
+    ? goal.liveSummary.currentTask || goal.liveSummary.todos.find(todo => todo.status === 'in_progress')?.content || null
+    : null;
   const openTodos = goal.liveSummary.todos.filter(todo => todo.status !== 'completed').length;
   const tokens = goal.liveSummary.nativeGoal?.tokensUsed ?? tokenTotal(goal.liveSummary.tokenUsage);
   const activeMs = goal.liveSummary.nativeGoal ? goal.liveSummary.nativeGoal.timeUsedSeconds * 1000 : goal.activeMs;
+  const { issues, openIssues, pullRequests, openPullRequests } = goal.artifactStats;
+  const agentLabel = formatAgentLabel(goal.agent, goalAgents);
+  const modelName = getModelDisplayName(goal.requestedModel);
   return <li className="border-b border-slate-200 last:border-b-0">
-    <Link to={`/goals/${goal.id}`} className="grid min-w-0 grid-cols-2 gap-x-4 gap-y-4 px-4 py-4 transition-colors hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-primary-500 sm:px-5 xl:grid-cols-[minmax(240px,2fr)_120px_minmax(140px,1fr)_minmax(180px,1.4fr)_160px] xl:items-center xl:gap-x-5 xl:gap-y-0 xl:py-3.5">
-      <div className="col-span-2 min-w-0 xl:col-span-1">
-        <h3 className="line-clamp-2 font-semibold leading-5 text-slate-900" title={goal.title}>{goal.title}</h3>
-        <p className="mt-1 line-clamp-2 text-sm leading-5 text-slate-500" title={goal.objective}>{goal.objective}</p>
-        <PreviewThumbnails media={goal.previewMedia} />
-      </div>
-      <div className="min-w-0">
-        <span className="mb-1.5 block text-[10px] font-bold uppercase tracking-wider text-slate-400 xl:hidden">Status</span>
-        <GoalState goal={goal} />
-        <span className="mt-2 flex min-w-0 items-center gap-1.5 text-xs text-slate-500">
+    <Link to={`/goals/${goal.id}`} className={`grid min-w-0 grid-cols-2 gap-x-4 gap-y-3 px-4 py-3 transition-colors hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-primary-500 sm:px-6 ${queueGridColumns} lg:h-16 lg:items-center lg:gap-x-4 lg:gap-y-0 lg:py-0`}>
+      <div className="col-span-2 min-w-0 lg:col-span-1">
+        <div className="flex min-w-0 items-center gap-2">
+          <h3 className="min-w-0 truncate text-sm font-semibold leading-5 text-slate-900" title={goal.title}>{goal.title}</h3>
+          <PreviewThumbnails media={goal.previewMedia} size="micro" />
+        </div>
+        {/* Runtime and objective share one truncated line so every row keeps the same two-line height. */}
+        <p className="flex min-w-0 items-center gap-1.5 text-xs leading-5 text-slate-500">
           <ProviderLogo provider={goal.agent.type} className="h-3.5 w-3.5 flex-none" />
-          <span className="truncate">{formatAgentLabel(goal.agent, goalAgents)}</span>
-        </span>
-        <span className="mt-0.5 block truncate text-xs text-slate-500" title={getModelDisplayName(goal.requestedModel)}>{getModelDisplayName(goal.requestedModel)}</span>
+          <span className="sr-only">{agentLabel}</span>
+          <span className="flex-none" title={`${agentLabel} · ${modelName}`}>{modelName}</span>
+          <span aria-hidden="true" className="flex-none text-slate-300">·</span>
+          <span className="truncate" title={goal.objective}>{goal.objective}</span>
+        </p>
       </div>
       <div className="min-w-0">
-        <span className="mb-1.5 block text-[10px] font-bold uppercase tracking-wider text-slate-400 xl:hidden">Repository</span>
-        <span className="flex min-w-0 items-center gap-1.5 text-sm text-slate-700"><Github className="h-3.5 w-3.5 flex-none text-slate-400" /><span className="truncate" title={goal.repository}>{goal.repository}</span></span>
+        <span className={queueCellLabel}>Repository</span>
+        <RepositoryChip repository={goal.repository} />
       </div>
-      <div className="col-span-2 min-w-0 xl:col-span-1">
-        <span className="mb-1.5 block text-[10px] font-bold uppercase tracking-wider text-slate-400 xl:hidden">Current activity</span>
-        <span className="flex min-w-0 items-start gap-1.5 text-sm text-slate-700"><Activity className="mt-0.5 h-3.5 w-3.5 flex-none text-blue-500" /><span className="line-clamp-2" title={activity}>{activity}</span></span>
-        {goal.liveSummary.todos.length > 0 && <span className="mt-1 flex items-center gap-1.5 text-xs text-slate-500"><ListTodo className="h-3.5 w-3.5" />{openTodos} open of {goal.liveSummary.todos.length} steps</span>}
+      <div className="min-w-0">
+        <span className={queueCellLabel}>Status</span>
+        <GoalState goal={goal} />
+        {/* One neutral sub-status line: the running task and its step count never push the row taller. */}
+        {(activity || (unsettled && goal.liveSummary.todos.length > 0)) && <span className="mt-1 flex min-w-0 items-center gap-1.5 text-xs leading-5 text-slate-500">
+          <Activity aria-hidden="true" className="h-3 w-3 flex-none text-slate-400" />
+          {activity && <span className="truncate" title={activity}>{activity}</span>}
+          {activity && unsettled && goal.liveSummary.todos.length > 0 && <span aria-hidden="true" className="flex-none text-slate-300">·</span>}
+          {unsettled && goal.liveSummary.todos.length > 0 && <span className="flex-none tabular-nums" title={`${openTodos} open of ${goal.liveSummary.todos.length} steps`}>{openTodos}/{goal.liveSummary.todos.length} steps</span>}
+        </span>}
       </div>
-      <div className="col-span-2 min-w-0 xl:col-span-1">
-        <span className="mb-1.5 block text-[10px] font-bold uppercase tracking-wider text-slate-400 xl:hidden">Usage</span>
-        <span className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-slate-600">
-          <span className="inline-flex items-center gap-1"><Coins className="h-3.5 w-3.5 text-amber-500" />{tokens.toLocaleString()} tokens</span>
-          <span className="inline-flex items-center gap-1"><Clock3 className="h-3.5 w-3.5 text-indigo-500" />{duration(activeMs)} active</span>
-        </span>
-        <span className="mt-1.5 flex flex-wrap gap-x-2 gap-y-1 text-xs text-slate-500">
-          <span className="inline-flex items-center gap-1"><CircleDot className="h-3.5 w-3.5" />{goal.artifactStats.openIssues}/{goal.artifactStats.issues} open issues</span>
-          <span className="inline-flex items-center gap-1"><GitPullRequest className="h-3.5 w-3.5" />{goal.artifactStats.openPullRequests}/{goal.artifactStats.pullRequests} open PRs</span>
-        </span>
+      <div className={queueSecondaryCell}>
+        <span className={queueCellLabel}>Tokens</span>
+        <span className="block truncate font-mono text-xs tabular-nums text-slate-700" title={`${tokens.toLocaleString('en-US')} tokens`}>{compactCount(tokens)}</span>
+      </div>
+      <div className={queueSecondaryCell}>
+        <span className={queueCellLabel}>Active time</span>
+        <span className="block truncate font-mono text-xs tabular-nums text-slate-700">{duration(activeMs)}</span>
+      </div>
+      <div className="min-w-0 lg:text-right">
+        <span className={queueCellLabel}>Output</span>
+        {pullRequests === 0 && issues === 0
+          ? <span className="block text-xs text-slate-400" title="No issues or pull requests yet">—</span>
+          : <>
+            <span className="block truncate text-xs tabular-nums text-slate-700" title={`${openPullRequests} of ${pullRequests} open`}>{plural(pullRequests, 'PR')}</span>
+            <span className="block truncate text-xs tabular-nums text-slate-500" title={`${openIssues} of ${issues} open`}>{plural(issues, 'issue')}</span>
+          </>}
       </div>
     </Link>
   </li>;
@@ -515,6 +672,11 @@ function GoalList() {
   const [isCreating, setIsCreating] = useState(false);
   const requestGenerationRef = useRef(0);
   const repositoryFilter = searchParams.get('repository') || 'all';
+  const statusFilter = searchParams.get('status') || 'all';
+  const urlSearch = searchParams.get('search') || '';
+  // The input stays instant while the URL and the filtered queue follow one debounce behind it.
+  const [searchQuery, setSearchQuery] = useState(urlSearch);
+  const [debouncedSearch, setDebouncedSearch] = useState(urlSearch);
   useEffect(() => {
     if (searchParams.get('new') !== '1') return;
     setIsCreating(true);
@@ -558,44 +720,103 @@ function GoalList() {
         .sort((left, right) => left.name.localeCompare(right.name)),
     ];
   }, [goals]);
-  const visibleGoals = repositoryFilter === 'all'
-    ? goals
-    : goals.filter(goal => goal.repository === repositoryFilter);
-  const setRepositoryFilter = useCallback((repository: string) => {
+  const searchTerms = useMemo(
+    () => debouncedSearch.toLowerCase().split(/\s+/).filter(Boolean),
+    [debouncedSearch],
+  );
+  const visibleGoals = useMemo(
+    () => filterGoals(goals, repositoryFilter, statusFilter, searchTerms),
+    [goals, repositoryFilter, searchTerms, statusFilter],
+  );
+  const updateFilterParams = useCallback((updates: Record<string, string | null>) => {
     setSearchParams(current => {
       const next = new URLSearchParams(current);
-      if (repository === 'all') next.delete('repository');
-      else next.set('repository', repository);
+      Object.entries(updates).forEach(([key, value]) => {
+        if (!value || value === 'all') next.delete(key);
+        else next.set(key, value);
+      });
       return next;
     }, { replace: true });
   }, [setSearchParams]);
+  const setRepositoryFilter = useCallback(
+    (repository: string) => updateFilterParams({ repository }),
+    [updateFilterParams],
+  );
+  const setStatusFilter = useCallback(
+    (status: string) => updateFilterParams({ status }),
+    [updateFilterParams],
+  );
+  const commitSearch = useCallback((value: string) => {
+    setDebouncedSearch(value);
+    updateFilterParams({ search: value.trim() || null });
+  }, [updateFilterParams]);
+  useDebouncedCallback(searchQuery, commitSearch, 400);
+  const clearSearch = useCallback(() => {
+    setSearchQuery('');
+    commitSearch('');
+  }, [commitSearch]);
+  const clearFilters = useCallback(() => {
+    setSearchQuery('');
+    setDebouncedSearch('');
+    updateFilterParams({ repository: null, status: null, search: null });
+  }, [updateFilterParams]);
+  const queueEmptyReason = emptyQueueReason(debouncedSearch, statusFilter, repositoryFilter);
   const goalAgents = goals.map(goal => ({ type: goal.agent.type, alias: goal.agent.alias }));
   const closeCreator = useCallback(() => {
     setIsCreating(false);
     newGoalButtonRef.current?.focus();
   }, []);
   const openCreator = useCallback(() => setIsCreating(true), []);
-  return <div className="min-h-full w-full min-w-0 bg-white p-4 sm:p-6">
-    <div className="border-b border-slate-200 pb-5">
-      <div><h1 className="text-2xl font-bold text-slate-900">Goals</h1><p className="mt-1 text-sm text-slate-600">Long-running work kept in one exact coding-agent session.</p></div>
+  return <div className="min-h-full w-full min-w-0 bg-white pb-6">
+    <div className="flex flex-wrap items-start justify-between gap-3 px-4 pb-3 pt-4 sm:px-6">
+      <div className="min-w-0"><h1 className="text-xl font-bold text-slate-900">Goals</h1><p className="mt-0.5 text-sm text-slate-600">Long-running work kept in one exact coding-agent session.</p></div>
+      <button ref={newGoalButtonRef} type="button" onClick={openCreator} className={`${buttonClass} min-h-10 flex-none justify-center bg-primary-600 text-white hover:bg-primary-700`}><Plus className="h-4 w-4" />New goal</button>
     </div>
-    {error && <p role="alert" className="mt-4 border-l-2 border-red-500 bg-red-50 p-3 text-sm text-red-700">{error}</p>}
-    <section aria-labelledby="goal-work-queue-title" className="mt-5">
-      <div className="flex flex-col gap-3 pb-3 sm:flex-row sm:items-center sm:justify-between">
-        <div className="flex items-baseline gap-2"><h2 id="goal-work-queue-title" className="text-base font-semibold text-slate-900">Work queue</h2>{hasSuccessfulRead && <span className="text-xs text-slate-500">{visibleGoals.length} of {goals.length}</span>}{refreshing && hasSuccessfulRead && <span role="status" className="text-xs text-slate-500">Refreshing…</span>}</div>
-        <div className="flex min-w-0 flex-col gap-2 sm:flex-row sm:items-center">
-          {goals.length > 0 && <div role="group" aria-label="Filter goals by repository" className="flex min-w-0 items-center gap-2">
-            <Filter className="h-4 w-4 flex-none text-slate-400" aria-hidden="true" />
-            <RepositorySelector
-              repos={repositoryOptions}
-              selectedRepo={repositoryFilter}
-              onRepoChange={setRepositoryFilter}
-              labelLayout="stacked"
-              className="min-w-0 flex-1 sm:w-[240px] sm:flex-none"
+    {error && <p role="alert" className="mx-4 mb-3 border-l-2 border-red-500 bg-red-50 p-3 text-sm text-red-700 sm:mx-6">{error}</p>}
+    <section aria-labelledby="goal-work-queue-title">
+      {/* One toolbar rail: the queue count sits with the filter that changes it. The list border below closes the bar. */}
+      <div className="flex flex-col gap-2 border-t border-slate-200 bg-slate-50 px-4 py-2 sm:flex-row sm:items-center sm:justify-between sm:px-6">
+        <div className="flex items-baseline gap-2"><h2 id="goal-work-queue-title" className="text-[10px] font-bold uppercase tracking-wider text-slate-500">Work queue</h2>{hasSuccessfulRead && <span className="text-xs tabular-nums text-slate-500">{visibleGoals.length} of {goals.length}</span>}{refreshing && hasSuccessfulRead && <span role="status" className="text-xs text-slate-500">Refreshing…</span>}</div>
+        {goals.length > 0 && <div className="flex min-w-0 flex-col gap-2 sm:flex-row sm:items-center sm:gap-3">
+          <div className="relative min-w-0 sm:w-64">
+            <Search aria-hidden="true" className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
+            <input
+              type="text"
+              value={searchQuery}
+              onChange={event => setSearchQuery(event.target.value)}
+              aria-label="Search goals"
+              placeholder="Search goals..."
+              className="w-full rounded-md border border-slate-300 bg-white py-1.5 pl-9 pr-8 text-sm text-slate-700 focus:border-primary-500 focus:outline-none focus:ring-2 focus:ring-primary-500"
             />
-          </div>}
-          <button ref={newGoalButtonRef} type="button" onClick={openCreator} className={`${buttonClass} min-h-10 justify-center bg-primary-600 text-white hover:bg-primary-700`}><Plus className="h-4 w-4" />New goal</button>
-        </div>
+            {searchQuery && <button
+              type="button"
+              onClick={clearSearch}
+              title="Clear search"
+              aria-label="Clear search"
+              className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600"
+            ><X className="h-4 w-4" /></button>}
+          </div>
+          <div className="flex min-w-0 items-center gap-2">
+            <Filter className="h-4 w-4 flex-none text-slate-400" aria-hidden="true" />
+            <select
+              value={statusFilter}
+              onChange={event => setStatusFilter(event.target.value)}
+              aria-label="Filter goals by status"
+              className="flex-none rounded-md border border-slate-300 bg-white px-2 py-1.5 text-sm text-slate-700 focus:border-primary-500 focus:outline-none focus:ring-2 focus:ring-primary-500"
+            >
+              {goalStatusFilters.map(option => <option key={option.value} value={option.value}>{option.label}</option>)}
+            </select>
+            <div role="group" aria-label="Filter goals by repository" className="min-w-0 flex-1 sm:w-[240px] sm:flex-none">
+              <RepositorySelector
+                repos={repositoryOptions}
+                selectedRepo={repositoryFilter}
+                onRepoChange={setRepositoryFilter}
+                labelLayout="stacked"
+                className="w-full min-w-0"
+              />
+            </div>
+          </div>
+        </div>}
       </div>
       {!hasSuccessfulRead && (initialLoading || refreshing)
         ? <div role="status" className="flex items-center justify-center gap-2 border-y border-slate-200 py-10 text-sm text-slate-500"><LoaderCircle className="h-4 w-4 animate-spin" aria-hidden="true" />Loading goals…</div>
@@ -604,10 +825,13 @@ function GoalList() {
           : goals.length === 0
         ? <div className="border-y border-dashed border-slate-300 py-10 text-center"><p className="text-sm font-medium text-slate-700">No goals yet</p><p className="mt-1 text-sm text-slate-500">Start a goal to add dedicated agent work to this queue.</p></div>
         : visibleGoals.length === 0
-          ? <div className="border-y border-dashed border-slate-300 py-10 text-center"><p className="text-sm font-medium text-slate-700">No goals in {repositoryFilter}</p><button type="button" onClick={() => setRepositoryFilter('all')} className="mt-2 text-sm font-medium text-primary-700 hover:underline">Show all goals</button></div>
+          ? <div className="border-y border-dashed border-slate-300 py-10 text-center"><p className="text-sm font-medium text-slate-700">{queueEmptyReason}</p><button type="button" onClick={clearFilters} className="mt-2 text-sm font-medium text-primary-700 hover:underline">Show all goals</button></div>
           : <div className="border-y border-slate-200 bg-white">
-            <div aria-hidden="true" className="hidden grid-cols-[minmax(240px,2fr)_120px_minmax(140px,1fr)_minmax(180px,1.4fr)_160px] gap-x-5 border-b border-slate-200 bg-slate-50 px-5 py-2 text-[10px] font-bold uppercase tracking-wider text-slate-500 xl:grid">
-              <span>Goal</span><span>Status / runtime</span><span>Repository</span><span>Current activity</span><span>Usage</span>
+            <div aria-hidden="true" data-testid="goal-queue-columns" className={`hidden gap-x-4 border-b border-slate-200 bg-slate-50 px-6 py-2 text-[10px] font-bold uppercase tracking-wider text-slate-500 ${queueGridColumns} lg:grid`}>
+              <span>Goal</span><span>Repository</span><span>Status</span>
+              <span data-testid="goal-queue-column-tokens" className="hidden text-right xl:block">Tokens</span>
+              <span data-testid="goal-queue-column-active-time" className="hidden text-right xl:block">Active time</span>
+              <span className="text-right">Output</span>
             </div>
             <ul aria-label="Goal work queue">{visibleGoals.map(goal => <GoalQueueRow key={goal.id} goal={goal} goalAgents={goalAgents} />)}</ul>
           </div>}
@@ -662,7 +886,8 @@ function GoalDetails({ goalId }: { goalId: string }) {
     }
     let active = true;
     const refreshPreviews = () => getGoalVisualPreviews(goalId)
-      .then(data => { if (active && !data.unavailable) setVisualPreviews(data.previews); })
+      // Filtered at the client boundary so only trusted GitHub attachments reach the gallery and lightbox.
+      .then(data => { if (active && !data.unavailable) setVisualPreviews(trustedPreviewMedia(data.previews, 8)); })
       .catch(() => { /* Keep the last successfully fetched GitHub previews. */ });
     void refreshPreviews();
     const timer = window.setInterval(refreshPreviews, 30_000);
@@ -696,6 +921,17 @@ function GoalDetails({ goalId }: { goalId: string }) {
   const canMutate = mutable && !isDemoMode;
   const strategyLabel = goal.launchStrategy === 'direct' ? 'Direct' : 'ProPR orchestrated';
   const currentModel = getModelDisplayName(goal.effectiveModel || goal.requestedModel);
+  // The locked-console state is a header note, not a sticky footer bar: it needs no screen real estate of its own.
+  const correctionsNote = canMutate
+    ? null
+    : isDemoMode && mutable
+      ? 'Demo mode is read-only. Corrections disabled.'
+      : goal.resultState === 'completed'
+        ? 'Goal completed. Corrections disabled.'
+        : 'Goal closed. Corrections disabled.';
+  const artifactLinks = goal.artifacts
+    .map(artifact => artifact as { type?: string; number?: number; url?: string })
+    .filter(artifact => Boolean(artifact.url));
   return <div className="min-h-full bg-white text-slate-900">
     <header className="w-full border-b border-slate-200 px-4 py-3 sm:px-6 lg:px-8">
       <div className="mx-auto max-w-7xl">
@@ -705,19 +941,26 @@ function GoalDetails({ goalId }: { goalId: string }) {
         <div className="mt-2 flex flex-wrap items-center gap-3">
           <h1 className="text-2xl font-bold tracking-tight text-slate-950 sm:text-3xl">{goal.title}</h1>
           <GoalState goal={goal} quietCompleted />
+          {correctionsNote && <span className="text-xs text-slate-500">{correctionsNote}</span>}
         </div>
         <div className="mt-2 flex flex-wrap items-center justify-between gap-x-4 gap-y-3">
-          <div className="flex flex-wrap items-center gap-x-2 gap-y-2 text-sm text-slate-700">
-            <span className="text-[10px] font-bold uppercase tracking-widest text-slate-500">Strategy</span>
-            <span className="font-medium">{strategyLabel}</span>
+          {/* Self-evident values carry no uppercase key, so the row reads as one sentence instead of stuttering label/value pairs.
+              The row aligns on baselines, not on box centres: the chip's border and padding make it taller
+              than the text beside it, and centring boxes of 14px prose against 12px mono still leaves their
+              baselines a pixel apart. Every item exports the baseline of its own text (the logo and the
+              repository mark centre themselves instead), so the whole row reads along one straight line.
+              Each raw value still carries the chip's 1.375rem line box, so the row's rhythm stays even. */}
+          <div className="flex flex-wrap items-baseline gap-x-2 gap-y-2 text-sm leading-[1.375rem] text-slate-700">
+            <span className="font-medium" title={`${strategyLabel} launch strategy`}>{strategyLabel}</span>
             <span aria-hidden="true" className="text-slate-300">•</span>
-            <span className="text-[10px] font-bold uppercase tracking-widest text-slate-500">Model</span>
-            <code className="rounded bg-slate-100 px-2 py-1 font-mono text-xs font-semibold text-slate-700">{currentModel}</code>
+            <span className="inline-flex items-baseline gap-1.5 font-medium" title={`Model: ${currentModel}`}>
+              <ProviderLogo provider={goal.agent.type} className="h-3.5 w-3.5 flex-none self-center" />
+              {currentModel}
+            </span>
             <span aria-hidden="true" className="text-slate-300">•</span>
-            <span className="text-[10px] font-bold uppercase tracking-widest text-slate-500">Elapsed</span>
-            <span className="font-mono text-xs font-semibold text-slate-700">{duration(goal.elapsedMs)}</span>
+            <span className="font-mono text-xs font-semibold leading-[1.375rem] text-slate-700" title="Elapsed time">{duration(goal.elapsedMs)}</span>
             <span aria-hidden="true" className="hidden text-slate-300 sm:inline">•</span>
-            <span className="text-xs text-slate-500">{goal.repository} · {goal.agent.alias}</span>
+            <RepositoryChip repository={goal.repository} />
           </div>
           <div className="flex flex-wrap items-center justify-end gap-2">
             {goal.desiredState === 'running' && canMutate && <button disabled={busy} onClick={() => act(() => pauseGoal(goal.id))} className={`${buttonClass} border border-amber-300 text-amber-800 hover:bg-amber-50`}><CirclePause className="h-4 w-4" />Pause</button>}
@@ -765,14 +1008,15 @@ function GoalDetails({ goalId }: { goalId: string }) {
           </details>
         </section>
 
-        {goal.checkpoint && <section className="mb-6 mt-3 bg-blue-50 p-4 text-sm text-blue-950">
+        {/* Colour is reserved for active work: once the goal settles, the checkpoint panel reads as history. */}
+        {goal.checkpoint && <section className={`mb-6 mt-3 border p-4 text-sm ${mutable ? 'border-blue-200 bg-blue-50 text-blue-950' : 'border-slate-200 bg-slate-50 text-slate-700'}`}>
           <div className="flex items-start gap-3">
-            <CircleDot className="mt-0.5 h-4 w-4 flex-none text-blue-600" />
+            <CircleDot className={`mt-0.5 h-4 w-4 flex-none ${mutable ? 'text-blue-600' : 'text-slate-400'}`} />
             <div className="min-w-0">
-              <p className="font-medium">{goal.checkpoint.count} checkpoint commit{goal.checkpoint.count === 1 ? '' : 's'}{goal.checkpoint.lastAt ? ` · last ${new Date(goal.checkpoint.lastAt).toLocaleString()}` : ''}</p>
-              <p className="mt-1 text-blue-800">Target cadence: about every {goal.checkpoint.intervalMinutes || 15} minutes. <span className="text-xs">The agent declares when coherent work is ready.</span></p>
+              <p className={`font-medium ${mutable ? '' : 'text-slate-800'}`}>{goal.checkpoint.count} checkpoint commit{goal.checkpoint.count === 1 ? '' : 's'}{goal.checkpoint.lastAt ? ` · last ${new Date(goal.checkpoint.lastAt).toLocaleString()}` : ''}</p>
+              <p className={`mt-1 ${mutable ? 'text-blue-800' : 'text-slate-500'}`}>Target cadence: about every {goal.checkpoint.intervalMinutes || 15} minutes. <span className="text-xs">The agent declares when coherent work is ready.</span></p>
               {goal.checkpoint.error && !goal.checkpoint.latest?.error && <p className="mt-2 text-red-700">Checkpoint error: {goal.checkpoint.error}</p>}
-              <CheckpointDeclaration checkpoint={goal.checkpoint} />
+              <CheckpointDeclaration checkpoint={goal.checkpoint} active={mutable} />
             </div>
           </div>
         </section>}
@@ -785,32 +1029,27 @@ function GoalDetails({ goalId }: { goalId: string }) {
             </div>
             <span className="text-xs text-slate-400">From GitHub</span>
           </div>
-          <div className="mt-4 grid gap-4 sm:grid-cols-2">
-            {visualPreviews.map((preview, index) => <figure key={`${preview.url}-${index}`} className="overflow-hidden rounded-lg border border-slate-200 bg-slate-50">
-              {preview.type === 'image'
-                ? <img src={preview.url} alt={preview.title} loading="lazy" className="aspect-video w-full bg-white object-contain" />
-                : <video src={preview.url} aria-label={preview.title} controls preload="metadata" className="aspect-video w-full bg-slate-950 object-contain" />}
-              <figcaption className="border-t border-slate-200 px-3 py-2.5">
-                <p className="text-sm font-medium text-slate-800">{preview.title}</p>
-                {preview.description && <p className="mt-1 text-xs leading-5 text-slate-500">{preview.description}</p>}
-              </figcaption>
-            </figure>)}
-          </div>
+          {/* Same evidence surface as the task detail screen: full-width media with lightbox support. */}
+          <VisualPreviewGallery previews={visualPreviews} className="mt-4" />
         </section>}
 
-        {goal.artifacts.length > 0 && <div className="my-5 flex flex-wrap gap-2 text-xs text-slate-600">{goal.artifacts.map((artifact, index) => { const item = artifact as { type?: string; number?: number; url?: string }; return item.url ? <a key={item.url} href={item.url} target="_blank" rel="noreferrer" className="rounded bg-slate-100 px-2 py-1 hover:underline">{item.type === 'pull_request' ? 'PR' : 'Issue'} #{item.number}</a> : <span key={index} />; })}</div>}
-
-        <section aria-labelledby="live-progress-heading" className="mt-6">
+        {/* A settled goal is not waiting for anything: with no queue on record the section goes away
+            rather than telling a finished goal it has "no provider todos yet". */}
+        {(live.todos.length > 0 || mutable) && <section aria-labelledby="live-progress-heading" className="mt-6">
           <div className="flex items-center gap-2">
             <h2 id="live-progress-heading" className="text-[11px] font-bold uppercase tracking-widest text-slate-500">Execution queue</h2>
             {mutable && goal.desiredState === 'running' && <span className="relative flex h-2 w-2"><span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-blue-400 opacity-75" /><span className="relative inline-flex h-2 w-2 rounded-full bg-blue-500" /></span>}
           </div>
           {live.todos.length ? <div className="[&>div]:border-t-0 [&>div]:pt-3 [&>div>h4]:hidden"><TodoList liveDetails={live} history={[{ state: goal.taskState }]} /></div> : <p className="mt-3 text-sm text-slate-500">No provider todos yet.</p>}
-        </section>
+        </section>}
 
         <section className="mt-8 border-t border-slate-200 pt-5">
+          {/* One header row owns both the label and the control that switches what sits under it. */}
           <header className="flex items-center justify-between gap-3">
-            <h2 className="text-[10px] font-bold uppercase tracking-widest text-slate-500">Goal output</h2>
+            <div className="flex items-center gap-2">
+              <h2 className="text-[10px] font-bold uppercase tracking-widest text-slate-500">Implementation log</h2>
+              {readableTimeline.length > 0 && <span className="rounded border border-slate-200 bg-slate-50 px-2 py-0.5 font-mono text-[10px] font-bold text-slate-500">{readableTimeline.length}</span>}
+            </div>
             <div role="group" aria-label="Goal output view" className="inline-flex rounded-md border border-slate-200 bg-slate-50 p-1">
               <button type="button" aria-pressed={outputMode === 'readable'} onClick={() => setOutputMode('readable')} className={`inline-flex items-center gap-1.5 rounded px-2.5 py-1.5 text-xs font-medium transition ${outputMode === 'readable' ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}><FileText className="h-3.5 w-3.5" />Human readable</button>
               <button type="button" aria-pressed={outputMode === 'terminal'} onClick={() => setOutputMode('terminal')} className={`inline-flex items-center gap-1.5 rounded px-2.5 py-1.5 text-xs font-medium transition ${outputMode === 'terminal' ? 'bg-slate-800 text-white shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}><Terminal className="h-3.5 w-3.5" />Raw terminal</button>
@@ -818,7 +1057,7 @@ function GoalDetails({ goalId }: { goalId: string }) {
           </header>
           {outputMode === 'readable'
             ? <div className="min-h-32 py-4">{readableTimeline.length > 0
-              ? <ThinkingLog events={readableTimeline} todos={live.todos} />
+              ? <ThinkingLog events={readableTimeline} todos={live.todos} showHeader={false} />
               : <p className="text-sm text-slate-500">No human-readable output yet.</p>}</div>
             : <div className="mt-4 min-h-32 bg-slate-950 p-4 text-slate-100">{terminalTimeline.length > 0
               ? <ExecutionEventLog events={terminalTimeline} collapsed={false} onToggleCollapse={() => undefined} lastThought={thinkingLog.lastThought} isTaskActive={mutable && goal.desiredState === 'running'} taskInfo={null} />
@@ -826,23 +1065,64 @@ function GoalDetails({ goalId }: { goalId: string }) {
         </section>
       </main>
 
-      <aside aria-label="Steering console" className="flex min-w-0 flex-col border-t border-slate-200 bg-slate-50 px-4 py-6 sm:px-6 lg:border-l lg:border-t-0">
+      <aside aria-label="Steering console" className="flex min-w-0 flex-col border-t border-slate-200 bg-slate-50 py-6 lg:border-l lg:border-t-0">
+        {/* The rail is one slate-50 canvas. Nothing here is boxed in white: rows are separated by rules that span the pane. */}
         <section aria-labelledby="goal-metrics-heading">
-          <h2 id="goal-metrics-heading" className="text-[10px] font-bold uppercase tracking-widest text-slate-500">Metrics</h2>
-          <dl className="mt-3 grid grid-cols-2 border-y border-slate-200">
-            <div className="border-b border-r border-slate-200 py-4 pr-4"><dt className="text-[10px] font-bold uppercase tracking-widest text-slate-500">Usage</dt><dd className="mt-1 text-2xl font-bold tracking-tight text-slate-950">{totalTokens.toLocaleString()}</dd><dd className="text-xs text-slate-500">tokens</dd>{goal.liveSummary.nativeGoal && <dd className="mt-1 text-xs text-slate-500">{goal.liveSummary.nativeGoal.status} · {duration(goal.liveSummary.nativeGoal.timeUsedSeconds * 1000)}</dd>}</div>
-            <div className="border-b border-slate-200 py-4 pl-4"><dt className="text-[10px] font-bold uppercase tracking-widest text-slate-500">Session</dt><dd className="mt-2 break-all"><code className="rounded bg-white px-2 py-1 font-mono text-xs text-slate-700 shadow-sm">{goal.sessionId || 'Waiting for provider identity'}</code></dd></div>
-            <div className="border-r border-slate-200 py-4 pr-4"><dt className="text-[10px] font-bold uppercase tracking-widest text-slate-500">Active</dt><dd className="mt-1 font-mono text-sm font-semibold text-slate-800">{duration(goal.activeMs)}</dd><dd className="mt-1 text-xs text-slate-500">{duration(goal.pausedMs)} paused</dd></div>
-            <div className="py-4 pl-4"><dt className="text-[10px] font-bold uppercase tracking-widest text-slate-500">Artifacts</dt><dd className="mt-1 text-sm font-semibold text-slate-800">{goal.artifactStats.openPullRequests}/{goal.artifactStats.pullRequests} PRs</dd><dd className="mt-1 text-xs text-slate-500">{goal.artifactStats.openIssues}/{goal.artifactStats.issues} open issues</dd></div>
+          <h2 id="goal-metrics-heading" className={`${railInset} text-[10px] font-bold uppercase tracking-widest text-slate-500`}>Metrics</h2>
+          <dl className="mt-3 border-t border-slate-200">
+            <div className={`${railInset} grid grid-cols-2 gap-x-6 border-b border-slate-200 py-4`}>
+              <div className="min-w-0">
+                <dt className={railMetricLabel}>Usage</dt>
+                <dd className="mt-1 text-2xl font-bold tracking-tight text-slate-950" title={`${totalTokens.toLocaleString()} tokens`}>{metricCount(totalTokens)}</dd>
+                <dd className="text-xs text-slate-500">tokens</dd>
+                {goal.liveSummary.nativeGoal && <dd className="mt-1 text-xs text-slate-500">{goal.liveSummary.nativeGoal.status} · {duration(goal.liveSummary.nativeGoal.timeUsedSeconds * 1000)}</dd>}
+              </div>
+              <div className="min-w-0">
+                <dt className={railMetricLabel}>Active</dt>
+                <dd className="mt-1 font-mono text-sm font-semibold text-slate-800">{duration(goal.activeMs)}</dd>
+                <dd className="mt-1 text-xs text-slate-500">{duration(goal.pausedMs)} paused</dd>
+              </div>
+            </div>
+            <div className={`${railInset} grid grid-cols-2 gap-x-6 border-b border-slate-200 py-4`}>
+              <div className="min-w-0">
+                <dt className={railMetricLabel}>Artifacts</dt>
+                <dd className="mt-1 text-sm font-semibold text-slate-800">{goal.artifactStats.openPullRequests}/{goal.artifactStats.pullRequests} PRs</dd>
+                <dd className="mt-1 text-xs text-slate-500">{goal.artifactStats.openIssues}/{goal.artifactStats.issues} open issues</dd>
+              </div>
+              {/* The id clips inside its half of the grid instead of wrapping and stretching the row. */}
+              <div className="group min-w-0">
+                <dt className={railMetricLabel}>Session</dt>
+                {goal.sessionId
+                  ? <dd className="mt-1 flex items-center gap-1">
+                    <span className="truncate font-mono text-xs text-slate-700" title={goal.sessionId}>{shortIdentifier(goal.sessionId)}</span>
+                    <CopyIdentifierButton value={goal.sessionId} label="Copy session id" />
+                  </dd>
+                  : <dd className="mt-1 truncate text-xs text-slate-500">Waiting for provider identity</dd>}
+              </div>
+            </div>
           </dl>
         </section>
 
-        {canMutate && <section aria-labelledby="quick-actions-heading" className="mt-7">
-          <h2 id="quick-actions-heading" className="text-[10px] font-bold uppercase tracking-widest text-slate-500">Quick actions</h2>
-          <div className="mt-3 flex flex-wrap gap-2"><button disabled={busy} onClick={() => continueWith({ canned: 'done' })} className={`${buttonClass} border border-slate-200 bg-white text-slate-700 shadow-sm hover:border-slate-300 hover:bg-slate-50`}>What's done?</button><button disabled={busy} onClick={() => continueWith({ canned: 'left' })} className={`${buttonClass} border border-slate-200 bg-white text-slate-700 shadow-sm hover:border-slate-300 hover:bg-slate-50`}>What's left?</button></div>
+        {/* Orphaned PR and issue chips belong to a labelled section here, not adrift in the reading column. */}
+        {artifactLinks.length > 0 && <section aria-labelledby="goal-artifacts-heading" className={`${railInset} mt-7`}>
+          <h2 id="goal-artifacts-heading" className="text-[10px] font-bold uppercase tracking-widest text-slate-500">Related artifacts</h2>
+          <ul className="mt-3 flex flex-wrap gap-2">{artifactLinks.map(artifact => <li key={artifact.url}>
+            <a href={artifact.url} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1.5 rounded border border-slate-200 px-2 py-1 text-xs text-slate-700 transition hover:border-slate-300 hover:text-primary-700">
+              {artifact.type === 'pull_request'
+                ? <GitPullRequest className="h-3.5 w-3.5 flex-none text-slate-400" />
+                : <CircleDot className="h-3.5 w-3.5 flex-none text-slate-400" />}
+              {artifact.type === 'pull_request' ? 'PR' : 'Issue'} #{artifact.number}
+            </a>
+          </li>)}</ul>
         </section>}
 
-        {canMutate ? <section aria-labelledby="correction-heading" className="sticky bottom-0 mt-auto pt-10">
+        {canMutate && <section aria-labelledby="quick-actions-heading" className={`${railInset} mt-7`}>
+          <h2 id="quick-actions-heading" className="text-[10px] font-bold uppercase tracking-widest text-slate-500">Quick actions</h2>
+          <div className="mt-3 flex flex-wrap gap-2"><button disabled={busy} onClick={() => continueWith({ canned: 'done' })} className={`${buttonClass} border border-slate-300 text-slate-700 hover:bg-slate-100`}>What's done?</button><button disabled={busy} onClick={() => continueWith({ canned: 'left' })} className={`${buttonClass} border border-slate-300 text-slate-700 hover:bg-slate-100`}>What's left?</button></div>
+        </section>}
+
+        {/* A closed goal gets no footer bar: the locked state is already stated beside the status badge. */}
+        {canMutate && <section aria-labelledby="correction-heading" className={`${railInset} sticky bottom-0 mt-auto bg-slate-50 pb-1 pt-10`}>
           <div className="mb-2 flex flex-col items-end gap-1">
             <label htmlFor="goal-continuation-model" className="text-xs text-slate-500">Model for next continuation</label>
             <select id="goal-continuation-model" value={goal.requestedModel} onChange={event => act(() => requestGoalModel(goal.id, event.target.value))} className="max-w-48 rounded-md border border-slate-200 bg-white px-2 py-1.5 text-xs font-medium text-slate-700 shadow-sm">{models.map(item => <option key={item} value={item}>{getModelDisplayName(item)}</option>)}</select>
@@ -858,14 +1138,6 @@ function GoalDetails({ goalId }: { goalId: string }) {
             <GoalAttachmentInput files={files} onChange={setFiles} onError={setError} disabled={busy} compact />
             <div className="mt-2 flex justify-end"><button disabled={busy || !message.trim()} onClick={() => continueWith({ message }, files)} className={`${buttonClass} bg-primary-600 text-white hover:bg-primary-700`}><Send className="h-4 w-4" />Send</button></div>
           </div>
-        </section> : <section aria-label="Correction command bar" className="sticky bottom-0 mt-auto pt-10">
-          <input
-            aria-label="Correction or follow-up"
-            type="text"
-            disabled
-            className="w-full cursor-not-allowed rounded-md border border-slate-200 bg-slate-100 px-3 py-3 text-sm text-slate-500 shadow-sm placeholder:text-slate-500 disabled:opacity-100"
-            placeholder={isDemoMode && mutable ? 'Demo mode is read-only. Corrections disabled.' : goal.resultState === 'completed' ? 'Goal completed. Corrections disabled.' : 'Goal closed. Corrections disabled.'}
-          />
         </section>}
       </aside>
     </div>

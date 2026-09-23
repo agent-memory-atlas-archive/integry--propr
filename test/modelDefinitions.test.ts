@@ -32,8 +32,21 @@ test('GPT-5.6 Codex models are in the catalog with labels and OpenRouter IDs', (
     }
 });
 
+test('Claude Opus 5.5 leads the Claude catalog as the default Claude model', () => {
+    assert.strictEqual(CLAUDE_MODELS[0]?.id, 'claude-opus-5-5');
+    assert.strictEqual(AGENT_DEFAULTS.claude.defaultModels[0], 'claude-opus-5-5');
+    assert.strictEqual(MODEL_INFO_MAP['claude-opus-5-5']?.githubLabel, 'llm-claude-opus55');
+    assert.strictEqual(MODEL_INFO_MAP['claude-opus-5-5']?.shortAlias, 'opus55');
+    assert.strictEqual(MODEL_INFO_MAP['claude-opus-5-5']?.openRouterId, 'anthropic/claude-opus-5.5');
+    assert.strictEqual(MODEL_INFO_MAP['claude-opus-5-5']?.contextWindow, '1M');
+    assert.strictEqual(MODEL_INFO_MAP['claude-opus-5-5']?.maxTokens, 1000000);
+    // Opus 5.5 shipped in Claude Code 2.1.280, so the pinned CLI must support it
+    assert.strictEqual(MODEL_INFO_MAP['claude-opus-5-5']?.minAgentVersion, '2.1.280');
+    assert.strictEqual(AGENT_DEFAULTS.claude.defaultCliVersion, '2.1.280');
+});
+
 test('Claude Fable 5.1, Opus 5, and Sonnet 5 are current Claude Code models', () => {
-    assert.strictEqual(CLAUDE_MODELS[0]?.id, 'claude-fable-5-1');
+    assert.ok(CLAUDE_MODELS.some(model => model.id === 'claude-fable-5-1'));
     assert.strictEqual(MODEL_INFO_MAP['claude-fable-5-1']?.githubLabel, 'llm-claude-fable51');
     assert.strictEqual(MODEL_INFO_MAP['claude-fable-5-1']?.minAgentVersion, '2.1.257');
     assert.ok(CLAUDE_MODELS.some(model => model.id === 'claude-opus-5'));

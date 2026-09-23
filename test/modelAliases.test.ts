@@ -26,7 +26,7 @@ test('Model Aliases Configuration', async (t) => {
     await t.test('should resolve known aliases to full model IDs', () => {
         // Default aliases point to the latest tier models
         assert.strictEqual(resolveModelAlias('fable'), 'claude-fable-5-1');
-        assert.strictEqual(resolveModelAlias('opus'), 'claude-opus-5');
+        assert.strictEqual(resolveModelAlias('opus'), 'claude-opus-5-5');
         assert.strictEqual(resolveModelAlias('sonnet'), 'claude-sonnet-5');
         // Explicit 4.5 aliases
         assert.strictEqual(resolveModelAlias('opus45'), 'claude-opus-4-5-20251101');
@@ -35,7 +35,7 @@ test('Model Aliases Configuration', async (t) => {
     });
 
     await t.test('should handle case-insensitive aliases', () => {
-        assert.strictEqual(resolveModelAlias('OPUS'), 'claude-opus-5');
+        assert.strictEqual(resolveModelAlias('OPUS'), 'claude-opus-5-5');
         assert.strictEqual(resolveModelAlias('Sonnet'), 'claude-sonnet-5');
         assert.strictEqual(resolveModelAlias('HAIKU'), 'claude-haiku-4-5-20251001');
     });
@@ -69,7 +69,9 @@ test('Model Aliases Configuration', async (t) => {
         assert.strictEqual(resolveModelAlias('fable5'), 'claude-fable-5');
         assert.strictEqual(resolveModelAlias('fable-5'), 'claude-fable-5');
         assert.strictEqual(resolveModelAlias('claude-fable-5'), 'claude-fable-5');
-        // 5/4.8/4.7/4.6 aliases
+        // 5.5/5/4.8/4.7/4.6 aliases
+        assert.strictEqual(resolveModelAlias('opus55'), 'claude-opus-5-5');
+        assert.strictEqual(resolveModelAlias('opus-5-5'), 'claude-opus-5-5');
         assert.strictEqual(resolveModelAlias('opus5'), 'claude-opus-5');
         assert.strictEqual(resolveModelAlias('sonnet5'), 'claude-sonnet-5');
         assert.strictEqual(resolveModelAlias('opus48'), 'claude-opus-4-8');
@@ -93,7 +95,7 @@ test('resolveLlmLabel - 7-step model resolution', async (t) => {
                 type: 'claude' as const,
                 alias: 'claude',
                 enabled: true,
-                supportedModels: ['claude-fable-5-1', 'claude-fable-5', 'claude-opus-5', 'claude-sonnet-5', 'claude-opus-4-8', 'claude-opus-4-7', 'claude-opus-4-6', 'claude-sonnet-4-6', 'claude-opus-4-5-20251101', 'claude-sonnet-4-5-20250929', 'claude-haiku-4-5-20251001'],
+                supportedModels: ['claude-opus-5-5', 'claude-fable-5-1', 'claude-fable-5', 'claude-opus-5', 'claude-sonnet-5', 'claude-opus-4-8', 'claude-opus-4-7', 'claude-opus-4-6', 'claude-sonnet-4-6', 'claude-opus-4-5-20251101', 'claude-sonnet-4-5-20250929', 'claude-haiku-4-5-20251001'],
                 defaultModel: 'claude-sonnet-4-6'
             }
         },
@@ -334,7 +336,7 @@ test('resolveLlmLabel - 7-step model resolution', async (t) => {
     await t.test('Step 6: resolves static MODEL_ALIASES for backwards compatibility (opus)', async () => {
         const result = await resolveLlmLabel('opus');
         assert.strictEqual(result.agentAlias, 'claude', 'Should resolve to default (claude) agent');
-        assert.strictEqual(result.model, 'claude-opus-5', 'Should resolve to claude-opus-5 from static aliases');
+        assert.strictEqual(result.model, 'claude-opus-5-5', 'Should resolve to claude-opus-5-5 from static aliases');
     });
 
     await t.test('Step 6: resolves static MODEL_ALIASES for sonnet', async () => {
@@ -676,7 +678,7 @@ test('resolveReviewModels - multi-model /review resolution', async (t) => {
                 type: 'claude' as const,
                 alias: 'claude',
                 enabled: true,
-                supportedModels: ['claude-fable-5-1', 'claude-fable-5', 'claude-opus-4-8', 'claude-opus-4-7', 'claude-opus-4-6', 'claude-sonnet-4-6', 'claude-opus-4-5-20251101', 'claude-sonnet-4-5-20250929', 'claude-haiku-4-5-20251001'],
+                supportedModels: ['claude-opus-5-5', 'claude-fable-5-1', 'claude-fable-5', 'claude-opus-4-8', 'claude-opus-4-7', 'claude-opus-4-6', 'claude-sonnet-4-6', 'claude-opus-4-5-20251101', 'claude-sonnet-4-5-20250929', 'claude-haiku-4-5-20251001'],
                 defaultModel: 'claude-sonnet-4-6'
             }
         },

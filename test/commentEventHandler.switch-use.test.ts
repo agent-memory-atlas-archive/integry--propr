@@ -229,6 +229,11 @@ after(async () => {
 
 // ========== Helpers ==========
 
+// Canonical model behind the bare "opus" alias. Promoting a new default Claude
+// model retargets the alias, so the /switch and /use expectations read it from
+// here rather than repeating the id.
+const CANONICAL_OPUS_MODEL = 'claude-opus-5-5';
+
 function createMockRedis() {
     const store = new Map<string, string>();
     return {
@@ -370,7 +375,7 @@ describe('commentEventHandler — /switch command', () => {
         const call = mockSafeUpdateLabels.mock.calls[0];
         const newLabels = call.arguments[2] as string[];
         // "opus" should be resolved via the current configured alias.
-        assert.deepStrictEqual(newLabels, ['llm-claude-opus-5']);
+        assert.deepStrictEqual(newLabels, [`llm-${CANONICAL_OPUS_MODEL}`]);
     });
 
     test('/switch with full model ID preserves it in label', async () => {
@@ -536,7 +541,7 @@ describe('commentEventHandler — /switch command', () => {
         // Should call safeUpdateLabels with the derived prefix 'model-'
         assert.strictEqual(mockSafeUpdateLabels.mock.callCount(), 1);
         const newLabels = mockSafeUpdateLabels.mock.calls[0].arguments[2] as string[];
-        assert.deepStrictEqual(newLabels, ['model-claude-opus-5']);
+        assert.deepStrictEqual(newLabels, [`model-${CANONICAL_OPUS_MODEL}`]);
     });
 
     test('/switch aborts when derived label prefix would not match MODEL_LABEL_PATTERN', async () => {
@@ -562,7 +567,7 @@ describe('commentEventHandler — /switch command', () => {
         // Should still update labels using the first model
         assert.strictEqual(mockSafeUpdateLabels.mock.callCount(), 1);
         const newLabels = mockSafeUpdateLabels.mock.calls[0].arguments[2] as string[];
-        assert.deepStrictEqual(newLabels, ['llm-claude-opus-5']);
+        assert.deepStrictEqual(newLabels, [`llm-${CANONICAL_OPUS_MODEL}`]);
         // Should have logged a warning about extra arguments
         const warnCalls = mockLoggerInstance.warn.mock.calls;
         const extraWarn = warnCalls.find(
@@ -692,7 +697,7 @@ describe('commentEventHandler — /use command', () => {
 
         assert.strictEqual(mockQueueAdd.mock.callCount(), 1);
         const jobData = mockQueueAdd.mock.calls[0].arguments[1] as Record<string, unknown>;
-        assert.strictEqual(jobData.llm, 'claude-opus-5');
+        assert.strictEqual(jobData.llm, CANONICAL_OPUS_MODEL);
     });
 
     test('/use without model argument warns and returns early', async () => {
@@ -745,7 +750,7 @@ describe('commentEventHandler — /use command', () => {
         assert.strictEqual(mockQueueAdd.mock.callCount(), 1);
         const jobData = mockQueueAdd.mock.calls[0].arguments[1] as Record<string, unknown>;
         // "llm-opus" is normalized before resolving the current alias.
-        assert.strictEqual(jobData.llm, 'claude-opus-5');
+        assert.strictEqual(jobData.llm, CANONICAL_OPUS_MODEL);
     });
 
     test('/use without instructions still enqueues a job with empty body', async () => {
@@ -788,7 +793,7 @@ describe('commentEventHandler — /use command', () => {
 
         assert.strictEqual(mockQueueAdd.mock.callCount(), 1);
         const jobData = mockQueueAdd.mock.calls[0].arguments[1] as Record<string, unknown>;
-        assert.strictEqual(jobData.llm, 'claude-opus-5');
+        assert.strictEqual(jobData.llm, CANONICAL_OPUS_MODEL);
         // Warning should be logged
         const warnCalls = mockLoggerInstance.warn.mock.calls;
         const extraWarn = warnCalls.find(
@@ -1027,7 +1032,7 @@ describe('commentEventHandler — slash command batching/concurrency guard', () 
         assert.strictEqual(pendingComment.body, 'Fix the bug');
         assert.strictEqual(pendingComment.commandMode, 'use');
         assert.strictEqual(pendingComment.commandInstructions, 'Fix the bug');
-        assert.strictEqual(pendingComment.llmOverride, 'claude-opus-5');
+        assert.strictEqual(pendingComment.llmOverride, CANONICAL_OPUS_MODEL);
     });
 
     test('/switch with instructions is batched when an existing job is active', async () => {
@@ -1050,7 +1055,7 @@ describe('commentEventHandler — slash command batching/concurrency guard', () 
         const pendingComment = JSON.parse(config.redisClient.rpush.mock.calls[0].arguments[1] as string) as Record<string, unknown>;
         assert.strictEqual(pendingComment.commandMode, 'switch');
         assert.strictEqual(pendingComment.commandInstructions, 'Review the code');
-        assert.strictEqual(pendingComment.llmOverride, 'claude-opus-5');
+        assert.strictEqual(pendingComment.llmOverride, CANONICAL_OPUS_MODEL);
     });
 
     test('/use enqueues normally when no existing job is active', async () => {

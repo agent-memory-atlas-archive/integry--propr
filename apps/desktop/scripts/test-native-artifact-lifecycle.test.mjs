@@ -18,6 +18,7 @@ import {
   inspectRunningProcessGroupMembers,
   LaunchServicesAbsenceFailure,
   LaunchServicesAuthority,
+  LAUNCH_SERVICES_STALE_REGISTRATION,
   launchServicesRecordMatchesApplication,
   linuxProtocolDispatch,
   NativeLifecycleCommandFailure,
@@ -656,7 +657,7 @@ describe('native staged artifact lifecycle authority', () => {
     const staleError = await stale.assertGone().then(() => null, error => error);
     assert.ok(staleError instanceof LaunchServicesAbsenceFailure);
     assert.match(staleError.message, /remained registered/);
-    assert.equal(staleError.resultClass, 'RECORD_PERSISTED');
+    assert.equal(staleError.resultClass, LAUNCH_SERVICES_STALE_REGISTRATION);
     assert.equal(stale.registered, true);
     assert.equal(staleDumps, 3);
     assert.deepEqual(staleWaits, [1_000, 1_000]);
@@ -668,7 +669,7 @@ describe('native staged artifact lifecycle authority', () => {
     // answered, without ever repeating an unclassified error's text.
     assert.match(
       new NativeLifecycleFailure(null, [{ label: 'launchservices-postcondition', error: staleError }]).message,
-      /launchservices-postcondition \[result:RECORD_PERSISTED\]/,
+      /launchservices-postcondition \[result:STALE_REGISTRATION\]/,
     );
     assert.match(
       new NativeLifecycleFailure(null, [{
@@ -742,6 +743,81 @@ describe('native staged artifact lifecycle authority', () => {
     assert.equal(authority.registered, false);
     assert.equal(dumps.length, 0);
     assert.deepEqual(waits, [1_000, 1_000]);
+  });
+
+  test('spends a bounded attempt on an unreadable dump instead of ending the absence proof', async () => {
+    const applicationRoot = '/private/copied/ProPR Desktop.app';
+    // One dump never answers, the next still lists the bundle, and only the
+    // third proves it gone. A probe that could not run is not evidence, so it
+    // must not be read as absence and must not abandon the proof either.
+    const probes = [
+      () => { throw new NativeLifecycleCommandFailure('COMMAND_DEADLINE'); },
+      () => true,
+      () => false,
+    ];
+    const waits = [];
+    const unregisters = [];
+    const authority = new LaunchServicesAuthority(applicationRoot, {}, {
+      runCommand: async (_file, args) => {
+        unregisters.push(args[0]);
+        return { stdout: Buffer.alloc(0), stderr: Buffer.alloc(0) };
+      },
+      scanCommand: async () => ({ matched: probes.shift()() }),
+      wait: async milliseconds => { waits.push(milliseconds); },
+      absenceAttempts: 4,
+    });
+    authority.registered = true;
+
+    await authority.assertGone();
+
+    assert.equal(authority.registered, false);
+    assert.equal(probes.length, 0);
+    assert.deepEqual(waits, [1_000, 1_000]);
+    assert.deepEqual(unregisters, ['-u', '-u']);
+  });
+
+  test('reports why the absence proof ended and carries that class into cleanup reporting', async () => {
+    const applicationRoot = '/private/copied/ProPR Desktop.app';
+    const secret = 'https://secret.invalid/private-dump';
+    const authorityFor = probe => {
+      const authority = new LaunchServicesAuthority(applicationRoot, {}, {
+        runCommand: async () => ({ stdout: Buffer.alloc(0), stderr: Buffer.alloc(0) }),
+        scanCommand: async () => ({ matched: probe() }),
+        wait: async () => undefined,
+        absenceAttempts: 2,
+      });
+      authority.registered = true;
+      return authority;
+    };
+
+    const stale = await authorityFor(() => true).assertGone().catch(error => error);
+    assert.ok(stale instanceof LaunchServicesAbsenceFailure);
+    assert.equal(stale.resultClass, LAUNCH_SERVICES_STALE_REGISTRATION);
+    assert.match(stale.message, /remained registered/);
+
+    const unreadable = await authorityFor(() => {
+      throw new NativeLifecycleCommandFailure('COMMAND_DEADLINE');
+    }).assertGone().catch(error => error);
+    assert.ok(unreadable instanceof LaunchServicesAbsenceFailure);
+    assert.equal(unreadable.resultClass, 'COMMAND_DEADLINE');
+    assert.match(unreadable.message, /could not be probed/);
+
+    // A cleanup label alone cannot tell these two apart in a CI log, so the
+    // fixed class rides along — and nothing else does.
+    for (const [failure, expected] of [[stale, 'STALE_REGISTRATION'], [unreadable, 'COMMAND_DEADLINE']]) {
+      const aggregate = new NativeLifecycleFailure(null, [
+        { label: 'launchservices-postcondition', error: failure },
+      ]);
+      assert.match(aggregate.message, new RegExp(`launchservices-postcondition \\[result:${expected}\\]`));
+      assert.doesNotMatch(inspect(aggregate), new RegExp(secret));
+      assert.ok(!inspect(aggregate).includes(applicationRoot));
+    }
+
+    // An unclassified cleanup error still reports as a bare label.
+    assert.equal(
+      new NativeLifecycleFailure(null, [{ label: 'install-root', error: new Error(secret) }]).message,
+      'Native lifecycle cleanup failed: install-root',
+    );
   });
 
   test('matches only the exact copied bundle path record in an lsregister dump', () => {

@@ -22,9 +22,12 @@ export interface AgentDisplayInfo {
   order: number;
 }
 
-// Claude models (newest first within each tier, then by capability: Fable > Opus > Sonnet > Haiku)
+// Claude models (default Claude model first, then newest first within each tier,
+// then by capability: Fable > Opus > Sonnet > Haiku)
 // Claude 5 and 4.8/4.7/4.6 models require newer Claude Code versions; 4.5 models work with older versions
 export const CLAUDE_MODELS: ModelInfo[] = [
+  // Claude Opus 5.5 - the default Claude model and the canonical "opus" alias target
+  { id: 'claude-opus-5-5', name: 'Claude Opus 5.5', shortName: 'Claude Opus 5.5', shortAlias: 'opus55', githubLabel: 'llm-claude-opus55', contextWindow: '1M', maxTokens: 1000000, openRouterId: 'anthropic/claude-opus-5.5', minAgentVersion: '2.1.280' },
   // Claude Fable series (top tier, above Opus)
   { id: 'claude-fable-5-1', name: 'Claude Fable 5.1', shortName: 'Claude Fable 5.1', shortAlias: 'fable51', githubLabel: 'llm-claude-fable51', contextWindow: '1M', maxTokens: 1000000, openRouterId: 'anthropic/claude-fable-5.1', minAgentVersion: '2.1.257' },
   { id: 'claude-fable-5', name: 'Claude Fable 5', shortName: 'Claude Fable 5', shortAlias: 'fable', githubLabel: 'llm-claude-fable', contextWindow: '1M', maxTokens: 1000000, openRouterId: 'anthropic/claude-fable-5', minAgentVersion: '2.1.170' },
@@ -157,7 +160,7 @@ export const AGENT_DEFAULTS: Record<AgentType, {
     defaultModels: CLAUDE_MODELS.map(m => m.id),
     defaultAlias: 'claude',
     npmPackage: '@anthropic-ai/claude-code',
-    defaultCliVersion: '2.1.273'
+    defaultCliVersion: '2.1.280'
   },
   codex: {
     dockerImage: 'propr/agent:latest',

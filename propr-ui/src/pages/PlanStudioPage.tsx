@@ -10,6 +10,8 @@ import ApprovedPlanView from '../components/TaskPlanner/ApprovedPlanView';
 import { GenerationProgress } from '../components/TaskPlanner/GenerationProgress';
 import StudioStepper, { StudioStage } from '../components/TaskPlanner/StudioStepper';
 import { PlannerDraft, DraftWithPlan } from '../api/plannerApi';
+import { getDraftDisplayName } from '../components/TaskPlanner/planDisplayName';
+import type { PromptPersistedUpdate } from '../components/TaskPlanner/setupWizardHooks';
 import {
   parsePlanNotificationIntent,
   removeNotificationIntent,
@@ -51,7 +53,7 @@ const getStageFromStatus = (status: string | undefined): StudioStage => {
 const getTaskTitle = (draft: PlannerDraft): string => {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const draftAny = draft as any;
-  return draftAny?.task_title || draftAny?.title || 'Untitled Task';
+  return draftAny?.task_title || draftAny?.title || getDraftDisplayName(draftAny, 'Untitled Task');
 };
 
 const LoadingView: React.FC<{ isNew: boolean }> = ({ isNew }) => (
@@ -195,7 +197,7 @@ const ReviewView: React.FC<{
   </div>
 );
 
-const DraftView: React.FC<{ currentStage: StudioStage; draft: PlannerDraft; onRefetch: () => void; onGenerationStarted: (runId: string) => void }> = ({ currentStage, draft, onRefetch, onGenerationStarted }) => (
+const DraftView: React.FC<{ currentStage: StudioStage; draft: PlannerDraft; onRefetch: () => void; onGenerationStarted: (runId: string) => void; onDraftMetadataPersisted?: (update: PromptPersistedUpdate) => void }> = ({ currentStage, draft, onRefetch, onGenerationStarted, onDraftMetadataPersisted }) => (
   <div className="planner-studio-viewport flex flex-col">
     {/* Fixed Header */}
     <div className="bg-gray-100 px-4 py-2 md:px-6 md:py-4 border-b border-gray-300">
@@ -208,6 +210,7 @@ const DraftView: React.FC<{ currentStage: StudioStage; draft: PlannerDraft; onRe
         draft={draft}
         onGenerateComplete={onRefetch}
         onGenerationStarted={onGenerationStarted}
+        onDraftMetadataPersisted={onDraftMetadataPersisted}
       />
     </div>
   </div>
@@ -219,7 +222,7 @@ const getNewDraftTitle = (search: string): string =>
 const getDocumentTitle = (draft: PlannerDraft | null): string => {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const draftAny = draft as any;
-  return draftAny?.name || draftAny?.task_title || draft?.repository || 'Planner Studio';
+  return getDraftDisplayName(draftAny, draftAny?.task_title || draft?.repository || 'Planner Studio');
 };
 
 const isApprovedStatus = (status: string | undefined): boolean => {
@@ -246,7 +249,8 @@ const NewDraftView: React.FC<{
   onDraftCreated?: (draft: PlannerDraft) => void;
   onRefetch?: () => void;
   onGenerationStarted?: (runId: string) => void;
-}> = ({ draft, onDraftCreated, onRefetch, onGenerationStarted, singleTask }) => (
+  onDraftMetadataPersisted?: (update: PromptPersistedUpdate) => void;
+}> = ({ draft, onDraftCreated, onRefetch, onGenerationStarted, onDraftMetadataPersisted, singleTask }) => (
   <div className="planner-studio-viewport flex flex-col">
     {/* Fixed Header */}
     <div className="bg-gray-100 px-4 py-2 md:px-6 md:py-4 border-b border-gray-300">
@@ -261,6 +265,7 @@ const NewDraftView: React.FC<{
         onGenerateComplete={onRefetch || (() => {})}
         onDraftCreatedInPlace={onDraftCreated}
         onGenerationStarted={onGenerationStarted}
+        onDraftMetadataPersisted={onDraftMetadataPersisted}
       />
     </div>
   </div>
@@ -271,6 +276,7 @@ interface DraftViewOptions extends IntentAwareViewProps {
   currentStage: StudioStage;
   refetch: () => void;
   onGenerationStarted: (runId: string) => void;
+  onDraftMetadataPersisted: (update: PromptPersistedUpdate) => void;
 }
 
 // Helper to render the appropriate view based on draft status
@@ -279,6 +285,7 @@ const renderDraftView = ({
   currentStage,
   refetch,
   onGenerationStarted,
+  onDraftMetadataPersisted,
   notificationIntent,
   onNotificationIntentConsumed,
 }: DraftViewOptions): React.ReactElement => {
@@ -310,7 +317,7 @@ const renderDraftView = ({
     );
   }
 
-  return <DraftView currentStage={currentStage} draft={draft} onRefetch={refetch} onGenerationStarted={onGenerationStarted} />;
+  return <DraftView currentStage={currentStage} draft={draft} onRefetch={refetch} onGenerationStarted={onGenerationStarted} onDraftMetadataPersisted={onDraftMetadataPersisted} />;
 };
 
 interface StudioIntentRouting {
@@ -376,12 +383,28 @@ const PlanStudioPage: React.FC<PlanStudioPageProps> = ({ isNew = false }) => {
 
   // For /studio/new: track draft created in-place (without navigation)
   const [inPlaceDraft, setInPlaceDraft] = useState<PlannerDraft | null>(null);
+  // Latest prompt metadata persisted by the setup wizard, used for the page title only
+  const [metadataOverride, setMetadataOverride] = useState<PromptPersistedUpdate | null>(null);
 
   // Reset in-place draft when navigation occurs (detected via location.key change)
   // This ensures stale state doesn't persist when navigating between plans
   useEffect(() => {
     setInPlaceDraft(null);
+    setMetadataOverride(null);
   }, [location.key]);
+
+  const handleDraftMetadataPersisted = useCallback((update: PromptPersistedUpdate) => {
+    setMetadataOverride(update);
+  }, []);
+
+  // The override only refreshes the title. It is deliberately not merged into the draft
+  // passed to SetupWizard: changing initial_prompt there resets the debounced prompt save
+  // and would drop the user's latest keystrokes.
+  const applyMetadataOverride = useCallback((source: PlannerDraft | null): PlannerDraft | null => {
+    if (!source || !metadataOverride) return source;
+    if (metadataOverride.draftId !== source.draft_id || !isDraftStatus(source.status)) return source;
+    return { ...source, initial_prompt: metadataOverride.initial_prompt, name: metadataOverride.name } as PlannerDraft;
+  }, [metadataOverride]);
 
   // Handle draft created in-place (auto-save in new mode)
   // This updates the URL without navigation, preserving focus and avoiding flicker
@@ -402,10 +425,11 @@ const PlanStudioPage: React.FC<PlanStudioPageProps> = ({ isNew = false }) => {
     { initialData: isNew ? inPlaceDraft : initialDraft }
   );
 
-  // The actual draft to use - prefer the in-place draft when available
-  const activeDraft = inPlaceDraft || draft;
+  // Prefer the refetched draft over the one-time in-place snapshot so a server-side
+  // (LLM-generated) name shows up as soon as it is fetched.
+  const titleDraft = applyMetadataOverride(draft || inPlaceDraft);
 
-  useDocumentTitle(isNew && !inPlaceDraft ? getNewDraftTitle(location.search) : getDocumentTitle(activeDraft));
+  useDocumentTitle(isNew && !inPlaceDraft ? getNewDraftTitle(location.search) : getDocumentTitle(titleDraft));
 
   // Determine effective draft and status for rendering decisions
   // After refetch, 'draft' from useDraft contains the latest status
@@ -424,6 +448,7 @@ const PlanStudioPage: React.FC<PlanStudioPageProps> = ({ isNew = false }) => {
         onDraftCreated={handleDraftCreatedInPlace}
         onRefetch={refetch}
         onGenerationStarted={activateGenerationRun}
+        onDraftMetadataPersisted={handleDraftMetadataPersisted}
       />
     );
   }
@@ -443,6 +468,7 @@ const PlanStudioPage: React.FC<PlanStudioPageProps> = ({ isNew = false }) => {
     currentStage,
     refetch,
     onGenerationStarted: activateGenerationRun,
+    onDraftMetadataPersisted: handleDraftMetadataPersisted,
     notificationIntent: activeNotificationIntent,
     onNotificationIntentConsumed: handleNotificationIntentConsumed,
   });

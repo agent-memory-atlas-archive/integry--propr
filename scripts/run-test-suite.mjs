@@ -11,6 +11,8 @@
 //                                                 summaries ran every unit exactly once
 //
 // PROPR_TEST_SUMMARY_FILE receives per-unit status and timing as JSON.
+// PROPR_TEST_TIMEOUT_MS bounds every unit; units that pass but already use
+// most of that budget are reported before they start timing out.
 
 import { appendFileSync, existsSync, readFileSync, readdirSync, mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { spawn } from 'node:child_process';
@@ -28,6 +30,12 @@ const IGNORED_DIRECTORIES = new Set(['.git', 'coverage', 'dist', 'node_modules']
 const MAX_SHARD_COUNT = 64;
 const SHARD_NUMBER_PATTERN = /^[1-9][0-9]*$/;
 const SLOWEST_RUNS_REPORTED = 15;
+// A unit that already spends most of its budget is one slow test file, or one
+// contended nightly run, away from being killed. propr-ui crossed the per-unit
+// timeout that way: it stayed healthy and just kept growing until the nightly
+// suite failed with no earlier signal. Passing units at or above this share of
+// the timeout are reported so they can be split before they fail.
+export const TIMEOUT_MARGIN_RATIO = 0.6;
 // Each native Jest/Vitest workspace runs as this many `--shard` parts. As one
 // unit, propr-ui alone took 88s on a hosted runner and more than the per-unit
 // timeout on a worker limited to two CPUs. Parts keep every unit well inside
@@ -315,11 +323,36 @@ export function formatDuration(milliseconds) {
     return `${(milliseconds / 1000).toFixed(1)}s`;
 }
 
+function formatBudgetShare(durationMs, timeoutMs) {
+    return `${Math.round((durationMs / timeoutMs) * 100)}%`;
+}
+
+// Units that passed but are already close to the per-unit timeout. A failed
+// unit is reported by the failure list, so repeating it here would only bury
+// the units that still have a chance of being split in time.
+export function selectTimeoutRisks(summary, ratio = TIMEOUT_MARGIN_RATIO) {
+    if (!summary.timeoutMs) return [];
+    return summary.results
+        .filter(result => result.status === 'passed' && result.durationMs >= summary.timeoutMs * ratio)
+        .sort((a, b) => b.durationMs - a.durationMs || a.id.localeCompare(b.id));
+}
+
+// Annotated on GitHub Actions so the warning is visible on the run itself
+// rather than only in the log of an otherwise green job.
+export function formatTimeoutRiskWarning(result, timeoutMs, env = process.env) {
+    const message = `${result.id} used ${formatBudgetShare(result.durationMs, timeoutMs)} `
+        + `(${formatDuration(result.durationMs)}) of the ${formatDuration(timeoutMs)} per-unit timeout`;
+    return env.GITHUB_ACTIONS === 'true'
+        ? `::warning title=Test unit near the per-unit timeout::${message}`
+        : `Warning: ${message}`;
+}
+
 export function formatTimingReport(summary, limit = SLOWEST_RUNS_REPORTED) {
     const label = summary.shard ? `Shard ${summary.shard.index}/${summary.shard.count}` : 'Unsharded suite';
     const slowest = [...summary.results]
         .sort((a, b) => b.durationMs - a.durationMs || a.id.localeCompare(b.id))
         .slice(0, limit);
+    const risks = selectTimeoutRisks(summary);
     return [
         `### ${label}: ${summary.passed}/${summary.results.length} passed in ${formatDuration(summary.durationMs)}`,
         '',
@@ -329,6 +362,13 @@ export function formatTimingReport(summary, limit = SLOWEST_RUNS_REPORTED) {
         '| ---: | --- | --- |',
         ...slowest.map(result => `| ${formatDuration(result.durationMs)} | ${result.status} | \`${result.id}\`${result.kind === 'workspace' ? ' (workspace)' : ''} |`),
         '',
+        ...(risks.length === 0 ? [] : [
+            `Passing units at or above ${Math.round(TIMEOUT_MARGIN_RATIO * 100)}% of the `
+                + `${formatDuration(summary.timeoutMs)} per-unit timeout. Split or speed these up before they fail:`,
+            '',
+            ...risks.map(result => `- \`${result.id}\` used ${formatBudgetShare(result.durationMs, summary.timeoutMs)} (${formatDuration(result.durationMs)})`),
+            '',
+        ]),
     ].join('\n');
 }
 
@@ -542,6 +582,7 @@ export async function runSuite(argv = process.argv.slice(2), env = process.env) 
         schemaVersion: 1,
         shard,
         runAttempt: Number(env.GITHUB_RUN_ATTEMPT) || 1,
+        timeoutMs: timeout,
         totalUnits: plan.allUnits.length,
         assignedUnits: units.length,
         durationMs: Date.now() - startedAt,
@@ -559,6 +600,12 @@ export async function runSuite(argv = process.argv.slice(2), env = process.env) 
     const timingReport = formatTimingReport(summary);
     console.log(`\n${timingReport}`);
     if (env.GITHUB_STEP_SUMMARY) appendFileSync(env.GITHUB_STEP_SUMMARY, `${timingReport}\n`);
+
+    // A unit creeping towards the per-unit timeout is reported while the run
+    // is still green, so it can be split before it starts failing.
+    for (const risk of selectTimeoutRisks(summary)) {
+        console.warn(formatTimeoutRiskWarning(risk, summary.timeoutMs, env));
+    }
 
     const durationSeconds = (summary.durationMs / 1000).toFixed(1);
     const scope = shard ? ` in shard ${shard.index}/${shard.count}` : '';

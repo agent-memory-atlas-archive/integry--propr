@@ -3,13 +3,13 @@ import { Film, ImageOff } from 'lucide-react';
 import { trustedPreviewMedia, type PublishedVisualPreview } from '@propr/shared';
 import { downsampleToCanvas } from './previewDownsampling';
 
-/** `className` replaces the default full-size sizing classes; compact thumbnails keep their fixed sizing. */
+/** `className` replaces the default sizing classes; compact thumbnails keep their canvas downsampling either way. */
 export function PreviewImage({ preview, compact = false, className: sizing }: { preview: PublishedVisualPreview; compact?: boolean; className?: string }) {
   const [failed, setFailed] = useState(false);
   const [downsampled, setDownsampled] = useState(false);
   const imageRef = useRef<HTMLImageElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const className = compact ? 'h-12 w-full object-contain bg-slate-900/5 sm:h-14' : sizing ?? 'aspect-video w-full object-contain';
+  const className = sizing ?? (compact ? 'h-12 w-full object-contain bg-slate-900/5 sm:h-14' : 'aspect-video w-full object-contain');
 
   const draw = useCallback(() => {
     const image = imageRef.current;
@@ -50,14 +50,18 @@ export function PreviewImage({ preview, compact = false, className: sizing }: { 
   </span>;
 }
 
-/** Non-interactive so it can live inside a task/goal/Inbox navigation target. */
-export function PreviewThumbnails({ media, limit = 3 }: { media?: unknown; limit?: 1 | 3 }) {
+/**
+ * Non-interactive so it can live inside a task/goal/Inbox navigation target.
+ * `micro` keeps dense list rows on their vertical rhythm with square 24px thumbnails.
+ */
+export function PreviewThumbnails({ media, limit = 3, size = 'default' }: { media?: unknown; limit?: 1 | 3; size?: 'default' | 'micro' }) {
   const previews = trustedPreviewMedia(media, limit);
   if (!previews.length) return null;
-  return <div role="group" aria-label="Published visual previews" className="mt-2 flex max-w-full flex-wrap gap-1.5">
-    {previews.map(preview => <span key={preview.url} title={preview.title} className="block w-16 shrink-0 overflow-hidden rounded-md border border-slate-200 bg-white sm:w-20">
-      {preview.type === 'image' ? <PreviewImage preview={preview} compact />
-        : <span role="img" aria-label={`Video preview: ${preview.title}`} className="flex h-12 flex-col items-center justify-center gap-0.5 bg-slate-800 text-white sm:h-14"><Film className="h-4 w-4" /><span className="text-[10px]">Video preview</span></span>}
+  const micro = size === 'micro';
+  return <div role="group" aria-label="Published visual previews" className={micro ? 'flex max-w-full flex-none gap-1' : 'mt-2 flex max-w-full flex-wrap gap-1.5'}>
+    {previews.map(preview => <span key={preview.url} title={preview.title} className={`block shrink-0 overflow-hidden border border-slate-200 bg-white ${micro ? 'h-6 w-6 rounded-sm' : 'w-16 rounded-md sm:w-20'}`}>
+      {preview.type === 'image' ? <PreviewImage preview={preview} compact {...(micro ? { className: 'h-6 w-6 object-cover bg-slate-900/5' } : {})} />
+        : <span role="img" aria-label={`Video preview: ${preview.title}`} className={`flex flex-col items-center justify-center bg-slate-800 text-white ${micro ? 'h-6 w-6' : 'h-12 gap-0.5 sm:h-14'}`}><Film className={micro ? 'h-3 w-3' : 'h-4 w-4'} />{!micro && <span className="text-[10px]">Video preview</span>}</span>}
     </span>)}
   </div>;
 }

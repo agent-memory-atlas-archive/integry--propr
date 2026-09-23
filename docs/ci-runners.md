@@ -135,6 +135,20 @@ Docker's [rootless client and resource-limit documentation](https://docs.docker.
 and [networking limitations](https://docs.docker.com/engine/security/rootless/troubleshoot/)
 explain the endpoint, delegation and namespace assumptions.
 
+## Change-based job selection
+
+Which checks a pull request runs is decided once, by the shared classifier
+described in [CI change classification](ci-change-classification.md). Nothing in
+that policy changes runner eligibility, the rootless opt-in, the hosted
+fallback, the preflight, isolation, Redis ownership, cleanup or superseded-run
+cancellation described in this document. It only decides whether a job is
+applicable to the change set, and every gate skips solely on an explicit `false`
+decision, so a failed or missing classifier runs the work.
+
+`Run Full Test Suite`, with all four shards, its coverage verification, the
+docs/test-preparation job and the hosted native Electron units, still runs
+unconditionally on every pull request.
+
 ## Deduplicated validation
 
 Eight rootless jobs now serve a pull request instead of eleven: four shards,
@@ -287,6 +301,12 @@ Sorted discovered test units are assigned deterministically to four shards.
 Files run serially within each shard with fresh data directories and an
 isolated Redis flush between files. Native workspace suites such as `propr-ui`
 are split into four workspace parts. Docs preparation runs once in its own job.
+
+Every unit is bounded by the same per-unit timeout (`PROPR_TEST_TIMEOUT_MS`,
+180s by default). `propr-ui` once crossed it as a single unit and failed the
+nightly suite with no earlier signal, so the timing report now also lists the
+units that passed while using 60% or more of that budget, and each one becomes
+a run annotation. A unit listed there is the next one to split.
 
 The required **Run Full Test Suite** name stays unchanged. Its gate requires
 all shards, docs, complete summary verification, and the hosted native Electron
