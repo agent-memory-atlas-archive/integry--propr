@@ -427,6 +427,9 @@ describe('release test-suite runner', () => {
             PROPR_TEST_SHARD_INDEX: '',
             PROPR_TEST_SHARD_COUNT: '',
             PROPR_TEST_REDIS_ISOLATION: '',
+            // An inherited override would make the nested run record its own
+            // budget; this test is about the default one.
+            PROPR_TEST_TIMEOUT_MS: '',
             PROPR_TEST_SUMMARY_FILE: summaryFile,
             GITHUB_STEP_SUMMARY: '',
             GITHUB_ACTIONS: '',
