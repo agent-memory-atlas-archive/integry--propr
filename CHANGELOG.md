@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Claude Opus 5.5**: added to the Claude model catalog (`llm-claude-opus55`, 1M
+  context) and made the default Claude model and the target of the plain `opus`
+  alias. The bundled Claude Code CLI moves to 2.1.280, which is the first release
+  that serves Opus 5.5. Claude agents still defaulting to Opus 5 are migrated to
+  Opus 5.5 on startup; deliberate picks in other tiers are left alone.
 - **Per-repository notifications**: Repositories → Settings now has a
   **Notifications** toggle that stops Inbox and push notifications for plan, task,
   review, pull request, and indexing activity in that repository while automation
@@ -28,6 +33,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   speech or microphone API is touched. Browser and PWA users who used Voice Briefings
   before this release must opt in once per account, instance, and device; existing
   desktop opt-ins are preserved.
+- **Claude Opus 5 and Opus 4.8 are legacy models**: both now sit behind the
+  *Show legacy models* fold on Coding Agents, leaving Opus 5.5, Fable 5.1, and
+  Sonnet 5 in the Claude agent's current list, and neither is offered as a
+  recommended model for plan generation or PR review. They remain fully
+  selectable, and agents already configured with them keep running them.
+
+### Fixed
+
+- **Cost for alias-configured agents**: an agent whose model is stored as an alias
+  (`fable`, `fable51`, `opus55`, ...) priced its runs against OpenRouter's generic
+  rates instead of the provider's published API rates, because the pricing lookup
+  only matched canonical model IDs. The lookup now resolves aliases first, so a
+  Fable 5 or Fable 5.1 run is costed at the Fable rates ($10/$50 per MTok, with
+  Fable 5.1's $0.25/MTok cache reads) however the model was named.
 
 ## [0.8.15] - 2026-08-15
 

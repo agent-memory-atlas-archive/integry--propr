@@ -147,11 +147,37 @@ describe('agent config migration', () => {
         assert.strictEqual(agent.cliVersionType, 'default');
         assert.strictEqual(agent.cliVersionResolved, AGENT_DEFAULT_VERSIONS.claude);
         assert.strictEqual(agent.dockerImage, 'propr/agent:latest');
+        assert.ok(agent.supportedModels.includes('claude-opus-5-5'));
         assert.ok(agent.supportedModels.includes('claude-opus-5'));
         assert.ok(agent.supportedModels.includes('claude-sonnet-5'));
         assert.ok(agent.supportedModels.includes('claude-fable-5-1'));
         assert.ok(agent.supportedModels.includes('claude-opus-4-6'));
         assert.ok(agent.supportedModels.includes('claude-sonnet-4-6'));
+    });
+
+    test('moves Claude agents defaulting to Opus 5 onto Opus 5.5', () => {
+        const agent = createAgent({
+            type: 'claude',
+            supportedModels: ['claude-opus-5', 'claude-sonnet-5'],
+            defaultModel: 'claude-opus-5'
+        });
+
+        assert.strictEqual(migrateAgentConfig(agent), true);
+        assert.ok(agent.supportedModels.includes('claude-opus-5-5'));
+        assert.strictEqual(agent.defaultModel, 'claude-opus-5-5');
+    });
+
+    test('keeps a deliberate non-Opus Claude default model', () => {
+        const agent = createAgent({
+            type: 'claude',
+            supportedModels: ['claude-fable-5-1', 'claude-opus-5'],
+            defaultModel: 'claude-fable-5-1'
+        });
+
+        migrateAgentConfig(agent);
+
+        assert.ok(agent.supportedModels.includes('claude-opus-5-5'));
+        assert.strictEqual(agent.defaultModel, 'claude-fable-5-1');
     });
 
     test('normalizes legacy agent images while updating Codex defaults', () => {

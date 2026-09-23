@@ -94,8 +94,11 @@ See [PR Slash Commands](./pr-commands.md) for full command syntax.
 
 ## Claude Code Models
 
+Claude Opus 5.5 is the default Claude model and the target of the plain `opus` alias.
+
 | Model | Label | Context |
 |-------|-------|---------|
+| Claude Opus 5.5 | `llm-claude-opus55` | 1M |
 | Claude Fable 5.1 | `llm-claude-fable51` | 1M |
 | Claude Fable 5 | `llm-claude-fable` | 1M |
 | Claude Opus 5 | `llm-claude-opus5` | 1M |
@@ -108,7 +111,7 @@ See [PR Slash Commands](./pr-commands.md) for full command syntax.
 | Claude Sonnet 4.5 | `llm-claude-sonnet45` | 200K |
 | Claude Haiku 4.5 | `llm-claude-haiku` | 200K |
 
-Some models require a minimum agent CLI version (for example, Fable 5.1 requires Claude Code ≥ 2.1.257); ProPR records this in the catalog and the agent image is kept current.
+Some models require a minimum agent CLI version (for example, Opus 5.5 requires Claude Code ≥ 2.1.280); ProPR records this in the catalog and the agent image is kept current.
 
 ## Codex Models
 

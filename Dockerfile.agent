@@ -105,7 +105,7 @@ WORKDIR /home/node/workspace
 
 
 FROM agent-base AS claude-cli
-ARG CLAUDE_CLI_VERSION=2.1.273
+ARG CLAUDE_CLI_VERSION=2.1.280
 USER root
 RUN npm install -g "@anthropic-ai/claude-code@${CLAUDE_CLI_VERSION}" \
     && npm cache clean --force \
@@ -191,7 +191,7 @@ RUN set -eu; \
 
 
 FROM agent-base AS final
-ARG CLAUDE_CLI_VERSION=2.1.273
+ARG CLAUDE_CLI_VERSION=2.1.280
 ARG CODEX_CLI_VERSION=0.154.0
 ARG ANTIGRAVITY_CLI_VERSION=1.2.4
 ARG OPENCODE_CLI_VERSION=1.18.31
