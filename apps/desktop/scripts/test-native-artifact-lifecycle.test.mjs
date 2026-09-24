@@ -635,6 +635,7 @@ describe('native staged artifact lifecycle authority', () => {
     const staleWaits = [];
     const staleUnregisters = [];
     let staleDumps = 0;
+    let staleClock = 0;
     const stale = new LaunchServicesAuthority(applicationRoot, {}, {
       runCommand: async (_file, args) => {
         staleUnregisters.push(args[0]);
@@ -645,17 +646,69 @@ describe('native staged artifact lifecycle authority', () => {
         staleDumps += 1;
         return { matched: matchesLine(`\tpath: ${applicationRoot}`) };
       },
-      wait: async milliseconds => { staleWaits.push(milliseconds); },
-      absenceAttempts: 3,
+      wait: async milliseconds => {
+        staleWaits.push(milliseconds);
+        staleClock += milliseconds;
+      },
+      now: () => staleClock,
+      absenceBudgetMs: 2_000,
     });
     stale.registered = true;
-    await assert.rejects(stale.assertGone(), /remained registered/);
+    const staleError = await stale.assertGone().then(() => null, error => error);
+    assert.ok(staleError instanceof LaunchServicesAbsenceFailure);
+    assert.match(staleError.message, /remained registered/);
+    assert.equal(staleError.resultClass, LAUNCH_SERVICES_STALE_REGISTRATION);
     assert.equal(stale.registered, true);
     assert.equal(staleDumps, 3);
     assert.deepEqual(staleWaits, [1_000, 1_000]);
     // Each re-probe re-issues the removal, because opening the bundle lets the
     // system re-register it after the first unregister returns.
     assert.deepEqual(staleUnregisters, ['-u', '-u']);
+
+    // The aggregate says whether the record persisted or the probe never
+    // answered, without ever repeating an unclassified error's text.
+    assert.match(
+      new NativeLifecycleFailure(null, [{ label: 'launchservices-postcondition', error: staleError }]).message,
+      /launchservices-postcondition \[result:STALE_REGISTRATION\]/,
+    );
+    assert.match(
+      new NativeLifecycleFailure(null, [{
+        label: 'launchservices-postcondition',
+        error: new NativeLifecycleCommandFailure('COMMAND_DEADLINE'),
+      }]).message,
+      /launchservices-postcondition \[result:COMMAND_DEADLINE\]/,
+    );
+    const unclassified = new Error('https://secret.invalid/private-profile');
+    unclassified.resultClass = 'https://secret.invalid/private-profile';
+    const aggregate = new NativeLifecycleFailure(null, [{ label: 'launchservices-postcondition', error: unclassified }]);
+    assert.equal(aggregate.message, 'Native lifecycle cleanup failed: launchservices-postcondition');
+    assert.doesNotMatch(inspect(aggregate), /secret\.invalid/);
+  });
+
+  test('re-probes a lagging LaunchServices removal for the full bounded window', async () => {
+    const applicationRoot = '/private/copied/ProPR Desktop.app';
+    // Each -dump answer costs seconds on a loaded runner, so the window is a
+    // deadline: a slow probe must not spend the budget the removal needs.
+    let clock = 0;
+    let dumps = 0;
+    const authority = new LaunchServicesAuthority(applicationRoot, {}, {
+      runCommand: async () => ({ stdout: Buffer.alloc(0), stderr: Buffer.alloc(0) }),
+      scanCommand: async (_file, _args, _options, matchesLine) => {
+        dumps += 1;
+        clock += 9_000;
+        return { matched: matchesLine(`\tpath: ${applicationRoot}`) };
+      },
+      wait: async milliseconds => { clock += milliseconds; },
+      now: () => clock,
+    });
+    authority.registered = true;
+
+    await assert.rejects(authority.assertGone(), error => error instanceof LaunchServicesAbsenceFailure);
+
+    // A probe count of ten would have declared the record stale at ninety-nine
+    // seconds, well inside the window the removal is allowed to take.
+    assert.equal(dumps, 13);
+    assert.ok(clock >= 120_000);
   });
 
   test('re-probes LaunchServices until a lagging unregister is reflected in the dump', async () => {
@@ -666,6 +719,7 @@ describe('native staged artifact lifecycle authority', () => {
       '\tpath: /Applications/Other.app',
     ];
     const waits = [];
+    let clock = 0;
     const authority = new LaunchServicesAuthority(applicationRoot, {}, {
       runCommand: async (_file, args) => {
         assert.deepEqual(args, ['-u', applicationRoot]);
@@ -675,8 +729,12 @@ describe('native staged artifact lifecycle authority', () => {
         assert.deepEqual(args, ['-dump']);
         return { matched: matchesLine(dumps.shift()) };
       },
-      wait: async milliseconds => { waits.push(milliseconds); },
-      absenceAttempts: 3,
+      wait: async milliseconds => {
+        waits.push(milliseconds);
+        clock += milliseconds;
+      },
+      now: () => clock,
+      absenceBudgetMs: 2_000,
     });
     authority.registered = true;
 
