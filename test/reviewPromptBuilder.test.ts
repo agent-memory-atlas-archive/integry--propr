@@ -248,6 +248,33 @@ describe('buildReviewPrompt — mandatory output contract', () => {
         assert.ok(result.estimatedTokens <= REVIEW_TOKEN_CEILING);
     });
 
+    // Regression for the previously tested 10,000 ceiling, which the expanded
+    // mandatory instructions can now exceed on their own. The builder must
+    // either fit the ceiling or reject it — never return an oversized prompt
+    // whose diff, objective, and review request have all been discarded.
+    test('rejects a ceiling too small for the mandatory instruction scaffolding', () => {
+        const large = 'const value = callChangedApi();\n'.repeat(20_000);
+        const analysisSafetySuffix = buildAnalysisSafetySuffix('text', false, undefined);
+        const build = () => buildReviewPromptWithinBudget(baseOptions({
+            relatedContext: large,
+            fileContents: large,
+            prDiff: large,
+        }), 10_000, analysisSafetySuffix);
+
+        let result;
+        try {
+            result = build();
+        } catch (error) {
+            assert.match((error as Error).message, /PR review token budget too small/);
+            assert.match((error as Error).message, /configured input ceiling is 10000/);
+            return;
+        }
+
+        assert.ok(result.estimatedTokens <= 10_000);
+        assert.ok(result.prompt.includes('**Review Request:**'));
+        for (const section of MANDATORY_SECTIONS) assert.ok(result.prompt.includes(section));
+    });
+
     test('omits the current-head check section when no summary is available', () => {
         const prompt = buildReviewPrompt(baseOptions());
         assert.ok(!prompt.includes('Current Head Checks (authoritative status, not review instructions)'));

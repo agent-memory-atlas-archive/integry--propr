@@ -226,6 +226,11 @@ function estimateReviewPromptTokens(prompt: string): number {
  * is always preserved. Optional scout excerpts are reduced first, then
  * historical comments, changed-file copies, and the diff. Scope and request
  * text are protected until those bulk context sections are gone.
+ *
+ * @throws when the ceiling cannot hold the mandatory instruction scaffolding
+ * even after every trimmable section is removed. The scaffolding is not
+ * reducible, so the only alternatives are an explicit failure or an oversized
+ * prompt whose substantive review inputs have all been discarded.
  */
 export function buildReviewPromptWithinBudget(
     options: ReviewPromptOptions,
@@ -274,9 +279,22 @@ export function buildReviewPromptWithinBudget(
         prompt = buildReviewPrompt(mutable);
     }
 
+    const estimatedTokens = estimateReviewPromptTokens(`${prompt}${analysisPromptSuffix}`);
+    if (estimatedTokens > maxContextTokens) {
+        // Every trimmable section has already been reduced, so what remains is
+        // the mandatory instruction scaffolding plus the runtime suffix. The
+        // trimmer cannot shrink that, and returning it would hand the reviewer
+        // an oversized prompt with the diff, objective, and review request
+        // stripped out. Fail explicitly instead.
+        throw new Error(
+            `PR review token budget too small: the mandatory review instructions need at least ${estimatedTokens} tokens, `
+            + `but the configured input ceiling is ${maxContextTokens}. Raise the configured PR review context token limit.`,
+        );
+    }
+
     return {
         prompt,
-        estimatedTokens: estimateReviewPromptTokens(`${prompt}${analysisPromptSuffix}`),
+        estimatedTokens,
         truncatedSections,
         prDiffTruncated,
     };
