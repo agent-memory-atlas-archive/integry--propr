@@ -158,12 +158,14 @@ function logHeadUnavailable(record: CiSuspensionRecord, deps: CiSuspensionDeps):
  * GitHub — and the obligation is met. Whatever happened to the newer attempt
  * afterwards is not ProPR's doing and is never "restored" on its behalf. A
  * record without a confirmed attempt proves nothing of the kind, and is settled
- * by the run's outcome alone.
+ * by the run's outcome alone: the attempt the run is cancelled on now is
+ * reported back as the one a rerun would restart, for the caller to record
+ * before it sends that rerun.
  */
 async function assessCancelledRun(
     run: CancelledRun,
     context: { target: SuspensionTarget; octokit: CiSuspensionOctokit; liveRuns: WorkflowRunSummary[]; activeWorkflowIds: Set<number> },
-): Promise<'pending' | 'settled' | { rerun: { attempt?: number } }> {
+): Promise<'pending' | 'settled' | { rerun: { cancelledAttempt?: number } }> {
     const { target, octokit, liveRuns, activeWorkflowIds } = context;
     const liveRun = liveRuns.find(candidate => candidate.id === run.id) ?? await getRun(octokit, target, run.id);
     if (!liveRun) return 'settled';
@@ -171,7 +173,7 @@ async function assessCancelledRun(
     if ((liveRun.status ?? '').toLowerCase() !== 'completed') return 'pending';
     if ((liveRun.conclusion ?? '').toLowerCase() !== 'cancelled') return 'settled';
     if (run.workflowId !== undefined && activeWorkflowIds.has(run.workflowId)) return 'settled';
-    return { rerun: { attempt: run.attempt ?? liveRun.run_attempt } };
+    return { rerun: { cancelledAttempt: run.attempt ?? liveRun.run_attempt } };
 }
 
 /** Whether the run already moved past the attempt ProPR confirmably cancelled, which only an accepted rerun can cause. */
@@ -192,9 +194,12 @@ type RerunGate = () => Promise<RestoreSuspensionResult | null>;
 interface RestartPassResult {
     /** Whether the record has to be written before the next wait. */
     progressed: boolean;
-    /** Set when the gate stopped the pass before one of its reruns; nothing was rerun from then on. */
+    /** Set when the pass was stopped before one of its reruns; nothing was rerun from then on. */
     stopped: RestoreSuspensionResult | null;
 }
+
+/** Writes the runs as they are now at the generation last read; false once the row moved on without this worker. */
+type PersistRuns = () => Promise<boolean>;
 
 /**
  * One pass over everything still owed a restart.
@@ -205,13 +210,23 @@ interface RestartPassResult {
  * trusted across them — the gate re-proves both immediately before every rerun,
  * so a stale worker never reruns what a newer owner now handles and an obsolete
  * revision is never restarted once its replacement is published.
+ *
+ * A rerun is only sent for an obligation whose attempt is on record. An
+ * obligation whose cancellation was never confirmed has none, so the attempt
+ * the run is cancelled on now is written first, with the generation-checked
+ * write, and the rerun waits for that write to land. Otherwise a rerun GitHub
+ * accepted, followed by a crash before the restart is recorded, leaves a
+ * record that cannot tell the restarted attempt from the cancelled one: were
+ * that new attempt later cancelled by somebody else, recovery would rerun it
+ * again on their behalf. With the attempt on record, its advancement is the
+ * proof that the obligation was met.
  */
 async function restartPass(
     runs: CancelledRun[],
-    context: { target: SuspensionTarget; octokit: CiSuspensionOctokit; headSha: string; restartedRunIds: number[] },
+    context: { target: SuspensionTarget; octokit: CiSuspensionOctokit; headSha: string; restartedRunIds: number[]; persist: PersistRuns },
     gate: RerunGate,
 ): Promise<RestartPassResult> {
-    const { target, octokit, headSha, restartedRunIds } = context;
+    const { target, octokit, headSha, restartedRunIds, persist } = context;
     // Re-read the live runs of the captured head on every pass so validation
     // GitHub already restarted is never duplicated. Only a run that validates
     // *this* pull request head on the pull request's own event counts as that
@@ -227,10 +242,16 @@ async function restartPass(
         const decision = await assessCancelledRun(run, { target, octokit, liveRuns, activeWorkflowIds });
         if (decision === 'pending') continue;
         if (decision !== 'settled') {
+            if (run.attempt === undefined && typeof decision.rerun.cancelledAttempt === 'number') {
+                // Durable before the rerun leaves the worker; the write also proves
+                // this pass still owns the row, and stops it when it does not.
+                run.attempt = decision.rerun.cancelledAttempt;
+                if (!await persist()) return { progressed, stopped: { reason: 'superseded', restartedRunIds, pendingRunIds: [] } };
+            }
             const stopped = await gate();
             if (stopped) return { progressed, stopped };
             // A run GitHub restarted in the meantime reports a conflict; its validation exists either way.
-            const outcome = await rerunRun(octokit, target, run.id, decision.rerun);
+            const outcome = await rerunRun(octokit, target, run.id, { attempt: run.attempt });
             if (outcome === 'unconfirmed') continue;
             if (outcome === 'restarted') restartedRunIds.push(run.id);
         }
@@ -343,21 +364,26 @@ async function restoreSuspension(
         await lease?.assertHeld();
         return null;
     };
-    // Writes what a pass settled before the next wait; false once the row moved
-    // on without this worker. A pass the gate stopped on a released head has no
-    // row left to write, one stopped on an unreadable head keeps its progress.
-    const saveProgress = async (pass: RestartPassResult): Promise<boolean> => {
-        if (!pass.progressed || (pass.stopped && !RETAINED_RESTORE_REASONS.has(pass.stopped.reason))) return true;
+    // Every write of the runs goes through here, so the worker always continues
+    // on the generation it just produced.
+    const persist: PersistRuns = async () => {
         const saved = await saveCancelledRuns(deps, current, runs, { state: SUSPENSION_RESTORING, attempts });
         if (!saved) return false;
         current = saved;
         return true;
     };
+    // Writes what a pass settled before the next wait; false once the row moved
+    // on without this worker. A pass the gate stopped on a released head has no
+    // row left to write, one stopped on an unreadable head keeps its progress.
+    const saveProgress = async (pass: RestartPassResult): Promise<boolean> => {
+        if (!pass.progressed || (pass.stopped && !RETAINED_RESTORE_REASONS.has(pass.stopped.reason))) return true;
+        return persist();
+    };
 
     const deadline = nowMs(deps) + (deps.restoreBudgetMs ?? DEFAULT_RESTORE_BUDGET_MS);
     try {
         for (;;) {
-            const pass = await restartPass(runs, { target, octokit, headSha: current.head_sha, restartedRunIds }, gate);
+            const pass = await restartPass(runs, { target, octokit, headSha: current.head_sha, restartedRunIds, persist }, gate);
             if (!await saveProgress(pass)) return { ...SUPERSEDED, restartedRunIds };
             if (pass.stopped) return pass.stopped;
             const pending = runs.filter(run => !run.restarted);

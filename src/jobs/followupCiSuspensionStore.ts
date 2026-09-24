@@ -45,7 +45,10 @@ export interface CancelledRun {
      * The attempt GitHub confirmed the cancellation affected; a higher one later
      * proves a rerun landed. Absent while that is unconfirmed — the request was
      * never answered, or the worker died before reading the run back — in which
-     * case only the run's own outcome can settle the obligation.
+     * case only the run's own outcome can settle the obligation. Once that
+     * outcome is a cancelled run about to be rerun, the attempt it is cancelled
+     * on is recorded here before the rerun is sent, so the rerun's advancement
+     * is recognized even if nothing else about it ever was.
      */
     attempt?: number;
     restarted?: boolean;
@@ -167,19 +170,28 @@ export async function saveCancelledRuns(
  * it. Runs recorded for another head belong to an obsolete revision and must
  * not be restarted; only the same head's cancellations carry over across
  * worker retries of the same implementation.
+ *
+ * The read and the write are two awaited calls, and between them the lease
+ * can expire and be taken over: the new holder reserves the pull request for
+ * a newer head and cancels its validation. The write is therefore never an
+ * unconditional upsert. A row that was read is only taken over at the
+ * generation and owner it was read at; where no row was read the write is an
+ * insert that a conflicting insertion rejects. Either way a stale worker
+ * matches nothing, and the new owner's ownership and restart obligations
+ * survive it. Returns null when that happened; the caller owns nothing then.
  */
 export async function reserveSuspension(
     params: { target: SuspensionTarget; headSha: string; taskId: string; correlationId?: string },
     deps: CiSuspensionStoreDeps,
-): Promise<{ record: CiSuspensionRecord; runs: CancelledRun[] }> {
+): Promise<{ record: CiSuspensionRecord; runs: CancelledRun[] } | null> {
     const { target, headSha, taskId, correlationId } = params;
     const repository = repositoryKey(target.owner, target.repo);
-    const existing = await loadSuspension(deps, { repository, pull_request: target.pullRequestNumber });
+    const key = { repository, pull_request: target.pullRequestNumber };
+    const existing = await loadSuspension(deps, key);
     const timestamp = nowMs(deps);
     const runs = existing && sameSha(existing.head_sha, headSha) ? parseCancelledRuns(existing) : [];
     const record: CiSuspensionRecord = {
-        repository,
-        pull_request: target.pullRequestNumber,
+        ...key,
         head_sha: headSha,
         task_id: taskId,
         correlation_id: correlationId ?? null,
@@ -191,9 +203,52 @@ export async function reserveSuspension(
         created_at: existing?.created_at ?? timestamp,
         updated_at: timestamp,
     };
-    await resolveDatabase(deps)(PR_CI_SUSPENSIONS_TABLE)
-        .insert(record)
-        .onConflict(['repository', 'pull_request'])
-        .merge(['head_sha', 'task_id', 'correlation_id', 'state', 'cancelled_runs', 'attempts', 'generation', 'updated_at']);
-    return { record, runs };
+    const reserved = existing
+        ? await takeOverSuspension(deps, existing, record)
+        : await insertSuspension(deps, record);
+    return reserved ? { record, runs } : null;
+}
+
+/** Replaces the row only while it is still the one that was read: same owner, same generation. */
+async function takeOverSuspension(
+    deps: CiSuspensionStoreDeps,
+    existing: CiSuspensionRecord,
+    record: CiSuspensionRecord,
+): Promise<boolean> {
+    const updated = await resolveDatabase(deps)(PR_CI_SUSPENSIONS_TABLE)
+        .where({
+            repository: existing.repository,
+            pull_request: existing.pull_request,
+            task_id: existing.task_id,
+            generation: existing.generation,
+        })
+        .update({
+            head_sha: record.head_sha,
+            task_id: record.task_id,
+            correlation_id: record.correlation_id,
+            state: record.state,
+            cancelled_runs: record.cancelled_runs,
+            attempts: record.attempts,
+            generation: record.generation,
+            updated_at: record.updated_at,
+        });
+    return updated > 0;
+}
+
+/**
+ * Inserts the row where none was read. The primary key rejects a second
+ * insertion, which is how a worker that read nothing learns that somebody
+ * reserved the pull request meanwhile; that row is theirs and is left alone.
+ */
+async function insertSuspension(deps: CiSuspensionStoreDeps, record: CiSuspensionRecord): Promise<boolean> {
+    try {
+        await resolveDatabase(deps)(PR_CI_SUSPENSIONS_TABLE).insert(record);
+        return true;
+    } catch (error) {
+        // Only a row that exists now explains the failure as a conflicting
+        // insertion; anything else is a real database error.
+        const conflicting = await loadSuspension(deps, record);
+        if (conflicting) return false;
+        throw error;
+    }
 }

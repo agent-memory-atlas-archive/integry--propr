@@ -256,7 +256,16 @@ async function beginSuspension(
         // request for a newer head; reserving on top of that would replace its
         // ownership and discard the restart obligations of the current head.
         await lease.assertHeld();
+        // The reservation itself reads and then writes, and the lease can be
+        // lost between the two as well. The write only takes the row over as
+        // it was read, so a reservation that lands on somebody else's row is
+        // refused rather than overwriting their ownership and cancelled runs.
         const reserved = await reserveSuspension({ target, headSha, taskId, correlationId }, deps);
+        if (!reserved) {
+            log.warn({ repository, pullRequest: target.pullRequestNumber, taskId, headSha },
+                'Stopping follow-up CI suspension: another task reserved this pull request suspension while it was being started');
+            return { suspended: false, reason: 'superseded', cancelledRunIds: [] };
+        }
         state = cancellationState(reserved.record, reserved.runs);
         await cancelPendingRuns(state, { ...deps, octokit, workflowPolicy: policy }, lease);
         if (state.ownershipLost) return { suspended: false, reason: 'superseded', cancelledRunIds: state.cancelledRunIds };

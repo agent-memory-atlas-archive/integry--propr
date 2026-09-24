@@ -207,6 +207,24 @@ function databaseResumingAfterSuspensionWrite(afterWrite: () => Promise<void>) {
     }) as never;
 }
 
+/**
+ * The shared database as one worker sees it, except that `afterRead` runs once
+ * a read of the suspension row has returned and before that worker resumes:
+ * the window in which the read's response is still on its way back to it.
+ */
+function databaseResumingAfterSuspensionRead(afterRead: () => Promise<void>) {
+    return ((table: string) => {
+        const builder = database(table);
+        if (table !== PR_CI_SUSPENSIONS_TABLE) return builder;
+        const first = builder.first.bind(builder) as (...args: unknown[]) => PromiseLike<unknown>;
+        builder.first = ((...args: unknown[]) => ({
+            then: (resolve?: (row: unknown) => unknown, reject?: (error: unknown) => unknown) =>
+                first(...args).then(async row => { await afterRead(); return row; }).then(resolve, reject),
+        })) as never;
+        return builder;
+    }) as never;
+}
+
 beforeEach(async () => {
     await database(PR_CI_SUSPENSIONS_TABLE).delete();
     await database(PR_CI_SUSPENSION_LEASES_TABLE).delete();
@@ -982,6 +1000,63 @@ describe('restoring cancelled validation', () => {
         assert.deepEqual(await records(), [], 'the stored attempt is the proof that the obligation was met');
     });
 
+    test('an obligation without a confirmed attempt records the attempt it reruns before the rerun is sent', async () => {
+        const runs = [run({ id: 1 })];
+        let readBackFails = true;
+        let workerDied = false;
+        let attemptOnRecordAtRerun: number | undefined;
+        const github = createGitHub(runs, {
+            onRequest: async route => {
+                if (route !== 'GET /repos/{owner}/{repo}/actions/runs/{run_id}') return;
+                // Reading the run back after the cancellation fails, so the attempt
+                // ProPR cancelled was never confirmed; later the worker is dead.
+                if (readBackFails || workerDied) throw Object.assign(new Error('read back failed'), { status: 500 });
+            },
+            onRerun: async runId => {
+                const [stored] = await records();
+                attemptOnRecordAtRerun = JSON.parse(stored.cancelled_runs)[0].attempt;
+                // GitHub accepts the rerun and starts attempt 2. The worker dies right
+                // there, before it can record that the restart happened.
+                const found = runs.find(candidate => candidate.id === runId)!;
+                found.status = 'queued';
+                found.conclusion = null;
+                found.run_attempt += 1;
+                workerDied = true;
+                throw Object.assign(new Error('socket hang up'), { code: 'ECONNRESET' });
+            },
+        });
+        const begun = await beginFollowupCiSuspension({ target: TARGET, taskId: TASK_ID }, deps(github));
+        assert.equal(begun.reason, 'suspended');
+        readBackFails = false;
+        const [unconfirmed] = await records();
+        assert.deepEqual(
+            JSON.parse(unconfirmed.cancelled_runs).map((entry: { attempt?: number; restarted: boolean }) => [entry.attempt, entry.restarted]),
+            [[undefined, false]], 'the cancellation landed on an attempt the worker never learned');
+
+        const [crashed] = await releaseFollowupCiSuspensionsForTask({ taskId: TASK_ID }, deps(github));
+
+        assert.equal(crashed.reason, 'pending');
+        assert.equal(attemptOnRecordAtRerun, 1, 'the attempt being rerun was on record before GitHub received the rerun');
+        const [stored] = await records();
+        assert.deepEqual(
+            JSON.parse(stored.cancelled_runs).map((entry: { attempt?: number; restarted: boolean }) => [entry.attempt, entry.restarted]),
+            [[1, false]], 'the crash left the obligation recorded against the attempt that was rerun');
+        assert.equal(runs[0].run_attempt, 2);
+        workerDied = false;
+
+        // Somebody at GitHub cancels the restarted attempt. That is theirs, not
+        // ProPR's: the attempt ProPR rerun is on record, and the run moved past it.
+        runs[0].status = 'completed';
+        runs[0].conclusion = 'cancelled';
+        const summary = await reconcileFollowupCiSuspensions(deps(github, { getTaskState: async () => null }));
+
+        assert.equal(summary.released, 1);
+        assert.equal(summary.restored, 0);
+        assert.deepEqual(github.rerun(), [1], 'the only rerun is the one the crashed pass sent');
+        assert.equal(runs[0].run_attempt, 2, 'the cancelled newer attempt is left as it is');
+        assert.deepEqual(await records(), [], 'the recorded attempt is the proof that the obligation was met');
+    });
+
     test('keeps the obligation when a failed rerun left no evidence that it landed', async () => {
         const runs = [run({ id: 1 })];
         const github = createGitHub(runs, { rerunStatus: 500 });
@@ -1399,6 +1474,87 @@ describe('coordinators in separate worker processes', () => {
         const [current] = await records();
         assert.equal(current.task_id, 'task-next');
         assert.equal(current.head_sha, NEW_HEAD);
+        assert.deepEqual(await storedRunIds(), [2], "the new owner's restart obligation survived the stale worker");
+        assert.deepEqual(await database(PR_CI_SUSPENSION_LEASES_TABLE).select('*'), [], 'the stale worker released nothing that was not its own');
+    });
+
+    test('a worker that lost its lease while reading an absent suspension never inserts over the one its new owner reserved', async () => {
+        const runs = [run({ id: 1 }), run({ id: 2, head_sha: NEW_HEAD, status: 'queued' })];
+        const workerB = createGitHub(runs, { headSha: NEW_HEAD });
+        let takenOver = false;
+        const takeOverWhileTheReadReturns = async () => {
+            if (takenOver) return;
+            takenOver = true;
+            // Worker A read that nothing is reserved, but its lease expired while
+            // the read's response was on its way back to it.
+            await database(PR_CI_SUSPENSION_LEASES_TABLE).update({ expires_at: Date.now() - 1 });
+            // A replacement commit was published meanwhile; a second follow-up takes
+            // the expired lease over, reserves the pull request for the new head and
+            // cancels its validation.
+            const begunB = await beginFollowupCiSuspension({ target: TARGET, taskId: 'task-next' },
+                deps(workerB, { leaseHolder: 'worker-b', leaseAcquireTimeoutMs: 0 }));
+            assert.equal(begunB.reason, 'suspended');
+            assert.deepEqual(begunB.cancelledRunIds, [2]);
+        };
+        const workerA = createGitHub(runs);
+
+        const resultA = await beginFollowupCiSuspension({ target: TARGET, taskId: TASK_ID }, deps(workerA, {
+            leaseHolder: 'worker-a',
+            database: databaseResumingAfterSuspensionRead(takeOverWhileTheReadReturns),
+        }));
+
+        assert.equal(resultA.reason, 'superseded');
+        assert.deepEqual(resultA.cancelledRunIds, []);
+        assert.deepEqual(workerA.cancelled(), [], 'nothing is cancelled on a lease that belongs to somebody else');
+        const [current] = await records();
+        assert.equal(current.task_id, 'task-next');
+        assert.equal(current.head_sha, NEW_HEAD);
+        assert.equal(current.state, 'active');
+        assert.deepEqual(await storedRunIds(), [2], "the new owner's restart obligation survived the stale worker");
+        assert.equal(runs[0].status, 'in_progress', 'the validation the stale worker meant to cancel keeps running');
+        assert.deepEqual(await database(PR_CI_SUSPENSION_LEASES_TABLE).select('*'), [], 'the stale worker released nothing that was not its own');
+    });
+
+    test('a worker that lost its lease while reading an existing suspension never takes it over from its new owner', async () => {
+        const runs = [run({ id: 1 }), run({ id: 2, head_sha: NEW_HEAD, status: 'queued' })];
+        // An earlier follow-up of the same head still owns the pull request.
+        const earlier = createGitHub(runs, { asyncCancellation: true });
+        await beginFollowupCiSuspension({ target: TARGET, taskId: 'task-earlier' }, deps(earlier));
+        assert.deepEqual(await storedRunIds(), [1]);
+
+        const workerB = createGitHub(runs, { headSha: NEW_HEAD });
+        let takenOver = false;
+        let generationOfNewOwner!: number;
+        const takeOverWhileTheReadReturns = async () => {
+            if (takenOver) return;
+            takenOver = true;
+            // Worker A read the earlier owner's row, but its lease expired while
+            // the read's response was on its way back to it.
+            await database(PR_CI_SUSPENSION_LEASES_TABLE).update({ expires_at: Date.now() - 1 });
+            // A replacement commit was published meanwhile; a second follow-up takes
+            // the expired lease over, takes the row over for the new head and
+            // cancels its validation.
+            const begunB = await beginFollowupCiSuspension({ target: TARGET, taskId: 'task-next' },
+                deps(workerB, { leaseHolder: 'worker-b', leaseAcquireTimeoutMs: 0 }));
+            assert.equal(begunB.reason, 'suspended');
+            assert.deepEqual(begunB.cancelledRunIds, [2]);
+            const [ownedByB] = await records();
+            generationOfNewOwner = ownedByB.generation;
+        };
+        const workerA = createGitHub(runs);
+
+        // Worker A is a retry of the earlier implementation on the same head.
+        const resultA = await beginFollowupCiSuspension({ target: TARGET, taskId: TASK_ID }, deps(workerA, {
+            leaseHolder: 'worker-a',
+            database: databaseResumingAfterSuspensionRead(takeOverWhileTheReadReturns),
+        }));
+
+        assert.equal(resultA.reason, 'superseded');
+        assert.deepEqual(workerA.cancelled(), [], 'nothing is cancelled on a lease that belongs to somebody else');
+        const [current] = await records();
+        assert.equal(current.task_id, 'task-next');
+        assert.equal(current.head_sha, NEW_HEAD);
+        assert.equal(current.generation, generationOfNewOwner, "the new owner's generation was not bumped by the stale worker");
         assert.deepEqual(await storedRunIds(), [2], "the new owner's restart obligation survived the stale worker");
         assert.deepEqual(await database(PR_CI_SUSPENSION_LEASES_TABLE).select('*'), [], 'the stale worker released nothing that was not its own');
     });
