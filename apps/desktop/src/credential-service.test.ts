@@ -17,6 +17,10 @@ import type { ConnectStatusDocument } from '@propr/cli/desktop-discovery';
 import { DesktopCredentialService, type DesktopCredentialDecision } from './credential-service';
 import { DesktopConnectDiscoveryService } from './connect-discovery';
 import { ProfileStore, type EncryptionProvider, type StoredCredential } from './profile-store';
+import { applyDesktopTestFsyncPolicy } from './profile-store-test-fsync';
+
+// The sharded full suite runs this file without native fsync; see the helper.
+await applyDesktopTestFsyncPolicy();
 
 const temporaryDirectories: string[] = [];
 const credentialServices: DesktopCredentialService[] = [];
