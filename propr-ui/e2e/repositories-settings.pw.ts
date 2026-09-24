@@ -115,6 +115,34 @@ test('shows and updates the follow-up CI cancellation option and its workflow se
   await expect.poll(() => api.writes.at(-1)?.map(repo => repo.cancelCiDuringFollowup)).toEqual([false, false]);
 });
 
+test('shows the whole repository-wide selection the worker may cancel', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  // Two valid branch entries, each with a selection of its own: the worker cancels
+  // both workflows, so the settings must name both rather than only the first.
+  await stubRepositoryApis(page, true, [
+    {
+      id: 'propr-main', name: 'integry/propr', baseBranch: 'main', enabled: true,
+      cancelCiDuringFollowup: true, cancelCiDuringFollowupWorkflows: ['pr-build-check.yml'],
+      visualPreview: { enabled: false, types: ['image'] }
+    },
+    {
+      id: 'propr-release', name: 'integry/propr', baseBranch: 'release', enabled: true,
+      cancelCiDuringFollowup: true, cancelCiDuringFollowupWorkflows: ['pr-test-on-label.yml', 'PR-BUILD-CHECK.YML'],
+      visualPreview: { enabled: false, types: ['image'] }
+    },
+  ]);
+  await page.goto('/repositories');
+  await page.getByRole('button', { name: 'Select integry/propr', exact: true }).nth(1).click();
+  const settings = page.getByRole('region', { name: 'Settings for integry/propr', exact: true });
+  const workflows = settings.getByRole('textbox', { name: 'Validation workflows to cancel for integry/propr', exact: true });
+  await expect(workflows).toHaveValue('pr-build-check.yml, pr-test-on-label.yml');
+  await expect(settings.getByText(/Cancels exactly these 2 workflows: pr-build-check\.yml, pr-test-on-label\.yml\./)).toBeVisible();
+  if (process.env.PROPR_CAPTURE_PREVIEWS) {
+    await mkdir('../.propr/previews', { recursive: true });
+    await page.screenshot({ animations: 'disabled', path: '../.propr/previews/repository-cancel-ci-union-selection.png' });
+  }
+});
+
 test('shows and updates shared settings while preserving the selected branch', async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
   const sharedPreview = { enabled: true, types: ['video'], instructions: 'Capture the repository settings.' } satisfies NonNullable<MonitoredRepo['visualPreview']>;

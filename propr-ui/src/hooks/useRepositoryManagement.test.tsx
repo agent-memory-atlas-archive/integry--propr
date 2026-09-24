@@ -397,6 +397,29 @@ describe('useRepositoryManagement', () => {
     ]);
   });
 
+  it('displays the whole repository-wide selection the worker may cancel, not just the first entry\u2019s', async () => {
+    mockGetRepoConfig.mockResolvedValue({
+      repos_to_monitor: [
+        {
+          id: 'repo-main', name: 'integry/propr', enabled: true, baseBranch: 'main',
+          cancelCiDuringFollowup: true, cancelCiDuringFollowupWorkflows: ['a.yml']
+        },
+        {
+          id: 'repo-release', name: 'INTEGRY/PROPR', enabled: true, baseBranch: 'release',
+          cancelCiDuringFollowup: true, cancelCiDuringFollowupWorkflows: ['b.yml', 'A.YML']
+        },
+        { id: 'repo-other', name: 'integry/other', enabled: true }
+      ]
+    });
+
+    const { result } = renderHook(() => useRepositoryManagement());
+    await waitFor(() => expect(result.current.loading).toBe(false));
+
+    // The worker cancels the union of both entries, so the settings must show it.
+    expect(result.current.filteredRepos.map(repo => repo.cancelCiDuringFollowupWorkflows))
+      .toEqual([['a.yml', 'b.yml'], ['a.yml', 'b.yml'], []]);
+  });
+
   it('preserves per-entry automatic CI follow-up state while displaying duplicate branches consistently', async () => {
     mockGetRepoConfig.mockResolvedValue({
       repos_to_monitor: [

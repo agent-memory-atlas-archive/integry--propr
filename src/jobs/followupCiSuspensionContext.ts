@@ -6,7 +6,9 @@
 
 import { getAuthenticatedOctokit, getCancelCiDuringFollowupWorkflowsForRepository, logger } from '@propr/core';
 import type { CiSuspensionOctokit } from './followupCiSuspensionRuns.js';
-import { resolveValidationWorkflowPolicy, type ValidationWorkflowPolicy } from './followupCiSuspensionPolicy.js';
+import {
+    resolveValidationWorkflowPolicy, VALIDATION_WORKFLOW_SELECTION_UNREADABLE, type ValidationWorkflowPolicy,
+} from './followupCiSuspensionPolicy.js';
 import type { SuspensionLeaseDeps } from './followupCiSuspensionLease.js';
 
 export interface SuspensionLogger {
@@ -20,8 +22,8 @@ export interface CiSuspensionDeps extends SuspensionLeaseDeps {
     octokit?: CiSuspensionOctokit;
     isEnabled?: (owner: string, repo: string) => Promise<boolean>;
     getTaskState?: (taskId: string) => Promise<{ state: string } | null>;
-    /** Which workflows the repository selected; defaults to the stored repository configuration. */
-    loadSelectedWorkflows?: (owner: string, repo: string) => Promise<string[]>;
+    /** Which workflows the repository selected, or null when its configuration cannot be read; defaults to the stored repository configuration. */
+    loadSelectedWorkflows?: (owner: string, repo: string) => Promise<string[] | null>;
     /** A resolved policy, for callers and tests that already know the selection. */
     workflowPolicy?: ValidationWorkflowPolicy;
     log?: SuspensionLogger;
@@ -43,6 +45,11 @@ export function resolveLog(deps: CiSuspensionDeps): SuspensionLogger {
  * The workflows this repository's operator selected. Nothing is inferred: with
  * no repository selection the documented environment fallback is consulted, and
  * with neither, the resulting policy selects nothing at all.
+ *
+ * A selection that could not be read is kept apart from a selection that is
+ * genuinely empty. Only the latter hands the decision to the environment
+ * fallback; an unreadable one cancels nothing, because the repository may well
+ * have selected workflows other than the fallback's.
  */
 export async function resolvePolicy(
     deps: CiSuspensionDeps,
@@ -50,7 +57,9 @@ export async function resolvePolicy(
 ): Promise<ValidationWorkflowPolicy> {
     if (deps.workflowPolicy) return deps.workflowPolicy;
     const loadSelected = deps.loadSelectedWorkflows ?? getCancelCiDuringFollowupWorkflowsForRepository;
-    return resolveValidationWorkflowPolicy(await loadSelected(target.owner, target.repo));
+    const selection = await loadSelected(target.owner, target.repo);
+    if (selection === null || selection === undefined) return VALIDATION_WORKFLOW_SELECTION_UNREADABLE;
+    return resolveValidationWorkflowPolicy(selection);
 }
 
 export function delay(deps: CiSuspensionDeps, ms: number): Promise<void> {

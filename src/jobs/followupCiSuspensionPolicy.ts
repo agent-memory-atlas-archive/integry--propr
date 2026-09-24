@@ -18,7 +18,7 @@ const PULL_REQUEST_EVENTS: ReadonlySet<string> = new Set(['pull_request', 'pull_
 export const VALIDATION_WORKFLOW_ALLOWLIST_ENV = 'CANCEL_CI_FOLLOWUP_WORKFLOWS';
 
 /** Where a selection came from, so logs and the UI can say what to change. */
-export type ValidationWorkflowPolicySource = 'repository' | 'environment' | 'none';
+export type ValidationWorkflowPolicySource = 'repository' | 'environment' | 'none' | 'unreadable';
 
 export interface ValidationWorkflowPolicy {
     /** Exact workflow identities selected by an operator. Empty means nothing is eligible. */
@@ -28,6 +28,15 @@ export interface ValidationWorkflowPolicy {
 
 /** No selection: the safe state this feature starts in and falls back to. */
 export const NO_VALIDATION_WORKFLOWS_SELECTED: ValidationWorkflowPolicy = { selected: new Set(), source: 'none' };
+
+/**
+ * The repository's stored selection could not be read. This is not an empty
+ * selection and therefore not a reason to consult the environment fallback: a
+ * repository that explicitly selected workflows nobody can currently read must
+ * not have different ones cancelled on its behalf, so nothing is cancelled at
+ * all until the configuration is readable again.
+ */
+export const VALIDATION_WORKFLOW_SELECTION_UNREADABLE: ValidationWorkflowPolicy = { selected: new Set(), source: 'unreadable' };
 
 export interface WorkflowRunIdentity {
     name?: string | null;

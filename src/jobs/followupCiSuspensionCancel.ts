@@ -18,8 +18,8 @@ import {
 
 export interface BeginSuspensionResult {
     suspended: boolean;
-    reason: 'suspended' | 'disabled' | 'no_workflows_selected' | 'no_destination' | 'head_unavailable'
-        | 'permission_denied' | 'superseded' | 'busy' | 'error';
+    reason: 'suspended' | 'disabled' | 'no_workflows_selected' | 'selection_unreadable' | 'no_destination'
+        | 'head_unavailable' | 'permission_denied' | 'superseded' | 'busy' | 'error';
     cancelledRunIds: number[];
 }
 
@@ -158,6 +158,14 @@ async function beginSuspension(
             return { suspended: false, reason: 'disabled', cancelledRunIds: [] };
         }
         const policy = await resolvePolicy(deps, target);
+        if (policy.source === 'unreadable') {
+            // The repository's own selection may name workflows the environment
+            // fallback does not, so an unreadable configuration cancels nothing.
+            log.warn({ repository, pullRequest: target.pullRequestNumber, taskId },
+                'Skipping follow-up CI cancellation: the repository workflow selection could not be read. '
+                + 'CI is left untouched until the configuration is readable again');
+            return { suspended: false, reason: 'selection_unreadable', cancelledRunIds: [] };
+        }
         if (policy.selected.size === 0) {
             log.info({ repository, pullRequest: target.pullRequestNumber, taskId },
                 'Skipping follow-up CI cancellation: no validation workflows are selected for this repository. '

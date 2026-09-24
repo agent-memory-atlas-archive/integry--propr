@@ -30,6 +30,7 @@ const {
     isCancelableValidationRun,
     isEligibleValidationWorkflow,
     loadValidationWorkflowPolicyFromEnv,
+    MAX_RESTORE_ATTEMPTS,
     PR_CI_SUSPENSION_LEASES_TABLE,
     PR_CI_SUSPENSIONS_TABLE,
     reconcileFollowupCiSuspensions,
@@ -467,6 +468,40 @@ describe('selected validation workflows', () => {
         assert.deepEqual(result.cancelledRunIds, [2]);
         assert.deepEqual(await storedRunIds(), [2]);
     });
+
+    test('an unreadable repository selection cancels nothing, and never falls back to the environment', async () => {
+        const previous = process.env[VALIDATION_WORKFLOW_ALLOWLIST_ENV];
+        process.env[VALIDATION_WORKFLOW_ALLOWLIST_ENV] = 'pr-preview.yml';
+        try {
+            const runs = [run({ id: 1, name: 'PR Preview', path: '.github/workflows/pr-preview.yml', event: 'pull_request_target', status: 'queued' })];
+            const unreadable = createGitHub(runs);
+
+            // The stored selection could not be read: the repository may well have
+            // selected workflows other than the fallback's, so nothing is cancelled.
+            const skipped = await beginFollowupCiSuspension({ target: TARGET, taskId: TASK_ID }, deps(unreadable, {
+                loadSelectedWorkflows: async () => null,
+            }));
+
+            assert.equal(skipped.suspended, false);
+            assert.equal(skipped.reason, 'selection_unreadable');
+            assert.deepEqual(unreadable.cancelled(), []);
+            assert.deepEqual(unreadable.calls, [], 'an unreadable selection never even asks GitHub for the runs');
+            assert.deepEqual(await records(), []);
+            assert.equal(runs[0].status, 'queued');
+
+            // A selection that was read and is genuinely empty still uses the fallback.
+            const readable = createGitHub(runs);
+            const fallback = await beginFollowupCiSuspension({ target: TARGET, taskId: TASK_ID }, deps(readable, {
+                loadSelectedWorkflows: async () => [],
+            }));
+
+            assert.deepEqual(fallback.cancelledRunIds, [1]);
+            assert.deepEqual(await storedRunIds(), [1]);
+        } finally {
+            if (previous === undefined) delete process.env[VALIDATION_WORKFLOW_ALLOWLIST_ENV];
+            else process.env[VALIDATION_WORKFLOW_ALLOWLIST_ENV] = previous;
+        }
+    });
 });
 
 describe('follow-up CI suspension while implementation runs', () => {
@@ -697,6 +732,52 @@ describe('restoring cancelled validation', () => {
         const [stored] = await records();
         assert.equal(stored.state, 'restoring');
         assert.deepEqual(JSON.parse(stored.cancelled_runs).map((entry: { restarted: boolean }) => entry.restarted), [false]);
+    });
+
+    test('keeps an unresolved obligation after the attempt budget is spent and honours it once GitHub recovers', async () => {
+        const runs = [run({ id: 1 }), run({ id: 2, status: 'queued' })];
+        const failing = createGitHub(runs, { rerunStatus: 500 });
+        await beginFollowupCiSuspension({ target: TARGET, taskId: TASK_ID }, deps(failing));
+        // Every earlier attempt already failed to reach GitHub's rerun API.
+        await database(PR_CI_SUSPENSIONS_TABLE).update({ attempts: MAX_RESTORE_ATTEMPTS - 1 });
+
+        const [result] = await releaseFollowupCiSuspensionsForTask({ taskId: TASK_ID }, deps(failing));
+
+        assert.equal(result.reason, 'blocked');
+        assert.deepEqual(result.pendingRunIds, [1, 2]);
+        // The head is still current and its checks are still cancelled, so the
+        // obligation to bring them back must outlive the attempt budget.
+        const [retained] = await records();
+        assert.equal(retained.state, 'blocked');
+        assert.deepEqual(await storedRunIds(), [1, 2]);
+        assert.deepEqual(JSON.parse(retained.cancelled_runs).map((entry: { restarted: boolean }) => entry.restarted), [false, false]);
+
+        // GitHub recovers; the retained record is what restores the validation.
+        const recovered = createGitHub(runs);
+        const summary = await reconcileFollowupCiSuspensions(deps(recovered, { getTaskState: async () => null }));
+
+        assert.equal(summary.restored, 1);
+        assert.deepEqual(recovered.rerun().sort((a, b) => (a ?? 0) - (b ?? 0)), [1, 2]);
+        assert.deepEqual(await records(), []);
+    });
+
+    test('a spent attempt budget releases its obligation once the cancelled head is obsolete', async () => {
+        const runs = [run({ id: 1 })];
+        const failing = createGitHub(runs, { rerunStatus: 500 });
+        await beginFollowupCiSuspension({ target: TARGET, taskId: TASK_ID }, deps(failing));
+        await database(PR_CI_SUSPENSIONS_TABLE).update({ attempts: MAX_RESTORE_ATTEMPTS });
+        const [blockedResult] = await releaseFollowupCiSuspensionsForTask({ taskId: TASK_ID }, deps(failing));
+        assert.equal(blockedResult.reason, 'blocked');
+        assert.equal((await records())[0].state, 'blocked');
+
+        // A replacement commit is published: the cancelled revision is obsolete,
+        // which is the evidence that nothing is owed any more.
+        const replaced = createGitHub(runs, { headSha: NEW_HEAD, rerunStatus: 500 });
+        const summary = await reconcileFollowupCiSuspensions(deps(replaced, { getTaskState: async () => null }));
+
+        assert.equal(summary.released, 1);
+        assert.deepEqual(replaced.rerun(), []);
+        assert.deepEqual(await records(), []);
     });
 });
 

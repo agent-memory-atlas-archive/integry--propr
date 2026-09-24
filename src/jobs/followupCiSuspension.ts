@@ -36,7 +36,7 @@ const TERMINAL_TASK_STATES: ReadonlySet<string> = new Set([TaskStates.COMPLETED,
 
 /** Absolute lifetime of a suspension. Reached only when its owner never reported a terminal state; CI is never suppressed beyond it. */
 export const MAX_SUSPENSION_AGE_MS = 6 * 60 * 60 * 1000;
-/** Restoration attempts before the obligation is dropped with an error log rather than retried forever. */
+/** Restoration attempts before the obligation stops being retried inline and waits, loudly, in the durable blocked state. */
 export const MAX_RESTORE_ATTEMPTS = 60;
 const DEFAULT_RESTORE_BUDGET_MS = 15_000;
 const DEFAULT_POLL_INTERVAL_MS = 2_000;
@@ -48,7 +48,7 @@ export interface SweepSuspensionResult {
 
 export interface RestoreSuspensionResult {
     reason: 'restarted' | 'head_replaced' | 'pull_request_closed' | 'pending' | 'permission_denied' | 'superseded'
-        | 'abandoned' | 'busy';
+        | 'blocked' | 'busy';
     restartedRunIds: number[];
     pendingRunIds: number[];
 }
@@ -57,7 +57,7 @@ export { CiActionsPermissionError, isCancelableValidationRun } from './followupC
 export {
     createValidationWorkflowPolicy, isEligibleValidationWorkflow, loadValidationWorkflowPolicyFromEnv,
     NO_VALIDATION_WORKFLOWS_SELECTED, parseWorkflowSelection, resolveValidationWorkflowPolicy,
-    VALIDATION_WORKFLOW_ALLOWLIST_ENV,
+    VALIDATION_WORKFLOW_ALLOWLIST_ENV, VALIDATION_WORKFLOW_SELECTION_UNREADABLE,
 } from './followupCiSuspensionPolicy.js';
 export { PR_CI_SUSPENSION_LEASES_TABLE, SuspensionLeaseUnavailableError } from './followupCiSuspensionLease.js';
 export type { ValidationWorkflowPolicy } from './followupCiSuspensionPolicy.js';
@@ -316,7 +316,17 @@ async function blockRestore(
     return { reason: 'permission_denied', restartedRunIds, pendingRunIds };
 }
 
-/** Hands the unfinished part of a restart to the next reconciliation pass, or gives up loudly. */
+/**
+ * Hands the unfinished part of a restart to the next reconciliation pass.
+ *
+ * The attempt budget decides how loudly that is reported, never whether the
+ * obligation survives: these runs were cancelled for a head that is still
+ * current, so only a confirmed restart, a closed pull request or a published
+ * replacement may clear them. Past the budget the record stops being retried at
+ * the normal pace and waits in the durable blocked state instead, which every
+ * later reconciliation still retries — dropping it there would leave the current
+ * head's checks cancelled with nothing left to bring them back.
+ */
 async function deferRestore(
     params: { record: CiSuspensionRecord; runs: CancelledRun[]; pending: CancelledRun[]; restartedRunIds: number[]; attempts: number },
     deps: CiSuspensionDeps,
@@ -324,16 +334,18 @@ async function deferRestore(
     const { record, runs, pending, restartedRunIds, attempts } = params;
     const log = resolveLog(deps);
     const pendingRunIds = pending.map(run => run.id);
-    const abandoned = attempts >= MAX_RESTORE_ATTEMPTS;
-    await (abandoned ? deleteSuspension(deps, record) : saveCancelledRuns(deps, record, runs, { state: SUSPENSION_RESTORING, attempts }));
-    if (abandoned) {
-        log.error({ repository: record.repository, pullRequest: record.pull_request, pendingRunIds },
-            'Gave up restarting cancelled pull request validation after repeated attempts');
+    const budgetSpent = attempts >= MAX_RESTORE_ATTEMPTS;
+    const state = budgetSpent ? SUSPENSION_BLOCKED : SUSPENSION_RESTORING;
+    const retained = await saveCancelledRuns(deps, record, runs, { state, attempts });
+    if (budgetSpent) {
+        log.error({ repository: record.repository, pullRequest: record.pull_request, pendingRunIds, attempts, retained: retained !== null },
+            'Cannot restart cancelled pull request validation after repeated attempts. The cancelled runs stay recorded '
+            + 'and every reconciliation retries them until validation is restored or the cancelled head becomes obsolete');
     } else {
         log.info({ repository: record.repository, pullRequest: record.pull_request, pendingRunIds, restartedRunIds },
             'Cancelled pull request validation is still finishing; restart continues on the next reconciliation');
     }
-    return { reason: abandoned ? 'abandoned' : 'pending', restartedRunIds, pendingRunIds };
+    return { reason: budgetSpent ? 'blocked' : 'pending', restartedRunIds, pendingRunIds };
 }
 
 /**
@@ -420,8 +432,8 @@ export async function reconcileFollowupCiSuspensions(
                 continue;
             }
             const restored = await restoreFollowupCiSuspension(record, deps);
-            // A denied restore released nothing: its obligation is still recorded.
-            if (!['pending', 'permission_denied', 'superseded', 'busy'].includes(restored.reason)) summary.released += 1;
+            // A denied or blocked restore released nothing: its obligation is still recorded.
+            if (!['pending', 'permission_denied', 'blocked', 'superseded', 'busy'].includes(restored.reason)) summary.released += 1;
             if (restored.restartedRunIds.length > 0) summary.restored += 1;
         } catch (error) {
             summary.errors += 1;

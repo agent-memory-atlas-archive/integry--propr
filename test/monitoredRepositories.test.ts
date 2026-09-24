@@ -104,9 +104,10 @@ test('the selected follow-up CI cancellation workflows are read across the branc
         await getCancelCiDuringFollowupWorkflowsForRepository('owner', 'repo', async () => [withoutSelection] as never),
         [],
     );
-    // An unreadable configuration must never be read as permission to cancel.
-    assert.deepEqual(
+    // An unreadable configuration is not an empty selection: it must be reported
+    // as unreadable so the caller skips cancellation instead of falling back.
+    assert.equal(
         await getCancelCiDuringFollowupWorkflowsForRepository('owner', 'repo', async () => { throw new Error('database is down'); }),
-        [],
+        null,
     );
 });

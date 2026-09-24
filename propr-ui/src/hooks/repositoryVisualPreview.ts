@@ -114,12 +114,13 @@ export function buildRepositoriesForDisplay(repos: ManagedRepo[]): ManagedRepo[]
     const key = getRepositoryConfigKey(repo.name);
     autoCiFollowupByRepository.set(key, autoCiFollowupByRepository.get(key) === true || repo.autoFollowupOnFailedCi);
     cancelCiByRepository.set(key, cancelCiByRepository.get(key) === true || repo.cancelCiDuringFollowup);
-    // Branch entries written before the selection existed hold none; the first
-    // entry that carries one speaks for the repository.
-    const knownWorkflows = cancelCiWorkflowsByRepository.get(key);
-    if (!knownWorkflows || knownWorkflows.length === 0) {
-      cancelCiWorkflowsByRepository.set(key, parseWorkflowSelection(repo.cancelCiDuringFollowupWorkflows));
-    }
+    // The worker cancels the union of every branch entry's selection, so the
+    // display has to show exactly that union: a selection stored on one entry
+    // only would otherwise hide a workflow the repository may cancel.
+    cancelCiWorkflowsByRepository.set(key, parseWorkflowSelection([
+      ...(cancelCiWorkflowsByRepository.get(key) ?? []),
+      ...(Array.isArray(repo.cancelCiDuringFollowupWorkflows) ? repo.cancelCiDuringFollowupWorkflows : [])
+    ]));
     const previousPreview = visualPreviewByRepository.get(key);
     if (!previousPreview || (!previousPreview.enabled && repo.visualPreview.enabled)) {
       visualPreviewByRepository.set(key, repo.visualPreview);

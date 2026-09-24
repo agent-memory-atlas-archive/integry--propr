@@ -61,16 +61,20 @@ export async function isCancelCiDuringFollowupEnabledForRepository(
 /**
  * The validation workflows an operator selected for a repository, which are the
  * only workflows follow-up CI cancellation may ever cancel. Branch-specific
- * entries share a repository name, so every entry's selection counts; an
- * unreadable configuration selects nothing, which cancels nothing.
+ * entries share a repository name, so every entry's selection counts.
+ *
+ * Returns null when the configuration could not be read at all. That is not an
+ * empty selection: a repository whose stored selection is unknown must not have
+ * any other workflow cancelled on its behalf, so the caller skips cancellation
+ * instead of falling back to the environment allowlist.
  */
 export async function getCancelCiDuringFollowupWorkflowsForRepository(
     owner: string,
     repo: string,
     loadConfiguredRepos: typeof loadMonitoredReposRaw = loadMonitoredReposRaw,
-): Promise<string[]> {
+): Promise<string[] | null> {
     const repository = `${owner.trim()}/${repo.trim()}`.toLowerCase();
-    if (repository === '/') return [];
+    if (repository === '/') return null;
 
     try {
         const configuredRepos = await loadConfiguredRepos();
@@ -88,8 +92,8 @@ export async function getCancelCiDuringFollowupWorkflowsForRepository(
     } catch (error) {
         const err = error as Error;
         logger.warn({ repository, error: err.message },
-            'Failed to load the follow-up CI cancellation workflow selection; cancelling nothing');
-        return [];
+            'Failed to load the follow-up CI cancellation workflow selection; cancelling nothing until it can be read');
+        return null;
     }
 }
 

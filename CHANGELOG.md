@@ -18,14 +18,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   name, path, display name or numeric workflow ID, matched exactly — are ever
   cancelled, so a workflow that deploys under a name like `Build` or `CI` keeps
   running, and an empty selection leaves the decision to the documented
-  environment fallback, which the settings screen discloses. Instances
+  environment fallback, which the settings screen discloses. A selection that
+  cannot be read at all is not an empty one: nothing is cancelled for that
+  repository until it can be read again. Instances
   configured outside the Web UI can set `CANCEL_CI_FOLLOWUP_WORKFLOWS` as a
   fallback for repositories with no selection of their own. Runs of other pull
   requests and other revisions are never touched. Each run is recorded before its
   cancel request is sent, so a crash or a lost response cannot leave CI cancelled
   without a restart obligation, and neither a denied retry nor a refused restart
-  discards an obligation: a refused restart keeps its runs recorded until the
-  restart is confirmed or the head is obsolete. Starting, sweeping, restoring and releasing one pull
+  discards an obligation: a refused or repeatedly failing restart keeps its runs
+  recorded until the restart is confirmed, the pull request closes or the head is
+  obsolete. Starting, sweeping, restoring and releasing one pull
   request all run under a shared database lease, so workers cannot interleave and
   no run is cancelled after its restart began. A replacement commit gets its
   normal CI; a run that ends without one has its cancelled checks restarted for
