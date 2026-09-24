@@ -126,17 +126,18 @@ function createGitHub(runs: FakeRun[], options: GitHubOptions = {}) {
                 const matching = runs.filter(candidate => candidate.head_sha === parameters.head_sha);
                 const perPage = options.perPage ?? (parameters.per_page as number);
                 const page = (parameters.page as number) ?? 1;
+                // Snapshots, as GitHub answers: what a run does after it was listed is not visible through the listing.
                 return {
                     data: {
                         total_count: matching.length,
-                        workflow_runs: matching.slice((page - 1) * perPage, page * perPage),
+                        workflow_runs: matching.slice((page - 1) * perPage, page * perPage).map(candidate => ({ ...candidate })),
                     },
                 };
             }
             if (route === 'GET /repos/{owner}/{repo}/actions/runs/{run_id}') {
                 const found = runs.find(candidate => candidate.id === runId);
                 if (!found) throw error(404);
-                return { data: found };
+                return { data: { ...found } };
             }
             if (route === 'GET /repos/{owner}/{repo}/actions/runs/{run_id}/attempts/{attempt_number}') {
                 const found = runs.find(candidate => candidate.id === runId);
@@ -524,13 +525,77 @@ describe('follow-up CI suspension targeting', () => {
         assert.deepEqual(await records(), []);
     });
 
+    test('a run an operator cancelled and reran while earlier runs were handled is cancelled on the attempt it is on now', async () => {
+        const runs = [run({ id: 1 }), run({ id: 2 })];
+        const observedBeforeCancel: Array<number | undefined> = [];
+        const github = createGitHub(runs, {
+            onCancel: async runId => {
+                if (runId !== 1) return;
+                // While ProPR is busy with run 1, an operator cancels run 2 on the
+                // attempt discovery listed and reruns it: run 2 is on attempt 2 now.
+                runs[1].attempts = { 1: { status: 'completed', conclusion: 'cancelled' } };
+                runs[1].run_attempt = 2;
+                runs[1].status = 'queued';
+                runs[1].conclusion = null;
+            },
+            onRequest: async route => {
+                if (route !== 'POST /repos/{owner}/{repo}/actions/runs/{run_id}/cancel') return;
+                const [stored] = await records();
+                const entry = JSON.parse(stored.cancelled_runs).find((candidate: { id: number }) => candidate.id === 2);
+                observedBeforeCancel.push(entry?.observedAttempt);
+            },
+        });
+
+        const result = await beginFollowupCiSuspension({ target: TARGET, taskId: TASK_ID }, deps(github));
+
+        assert.deepEqual(result.cancelledRunIds, [1, 2]);
+        assert.deepEqual([runs[1].status, runs[1].conclusion, runs[1].run_attempt], ['completed', 'cancelled', 2]);
+        assert.deepEqual(observedBeforeCancel, [undefined, 2],
+            'the intent for run 2 records the attempt it is on right before its request leaves, not the listed one');
+        const [stored] = await records();
+        assert.deepEqual(
+            JSON.parse(stored.cancelled_runs).map((entry: { id: number; observedAttempt?: number; attempt?: number; restarted: boolean }) =>
+                [entry.id, entry.observedAttempt, entry.attempt, entry.restarted]),
+            [[1, 1, 1, false], [2, 2, 2, false]], 'the record ties ProPR\'s cancellation of run 2 to attempt 2');
+
+        // The head is unchanged when implementation ends. The operator's
+        // cancelled attempt 1 must not pass for ProPR's, nor their rerun for its
+        // restoration: attempt 2 is what ProPR cancelled, and it has to come back.
+        const summary = await reconcileFollowupCiSuspensions(deps(github, { getTaskState: async () => null }));
+        assert.equal(summary.restored, 1);
+        assert.deepEqual(github.rerun(), [1, 2]);
+        assert.equal(runs[1].run_attempt, 3);
+        assert.deepEqual(await records(), []);
+    });
+
+    test('a run that finished while earlier runs were handled is neither cancelled nor recorded', async () => {
+        const runs = [run({ id: 1 }), run({ id: 2 })];
+        const github = createGitHub(runs, {
+            onCancel: async runId => {
+                if (runId !== 1) return;
+                // Run 2 produced its own result while run 1 was being cancelled.
+                runs[1].status = 'completed';
+                runs[1].conclusion = 'success';
+            },
+        });
+
+        const result = await beginFollowupCiSuspension({ target: TARGET, taskId: TASK_ID }, deps(github));
+
+        assert.deepEqual(result.cancelledRunIds, [1]);
+        assert.deepEqual(github.cancelled(), [1], 'the listing alone never sends a cancel to a run that is no longer pending');
+        assert.deepEqual(await storedRunIds(), [1]);
+        assert.deepEqual([runs[1].status, runs[1].conclusion], ['completed', 'success']);
+    });
+
     test('an unconfirmed cancellation is settled by the attempts the run left behind, not by the attempt it shows', async () => {
         const runs = [run({ id: 1 })];
+        let cancelSent = false;
         const github = createGitHub(runs, {
             // The worker dies before it can read the run back: the attempt the
             // cancellation affected is never confirmed, only the one observed.
             onRequest: async route => {
-                if (route === 'GET /repos/{owner}/{repo}/actions/runs/{run_id}') throw Object.assign(new Error('worker died'), { status: 500 });
+                if (route === 'POST /repos/{owner}/{repo}/actions/runs/{run_id}/cancel') cancelSent = true;
+                if (cancelSent && route === 'GET /repos/{owner}/{repo}/actions/runs/{run_id}') throw Object.assign(new Error('worker died'), { status: 500 });
             },
         });
         const begun = await beginFollowupCiSuspension({ target: TARGET, taskId: TASK_ID }, deps(github));
@@ -559,10 +624,12 @@ describe('follow-up CI suspension targeting', () => {
 
     test('an unconfirmed cancellation whose evidence cannot be read keeps its obligation for a later pass', async () => {
         const runs = [run({ id: 1 })];
+        let cancelSent = false;
         let readBackFails = true;
         const github = createGitHub(runs, {
             onRequest: async route => {
-                if (readBackFails && route === 'GET /repos/{owner}/{repo}/actions/runs/{run_id}') throw Object.assign(new Error('read back failed'), { status: 500 });
+                if (route === 'POST /repos/{owner}/{repo}/actions/runs/{run_id}/cancel') cancelSent = true;
+                if (cancelSent && readBackFails && route === 'GET /repos/{owner}/{repo}/actions/runs/{run_id}') throw Object.assign(new Error('read back failed'), { status: 500 });
             },
         });
         await beginFollowupCiSuspension({ target: TARGET, taskId: TASK_ID }, deps(github));
@@ -1230,12 +1297,14 @@ describe('restoring cancelled validation', () => {
 
     test('an obligation without a confirmed attempt records the attempt it reruns before the rerun is sent', async () => {
         const runs = [run({ id: 1 })];
+        let cancelSent = false;
         let readBackFails = true;
         let workerDied = false;
         let attemptOnRecordAtRerun: number | undefined;
         const github = createGitHub(runs, {
             onRequest: async route => {
-                if (route !== 'GET /repos/{owner}/{repo}/actions/runs/{run_id}') return;
+                if (route === 'POST /repos/{owner}/{repo}/actions/runs/{run_id}/cancel') cancelSent = true;
+                if (!cancelSent || route !== 'GET /repos/{owner}/{repo}/actions/runs/{run_id}') return;
                 // Reading the run back after the cancellation fails, so the attempt
                 // ProPR cancelled was never confirmed; later the worker is dead.
                 if (readBackFails || workerDied) throw Object.assign(new Error('read back failed'), { status: 500 });

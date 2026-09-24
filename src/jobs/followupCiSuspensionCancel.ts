@@ -79,15 +79,21 @@ export function resolveFollowupCiSuspensionTarget(
  * run's real outcome later and restarts only what GitHub really cancelled.
  *
  * Which attempt that request affects is not known until it lands either. The
- * attempt discovery listed is a snapshot: a run that completed and was rerun
- * in the meantime is cancelled on its newer attempt, and recording the older
- * one would let that newer attempt pass for an accepted rerun and settle the
- * obligation while the head's checks stay cancelled. The opposite is just as
+ * listing discovery produced is a snapshot, and it ages while the runs before
+ * a given one are cancelled and read back: an operator who cancels that run
+ * and reruns it in the meantime leaves it on a newer attempt, with the older
+ * one ended cancelled by their hand. Cancelling on the listed evidence would
+ * then take their cancelled attempt for ProPR's and the attempt ProPR really
+ * cancelled for their rerun, settling the obligation while the head's checks
+ * stay cancelled. Each run is therefore read again immediately before its
+ * intent is written, its eligibility judged on that fresh state, and the
+ * attempt it is on at that moment recorded: the request that follows cannot
+ * affect an earlier one. Even that is only a lower bound. A rerun can still
+ * land between the read and the request, and the opposite mistake is just as
  * wrong: a rerun somebody starts right after the cancellation landed shows the
  * run on a newer attempt too, and adopting that attempt as the cancelled one
  * would have ProPR "restore" it on their behalf should they cancel it later,
- * although their rerun already met the obligation. The intent therefore keeps
- * the observed attempt only as a lower bound, and the attempt the request
+ * although their rerun already met the obligation. The attempt the request
  * affected is established once GitHub accepted it from the run's own attempts
  * (see {@link locateCancelledAttempt}). An intent whose attempt could not be
  * confirmed is settled by the run's real outcome alone, with the same evidence.
@@ -121,9 +127,16 @@ export async function cancelPendingRuns(
     const target = targetOf(record);
     const policy = await resolvePolicy(deps, target);
     if (policy.selected.size === 0) return;
-    for (const run of await listRunsForSha(octokit, target, headSha)) {
-        if (!isCancelableValidationRun(run, { pullRequestNumber: target.pullRequestNumber, headSha, policy })) continue;
+    const eligible = { pullRequestNumber: target.pullRequestNumber, headSha, policy };
+    for (const listed of await listRunsForSha(octokit, target, headSha)) {
+        if (!isCancelableValidationRun(listed, eligible)) continue;
         await lease?.assertHeld();
+        // The listing is stale by now for every run but the first: this run is
+        // read again, and only what it is right now decides whether it is still
+        // cancellable and which attempt the intent records. A run that vanished
+        // or finished meanwhile is left alone.
+        const run = await getRun(octokit, target, listed.id);
+        if (!run || !isCancelableValidationRun(run, eligible)) continue;
         const index = runs.findIndex(entry => entry.id === run.id);
         // What the record said before this request, to fall back on if the request is rejected.
         const previous = index >= 0 ? { ...runs[index] } : undefined;
