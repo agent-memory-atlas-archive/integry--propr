@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { before, describe, it } from 'node:test';
-import { runElectronFixture } from './electron-fixture-runner.mjs';
+import { linuxProbeArguments, runElectronFixture } from './electron-fixture-runner.mjs';
 import { prepareNativeElectronTest } from './electron-native-test-setup.mjs';
 
 const fixture = resolve(dirname(fileURLToPath(import.meta.url)), 'electron-frame-semantics-probe.cjs');
@@ -26,7 +26,7 @@ describe('Electron BrowserWindow lifecycle semantics', () => {
     const report = await runElectronFixture({
       diagnostic: message => context.diagnostic(message),
       electronArguments: [
-        ...(process.platform === 'linux' ? ['--no-sandbox', '--disable-gpu'] : []),
+        ...(process.platform === 'linux' ? linuxProbeArguments : []),
         fixture,
       ],
       name: 'Electron frame fixture',

@@ -4,7 +4,7 @@ import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { zstdCompressSync } from 'node:zlib';
 import { before, describe, it } from 'node:test';
-import { runElectronFixture } from './electron-fixture-runner.mjs';
+import { linuxProbeArguments, runElectronFixture } from './electron-fixture-runner.mjs';
 import { prepareNativeElectronTest } from './electron-native-test-setup.mjs';
 
 const fixture = resolve(dirname(fileURLToPath(import.meta.url)), 'electron-pairing-zstd-probe.cjs');
@@ -61,8 +61,7 @@ describe('Electron pairing response compression', () => {
         diagnostic: message => context.diagnostic(message),
         electronArguments: [
           ...(process.platform === 'linux' ? [
-            '--no-sandbox',
-            '--disable-gpu',
+            ...linuxProbeArguments,
             ...('headlessLinux' in setup ? ['--headless', '--ozone-platform=headless'] : []),
           ] : []),
           fixture,

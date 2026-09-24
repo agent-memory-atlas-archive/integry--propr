@@ -20,10 +20,29 @@ import { spawn } from 'node:child_process';
 // shutdown says nothing about the behaviour under test. A complete report is
 // therefore accepted and the odd exit status is recorded as a diagnostic.
 
+// The switches every Linux Electron probe needs. `--disable-dev-shm-usage`
+// belongs here with the others: Chromium keeps its shared-memory segments in
+// /dev/shm, and a fault on a segment it cannot back there arrives as SIGBUS —
+// `xvfb-run` reporting 135 with no message, which is exactly how the
+// linux-arm64 fixture died while a second Electron ran beside it. Backing the
+// segments with the ordinary temp directory instead removes that failure mode
+// and costs nothing on a worker with room to spare.
+export const linuxProbeArguments = ['--no-sandbox', '--disable-gpu', '--disable-dev-shm-usage'];
+
 const describeExit = ({ code, signal, timedOut }) => [
   code === null || code === undefined ? String(signal) : String(code),
   ...(timedOut ? ['after exhausting its own budget'] : []),
 ].join(' ');
+
+// Both streams are quoted, not just stderr. `xvfb-run` runs its child as
+// `"$@" 2>&1`, so a crashing Electron's diagnostics land on stdout and stderr
+// is empty: the linux-arm64 failure that motivated this runner reported
+// nothing whatsoever after its exit code, which is what made it unreadable.
+const describeStreams = ({ stderr, stdout }) => [['stderr', stderr], ['stdout', stdout]]
+  .map(([stream, value]) => [stream, (value ?? '').trim()])
+  .filter(([, value]) => value.length > 0)
+  .map(([stream, value]) => `${stream}: ${value.slice(-2_000)}`)
+  .join(' | ') || 'both output streams were empty';
 
 const readEvidence = stdout => {
   const line = stdout.trim().split(/\r?\n/u).findLast(candidate => candidate.startsWith('{'));
@@ -86,7 +105,7 @@ export const runElectronFixture = async ({
     }
     const { detail, report } = readEvidence(outcome.stdout);
     if (!report) {
-      failures.push(`attempt ${attempt} exited ${describeExit(outcome)} and ${detail}: ${outcome.stderr.slice(-2_000)}`);
+      failures.push(`attempt ${attempt} exited ${describeExit(outcome)} and ${detail} (${describeStreams(outcome)})`);
       continue;
     }
     if (outcome.code !== 0) {

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { runElectronFixture } from './electron-fixture-runner.mjs';
+import { linuxProbeArguments, runElectronFixture } from './electron-fixture-runner.mjs';
 
 const nativeSetup = { electronExecutable: '/electron' };
 const headlessSetup = { electronExecutable: '/electron', xvfbRun: '/tools/xvfb-run' };
@@ -78,7 +78,7 @@ describe('Electron fixture runner', () => {
     assert.deepEqual(report, { ok: true });
     assert.equal(launches.length, 2);
     assert.deepEqual(diagnostics, [
-      'Electron frame fixture needed 2 launches on this worker: attempt 1 exited 135 and reported no evidence: ',
+      'Electron frame fixture needed 2 launches on this worker: attempt 1 exited 135 and reported no evidence (both output streams were empty)',
     ]);
   });
 
@@ -112,7 +112,7 @@ describe('Electron fixture runner', () => {
       runAttempt,
       setup: nativeSetup,
       timeout: 20_000,
-    }), /^Error: Electron frame fixture failed: attempt 1 exited 135 and reported no evidence: first stderr; attempt 2 exited SIGKILL after exhausting its own budget and reported no evidence: second stderr$/u);
+    }), /^Error: Electron frame fixture failed: attempt 1 exited 135 and reported no evidence \(stderr: first stderr\); attempt 2 exited SIGKILL after exhausting its own budget and reported no evidence \(stderr: second stderr\)$/u);
     assert.equal(launches.length, 2);
   });
 
@@ -129,6 +129,30 @@ describe('Electron fixture runner', () => {
       setup: nativeSetup,
       timeout: 20_000,
     }), /reported unparseable evidence/u);
+  });
+
+  it('quotes the merged stdout that xvfb-run hands back for a crashed fixture', async () => {
+    // `xvfb-run` runs its child as `"$@" 2>&1`, so the crash reason arrives on
+    // stdout with stderr empty. Reporting stderr alone is what left the
+    // original linux-arm64 failure with nothing after its exit code.
+    const { runAttempt } = scriptedRunner([
+      { code: 135, signal: null, stderr: '', stdout: 'Trace/breakpoint trap\n', timedOut: false },
+      { code: 135, signal: null, stderr: 'late note', stdout: 'Trace/breakpoint trap\n', timedOut: false },
+    ]);
+
+    await assert.rejects(() => runElectronFixture({
+      electronArguments: ['/probe.cjs'],
+      name: 'probe',
+      runAttempt,
+      setup: headlessSetup,
+      timeout: 20_000,
+    }), /attempt 1 exited 135 and reported no evidence \(stdout: Trace\/breakpoint trap\); attempt 2 exited 135 and reported no evidence \(stderr: late note \| stdout: Trace\/breakpoint trap\)/u);
+  });
+
+  it('keeps every Linux worker on the same Chromium switches', () => {
+    // /dev/shm-backed shared memory is the one SIGBUS source a probe can rule
+    // out for itself, so no call site may quietly launch without the switch.
+    assert.deepEqual(linuxProbeArguments, ['--no-sandbox', '--disable-gpu', '--disable-dev-shm-usage']);
   });
 
   it('reports a fixture that could not be spawned at all', async () => {
