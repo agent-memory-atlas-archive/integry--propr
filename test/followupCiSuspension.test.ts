@@ -1132,6 +1132,33 @@ describe('restoring cancelled validation', () => {
         assert.deepEqual(await records(), []);
     });
 
+    test('a cancelled run never stands in as its own replacement while its cancellation is still landing', async () => {
+        const runs = [run({ id: 1 })];
+        let restoring = false;
+        const github = createGitHub(runs, {
+            asyncCancellation: true,
+            // The listing that begins the restore still shows the cancelled run in
+            // progress; by the time the run itself is read, GitHub has landed the
+            // cancellation. Only ProPR's own run ever appears for this workflow.
+            onRequest: route => {
+                if (!restoring || route !== 'GET /repos/{owner}/{repo}/actions/runs/{run_id}') return;
+                runs[0].status = 'completed';
+                runs[0].conclusion = 'cancelled';
+            },
+        });
+        await beginFollowupCiSuspension({ target: TARGET, taskId: TASK_ID }, deps(github));
+        assert.deepEqual(github.cancelled(), [1]);
+
+        restoring = true;
+        const [result] = await releaseFollowupCiSuspensionsForTask({ taskId: TASK_ID }, deps(github));
+
+        assert.equal(result.reason, 'restarted');
+        assert.deepEqual(result.restartedRunIds, [1]);
+        assert.deepEqual(github.rerun(), [1], 'the run ProPR cancelled is restarted rather than mistaken for a replacement');
+        assert.equal(runs[0].run_attempt, 2);
+        assert.deepEqual(await records(), []);
+    });
+
     test('a run of another event or another pull request never stands in for the cancelled validation', async () => {
         const runs = [run({ id: 1 })];
         const github = createGitHub(runs, { asyncCancellation: true });

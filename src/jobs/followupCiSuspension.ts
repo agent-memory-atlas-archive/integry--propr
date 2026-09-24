@@ -255,7 +255,14 @@ async function restartPass(
     // *this* pull request head on the pull request's own event counts as that
     // replacement: an unrelated push or another pull request's run of the same
     // commit never settles the obligation to restart what ProPR cancelled.
+    // Neither does a run ProPR cancelled itself: GitHub lands a cancellation
+    // asynchronously, so the listing can still show such a run in progress
+    // while the run's own read moments later returns it cancelled, and the
+    // obligation would be dropped on nothing. A rerun of one of those runs is
+    // recognised by its attempt advancing, never through the listing.
+    const recordedRunIds = new Set(runs.map(run => run.id));
     const activeWorkflowIds = new Set((await listRunsForSha(octokit, target, headSha))
+        .filter(run => !recordedRunIds.has(run.id))
         .filter(run => isReplacementValidationRun(run, { pullRequestNumber: target.pullRequestNumber, headSha }))
         .map(run => run.workflow_id)
         .filter((id): id is number => typeof id === 'number'));
