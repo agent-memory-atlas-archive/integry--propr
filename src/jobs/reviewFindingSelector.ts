@@ -4,6 +4,7 @@ import type { Redis } from 'ioredis';
 import type { CommentJobData } from '@propr/core';
 import { formatActionableFindings, gatherUnprocessedReviewComments } from './reviewCommentGatherer.js';
 import type { AIReviewComment, ActionableFinding } from './reviewCommentGatherer.js';
+import { formatRecordFields } from './reviewRecordFields.js';
 
 export interface FixFindingSelection {
     actionableIds: Set<string> | null;
@@ -162,11 +163,13 @@ export async function prepareFixReviewFeedback(params: {
 function formatActionableRecord(finding: ActionableFinding, commentId: number): string {
     return [
         `### ${finding.id}: ${finding.title}`,
-        `- **Source review comment:** ${commentId}`,
-        `- **Violated requirement:** ${finding.violatedRequirement}`,
-        `- **Changed-code evidence:** ${finding.evidence}`,
-        `- **Why introduced by this PR:** ${finding.introducedByPRExplanation}`,
-        `- **Minimum necessary correction:** ${finding.minimumCorrection}`,
+        formatRecordFields([
+            ['Source review comment', String(commentId)],
+            ['Violated requirement', finding.violatedRequirement],
+            ['Changed-code evidence', finding.evidence],
+            ['Why introduced by this PR', finding.introducedByPRExplanation],
+            ['Minimum necessary correction', finding.minimumCorrection],
+        ]),
     ].join('\n');
 }
 
@@ -179,7 +182,7 @@ export function formatReviewCommentsSection(
     const lines = ['**Selected Review Finding Records:**', ''];
     if (actionable.length > 0) {
         const ids = selectedComments.flatMap(comment => comment.actionableFindings.map(finding => finding.id));
-        lines.push(`Address actionable finding${ids.length === 1 ? '' : 's'} ${ids.join(', ')} only.`, '', ...actionable);
+        lines.push(`Address actionable finding${ids.length === 1 ? '' : 's'} ${ids.join(', ')} only.`, '', actionable.join('\n\n'));
     } else {
         lines.push('No actionable findings were selected.');
     }
