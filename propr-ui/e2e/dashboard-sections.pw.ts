@@ -173,7 +173,8 @@ test('desktop shows every section with running work in the main column', async (
   await fixture(page);
   await page.goto('/');
 
-  await expect(page.getByTestId('dashboard-toolbar')).toBeVisible();
+  await expect(page.getByTestId('header-scope-slot').getByRole('button', { name: /All Repos/ })).toBeVisible();
+  await expect(page.getByTestId('dashboard-scope-bar')).toBeHidden();
   await expect(page.getByTestId('summary-strip')).toHaveCount(0);
   await expect(page.getByTestId('needs-attention-panel')).toBeVisible();
   await expect(page.getByTestId('happening-now-section')).toContainText('Implementing');
@@ -342,7 +343,7 @@ test('the dashboard fits a 320px viewport without horizontal overflow', async ({
   await fixture(page);
   await page.goto('/');
 
-  await expect(page.getByTestId('dashboard-toolbar')).toBeVisible();
+  await expect(page.getByTestId('dashboard-scope-bar')).toBeVisible();
   await expect(page.getByTestId('needs-attention-panel')).toBeVisible();
   await expect(page.getByTestId('happening-now-section')).toBeVisible();
 

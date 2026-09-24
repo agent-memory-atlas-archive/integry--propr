@@ -2,9 +2,10 @@
  * Dashboard composition root.
  *
  * The dashboard answers "what needs my attention right now" in four panes:
- * needs attention, happening now, recent outcomes and historical stats, under
- * a single 36px toolbar. Live work gets the space; the deeper charts live on
- * `/analytics`.
+ * needs attention, happening now, recent outcomes and historical stats. Live
+ * work gets the space; the deeper charts live on `/analytics`. The page spends
+ * no row of its own on a title or a toolbar: the panes start directly under the
+ * global header, and the repository filter lives in that header.
  *
  * This file owns only three things — the shared repository filter, the socket
  * subscription that keeps every section current, and the responsive layout.
@@ -23,6 +24,7 @@
  */
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { useSearchParams } from 'react-router-dom';
 import { useDocumentTitle } from '../hooks/useDocumentTitle';
 import { useSystemReadiness } from '../hooks/useSystemReadiness';
@@ -31,6 +33,7 @@ import { NoDefaultModelAlert } from './Dashboard/NoDefaultModelAlert';
 import AgentTankDetectionBanner from './AgentTankDetectionBanner';
 import { ConnectSoftPromoBanner } from './ConnectPlusBanner';
 import { RepositorySelector, type RepoOption } from './RepositorySelector';
+import { useHeaderScopeSlot } from './headerScopeSlot';
 import { fetchEnabledRepos } from '../utils/repoHelpers';
 import { useSocket } from '../contexts/useSocket';
 import { useCurrentUser, userHasPermission } from '../contexts/AuthContext';
@@ -113,6 +116,15 @@ const Dashboard: React.FC = () => {
 
   const sectionProps = { repository, refreshToken };
 
+  const headerScopeSlot = useHeaderScopeSlot();
+  const showRepositoryFilter = reposLoading || repoOptions.length > 1;
+  const repositoryFilterProps = {
+    repos: repoOptions,
+    selectedRepo: repository,
+    onRepoChange: setRepository,
+    isLoading: reposLoading,
+  };
+
   return (
     <RepositoryIconProvider icons={repositoryIcons}>
       {/*
@@ -125,6 +137,53 @@ const Dashboard: React.FC = () => {
         the console look like the end of the console.
       */}
       <div className="flex min-h-full flex-col bg-white pb-6 md:pb-0">
+        {/*
+          The page's name is carried by the highlighted navigation — the
+          sidebar on a desktop, the bottom tab on a phone — so it is not
+          printed again above the console. Assistive technology still gets it.
+        */}
+        <h1 className="sr-only">Dashboard</h1>
+
+        {/*
+          The repository filter scopes every pane, so it goes where scope
+          belongs rather than on a row of its own.
+
+          From `lg` up the filter mounts in the global toolbar, immediately
+          left of search: the panes then start directly under that toolbar's
+          rule, with no page bar between them. A 36px bar holding a title on
+          the left and this filter on the right spent a full row and 800px of
+          empty width on one control.
+
+          On a phone there is no global toolbar, and on a tablet it has no
+          width to spare, so there the filter becomes the title bar itself —
+          centered, full width and sticky, the way a native app's scope
+          switcher is. Nothing sits beside it, so a repository named
+          `payment-gateway` gets the whole row instead of the half a static
+          "Dashboard" label used to leave it.
+        */}
+        {showRepositoryFilter && headerScopeSlot && createPortal(
+          <RepositorySelector
+            {...repositoryFilterProps}
+            variant="default"
+            size="compact"
+            className="w-36 xl:w-48"
+          />,
+          headerScopeSlot,
+        )}
+        {showRepositoryFilter && (
+          <div
+            data-testid="dashboard-scope-bar"
+            className="sticky top-0 z-10 flex h-11 flex-none items-center border-b border-slate-200 bg-white px-3 lg:hidden"
+          >
+            <RepositorySelector
+              {...repositoryFilterProps}
+              variant="default"
+              appearance="title"
+              className="w-full"
+            />
+          </div>
+        )}
+
         <ConnectSoftPromoBanner />
 
         {canManageAgents && !readinessLoading && (!hasAgents || !hasDefaultModel) && (
@@ -144,42 +203,6 @@ const Dashboard: React.FC = () => {
             <AgentTankDetectionBanner />
           </div>
         )}
-
-        {/*
-          The page toolbar: a single 36px bar naming the page on the left and
-          holding the repository filter on the right — the same pattern Plans,
-          Goals and Tasks use.
-
-          It says nothing about the socket and carries no counts. A line
-          reading `Reconnecting · Last updated Just now` spent the most
-          valuable row on the screen on the app's own plumbing, and a strip of
-          `NEEDS ATTENTION 3 | RUNNING 1 …` only repeated what the panes
-          directly underneath it already say: their headings carry the
-          attention and running counts, the queue footer the queued one.
-          The sections still keep their last known rows through a dropped
-          socket and still refresh when it returns; that needs no commentary.
-
-          Its bottom rule is the top edge of the console: the panes attach to
-          it directly, with no margin between. It shares the panes' `px-3` left
-          rail, so "Dashboard" and `HAPPENING NOW` start on the same vertical.
-        */}
-        <div
-          data-testid="dashboard-toolbar"
-          className="flex h-9 flex-none items-center justify-between gap-3 border-b border-slate-200 bg-white px-3"
-        >
-          <h1 className="min-w-0 truncate text-[13px] font-semibold text-slate-800">Dashboard</h1>
-          {(reposLoading || repoOptions.length > 1) && (
-            <RepositorySelector
-              repos={repoOptions}
-              selectedRepo={repository}
-              onRepoChange={setRepository}
-              isLoading={reposLoading}
-              variant="default"
-              size="compact"
-              className="w-48 flex-none sm:w-56"
-            />
-          )}
-        </div>
 
         {/*
           Mobile keeps the DOM order: attention, happening now, recent

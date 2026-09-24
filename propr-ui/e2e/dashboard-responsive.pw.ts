@@ -149,7 +149,6 @@ async function openDashboard(page: Page, width: number, attentionItems = attenti
   await page.setViewportSize({ width, height: 1200 });
   await fixture(page, attentionItems);
   await page.goto('/');
-  await expect(page.getByTestId('dashboard-toolbar')).toBeVisible();
   await expect(page.getByTestId('happening-now-list')).toBeVisible();
   await expect(page.getByTestId('recent-outcomes-list')).toBeVisible();
   await expect(page.getByTestId('historical-stats-section')).toBeVisible();
@@ -180,11 +179,11 @@ async function horizontalOverflow(page: Page) {
   }));
 }
 
-/** The four panes, and the toolbar above them, in priority order. */
+/** The four panes, and the phone's scope bar above them, in priority order. */
 const PANES = ['needs-attention-panel', 'happening-now-section', 'recent-outcomes-section', 'historical-stats-section'];
-const SECTIONS = ['dashboard-toolbar', ...PANES];
+const SECTIONS = ['dashboard-scope-bar', ...PANES];
 
-/** The toolbar and panes in the order the document lists them. */
+/** The scope bar and panes in the order the document lists them. */
 async function sectionOrder(page: Page): Promise<string[]> {
   return page.evaluate(ids => [...document.querySelectorAll('[data-testid]')]
     .map(node => node.getAttribute('data-testid') as string)
@@ -246,32 +245,35 @@ test('the wide layout keeps live work in the main column and the supporting pane
   await capture(page, 'dashboard-responsive-1440');
 });
 
-test('the wide toolbar is one 36px row and both columns hang directly off it', async ({ page }) => {
+test('the wide layout spends no row on a page bar: the filter sits left of search and both columns hang off the global header', async ({ page }) => {
   await openDashboard(page, 1440);
 
+  await expect(page.getByTestId('dashboard-scope-bar')).toBeHidden();
+  await expect(page.getByTestId('summary-strip')).toHaveCount(0);
   const geometry = await page.evaluate(() => {
     const rect = (selector: string) => (document.querySelector(selector) as HTMLElement).getBoundingClientRect();
-    const toolbar = rect('[data-testid="dashboard-toolbar"]');
+    const header = rect('header[aria-label="Application toolbar"]');
+    const filter = rect('[data-testid="header-scope-slot"] button');
+    const search = rect('header input[aria-label="Search"]');
     return {
-      height: Math.round(toolbar.height),
-      bottom: Math.round(toolbar.bottom),
-      left: Math.round(toolbar.left),
-      right: Math.round(toolbar.right),
-      headingLeft: Math.round(rect('[data-testid="dashboard-toolbar"] h1').left),
-      filterRight: Math.round(rect('[data-testid="dashboard-toolbar"] button').right),
+      headerMiddle: Math.round(header.top + header.height / 2),
+      headerBottom: Math.round(header.bottom),
+      filterMiddle: Math.round(filter.top + filter.height / 2),
+      filterRight: Math.round(filter.right),
+      searchLeft: Math.round(search.left),
       running: Math.round(rect('[data-testid="happening-now-section"]').top),
       attention: Math.round(rect('[data-testid="needs-attention-panel"]').top),
     };
   });
 
-  // Page name on the left, filter on the right, both inside the 12px rail.
-  expect(geometry.height).toBe(36);
-  expect(geometry.headingLeft - geometry.left).toBe(12);
-  expect(geometry.right - geometry.filterRight).toBe(12);
-  // No counts strip and no margin: both columns start on the toolbar's rule.
-  await expect(page.getByTestId('summary-strip')).toHaveCount(0);
-  expect(geometry.running).toBe(geometry.bottom);
-  expect(geometry.attention).toBe(geometry.bottom);
+  // The filter is in the global toolbar, on its center line, immediately
+  // left of search with nothing between them.
+  expect(Math.abs(geometry.filterMiddle - geometry.headerMiddle)).toBeLessThanOrEqual(1);
+  expect(geometry.searchLeft - geometry.filterRight).toBeGreaterThan(0);
+  expect(geometry.searchLeft - geometry.filterRight).toBeLessThanOrEqual(8);
+  // Both columns start on the global header's own rule.
+  expect(geometry.running).toBe(geometry.headerBottom);
+  expect(geometry.attention).toBe(geometry.headerBottom);
 });
 
 test('an empty attention list holds the right column instead of collapsing it', async ({ page }) => {
@@ -526,29 +528,34 @@ for (const width of NARROW_WIDTHS) {
     await capture(page, `dashboard-responsive-${width}-end`);
   });
 
-  test(`the toolbar is one 36px row with the panes attached beneath it at ${width}px`, async ({ page }) => {
+  test(`the repository filter is the whole title bar at ${width}px`, async ({ page }) => {
     await openDashboard(page, width);
 
-    // The page name and the repository filter share a single row, even at
-    // 320px, and the first pane starts on the toolbar's bottom rule.
+    // No "Dashboard" beside it: the bottom tab says where you are, so a long
+    // repository name gets the full row instead of being cut to fit half.
+    const bar = page.getByTestId('dashboard-scope-bar');
+    await expect(bar).toHaveText('All Repos');
+    await bar.getByRole('button').click();
+    await page.getByTestId('repo-item').filter({ hasText: 'design-system' }).click();
+    await expect(bar).toHaveText('example/design-system (main)');
+
     const geometry = await page.evaluate(() => {
       const rect = (selector: string) => (document.querySelector(selector) as HTMLElement).getBoundingClientRect();
-      const toolbar = rect('[data-testid="dashboard-toolbar"]');
-      const heading = rect('[data-testid="dashboard-toolbar"] h1');
-      const filter = rect('[data-testid="dashboard-toolbar"] button');
+      const [bar, button, label] = ['', ' button', ' button span.truncate'].map(part => rect(`[data-testid="dashboard-scope-bar"]${part}`));
+      const labelNode = document.querySelector('[data-testid="dashboard-scope-bar"] button span.truncate') as HTMLElement;
       return {
-        height: Math.round(toolbar.height),
-        bottom: Math.round(toolbar.bottom),
-        headingTop: Math.round(heading.top),
-        filterTop: Math.round(filter.top),
-        filterRight: Math.round(filter.right),
-        firstPane: Math.round(rect('[data-testid="needs-attention-panel"]').top),
+        bar: bar.toJSON() as DOMRect, canvas: rect('main').top, buttonWidth: button.width, firstPane: rect('[data-testid="needs-attention-panel"]').top,
+        offCenter: Math.abs((label.left + label.right) / 2 - (bar.left + bar.right) / 2),
+        truncated: labelNode.scrollWidth > labelNode.clientWidth,
       };
     });
-    expect(geometry.height).toBe(36);
-    expect(geometry.filterRight).toBeLessThanOrEqual(width);
-    expect(Math.abs(geometry.headingTop - geometry.filterTop)).toBeLessThanOrEqual(8);
-    expect(geometry.firstPane).toBe(geometry.bottom);
-    await expect(page.getByTestId('summary-strip')).toHaveCount(0);
+    // It is the first thing on the canvas, spans the row inside the 12px
+    // rail, reads centered, and the panes start on its bottom rule.
+    expect(geometry.bar.top).toBe(geometry.canvas);
+    expect(Math.round(geometry.buttonWidth)).toBe(Math.round(geometry.bar.width) - 24);
+    expect(geometry.offCenter).toBeLessThanOrEqual(12);
+    expect(geometry.truncated).toBe(false);
+    expect(Math.round(geometry.firstPane)).toBe(Math.round(geometry.bar.bottom));
+    await capture(page, `dashboard-responsive-${width}-scope`);
   });
 }

@@ -181,18 +181,17 @@ describe('Dashboard consistency rules', () => {
     expect(within(stats).getByText('Spend')).toHaveAttribute('title', expect.stringContaining('Recorded spend'));
   });
 
-  it('keeps the toolbar to the page and its filter, with no socket commentary', async () => {
+  it('keeps the scope bar to the filter alone, with no socket commentary', async () => {
     renderDashboard();
     await waitForSections();
 
     // `Dashboard ● Reconnecting · Last updated 2m` spent the top row on the
     // app's own plumbing — and spent two different glyphs saying it, a status
-    // light doing duty as a bullet beside an interpunct. The row names the
-    // page and what it is filtered to; nothing else.
-    const toolbar = screen.getByTestId('dashboard-toolbar');
-    expect(toolbar).toContainElement(screen.getByRole('heading', { name: 'Dashboard', level: 1 }));
-    expect(toolbar.textContent).not.toMatch(/Live|Reconnecting|Last updated/);
-    expect(toolbar.textContent).not.toMatch(/[•‧∙]/);
+    // light doing duty as a bullet beside an interpunct. The only thing above
+    // the console is what it is filtered to.
+    const scopeBar = screen.getByTestId('dashboard-scope-bar');
+    expect(scopeBar.textContent).toBe('All Repos');
+    expect(screen.queryByText(/Reconnecting|Last updated/)).toBeNull();
     expect(screen.queryByTestId('live-status')).toBeNull();
   });
 

@@ -11,6 +11,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, waitFor, within } from '@testing-library/react';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import Dashboard from './Dashboard';
+import { HeaderScopeSlotContext } from './headerScopeSlot';
 import {
   getDashboardActive,
   getDashboardAttention,
@@ -82,13 +83,16 @@ const mockActive = vi.mocked(getDashboardActive);
 const mockOutcomes = vi.mocked(getDashboardOutcomes);
 const mockStats = vi.mocked(getDashboardStats);
 
-function renderDashboard() {
+/** `headerSlot` stands in for the global toolbar's scope slot, which the layout owns. */
+function renderDashboard(headerSlot: HTMLElement | null = null) {
   return render(
-    <MemoryRouter initialEntries={['/']}>
-      <Routes>
-        <Route path="/" element={<Dashboard />} />
-      </Routes>
-    </MemoryRouter>,
+    <HeaderScopeSlotContext.Provider value={headerSlot}>
+      <MemoryRouter initialEntries={['/']}>
+        <Routes>
+          <Route path="/" element={<Dashboard />} />
+        </Routes>
+      </MemoryRouter>
+    </HeaderScopeSlotContext.Provider>,
   );
 }
 
@@ -198,8 +202,10 @@ describe('Dashboard studio design rules', () => {
     expect(dailyPointFill('2020-01-01', today)).toBe(PAST_DAY_FILL);
   });
 
-  it('spends a single 36px toolbar on the page and its filter, with the console attached beneath it', async () => {
-    renderDashboard();
+  it('spends no row on a page bar: the filter sits in the global toolbar and the console starts at the top', async () => {
+    const headerSlot = document.createElement('div');
+    document.body.appendChild(headerSlot);
+    renderDashboard(headerSlot);
     await waitForSections();
 
     // The counts strip only repeated what the pane headings and the queue
@@ -208,32 +214,30 @@ describe('Dashboard studio design rules', () => {
     expect(screen.queryByLabelText('Work summary')).toBeNull();
     expect(mockSummary).not.toHaveBeenCalled();
 
-    // One bar: the page on the left, the repository filter on the right.
-    const toolbar = screen.getByTestId('dashboard-toolbar');
-    expect(toolbar.className).toMatch(/\bh-9\b/);
-    expect(toolbar.className).toMatch(/justify-between/);
-    expect(toolbar.className).toMatch(/border-b/);
-    // It shares the panes' left rail and stays on the white canvas.
-    expect(toolbar.className).toMatch(/px-3/);
-    expect(toolbar.className).not.toMatch(/bg-slate-50|bg-gray-50|bg-slate-100/);
+    // No page bar and no visible title: the highlighted navigation already
+    // says where you are. The heading stays for assistive technology only.
+    expect(screen.queryByTestId('dashboard-toolbar')).toBeNull();
+    expect(screen.getByRole('heading', { name: 'Dashboard', level: 1 })).toHaveClass('sr-only');
 
-    const heading = screen.getByRole('heading', { name: 'Dashboard', level: 1 });
-    expect(toolbar.firstElementChild).toBe(heading);
-    const filter = within(toolbar).getByRole('button', { name: /All Repos/ });
-    expect(toolbar.lastElementChild).toContainElement(filter);
-    // A 28px trigger, so the filter fits inside the 36px bar instead of
-    // stretching it.
-    expect(filter.className).toMatch(/\bh-7\b/);
-    expect(filter.className).toMatch(/text-xs/);
-    expect(filter).not.toHaveTextContent(/acme/);
+    // From `lg` up the filter is mounted in the global toolbar, beside search,
+    // as a 28px trigger that fits that bar.
+    const headerFilter = within(headerSlot).getByRole('button', { name: /All Repos/ });
+    expect(headerFilter.className).toMatch(/\bh-7\b/);
+    expect(headerFilter).not.toHaveTextContent(/acme/);
 
-    // The split pane hangs directly off the toolbar's bottom rule: nothing
-    // between them, and no margin on either side of the join.
-    const panes = toolbar.nextElementSibling as HTMLElement | null;
-    expect(panes).not.toBeNull();
+    // Narrower than that the filter is the title bar: alone on its row,
+    // centered, and gone once the global toolbar has room for it.
+    const scopeBar = screen.getByTestId('dashboard-scope-bar');
+    expect(scopeBar.className).toMatch(/(?:^|\s)lg:hidden(?:\s|$)/);
+    expect(scopeBar.children).toHaveLength(1);
+    expect(scopeBar.textContent).not.toMatch(/Dashboard/);
+    expect(within(scopeBar).getByRole('button', { name: /All Repos/ })).toHaveClass('w-full', 'justify-center');
+
+    // The split pane follows directly, with no margin above it.
+    const panes = scopeBar.nextElementSibling as HTMLElement | null;
     expect(panes).toContainElement(screen.getByTestId('happening-now-section'));
-    expect(toolbar.className).not.toMatch(/(?:^|\s)(?:[a-z]+:)?m[by]?-/);
     expect(panes?.className).not.toMatch(/(?:^|\s)(?:[a-z]+:)?(?:m[ty]?|pt|py)-/);
+    headerSlot.remove();
   });
 
   it('fills the attention pane with its zero-state instead of stranding one line at the top', async () => {

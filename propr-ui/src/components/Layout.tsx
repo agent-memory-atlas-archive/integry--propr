@@ -21,6 +21,7 @@ import { DesktopInstanceSelector } from '../desktop/DesktopInstanceSelector';
 import { useDesktop } from '../desktop/DesktopContext';
 import UserAvatar from './UserAvatar';
 import VoiceBriefingControl from './VoiceBriefingControl';
+import { HeaderScopeSlotContext } from './headerScopeSlot';
 
 interface LayoutProps {
   children: React.ReactNode;
@@ -185,6 +186,9 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
   const desktop = useDesktop();
   const [desktopSidebarHidden, setDesktopSidebarHidden] = useState(false);
   const hideSidebar = desktop && desktopSidebarHidden;
+  // The toolbar's scope slot, handed to the routed page so it can mount its
+  // filter beside search instead of spending a row of its own on it.
+  const [headerScopeSlot, setHeaderScopeSlot] = useState<HTMLElement | null>(null);
   useEffect(() => {
     if (!desktop) return;
     const handleCommand = (event: Event) => {
@@ -427,12 +431,15 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
           MenuIcon={MenuIcon}
           isDemoMode={isDemoMode}
           inboxUnreadCount={unreadCount}
+          scopeSlotRef={setHeaderScopeSlot}
         />
 
         {!isDemoMode && <ConnectCapacityBanner />}
 
         <main className="mobile-content-clearance flex-1 overflow-y-auto md:pb-0">
-          {children}
+          <HeaderScopeSlotContext.Provider value={headerScopeSlot}>
+            {children}
+          </HeaderScopeSlotContext.Provider>
         </main>
 
         <VoiceBriefingControl />

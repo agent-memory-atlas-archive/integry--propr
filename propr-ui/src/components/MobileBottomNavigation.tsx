@@ -1,7 +1,6 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { Link, useLocation, useNavigate } from 'react-router-dom';
 import {
-  Activity,
   Zap,
   BookMarked,
   Bot,
@@ -10,8 +9,9 @@ import {
   CircleCheck,
   CircleAlert,
   Cpu,
-  Home,
   Inbox,
+  LayoutDashboard,
+  ListTodo,
   LogOut,
   MoreHorizontal,
   ScrollText,
@@ -48,10 +48,10 @@ const getNavigationState = (pathname: string) => {
   const newPlan = pathname === '/tasks/new';
   return {
     inbox: pathMatches(pathname, '/inbox'),
-    activity: pathMatches(pathname, '/tasks') && !newPlan,
+    dashboard: pathname === '/',
     newPlan,
     repositories: pathMatches(pathname, '/repositories') || pathMatches(pathname, '/summaries'),
-    more: pathname === '/' || pathMatches(pathname, '/plans') ||
+    more: (pathMatches(pathname, '/tasks') && !newPlan) || pathMatches(pathname, '/plans') ||
       (pathMatches(pathname, '/studio') && !newPlan) ||
       pathMatches(pathname, '/ai-agents') || pathMatches(pathname, '/llm-logs') ||
       pathMatches(pathname, '/settings') || pathMatches(pathname, '/admin/members') || pathMatches(pathname, '/goals'),
@@ -59,9 +59,9 @@ const getNavigationState = (pathname: string) => {
 };
 
 const getMoreItems = (user: CurrentUser | null) => [
-  { label: 'Dashboard', to: '/', icon: Home },
   { label: 'New Plan', to: '/studio/new', icon: ScrollText },
   { label: 'New Goal', to: '/goals?new=1', icon: Target },
+  { label: 'Tasks', to: '/tasks', icon: ListTodo },
   { label: 'Plans', to: '/plans', icon: ScrollText },
   { label: 'Goals', to: '/goals', icon: Target },
   ...(userHasPermission(user, 'instance.manage_agents')
@@ -319,11 +319,17 @@ const MobileBottomNavigation: React.FC<MobileBottomNavigationProps> = ({
           icon={<Inbox className="h-5 w-5" aria-hidden="true" />}
           badge={unreadBadge}
         />
+        {/*
+          The dashboard is a primary tab, named and drawn the way the sidebar
+          names and draws it. This slot used to be "Activity" under a pulse
+          icon — a name nothing else in the app uses, on a tab that opened
+          Tasks while the dashboard itself hid under More. Tasks is in More now.
+        */}
         <MobileNavLink
-          to="/tasks"
-          label="Activity"
-          active={active.activity}
-          icon={<Activity className="h-5 w-5" aria-hidden="true" />}
+          to="/"
+          label="Dashboard"
+          active={active.dashboard}
+          icon={<LayoutDashboard className="h-5 w-5" aria-hidden="true" />}
         />
         <button
           type="button"
