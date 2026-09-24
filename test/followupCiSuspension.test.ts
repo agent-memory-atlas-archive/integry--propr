@@ -583,6 +583,26 @@ describe('restoring cancelled validation', () => {
         assert.deepEqual(await records(), []);
     });
 
+    test('stops restarting once a replacement is published between two reruns', async () => {
+        const runs = [run({ id: 1 }), run({ id: 2, status: 'queued' })];
+        const github = createGitHub(runs, {
+            // The implementation publishes its replacement commit while the first
+            // rerun is in flight, after the single head check that began the restore.
+            onRerun: async () => { github.head.sha = NEW_HEAD; },
+        });
+        await beginFollowupCiSuspension({ target: TARGET, taskId: TASK_ID }, deps(github));
+
+        const [result] = await releaseFollowupCiSuspensionsForTask({ taskId: TASK_ID }, deps(github));
+
+        assert.equal(result.reason, 'head_replaced');
+        assert.deepEqual(github.rerun(), [1], 'the obsolete revision is not restarted any further once its replacement exists');
+        assert.deepEqual(result.restartedRunIds, [1]);
+        assert.deepEqual(result.pendingRunIds, [2]);
+        assert.deepEqual(await records(), [], 'the obsolete obligation is released');
+        assert.equal(runs[1].status, 'completed');
+        assert.equal(runs[1].conclusion, 'cancelled');
+    });
+
     test('waits for asynchronous cancellation and finishes the restart on a later reconciliation', async () => {
         const runs = [run({ id: 1 })];
         const github = createGitHub(runs, { asyncCancellation: true });
@@ -1059,6 +1079,55 @@ describe('coordinators in separate worker processes', () => {
         assert.equal((await records()).length, 1, 'the obligation waits for whoever holds the lease now');
         const [lease] = await database(PR_CI_SUSPENSION_LEASES_TABLE).select('*');
         assert.equal(lease.token, 'other-worker', 'a lost lease is never released by its previous holder');
+    });
+
+    test('a restore that loses its lease while discovering runs reruns nothing on the new owner\'s suspension', async () => {
+        const runs = [run({ id: 1 })];
+        const github = createGitHub(runs);
+        await beginFollowupCiSuspension({ target: TARGET, taskId: TASK_ID }, deps(github));
+        const [record] = await records();
+        // GitHub queued a late run of the same head after the suspension started.
+        runs.push(run({ id: 2, status: 'queued' }));
+
+        let reachedDiscovery!: () => void;
+        const discoveryIsPaused = new Promise<void>(resolve => { reachedDiscovery = resolve; });
+        let letDiscoveryFinish!: () => void;
+        const discoveryMayContinue = new Promise<void>(resolve => { letDiscoveryFinish = resolve; });
+        let paused = false;
+        const workerA = createGitHub(runs, {
+            onRequest: async route => {
+                if (paused || route !== 'GET /repos/{owner}/{repo}/actions/runs') return;
+                paused = true;
+                reachedDiscovery();
+                await discoveryMayContinue;
+            },
+        });
+
+        // Worker A restores and stalls inside its run discovery for longer than
+        // the lease lives.
+        const restoreA = restoreFollowupCiSuspension(record, deps(workerA, { leaseHolder: 'worker-a' }));
+        await discoveryIsPaused;
+        await database(PR_CI_SUSPENSION_LEASES_TABLE).update({ expires_at: Date.now() - 1 });
+
+        // A newer follow-up of the same head takes the expired lease over and
+        // starts its own suspension, cancelling the late run.
+        const workerB = createGitHub(runs);
+        const begunB = await beginFollowupCiSuspension({ target: TARGET, taskId: 'task-next' },
+            deps(workerB, { leaseHolder: 'worker-b', leaseAcquireTimeoutMs: 0 }));
+        assert.equal(begunB.reason, 'suspended');
+        assert.deepEqual(begunB.cancelledRunIds, [2]);
+
+        // Worker A's discovery finally returns, with run 1 completed as cancelled.
+        letDiscoveryFinish();
+        const resultA = await restoreA;
+
+        assert.equal(resultA.reason, 'busy');
+        assert.deepEqual(workerA.rerun(), [], 'nothing is rerun on a lease that belongs to somebody else');
+        assert.deepEqual(runs.map(candidate => candidate.status), ['completed', 'completed'], 'the new owner\'s suspension stays suspended');
+        const [current] = await records();
+        assert.equal(current.task_id, 'task-next');
+        assert.equal(current.state, 'active');
+        assert.deepEqual((await storedRunIds()).sort((a, b) => a - b), [1, 2], "the new owner's restart obligations survived the stale worker");
     });
 
     test('a worker that lost its lease while reading the pull request never reserves the suspension over its new owner', async () => {
