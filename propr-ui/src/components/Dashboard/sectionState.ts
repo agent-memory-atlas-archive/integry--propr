@@ -19,8 +19,6 @@ export interface DashboardSectionProps {
   repository: string;
   /** Bumped by the composition root once per coalesced burst of live events. */
   refreshToken: number;
-  /** Reports a successful read so the shell can show when data was last fresh. */
-  onLoaded?: () => void;
 }
 
 interface SectionState<T> {
@@ -42,21 +40,20 @@ export interface DashboardSection<T> {
  * A changed scope (repository or a section-local option) clears the previous
  * rows, because rows from another filter are not this section's data. A live
  * refresh never does: a failed refresh keeps the last known rows on screen and
- * only records the error, which is what "reconnecting" has to look like.
+ * only records the error. Nothing announces the dropped connection — the rows
+ * that stay on screen are the behaviour, and the next successful read replaces
+ * them.
  */
 export function useDashboardSection<T>(
   load: () => Promise<T>,
   scope: string,
   refreshToken: number,
-  onLoaded?: () => void,
 ): DashboardSection<T> {
   const [state, setState] = useState<SectionState<T>>({ scope, data: null, error: null });
   const [retryToken, setRetryToken] = useState(0);
   const requestRef = useRef(0);
   const loadRef = useRef(load);
-  const onLoadedRef = useRef(onLoaded);
   loadRef.current = load;
-  onLoadedRef.current = onLoaded;
 
   useEffect(() => {
     const requestId = ++requestRef.current;
@@ -65,7 +62,6 @@ export function useDashboardSection<T>(
       data => {
         if (requestId !== requestRef.current) return;
         setState({ scope, data, error: null });
-        onLoadedRef.current?.();
       },
       error => {
         if (requestId !== requestRef.current) return;

@@ -10,8 +10,10 @@
 import type { Knex } from 'knex';
 import { loadCritiqueScores, toScoreNumber } from './critiqueScore.js';
 import {
+  loadThreadWork,
   mapTaskRow,
   TASK_COLUMNS,
+  threadTitle,
   terminalTransitionQuery,
   TERMINAL_TASK_STATES,
   toIso,
@@ -77,6 +79,8 @@ export interface PlanIssueOutcomeRow {
   issueNumber: number;
   prNumber: number | null;
   status: string;
+  /** What was merged or closed, from the run behind it. */
+  title: string | null;
   taskId: string | null;
   occurredAt: string;
 }
@@ -101,13 +105,20 @@ export async function loadPlanIssueOutcomes(
   if (repository && repository !== 'all') query.where('repository', repository);
 
   const rows = await query as Array<Record<string, unknown>>;
-  return rows.map(row => ({
+  const outcomes = rows.map(row => ({
     id: Number(row.id),
     repository: String(row.repository),
     issueNumber: Number(row.issue_number),
     prNumber: row.pr_number === null || row.pr_number === undefined ? null : Number(row.pr_number),
     status: String(row.status),
+    title: null,
     taskId: row.task_id === null || row.task_id === undefined ? null : String(row.task_id),
     occurredAt: toIso(row.updated_at),
   }));
+
+  // A plan issue has no title of its own, so a merge row is named by the run
+  // it merged. Without it the feed printed `Pull request #2467` beside a
+  // `PR #2467` chip — the identifier twice, and the work not at all.
+  const threads = await loadThreadWork(db, repository, outcomes.map(row => row.issueNumber));
+  return outcomes.map(outcome => ({ ...outcome, title: threadTitle(threads, outcome) }));
 }

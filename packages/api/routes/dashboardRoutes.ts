@@ -103,7 +103,7 @@ function toPlanIssueOutcomeItem(row: PlanIssueOutcomeRow): OutcomeItem {
     repository: row.repository,
     issueNumber: row.issueNumber,
     prNumber: row.prNumber,
-    title: null,
+    title: row.title,
     detail: row.status === 'merged' ? 'Pull request merged' : 'Closed without merging',
     planIssueStatus: row.status,
     score: null,

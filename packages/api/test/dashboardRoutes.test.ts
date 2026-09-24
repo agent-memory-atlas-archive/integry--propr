@@ -185,6 +185,34 @@ test('attention lists blocking problems before pending decisions, oldest first i
   assert.deepEqual(attention.body.counts, { blocked: 3, decisions: 2, total: 5 });
 });
 
+test('a review decision is titled by the work behind it, never by its own chip', async () => {
+  await seedTask({
+    taskId: 'titled-run', issueNumber: 71, prNumber: 710,
+    title: 'Cache repository icons across dashboard sections',
+    states: [{ state: 'completed', timestamp: minutesAgo(80) }],
+  });
+  await seedTask({ taskId: 'untitled-run', issueNumber: 72, prNumber: 720, states: [{ state: 'completed', timestamp: minutesAgo(70) }] });
+  // A run queued from a pull request records no title of its own, only the
+  // branch it works on — which still says more than the PR number does.
+  await database('tasks').where({ task_id: 'untitled-run' })
+    .update({ initial_job_data: JSON.stringify({ branchName: 'feature/icon-cache' }) });
+  await database('plan_issues').insert([
+    { draft_id: 'draft-4', repository: 'integry/propr', issue_number: 71, pr_number: 710, status: 'under_review', task_id: 'titled-run', created_at: daysAgo(1), updated_at: minutesAgo(30) },
+    { draft_id: 'draft-4', repository: 'integry/propr', issue_number: 72, pr_number: 720, status: 'under_review', task_id: null, created_at: daysAgo(1), updated_at: minutesAgo(20) },
+  ]);
+
+  const attention = await call(routes().getAttention, { repository: 'all' });
+  const decisions = (attention.body.items as Array<Record<string, unknown>>).filter(item => item.kind === 'plan_review');
+  // A plan issue has no title column, so the decision inherits one from the
+  // run on its thread. Leaving it null left the UI to print `Pull request
+  // #720` beside a `PR #720` chip, which tells a reviewer nothing.
+  assert.deepEqual(decisions.map(item => item.title), [
+    'Cache repository icons across dashboard sections',
+    'feature/icon-cache',
+  ]);
+  assert.deepEqual(decisions.map(item => item.taskId), ['titled-run', 'untitled-run']);
+});
+
 test('dismissing every notification for a failed task leaves the task in attention', async () => {
   await seedTask({ taskId: 'blocked-task', issueNumber: 61, states: [{ state: 'failed', timestamp: minutesAgo(20), reason: 'Boom' }] });
   // Two inbox notifications about the same failure, for two different people.
@@ -311,6 +339,10 @@ test('outcomes collapse one result per task and exclude non-outcome history entr
   assert.equal(items[3].planIssueStatus, 'merged');
   assert.equal(items[3].title, 'Ship the thing');
   assert.equal(items[2].detail, 'Lint failed');
+  // The merge has no title of its own, so it takes the one from the run it
+  // merged. Left null, the feed printed `Pull request #900` next to a
+  // `PR #900` chip and named the work nowhere.
+  assert.equal(items[0].title, 'Ship the thing');
 
   const limited = await call(routes().getOutcomes, { repository: 'all', limit: '2' });
   assert.deepEqual((limited.body.items as Array<Record<string, unknown>>).map(item => item.kind), ['merged', 'cancelled']);

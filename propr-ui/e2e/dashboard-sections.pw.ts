@@ -20,12 +20,17 @@ const running = [
 const attention = [
   { id: 'task:blocked-1', category: 'blocked', kind: 'task_failed', taskId: 'blocked-1', repository: 'example/workspace', issueNumber: 2470, prNumber: null, title: 'Retry budget never applies to post-processing', state: 'failed', detail: 'Lint failed on propr-ui/src/api/dashboardApi.ts', since: minutesAgo(190) },
   { id: 'task:blocked-2', category: 'blocked', kind: 'task_action_required', taskId: 'blocked-2', repository: 'example/design-system', issueNumber: 117, prNumber: null, title: 'Choose between the compact and comfortable row density', state: 'action_required', detail: 'Waiting for a decision on row density', since: minutesAgo(95) },
-  { id: 'plan-issue:31', category: 'decision', kind: 'plan_review', taskId: null, repository: 'example/workspace', issueNumber: 2468, prNumber: 2469, title: null, state: 'under_review', detail: 'Pull request is awaiting review', since: minutesAgo(52) },
-  { id: 'plan-issue:32', category: 'decision', kind: 'plan_review', taskId: null, repository: 'example/docs', issueNumber: 58, prNumber: 59, title: null, state: 'under_review', detail: 'Pull request is awaiting review', since: minutesAgo(20) },
+  // A review decision carries the title of the run behind it, and where that
+  // run recorded no title, the branch it works on. Neither row may fall back
+  // to `Pull request #2469`, which is the chip beside it read twice.
+  { id: 'plan-issue:31', category: 'decision', kind: 'plan_review', taskId: null, repository: 'example/workspace', issueNumber: 2468, prNumber: 2469, title: 'Cache repository icons across dashboard sections', state: 'under_review', detail: 'Pull request is awaiting review', since: minutesAgo(52) },
+  { id: 'plan-issue:32', category: 'decision', kind: 'plan_review', taskId: null, repository: 'example/docs', issueNumber: 58, prNumber: 59, title: 'feature/icon-cache', state: 'under_review', detail: 'Pull request is awaiting review', since: minutesAgo(20) },
 ];
 
 const outcomes = [
-  { id: 'plan-issue:30:merged', kind: 'merged', taskId: 'done-1', repository: 'example/workspace', issueNumber: 2466, prNumber: 2467, title: null, detail: 'Pull request merged', planIssueStatus: 'merged', score: null, occurredAt: minutesAgo(18) },
+  // A merge is recorded against a plan issue, which has no title of its own:
+  // the API names it after the run it merged rather than after its own chip.
+  { id: 'plan-issue:30:merged', kind: 'merged', taskId: 'done-1', repository: 'example/workspace', issueNumber: 2466, prNumber: 2467, title: 'Show corrective operator messages verbatim in the goal timeline', detail: 'Pull request merged', planIssueStatus: 'merged', score: null, occurredAt: minutesAgo(18) },
   { id: 'task:done-1:completed', kind: 'completed', taskId: 'done-1', repository: 'example/workspace', issueNumber: 2466, prNumber: 2467, title: 'Show corrective operator messages verbatim in the goal timeline', detail: null, planIssueStatus: 'merged', score: 9, occurredAt: minutesAgo(46) },
   { id: 'task:done-2:failed', kind: 'failed', taskId: 'done-2', repository: 'example/design-system', issueNumber: 115, prNumber: null, title: 'Tighten the reference chip contrast', detail: 'Typecheck failed', planIssueStatus: null, score: null, occurredAt: minutesAgo(88) },
   { id: 'task:done-3:completed', kind: 'completed', taskId: 'done-3', repository: 'example/docs', issueNumber: 57, prNumber: 60, title: 'Describe the recorded-spend metric', detail: null, planIssueStatus: null, score: 7, occurredAt: minutesAgo(140) },
@@ -76,11 +81,14 @@ const agentTankUsage = {
   },
 };
 
-const dashboardResponses = (attentionItems: typeof attention): Record<string, unknown> => ({
+const dashboardResponses = (
+  attentionItems: typeof attention,
+  runningItems: typeof running,
+): Record<string, unknown> => ({
   '/api/dashboard/summary': {
     repository: 'all',
     needsAttention: attentionItems.length,
-    running: running.length,
+    running: runningItems.length,
     queued: 2,
     completedRecently: 4,
     recentWindowHours: 24,
@@ -96,10 +104,10 @@ const dashboardResponses = (attentionItems: typeof attention): Record<string, un
   },
   '/api/dashboard/active': {
     repository: 'all',
-    running,
+    running: runningItems,
     queued: [],
     queue: { queuedCount: 2, reason: 'All agents are busy' },
-    counts: { running: running.length, queued: 2 },
+    counts: { running: runningItems.length, queued: 2 },
   },
   '/api/dashboard/outcomes': { repository: 'all', limit: 50, items: outcomes },
   '/api/stats/dashboard': {
@@ -117,7 +125,11 @@ const dashboardResponses = (attentionItems: typeof attention): Record<string, un
   },
 });
 
-async function fixture(page: Page, attentionItems: typeof attention = attention) {
+async function fixture(
+  page: Page,
+  attentionItems: typeof attention = attention,
+  runningItems: typeof running = running,
+) {
   await page.clock.install({ time: now });
   await page.route('**/api/**', route => {
     const pathname = new URL(route.request().url()).pathname;
@@ -139,7 +151,7 @@ async function fixture(page: Page, attentionItems: typeof attention = attention)
       '/api/notifications/unread-count': { unreadCount: 0 },
       '/api/notifications/preferences': { preferences: {}, quietHours: {}, badgeEnabled: false },
       '/api/status': { status: 'ok' },
-      ...dashboardResponses(attentionItems),
+      ...dashboardResponses(attentionItems, runningItems),
     };
     return pathname in responses
       ? route.fulfill({ json: responses[pathname] })
@@ -206,6 +218,53 @@ test('desktop shows every section with running work in the main column', async (
   await footer.getByRole('button', { name: 'Show 2 more' }).click();
   await expect(page.getByTestId('happening-now-list').locator('li')).toHaveCount(7);
   await expect(footer.getByRole('button', { name: 'Show fewer' })).toBeVisible();
+});
+
+test('the queue footer floors the running pane when the column beside it is taller', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 1400 });
+  // One running task against three attention items: the pane is sized by the
+  // column beside it, not by its own single row. The task has been going for
+  // four hours, which is the duration that used to print as `240m 00s`.
+  await fixture(page, attention.slice(0, 3), [{ ...running[0], createdAt: minutesAgo(240) }]);
+  await page.goto('/');
+
+  await expect(page.getByTestId('happening-now-list').locator('li')).toHaveCount(1);
+
+  const geometry = await page.evaluate(() => {
+    const box = (id: string) => (document.querySelector(`[data-testid="${id}"]`) as HTMLElement).getBoundingClientRect();
+    const section = box('happening-now-section');
+    const footer = box('happening-now-footer');
+    const row = (document.querySelector('[data-testid="happening-now-list"] li') as HTMLElement).getBoundingClientRect();
+    return {
+      slack: Math.round(footer.top - row.bottom),
+      floorGap: Math.round(section.bottom - footer.bottom),
+      paneHeight: Math.round(section.height),
+      outcomesTop: Math.round(box('recent-outcomes-section').top),
+      footerBottom: Math.round(footer.bottom),
+    };
+  });
+
+  // The bar closes the pane: nothing of the pane is left below it, and the
+  // rule under it is the top of the next section.
+  expect(geometry.floorGap).toBe(0);
+  expect(geometry.outcomesTop).toBeGreaterThanOrEqual(geometry.footerBottom);
+  // The empty space is above the bar, in the list area, rather than below it:
+  // this is the 260px hole the bar used to hang over.
+  expect(geometry.paneHeight).toBeGreaterThan(300);
+  expect(geometry.slack).toBeGreaterThan(100);
+
+  // A review row says what is being reviewed. `Pull request #2469` under a
+  // `PR #2469` chip is the chip read twice.
+  const panel = page.getByTestId('needs-attention-panel');
+  await expect(panel).toContainText('Cache repository icons across dashboard sections');
+  await expect(panel).not.toContainText('Pull request #');
+
+  // Four hours reads as four hours, not as a count of 240 minutes.
+  const list = page.getByTestId('happening-now-list');
+  await expect(list).toContainText('4h 00m');
+  await expect(list).not.toContainText('240m');
+
+  await capture(page, 'dashboard-desktop-short-running-list');
 });
 
 test('an empty attention list keeps the panel in place with an all-clear line', async ({ page }) => {

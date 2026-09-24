@@ -23,12 +23,14 @@ import {
   isQueuedState,
   isRunningState,
   latestTaskStateQuery,
+  loadThreadWork,
   mapTaskRow,
   MAX_WORK_ROWS,
   QUEUED_TASK_STATES,
   RECENT_COMPLETION_WINDOW_HOURS,
   RUNNING_TASK_STATES,
   TASK_COLUMNS,
+  threadTitle,
   toIso,
   WORK_LOOKBACK_DAYS,
   workKey,
@@ -177,42 +179,10 @@ export interface PlanIssueDecisionRow {
   issueNumber: number;
   prNumber: number | null;
   status: string;
+  /** What the work under review is about, from the run that produced it. */
+  title: string | null;
   taskId: string | null;
   updatedAt: string;
-}
-
-/**
- * The run behind a plan issue that never recorded one.
- *
- * A pull request under review was produced by a task, but older plan issues
- * were written without the link. Resolving the newest task on the same issue
- * thread gives the decision the same task identity the rest of the dashboard
- * uses, so the list a count opens can show the work the count is about.
- */
-async function resolveDecisionTasks(
-  db: Knex,
-  repository: string,
-  decisions: readonly PlanIssueDecisionRow[],
-): Promise<Map<string, string>> {
-  const issueNumbers = [...new Set(decisions.filter(row => row.taskId === null).map(row => row.issueNumber))];
-  if (issueNumbers.length === 0) return new Map();
-
-  const newestByThread = new Map<string, string>();
-  for (const batch of chunk(issueNumbers)) {
-    const query = db('tasks as t')
-      .where(function (this: Knex.QueryBuilder) {
-        this.whereNull('t.task_type').orWhereNot('t.task_type', 'goal');
-      })
-      .whereIn('t.issue_number', batch)
-      .select('t.task_id', 't.repository', 't.issue_number')
-      // Ascending, so the last write for a thread is its newest run.
-      .orderBy('t.created_at', 'asc');
-    if (repository && repository !== 'all') query.where('t.repository', repository);
-    for (const row of await query as Array<Record<string, unknown>>) {
-      newestByThread.set(`${String(row.repository)}#${Number(row.issue_number)}`, String(row.task_id));
-    }
-  }
-  return newestByThread;
 }
 
 /** Plan issues waiting on a human decision, oldest first. */
@@ -231,14 +201,24 @@ export async function loadPlanIssueDecisions(db: Knex, repository: string): Prom
     issueNumber: Number(row.issue_number),
     prNumber: row.pr_number === null || row.pr_number === undefined ? null : Number(row.pr_number),
     status: String(row.status),
+    title: null,
     taskId: row.task_id === null || row.task_id === undefined ? null : String(row.task_id),
     updatedAt: toIso(row.updated_at),
   }));
 
-  const resolved = await resolveDecisionTasks(db, repository, decisions);
-  return decisions.map(decision => decision.taskId !== null
-    ? decision
-    : { ...decision, taskId: resolved.get(`${decision.repository}#${decision.issueNumber}`) ?? null });
+  /*
+    A plan issue records neither a title of its own nor, in older rows, the
+    task that produced it. Both come from the runs on its thread: the task
+    identity so the list a count opens is the work the count is about, and the
+    title so a review row says what is being reviewed rather than repeating
+    the chip beside it.
+  */
+  const threads = await loadThreadWork(db, repository, decisions.map(row => row.issueNumber));
+  return decisions.map(decision => ({
+    ...decision,
+    title: threadTitle(threads, decision),
+    taskId: decision.taskId ?? threads.byThread.get(`${decision.repository}#${decision.issueNumber}`)?.taskId ?? null,
+  }));
 }
 
 export interface AttentionItem {
@@ -348,7 +328,9 @@ export function projectDashboardWork(
     repository: issue.repository,
     issueNumber: issue.issueNumber,
     prNumber: issue.prNumber,
-    title: null,
+    // What the pull request is about, resolved from the run that produced it.
+    // The identifier is already on the row as a chip; the title must not be it.
+    title: issue.title,
     state: issue.status,
     detail: issue.status === 'under_review' ? 'Pull request is awaiting review' : null,
     since: issue.updatedAt,

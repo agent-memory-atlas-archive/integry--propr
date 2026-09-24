@@ -36,23 +36,17 @@ export const RepositoryIconProvider: React.FC<{
  * issue or a pull request rather than reading as prose. The icon rides inside
  * the chip so the two never separate when the metadata line wraps.
  *
- * `short` drops the owner and draws only the repository name. It is for the
- * narrow right rail, where `example/workspace` has to be cut to
- * `example/workspa…` to fit beside a status and an entity chip — eight
- * characters of organisation spent to make the eight characters that identify
- * the repository unreadable. The owner is the constant in any one instance, so
- * it is the part that can go; the full slug stays in the tooltip and in the
- * icon beside it.
- *
- * `shortOnMobile` applies the same reasoning to a phone. A 320px row is as
- * narrow as the right rail is on a desktop, so the main column's chips earn
- * their owner back only once there is width for it.
+ * The chip draws the repository name without its owner, in every section and
+ * at every width. The owner is the constant: the filter above the console is
+ * already scoped to this instance's repositories, so `example/` is eight
+ * characters repeated down every row of every column — and in the narrow rail
+ * it was eight characters spent to truncate the eight that actually identify
+ * the repository, leaving `example/workspa…`. Dropping it in one column and
+ * keeping it in the next was worse still: the same repository read as two
+ * different entities on one screen. So the owner goes everywhere, and stays in
+ * the chip's tooltip and in the icon beside it.
  */
-export const RepositoryLabel: React.FC<{
-  repository: string;
-  short?: boolean;
-  shortOnMobile?: boolean;
-}> = ({ repository, short = false, shortOnMobile = false }) => {
+export const RepositoryLabel: React.FC<{ repository: string }> = ({ repository }) => {
   const icons = useContext(RepositoryIconContext);
   const icon = icons.get(repository);
   const name = repository.slice(repository.lastIndexOf('/') + 1);
@@ -67,14 +61,7 @@ export const RepositoryLabel: React.FC<{
         revision={icon?.revision}
         className="h-3.5 w-3.5 flex-none"
       />
-      {short && <span className="truncate">{name}</span>}
-      {!short && shortOnMobile && (
-        <>
-          <span className="truncate sm:hidden">{name}</span>
-          <span className="hidden truncate sm:inline">{repository}</span>
-        </>
-      )}
-      {!short && !shortOnMobile && <span className="truncate">{repository}</span>}
+      <span className="truncate">{name}</span>
     </span>
   );
 };
@@ -145,13 +132,22 @@ export const SectionLink: React.FC<{ to: string; children: React.ReactNode }> = 
  * white space rather than as a control belonging to the list, so the section
  * gets one footer and the expand action lives inside it. The tint is what
  * marks it as a footer; it does not also need a rule above it.
+ *
+ * `mt-auto` makes it the pane's floor rather than a bar that trails the last
+ * row. A pane in a split-pane console is as tall as the pane beside it, so one
+ * running task next to three attention items left the queue bar pinned at
+ * 260px with a quarter of a screen of white between it and the rule below,
+ * which reads as content that failed to load. Held to the bottom, the list
+ * area absorbs the slack and the pane keeps a solid baseline. In a pane
+ * that is not a flex column the margin resolves to zero, so the bar still sits
+ * directly under the last row it closes.
  */
 export const SectionFooter: React.FC<{
   children: React.ReactNode;
   'data-testid'?: string;
 }> = ({ children, ...rest }) => (
   <div
-    className="flex flex-wrap items-center gap-x-3 gap-y-1 bg-slate-50 px-3 py-2 text-xs text-slate-600"
+    className="mt-auto flex flex-wrap items-center gap-x-3 gap-y-1 bg-slate-50 px-3 py-2 text-xs text-slate-600"
     {...rest}
   >
     {children}

@@ -80,7 +80,7 @@ const ActiveRow: React.FC<{ item: ActiveItem }> = ({ item }) => (
         )}
         entities={(
           <>
-            <RepositoryLabel repository={item.repository} shortOnMobile />
+            <RepositoryLabel repository={item.repository} />
             <WorkReference issueNumber={item.issueNumber} prNumber={item.prNumber} />
           </>
         )}
@@ -152,13 +152,12 @@ const HappeningNowFooter: React.FC<{
   );
 };
 
-export const HappeningNowSection: React.FC<DashboardSectionProps> = ({ repository, refreshToken, onLoaded }) => {
+export const HappeningNowSection: React.FC<DashboardSectionProps> = ({ repository, refreshToken }) => {
   const load = useCallback(() => getDashboardActive(repository), [repository]);
   const { data, error, loading, reload } = useDashboardSection<DashboardActiveResponse>(
     load,
     repository,
     refreshToken,
-    onLoaded,
   );
   const [showAll, setShowAll] = useState(false);
   // Elapsed times advance between reads.
@@ -198,14 +197,21 @@ export const HappeningNowSection: React.FC<DashboardSectionProps> = ({ repositor
     );
   };
 
+  /*
+    The pane is a column with a floor, not a stack that stops where its rows
+    do. Its height is set by whichever pane is taller in the row, so a single
+    running task beside three attention items left the queue bar stranded
+    mid-pane above a band of white. The list area takes the slack instead, and
+    the footer closes the pane against the rule under it.
+  */
   return (
     <section
       aria-labelledby="happening-now-heading"
       data-testid="happening-now-section"
-      className="min-w-0 bg-white"
+      className="flex h-full min-w-0 flex-col bg-white"
     >
       {heading}
-      {body()}
+      <div className="flex-1">{body()}</div>
       {data && (
         <HappeningNowFooter
           queuedCount={data.queue.queuedCount}

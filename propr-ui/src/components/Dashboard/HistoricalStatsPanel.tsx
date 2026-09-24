@@ -82,14 +82,13 @@ const Metric: React.FC<{
   </div>
 );
 
-export const HistoricalStatsPanel: React.FC<DashboardSectionProps> = ({ repository, refreshToken, onLoaded }) => {
+export const HistoricalStatsPanel: React.FC<DashboardSectionProps> = ({ repository, refreshToken }) => {
   const [period, setPeriod] = useState<DashboardStatsPeriod>('7d');
   const load = useCallback(() => getDashboardStats(repository, period), [repository, period]);
   const { data, error, loading, reload } = useDashboardSection<DashboardStatsResponse>(
     load,
     `${repository}::${period}`,
     refreshToken,
-    onLoaded,
   );
 
   const days = PERIOD_DAYS[period];

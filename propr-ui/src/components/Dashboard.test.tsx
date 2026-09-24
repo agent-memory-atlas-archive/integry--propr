@@ -303,7 +303,7 @@ describe('Dashboard', () => {
     expect(titles).toEqual(['Alpha work', 'Beta work']);
   });
 
-  it('keeps the last known rows and reports reconnecting when the socket drops', async () => {
+  it('keeps the last known rows, and says nothing about the socket, when it drops', async () => {
     const { rerender } = renderDashboard();
     await waitForSections();
     await waitFor(() => expect(screen.getByText('Add retry budget')).toBeInTheDocument());
@@ -318,8 +318,11 @@ describe('Dashboard', () => {
       </MemoryRouter>,
     );
 
-    await waitFor(() => expect(screen.getByTestId('live-status')).toHaveTextContent(/Reconnecting · Last updated/));
+    // The rows are the report. A dropped socket never blanks the dashboard,
+    // and it no longer narrates itself across the top of the page either.
     expect(screen.getByText('Add retry budget')).toBeInTheDocument();
+    expect(screen.queryByTestId('live-status')).toBeNull();
+    expect(screen.queryByText(/Reconnecting|Last updated/)).toBeNull();
   });
 
   it('distinguishes no running work from a failed read of running work', async () => {

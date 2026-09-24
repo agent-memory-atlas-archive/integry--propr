@@ -81,11 +81,21 @@ function actionHref(item: AttentionItem): string {
   return workHref(item);
 }
 
+/**
+ * What the row is about, in the row's one prominent line.
+ *
+ * Never the entity number. `Pull request #2482` under a `PR #2482` chip is the
+ * chip read twice: the line that is supposed to say what someone is being
+ * asked to look at instead repeats the identifier they can already see, so a
+ * row about an untitled pull request tells them nothing they did not know.
+ *
+ * The API resolves the work's own title first — the issue title, or the branch
+ * the run is on when there is no title yet. What is left when even that is
+ * unknown is the state the item is in, which is at least a fact about the
+ * work: `Pull request is awaiting review`.
+ */
 function itemTitle(item: AttentionItem): string {
-  if (item.title) return item.title;
-  if (item.prNumber) return `Pull request #${item.prNumber}`;
-  if (item.issueNumber) return `Issue #${item.issueNumber}`;
-  return 'Untitled work';
+  return item.title || item.detail || 'Untitled work';
 }
 
 const AttentionRow: React.FC<{ item: AttentionItem }> = ({ item }) => {
@@ -108,11 +118,9 @@ const AttentionRow: React.FC<{ item: AttentionItem }> = ({ item }) => {
         time and its action close the row. Same DOM, same reading order, placed
         rather than duplicated — so nothing is rendered twice and hidden.
 
-        Three chips do not fit 320px at full length, and the one that loses the
-        fight is the repository: `example/workspa…` identifies nothing. So the
-        chip here is `short` — the repository name without its owner, which is
-        the same eight characters on every row of a given instance, with the
-        full slug still in the chip's tooltip.
+        The repository chip carries the repository name alone, as it does in
+        every other section: three chips do not fit 320px at full slug length,
+        and the one that loses the fight is the repository.
       */}
       <div className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-x-2 gap-y-1 px-3 py-2.5 text-xs lg:grid-cols-[auto_minmax(0,1fr)]">
         <span
@@ -130,7 +138,7 @@ const AttentionRow: React.FC<{ item: AttentionItem }> = ({ item }) => {
           Waiting {elapsedLabel(item.since)}
         </time>
         <span className="flex min-w-0 items-center gap-1.5 lg:col-start-2 lg:row-start-1">
-          <RepositoryLabel repository={item.repository} short />
+          <RepositoryLabel repository={item.repository} />
           <WorkReference issueNumber={item.issueNumber} prNumber={item.prNumber} />
         </span>
         {/*
@@ -175,14 +183,12 @@ const AllClear: React.FC = () => (
 export const NeedsAttentionPanel: React.FC<DashboardSectionProps> = ({
   repository,
   refreshToken,
-  onLoaded,
 }) => {
   const load = useCallback(() => getDashboardAttention(repository), [repository]);
   const { data, error, loading, reload } = useDashboardSection<DashboardAttentionResponse>(
     load,
     repository,
     refreshToken,
-    onLoaded,
   );
   // Waiting durations tick without a network read.
   useNowTick();

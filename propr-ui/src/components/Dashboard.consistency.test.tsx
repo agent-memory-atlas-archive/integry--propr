@@ -186,19 +186,77 @@ describe('Dashboard consistency rules', () => {
     expect(within(stats).getByText('Spend')).toHaveAttribute('title', expect.stringContaining('Recorded spend'));
   });
 
-  it('separates the toolbar\'s items with a rule, not with a second delimiter glyph', async () => {
+  it('keeps the toolbar to the page and its filter, with no socket commentary', async () => {
     renderDashboard();
     await waitForSections();
 
-    // `Dashboard ● Reconnecting · Last updated 2m` spent a status light as a
-    // heavy bullet and an interpunct as a delimiter in one string. The rule
-    // separates toolbar items; the interpunct is the app's one in-string
-    // delimiter; the dot is only a status light again.
-    const status = screen.getByTestId('live-status');
-    expect(status.className).toMatch(/sm:border-l/);
-    expect(status.className).toMatch(/sm:pl-3/);
+    // `Dashboard ● Reconnecting · Last updated 2m` spent the top row on the
+    // app's own plumbing — and spent two different glyphs saying it, a status
+    // light doing duty as a bullet beside an interpunct. The row names the
+    // page and what it is filtered to; nothing else.
     const toolbar = screen.getByTestId('summary-strip').previousElementSibling as HTMLElement;
+    expect(toolbar).toContainElement(screen.getByRole('heading', { name: 'Dashboard', level: 1 }));
+    expect(toolbar.textContent).not.toMatch(/Live|Reconnecting|Last updated/);
     expect(toolbar.textContent).not.toMatch(/[•‧∙]/);
+    expect(screen.queryByTestId('live-status')).toBeNull();
+  });
+
+  it('drops the owner from every repository chip, in both columns', async () => {
+    mockAttention.mockResolvedValue(attentionResponse([attentionItem()]));
+
+    renderDashboard();
+    await waitForSections();
+
+    // One screen cannot spell the same repository two ways. The owner is the
+    // constant the filter above the console already establishes, so it goes
+    // everywhere rather than only where a chip would otherwise truncate — and
+    // it stays in the tooltip.
+    for (const testId of ['needs-attention-panel', 'happening-now-section', 'recent-outcomes-section']) {
+      const chip = within(await screen.findByTestId(testId)).getAllByTitle('acme/app')[0];
+      expect(chip).toHaveTextContent(/^app$/);
+      expect(chip.textContent).not.toMatch(/acme/);
+    }
+  });
+
+  it('reads a long elapsed time in hours instead of counting minutes up', async () => {
+    mockActive.mockResolvedValue(activeResponse([
+      activeItem({ createdAt: new Date(Date.now() - 4 * 60 * 60 * 1000).toISOString() }),
+    ]));
+
+    renderDashboard();
+    await waitForSections();
+
+    // `240m 00s` is a raw minute count printed rather than a duration read.
+    const section = screen.getByTestId('happening-now-section');
+    expect(within(section).getByText('4h 00m')).toBeInTheDocument();
+    expect(section.textContent).not.toMatch(/\d{3,}m/);
+  });
+
+  it('never fills an attention title with the chip already on the row', async () => {
+    mockAttention.mockResolvedValue(attentionResponse([
+      attentionItem({
+        id: 'plan-issue:31',
+        category: 'decision',
+        kind: 'plan_review',
+        taskId: null,
+        prNumber: 2482,
+        issueNumber: 2468,
+        title: null,
+        state: 'under_review',
+        detail: 'Pull request is awaiting review',
+      }),
+    ]));
+
+    renderDashboard();
+    await waitForSections();
+
+    // `Pull request #2482` under a `PR #2482` chip is the chip read twice: the
+    // one line with room to say what the reviewer is being asked to look at
+    // repeated the identifier beside it instead.
+    const panel = await screen.findByTestId('needs-attention-panel');
+    expect(within(panel).getByText('PR #2482')).toBeInTheDocument();
+    expect(within(panel).queryByText('Pull request #2482')).toBeNull();
+    expect(within(panel).getByText('Pull request is awaiting review')).toBeInTheDocument();
   });
 
   it('keeps the phone\'s last pane clear of the fixed bottom navigation', async () => {

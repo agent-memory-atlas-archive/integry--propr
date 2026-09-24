@@ -81,11 +81,17 @@ const KIND_ICONS: Record<OutcomeKind, LucideIcon> = {
   closed: CircleSlash,
 };
 
+/**
+ * What finished, in the row's one prominent line — never its own chip.
+ *
+ * `Pull request #2467` above a `PR #2467` chip is the identifier printed
+ * twice and the work named not at all. The API resolves the title of the run
+ * behind an outcome, including for a merge recorded against a plan issue; what
+ * is left when even that is unknown is what happened to it, which is at least
+ * a fact about the work.
+ */
 function outcomeTitle(item: OutcomeItem): string {
-  if (item.title) return item.title;
-  if (item.prNumber) return `Pull request #${item.prNumber}`;
-  if (item.issueNumber) return `Issue #${item.issueNumber}`;
-  return 'Untitled work';
+  return item.title || item.detail || 'Untitled work';
 }
 
 /** The status cell: one glyph plus one word, the same shape for every kind. */
@@ -99,53 +105,57 @@ const OutcomeKindLabel: React.FC<{ kind: OutcomeKind }> = ({ kind }) => {
   );
 };
 
-const OutcomeRow: React.FC<{ item: OutcomeItem }> = ({ item }) => (
-  <li>
-    <RowLink
-      href={workHref(item)}
-      className="flex min-w-0 items-start gap-2 px-3 py-2.5 text-left transition-colors hover:bg-slate-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-teal-500"
-    >
-      <span className="min-w-0 flex-1">
-        <RowMetaLines
-          status={<OutcomeKindLabel kind={item.kind} />}
-          entities={(
-            <>
-              <RepositoryLabel repository={item.repository} shortOnMobile />
-              <WorkReference issueNumber={item.issueNumber} prNumber={item.prNumber} />
-            </>
-          )}
-          trailing={(
-            <time dateTime={item.occurredAt} title={new Date(item.occurredAt).toLocaleString()}>
-              {elapsedLabel(item.occurredAt)} ago
-            </time>
-          )}
-        />
-        <RowTitle>{outcomeTitle(item)}</RowTitle>
-        {item.detail && <RowDetail>{item.detail}</RowDetail>}
-      </span>
-      {/*
-        Rendered only when a score exists, so no empty column is reserved.
-
-        The scale is carried by the shape and by the assistive-technology
-        label, never as visible `/10` prose: floating prose next to a
-        fixed-width badge puts variable-width glyphs outside the w-12 box and
-        makes the right rail shift by a pixel or two between 7, 8 and 9.
-
-        On a phone the badge centres against the row rather than hanging off
-        its first line, where it used to crowd the status word and push the
-        timestamp onto a line of its own.
-      */}
-      {item.score !== null && item.score !== undefined && (
-        <span className="flex flex-none items-baseline self-center sm:mt-0.5 sm:self-start" data-testid="outcome-score">
-          <ScoreBadge score={item.score} bracketed />
-          <span className="sr-only">Code quality score {item.score} out of 10</span>
+const OutcomeRow: React.FC<{ item: OutcomeItem }> = ({ item }) => {
+  const title = outcomeTitle(item);
+  return (
+    <li>
+      <RowLink
+        href={workHref(item)}
+        className="flex min-w-0 items-start gap-2 px-3 py-2.5 text-left transition-colors hover:bg-slate-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-teal-500"
+      >
+        <span className="min-w-0 flex-1">
+          <RowMetaLines
+            status={<OutcomeKindLabel kind={item.kind} />}
+            entities={(
+              <>
+                <RepositoryLabel repository={item.repository} />
+                <WorkReference issueNumber={item.issueNumber} prNumber={item.prNumber} />
+              </>
+            )}
+            trailing={(
+              <time dateTime={item.occurredAt} title={new Date(item.occurredAt).toLocaleString()}>
+                {elapsedLabel(item.occurredAt)} ago
+              </time>
+            )}
+          />
+          <RowTitle>{title}</RowTitle>
+          {/* Never the same sentence twice: a detail promoted to the title is not repeated under it. */}
+          {item.detail && item.detail !== title && <RowDetail>{item.detail}</RowDetail>}
         </span>
-      )}
-    </RowLink>
-  </li>
-);
+        {/*
+          Rendered only when a score exists, so no empty column is reserved.
 
-export const RecentOutcomesFeed: React.FC<DashboardSectionProps> = ({ repository, refreshToken, onLoaded }) => {
+          The scale is carried by the shape and by the assistive-technology
+          label, never as visible `/10` prose: floating prose next to a
+          fixed-width badge puts variable-width glyphs outside the w-12 box and
+          makes the right rail shift by a pixel or two between 7, 8 and 9.
+
+          On a phone the badge centres against the row rather than hanging off
+          its first line, where it used to crowd the status word and push the
+          timestamp onto a line of its own.
+        */}
+        {item.score !== null && item.score !== undefined && (
+          <span className="flex flex-none items-baseline self-center sm:mt-0.5 sm:self-start" data-testid="outcome-score">
+            <ScoreBadge score={item.score} bracketed />
+            <span className="sr-only">Code quality score {item.score} out of 10</span>
+          </span>
+        )}
+      </RowLink>
+    </li>
+  );
+};
+
+export const RecentOutcomesFeed: React.FC<DashboardSectionProps> = ({ repository, refreshToken }) => {
   const [range, setRange] = useState<OutcomeWindow>('24h');
   const [showAll, setShowAll] = useState(false);
   const load = useCallback(() => getDashboardOutcomes(repository, FETCH_LIMIT), [repository]);
@@ -153,7 +163,6 @@ export const RecentOutcomesFeed: React.FC<DashboardSectionProps> = ({ repository
     load,
     repository,
     refreshToken,
-    onLoaded,
   );
   const now = useNowTick(60_000);
 

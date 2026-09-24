@@ -119,12 +119,22 @@ function parseJson(value: unknown): Record<string, unknown> | null {
   }
 }
 
-function taskTitle(initialJobData: unknown): string | null {
+/**
+ * What a run is about, from the job data it was queued with.
+ *
+ * The recorded title first, then the linked issue's title, then the branch the
+ * run works on. A branch is a weak title but a real one: `feature/icon-cache`
+ * tells a reviewer what they are about to open, where the fallback the UI is
+ * otherwise left with — `Pull request #2482` under a `PR #2482` chip — only
+ * repeats the identifier already on the row.
+ */
+export function taskTitle(initialJobData: unknown): string | null {
   const jobData = parseJson(initialJobData);
   if (!jobData) return null;
   if (typeof jobData.title === 'string' && jobData.title.trim()) return jobData.title;
   const issueRef = parseJson(jobData.issueRef);
-  return typeof issueRef?.title === 'string' && issueRef.title.trim() ? issueRef.title : null;
+  if (typeof issueRef?.title === 'string' && issueRef.title.trim()) return issueRef.title;
+  return typeof jobData.branchName === 'string' && jobData.branchName.trim() ? jobData.branchName : null;
 }
 
 function taskPrNumber(row: RawTaskRow): number | null {
@@ -196,6 +206,67 @@ export const TASK_COLUMNS = [
  */
 export function workKey(row: Pick<DashboardTaskRow, 'repository' | 'issueNumber' | 'taskId'>): string {
   return row.issueNumber === null ? `${row.repository}#task:${row.taskId}` : `${row.repository}#${row.issueNumber}`;
+}
+
+/** The run behind a plan issue: its task identity and what it was about. */
+export interface ThreadWork {
+  taskId: string;
+  title: string | null;
+}
+
+/** Thread lookups for a set of issues: by thread key, and by task id. */
+export interface ThreadWorkIndex {
+  byThread: Map<string, ThreadWork>;
+  titleByTaskId: Map<string, string | null>;
+}
+
+/**
+ * The runs behind a set of issue threads.
+ *
+ * A `plan_issues` row has no title column and, in older rows, no task link
+ * either, so everything a review row or a merge row can say about itself comes
+ * from the tasks on its thread. Reading them once gives both: the task a plan
+ * issue should point at, and the title the rest of the dashboard already shows
+ * for that work — which is what keeps a row from falling back to printing the
+ * entity number it already carries as a chip.
+ */
+export async function loadThreadWork(
+  db: Knex,
+  repository: string,
+  issueNumbers: readonly number[],
+): Promise<ThreadWorkIndex> {
+  const index: ThreadWorkIndex = { byThread: new Map(), titleByTaskId: new Map() };
+  const unique = [...new Set(issueNumbers)];
+  if (unique.length === 0) return index;
+
+  for (const batch of chunk(unique)) {
+    const query = db('tasks as t')
+      .where(function (this: Knex.QueryBuilder) {
+        this.whereNull('t.task_type').orWhereNot('t.task_type', 'goal');
+      })
+      .whereIn('t.issue_number', batch)
+      .select('t.task_id', 't.repository', 't.issue_number', 't.initial_job_data')
+      // Ascending, so the last write for a thread is its newest run.
+      .orderBy('t.created_at', 'asc');
+    if (repository && repository !== 'all') query.where('t.repository', repository);
+    for (const row of await query as Array<Record<string, unknown>>) {
+      const work: ThreadWork = { taskId: String(row.task_id), title: taskTitle(row.initial_job_data) };
+      index.byThread.set(`${String(row.repository)}#${Number(row.issue_number)}`, work);
+      index.titleByTaskId.set(work.taskId, work.title);
+    }
+  }
+  return index;
+}
+
+/**
+ * The title a plan issue inherits: its own run's, else its thread's newest.
+ */
+export function threadTitle(
+  index: ThreadWorkIndex,
+  row: { repository: string; issueNumber: number; taskId: string | null },
+): string | null {
+  const own = row.taskId === null ? null : index.titleByTaskId.get(row.taskId) ?? null;
+  return own ?? index.byThread.get(`${row.repository}#${row.issueNumber}`)?.title ?? null;
 }
 
 /**

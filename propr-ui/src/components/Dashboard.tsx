@@ -36,60 +36,14 @@ import { useSocket } from '../contexts/useSocket';
 import { useCurrentUser, userHasPermission } from '../contexts/AuthContext';
 import { useLiveRefreshScheduler } from '../hooks/useLiveRefreshScheduler';
 import { isDefaultParamValue } from './TaskList/utils';
-import { formatRelativeTime } from './TaskList/utils.tsx';
 import { SummaryStrip } from './Dashboard/SummaryStrip';
 import { NeedsAttentionPanel } from './Dashboard/NeedsAttentionPanel';
 import { HappeningNowSection } from './Dashboard/HappeningNowSection';
 import { RecentOutcomesFeed } from './Dashboard/RecentOutcomesFeed';
 import { HistoricalStatsPanel } from './Dashboard/HistoricalStatsPanel';
 import { RepositoryIconProvider, type RepositoryIconInfo } from './Dashboard/sectionPrimitives';
-import { ALL_REPOSITORIES, REPOSITORY_PARAM, useNowTick } from './Dashboard/sectionState';
+import { ALL_REPOSITORIES, REPOSITORY_PARAM } from './Dashboard/sectionState';
 import type { TaskUpdatePayload } from '@propr/shared';
-
-/**
- * Connection state for the live sections.
- *
- * A dropped socket never blanks the dashboard: the last known rows stay on
- * screen and this line says how old they are.
- *
- * The status owns a rule of its own rather than butting against the page
- * title. Read left to right the toolbar was `Dashboard ● Reconnecting ·
- * Last updated 2m`, and the connection light — a 6px filled circle — was doing
- * duty as a heavy bullet between two facts while an interpunct separated the
- * next two. Two different glyphs, one string, and neither of them was a
- * delimiter by design. The rule separates the toolbar's items; the interpunct
- * is the one glyph that separates facts inside a string, here and everywhere
- * else in the app; and the dot goes back to being only a status light.
- *
- * A phone has no room for the rule and the two facts on one line, so the
- * status takes a line of its own there — which is what the 320px header
- * already did once it wrapped, and the light then starts a line rather than
- * separating two.
- */
-const LiveStatus: React.FC<{ isConnected: boolean; lastUpdatedAt: string | null }> = ({
-  isConnected,
-  lastUpdatedAt,
-}) => {
-  // Re-render so "last updated" ages while the socket stays down.
-  useNowTick(30_000);
-
-  if (isConnected) {
-    return (
-      <p className="flex items-center gap-1.5 text-xs text-gray-500 w-full sm:w-auto sm:border-l sm:border-slate-200 sm:pl-3" data-testid="live-status">
-        <span className="h-1.5 w-1.5 rounded-full bg-teal-500" aria-hidden="true" />
-        Live
-      </p>
-    );
-  }
-
-  return (
-    <p className="flex items-center gap-1.5 text-xs text-amber-700 w-full sm:w-auto sm:border-l sm:border-slate-200 sm:pl-3" data-testid="live-status" role="status">
-      <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-amber-500" aria-hidden="true" />
-      Reconnecting
-      {lastUpdatedAt && <> · Last updated {formatRelativeTime(lastUpdatedAt)}</>}
-    </p>
-  );
-};
 
 const Dashboard: React.FC = () => {
   useDocumentTitle('Dashboard');
@@ -140,10 +94,8 @@ const Dashboard: React.FC = () => {
   // every section reads, so ten events in a row cost one request per section.
   const { onTaskUpdate, isConnected } = useSocket();
   const [refreshToken, setRefreshToken] = useState(0);
-  const [lastUpdatedAt, setLastUpdatedAt] = useState<string | null>(null);
   const taskEventFingerprintsRef = useRef<Map<string, string>>(new Map());
 
-  const markLoaded = useCallback(() => setLastUpdatedAt(new Date().toISOString()), []);
   const scheduleLiveRefresh = useLiveRefreshScheduler({
     isConnected,
     refresh: () => setRefreshToken(token => token + 1),
@@ -160,7 +112,7 @@ const Dashboard: React.FC = () => {
     return onTaskUpdate(handleTaskUpdate);
   }, [isConnected, onTaskUpdate, scheduleLiveRefresh]);
 
-  const sectionProps = { repository, refreshToken, onLoaded: markLoaded };
+  const sectionProps = { repository, refreshToken };
 
   return (
     <RepositoryIconProvider icons={repositoryIcons}>
@@ -195,24 +147,30 @@ const Dashboard: React.FC = () => {
         )}
 
         {/*
-          Tier one of the page toolbar: what this page is, whether it is live,
-          and what it is filtered to.
+          Tier one of the page toolbar: what this page is and what it is
+          filtered to.
 
-          It carries its own bottom rule. Without one the row floated: the
-          connection status bled into the summary counts, which bled into the
-          first pane heading, and the top of the console had no structure at
-          all until the first row of content. The rule is what turns two loose
-          rows into a two-tier toolbar — this tier on the canvas, the counts
-          below it on tint, each one closed by a line.
+          It says nothing about the socket. A line reading `Reconnecting ·
+          Last updated Just now` beside the page title spent the most valuable
+          row on the screen on the app's own plumbing, and in its healthy state
+          — the state it is in nearly always — it only said `Live`, which is
+          what a dashboard that is drawing current work already says. The
+          sections still keep their last known rows through a dropped socket
+          and still refresh when it returns; that is the behaviour, and it
+          needs no running commentary.
+
+          It carries its own bottom rule. Without one the row floated into the
+          summary counts, which bled into the first pane heading, and the top
+          of the console had no structure at all until the first row of
+          content. The rule is what turns two loose rows into a two-tier
+          toolbar — this tier on the canvas, the counts below it on tint, each
+          one closed by a line.
 
           It shares the panes' `px-3` left rail, so "Dashboard", the first
           summary count and `HAPPENING NOW` all start on the same vertical.
         */}
         <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-2 border-b border-slate-200 bg-white px-3 py-2">
-          <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1">
-            <h1 className="text-[13px] font-semibold text-slate-800">Dashboard</h1>
-            <LiveStatus isConnected={isConnected} lastUpdatedAt={lastUpdatedAt} />
-          </div>
+          <h1 className="min-w-0 text-[13px] font-semibold text-slate-800">Dashboard</h1>
           {(reposLoading || repoOptions.length > 1) && (
             <RepositorySelector
               repos={repoOptions}

@@ -248,7 +248,6 @@ describe('Dashboard studio design rules', () => {
     const strip = screen.getByTestId('summary-strip');
     const toolbar = strip.previousElementSibling as HTMLElement | null;
     expect(toolbar).not.toBeNull();
-    expect(toolbar).toContainElement(screen.getByTestId('live-status'));
     expect(toolbar).toContainElement(screen.getByRole('heading', { name: 'Dashboard', level: 1 }));
     expect(toolbar?.className).toMatch(/border-b/);
     // Both tiers share the panes' left rail, so nothing in the header starts
@@ -277,7 +276,7 @@ describe('Dashboard studio design rules', () => {
     // sit against rather than more tint.
     const toolbar = strip.previousElementSibling as HTMLElement | null;
     expect(toolbar).not.toBeNull();
-    expect(toolbar).toContainElement(screen.getByTestId('live-status'));
+    expect(toolbar).toContainElement(screen.getByRole('heading', { name: 'Dashboard', level: 1 }));
     expect(toolbar?.className).not.toMatch(/bg-slate-50|bg-gray-50/);
     // The four counts are spaced apart, not ruled apart: the strip closes the
     // toolbar band with one rule and draws no internal ones.
@@ -479,26 +478,6 @@ describe('Dashboard studio design rules', () => {
     }
   });
 
-  it('drops the owner from the repository chip in the narrow attention column', async () => {
-    mockAttention.mockResolvedValue(attentionResponse([attentionItem()]));
-
-    renderDashboard();
-    await waitForSections();
-
-    // Three chips do not fit the right rail at full length, and the truncation
-    // lands on the half of the slug that identifies the repository. The owner
-    // is the same on every row, so it is the part that goes — and it stays in
-    // the tooltip.
-    const panel = await screen.findByTestId('needs-attention-panel');
-    const chip = within(panel).getAllByTitle('acme/app')[0];
-    expect(chip).toHaveTextContent(/^app$/);
-    expect(chip.textContent).not.toMatch(/acme/);
-
-    // The main column is wide enough for the whole slug, so it keeps it.
-    const active = screen.getByTestId('happening-now-section');
-    expect(within(active).getAllByTitle('acme/app')[0]).toHaveTextContent('acme/app');
-  });
-
   it('closes a list with one footer bar instead of a floating expand link', async () => {
     mockActive.mockResolvedValue(activeResponse(
       Array.from({ length: 9 }, (_, index) => activeItem({ id: `active-${index}`, taskId: `t-${index}` })),
@@ -515,6 +494,34 @@ describe('Dashboard studio design rules', () => {
     expect(footer.className).toMatch(/bg-slate-50/);
     expect(footer).toContainElement(screen.getByTestId('queue-summary'));
     expect(footer).toContainElement(screen.getByRole('button', { name: 'Show 4 more' }));
+  });
+
+  it('pins the queue footer to the floor of the running pane', async () => {
+    mockActive.mockResolvedValue(activeResponse([activeItem()], [activeItem({ id: 'task:q', taskId: 'q' })]));
+    mockAttention.mockResolvedValue(attentionResponse([
+      attentionItem({ id: 'a-1', taskId: 'a-1' }),
+      attentionItem({ id: 'a-2', taskId: 'a-2', issueNumber: 43 }),
+      attentionItem({ id: 'a-3', taskId: 'a-3', issueNumber: 44 }),
+    ]));
+
+    renderDashboard();
+    await waitForSections();
+
+    // One running task beside three attention items left the queue bar
+    // stranded at the top of a pane sized by the column next to it, with a
+    // quarter-screen of white between it and the rule below. The pane is a
+    // column with a floor: the list area takes the slack, the bar closes it.
+    const section = screen.getByTestId('happening-now-section');
+    expect(section.className).toMatch(/\bflex\b/);
+    expect(section.className).toMatch(/flex-col/);
+    expect(section.className).toMatch(/h-full/);
+
+    const list = screen.getByTestId('happening-now-list');
+    expect((list.parentElement as HTMLElement).className).toMatch(/flex-1/);
+
+    const footer = screen.getByTestId('happening-now-footer');
+    expect(footer.className).toMatch(/mt-auto/);
+    expect(section.lastElementChild).toBe(footer);
   });
 
   it('draws a single overflow row rather than folding it behind a toggle', async () => {

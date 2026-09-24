@@ -91,9 +91,9 @@ const SummaryCount: React.FC<SummaryCountProps> = ({
   </Link>
 );
 
-export const SummaryStrip: React.FC<DashboardSectionProps> = ({ repository, refreshToken, onLoaded }) => {
+export const SummaryStrip: React.FC<DashboardSectionProps> = ({ repository, refreshToken }) => {
   const load = useCallback(() => getDashboardSummary(repository), [repository]);
-  const { data, error } = useDashboardSection<DashboardSummaryResponse>(load, repository, refreshToken, onLoaded);
+  const { data, error } = useDashboardSection<DashboardSummaryResponse>(load, repository, refreshToken);
 
   // A failed read leaves the counts unknown. An unknown count is rendered as
   // unknown, never as zero.
