@@ -52,6 +52,13 @@ function getProviderRank(name: string): number {
   return idx === -1 ? PROVIDER_ORDER.length : idx;
 }
 
+// Agent Tank reports Antigravity quotas as "<group> · <window> Limit Remaining".
+// Every row in the widget already reads as remaining capacity, so the trailing
+// word is noise that pushes the informative part out of the truncated label.
+function stripRemainingSuffix(name: string): string {
+  return name.replace(/\s+Remaining$/i, '').trim();
+}
+
 // Map Antigravity thinking-level suffixes to compact bold badges.
 const ANTIGRAVITY_LEVEL_BADGES: Record<string, string> = {
   medium: 'M',
@@ -155,7 +162,7 @@ function getAllMetrics(agent: AgentUsageData): UsageMetric[] {
       if (isAntigravity) {
         // Keep the full model name (incl. "Gemini" prefix and thinking level) for the tooltip,
         // but shorten the visible label.
-        const fullName = getModelDisplayName(model.model);
+        const fullName = stripRemainingSuffix(getModelDisplayName(model.model));
         const { display, plain } = formatAntigravityModelLabel(fullName);
         metrics.push({
           label: plain,
@@ -166,7 +173,7 @@ function getAllMetrics(agent: AgentUsageData): UsageMetric[] {
         });
       } else {
         metrics.push({
-          label: getModelDisplayName(model.model, { compactGemini: true }),
+          label: stripRemainingSuffix(getModelDisplayName(model.model, { compactGemini: true })),
           percent: model.percentUsed,
           resetsIn: model.resetsIn
         });
@@ -201,6 +208,16 @@ function getPrimaryMetric(agent: AgentUsageData): UsageMetric | null {
   return metrics.length > 0 ? metrics[0] : null;
 }
 
+// Rows with an explicit tooltip (Antigravity, whose visible label is shortened)
+// must still report their reset countdown — the same "Resets in ..." suffix every
+// other provider's rows get — so the two are composed rather than one replacing
+// the other. Agent Tank omits the countdown for quotas it has no window for.
+function getMetricTooltip(metric: UsageMetric): string {
+  const resets = metric.resetsIn ? `Resets in ${metric.resetsIn}` : null;
+  if (metric.title) return resets ? `${metric.title} · ${resets}` : metric.title;
+  return resets ?? metric.label;
+}
+
 interface MetricRowProps {
   metric: UsageMetric;
   compact?: boolean;
@@ -219,7 +236,7 @@ const MetricRow: React.FC<MetricRowProps> = ({ metric, compact = false }) => (
   <div className={`flex min-w-0 items-center gap-2 ${compact ? 'h-5' : 'py-1'}`}>
     <span
       className="min-w-0 max-w-[100px] flex-1 truncate text-[10px] text-gray-500"
-      title={metric.title ?? (metric.resetsIn ? `Resets in ${metric.resetsIn}` : metric.label)}
+      title={getMetricTooltip(metric)}
     >
       {metric.displayLabel ?? metric.label}
     </span>

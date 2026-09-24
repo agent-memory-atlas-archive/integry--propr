@@ -88,6 +88,62 @@ describe('AgentTankSidebar Claude metrics', () => {
   });
 });
 
+// Agent Tank names Antigravity quotas after the window they cover, e.g.
+// "Gemini · Weekly Limit Remaining", and reports a countdown for the windows it
+// has started tracking (null for the rest).
+const antigravityResponse = (): AgentTankUsageResponse => ({
+  enabled: true,
+  agents: {
+    antigravity: {
+      name: 'antigravity',
+      usage: {
+        models: [
+          { model: 'Gemini · Weekly Limit Remaining', percentUsed: 12.2, resetsIn: '136h 1m' },
+          { model: 'Gemini · Five Hour Limit Remaining', percentUsed: 0.3, resetsIn: '4h 37m' },
+          { model: 'Claude and GPT · Weekly Limit Remaining', percentUsed: 0 },
+        ],
+      },
+    },
+  },
+});
+
+describe('AgentTankSidebar Antigravity rows', () => {
+  beforeEach(() => {
+    mockGetAgentTankUsage.mockResolvedValue(antigravityResponse());
+  });
+
+  it('drops the trailing "Remaining" from the model labels', async () => {
+    await renderSidebar();
+
+    fireEvent.click(providerRow('Antigravity'));
+
+    expect(screen.getByText('Gemini · Weekly Limit')).toBeInTheDocument();
+    expect(screen.getByText('Gemini · Five Hour Limit')).toBeInTheDocument();
+    expect(screen.getByText('Claude and GPT · Weekly Limit')).toBeInTheDocument();
+    expect(screen.queryByText(/Remaining/)).not.toBeInTheDocument();
+  });
+
+  it('reports when each quota resets, the way the other providers do', async () => {
+    await renderSidebar();
+
+    fireEvent.click(providerRow('Antigravity'));
+
+    expect(screen.getByText('Gemini · Weekly Limit'))
+      .toHaveAttribute('title', 'Gemini · Weekly Limit · Resets in 136h 1m');
+    expect(screen.getByText('Gemini · Five Hour Limit'))
+      .toHaveAttribute('title', 'Gemini · Five Hour Limit · Resets in 4h 37m');
+  });
+
+  it('keeps the model name alone when Agent Tank reports no reset window', async () => {
+    await renderSidebar();
+
+    fireEvent.click(providerRow('Antigravity'));
+
+    expect(screen.getByText('Claude and GPT · Weekly Limit'))
+      .toHaveAttribute('title', 'Claude and GPT · Weekly Limit');
+  });
+});
+
 describe('AgentTankSidebar expansion persistence', () => {
   it('saves an expanded provider to localStorage', async () => {
     await renderSidebar();
