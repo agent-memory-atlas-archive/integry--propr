@@ -39,6 +39,8 @@ interface RepositorySelectorProps {
   isLoading?: boolean;
   placeholder?: string;
   variant?: 'default' | 'breadcrumb';
+  /** `compact` fits the default trigger into a 36px toolbar: a 28px button with small inline text. */
+  size?: 'default' | 'compact';
   className?: string;
   labelLayout?: 'inline' | 'stacked';
 }
@@ -225,31 +227,38 @@ const DefaultTrigger: React.FC<{
   isOpen: boolean;
   onClick: () => void;
   labelLayout: 'inline' | 'stacked';
-}> = ({ selectedRepoData, selectedRepo, placeholder, reposCount, disabled, isLoading, isOpen, onClick, labelLayout }) => (
-  <button type="button" onClick={onClick} disabled={disabled || isLoading || reposCount === 0} className={`w-full min-w-0 px-3 ${labelLayout === 'stacked' ? 'py-1' : 'py-2'} bg-white text-gray-900 border border-gray-300 rounded-md focus:ring-2 focus:ring-primary-500 focus:border-primary-500 flex items-center gap-2 disabled:cursor-not-allowed disabled:bg-gray-50 disabled:text-gray-500`}>
-    {selectedRepoData ? (
-      <>
-        <RepositoryIcon repository={selectedRepoData.name} iconPath={selectedRepoData.iconPath} revision={selectedRepoData.iconRevision || selectedRepoData.baseBranch} />
-        <span className={`flex-1 min-w-0 text-left ${labelLayout === 'stacked' ? '' : 'truncate text-sm'}`}>
-          <RepoLabel repo={selectedRepoData} labelLayout={labelLayout} />
-        </span>
-        {selectedRepoData.count !== undefined && (
-          <RepoCountBadge
-            count={selectedRepoData.count}
-            className={labelLayout === 'stacked' ? 'hidden sm:inline-flex' : ''}
-          />
-        )}
-        {selectedRepoData.starred && <Star className="w-3.5 h-3.5 text-amber-500 fill-amber-500 flex-shrink-0" />}
-      </>
-    ) : (
-      <>
-        {isLoading ? <Loader2 className="w-4 h-4 text-gray-400 flex-shrink-0 animate-spin" /> : <Github className="w-4 h-4 text-gray-400 flex-shrink-0" />}
-        <span className="flex-1 min-w-0 truncate text-left text-gray-500 text-sm">{isLoading ? 'Loading repositories...' : selectedRepo ? <FormatRepoName name={selectedRepo} /> : reposCount === 0 ? 'No repositories configured' : placeholder}</span>
-      </>
-    )}
-    <ChevronDown className={`w-4 h-4 text-gray-400 flex-shrink-0 transition-transform ${isOpen ? 'rotate-180' : ''}`} />
-  </button>
-);
+  size: 'default' | 'compact';
+}> = ({ selectedRepoData, selectedRepo, placeholder, reposCount, disabled, isLoading, isOpen, onClick, labelLayout, size }) => {
+  const compact = size === 'compact';
+  const iconClassName = compact ? 'w-3.5 h-3.5' : 'w-4 h-4';
+  const padding = compact ? 'h-7 px-2 gap-1.5 text-xs' : `px-3 ${labelLayout === 'stacked' ? 'py-1' : 'py-2'} gap-2`;
+  const textSize = compact ? 'text-xs' : 'text-sm';
+  return (
+    <button type="button" onClick={onClick} disabled={disabled || isLoading || reposCount === 0} className={`w-full min-w-0 ${padding} bg-white text-gray-900 border border-gray-300 rounded-md focus:ring-2 focus:ring-primary-500 focus:border-primary-500 flex items-center disabled:cursor-not-allowed disabled:bg-gray-50 disabled:text-gray-500`}>
+      {selectedRepoData ? (
+        <>
+          <RepositoryIcon repository={selectedRepoData.name} iconPath={selectedRepoData.iconPath} revision={selectedRepoData.iconRevision || selectedRepoData.baseBranch} className={iconClassName} />
+          <span className={`flex-1 min-w-0 text-left ${labelLayout === 'stacked' ? '' : `truncate ${textSize}`}`}>
+            <RepoLabel repo={selectedRepoData} labelLayout={labelLayout} />
+          </span>
+          {selectedRepoData.count !== undefined && (
+            <RepoCountBadge
+              count={selectedRepoData.count}
+              className={labelLayout === 'stacked' ? 'hidden sm:inline-flex' : ''}
+            />
+          )}
+          {selectedRepoData.starred && <Star className="w-3.5 h-3.5 text-amber-500 fill-amber-500 flex-shrink-0" />}
+        </>
+      ) : (
+        <>
+          {isLoading ? <Loader2 className={`${iconClassName} text-gray-400 flex-shrink-0 animate-spin`} /> : <Github className={`${iconClassName} text-gray-400 flex-shrink-0`} />}
+          <span className={`flex-1 min-w-0 truncate text-left text-gray-500 ${textSize}`}>{isLoading ? 'Loading repositories...' : selectedRepo ? <FormatRepoName name={selectedRepo} /> : reposCount === 0 ? 'No repositories configured' : placeholder}</span>
+        </>
+      )}
+      <ChevronDown className={`${iconClassName} text-gray-400 flex-shrink-0 transition-transform ${isOpen ? 'rotate-180' : ''}`} />
+    </button>
+  );
+};
 
 export const RepositorySelector: React.FC<RepositorySelectorProps> = ({
   repos: externalRepos,
@@ -261,6 +270,7 @@ export const RepositorySelector: React.FC<RepositorySelectorProps> = ({
   isLoading = false,
   placeholder = 'Select repository',
   variant = 'default',
+  size = 'default',
   className = '',
   labelLayout = 'inline'
 }) => {
@@ -370,7 +380,7 @@ export const RepositorySelector: React.FC<RepositorySelectorProps> = ({
   }, [disabled, effectiveLoading]);
 
   const dropdownContent = isOpen && (
-    <div className={`absolute top-full ${variant === 'breadcrumb' ? 'left-0 w-72' : 'left-0 right-0'} mt-1 bg-white border border-gray-200 rounded-lg shadow-lg z-50 overflow-hidden`}>
+    <div className={`absolute top-full ${variant === 'breadcrumb' ? 'left-0 w-72' : size === 'compact' ? 'right-0 w-72' : 'left-0 right-0'} mt-1 bg-white border border-gray-200 rounded-lg shadow-lg z-50 overflow-hidden`}>
       <FilterInput inputRef={inputRef} value={filter} onChange={setFilter} onKeyDown={handleKeyDown} />
       <div className="max-h-64 overflow-y-auto">
         <RepoList starredRepos={starredRepos} otherRepos={otherRepos} selectedRepoKey={selectedRepoKeyValue} onSelect={handleSelect} labelLayout={labelLayout} />
@@ -389,7 +399,7 @@ export const RepositorySelector: React.FC<RepositorySelectorProps> = ({
 
   return (
     <div ref={containerRef} className={`relative min-w-0 ${className}`}>
-      <DefaultTrigger selectedRepoData={selectedRepoData} selectedRepo={selectedRepo} placeholder={placeholder} reposCount={repos.length} disabled={disabled} isLoading={effectiveLoading} isOpen={isOpen} onClick={handleToggle} labelLayout={labelLayout} />
+      <DefaultTrigger selectedRepoData={selectedRepoData} selectedRepo={selectedRepo} placeholder={placeholder} reposCount={repos.length} disabled={disabled} isLoading={effectiveLoading} isOpen={isOpen} onClick={handleToggle} labelLayout={labelLayout} size={size} />
       {dropdownContent}
     </div>
   );

@@ -198,91 +198,42 @@ describe('Dashboard studio design rules', () => {
     expect(dailyPointFill('2020-01-01', today)).toBe(PAST_DAY_FILL);
   });
 
-  it('spends one compact row on the four top-level counts', async () => {
+  it('spends a single 36px toolbar on the page and its filter, with the console attached beneath it', async () => {
     renderDashboard();
     await waitForSections();
 
-    const strip = screen.getByTestId('summary-strip');
-    for (const testId of ['summary-needs-attention', 'summary-running', 'summary-queued', 'summary-completed']) {
-      const count = screen.getByTestId(testId);
-      expect(strip).toContainElement(count);
-      // A count is a label beside a number, not a card wrapping one.
-      expect(count.className).toMatch(/sm:items-baseline/);
-      expect(count.className).not.toMatch(/rounded-(?:md|lg|xl)/);
-      expect(count.className).not.toMatch(/shadow/);
-    }
-  });
+    // The counts strip only repeated what the pane headings and the queue
+    // footer already say, so it is gone — and so is its read.
+    expect(screen.queryByTestId('summary-strip')).toBeNull();
+    expect(screen.queryByLabelText('Work summary')).toBeNull();
+    expect(mockSummary).not.toHaveBeenCalled();
 
-  it('lays the four counts out as a micro-grid on a phone rather than letting them wrap', async () => {
-    renderDashboard();
-    await waitForSections();
+    // One bar: the page on the left, the repository filter on the right.
+    const toolbar = screen.getByTestId('dashboard-toolbar');
+    expect(toolbar.className).toMatch(/\bh-9\b/);
+    expect(toolbar.className).toMatch(/justify-between/);
+    expect(toolbar.className).toMatch(/border-b/);
+    // It shares the panes' left rail and stays on the white canvas.
+    expect(toolbar.className).toMatch(/px-3/);
+    expect(toolbar.className).not.toMatch(/bg-slate-50|bg-gray-50|bg-slate-100/);
 
-    // Four labelled counts do not fit one 320px row, and wrapping dropped the
-    // fourth onto an orphaned second line under nothing. Four columns, a
-    // number over a single word in each.
-    const strip = screen.getByTestId('summary-strip');
-    expect(strip.className).toMatch(/grid-cols-4/);
-    expect(strip.className).toMatch(/sm:flex/);
+    const heading = screen.getByRole('heading', { name: 'Dashboard', level: 1 });
+    expect(toolbar.firstElementChild).toBe(heading);
+    const filter = within(toolbar).getByRole('button', { name: /All Repos/ });
+    expect(toolbar.lastElementChild).toContainElement(filter);
+    // A 28px trigger, so the filter fits inside the 36px bar instead of
+    // stretching it.
+    expect(filter.className).toMatch(/\bh-7\b/);
+    expect(filter.className).toMatch(/text-xs/);
+    expect(filter).not.toHaveTextContent(/acme/);
 
-    for (const [testId, short, long] of [
-      ['summary-needs-attention', 'Attention', 'Needs attention'],
-      ['summary-completed', 'Done', 'Completed today'],
-    ] as const) {
-      const count = screen.getByTestId(testId);
-      // Stacked on a phone, back on one line from `sm`.
-      expect(count.className).toMatch(/flex-col-reverse/);
-      expect(count.className).toMatch(/sm:flex-row/);
-      // The long phrase is what will not fit, so the phone gets one word.
-      expect(within(count).getByText(short).className).toMatch(/sm:hidden/);
-      expect(within(count).getByText(long).className).toMatch(/hidden/);
-    }
-  });
-
-  it('locks the page header into two ruled tiers instead of floating it', async () => {
-    renderDashboard();
-    await waitForSections();
-
-    // Tier one carries the page, the connection state and the filter; tier two
-    // carries the counts. Each closes with a rule, so the top of the canvas has
-    // structure before the first row of content rather than three loose bands.
-    const strip = screen.getByTestId('summary-strip');
-    const toolbar = strip.previousElementSibling as HTMLElement | null;
-    expect(toolbar).not.toBeNull();
-    expect(toolbar).toContainElement(screen.getByRole('heading', { name: 'Dashboard', level: 1 }));
-    expect(toolbar?.className).toMatch(/border-b/);
-    // Both tiers share the panes' left rail, so nothing in the header starts
-    // on a vertical of its own.
-    expect(toolbar?.className).toMatch(/px-3/);
-    expect(strip.className).toMatch(/px-3/);
-  });
-
-  it('anchors the summary counts in a sub-toolbar rather than floating them', async () => {
-    renderDashboard();
-    await waitForSections();
-
-    // Loose text between the toolbar and the feed reads as an orphan, so the
-    // strip is real chrome: a tinted bar of its own height, ruled on both
-    // edges and padded to the console's left rail.
-    const strip = screen.getByTestId('summary-strip');
-    expect(strip.className).toMatch(/min-h-9/);
-    // A step darker than the pane headings below, which are bg-slate-50: the
-    // console's own bar outranks a pane's heading.
-    expect(strip.className).toMatch(/bg-slate-100/);
-    expect(strip.className).toMatch(/px-3/);
-    // Both edges, not just the bottom one: a bar that is open at the top bleeds
-    // into the white toolbar above it and reads as loose text again.
-    expect(strip.className).toMatch(/border-y/);
-    // The toolbar above stays on the canvas so the bar's top rule has white to
-    // sit against rather than more tint.
-    const toolbar = strip.previousElementSibling as HTMLElement | null;
-    expect(toolbar).not.toBeNull();
-    expect(toolbar).toContainElement(screen.getByRole('heading', { name: 'Dashboard', level: 1 }));
-    expect(toolbar?.className).not.toMatch(/bg-slate-50|bg-gray-50/);
-    // The four counts are spaced apart, not ruled apart: the strip closes the
-    // toolbar band with one rule and draws no internal ones.
-    for (const testId of ['summary-needs-attention', 'summary-running', 'summary-queued', 'summary-completed']) {
-      expect(screen.getByTestId(testId).className).not.toMatch(/border-[rlbt]\b/);
-    }
+    // The split pane hangs directly off the toolbar's bottom rule: nothing
+    // between them, and no margin on either side of the join.
+    const panes = toolbar.nextElementSibling as HTMLElement | null;
+    expect(panes).not.toBeNull();
+    expect(panes).toContainElement(screen.getByTestId('happening-now-section'));
+    expect(toolbar.className).not.toMatch(/(?:^|\s)(?:[a-z]+:)?m[by]?-/);
+    expect(panes?.className).not.toMatch(/(?:^|\s)(?:[a-z]+:)?(?:m[ty]?|pt|py)-/);
   });
 
   it('fills the attention pane with its zero-state instead of stranding one line at the top', async () => {

@@ -1,9 +1,9 @@
 /**
  * Dashboard composition root.
  *
- * The dashboard answers "what needs my attention right now" in five sections:
- * a summary strip, needs attention, happening now, recent outcomes and
- * historical stats. Live work gets the space; the deeper charts live on
+ * The dashboard answers "what needs my attention right now" in four panes:
+ * needs attention, happening now, recent outcomes and historical stats, under
+ * a single 36px toolbar. Live work gets the space; the deeper charts live on
  * `/analytics`.
  *
  * This file owns only three things — the shared repository filter, the socket
@@ -36,7 +36,6 @@ import { useSocket } from '../contexts/useSocket';
 import { useCurrentUser, userHasPermission } from '../contexts/AuthContext';
 import { useLiveRefreshScheduler } from '../hooks/useLiveRefreshScheduler';
 import { isDefaultParamValue } from './TaskList/utils';
-import { SummaryStrip } from './Dashboard/SummaryStrip';
 import { NeedsAttentionPanel } from './Dashboard/NeedsAttentionPanel';
 import { HappeningNowSection } from './Dashboard/HappeningNowSection';
 import { RecentOutcomesFeed } from './Dashboard/RecentOutcomesFeed';
@@ -147,30 +146,28 @@ const Dashboard: React.FC = () => {
         )}
 
         {/*
-          Tier one of the page toolbar: what this page is and what it is
-          filtered to.
+          The page toolbar: a single 36px bar naming the page on the left and
+          holding the repository filter on the right — the same pattern Plans,
+          Goals and Tasks use.
 
-          It says nothing about the socket. A line reading `Reconnecting ·
-          Last updated Just now` beside the page title spent the most valuable
-          row on the screen on the app's own plumbing, and in its healthy state
-          — the state it is in nearly always — it only said `Live`, which is
-          what a dashboard that is drawing current work already says. The
-          sections still keep their last known rows through a dropped socket
-          and still refresh when it returns; that is the behaviour, and it
-          needs no running commentary.
+          It says nothing about the socket and carries no counts. A line
+          reading `Reconnecting · Last updated Just now` spent the most
+          valuable row on the screen on the app's own plumbing, and a strip of
+          `NEEDS ATTENTION 3 | RUNNING 1 …` only repeated what the panes
+          directly underneath it already say: their headings carry the
+          attention and running counts, the queue footer the queued one.
+          The sections still keep their last known rows through a dropped
+          socket and still refresh when it returns; that needs no commentary.
 
-          It carries its own bottom rule. Without one the row floated into the
-          summary counts, which bled into the first pane heading, and the top
-          of the console had no structure at all until the first row of
-          content. The rule is what turns two loose rows into a two-tier
-          toolbar — this tier on the canvas, the counts below it on tint, each
-          one closed by a line.
-
-          It shares the panes' `px-3` left rail, so "Dashboard", the first
-          summary count and `HAPPENING NOW` all start on the same vertical.
+          Its bottom rule is the top edge of the console: the panes attach to
+          it directly, with no margin between. It shares the panes' `px-3` left
+          rail, so "Dashboard" and `HAPPENING NOW` start on the same vertical.
         */}
-        <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-2 border-b border-slate-200 bg-white px-3 py-2">
-          <h1 className="min-w-0 text-[13px] font-semibold text-slate-800">Dashboard</h1>
+        <div
+          data-testid="dashboard-toolbar"
+          className="flex h-9 flex-none items-center justify-between gap-3 border-b border-slate-200 bg-white px-3"
+        >
+          <h1 className="min-w-0 truncate text-[13px] font-semibold text-slate-800">Dashboard</h1>
           {(reposLoading || repoOptions.length > 1) && (
             <RepositorySelector
               repos={repoOptions}
@@ -178,18 +175,11 @@ const Dashboard: React.FC = () => {
               onRepoChange={setRepository}
               isLoading={reposLoading}
               variant="default"
-              labelLayout="stacked"
-              className="w-full min-w-0 sm:w-[280px] sm:max-w-[280px] sm:flex-none"
+              size="compact"
+              className="w-48 flex-none sm:w-56"
             />
           )}
         </div>
-
-        {/*
-          Tier two: the status bar for the whole console — a tinted bar ruled on
-          both edges and anchored directly above the panes, not loose text
-          between the toolbar and the feed.
-        */}
-        <SummaryStrip {...sectionProps} />
 
         {/*
           Mobile keeps the DOM order: attention, happening now, recent

@@ -8,7 +8,6 @@ import {
   getDashboardAttention,
   getDashboardOutcomes,
   getDashboardStats,
-  getDashboardSummary,
 } from '../api/dashboardApi';
 import type { TaskUpdatePayload } from '@propr/shared';
 import {
@@ -19,11 +18,9 @@ import {
   outcomeItem,
   outcomesResponse,
   statsResponse,
-  summaryResponse,
 } from './Dashboard.fixtures';
 
 vi.mock('../api/dashboardApi', () => ({
-  getDashboardSummary: vi.fn(),
   getDashboardAttention: vi.fn(),
   getDashboardActive: vi.fn(),
   getDashboardOutcomes: vi.fn(),
@@ -72,7 +69,6 @@ vi.mock('../utils/repoHelpers', () => ({
   ]),
 }));
 
-const mockSummary = vi.mocked(getDashboardSummary);
 const mockAttention = vi.mocked(getDashboardAttention);
 const mockActive = vi.mocked(getDashboardActive);
 const mockOutcomes = vi.mocked(getDashboardOutcomes);
@@ -116,7 +112,6 @@ describe('Dashboard', () => {
     vi.clearAllMocks();
     socketConnected = true;
     taskUpdateHandler = null;
-    mockSummary.mockResolvedValue(summaryResponse());
     mockAttention.mockResolvedValue(attentionResponse());
     mockActive.mockResolvedValue(activeResponse([activeItem()]));
     mockOutcomes.mockResolvedValue(outcomesResponse([outcomeItem()]));
@@ -138,7 +133,6 @@ describe('Dashboard', () => {
     );
     // Nothing to view, so no "View all" link into an empty list.
     expect(within(panel).queryByRole('link', { name: 'View all' })).not.toBeInTheDocument();
-    expect(screen.getByTestId('summary-needs-attention')).toHaveAttribute('data-emphasis', 'false');
   });
 
   it('draws the attention heading before its first read lands, so the column never jumps', async () => {
@@ -191,8 +185,7 @@ describe('Dashboard', () => {
     expect(screen.getByTestId('needs-attention-panel')).toHaveTextContent('Checkout retries never fire');
   });
 
-  it('emphasises the attention count and lists attention items when work is blocked', async () => {
-    mockSummary.mockResolvedValue(summaryResponse({ needsAttention: 2 }));
+  it('counts and lists attention items when work is blocked', async () => {
     mockAttention.mockResolvedValue(attentionResponse([
       attentionItem(),
       attentionItem({ id: 'plan-issue:5', kind: 'plan_review', category: 'decision', taskId: null, prNumber: 51, title: null }),
@@ -201,7 +194,7 @@ describe('Dashboard', () => {
     renderDashboard();
     await waitForSections();
 
-    expect(screen.getByTestId('summary-needs-attention')).toHaveAttribute('data-emphasis', 'true');
+    expect(screen.getByRole('heading', { name: /Needs attention/ })).toHaveTextContent('Needs attention (2)');
     const panel = screen.getByTestId('needs-attention-panel');
     expect(panel).toHaveTextContent('Run failed');
     expect(panel).toHaveTextContent('Checkout retries never fire');
@@ -213,16 +206,6 @@ describe('Dashboard', () => {
     expect(screen.queryByTestId('needs-attention-empty')).not.toBeInTheDocument();
   });
 
-  it('opens the correspondingly filtered list from each summary count', async () => {
-    renderDashboard();
-    await waitForSections();
-
-    expect(screen.getByTestId('summary-needs-attention')).toHaveAttribute('href', '/tasks?status=attention');
-    expect(screen.getByTestId('summary-running')).toHaveAttribute('href', '/tasks?status=active');
-    expect(screen.getByTestId('summary-queued')).toHaveAttribute('href', '/tasks?status=waiting');
-    expect(screen.getByTestId('summary-completed')).toHaveAttribute('href', '/tasks?status=completed');
-  });
-
   it('applies one repository filter to every section and writes it to the URL', async () => {
     renderDashboard();
     await waitForSections();
@@ -232,21 +215,21 @@ describe('Dashboard', () => {
 
     await waitFor(() => expect(screen.getByTestId('location-search')).toHaveTextContent('repository=acme%2Fweb'));
     await waitFor(() => {
-      expect(mockSummary).toHaveBeenLastCalledWith('acme/web');
       expect(mockAttention).toHaveBeenLastCalledWith('acme/web');
       expect(mockActive).toHaveBeenLastCalledWith('acme/web');
       expect(mockOutcomes).toHaveBeenLastCalledWith('acme/web', 50);
       expect(mockStats).toHaveBeenLastCalledWith('acme/web', '7d');
     });
-    // The filtered lists behind the counts carry the same filter.
-    expect(screen.getByTestId('summary-running')).toHaveAttribute('href', '/tasks?status=active&repository=acme%2Fweb');
+    // The filtered lists behind the pane links carry the same filter.
+    const running = screen.getByTestId('happening-now-section');
+    expect(within(running).getByRole('link', { name: 'View all' })).toHaveAttribute('href', '/tasks?status=active&repository=acme%2Fweb');
   });
 
   it('restores the repository filter from the URL on load', async () => {
     renderDashboard('/?repository=acme%2Fapp');
     await waitForSections();
 
-    expect(mockSummary).toHaveBeenCalledWith('acme/app');
+    expect(mockAttention).toHaveBeenCalledWith('acme/app');
     expect(mockActive).toHaveBeenCalledWith('acme/app');
     expect(mockStats).toHaveBeenCalledWith('acme/app', '7d');
   });
@@ -255,7 +238,7 @@ describe('Dashboard', () => {
     renderDashboard();
     await waitForSections();
 
-    await waitFor(() => expect(mockSummary).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(mockActive).toHaveBeenCalledTimes(1));
     expect(taskUpdateHandler).not.toBeNull();
 
     // Each event is delivered in its own flush, so only the scheduler's
@@ -271,10 +254,9 @@ describe('Dashboard', () => {
       });
     }
 
-    await waitFor(() => expect(mockSummary).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(mockActive).toHaveBeenCalledTimes(2));
     await waitFor(() => expect(mockStats).toHaveBeenCalledTimes(2));
     expect(mockAttention).toHaveBeenCalledTimes(2);
-    expect(mockActive).toHaveBeenCalledTimes(2);
     expect(mockOutcomes).toHaveBeenCalledTimes(2);
   });
 

@@ -173,8 +173,8 @@ test('desktop shows every section with running work in the main column', async (
   await fixture(page);
   await page.goto('/');
 
-  await expect(page.getByTestId('summary-strip')).toBeVisible();
-  await expect(page.getByTestId('summary-needs-attention')).toHaveAttribute('data-emphasis', 'true');
+  await expect(page.getByTestId('dashboard-toolbar')).toBeVisible();
+  await expect(page.getByTestId('summary-strip')).toHaveCount(0);
   await expect(page.getByTestId('needs-attention-panel')).toBeVisible();
   await expect(page.getByTestId('happening-now-section')).toContainText('Implementing');
   await expect(page.getByTestId('queue-summary')).toContainText('All agents are busy');
@@ -280,7 +280,6 @@ test('an empty attention list keeps the panel in place with an all-clear line', 
   await expect(panel.getByRole('heading')).toHaveText('Needs attention (0)');
   await expect(page.getByTestId('needs-attention-empty'))
     .toHaveText('All tasks operational — no attention required');
-  await expect(page.getByTestId('summary-needs-attention')).toHaveAttribute('data-emphasis', 'false');
 
   const geometry = await page.evaluate(() => Object.fromEntries(
     ['needs-attention-panel', 'happening-now-section', 'recent-outcomes-section', 'historical-stats-section'].map(id => {
@@ -343,7 +342,7 @@ test('the dashboard fits a 320px viewport without horizontal overflow', async ({
   await fixture(page);
   await page.goto('/');
 
-  await expect(page.getByTestId('summary-strip')).toBeVisible();
+  await expect(page.getByTestId('dashboard-toolbar')).toBeVisible();
   await expect(page.getByTestId('needs-attention-panel')).toBeVisible();
   await expect(page.getByTestId('happening-now-section')).toBeVisible();
 
@@ -378,7 +377,7 @@ test('the repository filter narrows every section and survives a reload', async 
 
   await expect(page).toHaveURL(/repository=example%2Fdocs/);
   await expect
-    .poll(() => ['/api/dashboard/summary', '/api/dashboard/attention', '/api/dashboard/active', '/api/dashboard/outcomes', '/api/stats/dashboard']
+    .poll(() => ['/api/dashboard/attention', '/api/dashboard/active', '/api/dashboard/outcomes', '/api/stats/dashboard']
       .every(pathname => requested.includes(`${pathname}?example/docs`)))
     .toBe(true);
 

@@ -22,7 +22,7 @@ The analytics page (`/analytics`) and the rest of the UI continue to read the ag
 
 The dashboard refreshes these on task updates over the WebSocket connection, so the numbers track live activity. Unavailable data — a success rate with nothing finished, or spend on an instance that records no cost — is reported as null and rendered as "—" rather than as zero. For the screen layout, see the [Web UI Guide](../features/web-ui.md).
 
-{/* SCREENSHOT PLACEHOLDER (P2 — same capture as tutorials/usage.md's dashboard shot; interim: the site's ui-dashboard.png): Capture the Dashboard page with a populated instance: the summary strip, Needs attention, Happening now, Recent outcomes, and Historical stats. Run a handful of tasks first so every section has data. */}
+{/* SCREENSHOT PLACEHOLDER (P2 — same capture as tutorials/usage.md's dashboard shot; interim: the site's ui-dashboard.png): Capture the Dashboard page with a populated instance: the toolbar with the repository filter, Needs attention, Happening now, Recent outcomes, and Historical stats. Run a handful of tasks first so every section has data. */}
 
 ### Breakdowns the product provides
 

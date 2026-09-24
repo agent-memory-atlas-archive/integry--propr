@@ -20,7 +20,6 @@ const repositoryBreakdownSource = readSource('../../../propr-ui/src/components/R
 const repositoryReportSource = readSource('../../../propr-ui/src/components/RepositoryReport.tsx');
 const headerStatsSource = readSource('../../../propr-ui/src/hooks/useHeaderStats.ts');
 const headerStatsHelpersSource = readSource('../../../propr-ui/src/hooks/useHeaderStatsHelpers.ts');
-const summaryStripSource = readSource('../../../propr-ui/src/components/Dashboard/SummaryStrip.tsx');
 const needsAttentionSource = readSource('../../../propr-ui/src/components/Dashboard/NeedsAttentionPanel.tsx');
 const happeningNowSource = readSource('../../../propr-ui/src/components/Dashboard/HappeningNowSection.tsx');
 const recentOutcomesSource = readSource('../../../propr-ui/src/components/Dashboard/RecentOutcomesFeed.tsx');
@@ -180,7 +179,6 @@ describe('packaged acceptance stats fixtures', () => {
     assert.ok(Array.isArray(stats.dailyCompleted));
 
     // The remaining sections map their rows, which have to arrive as arrays.
-    assert.match(summaryStripSource, /counts\?\.needsAttention/);
     assert.match(needsAttentionSource, /data\?\.items \?\? \[\]/);
     assert.match(recentOutcomesSource, /\(data\?\.items \?\? \[\]\)\.filter/);
     for (const rows of [attention.items, active.running, active.queued, outcomes.items]) {

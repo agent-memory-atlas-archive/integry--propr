@@ -17,7 +17,6 @@ import {
   getDashboardAttention,
   getDashboardOutcomes,
   getDashboardStats,
-  getDashboardSummary,
 } from '../api/dashboardApi';
 import {
   activeItem,
@@ -27,11 +26,9 @@ import {
   outcomeItem,
   outcomesResponse,
   statsResponse,
-  summaryResponse,
 } from './Dashboard.fixtures';
 
 vi.mock('../api/dashboardApi', () => ({
-  getDashboardSummary: vi.fn(),
   getDashboardAttention: vi.fn(),
   getDashboardActive: vi.fn(),
   getDashboardOutcomes: vi.fn(),
@@ -67,7 +64,6 @@ vi.mock('../utils/repoHelpers', () => ({
   fetchEnabledRepos: vi.fn(async () => [{ name: 'acme/app', enabled: true }]),
 }));
 
-const mockSummary = vi.mocked(getDashboardSummary);
 const mockAttention = vi.mocked(getDashboardAttention);
 const mockActive = vi.mocked(getDashboardActive);
 const mockOutcomes = vi.mocked(getDashboardOutcomes);
@@ -92,7 +88,6 @@ async function waitForSections() {
 describe('Dashboard consistency rules', () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    mockSummary.mockResolvedValue(summaryResponse());
     mockAttention.mockResolvedValue(attentionResponse([attentionItem()]));
     mockActive.mockResolvedValue(activeResponse([activeItem()]));
     mockOutcomes.mockResolvedValue(outcomesResponse([outcomeItem()]));
@@ -194,7 +189,7 @@ describe('Dashboard consistency rules', () => {
     // app's own plumbing — and spent two different glyphs saying it, a status
     // light doing duty as a bullet beside an interpunct. The row names the
     // page and what it is filtered to; nothing else.
-    const toolbar = screen.getByTestId('summary-strip').previousElementSibling as HTMLElement;
+    const toolbar = screen.getByTestId('dashboard-toolbar');
     expect(toolbar).toContainElement(screen.getByRole('heading', { name: 'Dashboard', level: 1 }));
     expect(toolbar.textContent).not.toMatch(/Live|Reconnecting|Last updated/);
     expect(toolbar.textContent).not.toMatch(/[•‧∙]/);

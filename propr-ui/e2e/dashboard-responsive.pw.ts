@@ -149,7 +149,7 @@ async function openDashboard(page: Page, width: number, attentionItems = attenti
   await page.setViewportSize({ width, height: 1200 });
   await fixture(page, attentionItems);
   await page.goto('/');
-  await expect(page.getByTestId('summary-strip')).toBeVisible();
+  await expect(page.getByTestId('dashboard-toolbar')).toBeVisible();
   await expect(page.getByTestId('happening-now-list')).toBeVisible();
   await expect(page.getByTestId('recent-outcomes-list')).toBeVisible();
   await expect(page.getByTestId('historical-stats-section')).toBeVisible();
@@ -180,9 +180,9 @@ async function horizontalOverflow(page: Page) {
   }));
 }
 
-/** The dashboard's five sections, in the order the document lists them. */
+/** The dashboard's toolbar and four panes, in the order the document lists them. */
 async function sectionOrder(page: Page): Promise<string[]> {
-  const sections = ['summary-strip', 'needs-attention-panel', 'happening-now-section', 'recent-outcomes-section', 'historical-stats-section'];
+  const sections = ['dashboard-toolbar', 'needs-attention-panel', 'happening-now-section', 'recent-outcomes-section', 'historical-stats-section'];
   return page.evaluate(ids => [...document.querySelectorAll('[data-testid]')]
     .map(node => node.getAttribute('data-testid') as string)
     .filter(id => ids.includes(id)), sections);
@@ -205,7 +205,7 @@ for (const width of NARROW_WIDTHS) {
     // What needs a person first, then what is running, then what happened,
     // then the background numbers.
     expect(await sectionOrder(page)).toEqual([
-      'summary-strip',
+      'dashboard-toolbar',
       'needs-attention-panel',
       'happening-now-section',
       'recent-outcomes-section',
@@ -213,7 +213,7 @@ for (const width of NARROW_WIDTHS) {
     ]);
 
     // One column: every section starts on the same left edge and spans it.
-    const boxes = await page.evaluate(() => ['summary-strip', 'needs-attention-panel', 'happening-now-section', 'recent-outcomes-section', 'historical-stats-section']
+    const boxes = await page.evaluate(() => ['dashboard-toolbar', 'needs-attention-panel', 'happening-now-section', 'recent-outcomes-section', 'historical-stats-section']
       .map(id => {
         const rect = (document.querySelector(`[data-testid="${id}"]`) as HTMLElement).getBoundingClientRect();
         return { id, left: Math.round(rect.left), width: Math.round(rect.width) };
@@ -248,6 +248,34 @@ test('the wide layout keeps live work in the main column and the supporting pane
   await capture(page, 'dashboard-responsive-1440');
 });
 
+test('the wide toolbar is one 36px row and both columns hang directly off it', async ({ page }) => {
+  await openDashboard(page, 1440);
+
+  const geometry = await page.evaluate(() => {
+    const rect = (selector: string) => (document.querySelector(selector) as HTMLElement).getBoundingClientRect();
+    const toolbar = rect('[data-testid="dashboard-toolbar"]');
+    return {
+      height: Math.round(toolbar.height),
+      bottom: Math.round(toolbar.bottom),
+      left: Math.round(toolbar.left),
+      right: Math.round(toolbar.right),
+      headingLeft: Math.round(rect('[data-testid="dashboard-toolbar"] h1').left),
+      filterRight: Math.round(rect('[data-testid="dashboard-toolbar"] button').right),
+      running: Math.round(rect('[data-testid="happening-now-section"]').top),
+      attention: Math.round(rect('[data-testid="needs-attention-panel"]').top),
+    };
+  });
+
+  // Page name on the left, filter on the right, both inside the 12px rail.
+  expect(geometry.height).toBe(36);
+  expect(geometry.headingLeft - geometry.left).toBe(12);
+  expect(geometry.right - geometry.filterRight).toBe(12);
+  // No counts strip and no margin: both columns start on the toolbar's rule.
+  await expect(page.getByTestId('summary-strip')).toHaveCount(0);
+  expect(geometry.running).toBe(geometry.bottom);
+  expect(geometry.attention).toBe(geometry.bottom);
+});
+
 test('an empty attention list holds the right column instead of collapsing it', async ({ page }) => {
   await openDashboard(page, 1440, []);
 
@@ -256,7 +284,6 @@ test('an empty attention list holds the right column instead of collapsing it', 
   await expect(page.getByTestId('needs-attention-panel')).toBeVisible();
   await expect(page.getByRole('heading', { name: /Needs attention/ })).toHaveText('Needs attention (0)');
   await expect(page.getByTestId('needs-attention-empty')).toBeVisible();
-  await expect(page.getByTestId('summary-needs-attention')).toHaveAttribute('data-emphasis', 'false');
 
   const boxes = await page.evaluate(() => Object.fromEntries(
     ['needs-attention-panel', 'happening-now-section', 'recent-outcomes-section', 'historical-stats-section'].map(id => {
@@ -506,28 +533,29 @@ for (const width of NARROW_WIDTHS) {
     await capture(page, `dashboard-responsive-${width}-end`);
   });
 
-  test(`the four summary counts hold one row as a micro-grid at ${width}px`, async ({ page }) => {
+  test(`the toolbar is one 36px row with the panes attached beneath it at ${width}px`, async ({ page }) => {
     await openDashboard(page, width);
 
-    const counts = await page.evaluate(() => ['summary-needs-attention', 'summary-running', 'summary-queued', 'summary-completed']
-      .map(id => {
-        const node = document.querySelector(`[data-testid="${id}"]`) as HTMLElement;
-        const rect = node.getBoundingClientRect();
-        // innerText, so the labels CSS hides at this width are not counted.
-        return { id, top: Math.round(rect.top), width: Math.round(rect.width), text: node.innerText.trim() };
-      }));
-
-    // One row of four equal columns: "Completed today" used to wrap onto an
-    // orphaned second line with nothing beside it.
-    expect(new Set(counts.map(count => count.top)).size).toBe(1);
-    expect(new Set(counts.map(count => count.width)).size).toBe(1);
-    // One word per column on a phone, and never the phrase that would not fit.
-    // The labels are uppercased by CSS, which `innerText` reports as rendered.
-    const spoken = counts.map(count => count.text.toLowerCase());
-    for (const [index, word] of ['attention', 'running', 'queued', 'done'].entries()) {
-      expect(spoken[index]).toContain(word);
-    }
-    expect(spoken[0]).not.toContain('needs attention');
-    expect(spoken[3]).not.toContain('completed today');
+    // The page name and the repository filter share a single row, even at
+    // 320px, and the first pane starts on the toolbar's bottom rule.
+    const geometry = await page.evaluate(() => {
+      const rect = (selector: string) => (document.querySelector(selector) as HTMLElement).getBoundingClientRect();
+      const toolbar = rect('[data-testid="dashboard-toolbar"]');
+      const heading = rect('[data-testid="dashboard-toolbar"] h1');
+      const filter = rect('[data-testid="dashboard-toolbar"] button');
+      return {
+        height: Math.round(toolbar.height),
+        bottom: Math.round(toolbar.bottom),
+        headingTop: Math.round(heading.top),
+        filterTop: Math.round(filter.top),
+        filterRight: Math.round(filter.right),
+        firstPane: Math.round(rect('[data-testid="needs-attention-panel"]').top),
+      };
+    });
+    expect(geometry.height).toBe(36);
+    expect(geometry.filterRight).toBeLessThanOrEqual(width);
+    expect(Math.abs(geometry.headingTop - geometry.filterTop)).toBeLessThanOrEqual(8);
+    expect(geometry.firstPane).toBe(geometry.bottom);
+    await expect(page.getByTestId('summary-strip')).toHaveCount(0);
   });
 }
