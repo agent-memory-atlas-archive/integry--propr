@@ -5,6 +5,7 @@ import type { RedisClientType } from 'redis';
 import { createDashboardRoutes } from '../routes/dashboardRoutes.js';
 import { createStatsRoutes } from '../routes/statsRoutes.js';
 import { getTasksFromDb } from '../routes/taskHelpers.js';
+import { MAX_WORK_ROWS } from '../routes/dashboardQueries.js';
 import {
   NOW,
   call,
@@ -28,11 +29,18 @@ interface QueueStub {
   paused?: boolean;
   activeCount?: number;
   workers?: number;
+  /** Concurrency each live worker publishes; null models a worker that publishes none. */
+  capacityPerWorker?: number | null;
 }
 
 function routes(queue: QueueStub = {}, liveDetails?: (taskId: string) => Promise<{ currentTask?: string | null } | null>) {
+  const workerIds = Array.from({ length: queue.workers ?? 1 }, (_, index) => `worker:${index}`);
+  const capacityPerWorker = queue.capacityPerWorker === undefined ? 1 : queue.capacityPerWorker;
   const redisClient = {
-    sCard: async () => queue.workers ?? 1,
+    sMembers: async () => workerIds,
+    hGetAll: async () => (capacityPerWorker === null
+      ? {}
+      : Object.fromEntries(workerIds.map(id => [id, String(capacityPerWorker)]))),
   } as unknown as RedisClientType;
   return createDashboardRoutes({
     db: database,
@@ -76,18 +84,21 @@ test('summary returns four integer counts that match the active endpoint for the
   assert.equal((scopedActive.body.running as unknown[]).length, scopedSummary.body.running);
 });
 
-/** The task page behind a dashboard count, asked for its total only. */
-async function taskPageTotal(status: string, repository: string): Promise<number> {
+/** The task page behind a dashboard count. */
+async function taskPage(status: string, repository: string, limit = 0): Promise<{ total: number; ids: string[] }> {
   const page = await getTasksFromDb({
     db: database,
     status,
     repository,
-    limit: 0,
+    limit,
     offset: 0,
-    previewReader: { project: async () => [] } as never,
+    previewReader: { project: async (rows: unknown[]) => rows.map(() => ({ previews: [] })) } as never,
   });
-  return page.total;
+  return { total: page.total, ids: (page.tasks as Array<{ id: string }>).map(task => task.id) };
 }
+
+const taskPageTotal = async (status: string, repository: string): Promise<number> =>
+  (await taskPage(status, repository)).total;
 
 test('the dashboard and the task pages count the same work for the same filter', async () => {
   await seedTask({ taskId: 'count-running-1', issueNumber: 111, states: [{ state: 'claude_execution', timestamp: minutesAgo(12) }] });
@@ -241,8 +252,22 @@ test('queue reason is null unless the backend knows why work is waiting', async 
   const idle = await call(routes({ activeCount: 0, workers: 2 }).getActive, { repository: 'all' });
   assert.equal((idle.body.queue as { reason: string | null }).reason, null);
 
+  // Two workers of one slot each, three jobs running: capacity really is gone.
   const busy = await call(routes({ activeCount: 3, workers: 2 }).getActive, { repository: 'all' });
   assert.equal((busy.body.queue as { reason: string | null }).reason, 'All agents are busy');
+
+  // One active job against ten published slots is not a busy fleet, so the
+  // backend has no verified explanation to offer.
+  const spare = await call(routes({ activeCount: 1, workers: 2, capacityPerWorker: 5 }).getActive, { repository: 'all' });
+  assert.equal((spare.body.queue as { reason: string | null }).reason, null);
+
+  const exhausted = await call(routes({ activeCount: 10, workers: 2, capacityPerWorker: 5 }).getActive, { repository: 'all' });
+  assert.equal((exhausted.body.queue as { reason: string | null }).reason, 'All agents are busy');
+
+  // A live worker that publishes no capacity leaves the total unknown, and an
+  // unknown total can never be declared exhausted.
+  const unknown = await call(routes({ activeCount: 9, workers: 2, capacityPerWorker: null }).getActive, { repository: 'all' });
+  assert.equal((unknown.body.queue as { reason: string | null }).reason, null);
 
   const paused = await call(routes({ paused: true, activeCount: 3, workers: 2 }).getActive, { repository: 'all' });
   assert.equal((paused.body.queue as { reason: string | null }).reason, 'Queue processing is paused');
@@ -308,6 +333,105 @@ test('outcomes carry a recorded critique score and stay null when none was recor
   const items = outcomes.body.items as Array<Record<string, unknown>>;
   assert.equal(items.find(item => item.taskId === 'scored')?.score, 8);
   assert.equal(items.find(item => item.taskId === 'unscored')?.score, null);
+});
+
+
+test('the attention count opens a list of exactly the work it counted', async () => {
+  // A failure the system is already retrying: counted by neither side.
+  await seedTask({ taskId: 'recovering-run', issueNumber: 301, createdAt: minutesAgo(120), states: [{ state: 'failed', timestamp: minutesAgo(110), reason: 'Flaky' }] });
+  await seedTask({ taskId: 'recovering-retry', issueNumber: 301, createdAt: minutesAgo(20), states: [{ state: 'queued', timestamp: minutesAgo(20) }] });
+  // A failure nobody is fixing, and work explicitly waiting on a person.
+  await seedTask({ taskId: 'stuck-run', issueNumber: 302, states: [{ state: 'failed', timestamp: minutesAgo(95), reason: 'Compile error' }] });
+  await seedTask({ taskId: 'asking-run', issueNumber: 303, states: [{ state: 'action_required', timestamp: minutesAgo(70), reason: 'Credentials expired' }] });
+  // A completed run whose pull request is waiting on a review decision, and
+  // one whose plan issue never recorded which run produced it.
+  await seedTask({ taskId: 'reviewable-run', issueNumber: 304, prNumber: 3040, states: [{ state: 'completed', timestamp: minutesAgo(60) }] });
+  await seedTask({ taskId: 'unlinked-run', issueNumber: 305, prNumber: 3050, states: [{ state: 'completed', timestamp: minutesAgo(50) }] });
+  await database('plan_issues').insert([
+    { draft_id: 'draft-3', repository: 'integry/propr', issue_number: 304, pr_number: 3040, status: 'under_review', task_id: 'reviewable-run', created_at: daysAgo(1), updated_at: minutesAgo(40) },
+    { draft_id: 'draft-3', repository: 'integry/propr', issue_number: 305, pr_number: 3050, status: 'under_review', task_id: null, created_at: daysAgo(1), updated_at: minutesAgo(35) },
+  ]);
+
+  const dashboard = routes();
+  const summary = await call(dashboard.getSummary, { repository: 'all' });
+  const attention = await call(dashboard.getAttention, { repository: 'all' });
+  const counted = (attention.body.items as Array<{ taskId: string | null }>).map(item => item.taskId);
+  assert.deepEqual(counted.slice().sort(), ['asking-run', 'reviewable-run', 'stuck-run', 'unlinked-run']);
+
+  // The list the count links to is that same projection, not a state match:
+  // the recovering failure is absent from both, and both review decisions are
+  // present in both — including the one that had to be resolved to its run.
+  const page = await taskPage('attention', 'all', 20);
+  assert.deepEqual(page.ids.slice().sort(), counted.slice().sort());
+  assert.equal(page.total, summary.body.needsAttention);
+  assert.equal(await taskPageTotal('attention', 'integry/propr'), summary.body.needsAttention);
+});
+
+test('a recorded failure survives the retry that follows it', async () => {
+  // The run failed, and a retry of the same task has already started.
+  await seedTask({
+    taskId: 'retried-run', issueNumber: 401,
+    states: [
+      { state: 'claude_execution', timestamp: minutesAgo(120) },
+      { state: 'failed', timestamp: minutesAgo(100), reason: 'Tests failed' },
+      { state: 'pending', timestamp: minutesAgo(10) },
+    ],
+  });
+  await seedTask({ taskId: 'clean-run', issueNumber: 402, states: [{ state: 'completed', timestamp: minutesAgo(90) }] });
+
+  const outcomes = await call(routes().getOutcomes, { repository: 'all' });
+  const items = outcomes.body.items as Array<Record<string, unknown>>;
+  // The failure is an event that happened; the task moving on does not unhappen it.
+  assert.deepEqual(items.map(item => [item.taskId, item.kind]), [
+    ['clean-run', 'completed'],
+    ['retried-run', 'failed'],
+  ]);
+  assert.equal(items[1].detail, 'Tests failed');
+  assert.equal(new Set(items.map(item => item.id)).size, items.length);
+
+  // A run that failed and was then retried to success keeps both outcomes.
+  await database('task_history').insert([
+    { task_id: 'retried-run', state: 'claude_execution', timestamp: minutesAgo(8), metadata: '{}' },
+    { task_id: 'retried-run', state: 'completed', timestamp: minutesAgo(5), metadata: '{}' },
+  ]);
+  const after = await call(routes().getOutcomes, { repository: 'all' });
+  assert.deepEqual((after.body.items as Array<Record<string, unknown>>).map(item => [item.taskId, item.kind]), [
+    ['retried-run', 'completed'],
+    ['clean-run', 'completed'],
+    ['retried-run', 'failed'],
+  ]);
+});
+
+test('the recent-completion row limit never hides running work or shrinks a count', async () => {
+  // One running task, older than a flood of completions that would fill the
+  // row budget several times over.
+  await seedTask({ taskId: 'long-runner', issueNumber: 501, createdAt: minutesAgo(600), states: [{ state: 'claude_execution', timestamp: minutesAgo(600) }] });
+
+  const completions = MAX_WORK_ROWS + 1;
+  const tasks = [];
+  const history = [];
+  for (let index = 0; index < completions; index += 1) {
+    const taskId = `flood-${index}`;
+    const timestamp = minutesAgo(120 - (index % 100));
+    tasks.push({
+      task_id: taskId, repository: 'integry/propr', issue_number: 10_000 + index, pr_number: null,
+      task_type: 'issue', model_name: 'claude-opus-5', created_at: timestamp,
+      initial_job_data: JSON.stringify({ title: taskId }), final_result: null,
+    });
+    history.push({ task_id: taskId, state: 'completed', timestamp, reason: null, metadata: '{}' });
+  }
+  await database.batchInsert('tasks', tasks, 500);
+  await database.batchInsert('task_history', history, 500);
+
+  const dashboard = routes();
+  const summary = await call(dashboard.getSummary, { repository: 'all' });
+  assert.equal(summary.body.running, 1);
+  // The count of finished work is aggregated, not the length of a capped list.
+  assert.equal(summary.body.completedRecently, completions);
+
+  const active = await call(dashboard.getActive, { repository: 'all' });
+  assert.deepEqual((active.body.running as Array<{ taskId: string }>).map(item => item.taskId), ['long-runner']);
+  assert.deepEqual(active.body.counts, { running: 1, queued: 0 });
 });
 
 test('every dashboard endpoint rejects a malformed repository filter with HTTP 400', async () => {

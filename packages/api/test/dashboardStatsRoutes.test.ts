@@ -72,6 +72,33 @@ test('dashboard stats compare against the previous period and report recorded sp
   assert.equal((empty.body.dailyCompleted as unknown[]).length, 30);
 });
 
+test('historical stats keep a recorded failure once its retry starts', async () => {
+  await seedTask({
+    taskId: 'retried', repository: 'acme/history', issueNumber: 1,
+    states: [
+      { state: 'failed', timestamp: daysAgo(3), reason: 'nope' },
+      // The retry is under way: the run's current state is no longer terminal.
+      { state: 'pending', timestamp: daysAgo(1) },
+    ],
+  });
+  await seedTask({ taskId: 'clean', repository: 'acme/history', issueNumber: 2, states: [{ state: 'completed', timestamp: daysAgo(2) }] });
+
+  const stats = createStatsRoutes({ db: database, now: () => NOW });
+  const current = await call(stats.getDashboardStats, { repository: 'acme/history', period: '7d' });
+  // One run finished well and one finished badly. Starting a retry does not
+  // turn the instance's history into a perfect record.
+  assert.equal(current.body.completed, 1);
+  assert.equal(current.body.successRate, 50);
+
+  // Repeated entries for the same outcome stay one finished run.
+  await database('task_history').insert([
+    { task_id: 'clean', state: 'completed', timestamp: daysAgo(2), metadata: '{}' },
+  ]);
+  const deduplicated = await call(stats.getDashboardStats, { repository: 'acme/history', period: '7d' });
+  assert.equal(deduplicated.body.completed, 1);
+  assert.equal(deduplicated.body.successRate, 50);
+});
+
 test('dashboard stats reject an unsupported period', async () => {
   const stats = createStatsRoutes({ db: database, now: () => NOW });
   const rejected = await call(stats.getDashboardStats, { repository: 'all', period: '90d' });

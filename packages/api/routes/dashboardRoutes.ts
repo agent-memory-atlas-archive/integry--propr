@@ -31,6 +31,9 @@ import {
 
 /** Running work we will pay for a live-details projection on in one request. */
 const MAX_LIVE_DETAIL_LOOKUPS = 20;
+/** Where `src/worker.ts` heartbeats its identity and the concurrency it runs at. */
+const WORKER_SET_KEY = 'system:status:workers';
+const WORKER_CAPACITY_KEY = 'system:status:worker-capacity';
 const DEFAULT_OUTCOME_LIMIT = 20;
 const MAX_OUTCOME_LIMIT = 100;
 
@@ -133,19 +136,45 @@ export function createDashboardRoutes(deps: DashboardRoutesDeps) {
   });
 
   /**
+   * How many jobs the live workers can run at once, or null when that is not
+   * knowable.
+   *
+   * Each worker publishes the concurrency it was started with beside its
+   * heartbeat. A worker that is in the live set but has published no capacity
+   * — an older build, or an entry whose capacity key has expired — makes the
+   * total unknown rather than smaller: guessing low would let the dashboard
+   * announce exhausted capacity that may not be exhausted.
+   */
+  async function workerCapacity(workerIds: readonly string[]): Promise<number | null> {
+    const published = await redisClient.hGetAll(WORKER_CAPACITY_KEY) as Record<string, string>;
+    let capacity = 0;
+    for (const workerId of workerIds) {
+      const reported = Number(published[workerId]);
+      if (!Number.isFinite(reported) || reported <= 0) return null;
+      capacity += reported;
+    }
+    return capacity;
+  }
+
+  /**
    * Why queued work is still queued, but only when the backend genuinely knows.
    *
-   * BullMQ workers claim waiting jobs as soon as a slot frees, so work that is
-   * still waiting while other jobs are active means every slot is taken. No
-   * estimated start time is ever returned.
+   * A paused queue and an empty worker set are checked directly. "All agents
+   * are busy" is a claim about capacity, so it is only made once the active
+   * job count is compared with the capacity the live workers actually report:
+   * one busy agent out of five is not a busy fleet, and saying so would
+   * explain the wait with something the backend never verified.
    */
   async function queueReason(queuedCount: number): Promise<string | null> {
     if (queuedCount === 0) return null;
     try {
       if (await taskQueue.isPaused()) return 'Queue processing is paused';
-      const workers = await redisClient.sCard('system:status:workers');
-      if (Number(workers) === 0) return 'No workers are running';
-      return (await taskQueue.getActiveCount()) > 0 ? 'All agents are busy' : null;
+      const workers = await redisClient.sMembers(WORKER_SET_KEY);
+      if (workers.length === 0) return 'No workers are running';
+
+      const capacity = await workerCapacity(workers);
+      if (capacity === null) return null;
+      return (await taskQueue.getActiveCount()) >= capacity ? 'All agents are busy' : null;
     } catch {
       return null;
     }

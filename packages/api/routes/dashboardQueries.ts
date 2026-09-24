@@ -55,11 +55,24 @@ void PLAN_ISSUE_STATUSES_ARE_VALID;
 
 /**
  * How far back an unresolved failure is still considered actionable, and how
- * many work rows a single dashboard read will project. Both bound the work set
- * on busy instances; neither changes how a listed item is classified.
+ * many *finished* rows a single dashboard read will project.
+ *
+ * `MAX_WORK_ROWS` bounds recent completions only. Open work — running, queued
+ * and action-required tasks — and the unresolved failures behind the attention
+ * count are never truncated by it: a display limit that drops a running task
+ * would make the running count claim that work does not exist.
  */
 export const WORK_LOOKBACK_DAYS = 14;
 export const MAX_WORK_ROWS = 2000;
+
+/** Bound on one `IN (...)` list, so a large failure set cannot overflow a bind limit. */
+const ID_CHUNK_SIZE = 500;
+
+function chunk<T>(values: readonly T[], size: number = ID_CHUNK_SIZE): T[][] {
+  const chunks: T[][] = [];
+  for (let index = 0; index < values.length; index += size) chunks.push(values.slice(index, index + size));
+  return chunks;
+}
 
 /** Rolling window used by the summary strip's "completed" count. */
 export const RECENT_COMPLETION_WINDOW_HOURS = 24;
@@ -71,8 +84,6 @@ const ATTENTION = new Set<string>(ATTENTION_TASK_STATES);
 export const isRunningState = (state: string): boolean => RUNNING.has(state);
 export const isQueuedState = (state: string): boolean => QUEUED.has(state);
 export const isAttentionState = (state: string): boolean => ATTENTION.has(state);
-export const isFailedState = (state: string): boolean => state === 'failed';
-export const isCompletedState = (state: string): boolean => state === 'completed';
 
 /** Human-readable phase for a lifecycle state. Never a synthesised percentage. */
 export function phaseLabel(state: string): string | null {
@@ -195,35 +206,123 @@ const TASK_COLUMNS = [
   'h.state', 'h.timestamp as state_timestamp', 'h.reason',
 ];
 
+/** A completion that can supersede a failure in the same thread. */
+export interface ThreadCompletion {
+  key: string;
+  completedAt: string;
+}
+
 /**
- * Loads the open work set plus recently terminal work.
+ * One dashboard read's task rows, split by how each set may be bounded.
  *
- * Non-terminal work is always loaded; completed and failed work is bounded by
- * `WORK_LOOKBACK_DAYS` because a failure older than that is history, not an
- * open blocker, and because the recent-completion count only looks back hours.
+ * `open` and `failed` decide counts the dashboard states as fact, so neither
+ * is truncated. Only `recentlyCompleted` — a display sample — carries a row
+ * limit, and the count beside it is read from the database rather than from
+ * the sample, so a limit can never shrink a number.
+ */
+export interface DashboardWorkRows {
+  /** Every task whose latest state is running, queued or action-required. */
+  open: DashboardTaskRow[];
+  /** Every task whose latest state is a failure inside the lookback window. */
+  failed: DashboardTaskRow[];
+  /** Completions that could supersede one of `failed`, whatever the row limit. */
+  supersedingCompletions: ThreadCompletion[];
+  /** A bounded, newest-first sample of completions inside the recent window. */
+  recentlyCompleted: DashboardTaskRow[];
+  /** How many completions the recent window actually holds. */
+  completedRecentlyCount: number;
+}
+
+/**
+ * Completions that can retire one of the loaded failures.
+ *
+ * Only the issue threads that actually have a failure are read, so recovery
+ * detection stays correct without loading every completion on the instance.
+ * A failure on a task with no issue number is its own thread, and that task's
+ * latest state is the failure, so no completion can supersede it.
+ */
+async function loadSupersedingCompletions(
+  db: Knex,
+  repository: string,
+  failed: readonly DashboardTaskRow[],
+  since: string,
+): Promise<ThreadCompletion[]> {
+  const issueNumbers = [...new Set(
+    failed.map(row => row.issueNumber).filter((value): value is number => value !== null),
+  )];
+  if (issueNumbers.length === 0) return [];
+
+  const completions: ThreadCompletion[] = [];
+  for (const batch of chunk(issueNumbers)) {
+    const rows = await latestTaskStateQuery(db, repository)
+      .where('h.state', 'completed')
+      .where('h.timestamp', '>=', since)
+      .whereIn('t.issue_number', batch)
+      .select('t.task_id', 't.repository', 't.issue_number', 'h.timestamp as state_timestamp') as Array<Record<string, unknown>>;
+    for (const row of rows) {
+      completions.push({
+        key: workKey({
+          repository: String(row.repository),
+          issueNumber: row.issue_number === null || row.issue_number === undefined ? null : Number(row.issue_number),
+          taskId: String(row.task_id),
+        }),
+        completedAt: toIso(row.state_timestamp),
+      });
+    }
+  }
+  return completions;
+}
+
+/**
+ * Loads the open work set plus the finished work the dashboard reasons about.
+ *
+ * Open work and unresolved failures are read in full: they are what the
+ * running, queued and attention counts describe. Completed work is bounded by
+ * `WORK_LOOKBACK_DAYS` because a completion older than that cannot retire a
+ * listed failure, and the recent-completion sample is bounded by
+ * `MAX_WORK_ROWS` while its count is aggregated in the database.
  */
 export async function loadDashboardWorkRows(
   db: Knex,
   repository: string,
-  options: { now?: Date; lookbackDays?: number } = {},
-): Promise<DashboardTaskRow[]> {
+  options: { now?: Date; lookbackDays?: number; recentWindowHours?: number } = {},
+): Promise<DashboardWorkRows> {
   const now = options.now ?? new Date();
   const lookbackDays = options.lookbackDays ?? WORK_LOOKBACK_DAYS;
   const lookback = new Date(now.getTime() - lookbackDays * 24 * 60 * 60 * 1000).toISOString();
+  const recentWindowHours = options.recentWindowHours ?? RECENT_COMPLETION_WINDOW_HOURS;
+  const recentSince = new Date(now.getTime() - recentWindowHours * 60 * 60 * 1000).toISOString();
   const openStates = [...RUNNING_TASK_STATES, ...QUEUED_TASK_STATES, ...ATTENTION_TASK_STATES];
 
-  const rows = await latestTaskStateQuery(db, repository)
-    .where(function (this: Knex.QueryBuilder) {
-      this.whereIn('h.state', openStates)
-        .orWhere(function (this: Knex.QueryBuilder) {
-          this.whereIn('h.state', ['failed', 'completed']).andWhere('h.timestamp', '>=', lookback);
-        });
-    })
-    .select(TASK_COLUMNS)
-    .orderBy('h.timestamp', 'desc')
-    .limit(MAX_WORK_ROWS) as unknown as RawTaskRow[];
+  const recentCompletions = (): Knex.QueryBuilder => latestTaskStateQuery(db, repository)
+    .where('h.state', 'completed')
+    .where('h.timestamp', '>=', recentSince);
 
-  return rows.map(mapTaskRow);
+  const [openRows, failedRows, recentRows, recentCount] = await Promise.all([
+    latestTaskStateQuery(db, repository)
+      .whereIn('h.state', openStates)
+      .select(TASK_COLUMNS)
+      .orderBy('h.timestamp', 'desc') as unknown as Promise<RawTaskRow[]>,
+    latestTaskStateQuery(db, repository)
+      .where('h.state', 'failed')
+      .where('h.timestamp', '>=', lookback)
+      .select(TASK_COLUMNS)
+      .orderBy('h.timestamp', 'desc') as unknown as Promise<RawTaskRow[]>,
+    recentCompletions()
+      .select(TASK_COLUMNS)
+      .orderBy('h.timestamp', 'desc')
+      .limit(MAX_WORK_ROWS) as unknown as Promise<RawTaskRow[]>,
+    recentCompletions().count({ total: '*' }).first() as Promise<{ total?: number | string } | undefined>,
+  ]);
+
+  const failed = failedRows.map(mapTaskRow);
+  return {
+    open: openRows.map(mapTaskRow),
+    failed,
+    supersedingCompletions: await loadSupersedingCompletions(db, repository, failed, lookback),
+    recentlyCompleted: recentRows.map(mapTaskRow),
+    completedRecentlyCount: Number(recentCount?.total ?? 0),
+  };
 }
 
 export interface PlanIssueDecisionRow {
@@ -236,6 +335,40 @@ export interface PlanIssueDecisionRow {
   updatedAt: string;
 }
 
+/**
+ * The run behind a plan issue that never recorded one.
+ *
+ * A pull request under review was produced by a task, but older plan issues
+ * were written without the link. Resolving the newest task on the same issue
+ * thread gives the decision the same task identity the rest of the dashboard
+ * uses, so the list a count opens can show the work the count is about.
+ */
+async function resolveDecisionTasks(
+  db: Knex,
+  repository: string,
+  decisions: readonly PlanIssueDecisionRow[],
+): Promise<Map<string, string>> {
+  const issueNumbers = [...new Set(decisions.filter(row => row.taskId === null).map(row => row.issueNumber))];
+  if (issueNumbers.length === 0) return new Map();
+
+  const newestByThread = new Map<string, string>();
+  for (const batch of chunk(issueNumbers)) {
+    const query = db('tasks as t')
+      .where(function (this: Knex.QueryBuilder) {
+        this.whereNull('t.task_type').orWhereNot('t.task_type', 'goal');
+      })
+      .whereIn('t.issue_number', batch)
+      .select('t.task_id', 't.repository', 't.issue_number')
+      // Ascending, so the last write for a thread is its newest run.
+      .orderBy('t.created_at', 'asc');
+    if (repository && repository !== 'all') query.where('t.repository', repository);
+    for (const row of await query as Array<Record<string, unknown>>) {
+      newestByThread.set(`${String(row.repository)}#${Number(row.issue_number)}`, String(row.task_id));
+    }
+  }
+  return newestByThread;
+}
+
 /** Plan issues waiting on a human decision, oldest first. */
 export async function loadPlanIssueDecisions(db: Knex, repository: string): Promise<PlanIssueDecisionRow[]> {
   const query = db('plan_issues')
@@ -246,7 +379,7 @@ export async function loadPlanIssueDecisions(db: Knex, repository: string): Prom
   if (repository && repository !== 'all') query.where('repository', repository);
 
   const rows = await query as Array<Record<string, unknown>>;
-  return rows.map(row => ({
+  const decisions = rows.map(row => ({
     id: Number(row.id),
     repository: String(row.repository),
     issueNumber: Number(row.issue_number),
@@ -255,6 +388,11 @@ export async function loadPlanIssueDecisions(db: Knex, repository: string): Prom
     taskId: row.task_id === null || row.task_id === undefined ? null : String(row.task_id),
     updatedAt: toIso(row.updated_at),
   }));
+
+  const resolved = await resolveDecisionTasks(db, repository, decisions);
+  return decisions.map(decision => decision.taskId !== null
+    ? decision
+    : { ...decision, taskId: resolved.get(`${decision.repository}#${decision.issueNumber}`) ?? null });
 }
 
 /**
@@ -284,6 +422,7 @@ export interface DashboardWorkProjection {
   running: DashboardTaskRow[];
   queued: DashboardTaskRow[];
   attention: AttentionItem[];
+  /** A capped sample; `counts.completedRecently` is the real total. */
   recentlyCompleted: DashboardTaskRow[];
   counts: {
     needsAttention: number;
@@ -301,20 +440,16 @@ export interface DashboardWorkProjection {
  * The system is already fixing it, so it belongs in `active`, not `attention`.
  */
 export function projectDashboardWork(
-  rows: readonly DashboardTaskRow[],
+  rows: DashboardWorkRows,
   planIssues: readonly PlanIssueDecisionRow[],
-  options: { now?: Date; recentWindowHours?: number } = {},
 ): DashboardWorkProjection {
-  const now = options.now ?? new Date();
-  const recentWindowMs = (options.recentWindowHours ?? RECENT_COMPLETION_WINDOW_HOURS) * 60 * 60 * 1000;
-
   const running: DashboardTaskRow[] = [];
   const queued: DashboardTaskRow[] = [];
-  const recentlyCompleted: DashboardTaskRow[] = [];
+  const attentionRows: DashboardTaskRow[] = [];
   const recovering = new Set<string>();
   const completedAt = new Map<string, number>();
 
-  for (const row of rows) {
+  for (const row of rows.open) {
     const key = workKey(row);
     if (isRunningState(row.state)) {
       running.push(row);
@@ -322,33 +457,34 @@ export function projectDashboardWork(
     } else if (isQueuedState(row.state)) {
       queued.push(row);
       recovering.add(key);
-    } else if (isCompletedState(row.state)) {
-      const timestamp = Date.parse(row.stateTimestamp);
-      completedAt.set(key, Math.max(completedAt.get(key) ?? 0, timestamp));
-      if (now.getTime() - timestamp <= recentWindowMs) recentlyCompleted.push(row);
+    } else if (isAttentionState(row.state)) {
+      attentionRows.push(row);
     }
   }
 
+  for (const completion of rows.supersedingCompletions) {
+    const timestamp = Date.parse(completion.completedAt);
+    completedAt.set(completion.key, Math.max(completedAt.get(completion.key) ?? 0, timestamp));
+  }
+
   const blocked: AttentionItem[] = [];
-  for (const row of rows) {
+  for (const row of attentionRows) {
+    blocked.push({
+      id: `task:${row.taskId}`,
+      category: 'blocked',
+      kind: 'task_action_required',
+      taskId: row.taskId,
+      repository: row.repository,
+      issueNumber: row.issueNumber,
+      prNumber: row.prNumber,
+      title: row.title,
+      state: row.state,
+      detail: row.reason,
+      since: row.stateTimestamp,
+    });
+  }
+  for (const row of rows.failed) {
     const key = workKey(row);
-    if (isAttentionState(row.state)) {
-      blocked.push({
-        id: `task:${row.taskId}`,
-        category: 'blocked',
-        kind: 'task_action_required',
-        taskId: row.taskId,
-        repository: row.repository,
-        issueNumber: row.issueNumber,
-        prNumber: row.prNumber,
-        title: row.title,
-        state: row.state,
-        detail: row.reason,
-        since: row.stateTimestamp,
-      });
-      continue;
-    }
-    if (!isFailedState(row.state)) continue;
     // Already being retried or auto-recovered, or superseded by a later success.
     if (recovering.has(key)) continue;
     if ((completedAt.get(key) ?? 0) > Date.parse(row.stateTimestamp)) continue;
@@ -393,27 +529,54 @@ export function projectDashboardWork(
     running: [...running].sort(byOldest),
     queued: [...queued].sort(byOldest),
     attention,
-    recentlyCompleted,
+    recentlyCompleted: rows.recentlyCompleted,
     counts: {
       needsAttention: attention.length,
       running: running.length,
       queued: queued.length,
-      completedRecently: recentlyCompleted.length,
+      // Counted in the database: the sample above is capped for display, and a
+      // display cap must never be reported as how much work finished.
+      completedRecently: rows.completedRecentlyCount,
     },
   };
+}
+
+/**
+ * The task identities behind the attention list.
+ *
+ * The attention count links to a task list, and that list has to be the same
+ * work: the same recovery exclusions, the same plan reviews awaiting a
+ * decision, and the runs behind decisions that never recorded a task link. So
+ * the list is built from this projection rather than from a second guess at
+ * what "needs attention" means.
+ */
+export async function loadAttentionTaskIds(
+  db: Knex,
+  repository: string,
+  options: { now?: Date } = {},
+): Promise<string[]> {
+  const work = await loadDashboardWork(db, repository, options);
+  const taskIds: string[] = [];
+  const seen = new Set<string>();
+  for (const item of work.attention) {
+    if (item.taskId === null || seen.has(item.taskId)) continue;
+    seen.add(item.taskId);
+    taskIds.push(item.taskId);
+  }
+  return taskIds;
 }
 
 /** One dashboard read of every work source, already projected. */
 export async function loadDashboardWork(
   db: Knex,
   repository: string,
-  options: { now?: Date } = {},
+  options: { now?: Date; lookbackDays?: number; recentWindowHours?: number } = {},
 ): Promise<DashboardWorkProjection> {
   const [rows, planIssues] = await Promise.all([
     loadDashboardWorkRows(db, repository, options),
     loadPlanIssueDecisions(db, repository),
   ]);
-  return projectDashboardWork(rows, planIssues, options);
+  return projectDashboardWork(rows, planIssues);
 }
 
 export interface OutcomeRow extends DashboardTaskRow {
@@ -423,12 +586,61 @@ export interface OutcomeRow extends DashboardTaskRow {
 }
 
 /**
- * Recent terminal task runs, newest first.
+ * Tasks joined to their latest recorded transition into one terminal state.
  *
- * One row per task: a task's "implementation completed" and "PR ready"
- * progress entries share a single terminal state, so they collapse into one
- * outcome. Heartbeats, indexing updates and CI job entries never reach this
- * set because only terminal task lifecycle states are read.
+ * Outcomes are recorded events, so they are read from history rather than from
+ * a task's current state: a run that failed and is now being retried still
+ * failed, and dropping that record would rewrite both the feed and the success
+ * rate the moment the retry starts.
+ *
+ * One row per task per state is the deduplication: a task's "implementation
+ * completed" and "PR ready" entries share a terminal state and collapse into
+ * the single outcome they describe, while a task that failed and later
+ * completed keeps both of its outcomes. Confining the lookup to the window
+ * keeps an event that happened inside it from being displaced by a later one
+ * outside it. Heartbeats, indexing updates and CI entries never reach this set
+ * because only terminal task lifecycle states are read.
+ */
+export function terminalTransitionQuery(
+  db: Knex,
+  repository: string,
+  state: string,
+  window: { from?: Date; to?: Date } = {},
+): Knex.QueryBuilder {
+  const bindings: unknown[] = [state];
+  let windowSql = '';
+  if (window.from) {
+    windowSql += ' AND lh.timestamp >= ?';
+    bindings.push(window.from.toISOString());
+  }
+  if (window.to) {
+    windowSql += ' AND lh.timestamp < ?';
+    bindings.push(window.to.toISOString());
+  }
+
+  const query = db('tasks as t')
+    .where(function (this: Knex.QueryBuilder) {
+      this.whereNull('t.task_type').orWhereNot('t.task_type', 'goal');
+    })
+    .joinRaw(`
+      JOIN task_history AS h ON h.history_id = (
+        SELECT lh.history_id
+        FROM task_history AS lh
+        WHERE lh.task_id = t.task_id AND lh.state = ?${windowSql}
+        ORDER BY lh.timestamp DESC
+        LIMIT 1
+      )
+    `, bindings);
+  if (repository && repository !== 'all') query.where('t.repository', repository);
+  return query;
+}
+
+/**
+ * Recent recorded outcomes, newest first.
+ *
+ * Each terminal state is read separately and merged, so one long run of
+ * completions cannot crowd the failures out of the feed before the limit is
+ * applied to the merged, ordered result.
  */
 export async function loadOutcomeRows(
   db: Knex,
@@ -436,18 +648,21 @@ export async function loadOutcomeRows(
   options: { limit?: number; since?: Date } = {},
 ): Promise<OutcomeRow[]> {
   const limit = Math.min(Math.max(options.limit ?? 20, 1), 100);
-  const query = latestTaskStateQuery(db, repository)
-    .whereIn('h.state', [...TERMINAL_TASK_STATES])
-    .select(TASK_COLUMNS)
-    .orderBy('h.timestamp', 'desc')
-    .limit(limit);
-  if (options.since) query.where('h.timestamp', '>=', options.since.toISOString());
+  const perState = await Promise.all(TERMINAL_TASK_STATES.map(state =>
+    terminalTransitionQuery(db, repository, state, { from: options.since })
+      .select(TASK_COLUMNS)
+      .orderBy('h.timestamp', 'desc')
+      .limit(limit) as unknown as Promise<RawTaskRow[]>));
 
-  const rows = await query as unknown as RawTaskRow[];
-  const mapped = rows.map(mapTaskRow);
+  const mapped = perState.flat()
+    .map(mapTaskRow)
+    .sort((a, b) => Date.parse(b.stateTimestamp) - Date.parse(a.stateTimestamp))
+    .slice(0, limit);
   if (mapped.length === 0) return [];
 
-  const taskIds = mapped.map(row => row.taskId);
+  // One task can carry two outcomes (it failed, then a retry completed), so the
+  // enrichment reads each task once.
+  const taskIds = [...new Set(mapped.map(row => row.taskId))];
   const [planRows, scores] = await Promise.all([
     db('plan_issues')
       .whereIn('task_id', taskIds)

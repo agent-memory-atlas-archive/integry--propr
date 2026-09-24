@@ -1,7 +1,7 @@
 import { latestCommentMetadata, previewMediaReader, taskPreviewSource } from '../services/previewMediaProjection.js';
 import { Knex } from 'knex';
 import { timeApiStage } from '../apiPerformanceTiming.js';
-import { ATTENTION_TASK_STATES, QUEUED_TASK_STATES, RUNNING_TASK_STATES } from './dashboardQueries.js';
+import { loadAttentionTaskIds, QUEUED_TASK_STATES, RUNNING_TASK_STATES } from './dashboardQueries.js';
 import { loadCritiqueScores } from './critiqueScore.js';
 
 export interface TaskQuery {
@@ -23,20 +23,28 @@ export interface TaskQuery {
 // so both read one definition.
 const ACTIVE_WORKER_STATES = [...RUNNING_TASK_STATES];
 const WAITING_WORKER_STATES = [...QUEUED_TASK_STATES];
-// The dashboard's "needs attention" count covers explicit action-required work
-// plus unresolved failures, so the list that count opens must match it.
-const ATTENTION_WORKER_STATES = [...ATTENTION_TASK_STATES, 'failed'];
+
+/**
+ * The attention filter is not a state list.
+ *
+ * "Needs attention" is a judgement, not a lifecycle state: a failure the
+ * system is already retrying is not attention, and a completed run whose pull
+ * request is waiting on a review decision is. Matching states here produced a
+ * list that disagreed with the count that opens it in both directions, so the
+ * filter asks the dashboard projection which tasks those are instead.
+ */
+const ATTENTION_STATUS = 'attention';
+
+const normalizeStatus = (status: string): string => status.trim().toLowerCase();
 
 function resolveStatusStates(status: string): string[] | null {
-  switch (status.trim().toLowerCase()) {
+  switch (normalizeStatus(status)) {
     case 'active':
     case 'implementing':
       return ACTIVE_WORKER_STATES;
     case 'waiting':
     case 'pending':
       return WAITING_WORKER_STATES;
-    case 'attention':
-      return ATTENTION_WORKER_STATES;
     default:
       return null;
   }
@@ -64,7 +72,15 @@ export async function getTasksFromDb(
       )
     `);
 
-  if (status && status !== 'all') {
+  if (normalizeStatus(status) === ATTENTION_STATUS) {
+    // Exactly the work the dashboard's attention count describes, including
+    // plan reviews awaiting a decision and the runs behind decisions that
+    // recorded no task link, and excluding failures under recovery.
+    const attentionTaskIds = await timeApiStage('sql.tasks.attention', () =>
+      loadAttentionTaskIds(db, repository));
+    if (attentionTaskIds.length === 0) return { tasks: [], total: 0, offset, limit };
+    baseQuery.whereIn('t.task_id', attentionTaskIds);
+  } else if (status && status !== 'all') {
     const lifecycleStates = resolveStatusStates(status);
     if (lifecycleStates) {
       baseQuery.whereIn('h.state', lifecycleStates);
