@@ -152,11 +152,13 @@ function logHeadUnavailable(record: CiSuspensionRecord, deps: CiSuspensionDeps):
  * restart. Only a run GitHub reports as cancelled, on the attempt ProPR
  * cancelled, is owed a rerun.
  *
- * The attempt recorded at cancellation is what ProPR cancelled. A live attempt
- * beyond it proves that attempt was already rerun — by a pass that crashed
- * before it could record the restart, or by somebody at GitHub — and the
- * obligation is met. Whatever happened to the newer attempt afterwards is not
- * ProPR's doing and is never "restored" on its behalf.
+ * The attempt recorded at cancellation is the one GitHub confirmed ProPR
+ * cancelled. A live attempt beyond it proves that attempt was already rerun —
+ * by a pass that crashed before it could record the restart, or by somebody at
+ * GitHub — and the obligation is met. Whatever happened to the newer attempt
+ * afterwards is not ProPR's doing and is never "restored" on its behalf. A
+ * record without a confirmed attempt proves nothing of the kind, and is settled
+ * by the run's outcome alone.
  */
 async function assessCancelledRun(
     run: CancelledRun,
@@ -172,7 +174,7 @@ async function assessCancelledRun(
     return { rerun: { attempt: run.attempt ?? liveRun.run_attempt } };
 }
 
-/** Whether the run already moved past the attempt ProPR cancelled, which only an accepted rerun can cause. */
+/** Whether the run already moved past the attempt ProPR confirmably cancelled, which only an accepted rerun can cause. */
 function attemptAdvanced(run: CancelledRun, liveRun: WorkflowRunSummary): boolean {
     return typeof run.attempt === 'number' && typeof liveRun.run_attempt === 'number' && liveRun.run_attempt > run.attempt;
 }
@@ -181,7 +183,9 @@ function attemptAdvanced(run: CancelledRun, liveRun: WorkflowRunSummary): boolea
  * What has to hold immediately before a rerun leaves the worker: the lease is
  * still this worker's and the captured head is still the pull request's current
  * one. Returns null while both hold; otherwise the result restoration stops
- * with. Lease loss surfaces as {@link SuspensionLeaseLostError}.
+ * with. Lease loss surfaces as {@link SuspensionLeaseLostError}, and it is
+ * checked last, after the head lookup, because that lookup is where a stalled
+ * worker outlives its lease.
  */
 type RerunGate = () => Promise<RestoreSuspensionResult | null>;
 
@@ -327,10 +331,17 @@ async function restoreSuspension(
     // Proven again before every rerun and after every wait: first that the lease
     // is still this worker's, so a restart somebody else took over is never
     // duplicated from here, then that the head is still current, so an obsolete
-    // revision is never restarted once its replacement is published.
+    // revision is never restarted once its replacement is published. The head
+    // lookup is itself an awaited GitHub call, during which the lease can expire
+    // and be taken over; an unchanged head therefore proves nothing about
+    // ownership, and the lease is asserted once more after the lookup returns,
+    // immediately before the rerun leaves the worker.
     const gate: RerunGate = async () => {
         await lease?.assertHeld();
-        return releaseObsoleteHead({ record: current, octokit, restartedRunIds, pendingRunIds: pendingRunIds() }, deps);
+        const stopped = await releaseObsoleteHead({ record: current, octokit, restartedRunIds, pendingRunIds: pendingRunIds() }, deps);
+        if (stopped) return stopped;
+        await lease?.assertHeld();
+        return null;
     };
     // Writes what a pass settled before the next wait; false once the row moved
     // on without this worker. A pass the gate stopped on a released head has no

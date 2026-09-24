@@ -6,7 +6,7 @@
 import { isCancelCiDuringFollowupEnabledForRepository } from '@propr/core';
 import type { ContinuationRecord, PullRequestReference } from './prContinuation.js';
 import {
-    CiActionsPermissionError, cancelRun, getPullRequestHead, isCancelableValidationRun, listRunsForSha,
+    CiActionsPermissionError, cancelRun, getPullRequestHead, getRun, isCancelableValidationRun, listRunsForSha,
     type SuspensionTarget,
 } from './followupCiSuspensionRuns.js';
 import { resolveLog, resolveOctokit, resolvePolicy, type CiSuspensionDeps } from './followupCiSuspensionContext.js';
@@ -78,6 +78,21 @@ export function resolveFollowupCiSuspensionTarget(
  * request actually landed is not assumed either way: reconciliation reads the
  * run's real outcome later and restarts only what GitHub really cancelled.
  *
+ * Which attempt that request affects is not known until it lands either. The
+ * attempt discovery listed is a snapshot: a run that completed and was rerun
+ * in the meantime is cancelled on its newer attempt, and recording the older
+ * one would let that newer attempt pass for an accepted rerun and settle the
+ * obligation while the head's checks stay cancelled. The intent is therefore
+ * written without an attempt, and the attempt is read back from the run and
+ * recorded only once GitHub accepted the cancellation. An intent whose attempt
+ * could not be confirmed is settled by the run's real outcome alone.
+ *
+ * A conflict is the one answer that definitively rejects the request: the run
+ * was already terminal, so ProPR cancelled nothing, and the intent this request
+ * introduced is taken back — a run somebody else cancelled must never be
+ * restarted on ProPR's behalf. An obligation an earlier cancellation left
+ * behind is not this request's to settle and is kept as it was.
+ *
  * Discovery is an awaited GitHub call, which is where a stalled worker outlives
  * its lease. The lease is therefore proven to be still this worker's before
  * every write and every cancel request; once it is lost, the pass stops with
@@ -98,20 +113,32 @@ export async function cancelPendingRuns(
     for (const run of await listRunsForSha(octokit, target, headSha)) {
         if (!isCancelableValidationRun(run, { pullRequestNumber: target.pullRequestNumber, headSha, policy })) continue;
         await lease?.assertHeld();
-        const known = runs.find(entry => entry.id === run.id);
-        if (known) {
+        const index = runs.findIndex(entry => entry.id === run.id);
+        // What the record said before this request, to fall back on if the request is rejected.
+        const previous = index >= 0 ? { ...runs[index] } : undefined;
+        const intent: CancelledRun = { id: run.id, name: run.name ?? undefined, workflowId: run.workflow_id, restarted: false };
+        if (index >= 0) {
             // Known and pending again — restarted or never cancelled — so this is a
-            // fresh obligation on the current attempt either way.
-            known.restarted = false;
-            known.attempt = run.run_attempt ?? known.attempt;
+            // fresh obligation on whatever attempt the request lands on.
+            runs[index] = intent;
         } else {
-            runs.push({ id: run.id, name: run.name ?? undefined, workflowId: run.workflow_id, attempt: run.run_attempt, restarted: false });
+            runs.push(intent);
         }
         // Written before every single cancel request, including for a run that is
         // already known: the write is also the ownership check that proves this
         // pass still owns the suspension at the moment it acts on GitHub.
         if (!await persistIntent(state, deps)) return;
-        if (await cancelRun(octokit, target, run.id)) state.cancelledRunIds.push(run.id);
+        if (!await cancelRun(octokit, target, run.id)) {
+            if (previous) runs[runs.indexOf(intent)] = previous;
+            else runs.splice(runs.indexOf(intent), 1);
+            if (!await persistIntent(state, deps)) return;
+            continue;
+        }
+        state.cancelledRunIds.push(run.id);
+        const affected = await getRun(octokit, target, run.id).catch(() => undefined);
+        if (typeof affected?.run_attempt !== 'number') continue;
+        intent.attempt = affected.run_attempt;
+        if (!await persistIntent(state, deps)) return;
     }
 }
 

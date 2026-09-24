@@ -41,7 +41,12 @@ export interface CancelledRun {
     id: number;
     name?: string;
     workflowId?: number;
-    /** Attempt number at cancellation time; a higher one later proves a rerun landed. */
+    /**
+     * The attempt GitHub confirmed the cancellation affected; a higher one later
+     * proves a rerun landed. Absent while that is unconfirmed — the request was
+     * never answered, or the worker died before reading the run back — in which
+     * case only the run's own outcome can settle the obligation.
+     */
     attempt?: number;
     restarted?: boolean;
 }
