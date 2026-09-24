@@ -27,9 +27,15 @@
 const FIELD_BOLD_RE = /^[-*][ \t]+\*\*([^*]+)\*\*[ \t]*(.*)$/;
 const FIELD_PLAIN_RE = /^[-*][ \t]+([A-Za-z][A-Za-z0-9 -]*):[ \t]*(.*)$/;
 const THEMATIC_BREAK_RE = /^(?:(?:-[ \t]*){3,}|(?:\*[ \t]*){3,}|(?:_[ \t]*){3,})$/;
+/**
+ * A code fence opener. A backtick fence's info string cannot contain a
+ * backtick, so a line that starts with a closed three-backtick inline code
+ * span is paragraph text, not a fence.
+ */
+const FENCE_OPEN_SOURCE = '(`{3,})[^`]*$|(~{3,})';
+const FENCE_RE = new RegExp(`^(?:${FENCE_OPEN_SOURCE})`);
 /** Unindented text that would open a new Markdown block rather than continue a paragraph. */
-const BLOCK_START_RE = /^(?:[-*+](?:[ \t]|$)|\d{1,9}[.)](?:[ \t]|$)|#{1,6}(?:[ \t]|$)|>|`{3,}|~{3,}|\||<)/;
-const FENCE_RE = /^(`{3,}|~{3,})/;
+const BLOCK_START_RE = new RegExp(`^(?:[-*+](?:[ \\t]|$)|\\d{1,9}[.)](?:[ \\t]|$)|#{1,6}(?:[ \\t]|$)|>|${FENCE_OPEN_SOURCE}|\\||<)`);
 const HEADING_RE = /^#{1,6}(?:[ \t]|$)/;
 
 interface FieldHeader {
@@ -121,7 +127,8 @@ class RecordFieldReader {
             if (new RegExp(`^${char}{${length},}$`).test(trimmed)) this.openFence = null;
         } else {
             const fence = FENCE_RE.exec(trimmed);
-            if (fence) this.openFence = { char: fence[1][0], length: fence[1].length };
+            const marker = fence?.[1] ?? fence?.[2];
+            if (marker) this.openFence = { char: marker[0], length: marker.length };
         }
         this.current.continuation.push({ text: line, lazy: false });
         return true;

@@ -305,6 +305,45 @@ describe('multiline review fields', () => {
         assert.ok(published.includes('- **Evidence:** src/jobs/followupCiSuspensionCancel.ts:142 — the stale attempt\n  is cancelled after the operator restart.\n\n  1. First step.'));
     });
 
+    test('evidence that opens with a closed three-backtick code span survives publication and /fix selection', async () => {
+        const evidence = [
+            '```src/jobs/followupCiSuspensionCancel.ts``` cancels the stale attempt.',
+            '1. ProPR persists the cancellation intent.',
+            '2. An operator restarts the run before the cancel lands.',
+        ].join('\n');
+        const review = reviewWithF1Evidence([
+            '- **evidence:** ```src/jobs/followupCiSuspensionCancel.ts``` cancels the stale attempt.',
+            indent(evidence.split('\n').slice(1).join('\n')),
+        ]);
+        const [parsed] = parseStructuredReview(review).actionableFindings;
+        assert.strictEqual(parsed.evidence, evidence);
+
+        const published = renderPublicReview(review, undefined, { changedFilePaths: CHANGED_FILES })!;
+        assert.ok(published);
+        const reparsed = parseStructuredReview(publicComment(published).body);
+        assert.strictEqual(reparsed.status, 'valid_with_blockers');
+        assert.strictEqual(reparsed.actionableFindings[0].evidence, evidence);
+
+        const gathered = await gatherUnprocessedReviewComments([publicComment(published)], gatherOptions);
+        const selected = selectReviewFeedback(gathered, parseFixFindingSelection('F1'));
+        assert.deepStrictEqual(selected.flatMap(comment => comment.actionableFindings.map(finding => finding.evidence)), [evidence]);
+
+        // A closed span on an indented continuation line does not open a fence
+        // that would swallow the fields after it.
+        const continuation = reviewWithF1Evidence([
+            '- **evidence:** src/jobs/followupCiSuspensionCancel.ts:142 — trace',
+            '  ```cancelPendingRuns``` reads the stale attempt.',
+        ]);
+        assert.strictEqual(
+            parseStructuredReview(continuation).actionableFindings[0].evidence,
+            'src/jobs/followupCiSuspensionCancel.ts:142 — trace\n```cancelPendingRuns``` reads the stale attempt.',
+        );
+        assert.strictEqual(
+            formatRecordField('Evidence', evidence).split('\n')[0],
+            '- **Evidence:** ```src/jobs/followupCiSuspensionCancel.ts``` cancels the stale attempt.',
+        );
+    });
+
     test('rejects unsupported formatting instead of publishing apparently complete evidence', () => {
         const unsupported: Record<string, string[]> = {
             'an outdented paragraph after a blank line': [
