@@ -718,6 +718,46 @@ describe('native staged artifact lifecycle authority', () => {
     assert.deepEqual(unregisters, ['-u', '-u']);
   });
 
+  test('spends a bounded attempt on a failed re-issued removal instead of ending the absence proof', async () => {
+    const applicationRoot = '/private/copied/ProPR Desktop.app';
+    // The first dump still lists the bundle, the removal re-issued before the
+    // next probe exits non-zero, and the next dump proves the bundle gone. The
+    // re-issue is never evidence either way, so its failure must neither end
+    // the proof nor be read as absence.
+    const probes = [() => true, () => false];
+    const unregisters = [];
+    const authority = new LaunchServicesAuthority(applicationRoot, {}, {
+      runCommand: async (_file, args) => {
+        unregisters.push(args[0]);
+        throw new NativeLifecycleCommandFailure('COMMAND_FAILED');
+      },
+      scanCommand: async () => ({ matched: probes.shift()() }),
+      wait: async () => undefined,
+      absenceAttempts: 3,
+    });
+    authority.registered = true;
+
+    await authority.assertGone();
+
+    assert.equal(authority.registered, false);
+    assert.equal(probes.length, 0);
+    assert.deepEqual(unregisters, ['-u']);
+
+    // When the bundle really does stay listed, the reported class still comes
+    // from the last probe, not from the failed re-issue.
+    const stale = new LaunchServicesAuthority(applicationRoot, {}, {
+      runCommand: async () => { throw new NativeLifecycleCommandFailure('COMMAND_FAILED'); },
+      scanCommand: async () => ({ matched: true }),
+      wait: async () => undefined,
+      absenceAttempts: 2,
+    });
+    stale.registered = true;
+    const failure = await stale.assertGone().catch(error => error);
+    assert.ok(failure instanceof LaunchServicesAbsenceFailure);
+    assert.equal(failure.resultClass, LAUNCH_SERVICES_STALE_REGISTRATION);
+    assert.equal(stale.registered, true);
+  });
+
   test('reports why the absence proof ended and carries that class into cleanup reporting', async () => {
     const applicationRoot = '/private/copied/ProPR Desktop.app';
     const secret = 'https://secret.invalid/private-dump';
