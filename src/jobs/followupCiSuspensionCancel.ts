@@ -87,17 +87,23 @@ export function resolveFollowupCiSuspensionTarget(
  * recorded only once GitHub accepted the cancellation. An intent whose attempt
  * could not be confirmed is settled by the run's real outcome alone.
  *
- * A conflict is the one answer that definitively rejects the request: the run
- * was already terminal, so ProPR cancelled nothing, and the intent this request
- * introduced is taken back — a run somebody else cancelled must never be
- * restarted on ProPR's behalf. An obligation an earlier cancellation left
- * behind is not this request's to settle and is kept as it was.
+ * Two answers definitively reject the request, and both take back the intent
+ * this request introduced while keeping whatever an earlier cancellation left
+ * behind, because that obligation is not this request's to settle. A conflict
+ * means the run was already terminal, so ProPR cancelled nothing, and a run
+ * somebody else cancelled must never be restarted on ProPR's behalf. A refused
+ * request never reached the run either: an intent left behind would let a
+ * later cancellation by somebody else pass for ProPR's and authorize a rerun
+ * nobody asked for. The rollback is persisted before the refusal propagates.
  *
- * Discovery is an awaited GitHub call, which is where a stalled worker outlives
- * its lease. The lease is therefore proven to be still this worker's before
- * every write and every cancel request; once it is lost, the pass stops with
- * {@link SuspensionLeaseLostError} and leaves the pull request to the worker
- * that holds the lease now.
+ * Discovery and the intent write are awaited calls, which is where a stalled
+ * worker outlives its lease. The lease is therefore proven to be still this
+ * worker's before every write and, again, immediately before every cancel
+ * request: the write only proves ownership at the moment it lands, and the
+ * worker that takes the lease over while the write's response is on its way
+ * back may restore the run and drop the suspension before this pass resumes.
+ * Once the lease is lost, the pass stops with {@link SuspensionLeaseLostError}
+ * and leaves the pull request to the worker that holds the lease now.
  */
 export async function cancelPendingRuns(
     state: CancellationState,
@@ -126,11 +132,28 @@ export async function cancelPendingRuns(
         }
         // Written before every single cancel request, including for a run that is
         // already known: the write is also the ownership check that proves this
-        // pass still owns the suspension at the moment it acts on GitHub.
+        // pass still owned the suspension at the moment the write landed.
         if (!await persistIntent(state, deps)) return;
-        if (!await cancelRun(octokit, target, run.id)) {
-            if (previous) runs[runs.indexOf(intent)] = previous;
-            else runs.splice(runs.indexOf(intent), 1);
+        // That moment has passed by the time the write's response is back. The
+        // lease is proven once more right before the request leaves the worker,
+        // so a worker that lost it meanwhile cancels nothing another worker may
+        // already have restored.
+        await lease?.assertHeld();
+        let accepted: boolean;
+        try {
+            accepted = await cancelRun(octokit, target, run.id);
+        } catch (error) {
+            // A refused request provably cancelled nothing, so the intent it
+            // introduced is taken back before the refusal surfaces. Any other
+            // failure is ambiguous and keeps the intent for reconciliation.
+            if (error instanceof CiActionsPermissionError) {
+                withdrawIntent(runs, intent, previous);
+                await persistIntent(state, deps);
+            }
+            throw error;
+        }
+        if (!accepted) {
+            withdrawIntent(runs, intent, previous);
             if (!await persistIntent(state, deps)) return;
             continue;
         }
@@ -140,6 +163,14 @@ export async function cancelPendingRuns(
         intent.attempt = affected.run_attempt;
         if (!await persistIntent(state, deps)) return;
     }
+}
+
+/** Takes a rejected request's intent back: the run is recorded as it was before, or not at all. */
+function withdrawIntent(runs: CancelledRun[], intent: CancelledRun, previous: CancelledRun | undefined): void {
+    const index = runs.indexOf(intent);
+    if (index < 0) return;
+    if (previous) runs[index] = previous;
+    else runs.splice(index, 1);
 }
 
 /** Writes the intent and keeps the caller on the generation it just produced; false once a newer owner holds the row. */

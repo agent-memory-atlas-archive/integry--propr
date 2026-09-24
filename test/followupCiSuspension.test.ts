@@ -69,6 +69,8 @@ interface GitHubOptions {
     cancelStatus?: number;
     /** Fails every cancel request after this many successful ones. */
     failCancelAfter?: number;
+    /** HTTP status of those later failures; 500 by default, the ambiguous kind. */
+    failCancelStatus?: number;
     rerunStatus?: number;
     /** Runs after the cancel was applied; throwing here simulates a response lost on the way back. */
     onCancel?: (runId: number) => Promise<void>;
@@ -135,7 +137,7 @@ function createGitHub(runs: FakeRun[], options: GitHubOptions = {}) {
             }
             if (route === 'POST /repos/{owner}/{repo}/actions/runs/{run_id}/cancel') {
                 if (options.cancelStatus) throw error(options.cancelStatus);
-                if (options.failCancelAfter !== undefined && cancels++ >= options.failCancelAfter) throw error(500);
+                if (options.failCancelAfter !== undefined && cancels++ >= options.failCancelAfter) throw error(options.failCancelStatus ?? 500);
                 const found = runs.find(candidate => candidate.id === runId)!;
                 if (!options.asyncCancellation) {
                     found.status = 'completed';
@@ -185,6 +187,24 @@ async function records() {
 async function storedRunIds(): Promise<number[]> {
     const [record] = await records();
     return record ? JSON.parse(record.cancelled_runs).map((entry: { id: number }) => entry.id) : [];
+}
+
+/**
+ * The shared database as one worker sees it, except that `afterWrite` runs once
+ * a write to the suspension row has landed and before that worker resumes:
+ * the window in which the write's response is still on its way back to it.
+ */
+function databaseResumingAfterSuspensionWrite(afterWrite: () => Promise<void>) {
+    return ((table: string) => {
+        const builder = database(table);
+        if (table !== PR_CI_SUSPENSIONS_TABLE) return builder;
+        const update = builder.update.bind(builder) as (...args: unknown[]) => PromiseLike<number>;
+        builder.update = ((...args: unknown[]) => ({
+            then: (resolve?: (count: number) => unknown, reject?: (error: unknown) => unknown) =>
+                update(...args).then(async count => { await afterWrite(); return count; }).then(resolve, reject),
+        })) as never;
+        return builder;
+    }) as never;
 }
 
 beforeEach(async () => {
@@ -301,6 +321,57 @@ describe('follow-up CI suspension targeting', () => {
         const summary = await reconcileFollowupCiSuspensions(deps(recovery, { getTaskState: async () => null }));
         assert.equal(summary.restored, 1);
         assert.deepEqual(recovery.rerun().sort((a, b) => (a ?? 0) - (b ?? 0)), [1, 2]);
+        assert.deepEqual(await records(), []);
+    });
+
+    test('a refused cancellation leaves no intent behind, while what earlier requests cancelled is still restored', async () => {
+        const runs = [run({ id: 1 }), run({ id: 2, status: 'queued' })];
+        // GitHub accepts the first cancellation, applies it asynchronously, and
+        // refuses the second: Actions write access went away in between.
+        const github = createGitHub(runs, { asyncCancellation: true, failCancelAfter: 1, failCancelStatus: 403 });
+
+        const result = await beginFollowupCiSuspension({ target: TARGET, taskId: TASK_ID }, deps(github));
+
+        assert.equal(result.reason, 'permission_denied');
+        assert.deepEqual(github.cancelled(), [1, 2]);
+        assert.deepEqual(await storedRunIds(), [1], 'a refused request authorizes no rerun; the accepted one is still owed a restart');
+
+        // Both runs end up cancelled: run 1 by ProPR, run 2 by somebody else
+        // after ProPR's request was refused.
+        runs.forEach(candidate => { candidate.status = 'completed'; candidate.conclusion = 'cancelled'; });
+        const recovery = createGitHub(runs);
+        const summary = await reconcileFollowupCiSuspensions(deps(recovery, { getTaskState: async () => null }));
+        assert.equal(summary.restored, 1);
+        assert.deepEqual(recovery.rerun(), [1], 'only the cancellation ProPR caused is restored');
+        assert.equal(runs[1].conclusion, 'cancelled', 'a run ProPR was refused to cancel is never restarted on its behalf');
+        assert.deepEqual(await records(), []);
+    });
+
+    test('a refused re-cancellation keeps the obligation an earlier cancellation left behind, as it was', async () => {
+        const runs = [run({ id: 1 })];
+        // GitHub accepts the cancellation and applies it asynchronously.
+        const github = createGitHub(runs, { asyncCancellation: true });
+        const begun = await beginFollowupCiSuspension({ target: TARGET, taskId: TASK_ID }, deps(github));
+        assert.deepEqual(begun.cancelledRunIds, [1]);
+        const [record] = await records();
+
+        // A sweep still finds the run pending and asks again, after the
+        // installation lost Actions write access.
+        const sweeping = createGitHub(runs, { asyncCancellation: true, cancelStatus: 403 });
+        await assert.rejects(sweepFollowupCiSuspension(record, deps(sweeping)), { name: 'CiActionsPermissionError' });
+
+        const [stored] = await records();
+        assert.deepEqual(
+            JSON.parse(stored.cancelled_runs).map((entry: { id: number; attempt?: number; restarted: boolean }) => [entry.id, entry.attempt, entry.restarted]),
+            [[1, 1, false]], 'the accepted cancellation is still owed a restart, on the attempt GitHub confirmed');
+
+        // The first cancellation lands; the obligation is honoured once access is back.
+        runs[0].status = 'completed';
+        runs[0].conclusion = 'cancelled';
+        const recovery = createGitHub(runs);
+        const summary = await reconcileFollowupCiSuspensions(deps(recovery, { getTaskState: async () => null }));
+        assert.equal(summary.restored, 1);
+        assert.deepEqual(recovery.rerun(), [1]);
         assert.deepEqual(await records(), []);
     });
 
@@ -1330,6 +1401,47 @@ describe('coordinators in separate worker processes', () => {
         assert.equal(current.head_sha, NEW_HEAD);
         assert.deepEqual(await storedRunIds(), [2], "the new owner's restart obligation survived the stale worker");
         assert.deepEqual(await database(PR_CI_SUSPENSION_LEASES_TABLE).select('*'), [], 'the stale worker released nothing that was not its own');
+    });
+
+    test('a sweep that loses its lease while its intent is being written cancels nothing the new owner restored', async () => {
+        const runs = [run({ id: 1 })];
+        // GitHub accepts the cancellation and applies it asynchronously, so a
+        // sweep still finds the run pending and asks again.
+        const github = createGitHub(runs, { asyncCancellation: true });
+        const begun = await beginFollowupCiSuspension({ target: TARGET, taskId: TASK_ID }, deps(github));
+        assert.deepEqual(begun.cancelledRunIds, [1]);
+        const [record] = await records();
+
+        const workerB = createGitHub(runs);
+        let takenOver = false;
+        const takeOverWhileTheWriteReturns = async () => {
+            if (takenOver) return;
+            takenOver = true;
+            // Worker A's intent has landed, but its lease expired while the
+            // write's response was on its way back to it.
+            await database(PR_CI_SUSPENSION_LEASES_TABLE).update({ expires_at: Date.now() - 1 });
+            // The cancellation lands; worker B takes the expired lease over,
+            // restores the run and drops the suspension.
+            runs[0].status = 'completed';
+            runs[0].conclusion = 'cancelled';
+            const restored = await restoreFollowupCiSuspension(record, deps(workerB, { leaseHolder: 'worker-b', leaseAcquireTimeoutMs: 0 }));
+            assert.equal(restored.reason, 'restarted');
+            assert.deepEqual(workerB.rerun(), [1]);
+            assert.deepEqual(await records(), []);
+        };
+        const workerA = createGitHub(runs);
+        const swept = await sweepFollowupCiSuspension(record, deps(workerA, {
+            leaseHolder: 'worker-a',
+            database: databaseResumingAfterSuspensionWrite(takeOverWhileTheWriteReturns),
+        }));
+
+        assert.equal(swept.reason, 'busy');
+        assert.deepEqual(swept.cancelledRunIds, []);
+        assert.deepEqual(workerA.cancelled(), [], 'nothing is cancelled on a lease that belongs to somebody else');
+        assert.equal(runs[0].status, 'queued', 'the validation the new owner restored keeps running');
+        assert.equal(runs[0].run_attempt, 2);
+        assert.deepEqual(await records(), [], 'the stale worker left no suspension behind');
+        assert.deepEqual(await database(PR_CI_SUSPENSION_LEASES_TABLE).select('*'), []);
     });
 
     test('leaves CI untouched and the implementation running when the lease cannot be taken at all', async () => {
