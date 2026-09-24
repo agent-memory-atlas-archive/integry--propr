@@ -1,7 +1,8 @@
 import { latestCommentMetadata, previewMediaReader, taskPreviewSource } from '../services/previewMediaProjection.js';
 import { Knex } from 'knex';
 import { timeApiStage } from '../apiPerformanceTiming.js';
-import { loadAttentionTaskIds, QUEUED_TASK_STATES, RUNNING_TASK_STATES } from './dashboardQueries.js';
+import { QUEUED_TASK_STATES, RUNNING_TASK_STATES } from './dashboardQueries.js';
+import { loadAttentionTaskIds } from './dashboardWorkQueries.js';
 import { loadCritiqueScores } from './critiqueScore.js';
 
 export interface TaskQuery {

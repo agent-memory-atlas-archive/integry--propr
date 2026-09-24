@@ -19,15 +19,17 @@ import type { RedisClientType } from 'redis';
 import { timeApiStage } from '../apiPerformanceTiming.js';
 import { validatePositiveInteger, validateRepositoryFilter } from './validation.js';
 import {
-  loadDashboardWork,
-  loadOutcomeRows,
-  loadPlanIssueOutcomes,
   phaseLabel,
   RECENT_COMPLETION_WINDOW_HOURS,
   type DashboardTaskRow,
+} from './dashboardQueries.js';
+import { loadDashboardWork } from './dashboardWorkQueries.js';
+import {
+  loadOutcomeRows,
+  loadPlanIssueOutcomes,
   type OutcomeRow,
   type PlanIssueOutcomeRow,
-} from './dashboardQueries.js';
+} from './dashboardOutcomeQueries.js';
 
 /** Running work we will pay for a live-details projection on in one request. */
 const MAX_LIVE_DETAIL_LOOKUPS = 20;
