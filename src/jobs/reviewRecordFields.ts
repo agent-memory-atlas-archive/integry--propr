@@ -34,6 +34,8 @@ const THEMATIC_BREAK_RE = /^(?:(?:-[ \t]*){3,}|(?:\*[ \t]*){3,}|(?:_[ \t]*){3,})
  */
 const FENCE_OPEN_SOURCE = '(`{3,})[^`]*$|(~{3,})';
 const FENCE_RE = new RegExp(`^(?:${FENCE_OPEN_SOURCE})`);
+/** Leading list item markers, including nested ones such as `- 1. `, that may precede a fence opener. */
+const LIST_MARKERS_RE = /^(?:(?:[-*+]|\d{1,9}[.)])[ \t]+)+/;
 /** Unindented text that would open a new Markdown block rather than continue a paragraph. */
 const BLOCK_START_RE = new RegExp(`^(?:[-*+](?:[ \\t]|$)|\\d{1,9}[.)](?:[ \\t]|$)|#{1,6}(?:[ \\t]|$)|>|${FENCE_OPEN_SOURCE}|\\||<)`);
 const HEADING_RE = /^#{1,6}(?:[ \t]|$)/;
@@ -126,7 +128,9 @@ class RecordFieldReader {
             const { char, length } = this.openFence;
             if (new RegExp(`^${char}{${length},}$`).test(trimmed)) this.openFence = null;
         } else {
-            const fence = FENCE_RE.exec(trimmed);
+            // A fence can open a list item, as in `- ~~~ts`; its closer then
+            // sits at the item's content indentation without a marker.
+            const fence = FENCE_RE.exec(trimmed.replace(LIST_MARKERS_RE, ''));
             const marker = fence?.[1] ?? fence?.[2];
             if (marker) this.openFence = { char: marker[0], length: marker.length };
         }

@@ -344,6 +344,44 @@ describe('multiline review fields', () => {
         );
     });
 
+    test('fences opened inside indented list items survive publication and /fix selection', async () => {
+        const evidence = [
+            'src/jobs/followupCiSuspensionCancel.ts:142 — static trace',
+            '',
+            '- ~~~ts',
+            '  cancel(attempt);',
+            '  ~~~',
+            '- 1. ```ts',
+            '     release(lease);',
+            '     ```',
+        ].join('\n');
+        const review = reviewWithF1Evidence([
+            '- **evidence:** src/jobs/followupCiSuspensionCancel.ts:142 — static trace',
+            '',
+            indent(evidence.split('\n').slice(2).join('\n')),
+        ]);
+        const [parsed] = parseStructuredReview(review).actionableFindings;
+        assert.strictEqual(parsed.evidence, evidence);
+
+        const published = renderPublicReview(review, undefined, { changedFilePaths: CHANGED_FILES })!;
+        assert.ok(published);
+        const reparsed = parseStructuredReview(publicComment(published).body);
+        assert.strictEqual(reparsed.status, 'valid_with_blockers');
+        assert.strictEqual(reparsed.actionableFindings[0].evidence, evidence);
+
+        const gathered = await gatherUnprocessedReviewComments([publicComment(published)], gatherOptions);
+        const selected = selectReviewFeedback(gathered, parseFixFindingSelection('F1'));
+        assert.deepStrictEqual(selected.flatMap(comment => comment.actionableFindings.map(finding => finding.evidence)), [evidence]);
+
+        // A list-item fence that never closes still rejects the record.
+        const unclosed = reviewWithF1Evidence([
+            '- **evidence:** src/jobs/followupCiSuspensionCancel.ts:142 — static trace',
+            '  - ~~~ts',
+            '    cancel(attempt);',
+        ]);
+        assert.strictEqual(parseStructuredReview(unclosed).status, 'invalid');
+    });
+
     test('rejects unsupported formatting instead of publishing apparently complete evidence', () => {
         const unsupported: Record<string, string[]> = {
             'an outdented paragraph after a blank line': [
