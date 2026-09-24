@@ -183,6 +183,7 @@ const TokenUsageChip: React.FC<{ tokenUsage: TokenUsage }> = ({ tokenUsage }) =>
 // Map of raw Agent Tank metric keys to human-readable labels
 const METRIC_KEY_LABELS: Record<string, string> = {
   session: 'Session', weeklyAll: 'Weekly', weeklySonnet: 'Sonnet',
+  weeklyFable: 'Fable',
   weeklyOpus: 'Opus', weeklyHaiku: 'Haiku', fiveHour: 'Five Hour',
   weekly: 'Weekly', daily: 'Daily', monthly: 'Monthly',
 };
