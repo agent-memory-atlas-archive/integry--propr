@@ -152,6 +152,16 @@ function logHeadUnavailable(record: CiSuspensionRecord, deps: CiSuspensionDeps):
  * restart. Only a run GitHub reports as cancelled, on the attempt ProPR
  * cancelled, is owed a rerun.
  *
+ * The run is read from GitHub here, immediately before the decision, never
+ * taken from the listing the pass started with. That listing is a snapshot,
+ * and it ages while the runs before this one are assessed and rerun: an
+ * operator who reruns this run in the meantime, and cancels the attempt they
+ * started, leaves it cancelled on a newer attempt. Judged on the listed
+ * attempt, that would look like the attempt ProPR cancelled still waiting for
+ * its rerun, and the rerun would restart their cancelled attempt on their
+ * behalf. Judged on the run as it is now, the newer attempt is the proof that
+ * the obligation was already met.
+ *
  * The attempt recorded at cancellation is the one GitHub confirmed ProPR
  * cancelled. A live attempt beyond it proves that attempt was already rerun —
  * by a pass that crashed before it could record the restart, or by somebody at
@@ -168,10 +178,10 @@ function logHeadUnavailable(record: CiSuspensionRecord, deps: CiSuspensionDeps):
  */
 async function assessCancelledRun(
     run: CancelledRun,
-    context: { target: SuspensionTarget; octokit: CiSuspensionOctokit; liveRuns: WorkflowRunSummary[]; activeWorkflowIds: Set<number> },
+    context: { target: SuspensionTarget; octokit: CiSuspensionOctokit; activeWorkflowIds: Set<number> },
 ): Promise<'pending' | 'settled' | { rerun: { cancelledAttempt?: number } }> {
-    const { target, octokit, liveRuns, activeWorkflowIds } = context;
-    const liveRun = liveRuns.find(candidate => candidate.id === run.id) ?? await getRun(octokit, target, run.id);
+    const { target, octokit, activeWorkflowIds } = context;
+    const liveRun = await getRun(octokit, target, run.id);
     if (!liveRun) return 'settled';
     if (attemptAdvanced(run, liveRun)) return 'settled';
     if ((liveRun.status ?? '').toLowerCase() !== 'completed') return 'pending';
@@ -219,7 +229,10 @@ type PersistRuns = () => Promise<boolean>;
  * can publish a replacement commit. Neither the lease nor the head is therefore
  * trusted across them — the gate re-proves both immediately before every rerun,
  * so a stale worker never reruns what a newer owner now handles and an obsolete
- * revision is never restarted once its replacement is published.
+ * revision is never restarted once its replacement is published. The listing
+ * is not trusted across them either: it only says which workflows already have
+ * a replacement run, while each run's own attempt and status are read again
+ * when its turn comes, after everything the runs before it waited on.
  *
  * A rerun is only sent for an obligation whose attempt is on record. An
  * obligation whose cancellation was never confirmed has none, so the attempt
@@ -242,14 +255,13 @@ async function restartPass(
     // *this* pull request head on the pull request's own event counts as that
     // replacement: an unrelated push or another pull request's run of the same
     // commit never settles the obligation to restart what ProPR cancelled.
-    const liveRuns = await listRunsForSha(octokit, target, headSha);
-    const activeWorkflowIds = new Set(liveRuns
+    const activeWorkflowIds = new Set((await listRunsForSha(octokit, target, headSha))
         .filter(run => isReplacementValidationRun(run, { pullRequestNumber: target.pullRequestNumber, headSha }))
         .map(run => run.workflow_id)
         .filter((id): id is number => typeof id === 'number'));
     let progressed = false;
     for (const run of runs.filter(candidate => !candidate.restarted)) {
-        const decision = await assessCancelledRun(run, { target, octokit, liveRuns, activeWorkflowIds });
+        const decision = await assessCancelledRun(run, { target, octokit, activeWorkflowIds });
         if (decision === 'pending') continue;
         if (decision !== 'settled') {
             if (run.attempt === undefined && typeof decision.rerun.cancelledAttempt === 'number') {

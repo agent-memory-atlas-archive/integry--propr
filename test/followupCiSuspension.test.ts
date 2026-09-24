@@ -1364,6 +1364,39 @@ describe('restoring cancelled validation', () => {
         assert.deepEqual(await records(), [], 'the stored attempt is the proof that the obligation was met');
     });
 
+    test('a run an operator reran and cancelled again while earlier runs were restarted is settled, not rerun on their behalf', async () => {
+        const runs = [run({ id: 1 }), run({ id: 2 })];
+        const github = createGitHub(runs, {
+            onRerun: async runId => {
+                if (runId !== 1) return;
+                // While ProPR's rerun of run 1 is outstanding, an operator reruns run
+                // 2 as attempt 2 and cancels that attempt. Run 2 is cancelled again,
+                // but on an attempt past the one ProPR cancelled.
+                runs[1].attempts = { 1: { status: 'completed', conclusion: 'cancelled' } };
+                runs[1].run_attempt = 2;
+                runs[1].status = 'completed';
+                runs[1].conclusion = 'cancelled';
+            },
+        });
+        await beginFollowupCiSuspension({ target: TARGET, taskId: TASK_ID }, deps(github));
+        const [stored] = await records();
+        assert.deepEqual(
+            JSON.parse(stored.cancelled_runs).map((entry: { id: number; attempt?: number }) => [entry.id, entry.attempt]),
+            [[1, 1], [2, 1]], 'both cancellations are on record against attempt 1');
+
+        // The head is unchanged when implementation ends. The operator's rerun of
+        // run 2 met ProPR's obligation; what they did with their attempt afterwards
+        // is theirs, and the listing the pass started with must not decide otherwise.
+        const [result] = await releaseFollowupCiSuspensionsForTask({ taskId: TASK_ID }, deps(github));
+
+        assert.equal(result.reason, 'restarted');
+        assert.deepEqual(result.restartedRunIds, [1]);
+        assert.deepEqual(github.rerun(), [1], 'run 2 is judged on its fresh attempt, and its newer cancelled attempt is left alone');
+        assert.equal(runs[1].run_attempt, 2, 'no attempt 3 is started on the operator\'s behalf');
+        assert.deepEqual([runs[1].status, runs[1].conclusion], ['completed', 'cancelled']);
+        assert.deepEqual(await records(), [], 'the advanced attempt is the proof that the obligation was met');
+    });
+
     test('an obligation without a confirmed attempt records the attempt it reruns before the rerun is sent', async () => {
         const runs = [run({ id: 1 })];
         let cancelSent = false;
