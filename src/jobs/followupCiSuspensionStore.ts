@@ -45,8 +45,20 @@ export interface CancelledRun {
     name?: string;
     workflowId?: number;
     /**
-     * The attempt GitHub confirmed the cancellation affected; a higher one later
-     * proves a rerun landed. Absent while that is unconfirmed — the request was
+     * The attempt the run was on when ProPR decided to cancel it, written with
+     * the intent before the request leaves the worker. It is a lower bound, not
+     * a claim: the cancellation cannot have affected an earlier attempt, and an
+     * attempt the run reaches beyond it is either the one the request landed on
+     * or a rerun somebody started afterwards — which of the two is settled from
+     * the run's own attempts, never assumed. Absent on records written before
+     * this evidence was kept.
+     */
+    observedAttempt?: number;
+    /**
+     * The attempt ProPR's cancellation is confirmed to have affected; a higher
+     * one later proves a rerun landed. Confirmed only from evidence that ties
+     * the attempt to the cancellation, never by adopting whatever attempt the
+     * run shows after the request. Absent while unconfirmed — the request was
      * never answered, or the worker died before reading the run back — in which
      * case only the run's own outcome can settle the obligation. Once that
      * outcome is a cancelled run about to be rerun, the attempt it is cancelled

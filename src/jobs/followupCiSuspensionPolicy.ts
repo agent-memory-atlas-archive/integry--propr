@@ -51,10 +51,13 @@ function normalize(value: string | null | undefined): string {
 }
 
 /**
- * The spellings one selected workflow can be written as: its numeric ID, its
- * workflow file path, that file's name with and without extension, and its
- * display name. Every one of them identifies exactly one workflow — none of
- * them is a substring match.
+ * The documented spellings one selected workflow can be written as: its numeric
+ * ID, its workflow file path, that file's complete name, and its display name.
+ * Every one of them identifies exactly one workflow — none of them is a
+ * substring match, and no alias is derived from them. A file name without its
+ * extension in particular is not an identity: `ci` would select `ci.yml` even
+ * when that file's workflow is called something else entirely, and would
+ * cancel a workflow whose display name `CI` the operator never selected.
  */
 export function workflowIdentities(run: WorkflowRunIdentity): string[] {
     const identities = new Set<string>();
@@ -65,10 +68,7 @@ export function workflowIdentities(run: WorkflowRunIdentity): string[] {
     if (path) {
         identities.add(path);
         const file = path.split('/').pop() ?? '';
-        if (file) {
-            identities.add(file);
-            identities.add(file.replace(/\.ya?ml$/, ''));
-        }
+        if (file) identities.add(file);
     }
     return [...identities].filter(Boolean);
 }

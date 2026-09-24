@@ -1,7 +1,7 @@
 import { getStateManager, isCancelCiDuringFollowupEnabledForRepository, TaskStates } from '@propr/core';
 import {
-    CiActionsPermissionError, getPullRequestHead, getRun, isReplacementValidationRun, listRunsForSha, rerunRun, sameSha,
-    type CiSuspensionOctokit, type SuspensionTarget, type WorkflowRunSummary,
+    CiActionsPermissionError, getPullRequestHead, getRun, isReplacementValidationRun, listRunsForSha, locateCancelledAttempt,
+    rerunRun, sameSha, type CiSuspensionOctokit, type SuspensionTarget, type WorkflowRunSummary,
 } from './followupCiSuspensionRuns.js';
 import { delay, resolveLog, resolveOctokit, type CiSuspensionDeps } from './followupCiSuspensionContext.js';
 import { cancellationState, cancelPendingRuns } from './followupCiSuspensionCancel.js';
@@ -158,9 +158,13 @@ function logHeadUnavailable(record: CiSuspensionRecord, deps: CiSuspensionDeps):
  * GitHub — and the obligation is met. Whatever happened to the newer attempt
  * afterwards is not ProPR's doing and is never "restored" on its behalf. A
  * record without a confirmed attempt proves nothing of the kind, and is settled
- * by the run's outcome alone: the attempt the run is cancelled on now is
- * reported back as the one a rerun would restart, for the caller to record
- * before it sends that rerun.
+ * by the run's outcome: the attempt the run is cancelled on now is reported
+ * back as the one a rerun would restart, for the caller to record before it
+ * sends that rerun — unless the attempts the run left behind since the one
+ * observed at cancellation show that ProPR's request affected an earlier one,
+ * in which case the rerun past it already met the obligation. A record from
+ * before that evidence was kept has no observed attempt and is settled by the
+ * outcome alone.
  */
 async function assessCancelledRun(
     run: CancelledRun,
@@ -173,7 +177,13 @@ async function assessCancelledRun(
     if ((liveRun.status ?? '').toLowerCase() !== 'completed') return 'pending';
     if ((liveRun.conclusion ?? '').toLowerCase() !== 'cancelled') return 'settled';
     if (run.workflowId !== undefined && activeWorkflowIds.has(run.workflowId)) return 'settled';
-    return { rerun: { cancelledAttempt: run.attempt ?? liveRun.run_attempt } };
+    if (typeof run.attempt === 'number') return { rerun: { cancelledAttempt: run.attempt } };
+    if (typeof run.observedAttempt !== 'number') return { rerun: { cancelledAttempt: liveRun.run_attempt } };
+    const cancelledAttempt = await locateCancelledAttempt(octokit, target, run.id, { observedAttempt: run.observedAttempt, live: liveRun });
+    // Evidence that cannot be read right now decides nothing; the obligation waits for a pass that can read it.
+    if (cancelledAttempt === undefined) return 'pending';
+    if (typeof liveRun.run_attempt === 'number' && liveRun.run_attempt > cancelledAttempt) return 'settled';
+    return { rerun: { cancelledAttempt } };
 }
 
 /** Whether the run already moved past the attempt ProPR confirmably cancelled, which only an accepted rerun can cause. */

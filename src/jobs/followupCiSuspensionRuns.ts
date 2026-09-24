@@ -152,6 +152,62 @@ export async function getRun(
     }
 }
 
+/** One attempt of a run, as GitHub keeps it after the run moved on; undefined when GitHub has no such attempt. */
+export async function getRunAttempt(
+    octokit: CiSuspensionOctokit,
+    target: SuspensionTarget,
+    runId: number,
+    attempt: number,
+): Promise<WorkflowRunSummary | undefined> {
+    try {
+        const response = await octokit.request('GET /repos/{owner}/{repo}/actions/runs/{run_id}/attempts/{attempt_number}', {
+            owner: target.owner, repo: target.repo, run_id: runId, attempt_number: attempt,
+        });
+        return response.data as WorkflowRunSummary;
+    } catch (error) {
+        if (isMissing(error)) return undefined;
+        throw error;
+    }
+}
+
+/**
+ * Which attempt an accepted cancellation affected, established from the run's
+ * own attempts rather than from whatever attempt the run shows now.
+ *
+ * GitHub cancels the attempt that is current when the request lands, and the
+ * attempt discovery observed is the earliest that can have been. A run still
+ * on that attempt settles it: nothing was rerun in between, so that is the
+ * attempt the request landed on, whether its cancellation has converged yet or
+ * not. A run beyond it was rerun at some point, and the newer attempt must not
+ * simply be adopted: had the cancellation landed first, the rerun already
+ * brought the validation back, and "restoring" the newer attempt would rerun
+ * on somebody else's behalf whatever they later did with it. The attempts the
+ * run left behind are the evidence: the first one from the observed attempt
+ * on that ended cancelled is the one ProPR's request affected, and the rerun
+ * past it met the obligation. Only when none of them ended cancelled did the
+ * request land on the attempt the run is on now.
+ *
+ * Returns undefined when the evidence cannot be read: an unconfirmed attempt
+ * is settled by the run's outcome later, with the observed attempt on record
+ * to repeat this very check.
+ */
+export async function locateCancelledAttempt(
+    octokit: CiSuspensionOctokit,
+    target: SuspensionTarget,
+    runId: number,
+    evidence: { observedAttempt?: number; live: WorkflowRunSummary },
+): Promise<number | undefined> {
+    const { observedAttempt, live } = evidence;
+    if (typeof live.run_attempt !== 'number' || typeof observedAttempt !== 'number') return undefined;
+    if (live.run_attempt < observedAttempt) return undefined;
+    for (let attempt = observedAttempt; attempt < live.run_attempt; attempt += 1) {
+        const earlier = await getRunAttempt(octokit, target, runId, attempt);
+        if (!earlier) return undefined;
+        if ((earlier.conclusion ?? '').toLowerCase() === 'cancelled') return attempt;
+    }
+    return live.run_attempt;
+}
+
 export interface PullRequestHead {
     sha: string;
     open: boolean;

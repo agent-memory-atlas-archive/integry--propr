@@ -7,7 +7,7 @@ import { isCancelCiDuringFollowupEnabledForRepository } from '@propr/core';
 import type { ContinuationRecord, PullRequestReference } from './prContinuation.js';
 import {
     CiActionsPermissionError, cancelRun, getPullRequestHead, getRun, isCancelableValidationRun, listRunsForSha,
-    type SuspensionTarget,
+    locateCancelledAttempt, type SuspensionTarget,
 } from './followupCiSuspensionRuns.js';
 import { resolveLog, resolveOctokit, resolvePolicy, type CiSuspensionDeps } from './followupCiSuspensionContext.js';
 import {
@@ -82,10 +82,15 @@ export function resolveFollowupCiSuspensionTarget(
  * attempt discovery listed is a snapshot: a run that completed and was rerun
  * in the meantime is cancelled on its newer attempt, and recording the older
  * one would let that newer attempt pass for an accepted rerun and settle the
- * obligation while the head's checks stay cancelled. The intent is therefore
- * written without an attempt, and the attempt is read back from the run and
- * recorded only once GitHub accepted the cancellation. An intent whose attempt
- * could not be confirmed is settled by the run's real outcome alone.
+ * obligation while the head's checks stay cancelled. The opposite is just as
+ * wrong: a rerun somebody starts right after the cancellation landed shows the
+ * run on a newer attempt too, and adopting that attempt as the cancelled one
+ * would have ProPR "restore" it on their behalf should they cancel it later,
+ * although their rerun already met the obligation. The intent therefore keeps
+ * the observed attempt only as a lower bound, and the attempt the request
+ * affected is established once GitHub accepted it from the run's own attempts
+ * (see {@link locateCancelledAttempt}). An intent whose attempt could not be
+ * confirmed is settled by the run's real outcome alone, with the same evidence.
  *
  * Two answers definitively reject the request, and both take back the intent
  * this request introduced while keeping whatever an earlier cancellation left
@@ -122,7 +127,10 @@ export async function cancelPendingRuns(
         const index = runs.findIndex(entry => entry.id === run.id);
         // What the record said before this request, to fall back on if the request is rejected.
         const previous = index >= 0 ? { ...runs[index] } : undefined;
-        const intent: CancelledRun = { id: run.id, name: run.name ?? undefined, workflowId: run.workflow_id, restarted: false };
+        const intent: CancelledRun = {
+            id: run.id, name: run.name ?? undefined, workflowId: run.workflow_id,
+            observedAttempt: typeof run.run_attempt === 'number' ? run.run_attempt : undefined, restarted: false,
+        };
         if (index >= 0) {
             // Known and pending again — restarted or never cancelled — so this is a
             // fresh obligation on whatever attempt the request lands on.
@@ -159,8 +167,15 @@ export async function cancelPendingRuns(
         }
         state.cancelledRunIds.push(run.id);
         const affected = await getRun(octokit, target, run.id).catch(() => undefined);
-        if (typeof affected?.run_attempt !== 'number') continue;
-        intent.attempt = affected.run_attempt;
+        if (!affected) continue;
+        // The attempt the run shows now is not adopted: it is only evidence,
+        // together with the attempts the run left behind, of which attempt the
+        // accepted request affected. An intervening rerun is recognized here as
+        // having met the obligation rather than as the attempt to restore.
+        const cancelledAttempt = await locateCancelledAttempt(octokit, target, run.id, { observedAttempt: intent.observedAttempt, live: affected })
+            .catch(() => undefined);
+        if (cancelledAttempt === undefined) continue;
+        intent.attempt = cancelledAttempt;
         if (!await persistIntent(state, deps)) return;
     }
 }

@@ -61,6 +61,8 @@ interface FakeRun {
     head_sha: string;
     workflow_id: number;
     run_attempt: number;
+    /** Earlier attempts the run moved past, as GitHub keeps them; a rerun through the fake records the attempt it replaces. */
+    attempts?: Record<number, { status: string; conclusion: string | null }>;
     pull_requests: Array<{ number: number }>;
 }
 
@@ -136,6 +138,15 @@ function createGitHub(runs: FakeRun[], options: GitHubOptions = {}) {
                 if (!found) throw error(404);
                 return { data: found };
             }
+            if (route === 'GET /repos/{owner}/{repo}/actions/runs/{run_id}/attempts/{attempt_number}') {
+                const found = runs.find(candidate => candidate.id === runId);
+                const attempt = parameters.attempt_number as number;
+                if (!found) throw error(404);
+                if (attempt === found.run_attempt) return { data: found };
+                const earlier = found.attempts?.[attempt];
+                if (!earlier) throw error(404);
+                return { data: { ...found, run_attempt: attempt, ...earlier } };
+            }
             if (route === 'POST /repos/{owner}/{repo}/actions/runs/{run_id}/cancel') {
                 if (options.cancelStatus) throw error(options.cancelStatus);
                 if (options.failCancelAfter !== undefined && cancels++ >= options.failCancelAfter) throw error(options.failCancelStatus ?? 500);
@@ -151,6 +162,7 @@ function createGitHub(runs: FakeRun[], options: GitHubOptions = {}) {
                 if (options.rerunStatus) throw error(options.rerunStatus);
                 if (options.onRerun) await options.onRerun(runId!);
                 const found = runs.find(candidate => candidate.id === runId)!;
+                found.attempts = { ...found.attempts, [found.run_attempt]: { status: found.status, conclusion: found.conclusion } };
                 found.status = 'queued';
                 found.conclusion = null;
                 found.run_attempt += 1;
@@ -447,8 +459,9 @@ describe('follow-up CI suspension targeting', () => {
         const github = createGitHub(runs, {
             onRequest: async route => {
                 if (route !== 'POST /repos/{owner}/{repo}/actions/runs/{run_id}/cancel') return;
-                // Between discovery and the cancel request, attempt 1 finished and
+                // Between discovery and the cancel request, attempt 1 failed and
                 // somebody at GitHub reran the workflow: the request lands on attempt 2.
+                runs[0].attempts = { 1: { status: 'completed', conclusion: 'failure' } };
                 runs[0].run_attempt = 2;
                 runs[0].status = 'queued';
                 runs[0].conclusion = null;
@@ -474,12 +487,118 @@ describe('follow-up CI suspension targeting', () => {
         assert.deepEqual(await records(), []);
     });
 
+    test('a rerun somebody starts right after the cancellation landed is not adopted as the attempt ProPR cancelled', async () => {
+        const runs = [run({ id: 1 })];
+        const github = createGitHub(runs, {
+            onCancel: async () => {
+                // GitHub applied the cancellation to attempt 1. Before the worker
+                // reads the run back, somebody at GitHub reruns it: attempt 2 starts.
+                runs[0].attempts = { 1: { status: 'completed', conclusion: 'cancelled' } };
+                runs[0].run_attempt = 2;
+                runs[0].status = 'queued';
+                runs[0].conclusion = null;
+            },
+        });
+
+        const result = await beginFollowupCiSuspension({ target: TARGET, taskId: TASK_ID }, deps(github));
+
+        assert.deepEqual(result.cancelledRunIds, [1]);
+        const [stored] = await records();
+        assert.deepEqual(
+            JSON.parse(stored.cancelled_runs).map((entry: { observedAttempt?: number; attempt?: number; restarted: boolean }) =>
+                [entry.observedAttempt, entry.attempt, entry.restarted]),
+            [[1, 1, false]], 'the record ties the cancellation to attempt 1, not to the rerun that followed it');
+
+        // That actor cancels attempt 2 as well, and the head is unchanged when
+        // implementation ends. Attempt 2 is theirs: their rerun already brought
+        // back the attempt ProPR cancelled, so there is nothing left to restore.
+        runs[0].status = 'completed';
+        runs[0].conclusion = 'cancelled';
+        const recovery = createGitHub(runs);
+        const summary = await reconcileFollowupCiSuspensions(deps(recovery, { getTaskState: async () => null }));
+
+        assert.equal(summary.released, 1);
+        assert.equal(summary.restored, 0);
+        assert.deepEqual(recovery.rerun(), [], 'the newer attempt is never restarted on somebody else\'s behalf');
+        assert.equal(runs[0].run_attempt, 2);
+        assert.deepEqual(await records(), []);
+    });
+
+    test('an unconfirmed cancellation is settled by the attempts the run left behind, not by the attempt it shows', async () => {
+        const runs = [run({ id: 1 })];
+        const github = createGitHub(runs, {
+            // The worker dies before it can read the run back: the attempt the
+            // cancellation affected is never confirmed, only the one observed.
+            onRequest: async route => {
+                if (route === 'GET /repos/{owner}/{repo}/actions/runs/{run_id}') throw Object.assign(new Error('worker died'), { status: 500 });
+            },
+        });
+        const begun = await beginFollowupCiSuspension({ target: TARGET, taskId: TASK_ID }, deps(github));
+        assert.equal(begun.reason, 'suspended');
+        const [unconfirmed] = await records();
+        assert.deepEqual(
+            JSON.parse(unconfirmed.cancelled_runs).map((entry: { observedAttempt?: number; attempt?: number; restarted: boolean }) =>
+                [entry.observedAttempt, entry.attempt, entry.restarted]),
+            [[1, undefined, false]]);
+
+        // Somebody at GitHub reruns the cancelled attempt and later cancels the
+        // rerun too. The run now shows a cancelled attempt 2.
+        runs[0].attempts = { 1: { status: 'completed', conclusion: 'cancelled' } };
+        runs[0].run_attempt = 2;
+        runs[0].status = 'completed';
+        runs[0].conclusion = 'cancelled';
+        const recovery = createGitHub(runs);
+        const summary = await reconcileFollowupCiSuspensions(deps(recovery, { getTaskState: async () => null }));
+
+        assert.equal(summary.released, 1);
+        assert.equal(summary.restored, 0);
+        assert.deepEqual(recovery.rerun(), [], 'attempt 1 was cancelled and rerun; attempt 2 is not ProPR\'s to restore');
+        assert.equal(runs[0].run_attempt, 2);
+        assert.deepEqual(await records(), []);
+    });
+
+    test('an unconfirmed cancellation whose evidence cannot be read keeps its obligation for a later pass', async () => {
+        const runs = [run({ id: 1 })];
+        let readBackFails = true;
+        const github = createGitHub(runs, {
+            onRequest: async route => {
+                if (readBackFails && route === 'GET /repos/{owner}/{repo}/actions/runs/{run_id}') throw Object.assign(new Error('read back failed'), { status: 500 });
+            },
+        });
+        await beginFollowupCiSuspension({ target: TARGET, taskId: TASK_ID }, deps(github));
+        readBackFails = false;
+        // The run moved on to a cancelled attempt 2, and GitHub cannot say what
+        // became of attempt 1: nothing is decided, and nothing is rerun blindly.
+        runs[0].run_attempt = 2;
+        runs[0].status = 'completed';
+        runs[0].conclusion = 'cancelled';
+
+        const [result] = await releaseFollowupCiSuspensionsForTask({ taskId: TASK_ID }, deps(github));
+
+        assert.equal(result.reason, 'pending');
+        assert.deepEqual(result.pendingRunIds, [1]);
+        assert.deepEqual(github.rerun(), []);
+        const [retained] = await records();
+        assert.equal(retained.state, 'restoring');
+
+        // Once GitHub reports attempt 1 as having failed on its own, the request
+        // can only have affected attempt 2, and that is what comes back.
+        runs[0].attempts = { 1: { status: 'completed', conclusion: 'failure' } };
+        const summary = await reconcileFollowupCiSuspensions(deps(github, { getTaskState: async () => null }));
+
+        assert.equal(summary.restored, 1);
+        assert.deepEqual(github.rerun(), [1]);
+        assert.equal(runs[0].run_attempt, 3);
+        assert.deepEqual(await records(), []);
+    });
+
     test('a cancellation whose outcome is unknown is never settled by attempt advancement', async () => {
         const runs = [run({ id: 1 })];
         const github = createGitHub(runs, {
             onRequest: async route => {
                 if (route !== 'POST /repos/{owner}/{repo}/actions/runs/{run_id}/cancel') return;
                 // Rerun between discovery and the request, as above...
+                runs[0].attempts = { 1: { status: 'completed', conclusion: 'failure' } };
                 runs[0].run_attempt = 2;
                 runs[0].status = 'queued';
                 runs[0].conclusion = null;
@@ -602,8 +721,9 @@ describe('selected validation workflows', () => {
         assert.equal(eligible({ name: 'Full Test Suite', path: '.github/workflows/pr-test-on-label.yml' }, policy), true);
         assert.equal(eligible({ name: 'Build & Lint Check', path: '.github/workflows/pr-build-check.yml' }, policy), true);
         assert.equal(eligible({ name: 'CodeQL', path: '.github/workflows/codeql.yml' }, policy), true);
-        assert.equal(eligible({ name: 'Dependency Review', path: '.github/workflows/dependency-review.yml' }, policy), true);
         assert.equal(eligible({ name: 'Nightly', path: '.github/workflows/nightly.yml', workflow_id: 425 }, policy), true);
+        // A file name without its extension is not one of the documented identities.
+        assert.equal(eligible({ name: 'Dependency Review', path: '.github/workflows/dependency-review.yml' }, policy), false);
         // A selected workflow stays selected on the event its operator chose it for.
         assert.equal(eligible({ name: 'Full Test Suite', path: '.github/workflows/pr-test-on-label.yml', event: 'pull_request_target' }, policy), true);
         // ...but never outside a pull request.
@@ -614,6 +734,11 @@ describe('selected validation workflows', () => {
         const policy = createValidationWorkflowPolicy(['pr-build-check.yml'], 'repository');
         // A `Build`/`CI` workflow is free to deploy; only an operator knows.
         assert.equal(eligible({ name: 'CI', path: '.github/workflows/ci.yml' }, policy), false);
+        // Selecting the display name `CI` selects the workflow shown as `CI`, not
+        // every workflow whose file happens to be called `ci.yml`.
+        const displayName = createValidationWorkflowPolicy(['CI'], 'repository');
+        assert.equal(eligible({ name: 'Deploy Preview', path: '.github/workflows/ci.yml' }, displayName), false);
+        assert.equal(eligible({ name: 'CI', path: '.github/workflows/checks.yml' }, displayName), true);
         assert.equal(eligible({ name: 'Build', path: '.github/workflows/build.yml' }, policy), false);
         assert.equal(eligible({ name: 'Full Test Suite', path: '.github/workflows/pr-test-on-label.yml' }, policy), false);
         assert.equal(eligible({ name: 'PR Preview', path: '.github/workflows/pr-preview.yml', event: 'pull_request_target' }, policy), false);
