@@ -952,14 +952,14 @@ function GoalDetails({ goalId }: { goalId: string }) {
               Each raw value still carries the chip's 1.375rem line box, so the row's rhythm stays even. */}
           <div className="flex flex-wrap items-baseline gap-x-2 gap-y-2 text-sm leading-[1.375rem] text-slate-700">
             <span className="font-medium" title={`${strategyLabel} launch strategy`}>{strategyLabel}</span>
-            <span aria-hidden="true" className="text-slate-300">•</span>
+            <span aria-hidden="true" className="text-slate-300">·</span>
             <span className="inline-flex items-baseline gap-1.5 font-medium" title={`Model: ${currentModel}`}>
               <ProviderLogo provider={goal.agent.type} className="h-3.5 w-3.5 flex-none self-center" />
               {currentModel}
             </span>
-            <span aria-hidden="true" className="text-slate-300">•</span>
+            <span aria-hidden="true" className="text-slate-300">·</span>
             <span className="font-mono text-xs font-semibold leading-[1.375rem] text-slate-700" title="Elapsed time">{duration(goal.elapsedMs)}</span>
-            <span aria-hidden="true" className="hidden text-slate-300 sm:inline">•</span>
+            <span aria-hidden="true" className="hidden text-slate-300 sm:inline">·</span>
             <RepositoryChip repository={goal.repository} />
           </div>
           <div className="flex flex-wrap items-center justify-end gap-2">
