@@ -8,6 +8,36 @@ import { SIDEBAR_ICON_STROKE_WIDTH, SIDEBAR_ICON_STROKE_CLASS } from './icons/si
 // Refresh interval in milliseconds (60 seconds)
 const REFRESH_INTERVAL = 60000;
 
+// Which provider rows are expanded is a preference, not session state: someone
+// watching Claude's weekly quotas wants the same rows open after a reload.
+export const EXPANDED_AGENTS_STORAGE_KEY = 'agent-tank-expanded-agents';
+
+// Storage access throws in private browsing, sandboxed iframes and non-browser
+// renderers, and the stored value can be anything a previous version (or a
+// user) left behind — so both directions fall back to the collapsed default
+// rather than taking the widget down with them.
+function loadExpandedAgents(): Set<string> {
+  try {
+    if (typeof window === 'undefined' || !window.localStorage) return new Set();
+    const stored = window.localStorage.getItem(EXPANDED_AGENTS_STORAGE_KEY);
+    if (!stored) return new Set();
+    const parsed = JSON.parse(stored);
+    if (!Array.isArray(parsed)) return new Set();
+    return new Set(parsed.filter((name): name is string => typeof name === 'string'));
+  } catch {
+    return new Set();
+  }
+}
+
+function saveExpandedAgents(expanded: Set<string>): void {
+  try {
+    if (typeof window === 'undefined' || !window.localStorage) return;
+    window.localStorage.setItem(EXPANDED_AGENTS_STORAGE_KEY, JSON.stringify([...expanded]));
+  } catch {
+    // Persistence is a convenience; a storage failure must not break toggling.
+  }
+}
+
 // Visible provider labels keyed by ProPR-facing provider key.
 const PROVIDER_DISPLAY_NAMES: Record<string, string> = {
   antigravity: 'Antigravity',
@@ -109,6 +139,13 @@ function getAllMetrics(agent: AgentUsageData): UsageMetric[] {
       label: 'Sonnet',
       percent: agent.usage.weeklySonnet.percent,
       resetsIn: agent.usage.weeklySonnet.resetsIn
+    });
+  }
+  if (agent.usage.weeklyFable) {
+    metrics.push({
+      label: 'Fable',
+      percent: agent.usage.weeklyFable.percent,
+      resetsIn: agent.usage.weeklyFable.resetsIn
     });
   }
   // Gemini / Antigravity models
@@ -311,7 +348,7 @@ const AgentTankSidebar: React.FC<AgentTankSidebarProps> = ({ allowManualRefresh 
   const [data, setData] = useState<AgentTankUsageResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
-  const [expandedAgents, setExpandedAgents] = useState<Set<string>>(new Set());
+  const [expandedAgents, setExpandedAgents] = useState<Set<string>>(() => loadExpandedAgents());
 
   const fetchUsage = useCallback(async (isManualRefresh = false) => {
     if (isManualRefresh) setRefreshing(true);
@@ -345,6 +382,7 @@ const AgentTankSidebar: React.FC<AgentTankSidebarProps> = ({ allowManualRefresh 
       } else {
         next.add(agentName);
       }
+      saveExpandedAgents(next);
       return next;
     });
   }, []);
