@@ -459,14 +459,17 @@ describe('release test-suite runner', () => {
         const probeDirectory = mkdtempSync(join(tmpdir(), 'propr-runner-fsync-'));
         const recordFile = join(probeDirectory, 'fsync-variable.txt');
         const probeFile = join(probeDirectory, 'env-probe.test.mjs');
+        // The probe is a fixed source string: it learns where to record from
+        // its environment rather than having the temp path spliced into code.
         writeFileSync(probeFile, [
             "import { writeFileSync } from 'node:fs';",
             "import { test } from 'node:test';",
-            `test('records the fsync variable', () => writeFileSync(${JSON.stringify(recordFile)}, String(process.env.PROPR_DESKTOP_TEST_FSYNC)));`,
+            "test('records the fsync variable', () => writeFileSync(process.env.PROPR_FSYNC_PROBE_RECORD_FILE, String(process.env.PROPR_DESKTOP_TEST_FSYNC)));",
             '',
         ].join('\n'));
         const baseEnv = {
             ...process.env,
+            PROPR_FSYNC_PROBE_RECORD_FILE: recordFile,
             PROPR_TEST_SHARD_INDEX: '',
             PROPR_TEST_SHARD_COUNT: '',
             PROPR_TEST_REDIS_ISOLATION: '',
