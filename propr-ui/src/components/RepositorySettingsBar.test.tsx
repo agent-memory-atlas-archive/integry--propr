@@ -94,6 +94,30 @@ describe('RepositorySettingsBar follow-up CI cancellation', () => {
     expect(onUpdateCancelCiWorkflows).not.toHaveBeenCalled();
   });
 
+  it('preserves comma-containing names on unchanged blur and when editing another selection', () => {
+    const { onUpdateCancelCiWorkflows } = renderBar({
+      cancelCiDuringFollowup: true,
+      cancelCiDuringFollowupWorkflows: ['Build, Test', 'Lint "strict"']
+    });
+    const input = screen.getByRole('textbox', { name: workflowsName });
+    expect(input).toHaveValue('"Build, Test", "Lint ""strict"""');
+    fireEvent.focus(input);
+    fireEvent.blur(input);
+    expect(onUpdateCancelCiWorkflows).not.toHaveBeenCalled();
+    fireEvent.change(input, { target: { value: '"Build, Test", "Lint ""strict""", docs.yml' } });
+    fireEvent.blur(input);
+    expect(onUpdateCancelCiWorkflows).toHaveBeenCalledWith('repo-1', ['Build, Test', 'Lint "strict"', 'docs.yml']);
+  });
+
+  it('does not save incomplete quoted input', () => {
+    const { onUpdateCancelCiWorkflows } = renderBar({ cancelCiDuringFollowup: true });
+    const input = screen.getByRole('textbox', { name: workflowsName });
+    fireEvent.change(input, { target: { value: '"Build, Test' } });
+    fireEvent.blur(input);
+    expect(onUpdateCancelCiWorkflows).not.toHaveBeenCalled();
+    expect(screen.getByRole('alert')).toHaveTextContent('Changes have not been saved');
+  });
+
   it('reflects the stored value and reports a toggle', () => {
     const { onToggleCancelCiDuringFollowup } = renderBar({ cancelCiDuringFollowup: true });
 

@@ -109,7 +109,7 @@ async function sweepSuspension(
     const current = await loadSuspension(deps, record);
     // The row may already belong to a newer implementation of the same pull
     // request, or its restoring transition may have taken it out of suppression.
-    if (!current || current.task_id !== record.task_id || !sameSha(current.head_sha, record.head_sha)) {
+    if (!current || current.incarnation !== record.incarnation || current.task_id !== record.task_id || !sameSha(current.head_sha, record.head_sha)) {
         return { reason: 'superseded', cancelledRunIds: [] };
     }
     if (current.state !== SUSPENSION_ACTIVE) return { reason: 'superseded', cancelledRunIds: [] };
@@ -326,7 +326,7 @@ async function restoreSuspension(
     // Work from the row as it is now: what the caller was handed may already
     // belong to a newer implementation of the same pull request.
     const loaded = await loadSuspension(deps, record);
-    if (!loaded || loaded.task_id !== record.task_id || !sameSha(loaded.head_sha, record.head_sha)) return SUPERSEDED;
+    if (!loaded || loaded.incarnation !== record.incarnation || loaded.task_id !== record.task_id || !sameSha(loaded.head_sha, record.head_sha)) return SUPERSEDED;
     let current = loaded;
     // A refused attempt never reached GitHub, so it must not consume the budget
     // of attempts that eventually gives up on a run that keeps finishing.

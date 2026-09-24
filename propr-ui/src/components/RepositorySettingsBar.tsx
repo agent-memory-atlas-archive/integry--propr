@@ -1,3 +1,4 @@
+import { formatWorkflowInput, parseWorkflowInput } from './workflowSelectionInput';
 import { useDemoMode } from '../contexts/DemoModeContext';
 import { Link } from 'react-router-dom';
 import React, { useEffect, useState } from 'react';
@@ -38,16 +39,6 @@ const AutoCiFollowupControl: React.FC<{
   );
 };
 
-/** Splits what an operator typed into exact workflow identities; order and spelling are theirs, duplicates are not. */
-const parseWorkflowInput = (value: string): string[] => {
-  const selection: string[] = [];
-  for (const entry of value.split(/[,\n]/)) {
-    const workflow = entry.trim();
-    if (workflow && !selection.some(existing => existing.toLowerCase() === workflow.toLowerCase())) selection.push(workflow);
-  }
-  return selection;
-};
-
 const CancelCiDuringFollowupControl: React.FC<{
   repo: MonitoredRepo;
   onToggle: (repoId: string) => void;
@@ -57,7 +48,7 @@ const CancelCiDuringFollowupControl: React.FC<{
   const selected = repo.cancelCiDuringFollowupWorkflows ?? [];
   // Compared by value, never by array identity: a poll that re-renders this bar
   // must not wipe what the operator is halfway through typing.
-  const storedSelection = selected.join(', ');
+  const storedSelection = formatWorkflowInput(selected);
   const [workflows, setWorkflows] = useState(storedSelection);
 
   useEffect(() => setWorkflows(storedSelection), [repo.id, storedSelection]);
@@ -66,7 +57,9 @@ const CancelCiDuringFollowupControl: React.FC<{
 
   const enabled = repo.cancelCiDuringFollowup === true;
   const commitWorkflows = () => {
+    if (workflows === storedSelection) return;
     const next = parseWorkflowInput(workflows);
+    if (next === null) return;
     if (next.join('\u0000').toLowerCase() !== selected.join('\u0000').toLowerCase()) onUpdateWorkflows(repo.id, next);
   };
 
@@ -94,25 +87,28 @@ const CancelCiDuringFollowupControl: React.FC<{
         <div className="ml-4 mt-1 mb-2 flex min-w-0 flex-col items-stretch gap-1 border-l-2 border-slate-200 pl-4">
           <label className="block w-full min-w-0">
             <span className="mb-1 block">Validation workflows to cancel</span>
-            <input
-              type="text"
+            <textarea
+              rows={2}
               value={workflows}
               onChange={(event) => setWorkflows(event.target.value)}
               onBlur={commitWorkflows}
-              onKeyDown={(event) => { if (event.key === 'Enter') event.currentTarget.blur(); }}
+              onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); event.currentTarget.blur(); } }}
+              aria-invalid={parseWorkflowInput(workflows) === null}
               maxLength={4000}
               aria-label={`Validation workflows to cancel for ${repo.name}`}
               className="min-w-0 w-full rounded border border-slate-200 bg-white px-2 py-1.5 text-xs text-slate-700 placeholder:text-slate-400 focus:border-teal-400 focus:outline-none focus:ring-1 focus:ring-teal-400"
               placeholder="pr-build-check.yml, Full Test Suite"
             />
           </label>
+          <p className="text-slate-500">Separate workflows with commas. Quote names containing commas, for example: &quot;Build, Test&quot;.</p>
+          {parseWorkflowInput(workflows) === null && <p role="alert">Close quoted workflow names and separate them with commas. Changes have not been saved.</p>}
           {selected.length === 0 ? (
             <p role="status" className="text-amber-700">
               No workflows selected for this repository, so the instance-wide <code>CANCEL_CI_FOLLOWUP_WORKFLOWS</code> fallback decides what is cancelled: whatever it lists is cancelled here, and nothing is cancelled when your operator left it unset. Select the workflows to cancel by file name, path or the name shown on the pull request — for example <code>pr-build-check.yml</code>.
             </p>
           ) : (
             <p role="status" className="text-slate-500">
-              Cancels exactly {selected.length === 1 ? 'this workflow' : `these ${selected.length} workflows`}: {selected.join(', ')}. A workflow that is not listed is never cancelled, whatever it is called.
+              Cancels exactly {selected.length === 1 ? 'this workflow' : `these ${selected.length} workflows`}: {formatWorkflowInput(selected)}. A workflow that is not listed is never cancelled, whatever it is called.
             </p>
           )}
         </div>

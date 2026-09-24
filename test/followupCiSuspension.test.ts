@@ -8,6 +8,7 @@ import { up as createLeases } from '../packages/core/src/db/migrations/202609230
 const database = knex({ client: 'better-sqlite3', connection: { filename: ':memory:' }, useNullAsDefault: true });
 await up(database);
 await createLeases(database);
+await (await import('../packages/core/src/db/migrations/20260924010000_add_ci_suspension_incarnation.js')).up(database);
 
 await mock.module('@propr/core', {
     namedExports: {
@@ -1823,4 +1824,71 @@ describe('follow-up CI suspension lifecycle wiring', () => {
         assert.ok(cleanup.includes('releaseFollowupCiSuspensionsForTask'), 'job cleanup releases the suspension');
         assert.ok(job.includes('await cleanupJob({ stateManager, lockKey, lockToken, taskId'), 'cleanup receives the owning task');
     });
+});
+
+describe('suspension identities survive row recreation', () => {
+    test('an old cancellation callback cannot overwrite a same-task retry at the same generation', async () => {
+        const store = await import('../src/jobs/followupCiSuspensionStore.ts');
+        const runs = [run({ id: 901 })];
+        let signal!: () => void;
+        const paused = new Promise<void>(resolve => { signal = resolve; });
+        let resume!: () => void;
+        const continuation = new Promise<void>(resolve => { resume = resolve; });
+        const worker = createGitHub(runs, { onCancel: async () => { signal(); await continuation; } });
+        const original = beginFollowupCiSuspension({ target: TARGET, taskId: TASK_ID }, deps(worker));
+        await paused;
+        const [stale] = await records();
+        assert.equal(stale.generation, 2);
+        // Model stopped lease renewal while the old request's response is delayed.
+        await database(PR_CI_SUSPENSION_LEASES_TABLE).update({ expires_at: Date.now() - 1 });
+        await restoreFollowupCiSuspension(stale, deps(createGitHub(runs)));
+        assert.equal((await records()).length, 0);
+        const fresh = await store.reserveSuspension({ target: TARGET, headSha: HEAD, taskId: TASK_ID }, { database });
+        assert.ok(fresh);
+        const current = await store.saveCancelledRuns({ database }, fresh.record, [{ id: 902, attempt: 1, restarted: false }]);
+        assert.ok(current);
+        assert.equal(current.generation, stale.generation);
+        assert.notEqual(current.incarnation, stale.incarnation);
+        resume();
+        await original;
+        assert.deepEqual(await storedRunIds(), [902]);
+        assert.equal(await store.deleteSuspension({ database }, stale), false);
+        assert.equal(await store.saveCancelledRuns({ database }, stale, []), null);
+        assert.deepEqual(await storedRunIds(), [902]);
+    });
+
+    test('a stale reservation cannot take over a recreated row with identical owner and generation', async () => {
+        const store = await import('../src/jobs/followupCiSuspensionStore.ts');
+        const params = { target: TARGET, headSha: HEAD, taskId: TASK_ID };
+        const original = await store.reserveSuspension(params, { database });
+        assert.ok(original);
+        const staleDatabase = databaseResumingAfterSuspensionRead(async () => {
+            await store.deleteSuspension({ database }, original.record);
+            await store.reserveSuspension(params, { database });
+        });
+        assert.equal(await store.reserveSuspension(params, { database: staleDatabase }), null);
+        const [current] = await records();
+        assert.notEqual(current.incarnation, original.record.incarnation);
+        assert.equal(current.generation, original.record.generation);
+    });
+});
+
+test('incarnation migration preserves existing restoration records and is reversible', async () => {
+    const legacy = knex({ client: 'better-sqlite3', connection: { filename: ':memory:' }, useNullAsDefault: true });
+    try {
+        await up(legacy);
+        const row = { repository: 'integry/propr', pull_request: 1, head_sha: HEAD, task_id: TASK_ID,
+            state: 'restoring', cancelled_runs: '[{"id":42}]', attempts: 3, generation: 9,
+            created_at: 1, updated_at: 2, correlation_id: null };
+        await legacy(PR_CI_SUSPENSIONS_TABLE).insert([row, { ...row, pull_request: 2 }]);
+        const migration = await import('../packages/core/src/db/migrations/20260924010000_add_ci_suspension_incarnation.js');
+        await migration.up(legacy);
+        const migrated = await legacy(PR_CI_SUSPENSIONS_TABLE).orderBy('pull_request');
+        assert.notEqual(migrated[0].incarnation, migrated[1].incarnation);
+        assert.match(migrated[0].incarnation, /^[a-f0-9-]{36}$/);
+        const { incarnation: _token, ...preserved } = migrated[0];
+        assert.deepEqual(preserved, row);
+        await migration.down(legacy);
+        assert.deepEqual(await legacy(PR_CI_SUSPENSIONS_TABLE).where('pull_request', 1).first(), row);
+    } finally { await legacy.destroy(); }
 });

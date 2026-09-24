@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import type { Knex } from 'knex';
 import { db } from '@propr/core';
 import { sameSha, type SuspensionTarget } from './followupCiSuspensionRuns.js';
@@ -7,8 +8,8 @@ import { sameSha, type SuspensionTarget } from './followupCiSuspensionRuns.js';
  * follow-up implementation. The row survives worker retries and crashes, so the
  * obligation to restart or drop that validation is never lost.
  *
- * Every write carries the generation it was read at and the task that owns it,
- * so a slow operation working from a stale read can neither overwrite nor
+ * Every write carries the row lifetime, generation, and task that owns it,
+ * so even deletion and recreation cannot let a stale read overwrite or
  * delete the state of a newer owner: its update simply matches no row. Across
  * workers the operations of a single pull request are additionally serialized
  * by the shared lease in `followupCiSuspensionLease.ts`, which is what keeps
@@ -32,6 +33,8 @@ export interface CiSuspensionRecord {
     attempts: number;
     /** Incremented by every successful write; the optimistic-concurrency token of this row. */
     generation: number;
+    /** Unique across deletion/recreation; generations are only unique within this lifetime. */
+    incarnation: string;
     created_at: number;
     updated_at: number;
 }
@@ -117,7 +120,7 @@ export async function loadSuspension(
  */
 export async function deleteSuspension(
     deps: CiSuspensionStoreDeps,
-    record: Pick<CiSuspensionRecord, 'repository' | 'pull_request' | 'task_id' | 'generation'>,
+    record: Pick<CiSuspensionRecord, 'repository' | 'pull_request' | 'task_id' | 'generation' | 'incarnation'>,
 ): Promise<boolean> {
     const deleted = await resolveDatabase(deps)(PR_CI_SUSPENSIONS_TABLE)
         .where({
@@ -125,6 +128,7 @@ export async function deleteSuspension(
             pull_request: record.pull_request,
             task_id: record.task_id,
             generation: record.generation,
+            incarnation: record.incarnation,
         })
         .delete();
     return deleted > 0;
@@ -154,6 +158,7 @@ export async function saveCancelledRuns(
             pull_request: record.pull_request,
             task_id: record.task_id,
             generation: record.generation,
+            incarnation: record.incarnation,
         })
         .update({
             cancelled_runs: next.cancelled_runs,
@@ -200,6 +205,7 @@ export async function reserveSuspension(
         attempts: 0,
         // Taking the row over from any previous owner invalidates its in-flight writes.
         generation: (existing?.generation ?? 0) + 1,
+        incarnation: existing?.incarnation ?? randomUUID(),
         created_at: existing?.created_at ?? timestamp,
         updated_at: timestamp,
     };
@@ -221,6 +227,7 @@ async function takeOverSuspension(
             pull_request: existing.pull_request,
             task_id: existing.task_id,
             generation: existing.generation,
+            incarnation: existing.incarnation,
         })
         .update({
             head_sha: record.head_sha,
@@ -230,6 +237,7 @@ async function takeOverSuspension(
             cancelled_runs: record.cancelled_runs,
             attempts: record.attempts,
             generation: record.generation,
+            incarnation: record.incarnation,
             updated_at: record.updated_at,
         });
     return updated > 0;
