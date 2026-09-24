@@ -213,6 +213,12 @@ async function cancelObservedRun(run: WorkflowRunSummary, pass: CancellationPass
         throw error;
     }
     if (!unchanged) return withdrawIntent(state, intent, previous, deps);
+    // That read took time as well, and a worker stalled inside it may have
+    // outlived its lease: the worker that took the lease over meanwhile may
+    // have seen the run finish, rerun it and dropped the suspension. The
+    // request is the last external effect of this pass and leaves only on a
+    // lease proven this worker's after the very last read.
+    await lease?.assertHeld();
     let accepted: boolean;
     try {
         accepted = await cancelRun(octokit, target, run.id);

@@ -1966,6 +1966,53 @@ describe('coordinators in separate worker processes', () => {
         assert.deepEqual(await database(PR_CI_SUSPENSION_LEASES_TABLE).select('*'), []);
     });
 
+    test('a sweep that loses its lease while reading the run one last time cancels nothing the new owner restored', async () => {
+        const runs = [run({ id: 1 })];
+        // GitHub accepts the cancellation and applies it asynchronously, so a
+        // sweep still finds the run pending and asks again.
+        const github = createGitHub(runs, { asyncCancellation: true });
+        const begun = await beginFollowupCiSuspension({ target: TARGET, taskId: TASK_ID }, deps(github));
+        assert.deepEqual(begun.cancelledRunIds, [1]);
+        const [record] = await records();
+
+        const workerB = createGitHub(runs);
+        const workerA = createGitHub(runs);
+        let runReads = 0;
+        let takenOver = false;
+        const request = workerA.octokit.request;
+        workerA.octokit.request = async (route, parameters) => {
+            const response = await request(route, parameters);
+            if (route !== 'GET /repos/{owner}/{repo}/actions/runs/{run_id}' || ++runReads !== 2 || takenOver) return response;
+            takenOver = true;
+            // The sweep re-read the run, wrote its intent and proved its lease;
+            // this is the final read before the cancel request. Its response,
+            // attempt 1 still running, is captured, and then the worker stalls
+            // for longer than the lease lives.
+            await database(PR_CI_SUSPENSION_LEASES_TABLE).update({ expires_at: Date.now() - 1 });
+            // The earlier cancellation lands; worker B takes the expired lease
+            // over, restores the run as attempt 2 and drops the suspension.
+            runs[0].status = 'completed';
+            runs[0].conclusion = 'cancelled';
+            const restored = await restoreFollowupCiSuspension(record, deps(workerB, { leaseHolder: 'worker-b', leaseAcquireTimeoutMs: 0 }));
+            assert.equal(restored.reason, 'restarted');
+            assert.deepEqual(workerB.rerun(), [1]);
+            assert.deepEqual(await records(), []);
+            // Worker A resumes with the response it captured before it stalled.
+            return response;
+        };
+
+        const swept = await sweepFollowupCiSuspension(record, deps(workerA, { leaseHolder: 'worker-a' }));
+
+        assert.equal(runReads, 2, 'the takeover happened during the final read before the cancel request');
+        assert.equal(swept.reason, 'busy');
+        assert.deepEqual(swept.cancelledRunIds, []);
+        assert.deepEqual(workerA.cancelled(), [], 'nothing is cancelled on a lease that belongs to somebody else');
+        assert.equal(runs[0].status, 'queued', 'the validation the new owner restored keeps running');
+        assert.equal(runs[0].run_attempt, 2);
+        assert.deepEqual(await records(), [], 'the stale worker left no suspension behind');
+        assert.deepEqual(await database(PR_CI_SUSPENSION_LEASES_TABLE).select('*'), []);
+    });
+
     test('leaves CI untouched and the implementation running when the lease cannot be taken at all', async () => {
         const github = createGitHub([run({ id: 1 })]);
 
