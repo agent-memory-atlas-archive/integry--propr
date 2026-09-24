@@ -250,7 +250,8 @@ async function restartPass(
             }
             const stopped = await gate();
             if (stopped) return { progressed, stopped };
-            // A run GitHub restarted in the meantime reports a conflict; its validation exists either way.
+            // A rejected or lost rerun only settles the obligation once the run
+            // proves its cancelled attempt was restarted; otherwise it stays owed.
             const outcome = await rerunRun(octokit, target, run.id, { attempt: run.attempt });
             if (outcome === 'unconfirmed') continue;
             if (outcome === 'restarted') restartedRunIds.push(run.id);

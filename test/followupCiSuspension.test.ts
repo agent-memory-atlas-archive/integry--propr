@@ -958,6 +958,108 @@ describe('restoring cancelled validation', () => {
         assert.deepEqual(await records(), []);
     });
 
+    test('a rerun GitHub rejected while the cancellation was still converging keeps the obligation', async () => {
+        const runs = [run({ id: 1 })];
+        // Discovery already reports the run cancelled, but the rerun endpoint
+        // still answers 409: the cancellation has not converged on GitHub's side.
+        const converging = createGitHub(runs, { asyncCancellation: true, rerunStatus: 409 });
+        await beginFollowupCiSuspension({ target: TARGET, taskId: TASK_ID }, deps(converging));
+        runs[0].status = 'completed';
+        runs[0].conclusion = 'cancelled';
+
+        const [result] = await releaseFollowupCiSuspensionsForTask({ taskId: TASK_ID }, deps(converging));
+
+        assert.equal(result.reason, 'pending');
+        assert.deepEqual(result.pendingRunIds, [1]);
+        assert.deepEqual(result.restartedRunIds, []);
+        // The head is still current and its validation is still cancelled on
+        // the attempt ProPR cancelled, so nothing may be released yet.
+        const [retained] = await records();
+        assert.equal(retained.state, 'restoring');
+        assert.deepEqual(
+            JSON.parse(retained.cancelled_runs).map((entry: { attempt?: number; restarted: boolean }) => [entry.attempt, entry.restarted]),
+            [[1, false]],
+        );
+        assert.deepEqual([runs[0].conclusion, runs[0].run_attempt], ['cancelled', 1]);
+
+        // The cancellation converged; the next reconciliation restarts the validation.
+        const recovered = createGitHub(runs);
+        const summary = await reconcileFollowupCiSuspensions(deps(recovered, { getTaskState: async () => null }));
+
+        assert.equal(summary.restored, 1);
+        assert.deepEqual(recovered.rerun(), [1]);
+        assert.equal(runs[0].run_attempt, 2);
+        assert.deepEqual(await records(), []);
+    });
+
+    test('a rerun GitHub rejected because the attempt was already restarted settles the obligation without a duplicate', async () => {
+        const runs = [run({ id: 1 })];
+        const github = createGitHub(runs, {
+            asyncCancellation: true,
+            // Somebody restarted the cancelled attempt just before ProPR did;
+            // GitHub rejects the duplicate and the run already carries attempt 2.
+            onRerun: async runId => {
+                const found = runs.find(candidate => candidate.id === runId)!;
+                found.status = 'queued';
+                found.conclusion = null;
+                found.run_attempt += 1;
+                throw Object.assign(new Error('status 409'), { status: 409 });
+            },
+        });
+        await beginFollowupCiSuspension({ target: TARGET, taskId: TASK_ID }, deps(github));
+        runs[0].status = 'completed';
+        runs[0].conclusion = 'cancelled';
+
+        const [result] = await releaseFollowupCiSuspensionsForTask({ taskId: TASK_ID }, deps(github));
+
+        assert.equal(result.reason, 'restarted');
+        assert.deepEqual(result.restartedRunIds, [], 'the restart was not ProPR\'s');
+        assert.deepEqual(github.rerun(), [1]);
+        assert.equal(runs[0].run_attempt, 2);
+        assert.deepEqual(await records(), []);
+    });
+
+    test('a lost rerun response is not taken as a restart while the run is only pending on the cancelled attempt', async () => {
+        const runs = [run({ id: 1 })];
+        const github = createGitHub(runs, {
+            asyncCancellation: true,
+            // The response is lost while the run is still winding down on the
+            // very attempt ProPR cancelled: nothing has been restarted.
+            onRerun: async runId => {
+                const found = runs.find(candidate => candidate.id === runId)!;
+                found.status = 'in_progress';
+                found.conclusion = null;
+                throw Object.assign(new Error('socket hang up'), { code: 'ECONNRESET' });
+            },
+        });
+        await beginFollowupCiSuspension({ target: TARGET, taskId: TASK_ID }, deps(github));
+        runs[0].status = 'completed';
+        runs[0].conclusion = 'cancelled';
+
+        const [result] = await releaseFollowupCiSuspensionsForTask({ taskId: TASK_ID }, deps(github));
+
+        assert.equal(result.reason, 'pending');
+        assert.deepEqual(result.pendingRunIds, [1]);
+        assert.deepEqual(result.restartedRunIds, []);
+        const [retained] = await records();
+        assert.equal(retained.state, 'restoring');
+        assert.deepEqual(
+            JSON.parse(retained.cancelled_runs).map((entry: { attempt?: number; restarted: boolean }) => [entry.attempt, entry.restarted]),
+            [[1, false]],
+        );
+
+        // The cancellation finishes on attempt 1; reconciliation now brings the validation back.
+        runs[0].status = 'completed';
+        runs[0].conclusion = 'cancelled';
+        const recovered = createGitHub(runs);
+        const summary = await reconcileFollowupCiSuspensions(deps(recovered, { getTaskState: async () => null }));
+
+        assert.equal(summary.restored, 1);
+        assert.deepEqual(recovered.rerun(), [1]);
+        assert.equal(runs[0].run_attempt, 2);
+        assert.deepEqual(await records(), []);
+    });
+
     test('an attempt a crashed pass already restarted is never rerun again, even once its newer attempt was cancelled', async () => {
         const runs = [run({ id: 1 })];
         let workerDied = false;

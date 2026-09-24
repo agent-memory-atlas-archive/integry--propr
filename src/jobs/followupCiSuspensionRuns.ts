@@ -54,7 +54,12 @@ function isPermissionError(error: unknown): boolean {
     return status === 403 || /resource not accessible by integration/i.test(message ?? '');
 }
 
-/** GitHub answers a cancel/rerun that no longer applies with 409; the outcome is already what the caller wanted. */
+/**
+ * GitHub answers a cancel or rerun it will not apply with 409. For a cancel
+ * that is the outcome the caller wanted: the run already finished. For a rerun
+ * it proves nothing by itself: the run may already have been restarted, but it
+ * may just as well still be converging on the cancellation ProPR asked for.
+ */
 function isConflict(error: unknown): boolean {
     return (error as { status?: number }).status === 409;
 }
@@ -196,11 +201,24 @@ export async function cancelRun(
 }
 
 /**
- * `restarted` — GitHub accepted this rerun; `exists` — the validation the caller
- * wanted is already there; `unconfirmed` — the request failed with no evidence
- * that it landed, so the obligation stays and the next pass retries it.
+ * `restarted` — GitHub accepted this rerun, or the run itself proves that the
+ * lost request landed; `exists` — the cancelled attempt was already restarted
+ * by somebody else; `unconfirmed` — the request failed with no evidence that
+ * the cancelled attempt was restarted, so the obligation stays and the next
+ * pass retries it.
  */
 export type RerunOutcome = 'restarted' | 'exists' | 'unconfirmed';
+
+/**
+ * Whether the run has moved past the attempt ProPR cancelled, which only an
+ * accepted rerun can cause. Nothing else the run reports is evidence of a
+ * restart: a pending status on the same attempt is what a cancellation that
+ * is still converging looks like, and treating it as a restart would release
+ * the obligation while the head's validation ends up cancelled.
+ */
+function attemptAdvancedPast(live: WorkflowRunSummary, evidence: { attempt?: number }): boolean {
+    return typeof live.run_attempt === 'number' && typeof evidence.attempt === 'number' && live.run_attempt > evidence.attempt;
+}
 
 export async function rerunRun(
     octokit: CiSuspensionOctokit,
@@ -214,17 +232,17 @@ export async function rerunRun(
         });
         return 'restarted';
     } catch (error) {
-        // A run GitHub already restarted answers 409; the validation the caller wanted exists.
-        if (isConflict(error)) return 'exists';
         if (isPermissionError(error)) throw new CiActionsPermissionError('rerun', (error as Error).message);
-        // The response can be lost after GitHub accepted the rerun. The run itself
-        // is the evidence: a higher attempt, or a run that is no longer completed,
-        // means the restart happened and must not be requested again.
+        // Neither a conflict nor a lost response says what happened to the
+        // cancelled attempt. GitHub rejects a rerun with 409 both for a run
+        // somebody already restarted and for a run still converging on its
+        // cancellation, and a request can be accepted after its response was
+        // lost. The run itself is the only evidence: an attempt beyond the
+        // one ProPR cancelled means the restart happened and must not be
+        // requested again. Anything else keeps the obligation, for the next
+        // pass to look at the run again and retry the rerun.
         const live = await getRun(octokit, target, runId).catch(() => undefined);
-        if (!live) return 'unconfirmed';
-        const attemptAdvanced = typeof live.run_attempt === 'number' && typeof evidence.attempt === 'number'
-            && live.run_attempt > evidence.attempt;
-        const runningAgain = PENDING_RUN_STATUSES.has((live.status ?? '').toLowerCase());
-        return attemptAdvanced || runningAgain ? 'restarted' : 'unconfirmed';
+        if (!live || !attemptAdvancedPast(live, evidence)) return 'unconfirmed';
+        return isConflict(error) ? 'exists' : 'restarted';
     }
 }
