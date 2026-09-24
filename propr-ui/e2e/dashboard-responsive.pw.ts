@@ -180,12 +180,25 @@ async function horizontalOverflow(page: Page) {
   }));
 }
 
-/** The dashboard's toolbar and four panes, in the order the document lists them. */
+/** The four panes, and the toolbar above them, in priority order. */
+const PANES = ['needs-attention-panel', 'happening-now-section', 'recent-outcomes-section', 'historical-stats-section'];
+const SECTIONS = ['dashboard-toolbar', ...PANES];
+
+/** The toolbar and panes in the order the document lists them. */
 async function sectionOrder(page: Page): Promise<string[]> {
-  const sections = ['dashboard-toolbar', 'needs-attention-panel', 'happening-now-section', 'recent-outcomes-section', 'historical-stats-section'];
   return page.evaluate(ids => [...document.querySelectorAll('[data-testid]')]
     .map(node => node.getAttribute('data-testid') as string)
-    .filter(id => ids.includes(id)), sections);
+    .filter(id => ids.includes(id)), SECTIONS);
+}
+
+type Box = { top: number; bottom: number; left: number; right: number; width: number };
+
+/** Each named section's rounded bounding box, keyed by its test id. */
+async function sectionBoxes(page: Page, ids: string[]): Promise<Record<string, Box>> {
+  return page.evaluate(names => Object.fromEntries(names.map(id => {
+    const { top, bottom, left, right, width } = (document.querySelector(`[data-testid="${id}"]`) as HTMLElement).getBoundingClientRect();
+    return [id, { top: Math.round(top), bottom: Math.round(bottom), left: Math.round(left), right: Math.round(right), width: Math.round(width) }];
+  })), ids);
 }
 
 for (const width of [...NARROW_WIDTHS, ...WIDE_WIDTHS]) {
@@ -204,20 +217,10 @@ for (const width of NARROW_WIDTHS) {
 
     // What needs a person first, then what is running, then what happened,
     // then the background numbers.
-    expect(await sectionOrder(page)).toEqual([
-      'dashboard-toolbar',
-      'needs-attention-panel',
-      'happening-now-section',
-      'recent-outcomes-section',
-      'historical-stats-section',
-    ]);
+    expect(await sectionOrder(page)).toEqual(SECTIONS);
 
     // One column: every section starts on the same left edge and spans it.
-    const boxes = await page.evaluate(() => ['dashboard-toolbar', 'needs-attention-panel', 'happening-now-section', 'recent-outcomes-section', 'historical-stats-section']
-      .map(id => {
-        const rect = (document.querySelector(`[data-testid="${id}"]`) as HTMLElement).getBoundingClientRect();
-        return { id, left: Math.round(rect.left), width: Math.round(rect.width) };
-      }));
+    const boxes = Object.values(await sectionBoxes(page, SECTIONS));
     expect(new Set(boxes.map(box => box.left)).size).toBe(1);
     expect(new Set(boxes.map(box => box.width)).size).toBe(1);
 
@@ -228,12 +231,7 @@ for (const width of NARROW_WIDTHS) {
 test('the wide layout keeps live work in the main column and the supporting panels beside it', async ({ page }) => {
   await openDashboard(page, 1440);
 
-  const columns = await page.evaluate(() => Object.fromEntries(
-    ['needs-attention-panel', 'happening-now-section', 'recent-outcomes-section', 'historical-stats-section'].map(id => {
-      const rect = (document.querySelector(`[data-testid="${id}"]`) as HTMLElement).getBoundingClientRect();
-      return [id, { left: Math.round(rect.left), right: Math.round(rect.right), width: Math.round(rect.width) }];
-    }),
-  ));
+  const columns = await sectionBoxes(page, PANES);
 
   // Running work and outcomes share the wide column, stacked.
   expect(columns['happening-now-section'].left).toBe(columns['recent-outcomes-section'].left);
@@ -285,12 +283,7 @@ test('an empty attention list holds the right column instead of collapsing it', 
   await expect(page.getByRole('heading', { name: /Needs attention/ })).toHaveText('Needs attention (0)');
   await expect(page.getByTestId('needs-attention-empty')).toBeVisible();
 
-  const boxes = await page.evaluate(() => Object.fromEntries(
-    ['needs-attention-panel', 'happening-now-section', 'recent-outcomes-section', 'historical-stats-section'].map(id => {
-      const rect = (document.querySelector(`[data-testid="${id}"]`) as HTMLElement).getBoundingClientRect();
-      return [id, { top: Math.round(rect.top), bottom: Math.round(rect.bottom), left: Math.round(rect.left) }];
-    }),
-  ));
+  const boxes = await sectionBoxes(page, PANES);
 
   // One horizon per row across both columns: attention beside running work,
   // stats beside the outcome feed.
