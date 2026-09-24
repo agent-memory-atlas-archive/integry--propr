@@ -47,6 +47,12 @@ export class SuspensionLeaseLostError extends Error {
     }
 }
 
+/** The handle an operation holds while it runs; `assertHeld` proves the lease is still this worker's before it acts on GitHub again. */
+export interface SuspensionLease {
+    token: string;
+    assertHeld: () => Promise<void>;
+}
+
 export interface SuspensionLeaseDeps extends CiSuspensionStoreDeps {
     /** Identifies the worker in the lease row; diagnostics only, never ownership — the token owns the lease. */
     leaseHolder?: string;
@@ -127,7 +133,7 @@ export async function releaseLease(deps: SuspensionLeaseDeps, leaseKey: string, 
 export async function withSuspensionLease<T>(
     deps: SuspensionLeaseDeps,
     leaseKey: string,
-    operation: (lease: { token: string; assertHeld: () => Promise<void> }) => Promise<T>,
+    operation: (lease: SuspensionLease) => Promise<T>,
 ): Promise<T> {
     const ttlMs = deps.leaseTtlMs ?? LEASE_TTL_MS;
     const token = randomUUID();

@@ -147,10 +147,23 @@ export async function getRun(
     }
 }
 
+export interface PullRequestHead {
+    sha: string;
+    open: boolean;
+}
+
+/**
+ * The pull request's current head and whether it is still open. `undefined`
+ * means the lookup could not establish either: the pull request answered 404 or
+ * came back without a head. That is not a closed pull request — a private
+ * repository answers 404 while the installation has lost access to it, and the
+ * head is still there when access comes back — so callers must keep whatever
+ * they owe that head and ask again later.
+ */
 export async function getPullRequestHead(
     octokit: CiSuspensionOctokit,
     target: SuspensionTarget,
-): Promise<{ sha: string; open: boolean } | undefined> {
+): Promise<PullRequestHead | undefined> {
     try {
         const response = await octokit.request('GET /repos/{owner}/{repo}/pulls/{pull_number}', {
             owner: target.owner, repo: target.repo, pull_number: target.pullRequestNumber,

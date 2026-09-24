@@ -10,7 +10,9 @@ import {
     SUSPENSION_ACTIVE, SUSPENSION_BLOCKED, SUSPENSION_RESTORING, suspensionKey, targetOf,
     type CancelledRun, type CiSuspensionRecord,
 } from './followupCiSuspensionStore.js';
-import { SuspensionLeaseLostError, SuspensionLeaseUnavailableError, withSuspensionLease } from './followupCiSuspensionLease.js';
+import {
+    SuspensionLeaseLostError, SuspensionLeaseUnavailableError, withSuspensionLease, type SuspensionLease,
+} from './followupCiSuspensionLease.js';
 
 /**
  * Cancels the GitHub Actions validation of a pull request head that a follow-up
@@ -42,16 +44,23 @@ const DEFAULT_RESTORE_BUDGET_MS = 15_000;
 const DEFAULT_POLL_INTERVAL_MS = 2_000;
 
 export interface SweepSuspensionResult {
-    reason: 'swept' | 'head_replaced' | 'pull_request_closed' | 'superseded' | 'busy';
+    /** `head_unavailable`: the pull request could not be read, so nothing was decided and the suspension is kept for the next pass. */
+    reason: 'swept' | 'head_replaced' | 'pull_request_closed' | 'head_unavailable' | 'superseded' | 'busy';
     cancelledRunIds: number[];
 }
 
 export interface RestoreSuspensionResult {
-    reason: 'restarted' | 'head_replaced' | 'pull_request_closed' | 'pending' | 'permission_denied' | 'superseded'
-        | 'blocked' | 'busy';
+    /** `head_unavailable`: the pull request could not be read, so the obligation is kept and retried by the next reconciliation. */
+    reason: 'restarted' | 'head_replaced' | 'pull_request_closed' | 'head_unavailable' | 'pending' | 'permission_denied'
+        | 'superseded' | 'blocked' | 'busy';
     restartedRunIds: number[];
     pendingRunIds: number[];
 }
+
+/** Outcomes that released nothing: the record, and with it every restart obligation, is still there. */
+const RETAINED_RESTORE_REASONS: ReadonlySet<RestoreSuspensionResult['reason']> = new Set([
+    'pending', 'permission_denied', 'blocked', 'superseded', 'busy', 'head_unavailable',
+]);
 
 export { CiActionsPermissionError, isCancelableValidationRun } from './followupCiSuspensionRuns.js';
 export {
@@ -83,16 +92,20 @@ export async function sweepFollowupCiSuspension(
     deps: CiSuspensionDeps = {},
 ): Promise<SweepSuspensionResult> {
     try {
-        return await withSuspensionLease(deps, suspensionKey(record), () => sweepSuspension(record, deps));
+        return await withSuspensionLease(deps, suspensionKey(record), lease => sweepSuspension(record, deps, lease));
     } catch (error) {
-        if (!(error instanceof SuspensionLeaseUnavailableError)) throw error;
+        if (!(error instanceof SuspensionLeaseUnavailableError) && !(error instanceof SuspensionLeaseLostError)) throw error;
         // Whoever holds the lease is already deciding what this pull request
         // needs; sweeping next to them could cancel what they are restoring.
         return { reason: 'busy', cancelledRunIds: [] };
     }
 }
 
-async function sweepSuspension(record: CiSuspensionRecord, deps: CiSuspensionDeps): Promise<SweepSuspensionResult> {
+async function sweepSuspension(
+    record: CiSuspensionRecord,
+    deps: CiSuspensionDeps,
+    lease: SuspensionLease,
+): Promise<SweepSuspensionResult> {
     const current = await loadSuspension(deps, record);
     // The row may already belong to a newer implementation of the same pull
     // request, or its restoring transition may have taken it out of suppression.
@@ -103,7 +116,13 @@ async function sweepSuspension(record: CiSuspensionRecord, deps: CiSuspensionDep
     const target = targetOf(current);
     const octokit = await resolveOctokit(deps);
     const live = await getPullRequestHead(octokit, target);
-    if (!live?.open) {
+    if (!live) {
+        // Nothing is known about the head, so nothing is decided about it: the
+        // suspension and its obligations wait for a pass that can read it.
+        logHeadUnavailable(current, deps);
+        return { reason: 'head_unavailable', cancelledRunIds: [] };
+    }
+    if (!live.open) {
         await deleteSuspension(deps, current);
         return { reason: 'pull_request_closed', cancelledRunIds: [] };
     }
@@ -116,8 +135,14 @@ async function sweepSuspension(record: CiSuspensionRecord, deps: CiSuspensionDep
         return { reason: 'head_replaced', cancelledRunIds: [] };
     }
     const state = cancellationState(current, parseCancelledRuns(current));
-    await cancelPendingRuns(state, { ...deps, octokit });
+    await cancelPendingRuns(state, { ...deps, octokit }, lease);
     return { reason: state.ownershipLost ? 'superseded' : 'swept', cancelledRunIds: state.cancelledRunIds };
+}
+
+function logHeadUnavailable(record: CiSuspensionRecord, deps: CiSuspensionDeps): void {
+    resolveLog(deps).warn({ repository: record.repository, pullRequest: record.pull_request, headSha: record.head_sha },
+        'The pull request of a follow-up CI suspension cannot be read right now; the suspension is kept and retried, '
+        + 'because a pull request that cannot be seen is not a closed one');
 }
 
 /**
@@ -126,6 +151,12 @@ async function sweepSuspension(record: CiSuspensionRecord, deps: CiSuspensionDep
  * fresh run of the same workflow validating the same pull request head need no
  * restart. A rerun whose response was lost counts as restarted only when the run
  * itself proves it.
+ *
+ * The attempt recorded at cancellation is what ProPR cancelled. A live attempt
+ * beyond it proves that attempt was already rerun — by a pass that crashed
+ * before it could record the restart, or by somebody at GitHub — and the
+ * obligation is met. Whatever happened to the newer attempt afterwards is not
+ * ProPR's doing and is never "restored" on its behalf.
  */
 async function restartCancelledRun(
     run: CancelledRun,
@@ -134,6 +165,7 @@ async function restartCancelledRun(
     const { target, octokit, liveRuns, activeWorkflowIds } = context;
     const liveRun = liveRuns.find(candidate => candidate.id === run.id) ?? await getRun(octokit, target, run.id);
     if (!liveRun) return 'settled';
+    if (attemptAdvanced(run, liveRun)) return 'settled';
     if ((liveRun.status ?? '').toLowerCase() !== 'completed') return 'pending';
     if ((liveRun.conclusion ?? '').toLowerCase() !== 'cancelled') return 'settled';
     if (run.workflowId !== undefined && activeWorkflowIds.has(run.workflowId)) return 'settled';
@@ -141,6 +173,11 @@ async function restartCancelledRun(
     const outcome = await rerunRun(octokit, target, run.id, { attempt: run.attempt ?? liveRun.run_attempt });
     if (outcome === 'unconfirmed') return 'unconfirmed';
     return outcome === 'restarted' ? 'restarted' : 'settled';
+}
+
+/** Whether the run already moved past the attempt ProPR cancelled, which only an accepted rerun can cause. */
+function attemptAdvanced(run: CancelledRun, liveRun: WorkflowRunSummary): boolean {
+    return typeof run.attempt === 'number' && typeof liveRun.run_attempt === 'number' && liveRun.run_attempt > run.attempt;
 }
 
 /** One pass over everything still owed a restart; `progressed` means the record has to be written before the next wait. */
@@ -174,6 +211,11 @@ async function restartPass(
  * Drops the obligation when the head it was taken on is gone: a closed pull
  * request or a published replacement commit means the cancelled revision is
  * obsolete and must never be restarted. Returns null while the head is current.
+ *
+ * Only a confirmed state drops anything. A pull request that cannot be read —
+ * a private repository the installation lost access to answers 404 — is not
+ * closed, and its head may well be unchanged; the obligation stays recorded and
+ * the next reconciliation asks again.
  */
 async function releaseObsoleteHead(
     context: { record: CiSuspensionRecord; octokit: CiSuspensionOctokit; restartedRunIds: number[]; pendingRunIds: number[] },
@@ -181,7 +223,11 @@ async function releaseObsoleteHead(
 ): Promise<RestoreSuspensionResult | null> {
     const { record, octokit, restartedRunIds, pendingRunIds } = context;
     const live = await getPullRequestHead(octokit, targetOf(record));
-    if (!live?.open) {
+    if (!live) {
+        logHeadUnavailable(record, deps);
+        return { reason: 'head_unavailable', restartedRunIds, pendingRunIds };
+    }
+    if (!live.open) {
         await deleteSuspension(deps, record);
         return { reason: 'pull_request_closed', restartedRunIds, pendingRunIds };
     }
@@ -234,11 +280,12 @@ async function restoreSuspension(
     const octokit = await resolveOctokit(deps);
     const attempts = current.attempts + 1;
     const restartedRunIds: number[] = [];
+    const runs = parseCancelledRuns(current);
+    const pendingRunIds = () => runs.filter(run => !run.restarted).map(run => run.id);
 
-    const obsolete = await releaseObsoleteHead({ record: current, octokit, restartedRunIds, pendingRunIds: [] }, deps);
+    const obsolete = await releaseObsoleteHead({ record: current, octokit, restartedRunIds, pendingRunIds: pendingRunIds() }, deps);
     if (obsolete) return obsolete;
 
-    const runs = parseCancelledRuns(current);
     if (current.state !== SUSPENSION_RESTORING) {
         // One-way transition, persisted before the first rerun: from here on a
         // sweep leaves this suspension alone instead of re-cancelling what is
@@ -276,8 +323,7 @@ async function restoreSuspension(
             await lease?.assertHeld();
             // The head can be replaced while this pass waits for cancellations to
             // finish, so it is read again before any further rerun.
-            const replaced = await releaseObsoleteHead(
-                { record: current, octokit, restartedRunIds, pendingRunIds: pending.map(run => run.id) }, deps);
+            const replaced = await releaseObsoleteHead({ record: current, octokit, restartedRunIds, pendingRunIds: pendingRunIds() }, deps);
             if (replaced) return replaced;
         }
     } catch (error) {
@@ -428,12 +474,12 @@ export async function reconcileFollowupCiSuspensions(
             if (await keepsSuppressing(record, deps, enabled)) {
                 const swept = await sweepFollowupCiSuspension(record, deps);
                 if (swept.reason === 'swept') summary.swept += 1;
-                else if (swept.reason !== 'superseded' && swept.reason !== 'busy') summary.released += 1;
+                else if (!['superseded', 'busy', 'head_unavailable'].includes(swept.reason)) summary.released += 1;
                 continue;
             }
             const restored = await restoreFollowupCiSuspension(record, deps);
-            // A denied or blocked restore released nothing: its obligation is still recorded.
-            if (!['pending', 'permission_denied', 'blocked', 'superseded', 'busy'].includes(restored.reason)) summary.released += 1;
+            // A denied, blocked or undecidable restore released nothing: its obligation is still recorded.
+            if (!RETAINED_RESTORE_REASONS.has(restored.reason)) summary.released += 1;
             if (restored.restartedRunIds.length > 0) summary.restored += 1;
         } catch (error) {
             summary.errors += 1;

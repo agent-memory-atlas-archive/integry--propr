@@ -77,6 +77,8 @@ interface GitHubOptions {
     /** Runs before every request, so a test can move the head while an operation waits. */
     onRequest?: (route: string) => Promise<void> | void;
     prState?: string;
+    /** Fails the pull request lookup itself, the way a repository the installation lost access to answers 404. */
+    prStatus?: number;
     headSha?: string;
     /** Runs returned per page, to exercise pagination. */
     perPage?: number;
@@ -112,6 +114,7 @@ function createGitHub(runs: FakeRun[], options: GitHubOptions = {}) {
             options.journal?.push({ coordinator: options.coordinator ?? 'default', route, runId });
             await options.onRequest?.(route);
             if (route === 'GET /repos/{owner}/{repo}/pulls/{pull_number}') {
+                if (options.prStatus) throw error(options.prStatus);
                 return { data: { state: head.state, head: { sha: head.sha } } };
             }
             if (route === 'GET /repos/{owner}/{repo}/actions/runs') {
@@ -720,6 +723,48 @@ describe('restoring cancelled validation', () => {
         assert.deepEqual(await records(), []);
     });
 
+    test('an attempt a crashed pass already restarted is never rerun again, even once its newer attempt was cancelled', async () => {
+        const runs = [run({ id: 1 })];
+        let workerDied = false;
+        const github = createGitHub(runs, {
+            onRerun: async runId => {
+                // GitHub accepts the rerun and starts attempt 2. The worker dies right
+                // there: neither the response nor any evidence reaches it, so the
+                // record still says attempt 1 was cancelled and never restarted.
+                const found = runs.find(candidate => candidate.id === runId)!;
+                found.status = 'queued';
+                found.conclusion = null;
+                found.run_attempt += 1;
+                workerDied = true;
+                throw Object.assign(new Error('socket hang up'), { code: 'ECONNRESET' });
+            },
+            onRequest: async route => {
+                if (workerDied && route === 'GET /repos/{owner}/{repo}/actions/runs/{run_id}') throw Object.assign(new Error('worker died'), { status: 500 });
+            },
+        });
+        await beginFollowupCiSuspension({ target: TARGET, taskId: TASK_ID }, deps(github));
+        const [crashed] = await releaseFollowupCiSuspensionsForTask({ taskId: TASK_ID }, deps(github));
+        assert.equal(crashed.reason, 'pending');
+        const [stored] = await records();
+        assert.deepEqual(
+            JSON.parse(stored.cancelled_runs).map((entry: { attempt: number; restarted: boolean }) => [entry.attempt, entry.restarted]),
+            [[1, false]], 'the crash left the original obligation recorded against attempt 1');
+        assert.equal(runs[0].run_attempt, 2);
+        workerDied = false;
+
+        // Somebody at GitHub cancels the restarted attempt. That is theirs, not
+        // ProPR's: the attempt ProPR cancelled was already brought back.
+        runs[0].status = 'completed';
+        runs[0].conclusion = 'cancelled';
+        const summary = await reconcileFollowupCiSuspensions(deps(github, { getTaskState: async () => null }));
+
+        assert.equal(summary.released, 1);
+        assert.equal(summary.restored, 0);
+        assert.deepEqual(github.rerun(), [1], 'the only rerun is the one the crashed pass sent');
+        assert.equal(runs[0].run_attempt, 2, 'the cancelled newer attempt is left as it is');
+        assert.deepEqual(await records(), [], 'the stored attempt is the proof that the obligation was met');
+    });
+
     test('keeps the obligation when a failed rerun left no evidence that it landed', async () => {
         const runs = [run({ id: 1 })];
         const github = createGitHub(runs, { rerunStatus: 500 });
@@ -777,6 +822,50 @@ describe('restoring cancelled validation', () => {
 
         assert.equal(summary.released, 1);
         assert.deepEqual(replaced.rerun(), []);
+        assert.deepEqual(await records(), []);
+    });
+
+    test('keeps the obligation while the pull request cannot be read, and honours it once it can be again', async () => {
+        const runs = [run({ id: 1 })];
+        const github = createGitHub(runs);
+        await beginFollowupCiSuspension({ target: TARGET, taskId: TASK_ID }, deps(github));
+        const [active] = await records();
+
+        // The installation lost access to the private repository: the pull request
+        // answers 404 although it is still open, on the very same head.
+        const inaccessible = createGitHub(runs, { prStatus: 404 });
+        const summary = await reconcileFollowupCiSuspensions(deps(inaccessible, { getTaskState: async () => null }));
+
+        assert.equal(summary.released, 0);
+        assert.equal(summary.errors, 0);
+        assert.deepEqual(inaccessible.rerun(), []);
+        assert.equal((await records()).length, 1, 'a pull request that cannot be seen is not a closed one');
+        assert.deepEqual(await storedRunIds(), [1]);
+
+        // Nor does a sweep, while the owner is still implementing, decide anything about a head it cannot see.
+        const swept = await sweepFollowupCiSuspension(active, deps(inaccessible));
+        assert.equal(swept.reason, 'head_unavailable');
+        assert.deepEqual(inaccessible.cancelled(), []);
+        assert.equal((await records()).length, 1);
+
+        // Access is granted back and the head is unchanged: the cancelled checks come back.
+        const restored = await reconcileFollowupCiSuspensions(deps(github, { getTaskState: async () => null }));
+
+        assert.equal(restored.restored, 1);
+        assert.deepEqual(github.rerun(), [1]);
+        assert.deepEqual(await records(), []);
+    });
+
+    test('a pull request that is confirmed closed still releases its obligation', async () => {
+        const runs = [run({ id: 1 })];
+        const github = createGitHub(runs);
+        await beginFollowupCiSuspension({ target: TARGET, taskId: TASK_ID }, deps(github));
+
+        github.head.state = 'closed';
+        const [result] = await releaseFollowupCiSuspensionsForTask({ taskId: TASK_ID }, deps(github));
+
+        assert.equal(result.reason, 'pull_request_closed');
+        assert.deepEqual(github.rerun(), []);
         assert.deepEqual(await records(), []);
     });
 });
@@ -970,6 +1059,49 @@ describe('coordinators in separate worker processes', () => {
         assert.equal((await records()).length, 1, 'the obligation waits for whoever holds the lease now');
         const [lease] = await database(PR_CI_SUSPENSION_LEASES_TABLE).select('*');
         assert.equal(lease.token, 'other-worker', 'a lost lease is never released by its previous holder');
+    });
+
+    test('a worker that lost its lease while reading the pull request never reserves the suspension over its new owner', async () => {
+        const runs = [run({ id: 1 }), run({ id: 2, head_sha: NEW_HEAD, status: 'queued' })];
+        let reachedLookup!: () => void;
+        const lookupIsPaused = new Promise<void>(resolve => { reachedLookup = resolve; });
+        let letLookupFinish!: () => void;
+        const lookupMayContinue = new Promise<void>(resolve => { letLookupFinish = resolve; });
+        let paused = false;
+        const workerA = createGitHub(runs, {
+            onRequest: async route => {
+                if (paused || route !== 'GET /repos/{owner}/{repo}/pulls/{pull_number}') return;
+                paused = true;
+                reachedLookup();
+                await lookupMayContinue;
+            },
+        });
+
+        // Worker A takes the lease and stalls inside its pull request lookup for
+        // longer than the lease lives.
+        const begunA = beginFollowupCiSuspension({ target: TARGET, taskId: TASK_ID }, deps(workerA, { leaseHolder: 'worker-a' }));
+        await lookupIsPaused;
+        await database(PR_CI_SUSPENSION_LEASES_TABLE).update({ expires_at: Date.now() - 1 });
+
+        // A replacement commit was published meanwhile; a second follow-up takes
+        // the expired lease over and suspends the validation of the new head.
+        const workerB = createGitHub(runs, { headSha: NEW_HEAD });
+        const begunB = await beginFollowupCiSuspension({ target: TARGET, taskId: 'task-next' },
+            deps(workerB, { leaseHolder: 'worker-b', leaseAcquireTimeoutMs: 0 }));
+        assert.equal(begunB.reason, 'suspended');
+        assert.deepEqual(begunB.cancelledRunIds, [2]);
+
+        // Worker A's lookup finally returns, with the old head.
+        letLookupFinish();
+        const resultA = await begunA;
+
+        assert.equal(resultA.reason, 'busy');
+        assert.deepEqual(workerA.cancelled(), [], 'nothing is cancelled on a lease that belongs to somebody else');
+        const [current] = await records();
+        assert.equal(current.task_id, 'task-next');
+        assert.equal(current.head_sha, NEW_HEAD);
+        assert.deepEqual(await storedRunIds(), [2], "the new owner's restart obligation survived the stale worker");
+        assert.deepEqual(await database(PR_CI_SUSPENSION_LEASES_TABLE).select('*'), [], 'the stale worker released nothing that was not its own');
     });
 
     test('leaves CI untouched and the implementation running when the lease cannot be taken at all', async () => {
