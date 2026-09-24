@@ -7,7 +7,7 @@ import { isCancelCiDuringFollowupEnabledForRepository } from '@propr/core';
 import type { ContinuationRecord, PullRequestReference } from './prContinuation.js';
 import {
     CiActionsPermissionError, cancelRun, getPullRequestHead, getRun, isCancelableValidationRun, listRunsForSha,
-    locateCancelledAttempt, type SuspensionTarget,
+    locateCancelledAttempt, type CiSuspensionOctokit, type SuspensionTarget, type WorkflowRunSummary,
 } from './followupCiSuspensionRuns.js';
 import { resolveLog, resolveOctokit, resolvePolicy, type CiSuspensionDeps } from './followupCiSuspensionContext.js';
 import {
@@ -107,98 +107,172 @@ export function resolveFollowupCiSuspensionTarget(
  * later cancellation by somebody else pass for ProPR's and authorize a rerun
  * nobody asked for. The rollback is persisted before the refusal propagates.
  *
- * Discovery and the intent write are awaited calls, which is where a stalled
- * worker outlives its lease. The lease is therefore proven to be still this
- * worker's before every write and, again, immediately before every cancel
- * request: the write only proves ownership at the moment it lands, and the
- * worker that takes the lease over while the write's response is on its way
- * back may restore the run and drop the suspension before this pass resumes.
- * Once the lease is lost, the pass stops with {@link SuspensionLeaseLostError}
- * and leaves the pull request to the worker that holds the lease now.
+ * The intent write itself is such a window, and the lease does not close it:
+ * the lease keeps other ProPR workers out, not the people at GitHub. An
+ * operator who cancels the run and reruns it while the write is pending
+ * leaves the run on a newer attempt with the observed one ended cancelled by
+ * their hand, which is exactly the evidence {@link locateCancelledAttempt}
+ * reads as ProPR's cancellation. The request would then land on their rerun,
+ * the record would tie the obligation to their cancelled attempt, and the
+ * rerun past it would settle it while the head's checks stay cancelled. The
+ * run is therefore read once more after the write has landed, and the request
+ * only leaves the worker while the run is still cancellable on the very
+ * attempt the intent recorded. Any other state takes this invocation's intent
+ * back, persisted, and leaves the run alone: a run that finished needs
+ * nothing, and a run on a newer attempt is somebody else's until a later
+ * sweep observes it afresh and records that attempt before asking again.
+ *
+ * Discovery, the intent write and that final read are awaited calls, which is
+ * where a stalled worker outlives its lease. The lease is therefore proven to
+ * be still this worker's before every write and, again, immediately before
+ * every cancel request: the write only proves ownership at the moment it
+ * lands, and the worker that takes the lease over while the write's response
+ * is on its way back may restore the run and drop the suspension before this
+ * pass resumes. Once the lease is lost, the pass stops with
+ * {@link SuspensionLeaseLostError} and leaves the pull request to the worker
+ * that holds the lease now.
  */
 export async function cancelPendingRuns(
     state: CancellationState,
     deps: CiSuspensionDeps,
     lease?: SuspensionLease,
 ): Promise<void> {
-    const { record, runs } = state;
+    const { record } = state;
     const octokit = await resolveOctokit(deps);
     const headSha = record.head_sha;
     const target = targetOf(record);
     const policy = await resolvePolicy(deps, target);
     if (policy.selected.size === 0) return;
-    const eligible = { pullRequestNumber: target.pullRequestNumber, headSha, policy };
+    const pass: CancellationPass = { state, deps, lease, octokit, target, eligible: { pullRequestNumber: target.pullRequestNumber, headSha, policy } };
     for (const listed of await listRunsForSha(octokit, target, headSha)) {
-        if (!isCancelableValidationRun(listed, eligible)) continue;
+        if (!isCancelableValidationRun(listed, pass.eligible)) continue;
         await lease?.assertHeld();
         // The listing is stale by now for every run but the first: this run is
         // read again, and only what it is right now decides whether it is still
         // cancellable and which attempt the intent records. A run that vanished
         // or finished meanwhile is left alone.
         const run = await getRun(octokit, target, listed.id);
-        if (!run || !isCancelableValidationRun(run, eligible)) continue;
-        const index = runs.findIndex(entry => entry.id === run.id);
-        // What the record said before this request, to fall back on if the request is rejected.
-        const previous = index >= 0 ? { ...runs[index] } : undefined;
-        const intent: CancelledRun = {
-            id: run.id, name: run.name ?? undefined, workflowId: run.workflow_id,
-            observedAttempt: typeof run.run_attempt === 'number' ? run.run_attempt : undefined, restarted: false,
-        };
-        if (index >= 0) {
-            // Known and pending again — restarted or never cancelled — so this is a
-            // fresh obligation on whatever attempt the request lands on.
-            runs[index] = intent;
-        } else {
-            runs.push(intent);
-        }
-        // Written before every single cancel request, including for a run that is
-        // already known: the write is also the ownership check that proves this
-        // pass still owned the suspension at the moment the write landed.
-        if (!await persistIntent(state, deps)) return;
-        // That moment has passed by the time the write's response is back. The
-        // lease is proven once more right before the request leaves the worker,
-        // so a worker that lost it meanwhile cancels nothing another worker may
-        // already have restored.
-        await lease?.assertHeld();
-        let accepted: boolean;
-        try {
-            accepted = await cancelRun(octokit, target, run.id);
-        } catch (error) {
-            // A refused request provably cancelled nothing, so the intent it
-            // introduced is taken back before the refusal surfaces. Any other
-            // failure is ambiguous and keeps the intent for reconciliation.
-            if (error instanceof CiActionsPermissionError) {
-                withdrawIntent(runs, intent, previous);
-                await persistIntent(state, deps);
-            }
-            throw error;
-        }
-        if (!accepted) {
-            withdrawIntent(runs, intent, previous);
-            if (!await persistIntent(state, deps)) return;
-            continue;
-        }
-        state.cancelledRunIds.push(run.id);
-        const affected = await getRun(octokit, target, run.id).catch(() => undefined);
-        if (!affected) continue;
-        // The attempt the run shows now is not adopted: it is only evidence,
-        // together with the attempts the run left behind, of which attempt the
-        // accepted request affected. An intervening rerun is recognized here as
-        // having met the obligation rather than as the attempt to restore.
-        const cancelledAttempt = await locateCancelledAttempt(octokit, target, run.id, { observedAttempt: intent.observedAttempt, live: affected })
-            .catch(() => undefined);
-        if (cancelledAttempt === undefined) continue;
-        intent.attempt = cancelledAttempt;
-        if (!await persistIntent(state, deps)) return;
+        if (!run || !isCancelableValidationRun(run, pass.eligible)) continue;
+        if (!await cancelObservedRun(run, pass)) return;
     }
 }
 
-/** Takes a rejected request's intent back: the run is recorded as it was before, or not at all. */
-function withdrawIntent(runs: CancelledRun[], intent: CancelledRun, previous: CancelledRun | undefined): void {
+/** Everything one cancellation pass shares between the runs it handles. */
+interface CancellationPass {
+    state: CancellationState;
+    deps: CiSuspensionDeps;
+    lease?: SuspensionLease;
+    octokit: CiSuspensionOctokit;
+    target: SuspensionTarget;
+    eligible: Parameters<typeof isCancelableValidationRun>[1];
+}
+
+/**
+ * Records the intent for one run as it was just observed and, while it still
+ * is that run, cancels it. False once a newer owner holds the row and the pass
+ * must stop.
+ */
+async function cancelObservedRun(run: WorkflowRunSummary, pass: CancellationPass): Promise<boolean> {
+    const { state, deps, lease, octokit, target, eligible } = pass;
+    const { runs } = state;
+    const index = runs.findIndex(entry => entry.id === run.id);
+    // What the record said before this request, to fall back on if the request is rejected.
+    const previous = index >= 0 ? { ...runs[index] } : undefined;
+    const intent: CancelledRun = {
+        id: run.id, name: run.name ?? undefined, workflowId: run.workflow_id,
+        observedAttempt: typeof run.run_attempt === 'number' ? run.run_attempt : undefined, restarted: false,
+    };
+    if (index >= 0) {
+        // Known and pending again — restarted or never cancelled — so this is a
+        // fresh obligation on whatever attempt the request lands on.
+        runs[index] = intent;
+    } else {
+        runs.push(intent);
+    }
+    // Written before every single cancel request, including for a run that is
+    // already known: the write is also the ownership check that proves this
+    // pass still owned the suspension at the moment the write landed.
+    if (!await persistIntent(state, deps)) return false;
+    // That moment has passed by the time the write's response is back. The
+    // lease is proven once more right before the request leaves the worker,
+    // so a worker that lost it meanwhile cancels nothing another worker may
+    // already have restored.
+    await lease?.assertHeld();
+    // The run is proven once more too: the write took time, and the lease
+    // keeps no operator at GitHub from cancelling and rerunning the run
+    // meanwhile. The request leaves only for a run still cancellable on
+    // the attempt the intent recorded; anything else provably received no
+    // request from this pass, so the intent it introduced is taken back.
+    let unchanged: boolean;
+    try {
+        unchanged = await stillObservedRun(octokit, target, run, eligible);
+    } catch (error) {
+        // A read that failed sent no request either, so the intent it was
+        // guarding is taken back before the failure surfaces.
+        await withdrawIntent(state, intent, previous, deps);
+        throw error;
+    }
+    if (!unchanged) return withdrawIntent(state, intent, previous, deps);
+    let accepted: boolean;
+    try {
+        accepted = await cancelRun(octokit, target, run.id);
+    } catch (error) {
+        // A refused request provably cancelled nothing, so the intent it
+        // introduced is taken back before the refusal surfaces. Any other
+        // failure is ambiguous and keeps the intent for reconciliation.
+        if (error instanceof CiActionsPermissionError) await withdrawIntent(state, intent, previous, deps);
+        throw error;
+    }
+    if (!accepted) return withdrawIntent(state, intent, previous, deps);
+    state.cancelledRunIds.push(run.id);
+    const affected = await getRun(octokit, target, run.id).catch(() => undefined);
+    if (!affected) return true;
+    // The attempt the run shows now is not adopted: it is only evidence,
+    // together with the attempts the run left behind, of which attempt the
+    // accepted request affected. An intervening rerun is recognized here as
+    // having met the obligation rather than as the attempt to restore.
+    const cancelledAttempt = await locateCancelledAttempt(octokit, target, run.id, { observedAttempt: intent.observedAttempt, live: affected })
+        .catch(() => undefined);
+    if (cancelledAttempt === undefined) return true;
+    intent.attempt = cancelledAttempt;
+    return persistIntent(state, deps);
+}
+
+/**
+ * Whether the run is still the one the intent describes: cancellable for this
+ * head and pull request, and on the attempt observed when the intent was
+ * written. A run that vanished, finished or moved to another attempt is not,
+ * and a request sent now could not affect the attempt the intent recorded.
+ */
+async function stillObservedRun(
+    octokit: CiSuspensionOctokit,
+    target: SuspensionTarget,
+    observed: WorkflowRunSummary,
+    eligible: Parameters<typeof isCancelableValidationRun>[1],
+): Promise<boolean> {
+    const current = await getRun(octokit, target, observed.id);
+    if (!current || !isCancelableValidationRun(current, eligible)) return false;
+    return current.run_attempt === observed.run_attempt;
+}
+
+/**
+ * Takes back the intent of a request that provably never affected the run: the
+ * run is recorded as it was before, or not at all, and the rollback is
+ * persisted. False once a newer owner holds the row.
+ */
+async function withdrawIntent(
+    state: CancellationState,
+    intent: CancelledRun,
+    previous: CancelledRun | undefined,
+    deps: CiSuspensionDeps,
+): Promise<boolean> {
+    const { runs } = state;
     const index = runs.indexOf(intent);
-    if (index < 0) return;
-    if (previous) runs[index] = previous;
-    else runs.splice(index, 1);
+    if (index >= 0) {
+        if (previous) runs[index] = previous;
+        else runs.splice(index, 1);
+    }
+    return persistIntent(state, deps);
 }
 
 /** Writes the intent and keeps the caller on the generation it just produced; false once a newer owner holds the row. */

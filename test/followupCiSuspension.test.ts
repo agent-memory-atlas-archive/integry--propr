@@ -568,6 +568,75 @@ describe('follow-up CI suspension targeting', () => {
         assert.deepEqual(await records(), []);
     });
 
+    test('a run an operator cancelled and reran while its intent was being written receives no request on the operator\'s rerun', async () => {
+        const runs = [run({ id: 1 })];
+        let rerunByOperator = false;
+        const github = createGitHub(runs);
+        const rerunWhileTheWriteReturns = async () => {
+            if (rerunByOperator) return;
+            rerunByOperator = true;
+            // The intent for attempt 1 has landed. While its response is on its
+            // way back, an operator cancels attempt 1 and reruns the workflow:
+            // the run is on attempt 2 now, with attempt 1 ended cancelled by
+            // their hand — the very evidence a cancellation by ProPR leaves.
+            runs[0].attempts = { 1: { status: 'completed', conclusion: 'cancelled' } };
+            runs[0].run_attempt = 2;
+            runs[0].status = 'queued';
+            runs[0].conclusion = null;
+        };
+
+        const result = await beginFollowupCiSuspension({ target: TARGET, taskId: TASK_ID },
+            deps(github, { database: databaseResumingAfterSuspensionWrite(rerunWhileTheWriteReturns) }));
+
+        assert.equal(result.reason, 'suspended');
+        assert.deepEqual(result.cancelledRunIds, []);
+        assert.deepEqual(github.cancelled(), [], 'the request recorded for attempt 1 never leaves for the operator\'s attempt 2');
+        assert.deepEqual([runs[0].status, runs[0].run_attempt], ['queued', 2], 'the operator\'s rerun keeps running');
+        assert.deepEqual(await storedRunIds(), [], 'the intent the rerun invalidated is withdrawn, not left to pass for a cancellation');
+
+        // A later sweep observes the run afresh, on attempt 2, and cancels that.
+        const [record] = await records();
+        const swept = await sweepFollowupCiSuspension(record, deps(github));
+        assert.equal(swept.reason, 'swept');
+        assert.deepEqual(swept.cancelledRunIds, [1]);
+        assert.deepEqual([runs[0].status, runs[0].conclusion, runs[0].run_attempt], ['completed', 'cancelled', 2]);
+        const [stored] = await records();
+        assert.deepEqual(
+            JSON.parse(stored.cancelled_runs).map((entry: { observedAttempt?: number; attempt?: number; restarted: boolean }) =>
+                [entry.observedAttempt, entry.attempt, entry.restarted]),
+            [[2, 2, false]], 'the record ties ProPR\'s cancellation to attempt 2, not to the attempt the operator cancelled');
+
+        // The head is unchanged when implementation ends: attempt 2 is what
+        // ProPR cancelled, and the operator's earlier cancellation of attempt 1
+        // must neither pass for it nor discharge the obligation to restore it.
+        const summary = await reconcileFollowupCiSuspensions(deps(github, { getTaskState: async () => null }));
+        assert.equal(summary.restored, 1);
+        assert.deepEqual(github.rerun(), [1]);
+        assert.equal(runs[0].run_attempt, 3);
+        assert.deepEqual(await records(), []);
+    });
+
+    test('a run that finished while its intent was being written receives no request and is not recorded', async () => {
+        const runs = [run({ id: 1 }), run({ id: 2 })];
+        let finished = false;
+        const github = createGitHub(runs);
+        const finishWhileTheWriteReturns = async () => {
+            if (finished) return;
+            finished = true;
+            // Run 1 produced its own result while its intent was being written.
+            runs[0].status = 'completed';
+            runs[0].conclusion = 'success';
+        };
+
+        const result = await beginFollowupCiSuspension({ target: TARGET, taskId: TASK_ID },
+            deps(github, { database: databaseResumingAfterSuspensionWrite(finishWhileTheWriteReturns) }));
+
+        assert.deepEqual(result.cancelledRunIds, [2]);
+        assert.deepEqual(github.cancelled(), [2], 'no cancel request leaves for a run that is no longer pending');
+        assert.deepEqual(await storedRunIds(), [2], 'the withdrawn intent of run 1 does not stand next to the obligation for run 2');
+        assert.deepEqual([runs[0].status, runs[0].conclusion], ['completed', 'success']);
+    });
+
     test('a run that finished while earlier runs were handled is neither cancelled nor recorded', async () => {
         const runs = [run({ id: 1 }), run({ id: 2 })];
         const github = createGitHub(runs, {
