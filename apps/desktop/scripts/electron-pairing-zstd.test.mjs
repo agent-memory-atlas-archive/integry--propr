@@ -1,49 +1,17 @@
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
 import { createServer } from 'node:http';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { zstdCompressSync } from 'node:zlib';
 import { before, describe, it } from 'node:test';
+import { runElectronFixture } from './electron-fixture-runner.mjs';
 import { prepareNativeElectronTest } from './electron-native-test-setup.mjs';
 
 const fixture = resolve(dirname(fileURLToPath(import.meta.url)), 'electron-pairing-zstd-probe.cjs');
 
-const runFixture = (command, args) => new Promise((resolveRun, rejectRun) => {
-  const child = spawn(command, args, {
-    env: process.env,
-    stdio: ['ignore', 'pipe', 'pipe'],
-    windowsHide: true,
-  });
-  let stdout = '';
-  let stderr = '';
-  child.stdout.setEncoding('utf8');
-  child.stderr.setEncoding('utf8');
-  child.stdout.on('data', value => { stdout += value; });
-  child.stderr.on('data', value => { stderr += value; });
-  const timer = setTimeout(() => child.kill('SIGKILL'), 30_000);
-  child.once('error', error => {
-    clearTimeout(timer);
-    rejectRun(error);
-  });
-  child.once('close', (code, signal) => {
-    clearTimeout(timer);
-    if (code !== 0) {
-      rejectRun(new Error(`Electron zstd fixture failed (${String(code ?? signal)}): ${stderr.slice(-2_000)}`));
-      return;
-    }
-    const reportLine = stdout.trim().split(/\r?\n/u).findLast(line => line.startsWith('{'));
-    if (!reportLine) {
-      rejectRun(new Error(`Electron zstd fixture did not report evidence: ${stderr.slice(-2_000)}`));
-      return;
-    }
-    resolveRun(JSON.parse(reportLine));
-  });
-});
-
 describe('Electron pairing response compression', () => {
   let setup;
-  // A cold Electron download belongs to setup, not the fixture's 25s budget.
+  // A cold Electron download belongs to setup, not the fixture's own budget.
   before(() => {
     // This probe uses only the main-process Session API, so Chromium's native
     // headless backend is sufficient when a Linux worker has no display.
@@ -51,9 +19,10 @@ describe('Electron pairing response compression', () => {
   }, { timeout: 120_000 });
 
   // The budget covers the probe's own bounded retries of a stalled loopback
-  // request, which each cost the client's fixed header deadline.
+  // request, which each cost the client's fixed header deadline, and the
+  // runner's bounded relaunch of a worker that killed the fixture outright.
   it('negotiates and transparently decodes zstd through defaultSession.fetch', {
-    timeout: 40_000,
+    timeout: 70_000,
   }, async context => {
     if ('skipReason' in setup) {
       context.skip(setup.skipReason);
@@ -88,18 +57,21 @@ describe('Electron pairing response compression', () => {
     try {
       const address = server.address();
       assert.ok(address && typeof address === 'object');
-      const electronArguments = [
-        ...(process.platform === 'linux' ? [
-          '--no-sandbox',
-          '--disable-gpu',
-          ...('headlessLinux' in setup ? ['--headless', '--ozone-platform=headless'] : []),
-        ] : []),
-        fixture,
-        `http://127.0.0.1:${address.port}/valid`,
-      ];
-      const report = setup.xvfbRun
-        ? await runFixture(setup.xvfbRun, ['--auto-servernum', setup.electronExecutable, ...electronArguments])
-        : await runFixture(setup.electronExecutable, electronArguments);
+      const report = await runElectronFixture({
+        diagnostic: message => context.diagnostic(message),
+        electronArguments: [
+          ...(process.platform === 'linux' ? [
+            '--no-sandbox',
+            '--disable-gpu',
+            ...('headlessLinux' in setup ? ['--headless', '--ozone-platform=headless'] : []),
+          ] : []),
+          fixture,
+          `http://127.0.0.1:${address.port}/valid`,
+        ],
+        name: 'Electron zstd fixture',
+        setup,
+        timeout: 30_000,
+      });
 
       const evidence = JSON.stringify(report);
       for (const { acceptEncoding, path } of received) {
