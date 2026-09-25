@@ -12,7 +12,7 @@ const files = [
   'packages/cli/src/orchestrator/index.test.ts',
   'packages/api/test/statusRoutes.test.ts',
 ].map((file) => join(root, file));
-const expectedTestCount = 103;
+const expectedTestCount = 106;
 
 const result = spawnSync(process.execPath, [
   '--import', 'tsx', '--experimental-test-module-mocks', '--test', ...files,
