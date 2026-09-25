@@ -21,7 +21,9 @@
  *
  * Values keep the first line as written and dedent continuation lines by
  * their common indentation, so renderers can indent them beneath any
- * `- **label:**` bullet without changing their Markdown structure.
+ * `- **label:**` bullet without changing their Markdown structure. A value
+ * that starts below an empty field line can therefore open with an indented
+ * line, which renderers keep below the label.
  *
  * Code fences are tracked on those dedented lines, the same shape a renderer
  * publishes, relative to the list item that contains them: an opener or
@@ -123,8 +125,14 @@ function fencesClose(continuation: ContinuationLine[]): boolean {
         let column = indent;
         let rest = text.slice(indent);
         // A fence can open a list item, as in `- ~~~ts`; its closer then sits
-        // at the item's content column without a marker.
-        for (let marker = LIST_MARKER_RE.exec(rest); marker; marker = LIST_MARKER_RE.exec(rest)) {
+        // at the item's content column without a marker. Text four or more
+        // columns past the containing item's content is literal code, so a
+        // marker-shaped `- ~~~` there opens neither an item nor a fence.
+        for (
+            let marker = LIST_MARKER_RE.exec(rest);
+            marker && column - items[items.length - 1] < 4;
+            marker = LIST_MARKER_RE.exec(rest)
+        ) {
             const markerEnd = column + marker[0].length - marker[1].length;
             column = advanceColumn(markerEnd, marker[1]);
             // Five or more columns after a marker start indented code in the item.
@@ -219,12 +227,14 @@ export function extractRecordFields(block: string, allowedKeys?: ReadonlySet<str
  * Render one record field as a Markdown bullet. Continuation lines are
  * indented beneath the bullet, which keeps lists and paragraphs inside the
  * field when GitHub renders the comment and when the parser reads it back.
- * Multiline values that open with a block such as a numbered list start on
- * their own line so Markdown does not fold that block into the label.
+ * Multiline values that open with a block such as a numbered list, or whose
+ * first line is indented relative to later lines, start on their own line so
+ * Markdown does not fold that block into the label and the parser dedents
+ * every line of the value together.
  */
 export function formatRecordField(label: string, value: string): string {
     const lines = value.split('\n');
-    const leadsWithBlock = lines.length > 1 && BLOCK_START_RE.test(lines[0]);
+    const leadsWithBlock = lines.length > 1 && (BLOCK_START_RE.test(lines[0]) || /^[ \t]/.test(lines[0]));
     const header = leadsWithBlock ? `- **${label}:**` : `- **${label}:** ${lines.shift() ?? ''}`.trimEnd();
     const body = leadsWithBlock ? ['', ...lines] : lines;
     return [header, ...body.map(line => (line === '' ? '' : `  ${line}`))].join('\n');

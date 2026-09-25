@@ -425,6 +425,77 @@ describe('multiline review fields', () => {
         assert.strictEqual(parseStructuredReview(literalCloser).status, 'invalid');
     });
 
+    test('a value whose first line keeps indentation stays below its label through publication and /fix selection', async () => {
+        const correction = ['  ~~~ts', 'return current;', '~~~'].join('\n');
+        const review = MACHINE_REVIEW.replace(
+            '- **minimumCorrection:** Refresh the attempt after intent persistence:\n\n' + indent(F1_CORRECTION.split('\n').slice(2).join('\n')),
+            ['- **minimumCorrection:**', '    ~~~ts', '  return current;', '  ~~~'].join('\n'),
+        );
+        assert.notStrictEqual(review, MACHINE_REVIEW);
+        const [parsed] = parseStructuredReview(review).actionableFindings;
+        assert.strictEqual(parsed.minimumCorrection, correction);
+
+        assert.strictEqual(formatRecordField('Minimum fix', correction), '- **Minimum fix:**\n\n    ~~~ts\n  return current;\n  ~~~');
+        const published = renderPublicReview(review, undefined, { changedFilePaths: CHANGED_FILES })!;
+        assert.ok(published);
+        const reparsed = parseStructuredReview(publicComment(published).body);
+        assert.strictEqual(reparsed.status, 'valid_with_blockers');
+        assert.strictEqual(reparsed.actionableFindings[0].minimumCorrection, correction);
+
+        const gathered = await gatherUnprocessedReviewComments([publicComment(published)], gatherOptions);
+        const selected = selectReviewFeedback(gathered, parseFixFindingSelection('F1'));
+        assert.deepStrictEqual(
+            selected.flatMap(comment => comment.actionableFindings.map(finding => finding.minimumCorrection)),
+            [correction],
+        );
+        const regathered = extractActionableFindings(`## Actionable Findings\n${formatActionableFindings(reparsed.actionableFindings)}`);
+        assert.strictEqual(regathered[0].minimumCorrection, correction);
+    });
+
+    test('list-marker-shaped literal code does not open a fence through publication and /fix selection', async () => {
+        for (const marker of ['- ', '1. ']) {
+            const evidence = [
+                'src/jobs/followupCiSuspensionCancel.ts:142 — static trace',
+                '',
+                `    ${marker}~~~`,
+                '',
+                'The template above is literal code.',
+                '',
+                '- Nested item:',
+                '',
+                `      ${marker}~~~`,
+                '',
+                '  Still inside the item.',
+            ].join('\n');
+            const review = reviewWithF1Evidence([
+                '- **evidence:** src/jobs/followupCiSuspensionCancel.ts:142 — static trace',
+                '',
+                indent(evidence.split('\n').slice(2).join('\n')),
+            ]);
+            const machine = parseStructuredReview(review);
+            assert.strictEqual(machine.status, 'valid_with_blockers', marker);
+            assert.strictEqual(machine.actionableFindings[0].evidence, evidence);
+
+            const published = renderPublicReview(review, undefined, { changedFilePaths: CHANGED_FILES })!;
+            assert.ok(published);
+            const reparsed = parseStructuredReview(publicComment(published).body);
+            assert.strictEqual(reparsed.status, 'valid_with_blockers', marker);
+            assert.strictEqual(reparsed.actionableFindings[0].evidence, evidence);
+
+            const gathered = await gatherUnprocessedReviewComments([publicComment(published)], gatherOptions);
+            const selected = selectReviewFeedback(gathered, parseFixFindingSelection('F1'));
+            assert.deepStrictEqual(selected.flatMap(comment => comment.actionableFindings.map(finding => finding.evidence)), [evidence]);
+        }
+
+        // The same markers inside a list item's content still open a fence.
+        const unclosed = reviewWithF1Evidence([
+            '- **evidence:** src/jobs/followupCiSuspensionCancel.ts:142 — static trace',
+            '  - 1. ~~~',
+            '       cancel(attempt);',
+        ]);
+        assert.strictEqual(parseStructuredReview(unclosed).status, 'invalid');
+    });
+
     test('rejects unsupported formatting instead of publishing apparently complete evidence', () => {
         const unsupported: Record<string, string[]> = {
             'an outdented paragraph after a blank line': [
