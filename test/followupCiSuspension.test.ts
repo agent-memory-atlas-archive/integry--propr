@@ -379,6 +379,40 @@ describe('follow-up CI suspension targeting', () => {
         assert.deepEqual(await records(), []);
     });
 
+    test('a cancellation refused for bad credentials leaves no intent behind either', async () => {
+        const github = createGitHub([run({ id: 1 })], { cancelStatus: 401 });
+
+        const result = await beginFollowupCiSuspension({ target: TARGET, taskId: TASK_ID }, deps(github));
+
+        assert.equal(result.reason, 'permission_denied');
+        assert.equal(result.suspended, false);
+        assert.deepEqual(await records(), [], 'a request GitHub rejected outright authorizes no rerun');
+    });
+
+    test('a run somebody else cancels after ProPR\'s credentials were rejected is never restarted on its behalf', async () => {
+        const runs = [run({ id: 1 }), run({ id: 2, status: 'queued' })];
+        // GitHub accepts the first cancellation, applies it asynchronously, and
+        // rejects the credentials of the second: the token expired in between.
+        const github = createGitHub(runs, { asyncCancellation: true, failCancelAfter: 1, failCancelStatus: 401 });
+
+        const result = await beginFollowupCiSuspension({ target: TARGET, taskId: TASK_ID }, deps(github));
+
+        assert.equal(result.reason, 'permission_denied');
+        assert.deepEqual(github.cancelled(), [1, 2]);
+        assert.deepEqual(await storedRunIds(), [1], 'the rejected request is withdrawn; the accepted one is still owed a restart');
+
+        // Both runs end up cancelled: run 1 by ProPR, run 2 by an operator after
+        // ProPR's request was rejected. Credentials recover, and implementation
+        // ends without replacing the head.
+        runs.forEach(candidate => { candidate.status = 'completed'; candidate.conclusion = 'cancelled'; });
+        const recovery = createGitHub(runs);
+        const summary = await reconcileFollowupCiSuspensions(deps(recovery, { getTaskState: async () => null }));
+        assert.equal(summary.restored, 1);
+        assert.deepEqual(recovery.rerun(), [1], 'only the cancellation ProPR caused is restored');
+        assert.equal(runs[1].conclusion, 'cancelled', 'the operator\'s cancellation stands');
+        assert.deepEqual(await records(), []);
+    });
+
     test('a refused re-cancellation keeps the obligation an earlier cancellation left behind, as it was', async () => {
         const runs = [run({ id: 1 })];
         // GitHub accepts the cancellation and applies it asynchronously.
@@ -1481,6 +1515,97 @@ describe('restoring cancelled validation', () => {
         assert.deepEqual(github.rerun(), [1], 'the only rerun is the one the crashed pass sent');
         assert.equal(runs[0].run_attempt, 2, 'the cancelled newer attempt is left as it is');
         assert.deepEqual(await records(), [], 'the recorded attempt is the proof that the obligation was met');
+    });
+
+    test('a run an operator reran and cancelled again while its attempt was being recorded is settled, not rerun on their behalf', async () => {
+        const runs = [run({ id: 1 })];
+        let cancelSent = false;
+        let readBackFails = true;
+        const github = createGitHub(runs, {
+            onRequest: async route => {
+                if (route === 'POST /repos/{owner}/{repo}/actions/runs/{run_id}/cancel') cancelSent = true;
+                if (!cancelSent || !readBackFails || route !== 'GET /repos/{owner}/{repo}/actions/runs/{run_id}') return;
+                // Reading the run back after the cancellation fails, so the attempt
+                // ProPR cancelled was never confirmed.
+                throw Object.assign(new Error('read back failed'), { status: 500 });
+            },
+        });
+        const begun = await beginFollowupCiSuspension({ target: TARGET, taskId: TASK_ID }, deps(github));
+        assert.equal(begun.reason, 'suspended');
+        readBackFails = false;
+        const [unconfirmed] = await records();
+        assert.deepEqual(
+            JSON.parse(unconfirmed.cancelled_runs).map((entry: { observedAttempt?: number; attempt?: number }) => [entry.observedAttempt, entry.attempt]),
+            [[1, undefined]], 'the cancellation landed on an attempt the worker never learned');
+
+        let operatorActed = false;
+        const rerunAndCancelWhileTheWriteReturns = async () => {
+            const [stored] = await records();
+            // Only the write that records attempt 1 as the one to rerun opens the
+            // window; the restoring transition before it records no attempt.
+            if (operatorActed || JSON.parse(stored.cancelled_runs)[0].attempt !== 1) return;
+            operatorActed = true;
+            // While that write's response is on its way back, an operator reruns
+            // the workflow and cancels the attempt they started. The run is
+            // cancelled again, but on an attempt past the one on record.
+            runs[0].attempts = { 1: { status: 'completed', conclusion: 'cancelled' } };
+            runs[0].run_attempt = 2;
+            runs[0].status = 'completed';
+            runs[0].conclusion = 'cancelled';
+        };
+
+        // The head is unchanged when implementation ends. The operator's rerun met
+        // ProPR's obligation; what they did with their attempt afterwards is theirs.
+        const [result] = await releaseFollowupCiSuspensionsForTask({ taskId: TASK_ID },
+            deps(github, { database: databaseResumingAfterSuspensionWrite(rerunAndCancelWhileTheWriteReturns) }));
+
+        assert.equal(operatorActed, true);
+        assert.equal(result.reason, 'restarted');
+        assert.deepEqual(result.restartedRunIds, []);
+        assert.deepEqual(github.rerun(), [], 'no rerun leaves on the assessment from before the write');
+        assert.equal(runs[0].run_attempt, 2, 'no attempt 3 is started on the operator\'s behalf');
+        assert.deepEqual([runs[0].status, runs[0].conclusion], ['completed', 'cancelled']);
+        assert.deepEqual(await records(), [], 'the advanced attempt is the proof that the obligation was met');
+    });
+
+    test('a run an operator reran and cancelled again while the head was being checked is settled, not rerun on their behalf', async () => {
+        const runs = [run({ id: 1 })];
+        let headChecksWhileReleasing = 0;
+        let operatorActed = false;
+        const github = createGitHub(runs, {
+            onRequest: async route => {
+                if (headChecksWhileReleasing < 0 || route !== 'GET /repos/{owner}/{repo}/pulls/{pull_number}') return;
+                headChecksWhileReleasing += 1;
+                // The first head check of the release precedes any assessment. The
+                // second is the gate right before the rerun: the run was assessed
+                // as cancelled on the attempt on record, and while the head is
+                // being checked an operator reruns the workflow and cancels the
+                // attempt they started.
+                if (headChecksWhileReleasing !== 2) return;
+                operatorActed = true;
+                runs[0].attempts = { 1: { status: 'completed', conclusion: 'cancelled' } };
+                runs[0].run_attempt = 2;
+                runs[0].status = 'completed';
+                runs[0].conclusion = 'cancelled';
+            },
+        });
+        headChecksWhileReleasing = -1;
+        await beginFollowupCiSuspension({ target: TARGET, taskId: TASK_ID }, deps(github));
+        const [stored] = await records();
+        assert.deepEqual(
+            JSON.parse(stored.cancelled_runs).map((entry: { attempt?: number }) => entry.attempt), [1],
+            'the cancellation is on record against attempt 1');
+
+        headChecksWhileReleasing = 0;
+        const [result] = await releaseFollowupCiSuspensionsForTask({ taskId: TASK_ID }, deps(github));
+
+        assert.equal(operatorActed, true);
+        assert.equal(result.reason, 'restarted');
+        assert.deepEqual(result.restartedRunIds, []);
+        assert.deepEqual(github.rerun(), [], 'no rerun leaves on the assessment from before the head check');
+        assert.equal(runs[0].run_attempt, 2, 'no attempt 3 is started on the operator\'s behalf');
+        assert.deepEqual([runs[0].status, runs[0].conclusion], ['completed', 'cancelled']);
+        assert.deepEqual(await records(), [], 'the advanced attempt is the proof that the obligation was met');
     });
 
     test('keeps the obligation when a failed rerun left no evidence that it landed', async () => {

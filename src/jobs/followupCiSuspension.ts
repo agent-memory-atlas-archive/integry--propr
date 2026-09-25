@@ -243,6 +243,16 @@ type PersistRuns = () => Promise<boolean>;
  * that new attempt later cancelled by somebody else, recovery would rerun it
  * again on their behalf. With the attempt on record, its advancement is the
  * proof that the obligation was met.
+ *
+ * That write and the gate are awaited calls as well, and the lease keeps only
+ * other ProPR workers out, not the people at GitHub. An operator who reruns
+ * the cancelled attempt while either is outstanding, and cancels the attempt
+ * they started, has met the obligation and then stopped their own work; a
+ * rerun sent on the assessment from before would restart it on their behalf.
+ * The run is therefore read once more after the gate, immediately before the
+ * rerun leaves the worker, and the rerun is sent only while the run is still
+ * cancelled on the very attempt on record: an attempt past it settles the
+ * obligation, anything else waits for the next pass to assess it afresh.
  */
 async function restartPass(
     runs: CancelledRun[],
@@ -279,16 +289,41 @@ async function restartPass(
             }
             const stopped = await gate();
             if (stopped) return { progressed, stopped };
-            // A rejected or lost rerun only settles the obligation once the run
-            // proves its cancelled attempt was restarted; otherwise it stays owed.
-            const outcome = await rerunRun(octokit, target, run.id, { attempt: run.attempt });
-            if (outcome === 'unconfirmed') continue;
-            if (outcome === 'restarted') restartedRunIds.push(run.id);
+            // The write and the gate took time; the run is proven once more to
+            // be still owed this rerun, on the attempt the record now names.
+            const owed = await stillOwedRerun(run, { target, octokit });
+            if (owed === 'pending') continue;
+            if (owed === 'rerun') {
+                // A rejected or lost rerun only settles the obligation once the run
+                // proves its cancelled attempt was restarted; otherwise it stays owed.
+                const outcome = await rerunRun(octokit, target, run.id, { attempt: run.attempt });
+                if (outcome === 'unconfirmed') continue;
+                if (outcome === 'restarted') restartedRunIds.push(run.id);
+            }
         }
         run.restarted = true;
         progressed = true;
     }
     return { progressed, stopped: null };
+}
+
+/**
+ * Whether the run, as it is right now, is still owed the rerun a pass is about
+ * to send: completed, cancelled, and not past the attempt on record. A run
+ * that vanished, moved past that attempt or produced its own result needs no
+ * rerun, so its obligation is settled; a run that is not completed any more
+ * is left to the next pass, which reads it afresh before deciding anything.
+ */
+async function stillOwedRerun(
+    run: CancelledRun,
+    context: { target: SuspensionTarget; octokit: CiSuspensionOctokit },
+): Promise<'pending' | 'settled' | 'rerun'> {
+    const liveRun = await getRun(context.octokit, context.target, run.id);
+    if (!liveRun) return 'settled';
+    if (attemptAdvanced(run, liveRun)) return 'settled';
+    if ((liveRun.status ?? '').toLowerCase() !== 'completed') return 'pending';
+    if ((liveRun.conclusion ?? '').toLowerCase() !== 'cancelled') return 'settled';
+    return 'rerun';
 }
 
 /**

@@ -49,9 +49,17 @@ export function sameSha(left: string | null | undefined, right: string | null | 
     return !!left && !!right && left.toLowerCase() === right.toLowerCase();
 }
 
+/**
+ * A request GitHub definitively refused: bad or expired credentials (401), a
+ * permission the installation lacks (403), or the integration error GitHub
+ * reports for an Actions scope the App was not granted. None of these ever
+ * reached the run, which is what matters to the caller: a refused cancel
+ * cancelled nothing and must not leave an intent behind, and a refused rerun
+ * keeps the obligation until access is back.
+ */
 function isPermissionError(error: unknown): boolean {
     const { status, message } = error as { status?: number; message?: string };
-    return status === 403 || /resource not accessible by integration/i.test(message ?? '');
+    return status === 401 || status === 403 || /resource not accessible by integration/i.test(message ?? '');
 }
 
 /**

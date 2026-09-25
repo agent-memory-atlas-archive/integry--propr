@@ -23,7 +23,8 @@ after(async () => {
 });
 
 const flush = async (): Promise<void> => {
-  const handle = await open(probePath, 'r');
+  // Writable on purpose: Windows refuses FlushFileBuffers on a read-only handle.
+  const handle = await open(probePath, 'r+');
   try {
     await handle.sync();
     await handle.datasync();
