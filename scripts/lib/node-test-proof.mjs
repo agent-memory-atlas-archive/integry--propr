@@ -4,7 +4,7 @@
 // Results come from the structured reporter in node-test-proof-reporter.mjs.
 // A proof passes only when every required file exists, its own process
 // reported a per-file `test:summary` with at least one passing test and no
-// failed, cancelled, skipped or todo tests, the run summary and end-of-stream
+// failed, cancelled, skipped or todo tests or suites, the run summary and end-of-stream
 // record are present, and the runner exited 0 within its budget. Adding a
 // passing test to a required file needs no change here or in the wrappers.
 
@@ -91,6 +91,16 @@ function classifyFailures(failures) {
         byKind.set(kind, [...(byKind.get(kind) ?? []), record]);
     }
     return byKind;
+}
+
+// The summary's skipped and todo counters cover tests only: a skipped suite
+// is not counted and neither are the tests it suppresses, so the recorded
+// skip and todo flags are checked on their own.
+function describeFlagged(count, records) {
+    const suites = records.filter(record => record.testType === 'suite').length;
+    const tests = Math.max(count, records.length - suites);
+    return [tests > 0 && `${tests} required tests`, suites > 0 && `${suites} required suites`]
+        .filter(Boolean).join(' and ');
 }
 
 const FAILURE_DESCRIPTIONS = {
@@ -200,12 +210,13 @@ export function evaluateNodeTestProof({ root, files, run, timeoutMs, results }) 
         if ((counts.failed > 0 || counts.cancelled > 0) && classified.size === 0) {
             add('assertion-failure', `${name} reported ${counts.failed} failed and ${counts.cancelled} cancelled tests`);
         }
-        const passes = tests.filter(record => record.type === 'test:pass');
-        if (counts.skipped > 0) {
-            add('skipped', `${name}: ${counts.skipped} required tests were skipped${listTests(passes.filter(record => record.skip))}`);
+        const skipped = tests.filter(record => record.skip);
+        if (counts.skipped > 0 || skipped.length > 0) {
+            add('skipped', `${name}: ${describeFlagged(counts.skipped, skipped)} were skipped${listTests(skipped)}`);
         }
-        if (counts.todo > 0) {
-            add('todo', `${name}: ${counts.todo} required tests are marked todo${listTests(passes.filter(record => record.todo))}`);
+        const todo = tests.filter(record => record.todo);
+        if (counts.todo > 0 || todo.length > 0) {
+            add('todo', `${name}: ${describeFlagged(counts.todo, todo)} are marked todo${listTests(todo)}`);
         }
         if (counts.passed === 0) {
             add('no-tests', `${name} executed no passing tests`);

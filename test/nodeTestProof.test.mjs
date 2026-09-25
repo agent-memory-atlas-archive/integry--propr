@@ -1,13 +1,14 @@
 import assert from 'node:assert/strict';
-import { appendFileSync, copyFileSync, mkdtempSync, rmSync } from 'node:fs';
+import { appendFileSync, copyFileSync, mkdtempSync, readdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { join, relative, resolve, sep } from 'node:path';
 import { describe, test } from 'node:test';
 import { evaluateNodeTestProof, parseProofResults, runNodeTestProof } from '../scripts/lib/node-test-proof.mjs';
 
-// Fixture files are named without `.test.` so the regular suite never runs
-// them; several fail or hang on purpose.
-const FIXTURES = resolve(import.meta.dirname, 'fixtures', 'nodeTestProof');
+// Several fixtures fail or hang on purpose, so they live outside `test/`,
+// where a bare `node --test` (npm test) would discover and run them.
+const REPO_ROOT = resolve(import.meta.dirname, '..');
+const FIXTURES = resolve(REPO_ROOT, 'scripts', 'lib', 'fixtures', 'nodeTestProof');
 
 function proof(files, { root = FIXTURES, timeoutMs = 30_000 } = {}) {
     const output = { stdout: '', stderr: '' };
@@ -114,6 +115,27 @@ describe('node test proof runs', () => {
         assert.match(messages(todo), /todo\.mjs: 1 required tests are marked todo: "unfinished required test"/);
     });
 
+    test('a skipped or todo suite fails although another test in the file passes', () => {
+        const skipped = proof(['passing.mjs', 'skipped-suite.mjs']);
+        assert.deepEqual(kinds(skipped), ['skipped']);
+        assert.equal(skipped.fileCounts.find(entry => entry.file === 'skipped-suite.mjs').counts.skipped, 0);
+        assert.match(messages(skipped), /^skipped-suite\.mjs: 1 required suites were skipped: "skipped required suite"$/);
+
+        const todo = proof(['passing.mjs', 'todo-suite.mjs']);
+        assert.deepEqual(kinds(todo), ['todo']);
+        assert.equal(todo.fileCounts.find(entry => entry.file === 'todo-suite.mjs').counts.todo, 0);
+        assert.match(messages(todo), /^todo-suite\.mjs: 1 required suites are marked todo: "unfinished required suite"$/);
+    });
+
+    test('fixtures are outside the default node --test discovery', () => {
+        // Node's defaults match any file under a `test` directory and
+        // test-named files anywhere.
+        assert.equal(relative(REPO_ROOT, FIXTURES).split(sep).includes('test'), false);
+        const discoverable = readdirSync(FIXTURES)
+            .filter(name => /^test([-.]|$)|[._-]test\./.test(name));
+        assert.deepEqual(discoverable, []);
+    });
+
     test('a run over its budget is reported as a timeout, not as empty files', () => {
         const evaluation = proof(['hang.mjs'], { timeoutMs: 2_000 });
         assert.equal(evaluation.ok, false);
@@ -142,6 +164,17 @@ describe('node test proof result evaluation', () => {
         const evaluation = evaluate(serialize(records));
         assert.equal(evaluation.ok, true, messages(evaluation));
         assert.equal(evaluation.totals.passed, 1);
+    });
+
+    test('skip and todo flags fail even when the summary counters are zero', () => {
+        const flagged = flags => ({ type: 'test:pass', file: passingFile, name: 'flagged suite', nesting: 0, testType: 'suite', skip: false, todo: false, ...flags });
+        const skipped = evaluate(serialize([records[0], flagged({ skip: true }), ...records.slice(1)]));
+        assert.deepEqual(kinds(skipped), ['skipped']);
+        assert.match(messages(skipped), /1 required suites were skipped: "flagged suite"/);
+
+        const todo = evaluate(serialize([records[0], flagged({ todo: true }), ...records.slice(1)]));
+        assert.deepEqual(kinds(todo), ['todo']);
+        assert.match(messages(todo), /1 required suites are marked todo: "flagged suite"/);
     });
 
     test('absent results fail', () => {
