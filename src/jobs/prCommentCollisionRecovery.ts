@@ -83,6 +83,7 @@ async function recordRecoveryLink(
     try {
         const replacementState = await stateManager.createTaskStateIfAbsent(replacementTaskId, {
             number: job.data.pullRequestNumber,
+            pullRequestNumber: job.data.pullRequestNumber,
             repoOwner: job.data.repoOwner,
             repoName: job.data.repoName,
             type: 'pr-comment',
@@ -265,6 +266,7 @@ export async function createPRCommentTaskStateIfMissing(params: {
     try {
         await stateManager.createTaskState(taskId, {
             number: job.data.pullRequestNumber,
+            pullRequestNumber: job.data.pullRequestNumber,
             repoOwner: job.data.repoOwner,
             repoName: job.data.repoName,
             type: 'pr-comment',
