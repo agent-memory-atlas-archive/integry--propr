@@ -20,6 +20,12 @@ import {
     failedTaskTransition,
     redisTerminalTransition,
 } from './taskReconciliationTransitions.js';
+import {
+    abortReason,
+    deadlineWasExhausted,
+    ReconciliationDeadlineExceededError,
+    runWithinRemainingBudget,
+} from './taskReconciliationBudget.js';
 import { taskAgeMs } from './taskReconciliationTime.js';
 
 export const DEFAULT_RECONCILIATION_STALE_MS = 15 * 60 * 1000;
@@ -88,63 +94,6 @@ const TERMINAL_TASK_STATES = new Set<TaskState>([
     TaskStates.FAILED,
     TaskStates.CANCELLED,
 ]);
-
-class ReconciliationDeadlineExceededError extends Error {
-    constructor() {
-        super('Task state reconciliation time budget was exhausted');
-        this.name = 'ReconciliationDeadlineExceededError';
-    }
-}
-
-function abortReason(signal: AbortSignal): unknown {
-    return signal.reason ?? new Error('Task state reconciliation was aborted');
-}
-
-function deadlineWasExhausted(error: unknown, signal: AbortSignal): boolean {
-    return error instanceof ReconciliationDeadlineExceededError
-        || (signal.aborted && abortReason(signal) instanceof ReconciliationDeadlineExceededError);
-}
-
-async function runWithinRemainingBudget<T>(
-    operation: () => Promise<T>,
-    deadline: number,
-    signal: AbortSignal,
-): Promise<T> {
-    if (Date.now() >= deadline) throw new ReconciliationDeadlineExceededError();
-    signal.throwIfAborted();
-
-    return new Promise<T>((resolve, reject) => {
-        const onAbort = (): void => {
-            cleanup();
-            reject(abortReason(signal));
-        };
-        const cleanup = (): void => signal.removeEventListener('abort', onAbort);
-        signal.addEventListener('abort', onAbort, { once: true });
-        if (signal.aborted) {
-            onAbort();
-            return;
-        }
-
-        let pending: Promise<T>;
-        try {
-            pending = operation();
-        } catch (error) {
-            cleanup();
-            reject(error);
-            return;
-        }
-        pending.then(
-            value => {
-                cleanup();
-                resolve(value);
-            },
-            error => {
-                cleanup();
-                reject(error);
-            },
-        );
-    });
-}
 
 function taskIdIsQueueJobId(candidate: PersistedTaskStateCandidate): boolean {
     return candidate.taskType === 'pr-comment'
