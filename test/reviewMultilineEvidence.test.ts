@@ -561,6 +561,83 @@ describe('multiline review fields', () => {
         assert.strictEqual(parseStructuredReview(unclosed).status, 'invalid');
     });
 
+    async function assertSurvivesPublication(review: string, evidence: string, description: string): Promise<void> {
+        const machine = parseStructuredReview(review);
+        assert.strictEqual(machine.status, 'valid_with_blockers', description);
+        assert.strictEqual(machine.actionableFindings[0].evidence, evidence, description);
+
+        const published = renderPublicReview(review, undefined, { changedFilePaths: CHANGED_FILES })!;
+        assert.ok(published, description);
+        const reparsed = parseStructuredReview(publicComment(published).body);
+        assert.strictEqual(reparsed.status, 'valid_with_blockers', description);
+        assert.strictEqual(reparsed.actionableFindings[0].evidence, evidence, description);
+
+        const gathered = await gatherUnprocessedReviewComments([publicComment(published)], gatherOptions);
+        const selected = selectReviewFeedback(gathered, parseFixFindingSelection('F1'));
+        assert.deepStrictEqual(
+            selected.flatMap(comment => comment.actionableFindings.map(finding => finding.evidence)),
+            [evidence],
+            description,
+        );
+    }
+
+    test('fences after a lazy continuation of a nested item survive publication and /fix selection', async () => {
+        // Publication indents the lazy line, which must still continue the
+        // nested item's paragraph rather than close the item.
+        const cases: Record<string, { lines: string[]; evidence: string[] }> = {
+            'a closer indented past its opener': {
+                lines: ['  - item', 'continuation', '    ~~~ts', '    x', '      ~~~'],
+                evidence: ['- item', 'continuation', '  ~~~ts', '  x', '    ~~~'],
+            },
+            'an opener indented past its closer': {
+                lines: ['  - Trace:', 'continued paragraph', '      ~~~js', '    cancel();', '    ~~~'],
+                evidence: ['- Trace:', 'continued paragraph', '    ~~~js', '  cancel();', '  ~~~'],
+            },
+        };
+        for (const [description, { lines, evidence }] of Object.entries(cases)) {
+            const header = 'src/jobs/followupCiSuspensionCancel.ts:142 — static trace';
+            const review = reviewWithF1Evidence([`- **evidence:** ${header}`, ...lines]);
+            await assertSurvivesPublication(review, [header, ...evidence].join('\n'), description);
+        }
+
+        // Once published, the formerly lazy line still keeps a less indented
+        // fence inside the nested item, where it never closes.
+        const unclosed = reviewWithF1Evidence([
+            '- **evidence:** src/jobs/followupCiSuspensionCancel.ts:142 — static trace',
+            '  - item',
+            'continuation',
+            '    ~~~ts',
+            '  ~~~',
+        ]);
+        assert.strictEqual(parseStructuredReview(unclosed).status, 'invalid');
+    });
+
+    test('indentation and list-marker tabs expand at tab stops through publication and /fix selection', async () => {
+        const review = reviewWithF1Evidence([
+            '- **evidence:** src/jobs/followupCiSuspensionCancel.ts:142 — static trace',
+            '  - item',
+            '   \t ~~~ts',
+            '     cancel(attempt);',
+            '    ~~~',
+            '',
+            '  -\t~~~ts',
+            '    release(lease);',
+            '    ~~~',
+        ]);
+        const evidence = [
+            'src/jobs/followupCiSuspensionCancel.ts:142 — static trace',
+            '- item',
+            '   ~~~ts',
+            '   cancel(attempt);',
+            '  ~~~',
+            '',
+            '- ~~~ts',
+            '  release(lease);',
+            '  ~~~',
+        ].join('\n');
+        await assertSurvivesPublication(review, evidence, 'mixed indentation');
+    });
+
     test('rejects unsupported formatting instead of publishing apparently complete evidence', () => {
         const unsupported: Record<string, string[]> = {
             'an outdented paragraph after a blank line': [
