@@ -147,10 +147,22 @@ function logHeadUnavailable(record: CiSuspensionRecord, deps: CiSuspensionDeps):
 
 /**
  * Decides what one cancelled run still needs. Runs that are still finishing stay
- * pending; runs that produced their own result, disappeared, or already have a
- * fresh run of the same workflow validating the same pull request head need no
- * restart. Only a run GitHub reports as cancelled, on the attempt ProPR
- * cancelled, is owed a rerun.
+ * pending; runs that produced their own result or already have a fresh run of
+ * the same workflow validating the same pull request head need no restart.
+ * Only a run GitHub reports as cancelled, on the attempt ProPR cancelled, is
+ * owed a rerun.
+ *
+ * A run that cannot be read is pending as well, never settled. GitHub answers
+ * 404 for a run that was deleted, but just the same for every run of a private
+ * repository the installation has lost access to — the pull request lookup
+ * treats that answer exactly so — and the run itself cannot tell the two
+ * apart. Access comes back, and with it the very run, still cancelled on the
+ * still-current head; an obligation dropped on that 404 would leave those
+ * checks cancelled with nothing left to restore them. The obligation therefore
+ * stays recorded, for a reconciliation that can read the run to settle it. A
+ * run that truly was deleted keeps its record only until its head is replaced
+ * or the pull request is closed, which is what every retained obligation waits
+ * for.
  *
  * The run is read from GitHub here, immediately before the decision, never
  * taken from the listing the pass started with. That listing is a snapshot,
@@ -182,7 +194,9 @@ async function assessCancelledRun(
 ): Promise<'pending' | 'settled' | { rerun: { cancelledAttempt?: number } }> {
     const { target, octokit, activeWorkflowIds } = context;
     const liveRun = await getRun(octokit, target, run.id);
-    if (!liveRun) return 'settled';
+    // Unreadable is not gone: a 404 is what lost access to a private repository
+    // looks like as well, and the run is still there when access returns.
+    if (!liveRun) return 'pending';
     if (attemptAdvanced(run, liveRun)) return 'settled';
     if ((liveRun.status ?? '').toLowerCase() !== 'completed') return 'pending';
     if ((liveRun.conclusion ?? '').toLowerCase() !== 'cancelled') return 'settled';
@@ -333,16 +347,19 @@ async function restartPass(
 /**
  * Whether the run, as it is right now, is still owed the rerun a pass is about
  * to send: completed, cancelled, and not past the attempt on record. A run
- * that vanished, moved past that attempt or produced its own result needs no
- * rerun, so its obligation is settled; a run that is not completed any more
- * is left to the next pass, which reads it afresh before deciding anything.
+ * that moved past that attempt or produced its own result needs no rerun, so
+ * its obligation is settled; a run that is not completed any more is left to
+ * the next pass, which reads it afresh before deciding anything. So is a run
+ * that cannot be read: its 404 may be the installation's lost access to the
+ * repository rather than a deleted run, and the run is still owed its rerun
+ * when access returns (see {@link assessCancelledRun}).
  */
 async function stillOwedRerun(
     run: CancelledRun,
     context: { target: SuspensionTarget; octokit: CiSuspensionOctokit },
 ): Promise<'pending' | 'settled' | 'rerun'> {
     const liveRun = await getRun(context.octokit, context.target, run.id);
-    if (!liveRun) return 'settled';
+    if (!liveRun) return 'pending';
     if (attemptAdvanced(run, liveRun)) return 'settled';
     if ((liveRun.status ?? '').toLowerCase() !== 'completed') return 'pending';
     if ((liveRun.conclusion ?? '').toLowerCase() !== 'cancelled') return 'settled';

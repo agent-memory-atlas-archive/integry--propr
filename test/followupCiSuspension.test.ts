@@ -84,6 +84,8 @@ interface GitHubOptions {
     prState?: string;
     /** Fails the pull request lookup itself, the way a repository the installation lost access to answers 404. */
     prStatus?: number;
+    /** Fails every individual run lookup, the way the runs of a repository the installation lost access to answer 404. Read per request, so a test can lose access mid-pass. */
+    runStatus?: number;
     headSha?: string;
     /** Runs returned per page, to exercise pagination. */
     perPage?: number;
@@ -135,11 +137,13 @@ function createGitHub(runs: FakeRun[], options: GitHubOptions = {}) {
                 };
             }
             if (route === 'GET /repos/{owner}/{repo}/actions/runs/{run_id}') {
+                if (options.runStatus) throw error(options.runStatus);
                 const found = runs.find(candidate => candidate.id === runId);
                 if (!found) throw error(404);
                 return { data: { ...found } };
             }
             if (route === 'GET /repos/{owner}/{repo}/actions/runs/{run_id}/attempts/{attempt_number}') {
+                if (options.runStatus) throw error(options.runStatus);
                 const found = runs.find(candidate => candidate.id === runId);
                 const attempt = parameters.attempt_number as number;
                 if (!found) throw error(404);
@@ -1709,6 +1713,77 @@ describe('restoring cancelled validation', () => {
         assert.equal(swept.reason, 'head_unavailable');
         assert.deepEqual(inaccessible.cancelled(), []);
         assert.equal((await records()).length, 1);
+
+        // Access is granted back and the head is unchanged: the cancelled checks come back.
+        const restored = await reconcileFollowupCiSuspensions(deps(github, { getTaskState: async () => null }));
+
+        assert.equal(restored.restored, 1);
+        assert.deepEqual(github.rerun(), [1]);
+        assert.deepEqual(await records(), []);
+    });
+
+    test('keeps the obligation when the run cannot be read once the head and its runs were, and honours it once it can be again', async () => {
+        const runs = [run({ id: 1 })];
+        const github = createGitHub(runs);
+        await beginFollowupCiSuspension({ target: TARGET, taskId: TASK_ID }, deps(github));
+
+        // Restoration reads the unchanged head and lists its runs; then, before the
+        // awaited lookup of the cancelled run itself, an administrator removes the
+        // installation's access to the private repository. The run answers 404
+        // from then on, exactly as a deleted run would.
+        const options: GitHubOptions = {
+            onRequest: route => {
+                if (route === 'GET /repos/{owner}/{repo}/actions/runs/{run_id}') options.runStatus = 404;
+            },
+        };
+        const losingAccess = createGitHub(runs, options);
+        const summary = await reconcileFollowupCiSuspensions(deps(losingAccess, { getTaskState: async () => null }));
+
+        assert.equal(summary.released, 0, 'a run that cannot be read is not a settled one');
+        assert.equal(summary.errors, 0);
+        assert.deepEqual(losingAccess.rerun(), []);
+        const [retained] = await records();
+        assert.ok(retained, 'the obligation stays recorded for a reconciliation that can read the run');
+        assert.equal(retained.state, 'restoring');
+        assert.deepEqual(await storedRunIds(), [1]);
+        assert.deepEqual([runs[0].status, runs[0].conclusion], ['completed', 'cancelled'], 'the current head\'s validation is still cancelled');
+
+        // Access is granted back and the head is unchanged: the cancelled checks come back.
+        const restored = await reconcileFollowupCiSuspensions(deps(github, { getTaskState: async () => null }));
+
+        assert.equal(restored.restored, 1);
+        assert.deepEqual(github.rerun(), [1]);
+        assert.deepEqual(await records(), []);
+    });
+
+    test('keeps the obligation when the run cannot be read in the final lookup before its rerun', async () => {
+        const runs = [run({ id: 1 })];
+        const github = createGitHub(runs);
+        await beginFollowupCiSuspension({ target: TARGET, taskId: TASK_ID }, deps(github));
+
+        // The run is assessed as cancelled on the attempt on record and the gate
+        // re-proves the head; access is lost during the very last read of the run
+        // before the rerun would leave, and that read answers 404.
+        let runLookups = 0;
+        const options: GitHubOptions = {
+            onRequest: route => {
+                if (route !== 'GET /repos/{owner}/{repo}/actions/runs/{run_id}') return;
+                runLookups += 1;
+                if (runLookups === 2) options.runStatus = 404;
+            },
+        };
+        const losingAccess = createGitHub(runs, options);
+        const [result] = await releaseFollowupCiSuspensionsForTask({ taskId: TASK_ID }, deps(losingAccess));
+
+        assert.equal(runLookups, 2, 'the final read before the rerun is the one that failed');
+        assert.equal(result.reason, 'pending');
+        assert.deepEqual(result.restartedRunIds, []);
+        assert.deepEqual(result.pendingRunIds, [1]);
+        assert.deepEqual(losingAccess.rerun(), [], 'no rerun leaves on a run that cannot be read');
+        const [retained] = await records();
+        assert.ok(retained, 'the obligation stays recorded');
+        assert.equal(retained.state, 'restoring');
+        assert.deepEqual(await storedRunIds(), [1]);
 
         // Access is granted back and the head is unchanged: the cancelled checks come back.
         const restored = await reconcileFollowupCiSuspensions(deps(github, { getTaskState: async () => null }));

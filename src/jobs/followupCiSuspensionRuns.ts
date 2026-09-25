@@ -144,6 +144,14 @@ export async function listRunsForSha(
     return runs;
 }
 
+/**
+ * One run as GitHub reports it now; `undefined` when the lookup answered 404.
+ * That answer does not establish that the run is gone: a private repository
+ * the installation has lost access to answers 404 for every one of its runs,
+ * exactly as it does for its pull request (see {@link getPullRequestHead}),
+ * and the run is still there when access comes back. A caller that owes the
+ * run something must therefore keep owing it, and ask again later.
+ */
 export async function getRun(
     octokit: CiSuspensionOctokit,
     target: SuspensionTarget,
