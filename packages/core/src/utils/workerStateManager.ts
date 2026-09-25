@@ -61,27 +61,42 @@ export class WorkerStateManager {
      * @param taskId - Unique task identifier
      * @param issueRef - GitHub issue reference
      * @param correlationId - Correlation ID for tracking
+     * @param jobId - BullMQ job identifier used for durable recovery
      * @returns Task state data
      */
-    async createTaskState(taskId: string, issueRef: IssueRef, correlationId: string | null = null): Promise<TaskStateData> {
+    async createTaskState(
+        taskId: string,
+        issueRef: IssueRef,
+        correlationId: string | null = null,
+        jobId: string | null = null,
+    ): Promise<TaskStateData> {
         const state = this.buildInitialTaskState(taskId, issueRef, correlationId);
         const key = this.getTaskKey(taskId);
         await this.redis.setex(key, this.stateExpiry, JSON.stringify(state));
-        await this.persistTaskStateCreation(state);
+        await this.persistTaskStateCreation(state, jobId);
         return state;
     }
 
     /**
      * Creates a task state entry only when no state already exists.
+     * @param taskId - Unique task identifier
+     * @param issueRef - GitHub issue reference
+     * @param correlationId - Correlation ID for tracking
+     * @param jobId - BullMQ job identifier used for durable recovery
      * @returns The created state, or the concurrently-created state when present
      */
-    async createTaskStateIfAbsent(taskId: string, issueRef: IssueRef, correlationId: string | null = null): Promise<TaskStateData | null> {
+    async createTaskStateIfAbsent(
+        taskId: string,
+        issueRef: IssueRef,
+        correlationId: string | null = null,
+        jobId: string | null = null,
+    ): Promise<TaskStateData | null> {
         const state = this.buildInitialTaskState(taskId, issueRef, correlationId);
         const key = this.getTaskKey(taskId);
         const created = await this.redis.set(key, JSON.stringify(state), 'EX', this.stateExpiry, 'NX');
         if (created !== 'OK') return this.getTaskState(taskId);
 
-        await this.persistTaskStateCreation(state);
+        await this.persistTaskStateCreation(state, jobId);
         return state;
     }
 
@@ -95,7 +110,7 @@ export class WorkerStateManager {
         };
     }
 
-    private async persistTaskStateCreation(state: TaskStateData): Promise<void> {
+    private async persistTaskStateCreation(state: TaskStateData, jobId: string | null): Promise<void> {
         const { taskId, issueRef } = state;
         const correlatedLogger: Logger = logger.withCorrelation(state.correlationId);
         correlatedLogger.info({
@@ -109,7 +124,7 @@ export class WorkerStateManager {
             const repoName = issueRef.repoName ?? 'unknown';
             const repository = `${repoOwner}/${repoName}`;
             const taskData = {
-                task_id: taskId, job_id: null, correlation_id: state.correlationId,
+                task_id: taskId, job_id: jobId, correlation_id: state.correlationId,
                 repository,
                 issue_number: issueRef.number, task_type: issueRef.type ?? 'issue',
                 model_name: issueRef.modelName ?? null, created_at: state.createdAt,

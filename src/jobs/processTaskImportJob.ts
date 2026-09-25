@@ -70,7 +70,12 @@ export async function processTaskImportJob(job: Job<TaskImportJobData>): Promise
     const taskId = `task-import-${repoOwner}-${repoName}-${Date.now()}`;
 
     try {
-        await stateManager.createTaskState(taskId, { number: 0, repoOwner, repoName }, correlationId);
+        await stateManager.createTaskState(
+            taskId,
+            { number: 0, repoOwner, repoName, type: 'task-import' },
+            correlationId,
+            jobId === undefined ? null : String(jobId),
+        );
 
         octokit = await withRetry(
             () => getAuthenticatedOctokit(),

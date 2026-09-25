@@ -94,6 +94,7 @@ test('createTaskState creates state with correct structure', async () => {
     // Reset mocks
     mockRedisInstance.setex.mock.resetCalls();
     mockPublishTaskUpdate.mock.resetCalls();
+    mockDbTasksInsert.mock.resetCalls();
 
     const stateManager = new WorkerStateManager({
         keyPrefix: TEST_KEY_PREFIX,
@@ -109,8 +110,9 @@ test('createTaskState creates state with correct structure', async () => {
         modelName: 'claude-3'
     };
     const correlationId = 'custom-correlation-id';
+    const jobId = 'bullmq-job-123';
 
-    const result = await stateManager.createTaskState(taskId, issueRef, correlationId);
+    const result = await stateManager.createTaskState(taskId, issueRef, correlationId, jobId);
 
     // Verify result structure
     assert.strictEqual(result.taskId, taskId);
@@ -118,6 +120,7 @@ test('createTaskState creates state with correct structure', async () => {
     assert.strictEqual(result.issueRef.repoOwner, issueRef.repoOwner);
     assert.strictEqual(result.issueRef.repoName, issueRef.repoName);
     assert.strictEqual(result.correlationId, correlationId);
+    assert.strictEqual(mockDbTasksInsert.mock.calls[0].arguments[0].job_id, jobId);
     assert.strictEqual(result.state, TaskStates.PENDING);
     assert.strictEqual(result.attempts, 0);
     assert.ok(result.createdAt);

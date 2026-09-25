@@ -88,7 +88,7 @@ async function recordRecoveryLink(
             type: 'pr-comment',
             comments: job.data.comments,
             modelName: job.data.llm ?? undefined,
-        }, job.data.correlationId);
+        }, job.data.correlationId, replacementTaskId);
         if (replacementState) {
             await stateManager.updateHistoryMetadata(replacementTaskId, replacementState.state, historyMetadata);
         }
@@ -267,9 +267,10 @@ export async function createPRCommentTaskStateIfMissing(params: {
             number: job.data.pullRequestNumber,
             repoOwner: job.data.repoOwner,
             repoName: job.data.repoName,
+            type: 'pr-comment',
             comments: job.data.comments,
             modelName: modelName ?? undefined,
-        }, job.data.correlationId);
+        }, job.data.correlationId, String(job.id ?? taskId));
     } catch (error) {
         correlatedLogger.warn({ taskId, error: (error as Error).message }, 'Failed to create initial task state, continuing anyway');
     }
