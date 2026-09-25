@@ -21,15 +21,25 @@ interface TaskRecord {
   task_type: string;
 }
 
+function isPullRequestTask(task: TaskRecord): boolean {
+  return task.task_type === 'pr-comment'
+    || task.task_type === 'review'
+    || task.task_type === 'merge_conflict'
+    // Historical PR-comment tasks were persisted as type "issue" before the
+    // worker began storing their explicit task type.
+    || task.task_id.startsWith('pr-comment-')
+    || task.task_id.startsWith('pr-comments-');
+}
+
 /**
  * Resolves the GitHub thread a follow-up comment is posted to. PR commands go
  * to the task's pull request; implementation tasks keep their source issue in
  * issue_number and the created PR in pr_number.
  */
-function resolveFollowupThread(task: TaskRecord, targetsPullRequest: boolean): { number?: number; error: string } {
+export function resolveFollowupThread(task: TaskRecord, targetsPullRequest: boolean): { number?: number; error: string } {
   return targetsPullRequest
     // PR comment tasks record their pull request as the issue number; other tasks must have a PR of their own.
-    ? { number: task.pr_number ?? (task.task_type === 'pr-comment' ? task.issue_number : undefined), error: 'Task does not have a valid GitHub pull request' }
+    ? { number: task.pr_number ?? (isPullRequestTask(task) ? task.issue_number : undefined), error: 'Task does not have a valid GitHub pull request' }
     : { number: task.issue_number, error: 'Task does not have valid GitHub issue information' };
 }
 
@@ -362,7 +372,7 @@ export function createTaskRoutes(deps: TaskRoutesDeps) {
 
       // Get branch name for PR-based tasks
       let branchName: string | undefined;
-      if (targetsPullRequest || task.task_type === 'pr-comment') {
+      if (targetsPullRequest || isPullRequestTask(task)) {
         try {
           const { data: prData } = await octokit.request('GET /repos/{owner}/{repo}/pulls/{pull_number}', {
             owner: repoOwner,
