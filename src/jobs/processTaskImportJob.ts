@@ -43,6 +43,13 @@ function taskImportNotificationRecap(
         : `Task import finished without importing tasks for ${repository}.`;
 }
 
+/** BullMQ retries keep the job ID, so every attempt shares one durable task. */
+function taskImportTaskId(repoOwner: string, repoName: string, jobId: string | undefined): string {
+    return jobId === undefined
+        ? `task-import-${repoOwner}-${repoName}-${Date.now()}`
+        : `task-import-${jobId}`;
+}
+
 export async function processTaskImportJob(job: Job<TaskImportJobData>): Promise<TaskImportResult> {
     const { id: jobId, name: jobName, data } = job;
     const {
@@ -67,7 +74,7 @@ export async function processTaskImportJob(job: Job<TaskImportJobData>): Promise
     let localRepoPath: string | undefined;
     let worktreeInfo: WorktreeInfo | undefined;
     const [repoOwner, repoName] = repository.split('/');
-    const taskId = `task-import-${repoOwner}-${repoName}-${Date.now()}`;
+    const taskId = taskImportTaskId(repoOwner, repoName, jobId);
 
     try {
         await stateManager.createTaskState(

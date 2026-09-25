@@ -330,6 +330,43 @@ test('persists a terminal Redis state that was missed by SQLite', async () => {
     assert.equal(transitions[0].transition.state, TaskStates.COMPLETED);
 });
 
+test('keeps a recovered Redis handoff cancellation identifiable as an operational handoff', async () => {
+    const candidate = makeCandidate('redis-rescheduled', { taskType: 'pr-comment' });
+    const handoffReason = 'Task job rescheduled: pr_locked_by_other_job';
+    const terminal = makeRedisState(candidate, {
+        state: TaskStates.CANCELLED,
+        updatedAt: new Date(NOW - 1_000).toISOString(),
+        history: [
+            { state: TaskStates.PROCESSING, timestamp: STALE_AT, reason: 'Started', metadata: {} },
+            {
+                state: TaskStates.CANCELLED,
+                timestamp: new Date(NOW - 1_000).toISOString(),
+                reason: handoffReason,
+                metadata: {
+                    finalizedBy: 'bullmq_completed_reconciliation',
+                    jobResultStatus: 'rescheduled',
+                    jobResultReason: 'pr_locked_by_other_job',
+                },
+            },
+        ],
+    });
+    const { store, transitions } = createStore([candidate]);
+    const result = await reconcileStaleTaskStates({
+        queue: { getJob: async () => null },
+        stateManager: createStateManager(new Map([[candidate.taskId, terminal]])),
+        store,
+        now: NOW,
+    });
+
+    assert.equal(result.summary.recovered, 1);
+    assert.equal(transitions[0].transition.state, TaskStates.CANCELLED);
+    assert.equal(transitions[0].transition.reason, handoffReason);
+    assert.equal(transitions[0].transition.metadata.jobResultStatus, 'rescheduled');
+    assert.equal(transitions[0].transition.metadata.jobResultReason, 'pr_locked_by_other_job');
+    assert.equal(transitions[0].transition.metadata.finalizedBy, 'redis_terminal_reconciliation');
+    assert.equal(transitions[0].transition.metadata.originalFinalizedBy, 'bullmq_completed_reconciliation');
+});
+
 test('isolates a task lookup failure and continues the persisted scan', async () => {
     const broken = makeCandidate('broken');
     const completed = makeCandidate('after-error');

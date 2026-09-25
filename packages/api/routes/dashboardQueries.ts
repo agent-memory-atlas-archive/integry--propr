@@ -16,6 +16,7 @@
  */
 
 import type { Knex } from 'knex';
+import { isPullRequestTask } from './pullRequestTaskIdentity.js';
 
 /** Worker lifecycle states the UI labels "Active"/"Implementing". */
 export const RUNNING_TASK_STATES = ['processing', 'claude_execution', 'post_processing', 'active'] as const;
@@ -143,8 +144,7 @@ function taskPrNumber(row: RawTaskRow): number | null {
   if (typeof jobData?.pullRequestNumber === 'number') return jobData.pullRequestNumber;
   // PR-comment and review tasks historically stored the pull request in the
   // required issue_number column without duplicating it into pr_number.
-  if (['pr-comment', 'review', 'merge_conflict'].includes(String(row.task_type))
-      && row.issue_number !== null && row.issue_number !== undefined) {
+  if (isPullRequestTask(row) && row.issue_number !== null && row.issue_number !== undefined) {
     return Number(row.issue_number);
   }
   const finalResult = parseJson(row.final_result);

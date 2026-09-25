@@ -58,3 +58,35 @@ test('outcomes exclude operational handoffs without letting them consume the res
   assert.deepEqual(items.map(item => item.kind), ['cancelled', 'completed']);
   assert.deepEqual(items.map(item => item.prNumber), [2507, 2506]);
 });
+
+test('outcomes identify issue-typed historical PR-comment tasks by their task ID', async () => {
+  const repository = 'integry/legacy-pr-comments';
+  await seedTask(database, {
+    taskId: 'pr-comments-batch-integry-propr-2506-5831013617-2026-09-25T10-37-33Z-87ecb969a008',
+    repository,
+    issueNumber: 2506,
+    taskType: 'issue',
+    states: [{ state: 'completed', timestamp: minutesAgo(5), reason: 'PR comment job completed' }],
+  });
+  await seedTask(database, {
+    taskId: 'issue-integry-propr-2507-claude-opus-5-5-legacy',
+    repository,
+    issueNumber: 2507,
+    taskType: 'issue',
+    states: [{ state: 'completed', timestamp: minutesAgo(6), reason: 'Task completed successfully' }],
+  });
+
+  const dashboard = createDashboardRoutes({
+    db: database,
+    redisClient: {} as RedisClientType,
+    taskQueue: {} as never,
+    liveDetails: async () => null,
+    now: () => NOW,
+  });
+  const outcomes = await call(dashboard.getOutcomes, { repository, limit: '10' });
+  const items = outcomes.body.items as Array<Record<string, unknown>>;
+  assert.deepEqual(items.map(item => [item.issueNumber, item.prNumber]), [
+    [2506, 2506],
+    [2507, null],
+  ]);
+});

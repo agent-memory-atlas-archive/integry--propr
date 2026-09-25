@@ -5,6 +5,7 @@ import { issueQueue, COMMENT_BATCH_DELAY_MS, getAuthenticatedOctokit, generateCo
 import type { CommentJobData, UnprocessedComment } from '@propr/core';
 import { ACTIVE_TASK_LIFECYCLE_STATES } from '@propr/shared';
 import { getTasksFromDb } from './taskHelpers.js';
+import { isPullRequestTask } from './pullRequestTaskIdentity.js';
 import { validateTaskId, validateRepositoryFilter, validateStringLength, validatePositiveInteger } from './validation.js';
 import { validateRevertRequestBody, formatCommit, validateRevertPreviewParams, checkRevertAuthorization, checkRevertPreviewAuthorization, lookupPr, buildRevertJobData, verifyCommitBelongsToPr, resolveRepoAndCheckAccess } from './revertHelpers.js';
 
@@ -19,16 +20,6 @@ interface TaskRecord {
   issue_number: number;
   pr_number?: number | null;
   task_type: string;
-}
-
-function isPullRequestTask(task: TaskRecord): boolean {
-  return task.task_type === 'pr-comment'
-    || task.task_type === 'review'
-    || task.task_type === 'merge_conflict'
-    // Historical PR-comment tasks were persisted as type "issue" before the
-    // worker began storing their explicit task type.
-    || task.task_id.startsWith('pr-comment-')
-    || task.task_id.startsWith('pr-comments-');
 }
 
 /**

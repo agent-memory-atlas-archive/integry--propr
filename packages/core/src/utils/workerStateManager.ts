@@ -130,6 +130,14 @@ export class WorkerStateManager {
                 model_name: issueRef.modelName ?? null, created_at: state.createdAt,
                 initial_job_data: JSON.stringify(issueRef)
             };
+            if (jobId !== null) {
+                // Deterministic BullMQ IDs (for example issue child jobs) are
+                // reused once the previous job is removed. The ID now belongs
+                // to this task; unlinking the older row keeps UNIQUE(job_id)
+                // from rejecting this insert and keeps the older row from
+                // adopting the new job's outcome during reconciliation.
+                await db('tasks').where({ job_id: jobId }).whereNot({ task_id: taskId }).update({ job_id: null });
+            }
             await db('tasks').insert(taskData).onConflict('task_id').ignore();
             const historyData = {
                 task_id: taskId, state: TaskStates.PENDING,

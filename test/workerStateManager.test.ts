@@ -31,9 +31,14 @@ const mockDbTasksInsert = mock.fn(() => ({
 
 const mockDbHistoryInsert = mock.fn(async () => [1]);
 
+const mockDbTasksUnlinkJob = mock.fn(async () => 0);
+
 const mockDb = (tableName: string) => {
     if (tableName === 'tasks') {
-        return { insert: mockDbTasksInsert };
+        return {
+            insert: mockDbTasksInsert,
+            where: () => ({ whereNot: () => ({ update: mockDbTasksUnlinkJob }) }),
+        };
     }
     if (tableName === 'task_history') {
         return { insert: mockDbHistoryInsert };
