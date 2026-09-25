@@ -196,15 +196,32 @@ export async function saveCancelledRuns(
  * insert that a conflicting insertion rejects. Either way a stale worker
  * matches nothing, and the new owner's ownership and restart obligations
  * survive it. Returns null when that happened; the caller owns nothing then.
+ *
+ * Those predicates only reject a takeover that happened after the read. A
+ * worker stalled before its read runs — its lease expired, another worker
+ * reserved the pull request and cancelled a newer head's validation — reads
+ * that newer row itself, at the very generation the predicates would accept,
+ * and would replace the new owner's head and drop its restart obligations.
+ * The caller's `assertOwned` therefore runs once the read has resolved,
+ * immediately before the write: it proves the lease is still this worker's at
+ * that point, and the predicates cover only what changes after it. Lease loss
+ * surfaces as whatever `assertOwned` throws, before anything is written.
  */
 export async function reserveSuspension(
-    params: { target: SuspensionTarget; headSha: string; taskId: string; correlationId?: string },
+    params: {
+        target: SuspensionTarget; headSha: string; taskId: string; correlationId?: string;
+        /** Proves the caller still owns the pull request; awaited after the read and before the write. */
+        assertOwned?: () => Promise<void>;
+    },
     deps: CiSuspensionStoreDeps,
 ): Promise<{ record: CiSuspensionRecord; runs: CancelledRun[] } | null> {
-    const { target, headSha, taskId, correlationId } = params;
+    const { target, headSha, taskId, correlationId, assertOwned } = params;
     const repository = repositoryKey(target.owner, target.repo);
     const key = { repository, pull_request: target.pullRequestNumber };
     const existing = await loadSuspension(deps, key);
+    // What was read may already be the new owner's row. Nothing is written on
+    // top of it unless the lease is proven this worker's after that read.
+    await assertOwned?.();
     const timestamp = nowMs(deps);
     const runs = existing && sameSha(existing.head_sha, headSha) ? parseCancelledRuns(existing) : [];
     const record: CiSuspensionRecord = {

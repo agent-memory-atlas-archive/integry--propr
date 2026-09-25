@@ -226,6 +226,25 @@ function databaseResumingAfterSuspensionWrite(afterWrite: () => Promise<void>) {
  * a read of the suspension row has returned and before that worker resumes:
  * the window in which the read's response is still on its way back to it.
  */
+/**
+ * The shared database as one worker sees it, except that `beforeRead` runs
+ * once that worker has asked for the suspension row and before the query
+ * reaches the database: the worker is stalled with its read still ahead of
+ * it, so what it eventually reads is whatever `beforeRead` left behind.
+ */
+function databaseStalledBeforeSuspensionRead(beforeRead: () => Promise<void>) {
+    return ((table: string) => {
+        const builder = database(table);
+        if (table !== PR_CI_SUSPENSIONS_TABLE) return builder;
+        const first = builder.first.bind(builder) as (...args: unknown[]) => PromiseLike<unknown>;
+        builder.first = ((...args: unknown[]) => ({
+            then: (resolve?: (row: unknown) => unknown, reject?: (error: unknown) => unknown) =>
+                beforeRead().then(() => first(...args)).then(resolve, reject),
+        })) as never;
+        return builder;
+    }) as never;
+}
+
 function databaseResumingAfterSuspensionRead(afterRead: () => Promise<void>) {
     return ((table: string) => {
         const builder = database(table);
@@ -2096,7 +2115,9 @@ describe('coordinators in separate worker processes', () => {
             database: databaseResumingAfterSuspensionRead(takeOverWhileTheReadReturns),
         }));
 
-        assert.equal(resultA.reason, 'superseded');
+        // The lease is asserted once the read has resolved, so the loss is
+        // caught before the insert its primary key would have rejected anyway.
+        assert.equal(resultA.reason, 'busy');
         assert.deepEqual(resultA.cancelledRunIds, []);
         assert.deepEqual(workerA.cancelled(), [], 'nothing is cancelled on a lease that belongs to somebody else');
         const [current] = await records();
@@ -2142,13 +2163,60 @@ describe('coordinators in separate worker processes', () => {
             database: databaseResumingAfterSuspensionRead(takeOverWhileTheReadReturns),
         }));
 
-        assert.equal(resultA.reason, 'superseded');
+        // The lease is asserted once the read has resolved, so the loss is
+        // caught before the takeover its generation predicate would have refused anyway.
+        assert.equal(resultA.reason, 'busy');
         assert.deepEqual(workerA.cancelled(), [], 'nothing is cancelled on a lease that belongs to somebody else');
         const [current] = await records();
         assert.equal(current.task_id, 'task-next');
         assert.equal(current.head_sha, NEW_HEAD);
         assert.equal(current.generation, generationOfNewOwner, "the new owner's generation was not bumped by the stale worker");
         assert.deepEqual(await storedRunIds(), [2], "the new owner's restart obligation survived the stale worker");
+        assert.deepEqual(await database(PR_CI_SUSPENSION_LEASES_TABLE).select('*'), [], 'the stale worker released nothing that was not its own');
+    });
+
+    test('a worker stalled before its reservation read never takes over the newer suspension it then reads', async () => {
+        const runs = [run({ id: 1 }), run({ id: 2, head_sha: NEW_HEAD, status: 'queued' })];
+        const workerB = createGitHub(runs, { headSha: NEW_HEAD });
+        let stalled = false;
+        let generationOfNewOwner!: number;
+        const takeOverBeforeTheReadRuns = async () => {
+            if (stalled) return;
+            stalled = true;
+            // Worker A captured the old head and proved its lease, then stalled
+            // before its reservation read reached the database, for longer
+            // than the lease lives.
+            await database(PR_CI_SUSPENSION_LEASES_TABLE).update({ expires_at: Date.now() - 1 });
+            // A replacement commit was published meanwhile; a second follow-up
+            // takes the expired lease over, reserves the pull request for the
+            // new head and cancels its validation.
+            const begunB = await beginFollowupCiSuspension({ target: TARGET, taskId: 'task-next' },
+                deps(workerB, { leaseHolder: 'worker-b', leaseAcquireTimeoutMs: 0 }));
+            assert.equal(begunB.reason, 'suspended');
+            assert.deepEqual(begunB.cancelledRunIds, [2]);
+            const [ownedByB] = await records();
+            generationOfNewOwner = ownedByB.generation;
+            // Worker A's read now runs and returns B's fresh row: the generation
+            // and incarnation it will write against are the new owner's own.
+        };
+        const workerA = createGitHub(runs);
+
+        const resultA = await beginFollowupCiSuspension({ target: TARGET, taskId: TASK_ID }, deps(workerA, {
+            leaseHolder: 'worker-a',
+            database: databaseStalledBeforeSuspensionRead(takeOverBeforeTheReadRuns),
+        }));
+
+        assert.ok(stalled, 'the takeover happened while the reservation read was still ahead of the stale worker');
+        assert.equal(resultA.reason, 'busy');
+        assert.deepEqual(resultA.cancelledRunIds, []);
+        assert.deepEqual(workerA.cancelled(), [], 'nothing is cancelled on a lease that belongs to somebody else');
+        const [current] = await records();
+        assert.equal(current.task_id, 'task-next', 'the new owner keeps the pull request');
+        assert.equal(current.head_sha, NEW_HEAD, 'the new owner\'s head was not replaced by the obsolete one');
+        assert.equal(current.state, 'active');
+        assert.equal(current.generation, generationOfNewOwner, "the new owner's generation was not bumped by the stale worker");
+        assert.deepEqual(await storedRunIds(), [2], "the new owner's restart obligation survived the stale worker");
+        assert.equal(runs[0].status, 'in_progress', 'the validation the stale worker meant to cancel keeps running');
         assert.deepEqual(await database(PR_CI_SUSPENSION_LEASES_TABLE).select('*'), [], 'the stale worker released nothing that was not its own');
     });
 

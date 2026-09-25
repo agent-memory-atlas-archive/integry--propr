@@ -365,10 +365,13 @@ async function beginSuspension(
         // ownership and discard the restart obligations of the current head.
         await lease.assertHeld();
         // The reservation itself reads and then writes, and the lease can be
-        // lost between the two as well. The write only takes the row over as
-        // it was read, so a reservation that lands on somebody else's row is
-        // refused rather than overwriting their ownership and cancelled runs.
-        const reserved = await reserveSuspension({ target, headSha, taskId, correlationId }, deps);
+        // lost around either. A worker stalled before its read runs reads the
+        // row the new owner wrote meanwhile, so the lease is asserted again
+        // once that read has resolved, immediately before the write; the write
+        // then only takes the row over as it was read, so a takeover landing
+        // after that assertion is refused as well. Neither path overwrites the
+        // new owner's ownership and cancelled runs.
+        const reserved = await reserveSuspension({ target, headSha, taskId, correlationId, assertOwned: () => lease.assertHeld() }, deps);
         if (!reserved) {
             log.warn({ repository, pullRequest: target.pullRequestNumber, taskId, headSha },
                 'Stopping follow-up CI suspension: another task reserved this pull request suspension while it was being started');
