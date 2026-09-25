@@ -200,9 +200,16 @@ export function createStatusRoutes(deps: StatusRoutesDeps) {
     maxAgeMs: agentStatusCacheMaxAgeMs,
   });
   const indexingStatusCache = createBoundedFreshCache({
-    load: () => timeApiStage('status.indexing', () => withTimeout(
-      getIndexingStatus(getIndexingQueue, now), statusDependencyTimeoutMs, 'disconnected',
-    )),
+    load: () => timeApiStage('status.indexing', () => {
+      const progress: IndexingStatusProgress = { failuresConfirmed: false };
+      // Once counts confirm failures, a stalled recency lookup must not turn
+      // that evidence into a queue-disconnection report.
+      return withLazyTimeout(
+        getIndexingStatus(getIndexingQueue, now, progress),
+        statusDependencyTimeoutMs,
+        () => (progress.failuresConfirmed ? 'failed' : 'disconnected'),
+      );
+    }),
     now,
     freshForMs: agentStatusCacheTtlMs,
     maxAgeMs: agentStatusCacheMaxAgeMs,
@@ -745,12 +752,16 @@ async function buildRegisteredAgentStatus(
 }
 
 async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, fallback: T): Promise<T> {
+  return withLazyTimeout(promise, timeoutMs, () => fallback);
+}
+
+async function withLazyTimeout<T>(promise: Promise<T>, timeoutMs: number, getFallback: () => T): Promise<T> {
   let timeout: NodeJS.Timeout | undefined;
   try {
     return await Promise.race([
       promise,
       new Promise<T>(resolve => {
-        timeout = setTimeout(() => resolve(fallback), timeoutMs);
+        timeout = setTimeout(() => resolve(getFallback()), timeoutMs);
       })
     ]);
   } finally {
@@ -767,14 +778,21 @@ function buildDisconnectedAgentStatus(config: AgentConfig): AgentStatus {
   };
 }
 
-function indexingJobFinishedAt(job: { finishedOn?: number; timestamp?: number } | undefined): number | undefined {
-  const value = job?.finishedOn ?? job?.timestamp;
+interface IndexingStatusProgress {
+  failuresConfirmed: boolean;
+}
+
+// Only the terminal timestamp describes when an outcome happened; the enqueue
+// timestamp says nothing about when a failure occurred or a recovery finished.
+function indexingJobFinishedAt(job: { finishedOn?: number } | undefined): number | undefined {
+  const value = job?.finishedOn;
   return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
 }
 
 async function getIndexingStatus(
   getIndexingQueue: () => Promise<IndexingStatusQueue>,
   now: () => number,
+  progress: IndexingStatusProgress,
 ): Promise<ServiceStatus> {
   try {
     const indexingQueue = await getIndexingQueue();
@@ -782,6 +800,7 @@ async function getIndexingStatus(
     if ((counts.active ?? 0) > 0) return 'active';
     if ((counts.waiting ?? 0) > 0 || (counts.delayed ?? 0) > 0) return 'queued';
     if ((counts.failed ?? 0) > 0) {
+      progress.failuresConfirmed = true;
       try {
         const [failedJobs, completedJobs] = await Promise.all([
           indexingQueue.getJobs(['failed'], 0, 0, false),

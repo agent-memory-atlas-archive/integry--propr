@@ -1290,7 +1290,7 @@ test('/api/status maps indexing queue states', async () => {
   const now = Date.UTC(2026, 8, 25, 12);
   const cases: Array<[
     Record<string, number>,
-    Partial<Record<'completed' | 'failed', Array<{ finishedOn?: number }>>>,
+    Partial<Record<'completed' | 'failed', Array<{ finishedOn?: number; timestamp?: number }>>>,
     string,
   ]> = [
     [{ active: 1, waiting: 0, delayed: 0, failed: 0 }, {}, 'active'],
@@ -1304,6 +1304,18 @@ test('/api/status maps indexing queue states', async () => {
     [{ active: 0, waiting: 0, delayed: 0, failed: 1 }, {
       failed: [{ finishedOn: now - (25 * 60 * 60 * 1_000) }],
     }, 'idle'],
+    // Enqueue timestamps are not terminal outcomes: missing or invalid
+    // finishedOn metadata cannot establish that a failure expired or recovered.
+    [{ active: 0, waiting: 0, delayed: 0, failed: 1 }, {
+      failed: [{ timestamp: now - (25 * 60 * 60 * 1_000) }],
+    }, 'failed'],
+    [{ active: 0, waiting: 0, delayed: 0, failed: 1 }, {
+      failed: [{ finishedOn: Number.NaN, timestamp: now - (25 * 60 * 60 * 1_000) }],
+    }, 'failed'],
+    [{ active: 0, waiting: 0, delayed: 0, failed: 1 }, {
+      failed: [{ finishedOn: now - 2_000 }],
+      completed: [{ timestamp: now - 1_000 }],
+    }, 'failed'],
     [{ active: 0, waiting: 0, delayed: 0, failed: 0 }, {}, 'idle'],
   ];
 
@@ -1314,6 +1326,37 @@ test('/api/status maps indexing queue states', async () => {
     });
     assert.equal(body.indexing, expected);
   }
+});
+
+test('/api/status preserves confirmed indexing failures when outcome metadata stalls', async () => {
+  for (const stalled of ['failed', 'completed'] as const) {
+    const startedAt = performance.now();
+    const body = await readStatus({
+      getIndexingQueue: async () => ({
+        getJobCounts: async () => ({ active: 0, waiting: 0, delayed: 0, failed: 1 }),
+        getJobs: async (statuses: string[]) => (statuses.includes(stalled)
+          ? new Promise<Array<{ finishedOn?: number }>>(() => undefined)
+          : []),
+      }),
+      statusDependencyTimeoutMs: 25,
+    });
+    const elapsedMs = performance.now() - startedAt;
+
+    assert.equal(body.indexing, 'failed', `stalled ${stalled} lookup`);
+    assert.ok(elapsedMs >= 10 && elapsedMs < 200, `bounded indexing read took ${elapsedMs.toFixed(1)}ms`);
+  }
+});
+
+test('/api/status reports indexing disconnected when queue counts stall', async () => {
+  const body = await readStatus({
+    getIndexingQueue: async () => ({
+      getJobCounts: async () => new Promise<Record<string, number>>(() => undefined),
+      getJobs: async () => [],
+    }),
+    statusDependencyTimeoutMs: 25,
+  });
+
+  assert.equal(body.indexing, 'disconnected');
 });
 
 test('/api/status caps summarization cooldown warnings', async () => {
