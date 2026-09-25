@@ -47,12 +47,45 @@ app.whenReady().then(async () => {
     }
   };
 
-  // A saturated CI worker can stall one loopback request past the client's
-  // fixed header deadline. That is a worker hiccup rather than a compression
-  // result, so a stalled path is retried once and every stall is reported so
-  // the test can surface it. Retries stay bounded to keep the run inside the
+  // On a CI worker the first request a freshly launched Electron makes can
+  // wait well past the client's fixed 8s header deadline while the default
+  // session's network stack finishes starting: across the full-suite runs it
+  // was always the first path that stalled, in about half of them, and once
+  // for more than 40s. Later requests never did. That start-up cost says
+  // nothing about compression, so the default session must first reach the
+  // loopback server with a plain request under its own, longer budget, and
+  // only then are the pairing requests measured.
+  const readinessBudgetMs = 45_000;
+  const readinessAttemptMs = 15_000;
+  const awaitReadiness = async () => {
+    const started = Date.now();
+    const elapsed = () => Date.now() - started;
+    let attempts = 0;
+    let lastFailure = '';
+    while (elapsed() < readinessBudgetMs) {
+      attempts += 1;
+      try {
+        const response = await electronFetch(new URL('/ready', endpoint).href, {
+          signal: AbortSignal.timeout(Math.min(readinessAttemptMs, readinessBudgetMs - elapsed())),
+        });
+        await response.arrayBuffer();
+        if (response.ok) return { attempts, elapsedMs: elapsed(), ready: true };
+        lastFailure = `status ${response.status}`;
+      } catch (error) {
+        lastFailure = error instanceof Error ? error.message : String(error);
+      }
+      // A refused connection fails at once; do not spin on it.
+      await new Promise(resolveDelay => setTimeout(resolveDelay, 250));
+    }
+    return { attempts, elapsedMs: elapsed(), lastFailure, ready: false };
+  };
+
+  // Once the stack is up, a saturated worker can still stall a request past
+  // the header deadline. That is a worker hiccup rather than a compression
+  // result, so one stalled path is retried and every stall is reported so the
+  // test can surface it. Retries stay bounded to keep the run inside the
   // fixture budget; beyond that the timeout is reported as the outcome.
-  const maximumStallRetries = 2;
+  const maximumStallRetries = 1;
   const stalls = [];
   const request = async path => {
     const attempt = await requestOnce(path);
@@ -62,13 +95,15 @@ app.whenReady().then(async () => {
     return requestOnce(path);
   };
 
-  process.stdout.write(`${JSON.stringify({
+  const readiness = await awaitReadiness();
+  process.stdout.write(`${JSON.stringify(readiness.ready ? {
+    readiness,
     valid: await request('/valid'),
     decodedOverLimit: await request('/decoded-over-limit'),
     truncated: await request('/truncated'),
     stacked: await request('/stacked'),
     stalls,
-  })}\n`);
+  } : { readiness })}\n`);
   app.quit();
 }).catch(error => {
   process.stderr.write(`${error instanceof Error ? error.stack : String(error)}\n`);
