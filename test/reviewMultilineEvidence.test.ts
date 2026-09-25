@@ -452,6 +452,71 @@ describe('multiline review fields', () => {
         assert.strictEqual(regathered[0].minimumCorrection, correction);
     });
 
+    test('a value whose later lines are all indented stays below its label through publication and /fix selection', async () => {
+        const evidence = ['src/jobs/followupCiSuspensionCancel.ts:142 — static trace', '', '    - ~~~'].join('\n');
+        const review = reviewWithF1Evidence([
+            '- **evidence:**',
+            '  src/jobs/followupCiSuspensionCancel.ts:142 — static trace',
+            '',
+            '      - ~~~',
+        ]);
+        const machine = parseStructuredReview(review);
+        assert.strictEqual(machine.status, 'valid_with_blockers');
+        assert.strictEqual(machine.actionableFindings[0].evidence, evidence);
+
+        // Inlining the reference would leave the literal code as the only
+        // continuation, which the parser would dedent into an unclosed fence.
+        assert.strictEqual(
+            formatRecordField('Evidence', evidence),
+            '- **Evidence:**\n\n  src/jobs/followupCiSuspensionCancel.ts:142 — static trace\n\n      - ~~~',
+        );
+        const published = renderPublicReview(review, undefined, { changedFilePaths: CHANGED_FILES })!;
+        assert.ok(published);
+        const reparsed = parseStructuredReview(publicComment(published).body);
+        assert.strictEqual(reparsed.status, 'valid_with_blockers');
+        assert.strictEqual(reparsed.actionableFindings[0].evidence, evidence);
+
+        const gathered = await gatherUnprocessedReviewComments([publicComment(published)], gatherOptions);
+        const selected = selectReviewFeedback(gathered, parseFixFindingSelection('F1'));
+        assert.deepStrictEqual(selected.flatMap(comment => comment.actionableFindings.map(finding => finding.evidence)), [evidence]);
+        const regathered = extractActionableFindings(`## Actionable Findings\n${formatActionableFindings(reparsed.actionableFindings)}`);
+        assert.strictEqual(regathered[0].evidence, evidence);
+    });
+
+    test('a fence opened on the label line must close before publication', async () => {
+        const withCorrection = (lines: string[]): string => MACHINE_REVIEW.replace(
+            '- **minimumCorrection:** Refresh the attempt after intent persistence:\n\n' + indent(F1_CORRECTION.split('\n').slice(2).join('\n')),
+            lines.join('\n'),
+        );
+        // Serialization moves these block-leading values below the public
+        // label, where their unclosed fences would reject the whole review.
+        for (const opener of ['~~~ts', '```ts', '- ~~~ts']) {
+            const unclosed = withCorrection([`- **minimumCorrection:** ${opener}`, '  return current;']);
+            assert.notStrictEqual(unclosed, MACHINE_REVIEW);
+            assert.strictEqual(parseStructuredReview(unclosed).status, 'invalid', opener);
+            assert.strictEqual(renderPublicReview(unclosed, undefined, { changedFilePaths: CHANGED_FILES }), null, opener);
+        }
+        // A list-item fence closes at the item's content column, which a
+        // dedented closer never reaches.
+        const escaped = withCorrection(['- **minimumCorrection:** - ~~~ts', '  return current;', '  ~~~']);
+        assert.strictEqual(parseStructuredReview(escaped).status, 'invalid');
+
+        const correction = ['~~~ts', 'return current;', '~~~'].join('\n');
+        const closed = withCorrection(['- **minimumCorrection:** ~~~ts', '  return current;', '  ~~~']);
+        assert.strictEqual(parseStructuredReview(closed).actionableFindings[0].minimumCorrection, correction);
+        const published = renderPublicReview(closed, undefined, { changedFilePaths: CHANGED_FILES })!;
+        assert.ok(published);
+        const reparsed = parseStructuredReview(publicComment(published).body);
+        assert.strictEqual(reparsed.status, 'valid_with_blockers');
+        assert.strictEqual(reparsed.actionableFindings[0].minimumCorrection, correction);
+        const gathered = await gatherUnprocessedReviewComments([publicComment(published)], gatherOptions);
+        const selected = selectReviewFeedback(gathered, parseFixFindingSelection('F1'));
+        assert.deepStrictEqual(
+            selected.flatMap(comment => comment.actionableFindings.map(finding => finding.minimumCorrection)),
+            [correction],
+        );
+    });
+
     test('list-marker-shaped literal code does not open a fence through publication and /fix selection', async () => {
         for (const marker of ['- ', '1. ']) {
             const evidence = [

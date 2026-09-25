@@ -203,8 +203,14 @@ class RecordFieldReader {
         if (!field) return true;
         if (this.fields.has(field.key) || (this.allowedKeys && !this.allowedKeys.has(field.key))) return false;
         const continuation = dedentContinuation(field);
-        if (!fencesClose(continuation)) return false;
-        this.fields.set(field.key, buildFieldValue(field.first, continuation));
+        const value = buildFieldValue(field.first, continuation);
+        // A first line that serializers move below the label is published as
+        // block content, so a fence it opens must close in the field too.
+        const published = field.first !== '' && startsBelowLabel(value.split('\n'))
+            ? [{ text: field.first, lazy: false }, ...continuation]
+            : continuation;
+        if (!fencesClose(published)) return false;
+        this.fields.set(field.key, value);
         this.current = null;
         return true;
     }
@@ -224,17 +230,30 @@ export function extractRecordFields(block: string, allowedKeys?: ReadonlySet<str
 }
 
 /**
+ * Whether a multiline value starts on its own line below its label. That is
+ * the case when its first line opens a block such as a numbered list, which
+ * Markdown would otherwise fold into the label, or when inlining the first
+ * line would change how the parser dedents the rest: an indented first line,
+ * or later lines that all share indentation the parser would strip once they
+ * are the only continuation.
+ */
+function startsBelowLabel(lines: string[]): boolean {
+    if (lines.length < 2) return false;
+    if (BLOCK_START_RE.test(lines[0]) || /^[ \t]/.test(lines[0])) return true;
+    return lines.slice(1).every(line => line.trim() === '' || /^[ \t]/.test(line));
+}
+
+/**
  * Render one record field as a Markdown bullet. Continuation lines are
  * indented beneath the bullet, which keeps lists and paragraphs inside the
  * field when GitHub renders the comment and when the parser reads it back.
- * Multiline values that open with a block such as a numbered list, or whose
- * first line is indented relative to later lines, start on their own line so
- * Markdown does not fold that block into the label and the parser dedents
- * every line of the value together.
+ * Values that `startsBelowLabel` start on their own line so Markdown does not
+ * fold a leading block into the label and the parser dedents every line of
+ * the value together.
  */
 export function formatRecordField(label: string, value: string): string {
     const lines = value.split('\n');
-    const leadsWithBlock = lines.length > 1 && (BLOCK_START_RE.test(lines[0]) || /^[ \t]/.test(lines[0]));
+    const leadsWithBlock = startsBelowLabel(lines);
     const header = leadsWithBlock ? `- **${label}:**` : `- **${label}:** ${lines.shift() ?? ''}`.trimEnd();
     const body = leadsWithBlock ? ['', ...lines] : lines;
     return [header, ...body.map(line => (line === '' ? '' : `  ${line}`))].join('\n');
