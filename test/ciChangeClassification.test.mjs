@@ -540,6 +540,12 @@ describe('change resolution', () => {
 // --- command line -----------------------------------------------------------
 
 describe('classifier command line', () => {
+    // The runner's own event (a nightly run is `schedule`) and any classifier
+    // inputs must not leak into the child, or it validates every surface.
+    const AMBIENT = /^(GITHUB_EVENT_NAME|PROPR_CLASSIFY_.*)$/;
+    const hermeticEnvironment = () => Object.fromEntries(
+        Object.entries(process.env).filter(([name]) => !AMBIENT.test(name)));
+
     const runClassifier = (args, { cwd = REPOSITORY, environment = {} } = {}) => {
         const directory = freshDirectory('cli-run');
         const outputFile = join(directory, 'output.txt');
@@ -550,7 +556,7 @@ describe('classifier command line', () => {
             cwd,
             encoding: 'utf8',
             env: {
-                ...process.env,
+                ...hermeticEnvironment(),
                 GITHUB_OUTPUT: outputFile,
                 GITHUB_STEP_SUMMARY: summaryFile,
                 ...environment,
@@ -632,6 +638,18 @@ describe('classifier command line', () => {
         assert.equal(result.outputs.api, 'false');
     });
 
+    test('falls back to the GitHub event name and validates every surface for a schedule', () => {
+        const { directory, base } = repositoryWithBranch('cli-schedule');
+        const head = commit(directory, { 'packages/api/mcp/tools.ts': 'export const a = 1;\n' }, 'feature');
+        const result = runClassifier(
+            ['--base', base, '--head', head, '--repo', directory, '--github-output', '--no-fetch'],
+            { environment: { GITHUB_EVENT_NAME: 'schedule' } },
+        );
+        assert.equal(result.status, 0, result.stderr);
+        assert.equal(result.outputs.broad, 'true');
+        for (const surface of SURFACES) assert.equal(result.outputs[surface], 'true', surface);
+    });
+
     test('the summary names every surface and the reason for each path', () => {
         const decision = classifyPaths(['apps/desktop/src/main.ts']);
         const summary = renderSummary(decision);
@@ -700,7 +718,7 @@ describe('workflow wiring', () => {
 
     test('every classifying workflow uses the one shared action', () => {
         for (const [name, workflow] of Object.entries({
-            buildCheck, cliCompatibility, desktopRelease, desktopConnect,
+            buildCheck, fullSuite, cliCompatibility, desktopRelease, desktopConnect,
         })) {
             assert.ok(workflow.includes('uses: ./.github/actions/classify-changes'),
                 `${name} must classify through the shared action`);
@@ -726,6 +744,8 @@ describe('workflow wiring', () => {
             [desktopRelease, 'renderer-axe-boundary', 'desktop'],
             [desktopRelease, 'package', 'desktop'],
             [desktopConnect, 'packaged-connect-discovery', 'desktop'],
+            [fullSuite, 'docs', 'docs'],
+            [fullSuite, 'native-electron', 'desktop'],
         ];
         for (const [workflow, job, surface] of gated) {
             const block = jobBlock(workflow, job);
@@ -751,13 +771,14 @@ describe('workflow wiring', () => {
         }
     });
 
-    test('the full suite still runs unconditionally for every pull request', () => {
-        assert.ok(!fullSuite.includes('classify'),
-            'the full test suite must not be narrowed by the classifier');
-        for (const job of ['shard', 'docs', 'native-electron']) {
-            const block = jobBlock(fullSuite, job);
-            assert.ok(!block.includes('needs.classify'), `${job} must stay unconditional`);
-        }
+    test('the full suite narrows only docs and native Electron, never the backend shards', () => {
+        // Selection and gate semantics are evaluated in
+        // test/ciFullSuiteSelection.test.mjs; this pins the wiring.
+        const shard = jobBlock(fullSuite, 'shard');
+        assert.ok(!shard.includes('classify'), 'backend shards must stay unconditional');
+        assert.ok(!/\n {4}needs:/.test(shard), 'backend shards must not wait for the classifier');
+        assert.ok(jobBlock(fullSuite, 'classify').includes("if: ${{ github.event_name == 'pull_request' && !github.event.pull_request.draft }}"),
+            'manual dispatch never consults the classifier');
         assert.ok(fullSuite.includes('--verify-shard-summaries'),
             'exact shard coverage verification must be preserved');
         assert.ok(fullSuite.includes('shard: [1, 2, 3, 4]'), 'the shard matrix must be preserved');

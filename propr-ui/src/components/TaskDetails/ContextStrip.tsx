@@ -44,7 +44,7 @@ const formatTokenCount = (count: number | null | undefined): string => {
 
 // Separator dot between items
 const Dot: React.FC = () => (
-  <span className="text-gray-300 mx-1.5">•</span>
+  <span className="text-gray-300 mx-1.5">·</span>
 );
 
 // Repository link component
@@ -320,7 +320,7 @@ const ContextStrip: React.FC<ContextStripProps> = ({
         {taskInfo && <RepoLink taskInfo={taskInfo} />}
       </div>
 
-      {/* Middle: PR • Issue • Model • Duration - Separated by dots */}
+      {/* Middle: PR · Issue · Model · Duration - Separated by dots */}
       <div className="flex items-center flex-wrap">
         {prInfo && <PRInfoChip prInfo={prInfo} />}
         {taskInfo && <IssuePRChip taskInfo={taskInfo} />}

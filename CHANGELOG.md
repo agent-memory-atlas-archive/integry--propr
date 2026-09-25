@@ -9,6 +9,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Cancel CI while follow-up implementation is in progress**: a new per-repository
+  option (Repositories → Automation, off by default, also available through
+  `POST /api/config/repos`) cancels the queued and running GitHub Actions
+  validation of the exact pull request head a follow-up is about to replace, once
+  that follow-up is authorized and actually implementing. Eligibility is never
+  inferred: only the workflows an operator selected next to the option — by file
+  name, path, display name or numeric workflow ID, matched exactly — are ever
+  cancelled, so a workflow that deploys under a name like `Build` or `CI` keeps
+  running, and an empty selection leaves the decision to the documented
+  environment fallback, which the settings screen discloses. A selection that
+  cannot be read at all is not an empty one: nothing is cancelled for that
+  repository until it can be read again. Instances
+  configured outside the Web UI can set `CANCEL_CI_FOLLOWUP_WORKFLOWS` as a
+  fallback for repositories with no selection of their own. Runs of other pull
+  requests and other revisions are never touched. Each run is recorded before its
+  cancel request is sent, so a crash or a lost response cannot leave CI cancelled
+  without a restart obligation, and neither a denied retry nor a refused restart
+  discards an obligation: a refused or repeatedly failing restart keeps its runs
+  recorded until the restart is confirmed, the pull request closes or the head is
+  obsolete. Starting, sweeping, restoring and releasing one pull
+  request all run under a shared database lease, so workers cannot interleave and
+  no run is cancelled after its restart began. A replacement commit gets its
+  normal CI; a run that ends without one has its cancelled checks restarted for
+  the still-current head, including after a worker restart. Requires the GitHub
+  App installation to have Actions "Read and write"; without it the option is
+  inert and logged.
 - **Claude Opus 5.5**: added to the Claude model catalog (`llm-claude-opus55`, 1M
   context) and made the default Claude model and the target of the plain `opus`
   alias. The bundled Claude Code CLI moves to 2.1.280, which is the first release
@@ -24,6 +50,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   notifications stay in the Inbox.
 
 ### Changed
+
+- **Rebuilt dashboard**: the home page now answers "what needs my attention right
+  now" in five sections — a summary strip of four clickable counts, **Needs
+  attention**, **Happening now**, **Recent outcomes**, and **Historical stats** —
+  with live work taking the main column. A single repository filter applies to every
+  section and is kept in the URL, ordering stays stable while tasks run, and a
+  dropped socket keeps the last known rows on screen under a
+  "Reconnecting · Last updated …" line. Unavailable data renders as "—" rather than
+  as zero, and cost is labelled **Recorded spend**. The Repository Breakdown, Top
+  Models, activity and status-distribution charts moved to a new **Analytics**
+  page (`/analytics`).
+
+  The page is laid out as a split-pane console following the Studio guidelines
+  rather than as cards on a tinted background. No section draws its own box: the
+  two columns are separated by one continuous vertical rule that runs the full
+  height of the canvas, sub-sections are separated by edge-to-edge horizontal
+  rules, and every pane header shares one height so the rules in the two columns
+  land on the same pixel. The summary counts sit in a 40px sub-toolbar anchored
+  above the panes. Repository slugs and issue/PR references are monospace code
+  chips that always name their entity type (`Issue #118`, `PR #2481`); a
+  recorded quality score uses the fixed-width pill (`[ ● 9 ]`) with the
+  out-of-ten scale announced rather than printed; each attention item carries a
+  single fixed-width verb (`Open`, `Review`) so the action column has one left
+  edge; and colour is reserved for work in progress, blockers and failures —
+  completed and merged work is neutral, and the historical chart greys out every
+  settled day.
 
 - **Voice Briefings are opt-in everywhere**: the experimental feature is now off by
   default in the browser, the installed PWA, and the desktop app. Enable

@@ -48,7 +48,7 @@ for consistency across all eligible jobs.
 | `pr-build-check.yml` | `cli-agent-skill-glibc-231` | Hosted Ubuntu; disposable glibc 2.31 container and ordinary-user ownership changes |
 | Native macOS, Windows and ARM64 checks | Existing platform jobs | Matching hosted platforms |
 | Desktop Linux x64 packaging/acceptance | Existing desktop jobs | Hosted: ordinary-user sandbox, desktop/session and clean-environment requirements remain |
-| Aggregate gate and failure reporters | `test`, `comment` | Hosted control/reporting jobs |
+| Change classification, aggregate gate and failure reporters | `classify`, `test`, `comment` | Hosted control/reporting jobs |
 
 Build/lint/docs coverage is unchanged in kind; see
 [Deduplicated validation](#deduplicated-validation) for the invocations that
@@ -307,6 +307,16 @@ Every unit is bounded by the same per-unit timeout (`PROPR_TEST_TIMEOUT_MS`,
 nightly suite with no earlier signal, so the timing report now also lists the
 units that passed while using 60% or more of that budget, and each one becomes
 a run annotation. A unit listed there is the next one to split.
+
+The shared runner's disk serves fsync slowly, and the desktop profile-store
+suites perform several hundred per run; `apps/desktop/src/profile-store.test.ts`
+took 90-124s there before crossing the budget. The runner therefore sets
+`PROPR_DESKTOP_TEST_FSYNC=off` for every unit, and those suites (with their
+crash fixtures) turn file-handle fsync into a no-op for the process. Their
+assertions cover write ordering through the store's hooks and crash recovery
+after SIGKILL, which the page cache preserves. Native fsync stays in force for
+`desktop:test`, the `test:native-durability` matrix and any direct `tsx --test`
+run, and an explicit value of the variable is passed through unchanged.
 
 The required **Run Full Test Suite** name stays unchanged. Its gate requires
 all shards, docs, complete summary verification, and the hosted native Electron

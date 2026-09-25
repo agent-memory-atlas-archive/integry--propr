@@ -36,6 +36,7 @@ import {
 } from './jobs/prCommentTaskStateFinalizers.js';
 import { startWorkerTaskStateRecovery } from './workerTaskStateRecovery.js';
 import { recoverNonterminalGoals } from './goalRecovery.js';
+import { reconcileFollowupCiSuspensions } from './jobs/followupCiSuspension.js';
 import { prepareAgentRegistryAtStartup, processAgentImagePreparationJob } from './workerAgentPreparation.js';
 
 process.on('uncaughtException', (error: Error) => {
@@ -291,10 +292,16 @@ async function startWorker(options: WorkerOptions = {}): Promise<StartedWorker> 
         retryStrategy: (times: number) => Math.min(times * 50, 2000)
     });
 
+    // Capacity travels with the heartbeat, in a hash keyed by the same worker
+    // ids. The dashboard can only say "all agents are busy" when it can compare
+    // the active job count against real capacity, and nothing else knows how
+    // many jobs this process was started to run at once.
     const sendHeartbeat = async (): Promise<void> => {
         try {
             await heartbeatRedis.sadd('system:status:workers', workerId);
             await heartbeatRedis.expire('system:status:workers', 90);
+            await heartbeatRedis.hset('system:status:worker-capacity', workerId, String(workerConcurrency));
+            await heartbeatRedis.expire('system:status:worker-capacity', 90);
             logger.debug('Worker heartbeat sent');
         } catch (error) {
             const err = error as Error;
@@ -386,6 +393,7 @@ async function startWorker(options: WorkerOptions = {}): Promise<StartedWorker> 
     const taskStateRecovery = await startWorkerTaskStateRecovery({
         stateManager,
         recoverGoals: () => recoverNonterminalGoals(),
+        reconcileCiSuspensions: () => reconcileFollowupCiSuspensions(),
     });
 
     const close = async (): Promise<void> => {
@@ -399,6 +407,7 @@ async function startWorker(options: WorkerOptions = {}): Promise<StartedWorker> 
         await agentImagePreparationQueue.close();
         await closeAgentImageBuildLock();
         await heartbeatRedis.srem('system:status:workers', workerId);
+        await heartbeatRedis.hdel('system:status:worker-capacity', workerId);
         await subscriberRedis.quit();
         await heartbeatRedis.quit();
     };
