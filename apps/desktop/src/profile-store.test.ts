@@ -11,7 +11,10 @@ import {
   type EncryptionProvider,
   type ProfileStoreIOOperation,
 } from './profile-store';
+import { applyDesktopTestFsyncPolicy } from './profile-store-test-fsync';
 
+// The sharded full suite runs this file without native fsync; see the helper.
+const fsyncPolicy = await applyDesktopTestFsyncPolicy();
 const temporaryDirectories: string[] = [];
 
 const createDirectory = async (): Promise<string> => {
@@ -82,7 +85,8 @@ describe('desktop profile store', () => {
     const barrierProof = join(directory, 'writable-file-barrier-proof');
     const barrierBytes = Buffer.from('native writable fsync proof');
     await writeFile(barrierProof, barrierBytes);
-    await flushFileData(barrierProof);
+    // The proof is about the native writable-handle flush itself.
+    await fsyncPolicy.withNativeFsync(() => flushFileData(barrierProof));
     assert.deepEqual(await readFile(barrierProof), barrierBytes);
 
     const store = new ProfileStore(directory, encryption());

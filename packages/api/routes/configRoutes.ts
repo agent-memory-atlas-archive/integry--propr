@@ -8,11 +8,11 @@ import { createIndexingRoutes } from './configRoutesIndexing.js';
 import { createAgentTankRoutes } from './configRoutesAgentTank.js';
 import { createAgentsRoutes, validateDefaultAgentSetting } from './configRoutesAgents.js';
 import { createSyntheticAgentConfigRoutes } from './configRoutesSyntheticAgents.js';
-import { saveSettingsWithRollback } from './configRoutesSettings.js';
+import { reviewContextBudgetSettingsResponse, saveSettingsWithRollback } from './configRoutesSettings.js';
 import { saveThenPublishConfigUpdate } from './configRoutesPersistence.js';
 import type { AgentPreparationDeps } from './configRoutesAgentsTypes.js';
 import type { Knex } from 'knex';
-import { normalizeRepoConfig, preserveRepoAutoFollowup, preserveRepoNotifications, preserveRepoVisualPreview } from './configRepoValidation.js';
+import { normalizeRepoConfig, preserveRepoSettings } from './configRepoValidation.js';
 import { loadReposWithAttachmentCapacity } from './configRoutesRepos.js';
 
 interface ConfigRoutesDeps {
@@ -216,9 +216,7 @@ export function createConfigRoutes(deps: ConfigRoutesDeps) {
     }
     const result = await withConfigLock(redisClient, 'config:repos:lock', async lock => {
       const previousRepos = await configStore.loadMonitoredReposRaw(); assertConfigRevision(req.body.expectedRevision, previousRepos);
-      const withPreservedAutoFollowup = preserveRepoAutoFollowup(previousRepos, validatedRepos, repos_to_monitor);
-      const withPreservedNotifications = preserveRepoNotifications(previousRepos, withPreservedAutoFollowup, repos_to_monitor);
-      const processedRepos = preserveRepoVisualPreview(previousRepos, withPreservedNotifications, repos_to_monitor);
+      const processedRepos = preserveRepoSettings(previousRepos, validatedRepos, repos_to_monitor);
       return saveThenPublishConfigUpdate({
         save: async () => {
           await database.transaction(async trx => {
@@ -283,7 +281,7 @@ export function createConfigRoutes(deps: ConfigRoutesDeps) {
         pr_review_prompt: typeof settings.pr_review_prompt === 'string' ? settings.pr_review_prompt : '',
         pr_review_context_enabled: typeof settings.pr_review_context_enabled === 'boolean' ? settings.pr_review_context_enabled : true,
         pr_review_context_model: typeof settings.pr_review_context_model === 'string' ? settings.pr_review_context_model : '',
-        pr_review_max_context_tokens: typeof settings.pr_review_max_context_tokens === 'number' ? settings.pr_review_max_context_tokens : 0,
+        ...reviewContextBudgetSettingsResponse(settings),
         auto_followup_score_threshold: autoFollowup.value,
         auto_resolve_merge_conflicts: autoResolveMergeConflicts,
         model_reasoning_level: modelReasoningLevel,

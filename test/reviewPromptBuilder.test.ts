@@ -8,7 +8,7 @@
  * `## Suggestions and Follow-ups` sections alongside evaluation and score.
  *
  * `reviewPromptBuilder.ts` only depends on `@propr/shared` (for the default
- * review guidance), which CI builds before running the test suite, so it can be
+ * review guidance) and pure local helpers, which CI builds before running the test suite, so it can be
  * imported directly without building the heavier `@propr/core` package.
  */
 import { test, describe } from 'node:test';
@@ -17,6 +17,7 @@ import { getEncoding } from 'js-tiktoken';
 import { buildAnalysisSafetySuffix } from '../packages/core/src/agents/impl/utils/analysisPromptSafety.js';
 
 const { buildReviewPrompt, buildReviewPromptWithinBudget } = await import('../src/jobs/reviewPromptBuilder.js');
+const { ReviewTokenEstimator } = await import('../src/jobs/reviewTokenEstimator.js');
 
 function baseOptions(overrides: Record<string, unknown> = {}) {
     return {
@@ -224,11 +225,14 @@ describe('buildReviewPrompt — mandatory output contract', () => {
         const analysisSafetySuffix = buildAnalysisSafetySuffix('text', false, undefined);
         const result = buildReviewPromptWithinBudget(baseOptions({ relatedContext: large }), REVIEW_TOKEN_CEILING, analysisSafetySuffix);
         const fullyComposedRequest = `${result.prompt}${analysisSafetySuffix}`;
-        const conservativeFullyComposedTokens = Buffer.byteLength(fullyComposedRequest, 'utf8');
+        const tokenizedRequestLength = getEncoding('o200k_base').encode(fullyComposedRequest).length;
 
-        assert.equal(result.estimatedTokens, conservativeFullyComposedTokens);
-        assert.ok(conservativeFullyComposedTokens <= REVIEW_TOKEN_CEILING);
-        assert.ok(Buffer.byteLength(result.prompt, 'utf8') < result.estimatedTokens);
+        // The estimate covers the analysis suffix and is a calibrated token
+        // estimate, not a byte count.
+        assert.equal(result.estimatedTokens, new ReviewTokenEstimator('generic-calibrated').estimate(fullyComposedRequest));
+        assert.ok(result.estimatedTokens <= REVIEW_TOKEN_CEILING);
+        assert.ok(tokenizedRequestLength <= result.estimatedTokens);
+        assert.ok(Buffer.byteLength(fullyComposedRequest, 'utf8') > result.estimatedTokens);
     });
 
     test('conservatively caps token-dense Unicode review input', () => {

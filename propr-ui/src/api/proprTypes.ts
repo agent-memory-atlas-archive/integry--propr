@@ -122,6 +122,10 @@ export interface MonitoredRepo {
   enabled: boolean;
   /** Whether failed CI triggers an automatic follow-up. Missing legacy values are off. */
   autoFollowupOnFailedCi?: boolean;
+  /** Whether obsolete PR checks are cancelled while a follow-up implements. Missing legacy values are off. */
+  cancelCiDuringFollowup?: boolean;
+  /** Exactly which validation workflows that option may cancel: file names, paths, display names or IDs. Empty cancels nothing. */
+  cancelCiDuringFollowupWorkflows?: string[];
   /** Whether Inbox and push notifications are generated for this repository. Missing values are on. */
   notificationsEnabled?: boolean;
   /** Generated media to embed in PRs when a change has a visible result. */
@@ -193,7 +197,10 @@ export interface SystemSettings {
   pr_review_prompt?: string;
   pr_review_context_enabled?: boolean;
   pr_review_context_model?: string;
+  /** Legacy absolute review input token cap; 0 = none. */
   pr_review_max_context_tokens?: number;
+  /** Review context budget: 10-100% of each reviewer's safe input capacity. */
+  pr_review_context_budget_percent?: number;
   ultrafix_rating_goal?: number;
   ultrafix_max_cycles?: number;
   ultrafix_pause_seconds?: number;
