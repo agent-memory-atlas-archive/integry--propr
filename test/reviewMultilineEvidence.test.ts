@@ -382,6 +382,49 @@ describe('multiline review fields', () => {
         assert.strictEqual(parseStructuredReview(unclosed).status, 'invalid');
     });
 
+    test('fence-like code indented four columns inside a fence stays literal through publication and /fix selection', async () => {
+        const evidence = [
+            'src/jobs/followupCiSuspensionCancel.ts:142 — static trace',
+            '',
+            '```md',
+            '    ```',
+            '```',
+            '',
+            '1. The cancel template embeds a fence:',
+            '   ~~~ts',
+            '       ~~~',
+            '   ~~~',
+        ].join('\n');
+        const review = reviewWithF1Evidence([
+            '- **evidence:** src/jobs/followupCiSuspensionCancel.ts:142 — static trace',
+            '',
+            indent(evidence.split('\n').slice(2).join('\n')),
+        ]);
+        const [parsed] = parseStructuredReview(review).actionableFindings;
+        assert.strictEqual(parsed.evidence, evidence);
+
+        const published = renderPublicReview(review, undefined, { changedFilePaths: CHANGED_FILES })!;
+        assert.ok(published);
+        assert.ok(published.includes('  ```md\n      ```\n  ```'));
+        const reparsed = parseStructuredReview(publicComment(published).body);
+        assert.strictEqual(reparsed.status, 'valid_with_blockers');
+        assert.strictEqual(reparsed.actionableFindings[0].evidence, evidence);
+
+        const gathered = await gatherUnprocessedReviewComments([publicComment(published)], gatherOptions);
+        const selected = selectReviewFeedback(gathered, parseFixFindingSelection('F1'));
+        assert.deepStrictEqual(selected.flatMap(comment => comment.actionableFindings.map(finding => finding.evidence)), [evidence]);
+
+        // A closer indented four columns past its list item's content is code,
+        // so the fence never closes and the record is rejected.
+        const literalCloser = reviewWithF1Evidence([
+            '- **evidence:** src/jobs/followupCiSuspensionCancel.ts:142 — static trace',
+            '  1. ```ts',
+            '     cancel(attempt);',
+            '         ```',
+        ]);
+        assert.strictEqual(parseStructuredReview(literalCloser).status, 'invalid');
+    });
+
     test('rejects unsupported formatting instead of publishing apparently complete evidence', () => {
         const unsupported: Record<string, string[]> = {
             'an outdented paragraph after a blank line': [

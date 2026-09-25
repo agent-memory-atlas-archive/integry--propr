@@ -22,6 +22,11 @@
  * Values keep the first line as written and dedent continuation lines by
  * their common indentation, so renderers can indent them beneath any
  * `- **label:**` bullet without changing their Markdown structure.
+ *
+ * Code fences are tracked on those dedented lines, the same shape a renderer
+ * publishes, relative to the list item that contains them: an opener or
+ * closer indented four or more columns past its item's content is literal
+ * code, and a fenced line indented less than that content leaves the item.
  */
 
 const FIELD_BOLD_RE = /^[-*][ \t]+\*\*([^*]+)\*\*[ \t]*(.*)$/;
@@ -34,8 +39,8 @@ const THEMATIC_BREAK_RE = /^(?:(?:-[ \t]*){3,}|(?:\*[ \t]*){3,}|(?:_[ \t]*){3,})
  */
 const FENCE_OPEN_SOURCE = '(`{3,})[^`]*$|(~{3,})';
 const FENCE_RE = new RegExp(`^(?:${FENCE_OPEN_SOURCE})`);
-/** Leading list item markers, including nested ones such as `- 1. `, that may precede a fence opener. */
-const LIST_MARKERS_RE = /^(?:(?:[-*+]|\d{1,9}[.)])[ \t]+)+/;
+/** One list item marker; nested items such as `- 1. ` repeat it on one line. */
+const LIST_MARKER_RE = /^(?:[-*+]|\d{1,9}[.)])([ \t]+)/;
 /** Unindented text that would open a new Markdown block rather than continue a paragraph. */
 const BLOCK_START_RE = new RegExp(`^(?:[-*+](?:[ \\t]|$)|\\d{1,9}[.)](?:[ \\t]|$)|#{1,6}(?:[ \\t]|$)|>|${FENCE_OPEN_SOURCE}|\\||<)`);
 const HEADING_RE = /^#{1,6}(?:[ \t]|$)/;
@@ -70,25 +75,74 @@ interface OpenField {
     continuation: ContinuationLine[];
 }
 
-function buildFieldValue(field: OpenField): string {
+function dedentContinuation(field: OpenField): ContinuationLine[] {
     const indents = field.continuation
         .filter(line => !line.lazy && line.text !== '')
         .map(line => line.text.length - line.text.trimStart().length);
     const dedent = indents.length > 0 ? Math.min(...indents) : 0;
-    const lines = [
-        field.first,
-        ...field.continuation.map(line => (line.lazy ? line.text : line.text.slice(dedent))),
-    ];
+    return field.continuation.map(line => (line.lazy ? line : { text: line.text.slice(dedent), lazy: false }));
+}
+
+function buildFieldValue(first: string, continuation: ContinuationLine[]): string {
+    const lines = [first, ...continuation.map(line => line.text)];
     while (lines.length > 0 && lines[0] === '') lines.shift();
     while (lines.length > 0 && lines[lines.length - 1] === '') lines.pop();
     return lines.join('\n');
+}
+
+/** The column just past `whitespace` that starts at `column`, with tab stops every four columns. */
+function advanceColumn(column: number, whitespace: string): number {
+    for (const char of whitespace) column = char === '\t' ? column + 4 - (column % 4) : column + 1;
+    return column;
+}
+
+/**
+ * Whether every code fence in a field's dedented continuation closes inside
+ * the list item that opened it. Column 0 is the field's own content column.
+ */
+function fencesClose(continuation: ContinuationLine[]): boolean {
+    // Content columns of the list items that contain the current line.
+    const items = [0];
+    let fence: { char: string; length: number; indent: number } | null = null;
+    for (const { text, lazy } of continuation) {
+        if (text === '') continue;
+        // Unindented text inside a fence would end the enclosing list item in
+        // Markdown, so it can never belong to the field.
+        if (lazy) {
+            if (fence) return false;
+            continue;
+        }
+        const indent = text.length - text.trimStart().length;
+        if (fence) {
+            if (indent < fence.indent) return false;
+            const closer = new RegExp(`^${fence.char}{${fence.length},}$`);
+            if (indent - fence.indent < 4 && closer.test(text.slice(indent))) fence = null;
+            continue;
+        }
+        while (items.length > 1 && items[items.length - 1] > indent) items.pop();
+        let column = indent;
+        let rest = text.slice(indent);
+        // A fence can open a list item, as in `- ~~~ts`; its closer then sits
+        // at the item's content column without a marker.
+        for (let marker = LIST_MARKER_RE.exec(rest); marker; marker = LIST_MARKER_RE.exec(rest)) {
+            const markerEnd = column + marker[0].length - marker[1].length;
+            column = advanceColumn(markerEnd, marker[1]);
+            // Five or more columns after a marker start indented code in the item.
+            items.push(column - markerEnd > 4 ? markerEnd + 1 : column);
+            rest = rest.slice(marker[0].length);
+        }
+        const opener = FENCE_RE.exec(rest);
+        const char = opener?.[1] ?? opener?.[2];
+        const itemIndent = items[items.length - 1];
+        if (char && column - itemIndent < 4) fence = { char: char[0], length: char.length, indent: itemIndent };
+    }
+    return fence === null;
 }
 
 /** Line-by-line reader for the field grammar documented above. */
 class RecordFieldReader {
     private readonly fields = new Map<string, string>();
     private current: OpenField | null = null;
-    private openFence: { char: string; length: number } | null = null;
 
     constructor(private readonly allowedKeys?: ReadonlySet<string>) {}
 
@@ -102,9 +156,6 @@ class RecordFieldReader {
             return true;
         }
         if (/^ /.test(line)) return this.readIndented(line);
-        // Unindented text inside an indented fence would end the enclosing
-        // list item in Markdown, so it can never belong to the field.
-        if (this.openFence) return false;
 
         const header = matchFieldHeader(line);
         if (header) {
@@ -118,22 +169,11 @@ class RecordFieldReader {
 
     /** Close the record, returning its fields or null when it is unsupported. */
     finish(): Map<string, string> | null {
-        return !this.openFence && this.finishField() ? this.fields : null;
+        return this.finishField() ? this.fields : null;
     }
 
     private readIndented(line: string): boolean {
         if (!this.current) return false;
-        const trimmed = line.trimStart();
-        if (this.openFence) {
-            const { char, length } = this.openFence;
-            if (new RegExp(`^${char}{${length},}$`).test(trimmed)) this.openFence = null;
-        } else {
-            // A fence can open a list item, as in `- ~~~ts`; its closer then
-            // sits at the item's content indentation without a marker.
-            const fence = FENCE_RE.exec(trimmed.replace(LIST_MARKERS_RE, ''));
-            const marker = fence?.[1] ?? fence?.[2];
-            if (marker) this.openFence = { char: marker[0], length: marker.length };
-        }
         this.current.continuation.push({ text: line, lazy: false });
         return true;
     }
@@ -154,7 +194,9 @@ class RecordFieldReader {
         const field = this.current;
         if (!field) return true;
         if (this.fields.has(field.key) || (this.allowedKeys && !this.allowedKeys.has(field.key))) return false;
-        this.fields.set(field.key, buildFieldValue(field));
+        const continuation = dedentContinuation(field);
+        if (!fencesClose(continuation)) return false;
+        this.fields.set(field.key, buildFieldValue(field.first, continuation));
         this.current = null;
         return true;
     }
