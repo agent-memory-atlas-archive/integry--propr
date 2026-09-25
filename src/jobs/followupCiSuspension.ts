@@ -211,6 +211,13 @@ function attemptAdvanced(run: CancelledRun, liveRun: WorkflowRunSummary): boolea
  */
 type RerunGate = () => Promise<RestoreSuspensionResult | null>;
 
+/**
+ * Proves the lease is still this worker's at the very moment before a rerun
+ * leaves it, after the final run lookup that the gate cannot cover. Lease
+ * loss surfaces as {@link SuspensionLeaseLostError}.
+ */
+type AssertOwned = () => Promise<void>;
+
 interface RestartPassResult {
     /** Whether the record has to be written before the next wait. */
     progressed: boolean;
@@ -253,13 +260,24 @@ type PersistRuns = () => Promise<boolean>;
  * rerun leaves the worker, and the rerun is sent only while the run is still
  * cancelled on the very attempt on record: an attempt past it settles the
  * obligation, anything else waits for the next pass to assess it afresh.
+ *
+ * That final read is an awaited GitHub call too, and a worker stalled inside
+ * it can outlive its lease: the worker that took the lease over meanwhile may
+ * have restored the very attempt the captured response still shows cancelled,
+ * and dropped the suspension. The rerun is the last external effect of this
+ * pass and leaves only on a lease proven this worker's after that very last
+ * read; a resumed heartbeat alone would only note the loss, and the record
+ * would show it gone only once the duplicate rerun had already left.
  */
 async function restartPass(
     runs: CancelledRun[],
-    context: { target: SuspensionTarget; octokit: CiSuspensionOctokit; headSha: string; restartedRunIds: number[]; persist: PersistRuns },
+    context: {
+        target: SuspensionTarget; octokit: CiSuspensionOctokit; headSha: string; restartedRunIds: number[];
+        persist: PersistRuns; assertOwned: AssertOwned;
+    },
     gate: RerunGate,
 ): Promise<RestartPassResult> {
-    const { target, octokit, headSha, restartedRunIds, persist } = context;
+    const { target, octokit, headSha, restartedRunIds, persist, assertOwned } = context;
     // Re-read the live runs of the captured head on every pass so validation
     // GitHub already restarted is never duplicated. Only a run that validates
     // *this* pull request head on the pull request's own event counts as that
@@ -294,6 +312,11 @@ async function restartPass(
             const owed = await stillOwedRerun(run, { target, octokit });
             if (owed === 'pending') continue;
             if (owed === 'rerun') {
+                // That read took time as well, and a worker stalled inside it may
+                // have outlived its lease: whoever took it over may have restored
+                // this very attempt already. The rerun leaves only on a lease
+                // proven this worker's after the very last read.
+                await assertOwned();
                 // A rejected or lost rerun only settles the obligation once the run
                 // proves its cancelled attempt was restarted; otherwise it stays owed.
                 const outcome = await rerunRun(octokit, target, run.id, { attempt: run.attempt });
@@ -429,6 +452,10 @@ async function restoreSuspension(
         await lease?.assertHeld();
         return null;
     };
+    // The gate's proof is itself followed by one more awaited read of the run;
+    // this is what the pass asserts after that read, immediately before the
+    // rerun leaves the worker.
+    const assertOwned: AssertOwned = async () => { await lease?.assertHeld(); };
     // Every write of the runs goes through here, so the worker always continues
     // on the generation it just produced.
     const persist: PersistRuns = async () => {
@@ -448,7 +475,7 @@ async function restoreSuspension(
     const deadline = nowMs(deps) + (deps.restoreBudgetMs ?? DEFAULT_RESTORE_BUDGET_MS);
     try {
         for (;;) {
-            const pass = await restartPass(runs, { target, octokit, headSha: current.head_sha, restartedRunIds, persist }, gate);
+            const pass = await restartPass(runs, { target, octokit, headSha: current.head_sha, restartedRunIds, persist, assertOwned }, gate);
             if (!await saveProgress(pass)) return { ...SUPERSEDED, restartedRunIds };
             if (pass.stopped) return pass.stopped;
             const pending = runs.filter(run => !run.restarted);
