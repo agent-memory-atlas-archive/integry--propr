@@ -638,6 +638,55 @@ describe('multiline review fields', () => {
         await assertSurvivesPublication(review, evidence, 'mixed indentation');
     });
 
+    test('tabs in a first line moved below its label expand before fence checks, publication, and /fix selection', async () => {
+        const withCorrection = (lines: string[]): string => MACHINE_REVIEW.replace(
+            '- **minimumCorrection:** Refresh the attempt after intent persistence:\n\n' + indent(F1_CORRECTION.split('\n').slice(2).join('\n')),
+            lines.join('\n'),
+        );
+        // Publication moves each first line to the field's content column,
+        // where an unexpanded tab would reach a different tab stop and leave
+        // the closer four columns past the item's content.
+        const cases: Record<string, { lines: string[]; correction: string[] }> = {
+            'a tabbed fence opener': {
+                lines: ['- **minimumCorrection:** -\t~~~ts', '      return current;', '        ~~~', '  Then rerun the test.'],
+                correction: ['-   ~~~ts', '    return current;', '      ~~~', 'Then rerun the test.'],
+            },
+            'a tabbed paragraph item': {
+                lines: ['- **minimumCorrection:** -\tApply change:', '  Details:', '      ~~~ts', '      fix();', '        ~~~'],
+                correction: ['-   Apply change:', 'Details:', '    ~~~ts', '    fix();', '      ~~~'],
+            },
+        };
+        for (const [description, { lines, correction: correctionLines }] of Object.entries(cases)) {
+            const correction = correctionLines.join('\n');
+            const review = withCorrection(lines);
+            assert.notStrictEqual(review, MACHINE_REVIEW, description);
+            const machine = parseStructuredReview(review);
+            assert.strictEqual(machine.status, 'valid_with_blockers', description);
+            assert.strictEqual(machine.actionableFindings[0].minimumCorrection, correction, description);
+
+            const published = renderPublicReview(review, undefined, { changedFilePaths: CHANGED_FILES })!;
+            assert.ok(published, description);
+            const reparsed = parseStructuredReview(publicComment(published).body);
+            assert.strictEqual(reparsed.status, 'valid_with_blockers', description);
+            assert.strictEqual(reparsed.actionableFindings[0].minimumCorrection, correction, description);
+
+            const gathered = await gatherUnprocessedReviewComments([publicComment(published)], gatherOptions);
+            const selected = selectReviewFeedback(gathered, parseFixFindingSelection('F1'));
+            assert.deepStrictEqual(
+                selected.flatMap(comment => comment.actionableFindings.map(finding => finding.minimumCorrection)),
+                [correction],
+                description,
+            );
+            const regathered = extractActionableFindings(`## Actionable Findings\n${formatActionableFindings(reparsed.actionableFindings)}`);
+            assert.strictEqual(regathered[0].minimumCorrection, correction, description);
+        }
+
+        // Expanded at the content column, the item's content starts at column
+        // 4, so a closer dedented to column 0 still escapes the item's fence.
+        const escaped = withCorrection(['- **minimumCorrection:** -\t~~~ts', '  return current;', '  ~~~']);
+        assert.strictEqual(parseStructuredReview(escaped).status, 'invalid');
+    });
+
     test('rejects unsupported formatting instead of publishing apparently complete evidence', () => {
         const unsupported: Record<string, string[]> = {
             'an outdented paragraph after a blank line': [

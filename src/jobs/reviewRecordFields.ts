@@ -27,7 +27,9 @@
  *
  * Tabs in a line's indentation and after its list markers expand to spaces at
  * four-column tab stops before any of this, so nesting does not depend on the
- * columns at which renderers later place the line.
+ * columns at which renderers later place the line. A first line that
+ * renderers move below the label expands the same way from the field's
+ * content column.
  *
  * Code fences are tracked on those dedented lines, the same shape a renderer
  * publishes, relative to the list item that contains them: an opener or
@@ -252,12 +254,17 @@ class RecordFieldReader {
         if (!field) return true;
         if (this.fields.has(field.key) || (this.allowedKeys && !this.allowedKeys.has(field.key))) return false;
         const continuation = dedentContinuation(field);
-        const value = buildFieldValue(field.first, continuation);
         // A first line that serializers move below the label is published as
-        // block content after a blank line, so a fence it opens must close in
-        // the field too.
-        const published = field.first !== '' && startsBelowLabel(value.split('\n'))
-            ? [{ text: '', lazy: false }, { text: field.first, lazy: false }, ...continuation]
+        // block content after a blank line, at the field's content column.
+        // Its tabs expand at that column, as a continuation line's already
+        // have, so fence checks and every later parse see the same nesting,
+        // and a fence it opens must close in the field too.
+        const belowLabel = field.first !== ''
+            && startsBelowLabel(buildFieldValue(field.first, continuation).split('\n'));
+        const first = belowLabel ? expandStructuralTabs(field.first) : field.first;
+        const value = buildFieldValue(first, continuation);
+        const published = belowLabel
+            ? [{ text: '', lazy: false }, { text: first, lazy: false }, ...continuation]
             : continuation;
         if (!fencesClose(published)) return false;
         this.fields.set(field.key, value);
