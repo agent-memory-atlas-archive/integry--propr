@@ -18,11 +18,12 @@ describe('Electron pairing response compression', () => {
     setup = prepareNativeElectronTest({ allowHeadlessLinux: true });
   }, { timeout: 120_000 });
 
-  // The budget covers the probe's own bounded retries of a stalled loopback
-  // request, which each cost the client's fixed header deadline, and the
+  // The fixture budget covers the probe's 45s wait for the default session's
+  // network stack to start and its bounded retry of a stalled pairing request,
+  // which costs the client's fixed header deadline. The test budget adds the
   // runner's bounded relaunch of a worker that killed the fixture outright.
   it('negotiates and transparently decodes zstd through defaultSession.fetch', {
-    timeout: 70_000,
+    timeout: 110_000,
   }, async context => {
     if ('skipReason' in setup) {
       context.skip(setup.skipReason);
@@ -36,6 +37,11 @@ describe('Electron pairing response compression', () => {
     })));
     const received = [];
     const server = createServer((request, response) => {
+      // The probe's readiness request only proves the network stack is up.
+      if (request.url === '/ready') {
+        response.writeHead(204).end();
+        return;
+      }
       received.push({ acceptEncoding: request.headers['accept-encoding'], path: request.url });
       const body = request.url === '/decoded-over-limit'
         ? decodedOverLimit
@@ -69,10 +75,22 @@ describe('Electron pairing response compression', () => {
         ],
         name: 'Electron zstd fixture',
         setup,
-        timeout: 30_000,
+        timeout: 80_000,
       });
 
       const evidence = JSON.stringify(report);
+      assert.equal(
+        report.readiness?.ready,
+        true,
+        `Electron's default session never reached the loopback server: ${evidence}`,
+      );
+      // 8s is the pairing client's header deadline: a start-up this slow would
+      // have failed a measured request without the readiness wait.
+      if (report.readiness.attempts > 1 || report.readiness.elapsedMs >= 8_000) {
+        context.diagnostic(
+          `default session needed ${report.readiness.attempts} requests and ${report.readiness.elapsedMs}ms to reach the loopback server`,
+        );
+      }
       for (const { acceptEncoding, path } of received) {
         assert.match(
           acceptEncoding ?? '',

@@ -44,7 +44,10 @@ const legacyCredential = (profileId: string, tokenCharacter = 'A') => ({
   token: `propr_it_${tokenCharacter.repeat(43)}`,
 });
 
-const bounded = <T>(promise: Promise<T>, milliseconds = 1_000): Promise<T> => {
+// A deadlock never settles, so this only needs to stay well under the file
+// timeout; a 1s bound failed on loaded CI runners where each durable write
+// alone can take close to a second.
+const bounded = <T>(promise: Promise<T>, milliseconds = 15_000): Promise<T> => {
   let timer: ReturnType<typeof setTimeout> | undefined;
   const timeout = new Promise<never>((_resolve, reject) => {
     timer = setTimeout(() => reject(new Error('Profile store operation did not settle')), milliseconds);

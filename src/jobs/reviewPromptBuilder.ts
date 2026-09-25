@@ -74,8 +74,9 @@ const REVIEW_OUTPUT_CONTRACT_TRANSITION = `Regardless of the guidance above, you
  * the verification was executed or is a static trace / proposed regression.
  * That detail travels inside the existing `evidence` and `minimumCorrection`
  * fields, so the machine contract the parser, publisher and /fix gatherer
- * depend on stays unchanged. Field values must stay on a single line because
- * `extractRecordFields` reads one line per field.
+ * depend on stays unchanged. Fields may continue on indented lines; the
+ * supported continuation syntax described in the prompt mirrors the field
+ * grammar documented on `extractRecordFields` in `reviewRecordFields.ts`.
  */
 export function buildReviewPrompt(options: ReviewPromptOptions): string {
     const {
@@ -166,20 +167,30 @@ Use sequential IDs and this exact record shape for every blocker:
 
 ### F1: Short title
 - **violatedRequirement:** The original requirement, acceptance criterion, or correctness/safety invariant of changed behavior that is violated
-- **evidence:** changed/file.ts:123 — trigger, ordered failure sequence, observable consequence, why existing protections do not prevent it, and how it was verified
+- **evidence:** \`changed/file.ts:123\` — trigger, ordered failure sequence, observable consequence, why existing protections do not prevent it, and how it was verified
 - **introducedByPR:** true — why this PR introduced or exposed the problem
 - **requiredForMerge:** true
 - **minimumCorrection:** the smallest correction that removes the demonstrated failure
 
-Keep every field on one single line. The review parser reads one line per field, so a line break, sub-bullet, table, or heading inside a field silently drops the rest of that field.
+**Field layout.** Start every field on its own unindented \`- **field:**\` line. A field may continue on the following lines when that makes it easier to read: indent every continuation line by two spaces, separate paragraphs with a blank line, and use indented numbered (\`1.\`) or bulleted (\`-\`) lists. Inline code and links are fine. Only unindented \`- **field:**\` lines, \`### F#\` headings, and \`## \` section headings are structural; indented text always belongs to the current field. Any other unindented line inside a finding — an unindented list item, heading, table, or stray paragraph — makes the whole review invalid, so never outdent continuation text. Do not add headings or tables inside a field. Keep simple fields on one line.
 
-**Demonstrated failure — required inside the evidence field.** Show the failure instead of naming its possibility, as one compact inline sequence rather than a per-finding checklist. The evidence line must carry: (1) the specific starting conditions or trigger that reach the changed code; (2) the ordered steps that produce the failure, grounded in this diff and the supplied context, written inline as \`1) ... -> 2) ... -> 3) ...\`; (3) the observable user impact, or the incorrect persistent or external state that remains; (4) the exact changed-file path with line or symbol, plus why the protections already present — validation, locks, leases, heartbeats, transactions, retries, existing tests — do not prevent this exact sequence; and (5) verification provenance, labelled explicitly: \`executed:\` only for a command or test you actually ran during this review, \`static trace:\` for reasoning over the supplied code, \`proposed regression:\` for a scenario you propose but did not run. Executing a test is not required to establish a blocker, but never word an unexecuted scenario as though it had been run.
+**Demonstrated failure — required inside the evidence field.** Show the failure instead of naming its possibility; this is content the evidence must carry, not a per-finding checklist of headings. Start with a concise code reference — the exact changed-file path with line or symbol — then give the ordered failure sequence, then short explanatory paragraphs only where needed. The evidence field must carry: (1) the specific starting conditions or trigger that reach the changed code; (2) the ordered steps that produce the failure, grounded in this diff and the supplied context, written as an indented numbered list (\`1.\`, \`2.\`, \`3.\`) beneath the code reference; (3) the observable user impact, or the incorrect persistent or external state that remains; (4) why the protections already present — validation, locks, leases, heartbeats, transactions, retries, existing tests — do not prevent this exact sequence; and (5) verification provenance, labelled explicitly: \`executed:\` only for a command or test you actually ran during this review, \`static trace:\` for reasoning over the supplied code, \`proposed regression:\` for a scenario you propose but did not run. Executing a test is not required to establish a blocker, but never word an unexecuted scenario as though it had been run. A simple finding may need only a one-line reference, a short sequence, and one sentence; do not pad it.
 
-Acceptable density (shape, not content): \`- **evidence:** src/jobs/recovery.ts:88 — static trace: 1) cancellation of A succeeds -> 2) B returns an explicit 403 -> 3) B's new intent remains -> 4) someone independently cancels B -> 5) recovery reruns B despite ProPR's refusal; the existing lease guard runs before step 2, so it never observes B's intent. Proposed regression: assert B is not rerun while A remains recoverable.\`
+Acceptable shape and density (shape, not content):
+
+- **evidence:** \`src/jobs/recovery.ts:88\`, \`recoverSuspendedRuns\`
+
+  Static trace:
+  1. Cancellation of A succeeds.
+  2. B returns an explicit 403, but B's new rerun intent remains.
+  3. Someone independently cancels B.
+  4. Recovery reruns B despite ProPR's refusal.
+
+  The existing lease guard runs before step 2, so it never observes B's intent. Proposed regression: assert B is not rerun while A remains recoverable.
 
 For a concurrency, race, or interleaving finding, also name the awaited operation or interruption point, what the competing actor does inside that window, and why the interleaving is possible despite the locks, leases, heartbeats, or transactions present in the code. A slow or long-running await alone does not establish that a renewing lease expired or that ownership was lost; do not assume it.
 
-State inside the evidence line any assumption you could not verify. A failure that depends on an unverified assumption, is unreachable from any caller, or has no material consequence is speculative hardening and belongs in Suggestions and Follow-ups.
+State inside the evidence field any assumption you could not verify. A failure that depends on an unverified assumption, is unreachable from any caller, or has no material consequence is speculative hardening and belongs in Suggestions and Follow-ups.
 
 Judge minimumCorrection against the demonstrated sequence: it must close the demonstrated failure, including verified sibling occurrences of the same root cause, without unrelated redesign. Do not demand atomicity that independent external systems cannot provide — when two independent external APIs cannot be updated as one transaction, separate the avoidable window this PR can close from the residual external race it cannot. That distinction never excuses a practical fencing token, ownership check, or reconciliation step that would have prevented the demonstrated failure.
 
