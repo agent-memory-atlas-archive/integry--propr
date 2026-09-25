@@ -49,6 +49,7 @@ function dependencies() {
             scanNonTerminalTasks: mock.fn(),
             recordMissing: mock.fn(),
             clearMissing: mock.fn(),
+            ownsJobAssignment: mock.fn(),
             finalizeIfCurrent: mock.fn(),
         },
     };

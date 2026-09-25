@@ -138,6 +138,7 @@ function createStore(
         scanNonTerminalTasks: mock.fn(async () => ({ tasks, nextCursor: '17' })),
         recordMissing: mock.fn(async () => observation),
         clearMissing: mock.fn(async () => {}),
+        ownsJobAssignment: mock.fn(async () => true),
         finalizeIfCurrent: mock.fn(async (candidate, transition) => {
             transitions.push({ candidate, transition });
             return { stateChanged: true, eventPublished: true };
@@ -419,6 +420,52 @@ test('resumes the unprocessed part of a page before scanning another page', asyn
     assert.equal(resumedResult.summary.recovered, 2);
     assert.equal((created.store.scanNonTerminalTasks as ReturnType<typeof mock.fn>).mock.calls.length, 1);
 });
+
+for (const redisEntry of ['absent', 'stale'] as const) {
+    test(`does not let a carried task adopt a reused job ID outcome when Redis state is ${redisEntry}`, async () => {
+        const blocker = makeCandidate('blocker', { jobId: 'bull-blocker' });
+        const abandoned = makeCandidate('abandoned', { jobId: 'issue-integry-propr-1748' });
+        const created = createStore([blocker, abandoned]);
+        const budgetResult = await reconcileStaleTaskStates({
+            queue: { getJob: async () => new Promise<never>(() => {}) },
+            stateManager: createStateManager(),
+            store: created.store,
+            now: NOW,
+            timeBudgetMs: 10,
+        });
+        assert.deepEqual(budgetResult.backlog.map(task => task.taskId), [blocker.taskId, abandoned.taskId]);
+
+        // Between runs a replacement task takes the reused job ID and completes.
+        const assignments = new Map([
+            [blocker.taskId, blocker.jobId],
+            [abandoned.taskId, null as string | null],
+        ]);
+        (created.store.ownsJobAssignment as ReturnType<typeof mock.fn>).mock.mockImplementation(
+            async (candidate: PersistedTaskStateCandidate) => assignments.get(candidate.taskId) === candidate.jobId,
+        );
+        const stateManager = createStateManager(redisEntry === 'stale'
+            ? new Map([[abandoned.taskId, makeRedisState(abandoned)]])
+            : new Map());
+        const resumedResult = await reconcileStaleTaskStates({
+            queue: {
+                getJob: async (jobId: string) => jobId === abandoned.jobId
+                    ? { returnvalue: { status: 'complete' }, getState: async () => 'completed' }
+                    : null,
+            },
+            stateManager,
+            store: created.store,
+            cursor: budgetResult.nextCursor,
+            backlog: budgetResult.backlog,
+            now: NOW,
+            inspectContainer: async () => 'not_found',
+        });
+
+        assert.deepEqual(resumedResult.backlog, []);
+        assert.equal(resumedResult.summary.recovered, 0);
+        assert.equal(created.transitions.some(entry => entry.candidate.taskId === abandoned.taskId), false);
+        assert.equal(stateManager.updateTaskStateIfCurrentDetailed.mock.calls.length, 0);
+    });
+}
 
 test('bounds the initial persisted scan by the reconciliation budget', async () => {
     const created = createStore([]);

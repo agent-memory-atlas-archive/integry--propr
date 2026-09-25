@@ -128,6 +128,56 @@ test('terminal finalization is compare-and-set against the scanned history row',
     }
 });
 
+test('terminal finalization rejects a candidate whose job ID moved to a newer task', async () => {
+    const database = await createDatabase();
+    try {
+        await seedCandidate(database);
+        const publishTaskUpdate = mock.fn(async () => true);
+        const store = createPersistedTaskStateStore(database, { publishTaskUpdate });
+        const candidate = (await store.scanNonTerminalTasks('0', 100)).tasks[0];
+        assert.equal(await store.ownsJobAssignment(candidate), true);
+
+        // Mirrors task creation for a reused deterministic BullMQ job ID.
+        await database('tasks').where({ job_id: 'bull-1' }).update({ job_id: null });
+        await database('tasks').insert({
+            task_id: 'task-2',
+            job_id: 'bull-1',
+            repository: 'integry/propr',
+            issue_number: 42,
+            task_type: 'issue',
+        });
+
+        assert.equal(await store.ownsJobAssignment(candidate), false);
+        const finalized = await store.finalizeIfCurrent(candidate, {
+            state: 'completed',
+            reason: 'Task completed',
+            metadata: { finalizedBy: 'bullmq_completed_reconciliation' },
+        }, '2026-09-25T12:01:00.000Z');
+
+        assert.deepEqual(finalized, { stateChanged: false, eventPublished: false });
+        const latest = await database('task_history')
+            .where({ task_id: candidate.taskId })
+            .orderBy('history_id', 'desc')
+            .first();
+        assert.equal(latest.state, 'processing');
+        assert.equal(publishTaskUpdate.mock.calls.length, 0);
+
+        // The unlinked row is still finalizable once rescanned without a job ID.
+        const rescanned = (await store.scanNonTerminalTasks('0', 100)).tasks
+            .find(task => task.taskId === candidate.taskId);
+        assert.equal(rescanned?.jobId, null);
+        assert.equal(await store.ownsJobAssignment(rescanned!), true);
+        const rescannedFinalized = await store.finalizeIfCurrent(rescanned!, {
+            state: 'failed',
+            reason: 'Task execution failed',
+            metadata: { finalizedBy: 'orphan_reconciliation' },
+        }, '2026-09-25T12:02:00.000Z');
+        assert.deepEqual(rescannedFinalized, { stateChanged: true, eventPublished: true });
+    } finally {
+        await database.destroy();
+    }
+});
+
 test('excludes terminal tasks and native goals from reconciliation scans', async () => {
     const database = await createDatabase();
     try {

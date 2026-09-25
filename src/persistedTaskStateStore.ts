@@ -55,6 +55,7 @@ export interface PersistedTaskStateStore {
     scanNonTerminalTasks(cursor: string, count: number): Promise<PersistedTaskStatePage>;
     recordMissing(candidate: PersistedTaskStateCandidate, observedAt: string): Promise<MissingTaskObservation>;
     clearMissing(taskId: string): Promise<void>;
+    ownsJobAssignment(candidate: PersistedTaskStateCandidate): Promise<boolean>;
     finalizeIfCurrent(
         candidate: PersistedTaskStateCandidate,
         transition: PersistedTaskTerminalTransition,
@@ -172,7 +173,22 @@ export function createPersistedTaskStateStore(
             await database('task_reconciliation_observations').where({ task_id: taskId }).delete();
         },
 
+        async ownsJobAssignment(candidate) {
+            const row = await database('tasks')
+                .where({ task_id: candidate.taskId })
+                .first('job_id') as { job_id: unknown } | undefined;
+            if (!row) return false;
+            const jobId = row.job_id === null || row.job_id === undefined ? null : String(row.job_id);
+            return jobId === candidate.jobId;
+        },
+
         async finalizeIfCurrent(candidate, transition, timestamp) {
+            // A deterministic BullMQ job ID can move to a newer task; the
+            // scanned assignment must still be current or this row would adopt
+            // the replacement job's outcome.
+            const jobAssignment = candidate.jobId === null
+                ? 'owner_t.job_id IS NULL'
+                : 'owner_t.job_id = ?';
             const metadata = JSON.stringify({
                 ...transition.metadata,
                 previousState: candidate.state,
@@ -194,6 +210,11 @@ export function createPersistedTaskStateStore(
                         FROM task_history AS expected_h
                         WHERE expected_h.history_id = ? AND expected_h.task_id = ?
                     )
+                    AND EXISTS (
+                        SELECT 1
+                        FROM tasks AS owner_t
+                        WHERE owner_t.task_id = ? AND ${jobAssignment}
+                    )
                     RETURNING history_id
                 `, [
                     candidate.taskId,
@@ -206,6 +227,8 @@ export function createPersistedTaskStateStore(
                     candidate.state,
                     candidate.historyId,
                     candidate.taskId,
+                    candidate.taskId,
+                    ...(candidate.jobId === null ? [] : [candidate.jobId]),
                 ]);
                 const inserted = returnedRows(result).length === 1;
                 if (inserted) {

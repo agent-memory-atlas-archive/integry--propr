@@ -181,6 +181,20 @@ async function finalizeCandidate(
     context: ReconciliationRunContext,
 ): Promise<void> {
     const { options, summary, deadline, signal, now } = context;
+    // Candidates can be carried across runs while a reused BullMQ job ID moves
+    // to a newer task. Revalidate after the outcome was read so neither the
+    // Redis nor the durable path attributes another task's result to this one.
+    const ownsJob = await runWithinRemainingBudget(
+        () => options.store.ownsJobAssignment(candidate),
+        deadline,
+        signal,
+    );
+    if (!ownsJob) {
+        logger.warn({ taskId: candidate.taskId, jobId: candidate.jobId },
+            'Skipped stale task whose persisted queue job assignment changed');
+        summary.skipped++;
+        return;
+    }
     if (current && !TERMINAL_TASK_STATES.has(current.state)) {
         const metadata: UpdateMetadata = {
             reason: transition.reason,
