@@ -36,7 +36,8 @@ describe('stale worktree registration', () => {
         await fs.remove(path.join(previous, '.git'));
 
         // What the failing follow-ups hit: the branch is still "in use" and a forced remove is refused.
-        await assert.rejects(git.raw(['worktree', 'add', worktree('next'), 'feature']), /already used by worktree/);
+        // Git versions differ in how they report a branch held by another worktree.
+        await assert.rejects(git.raw(['worktree', 'add', worktree('next'), 'feature']), /already (?:used by worktree|checked out at)/);
         await assert.rejects(git.raw(['worktree', 'remove', previous, '--force']), /validation failed/);
 
         assert.equal(await removeStaleWorktreeRegistration(git, previous), true);
