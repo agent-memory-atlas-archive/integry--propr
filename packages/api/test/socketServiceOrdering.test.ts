@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
 import { after, describe, test } from 'node:test';
 import { closeConnection } from '@propr/core';
-import { ACTIVITY_UPDATE, TASK_UPDATE, type TaskUpdatePayload } from '@propr/shared';
+import { ACTIVITY_UPDATE, NOTIFICATION_UPDATE, TASK_UPDATE, type TaskUpdatePayload } from '@propr/shared';
+import { ACTIVITY_ROOM, activityUserRoom } from '../services/socketSubscriptions.js';
 import {
   loadDurableTaskRevision,
   readCachedTaskRevision,
@@ -73,7 +74,7 @@ describe('SocketService task update ordering', () => {
       { rooms: ['instance:operational', 'task:legacy-task'], event: TASK_UPDATE },
       // The same transition also reaches interest-based consumers as the
       // derived envelope, without a second producer having to publish it.
-      { rooms: ['instance:operational'], event: ACTIVITY_UPDATE },
+      { rooms: [ACTIVITY_ROOM], event: ACTIVITY_UPDATE },
     ]);
     assert.deepEqual(broadcasts[0].payload, payload);
     assert.partialDeepStrictEqual(broadcasts[1].payload, {
@@ -140,4 +141,30 @@ describe('SocketService task update ordering', () => {
       assert.equal(revision, undefined);
     }
   });
+});
+
+
+test('relays both notification publisher formats only to their recipients', () => {
+  const broadcasts: Array<{ room: string; event: string; payload: Record<string, unknown> }> = [];
+  const service = Object.create(SocketService.prototype) as SocketService;
+  const internals = service as unknown as {
+    io: { to: (room: string) => { emit: (event: string, payload: Record<string, unknown>) => void } };
+    handleEvent: (channel: string, payload: Record<string, unknown>) => void;
+  };
+  internals.io = {
+    to: room => ({ emit: (event, payload) => { broadcasts.push({ room, event, payload }); } }),
+  };
+  const common = { eventType: NOTIFICATION_UPDATE, change: 'read', eventId: 'notification-1',
+    occurredAt: new Date(0).toISOString() };
+  internals.handleEvent('', { ...common, recipientId: 'alice' });
+  internals.handleEvent('', { ...common, recipientIds: ['bob', 'bob', 'carol'], repository: null });
+  assert.deepEqual(broadcasts.map(({ room }) => room), [
+    activityUserRoom('alice'), activityUserRoom('bob'), activityUserRoom('carol'),
+  ]);
+  for (const broadcast of broadcasts) {
+    assert.equal(broadcast.event, NOTIFICATION_UPDATE);
+    assert.equal('recipientId' in broadcast.payload, false);
+    assert.equal('recipientIds' in broadcast.payload, false);
+    assert.equal(broadcast.payload.eventId, common.eventId);
+  }
 });

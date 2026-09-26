@@ -305,6 +305,8 @@ async function initRedis(): Promise<void> {
   console.log('Connected to Redis');
 }
 
+let readSystemStatus: (() => Promise<Record<string, unknown>>) | undefined;
+
 function setupRoutes(): void {
   const statusRoutes = createStatusRoutes({
     redisClient,
@@ -315,6 +317,7 @@ function setupRoutes(): void {
       ) => notificationBackground!.projectSystemSnapshot(snapshot, additionalAdministratorIds),
     }),
   });
+  readSystemStatus = statusRoutes.getStatusSnapshot;
   invalidateStatusAgentCache = statusRoutes.invalidateAgentStatusCache;
   readStatusSnapshot = statusRoutes.readStatusSnapshot;
   const desktopAuthRoutes = createDesktopAuthRoutes();
@@ -619,6 +622,7 @@ async function start(): Promise<void> {
       });
       console.log('[WebSocket] Socket.IO server initialized');
       socketService.initQueueFeatures({
+        readSystemStatus,
         taskQueue, redisClient, db,
         notificationProjection: notificationBackground,
       });

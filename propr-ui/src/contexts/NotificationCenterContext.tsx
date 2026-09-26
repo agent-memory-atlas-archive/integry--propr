@@ -1,3 +1,5 @@
+import { useLiveRefreshScheduler } from '../hooks/useLiveRefreshScheduler';
+import { useSocket } from './useSocket';
 /* eslint-disable react-refresh/only-export-components */
 import React, {
   createContext,
@@ -11,7 +13,6 @@ import React, {
 import { getNotificationPreferences, getNotificationUnreadCount } from '../api/notificationApi';
 import { useCurrentUser } from './AuthContext';
 import { useDemoMode } from './DemoModeContext';
-import { useSocket } from './useSocket';
 
 type BadgeNavigator = Navigator & {
   setAppBadge?: (count?: number) => Promise<void>;
@@ -45,13 +46,13 @@ async function updateInstalledBadge(count: number, enabled: boolean): Promise<vo
 export const NotificationCenterProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const user = useCurrentUser();
   const { isDemoMode } = useDemoMode();
-  const { isConnected, onNotificationUpdate } = useSocket();
+  const { isConnected, onNotificationUpdate, onActivityReady, subscribeToActivity, unsubscribeFromActivity } = useSocket();
   const [unreadCount, setUnreadCount] = useState<number | null>(null);
   const [badgeEnabled, setBadgeEnabled] = useState(false);
   const activeRef = useRef(true);
   const generationRef = useRef(0);
-  const previousConnectedRef = useRef<boolean | null>(null);
   const preferenceGenerationRef = useRef(0);
+  const previousConnectedRef = useRef(isConnected);
   const unreadCountRef = useRef(unreadCount);
   const badgeEnabledRef = useRef(badgeEnabled);
   unreadCountRef.current = unreadCount;
@@ -100,7 +101,6 @@ export const NotificationCenterProvider: React.FC<{ children: React.ReactNode }>
       commitUnreadCount(0);
       return;
     }
-    void refreshUnreadCount().catch(() => undefined);
     void getNotificationPreferences()
       .then(preferences => {
         if (preferenceGeneration !== preferenceGenerationRef.current) return;
@@ -113,51 +113,36 @@ export const NotificationCenterProvider: React.FC<{ children: React.ReactNode }>
     };
   }, [commitBadgeEnabled, commitUnreadCount, identityKey, refreshUnreadCount]);
 
+  const schedule = useLiveRefreshScheduler({
+    refresh: () => identityKey === null ? undefined : refreshUnreadCount(),
+    scopeKey: identityKey,
+    isConnected,
+    fallbackPollMs: DISCONNECTED_FALLBACK_INTERVAL_MS,
+  });
+  const { refreshNow } = schedule;
+  useEffect(() => {
+    if (identityKey !== null) void refreshNow().catch(() => undefined);
+  }, [identityKey, refreshNow]);
+
   useEffect(() => {
     if (identityKey === null) return;
-    const refreshWhenVisible = () => {
-      if (document.visibilityState === 'visible') {
-        void refreshUnreadCount().catch(() => undefined);
-      }
-    };
-    window.addEventListener('focus', refreshWhenVisible);
-    document.addEventListener('visibilitychange', refreshWhenVisible);
+    const unsubscribeNotification = onNotificationUpdate(() => { void refreshNow().catch(() => undefined); });
+    const unsubscribeReady = onActivityReady?.(() => schedule());
+    subscribeToActivity?.();
     return () => {
-      window.removeEventListener('focus', refreshWhenVisible);
-      document.removeEventListener('visibilitychange', refreshWhenVisible);
+      unsubscribeNotification();
+      unsubscribeReady?.();
+      unsubscribeFromActivity?.();
     };
-  }, [identityKey, refreshUnreadCount]);
+  }, [identityKey, onNotificationUpdate, onActivityReady, subscribeToActivity, unsubscribeFromActivity, schedule, refreshNow]);
 
   useEffect(() => {
-    if (identityKey === null || !isConnected) return;
-    // Every notification change moves this number, so no filtering is needed:
-    // the server scopes the event to this user's room. A hidden tab issues
-    // nothing and the visibility handler above reconciles on return.
-    return onNotificationUpdate(() => {
-      if (document.visibilityState === 'hidden') return;
-      void refreshUnreadCount().catch(() => undefined);
-    });
-  }, [identityKey, isConnected, onNotificationUpdate, refreshUnreadCount]);
-
-  useEffect(() => {
-    // Reconnect reconciliation: a badge that is wrong after a dropped socket is
-    // worse than one request, so read once per connect transition. The identity
-    // effect above covers a session that was connected from the start.
-    const previous = previousConnectedRef.current;
+    const wasConnected = previousConnectedRef.current;
     previousConnectedRef.current = isConnected;
-    if (identityKey === null || previous !== false || !isConnected) return;
-    void refreshUnreadCount().catch(() => undefined);
-  }, [identityKey, isConnected, refreshUnreadCount]);
-
-  useEffect(() => {
-    // Fallback polling only while the websocket is unavailable.
-    if (identityKey === null || isConnected) return;
-    const interval = window.setInterval(() => {
-      if (document.visibilityState === 'hidden') return;
-      void refreshUnreadCount().catch(() => undefined);
-    }, DISCONNECTED_FALLBACK_INTERVAL_MS);
-    return () => { window.clearInterval(interval); };
-  }, [identityKey, isConnected, refreshUnreadCount]);
+    // The badge reconciles immediately; refreshNow also consumes the scheduler's
+    // pending reconnect so the transition still costs only one read.
+    if (identityKey !== null && !wasConnected && isConnected) void refreshNow().catch(() => undefined);
+  }, [identityKey, isConnected, refreshNow]);
 
   const value = useMemo(() => ({
     unreadCount,

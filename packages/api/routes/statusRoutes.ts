@@ -388,6 +388,7 @@ export function createStatusRoutes(deps: StatusRoutesDeps) {
     getDesktopDiscovery,
     getStatus,
     readStatusSnapshot,
+    getStatusSnapshot: readStatusSnapshot,
     invalidateAgentStatusCache: agentStatusCache.invalidate,
   };
 }

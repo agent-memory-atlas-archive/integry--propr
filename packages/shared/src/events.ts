@@ -1,3 +1,4 @@
+import type { ActivityUpdatePayload, GoalUpdatePayload, NotificationUpdatePayload, UsageUpdatePayload } from './activityEvents.js';
 /**
  * Event names for real-time updates via WebSocket
  * These events are published to Redis and broadcast to WebSocket clients
@@ -40,6 +41,7 @@ export const USAGE_UPDATE = 'usage:update';
 export const REDIS_CHANNELS = {
   /** Channel for all task-related events */
   TASKS: 'propr:events:tasks',
+  ACTIVITY: 'propr:events:activity',
   /** Channel for draft/plan generation events */
   DRAFTS: 'propr:events:drafts',
   /** Channel for indexing events */
@@ -275,6 +277,10 @@ export interface UsageUpdatePayload {
 
 /** Union type for all event payloads */
 export type EventPayload =
+  | ActivityUpdatePayload
+  | GoalUpdatePayload
+  | NotificationUpdatePayload
+  | UsageUpdatePayload
   | TaskUpdatePayload
   | DraftUpdatePayload
   | PlanStepUpdatePayload

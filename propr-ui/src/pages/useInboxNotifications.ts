@@ -1,3 +1,5 @@
+import { useLiveRefreshScheduler } from '../hooks/useLiveRefreshScheduler';
+import { useSocket } from '../contexts/useSocket';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { Notification } from '@propr/shared';
 import {
@@ -129,6 +131,7 @@ export function useInboxNotifications(): InboxNotificationsState {
   } = useNotificationCenter();
   const { addToast } = useToast();
   const { isDemoMode } = useDemoMode();
+  const { isConnected, subscribeToActivity, unsubscribeFromActivity, onActivityReady } = useSocket();
   notificationsRef.current = notifications;
 
   useEffect(() => {
@@ -206,7 +209,6 @@ export function useInboxNotifications(): InboxNotificationsState {
   }, [commitUnreadCount, hasVisibleActivity, reconcileIncoming]);
 
   useEffect(() => {
-    void loadFirstPage('initial');
     return () => { requestGenerationRef.current += 1; };
   }, [loadFirstPage]);
 
@@ -223,6 +225,23 @@ export function useInboxNotifications(): InboxNotificationsState {
 
   const refresh = useCallback(() => loadFirstPage('refresh'), [loadFirstPage]);
 
+  const schedule = useLiveRefreshScheduler({
+    refresh: () => {
+      if (!navigator.onLine || clearingRef.current) return;
+      return loadFirstPage(initialLoading ? 'initial' : 'background');
+    },
+    scopeKey: 'inbox',
+    isConnected,
+    fallbackPollMs: 60_000,
+  });
+  const { refreshNow } = schedule;
+  useEffect(() => { void refreshNow(); }, [refreshNow]);
+  useEffect(() => {
+    const unsubscribeReady = onActivityReady?.(() => schedule());
+    subscribeToActivity?.();
+    return () => { unsubscribeReady?.(); unsubscribeFromActivity?.(); };
+  }, [onActivityReady, subscribeToActivity, unsubscribeFromActivity, schedule]);
+
   // The Inbox is told when it has to re-read; see useInboxRefreshTriggers for
   // the push, reconnect, visibility and disconnected-fallback contract.
   const { markLocallyMutated } = useInboxRefreshTriggers({
@@ -230,7 +249,7 @@ export function useInboxNotifications(): InboxNotificationsState {
       () => document.visibilityState === 'visible' && navigator.onLine && !clearingRef.current,
       [],
     ),
-    reconcile: useCallback(() => { void loadFirstPage('background'); }, [loadFirstPage]),
+    reconcile: schedule,
   });
 
   const loadMore = useCallback(async () => {
@@ -368,10 +387,11 @@ export function useInboxNotifications(): InboxNotificationsState {
     } finally {
       mutationEpochRef.current += 1;
       clearingRef.current = false;
+      schedule();
       if (mountedRef.current) setClearing(false);
       void refreshUnreadCount().catch(() => undefined);
     }
-  }, [addToast, commitUnreadCount, isActiveIdentity, isDemoMode, refreshUnreadCount]);
+  }, [addToast, commitUnreadCount, isActiveIdentity, isDemoMode, refreshUnreadCount, schedule]);
 
   const open = useCallback((id: string) => {
     const current = notificationsRef.current.find(notification => notification.id === id);

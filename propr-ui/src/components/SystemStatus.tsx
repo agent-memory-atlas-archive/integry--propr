@@ -35,7 +35,7 @@ const SystemStatus: React.FC = () => {
     read: () => getSystemStatus(),
     scopeKey: 'system-status',
     interest: {
-      domains: ['health', 'indexing', 'usage'],
+      domains: ['health', 'system', 'indexing', 'usage'],
       // Per-file indexing progress does not move the health rows.
       changes: ['created', 'started', 'completed', 'failed', 'cancelled', 'updated'],
       usage: true,
