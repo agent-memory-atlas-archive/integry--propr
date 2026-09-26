@@ -82,3 +82,19 @@ test('the image build script uses the same pinned Agent Tank version', () => {
   assert.equal(scriptVersion, dockerVersion);
   assert.match(buildScript, /"--build-arg" "AGENT_TANK_CLI_VERSION=\$AGENT_TANK_CLI_VERSION"/);
 });
+
+test('every CLI the final stage verifies is linked into PATH in that same stage', () => {
+  const finalStage = dockerfile.slice(dockerfile.indexOf('FROM agent-base AS final'));
+  // Stages are independent: copying a package's node_modules tree does not bring
+  // along the npm bin symlink created where it was installed. A command that is
+  // verified but never linked here fails the build with "command not found".
+  const verified = [...finalStage.matchAll(/&& ([a-z][a-z-]*) --version/g)].map(match => match[1]);
+  assert.ok(verified.includes('agent-tank'), 'the final stage should verify bundled Agent Tank');
+  for (const command of verified) {
+    assert.match(
+      finalStage,
+      new RegExp(`link_npm_bin \\S+ ${command}\\b|ln -sf \\S+ /usr/local/bin/${command}\\b|COPY --from=\\S+ \\S+ /usr/local/bin/${command}\\b`),
+      `${command} is verified in the final stage but nothing links its executable there`
+    );
+  }
+});

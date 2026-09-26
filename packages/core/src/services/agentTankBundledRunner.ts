@@ -237,7 +237,19 @@ async function runBundledAgentTank(): Promise<Record<string, AgentStatusResponse
 
         configDir = fs.mkdtempSync(path.join(os.tmpdir(), 'propr-agent-tank-'));
         const configFile = path.join(configDir, 'config.json');
-        fs.writeFileSync(configFile, buildBundledAgentTankConfig(entries), { mode: 0o600 });
+        // The container runs Agent Tank as `node`, while this backend process may
+        // be any other uid (root in most deployments). A bind mount preserves the
+        // host owner and mode, so an owner-only file would be unreadable inside
+        // the container. The config holds provider names and container paths -
+        // no secrets - so it is made world-readable; `chmod` after the write
+        // because `writeFileSync`'s mode is still subject to the umask. The
+        // mount stays `:ro`, which is what keeps Agent Tank from rewriting it.
+        fs.writeFileSync(configFile, buildBundledAgentTankConfig(entries), { mode: 0o444 });
+        fs.chmodSync(configFile, 0o444);
+        // mkdtemp creates the directory 0700; the daemon resolves the bind source
+        // path itself, so this only matters for rootless/userns daemons that do
+        // it as a non-root user.
+        fs.chmodSync(configDir, 0o755);
 
         const result = await executeDockerCommand('docker', [
             'run', '--rm',

@@ -34,11 +34,24 @@ let dockerResult: ExecutionResult = {
 };
 /** Held open so concurrent callers overlap and coalescing is actually exercised. */
 let dockerGate: Promise<void> | undefined;
+/**
+ * Permission bits of the generated config as seen while the container would be
+ * running. Captured here because the runner deletes the file once the run ends.
+ */
+let configModes: number[] = [];
+
+function captureConfigMode(args: string[]): void {
+    const mount = args.find(arg => arg.endsWith(':/tmp/propr-agent-tank/config.json:ro'));
+    if (!mount) return;
+    const hostPath = mount.slice(0, mount.indexOf(':/tmp/propr-agent-tank/config.json:ro'));
+    configModes.push(fs.statSync(hostPath).mode & 0o777);
+}
 
 await mock.module('../packages/core/src/claude/docker/dockerExecutor.js', {
     namedExports: {
         executeDockerCommand: async (_command: string, args: string[]): Promise<ExecutionResult> => {
             dockerRuns.push(args);
+            captureConfigMode(args);
             if (dockerGate) await dockerGate;
             return dockerResult;
         },
@@ -98,6 +111,7 @@ const SAMPLE_OUTPUT = JSON.stringify({
 
 beforeEach(() => {
     dockerRuns = [];
+    configModes = [];
     dockerGate = undefined;
     dockerResult = { exitCode: 0, stdout: SAMPLE_OUTPUT, stderr: '', messageTimestamps: new Map() };
     configuredAgents = [
@@ -208,4 +222,28 @@ test('output parsing degrades to an empty map instead of throwing', () => {
     assert.deepEqual(parseBundledAgentTankOutput(''), {});
     assert.deepEqual(parseBundledAgentTankOutput('no json here'), {});
     assert.deepEqual(parseBundledAgentTankOutput('{ not json'), {});
+});
+
+test('the generated config is readable by the container user, not owner-only', async () => {
+    await refreshBundledStatuses();
+
+    // Docker bind-mounts the file with the host owner and mode intact, and the
+    // image runs Agent Tank as `node`. A 0600 file written by a differently
+    // owned backend process (root in most deployments) would be unreadable
+    // inside the container, so the refresh would produce nothing.
+    assert.equal(configModes.length, 1);
+    assert.equal(configModes[0] & 0o004, 0o004);
+    // Read-only by mode as well as by mount: nothing should be able to rewrite it.
+    assert.equal(configModes[0] & 0o222, 0);
+});
+
+test('the generated config is cleaned up after the run', async () => {
+    await refreshBundledStatuses();
+
+    const mount = dockerRuns[0].find(arg => arg.endsWith(':/tmp/propr-agent-tank/config.json:ro'));
+    assert.ok(mount);
+    const hostPath = mount.slice(0, mount.indexOf(':/tmp/propr-agent-tank/config.json:ro'));
+    // A world-readable file must not outlive the run it was written for.
+    assert.equal(fs.existsSync(hostPath), false);
+    assert.equal(fs.existsSync(path.dirname(hostPath)), false);
 });
