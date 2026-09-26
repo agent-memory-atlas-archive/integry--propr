@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { after, describe, test } from 'node:test';
-import { closeConnection } from '@propr/core';
-import { parseFixSelection } from '../src/jobs/reviewFindingSelector.js';
+import { buildCommandMeta, closeConnection, parseSlashCommand } from '@propr/core';
+import { parseFixCommand, parseFixSelection, resolveReviewFeedback } from '../src/jobs/reviewFindingSelector.js';
 
 after(async () => {
     await closeConnection();
@@ -51,6 +51,19 @@ describe('/fix command-line selection', () => {
             { findingIds: [], suggestionIds: [], instructions: 'Rework the retry\nS3 is already done', malformedIds: [] }],
         ['keeps interior blank lines in the instructions', 'F1\n\nFirst point.\n\nSecond point.',
             { findingIds: ['F1'], suggestionIds: [], instructions: 'First point.\n\nSecond point.', malformedIds: [] }],
+        // Unsupported selector shapes are refused, not reclassified as prose: a
+        // rejected attempt must never fall through to the bare `/fix` meaning of
+        // every pending blocker.
+        ['refuses an unsupported range selector', 'F1-F2',
+            { findingIds: [], suggestionIds: [], instructions: '', malformedIds: ['F1-F2'] }],
+        ['refuses a selector with trailing garbage', 'F1x keep it small',
+            { findingIds: [], suggestionIds: [], instructions: 'keep it small', malformedIds: ['F1X'] }],
+        ['refuses a range beside a valid identifier', 'F1 S3-S5',
+            { findingIds: ['F1'], suggestionIds: [], instructions: '', malformedIds: ['S3-S5'] }],
+        // Prose is still prose: a token only counts as an attempted selector when
+        // it starts with F/S immediately followed by a digit.
+        ['keeps prose that merely mentions a range', 'Rework retries in F1 and F2 style',
+            { findingIds: [], suggestionIds: [], instructions: 'Rework retries in F1 and F2 style', malformedIds: [] }],
     ];
 
     for (const [description, input, expected] of cases) {
@@ -59,5 +72,61 @@ describe('/fix command-line selection', () => {
 
     test('treats a missing command body as a bare /fix', () => {
         assert.deepStrictEqual(parseFixSelection(undefined), { findingIds: [], suggestionIds: [], instructions: '', malformedIds: [] });
+    });
+});
+
+describe('/fix intake preserves the command-line boundary', () => {
+    /** The real producer-to-worker path: comment body → command meta → selection. */
+    const selectionFor = (body: string) => {
+        const meta = buildCommandMeta(parseSlashCommand(body)!);
+        assert.strictEqual(meta.mode, 'fix');
+        const fix = meta as { commandLine?: string; bodyInstructions?: string };
+        return parseFixCommand({ commandLine: fix.commandLine, bodyInstructions: fix.bodyInstructions });
+    };
+
+    test('a bare /fix whose instructions begin with an identifier selects nothing', () => {
+        const selection = selectionFor('/fix\nS3 is already done; keep the blocker correction localized.');
+        assert.deepStrictEqual(selection.findingIds, []);
+        assert.deepStrictEqual(selection.suggestionIds, []);
+        assert.deepStrictEqual(selection.malformedIds, []);
+        // The prose reaches the agent intact, semicolon and identifier included.
+        assert.strictEqual(selection.instructions, 'S3 is already done; keep the blocker correction localized.');
+    });
+
+    test('identifiers on the command line still select, with the prose below preserved', () => {
+        const selection = selectionFor('/fix F20 S3 keep the API stable\n\nS5 is out of scope.');
+        assert.deepStrictEqual(selection.findingIds, ['F20']);
+        assert.deepStrictEqual(selection.suggestionIds, ['S3']);
+        // Intake trims the body, so the blank line between the two halves is
+        // already gone by the time the selector parser sees them.
+        assert.strictEqual(selection.instructions, 'keep the API stable\nS5 is out of scope.');
+    });
+
+    test('a /fix with only instruction lines never widens to every blocker either', () => {
+        const review = {
+            id: 7,
+            body: '',
+            author: 'propr-bot',
+            created_at: new Date().toISOString(),
+            actionableFindings: ['F1', 'F2'].map(id => ({
+                id,
+                title: `Blocker ${id}`,
+                violatedRequirement: '',
+                evidence: '',
+                introducedByPR: true as const,
+                introducedByPRExplanation: '',
+                requiredForMerge: true as const,
+                minimumCorrection: '',
+            })),
+            suggestions: [{ id: 'S3', title: 'Optional follow-up', description: '' }],
+            score: 7,
+            reviewStatus: 'valid_with_blockers' as const,
+            isPartial: false,
+        };
+        // No identifiers were named, so the bare meaning applies: both blockers,
+        // and never the suggestion the instruction prose mentions.
+        const resolution = resolveReviewFeedback([review], selectionFor('/fix\nS3 is already done; keep the blocker correction localized.'));
+        assert.deepStrictEqual(resolution.selected, { findingIds: ['F1', 'F2'], suggestionIds: [] });
+        assert.deepStrictEqual(resolution.comments[0].suggestions, []);
     });
 });

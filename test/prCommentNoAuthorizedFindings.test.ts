@@ -87,6 +87,10 @@ describe('no-authorized-findings completion recap', () => {
     const body = String(comments[0].body);
     assert.match(body, /These are not valid review identifiers: S0\./);
     assert.match(body, /No current review offers finding F20 · suggestions S3, S5\./);
+    // A mixed request is refused whole, so the message must say so: a record the
+    // user named beside an unavailable one was deliberately left untouched.
+    assert.match(body, /Nothing was applied: a request that names a record no review offers is not acted on in part/);
+    assert.match(body, /ranges such as `F1-F2`/);
     assert.match(body, /`\/fix F20 S3`/);
     const historyMetadata = updates[0].metadata.historyMetadata as Record<string, unknown>;
     assert.deepEqual(historyMetadata.malformedReviewFeedbackIds, ['S0']);

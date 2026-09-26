@@ -173,11 +173,14 @@ Keep the public helper signature unchanged.
   (`/fix f20 s3` is `/fix F20 S3`).
 - Everything after the last identifier on that line, plus every following line,
   is passed to the agent as instructions. The identifiers themselves are not.
-- An identifier no current review offers is reported back on the pull request
-  instead of being ignored.
-- A malformed identifier such as `S0` or `F007` fails the whole command closed:
-  nothing is applied, and ProPR names the invalid identifiers so you can correct
-  them. A partly misunderstood request is never acted on in part.
+- An identifier no current review offers fails the whole command closed, even
+  when other identifiers in the same request are available: nothing is applied,
+  and ProPR names the identifiers it could not resolve on the pull request. This
+  is the same rule the `fix_review_findings` MCP tool applies before it posts.
+- A malformed or unsupported identifier such as `S0`, `F007`, `F1x` or the range
+  `F1-F2` fails the whole command closed too: nothing is applied, and ProPR names
+  the invalid identifiers so you can correct them. A partly misunderstood request
+  is never acted on in part, and never silently widened to every pending blocker.
 - Selecting a suggestion changes nothing about merge blockers: blockers stay
   required, suggestions are implemented only because you asked for them, and an
   unselected blocker is never treated as in scope.

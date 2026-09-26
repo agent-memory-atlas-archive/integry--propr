@@ -77,11 +77,16 @@ export async function handleNoAuthorizedFindings(params: NoAuthorizedFindingsPar
     if (malformedIds && malformedIds.length > 0) {
         problems.push(`These are not valid review identifiers: ${malformedIds.join(', ')}. `
             + 'Nothing was applied, because a request that is partly not understood is not acted on. '
-            + 'Correct them and run `/fix` again.');
+            + 'Correct them and run `/fix` again. Unsupported forms include ranges such as `F1-F2`: name each '
+            + 'record separately, as `/fix F1 F2`. If that text was meant as instructions rather than a '
+            + 'selection, put it on a line below the `/fix` line.');
     }
     if (unresolved && !isEmptyReviewFeedbackSelection(unresolved)) {
         problems.push(`No current review offers ${describeReviewFeedbackSelection(unresolved)}. `
-            + 'They may have been addressed already, or they belong to a review of an older head.');
+            + 'They may have been addressed already, or they belong to a review of an older head. '
+            + 'Nothing was applied: a request that names a record no review offers is not acted on in part, '
+            + 'so any records you named beside these were left untouched. Name only records a current review '
+            + 'offers and run `/fix` again.');
     }
     const body = [
         'ℹ️ **No review findings or suggestions were selected.**',

@@ -23,10 +23,13 @@ test('identifiers are recognised per namespace and canonicalised to upper case',
 });
 
 test('selector-shaped typos are distinguished from prose', () => {
-  for (const token of ['S0', 'F007', 'F-1', 'f00']) {
+  // Unsupported selector shapes count as attempted selectors too: treating
+  // `F1-F2` as prose would turn a narrowed request into a bare `/fix` over every
+  // pending blocker.
+  for (const token of ['S0', 'F007', 'F-1', 'f00', 'F1-F2', 'f1-f2', 'F1x', 'S3.', 'S1-2']) {
     assert.equal(isMalformedReviewFeedbackToken(token), true, token);
   }
-  for (const token of ['F1', 'S3', 'Fix', '2', 'please']) {
+  for (const token of ['F1', 'S3', 'Fix', '2', 'please', 'Suggest', 'F', 'first']) {
     assert.equal(isMalformedReviewFeedbackToken(token), false, token);
   }
 });

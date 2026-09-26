@@ -29,29 +29,47 @@ export interface FixSelection extends ReviewFeedbackSelection {
 /** Historic alias; the selection now carries both namespaces. */
 export type FixFindingSelection = FixSelection;
 
+/** The two halves of a `/fix` command, kept apart by intake. */
+export interface FixCommandText {
+    /** Verbatim command-line arguments. The ONLY place selectors are read from. */
+    commandLine?: string | null;
+    /** Everything below the command line. Instruction prose by construction. */
+    bodyInstructions?: string | null;
+}
+
 /**
- * Parse the text that follows the `/fix` keyword.
+ * Parse one `/fix` command whose command-line boundary intake preserved.
  *
- * Only the FIRST line can carry identifiers. That boundary is what makes the
+ * Only the command line can carry identifiers. That boundary is what makes the
  * free-text half of this feature possible at all: without it, a user whose
  * instructions happen to begin with `S3 should also change` would have their
  * prose eaten as a selector. Everything below the command line is prose by
- * construction, which is also how the user documentation describes it.
+ * construction, which is also how the user documentation describes it. The
+ * boundary is taken from the caller rather than rediscovered in joined text,
+ * because a join cannot be undone: `/fix` with no arguments and prose below it
+ * produces text whose first line is prose, and no amount of newline handling
+ * here could tell that apart from a selector line.
  *
  * Parsing stops at the first non-selector token on the command line; that token
  * and the rest of the line join the instructions. A `;` still closes the
  * selector clause explicitly, and commas still separate selectors, both of which
  * `/fix` has always accepted. Selector-shaped-but-invalid tokens do NOT stop
- * parsing — they are collected for reporting, because reclassifying `S0` as
- * prose turns a typo into a silently empty request. Resolution then fails the
- * request closed and reports them (see `resolveReviewFeedback`).
+ * parsing — they are collected for reporting, because reclassifying `S0` or the
+ * unsupported range `F1-F2` as prose turns a typo into a silently empty request,
+ * which then widens to every pending blocker. Resolution fails the request
+ * closed and reports them (see `resolveReviewFeedback`).
  */
-export function parseFixSelection(text: string | undefined | null): FixSelection {
+export function parseFixCommand(command: FixCommandText): FixSelection {
     const selection: FixSelection = { ...emptyReviewFeedbackSelection(), instructions: '', malformedIds: [] };
-    if (!text) return selection;
     // Normalise line endings first so a CRLF comment body from the GitHub web UI
-    // parses identically to an LF one.
-    const [commandLine = '', ...following] = text.replace(/\r\n?/g, '\n').split('\n');
+    // parses identically to an LF one. A command line cannot hold a newline; if
+    // one ever arrives, only its first line is read as the command line and the
+    // remainder stays prose.
+    const [commandLine = '', ...extraCommandLines] = (command.commandLine ?? '').replace(/\r\n?/g, '\n').split('\n');
+    const following = [
+        ...extraCommandLines,
+        ...(command.bodyInstructions ? command.bodyInstructions.replace(/\r\n?/g, '\n').split('\n') : []),
+    ];
     const tokens = [...commandLine.matchAll(/[^,\s]+/g)].map(match => ({ value: match[0], start: match.index }));
     const seen = new Set<string>();
     /** Offset on the command line where instruction text begins, if any. */
@@ -86,6 +104,21 @@ export function parseFixSelection(text: string | undefined | null): FixSelection
 }
 
 /**
+ * Parse an already-joined `/fix` body, whose first line is the command line.
+ *
+ * This is the shape the worker sees for a job queued before intake carried the
+ * boundary, and the shape every direct caller (tests included) finds convenient.
+ * It is a projection of `parseFixCommand`, never a second implementation.
+ */
+export function parseFixSelection(text: string | undefined | null): FixSelection {
+    const normalized = (text ?? '').replace(/\r\n?/g, '\n');
+    const firstNewline = normalized.indexOf('\n');
+    return parseFixCommand(firstNewline === -1
+        ? { commandLine: normalized }
+        : { commandLine: normalized.slice(0, firstNewline), bodyInstructions: normalized.slice(firstNewline + 1) });
+}
+
+/**
  * Backward-compatible shim for call sites and tests that still ask only for
  * findings. Kept deliberately: it documents the old contract as a projection of
  * the new one rather than as a second implementation.
@@ -100,7 +133,11 @@ export interface FixFeedbackResolution {
     comments: AIReviewComment[];
     /** Identifiers the live reviews actually offered. */
     selected: ReviewFeedbackSelection;
-    /** Requested identifiers no current review offers. */
+    /**
+     * Requested identifiers no current review offers. Nonempty means nothing was
+     * selected at all: the request is refused as a whole so the caller can name
+     * these back to the user.
+     */
     unresolved: ReviewFeedbackSelection;
     malformedIds: string[];
 }
@@ -113,8 +150,9 @@ function sortNewestFirst(comments: AIReviewComment[]): AIReviewComment[] {
 }
 
 /**
- * Filter gathered review comments down to the selection, reporting anything the
- * live reviews no longer offer instead of dropping it silently.
+ * Filter gathered review comments down to the selection, refusing the whole
+ * request when any named record is missing or malformed rather than quietly
+ * acting on the half that resolved.
  *
  * A selection that names nothing keeps the pre-existing meaning: every
  * unprocessed actionable finding, and no suggestions. Suggestions are opt-in by
@@ -176,6 +214,27 @@ export function resolveReviewFeedback(
         }
     }
 
+    const unresolved: ReviewFeedbackSelection = {
+        findingIds: selection.findingIds.filter(id => !findingOwner.has(id)),
+        suggestionIds: selection.suggestionIds.filter(id => !suggestionOwner.has(id)),
+    };
+    // A named record no current review offers fails the whole request closed,
+    // exactly as a malformed token does and exactly as the MCP tool does before
+    // it posts anything. Acting on the available half would be a silent partial
+    // substitution, and worse: the unavailable half would never be reported,
+    // because only the "nothing was selected" path names identifiers back to the
+    // user. Whether the record went stale between the request and this
+    // resolution cannot be closed atomically, so the request is refused and the
+    // identifier named instead of guessed at.
+    if (!isEmptyReviewFeedbackSelection(unresolved)) {
+        return {
+            comments: [],
+            selected: emptyReviewFeedbackSelection(),
+            unresolved,
+            malformedIds: selection.malformedIds,
+        };
+    }
+
     const filtered = comments
         .map(comment => {
             const actionableFindings = comment.actionableFindings.filter(finding =>
@@ -196,10 +255,7 @@ export function resolveReviewFeedback(
             findingIds: selection.findingIds.filter(id => findingOwner.has(id)),
             suggestionIds: selection.suggestionIds.filter(id => suggestionOwner.has(id)),
         },
-        unresolved: {
-            findingIds: selection.findingIds.filter(id => !findingOwner.has(id)),
-            suggestionIds: selection.suggestionIds.filter(id => !suggestionOwner.has(id)),
-        },
+        unresolved,
         malformedIds: selection.malformedIds,
     };
 }
@@ -260,9 +316,16 @@ export async function prepareFixReviewFeedback(params: {
     });
     // Automated Ultrafix always selects all F# blockers and never suggestions:
     // optional work is acted on solely because a human named it.
+    const commandMeta = job.data.commandMeta;
     const fixSelection = job.data.ultrafixMeta
         ? { ...emptySelection, instructions: job.data.commandInstructions || '' }
-        : parseFixSelection(job.data.commandInstructions);
+        // Selectors come from the command line intake preserved, so a `/fix`
+        // whose instructions merely begin with `S3 is already done` selects
+        // nothing. Falling back to the joined text keeps a job queued by an
+        // earlier deploy working, with the behaviour it was queued under.
+        : commandMeta?.mode === 'fix' && typeof commandMeta.commandLine === 'string'
+            ? parseFixCommand({ commandLine: commandMeta.commandLine, bodyInstructions: commandMeta.bodyInstructions })
+            : parseFixSelection(job.data.commandInstructions);
     // Cap explicit requests only. A bare `/fix` inherits whatever blockers the
     // reviews published, and rejecting that would be a regression.
     if (!isEmptyReviewFeedbackSelection(fixSelection) && reviewFeedbackSelectionSize(fixSelection) > MAX_REVIEW_FEEDBACK_SELECTION) {

@@ -15,11 +15,20 @@ export const REVIEW_FINDING_ID_PATTERN = /^F[1-9][0-9]*$/i;
 export const REVIEW_SUGGESTION_ID_PATTERN = /^S[1-9][0-9]*$/i;
 
 /**
- * Selector-shaped, valid or not. A token matching this but failing the two
- * patterns above is a typo to report, never prose to keep: reclassifying `S0`
- * as instruction text is how a mistyped request silently becomes an empty one.
+ * Selector-shaped, valid or not: an `F` or `S`, optionally a `-`, then a digit.
+ * A token matching this but failing the two patterns above is a typo to report,
+ * never prose to keep: reclassifying `S0` as instruction text is how a mistyped
+ * request silently becomes an empty one, and reclassifying an unsupported
+ * selector such as the range `F1-F2` or the trailing-garbage `F1x` is how a
+ * deliberately narrowed request silently widens to every pending blocker.
+ *
+ * Deliberately unanchored at the end, which is exactly the attempted-selector
+ * test `/fix` applied before identifiers were shared with the MCP surface:
+ * anchoring it would accept `F1-F2` as prose. Ordinary instruction prose does
+ * not begin with an `F`/`S` immediately followed by a digit, and a token that
+ * does not is still prose, so free text keeps working.
  */
-export const REVIEW_FEEDBACK_TOKEN_SHAPE = /^[FS]-?[0-9]+$/i;
+export const REVIEW_FEEDBACK_TOKEN_SHAPE = /^[FS]-?[0-9]/i;
 
 /**
  * Upper bound on one request. Mirrors the pre-existing `.max(100)` on the MCP
@@ -48,7 +57,7 @@ export function normalizeReviewFeedbackId(token: string): { kind: ReviewFeedback
     return null;
 }
 
-/** Selector-shaped but not a valid identifier, e.g. `S0`, `F007`, `F-1`. */
+/** Selector-shaped but not a valid identifier, e.g. `S0`, `F007`, `F-1`, `F1-F2`, `F1x`. */
 export function isMalformedReviewFeedbackToken(token: string): boolean {
     const trimmed = token.trim();
     return REVIEW_FEEDBACK_TOKEN_SHAPE.test(trimmed) && normalizeReviewFeedbackId(trimmed) === null;

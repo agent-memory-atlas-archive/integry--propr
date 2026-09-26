@@ -7,7 +7,7 @@
  */
 import { after, test, describe } from 'node:test';
 import assert from 'node:assert';
-import { closeConnection } from '@propr/core';
+import { buildCommandMeta, closeConnection, parseSlashCommand } from '@propr/core';
 
 const {
     extractActionableFindings: extractStructuredActionableFindings,
@@ -696,6 +696,69 @@ describe('/fix structured finding selection', () => {
         // The agent never sees the raw token list.
         assert.strictEqual(job.data.commandInstructions, 'Also rename the helper.');
         assert.doesNotMatch(prepared.reviewCommentsSection, /^F1 S1$/m);
+    });
+
+    test('refuses a request that mixes available and unavailable identifiers', () => {
+        // The available half is not acted on: only the "nothing was selected"
+        // path reports identifiers back to the user, so honouring S1 here would
+        // drop S999 silently. This is the rule the MCP tool already applies.
+        const resolution = resolveReviewFeedback([reviewComment()], parseFixSelection('S1 S999'));
+        assert.deepStrictEqual(resolution.comments, []);
+        assert.deepStrictEqual(resolution.selected, { findingIds: [], suggestionIds: [] });
+        assert.deepStrictEqual(resolution.unresolved, { findingIds: [], suggestionIds: ['S999'] });
+        assert.strictEqual(hasAuthorizedFixFeedback(resolution), false);
+
+        const mixedFinding = resolveReviewFeedback([reviewComment()], parseFixSelection('F1 F999 S1'));
+        assert.deepStrictEqual(mixedFinding.comments, []);
+        assert.deepStrictEqual(mixedFinding.selected, { findingIds: [], suggestionIds: [] });
+        assert.deepStrictEqual(mixedFinding.unresolved, { findingIds: ['F999'], suggestionIds: [] });
+        assert.strictEqual(hasAuthorizedFixFeedback(mixedFinding), false);
+    });
+
+    test('an unsupported selector never falls back to every pending blocker', () => {
+        const comment = reviewComment();
+        comment.actionableFindings.push({ ...comment.actionableFindings[0], id: 'F2', title: 'Second blocker' });
+        for (const attempt of ['F1-F2', 'F1x', 'S1-S2']) {
+            const selection = parseFixSelection(attempt);
+            assert.deepStrictEqual(selection.malformedIds, [attempt.toUpperCase()], attempt);
+            const resolution = resolveReviewFeedback([comment], selection);
+            assert.deepStrictEqual(resolution.comments, [], attempt);
+            assert.deepStrictEqual(resolution.selected, { findingIds: [], suggestionIds: [] }, attempt);
+            assert.strictEqual(hasAuthorizedFixFeedback(resolution), false, attempt);
+        }
+    });
+
+    test('the intake boundary keeps instruction prose from selecting a suggestion', async () => {
+        const comments = [{
+            id: 82,
+            body: `${STRUCTURED_REVIEW}\n<!-- propr:ai-review model="test" -->`,
+            user: { login: 'propr-bot', type: 'Bot' },
+            created_at: new Date().toISOString(),
+        }];
+        // Exactly what intake produces for `/fix` with no arguments and prose
+        // below it: an empty command line, and the prose kept apart from it.
+        const commandMeta = buildCommandMeta(parseSlashCommand('/fix\nS1 is already done; keep the blocker correction localized.')!);
+        const job = {
+            data: {
+                commandMode: 'fix',
+                commandMeta,
+                commandInstructions: (commandMeta as { instructions: string }).instructions,
+            },
+        };
+        const prepared = await prepareFixReviewFeedback({
+            job: job as any,
+            allComments: comments as any,
+            repoOwner: 'o',
+            repoName: 'r',
+            pullRequestNumber: 1,
+            redisClient: { smembers: async () => [] } as any,
+            correlatedLogger: { debug() {}, info() {}, warn() {} } as any,
+        });
+        // The bare meaning applies: blockers only, and the prose is forwarded.
+        assert.deepStrictEqual(prepared.resolution.selected, { findingIds: ['F1'], suggestionIds: [] });
+        assert.deepStrictEqual(prepared.selectedReviewComments[0].suggestions, []);
+        assert.strictEqual(job.data.commandInstructions, 'S1 is already done; keep the blocker correction localized.');
+        assert.doesNotMatch(prepared.reviewCommentsSection, /### S1:/);
     });
 
     test('does not authorize execution for unknown IDs or a bare fix with no blockers', () => {
