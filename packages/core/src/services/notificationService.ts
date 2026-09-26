@@ -131,17 +131,27 @@ export interface SystemFailureTransitionInput {
         | Promise<CreateNotificationEventInput<'system_failure'>>;
 }
 
+/** One active Inbox receipt a server-side cleanup dismissed, and its owner. */
+export interface DismissedNotificationReceipt {
+    userId: string;
+    eventId: string;
+}
+
 export interface SystemFailureTransitionResult {
     accepted: boolean;
     event: NotificationEvent<'system_failure'> | null;
     /**
-     * Active Inbox receipts this transition dismissed.
+     * Active Inbox receipts this transition dismissed, with their owners.
      *
      * A component recovering dismisses its failure cards without creating a
-     * replacement, so this count is the only evidence a caller has that an open
-     * Inbox somewhere is now showing a card the server already cleaned up.
+     * replacement, so these receipts are the only evidence a caller has that an
+     * open Inbox somewhere is showing a card the server already cleaned up. The
+     * owners are named rather than counted because a receipt outlives the role
+     * that earned it: an administrator demoted while the failure persisted still
+     * holds the card, and is no longer among the recipients a caller would
+     * otherwise announce to.
      */
-    dismissed?: number;
+    dismissedReceipts?: readonly DismissedNotificationReceipt[];
     /**
      * Whether `event` is new rather than the card this component already had.
      *
@@ -565,7 +575,7 @@ export class NotificationService {
                 .where({ component: input.component })
                 .first();
             if (existing && snapshotAt < existing.last_snapshot_at) {
-                return { accepted: false, event: null, dismissed: 0, created: false };
+                return { accepted: false, event: null, dismissedReceipts: [], created: false };
             }
             if (initializing) {
                 return this.reconcileInitialSystemFailureReceipts(
@@ -578,8 +588,9 @@ export class NotificationService {
 
             const continuingFailure = isContinuingSystemFailure(existing, input);
             // Receipts dismissed by this commit, so the caller can tell the
-            // recipients' open Inboxes that a card disappeared server-side.
-            let dismissed = 0;
+            // Inboxes that actually hold those cards they disappeared
+            // server-side - whoever their owners are today.
+            let dismissedReceipts: DismissedNotificationReceipt[] = [];
             const failureStartedAt = input.healthy
                 ? null
                 : continuingFailure ? existing.failure_started_at : snapshotAt;
@@ -606,8 +617,8 @@ export class NotificationService {
                     existing.failure_status,
                     existing.failure_started_at as ISO8601Timestamp
                 );
-                dismissed += await this.dismissReceiptQuery(
-                    transaction('notification_events')
+                dismissedReceipts = await this.dismissReceiptsFor(
+                    () => transaction('notification_events')
                         .select('event_id')
                         .where({ deduplication_key: superseded.deduplicationKey }),
                     transaction
@@ -615,7 +626,7 @@ export class NotificationService {
             }
 
             if (input.healthy || failureStartedAt === null) {
-                return { accepted: true, event: null, dismissed, created: false };
+                return { accepted: true, event: null, dismissedReceipts, created: false };
             }
             const event = this.prepareNotificationEvent(await input.eventFor(
                 input.status,
@@ -628,7 +639,7 @@ export class NotificationService {
                     event,
                     normalizedRecipients
                 ),
-                dismissed,
+                dismissedReceipts,
                 // A continuing failure re-persists the card this component
                 // already had; only a replaced one is news.
                 created: !continuingFailure
@@ -642,22 +653,22 @@ export class NotificationService {
         failureStartedAt: ISO8601Timestamp,
         normalizedRecipients: NormalizedRecipient[]
     ): Promise<SystemFailureTransitionResult> {
-        let priorEvents = this.matchingTargetEvents(['system_failure'], transaction)
+        const priorEvents = () => this.matchingTargetEvents(['system_failure'], transaction)
             .whereRaw("json_extract(event.target_json, '$.component') = ?", [input.component]);
         if (input.healthy) {
             return {
                 accepted: true,
                 event: null,
-                dismissed: await this.dismissReceiptQuery(priorEvents, transaction),
+                dismissedReceipts: await this.dismissReceiptsFor(priorEvents, transaction),
                 created: false
             };
         }
         const eventInput = await input.eventFor(input.status, failureStartedAt);
         const currentEvent = this.prepareNotificationEvent(eventInput);
-        priorEvents = priorEvents.whereNot({
+        const supersededEvents = () => priorEvents().whereNot({
             'event.deduplication_key': currentEvent.deduplicationKey
         });
-        const dismissed = await this.dismissReceiptQuery(priorEvents, transaction);
+        const dismissedReceipts = await this.dismissReceiptsFor(supersededEvents, transaction);
         return {
             accepted: true,
             event: await this.persistNotificationEvent(
@@ -665,7 +676,7 @@ export class NotificationService {
                 currentEvent,
                 normalizedRecipients
             ),
-            dismissed,
+            dismissedReceipts,
             created: true
         };
     }
@@ -964,14 +975,21 @@ export class NotificationService {
         prNumber: number
     ): Promise<number> {
         this.assertPullRequestIdentity(repository, prNumber);
-        const pullRequestEvents = () => this
-            .matchingTargetEvents(['task', 'review', 'pull_request'])
-            .whereRaw("json_extract(event.target_json, '$.repository') = ?", [repository])
-            .whereRaw("json_extract(event.target_json, '$.prNumber') = ?", [prNumber]);
-        const receipts = await this.activeReceiptsFor(pullRequestEvents());
-        const dismissed = await this.dismissReceiptQuery(pullRequestEvents());
+        // Captured and dismissed in one transaction, like the merged sibling: a
+        // projection committing another card for this pull request between the
+        // two statements would be dismissed here yet never announced, and the
+        // recipient's Inbox - which no longer polls - would keep showing it.
+        const receipts = await this.database.transaction(transaction =>
+            this.dismissReceiptsFor(() => this
+                .matchingTargetEvents(['task', 'review', 'pull_request'], transaction)
+                .whereRaw("json_extract(event.target_json, '$.repository') = ?", [repository])
+                .whereRaw("json_extract(event.target_json, '$.prNumber') = ?", [prNumber]),
+            transaction));
+        // Announced only once the dismissal has committed: the Inbox re-reads on
+        // this event, so an announcement that outran a rollback would tell it to
+        // read the state it already had.
         this.announceDismissedReceipts(receipts);
-        return dismissed;
+        return receipts.length;
     }
 
     /** Persist a merged marker and close all existing PR receipts atomically. */
@@ -986,8 +1004,7 @@ export class NotificationService {
         // Announced after the transaction commits, never before: the Inbox
         // re-reads on this event, so an announcement that outran a rollback
         // would tell it to read the state it already had.
-        let receipts: Array<{ user_id: string; event_id: string }> = [];
-        const dismissed = await this.database.transaction(async transaction => {
+        const receipts = await this.database.transaction(async transaction => {
             await transaction('notification_pull_request_state')
                 .insert({
                     repository,
@@ -996,17 +1013,16 @@ export class NotificationService {
                 })
                 .onConflict(['repository', 'pr_number'])
                 .merge({ merged_at: normalizedMergedAt });
-            const mergedPullRequestEvents = () => this.matchingTargetEvents(
+            return this.dismissReceiptsFor(() => this.matchingTargetEvents(
                 ['task', 'review', 'pull_request'],
                 transaction
             )
                 .whereRaw("json_extract(event.target_json, '$.repository') = ?", [repository])
-                .whereRaw("json_extract(event.target_json, '$.prNumber') = ?", [prNumber]);
-            receipts = await this.activeReceiptsFor(mergedPullRequestEvents(), transaction);
-            return this.dismissReceiptQuery(mergedPullRequestEvents(), transaction);
+                .whereRaw("json_extract(event.target_json, '$.prNumber') = ?", [prNumber]),
+            transaction);
         });
         this.announceDismissedReceipts(receipts);
-        return dismissed;
+        return receipts.length;
     }
 
     /** Keep only the newest PR-attention event visible for a repository/PR. */
@@ -1037,13 +1053,24 @@ export class NotificationService {
         });
     }
 
-    /** Dismiss active failure cards for one system-health component. */
-    async dismissSystemFailureNotifications(component: string): Promise<number> {
+    /**
+     * Dismiss active failure cards for one system-health component.
+     *
+     * Returns the receipts it closed, with their owners: a recovery clears
+     * cards nobody asked it to clear, and the recipients who hold them are the
+     * ones the caller has to tell - not whoever qualifies for this component's
+     * notifications now. The capture and the update share one transaction so a
+     * card committed between them cannot be dismissed without being reported.
+     */
+    async dismissSystemFailureNotifications(
+        component: string
+    ): Promise<DismissedNotificationReceipt[]> {
         assertIdentifier(component, 'notification system component');
-        return this.dismissReceiptQuery(
-            this.matchingTargetEvents(['system_failure'])
-                .whereRaw("json_extract(event.target_json, '$.component') = ?", [component])
-        );
+        return this.database.transaction(transaction => this.dismissReceiptsFor(
+            () => this.matchingTargetEvents(['system_failure'], transaction)
+                .whereRaw("json_extract(event.target_json, '$.component') = ?", [component]),
+            transaction
+        ));
     }
 
     private async readPreferenceSnapshot(
@@ -1283,14 +1310,33 @@ export class NotificationService {
     private async activeReceiptsFor(
         eventIds: Knex.QueryBuilder,
         database: Database = this.database
-    ): Promise<Array<{ user_id: string; event_id: string }>> {
-        return database('notification_user_states')
+    ): Promise<DismissedNotificationReceipt[]> {
+        const rows = await database('notification_user_states')
             .where({ inbox_enabled: true })
             .whereNull('dismissed_at')
             .whereIn('event_id', eventIds)
-            .select('user_id', 'event_id') as Promise<Array<{
-                user_id: string; event_id: string;
-            }>>;
+            .select('user_id', 'event_id') as Array<{ user_id: string; event_id: string }>;
+        return rows.map(row => ({ userId: row.user_id, eventId: row.event_id }));
+    }
+
+    /**
+     * Dismiss the receipts an event query covers and return the ones it closed.
+     *
+     * The capture and the update must see the same rows, so both run against
+     * the caller's transaction: a projection committing another receipt for the
+     * same target between them would be dismissed by the update yet absent from
+     * the announcement, leaving that recipient's Inbox showing a card the
+     * server already cleaned up until their next focus or reconnect. The query
+     * is rebuilt per use because a knex builder cannot be executed twice.
+     */
+    private async dismissReceiptsFor(
+        eventIds: () => Knex.QueryBuilder,
+        database: Database
+    ): Promise<DismissedNotificationReceipt[]> {
+        const receipts = await this.activeReceiptsFor(eventIds(), database);
+        if (receipts.length === 0) return [];
+        await this.dismissReceiptQuery(eventIds(), database);
+        return receipts;
     }
 
     /**
@@ -1302,13 +1348,13 @@ export class NotificationService {
      * exactly one to name.
      */
     private announceDismissedReceipts(
-        receipts: readonly { user_id: string; event_id: string }[]
+        receipts: readonly DismissedNotificationReceipt[]
     ): void {
         const eventIdsByRecipient = new Map<string, string[]>();
         for (const receipt of receipts) {
-            const eventIds = eventIdsByRecipient.get(receipt.user_id) ?? [];
-            eventIds.push(receipt.event_id);
-            eventIdsByRecipient.set(receipt.user_id, eventIds);
+            const eventIds = eventIdsByRecipient.get(receipt.userId) ?? [];
+            eventIds.push(receipt.eventId);
+            eventIdsByRecipient.set(receipt.userId, eventIds);
         }
         const occurredAt = normalizeISO8601Timestamp(this.now());
         for (const [recipientId, eventIds] of eventIdsByRecipient) {

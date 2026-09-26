@@ -422,6 +422,54 @@ describe('notification service', { concurrency: false }, () => {
         assert.deepEqual(published, []);
     });
 
+    test('captures a closing pull request\'s receipts inside the dismissal transaction', async () => {
+        for (const eventId of ['pr-task-event', 'pr-attention-event']) {
+            await service.createNotificationEvent({
+                eventId,
+                deduplicationKey: `${eventId}-key`,
+                kind: 'pull_request',
+                target: { type: 'pull_request', repository: 'integry/propr', prNumber: 42 },
+                title: 'Pull request needs attention',
+                body: 'PR needs attention.',
+                recipients: ['user-a', 'user-b']
+            });
+        }
+        published.length = 0;
+        const statements: Array<{ sql: string; transactionId: unknown }> = [];
+        const record = (query: { sql: string; __knexTxId?: unknown }) => {
+            statements.push({ sql: query.sql, transactionId: query.__knexTxId });
+        };
+        database.on('query', record);
+
+        try {
+            assert.equal(await service.dismissNotificationsForPullRequest('integry/propr', 42), 4);
+        } finally {
+            database.removeListener('query', record);
+        }
+
+        const receiptStatements = statements.filter(
+            statement => statement.sql.includes('notification_user_states')
+        );
+        const capture = receiptStatements.find(statement => statement.sql.startsWith('select'));
+        const dismissal = receiptStatements.find(statement => statement.sql.startsWith('update'));
+        assert.ok(capture, 'the receipts to announce are read before they are dismissed');
+        assert.ok(dismissal, 'the receipts are dismissed');
+        assert.notEqual(
+            capture.transactionId,
+            undefined,
+            'a read outside a transaction can miss a card another writer is committing'
+        );
+        // Both statements must share the transaction: a projection committing
+        // another card for this pull request between them would be dismissed by
+        // the update and left out of the announcement, so the Inbox holding it
+        // would keep showing a card the server already cleaned up.
+        assert.equal(capture.transactionId, dismissal.transactionId);
+        assert.deepEqual(
+            published.map(payload => payload.recipientId).sort(),
+            ['user-a', 'user-b']
+        );
+    });
+
     test('announces a merged pull request once per recipient, after it commits', async () => {
         for (const eventId of ['pr-task-event', 'pr-attention-event']) {
             await service.createNotificationEvent({
@@ -629,6 +677,77 @@ describe('notification service', { concurrency: false }, () => {
                 { component: 'redis', failure_status: null },
                 { component: 'worker', failure_status: 'stopped' }
             ]
+        );
+    });
+
+    test('names the owners of the failure receipts a recovery dismisses', async () => {
+        await service.createNotificationEvent({
+            eventId: 'component-failure',
+            deduplicationKey: 'component-failure-key',
+            kind: 'system_failure',
+            severity: 'error',
+            target: { type: 'system_failure', component: 'redis' },
+            title: 'System component unhealthy',
+            body: 'redis is not reporting a healthy status.',
+            recipients: ['former-admin']
+        });
+
+        // The recipient's role can change while the failure persists, so the
+        // receipt owner - not whoever qualifies for the card now - is reported.
+        assert.deepEqual(
+            await service.dismissSystemFailureNotifications('redis'),
+            [{ userId: 'former-admin', eventId: 'component-failure' }]
+        );
+        assert.deepEqual(await service.dismissSystemFailureNotifications('redis'), []);
+    });
+
+    test('reports the receipts a system transition dismissed, with their owners', async () => {
+        const eventFor = (suffix: string) => (status: string, failureStartedAt: string) => ({
+            eventId: `${suffix}-failure-event`,
+            deduplicationKey: `redis:${status}:${failureStartedAt}`,
+            kind: 'system_failure' as const,
+            severity: 'error' as const,
+            target: { type: 'system_failure' as const, component: 'redis' },
+            title: 'System component unhealthy',
+            body: 'redis is not reporting a healthy status.',
+            occurredAt: failureStartedAt
+        });
+        const unhealthy = await service.reconcileSystemFailureTransition({
+            component: 'redis',
+            status: 'disconnected',
+            healthy: false,
+            snapshotAt: '2026-08-02T09:00:00.000Z',
+            eventFor: eventFor('first')
+        }, ['former-admin']);
+        assert.deepEqual(unhealthy.dismissedReceipts, []);
+        assert.equal(unhealthy.created, true);
+
+        const superseded = await service.reconcileSystemFailureTransition({
+            component: 'redis',
+            status: 'connection-error',
+            healthy: false,
+            snapshotAt: '2026-08-02T09:00:01.000Z',
+            eventFor: eventFor('second')
+        }, ['current-admin']);
+        assert.deepEqual(
+            superseded.dismissedReceipts,
+            [{ userId: 'former-admin', eventId: 'first-failure-event' }],
+            'the replaced card belongs to whoever received it, not to this snapshot'
+        );
+
+        const recovered = await service.reconcileSystemFailureTransition({
+            component: 'redis',
+            status: 'connected',
+            healthy: true,
+            snapshotAt: '2026-08-02T09:00:02.000Z',
+            // Still asked for the card it is replacing: recovery locates the
+            // receipts to dismiss through the outgoing failure's key.
+            eventFor: eventFor('second')
+        }, ['current-admin']);
+        assert.equal(recovered.event, null);
+        assert.deepEqual(
+            recovered.dismissedReceipts,
+            [{ userId: 'current-admin', eventId: 'second-failure-event' }]
         );
     });
 

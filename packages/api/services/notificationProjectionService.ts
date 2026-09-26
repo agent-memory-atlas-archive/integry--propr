@@ -766,11 +766,12 @@ export class NotificationProjectionService {
       // Seats are available again, so an earlier seat-limit card is stale. Most
       // health ticks have no such card; read first to keep them write-free.
       if (await this.hasActiveSystemFailureReceipt(CONNECT_SEAT_LIMIT_COMPONENT)) {
-        const dismissed = await this.notifications
-          .dismissSystemFailureNotifications(CONNECT_SEAT_LIMIT_COMPONENT);
         // The card disappeared without anyone dismissing it, so the Inboxes
-        // still showing it have no other reason to re-read.
-        if (dismissed > 0) this.announce('dismissed', recipients);
+        // still showing it have no other reason to re-read - and the recipients
+        // who hold it are whoever received it then, not the administrators the
+        // snapshot resolves now: a demoted administrator keeps their receipt.
+        this.announceDismissed(await this.notifications
+          .dismissSystemFailureNotifications(CONNECT_SEAT_LIMIT_COMPONENT));
       }
     } else if (seatLimitBlock && seatLimitBlock.blockedAt <= snapshotAt) {
       // Health ticks repeat the same block, and creation is deduplicated, so
@@ -829,11 +830,11 @@ export class NotificationProjectionService {
       // snapshot; announcing that would ask every admin's Inbox to re-read for
       // a card it already shows.
       if (transition.created) this.announceCreated(transition.event, recipients);
-      // A recovered component dismisses its failure cards without replacing
-      // them; nothing else would tell an open Inbox they are gone.
-      if (transition.event === null && (transition.dismissed ?? 0) > 0) {
-        this.announce('dismissed', recipients);
-      }
+      // A recovered or superseded component dismisses its failure cards without
+      // the recipient asking, so the owners of those receipts are told - which
+      // is not the same set as this snapshot's administrators once someone's
+      // role changed while the failure persisted.
+      this.announceDismissed(transition.dismissedReceipts ?? []);
     }
   }
 

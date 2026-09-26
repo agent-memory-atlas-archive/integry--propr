@@ -108,18 +108,78 @@ describe('notification projection publishing', { concurrency: false }, () => {
 
   test('tells administrators when a recovered component clears its card', async () => {
     await projection.projectSystemSnapshot({ timestamp: iso(), redis: 'disconnected' });
+    const failureEventId = (await database('notification_events')
+      .where({ kind: 'system_failure' })
+      .first()).event_id;
     published.length = 0;
 
     clock += 1_000;
     await projection.projectSystemSnapshot({ timestamp: iso(), redis: 'connected' });
 
-    assert.deepEqual(changesFor('dismissed'), [{ recipientId: 'admin-user', eventId: undefined }]);
+    // The receipt the recovery closed is named, so the Inbox knows which card
+    // left rather than only that something did.
+    assert.deepEqual(changesFor('dismissed'), [
+      { recipientId: 'admin-user', eventId: failureEventId },
+    ]);
 
     // A component that stays healthy has nothing left to dismiss, so it is quiet.
     published.length = 0;
     clock += 1_000;
     await projection.projectSystemSnapshot({ timestamp: iso(), redis: 'connected' });
     assert.deepEqual(published, []);
+  });
+
+  test('tells the administrator who kept a failure card after losing the role', async () => {
+    await projection.projectSystemSnapshot({ timestamp: iso(), redis: 'disconnected' });
+    const failureEventId = (await database('notification_events')
+      .where({ kind: 'system_failure' })
+      .first()).event_id;
+    // The administrator who received the card becomes an ordinary member while
+    // the failure persists. Their receipt still belongs to them and their Inbox
+    // still shows it, so the recovery has to reach them and not the
+    // administrator who replaced them.
+    await database('instance_members')
+      .where({ github_user_id: 'admin-user' })
+      .update({ role: 'member' });
+    await database('instance_members')
+      .where({ github_user_id: 'member-user' })
+      .update({ role: 'admin' });
+    published.length = 0;
+
+    clock += 1_000;
+    await projection.projectSystemSnapshot({ timestamp: iso(), redis: 'connected' });
+
+    assert.deepEqual(changesFor('dismissed'), [
+      { recipientId: 'admin-user', eventId: failureEventId },
+    ]);
+  });
+
+  test('tells the holder of a seat-limit card when seats free up after a role change', async () => {
+    const connectAccount = {
+      installationId: 42, activeSeats: 2, allowedSeats: 2, seatsRemaining: 0,
+      billingCycleResetAt: iso(30 * 24 * 60 * 60 * 1_000), seatLimitBlockedAt: iso(-5_000),
+    };
+    await projection.projectSystemSnapshot({ timestamp: iso(), connectAccount });
+    const seatLimitEventId = (await database('notification_events')
+      .where({ kind: 'system_failure' })
+      .first()).event_id;
+    await database('instance_members')
+      .where({ github_user_id: 'admin-user' })
+      .update({ role: 'member' });
+    await database('instance_members')
+      .where({ github_user_id: 'member-user' })
+      .update({ role: 'admin' });
+    published.length = 0;
+
+    clock += 1_000;
+    await projection.projectSystemSnapshot({
+      timestamp: iso(),
+      connectAccount: { ...connectAccount, activeSeats: 1, seatsRemaining: 1 },
+    });
+
+    assert.deepEqual(changesFor('dismissed'), [
+      { recipientId: 'admin-user', eventId: seatLimitEventId },
+    ]);
   });
 
   test('announces a repeated Connect seat-limit block only when it first appears', async () => {
