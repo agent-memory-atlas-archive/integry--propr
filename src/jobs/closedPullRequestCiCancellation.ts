@@ -25,9 +25,15 @@ export const CLOSED_PULL_REQUEST_CI_MAX_AGE_MS = 6 * 60 * 60 * 1000;
 
 interface ClosedPullRequestCiRedis {
     hgetall(key: string): Promise<Record<string, string>>;
-    hget(key: string, field: string): Promise<string | null>;
-    hdel(key: string, ...fields: string[]): Promise<number>;
+    eval(script: string, numberOfKeys: number, ...args: string[]): Promise<unknown>;
 }
+
+const SETTLE_REQUEST_SCRIPT = `
+if redis.call('HGET', KEYS[1], ARGV[1]) == ARGV[2] then
+    return redis.call('HDEL', KEYS[1], ARGV[1])
+end
+return 0
+`;
 
 export interface ClosedPullRequestCiDeps extends CiSuspensionDeps {
     redis?: ClosedPullRequestCiRedis;
@@ -55,14 +61,14 @@ export function isObsoleteClosedPullRequestRun(
     return Number.isFinite(createdAt) && createdAt < Date.parse(request.closedAt);
 }
 
-/** Another open pull request of the same head commit still needs this validation. */
+/** Any open pull request of the same head commit, including a reopened one, still needs this validation. */
 async function headStillUnderReview(octokit: CiSuspensionOctokit, target: SuspensionTarget, request: ClosedPullRequestCiRequest): Promise<boolean> {
     const headOwner = (request.headRepository ?? `${target.owner}/${target.repo}`).split('/')[0];
     const { data } = await octokit.request('GET /repos/{owner}/{repo}/pulls', {
         owner: target.owner, repo: target.repo, state: 'open', head: `${headOwner}:${request.headRef}`, per_page: 100,
     });
     return (data as Array<{ number: number; head?: { sha?: string } }>)
-        .some(pullRequest => pullRequest.number !== request.pullRequestNumber && sameSha(pullRequest.head?.sha, request.headSha));
+        .some(pullRequest => sameSha(pullRequest.head?.sha, request.headSha));
 }
 
 async function cancelForRequest(request: ClosedPullRequestCiRequest, deps: ClosedPullRequestCiDeps): Promise<number> {
@@ -71,18 +77,25 @@ async function cancelForRequest(request: ClosedPullRequestCiRequest, deps: Close
     const isEnabled = deps.isEnabled ?? isCancelCiDuringFollowupEnabledForRepository;
     if (!await isEnabled(owner, repo)) return 0;
     const policy = await resolvePolicy(deps, target);
+    if (policy.source === 'unreadable') throw new Error('Closed pull request workflow selection is unavailable');
     if (policy.selected.size === 0) return 0;
     const octokit = await resolveOctokit(deps);
     const runs = (await listRunsForSha(octokit, target, request.headSha))
         .filter(run => isObsoleteClosedPullRequestRun(run, request, policy));
-    if (runs.length === 0 || await headStillUnderReview(octokit, target, request)) return 0;
     let cancelled = 0;
+    const cancelledRunIds: number[] = [];
     for (const run of runs) {
-        if (await cancelRun(octokit, target, run.id)) cancelled += 1;
+        // Each cancellation awaits GitHub; a PR may reopen while the previous
+        // one is pending. Refresh protection immediately before the next one.
+        if (await headStillUnderReview(octokit, target, request)) break;
+        if (await cancelRun(octokit, target, run.id)) {
+            cancelled += 1;
+            cancelledRunIds.push(run.id);
+        }
     }
     resolveLog(deps).info({
         repository: request.repository, pullRequest: request.pullRequestNumber, merged: request.merged,
-        cancelledRunIds: runs.map(run => run.id),
+        cancelledRunIds,
     }, 'Cancelled obsolete validation of a closed pull request');
     return cancelled;
 }
@@ -109,8 +122,8 @@ export async function cancelClosedPullRequestValidation(deps: ClosedPullRequestC
                 'Failed to cancel obsolete validation of a closed pull request');
         }
         // A pull request reopened and closed again in the meantime is handled by its newer request.
-        if (settled && await redis.hget(CLOSED_PULL_REQUEST_CI_KEY, field) === raw) {
-            await redis.hdel(CLOSED_PULL_REQUEST_CI_KEY, field);
+        if (settled) {
+            await redis.eval(SETTLE_REQUEST_SCRIPT, 1, CLOSED_PULL_REQUEST_CI_KEY, field, raw);
         }
     }
     return summary;
