@@ -1,5 +1,5 @@
 import { act, renderHook, waitFor } from '@testing-library/react';
-import { beforeEach, expect, test, vi } from 'vitest';
+import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 
 const apiMocks = vi.hoisted(() => ({
   getAgentTankStatus: vi.fn(),
@@ -8,11 +8,23 @@ const apiMocks = vi.hoisted(() => ({
 
 vi.mock('../../api/revertApi', () => apiMocks);
 
-import { useAgentTankSettings } from './useAgentTankSettings';
+import { STATUS_PROBE_DELAY, useAgentTankSettings } from './useAgentTankSettings';
+
+/** Long enough for a probe scheduled at click time to have fired already. */
+const pastProbeDelay = () => new Promise(resolve => setTimeout(resolve, STATUS_PROBE_DELAY + 100));
 
 beforeEach(() => {
+  // Fake timers only so the probe delay can be discarded between tests: a probe
+  // still on the clock when a test ends would otherwise answer the next test's
+  // mocks. `shouldAdvanceTime` keeps everything else running in real time.
+  vi.useFakeTimers({ shouldAdvanceTime: true });
   apiMocks.getAgentTankStatus.mockReset().mockResolvedValue({ available: true });
   apiMocks.updateAgentTankSettings.mockReset().mockResolvedValue(undefined);
+});
+
+afterEach(() => {
+  vi.clearAllTimers();
+  vi.useRealTimers();
 });
 
 test('a rejected mode change is reported and the shown mode goes back to what is persisted', async () => {
@@ -86,4 +98,103 @@ test('an older failed write does not replace a newer successful selection', asyn
   // restoring "external" would resurrect a mode nobody selected.
   expect(result.current.settings.mode).toBe('disabled');
   expect(reportError).not.toHaveBeenCalledWith('Backend too old');
+});
+
+test('availability is fetched only after the selected mode has been saved', async () => {
+  // `updateAgentTankSettings` awaits a compatibility GET before POSTing bundled.
+  // A probe sent while that GET is open reaches a backend that still stores
+  // "disabled", so its "not available" would label the bundled selection
+  // unavailable without bundled ever having been tried.
+  let persistedMode = 'disabled';
+  let releaseWrite = () => {};
+  const writeGate = new Promise<void>(resolve => { releaseWrite = resolve; });
+  const probedModes: string[] = [];
+  apiMocks.updateAgentTankSettings.mockImplementation(async ({ mode }: { mode: string }) => {
+    await writeGate;
+    persistedMode = mode;
+  });
+  apiMocks.getAgentTankStatus.mockImplementation(async () => {
+    probedModes.push(persistedMode);
+    return { available: persistedMode === 'bundled' };
+  });
+  const { result } = renderHook(() => useAgentTankSettings(vi.fn()));
+  act(() => result.current.adopt({ mode: 'disabled', enabled: false, url: '' }));
+
+  act(() => result.current.change({ mode: 'bundled', enabled: true, url: '' }));
+  await pastProbeDelay();
+
+  expect(probedModes).toEqual([]);
+  // The operator sees the check as still running rather than as a verdict.
+  expect(result.current.checkingStatus).toBe(true);
+  await act(async () => { releaseWrite(); });
+
+  await waitFor(() => expect(probedModes).toEqual(['bundled']), { timeout: 2000 });
+  await waitFor(() => expect(result.current.available).toBe(true));
+  expect(result.current.checkingStatus).toBe(false);
+});
+
+test('a selection waiting behind an earlier write is probed only once it is persisted', async () => {
+  // The external selection is queued behind the held bundled write, so the
+  // backend keeps answering for "disabled" until that queue drains.
+  let persistedMode = 'disabled';
+  let releaseBundled = () => {};
+  const bundledGate = new Promise<void>(resolve => { releaseBundled = resolve; });
+  const probedModes: string[] = [];
+  apiMocks.updateAgentTankSettings.mockImplementation(async ({ mode }: { mode: string }) => {
+    if (mode === 'bundled') await bundledGate;
+    persistedMode = mode;
+  });
+  apiMocks.getAgentTankStatus.mockImplementation(async () => {
+    probedModes.push(persistedMode);
+    return { available: true };
+  });
+  const { result } = renderHook(() => useAgentTankSettings(vi.fn()));
+  act(() => result.current.adopt({ mode: 'disabled', enabled: false, url: '' }));
+
+  act(() => result.current.change({ mode: 'bundled', enabled: true, url: '' }));
+  act(() => result.current.change({ mode: 'external', enabled: true, url: 'http://legacy:3456' }));
+  await pastProbeDelay();
+
+  expect(probedModes).toEqual([]);
+  await act(async () => { releaseBundled(); });
+
+  // Only the surviving selection is probed, and only against its own mode: the
+  // superseded bundled selection never owned the indicator.
+  await waitFor(() => expect(probedModes).toEqual(['external']), { timeout: 2000 });
+  expect(result.current.settings.mode).toBe('external');
+});
+
+test('a refused selection reports no availability for the mode that was never stored', async () => {
+  // Rolling back to "disabled" and then letting the refused selection's probe
+  // land would claim a working Agent Tank for a mode the backend rejected.
+  apiMocks.updateAgentTankSettings.mockRejectedValue(new Error('Backend too old'));
+  const reportError = vi.fn();
+  const { result } = renderHook(() => useAgentTankSettings(reportError));
+  act(() => result.current.adopt({ mode: 'disabled', enabled: false, url: '' }));
+
+  act(() => result.current.change({ mode: 'bundled', enabled: true, url: '' }));
+  await waitFor(() => expect(reportError).toHaveBeenCalledWith('Backend too old'));
+  await pastProbeDelay();
+
+  expect(result.current.settings.mode).toBe('disabled');
+  expect(apiMocks.getAgentTankStatus).not.toHaveBeenCalled();
+  expect(result.current.available).toBeNull();
+  expect(result.current.checkingStatus).toBe(false);
+});
+
+test('a refused selection restores the availability of the mode that is persisted', async () => {
+  // The rollback puts "external" back on screen, so the indicator has to
+  // describe external instead of staying blank on the spinner it raised.
+  apiMocks.updateAgentTankSettings.mockImplementation(async ({ mode }: { mode: string }) => {
+    if (mode === 'bundled') throw new Error('Backend too old');
+  });
+  const { result } = renderHook(() => useAgentTankSettings(vi.fn()));
+  act(() => result.current.adopt({ mode: 'external', enabled: true, url: 'http://legacy:3456' }));
+  await waitFor(() => expect(apiMocks.getAgentTankStatus).toHaveBeenCalledTimes(1));
+
+  act(() => result.current.change({ mode: 'bundled', enabled: true, url: 'http://legacy:3456' }));
+
+  await waitFor(() => expect(result.current.settings.mode).toBe('external'));
+  await waitFor(() => expect(result.current.available).toBe(true));
+  expect(result.current.checkingStatus).toBe(false);
 });

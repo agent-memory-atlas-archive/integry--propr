@@ -174,3 +174,51 @@ test('bundled mode with nothing to monitor is not announced as ready', async ({ 
   await expect(status).not.toContainText('ready');
   await capture(page, 'agent-tank-bundled-nothing-to-monitor');
 });
+
+test('bundled availability is reported only once bundled is the stored mode', async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 1000 });
+  await installFixture(page, { mode: 'disabled', enabled: false, url: '' });
+
+  // The bundled write asks the backend whether it understands modes before
+  // POSTing. Holding that GET open keeps "disabled" stored: a status request
+  // answered in this window describes disabled mode, not the bundled selection.
+  let storedMode = 'disabled';
+  let holdCompatibilityGet = false;
+  let releaseCompatibilityGet = () => {};
+  const compatibilityGet = new Promise<void>(resolve => { releaseCompatibilityGet = resolve; });
+  const backendCalls: string[] = [];
+  await page.route('**/api/config/agent-tank**', async route => {
+    const request = route.request();
+    const pathname = new URL(request.url()).pathname;
+    if (pathname === '/api/config/agent-tank/status') {
+      backendCalls.push(`status:${storedMode}`);
+      return route.fulfill({ json: { mode: storedMode, available: storedMode === 'bundled' } });
+    }
+    if (pathname !== '/api/config/agent-tank') return route.fallback();
+    if (request.method() === 'POST') {
+      storedMode = (request.postDataJSON() as { mode: string }).mode;
+      backendCalls.push(`save:${storedMode}`);
+      return route.fulfill({ json: { success: true } });
+    }
+    if (holdCompatibilityGet) await compatibilityGet;
+    return route.fulfill({ json: { mode: storedMode, enabled: storedMode !== 'disabled', url: '' } });
+  });
+  await page.goto('/settings?tab=integrations');
+  const section = page.getByRole('region', { name: 'LLM Usage Tracking' });
+  await expect(page.getByRole('radio', { name: /Disabled/ })).toBeChecked();
+
+  holdCompatibilityGet = true;
+  await page.getByRole('radio', { name: /Bundled/ }).check();
+  // Well past the probe delay, and still nothing has been asked: a verdict here
+  // would read "Bundled Agent Tank unavailable" about a mode never stored.
+  await page.waitForTimeout(1200);
+  expect(backendCalls).toEqual([]);
+  await expect(section.getByRole('status')).toContainText('Checking connection');
+  await capture(page, 'agent-tank-bundled-awaiting-save');
+
+  releaseCompatibilityGet();
+
+  await expect(section.getByRole('status')).toContainText('Bundled Agent Tank ready');
+  expect(backendCalls).toEqual(['save:bundled', 'status:bundled']);
+  await capture(page, 'agent-tank-bundled-ready-after-save');
+});
