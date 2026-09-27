@@ -8,10 +8,8 @@ import os from 'os';
 import fs from 'fs-extra';
 import { validateTaskId } from './validation.js';
 import {
-  isConversationResultEmpty,
-  parseClaudeOutputToConversationResult,
-  parseCodexOutputToConversationResult,
-  type ConversationResult
+  isConversationResultEmpty, parseClaudeOutputToConversationResult,
+  parseCodexOutputToConversationResult, type ConversationResult
 } from './liveDetailsCodexParser.js';
 import { parseAntigravityOutputToConversationResult, parseVibeOutputToConversationResult } from './liveDetailsOutputParsers.js';
 import { parseOpenCodeOutputToConversationResult } from './liveDetailsOpenCodeParser.js';
@@ -124,11 +122,8 @@ function withStableResultEventIds(
   return {
     ...result,
     events: withStableLiveEventIds({
-      taskId,
-      source,
-      events: result.events,
-      totalEventCount: result.events.length,
-      executionNamespace,
+      taskId, source, events: result.events,
+      totalEventCount: result.events.length, executionNamespace,
     }),
   };
 }
@@ -303,11 +298,7 @@ async function parseActiveExecutionOutput(redisClient: RedisClientType, db: Knex
   if (events.length > 0 || todos.length > 0 || currentTask || tokenUsage) {
     return {
       events: events as unknown as Array<Record<string, unknown>>,
-      todos,
-      currentTask,
-      tokenUsage,
-      nativeGoal,
-      omittedEventCount,
+      todos, currentTask, tokenUsage, nativeGoal, omittedEventCount,
     };
   }
   // Output that is not a record stream (a stored result document) is projected whole.

@@ -1,21 +1,9 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import {
-  getTaskHistory,
-  getTaskAnalysis,
-  getTaskLiveDetails,
-  stopTaskExecution,
-  StopExecutionResponse,
-  deleteTask
+  getTaskHistory, getTaskAnalysis, getTaskLiveDetails,
+  stopTaskExecution, StopExecutionResponse, deleteTask
 } from '../../api/proprApi';
-import {
-  HistoryItem,
-  TaskInfo,
-  LiveDetails,
-  LiveEvent,
-  TodoItem,
-  AnalysisData,
-  UsageMetricRecord
-} from './types';
+import { HistoryItem, TaskInfo, LiveDetails, LiveEvent, TodoItem, AnalysisData, UsageMetricRecord } from './types';
 import { useToast } from '../ui/useToast';
 import { useSocket } from '../../contexts/useSocket';
 import { trustedPreviewMedia, type PublishedVisualPreview, type TaskUpdatePayload, type TaskLiveUpdatePayload } from '@propr/shared';
@@ -209,15 +197,9 @@ export const mergeIncrementalLiveDetails = (
   return {
     events: capped.events,
     ...omitted,
-    todos: hasUpdateField(payload, 'todos')
-      ? normalizeLiveTodos(payload.todos ?? [])
-      : previous.todos,
-    currentTask: hasUpdateField(payload, 'currentTask')
-      ? payload.currentTask ?? null
-      : previous.currentTask,
-    tokenUsage: hasUpdateField(payload, 'tokenUsage')
-      ? payload.tokenUsage ?? null
-      : previous.tokenUsage,
+    todos: hasUpdateField(payload, 'todos') ? normalizeLiveTodos(payload.todos ?? []) : previous.todos,
+    currentTask: hasUpdateField(payload, 'currentTask') ? payload.currentTask ?? null : previous.currentTask,
+    tokenUsage: hasUpdateField(payload, 'tokenUsage') ? payload.tokenUsage ?? null : previous.tokenUsage,
   };
 };
 
@@ -331,16 +313,10 @@ export const useTaskData = (taskId: string | undefined) => {
     const state = payload.state?.toUpperCase() || '';
     if (state === 'COMPLETED' && lastNotifiedStateRef.current !== 'COMPLETED') {
       lastNotifiedStateRef.current = 'COMPLETED';
-      addToast({
-        type: 'success',
-        message: 'Task completed successfully',
-      });
+      addToast({ type: 'success', message: 'Task completed successfully' });
     } else if (state === 'FAILED' && lastNotifiedStateRef.current !== 'FAILED') {
       lastNotifiedStateRef.current = 'FAILED';
-      addToast({
-        type: 'error',
-        message: 'Task execution failed',
-      });
+      addToast({ type: 'error', message: 'Task execution failed' });
     }
   }, [scheduleTaskHistoryRefresh, addToast]);
 
