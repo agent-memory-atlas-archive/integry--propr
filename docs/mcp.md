@@ -57,10 +57,21 @@ issue and starts the ordinary issue implementation workflow immediately, without
 a plan or goal. Repository write access is required. Optional `agentAlias` and
 `model` select supported routing; otherwise instance defaults apply.
 
+Optional automation matches `implement_plan`. `runUltrafix` (review scope) runs
+the review/fix loop on the resulting pull request as soon as it opens, bounded by
+`ultrafixGoal` (1-10, default 9) and `ultrafixMaxCycles` (1-10, default 3); both
+bounds apply only when `runUltrafix` is true. `autoMerge` (merge scope) merges
+the pull request once it is ready. Both opt-ins are applied as the shared
+`ultrafix` and `auto-merge` issue labels, so removing a label stops the
+automation exactly as it does for planned work.
+
 ```json
 {
   "repository": "owner/repo",
   "instruction": "Fix the invoice date format",
+  "runUltrafix": true,
+  "ultrafixGoal": 9,
+  "ultrafixMaxCycles": 3,
   "idempotencyKey": "invoice-date-fix-001"
 }
 ```
@@ -232,6 +243,12 @@ file summary; request `detail: "diff"` with an exact path for 16 KiB chunks.
 No tool downloads arbitrary remote URLs. Secret entry and browser push/login
 flows stay in the browser. Tool responses are bounded at 256 KiB and redact
 credential fields and recognizable token strings.
+
+`list_plans` takes an optional `status` filter alongside `offset`/`limit`:
+`active` (every plan that has not merged or failed), any persisted plan status
+(`draft`, `generating`, `refining`, `review`, `approved`, `executed`,
+`executing`, `pr_created`, `merged`, `failed`) or `all`, the default. The filter
+runs in the query, so `offset` and `limit` page the filtered set.
 
 List tools return bounded summaries rather than requiring one read per item.
 Task and goal entries include a concise title/summary, agent and model, linked

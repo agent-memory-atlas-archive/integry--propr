@@ -36,6 +36,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   consumed or mismatched identifiers by name rather than dropping them; a client
   sending only `findingIds` behaves exactly as before.
 
+- **Plan status filter over MCP**: the `list_plans` tool now takes an optional
+  `status` next to `repository`, `offset` and `limit` — `active` for every plan
+  that has not merged or failed, one exact persisted status (`draft`,
+  `generating`, `refining`, `review`, `approved`, `executed`, `executing`,
+  `pr_created`, `merged`, `failed`) or `all`, which stays the default so existing
+  callers see the same page. The filter is applied in the query, so `offset` and
+  `limit` paginate the filtered set instead of the whole repository, and the
+  response shape is unchanged. Mirrors the `state` filter `list_tasks` and
+  `list_goals` already expose. See [docs/mcp.md](docs/mcp.md).
 - **MCP operator surface**: a connected agent can now run an instance rather than
   only read and write one object at a time. `get_current_activity` answers "what
   is happening right now" across every repository in the grant — running tasks,
@@ -58,6 +67,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   summarized per connected app on `/mcp/apps`; the log stores names, identities,
   outcomes, sizes and durations, never tool arguments or payload content. See
   [docs/mcp.md](docs/mcp.md) and [docs/mcp-coverage.md](docs/mcp-coverage.md).
+- **Ultrafix and auto-merge for one-off MCP tasks**: `create_task` now takes the
+  same automation options `implement_plan` already had — `runUltrafix` with its
+  bounded `ultrafixGoal` (1-10, default 9) and `ultrafixMaxCycles` (1-10, default
+  3), plus `autoMerge`. Both opt-ins are applied as the shared `ultrafix` and
+  `auto-merge` issue labels, so the review-fix loop starts on the resulting pull
+  request as soon as it opens without a separate manual step, and removing a label
+  stops it exactly as it does for planned work. `runUltrafix` requires review
+  scope and `autoMerge` requires merge scope; the ultrafix bounds apply only when
+  `runUltrafix` is true. Existing callers are unaffected: both default to off.
 - **Cancel CI while follow-up implementation is in progress**: a new per-repository
   option (Repositories → Automation, off by default, also available through
   `POST /api/config/repos`) cancels the queued and running GitHub Actions
