@@ -7,10 +7,10 @@ export function withLiveOutputReads<T extends { get(key: string): Promise<string
   eval(script: string, options: { keys: string[]; arguments: string[] }): Promise<string[]>;
 } {
   return Object.assign(client, {
-    async eval(_script: string, { keys, arguments: args }: { keys: string[]; arguments: string[] }) {
+    async eval(_script: string, { keys }: { keys: string[]; arguments: string[] }) {
       const data = Buffer.from((await client.get(keys[0])) ?? '');
-      const from = Math.max(0, Number(args[0]));
-      const text = from < data.length ? data.subarray(from).toString() : '';
+      const from = 0;
+      const text = data.toString();
       return ['0', 'legacy', '0', '', String(from), text, String(data.length)];
     },
   });

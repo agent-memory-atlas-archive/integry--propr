@@ -3,9 +3,10 @@ import { getTaskLiveDetails } from '../../api/proprApi';
 import { useSocket } from '../../contexts/useSocket';
 import type { TaskLiveUpdatePayload } from '@propr/shared';
 import type { LiveDetails } from './types';
+import { isFinishedTask } from './liveDetailsMerge';
 import { applyTaskLiveUpdate, mergeFullLiveDetails } from './useTaskData';
 
-export function useTaskLiveData(taskId: string | undefined, pollIntervalMs = 5_000) {
+export function useTaskLiveData(taskId: string | undefined, pollIntervalMs = 5_000, taskState?: string) {
   const [liveDetails, setLiveDetails] = useState<LiveDetails>({ events: [], todos: [], currentTask: null });
   const {
     subscribeToTaskLive,
@@ -16,6 +17,9 @@ export function useTaskLiveData(taskId: string | undefined, pollIntervalMs = 5_0
 
   const activeTaskId = useRef(taskId);
   activeTaskId.current = taskId;
+  const isLive = !isFinishedTask(taskState);
+  const liveSelection = useRef(isLive);
+  liveSelection.current = isLive;
   const requestSequence = useRef(0);
   const pendingRead = useRef<TaskLiveUpdatePayload[] | null>(null);
 
@@ -37,7 +41,8 @@ export function useTaskLiveData(taskId: string | undefined, pollIntervalMs = 5_0
       const received = [...updates];
       setLiveDetails(previous => {
         if (activeTaskId.current !== taskId || sequence !== requestSequence.current) return previous;
-        return received.reduce(applyTaskLiveUpdate, mergeFullLiveDetails(previous, data));
+        return received.reduce((state, update) => applyTaskLiveUpdate(state, update, liveSelection.current),
+          mergeFullLiveDetails(previous, data, liveSelection.current));
       });
       return data;
     } catch {
@@ -52,7 +57,7 @@ export function useTaskLiveData(taskId: string | undefined, pollIntervalMs = 5_0
     if (!taskId || pollIntervalMs <= 0) return;
     const timer = window.setInterval(() => { void refresh(); }, pollIntervalMs);
     return () => window.clearInterval(timer);
-  }, [pollIntervalMs, refresh, taskId]);
+  }, [isLive, pollIntervalMs, refresh, taskId]);
 
   useEffect(() => {
     if (!taskId || !isConnected) return;
@@ -60,7 +65,7 @@ export function useTaskLiveData(taskId: string | undefined, pollIntervalMs = 5_0
     const unsubscribe = onTaskLiveUpdate((payload: TaskLiveUpdatePayload) => {
       if (payload.taskId !== taskId || activeTaskId.current !== taskId) return;
       pendingRead.current?.push(payload);
-      setLiveDetails(previous => applyTaskLiveUpdate(previous, payload));
+      setLiveDetails(previous => applyTaskLiveUpdate(previous, payload, liveSelection.current));
     });
     return () => {
       unsubscribe();

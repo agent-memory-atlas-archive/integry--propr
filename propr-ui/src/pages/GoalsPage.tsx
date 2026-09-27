@@ -853,7 +853,7 @@ function GoalDetails({ goalId }: { goalId: string }) {
   const [error, setError] = useState<string | null>(null);
   const [outputMode, setOutputMode] = useState<'readable' | 'terminal'>('readable');
   const [visualPreviews, setVisualPreviews] = useState<GoalVisualPreview[]>([]);
-  const { liveDetails: live } = useTaskLiveData(goal?.taskId);
+  const { liveDetails: live } = useTaskLiveData(goal?.taskId, 5_000, goal?.taskState);
   const goalHistory = useMemo(() => goal?.startedAt
     ? [{ state: 'CLAUDE_EXECUTION', timestamp: goal.startedAt }]
     : [], [goal?.startedAt]);

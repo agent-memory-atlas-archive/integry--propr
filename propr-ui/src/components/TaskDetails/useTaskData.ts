@@ -10,7 +10,9 @@ import { trustedPreviewMedia, type PublishedVisualPreview, type TaskUpdatePayloa
 import { isAnalysisData, normalizeAnalysisData } from './apiDataGuards';
 import { useLiveRefreshScheduler } from '../../hooks/useLiveRefreshScheduler';
 import { useCurrentUser } from '../../contexts/AuthContext';
+import { capLiveEvents, isFinishedTask, mergeFullLiveDetails } from './liveDetailsMerge';
 import { getDesktopSocketConfigurationKey } from '../../api/apiClient';
+export { capLiveEvents, MAX_LIVE_RAW_EVENTS, mergeFullLiveDetails } from './liveDetailsMerge';
 
 interface TaskHistoryData {
   history?: HistoryItem[];
@@ -70,26 +72,6 @@ const legacyEventFingerprint = (event: LiveDetails['events'][number]) => {
   })}`;
 };
 
-/** Raw terminal events kept in a live view; readable (`thought`) events are always kept. */
-export const MAX_LIVE_RAW_EVENTS = 500;
-
-/** Keeps every readable event and only the most recent raw ones. */
-export const capLiveEvents = (events: LiveEvent[], maxRawEvents = MAX_LIVE_RAW_EVENTS): { events: LiveEvent[]; dropped: number } => {
-  let raw = 0;
-  for (const event of events) if (event.type !== 'thought') raw += 1;
-  let skip = Math.max(0, raw - maxRawEvents);
-  const dropped = skip;
-  if (skip === 0) return { events, dropped };
-  return {
-    events: events.filter(event => {
-      if (event.type === 'thought' || skip === 0) return true;
-      skip -= 1;
-      return false;
-    }),
-    dropped,
-  };
-};
-
 /**
  * Appends events not seen yet and updates events whose content changed (a
  * buffered assistant message keeps its ID while it grows).
@@ -132,50 +114,6 @@ const appendUniqueEvents = (
   return uniqueNewEvents.length > 0 ? [...base, ...uniqueNewEvents] : base;
 };
 
-/** Execution identity is encoded in the first four segments of server event IDs. */
-const executionIdentity = (events: LiveEvent[]): string | null => {
-  const identities = new Set(events.flatMap(event =>
-    event.id?.match(/^live:[^:]+:(?:redis|conversation|stored|database):[^:]+:/)?.[0] ?? []));
-  return identities.size === 1 ? [...identities][0] : null;
-};
-
-/** Full state sets shared-event order while retaining history collected in this execution. */
-export const mergeFullLiveDetails = (previous: LiveDetails, full: LiveDetails): LiveDetails => {
-  const fullEvents = full.events || [];
-  const fullIds = new Set(fullEvents.flatMap(event => event.id ? [event.id] : []));
-  const previousIdentity = executionIdentity(previous.events);
-  const fullIdentity = executionIdentity(fullEvents);
-  const sameExecution = previousIdentity && fullIdentity
-    ? previousIdentity === fullIdentity
-    : previous.events.some(event => event.id && fullIds.has(event.id));
-  const events: LiveEvent[] = [];
-  if (sameExecution) {
-    // Place missing history before its next shared event. This preserves prefixes
-    // lost to Redis trimming as well as increments received after the snapshot.
-    const before = new Map<string, LiveEvent[]>();
-    let missing: LiveEvent[] = [];
-    for (const event of previous.events) {
-      if (event.id && fullIds.has(event.id)) {
-        before.set(event.id, missing);
-        missing = [];
-      } else missing.push(event);
-    }
-    if (before.size === 0) events.push(...missing, ...fullEvents);
-    else {
-      for (const event of fullEvents) events.push(...(event.id ? before.get(event.id) ?? [] : []), event);
-      events.push(...missing);
-    }
-  } else events.push(...fullEvents);
-  const capped = capLiveEvents(events);
-  return {
-    events: capped.events,
-    todos: full.todos || [],
-    currentTask: full.currentTask || null,
-    tokenUsage: full.tokenUsage || null,
-    omittedEventCount: (full.omittedEventCount ?? 0) + capped.dropped,
-  };
-};
-
 export type IncrementalTaskLiveUpdatePayload = Pick<TaskLiveUpdatePayload, 'taskId'>
   & Partial<Omit<TaskLiveUpdatePayload, 'taskId'>>;
 
@@ -187,10 +125,12 @@ const hasUpdateField = (
 
 export const mergeIncrementalLiveDetails = (
   previous: LiveDetails,
-  payload: IncrementalTaskLiveUpdatePayload
+  payload: IncrementalTaskLiveUpdatePayload,
+  isLive = true
 ): LiveDetails => {
   const newEvents: LiveEvent[] = payload.events || [];
-  const capped = capLiveEvents(appendUniqueEvents(previous.events, newEvents));
+  const events = appendUniqueEvents(previous.events, newEvents);
+  const capped = isLive ? capLiveEvents(events) : { events, dropped: 0 };
   const omitted = previous.omittedEventCount !== undefined || capped.dropped > 0
     ? { omittedEventCount: (previous.omittedEventCount ?? 0) + capped.dropped }
     : {};
@@ -204,15 +144,15 @@ export const mergeIncrementalLiveDetails = (
 };
 
 /** A socket payload carrying `omittedEventCount` is full state (initial, or after a resync); others are increments. */
-export const applyTaskLiveUpdate = (previous: LiveDetails, payload: IncrementalTaskLiveUpdatePayload): LiveDetails => {
-  if (payload.omittedEventCount === undefined) return mergeIncrementalLiveDetails(previous, payload);
+export const applyTaskLiveUpdate = (previous: LiveDetails, payload: IncrementalTaskLiveUpdatePayload, isLive = true): LiveDetails => {
+  if (payload.omittedEventCount === undefined) return mergeIncrementalLiveDetails(previous, payload, isLive);
   return mergeFullLiveDetails(previous, {
     events: payload.events || [],
     todos: normalizeLiveTodos(payload.todos || []),
     currentTask: payload.currentTask || null,
     tokenUsage: payload.tokenUsage || null,
     omittedEventCount: payload.omittedEventCount,
-  });
+  }, isLive);
 };
 
 export const useTaskData = (taskId: string | undefined) => {
@@ -235,6 +175,9 @@ export const useTaskData = (taskId: string | undefined) => {
   const lastNotifiedStateRef = useRef<string | null>(null);
   const hasReceivedSocketStateRef = useRef<boolean>(false);
   const socketRevisionRef = useRef(0);
+  const liveReadSequence = useRef(0);
+  const finishedLiveReadScope = useRef<string | null>(null);
+  const pendingLiveRead = useRef<TaskLiveUpdatePayload[] | null>(null);
   // Track if we've received initial data from WebSocket (to distinguish initial vs incremental updates)
   // A route parameter can change without unmounting this hook. Late responses
   // from the previous task must never replace the newly selected task's data.
@@ -272,18 +215,33 @@ export const useTaskData = (taskId: string | undefined) => {
     if (!taskId) return null;
     const requestedScope = requestScopeKey;
     const socketRevision = socketRevisionRef.current;
+    const finishedAtRequest = isFinishedTask(latestHistoryRef.current.at(-1)?.state);
+    const sequence = ++liveReadSequence.current;
+    const updates: TaskLiveUpdatePayload[] = [];
+    pendingLiveRead.current = updates;
 
     try {
       const data = await getTaskLiveDetails(taskId) as LiveDetails;
-      if (activeRequestScopeRef.current !== requestedScope) return data;
+      if (activeRequestScopeRef.current !== requestedScope || sequence !== liveReadSequence.current) return data;
       // The socket subscription runs in parallel with this read, and its first
       // payload is already full state. Never let an older HTTP snapshot replace
       // newer socket state that arrived while the request was pending.
-      if (!hasReceivedSocketStateRef.current && socketRevision === socketRevisionRef.current) setLiveDetails(previous => mergeFullLiveDetails(previous, data));
+      const isLive = !isFinishedTask(latestHistoryRef.current.at(-1)?.state);
+      if (!isLive || (!hasReceivedSocketStateRef.current && socketRevision === socketRevisionRef.current)) {
+        finishedLiveReadScope.current = finishedAtRequest ? requestedScope : null;
+        const received = [...updates];
+        setLiveDetails(previous => {
+          if (activeRequestScopeRef.current !== requestedScope || sequence !== liveReadSequence.current) return previous;
+          return received.reduce((state, update) => applyTaskLiveUpdate(state, update, isLive),
+            mergeFullLiveDetails(previous, data, isLive));
+        });
+      }
       return data;
     } catch (err) {
       console.error('Error fetching persisted live details:', err);
       return null;
+    } finally {
+      if (pendingLiveRead.current === updates) pendingLiveRead.current = null;
     }
   }, [requestScopeKey, taskId]);
 
@@ -328,7 +286,8 @@ export const useTaskData = (taskId: string | undefined) => {
 
     hasReceivedSocketStateRef.current = true;
     socketRevisionRef.current += 1;
-    setLiveDetails(previous => applyTaskLiveUpdate(previous, payload));
+    pendingLiveRead.current?.push(payload);
+    setLiveDetails(previous => applyTaskLiveUpdate(previous, payload, !isFinishedTask(latestHistoryRef.current.at(-1)?.state)));
   }, []);
 
   // Initial data fetch
@@ -358,6 +317,13 @@ export const useTaskData = (taskId: string | undefined) => {
     void fetchInitialData();
     return () => { active = false; };
   }, [taskId, scheduleTaskHistoryRefresh, fetchPersistedLiveDetails]);
+
+  const finished = isFinishedTask(history.at(-1)?.state);
+  useEffect(() => {
+    // Live payloads only included the retained window. Fetch full history on completion.
+    if (!finished) finishedLiveReadScope.current = null;
+    else if (!loading && finishedLiveReadScope.current !== requestScopeKey) void fetchPersistedLiveDetails();
+  }, [finished, loading, requestScopeKey, fetchPersistedLiveDetails]);
 
   // Subscribe to WebSocket events for this task
   useEffect(() => {

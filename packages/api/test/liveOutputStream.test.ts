@@ -7,6 +7,7 @@ import type { Server as SocketIOServer } from 'socket.io';
 import { db, liveOutputKey, liveOutputMetaKey, writeLiveOutput } from '@propr/core';
 import { LiveOutputProjector, projectLiveOutput, readLiveOutput } from '../services/liveOutputStream.js';
 import { selectLiveEvents } from '../services/liveEventSelection.js';
+import { withLiveOutputReads } from './liveOutputRedisFake.js';
 import { TaskWatcherManager } from '../services/taskWatcher.js';
 
 const host = process.env.REDIS_HOST ?? '127.0.0.1';
@@ -262,6 +263,87 @@ for (const format of ['records', 'compact-array', 'formatted-array']) {
       gate = null;
       await latePoll;
       assert.equal(emitted.length, 3, 'a removed watcher cannot publish a late read');
+    } finally { await manager.closeAll(); }
+  });
+}
+
+
+test('full reads with and without live selection project 500,000 readable records below the retention ceiling', async () => {
+  const count = 500_000;
+  const output = `${JSON.stringify({ type: 'assistant', message: { content: [{ type: 'text', text: 'x' }] } })}\n`.repeat(count);
+  assert.ok(Buffer.byteLength(output) < 64 * 1024 * 1024);
+  const redis = withLiveOutputReads({ get: () => output });
+  for (const selectEvents of [false, true]) {
+    const full = await projectLiveOutput(redis, 'large', null, { selectEvents });
+    assert.equal(full?.events.length, count);
+    assert.equal(full?.events.at(-1)?.content, 'x');
+    assert.equal(full?.omittedEventCount, 0);
+    assert.equal(full?.projector.offset, Buffer.byteLength(output));
+  }
+});
+
+test('legacy atomic reads return the whole snapshot even beyond its end', async t => {
+  const taskId = await freshTask(t);
+  if (!taskId) return;
+  const output = `${claudeRecords[2]}\n`;
+  await writer!.set(liveOutputKey(taskId), output, 'EX', 60);
+  const read = await readLiveOutput(reader!, taskId, Buffer.byteLength(output) + 100);
+  assert.equal(read?.from, 0);
+  assert.equal(read?.text, output);
+  assert.equal(read?.epoch, 'legacy');
+});
+
+for (const format of ['records', 'array']) {
+  test(`legacy ${format} watchers compare complete replacements and keep authority across awaits`, async () => {
+    const taskId = `legacy-${format}`;
+    const snapshot = (content: string) => format === 'records'
+      ? `${JSON.stringify({ type: 'assistant', message: { content: [{ type: 'text', text: content }] } })}\n`
+      : JSON.stringify([{ role: 'assistant', content }]);
+    let output = snapshot('First');
+    let gate: ReturnType<typeof deferred<void>> | null = null;
+    let entered = deferred<void>();
+    const redis = withLiveOutputReads({ get: async (key: string) => {
+      if (key.startsWith('worker:state:')) {
+        if (gate) { entered.resolve(); await gate.promise; }
+        return JSON.stringify({ history: [{ state: 'claude_execution', timestamp: '2026-09-27T00:00:00Z' }] });
+      }
+      return key === liveOutputKey(taskId) ? output : null;
+    } });
+    const emitted: Array<{ events: Array<{ content?: string }>; omittedEventCount?: number }> = [];
+    const io = { to: () => ({ emit: (_event: string, payload: typeof emitted[number]) => emitted.push(payload) }) } as unknown as SocketIOServer;
+    const manager = new TaskWatcherManager(io);
+    manager.setDeps({ redisClient: redis as unknown as RedisClientType, db: {} as Knex });
+    const send = (manager as unknown as { sendRedisLiveUpdate: (id: string) => Promise<void> }).sendRedisLiveUpdate.bind(manager);
+    try {
+      await manager.startTaskWatcher(taskId);
+      for (const content of ['Other', 'Tiny', 'A larger snapshot']) {
+        output = snapshot(content);
+        await send(taskId);
+        assert.deepEqual(emitted.at(-1)?.events.map(event => event.content), [content]);
+        assert.equal(emitted.at(-1)?.omittedEventCount, 0);
+        const sent = emitted.length;
+        await send(taskId);
+        assert.equal(emitted.length, sent, 'unchanged legacy snapshots are silent');
+      }
+      output = snapshot('Read before lookup');
+      gate = deferred<void>();
+      const poll = send(taskId);
+      await entered.promise;
+      output = snapshot('Written during lookup');
+      gate.resolve(); gate = null;
+      await poll;
+      assert.equal(emitted.at(-1)?.events[0].content, 'Read before lookup');
+      await send(taskId);
+      assert.equal(emitted.at(-1)?.events[0].content, 'Written during lookup', 'comparison evidence matches the projected read');
+      output = snapshot('Removed watcher');
+      gate = deferred<void>(); entered = deferred<void>();
+      const removed = send(taskId);
+      await entered.promise;
+      const sent = emitted.length;
+      await manager.closeAll();
+      gate.resolve(); gate = null;
+      await removed;
+      assert.equal(emitted.length, sent);
     } finally { await manager.closeAll(); }
   });
 }

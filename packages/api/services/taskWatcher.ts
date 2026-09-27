@@ -10,11 +10,16 @@ import { TASK_LIVE_UPDATE, type TaskLiveUpdatePayload } from '@propr/shared';
 import { parseConversationFile } from './conversationParser.js';
 import { withStableLiveEventIds } from './liveEventIds.js';
 import { selectLiveEvents } from './liveEventSelection.js';
-import { projectLiveOutput, readLiveOutput, type LiveOutputProjector, type LiveOutputRedis } from './liveOutputStream.js';
+import { projectLiveOutputRead, readLiveOutput, type LiveOutputProjector, type LiveOutputRead, type LiveOutputRedis } from './liveOutputStream.js';
 import { resolveConfigPath } from '@propr/core';
 import { findAgentConfigForTask, findExecutionStartTimestampForTask } from './taskWatcherLookup.js';
 
 const LIVE_EXECUTION_STATES = new Set(['claude_execution', 'codex_execution', 'gemini_execution', 'opencode_execution']);
+
+function canContinueProjection(projector: LiveOutputProjector, read: LiveOutputRead): boolean {
+  return read.epoch !== 'legacy' && read.epoch === projector.epoch
+    && read.start === projector.start && read.from === projector.offset;
+}
 
 /** Active task watcher info */
 export interface TaskWatcherInfo {
@@ -31,6 +36,8 @@ export interface TaskWatcherInfo {
   redisPollingInterval?: ReturnType<typeof setInterval>;
   /** Redis watchers: projection of the append-only live output read so far. */
   liveProjector?: LiveOutputProjector;
+  /** Exact metadata-free snapshot last projected; legacy writers may replace any byte. */
+  lastLegacySnapshot?: string;
   liveReadPromise?: Promise<void>;
   /** Last broadcast buffered message and snapshot, so unchanged polls send nothing. */
   lastPendingSignature?: string;
@@ -488,7 +495,8 @@ export class TaskWatcherManager {
    * Events to broadcast from the task's append-only live output. After the
    * first read only output past the last read is fetched and parsed; a new
    * execution, or output trimmed past what was read, starts over from the top
-   * and is sent as full state (with `omittedEventCount`).
+   * and is sent as full state (with `omittedEventCount`). Legacy replacement
+   * writers are compared and projected as complete snapshots on every change.
    */
   private async readRedisLiveEvents(
     taskId: string,
@@ -497,24 +505,34 @@ export class TaskWatcherManager {
   ): Promise<{ events: TaskLiveUpdatePayload['events']; omittedEventCount?: number; projector: LiveOutputProjector } | null> {
     const redis = this.deps!.redisClient as unknown as LiveOutputRedis;
     const projector = isInitial ? undefined : watcherInfo.liveProjector;
-    const read = projector ? await readLiveOutput(redis, taskId, projector.offset) : null;
+    const read = await readLiveOutput(redis, taskId, projector?.offset ?? 0);
     if (this.taskWatchers.get(taskId) !== watcherInfo) return null;
-    if (projector && read && read.epoch === projector.epoch && read.start === projector.start && read.from === projector.offset) {
-      const events = projector.feed(read.text, read.from);
-      const pending = projector.pending();
-      const pendingSignature = pending ? `${pending.id}:${String((pending as { content?: unknown }).content ?? '').length}` : '';
-      if (pending && pendingSignature !== watcherInfo.lastPendingSignature) events.push(pending);
-      watcherInfo.lastPendingSignature = pendingSignature;
-      if (events.length > 0) console.log(`[TaskWatcher] Redis update for task ${taskId}: sending ${events.length} new events`);
-      return { events, projector };
+    if (!read) return null;
+    if (!isInitial && read.epoch === 'legacy' && read.text === watcherInfo.lastLegacySnapshot) return null;
+    if (projector && canContinueProjection(projector, read)) {
+      return this.continueRedisProjection(taskId, watcherInfo, projector, read);
     }
-    if (projector && !read) return null;
-
-    const full = await projectLiveOutput(redis, taskId, await this.findExecutionStartTimestampForTask(taskId));
-    if (!full || this.taskWatchers.get(taskId) !== watcherInfo) return null;
+    const executionStart = await this.findExecutionStartTimestampForTask(taskId);
+    if (this.taskWatchers.get(taskId) !== watcherInfo) return null;
+    // Incremental reads that need resync may begin after the retained prefix.
+    const fullRead = read.epoch === 'legacy' || read.from === read.base ? read : await readLiveOutput(redis, taskId);
+    if (!fullRead || this.taskWatchers.get(taskId) !== watcherInfo) return null;
+    const full = projectLiveOutputRead(fullRead, taskId, executionStart);
+    watcherInfo.lastLegacySnapshot = fullRead.epoch === 'legacy' ? fullRead.text : undefined;
     watcherInfo.liveProjector = full.projector;
     console.log(`[TaskWatcher] Full Redis update for task ${taskId}: sending ${full.events.length} events (${full.omittedEventCount} raw events omitted)`);
     return { events: full.events, omittedEventCount: full.omittedEventCount, projector: full.projector };
+  }
+
+
+  private continueRedisProjection(taskId: string, watcherInfo: TaskWatcherInfo, projector: LiveOutputProjector, read: LiveOutputRead) {
+    const events = projector.feed(read.text, read.from);
+    const pending = projector.pending();
+    const pendingSignature = pending ? `${pending.id}:${String((pending as { content?: unknown }).content ?? '').length}` : '';
+    if (pending && pendingSignature !== watcherInfo.lastPendingSignature) events.push(pending);
+    watcherInfo.lastPendingSignature = pendingSignature;
+    if (events.length > 0) console.log(`[TaskWatcher] Redis update for task ${taskId}: sending ${events.length} new events`);
+    return { events, projector };
   }
 
 

@@ -26,7 +26,8 @@ const READ_LIVE_OUTPUT_SCRIPT = `
 local meta = redis.call('hmget', KEYS[2], 'base', 'epoch', 'start', 'head')
 local base = tonumber(meta[1] or '0') or 0
 local length = redis.call('strlen', KEYS[1])
-local from = tonumber(ARGV[1])
+-- Metadata-free workers replace whole snapshots, including at the retention ceiling.
+local from = meta[2] and tonumber(ARGV[1]) or 0
 if from < base then from = base end
 local text = ''
 if from - base < length then text = redis.call('getrange', KEYS[1], from - base, length - 1) end
@@ -41,7 +42,7 @@ export interface LiveOutputRead {
   /** Absolute offset where this execution began, and its first record (kept even once trimmed). */
   start: number;
   head: string;
-  /** Absolute offset `text` begins at; later than requested when those bytes were trimmed. */
+  /** Offset of `text`: later than requested after trimming; always zero for legacy snapshots. */
   from: number;
   text: string;
 }
@@ -144,7 +145,7 @@ export class LiveOutputProjector {
    * sequence of incremental reads choose the same parser.
    */
   private decide(entries: Array<{ line: string; offset: number }>): LiveEvent[] {
-    this.preamble.push(...entries);
+    for (const entry of entries) this.preamble.push(entry);
     this.preambleBytes += entries.reduce((total, entry) => total + entry.line.length + 1, 0);
     const format = detectStoredOutputFormat(this.preamble.map(entry => entry.line).join('\n'));
     if (format === 'unknown' && this.preamble.length < MAX_PREAMBLE_RECORDS && this.preambleBytes < MAX_PREAMBLE_BYTES) return [];
@@ -302,11 +303,22 @@ export async function projectLiveOutput(
 ): Promise<LiveOutputProjectionResult | null> {
   const read = await readLiveOutput(redis, taskId, 0);
   if (!read) return null;
+  return projectLiveOutputRead(read, taskId, executionStartTimestamp, { selectEvents });
+}
+
+/** Project exactly the snapshot read, without another Redis read across an await. */
+export function projectLiveOutputRead(
+  read: LiveOutputRead,
+  taskId: string,
+  executionStartTimestamp: string | null = null,
+  { selectEvents = true }: { selectEvents?: boolean } = {},
+): LiveOutputProjectionResult {
   const projector = new LiveOutputProjector({ taskId, epoch: read.epoch, offset: read.from, start: read.start, executionStartTimestamp });
   const truncated = read.base > read.start;
   // The first record identifies the provider; it survives trimming in `head`.
   const events = truncated && read.head ? projector.feed(`${read.head}\n`, read.start) : [];
-  events.push(...projector.feed(read.text, read.from), ...projector.heldEvents());
+  for (const event of projector.feed(read.text, read.from)) events.push(event);
+  for (const event of projector.heldEvents()) events.push(event);
   const pending = projector.pending();
   const all = pending ? [...events, pending] : events;
   const selected = selectEvents ? selectLiveEvents(all) : { events: all, omittedEventCount: 0 };
