@@ -1,8 +1,8 @@
-import { act, render } from '@testing-library/react';
+import { act, render, screen } from '@testing-library/react';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { MemoryRouter } from 'react-router-dom';
 import { SocketContext, type SocketContextValue } from '../contexts/SocketContext';
-import { NotificationCenterProvider } from '../contexts/NotificationCenterContext';
+import { NotificationCenterProvider, useNotificationCenter } from '../contexts/NotificationCenterContext';
 import { SystemStatusProvider } from '../contexts/SystemStatusContext';
 import AgentTankSidebar from '../components/AgentTankSidebar';
 import SystemStatus from '../components/SystemStatus';
@@ -32,7 +32,13 @@ const socket = {
   onUsageUpdate: register('usage'), onGoalUpdate: register('goal'), onTaskUpdate: register('task'),
   onDraftUpdate: register('draft'), onQueueStatsUpdate: register('queue'),
 } as unknown as SocketContextValue;
-function InboxAndHeader() { useInboxNotifications(); useHeaderStats(); return null; }
+function InboxAndHeader() {
+  const inbox = useInboxNotifications();
+  const center = useNotificationCenter();
+  useHeaderStats();
+  return <><output data-testid="inbox-state">{JSON.stringify(inbox.notifications)}</output>
+    <output data-testid="unread-count">{center.unreadCount}</output></>;
+}
 function tree() {
   return <SocketContext.Provider value={{ ...socket }}><MemoryRouter>
     <SystemStatusProvider><NotificationCenterProvider>
@@ -69,4 +75,43 @@ it('keeps all five connected consumers idle, then reconciles matching pushes and
   socket.isConnected = false; rerender(tree()); await advance(60_100);
   expect(reads.usage.mock.calls.length).toBeGreaterThan(initial.usage + 1);
   expect(reads.inbox.mock.calls.length).toBeGreaterThan(initial.inbox + 1);
+});
+
+it.each(['read', 'dismissed'])('reconciles a committed %s notification whose publication was dropped while connected', async change => {
+  const notification = { id: 'event-1', kind: 'task', title: 'Task completed',
+    createdAt: '2026-09-27T00:00:00.000Z', readAt: null };
+  let notifications: Array<{ readAt: string | null }> = [notification];
+  let unreadCount = 1;
+  reads.inbox.mockImplementation(async () => ({ notifications, unreadCount, nextCursor: null }));
+  reads.unread.mockImplementation(async () => ({ unreadCount }));
+  render(tree()); await advance(100);
+  expect(screen.getByTestId('inbox-state').textContent).toContain('event-1');
+  expect(screen.getByTestId('unread-count').textContent).toBe('1');
+  // Another session committed this mutation. Neither the publication timeout
+  // nor its cooldown delivers an event; the browser socket remains healthy.
+  notifications = change === 'read' ? [{ ...notification, readAt: '2026-09-27T00:01:00.000Z' }] : [];
+  unreadCount = 0;
+  await advance(180_000);
+  expect(reads.inbox).toHaveBeenCalledTimes(1);
+  expect(screen.getByTestId('unread-count').textContent).toBe('1');
+  await advance(120_000);
+  expect(socket.isConnected).toBe(true);
+  expect(reads.inbox).toHaveBeenCalledTimes(2);
+  expect(reads.drafts).toHaveBeenCalledTimes(2);
+  expect(reads.tasks).toHaveBeenCalledTimes(2);
+  expect(screen.getByTestId('unread-count').textContent).toBe('0');
+  expect(JSON.parse(screen.getByTestId('inbox-state').textContent!)).toEqual(notifications);
+});
+
+it('replaces displayed usage when sampling announces an outage and restores it on recovery', async () => {
+  const usage = { enabled: true, agents: { claude: { name: 'claude', usage: { session: { percent: 42 } } } } };
+  reads.usage.mockResolvedValue(usage);
+  render(tree()); await advance(100);
+  expect(screen.getByText('Usage')).toBeInTheDocument();
+  reads.usage.mockResolvedValue({ enabled: true, error: 'unreachable' });
+  emit('usage'); await advance(100);
+  expect(screen.queryByText('Usage')).not.toBeInTheDocument();
+  reads.usage.mockResolvedValue(usage);
+  emit('usage'); await advance(100);
+  expect(screen.getByText('Usage')).toBeInTheDocument();
 });

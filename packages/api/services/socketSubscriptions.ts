@@ -226,6 +226,14 @@ export class SocketSubscriptionManager {
   }
 
   private setupActivityHandlers(socket: Socket): void {
+    // Instance-wide activity is opt-in, so a socket opened only to watch one
+    // task's live output does not receive every frame on the instance. The
+    // envelope carries ids, a repository and a change - strictly less than the
+    // task payloads every authenticated socket already receives in the
+    // instance-operational room - so it needs no further permission. Anything
+    // narrower than the instance, notification and planner activity, is emitted
+    // to its owner's room instead.
+    //
     // Serialize join/leave across awaited adapter operations. An unsubscribe
     // during authentication or join must not leave a late membership behind.
     let tail = Promise.resolve();

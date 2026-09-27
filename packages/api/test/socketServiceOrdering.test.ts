@@ -3,12 +3,12 @@ import { after, describe, test } from 'node:test';
 import { closeConnection } from '@propr/core';
 import { ACTIVITY_UPDATE, NOTIFICATION_UPDATE, TASK_UPDATE, type TaskUpdatePayload } from '@propr/shared';
 import { ACTIVITY_ROOM, activityUserRoom } from '../services/socketSubscriptions.js';
+import { SocketService } from '../services/socketService.js';
 import {
   loadDurableTaskRevision,
   readCachedTaskRevision,
   shouldBroadcastTaskUpdate,
-  SocketService,
-} from '../services/socketService.js';
+} from '../services/taskRevisionOrdering.js';
 
 after(async () => { await closeConnection(); });
 
@@ -27,7 +27,7 @@ describe('SocketService task update ordering', () => {
       io: {
         to: (room: string) => {
           to: (additionalRoom: string) => unknown;
-          emit: (event: string, payload: TaskUpdatePayload) => void;
+          emit: (event: string, payload: Record<string, unknown>) => void;
         };
       };
       queueDeps: {
@@ -158,13 +158,19 @@ test('relays both notification publisher formats only to their recipients', () =
     occurredAt: new Date(0).toISOString() };
   internals.handleEvent('', { ...common, recipientId: 'alice' });
   internals.handleEvent('', { ...common, recipientIds: ['bob', 'bob', 'carol'], repository: null });
-  assert.deepEqual(broadcasts.map(({ room }) => room), [
-    activityUserRoom('alice'), activityUserRoom('bob'), activityUserRoom('carol'),
+  assert.deepEqual(broadcasts.map(({ room, event }) => ({ room, event })), [
+    { room: activityUserRoom('alice'), event: NOTIFICATION_UPDATE },
+    { room: activityUserRoom('bob'), event: NOTIFICATION_UPDATE },
+    { room: activityUserRoom('bob'), event: ACTIVITY_UPDATE },
+    { room: activityUserRoom('carol'), event: NOTIFICATION_UPDATE },
+    { room: activityUserRoom('carol'), event: ACTIVITY_UPDATE },
   ]);
-  for (const broadcast of broadcasts) {
-    assert.equal(broadcast.event, NOTIFICATION_UPDATE);
+  const notifications = broadcasts.filter(broadcast => broadcast.event === NOTIFICATION_UPDATE);
+  for (const broadcast of notifications) {
     assert.equal('recipientId' in broadcast.payload, false);
-    assert.equal('recipientIds' in broadcast.payload, false);
     assert.equal(broadcast.payload.eventId, common.eventId);
   }
+  assert.equal('recipientIds' in notifications[0].payload, false);
+  assert.deepEqual(notifications[1].payload.recipientIds, ['bob']);
+  assert.deepEqual(notifications[2].payload.recipientIds, ['carol']);
 });

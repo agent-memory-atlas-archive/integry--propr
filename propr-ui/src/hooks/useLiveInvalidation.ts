@@ -1,7 +1,7 @@
 import { useEffect } from 'react';
 import { useOptionalSocket } from '../contexts/useSocket';
 import { matchesInterest, type LiveResourceInterest } from './useLiveResource';
-import { useLiveRefreshScheduler } from './useLiveRefreshScheduler';
+import { CONNECTED_RECONCILE_MS, useLiveRefreshScheduler } from './useLiveRefreshScheduler';
 
 /** Push scheduling for projections that already own state and mutation ordering. */
 export function useLiveInvalidation({ refresh, scopeKey, interest, disabled = false, fallbackPollMs = 30_000 }: {
@@ -20,6 +20,7 @@ export function useLiveInvalidation({ refresh, scopeKey, interest, disabled = fa
     refresh: () => disabled ? undefined : refresh(),
     scopeKey,
     fallbackPollMs,
+    connectedPollMs: disabled ? undefined : CONNECTED_RECONCILE_MS,
   });
   const { refreshNow } = schedule;
   useEffect(() => {

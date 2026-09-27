@@ -532,7 +532,9 @@ async function handleUltrafixCommand(opts: UltrafixCommandOptions): Promise<void
         // 7. Build a command meta for the first action (review or fix), carrying ultrafix metadata
         const firstActionMeta: CommandMeta = initialAction === 'review'
             ? { mode: 'review', models: effectiveReviewModel ? [effectiveReviewModel] : [], instructions: commandMeta.instructions }
-            : { mode: 'fix', instructions: commandMeta.instructions };
+            // No command line: an ultrafix loop selects blockers itself, so none of
+            // its instruction prose may ever be read as a record selection.
+            : { mode: 'fix', commandLine: '', bodyInstructions: commandMeta.instructions, instructions: commandMeta.instructions };
 
         // 8. Enqueue the first step with ultrafix metadata
         await enqueueNewCommentJob(strippedComment, commentAuthor, eventContext, {

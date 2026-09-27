@@ -1,6 +1,10 @@
 import { Request, Response } from 'express';
 import * as configManager from '@propr/core';
-import { normalizeAgentTankAgents, type AgentStatusResponse } from '@propr/core';
+import {
+  normalizeAgentTankAgents,
+  observeAgentTankUsageSnapshot,
+  type AgentStatusResponse
+} from '@propr/core';
 /**
  * Tells every open tab that capacity may have moved.
  *
@@ -85,7 +89,13 @@ export function createAgentTankRoutes() {
         clearTimeout(timer);
         if (response.ok) {
           const data = await response.json() as Record<string, AgentStatusResponse>;
-          res.json({ enabled: true, agents: normalizeAgentTankAgents(data) });
+          const agents = normalizeAgentTankAgents(data);
+          // This is the read that supplies the client's usage snapshot, so it is
+          // also where a changed snapshot is observed: announced before the
+          // response, so a client woken by it cannot re-read older state. The
+          // observer seeds silently and says nothing about an unchanged read.
+          await observeAgentTankUsageSnapshot(agents);
+          res.json({ enabled: true, agents });
         } else {
           res.json({ enabled: true, error: `HTTP ${response.status}` });
         }

@@ -168,7 +168,7 @@ describe('useLiveResource', () => {
     expect(read).toHaveBeenCalledTimes(2);
   });
 
-  it('polls only while the socket is disconnected', async () => {
+  it('uses frequent fallback polls only while disconnected', async () => {
     const read = vi.fn(async () => ({ ok: true }));
     socket.value.isConnected = false;
     const { rerender } = renderHook(() => useLiveResource({
@@ -189,9 +189,35 @@ describe('useLiveResource', () => {
     await advance(100);
     expect(read).toHaveBeenCalledTimes(4);
 
-    // Push is the only path once the socket is back: no interval may fire.
+    // Normal fallback polls stop; connected safety reads are much less frequent.
     await advance(120_000);
     expect(read).toHaveBeenCalledTimes(4);
+  });
+
+  it('recovers a lost publication while connected and keeps hidden or disabled scopes quiet', async () => {
+    let value = 'pending';
+    let disabled = false;
+    const read = vi.fn(async () => value);
+    const { result, rerender, unmount } = renderHook(() => useLiveResource({
+      read, scopeKey: 'goal', interest: { goals: true }, disabled,
+    }));
+    await flush();
+    value = 'completed'; // Committed change, with no delivered event.
+    await advance(299_999);
+    expect(read).toHaveBeenCalledTimes(1);
+    await advance(101);
+    expect(result.current.data).toBe('completed');
+    expect(read).toHaveBeenCalledTimes(2);
+    setVisibility('hidden');
+    await advance(600_000);
+    expect(read).toHaveBeenCalledTimes(2);
+    setVisibility('visible');
+    disabled = true; rerender();
+    await advance(600_000);
+    expect(read).toHaveBeenCalledTimes(2);
+    unmount();
+    await advance(600_000);
+    expect(read).toHaveBeenCalledTimes(2);
   });
 
   it('does no work while the tab is hidden and reconciles once when it becomes visible', async () => {

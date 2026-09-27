@@ -56,7 +56,7 @@ const redisClient = new Redis({
     maxRetriesPerRequest: null, enableReadyCheck: false,
 });
 
-interface PRData { data: Contribution & { labels: Array<{ name: string }> } }
+interface PRData { data: Contribution & { labels: Array<{ name: string }>; state?: string; merged?: boolean } }
 interface PRComment { id: number; body: string; body_html?: string; user: { login: string; type?: string }; created_at: string; pull_request_review_id?: number }
 
 interface ValidationResult {
@@ -128,6 +128,9 @@ async function validatePRAndComments(octokit: Awaited<ReturnType<typeof getAuthe
         owner: repoOwner, repo: repoName, pull_number: pullRequestNumber,
         mediaType: { format: 'full' }  // Get body_html with signed image URLs
     }) as PRData;
+    // A merged or closed pull request usually has no head branch left to fetch, and
+    // nothing to follow up on; queued follow-ups and ultrafix cycles end here.
+    if (prData.data.state === 'closed') return { skip: true, reason: prData.data.merged ? 'pull_request_merged' : 'pull_request_closed' };
     const botUsername = process.env.GITHUB_BOT_USERNAME || 'propr-dev[bot]';
     // Fetch ALL comments with pagination to handle PRs with 100+ comments
     const allCommentsForValidation = await fetchAllComments(octokit, repoOwner, repoName, pullRequestNumber);
@@ -199,6 +202,7 @@ async function executeProcessing(params: ExecuteProcessingParams): Promise<JobRe
     const {
         isFixMode,
         fixSelection,
+        resolution,
         selectedReviewComments,
         reviewCommentsSection,
     } = await prepareFixReviewFeedback({
@@ -206,10 +210,8 @@ async function executeProcessing(params: ExecuteProcessingParams): Promise<JobRe
     });
 
     if (isFixMode && !hasAuthorizedFixFeedback(selectedReviewComments)) {
-        correlatedLogger.info(
-            { pullRequestNumber },
-            'Skipping fix processing because no actionable findings were selected',
-        );
+        correlatedLogger.info({ pullRequestNumber, unresolved: resolution.unresolved, malformedIds: resolution.malformedIds },
+            'Skipping fix processing because no review findings or suggestions were selected');
         await handleNoAuthorizedFindings({
             job,
             taskId,
@@ -223,6 +225,8 @@ async function executeProcessing(params: ExecuteProcessingParams): Promise<JobRe
             pullRequestNumber,
             correlatedLogger,
             correlationId,
+            // Naming the identifiers is what makes the posted explanation actionable.
+            unresolved: resolution.unresolved, malformedIds: resolution.malformedIds,
         });
         return { status: 'skipped', reason: 'no_authorized_review_findings', pullRequestNumber };
     }
@@ -256,7 +260,7 @@ async function executeProcessing(params: ExecuteProcessingParams): Promise<JobRe
     // Opt-in per repository; a failure there never stops the implementation.
     await suspendObsoleteValidationForImplementation({ ref: context, continuation: publication.continuation, taskId, correlationId }, { octokit: state.octokit, log: correlatedLogger });
 
-    const requestBody = isFixMode ? (fixSelection.remainingInstructions || 'Apply only the selected review finding records below.') : combinedCommentBody;
+    const requestBody = isFixMode ? (fixSelection.instructions || 'Apply only the selected review records below.') : combinedCommentBody;
     const localizedCombinedCommentBody = await localizeContentImages(requestBody, state.worktreeInfo.worktreePath, correlatedLogger, { bodyHtml: combinedBodyHtml, issueOrPrId: pullRequestNumber });
     let originalTaskSpec = linkedIssueResult.context || prData!.data.body || '';
     if (job.data.ultrafixMeta) {

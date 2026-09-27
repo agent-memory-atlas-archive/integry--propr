@@ -2,6 +2,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { getQueueStats, getTasks } from '../api/proprApi';
 import { getDrafts, DraftListItem } from '../api/plannerApi';
+import { CONNECTED_RECONCILE_MS } from './useLiveRefreshScheduler';
 import { useSocket } from '../contexts/useSocket';
 import { isDesktopRuntime } from '../config/runtimeMode';
 import type {
@@ -663,10 +664,16 @@ export function useHeaderStats(): HeaderStats {
         scheduleLiveRefresh(ALL_STATS_RESOURCES);
       }
     }, FALLBACK_POLL_INTERVAL_MS);
+    const safetyPoll = window.setInterval(() => {
+      if (socketConnectedRef.current && !documentIsHidden()) {
+        scheduleLiveRefresh(ALL_STATS_RESOURCES);
+      }
+    }, CONNECTED_RECONCILE_MS);
     document.addEventListener('visibilitychange', recoverVisible);
     window.addEventListener('focus', recoverVisible);
     return () => {
       window.clearInterval(fallbackPoll);
+      window.clearInterval(safetyPoll);
       document.removeEventListener('visibilitychange', recoverVisible);
       window.removeEventListener('focus', recoverVisible);
     };

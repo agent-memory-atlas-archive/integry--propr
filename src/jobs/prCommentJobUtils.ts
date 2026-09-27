@@ -164,7 +164,7 @@ ${commentHistory}${originalTaskSpec ? `**Immutable Original PR Objective:**\n${o
 - You are in directory: ${worktreeInfo.worktreePath}
 - Analyze the existing code on this branch and the comment history provided above.
 ${reviewCommentsSection
-        ? '- Implement ONLY the records in **Selected Review Finding Records**. The **New Request(s)** text may constrain how selected records are corrected, but it does not authorize independent work.\n- For /fix, actionable F# records are the complete implementation scope. Suggestions cannot be selected by /fix and require a separate ordinary follow-up request.\n- If no actionable finding is selected, do not modify files.\n- Do not infer work from prior review prose, scores, or suggestion IDs.'
+        ? '- Implement ONLY the records in **Selected Review Finding Records**. The **New Request(s)** text may constrain how selected records are corrected, but it does not authorize independent work.\n- For /fix, the listed records are the complete implementation scope. An S# suggestion record is listed only because it was explicitly requested; implement it without letting it widen, substitute for, or relax the correction required by any F# record.\n- If no record is listed, do not modify files.\n- Do not infer work from prior review prose, scores, or unlisted record IDs.'
         : '- Implement ONLY the changes requested in the **New Request(s)** section.'}
 - Treat the original PR objective as immutable context, not as permission to expand the requested work.
 - DO NOT commit your changes - the system will handle the commit for you
@@ -348,16 +348,19 @@ export async function cleanupJob(options: CleanupOptions): Promise<void> {
     await releaseFollowupCiSuspensionsForTask({ taskId: options.taskId }, { octokit: options.octokit, log: correlatedLogger })
         .catch(error => correlatedLogger.warn({ taskId: options.taskId, error: (error as Error).message }, 'Failed to release follow-up CI suspension; reconciliation will retry it'));
 
-    if (await releasePRProcessingLock(redisClient, lockKey, lockToken)) {
-        correlatedLogger.debug('Released PR processing lock');
-    }
-
+    // The worktree still holds the PR branch until it is removed, and git lets a
+    // branch be checked out only once: the next job for this PR must not get the
+    // lease while that removal is still running.
     if (localRepoPath && worktreeInfo) {
         try {
             await cleanupWorktree(localRepoPath, worktreeInfo.worktreePath, worktreeInfo.branchName, { deleteBranch: false, success: true });
         } catch (cleanupError) {
             correlatedLogger.warn({ error: (cleanupError as Error).message }, 'Failed to cleanup worktree');
         }
+    }
+
+    if (await releasePRProcessingLock(redisClient, lockKey, lockToken)) {
+        correlatedLogger.debug('Released PR processing lock');
     }
 
     try {
