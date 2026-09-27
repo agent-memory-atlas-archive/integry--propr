@@ -75,11 +75,8 @@ const dashboardResponses = (attentionItems: typeof attention): Record<string, un
   '/api/dashboard/narrative': { repository: 'all', enabled: true, summary: 'Work is underway on the dashboard and design system, with more tasks queued. Recent reviews are complete; a failed check and pull requests still need your attention.' },
   '/api/dashboard/summary': {
     repository: 'all',
-    needsAttention: attentionItems.length,
-    running: running.length,
-    queued: 1,
-    completedRecently: 2,
-    recentWindowHours: 24,
+    needsAttention: attentionItems.length, running: running.length, queued: 1,
+    completedRecently: 2, recentWindowHours: 24,
   },
   '/api/dashboard/attention': {
     repository: 'all',
@@ -91,19 +88,14 @@ const dashboardResponses = (attentionItems: typeof attention): Record<string, un
     },
   },
   '/api/dashboard/active': {
-    repository: 'all',
-    running,
-    queued: [],
+    repository: 'all', running, queued: [],
     queue: { queuedCount: 1, reason: 'All agents are busy' },
     counts: { running: running.length, queued: 1 },
   },
   '/api/dashboard/outcomes': { repository: 'all', limit: 50, items: outcomes },
   '/api/stats/dashboard': {
-    period: '7d',
-    repository: 'all',
-    completed: 34,
-    successRate: 87.5,
-    recordedSpend: 12.42,
+    period: '7d', repository: 'all',
+    completed: 34, successRate: 87.5, recordedSpend: 12.42,
     dailyCompleted: [
       { date: '2026-09-17', count: 4 }, { date: '2026-09-18', count: 7 }, { date: '2026-09-19', count: 3 },
       { date: '2026-09-20', count: 6 }, { date: '2026-09-21', count: 2 }, { date: '2026-09-22', count: 8 },
