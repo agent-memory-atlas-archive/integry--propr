@@ -112,17 +112,24 @@ Every `/review` comment follows a fixed structure:
 ## Overall Evaluation
 <summary of the change>
 
-## Findings
-🔴 Critical: <must-fix problems>
-🟡 Warning: <likely problems or risky patterns>
-🟢 Suggestion: <optional improvements>
-✅ Positive: <things done well>
+## Merge blockers
+### F1: 🔴 <problem this PR introduced>
+- **Required behavior:** <what the code has to do>
+- **Evidence:** <changed file and line that breaks it>
+- **Minimum fix:** <smallest correction that resolves it>
+
+## Suggestions
+### S1: 🟢 <optional improvement>
+
+<why it is worth doing>
 
 ## Score
 Score: N/10
 ```
 
-The three sections always appear in this order, findings are tagged with the severity emojis above, and the comment ends with a `Score: N/10` line. [`/ultrafix`](#ultrafix) reads that score line to decide whether its goal is reached.
+The four sections always appear in this order. **Merge blockers** holds the problems the PR introduced that have to be resolved before merging, each published as a numbered `F#` record carrying those three fields; **Suggestions** holds the non-blocking follow-ups, each published as a numbered `S#` record with its explanation. A review that found nothing prints `No merge blockers.` or `No suggestions.` in place of the records.
+
+Both identifier sequences are PR-wide and never reused, so `F20` or `S5` names one record for the life of the pull request — that is what makes them selectable by [`/fix F20 S3 S5`](#fix). The comment ends with a `Score: N/10` line, which [`/ultrafix`](#ultrafix) reads to decide whether its goal is reached.
 
 ### Review Markers
 
