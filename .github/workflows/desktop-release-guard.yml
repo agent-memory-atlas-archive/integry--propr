@@ -129,10 +129,14 @@ jobs:
           cache: npm
           cache-dependency-path: package-lock.json
 
-      - name: Install locked dependencies and real Chromium
-        run: |
-          npm ci
-          npx playwright install --with-deps chromium
+      - name: Install locked dependencies
+        run: npm ci
+
+      # The hosted Ubuntu image already supplies Chromium's system libraries.
+      # Avoid an apt refresh here: a stalled mirror can exhaust this prerequisite's
+      # timeout and leave the unsigned packaging matrix skipped.
+      - name: Install real Chromium
+        run: npx playwright install chromium
 
       - name: Run focused stock Chromium existing-target axe regressions
         env:
