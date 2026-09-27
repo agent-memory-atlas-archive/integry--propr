@@ -17,6 +17,8 @@ import {
 // so the bundled runner can share them without importing this router back.
 export {
     hasAgentTankStatuses,
+    hasUsableAgentTankStatuses,
+    isUsableAgentTankStatus,
     normalizeAgentTankAgents,
     normalizeAgentTankStatus,
     toAgentTankAgent,

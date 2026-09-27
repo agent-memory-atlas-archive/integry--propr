@@ -38,6 +38,8 @@ VIBE_CLI_VERSION="${VIBE_CLI_VERSION:-2.25.4}"
 # Keep this default identical to the ARG default in Dockerfile.agent: only the
 # Dockerfile literal participates in the agent bundle content hash, so a
 # mismatch here would ship a different Agent Tank build under an existing tag.
+# `assert_agent_tank_version_matches_pin` enforces that, including for an
+# environment override, rather than trusting the convention.
 AGENT_TANK_CLI_VERSION="${AGENT_TANK_CLI_VERSION:-0.9.10}"
 PUSH_LATEST="${PUSH_LATEST:-true}"
 
@@ -64,6 +66,35 @@ AGENT_BUNDLE_CONTENT_FILES=(
   NOTICE
   THIRD_PARTY_LICENSES.md
 )
+
+# The bundled Agent Tank version reaches the agent bundle tag only through the
+# `ARG AGENT_TANK_CLI_VERSION` literal in Dockerfile.agent, via the content hash
+# above - unlike the agent CLI versions, it is not part of the version matrix,
+# and the runtime tag generator (packages/core/src/agents/version) does not know
+# about it at all. An override therefore installs a different Agent Tank binary
+# and stamps a different image label while producing the byte-identical tag, so
+# existing installs would keep a different binary under a supposedly
+# version-specific tag. Refuse to build rather than publish that.
+assert_agent_tank_version_matches_pin() {
+  local -a pins=()
+  while IFS= read -r pin; do pins+=("$pin"); done \
+    < <(sed -n 's/^ARG AGENT_TANK_CLI_VERSION=\([^[:space:]]\{1,\}\)$/\1/p' Dockerfile.agent)
+
+  if [[ ${#pins[@]} -eq 0 ]]; then
+    echo "Dockerfile.agent must pin ARG AGENT_TANK_CLI_VERSION." >&2
+    exit 1
+  fi
+
+  for pin in "${pins[@]}"; do
+    if [[ "$pin" != "$AGENT_TANK_CLI_VERSION" ]]; then
+      echo "AGENT_TANK_CLI_VERSION=$AGENT_TANK_CLI_VERSION does not match the Dockerfile.agent pin ($pin)." >&2
+      echo "The bundled Agent Tank version only reaches the agent bundle tag through that Dockerfile literal," >&2
+      echo "so building with an override would ship a different Agent Tank binary under an unchanged tag." >&2
+      echo "Bump ARG AGENT_TANK_CLI_VERSION in Dockerfile.agent (every stage) and the default in this script instead." >&2
+      exit 1
+    fi
+  done
+}
 
 resolve_agent_bundle_tag() {
   CLAUDE_CLI_VERSION="$CLAUDE_CLI_VERSION" \
@@ -592,6 +623,7 @@ build_image() {
 }
 
 # --- Main ---------------------------------------------------------------------
+assert_agent_tank_version_matches_pin
 AGENT_BUNDLE_TAG="$(resolve_agent_bundle_tag)"
 RELEASE_IMAGES=("${IMAGES[@]}" "launcher|docker/Dockerfile.launcher|.")
 

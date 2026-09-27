@@ -175,6 +175,24 @@ test('bundled mode with nothing to monitor is not announced as ready', async ({ 
   await capture(page, 'agent-tank-bundled-nothing-to-monitor');
 });
 
+test('bundled mode whose every provider failed is not announced as ready', async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 1000 });
+  // The bundled run produced a snapshot, but every provider in it carries an
+  // error and no usage, so the backend answers unavailable with its own reason.
+  // A provider key is not a usage number: this must not read "ready".
+  await installFixture(
+    page,
+    { mode: 'bundled', enabled: true, url: 'http://host.docker.internal:3456' },
+    { available: false, reason: 'no_usage_data' },
+  );
+  await page.goto('/settings?tab=integrations');
+
+  const status = page.getByRole('region', { name: 'LLM Usage Tracking' }).getByRole('status');
+  await expect(status).toContainText('Bundled Agent Tank unavailable');
+  await expect(status).not.toContainText('ready');
+  await capture(page, 'agent-tank-bundled-all-providers-failed');
+});
+
 test('bundled availability is reported only once bundled is the stored mode', async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 1000 });
   await installFixture(page, { mode: 'disabled', enabled: false, url: '' });

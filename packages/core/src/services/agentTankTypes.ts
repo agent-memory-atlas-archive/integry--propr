@@ -47,17 +47,41 @@ export interface AgentStatusResponse {
 }
 
 /**
- * Whether a status map is evidence that usage monitoring actually works.
+ * Whether a status map describes any provider at all.
  *
  * A run can succeed and still describe nothing: bundled mode returns an empty
  * map when no enabled agent is a provider Agent Tank can inspect, and a daemon
- * with nothing configured answers the same way. That is a successful run, not
- * operational readiness - reporting it as "ready" would promise a capacity
- * gauge that cannot produce a single number - so readiness asks for at least
- * one provider status.
+ * with nothing configured answers the same way. This only separates "nothing to
+ * inspect" from "something was inspected" so callers can name that reason; it is
+ * NOT a readiness answer - use `hasUsableAgentTankStatuses` for that.
  */
 export function hasAgentTankStatuses(agents: Record<string, AgentStatusResponse> | undefined): boolean {
     return !!agents && Object.keys(agents).length > 0;
+}
+
+/**
+ * Whether one provider status is evidence that usage monitoring actually works.
+ *
+ * A provider Agent Tank could not read is still reported as a status *object*
+ * carrying the failure - `{"claude":{"usage":{},"error":"Timeout waiting for
+ * usage data"}}` - so the presence of a key proves only that a provider key was
+ * configured. A status with an error, or with no usage fields at all, cannot
+ * produce a single number for the capacity gauge, so it is not usable evidence.
+ */
+export function isUsableAgentTankStatus(status: AgentStatusResponse | undefined): boolean {
+    if (!status || status.error) return false;
+    return !!status.usage && typeof status.usage === 'object' && Object.keys(status.usage).length > 0;
+}
+
+/**
+ * Whether a status map is evidence that usage monitoring actually works.
+ *
+ * Readiness and a successful refresh promise a capacity gauge that can show a
+ * number, so they ask for at least one provider whose usage actually came back:
+ * an all-error snapshot refreshed nothing, however many keys it carries.
+ */
+export function hasUsableAgentTankStatuses(agents: Record<string, AgentStatusResponse> | undefined): boolean {
+    return !!agents && Object.values(agents).some(isUsableAgentTankStatus);
 }
 
 /** Normalize a single Agent Tank status object to ProPR-facing agent names. */

@@ -364,6 +364,8 @@ export {
     toAgentTankAgent,
     toProprAgent,
     hasAgentTankStatuses,
+    hasUsableAgentTankStatuses,
+    isUsableAgentTankStatus,
     normalizeAgentTankStatus,
     normalizeAgentTankAgents,
     getStatusForAlias as getAgentTankStatusForAlias,

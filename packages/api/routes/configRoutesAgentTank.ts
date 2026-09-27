@@ -1,6 +1,12 @@
 import { Request, Response } from 'express';
 import * as configManager from '@propr/core';
-import { canRunBundledAgentTank, getAgentTankStatuses, hasAgentTankStatuses, refreshBundledStatuses } from '@propr/core';
+import {
+  canRunBundledAgentTank,
+  getAgentTankStatuses,
+  hasAgentTankStatuses,
+  hasUsableAgentTankStatuses,
+  refreshBundledStatuses
+} from '@propr/core';
 import { AGENT_TANK_MODES, isAgentTankMode, normalizeAgentTankMode } from '@propr/shared';
 
 export function createAgentTankRoutes() {
@@ -52,9 +58,9 @@ export function createAgentTankRoutes() {
       }
       if (settings.mode === 'bundled') {
         // "Available" for bundled mode means "we can produce a snapshot that
-        // describes at least one provider", which is exactly what a (cached)
-        // refresh answers. Reusing the same call keeps the status indicator
-        // honest instead of asserting health from image presence alone.
+        // carries at least one provider's usage", which is exactly what a
+        // (cached) refresh answers. Reusing the same call keeps the status
+        // indicator honest instead of asserting health from image presence alone.
         const agents = await refreshBundledStatuses();
         if (!agents) {
           res.json({ available: false, mode: 'bundled', reason: 'bundled_run_failed' });
@@ -66,6 +72,14 @@ export function createAgentTankRoutes() {
         // as ready would promise a gauge that can never show a number.
         if (!hasAgentTankStatuses(agents)) {
           res.json({ available: false, mode: 'bundled', reason: 'no_supported_agents' });
+          return;
+        }
+        // A provider Agent Tank failed to read still appears in the map, carrying
+        // its error and an empty usage object. Keys alone therefore prove only
+        // that a provider was configured, so readiness asks for usage that
+        // actually came back.
+        if (!hasUsableAgentTankStatuses(agents)) {
+          res.json({ available: false, mode: 'bundled', reason: 'no_usage_data' });
           return;
         }
         res.json({ available: true, mode: 'bundled' });
@@ -125,16 +139,21 @@ export function createAgentTankRoutes() {
         // `force` because this is an explicit operator action: they pressed
         // refresh precisely because they do not trust the cached snapshot.
         const agents = await refreshBundledStatuses({ force: true });
-        // Same evidence rule as the status route: a snapshot that describes no
-        // provider did not refresh any usage data, so it cannot be reported as a
-        // successful refresh.
+        // Same evidence rule as the status route: a snapshot with no usable
+        // provider usage - no provider at all, or only failed ones - did not
+        // refresh any usage data, so it cannot be reported as a successful
+        // refresh.
         if (!agents) {
           res.json({ success: false, error: 'bundled_run_failed' });
           return;
         }
-        res.json(hasAgentTankStatuses(agents)
+        if (!hasAgentTankStatuses(agents)) {
+          res.json({ success: false, error: 'no_supported_agents' });
+          return;
+        }
+        res.json(hasUsableAgentTankStatuses(agents)
           ? { success: true }
-          : { success: false, error: 'no_supported_agents' });
+          : { success: false, error: 'no_usage_data' });
         return;
       }
       const controller = new AbortController();
