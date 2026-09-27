@@ -12,7 +12,7 @@ import { withStableLiveEventIds } from './liveEventIds.js';
 import { selectLiveEvents } from './liveEventSelection.js';
 import { projectLiveOutputRead, readLiveOutput, type LiveOutputProjector, type LiveOutputRead, type LiveOutputRedis } from './liveOutputStream.js';
 import { resolveConfigPath } from '@propr/core';
-import { findAgentConfigForTask, findExecutionStartTimestampForTask } from './taskWatcherLookup.js';
+import { findAgentConfigForTask, findExecutionStartTimestampForTask, findLatestExecutionStartForTask } from './taskWatcherLookup.js';
 
 const LIVE_EXECUTION_STATES = new Set(['claude_execution', 'codex_execution', 'gemini_execution', 'opencode_execution']);
 
@@ -517,7 +517,12 @@ export class TaskWatcherManager {
     // Incremental reads that need resync may begin after the retained prefix.
     const fullRead = read.epoch === 'legacy' || read.from === read.base ? read : await readLiveOutput(redis, taskId);
     if (!fullRead || this.taskWatchers.get(taskId) !== watcherInfo) return null;
-    const full = projectLiveOutputRead(fullRead, taskId, executionStart);
+    // Metadata-free output repeats epoch `legacy` in every execution; scope its IDs as HTTP reads do.
+    const legacyExecution = fullRead.epoch === 'legacy' && this.deps
+      ? await findLatestExecutionStartForTask(this.deps, this.normalizeTaskId(taskId))
+      : null;
+    if (this.taskWatchers.get(taskId) !== watcherInfo) return null;
+    const full = projectLiveOutputRead(fullRead, taskId, executionStart, { legacyExecution });
     watcherInfo.lastLegacySnapshot = fullRead.epoch === 'legacy' ? fullRead.text : undefined;
     watcherInfo.liveProjector = full.projector;
     console.log(`[TaskWatcher] Full Redis update for task ${taskId}: sending ${full.events.length} events (${full.omittedEventCount} raw events omitted)`);

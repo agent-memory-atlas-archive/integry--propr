@@ -46,6 +46,12 @@ interface ParseState {
   /** Live projection only: the record that started the buffered assistant message. */
   pendingAssistantKey: string | null;
   eventKeys: WeakMap<object, string>;
+  /**
+   * Live projection only: `events.length` wherever the current record skipped an
+   * event already emitted by an earlier record. The skipped event keeps its slot,
+   * so later events of the record keep their IDs once that earlier record is trimmed.
+   */
+  skippedSlots: number[];
 }
 
 interface OpenCodeRedisEventUsage {
@@ -342,7 +348,10 @@ function processAntigravityToolUse(
 ): void {
   flushPendingMessage(state, timestamp);
   const id = event.tool_id;
-  if (id && state.emittedAntigravityToolUseIds.has(id)) return;
+  if (id && state.emittedAntigravityToolUseIds.has(id)) {
+    state.skippedSlots.push(state.events.length);
+    return;
+  }
   if (id) state.emittedAntigravityToolUseIds.add(id);
   state.events.push({
     type: 'tool_use' as const,
@@ -428,9 +437,10 @@ function processOpenCodeEvent(
     });
   }
   const toolEvents = extractOpenCodeToolEvents(event, timestamp, state);
-  if (toolEvents.length) {
-    flushPendingMessage(state, timestamp);
-    state.events.push(...toolEvents);
+  if (toolEvents.some(toolEvent => toolEvent !== SKIPPED_TOOL_EVENT)) flushPendingMessage(state, timestamp);
+  for (const toolEvent of toolEvents) {
+    if (toolEvent === SKIPPED_TOOL_EVENT) state.skippedSlots.push(state.events.length);
+    else state.events.push(toolEvent);
   }
 
   const eventUsage = buildOpenCodeRedisEventUsage(event);
@@ -564,6 +574,9 @@ interface OpenCodeRedisToolTracker {
   emittedToolResultIds: Set<string>;
 }
 
+/** Stands in for a tool event already emitted by an earlier (cumulative) record. */
+const SKIPPED_TOOL_EVENT: ConversationEvent = Object.freeze({ type: 'tool_result' as const, timestamp: '' });
+
 function extractOpenCodeToolEvents(event: OpenCodeRedisEvent, timestamp: string, state: ParseState): ConversationEvent[] {
   const events: ConversationEvent[] = [];
   const tracker: OpenCodeRedisToolTracker = {
@@ -586,7 +599,11 @@ function appendOpenCodeToolEvent(events: ConversationEvent[], source: (OpenCodeR
   }
   if (!isOpenCodeToolUseType(type)) return;
   const toolId = getOpenCodeToolId(sourceWithState);
-  if (toolId && tracker.emittedToolUseIds.has(toolId)) return;
+  if (toolId && tracker.emittedToolUseIds.has(toolId)) {
+    events.push(SKIPPED_TOOL_EVENT);
+    if (type === 'tool' && hasOpenCodeCompletedState(sourceWithState)) events.push(SKIPPED_TOOL_EVENT);
+    return;
+  }
   if (toolId) tracker.emittedToolUseIds.add(toolId);
   events.push(buildOpenCodeToolUseEvent(sourceWithState, timestamp));
   if (type === 'tool') appendOpenCodeCompletedToolResult(events, sourceWithState, timestamp, tracker.emittedToolResultIds);
@@ -600,17 +617,27 @@ function buildOpenCodeToolUseEvent(source: OpenCodeRedisToolSource, timestamp: s
   return { type: 'tool_use' as const, toolName: source.tool_name || source.tool || source.name, input: source.parameters || source.input || source.args || source.state?.input, id: getOpenCodeToolId(source), timestamp };
 }
 
+function hasOpenCodeCompletedState(source: OpenCodeRedisToolSource): boolean {
+  return Boolean(source.state && ['completed', 'error'].includes(source.state.status ?? ''));
+}
+
 function appendOpenCodeCompletedToolResult(events: ConversationEvent[], source: OpenCodeRedisToolSource, timestamp: string, emittedToolResultIds: Set<string>): void {
-  if (!source.state || !['completed', 'error'].includes(source.state.status ?? '')) return;
+  if (!hasOpenCodeCompletedState(source)) return;
   const toolId = getOpenCodeToolId(source);
-  if (toolId && emittedToolResultIds.has(toolId)) return;
+  if (toolId && emittedToolResultIds.has(toolId)) {
+    events.push(SKIPPED_TOOL_EVENT);
+    return;
+  }
   if (toolId) emittedToolResultIds.add(toolId);
   events.push({ type: 'tool_result' as const, toolUseId: getOpenCodeToolId(source), result: truncateContent(extractOpenCodeToolResult(source)), isError: isOpenCodeToolStateError(source), timestamp });
 }
 
 function appendOpenCodeToolResultEvent(events: ConversationEvent[], source: OpenCodeRedisToolSource, timestamp: string, emittedToolResultIds: Set<string>): void {
   const toolId = getOpenCodeToolId(source);
-  if (toolId && emittedToolResultIds.has(toolId)) return;
+  if (toolId && emittedToolResultIds.has(toolId)) {
+    events.push(SKIPPED_TOOL_EVENT);
+    return;
+  }
   if (toolId) emittedToolResultIds.add(toolId);
   events.push({ type: 'tool_result' as const, toolUseId: toolId, result: truncateContent(source.output || source.result), isError: source.status === 'error', timestamp });
 }
@@ -841,12 +868,17 @@ function createParseState(options: RedisOutputParseOptions): ParseState {
     nativeGoal: null,
     pendingAssistantKey: null,
     eventKeys: new WeakMap(),
+    skippedSlots: [],
   };
 }
 
-/** One record's contribution to a live projection: the events it completed, each with its source key. */
+/**
+ * One record's contribution to a live projection: the events it completed, each
+ * with its source key. Events of the fed record also carry their slot within it,
+ * which counts events skipped as already emitted by earlier records.
+ */
 export interface ProjectedLineEvents {
-  events: Array<{ event: ConversationEvent; key: string }>;
+  events: Array<{ event: ConversationEvent; key: string; slot?: number }>;
 }
 
 /**
@@ -867,10 +899,17 @@ export function createRedisOutputProjection(options: RedisOutputParseOptions = {
   return {
     feed(line, key) {
       const before = state.events.length;
+      state.skippedSlots = [];
       parseLine(line, state);
       if (state.pendingAssistantMessage && !state.pendingAssistantKey) state.pendingAssistantKey = key;
+      let slot = 0;
       return {
-        events: state.events.slice(before).map(event => ({ event, key: state.eventKeys.get(event) ?? key })),
+        events: state.events.slice(before).map((event, index) => {
+          const eventKey = state.eventKeys.get(event) ?? key;
+          if (eventKey !== key) return { event, key: eventKey };
+          const skipped = state.skippedSlots.filter(at => at <= before + index).length;
+          return { event, key, slot: slot++ + skipped };
+        }),
       };
     },
     pendingEvent() {

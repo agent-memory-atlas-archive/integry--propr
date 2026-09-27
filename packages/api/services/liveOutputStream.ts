@@ -94,6 +94,7 @@ export class LiveOutputProjector {
   offset: number;
 
   private readonly taskId: string;
+  /** Execution identity namespacing event IDs: the read's epoch, scoped by execution for legacy output. */
   readonly epoch: string;
   private readonly executionStartTimestamp: string | null;
   /** Absolute offset where the execution's output begins; event keys are relative to it. */
@@ -197,12 +198,13 @@ export class LiveOutputProjector {
       : `${prefix}:${key}`;
   }
 
-  private withIds(entries: Array<{ event: ConversationEvent; key: string }>): LiveEvent[] {
+  /** A `slot` is the event's stable source position within its record; otherwise events are numbered in emission order. */
+  private withIds(entries: Array<{ event: ConversationEvent; key: string; slot?: number }>): LiveEvent[] {
     const perKey = new Map<string, number>();
-    return entries.map(({ event, key }) => {
+    return entries.map(({ event, key, slot }) => {
       const index = perKey.get(key) ?? 0;
       perKey.set(key, index + 1);
-      return { ...event, id: this.id(event, `${key}:${index}`) };
+      return { ...event, id: this.id(event, `${key}:${slot ?? index}`) };
     });
   }
 
@@ -232,7 +234,10 @@ export class LiveOutputProjector {
         if (!line.trimStart().startsWith('{')) return [];
         const stamped = withSyntheticTimestamp(line, startMs, envelopeIndex++);
         goalRecord = claudeNativeGoalRecord(line) ?? goalRecord;
-        return this.withIds(projection.feed(stamped).map(event => ({ event: event as unknown as ConversationEvent, key: String(offset - this.start) })));
+        // Whether a tool result is followed by a subagent completion depends on
+        // an earlier (possibly trimmed) Task invocation, so IDs use source slots.
+        const key = String(offset - this.start);
+        return this.withIds(projection.feed(stamped).map(event => ({ event: event as unknown as ConversationEvent, key, slot: projection.slot(event) })));
       },
       pending: () => null,
       snapshot: () => {
@@ -298,16 +303,30 @@ export interface LiveOutputProjectionResult extends LiveProjectionSnapshot {
   projector: LiveOutputProjector;
 }
 
+/**
+ * Metadata-free output has no execution counter: every execution reads as
+ * epoch `legacy`, so offset-based IDs would repeat across executions. Scoping
+ * them by the execution that wrote the output keeps them distinct.
+ */
+function liveOutputIdentity(read: Pick<LiveOutputRead, 'epoch'>, legacyExecution: string | null | undefined): string {
+  return read.epoch === 'legacy' && legacyExecution ? `legacy:${legacyExecution}` : read.epoch;
+}
+
 /** Everything retained for the current execution, projected from its first record. */
 export async function projectLiveOutput(
   redis: LiveOutputRedis,
   taskId: string,
   executionStartTimestamp: string | null = null,
-  { selectEvents = true }: { selectEvents?: boolean } = {},
+  { selectEvents = true, resolveLegacyExecution }: {
+    selectEvents?: boolean;
+    /** Identifies the execution that wrote metadata-free output; see {@link liveOutputIdentity}. */
+    resolveLegacyExecution?: () => Promise<string | null>;
+  } = {},
 ): Promise<LiveOutputProjectionResult | null> {
   const read = await readLiveOutput(redis, taskId, 0);
   if (!read) return null;
-  return projectLiveOutputRead(read, taskId, executionStartTimestamp, { selectEvents });
+  const legacyExecution = read.epoch === 'legacy' ? await resolveLegacyExecution?.() : null;
+  return projectLiveOutputRead(read, taskId, executionStartTimestamp, { selectEvents, legacyExecution });
 }
 
 /** Project exactly the snapshot read, without another Redis read across an await. */
@@ -315,9 +334,10 @@ export function projectLiveOutputRead(
   read: LiveOutputRead,
   taskId: string,
   executionStartTimestamp: string | null = null,
-  { selectEvents = true }: { selectEvents?: boolean } = {},
+  { selectEvents = true, legacyExecution }: { selectEvents?: boolean; legacyExecution?: string | null } = {},
 ): LiveOutputProjectionResult {
-  const projector = new LiveOutputProjector({ taskId, epoch: read.epoch, offset: read.from, start: read.start, executionStartTimestamp });
+  const epoch = liveOutputIdentity(read, legacyExecution);
+  const projector = new LiveOutputProjector({ taskId, epoch, offset: read.from, start: read.start, executionStartTimestamp });
   const truncated = read.base > read.start;
   // The first record identifies the provider; it survives trimming in `head`.
   const events = truncated && read.head ? projector.feed(`${read.head}\n`, read.start) : [];

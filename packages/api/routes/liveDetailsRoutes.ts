@@ -18,6 +18,7 @@ import { detectStoredOutputFormat, hasCodexAppServerNotification, type StoredOut
 import { parseRedisOutput } from '../services/redisOutputParser.js';
 import { type AgentStreamParseOptions } from '../services/agentStreamProjection.js';
 import { projectLiveOutput, type LiveOutputRedis } from '../services/liveOutputStream.js';
+import { findLatestExecutionStartForTask } from '../services/taskWatcherLookup.js';
 import { selectLiveEvents } from '../services/liveEventSelection.js';
 import { parseConversationFile } from '../services/conversationParser.js';
 import { withStableLiveEventIds, type LiveEventSource } from '../services/liveEventIds.js';
@@ -288,7 +289,7 @@ async function isLiveTask(redisClient: RedisClientType, db: Knex, taskId: string
 async function parseActiveExecutionOutput(redisClient: RedisClientType, db: Knex, taskId: string, options: AgentStreamParseOptions = {}): Promise<(ConversationResult & { nativeGoal?: ReturnType<typeof parseRedisOutput>['nativeGoal']; omittedEventCount?: number }) | null> {
   const executionStartTimestamp = await findExecutionStartTimestamp(redisClient, db, taskId);
   const projected = await projectLiveOutput(redisClient as unknown as LiveOutputRedis, taskId, executionStartTimestamp, {
-    selectEvents: false,
+    selectEvents: false, resolveLegacyExecution: () => findLatestExecutionStartForTask({ redisClient, db }, taskId),
   });
   if (!projected) return null;
   const { todos, currentTask, tokenUsage, nativeGoal } = projected;
