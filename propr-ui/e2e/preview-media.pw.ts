@@ -72,6 +72,47 @@ async function fixture(page: Page) {
   return { requests, state: (state: typeof mediaState) => { mediaState = state; }, disable: () => { showMedia = false; } };
 }
 
+const videoUrl = 'https://github.com/user-attachments/assets/walkthrough';
+
+/**
+ * A short WebM recorded from a screenshot of the running app, encoded by Chromium itself so the
+ * fixture is real, playable media rather than invented artwork or a checked-in binary.
+ */
+async function recordClip(page: Page) {
+  const frame = `data:image/png;base64,${(await page.screenshot()).toString('base64')}`;
+  const bytes = await page.evaluate(async source => {
+    const poster = new Image();
+    poster.src = source;
+    await poster.decode();
+    const canvas = document.createElement('canvas');
+    canvas.width = 960;
+    canvas.height = 540;
+    const context = canvas.getContext('2d');
+    if (!context) throw new Error('2D canvas unavailable');
+    const scale = Math.min(canvas.width / poster.width, canvas.height / poster.height);
+    const [width, height] = [poster.width * scale, poster.height * scale];
+    const draw = (progress: number) => {
+      context.fillStyle = '#020617';
+      context.fillRect(0, 0, canvas.width, canvas.height);
+      context.drawImage(poster, (canvas.width - width) / 2, (canvas.height - height) / 2, width, height);
+      context.fillStyle = '#38bdf8';
+      context.fillRect(0, canvas.height - 10, canvas.width * progress, 10);
+    };
+    draw(0);
+    const recorder = new MediaRecorder(canvas.captureStream(25), { mimeType: 'video/webm' });
+    const chunks: Blob[] = [];
+    recorder.ondataavailable = event => chunks.push(event.data);
+    recorder.start();
+    for (let index = 1; index <= 25; index += 1) {
+      draw(index / 25);
+      await new Promise(resolve => setTimeout(resolve, 40));
+    }
+    await new Promise(resolve => { recorder.onstop = () => resolve(null); recorder.stop(); });
+    return [...new Uint8Array(await new Blob(chunks).arrayBuffer())];
+  }, frame);
+  return Buffer.from(bytes);
+}
+
 async function capture(page: Page, name: string) {
   if (!process.env.PROPR_CAPTURE_PREVIEWS) return;
   await mkdir('../.propr/previews', { recursive: true });
@@ -132,6 +173,71 @@ for (const width of [390, 1440]) {
     await page.getByRole('button', { name: 'Select acme/legacy', exact: true }).click();
     await expect(page.getByRole('button', { name: 'Media', exact: true })).toHaveCount(0);
     await expect(panel).toHaveCount(0);
+  });
+
+  test(`repository media opens in an in-app lightbox at ${width}px`, async ({ page }) => {
+    await page.setViewportSize({ width, height: 900 });
+    await fixture(page);
+    // Record the walkthrough clip from the running app itself, so the video fixture is real media.
+    const clip = await recordClip(page);
+    const previews = [...media, { title: 'Walkthrough', description: 'Recorded run of the completed implementation.', type: 'video', url: videoUrl }];
+    await page.route(videoUrl, route => route.fulfill({ contentType: 'video/webm', body: clip }));
+    await page.route('**/api/repos/media*', route => route.fulfill({ json: { previews, nextOffset: null } }));
+
+    await page.goto('/repositories');
+    await page.getByRole('button', { name: 'Select acme/web', exact: true }).click();
+    await page.getByRole('button', { name: 'Media', exact: true }).click();
+    const tile = page.getByRole('button', { name: 'Open preview: Task queue', exact: true });
+    await expect(tile).toBeVisible();
+    await expect(page.getByRole('link', { name: /Open preview/ })).toHaveCount(0);
+    await tile.click();
+    // The media stays in the app: no second tab, no navigation away from the repository view.
+    expect(page.context().pages()).toHaveLength(1);
+    const dialog = page.getByRole('dialog', { name: 'Task queue', exact: true });
+    await expect(dialog).toHaveAttribute('aria-modal', 'true');
+    await expect(dialog.getByRole('img', { name: 'Task queue', exact: true })).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Close preview', exact: true })).toBeFocused();
+    expect(await page.evaluate(() => getComputedStyle(document.body).overflow)).toBe('hidden');
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+    await capture(page, `media-lightbox-image-${width}`);
+
+    // Zooming to the cap disables the control the keyboard is standing on; focus has to stay in the dialog.
+    const zoomIn = page.getByRole('button', { name: 'Zoom in', exact: true });
+    await page.keyboard.press('Shift+Tab');
+    await expect(zoomIn).toBeFocused();
+    for (let press = 0; press < 4; press += 1) await page.keyboard.press('Enter');
+    await expect(zoomIn).toBeDisabled();
+    await expect(page.getByRole('button', { name: 'Close preview', exact: true })).toBeFocused();
+    await page.getByRole('button', { name: /Reset zoom/ }).click();
+
+    // Arrow keys and the next control walk the collection, which mixes images and videos.
+    await page.keyboard.press('ArrowRight');
+    await expect(page.getByRole('dialog', { name: 'Goal workspace', exact: true })).toBeVisible();
+    for (let step = 0; step < 2; step += 1) await page.getByRole('button', { name: 'Next preview', exact: true }).click();
+    // The last image before the video: ArrowRight from a focused zoom control removes that control, and
+    // focus must not fall to the body or Escape and the arrow keys would stop reaching the dialog.
+    await expect(page.getByRole('dialog', { name: 'Additional screen', exact: true })).toBeVisible();
+    await zoomIn.focus();
+    await expect(zoomIn).toBeFocused();
+    await page.keyboard.press('ArrowRight');
+    const player = page.getByRole('dialog', { name: 'Walkthrough', exact: true }).locator('video');
+    await expect(player).toBeVisible();
+    await expect(zoomIn).toHaveCount(0);
+    await expect(page.getByRole('button', { name: 'Close preview', exact: true })).toBeFocused();
+    await player.evaluate((video: HTMLVideoElement) => video.play());
+    await expect.poll(() => player.evaluate((video: HTMLVideoElement) => video.currentTime)).toBeGreaterThan(0);
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+    await capture(page, `media-lightbox-video-${width}`);
+
+    // Escape closes the overlay, unlocks the page and hands focus back to the tile that opened it.
+    await page.keyboard.press('Escape');
+    await expect(page.getByRole('dialog')).toHaveCount(0);
+    await expect(tile).toBeFocused();
+    expect(await page.evaluate(() => getComputedStyle(document.body).overflow)).not.toBe('hidden');
+    const videoTile = page.getByRole('button', { name: 'Open preview: Walkthrough', exact: true });
+    await videoTile.scrollIntoViewIfNeeded();
+    await expect(videoTile).toBeVisible();
+    await capture(page, `media-grid-${width}`);
   });
 }
 
