@@ -22,7 +22,7 @@
  * halfway down the screen above a band of dead white space.
  */
 
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { useSearchParams } from 'react-router-dom';
 import { useDocumentTitle } from '../hooks/useDocumentTitle';
@@ -34,8 +34,6 @@ import { ConnectSoftPromoBanner } from './ConnectPlusBanner';
 import { RepositorySelector, type RepoOption } from './RepositorySelector';
 import { useHeaderScopeSlot } from './headerScopeSlot';
 import { fetchEnabledRepos } from '../utils/repoHelpers';
-import { useSocket } from '../contexts/useSocket';
-import type { TaskUpdatePayload } from '@propr/shared';
 import { useCurrentUser, userHasPermission } from '../contexts/AuthContext';
 import { isDefaultParamValue } from './TaskList/utils';
 import { DashboardSummary } from './Dashboard/DashboardSummary';
@@ -109,25 +107,6 @@ const Dashboard: React.FC = () => {
   */
   const refreshTokens = useSectionRefreshTokens(repository);
 
-  // The narrative reacts only to task outcomes and attention transitions. Keep
-  // its token separate so these events do not refresh unrelated dashboard panes.
-  const { onTaskUpdate, isConnected } = useSocket();
-  const [completionToken, setCompletionToken] = useState(0);
-  const summaryTaskFingerprintsRef = useRef<Map<string, string>>(new Map());
-
-  useEffect(() => {
-    if (!isConnected) return;
-    return onTaskUpdate((payload: TaskUpdatePayload) => {
-      const fingerprint = `${payload.state}\0${payload.repository ?? ''}\0${payload.issueNumber ?? ''}`;
-      if (summaryTaskFingerprintsRef.current.get(payload.taskId) === fingerprint) return;
-      summaryTaskFingerprintsRef.current.set(payload.taskId, fingerprint);
-      if (['completed', 'failed', 'cancelled', 'action_required', 'action-required', 'needs_attention', 'needs-attention'].includes(payload.state)
-        && (repository === ALL_REPOSITORIES || !payload.repository || payload.repository === repository)) {
-        setCompletionToken(token => token + 1);
-      }
-    });
-  }, [isConnected, onTaskUpdate, repository]);
-
   const headerScopeSlot = useHeaderScopeSlot();
   const showRepositoryFilter = reposLoading || repoOptions.length > 1;
   const repositoryFilterProps = {
@@ -196,7 +175,7 @@ const Dashboard: React.FC = () => {
           </div>
         )}
 
-        <DashboardSummary repository={repository} completionToken={completionToken} />
+        <DashboardSummary repository={repository} completionToken={refreshTokens.summary} />
 
         <ConnectSoftPromoBanner />
 

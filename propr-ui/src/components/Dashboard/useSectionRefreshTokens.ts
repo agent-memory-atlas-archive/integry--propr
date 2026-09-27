@@ -46,8 +46,17 @@ const SECTION_INTERESTS = {
   stats: {
     changes: ['completed', 'failed', 'cancelled'],
   },
+  // The activity summary is not a pane, but it refreshes on the same terms as
+  // one: work that ended, plus work that a human now has to unblock. It is
+  // declared here rather than subscribing separately so the whole page still
+  // holds one activity listener, and so its interest is readable beside the
+  // panes' rather than buried in the composition root.
+  summary: {
+    changes: ['completed', 'failed', 'cancelled', 'dismissed', 'blocked'],
+  },
 } as const satisfies Record<string, SectionInterest>;
 
+/** Every refresh token the page publishes; `summary` is a widget, not a pane. */
 export type DashboardSectionName = keyof typeof SECTION_INTERESTS;
 export type SectionRefreshTokens = Record<DashboardSectionName, number>;
 

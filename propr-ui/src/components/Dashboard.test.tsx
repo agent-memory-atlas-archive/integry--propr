@@ -4,6 +4,7 @@ import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom';
 import Dashboard from './Dashboard';
 import { SocketContext, type SocketContextValue } from '../contexts/SocketContext';
 import { NeedsAttentionPanel } from './Dashboard/NeedsAttentionPanel';
+import { SUMMARY_COALESCE_MS } from './Dashboard/useDashboardSummary';
 import {
   getDashboardNarrative,
   getDashboardActive,
@@ -337,24 +338,30 @@ describe('Dashboard', () => {
     renderDashboard();
     await waitForSections();
     await waitFor(() => expect(getDashboardNarrative).toHaveBeenCalledTimes(1));
-    for (const [index, state] of ['completed', 'failed', 'cancelled', 'action_required', 'needs-attention'].entries()) {
-      await act(async () => {
-        taskUpdateHandler?.({ taskId: `finished-${index}`, state, repository: 'acme/app' } as TaskUpdatePayload);
-      });
+    for (const [index, change] of (['completed', 'failed', 'cancelled', 'blocked'] as const).entries()) {
+      await push(activity('task', change, { entityId: `finished-${index}` }));
     }
     await waitFor(() => expect(getDashboardNarrative).toHaveBeenCalledTimes(2));
   });
 
   it('does not regenerate narrative for progress updates or completions outside its repository', async () => {
-    renderDashboard('/?repository=acme/app');
-    await waitForSections();
-    await waitFor(() => expect(getDashboardNarrative).toHaveBeenCalledTimes(1));
-    await act(async () => {
-      taskUpdateHandler?.({ taskId: 'progress', state: 'processing', repository: 'acme/app' } as TaskUpdatePayload);
-      taskUpdateHandler?.({ taskId: 'outside', state: 'completed', repository: 'acme/web' } as TaskUpdatePayload);
-    });
-    await waitFor(() => expect(mockActive).toHaveBeenCalledTimes(2));
-    expect(getDashboardNarrative).toHaveBeenCalledTimes(1);
+    // A second section read is not proof here: the sections coalesce in a
+    // shorter window than the summary, so the summary's own window is what has
+    // to be outlasted before "it never read again" means anything.
+    vi.useFakeTimers();
+    try {
+      renderDashboard('/?repository=acme/app');
+      await act(async () => { await vi.advanceTimersByTimeAsync(10); });
+      expect(getDashboardNarrative).toHaveBeenCalledTimes(1);
+
+      await push(activity('task', 'progressed', { entityId: 'progress' }));
+      await push(activity('task', 'completed', { entityId: 'outside', repository: 'acme/web' }));
+
+      await act(async () => { await vi.advanceTimersByTimeAsync(SUMMARY_COALESCE_MS * 4); });
+      expect(getDashboardNarrative).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('does not reorder running work under a pointer when live updates arrive', async () => {
