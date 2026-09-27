@@ -3,6 +3,7 @@ import { validateModelReasoningLevel, validatePrReviewModelValue } from '@propr/
 interface SettingFields {
   auto_followup_score_threshold?: unknown;
   auto_resolve_merge_conflicts?: unknown;
+  dashboard_summary_enabled?: unknown;
   model_reasoning_level?: unknown;
   pr_review_model?: unknown;
   ultrafix_rating_goal?: unknown;
@@ -13,6 +14,7 @@ interface SettingFields {
 export type SettingSaveName =
   | 'auto_followup_score_threshold'
   | 'auto_resolve_merge_conflicts'
+  | 'dashboard_summary_enabled'
   | 'model_reasoning_level'
   | 'pr_review_model'
   | 'ultrafix_rating_goal'
@@ -57,6 +59,12 @@ export async function extractSettingSaves(fields: SettingFields): Promise<{ erro
     if (typeof fields.auto_resolve_merge_conflicts !== 'boolean') return { error: 'auto_resolve_merge_conflicts must be a boolean', saves: [], normalized };
     normalized.auto_resolve_merge_conflicts = fields.auto_resolve_merge_conflicts;
     saves.push({ name: 'auto_resolve_merge_conflicts' });
+  }
+
+  if (fields.dashboard_summary_enabled !== undefined) {
+    if (typeof fields.dashboard_summary_enabled !== 'boolean') return { error: 'dashboard_summary_enabled must be a boolean', saves: [], normalized };
+    normalized.dashboard_summary_enabled = fields.dashboard_summary_enabled;
+    saves.push({ name: 'dashboard_summary_enabled' });
   }
 
   if (fields.model_reasoning_level !== undefined) {

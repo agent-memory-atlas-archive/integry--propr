@@ -284,6 +284,7 @@ export function createConfigRoutes(deps: ConfigRoutesDeps) {
         ...reviewContextBudgetSettingsResponse(settings),
         auto_followup_score_threshold: autoFollowup.value,
         auto_resolve_merge_conflicts: autoResolveMergeConflicts,
+        dashboard_summary_enabled: (await configStore.getConfig('dashboard_summary_enabled', true)) !== false,
         model_reasoning_level: modelReasoningLevel,
         pr_review_model: prReviewModel,
         ultrafix_rating_goal: ultrafixGoal.value,

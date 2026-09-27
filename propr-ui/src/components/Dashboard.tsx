@@ -4,8 +4,7 @@
  * The dashboard answers "what needs my attention right now" in four panes:
  * needs attention, happening now, completed and historical stats. Live
  * work gets the space; the deeper charts live on `/analytics`. The page spends
- * no row of its own on a title or a toolbar: the panes start directly under the
- * global header, and the repository filter lives in that header.
+ * no row of its own on a title or a toolbar: an activity summary precedes the panes, and the repository filter lives in that header.
  *
  * This file owns only three things — the shared repository filter, the socket
  * subscription that keeps every section current, and the responsive layout.
@@ -39,6 +38,7 @@ import { useSocket } from '../contexts/useSocket';
 import { useCurrentUser, userHasPermission } from '../contexts/AuthContext';
 import { useLiveRefreshScheduler } from '../hooks/useLiveRefreshScheduler';
 import { isDefaultParamValue } from './TaskList/utils';
+import { DashboardSummary } from './Dashboard/DashboardSummary';
 import { NeedsAttentionPanel } from './Dashboard/NeedsAttentionPanel';
 import { HappeningNowSection } from './Dashboard/HappeningNowSection';
 import { CompletedFeed } from './Dashboard/CompletedFeed';
@@ -96,6 +96,7 @@ const Dashboard: React.FC = () => {
   // every section reads, so ten events in a row cost one request per section.
   const { onTaskUpdate, isConnected } = useSocket();
   const [refreshToken, setRefreshToken] = useState(0);
+  const [completionToken, setCompletionToken] = useState(0);
   const taskEventFingerprintsRef = useRef<Map<string, string>>(new Map());
 
   const scheduleLiveRefresh = useLiveRefreshScheduler({
@@ -110,9 +111,13 @@ const Dashboard: React.FC = () => {
       if (taskEventFingerprintsRef.current.get(payload.taskId) === fingerprint) return;
       taskEventFingerprintsRef.current.set(payload.taskId, fingerprint);
       scheduleLiveRefresh();
+      if (['completed', 'failed', 'cancelled', 'action_required', 'action-required', 'needs_attention', 'needs-attention'].includes(payload.state)
+        && (repository === ALL_REPOSITORIES || !payload.repository || payload.repository === repository)) {
+        setCompletionToken(token => token + 1);
+      }
     };
     return onTaskUpdate(handleTaskUpdate);
-  }, [isConnected, onTaskUpdate, scheduleLiveRefresh]);
+  }, [isConnected, onTaskUpdate, scheduleLiveRefresh, repository]);
 
   const sectionProps = { repository, refreshToken };
 
@@ -149,8 +154,8 @@ const Dashboard: React.FC = () => {
           belongs rather than on a row of its own.
 
           From `lg` up the filter mounts in the global toolbar, immediately
-          right of search: the panes then start directly under that toolbar's
-          rule, with no page bar between them. A 36px bar holding a title on
+          right of search: the activity summary then starts directly under
+          that toolbar's rule, with no page bar between them. A 36px bar holding a title on
           the left and this filter on the right spent a full row and 800px of
           empty width on one control.
 
@@ -183,6 +188,8 @@ const Dashboard: React.FC = () => {
             />
           </div>
         )}
+
+        <DashboardSummary repository={repository} completionToken={completionToken} />
 
         <ConnectSoftPromoBanner />
 

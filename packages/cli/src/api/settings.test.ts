@@ -30,3 +30,11 @@ test("triggerSummarizationReindexAll posts ignoreCooldown body", async () => {
     options: { body: { ignoreCooldown: true } },
   }]);
 });
+
+test('dashboard_summary_enabled accepts booleans only', async () => {
+  const { parseSettingValue, VALID_SETTING_KEYS } = await import('./settings.js');
+  assert.ok(VALID_SETTING_KEYS.includes('dashboard_summary_enabled'));
+  assert.equal(parseSettingValue('dashboard_summary_enabled', 'false'), false);
+  assert.equal(parseSettingValue('dashboard_summary_enabled', 'true'), true);
+  assert.throws(() => parseSettingValue('dashboard_summary_enabled', 'yes'), /true.*false/);
+});

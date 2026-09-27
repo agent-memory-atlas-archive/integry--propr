@@ -8,6 +8,7 @@ export const SETTINGS_CONFIG_LOCK_KEY = 'config:settings:lock';
 export const SPECIALIZED_SETTING_NAMES = [
   'auto_followup_score_threshold',
   'auto_resolve_merge_conflicts',
+  'dashboard_summary_enabled',
   'model_reasoning_level',
   'pr_review_model',
   'ultrafix_rating_goal',

@@ -4,6 +4,7 @@ import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom';
 import Dashboard from './Dashboard';
 import { NeedsAttentionPanel } from './Dashboard/NeedsAttentionPanel';
 import {
+  getDashboardNarrative,
   getDashboardActive,
   getDashboardAttention,
   getDashboardOutcomes,
@@ -21,6 +22,7 @@ import {
 } from './Dashboard.fixtures';
 
 vi.mock('../api/dashboardApi', () => ({
+  getDashboardNarrative: vi.fn(),
   getDashboardAttention: vi.fn(),
   getDashboardActive: vi.fn(),
   getDashboardOutcomes: vi.fn(),
@@ -110,6 +112,7 @@ async function waitForSections() {
 describe('Dashboard', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    vi.mocked(getDashboardNarrative).mockResolvedValue({ repository: 'all', enabled: true, summary: 'Work is underway. Nothing needs your attention.' });
     socketConnected = true;
     taskUpdateHandler = null;
     mockAttention.mockResolvedValue(attentionResponse());
@@ -258,6 +261,30 @@ describe('Dashboard', () => {
     await waitFor(() => expect(mockStats).toHaveBeenCalledTimes(2));
     expect(mockAttention).toHaveBeenCalledTimes(2);
     expect(mockOutcomes).toHaveBeenCalledTimes(2);
+  });
+
+  it('regenerates narrative once for a burst of terminal and attention events from the existing socket', async () => {
+    renderDashboard();
+    await waitForSections();
+    await waitFor(() => expect(getDashboardNarrative).toHaveBeenCalledTimes(1));
+    for (const [index, state] of ['completed', 'failed', 'cancelled', 'action_required', 'needs-attention'].entries()) {
+      await act(async () => {
+        taskUpdateHandler?.({ taskId: `finished-${index}`, state, repository: 'acme/app' } as TaskUpdatePayload);
+      });
+    }
+    await waitFor(() => expect(getDashboardNarrative).toHaveBeenCalledTimes(2));
+  });
+
+  it('does not regenerate narrative for progress updates or completions outside its repository', async () => {
+    renderDashboard('/?repository=acme/app');
+    await waitForSections();
+    await waitFor(() => expect(getDashboardNarrative).toHaveBeenCalledTimes(1));
+    await act(async () => {
+      taskUpdateHandler?.({ taskId: 'progress', state: 'processing', repository: 'acme/app' } as TaskUpdatePayload);
+      taskUpdateHandler?.({ taskId: 'outside', state: 'completed', repository: 'acme/web' } as TaskUpdatePayload);
+    });
+    await waitFor(() => expect(mockActive).toHaveBeenCalledTimes(2));
+    expect(getDashboardNarrative).toHaveBeenCalledTimes(1);
   });
 
   it('does not reorder running work under a pointer when live updates arrive', async () => {
