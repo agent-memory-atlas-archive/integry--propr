@@ -151,10 +151,24 @@ function renderDashboard(initialEntry = '/') {
   return render(dashboardTree(initialEntry));
 }
 
+function renderAttentionPanel() {
+  return render(
+    <MemoryRouter>
+      <NeedsAttentionPanel repository="all" refreshToken={0} />
+    </MemoryRouter>,
+  );
+}
+
 /** Every section has landed its first read. */
 async function waitForSections() {
   await waitFor(() => expect(screen.getByTestId('happening-now-section')).toBeInTheDocument());
   await waitFor(() => expect(screen.getByTestId('historical-stats-section')).toBeInTheDocument());
+}
+
+async function renderLoadedDashboard(initialEntry = '/') {
+  const view = renderDashboard(initialEntry);
+  await waitForSections();
+  return view;
 }
 
 describe('Dashboard', () => {
@@ -189,8 +203,7 @@ describe('Dashboard', () => {
   });
 
   it('keeps the attention section in place with an all-clear line when nothing needs attention', async () => {
-    renderDashboard();
-    await waitForSections();
+    await renderLoadedDashboard();
 
     // The section is structure, not a conditional decoration: unmounting it
     // collapsed the right column and left the stats panel alone at the top of
@@ -209,11 +222,7 @@ describe('Dashboard', () => {
     let resolveAttention: (value: ReturnType<typeof attentionResponse>) => void = () => {};
     mockAttention.mockReturnValue(new Promise(resolve => { resolveAttention = resolve; }));
 
-    render(
-      <MemoryRouter>
-        <NeedsAttentionPanel repository="all" refreshToken={0} />
-      </MemoryRouter>,
-    );
+    renderAttentionPanel();
 
     // A skeleton under the real heading, not instead of the whole section.
     expect(screen.getByTestId('needs-attention-panel')).toBeInTheDocument();
@@ -229,11 +238,7 @@ describe('Dashboard', () => {
 
   it('keeps the heading and offers a retry when the attention read fails', async () => {
     mockAttention.mockRejectedValue(new Error('attention unavailable'));
-    render(
-      <MemoryRouter>
-        <NeedsAttentionPanel repository="all" refreshToken={0} />
-      </MemoryRouter>,
-    );
+    renderAttentionPanel();
 
     await waitFor(() => expect(screen.getByText('Unable to load what needs attention')).toBeInTheDocument());
     // "We could not find out" is not "there is nothing to do".
@@ -244,11 +249,7 @@ describe('Dashboard', () => {
 
   it('shows the attention list whatever the caller asked for when work is blocked', async () => {
     mockAttention.mockResolvedValue(attentionResponse([attentionItem()]));
-    render(
-      <MemoryRouter>
-        <NeedsAttentionPanel repository="all" refreshToken={0} />
-      </MemoryRouter>,
-    );
+    renderAttentionPanel();
 
     await waitFor(() => expect(screen.getByTestId('needs-attention-panel')).toBeInTheDocument());
     expect(screen.getByText('Needs attention')).toBeInTheDocument();
@@ -261,8 +262,7 @@ describe('Dashboard', () => {
       attentionItem({ id: 'plan-issue:5', kind: 'plan_review', category: 'decision', taskId: null, prNumber: 51, title: null }),
     ]));
 
-    renderDashboard();
-    await waitForSections();
+    await renderLoadedDashboard();
 
     expect(screen.getByRole('heading', { name: /Needs attention/ })).toHaveTextContent('Needs attention (2)');
     const panel = screen.getByTestId('needs-attention-panel');
@@ -277,8 +277,7 @@ describe('Dashboard', () => {
   });
 
   it('applies one repository filter to every section and writes it to the URL', async () => {
-    renderDashboard();
-    await waitForSections();
+    await renderLoadedDashboard();
 
     fireEvent.click(screen.getByRole('button', { name: /All Repos/ }));
     fireEvent.click(screen.getAllByTestId('repo-item').find(item => item.textContent?.includes('web')) as HTMLElement);
@@ -296,8 +295,7 @@ describe('Dashboard', () => {
   });
 
   it('restores the repository filter from the URL on load', async () => {
-    renderDashboard('/?repository=acme%2Fapp');
-    await waitForSections();
+    await renderLoadedDashboard('/?repository=acme%2Fapp');
 
     expect(mockAttention).toHaveBeenCalledWith('acme/app');
     expect(mockActive).toHaveBeenCalledWith('acme/app');
@@ -341,8 +339,7 @@ describe('Dashboard', () => {
   });
 
   it('regenerates narrative once for a burst of terminal and attention events from the existing socket', async () => {
-    renderDashboard();
-    await waitForSections();
+    await renderLoadedDashboard();
     await waitFor(() => expect(getDashboardNarrative).toHaveBeenCalledTimes(1));
     for (const [index, state] of ['completed', 'failed', 'cancelled', 'action_required', 'needs-attention'].entries()) {
       await act(async () => {
@@ -353,8 +350,7 @@ describe('Dashboard', () => {
   });
 
   it('does not regenerate narrative for progress updates or completions outside its repository', async () => {
-    renderDashboard('/?repository=acme/app');
-    await waitForSections();
+    await renderLoadedDashboard('/?repository=acme/app');
     await waitFor(() => expect(getDashboardNarrative).toHaveBeenCalledTimes(1));
     expect(taskUpdateHandler).not.toBeNull();
     vi.useFakeTimers();
@@ -378,8 +374,7 @@ describe('Dashboard', () => {
     const second = activeItem({ id: 'task:b', taskId: 'b', title: 'Beta work' });
     mockActive.mockResolvedValue(activeResponse([first, second]));
 
-    renderDashboard();
-    await waitForSections();
+    await renderLoadedDashboard();
     await waitFor(() => expect(screen.getByText('Alpha work')).toBeInTheDocument());
 
     // Every row is a link to its work, so the row under the pointer is the
@@ -397,8 +392,7 @@ describe('Dashboard', () => {
   });
 
   it('keeps the last known rows, and says nothing about the socket, when it drops', async () => {
-    const { rerender } = renderDashboard();
-    await waitForSections();
+    const { rerender } = await renderLoadedDashboard();
     await waitFor(() => expect(screen.getByText('Add retry budget')).toBeInTheDocument());
 
     socketConnected = false;
@@ -417,8 +411,7 @@ describe('Dashboard', () => {
     expect(IDLE_RUNNING_MESSAGE).not.toBe(UNAVAILABLE_RUNNING_MESSAGE);
 
     mockActive.mockResolvedValue(activeResponse([]));
-    const empty = renderDashboard();
-    await waitForSections();
+    const empty = await renderLoadedDashboard();
     expect(screen.getByTestId('happening-now-section')).toHaveTextContent(IDLE_RUNNING_MESSAGE);
     expect(screen.getByTestId('happening-now-section')).not.toHaveTextContent(UNAVAILABLE_RUNNING_MESSAGE);
     // An empty list is normal operation, so it never offers a retry.
@@ -453,8 +446,7 @@ describe('Dashboard', () => {
       previous: { completed: 0, successRate: null, recordedSpend: null },
     }));
 
-    renderDashboard();
-    await waitForSections();
+    await renderLoadedDashboard();
 
     await waitFor(() => expect(screen.getByTestId('stat-success-rate')).toHaveTextContent('—'));
     expect(screen.getByTestId('stat-success-rate')).not.toHaveTextContent('0%');
@@ -469,8 +461,7 @@ describe('Dashboard', () => {
   it('summarises the queue with the reason work is waiting', async () => {
     mockActive.mockResolvedValue(activeResponse([activeItem()], [activeItem({ id: 'task:q', taskId: 'q', state: 'pending', phase: 'Waiting' })]));
 
-    renderDashboard();
-    await waitForSections();
+    await renderLoadedDashboard();
 
     const queue = await screen.findByTestId('queue-summary');
     expect(queue).toHaveTextContent('1 queued');
@@ -483,8 +474,7 @@ describe('Dashboard', () => {
       outcomeItem({ id: 'unscored', taskId: 'done-2', title: 'No score here' }),
     ]));
 
-    renderDashboard();
-    await waitForSections();
+    await renderLoadedDashboard();
 
     const scores = await screen.findAllByTestId('completed-score');
     expect(scores).toHaveLength(1);
@@ -501,8 +491,7 @@ describe('Dashboard', () => {
       outcomeItem({ id: 'a', title: 'Fix PR #2494: [Epic] MCP operator surface', taskType: 'pr-comment' }),
     ]));
 
-    renderDashboard();
-    await waitForSections();
+    await renderLoadedDashboard();
 
     const feed = await screen.findByTestId('completed-section');
     expect(within(feed).getByRole('heading', { name: 'Completed' })).toBeInTheDocument();
@@ -515,8 +504,7 @@ describe('Dashboard', () => {
   });
 
   it('filters completed work by title through the heading search box', async () => {
-    renderDashboard();
-    await waitForSections();
+    await renderLoadedDashboard();
     await waitFor(() => expect(mockOutcomes).toHaveBeenCalledWith('all', 50, ''));
 
     mockOutcomes.mockResolvedValue(outcomesResponse([outcomeItem({ id: 'hit', title: 'Cache repository icons' })]));
