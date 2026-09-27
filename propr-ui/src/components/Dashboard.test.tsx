@@ -4,6 +4,7 @@ import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom';
 import Dashboard from './Dashboard';
 import { SocketContext, type SocketContextValue } from '../contexts/SocketContext';
 import { NeedsAttentionPanel } from './Dashboard/NeedsAttentionPanel';
+import { SUMMARY_COALESCE_MS } from './Dashboard/useDashboardSummary';
 import {
   getDashboardNarrative,
   getDashboardActive,
@@ -11,7 +12,7 @@ import {
   getDashboardOutcomes,
   getDashboardStats,
 } from '../api/dashboardApi';
-import type { ActivityChange, ActivityDomain, ActivityUpdatePayload } from '@propr/shared';
+import type { ActivityChange, ActivityDomain, ActivityUpdatePayload, TaskUpdatePayload } from '@propr/shared';
 import {
   activeItem,
   activeResponse,
@@ -32,6 +33,7 @@ vi.mock('../api/dashboardApi', () => ({
 
 let socketConnected = true;
 let activityHandler: ((payload: ActivityUpdatePayload) => void) | null = null;
+let taskUpdateHandler: ((payload: TaskUpdatePayload) => void) | null = null;
 
 vi.mock('../contexts/useSocket', () => ({
   useSocket: () => ({
@@ -39,6 +41,12 @@ vi.mock('../contexts/useSocket', () => ({
     subscribeToActivity: () => {},
     unsubscribeFromActivity: () => {},
     onGoalUpdate: () => () => {},
+    onTaskUpdate: (handler: (payload: TaskUpdatePayload) => void) => {
+      taskUpdateHandler = handler;
+      return () => {
+        if (taskUpdateHandler === handler) taskUpdateHandler = null;
+      };
+    },
     onActivityUpdate: (handler: (payload: ActivityUpdatePayload) => void) => {
       activityHandler = handler;
       return () => {
@@ -155,6 +163,7 @@ describe('Dashboard', () => {
     vi.mocked(getDashboardNarrative).mockResolvedValue({ repository: 'all', enabled: true, summary: 'Work is underway. Nothing needs your attention.' });
     socketConnected = true;
     activityHandler = null;
+    taskUpdateHandler = null;
     mockAttention.mockResolvedValue(attentionResponse());
     mockActive.mockResolvedValue(activeResponse([activeItem()]));
     mockOutcomes.mockResolvedValue(outcomesResponse([outcomeItem()]));
@@ -347,12 +356,21 @@ describe('Dashboard', () => {
     renderDashboard('/?repository=acme/app');
     await waitForSections();
     await waitFor(() => expect(getDashboardNarrative).toHaveBeenCalledTimes(1));
-    await act(async () => {
-      taskUpdateHandler?.({ taskId: 'progress', state: 'processing', repository: 'acme/app' } as TaskUpdatePayload);
-      taskUpdateHandler?.({ taskId: 'outside', state: 'completed', repository: 'acme/web' } as TaskUpdatePayload);
-    });
-    await waitFor(() => expect(mockActive).toHaveBeenCalledTimes(2));
-    expect(getDashboardNarrative).toHaveBeenCalledTimes(1);
+    expect(taskUpdateHandler).not.toBeNull();
+    vi.useFakeTimers();
+    try {
+      await act(async () => {
+        taskUpdateHandler?.({ taskId: 'progress', state: 'processing', repository: 'acme/app' } as TaskUpdatePayload);
+        taskUpdateHandler?.({ taskId: 'outside', state: 'completed', repository: 'acme/web' } as TaskUpdatePayload);
+      });
+      // Task updates drive the narrative; section refreshes use activity events.
+      // Let a possible narrative refresh run before asserting it stayed idle.
+      await act(async () => { await vi.advanceTimersByTimeAsync(SUMMARY_COALESCE_MS * 2); });
+      expect(mockActive).toHaveBeenCalledTimes(1);
+      expect(getDashboardNarrative).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('does not reorder running work under a pointer when live updates arrive', async () => {
