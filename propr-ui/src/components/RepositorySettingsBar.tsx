@@ -161,27 +161,23 @@ const CancelCiDuringFollowupControl: React.FC<{
             selection={parseWorkflowInput(workflows) ?? selected}
             onChange={(next) => { setWorkflows(formatWorkflowInput(next)); onUpdateWorkflows(repo.id, next); }}
           />
-          {detected.status === 'error' && (
-            <>
-              <label className="block w-full min-w-0">
-                <span className="mb-1 block">Validation workflows to cancel</span>
-                <textarea
-                  rows={2}
-                  value={workflows}
-                  onChange={(event) => setWorkflows(event.target.value)}
-                  onBlur={commitWorkflows}
-                  onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); event.currentTarget.blur(); } }}
-                  aria-invalid={parseWorkflowInput(workflows) === null}
-                  maxLength={4000}
-                  aria-label={`Validation workflows to cancel for ${repo.name}`}
-                  className="min-w-0 w-full rounded border border-slate-200 bg-white px-2 py-1.5 text-xs text-slate-700 placeholder:text-slate-400 focus:border-teal-400 focus:outline-none focus:ring-1 focus:ring-teal-400"
-                  placeholder="pr-build-check.yml, Full Test Suite"
-                />
-              </label>
-              <p className="text-slate-500">Separate workflows with commas. Quote names containing commas, for example: &quot;Build, Test&quot;.</p>
-              {parseWorkflowInput(workflows) === null && <p role="alert">Close quoted workflow names and separate them with commas. Changes have not been saved.</p>}
-            </>
-          )}
+          <label className="block w-full min-w-0">
+            <span className="mb-1 block">Validation workflows to cancel</span>
+            <textarea
+              rows={2}
+              value={workflows}
+              onChange={(event) => setWorkflows(event.target.value)}
+              onBlur={commitWorkflows}
+              onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); event.currentTarget.blur(); } }}
+              aria-invalid={parseWorkflowInput(workflows) === null}
+              maxLength={4000}
+              aria-label={`Validation workflows to cancel for ${repo.name}`}
+              className="min-w-0 w-full rounded border border-slate-200 bg-white px-2 py-1.5 text-xs text-slate-700 placeholder:text-slate-400 focus:border-teal-400 focus:outline-none focus:ring-1 focus:ring-teal-400"
+              placeholder="pr-build-check.yml, Full Test Suite"
+            />
+          </label>
+          <p className="text-slate-500">Separate workflows with commas. Quote names containing commas, for example: &quot;Build, Test&quot;.</p>
+          {parseWorkflowInput(workflows) === null && <p role="alert">Close quoted workflow names and separate them with commas. Changes have not been saved.</p>}
           {selected.length === 0 ? (
             <p role="status" className="text-amber-700">
               No workflows selected for this repository, so the instance-wide <code>CANCEL_CI_FOLLOWUP_WORKFLOWS</code> fallback decides what is cancelled: whatever it lists is cancelled here, and nothing is cancelled when your operator left it unset. Select the validation workflows to cancel above.

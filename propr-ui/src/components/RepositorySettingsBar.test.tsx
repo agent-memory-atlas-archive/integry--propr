@@ -25,7 +25,7 @@ const repo: MonitoredRepo = {
 function renderBar(overrides: Partial<MonitoredRepo> = {}, isReadOnly = false) {
   const onToggleCancelCiDuringFollowup = vi.fn();
   const onUpdateCancelCiWorkflows = vi.fn();
-  render(
+  const { unmount } = render(
     <MemoryRouter>
       <RepositorySettingsBar
         repo={{ ...repo, ...overrides }}
@@ -45,7 +45,7 @@ function renderBar(overrides: Partial<MonitoredRepo> = {}, isReadOnly = false) {
       />
     </MemoryRouter>
   );
-  return { onToggleCancelCiDuringFollowup, onUpdateCancelCiWorkflows };
+  return { onToggleCancelCiDuringFollowup, onUpdateCancelCiWorkflows, unmount };
 }
 
 const controlName = 'Cancel CI during follow-up implementation for integry/propr';
@@ -68,7 +68,7 @@ describe('RepositorySettingsBar follow-up CI cancellation', () => {
   it('asks for a selection and discloses the instance fallback while the enabled option selects nothing', () => {
     renderBar({ cancelCiDuringFollowup: true });
 
-    expect(screen.queryByRole('textbox', { name: workflowsName })).not.toBeInTheDocument();
+    expect(screen.getByRole('textbox', { name: workflowsName })).toBeInTheDocument();
     // Clearing the selection hands the decision to the environment fallback, so
     // the empty state must not promise that nothing is cancelled.
     expect(screen.getByText(/No workflows selected for this repository, so the instance-wide/)).toBeInTheDocument();
@@ -168,11 +168,53 @@ describe('RepositorySettingsBar detected workflows', () => {
     const fullSuite = await screen.findByRole('checkbox', { name: /Full Test Suite/ });
     expect(getRepoWorkflows).toHaveBeenCalledWith('integry', 'propr');
     expect(fullSuite).toBeChecked();
-    expect(screen.queryByRole('textbox', { name: workflowsName })).not.toBeInTheDocument();
+    expect(screen.getByRole('textbox', { name: workflowsName })).toBeInTheDocument();
     expect(screen.getByRole('checkbox', { name: /Build & Lint Check/ })).not.toBeChecked();
     // Only pull request runs are cancelled, so a push-only workflow cannot be picked.
     expect(screen.getByRole('checkbox', { name: /Docker Images/ })).toBeDisabled();
   });
+
+  it('allows manual identities outside a cached listing and keeps checkbox edits in sync', async () => {
+    getRepoWorkflows.mockResolvedValue({ workflows: detected });
+    const initial = renderBar({ cancelCiDuringFollowup: true });
+    await screen.findByRole('checkbox', { name: /Full Test Suite/ });
+    initial.unmount();
+
+    const { onUpdateCancelCiWorkflows } = renderBar({ cancelCiDuringFollowup: true });
+    const fullSuite = await screen.findByRole('checkbox', { name: /Full Test Suite/ });
+    expect(getRepoWorkflows).toHaveBeenCalledTimes(1);
+    const input = screen.getByRole('textbox', { name: workflowsName });
+    fireEvent.change(input, { target: { value: 'Full Test Suite, new-validation.yml' } });
+    fireEvent.blur(input);
+    expect(onUpdateCancelCiWorkflows).toHaveBeenLastCalledWith('repo-1', ['Full Test Suite', 'new-validation.yml']);
+    expect(fullSuite).toBeChecked();
+
+    fireEvent.click(screen.getByRole('checkbox', { name: /Build & Lint Check/ }));
+    expect(input).toHaveValue('Full Test Suite, new-validation.yml, pr-build-check.yml');
+    fireEvent.click(fullSuite);
+    expect(input).toHaveValue('new-validation.yml, pr-build-check.yml');
+    expect(onUpdateCancelCiWorkflows).toHaveBeenLastCalledWith('repo-1', ['new-validation.yml', 'pr-build-check.yml']);
+    expect(getRepoWorkflows).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([['populated', detected], ['empty', []]] as const)(
+    'preserves manual input across a successful %s discovery without saving it',
+    async (_label, listing) => {
+      let resolveListing!: (response: { workflows: readonly RepoWorkflow[] }) => void;
+      getRepoWorkflows.mockReturnValue(new Promise(resolve => { resolveListing = resolve; }));
+      const { onUpdateCancelCiWorkflows } = renderBar({ cancelCiDuringFollowup: true });
+      const input = screen.getByRole('textbox', { name: workflowsName });
+      fireEvent.change(input, { target: { value: 'new-validation.yml' } });
+
+      await act(async () => { resolveListing({ workflows: listing }); });
+
+      expect(screen.getByRole('textbox', { name: workflowsName })).toBe(input);
+      expect(input).toHaveValue('new-validation.yml');
+      expect(onUpdateCancelCiWorkflows).not.toHaveBeenCalled();
+      fireEvent.blur(input);
+      expect(onUpdateCancelCiWorkflows).toHaveBeenCalledWith('repo-1', ['new-validation.yml']);
+    },
+  );
 
   it('stores a picked workflow by file name and removes every spelling of an unpicked one', async () => {
     getRepoWorkflows.mockResolvedValue({ workflows: detected });
@@ -206,7 +248,7 @@ describe('RepositorySettingsBar detected workflows', () => {
     });
 
     expect(screen.getByText('Loading workflows from GitHub…')).toBeInTheDocument();
-    expect(screen.queryByRole('textbox', { name: workflowsName })).not.toBeInTheDocument();
+    expect(screen.getByRole('textbox', { name: workflowsName })).toBeInTheDocument();
     expect(screen.queryByRole('alert')).not.toBeInTheDocument();
 
     await act(async () => { resolveListing({ workflows: [] }); });
@@ -215,7 +257,7 @@ describe('RepositorySettingsBar detected workflows', () => {
       'Not found in this repository, so never cancelled: ci.yml.',
     );
     expect(screen.queryByText('Loading workflows from GitHub…')).not.toBeInTheDocument();
-    expect(screen.queryByRole('textbox', { name: workflowsName })).not.toBeInTheDocument();
+    expect(screen.getByRole('textbox', { name: workflowsName })).toBeInTheDocument();
     expect(onUpdateCancelCiWorkflows).not.toHaveBeenCalled();
 
     fireEvent.click(screen.getByRole('button', { name: 'Remove unavailable selections' }));
@@ -230,7 +272,7 @@ describe('RepositorySettingsBar detected workflows', () => {
     expect(screen.queryByRole('alert')).not.toBeInTheDocument();
     expect(screen.queryByRole('group', { name: 'Workflows in integry/propr' })).not.toBeInTheDocument();
     expect(screen.getByText('No active workflow files found in this repository.')).toBeInTheDocument();
-    expect(screen.queryByRole('textbox', { name: workflowsName })).not.toBeInTheDocument();
+    expect(screen.getByRole('textbox', { name: workflowsName })).toBeInTheDocument();
   });
 
   it('falls back to typing workflows when GitHub cannot list them', async () => {
