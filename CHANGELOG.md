@@ -9,6 +9,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`/fix` selects suggestions as well as findings**: a `/fix` command line now
+  accepts a review's non-blocking suggestion identifiers (`S1`, `S2`, …) beside
+  its merge-blocking findings (`F1`, `F2`, …), mixed freely and in any order, as
+  in `/fix F20 S3 S5`. Identifiers are case-insensitive on input and canonical
+  upper case everywhere they are stored, echoed or rendered; everything after the
+  last identifier on the command line, plus every following line, reaches the
+  agent as instructions without the token list. An identifier no current review
+  offers, or one that is malformed or unsupported such as `S0` or the range
+  `F1-F2`, fails the whole command closed and is named back on the pull request
+  instead of being silently ignored or quietly widened to every pending blocker —
+  the same rule `fix_review_findings` applies before it posts, so neither entry
+  point acts on a request it only partly understood. The completion comment and
+  task history record which findings and which suggestions were addressed.
+  Published `S#` identifiers now continue a per-pull-request sequence exactly as `F#` does
+  instead of restarting at `S1` in every review comment, so one `S#` names one
+  suggestion for the life of the pull request; the two sequences advance
+  independently, and each is reserved atomically so concurrent reviewers cannot
+  publish the same identifier twice. Merge-blocker semantics are unchanged:
+  suggestions are acted on only when named, a pending suggestion never extends
+  an `/ultrafix` loop or moves a score gate, and `/ultrafix` still selects
+  findings only. The MCP tool `fix_review_findings`
+  gains an optional `suggestionIds` array beside `findingIds` (at least one
+  identifier across the two is required, `instructions` are forwarded unchanged)
+  and validates both namespaces against the referenced review, rejecting unknown,
+  consumed or mismatched identifiers by name rather than dropping them; a client
+  sending only `findingIds` behaves exactly as before.
+
 - **Plan status filter over MCP**: the `list_plans` tool now takes an optional
   `status` next to `repository`, `offset` and `limit` — `active` for every plan
   that has not merged or failed, one exact persisted status (`draft`,
