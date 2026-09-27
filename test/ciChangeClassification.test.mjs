@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { after, describe, test } from 'node:test';
+import { runInNewContext } from 'node:vm';
 
 import {
     CONNECT_PROOF_FILES,
@@ -800,10 +801,10 @@ describe('workflow wiring', () => {
     });
 
     test('desktop checks run on demand: the label request and the nightly run call them', () => {
-        // The unsigned validation runs for pull requests and the nightly run, never for a push.
+        // The unsigned validation includes scheduled and manually dispatched nightly runs.
         for (const job of ['validation-version', 'renderer-axe-boundary', 'package', 'finalize']) {
             const block = jobBlock(desktopRelease, job);
-            assert.ok(block.includes("(github.event_name == 'pull_request' || github.event_name == 'schedule')"), `${job} runs for pull requests and the nightly run`);
+            assert.ok(block.includes("github.event_name != 'push'"), `${job} runs for every event except a push`);
         }
         const releaseTrigger = desktopRelease.slice(desktopRelease.indexOf('on:'), desktopRelease.indexOf('permissions:'));
         assert.match(releaseTrigger, /workflow_call:/);
@@ -827,10 +828,39 @@ describe('workflow wiring', () => {
 
         const nightly = readWorkflow('test-nightly.yml');
         assert.match(nightly, /schedule:/);
+        assert.match(nightly, /workflow_dispatch:/);
         assert.ok(jobBlock(nightly, 'desktop-package').includes('uses: ./.github/workflows/desktop-release-guard.yml'));
         assert.ok(jobBlock(nightly, 'desktop-connect').includes('uses: ./.github/workflows/desktop-connect-discovery-guard.yml'));
         assert.ok(jobBlock(nightly, 'native-electron').includes("PROPR_REQUIRE_NATIVE_ELECTRON: '1'"));
     });
+
+    for (const eventName of ['pull_request', 'schedule', 'workflow_dispatch', 'push']) {
+        test(`unsigned desktop job conditions handle ${eventName}`, () => {
+            for (const job of ['validation-version', 'renderer-axe-boundary', 'package', 'finalize']) {
+                const condition = jobBlock(desktopRelease, job).match(/\n    if: (?:>-\n\s*)?\$\{\{([\s\S]*?)\}\}/)?.[1];
+                assert.ok(condition, `${job} has a job-level condition`);
+                // These conditions use the JS-compatible boolean subset of Actions expressions.
+                const expression = condition.replace(/needs\.([\w-]+)/g, 'needs["$1"]');
+                for (const desktop of ['true', 'false', '']) {
+                    for (const cancelled of [false, true]) {
+                        const actual = runInNewContext(expression, {
+                            github: { event_name: eventName, ref_type: eventName === 'push' ? 'tag' : 'branch' },
+                            cancelled: () => cancelled,
+                            needs: {
+                                // Non-PR calls skip classification and expose an empty output.
+                                classify: { outputs: { desktop } },
+                                'validation-version': { result: 'success' },
+                                'renderer-axe-boundary': { result: 'success' },
+                            },
+                        });
+                        assert.equal(actual,
+                            !cancelled && eventName !== 'push' && (job === 'finalize' || desktop !== 'false'),
+                            `${job}: event=${eventName}, desktop=${JSON.stringify(desktop)}, cancelled=${cancelled}`);
+                    }
+                }
+            }
+        });
+    }
 
     test('the full suite gate accepts the on-demand desktop skip even for a broad change', () => {
         const gate = jobBlock(fullSuite, 'test');
@@ -982,6 +1012,25 @@ describe('gate semantics', () => {
 
     const finalizeGate = extractRunBlock(
         jobBlock(desktopRelease, 'finalize'), 'Resolve desktop packaging applicability');
+
+    test('nightly desktop finalization requires validation when classification was skipped', () => {
+        const nightly = {
+            CLASSIFY_RESULT: 'skipped',
+            CLASSIFY_STATUS: '',
+            DESKTOP_DECISION: '',
+            VERSION_RESULT: 'success',
+            PACKAGE_RESULT: 'success',
+        };
+        const passed = runGate(finalizeGate, nightly);
+        assert.equal(passed.status, 0, passed.stdout);
+        assert.match(passed.outputs, /applicable=true/);
+        for (const key of ['VERSION_RESULT', 'PACKAGE_RESULT']) {
+            for (const result of ['failure', 'cancelled', 'skipped', '']) {
+                assert.equal(runGate(finalizeGate, { ...nightly, [key]: result }).status, 1,
+                    `${key}=${JSON.stringify(result)} must fail nightly validation`);
+            }
+        }
+    });
 
     test('the desktop finalize gate distinguishes inapplicable from failed or missing', () => {
         const inapplicable = runGate(finalizeGate, {
