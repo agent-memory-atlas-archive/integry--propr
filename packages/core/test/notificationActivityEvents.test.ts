@@ -51,6 +51,31 @@ function createDatabase(filename = ':memory:'): Knex {
     });
 }
 
+/** How a knex client runs one statement, including inside a transaction. */
+interface QueryRunner {
+    query: (
+        this: unknown,
+        connection: unknown,
+        request: { sql?: string }
+    ) => Promise<unknown>;
+}
+
+/**
+ * The prototype a knex client and its transaction clients share `query` through.
+ *
+ * A transaction client is built from the client constructor's prototype, so this
+ * is the one place a hook sees both a direct statement and one issued inside a
+ * transaction.
+ */
+function queryPrototypeOf(target: Knex): QueryRunner {
+    let prototype: object | null = Object.getPrototypeOf(target.client);
+    while (prototype && !Object.prototype.hasOwnProperty.call(prototype, 'query')) {
+        prototype = Object.getPrototypeOf(prototype);
+    }
+    assert.ok(prototype, 'the knex client must expose query on a prototype');
+    return prototype as unknown as QueryRunner;
+}
+
 async function migrate(target: Knex): Promise<void> {
     await up(target);
     await addPreferenceApis(target);
@@ -218,29 +243,35 @@ describe('notification activity events', { concurrency: false }, () => {
 
             // user-b is assigned once the cleanup is under way: its receipt is
             // still active when the dismissal runs, so the dismissal closes it.
-            const client = cleanupDatabase.client as unknown as {
-                query: (connection: unknown, request: { sql?: string }) => Promise<unknown>;
-            };
-            const runQuery = client.query.bind(client);
+            //
+            // Hooked on the prototype that owns `query` rather than on the
+            // client instance: the cleanup dismisses inside a transaction, and
+            // knex builds its transaction client from the constructor's
+            // prototype, so an instance-level hook would never see the
+            // statement and the interleaving would silently not happen.
+            const clientPrototype = queryPrototypeOf(cleanupDatabase);
+            const runQuery = clientPrototype.query;
             let interleaved = false;
-            client.query = async (connection, request) => {
+            clientPrototype.query = async function (connection, request) {
                 const sql = String(request.sql ?? '');
                 if (
                     !interleaved
                     && /^update\s+[`"[]?notification_user_states/i.test(sql)
                     && sql.includes('dismissed_at')
                 ) {
+                    // Set before awaiting, so the assignment's own statements -
+                    // which run through this same prototype - cannot re-enter.
                     interleaved = true;
                     await assignment.assignNotificationRecipients('pr-event', ['user-b']);
                 }
-                return runQuery(connection, request);
+                return runQuery.call(this, connection, request);
             };
 
             let dismissed: number;
             try {
                 dismissed = await cleanup.dismissNotificationsForPullRequest('integry/propr', 42);
             } finally {
-                client.query = runQuery;
+                clientPrototype.query = runQuery;
             }
 
             assert.ok(interleaved, 'the assignment must commit inside the cleanup');

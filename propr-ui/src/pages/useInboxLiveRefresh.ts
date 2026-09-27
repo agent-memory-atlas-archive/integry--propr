@@ -1,6 +1,10 @@
 import { useEffect } from 'react';
 import { useSocket } from '../contexts/useSocket';
-import { useLiveRefreshScheduler, type LiveRefreshScheduler } from '../hooks/useLiveRefreshScheduler';
+import {
+  CONNECTED_RECONCILE_MS,
+  useLiveRefreshScheduler,
+  type LiveRefreshScheduler,
+} from '../hooks/useLiveRefreshScheduler';
 
 /** Fallback cadence, armed by the scheduler only while the socket is down. */
 const INBOX_FALLBACK_POLL_MS = 60_000;
@@ -21,6 +25,11 @@ export function useInboxLiveRefresh(refresh: () => unknown): LiveRefreshSchedule
     scopeKey: 'inbox',
     isConnected,
     fallbackPollMs: INBOX_FALLBACK_POLL_MS,
+    // A read or dismissal committed in another session is published best
+    // effort: if that publication is lost the socket stays healthy and nothing
+    // else would ever tell this Inbox, so it reconciles on the same slow
+    // cadence every other push-driven surface uses.
+    connectedPollMs: CONNECTED_RECONCILE_MS,
   });
   const { refreshNow } = schedule;
   useEffect(() => { void refreshNow(); }, [refreshNow]);

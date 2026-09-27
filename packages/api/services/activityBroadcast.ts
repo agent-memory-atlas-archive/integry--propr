@@ -9,15 +9,20 @@ import {
   isNotificationUpdatePayload,
   isTerminalActivityChange,
   isUsageUpdatePayload,
-  type ActivityChange,
-  type ActivityUpdatePayload,
   type DraftUpdatePayload,
   type GoalActivityState,
   type GoalUpdatePayload,
-  type NotificationChange,
-  type NotificationUpdatePayload,
   type TaskUpdatePayload,
 } from '@propr/shared';
+// This module produces and validates the envelope surface, so its payload types
+// come from the module that owns it. The barrel exports the shell surfaces'
+// same-named variants, which are a different wire shape.
+import type {
+  ActivityChange,
+  ActivityUpdatePayload,
+  NotificationChange,
+  NotificationUpdatePayload,
+} from '@propr/shared/dist/activityEvents.js';
 import { userRoom } from './socketSubscriptions.js';
 
 /**

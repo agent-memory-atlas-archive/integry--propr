@@ -467,7 +467,7 @@ describe('notification service', { concurrency: false }, () => {
         assert.deepEqual(published, []);
     });
 
-    test('captures a closing pull request\'s receipts inside the dismissal transaction', async () => {
+    test('captures a closing pull request\'s receipts in the dismissal itself', async () => {
         for (const eventId of ['pr-task-event', 'pr-attention-event']) {
             await service.createNotificationEvent({
                 eventId,
@@ -495,20 +495,24 @@ describe('notification service', { concurrency: false }, () => {
         const receiptStatements = statements.filter(
             statement => statement.sql.includes('notification_user_states')
         );
-        const capture = receiptStatements.find(statement => statement.sql.startsWith('select'));
         const dismissal = receiptStatements.find(statement => statement.sql.startsWith('update'));
-        assert.ok(capture, 'the receipts to announce are read before they are dismissed');
         assert.ok(dismissal, 'the receipts are dismissed');
-        assert.notEqual(
-            capture.transactionId,
-            undefined,
-            'a read outside a transaction can miss a card another writer is committing'
+        // The audience comes out of the dismissal itself. Reading the receipts
+        // in a separate statement first - even inside the same transaction -
+        // would miss a card a projection commits before the update runs: the
+        // update dismisses that receipt, and the Inbox holding it would never
+        // be told, so it would keep showing a card the server already cleaned up.
+        assert.match(dismissal.sql, /returning/i);
+        assert.deepEqual(
+            receiptStatements.filter(statement => statement.sql.startsWith('select')),
+            [],
+            'the announcement audience is the set of rows the update changed'
         );
-        // Both statements must share the transaction: a projection committing
-        // another card for this pull request between them would be dismissed by
-        // the update and left out of the announcement, so the Inbox holding it
-        // would keep showing a card the server already cleaned up.
-        assert.equal(capture.transactionId, dismissal.transactionId);
+        assert.notEqual(
+            dismissal.transactionId,
+            undefined,
+            'the dismissal runs in a transaction, so its receipts commit or roll back together'
+        );
         assert.deepEqual(
             published.map(payload => payload.recipientId).sort(),
             ['user-a', 'user-b']

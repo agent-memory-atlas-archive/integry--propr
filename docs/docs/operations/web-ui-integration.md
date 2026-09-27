@@ -102,6 +102,10 @@ optimistic dismissals must not be undone by a pushed refresh:
    reconnect transition, so nothing is missed while the socket was down.
 2. **Fallback polling** — an interval read armed *only* while the websocket is
    unavailable, so a client without a socket degrades instead of going stale.
+   A publication is best effort, so a connected surface also reconciles on a
+   deliberately slow safety cadence (`CONNECTED_RECONCILE_MS`, five minutes) to
+   recover a change whose event was lost while the socket stayed healthy. That
+   is the only interval a connected surface is allowed.
 3. **Page visibility** — a hidden or backgrounded tab issues no requests, and
    reconciles once when it becomes visible again.
 

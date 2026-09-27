@@ -248,11 +248,14 @@ export class SocketService {
     change: ActivityChange;
     /** Defaults to the public activity room; private subjects pass their own. */
     room?: string;
+    /** Defaults to now; a producer that timestamped the change passes its own. */
+    occurredAt?: string;
     details?: Partial<ActivityUpdatePayload>;
   }): void {
     const { domain, entityId, repository, change, room = ACTIVITY_ROOM, details = {} } = frame;
     this.io.to(room).emit(ACTIVITY_UPDATE, { ...details, eventType: ACTIVITY_UPDATE, domain, entityId,
-      repository, change, terminal: isTerminalActivityChange(change), occurredAt: new Date().toISOString() });
+      repository, change, terminal: isTerminalActivityChange(change),
+      occurredAt: frame.occurredAt ?? new Date().toISOString() });
   }
 
   private async handleGoalUpdate(
@@ -322,7 +325,6 @@ export class SocketService {
 
   // One task frame fans out to its room, the activity envelope, private goal
   // tasks and the notification projection.
-  // eslint-disable-next-line complexity
   private async handleTaskUpdate(payload: TaskUpdatePayload): Promise<void> {
     const admitted = await admitTaskRevision({
       cache: this.taskRevisions,
@@ -383,10 +385,26 @@ export class SocketService {
       .to(userRoom(ownerId))
       .emit(DRAFT_UPDATE, payload);
     console.log(`[SocketService] Broadcasted ${DRAFT_UPDATE} for draft ${payload.draftId}, step: ${payload.step}`);
-    const draftActivity = activityFromDraftUpdate(payload);
-    if (draftActivity) this.io.to(activityUserRoom(ownerId)).emit(ACTIVITY_UPDATE, {
-      ...draftActivity, entityId: payload.draftId, repository: null,
-      change: payload.draftStatus === 'review' ? 'blocked' : draftActivity.change,
+    // Every draft update reaches the owner's activity room, not just the ones
+    // that moved the draft's status: a consumer that reacts to plan activity at
+    // all has no other way to learn a generation run is progressing. The change
+    // stays in the envelope's vocabulary so the frame satisfies the wire
+    // contract every consumer validates against, while `details` carries the
+    // shell surfaces' fields derived from the same payload.
+    this.broadcastActivity({
+      domain: 'plan',
+      entityId: payload.draftId,
+      // Draft updates carry no repository; a consumer filtering by repository
+      // resolves it from the draft it already reads rather than a guess here.
+      repository: null,
+      // `review` is the one draft status a person has to act on.
+      change: payload.draftStatus === 'review' ? 'blocked'
+        : payload.draftStatus === 'failed' ? 'failed'
+          : payload.draftStatus === 'merged' ? 'completed'
+            : 'progressed',
+      room: activityUserRoom(ownerId),
+      occurredAt: payload.timestamp,
+      details: activityFromDraftUpdate(payload) ?? undefined,
     });
     if (this.notificationProjection) {
       await this.notificationProjection.projectDraftUpdate(payload);

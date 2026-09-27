@@ -1,3 +1,4 @@
+/* eslint-disable max-lines -- every case drives the hook through one socket and visibility fixture */
 import { act, renderHook } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
