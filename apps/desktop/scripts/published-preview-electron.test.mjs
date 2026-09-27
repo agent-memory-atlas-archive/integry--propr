@@ -3,7 +3,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { it } from 'node:test';
+import { before, it } from 'node:test';
 import { build } from 'esbuild';
 import { linuxProbeArguments, runElectronFixture } from './electron-fixture-runner.mjs';
 import { prepareNativeElectronTest } from './electron-native-test-setup.mjs';
@@ -11,10 +11,30 @@ import { prepareNativeElectronTest } from './electron-native-test-setup.mjs';
 const desktop = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const root = resolve(desktop, '../..');
 
+// The only image this probe can assert on travels loopback twice: out through
+// the allowlisted CONNECT proxy and into the TLS origin running beside it in the
+// fixture's own main process. A shared CI worker can take that path away and
+// give it back — one recorded run stalled every request for ~40s and then
+// served the next one at once — so the launch budget sizes an outage rather than
+// any single request. A healthy worker spends a small fraction of it: this whole
+// unit, cold Electron download included, has run green in 7.4s.
+const launchTimeoutMs = 40_000;
+// Two full launches plus the fixture bundle. The runner relaunches a launch that
+// spent its budget anyway (`retryAfterSpentBudget`), and the cold Electron
+// download is hoisted into `before` so it cannot claim the room that relaunch
+// needs: that is exactly how this unit failed, the download and one killed
+// launch together filling a 50s budget that was written for two launches.
+const testTimeoutMs = 100_000;
+
+let setup;
+// A cold Electron download belongs to setup, not the fixture's own budget.
+before(() => {
+  setup = prepareNativeElectronTest();
+}, { timeout: 120_000 });
+
 it('renders a published GitHub preview through the native session boundary and signed redirect', {
-  timeout: 50_000,
+  timeout: testTimeoutMs,
 }, async context => {
-  const setup = prepareNativeElectronTest();
   if ('skipReason' in setup) {
     context.skip(setup.skipReason);
     return;
@@ -38,8 +58,9 @@ it('renders a published GitHub preview through the native session boundary and s
         `--propr-published-preview-image=${join(root, 'propr-ui/public/logo.png')}`,
       ],
       name: 'Published preview Electron fixture',
+      retryAfterSpentBudget: true,
       setup,
-      timeout: 20_000,
+      timeout: launchTimeoutMs,
     });
     assert.equal(report.visible.complete, true);
     assert.equal(report.visible.fallbackHidden, true);

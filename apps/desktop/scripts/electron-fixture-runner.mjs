@@ -19,6 +19,16 @@ import { spawn } from 'node:child_process';
 // the last thing it does and then asks Electron to quit, so a crash inside that
 // shutdown says nothing about the behaviour under test. A complete report is
 // therefore accepted and the odd exit status is recorded as a diagnostic.
+//
+// A launch the runner had to kill for exhausting its own budget is the one exit
+// that tolerance does not cover: it was still running when the window closed, so
+// it never reached the shutdown a crash would have happened in, and whatever it
+// printed measures a starved worker instead. `retryAfterSpentBudget` relaunches
+// it. It is opt-in because paying for a second full budget has to fit the call
+// site's test timeout: the pairing-zstd probe sizes its launch to outlast the
+// outage it measures and cannot afford a second, while a spent budget there
+// already means a fixture killed before its report, which the no-evidence path
+// above retries anyway.
 
 // The switches every Linux Electron probe needs. `--disable-dev-shm-usage`
 // belongs here with the others: Chromium keeps its shared-memory segments in
@@ -86,6 +96,7 @@ export const runElectronFixture = async ({
   diagnostic,
   electronArguments,
   name,
+  retryAfterSpentBudget = false,
   runAttempt = spawnFixture,
   setup,
   timeout,
@@ -106,6 +117,13 @@ export const runElectronFixture = async ({
     const { detail, report } = readEvidence(outcome.stdout);
     if (!report) {
       failures.push(`attempt ${attempt} exited ${describeExit(outcome)} and ${detail} (${describeStreams(outcome)})`);
+      continue;
+    }
+    // The final attempt keeps its report either way, so a worker that stays
+    // starved fails on the assertion that names what went wrong rather than on a
+    // generic runner message.
+    if (retryAfterSpentBudget && outcome.timedOut && attempt < attempts) {
+      failures.push(`attempt ${attempt} exited ${describeExit(outcome)} and reported a starved run`);
       continue;
     }
     if (outcome.code !== 0) {

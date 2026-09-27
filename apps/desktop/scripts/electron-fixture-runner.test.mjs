@@ -100,6 +100,80 @@ describe('Electron fixture runner', () => {
     assert.deepEqual(diagnostics, ['Electron frame fixture reported its evidence, then exited SIGSEGV']);
   });
 
+  it('relaunches a report the worker cut off from the fixture\'s own shutdown', async () => {
+    const diagnostics = [];
+    const spent = { ...reported({ ok: false }), code: null, signal: 'SIGKILL', timedOut: true };
+    const { launches, runAttempt } = scriptedRunner([spent, reported({ ok: true })]);
+
+    const report = await runElectronFixture({
+      diagnostic: message => diagnostics.push(message),
+      electronArguments: ['/probe.cjs'],
+      name: 'Published preview Electron fixture',
+      retryAfterSpentBudget: true,
+      runAttempt,
+      setup: nativeSetup,
+      timeout: 20_000,
+    });
+
+    // The starved launch's measurements are discarded, not merged with the clean
+    // run's: a spent budget answered no question about the behaviour under test.
+    assert.deepEqual(report, { ok: true });
+    assert.equal(launches.length, 2);
+    assert.deepEqual(diagnostics, [
+      'Published preview Electron fixture needed 2 launches on this worker:'
+        + ' attempt 1 exited SIGKILL after exhausting its own budget and reported a starved run',
+    ]);
+  });
+
+  it('keeps the last spent-budget report so a worker that stays starved fails on the assertion', async () => {
+    const diagnostics = [];
+    const spent = { ...reported({ ok: false }), code: null, signal: 'SIGKILL', timedOut: true };
+    const { launches, runAttempt } = scriptedRunner([spent, spent]);
+
+    const report = await runElectronFixture({
+      diagnostic: message => diagnostics.push(message),
+      electronArguments: ['/probe.cjs'],
+      name: 'Published preview Electron fixture',
+      retryAfterSpentBudget: true,
+      runAttempt,
+      setup: nativeSetup,
+      timeout: 20_000,
+    });
+
+    assert.deepEqual(report, { ok: false });
+    assert.equal(launches.length, 2);
+    assert.deepEqual(diagnostics, [
+      'Published preview Electron fixture reported its evidence, then exited SIGKILL after exhausting its own budget',
+      'Published preview Electron fixture needed 2 launches on this worker:'
+        + ' attempt 1 exited SIGKILL after exhausting its own budget and reported a starved run',
+    ]);
+  });
+
+  it('leaves a spent budget alone for a probe that sizes its own launch', async () => {
+    // The pairing-zstd probe rides its outage out inside the budget it is given
+    // and its test timeout cannot afford a second full launch, so opting out has
+    // to keep the reported evidence exactly as before.
+    const diagnostics = [];
+    const { launches, runAttempt } = scriptedRunner([
+      { ...reported({ ok: true }), code: null, signal: 'SIGKILL', timedOut: true },
+    ]);
+
+    const report = await runElectronFixture({
+      diagnostic: message => diagnostics.push(message),
+      electronArguments: ['/probe.cjs'],
+      name: 'Electron pairing fixture',
+      runAttempt,
+      setup: nativeSetup,
+      timeout: 20_000,
+    });
+
+    assert.deepEqual(report, { ok: true });
+    assert.equal(launches.length, 1);
+    assert.deepEqual(diagnostics, [
+      'Electron pairing fixture reported its evidence, then exited SIGKILL after exhausting its own budget',
+    ]);
+  });
+
   it('fails with every attempt once the relaunch budget is spent', async () => {
     const { launches, runAttempt } = scriptedRunner([
       { ...crashed, stderr: 'first stderr' },
