@@ -6,7 +6,7 @@ import path from 'node:path';
 import { closeConnection } from '../packages/core/src/db/connection.js';
 import { AntigravityAgent } from '../packages/core/src/agents/impl/AntigravityAgent.js';
 import { toAntigravityCliModelId } from '../packages/core/src/agents/impl/antigravityModelIds.js';
-import type { AgentConfig } from '../packages/core/src/agents/types.js';
+import type { AgentConfig, AgentExecutionResult } from '../packages/core/src/agents/types.js';
 
 process.env.NODE_ENV = 'test';
 
@@ -29,6 +29,26 @@ function createAgent(configPath: string): AntigravityAgent {
 }
 
 describe('AntigravityAgent Docker args', () => {
+    test('goal execution rejects exit-zero plain text without a resumable conversation', async () => {
+        const agent = createAgent('/tmp/antigravity-goal-config') as unknown as {
+            persistImplementationLog: () => Promise<void>;
+            processExecutionResult: (options: Record<string, unknown>) => Promise<AgentExecutionResult>;
+        };
+        agent.persistImplementationLog = async () => {};
+        const result = await agent.processExecutionResult({
+            result: { stdout: 'Implementation complete', stderr: '', exitCode: 0 },
+            executionTime: 1,
+            issueRef: { number: 0, repoOwner: 'acme', repoName: 'repo' },
+            effectiveModel: 'antigravity-gemini-3.5-flash-high',
+            prompt: '/goal Implement a small change',
+            worktreePath: '/tmp/antigravity-goal-worktree',
+            worktreeGitContent: null,
+            executionMode: 'goal',
+        });
+        assert.equal(result.success, false);
+        assert.match(result.error || '', /resumable stream-json conversation/);
+    });
+
     test('mounts sibling .gemini auth directory when legacy .antigravity config is configured', () => {
         const tempHome = fs.mkdtempSync(path.join(os.tmpdir(), 'propr-antigravity-home-'));
         const legacyPath = path.join(tempHome, '.antigravity');

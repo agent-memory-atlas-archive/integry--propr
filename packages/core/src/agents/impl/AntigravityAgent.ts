@@ -24,7 +24,7 @@ import {
 } from './utils/antigravityOutputParser.js';
 import { estimateTokens } from '../../utils/tokenCalculation.js';
 import { antigravityModelIdsMatch, toAntigravityCliModelId } from './antigravityModelIds.js';
-import { resolveAntigravityProtocolError } from './utils/antigravityProtocol.js';
+import { resolveAntigravityGoalSessionError, resolveAntigravityProtocolError } from './utils/antigravityProtocol.js';
 import fs from 'fs';
 import path from 'path';
 import { randomBytes } from 'node:crypto';
@@ -127,7 +127,7 @@ export class AntigravityAgent implements Agent {
             );
 
             const executionTime = Date.now() - startTime;
-            return this.processExecutionResult({ result, executionTime, issueRef, effectiveModel, prompt, worktreePath, worktreeGitContent, taskId, prNumber, isRetry, retryReason, usageMetrics, transcriptPath, metadata });
+            return this.processExecutionResult({ result, executionTime, issueRef, effectiveModel, prompt, worktreePath, worktreeGitContent, taskId, prNumber, isRetry, retryReason, usageMetrics, transcriptPath, metadata, executionMode });
         } catch (error) {
             return this.handleExecutionError(error, Date.now() - startTime, issueRef, effectiveModel);
         } finally {
@@ -148,6 +148,7 @@ export class AntigravityAgent implements Agent {
         prompt: string; worktreePath: string; worktreeGitContent: string | null;
         taskId?: string; prNumber?: number; isRetry?: boolean; retryReason?: string; usageMetrics?: UsageTrackingMetrics | null;
         transcriptPath?: string; metadata?: Record<string, unknown>;
+        executionMode?: 'task' | 'goal';
     }): Promise<AgentExecutionResult> {
         const { result, executionTime, issueRef, effectiveModel, prompt, worktreePath, worktreeGitContent, taskId, prNumber, isRetry, retryReason, usageMetrics, transcriptPath, metadata } = opts;
         logger.info({ issueNumber: issueRef.number, repository: `${issueRef.repoOwner}/${issueRef.repoName}`, executionTime, outputLength: result.stdout?.length || 0, success: result.exitCode === 0, exitCode: result.exitCode, agentAlias: this.config.alias }, 'Antigravity agent execution completed');
@@ -157,7 +158,10 @@ export class AntigravityAgent implements Agent {
         const finalTokenUsage = this.resolveTokenUsage(response.tokenUsage, prompt, response.summary, response.rawConversationLog);
         const modelIdentity = resolveAntigravityModelIdentity(response.modelUsed, effectiveModel, response.hasStreamEnvelopes); const resolvedModel = modelIdentity.modelUsed;
         const terminationReason = resolveAgentTerminationReason({ timedOut: result.timedOut, error: result.stderr });
-        const executionError = resolveAntigravityExecutionError(response.terminalStatus, response.protocolError, response.hasStreamEnvelopes, modelIdentity.error);
+        const executionError = resolveAntigravityExecutionError(response.terminalStatus, response.protocolError, response.hasStreamEnvelopes, modelIdentity.error)
+            ?? (opts.executionMode === 'goal'
+                ? resolveAntigravityGoalSessionError(response.hasStreamEnvelopes, response.conversationId)
+                : undefined);
         const success = result.exitCode === 0 && !terminationReason && !executionError;
         const agentResult: AgentExecutionResult = {
             success, executionTimeMs: executionTime,
@@ -429,6 +433,10 @@ export class AntigravityAgent implements Agent {
         // Antigravity otherwise applies its own five-minute print-mode deadline,
         // which can abort large plan prompts long before ProPR's execution timeout.
         dockerArgs.push('--print-timeout', `${Math.max(1, Math.ceil(printTimeoutMs / 1000))}s`);
+        // Session identity and live narration must arrive on stdout while the
+        // invocation runs. Persistent goal sessions do not export the disposable
+        // task transcript, so plain-text output cannot support exact resume.
+        dockerArgs.push('--output-format', 'stream-json');
         if (modelName) {
             // Convert ProPR's namespaced id (e.g. 'antigravity-gpt-oss-120b-medium')
             // to the Antigravity CLI's native model name. Passing the prefixed id

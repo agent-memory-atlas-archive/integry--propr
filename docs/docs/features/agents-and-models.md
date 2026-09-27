@@ -39,6 +39,12 @@ Direct-login accounts use the portable saved path `~/.propr/agent-credentials/<a
 
 To reuse an account that is already authenticated on the host, select **Use existing config** and provide its config path. Launcher deployments also expose that path with the matching `HOST_*` setting. You can authenticate existing paths with a host CLI or `propr agent login <type>`; both CLI and Web login actions run the configured agent image, avoiding host/image CLI version drift. Gemini CLI was discontinued upstream; Gemini models route through Antigravity.
 
+## Goal sessions
+
+Codex and Claude expose native goal control. Antigravity supports ProPR goals through its persistent CLI conversations: ProPR streams activity, saves the conversation ID, and resumes that exact conversation at checkpoint and operator-input boundaries. Availability is checked against the configured image's CLI capabilities.
+
+Antigravity operator input uses a safe boundary and conversation resume; it is not delivered through a live steering API. Keep its mounted configuration directory across goal attempts. See [Goals](./goals.md) for checkpoint, pause/resume, cancellation, and draft PR behavior.
+
 ## Agent Configuration
 
 The Web UI includes an AI Agents page for configuring coding agents. Each agent entry defines:

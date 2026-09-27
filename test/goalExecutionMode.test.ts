@@ -27,6 +27,8 @@ import {
 import { buildDockerArgs as buildClaudeDockerArgs } from '../packages/core/src/agents/impl/utils/dockerArgsBuilder.ts';
 import { buildCodexAppServerDockerArgs, buildCodexDockerArgs } from '../packages/core/src/agents/impl/utils/codexDockerArgsBuilder.ts';
 import { AntigravityAgent } from '../packages/core/src/agents/impl/AntigravityAgent.ts';
+import { resolveAntigravityGoalSessionError } from '../packages/core/src/agents/impl/utils/antigravityProtocol.ts';
+import { inspectSessionMessageLine } from '../packages/core/src/claude/docker/dockerSessionOutput.ts';
 import type { Agent, AgentConfig } from '../packages/core/src/agents/types.ts';
 
 let codexConfigPath: string;
@@ -221,6 +223,10 @@ describe('native goal provider contract', () => {
     assert.ok(normal.some(argument => argument.endsWith(':/home/node/.gemini-source:rw')));
     assert.equal(initial.includes('PROPR_EPHEMERAL_STATE=1'), false);
     assert.ok(initial.some(argument => argument.endsWith(':/home/node/.gemini:rw')));
+    for (const args of [normal, initial, resumed]) {
+      assert.deepEqual(args.slice(args.indexOf('--output-format'), args.indexOf('--output-format') + 2),
+        ['--output-format', 'stream-json']);
+    }
     assert.deepEqual(resumed.slice(resumed.indexOf('--conversation'), resumed.indexOf('--conversation') + 2), ['--conversation', 'agy-conversation']);
   });
 
@@ -250,6 +256,25 @@ describe('native goal provider contract', () => {
       JSON.stringify({ event: 'init', conversation_id: 'conversation-1', init: { model: 'gemini' } }),
       JSON.stringify({ event: 'result', result: { conversation_id: 'different-conversation', status: 'SUCCESS' } }),
     ].join('\n')), undefined);
+  });
+
+  test('Antigravity publishes its recorded conversation before the result for goal controls', () => {
+    const lines = readFileSync('packages/core/test/fixtures/antigravity-stream-1.1.12.jsonl', 'utf8').trim().split('\n');
+    const identities: Array<[string, string | undefined]> = [];
+    const context = {
+      messageTimestamps: new Map<string, string>(),
+      state: { sessionIdDetected: false },
+      onSessionId: (sessionId: string, conversationId?: string) => { identities.push([sessionId, conversationId]); },
+      invokeExecutionCallback: (callback: () => void | Promise<void>) => { void callback(); },
+    };
+    inspectSessionMessageLine(lines[0], '2026-09-27T00:00:00Z', context);
+    assert.deepEqual(identities, [['conversation-sanitized', 'conversation-sanitized']]);
+    for (const line of lines.slice(1)) inspectSessionMessageLine(line, '2026-09-27T00:00:01Z', context);
+    assert.equal(identities.length, 1);
+    assert.equal(resolveAntigravityGoalSessionError(true, identities[0][1]), undefined);
+    assert.match(resolveAntigravityGoalSessionError(false, undefined)!, /resumable stream-json conversation/);
+    assert.match(resolveAntigravityGoalSessionError(true, undefined)!, /resumable stream-json conversation/);
+    assert.match(resolveAntigravityGoalSessionError(false, 'legacy-session')!, /resumable stream-json conversation/);
   });
 
   test('recognizes the pinned Codex experimental schema only when every goal method is present', () => {

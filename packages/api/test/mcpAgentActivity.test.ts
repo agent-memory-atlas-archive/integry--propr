@@ -79,6 +79,30 @@ async function createActivityDatabase() {
   return db;
 }
 
+test('get_agent_activity exposes Antigravity goal narration before a terminal result', async () => {
+  const db = await createActivityDatabase();
+  const output = [
+    { event: 'init', conversation_id: 'agy-goal', init: { model: 'gemini-3.8-flash-high' } },
+    { event: 'step_update', step_update: { conversation_id: 'agy-goal', step_index: 1,
+      state: 'DONE', step_type: 'agent_response', text_delta: 'Implementing the requested goal correction.' } },
+  ].map(event => JSON.stringify(event)).join('\n');
+  const redisClient = {
+    get: async (key: string) => key === 'agent:output:goal-task-direct' ? output : null,
+  } as unknown as RedisClientType;
+  try {
+    const tool = createToolCatalog({ db, redisClient, policy: {} as McpPolicy,
+      taskQueue: {} as never, runtimeBuildQueue: {} as never }).find(candidate => candidate.name === 'get_agent_activity');
+    assert.ok(tool);
+    const result = (await tool.run({
+      principal: { user: { id: 'owner-1' } } as McpPrincipal,
+      args: tool.schema.parse({ repository, goalId: directGoalId }),
+    })).data as { activity: Array<{ message: string }> };
+    assert.deepEqual(result.activity.map(item => item.message), ['Implementing the requested goal correction.']);
+  } finally {
+    await db.destroy();
+  }
+});
+
 test('activity database fallback excludes unclassified legacy Vibe text', async () => {
   const db = await createActivityDatabase();
   const redisClient = { get: async () => null } as unknown as RedisClientType;
