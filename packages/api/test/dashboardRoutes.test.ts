@@ -1,3 +1,4 @@
+import { createDashboardRoutes } from '../routes/dashboardRoutes.js';
 import assert from 'node:assert/strict';
 import { after, before, beforeEach, test } from 'node:test';
 import type { Knex } from 'knex';
@@ -369,4 +370,52 @@ test('every dashboard endpoint rejects a malformed repository filter with HTTP 4
     const accepted = await call(handler, { repository: 'integry/propr' });
     assert.equal(accepted.status, 200);
   }
+});
+
+test('narrative route returns idle prose and validates the repository filter', async () => {
+  const routes = createTestDashboardRoutes(database);
+  const result = await call(routes.getNarrative);
+  assert.equal(result.status, 200);
+  assert.equal(result.body.enabled, true);
+  assert.match(String(result.body.summary), /No work is running/);
+  assert.equal((await call(routes.getNarrative, { repository: 'invalid repo' })).status, 400);
+});
+
+
+test('disabled narrative short-circuits data reads and model resolution', async () => {
+  const routes = createDashboardRoutes({
+    db: (() => { throw new Error('Must not query'); }) as unknown as Knex,
+    redisClient: {} as never, taskQueue: {} as never,
+    isSummaryEnabled: async () => false,
+    narrativeModel: async () => { assert.fail('Must not resolve model'); },
+  });
+  const result = await call(routes.getNarrative);
+  assert.equal(result.status, 200);
+  assert.deepEqual(result.body, { repository: 'all', enabled: false, summary: null });
+});
+
+test('narrative route uses injected model, bypasses cache on refresh and degrades without HTTP errors', async () => {
+  await seedTask({ taskId: 'narrative-task', states: [{ state: 'processing', timestamp: minutesAgo(1) }] });
+  let count = 0;
+  let fail = false;
+  const routes = createDashboardRoutes({
+    db: database, redisClient: {} as never, taskQueue: {} as never, now: () => NOW,
+    narrativeModel: async () => ({ id: 'configured', generate: async () => {
+      count++;
+      if (fail) throw new Error('Provider failed');
+      return `Running work. Generation ${count}.`;
+    } }),
+  });
+  assert.equal((await call(routes.getNarrative)).body.summary, 'Running work. Generation 1.');
+  await call(routes.getNarrative);
+  assert.equal(count, 1);
+  assert.equal((await call(routes.getNarrative, { refresh: 'true' })).body.summary, 'Running work. Generation 2.');
+  fail = true;
+  const failed = await call(routes.getNarrative, { refresh: 'true' });
+  assert.equal(failed.status, 200);
+  assert.equal(failed.body.summary, null);
+  assert.equal((await call(routes.getNarrative)).body.summary, 'Running work. Generation 2.');
+  const unavailable = await call(createTestDashboardRoutes(database).getNarrative);
+  assert.equal(unavailable.status, 200);
+  assert.equal(unavailable.body.summary, null);
 });

@@ -13,6 +13,7 @@ import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import Dashboard from './Dashboard';
 import { HeaderScopeSlotContext } from './headerScopeSlot';
 import {
+  getDashboardNarrative,
   getDashboardActive,
   getDashboardAttention,
   getDashboardOutcomes,
@@ -36,6 +37,7 @@ import {
 } from './Dashboard.fixtures';
 
 vi.mock('../api/dashboardApi', () => ({
+  getDashboardNarrative: vi.fn(),
   getDashboardSummary: vi.fn(),
   getDashboardAttention: vi.fn(),
   getDashboardActive: vi.fn(),
@@ -104,6 +106,7 @@ async function waitForSections() {
 describe('Dashboard studio design rules', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    vi.mocked(getDashboardNarrative).mockResolvedValue({ repository: 'all', enabled: true, summary: 'Work is underway. Nothing needs your attention.' });
     mockSummary.mockResolvedValue(summaryResponse());
     mockAttention.mockResolvedValue(attentionResponse());
     mockActive.mockResolvedValue(activeResponse([activeItem()]));
@@ -237,7 +240,9 @@ describe('Dashboard studio design rules', () => {
     expect(within(scopeBar).getByRole('button', { name: /All Repos/ })).toHaveClass('w-full', 'justify-center');
 
     // The split pane follows directly, with no margin above it.
-    const panes = scopeBar.nextElementSibling as HTMLElement | null;
+    const summary = screen.getByTestId('dashboard-summary');
+    expect(scopeBar.nextElementSibling).toBe(summary);
+    const panes = summary.nextElementSibling as HTMLElement | null;
     expect(panes).toContainElement(screen.getByTestId('happening-now-section'));
     expect(panes?.className).not.toMatch(/(?:^|\s)(?:[a-z]+:)?(?:m[ty]?|pt|py)-/);
     headerSlot.remove();

@@ -160,6 +160,7 @@ function jsonResponse(): {
   let statusCode = 200;
   let payload: Record<string, unknown> = {};
   const response = {
+    setHeader() { return response; },
     status(code: number) { statusCode = code; return response; },
     json(body: Record<string, unknown>) { payload = body; return response; },
   } as unknown as ExpressResponse;
