@@ -223,6 +223,9 @@ describe('native goal provider contract', () => {
     assert.ok(normal.some(argument => argument.endsWith(':/home/node/.gemini-source:rw')));
     assert.equal(initial.includes('PROPR_EPHEMERAL_STATE=1'), false);
     assert.ok(initial.some(argument => argument.endsWith(':/home/node/.gemini:rw')));
+    assert.equal(normal.includes('--disable-slash-commands'), false);
+    assert.ok(initial.includes('--disable-slash-commands'));
+    assert.ok(resumed.includes('--disable-slash-commands'));
     for (const args of [normal, initial, resumed]) {
       assert.deepEqual(args.slice(args.indexOf('--output-format'), args.indexOf('--output-format') + 2),
         ['--output-format', 'stream-json']);

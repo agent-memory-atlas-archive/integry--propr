@@ -437,6 +437,10 @@ export class AntigravityAgent implements Agent {
         // invocation runs. Persistent goal sessions do not export the disposable
         // task transcript, so plain-text output cannot support exact resume.
         dockerArgs.push('--output-format', 'stream-json');
+        // ProPR's whole-session transport sends the saved goal prompt and
+        // operator corrections as text. Do not let CLI slash commands or
+        // installed skills consume those messages instead of the conversation.
+        if (executionMode === 'goal') dockerArgs.push('--disable-slash-commands');
         if (modelName) {
             // Convert ProPR's namespaced id (e.g. 'antigravity-gpt-oss-120b-medium')
             // to the Antigravity CLI's native model name. Passing the prefixed id
