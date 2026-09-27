@@ -31,6 +31,8 @@ export function leaseRedis() {
       return 'OK';
     },
     eval: async (script: string, { keys, arguments: [token, ttl] }: { keys: string[]; arguments: string[] }) => {
+      // The live-output reader's atomic read: no agent output in this fixture.
+      if (keys[0].startsWith('agent:output:')) return ['0', 'legacy', '0', '', '0', '', '0'];
       const lease = held(keys[0]);
       if (lease?.token !== token) return 0;
       if (script.includes('pexpire')) lease.expiresAt = clock + Number(ttl);

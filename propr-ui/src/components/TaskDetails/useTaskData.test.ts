@@ -1,12 +1,7 @@
 import { act, renderHook } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { LiveDetails } from './types';
-import {
-  mergeIncrementalLiveDetails,
-  normalizeLiveTodos,
-  useTaskData,
-  type IncrementalTaskLiveUpdatePayload,
-} from './useTaskData';
+import { mergeIncrementalLiveDetails, normalizeLiveTodos, useTaskData, type IncrementalTaskLiveUpdatePayload, applyTaskLiveUpdate, capLiveEvents, mergeFullLiveDetails } from './useTaskData';
 
 const apiMocks = vi.hoisted(() => ({
   getTaskHistory: vi.fn(),
@@ -240,5 +235,40 @@ describe('task detail history refreshes', () => {
       { id: 'new-event', type: 'thought', content: 'new socket log' },
     ]);
     expect(result.current.liveDetails.currentTask).toBe('new state');
+  });
+});
+
+describe('long live logs', () => {
+  const thought = (id: string, content = id) => ({ id, type: 'thought', content });
+  const tool = (id: string) => ({ id, type: 'tool_use', toolName: 'Bash' });
+
+  it('keeps every readable event and only the most recent raw events', () => {
+    const events = Array.from({ length: 700 }, (_, index) => (index % 7 === 0 ? thought(`t${index}`) : tool(`r${index}`)));
+    const capped = capLiveEvents(events as never, 500);
+    expect(capped.events.filter(event => event.type === 'thought')).toHaveLength(100);
+    expect(capped.events.filter(event => event.type !== 'thought')).toHaveLength(500);
+    expect(capped.dropped).toBe(100);
+    expect(capped.events.at(-1)?.id).toBe('r699');
+  });
+
+  it('replaces an event whose content grew under the same ID instead of duplicating it', () => {
+    const previous = { events: [thought('a', 'Checking')], todos: [], currentTask: null };
+    const merged = mergeIncrementalLiveDetails(previous as never, { taskId: 'task-1', events: [thought('a', 'Checking the parser'), tool('b')] } as never);
+    expect(merged.events.map(event => [event.id, event.content])).toEqual([['a', 'Checking the parser'], ['b', undefined]]);
+  });
+
+  it('lets a full-state read set the order while keeping newer socket events after it', () => {
+    const previous = { events: [thought('a'), tool('b'), tool('c')], todos: [], currentTask: null };
+    const merged = mergeFullLiveDetails(previous as never, { events: [thought('earlier'), thought('a'), tool('b')], todos: [], currentTask: null, omittedEventCount: 3 } as never);
+    expect(merged.events.map(event => event.id)).toEqual(['earlier', 'a', 'b', 'c']);
+    expect(merged.omittedEventCount).toBe(3);
+  });
+
+  it('treats a socket payload with omittedEventCount as full state and others as increments', () => {
+    const previous = { events: [thought('a')], todos: [], currentTask: null };
+    const increment = applyTaskLiveUpdate(previous as never, { taskId: 'task-1', events: [tool('b')] } as never);
+    expect(increment.events.map(event => event.id)).toEqual(['a', 'b']);
+    const nextExecution = applyTaskLiveUpdate(increment, { taskId: 'task-1', events: [thought('x')], todos: [], currentTask: null, tokenUsage: null, omittedEventCount: 0 } as never);
+    expect(nextExecution.events.map(event => event.id)).toEqual(['x']);
   });
 });

@@ -18,7 +18,9 @@ import { parseOpenCodeOutputToConversationResult } from './liveDetailsOpenCodePa
 import { parseExecutionDetailsRows, type ExecutionDetailRow } from './liveDetailsExecutionParser.js';
 import { detectStoredOutputFormat, hasCodexAppServerNotification, type StoredOutputFormat } from './liveDetailsStoredOutputFormat.js';
 import { parseRedisOutput } from '../services/redisOutputParser.js';
-import { parseAgentStreamOutput, type AgentStreamParseOptions } from '../services/agentStreamProjection.js';
+import { type AgentStreamParseOptions } from '../services/agentStreamProjection.js';
+import { projectLiveOutput, type LiveOutputRedis } from '../services/liveOutputStream.js';
+import { selectLiveEvents } from '../services/liveEventSelection.js';
 import { parseConversationFile } from '../services/conversationParser.js';
 import { withStableLiveEventIds, type LiveEventSource } from '../services/liveEventIds.js';
 
@@ -87,17 +89,15 @@ export function createLiveDetailsRoutes(deps: LiveDetailsRoutesDeps) {
         return;
       }
       const result = await parseConversationFile(conversationPath);
-      console.log(`[live-details] Returning: ${result.events.length} events, ${result.todos.length} todos, currentTask: ${result.currentTask ? 'yes' : 'no'}`);
-      send(res, {
-        ...result,
-        events: withStableLiveEventIds({
-          taskId,
-          source: 'conversation',
-          events: result.events,
-          totalEventCount: result.totalEventCount,
-          executionNamespace: sessionId,
-        }),
-      });
+      const selected = selectLiveEvents(withStableLiveEventIds({
+        taskId,
+        source: 'conversation',
+        events: result.events,
+        totalEventCount: result.totalEventCount,
+        executionNamespace: sessionId,
+      }));
+      console.log(`[live-details] Returning: ${selected.events.length} of ${result.events.length} events, ${result.todos.length} todos, currentTask: ${result.currentTask ? 'yes' : 'no'}`);
+      send(res, { ...result, events: selected.events, omittedEventCount: selected.omittedEventCount });
     } catch (error) {
       console.error(`Error in /api/task/:taskId/live-details:`, error);
       res.status(500).json({ error: 'Internal server error' });
@@ -270,28 +270,27 @@ async function loadStoredExecutionOutput(redisClient: RedisClientType, sessionId
   const output = await fs.readFile(outputPath, 'utf8');
   return parseStoredOutputContent(output);
 }
-async function parseActiveExecutionOutput(redisClient: RedisClientType, db: Knex, taskId: string, options: AgentStreamParseOptions = {}): Promise<(ConversationResult & { nativeGoal?: ReturnType<typeof parseRedisOutput>['nativeGoal'] }) | null> {
-  const output = await redisClient.get(`agent:output:${taskId}`);
-  if (!output?.trim()) return null;
+async function parseActiveExecutionOutput(redisClient: RedisClientType, db: Knex, taskId: string, options: AgentStreamParseOptions = {}): Promise<(ConversationResult & { nativeGoal?: ReturnType<typeof parseRedisOutput>['nativeGoal']; omittedEventCount?: number }) | null> {
   const executionStartTimestamp = await findExecutionStartTimestamp(redisClient, db, taskId);
-  const redisParsed = parseAgentStreamOutput(output, { ...options, executionStartTimestamp });
-  if (redisParsed.events.length > 0 || redisParsed.todos.length > 0 || redisParsed.currentTask || redisParsed.tokenUsage) {
+  const projected = await projectLiveOutput(redisClient as unknown as LiveOutputRedis, taskId, executionStartTimestamp, {
+    selectEvents: options.limitEvents !== false,
+  });
+  if (!projected) return null;
+  const { events, todos, currentTask, tokenUsage, nativeGoal, omittedEventCount } = projected;
+  if (events.length > 0 || todos.length > 0 || currentTask || tokenUsage) {
     return {
-      events: withStableLiveEventIds({
-        taskId,
-        source: 'redis',
-        events: redisParsed.events,
-        totalEventCount: redisParsed.totalEventCount,
-        executionNamespace: executionStartTimestamp ?? taskId,
-      }) as unknown as Array<Record<string, unknown>>,
-      todos: redisParsed.todos,
-      currentTask: redisParsed.currentTask,
-      tokenUsage: redisParsed.tokenUsage,
-      nativeGoal: redisParsed.nativeGoal,
+      events: events as unknown as Array<Record<string, unknown>>,
+      todos,
+      currentTask,
+      tokenUsage,
+      nativeGoal,
+      omittedEventCount,
     };
   }
-  const parsedOutput = parseStoredOutputContent(output);
-  const result = projectStoredOutputResult(parsedOutput);
+  // Output that is not a record stream (a stored result document) is projected whole.
+  const output = await redisClient.get(`agent:output:${taskId}`);
+  if (!output?.trim()) return null;
+  const result = projectStoredOutputResult(parseStoredOutputContent(output));
   return result
     ? withStableResultEventIds(taskId, 'redis', executionStartTimestamp ?? taskId, result)
     : null;
@@ -322,8 +321,8 @@ export async function projectTaskLiveDetails(
   }
 }
 async function parsePersistedGoalOutput(db: Knex, taskId: string): Promise<ConversationResult | null> {
-  const history = await db('task_history').where({ task_id: taskId }).orderBy('timestamp', 'desc').limit(20).select('metadata');
-  const records = history.reverse().flatMap(entry => {
+  const history = await db('task_history').where({ task_id: taskId }).orderBy('timestamp', 'asc').select('metadata');
+  const records = history.flatMap(entry => {
     try {
       const metadata = typeof entry.metadata === 'string' ? JSON.parse(entry.metadata) : entry.metadata;
       return Array.isArray(metadata?.goalOutputRecords)

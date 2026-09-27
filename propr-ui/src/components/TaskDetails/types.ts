@@ -138,6 +138,8 @@ export interface LiveDetails {
   todos: TodoItem[];
   currentTask: string | null;
   tokenUsage?: TokenUsage | null;
+  /** Raw terminal events of this execution not held here; readable events are never left out. */
+  omittedEventCount?: number;
 }
 
 export interface AnalysisData {

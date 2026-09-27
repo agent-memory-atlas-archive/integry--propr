@@ -43,6 +43,9 @@ interface ParseState {
   emittedOpenCodeToolUseIds: Set<string>;
   emittedOpenCodeToolResultIds: Set<string>;
   nativeGoal: NativeGoalProjection | null;
+  /** Live projection only: the record that started the buffered assistant message. */
+  pendingAssistantKey: string | null;
+  eventKeys: WeakMap<object, string>;
 }
 
 interface OpenCodeRedisEventUsage {
@@ -222,11 +225,6 @@ function processCodexTurnCompleted(event: CodexEvent, _timestamp: string, state:
   state.codexTurnCompletedUsage ??= emptyRedisTokenUsage();
   addRedisTokenUsage(state.codexTurnCompletedUsage, usage);
   return true;
-}
-
-function applyAuthoritativeCodexUsage(state: ParseState): void {
-  const usage = state.codexTurnCompletedUsage ?? state.codexResultUsage;
-  if (usage) addRedisTokenUsage(state.tokenUsage, usage);
 }
 
 function processCodexEvent(event: CodexEvent, timestamp: string, state: ParseState): boolean {
@@ -680,14 +678,21 @@ function hasRedisTokenUsage(usage: ParseState['tokenUsage']): boolean {
 /**
  * Flush pending assistant message to events
  */
+function pendingMessageEvent(state: ParseState, timestamp: string): ConversationEvent {
+  return {
+    type: 'thought' as const,
+    content: state.pendingAssistantMessage,
+    ...(state.pendingAssistantInternalReasoning ? { internalReasoning: true } : {}),
+    timestamp: state.pendingAssistantTimestamp ?? timestamp,
+  };
+}
+
 function flushPendingMessage(state: ParseState, timestamp: string): void {
   if (state.pendingAssistantMessage) {
-    state.events.push({
-      type: 'thought' as const,
-      content: state.pendingAssistantMessage,
-      ...(state.pendingAssistantInternalReasoning ? { internalReasoning: true } : {}),
-      timestamp: state.pendingAssistantTimestamp ?? timestamp,
-    });
+    const event = pendingMessageEvent(state, timestamp);
+    if (state.pendingAssistantKey) state.eventKeys.set(event, state.pendingAssistantKey);
+    state.events.push(event);
+    state.pendingAssistantKey = null;
     state.pendingAssistantMessage = '';
     state.pendingAssistantTimestamp = null;
     state.pendingAssistantInternalReasoning = false;
@@ -814,9 +819,9 @@ function shouldProcessOpenCodeBeforeCodex(event: OpenCodeRedisEvent): boolean {
 /**
  * Parse Redis output (Codex, Antigravity, OpenCode, or Vibe JSONL format)
  */
-export function parseRedisOutput(lines: string[], options: RedisOutputParseOptions = {}): ParsedRedisOutput {
+function createParseState(options: RedisOutputParseOptions): ParseState {
   const executionStartMs = options.executionStartTimestamp ? new Date(options.executionStartTimestamp).getTime() : NaN;
-  const state: ParseState = {
+  return {
     events: [],
     todos: [],
     tokenUsage: emptyRedisTokenUsage(),
@@ -834,37 +839,82 @@ export function parseRedisOutput(lines: string[], options: RedisOutputParseOptio
     emittedOpenCodeToolUseIds: new Set(),
     emittedOpenCodeToolResultIds: new Set(),
     nativeGoal: null,
+    pendingAssistantKey: null,
+    eventKeys: new WeakMap(),
   };
+}
 
-  if (parseVibeTranscriptOutput(lines.join('\n'), state)) {
-    const hasTokens = state.tokenUsage.input_tokens > 0 || state.tokenUsage.output_tokens > 0;
-    return {
-      events: state.events,
-      todos: state.todos,
-      currentTask: null,
-      tokenUsage: hasTokens ? state.tokenUsage : null,
-      totalEventCount: state.events.length,
-      nativeGoal: state.nativeGoal,
-    };
-  }
+/** One record's contribution to a live projection: the events it completed, each with its source key. */
+export interface ProjectedLineEvents {
+  events: Array<{ event: ConversationEvent; key: string }>;
+}
 
-  for (const line of lines) {
-    parseLine(line, state);
-  }
-  applyAuthoritativeCodexUsage(state);
+/**
+ * Record-by-record projection of provider output, for readers that only fetch
+ * new output. Feeding every record and then calling result() gives exactly what
+ * parseRedisOutput() returns for the same records.
+ */
+export interface RedisOutputProjection {
+  /** Consumes one record; `key` identifies it (its absolute offset in the live log). */
+  feed(line: string, key: string): ProjectedLineEvents;
+  /** The buffered assistant message not yet completed by a later record, if any. */
+  pendingEvent(): { event: ConversationEvent; key: string } | null;
+  result(): ParsedRedisOutput;
+}
 
-  // Flush any remaining pending message
-  flushPendingMessage(state, new Date().toISOString());
+export function createRedisOutputProjection(options: RedisOutputParseOptions = {}): RedisOutputProjection {
+  const state = createParseState(options);
+  return {
+    feed(line, key) {
+      const before = state.events.length;
+      parseLine(line, state);
+      if (state.pendingAssistantMessage && !state.pendingAssistantKey) state.pendingAssistantKey = key;
+      return {
+        events: state.events.slice(before).map(event => ({ event, key: state.eventKeys.get(event) ?? key })),
+      };
+    },
+    pendingEvent() {
+      if (!state.pendingAssistantMessage) return null;
+      return { event: pendingMessageEvent(state, new Date().toISOString()), key: state.pendingAssistantKey ?? 'pending' };
+    },
+    result() {
+      const tokenUsage = { ...state.tokenUsage };
+      const usage = state.codexTurnCompletedUsage ?? state.codexResultUsage;
+      if (usage) addRedisTokenUsage(tokenUsage, usage);
+      const pending = state.pendingAssistantMessage ? [pendingMessageEvent(state, new Date().toISOString())] : [];
+      const events = [...state.events, ...pending];
+      const inProgressTask = state.todos.find(t => t.status === 'in_progress');
+      return {
+        events,
+        todos: state.todos,
+        currentTask: inProgressTask ? inProgressTask.content : null,
+        tokenUsage: hasRedisTokenUsage(tokenUsage) ? tokenUsage : null,
+        totalEventCount: events.length,
+        nativeGoal: state.nativeGoal,
+      };
+    },
+  };
+}
 
-  const inProgressTask = state.todos.find(t => t.status === 'in_progress');
-  const hasTokens = hasRedisTokenUsage(state.tokenUsage);
-
+/** Whole-output Vibe transcripts cannot be projected record by record. */
+export function parseVibeTranscript(output: string, options: RedisOutputParseOptions = {}): ParsedRedisOutput | null {
+  const state = createParseState(options);
+  if (!parseVibeTranscriptOutput(output, state)) return null;
+  const hasTokens = state.tokenUsage.input_tokens > 0 || state.tokenUsage.output_tokens > 0;
   return {
     events: state.events,
     todos: state.todos,
-    currentTask: inProgressTask ? inProgressTask.content : null,
+    currentTask: null,
     tokenUsage: hasTokens ? state.tokenUsage : null,
     totalEventCount: state.events.length,
     nativeGoal: state.nativeGoal,
   };
+}
+
+export function parseRedisOutput(lines: string[], options: RedisOutputParseOptions = {}): ParsedRedisOutput {
+  const vibe = parseVibeTranscript(lines.join('\n'), options);
+  if (vibe) return vibe;
+  const projection = createRedisOutputProjection(options);
+  lines.forEach((line, index) => projection.feed(line, String(index)));
+  return projection.result();
 }

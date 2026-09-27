@@ -5,6 +5,7 @@ import knex, { type Knex } from 'knex';
 import type { RedisClientType } from 'redis';
 import type { FlatRequest } from '../requestTypes.js';
 import type { ExecutionDetailRow } from '../routes/liveDetailsExecutionParser.js';
+import { withLiveOutputReads } from './liveOutputRedisFake.js';
 
 process.env.NODE_ENV = 'test';
 process.env.PROPR_DEMO_MODE = 'true';
@@ -299,7 +300,7 @@ test('live-details database fallback preserves token usage and stable event IDs'
     await database('llm_execution_details').insert(fixture.map((row, sequenceNumber) => ({
       execution_id: 'execution-1915', sequence_number: sequenceNumber, ...row
     })));
-    const redisClient = { get: async () => null } as unknown as RedisClientType;
+    const redisClient = withLiveOutputReads({ get: async () => null }) as unknown as RedisClientType;
     const { getLiveDetails } = createLiveDetailsRoutes({ redisClient, db: database });
     const request = { params: { taskId } } as unknown as FlatRequest;
 
@@ -342,7 +343,7 @@ test('live-details keeps persisted goal output visible after completion cleanup'
       timestamp: timestamp(0),
       metadata: JSON.stringify({ goalOutputRecords: outputRecords }),
     });
-    const redisClient = { get: async () => null } as unknown as RedisClientType;
+    const redisClient = withLiveOutputReads({ get: async () => null }) as unknown as RedisClientType;
     const { getLiveDetails } = createLiveDetailsRoutes({ redisClient, db: database });
     const request = { params: { taskId } } as unknown as FlatRequest;
     const completedResponse = createJsonResponse();
@@ -376,7 +377,7 @@ test('live-details database output redacts local preview references while preser
         id: 'preview-command', type: 'command_execution', command: `capture ${local}`, aggregated_output: `Saved ${local}`, exit_code: 0,
       } }),
     });
-    const routes = createLiveDetailsRoutes({ redisClient: { get: async () => null } as unknown as RedisClientType, db: database });
+    const routes = createLiveDetailsRoutes({ redisClient: withLiveOutputReads({ get: async () => null }) as unknown as RedisClientType, db: database });
     const recorder = createJsonResponse();
     await routes.getLiveDetails({ params: { taskId } } as unknown as FlatRequest, recorder.response);
     const output = JSON.stringify(recorder.body());

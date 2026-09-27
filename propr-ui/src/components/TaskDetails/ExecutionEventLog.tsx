@@ -25,6 +25,8 @@ interface ExecutionEventLogProps {
   lastThought: string | null;
   isTaskActive: boolean;
   taskInfo: TaskInfo | null;
+  /** Earlier raw terminal events not loaded (the live view keeps the most recent ones). */
+  omittedEventCount?: number;
 }
 
 // Separate component for thought content rendering
@@ -278,7 +280,8 @@ const ExecutionEventLog: React.FC<ExecutionEventLogProps> = ({
   onToggleCollapse,
   lastThought,
   isTaskActive: _isTaskActive,
-  taskInfo
+  taskInfo,
+  omittedEventCount = 0,
 }) => {
   // Note: isTaskActive is still passed for potential future use
   void _isTaskActive;
@@ -318,7 +321,7 @@ const ExecutionEventLog: React.FC<ExecutionEventLogProps> = ({
         <div className="flex items-center gap-2.5 flex-shrink-0">
           <span className={`font-mono text-sm font-bold ${collapsed ? 'text-slate-500' : 'text-zinc-400'}`}>{'>_'}</span>
           <span className={`font-mono text-[11px] font-bold uppercase tracking-wider ${collapsed ? 'text-slate-600' : 'text-white'}`}>
-            {collapsed ? 'EXECUTION LOG' : 'TERMINAL OUTPUT'} ({events.length})
+            {collapsed ? 'EXECUTION LOG' : 'TERMINAL OUTPUT'} ({events.length + omittedEventCount})
           </span>
         </div>
         <div className="flex items-center gap-3 justify-end min-w-0 flex-1 pl-4">
@@ -348,9 +351,14 @@ const ExecutionEventLog: React.FC<ExecutionEventLogProps> = ({
         >
           {/* Continuous stream layout - no dividers between items */}
           <div className="p-3 space-y-0">
+            {omittedEventCount > 0 && (
+              <p role="note" className="mb-2 font-mono text-[11px] text-zinc-500">
+                {omittedEventCount} earlier terminal {omittedEventCount === 1 ? 'event is' : 'events are'} not shown. The implementation log keeps every message.
+              </p>
+            )}
             {eventsWithContext.map(({ event, prevToolUse, originalIndex }) => (
               <TerminalEventItem
-                key={originalIndex}
+                key={event.id ?? originalIndex}
                 event={event}
                 taskInfo={taskInfo}
                 previousEvent={prevToolUse}

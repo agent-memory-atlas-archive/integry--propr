@@ -1,7 +1,6 @@
 import { spawn, execFileSync, SpawnOptions, ChildProcess } from 'child_process';
 import { StringDecoder } from 'node:string_decoder';
 import fs from 'fs';
-import { Redis } from 'ioredis';
 import logger from '../../utils/logger.js';
 import {
     abortSpawnedExecution,
@@ -22,6 +21,7 @@ import {
     boundedProviderDiagnostic,
     boundedProviderOutput,
 } from '../../agents/impl/utils/boundedProviderOutput.js';
+import { LiveOutputLog } from '../../agents/impl/utils/liveOutputLog.js';
 import {
     inspectSessionMessageLine,
     SessionLineInspectionContext,
@@ -314,19 +314,7 @@ export function executeDockerCommand(command: string, args: string[], options: D
             })
             : null;
 
-        const getRedisOutput = () => {
-            const primaryOutput = streamStderrToRedis ? `${stderr}${stdout ? `\n${stdout}` : ''}` : stdout;
-            let extraOutput = '';
-            if (streamExtraOutput) {
-                try { extraOutput = streamExtraOutput(); }
-                catch (err) { logger.debug({ error: (err as Error).message }, 'Failed to read extra streaming output'); }
-            }
-            return boundedProviderOutput(
-                extraOutput ? `${primaryOutput}${primaryOutput ? '\n' : ''}${extraOutput}` : primaryOutput,
-            );
-        };
-        const redisState = { client: null as Redis | null, interval: null as ReturnType<typeof setInterval> | null, lastOutput: '' };
-        if (streamToRedis && taskId) initRedisStreaming(taskId, stripAnsi, getRedisOutput, redisState);
+        const liveOutput = startLiveOutputStreaming({ taskId, streamToRedis, streamStderrToRedis, streamExtraOutput, stripAnsi }, () => stdout, () => stderr);
         if (command === 'docker' && args[0] === 'run' && worktreePath) {
             containerDetectionTimer = detectContainerId(
                 worktreePath,
@@ -339,24 +327,30 @@ export function executeDockerCommand(command: string, args: string[], options: D
         child.stdout?.on('data', (data: Buffer) => {
             const chunk = stdoutDecoder.write(data), ts = new Date().toISOString();
             stdout = stdoutBuffer.append(chunk);
+            liveOutput?.stdout(chunk);
             inspectSessionLines(chunk, ts);
         });
         child.stderr?.on('data', (data: Buffer) => {
-            stderr = boundedProviderDiagnostic(stderr + stderrDecoder.write(data));
+            const chunk = stderrDecoder.write(data);
+            stderr = boundedProviderDiagnostic(stderr + chunk);
+            liveOutput?.stderr(chunk);
         });
 
         child.on('close', async (exitCode: number | null) => {
             clearTimeout(timeoutHandle);
             const finalStdout = stdoutDecoder.end();
             if (finalStdout) stdout = stdoutBuffer.append(finalStdout);
-            stderr = boundedProviderDiagnostic(stderr + stderrDecoder.end());
+            const finalStderr = stderrDecoder.end();
+            stderr = boundedProviderDiagnostic(stderr + finalStderr);
+            liveOutput?.stdout(finalStdout);
+            liveOutput?.stderr(finalStderr);
             inspectSessionLines(finalStdout, new Date().toISOString(), true);
             if (containerDetectionTimer) clearTimeout(containerDetectionTimer);
             if (abortChecker) await abortChecker.close();
             await Promise.allSettled([...pendingCallbacks]);
             if (state.teardownPromise) await state.teardownPromise;
             executionSignal?.removeEventListener('abort', abortForExecutionSignal);
-            await cleanupRedisStreaming(redisState, taskId, stripAnsi, getRedisOutput());
+            await liveOutput?.close();
             const executionAbortError = getExecutionAbortError(executionSignal);
             if (executionAbortError) preserveOwnershipFailure(executionAbortError);
             if (hasOwnershipFailure) {
@@ -387,36 +381,48 @@ export function executeDockerCommand(command: string, args: string[], options: D
             if (abortChecker) await abortChecker.close();
             await Promise.allSettled([...pendingCallbacks]);
             if (state.teardownPromise) await state.teardownPromise;
-            if (redisState.interval) clearInterval(redisState.interval);
-            if (redisState.client) redisState.client.quit().catch(() => {});
+            await liveOutput?.close();
             reject(error);
         });
     });
 }
 
-function initRedisStreaming(taskId: string, stripAnsi: boolean | undefined, getStdout: () => string, state: { client: Redis | null; interval: ReturnType<typeof setInterval> | null; lastOutput: string }): void {
-    (async () => {
-        try {
-            state.client = new Redis({ host: process.env.REDIS_HOST || 'redis', port: parseInt(process.env.REDIS_PORT || '6379', 10) });
-            const redisKey = `agent:output:${taskId}`;
-            state.interval = setInterval(async () => {
-                const stdout = getStdout();
-                if (stdout !== state.lastOutput && state.client) {
-                    try { await state.client.setex(redisKey, 3600, stripAnsi ? stripAnsiCodes(stdout) : stdout); state.lastOutput = stdout; }
-                    catch (err) { logger.debug({ error: (err as Error).message }, 'Failed to stream output to Redis'); }
-                }
-            }, 2000);
-            logger.debug({ taskId, redisKey }, 'Started streaming output to Redis');
-        } catch (err) { logger.warn({ error: (err as Error).message }, 'Failed to initialize Redis streaming'); }
-    })();
-}
+interface LiveOutputStreaming { stdout(chunk: string): void; stderr(chunk: string): void; close(): Promise<void> }
 
-async function cleanupRedisStreaming(state: { client: Redis | null; interval: ReturnType<typeof setInterval> | null }, taskId: string | undefined, stripAnsi: boolean | undefined, stdout: string): Promise<void> {
-    if (state.interval) clearInterval(state.interval);
-    if (state.client && taskId) {
-        try { await state.client.setex(`agent:output:${taskId}`, 3600, stripAnsi ? stripAnsiCodes(stdout) : stdout); await state.client.quit(); }
-        catch (err) { logger.debug({ error: (err as Error).message }, 'Failed to cleanup Redis streaming'); }
+/**
+ * The task's live log is append-only: each record is sent once, as it arrives,
+ * and a new execution replaces what an earlier one left. Providers whose
+ * readable transcript only exists as a whole snapshot (Vibe's session
+ * messages) publish that snapshot in place of the previous one instead.
+ */
+function startLiveOutputStreaming(
+    options: Pick<DockerCommandOptions, 'taskId' | 'streamToRedis' | 'streamStderrToRedis' | 'streamExtraOutput' | 'stripAnsi'>,
+    readStdout: () => string,
+    readStderr: () => string,
+): LiveOutputStreaming | null {
+    const { taskId, streamToRedis, streamStderrToRedis, streamExtraOutput, stripAnsi } = options;
+    if (!streamToRedis || !taskId) return null;
+    const log = new LiveOutputLog(taskId, { reset: true, ...(stripAnsi ? { transformRecord: stripAnsiCodes } : {}) });
+    if (!streamExtraOutput) {
+        return { stdout: chunk => log.append(chunk), stderr: chunk => { if (streamStderrToRedis) log.append(chunk); }, close: () => log.close() };
     }
+    let previous = '';
+    const publish = () => {
+        let extraOutput = '';
+        try { extraOutput = streamExtraOutput(); }
+        catch (err) { logger.debug({ error: (err as Error).message }, 'Failed to read extra streaming output'); }
+        const stdout = readStdout();
+        const primary = streamStderrToRedis ? `${readStderr()}${stdout ? `\n${stdout}` : ''}` : stdout;
+        const snapshot = boundedProviderOutput(extraOutput ? `${primary}${primary ? '\n' : ''}${extraOutput}` : primary);
+        if (snapshot !== previous) log.replace(snapshot);
+        previous = snapshot;
+    };
+    const interval = setInterval(publish, 2000);
+    return {
+        stdout: () => undefined,
+        stderr: () => undefined,
+        close: async () => { clearInterval(interval); publish(); await log.close(); },
+    };
 }
 
 function detectContainerId(

@@ -82,24 +82,57 @@ const legacyEventFingerprint = (event: LiveDetails['events'][number]) => {
   })}`;
 };
 
+/** Raw terminal events kept in a live view; readable (`thought`) events are always kept. */
+export const MAX_LIVE_RAW_EVENTS = 500;
+
+/** Keeps every readable event and only the most recent raw ones. */
+export const capLiveEvents = (events: LiveEvent[], maxRawEvents = MAX_LIVE_RAW_EVENTS): { events: LiveEvent[]; dropped: number } => {
+  let raw = 0;
+  for (const event of events) if (event.type !== 'thought') raw += 1;
+  let skip = Math.max(0, raw - maxRawEvents);
+  const dropped = skip;
+  if (skip === 0) return { events, dropped };
+  return {
+    events: events.filter(event => {
+      if (event.type === 'thought' || skip === 0) return true;
+      skip -= 1;
+      return false;
+    }),
+    dropped,
+  };
+};
+
+/**
+ * Appends events not seen yet and updates events whose content changed (a
+ * buffered assistant message keeps its ID while it grows).
+ */
 const appendUniqueEvents = (
   currentEvents: LiveDetails['events'],
   newEvents: LiveDetails['events']
 ) => {
   if (newEvents.length === 0) return currentEvents;
-  const seenIds = new Set(currentEvents.flatMap(event => event.id ? [event.id] : []));
+  const indexById = new Map<string, number>();
+  currentEvents.forEach((event, index) => { if (event.id) indexById.set(event.id, index); });
   const existingLegacyOccurrences = new Map<string, number>();
   for (const event of currentEvents) {
     if (event.id) continue;
     const fingerprint = legacyEventFingerprint(event);
     existingLegacyOccurrences.set(fingerprint, (existingLegacyOccurrences.get(fingerprint) ?? 0) + 1);
   }
+  let updated: LiveDetails['events'] | null = null;
   const incomingLegacyOccurrences = new Map<string, number>();
   const uniqueNewEvents = newEvents.filter(event => {
     if (event.id) {
-      if (seenIds.has(event.id)) return false;
-      seenIds.add(event.id);
-      return true;
+      const existing = indexById.get(event.id);
+      if (existing === undefined) {
+        indexById.set(event.id, -1);
+        return true;
+      }
+      if (existing >= 0 && currentEvents[existing] !== event) {
+        updated ??= [...currentEvents];
+        updated[existing] = event;
+      }
+      return false;
     }
     const fingerprint = legacyEventFingerprint(event);
     const occurrence = incomingLegacyOccurrences.get(fingerprint) ?? 0;
@@ -107,7 +140,29 @@ const appendUniqueEvents = (
     if (occurrence < (existingLegacyOccurrences.get(fingerprint) ?? 0)) return false;
     return true;
   });
-  return uniqueNewEvents.length > 0 ? [...currentEvents, ...uniqueNewEvents] : currentEvents;
+  const base = updated ?? currentEvents;
+  return uniqueNewEvents.length > 0 ? [...base, ...uniqueNewEvents] : base;
+};
+
+/**
+ * A full-state read (HTTP snapshot or a socket full-state payload) sets the
+ * order; events already held that are newer than anything it shares with the
+ * current list (socket increments that raced the read) stay after it.
+ */
+export const mergeFullLiveDetails = (previous: LiveDetails, full: LiveDetails): LiveDetails => {
+  const fullEvents = full.events || [];
+  const fullIds = new Set(fullEvents.flatMap(event => event.id ? [event.id] : []));
+  let lastShared = -1;
+  previous.events.forEach((event, index) => { if (event.id && fullIds.has(event.id)) lastShared = index; });
+  const newer = lastShared >= 0 ? previous.events.slice(lastShared + 1).filter(event => !event.id || !fullIds.has(event.id)) : [];
+  const capped = capLiveEvents(newer.length > 0 ? [...fullEvents, ...newer] : fullEvents);
+  return {
+    events: capped.events,
+    todos: full.todos || [],
+    currentTask: full.currentTask || null,
+    tokenUsage: full.tokenUsage || null,
+    omittedEventCount: (full.omittedEventCount ?? 0) + capped.dropped,
+  };
 };
 
 export type IncrementalTaskLiveUpdatePayload = Pick<TaskLiveUpdatePayload, 'taskId'>
@@ -124,8 +179,13 @@ export const mergeIncrementalLiveDetails = (
   payload: IncrementalTaskLiveUpdatePayload
 ): LiveDetails => {
   const newEvents: LiveEvent[] = payload.events || [];
+  const capped = capLiveEvents(appendUniqueEvents(previous.events, newEvents));
+  const omitted = previous.omittedEventCount !== undefined || capped.dropped > 0
+    ? { omittedEventCount: (previous.omittedEventCount ?? 0) + capped.dropped }
+    : {};
   return {
-    events: appendUniqueEvents(previous.events, newEvents),
+    events: capped.events,
+    ...omitted,
     todos: hasUpdateField(payload, 'todos')
       ? normalizeLiveTodos(payload.todos ?? [])
       : previous.todos,
@@ -136,6 +196,18 @@ export const mergeIncrementalLiveDetails = (
       ? payload.tokenUsage ?? null
       : previous.tokenUsage,
   };
+};
+
+/** A socket payload carrying `omittedEventCount` is full state (initial, or after a resync); others are increments. */
+export const applyTaskLiveUpdate = (previous: LiveDetails, payload: IncrementalTaskLiveUpdatePayload): LiveDetails => {
+  if (payload.omittedEventCount === undefined) return mergeIncrementalLiveDetails(previous, payload);
+  return mergeFullLiveDetails(previous, {
+    events: payload.events || [],
+    todos: normalizeLiveTodos(payload.todos || []),
+    currentTask: payload.currentTask || null,
+    tokenUsage: payload.tokenUsage || null,
+    omittedEventCount: payload.omittedEventCount,
+  });
 };
 
 export const useTaskData = (taskId: string | undefined) => {
@@ -156,8 +228,8 @@ export const useTaskData = (taskId: string | undefined) => {
   const { subscribeToTask, unsubscribeFromTask, onTaskUpdate, isConnected, subscribeToTaskLive, unsubscribeFromTaskLive, onTaskLiveUpdate } = useSocket();
   // Track the last notified terminal state to avoid duplicate toasts
   const lastNotifiedStateRef = useRef<string | null>(null);
+  const hasReceivedSocketStateRef = useRef<boolean>(false);
   // Track if we've received initial data from WebSocket (to distinguish initial vs incremental updates)
-  const hasReceivedInitialDataRef = useRef<boolean>(false);
   // A route parameter can change without unmounting this hook. Late responses
   // from the previous task must never replace the newly selected task's data.
   const activeTaskIdRef = useRef(taskId);
@@ -197,17 +269,10 @@ export const useTaskData = (taskId: string | undefined) => {
     try {
       const data = await getTaskLiveDetails(taskId) as LiveDetails;
       if (activeRequestScopeRef.current !== requestedScope) return data;
-      // The socket subscription is established in parallel with this fallback
-      // read. Never let an older HTTP snapshot replace a newer full/incremental
-      // socket payload that arrived while the request was pending.
-      if (!hasReceivedInitialDataRef.current) {
-        setLiveDetails({
-          events: data.events || [],
-          todos: data.todos || [],
-          currentTask: data.currentTask || null,
-          tokenUsage: data.tokenUsage || null,
-        });
-      }
+      // The socket subscription runs in parallel with this read, and its first
+      // payload is already full state. Never let an older HTTP snapshot replace
+      // newer socket state that arrived while the request was pending.
+      if (!hasReceivedSocketStateRef.current) setLiveDetails(previous => mergeFullLiveDetails(previous, data));
       return data;
     } catch (err) {
       console.error('Error fetching persisted live details:', err);
@@ -223,7 +288,7 @@ export const useTaskData = (taskId: string | undefined) => {
 
   useEffect(() => {
     lastNotifiedStateRef.current = null;
-    hasReceivedInitialDataRef.current = false;
+    hasReceivedSocketStateRef.current = false;
   }, [requestScopeKey]);
 
   // Handle task update from WebSocket
@@ -260,25 +325,8 @@ export const useTaskData = (taskId: string | undefined) => {
   const handleTaskLiveUpdate = useCallback((payload: TaskLiveUpdatePayload) => {
     if (payload.taskId !== activeTaskIdRef.current) return;
 
-    const newEvents: LiveEvent[] = payload.events || [];
-    const newTodos = normalizeLiveTodos(payload.todos || []);
-
-    if (!hasReceivedInitialDataRef.current) {
-      // First message: this is the initial full state
-      console.log(`[useTaskData] Received initial live data via WebSocket: ${newEvents.length} events`);
-      hasReceivedInitialDataRef.current = true;
-      setLiveDetails({
-        events: newEvents,
-        todos: newTodos,
-        currentTask: payload.currentTask || null,
-        tokenUsage: payload.tokenUsage || null,
-      });
-    } else {
-      // Subsequent messages: these are incremental updates (only new events)
-      // Append new events to existing ones
-      console.log(`[useTaskData] Received incremental update via WebSocket: ${newEvents.length} new events`);
-      setLiveDetails(prev => mergeIncrementalLiveDetails(prev, payload));
-    }
+    hasReceivedSocketStateRef.current = true;
+    setLiveDetails(previous => applyTaskLiveUpdate(previous, payload));
   }, []);
 
   // Initial data fetch
@@ -331,7 +379,7 @@ export const useTaskData = (taskId: string | undefined) => {
       unsubscribeTask();
       unsubscribeLive();
       // Reset initial data flag on cleanup so re-subscription gets fresh state
-      hasReceivedInitialDataRef.current = false;
+      hasReceivedSocketStateRef.current = false;
     };
   }, [requestScopeKey, taskId, isConnected, subscribeToTask, unsubscribeFromTask, subscribeToTaskLive, unsubscribeFromTaskLive, onTaskUpdate, onTaskLiveUpdate, handleTaskUpdate, handleTaskLiveUpdate]);
 

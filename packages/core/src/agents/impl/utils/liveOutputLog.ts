@@ -1,0 +1,178 @@
+import { Redis } from 'ioredis';
+import logger from '../../../utils/logger.js';
+
+/**
+ * A task's live agent output in Redis is an append-only log, so writers send
+ * only new records and readers fetch only the bytes they have not seen yet.
+ *
+ *   agent:output:<task>       the retained output (a byte string)
+ *   agent:output:<task>:meta  hash: `base` absolute offset of the first retained
+ *                             byte, `epoch` bumped whenever an execution starts
+ *                             over, `start` that execution's absolute offset,
+ *                             `head` its first record
+ *
+ * Absolute offsets only ever grow: a reader that remembers one can always tell
+ * whether its next bytes are still retained. When the output passes the ceiling
+ * the oldest records are dropped at a record boundary (the first record, which
+ * identifies the provider format, is kept in `head`).
+ */
+export const LIVE_OUTPUT_MAX_BYTES = 64 * 1024 * 1024;
+export const LIVE_OUTPUT_TTL_SECONDS = 3600;
+
+export const liveOutputKey = (taskId: string): string => `agent:output:${taskId}`;
+export const liveOutputMetaKey = (taskId: string): string => `agent:output:${taskId}:meta`;
+
+/**
+ * KEYS: data, meta. ARGV: chunk, maximum bytes, ttl seconds, mode.
+ * mode `reset` starts a new execution (new epoch) before appending; `replace`
+ * swaps in a whole snapshot of the same execution (providers that cannot stream
+ * records), so readers resynchronize without a new epoch.
+ */
+export const APPEND_LIVE_OUTPUT_SCRIPT = `
+local mode = ARGV[4]
+if mode == 'reset' or mode == 'replace' then
+    local previous = redis.call('strlen', KEYS[1])
+    redis.call('del', KEYS[1])
+    local base = redis.call('hincrby', KEYS[2], 'base', previous)
+    -- A snapshot replaces the same execution's output, so its events keep their IDs.
+    if mode == 'reset' then redis.call('hincrby', KEYS[2], 'epoch', 1) end
+    redis.call('hset', KEYS[2], 'start', base)
+    redis.call('hdel', KEYS[2], 'head')
+end
+if redis.call('hexists', KEYS[2], 'epoch') == 0 then
+    redis.call('hset', KEYS[2], 'epoch', 0, 'base', 0, 'start', 0)
+end
+local length = redis.call('append', KEYS[1], ARGV[1])
+if redis.call('hexists', KEYS[2], 'head') == 0 then
+    local first = redis.call('getrange', KEYS[1], 0, 65535)
+    local boundary = string.find(first, '\\n', 1, true)
+    if boundary then
+        redis.call('hset', KEYS[2], 'head', string.sub(first, 1, boundary - 1))
+    elseif length > 65536 then
+        redis.call('hset', KEYS[2], 'head', '')
+    end
+end
+local maximum = tonumber(ARGV[2])
+if length > maximum then
+    local keep = math.floor(maximum * 3 / 4)
+    local tail = redis.call('getrange', KEYS[1], length - keep, -1)
+    local boundary = string.find(tail, '\\n', 1, true)
+    if boundary then tail = string.sub(tail, boundary + 1) end
+    redis.call('set', KEYS[1], tail)
+    redis.call('hincrby', KEYS[2], 'base', length - string.len(tail))
+    length = string.len(tail)
+end
+redis.call('expire', KEYS[1], tonumber(ARGV[3]))
+redis.call('expire', KEYS[2], tonumber(ARGV[3]))
+return length
+`;
+
+export type LiveOutputWriteMode = 'append' | 'reset' | 'replace';
+
+export async function writeLiveOutput(
+    redis: Pick<Redis, 'eval'>,
+    taskId: string,
+    chunk: string,
+    { mode = 'append', maximumBytes = LIVE_OUTPUT_MAX_BYTES }: { mode?: LiveOutputWriteMode; maximumBytes?: number } = {},
+): Promise<number> {
+    return Number(await redis.eval(
+        APPEND_LIVE_OUTPUT_SCRIPT, 2, liveOutputKey(taskId), liveOutputMetaKey(taskId),
+        chunk, String(maximumBytes), String(LIVE_OUTPUT_TTL_SECONDS), mode,
+    ));
+}
+
+export interface LiveOutputLogOptions {
+    /** Start a new execution: the first write replaces whatever an earlier one left. */
+    reset?: boolean;
+    /** Applied to whole records only, so escape sequences are never split. */
+    transformRecord?: (record: string) => string;
+    flushIntervalMs?: number;
+    redis?: Redis;
+}
+
+/**
+ * Streams one process's output into the task's live log, one complete record
+ * at a time. Partial records wait for their newline (or for close()).
+ */
+export class LiveOutputLog {
+    private readonly redis: Redis;
+    private readonly ownsRedis: boolean;
+    private partial = '';
+    private pending = '';
+    private resetPending: boolean;
+    private flushTimer: ReturnType<typeof setTimeout> | null = null;
+    private flushPromise: Promise<void> = Promise.resolve();
+    private closed = false;
+
+    constructor(private readonly taskId: string, private readonly options: LiveOutputLogOptions = {}) {
+        this.resetPending = options.reset === true;
+        this.ownsRedis = !options.redis;
+        this.redis = options.redis ?? new Redis({
+            host: process.env.REDIS_HOST || 'redis',
+            port: parseInt(process.env.REDIS_PORT || '6379', 10),
+            maxRetriesPerRequest: 1,
+        });
+        this.redis.on?.('error', error => logger.debug({ error: error.message }, 'Live output Redis connection error'));
+    }
+
+    append(chunk: string): void {
+        if (this.closed || !chunk) return;
+        const text = this.partial + chunk;
+        const boundary = text.lastIndexOf('\n');
+        if (boundary < 0) {
+            this.partial = text;
+            return;
+        }
+        this.partial = text.slice(boundary + 1);
+        this.queue(text.slice(0, boundary + 1));
+    }
+
+    /** Publishes a whole snapshot in place of the previous one (providers that cannot stream records). */
+    replace(snapshot: string): void {
+        if (this.closed) return;
+        this.flushPromise = this.flushPromise
+            .then(() => writeLiveOutput(this.redis, this.taskId, this.transform(snapshot), { mode: 'replace' }))
+            .then(() => undefined, error => this.warn(error));
+    }
+
+    flush(): Promise<void> {
+        if (this.flushTimer) clearTimeout(this.flushTimer);
+        this.flushTimer = null;
+        if (!this.pending && !this.resetPending) return this.flushPromise;
+        const chunk = this.pending;
+        const mode: LiveOutputWriteMode = this.resetPending ? 'reset' : 'append';
+        this.pending = '';
+        this.resetPending = false;
+        this.flushPromise = this.flushPromise
+            .then(() => writeLiveOutput(this.redis, this.taskId, chunk, { mode }))
+            .then(() => undefined, error => this.warn(error));
+        return this.flushPromise;
+    }
+
+    async close(): Promise<void> {
+        if (this.closed) return;
+        if (this.partial) this.queue(`${this.partial}\n`);
+        this.partial = '';
+        this.closed = true;
+        await this.flush();
+        if (this.ownsRedis) await this.redis.quit().catch(() => undefined);
+    }
+
+    private queue(records: string): void {
+        this.pending += this.options.transformRecord
+            ? records.split('\n').map((record, index, all) => (index === all.length - 1 ? record : this.transform(record))).join('\n')
+            : records;
+        if (!this.flushTimer) {
+            this.flushTimer = setTimeout(() => { this.flushTimer = null; void this.flush(); }, this.options.flushIntervalMs ?? 500);
+            this.flushTimer.unref?.();
+        }
+    }
+
+    private transform(value: string): string {
+        return this.options.transformRecord ? this.options.transformRecord(value) : value;
+    }
+
+    private warn(error: unknown): void {
+        logger.debug({ error: (error as Error).message, taskId: this.taskId }, 'Failed to stream live output to Redis');
+    }
+}

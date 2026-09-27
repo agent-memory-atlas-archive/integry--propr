@@ -4,6 +4,7 @@ import knex from 'knex';
 import type { RedisClientType } from 'redis';
 import { appendGoalAttachments, GOAL_ATTACHMENT_SECTION_HEADING } from '../services/goalAttachmentService.js';
 import { serializeGoal, type GoalProjectionRow } from '../services/goalProjection.js';
+import { withLiveOutputReads } from './liveOutputRedisFake.js';
 
 after(async () => {
   const { closeConnection } = await import('@propr/core');
@@ -67,7 +68,7 @@ test('goal projection redacts nested failure, checkpoint, and provider live-summ
         objective: `Verify ${sourcePath}`, status: 'active', tokenBudget: 1000, tokensUsed: 250, timeUsedSeconds: 30,
       } } },
     ].map(record => JSON.stringify(record)).join('\n');
-    const redisClient = {
+    const redisClient = withLiveOutputReads({
       get: async (key: string) => {
         if (key === 'agent:output:goal-task-2283') return liveOutput;
         if (key === 'worker:state:goal-task-2283') return JSON.stringify({ history: [{
@@ -75,7 +76,7 @@ test('goal projection redacts nested failure, checkpoint, and provider live-summ
         }] });
         return null;
       },
-    } as unknown as RedisClientType;
+    }) as unknown as RedisClientType;
     const row = {
       goal_id: 'goal-2283', owner_id: 'owner-1', owner_login: 'alice', repository: 'acme/repo',
       title: 'Preview goal', objective: `Ship ${previewPath}`, launch_strategy: 'direct',
@@ -131,7 +132,7 @@ const inputGoalRow = {
   checkpoint_count: 0, checkpoint_error: null,
 } satisfies GoalProjectionRow;
 
-const emptyRedis = { get: async () => null } as unknown as RedisClientType;
+const emptyRedis = withLiveOutputReads({ get: async () => null }) as unknown as RedisClientType;
 
 async function inputProjectionDatabase() {
   const database = knex({ client: 'better-sqlite3', connection: { filename: ':memory:' }, useNullAsDefault: true });

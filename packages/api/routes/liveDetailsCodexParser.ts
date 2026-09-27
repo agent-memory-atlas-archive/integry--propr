@@ -337,8 +337,18 @@ export async function parseClaudeConversationFile(conversationPath: string): Pro
   return parseClaudeOutputToConversationResult(conversationContent);
 }
 
-export function parseClaudeOutputToConversationResult(conversationContent: string): ConversationResult {
-  const lines = conversationContent.trim().split('\n').filter(line => line.trim());
+/**
+ * Record-by-record projection of Claude stream-json, for readers that only
+ * fetch new output. Feeding every record and then calling result() gives
+ * exactly what parseClaudeOutputToConversationResult() returns.
+ */
+export interface ClaudeStreamProjection {
+  /** Consumes one record and returns the events it completed. */
+  feed(line: string): Array<Record<string, unknown>>;
+  result(): ConversationResult;
+}
+
+export function createClaudeStreamProjection(): ClaudeStreamProjection {
   const events: Array<Record<string, unknown>> = [];
   let todos: TodoItem[] = [];
   const tokenUsage: TokenUsage = {
@@ -350,22 +360,33 @@ export function parseClaudeOutputToConversationResult(conversationContent: strin
   const pendingSubagents: Map<string, PendingSubagent> = new Map();
   const warningState: ClaudeWarningState = { malformedLineWarnings: 0 };
 
-  for (const line of lines) {
-    const parsed = parseLine(line, events, pendingSubagents, warningState);
-    if (parsed.newTodos) todos = parsed.newTodos;
-    if (parsed.tokenUsage) {
-      tokenUsage.input_tokens += parsed.tokenUsage.input_tokens;
-      tokenUsage.output_tokens += parsed.tokenUsage.output_tokens;
-      tokenUsage.cache_creation_input_tokens += parsed.tokenUsage.cache_creation_input_tokens;
-      tokenUsage.cache_read_input_tokens += parsed.tokenUsage.cache_read_input_tokens;
-    }
-  }
+  return {
+    feed(line) {
+      if (!line.trim()) return [];
+      const before = events.length;
+      const parsed = parseLine(line, events, pendingSubagents, warningState);
+      if (parsed.newTodos) todos = parsed.newTodos;
+      if (parsed.tokenUsage) {
+        tokenUsage.input_tokens += parsed.tokenUsage.input_tokens;
+        tokenUsage.output_tokens += parsed.tokenUsage.output_tokens;
+        tokenUsage.cache_creation_input_tokens += parsed.tokenUsage.cache_creation_input_tokens;
+        tokenUsage.cache_read_input_tokens += parsed.tokenUsage.cache_read_input_tokens;
+      }
+      return events.slice(before);
+    },
+    result() {
+      const currentTask = deriveCurrentTask(todos);
+      const hasTokens = tokenUsage.input_tokens > 0 || tokenUsage.output_tokens > 0 ||
+        tokenUsage.cache_creation_input_tokens > 0 || tokenUsage.cache_read_input_tokens > 0;
+      return { events, todos, currentTask, tokenUsage: hasTokens ? { ...tokenUsage } : null };
+    },
+  };
+}
 
-  const currentTask = deriveCurrentTask(todos);
-  const hasTokens = tokenUsage.input_tokens > 0 || tokenUsage.output_tokens > 0 ||
-    tokenUsage.cache_creation_input_tokens > 0 || tokenUsage.cache_read_input_tokens > 0;
-
-  return { events, todos, currentTask, tokenUsage: hasTokens ? tokenUsage : null };
+export function parseClaudeOutputToConversationResult(conversationContent: string): ConversationResult {
+  const projection = createClaudeStreamProjection();
+  for (const line of conversationContent.trim().split('\n')) projection.feed(line);
+  return projection.result();
 }
 
 export function parseCodexOutputToConversationResult(output: string): ConversationResult | null {

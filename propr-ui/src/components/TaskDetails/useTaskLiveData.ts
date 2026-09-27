@@ -1,13 +1,12 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { getTaskLiveDetails } from '../../api/proprApi';
 import { useSocket } from '../../contexts/useSocket';
 import type { TaskLiveUpdatePayload } from '@propr/shared';
-import type { LiveDetails, LiveEvent } from './types';
-import { mergeIncrementalLiveDetails, normalizeLiveTodos } from './useTaskData';
+import type { LiveDetails } from './types';
+import { applyTaskLiveUpdate, mergeFullLiveDetails } from './useTaskData';
 
 export function useTaskLiveData(taskId: string | undefined, pollIntervalMs = 5_000) {
   const [liveDetails, setLiveDetails] = useState<LiveDetails>({ events: [], todos: [], currentTask: null });
-  const hasReceivedInitialDataRef = useRef(false);
   const {
     subscribeToTaskLive,
     unsubscribeFromTaskLive,
@@ -19,12 +18,8 @@ export function useTaskLiveData(taskId: string | undefined, pollIntervalMs = 5_0
     if (!taskId) return null;
     try {
       const data = await getTaskLiveDetails(taskId) as LiveDetails;
-      setLiveDetails({
-        events: data.events || [],
-        todos: data.todos || [],
-        currentTask: data.currentTask || null,
-        tokenUsage: data.tokenUsage || null,
-      });
+      // Merge, never replace: events gathered over the socket since this read started are kept.
+      setLiveDetails(previous => mergeFullLiveDetails(previous, data));
       return data;
     } catch {
       return null;
@@ -43,23 +38,11 @@ export function useTaskLiveData(taskId: string | undefined, pollIntervalMs = 5_0
     subscribeToTaskLive(taskId);
     const unsubscribe = onTaskLiveUpdate((payload: TaskLiveUpdatePayload) => {
       if (payload.taskId !== taskId) return;
-      const newEvents: LiveEvent[] = payload.events || [];
-      if (!hasReceivedInitialDataRef.current) {
-        hasReceivedInitialDataRef.current = true;
-        setLiveDetails({
-          events: newEvents,
-          todos: normalizeLiveTodos(payload.todos || []),
-          currentTask: payload.currentTask || null,
-          tokenUsage: payload.tokenUsage || null,
-        });
-      } else {
-        setLiveDetails(previous => mergeIncrementalLiveDetails(previous, payload));
-      }
+      setLiveDetails(previous => applyTaskLiveUpdate(previous, payload));
     });
     return () => {
       unsubscribe();
       unsubscribeFromTaskLive(taskId);
-      hasReceivedInitialDataRef.current = false;
     };
   }, [isConnected, onTaskLiveUpdate, subscribeToTaskLive, taskId, unsubscribeFromTaskLive]);
 

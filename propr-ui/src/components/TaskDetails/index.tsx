@@ -319,6 +319,7 @@ const TaskDetails: React.FC = () => {
       >
         <ExecutionEventLog
           events={taskData.liveDetails.events}
+          omittedEventCount={taskData.liveDetails.omittedEventCount}
           collapsed={thinkingLog.eventsCollapsed}
           onToggleCollapse={thinkingLog.toggleEventsCollapse}
           lastThought={thinkingLog.lastThought}

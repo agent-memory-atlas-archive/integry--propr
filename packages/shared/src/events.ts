@@ -151,6 +151,11 @@ export interface TaskLiveUpdatePayload {
   currentTask: string | null;
   tokenUsage: TokenUsageInfo | null;
   timestamp: string;
+  /**
+   * Full-state payloads only: raw terminal events of this execution left out to
+   * keep the payload bounded. Readable (`thought`) events are never left out.
+   */
+  omittedEventCount?: number;
 }
 
 /** Queue statistics data */

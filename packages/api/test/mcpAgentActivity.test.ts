@@ -8,6 +8,7 @@ import { createToolCatalog, type ToolDeps } from '../mcp/tools.js';
 import { getAgentActivity } from '../mcp/agentActivity.js';
 import { parseAgentStreamOutput } from '../services/agentStreamProjection.js';
 import { projectTaskLiveDetails } from '../routes/liveDetailsRoutes.js';
+import { withLiveOutputReads } from './liveOutputRedisFake.js';
 
 const directGoalId = '11111111-1111-4111-8111-111111111111';
 const orchestratedGoalId = '22222222-2222-4222-8222-222222222222';
@@ -81,7 +82,7 @@ async function createActivityDatabase() {
 
 test('activity database fallback excludes unclassified legacy Vibe text', async () => {
   const db = await createActivityDatabase();
-  const redisClient = { get: async () => null } as unknown as RedisClientType;
+  const redisClient = withLiveOutputReads({ get: async () => null }) as unknown as RedisClientType;
   const timestamp = '2026-09-13T10:00:01.000Z';
   const sessionId = 'vibe-persisted-session';
   // Pre-change parseVibeConversationLog output, serialized by the execution
@@ -156,14 +157,14 @@ test('get_agent_activity returns compact newest-first narration for direct and o
       { type: 'tool_use', name: 'Bash', input: { command: 'printenv' } },
     ] },
   });
-  const redisClient = {
+  const redisClient = withLiveOutputReads({
     get: async (key: string) => {
       if (key === 'agent:output:goal-task-direct') return directOutput;
       if (key === 'agent:output:goal-task-orchestrated') return orchestratedOutput;
       if (key.startsWith('worker:state:')) return JSON.stringify({ history: [{ state: 'codex_execution', timestamp: '2026-09-13T10:00:00.000Z' }] });
       return null;
     },
-  } as unknown as RedisClientType;
+  }) as unknown as RedisClientType;
   const deps = {
     db,
     redisClient,
@@ -246,9 +247,9 @@ test('get_agent_activity opts in to only Codex summaries for live and persisted 
     { method: 'item/completed', params: { item: { type: 'commandExecution', command: 'Hidden command', aggregatedOutput: 'Hidden output' } } },
   ].map(event => JSON.stringify(event));
   let live = true;
-  const redisClient = {
+  const redisClient = withLiveOutputReads({
     get: async (key: string) => live && key === 'agent:output:goal-task-direct' ? output.join('\n') : null,
-  } as unknown as RedisClientType;
+  }) as unknown as RedisClientType;
   const tool = createToolCatalog({
     db, redisClient, policy: {} as McpPolicy, taskQueue: {} as never, runtimeBuildQueue: {} as never,
   }).find(candidate => candidate.name === 'get_agent_activity');
@@ -303,14 +304,15 @@ test('activity paginates all Claude narration before the mixed live event limit'
     message: { content: [{ type: 'tool_use', id: `tool-${index}`, name: 'Bash', input: { command: 'npm test' } }] },
   }));
   const output = [...narration, ...tools].map(event => JSON.stringify(event)).join('\n');
-  const redisClient = {
+  const redisClient = withLiveOutputReads({
     get: async (key: string) => key.startsWith('agent:output:') ? output : null,
-  } as unknown as RedisClientType;
+  }) as unknown as RedisClientType;
   try {
     const ui = parseAgentStreamOutput(output);
     assert.equal(ui.totalEventCount, 205);
-    assert.equal(ui.events.length, 100);
-    assert.ok(ui.events.every(event => event.type === 'tool_use'));
+    // Readable events are never dropped from the live view; raw ones only past the raw limit.
+    assert.equal(ui.events.length, 205);
+    assert.equal(ui.events.filter(event => event.type === 'thought').length, 105);
     for (const target of [{ goalId: directGoalId }, { taskId: 'goal-task-orchestrated' }]) {
       const read = (offset: number) => getAgentActivity(
         { db, redisClient }, { repository, ...target, offset, limit: 50 }, 'owner-1',
@@ -381,9 +383,9 @@ test('activity removes fenced payloads and retains bracket-prefixed prose in liv
     ['[1/3] Updating the parser.', '[1/3] Updating the parser.'],
   ];
   let output: string | null = null;
-  const redisClient = {
+  const redisClient = withLiveOutputReads({
     get: async (key: string) => key === 'agent:output:goal-task-direct' ? output : null,
-  } as unknown as RedisClientType;
+  }) as unknown as RedisClientType;
   const timestamp = '2026-09-13T10:00:00.000Z';
   try {
     for (const [content, expected] of cases) {

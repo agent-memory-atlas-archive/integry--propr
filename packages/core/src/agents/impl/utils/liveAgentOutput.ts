@@ -1,22 +1,11 @@
 import { Redis } from 'ioredis';
 import logger from '../../../utils/logger.js';
 import { boundedProviderOutput, MAX_PROVIDER_OUTPUT_BYTES } from './boundedProviderOutput.js';
-
-const APPEND_BOUNDED_OUTPUT_SCRIPT = `
-local combined = (redis.call('get', KEYS[1]) or '') .. ARGV[1]
-local maximum = tonumber(ARGV[2])
-if string.len(combined) > maximum then
-    combined = string.sub(combined, string.len(combined) - maximum + 1)
-    local boundary = string.find(combined, '\\n')
-    if boundary then combined = string.sub(combined, boundary + 1) end
-end
-redis.call('setex', KEYS[1], tonumber(ARGV[3]), combined)
-return string.len(combined)
-`;
+import { writeLiveOutput } from './liveOutputLog.js';
 
 /**
  * Bounded provider JSONL kept in memory and appended to the task's live Redis
- * output (and optional durable goal records) in small batched flushes.
+ * output log (and optional durable goal records) in small batched flushes.
  */
 export class LiveAgentOutput {
     private readonly redis: Redis;
@@ -51,14 +40,8 @@ export class LiveAgentOutput {
         this.pendingOutput = '';
         this.flushPromise = this.flushPromise.then(async () => {
             await Promise.all([
-                this.redis.eval(
-                    APPEND_BOUNDED_OUTPUT_SCRIPT,
-                    1,
-                    `agent:output:${this.taskId}`,
-                    chunk,
-                    String(MAX_PROVIDER_OUTPUT_BYTES),
-                    '3600',
-                ),
+                // Appended, never rewritten: output continues across resumes of the same task.
+                writeLiveOutput(this.redis, this.taskId!, chunk),
                 this.persistOutput?.(chunk.split('\n').filter(Boolean)),
             ]);
         }).catch(error => {
