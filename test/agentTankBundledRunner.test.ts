@@ -8,6 +8,7 @@
 
 import { afterEach, beforeEach, mock, test } from 'node:test';
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -34,24 +35,30 @@ let dockerResult: ExecutionResult = {
 };
 /** Held open so concurrent callers overlap and coalescing is actually exercised. */
 let dockerGate: Promise<void> | undefined;
-/**
- * Permission bits of the generated config as seen while the container would be
- * running. Captured here because the runner deletes the file once the run ends.
- */
-let configModes: number[] = [];
 
-function captureConfigMode(args: string[]): void {
-    const mount = args.find(arg => arg.endsWith(':/tmp/propr-agent-tank/config.json:ro'));
-    if (!mount) return;
-    const hostPath = mount.slice(0, mount.indexOf(':/tmp/propr-agent-tank/config.json:ro'));
-    configModes.push(fs.statSync(hostPath).mode & 0o777);
+const CONTAINER_CONFIG_FILE = '/tmp/propr-agent-tank/config.json';
+const CONFIG_ENV_PREFIX = 'PROPR_AGENT_TANK_CONFIG=';
+
+/** The `-v` sources of a run, in order. */
+function bindMounts(args: string[]): string[] {
+    return args.filter((_arg, index) => args[index - 1] === '-v');
+}
+
+/** The container command (everything after the image). */
+function containerCommand(args: string[]): string[] {
+    return args.slice(args.indexOf('propr/agent:test') + 1);
+}
+
+function configEnvValue(args: string[]): string {
+    const entry = args.find(arg => arg.startsWith(CONFIG_ENV_PREFIX));
+    assert.ok(entry, 'the run carries no generated Agent Tank config');
+    return entry.slice(CONFIG_ENV_PREFIX.length);
 }
 
 await mock.module('../packages/core/src/claude/docker/dockerExecutor.js', {
     namedExports: {
         executeDockerCommand: async (_command: string, args: string[]): Promise<ExecutionResult> => {
             dockerRuns.push(args);
-            captureConfigMode(args);
             if (dockerGate) await dockerGate;
             return dockerResult;
         },
@@ -115,7 +122,6 @@ const SAMPLE_OUTPUT = JSON.stringify({
 
 beforeEach(() => {
     dockerRuns = [];
-    configModes = [];
     dockerGate = undefined;
     dockerResult = { exitCode: 0, stdout: SAMPLE_OUTPUT, stderr: '', messageTimestamps: new Map() };
     configuredAgents = [
@@ -181,7 +187,9 @@ test('credential directories are mounted read-only at the agent runtime containe
     assert.ok(args.includes(`${claudeHome}:/home/node/.claude:ro`));
     assert.ok(args.includes(`${codexHome}:/home/node/.codex:ro`));
     assert.ok(args.includes('propr/agent:test'));
-    assert.deepEqual(args.slice(-5), ['agent-tank', '--once', '--json', '--config', '/tmp/propr-agent-tank/config.json']);
+    const command = containerCommand(args);
+    assert.match(command[2], /exec agent-tank --once --json --config "\$1"/);
+    assert.deepEqual(command.slice(-2), ['propr-agent-tank', CONTAINER_CONFIG_FILE]);
 });
 
 test('unsupported providers are left out rather than failing the whole run', async () => {
@@ -228,28 +236,48 @@ test('output parsing degrades to an empty map instead of throwing', () => {
     assert.deepEqual(parseBundledAgentTankOutput('{ not json'), {});
 });
 
-test('the generated config is readable by the container user, not owner-only', async () => {
+test('the generated config is never bind-mounted from the backend filesystem', async () => {
     await refreshBundledStatuses();
 
-    // Docker bind-mounts the file with the host owner and mode intact, and the
-    // image runs Agent Tank as `node`. A 0600 file written by a differently
-    // owned backend process (root in most deployments) would be unreadable
-    // inside the container, so the refresh would produce nothing.
-    assert.equal(configModes.length, 1);
-    assert.equal(configModes[0] & 0o004, 0o004);
-    // Read-only by mode as well as by mount: nothing should be able to rewrite it.
-    assert.equal(configModes[0] & 0o222, 0);
+    // The host daemon resolves every `-v` source on the host, so a pathname that
+    // only exists inside the backend container would silently become an empty
+    // directory in the agent container. Only credential directories - which went
+    // through the deployment's host mapping - may be bind sources here.
+    const mounts = bindMounts(dockerRuns[0]);
+    assert.deepEqual(mounts, [
+        `${claudeHome}:/home/node/.claude:ro`,
+        `${codexHome}:/home/node/.codex:ro`,
+    ]);
+    assert.equal(mounts.some(mount => mount.includes(CONTAINER_CONFIG_FILE)), false);
 });
 
-test('the generated config is cleaned up after the run', async () => {
+test('the run carries the generated config and the container writes it itself', async () => {
     await refreshBundledStatuses();
 
-    const mount = dockerRuns[0].find(arg => arg.endsWith(':/tmp/propr-agent-tank/config.json:ro'));
-    assert.ok(mount);
-    const hostPath = mount.slice(0, mount.indexOf(':/tmp/propr-agent-tank/config.json:ro'));
-    // A world-readable file must not outlive the run it was written for.
-    assert.equal(fs.existsSync(hostPath), false);
-    assert.equal(fs.existsSync(path.dirname(hostPath)), false);
+    const args = dockerRuns[0];
+    const command = containerCommand(args);
+    assert.equal(command[0], 'sh');
+    assert.equal(command[1], '-c');
+
+    // Actually run the bootstrap the way the container would: it must reproduce
+    // the generated config byte for byte at the container config path, with no
+    // host-visible file involved anywhere.
+    const target = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'propr-tank-bootstrap-')), 'nested', 'config.json');
+    const expected = configEnvValue(args);
+    // `agent-tank` only exists in the agent image, so the final exec is swapped
+    // for a no-op; everything before it is the part under test.
+    const bootstrap = command[2].replace('exec agent-tank', 'exec true');
+    execFileSync('sh', ['-c', bootstrap, command[3], target], {
+        env: { ...process.env, PROPR_AGENT_TANK_CONFIG: expected },
+    });
+    assert.equal(fs.readFileSync(target, 'utf8'), expected);
+
+    const config = JSON.parse(expected) as { agents: { provider: string; configPath: string }[] };
+    assert.deepEqual(config.agents.map(entry => entry.provider), ['claude', 'codex']);
+    assert.deepEqual(config.agents.map(entry => entry.configPath), ['/home/node/.claude', '/home/node/.codex']);
+    // The runner wrote nothing outside the container: this is the test's own
+    // scratch directory, not something the refresh left behind.
+    fs.rmSync(path.dirname(path.dirname(target)), { recursive: true, force: true });
 });
 
 test('an alias-specific read only answers for the account whose credentials were inspected', async () => {

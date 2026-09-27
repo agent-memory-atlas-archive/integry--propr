@@ -140,7 +140,9 @@ export async function getStatus(agent: string, timeoutMs: number = DEFAULT_TIMEO
  * Bundled mode inspects one account per provider, so its snapshot can only
  * answer for the alias whose credentials produced it; every other alias of the
  * same provider is reported as unavailable instead of being handed a stranger's
- * numbers. External mode keeps the daemon's own per-name answer.
+ * numbers. The answer is renamed to the requested alias, because the bundled
+ * snapshot carries the provider key rather than the account's name. External
+ * mode keeps the daemon's own per-name answer.
  *
  * @example
  *   const status = await getStatusForAlias('claude-secondary');
@@ -158,7 +160,14 @@ export async function getStatusForAlias(
         if (!status) {
             throw new Error(`No fresh bundled Agent Tank snapshot for alias ${alias}`);
         }
-        return normalizeAgentTankStatus(status);
+        // The bundled snapshot is named after the provider key its generated id
+        // was pinned to, never after the account it describes. Provenance has
+        // just proven this snapshot came from `alias`'s credentials, so answer
+        // under that name: alias-specific consumers match the response name
+        // against the alias they asked for, and a custom alias would otherwise
+        // be rejected as somebody else's data. The copy keeps the cached
+        // snapshot untouched.
+        return { ...normalizeAgentTankStatus(status), name: alias };
     }
     return getStatus(alias, timeoutMs);
 }

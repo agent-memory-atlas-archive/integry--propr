@@ -172,7 +172,12 @@ test('bundled mode answers an alias-specific read only for the inspected account
     // Alias `claude` is a different account, so it gets nothing rather than the
     // secondary account's capacity.
     await assert.rejects(() => getStatusForAlias('claude'), /No fresh bundled Agent Tank snapshot for alias claude/);
-    assert.equal((await getStatusForAlias('claude-secondary')).name, 'claude');
+    // The verified answer is named after the account that produced it, not after
+    // the provider key the bundled id is pinned to - alias consumers match the
+    // name exactly.
+    assert.equal((await getStatusForAlias('claude-secondary')).name, 'claude-secondary');
+    // Renaming must copy, never edit the cached snapshot in place.
+    assert.equal(status.name, 'claude');
     assert.deepEqual(fetchCalls, []);
 });
 
@@ -208,6 +213,26 @@ test('alias-specific capacity is reported for the account that was actually insp
     assert.equal(snapshot?.directAgentAlias, 'claude');
     assert.equal(snapshot?.sessionPercent, 5);
     assert.equal(snapshot?.weeklyPercent, 11);
+});
+
+test('alias-specific capacity is reported for a custom alias that was actually inspected', async () => {
+    mode = 'bundled';
+    // A custom alias is the case the provider-keyed snapshot name cannot satisfy
+    // on its own: Agent Tank labels this snapshot `claude`, but it was produced
+    // by `claude-secondary`'s credentials and must route capacity for it.
+    bundledSnapshotsByAlias = {
+        'claude-secondary': {
+            name: 'claude',
+            usage: { session: { percent: 7 }, weekly: { percent: 13 } },
+            lastUpdated: new Date().toISOString(),
+        },
+    };
+
+    const snapshot = await new AliasSpecificAgentTankSnapshotProvider().getSnapshot('claude-secondary');
+
+    assert.equal(snapshot?.directAgentAlias, 'claude-secondary');
+    assert.equal(snapshot?.sessionPercent, 7);
+    assert.equal(snapshot?.weeklyPercent, 13);
 });
 
 test('an alias-specific read in external mode still asks the daemon by name', async () => {

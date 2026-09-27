@@ -12,8 +12,6 @@
  */
 
 import fs from 'node:fs';
-import os from 'node:os';
-import path from 'node:path';
 import { randomBytes } from 'node:crypto';
 import logger from '../utils/logger.js';
 import { executeDockerCommand } from '../claude/docker/dockerExecutor.js';
@@ -42,6 +40,33 @@ const DEFAULT_CACHE_TTL_MS = 60_000;
 const DELTA_FRESHNESS_MS = 90_000;
 
 const CONTAINER_CONFIG_FILE = '/tmp/propr-agent-tank/config.json';
+
+/** Carries the generated config into the container (see `CONFIG_BOOTSTRAP`). */
+const CONFIG_ENV_VAR = 'PROPR_AGENT_TANK_CONFIG';
+
+/**
+ * Materialize the generated config *inside* the container instead of
+ * bind-mounting it from this process's filesystem.
+ *
+ * The backend normally runs in its own container and drives the host Docker
+ * daemon, so a backend-local pathname is not a usable bind source: the daemon
+ * resolves `-v` sources on the host, where the generated file does not exist,
+ * and would hand Agent Tank an empty directory instead of its config. No file
+ * mode or directory permission can bridge two filesystem namespaces. Every
+ * other mount in the run is a credential directory whose path already went
+ * through the deployment's host mapping (`resolveConfigPath` /
+ * `resolveCodexConfigPath`); the generated config has no such mapping, so it
+ * travels in the run itself and the container writes it as the user that reads
+ * it. The config holds provider keys and container paths only - no secrets - so
+ * an environment variable is a safe carrier. The `--rm` container takes the
+ * file with it, so there is nothing host-side left to clean up.
+ */
+const CONFIG_BOOTSTRAP = [
+    'set -e',
+    'mkdir -p "$(dirname "$1")"',
+    `printf %s "$${CONFIG_ENV_VAR}" > "$1"`,
+    'exec agent-tank --once --json --config "$1"',
+].join('; ');
 
 /**
  * Agent Tank only knows these three providers (`SUPPORTED_PROVIDERS` upstream).
@@ -248,7 +273,6 @@ export async function canRunBundledAgentTank(): Promise<boolean> {
 }
 
 async function runBundledAgentTank(): Promise<BundledRunResult | undefined> {
-    let configDir: string | undefined;
     try {
         const { mounts, entries } = await collectBundledAgents();
         if (entries.length === 0) {
@@ -259,22 +283,6 @@ async function runBundledAgentTank(): Promise<BundledRunResult | undefined> {
 
         const image = await resolveAgentImage();
 
-        configDir = fs.mkdtempSync(path.join(os.tmpdir(), 'propr-agent-tank-'));
-        const configFile = path.join(configDir, 'config.json');
-        // The container runs Agent Tank as `node`, while this backend process may
-        // be any other uid (root in most deployments). A bind mount preserves the
-        // host owner and mode, so an owner-only file would be unreadable inside
-        // the container. The config holds provider names and container paths -
-        // no secrets - so it is made world-readable; `chmod` after the write
-        // because `writeFileSync`'s mode is still subject to the umask. The
-        // mount stays `:ro`, which is what keeps Agent Tank from rewriting it.
-        fs.writeFileSync(configFile, buildBundledAgentTankConfig(entries), { mode: 0o444 });
-        fs.chmodSync(configFile, 0o444);
-        // mkdtemp creates the directory 0700; the daemon resolves the bind source
-        // path itself, so this only matters for rootless/userns daemons that do
-        // it as a non-root user.
-        fs.chmodSync(configDir, 0o755);
-
         const result = await executeDockerCommand('docker', [
             'run', '--rm',
             // No inbound/outbound needs beyond the provider APIs the CLIs call;
@@ -282,10 +290,13 @@ async function runBundledAgentTank(): Promise<BundledRunResult | undefined> {
             // hits the provider API.
             '--name', `propr-agent-tank-${randomBytes(6).toString('hex')}`,
             '-e', 'PROPR_AGENT_TYPE=agent-tank',
-            '-v', `${configFile}:${CONTAINER_CONFIG_FILE}:ro`,
+            '-e', `${CONFIG_ENV_VAR}=${buildBundledAgentTankConfig(entries)}`,
             ...mounts,
             image,
-            'agent-tank', '--once', '--json', '--config', CONTAINER_CONFIG_FILE,
+            // `sh -c <script> <$0> <$1>`: the config path is passed as an
+            // argument rather than interpolated, so the script itself stays a
+            // fixed string.
+            'sh', '-c', CONFIG_BOOTSTRAP, 'propr-agent-tank', CONTAINER_CONFIG_FILE,
         ], { timeout: timeoutMs() });
 
         if (result.exitCode !== 0) {
@@ -297,12 +308,6 @@ async function runBundledAgentTank(): Promise<BundledRunResult | undefined> {
     } catch (error) {
         logger.warn({ error: (error as Error).message }, 'Bundled Agent Tank run threw');
         return undefined;
-    } finally {
-        // Best-effort: the temp file holds no secrets, but leaving one per probe
-        // would slowly fill the container's tmp.
-        if (configDir) {
-            try { fs.rmSync(configDir, { recursive: true, force: true }); } catch { /* ignore */ }
-        }
     }
 }
 

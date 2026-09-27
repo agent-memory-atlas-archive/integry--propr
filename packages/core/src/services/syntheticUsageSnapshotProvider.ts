@@ -27,7 +27,9 @@ function nestedPercent(usage: Record<string, unknown>, names: string[]): number 
  * Provides fresh usage data only when Agent Tank names the requested direct alias
  * exactly. `getStatusForAlias` is what makes that name trustworthy in bundled
  * mode, where only one account per provider is inspected: it refuses to answer
- * for an alias whose credentials did not produce the snapshot.
+ * for an alias whose credentials did not produce the snapshot, and names the
+ * answers it does give after the alias that produced them rather than after the
+ * provider key the bundled snapshot carries.
  */
 export class AliasSpecificAgentTankSnapshotProvider implements SyntheticUsageSnapshotProvider {
   constructor(
