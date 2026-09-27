@@ -1192,11 +1192,11 @@ export class LaunchServicesAuthority {
     await this.runCommand(LAUNCH_SERVICES, ['-u', this.applicationRoot], { env: this.environment, timeout: 30_000 });
   }
 
-  async isListed() {
+  async isListed(timeout = this.absenceBudgetMs) {
     const { matched } = await this.scanCommand(
       LAUNCH_SERVICES,
       ['-dump'],
-      { env: this.environment, timeout: 30_000 },
+      { env: this.environment, timeout },
       line => launchServicesRecordMatchesApplication(line, this.applicationRoot),
     );
     return matched;
@@ -1218,7 +1218,10 @@ export class LaunchServicesAuthority {
     let unregisterFailed = false;
     for (let attempt = 1; attempt <= this.absenceAttempts; attempt += 1) {
       try {
-        if (!await this.isListed()) {
+        // A full database scan can exceed 30 seconds on hosted Intel runners.
+        // Restarting it at that fixed limit never lets it prove absence, even
+        // within the two-minute window. Give it the remaining proof budget.
+        if (!await this.isListed(Math.max(1, deadline - this.now()))) {
           this.registered = false;
           return;
         }
