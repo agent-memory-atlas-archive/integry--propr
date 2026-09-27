@@ -297,7 +297,7 @@ describe('long live logs', () => {
 
 
 describe('full live history retention', () => {
-  const event = (epoch: number, index: number) => ({ id: `live:task:redis:${epoch}:${index}:0`, type: 'thought' as const, content: `Step ${index}` });
+  const event = (epoch: number, index: number) => ({ id: `live:task:redis:${epoch}:${index}:0`, type: 'thought' as const, content: `Step ${index}`, timestamp: '2026-08-03T00:00:00.000Z' });
   const details = (events: LiveDetails['events']): LiveDetails => ({ events, todos: [], currentTask: null });
 
   it('retains readable prefixes, missing middle events, and suffixes on HTTP and socket full reads', () => {
