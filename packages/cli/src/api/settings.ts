@@ -68,6 +68,7 @@ export interface SystemSettings {
    * contributor branches and ask an agent to resolve any conflicts.
    */
   auto_resolve_merge_conflicts: boolean;
+  dashboard_summary_enabled: boolean;
 
   /**
    * Global reasoning effort/level for supported GPT and Claude agents.
@@ -194,6 +195,7 @@ export interface UpdateSettingsOptions {
    * contributor branches and ask an agent to resolve any conflicts.
    */
   auto_resolve_merge_conflicts?: boolean;
+  dashboard_summary_enabled?: boolean;
 
   /**
    * Global reasoning effort/level for supported GPT and Claude agents.
@@ -278,6 +280,7 @@ export const VALID_SETTING_KEYS: SettingKey[] = [
   "planner_generation_model",
   "auto_followup_score_threshold",
   "auto_resolve_merge_conflicts",
+  "dashboard_summary_enabled",
   "model_reasoning_level",
   "pr_review_model",
   "pr_review_prompt",
@@ -371,6 +374,7 @@ export function parseSettingValue(key: SettingKey, value: string): number | stri
       }
       return parsed;
     }
+    case "dashboard_summary_enabled":
     case "auto_resolve_merge_conflicts":
     case "pr_review_context_enabled": {
       const lower = value.toLowerCase();

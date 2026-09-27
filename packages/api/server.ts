@@ -1,3 +1,5 @@
+import { dashboardNarrativeModel } from './routes/dashboardNarrativeModel.js';
+import { getConfig } from '@propr/core';
 import { createTaskSubmissionRoutes, taskSubmissionUpload } from './routes/taskSubmissionRoutes.js';
 import { createRepositoryMediaRoutes } from './routes/repositoryMediaRoutes.js';
 import { createPreviewMediaRoutes } from './routes/previewMediaRoutes.js';
@@ -352,7 +354,7 @@ function setupRoutes(): void {
   const agentRoutes = createAgentRoutes();
   const agentLoginRoutes = createAgentLoginRoutes();
   const statsRoutes = createStatsRoutes({ db });
-  const dashboardRoutes = createDashboardRoutes({ db, redisClient, taskQueue });
+  const dashboardRoutes = createDashboardRoutes({ db, redisClient, taskQueue, narrativeModel: dashboardNarrativeModel, isSummaryEnabled: async () => (await getConfig('dashboard_summary_enabled', true)) !== false });
   const summaryBrowserRoutes = createSummaryBrowserRoutes();
   const repoChatRoutes = createRepoChatRoutes();
   const repoImprovementsRoutes = createRepoImprovementsRoutes();
@@ -399,7 +401,7 @@ function setupRoutes(): void {
     ['post', '/api/planner/drafts/:id/revise', plannerRoutes.reviseDraft], ['post', '/api/planner/validate-context-repository', plannerRoutes.validateContextRepository], ['post', '/api/planner/drafts/:id/pause', plannerRoutes.pauseDraftExecution], ['post', '/api/planner/drafts/:id/resume', plannerRoutes.resumeDraftExecution],
     ['patch', '/api/planner/drafts/:id/execution-settings', plannerRoutes.updateExecutionSettings], ['post', '/api/planner/relevance', relevanceRoutes.analyzeRelevance], ['get', '/api/stats/tasks', statsRoutes.getTaskStats], ['get', '/api/stats/repositories', statsRoutes.getRepositoryStats],
     ['get', '/api/stats/overview', statsRoutes.getOverview], ['get', '/api/stats/generating-plans', statsRoutes.getGeneratingPlansCount], ['get', '/api/stats/dashboard', statsRoutes.getDashboardStats],
-    ['get', '/api/dashboard/summary', dashboardRoutes.getSummary], ['get', '/api/dashboard/attention', dashboardRoutes.getAttention], ['get', '/api/dashboard/active', dashboardRoutes.getActive], ['get', '/api/dashboard/outcomes', dashboardRoutes.getOutcomes],
+    ['get', '/api/dashboard/narrative', dashboardRoutes.getNarrative], ['get', '/api/dashboard/summary', dashboardRoutes.getSummary], ['get', '/api/dashboard/attention', dashboardRoutes.getAttention], ['get', '/api/dashboard/active', dashboardRoutes.getActive], ['get', '/api/dashboard/outcomes', dashboardRoutes.getOutcomes],
     ['get', '/api/summaries/:owner/:repo/status', summaryBrowserRoutes.getIndexingStatus], ['get', '/api/summaries/:owner/:repo/tree', summaryBrowserRoutes.getDirectoryTree],
     ['get', SUMMARY_TREE_ROUTE_PATH, summaryBrowserRoutes.getDirectoryTree], ['get', SUMMARY_PATH_ROUTE_PATH, summaryBrowserRoutes.getPathSummary], ['post', '/api/repos/chat', repoChatRoutes.postChat], ['get', '/api/repos/chat/messages', repoChatRoutes.getMessages],
     ['post', '/api/repos/chat/messages', repoChatRoutes.saveMessages], ['delete', '/api/repos/chat/messages/:messageId', repoChatRoutes.deleteMessage], ['delete', '/api/repos/chat/messages', repoChatRoutes.clearMessages], ['post', '/api/repos/improvements', repoImprovementsRoutes.postImprovements],

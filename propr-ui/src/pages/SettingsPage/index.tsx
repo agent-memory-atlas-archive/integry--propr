@@ -107,10 +107,11 @@ const AdminSettingsPage: React.FC = () => {
     {
       id: 'model-selection',
       category: 'models',
-      searchText: 'model selection AI implementation agent reasoning level planning context analysis plan generation summarization fallback pull request PR review prompt review context budget percentage token limit',
+      searchText: 'dashboard summary model selection AI implementation agent reasoning level planning context analysis plan generation summarization fallback pull request PR review prompt review context budget percentage token limit',
       content: (
         <AIModelSelectionSection
           settings={{
+            dashboard_summary_enabled: settings.dashboard_summary_enabled,
             analysis_model_fast: settings.analysis_model_fast,
             planner_context_model: settings.planner_context_model,
             planner_generation_model: settings.planner_generation_model,
