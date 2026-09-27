@@ -241,6 +241,27 @@ async function refreshAndGetStatus(
     return getStatus(agent, timeoutMs);
 }
 
+/**
+ * Whether the post-call status is the *same snapshot* the pre-call read returned.
+ *
+ * Bundled mode answers both probes from a cached snapshot, because a refresh
+ * means starting a container and the hot path must never wait for one. A call
+ * that begins and ends between two refreshes therefore sees one snapshot twice,
+ * and subtracting it from itself would record a confident "this call consumed
+ * 0%" for a call that really did consume capacity. Recording nothing is the
+ * documented contract (`docs/docs/operations/agent-tank.md`): a snapshot that did
+ * not move is not a measurement of this call.
+ *
+ * `lastUpdated` is the transport-independent identity of a snapshot - Agent Tank
+ * stamps it when it reads the CLI - and the usage payload is compared too so a
+ * daemon that reports new numbers under an unchanged timestamp still counts as a
+ * measurement.
+ */
+function isSameSnapshot(preCall: AgentStatusResponse, postCall: AgentStatusResponse): boolean {
+    return preCall.lastUpdated === postCall.lastUpdated
+        && JSON.stringify(preCall.usage) === JSON.stringify(postCall.usage);
+}
+
 function isAgentTankTimeout(error: unknown): boolean {
     return error instanceof Error && (
         error.message.includes('Agent Tank refresh timed out') ||
@@ -302,8 +323,11 @@ function startStatusSnapshot(
  * 3. Uses the pre-call snapshot only if it is already available when the LLM
  *    call finishes.
  * 4. Refreshes the agent again and fetches status (post-call).
- * 5. Computes the delta and extracts structured metric records.
- * 6. Returns both the execution result and the usage metrics.
+ * 5. Skips the measurement when both probes returned the same snapshot — in
+ *    bundled mode they are cache reads, so a short call can see one snapshot
+ *    twice, and a self-subtracted snapshot is not a measurement.
+ * 6. Computes the delta and extracts structured metric records.
+ * 7. Returns both the execution result and the usage metrics.
  *
  * If Agent Tank is disabled or a status fetch fails, the LLM call still
  * proceeds — usage tracking is best-effort and never blocks execution.
@@ -346,6 +370,14 @@ export async function executeWithUsageTracking<T>(
 
     const postCall = await fetchStatusBestEffort(agent, 'post-call', timeoutMs);
     if (postCall === null) {
+        return { result, usageMetrics: null };
+    }
+
+    // Both probes read the same snapshot, so there is nothing this call can be
+    // said to have consumed. Report no metrics rather than a fabricated zero.
+    if (isSameSnapshot(preCall, postCall)) {
+        logger.debug({ agent, lastUpdated: preCall.lastUpdated },
+            'Agent Tank returned the same snapshot before and after the call — recording no usage delta');
         return { result, usageMetrics: null };
     }
 

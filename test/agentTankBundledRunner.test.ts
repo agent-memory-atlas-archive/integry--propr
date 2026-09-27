@@ -110,6 +110,7 @@ const {
     canRunBundledAgentTank,
     clearBundledAgentTankCache,
     getBundledStatusForAlias,
+    getBundledStatusesForDelta,
     missingBindSources,
     parseBundledAgentTankOutput,
     refreshBundledStatuses,
@@ -296,6 +297,36 @@ test('the run carries the generated config and the container writes it itself', 
     // The runner wrote nothing outside the container: this is the test's own
     // scratch directory, not something the refresh left behind.
     fs.rmSync(path.dirname(path.dirname(target)), { recursive: true, force: true });
+});
+
+test('the two probes around one LLM call read one snapshot and start no container', async () => {
+    await refreshBundledStatuses();
+    assert.equal(dockerRuns.length, 1);
+
+    // `executeWithUsageTracking` reads this before and after every LLM call. A
+    // call that finishes inside the freshness window sees the same snapshot
+    // twice, which is why the wrapper records no delta for it (covered by
+    // usageTrackingBundledDelta) - and neither read may start a container.
+    const preCall = getBundledStatusesForDelta();
+    const postCall = getBundledStatusesForDelta();
+
+    assert.ok(preCall);
+    assert.equal(postCall, preCall);
+    assert.equal((preCall.claude.usage.session as { percent: number }).percent, 42);
+    assert.equal(dockerRuns.length, 1);
+
+    // A refresh that lands between two calls is what makes a real delta
+    // measurable, so the reader must hand out the newer snapshot afterwards.
+    dockerResult = {
+        exitCode: 0,
+        stdout: JSON.stringify({ claude: { name: 'claude', usage: { session: { percent: 58 } } } }),
+        stderr: '',
+        messageTimestamps: new Map(),
+    };
+    await refreshBundledStatuses({ force: true });
+
+    const refreshed = getBundledStatusesForDelta();
+    assert.equal((refreshed?.claude.usage.session as { percent: number }).percent, 58);
 });
 
 test('an alias-specific read only answers for the account whose credentials were inspected', async () => {

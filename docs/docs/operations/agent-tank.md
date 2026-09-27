@@ -142,7 +142,7 @@ Because this is a backend setting rather than a stack container, `propr tank` ta
 - **Per-call usage deltas.** Around each agent run ProPR snapshots usage before and after the call, computes the delta per metric, and stores it next to the [LLM Log](./metrics.md) entry. The task detail context strip shows a compact session/weekly delta chip for the run.
 - **Capacity in your metrics.** Provider capacity pressure becomes a first-class signal alongside cost and cycle time — see [Metrics](./metrics.md).
 
-In bundled mode the deltas come from cached snapshots, so a call that finishes between two refreshes records no delta rather than a guessed one.
+In bundled mode the deltas come from cached snapshots, so a call that starts and finishes between two refreshes sees the same snapshot twice. ProPR records no usage at all on that call's log entry rather than subtracting a snapshot from itself and reporting a confident 0%.
 
 {/* SCREENSHOT PLACEHOLDER (P3 — needs a running Agent Tank instance; interim: the site's ui-agent-tank.png): Capture the sidebar Usage section with Agent Tank enabled, showing provider rows (for example Claude and Codex) with colored usage bars and percentages, and one provider expanded to show its session and weekly metrics. Requires a running Agent Tank instance configured in Settings. */}
 
@@ -158,7 +158,7 @@ So a missing Agent Tank degrades to "no capacity bars," and the work itself comp
 
 ## Troubleshooting
 
-- **Sidebar is empty in bundled mode.** Confirm the agent image is built and at least one enabled agent is authenticated. `docker run --rm propr/agent:latest agent-tank --version` proves the image ships the CLI; a task that runs successfully proves the credentials are mounted.
+- **Sidebar is empty in bundled mode.** Confirm the agent image is built and at least one enabled agent is authenticated. `docker run --rm propr/agent:latest agent-tank --version` proves the image ships the CLI; a task that runs successfully proves the credentials are mounted. From a source checkout, `scripts/verify-agent-tank-image.sh` proves the whole path end to end: it runs bundled mode against your own credentials (mounted read-only, no provider entrypoint) and fails unless every provider actually returns usage numbers.
 - **"Bundled Agent Tank unavailable" right after selecting bundled.** The run worked but produced no usable usage, so there is nothing to monitor. Either it described no provider at all — bundled mode only inspects enabled `claude`, `codex` and `antigravity` agents, so an installation with only OpenCode or Vibe enabled lands here — or every provider it did describe returned an error (see `Timeout waiting for usage data` below). A provider key alone is not readiness: ProPR reports ready only once at least one provider's usage actually came back.
 - **Sidebar is empty / "unreachable" in external mode.** Confirm Agent Tank is running (`http://127.0.0.1:3456` in a browser) and that the URL ProPR uses is reachable *from inside the container* — typically `http://host.docker.internal:3456`, since `localhost` there resolves to the container itself. Avoid `--no-docker` when ProPR runs in Docker. Bundled mode sidesteps all of this.
 - **No agents found by Agent Tank.** At least one supported CLI (`claude`, `agy`, or `codex`) must be installed and authenticated. In bundled mode that means an enabled ProPR agent of that type whose credential directory exists on the Docker host; in external mode, a CLI on the `PATH` of the host running Agent Tank.
