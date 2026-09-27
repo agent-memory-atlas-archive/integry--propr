@@ -29,6 +29,15 @@ import { spawn } from 'node:child_process';
 // outage it measures and cannot afford a second, while a spent budget there
 // already means a fixture killed before its report, which the no-evidence path
 // above retries anyway.
+//
+// A spent budget is not the only shape a starved launch takes, though. The
+// same contention can simply make the fixture's own work fail — the
+// published-preview probe reaches its origin over loopback, and a stalled
+// CONNECT errors the image while the page still fires `load`, so the fixture
+// reports and shuts down well inside its budget. `rejectReport` lets a call
+// site name the evidence that means "this measured the worker, not the
+// behaviour" and have that launch relaunched too, rather than depending on the
+// kill that happened to accompany the one failure we recorded.
 
 // The switches every Linux Electron probe needs. `--disable-dev-shm-usage`
 // belongs here with the others: Chromium keeps its shared-memory segments in
@@ -96,6 +105,7 @@ export const runElectronFixture = async ({
   diagnostic,
   electronArguments,
   name,
+  rejectReport,
   retryAfterSpentBudget = false,
   runAttempt = spawnFixture,
   setup,
@@ -121,9 +131,12 @@ export const runElectronFixture = async ({
     }
     // The final attempt keeps its report either way, so a worker that stays
     // starved fails on the assertion that names what went wrong rather than on a
-    // generic runner message.
-    if (retryAfterSpentBudget && outcome.timedOut && attempt < attempts) {
-      failures.push(`attempt ${attempt} exited ${describeExit(outcome)} and reported a starved run`);
+    // generic runner message — and a genuine regression, which every attempt
+    // reproduces, still fails on that same assertion.
+    const rejection = (retryAfterSpentBudget && outcome.timedOut && 'reported a starved run')
+      || rejectReport?.(report);
+    if (rejection && attempt < attempts) {
+      failures.push(`attempt ${attempt} exited ${describeExit(outcome)} and ${rejection}`);
       continue;
     }
     if (outcome.code !== 0) {

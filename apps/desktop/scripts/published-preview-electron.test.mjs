@@ -17,17 +17,20 @@ const root = resolve(desktop, '../..');
 // give it back — one recorded run stalled every request for ~40s and then
 // served the next one at once — so the launch budget sizes an outage rather than
 // any single request. A healthy worker spends a small fraction of it: this whole
-// unit, cold Electron download included, has run green in 7.4s.
+// unit, setup included, has run green in 7.4s.
 const launchTimeoutMs = 40_000;
-// Two full launches plus the fixture bundle. The runner relaunches a launch that
-// spent its budget anyway (`retryAfterSpentBudget`), and the cold Electron
-// download is hoisted into `before` so it cannot claim the room that relaunch
-// needs: that is exactly how this unit failed, the download and one killed
-// launch together filling a 50s budget that was written for two launches.
+// Two full launches plus the fixture bundle. The runner relaunches a launch it
+// could not use (`rejectReport`, `retryAfterSpentBudget`), and setup is hoisted
+// into `before` so it cannot claim the room that relaunch needs: that is exactly
+// how this unit failed, setup and one killed launch together filling a 50s
+// budget that had been copied from a sibling sized for two launches alone.
 const testTimeoutMs = 100_000;
 
 let setup;
-// A cold Electron download belongs to setup, not the fixture's own budget.
+// `prepareNativeElectronTest` is not free — it spawns `electron --version`
+// through the same wrapper the fixture uses, and gives that probe its own 15s
+// budget. On the worker that failed this unit, that ran inside the test and left
+// the relaunch nowhere to go. It belongs to setup, not the fixture's budget.
 before(() => {
   setup = prepareNativeElectronTest();
 }, { timeout: 120_000 });
@@ -58,6 +61,16 @@ it('renders a published GitHub preview through the native session boundary and s
         `--propr-published-preview-image=${join(root, 'propr-ui/public/logo.png')}`,
       ],
       name: 'Published preview Electron fixture',
+      // A spent budget is only the shape the one recorded failure happened to
+      // take. The same loopback outage can error the image while the page still
+      // fires `load`, so the fixture reports `fallbackHidden: false` and shuts
+      // down well inside its budget — and the wider the budget, the likelier
+      // that is the shape it takes. Naming the evidence relaunches that run too;
+      // a preview that is genuinely broken fails the same assertion below on
+      // every attempt.
+      rejectReport: report => (report.visible?.fallbackHidden === true
+        ? undefined
+        : 'reported the preview image as unavailable'),
       retryAfterSpentBudget: true,
       setup,
       timeout: launchTimeoutMs,

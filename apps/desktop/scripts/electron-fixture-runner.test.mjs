@@ -149,6 +149,74 @@ describe('Electron fixture runner', () => {
     ]);
   });
 
+  it('relaunches a clean exit whose evidence the call site cannot use', async () => {
+    // The shape a starved worker takes when it errors the fixture's own work
+    // instead of outliving its budget: exit 0, inside the timeout, useless
+    // evidence. Nothing about the exit distinguishes it, so only the call site
+    // can.
+    const diagnostics = [];
+    const { launches, runAttempt } = scriptedRunner([
+      reported({ visible: { fallbackHidden: false } }),
+      reported({ visible: { fallbackHidden: true } }),
+    ]);
+
+    const report = await runElectronFixture({
+      diagnostic: message => diagnostics.push(message),
+      electronArguments: ['/probe.cjs'],
+      name: 'Published preview Electron fixture',
+      rejectReport: candidate => (candidate.visible?.fallbackHidden === true
+        ? undefined
+        : 'reported the preview image as unavailable'),
+      runAttempt,
+      setup: nativeSetup,
+      timeout: 20_000,
+    });
+
+    assert.deepEqual(report, { visible: { fallbackHidden: true } });
+    assert.equal(launches.length, 2);
+    assert.deepEqual(diagnostics, [
+      'Published preview Electron fixture needed 2 launches on this worker:'
+        + ' attempt 1 exited 0 and reported the preview image as unavailable',
+    ]);
+  });
+
+  it('returns the last rejected report so a real regression fails on its own assertion', async () => {
+    const diagnostics = [];
+    const unusable = reported({ visible: { fallbackHidden: false } });
+    const { launches, runAttempt } = scriptedRunner([unusable, unusable]);
+
+    const report = await runElectronFixture({
+      diagnostic: message => diagnostics.push(message),
+      electronArguments: ['/probe.cjs'],
+      name: 'Published preview Electron fixture',
+      rejectReport: () => 'reported the preview image as unavailable',
+      runAttempt,
+      setup: nativeSetup,
+      timeout: 20_000,
+    });
+
+    assert.deepEqual(report, { visible: { fallbackHidden: false } });
+    assert.equal(launches.length, 2);
+  });
+
+  it('accepts evidence the call site is happy with on the first launch', async () => {
+    const { launches, runAttempt } = scriptedRunner([reported({ visible: { fallbackHidden: true } })]);
+
+    await runElectronFixture({
+      diagnostic: () => assert.fail('an accepted report has nothing to report'),
+      electronArguments: ['/probe.cjs'],
+      name: 'Published preview Electron fixture',
+      rejectReport: candidate => (candidate.visible?.fallbackHidden === true
+        ? undefined
+        : 'reported the preview image as unavailable'),
+      runAttempt,
+      setup: nativeSetup,
+      timeout: 20_000,
+    });
+
+    assert.equal(launches.length, 1);
+  });
+
   it('leaves a spent budget alone for a probe that sizes its own launch', async () => {
     // The pairing-zstd probe rides its outage out inside the budget it is given
     // and its test timeout cannot afford a second full launch, so opting out has
