@@ -1,9 +1,7 @@
-import { getEventPublisher } from '../utils/eventPublisher.js';
-import type { NotificationChange } from '@propr/shared';
 /* eslint-disable max-lines -- event creation, preferences, and Inbox state share transactions */
 import { createHash, randomUUID } from 'node:crypto';
 import type { Knex } from 'knex';
-import { publishNotificationUpdateThroughRedis } from '../utils/eventPublisher.js';
+import { getEventPublisher, publishNotificationUpdateThroughRedis } from '../utils/eventPublisher.js';
 import {
     DEFAULT_NOTIFICATION_PREFERENCE_CHANNELS,
     DEFAULT_NOTIFICATION_QUIET_HOURS,

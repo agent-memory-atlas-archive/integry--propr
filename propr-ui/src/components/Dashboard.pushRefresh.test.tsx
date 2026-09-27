@@ -21,7 +21,9 @@ import {
   getDashboardOutcomes,
   getDashboardStats,
 } from '../api/dashboardApi';
-import type { ActivityChange, ActivityDomain, ActivityUpdatePayload } from '@propr/shared';
+// The envelope these frames imitate is the one `activityEvents` declares:
+// `entityId` and a resolved `terminal`, which is what the server publishes.
+import type { ActivityChange, ActivityDomain, ActivityUpdatePayload } from '@propr/shared/dist/activityEvents.js';
 import {
   activeItem,
   activeResponse,

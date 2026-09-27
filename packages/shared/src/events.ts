@@ -1,4 +1,13 @@
-import type { ActivityUpdatePayload, GoalUpdatePayload, NotificationUpdatePayload, UsageUpdatePayload } from './activityEvents.js';
+// The envelope-shaped variants of these payloads live in `activityEvents.ts`
+// and are aliased here: that module owns the general activity surface, while
+// the declarations below stay the shape the shell surfaces already consume.
+// `EventPayload` has to admit both, so neither publisher is excluded.
+import type {
+  ActivityUpdatePayload as ScopedActivityUpdatePayload,
+  GoalUpdatePayload,
+  NotificationUpdatePayload as RecipientListNotificationUpdatePayload,
+  UsageUpdatePayload as ScopedUsageUpdatePayload,
+} from './activityEvents.js';
 /**
  * Event names for real-time updates via WebSocket
  * These events are published to Redis and broadcast to WebSocket clients
@@ -50,8 +59,6 @@ export const REDIS_CHANNELS = {
   LIVE_DETAILS: 'propr:events:live',
   /** Channel for queue statistics updates */
   QUEUE_STATS: 'propr:events:queue',
-  /** Channel for the derived activity envelope */
-  ACTIVITY: 'propr:events:activity',
   /** Channel for per-recipient notification changes */
   NOTIFICATIONS: 'propr:events:notifications',
   /** Channel for agent capacity/quota changes */
@@ -277,10 +284,6 @@ export interface UsageUpdatePayload {
 
 /** Union type for all event payloads */
 export type EventPayload =
-  | ActivityUpdatePayload
-  | GoalUpdatePayload
-  | NotificationUpdatePayload
-  | UsageUpdatePayload
   | TaskUpdatePayload
   | DraftUpdatePayload
   | PlanStepUpdatePayload
@@ -289,4 +292,8 @@ export type EventPayload =
   | QueueStatsUpdatePayload
   | ActivityUpdatePayload
   | NotificationUpdatePayload
-  | UsageUpdatePayload;
+  | UsageUpdatePayload
+  | GoalUpdatePayload
+  | ScopedActivityUpdatePayload
+  | RecipientListNotificationUpdatePayload
+  | ScopedUsageUpdatePayload;

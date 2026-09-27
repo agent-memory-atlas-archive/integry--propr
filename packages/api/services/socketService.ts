@@ -1,3 +1,4 @@
+/* eslint-disable max-lines -- the Redis relay, its rooms and the per-event broadcasters are one transport boundary */
 import { ShellActivityBroadcaster } from './shellActivityBroadcaster.js';
 import { Server as SocketIOServer } from 'socket.io';
 import { Server as HttpServer } from 'http';
@@ -263,8 +264,16 @@ export class SocketService {
     }
   }
 
-  private broadcastActivity(domain: ActivityDomain, entityId: string, repository: string | null,
-    change: ActivityChange, room = ACTIVITY_ROOM, details: Partial<ActivityUpdatePayload> = {}): void {
+  private broadcastActivity(frame: {
+    domain: ActivityDomain;
+    entityId: string;
+    repository: string | null;
+    change: ActivityChange;
+    /** Defaults to the public activity room; private subjects pass their own. */
+    room?: string;
+    details?: Partial<ActivityUpdatePayload>;
+  }): void {
+    const { domain, entityId, repository, change, room = ACTIVITY_ROOM, details = {} } = frame;
     this.io.to(room).emit(ACTIVITY_UPDATE, { ...details, eventType: ACTIVITY_UPDATE, domain, entityId,
       repository, change, terminal: isTerminalActivityChange(change), occurredAt: new Date().toISOString() });
   }
@@ -284,7 +293,8 @@ export class SocketService {
       : goal?.result_state === 'failed' ? 'failed'
       : goal?.result_state === 'cancelled' || !goal ? 'cancelled'
       : goal?.desired_state === 'paused' ? 'blocked' : 'progressed';
-    this.broadcastActivity('goal', payload.goalId, frame.repository, change, room);
+    this.broadcastActivity({ domain: 'goal', entityId: payload.goalId,
+      repository: frame.repository, change, room });
   }
 
   private enqueueTaskUpdate(payload: TaskUpdatePayload): void {
@@ -319,6 +329,9 @@ export class SocketService {
     this.draftUpdateTails.set(payload.draftId, current);
   }
 
+  // One task frame fans out to its room, the activity envelope, private goal
+  // tasks and the notification projection.
+  // eslint-disable-next-line complexity
   private async handleTaskUpdate(payload: TaskUpdatePayload): Promise<void> {
     const now = Date.now();
     const cachedRevision = this.taskRevisions.get(payload.taskId);
@@ -374,8 +387,8 @@ export class SocketService {
       if (goal) await this.handleGoalUpdate({ eventType: GOAL_UPDATE, goalId: goal.goal_id,
         repository: payload.repository ?? null, occurredAt: payload.timestamp });
     } else if (payload.state !== payload.previousState || payload.metadata?.issueRefUpdated) {
-      this.broadcastActivity('task', payload.taskId, payload.repository ?? null, change,
-        ACTIVITY_ROOM, activityFromTaskUpdate(payload));
+      this.broadcastActivity({ domain: 'task', entityId: payload.taskId,
+        repository: payload.repository ?? null, change, details: activityFromTaskUpdate(payload) });
     }
     console.log(`[SocketService] Broadcasted ${TASK_UPDATE} for task ${payload.taskId}`);
     if (this.notificationProjection) {

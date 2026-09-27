@@ -15,11 +15,14 @@
 import { useEffect, useRef, useState } from 'react';
 import { useSocket } from '../../contexts/useSocket';
 import type { ActivityChange, ActivityDomain, ActivityUpdatePayload } from '@propr/shared';
+import type { ActivityUpdatePayload as ScopedActivityUpdatePayload } from '@propr/shared/dist/activityEvents.js';
 import { ALL_REPOSITORIES } from './sectionState';
 
 interface SectionInterest {
-  domains?: readonly ActivityDomain[];
-  changes?: readonly ActivityChange[];
+  // Both published envelope vocabularies: a frame can name its change
+  // `progress` or `progressed`, and notification changes only exist in one.
+  domains?: readonly (ActivityDomain | 'system')[];
+  changes?: readonly (ActivityChange | 'progressed' | 'read' | 'dismissed' | 'dismissed_all')[];
 }
 
 const SECTION_INTERESTS = {
@@ -57,7 +60,7 @@ const zeroTokens = (): SectionRefreshTokens =>
 const GOAL_SECTIONS: readonly DashboardSectionName[] = ['attention', 'active', 'completed'];
 
 function isRelevant(
-  payload: ActivityUpdatePayload,
+  payload: ActivityUpdatePayload | ScopedActivityUpdatePayload,
   section: DashboardSectionName,
   repository: string,
 ): boolean {

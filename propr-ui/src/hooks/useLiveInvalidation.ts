@@ -1,5 +1,5 @@
-import { useContext, useEffect } from 'react';
-import { SocketContext } from '../contexts/SocketContext';
+import { useEffect } from 'react';
+import { useOptionalSocket } from '../contexts/useSocket';
 import { matchesInterest, type LiveResourceInterest } from './useLiveResource';
 import { useLiveRefreshScheduler } from './useLiveRefreshScheduler';
 
@@ -11,7 +11,10 @@ export function useLiveInvalidation({ refresh, scopeKey, interest, disabled = fa
   disabled?: boolean;
   fallbackPollMs?: number;
 }) {
-  const socket = useContext(SocketContext);
+  // Through the same accessor every other surface uses, so a shell provider
+  // mounted without a socket takes the disconnected contract and a consumer
+  // cannot end up reading a different socket than the rest of the tree.
+  const socket = useOptionalSocket();
   const schedule = useLiveRefreshScheduler({
     isConnected: socket?.isConnected ?? false,
     refresh: () => disabled ? undefined : refresh(),

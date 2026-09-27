@@ -3,14 +3,12 @@ import logger from './logger.js';
 import {
   REDIS_CHANNELS,
   ACTIVITY_UPDATE, GOAL_UPDATE, NOTIFICATION_UPDATE, USAGE_UPDATE, isTerminalActivityChange,
-  type ActivityUpdatePayload, type GoalUpdatePayload, type NotificationUpdatePayload,
+  type GoalUpdatePayload,
   TASK_UPDATE,
   DRAFT_UPDATE,
   INDEXING_UPDATE,
   TASK_LIVE_UPDATE,
   QUEUE_STATS_UPDATE,
-  NOTIFICATION_UPDATE,
-  USAGE_UPDATE,
   type NotificationChange,
   type NotificationUpdatePayload,
   type UsageUpdatePayload,
@@ -29,6 +27,27 @@ import {
   type QueueStatsData,
   type EventPayload
 } from '@propr/shared';
+// The activity envelope's own payload shapes. The barrel exports the shell
+// surfaces' variants under these names, so the envelope ones are imported
+// directly rather than aliased through it.
+import type {
+  ActivityUpdatePayload as ScopedActivityUpdatePayload,
+  NotificationUpdatePayload as RecipientListNotificationUpdate,
+} from '@propr/shared/dist/activityEvents.js';
+
+/**
+ * The two notification producer shapes: a change fanned out to every recipient
+ * of one event, or a change for a single recipient carrying its unread count.
+ */
+type NotificationUpdateInput =
+  | Omit<RecipientListNotificationUpdate, 'eventType' | 'occurredAt'>
+  | {
+      change: NotificationChange;
+      recipientId: string;
+      eventId?: string;
+      unreadCount?: number;
+      occurredAt?: string;
+    };
 
 /**
  * Event publisher for real-time updates via Redis pub/sub.
@@ -209,7 +228,7 @@ class EventPublisher {
     await this.publish(REDIS_CHANNELS.QUEUE_STATS, payload);
   }
 
-  async publishActivity(params: Omit<ActivityUpdatePayload, 'eventType' | 'occurredAt' | 'terminal'>): Promise<boolean> {
+  async publishActivity(params: Omit<ScopedActivityUpdatePayload, 'eventType' | 'occurredAt' | 'terminal'>): Promise<boolean> {
     return this.publish(REDIS_CHANNELS.ACTIVITY, {
       ...params, eventType: ACTIVITY_UPDATE, occurredAt: new Date().toISOString(),
       terminal: isTerminalActivityChange(params.change),
@@ -223,33 +242,28 @@ class EventPublisher {
     });
   }
 
-  async publishNotificationUpdate(params: Omit<NotificationUpdatePayload, 'eventType' | 'occurredAt'>): Promise<boolean> {
-    return this.publish(REDIS_CHANNELS.ACTIVITY, {
-      ...params, eventType: NOTIFICATION_UPDATE, occurredAt: new Date().toISOString(),
-    });
-  }
-
-  async publishUsageUpdate(): Promise<boolean> {
-    return this.publish(REDIS_CHANNELS.ACTIVITY, {
-      eventType: USAGE_UPDATE, source: 'agent-tank', occurredAt: new Date().toISOString(),
-    });
-  }
-
   /**
-   * Publish a notification change for one recipient.
+   * Publish a notification change.
    *
    * Producers run outside the process that owns the websocket - the projection
    * worker creates the notification, and server-side cleanup dismisses it - so
    * the change reaches the recipient's open tabs through the same Redis relay
    * as every other event rather than through a socket they cannot see.
+   *
+   * Two producer shapes exist: the notification service fans a change out to
+   * the recipients of one event at once, while per-recipient producers publish
+   * one frame with the recipient's new unread count. The relay routes either to
+   * the recipients' rooms, so both are accepted rather than forcing a producer
+   * to restate what it knows.
    */
-  async publishNotificationUpdate(params: {
-    change: NotificationChange;
-    recipientId: string;
-    eventId?: string;
-    unreadCount?: number;
-    occurredAt?: string;
-  }): Promise<boolean> {
+  async publishNotificationUpdate(
+    params: NotificationUpdateInput
+  ): Promise<boolean> {
+    if ('recipientIds' in params) {
+      return this.publish(REDIS_CHANNELS.NOTIFICATIONS, {
+        ...params, eventType: NOTIFICATION_UPDATE, occurredAt: new Date().toISOString(),
+      });
+    }
     const payload: NotificationUpdatePayload = {
       eventType: NOTIFICATION_UPDATE,
       change: params.change,
@@ -268,8 +282,9 @@ class EventPublisher {
    * which keeps owning the projection and its permission check.
    */
   async publishUsageUpdate(params: { provider?: string } = {}): Promise<boolean> {
-    const payload: UsageUpdatePayload = {
+    const payload: UsageUpdatePayload & { source: 'agent-tank' } = {
       eventType: USAGE_UPDATE,
+      source: 'agent-tank',
       ...(params.provider === undefined ? {} : { provider: params.provider }),
       occurredAt: new Date().toISOString()
     };

@@ -33,7 +33,6 @@ export function createAgentTankRoutes() {
     try {
       const { enabled, url } = req.body;
       await configManager.saveAgentTankSettings({ enabled: !!enabled, url: url || 'http://0.0.0.0:3456' });
-      await configManager.getEventPublisher().publishUsageUpdate();
       res.json({ success: true });
       // Enabling, disabling or repointing the integration changes what every
       // open sidebar should be showing, and the sidebar no longer polls to
@@ -116,8 +115,8 @@ export function createAgentTankRoutes() {
         });
         clearTimeout(timer);
         if (response.ok) {
-          await configManager.getEventPublisher().publishUsageUpdate();
           res.json({ success: true });
+          // A successful re-probe is the moment the numbers actually moved.
           publishUsageChanged();
         } else {
           res.json({ success: false, error: `HTTP ${response.status}` });

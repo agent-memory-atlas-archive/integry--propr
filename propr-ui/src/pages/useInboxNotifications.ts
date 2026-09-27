@@ -1,5 +1,4 @@
-import { useLiveRefreshScheduler } from '../hooks/useLiveRefreshScheduler';
-import { useSocket } from '../contexts/useSocket';
+import { useInboxLiveRefresh } from './useInboxLiveRefresh';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { Notification } from '@propr/shared';
 import {
@@ -131,7 +130,6 @@ export function useInboxNotifications(): InboxNotificationsState {
   } = useNotificationCenter();
   const { addToast } = useToast();
   const { isDemoMode } = useDemoMode();
-  const { isConnected, subscribeToActivity, unsubscribeFromActivity, onActivityReady } = useSocket();
   notificationsRef.current = notifications;
 
   useEffect(() => {
@@ -225,22 +223,10 @@ export function useInboxNotifications(): InboxNotificationsState {
 
   const refresh = useCallback(() => loadFirstPage('refresh'), [loadFirstPage]);
 
-  const schedule = useLiveRefreshScheduler({
-    refresh: () => {
-      if (!navigator.onLine || clearingRef.current) return;
-      return loadFirstPage(initialLoading ? 'initial' : 'background');
-    },
-    scopeKey: 'inbox',
-    isConnected,
-    fallbackPollMs: 60_000,
+  const schedule = useInboxLiveRefresh(() => {
+    if (!navigator.onLine || clearingRef.current) return;
+    return loadFirstPage(initialLoading ? 'initial' : 'background');
   });
-  const { refreshNow } = schedule;
-  useEffect(() => { void refreshNow(); }, [refreshNow]);
-  useEffect(() => {
-    const unsubscribeReady = onActivityReady?.(() => schedule());
-    subscribeToActivity?.();
-    return () => { unsubscribeReady?.(); unsubscribeFromActivity?.(); };
-  }, [onActivityReady, subscribeToActivity, unsubscribeFromActivity, schedule]);
 
   // The Inbox is told when it has to re-read; see useInboxRefreshTriggers for
   // the push, reconnect, visibility and disconnected-fallback contract.
