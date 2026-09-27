@@ -1,13 +1,14 @@
 import assert from 'node:assert/strict';
 import { after, describe, test } from 'node:test';
 import { closeConnection } from '@propr/core';
-import { TASK_UPDATE, type TaskUpdatePayload } from '@propr/shared';
+import { ACTIVITY_UPDATE, TASK_UPDATE, type TaskUpdatePayload } from '@propr/shared';
+import { ACTIVITY_ROOM } from '../services/activitySocketRooms.js';
+import { SocketService } from '../services/socketService.js';
 import {
   loadDurableTaskRevision,
   readCachedTaskRevision,
   shouldBroadcastTaskUpdate,
-  SocketService,
-} from '../services/socketService.js';
+} from '../services/taskRevisionOrdering.js';
 
 after(async () => { await closeConnection(); });
 
@@ -44,7 +45,7 @@ describe('SocketService task update ordering', () => {
             return operator;
           },
           emit: (_event: string, emittedPayload: TaskUpdatePayload) => {
-            if (_event === TASK_UPDATE) broadcasts.push({ rooms, payload: emittedPayload });
+            broadcasts.push({ rooms, payload: emittedPayload });
           },
         };
         return operator;
@@ -69,8 +70,22 @@ describe('SocketService task update ordering', () => {
     await internals.handleTaskUpdate(payload);
 
     assert.equal(durableReads, 0);
+    // The task frame, plus the one activity envelope derived from it: a task
+    // update that passes the ordering gate is also 'activity happened'.
     assert.deepEqual(broadcasts, [
       { rooms: ['instance:operational', 'task:legacy-task'], payload },
+      {
+        rooms: [ACTIVITY_ROOM],
+        payload: {
+          eventType: ACTIVITY_UPDATE,
+          domain: 'task',
+          change: 'started',
+          entityId: 'legacy-task',
+          repository: null,
+          terminal: false,
+          occurredAt: payload.timestamp,
+        } as unknown as TaskUpdatePayload,
+      },
     ]);
   });
 

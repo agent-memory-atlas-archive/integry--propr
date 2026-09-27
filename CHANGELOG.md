@@ -9,6 +9,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Server-side activity push events**: the server now announces the changes the
+  dashboard, header, Goals console and Inbox currently poll for. `@propr/shared`
+  defines one general envelope, `activity:update` (`domain`, `change`,
+  `entityId`, `repository`, `terminal`, `occurredAt`, `revision`), alongside
+  `goal:update`, `notification:update` and `usage:update`. `@propr/core`
+  publishes goal transitions from the writes that persist them (create, pause,
+  resume, cancel, claim, completion, failure and leased recovery), Inbox changes
+  from the only writer of notification receipts, and an Agent Tank usage trigger
+  only when an observed snapshot actually differs — never on an unchanged poll.
+  Both reads that see provider usage feed that one detector: the per-agent status
+  read and the aggregate endpoint the usage panel itself calls, so a percentage
+  that moves is announced whichever read observes it. The API derives `activity:update` from the task, planner, goal and notification
+  events it already subscribes to, so a producer cannot publish one without the
+  other, and emits over Socket.IO with an opt-in `activity` room and the existing
+  per-user room: notification frames and the activity they derive stay in their
+  recipients' rooms, so one operator never learns what another is being notified
+  about or when they read it, and an Inbox arrival is announced only to the
+  recipients whose receipt the write actually created. Payloads carry ids,
+  a repository and a timestamp — no prose, tokens, diffs or agent output — and a
+  failed publish is logged and swallowed, so a Redis outage degrades to the
+  polling that exists today. Publishing is also bounded: a disconnected
+  publisher drops the event and a Redis that stops answering costs one second,
+  so a notification request or a goal worker never waits out an outage after its
+  database write has committed. An idle publisher also stops holding its process
+  open: the connection is kept for reuse but only keeps the event loop alive
+  while an event is actually in flight, so reaching a publishing code path never
+  becomes an obligation to shut the publisher down. An operation that announces
+  many changes is bounded too — one timeout pauses publishing briefly instead of
+  being charged again per event, and a notification cleanup stops announcing
+  once its flush budget is spent — so closing a hundred notifications cannot
+  cost a hundred timeouts. Every frame decoded from Redis is validated against
+  its whole published contract — identifiers, states, repository scope,
+  revisions and the precomputed `terminal` flag — before the producer event or
+  the activity envelope derived from it is emitted, so a malformed publish is
+  dropped and reported instead of reaching a browser. No client change is
+  required by this step: with nothing subscribed, behaviour is unchanged.
 - **MCP operator surface**: a connected agent can now run an instance rather than
   only read and write one object at a time. `get_current_activity` answers "what
   is happening right now" across every repository in the grant — running tasks,

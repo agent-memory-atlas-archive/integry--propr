@@ -5,16 +5,19 @@ import { Redis } from 'ioredis';
 import { Queue } from 'bullmq';
 import { RedisClientType } from 'redis';
 import { Knex } from 'knex';
-import type { WorkerStateManagerOptions } from '@propr/core';
+import { goalActivityState, type WorkerStateManagerOptions } from '@propr/core';
 import {
   REDIS_CHANNELS,
-  ACTIVITY_UPDATE, GOAL_UPDATE, NOTIFICATION_UPDATE, USAGE_UPDATE, isActivityUpdatePayload, isTerminalActivityChange,
-  type ActivityChange, type ActivityDomain, type GoalUpdatePayload, type NotificationUpdatePayload,
+  ACTIVITY_UPDATE, isActivityTimestamp, isActivityUpdatePayload, isGoalUpdatePayload, isTerminalActivityChange,
+  type ActivityChange, type ActivityDomain, type GoalUpdatePayload,
   TASK_UPDATE,
   DRAFT_UPDATE,
   INDEXING_UPDATE,
   TASK_LIVE_UPDATE,
   QUEUE_STATS_UPDATE,
+  GOAL_UPDATE,
+  NOTIFICATION_UPDATE,
+  USAGE_UPDATE,
   type EventPayload,
   type TaskUpdatePayload,
   type DraftUpdatePayload,
@@ -22,6 +25,7 @@ import {
   type TaskLiveUpdatePayload,
   type QueueStatsUpdatePayload
 } from '@propr/shared';
+import { ActivityBroadcaster, ACTIVITY_ROOM as BROADCAST_ACTIVITY_ROOM } from './activityBroadcast.js';
 import { QueueBroadcaster } from './queueBroadcaster.js';
 import { TaskWatcherManager } from './taskWatcher.js';
 import {
@@ -34,6 +38,12 @@ import {
   taskRoom,
   userRoom,
 } from './socketSubscriptions.js';
+import {
+  admitTaskRevision,
+  DEFAULT_TASK_STATE_EXPIRY_SECONDS,
+  loadDurableTaskRevision,
+  type TaskRevisionCacheEntry,
+} from './taskRevisionOrdering.js';
 import type { NotificationProjectionSink } from './notificationBackgroundProtocol.js';
 
 /** CORS origin validation function type compatible with Socket.IO */
@@ -48,56 +58,6 @@ export interface QueueDependencies {
   db: Knex;
   workerStateOptions?: Pick<WorkerStateManagerOptions, 'keyPrefix' | 'stateExpiry'>;
   notificationProjection?: NotificationProjectionSink;
-}
-
-const DEFAULT_TASK_STATE_EXPIRY_SECONDS = 7 * 24 * 3600;
-
-export interface TaskRevisionCacheEntry {
-  version: number;
-  expiresAt: number;
-}
-
-export function readCachedTaskRevision(
-  entry: TaskRevisionCacheEntry | undefined,
-  now = Date.now(),
-): number | undefined {
-  return entry && entry.expiresAt > now ? entry.version : undefined;
-}
-
-export function shouldBroadcastTaskUpdate(
-  latestVersion: number | undefined,
-  incomingVersion: number | undefined,
-  allowSeededEquality = false,
-): boolean {
-  if (incomingVersion !== undefined
-    && (!Number.isSafeInteger(incomingVersion) || incomingVersion < 0)) return false;
-  if (latestVersion === undefined) return true;
-  if (incomingVersion === undefined) return false;
-  return incomingVersion > latestVersion
-    || (allowSeededEquality && incomingVersion === latestVersion);
-}
-
-export async function loadDurableTaskRevision(
-  get: (key: string) => Promise<string | null>,
-  taskId: string,
-  options: Pick<WorkerStateManagerOptions, 'keyPrefix'> = {},
-): Promise<number | undefined> {
-  const stateValue = await get(`${options.keyPrefix ?? 'worker:state:'}${taskId}`);
-  const isValidRevision = (value: number): boolean => (
-    Number.isSafeInteger(value) && value >= 0
-  );
-  let stateRevision = Number.NaN;
-  if (stateValue) {
-    try {
-      const parsed = JSON.parse(stateValue) as { version?: unknown };
-      stateRevision = typeof parsed.version === 'number' && isValidRevision(parsed.version)
-        ? parsed.version
-        : Number.NaN;
-    } catch {
-      // A malformed/partially-written state cannot seed event ordering.
-    }
-  }
-  return isValidRevision(stateRevision) ? stateRevision : undefined;
 }
 
 /**
@@ -115,6 +75,7 @@ export class SocketService {
   private isSubscribed = false;
   private shellBroadcaster: ShellActivityBroadcaster | null = null;
   private queueBroadcaster: QueueBroadcaster | null = null;
+  private activityBroadcaster: ActivityBroadcaster | null = null;
   private taskWatcherManager: TaskWatcherManager;
   private subscriptionManager: SocketSubscriptionManager;
   private queueDeps: QueueDependencies | null = null;
@@ -178,6 +139,22 @@ export class SocketService {
   }
 
   /**
+   * Derives the general activity surface from the producer events this service
+   * already subscribes to, so 'a task changed' and 'activity happened' cannot
+   * drift apart, and so no second Redis subscription has to be opened and torn
+   * down for it. Resolved on first use because it needs nothing but this
+   * service's own Socket.IO server.
+   */
+  private get activity(): ActivityBroadcaster {
+    // Use the target branch's opt-in rooms with the PR's validated derivation.
+    this.activityBroadcaster ??= new ActivityBroadcaster({
+      to: room => this.io.to(room === BROADCAST_ACTIVITY_ROOM ? ACTIVITY_ROOM
+        : room.startsWith('user:') ? activityUserRoom(room.slice('user:'.length)) : room),
+    });
+    return this.activityBroadcaster;
+  }
+
+  /**
    * Set up Socket.IO connection handlers
    */
   private setupConnectionHandlers(): void {
@@ -200,7 +177,10 @@ export class SocketService {
         REDIS_CHANNELS.DRAFTS,
         REDIS_CHANNELS.INDEXING,
         REDIS_CHANNELS.LIVE_DETAILS,
-        REDIS_CHANNELS.QUEUE_STATS
+        REDIS_CHANNELS.QUEUE_STATS,
+        REDIS_CHANNELS.GOALS,
+        REDIS_CHANNELS.NOTIFICATIONS,
+        REDIS_CHANNELS.USAGE
       );
       this.isSubscribed = true;
       console.log('[SocketService] Subscribed to Redis channels:', Object.values(REDIS_CHANNELS));
@@ -229,16 +209,11 @@ export class SocketService {
       case GOAL_UPDATE:
         void this.handleGoalUpdate(payload).catch(error => console.error('Goal broadcast failed:', error));
         break;
-      case NOTIFICATION_UPDATE: {
-        const { recipientIds, ...frame } = payload as NotificationUpdatePayload;
-        if (!Array.isArray(recipientIds)) break;
-        for (const id of new Set(recipientIds)) {
-          if (typeof id === 'string') this.io.to(activityUserRoom(id)).emit(NOTIFICATION_UPDATE, frame);
-        }
+      case NOTIFICATION_UPDATE:
+        this.activity.notificationUpdated(payload);
         break;
-      }
       case USAGE_UPDATE:
-        this.io.to(ACTIVITY_ROOM).emit(USAGE_UPDATE, payload);
+        this.activity.usageUpdated(payload);
         break;
       case TASK_UPDATE:
         this.enqueueTaskUpdate(payload as TaskUpdatePayload);
@@ -261,27 +236,35 @@ export class SocketService {
   }
 
   private broadcastActivity(domain: ActivityDomain, entityId: string, repository: string | null,
-    change: ActivityChange, room = ACTIVITY_ROOM): void {
-    this.io.to(room).emit(ACTIVITY_UPDATE, { eventType: ACTIVITY_UPDATE, domain, entityId,
+    change: ActivityChange): void {
+    this.io.to(ACTIVITY_ROOM).emit(ACTIVITY_UPDATE, { eventType: ACTIVITY_UPDATE, domain, entityId,
       repository, change, terminal: isTerminalActivityChange(change), occurredAt: new Date().toISOString() });
   }
 
-  private async handleGoalUpdate(payload: GoalUpdatePayload & { ownerId?: string }): Promise<void> {
-    if (!this.queueDeps || typeof payload.goalId !== 'string') return;
+  private async handleGoalUpdate(
+    payload: Partial<GoalUpdatePayload> & { goalId: string; ownerId?: string },
+  ): Promise<void> {
+    if (!this.queueDeps || typeof payload.goalId !== 'string' || !payload.goalId
+      || !isActivityTimestamp(payload.occurredAt)) return;
+    // Rich transition frames must satisfy the PR contract. Bare invalidations
+    // from checkpoint/session writers are resolved from the committed goal row.
+    if (payload.state !== undefined && !isGoalUpdatePayload(payload)) return;
     const goal = await this.queueDeps.db('goals').where({ goal_id: payload.goalId }).first();
     const ownerId = goal?.owner_id ?? payload.ownerId;
-    if (typeof ownerId !== 'string') return;
-    const room = activityUserRoom(ownerId);
-    const frame: GoalUpdatePayload = { eventType: GOAL_UPDATE, goalId: payload.goalId,
-      repository: goal?.repository ?? payload.repository, occurredAt: payload.occurredAt,
-      desiredState: goal?.desired_state, resultState: goal?.result_state,
-      currentTaskId: goal?.current_task_id };
-    this.io.to(room).emit(GOAL_UPDATE, frame);
-    const change = goal?.result_state === 'completed' ? 'completed'
-      : goal?.result_state === 'failed' ? 'failed'
-      : goal?.result_state === 'cancelled' || !goal ? 'cancelled'
-      : goal?.desired_state === 'paused' ? 'blocked' : 'progressed';
-    this.broadcastActivity('goal', payload.goalId, frame.repository, change, room);
+    if (typeof ownerId !== 'string' || !ownerId) return;
+    const frame: GoalUpdatePayload = {
+      eventType: GOAL_UPDATE,
+      goalId: payload.goalId,
+      repository: goal?.repository ?? payload.repository,
+      state: payload.state ?? (goal ? goalActivityState(goal) : 'cancelled'),
+      occurredAt: payload.occurredAt,
+      desiredState: goal?.desired_state,
+      resultState: goal?.result_state,
+      currentTaskId: payload.currentTaskId ?? goal?.current_task_id,
+      ...(payload.revision === undefined ? {} : { revision: payload.revision }),
+    };
+    // Both the goal frame and its derived activity have the same private audience.
+    new ActivityBroadcaster({ to: () => this.io.to(activityUserRoom(ownerId)) }).goalUpdated(frame);
   }
 
   private enqueueTaskUpdate(payload: TaskUpdatePayload): void {
@@ -316,62 +299,38 @@ export class SocketService {
     this.draftUpdateTails.set(payload.draftId, current);
   }
 
+  /** Durable revision baseline for a task, or undefined when no store is wired. */
+  private async seedDurableTaskRevision(taskId: string): Promise<number | undefined> {
+    const deps = this.queueDeps;
+    if (!deps) return undefined;
+    return loadDurableTaskRevision(key => deps.redisClient.get(key), taskId, deps.workerStateOptions);
+  }
+
   private async handleTaskUpdate(payload: TaskUpdatePayload): Promise<void> {
-    const now = Date.now();
-    const cachedRevision = this.taskRevisions.get(payload.taskId);
-    let latestVersion = readCachedTaskRevision(cachedRevision, now);
-    if (cachedRevision && latestVersion === undefined) this.taskRevisions.delete(payload.taskId);
-    let allowSeededEquality = false;
-    if (latestVersion === undefined && payload.version !== undefined && this.queueDeps) {
-      try {
-        latestVersion = await loadDurableTaskRevision(
-          key => this.queueDeps!.redisClient.get(key),
-          payload.taskId,
-          this.queueDeps.workerStateOptions,
-        );
-        allowSeededEquality = latestVersion !== undefined;
-      } catch (error) {
-        console.error(`[SocketService] Failed to seed task revision for ${payload.taskId}:`, error);
-        // A versioned pub/sub event is already self-ordering. Accept it as the
-        // live baseline when durable state is transiently unavailable rather
-        // than silently dropping the only update clients may receive.
-        if (payload.version === undefined) return;
-        latestVersion = undefined;
-      }
-    }
-    // During rolling upgrades, legacy events may be accepted until a
-    // versioned producer establishes the ordered stream for this task.
-    if (!shouldBroadcastTaskUpdate(latestVersion, payload.version, allowSeededEquality)) return;
-    if (payload.version !== undefined) {
-      const stateExpirySeconds = Math.max(
-        1,
-        this.queueDeps?.workerStateOptions?.stateExpiry ?? DEFAULT_TASK_STATE_EXPIRY_SECONDS,
-      );
-      this.taskRevisions.delete(payload.taskId);
-      this.taskRevisions.set(payload.taskId, {
-        version: payload.version,
-        expiresAt: now + stateExpirySeconds * 1000,
-      });
-      if (this.taskRevisions.size > 10_000) {
-        const oldestTaskId = this.taskRevisions.keys().next().value;
-        if (oldestTaskId !== undefined) this.taskRevisions.delete(oldestTaskId);
-      }
-    }
+    const admitted = await admitTaskRevision({
+      cache: this.taskRevisions,
+      taskId: payload.taskId,
+      version: payload.version,
+      seed: taskId => this.seedDurableTaskRevision(taskId),
+      stateExpirySeconds: () => this.queueDeps?.workerStateOptions?.stateExpiry
+        ?? DEFAULT_TASK_STATE_EXPIRY_SECONDS,
+    });
+    if (!admitted) return;
     this.io
       .to(INSTANCE_OPERATIONAL_ROOM)
       .to(taskRoom(payload.taskId))
       .emit(TASK_UPDATE, payload);
-    const state = payload.state.toLowerCase();
-    const change: ActivityChange = state === 'completed' ? 'completed' : state === 'failed' ? 'failed'
-      : state === 'cancelled' ? 'cancelled' : ['action_required', 'blocked', 'paused'].includes(state) ? 'blocked'
-      : state === 'pending' ? 'created' : 'started';
-    // Goal tasks are private; resolve their owner instead of emitting a public invalidation.
+    // Derived after the ordering gate above, so a replayed or out-of-order task
+    // event cannot produce an activity frame the task feed itself rejected.
     if (payload.taskId.startsWith('goal-')) {
-      const goal = this.queueDeps && await this.queueDeps.db('goals').where({ current_task_id: payload.taskId }).first('goal_id');
-      if (goal) await this.handleGoalUpdate({ eventType: GOAL_UPDATE, goalId: goal.goal_id,
-        repository: payload.repository ?? null, occurredAt: payload.timestamp });
+      const goal = this.queueDeps && await this.queueDeps.db('goals')
+        .where({ current_task_id: payload.taskId }).first('goal_id');
+      if (goal) await this.handleGoalUpdate({
+        eventType: GOAL_UPDATE, goalId: goal.goal_id,
+        repository: payload.repository ?? undefined, occurredAt: payload.timestamp,
+      });
     } else if (payload.state !== payload.previousState || payload.metadata?.issueRefUpdated) {
-      this.broadcastActivity('task', payload.taskId, payload.repository ?? null, change);
+      this.activity.taskUpdated(payload);
     }
     console.log(`[SocketService] Broadcasted ${TASK_UPDATE} for task ${payload.taskId}`);
     if (this.notificationProjection) {
@@ -400,9 +359,7 @@ export class SocketService {
       .to(`draft:${payload.draftId}`)
       .to(userRoom(ownerId))
       .emit(DRAFT_UPDATE, payload);
-    this.broadcastActivity('plan', payload.draftId, null,
-      payload.draftStatus === 'failed' ? 'failed' : payload.draftStatus === 'merged' ? 'completed'
-        : payload.draftStatus === 'review' ? 'blocked' : 'created', activityUserRoom(ownerId));
+    this.activity.draftUpdated(payload, ownerId);
     console.log(`[SocketService] Broadcasted ${DRAFT_UPDATE} for draft ${payload.draftId}, step: ${payload.step}`);
     if (this.notificationProjection) {
       await this.notificationProjection.projectDraftUpdate(payload);

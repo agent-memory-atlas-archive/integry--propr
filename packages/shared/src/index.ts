@@ -49,7 +49,33 @@ export {
 // The general activity push surface. Exported from the barrel so the core
 // publishers, the API broadcaster and the UI socket provider all compile
 // against one definition of the wire format.
-export * from './activityEvents.js';
+export {
+  ACTIVITY_UPDATE,
+  GOAL_UPDATE,
+  NOTIFICATION_UPDATE,
+  USAGE_UPDATE,
+  ACTIVITY_DOMAINS,
+  ACTIVITY_CHANGES,
+  GOAL_ACTIVITY_STATES,
+  NOTIFICATION_CHANGES,
+  USAGE_SOURCES,
+  isActivityTimestamp,
+  isActivityUpdatePayload,
+  isGoalUpdatePayload,
+  isNotificationUpdatePayload,
+  isTerminalActivityChange,
+  isUsageUpdatePayload,
+  type ActivityChange,
+  type ActivityDomain,
+  type ActivityUpdatePayload,
+  type GoalActivityState,
+  type GoalUpdatePayload,
+  type GoalUpdateTriggerPayload,
+  type NotificationChange,
+  type NotificationUpdatePayload,
+  type UsageSource,
+  type UsageUpdatePayload,
+} from './activityEvents.js';
 
 // Export usage configuration and metrics types
 export {

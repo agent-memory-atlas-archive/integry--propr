@@ -19,6 +19,9 @@ import {
   nativeGoalPromptValidationError,
   generateGoalTitle,
   getAuthenticatedOctokit,
+  goalActivityState,
+  publishGoalActivity,
+  publishGoalTransition,
   goalTitleFallback,
   goalJobId,
   loadRepositoryVisualPreviewSettings,
@@ -258,6 +261,32 @@ export function createGoalRoutes(deps: GoalRoutesDeps) {
   const loadVisualPreviewSettings = deps.loadVisualPreviewSettings ?? loadRepositoryVisualPreviewSettings;
   const getOctokit = deps.getOctokit ?? getAuthenticatedOctokit;
 
+  /**
+   * Answer a control request with the goal it produced, announcing the
+   * transition first.
+   *
+   * Published from the handler that persisted the change rather than from a
+   * sweep. Lifecycle transitions carry their normalized state; other control
+   * changes invalidate the projection so inputs and model changes appear too.
+   * Idempotent requests return before this helper. A Redis outage degrades to
+   * the polling clients already fall back on instead of failing the mutation
+   * that has already committed.
+   */
+  const respondWithGoalTransition = async (
+    res: Response,
+    previous: GoalRow | undefined,
+    updated: GoalRow,
+  ): Promise<void> => {
+    if (previous && goalActivityState(previous) === goalActivityState(updated)) {
+      // Input and model changes still refresh the projection without announcing
+      // a lifecycle transition that did not happen.
+      await getEventPublisher().publishGoalUpdate({ goalId: updated.goal_id, repository: updated.repository });
+    } else {
+      await publishGoalTransition({ previous, next: updated });
+    }
+    res.json({ goal: await serializeGoal(deps.db, deps.redisClient, updated) });
+  };
+
   const uploadedFiles = (req: Request): MulterFile[] => Array.isArray(req.files)
     ? req.files as MulterFile[]
     : [];
@@ -491,7 +520,9 @@ export function createGoalRoutes(deps: GoalRoutesDeps) {
         }
         throw error;
       }
-      await getEventPublisher().publishGoalUpdate({ goalId, repository: `${repoOwner}/${repoName}` });
+      const inserted = await deps.db('goals').where({ goal_id: goalId }).first() as GoalRow;
+      // Announce the durable creation even if queueing needs recovery.
+      await publishGoalActivity(inserted);
       const data: GoalJobData = {
         goalId, taskId, repoOwner, repoName, generation: 0, claimId,
         input: initialPrompt,
@@ -504,7 +535,6 @@ export function createGoalRoutes(deps: GoalRoutesDeps) {
           goalId,
         });
       }
-      const inserted = await deps.db('goals').where({ goal_id: goalId }).first() as GoalRow;
       res.status(201).json({ goal: await serializeGoal(deps.db, deps.redisClient, inserted) });
     } finally {
       if (!attachmentsPersisted) await deleteGoalAttachments(attachments);
@@ -572,8 +602,7 @@ export function createGoalRoutes(deps: GoalRoutesDeps) {
     }
     await recordControlMutation(deps.db, row, key, operation, payloadHash);
     const updated = await deps.db<GoalRow>('goals').where({ goal_id: row.goal_id }).first();
-    await getEventPublisher().publishGoalUpdate({ goalId: row.goal_id, repository: row.repository });
-    res.json({ goal: await serializeGoal(deps.db, deps.redisClient, updated!) });
+    await respondWithGoalTransition(res, row, updated!);
   };
 
   async function addGoalInput(options: {
@@ -694,8 +723,7 @@ export function createGoalRoutes(deps: GoalRoutesDeps) {
     const latest = await deps.db<GoalRow>('goals').where({ goal_id: row.goal_id }).first();
     if (latest?.pause_confirmed_at) await beginPausedContinuation(latest);
     const updated = await deps.db<GoalRow>('goals').where({ goal_id: row.goal_id }).first();
-    await getEventPublisher().publishGoalUpdate({ goalId: row.goal_id, repository: row.repository });
-    res.json({ goal: await serializeGoal(deps.db, deps.redisClient, updated!) });
+    await respondWithGoalTransition(res, row, updated!);
   };
 
   const cancel = async (req: Request, res: Response) => {
@@ -758,8 +786,7 @@ export function createGoalRoutes(deps: GoalRoutesDeps) {
     }
     await recordControlMutation(deps.db, row, key, operation, payloadHash);
     const updated = await deps.db<GoalRow>('goals').where({ goal_id: row.goal_id }).first();
-    await getEventPublisher().publishGoalUpdate({ goalId: row.goal_id, repository: row.repository });
-    res.json({ goal: await serializeGoal(deps.db, deps.redisClient, updated!) });
+    await respondWithGoalTransition(res, row, updated!);
   };
 
   const remove = async (req: Request, res: Response) => {
@@ -858,8 +885,7 @@ export function createGoalRoutes(deps: GoalRoutesDeps) {
     }
     await recordControlMutation(deps.db, row, key, operation, payloadHash);
     const updated = await deps.db<GoalRow>('goals').where({ goal_id: row.goal_id }).first();
-    await getEventPublisher().publishGoalUpdate({ goalId: row.goal_id, repository: row.repository });
-    res.json({ goal: await serializeGoal(deps.db, deps.redisClient, updated!) });
+    await respondWithGoalTransition(res, row, updated!);
   };
 
   // eslint-disable-next-line complexity -- input delivery branches by persisted lifecycle and provider resume capability
@@ -990,8 +1016,7 @@ export function createGoalRoutes(deps: GoalRoutesDeps) {
       if (inputBoundary?.pause_confirmed_at) await beginPausedContinuation(inputBoundary);
     }
     const updated = await deps.db<GoalRow>('goals').where({ goal_id: row.goal_id }).first();
-    await getEventPublisher().publishGoalUpdate({ goalId: row.goal_id, repository: row.repository });
-    res.json({ goal: await serializeGoal(deps.db, deps.redisClient, updated!) });
+    await respondWithGoalTransition(res, row, updated!);
   };
 
   const input = async (req: Request, res: Response) => {
