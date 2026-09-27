@@ -363,6 +363,7 @@ export { toAntigravityCliModelId } from './agents/impl/antigravityModelIds.js';
 export {
     toAgentTankAgent,
     toProprAgent,
+    hasAgentTankStatuses,
     normalizeAgentTankStatus,
     normalizeAgentTankAgents,
     getStatusForAlias as getAgentTankStatusForAlias,

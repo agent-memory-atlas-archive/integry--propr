@@ -16,6 +16,7 @@ import {
 // The provider-key vocabulary and the status shape live in `agentTankTypes.ts`
 // so the bundled runner can share them without importing this router back.
 export {
+    hasAgentTankStatuses,
     normalizeAgentTankAgents,
     normalizeAgentTankStatus,
     toAgentTankAgent,

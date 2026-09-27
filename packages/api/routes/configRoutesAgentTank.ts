@@ -1,6 +1,6 @@
 import { Request, Response } from 'express';
 import * as configManager from '@propr/core';
-import { canRunBundledAgentTank, getAgentTankStatuses, refreshBundledStatuses } from '@propr/core';
+import { canRunBundledAgentTank, getAgentTankStatuses, hasAgentTankStatuses, refreshBundledStatuses } from '@propr/core';
 import { AGENT_TANK_MODES, isAgentTankMode, normalizeAgentTankMode } from '@propr/shared';
 
 export function createAgentTankRoutes() {
@@ -51,14 +51,24 @@ export function createAgentTankRoutes() {
         return;
       }
       if (settings.mode === 'bundled') {
-        // "Available" for bundled mode means "we can produce a snapshot",
-        // which is exactly what a (cached) refresh answers. Reusing the same
-        // call keeps the status indicator honest instead of asserting health
-        // from image presence alone.
+        // "Available" for bundled mode means "we can produce a snapshot that
+        // describes at least one provider", which is exactly what a (cached)
+        // refresh answers. Reusing the same call keeps the status indicator
+        // honest instead of asserting health from image presence alone.
         const agents = await refreshBundledStatuses();
-        res.json(agents
-          ? { available: true, mode: 'bundled' }
-          : { available: false, mode: 'bundled', reason: 'bundled_run_failed' });
+        if (!agents) {
+          res.json({ available: false, mode: 'bundled', reason: 'bundled_run_failed' });
+          return;
+        }
+        // A run that had nothing to inspect - only OpenCode/Vibe enabled, or no
+        // enabled agent at all - succeeds with an empty map and starts no
+        // container. That is a successful run, not usage tracking: announcing it
+        // as ready would promise a gauge that can never show a number.
+        if (!hasAgentTankStatuses(agents)) {
+          res.json({ available: false, mode: 'bundled', reason: 'no_supported_agents' });
+          return;
+        }
+        res.json({ available: true, mode: 'bundled' });
         return;
       }
       const controller = new AbortController();
@@ -115,7 +125,16 @@ export function createAgentTankRoutes() {
         // `force` because this is an explicit operator action: they pressed
         // refresh precisely because they do not trust the cached snapshot.
         const agents = await refreshBundledStatuses({ force: true });
-        res.json(agents ? { success: true } : { success: false, error: 'bundled_run_failed' });
+        // Same evidence rule as the status route: a snapshot that describes no
+        // provider did not refresh any usage data, so it cannot be reported as a
+        // successful refresh.
+        if (!agents) {
+          res.json({ success: false, error: 'bundled_run_failed' });
+          return;
+        }
+        res.json(hasAgentTankStatuses(agents)
+          ? { success: true }
+          : { success: false, error: 'no_supported_agents' });
         return;
       }
       const controller = new AbortController();

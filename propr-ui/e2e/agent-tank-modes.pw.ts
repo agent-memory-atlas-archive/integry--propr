@@ -18,6 +18,8 @@ const agents = [
 async function installFixture(
   page: Page,
   agentTank: Record<string, unknown>,
+  /** What the backend answers about whether the selected mode actually works. */
+  status: Record<string, unknown> = { available: true },
 ): Promise<Array<Record<string, unknown>>> {
   const saved: Array<Record<string, unknown>> = [];
   let tank = { ...agentTank };
@@ -52,7 +54,7 @@ async function installFixture(
       '/api/config/agents': { agents },
       '/api/config/summarization': { enabled: false, agent_alias: '', fallback_agent_alias: '' },
       '/api/config/agent-tank': tank,
-      '/api/config/agent-tank/status': { available: true, mode: tank.mode },
+      '/api/config/agent-tank/status': { mode: tank.mode, ...status },
       '/api/config/agent-tank/detect': { detected: false },
       '/api/instance/catalog': {
         agents: agents.map(agent => ({ id: agent.id, kind: 'direct', alias: agent.alias, enabled: true, supportedModels: agent.supportedModels })),
@@ -154,4 +156,21 @@ test('bundled mode is refused on a legacy backend instead of reported as applied
   expect(saved).toEqual([]);
   await expect(page.getByRole('radio', { name: /External/ })).toBeChecked();
   await captureViewport(page, 'agent-tank-legacy-backend');
+});
+
+test('bundled mode with nothing to monitor is not announced as ready', async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 1000 });
+  // The bundled run succeeded and described no provider - only unsupported
+  // agents are enabled - so the backend reports it as unavailable with a reason.
+  await installFixture(
+    page,
+    { mode: 'bundled', enabled: true, url: 'http://host.docker.internal:3456' },
+    { available: false, reason: 'no_supported_agents' },
+  );
+  await page.goto('/settings?tab=integrations');
+
+  const status = page.getByRole('region', { name: 'LLM Usage Tracking' }).getByRole('status');
+  await expect(status).toContainText('Bundled Agent Tank unavailable');
+  await expect(status).not.toContainText('ready');
+  await capture(page, 'agent-tank-bundled-nothing-to-monitor');
 });

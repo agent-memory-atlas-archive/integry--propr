@@ -40,3 +40,50 @@ test('an accepted mode change sticks and clears any previous error', async () =>
   expect(reportError).not.toHaveBeenCalledWith(expect.any(String));
   expect(result.current.settings.mode).toBe('bundled');
 });
+
+test('a slow bundled write cannot overtake a later "disabled" selection', async () => {
+  // Turning tracking off is the write that must win: a bundled POST landing
+  // after it would let usage requests start containers the operator declined.
+  // The bundled write is held open the way the real compatibility GET holds it.
+  const persisted: string[] = [];
+  let releaseBundled = () => {};
+  const bundledGate = new Promise<void>(resolve => { releaseBundled = resolve; });
+  apiMocks.updateAgentTankSettings.mockImplementation(async ({ mode }: { mode: string }) => {
+    if (mode === 'bundled') await bundledGate;
+    persisted.push(mode);
+  });
+  const { result } = renderHook(() => useAgentTankSettings(vi.fn()));
+  act(() => result.current.adopt({ mode: 'disabled', enabled: false, url: '' }));
+
+  act(() => result.current.change({ mode: 'bundled', enabled: true, url: '' }));
+  act(() => result.current.change({ mode: 'disabled', enabled: false, url: '' }));
+
+  // The queued "disabled" write must wait behind the bundled one rather than
+  // racing ahead of it and being overwritten when it finally completes.
+  expect(persisted).toEqual([]);
+  await act(async () => { releaseBundled(); });
+
+  await waitFor(() => expect(persisted).toEqual(['bundled', 'disabled']));
+  expect(result.current.settings.mode).toBe('disabled');
+});
+
+test('an older failed write does not replace a newer successful selection', async () => {
+  let releaseBundled = () => {};
+  const bundledGate = new Promise<void>(resolve => { releaseBundled = resolve; });
+  apiMocks.updateAgentTankSettings.mockImplementation(async ({ mode }: { mode: string }) => {
+    if (mode === 'bundled') { await bundledGate; throw new Error('Backend too old'); }
+  });
+  const reportError = vi.fn();
+  const { result } = renderHook(() => useAgentTankSettings(reportError));
+  act(() => result.current.adopt({ mode: 'external', enabled: true, url: 'http://legacy:3456' }));
+
+  act(() => result.current.change({ mode: 'bundled', enabled: true, url: 'http://legacy:3456' }));
+  act(() => result.current.change({ mode: 'disabled', enabled: false, url: 'http://legacy:3456' }));
+  await act(async () => { releaseBundled(); });
+
+  await waitFor(() => expect(apiMocks.updateAgentTankSettings).toHaveBeenCalledTimes(2));
+  // The rollback belongs to the bundled selection, which the operator replaced;
+  // restoring "external" would resurrect a mode nobody selected.
+  expect(result.current.settings.mode).toBe('disabled');
+  expect(reportError).not.toHaveBeenCalledWith('Backend too old');
+});

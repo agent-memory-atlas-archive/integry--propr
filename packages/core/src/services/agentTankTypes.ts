@@ -46,6 +46,20 @@ export interface AgentStatusResponse {
     isRefreshing?: boolean;
 }
 
+/**
+ * Whether a status map is evidence that usage monitoring actually works.
+ *
+ * A run can succeed and still describe nothing: bundled mode returns an empty
+ * map when no enabled agent is a provider Agent Tank can inspect, and a daemon
+ * with nothing configured answers the same way. That is a successful run, not
+ * operational readiness - reporting it as "ready" would promise a capacity
+ * gauge that cannot produce a single number - so readiness asks for at least
+ * one provider status.
+ */
+export function hasAgentTankStatuses(agents: Record<string, AgentStatusResponse> | undefined): boolean {
+    return !!agents && Object.keys(agents).length > 0;
+}
+
 /** Normalize a single Agent Tank status object to ProPR-facing agent names. */
 export function normalizeAgentTankStatus(status: AgentStatusResponse): AgentStatusResponse {
     return { ...status, name: toProprAgent(status.name) };
