@@ -50,8 +50,23 @@ const CONTAINER_CONFIG_FILE = '/tmp/propr-agent-tank/config.json';
  */
 const BUNDLED_SUPPORTED_TANK_AGENTS = new Set(['claude', 'codex', 'agy']);
 
-interface CachedSnapshot {
+/**
+ * One Agent Tank run: the per-provider snapshots plus which configured account
+ * each one actually describes.
+ */
+interface BundledRunResult {
     agents: Record<string, AgentStatusResponse>;
+    /**
+     * Provider key -> the alias of the enabled agent whose credentials were
+     * mounted for that provider. Agent Tank knows only providers, so this is the
+     * ONLY record of which configured account the numbers belong to: the
+     * generated id is the provider key, so two accounts of the same provider are
+     * indistinguishable from the snapshot itself.
+     */
+    aliases: Record<string, string>;
+}
+
+interface CachedSnapshot extends BundledRunResult {
     capturedAt: number;
 }
 
@@ -59,6 +74,8 @@ interface CachedSnapshot {
 export interface BundledAgentTankEntry {
     /** Agent Tank provider key (`claude`, `codex`, `agy`). */
     provider: string;
+    /** ProPR alias of the agent whose credentials are mounted for that provider. */
+    alias: string;
     /** Container path holding that provider's credentials. */
     configPath: string;
 }
@@ -66,7 +83,7 @@ export interface BundledAgentTankEntry {
 let cached: CachedSnapshot | undefined;
 // Coalesces concurrent refresh requests onto a single container run. Without
 // this, the sidebar poll and a task's post-call probe could each spawn one.
-let inFlight: Promise<Record<string, AgentStatusResponse> | undefined> | undefined;
+let inFlight: Promise<BundledRunResult | undefined> | undefined;
 
 function timeoutMs(): number {
     const parsed = Number.parseInt(process.env.AGENT_TANK_BUNDLED_TIMEOUT_MS || '', 10);
@@ -106,6 +123,10 @@ function hostCredentialPath(agent: AgentConfig): string | undefined {
  * optional `id`, and a `configPath` that is handed to the CLI as its config
  * home (`CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `GEMINI_CLI_HOME`). If upstream
  * renames keys, change only this function.
+ *
+ * There is no place in this schema for the ProPR alias, which is why the alias
+ * of the account each entry was built from is tracked separately (see
+ * `BundledRunResult.aliases`) instead of being recovered from the output.
  */
 export function buildBundledAgentTankConfig(entries: BundledAgentTankEntry[]): string {
     return JSON.stringify({
@@ -192,7 +213,9 @@ async function collectBundledAgents(): Promise<{ mounts: string[]; entries: Bund
         if (!BUNDLED_SUPPORTED_TANK_AGENTS.has(provider)) continue;
         // Agent Tank tracks a provider, not a ProPR alias. If two aliases share a
         // provider we can only report one; the first enabled one wins, matching
-        // how the sidebar already groups by provider.
+        // how the sidebar already groups by provider. Which alias won is recorded
+        // on the entry so an alias-specific reader cannot mistake this account's
+        // usage for another account of the same provider.
         if (seen.has(provider)) continue;
         const hostPath = hostCredentialPath(agent);
         const containerConfigPath = CONTAINER_CONFIG_PATHS[agent.type];
@@ -201,7 +224,7 @@ async function collectBundledAgents(): Promise<{ mounts: string[]; entries: Bund
         // Read-only: usage inspection must never be able to mutate or corrupt the
         // credentials the real agent runs depend on.
         mounts.push('-v', `${hostPath}:${containerConfigPath}:ro`);
-        entries.push({ provider, configPath: containerConfigPath });
+        entries.push({ provider, alias: agent.alias, configPath: containerConfigPath });
     }
 
     return { mounts, entries };
@@ -224,14 +247,15 @@ export async function canRunBundledAgentTank(): Promise<boolean> {
     }
 }
 
-async function runBundledAgentTank(): Promise<Record<string, AgentStatusResponse> | undefined> {
+async function runBundledAgentTank(): Promise<BundledRunResult | undefined> {
     let configDir: string | undefined;
     try {
         const { mounts, entries } = await collectBundledAgents();
         if (entries.length === 0) {
             logger.debug('Bundled Agent Tank skipped: no enabled agent has a readable credential directory');
-            return {};
+            return { agents: {}, aliases: {} };
         }
+        const aliases = Object.fromEntries(entries.map(entry => [entry.provider, entry.alias]));
 
         const image = await resolveAgentImage();
 
@@ -269,7 +293,7 @@ async function runBundledAgentTank(): Promise<Record<string, AgentStatusResponse
                 'Bundled Agent Tank run failed');
             return undefined;
         }
-        return parseBundledAgentTankOutput(result.stdout || '');
+        return { agents: parseBundledAgentTankOutput(result.stdout || ''), aliases };
     } catch (error) {
         logger.warn({ error: (error as Error).message }, 'Bundled Agent Tank run threw');
         return undefined;
@@ -297,6 +321,33 @@ export function getBundledStatusesForDelta(): Record<string, AgentStatusResponse
 }
 
 /**
+ * Cache-only read for an alias-specific question: "how much capacity is left on
+ * the account configured as `alias`?".
+ *
+ * Only one alias per provider is inspected per run (see `collectBundledAgents`),
+ * so a snapshot describes exactly one configured account. Answering for a
+ * different alias of the same provider would hand out another account's usage,
+ * so the cached provenance - not the snapshot's `name`, which is pinned to the
+ * provider key - decides whether we can answer at all.
+ */
+export function getBundledStatusForAlias(
+    alias: string,
+    options: { maxAgeMs?: number } = {}
+): AgentStatusResponse | undefined {
+    if (!cached) return undefined;
+    const maxAge = options.maxAgeMs ?? DELTA_FRESHNESS_MS;
+    if (Date.now() - cached.capturedAt > maxAge) return undefined;
+    const provider = Object.entries(cached.aliases)
+        .find(([, snapshotAlias]) => snapshotAlias === alias)?.[0];
+    if (!provider) {
+        logger.debug({ alias, inspectedAliases: Object.values(cached.aliases) },
+            'No bundled Agent Tank snapshot belongs to this alias');
+        return undefined;
+    }
+    return cached.agents[provider];
+}
+
+/**
  * Return a fresh snapshot, reusing the cache when it is young enough and
  * coalescing concurrent callers onto one container run.
  */
@@ -307,17 +358,17 @@ export async function refreshBundledStatuses(
         const fresh = getCachedBundledStatuses();
         if (fresh) return fresh;
     }
-    if (inFlight) return inFlight;
-
-    inFlight = runBundledAgentTank()
-        .then(agents => {
-            // Only replace the cache on success: a transient container failure
-            // should not blank out a perfectly good recent snapshot.
-            if (agents) cached = { agents, capturedAt: Date.now() };
-            return agents;
-        })
-        .finally(() => { inFlight = undefined; });
-    return inFlight;
+    if (!inFlight) {
+        inFlight = runBundledAgentTank()
+            .then(result => {
+                // Only replace the cache on success: a transient container failure
+                // should not blank out a perfectly good recent snapshot.
+                if (result) cached = { ...result, capturedAt: Date.now() };
+                return result;
+            })
+            .finally(() => { inFlight = undefined; });
+    }
+    return (await inFlight)?.agents;
 }
 
 /** Fire-and-forget refresh used by hot paths that must not await a container. */

@@ -365,6 +365,7 @@ export {
     toProprAgent,
     normalizeAgentTankStatus,
     normalizeAgentTankAgents,
+    getStatusForAlias as getAgentTankStatusForAlias,
     getAllStatuses as getAgentTankStatuses
 } from './services/agentTankService.js';
 export type { AgentStatusResponse } from './services/agentTankService.js';
@@ -375,6 +376,7 @@ export {
     refreshBundledStatuses,
     getCachedBundledStatuses,
     getBundledStatusesForDelta,
+    getBundledStatusForAlias,
     clearBundledAgentTankCache
 } from './services/agentTankBundledRunner.js';
 export type { BuildOpenCodePromptOptions, OpenCodeDockerArgsParams, OpenCodeEvent, ParsedOpenCodeOutput } from './agents/impl/openCodeUtils.js';

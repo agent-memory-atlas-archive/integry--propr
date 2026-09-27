@@ -1,6 +1,7 @@
 import logger from '../utils/logger.js';
 import { loadAgentTankSettings } from '../config/configManager.js';
 import {
+    getBundledStatusForAlias,
     getBundledStatusesForDelta,
     refreshBundledStatuses,
     scheduleBundledRefresh,
@@ -129,6 +130,37 @@ export async function getStatus(agent: string, timeoutMs: number = DEFAULT_TIMEO
     } finally {
         clearTimeout(timer);
     }
+}
+
+/**
+ * Fetch usage for one configured agent *alias*, for decisions that are specific
+ * to that account rather than to the provider as a whole (synthetic-agent
+ * capacity routing).
+ *
+ * Bundled mode inspects one account per provider, so its snapshot can only
+ * answer for the alias whose credentials produced it; every other alias of the
+ * same provider is reported as unavailable instead of being handed a stranger's
+ * numbers. External mode keeps the daemon's own per-name answer.
+ *
+ * @example
+ *   const status = await getStatusForAlias('claude-secondary');
+ */
+export async function getStatusForAlias(
+    alias: string,
+    timeoutMs: number = DEFAULT_TIMEOUT_MS,
+): Promise<AgentStatusResponse> {
+    const settings = await loadAgentTankSettings();
+    if (settings.mode === 'disabled') {
+        throw new Error('Agent Tank is disabled');
+    }
+    if (settings.mode === 'bundled') {
+        const status = getBundledStatusForAlias(alias);
+        if (!status) {
+            throw new Error(`No fresh bundled Agent Tank snapshot for alias ${alias}`);
+        }
+        return normalizeAgentTankStatus(status);
+    }
+    return getStatus(alias, timeoutMs);
 }
 
 /**

@@ -30,9 +30,16 @@ await mock.module('../packages/core/src/config/configManager.js', {
 
 let scheduledRefreshes = 0;
 let bundledSnapshot: Record<string, AgentStatusResponse> | undefined;
+/**
+ * Snapshots keyed by the alias whose credentials produced them - the runner only
+ * inspects one account per provider, so this is what an alias-specific read is
+ * allowed to see.
+ */
+let bundledSnapshotsByAlias: Record<string, AgentStatusResponse> = {};
 await mock.module('../packages/core/src/services/agentTankBundledRunner.js', {
     namedExports: {
         getBundledStatusesForDelta: () => bundledSnapshot,
+        getBundledStatusForAlias: (alias: string) => bundledSnapshotsByAlias[alias],
         refreshBundledStatuses: async () => bundledSnapshot,
         scheduleBundledRefresh: () => { scheduledRefreshes += 1; },
     },
@@ -41,12 +48,16 @@ await mock.module('../packages/core/src/services/agentTankBundledRunner.js', {
 const {
     getAllStatuses,
     getStatus,
+    getStatusForAlias,
     normalizeAgentTankAgents,
     normalizeAgentTankStatus,
     refreshAgent,
     toAgentTankAgent,
     toProprAgent,
 } = await import('../packages/core/src/services/agentTankService.js');
+
+const { AliasSpecificAgentTankSnapshotProvider } =
+    await import('../packages/core/src/services/syntheticUsageSnapshotProvider.js');
 
 const { closeConnection } = await import('../packages/core/src/db/connection.js');
 
@@ -57,6 +68,7 @@ beforeEach(() => {
     mode = 'disabled';
     scheduledRefreshes = 0;
     bundledSnapshot = undefined;
+    bundledSnapshotsByAlias = {};
     fetchCalls = [];
     globalThis.fetch = (async (input: string | URL | Request) => {
         fetchCalls.push(input.toString());
@@ -142,4 +154,66 @@ test('external mode still talks HTTP to the configured daemon', async () => {
         'http://0.0.0.0:3456/status',
     ]);
     assert.equal(scheduledRefreshes, 0);
+});
+
+test('bundled mode answers an alias-specific read only for the inspected account', async () => {
+    mode = 'bundled';
+    // Two Claude accounts with `claude-secondary` configured first: provider
+    // dedup means only that account was inspected, even though Agent Tank labels
+    // the snapshot with the provider key `claude`.
+    const status: AgentStatusResponse = {
+        name: 'claude',
+        usage: { session: { percent: 5 } },
+        lastUpdated: new Date().toISOString(),
+    };
+    bundledSnapshot = { claude: status };
+    bundledSnapshotsByAlias = { 'claude-secondary': status };
+
+    // Alias `claude` is a different account, so it gets nothing rather than the
+    // secondary account's capacity.
+    await assert.rejects(() => getStatusForAlias('claude'), /No fresh bundled Agent Tank snapshot for alias claude/);
+    assert.equal((await getStatusForAlias('claude-secondary')).name, 'claude');
+    assert.deepEqual(fetchCalls, []);
+});
+
+test('alias-specific capacity is withheld when the snapshot belongs to another account of the same provider', async () => {
+    mode = 'bundled';
+    const status: AgentStatusResponse = {
+        name: 'claude',
+        usage: { session: { percent: 5 }, weekly: { percent: 11 } },
+        lastUpdated: new Date().toISOString(),
+    };
+    bundledSnapshot = { claude: status };
+    bundledSnapshotsByAlias = { 'claude-secondary': status };
+
+    const provider = new AliasSpecificAgentTankSnapshotProvider();
+
+    // Without provenance the name check alone would pass here, because the
+    // bundled id is pinned to the provider key.
+    assert.equal(await provider.getSnapshot('claude'), null);
+});
+
+test('alias-specific capacity is reported for the account that was actually inspected', async () => {
+    mode = 'bundled';
+    bundledSnapshotsByAlias = {
+        claude: {
+            name: 'claude',
+            usage: { session: { percent: 5 }, weekly: { percent: 11 } },
+            lastUpdated: new Date().toISOString(),
+        },
+    };
+
+    const snapshot = await new AliasSpecificAgentTankSnapshotProvider().getSnapshot('claude');
+
+    assert.equal(snapshot?.directAgentAlias, 'claude');
+    assert.equal(snapshot?.sessionPercent, 5);
+    assert.equal(snapshot?.weeklyPercent, 11);
+});
+
+test('an alias-specific read in external mode still asks the daemon by name', async () => {
+    mode = 'external';
+
+    await getStatusForAlias('antigravity');
+
+    assert.deepEqual(fetchCalls, ['http://0.0.0.0:3456/status/agy']);
 });

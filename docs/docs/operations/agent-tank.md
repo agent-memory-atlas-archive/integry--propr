@@ -63,6 +63,8 @@ propr tank bundled
 
 Bundled mode reports the providers it can see. An agent with no credentials mounted, or a provider Agent Tank does not support, is simply left out.
 
+If two enabled agents share a provider — two Claude accounts, for example — one run can only inspect one of them, and the first enabled one wins. The snapshot then describes that account only: capacity-aware routing for the other alias reports "no usage data" rather than borrowing the inspected account's numbers. Use external mode if you need every account measured.
+
 ### External Mode
 
 Use this when you run Agent Tank yourself. Install and start it on the host that runs your agent CLIs:

@@ -63,8 +63,11 @@ await mock.module('../packages/core/src/claude/docker/dockerExecutor.js', {
 const credentialRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'propr-tank-test-'));
 const claudeHome = path.join(credentialRoot, 'claude');
 const codexHome = path.join(credentialRoot, 'codex');
+// A second Claude account, for the case where two aliases share one provider.
+const secondaryClaudeHome = path.join(credentialRoot, 'claude-secondary');
 fs.mkdirSync(claudeHome);
 fs.mkdirSync(codexHome);
+fs.mkdirSync(secondaryClaudeHome);
 
 let configuredAgents: AgentConfig[] = [];
 
@@ -87,6 +90,7 @@ await mock.module('../packages/core/src/agents/AgentRegistry.js', {
 const {
     buildBundledAgentTankConfig,
     clearBundledAgentTankCache,
+    getBundledStatusForAlias,
     parseBundledAgentTankOutput,
     refreshBundledStatuses,
 } = await import('../packages/core/src/services/agentTankBundledRunner.js');
@@ -196,8 +200,8 @@ test('unsupported providers are left out rather than failing the whole run', asy
 
 test('the generated config uses the upstream provider/configPath schema', () => {
     const config = JSON.parse(buildBundledAgentTankConfig([
-        { provider: 'claude', configPath: '/home/node/.claude' },
-        { provider: 'agy', configPath: '/home/node/.gemini' },
+        { provider: 'claude', alias: 'claude', configPath: '/home/node/.claude' },
+        { provider: 'agy', alias: 'antigravity', configPath: '/home/node/.gemini' },
     ]));
 
     assert.deepEqual(config.agents, [
@@ -246,4 +250,56 @@ test('the generated config is cleaned up after the run', async () => {
     // A world-readable file must not outlive the run it was written for.
     assert.equal(fs.existsSync(hostPath), false);
     assert.equal(fs.existsSync(path.dirname(hostPath)), false);
+});
+
+test('an alias-specific read only answers for the account whose credentials were inspected', async () => {
+    // Two Claude accounts, the secondary one first. Provider dedup keeps only
+    // `claude-secondary`'s credentials, but Agent Tank labels the result with the
+    // provider key `claude` - so without provenance the snapshot would be handed
+    // out as the capacity of alias `claude`, which is a different account.
+    configuredAgents = [
+        agent({ alias: 'claude-secondary', type: 'claude', configPath: secondaryClaudeHome }),
+        agent({ alias: 'claude', type: 'claude', configPath: claudeHome }),
+    ];
+    clearBundledAgentTankCache();
+
+    await refreshBundledStatuses();
+
+    // Only the first enabled Claude account was mounted, so it is the only
+    // account the snapshot can describe.
+    assert.ok(dockerRuns[0].includes(`${secondaryClaudeHome}:/home/node/.claude:ro`));
+    assert.equal(dockerRuns[0].includes(`${claudeHome}:/home/node/.claude:ro`), false);
+
+    assert.equal(getBundledStatusForAlias('claude'), undefined);
+    assert.equal(getBundledStatusForAlias('claude-secondary')?.name, 'claude');
+});
+
+test('an alias-specific read follows the order the aliases are configured in', async () => {
+    // Same two accounts, opposite order: now the snapshot really is alias
+    // `claude`'s, and the secondary alias is the one that must get nothing.
+    configuredAgents = [
+        agent({ alias: 'claude', type: 'claude', configPath: claudeHome }),
+        agent({ alias: 'claude-secondary', type: 'claude', configPath: secondaryClaudeHome }),
+    ];
+    clearBundledAgentTankCache();
+
+    await refreshBundledStatuses();
+
+    assert.equal(getBundledStatusForAlias('claude')?.name, 'claude');
+    assert.equal(getBundledStatusForAlias('claude-secondary'), undefined);
+});
+
+test('an alias-specific read reports nothing once the snapshot is too stale to trust', async () => {
+    await refreshBundledStatuses();
+    assert.ok(getBundledStatusForAlias('claude'));
+
+    // Past the delta freshness window the snapshot is no longer evidence about
+    // the account's current capacity.
+    assert.equal(getBundledStatusForAlias('claude', { maxAgeMs: -1 }), undefined);
+});
+
+test('an alias-specific read reports nothing when no run has succeeded', () => {
+    clearBundledAgentTankCache();
+
+    assert.equal(getBundledStatusForAlias('claude'), undefined);
 });
