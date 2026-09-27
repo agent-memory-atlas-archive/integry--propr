@@ -75,13 +75,27 @@ describe('closed pull request CI cancellation', () => {
         assert.equal(isObsoleteClosedPullRequestRun(run({ head_repository: { full_name: 'fork/propr' } }), request, policy), false);
     });
 
-    function octokitWith(runs: ReturnType<typeof run>[], openPullRequests: Array<{ number: number; head: { sha: string } }> = []) {
+    type OpenPullRequest = { number: number; head: { sha: string; ref?: string; repo?: { owner: { login: string } } } };
+
+    function octokitWith(runs: ReturnType<typeof run>[], openPullRequests: OpenPullRequest[] = []) {
         const cancelled: number[] = [];
+        const pullRequestPages: number[] = [];
         return {
             cancelled,
+            pullRequestPages,
             async request(route: string, params: Record<string, unknown>) {
                 if (route === 'GET /repos/{owner}/{repo}/actions/runs') return { data: { workflow_runs: runs, total_count: runs.length } };
-                if (route === 'GET /repos/{owner}/{repo}/pulls') return { data: openPullRequests };
+                if (route === 'GET /repos/{owner}/{repo}/pulls') {
+                    assert.equal(params.owner, 'integry');
+                    assert.equal(params.repo, 'propr');
+                    assert.equal(params.state, 'open');
+                    const page = Number(params.page ?? 1);
+                    const perPage = Number(params.per_page ?? 30);
+                    pullRequestPages.push(page);
+                    const filtered = openPullRequests.filter(pr => !params.head
+                        || params.head === `${pr.head.repo?.owner.login ?? 'integry'}:${pr.head.ref ?? request.headRef}`);
+                    return { data: filtered.slice((page - 1) * perPage, page * perPage) };
+                }
                 if (route === 'POST /repos/{owner}/{repo}/actions/runs/{run_id}/cancel') { cancelled.push(params.run_id as number); return { data: {} }; }
                 throw new Error(`unexpected ${route}`);
             },
@@ -107,6 +121,62 @@ describe('closed pull request CI cancellation', () => {
         assert.equal(redis.hash.size, 0);
     });
 
+    test('keeps same-commit validation for another branch or head owner, including on later pages', async () => {
+        for (const owner of ['integry', 'contributor']) {
+            for (const precedingCount of [0, 100]) {
+                const redis = fakeRedis({ [field]: JSON.stringify(request) });
+                const openPullRequests: OpenPullRequest[] = Array.from({ length: precedingCount }, (_, i) => ({
+                    number: 2700 + i, head: { sha: 'a'.repeat(40) },
+                }));
+                openPullRequests.push({ number: 2600, head: { sha: HEAD, ref: 'feature-b', repo: { owner: { login: owner } } } });
+                const octokit = octokitWith([run()], openPullRequests);
+                const summary = await cancelClosedPullRequestValidation({ redis, octokit, isEnabled: async () => true, workflowPolicy: policy, log, now });
+                assert.deepEqual(octokit.cancelled, [], `${owner}, ${precedingCount} preceding PRs`);
+                assert.deepEqual(octokit.pullRequestPages, precedingCount === 0 ? [1] : [1, 2]);
+                assert.deepEqual(summary, { scanned: 1, cancelledRuns: 0, errors: 0 });
+                assert.equal(redis.hash.size, 0);
+            }
+        }
+    });
+
+    test('cancels only after exhausting open PR pages without a matching head', async () => {
+        const redis = fakeRedis({ [field]: JSON.stringify(request) });
+        const octokit = octokitWith([run()], Array.from({ length: 100 }, (_, i) => ({
+            number: 2700 + i, head: { sha: 'a'.repeat(40) },
+        })));
+        const summary = await cancelClosedPullRequestValidation({ redis, octokit, isEnabled: async () => true, workflowPolicy: policy, log, now });
+        assert.deepEqual(octokit.pullRequestPages, [1, 2]);
+        assert.deepEqual(octokit.cancelled, [1]);
+        assert.deepEqual(summary, { scanned: 1, cancelledRuns: 1, errors: 0 });
+        assert.equal(redis.hash.size, 0);
+    });
+
+    test('retains the request when a later open PR page fails and retries protection', async () => {
+        const raw = JSON.stringify(request);
+        const redis = fakeRedis({ [field]: raw });
+        const openPullRequests: OpenPullRequest[] = Array.from({ length: 100 }, (_, i) => ({
+            number: 2700 + i, head: { sha: 'a'.repeat(40) },
+        }));
+        openPullRequests.push({ number: 2600, head: { sha: HEAD, ref: 'feature-b' } });
+        const octokit = octokitWith([run()], openPullRequests);
+        const send = octokit.request.bind(octokit);
+        let unavailable = true;
+        octokit.request = async (route, params) => {
+            if (route === 'GET /repos/{owner}/{repo}/pulls' && params.page === 2 && unavailable) {
+                throw Object.assign(new Error('Service Unavailable'), { status: 503 });
+            }
+            return send(route, params);
+        };
+        const deps = { redis, octokit, isEnabled: async () => true, workflowPolicy: policy, log, now };
+        assert.deepEqual(await cancelClosedPullRequestValidation(deps), { scanned: 1, cancelledRuns: 0, errors: 1 });
+        assert.deepEqual(octokit.cancelled, []);
+        assert.equal(redis.hash.get(field), raw);
+        unavailable = false;
+        assert.deepEqual(await cancelClosedPullRequestValidation(deps), { scanned: 1, cancelledRuns: 0, errors: 0 });
+        assert.deepEqual(octokit.cancelled, []);
+        assert.equal(redis.hash.size, 0);
+    });
+
     test('keeps validation when the closed pull request reopens on the same head before reconciliation', async () => {
         const redis = fakeRedis();
         await recordClosedPullRequestForCiCancellation({
@@ -125,13 +195,15 @@ describe('closed pull request CI cancellation', () => {
     test('refreshes open pull request protection after each awaited cancellation', async () => {
         for (const number of [request.pullRequestNumber, 2600]) {
             const redis = fakeRedis({ [field]: JSON.stringify(request) });
-            const openPullRequests: Array<{ number: number; head: { sha: string } }> = [];
+            const openPullRequests: OpenPullRequest[] = [];
             const octokit = octokitWith([run({ id: 1 }), run({ id: 2 })], openPullRequests);
             const send = octokit.request.bind(octokit);
             octokit.request = async (route, params) => {
                 const response = await send(route, params);
                 if (route === 'POST /repos/{owner}/{repo}/actions/runs/{run_id}/cancel') {
-                    openPullRequests.push({ number, head: { sha: HEAD } });
+                    openPullRequests.push({ number, head: { sha: HEAD,
+                        ref: number === request.pullRequestNumber ? request.headRef : 'feature-b',
+                        repo: { owner: { login: number === request.pullRequestNumber ? 'integry' : 'contributor' } } } });
                 }
                 return response;
             };

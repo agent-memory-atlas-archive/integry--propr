@@ -63,12 +63,17 @@ export function isObsoleteClosedPullRequestRun(
 
 /** Any open pull request of the same head commit, including a reopened one, still needs this validation. */
 async function headStillUnderReview(octokit: CiSuspensionOctokit, target: SuspensionTarget, request: ClosedPullRequestCiRequest): Promise<boolean> {
-    const headOwner = (request.headRepository ?? `${target.owner}/${target.repo}`).split('/')[0];
-    const { data } = await octokit.request('GET /repos/{owner}/{repo}/pulls', {
-        owner: target.owner, repo: target.repo, state: 'open', head: `${headOwner}:${request.headRef}`, per_page: 100,
-    });
-    return (data as Array<{ number: number; head?: { sha?: string } }>)
-        .some(pullRequest => sameSha(pullRequest.head?.sha, request.headSha));
+    const perPage = 100;
+    for (let page = 1; ; page += 1) {
+        // The same commit may be under review on another branch or fork.
+        // Only a complete scan can prove that no open PR still needs it.
+        const { data } = await octokit.request('GET /repos/{owner}/{repo}/pulls', {
+            owner: target.owner, repo: target.repo, state: 'open', per_page: perPage, page,
+        });
+        const pullRequests = data as Array<{ head?: { sha?: string } }>;
+        if (pullRequests.some(pullRequest => sameSha(pullRequest.head?.sha, request.headSha))) return true;
+        if (pullRequests.length < perPage) return false;
+    }
 }
 
 async function cancelForRequest(request: ClosedPullRequestCiRequest, deps: ClosedPullRequestCiDeps): Promise<number> {
