@@ -799,30 +799,36 @@ describe('workflow wiring', () => {
         assert.ok(action.includes('scripts/ci-change-classification.mjs'));
     });
 
-    test('desktop checks run on demand: dispatch, the label request and the nightly run', () => {
-        // The validation jobs run for any event but a release tag push.
+    test('desktop checks run on demand: the label request and the nightly run call them', () => {
+        // The unsigned validation runs for pull requests and the nightly run, never for a push.
         for (const job of ['validation-version', 'renderer-axe-boundary', 'package', 'finalize']) {
             const block = jobBlock(desktopRelease, job);
-            assert.ok(block.includes("github.event_name != 'push'"), `${job} runs for pull requests, dispatch and the nightly run`);
-            assert.ok(!block.includes("github.event_name == 'pull_request'"), `${job} is not limited to pull requests`);
+            assert.ok(block.includes("(github.event_name == 'pull_request' || github.event_name == 'schedule')"), `${job} runs for pull requests and the nightly run`);
         }
+        const releaseTrigger = desktopRelease.slice(desktopRelease.indexOf('on:'), desktopRelease.indexOf('permissions:'));
+        assert.match(releaseTrigger, /workflow_call:/);
+        assert.doesNotMatch(desktopRelease, /workflow_dispatch:/, 'a production release must never be dispatchable');
         for (const workflow of [desktopRelease, desktopConnect]) {
             const trigger = workflow.slice(workflow.indexOf('on:'), workflow.indexOf('permissions:'));
-            assert.match(trigger, /workflow_dispatch:/);
+            assert.match(trigger, /workflow_call:/);
             // A per-PR concurrency group would let any label change cancel a real run.
             assert.doesNotMatch(trigger, /labeled/);
         }
+
         const request = readWorkflow('desktop-ci-request.yml');
         assert.match(request, /types: \[labeled\]/);
-        assert.ok(request.includes(`github.event.label.name == '${DESKTOP_CI_LABEL}'`));
-        assert.ok(request.includes('github.event.pull_request.head.repo.full_name == github.repository'),
-            'forks cannot dispatch, so only same-repository pull requests are handled');
-        assert.match(request, /desktop-release-guard\.yml desktop-connect-discovery-guard\.yml/);
+        for (const [job, workflow] of [['desktop-package', 'desktop-release-guard.yml'], ['desktop-connect', 'desktop-connect-discovery-guard.yml']]) {
+            const block = jobBlock(request, job);
+            assert.ok(block.includes(`uses: ./.github/workflows/${workflow}`));
+            assert.ok(block.includes(`github.event.label.name == '${DESKTOP_CI_LABEL}'`));
+            assert.ok(block.includes('github.event.pull_request.head.repo.full_name == github.repository'));
+            assert.doesNotMatch(block, /secrets:/, 'no secrets reach a pull request call');
+        }
 
         const nightly = readWorkflow('test-nightly.yml');
         assert.match(nightly, /schedule:/);
-        assert.match(jobBlock(nightly, 'desktop-checks'), /gh run watch "\$id" [^\n]*--exit-status/,
-            'the nightly run fails when a desktop workflow fails');
+        assert.ok(jobBlock(nightly, 'desktop-package').includes('uses: ./.github/workflows/desktop-release-guard.yml'));
+        assert.ok(jobBlock(nightly, 'desktop-connect').includes('uses: ./.github/workflows/desktop-connect-discovery-guard.yml'));
         assert.ok(jobBlock(nightly, 'native-electron').includes("PROPR_REQUIRE_NATIVE_ELECTRON: '1'"));
     });
 

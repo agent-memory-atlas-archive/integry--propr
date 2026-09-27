@@ -10,9 +10,10 @@ on:
     tags:
       - 'desktop-v*'
   # Pull requests run the unsigned validation only when they touch the desktop
-  # app (or carry the `desktop-ci` label). The Tier 3 nightly run dispatches it
-  # for the default branch, and it can be dispatched for any branch on demand.
-  workflow_dispatch:
+  # app. The `desktop-ci` label request and the Tier 3 nightly run call it as a
+  # reusable workflow; it is never dispatchable, so production releases can
+  # only come from a protected desktop tag. No secrets are passed to calls.
+  workflow_call:
 
 permissions:
   contents: read
@@ -53,7 +54,7 @@ jobs:
     # Only an explicit `false` skips. A failed, cancelled or missing decision
     # leaves the output empty, which runs the job.
     if: >-
-      ${{ !cancelled() && github.event_name != 'push'
+      ${{ !cancelled() && github.event_name == 'pull_request'
           && vars.PROPR_WINDOWS_DESKTOP_CI_ENABLED == 'true'
           && needs.classify.outputs.desktop != 'false' }}
     runs-on: windows-latest
@@ -96,7 +97,7 @@ jobs:
     name: Validate unsigned desktop package version
     needs: classify
     if: >-
-      ${{ !cancelled() && github.event_name != 'push'
+      ${{ !cancelled() && (github.event_name == 'pull_request' || github.event_name == 'schedule')
           && needs.classify.outputs.desktop != 'false' }}
     runs-on: ubuntu-latest
     outputs:
@@ -118,7 +119,7 @@ jobs:
     name: Prove stock Chromium existing-target axe boundary
     needs: classify
     if: >-
-      ${{ !cancelled() && github.event_name != 'push'
+      ${{ !cancelled() && (github.event_name == 'pull_request' || github.event_name == 'schedule')
           && needs.classify.outputs.desktop != 'false' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
@@ -153,7 +154,7 @@ jobs:
     # `!cancelled()` replaces the implicit success gate that `needs` alone
     # gives, so the prerequisites are required explicitly here.
     if: >-
-      ${{ !cancelled() && github.event_name != 'push'
+      ${{ !cancelled() && (github.event_name == 'pull_request' || github.event_name == 'schedule')
           && needs.classify.outputs.desktop != 'false'
           && needs.validation-version.result == 'success'
           && needs.renderer-axe-boundary.result == 'success' }}
@@ -592,7 +593,7 @@ jobs:
     # inapplicable and every desktop job was skipped for exactly that reason.
     # A failed, cancelled or unexpectedly skipped job still fails it.
     name: Finalize unsigned validation checksums
-    if: ${{ !cancelled() && github.event_name != 'push' }}
+    if: ${{ !cancelled() && (github.event_name == 'pull_request' || github.event_name == 'schedule') }}
     needs: [classify, validation-version, package]
     runs-on: ubuntu-latest
     timeout-minutes: 15

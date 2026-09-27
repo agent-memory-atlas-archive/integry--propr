@@ -574,7 +574,7 @@ describe('gated job inputs are covered by their surface', () => {
         const nightlyNative = jobBlock(nightly, 'native-electron');
         assert.equal(extractRunBlock(nightlyNative, 'Run native Electron units without skipping'), run,
             'the nightly run executes the same native Electron units');
-        assert.match(jobBlock(nightly, 'desktop-checks'), /desktop-release-guard\.yml desktop-connect-discovery-guard\.yml/);
+        assert.ok(jobBlock(nightly, 'desktop-package').includes('uses: ./.github/workflows/desktop-release-guard.yml'));
     });
 
     test('the docs site reads nothing from outside docs/', () => {

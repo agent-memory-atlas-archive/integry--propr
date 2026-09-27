@@ -265,8 +265,6 @@ jobs:
         env:
           NODE_ENV: test
           PROPR_REQUIRE_NATIVE_ELECTRON: '1'
-          # Clears the workflow-level count: these units run unsharded.
-          PROPR_TEST_SHARD_COUNT: ''
         run: |
           set -euo pipefail
           mapfile -t files < <(grep -l 'prepareNativeElectronTest(' apps/desktop/scripts/*.test.mjs | grep -v '/electron-native-test-setup\.test\.mjs$')
@@ -277,51 +275,17 @@ jobs:
           printf 'Native Electron unit: %s\n' "${files[@]}"
           node scripts/run-test-suite.mjs "${files[@]}"
 
-  desktop-checks:
-    name: Nightly desktop package and Connect checks
-    runs-on: ubuntu-latest
-    # The unsigned packaging matrix and the Connect proofs run on hosted macOS,
-    # Linux (and optionally Windows) runners and can take a while.
-    timeout-minutes: 240
+  # Called, never dispatched: the release workflow is not dispatchable. Its
+  # release jobs declare `contents: write` and only run for desktop tags; the
+  # validation jobs stay read-only through its own `contents: read`.
+  desktop-package:
+    name: Nightly desktop package
     permissions:
-      actions: write
+      contents: write
+    uses: ./.github/workflows/desktop-release-guard.yml
+
+  desktop-connect:
+    name: Nightly Packaged Connect
+    permissions:
       contents: read
-    steps:
-      - name: Run the desktop workflows on this branch and wait for their result
-        env:
-          GH_TOKEN: ${{ github.token }}
-          REF: ${{ github.ref_name }}
-        run: |
-          set -euo pipefail
-          started="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          runs=()
-          for workflow in desktop-release-guard.yml desktop-connect-discovery-guard.yml; do
-            gh workflow run "$workflow" --repo "$GITHUB_REPOSITORY" --ref "$REF"
-            id=''
-            for _ in $(seq 1 30); do
-              id="$(gh run list --repo "$GITHUB_REPOSITORY" --workflow "$workflow" --event workflow_dispatch \
-                --branch "$REF" --created ">=$started" --limit 1 --json databaseId --jq '.[0].databaseId // empty')"
-              [ -n "$id" ] && break
-              sleep 10
-            done
-            if [ -z "$id" ]; then
-              echo "::error::$workflow did not start after being dispatched."
-              exit 1
-            fi
-            runs+=("$workflow=$id")
-          done
-          status=0
-          for entry in "${runs[@]}"; do
-            workflow="${entry%%=*}"
-            id="${entry#*=}"
-            url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$id"
-            echo "Waiting for $workflow: $url"
-            if gh run watch "$id" --repo "$GITHUB_REPOSITORY" --exit-status --interval 60 >/dev/null; then
-              echo "- $workflow passed: $url" >> "$GITHUB_STEP_SUMMARY"
-            else
-              echo "::error::$workflow failed: $url"
-              echo "- $workflow failed: $url" >> "$GITHUB_STEP_SUMMARY"
-              status=1
-            fi
-          done
-          exit "$status"
+    uses: ./.github/workflows/desktop-connect-discovery-guard.yml
