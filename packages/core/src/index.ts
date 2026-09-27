@@ -314,6 +314,7 @@ export {
     getRepos,
     isMonitoredRepository, isAutoCiFollowupEnabledForRepository, isCancelCiDuringFollowupEnabledForRepository,
     getCancelCiDuringFollowupWorkflowsForRepository,
+    getNonBlockingChecksForRepository,
     resolveMonitoredRepositories,
     getAiPrimaryTag,
     getPrimaryProcessingLabels,
@@ -473,3 +474,4 @@ export * from './services/previewStorage/v1.js';
 export { createManagedPreviewStorageClient } from './services/previewStorage/runtime.js';
 export * from './services/taskSubmissionService.js';
 export * from './services/taskSubmissionRetry.js';
+export { checkNameMatches, isNonBlockingCheck } from './webhook/nonBlockingChecks.js';
