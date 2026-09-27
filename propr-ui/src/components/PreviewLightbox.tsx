@@ -85,6 +85,15 @@ export default function PreviewLightbox({ previews, index, onIndexChange, onClos
     };
   }, [returnFocusTo]);
 
+  // A render can take the focused control with it: navigating between media drops the zoom buttons, those
+  // buttons disable themselves at their bounds, and a failed load replaces the player. Removing or disabling
+  // the active element leaves focus on the body without firing `focusin`, so the boundary guard above never
+  // sees it and the dialog's Escape and arrow keys stop reaching a handler. Focus that is still inside stays put.
+  useEffect(() => {
+    const dialog = dialogRef.current;
+    if (dialog && !dialog.contains(document.activeElement)) closeRef.current?.focus();
+  });
+
   useEffect(() => {
     const dialog = dialogRef.current;
     if (!dialog || isVideo) return;

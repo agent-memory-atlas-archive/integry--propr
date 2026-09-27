@@ -201,12 +201,29 @@ for (const width of [390, 1440]) {
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
     await capture(page, `media-lightbox-image-${width}`);
 
+    // Zooming to the cap disables the control the keyboard is standing on; focus has to stay in the dialog.
+    const zoomIn = page.getByRole('button', { name: 'Zoom in', exact: true });
+    await page.keyboard.press('Shift+Tab');
+    await expect(zoomIn).toBeFocused();
+    for (let press = 0; press < 4; press += 1) await page.keyboard.press('Enter');
+    await expect(zoomIn).toBeDisabled();
+    await expect(page.getByRole('button', { name: 'Close preview', exact: true })).toBeFocused();
+    await page.getByRole('button', { name: /Reset zoom/ }).click();
+
     // Arrow keys and the next control walk the collection, which mixes images and videos.
     await page.keyboard.press('ArrowRight');
     await expect(page.getByRole('dialog', { name: 'Goal workspace', exact: true })).toBeVisible();
-    for (let step = 0; step < 3; step += 1) await page.getByRole('button', { name: 'Next preview', exact: true }).click();
+    for (let step = 0; step < 2; step += 1) await page.getByRole('button', { name: 'Next preview', exact: true }).click();
+    // The last image before the video: ArrowRight from a focused zoom control removes that control, and
+    // focus must not fall to the body or Escape and the arrow keys would stop reaching the dialog.
+    await expect(page.getByRole('dialog', { name: 'Additional screen', exact: true })).toBeVisible();
+    await zoomIn.focus();
+    await expect(zoomIn).toBeFocused();
+    await page.keyboard.press('ArrowRight');
     const player = page.getByRole('dialog', { name: 'Walkthrough', exact: true }).locator('video');
     await expect(player).toBeVisible();
+    await expect(zoomIn).toHaveCount(0);
+    await expect(page.getByRole('button', { name: 'Close preview', exact: true })).toBeFocused();
     await player.evaluate((video: HTMLVideoElement) => video.play());
     await expect.poll(() => player.evaluate((video: HTMLVideoElement) => video.currentTime)).toBeGreaterThan(0);
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);

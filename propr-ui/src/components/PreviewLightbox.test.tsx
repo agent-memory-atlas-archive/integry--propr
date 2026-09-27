@@ -198,6 +198,25 @@ describe('PreviewLightbox', () => {
     expect(opener).toHaveFocus();
     opener.remove();
   });
+  it('keeps keyboard control when navigation removes the focused zoom control', () => {
+    const onClose = vi.fn();
+    const mixed: PublishedVisualPreview[] = [previews[0], { type: 'video', title: 'Walkthrough', url: 'https://github.com/user-attachments/assets/walkthrough' }];
+    render(<Harness items={mixed} onClose={onClose} />);
+    const zoomIn = screen.getByRole('button', { name: 'Zoom in' });
+    zoomIn.focus();
+    // ArrowRight moves to the video, which renders without the zoom controls the user was standing on.
+    fireEvent.keyDown(zoomIn, { key: 'ArrowRight' });
+    const dialog = screen.getByRole('dialog', { name: 'Walkthrough' });
+    expect(screen.queryByRole('button', { name: 'Zoom in' })).toBeNull();
+    expect(dialog.contains(document.activeElement)).toBe(true);
+    expect(screen.getByRole('button', { name: 'Close preview' })).toHaveFocus();
+    // Escape and arrow keys still reach the dialog from wherever focus landed.
+    fireEvent.keyDown(document.activeElement as HTMLElement, { key: 'ArrowLeft' });
+    expect(screen.getByRole('dialog', { name: 'Dashboard' })).toBeInTheDocument();
+    fireEvent.keyDown(document.activeElement as HTMLElement, { key: 'Escape' });
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
   it('keeps focus in the dialog when background content is focused by a document-level shortcut', () => {
     const search = document.createElement('input');
     document.body.appendChild(search);
