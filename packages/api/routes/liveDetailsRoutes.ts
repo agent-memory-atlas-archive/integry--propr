@@ -89,13 +89,16 @@ export function createLiveDetailsRoutes(deps: LiveDetailsRoutesDeps) {
         return;
       }
       const result = await parseConversationFile(conversationPath);
-      const selected = selectLiveEvents(withStableLiveEventIds({
+      const events = withStableLiveEventIds({
         taskId,
         source: 'conversation',
         events: result.events,
         totalEventCount: result.totalEventCount,
         executionNamespace: sessionId,
-      }));
+      });
+      const selected = await isLiveTask(redisClient, db, taskId)
+        ? selectLiveEvents(events)
+        : { events, omittedEventCount: 0 };
       console.log(`[live-details] Returning: ${selected.events.length} of ${result.events.length} events, ${result.todos.length} todos, currentTask: ${result.currentTask ? 'yes' : 'no'}`);
       send(res, { ...result, events: selected.events, omittedEventCount: selected.omittedEventCount });
     } catch (error) {
@@ -270,13 +273,33 @@ async function loadStoredExecutionOutput(redisClient: RedisClientType, sessionId
   const output = await fs.readFile(outputPath, 'utf8');
   return parseStoredOutputContent(output);
 }
+const FINISHED_TASK_STATES = new Set(['completed', 'failed', 'cancelled']);
+
+/** Unknown lifecycle state retains live selection; known finished tasks are uncapped. */
+async function isLiveTask(redisClient: RedisClientType, db: Knex, taskId: string): Promise<boolean> {
+  try {
+    const raw = await redisClient.get(`worker:state:${taskId}`);
+    const state = raw ? JSON.parse(raw) as { history?: HistoryEntryWithSessionMetadata[] } : null;
+    const latest = state?.history?.at(-1)?.state;
+    if (latest) return !FINISHED_TASK_STATES.has(latest.toLowerCase());
+  } catch { /* Fall back to persisted lifecycle state. */ }
+  try {
+    const latest = await db('task_history').where({ task_id: taskId }).orderBy('timestamp', 'desc').first('state');
+    if (latest?.state) return !FINISHED_TASK_STATES.has(String(latest.state).toLowerCase());
+  } catch { /* Some callers only have output storage available. */ }
+  return true;
+}
+
 async function parseActiveExecutionOutput(redisClient: RedisClientType, db: Knex, taskId: string, options: AgentStreamParseOptions = {}): Promise<(ConversationResult & { nativeGoal?: ReturnType<typeof parseRedisOutput>['nativeGoal']; omittedEventCount?: number }) | null> {
   const executionStartTimestamp = await findExecutionStartTimestamp(redisClient, db, taskId);
   const projected = await projectLiveOutput(redisClient as unknown as LiveOutputRedis, taskId, executionStartTimestamp, {
-    selectEvents: options.limitEvents !== false,
+    selectEvents: false,
   });
   if (!projected) return null;
-  const { events, todos, currentTask, tokenUsage, nativeGoal, omittedEventCount } = projected;
+  const { todos, currentTask, tokenUsage, nativeGoal } = projected;
+  const { events, omittedEventCount } = options.limitEvents !== false && await isLiveTask(redisClient, db, taskId)
+    ? selectLiveEvents(projected.events)
+    : { events: projected.events, omittedEventCount: 0 };
   if (events.length > 0 || todos.length > 0 || currentTask || tokenUsage) {
     return {
       events: events as unknown as Array<Record<string, unknown>>,

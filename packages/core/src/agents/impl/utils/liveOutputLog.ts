@@ -130,8 +130,10 @@ export class LiveOutputLog {
     /** Publishes a whole snapshot in place of the previous one (providers that cannot stream records). */
     replace(snapshot: string): void {
         if (this.closed) return;
+        const mode: LiveOutputWriteMode = this.resetPending ? 'reset' : 'replace';
+        this.resetPending = false;
         this.flushPromise = this.flushPromise
-            .then(() => writeLiveOutput(this.redis, this.taskId, this.transform(snapshot), { mode: 'replace' }))
+            .then(() => writeLiveOutput(this.redis, this.taskId, this.transform(snapshot), { mode }))
             .then(() => undefined, error => this.warn(error));
     }
 

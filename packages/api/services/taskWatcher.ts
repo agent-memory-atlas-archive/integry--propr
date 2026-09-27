@@ -31,6 +31,7 @@ export interface TaskWatcherInfo {
   redisPollingInterval?: ReturnType<typeof setInterval>;
   /** Redis watchers: projection of the append-only live output read so far. */
   liveProjector?: LiveOutputProjector;
+  liveReadPromise?: Promise<void>;
   /** Last broadcast buffered message and snapshot, so unchanged polls send nothing. */
   lastPendingSignature?: string;
   lastSnapshotSignature?: string;
@@ -448,9 +449,19 @@ export class TaskWatcherManager {
     const watcherInfo = this.taskWatchers.get(taskId);
     if (!this.deps || !watcherInfo) return;
 
+    // Serialize polls: an awaited read must not feed bytes already consumed by another poll.
+    const run = (watcherInfo.liveReadPromise ?? Promise.resolve()).then(async () => {
+      if (this.taskWatchers.get(taskId) !== watcherInfo) return;
+      await this.publishRedisLiveUpdate(taskId, watcherInfo, isInitial);
+    });
+    watcherInfo.liveReadPromise = run;
+    await run;
+  }
+
+  private async publishRedisLiveUpdate(taskId: string, watcherInfo: TaskWatcherInfo, isInitial: boolean): Promise<void> {
     try {
       const update = await this.readRedisLiveEvents(taskId, watcherInfo, isInitial);
-      if (!update) return;
+      if (!update || this.taskWatchers.get(taskId) !== watcherInfo) return;
       const { events, omittedEventCount } = update;
       const snapshot = update.projector.snapshot();
       const snapshotSignature = JSON.stringify([snapshot.todos, snapshot.currentTask, snapshot.tokenUsage]);
@@ -487,7 +498,8 @@ export class TaskWatcherManager {
     const redis = this.deps!.redisClient as unknown as LiveOutputRedis;
     const projector = isInitial ? undefined : watcherInfo.liveProjector;
     const read = projector ? await readLiveOutput(redis, taskId, projector.offset) : null;
-    if (projector && read && read.epoch === projector.epoch && read.from <= projector.offset) {
+    if (this.taskWatchers.get(taskId) !== watcherInfo) return null;
+    if (projector && read && read.epoch === projector.epoch && read.start === projector.start && read.from === projector.offset) {
       const events = projector.feed(read.text, read.from);
       const pending = projector.pending();
       const pendingSignature = pending ? `${pending.id}:${String((pending as { content?: unknown }).content ?? '').length}` : '';
@@ -499,7 +511,7 @@ export class TaskWatcherManager {
     if (projector && !read) return null;
 
     const full = await projectLiveOutput(redis, taskId, await this.findExecutionStartTimestampForTask(taskId));
-    if (!full) return null;
+    if (!full || this.taskWatchers.get(taskId) !== watcherInfo) return null;
     watcherInfo.liveProjector = full.projector;
     console.log(`[TaskWatcher] Full Redis update for task ${taskId}: sending ${full.events.length} events (${full.omittedEventCount} raw events omitted)`);
     return { events: full.events, omittedEventCount: full.omittedEventCount, projector: full.projector };

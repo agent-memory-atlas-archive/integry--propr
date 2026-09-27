@@ -13,7 +13,6 @@ import { up as addGoalAttachments } from '../../core/src/db/migrations/202609080
 import { up as addGoalInputDisplayBody } from '../../core/src/db/migrations/20260923000000_add_goal_input_display_body.js';
 import { createGoalRoutes } from '../routes/goalRoutes.js';
 import { withLiveOutputReads } from './liveOutputRedisFake.js';
-import { withLiveOutputReads } from './liveOutputRedisFake.js';
 
 function request(userId: string, params: Record<string, string> = {}, body: unknown = {}): Request {
     return {

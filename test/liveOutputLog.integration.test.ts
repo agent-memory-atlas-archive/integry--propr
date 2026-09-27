@@ -78,3 +78,45 @@ test('trims the oldest records at a record boundary past the ceiling and never m
         redis.disconnect();
     }
 });
+
+test('snapshot publication consumes reset once and close retains the final snapshot', async () => {
+    const writes: Array<{ text: string; mode: string }> = [];
+    const redis = {
+        on: () => undefined,
+        eval: async (_script: string, _keys: number, _data: string, _meta: string, text: string, _max: string, _ttl: string, mode: string) => {
+            writes.push({ text, mode });
+            return text.length;
+        },
+    } as unknown as Redis;
+    const log = new LiveOutputLog('snapshots', { reset: true, redis });
+    log.replace('first snapshot');
+    await log.flush();
+    log.replace('final snapshot');
+    await log.close();
+    await log.close();
+    assert.deepEqual(writes, [
+        { text: 'first snapshot', mode: 'reset' },
+        { text: 'final snapshot', mode: 'replace' },
+    ]);
+});
+
+test('snapshot close retains output and increments the epoch only at execution start', async t => {
+    const redis = await connect(t);
+    if (!redis) return;
+    const id = taskId('snapshot');
+    try {
+        await writeLiveOutput(redis, id, 'earlier execution', { mode: 'reset' });
+        const oldEpoch = Number(await redis.hget(liveOutputMetaKey(id), 'epoch'));
+        const log = new LiveOutputLog(id, { reset: true, redis });
+        log.replace('first snapshot');
+        await log.flush();
+        assert.equal(Number(await redis.hget(liveOutputMetaKey(id), 'epoch')), oldEpoch + 1);
+        log.replace('final snapshot');
+        await log.close();
+        assert.equal(await redis.get(liveOutputKey(id)), 'final snapshot');
+        assert.equal(Number(await redis.hget(liveOutputMetaKey(id), 'epoch')), oldEpoch + 1);
+    } finally {
+        await redis.del(liveOutputKey(id), liveOutputMetaKey(id));
+        redis.disconnect();
+    }
+});

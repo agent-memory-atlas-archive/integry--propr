@@ -92,7 +92,7 @@ export class LiveOutputProjector {
   readonly epoch: string;
   private readonly executionStartTimestamp: string | null;
   /** Absolute offset where the execution's output begins; event keys are relative to it. */
-  private readonly start: number;
+  readonly start: number;
 
   constructor(options: { taskId: string; epoch: string; offset: number; start?: number; executionStartTimestamp?: string | null }) {
     this.taskId = options.taskId;
@@ -107,6 +107,15 @@ export class LiveOutputProjector {
    * A trailing partial record is left for the next read.
    */
   feed(text: string, from: number): LiveEvent[] {
+    // Whole transcripts must bypass JSONL framing, including a final ] without a newline.
+    if (!this.projection && this.preamble.length === 0) {
+      const transcript = parseVibeTranscript(text, { executionStartTimestamp: this.executionStartTimestamp });
+      if (transcript) {
+        this.projection = this.wholeOutputProjection(transcript);
+        this.offset = from + Buffer.byteLength(text);
+        return this.projection.feed(text, from);
+      }
+    }
     const entries: Array<{ line: string; offset: number }> = [];
     let offset = from;
     const boundary = text.lastIndexOf('\n') + 1;
@@ -125,11 +134,7 @@ export class LiveOutputProjector {
     }
     if (entries.length === 0) return [];
     this.offset = offset;
-    if (!this.projection) {
-      // Vibe publishes whole JSON-array transcripts, only ever read in full.
-      if (this.preamble.length === 0 && parseVibeTranscript(text)) this.projection = this.wholeOutputProjection();
-      else return this.decide(entries);
-    }
+    if (!this.projection) return this.decide(entries);
     return entries.flatMap(({ line, offset: at }) => this.projection!.feed(line, at));
   }
 
@@ -238,25 +243,20 @@ export class LiveOutputProjector {
   }
 
   /** Vibe publishes whole transcripts, so each read re-projects the snapshot it has. */
-  private wholeOutputProjection(): Projection {
-    let text = '';
-    let emitted = 0;
-    let parsed: ParsedRedisOutput | null = null;
+  private wholeOutputProjection(parsed: ParsedRedisOutput): Projection {
+    let emitted = false;
     return {
-      feed: (line) => {
-        text += `${line}\n`;
-        parsed = parseVibeTranscript(text, { executionStartTimestamp: this.executionStartTimestamp });
-        const events = parsed?.events ?? [];
-        const fresh = events.slice(emitted).map((event, index) => ({ event, key: `vibe:${emitted + index}` }));
-        emitted = events.length;
-        return this.withIds(fresh);
+      feed: () => {
+        if (emitted) return [];
+        emitted = true;
+        return this.withIds(parsed.events.map((event, index) => ({ event, key: `vibe:${index}` })));
       },
       pending: () => null,
       snapshot: () => ({
-        todos: parsed?.todos ?? [],
-        currentTask: parsed?.currentTask ?? null,
-        tokenUsage: parsed?.tokenUsage ?? null,
-        nativeGoal: parsed?.nativeGoal ?? null,
+        todos: parsed.todos,
+        currentTask: parsed.currentTask,
+        tokenUsage: parsed.tokenUsage,
+        nativeGoal: parsed.nativeGoal ?? null,
       }),
     };
   }

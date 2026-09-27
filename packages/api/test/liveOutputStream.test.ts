@@ -180,3 +180,88 @@ describe('append-only live output', () => {
     }
   });
 });
+
+for (const indentation of [undefined, 2]) {
+  test(`whole Vibe arrays without a trailing newline are projected (${indentation ?? 'compact'})`, () => {
+    const text = JSON.stringify([{ role: 'assistant', content: 'Inspecting ✓', usage: { input_tokens: 10, output_tokens: 2 } }], null, indentation);
+    const projector = new LiveOutputProjector({ taskId: 'vibe', epoch: '1', offset: 50, start: 50 });
+    const events = projector.feed(text, 50);
+    assert.deepEqual(events.map(event => event.content), ['Inspecting ✓']);
+    assert.equal(projector.offset, 50 + Buffer.byteLength(text));
+    assert.equal(projector.snapshot().tokenUsage?.input_tokens, 10);
+    assert.deepEqual(projector.feed('', projector.offset), []);
+    assert.deepEqual(projector.feed('\n', projector.offset), [], 'a delayed newline does not replay the snapshot');
+  });
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>(done => { resolve = done; });
+  return { promise, resolve };
+}
+
+for (const format of ['records', 'compact-array', 'formatted-array']) {
+  test(`watcher rebuilds ${format} replacements at its exact offset and serializes polls`, async () => {
+    const taskId = `replacement-${format}`;
+    const emitted: Array<{ events: Array<{ id: string; content?: string }>; omittedEventCount?: number }> = [];
+    const io = {
+      to: () => ({ emit: (_event: string, payload: typeof emitted[number]) => { emitted.push(payload); } }),
+      sockets: { adapter: { rooms: new Map() } },
+    } as unknown as SocketIOServer;
+    const snapshot = (messages: string[]) => format === 'records'
+      ? messages.map(content => JSON.stringify({ type: 'assistant', message: { content: [{ type: 'text', text: content }] } })).join('\n') + '\n'
+      : JSON.stringify(messages.map(content => ({ role: 'assistant', content })), null, format === 'formatted-array' ? 2 : undefined);
+    let data = snapshot(['First']);
+    let start = 0;
+    let epoch = '1';
+    let gate: ReturnType<typeof deferred<void>> | null = null;
+    let entered = deferred<void>();
+    const redis = {
+      get: async (key: string) => key.startsWith('worker:state:') ? JSON.stringify({ history: [{ state: 'claude_execution', timestamp: '2026-09-27T00:00:00Z' }] }) : null,
+      eval: async (_script: string, options: { arguments: string[] }) => {
+        const from = Math.max(start, Number(options.arguments[0]));
+        const result = [String(start), epoch, String(start), '', String(from), Buffer.from(data).subarray(from - start).toString(), String(Buffer.byteLength(data))];
+        if (gate) { entered.resolve(); await gate.promise; }
+        return result;
+      },
+    } as unknown as RedisClientType;
+    const manager = new TaskWatcherManager(io);
+    manager.setDeps({ redisClient: redis, db: {} as Knex });
+    const send = (manager as unknown as { sendRedisLiveUpdate: (id: string) => Promise<void> }).sendRedisLiveUpdate.bind(manager);
+    try {
+      await manager.startTaskWatcher(taskId);
+      const firstId = emitted[0].events[0].id;
+      start += Buffer.byteLength(data);
+      data = snapshot(['First', 'Second']);
+      gate = deferred<void>();
+      const firstPoll = send(taskId);
+      await entered.promise;
+      const overlappingPoll = send(taskId);
+      gate.resolve();
+      gate = null;
+      await Promise.all([firstPoll, overlappingPoll]);
+      assert.equal(emitted.length, 2, 'overlapping polls do not replay bytes');
+      assert.equal(emitted[1].omittedEventCount, 0, 'replacement broadcasts full state');
+      assert.deepEqual(emitted[1].events.map(event => event.content), ['First', 'Second']);
+      assert.equal(emitted[1].events[0].id, firstId);
+      start += Buffer.byteLength(data);
+      data = snapshot(['New execution']);
+      epoch = '2';
+      await send(taskId);
+      assert.notEqual(emitted[2].events[0].id, firstId);
+      assert.deepEqual(emitted[2].events.map(event => event.content), ['New execution']);
+      // A pending read loses authority when its watcher is removed.
+      start += Buffer.byteLength(data);
+      data = snapshot(['After removal']);
+      entered = deferred<void>();
+      gate = deferred<void>();
+      const latePoll = send(taskId);
+      await entered.promise;
+      await manager.closeAll();
+      gate.resolve();
+      gate = null;
+      await latePoll;
+      assert.equal(emitted.length, 3, 'a removed watcher cannot publish a late read');
+    } finally { await manager.closeAll(); }
+  });
+}

@@ -144,18 +144,41 @@ const appendUniqueEvents = (
   return uniqueNewEvents.length > 0 ? [...base, ...uniqueNewEvents] : base;
 };
 
-/**
- * A full-state read (HTTP snapshot or a socket full-state payload) sets the
- * order; events already held that are newer than anything it shares with the
- * current list (socket increments that raced the read) stay after it.
- */
+/** Execution identity is encoded in the first four segments of server event IDs. */
+const executionIdentity = (events: LiveEvent[]): string | null => {
+  const identities = new Set(events.flatMap(event =>
+    event.id?.match(/^live:[^:]+:(?:redis|conversation|stored|database):[^:]+:/)?.[0] ?? []));
+  return identities.size === 1 ? [...identities][0] : null;
+};
+
+/** Full state sets shared-event order while retaining history collected in this execution. */
 export const mergeFullLiveDetails = (previous: LiveDetails, full: LiveDetails): LiveDetails => {
   const fullEvents = full.events || [];
   const fullIds = new Set(fullEvents.flatMap(event => event.id ? [event.id] : []));
-  let lastShared = -1;
-  previous.events.forEach((event, index) => { if (event.id && fullIds.has(event.id)) lastShared = index; });
-  const newer = lastShared >= 0 ? previous.events.slice(lastShared + 1).filter(event => !event.id || !fullIds.has(event.id)) : [];
-  const capped = capLiveEvents(newer.length > 0 ? [...fullEvents, ...newer] : fullEvents);
+  const previousIdentity = executionIdentity(previous.events);
+  const fullIdentity = executionIdentity(fullEvents);
+  const sameExecution = previousIdentity && fullIdentity
+    ? previousIdentity === fullIdentity
+    : previous.events.some(event => event.id && fullIds.has(event.id));
+  const events: LiveEvent[] = [];
+  if (sameExecution) {
+    // Place missing history before its next shared event. This preserves prefixes
+    // lost to Redis trimming as well as increments received after the snapshot.
+    const before = new Map<string, LiveEvent[]>();
+    let missing: LiveEvent[] = [];
+    for (const event of previous.events) {
+      if (event.id && fullIds.has(event.id)) {
+        before.set(event.id, missing);
+        missing = [];
+      } else missing.push(event);
+    }
+    if (before.size === 0) events.push(...missing, ...fullEvents);
+    else {
+      for (const event of fullEvents) events.push(...(event.id ? before.get(event.id) ?? [] : []), event);
+      events.push(...missing);
+    }
+  } else events.push(...fullEvents);
+  const capped = capLiveEvents(events);
   return {
     events: capped.events,
     todos: full.todos || [],
@@ -229,6 +252,7 @@ export const useTaskData = (taskId: string | undefined) => {
   // Track the last notified terminal state to avoid duplicate toasts
   const lastNotifiedStateRef = useRef<string | null>(null);
   const hasReceivedSocketStateRef = useRef<boolean>(false);
+  const socketRevisionRef = useRef(0);
   // Track if we've received initial data from WebSocket (to distinguish initial vs incremental updates)
   // A route parameter can change without unmounting this hook. Late responses
   // from the previous task must never replace the newly selected task's data.
@@ -265,6 +289,7 @@ export const useTaskData = (taskId: string | undefined) => {
   const fetchPersistedLiveDetails = useCallback(async () => {
     if (!taskId) return null;
     const requestedScope = requestScopeKey;
+    const socketRevision = socketRevisionRef.current;
 
     try {
       const data = await getTaskLiveDetails(taskId) as LiveDetails;
@@ -272,7 +297,7 @@ export const useTaskData = (taskId: string | undefined) => {
       // The socket subscription runs in parallel with this read, and its first
       // payload is already full state. Never let an older HTTP snapshot replace
       // newer socket state that arrived while the request was pending.
-      if (!hasReceivedSocketStateRef.current) setLiveDetails(previous => mergeFullLiveDetails(previous, data));
+      if (!hasReceivedSocketStateRef.current && socketRevision === socketRevisionRef.current) setLiveDetails(previous => mergeFullLiveDetails(previous, data));
       return data;
     } catch (err) {
       console.error('Error fetching persisted live details:', err);
@@ -326,6 +351,7 @@ export const useTaskData = (taskId: string | undefined) => {
     if (payload.taskId !== activeTaskIdRef.current) return;
 
     hasReceivedSocketStateRef.current = true;
+    socketRevisionRef.current += 1;
     setLiveDetails(previous => applyTaskLiveUpdate(previous, payload));
   }, []);
 
