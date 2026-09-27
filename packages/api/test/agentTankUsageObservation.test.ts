@@ -35,6 +35,10 @@ const coreMock = await mock.module('@propr/core', {
 });
 
 const { createAgentTankRoutes } = await import('../routes/configRoutesAgentTank.js');
+const { ShellActivityBroadcaster } = await import('../services/shellActivityBroadcaster.js');
+const { ACTIVITY_ROOM } = await import('../services/activitySocketRooms.js');
+const { USAGE_UPDATE } = await import('@propr/shared');
+
 
 after(async () => {
   coreMock.restore();
@@ -110,4 +114,71 @@ test('a usage read that Agent Tank refuses observes nothing', async () => {
 
   assert.deepEqual(await readUsage(), { enabled: true, error: 'HTTP 503' });
   assert.equal(observed.length, 0);
+});
+
+
+function shellSampler() {
+  const events: string[] = [];
+  const io = {
+    sockets: { adapter: { rooms: new Map([[ACTIVITY_ROOM, new Set(['connected-client'])]]) } },
+    to: () => ({ emit: (event: string) => events.push(event) }),
+  };
+  return { sampler: new ShellActivityBroadcaster(io as never), events };
+}
+
+test('shell sampling ignores countdowns and ordering but detects quota, membership and enabled changes', async () => {
+  const { sampler, events } = shellSampler();
+  const report = (body: unknown) => {
+    globalThis.fetch = async () => new Response(JSON.stringify(body));
+  };
+  try {
+    report({ claude: { name: 'claude', usage: { session: { percent: 42, resetsInSeconds: 120 } } } });
+    await sampler.sample();
+    report({ claude: { usage: { session: { resetsInSeconds: 90, percent: 42 } }, name: 'claude' } });
+    await sampler.sample();
+    assert.deepEqual(events, [USAGE_UPDATE], 'countdown-only samples must not wake connected consumers');
+    tankReports({ claude: 43 }); await sampler.sample();
+    tankReports({ claude: 43, agy: 0 }); await sampler.sample();
+    tankReports({ agy: 0, claude: 43 }); await sampler.sample();
+    assert.equal(events.length, 3, 'agent ordering is not a change');
+    tankReports({ claude: 43 }); await sampler.sample();
+    settings.enabled = false; await sampler.sample(); await sampler.sample();
+    settings.enabled = true; await sampler.sample();
+    assert.equal(events.length, 6, 'quota, additions, removals and enable transitions each invalidate');
+  } finally { settings.enabled = true; sampler.close(); }
+});
+
+test('shell sampling announces HTTP, unreachable and recovery transitions once each', async () => {
+  const { sampler, events } = shellSampler();
+  try {
+    tankReports({ claude: 42 }); await sampler.sample();
+    globalThis.fetch = async () => new Response('unavailable', { status: 503 });
+    await sampler.sample(); await sampler.sample();
+    assert.equal(events.length, 2);
+    globalThis.fetch = async () => { throw new Error('network unavailable'); };
+    await sampler.sample(); await sampler.sample();
+    assert.equal(events.length, 3);
+    globalThis.fetch = async () => new Response('invalid JSON');
+    await sampler.sample();
+    assert.equal(events.length, 3, 'body failures have the same unreachable outcome as the endpoint');
+    tankReports({ claude: 42 }); await sampler.sample(); await sampler.sample();
+    assert.equal(events.length, 4, 'recovery invalidates even when the quota did not change');
+  } finally { sampler.close(); }
+});
+
+test('closing during an awaited usage body prevents a late invalidation', async () => {
+  const { sampler, events } = shellSampler();
+  let release!: (value: unknown) => void;
+  let entered!: () => void;
+  const reading = new Promise<void>(resolve => { entered = resolve; });
+  globalThis.fetch = async () => ({ ok: true, json: () => {
+    entered();
+    return new Promise(resolve => { release = resolve; });
+  } }) as Response;
+  const pending = sampler.sample();
+  await reading;
+  sampler.close();
+  release({ claude: { name: 'claude', usage: { percent: 42 } } });
+  await pending;
+  assert.deepEqual(events, []);
 });

@@ -112,7 +112,7 @@ test('shell snapshots emit only real changes and stop after close', async () => 
   const io = { sockets: { adapter: { rooms: new Map([[ACTIVITY_ROOM, new Set(['socket'])]]) } },
     to: () => ({ emit: (event: string) => events.push(event) }) };
   const broadcaster = new ShellActivityBroadcaster(io as never,
-    async () => ({ daemon: 'running', timestamp: new Date().toISOString() }), async () => ({ percent }));
+    async () => ({ daemon: 'running', timestamp: new Date().toISOString() }), async () => ({ enabled: true, agents: { claude: { name: 'claude', usage: { percent } } } }));
   await broadcaster.sample(); await broadcaster.sample();
   assert.equal(events.length, 2);
   percent = 2; await broadcaster.sample(); assert.equal(events.length, 3);

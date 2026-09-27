@@ -1,7 +1,24 @@
 import type { Server } from 'socket.io';
-import { loadAgentTankSettings } from '@propr/core';
+import { agentTankUsageFingerprint, loadAgentTankSettings, normalizeAgentTankAgents, type AgentStatusResponse } from '@propr/core';
 import { ACTIVITY_UPDATE, USAGE_UPDATE } from '@propr/shared';
 import { ACTIVITY_ROOM } from './activitySocketRooms.js';
+
+interface UsageSnapshot {
+  enabled?: boolean;
+  agents?: Record<string, AgentStatusResponse>;
+  error?: string;
+}
+
+function usageFingerprint(snapshot: UsageSnapshot): string {
+  return JSON.stringify({
+    enabled: snapshot.enabled,
+    error: snapshot.error ?? null,
+    // Keep membership in the fingerprint, but share the per-agent projection
+    // with the other usage observers so countdowns cannot become invalidations.
+    agents: Object.entries(snapshot.agents ?? {}).sort(([a], [b]) => a.localeCompare(b))
+      .map(([name, status]) => [name, agentTankUsageFingerprint({ ...status, name: status.name || name })]),
+  });
+}
 
 // Agent Tank and runtime health have no external push API. Sample once per API
 // process while subscribed, then emit only changes; browser count adds no reads.
@@ -11,12 +28,17 @@ export class ShellActivityBroadcaster {
   private closed = false;
   private fingerprints = new Map<string, string>();
   constructor(private io: Server, private readStatus?: () => Promise<Record<string, unknown>>,
-    private readUsage = async (): Promise<unknown> => {
+    private readUsage = async (): Promise<UsageSnapshot> => {
       const settings = await loadAgentTankSettings();
       if (!settings.enabled) return { enabled: false };
-      const response = await fetch(`${settings.url}/status`, { signal: AbortSignal.timeout(5000) });
-      if (!response.ok) throw new Error(`Agent Tank status: ${response.status}`);
-      return response.json();
+      try {
+        const response = await fetch(`${settings.url}/status`, { signal: AbortSignal.timeout(5000) });
+        if (!response.ok) return { enabled: true, error: `HTTP ${response.status}` };
+        const agents = normalizeAgentTankAgents(await response.json() as Record<string, AgentStatusResponse>);
+        return { enabled: true, agents };
+      } catch {
+        return { enabled: true, error: 'unreachable' };
+      }
     }) {}
 
   start(): void {
@@ -40,10 +62,16 @@ export class ShellActivityBroadcaster {
 
   private async changed(key: string, read: () => Promise<unknown>, emit: () => void): Promise<void> {
     try {
-      const snapshot = await read();
+      const snapshot = await read().catch(error => {
+        if (key !== 'usage') throw error;
+        // Settings/read failures are also observable endpoint outcomes. Keep
+        // their fingerprint stable, independent of incidental error messages.
+        console.warn('Unable to sample usage activity:', error);
+        return { error: 'Failed to fetch Agent Tank usage' };
+      });
       if (this.closed) return;
       // Snapshot timestamps/countdowns are not resource changes.
-      const fingerprint = JSON.stringify(snapshot, (name, value) =>
+      const fingerprint = key === 'usage' ? usageFingerprint(snapshot as UsageSnapshot) : JSON.stringify(snapshot, (name, value) =>
         ['timestamp', 'updatedAt', 'lastUpdated', 'fetchedAt', 'resetsIn', 'lastAckAt'].includes(name) ? undefined : value);
       if (this.fingerprints.get(key) === fingerprint) return;
       this.fingerprints.set(key, fingerprint);

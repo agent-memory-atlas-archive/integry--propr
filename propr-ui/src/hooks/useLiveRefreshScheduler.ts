@@ -1,10 +1,15 @@
 import { useCallback, useEffect, useRef } from 'react';
 
+/** Best-effort publications can be lost even while the browser stays connected. */
+export const CONNECTED_RECONCILE_MS = 5 * 60_000;
+
 interface LiveRefreshSchedulerOptions {
   isConnected: boolean;
   refresh: () => unknown | Promise<unknown>;
   coalesceMs?: number;
   fallbackPollMs?: number;
+  /** Opt in for push-driven projections whose publications are best effort. */
+  connectedPollMs?: number;
   /**
    * Identifies the data being refreshed. Pending work from an old scope is
    * discarded when, for example, a detail route navigates to another task.
@@ -28,6 +33,7 @@ export function useLiveRefreshScheduler({
   refresh,
   coalesceMs = 100,
   fallbackPollMs = 30_000,
+  connectedPollMs,
   scopeKey,
 }: LiveRefreshSchedulerOptions): LiveRefreshScheduler {
   const documentIsHidden = () => document.visibilityState === 'hidden';
@@ -151,6 +157,14 @@ export function useLiveRefreshScheduler({
       window.removeEventListener('focus', recoverVisible);
     };
   }, [fallbackPollMs, schedule]);
+
+  useEffect(() => {
+    if (!connectedPollMs) return;
+    const safety = window.setInterval(() => {
+      if (connectedRef.current && !documentIsHidden()) schedule();
+    }, connectedPollMs);
+    return () => window.clearInterval(safety);
+  }, [connectedPollMs, schedule]);
 
   const scheduler = schedule as LiveRefreshScheduler;
   scheduler.refreshNow = refreshNow;

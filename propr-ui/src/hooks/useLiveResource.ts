@@ -6,7 +6,7 @@ import type {
   GoalUpdatePayload,
 } from '@propr/shared';
 import { useSocket } from '../contexts/useSocket';
-import { useLiveRefreshScheduler } from './useLiveRefreshScheduler';
+import { CONNECTED_RECONCILE_MS, useLiveRefreshScheduler } from './useLiveRefreshScheduler';
 
 /** Scope value meaning every repository. */
 export const ALL_SCOPES = 'all';
@@ -93,7 +93,8 @@ export const matchesLiveInterest = matchesInterest;
  *
  * The refresh discipline lives in `useLiveRefreshScheduler`, which already
  * coalesces bursts, serializes concurrent reads, pauses while the tab is
- * hidden and recovers on visibility change, polls only while disconnected, and
+ * hidden and recovers on visibility change, polls frequently while disconnected,
+ * reconciles occasionally while connected to recover lost publications, and
  * discards work belonging to a superseded scope. This hook contributes the two
  * things that scheduler cannot know: which events matter, and where the result
  * is stored.
@@ -171,6 +172,7 @@ export function useLiveResource<T>({
     refresh,
     scopeKey,
     fallbackPollMs: fallbackIntervalMs,
+    connectedPollMs: disabled ? undefined : CONNECTED_RECONCILE_MS,
   });
   const scheduleRefreshNow = schedule.refreshNow;
 

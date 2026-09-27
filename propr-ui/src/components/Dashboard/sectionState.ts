@@ -10,7 +10,7 @@ import { useCallback, useContext, useEffect, useMemo, useRef, useState } from 'r
 // rather than growing a second set of duration strings.
 import { formatDuration, formatRelativeTime } from '../TaskList/utils.tsx';
 import { SocketContext } from '../../contexts/SocketContext';
-import { useLiveRefreshScheduler } from '../../hooks/useLiveRefreshScheduler';
+import { CONNECTED_RECONCILE_MS, useLiveRefreshScheduler } from '../../hooks/useLiveRefreshScheduler';
 
 /**
  * How often a section re-reads while the websocket is unavailable.
@@ -105,6 +105,7 @@ export function useDashboardSection<T>(
     refresh: read,
     scopeKey: scope,
     fallbackPollMs: FALLBACK_POLL_MS,
+    connectedPollMs: CONNECTED_RECONCILE_MS,
   });
   const { refreshNow } = scheduler;
 
