@@ -9,6 +9,10 @@ on:
   push:
     tags:
       - 'desktop-v*'
+  # Pull requests run the unsigned validation only when they touch the desktop
+  # app (or carry the `desktop-ci` label). The Tier 3 nightly run dispatches it
+  # for the default branch, and it can be dispatched for any branch on demand.
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -49,7 +53,7 @@ jobs:
     # Only an explicit `false` skips. A failed, cancelled or missing decision
     # leaves the output empty, which runs the job.
     if: >-
-      ${{ !cancelled() && github.event_name == 'pull_request'
+      ${{ !cancelled() && github.event_name != 'push'
           && vars.PROPR_WINDOWS_DESKTOP_CI_ENABLED == 'true'
           && needs.classify.outputs.desktop != 'false' }}
     runs-on: windows-latest
@@ -92,7 +96,7 @@ jobs:
     name: Validate unsigned desktop package version
     needs: classify
     if: >-
-      ${{ !cancelled() && github.event_name == 'pull_request'
+      ${{ !cancelled() && github.event_name != 'push'
           && needs.classify.outputs.desktop != 'false' }}
     runs-on: ubuntu-latest
     outputs:
@@ -114,7 +118,7 @@ jobs:
     name: Prove stock Chromium existing-target axe boundary
     needs: classify
     if: >-
-      ${{ !cancelled() && github.event_name == 'pull_request'
+      ${{ !cancelled() && github.event_name != 'push'
           && needs.classify.outputs.desktop != 'false' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
@@ -149,7 +153,7 @@ jobs:
     # `!cancelled()` replaces the implicit success gate that `needs` alone
     # gives, so the prerequisites are required explicitly here.
     if: >-
-      ${{ !cancelled() && github.event_name == 'pull_request'
+      ${{ !cancelled() && github.event_name != 'push'
           && needs.classify.outputs.desktop != 'false'
           && needs.validation-version.result == 'success'
           && needs.renderer-axe-boundary.result == 'success' }}
@@ -512,9 +516,26 @@ jobs:
             ' bash "$keyring_root" "$PROPR_DESKTOP_VERSION" "${{ matrix.arch }}" \
               "desktop-release-${{ matrix.platform }}-${{ matrix.arch }}"
           else
-            bash apps/desktop/scripts/run-packaged-darwin-connect-smoke.sh \
-              "${{ matrix.arch }}" native-lifecycle "$PROPR_DESKTOP_VERSION" \
-              "desktop-release-${{ matrix.platform }}-${{ matrix.arch }}"
+            lifecycle_log="$(mktemp)"
+            for attempt in 1 2; do
+              if bash apps/desktop/scripts/run-packaged-darwin-connect-smoke.sh \
+                "${{ matrix.arch }}" native-lifecycle "$PROPR_DESKTOP_VERSION" \
+                "desktop-release-${{ matrix.platform }}-${{ matrix.arch }}" 2>&1 | tee "$lifecycle_log"; then
+                break
+              else
+                status=$?
+              fi
+              # Hosted macOS runners sometimes cannot answer the final
+              # LaunchServices query within its deadline. That result proves
+              # nothing either way (a stale registration reports
+              # STALE_REGISTRATION instead), so retry the whole lifecycle once;
+              # any other cleanup failure, or a second one, still fails the leg.
+              if [ "$attempt" -eq 2 ] \
+                || ! grep -qE '^(NativeLifecycleFailure|[[:space:]]*Error): Native lifecycle cleanup failed: launchservices-postcondition \[result:COMMAND_DEADLINE\]$' "$lifecycle_log"; then
+                exit "$status"
+              fi
+              echo '::warning::The macOS LaunchServices postcondition query hit its deadline; rerunning the native lifecycle once.'
+            done
           fi
 
       # Hosted runners occasionally lose name resolution to the artifact
@@ -571,7 +592,7 @@ jobs:
     # inapplicable and every desktop job was skipped for exactly that reason.
     # A failed, cancelled or unexpectedly skipped job still fails it.
     name: Finalize unsigned validation checksums
-    if: ${{ !cancelled() && github.event_name == 'pull_request' }}
+    if: ${{ !cancelled() && github.event_name != 'push' }}
     needs: [classify, validation-version, package]
     runs-on: ubuntu-latest
     timeout-minutes: 15

@@ -347,8 +347,10 @@ jobs:
     # actual native assertions on hosted runners on either shard route.
     # Inputs: apps/desktop/scripts, packages/client/dist (built from
     # @propr/client and @propr/shared), the Electron binary from the lockfile and
-    # scripts/run-test-suite.mjs. The classifier's `desktop` surface covers every
-    # one of them; the lockfile and scripts/ select every surface.
+    # scripts/run-test-suite.mjs. The classifier's on-demand `desktop` surface
+    # covers the desktop-owned ones (and Electron changes in the lockfile); the
+    # shared runtime, the renderer and the runner are validated by the job of the
+    # same name in the Tier 3 nightly run (test-nightly.yml).
     name: Full Test Suite Native Electron (hosted)
     needs: classify
     # Only an explicit `false` skips; see the docs job above.
@@ -482,12 +484,27 @@ jobs:
             fi
             require "$1" "$2"
           }
+          # The desktop checks are on demand: a broad change leaves them to the
+          # nightly run, so their skip needs only a resolved pull-request
+          # classification that reported the surface as `false`, broad or not.
+          on_demand_gated() {
+            if [ "$2" = skipped ] \
+              && [ "${EVENT_NAME:-}" = pull_request ] \
+              && [ "${CLASSIFY_RESULT:-}" = success ] \
+              && [ "${CLASSIFY_STATUS:-}" = ok ] \
+              && [ "$3" = false ]; then
+              echo "::notice::$1 proved inapplicable to this change set; the nightly run validates it. See the classifier job summary for the reasons."
+              echo "$1: not applicable to this change set (validated nightly)." >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
+              return
+            fi
+            require "$1" "$2"
+          }
           # A matrix result is success only when every shard succeeded. The
           # shards are never gated, so a skipped shard always fails.
           require "Full test suite shards" "$SHARD_RESULT"
           surface_gated "Docs site validation" "$DOCS_RESULT" "${DOCS_DECISION:-}"
           # Missing or unexplained skipped native assertions fail closed.
-          surface_gated "Hosted native Electron units" "$ELECTRON_RESULT" "${DESKTOP_DECISION:-}"
+          on_demand_gated "Hosted native Electron units" "$ELECTRON_RESULT" "${DESKTOP_DECISION:-}"
           if [ "$COVERAGE_RESULT" != success ]; then
             echo "::error::Shard coverage verification finished with result '$COVERAGE_RESULT'."
             status=1

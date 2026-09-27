@@ -291,11 +291,12 @@ describe('Full Test Suite job selection', () => {
         ['a native Electron unit', ['apps/desktop/scripts/electron-frame-semantics.test.mjs'], { docs: false, 'native-electron': true }],
         ['a native Electron probe', ['apps/desktop/scripts/electron-pairing-zstd-probe.cjs'], { docs: false, 'native-electron': true }],
         ['desktop application source', ['apps/desktop/src/main.ts'], { docs: false, 'native-electron': true }],
-        // Shared dependencies activate every consumer they affect.
+        // Desktop-bundled packages activate the desktop checks.
         ['@propr/client, whose dist the zstd probe loads', ['packages/client/src/pairingProtocol.ts'], { docs: false, 'native-electron': true }],
-        ['@propr/shared, which @propr/client depends on', ['packages/shared/src/index.ts'], { docs: false, 'native-electron': true }],
         ['@propr/cli, which the desktop app bundles', ['packages/cli/src/index.ts'], { docs: false, 'native-electron': true }],
-        ['the renderer the desktop app embeds', ['propr-ui/src/App.tsx'], { docs: false, 'native-electron': true }],
+        // The shared runtime and the renderer leave the desktop checks to the nightly run.
+        ['@propr/shared, which @propr/client depends on', ['packages/shared/src/index.ts'], { docs: false, 'native-electron': false }],
+        ['the renderer the desktop app embeds', ['propr-ui/src/App.tsx'], { docs: false, 'native-electron': false }],
         ['docs and desktop together', ['docs/docs/intro.md', 'apps/desktop/src/main.ts'], { docs: true, 'native-electron': true }],
     ]) {
         test(`${label} runs the relevant validation`, () => {
@@ -305,30 +306,32 @@ describe('Full Test Suite job selection', () => {
         });
     }
 
-    for (const [label, path] of [
-        ['the root lockfile', 'package-lock.json'],
-        ['the docs site lockfile', 'docs/package-lock.json'],
-        ['the UI lockfile', 'propr-ui/package-lock.json'],
-        ['the Node toolchain', '.nvmrc'],
-        ['shared TypeScript configuration', 'tsconfig.json'],
-        ['this workflow', '.github/workflows/pr-test-on-label.yml'],
-        ['the classifier action', '.github/actions/classify-changes/action.yml'],
-        ['the classifier', 'scripts/ci-change-classification.mjs'],
-        ['the native Electron runner', 'scripts/run-test-suite.mjs'],
-        ['this regression test', 'test/ciFullSuiteSelection.test.mjs'],
-        ['the workspace setup the docs job runs', '.propr/setup.sh'],
-        ['an unknown path', 'brand-new-workspace/index.ts'],
+    // Broad changes run docs; native Electron runs only when the change defines
+    // the desktop checks or cannot rule out a desktop dependency change.
+    for (const [label, path, nativeElectron] of [
+        ['an unreadable root lockfile', 'package-lock.json', true],
+        ['an unreadable docs site lockfile', 'docs/package-lock.json', true],
+        ['an unreadable UI lockfile', 'propr-ui/package-lock.json', true],
+        ['the Node toolchain', '.nvmrc', false],
+        ['shared TypeScript configuration', 'tsconfig.json', false],
+        ['this workflow', '.github/workflows/pr-test-on-label.yml', true],
+        ['the classifier action', '.github/actions/classify-changes/action.yml', true],
+        ['the classifier', 'scripts/ci-change-classification.mjs', true],
+        ['the native Electron runner', 'scripts/run-test-suite.mjs', false],
+        ['this regression test', 'test/ciFullSuiteSelection.test.mjs', false],
+        ['the workspace setup the docs job runs', '.propr/setup.sh', false],
+        ['an unknown path', 'brand-new-workspace/index.ts', false],
     ]) {
-        test(`${label} runs docs and native Electron validation`, () => {
+        test(`${label} runs docs${nativeElectron ? ' and native Electron' : ''} validation`, () => {
             const decision = narrowDecision([path]);
             assert.equal(decision.broad, true);
             const run = simulateRun({ classifier: decision });
-            assert.deepEqual(run.started, { shard: true, docs: true, 'native-electron': true });
+            assert.deepEqual(run.started, { shard: true, docs: true, 'native-electron': nativeElectron });
             assert.equal(run.gate.status, 0, run.gate.stdout);
         });
     }
 
-    test('a dependency change in the UI manifest, which pins the docs job\'s Playwright, runs both', () => {
+    test('a dependency change in the UI manifest, which pins the docs job\'s Playwright, runs docs', () => {
         const base = JSON.parse(readFileSync(join(REPOSITORY, 'propr-ui', 'package.json'), 'utf8'));
         const head = { ...base, devDependencies: { ...base.devDependencies, '@playwright/test': '0.0.0' } };
         const decision = classifyChanges({
@@ -336,7 +339,7 @@ describe('Full Test Suite job selection', () => {
             manifests: { 'propr-ui/package.json': { base: JSON.stringify(base), head: JSON.stringify(head) } },
         });
         assert.equal(decision.broad, true);
-        assert.deepEqual(simulateRun({ classifier: decision }).started, { shard: true, docs: true, 'native-electron': true });
+        assert.deepEqual(simulateRun({ classifier: decision }).started, { shard: true, docs: true, 'native-electron': false });
     });
 
     test('an unresolvable diff falls back to running everything', () => {
@@ -557,10 +560,21 @@ describe('gated job inputs are covered by their surface', () => {
             // The runner the job invokes.
             'scripts/run-test-suite.mjs',
         ];
+        // Desktop-owned inputs select the desktop checks on the pull request; the
+        // shared runtime, the renderer and the shared runner are left to the
+        // nightly run, which validates everything.
+        const NIGHTLY_COVERED = [/^packages\/shared\//, /^propr-ui\//, /^scripts\//];
         for (const path of paths) {
             const decision = narrowDecision([path]);
-            assert.ok(decision.broad || decision.surfaces.desktop, `${path} must select the desktop surface`);
+            assert.ok(decision.surfaces.desktop || NIGHTLY_COVERED.some(pattern => pattern.test(path)),
+                `${path} must select the desktop surface or be covered by the nightly run`);
         }
+        // The Tier 3 nightly run is where every change reaches the desktop checks.
+        const nightly = readWorkflow('test-nightly.yml');
+        const nightlyNative = jobBlock(nightly, 'native-electron');
+        assert.equal(extractRunBlock(nightlyNative, 'Run native Electron units without skipping'), run,
+            'the nightly run executes the same native Electron units');
+        assert.match(jobBlock(nightly, 'desktop-checks'), /desktop-release-guard\.yml desktop-connect-discovery-guard\.yml/);
     });
 
     test('the docs site reads nothing from outside docs/', () => {

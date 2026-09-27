@@ -7,6 +7,8 @@ name: Packaged Connect Discovery Guard
 # the shared classifier, and is visible in this run's job summary.
 on:
   pull_request:
+  # Pull requests run this only when they touch the desktop app (or carry the
+  # `desktop-ci` label); the Tier 3 nightly run dispatches it for the default branch.
   workflow_dispatch:
 
 permissions:
