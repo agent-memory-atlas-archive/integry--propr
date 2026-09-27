@@ -38,10 +38,10 @@ export function parseWorkflowInput(value: string): string[] | null {
   return selection;
 }
 
-/** The identities the worker matches a stored entry against: ID, path, file name and display name, case-insensitively. */
+/** Match the worker's ID, path, file name and display name identities, trimming whitespace and ignoring case. */
 export function workflowMatchesEntry(workflow: RepoWorkflow, entry: string): boolean {
   const normalized = entry.trim().toLowerCase();
-  return [String(workflow.id), workflow.path, workflow.file, workflow.name].some(identity => identity.toLowerCase() === normalized);
+  return [String(workflow.id), workflow.path, workflow.file, workflow.name].some(identity => identity.trim().toLowerCase() === normalized);
 }
 
 /** Selecting stores the file name; deselecting removes every entry that identifies the workflow, whichever spelling it used. */

@@ -161,6 +161,45 @@ const detected = [
 ];
 
 describe('RepositorySettingsBar detected workflows', () => {
+  it.each([{ triggers: ['pull_request'] }, { triggers: ['push'] }, { triggers: null }])('recognizes and deselects a padded display name with triggers $triggers', async ({ triggers }) => {
+    getRepoWorkflows.mockResolvedValue({ workflows: [workflow(1, ' CI ', 'validation.yml', triggers)] });
+    const { onUpdateCancelCiWorkflows } = renderBar({
+      cancelCiDuringFollowup: true,
+      cancelCiDuringFollowupWorkflows: ['cI'],
+    });
+
+    const checkbox = await screen.findByRole('checkbox', { name: /validation\.yml/ });
+    expect(checkbox).toBeChecked();
+    expect(checkbox).toBeEnabled();
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Remove unavailable selections' })).not.toBeInTheDocument();
+    expect(onUpdateCancelCiWorkflows).not.toHaveBeenCalled();
+
+    fireEvent.click(checkbox);
+    expect(checkbox).not.toBeChecked();
+    expect(screen.getByRole('textbox', { name: workflowsName })).toHaveValue('');
+    expect(onUpdateCancelCiWorkflows).toHaveBeenLastCalledWith('repo-1', []);
+  });
+
+  it('preserves a normalized display name when removing unavailable selections after discovery', async () => {
+    let resolveListing!: (response: { workflows: RepoWorkflow[] }) => void;
+    getRepoWorkflows.mockReturnValue(new Promise(resolve => { resolveListing = resolve; }));
+    const { onUpdateCancelCiWorkflows } = renderBar({
+      cancelCiDuringFollowup: true,
+      cancelCiDuringFollowupWorkflows: ['CI', 'deleted.yml'],
+    });
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+
+    await act(async () => { resolveListing({ workflows: [workflow(1, ' CI ', 'validation.yml', ['pull_request'])] }); });
+
+    expect(screen.getByRole('alert')).toHaveTextContent('Not found in this repository, so never cancelled: deleted.yml.');
+    fireEvent.click(screen.getByRole('button', { name: 'Remove unavailable selections' }));
+    expect(onUpdateCancelCiWorkflows).toHaveBeenLastCalledWith('repo-1', ['CI']);
+    expect(screen.getByRole('checkbox', { name: /validation\.yml/ })).toBeChecked();
+    expect(screen.getByRole('textbox', { name: workflowsName })).toHaveValue('CI');
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+  });
+
   it('offers the repository workflows and matches stored entries by any identity', async () => {
     getRepoWorkflows.mockResolvedValue({ workflows: detected });
     renderBar({ cancelCiDuringFollowup: true, cancelCiDuringFollowupWorkflows: ['Full Test Suite'] });
