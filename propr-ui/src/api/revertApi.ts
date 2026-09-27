@@ -1,5 +1,10 @@
 import { API_BASE_URL, apiFetch, handleApiResponse } from './apiClient';
-import type { AgentTankMode } from '@propr/shared';
+import {
+  AGENT_TANK_LEGACY_BACKEND_MESSAGE,
+  buildAgentTankSettingsRequest,
+  supportsAgentTankModes,
+  type AgentTankMode,
+} from '@propr/shared';
 import type { SummarizationSettings } from './proprTypes';
 
 export type { SummarizationSettings };
@@ -88,10 +93,25 @@ export const getAgentTankSettings = async (): Promise<AgentTankSettingsResponse>
   return response.json();
 };
 
+/**
+ * Refuse a write this backend cannot express instead of letting it answer
+ * `{ success: true }` for something else.
+ *
+ * Only `bundled` needs the check: `external` and `disabled` both survive a
+ * pre-mode backend because the request body carries the derived `enabled`
+ * flag those backends read.
+ */
+const assertModeSupported = async (mode: AgentTankMode): Promise<void> => {
+  if (mode !== 'bundled') return;
+  if (supportsAgentTankModes(await getAgentTankSettings())) return;
+  throw new Error(AGENT_TANK_LEGACY_BACKEND_MESSAGE);
+};
+
 export const updateAgentTankSettings = async (settings: { mode: AgentTankMode; url: string }): Promise<void> => {
+  await assertModeSupported(settings.mode);
   const response = await apiFetch(`${API_BASE_URL}/api/config/agent-tank`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(settings), credentials: 'include'
+    body: JSON.stringify(buildAgentTankSettingsRequest(settings.mode, settings.url)), credentials: 'include'
   });
   await handleApiResponse(response);
 };
@@ -164,10 +184,11 @@ export const detectAgentTank = async (): Promise<AgentTankDetectResponse> => {
 };
 
 export const enableAgentTank = async (mode: AgentTankMode, url?: string): Promise<{ success: boolean }> => {
+  await assertModeSupported(mode);
   const response = await apiFetch(`${API_BASE_URL}/api/config/agent-tank`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(url ? { mode, url } : { mode }),
+    body: JSON.stringify(buildAgentTankSettingsRequest(mode, url)),
     credentials: 'include'
   });
   await handleApiResponse(response);

@@ -61,7 +61,7 @@ Enable it with:
 propr tank bundled
 ```
 
-Bundled mode reports the providers it can see. An agent with no credentials mounted, or a provider Agent Tank does not support, is simply left out.
+Bundled mode reports the providers it can see. A provider Agent Tank does not support is left out, and so is an agent whose credential directory does not exist **on the Docker host** — the host daemon is what resolves the mount, so a directory that is simply not visible inside the ProPR backend container still counts.
 
 If two enabled agents share a provider — two Claude accounts, for example — one run can only inspect one of them, and the first enabled one wins. The snapshot then describes that account only: capacity-aware routing for the other alias reports "no usage data" rather than borrowing the inspected account's numbers. Use external mode if you need every account measured.
 
@@ -160,7 +160,8 @@ So a missing Agent Tank degrades to "no capacity bars," and the work itself comp
 
 - **Sidebar is empty in bundled mode.** Confirm the agent image is built and at least one enabled agent is authenticated. `docker run --rm propr/agent:latest agent-tank --version` proves the image ships the CLI; a task that runs successfully proves the credentials are mounted.
 - **Sidebar is empty / "unreachable" in external mode.** Confirm Agent Tank is running (`http://127.0.0.1:3456` in a browser) and that the URL ProPR uses is reachable *from inside the container* — typically `http://host.docker.internal:3456`, since `localhost` there resolves to the container itself. Avoid `--no-docker` when ProPR runs in Docker. Bundled mode sidesteps all of this.
-- **No agents found by Agent Tank.** At least one supported CLI (`claude`, `agy`, or `codex`) must be installed and authenticated. In bundled mode that means an enabled ProPR agent of that type with a readable credential directory; in external mode, a CLI on the `PATH` of the host running Agent Tank.
+- **No agents found by Agent Tank.** At least one supported CLI (`claude`, `agy`, or `codex`) must be installed and authenticated. In bundled mode that means an enabled ProPR agent of that type whose credential directory exists on the Docker host; in external mode, a CLI on the `PATH` of the host running Agent Tank.
+- **"This ProPR backend is too old to support bundled Agent Tank mode."** The UI or CLI is newer than the backend it is talking to. Upgrade the backend, or stay on external mode until you do — `disabled` and `external` keep working across that version gap.
 - **`Timeout waiting for usage data`.** Make sure the CLI works and is authenticated on its own (no pending trust/auth/update prompts). For Claude, try `--claude-api` in external mode.
 
 For deeper operational context, see [Metrics](./metrics.md).

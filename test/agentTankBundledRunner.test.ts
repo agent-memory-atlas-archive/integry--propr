@@ -35,13 +35,24 @@ let dockerResult: ExecutionResult = {
 };
 /** Held open so concurrent callers overlap and coalescing is actually exercised. */
 let dockerGate: Promise<void> | undefined;
+/** Consumed one run at a time; `dockerResult` answers every run after it. */
+let dockerResultQueue: ExecutionResult[] = [];
 
 const CONTAINER_CONFIG_FILE = '/tmp/propr-agent-tank/config.json';
 const CONFIG_ENV_PREFIX = 'PROPR_AGENT_TANK_CONFIG=';
 
-/** The `-v` sources of a run, in order. */
+/** The `--mount` specs of a run, in order. */
 function bindMounts(args: string[]): string[] {
-    return args.filter((_arg, index) => args[index - 1] === '-v');
+    return args.filter((_arg, index) => args[index - 1] === '--mount');
+}
+
+/**
+ * The spec the runner must produce for a credential directory: `--mount`
+ * (not `-v`) so the daemon refuses a source that is missing on the host
+ * instead of creating an empty directory in its place.
+ */
+function mountSpec(hostPath: string, containerPath: string): string {
+    return `type=bind,source=${hostPath},target=${containerPath},readonly`;
 }
 
 /** The container command (everything after the image). */
@@ -60,7 +71,7 @@ await mock.module('../packages/core/src/claude/docker/dockerExecutor.js', {
         executeDockerCommand: async (_command: string, args: string[]): Promise<ExecutionResult> => {
             dockerRuns.push(args);
             if (dockerGate) await dockerGate;
-            return dockerResult;
+            return dockerResultQueue.shift() ?? dockerResult;
         },
     },
 });
@@ -96,8 +107,10 @@ await mock.module('../packages/core/src/agents/AgentRegistry.js', {
 
 const {
     buildBundledAgentTankConfig,
+    canRunBundledAgentTank,
     clearBundledAgentTankCache,
     getBundledStatusForAlias,
+    missingBindSources,
     parseBundledAgentTankOutput,
     refreshBundledStatuses,
 } = await import('../packages/core/src/services/agentTankBundledRunner.js');
@@ -123,6 +136,7 @@ const SAMPLE_OUTPUT = JSON.stringify({
 beforeEach(() => {
     dockerRuns = [];
     dockerGate = undefined;
+    dockerResultQueue = [];
     dockerResult = { exitCode: 0, stdout: SAMPLE_OUTPUT, stderr: '', messageTimestamps: new Map() };
     configuredAgents = [
         agent({ alias: 'claude', type: 'claude', configPath: claudeHome }),
@@ -130,10 +144,14 @@ beforeEach(() => {
     ];
     clearBundledAgentTankCache();
     delete process.env.AGENT_TANK_BUNDLED_CACHE_TTL_MS;
+    // The test process may itself be a container, so pin the namespace question
+    // instead of letting `/.dockerenv` decide it.
+    process.env.PROPR_CONTAINERIZED = '0';
 });
 
 afterEach(() => {
     clearBundledAgentTankCache();
+    delete process.env.PROPR_CONTAINERIZED;
 });
 
 test('ten concurrent refreshes coalesce onto exactly one container run', async () => {
@@ -184,8 +202,8 @@ test('credential directories are mounted read-only at the agent runtime containe
     await refreshBundledStatuses();
 
     const args = dockerRuns[0];
-    assert.ok(args.includes(`${claudeHome}:/home/node/.claude:ro`));
-    assert.ok(args.includes(`${codexHome}:/home/node/.codex:ro`));
+    assert.ok(args.includes(mountSpec(claudeHome, '/home/node/.claude')));
+    assert.ok(args.includes(mountSpec(codexHome, '/home/node/.codex')));
     assert.ok(args.includes('propr/agent:test'));
     const command = containerCommand(args);
     assert.match(command[2], /exec agent-tank --once --json --config "\$1"/);
@@ -245,8 +263,8 @@ test('the generated config is never bind-mounted from the backend filesystem', a
     // through the deployment's host mapping - may be bind sources here.
     const mounts = bindMounts(dockerRuns[0]);
     assert.deepEqual(mounts, [
-        `${claudeHome}:/home/node/.claude:ro`,
-        `${codexHome}:/home/node/.codex:ro`,
+        mountSpec(claudeHome, '/home/node/.claude'),
+        mountSpec(codexHome, '/home/node/.codex'),
     ]);
     assert.equal(mounts.some(mount => mount.includes(CONTAINER_CONFIG_FILE)), false);
 });
@@ -295,8 +313,8 @@ test('an alias-specific read only answers for the account whose credentials were
 
     // Only the first enabled Claude account was mounted, so it is the only
     // account the snapshot can describe.
-    assert.ok(dockerRuns[0].includes(`${secondaryClaudeHome}:/home/node/.claude:ro`));
-    assert.equal(dockerRuns[0].includes(`${claudeHome}:/home/node/.claude:ro`), false);
+    assert.ok(dockerRuns[0].includes(mountSpec(secondaryClaudeHome, '/home/node/.claude')));
+    assert.equal(dockerRuns[0].includes(mountSpec(claudeHome, '/home/node/.claude')), false);
 
     assert.equal(getBundledStatusForAlias('claude'), undefined);
     assert.equal(getBundledStatusForAlias('claude-secondary')?.name, 'claude');
@@ -330,4 +348,81 @@ test('an alias-specific read reports nothing when no run has succeeded', () => {
     clearBundledAgentTankCache();
 
     assert.equal(getBundledStatusForAlias('claude'), undefined);
+});
+
+test('a credential directory the backend cannot see is still handed to the Docker daemon', async () => {
+    // The backend runs in its own container and drives the host daemon, so a
+    // credential directory that went through the deployment's host mapping does
+    // not have to exist in *this* filesystem. Skipping it here would leave a
+    // correctly configured install with no Agent Tank container at all.
+    process.env.PROPR_CONTAINERIZED = '1';
+    const hostOnlyClaude = '/host-only/propr-agent-tank/.claude';
+    assert.equal(fs.existsSync(hostOnlyClaude), false);
+    configuredAgents = [agent({ alias: 'claude', type: 'claude', configPath: hostOnlyClaude })];
+    clearBundledAgentTankCache();
+
+    const result = await refreshBundledStatuses();
+
+    assert.equal(dockerRuns.length, 1);
+    assert.deepEqual(bindMounts(dockerRuns[0]), [mountSpec(hostOnlyClaude, '/home/node/.claude')]);
+    assert.ok(result?.claude);
+});
+
+test('bundled detection offers the feature for credentials only the Docker host can see', async () => {
+    process.env.PROPR_CONTAINERIZED = '1';
+    configuredAgents = [agent({ alias: 'codex', type: 'codex', configPath: '/host-only/propr-agent-tank/.codex' })];
+
+    assert.equal(await canRunBundledAgentTank(), true);
+});
+
+test('a credential directory absent from a host-sharing backend is still skipped', async () => {
+    // The opposite over-correction: when this process *is* the daemon's
+    // filesystem, a missing directory really is missing and mounting it would
+    // hand Agent Tank an empty credential home.
+    process.env.PROPR_CONTAINERIZED = '0';
+    configuredAgents = [
+        agent({ alias: 'claude', type: 'claude', configPath: path.join(credentialRoot, 'nope') }),
+        agent({ alias: 'codex', type: 'codex', configPath: codexHome }),
+    ];
+    clearBundledAgentTankCache();
+
+    await refreshBundledStatuses();
+
+    assert.deepEqual(bindMounts(dockerRuns[0]), [mountSpec(codexHome, '/home/node/.codex')]);
+    assert.equal(await canRunBundledAgentTank(), true);
+});
+
+test('a bind source the daemon rejects drops that agent instead of the whole run', async () => {
+    process.env.PROPR_CONTAINERIZED = '1';
+    const hostOnlyClaude = '/host-only/propr-agent-tank/.claude';
+    configuredAgents = [
+        agent({ alias: 'claude', type: 'claude', configPath: hostOnlyClaude }),
+        agent({ alias: 'codex', type: 'codex', configPath: codexHome }),
+    ];
+    clearBundledAgentTankCache();
+    // Only the daemon can answer "does this exist on the host?", and it answers
+    // by refusing to start the container. The other account's usage must not go
+    // down with it.
+    dockerResultQueue = [{
+        exitCode: 125,
+        stdout: '',
+        stderr: 'docker: Error response from daemon: invalid mount config for type "bind": '
+            + `bind source path does not exist: ${hostOnlyClaude}.`,
+        messageTimestamps: new Map(),
+    }];
+
+    const result = await refreshBundledStatuses();
+
+    assert.equal(dockerRuns.length, 2);
+    assert.deepEqual(bindMounts(dockerRuns[1]), [mountSpec(codexHome, '/home/node/.codex')]);
+    assert.ok(result?.codex);
+});
+
+test('the daemon error naming a missing bind source is parsed back to the path', () => {
+    assert.deepEqual(
+        missingBindSources('docker: Error response from daemon: invalid mount config for type "bind": '
+            + 'bind source path does not exist: /host/only/.claude.'),
+        ['/host/only/.claude'],
+    );
+    assert.deepEqual(missingBindSources('some other docker failure'), []);
 });

@@ -50,7 +50,7 @@ const CONFIG_ENV_VAR = 'PROPR_AGENT_TANK_CONFIG';
  *
  * The backend normally runs in its own container and drives the host Docker
  * daemon, so a backend-local pathname is not a usable bind source: the daemon
- * resolves `-v` sources on the host, where the generated file does not exist,
+ * resolves bind sources on the host, where the generated file does not exist,
  * and would hand Agent Tank an empty directory instead of its config. No file
  * mode or directory permission can bridge two filesystem namespaces. Every
  * other mount in the run is a credential directory whose path already went
@@ -105,6 +105,17 @@ export interface BundledAgentTankEntry {
     configPath: string;
 }
 
+/** A generated config entry together with the bind source that feeds it. */
+interface BundledCredentialSource {
+    /**
+     * Credential directory as the *Docker daemon* sees it - the deployment's
+     * host mapping, which is not necessarily a path in this process's
+     * filesystem (see `credentialSourceIsUsable`).
+     */
+    hostPath: string;
+    entry: BundledAgentTankEntry;
+}
+
 let cached: CachedSnapshot | undefined;
 // Coalesces concurrent refresh requests onto a single container run. Without
 // this, the sidebar poll and a task's post-call probe could each spawn one.
@@ -139,6 +150,87 @@ function hostCredentialPath(agent: AgentConfig): string | undefined {
             'Skipping agent for bundled Agent Tank: credential path is unavailable');
         return undefined;
     }
+}
+
+/**
+ * Whether this process and the Docker daemon share one filesystem namespace.
+ *
+ * The backend normally runs in its own container against the host daemon, so
+ * the two namespaces are different and a host pathname says nothing about what
+ * this process can stat.
+ */
+function backendSharesHostFilesystem(): boolean {
+    const flag = process.env.PROPR_CONTAINERIZED?.trim().toLowerCase();
+    if (flag === '1' || flag === 'true') return false;
+    if (flag === '0' || flag === 'false') return true;
+    return !fs.existsSync('/.dockerenv');
+}
+
+/**
+ * Decide whether a resolved host credential path may be used as a bind source.
+ *
+ * A local `existsSync` hit is good news in either namespace. A miss only means
+ * anything when this process shares the daemon's filesystem: inside the backend
+ * container a credential directory that went through the deployment's host
+ * mapping (`HOST_CODEX_DIR`, a non-identity `*_CONFIG_PATH`, a managed root that
+ * is not mounted here) is perfectly valid for the daemon and simply invisible to
+ * us. Discarding it there would silently disable bundled mode - and suppress the
+ * detection banner's bundled offer - for a correctly configured install. What we
+ * cannot see, the daemon checks for us: credentials are mounted with
+ * `--mount type=bind`, which refuses to start the container when the source is
+ * missing on the host instead of inventing an empty directory the way `-v` does.
+ */
+function credentialSourceIsUsable(agent: AgentConfig, hostPath: string): boolean {
+    if (fs.existsSync(hostPath)) return true;
+    if (backendSharesHostFilesystem()) {
+        logger.debug({ agentAlias: agent.alias },
+            'Skipping agent for bundled Agent Tank: credential directory does not exist');
+        return false;
+    }
+    logger.debug({ agentAlias: agent.alias },
+        'Bundled Agent Tank credential directory is not visible to the backend; letting the Docker daemon resolve it');
+    return true;
+}
+
+/**
+ * Render one `--mount` field, quoting the way Docker's CSV parser expects when
+ * the value contains a comma or quote (a path may legally contain either, and
+ * an unquoted comma would be read as the start of another field).
+ */
+function mountField(key: string, value: string): string {
+    return /[",]/.test(value)
+        ? `"${key}=${value.replace(/"/g, '""')}"`
+        : `${key}=${value}`;
+}
+
+/**
+ * Read-only bind mounts for every credential source.
+ *
+ * `--mount` rather than `-v` deliberately: usage inspection must never mutate
+ * the credentials the real agent runs depend on, and a missing source must fail
+ * the run rather than be created as an empty directory that Agent Tank would
+ * report as "no usage" for a perfectly healthy account.
+ */
+function buildCredentialMountArgs(sources: BundledCredentialSource[]): string[] {
+    return sources.flatMap(source => ['--mount', [
+        'type=bind',
+        mountField('source', source.hostPath),
+        mountField('target', source.entry.configPath),
+        'readonly',
+    ].join(',')]);
+}
+
+/**
+ * Host paths the daemon refused because they do not exist.
+ *
+ * This is the namespace-correct existence check the backend cannot perform
+ * itself, read back out of the daemon's error so one unauthenticated agent
+ * drops out of the run instead of taking every other agent's usage with it.
+ */
+export function missingBindSources(stderr: string): string[] {
+    return [...stderr.matchAll(/bind source path does not exist:[ \t]*(.*?)\.?[ \t]*$/gm)]
+        .map(match => match[1])
+        .filter(Boolean);
 }
 
 /**
@@ -226,11 +318,10 @@ async function resolveAgentImage(): Promise<string> {
     return process.env.AGENT_DOCKER_IMAGE || 'propr/agent:latest';
 }
 
-/** Build the mount list and config entries for every eligible enabled agent. */
-async function collectBundledAgents(): Promise<{ mounts: string[]; entries: BundledAgentTankEntry[] }> {
+/** Build the credential sources for every eligible enabled agent. */
+async function collectBundledAgents(): Promise<BundledCredentialSource[]> {
     const agents = (await loadAgents()).filter(agent => agent.enabled);
-    const mounts: string[] = [];
-    const entries: BundledAgentTankEntry[] = [];
+    const sources: BundledCredentialSource[] = [];
     const seen = new Set<string>();
 
     for (const agent of agents) {
@@ -244,15 +335,16 @@ async function collectBundledAgents(): Promise<{ mounts: string[]; entries: Bund
         if (seen.has(provider)) continue;
         const hostPath = hostCredentialPath(agent);
         const containerConfigPath = CONTAINER_CONFIG_PATHS[agent.type];
-        if (!hostPath || !containerConfigPath || !fs.existsSync(hostPath)) continue;
+        if (!hostPath || !containerConfigPath) continue;
+        if (!credentialSourceIsUsable(agent, hostPath)) continue;
         seen.add(provider);
-        // Read-only: usage inspection must never be able to mutate or corrupt the
-        // credentials the real agent runs depend on.
-        mounts.push('-v', `${hostPath}:${containerConfigPath}:ro`);
-        entries.push({ provider, alias: agent.alias, configPath: containerConfigPath });
+        sources.push({
+            hostPath,
+            entry: { provider, alias: agent.alias, configPath: containerConfigPath },
+        });
     }
 
-    return { mounts, entries };
+    return sources;
 }
 
 /**
@@ -263,8 +355,7 @@ async function collectBundledAgents(): Promise<{ mounts: string[]; entries: Bund
  */
 export async function canRunBundledAgentTank(): Promise<boolean> {
     try {
-        const { entries } = await collectBundledAgents();
-        return entries.length > 0;
+        return (await collectBundledAgents()).length > 0;
     } catch (error) {
         logger.debug({ error: (error as Error).message },
             'Could not determine bundled Agent Tank eligibility');
@@ -274,37 +365,55 @@ export async function canRunBundledAgentTank(): Promise<boolean> {
 
 async function runBundledAgentTank(): Promise<BundledRunResult | undefined> {
     try {
-        const { mounts, entries } = await collectBundledAgents();
-        if (entries.length === 0) {
-            logger.debug('Bundled Agent Tank skipped: no enabled agent has a readable credential directory');
+        let sources = await collectBundledAgents();
+        if (sources.length === 0) {
+            logger.debug('Bundled Agent Tank skipped: no enabled agent has a usable credential directory');
             return { agents: {}, aliases: {} };
         }
-        const aliases = Object.fromEntries(entries.map(entry => [entry.provider, entry.alias]));
 
         const image = await resolveAgentImage();
 
-        const result = await executeDockerCommand('docker', [
-            'run', '--rm',
-            // No inbound/outbound needs beyond the provider APIs the CLIs call;
-            // we do not add --network none because `/usage` for some providers
-            // hits the provider API.
-            '--name', `propr-agent-tank-${randomBytes(6).toString('hex')}`,
-            '-e', 'PROPR_AGENT_TYPE=agent-tank',
-            '-e', `${CONFIG_ENV_VAR}=${buildBundledAgentTankConfig(entries)}`,
-            ...mounts,
-            image,
-            // `sh -c <script> <$0> <$1>`: the config path is passed as an
-            // argument rather than interpolated, so the script itself stays a
-            // fixed string.
-            'sh', '-c', CONFIG_BOOTSTRAP, 'propr-agent-tank', CONTAINER_CONFIG_FILE,
-        ], { timeout: timeoutMs() });
+        // The daemon reports missing bind sources one run at a time and each
+        // retry drops at least one, so this many attempts is always enough.
+        const maxAttempts = sources.length;
+        for (let attempt = 0; attempt < maxAttempts; attempt++) {
+            const entries = sources.map(source => source.entry);
+            const aliases = Object.fromEntries(entries.map(entry => [entry.provider, entry.alias]));
 
-        if (result.exitCode !== 0) {
-            logger.warn({ exitCode: result.exitCode, stderr: (result.stderr || '').slice(0, 500) },
-                'Bundled Agent Tank run failed');
-            return undefined;
+            const result = await executeDockerCommand('docker', [
+                'run', '--rm',
+                // No inbound/outbound needs beyond the provider APIs the CLIs call;
+                // we do not add --network none because `/usage` for some providers
+                // hits the provider API.
+                '--name', `propr-agent-tank-${randomBytes(6).toString('hex')}`,
+                '-e', 'PROPR_AGENT_TYPE=agent-tank',
+                '-e', `${CONFIG_ENV_VAR}=${buildBundledAgentTankConfig(entries)}`,
+                ...buildCredentialMountArgs(sources),
+                image,
+                // `sh -c <script> <$0> <$1>`: the config path is passed as an
+                // argument rather than interpolated, so the script itself stays a
+                // fixed string.
+                'sh', '-c', CONFIG_BOOTSTRAP, 'propr-agent-tank', CONTAINER_CONFIG_FILE,
+            ], { timeout: timeoutMs() });
+
+            if (result.exitCode === 0) {
+                return { agents: parseBundledAgentTankOutput(result.stdout || ''), aliases };
+            }
+
+            const stderr = result.stderr || '';
+            const missing = new Set(missingBindSources(stderr));
+            const remaining = sources.filter(source => !missing.has(source.hostPath));
+            if (remaining.length === sources.length) {
+                logger.warn({ exitCode: result.exitCode, stderr: stderr.slice(0, 500) },
+                    'Bundled Agent Tank run failed');
+                return undefined;
+            }
+            logger.warn({ missingCredentialSources: [...missing] },
+                'Bundled Agent Tank credential directories are missing on the Docker host; inspecting the remaining agents');
+            if (remaining.length === 0) return { agents: {}, aliases: {} };
+            sources = remaining;
         }
-        return { agents: parseBundledAgentTankOutput(result.stdout || ''), aliases };
+        return undefined;
     } catch (error) {
         logger.warn({ error: (error as Error).message }, 'Bundled Agent Tank run threw');
         return undefined;

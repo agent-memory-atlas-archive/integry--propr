@@ -87,6 +87,14 @@ async function capture(page: Page, name: string): Promise<void> {
   });
 }
 
+/** Whole-viewport variant, for states whose evidence includes the save bar. */
+async function captureViewport(page: Page, name: string): Promise<void> {
+  if (!process.env.PROPR_CAPTURE_PREVIEWS) return;
+  const directory = path.resolve('../.propr/previews');
+  await mkdir(directory, { recursive: true });
+  await page.screenshot({ animations: 'disabled', path: path.join(directory, `${name}.png`) });
+}
+
 test('offers three modes and shows the daemon URL only for external', async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 1000 });
   const saved = await installFixture(page, { mode: 'disabled', enabled: false, url: 'http://host.docker.internal:3456' });
@@ -117,4 +125,33 @@ test('loads a legacy enabled installation as external with its saved URL', async
 
   await expect(page.getByRole('radio', { name: /External/ })).toBeChecked();
   await expect(page.getByLabel('Daemon URL')).toHaveValue('http://host.docker.internal:3456');
+});
+
+test('a write to a legacy backend carries the enabled flag that backend reads', async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 1000 });
+  const saved = await installFixture(page, { enabled: true, url: 'http://host.docker.internal:3456' });
+  await page.goto('/settings?tab=integrations');
+  await expect(page.getByRole('radio', { name: /External/ })).toBeChecked();
+
+  await page.getByLabel('Daemon URL').fill('http://127.0.0.1:3456');
+
+  // The pre-mode handler stores `enabled: !!enabled`, so a body carrying only
+  // `mode` would turn tracking off while the server still answers success.
+  await expect.poll(() => saved.at(-1)).toMatchObject({
+    mode: 'external', enabled: true, url: 'http://127.0.0.1:3456',
+  });
+});
+
+test('bundled mode is refused on a legacy backend instead of reported as applied', async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 1000 });
+  const saved = await installFixture(page, { enabled: true, url: 'http://host.docker.internal:3456' });
+  await page.goto('/settings?tab=integrations');
+
+  await page.getByRole('radio', { name: /Bundled/ }).check();
+
+  await expect(page.getByRole('status').filter({ hasText: 'too old' })).toBeVisible();
+  // Nothing was written, and the radio shows the mode that is really stored.
+  expect(saved).toEqual([]);
+  await expect(page.getByRole('radio', { name: /External/ })).toBeChecked();
+  await captureViewport(page, 'agent-tank-legacy-backend');
 });

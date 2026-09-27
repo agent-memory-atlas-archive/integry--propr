@@ -37,3 +37,44 @@ export function isAgentTankMode(value: unknown): value is AgentTankMode {
 export function agentTankModeFromLegacyEnabled(enabled: unknown): AgentTankMode {
   return enabled === true ? 'external' : 'disabled';
 }
+
+/**
+ * Build the body for `POST /api/config/agent-tank`.
+ *
+ * `enabled` travels next to `mode` on purpose. A backend that predates
+ * integration modes reads only `{ enabled, url }`, so a mode-only body makes it
+ * persist `enabled: false` and still answer `{ success: true }`: tracking is
+ * switched off while the client reports the mode the operator picked. Current
+ * backends treat `mode` as authoritative and ignore `enabled`, so one body is
+ * correct against both.
+ *
+ * `bundled` has no legacy equivalent at all - callers must refuse it against a
+ * pre-mode backend (see `supportsAgentTankModes`) instead of sending a body
+ * that backend would reinterpret as "external, at whatever URL is saved".
+ */
+export function buildAgentTankSettingsRequest(
+  mode: AgentTankMode,
+  url?: string
+): { mode: AgentTankMode; enabled: boolean; url?: string } {
+  const enabled = mode !== 'disabled';
+  return url === undefined ? { mode, enabled } : { mode, enabled, url };
+}
+
+/**
+ * Whether the backend that produced this `/api/config/agent-tank` (or
+ * `/detect`) response understands integration modes. A pre-mode backend answers
+ * with no `mode` key at all, and cannot honor a `bundled` request.
+ */
+export function supportsAgentTankModes(response: unknown): boolean {
+  return !!response
+    && typeof response === 'object'
+    && isAgentTankMode((response as { mode?: unknown }).mode);
+}
+
+/**
+ * Shown instead of reporting a successful change when the operator asks for a
+ * mode the connected backend cannot express.
+ */
+export const AGENT_TANK_LEGACY_BACKEND_MESSAGE =
+  'This ProPR backend is too old to support bundled Agent Tank mode. '
+  + 'Upgrade the backend, or choose external mode.';

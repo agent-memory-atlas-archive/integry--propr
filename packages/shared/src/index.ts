@@ -468,10 +468,13 @@ export * from './publishedVisualPreviews.js';
 // Export the Agent Tank integration mode vocabulary shared by core, the API,
 // the CLI and the UI so the three states cannot drift between surfaces.
 export {
+  AGENT_TANK_LEGACY_BACKEND_MESSAGE,
   AGENT_TANK_MODES,
   DEFAULT_AGENT_TANK_MODE,
   agentTankModeFromLegacyEnabled,
+  buildAgentTankSettingsRequest,
   isAgentTankMode,
   normalizeAgentTankMode,
+  supportsAgentTankModes,
   type AgentTankMode,
 } from './agentTank.js';
