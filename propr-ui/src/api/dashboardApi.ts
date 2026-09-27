@@ -181,3 +181,18 @@ export const getDashboardStats = (
       `/api/stats/dashboard?${repositoryQuery(repository)}&period=${encodeURIComponent(period)}`,
       signal,
     ));
+
+export interface DashboardNarrativeResponse {
+  repository: RepositoryFilter;
+  enabled: boolean;
+  summary: string | null;
+}
+
+export const getDashboardNarrative = (
+  repository: RepositoryFilter = 'all',
+  refresh = false,
+): Promise<DashboardNarrativeResponse> =>
+  shareInFlightApiRead(`dashboard-narrative:${repository}:${refresh}`, signal =>
+    readJson<DashboardNarrativeResponse>(
+      `/api/dashboard/narrative?${repositoryQuery(repository)}${refresh ? '&refresh=true' : ''}`, signal,
+    ));

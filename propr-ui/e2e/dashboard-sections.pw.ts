@@ -84,6 +84,7 @@ const dashboardResponses = (
   attentionItems: typeof attention,
   runningItems: typeof running,
 ): Record<string, unknown> => ({
+  '/api/dashboard/narrative': { repository: 'all', enabled: true, summary: 'Work is underway on the dashboard and design system, with more tasks queued. Recent reviews are complete; a failed check and pull requests still need your attention.' },
   '/api/dashboard/summary': {
     repository: 'all',
     needsAttention: attentionItems.length,

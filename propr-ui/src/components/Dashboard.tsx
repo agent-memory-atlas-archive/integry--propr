@@ -4,8 +4,7 @@
  * The dashboard answers "what needs my attention right now" in four panes:
  * needs attention, happening now, completed and historical stats. Live
  * work gets the space; the deeper charts live on `/analytics`. The page spends
- * no row of its own on a title or a toolbar: the panes start directly under the
- * global header, and the repository filter lives in that header.
+ * no row of its own on a title or a toolbar: an activity summary precedes the panes, and the repository filter lives in that header.
  *
  * This file owns only three things — the shared repository filter, the live
  * activity subscription that tells each section when its own data changed, and
@@ -23,7 +22,7 @@
  * halfway down the screen above a band of dead white space.
  */
 
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { useSearchParams } from 'react-router-dom';
 import { useDocumentTitle } from '../hooks/useDocumentTitle';
@@ -35,8 +34,11 @@ import { ConnectSoftPromoBanner } from './ConnectPlusBanner';
 import { RepositorySelector, type RepoOption } from './RepositorySelector';
 import { useHeaderScopeSlot } from './headerScopeSlot';
 import { fetchEnabledRepos } from '../utils/repoHelpers';
+import { useSocket } from '../contexts/useSocket';
+import type { TaskUpdatePayload } from '@propr/shared';
 import { useCurrentUser, userHasPermission } from '../contexts/AuthContext';
 import { isDefaultParamValue } from './TaskList/utils';
+import { DashboardSummary } from './Dashboard/DashboardSummary';
 import { NeedsAttentionPanel } from './Dashboard/NeedsAttentionPanel';
 import { HappeningNowSection } from './Dashboard/HappeningNowSection';
 import { CompletedFeed } from './Dashboard/CompletedFeed';
@@ -96,7 +98,7 @@ const Dashboard: React.FC = () => {
     One shared token meant an agent's tool-call heartbeat re-ran the aggregate
     completion-count query behind the historical stats panel. Each section now
     gets a token bumped only by the changes it actually reflects, and the
-    client-side fingerprint heuristic is gone: the pushed envelope already states
+    client-side fingerprint heuristic for section refreshes is gone: the pushed envelope already states
     the domain, the change and a revision, so the client no longer has to guess
     from a worker state string whether a frame mattered.
 
@@ -106,6 +108,25 @@ const Dashboard: React.FC = () => {
     screen and still refreshes them.
   */
   const refreshTokens = useSectionRefreshTokens(repository);
+
+  // The narrative reacts only to task outcomes and attention transitions. Keep
+  // its token separate so these events do not refresh unrelated dashboard panes.
+  const { onTaskUpdate, isConnected } = useSocket();
+  const [completionToken, setCompletionToken] = useState(0);
+  const summaryTaskFingerprintsRef = useRef<Map<string, string>>(new Map());
+
+  useEffect(() => {
+    if (!isConnected) return;
+    return onTaskUpdate((payload: TaskUpdatePayload) => {
+      const fingerprint = `${payload.state}\0${payload.repository ?? ''}\0${payload.issueNumber ?? ''}`;
+      if (summaryTaskFingerprintsRef.current.get(payload.taskId) === fingerprint) return;
+      summaryTaskFingerprintsRef.current.set(payload.taskId, fingerprint);
+      if (['completed', 'failed', 'cancelled', 'action_required', 'action-required', 'needs_attention', 'needs-attention'].includes(payload.state)
+        && (repository === ALL_REPOSITORIES || !payload.repository || payload.repository === repository)) {
+        setCompletionToken(token => token + 1);
+      }
+    });
+  }, [isConnected, onTaskUpdate, repository]);
 
   const headerScopeSlot = useHeaderScopeSlot();
   const showRepositoryFilter = reposLoading || repoOptions.length > 1;
@@ -140,8 +161,8 @@ const Dashboard: React.FC = () => {
           belongs rather than on a row of its own.
 
           From `lg` up the filter mounts in the global toolbar, immediately
-          right of search: the panes then start directly under that toolbar's
-          rule, with no page bar between them. A 36px bar holding a title on
+          right of search: the activity summary then starts directly under
+          that toolbar's rule, with no page bar between them. A 36px bar holding a title on
           the left and this filter on the right spent a full row and 800px of
           empty width on one control.
 
@@ -174,6 +195,8 @@ const Dashboard: React.FC = () => {
             />
           </div>
         )}
+
+        <DashboardSummary repository={repository} completionToken={completionToken} />
 
         <ConnectSoftPromoBanner />
 

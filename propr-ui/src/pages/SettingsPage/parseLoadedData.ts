@@ -21,6 +21,7 @@ interface SettingsApiData {
   github_user_whitelist?: string[];
   auto_followup_score_threshold?: number;
   auto_resolve_merge_conflicts?: boolean;
+  dashboard_summary_enabled?: boolean;
   model_reasoning_level?: string;
   pr_review_model?: string;
   pr_review_prompt?: string;
@@ -42,6 +43,7 @@ function buildSettings(settingsData: SettingsApiData, enabledAgents: AgentConfig
     default_agent_alias: resolveDefaultAgentAlias(settingsData.default_agent_alias, enabledAgents),
     auto_followup_score_threshold: settingsData.auto_followup_score_threshold ?? 4,
     auto_resolve_merge_conflicts: settingsData.auto_resolve_merge_conflicts ?? false,
+    dashboard_summary_enabled: settingsData.dashboard_summary_enabled ?? true,
     model_reasoning_level: settingsData.model_reasoning_level || '',
     pr_review_model: settingsData.pr_review_model || '',
     pr_review_prompt: settingsData.pr_review_prompt || '',

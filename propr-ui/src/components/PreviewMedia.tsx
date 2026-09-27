@@ -66,8 +66,12 @@ export function PreviewImage({ preview, compact = false, className: sizing, onUn
   </span>;
 }
 
-/** Authenticated video equivalent used by full galleries in web and Desktop. */
-export function PreviewVideo({ preview, className }: { preview: PublishedVisualPreview; className: string }) {
+/**
+ * Authenticated video equivalent used by full galleries in web and Desktop.
+ * `controls={false}` makes it a silent poster frame for a clickable tile: the wrapping control owns
+ * the interaction and the accessible name, so the element itself leaves the tab order.
+ */
+export function PreviewVideo({ preview, className, controls = true }: { preview: PublishedVisualPreview; className: string; controls?: boolean }) {
   const source = usePreviewMediaSource(preview.url);
   if (source.status === 'loading') {
     return <span role="status" aria-label={`${preview.title} — video loading`} className={`${className} block animate-pulse bg-slate-900`} />;
@@ -76,6 +80,9 @@ export function PreviewVideo({ preview, className }: { preview: PublishedVisualP
     return <span role="img" aria-label={`${preview.title} — video unavailable`} className={`${className} flex items-center justify-center bg-slate-900 text-sm text-white/70`}>
       <Film className="mr-2 h-5 w-5" />Video unavailable
     </span>;
+  }
+  if (!controls) {
+    return <video src={source.src} aria-hidden="true" tabIndex={-1} muted preload="metadata" playsInline className={className} />;
   }
   return <video src={source.src} aria-label={preview.title} controls preload="metadata" playsInline className={className} />;
 }
