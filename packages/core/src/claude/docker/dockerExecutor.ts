@@ -18,8 +18,8 @@ import {
     setupAbortChecker,
 } from './dockerAbortController.js';
 import {
+    BoundedDiagnosticTail,
     BoundedProviderRecordBuffer,
-    boundedProviderDiagnostic,
     boundedProviderOutput,
 } from '../../agents/impl/utils/boundedProviderOutput.js';
 import {
@@ -233,8 +233,11 @@ export function executeDockerCommand(command: string, args: string[], options: D
         const namedContainer = command === 'docker' ? getDockerRunContainerName(executionArgs) : null;
         const child = spawnCommandProcess(executablePath, executionArgs, cwd, stdinData);
 
-        let stdout = '', stderr = '', sessionLineBuffer = '';
+        let sessionLineBuffer = '';
+        const stderrTail = new BoundedDiagnosticTail();
+        // Built on read only (it costs the whole bounded output), never per chunk.
         const stdoutBuffer = new BoundedProviderRecordBuffer();
+        const readStdout = (): string => stdoutBuffer.output;
         const stdoutDecoder = new StringDecoder('utf8');
         const stderrDecoder = new StringDecoder('utf8');
         const state = createDockerExecutionState();
@@ -315,7 +318,7 @@ export function executeDockerCommand(command: string, args: string[], options: D
             : null;
 
         const getRedisOutput = () => {
-            const primaryOutput = streamStderrToRedis ? `${stderr}${stdout ? `\n${stdout}` : ''}` : stdout;
+            const stdout = readStdout(), primaryOutput = streamStderrToRedis ? `${stderrTail.value}${stdout ? `\n${stdout}` : ''}` : stdout;
             let extraOutput = '';
             if (streamExtraOutput) {
                 try { extraOutput = streamExtraOutput(); }
@@ -338,18 +341,18 @@ export function executeDockerCommand(command: string, args: string[], options: D
 
         child.stdout?.on('data', (data: Buffer) => {
             const chunk = stdoutDecoder.write(data), ts = new Date().toISOString();
-            stdout = stdoutBuffer.append(chunk);
+            stdoutBuffer.append(chunk);
             inspectSessionLines(chunk, ts);
         });
         child.stderr?.on('data', (data: Buffer) => {
-            stderr = boundedProviderDiagnostic(stderr + stderrDecoder.write(data));
+            stderrTail.append(stderrDecoder.write(data));
         });
 
         child.on('close', async (exitCode: number | null) => {
             clearTimeout(timeoutHandle);
             const finalStdout = stdoutDecoder.end();
-            if (finalStdout) stdout = stdoutBuffer.append(finalStdout);
-            stderr = boundedProviderDiagnostic(stderr + stderrDecoder.end());
+            if (finalStdout) stdoutBuffer.append(finalStdout);
+            stderrTail.append(stderrDecoder.end()); const stderr = stderrTail.value;
             inspectSessionLines(finalStdout, new Date().toISOString(), true);
             if (containerDetectionTimer) clearTimeout(containerDetectionTimer);
             if (abortChecker) await abortChecker.close();
@@ -371,13 +374,13 @@ export function executeDockerCommand(command: string, args: string[], options: D
                 const timeoutMessage = `Command timed out after ${timeout}ms`;
                 const timeoutStderr = stderr.trim() ? `${stderr.trimEnd()}\n${timeoutMessage}` : timeoutMessage;
                 if (preserveOutputOnTimeout) {
-                    resolve({ exitCode, stdout, stderr: timeoutStderr, messageTimestamps, timedOut: true, timeoutMs: timeout });
+                    resolve({ exitCode, stdout: readStdout(), stderr: timeoutStderr, messageTimestamps, timedOut: true, timeoutMs: timeout });
                 } else {
                     reject(new Error(timeoutMessage));
                 }
                 return;
             }
-            resolve({ exitCode, stdout, stderr, messageTimestamps });
+            resolve({ exitCode, stdout: readStdout(), stderr, messageTimestamps });
         });
         child.on('error', async (error: Error) => {
             clearTimeout(timeoutHandle);
