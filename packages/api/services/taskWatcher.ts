@@ -18,7 +18,7 @@ const LIVE_EXECUTION_STATES = new Set(['claude_execution', 'codex_execution', 'g
 
 function canContinueProjection(projector: LiveOutputProjector, read: LiveOutputRead): boolean {
   return read.epoch !== 'legacy' && read.epoch === projector.epoch
-    && read.start === projector.start && read.from === projector.offset;
+    && read.start === projector.start && read.from === projector.offset && projector.offset <= read.end;
 }
 
 /** Active task watcher info */

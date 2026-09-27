@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { Redis } from 'ioredis';
 import logger from '../../../utils/logger.js';
 
@@ -9,9 +10,10 @@ import logger from '../../../utils/logger.js';
  *   agent:output:<task>:meta  hash: `base` absolute offset of the first retained
  *                             byte, `epoch` bumped whenever an execution starts
  *                             over, `start` that execution's absolute offset,
- *                             `head` its first record
+ *                             `head` its first record, `generation` a unique identity
+ *                             assigned when the log is recreated
  *
- * Absolute offsets only ever grow: a reader that remembers one can always tell
+ * Within a generation offsets only grow: a reader that remembers one can tell
  * whether its next bytes are still retained. When the output passes the ceiling
  * the oldest records are dropped at a record boundary (the first record, which
  * identifies the provider format, is kept in `head`).
@@ -23,13 +25,18 @@ export const liveOutputKey = (taskId: string): string => `agent:output:${taskId}
 export const liveOutputMetaKey = (taskId: string): string => `agent:output:${taskId}:meta`;
 
 /**
- * KEYS: data, meta. ARGV: chunk, maximum bytes, ttl seconds, mode.
+ * KEYS: data, meta. ARGV: chunk, maximum bytes, ttl seconds, mode, generation candidate.
  * mode `reset` starts a new execution (new epoch) before appending; `replace`
  * swaps in a whole snapshot of the same execution (providers that cannot stream
  * records), so readers resynchronize without a new epoch.
  */
 export const APPEND_LIVE_OUTPUT_SCRIPT = `
 local mode = ARGV[4]
+-- The counter can restart after expiry. A fresh identity distinguishes that
+-- log from all prior generations, even if its offsets and epoch are identical.
+if redis.call('exists', KEYS[1]) == 0 or redis.call('hexists', KEYS[2], 'generation') == 0 then
+    redis.call('hset', KEYS[2], 'generation', ARGV[5])
+end
 if mode == 'reset' or mode == 'replace' then
     local previous = redis.call('strlen', KEYS[1])
     redis.call('del', KEYS[1])
@@ -77,7 +84,7 @@ export async function writeLiveOutput(
 ): Promise<number> {
     return Number(await redis.eval(
         APPEND_LIVE_OUTPUT_SCRIPT, 2, liveOutputKey(taskId), liveOutputMetaKey(taskId),
-        chunk, String(maximumBytes), String(LIVE_OUTPUT_TTL_SECONDS), mode,
+        chunk, String(maximumBytes), String(LIVE_OUTPUT_TTL_SECONDS), mode, randomUUID(),
     ));
 }
 
@@ -99,10 +106,13 @@ export class LiveOutputLog {
     private readonly ownsRedis: boolean;
     private partial = '';
     private pending = '';
+    private readonly writes: Array<{ chunk: string; mode: 'append' | 'replace' }> = [];
     private resetPending: boolean;
     private flushTimer: ReturnType<typeof setTimeout> | null = null;
     private flushPromise: Promise<void> = Promise.resolve();
     private closed = false;
+    private finished = false;
+    private closePromise: Promise<void> | null = null;
 
     constructor(private readonly taskId: string, private readonly options: LiveOutputLogOptions = {}) {
         this.resetPending = options.reset === true;
@@ -130,41 +140,72 @@ export class LiveOutputLog {
     /** Publishes a whole snapshot in place of the previous one (providers that cannot stream records). */
     replace(snapshot: string): void {
         if (this.closed) return;
-        const mode: LiveOutputWriteMode = this.resetPending ? 'reset' : 'replace';
-        this.resetPending = false;
-        this.flushPromise = this.flushPromise
-            .then(() => writeLiveOutput(this.redis, this.taskId, this.transform(snapshot), { mode }))
-            .then(() => undefined, error => this.warn(error));
+        this.enqueuePending();
+        this.writes.push({ chunk: this.transform(snapshot), mode: 'replace' });
+        void this.flush();
     }
 
     flush(): Promise<void> {
         if (this.flushTimer) clearTimeout(this.flushTimer);
         this.flushTimer = null;
-        if (!this.pending && !this.resetPending) return this.flushPromise;
-        const chunk = this.pending;
-        const mode: LiveOutputWriteMode = this.resetPending ? 'reset' : 'append';
-        this.pending = '';
-        this.resetPending = false;
-        this.flushPromise = this.flushPromise
-            .then(() => writeLiveOutput(this.redis, this.taskId, chunk, { mode }))
-            .then(() => undefined, error => this.warn(error));
+        this.enqueuePending();
+        if (this.resetPending && this.writes.length === 0) this.writes.push({ chunk: '', mode: 'append' });
+        this.flushPromise = this.flushPromise.then(async () => {
+            while (this.writes.length > 0) {
+                const write = this.writes[0];
+                try {
+                    if (this.ownsRedis && this.redis.status === 'end') await this.redis.connect();
+                    await writeLiveOutput(this.redis, this.taskId, write.chunk, { mode: this.resetPending ? 'reset' : write.mode });
+                } catch (error) {
+                    this.warn(error);
+                    this.scheduleFlush();
+                    return;
+                }
+                // Only this serialized drain may acknowledge the head, after success.
+                this.resetPending = false;
+                this.writes.shift();
+            }
+        });
         return this.flushPromise;
     }
 
     async close(): Promise<void> {
-        if (this.closed) return;
+        if (this.finished) return;
+        if (this.closePromise) return this.closePromise;
+        this.closePromise = this.finishClose();
+        try { await this.closePromise; }
+        finally { this.closePromise = null; }
+    }
+
+    private async finishClose(): Promise<void> {
         if (this.partial) this.queue(`${this.partial}\n`);
         this.partial = '';
         this.closed = true;
         await this.flush();
+        // Retain failed work for a later close/flush, without leaking an owned connection.
+        if (this.writes.length > 0) {
+            if (this.ownsRedis) this.redis.disconnect();
+            throw new Error('Live output still has unpublished writes');
+        }
         if (this.ownsRedis) await this.redis.quit().catch(() => undefined);
+        this.finished = true;
+    }
+
+    private enqueuePending(): void {
+        if (!this.pending) return;
+        this.writes.push({ chunk: this.pending, mode: 'append' });
+        this.pending = '';
     }
 
     private queue(records: string): void {
         this.pending += this.options.transformRecord
             ? records.split('\n').map((record, index, all) => (index === all.length - 1 ? record : this.transform(record))).join('\n')
             : records;
-        if (!this.flushTimer) {
+        this.scheduleFlush();
+    }
+
+    private scheduleFlush(): void {
+        if (!this.closed && !this.flushTimer) {
             this.flushTimer = setTimeout(() => { this.flushTimer = null; void this.flush(); }, this.options.flushIntervalMs ?? 500);
             this.flushTimer.unref?.();
         }

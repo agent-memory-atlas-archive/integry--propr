@@ -198,7 +198,6 @@ export class AppServerConnection {
     }
 
     async close(): Promise<void> {
-        await this.output.close();
         this.child.stdin?.end();
         const force = setTimeout(() => this.child.kill('SIGTERM'), 500);
         await new Promise<void>(resolve => {
@@ -206,5 +205,6 @@ export class AppServerConnection {
             else this.child.once('close', () => resolve());
         });
         clearTimeout(force);
+        await this.output.close();
     }
 }

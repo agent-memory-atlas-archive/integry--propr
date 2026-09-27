@@ -350,7 +350,8 @@ export function executeDockerCommand(command: string, args: string[], options: D
             await Promise.allSettled([...pendingCallbacks]);
             if (state.teardownPromise) await state.teardownPromise;
             executionSignal?.removeEventListener('abort', abortForExecutionSignal);
-            await liveOutput?.close();
+            try { await liveOutput?.close(); }
+            catch (error) { reject(hasOwnershipFailure ? ownershipFailure : getExecutionAbortError(executionSignal) ?? error); return; }
             const executionAbortError = getExecutionAbortError(executionSignal);
             if (executionAbortError) preserveOwnershipFailure(executionAbortError);
             if (hasOwnershipFailure) {
@@ -381,7 +382,7 @@ export function executeDockerCommand(command: string, args: string[], options: D
             if (abortChecker) await abortChecker.close();
             await Promise.allSettled([...pendingCallbacks]);
             if (state.teardownPromise) await state.teardownPromise;
-            await liveOutput?.close();
+            await liveOutput?.close().catch(() => undefined);
             reject(error);
         });
     });

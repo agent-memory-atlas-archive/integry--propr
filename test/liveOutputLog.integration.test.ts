@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { Redis } from 'ioredis';
+import { LiveAgentOutput } from '../packages/core/src/agents/impl/utils/liveAgentOutput.js';
 import { LiveOutputLog, liveOutputKey, liveOutputMetaKey, writeLiveOutput } from '../packages/core/src/agents/impl/utils/liveOutputLog.js';
 
 async function connect(t: { skip: (message: string) => void }): Promise<Redis | null> {
@@ -120,3 +121,207 @@ test('snapshot close retains output and increments the epoch only at execution s
         redis.disconnect();
     }
 });
+
+function deferred() {
+    let resolve!: () => void;
+    const promise = new Promise<void>(done => { resolve = done; });
+    return { promise, resolve };
+}
+
+for (const reset of [false, true]) {
+    test(`failed append batches retain their mode and order across overlapping flushes (reset=${reset})`, async () => {
+        const entered = deferred();
+        const release = deferred();
+        const attempts: Array<{ text: string; mode: string }> = [];
+        const redis = {
+            eval: async (_script: string, _keys: number, _data: string, _meta: string, text: string, _max: string, _ttl: string, mode: string) => {
+                attempts.push({ text, mode });
+                if (attempts.length === 1) {
+                    entered.resolve();
+                    await release.promise;
+                    throw new Error('temporary outage');
+                }
+                return text.length;
+            },
+        } as unknown as Redis;
+        const log = new LiveOutputLog('retry-append', { reset, redis });
+        log.append('first\n');
+        const first = log.flush();
+        await entered.promise;
+        log.append('second\n');
+        const second = log.flush();
+        release.resolve();
+        await Promise.all([first, second]);
+        await log.close();
+        assert.deepEqual(attempts, [
+            { text: 'first\n', mode: reset ? 'reset' : 'append' },
+            { text: 'first\n', mode: reset ? 'reset' : 'append' },
+            { text: 'second\n', mode: 'append' },
+        ]);
+    });
+}
+
+for (const initialFailure of [true, false]) {
+    test(`failed snapshots retry before later snapshots (initial failure=${initialFailure})`, async () => {
+        const attempts: Array<{ text: string; mode: string }> = [];
+        let failing = false;
+        const redis = {
+            eval: async (_script: string, _keys: number, _data: string, _meta: string, text: string, _max: string, _ttl: string, mode: string) => {
+                attempts.push({ text, mode });
+                if (failing) throw new Error('temporary outage');
+                return text.length;
+            },
+        } as unknown as Redis;
+        const log = new LiveOutputLog('retry-snapshot', { reset: true, redis });
+        if (!initialFailure) {
+            log.replace('initial');
+            await log.flush();
+        }
+        failing = true;
+        log.replace('failed');
+        await log.flush();
+        const failures = attempts.filter(write => write.text === 'failed');
+        assert.ok(failures.length > 0);
+        assert.ok(failures.every(write => write.mode === (initialFailure ? 'reset' : 'replace')));
+        failing = false;
+        const recoveredAt = attempts.length;
+        log.replace('later');
+        await log.close();
+        assert.deepEqual(attempts.slice(recoveredAt), [
+            { text: 'failed', mode: initialFailure ? 'reset' : 'replace' },
+            { text: 'later', mode: 'replace' },
+        ]);
+    });
+}
+
+test('failed empty reset is retried before output, and a failed close remains retryable', async () => {
+    let failing = true;
+    const attempts: Array<{ text: string; mode: string }> = [];
+    const redis = {
+        eval: async (_script: string, _keys: number, _data: string, _meta: string, text: string, _max: string, _ttl: string, mode: string) => {
+            attempts.push({ text, mode });
+            if (failing) throw new Error('temporary outage');
+            return text.length;
+        },
+    } as unknown as Redis;
+    const log = new LiveOutputLog('retry-close', { reset: true, redis });
+    await log.flush();
+    log.append('final partial');
+    await assert.rejects(log.close(), /unpublished/);
+    failing = false;
+    const recoveredAt = attempts.length;
+    await log.close();
+    await log.close();
+    assert.deepEqual(attempts.slice(recoveredAt), [
+        { text: '', mode: 'reset' },
+        { text: 'final partial\n', mode: 'append' },
+    ]);
+});
+
+test('an unchanged snapshot is retried by the timer without another publication', async () => {
+    let attempts = 0;
+    const published = deferred();
+    const redis = {
+        eval: async () => {
+            if (++attempts === 1) throw new Error('temporary outage');
+            published.resolve();
+            return 1;
+        },
+    } as unknown as Redis;
+    const log = new LiveOutputLog('timer-retry', { reset: true, redis, flushIntervalMs: 1 });
+    // Keep the test alive while the writer's intentionally unreferenced timer runs.
+    const timeout = setTimeout(() => published.resolve(), 1000);
+    try {
+        log.replace('unchanged');
+        await published.promise;
+        assert.equal(attempts, 2);
+    } finally {
+        clearTimeout(timeout);
+        await log.close();
+    }
+});
+
+for (const failingSink of ['redis', 'durable']) {
+    test(`goal output retains failed ${failingSink} writes and waits for both acknowledgements`, async () => {
+        const entered = deferred();
+        const release = deferred();
+        const published: string[] = [];
+        const persisted: string[] = [];
+        const attempts = { redis: 0, durable: 0 };
+        const write = async (sink: 'redis' | 'durable', text: string) => {
+            attempts[sink] += 1;
+            if (attempts[sink] === 1) {
+                if (sink === failingSink) throw new Error('temporary outage');
+                entered.resolve();
+                await release.promise;
+            }
+            (sink === 'redis' ? published : persisted).push(text);
+            return text.length;
+        };
+        const redis = { eval: async (_script: string, _keys: number, _data: string, _meta: string, text: string) => write('redis', text) } as unknown as Redis;
+        const output = new LiveAgentOutput('goal-retry', async records => { await write('durable', `${records.join('\n')}\n`); }, 'test', redis);
+        output.append('first\n');
+        const first = output.flush();
+        await entered.promise;
+        output.append('second\n');
+        const second = output.flush();
+        await new Promise(resolve => setImmediate(resolve));
+        assert.deepEqual(attempts, { redis: 1, durable: 1 }, 'a rejection cannot release the still-running sibling write');
+        release.resolve();
+        await Promise.all([first, second]);
+        await output.close();
+        assert.deepEqual(published, ['first\n', 'second\n']);
+        assert.deepEqual(persisted, published, 'successful sinks are not replayed when the other sink fails');
+        assert.equal(attempts[failingSink], 3);
+        assert.equal(attempts[failingSink === 'redis' ? 'durable' : 'redis'], 2);
+    });
+}
+
+test('goal output close retains unacknowledged durable records for retry', async () => {
+    let failing = true;
+    let publications = 0;
+    const persisted: string[] = [];
+    const redis = { eval: async () => ++publications } as unknown as Redis;
+    const output = new LiveAgentOutput('goal-close', async records => {
+        if (failing) throw new Error('temporary outage');
+        persisted.push(...records);
+    }, 'test', redis);
+    output.append('final\n');
+    await assert.rejects(output.close(), /unacknowledged/);
+    failing = false;
+    await output.close();
+    await output.close();
+    assert.equal(publications, 1);
+    assert.deepEqual(persisted, ['final']);
+});
+
+for (const kind of ['process', 'goal']) {
+    test(`concurrent ${kind} closes share the failed attempt and remain retryable`, async () => {
+        const entered = deferred();
+        const release = deferred();
+        let attempts = 0;
+        const redis = {
+            eval: async () => {
+                if (++attempts === 1) {
+                    entered.resolve();
+                    await release.promise;
+                    throw new Error('temporary outage');
+                }
+                return 1;
+            },
+        } as unknown as Redis;
+        const output = kind === 'process'
+            ? new LiveOutputLog('concurrent-close', { reset: true, redis })
+            : new LiveAgentOutput('concurrent-close', undefined, 'test', redis);
+        output.append('final\n');
+        const first = output.close();
+        await entered.promise;
+        const second = output.close();
+        release.resolve();
+        const results = await Promise.allSettled([first, second]);
+        assert.ok(results.every(result => result.status === 'rejected'));
+        assert.equal(attempts, 1, 'concurrent shutdown cannot start or disconnect a sibling retry');
+        await output.close();
+        assert.equal(attempts, 2);
+    });
+}

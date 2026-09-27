@@ -105,9 +105,8 @@ describe('append-only live output', () => {
       await writeLiveOutput(writer!, taskId, `${lines.join('\n')}\n`, { mode: 'reset' });
       return projectLiveOutput(reader!, taskId);
     })();
-    // Re-publish the same records under a ceiling that forces the oldest out.
-    await writer!.del(liveOutputKey(taskId), liveOutputMetaKey(taskId));
-    for (const [index, line] of lines.entries()) await writeLiveOutput(writer!, taskId, `${line}\n`, { mode: index === 0 ? 'reset' : 'append', maximumBytes: 2000 });
+    // Trim the same generation: deleting metadata would start a different log.
+    await writeLiveOutput(writer!, taskId, '', { maximumBytes: 2000 });
     const meta = await writer!.hgetall(liveOutputMetaKey(taskId));
     assert.ok(Number(meta.base) > 0, 'old records were trimmed');
     assert.equal(meta.head, claudeRecords[1], 'the first record survives in the metadata');
@@ -344,6 +343,73 @@ for (const format of ['records', 'array']) {
       gate.resolve(); gate = null;
       await removed;
       assert.equal(emitted.length, sent);
+    } finally { await manager.closeAll(); }
+  });
+}
+
+for (const mode of ['append', 'reset', 'replace'] as const) {
+  test(`expiry recreates ${mode} output with a new identity even when the epoch repeats`, async t => {
+    const taskId = await freshTask(t);
+    if (!taskId) return;
+    const record = `${claudeRecords[2]}\n`;
+    await writeLiveOutput(writer!, taskId, record, { mode });
+    const first = await projectLiveOutput(reader!, taskId);
+    const oldCounter = await writer!.hget(liveOutputMetaKey(taskId), 'epoch');
+    await writer!.expire(liveOutputKey(taskId), 0);
+    await writer!.expire(liveOutputMetaKey(taskId), 0);
+    assert.equal(await readLiveOutput(reader!, taskId, first!.projector.offset), null);
+    await writeLiveOutput(writer!, taskId, record, { mode });
+    const next = await projectLiveOutput(reader!, taskId);
+    assert.equal(await writer!.hget(liveOutputMetaKey(taskId), 'epoch'), oldCounter);
+    assert.notEqual(next?.projector.epoch, first?.projector.epoch);
+    assert.notEqual(next?.events[0].id, first?.events[0].id);
+    const beyond = await readLiveOutput(reader!, taskId, next!.projector.offset + 100);
+    assert.equal(beyond?.from, beyond?.base);
+    assert.equal(beyond?.text, record, 'a request beyond end returns the retained prefix for resync');
+    const atEnd = await readLiveOutput(reader!, taskId, next!.projector.offset);
+    assert.equal(atEnd?.from, next!.projector.offset);
+    assert.equal(atEnd?.text, '', 'a valid cursor at end stays incremental');
+  });
+}
+
+for (const change of ['expired-shorter', 'expired-longer', 'beyond-end']) {
+  test(`watcher resynchronizes ${change} output after an empty read`, async () => {
+    const taskId = `generation-${change}`;
+    const record = (content: string) => `${JSON.stringify({ type: 'assistant', message: { content: [{ type: 'text', text: content }] } })}\n`;
+    let data = record('Earlier execution output');
+    let epoch = 'generation-a:0';
+    const redis = {
+      get: async () => JSON.stringify({ history: [{ state: 'claude_execution', timestamp: '2026-09-27T00:00:00Z' }] }),
+      eval: async (_script: string, options: { arguments: string[] }) => {
+        const from = Number(options.arguments[0]);
+        // Deliberately leave an out-of-range cursor intact to exercise the
+        // watcher's end check independently of Lua's cursor clamping.
+        return ['0', epoch, '0', '', String(from), Buffer.from(data).subarray(from).toString(), String(Buffer.byteLength(data))];
+      },
+    } as unknown as RedisClientType;
+    const emitted: Array<{ events: Array<{ id: string; content?: string }>; omittedEventCount?: number }> = [];
+    const io = { to: () => ({ emit: (_event: string, payload: typeof emitted[number]) => emitted.push(payload) }) } as unknown as SocketIOServer;
+    const manager = new TaskWatcherManager(io);
+    manager.setDeps({ redisClient: redis, db: {} as Knex });
+    const send = (manager as unknown as { sendRedisLiveUpdate: (id: string) => Promise<void> }).sendRedisLiveUpdate.bind(manager);
+    try {
+      await manager.startTaskWatcher(taskId);
+      const firstId = emitted[0].events[0].id;
+      if (change !== 'beyond-end') {
+        data = ''; epoch = 'legacy';
+        await send(taskId);
+        assert.equal(emitted.length, 1, 'an expired log returns no new projection');
+        epoch = 'generation-b:0';
+      }
+      const content = change === 'expired-longer' ? 'Resumed output '.repeat(30) : 'Resumed';
+      data = record(content);
+      await send(taskId);
+      assert.equal(emitted.length, 2);
+      assert.equal(emitted[1].omittedEventCount, 0);
+      assert.deepEqual(emitted[1].events.map(event => event.content), [content]);
+      if (change !== 'beyond-end') assert.notEqual(emitted[1].events[0].id, firstId);
+      await send(taskId);
+      assert.equal(emitted.length, 2, 'no repeated events after resynchronizing');
     } finally { await manager.closeAll(); }
   });
 }

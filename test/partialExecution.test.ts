@@ -1,4 +1,5 @@
 import assert from 'node:assert';
+import { Redis } from 'ioredis';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -305,4 +306,28 @@ describe('partial agent execution', () => {
         assert.match(commitMessage, /Partial execution:/);
         assert.doesNotMatch(comment, /Applied the requested follow-up changes/);
     });
+});
+
+for (const command of [process.execPath, '/missing-live-output-test-executable']) {
+    test(`final publication failure rejects execution instead of stranding its completion (${command})`, { timeout: 5000 }, async t => {
+        t.mock.method(Redis.prototype, 'connect', async () => undefined);
+        t.mock.method(Redis.prototype, 'eval', async () => { throw new Error('Redis unavailable'); });
+        await assert.rejects(executeDockerCommand(command, ['-e', 'process.stdout.write("final")'], {
+            taskId: 'failed-final-publication', streamToRedis: true,
+        }), command === process.execPath ? /unpublished writes/ : /ENOENT/);
+    });
+}
+
+
+test('publication failure does not obscure lost execution authority', async t => {
+    t.mock.method(Redis.prototype, 'connect', async () => undefined);
+    t.mock.method(Redis.prototype, 'eval', async () => { throw new Error('Redis unavailable'); });
+    const superseded = new Error('superseded callback');
+    superseded.name = 'SupersededTaskAttemptError';
+    await assert.rejects(executeDockerCommand(process.execPath, [
+        '-e', 'console.log(JSON.stringify({type:"assistant",session_id:"old-session"}))',
+    ], {
+        taskId: 'superseded-publication', streamToRedis: true,
+        onSessionId: async () => { throw superseded; },
+    }), error => error === superseded);
 });

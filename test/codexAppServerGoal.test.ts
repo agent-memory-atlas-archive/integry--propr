@@ -4,7 +4,7 @@ import {
   CODEX_APP_SERVER_INITIALIZE_TIMEOUT_MS,
   runGoalProtocol,
 } from '../packages/core/src/agents/impl/codexAppServer.ts';
-import { boundedCodexJsonlTail } from '../packages/core/src/agents/impl/codexAppServerConnection.ts';
+import { AppServerConnection, boundedCodexJsonlTail } from '../packages/core/src/agents/impl/codexAppServerConnection.ts';
 import type { AgentTaskOptions, GoalExecutionControl } from '../packages/core/src/agents/types.ts';
 
 after(async () => {
@@ -349,4 +349,14 @@ test('Codex live output retains resumed records and rotates a long stream on rec
   for (const line of multibyteTail.split('\n').filter(Boolean)) assert.doesNotThrow(() => JSON.parse(line));
 
   assert.equal(boundedCodexJsonlTail(`${JSON.stringify({ text: '😀'.repeat(500) })}\n`, 128), '');
+});
+
+test('app server child is cleaned up even when final output publication fails', async () => {
+  const failure = new Error('unacknowledged output');
+  let ended = false;
+  const connection = {
+    child: { exitCode: 0, stdin: { end: () => { ended = true; } } },
+    output: { close: async () => { assert.equal(ended, true); throw failure; } },
+  } as unknown as AppServerConnection;
+  await assert.rejects(AppServerConnection.prototype.close.call(connection), error => error === failure);
 });

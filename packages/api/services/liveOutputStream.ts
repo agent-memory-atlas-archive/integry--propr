@@ -23,26 +23,30 @@ export interface LiveOutputRedis {
 }
 
 const READ_LIVE_OUTPUT_SCRIPT = `
-local meta = redis.call('hmget', KEYS[2], 'base', 'epoch', 'start', 'head')
+local meta = redis.call('hmget', KEYS[2], 'base', 'epoch', 'start', 'head', 'generation')
 local base = tonumber(meta[1] or '0') or 0
 local length = redis.call('strlen', KEYS[1])
 -- Metadata-free workers replace whole snapshots, including at the retention ceiling.
 local from = meta[2] and tonumber(ARGV[1]) or 0
-if from < base then from = base end
+if from < base or from > base + length then from = base end
+local epoch = meta[2] or 'legacy'
+if meta[5] then epoch = meta[5] .. ':' .. epoch end
 local text = ''
 if from - base < length then text = redis.call('getrange', KEYS[1], from - base, length - 1) end
-return { tostring(base), meta[2] or 'legacy', tostring(tonumber(meta[3] or '0') or 0), meta[4] or '', tostring(from), text, tostring(length) }
+return { tostring(base), epoch, tostring(tonumber(meta[3] or '0') or 0), meta[4] or '', tostring(from), text, tostring(length) }
 `;
 
 export interface LiveOutputRead {
-  /** Changes whenever an execution starts over; offsets are only comparable within one epoch. */
+  /** Generation plus execution counter; changes on reset or recreation after expiry. */
   epoch: string;
   /** Absolute offset of the first byte still retained. */
   base: number;
+  /** Absolute offset just past the retained log; offsets beyond it require resync. */
+  end: number;
   /** Absolute offset where this execution began, and its first record (kept even once trimmed). */
   start: number;
   head: string;
-  /** Offset of `text`: later than requested after trimming; always zero for legacy snapshots. */
+  /** Offset of `text`: clamped to base after trimming or a request beyond end; zero for legacy snapshots. */
   from: number;
   text: string;
 }
@@ -53,7 +57,7 @@ export async function readLiveOutput(redis: LiveOutputRedis, taskId: string, fro
     arguments: [String(from)],
   }) as string[];
   if (Number(length) === 0 && epoch === 'legacy') return null;
-  return { epoch, base: Number(base), start: Number(start), head, from: Number(readFrom), text };
+  return { epoch, base: Number(base), end: Number(base) + Number(length), start: Number(start), head, from: Number(readFrom), text };
 }
 
 export interface LiveProjectionSnapshot {
