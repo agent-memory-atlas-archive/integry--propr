@@ -57,10 +57,21 @@ issue and starts the ordinary issue implementation workflow immediately, without
 a plan or goal. Repository write access is required. Optional `agentAlias` and
 `model` select supported routing; otherwise instance defaults apply.
 
+Optional automation matches `implement_plan`. `runUltrafix` (review scope) runs
+the review/fix loop on the resulting pull request as soon as it opens, bounded by
+`ultrafixGoal` (1-10, default 9) and `ultrafixMaxCycles` (1-10, default 3); both
+bounds apply only when `runUltrafix` is true. `autoMerge` (merge scope) merges
+the pull request once it is ready. Both opt-ins are applied as the shared
+`ultrafix` and `auto-merge` issue labels, so removing a label stops the
+automation exactly as it does for planned work.
+
 ```json
 {
   "repository": "owner/repo",
   "instruction": "Fix the invoice date format",
+  "runUltrafix": true,
+  "ultrafixGoal": 9,
+  "ultrafixMaxCycles": 3,
   "idempotencyKey": "invoice-date-fix-001"
 }
 ```
@@ -360,8 +371,12 @@ just read and an 8–128 character `idempotencyKey`; a changed head fails with
 `comment_on_pull_request` posts an ordinary follow-up comment, which is how
 ProPR queues a scoped refinement. A message that starts a slash command is
 rejected with `USE_EXPLICIT_TOOL`; use `review_pull_request`,
-`fix_review_findings` (with `reviewCommentId` and explicit `findingIds`) or
-`run_ultrafix` instead, so their scope and head preconditions are checked.
+`fix_review_findings` (with `reviewCommentId` and explicit `findingIds` and/or
+`suggestionIds`, plus optional `instructions`) or `run_ultrafix` instead, so
+their scope and head preconditions are checked. `fix_review_findings` needs at
+least one identifier across the two arrays; an identifier the referenced review
+does not currently offer is rejected by name rather than dropped. Selecting a
+suggestion does not change how merge blockers are treated.
 
 `set_pull_request_model` routes the PR to exactly one enabled model by
 converging the managed `llm-*` labels the repository already defines:
