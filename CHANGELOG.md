@@ -45,6 +45,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the activity envelope derived from it is emitted, so a malformed publish is
   dropped and reported instead of reaching a browser. No client change is
   required by this step: with nothing subscribed, behaviour is unchanged.
+
+- **`/fix` selects suggestions as well as findings**: a `/fix` command line now
+  accepts a review's non-blocking suggestion identifiers (`S1`, `S2`, …) beside
+  its merge-blocking findings (`F1`, `F2`, …), mixed freely and in any order, as
+  in `/fix F20 S3 S5`. Identifiers are case-insensitive on input and canonical
+  upper case everywhere they are stored, echoed or rendered; everything after the
+  last identifier on the command line, plus every following line, reaches the
+  agent as instructions without the token list. An identifier no current review
+  offers, or one that is malformed or unsupported such as `S0` or the range
+  `F1-F2`, fails the whole command closed and is named back on the pull request
+  instead of being silently ignored or quietly widened to every pending blocker —
+  the same rule `fix_review_findings` applies before it posts, so neither entry
+  point acts on a request it only partly understood. The completion comment and
+  task history record which findings and which suggestions were addressed.
+  Published `S#` identifiers now continue a per-pull-request sequence exactly as `F#` does
+  instead of restarting at `S1` in every review comment, so one `S#` names one
+  suggestion for the life of the pull request; the two sequences advance
+  independently, and each is reserved atomically so concurrent reviewers cannot
+  publish the same identifier twice. Merge-blocker semantics are unchanged:
+  suggestions are acted on only when named, a pending suggestion never extends
+  an `/ultrafix` loop or moves a score gate, and `/ultrafix` still selects
+  findings only. The MCP tool `fix_review_findings`
+  gains an optional `suggestionIds` array beside `findingIds` (at least one
+  identifier across the two is required, `instructions` are forwarded unchanged)
+  and validates both namespaces against the referenced review, rejecting unknown,
+  consumed or mismatched identifiers by name rather than dropping them; a client
+  sending only `findingIds` behaves exactly as before.
+
+- **Plan status filter over MCP**: the `list_plans` tool now takes an optional
+  `status` next to `repository`, `offset` and `limit` — `active` for every plan
+  that has not merged or failed, one exact persisted status (`draft`,
+  `generating`, `refining`, `review`, `approved`, `executed`, `executing`,
+  `pr_created`, `merged`, `failed`) or `all`, which stays the default so existing
+  callers see the same page. The filter is applied in the query, so `offset` and
+  `limit` paginate the filtered set instead of the whole repository, and the
+  response shape is unchanged. Mirrors the `state` filter `list_tasks` and
+  `list_goals` already expose. See [docs/mcp.md](docs/mcp.md).
 - **MCP operator surface**: a connected agent can now run an instance rather than
   only read and write one object at a time. `get_current_activity` answers "what
   is happening right now" across every repository in the grant — running tasks,
@@ -67,6 +104,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   summarized per connected app on `/mcp/apps`; the log stores names, identities,
   outcomes, sizes and durations, never tool arguments or payload content. See
   [docs/mcp.md](docs/mcp.md) and [docs/mcp-coverage.md](docs/mcp-coverage.md).
+- **Ultrafix and auto-merge for one-off MCP tasks**: `create_task` now takes the
+  same automation options `implement_plan` already had — `runUltrafix` with its
+  bounded `ultrafixGoal` (1-10, default 9) and `ultrafixMaxCycles` (1-10, default
+  3), plus `autoMerge`. Both opt-ins are applied as the shared `ultrafix` and
+  `auto-merge` issue labels, so the review-fix loop starts on the resulting pull
+  request as soon as it opens without a separate manual step, and removing a label
+  stops it exactly as it does for planned work. `runUltrafix` requires review
+  scope and `autoMerge` requires merge scope; the ultrafix bounds apply only when
+  `runUltrafix` is true. Existing callers are unaffected: both default to off.
 - **Cancel CI while follow-up implementation is in progress**: a new per-repository
   option (Repositories → Automation, off by default, also available through
   `POST /api/config/repos`) cancels the queued and running GitHub Actions
