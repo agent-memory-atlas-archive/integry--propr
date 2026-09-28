@@ -13,11 +13,7 @@ import {
   SummarizationSettings
 } from '../../api/proprApi';
 import { DEFAULT_REVIEW_CONTEXT_BUDGET_PERCENT, type InstanceCatalogAgent } from '@propr/shared';
-import {
-  getAgentTankSettings,
-  updateAgentTankSettings,
-  getAgentTankStatus
-} from '../../api/revertApi';
+import { getAgentTankSettings, updateAgentTankSettings, getAgentTankStatus } from '../../api/revertApi';
 import { Settings } from './types';
 import { parseLoadedData } from './parseLoadedData';
 import { useListManagement } from './useListManagement';
@@ -65,6 +61,8 @@ export function useSettingsState() {
     auto_followup_score_threshold: 4,
     auto_resolve_merge_conflicts: false,
     dashboard_summary_enabled: true,
+    usage_tips_enabled: true,
+    usage_tips_dismissal_cooldown_days: 45,
     model_reasoning_level: '',
     pr_review_model: '',
     pr_review_prompt: '',
@@ -151,6 +149,8 @@ export function useSettingsState() {
         auto_followup_score_threshold: settingsToSave.auto_followup_score_threshold,
         auto_resolve_merge_conflicts: settingsToSave.auto_resolve_merge_conflicts,
         dashboard_summary_enabled: settingsToSave.dashboard_summary_enabled ?? true,
+        usage_tips_enabled: settingsToSave.usage_tips_enabled ?? true,
+        usage_tips_dismissal_cooldown_days: settingsToSave.usage_tips_dismissal_cooldown_days ?? 45,
         model_reasoning_level: settingsToSave.model_reasoning_level,
         pr_review_model: settingsToSave.pr_review_model,
         pr_review_prompt: settingsToSave.pr_review_prompt,

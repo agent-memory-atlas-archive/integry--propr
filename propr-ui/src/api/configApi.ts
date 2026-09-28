@@ -1,3 +1,4 @@
+import { USAGE_TIPS_SETTINGS_CHANGED } from './usageTipsApi';
 import type {
   AgentConfig,
   MonitoredRepo,
@@ -72,8 +73,13 @@ export interface ConfigUpdateResponse {
   warnings?: string[];
 }
 
-export const updateSettings = (settings: Record<string, unknown>): Promise<ConfigUpdateResponse> =>
-  postJson('/api/config/settings', { settings });
+export const updateSettings = async (settings: Record<string, unknown>): Promise<ConfigUpdateResponse> => {
+  const result = await postJson<ConfigUpdateResponse>('/api/config/settings', { settings });
+  if ('usage_tips_enabled' in settings || 'usage_tips_dismissal_cooldown_days' in settings) {
+    window.dispatchEvent(new Event(USAGE_TIPS_SETTINGS_CHANGED));
+  }
+  return result;
+};
 export const getFollowupKeywords = (): Promise<FollowupKeywordsResponse> => getJson('/api/config/followup-keywords');
 export const updateFollowupKeywords = (keywords: string[]): Promise<ConfigWriteResponse<FollowupKeywordsResponse>> =>
   postJson('/api/config/followup-keywords', { followup_keywords: keywords });
