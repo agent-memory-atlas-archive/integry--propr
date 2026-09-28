@@ -209,3 +209,17 @@ test('an empty whole array retains the empty-plan diagnostic', async () => {
   await assert.rejects(generate(), /Generated plan is empty/);
   assert.equal(repairCalls.length, 0);
 });
+
+test('unescaped quotes around a closing bracket reach the repair agent with all content', async () => {
+  const original = '[{"title":"A","body":"Use "]" here","implementation":"c"}]';
+  analysisResponses.push(original);
+  repairResult = [{ title: 'A', body: 'Use "]" here', implementation: 'c' }];
+
+  const result = await generate();
+
+  assert.deepEqual(result.plan, repairResult);
+  assert.equal(repairCalls.length, 1);
+  assert.equal(repairCalls[0].original, original);
+  assert.equal(repairCalls[0].files['original.txt'], original);
+  assert.equal(repairCalls[0].files['plan.json'], original);
+});

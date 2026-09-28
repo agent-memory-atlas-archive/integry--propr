@@ -126,6 +126,31 @@ describe('plan response shape', () => {
     assert.equal(extractWholeJsonArray(broken), broken);
   });
 
+  test('passes repairable quotes containing delimiters through to syntax-only validation', async () => {
+    for (const field of ['title', 'body', 'implementation']) {
+      for (const quoted of [']', '[', '{', 'text }]', 'text [ {']) {
+        const repaired = [{ title: 'A', body: 'b', implementation: 'c', [field]: `Use "${quoted}" here` }];
+        const valid = JSON.stringify(repaired);
+        const original = valid.replaceAll(String.raw`\"`, '"');
+        assert.throws(() => JSON.parse(original));
+        assert.equal(extractWholeJsonArray(original), original);
+        assert.equal(extractWholeJsonArray(`Here is the plan:\n\`\`\`json\n${original}\n\`\`\``), original);
+        assert.equal((await validatePlanText(valid, original)).valid, true);
+        assert.equal(extractWholeJsonArray(original.slice(0, -1)), null);
+        assert.equal(extractWholeJsonArray(`${original}, {"title":"trailing"`), null);
+      }
+    }
+  });
+
+  test('uses tolerant boundaries for nested object and array string values too', async () => {
+    const original = '[{"title":"A","body":"b","implementation":"c","extra":{"note":"Use "]" here","labels":["Use "text }" here"]}}]';
+    const repaired = JSON.stringify([{ title: 'A', body: 'b', implementation: 'c',
+      extra: { note: 'Use "]" here', labels: ['Use "text }" here'] } }]);
+    assert.equal(extractWholeJsonArray(original), original);
+    assert.equal((await validatePlanText(repaired, original)).valid, true);
+    assert.equal(extractWholeJsonArray(original.slice(0, -1)), null);
+  });
+
   test('lists incomplete tasks by position', () => {
     assert.deepEqual(incompletePlanItems([task('A'), { title: 'B', body: ' ', implementation: 'x' }, 'text', null]), [2, 3, 4]);
   });

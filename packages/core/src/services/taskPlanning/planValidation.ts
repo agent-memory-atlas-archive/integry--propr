@@ -52,16 +52,31 @@ export function extractWholeJsonArray(response: string): string | null {
   const closers: string[] = [];
   let inString = false;
   let escaped = false;
+  let previous = '';
+  // Match the standalone validator's tolerant string-value boundaries. Sticky
+  // lookahead avoids copying the remaining (potentially very large) plan.
+  const objectBoundary = /\s*(?:,\s*)?(?:}|"(?:\\.|[^"\\])*"\s*:)/y;
+  const arrayBoundary = /\s*(?:,\s*)?(?:\]|"|\{|\[|-?\d|true\b|false\b|null\b)/y;
+  let valueBoundary: RegExp | null = null;
   for (let i = start; i < text.length; i++) {
     const char = text[i];
     if (inString) {
       if (escaped) escaped = false;
       else if (char === '\\') escaped = true;
-      else if (char === '"') inString = false;
+      else if (char === '"') {
+        if (valueBoundary) valueBoundary.lastIndex = i + 1;
+        if (!valueBoundary || valueBoundary.test(text)) {
+          inString = false;
+          previous = char;
+        }
+      }
       continue;
     }
-    if (char === '"') inString = true;
-    else if (char === '[') closers.push(']');
+    if (char === '"') {
+      inString = true;
+      valueBoundary = closers.at(-1) === ']' ? arrayBoundary
+        : previous === ':' ? objectBoundary : null;
+    } else if (char === '[') closers.push(']');
     else if (char === '{') closers.push('}');
     else if (char === ']' || char === '}') {
       if (closers.pop() !== char) return null;
@@ -72,6 +87,7 @@ export function extractWholeJsonArray(response: string): string | null {
         return text.slice(start, i + 1);
       }
     }
+    if (!/\s/.test(char)) previous = char;
   }
   return null;
 }
