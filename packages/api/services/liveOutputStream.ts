@@ -33,7 +33,7 @@ local epoch = meta[2] or 'legacy'
 if meta[5] then epoch = meta[5] .. ':' .. epoch end
 local text = ''
 if from - base < length then text = redis.call('getrange', KEYS[1], from - base, length - 1) end
-return { tostring(base), epoch, tostring(tonumber(meta[3] or '0') or 0), meta[4] or '', tostring(from), text, tostring(length), tostring(tonumber(meta[6] or '0') or 0) }
+return { tostring(base), epoch, tostring(tonumber(meta[3] or '0') or 0), meta[4] or '', tostring(from), text, tostring(length), tostring(tonumber(meta[6] or '0') or 0), from == base and (redis.call('hget', KEYS[2], 'openCodeTools') or '{}') or '{}' }
 `;
 
 export interface LiveOutputRead {
@@ -51,16 +51,19 @@ export interface LiveOutputRead {
   /** Offset of `text`: clamped to base after trimming or a request beyond end; zero for legacy snapshots. */
   from: number;
   text: string;
+  /** Tool IDs in trimmed records, needed to skip cumulative duplicates on a fresh read. */
+  openCodeTools?: { uses?: Record<string, boolean>; results?: Record<string, boolean> };
 }
 
 export async function readLiveOutput(redis: LiveOutputRedis, taskId: string, from = 0): Promise<LiveOutputRead | null> {
-  const [base, epoch, start, head, readFrom, text, length, envelopes] = await redis.eval(READ_LIVE_OUTPUT_SCRIPT, {
+  const [base, epoch, start, head, readFrom, text, length, envelopes, openCodeTools] = await redis.eval(READ_LIVE_OUTPUT_SCRIPT, {
     keys: [liveOutputKey(taskId), liveOutputMetaKey(taskId)],
     arguments: [String(from)],
   }) as string[];
   if (Number(length) === 0 && epoch === 'legacy') return null;
   return {
     epoch, base: Number(base), end: Number(base) + Number(length), start: Number(start), head,
+    openCodeTools: JSON.parse(openCodeTools || '{}'),
     envelopes: Number(envelopes ?? 0) || 0, from: Number(readFrom), text,
   };
 }
@@ -84,7 +87,7 @@ interface Projection {
 const SYNTHETIC_TIMESTAMP_STEP_MS = 1000;
 /** A JSON record; the append script counts trimmed ones by the same rule. */
 const ENVELOPE = /^[ \t\r]*\{/;
-/** Unidentifiable output past this is projected with the generic parser. */
+/** Bounds diagnostic preamble without committing to a provider parser. */
 const MAX_PREAMBLE_RECORDS = 200;
 const MAX_PREAMBLE_BYTES = 256 * 1024;
 
@@ -105,7 +108,7 @@ export class LiveOutputProjector {
   /** Ordinal of the next JSON record. */
   private envelope = 0;
   /** The record at absolute `offset` has JSON-record ordinal `envelopes` (records before it were trimmed). */
-  private readonly retained: { offset: number; envelopes: number };
+  private readonly retained: { offset: number; envelopes: number; openCodeTools?: LiveOutputRead['openCodeTools'] };
 
   private readonly taskId: string;
   /** Execution identity namespacing event IDs: the read's epoch, scoped by execution for legacy output. */
@@ -120,7 +123,7 @@ export class LiveOutputProjector {
     offset: number;
     start?: number;
     executionStartTimestamp?: string | null;
-    retained?: { offset: number; envelopes: number };
+    retained?: { offset: number; envelopes: number; openCodeTools?: LiveOutputRead['openCodeTools'] };
   }) {
     this.taskId = options.taskId;
     this.epoch = options.epoch;
@@ -184,14 +187,30 @@ export class LiveOutputProjector {
    * sequence of incremental reads choose the same parser.
    */
   private decide(entries: Entry[]): LiveEvent[] {
-    for (const entry of entries) this.preamble.push(entry);
-    this.preambleBytes += entries.reduce((total, entry) => total + entry.line.length + 1, 0);
-    const format = detectStoredOutputFormat(this.preamble.map(entry => entry.line).join('\n'));
-    if (format === 'unknown' && this.preamble.length < MAX_PREAMBLE_RECORDS && this.preambleBytes < MAX_PREAMBLE_BYTES) return [];
-    this.projection = format === 'claude' ? this.claudeProjection() : this.genericProjection();
-    const held = this.preamble;
-    this.preamble = [];
-    return held.flatMap(entry => this.projection!.feed(entry.line, entry.offset, entry.ordinal));
+    const events: LiveEvent[] = [];
+    for (const entry of entries) {
+      if (this.projection) {
+        events.push(...this.projection.feed(entry.line, entry.offset, entry.ordinal));
+        continue;
+      }
+      this.preamble.push(entry);
+      this.preambleBytes += Buffer.byteLength(entry.line) + 1;
+      const format = detectStoredOutputFormat(entry.line);
+      if (format === 'unknown') {
+        if (this.preamble.length >= MAX_PREAMBLE_RECORDS || this.preambleBytes >= MAX_PREAMBLE_BYTES) {
+          // Plain startup diagnostics produce no events in either parser. Keep
+          // envelopes (including init) to replay once the provider identifies itself.
+          this.preamble = this.preamble.filter(held => ENVELOPE.test(held.line));
+          this.preambleBytes = this.preamble.reduce((bytes, held) => bytes + Buffer.byteLength(held.line) + 1, 0);
+        }
+        continue;
+      }
+      this.projection = format === 'claude' ? this.claudeProjection() : this.genericProjection();
+      for (const held of this.preamble) events.push(...this.projection.feed(held.line, held.offset, held.ordinal));
+      this.preamble = [];
+      this.preambleBytes = 0;
+    }
+    return events;
   }
 
   /** What a reader shows while the provider is still unidentified, without committing to a parser. */
@@ -253,8 +272,15 @@ export class LiveOutputProjector {
    */
   private genericProjection(): Projection {
     const projection = createRedisOutputProjection({ executionStartTimestamp: this.executionStartTimestamp, retainEvents: false });
+    let seeded = false;
     return {
-      feed: (line, offset, ordinal) => this.withIds(projection.feed(line, String(offset - this.start), ordinal).events),
+      feed: (line, offset, ordinal) => {
+        if (!seeded && offset >= this.retained.offset) {
+          projection.seedOpenCodeTools(this.retained.openCodeTools ?? {});
+          seeded = true;
+        }
+        return this.withIds(projection.feed(line, String(offset - this.start), ordinal).events);
+      },
       pending: () => {
         const pending = projection.pendingEvent();
         return pending ? { ...pending.event, id: this.id(pending.event, `${pending.key}:0`) } : null;
@@ -389,7 +415,7 @@ export function projectLiveOutputRead(
   const epoch = liveOutputIdentity(read, legacyExecution);
   const projector = new LiveOutputProjector({
     taskId, epoch, offset: read.from, start: read.start, executionStartTimestamp,
-    retained: { offset: read.base, envelopes: read.envelopes },
+    retained: { offset: read.base, envelopes: read.envelopes, openCodeTools: read.openCodeTools },
   });
   const truncated = read.base > read.start;
   // The first record identifies the provider; it survives trimming in `head`.

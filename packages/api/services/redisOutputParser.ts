@@ -887,6 +887,7 @@ export interface ProjectedLineEvents {
  * parseRedisOutput() returns for the same records.
  */
 export interface RedisOutputProjection {
+  seedOpenCodeTools(tools: { uses?: Record<string, boolean>; results?: Record<string, boolean> }): void;
   /**
    * Consumes one record; `key` identifies it (its absolute offset in the live log).
    * An `ordinal` (the record's position among the execution's JSON records, which
@@ -923,6 +924,10 @@ export function createRedisOutputProjection(
     };
   };
   return {
+    seedOpenCodeTools(tools) {
+      for (const id of Object.keys(tools.uses ?? {})) state.emittedOpenCodeToolUseIds.add(id);
+      for (const id of Object.keys(tools.results ?? {})) state.emittedOpenCodeToolResultIds.add(id);
+    },
     feed(line, key, ordinal) {
       const before = state.events.length;
       state.skippedSlots = [];

@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { setTimeout as delay } from 'node:timers/promises';
 import { Redis } from 'ioredis';
 import logger from '../../../utils/logger.js';
 import { MAX_PROVIDER_OUTPUT_BYTES } from './boundedProviderOutput.js';
@@ -29,8 +30,8 @@ export const LIVE_OUTPUT_MAX_BYTES = 64 * 1024 * 1024;
 export const LIVE_OUTPUT_TTL_SECONDS = 3600;
 /**
  * Most output a writer holds while its publication fails or falls behind. Past
- * it the writer refuses further output and reports the overflow, so the
- * execution fails instead of exhausting worker memory.
+ * it the writer refuses further output and reports the overflow. Display
+ * sinks may drop it; durable sinks must fail instead of losing accepted work.
  */
 export const LIVE_OUTPUT_MAX_QUEUED_BYTES = 16 * 1024 * 1024;
 
@@ -54,18 +55,54 @@ export const APPEND_LIVE_OUTPUT_SCRIPT = `
 -- it. Mirrors what the API's generic parser (redisOutputParser) buffers: stream
 -- deltas and OpenCode text parts, until a tool or error record.
 local tools = { tool_use = true, tool = true, tool_call = true, tool_result = true, tool_response = true }
-local function continuesMessage(record)
+-- Carry only tool identities across a trim, never their bodies. A fresh parser
+-- needs the same deduplication evidence as the running parser.
+local function toolState()
+    local raw = redis.call('hget', KEYS[2], 'openCodeTools')
+    return raw and cjson.decode(raw) or { uses = {}, results = {} }
+end
+local function visitTools(record, seen)
+    if not string.find(record, '"tool', 1, true) then return false end
+    local ok, event = pcall(cjson.decode, record)
+    if not ok or type(event) ~= 'table' then return false end
+    -- Session-qualified and part-based OpenCode records take this parser route.
+    if not (event.sessionID or event.sessionId or event.session_id or event.callID or event.state or event.part or event.parts) then return false end
+    local emitted = false
+    local function visit(source)
+        if type(source) ~= 'table' or type(source.type) ~= 'string' then return end
+        local kind = string.lower(source.type)
+        if not tools[kind] then return end
+        local id = source.tool_id or source.callID or source.id
+        if id == cjson.null then id = nil end
+        local result = kind == 'tool_result' or kind == 'tool_response'
+        local ids = result and seen.results or seen.uses
+        if id and ids[id] then return end
+        emitted = true
+        if id then ids[id] = true end
+        if kind == 'tool' and type(source.state) == 'table'
+            and (source.state.status == 'completed' or source.state.status == 'error') and id then
+            seen.results[id] = true
+        end
+    end
+    if not event.part then visit(event) end
+    visit(event.part)
+    for _, part in ipairs(type(event.parts) == 'table' and event.parts or {}) do visit(part) end
+    return emitted
+end
+local function continuesMessage(record, emittedTool)
     if not string.find(record, '^[ \\t\\r]*{') then return 1 end
-    if not string.find(record, '"delta"', 1, true) and not string.find(record, '"parts?"') then return 0 end
     local decoded, event = pcall(cjson.decode, record)
     if not decoded then return 1 end
     if type(event) ~= 'table' then return 0 end
     local kind = type(event.type) == 'string' and string.lower(event.type) or ''
-    if tools[kind] or kind == 'error' or (event.error ~= nil and event.error ~= cjson.null) then return 0 end
+    if emittedTool or kind == 'error' or (event.error ~= nil and event.error ~= cjson.null) then return 0 end
     local parts = type(event.parts) == 'table' and event.parts or {}
     if type(event.part) == 'table' then parts = { event.part, unpack(parts) } end
-    for _, part in ipairs(parts) do
-        if type(part) == 'table' and type(part.type) == 'string' and tools[string.lower(part.type)] then return 0 end
+    -- Tool parts with no emitted event are cumulative duplicates; they do not
+    -- flush the parser's pending message. Non-OpenCode tools still complete it.
+    if tools[kind] then
+        if not (event.sessionID or event.sessionId or event.session_id or event.callID or event.state or event.part or event.parts) then return 0 end
+        if #parts == 0 then return 1 end
     end
     if event.delta == true or type(event.delta) == 'string' or kind == 'delta' or #parts > 0 then return 2 end
     return 0
@@ -98,7 +135,7 @@ if mode == 'reset' or mode == 'replace' then
         base = redis.call('hincrby', KEYS[2], 'base', previousStart + origin + 1 - base)
     end
     redis.call('hset', KEYS[2], 'start', base - origin)
-    redis.call('hdel', KEYS[2], 'head', 'envelopes')
+    redis.call('hdel', KEYS[2], 'head', 'envelopes', 'openCodeTools')
     if origin > 0 then redis.call('hset', KEYS[2], 'head', ARGV[10], 'envelopes', ARGV[9]) end
 end
 if redis.call('hexists', KEYS[2], 'epoch') == 0 then
@@ -127,6 +164,15 @@ if length > maximum then
         -- message still arriving across the cut is retained from that record on.
         local cut = length - string.len(tail)
         local from = math.max(0, cut - math.floor((maximum - keep) / 2))
+        local seen = toolState()
+        local completions = {}
+        local prefix = redis.call('getrange', KEYS[1], 0, cut - 1)
+        local position = 0
+        for record in string.gmatch(prefix, '([^\\n]*)\\n') do
+            local emitted = visitTools(record, seen)
+            position = position + string.len(record) + 1
+            if emitted then completions[position] = true end
+        end
         -- Reversed, the records before the cut read from the nearest one backwards.
         local before = string.reverse(redis.call('getrange', KEYS[1], from, cut - 1))
         local at = 1
@@ -145,7 +191,7 @@ if length > maximum then
                 record = (last and string.sub(chunk, string.len(chunk) - last + 2) or chunk) .. record
                 from = last and 0 or step
             end
-            local continues = continuesMessage(record)
+            local continues = continuesMessage(record, completions[cut - at + 1])
             if continues == 0 then break end
             if not whole then message = 0 break end
             if continues == 2 then message = (finish or string.len(before) + 1) - 1 end
@@ -157,6 +203,9 @@ if length > maximum then
     -- Readers number JSON records to synthesize timestamps; count the trimmed
     -- ones so the retained records keep their ordinals.
     local dropped = redis.call('getrange', KEYS[1], 0, length - string.len(tail) - 1)
+    local seen = toolState()
+    for record in string.gmatch(dropped, '([^\\n]*)\\n') do visitTools(record, seen) end
+    redis.call('hset', KEYS[2], 'openCodeTools', cjson.encode(seen))
     local envelopes = 0
     if string.find(dropped, '^[ \\t\\r]*{') then envelopes = 1 end
     for _ in string.gmatch(dropped, '\\n[ \\t\\r]*{') do envelopes = envelopes + 1 end
@@ -229,7 +278,7 @@ export async function writeLiveOutput(
  * The bytes a writer has accepted but not yet had acknowledged. Output that
  * would take it past the maximum is refused, as is everything after it: the
  * writer can no longer deliver the execution's output in order, so the
- * overflow is reported once for the owner to fail the execution.
+ * overflow is reported once for the owner to handle according to its sink.
  */
 export class LiveOutputBacklog {
     private bytes = 0;
@@ -416,6 +465,11 @@ export class LiveOutputLog {
         this.partials.clear();
         this.closed = true;
         await this.flush();
+        for (const backoff of [50, 150]) {
+            if (this.writes.length === 0) break;
+            await delay(backoff);
+            await this.flush();
+        }
         // Retain failed work for a later close/flush, without leaking an owned connection.
         if (this.writes.length > 0) {
             if (this.ownsRedis) this.redis.disconnect();

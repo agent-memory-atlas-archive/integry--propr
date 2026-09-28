@@ -149,11 +149,17 @@ export const mergeIncrementalLiveDetails = (
 
 /**
  * A socket payload carrying `omittedEventCount` is full state (initial, or after a resync); others are increments.
- * An update the current state already covers is ignored: it was read earlier than that state (a full read can
- * finish before the watcher broadcasts an older one) and may hold shorter versions of growing events.
+ * Covered updates can restore missing history, but cannot replace newer event versions or metadata.
+ * A full read can finish before the watcher broadcasts an older snapshot.
  */
 export const applyTaskLiveUpdate = (previous: LiveDetails, payload: IncrementalTaskLiveUpdatePayload, isLive = true): LiveDetails => {
-  if (readCoversUpdate(previous, payload)) return previous;
+  if (readCoversUpdate(previous, payload)) {
+    if (previous.liveOutputPosition?.epoch !== payload.liveOutputPosition?.epoch) return previous;
+    // A later offset proves freshness, not inclusion: retention may have removed
+    // readable history delivered while this read was in flight. The read wins
+    // shared event versions and every metadata field.
+    return mergeFullLiveDetails({ ...previous, events: payload.events || [] }, previous, isLive);
+  }
   if (payload.omittedEventCount === undefined) return mergeIncrementalLiveDetails(previous, payload, isLive);
   return mergeFullLiveDetails(previous, {
     events: payload.events || [],

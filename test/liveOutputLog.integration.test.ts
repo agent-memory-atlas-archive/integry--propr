@@ -344,7 +344,8 @@ for (const failingSink of ['redis', 'durable']) {
         output.append('second\n');
         const second = output.flush();
         await new Promise(resolve => setImmediate(resolve));
-        assert.deepEqual(attempts, { redis: 1, durable: 1 }, 'a rejection cannot release the still-running sibling write');
+        assert.equal(attempts[failingSink === 'redis' ? 'durable' : 'redis'], 1, 'an in-flight sink is never replayed by another drain');
+        assert.equal(attempts[failingSink], 3, 'the independent sink may retry and drain later writes');
         release.resolve();
         await Promise.all([first, second]);
         await output.close();
@@ -452,17 +453,23 @@ for (const failingSink of ['redis', 'durable']) {
         assert.deepEqual(overflows, []);
         output.append('third\n');
         output.append('fourth\n');
-        assert.equal(overflows.length, 1, 'the overflow is reported once');
+        assert.equal(overflows.length, failingSink === 'durable' ? 1 : 0, 'only durable overflow fails the session');
         failing = false;
-        await assert.rejects(output.close(), /fell more than 16 bytes behind/);
-        await assert.rejects(output.close(), /fell more than 16 bytes behind/);
-        assert.deepEqual(published, ['first\n', 'second\n'], 'every accepted record is published once, in order');
-        assert.deepEqual(persisted, published, 'every accepted record is persisted once, in order');
+        if (failingSink === 'durable') {
+            await assert.rejects(output.close(), /fell more than 16 bytes behind/);
+            await assert.rejects(output.close(), /fell more than 16 bytes behind/);
+            assert.deepEqual(persisted, ['first\n', 'second\n']);
+        } else {
+            await output.close();
+            await output.close();
+            assert.deepEqual(published, ['first\n', 'second\n']);
+            assert.equal(persisted.join(''), 'first\nsecond\nthird\nfourth\n', 'Redis overflow cannot discard durable records');
+        }
     });
 }
 
 for (const kind of ['process', 'goal']) {
-    test(`concurrent ${kind} closes share the failed attempt and remain retryable`, async () => {
+    test(`concurrent ${kind} closes share the drain and its bounded retry`, async () => {
         const entered = deferred();
         const release = deferred();
         let attempts = 0;
@@ -485,8 +492,8 @@ for (const kind of ['process', 'goal']) {
         const second = output.close();
         release.resolve();
         const results = await Promise.allSettled([first, second]);
-        assert.ok(results.every(result => result.status === 'rejected'));
-        assert.equal(attempts, 1, 'concurrent shutdown cannot start or disconnect a sibling retry');
+        assert.ok(results.every(result => result.status === 'fulfilled'));
+        assert.equal(attempts, 2, 'concurrent shutdown shares the successful retry');
         await output.close();
         assert.equal(attempts, 2);
     });
@@ -631,3 +638,18 @@ test('the default maximum bounds the unfinished record of a newline-free stream'
     await log.close();
     assert.equal(writes.join(''), 'done\n');
 });
+
+for (const durable of [false, true]) {
+    test(`agent close tolerates a permanent Redis outage (durable=${durable})`, async () => {
+        let attempts = 0;
+        const redis = { eval: async () => { attempts++; throw new Error('outage'); } } as unknown as Redis;
+        const persisted: string[] = [];
+        const output = new LiveAgentOutput('redis-outage', durable ? async records => { persisted.push(...records); } : undefined, 'test', { redis });
+        output.append('first\n');
+        await output.flush();
+        output.append('last\n');
+        await output.close();
+        assert.ok(attempts >= 3 && attempts <= 5, 'the close drain is bounded');
+        assert.deepEqual(persisted, durable ? ['first', 'last'] : []);
+    });
+}

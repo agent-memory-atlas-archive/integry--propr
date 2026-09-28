@@ -46,10 +46,9 @@ export function useTaskLiveData(taskId: string | undefined, pollIntervalMs = 5_0
       // metadata clears and full-state execution resets, over the older snapshot.
       // They are replayed over the pre-request state, not the current one, which
       // already applied them: raw events a large increment evicted there would
-      // otherwise be appended again after newer ones. Updates the snapshot already
-      // contains are skipped (see applyTaskLiveUpdate): they could hold an older
-      // version of a growing event, or belong to an earlier execution than the
-      // read's, even one first received during it. Updates of the execution the
+      // otherwise be appended again after newer ones. Covered updates contribute
+      // missing history only (see applyTaskLiveUpdate); shared versions and
+      // metadata stay with the newer read. Updates of the execution the
       // read replaced are dropped: they were buffered before the response and are
       // not newer than it.
       setLiveDetails(previous => {

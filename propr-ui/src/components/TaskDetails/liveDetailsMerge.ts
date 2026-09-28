@@ -43,9 +43,9 @@ const executionPrecedes = (epoch: string, later: string): boolean => {
 };
 
 /**
- * A read's position proves it already holds everything an update read at or
- * before the same position carried, including newer versions of events that
- * were still growing, and that an update of an earlier execution is obsolete.
+ * A read's position proves its shared events and metadata are newer than an
+ * update at or before it, and that an earlier execution is obsolete. It does
+ * not prove inclusion of history that retention may have removed.
  * Without comparable positions there is no ordering evidence.
  */
 export const readCoversUpdate = (read: Pick<LiveDetails, 'liveOutputPosition'>, update: { liveOutputPosition?: LiveOutputPosition }): boolean => {
@@ -81,7 +81,9 @@ export const mergeFullLiveDetails = (previous: LiveDetails, full: LiveDetails, i
   const fullIds = new Set(fullEvents.flatMap(event => event.id ? [event.id] : []));
   const previousIdentity = executionIdentity(previous.events);
   const fullIdentity = executionIdentity(fullEvents);
-  const sameExecution = previousIdentity && fullIdentity
+  const sameExecution = previous.liveOutputPosition && full.liveOutputPosition
+    ? previous.liveOutputPosition.epoch === full.liveOutputPosition.epoch
+    : previousIdentity && fullIdentity
     ? previousIdentity === fullIdentity
     : previous.events.some(event => event.id && fullIds.has(event.id));
   const { events, retainedOmittedRaw } = sameExecution

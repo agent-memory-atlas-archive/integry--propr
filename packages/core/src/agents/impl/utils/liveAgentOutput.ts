@@ -1,8 +1,7 @@
-import { randomUUID } from 'node:crypto';
 import { Redis } from 'ioredis';
 import logger from '../../../utils/logger.js';
 import { boundedProviderOutput, MAX_PROVIDER_OUTPUT_BYTES } from './boundedProviderOutput.js';
-import { LiveOutputBacklog, writeLiveOutput } from './liveOutputLog.js';
+import { LiveOutputBacklog, LiveOutputLog } from './liveOutputLog.js';
 
 /**
  * Bounded provider JSONL kept in memory and appended to the task's live Redis
@@ -10,12 +9,9 @@ import { LiveOutputBacklog, writeLiveOutput } from './liveOutputLog.js';
  * Records neither sink has acknowledged are bounded (see {@link LiveOutputBacklog}).
  */
 export class LiveAgentOutput {
-    private readonly redis: Redis;
-    private readonly ownsRedis: boolean;
-    private readonly writes: Array<{ chunk: string; bytes: number; sequence: number; published: boolean; persisted: boolean }> = [];
+    private readonly liveLog?: LiveOutputLog;
+    private readonly writes: Array<{ chunk: string; bytes: number }> = [];
     private readonly backlog: LiveOutputBacklog;
-    private readonly writer = randomUUID();
-    private sequence = 0;
     private closed = false;
     private finished = false;
     private closePromise: Promise<void> | null = null;
@@ -38,12 +34,9 @@ export class LiveAgentOutput {
         } = {},
     ) {
         this.backlog = new LiveOutputBacklog(maximumQueuedBytes, onOverflow, { taskId, label });
-        this.ownsRedis = !redis;
-        this.redis = redis ?? new Redis({
-            host: process.env.REDIS_HOST || 'redis',
-            port: parseInt(process.env.REDIS_PORT || '6379', 10),
-            maxRetriesPerRequest: 1,
-        });
+        // Redis is an ephemeral display sink. Its backlog and acknowledgements
+        // must never hold up, or release, the independent durable obligation.
+        if (taskId) this.liveLog = new LiveOutputLog(taskId, { redis, maximumQueuedBytes, flushIntervalMs: 200 });
     }
 
     get raw(): string { return this.output; }
@@ -51,7 +44,8 @@ export class LiveAgentOutput {
     append(value: string): void {
         if (this.closed) return;
         this.output = boundedProviderOutput(this.output + value, MAX_PROVIDER_OUTPUT_BYTES);
-        if (!this.taskId) return;
+        this.liveLog?.append(value);
+        if (!this.taskId || !this.persistOutput) return;
         const bytes = Buffer.byteLength(value);
         if (!this.backlog.reserve(bytes)) return;
         this.pendingOutput = boundedProviderOutput(this.pendingOutput + value, MAX_PROVIDER_OUTPUT_BYTES);
@@ -62,35 +56,22 @@ export class LiveAgentOutput {
     flush(): Promise<void> {
         if (this.flushTimer) clearTimeout(this.flushTimer);
         this.flushTimer = null;
-        if (!this.taskId) return this.flushPromise;
+        const publication = this.liveLog?.flush();
+        if (!this.taskId || !this.persistOutput) return publication ?? this.flushPromise;
         if (this.pendingOutput) {
             const bytes = Buffer.byteLength(this.pendingOutput);
             this.backlog.release(this.pendingBytes - bytes);
-            this.writes.push({ chunk: this.pendingOutput, bytes, sequence: ++this.sequence, published: false, persisted: !this.persistOutput });
+            this.writes.push({ chunk: this.pendingOutput, bytes });
             this.pendingOutput = '';
             this.pendingBytes = 0;
         }
         this.flushPromise = this.flushPromise.then(async () => {
             while (this.writes.length > 0) {
                 const write = this.writes[0];
-                // A fast rejection must not allow another drain to retry a sink
-                // whose write is still in flight. Acknowledge the sinks separately.
-                const results = await Promise.allSettled([
-                    (async () => {
-                        if (write.published) return;
-                        if (this.ownsRedis && this.redis.status === 'end') await this.redis.connect();
-                        await writeLiveOutput(this.redis, this.taskId!, write.chunk, { publication: { writer: this.writer, sequence: write.sequence } });
-                        write.published = true;
-                    })(),
-                    (async () => {
-                        if (write.persisted) return;
-                        await this.persistOutput!(write.chunk.split('\n').filter(Boolean));
-                        write.persisted = true;
-                    })(),
-                ]);
-                const failure = results.find(result => result.status === 'rejected');
-                if (failure?.status === 'rejected') {
-                    logger.debug({ error: (failure.reason as Error).message, label: this.label }, 'Failed to persist live agent output');
+                try {
+                    await this.persistOutput!(write.chunk.split('\n').filter(Boolean));
+                } catch (error) {
+                    logger.debug({ error: (error as Error).message, label: this.label }, 'Failed to persist durable agent output');
                     this.scheduleFlush();
                     return;
                 }
@@ -98,7 +79,7 @@ export class LiveAgentOutput {
                 this.writes.shift();
             }
         });
-        return this.flushPromise;
+        return Promise.all([this.flushPromise, publication]).then(() => undefined);
     }
 
     private scheduleFlush(): void {
@@ -124,12 +105,15 @@ export class LiveAgentOutput {
         this.closed = true;
         if (this.flushTimer) clearTimeout(this.flushTimer);
         this.flushTimer = null;
-        await this.flush();
-        if (this.writes.length > 0) {
-            if (this.ownsRedis) this.redis.disconnect();
-            throw new Error('Live agent output still has unacknowledged writes');
-        }
-        if (this.ownsRedis) await this.redis.quit().catch(() => undefined);
+        // close() retries the Redis drain with bounded backoff. Failure remains
+        // diagnostic; only unacknowledged durable writes can fail the session.
+        await Promise.all([
+            this.flush(),
+            this.liveLog?.close().catch(error => {
+                logger.warn({ error: (error as Error).message, label: this.label }, 'Failed to publish final live agent output');
+            }),
+        ]);
+        if (this.writes.length > 0) throw new Error('Live agent output still has unacknowledged writes');
         this.finished = true;
         // Everything accepted was acknowledged, but the output refused after the overflow was not.
         if (this.backlog.overflow) throw this.backlog.overflow;

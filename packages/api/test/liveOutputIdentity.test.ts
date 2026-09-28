@@ -328,7 +328,8 @@ const streams = {
 };
 
 for (const [name, { head, delta, tool }] of Object.entries(streams)) {
-  test(`a buffered message of ${name} keeps its identity when the log is trimmed before it completes`, async t => {
+  for (const duplicate of name === 'OpenCode text parts' ? ['none', 'part', 'parts', 'top-level'] : ['none']) {
+  test(`a buffered message of ${name} (${duplicate} duplicate) keeps its identity when the log is trimmed before it completes`, async t => {
     const redis = new Redis({
       host: process.env.REDIS_HOST ?? '127.0.0.1', port: Number.parseInt(process.env.REDIS_PORT ?? '6379', 10),
       lazyConnect: true, connectTimeout: 250, maxRetriesPerRequest: 1, retryStrategy: () => null,
@@ -343,9 +344,12 @@ for (const [name, { head, delta, tool }] of Object.entries(streams)) {
     const reader: LiveOutputRedis = { eval: (script, { keys, arguments: args }) => redis.eval(script, keys.length, ...keys, ...args) };
     const thoughts = (events: Array<{ type: string }>) => events.filter(event => event.type === 'thought') as unknown as Array<{ id: string; content: string }>;
     const earlier = `${[head, ...Array.from({ length: 12 }, (_, index) => tool(`tool-${index}`))].join('\n')}\n`;
-    const parts = Array.from({ length: 30 }, (_, index) => `part ${String(index).padStart(2, '0')} of the message, `);
+    const parts = Array.from({ length: duplicate === 'none' ? 30 : 60 }, (_, index) => `part ${String(index).padStart(2, '0')} of the message, `);
     const message = parts.join('');
-    const began = `${parts.slice(0, 3).map(delta).join('\n')}\n`;
+    const repeated = JSON.parse(tool('tool-0'));
+    if (duplicate === 'parts') { repeated.parts = [repeated.part]; delete repeated.part; }
+    if (duplicate === 'top-level') { Object.assign(repeated, repeated.part); delete repeated.part; }
+    const began = `${[delta(parts[0]), ...(duplicate === 'none' ? [] : [JSON.stringify(repeated)]), ...parts.slice(1, 3).map(delta)].join('\n')}\n`;
     const went = `${parts.slice(3).map(delta).join('\n')}\n`;
     // The ceiling's cut falls inside the third delta, so the log would begin at the fourth.
     const length = Buffer.byteLength(earlier + began + went);
@@ -392,5 +396,29 @@ for (const [name, { head, delta, tool }] of Object.entries(streams)) {
       await redis.del(liveOutputKey(id), liveOutputMetaKey(id));
       redis.disconnect();
     }
+  });
+  }
+}
+
+for (const toolType of ['tool', 'tool_result']) {
+  test(`trimmed OpenCode ${toolType} identities seed deduplication without completing buffered text`, () => {
+    const head = streams['OpenCode text parts'].head;
+    const tool = JSON.stringify({ type: 'tool_use', sessionID: 'session', part: {
+      type: toolType, callID: 'a', tool: 'bash', state: { status: 'completed', output: 'ok' }, output: 'ok',
+    } });
+    const delta = streams['OpenCode text parts'].delta;
+    const prefix = `${head}\n${tool}\n`;
+    const tail = `${delta('Checking ')}\n${tool}\n${delta('the parser')}\n`;
+    const options = { taskId: 'seed', epoch: '1', offset: 0, executionStartTimestamp: '2026-09-28T00:00:00Z' };
+    const running = new LiveOutputProjector(options);
+    running.feed(prefix + tail, 0);
+    const read = projectLiveOutputRead({
+      epoch: '1', start: 0, base: Buffer.byteLength(prefix), from: Buffer.byteLength(prefix),
+      end: Buffer.byteLength(prefix + tail), head, text: tail, envelopes: 2,
+      openCodeTools: { uses: toolType === 'tool' ? { a: true } : {}, results: { a: true } },
+    }, 'seed', options.executionStartTimestamp);
+    assert.deepEqual(read.events.filter(event => event.type === 'thought'), [running.pending()]);
+    assert.equal(read.events.filter(event => event.type === 'thought').length, 1);
+    assert.equal(read.events.find(event => event.type === 'thought')?.content, 'Checking the parser');
   });
 }

@@ -413,3 +413,17 @@ for (const change of ['expired-shorter', 'expired-longer', 'beyond-end']) {
     } finally { await manager.closeAll(); }
   });
 }
+
+for (const diagnostics of [Array(200).fill('Starting container'), ['Starting ' + 'x'.repeat(256 * 1024)]]) {
+  test(`provider selection survives ${diagnostics.length} diagnostic records across any read boundary`, () => {
+    const lines = [...diagnostics, ...claudeRecords.slice(1)];
+    const options = { taskId: 'preamble', epoch: '1', offset: 0, executionStartTimestamp: '2026-09-28T00:00:00Z' };
+    const full = new LiveOutputProjector(options).feed(lines.join('\n') + '\n', 0);
+    assert.ok(full.some(event => event.type === 'tool_use'));
+    for (const chunks of [[diagnostics.join('\n') + '\n', claudeRecords.slice(1).join('\n') + '\n'], lines.map(line => line + '\n')]) {
+      const incremental = new LiveOutputProjector(options);
+      const events = chunks.flatMap(chunk => incremental.feed(chunk, incremental.offset));
+      assert.deepEqual(events, full);
+    }
+  });
+}

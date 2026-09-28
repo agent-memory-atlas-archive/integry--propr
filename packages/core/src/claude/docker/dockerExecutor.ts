@@ -241,6 +241,7 @@ export function executeDockerCommand(command: string, args: string[], options: D
         const state = createDockerExecutionState();
         let ownershipFailure: unknown;
         let hasOwnershipFailure = false;
+        let processError: Error | undefined;
         let timeoutInitiatedAbort = false;
         const pendingCallbacks = new Set<Promise<void>>();
         let containerDetectionTimer: ReturnType<typeof setTimeout> | null = null;
@@ -276,8 +277,9 @@ export function executeDockerCommand(command: string, args: string[], options: D
             preserveOwnershipFailure(error);
             abortExecution();
         };
-        // Live output that can no longer be published fails this subprocess alone, like a timeout.
-        const failFromLiveOutput = (error: Error): void => { preserveOwnershipFailure(error); abortExecution(true); };
+        const warnFromLiveOutput = (error: Error): void => {
+            logger.warn({ error: error.message, taskId }, 'Live output unavailable; continuing agent execution');
+        };
         const invokeExecutionCallback = (callback: () => void | Promise<void>): void => {
             const callbackPromise = Promise.resolve().then(callback).catch(failFromCallback);
             pendingCallbacks.add(callbackPromise);
@@ -317,7 +319,7 @@ export function executeDockerCommand(command: string, args: string[], options: D
             })
             : null;
 
-        const liveOutput = startLiveOutputStreaming({ taskId, streamToRedis, streamStderrToRedis, streamExtraOutput, stripAnsi, onOverflow: failFromLiveOutput }, () => stdout, () => stderr);
+        const liveOutput = startLiveOutputStreaming({ taskId, streamToRedis, streamStderrToRedis, streamExtraOutput, stripAnsi, onOverflow: warnFromLiveOutput }, () => stdout, () => stderr);
         if (command === 'docker' && args[0] === 'run' && worktreePath) {
             containerDetectionTimer = detectContainerId(
                 worktreePath,
@@ -354,13 +356,14 @@ export function executeDockerCommand(command: string, args: string[], options: D
             if (state.teardownPromise) await state.teardownPromise;
             executionSignal?.removeEventListener('abort', abortForExecutionSignal);
             try { await liveOutput?.close(); }
-            catch (error) { reject(hasOwnershipFailure ? ownershipFailure : getExecutionAbortError(executionSignal) ?? error); return; }
+            catch (error) { logger.warn({ error: (error as Error).message, taskId }, 'Failed to publish final live output'); }
             const executionAbortError = getExecutionAbortError(executionSignal);
             if (executionAbortError) preserveOwnershipFailure(executionAbortError);
             if (hasOwnershipFailure) {
                 reject(ownershipFailure);
                 return;
             }
+            if (processError) { reject(processError); return; }
             if (state.aborted.value && !timeoutInitiatedAbort) {
                 reject(new ExecutionAbortedError());
                 return;
@@ -378,6 +381,8 @@ export function executeDockerCommand(command: string, args: string[], options: D
             resolve({ exitCode, stdout, stderr, messageTimestamps });
         });
         child.on('error', async (error: Error) => {
+            // close may run during cleanup; capture the process result before awaiting.
+            processError = error;
             clearTimeout(timeoutHandle);
             inspectSessionLines('', new Date().toISOString(), true);
             if (containerDetectionTimer) clearTimeout(containerDetectionTimer);
@@ -386,7 +391,7 @@ export function executeDockerCommand(command: string, args: string[], options: D
             await Promise.allSettled([...pendingCallbacks]);
             if (state.teardownPromise) await state.teardownPromise;
             await liveOutput?.close().catch(() => undefined);
-            reject(error);
+            reject(hasOwnershipFailure ? ownershipFailure : error);
         });
     });
 }

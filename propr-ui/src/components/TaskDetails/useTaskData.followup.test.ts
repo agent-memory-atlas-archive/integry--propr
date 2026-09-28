@@ -292,6 +292,32 @@ describe('full history follow-up regressions', () => {
     });
   }
 
+  for (const page of ['goal', 'finished task']) {
+    for (const fullState of [true, false]) {
+      it(`${page}: retains history from a covered ${fullState ? 'snapshot' : 'increment'} received during HTTP`, async () => {
+        vi.useFakeTimers();
+        const read = deferred<LiveDetails>();
+        apiMocks.getTaskLiveDetails.mockReturnValueOnce(read.promise).mockReturnValue(new Promise(() => {}));
+        apiMocks.getTaskHistory.mockResolvedValue({ history: [{ state: 'COMPLETED' }] });
+        const usePage: () => { liveDetails: LiveDetails } = page === 'goal' ? () => useTaskLiveData('task', 0, 'claude_execution') : () => useTaskData('task');
+        const { result, unmount } = renderHook(usePage);
+        await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+        const lost = { ...message('Earlier readable history'), id: 'live:task:redis:gen%3A1:20:0' };
+        act(() => socketMocks.liveUpdateHandler?.({
+          taskId: 'task', events: [lost, message('Check')], currentTask: 'Old task',
+          ...(fullState ? { omittedEventCount: 0 } : {}), liveOutputPosition: at(60),
+        }));
+        expect(result.current.liveDetails.events).toContainEqual(lost);
+        const newer = { ...growing('Checking the parser', 100), currentTask: 'New task', historyTruncated: true };
+        await act(async () => { read.resolve(newer); await read.promise; });
+        expect(result.current.liveDetails).toMatchObject({
+          ...newer, events: [lost, message('Checking the parser')],
+        });
+        unmount();
+      });
+    }
+  }
+
   describe('socket updates arriving after a newer full read', () => {
     const lateWatcherState = {
       taskId: 'task', events: [message('Check')], todos: [{ id: 'todo', content: 'Read parser', status: 'in_progress' }],
