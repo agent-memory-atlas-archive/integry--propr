@@ -19,13 +19,15 @@ import {
   QUEUED_TASK_STATES,
   RUNNING_TASK_STATES,
   TASK_COLUMNS,
-  terminalTransitionQuery,
-  toIso,
   type DashboardTaskRow,
   type RawTaskRow,
 } from './dashboardQueries.js';
 
-export interface CompletionUpdate extends DashboardTaskRow {
+interface CompletionRow extends DashboardTaskRow {
+  completionId: number;
+}
+
+export interface CompletionUpdate extends CompletionRow {
   /**
    * What the run actually produced, from the recap recorded on its completion,
    * or null when the only thing recorded is that it finished.
@@ -99,40 +101,41 @@ const RUN_START_STATES: readonly string[] = [...QUEUED_TASK_STATES, ...RUNNING_T
  * recap or review score from an earlier run must not be shown as the result of
  * a later one that recorded none.
  */
-async function loadCompletionDetails(db: Knex, rows: readonly DashboardTaskRow[]): Promise<Map<string, CompletionDetails>> {
-  const details = new Map<string, CompletionDetails>();
-  const completedAt = new Map(rows.map(row => [row.taskId, Date.parse(row.stateTimestamp)]));
-  const runStarted = new Set<string>();
-  for (const batch of chunk(rows.map(row => row.taskId))) {
+async function loadCompletionDetails(db: Knex, rows: readonly CompletionRow[]): Promise<Map<number, CompletionDetails>> {
+  const details = new Map<number, CompletionDetails>();
+  for (const batch of chunk([...new Set(rows.map(row => row.taskId))])) {
     const history = await db('task_history')
       .whereIn('task_id', batch)
       .whereIn('state', ['completed', ...RUN_START_STATES])
-      .select('task_id', 'state', 'timestamp', 'metadata')
+      .select('task_id', 'history_id', 'state', 'timestamp', 'metadata')
       .orderBy([{ column: 'timestamp', order: 'desc' }, { column: 'history_id', order: 'desc' }]) as Array<Record<string, unknown>>;
+    const byTask = new Map<string, Array<Record<string, unknown>>>();
     for (const entry of history) {
       const taskId = String(entry.task_id);
-      if (runStarted.has(taskId)) continue;
-      // Anything after the listed completion belongs to a later run, including
-      // a restart recorded in the same millisecond, which sorts before it.
-      if (Date.parse(toIso(entry.timestamp)) > (completedAt.get(taskId) ?? Number.NEGATIVE_INFINITY)) continue;
-      if (entry.state !== 'completed') {
-        if (details.has(taskId)) runStarted.add(taskId);
-        continue;
+      const entries = byTask.get(taskId) ?? [];
+      entries.push(entry);
+      byTask.set(taskId, entries);
+    }
+    for (const row of rows.filter(row => byTask.has(row.taskId))) {
+      const current: CompletionDetails = { recap: null, commandMode: null };
+      let found = false;
+      for (const entry of byTask.get(row.taskId)!) {
+        if (!found && Number(entry.history_id) !== row.completionId) continue;
+        found = true;
+        const metadata = parseJsonObject(entry.metadata);
+        current.commandMode ??= typeof metadata.commandMode === 'string' ? metadata.commandMode : null;
+        if (entry.state !== 'completed') break;
+        current.recap ??= meaningfulRecap(recapFrom(metadata));
       }
-      const metadata = parseJsonObject(entry.metadata);
-      const current = details.get(taskId) ?? { recap: null, commandMode: null };
-      const commandMode = typeof metadata.commandMode === 'string' ? metadata.commandMode : null;
-      details.set(taskId, {
-        recap: current.recap ?? recapFrom(metadata),
-        commandMode: current.commandMode ?? commandMode,
-      });
+      details.set(row.completionId, current);
     }
   }
   return details;
 }
 
 function isReviewRun(row: DashboardTaskRow, commandMode: string | null): boolean {
-  return commandMode === 'review' || row.taskType === 'review' || /^Review PR #\d+:/i.test(row.title ?? '');
+  if (commandMode !== null) return commandMode === 'review';
+  return row.taskType === 'review' || /^Review PR #\d+:/i.test(row.title ?? '');
 }
 
 /**
@@ -168,16 +171,32 @@ function meaningfulRecap(recap: string | null): string | null {
 /**
  * Group before limiting or searching so retries cannot crowd other entities
  * off the page. Keep the newest outcome (and its own recap/score), with the
- * count of completed tasks behind it. Duplicate terminal transitions within a
- * task and skipped work remain excluded by terminalTransitionQuery.
+ * count of completed runs behind it. Duplicate terminal transitions within a
+ * run and skipped work remain excluded, while a later run cannot erase a review.
  *
  * Identity follows mapTaskRow's PR resolution, including legacy PR task IDs
  * and PRs recorded only in final_result. Goal and issue keys are fallbacks;
  * repository and entity kind are both part of the partition.
  */
 function entityCompletions(db: Knex, repository: string): Knex.QueryBuilder {
-  const completed = terminalTransitionQuery(db, repository, 'completed', { excludeReasonLike: SKIPPED_REASON_PATTERN })
-    .select(TASK_COLUMNS);
+  // Keep one outcome per run, not per task: a review and a subsequent fix can
+  // reuse the same task ID. Consecutive completion writes are still one run.
+  const history = db('task_history')
+    .whereIn('state', ['completed', ...RUN_START_STATES])
+    .select('task_id', 'history_id', 'state', 'timestamp', 'reason').select(db.raw(`
+    SUM(CASE WHEN state IN (${RUN_START_STATES.map(() => '?').join(', ')}) THEN 1 ELSE 0 END)
+      OVER (PARTITION BY task_id ORDER BY timestamp, history_id) AS run_id
+  `, [...RUN_START_STATES]));
+  const runs = db.from('completion_history').where('state', 'completed')
+    .where(query => query.whereNull('reason').orWhereNot('reason', 'like', SKIPPED_REASON_PATTERN))
+    .select('*').select(db.raw(`ROW_NUMBER() OVER (
+      PARTITION BY task_id, run_id ORDER BY timestamp DESC, history_id DESC
+    ) AS completion_rank`));
+  const completed = db('tasks as t').join('completion_runs as h', 'h.task_id', 't.task_id')
+    .where('h.completion_rank', 1)
+    .where(query => query.whereNull('t.task_type').orWhereNot('t.task_type', 'goal'))
+    .modify(query => { if (repository && repository !== 'all') query.where('t.repository', repository); })
+    .select(TASK_COLUMNS).select('h.history_id');
   const validJob = "CASE WHEN json_valid(initial_job_data) THEN initial_job_data ELSE '{}' END";
   const validResult = "CASE WHEN json_valid(final_result) THEN final_result ELSE '{}' END";
   const numbered = db.from('completed').select('*').select(db.raw(`
@@ -212,15 +231,15 @@ function entityCompletions(db: Knex, repository: string): Knex.QueryBuilder {
   `));
   const ranked = db.from('entities').select('*').select(db.raw(`
     ROW_NUMBER() OVER (
-      PARTITION BY repository, entity_key ORDER BY state_timestamp DESC, task_id DESC
+      PARTITION BY repository, entity_key ORDER BY state_timestamp DESC, task_id DESC, history_id DESC
     ) AS entity_rank,
     COUNT(*) OVER (PARTITION BY repository, entity_key) AS event_count,
     FIRST_VALUE(resolved_title) OVER (
       PARTITION BY repository, entity_key
-      ORDER BY (resolved_title IS NULL), state_timestamp DESC, task_id DESC
+      ORDER BY (resolved_title IS NULL), state_timestamp DESC, task_id DESC, history_id DESC
     ) AS entity_title
   `));
-  return db.with('completed', completed).with('numbered', numbered)
+  return db.with('completion_history', history).with('completion_runs', runs).with('completed', completed).with('numbered', numbered)
     .with('entities', entities).with('ranked', ranked)
     .from('ranked');
 }
@@ -233,7 +252,7 @@ export async function loadCompletedRows(
 ): Promise<CompletedRow[]> {
   const limit = Math.min(Math.max(options.limit ?? 20, 1), 100);
   const search = options.search?.trim().toLowerCase() ?? '';
-  type EntityRow = RawTaskRow & { event_count: number; entity_key: string; entity_title: string | null };
+  type EntityRow = RawTaskRow & { history_id: number; event_count: number; entity_key: string; entity_title: string | null };
   const candidates = (after: EntityRow | null, pageSize: number): Knex.QueryBuilder => {
     const query = entityCompletions(db, repository)
       .where('entity_rank', 1)
@@ -251,13 +270,13 @@ export async function loadCompletedRows(
     return query;
   };
 
-  const mapped: Array<DashboardTaskRow & { eventCount: number; entityKey: string }> = [];
+  const mapped: Array<CompletionRow & { eventCount: number; entityKey: string }> = [];
   let after: EntityRow | null = null;
   const pageSize = search ? SEARCH_PAGE_SIZE : limit;
   do {
     const page = await candidates(after, pageSize) as EntityRow[];
     for (const row of page) {
-      const mappedRow = { ...mapTaskRow(row), title: row.entity_title };
+      const mappedRow = { ...mapTaskRow(row), completionId: row.history_id, title: row.entity_title };
       if (!search || (mappedRow.title ?? '').toLowerCase().includes(search)) {
         mapped.push({ ...mappedRow, eventCount: Number(row.event_count), entityKey: row.entity_key });
       }
@@ -275,16 +294,17 @@ export async function loadCompletedRows(
     .whereIn(['repository', 'entity_key'], db.from('ranked')
       .select('repository', 'entity_key').whereIn('task_id', visible.map(row => row.taskId)))
     .select('*')
-    .orderBy([{ column: 'state_timestamp', order: 'desc' }, { column: 'task_id', order: 'desc' }]) as EntityRow[];
-  const earlierRows = earlier.map(row => mapTaskRow(row));
+    .orderBy([{ column: 'state_timestamp', order: 'desc' }, { column: 'task_id', order: 'desc' }, { column: 'history_id', order: 'desc' }]) as EntityRow[];
+  const earlierRows = earlier.map(row => ({ ...mapTaskRow(row), completionId: row.history_id }));
   const details = await loadCompletionDetails(db, [...visible, ...earlierRows]);
-  const withDetails = (row: DashboardTaskRow): CompletionUpdate => {
-    const detail = details.get(row.taskId) ?? { recap: null, commandMode: null };
+  const withDetails = (row: CompletionRow): CompletionUpdate => {
+    const detail = details.get(row.completionId) ?? { recap: null, commandMode: null };
     if (isReviewRun(row, detail.commandMode)) {
       const review = splitReviewRecap(detail.recap);
-      return { ...row, recap: meaningfulRecap(review.detail), reviewScore: review.score };
+      return { ...row, taskType: 'review', recap: meaningfulRecap(review.detail), reviewScore: review.score };
     }
-    return { ...row, recap: meaningfulRecap(detail.recap), reviewScore: null };
+    const taskType = detail.commandMode === 'default' ? 'follow-up' : detail.commandMode ?? row.taskType;
+    return { ...row, taskType, recap: meaningfulRecap(detail.recap), reviewScore: null };
   };
   const updates = new Map<string, CompletionUpdate[]>();
   for (const [index, raw] of earlier.entries()) {

@@ -218,8 +218,8 @@ describe('Dashboard', () => {
 
   it('expands typed chronological deltas, preserving findings, scores and destinations', async () => {
     const earlierUpdates = [
-      outcomeItem({ id: 'deferred', taskId: 'deferred', title: 'Review PR #100: Ship the retry budget', detail: 'Review deferred: awaiting checks', score: null }),
-      outcomeItem({ id: 'fix', taskId: 'fix', title: 'Followup: Ship the retry budget', detail: 'Fixed operator markup · Validation: ESLint passed', score: null }),
+      outcomeItem({ id: 'deferred', taskId: 'deferred', title: 'Followup: Ship the retry budget', taskType: 'review', detail: 'Review deferred: awaiting checks', score: null }),
+      outcomeItem({ id: 'fix', taskId: 'fix', taskType: 'fix', title: 'Review PR #100: Ship the retry budget', detail: 'Implemented the requested changes:\n · Fixed operator markup · Validation: ESLint passed', score: null }),
       outcomeItem({ id: 'review', taskId: 'review', taskType: 'review', detail: '2 issues found: Allow repairable quotes; Preserve OpenCode attribution', score: 6 }),
       outcomeItem({ id: 'verify', taskId: 'verify', title: 'Followup: Ship the retry budget', taskType: 'pr-comment', detail: 'The reported lint issue is already fixed. No further changes were needed. · Verified: Lint passed', score: null }),
       outcomeItem({ id: 'ci', taskId: 'ci', taskType: 'ci', detail: 'Build passed', score: null }),
@@ -241,6 +241,7 @@ describe('Dashboard', () => {
       .toEqual(['Review', 'Fix', 'Review', 'Verify', 'CI', 'Ultrafix', 'Fix']);
     expect(updates.getByText('Allow repairable quotes & Preserve OpenCode attribution (2 issues)'))
       .toHaveAttribute('title', earlierUpdates[2].detail);
+    expect(updates.getByText('Implemented the requested changes: · Fixed operator markup · Validation: ESLint passed')).toBeVisible();
     expect(updates.getByText('Review score 6 out of 10')).toBeInTheDocument();
     expect(updates.getByText('Review deferred: awaiting checks')).toBeVisible();
     expect(updates.getByText('Fix run')).toBeVisible();

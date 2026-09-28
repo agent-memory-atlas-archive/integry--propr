@@ -49,9 +49,12 @@ const VISIBLE_ITEMS = 5;
 /** How long typing has to pause before the filter reads again. */
 const SEARCH_DEBOUNCE_MS = 300;
 
+// Recorded run metadata takes precedence over the task's mutable title.
+const RECORDED_WORK_TYPES: Record<string, string> = { review: 'Review', fix: 'Fix', 'follow-up': 'Follow-up', merge: 'Merge' };
+
 /** Compact only the structured review prefix; retain the actual findings verbatim. */
 function compactDelta(detail: string): string {
-  const summary = detail.split(' · ')[0].trim();
+  const summary = detail.replace(/\s+/g, ' ').trim();
   const findings = /^(?:([0-9]+) issues? found|Found ([0-9]+) issues?):\s*(.+)$/i.exec(summary);
   if (!findings) return summary;
   const count = findings[1] ?? findings[2];
@@ -63,7 +66,7 @@ function updateType(update: OutcomeItem, type: string | null): string {
   // Some older runs record only "pr-comment" or "Follow-up" as their type.
   // Prefer explicit review evidence, then validation-only recaps. A fix that
   // merely mentions passing validation must remain a fix.
-  if (type === 'Review' || update.score != null || /^Review\b/i.test(detail)) return 'Review';
+  if (update.taskType === 'review' || type === 'Review' || update.score != null || /^Review\b/i.test(detail)) return 'Review';
   if (/^(?:validation|verification|validate|verify)$/i.test(type ?? '')
     || (/\bno (?:further )?changes\b/i.test(detail) && /\b(?:verified|lint passed|tests? passed)\b/i.test(detail))) return 'Verify';
   if (/^ci(?: checks?)?$/i.test(type ?? '') || /^CI checks? (?:passed|completed)\b/i.test(detail)) return 'CI';
@@ -105,7 +108,7 @@ const CompletedRow: React.FC<{ item: OutcomeItem }> = ({ item }) => {
               </time>
             )}
           />
-          <RowTitle type={work.type}>{title}</RowTitle>
+          <RowTitle type={RECORDED_WORK_TYPES[item.taskType ?? ''] ?? work.type}>{title}</RowTitle>
         </span>
         {/*
           A review's score, and nothing else's. Rendered only when one exists,
@@ -148,7 +151,7 @@ const CompletedRow: React.FC<{ item: OutcomeItem }> = ({ item }) => {
         <ul id={updatesId} hidden={!expanded} className="ml-3 mr-3 my-2 space-y-1.5 border-l-2 border-solid border-slate-200 pl-3">
           {expanded && updates.map(update => {
             const updateWork = splitWorkTitle(update.title, update.taskType);
-            const type = updateType(update, updateWork.type);
+            const type = updateType(update, RECORDED_WORK_TYPES[update.taskType ?? ''] ?? updateWork.type);
             // A missing recap is a run type, never the parent deliverable again.
             const delta = update.detail && update.detail !== title && update.detail !== item.title
               && update.detail !== update.title && update.detail !== updateWork.title

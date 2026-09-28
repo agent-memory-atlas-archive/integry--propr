@@ -83,7 +83,7 @@ export interface ActiveItem {
   updatedAt: string;
 }
 
-/** The newest successful outcome for an entity, with its completed task count. */
+/** The newest successful outcome for an entity, with its completed run count. */
 export interface OutcomeItem {
   eventCount: number;
   earlierUpdates: Array<Omit<OutcomeItem, 'eventCount' | 'earlierUpdates'>>;
@@ -116,7 +116,7 @@ function readRepositoryFilter(req: Request, res: Response): string | null {
 
 function toOutcomeItem(row: CompletedRow): OutcomeItem {
   return {
-    id: `task:${row.taskId}:completed`,
+    id: `task:${row.taskId}:completed:${row.completionId}`,
     taskId: row.taskId,
     repository: row.repository,
     issueNumber: row.issueNumber,
@@ -125,7 +125,7 @@ function toOutcomeItem(row: CompletedRow): OutcomeItem {
     title: row.title,
     eventCount: row.eventCount,
     earlierUpdates: row.earlierUpdates.map(update => ({
-      id: `task:${update.taskId}:completed`, taskId: update.taskId,
+      id: `task:${update.taskId}:completed:${update.completionId}`, taskId: update.taskId,
       repository: update.repository, issueNumber: update.issueNumber, prNumber: update.prNumber,
       taskType: update.taskType, title: update.title, detail: update.recap,
       score: update.reviewScore, occurredAt: update.stateTimestamp,

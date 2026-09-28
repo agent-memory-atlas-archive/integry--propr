@@ -217,6 +217,11 @@ test('a completion shows its own run\'s recap and score, never an earlier run\'s
   const byTask = new Map((outcomes.body.items as Array<Record<string, unknown>>).map(item => [item.taskId, item]));
   const rereviewed = byTask.get('rereviewed');
   assert.deepEqual([rereviewed?.occurredAt, rereviewed?.score, rereviewed?.detail], [minutesAgo(30), null, null]);
+  const previousReview = (rereviewed?.earlierUpdates as Array<Record<string, unknown>>)[0];
+  assert.deepEqual([previousReview.taskId, previousReview.occurredAt, previousReview.taskType, previousReview.score, previousReview.detail],
+    ['rereviewed', minutesAgo(180), 'review', 9, '0 issues found']);
+  assert.notEqual(previousReview.id, rereviewed?.id);
+  assert.equal(rereviewed?.eventCount, 2);
   const twoStep = byTask.get('two-step');
   assert.deepEqual(
     [twoStep?.occurredAt, twoStep?.detail],
@@ -304,4 +309,39 @@ test('five parents survive many updates and prior recaps keep their own scores a
     assert.deepEqual(item.earlierUpdates.map(update => [update.taskId, update.detail, update.score]),
       [1, 2, 3].map(update => [`parent-${parent}-update-${update}`, `Review pass ${update}`, 9 - update]));
   }
+});
+
+
+test('review metadata survives generic titles, absent scores and later fixes in the same PR', async () => {
+  await seedTask({ taskId: 'review-without-score', prNumber: 2587, taskType: 'pr-comment', title: 'Followup: Dashboard cleanup', states: [
+    { state: 'processing', timestamp: minutesAgo(20), metadata: { commandMode: 'review' } },
+    { state: 'completed', timestamp: minutesAgo(18), metadata: { commandMode: 'review', notificationRecap: '1 reviewer failed' } },
+    { state: 'completed', timestamp: minutesAgo(17), metadata: { notificationRecap: 'Completed the pull request follow-up.' } },
+  ] });
+  await seedTask({ taskId: 'fix', prNumber: 2587, title: 'Followup: Dashboard cleanup', states: [
+    { state: 'completed', timestamp: minutesAgo(10), metadata: { notificationRecap: 'Fixed the reported issue.' } },
+  ] });
+  const items = (await call(routes().getOutcomes, { repository: 'integry/propr', limit: '1' })).body.items as Array<Record<string, unknown>>;
+  assert.equal(items.length, 1);
+  assert.equal(items[0].eventCount, 2);
+  const updates = items[0].earlierUpdates as Array<Record<string, unknown>>;
+  assert.deepEqual(updates.map(item => [item.taskType, item.score, item.detail]), [['review', null, '1 reviewer failed']]);
+});
+
+test('same-millisecond review and fix completions keep distinct IDs, recaps and scores', async () => {
+  await seedTask({ taskId: 'reused', prNumber: 2587, taskType: 'pr-comment', title: 'Review PR #2587: Dashboard cleanup', states: [
+    { state: 'processing', timestamp: minutesAgo(1) },
+    { state: 'completed', timestamp: minutesAgo(1), metadata: { commandMode: 'review', notificationRecap: 'Score 6/10 · 2 issues found' } },
+    { state: 'processing', timestamp: minutesAgo(1) },
+    { state: 'completed', timestamp: minutesAgo(1), metadata: { commandMode: 'fix', notificationRecap: 'Fixed the review findings.' } },
+    { state: 'processing', timestamp: minutesAgo(1) },
+    { state: 'completed', timestamp: minutesAgo(1), metadata: { commandMode: 'review', notificationRecap: 'Score 9/10 · 0 issues found' } },
+  ] });
+  const items = (await call(routes().getOutcomes)).body.items as Array<Record<string, unknown>>;
+  const updates = items[0].earlierUpdates as Array<Record<string, unknown>>;
+  assert.equal(items[0].eventCount, 3);
+  assert.equal(items[0].score, 9);
+  assert.deepEqual(updates.map(item => [item.taskType, item.score, item.detail]),
+    [['fix', null, 'Fixed the review findings.'], ['review', 6, '2 issues found']]);
+  assert.equal(new Set([items[0].id, ...updates.map(item => item.id)]).size, 3);
 });
