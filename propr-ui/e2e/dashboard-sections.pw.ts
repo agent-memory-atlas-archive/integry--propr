@@ -49,79 +49,42 @@ const outcomes = [
  * itself down the page and out of the capture.
  */
 const user = {
-  id: 'preview-user',
-  login: 'operator',
-  username: 'operator',
-  displayName: 'Dana Okonkwo',
-  email: null,
-  avatarUrl: null,
-  role: 'member',
-  permissions: [],
-  authorizationSource: 'local',
+  id: 'preview-user', login: 'operator', username: 'operator', displayName: 'Dana Okonkwo',
+  email: null, avatarUrl: null, role: 'member', permissions: [], authorizationSource: 'local',
 };
 
 const agentTankUsage = {
   enabled: true,
   agents: {
-    claude: {
-      name: 'claude',
-      usage: {
-        session: { percent: 34, resetsIn: '2h 10m' },
-        weeklyAll: { percent: 61, resetsIn: '3d 4h' },
-        weeklySonnet: { percent: 22, resetsIn: '3d 4h' },
-      },
-    },
-    codex: {
-      name: 'codex',
-      usage: {
-        fiveHour: { percentUsed: 12, resetsIn: '1h 05m' },
-        weekly: { percentUsed: 47, resetsIn: '4d 2h' },
-      },
-    },
+    claude: { name: 'claude', usage: {
+      session: { percent: 34, resetsIn: '2h 10m' },
+      weeklyAll: { percent: 61, resetsIn: '3d 4h' },
+      weeklySonnet: { percent: 22, resetsIn: '3d 4h' },
+    } },
+    codex: { name: 'codex', usage: {
+      fiveHour: { percentUsed: 12, resetsIn: '1h 05m' },
+      weekly: { percentUsed: 47, resetsIn: '4d 2h' },
+    } },
   },
 };
 
-const dashboardResponses = (
-  attentionItems: typeof attention,
-  runningItems: typeof running,
-): Record<string, unknown> => ({
+const dashboardResponses = (attentionItems: typeof attention, runningItems: typeof running): Record<string, unknown> => ({
   '/api/dashboard/narrative': { repository: 'all', enabled: true, summary: '“Cache repository icons across dashboard sections” is running tests at step 3 of 5 for example/workspace PR #2456. “Show corrective operator messages” and “MCP Operator Surface” were recently completed.' },
-  '/api/dashboard/summary': {
-    repository: 'all',
-    needsAttention: attentionItems.length,
-    running: runningItems.length,
-    queued: 2,
-    completedRecently: 4,
-    recentWindowHours: 24,
-  },
+  '/api/dashboard/summary': { repository: 'all', needsAttention: attentionItems.length,
+    running: runningItems.length, queued: 2, completedRecently: 4, recentWindowHours: 24 },
   '/api/dashboard/attention': {
-    repository: 'all',
-    items: attentionItems,
-    counts: {
-      blocked: attentionItems.filter(item => item.category === 'blocked').length,
+    repository: 'all', items: attentionItems,
+    counts: { blocked: attentionItems.filter(item => item.category === 'blocked').length,
       decisions: attentionItems.filter(item => item.category === 'decision').length,
-      total: attentionItems.length,
-    },
+      total: attentionItems.length },
   },
-  '/api/dashboard/active': {
-    repository: 'all',
-    running: runningItems,
-    queued: [],
+  '/api/dashboard/active': { repository: 'all', running: runningItems, queued: [],
     queue: { queuedCount: 2, reason: 'All agents are busy' },
     counts: { running: runningItems.length, queued: 2 },
   },
   '/api/dashboard/outcomes': { repository: 'all', limit: 50, items: outcomes },
-  '/api/stats/dashboard': {
-    period: '7d',
-    repository: 'all',
-    completed: 34,
-    successRate: 87.5,
-    recordedSpend: 12.42,
-    dailyCompleted: [
-      { date: '2026-09-17', count: 4 }, { date: '2026-09-18', count: 7 }, { date: '2026-09-19', count: 3 },
-      { date: '2026-09-20', count: 6 }, { date: '2026-09-21', count: 2 }, { date: '2026-09-22', count: 8 },
-      { date: '2026-09-23', count: 4 },
-    ],
+  '/api/stats/dashboard': { period: '7d', repository: 'all', completed: 34, successRate: 87.5, recordedSpend: 12.42,
+    dailyCompleted: [4, 7, 3, 6, 2, 8, 4].map((count, index) => ({ date: `2026-09-${17 + index}`, count })),
     previous: { completed: 29, successRate: 81.2, recordedSpend: 9.8 },
   },
 });
@@ -144,11 +107,7 @@ test('the activity briefing leads with specific live progress before recent comp
   await summary.screenshot({ animations: 'disabled', path: path.join(directory, 'dashboard-live-activity-summary.png') });
 });
 
-async function fixture(
-  page: Page,
-  attentionItems: typeof attention = attention,
-  runningItems: typeof running = running,
-) {
+async function fixture(page: Page, attentionItems: typeof attention = attention, runningItems: typeof running = running) {
   await page.clock.install({ time: now });
   await page.route('**/api/**', route => {
     const pathname = new URL(route.request().url()).pathname;
@@ -159,11 +118,8 @@ async function fixture(
       '/api/tasks': { tasks: [], total: 0 },
       '/api/instance/catalog': {
         agents: [{ id: 'fixture', name: 'Fixture agent', defaultModel: 'gpt-6-astra' }],
-        repositories: [
-          { name: 'example/workspace', enabled: true, baseBranch: 'main' },
-          { name: 'example/design-system', enabled: true, baseBranch: 'main' },
-          { name: 'example/docs', enabled: true, baseBranch: 'main' },
-        ],
+        repositories: ['example/workspace', 'example/design-system', 'example/docs']
+          .map(name => ({ name, enabled: true, baseBranch: 'main' })),
       },
       '/api/queue/stats': { active: 6, waiting: 2, completed: 34, failed: 3 },
       '/api/stats/generating-plans': { count: 0 },
@@ -400,7 +356,16 @@ test('the dashboard fits a 320px viewport without horizontal overflow', async ({
     documentScrollWidth: document.documentElement.scrollWidth,
     innerWidth: window.innerWidth,
     wide: [...document.querySelectorAll('main *')]
-      .filter(node => node.getBoundingClientRect().right > window.innerWidth + 1)
+      .filter(node => {
+        let right = node.getBoundingClientRect().right;
+        // Inline tokens retain their full bounds even when an ellipsis clips them.
+        for (let parent = node.parentElement; parent; parent = parent.parentElement) {
+          if (getComputedStyle(parent).overflowX !== 'visible') {
+            right = Math.min(right, parent.getBoundingClientRect().right);
+          }
+        }
+        return right > window.innerWidth + 1;
+      })
       .map(node => ({ cls: node.className, text: (node.textContent || '').slice(0, 40), right: Math.round(node.getBoundingClientRect().right), parent: (node.parentElement?.className || '').slice(0, 80) }))
       .slice(0, 5),
   }));

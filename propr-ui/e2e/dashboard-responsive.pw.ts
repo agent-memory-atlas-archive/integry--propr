@@ -60,32 +60,19 @@ const SCORED_OUTCOMES = outcomes.filter(outcome => outcome.score !== null).lengt
  * the page and change the DOM order the layout tests read.
  */
 const user = {
-  id: 'responsive-user',
-  login: 'operator',
-  username: 'operator',
-  displayName: 'Dana Okonkwo',
-  email: null,
-  avatarUrl: null,
-  role: 'member',
-  permissions: [],
-  authorizationSource: 'local',
+  id: 'responsive-user', login: 'operator', username: 'operator', displayName: 'Dana Okonkwo',
+  email: null, avatarUrl: null, role: 'member', permissions: [], authorizationSource: 'local',
 };
 
 const dashboardResponses = (attentionItems: typeof attention): Record<string, unknown> => ({
   '/api/dashboard/narrative': { repository: 'all', enabled: true, summary: `“${LONG_TITLE}” is editing HappeningNowSection.tsx at step 2 of 6 for example/workspace issue #2480. “Tighten the reference chip contrast” was recently completed.` },
-  '/api/dashboard/summary': {
-    repository: 'all',
-    needsAttention: attentionItems.length, running: running.length, queued: 1,
-    completedRecently: 2, recentWindowHours: 24,
-  },
+  '/api/dashboard/summary': { repository: 'all', needsAttention: attentionItems.length,
+    running: running.length, queued: 1, completedRecently: 2, recentWindowHours: 24 },
   '/api/dashboard/attention': {
-    repository: 'all',
-    items: attentionItems,
-    counts: {
-      blocked: attentionItems.filter(item => item.category === 'blocked').length,
+    repository: 'all', items: attentionItems,
+    counts: { blocked: attentionItems.filter(item => item.category === 'blocked').length,
       decisions: attentionItems.filter(item => item.category === 'decision').length,
-      total: attentionItems.length,
-    },
+      total: attentionItems.length },
   },
   '/api/dashboard/active': {
     repository: 'all', running, queued: [],
@@ -94,13 +81,8 @@ const dashboardResponses = (attentionItems: typeof attention): Record<string, un
   },
   '/api/dashboard/outcomes': { repository: 'all', limit: 50, items: outcomes },
   '/api/stats/dashboard': {
-    period: '7d', repository: 'all',
-    completed: 34, successRate: 87.5, recordedSpend: 12.42,
-    dailyCompleted: [
-      { date: '2026-09-17', count: 4 }, { date: '2026-09-18', count: 7 }, { date: '2026-09-19', count: 3 },
-      { date: '2026-09-20', count: 6 }, { date: '2026-09-21', count: 2 }, { date: '2026-09-22', count: 8 },
-      { date: '2026-09-23', count: 4 },
-    ],
+    period: '7d', repository: 'all', completed: 34, successRate: 87.5, recordedSpend: 12.42,
+    dailyCompleted: [4, 7, 3, 6, 2, 8, 4].map((count, index) => ({ date: `2026-09-${17 + index}`, count })),
     previous: { completed: 29, successRate: 81.2, recordedSpend: 9.8 },
   },
 });
@@ -118,11 +100,8 @@ async function fixture(page: Page, attentionItems: typeof attention = attention)
       '/api/tasks': { tasks: [], total: 0 },
       '/api/instance/catalog': {
         agents: [{ id: 'fixture', name: 'Fixture agent', defaultModel: 'gpt-6-astra' }],
-        repositories: [
-          { name: 'example/workspace', enabled: true, baseBranch: 'main' },
-          { name: 'example/design-system', enabled: true, baseBranch: 'main' },
-          { name: 'example/docs', enabled: true, baseBranch: 'main' },
-        ],
+        repositories: ['example/workspace', 'example/design-system', 'example/docs']
+          .map(name => ({ name, enabled: true, baseBranch: 'main' })),
       },
       '/api/queue/stats': { active: 2, waiting: 1, completed: 34, failed: 3 },
       '/api/stats/generating-plans': { count: 0 },
@@ -157,13 +136,22 @@ async function capture(page: Page, name: string): Promise<void> {
   await page.screenshot({ animations: 'disabled', fullPage: true, path: path.join(directory, `${name}.png`) });
 }
 
-/** Every element wider than the viewport, named well enough to fix. */
+/** Elements visibly extending past the viewport, named well enough to fix. */
 async function horizontalOverflow(page: Page) {
   return page.evaluate(() => ({
     documentScrollWidth: document.documentElement.scrollWidth,
     innerWidth: window.innerWidth,
     wide: [...document.querySelectorAll('main *')]
-      .filter(node => node.getBoundingClientRect().right > window.innerWidth + 1)
+      .filter(node => {
+        let right = node.getBoundingClientRect().right;
+        // Inline tokens retain their full bounds even when an ellipsis clips them.
+        for (let parent = node.parentElement; parent; parent = parent.parentElement) {
+          if (getComputedStyle(parent).overflowX !== 'visible') {
+            right = Math.min(right, parent.getBoundingClientRect().right);
+          }
+        }
+        return right > window.innerWidth + 1;
+      })
       .map(node => ({
         className: String(node.className).slice(0, 80),
         text: (node.textContent || '').slice(0, 40),
@@ -172,6 +160,24 @@ async function horizontalOverflow(page: Page) {
       .slice(0, 5),
   }));
 }
+
+test('overflow detection ignores clipped tokens but catches visible overflow', async ({ page }) => {
+  await page.setViewportSize({ width: 320, height: 600 });
+  await page.setContent('<main><p style="width: 100px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis"><strong>Implementing</strong> <code>workspace#2587: Consolidating overlapping tests in Dashboard.test.tsx</code></p></main>');
+  const clipped = await horizontalOverflow(page);
+  expect(clipped.wide).toEqual([]);
+  expect(clipped.documentScrollWidth).toBeLessThanOrEqual(clipped.innerWidth);
+
+  await page.locator('p').evaluate(node => { node.style.overflow = 'visible'; });
+  const visible = await horizontalOverflow(page);
+  expect(visible.wide.some(node => node.text.includes('workspace#2587'))).toBe(true);
+  expect(visible.documentScrollWidth).toBeGreaterThan(visible.innerWidth);
+
+  await page.locator('p').evaluate(node => { node.style.overflow = 'hidden'; node.style.width = '400px'; });
+  const wideContainer = await horizontalOverflow(page);
+  expect(wideContainer.wide.length).toBeGreaterThan(0);
+  expect(wideContainer.documentScrollWidth).toBeGreaterThan(wideContainer.innerWidth);
+});
 
 /** The four panes, and the phone's scope bar above them, in priority order. */
 const PANES = ['needs-attention-panel', 'happening-now-section', 'completed-section', 'historical-stats-section'];
