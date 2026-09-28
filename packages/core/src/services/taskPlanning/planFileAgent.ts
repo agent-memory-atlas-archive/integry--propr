@@ -9,7 +9,8 @@
  */
 
 import { execFile } from 'node:child_process';
-import { lstat, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { constants } from 'node:fs';
+import { lstat, mkdir, mkdtemp, open, readdir, realpath, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import type { PlanItem } from '../../claude/prompts/plannerPrompts.js';
@@ -50,22 +51,74 @@ const MAX_WORKSPACE_FILE_BYTES = 8 * 1024 * 1024;
  */
 export const PLAN_AGENT_MAX_TURNS = 200;
 
-/** Content of a regular file in the workspace; never follows a symlink out of it. */
+async function workspaceEntry(file: string) {
+  return lstat(file).catch(error => {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
+    throw new PlanningFailedError(`Could not inspect plan output ${file}: ${(error as Error).message}`);
+  });
+}
+
+/** Check parents as well as leaf files, against the workspace resolved before execution. */
+async function checkWorkspaceDirectory(directory: string): Promise<boolean> {
+  const stats = await workspaceEntry(directory);
+  if (!stats) return false;
+  if (!stats.isDirectory() || await realpath(directory) !== directory) {
+    throw new PlanningFailedError(`Plan output directory ${directory} must be a real directory within the workspace, without symlinks.`);
+  }
+  return true;
+}
+
+/** Read through a checked file handle so replacing the leaf cannot redirect a read. */
 async function readWorkspaceFile(file: string): Promise<string | null> {
-  const stats = await lstat(file).catch(() => null);
-  if (!stats || !stats.isFile() || stats.size > MAX_WORKSPACE_FILE_BYTES) return null;
-  return readFile(file, 'utf8');
+  if (!await checkWorkspaceDirectory(path.dirname(file))) return null;
+  const stats = await workspaceEntry(file);
+  if (!stats) return null;
+  if (!stats.isFile()) throw new PlanningFailedError(`Plan output ${file} must be a regular file, without symlinks.`);
+  const handle = await open(file, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+  try {
+    const opened = await handle.stat();
+    if (!opened.isFile()) throw new PlanningFailedError(`Plan output ${file} must be a regular file.`);
+    // Read at most the limit plus one byte, including if the file grows after stat.
+    if (opened.size > MAX_WORKSPACE_FILE_BYTES) throw new PlanningFailedError(`Plan output ${file} exceeds the ${MAX_WORKSPACE_FILE_BYTES}-byte limit.`);
+    const buffer = Buffer.alloc(MAX_WORKSPACE_FILE_BYTES + 1);
+    let length = 0;
+    while (length < buffer.length) {
+      const { bytesRead } = await handle.read(buffer, length, buffer.length - length, length);
+      if (bytesRead === 0) break;
+      length += bytesRead;
+    }
+    if (length > MAX_WORKSPACE_FILE_BYTES) throw new PlanningFailedError(`Plan output ${file} exceeds the ${MAX_WORKSPACE_FILE_BYTES}-byte limit.`);
+    return buffer.toString('utf8', 0, length);
+  } finally {
+    await handle.close();
+  }
 }
 
 async function readTaskFiles(directory: string): Promise<Record<string, string>> {
-  const names = (await readdir(directory).catch(() => [] as string[]))
-    .filter(name => name.endsWith('.json')).sort().slice(0, MAX_TASK_FILES);
-  const files: Record<string, string> = {};
-  for (const name of names) {
-    const content = await readWorkspaceFile(path.join(directory, name));
-    if (content !== null) files[name] = content;
+  try {
+    if (!await checkWorkspaceDirectory(directory)) return {};
+    const names = (await readdir(directory)).filter(name => name.endsWith('.json')).sort();
+    if (names.length > MAX_TASK_FILES) throw new PlanningFailedError(`Plan output has ${names.length} task files; the limit is ${MAX_TASK_FILES}. No tasks were accepted.`);
+    const files: Record<string, string> = {};
+    for (const name of names) {
+      const content = await readWorkspaceFile(path.join(directory, name));
+      if (content === null) throw new PlanningFailedError(`Could not read task file ${PLAN_TASKS_DIR}/${name}. No tasks were accepted.`);
+      files[name] = content;
+    }
+    return files;
+  } catch (error) {
+    if (error instanceof PlanningFailedError) throw error;
+    throw new PlanningFailedError(`Could not read plan task files: ${(error as Error).message}`);
   }
-  return files;
+}
+
+/** Output need not be valid, readable, or even complete to rule out a retry. */
+async function hasPlanOutput(workspace: string, taskFiles: boolean): Promise<boolean> {
+  if (await workspaceEntry(path.join(workspace, PLAN_FILE))) return true;
+  if (!taskFiles) return false;
+  const directory = path.join(workspace, PLAN_TASKS_DIR);
+  if (!await checkWorkspaceDirectory(directory)) return false;
+  return (await readdir(directory)).length > 0;
 }
 
 export interface PlanFileAgentOptions {
@@ -116,6 +169,7 @@ export async function runPlanFileAgent(options: PlanFileAgentOptions): Promise<P
   const root = planWorkspaceRoot();
   const workspace = await mkdir(root, { recursive: true })
     .then(() => mkdtemp(path.join(root, `${purpose}-`)))
+    .then(directory => realpath(directory))
     .catch(error => { throw new PlanFileAgentUnavailableError(`Could not create a plan workspace under ${root}: ${(error as Error).message}`); });
   try {
     try {
@@ -146,13 +200,22 @@ export async function runPlanFileAgent(options: PlanFileAgentOptions): Promise<P
         executionType,
         workRef: buildAnalysisWorkRef(executionType, draftId, repository),
       }),
-    }).catch(error => {
+    }).catch(async error => {
       // Usage limits drive requeueing upstream and must keep their type.
       if ((error as Error)?.name === 'UsageLimitError') throw error;
+      let producedOutput: boolean;
+      try {
+        producedOutput = await hasPlanOutput(workspace, taskFiles);
+      } catch (inspectionError) {
+        // Absence of output must be established before allowing response fallback.
+        throw new PlanningFailedError(`Plan ${purpose} agent failed: ${(error as Error).message}. Could not establish absence of plan output: ${(inspectionError as Error).message}`);
+      }
+      if (producedOutput) throw new PlanningFailedError(`Plan ${purpose} agent failed after producing output: ${(error as Error).message}`);
       throw new PlanFileAgentUnavailableError(`Plan ${purpose} agent could not run: ${(error as Error).message}`);
     });
 
     const agentFailure = result.success ? '' : ` The agent reported: ${(result.error || 'execution failed').slice(0, 300)}`;
+    if (purpose === 'generation' && !result.success) throw new PlanningFailedError(`Plan generation did not finish.${agentFailure}`);
     // Never trust the workspace copy of the validator or of the original.
     let planText: string | null;
     let report;

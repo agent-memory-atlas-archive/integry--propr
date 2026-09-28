@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { existsSync, mkdtempSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -129,29 +129,99 @@ describe('plan file agent with task files', () => {
     assert.deepEqual(readdirSync(workspaceRoot), [], 'workspace removed');
   });
 
-  test('re-validates with its own validator and never follows a symlink out of the workspace', async () => {
-    const secret = path.join(workspaceRoot, '..', `secret-${process.pid}.json`);
-    writeFileSync(secret, json(task('Host file')));
-    try {
+  test('re-validates with its own validator', async () => {
+    const agent = fakeAgent(workspace => {
+      writeFileSync(path.join(workspace, 'validate-plan.mjs'), 'console.log(JSON.stringify({ valid: true, taskCount: 1, errors: [] }))');
+      writeTasks(workspace, { '001.json': json({ title: 'Stub' }) });
+    });
+    await assert.rejects(
+      runPlanFileAgent({ ...baseOptions, purpose: 'generation', prompt: 'Plan it', taskFiles: true, executionType: 'plan-generation', routingSession: agent.session as never }),
+      /task 1 \(tasks\/001\.json\) has no non-empty "body"/,
+    );
+  });
+
+  test('accepts the file count limit and rejects overflow without returning a prefix', async () => {
+    for (const count of [200, 201]) {
       const agent = fakeAgent(workspace => {
-        writeFileSync(path.join(workspace, 'validate-plan.mjs'), 'console.log(JSON.stringify({ valid: true, taskCount: 1, errors: [] }))');
-        writeTasks(workspace, { '001.json': json({ title: 'Stub' }) });
-        symlinkSync(secret, path.join(workspace, 'tasks', '002.json'));
+        for (let index = 1; index <= count; index++) {
+          writeTasks(workspace, { [`${String(index).padStart(3, '0')}.json`]: json(task(`Task ${index}`)) });
+        }
+      });
+      const result = runPlanFileAgent({ ...baseOptions, purpose: 'generation', prompt: 'Plan it', taskFiles: true, executionType: 'plan-generation', routingSession: agent.session as never });
+      if (count === 200) assert.equal((await result).length, count);
+      else await assert.rejects(result, /201 task files; the limit is 200/);
+    }
+    assert.deepEqual(readdirSync(workspaceRoot), []);
+  });
+
+  const unacceptableFiles = {
+    oversized: (workspace: string) => writeTasks(workspace, { '002.json': json(task('Large')).padEnd(8 * 1024 * 1024 + 1, ' ') }),
+    directory: (workspace: string) => mkdirSync(path.join(workspace, 'tasks', '002.json')),
+    symlink: (workspace: string) => symlinkSync(path.join(workspace, 'tasks', '001.json'), path.join(workspace, 'tasks', '002.json')),
+    'dangling symlink': (workspace: string) => symlinkSync(path.join(workspace, 'missing.json'), path.join(workspace, 'tasks', '002.json')),
+  };
+  for (const [kind, write] of Object.entries(unacceptableFiles)) {
+    test(`rejects a task file of type ${kind} alongside a valid task`, async () => {
+      const agent = fakeAgent(workspace => {
+        writeTasks(workspace, { '001.json': json(task('Valid prefix')) });
+        write(workspace);
       });
       await assert.rejects(
-        runPlanFileAgent({ ...baseOptions, purpose: 'generation', prompt: 'Plan it', taskFiles: true, executionType: 'plan-generation', routingSession: agent.session as never }),
-        (error: Error) => error.name === 'PlanningFailedError' && /task 1 \(tasks\/001\.json\) has no non-empty "body"/.test(error.message) && !/Host file/.test(error.message),
+        tryGeneratePlanWithFiles({ ...baseOptions, fullContext: 'Plan it', routingSession: agent.session as never }),
+        (error: Error) => error instanceof PlanningFailedError && !(error instanceof PlanFileAgentUnavailableError)
+          && /002\.json/.test(error.message) && /exceeds|regular file/.test(error.message),
       );
-    } finally {
-      rmSync(secret, { force: true });
-    }
+      assert.deepEqual(readdirSync(workspaceRoot), []);
+    });
+  }
+
+  for (const target of ['file', 'directory']) {
+    test(`rejects a task ${target} symlink to outside the workspace`, async () => {
+      const outside = mkdtempSync(path.join(tmpdir(), 'propr-outside-tasks-'));
+      writeFileSync(path.join(outside, '001.json'), json(task('Outside task')));
+      try {
+        const agent = fakeAgent(workspace => {
+          if (target === 'directory') {
+            rmSync(path.join(workspace, 'tasks'), { recursive: true });
+            symlinkSync(outside, path.join(workspace, 'tasks'));
+          } else {
+            writeTasks(workspace, { '001.json': json(task('Valid prefix')) });
+            symlinkSync(path.join(outside, '001.json'), path.join(workspace, 'tasks', '002.json'));
+          }
+        });
+        await assert.rejects(
+          tryGeneratePlanWithFiles({ ...baseOptions, fullContext: 'Plan it', routingSession: agent.session as never }),
+          /without symlinks/,
+        );
+        assert.equal(existsSync(path.join(outside, '001.json')), true, 'cleanup leaves the outside directory untouched');
+        assert.deepEqual(readdirSync(workspaceRoot), []);
+      } finally {
+        rmSync(outside, { recursive: true, force: true });
+      }
+    });
+  }
+
+  test('rejects an empty task directory even when execution reports success', async () => {
+    const agent = fakeAgent(() => undefined);
+    await assert.rejects(
+      tryGeneratePlanWithFiles({ ...baseOptions, fullContext: 'Plan it', routingSession: agent.session as never }),
+      /wrote no task files/,
+    );
+  });
+
+  test('rejects unsuccessful generation in the single-file mode too', async () => {
+    const agent = fakeAgent(workspace => writeFileSync(path.join(workspace, 'plan.json'), json([task('Prefix')])), { success: false });
+    await assert.rejects(
+      runPlanFileAgent({ ...baseOptions, purpose: 'generation', prompt: 'Plan it', executionType: 'plan-generation', routingSession: agent.session as never }),
+      /Plan generation did not finish/,
+    );
   });
 
   test('an agent that ran but wrote nothing is a planning failure, not an unavailable agent', async () => {
     const agent = fakeAgent(() => undefined, { success: false, error: 'model refused' });
     await assert.rejects(
       runPlanFileAgent({ ...baseOptions, purpose: 'generation', prompt: 'Plan it', taskFiles: true, executionType: 'plan-generation', routingSession: agent.session as never }),
-      (error: Error) => !(error instanceof PlanFileAgentUnavailableError) && /wrote no task files to tasks\/\. The agent reported: model refused/.test(error.message),
+      (error: Error) => !(error instanceof PlanFileAgentUnavailableError) && /did not finish\. The agent reported: model refused/.test(error.message),
     );
   });
 
@@ -204,6 +274,59 @@ describe('file-based plan generation', () => {
     assert.equal(runLightweightLLMAnalysis.mock.callCount(), 0, 'the reply path is not used');
     assert.equal(result.plan.length, 1, 'single granularity merges the written tasks');
     assert.equal(result.enforcementMetadata.enforced, true);
+  });
+
+  test('rejects an unsuccessful execution even after it wrote a valid task', async () => {
+    const agent = fakeAgent(async workspace => {
+      writeTasks(workspace, { '001.json': json(task('Completed prefix')) });
+      await Promise.resolve();
+    }, { success: false, error: 'execution failed' });
+    await assert.rejects(callLLMForPlan({
+      ...baseOptions, runId: 'run-1', fullContext: 'Generate a plan', worktreePath: '/tmp/worktree', tokenLimit: 100_000,
+      repairModel: 'codex:gpt', granularity: 'balanced', routingSession: agent.session as never,
+    }), /Plan generation did not finish\. The agent reported: execution failed/);
+    assert.equal(runLightweightLLMAnalysis.mock.callCount(), 0);
+    assert.deepEqual(readdirSync(workspaceRoot), []);
+  });
+
+  const partialOutputs = {
+    'valid task': (workspace: string) => writeTasks(workspace, { '001.json': json(task('Prefix')) }),
+    'invalid task': (workspace: string) => writeTasks(workspace, { '001.json': '{' }),
+    'empty task': (workspace: string) => writeTasks(workspace, { '001.json': '' }),
+    'temporary task': (workspace: string) => writeTasks(workspace, { '001.json.tmp': '{' }),
+    'assembled plan': (workspace: string) => writeFileSync(path.join(workspace, 'plan.json'), json([task('Plan')])),
+    'uninspectable task directory': (workspace: string) => {
+      rmSync(path.join(workspace, 'tasks'), { recursive: true });
+      writeFileSync(path.join(workspace, 'tasks'), 'incomplete output');
+    },
+  };
+  for (const [kind, write] of Object.entries(partialOutputs)) {
+    test(`does not fall back after execution throws with ${kind} output`, async () => {
+      const agent = fakeAgent(async workspace => {
+        write(workspace);
+        await Promise.resolve();
+        throw new Error('execution crashed');
+      });
+      await assert.rejects(callLLMForPlan({
+        ...baseOptions, runId: 'run-1', fullContext: 'Generate a plan', worktreePath: '/tmp/worktree', tokenLimit: 100_000,
+        repairModel: 'codex:gpt', granularity: 'balanced', routingSession: agent.session as never,
+      }), (error: Error) => error instanceof PlanningFailedError && !(error instanceof PlanFileAgentUnavailableError) && /execution crashed/.test(error.message));
+      assert.equal(runLightweightLLMAnalysis.mock.callCount(), 0);
+      assert.deepEqual(readdirSync(workspaceRoot), []);
+    });
+  }
+
+  test('preserves usage limits after producing output', async () => {
+    const usageLimit = Object.assign(new Error('limit reached'), { name: 'UsageLimitError' });
+    const agent = fakeAgent(workspace => {
+      writeTasks(workspace, { '001.json': json(task('Prefix')) });
+      throw usageLimit;
+    });
+    await assert.rejects(
+      tryGeneratePlanWithFiles({ ...baseOptions, fullContext: 'Plan it', routingSession: agent.session as never }),
+      (error: Error) => error === usageLimit,
+    );
+    assert.deepEqual(readdirSync(workspaceRoot), []);
   });
 
   test('falls back to the model reply only when the agent could not run', async () => {
