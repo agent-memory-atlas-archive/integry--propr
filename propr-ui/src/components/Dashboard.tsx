@@ -1,3 +1,4 @@
+import { UsageTipsSection } from './Dashboard/UsageTipsSection';
 /**
  * Dashboard composition root.
  *
@@ -175,7 +176,7 @@ const Dashboard: React.FC = () => {
           </div>
         )}
 
-        <DashboardSummary repository={repository} completionToken={refreshTokens.summary} />
+        <DashboardSummary repository={repository} activityToken={refreshTokens.summary} />
 
         <ConnectSoftPromoBanner />
 
@@ -241,6 +242,7 @@ const Dashboard: React.FC = () => {
 
           <div className="min-w-0 border-b border-slate-200 lg:col-start-2 lg:row-start-2 lg:border-b-0">
             <HistoricalStatsPanel repository={repository} refreshToken={refreshTokens.stats} />
+            <UsageTipsSection />
           </div>
         </div>
       </div>

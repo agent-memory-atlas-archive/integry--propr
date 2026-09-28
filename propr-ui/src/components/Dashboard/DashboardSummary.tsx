@@ -1,8 +1,8 @@
 import { Pause, Play, RefreshCw } from 'lucide-react';
 import { useDashboardSummary } from './useDashboardSummary';
 
-export function DashboardSummary({ repository, completionToken }: { repository: string; completionToken: number }) {
-  const { summary, enabled, loading, paused, togglePaused, refresh } = useDashboardSummary(repository, completionToken);
+export function DashboardSummary({ repository, activityToken }: { repository: string; activityToken: number }) {
+  const { summary, enabled, loading, paused, togglePaused, refresh } = useDashboardSummary(repository, activityToken);
   if (enabled !== true) return null;
   const pauseLabel = paused ? 'Resume automatic summary updates' : 'Pause automatic summary updates';
   const buttonClass = 'flex h-8 w-8 items-center justify-center rounded text-slate-500 hover:bg-slate-100 hover:text-slate-800 focus-visible:outline focus-visible:outline-2 focus-visible:outline-blue-600 disabled:opacity-40';

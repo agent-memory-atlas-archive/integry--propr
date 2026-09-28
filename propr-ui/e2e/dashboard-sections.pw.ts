@@ -84,7 +84,7 @@ const dashboardResponses = (
   attentionItems: typeof attention,
   runningItems: typeof running,
 ): Record<string, unknown> => ({
-  '/api/dashboard/narrative': { repository: 'all', enabled: true, summary: 'Work is underway on the dashboard and design system, with more tasks queued. Recent reviews are complete; a failed check and pull requests still need your attention.' },
+  '/api/dashboard/narrative': { repository: 'all', enabled: true, summary: '“Cache repository icons across dashboard sections” is running tests at step 3 of 5 for example/workspace PR #2456. “Show corrective operator messages” and “MCP Operator Surface” were recently completed.' },
   '/api/dashboard/summary': {
     repository: 'all',
     needsAttention: attentionItems.length,
@@ -123,6 +123,24 @@ const dashboardResponses = (
     ],
     previous: { completed: 29, successRate: 81.2, recordedSpend: 9.8 },
   },
+});
+
+test('the activity briefing leads with specific live progress before recent completions', async ({ page }) => {
+  await page.setViewportSize({ width: 1200, height: 800 });
+  await fixture(page);
+  await page.goto('/');
+
+  const summary = page.getByTestId('dashboard-summary');
+  await expect(summary).toContainText('Cache repository icons across dashboard sections');
+  await expect(summary).toContainText('running tests at step 3 of 5');
+  await expect(summary).toContainText('PR #2456');
+  const prose = (await summary.textContent()) ?? '';
+  expect(prose.indexOf('running tests')).toBeLessThan(prose.indexOf('recently completed'));
+  expect(prose).not.toMatch(/past 24 hours|success rate|spend|needs attention/i);
+
+  const directory = path.resolve('../.propr/previews');
+  await mkdir(directory, { recursive: true });
+  await summary.screenshot({ animations: 'disabled', path: path.join(directory, 'dashboard-live-activity-summary.png') });
 });
 
 async function fixture(

@@ -430,12 +430,15 @@ describe('PR check routing', () => {
             assert.doesNotMatch(expression, /PROPR_SELF_HOSTED_PR_ACCESS_VERIFIED|PROPR_SELF_HOSTED_PR_CHECKS|"propr"/);
         }
         assert.equal(new Set(expressions).size, 1, 'all routing uses the same conditions');
-        const evaluate = new Function('vars', 'github', 'fromJSON', 'format', `return ${expressions[0]}`);
+        const evaluate = new Function('vars', 'github', 'needs', 'fromJSON', 'format', `return ${expressions[0]}`);
         const github = {
             actor: 'maintainer', repository: 'integry/propr', event_name: 'pull_request', ref: 'refs/pull/2466/merge',
             event: { repository: { default_branch: 'main' }, pull_request: { user: { login: 'maintainer' }, head: { repo: { full_name: 'integry/propr' } } } },
         };
         const enabled = { PROPR_ROOTLESS_PR_CHECKS: 'true' };
+        const overflow = { PROPR_ROOTLESS_PR_CHECKS: 'overflow' };
+        const saturated = { route: { result: 'success', outputs: { overflow: 'true' } } };
+        const available = { route: { result: 'success', outputs: { overflow: 'false' } } };
         const cases = [
             [enabled, github, true],
             [{}, github, false],
@@ -455,25 +458,65 @@ describe('PR check routing', () => {
             [enabled, { ...github, event_name: 'pull_request_target' }, false],
             [enabled, { ...github, event_name: 'schedule' }, false],
         ];
-        for (const [vars, context, selfHosted] of cases) {
-            assert.deepEqual(evaluate(vars, context, JSON.parse, (pattern, value) => pattern.replace('{0}', value)),
-                selfHosted ? ['self-hosted', 'Linux', 'X64', 'propr-rootless'] : ['ubuntu-latest'], JSON.stringify({ vars, context }));
+        // Overflow mode uses the pool only when the route job saw saturated
+        // hosted runners; anything else, including a failed or skipped route,
+        // stays hosted. The trust conditions apply unchanged.
+        const overflowCases = [
+            [overflow, github, saturated, true],
+            [overflow, github, available, false],
+            [overflow, github, { route: { result: 'failure', outputs: {} } }, false],
+            [overflow, github, { route: { result: 'skipped', outputs: {} } }, false],
+            [overflow, { ...github, actor: 'dependabot[bot]' }, saturated, false],
+            [overflow, { ...github, event: { pull_request: { user: { login: 'contributor' }, head: { repo: { full_name: 'fork/propr' } } } } }, saturated, false],
+            [overflow, { ...github, event_name: 'workflow_dispatch', ref: 'refs/heads/unreviewed' }, saturated, false],
+            [{ PROPR_ROOTLESS_PR_CHECKS: 'false' }, github, saturated, false],
+            [{}, github, saturated, false],
+            [enabled, github, available, true],
+        ];
+        for (const [vars, context, needs, selfHosted] of [...cases.map(([vars, context, selfHosted]) => [vars, context, {}, selfHosted]), ...overflowCases]) {
+            assert.deepEqual(evaluate(vars, context, needs, JSON.parse, (pattern, value) => pattern.replace('{0}', value)),
+                selfHosted ? ['self-hosted', 'Linux', 'X64', 'propr-rootless'] : ['ubuntu-latest'], JSON.stringify({ vars, context, needs }));
         }
     });
 
+    test('selects overflow runners once per workflow without ever blocking the routed jobs', () => {
+        const workflows = { 'pr-test-on-label.yml': ['5', ['shard', 'docs']], 'pr-build-check.yml': ['3', ['validate', 'cli-node-matrix']], 'cli-node-compatibility.yml': ['2', ['project-options']] };
+        const routes = [];
+        for (const [file, [planned, jobs]] of Object.entries(workflows)) {
+            const workflow = readWorkflow(file);
+            const route = jobBlock(workflow, 'route');
+            assert.match(route, /\n {4}if: \$\{\{ vars\.PROPR_ROOTLESS_PR_CHECKS == 'overflow' \}\}\n/, `${file} checks capacity only in overflow mode`);
+            assert.match(route, /\n {4}runs-on: ubuntu-latest\n/, file);
+            assert.match(route, /permissions:\n\s+contents: read\n\s+actions: read\n\s+outputs:/, `${file} reads Actions data only`);
+            assert.match(route, /persist-credentials: false/, file);
+            assert.match(route, /run: node scripts\/ci-hosted-capacity\.mjs\n/, file);
+            assert.match(route, new RegExp(`PROPR_PLANNED_HOSTED_JOBS: '${planned}'\n`), `${file} plans its ${jobs.length === 1 ? 'matrix' : 'routed'} jobs`);
+            assert.doesNotMatch(route, /secrets\./, file);
+            // Compare the job itself, not comments that precede the next job.
+            const job = route.slice(0, route.indexOf('run: node scripts/ci-hosted-capacity.mjs'));
+            routes.push(job.replace(/PROPR_PLANNED_HOSTED_JOBS: '\d+'/, ''));
+            for (const job of jobs) {
+                const block = jobBlock(workflow, job);
+                assert.match(block, /\n {4}needs: (?:route|\[[^\]]*\broute\b[^\]]*\])\n/, `${file} ${job} reads the route decision`);
+                assert.match(block, /\n {4}if: (?:>-\n\s+)?\$\{\{ !cancelled\(\)/, `${file} ${job} runs whatever the route outcome`);
+            }
+        }
+        assert.equal(new Set(routes).size, 1, 'every workflow selects runners the same way');
+    });
+
     test('keeps four independent shard jobs and a separate docs job', () => {
-        assert.deepEqual(jobNames(fullSuite), ['classify', 'shard', 'docs', 'native-electron', 'test', 'comment']);
+        assert.deepEqual(jobNames(fullSuite), ['classify', 'route', 'shard', 'docs', 'native-electron', 'test', 'comment']);
         const shard = jobBlock(fullSuite, 'shard');
         assert.match(shard, /matrix:\n\s+shard: \[1, 2, 3, 4\]\n/);
         for (const job of ['shard', 'docs']) {
             assert.match(jobBlock(fullSuite, job), /runs-on: \$\{\{ fromJSON\(/, `${job} supports both routes`);
         }
-        assert.match(shard, /\n {4}if: \$\{\{ github\.event_name == 'workflow_dispatch' \|\| !github\.event\.pull_request\.draft \}\}\n/, 'shards run for ready PRs and dispatches');
+        assert.match(shard, /\n {4}if: \$\{\{ !cancelled\(\) && \(github\.event_name == 'workflow_dispatch' \|\| !github\.event\.pull_request\.draft\) \}\}\n/, 'shards run for ready PRs and dispatches');
         // The docs job keeps the same draft handling and is additionally
         // gated on the shared classifier; test/ciFullSuiteSelection.test.mjs
         // evaluates the full condition.
         assert.match(jobBlock(fullSuite, 'docs'), /\n {10}\(github\.event_name == 'workflow_dispatch' \|\| !github\.event\.pull_request\.draft\) &&\n/);
-        for (const job of ['classify', 'native-electron', 'test', 'comment']) assert.match(jobBlock(fullSuite, job), /\n {4}runs-on: ubuntu-latest\n/);
+        for (const job of ['classify', 'route', 'native-electron', 'test', 'comment']) assert.match(jobBlock(fullSuite, job), /\n {4}runs-on: ubuntu-latest\n/);
         assert.doesNotMatch(fullSuite, /run-local-shards|LOCAL_SHARD/, 'no nested local shard coordinator');
         assert.ok(!existsSync(join(REPOSITORY, 'scripts', 'run-local-shards.mjs')));
         assert.doesNotMatch(fullSuite, /pull_request_target/);
@@ -695,6 +738,7 @@ describe('PR check routing', () => {
             comment: 'ubuntu-latest',
             // Selection and its fail-closed aggregate are cheap hosted jobs.
             classify: 'ubuntu-latest',
+            route: 'ubuntu-latest',
             'compatibility-guard': 'ubuntu-latest',
         };
         assert.deepEqual(jobNames(buildCheck).sort(), [...Object.keys(expected), 'validate', 'cli-node-matrix'].sort());

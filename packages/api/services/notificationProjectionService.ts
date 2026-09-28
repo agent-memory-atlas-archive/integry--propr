@@ -82,6 +82,7 @@ export interface SystemHealthSnapshot {
 
 interface TaskContext {
   repository: string;
+  goalId?: string;
   issueNumber?: number;
   prNumber?: number;
   description?: string;
@@ -592,6 +593,7 @@ export class NotificationProjectionService {
       ...(context.issueNumber === undefined ? {} : { issueNumber: context.issueNumber }),
       ...(context.prNumber === undefined ? {} : { prNumber: context.prNumber }),
       isReview: context.isReview,
+      ...(context.goalId ? { goalId: context.goalId } : {}),
       ...(context.description === undefined ? {} : { description: context.description }),
     };
     const accepted = await this.upsertSourceActivity({
@@ -701,6 +703,7 @@ export class NotificationProjectionService {
             ...(issueNumber === undefined ? {} : { issueNumber }),
             ...(prNumber === undefined ? {} : { prNumber }),
           },
+          ...(typeof metadata.goalId === 'string' ? { metadata: { goalId: metadata.goalId } } : {}),
           title: 'Task appears stalled',
           body: description
             ? `${quotedDescription(description)} has not reported progress.`
@@ -917,6 +920,7 @@ export class NotificationProjectionService {
         hasPullRequest: pullRequestUrl !== undefined,
       }),
       ...pullRequestAction(pullRequestUrl),
+      ...(context.goalId ? { metadata: { goalId: context.goalId } } : {}),
       occurredAt,
     }, recipients, context.repository, context.prNumber);
   }
@@ -940,6 +944,7 @@ export class NotificationProjectionService {
         hasPullRequest: pullRequestUrl !== undefined,
       }),
       ...pullRequestAction(pullRequestUrl),
+      ...(context.goalId ? { metadata: { goalId: context.goalId } } : {}),
       occurredAt,
     }, recipients, context.repository, prNumber);
   }
@@ -968,6 +973,7 @@ export class NotificationProjectionService {
         hasPullRequest: pullRequestUrl !== undefined,
       }),
       ...pullRequestAction(pullRequestUrl),
+      ...(context.goalId ? { metadata: { goalId: context.goalId } } : {}),
       occurredAt,
     }, recipients, context.repository, context.prNumber);
   }
@@ -993,6 +999,7 @@ export class NotificationProjectionService {
         // Persist only the completing implementation identity, never arbitrary task metadata.
         metadata: {
           completedImplementationTaskId: payload.taskId,
+          ...(context.goalId ? { goalId: context.goalId } : {}),
           completionType: context.commandMode ?? 'implementation',
         },
         actions: [
@@ -1047,6 +1054,8 @@ export class NotificationProjectionService {
     const issueNumber = positiveInteger(payload.issueNumber) ?? storedIssueNumber;
     return {
       repository,
+      ...(taskType === 'goal' && typeof initial.goalId === 'string' && initial.goalId.trim()
+        ? { goalId: initial.goalId } : {}),
       issueNumber,
       prNumber,
       description: taskDescription(initial),

@@ -15,6 +15,8 @@ await mock.module('@propr/core', {
         getDetailedUsageStats: mock.fn(() => ({ totalTokens: 0 })),
         getModelPricing: mock.fn(),
         getOpenRouterId: mock.fn(),
+        getNonBlockingChecksForRepository: mock.fn(async () => []),
+        isNonBlockingCheck: mock.fn(() => false),
         getModelName: (model: string) => model,
     },
 });

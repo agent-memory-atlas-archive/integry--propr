@@ -1,3 +1,4 @@
+import { getUsageTips, dismissUsageTip } from '../api/usageTipsApi';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, waitFor, within, act, fireEvent } from '@testing-library/react';
 import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom';
@@ -15,7 +16,6 @@ import {
 // The envelope these frames imitate is the one `activityEvents` declares:
 // `entityId` and a resolved `terminal`, which is what the server publishes.
 import type { ActivityChange, ActivityDomain, ActivityUpdatePayload } from '@propr/shared/dist/activityEvents.js';
-import type { TaskUpdatePayload } from '@propr/shared';
 import {
   activeItem,
   activeResponse,
@@ -25,6 +25,8 @@ import {
   outcomesResponse,
   statsResponse,
 } from './Dashboard.fixtures';
+
+vi.mock('../api/usageTipsApi', () => ({ getUsageTips: vi.fn(async () => ({ enabled: true, tips: [] })), dismissUsageTip: vi.fn(), USAGE_TIPS_SETTINGS_CHANGED: 'tips-settings-changed' }));
 
 vi.mock('../api/dashboardApi', () => ({
   getDashboardNarrative: vi.fn(),
@@ -36,7 +38,6 @@ vi.mock('../api/dashboardApi', () => ({
 
 let socketConnected = true;
 let activityHandler: ((payload: ActivityUpdatePayload) => void) | null = null;
-let taskUpdateHandler: ((payload: TaskUpdatePayload) => void) | null = null;
 
 vi.mock('../contexts/useSocket', () => ({
   useSocket: () => ({
@@ -44,12 +45,6 @@ vi.mock('../contexts/useSocket', () => ({
     subscribeToActivity: () => {},
     unsubscribeFromActivity: () => {},
     onGoalUpdate: () => () => {},
-    onTaskUpdate: (handler: (payload: TaskUpdatePayload) => void) => {
-      taskUpdateHandler = handler;
-      return () => {
-        if (taskUpdateHandler === handler) taskUpdateHandler = null;
-      };
-    },
     onActivityUpdate: (handler: (payload: ActivityUpdatePayload) => void) => {
       activityHandler = handler;
       return () => {
@@ -180,7 +175,6 @@ describe('Dashboard', () => {
     vi.mocked(getDashboardNarrative).mockResolvedValue({ repository: 'all', enabled: true, summary: 'Work is underway. Nothing needs your attention.' });
     socketConnected = true;
     activityHandler = null;
-    taskUpdateHandler = null;
     mockAttention.mockResolvedValue(attentionResponse());
     mockActive.mockResolvedValue(activeResponse([activeItem()]));
     mockOutcomes.mockResolvedValue(outcomesResponse([outcomeItem()]));
@@ -305,7 +299,7 @@ describe('Dashboard', () => {
     expect(mockStats).toHaveBeenCalledWith('acme/app', '7d');
   });
 
-  it('coalesces a burst of activity into a single refresh per interested section', async () => {
+  it('coalesces a burst of activity per interested section without refetching or dismissing tips', async () => {
     // The clock is held still for the burst. Each frame is still delivered in
     // its own flush, so only the scheduler's coalescing can collapse them —
     // but on real timers a loaded machine can spend longer than the coalescing
@@ -336,6 +330,8 @@ describe('Dashboard', () => {
       await act(async () => { await vi.advanceTimersByTimeAsync(1_000); });
       expect(mockActive).toHaveBeenCalledTimes(2);
       expect(mockStats).toHaveBeenCalledTimes(2);
+      expect(getUsageTips).toHaveBeenCalledTimes(1);
+      expect(dismissUsageTip).not.toHaveBeenCalled();
     } finally {
       vi.useRealTimers();
     }
