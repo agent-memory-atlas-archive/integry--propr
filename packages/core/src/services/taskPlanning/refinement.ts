@@ -226,8 +226,10 @@ async function requestCompletePlan(
   if (charLimit === null || repairPrompt.length <= charLimit) {
     try {
       const repaired = validateRefinementResponse(parseRefinementResponse(await context.llm(repairPrompt), correlatedLogger), correlatedLogger);
+      // Repair responses can also answer or clarify without modifying the plan.
+      if (repaired.action !== 'modified') return { ...repaired, plan: currentPlan };
       incomplete = incompletePlanItems(repaired.plan);
-      if (incomplete.length === 0) return { ...repaired, action: 'modified' };
+      if (incomplete.length === 0) return repaired;
     } catch (repairError) {
       correlatedLogger.warn({ error: repairError instanceof Error ? repairError.message : String(repairError) }, 'Complete-plan repair failed');
     }

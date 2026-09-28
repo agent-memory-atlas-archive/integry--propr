@@ -88,11 +88,30 @@ describe('plan refinement returns complete plans only', () => {
         await assert.rejects(refinePlan(options), /not a valid array/);
     });
 
-    test('answers and clarifying questions keep the current plan whatever came back', async () => {
-        llmResponses.push(JSON.stringify({ action: 'answered', summary: 'It covers three areas.', plan: [{ number: 1, action: 'retain' }] }));
-        const result = await refinePlan(options);
-        assert.equal(result.action, 'answered');
-        assert.deepEqual(result.plan, currentPlan);
-        assert.equal(runLightweightLLMAnalysis.mock.callCount(), 1);
-    });
+    for (const action of ['answered', 'clarify'] as const) {
+        test(`${action} keeps the current plan whatever came back`, async () => {
+            llmResponses.push(JSON.stringify({ action, summary: 'It covers three areas.', plan: [{ number: 1, action: 'retain' }] }));
+            const result = await refinePlan(options);
+            assert.equal(result.action, action);
+            assert.deepEqual(result.plan, currentPlan);
+            assert.equal(runLightweightLLMAnalysis.mock.callCount(), 1);
+        });
+
+        for (const [description, plan] of [
+            ['a different complete plan', [issue('Unrequested replacement')]],
+            ['an incomplete plan', [{ number: 1, action: 'retain' }]],
+        ] as const) {
+            test(`${action} from completeness repair keeps the current plan when returning ${description}`, async () => {
+                const summary = action === 'answered' ? 'It covers three areas.' : 'Which area should change?';
+                llmResponses.push(editsAsPlan, JSON.stringify({ action, summary, plan }));
+
+                const result = await refinePlan(options);
+
+                assert.equal(result.action, action);
+                assert.equal(result.summary, summary);
+                assert.deepEqual(result.plan, currentPlan);
+                assert.equal(runLightweightLLMAnalysis.mock.callCount(), 2);
+            });
+        }
+    }
 });
