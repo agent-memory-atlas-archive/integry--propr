@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { Redis } from 'ioredis';
 import logger from '../../../utils/logger.js';
+import { MAX_PROVIDER_OUTPUT_BYTES } from './boundedProviderOutput.js';
 
 /**
  * A task's live agent output in Redis is an append-only log, so writers send
@@ -169,18 +170,32 @@ export interface LiveOutputLogOptions {
     transformRecord?: (record: string) => string;
     flushIntervalMs?: number;
     redis?: Redis;
+    /**
+     * Longest record, in bytes without its newline, that is published. A longer
+     * one is dropped whole rather than buffered or split into fragments. Defaults
+     * to the bound the executor's own record buffer applies to provider output.
+     */
+    maximumRecordBytes?: number;
+}
+
+/** A source's unfinished record, or `oversized` while one is discarded up to its newline. */
+interface PartialRecord {
+    text: string;
+    bytes: number;
+    oversized: boolean;
 }
 
 /**
  * Streams one process's output into the task's live log, one complete record
  * at a time. Partial records wait for their newline (or for close()). Each
  * source (stdout, stderr) is framed on its own, so a record of one is never
- * completed by a newline of the other.
+ * completed by a newline of the other. A record longer than the maximum is
+ * dropped as it grows, so each source buffers at most that much.
  */
 export class LiveOutputLog {
     private readonly redis: Redis;
     private readonly ownsRedis: boolean;
-    private readonly partials = new Map<string, string>();
+    private readonly partials = new Map<string, PartialRecord>();
     private pending = '';
     private readonly writes: Array<{ chunk: string; mode: 'append' | 'replace'; sequence: number; origin?: LiveOutputOrigin }> = [];
     private readonly writer = randomUUID();
@@ -205,14 +220,31 @@ export class LiveOutputLog {
 
     append(chunk: string, source = 'stdout'): void {
         if (this.closed || !chunk) return;
-        const text = (this.partials.get(source) ?? '') + chunk;
-        const boundary = text.lastIndexOf('\n');
-        if (boundary < 0) {
-            this.partials.set(source, text);
-            return;
+        const maximum = this.options.maximumRecordBytes ?? MAX_PROVIDER_OUTPUT_BYTES;
+        const partial = this.partials.get(source) ?? { text: '', bytes: 0, oversized: false };
+        let records = '';
+        for (let start = 0; start < chunk.length;) {
+            const boundary = chunk.indexOf('\n', start);
+            const end = boundary < 0 ? chunk.length : boundary;
+            if (!partial.oversized) {
+                const piece = chunk.slice(start, end);
+                partial.bytes += Buffer.byteLength(piece);
+                if (partial.bytes > maximum) {
+                    partial.text = '';
+                    partial.oversized = true;
+                    logger.warn({ taskId: this.taskId, source, maximumBytes: maximum }, 'Dropping an oversized live output record');
+                } else partial.text += piece;
+            }
+            if (boundary < 0) break;
+            // The newline ends the record; a dropped one resumes framing here.
+            if (!partial.oversized) records += `${partial.text}\n`;
+            partial.text = '';
+            partial.bytes = 0;
+            partial.oversized = false;
+            start = boundary + 1;
         }
-        this.partials.set(source, text.slice(boundary + 1));
-        this.queue(text.slice(0, boundary + 1));
+        this.partials.set(source, partial);
+        if (records) this.queue(records);
     }
 
     /**
@@ -265,7 +297,7 @@ export class LiveOutputLog {
     }
 
     private async finishClose(): Promise<void> {
-        for (const partial of this.partials.values()) if (partial) this.queue(`${partial}\n`);
+        for (const partial of this.partials.values()) if (partial.text) this.queue(`${partial.text}\n`);
         this.partials.clear();
         this.closed = true;
         await this.flush();

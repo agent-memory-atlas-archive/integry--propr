@@ -291,4 +291,63 @@ describe('full history follow-up regressions', () => {
       unmount();
     });
   }
+
+  describe('socket updates arriving after a newer full read', () => {
+    const lateWatcherState = {
+      taskId: 'task', events: [message('Check')], todos: [{ id: 'todo', content: 'Read parser', status: 'in_progress' }],
+      currentTask: 'Reading', tokenUsage: null, omittedEventCount: 0, liveOutputPosition: at(60),
+    };
+    const newerRead = (): LiveDetails => ({
+      ...growing('Checking the parser', 100),
+      todos: [{ id: 'todo', content: 'Read parser', status: 'completed' }], currentTask: 'Done reading',
+    });
+    const expectNewerRead = (liveDetails: LiveDetails) => {
+      expect(liveDetails.events).toEqual([message('Checking the parser')]);
+      expect(liveDetails.todos).toEqual([{ id: 'todo', content: 'Read parser', status: 'completed' }]);
+      expect(liveDetails.currentTask).toBe('Done reading');
+      expect(liveDetails.liveOutputPosition).toEqual(at(100));
+    };
+
+    it('goal page: a late watcher full state or increment read before the HTTP state is ignored', async () => {
+      apiMocks.getTaskLiveDetails.mockResolvedValueOnce(newerRead());
+      const { result, unmount } = renderHook(() => useTaskLiveData('task', 0, 'claude_execution'));
+      await act(async () => {});
+      expectNewerRead(result.current.liveDetails);
+      act(() => socketMocks.liveUpdateHandler?.(lateWatcherState));
+      act(() => socketMocks.liveUpdateHandler?.({ taskId: 'task', events: [message('Checking')], currentTask: 'Reading', liveOutputPosition: at(80) }));
+      expectNewerRead(result.current.liveDetails);
+      // Later output in the same execution still applies, and advances the position.
+      act(() => socketMocks.liveUpdateHandler?.({ taskId: 'task', events: [message('Checking the parser and tests')], liveOutputPosition: at(140) }));
+      expect(result.current.liveDetails.events).toEqual([message('Checking the parser and tests')]);
+      expect(result.current.liveDetails.liveOutputPosition).toEqual(at(140));
+      act(() => socketMocks.liveUpdateHandler?.({ taskId: 'task', events: [message('Checking the parser')], liveOutputPosition: at(120) }));
+      expect(result.current.liveDetails.events).toEqual([message('Checking the parser and tests')]);
+      unmount();
+    });
+
+    it('task page: the watcher\'s initial state broadcast after a newer live HTTP read is ignored', async () => {
+      vi.useFakeTimers();
+      apiMocks.getTaskHistory.mockResolvedValue({ history: [{ state: 'CLAUDE_EXECUTION' }] });
+      apiMocks.getTaskLiveDetails.mockResolvedValueOnce(newerRead());
+      const { result, unmount } = renderHook(() => useTaskData('task'));
+      await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+      expectNewerRead(result.current.liveDetails);
+      act(() => socketMocks.liveUpdateHandler?.(lateWatcherState));
+      expectNewerRead(result.current.liveDetails);
+      unmount();
+    });
+
+    it('still applies a new execution and updates without positions', () => {
+      const state = mergeFullLiveDetails({ events: [], todos: [], currentTask: null }, newerRead());
+      const timestamp = '2026-09-27T00:00:00Z';
+      const nextExecution = { id: 'live:task:redis:gen%3A2:0:0', type: 'thought' as const, content: 'Starting over', timestamp };
+      expect(applyTaskLiveUpdate(state, {
+        taskId: 'task', events: [nextExecution], todos: [], currentTask: null, tokenUsage: null,
+        omittedEventCount: 0, liveOutputPosition: { epoch: 'gen:2', offset: 10 },
+      })).toMatchObject({ events: [nextExecution], liveOutputPosition: { epoch: 'gen:2', offset: 10 } });
+      const unordered = applyTaskLiveUpdate(state, { taskId: 'task', events: [{ ...message('Checking'), timestamp }] });
+      expect(unordered.events).toEqual([{ ...message('Checking'), timestamp }]);
+      expect(unordered.liveOutputPosition).toBeUndefined();
+    });
+  });
 });

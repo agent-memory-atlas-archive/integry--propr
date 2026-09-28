@@ -3,7 +3,7 @@ import { getTaskLiveDetails } from '../../api/proprApi';
 import { useSocket } from '../../contexts/useSocket';
 import type { TaskLiveUpdatePayload } from '@propr/shared';
 import type { LiveDetails } from './types';
-import { isFinishedTask, readCoversUpdate } from './liveDetailsMerge';
+import { isFinishedTask } from './liveDetailsMerge';
 import { applyTaskLiveUpdate, mergeFullLiveDetails } from './useTaskData';
 
 export function useTaskLiveData(taskId: string | undefined, pollIntervalMs = 5_000, taskState?: string) {
@@ -45,11 +45,11 @@ export function useTaskLiveData(taskId: string | undefined, pollIntervalMs = 5_0
       // They are replayed over the pre-request state, not the current one, which
       // already applied them: raw events a large increment evicted there would
       // otherwise be appended again after newer ones. Updates the snapshot already
-      // contains are skipped: they could hold an older version of a growing event.
-      const received = updates.filter(update => !readCoversUpdate(data, update));
+      // contains are skipped (see applyTaskLiveUpdate): they could hold an older
+      // version of a growing event.
       setLiveDetails(previous => {
         if (activeTaskId.current !== taskId || sequence !== requestSequence.current) return previous;
-        return received.reduce((state, update) => applyTaskLiveUpdate(state, update, liveSelection.current),
+        return updates.reduce((state, update) => applyTaskLiveUpdate(state, update, liveSelection.current),
           mergeFullLiveDetails(atRequest.state ?? previous, data, liveSelection.current));
       });
       return data;

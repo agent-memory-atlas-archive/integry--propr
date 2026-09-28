@@ -29,3 +29,16 @@ test('a streamed execution publishes stderr diagnostics without splitting an unf
     await executeDockerCommand(process.execPath, ['-e', script], { taskId: 'docker-sources', streamToRedis: true, streamStderrToRedis: true, timeout: 10_000 });
     assert.deepEqual(writes.join('').split('\n').filter(Boolean).sort(), [record, 'warning: slow network'].sort());
 });
+
+test('a streamed execution drops a newline-free record past the bound instead of buffering it', async () => {
+    writes.length = 0;
+    const script = `
+        const wait = ms => new Promise(done => setTimeout(done, ms));
+        (async () => {
+            process.stdout.write('before\\n');
+            for (let index = 0; index < 48; index += 1) { process.stdout.write('x'.repeat(64 * 1024)); await wait(1); }
+            process.stdout.write('\\nafter\\n');
+        })();`;
+    await executeDockerCommand(process.execPath, ['-e', script], { taskId: 'docker-oversized', streamToRedis: true, timeout: 10_000 });
+    assert.deepEqual(writes.join('').split('\n'), ['before', 'after', '']);
+});

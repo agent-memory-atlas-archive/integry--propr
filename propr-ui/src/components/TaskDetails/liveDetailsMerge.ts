@@ -66,6 +66,8 @@ export const mergeFullLiveDetails = (previous: LiveDetails, full: LiveDetails, i
     omittedEventCount: Math.max(0, (full.omittedEventCount ?? 0) - retainedOmittedRaw) + capped.dropped,
     // Whether history was retained from before the discard cannot be proven, so the latest full state decides.
     ...(full.historyTruncated ? { historyTruncated: true } : {}),
+    // The state now reflects this read, so later updates are ordered against it.
+    ...(full.liveOutputPosition ? { liveOutputPosition: full.liveOutputPosition } : {}),
   };
 };
 

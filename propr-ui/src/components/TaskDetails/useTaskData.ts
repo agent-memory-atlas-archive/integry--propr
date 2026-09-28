@@ -141,11 +141,17 @@ export const mergeIncrementalLiveDetails = (
     todos: hasUpdateField(payload, 'todos') ? normalizeLiveTodos(payload.todos ?? []) : previous.todos,
     currentTask: hasUpdateField(payload, 'currentTask') ? payload.currentTask ?? null : previous.currentTask,
     tokenUsage: hasUpdateField(payload, 'tokenUsage') ? payload.tokenUsage ?? null : previous.tokenUsage,
+    ...(payload.liveOutputPosition ? { liveOutputPosition: payload.liveOutputPosition } : {}),
   };
 };
 
-/** A socket payload carrying `omittedEventCount` is full state (initial, or after a resync); others are increments. */
+/**
+ * A socket payload carrying `omittedEventCount` is full state (initial, or after a resync); others are increments.
+ * An update the current state already covers is ignored: it was read earlier than that state (a full read can
+ * finish before the watcher broadcasts an older one) and may hold shorter versions of growing events.
+ */
 export const applyTaskLiveUpdate = (previous: LiveDetails, payload: IncrementalTaskLiveUpdatePayload, isLive = true): LiveDetails => {
+  if (readCoversUpdate(previous, payload)) return previous;
   if (payload.omittedEventCount === undefined) return mergeIncrementalLiveDetails(previous, payload, isLive);
   return mergeFullLiveDetails(previous, {
     events: payload.events || [],
@@ -154,6 +160,7 @@ export const applyTaskLiveUpdate = (previous: LiveDetails, payload: IncrementalT
     tokenUsage: payload.tokenUsage || null,
     omittedEventCount: payload.omittedEventCount,
     historyTruncated: payload.historyTruncated,
+    liveOutputPosition: payload.liveOutputPosition,
   }, isLive);
 };
 
@@ -237,10 +244,9 @@ export const useTaskData = (taskId: string | undefined) => {
         finishedLiveReadScope.current = finishedAtRequest ? requestedScope : null;
         // Replay updates over the pre-request state, which has not applied them yet,
         // except those the response already contains (possibly in a newer version).
-        const received = updates.filter(update => !readCoversUpdate(data, update));
         setLiveDetails(previous => {
           if (activeRequestScopeRef.current !== requestedScope || sequence !== liveReadSequence.current) return previous;
-          return received.reduce((state, update) => applyTaskLiveUpdate(state, update, isLive),
+          return updates.reduce((state, update) => applyTaskLiveUpdate(state, update, isLive),
             mergeFullLiveDetails(atRequest.state ?? previous, data, isLive));
         });
       }

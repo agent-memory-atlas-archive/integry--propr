@@ -455,3 +455,54 @@ test('stdout and stderr are framed separately, so a diagnostic never splits a re
         '',
     ]);
 });
+
+test('an unfinished record past the maximum is dropped whole and framing resumes at its newline', async () => {
+    const writes: string[] = [];
+    const redis = {
+        on: () => undefined,
+        eval: async (_script: string, _keys: number, _data: string, _meta: string, text: string) => {
+            writes.push(text);
+            return text.length;
+        },
+    } as unknown as Redis;
+    const log = new LiveOutputLog('oversized', { reset: true, redis, maximumRecordBytes: 16 });
+    const buffered = () => [...(log as unknown as { partials: Map<string, { text: string }> }).partials.values()]
+        .reduce((total, partial) => total + partial.text.length, 0);
+    log.append('kept\n{"type":"huge","text":"', 'stdout');
+    for (let index = 0; index < 1000; index += 1) {
+        log.append('x'.repeat(64), 'stdout');
+        assert.ok(buffered() <= 16, 'an unfinished record never buffers past the maximum');
+    }
+    log.append('warn: unrelated\n', 'stderr');
+    log.append('"}\nafter\nexactly sixteen!\nseventeen bytes!!\nlast', 'stdout');
+    log.append('y'.repeat(17), 'stderr');
+    await log.close();
+    assert.deepEqual(writes.join('').split('\n'), [
+        'kept',
+        'warn: unrelated',
+        'after',
+        'exactly sixteen!',
+        // A partial is flushed on close only when it fits; no fragment of a dropped record is published.
+        'last',
+        '',
+    ]);
+});
+
+test('the default maximum bounds the unfinished record of a newline-free stream', async () => {
+    const writes: string[] = [];
+    const redis = {
+        on: () => undefined,
+        eval: async (_script: string, _keys: number, _data: string, _meta: string, text: string) => {
+            writes.push(text);
+            return text.length;
+        },
+    } as unknown as Redis;
+    const log = new LiveOutputLog('oversized-default', { reset: true, redis });
+    const partials = (log as unknown as { partials: Map<string, { text: string }> }).partials;
+    const chunk = 'z'.repeat(64 * 1024);
+    for (let index = 0; index < 64; index += 1) log.append(chunk, 'stdout');
+    assert.ok(Buffer.byteLength(partials.get('stdout')!.text) <= 1024 * 1024, '4 MiB without a newline stays bounded');
+    log.append('\ndone\n', 'stdout');
+    await log.close();
+    assert.equal(writes.join(''), 'done\n');
+});
