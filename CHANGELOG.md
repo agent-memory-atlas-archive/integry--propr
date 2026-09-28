@@ -9,6 +9,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Server-side activity push events**: the server now announces the changes the
+  dashboard, header, Goals console and Inbox currently poll for. `@propr/shared`
+  defines one general envelope, `activity:update` (`domain`, `change`,
+  `entityId`, `repository`, `terminal`, `occurredAt`, `revision`), alongside
+  `goal:update`, `notification:update` and `usage:update`. `@propr/core`
+  publishes goal transitions from the writes that persist them (create, pause,
+  resume, cancel, claim, completion, failure and leased recovery), Inbox changes
+  from the only writer of notification receipts, and an Agent Tank usage trigger
+  only when an observed snapshot actually differs — never on an unchanged poll.
+  Both reads that see provider usage feed that one detector: the per-agent status
+  read and the aggregate endpoint the usage panel itself calls, so a percentage
+  that moves is announced whichever read observes it. The API derives `activity:update` from the task, planner, goal and notification
+  events it already subscribes to, so a producer cannot publish one without the
+  other, and emits over Socket.IO with an opt-in `activity` room and the existing
+  per-user room: notification frames and the activity they derive stay in their
+  recipients' rooms, so one operator never learns what another is being notified
+  about or when they read it, and an Inbox arrival is announced only to the
+  recipients whose receipt the write actually created. Payloads carry ids,
+  a repository and a timestamp — no prose, tokens, diffs or agent output — and a
+  failed publish is logged and swallowed, so a Redis outage degrades to the
+  polling that exists today. Publishing is also bounded: a disconnected
+  publisher drops the event and a Redis that stops answering costs one second,
+  so a notification request or a goal worker never waits out an outage after its
+  database write has committed. An idle publisher also stops holding its process
+  open: the connection is kept for reuse but only keeps the event loop alive
+  while an event is actually in flight, so reaching a publishing code path never
+  becomes an obligation to shut the publisher down. An operation that announces
+  many changes is bounded too — one timeout pauses publishing briefly instead of
+  being charged again per event, and a notification cleanup stops announcing
+  once its flush budget is spent — so closing a hundred notifications cannot
+  cost a hundred timeouts. Every frame decoded from Redis is validated against
+  its whole published contract — identifiers, states, repository scope,
+  revisions and the precomputed `terminal` flag — before the producer event or
+  the activity envelope derived from it is emitted, so a malformed publish is
+  dropped and reported instead of reaching a browser. No client change is
+  required by this step: with nothing subscribed, behaviour is unchanged.
+
 - **`/fix` selects suggestions as well as findings**: a `/fix` command line now
   accepts a review's non-blocking suggestion identifiers (`S1`, `S2`, …) beside
   its merge-blocking findings (`F1`, `F2`, …), mixed freely and in any order, as
@@ -117,6 +154,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   notifications stay in the Inbox.
 
 ### Changed
+
+- **Push-driven application shell**: the header stats, the Inbox and its unread
+  badge, the Agent Tank usage sidebar and the system-health surfaces no longer
+  poll on a timer. Each refreshes because the backend published a change it
+  declared an interest in — a new `activity:update` envelope (`domain`,
+  `change`, `repository`, `subjectId`, `terminal`) derived from the existing
+  task, plan, indexing and queue events, plus `notification:update` published
+  into a recipient's room and `usage:update` for capacity. Instance health is
+  published too: nothing in a run's lifecycle says a worker, the daemon, Redis,
+  GitHub authentication or a coding agent went away, so the API watches the
+  `/api/status` snapshot once for the whole instance and publishes a `health`
+  change when it moves. With the socket
+  connected and nothing happening, an open tab issues no requests after its
+  initial load; polling is now the fallback for a client whose websocket is
+  unavailable. A dismissal in one tab, or a server-side notification cleanup,
+  is reflected in the other tabs without either of them resurrecting a card the
+  user already dismissed. Hidden tabs do no work and reconcile once on return,
+  and every surface keeps its last good data when a refresh fails.
 
 - **Rebuilt dashboard**: the home page now answers "what needs my attention right
   now" in five sections — a summary strip of four clickable counts, **Needs

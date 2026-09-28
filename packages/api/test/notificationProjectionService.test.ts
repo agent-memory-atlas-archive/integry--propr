@@ -2,7 +2,7 @@
 import assert from 'node:assert/strict';
 import { after, afterEach, beforeEach, describe, mock, test } from 'node:test';
 import type { Knex } from 'knex';
-import { closeConnection, NotificationService } from '@propr/core';
+import { closeConnection, closeEventPublisher, NotificationService } from '@propr/core';
 import { notificationHref, DRAFT_UPDATE, INDEXING_UPDATE, TASK_UPDATE } from '@propr/shared';
 import { up as backfillEntityReferences } from '../../core/src/db/migrations/20260928120000_backfill_notification_entity_references.js';
 import { NotificationProjectionService } from '../services/notificationProjectionService.js';
@@ -29,7 +29,12 @@ afterEach(async () => {
   await database.destroy();
 });
 
-after(async () => closeConnection());
+after(async () => {
+  await closeConnection();
+  // Notification writes now publish a push event; close the publisher's Redis
+  // client so a test process is not held open by best-effort telemetry.
+  await closeEventPublisher();
+});
 
 describe('notification lifecycle projection', { concurrency: false }, () => {
   test('stores the goal destination for completed, failed, and stalled goal tasks', async () => {

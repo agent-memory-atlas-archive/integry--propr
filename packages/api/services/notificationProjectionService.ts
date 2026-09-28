@@ -8,10 +8,13 @@ import {
 } from '@propr/core';
 import {
   normalizeISO8601Timestamp,
+  NOTIFICATION_UPDATE,
   type DraftUpdatePayload,
   type IndexingUpdatePayload,
   type JsonObject,
+  type NotificationChange,
   type NotificationEventAction,
+  type NotificationUpdatePayload,
   type TaskUpdatePayload,
 } from '@propr/shared';
 
@@ -45,9 +48,24 @@ type NotificationEventWriter = Pick<NotificationService,
   | 'reconcileSystemFailureTransition'
   | 'dismissSystemFailureNotifications'>;
 
+/** A notification change published for exactly one recipient. */
+export type RecipientNotificationUpdate = NotificationUpdatePayload & { recipientId: string };
+
 export interface NotificationProjectionOptions {
   database: Knex;
   notificationService?: NotificationEventWriter;
+  /**
+   * Publishes receipt cleanup performed directly by this projection. Mutations
+   * delegated to NotificationService are announced by that service.
+   *
+   * Production passes `@propr/core`'s `publishNotificationUpdateThroughRedis`:
+   * projection runs outside the process that owns the websocket, in a worker
+   * thread or beside an API the recipient is not connected to, so the change
+   * travels the same Redis path as every other event. A projection constructed
+   * without it stays silent rather than opening a connection its owner did not
+   * ask for.
+   */
+  publishNotificationUpdate?: (payload: RecipientNotificationUpdate) => void;
   now?: () => Date;
   stalledAfterMs?: number;
   stalledCheckIntervalMs?: number;
@@ -88,6 +106,12 @@ interface TaskEventProjection {
 
 interface PullRequestTaskEventProjection extends TaskEventProjection {
   prNumber: number;
+}
+
+/** One active Inbox receipt a server-side cleanup dismissed. */
+interface DismissedReceipt {
+  userId: string;
+  eventId: string;
 }
 
 interface SourceActivityRow {
@@ -409,6 +433,7 @@ function connectSeatLimitBlock(account: Record<string, unknown>): ConnectSeatLim
 export class NotificationProjectionService {
   private readonly database: Knex;
   private readonly notifications: NotificationEventWriter;
+  private readonly publishNotificationUpdate: (payload: RecipientNotificationUpdate) => void;
   private readonly now: () => Date;
   private readonly stalledAfterMs: number;
   private readonly stalledCheckIntervalMs: number;
@@ -425,6 +450,7 @@ export class NotificationProjectionService {
     this.database = options.database;
     this.notifications = options.notificationService
       ?? new NotificationService({ database: options.database });
+    this.publishNotificationUpdate = options.publishNotificationUpdate ?? (() => undefined);
     this.now = options.now ?? (() => new Date());
     this.stalledAfterMs = resolveStalledAfterMs(options.stalledAfterMs);
     this.stalledCheckIntervalMs = options.stalledCheckIntervalMs ?? Math.min(
@@ -435,6 +461,54 @@ export class NotificationProjectionService {
     this.contentionRetryDelaysMs = options.contentionRetryDelaysMs
       ?? SQLITE_CONTENTION_RETRY_DELAYS_MS;
     this.repositoryNotificationsEnabled = options.repositoryNotificationsEnabled;
+  }
+
+  /**
+   * Tells each recipient's open tabs that their Inbox changed.
+   *
+   * Only ever called once the change is committed: the Inbox re-reads on this
+   * event rather than polling, so publishing before the row exists would hand
+   * it the state it already had. A publish that fails costs those tabs
+   * freshness until their next focus or reconnect - never the projection.
+   */
+  private announce(
+    change: NotificationChange,
+    recipients: readonly NotificationRecipient[],
+    eventId?: string,
+  ): void {
+    const occurredAt = normalizeISO8601Timestamp(this.now());
+    const recipientIds = new Set(recipients.map(
+      recipient => typeof recipient === 'string' ? recipient : recipient.userId,
+    ));
+    for (const recipientId of recipientIds) {
+      try {
+        this.publishNotificationUpdate({
+          eventType: NOTIFICATION_UPDATE,
+          change,
+          recipientId,
+          ...(eventId === undefined ? {} : { eventId }),
+          occurredAt,
+        });
+      } catch {
+        // Freshness only; the notification itself is already durable.
+      }
+    }
+  }
+
+  /** Announces receipts a server-side cleanup dismissed, per recipient. */
+  private announceDismissed(dismissed: readonly DismissedReceipt[]): void {
+    const eventIdsByRecipient = new Map<string, string[]>();
+    for (const receipt of dismissed) {
+      const eventIds = eventIdsByRecipient.get(receipt.userId) ?? [];
+      eventIds.push(receipt.eventId);
+      eventIdsByRecipient.set(receipt.userId, eventIds);
+    }
+    // One announcement per recipient: a sweep that resolves several cards at
+    // once still costs that Inbox a single re-read, and naming the notification
+    // only helps the recipient when there is exactly one to name.
+    for (const [userId, eventIds] of eventIdsByRecipient) {
+      this.announce('dismissed', [userId], eventIds.length === 1 ? eventIds[0] : undefined);
+    }
   }
 
   async bestEffort(label: string, projection: () => Promise<void>): Promise<void> {
@@ -492,6 +566,9 @@ export class NotificationProjectionService {
     const itemCount = planItemCount(draft.plan_json);
     const planName = name && name !== 'Untitled Plan' ? name : undefined;
 
+    const planRecipients: NotificationRecipient[] = [
+      { userId: draft.user_id, pushEnabled: true },
+    ];
     await this.notifications.createNotificationEvent({
       deduplicationKey: stableKey('plan-ready', payload.draftId, 'review', occurredAt),
       kind: 'plan',
@@ -503,7 +580,7 @@ export class NotificationProjectionService {
         : `Ready for review with ${itemCount} planned ${itemCount === 1 ? 'task' : 'tasks'}.`,
       actions: ['refine', 'approve_execute', 'dismiss'],
       occurredAt,
-    }, [{ userId: draft.user_id, pushEnabled: true }]);
+    }, planRecipients);
   }
 
   async projectTaskUpdate(payload: TaskUpdatePayload): Promise<void> {
@@ -611,6 +688,7 @@ export class NotificationProjectionService {
         const issueNumber = positiveInteger(metadata.issueNumber);
         const prNumber = positiveInteger(metadata.prNumber);
         const description = compactDisplayText(metadata.description);
+        const taskRecipients = await this.loadInstanceMemberRecipients();
         await this.notifications.createSourceActivityNotificationEvent({
           type: 'task', key: row.activity_key, repository: row.repository,
           lastActivityAt: row.last_activity_at,
@@ -632,8 +710,9 @@ export class NotificationProjectionService {
             : `Active work for ${row.repository} has not reported progress.`,
           actions: taskActions({ active: true }),
           occurredAt: row.last_activity_at,
-        }, await this.loadInstanceMemberRecipients());
+        }, taskRecipients);
       } else {
+        const indexingRecipients = await this.loadAdministratorRecipients();
         await this.notifications.createSourceActivityNotificationEvent({
           type: 'indexing', key: row.activity_key, repository: row.repository,
           ...(row.branch === null ? {} : { branch: row.branch }),
@@ -652,7 +731,7 @@ export class NotificationProjectionService {
           body: `Indexing ${row.branch ? `branch ${row.branch}` : row.repository} has not reported progress.`,
           actions: ['dismiss'],
           occurredAt: row.last_activity_at,
-        }, await this.loadAdministratorRecipients());
+        }, indexingRecipients);
       }
     }
   }
@@ -663,8 +742,10 @@ export class NotificationProjectionService {
    * audit; only their active Inbox receipts are dismissed.
    */
   async cleanupResolvedActivities(): Promise<number> {
-    return this.database.transaction(transaction =>
+    const dismissed = await this.database.transaction(transaction =>
       this.dismissResolvedActivityReceipts(transaction));
+    this.announceDismissed(dismissed);
+    return dismissed.length;
   }
 
   async projectSystemSnapshot(
@@ -799,21 +880,20 @@ export class NotificationProjectionService {
     return new Set([...enabledByRepository].filter(([, enabled]) => !enabled).map(([name]) => name));
   }
 
-  private createPullRequestAwareEvent<K extends 'task' | 'review'>(
+  private async createPullRequestAwareEvent<K extends 'task' | 'review'>(
     input: CreateNotificationEventInput<K>,
     recipients: readonly NotificationRecipient[],
     repository: string,
     prNumber: number | undefined,
   ): Promise<{ id: string } | null> {
-    if (prNumber === undefined) {
-      return this.notifications.createNotificationEvent(input, recipients);
-    }
-    return this.notifications.createPullRequestNotificationEvent(
-      repository,
-      prNumber,
-      input,
-      recipients,
-    );
+    return prNumber === undefined
+      ? await this.notifications.createNotificationEvent(input, recipients)
+      : await this.notifications.createPullRequestNotificationEvent(
+        repository,
+        prNumber,
+        input,
+        recipients,
+      );
   }
 
   private projectFailedTask(input: TaskEventProjection): Promise<{ id: string } | null> {
@@ -898,11 +978,11 @@ export class NotificationProjectionService {
     }, recipients, context.repository, context.prNumber);
   }
 
-  private projectPullRequestAttention(
+  private async projectPullRequestAttention(
     input: PullRequestTaskEventProjection,
   ): Promise<{ id: string } | null> {
     const { payload, context, occurredAt, recipients, pullRequestUrl, prNumber } = input;
-    return this.notifications.createPullRequestAttentionNotificationEvent(
+    return await this.notifications.createPullRequestAttentionNotificationEvent(
       context.repository,
       prNumber,
       {
@@ -999,6 +1079,9 @@ export class NotificationProjectionService {
     metadata?: JsonObject;
   }): Promise<boolean> {
     const completedAt = TERMINAL_ACTIVITY_STATUSES.has(input.status) ? input.occurredAt : null;
+    // Receipts this terminal transition resolves, announced once the
+    // transaction that dismissed them has actually committed.
+    let dismissed: DismissedReceipt[] = [];
     const values = {
         activity_type: input.type,
         activity_key: input.key,
@@ -1011,7 +1094,7 @@ export class NotificationProjectionService {
         created_at: input.occurredAt,
         updated_at: input.occurredAt,
     };
-    return this.database.transaction(async transaction => {
+    const accepted = await this.database.transaction(async transaction => {
       const existing = await transaction('notification_source_activity')
         .select('status', 'last_activity_at')
         .where({ activity_type: input.type, activity_key: input.key })
@@ -1051,18 +1134,20 @@ export class NotificationProjectionService {
         .select('status', 'last_activity_at')
         .where({ activity_type: input.type, activity_key: input.key })
         .first() as { status?: unknown; last_activity_at?: unknown } | undefined;
-      const accepted = stored?.status === input.status
+      const storedAccepted = stored?.status === input.status
         && stored.last_activity_at === input.occurredAt;
-      if (accepted && completedAt !== null) {
-        await this.dismissResolvedActivityReceipts(transaction);
+      if (storedAccepted && completedAt !== null) {
+        dismissed = await this.dismissResolvedActivityReceipts(transaction);
       }
-      return accepted;
+      return storedAccepted;
     });
+    this.announceDismissed(dismissed);
+    return accepted;
   }
 
   private async dismissResolvedActivityReceipts(
     transaction: Knex.Transaction,
-  ): Promise<number> {
+  ): Promise<DismissedReceipt[]> {
     const timestamp = normalizeISO8601Timestamp(this.now());
     // Stalled warnings resolve on any terminal transition; failures resolve
     // once the same task or indexing source later completes successfully.
@@ -1080,7 +1165,9 @@ export class NotificationProjectionService {
             .whereRaw('activity.last_activity_at > event.occurred_at');
         });
       });
-    const resolvedEvents = transaction('notification_events as event')
+    // Rebuilt per use: the same query selects the receipts to announce and
+    // then bounds the update that dismisses them.
+    const resolvedEvents = () => transaction('notification_events as event')
       .select('event.event_id')
       .whereIn('event.severity', ['warning', 'error'])
       .andWhere((resolvable) => {
@@ -1103,17 +1190,23 @@ export class NotificationProjectionService {
             });
         });
       });
-    const changed = await transaction('notification_user_states')
+    const resolving = await transaction('notification_user_states')
       .where({ inbox_enabled: true })
       .whereNull('dismissed_at')
-      .whereIn('event_id', resolvedEvents)
+      .whereIn('event_id', resolvedEvents())
+      .select('user_id', 'event_id') as Array<{ user_id: string; event_id: string }>;
+    if (resolving.length === 0) return [];
+    await transaction('notification_user_states')
+      .where({ inbox_enabled: true })
+      .whereNull('dismissed_at')
+      .whereIn('event_id', resolvedEvents())
       .update({
         dismissed_at: transaction.raw(
           'CASE WHEN created_at > ? THEN created_at ELSE ? END',
           [timestamp, timestamp],
         ),
       });
-    return Number(changed);
+    return resolving.map(receipt => ({ userId: receipt.user_id, eventId: receipt.event_id }));
   }
 
   private async hasActiveSystemFailureReceipt(component: string): Promise<boolean> {
