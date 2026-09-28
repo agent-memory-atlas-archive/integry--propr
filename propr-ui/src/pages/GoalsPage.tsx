@@ -1057,10 +1057,10 @@ function GoalDetails({ goalId }: { goalId: string }) {
           </header>
           {outputMode === 'readable'
             ? <div className="min-h-32 py-4">{readableTimeline.length > 0
-              ? <ThinkingLog events={readableTimeline} todos={live.todos} showHeader={false} />
+              ? <ThinkingLog events={readableTimeline} todos={live.todos} showHeader={false} historyTruncated={live.historyTruncated} />
               : <p className="text-sm text-slate-500">No human-readable output yet.</p>}</div>
             : <div className="mt-4 min-h-32 bg-slate-950 p-4 text-slate-100">{terminalTimeline.length > 0
-              ? <ExecutionEventLog events={terminalTimeline} omittedEventCount={live.omittedEventCount} collapsed={false} onToggleCollapse={() => undefined} lastThought={thinkingLog.lastThought} isTaskActive={mutable && goal.desiredState === 'running'} taskInfo={null} />
+              ? <ExecutionEventLog events={terminalTimeline} omittedEventCount={live.omittedEventCount} historyTruncated={live.historyTruncated} collapsed={false} onToggleCollapse={() => undefined} lastThought={thinkingLog.lastThought} isTaskActive={mutable && goal.desiredState === 'running'} taskInfo={null} />
               : <p className="text-sm text-slate-400">No terminal output yet.</p>}</div>}
         </section>
       </main>

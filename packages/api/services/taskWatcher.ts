@@ -469,7 +469,7 @@ export class TaskWatcherManager {
     try {
       const update = await this.readRedisLiveEvents(taskId, watcherInfo, isInitial);
       if (!update || this.taskWatchers.get(taskId) !== watcherInfo) return;
-      const { events, omittedEventCount } = update;
+      const { events, omittedEventCount, historyTruncated } = update;
       const snapshot = update.projector.snapshot();
       const snapshotSignature = JSON.stringify([snapshot.todos, snapshot.currentTask, snapshot.tokenUsage]);
       if (events.length === 0 && omittedEventCount === undefined && snapshotSignature === watcherInfo.lastSnapshotSignature) return;
@@ -484,6 +484,7 @@ export class TaskWatcherManager {
         tokenUsage: snapshot.tokenUsage,
         timestamp: new Date().toISOString(),
         ...(omittedEventCount !== undefined ? { omittedEventCount } : {}),
+        ...(historyTruncated ? { historyTruncated } : {}),
       };
       this.io.to(`task:live:${taskId}`).emit(TASK_LIVE_UPDATE, payload);
     } catch (error) {
@@ -495,14 +496,15 @@ export class TaskWatcherManager {
    * Events to broadcast from the task's append-only live output. After the
    * first read only output past the last read is fetched and parsed; a new
    * execution, or output trimmed past what was read, starts over from the top
-   * and is sent as full state (with `omittedEventCount`). Legacy replacement
+   * and is sent as full state (with `omittedEventCount`, and `historyTruncated`
+   * once output of the execution was discarded). Legacy replacement
    * writers are compared and projected as complete snapshots on every change.
    */
   private async readRedisLiveEvents(
     taskId: string,
     watcherInfo: TaskWatcherInfo,
     isInitial: boolean,
-  ): Promise<{ events: TaskLiveUpdatePayload['events']; omittedEventCount?: number; projector: LiveOutputProjector } | null> {
+  ): Promise<{ events: TaskLiveUpdatePayload['events']; omittedEventCount?: number; historyTruncated?: boolean; projector: LiveOutputProjector } | null> {
     const redis = this.deps!.redisClient as unknown as LiveOutputRedis;
     const projector = isInitial ? undefined : watcherInfo.liveProjector;
     const read = await readLiveOutput(redis, taskId, projector?.offset ?? 0);
@@ -525,8 +527,8 @@ export class TaskWatcherManager {
     const full = projectLiveOutputRead(fullRead, taskId, executionStart, { legacyExecution });
     watcherInfo.lastLegacySnapshot = fullRead.epoch === 'legacy' ? fullRead.text : undefined;
     watcherInfo.liveProjector = full.projector;
-    console.log(`[TaskWatcher] Full Redis update for task ${taskId}: sending ${full.events.length} events (${full.omittedEventCount} raw events omitted)`);
-    return { events: full.events, omittedEventCount: full.omittedEventCount, projector: full.projector };
+    console.log(`[TaskWatcher] Full Redis update for task ${taskId}: sending ${full.events.length} events (${full.omittedEventCount} raw events omitted, earlier output discarded: ${full.truncated})`);
+    return { events: full.events, omittedEventCount: full.omittedEventCount, historyTruncated: full.truncated, projector: full.projector };
   }
 
 

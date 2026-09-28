@@ -137,6 +137,7 @@ export const mergeIncrementalLiveDetails = (
   return {
     events: capped.events,
     ...omitted,
+    ...(previous.historyTruncated ? { historyTruncated: true } : {}),
     todos: hasUpdateField(payload, 'todos') ? normalizeLiveTodos(payload.todos ?? []) : previous.todos,
     currentTask: hasUpdateField(payload, 'currentTask') ? payload.currentTask ?? null : previous.currentTask,
     tokenUsage: hasUpdateField(payload, 'tokenUsage') ? payload.tokenUsage ?? null : previous.tokenUsage,
@@ -152,6 +153,7 @@ export const applyTaskLiveUpdate = (previous: LiveDetails, payload: IncrementalT
     currentTask: payload.currentTask || null,
     tokenUsage: payload.tokenUsage || null,
     omittedEventCount: payload.omittedEventCount,
+    historyTruncated: payload.historyTruncated,
   }, isLive);
 };
 

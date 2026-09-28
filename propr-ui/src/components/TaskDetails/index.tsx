@@ -304,6 +304,7 @@ const TaskDetails: React.FC = () => {
                     events={thinkingLog.thinkingLogWithTimestamps}
                     todos={taskData.liveDetails.todos}
                     highlightedTodoId={highlightedTodoId}
+                    historyTruncated={taskData.liveDetails.historyTruncated}
                   />
                 </div>
               </div>
@@ -320,6 +321,7 @@ const TaskDetails: React.FC = () => {
         <ExecutionEventLog
           events={taskData.liveDetails.events}
           omittedEventCount={taskData.liveDetails.omittedEventCount}
+          historyTruncated={taskData.liveDetails.historyTruncated}
           collapsed={thinkingLog.eventsCollapsed}
           onToggleCollapse={thinkingLog.toggleEventsCollapse}
           lastThought={thinkingLog.lastThought}

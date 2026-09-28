@@ -156,6 +156,12 @@ export interface TaskLiveUpdatePayload {
    * keep the payload bounded. Readable (`thought`) events are never left out.
    */
   omittedEventCount?: number;
+  /**
+   * Full-state payloads only: earlier output of this execution exceeded the
+   * live log's retention limit and was discarded, so neither `events` nor
+   * `omittedEventCount` covers it.
+   */
+  historyTruncated?: boolean;
 }
 
 /** Queue statistics data */

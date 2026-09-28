@@ -3,6 +3,9 @@ import type { LiveDetails, LiveEvent } from './types';
 /** Raw terminal events kept in a live view; readable (`thought`) events are always kept. */
 export const MAX_LIVE_RAW_EVENTS = 500;
 
+/** Shown wherever a view may lack output the server discarded (see `LiveDetails.historyTruncated`). */
+export const HISTORY_TRUNCATED_NOTICE = 'Earlier output from this run exceeded the live log size limit and was discarded.';
+
 /** Keeps every readable event and only the most recent raw ones. */
 export const capLiveEvents = (events: LiveEvent[], maxRawEvents = MAX_LIVE_RAW_EVENTS): { events: LiveEvent[]; dropped: number } => {
   let raw = 0;
@@ -49,6 +52,8 @@ export const mergeFullLiveDetails = (previous: LiveDetails, full: LiveDetails, i
     currentTask: full.currentTask || null,
     tokenUsage: full.tokenUsage || null,
     omittedEventCount: Math.max(0, (full.omittedEventCount ?? 0) - retainedOmittedRaw) + capped.dropped,
+    // Whether history was retained from before the discard cannot be proven, so the latest full state decides.
+    ...(full.historyTruncated ? { historyTruncated: true } : {}),
   };
 };
 

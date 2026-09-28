@@ -185,6 +185,23 @@ describe('full history follow-up regressions', () => {
     unmount();
   });
 
+  it('keeps output discarded by retention disclosed across increments until full state says otherwise', async () => {
+    const truncated = applyTaskLiveUpdate(details(0, 0), { taskId: 'task', events: [raw(900)], omittedEventCount: 0, historyTruncated: true });
+    expect(truncated.omittedEventCount).toBe(0);
+    expect(truncated.historyTruncated).toBe(true);
+    const increment = applyTaskLiveUpdate(truncated, { taskId: 'task', events: [raw(901)] });
+    expect(increment.historyTruncated).toBe(true);
+    expect(mergeFullLiveDetails(increment, { ...details(900, 2, 0), historyTruncated: true }).historyTruncated).toBe(true);
+    expect(applyTaskLiveUpdate(increment, { taskId: 'task', events: [raw(0)], omittedEventCount: 0 }).historyTruncated).toBeUndefined();
+
+    apiMocks.getTaskLiveDetails.mockResolvedValue({ ...details(900, 2, 0), historyTruncated: true });
+    const { result, unmount } = renderHook(() => useTaskLiveData('task', 0, 'running'));
+    await act(async () => {});
+    expect(result.current.liveDetails.omittedEventCount).toBe(0);
+    expect(result.current.liveDetails.historyTruncated).toBe(true);
+    unmount();
+  });
+
   it('merges large full histories, including unshared prefixes and suffixes, without positional arguments', () => {
     const events = Array.from({ length: 150_000 }, (_, index) => ({ ...raw(index), type: 'thought' as const, content: 'x' }));
     const full = { ...details(0, 0), events };

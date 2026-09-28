@@ -140,6 +140,8 @@ export interface LiveDetails {
   tokenUsage?: TokenUsage | null;
   /** Raw terminal events of this execution not held here; readable events are never left out. */
   omittedEventCount?: number;
+  /** The server discarded earlier output of this execution; neither `events` nor `omittedEventCount` accounts for it. */
+  historyTruncated?: boolean;
 }
 
 export interface AnalysisData {

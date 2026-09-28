@@ -286,7 +286,7 @@ async function isLiveTask(redisClient: RedisClientType, db: Knex, taskId: string
   return true;
 }
 
-async function parseActiveExecutionOutput(redisClient: RedisClientType, db: Knex, taskId: string, options: AgentStreamParseOptions = {}): Promise<(ConversationResult & { nativeGoal?: ReturnType<typeof parseRedisOutput>['nativeGoal']; omittedEventCount?: number }) | null> {
+async function parseActiveExecutionOutput(redisClient: RedisClientType, db: Knex, taskId: string, options: AgentStreamParseOptions = {}): Promise<(ConversationResult & { nativeGoal?: ReturnType<typeof parseRedisOutput>['nativeGoal']; omittedEventCount?: number; historyTruncated?: boolean }) | null> {
   const executionStartTimestamp = await findExecutionStartTimestamp(redisClient, db, taskId);
   const projected = await projectLiveOutput(redisClient as unknown as LiveOutputRedis, taskId, executionStartTimestamp, {
     selectEvents: false, resolveLegacyExecution: () => findLatestExecutionStartForTask({ redisClient, db }, taskId),
@@ -299,7 +299,7 @@ async function parseActiveExecutionOutput(redisClient: RedisClientType, db: Knex
   if (events.length > 0 || todos.length > 0 || currentTask || tokenUsage) {
     return {
       events: events as unknown as Array<Record<string, unknown>>,
-      todos, currentTask, tokenUsage, nativeGoal, omittedEventCount,
+      todos, currentTask, tokenUsage, nativeGoal, omittedEventCount, ...(projected.truncated ? { historyTruncated: true } : {}),
     };
   }
   // Output that is not a record stream (a stored result document) is projected whole.

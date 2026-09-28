@@ -895,11 +895,33 @@ export interface RedisOutputProjection {
   feed(line: string, key: string, ordinal?: number): ProjectedLineEvents;
   /** The buffered assistant message not yet completed by a later record, if any. */
   pendingEvent(): { event: ConversationEvent; key: string } | null;
+  /** Everything but the events, without touching them. */
+  metadata(): Omit<ParsedRedisOutput, 'events' | 'totalEventCount'>;
+  /** Every event fed so far, plus the buffered one; only the buffered one unless the projection retains events. */
   result(): ParsedRedisOutput;
 }
 
-export function createRedisOutputProjection(options: RedisOutputParseOptions = {}): RedisOutputProjection {
+/**
+ * `retainEvents: false` releases each event once feed() returns it, keeping only
+ * parser state later records depend on (including a buffered message), so a
+ * live reader's memory does not grow with the length of the run.
+ */
+export function createRedisOutputProjection(
+  { retainEvents = true, ...options }: RedisOutputParseOptions & { retainEvents?: boolean } = {},
+): RedisOutputProjection {
   const state = createParseState(options);
+  const metadata = () => {
+    const tokenUsage = { ...state.tokenUsage };
+    const usage = state.codexTurnCompletedUsage ?? state.codexResultUsage;
+    if (usage) addRedisTokenUsage(tokenUsage, usage);
+    const inProgressTask = state.todos.find(t => t.status === 'in_progress');
+    return {
+      todos: state.todos,
+      currentTask: inProgressTask ? inProgressTask.content : null,
+      tokenUsage: hasRedisTokenUsage(tokenUsage) ? tokenUsage : null,
+      nativeGoal: state.nativeGoal,
+    };
+  };
   return {
     feed(line, key, ordinal) {
       const before = state.events.length;
@@ -908,34 +930,24 @@ export function createRedisOutputProjection(options: RedisOutputParseOptions = {
       parseLine(line, state);
       if (state.pendingAssistantMessage && !state.pendingAssistantKey) state.pendingAssistantKey = key;
       let slot = 0;
-      return {
-        events: state.events.slice(before).map((event, index) => {
-          const eventKey = state.eventKeys.get(event) ?? key;
-          if (eventKey !== key) return { event, key: eventKey };
-          const skipped = state.skippedSlots.filter(at => at <= before + index).length;
-          return { event, key, slot: slot++ + skipped };
-        }),
-      };
+      const events = state.events.slice(before).map((event, index) => {
+        const eventKey = state.eventKeys.get(event) ?? key;
+        if (eventKey !== key) return { event, key: eventKey };
+        const skipped = state.skippedSlots.filter(at => at <= before + index).length;
+        return { event, key, slot: slot++ + skipped };
+      });
+      if (!retainEvents) state.events.length = 0;
+      return { events };
     },
     pendingEvent() {
       if (!state.pendingAssistantMessage) return null;
       return { event: pendingMessageEvent(state, new Date().toISOString()), key: state.pendingAssistantKey ?? 'pending' };
     },
+    metadata,
     result() {
-      const tokenUsage = { ...state.tokenUsage };
-      const usage = state.codexTurnCompletedUsage ?? state.codexResultUsage;
-      if (usage) addRedisTokenUsage(tokenUsage, usage);
       const pending = state.pendingAssistantMessage ? [pendingMessageEvent(state, new Date().toISOString())] : [];
       const events = [...state.events, ...pending];
-      const inProgressTask = state.todos.find(t => t.status === 'in_progress');
-      return {
-        events,
-        todos: state.todos,
-        currentTask: inProgressTask ? inProgressTask.content : null,
-        tokenUsage: hasRedisTokenUsage(tokenUsage) ? tokenUsage : null,
-        totalEventCount: events.length,
-        nativeGoal: state.nativeGoal,
-      };
+      return { events, ...metadata(), totalEventCount: events.length };
     },
   };
 }

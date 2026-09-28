@@ -1,6 +1,7 @@
 import React, { useState, useMemo } from 'react';
 import { LiveEvent, TaskInfo } from './types';
 import MarkdownRenderer from './MarkdownRenderer';
+import { HISTORY_TRUNCATED_NOTICE } from './liveDetailsMerge';
 import {
   ChevronUp,
   ChevronDown,
@@ -27,6 +28,8 @@ interface ExecutionEventLogProps {
   taskInfo: TaskInfo | null;
   /** Earlier raw terminal events not loaded (the live view keeps the most recent ones). */
   omittedEventCount?: number;
+  /** Earlier output was discarded by the server, so `omittedEventCount` is not the whole history. */
+  historyTruncated?: boolean;
 }
 
 // Separate component for thought content rendering
@@ -274,6 +277,21 @@ const computeEventsWithContext = (
   });
 };
 
+/** Output the server discarded was never counted, so the total is only a lower bound. */
+const formatEventCount = (count: number, historyTruncated: boolean): string => historyTruncated ? `${count}+` : String(count);
+
+const OmittedHistoryNotice: React.FC<{ omittedEventCount: number; historyTruncated: boolean }> = ({ omittedEventCount, historyTruncated }) => {
+  if (omittedEventCount === 0 && !historyTruncated) return null;
+  return (
+    <p role="note" className="mb-2 font-mono text-[11px] text-zinc-500">
+      {omittedEventCount > 0 && `${omittedEventCount} earlier terminal ${omittedEventCount === 1 ? 'event is' : 'events are'} not shown. `}
+      {historyTruncated
+        ? `${HISTORY_TRUNCATED_NOTICE} The event count does not include it.`
+        : 'The implementation log keeps every message.'}
+    </p>
+  );
+};
+
 const ExecutionEventLog: React.FC<ExecutionEventLogProps> = ({
   events,
   collapsed,
@@ -282,6 +300,7 @@ const ExecutionEventLog: React.FC<ExecutionEventLogProps> = ({
   isTaskActive: _isTaskActive,
   taskInfo,
   omittedEventCount = 0,
+  historyTruncated = false,
 }) => {
   // Note: isTaskActive is still passed for potential future use
   void _isTaskActive;
@@ -321,7 +340,7 @@ const ExecutionEventLog: React.FC<ExecutionEventLogProps> = ({
         <div className="flex items-center gap-2.5 flex-shrink-0">
           <span className={`font-mono text-sm font-bold ${collapsed ? 'text-slate-500' : 'text-zinc-400'}`}>{'>_'}</span>
           <span className={`font-mono text-[11px] font-bold uppercase tracking-wider ${collapsed ? 'text-slate-600' : 'text-white'}`}>
-            {collapsed ? 'EXECUTION LOG' : 'TERMINAL OUTPUT'} ({events.length + omittedEventCount})
+            {collapsed ? 'EXECUTION LOG' : 'TERMINAL OUTPUT'} ({formatEventCount(events.length + omittedEventCount, historyTruncated)})
           </span>
         </div>
         <div className="flex items-center gap-3 justify-end min-w-0 flex-1 pl-4">
@@ -351,11 +370,7 @@ const ExecutionEventLog: React.FC<ExecutionEventLogProps> = ({
         >
           {/* Continuous stream layout - no dividers between items */}
           <div className="p-3 space-y-0">
-            {omittedEventCount > 0 && (
-              <p role="note" className="mb-2 font-mono text-[11px] text-zinc-500">
-                {omittedEventCount} earlier terminal {omittedEventCount === 1 ? 'event is' : 'events are'} not shown. The implementation log keeps every message.
-              </p>
-            )}
+            <OmittedHistoryNotice omittedEventCount={omittedEventCount} historyTruncated={historyTruncated} />
             {eventsWithContext.map(({ event, prevToolUse, originalIndex }) => (
               <TerminalEventItem
                 key={event.id ?? originalIndex}

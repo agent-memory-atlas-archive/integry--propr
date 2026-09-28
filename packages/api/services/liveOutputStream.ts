@@ -239,8 +239,12 @@ export class LiveOutputProjector {
     });
   }
 
+  /*
+   * Parsers release events once emitted: a watcher keeps its projector for the
+   * whole run, and a reader that wants every event collects what feed() returns.
+   */
   private genericProjection(): Projection {
-    const projection = createRedisOutputProjection({ executionStartTimestamp: this.executionStartTimestamp });
+    const projection = createRedisOutputProjection({ executionStartTimestamp: this.executionStartTimestamp, retainEvents: false });
     return {
       feed: (line, offset, ordinal) => this.withIds(projection.feed(line, String(offset - this.start), ordinal).events),
       pending: () => {
@@ -248,14 +252,14 @@ export class LiveOutputProjector {
         return pending ? { ...pending.event, id: this.id(pending.event, `${pending.key}:0`) } : null;
       },
       snapshot: () => {
-        const { todos, currentTask, tokenUsage, nativeGoal } = projection.result();
+        const { todos, currentTask, tokenUsage, nativeGoal } = projection.metadata();
         return { todos, currentTask, tokenUsage, nativeGoal: nativeGoal ?? null };
       },
     };
   }
 
   private claudeProjection(): Projection {
-    const projection = createClaudeStreamProjection();
+    const projection = createClaudeStreamProjection({ retainEvents: false });
     const startMs = this.executionStartTimestamp ? new Date(this.executionStartTimestamp).getTime() : NaN;
     let goalRecord: ClaudeNativeGoalRecord | null = null;
     return {
@@ -271,7 +275,7 @@ export class LiveOutputProjector {
       },
       pending: () => null,
       snapshot: () => {
-        const { todos, currentTask, tokenUsage } = projection.result();
+        const { todos, currentTask, tokenUsage } = projection.metadata();
         return {
           todos: todos as LiveProjectionSnapshot['todos'],
           currentTask,
@@ -284,20 +288,22 @@ export class LiveOutputProjector {
 
   /** Vibe publishes whole transcripts, so each read re-projects the snapshot it has. */
   private wholeOutputProjection(parsed: ParsedRedisOutput): Projection {
-    let emitted = false;
+    let events: ConversationEvent[] | null = parsed.events;
+    const snapshot: LiveProjectionSnapshot = {
+      todos: parsed.todos,
+      currentTask: parsed.currentTask,
+      tokenUsage: parsed.tokenUsage,
+      nativeGoal: parsed.nativeGoal ?? null,
+    };
     return {
       feed: () => {
-        if (emitted) return [];
-        emitted = true;
-        return this.withIds(parsed.events.map((event, index) => ({ event, key: `vibe:${index}` })));
+        if (!events) return [];
+        const emitted = events;
+        events = null;
+        return this.withIds(emitted.map((event, index) => ({ event, key: `vibe:${index}` })));
       },
       pending: () => null,
-      snapshot: () => ({
-        todos: parsed.todos,
-        currentTask: parsed.currentTask,
-        tokenUsage: parsed.tokenUsage,
-        nativeGoal: parsed.nativeGoal ?? null,
-      }),
+      snapshot: () => snapshot,
     };
   }
 }
@@ -327,8 +333,12 @@ function withSyntheticTimestamp(line: string, startMs: number, index: number): s
 
 export interface LiveOutputProjectionResult extends LiveProjectionSnapshot {
   events: LiveEvent[];
-  /** Raw events left out by {@link selectLiveEvents}, plus any output already trimmed from Redis. */
+  /** Raw events of the retained output left out by {@link selectLiveEvents}. */
   omittedEventCount: number;
+  /**
+   * Earlier output of this execution was trimmed from Redis. How many events it
+   * held is unknown, so it is not part of `omittedEventCount`.
+   */
   truncated: boolean;
   projector: LiveOutputProjector;
 }

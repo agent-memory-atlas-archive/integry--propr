@@ -357,10 +357,18 @@ export interface ClaudeStreamProjection {
   feed(line: string): Array<Record<string, unknown>>;
   /** An event's stable slot within the record that produced it (see {@link ClaudeEventSlots}). */
   slot(event: object): number | undefined;
+  /** Everything but the events, without touching them. */
+  metadata(): Omit<ConversationResult, 'events'>;
+  /** Every event fed so far; empty unless the projection retains events. */
   result(): ConversationResult;
 }
 
-export function createClaudeStreamProjection(): ClaudeStreamProjection {
+/**
+ * `retainEvents: false` releases each event once feed() returns it, keeping only
+ * what later records depend on (todos, usage, pending subagents), so a live
+ * reader's memory does not grow with the length of the run.
+ */
+export function createClaudeStreamProjection({ retainEvents = true }: { retainEvents?: boolean } = {}): ClaudeStreamProjection {
   const events: Array<Record<string, unknown>> = [];
   let todos: TodoItem[] = [];
   const tokenUsage: TokenUsage = {
@@ -372,6 +380,11 @@ export function createClaudeStreamProjection(): ClaudeStreamProjection {
   const pendingSubagents: Map<string, PendingSubagent> = new Map();
   const warningState: ClaudeWarningState = { malformedLineWarnings: 0 };
   const eventSlots: ClaudeEventSlots = new WeakMap();
+  const metadata = () => {
+    const hasTokens = tokenUsage.input_tokens > 0 || tokenUsage.output_tokens > 0 ||
+      tokenUsage.cache_creation_input_tokens > 0 || tokenUsage.cache_read_input_tokens > 0;
+    return { todos, currentTask: deriveCurrentTask(todos), tokenUsage: hasTokens ? { ...tokenUsage } : null };
+  };
 
   return {
     feed(line) {
@@ -385,15 +398,13 @@ export function createClaudeStreamProjection(): ClaudeStreamProjection {
         tokenUsage.cache_creation_input_tokens += parsed.tokenUsage.cache_creation_input_tokens;
         tokenUsage.cache_read_input_tokens += parsed.tokenUsage.cache_read_input_tokens;
       }
-      return events.slice(before);
+      const emitted = events.slice(before);
+      if (!retainEvents) events.length = 0;
+      return emitted;
     },
     slot: event => eventSlots.get(event),
-    result() {
-      const currentTask = deriveCurrentTask(todos);
-      const hasTokens = tokenUsage.input_tokens > 0 || tokenUsage.output_tokens > 0 ||
-        tokenUsage.cache_creation_input_tokens > 0 || tokenUsage.cache_read_input_tokens > 0;
-      return { events, todos, currentTask, tokenUsage: hasTokens ? { ...tokenUsage } : null };
-    },
+    metadata,
+    result: () => ({ events, ...metadata() }),
   };
 }
 
