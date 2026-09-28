@@ -12,6 +12,7 @@ import { up as addGoalTitles } from '../../core/src/db/migrations/20260907000000
 import { up as addGoalAttachments } from '../../core/src/db/migrations/20260908000000_add_goal_attachments.js';
 import { up as addGoalInputDisplayBody } from '../../core/src/db/migrations/20260923000000_add_goal_input_display_body.js';
 import { createGoalRoutes } from '../routes/goalRoutes.js';
+import { withLiveOutputReads } from './liveOutputRedisFake.js';
 
 function request(userId: string, params: Record<string, string> = {}, body: unknown = {}): Request {
     return {
@@ -123,7 +124,7 @@ test('goal routes keep metadata owner-scoped and queue ordinary input on the sam
                     queued.push({ name, data, options });
                 },
             } as never,
-            redisClient: {
+            redisClient: withLiveOutputReads({
                 get: async (key: string) => key === 'agent:output:goal-task-1' ? [
                     JSON.stringify({ type: 'assistant', timestamp: '2026-09-02T20:00:00Z', message: {
                         content: [{ type: 'tool_use', name: 'TodoWrite', input: { todos: [
@@ -133,7 +134,7 @@ test('goal routes keep metadata owner-scoped and queue ordinary input on the sam
                     } }),
                 ].join('\n') : null,
                 del: async () => 1,
-            } as never,
+            }) as never,
             stopExecution: async taskId => {
                 stopped.push(taskId);
                 const attempt = (stopAttempts.get(taskId) ?? 0) + 1;

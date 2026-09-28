@@ -175,7 +175,8 @@ export class ClaudeGoalStream {
         taskId: string | undefined,
         persistOutput?: (records: string[]) => Promise<void>,
     ) {
-        this.output = new LiveAgentOutput(taskId, persistOutput, 'claude-goal');
+        // Output that can no longer be published or persisted fails the session.
+        this.output = new LiveAgentOutput(taskId, persistOutput, 'claude-goal', { onOverflow: error => this.close(error) });
         child.stderr?.on('data', chunk => {
             this.stderr = boundedProviderDiagnostic(this.stderr + chunk.toString());
         });

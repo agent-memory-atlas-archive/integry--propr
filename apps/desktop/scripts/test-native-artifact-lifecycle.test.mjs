@@ -686,6 +686,83 @@ describe('native staged artifact lifecycle authority', () => {
     assert.doesNotMatch(inspect(aggregate), /secret\.invalid/);
   });
 
+  test('lets a slow complete LaunchServices dump prove absence within the overall budget', async () => {
+    let clock = 0;
+    let dumps = 0;
+    const authority = new LaunchServicesAuthority('/private/copied/ProPR Desktop.app', {}, {
+      runCommand: async () => ({}),
+      scanCommand: async (_file, _args, { timeout }) => {
+        dumps += 1;
+        clock += Math.min(timeout, 45_000);
+        if (timeout < 45_000) throw new NativeLifecycleCommandFailure('COMMAND_DEADLINE');
+        return { matched: false };
+      },
+      wait: async milliseconds => { clock += milliseconds; },
+      now: () => clock,
+    });
+    authority.registered = true;
+
+    await authority.assertGone();
+
+    assert.equal(authority.registered, false);
+    assert.equal(dumps, 1);
+    assert.equal(clock, 45_000);
+  });
+
+  test('charges failed probes, waits, and repeated removal against the next dump budget', async () => {
+    let clock = 0;
+    const timeouts = [];
+    const authority = new LaunchServicesAuthority('/private/copied/ProPR Desktop.app', {}, {
+      runCommand: async () => { clock += 5_000; },
+      scanCommand: async (_file, _args, { timeout }) => {
+        timeouts.push(timeout);
+        if (timeouts.length === 1) {
+          clock += 20_000;
+          throw new NativeLifecycleCommandFailure('COMMAND_FAILED');
+        }
+        clock += 40_000;
+        return { matched: timeouts.length === 2 };
+      },
+      wait: async milliseconds => { clock += milliseconds; },
+      now: () => clock,
+      // Keep the remaining budget below the per-dump cap after the first probe.
+      absenceBudgetMs: 120_000,
+    });
+    authority.registered = true;
+
+    await authority.assertGone();
+
+    assert.equal(authority.registered, false);
+    assert.deepEqual(timeouts, [120_000, 94_000, 48_000]);
+    assert.equal(clock, 112_000);
+  });
+
+  test('fails a dump that exhausts the proof budget without claiming absence', async () => {
+    let clock = 0;
+    let dumps = 0;
+    const authority = new LaunchServicesAuthority('/private/copied/ProPR Desktop.app', {}, {
+      runCommand: async () => ({}),
+      scanCommand: async (_file, _args, { timeout }) => {
+        dumps += 1;
+        clock += timeout;
+        throw new NativeLifecycleCommandFailure('COMMAND_DEADLINE');
+      },
+      wait: async milliseconds => { clock += milliseconds; },
+      now: () => clock,
+      // One dump must exhaust this fixture's budget, unlike the production window.
+      absenceBudgetMs: 120_000,
+    });
+    authority.registered = true;
+
+    await assert.rejects(authority.assertGone(), error => (
+      error instanceof LaunchServicesAbsenceFailure && error.resultClass === 'COMMAND_DEADLINE'
+    ));
+
+    assert.equal(authority.registered, true);
+    assert.equal(dumps, 1);
+    assert.equal(clock, 120_000);
+  });
+
   test('re-probes a lagging LaunchServices removal for the full bounded window', async () => {
     const applicationRoot = '/private/copied/ProPR Desktop.app';
     // Each -dump answer costs seconds on a loaded runner, so the window is a

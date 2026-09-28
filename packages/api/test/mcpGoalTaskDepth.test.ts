@@ -9,6 +9,7 @@ import knex, { type Knex } from 'knex';
 import type { RedisClientType } from 'redis';
 import type { McpPrincipal } from '../mcp/policy.js';
 import type { ToolDeps, McpTool } from '../mcp/tools.js';
+import { withLiveOutputReads } from './liveOutputRedisFake.js';
 
 const repository = 'acme/repo';
 const otherRepository = 'acme/other';
@@ -150,7 +151,7 @@ test('MCP goal and task depth lists across the grant, reads live detail and reco
     })],
   ]);
   const fileChanges = new Map<string, string>();
-  const redisClient = { get: async (key: string) => fileChanges.get(key) ?? liveOutput.get(key) ?? null } as unknown as RedisClientType;
+  const redisClient = withLiveOutputReads({ get: async (key: string) => fileChanges.get(key) ?? liveOutput.get(key) ?? null }) as unknown as RedisClientType;
 
   try {
     await db.migrate.latest({ directory: fileURLToPath(new URL('../../core/src/db/migrations/', import.meta.url)) });

@@ -43,6 +43,7 @@ export {
   type IndexingPhase,
   type IndexingUpdatePayload,
   type TaskLiveUpdatePayload,
+  type LiveOutputPosition,
   type QueueStatsUpdatePayload,
   type ActivityDomain,
   type ActivityChange,

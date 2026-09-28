@@ -3,6 +3,7 @@ import { LiveEvent, TodoItem } from './types';
 import { renderMarkdown } from './renderMarkdown';
 import { Lightbulb, Wrench, Search, CheckCircle2, MessageSquare } from 'lucide-react';
 import { formatReviewPromptOverview } from './reviewPromptOverview';
+import { HISTORY_TRUNCATED_NOTICE } from './liveDetailsMerge';
 
 // Simple thought type detection based on content
 const detectThoughtType = (content: string): 'analysis' | 'action' | 'summary' | 'search' => {
@@ -28,6 +29,8 @@ interface ThinkingLogProps {
   highlightedTodoId?: string | null;
   /** Surfaces that own the "Implementation log" utility header themselves (and the controls beside it) opt out of this one. */
   showHeader?: boolean;
+  /** Earlier output was discarded by the server, so the oldest messages may be missing. */
+  historyTruncated?: boolean;
 }
 
 // Get category display info for gutter-style output
@@ -223,7 +226,7 @@ const ThoughtGroup: React.FC<ThoughtGroupProps> = ({ title, events, isCompleted,
   );
 };
 
-const ThinkingLog: React.FC<ThinkingLogProps> = ({ events, todos = [], highlightedTodoId, showHeader = true }) => {
+const ThinkingLog: React.FC<ThinkingLogProps> = ({ events, todos = [], highlightedTodoId, showHeader = true, historyTruncated = false }) => {
   // Group events by todo items if available
   const groupedEvents = useMemo(() => {
     if (todos.length === 0) {
@@ -305,6 +308,12 @@ const ThinkingLog: React.FC<ThinkingLogProps> = ({ events, todos = [], highlight
             {events.length}
           </div>
         </div>
+      )}
+
+      {historyTruncated && (
+        <p role="note" className="mb-3 text-xs text-slate-500">
+          {HISTORY_TRUNCATED_NOTICE} The oldest messages may be missing.
+        </p>
       )}
 
       {/* Grouped Events - terminal style log feed */}

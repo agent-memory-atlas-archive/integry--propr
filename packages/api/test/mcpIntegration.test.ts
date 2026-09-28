@@ -23,6 +23,7 @@ import { McpError } from '../mcp/config.js';
 import { McpPolicy, type McpPrincipal } from '../mcp/policy.js';
 import { buildMcpServer } from '../mcp/server.js';
 import { createToolCatalog, executeTool, type ToolDeps } from '../mcp/tools.js';
+import { withLiveOutputReads } from './liveOutputRedisFake.js';
 
 after(async () => closeConnection());
 
@@ -46,7 +47,7 @@ test('both official SDK protocol eras execute real draft/revision/publication/ta
       assert.equal(route, 'POST /repos/{owner}/{repo}/issues');
       githubIssues.push(payload); return { data: { number: githubIssues.length, title: payload.title, html_url: `https://github.com/acme/repo/issues/${githubIssues.length}` } };
     } } as never };
-  const deps: ToolDeps = { db, policy, taskQueue: {} as never, redisClient: { get: async () => null } as never, runtimeBuildQueue: {} as never };
+  const deps: ToolDeps = { db, policy, taskQueue: {} as never, redisClient: withLiveOutputReads({ get: async () => null }) as never, runtimeBuildQueue: {} as never };
   const catalog = createToolCatalog(deps);
   const app = express(); app.use(express.json());
   const wire: Array<{ method: string; version?: string }> = [];
