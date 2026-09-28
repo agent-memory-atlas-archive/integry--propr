@@ -21,6 +21,7 @@ function fullAndTrimmed(records: string[], retained: number) {
   const base = Buffer.byteLength(`${records.slice(0, retained).join('\n')}\n`);
   const read = (from: number): LiveOutputRead => ({
     epoch: 'generation:1', base: from, end: Buffer.byteLength(text), start: 0, head: records[0], from,
+    envelopes: from === 0 ? 0 : records.slice(0, retained).filter(record => record.startsWith('{')).length,
     text: Buffer.from(text).subarray(from).toString(),
   });
   const project = (from: number) => projectLiveOutputRead(read(from), 'task', null, { selectEvents: false }).events as Event[];

@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { Redis } from 'ioredis';
 import logger from '../../../utils/logger.js';
 import { boundedProviderOutput, MAX_PROVIDER_OUTPUT_BYTES } from './boundedProviderOutput.js';
@@ -10,7 +11,9 @@ import { writeLiveOutput } from './liveOutputLog.js';
 export class LiveAgentOutput {
     private readonly redis: Redis;
     private readonly ownsRedis: boolean;
-    private readonly writes: Array<{ chunk: string; published: boolean; persisted: boolean }> = [];
+    private readonly writes: Array<{ chunk: string; sequence: number; published: boolean; persisted: boolean }> = [];
+    private readonly writer = randomUUID();
+    private sequence = 0;
     private closed = false;
     private finished = false;
     private closePromise: Promise<void> | null = null;
@@ -47,7 +50,7 @@ export class LiveAgentOutput {
         this.flushTimer = null;
         if (!this.taskId) return this.flushPromise;
         if (this.pendingOutput) {
-            this.writes.push({ chunk: this.pendingOutput, published: false, persisted: !this.persistOutput });
+            this.writes.push({ chunk: this.pendingOutput, sequence: ++this.sequence, published: false, persisted: !this.persistOutput });
             this.pendingOutput = '';
         }
         this.flushPromise = this.flushPromise.then(async () => {
@@ -59,7 +62,7 @@ export class LiveAgentOutput {
                     (async () => {
                         if (write.published) return;
                         if (this.ownsRedis && this.redis.status === 'end') await this.redis.connect();
-                        await writeLiveOutput(this.redis, this.taskId!, write.chunk);
+                        await writeLiveOutput(this.redis, this.taskId!, write.chunk, { publication: { writer: this.writer, sequence: write.sequence } });
                         write.published = true;
                     })(),
                     (async () => {

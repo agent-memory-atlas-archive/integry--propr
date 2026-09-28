@@ -23,7 +23,7 @@ export interface LiveOutputRedis {
 }
 
 const READ_LIVE_OUTPUT_SCRIPT = `
-local meta = redis.call('hmget', KEYS[2], 'base', 'epoch', 'start', 'head', 'generation')
+local meta = redis.call('hmget', KEYS[2], 'base', 'epoch', 'start', 'head', 'generation', 'envelopes')
 local base = tonumber(meta[1] or '0') or 0
 local length = redis.call('strlen', KEYS[1])
 -- Metadata-free workers replace whole snapshots, including at the retention ceiling.
@@ -33,7 +33,7 @@ local epoch = meta[2] or 'legacy'
 if meta[5] then epoch = meta[5] .. ':' .. epoch end
 local text = ''
 if from - base < length then text = redis.call('getrange', KEYS[1], from - base, length - 1) end
-return { tostring(base), epoch, tostring(tonumber(meta[3] or '0') or 0), meta[4] or '', tostring(from), text, tostring(length) }
+return { tostring(base), epoch, tostring(tonumber(meta[3] or '0') or 0), meta[4] or '', tostring(from), text, tostring(length), tostring(tonumber(meta[6] or '0') or 0) }
 `;
 
 export interface LiveOutputRead {
@@ -46,18 +46,23 @@ export interface LiveOutputRead {
   /** Absolute offset where this execution began, and its first record (kept even once trimmed). */
   start: number;
   head: string;
+  /** How many of this execution's JSON records were trimmed: the ordinal of the first retained one. */
+  envelopes: number;
   /** Offset of `text`: clamped to base after trimming or a request beyond end; zero for legacy snapshots. */
   from: number;
   text: string;
 }
 
 export async function readLiveOutput(redis: LiveOutputRedis, taskId: string, from = 0): Promise<LiveOutputRead | null> {
-  const [base, epoch, start, head, readFrom, text, length] = await redis.eval(READ_LIVE_OUTPUT_SCRIPT, {
+  const [base, epoch, start, head, readFrom, text, length, envelopes] = await redis.eval(READ_LIVE_OUTPUT_SCRIPT, {
     keys: [liveOutputKey(taskId), liveOutputMetaKey(taskId)],
     arguments: [String(from)],
   }) as string[];
   if (Number(length) === 0 && epoch === 'legacy') return null;
-  return { epoch, base: Number(base), end: Number(base) + Number(length), start: Number(start), head, from: Number(readFrom), text };
+  return {
+    epoch, base: Number(base), end: Number(base) + Number(length), start: Number(start), head,
+    envelopes: Number(envelopes ?? 0) || 0, from: Number(readFrom), text,
+  };
 }
 
 export interface LiveProjectionSnapshot {
@@ -70,15 +75,20 @@ export interface LiveProjectionSnapshot {
 type LiveEvent = ConversationEvent & { id: string };
 
 interface Projection {
-  feed(line: string, offset: number): LiveEvent[];
+  /** `ordinal` numbers the execution's JSON records, the basis of synthetic timestamps. */
+  feed(line: string, offset: number, ordinal: number): LiveEvent[];
   pending(): LiveEvent | null;
   snapshot(): LiveProjectionSnapshot;
 }
 
 const SYNTHETIC_TIMESTAMP_STEP_MS = 1000;
+/** A JSON record; the append script counts trimmed ones by the same rule. */
+const ENVELOPE = /^[ \t\r]*\{/;
 /** Unidentifiable output past this is projected with the generic parser. */
 const MAX_PREAMBLE_RECORDS = 200;
 const MAX_PREAMBLE_BYTES = 256 * 1024;
+
+interface Entry { line: string; offset: number; ordinal: number }
 
 /**
  * Projects one execution's records as they arrive. Event IDs derive from the
@@ -88,10 +98,14 @@ const MAX_PREAMBLE_BYTES = 256 * 1024;
  */
 export class LiveOutputProjector {
   private projection: Projection | null = null;
-  private preamble: Array<{ line: string; offset: number }> = [];
+  private preamble: Entry[] = [];
   private preambleBytes = 0;
   /** Offset just past the last complete record consumed. */
   offset: number;
+  /** Ordinal of the next JSON record. */
+  private envelope = 0;
+  /** The record at absolute `offset` has JSON-record ordinal `envelopes` (records before it were trimmed). */
+  private readonly retained: { offset: number; envelopes: number };
 
   private readonly taskId: string;
   /** Execution identity namespacing event IDs: the read's epoch, scoped by execution for legacy output. */
@@ -100,12 +114,20 @@ export class LiveOutputProjector {
   /** Absolute offset where the execution's output begins; event keys are relative to it. */
   readonly start: number;
 
-  constructor(options: { taskId: string; epoch: string; offset: number; start?: number; executionStartTimestamp?: string | null }) {
+  constructor(options: {
+    taskId: string;
+    epoch: string;
+    offset: number;
+    start?: number;
+    executionStartTimestamp?: string | null;
+    retained?: { offset: number; envelopes: number };
+  }) {
     this.taskId = options.taskId;
     this.epoch = options.epoch;
     this.offset = options.offset;
     this.start = options.start ?? 0;
     this.executionStartTimestamp = options.executionStartTimestamp ?? null;
+    this.retained = options.retained ?? { offset: this.start, envelopes: 0 };
   }
 
   /**
@@ -119,15 +141,15 @@ export class LiveOutputProjector {
       if (transcript) {
         this.projection = this.wholeOutputProjection(transcript);
         this.offset = from + Buffer.byteLength(text);
-        return this.projection.feed(text, from);
+        return this.projection.feed(text, from, this.envelope);
       }
     }
-    const entries: Array<{ line: string; offset: number }> = [];
+    const entries: Entry[] = [];
     let offset = from;
     const boundary = text.lastIndexOf('\n') + 1;
     if (boundary > 0) {
       for (const line of text.slice(0, boundary - 1).split('\n')) {
-        entries.push({ line, offset });
+        entries.push(this.entry(line, offset));
         offset += Buffer.byteLength(line) + 1;
       }
     }
@@ -135,13 +157,22 @@ export class LiveOutputProjector {
     // can turn one JSON object into another. Anything else waits for its newline.
     const remainder = text.slice(boundary);
     if (isCompleteJsonRecord(remainder)) {
-      entries.push({ line: remainder, offset });
+      entries.push(this.entry(remainder, offset));
       offset += Buffer.byteLength(remainder);
     }
     if (entries.length === 0) return [];
     this.offset = offset;
     if (!this.projection) return this.decide(entries);
-    return entries.flatMap(({ line, offset: at }) => this.projection!.feed(line, at));
+    return entries.flatMap(entry => this.projection!.feed(entry.line, entry.offset, entry.ordinal));
+  }
+
+  /**
+   * Numbers JSON records from the execution's start, continuing past trimmed
+   * ones, so a record's synthetic timestamp does not depend on what was read.
+   */
+  private entry(line: string, offset: number): Entry {
+    if (offset >= this.retained.offset) this.envelope = Math.max(this.envelope, this.retained.envelopes);
+    return { line, offset, ordinal: ENVELOPE.test(line) ? this.envelope++ : this.envelope };
   }
 
   /**
@@ -149,7 +180,7 @@ export class LiveOutputProjector {
    * init record) are held and replayed once it can, so a full read and any
    * sequence of incremental reads choose the same parser.
    */
-  private decide(entries: Array<{ line: string; offset: number }>): LiveEvent[] {
+  private decide(entries: Entry[]): LiveEvent[] {
     for (const entry of entries) this.preamble.push(entry);
     this.preambleBytes += entries.reduce((total, entry) => total + entry.line.length + 1, 0);
     const format = detectStoredOutputFormat(this.preamble.map(entry => entry.line).join('\n'));
@@ -157,13 +188,13 @@ export class LiveOutputProjector {
     this.projection = format === 'claude' ? this.claudeProjection() : this.genericProjection();
     const held = this.preamble;
     this.preamble = [];
-    return held.flatMap(({ line, offset }) => this.projection!.feed(line, offset));
+    return held.flatMap(entry => this.projection!.feed(entry.line, entry.offset, entry.ordinal));
   }
 
   /** What a reader shows while the provider is still unidentified, without committing to a parser. */
   private provisional(): Projection {
     const projection = this.genericProjection();
-    for (const { line, offset } of this.preamble) projection.feed(line, offset);
+    for (const entry of this.preamble) projection.feed(entry.line, entry.offset, entry.ordinal);
     return projection;
   }
 
@@ -171,7 +202,7 @@ export class LiveOutputProjector {
   heldEvents(): LiveEvent[] {
     if (this.projection || this.preamble.length === 0) return [];
     const projection = this.genericProjection();
-    return this.preamble.flatMap(({ line, offset }) => projection.feed(line, offset));
+    return this.preamble.flatMap(entry => projection.feed(entry.line, entry.offset, entry.ordinal));
   }
 
   pending(): LiveEvent | null {
@@ -211,7 +242,7 @@ export class LiveOutputProjector {
   private genericProjection(): Projection {
     const projection = createRedisOutputProjection({ executionStartTimestamp: this.executionStartTimestamp });
     return {
-      feed: (line, offset) => this.withIds(projection.feed(line, String(offset - this.start)).events),
+      feed: (line, offset, ordinal) => this.withIds(projection.feed(line, String(offset - this.start), ordinal).events),
       pending: () => {
         const pending = projection.pendingEvent();
         return pending ? { ...pending.event, id: this.id(pending.event, `${pending.key}:0`) } : null;
@@ -226,13 +257,12 @@ export class LiveOutputProjector {
   private claudeProjection(): Projection {
     const projection = createClaudeStreamProjection();
     const startMs = this.executionStartTimestamp ? new Date(this.executionStartTimestamp).getTime() : NaN;
-    let envelopeIndex = 0;
     let goalRecord: ClaudeNativeGoalRecord | null = null;
     return {
-      feed: (line, offset) => {
+      feed: (line, offset, ordinal) => {
         // Container entrypoints print plain text before Claude's first envelope.
-        if (!line.trimStart().startsWith('{')) return [];
-        const stamped = withSyntheticTimestamp(line, startMs, envelopeIndex++);
+        if (!ENVELOPE.test(line)) return [];
+        const stamped = withSyntheticTimestamp(line, startMs, ordinal);
         goalRecord = claudeNativeGoalRecord(line) ?? goalRecord;
         // Whether a tool result is followed by a subagent completion depends on
         // an earlier (possibly trimmed) Task invocation, so IDs use source slots.
@@ -337,7 +367,10 @@ export function projectLiveOutputRead(
   { selectEvents = true, legacyExecution }: { selectEvents?: boolean; legacyExecution?: string | null } = {},
 ): LiveOutputProjectionResult {
   const epoch = liveOutputIdentity(read, legacyExecution);
-  const projector = new LiveOutputProjector({ taskId, epoch, offset: read.from, start: read.start, executionStartTimestamp });
+  const projector = new LiveOutputProjector({
+    taskId, epoch, offset: read.from, start: read.start, executionStartTimestamp,
+    retained: { offset: read.base, envelopes: read.envelopes },
+  });
   const truncated = read.base > read.start;
   // The first record identifies the provider; it survives trimming in `head`.
   const events = truncated && read.head ? projector.feed(`${read.head}\n`, read.start) : [];

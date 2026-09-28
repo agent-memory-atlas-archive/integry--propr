@@ -11,7 +11,10 @@ import logger from '../../../utils/logger.js';
  *                             byte, `epoch` bumped whenever an execution starts
  *                             over, `start` that execution's absolute offset,
  *                             `head` its first record, `generation` a unique identity
- *                             assigned when the log is recreated
+ *                             assigned when the log is recreated, `envelopes` how many
+ *                             of the execution's JSON records were trimmed (the ordinal
+ *                             of the first retained one), `publication:<writer>` the
+ *                             last batch each writer committed
  *
  * Within a generation offsets only grow: a reader that remembers one can tell
  * whether its next bytes are still retained. When the output passes the ceiling
@@ -25,13 +28,23 @@ export const liveOutputKey = (taskId: string): string => `agent:output:${taskId}
 export const liveOutputMetaKey = (taskId: string): string => `agent:output:${taskId}:meta`;
 
 /**
- * KEYS: data, meta. ARGV: chunk, maximum bytes, ttl seconds, mode, generation candidate.
- * mode `reset` starts a new execution (new epoch) before appending; `replace`
- * swaps in a whole snapshot of the same execution (providers that cannot stream
- * records), so readers resynchronize without a new epoch.
+ * KEYS: data, meta. ARGV: chunk, maximum bytes, ttl seconds, mode, generation
+ * candidate, writer, batch sequence. mode `reset` starts a new execution (new
+ * epoch) before appending; `replace` swaps in a whole snapshot of the same
+ * execution (providers that cannot stream records), so readers resynchronize
+ * without a new epoch. A writer's batches commit in sequence order, so a batch
+ * at or below its last committed sequence is a retry of a write whose reply was
+ * lost, and is not applied again.
  */
 export const APPEND_LIVE_OUTPUT_SCRIPT = `
 local mode = ARGV[4]
+local publication = nil
+if ARGV[6] and ARGV[6] ~= '' then
+    publication = 'publication:' .. ARGV[6]
+    if tonumber(redis.call('hget', KEYS[2], publication) or '0') >= tonumber(ARGV[7]) then
+        return redis.call('strlen', KEYS[1])
+    end
+end
 -- The counter can restart after expiry. A fresh identity distinguishes that
 -- log from all prior generations, even if its offsets and epoch are identical.
 if redis.call('exists', KEYS[1]) == 0 or redis.call('hexists', KEYS[2], 'generation') == 0 then
@@ -44,7 +57,7 @@ if mode == 'reset' or mode == 'replace' then
     -- A snapshot replaces the same execution's output, so its events keep their IDs.
     if mode == 'reset' then redis.call('hincrby', KEYS[2], 'epoch', 1) end
     redis.call('hset', KEYS[2], 'start', base)
-    redis.call('hdel', KEYS[2], 'head')
+    redis.call('hdel', KEYS[2], 'head', 'envelopes')
 end
 if redis.call('hexists', KEYS[2], 'epoch') == 0 then
     redis.call('hset', KEYS[2], 'epoch', 0, 'base', 0, 'start', 0)
@@ -65,10 +78,18 @@ if length > maximum then
     local tail = redis.call('getrange', KEYS[1], length - keep, -1)
     local boundary = string.find(tail, '\\n', 1, true)
     if boundary then tail = string.sub(tail, boundary + 1) end
+    -- Readers number JSON records to synthesize timestamps; count the trimmed
+    -- ones so the retained records keep their ordinals.
+    local dropped = redis.call('getrange', KEYS[1], 0, length - string.len(tail) - 1)
+    local envelopes = 0
+    if string.find(dropped, '^[ \\t\\r]*{') then envelopes = 1 end
+    for _ in string.gmatch(dropped, '\\n[ \\t\\r]*{') do envelopes = envelopes + 1 end
+    redis.call('hincrby', KEYS[2], 'envelopes', envelopes)
     redis.call('set', KEYS[1], tail)
     redis.call('hincrby', KEYS[2], 'base', length - string.len(tail))
     length = string.len(tail)
 end
+if publication then redis.call('hset', KEYS[2], publication, ARGV[7]) end
 redis.call('expire', KEYS[1], tonumber(ARGV[3]))
 redis.call('expire', KEYS[2], tonumber(ARGV[3]))
 return length
@@ -76,15 +97,27 @@ return length
 
 export type LiveOutputWriteMode = 'append' | 'reset' | 'replace';
 
+/** A queued batch's identity, kept across retries: `sequence` grows by one per batch of `writer`. */
+export interface LiveOutputPublication {
+    writer: string;
+    sequence: number;
+}
+
 export async function writeLiveOutput(
     redis: Pick<Redis, 'eval'>,
     taskId: string,
     chunk: string,
-    { mode = 'append', maximumBytes = LIVE_OUTPUT_MAX_BYTES }: { mode?: LiveOutputWriteMode; maximumBytes?: number } = {},
+    { mode = 'append', maximumBytes = LIVE_OUTPUT_MAX_BYTES, publication }: {
+        mode?: LiveOutputWriteMode;
+        maximumBytes?: number;
+        /** Makes a retry of a committed batch (whose reply was lost) a no-op. */
+        publication?: LiveOutputPublication;
+    } = {},
 ): Promise<number> {
     return Number(await redis.eval(
         APPEND_LIVE_OUTPUT_SCRIPT, 2, liveOutputKey(taskId), liveOutputMetaKey(taskId),
         chunk, String(maximumBytes), String(LIVE_OUTPUT_TTL_SECONDS), mode, randomUUID(),
+        publication?.writer ?? '', String(publication?.sequence ?? 0),
     ));
 }
 
@@ -106,7 +139,9 @@ export class LiveOutputLog {
     private readonly ownsRedis: boolean;
     private partial = '';
     private pending = '';
-    private readonly writes: Array<{ chunk: string; mode: 'append' | 'replace' }> = [];
+    private readonly writes: Array<{ chunk: string; mode: 'append' | 'replace'; sequence: number }> = [];
+    private readonly writer = randomUUID();
+    private sequence = 0;
     private resetPending: boolean;
     private flushTimer: ReturnType<typeof setTimeout> | null = null;
     private flushPromise: Promise<void> = Promise.resolve();
@@ -141,7 +176,7 @@ export class LiveOutputLog {
     replace(snapshot: string): void {
         if (this.closed) return;
         this.enqueuePending();
-        this.writes.push({ chunk: this.transform(snapshot), mode: 'replace' });
+        this.writes.push({ chunk: this.transform(snapshot), mode: 'replace', sequence: ++this.sequence });
         void this.flush();
     }
 
@@ -149,13 +184,16 @@ export class LiveOutputLog {
         if (this.flushTimer) clearTimeout(this.flushTimer);
         this.flushTimer = null;
         this.enqueuePending();
-        if (this.resetPending && this.writes.length === 0) this.writes.push({ chunk: '', mode: 'append' });
+        if (this.resetPending && this.writes.length === 0) this.writes.push({ chunk: '', mode: 'append', sequence: ++this.sequence });
         this.flushPromise = this.flushPromise.then(async () => {
             while (this.writes.length > 0) {
                 const write = this.writes[0];
                 try {
                     if (this.ownsRedis && this.redis.status === 'end') await this.redis.connect();
-                    await writeLiveOutput(this.redis, this.taskId, write.chunk, { mode: this.resetPending ? 'reset' : write.mode });
+                    await writeLiveOutput(this.redis, this.taskId, write.chunk, {
+                        mode: this.resetPending ? 'reset' : write.mode,
+                        publication: { writer: this.writer, sequence: write.sequence },
+                    });
                 } catch (error) {
                     this.warn(error);
                     this.scheduleFlush();
@@ -193,7 +231,7 @@ export class LiveOutputLog {
 
     private enqueuePending(): void {
         if (!this.pending) return;
-        this.writes.push({ chunk: this.pending, mode: 'append' });
+        this.writes.push({ chunk: this.pending, mode: 'append', sequence: ++this.sequence });
         this.pending = '';
     }
 

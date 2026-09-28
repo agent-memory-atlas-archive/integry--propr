@@ -887,8 +887,12 @@ export interface ProjectedLineEvents {
  * parseRedisOutput() returns for the same records.
  */
 export interface RedisOutputProjection {
-  /** Consumes one record; `key` identifies it (its absolute offset in the live log). */
-  feed(line: string, key: string): ProjectedLineEvents;
+  /**
+   * Consumes one record; `key` identifies it (its absolute offset in the live log).
+   * An `ordinal` (the record's position among the execution's JSON records, which
+   * survives trimming) replaces the running count behind synthetic timestamps.
+   */
+  feed(line: string, key: string, ordinal?: number): ProjectedLineEvents;
   /** The buffered assistant message not yet completed by a later record, if any. */
   pendingEvent(): { event: ConversationEvent; key: string } | null;
   result(): ParsedRedisOutput;
@@ -897,9 +901,10 @@ export interface RedisOutputProjection {
 export function createRedisOutputProjection(options: RedisOutputParseOptions = {}): RedisOutputProjection {
   const state = createParseState(options);
   return {
-    feed(line, key) {
+    feed(line, key, ordinal) {
       const before = state.events.length;
       state.skippedSlots = [];
+      if (ordinal !== undefined) state.syntheticTimestampIndex = ordinal;
       parseLine(line, state);
       if (state.pendingAssistantMessage && !state.pendingAssistantKey) state.pendingAssistantKey = key;
       let slot = 0;

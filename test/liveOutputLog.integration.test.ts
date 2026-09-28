@@ -325,3 +325,67 @@ for (const kind of ['process', 'goal']) {
         assert.equal(attempts, 2);
     });
 }
+
+/** Commits each script, then loses the replies of the first `losses` calls, as a connection reset after execution does. */
+function losingReplies(redis: Redis, losses: number): Redis {
+    let calls = 0;
+    return {
+        on: () => undefined,
+        eval: async (...args: Parameters<Redis['eval']>) => {
+            const result = await redis.eval(...args);
+            if (++calls <= losses) throw new Error('connection reset before the reply');
+            return result;
+        },
+    } as unknown as Redis;
+}
+
+for (const kind of ['process-reset', 'process-append', 'process-snapshot', 'goal'] as const) {
+    test(`a committed ${kind} batch whose reply was lost is not applied again on retry`, async t => {
+        const redis = await connect(t);
+        if (!redis) return;
+        const id = taskId(`lost-reply-${kind}`);
+        try {
+            await writeLiveOutput(redis, id, 'earlier execution\n', { mode: 'reset' });
+            const before = await redis.hgetall(liveOutputMetaKey(id));
+            const lossy = losingReplies(redis, 1);
+            const output = kind === 'goal'
+                ? new LiveAgentOutput(id, undefined, 'test', lossy)
+                : new LiveOutputLog(id, { reset: kind !== 'process-append', redis: lossy });
+            const publish = (text: string) => (output instanceof LiveOutputLog && kind === 'process-snapshot' ? output.replace(text) : output.append(text));
+            publish('first\n');
+            await output.flush();
+            assert.equal(Number(await redis.hget(liveOutputMetaKey(id), 'epoch')), Number(before.epoch) + (kind === 'process-reset' || kind === 'process-snapshot' ? 1 : 0));
+            // The writer saw a rejection, so it retries the same batch before later output.
+            publish(kind === 'process-snapshot' ? 'first\nsecond\n' : 'second\n');
+            await output.close();
+            const expected = kind === 'process-append' || kind === 'goal' ? 'earlier execution\nfirst\nsecond\n' : 'first\nsecond\n';
+            assert.equal(await redis.get(liveOutputKey(id)), expected, 'every record is published once');
+            const after = await redis.hgetall(liveOutputMetaKey(id));
+            assert.equal(after.epoch, String(Number(before.epoch) + (kind === 'process-reset' || kind === 'process-snapshot' ? 1 : 0)), 'a retried reset starts one execution');
+            assert.equal(after.generation, before.generation);
+            if (kind === 'process-reset') assert.equal(after.base, after.start, 'the retried reset did not move the execution start');
+        } finally {
+            await redis.del(liveOutputKey(id), liveOutputMetaKey(id));
+            redis.disconnect();
+        }
+    });
+}
+
+test('publications of different writers are deduplicated independently', async t => {
+    const redis = await connect(t);
+    if (!redis) return;
+    const id = taskId('writers');
+    try {
+        await writeLiveOutput(redis, id, 'a1\n', { mode: 'reset', publication: { writer: 'a', sequence: 1 } });
+        await writeLiveOutput(redis, id, 'b1\n', { publication: { writer: 'b', sequence: 1 } });
+        // A's retry of a committed batch arrives after B's write.
+        await writeLiveOutput(redis, id, 'a1\n', { mode: 'reset', publication: { writer: 'a', sequence: 1 } });
+        await writeLiveOutput(redis, id, 'a2\n', { publication: { writer: 'a', sequence: 2 } });
+        await writeLiveOutput(redis, id, 'unidentified\n');
+        await writeLiveOutput(redis, id, 'unidentified\n');
+        assert.equal(await redis.get(liveOutputKey(id)), 'a1\nb1\na2\nunidentified\nunidentified\n');
+    } finally {
+        await redis.del(liveOutputKey(id), liveOutputMetaKey(id));
+        redis.disconnect();
+    }
+});
