@@ -30,6 +30,7 @@ const APP_ROUTE_PATTERNS = [
   /^\/$/,
   /^\/repositories\/?$/,
   /^\/tasks(?:\/[^/]+)?\/?$/,
+  /^\/goals(?:\/[^/]+)?\/?$/,
   /^\/studio(?:\/[^/]+)?\/?$/,
   /^\/plans\/?$/,
   /^\/inbox\/?$/,
