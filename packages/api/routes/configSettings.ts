@@ -1,6 +1,9 @@
+import { isUsageTipsCooldownDays } from '@propr/shared';
 import { validateModelReasoningLevel, validatePrReviewModelValue } from '@propr/core';
 
 interface SettingFields {
+  usage_tips_enabled?: unknown;
+  usage_tips_dismissal_cooldown_days?: unknown;
   auto_followup_score_threshold?: unknown;
   auto_resolve_merge_conflicts?: unknown;
   dashboard_summary_enabled?: unknown;
@@ -12,6 +15,8 @@ interface SettingFields {
 }
 
 export type SettingSaveName =
+  | 'usage_tips_enabled'
+  | 'usage_tips_dismissal_cooldown_days'
   | 'auto_followup_score_threshold'
   | 'auto_resolve_merge_conflicts'
   | 'dashboard_summary_enabled'
@@ -47,6 +52,17 @@ async function validatePrReviewModel(raw: unknown): Promise<{ error?: string; va
 export async function extractSettingSaves(fields: SettingFields): Promise<{ error?: string; saves: LabeledSaveDescriptor[]; normalized: Record<string, unknown> }> {
   const saves: LabeledSaveDescriptor[] = [];
   const normalized: Record<string, unknown> = {};
+
+  if (fields.usage_tips_enabled !== undefined) {
+    if (typeof fields.usage_tips_enabled !== 'boolean') return { error: 'usage_tips_enabled must be a boolean', saves: [], normalized };
+    normalized.usage_tips_enabled = fields.usage_tips_enabled;
+    saves.push({ name: 'usage_tips_enabled' });
+  }
+  if (fields.usage_tips_dismissal_cooldown_days !== undefined) {
+    if (!isUsageTipsCooldownDays(fields.usage_tips_dismissal_cooldown_days)) return { error: 'usage_tips_dismissal_cooldown_days must be an integer from 1 to 365', saves: [], normalized };
+    normalized.usage_tips_dismissal_cooldown_days = fields.usage_tips_dismissal_cooldown_days;
+    saves.push({ name: 'usage_tips_dismissal_cooldown_days' });
+  }
 
   if (fields.auto_followup_score_threshold !== undefined) {
     const v = validateStrictInt(fields.auto_followup_score_threshold, 0, 9);

@@ -1,3 +1,4 @@
+import { UsageTipsSection } from './Dashboard/UsageTipsSection';
 /**
  * Dashboard composition root.
  *
@@ -255,6 +256,7 @@ const Dashboard: React.FC = () => {
 
           <div className="min-w-0 border-b border-slate-200 lg:col-start-2 lg:row-start-2 lg:border-b-0">
             <HistoricalStatsPanel {...sectionProps} />
+            <UsageTipsSection />
           </div>
         </div>
       </div>

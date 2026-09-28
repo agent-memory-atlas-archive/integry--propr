@@ -1,3 +1,4 @@
+import { UsageTipsSettingsSection } from './UsageTipsSettingsSection';
 import React from 'react';
 import { useDocumentTitle } from '../../hooks/useDocumentTitle';
 import GeneralSettingsSection from './GeneralSettingsSection';
@@ -78,7 +79,7 @@ const AdminSettingsPage: React.FC = () => {
   const handleGeneralSettingChange = (event: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>) => {
     const settingName = event.target.name;
     let value: string | number | boolean;
-    const numericFields = ['auto_followup_score_threshold', 'ultrafix_rating_goal', 'ultrafix_max_cycles', 'ultrafix_pause_seconds'];
+    const numericFields = ['usage_tips_dismissal_cooldown_days', 'auto_followup_score_threshold', 'ultrafix_rating_goal', 'ultrafix_max_cycles', 'ultrafix_pause_seconds'];
     if (numericFields.includes(settingName)) {
       const raw = event.target.value;
       // Only accept strings that are strictly integer digits (with optional leading minus)
@@ -87,7 +88,7 @@ const AdminSettingsPage: React.FC = () => {
       const parsed = Number(raw);
       if (!Number.isSafeInteger(parsed)) return;
       value = parsed;
-    } else if (settingName === 'auto_resolve_merge_conflicts') {
+    } else if (settingName === 'auto_resolve_merge_conflicts' || settingName === 'usage_tips_enabled') {
       value = (event.target as HTMLInputElement).checked;
     } else {
       value = event.target.value;
@@ -152,6 +153,12 @@ const AdminSettingsPage: React.FC = () => {
           isReindexing={isReindexing}
         />
       )
+    },
+    {
+      id: 'usage-tips',
+      category: 'automation',
+      searchText: 'usage tips documentation dismissal cooldown days',
+      content: <UsageTipsSettingsSection settings={settings} onChange={handleGeneralSettingChange} onBlur={triggerSettingsSave} />,
     },
     {
       id: 'general-configuration',

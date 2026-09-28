@@ -1,3 +1,4 @@
+import { createUsageTipsRoutes } from './routes/usageTipsRoutes.js';
 import { dashboardNarrativeModel } from './routes/dashboardNarrativeModel.js';
 import { getConfig } from '@propr/core';
 import { createTaskSubmissionRoutes, taskSubmissionUpload } from './routes/taskSubmissionRoutes.js';
@@ -358,6 +359,7 @@ function setupRoutes(): void {
   const repoTodoRoutes = createRepoTodoRoutes();
   const userRepoPreferencesRoutes = createUserRepoPreferencesRoutes();
   const agentRuntimeRoutes = createAgentRuntimeRoutes({ getRuntimeBuildQueue: () => runtimeBuildQueue });
+  const usageTipsRoutes = createUsageTipsRoutes();
   const notificationRoutes = createNotificationRoutes({ webPushDispatcherConfigured, resolvedWebPushConfiguration });
   const voiceBriefingService = createVoiceBriefingService({
     database: db,
@@ -398,6 +400,7 @@ function setupRoutes(): void {
     ['post', '/api/planner/drafts/:id/revise', plannerRoutes.reviseDraft], ['post', '/api/planner/validate-context-repository', plannerRoutes.validateContextRepository], ['post', '/api/planner/drafts/:id/pause', plannerRoutes.pauseDraftExecution], ['post', '/api/planner/drafts/:id/resume', plannerRoutes.resumeDraftExecution],
     ['patch', '/api/planner/drafts/:id/execution-settings', plannerRoutes.updateExecutionSettings], ['post', '/api/planner/relevance', relevanceRoutes.analyzeRelevance], ['get', '/api/stats/tasks', statsRoutes.getTaskStats], ['get', '/api/stats/repositories', statsRoutes.getRepositoryStats],
     ['get', '/api/stats/overview', statsRoutes.getOverview], ['get', '/api/stats/generating-plans', statsRoutes.getGeneratingPlansCount], ['get', '/api/stats/dashboard', statsRoutes.getDashboardStats],
+    ['get', '/api/usage-tips', usageTipsRoutes.get], ['post', '/api/usage-tips/dismiss', usageTipsRoutes.dismiss],
     ['get', '/api/dashboard/narrative', dashboardRoutes.getNarrative], ['get', '/api/dashboard/summary', dashboardRoutes.getSummary], ['get', '/api/dashboard/attention', dashboardRoutes.getAttention], ['get', '/api/dashboard/active', dashboardRoutes.getActive], ['get', '/api/dashboard/outcomes', dashboardRoutes.getOutcomes],
     ['get', '/api/summaries/:owner/:repo/status', summaryBrowserRoutes.getIndexingStatus], ['get', '/api/summaries/:owner/:repo/tree', summaryBrowserRoutes.getDirectoryTree],
     ['get', SUMMARY_TREE_ROUTE_PATH, summaryBrowserRoutes.getDirectoryTree], ['get', SUMMARY_PATH_ROUTE_PATH, summaryBrowserRoutes.getPathSummary], ['post', '/api/repos/chat', repoChatRoutes.postChat], ['get', '/api/repos/chat/messages', repoChatRoutes.getMessages],

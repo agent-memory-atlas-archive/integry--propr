@@ -1,3 +1,4 @@
+import { getUsageTips, dismissUsageTip } from '../api/usageTipsApi';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, waitFor, within, act, fireEvent } from '@testing-library/react';
 import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom';
@@ -20,6 +21,8 @@ import {
   outcomesResponse,
   statsResponse,
 } from './Dashboard.fixtures';
+
+vi.mock('../api/usageTipsApi', () => ({ getUsageTips: vi.fn(async () => ({ enabled: true, tips: [] })), dismissUsageTip: vi.fn(), USAGE_TIPS_SETTINGS_CHANGED: 'tips-settings-changed' }));
 
 vi.mock('../api/dashboardApi', () => ({
   getDashboardNarrative: vi.fn(),
@@ -237,7 +240,7 @@ describe('Dashboard', () => {
     expect(mockStats).toHaveBeenCalledWith('acme/app', '7d');
   });
 
-  it('coalesces a burst of task updates into a single refresh per section', async () => {
+  it('coalesces task updates without refetching tips or acknowledging them', async () => {
     renderDashboard();
     await waitForSections();
 
@@ -261,6 +264,8 @@ describe('Dashboard', () => {
     await waitFor(() => expect(mockStats).toHaveBeenCalledTimes(2));
     expect(mockAttention).toHaveBeenCalledTimes(2);
     expect(mockOutcomes).toHaveBeenCalledTimes(2);
+    expect(getUsageTips).toHaveBeenCalledTimes(1);
+    expect(dismissUsageTip).not.toHaveBeenCalled();
   });
 
   it('regenerates narrative once for a burst of terminal and attention events from the existing socket', async () => {
