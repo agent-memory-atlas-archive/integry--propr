@@ -68,7 +68,7 @@ export function extractWholeJsonArray(response: string): string | null {
       if (closers.length === 0) {
         // Prose and a closing fence are harmless; JSON-looking suffixes are
         // ambiguous and must not be discarded when establishing the original.
-        if (/[\[\]{}"]/.test(text.slice(i + 1))) return null;
+        if (/[[\]{}"]/.test(text.slice(i + 1))) return null;
         return text.slice(start, i + 1);
       }
     }
