@@ -193,7 +193,7 @@ const Dashboard: React.FC = () => {
         )}
 
         {canManageAgents && (
-          <div className="px-4 pt-4 sm:px-6">
+          <div className="px-4 pt-4 empty:hidden sm:px-6">
             <AgentTankDetectionBanner />
           </div>
         )}

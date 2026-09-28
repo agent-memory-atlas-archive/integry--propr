@@ -1,23 +1,8 @@
 import { useEffect, useState } from 'react';
 import { Pause, Play, RefreshCw } from 'lucide-react';
 import { useDashboardSummary } from './useDashboardSummary';
-
-// Style recognizable tokens without interpreting generated prose as HTML or Markdown.
-const SUMMARY_TOKEN = /(`[^`]+`|\b(?:[\w.-]+\/)?[\w.-]+\s+(?:pull request|PR)\s*#\d+\b|\b(?:[\w.-]+\/)?[\w.-]+#\d+\b|\b(?:[\w@-]+\/)*[\w-]+(?:\.[\w-]+)*\.(?:tsx?|jsx?|mjs|cjs|json|css|scss|html|md|py|rs|go|ya?ml|sql|sh)\b|\b(?:Implementing|Reviewing|Testing|Planning|Refining|Fixing|Building|Deploying|Consolidating|Running tests)\b)/gi;
-
-function SummaryReadout({ summary }: { summary: string }) {
-  return summary.split(SUMMARY_TOKEN).map((part, index) => {
-    if (index % 2 === 0) return part;
-    if (part.includes('#')) {
-      const reference = part.replace(/\s+(?:pull request|PR)\s*#/i, '#').replace(/^[\w.-]+\//, '');
-      return <code key={index} title={part} className="rounded-sm bg-slate-200/60 px-1 py-0.5 font-mono text-slate-900">{reference}</code>;
-    }
-    if (part.startsWith('`') || part.includes('.')) {
-      return <code key={index} className="font-mono text-slate-700">{part.replace(/^`|`$/g, '')}</code>;
-    }
-    return <strong key={index} className="font-semibold text-slate-900">{part}</strong>;
-  });
-}
+import { useCurrentUser } from '../../contexts/AuthContext';
+import { API_BASE_URL, getDesktopConnectionScope } from '../../api/apiClient';
 
 function Freshness({ updatedAt }: { updatedAt: number }) {
   const [now, setNow] = useState(Date.now);
@@ -30,27 +15,40 @@ function Freshness({ updatedAt }: { updatedAt: number }) {
   return <span title="Time since the last successful summary update">Updated {age} ago</span>;
 }
 
-export function DashboardSummary({ repository, activityToken }: { repository: string; activityToken: number }) {
-  const { summary, enabled, loading, paused, updatedAt, available, togglePaused, refresh } = useDashboardSummary(repository, activityToken);
-  if (enabled !== true) return null;
+interface SummaryProps { repository: string; activityToken: number }
+
+export function DashboardSummary(props: SummaryProps) {
+  const user = useCurrentUser();
+  const desktop = getDesktopConnectionScope();
+  const scope = JSON.stringify([API_BASE_URL, desktop?.profileId ?? null, user?.id ?? null, props.repository]);
+  // A scope change remounts the readout, so another account/repository never flashes.
+  const cacheKey = user ? `dashboard-summary-v2:${scope}` : null;
+  return <DashboardSummaryReadout key={scope} {...props} cacheKey={cacheKey} />;
+}
+
+function DashboardSummaryReadout({ repository, activityToken, cacheKey }: SummaryProps & { cacheKey: string | null }) {
+  const { summary, enabled, loading, paused, updatedAt, available, togglePaused, refresh } = useDashboardSummary(repository, activityToken, cacheKey);
+  if (enabled === false) return null;
   const pauseLabel = paused ? 'Resume automatic summary updates' : 'Pause automatic summary updates';
   const idle = !available || /^No work is (?:active|running)\b/.test(summary ?? '');
   const live = !paused && !idle;
-  const status = paused ? 'Paused' : live ? 'Live' : 'Idle';
+  const awaiting = loading || enabled === null;
+  const status = paused ? 'Paused' : live ? 'Live' : summary && !available ? 'Saved' : awaiting ? 'Syncing' : 'Idle';
+  const text = summary ?? (awaiting ? 'Gathering the latest activity…' : 'Activity overview is temporarily unavailable.');
   const buttonClass = 'flex h-7 w-7 items-center justify-center rounded text-slate-500 transition-colors hover:bg-slate-200/60 hover:text-slate-800 focus-visible:outline focus-visible:outline-2 focus-visible:outline-blue-600 disabled:cursor-not-allowed disabled:opacity-40';
   return (
-    <section aria-label="Activity summary" data-testid="dashboard-summary" className="flex h-10 min-w-0 w-full flex-none items-center justify-between gap-2 border-b border-slate-200 bg-slate-50/80 px-3 text-xs sm:gap-4 sm:px-6">
+    <section aria-label="Activity summary" data-testid="dashboard-summary" className="flex h-20 sm:h-10 min-w-0 w-full flex-none items-center justify-between gap-2 border-b border-slate-200 bg-slate-50/80 px-3 text-xs sm:gap-4 sm:px-6">
       <div className="flex min-w-0 flex-1 items-center gap-2.5">
         <span className={`inline-flex shrink-0 items-center gap-1.5 rounded-sm border px-1.5 py-0.5 font-mono text-[10px] font-bold uppercase tracking-wider ${live ? 'border-teal-200/70 bg-teal-50 text-teal-700' : 'border-slate-200 bg-slate-100 text-slate-500'}`}>
           <span aria-hidden="true" className={`h-1.5 w-1.5 rounded-full ${live ? 'bg-teal-500 motion-safe:animate-pulse' : 'border border-slate-400'}`} />
           {status}
         </span>
-        <p aria-live="polite" aria-busy={loading} title={summary ?? 'Summary unavailable'} className="min-w-0 truncate text-slate-700">
-          {summary ? <SummaryReadout summary={summary} /> : 'Summary unavailable'}
+        <p aria-live="polite" aria-busy={loading} title={text} className="min-w-0 line-clamp-3 text-slate-700 sm:truncate sm:block">
+          {text}
         </p>
       </div>
       <div className="flex shrink-0 items-center gap-1 sm:gap-3">
-        <span className="whitespace-nowrap font-mono text-[11px] text-slate-400">
+        <span className="hidden sm:inline whitespace-nowrap font-mono text-[11px] text-slate-400">
           {loading ? 'Updating…' : updatedAt !== null ? <Freshness updatedAt={updatedAt} /> : 'Awaiting data'}
         </span>
         <span aria-hidden="true" className="hidden h-3 w-px bg-slate-200 sm:block" />

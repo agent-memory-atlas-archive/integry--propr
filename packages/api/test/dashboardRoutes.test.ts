@@ -417,8 +417,7 @@ test('narrative route uses injected model, bypasses cache on refresh and degrade
   assert.equal((await call(routes.getNarrative)).body.summary, 'Running work. Generation 1.');
   assert.match(prompt, /Cache repository icons/);
   assert.match(prompt, /Running tests \(step 3 of 5\)/);
-  assert.match(prompt, /Running dashboard tests/);
-  assert.match(prompt, /"number":2574/);
+  assert.doesNotMatch(prompt, /"number":2574|"reference":/);
   await call(routes.getNarrative);
   assert.equal(count, 1);
   assert.equal((await call(routes.getNarrative, { refresh: 'true' })).body.summary, 'Running work. Generation 2.');

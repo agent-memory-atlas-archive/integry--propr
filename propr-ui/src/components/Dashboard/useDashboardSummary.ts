@@ -4,15 +4,33 @@ import { getDashboardNarrative } from '../../api/dashboardApi';
 const PAUSE_KEY = 'dashboard-summary-paused';
 export const SUMMARY_COALESCE_MS = 300;
 
-export function useDashboardSummary(repository: string, activityToken: number) {
+interface CachedSummary { summary: string | null; updatedAt: number | null; enabled: boolean }
+
+function readCachedSummary(key: string | null): CachedSummary | null {
+  if (!key) return null;
+  try {
+    const value = JSON.parse(sessionStorage.getItem(key) ?? 'null');
+    if (value?.enabled === false) return { summary: null, updatedAt: null, enabled: false };
+    if (value?.enabled === true && typeof value.summary === 'string' && value.summary.length <= 180
+      && Number.isFinite(value.updatedAt) && Date.now() - value.updatedAt < 86_400_000) return value;
+  } catch { /* Storage is optional. */ }
+  return null;
+}
+
+function cacheSummary(key: string | null, value: CachedSummary) {
+  if (!key) return;
+  try { sessionStorage.setItem(key, JSON.stringify(value)); } catch { /* Storage is optional. */ }
+}
+
+export function useDashboardSummary(repository: string, activityToken: number, cacheKey: string | null) {
+  const [cached] = useState(() => readCachedSummary(cacheKey));
   const [paused, setPaused] = useState(() => {
     try { return localStorage.getItem(PAUSE_KEY) === 'true'; } catch { return false; }
   });
-  const [summary, setSummary] = useState<string | null>(null);
-  // Wait for the enable flag before drawing anything, including a skeleton.
-  const [enabled, setEnabled] = useState<boolean | null>(null);
+  const [summary, setSummary] = useState<string | null>(cached?.summary ?? null);
+  const [enabled, setEnabled] = useState<boolean | null>(cached?.enabled ?? null);
   const [loading, setLoading] = useState(false);
-  const [updatedAt, setUpdatedAt] = useState<number | null>(null);
+  const [updatedAt, setUpdatedAt] = useState<number | null>(cached?.updatedAt ?? null);
   const [available, setAvailable] = useState(false);
   const pausedRef = useRef(paused);
   pausedRef.current = paused;
@@ -25,11 +43,6 @@ export function useDashboardSummary(repository: string, activityToken: number) {
     let initial = true;
     let disabled = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
-    setSummary(null);
-    setEnabled(null);
-    setLoading(false);
-    setUpdatedAt(null);
-    setAvailable(false);
 
     const visible = () => document.visibilityState === 'visible';
     const clear = () => { clearTimeout(timer); timer = undefined; };
@@ -51,10 +64,13 @@ export function useDashboardSummary(repository: string, activityToken: number) {
         if (!response.enabled) {
           setSummary(null);
           setUpdatedAt(null);
+          cacheSummary(cacheKey, { summary: null, updatedAt: null, enabled: false });
         } else if (response.summary !== null) {
           setSummary(response.summary);
           // Receipt time of the latest successful read, including a cached response.
-          setUpdatedAt(Date.now());
+          const receivedAt = Date.now();
+          setUpdatedAt(receivedAt);
+          cacheSummary(cacheKey, { summary: response.summary, updatedAt: receivedAt, enabled: true });
         }
       } catch {
         if (!disposed) {
@@ -89,7 +105,7 @@ export function useDashboardSummary(repository: string, activityToken: number) {
       controller.current = null;
       document.removeEventListener('visibilitychange', visibilityChanged);
     };
-  }, [repository]);
+  }, [repository, cacheKey]);
 
   const lastToken = useRef(activityToken);
   useEffect(() => {
