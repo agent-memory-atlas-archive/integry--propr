@@ -7,33 +7,21 @@ import { SocketContext, type SocketContextValue } from '../contexts/SocketContex
 import { NeedsAttentionPanel } from './Dashboard/NeedsAttentionPanel';
 import { SUMMARY_COALESCE_MS } from './Dashboard/useDashboardSummary';
 import {
-  getDashboardNarrative,
-  getDashboardActive,
-  getDashboardAttention,
-  getDashboardOutcomes,
-  getDashboardStats,
+  getDashboardNarrative, getDashboardActive, getDashboardAttention, getDashboardOutcomes, getDashboardStats,
 } from '../api/dashboardApi';
 // The envelope these frames imitate is the one `activityEvents` declares:
 // `entityId` and a resolved `terminal`, which is what the server publishes.
 import type { ActivityChange, ActivityDomain, ActivityUpdatePayload } from '@propr/shared/dist/activityEvents.js';
 import {
-  activeItem,
-  activeResponse,
-  attentionItem,
-  attentionResponse,
-  outcomeItem,
-  outcomesResponse,
-  statsResponse,
+  activeItem, activeResponse, attentionItem, attentionResponse, outcomeItem, outcomesResponse, statsResponse,
 } from './Dashboard.fixtures';
 
 vi.mock('../api/usageTipsApi', () => ({ getUsageTips: vi.fn(async () => ({ enabled: true, tips: [] })), dismissUsageTip: vi.fn(), USAGE_TIPS_SETTINGS_CHANGED: 'tips-settings-changed' }));
 
 vi.mock('../api/dashboardApi', () => ({
   getDashboardNarrative: vi.fn(),
-  getDashboardAttention: vi.fn(),
-  getDashboardActive: vi.fn(),
-  getDashboardOutcomes: vi.fn(),
-  getDashboardStats: vi.fn(),
+  getDashboardAttention: vi.fn(), getDashboardActive: vi.fn(),
+  getDashboardOutcomes: vi.fn(), getDashboardStats: vi.fn(),
 }));
 
 let socketConnected = true;
@@ -79,18 +67,11 @@ async function push(payload: ActivityUpdatePayload): Promise<void> {
 }
 
 vi.mock('../hooks/useSystemReadiness', () => ({
-  useSystemReadiness: () => ({
-    hasAgents: true,
-    hasDefaultModel: true,
-    hasRepos: true,
-    hasTasks: true,
-    isLoading: false,
-  }),
+  useSystemReadiness: () => ({ hasAgents: true, hasDefaultModel: true, hasRepos: true, hasTasks: true, isLoading: false }),
 }));
 
 vi.mock('../contexts/AuthContext', () => ({
-  useCurrentUser: () => null,
-  userHasPermission: () => false,
+  useCurrentUser: () => null, userHasPermission: () => false,
 }));
 
 vi.mock('./ConnectPlusBanner', () => ({ ConnectSoftPromoBanner: () => null }));
@@ -99,10 +80,7 @@ vi.mock('./AgentTankDetectionBanner', () => ({ default: () => null }));
 vi.mock('./Dashboard/DailyCompletionsChart', () => ({ DailyCompletionsChart: () => null }));
 
 vi.mock('../utils/repoHelpers', () => ({
-  fetchEnabledRepos: vi.fn(async () => [
-    { name: 'acme/app', enabled: true },
-    { name: 'acme/web', enabled: true },
-  ]),
+  fetchEnabledRepos: vi.fn(async () => [{ name: 'acme/app', enabled: true }, { name: 'acme/web', enabled: true }]),
 }));
 
 const mockAttention = vi.mocked(getDashboardAttention);
@@ -137,9 +115,7 @@ function dashboardTree(initialEntry = '/') {
     <SocketContext.Provider value={{ isConnected: socketConnected } as unknown as SocketContextValue}>
       <MemoryRouter initialEntries={[initialEntry]}>
         <LocationProbe />
-        <Routes>
-          <Route path="/" element={<Dashboard />} />
-        </Routes>
+        <Routes><Route path="/" element={<Dashboard />} /></Routes>
       </MemoryRouter>
     </SocketContext.Provider>
   );
@@ -150,11 +126,7 @@ function renderDashboard(initialEntry = '/') {
 }
 
 function renderAttentionPanel() {
-  return render(
-    <MemoryRouter>
-      <NeedsAttentionPanel repository="all" refreshToken={0} />
-    </MemoryRouter>,
-  );
+  return render(<MemoryRouter><NeedsAttentionPanel repository="all" refreshToken={0} /></MemoryRouter>);
 }
 
 /** Every section has landed its first read. */
@@ -314,10 +286,7 @@ describe('Dashboard', () => {
     expect(panel).toHaveTextContent('Run failed');
     expect(panel).toHaveTextContent('Checkout retries never fire');
     expect(panel).toHaveTextContent('Waiting 3 hrs');
-    expect(screen.getByRole('link', { name: /Review pull request/ })).toHaveAttribute(
-      'href',
-      'https://github.com/acme/app/pull/51',
-    );
+    expect(screen.getByRole('link', { name: /Review pull request/ })).toHaveAttribute('href', 'https://github.com/acme/app/pull/51');
     expect(screen.queryByTestId('needs-attention-empty')).not.toBeInTheDocument();
   });
 
