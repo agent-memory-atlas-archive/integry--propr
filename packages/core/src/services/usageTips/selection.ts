@@ -1,6 +1,11 @@
 import { USAGE_TIPS_CATALOG, MAX_USAGE_TIP_CANDIDATES, parseUsageTipCandidates, rotateUsageTipCandidates,
   type UsageTipSignals, type UsageTipCandidate, type UsageTipSelection } from '@propr/shared';
 
+function indexingUsageTipReason(hasFailures: boolean): string {
+  const observation = hasFailures ? 'Recent indexing failures are recorded' : 'Indexing calls are taking at least two minutes';
+  return `${observation}. Review indexing agent and fallback options to help keep repository context available for your tasks.`;
+}
+
 /** Explicit positive evidence for relevance, shared by model and heuristic paths.
  * Three uses in the sample means regular adoption; configuration/grants also
  * establish adoption independently. Unknown usage cannot be called zero. */
@@ -20,7 +25,7 @@ export function heuristicUsageTipCandidates(s: UsageTipSignals): UsageTipCandida
   add('planner-studio', has('oneOffTasks', 3) && gap('plans'), 85, 'Review and refine related work in Planner Studio before approving implementation. Several one-off tasks are recorded, but few plans.');
   add('repository-todos', has('tasks', 3) && gap('todos'), 65, 'Capture follow-up ideas in To-Dos to track maintenance alongside the repository. Recent task activity includes few repository to-dos.');
   add('indexing-options', has('indexingFailures') || has('indexingSlow'), 95,
-    `${has('indexingFailures') ? 'Recent indexing failures are recorded' : 'Indexing calls are taking at least two minutes'}. Review indexing agent and fallback options to help keep repository context available for your tasks.`);
+    indexingUsageTipReason(has('indexingFailures')));
   add('agent-model-selection', has('tasks', 3) && gap('distinctAgents') && gap('distinctModels')
     && !has('distinctAgents', 2) && !has('distinctModels', 2), 65, 'Recent activity uses at most one agent and model. Choose a model per phase to tailor implementation and review to different needs.');
   add('agent-tank', has('tasks', 3) && s.tankEnabled === false && gap('tankRecords'), 65, 'Agent Tank is disabled despite recent task activity. Enable it to see provider capacity and per-call usage and plan work around available limits.');
