@@ -14,10 +14,13 @@ after(async () => closeConnection());
 
 test('core publication reaches an authorized real socket and reconciles the changed projection', async () => {
   let state = 'pending';
+  const projectedTaskStates: string[] = [];
   const http = createServer((_req, res) => { res.setHeader('Content-Type', 'application/json'); res.end(JSON.stringify({ state })); });
   const io = new Server(http, { transports: ['websocket'] });
   const service = Object.create(SocketService.prototype);
-  Object.assign(service, { io, queueDeps: null, taskRevisions: new Map(), taskUpdateTails: new Map(), draftUpdateTails: new Map() });
+  Object.assign(service, { io, queueDeps: null,
+    notificationProjection: { projectTaskUpdate: async (payload: { state: string }) => { projectedTaskStates.push(payload.state); } },
+    taskRevisions: new Map(), taskUpdateTails: new Map(), draftUpdateTails: new Map() });
   const manager = new SocketSubscriptionManager({ getQueueDependencies: () => null, getQueueBroadcaster: () => null,
     taskWatcherManager: { stopTaskWatcherIfEmpty: async () => {} } as never });
   io.on('connection', socket => {
@@ -37,10 +40,12 @@ test('core publication reaches an authorized real socket and reconciles the chan
     const publisher = new EventPublisher();
     // Replace only Redis transport: use the production publisher, relay, rooms,
     // Socket.IO transport and a client reconciliation read.
-    Object.assign(publisher, { isInitialized: true, redis: { status: 'ready',
-      publish: async (channel: string, message: string) => {
-        service.handleEvent(channel, JSON.parse(message)); return 1;
-      } } });
+    for (const transport of [publisher['lifecycle'], publisher['bestEffort']]) {
+      Object.assign(transport, { isInitialized: true, redis: { status: 'ready',
+        publish: async (channel: string, message: string) => {
+          service.handleEvent(channel, JSON.parse(message)); return 1;
+        } } });
+    }
     const refreshed = new Promise<{ state: string }>(resolve => client.once(ACTIVITY_UPDATE, async payload => {
       assert.equal(payload.change, 'completed');
       resolve(await (await fetch(origin)).json() as { state: string });
@@ -48,6 +53,7 @@ test('core publication reaches an authorized real socket and reconciles the chan
     state = 'completed';
     assert.equal(await publisher.publishTaskUpdate({ taskId: 'task-1', state, previousState: 'processing', repository: 'acme/app' }), true);
     assert.deepEqual(await refreshed, { state: 'completed' });
+    assert.deepEqual(projectedTaskStates, ['completed'], 'the terminal event reaches the Inbox projection');
 
     service.queueDeps = { db: () => ({ where: () => ({ first: async () => ({ owner_id: 'owner', repository: 'acme/app', result_state: 'completed' }) }) }) };
     const goal = once(client, GOAL_UPDATE);

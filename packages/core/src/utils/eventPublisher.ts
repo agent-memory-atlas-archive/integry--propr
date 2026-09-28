@@ -54,7 +54,7 @@ type NotificationUpdateInput =
  * Publishes events that will be consumed by the SocketService in the dashboard.
  */
 /**
- * How long to leave the publisher offline after a failed connection.
+ * How long to leave best-effort publishing offline after a failed connection.
  *
  * Without it, every publish during an outage builds a fresh client that keeps
  * retrying in the background: one unreachable Redis turns a burst of events
@@ -65,12 +65,12 @@ const CONNECT_RETRY_COOLDOWN_MS = 5_000;
 /**
  * How long one publish may take before it is abandoned.
  *
- * Publishing is best effort, but its callers are not: a notification mutation
- * or a goal transition awaits its event after the database write has already
+ * The new freshness triggers are best effort, but their callers are not:
+ * a notification mutation or goal transition awaits its event after the write has
  * committed. A Redis that stops answering - rather than refusing the
  * connection - must therefore cost the caller this long at most, never the
- * length of the outage. A healthy local Redis answers in well under a
- * millisecond, so nothing that is merely busy is dropped.
+ * length of the outage. Existing lifecycle streams use a separate connection
+ * without this deadline.
  */
 const PUBLISH_TIMEOUT_MS = 1_000;
 
@@ -89,7 +89,10 @@ const PUBLISH_TIMEOUT_MS = 1_000;
  */
 const PUBLISH_FAILURE_COOLDOWN_MS = 5_000;
 
-class EventPublisher {
+/** Each delivery policy owns its connection, retries, and failure cooldown. */
+class EventPublisherConnection {
+  constructor(private readonly bestEffort: boolean) {}
+
   private redis: InstanceType<typeof Redis> | null = null;
   private isInitialized = false;
   private connectRetryAfter = 0;
@@ -115,8 +118,7 @@ class EventPublisher {
    *
    * So the socket is unref'd whenever no publish is outstanding, and ref'd
    * again for the duration of one. An in-flight event still keeps the process
-   * alive long enough to reach Redis - and it is bounded by
-   * `PUBLISH_TIMEOUT_MS` regardless - while an idle connection lets the process
+   * alive long enough to reach Redis, while an idle connection lets the process
    * exit and take the socket with it. `close()` remains the way to release it
    * within a living process.
    */
@@ -151,12 +153,11 @@ class EventPublisher {
     const client = new Redis({
       host: process.env.REDIS_HOST ?? '127.0.0.1',
       port: parseInt(process.env.REDIS_PORT ?? '6379', 10),
-      // A publish is never worth retrying: by the time a reconnect succeeds the
-      // event is stale, and an unbounded retry is what holds a committed write
-      // hostage to the outage.
-      maxRetriesPerRequest: 0,
-      commandTimeout: PUBLISH_TIMEOUT_MS,
-      enableOfflineQueue: false,
+      // Existing lifecycle streams keep their offline queue and retries.
+      // Only the new freshness triggers may be dropped during an outage.
+      maxRetriesPerRequest: this.bestEffort ? 0 : null,
+      ...(this.bestEffort ? { commandTimeout: PUBLISH_TIMEOUT_MS } : {}),
+      enableOfflineQueue: !this.bestEffort,
       enableReadyCheck: false,
       lazyConnect: true
     });
@@ -186,7 +187,7 @@ class EventPublisher {
       // reconnecting forever behind our back.
       client.disconnect();
       this.redis = null;
-      if (generation === this.generation) {
+      if (this.bestEffort && generation === this.generation) {
         this.connectRetryAfter = Date.now() + CONNECT_RETRY_COOLDOWN_MS;
       }
       logger.warn({ error: (error as Error).message }, 'Failed to connect EventPublisher to Redis');
@@ -197,11 +198,11 @@ class EventPublisher {
    * Publish an event to a Redis channel.
    * Silently fails if Redis is not available to avoid breaking main application flow.
    *
-   * The caller has usually committed its database write already, so this
-   * resolves within `PUBLISH_TIMEOUT_MS` whatever Redis is doing: an
-   * unreachable Redis costs the event, not the operation that produced it.
+   * New freshness triggers have a deadline; existing streams await Redis's
+   * acknowledgement, including through a transient reconnect.
    */
-  private async publish(channel: string, payload: EventPayload): Promise<boolean> {
+  async publish(channel: string, payload: EventPayload): Promise<boolean> {
+    if (!this.bestEffort) return this.attemptPublish(channel, payload);
     // A publish that already timed out speaks for the ones behind it: the rest
     // of a batch is dropped for free instead of waiting out its own deadline.
     if (Date.now() < this.publishRetryAfter) {
@@ -233,11 +234,11 @@ class EventPublisher {
       await this.ensureInitialized();
       const client = this.redis;
       if (!client) return false;
-      // A client that is not ready is reconnecting in the background. Its
+      // The best-effort client may be reconnecting in the background. Its
       // offline queue is disabled, so the publish would be rejected anyway;
       // dropping it here keeps an outage from costing the caller a round of
       // command timeouts per event.
-      if (client.status !== 'ready') {
+      if (this.bestEffort && client.status !== 'ready') {
         logger.debug(
           { channel, status: client.status },
           'Dropped event: EventPublisher Redis is not connected'
@@ -253,10 +254,9 @@ class EventPublisher {
       try {
         await client.publish(channel, message);
       } catch (error) {
-        // The connection was ready and the command still failed: a command
-        // timeout, or a socket that died under it. Either way the next event in
-        // the batch would pay the same cost, so stop publishing for a while.
-        this.suspendPublishing((error as Error).message);
+        // A failed freshness trigger pauses only the best-effort connection;
+        // lifecycle events retain their existing retry behavior.
+        if (this.bestEffort) this.suspendPublishing((error as Error).message);
         throw error;
       } finally {
         this.inFlight -= 1;
@@ -288,6 +288,39 @@ class EventPublisher {
   }
 
   /**
+   * Close the Redis connection.
+   * Should be called during application shutdown.
+   */
+  async close(): Promise<void> {
+    this.connectRetryAfter = 0;
+    this.publishRetryAfter = 0;
+    this.generation += 1;
+    const client = this.redis;
+    if (client) {
+      this.redis = null;
+      this.isInitialized = false;
+      try {
+        await client.quit();
+      } catch (error) {
+        // With the offline queue disabled a disconnected client rejects `quit`
+        // instead of answering it. Dropping the socket is the same teardown,
+        // and shutdown must not wait on an unreachable Redis either.
+        client.disconnect();
+        logger.debug(
+          { error: (error as Error).message },
+          'EventPublisher Redis connection dropped instead of closed'
+        );
+      }
+      logger.debug('EventPublisher Redis connection closed');
+    }
+  }
+}
+
+class EventPublisher {
+  private readonly lifecycle = new EventPublisherConnection(false);
+  private readonly bestEffort = new EventPublisherConnection(true);
+
+  /**
    * Publish a task state update event.
    * Called when a task's state changes (e.g., pending -> processing -> completed).
    */
@@ -313,7 +346,7 @@ class EventPublisher {
       version: params.version,
       metadata: params.metadata
     };
-    return this.publish(REDIS_CHANNELS.TASKS, payload);
+    return this.lifecycle.publish(REDIS_CHANNELS.TASKS, payload);
   }
 
   /**
@@ -340,7 +373,7 @@ class EventPublisher {
       draftStatus: params.draftStatus,
       generationTrace: params.generationTrace
     };
-    return this.publish(REDIS_CHANNELS.DRAFTS, payload);
+    return this.lifecycle.publish(REDIS_CHANNELS.DRAFTS, payload);
   }
 
   /**
@@ -369,7 +402,7 @@ class EventPublisher {
       processedDirectories: params.processedDirectories,
       timestamp: new Date().toISOString()
     };
-    await this.publish(REDIS_CHANNELS.INDEXING, payload);
+    await this.lifecycle.publish(REDIS_CHANNELS.INDEXING, payload);
   }
 
   /**
@@ -392,7 +425,7 @@ class EventPublisher {
       tokenUsage: params.tokenUsage,
       timestamp: new Date().toISOString()
     };
-    await this.publish(REDIS_CHANNELS.LIVE_DETAILS, payload);
+    await this.lifecycle.publish(REDIS_CHANNELS.LIVE_DETAILS, payload);
   }
 
   /**
@@ -407,11 +440,11 @@ class EventPublisher {
       stats: params.stats,
       timestamp: new Date().toISOString()
     };
-    await this.publish(REDIS_CHANNELS.QUEUE_STATS, payload);
+    await this.lifecycle.publish(REDIS_CHANNELS.QUEUE_STATS, payload);
   }
 
   async publishActivity(params: Omit<ScopedActivityUpdatePayload, 'eventType' | 'occurredAt' | 'terminal'>): Promise<boolean> {
-    return this.publish(REDIS_CHANNELS.ACTIVITY, {
+    return this.bestEffort.publish(REDIS_CHANNELS.ACTIVITY, {
       ...params, eventType: ACTIVITY_UPDATE, occurredAt: new Date().toISOString(),
       terminal: isTerminalActivityChange(params.change),
     });
@@ -429,7 +462,7 @@ class EventPublisher {
   async publishGoalUpdate(
     params: Omit<GoalUpdateTriggerPayload, 'eventType' | 'occurredAt'> & { occurredAt?: string }
   ): Promise<boolean> {
-    return this.publish(REDIS_CHANNELS.GOALS, {
+    return this.bestEffort.publish(REDIS_CHANNELS.GOALS, {
       ...params,
       eventType: GOAL_UPDATE,
       occurredAt: params.occurredAt ?? new Date().toISOString()
@@ -454,7 +487,7 @@ class EventPublisher {
     params: NotificationUpdateInput
   ): Promise<boolean> {
     if ('recipientIds' in params) {
-      return this.publish(REDIS_CHANNELS.NOTIFICATIONS, {
+      return this.bestEffort.publish(REDIS_CHANNELS.NOTIFICATIONS, {
         ...params, eventType: NOTIFICATION_UPDATE, occurredAt: params.occurredAt ?? new Date().toISOString(),
       });
     }
@@ -466,7 +499,7 @@ class EventPublisher {
       ...(params.unreadCount === undefined ? {} : { unreadCount: params.unreadCount }),
       occurredAt: params.occurredAt ?? new Date().toISOString()
     };
-    return this.publish(REDIS_CHANNELS.NOTIFICATIONS, payload);
+    return this.bestEffort.publish(REDIS_CHANNELS.NOTIFICATIONS, payload);
   }
 
   /**
@@ -482,35 +515,11 @@ class EventPublisher {
       ...(params.provider === undefined ? {} : { provider: params.provider }),
       occurredAt: params.occurredAt ?? new Date().toISOString()
     };
-    return this.publish(REDIS_CHANNELS.USAGE, payload);
+    return this.bestEffort.publish(REDIS_CHANNELS.USAGE, payload);
   }
 
-  /**
-   * Close the Redis connection.
-   * Should be called during application shutdown.
-   */
   async close(): Promise<void> {
-    this.connectRetryAfter = 0;
-    this.publishRetryAfter = 0;
-    this.generation += 1;
-    const client = this.redis;
-    if (client) {
-      this.redis = null;
-      this.isInitialized = false;
-      try {
-        await client.quit();
-      } catch (error) {
-        // With the offline queue disabled a disconnected client rejects `quit`
-        // instead of answering it. Dropping the socket is the same teardown,
-        // and shutdown must not wait on an unreachable Redis either.
-        client.disconnect();
-        logger.debug(
-          { error: (error as Error).message },
-          'EventPublisher Redis connection dropped instead of closed'
-        );
-      }
-      logger.debug('EventPublisher Redis connection closed');
-    }
+    await Promise.all([this.lifecycle.close(), this.bestEffort.close()]);
   }
 }
 

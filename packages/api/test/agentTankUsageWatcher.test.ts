@@ -14,7 +14,7 @@ interface WatcherHarness {
 }
 
 function createWatcher(): WatcherHarness {
-  let status: unknown = { claude: { used: 1 } };
+  let status: unknown = { claude: { usage: { session: { percent: 1 } } } };
   let settings = { enabled: true, url: 'http://agent-tank.test' };
   let listening = true;
   const harness = {
@@ -25,7 +25,10 @@ function createWatcher(): WatcherHarness {
   } as WatcherHarness;
   harness.watcher = new AgentTankUsageWatcher({
     loadSettings: async () => settings,
-    probe: async () => status,
+    probe: async () => {
+      if (status instanceof Error) throw status;
+      return status;
+    },
     publish: () => { harness.published += 1; },
     hasListeners: () => listening,
   });
@@ -42,12 +45,76 @@ describe('agent tank usage watcher', { concurrency: false }, () => {
     assert.equal(harness.published, 1);
   });
 
+  test('ignores provider countdowns, refresh metadata, and response key order', async () => {
+    const harness = createWatcher();
+    harness.setStatus({
+      claude: { name: 'claude', usage: { session: { percent: 42, resetsInSeconds: 764 } },
+        lastUpdated: '2026-09-28T10:00:00Z', isRefreshing: false },
+      codex: { usage: { weekly: { percent: 31, resetsInSeconds: 364_364 } } },
+    });
+    assert.equal(await harness.watcher.probeOnce(), true);
+    harness.setStatus({
+      codex: { usage: { weekly: { resetsInSeconds: 364_304, percent: 31 } } },
+      claude: { isRefreshing: true, lastUpdated: '2026-09-28T10:01:00Z',
+        usage: { session: { resetsInSeconds: 704, percent: 42 } }, name: 'claude' },
+    });
+    assert.equal(await harness.watcher.probeOnce(), false);
+    assert.equal(harness.published, 1);
+  });
+
+  test('preserves provider membership and error changes', async () => {
+    const harness = createWatcher();
+    const claude = { name: 'claude', usage: { session: { percent: 42 } } };
+    harness.setStatus({ claude });
+    await harness.watcher.probeOnce();
+    for (const status of [
+      { claude, codex: { usage: {} } },
+      { claude },
+      { claude: { ...claude, error: 'Quota unavailable' } },
+      { claude },
+      'HTTP 503',
+      new Error('Agent Tank is unreachable'),
+      { claude },
+    ]) {
+      harness.setStatus(status);
+      assert.equal(await harness.watcher.probeOnce(), true);
+      assert.equal(await harness.watcher.probeOnce(), false);
+    }
+    assert.equal(harness.published, 8);
+  });
+
+  test('preserves configured URL changes even when usage is identical', async () => {
+    const harness = createWatcher();
+    await harness.watcher.probeOnce();
+    harness.setSettings({ enabled: true, url: 'http://replacement.test' });
+    assert.equal(await harness.watcher.probeOnce(), true);
+    assert.equal(await harness.watcher.probeOnce(), false);
+  });
+
+  test('does not publish a snapshot that completes after shutdown', async () => {
+    let resolveProbe!: (status: unknown) => void;
+    let published = 0;
+    const watcher = new AgentTankUsageWatcher({
+      loadSettings: async () => ({ enabled: true, url: 'http://agent-tank.test' }),
+      probe: () => new Promise(resolve => { resolveProbe = resolve; }),
+      publish: () => { published += 1; },
+      hasListeners: () => true,
+    });
+    const probing = watcher.probeOnce();
+    await Promise.resolve();
+    assert.equal(await watcher.probeOnce(), false, 'overlapping probes are suppressed');
+    await watcher.close();
+    resolveProbe({ claude: { usage: { session: { percent: 42 } } } });
+    assert.equal(await probing, false);
+    assert.equal(published, 0);
+  });
+
   test('announces the first snapshot, which a mounted sidebar may already be behind', async () => {
     // The sidebar mounts and reads A, the quota moves to B, and only then does
     // the first probe run. Staying silent here would leave that sidebar on A
     // for as long as it stays connected: every later probe sees B and matches.
     const harness = createWatcher();
-    harness.setStatus({ claude: { used: 2 } });
+    harness.setStatus({ claude: { usage: { session: { percent: 2 } } } });
 
     assert.equal(await harness.watcher.probeOnce(), true);
     assert.equal(harness.published, 1);
@@ -59,7 +126,7 @@ describe('agent tank usage watcher', { concurrency: false }, () => {
     const harness = createWatcher();
     await harness.watcher.probeOnce();
 
-    harness.setStatus({ claude: { used: 2 } });
+    harness.setStatus({ claude: { usage: { session: { percent: 2 } } } });
 
     assert.equal(await harness.watcher.probeOnce(), true);
     assert.equal(harness.published, 2);
@@ -80,7 +147,7 @@ describe('agent tank usage watcher', { concurrency: false }, () => {
   test('does not probe when nobody is connected to be told', async () => {
     const harness = createWatcher();
     harness.setListeners(false);
-    harness.setStatus({ claude: { used: 3 } });
+    harness.setStatus({ claude: { usage: { session: { percent: 3 } } } });
 
     assert.equal(await harness.watcher.probeOnce(), false);
     assert.equal(harness.published, 0);

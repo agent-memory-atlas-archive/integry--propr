@@ -1,4 +1,5 @@
 import * as configManager from '@propr/core';
+import { agentTankUsageFingerprint, type AgentStatusResponse } from '@propr/core';
 import { USAGE_UPDATE } from '@propr/shared';
 import { getSocketService } from './socketService.js';
 
@@ -123,7 +124,15 @@ export class AgentTankUsageWatcher {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), PROBE_TIMEOUT_MS);
     try {
-      return JSON.stringify({ url: settings.url, status: await this.probe(settings.url, controller.signal) });
+      const status = await this.probe(settings.url, controller.signal);
+      // Preserve provider membership and errors, but ignore countdowns and
+      // refresh timestamps just like the other Agent Tank observers.
+      const fingerprint = status && typeof status === 'object'
+        ? Object.entries(status as Record<string, AgentStatusResponse>)
+          .sort(([a], [b]) => a.localeCompare(b))
+          .map(([name, agent]) => [name, agentTankUsageFingerprint({ ...agent, name: agent.name || name })])
+        : status;
+      return JSON.stringify({ url: settings.url, status: fingerprint });
     } catch {
       // An unreachable Agent Tank is itself a change the sidebar shows.
       return JSON.stringify({ url: settings.url, status: 'unreachable' });
