@@ -55,18 +55,20 @@ describe('notification lifecycle projection', { concurrency: false }, () => {
 
   test('backfills only unambiguous producer references and preserves receipt state and immutability', async () => {
     const service = new NotificationService({ database, now: () => new Date(clock) });
-    const addTask = async (id: string, repository: string, pr: number, at: string, type = 'issue') => {
+    const addTask = async ({ id, repository, pr, at, type = 'issue' }: {
+      id: string; repository: string; pr: number; at: string; type?: string;
+    }) => {
       await database('tasks').insert({ task_id: id, repository, pr_number: pr, task_type: type,
         initial_job_data: JSON.stringify(type === 'goal' ? { goalId: 'saved-goal' } : {}) });
       await database('task_history').insert({ task_id: id, state: 'completed', timestamp: at });
     };
-    await addTask('fix-original', 'integry/propr', 42, iso());
-    await addTask('fix-later', 'integry/propr', 42, iso(1_000));
-    await addTask('other-repository', 'other/propr', 42, iso());
-    await addTask('review-original', 'integry/propr', 42, iso(), 'review');
-    await addTask('ambiguous-1', 'integry/propr', 43, iso());
-    await addTask('ambiguous-2', 'integry/propr', 43, iso());
-    await addTask('goal-task', 'integry/propr', 44, iso(), 'goal');
+    await addTask({ id: 'fix-original', repository: 'integry/propr', pr: 42, at: iso() });
+    await addTask({ id: 'fix-later', repository: 'integry/propr', pr: 42, at: iso(1_000) });
+    await addTask({ id: 'other-repository', repository: 'other/propr', pr: 42, at: iso() });
+    await addTask({ id: 'review-original', repository: 'integry/propr', pr: 42, at: iso(), type: 'review' });
+    await addTask({ id: 'ambiguous-1', repository: 'integry/propr', pr: 43, at: iso() });
+    await addTask({ id: 'ambiguous-2', repository: 'integry/propr', pr: 43, at: iso() });
+    await addTask({ id: 'goal-task', repository: 'integry/propr', pr: 44, at: iso(), type: 'goal' });
     for (const [id, prNumber, kind] of [
       ['fix', 42, 'pull_request'], ['review', 42, 'review'],
       ['ambiguous', 43, 'pull_request'], ['missing', 45, 'pull_request'], ['goal', 44, 'pull_request'],
