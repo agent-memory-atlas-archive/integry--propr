@@ -663,7 +663,6 @@ function GoalQueueRow({ goal, goalAgents }: { goal: Goal; goalAgents: Array<{ ty
 
 function GoalList() {
   const navigate = useNavigate();
-  const newGoalButtonRef = useRef<HTMLButtonElement>(null);
   const [searchParams, setSearchParams] = useSearchParams();
   const [isCreating, setIsCreating] = useState(false);
   const repositoryFilter = searchParams.get('repository') || 'all';
@@ -755,60 +754,55 @@ function GoalList() {
   const goalAgents = goals.map(goal => ({ type: goal.agent.type, alias: goal.agent.alias }));
   const closeCreator = useCallback(() => {
     setIsCreating(false);
-    newGoalButtonRef.current?.focus();
   }, []);
-  const openCreator = useCallback(() => setIsCreating(true), []);
-  return <div className="min-h-full w-full min-w-0 bg-white pb-6">
-    <div className="flex flex-wrap items-start justify-between gap-3 px-4 pb-3 pt-4 sm:px-6">
-      <div className="min-w-0"><h1 className="text-xl font-bold text-slate-900">Goals</h1><p className="mt-0.5 text-sm text-slate-600">Long-running work kept in one exact coding-agent session.</p></div>
-      <button ref={newGoalButtonRef} type="button" onClick={openCreator} className={`${buttonClass} min-h-10 flex-none justify-center bg-primary-600 text-white hover:bg-primary-700`}><Plus className="h-4 w-4" />New goal</button>
-    </div>
-    {error && <p role="alert" className="mx-4 mb-3 border-l-2 border-red-500 bg-red-50 p-3 text-sm text-red-700 sm:mx-6">{error}</p>}
-    <section aria-labelledby="goal-work-queue-title">
-      {/* One toolbar rail: the queue count sits with the filter that changes it. The list border below closes the bar. */}
-      <div className="flex flex-col gap-2 border-t border-slate-200 bg-slate-50 px-4 py-2 sm:flex-row sm:items-center sm:justify-between sm:px-6">
-        <div className="flex items-baseline gap-2"><h2 id="goal-work-queue-title" className="text-[10px] font-bold uppercase tracking-wider text-slate-500">Work queue</h2>{hasSuccessfulRead && <span className="text-xs tabular-nums text-slate-500">{visibleGoals.length} of {goals.length}</span>}{refreshing && hasSuccessfulRead && <span role="status" className="text-xs text-slate-500">Refreshing…</span>}</div>
-        {goals.length > 0 && <div className="flex min-w-0 flex-col gap-2 sm:flex-row sm:items-center sm:gap-3">
-          <div className="relative min-w-0 sm:w-64">
-            <Search aria-hidden="true" className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
-            <input
-              type="text"
-              value={searchQuery}
-              onChange={event => setSearchQuery(event.target.value)}
-              aria-label="Search goals"
-              placeholder="Search goals..."
-              className="w-full rounded-md border border-slate-300 bg-white py-1.5 pl-9 pr-8 text-sm text-slate-700 focus:border-primary-500 focus:outline-none focus:ring-2 focus:ring-primary-500"
+  return <div className="flex h-full w-full min-w-0 flex-col bg-white">
+    <header className="flex flex-none items-center justify-between gap-2 border-b border-gray-200 bg-slate-50 px-4 py-2 sm:gap-4 sm:px-6 sm:py-4">
+      <h1 id="goals-title" className="flex-none text-lg font-bold text-gray-800 sm:text-2xl">Goals</h1>
+      {goals.length > 0 && <div className="flex min-w-0 flex-1 items-center justify-end gap-2 sm:gap-4">
+        <div className="relative hidden min-w-0 max-w-64 flex-1 sm:block">
+          <Search aria-hidden="true" className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
+          <input
+            type="text"
+            value={searchQuery}
+            onChange={event => setSearchQuery(event.target.value)}
+            aria-label="Search goals"
+            placeholder="Search goals..."
+            className="w-full rounded-md border border-gray-300 bg-white py-2 pl-9 pr-8 text-sm text-gray-700 focus:border-teal-500 focus:outline-none focus:ring-2 focus:ring-teal-500"
+          />
+          {searchQuery && <button
+            type="button"
+            onClick={clearSearch}
+            title="Clear search"
+            aria-label="Clear search"
+            className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600"
+          ><X className="h-4 w-4" /></button>}
+        </div>
+        <div className="flex min-w-0 items-center justify-end gap-2 sm:flex-1 sm:max-w-[480px]">
+          <Filter className="hidden h-4 w-4 flex-none text-gray-500 sm:block" aria-hidden="true" />
+          <select
+            value={statusFilter}
+            onChange={event => setStatusFilter(event.target.value)}
+            aria-label="Filter goals by status"
+            className="w-[120px] flex-none rounded-md border border-gray-300 bg-white px-2 py-1.5 text-sm text-gray-700 focus:border-teal-500 focus:outline-none focus:ring-2 focus:ring-teal-500 sm:w-auto sm:px-3 sm:py-2"
+          >
+            {goalStatusFilters.map(option => <option key={option.value} value={option.value}>{option.label}</option>)}
+          </select>
+          <div role="group" aria-label="Filter goals by repository" className="min-w-0 max-w-[220px] flex-1 sm:max-w-[320px]">
+            <RepositorySelector
+              repos={repositoryOptions}
+              selectedRepo={repositoryFilter}
+              onRepoChange={setRepositoryFilter}
+              labelLayout="stacked"
+              className="w-full min-w-0"
             />
-            {searchQuery && <button
-              type="button"
-              onClick={clearSearch}
-              title="Clear search"
-              aria-label="Clear search"
-              className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600"
-            ><X className="h-4 w-4" /></button>}
           </div>
-          <div className="flex min-w-0 items-center gap-2">
-            <Filter className="h-4 w-4 flex-none text-slate-400" aria-hidden="true" />
-            <select
-              value={statusFilter}
-              onChange={event => setStatusFilter(event.target.value)}
-              aria-label="Filter goals by status"
-              className="flex-none rounded-md border border-slate-300 bg-white px-2 py-1.5 text-sm text-slate-700 focus:border-primary-500 focus:outline-none focus:ring-2 focus:ring-primary-500"
-            >
-              {goalStatusFilters.map(option => <option key={option.value} value={option.value}>{option.label}</option>)}
-            </select>
-            <div role="group" aria-label="Filter goals by repository" className="min-w-0 flex-1 sm:w-[240px] sm:flex-none">
-              <RepositorySelector
-                repos={repositoryOptions}
-                selectedRepo={repositoryFilter}
-                onRepoChange={setRepositoryFilter}
-                labelLayout="stacked"
-                className="w-full min-w-0"
-              />
-            </div>
-          </div>
-        </div>}
-      </div>
+        </div>
+      </div>}
+    </header>
+    <section aria-labelledby="goals-title" className="min-h-0 flex-1 overflow-auto pb-6">
+      {error && <p role="alert" className="mx-4 my-3 border-l-2 border-red-500 bg-red-50 p-3 text-sm text-red-700 sm:mx-6">{error}</p>}
+      {hasSuccessfulRead && <span className="sr-only">{visibleGoals.length} of {goals.length}</span>}
+      {refreshing && hasSuccessfulRead && <p role="status" className="px-4 py-3 text-xs text-slate-500 sm:px-6">Refreshing…</p>}
       {!hasSuccessfulRead && (initialLoading || refreshing)
         ? <div role="status" className="flex items-center justify-center gap-2 border-y border-slate-200 py-10 text-sm text-slate-500"><LoaderCircle className="h-4 w-4 animate-spin" aria-hidden="true" />Loading goals…</div>
         : error && goals.length === 0
@@ -817,7 +811,7 @@ function GoalList() {
         ? <div className="border-y border-dashed border-slate-300 py-10 text-center"><p className="text-sm font-medium text-slate-700">No goals yet</p><p className="mt-1 text-sm text-slate-500">Start a goal to add dedicated agent work to this queue.</p></div>
         : visibleGoals.length === 0
           ? <div className="border-y border-dashed border-slate-300 py-10 text-center"><p className="text-sm font-medium text-slate-700">{queueEmptyReason}</p><button type="button" onClick={clearFilters} className="mt-2 text-sm font-medium text-primary-700 hover:underline">Show all goals</button></div>
-          : <div className="border-y border-slate-200 bg-white">
+          : <div className="border-b border-slate-200 bg-white">
             <div aria-hidden="true" data-testid="goal-queue-columns" className={`hidden gap-x-4 border-b border-slate-200 bg-slate-50 px-6 py-2 text-[10px] font-bold uppercase tracking-wider text-slate-500 ${queueGridColumns} lg:grid`}>
               <span>Goal</span><span>Repository</span><span>Status</span>
               <span data-testid="goal-queue-column-tokens" className="hidden text-right xl:block">Tokens</span>
