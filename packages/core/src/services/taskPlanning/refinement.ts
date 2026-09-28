@@ -138,7 +138,8 @@ function validateRefinementResponse(
 ): RefinementResponse {
   // Handle alternative keys for plan array
   if (!refinementResponse.plan || !Array.isArray(refinementResponse.plan)) {
-    const altKeys = ['tasks', 'items', 'issues', 'changes'] as const;
+    // Never `changes`: a list of edits is not a plan.
+    const altKeys = ['tasks', 'items', 'issues'] as const;
     const responseObj = refinementResponse as unknown as Record<string, unknown>;
     for (const key of altKeys) {
       if (Array.isArray(responseObj[key])) {
@@ -166,6 +167,74 @@ function validateRefinementResponse(
   }
 
   return refinementResponse;
+}
+
+/**
+ * Positions (1-based) of refined items that are not complete plan issues: a
+ * model sometimes returns edit instructions ("retain issue 3", "extend issue 1
+ * with…") or partial issues instead of the rewritten plan.
+ */
+export function incompletePlanItems(plan: unknown[]): number[] {
+  const incomplete: number[] = [];
+  plan.forEach((item, index) => {
+    const record = item && typeof item === 'object' ? item as Record<string, unknown> : null;
+    const complete = !!record && (['title', 'body', 'implementation'] as const)
+      .every(field => typeof record[field] === 'string' && (record[field] as string).trim().length > 0);
+    if (!complete) incomplete.push(index + 1);
+  });
+  return incomplete;
+}
+
+function incompletePlanRepairPrompt(currentPlan: PlanItem[], instruction: string, response: string, incomplete: number[]): string {
+  return `Your previous response did not return the complete refined plan: plan entries ${incomplete.join(', ')} are not full issues with a non-empty title, body and implementation (they look like edit instructions or partial issues).
+
+Apply the requested changes to the current plan below and return ONLY this JSON object:
+{"action": "modified", "summary": "<what changed>", "plan": [ ... ]}
+
+The plan array must contain EVERY issue of the refined plan in full, each as {"title", "body", "implementation"}, copying unchanged issues verbatim. Do not return edit instructions such as "retain", "extend" or "unchanged". No markdown or code fences.
+
+Current plan:
+${JSON.stringify(currentPlan)}
+
+Requested change:
+${instruction}
+
+Your previous response:
+${response}`;
+}
+
+/**
+ * Asks once for the complete plan when a refinement returned edits or partial
+ * issues. Saving those would replace the plan with stubs, so if the second
+ * answer is still incomplete the refinement fails and the plan is kept.
+ */
+async function requestCompletePlan(
+  refinementResponse: RefinementResponse,
+  context: {
+    currentPlan: PlanItem[];
+    instruction: string;
+    response: string;
+    charLimit: number | null;
+    correlatedLogger: MinimalLogger;
+    llm: (prompt: string) => Promise<string>;
+  },
+): Promise<RefinementResponse> {
+  const { currentPlan, instruction, response, charLimit, correlatedLogger } = context;
+  let incomplete = incompletePlanItems(refinementResponse.plan);
+  correlatedLogger.warn({ incomplete, taskCount: refinementResponse.plan.length }, 'Refinement returned edits instead of a complete plan, asking for the full plan');
+  const repairPrompt = incompletePlanRepairPrompt(currentPlan, instruction, response, incomplete);
+  if (charLimit === null || repairPrompt.length <= charLimit) {
+    try {
+      const repaired = validateRefinementResponse(parseRefinementResponse(await context.llm(repairPrompt), correlatedLogger), correlatedLogger);
+      // Repair responses can also answer or clarify without modifying the plan.
+      if (repaired.action !== 'modified') return { ...repaired, plan: currentPlan };
+      incomplete = incompletePlanItems(repaired.plan);
+      if (incomplete.length === 0) return repaired;
+    } catch (repairError) {
+      correlatedLogger.warn({ error: repairError instanceof Error ? repairError.message : String(repairError) }, 'Complete-plan repair failed');
+    }
+  }
+  throw new PlanningFailedError(`Refinement returned edits instead of a complete plan (entries ${incomplete.join(', ')} lack a title, body or implementation); the plan was left unchanged. Try the refinement again.`);
 }
 
 export async function refinePlan(options: RefinePlanOptions): Promise<RefinePlanResult & { estimation?: RefinePlanEstimation }> {
@@ -286,6 +355,26 @@ ${response}`;
   }
 
   refinementResponse = validateRefinementResponse(refinementResponse, correlatedLogger);
+
+  // Answers and clarifying questions never change the plan, whatever came back with them.
+  if (refinementResponse.action !== 'modified') {
+    refinementResponse.plan = currentPlan;
+  } else if (incompletePlanItems(refinementResponse.plan).length > 0) {
+    refinementResponse = await requestCompletePlan(refinementResponse, {
+      currentPlan, instruction, response, charLimit, correlatedLogger,
+      llm: prompt => runLightweightLLMAnalysis({
+        prompt,
+        model: generationModel,
+        correlationId: correlationId ? `${correlationId}-complete-plan` : 'plan-refinement-complete-plan',
+        worktreePath,
+        githubToken,
+        issueRef,
+        taskId: draftId,
+        executionType: 'plan-refinement',
+        routingSession: routingSession.fork(),
+      }),
+    });
+  }
 
   correlatedLogger.info({
     taskCount: refinementResponse.plan.length,

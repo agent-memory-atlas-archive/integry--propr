@@ -12,6 +12,7 @@
  * dismissal state: dismissing a notification must not resolve a blocker.
  */
 
+import { collectNarrativeFacts, createDashboardNarrative, type NarrativeModel } from './dashboardNarrative.js';
 import type { Request, Response } from 'express';
 import type { Knex } from 'knex';
 import type { Queue } from 'bullmq';
@@ -28,13 +29,12 @@ import { loadCompletedRows, type CompletedRow } from './dashboardOutcomeQueries.
 import {
   EMPTY_LIVE_ACTIVITY,
   EMPTY_LIVE_DETAILS,
+  MAX_LIVE_DETAIL_LOOKUPS,
   summariseLiveActivity,
   type LiveActivity,
   type LiveDetailsSnapshot,
 } from './dashboardLiveActivity.js';
 
-/** Running work we will pay for a live-details projection on in one request. */
-const MAX_LIVE_DETAIL_LOOKUPS = 20;
 /** Where `src/worker.ts` heartbeats its identity and the concurrency it runs at. */
 const WORKER_SET_KEY = 'system:status:workers';
 const WORKER_CAPACITY_KEY = 'system:status:worker-capacity';
@@ -53,6 +53,8 @@ export interface DashboardRoutesDeps {
    */
   liveDetails?: (taskId: string) => Promise<LiveDetailsSnapshot | null>;
   now?: () => Date;
+  narrativeModel?: NarrativeModel;
+  isSummaryEnabled?: () => Promise<boolean>;
 }
 
 export interface ActiveItem {
@@ -211,6 +213,29 @@ export function createDashboardRoutes(deps: DashboardRoutesDeps) {
     }
   }
 
+  const narrative = createDashboardNarrative(deps.narrativeModel ?? (async () => null));
+
+  async function getNarrative(req: Request, res: Response): Promise<void> {
+    const repository = readRepositoryFilter(req, res);
+    if (repository === null) return;
+    res.setHeader('Cache-Control', 'no-store');
+    try {
+      if (deps.isSummaryEnabled && !await deps.isSummaryEnabled()) {
+        res.json({ repository, enabled: false, summary: null });
+        return;
+      }
+      const snapshot = await collectNarrativeFacts(db, repository, now(), {
+        ownerId: req.user?.id ? String(req.user.id) : undefined,
+        liveActivity: liveActivityFor,
+      });
+      const summary = await narrative(snapshot, req.query.refresh === 'true');
+      res.json({ repository, enabled: true, summary });
+    } catch {
+      // A transient data/model failure is unavailable, never a dashboard failure.
+      res.json({ repository, enabled: true, summary: null });
+    }
+  }
+
   async function getSummary(req: Request, res: Response): Promise<void> {
     const repository = readRepositoryFilter(req, res);
     if (repository === null) return;
@@ -313,5 +338,5 @@ export function createDashboardRoutes(deps: DashboardRoutesDeps) {
     }
   }
 
-  return { getSummary, getAttention, getActive, getOutcomes };
+  return { getSummary, getAttention, getActive, getOutcomes, getNarrative };
 }

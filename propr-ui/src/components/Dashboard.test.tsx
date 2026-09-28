@@ -1,15 +1,21 @@
+import { getUsageTips, dismissUsageTip } from '../api/usageTipsApi';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, waitFor, within, act, fireEvent } from '@testing-library/react';
 import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom';
 import Dashboard from './Dashboard';
+import { SocketContext, type SocketContextValue } from '../contexts/SocketContext';
 import { NeedsAttentionPanel } from './Dashboard/NeedsAttentionPanel';
+import { SUMMARY_COALESCE_MS } from './Dashboard/useDashboardSummary';
 import {
+  getDashboardNarrative,
   getDashboardActive,
   getDashboardAttention,
   getDashboardOutcomes,
   getDashboardStats,
 } from '../api/dashboardApi';
-import type { TaskUpdatePayload } from '@propr/shared';
+// The envelope these frames imitate is the one `activityEvents` declares:
+// `entityId` and a resolved `terminal`, which is what the server publishes.
+import type { ActivityChange, ActivityDomain, ActivityUpdatePayload } from '@propr/shared/dist/activityEvents.js';
 import {
   activeItem,
   activeResponse,
@@ -20,7 +26,10 @@ import {
   statsResponse,
 } from './Dashboard.fixtures';
 
+vi.mock('../api/usageTipsApi', () => ({ getUsageTips: vi.fn(async () => ({ enabled: true, tips: [] })), dismissUsageTip: vi.fn(), USAGE_TIPS_SETTINGS_CHANGED: 'tips-settings-changed' }));
+
 vi.mock('../api/dashboardApi', () => ({
+  getDashboardNarrative: vi.fn(),
   getDashboardAttention: vi.fn(),
   getDashboardActive: vi.fn(),
   getDashboardOutcomes: vi.fn(),
@@ -28,19 +37,46 @@ vi.mock('../api/dashboardApi', () => ({
 }));
 
 let socketConnected = true;
-let taskUpdateHandler: ((payload: TaskUpdatePayload) => void) | null = null;
+let activityHandler: ((payload: ActivityUpdatePayload) => void) | null = null;
 
 vi.mock('../contexts/useSocket', () => ({
   useSocket: () => ({
     isConnected: socketConnected,
-    onTaskUpdate: (handler: (payload: TaskUpdatePayload) => void) => {
-      taskUpdateHandler = handler;
+    subscribeToActivity: () => {},
+    unsubscribeFromActivity: () => {},
+    onGoalUpdate: () => () => {},
+    onActivityUpdate: (handler: (payload: ActivityUpdatePayload) => void) => {
+      activityHandler = handler;
       return () => {
-        if (taskUpdateHandler === handler) taskUpdateHandler = null;
+        if (activityHandler === handler) activityHandler = null;
       };
     },
   }),
 }));
+
+/** One pushed activity frame, in the envelope the server publishes. */
+const activity = (
+  domain: ActivityDomain,
+  change: ActivityChange,
+  overrides: Partial<ActivityUpdatePayload> = {},
+): ActivityUpdatePayload => ({
+  eventType: 'activity:update',
+  domain,
+  change,
+  entityId: 'task-1',
+  repository: 'acme/app',
+  terminal: change === 'completed' || change === 'failed' || change === 'cancelled',
+  occurredAt: new Date().toISOString(),
+  ...overrides,
+});
+
+/** Delivers one frame in its own flush, so only coalescing can collapse a burst. */
+async function push(payload: ActivityUpdatePayload): Promise<void> {
+  await act(async () => {
+    activityHandler?.(payload);
+    await Promise.resolve();
+  });
+}
 
 vi.mock('../hooks/useSystemReadiness', () => ({
   useSystemReadiness: () => ({
@@ -90,13 +126,33 @@ const LocationProbe: React.FC = () => {
   return <span data-testid="location-search">{location.search}</span>;
 };
 
+/*
+  The sections read the connection from the context rather than through
+  `useSocket`, so the provider is part of the tree under test: with it, an idle
+  dashboard is genuinely idle, and without a connection every section falls back
+  to its bounded poll.
+*/
+function dashboardTree(initialEntry = '/') {
+  return (
+    <SocketContext.Provider value={{ isConnected: socketConnected } as unknown as SocketContextValue}>
+      <MemoryRouter initialEntries={[initialEntry]}>
+        <LocationProbe />
+        <Routes>
+          <Route path="/" element={<Dashboard />} />
+        </Routes>
+      </MemoryRouter>
+    </SocketContext.Provider>
+  );
+}
+
 function renderDashboard(initialEntry = '/') {
+  return render(dashboardTree(initialEntry));
+}
+
+function renderAttentionPanel() {
   return render(
-    <MemoryRouter initialEntries={[initialEntry]}>
-      <LocationProbe />
-      <Routes>
-        <Route path="/" element={<Dashboard />} />
-      </Routes>
+    <MemoryRouter>
+      <NeedsAttentionPanel repository="all" refreshToken={0} />
     </MemoryRouter>,
   );
 }
@@ -107,20 +163,44 @@ async function waitForSections() {
   await waitFor(() => expect(screen.getByTestId('historical-stats-section')).toBeInTheDocument());
 }
 
+async function renderLoadedDashboard(initialEntry = '/') {
+  const view = renderDashboard(initialEntry);
+  await waitForSections();
+  return view;
+}
+
 describe('Dashboard', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    vi.mocked(getDashboardNarrative).mockResolvedValue({ repository: 'all', enabled: true, summary: 'Work is underway. Nothing needs your attention.' });
     socketConnected = true;
-    taskUpdateHandler = null;
+    activityHandler = null;
     mockAttention.mockResolvedValue(attentionResponse());
     mockActive.mockResolvedValue(activeResponse([activeItem()]));
     mockOutcomes.mockResolvedValue(outcomesResponse([outcomeItem()]));
     mockStats.mockResolvedValue(statsResponse());
   });
 
+  it('defers all four initial section reads in a background tab', async () => {
+    Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'hidden' });
+    const view = renderDashboard();
+    try {
+      await act(async () => { await Promise.resolve(); });
+      for (const read of [mockAttention, mockActive, mockOutcomes, mockStats]) expect(read).not.toHaveBeenCalled();
+      Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'visible' });
+      fireEvent(document, new Event('visibilitychange'));
+      await waitForSections();
+      await waitFor(() => {
+        for (const read of [mockAttention, mockActive, mockOutcomes, mockStats]) expect(read).toHaveBeenCalledTimes(1);
+      });
+    } finally {
+      view.unmount();
+      Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'visible' });
+    }
+  });
+
   it('keeps the attention section in place with an all-clear line when nothing needs attention', async () => {
-    renderDashboard();
-    await waitForSections();
+    await renderLoadedDashboard();
 
     // The section is structure, not a conditional decoration: unmounting it
     // collapsed the right column and left the stats panel alone at the top of
@@ -139,11 +219,7 @@ describe('Dashboard', () => {
     let resolveAttention: (value: ReturnType<typeof attentionResponse>) => void = () => {};
     mockAttention.mockReturnValue(new Promise(resolve => { resolveAttention = resolve; }));
 
-    render(
-      <MemoryRouter>
-        <NeedsAttentionPanel repository="all" refreshToken={0} />
-      </MemoryRouter>,
-    );
+    renderAttentionPanel();
 
     // A skeleton under the real heading, not instead of the whole section.
     expect(screen.getByTestId('needs-attention-panel')).toBeInTheDocument();
@@ -159,11 +235,7 @@ describe('Dashboard', () => {
 
   it('keeps the heading and offers a retry when the attention read fails', async () => {
     mockAttention.mockRejectedValue(new Error('attention unavailable'));
-    render(
-      <MemoryRouter>
-        <NeedsAttentionPanel repository="all" refreshToken={0} />
-      </MemoryRouter>,
-    );
+    renderAttentionPanel();
 
     await waitFor(() => expect(screen.getByText('Unable to load what needs attention')).toBeInTheDocument());
     // "We could not find out" is not "there is nothing to do".
@@ -174,11 +246,7 @@ describe('Dashboard', () => {
 
   it('shows the attention list whatever the caller asked for when work is blocked', async () => {
     mockAttention.mockResolvedValue(attentionResponse([attentionItem()]));
-    render(
-      <MemoryRouter>
-        <NeedsAttentionPanel repository="all" refreshToken={0} />
-      </MemoryRouter>,
-    );
+    renderAttentionPanel();
 
     await waitFor(() => expect(screen.getByTestId('needs-attention-panel')).toBeInTheDocument());
     expect(screen.getByText('Needs attention')).toBeInTheDocument();
@@ -191,8 +259,7 @@ describe('Dashboard', () => {
       attentionItem({ id: 'plan-issue:5', kind: 'plan_review', category: 'decision', taskId: null, prNumber: 51, title: null }),
     ]));
 
-    renderDashboard();
-    await waitForSections();
+    await renderLoadedDashboard();
 
     expect(screen.getByRole('heading', { name: /Needs attention/ })).toHaveTextContent('Needs attention (2)');
     const panel = screen.getByTestId('needs-attention-panel');
@@ -207,8 +274,7 @@ describe('Dashboard', () => {
   });
 
   it('applies one repository filter to every section and writes it to the URL', async () => {
-    renderDashboard();
-    await waitForSections();
+    await renderLoadedDashboard();
 
     fireEvent.click(screen.getByRole('button', { name: /All Repos/ }));
     fireEvent.click(screen.getAllByTestId('repo-item').find(item => item.textContent?.includes('web')) as HTMLElement);
@@ -226,38 +292,78 @@ describe('Dashboard', () => {
   });
 
   it('restores the repository filter from the URL on load', async () => {
-    renderDashboard('/?repository=acme%2Fapp');
-    await waitForSections();
+    await renderLoadedDashboard('/?repository=acme%2Fapp');
 
     expect(mockAttention).toHaveBeenCalledWith('acme/app');
     expect(mockActive).toHaveBeenCalledWith('acme/app');
     expect(mockStats).toHaveBeenCalledWith('acme/app', '7d');
   });
 
-  it('coalesces a burst of task updates into a single refresh per section', async () => {
-    renderDashboard();
-    await waitForSections();
+  it('coalesces a burst of activity per interested section without refetching or dismissing tips', async () => {
+    // The clock is held still for the burst. Each frame is still delivered in
+    // its own flush, so only the scheduler's coalescing can collapse them —
+    // but on real timers a loaded machine can spend longer than the coalescing
+    // window delivering ten frames, which splits one burst into two windows and
+    // costs a second read. That is correct behaviour and a broken assertion, so
+    // the window is stepped explicitly instead of raced against.
+    vi.useFakeTimers();
+    try {
+      renderDashboard();
+      await act(async () => { await vi.advanceTimersByTimeAsync(10); });
+      expect(screen.getByTestId('historical-stats-section')).toBeInTheDocument();
+      expect(mockActive).toHaveBeenCalledTimes(1);
+      expect(activityHandler).not.toBeNull();
 
-    await waitFor(() => expect(mockActive).toHaveBeenCalledTimes(1));
-    expect(taskUpdateHandler).not.toBeNull();
+      for (let index = 0; index < 10; index += 1) {
+        await push(activity('task', 'completed', { entityId: `task-${index}` }));
+      }
+      // Still inside the window: the burst has cost nothing yet.
+      expect(mockActive).toHaveBeenCalledTimes(1);
 
-    // Each event is delivered in its own flush, so only the scheduler's
-    // coalescing can collapse them into one read per section.
-    for (let index = 0; index < 10; index += 1) {
-      await act(async () => {
-        taskUpdateHandler?.({
-          taskId: `task-${index}`,
-          state: 'claude_execution',
-          repository: 'acme/app',
-        } as TaskUpdatePayload);
-        await Promise.resolve();
-      });
+      await act(async () => { await vi.advanceTimersByTimeAsync(200); });
+      expect(mockActive).toHaveBeenCalledTimes(2);
+      expect(mockStats).toHaveBeenCalledTimes(2);
+      expect(mockAttention).toHaveBeenCalledTimes(2);
+      expect(mockOutcomes).toHaveBeenCalledTimes(2);
+
+      // And nothing trails in behind the coalesced read.
+      await act(async () => { await vi.advanceTimersByTimeAsync(1_000); });
+      expect(mockActive).toHaveBeenCalledTimes(2);
+      expect(mockStats).toHaveBeenCalledTimes(2);
+      expect(getUsageTips).toHaveBeenCalledTimes(1);
+      expect(dismissUsageTip).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
     }
+  });
 
-    await waitFor(() => expect(mockActive).toHaveBeenCalledTimes(2));
-    await waitFor(() => expect(mockStats).toHaveBeenCalledTimes(2));
-    expect(mockAttention).toHaveBeenCalledTimes(2);
-    expect(mockOutcomes).toHaveBeenCalledTimes(2);
+  it('regenerates narrative once for a burst of terminal and attention events from the existing socket', async () => {
+    await renderLoadedDashboard();
+    await waitFor(() => expect(getDashboardNarrative).toHaveBeenCalledTimes(1));
+    for (const [index, change] of (['completed', 'failed', 'cancelled', 'blocked'] as const).entries()) {
+      await push(activity('task', change, { entityId: `finished-${index}` }));
+    }
+    await waitFor(() => expect(getDashboardNarrative).toHaveBeenCalledTimes(2));
+  });
+
+  it('does not regenerate narrative for progress updates or completions outside its repository', async () => {
+    // A second section read is not proof here: the sections coalesce in a
+    // shorter window than the summary, so the summary's own window is what has
+    // to be outlasted before "it never read again" means anything.
+    vi.useFakeTimers();
+    try {
+      renderDashboard('/?repository=acme/app');
+      await act(async () => { await vi.advanceTimersByTimeAsync(10); });
+      expect(getDashboardNarrative).toHaveBeenCalledTimes(1);
+
+      await push(activity('task', 'progressed', { entityId: 'progress' }));
+      await push(activity('task', 'completed', { entityId: 'outside', repository: 'acme/web' }));
+
+      await act(async () => { await vi.advanceTimersByTimeAsync(SUMMARY_COALESCE_MS * 4); });
+      expect(getDashboardNarrative).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('does not reorder running work under a pointer when live updates arrive', async () => {
@@ -265,8 +371,7 @@ describe('Dashboard', () => {
     const second = activeItem({ id: 'task:b', taskId: 'b', title: 'Beta work' });
     mockActive.mockResolvedValue(activeResponse([first, second]));
 
-    renderDashboard();
-    await waitForSections();
+    await renderLoadedDashboard();
     await waitFor(() => expect(screen.getByText('Alpha work')).toBeInTheDocument());
 
     // Every row is a link to its work, so the row under the pointer is the
@@ -276,9 +381,7 @@ describe('Dashboard', () => {
 
     // The server now reports the rows the other way round.
     mockActive.mockResolvedValue(activeResponse([second, first]));
-    await act(async () => {
-      taskUpdateHandler?.({ taskId: 'b', state: 'post_processing', repository: 'acme/app' } as TaskUpdatePayload);
-    });
+    await push(activity('task', 'progressed', { entityId: 'b' }));
     await waitFor(() => expect(mockActive).toHaveBeenCalledTimes(2));
 
     const titles = screen.getAllByText(/(Alpha|Beta) work/).map(node => /(Alpha|Beta) work/.exec(node.textContent ?? '')?.[0]);
@@ -286,19 +389,11 @@ describe('Dashboard', () => {
   });
 
   it('keeps the last known rows, and says nothing about the socket, when it drops', async () => {
-    const { rerender } = renderDashboard();
-    await waitForSections();
+    const { rerender } = await renderLoadedDashboard();
     await waitFor(() => expect(screen.getByText('Add retry budget')).toBeInTheDocument());
 
     socketConnected = false;
-    rerender(
-      <MemoryRouter initialEntries={['/']}>
-        <LocationProbe />
-        <Routes>
-          <Route path="/" element={<Dashboard />} />
-        </Routes>
-      </MemoryRouter>,
-    );
+    rerender(dashboardTree());
 
     // The rows are the report. A dropped socket never blanks the dashboard,
     // and it no longer narrates itself across the top of the page either.
@@ -313,8 +408,7 @@ describe('Dashboard', () => {
     expect(IDLE_RUNNING_MESSAGE).not.toBe(UNAVAILABLE_RUNNING_MESSAGE);
 
     mockActive.mockResolvedValue(activeResponse([]));
-    const empty = renderDashboard();
-    await waitForSections();
+    const empty = await renderLoadedDashboard();
     expect(screen.getByTestId('happening-now-section')).toHaveTextContent(IDLE_RUNNING_MESSAGE);
     expect(screen.getByTestId('happening-now-section')).not.toHaveTextContent(UNAVAILABLE_RUNNING_MESSAGE);
     // An empty list is normal operation, so it never offers a retry.
@@ -349,8 +443,7 @@ describe('Dashboard', () => {
       previous: { completed: 0, successRate: null, recordedSpend: null },
     }));
 
-    renderDashboard();
-    await waitForSections();
+    await renderLoadedDashboard();
 
     await waitFor(() => expect(screen.getByTestId('stat-success-rate')).toHaveTextContent('—'));
     expect(screen.getByTestId('stat-success-rate')).not.toHaveTextContent('0%');
@@ -365,8 +458,7 @@ describe('Dashboard', () => {
   it('summarises the queue with the reason work is waiting', async () => {
     mockActive.mockResolvedValue(activeResponse([activeItem()], [activeItem({ id: 'task:q', taskId: 'q', state: 'pending', phase: 'Waiting' })]));
 
-    renderDashboard();
-    await waitForSections();
+    await renderLoadedDashboard();
 
     const queue = await screen.findByTestId('queue-summary');
     expect(queue).toHaveTextContent('1 queued');
@@ -379,8 +471,7 @@ describe('Dashboard', () => {
       outcomeItem({ id: 'unscored', taskId: 'done-2', title: 'No score here' }),
     ]));
 
-    renderDashboard();
-    await waitForSections();
+    await renderLoadedDashboard();
 
     const scores = await screen.findAllByTestId('completed-score');
     expect(scores).toHaveLength(1);
@@ -397,8 +488,7 @@ describe('Dashboard', () => {
       outcomeItem({ id: 'a', title: 'Fix PR #2494: [Epic] MCP operator surface', taskType: 'pr-comment' }),
     ]));
 
-    renderDashboard();
-    await waitForSections();
+    await renderLoadedDashboard();
 
     const feed = await screen.findByTestId('completed-section');
     expect(within(feed).getByRole('heading', { name: 'Completed' })).toBeInTheDocument();
@@ -411,8 +501,7 @@ describe('Dashboard', () => {
   });
 
   it('filters completed work by title through the heading search box', async () => {
-    renderDashboard();
-    await waitForSections();
+    await renderLoadedDashboard();
     await waitFor(() => expect(mockOutcomes).toHaveBeenCalledWith('all', 50, ''));
 
     mockOutcomes.mockResolvedValue(outcomesResponse([outcomeItem({ id: 'hit', title: 'Cache repository icons' })]));

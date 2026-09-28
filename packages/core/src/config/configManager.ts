@@ -34,6 +34,10 @@ export interface RepoToMonitor {
     // paths, file names, display names or numeric workflow IDs. Nothing is
     // cancelled while this is empty; eligibility is never inferred from a name.
     cancelCiDuringFollowupWorkflows?: string[];
+    // Check runs (by name; `*` matches any text) that never block ProPR's
+    // CI-driven automation: auto-merge, ultrafix continuation, failed-CI
+    // follow-ups and the check status reviews see. GitHub still shows them.
+    nonBlockingChecks?: string[];
     notificationsEnabled?: boolean; // Defaults to true; undefined (legacy configurations) reads as enabled
     visualPreview?: VisualPreviewSettings; // Defaults to disabled for legacy configurations
     alias?: string;          // Optional display name

@@ -77,4 +77,16 @@ The repository setting **Cancel CI while follow-up implementation is in progress
 
 Prerequisite: the GitHub App installation needs **Actions: Read and write**. With read-only Actions access the option is inert — the attempt is logged as a permission error and implementation continues with CI untouched. If access is lost after checks were already cancelled, the obligation to restart them survives and is honoured as soon as the access is granted back. Fork contributions that ProPR publishes to a continuation pull request are handled through that continuation; runs GitHub does not associate with a pull request are left alone.
 
+## Checks That Never Block Automation
+
+Some checks are worth running but should not decide whether ProPR moves a pull request forward, for example slow packaging or platform checks that occasionally fail on hosted runners. List them under **Checks that never block automation** (Repositories → repository → Automation). Each entry is a check run name, matched case-insensitively; `*` matches any text, so `Validate unsigned * package` covers every platform leg.
+
+A failure of a listed check:
+
+- does not hold back auto-merge (`/merge`) or ultrafix continuation;
+- does not start an automatic failed-CI follow-up;
+- is shown to reviews as neutral and marked *(non-blocking)*, not as a failure of the change.
+
+GitHub still shows the check and its result. Unlisted checks keep blocking, and if the repository configuration cannot be read, every check blocks.
+
 {/* VIDEO PLACEHOLDER: Record a 45-second clip: post a natural follow-up comment on a ProPR-created PR, show the task appearing in the Web UI task list, then return to the PR to show the new commit and the completion comment. Show the completion comment's expandable slash-command block as the key moment. */}

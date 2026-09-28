@@ -61,6 +61,7 @@ const sidebars: SidebarsConfig = {
       label: 'Core Workflow',
       items: [
         'features/planning',
+        'features/usage-tips',
         'features/work-splitting',
         'features/execution-safety',
         'features/observability',

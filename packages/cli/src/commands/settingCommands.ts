@@ -47,6 +47,8 @@ function formatValue(value: unknown): string {
  */
 function getSettingDescription(key: SettingKey): string {
   const descriptions: Record<SettingKey, string> = {
+    usage_tips_enabled: "Show daily documentation tips on the dashboard",
+    usage_tips_dismissal_cooldown_days: "Base dismissal cooldown (1–365 days; changes recalculate existing cooldowns)",
     default_agent_alias: "Alias of the default implementation agent",
     worker_concurrency: "Number of concurrent workers for processing tasks",
     github_user_whitelist: "GitHub usernames allowed to use the system",
@@ -55,6 +57,7 @@ function getSettingDescription(key: SettingKey): string {
     planner_generation_model: "Model for planner generation",
     auto_followup_score_threshold: "Score threshold (0-9) for auto-followup",
     auto_resolve_merge_conflicts: "Automatically resolve merge conflicts",
+    dashboard_summary_enabled: "Enable AI-generated dashboard activity summaries",
     model_reasoning_level: "Reasoning level for GPT and Claude agents (empty = agent default)",
     pr_review_model: "Model for full PR reviews",
     pr_review_prompt: "Override for the PR review prompt guidance (empty = built-in default)",

@@ -1,3 +1,4 @@
+import { parseUsageTipsSettings } from '@propr/shared';
 import { assertConfigRevision } from './configRevision.js';
 import { Request, Response } from 'express';
 import { RedisClientType } from 'redis';
@@ -140,15 +141,13 @@ export function createConfigRoutes(deps: ConfigRoutesDeps) {
     database,
     preparationDeps: deps.agentPreparationDeps,
   });
-  const syntheticAgentRoutes = createSyntheticAgentConfigRoutes(
-    {
-      redisClient,
-      configStore,
-      publishConfigUpdate,
-      logActivityHelper,
-      refreshAgentRegistry: () => configManager.AgentRegistry.getInstance().refresh(),
-    },
-  );
+  const syntheticAgentRoutes = createSyntheticAgentConfigRoutes({
+    redisClient,
+    configStore,
+    publishConfigUpdate,
+    logActivityHelper,
+    refreshAgentRegistry: () => configManager.AgentRegistry.getInstance().refresh(),
+  });
   const createJsonPostHandler = <T>({ lockKey, pickValue, validate, save, subtype, body, committedErrorMessage, activity }: JsonPostHandlerConfig<T>) => async (req: Request, res: Response): Promise<void> => {
     const bodyValidation = validateJsonObjectBody(req.body);
     if (!bodyValidation.ok) {
@@ -284,6 +283,9 @@ export function createConfigRoutes(deps: ConfigRoutesDeps) {
         ...reviewContextBudgetSettingsResponse(settings),
         auto_followup_score_threshold: autoFollowup.value,
         auto_resolve_merge_conflicts: autoResolveMergeConflicts,
+        usage_tips_enabled: parseUsageTipsSettings({ usage_tips_enabled: await configStore.getConfig('usage_tips_enabled', true) }).enabled,
+        usage_tips_dismissal_cooldown_days: parseUsageTipsSettings({ usage_tips_dismissal_cooldown_days: await configStore.getConfig('usage_tips_dismissal_cooldown_days', 45) }).cooldownDays,
+        dashboard_summary_enabled: (await configStore.getConfig('dashboard_summary_enabled', true)) !== false,
         model_reasoning_level: modelReasoningLevel,
         pr_review_model: prReviewModel,
         ultrafix_rating_goal: ultrafixGoal.value,

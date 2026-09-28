@@ -1,29 +1,19 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import {
-  getSettings,
-  updateSettings,
-  getFollowupKeywords,
-  updateFollowupKeywords,
-  getFollowupIgnoreKeywords,
-  updateFollowupIgnoreKeywords,
-  getPrLabel,
-  updatePrLabel,
-  getPrimaryProcessingLabels,
-  updatePrimaryProcessingLabels,
+  getSettings, updateSettings,
+  getFollowupKeywords, updateFollowupKeywords,
+  getFollowupIgnoreKeywords, updateFollowupIgnoreKeywords,
+  getPrLabel, updatePrLabel,
+  getPrimaryProcessingLabels, updatePrimaryProcessingLabels,
   getAgents,
   getInstanceCatalog,
-  getSummarizationSettings,
-  updateSummarizationSettings,
+  getSummarizationSettings, updateSummarizationSettings,
   triggerReindexAll,
   AgentConfig,
   SummarizationSettings
 } from '../../api/proprApi';
 import { DEFAULT_REVIEW_CONTEXT_BUDGET_PERCENT, type InstanceCatalogAgent } from '@propr/shared';
-import {
-  getAgentTankSettings,
-  updateAgentTankSettings,
-  getAgentTankStatus
-} from '../../api/revertApi';
+import { getAgentTankSettings, updateAgentTankSettings, getAgentTankStatus } from '../../api/revertApi';
 import { Settings } from './types';
 import { parseLoadedData } from './parseLoadedData';
 import { useListManagement } from './useListManagement';
@@ -70,6 +60,9 @@ export function useSettingsState() {
     default_agent_alias: '',
     auto_followup_score_threshold: 4,
     auto_resolve_merge_conflicts: false,
+    dashboard_summary_enabled: true,
+    usage_tips_enabled: true,
+    usage_tips_dismissal_cooldown_days: 45,
     model_reasoning_level: '',
     pr_review_model: '',
     pr_review_prompt: '',
@@ -155,6 +148,9 @@ export function useSettingsState() {
         default_agent_alias: settingsToSave.default_agent_alias,
         auto_followup_score_threshold: settingsToSave.auto_followup_score_threshold,
         auto_resolve_merge_conflicts: settingsToSave.auto_resolve_merge_conflicts,
+        dashboard_summary_enabled: settingsToSave.dashboard_summary_enabled ?? true,
+        usage_tips_enabled: settingsToSave.usage_tips_enabled ?? true,
+        usage_tips_dismissal_cooldown_days: settingsToSave.usage_tips_dismissal_cooldown_days ?? 45,
         model_reasoning_level: settingsToSave.model_reasoning_level,
         pr_review_model: settingsToSave.pr_review_model,
         pr_review_prompt: settingsToSave.pr_review_prompt,
@@ -296,8 +292,9 @@ export function useSettingsState() {
     saveSettingsOnly(settings);
   }, [settings, saveSettingsOnly]);
 
-  const handleModelSelectionChange = useCallback((e: React.ChangeEvent<HTMLSelectElement>) => {
-    const newSettings = { ...settings, [e.target.name]: e.target.value };
+  const handleModelSelectionChange = useCallback((e: React.ChangeEvent<HTMLSelectElement | HTMLInputElement>) => {
+    const value = e.target instanceof HTMLInputElement && e.target.type === 'checkbox' ? e.target.checked : e.target.value;
+    const newSettings = { ...settings, [e.target.name]: value };
     setSettings(newSettings);
     saveSettingsOnly(newSettings);
   }, [settings, saveSettingsOnly]);

@@ -13,6 +13,7 @@ import { render, screen, waitFor, within } from '@testing-library/react';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import Dashboard from './Dashboard';
 import {
+  getDashboardNarrative,
   getDashboardActive,
   getDashboardAttention,
   getDashboardOutcomes,
@@ -29,6 +30,7 @@ import {
 } from './Dashboard.fixtures';
 
 vi.mock('../api/dashboardApi', () => ({
+  getDashboardNarrative: vi.fn(),
   getDashboardAttention: vi.fn(),
   getDashboardActive: vi.fn(),
   getDashboardOutcomes: vi.fn(),
@@ -36,7 +38,13 @@ vi.mock('../api/dashboardApi', () => ({
 }));
 
 vi.mock('../contexts/useSocket', () => ({
-  useSocket: () => ({ isConnected: true, onTaskUpdate: () => () => {} }),
+  useSocket: () => ({
+    isConnected: true,
+    subscribeToActivity: () => {},
+    unsubscribeFromActivity: () => {},
+    onActivityUpdate: () => () => {},
+    onGoalUpdate: () => () => {},
+  }),
 }));
 
 vi.mock('../hooks/useSystemReadiness', () => ({
@@ -88,6 +96,7 @@ async function waitForSections() {
 describe('Dashboard consistency rules', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    vi.mocked(getDashboardNarrative).mockResolvedValue({ repository: 'all', enabled: true, summary: 'Work is underway. Nothing needs your attention.' });
     mockAttention.mockResolvedValue(attentionResponse([attentionItem()]));
     mockActive.mockResolvedValue(activeResponse([activeItem()]));
     mockOutcomes.mockResolvedValue(outcomesResponse([outcomeItem()]));

@@ -75,6 +75,7 @@ export function withDefaultRepoOptions(repo: RepoToMonitor): RepoToMonitor {
     ...withDefaultRepoAutoFollowup(repo),
     cancelCiDuringFollowup: repo.cancelCiDuringFollowup === true,
     cancelCiDuringFollowupWorkflows: normalizeStoredWorkflowSelection(repo.cancelCiDuringFollowupWorkflows),
+    nonBlockingChecks: normalizeStoredWorkflowSelection(repo.nonBlockingChecks),
     notificationsEnabled: repo.notificationsEnabled !== false,
     visualPreview: normalizeStoredVisualPreviewSettings(repo.visualPreview)
   };
@@ -114,6 +115,20 @@ export function preserveRepoCancelCiWorkflows(
     if (incomingRepo.cancelCiDuringFollowupWorkflows !== undefined) return repo;
     const previousRepo = previousRepos.find(candidate => candidate.id === repo.id);
     return { ...repo, cancelCiDuringFollowupWorkflows: normalizeStoredWorkflowSelection(previousRepo?.cancelCiDuringFollowupWorkflows) };
+  });
+}
+
+/** A client that does not know the field must never drop the operator's non-blocking checks. */
+export function preserveRepoNonBlockingChecks(
+  previousRepos: RepoToMonitor[],
+  normalizedRepos: RepoToMonitor[],
+  incomingRepos: unknown[]
+): RepoToMonitor[] {
+  return normalizedRepos.map((repo, index) => {
+    const incomingRepo = incomingRepos[index] as Partial<RepoToMonitor>;
+    if (incomingRepo.nonBlockingChecks !== undefined) return repo;
+    const previousRepo = previousRepos.find(candidate => candidate.id === repo.id);
+    return { ...repo, nonBlockingChecks: normalizeStoredWorkflowSelection(previousRepo?.nonBlockingChecks) };
   });
 }
 
@@ -324,6 +339,25 @@ function normalizeWorkflowSelection(value: unknown, repoName: string): Validatio
   return success(selection);
 }
 
+/** Check run name patterns that never block automation (`*` matches any text). */
+function normalizeNonBlockingChecks(value: unknown, repoName: string): ValidationResult<string[]> {
+  if (value === undefined || value === null) return success([]);
+  if (!Array.isArray(value)) return failure(`Invalid nonBlockingChecks format for ${repoName}: must be an array of check run names`);
+  if (value.length > MAX_CANCEL_CI_WORKFLOWS) return failure(`Invalid nonBlockingChecks format for ${repoName}: at most ${MAX_CANCEL_CI_WORKFLOWS} checks`);
+  const checks: string[] = [];
+  for (const entry of value) {
+    if (typeof entry !== 'string') return failure(`Invalid nonBlockingChecks format for ${repoName}: every check must be a string`);
+    const check = entry.trim();
+    if (!check) continue;
+    if (check.length > MAX_CANCEL_CI_WORKFLOW_LENGTH) {
+      return failure(`Invalid nonBlockingChecks format for ${repoName}: a check must be ${MAX_CANCEL_CI_WORKFLOW_LENGTH} characters or fewer`);
+    }
+    if (/^\*+$/.test(check)) return failure(`Invalid nonBlockingChecks format for ${repoName}: a pattern must name a check, not match every check`);
+    if (!checks.some(existing => existing.toLowerCase() === check.toLowerCase())) checks.push(check);
+  }
+  return success(checks);
+}
+
 /** Optional booleans that are rejected when present with a non-boolean value. */
 const OPTIONAL_BOOLEAN_FIELDS = ['autoFollowupOnFailedCi', 'cancelCiDuringFollowup', 'notificationsEnabled'] as const;
 
@@ -357,6 +391,8 @@ export function normalizeRepoConfig(repo: unknown): ValidationResult<RepoToMonit
   if (!booleans.ok) return booleans;
   const cancelCiWorkflows = normalizeWorkflowSelection(candidate.cancelCiDuringFollowupWorkflows, name);
   if (!cancelCiWorkflows.ok) return cancelCiWorkflows;
+  const nonBlockingChecks = normalizeNonBlockingChecks(candidate.nonBlockingChecks, name);
+  if (!nonBlockingChecks.ok) return nonBlockingChecks;
   const visualPreview = normalizeVisualPreview(candidate.visualPreview, name);
   if (!visualPreview.ok) return visualPreview;
 
@@ -367,6 +403,7 @@ export function normalizeRepoConfig(repo: unknown): ValidationResult<RepoToMonit
     autoFollowupOnFailedCi: candidate.autoFollowupOnFailedCi ?? false,
     cancelCiDuringFollowup: candidate.cancelCiDuringFollowup ?? false,
     cancelCiDuringFollowupWorkflows: cancelCiWorkflows.value,
+    nonBlockingChecks: nonBlockingChecks.value,
     notificationsEnabled: candidate.notificationsEnabled !== false,
     visualPreview: visualPreview.value,
     alias: alias.value,
@@ -388,6 +425,7 @@ export function preserveRepoSettings(
   let repos = preserveRepoAutoFollowup(previousRepos, normalizedRepos, incomingRepos);
   repos = preserveRepoCancelCiDuringFollowup(previousRepos, repos, incomingRepos);
   repos = preserveRepoCancelCiWorkflows(previousRepos, repos, incomingRepos);
+  repos = preserveRepoNonBlockingChecks(previousRepos, repos, incomingRepos);
   repos = preserveRepoNotifications(previousRepos, repos, incomingRepos);
   return preserveRepoVisualPreview(previousRepos, repos, incomingRepos);
 }

@@ -1,3 +1,4 @@
+import { createDashboardRoutes } from '../routes/dashboardRoutes.js';
 import assert from 'node:assert/strict';
 import { after, before, beforeEach, test } from 'node:test';
 import type { Knex } from 'knex';
@@ -369,4 +370,96 @@ test('every dashboard endpoint rejects a malformed repository filter with HTTP 4
     const accepted = await call(handler, { repository: 'integry/propr' });
     assert.equal(accepted.status, 200);
   }
+});
+
+test('narrative route returns idle prose and validates the repository filter', async () => {
+  const routes = createTestDashboardRoutes(database);
+  const result = await call(routes.getNarrative);
+  assert.equal(result.status, 200);
+  assert.equal(result.body.enabled, true);
+  assert.equal(result.body.summary, 'No work is active, and there are no recent completions.');
+  assert.equal((await call(routes.getNarrative, { repository: 'invalid repo' })).status, 400);
+});
+
+
+test('disabled narrative short-circuits data reads and model resolution', async () => {
+  const routes = createDashboardRoutes({
+    db: (() => { throw new Error('Must not query'); }) as unknown as Knex,
+    redisClient: {} as never, taskQueue: {} as never,
+    isSummaryEnabled: async () => false,
+    narrativeModel: async () => { assert.fail('Must not resolve model'); },
+  });
+  const result = await call(routes.getNarrative);
+  assert.equal(result.status, 200);
+  assert.deepEqual(result.body, { repository: 'all', enabled: false, summary: null });
+});
+
+test('narrative route degrades a live-detail projection failure to lifecycle progress', async () => {
+  await seedTask({
+    taskId: 'unreadable-live', title: 'Keep the briefing available', issueNumber: 2574,
+    states: [{ state: 'post_processing', timestamp: minutesAgo(1) }],
+  });
+  let prompt = '';
+  const route = createDashboardRoutes({
+    db: database,
+    redisClient: {} as never,
+    taskQueue: {} as never,
+    now: () => NOW,
+    liveDetails: async () => { throw new Error('Stream unavailable'); },
+    narrativeModel: async () => ({
+      id: 'configured',
+      generate: async value => { prompt = value; return 'The task is finishing up.'; },
+    }),
+  }).getNarrative;
+
+  const result = await call(route, { repository: 'integry/propr' });
+  assert.equal(result.status, 200);
+  assert.equal(result.body.summary, 'The task is finishing up.');
+  assert.match(prompt, /"progress":"Finishing up"/);
+});
+
+test('narrative route uses injected model, bypasses cache on refresh and degrades without HTTP errors', async () => {
+  await seedTask({
+    taskId: 'narrative-task', title: 'Cache repository icons', issueNumber: 2574,
+    states: [{ state: 'claude_execution', timestamp: minutesAgo(1) }],
+  });
+  let count = 0;
+  let fail = false;
+  let prompt = '';
+  const routes = createDashboardRoutes({
+    db: database, redisClient: {} as never, taskQueue: {} as never, now: () => NOW,
+    liveDetails: async () => ({
+      currentTask: 'Running tests',
+      todos: [
+        { status: 'completed', content: 'Implement cache' },
+        { status: 'completed', content: 'Add tests' },
+        { status: 'in_progress', content: 'Run tests' },
+        { status: 'pending', content: 'Review changes' },
+        { status: 'pending', content: 'Finish' },
+      ],
+      events: [{ type: 'tool_use', toolName: 'Bash', input: { description: 'Running dashboard tests' }, timestamp: minutesAgo(0.5) }],
+    }),
+    narrativeModel: async () => ({ id: 'configured', generate: async value => {
+      prompt = value;
+      count++;
+      if (fail) throw new Error('Provider failed');
+      return `Running work. Generation ${count}.`;
+    } }),
+  });
+  assert.equal((await call(routes.getNarrative)).body.summary, 'Running work. Generation 1.');
+  assert.match(prompt, /Cache repository icons/);
+  assert.match(prompt, /Running tests \(step 3 of 5\)/);
+  assert.match(prompt, /Running dashboard tests/);
+  assert.match(prompt, /"number":2574/);
+  await call(routes.getNarrative);
+  assert.equal(count, 1);
+  assert.equal((await call(routes.getNarrative, { refresh: 'true' })).body.summary, 'Running work. Generation 2.');
+  fail = true;
+  const failed = await call(routes.getNarrative, { refresh: 'true' });
+  assert.equal(failed.status, 200);
+  assert.equal(failed.body.summary, null);
+  assert.equal((await call(routes.getNarrative)).body.summary, 'Running work. Generation 2.');
+  const unavailable = await call(createTestDashboardRoutes(database).getNarrative);
+  assert.equal(unavailable.status, 200);
+  assert.equal(unavailable.body.summary, null);
 });

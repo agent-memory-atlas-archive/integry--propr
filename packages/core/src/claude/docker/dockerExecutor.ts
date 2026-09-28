@@ -17,8 +17,8 @@ import {
     setupAbortChecker,
 } from './dockerAbortController.js';
 import {
+    BoundedDiagnosticTail,
     BoundedProviderRecordBuffer,
-    boundedProviderDiagnostic,
     boundedProviderOutput,
 } from '../../agents/impl/utils/boundedProviderOutput.js';
 import { LiveOutputLog } from '../../agents/impl/utils/liveOutputLog.js';
@@ -234,8 +234,11 @@ export function executeDockerCommand(command: string, args: string[], options: D
         const namedContainer = command === 'docker' ? getDockerRunContainerName(executionArgs) : null;
         const child = spawnCommandProcess(executablePath, executionArgs, cwd, stdinData);
 
-        let stdout = '', stderr = '', sessionLineBuffer = '';
+        let sessionLineBuffer = '';
+        const stderrTail = new BoundedDiagnosticTail();
+        // Built on read only (it costs the whole bounded output), never per chunk.
         const stdoutBuffer = new BoundedProviderRecordBuffer();
+        const readStdout = (): string => stdoutBuffer.output;
         const stdoutDecoder = new StringDecoder('utf8');
         const stderrDecoder = new StringDecoder('utf8');
         const state = createDockerExecutionState();
@@ -319,7 +322,7 @@ export function executeDockerCommand(command: string, args: string[], options: D
             })
             : null;
 
-        const liveOutput = startLiveOutputStreaming({ taskId, streamToRedis, streamStderrToRedis, streamExtraOutput, stripAnsi, onOverflow: warnFromLiveOutput }, () => stdout, () => stderr);
+        const liveOutput = startLiveOutputStreaming({ taskId, streamToRedis, streamStderrToRedis, streamExtraOutput, stripAnsi, onOverflow: warnFromLiveOutput }, readStdout, () => stderrTail.value);
         if (command === 'docker' && args[0] === 'run' && worktreePath) {
             containerDetectionTimer = detectContainerId(
                 worktreePath,
@@ -331,22 +334,23 @@ export function executeDockerCommand(command: string, args: string[], options: D
 
         child.stdout?.on('data', (data: Buffer) => {
             const chunk = stdoutDecoder.write(data), ts = new Date().toISOString();
-            stdout = stdoutBuffer.append(chunk);
+            stdoutBuffer.append(chunk);
             liveOutput?.stdout(chunk);
             inspectSessionLines(chunk, ts);
         });
         child.stderr?.on('data', (data: Buffer) => {
             const chunk = stderrDecoder.write(data);
-            stderr = boundedProviderDiagnostic(stderr + chunk);
+            stderrTail.append(chunk);
             liveOutput?.stderr(chunk);
         });
 
         child.on('close', async (exitCode: number | null) => {
             clearTimeout(timeoutHandle);
             const finalStdout = stdoutDecoder.end();
-            if (finalStdout) stdout = stdoutBuffer.append(finalStdout);
+            if (finalStdout) stdoutBuffer.append(finalStdout);
             const finalStderr = stderrDecoder.end();
-            stderr = boundedProviderDiagnostic(stderr + finalStderr);
+            stderrTail.append(finalStderr);
+            const stderr = stderrTail.value;
             liveOutput?.stdout(finalStdout);
             liveOutput?.stderr(finalStderr);
             inspectSessionLines(finalStdout, new Date().toISOString(), true);
@@ -372,13 +376,13 @@ export function executeDockerCommand(command: string, args: string[], options: D
                 const timeoutMessage = `Command timed out after ${timeout}ms`;
                 const timeoutStderr = stderr.trim() ? `${stderr.trimEnd()}\n${timeoutMessage}` : timeoutMessage;
                 if (preserveOutputOnTimeout) {
-                    resolve({ exitCode, stdout, stderr: timeoutStderr, messageTimestamps, timedOut: true, timeoutMs: timeout });
+                    resolve({ exitCode, stdout: readStdout(), stderr: timeoutStderr, messageTimestamps, timedOut: true, timeoutMs: timeout });
                 } else {
                     reject(new Error(timeoutMessage));
                 }
                 return;
             }
-            resolve({ exitCode, stdout, stderr, messageTimestamps });
+            resolve({ exitCode, stdout: readStdout(), stderr, messageTimestamps });
         });
         child.on('error', async (error: Error) => {
             // close may run during cleanup; capture the process result before awaiting.

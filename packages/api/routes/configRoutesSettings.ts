@@ -204,6 +204,9 @@ async function saveNormalizedSettingsWithRollback({
   const {
     auto_followup_score_threshold,
     auto_resolve_merge_conflicts,
+    dashboard_summary_enabled,
+    usage_tips_enabled,
+    usage_tips_dismissal_cooldown_days,
     model_reasoning_level,
     pr_review_model,
     ultrafix_rating_goal,
@@ -215,6 +218,9 @@ async function saveNormalizedSettingsWithRollback({
   const extracted = await extractSettingSaves({
     auto_followup_score_threshold,
     auto_resolve_merge_conflicts,
+    dashboard_summary_enabled,
+    usage_tips_enabled,
+    usage_tips_dismissal_cooldown_days,
     model_reasoning_level,
     pr_review_model,
     ultrafix_rating_goal,
