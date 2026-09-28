@@ -142,6 +142,16 @@ export interface TokenUsageInfo {
   cache_read_input_tokens: number;
 }
 
+/**
+ * How far into a task's live output log a read got. Within one epoch a larger
+ * offset reflects newer output, so a read at or past an update's position
+ * already contains everything that update carried, grown events included.
+ */
+export interface LiveOutputPosition {
+  epoch: string;
+  offset: number;
+}
+
 /** Event payload for live task details updates */
 export interface TaskLiveUpdatePayload {
   eventType: typeof TASK_LIVE_UPDATE;
@@ -162,6 +172,8 @@ export interface TaskLiveUpdatePayload {
    * `omittedEventCount` covers it.
    */
   historyTruncated?: boolean;
+  /** Where in the live output log this payload was read; absent for output without ordered offsets. */
+  liveOutputPosition?: LiveOutputPosition;
 }
 
 /** Queue statistics data */

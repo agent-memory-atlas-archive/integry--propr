@@ -29,12 +29,14 @@ export const liveOutputMetaKey = (taskId: string): string => `agent:output:${tas
 
 /**
  * KEYS: data, meta. ARGV: chunk, maximum bytes, ttl seconds, mode, generation
- * candidate, writer, batch sequence. mode `reset` starts a new execution (new
- * epoch) before appending; `replace` swaps in a whole snapshot of the same
- * execution (providers that cannot stream records), so readers resynchronize
- * without a new epoch. A writer's batches commit in sequence order, so a batch
- * at or below its last committed sequence is a retry of a write whose reply was
- * lost, and is not applied again.
+ * candidate, writer, batch sequence, origin offset, origin envelopes, origin
+ * head. mode `reset` starts a new execution (new epoch) before appending;
+ * `replace` swaps in a whole snapshot of the same execution (providers that
+ * cannot stream records), so readers resynchronize without a new epoch. A
+ * snapshot whose oldest records were dropped (see {@link LiveOutputOrigin})
+ * starts that far into the execution, just like a trimmed log. A writer's
+ * batches commit in sequence order, so a batch at or below its last committed
+ * sequence is a retry of a write whose reply was lost, and is not applied again.
  */
 export const APPEND_LIVE_OUTPUT_SCRIPT = `
 local mode = ARGV[4]
@@ -52,15 +54,26 @@ if redis.call('exists', KEYS[1]) == 0 or redis.call('hexists', KEYS[2], 'generat
 end
 if mode == 'reset' or mode == 'replace' then
     local previous = redis.call('strlen', KEYS[1])
+    local previousStart = tonumber(redis.call('hget', KEYS[2], 'start') or '-1')
     redis.call('del', KEYS[1])
     local base = redis.call('hincrby', KEYS[2], 'base', previous)
     -- A snapshot replaces the same execution's output, so its events keep their IDs.
     if mode == 'reset' then redis.call('hincrby', KEYS[2], 'epoch', 1) end
-    redis.call('hset', KEYS[2], 'start', base)
+    -- Records keep their offsets from the execution's start when the snapshot
+    -- dropped older ones. The start must still move, or a reader would take
+    -- the new snapshot for an append to the one it read.
+    local origin = tonumber(ARGV[8] or '0') or 0
+    if origin > 0 and base - origin <= previousStart then
+        base = redis.call('hincrby', KEYS[2], 'base', previousStart + origin + 1 - base)
+    end
+    redis.call('hset', KEYS[2], 'start', base - origin)
     redis.call('hdel', KEYS[2], 'head', 'envelopes')
+    if origin > 0 then redis.call('hset', KEYS[2], 'head', ARGV[10], 'envelopes', ARGV[9]) end
 end
 if redis.call('hexists', KEYS[2], 'epoch') == 0 then
-    redis.call('hset', KEYS[2], 'epoch', 0, 'base', 0, 'start', 0)
+    redis.call('hset', KEYS[2], 'epoch', 0)
+    redis.call('hsetnx', KEYS[2], 'base', 0)
+    redis.call('hsetnx', KEYS[2], 'start', 0)
 end
 local length = redis.call('append', KEYS[1], ARGV[1])
 if redis.call('hexists', KEYS[2], 'head') == 0 then
@@ -97,6 +110,31 @@ return length
 
 export type LiveOutputWriteMode = 'append' | 'reset' | 'replace';
 
+/**
+ * Where a snapshot begins within its execution's output once its oldest
+ * records were dropped: `offset` bytes in, after `envelopes` JSON records, the
+ * first of which is `head`. Readers then number its records as if nothing had
+ * been dropped, exactly as they do for a log trimmed at the ceiling.
+ */
+export interface LiveOutputOrigin {
+    offset: number;
+    envelopes: number;
+    head: string;
+}
+
+/** Longest first record kept as `head`; the append script reads the same window. */
+const MAX_HEAD_BYTES = 65535;
+/** A JSON record; the append script counts trimmed ones by the same rule. */
+const ENVELOPE = /^[ \t\r]*\{/;
+
+/** The origin of a snapshot whose records before it, `discarded`, were dropped. */
+export function liveOutputOrigin(discarded: string): LiveOutputOrigin | undefined {
+    if (!discarded) return undefined;
+    const lines = discarded.split('\n');
+    const head = lines.length > 1 && Buffer.byteLength(lines[0]) <= MAX_HEAD_BYTES ? lines[0] : '';
+    return { offset: Buffer.byteLength(discarded), envelopes: lines.filter(line => ENVELOPE.test(line)).length, head };
+}
+
 /** A queued batch's identity, kept across retries: `sequence` grows by one per batch of `writer`. */
 export interface LiveOutputPublication {
     writer: string;
@@ -107,17 +145,20 @@ export async function writeLiveOutput(
     redis: Pick<Redis, 'eval'>,
     taskId: string,
     chunk: string,
-    { mode = 'append', maximumBytes = LIVE_OUTPUT_MAX_BYTES, publication }: {
+    { mode = 'append', maximumBytes = LIVE_OUTPUT_MAX_BYTES, publication, origin }: {
         mode?: LiveOutputWriteMode;
         maximumBytes?: number;
         /** Makes a retry of a committed batch (whose reply was lost) a no-op. */
         publication?: LiveOutputPublication;
+        /** `reset` and `replace` only: where the chunk begins within the execution. */
+        origin?: LiveOutputOrigin;
     } = {},
 ): Promise<number> {
     return Number(await redis.eval(
         APPEND_LIVE_OUTPUT_SCRIPT, 2, liveOutputKey(taskId), liveOutputMetaKey(taskId),
         chunk, String(maximumBytes), String(LIVE_OUTPUT_TTL_SECONDS), mode, randomUUID(),
         publication?.writer ?? '', String(publication?.sequence ?? 0),
+        String(origin?.offset ?? 0), String(origin?.envelopes ?? 0), origin?.head ?? '',
     ));
 }
 
@@ -141,7 +182,7 @@ export class LiveOutputLog {
     private readonly ownsRedis: boolean;
     private readonly partials = new Map<string, string>();
     private pending = '';
-    private readonly writes: Array<{ chunk: string; mode: 'append' | 'replace'; sequence: number }> = [];
+    private readonly writes: Array<{ chunk: string; mode: 'append' | 'replace'; sequence: number; origin?: LiveOutputOrigin }> = [];
     private readonly writer = randomUUID();
     private sequence = 0;
     private resetPending: boolean;
@@ -174,11 +215,16 @@ export class LiveOutputLog {
         this.queue(text.slice(0, boundary + 1));
     }
 
-    /** Publishes a whole snapshot in place of the previous one (providers that cannot stream records). */
-    replace(snapshot: string): void {
+    /**
+     * Publishes a whole snapshot in place of the previous one (providers that
+     * cannot stream records). `discarded` is the output before the snapshot
+     * that it no longer holds, so its records keep their offsets.
+     */
+    replace(snapshot: string, { discarded = '' }: { discarded?: string } = {}): void {
         if (this.closed) return;
         this.enqueuePending();
-        this.writes.push({ chunk: this.transform(snapshot), mode: 'replace', sequence: ++this.sequence });
+        const origin = liveOutputOrigin(this.transform(discarded));
+        this.writes.push({ chunk: this.transform(snapshot), mode: 'replace', sequence: ++this.sequence, ...(origin ? { origin } : {}) });
         void this.flush();
     }
 
@@ -195,6 +241,7 @@ export class LiveOutputLog {
                     await writeLiveOutput(this.redis, this.taskId, write.chunk, {
                         mode: this.resetPending ? 'reset' : write.mode,
                         publication: { writer: this.writer, sequence: write.sequence },
+                        origin: write.origin,
                     });
                 } catch (error) {
                     this.warn(error);

@@ -1,14 +1,16 @@
 import assert from 'node:assert/strict';
 import { after, test } from 'node:test';
+import { Redis } from 'ioredis';
 import type { Knex } from 'knex';
 import type { RedisClientType } from 'redis';
 import type { Server as SocketIOServer } from 'socket.io';
 import { db, liveOutputKey } from '@propr/core';
-import { LiveOutputProjector, projectLiveOutput, projectLiveOutputRead, type LiveOutputRead } from '../services/liveOutputStream.js';
+import { LiveOutputProjector, projectLiveOutput, projectLiveOutputRead, type LiveOutputRead, type LiveOutputRedis } from '../services/liveOutputStream.js';
 import { TaskWatcherManager } from '../services/taskWatcher.js';
 import { findLatestExecutionStartForTask } from '../services/taskWatcherLookup.js';
 import { mergeFullLiveDetails } from '../../../propr-ui/src/components/TaskDetails/liveDetailsMerge.js';
 import { buildLiveOutputSnapshot } from '../../core/src/claude/docker/dockerLiveOutputSnapshot.js';
+import { LiveOutputLog, liveOutputMetaKey, liveOutputOrigin } from '../../core/src/agents/impl/utils/liveOutputLog.js';
 import { withLiveOutputReads } from './liveOutputRedisFake.js';
 
 after(async () => { await db.destroy(); });
@@ -151,10 +153,10 @@ test('re-published Vibe snapshots keep transcript IDs while process diagnostics 
   const details = (events: Event[]) => ({ events, todos: [], currentTask: null, tokenUsage: null } as unknown as Details);
   const thoughts = (events: Array<{ type: string; content?: unknown }>) => events.filter(event => event.type === 'thought').map(event => event.content);
 
-  const first = project(buildLiveOutputSnapshot(`${transcript.slice(0, 2).join('\n')}\n`, '', 'Starting vibe'));
+  const first = project(buildLiveOutputSnapshot(`${transcript.slice(0, 2).join('\n')}\n`, '', 'Starting vibe').text);
   // More stderr (and stdout) arrives while the transcript is unchanged, then the transcript grows.
-  const grown = project(buildLiveOutputSnapshot(`${transcript.slice(0, 2).join('\n')}\n`, 'progress', 'Starting vibe\nwarning: slow network'));
-  const extended = project(buildLiveOutputSnapshot(`${transcript.join('\n')}\n`, 'progress', 'Starting vibe\nwarning: slow network\nretrying'));
+  const grown = project(buildLiveOutputSnapshot(`${transcript.slice(0, 2).join('\n')}\n`, 'progress', 'Starting vibe\nwarning: slow network').text);
+  const extended = project(buildLiveOutputSnapshot(`${transcript.join('\n')}\n`, 'progress', 'Starting vibe\nwarning: slow network\nretrying').text);
   const inspect = (events: Event[]) => events.find(event => event.content === 'Inspect the parser')?.id;
   assert.ok(inspect(first));
   assert.equal(inspect(grown), inspect(first));
@@ -168,8 +170,145 @@ test('re-published Vibe snapshots keep transcript IDs while process diagnostics 
 
 test('snapshot diagnostics never push the transcript out of the byte budget', () => {
   const transcript = `${JSON.stringify({ role: 'assistant', content: 'Keep me' })}\n`;
-  const snapshot = buildLiveOutputSnapshot(transcript, 'x'.repeat(40), `${'diagnostic\n'.repeat(20)}`, 128);
+  const { text: snapshot, discarded } = buildLiveOutputSnapshot(transcript, 'x'.repeat(40), `${'diagnostic\n'.repeat(20)}`, 128);
   assert.ok(Buffer.byteLength(snapshot) <= 128);
   assert.ok(snapshot.startsWith(transcript), 'the transcript keeps its offsets');
+  assert.equal(discarded, '');
   assert.ok(snapshot.endsWith('diagnostic\n'), 'diagnostics keep their most recent records');
+});
+
+test('bounded Vibe snapshots keep every message identity once the transcript outgrows the budget', () => {
+  const records = [
+    JSON.stringify({ role: 'system', content: 'You are Vibe.' }),
+    ...Array.from({ length: 14 }, (_, index) => JSON.stringify({ role: 'assistant', content: `Message ${index} ${'.'.repeat(40)}` })),
+  ];
+  type Details = Parameters<typeof mergeFullLiveDetails>[0];
+  const details = (events: Event[]) => ({ events, todos: [], currentTask: null, tokenUsage: null } as unknown as Details);
+  const offsetKey = (id: string) => id.split(':').slice(-2).join(':');
+  // Each publication replaces the previous snapshot, as the append script stores it.
+  let base = 0;
+  let previousStart = -1;
+  let merged = details([]);
+  const identity = new Map<string, string>();
+  for (let count = 1; count <= records.length; count += 1) {
+    const transcript = `${records.slice(0, count).join('\n')}\n`;
+    const { text, discarded } = buildLiveOutputSnapshot(transcript, 'progress', 'Starting vibe', 600);
+    const origin = liveOutputOrigin(discarded);
+    if (origin && base - origin.offset <= previousStart) base = previousStart + origin.offset + 1;
+    const start = base - (origin?.offset ?? 0);
+    assert.ok(start > previousStart, 'every snapshot moves the start, so readers resynchronize');
+    const read: LiveOutputRead = {
+      epoch: 'generation:1', base, end: base + Buffer.byteLength(text), start, head: origin?.head ?? '',
+      envelopes: origin?.envelopes ?? 0, from: base, text,
+    };
+    const events = projectLiveOutputRead(read, 'task', null, { selectEvents: false }).events as Event[];
+    // The whole transcript, published unbounded, defines each message's identity.
+    const whole = buildLiveOutputSnapshot(transcript, 'progress', 'Starting vibe', 1 << 20).text;
+    for (const event of projectLiveOutputRead({ ...read, base: 0, end: Buffer.byteLength(whole), start: 0, head: '', envelopes: 0, from: 0, text: whole }, 'task', null, { selectEvents: false }).events) {
+      if (event.type === 'thought') identity.set(String(event.content), offsetKey(event.id));
+    }
+    for (const event of events.filter(event => event.type === 'thought')) {
+      assert.equal(offsetKey(event.id), identity.get(String(event.content)), `${String(event.content).slice(0, 10)} keeps its ID with ${count} records`);
+    }
+    merged = mergeFullLiveDetails(merged, details(events));
+    previousStart = start;
+    base += Buffer.byteLength(text);
+  }
+  assert.ok(liveOutputOrigin(buildLiveOutputSnapshot(`${records.join('\n')}\n`, '', '', 600).discarded), 'the transcript outgrew the budget');
+  const thoughts = merged.events.filter(event => event.type === 'thought').map(event => String(event.content).split(' ').slice(0, 2).join(' '));
+  assert.deepEqual(thoughts, Array.from({ length: 14 }, (_, index) => `Message ${index}`), 'no message is lost or replaced');
+});
+
+test('a whole transcript is numbered by index only when read from the execution start', () => {
+  const transcript = JSON.stringify([{ role: 'assistant', content: 'Later message' }], null, 2);
+  const read = (base: number): LiveOutputRead => ({
+    epoch: 'generation:1', base, end: base + Buffer.byteLength(transcript), start: 0, head: '', envelopes: 0, from: base, text: transcript,
+  });
+  const whole = projectLiveOutputRead(read(0), 'task', null, { selectEvents: false }).events;
+  assert.match(whole[0].id, /:vibe:0:0$/);
+  // The same text as the tail of a bounded snapshot must not take the first message's index.
+  const tail = projectLiveOutputRead(read(120), 'task', null, { selectEvents: false }).events;
+  assert.ok(tail.every(event => !event.id.includes(':vibe:')), 'a bounded tail is projected by record offset');
+});
+
+test('reads report their live output position; legacy output has none', () => {
+  const text = `${JSON.stringify({ type: 'assistant', message: { content: [{ type: 'text', text: 'Hello' }] } })}\npartial`;
+  const read = (epoch: string): LiveOutputRead => ({ epoch, base: 10, end: 10 + Buffer.byteLength(text), start: 10, head: '', envelopes: 0, from: 10, text });
+  const projected = projectLiveOutputRead(read('generation:1'), 'task');
+  assert.deepEqual(projected.projector.position(), { epoch: 'generation:1', offset: 10 + text.indexOf('\n') + 1 }, 'up to the last complete record');
+  assert.equal(projectLiveOutputRead(read('legacy'), 'task', null, { legacyExecution: 'run-1' }).projector.position(), null);
+});
+
+test('watcher updates and HTTP reads carry positions that order them within an execution', async () => {
+  const taskId = 'positions';
+  const delta = (content: string) => `${JSON.stringify({ type: 'message', role: 'assistant', delta: true, content })}\n`;
+  let data = delta('Checking');
+  const redis = {
+    get: async () => JSON.stringify({ history: [{ state: 'claude_execution', timestamp: '2026-09-27T00:00:00Z' }] }),
+    eval: async (_script: string, options: { arguments: string[] }) => {
+      const from = Math.min(Number(options.arguments[0]), Buffer.byteLength(data));
+      return ['0', 'generation:1', '0', '', String(from), Buffer.from(data).subarray(from).toString(), String(Buffer.byteLength(data)), '0'];
+    },
+  } as unknown as RedisClientType;
+  const emitted: Array<{ events: Array<{ id: string; content?: string }>; liveOutputPosition?: { epoch: string; offset: number } }> = [];
+  const io = { to: () => ({ emit: (_event: string, payload: typeof emitted[number]) => emitted.push(payload) }) } as unknown as SocketIOServer;
+  const manager = new TaskWatcherManager(io);
+  manager.setDeps({ redisClient: redis, db: {} as Knex });
+  const send = (manager as unknown as { sendRedisLiveUpdate: (id: string) => Promise<void> }).sendRedisLiveUpdate.bind(manager);
+  try {
+    await manager.startTaskWatcher(taskId);
+    data += delta(' the');
+    await send(taskId);
+    const socket = emitted.at(-1)!;
+    assert.equal(socket.events.at(-1)?.content, 'Checking the');
+    assert.deepEqual(socket.liveOutputPosition, { epoch: 'generation:1', offset: Buffer.byteLength(data) });
+    // The provider appends again before the HTTP handler reads: same event, newer content, later position.
+    data += delta(' parser');
+    const http = (await projectLiveOutput(redis as unknown as LiveOutputRedis, taskId))!;
+    assert.equal(http.events.at(-1)?.id, socket.events.at(-1)?.id);
+    assert.equal(http.events.at(-1)?.content, 'Checking the parser');
+    assert.equal(http.projector.position()!.epoch, socket.liveOutputPosition!.epoch);
+    assert.ok(http.projector.position()!.offset > socket.liveOutputPosition!.offset);
+  } finally { await manager.closeAll(); }
+});
+
+test('bounded Vibe snapshots published through the log keep each message identity', async t => {
+  const redis = new Redis({
+    host: process.env.REDIS_HOST ?? '127.0.0.1', port: Number.parseInt(process.env.REDIS_PORT ?? '6379', 10),
+    lazyConnect: true, connectTimeout: 250, maxRetriesPerRequest: 1, retryStrategy: () => null,
+  });
+  redis.on('error', () => {});
+  try { await redis.connect(); } catch {
+    redis.disconnect();
+    t.skip('Redis is not available for live output integration testing');
+    return;
+  }
+  const id = `bounded-vibe-${process.pid}-${Date.now()}`;
+  const reader: LiveOutputRedis = { eval: (script, { keys, arguments: args }) => redis.eval(script, keys.length, ...keys, ...args) };
+  const records = [
+    JSON.stringify({ role: 'system', content: 'You are Vibe.' }),
+    ...Array.from({ length: 12 }, (_, index) => JSON.stringify({ role: 'assistant', content: `Message ${index} ${'.'.repeat(40)}` })),
+  ];
+  const log = new LiveOutputLog(id, { reset: true, redis });
+  const ids = new Map<string, string>();
+  try {
+    for (let count = 1; count <= records.length; count += 1) {
+      const snapshot = buildLiveOutputSnapshot(`${records.slice(0, count).join('\n')}\n`, 'progress', 'Starting vibe', 500);
+      log.replace(snapshot.text, { discarded: snapshot.discarded });
+      await log.flush();
+      const projected = await projectLiveOutput(reader, id, null, { selectEvents: false });
+      for (const event of projected!.events.filter(event => event.type === 'thought')) {
+        const content = String(event.content);
+        assert.equal(event.id, ids.get(content) ?? event.id, `${content.slice(0, 10)} keeps its ID with ${count} records`);
+        ids.set(content, event.id);
+      }
+      if (count === records.length) assert.ok(projected!.truncated, 'the transcript outgrew the snapshot budget');
+    }
+    assert.equal(ids.size, 12);
+    assert.equal(new Set(ids.values()).size, ids.size, 'no two messages share an ID');
+  } finally {
+    await log.close();
+    await redis.del(liveOutputKey(id), liveOutputMetaKey(id));
+    redis.disconnect();
+  }
 });

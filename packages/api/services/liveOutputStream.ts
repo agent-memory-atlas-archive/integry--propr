@@ -1,4 +1,4 @@
-import type { ConversationEvent } from '@propr/shared';
+import type { ConversationEvent, LiveOutputPosition } from '@propr/shared';
 import { liveOutputKey, liveOutputMetaKey } from '@propr/core';
 import { createClaudeStreamProjection } from '../routes/liveDetailsCodexParser.js';
 import { detectStoredOutputFormat } from '../routes/liveDetailsStoredOutputFormat.js';
@@ -136,7 +136,10 @@ export class LiveOutputProjector {
    */
   feed(text: string, from: number): LiveEvent[] {
     // Whole transcripts must bypass JSONL framing, including a final ] without a newline.
-    if (!this.projection && this.preamble.length === 0) {
+    // Their events are numbered by index, so only an untrimmed read from the
+    // execution's first byte may number them: a bounded tail would reuse the
+    // indexes of the messages it no longer holds.
+    if (!this.projection && this.preamble.length === 0 && from === this.start && this.retained.offset <= this.start) {
       const transcript = parseVibeTranscript(text, { executionStartTimestamp: this.executionStartTimestamp });
       if (transcript) {
         this.projection = this.wholeOutputProjection(transcript);
@@ -203,6 +206,11 @@ export class LiveOutputProjector {
     if (this.projection || this.preamble.length === 0) return [];
     const projection = this.genericProjection();
     return this.preamble.flatMap(entry => projection.feed(entry.line, entry.offset, entry.ordinal));
+  }
+
+  /** Where this projection has read to; legacy output restarts its offsets with every snapshot, so it has none. */
+  position(): LiveOutputPosition | null {
+    return this.epoch === 'legacy' || this.epoch.startsWith('legacy:') ? null : { epoch: this.epoch, offset: this.offset };
   }
 
   pending(): LiveEvent | null {
@@ -340,6 +348,8 @@ export interface LiveOutputProjectionResult extends LiveProjectionSnapshot {
    * held is unknown, so it is not part of `omittedEventCount`.
    */
   truncated: boolean;
+  /** Where this read ended, when the output has ordered offsets. */
+  liveOutputPosition?: LiveOutputPosition;
   projector: LiveOutputProjector;
 }
 
@@ -389,5 +399,6 @@ export function projectLiveOutputRead(
   const pending = projector.pending();
   const all = pending ? [...events, pending] : events;
   const selected = selectEvents ? selectLiveEvents(all) : { events: all, omittedEventCount: 0 };
-  return { ...projector.snapshot(), events: selected.events, omittedEventCount: selected.omittedEventCount, truncated, projector };
+  const liveOutputPosition = projector.position() ?? undefined;
+  return { ...projector.snapshot(), events: selected.events, omittedEventCount: selected.omittedEventCount, truncated, liveOutputPosition, projector };
 }

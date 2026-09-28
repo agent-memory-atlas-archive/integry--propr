@@ -249,4 +249,46 @@ describe('full history follow-up regressions', () => {
     expect(result.current.liveDetails.omittedEventCount).toBe(0);
     unmount();
   });
+
+  const message = (content: string) => ({ id: 'live:task:redis:gen%3A1:40:0', type: 'thought' as const, content });
+  const at = (offset: number) => ({ epoch: 'gen:1', offset });
+  const growing = (content: string, offset: number): LiveDetails => ({
+    events: [message(content)], todos: [], currentTask: null, omittedEventCount: 0, liveOutputPosition: at(offset),
+  });
+
+  for (const [ordering, socketOffset, expected] of [
+    ['an HTTP read past the socket update keeps its newer message', 60, 'Checking the parser'],
+    ['a socket update past the HTTP read still replaces its older message', 140, 'Checking the parser and tests'],
+  ] as const) {
+    it(`goal page: ${ordering}`, async () => {
+      const read = deferred<LiveDetails>();
+      apiMocks.getTaskLiveDetails.mockResolvedValueOnce(growing('Check', 50)).mockReturnValueOnce(read.promise);
+      const { result, unmount } = renderHook(() => useTaskLiveData('task', 0, 'claude_execution'));
+      await act(async () => {});
+      let refresh!: Promise<LiveDetails | null>;
+      act(() => { refresh = result.current.refreshLiveDetails(); });
+      const socketContent = socketOffset > 100 ? 'Checking the parser and tests' : 'Checking';
+      act(() => socketMocks.liveUpdateHandler?.({ taskId: 'task', events: [message(socketContent)], liveOutputPosition: at(socketOffset) }));
+      // The server read more of the log than the socket update did (or less, in the reverse ordering).
+      await act(async () => { read.resolve(growing('Checking the parser', 100)); await refresh; });
+      expect(result.current.liveDetails.events).toEqual([message(expected)]);
+      unmount();
+    });
+
+    it(`finished task page: ${ordering}`, async () => {
+      vi.useFakeTimers();
+      const read = deferred<LiveDetails>();
+      apiMocks.getTaskHistory.mockResolvedValueOnce({ history: [{ state: 'CLAUDE_EXECUTION' }] });
+      apiMocks.getTaskLiveDetails.mockReturnValueOnce(read.promise).mockReturnValue(new Promise(() => {}));
+      const { result, unmount } = renderHook(() => useTaskData('task'));
+      await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+      const socketContent = socketOffset > 100 ? 'Checking the parser and tests' : 'Checking';
+      act(() => socketMocks.liveUpdateHandler?.({ taskId: 'task', events: [message(socketContent)], liveOutputPosition: at(socketOffset) }));
+      act(() => socketMocks.taskUpdateHandler?.({ taskId: 'task', state: 'COMPLETED' }));
+      await act(async () => { await vi.advanceTimersByTimeAsync(200); });
+      await act(async () => { read.resolve(growing('Checking the parser', 100)); await read.promise; });
+      expect(result.current.liveDetails.events).toEqual([message(expected)]);
+      unmount();
+    });
+  }
 });

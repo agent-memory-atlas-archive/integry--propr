@@ -471,6 +471,7 @@ export class TaskWatcherManager {
       if (!update || this.taskWatchers.get(taskId) !== watcherInfo) return;
       const { events, omittedEventCount, historyTruncated } = update;
       const snapshot = update.projector.snapshot();
+      const liveOutputPosition = update.projector.position();
       const snapshotSignature = JSON.stringify([snapshot.todos, snapshot.currentTask, snapshot.tokenUsage]);
       if (events.length === 0 && omittedEventCount === undefined && snapshotSignature === watcherInfo.lastSnapshotSignature) return;
       watcherInfo.lastSnapshotSignature = snapshotSignature;
@@ -485,6 +486,7 @@ export class TaskWatcherManager {
         timestamp: new Date().toISOString(),
         ...(omittedEventCount !== undefined ? { omittedEventCount } : {}),
         ...(historyTruncated ? { historyTruncated } : {}),
+        ...(liveOutputPosition ? { liveOutputPosition } : {}),
       };
       this.io.to(`task:live:${taskId}`).emit(TASK_LIVE_UPDATE, payload);
     } catch (error) {

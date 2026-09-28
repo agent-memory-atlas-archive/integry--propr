@@ -10,7 +10,7 @@ import { trustedPreviewMedia, type PublishedVisualPreview, type TaskUpdatePayloa
 import { isAnalysisData, normalizeAnalysisData } from './apiDataGuards';
 import { useLiveRefreshScheduler } from '../../hooks/useLiveRefreshScheduler';
 import { useCurrentUser } from '../../contexts/AuthContext';
-import { capLiveEvents, isFinishedTask, mergeFullLiveDetails } from './liveDetailsMerge';
+import { capLiveEvents, isFinishedTask, mergeFullLiveDetails, readCoversUpdate } from './liveDetailsMerge';
 import { getDesktopSocketConfigurationKey } from '../../api/apiClient';
 export { capLiveEvents, MAX_LIVE_RAW_EVENTS, mergeFullLiveDetails } from './liveDetailsMerge';
 
@@ -235,8 +235,9 @@ export const useTaskData = (taskId: string | undefined) => {
       const isLive = !isFinishedTask(latestHistoryRef.current.at(-1)?.state);
       if (!isLive || (!hasReceivedSocketStateRef.current && socketRevision === socketRevisionRef.current)) {
         finishedLiveReadScope.current = finishedAtRequest ? requestedScope : null;
-        // Replay updates over the pre-request state, which has not applied them yet.
-        const received = [...updates];
+        // Replay updates over the pre-request state, which has not applied them yet,
+        // except those the response already contains (possibly in a newer version).
+        const received = updates.filter(update => !readCoversUpdate(data, update));
         setLiveDetails(previous => {
           if (activeRequestScopeRef.current !== requestedScope || sequence !== liveReadSequence.current) return previous;
           return received.reduce((state, update) => applyTaskLiveUpdate(state, update, isLive),

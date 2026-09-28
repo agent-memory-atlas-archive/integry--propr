@@ -1,3 +1,4 @@
+import type { LiveOutputPosition } from '@propr/shared';
 import type { LiveDetails, LiveEvent } from './types';
 
 /** Raw terminal events kept in a live view; readable (`thought`) events are always kept. */
@@ -28,6 +29,17 @@ const executionIdentity = (events: LiveEvent[]): string | null => {
   const identities = new Set(events.flatMap(event =>
     event.id?.match(/^live:[^:]+:(?:redis|conversation|stored|database):[^:]+:/)?.[0] ?? []));
   return identities.size === 1 ? [...identities][0] : null;
+};
+
+/**
+ * A read's position proves it already holds everything an update read at or
+ * before the same position carried, including newer versions of events that
+ * were still growing. Without positions in one epoch there is no ordering evidence.
+ */
+export const readCoversUpdate = (read: Pick<LiveDetails, 'liveOutputPosition'>, update: { liveOutputPosition?: LiveOutputPosition }): boolean => {
+  const at = read.liveOutputPosition;
+  const of = update.liveOutputPosition;
+  return Boolean(at && of && at.epoch === of.epoch && of.offset <= at.offset);
 };
 
 export const isFinishedTask = (state: string | undefined): boolean =>

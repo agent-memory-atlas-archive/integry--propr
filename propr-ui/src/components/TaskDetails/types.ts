@@ -1,4 +1,4 @@
-import type { PublishedVisualPreview } from '@propr/shared';
+import type { LiveOutputPosition, PublishedVisualPreview } from '@propr/shared';
 
 export interface TokenUsage {
   input_tokens?: number | null;
@@ -142,6 +142,8 @@ export interface LiveDetails {
   omittedEventCount?: number;
   /** The server discarded earlier output of this execution; neither `events` nor `omittedEventCount` accounts for it. */
   historyTruncated?: boolean;
+  /** Where in the live output log this state was read (see `LiveOutputPosition`). */
+  liveOutputPosition?: LiveOutputPosition;
 }
 
 export interface AnalysisData {

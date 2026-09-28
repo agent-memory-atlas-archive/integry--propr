@@ -122,6 +122,47 @@ test('snapshot close retains output and increments the epoch only at execution s
     }
 });
 
+test('a bounded snapshot is published with the origin of the records it dropped', async () => {
+    const origins: string[][] = [];
+    const redis = {
+        on: () => undefined,
+        eval: async (_script: string, _keys: number, ...args: string[]) => {
+            origins.push(args.slice(9));
+            return 0;
+        },
+    } as unknown as Redis;
+    const log = new LiveOutputLog('bounded', { reset: true, redis, transformRecord: record => record.replace(/\u001b\[[0-9;]*m/g, '') });
+    log.replace('whole snapshot\n');
+    log.replace('{"b":2}\n', { discarded: '\u001b[1m{"a":1}\u001b[0m\nplain\n' });
+    await log.close();
+    assert.deepEqual(origins, [['0', '0', ''], [String(Buffer.byteLength('{"a":1}\nplain\n')), '1', '{"a":1}']]);
+});
+
+test('bounded snapshots start as far into the execution as they dropped, and always move the start', async t => {
+    const redis = await connect(t);
+    if (!redis) return;
+    const id = taskId('bounded');
+    try {
+        const meta = async () => {
+            const { base, start, head, envelopes } = await redis.hgetall(liveOutputMetaKey(id));
+            return { base: Number(base), start: Number(start), head, envelopes: Number(envelopes ?? 0) };
+        };
+        await writeLiveOutput(redis, id, 'abcdef\n', { mode: 'reset' });
+        assert.deepEqual(await meta(), { base: 0, start: 0, head: 'abcdef', envelopes: 0 });
+        // Dropping as many bytes as the previous snapshot held would repeat its start.
+        await writeLiveOutput(redis, id, 'ghij\n', { mode: 'replace', origin: { offset: 7, envelopes: 1, head: '{"first":1}' } });
+        assert.deepEqual(await meta(), { base: 8, start: 1, head: '{"first":1}', envelopes: 1 });
+        await writeLiveOutput(redis, id, 'klmn\n', { mode: 'replace', origin: { offset: 10, envelopes: 2, head: '{"first":1}' } });
+        assert.deepEqual(await meta(), { base: 13, start: 3, head: '{"first":1}', envelopes: 2 });
+        await writeLiveOutput(redis, id, 'whole\n', { mode: 'replace' });
+        assert.deepEqual(await meta(), { base: 18, start: 18, head: 'whole', envelopes: 0 });
+        assert.equal(await redis.get(liveOutputKey(id)), 'whole\n');
+    } finally {
+        await redis.del(liveOutputKey(id), liveOutputMetaKey(id));
+        redis.disconnect();
+    }
+});
+
 function deferred() {
     let resolve!: () => void;
     const promise = new Promise<void>(done => { resolve = done; });

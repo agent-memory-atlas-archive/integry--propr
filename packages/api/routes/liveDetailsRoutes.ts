@@ -17,7 +17,7 @@ import { parseExecutionDetailsRows, type ExecutionDetailRow } from './liveDetail
 import { detectStoredOutputFormat, hasCodexAppServerNotification, type StoredOutputFormat } from './liveDetailsStoredOutputFormat.js';
 import { parseRedisOutput } from '../services/redisOutputParser.js';
 import { type AgentStreamParseOptions } from '../services/agentStreamProjection.js';
-import { projectLiveOutput, type LiveOutputRedis } from '../services/liveOutputStream.js';
+import { projectLiveOutput, type LiveOutputProjectionResult, type LiveOutputRedis } from '../services/liveOutputStream.js';
 import { findLatestExecutionStartForTask } from '../services/taskWatcherLookup.js';
 import { selectLiveEvents } from '../services/liveEventSelection.js';
 import { parseConversationFile } from '../services/conversationParser.js';
@@ -286,20 +286,21 @@ async function isLiveTask(redisClient: RedisClientType, db: Knex, taskId: string
   return true;
 }
 
-async function parseActiveExecutionOutput(redisClient: RedisClientType, db: Knex, taskId: string, options: AgentStreamParseOptions = {}): Promise<(ConversationResult & { nativeGoal?: ReturnType<typeof parseRedisOutput>['nativeGoal']; omittedEventCount?: number; historyTruncated?: boolean }) | null> {
+async function parseActiveExecutionOutput(redisClient: RedisClientType, db: Knex, taskId: string, options: AgentStreamParseOptions = {}): Promise<(ConversationResult & { nativeGoal?: ReturnType<typeof parseRedisOutput>['nativeGoal']; omittedEventCount?: number; historyTruncated?: boolean } & Pick<LiveOutputProjectionResult, 'liveOutputPosition'>) | null> {
   const executionStartTimestamp = await findExecutionStartTimestamp(redisClient, db, taskId);
   const projected = await projectLiveOutput(redisClient as unknown as LiveOutputRedis, taskId, executionStartTimestamp, {
     selectEvents: false, resolveLegacyExecution: () => findLatestExecutionStartForTask({ redisClient, db }, taskId),
   });
   if (!projected) return null;
-  const { todos, currentTask, tokenUsage, nativeGoal } = projected;
+  // The position lets a client tell which socket updates received during this request it already contains.
+  const { todos, currentTask, tokenUsage, nativeGoal, liveOutputPosition } = projected;
   const { events, omittedEventCount } = options.limitEvents !== false && await isLiveTask(redisClient, db, taskId)
     ? selectLiveEvents(projected.events)
     : { events: projected.events, omittedEventCount: 0 };
   if (events.length > 0 || todos.length > 0 || currentTask || tokenUsage) {
     return {
       events: events as unknown as Array<Record<string, unknown>>,
-      todos, currentTask, tokenUsage, nativeGoal, omittedEventCount, ...(projected.truncated ? { historyTruncated: true } : {}),
+      todos, currentTask, tokenUsage, nativeGoal, omittedEventCount, liveOutputPosition, ...(projected.truncated ? { historyTruncated: true } : {}),
     };
   }
   // Output that is not a record stream (a stored result document) is projected whole.

@@ -414,8 +414,8 @@ function startLiveOutputStreaming(
         try { extraOutput = streamExtraOutput(); }
         catch (err) { logger.debug({ error: (err as Error).message }, 'Failed to read extra streaming output'); }
         const snapshot = buildLiveOutputSnapshot(extraOutput, readStdout(), streamStderrToRedis ? readStderr() : '');
-        if (snapshot !== previous) log.replace(snapshot);
-        previous = snapshot;
+        if (snapshot.text !== previous) log.replace(snapshot.text, { discarded: snapshot.discarded });
+        previous = snapshot.text;
     };
     const interval = setInterval(publish, 2000);
     return {
