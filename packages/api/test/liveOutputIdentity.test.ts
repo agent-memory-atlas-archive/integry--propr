@@ -8,6 +8,7 @@ import { LiveOutputProjector, projectLiveOutput, projectLiveOutputRead, type Liv
 import { TaskWatcherManager } from '../services/taskWatcher.js';
 import { findLatestExecutionStartForTask } from '../services/taskWatcherLookup.js';
 import { mergeFullLiveDetails } from '../../../propr-ui/src/components/TaskDetails/liveDetailsMerge.js';
+import { buildLiveOutputSnapshot } from '../../core/src/claude/docker/dockerLiveOutputSnapshot.js';
 import { withLiveOutputReads } from './liveOutputRedisFake.js';
 
 after(async () => { await db.destroy(); });
@@ -135,4 +136,40 @@ test('legacy executions of one task get distinct IDs in watcher and HTTP reads, 
     assert.equal(payloads.at(-1)!.events[0].id, rerun.events[0].id, 'a snapshot of the same execution keeps its IDs');
     assert.deepEqual(apply(payloads.at(-1)!), ['New X', 'New Y']);
   } finally { await manager.closeAll(); }
+});
+
+test('re-published Vibe snapshots keep transcript IDs while process diagnostics grow', () => {
+  const transcript = [
+    JSON.stringify({ role: 'assistant', content: 'Inspect the parser', tool_calls: [{ id: 'call-1', function: { name: 'bash', arguments: '{"command":"ls"}' } }] }),
+    JSON.stringify({ role: 'tool', tool_call_id: 'call-1', content: 'parser.ts' }),
+    JSON.stringify({ role: 'assistant', content: 'Update the parser' }),
+  ];
+  const project = (snapshot: string) => projectLiveOutputRead({
+    epoch: 'generation:1', base: 0, end: Buffer.byteLength(snapshot), start: 0, head: snapshot.split('\n')[0], envelopes: 0, from: 0, text: snapshot,
+  }, 'task', null, { selectEvents: false }).events as Event[];
+  type Details = Parameters<typeof mergeFullLiveDetails>[0];
+  const details = (events: Event[]) => ({ events, todos: [], currentTask: null, tokenUsage: null } as unknown as Details);
+  const thoughts = (events: Array<{ type: string; content?: unknown }>) => events.filter(event => event.type === 'thought').map(event => event.content);
+
+  const first = project(buildLiveOutputSnapshot(`${transcript.slice(0, 2).join('\n')}\n`, '', 'Starting vibe'));
+  // More stderr (and stdout) arrives while the transcript is unchanged, then the transcript grows.
+  const grown = project(buildLiveOutputSnapshot(`${transcript.slice(0, 2).join('\n')}\n`, 'progress', 'Starting vibe\nwarning: slow network'));
+  const extended = project(buildLiveOutputSnapshot(`${transcript.join('\n')}\n`, 'progress', 'Starting vibe\nwarning: slow network\nretrying'));
+  const inspect = (events: Event[]) => events.find(event => event.content === 'Inspect the parser')?.id;
+  assert.ok(inspect(first));
+  assert.equal(inspect(grown), inspect(first));
+  assert.equal(inspect(extended), inspect(first));
+
+  let merged = mergeFullLiveDetails(details([]), details(first));
+  merged = mergeFullLiveDetails(merged, details(grown));
+  merged = mergeFullLiveDetails(merged, details(extended));
+  assert.deepEqual(thoughts(merged.events), ['Inspect the parser', 'Update the parser'], 'no readable message is duplicated');
+});
+
+test('snapshot diagnostics never push the transcript out of the byte budget', () => {
+  const transcript = `${JSON.stringify({ role: 'assistant', content: 'Keep me' })}\n`;
+  const snapshot = buildLiveOutputSnapshot(transcript, 'x'.repeat(40), `${'diagnostic\n'.repeat(20)}`, 128);
+  assert.ok(Buffer.byteLength(snapshot) <= 128);
+  assert.ok(snapshot.startsWith(transcript), 'the transcript keeps its offsets');
+  assert.ok(snapshot.endsWith('diagnostic\n'), 'diagnostics keep their most recent records');
 });

@@ -22,6 +22,7 @@ import {
     boundedProviderOutput,
 } from '../../agents/impl/utils/boundedProviderOutput.js';
 import { LiveOutputLog } from '../../agents/impl/utils/liveOutputLog.js';
+import { buildLiveOutputSnapshot } from './dockerLiveOutputSnapshot.js';
 import {
     inspectSessionMessageLine,
     SessionLineInspectionContext,
@@ -405,16 +406,14 @@ function startLiveOutputStreaming(
     if (!streamToRedis || !taskId) return null;
     const log = new LiveOutputLog(taskId, { reset: true, ...(stripAnsi ? { transformRecord: stripAnsiCodes } : {}) });
     if (!streamExtraOutput) {
-        return { stdout: chunk => log.append(chunk), stderr: chunk => { if (streamStderrToRedis) log.append(chunk); }, close: () => log.close() };
+        return { stdout: chunk => log.append(chunk, 'stdout'), stderr: chunk => { if (streamStderrToRedis) log.append(chunk, 'stderr'); }, close: () => log.close() };
     }
     let previous = '';
     const publish = () => {
         let extraOutput = '';
         try { extraOutput = streamExtraOutput(); }
         catch (err) { logger.debug({ error: (err as Error).message }, 'Failed to read extra streaming output'); }
-        const stdout = readStdout();
-        const primary = streamStderrToRedis ? `${readStderr()}${stdout ? `\n${stdout}` : ''}` : stdout;
-        const snapshot = boundedProviderOutput(extraOutput ? `${primary}${primary ? '\n' : ''}${extraOutput}` : primary);
+        const snapshot = buildLiveOutputSnapshot(extraOutput, readStdout(), streamStderrToRedis ? readStderr() : '');
         if (snapshot !== previous) log.replace(snapshot);
         previous = snapshot;
     };

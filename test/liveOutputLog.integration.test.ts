@@ -389,3 +389,28 @@ test('publications of different writers are deduplicated independently', async t
         redis.disconnect();
     }
 });
+
+test('stdout and stderr are framed separately, so a diagnostic never splits a record', async () => {
+    const writes: string[] = [];
+    const redis = {
+        on: () => undefined,
+        eval: async (_script: string, _keys: number, _data: string, _meta: string, text: string) => {
+            writes.push(text);
+            return text.length;
+        },
+    } as unknown as Redis;
+    const log = new LiveOutputLog('sources', { reset: true, redis });
+    log.append('{"type":"assistant","message":', 'stdout');
+    log.append('warning: slow network\n', 'stderr');
+    log.append('{"content":[]}}\n{"type":"res', 'stdout');
+    log.append('retrying', 'stderr');
+    await log.close();
+    assert.deepEqual(writes.join('').split('\n'), [
+        'warning: slow network',
+        '{"type":"assistant","message":{"content":[]}}',
+        // Each source's partial record is flushed on its own at close.
+        '{"type":"res',
+        'retrying',
+        '',
+    ]);
+});

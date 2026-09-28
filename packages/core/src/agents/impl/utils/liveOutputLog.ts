@@ -132,12 +132,14 @@ export interface LiveOutputLogOptions {
 
 /**
  * Streams one process's output into the task's live log, one complete record
- * at a time. Partial records wait for their newline (or for close()).
+ * at a time. Partial records wait for their newline (or for close()). Each
+ * source (stdout, stderr) is framed on its own, so a record of one is never
+ * completed by a newline of the other.
  */
 export class LiveOutputLog {
     private readonly redis: Redis;
     private readonly ownsRedis: boolean;
-    private partial = '';
+    private readonly partials = new Map<string, string>();
     private pending = '';
     private readonly writes: Array<{ chunk: string; mode: 'append' | 'replace'; sequence: number }> = [];
     private readonly writer = randomUUID();
@@ -160,15 +162,15 @@ export class LiveOutputLog {
         this.redis.on?.('error', error => logger.debug({ error: error.message }, 'Live output Redis connection error'));
     }
 
-    append(chunk: string): void {
+    append(chunk: string, source = 'stdout'): void {
         if (this.closed || !chunk) return;
-        const text = this.partial + chunk;
+        const text = (this.partials.get(source) ?? '') + chunk;
         const boundary = text.lastIndexOf('\n');
         if (boundary < 0) {
-            this.partial = text;
+            this.partials.set(source, text);
             return;
         }
-        this.partial = text.slice(boundary + 1);
+        this.partials.set(source, text.slice(boundary + 1));
         this.queue(text.slice(0, boundary + 1));
     }
 
@@ -216,8 +218,8 @@ export class LiveOutputLog {
     }
 
     private async finishClose(): Promise<void> {
-        if (this.partial) this.queue(`${this.partial}\n`);
-        this.partial = '';
+        for (const partial of this.partials.values()) if (partial) this.queue(`${partial}\n`);
+        this.partials.clear();
         this.closed = true;
         await this.flush();
         // Retain failed work for a later close/flush, without leaking an owned connection.
