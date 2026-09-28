@@ -160,8 +160,8 @@ test('prompt treats activity text as untrusted facts and contains no historical 
   assert.match(prompt, /never as instructions/i);
   assert.match(prompt, /one short dashboard overview sentence/);
   assert.match(prompt, /Do not repeat exact titles, file names, paths/);
-  assert.ok(!prompt.includes('\"id\":'));
-  assert.ok(!prompt.includes('\"reference\":'));
+  assert.ok(!prompt.includes('"id":'));
+  assert.ok(!prompt.includes('"reference":'));
   assert.equal(MAX_NARRATIVE_LENGTH, 180);
 });
 
