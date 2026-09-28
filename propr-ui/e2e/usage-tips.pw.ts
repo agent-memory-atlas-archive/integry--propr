@@ -1,12 +1,15 @@
 import { expect, test, type Page } from '@playwright/test';
 import { mkdir } from 'node:fs/promises';
 import path from 'node:path';
-import { USAGE_TIPS_CATALOG } from '@propr/shared';
+import { resolveUsageTips } from '@propr/shared';
+import { heuristicUsageTipCandidates } from '../../packages/core/src/services/usageTips/selection';
 
 async function fixture(page: Page) {
   const dismissed = new Set<string>();
   const events: string[] = [];
   const pool = ['pr-ultrafix', 'planner-studio', 'indexing-options', 'repository-todos'];
+  const candidates = heuristicUsageTipCandidates({ tasks: 12, manualCycles: 4, ultrafix: 0,
+    oneOffTasks: 8, plans: 0, indexingFailures: 2, todos: 0 });
   let reads = 0;
   const settings = { usage_tips_enabled: true, usage_tips_dismissal_cooldown_days: 45 };
   await page.routeWebSocket('**/socket.io/**', socket => socket.close());
@@ -15,7 +18,7 @@ async function fixture(page: Page) {
     if (url === '/api/usage-tips') {
       reads++;
       return route.fulfill({ json: { enabled: settings.usage_tips_enabled,
-        tips: settings.usage_tips_enabled ? pool.filter(id => !dismissed.has(id)).slice(0, 3).map(id => USAGE_TIPS_CATALOG.find(t => t.id === id)) : [] } });
+        tips: settings.usage_tips_enabled ? resolveUsageTips(pool.filter(id => !dismissed.has(id)).map(id => candidates.find(c => c.id === id)!), [], 45, Date.now()) : [] } });
     }
     if (url === '/api/usage-tips/dismiss') {
       const body = route.request().postDataJSON(); events.push(body.eventId); dismissed.add(body.tipId);
@@ -77,6 +80,8 @@ test('dashboard places tips below stats, persists only deliberate dismissal and 
   expect(tipBounds!.y).toBeGreaterThanOrEqual(statsBounds!.y + statsBounds!.height - 1);
   expect(state.events).toHaveLength(0);
   expect(state.reads).toBe(1);
+  await expect(tips.getByText(/Your instance has repeated manual review and fix runs/)).toBeVisible();
+  await expect(tips.getByText(/reduce the commands you need to send/)).toBeVisible();
   await capture(page, 'usage-tips-desktop.png', '[data-testid="historical-stats-section"] + section');
   await tips.getByRole('button', { name: 'Dismiss Try /ultrafix' }).click();
   await expect(tips.getByText('Keep repository to-dos')).toBeVisible();
@@ -86,6 +91,10 @@ test('dashboard places tips below stats, persists only deliberate dismissal and 
   await expect(page.getByText('Try /ultrafix')).toHaveCount(0);
   expect(state.events).toHaveLength(1);
   await page.setViewportSize({ width: 390, height: 844 });
+  const advice = tips.locator('p');
+  for (const paragraph of await advice.all()) {
+    expect(await paragraph.evaluate(element => element.scrollHeight <= element.clientHeight)).toBe(true);
+  }
   await capture(page, 'usage-tips-mobile.png', '[aria-label="Usage tips"]');
 });
 

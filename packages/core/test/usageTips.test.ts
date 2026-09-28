@@ -132,6 +132,38 @@ test('model validation, fallback, deterministic heuristics, valid empty and excl
   assert.deepEqual(heuristicUsageTipCandidates({ tasks: 50, goals: 5, plans: 5, oneOffTasks: 20, review: 10, fix: 10, ultrafix: 5, manualCycles: 10 }), []);
 });
 
+test('personalized model advice survives persistence and replaces catalog copy without changing identity', async () => fixture(async db => {
+  const reason = 'Your instance has repeated manual review and fix runs but little /ultrafix use. Try /ultrafix to automate that loop and reduce the commands you need to send.';
+  const selected = await selectUsageTips({
+    signals: { manualCycles: 4, ultrafix: 0 }, epoch: 0,
+    generate: async (_alias, prompt) => {
+      assert.match(prompt, /reason is the user-facing tip body/);
+      assert.match(prompt, /why this tip is being displayed/);
+      assert.match(prompt, /how it could improve their workflow/);
+      assert.match(prompt, /installation-wide aggregates/);
+      assert.match(prompt, /"manualCycles":4/);
+      return { text: JSON.stringify({ candidates: [{ id: 'pr-ultrafix', score: 95, reason }] }), model: 'test-model' };
+    },
+  });
+  const store = createUsageTipsStore(db);
+  await store.persist(selected, null);
+  const catalogTip = USAGE_TIPS_CATALOG.find(t => t.id === 'pr-ultrafix')!;
+  assert.deepEqual((await store.get('alice')).tips, [{ ...catalogTip, body: reason }]);
+  assert.notEqual(catalogTip.body, reason);
+  await store.dismiss('alice', catalogTip.id, randomUUID());
+  assert.deepEqual((await store.get('alice')).tips, []);
+}));
+
+test('offline advice explains the observed workflow and benefit, including slow-only indexing', async () => {
+  const selected = await selectUsageTips({ signals: { indexingSlow: 2, indexingFailures: null }, epoch: 0,
+    generate: async () => { throw new Error('offline'); } });
+  const [tip] = resolveUsageTips(selected.candidates, [], 45, Date.now());
+  assert.match(tip.body, /Your instance has indexing calls taking at least two minutes/);
+  assert.match(tip.body, /keep repository context available for your tasks/);
+  assert.doesNotMatch(tip.body, /failures/);
+  assert.equal(selected.source, 'heuristic');
+});
+
 test('guarded bounded signals handle real SQLite tables and mixed timestamps', async () => fixture(async db => {
   const now = Date.parse('2026-09-27T12:00:00Z');
   const missing = await collectUsageTipSignals(db, now);

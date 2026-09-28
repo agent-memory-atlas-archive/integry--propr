@@ -58,14 +58,14 @@ export function UsageTipsSection() {
   return (
     <section aria-label="Usage tips" className="border-t border-slate-200 px-4 py-3">
       <div className="mb-2 flex items-center gap-2 text-[11px] font-medium uppercase tracking-wide text-slate-500">
-        <Lightbulb aria-hidden="true" size={13} /> From the docs
+        <Lightbulb aria-hidden="true" size={13} /> For your workflow
       </div>
       <div className="space-y-3">
         {tips.map(tip => (
           <div key={tip.id} className="flex items-start gap-3 text-xs">
             <div className="min-w-0 flex-1">
               <a href={tip.docUrl} target="_blank" rel="noreferrer" className="font-medium text-slate-800 hover:underline">{tip.title}</a>
-              <p className="mt-0.5 line-clamp-2 leading-5 text-slate-500">{tip.body}</p>
+              <p className="mt-0.5 leading-5 text-slate-500">{tip.body}</p>
               {failures[tip.id] && <button className="mt-1 text-slate-600 underline" onClick={() => void dismiss(tip)}>Dismissal not saved. Retry</button>}
             </div>
             <button type="button" aria-label={`Dismiss ${tip.title}`} title="Dismiss for now" onClick={() => void dismiss(tip)}

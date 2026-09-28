@@ -1,6 +1,6 @@
 # Dashboard Usage Tips
 
-A compact strip beneath historical dashboard statistics links to documented ProPR capabilities. A worker ranks installation-relevant tips approximately once a day using the repository indexing agent and its configured fallback. No extra model setting is needed. Up to three eligible tips appear; fewer or none is normal.
+A compact strip beneath historical dashboard statistics links to documented ProPR capabilities. A worker ranks installation-relevant tips approximately once a day using the repository indexing agent and its configured fallback. Each tip explains why it fits your workflow using observed activity in your instance, suggests a documented action, and describes how it could help. These recommendations use installation-wide signals, not individual activity histories. If model generation fails, signal-based recommendations still explain the context and benefit. No extra model setting is needed. Up to three eligible tips appear; fewer or none is normal.
 
 ## Goals and launch strategies
 

@@ -11,6 +11,15 @@ const tips = USAGE_TIPS_CATALOG.slice(0, 3);
 beforeEach(() => { vi.resetAllMocks(); vi.mocked(getUsageTips).mockResolvedValue({ enabled: true, tips: [...tips] }); });
 
 describe('usage tips', () => {
+  it('shows the complete personalized recommendation supplied by the API', async () => {
+    const body = 'Your instance has recent tasks but few manual reviews. Try /review on a PR to get AI feedback before deciding what needs fixing.';
+    vi.mocked(getUsageTips).mockResolvedValue({ enabled: true, tips: [{ ...tips[0], body }] });
+    render(<UsageTipsSection />);
+    expect(await screen.findByText(body)).toBeVisible();
+    expect(screen.getByText('For your workflow')).toBeVisible();
+    expect(screen.queryByText(tips[0].body)).toBeNull();
+    expect(screen.getByRole('link', { name: tips[0].title })).toHaveAttribute('href', tips[0].docUrl);
+  });
   it('mount, rerender, and reload only read, never acknowledge', async () => {
     const view = render(<UsageTipsSection />);
     await screen.findByText(tips[0].title);

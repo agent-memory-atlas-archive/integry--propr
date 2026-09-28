@@ -21,3 +21,13 @@ it('explicit POST preserves the supplied event identifier and enables safe auth 
     expect(options?.replayMutationAfterTokenRefresh).toBe(true);
   }
 });
+
+it('preserves personalized advice while retaining catalog titles and documentation links', async () => {
+  const tip = USAGE_TIPS_CATALOG[0];
+  const body = 'Your instance has recent tasks but few manual reviews. Try /review on a PR to get AI feedback before deciding what needs fixing.';
+  vi.mocked(apiFetch).mockResolvedValue(new Response(JSON.stringify({ enabled: true, tips: [
+    ...[null, '', '   ', 123, 'x'.repeat(241)].map(body => ({ id: tip.id, body })),
+    { ...tip, body: ` ${body} `, title: 'Unexpected title', docUrl: 'https://example.com/untrusted' },
+  ] })));
+  expect((await getUsageTips()).tips).toEqual([{ ...tip, body }]);
+});

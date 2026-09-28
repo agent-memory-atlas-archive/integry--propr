@@ -9,6 +9,7 @@ export interface UsageTip {
 }
 export const USAGE_TIPS_CATALOG: readonly UsageTip[] = catalog;
 export const USAGE_TIPS_BY_ID = new Map(USAGE_TIPS_CATALOG.map(tip => [tip.id, tip]));
+/** reason is the signal-grounded, user-facing recommendation and workflow benefit. */
 export interface UsageTipCandidate { id: string; score: number; reason: string }
 export interface UsageTipDismissal { tip_id: string; dismissed_at: number; dismissal_count: number }
 export type UsageTipSignals = Record<string, number | boolean | null>;
@@ -72,7 +73,7 @@ export function resolveUsageTips(candidates: UsageTipCandidate[], dismissals: Us
   const byId = new Map(dismissals.map(d => [d.tip_id, d]));
   return parseUsageTipCandidates(candidates)
     .filter(c => isUsageTipEligible(byId.get(c.id), baseDays, now))
-    .slice(0, MAX_SELECTED_USAGE_TIPS).map(c => USAGE_TIPS_BY_ID.get(c.id)!);
+    .slice(0, MAX_SELECTED_USAGE_TIPS).map(c => ({ ...USAGE_TIPS_BY_ID.get(c.id)!, body: c.reason }));
 }
 export function isUsageTipEventId(value: unknown): value is string {
   return typeof value === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value);

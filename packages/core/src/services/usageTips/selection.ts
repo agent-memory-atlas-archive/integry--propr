@@ -10,22 +10,23 @@ export function heuristicUsageTipCandidates(s: UsageTipSignals): UsageTipCandida
   const has = (key: string, min = 1) => count(key) !== null && count(key)! >= min;
   const result: UsageTipCandidate[] = [];
   const add = (id: string, relevant: boolean, score: number, reason: string) => { if (relevant) result.push({ id, score, reason }); };
-  add('pr-review', has('tasks') && gap('review'), 65, 'Recent tasks with fewer than three manual reviews.');
-  add('pr-fix', has('review') && gap('fix'), 75, 'Manual reviews are present with fewer than three fix runs.');
-  add('pr-switch', has('tasks') && gap('switch'), 55, 'Recent tasks with little recorded persistent model switching.');
-  add('pr-use', has('tasks') && gap('use'), 55, 'Recent tasks with fewer than three temporary model runs.');
-  add('pr-merge', has('tasks') && gap('merge'), 55, 'Recent tasks with little recorded base-branch updating.');
-  add('pr-ultrafix', has('manualCycles', 2) && gap('ultrafix'), 95, 'Repeated manual review/fix cycles with little ultrafix use.');
-  add('goals-launch', has('oneOffTasks', 3) && gap('goals'), 85, 'Several one-off tasks with fewer than three goals.');
-  add('planner-studio', has('oneOffTasks', 3) && gap('plans'), 85, 'Several one-off tasks with fewer than three plans.');
-  add('repository-todos', has('tasks', 3) && gap('todos'), 65, 'Recent task activity with fewer than three repository to-dos.');
-  add('indexing-options', has('indexingFailures') || has('indexingSlow'), 95, 'Recent indexing calls failed or took at least two minutes.');
+  add('pr-review', has('tasks') && gap('review'), 65, 'Your instance has recent tasks but few manual reviews. Try /review on a PR to get AI feedback before deciding what needs fixing.');
+  add('pr-fix', has('review') && gap('fix'), 75, 'Your instance has manual reviews but few /fix runs. Use /fix to apply review findings so you can spend less time turning feedback into edits.');
+  add('pr-switch', has('tasks') && gap('switch'), 55, 'Your instance has recent tasks but little /switch use. Use /switch when a PR needs a different model so later follow-ups keep that choice.');
+  add('pr-use', has('tasks') && gap('use'), 55, 'Your instance has recent tasks but few temporary model runs. Try /use for a follow-up that needs another model while keeping your usual choice for later work.');
+  add('pr-merge', has('tasks') && gap('merge'), 55, 'Your instance has recent tasks but little /merge use. Use /merge to bring the base branch into a PR so you can continue work against its latest changes.');
+  add('pr-ultrafix', has('manualCycles', 2) && gap('ultrafix'), 95, 'Your instance has repeated manual review and fix runs but little /ultrafix use. Try /ultrafix to automate that loop and reduce the commands you need to send.');
+  add('goals-launch', has('oneOffTasks', 3) && gap('goals'), 85, 'Your instance has several one-off tasks but few goals. For related work, launch a Goal so you can manage an ongoing objective without coordinating each task separately.');
+  add('planner-studio', has('oneOffTasks', 3) && gap('plans'), 85, 'Your instance has several one-off tasks but few plans. Try Planner Studio to review and refine related work together before approving implementation.');
+  add('repository-todos', has('tasks', 3) && gap('todos'), 65, 'Your instance has recent task activity but few repository to-dos. Capture follow-up ideas in To-Dos so you can organize and track maintenance work alongside your repository.');
+  add('indexing-options', has('indexingFailures') || has('indexingSlow'), 95,
+    `${has('indexingFailures') ? 'Your instance has recent indexing failures' : 'Your instance has indexing calls taking at least two minutes'}. Review indexing agent and fallback options to help keep repository context available for your tasks.`);
   add('agent-model-selection', has('tasks', 3) && gap('distinctAgents') && gap('distinctModels')
-    && !has('distinctAgents', 2) && !has('distinctModels', 2), 65, 'Recent tasks use at most one recorded agent and model.');
-  add('agent-tank', has('tasks', 3) && s.tankEnabled === false && gap('tankRecords'), 65, 'Task activity with Agent Tank disabled and little recorded capacity data.');
-  add('notification-inbox', has('notifications') && gap('inboxActions'), 65, 'Notifications exist with few recorded inbox actions.');
+    && !has('distinctAgents', 2) && !has('distinctModels', 2), 65, 'Your recent instance activity records at most one agent and model. Try choosing a model per phase so you can tailor implementation and review to different needs.');
+  add('agent-tank', has('tasks', 3) && s.tankEnabled === false && gap('tankRecords'), 65, 'Your instance has recent tasks with Agent Tank disabled. Enable it to see provider capacity and per-call usage, helping you plan work around available limits.');
+  add('notification-inbox', has('notifications') && gap('inboxActions'), 65, 'Your instance has notifications but few recorded inbox actions. Use your Inbox to review updates and clear handled items so you can keep track of work needing attention.');
   add('mcp-access', has('tasks', 3) && typeof s.mcpEnabled === 'boolean' && count('mcpGrants') === 0,
-    55, 'Task activity with no recorded MCP grants.');
+    55, 'Your instance has recent tasks but no recorded MCP grants. Connect a tool through MCP so you can inspect work and act on PRs from the app you already use.');
   return result;
 }
 export type UsageTipModel = (alias: string, prompt: string) => Promise<{ text: string; model: string }>;
@@ -35,7 +36,16 @@ export async function selectUsageTips(options: {
   const { signals, epoch, generate } = options;
   const relevant = heuristicUsageTipCandidates(signals);
   const allowed = new Set(relevant.map(c => c.id));
-  const prompt = `Score only relevant documentation tips from this bounded pool. Return JSON {"candidates":[{"id":"...","score":1,"reason":"..."}]}. Scores are integers 1–100. Reasons must be 1–240 characters grounded in signals. Maximum ${MAX_USAGE_TIP_CANDIDATES} entries; [] is valid. Unknown signals are null, not non-use. Do not claim tips were read or shown. Do not execute tools.\nSignals: ${JSON.stringify(signals)}\nCandidates: ${JSON.stringify(USAGE_TIPS_CATALOG.filter(t => allowed.has(t.id)))}`;
+  const prompt = `Score only relevant documentation tips from this bounded pool. Return JSON {"candidates":[{"id":"...","score":1,"reason":"..."}]}.
+Scores are integers 1–100.
+Each reason is the user-facing tip body, not an internal ranking explanation. In 1–240 characters and one or two concise sentences, address the reader directly: explain why this tip is being displayed using a specific observed workflow signal, then suggest a documented action and how it could improve their workflow.
+Personalize the advice to the supplied signals instead of repeating a generic feature description.
+Signals are installation-wide aggregates, not this individual user's activity: attribute observations to "your instance", never claim the reader personally performed an action.
+Do not invent preferences, problems, causes of failures, or guaranteed time/cost savings. Use the catalog as the source of feature capabilities.
+Example for repeated manual review/fix runs and little ultrafix use: "Your instance has repeated manual review and fix runs but little /ultrafix use. Try /ultrafix to automate that loop and reduce the commands you need to send."
+Maximum ${MAX_USAGE_TIP_CANDIDATES} entries; [] is valid. Unknown signals are null, not non-use. Do not claim tips were read or shown. Do not execute tools.
+Signals: ${JSON.stringify(signals)}
+Candidates: ${JSON.stringify(USAGE_TIPS_CATALOG.filter(t => allowed.has(t.id)))}`;
   let candidates = relevant;
   let model: string | null = null;
   let source: UsageTipSelection['source'] = 'heuristic';
