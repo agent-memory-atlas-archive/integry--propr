@@ -3,7 +3,8 @@ import assert from 'node:assert/strict';
 import { after, afterEach, beforeEach, describe, mock, test } from 'node:test';
 import type { Knex } from 'knex';
 import { closeConnection, NotificationService } from '@propr/core';
-import { DRAFT_UPDATE, INDEXING_UPDATE, TASK_UPDATE } from '@propr/shared';
+import { notificationHref, DRAFT_UPDATE, INDEXING_UPDATE, TASK_UPDATE } from '@propr/shared';
+import { up as backfillEntityReferences } from '../../core/src/db/migrations/20260928120000_backfill_notification_entity_references.js';
 import { NotificationProjectionService } from '../services/notificationProjectionService.js';
 import {
   countNotificationEvents, countUndismissedNotificationReceipts,
@@ -31,6 +32,62 @@ afterEach(async () => {
 after(async () => closeConnection());
 
 describe('notification lifecycle projection', { concurrency: false }, () => {
+  test('stores the goal destination for completed, failed, and stalled goal tasks', async () => {
+    for (const state of ['completed', 'failed', 'processing']) {
+      await database('tasks').insert({
+        task_id: `goal-task-${state}`, repository: 'integry/propr', task_type: 'goal',
+        pr_number: state === 'completed' ? 42 : null,
+        initial_job_data: JSON.stringify({ goalId: `goal-${state}` }),
+      });
+      await projection.projectTaskUpdate({
+        eventType: TASK_UPDATE, taskId: `goal-task-${state}`, state, timestamp: iso(),
+      });
+    }
+    clock += 20_000;
+    await projection.detectStalledActivities();
+    const service = new NotificationService({ database });
+    const { notifications } = await service.listNotifications('admin-user');
+    assert.equal(notifications.length, 3);
+    assert.deepEqual(notifications.map(notificationHref).sort(), [
+      '/goals/goal-completed', '/goals/goal-failed', '/goals/goal-processing',
+    ]);
+  });
+
+  test('backfills only unambiguous producer references and preserves receipt state and immutability', async () => {
+    const service = new NotificationService({ database, now: () => new Date(clock) });
+    const addTask = async (id: string, repository: string, pr: number, at: string, type = 'issue') => {
+      await database('tasks').insert({ task_id: id, repository, pr_number: pr, task_type: type,
+        initial_job_data: JSON.stringify(type === 'goal' ? { goalId: 'saved-goal' } : {}) });
+      await database('task_history').insert({ task_id: id, state: 'completed', timestamp: at });
+    };
+    await addTask('fix-original', 'integry/propr', 42, iso());
+    await addTask('fix-later', 'integry/propr', 42, iso(1_000));
+    await addTask('other-repository', 'other/propr', 42, iso());
+    await addTask('review-original', 'integry/propr', 42, iso(), 'review');
+    await addTask('ambiguous-1', 'integry/propr', 43, iso());
+    await addTask('ambiguous-2', 'integry/propr', 43, iso());
+    await addTask('goal-task', 'integry/propr', 44, iso(), 'goal');
+    for (const [id, prNumber, kind] of [
+      ['fix', 42, 'pull_request'], ['review', 42, 'review'],
+      ['ambiguous', 43, 'pull_request'], ['missing', 45, 'pull_request'], ['goal', 44, 'pull_request'],
+    ] as const) {
+      await service.createNotificationEvent({
+        id, deduplicationKey: id, kind, target: { type: kind, repository: 'integry/propr', prNumber },
+        title: id, body: 'Complete', occurredAt: iso(), recipients: ['admin-user'],
+      });
+    }
+    await service.markNotificationRead('admin-user', 'fix');
+    await backfillEntityReferences(database);
+    await backfillEntityReferences(database);
+    const { notifications } = await service.listNotifications('admin-user');
+    assert.deepEqual(Object.fromEntries(notifications.map(n => [n.id, notificationHref(n)])), {
+      fix: '/tasks/fix-original', review: '/tasks/review-original', goal: '/goals/saved-goal',
+      ambiguous: 'https://github.com/integry/propr/pull/43', missing: 'https://github.com/integry/propr/pull/45',
+    });
+    assert.ok(notifications.find(n => n.id === 'fix')?.readAt);
+    await assert.rejects(database('notification_events').where({ event_id: 'fix' }).update({ title: 'changed' }), /immutable/);
+  });
+
   test('creates exactly one plan-ready event for the draft owner', async () => {
     await database('task_drafts').insert({
       draft_id: 'draft-1', user_id: 'draft-owner', repository: 'integry/propr',

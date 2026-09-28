@@ -18,6 +18,7 @@ import {
   notificationHref,
   notificationKindLabel,
   notificationReference,
+  notificationPullRequestUrl,
   notificationRepository,
   notificationStatus,
   repositoryParts,
@@ -189,6 +190,7 @@ export const InboxCard: React.FC<{
   const swipe = useSwipeToDismiss(canDismiss, dismiss);
   const inPlace = expandsInPlace(notification);
   const reference = notificationReference(notification);
+  const pullRequestUrl = notificationPullRequestUrl(notification);
   // The title link stretches over the whole row; commands and dismiss sit above it.
   const targetClass = 'text-left after:absolute after:inset-0 after:content-[""] focus:outline-none focus-visible:after:ring-2 focus-visible:after:ring-inset focus-visible:after:ring-teal-500';
   const title = notificationDisplayTitle(notification);
@@ -247,7 +249,14 @@ export const InboxCard: React.FC<{
             {reference && (
               <>
                 <span className="hidden sm:inline"><Dot /></span>
-                <span className="flex-none"><ReferenceChip title={reference.title}>{reference.label}</ReferenceChip></span>
+                {pullRequestUrl ? (
+                  <a href={pullRequestUrl} target="_blank" rel="noopener noreferrer"
+                    onClick={() => onOpen(notification.id)}
+                    className="relative z-10 flex-none rounded-sm hover:underline focus-visible:outline-teal-500"
+                    aria-label={`${reference.label} on GitHub`}>
+                    <ReferenceChip title={reference.title}>{reference.label}</ReferenceChip>
+                  </a>
+                ) : <span className="flex-none"><ReferenceChip title={reference.title}>{reference.label}</ReferenceChip></span>}
               </>
             )}
             <span className="hidden sm:inline"><Dot /></span>
