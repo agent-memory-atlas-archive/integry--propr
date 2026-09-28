@@ -85,6 +85,7 @@ export interface ActiveItem {
 /** The newest successful outcome for an entity, with its completed task count. */
 export interface OutcomeItem {
   eventCount: number;
+  earlierUpdates: Array<Omit<OutcomeItem, 'eventCount' | 'earlierUpdates'>>;
   id: string;
   taskId: string;
   repository: string;
@@ -122,6 +123,12 @@ function toOutcomeItem(row: CompletedRow): OutcomeItem {
     taskType: row.taskType,
     title: row.title,
     eventCount: row.eventCount,
+    earlierUpdates: row.earlierUpdates.map(update => ({
+      id: `task:${update.taskId}:completed`, taskId: update.taskId,
+      repository: update.repository, issueNumber: update.issueNumber, prNumber: update.prNumber,
+      taskType: update.taskType, title: update.title, detail: update.recap,
+      score: update.reviewScore, occurredAt: update.stateTimestamp,
+    })),
     detail: row.recap,
     score: row.reviewScore,
     occurredAt: row.stateTimestamp,

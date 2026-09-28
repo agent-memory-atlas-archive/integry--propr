@@ -25,9 +25,7 @@ import {
   type RawTaskRow,
 } from './dashboardQueries.js';
 
-export interface CompletedRow extends DashboardTaskRow {
-  /** Completed task outcomes rolled into this entity, excluding duplicate transitions. */
-  eventCount: number;
+export interface CompletionUpdate extends DashboardTaskRow {
   /**
    * What the run actually produced, from the recap recorded on its completion,
    * or null when the only thing recorded is that it finished.
@@ -35,6 +33,12 @@ export interface CompletedRow extends DashboardTaskRow {
   recap: string | null;
   /** Review score out of 10; only reviews carry one, and only when recorded. */
   reviewScore: number | null;
+}
+
+export interface CompletedRow extends CompletionUpdate {
+  /** Includes the latest outcome; earlierUpdates excludes it. */
+  eventCount: number;
+  earlierUpdates: CompletionUpdate[];
 }
 
 /** Candidates read per page while a title search looks for its matches. */
@@ -218,7 +222,7 @@ function entityCompletions(db: Knex, repository: string): Knex.QueryBuilder {
   `));
   return db.with('completed', completed).with('numbered', numbered)
     .with('entities', entities).with('ranked', ranked)
-    .from('ranked').where('entity_rank', 1);
+    .from('ranked');
 }
 
 /** Recent entity outcomes, optionally narrowed by their decoded title. */
@@ -229,9 +233,10 @@ export async function loadCompletedRows(
 ): Promise<CompletedRow[]> {
   const limit = Math.min(Math.max(options.limit ?? 20, 1), 100);
   const search = options.search?.trim().toLowerCase() ?? '';
-  type EntityRow = RawTaskRow & { event_count: number; entity_title: string | null };
+  type EntityRow = RawTaskRow & { event_count: number; entity_key: string; entity_title: string | null };
   const candidates = (after: EntityRow | null, pageSize: number): Knex.QueryBuilder => {
     const query = entityCompletions(db, repository)
+      .where('entity_rank', 1)
       .select('*')
       .orderBy([{ column: 'state_timestamp', order: 'desc' }, { column: 'task_id', order: 'desc' }])
       .limit(pageSize);
@@ -246,7 +251,7 @@ export async function loadCompletedRows(
     return query;
   };
 
-  const mapped: Array<DashboardTaskRow & { eventCount: number }> = [];
+  const mapped: Array<DashboardTaskRow & { eventCount: number; entityKey: string }> = [];
   let after: EntityRow | null = null;
   const pageSize = search ? SEARCH_PAGE_SIZE : limit;
   do {
@@ -254,7 +259,7 @@ export async function loadCompletedRows(
     for (const row of page) {
       const mappedRow = { ...mapTaskRow(row), title: row.entity_title };
       if (!search || (mappedRow.title ?? '').toLowerCase().includes(search)) {
-        mapped.push({ ...mappedRow, eventCount: Number(row.event_count) });
+        mapped.push({ ...mappedRow, eventCount: Number(row.event_count), entityKey: row.entity_key });
       }
     }
     if (page.length < pageSize) break;
@@ -263,13 +268,33 @@ export async function loadCompletedRows(
   const visible = mapped.slice(0, limit);
   if (visible.length === 0) return [];
 
-  const details = await loadCompletionDetails(db, visible);
-  return visible.map(row => {
+  // Read prior outcomes only for the selected parents, using the same identity
+  // partition as the feed. The parent limit never applies to individual updates.
+  const earlier = await entityCompletions(db, repository)
+    .where('entity_rank', '>', 1)
+    .whereIn(['repository', 'entity_key'], db.from('ranked')
+      .select('repository', 'entity_key').whereIn('task_id', visible.map(row => row.taskId)))
+    .select('*')
+    .orderBy([{ column: 'state_timestamp', order: 'desc' }, { column: 'task_id', order: 'desc' }]) as EntityRow[];
+  const earlierRows = earlier.map(row => mapTaskRow(row));
+  const details = await loadCompletionDetails(db, [...visible, ...earlierRows]);
+  const withDetails = (row: DashboardTaskRow): CompletionUpdate => {
     const detail = details.get(row.taskId) ?? { recap: null, commandMode: null };
     if (isReviewRun(row, detail.commandMode)) {
       const review = splitReviewRecap(detail.recap);
       return { ...row, recap: meaningfulRecap(review.detail), reviewScore: review.score };
     }
     return { ...row, recap: meaningfulRecap(detail.recap), reviewScore: null };
-  });
+  };
+  const updates = new Map<string, CompletionUpdate[]>();
+  for (const [index, raw] of earlier.entries()) {
+    const key = JSON.stringify([raw.repository, raw.entity_key]);
+    const group = updates.get(key) ?? [];
+    group.push(withDetails(earlierRows[index]));
+    updates.set(key, group);
+  }
+  return visible.map(row => ({
+    ...withDetails(row), eventCount: row.eventCount,
+    earlierUpdates: updates.get(JSON.stringify([row.repository, row.entityKey])) ?? [],
+  }));
 }

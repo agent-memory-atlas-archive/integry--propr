@@ -105,7 +105,7 @@ function actionHref(item: AttentionItem): string {
  */
 function itemTitle(item: AttentionItem): WorkTitle & { title: string } {
   const work = splitWorkTitle(item.title, item.taskType);
-  return { type: work.type, title: work.title || item.detail || 'Untitled work' };
+  return { type: item.kind === 'plan_review' ? 'Review' : work.type, title: work.title || item.detail || 'Untitled work' };
 }
 
 const AttentionRow: React.FC<{ item: AttentionItem }> = ({ item }) => {
@@ -148,7 +148,7 @@ const AttentionRow: React.FC<{ item: AttentionItem }> = ({ item }) => {
           className="min-w-0 justify-self-end truncate whitespace-nowrap text-gray-500 lg:col-start-1 lg:row-start-3 lg:justify-self-start"
         >
           Waiting {elapsedLabel(item.since)}
-          {stale && <span className="ml-1.5 font-medium text-slate-500">[Stale]</span>}
+          {stale && <span className="ml-1.5 rounded-sm bg-slate-100 px-1.5 py-0.5 font-mono text-[10px] font-bold uppercase text-slate-500">Stale</span>}
         </time>
         <span className="flex min-w-0 items-center gap-1.5 lg:col-start-2 lg:row-start-1">
           <RepositoryLabel repository={item.repository} />

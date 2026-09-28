@@ -10,6 +10,7 @@
  */
 
 import React, { useCallback, useMemo, useState } from 'react';
+import { Terminal } from 'lucide-react';
 import { getDashboardActive, type ActiveItem, type DashboardActiveResponse } from '../../api/dashboardApi';
 import {
   RepositoryLabel,
@@ -17,7 +18,7 @@ import {
   RowLink,
   RowMetaLines,
   RowTitle,
-  SectionEmpty,
+  SectionZeroState,
   SectionError,
   SectionFooter,
   SectionFooterButton,
@@ -250,7 +251,7 @@ export const HappeningNowSection: React.FC<DashboardSectionProps> = ({ repositor
       return <SectionError message="Unable to load running work" onRetry={reload} />;
     }
     if (orderedRunning.length === 0) {
-      return <SectionEmpty>No work running</SectionEmpty>;
+      return <SectionZeroState data-testid="happening-now-empty" icon={<Terminal className="h-6 w-6 text-slate-300" aria-hidden="true" />}>No active tasks running</SectionZeroState>;
     }
 
     const visible = showAll ? orderedRunning : orderedRunning.slice(0, collapsedLimit);

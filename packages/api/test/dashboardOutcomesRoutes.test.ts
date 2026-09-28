@@ -284,3 +284,24 @@ test('an untitled latest event keeps the entity title and its own outcome', asyn
   assert.deepEqual([items[0].taskId, items[0].title, items[0].detail, items[0].eventCount],
     ['untitled', 'Handle "retry budget" failures', 'Fixed remaining checks', 2]);
 });
+
+
+test('five parents survive many updates and prior recaps keep their own scores and order', async () => {
+  for (let parent = 0; parent < 6; parent++) {
+    for (let update = 0; update < 4; update++) {
+      await seedTask({ taskId: `parent-${parent}-update-${update}`, prNumber: 500 + parent,
+        taskType: 'review', title: `Review PR #${500 + parent}: Deliverable ${parent}`,
+        states: [{ state: 'completed', timestamp: minutesAgo(parent * 10 + update + 1),
+          metadata: { notificationRecap: `Score ${9 - update}/10 · Review pass ${update}` } }],
+      });
+    }
+  }
+  const response = await call(routes().getOutcomes, { limit: '5' });
+  const items = response.body.items as Array<{ prNumber: number; eventCount: number; earlierUpdates: Array<{ taskId: string; detail: string; score: number }> }>;
+  assert.deepEqual(items.map(item => item.prNumber), [500, 501, 502, 503, 504]);
+  for (const [parent, item] of items.entries()) {
+    assert.equal(item.eventCount, 4);
+    assert.deepEqual(item.earlierUpdates.map(update => [update.taskId, update.detail, update.score]),
+      [1, 2, 3].map(update => [`parent-${parent}-update-${update}`, `Review pass ${update}`, 9 - update]));
+  }
+});

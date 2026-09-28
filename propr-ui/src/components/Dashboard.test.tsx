@@ -96,7 +96,7 @@ const mockStats = vi.mocked(getDashboardStats);
  * facts, and a refactor that collapsed them into one message would otherwise
  * still satisfy a pair of `toHaveTextContent` assertions.
  */
-const IDLE_RUNNING_MESSAGE = 'No work running';
+const IDLE_RUNNING_MESSAGE = 'No active tasks running';
 const UNAVAILABLE_RUNNING_MESSAGE = 'Unable to load running work';
 
 const LocationProbe: React.FC = () => {
@@ -211,8 +211,8 @@ describe('Dashboard', () => {
       renderAttentionPanel();
       const panel = screen.getByTestId('needs-attention-panel');
       await within(panel).findByText('Waiting 50d');
-      expect(within(panel).getAllByText('[Stale]')).toHaveLength(2);
-      expect(within(panel).getByText('Waiting 14d').parentElement).not.toHaveTextContent('[Stale]');
+      expect(within(panel).getAllByText('Stale')).toHaveLength(2);
+      expect(within(panel).getByText('Waiting 14d').parentElement).not.toHaveTextContent('Stale');
       expect(panel).not.toHaveTextContent(/Waiting \d+\/\d+\//);
     } finally {
       clock.mockRestore();
@@ -223,16 +223,49 @@ describe('Dashboard', () => {
     mockActive.mockResolvedValue(activeResponse());
     await renderLoadedDashboard();
     const panel = screen.getByTestId('happening-now-section');
-    await within(panel).findByText('No work running');
+    await within(panel).findByText('No active tasks running');
     expect(within(panel).queryByRole('link', { name: 'View all' })).not.toBeInTheDocument();
   });
 
-  it('discloses rolled-up completion events on the entity row', async () => {
-    mockOutcomes.mockResolvedValue(outcomesResponse([outcomeItem({ eventCount: 5 })]));
+  it('keeps earlier updates collapsed and toggles their own recaps without navigating', async () => {
+    const earlierUpdates = [
+      outcomeItem({ id: 'earlier-fix', taskId: 'earlier-fix', detail: 'Fixed operator markup', score: null }),
+      outcomeItem({ id: 'earlier-review', taskId: 'earlier-review', detail: 'Missing timeline test', score: 4 }),
+    ];
+    mockOutcomes.mockResolvedValue(outcomesResponse([outcomeItem({ eventCount: 3, earlierUpdates })]));
     await renderLoadedDashboard();
     const list = await screen.findByTestId('completed-list');
     expect(within(list).getAllByRole('listitem')).toHaveLength(1);
-    expect(list).toHaveTextContent('5 events rolled up');
+    expect(within(list).queryByText('Fixed operator markup')).toBeNull();
+    const toggle = within(list).getByRole('button', { name: '2 earlier updates' });
+    expect(toggle).toHaveAttribute('aria-expanded', 'false');
+    expect(toggle.closest('a')).toBeNull();
+    fireEvent.click(toggle);
+    expect(toggle).toHaveAttribute('aria-expanded', 'true');
+    expect(within(list).getByText('Fixed operator markup')).toBeVisible();
+    expect(within(list).getByText('Missing timeline test')).toBeVisible();
+    fireEvent.click(toggle);
+    expect(within(list).queryByText('Fixed operator markup')).toBeNull();
+  });
+
+  it('shows five parent outcomes before offering more', async () => {
+    mockOutcomes.mockResolvedValue(outcomesResponse(Array.from({ length: 7 }, (_, index) =>
+      outcomeItem({ id: `parent-${index}`, taskId: `parent-${index}`, prNumber: 100 + index }))));
+    await renderLoadedDashboard();
+    const list = await screen.findByTestId('completed-list');
+    expect(list.children).toHaveLength(5);
+    fireEvent.click(screen.getByRole('button', { name: 'Show 2 more' }));
+    expect(list.children).toHaveLength(7);
+  });
+
+  it('tags review decisions and fix tasks with the shared work types', async () => {
+    mockAttention.mockResolvedValue(attentionResponse([
+      attentionItem({ id: 'review', kind: 'plan_review', taskType: null, title: 'New Issue: Add VERSION constant' }),
+      attentionItem({ id: 'fix', kind: 'task_failed', taskType: 'pr-comment', title: 'Fix PR #12: Repair validation' }),
+    ]));
+    renderAttentionPanel();
+    const badges = await within(screen.getByTestId('needs-attention-panel')).findAllByTestId('work-type-badge');
+    expect(badges.map(badge => badge.textContent)).toEqual(['Review', 'Fix']);
   });
 
   it('draws the attention heading before its first read lands, so the column never jumps', async () => {

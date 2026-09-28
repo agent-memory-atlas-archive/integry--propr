@@ -15,13 +15,12 @@
  * top, so the heading carries a title filter instead of a period toggle.
  */
 
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useId, useState } from 'react';
 import { Search } from 'lucide-react';
 import { getDashboardOutcomes, type DashboardOutcomesResponse, type OutcomeItem } from '../../api/dashboardApi';
 import { ScoreBadge } from '../TaskList/ScoreBadge';
 import {
   RepositoryLabel,
-  RowDetail,
   RowLink,
   RowMetaLines,
   RowTitle,
@@ -44,22 +43,22 @@ import { splitWorkTitle } from './workTitle';
 
 /** Completions read per request. */
 const FETCH_LIMIT = 50;
-const VISIBLE_ITEMS = 8;
-
-/** Rows drawn rather than folded behind a toggle, as in "Happening now". */
-const OVERFLOW_SLACK = 1;
+const VISIBLE_ITEMS = 5;
 
 /** How long typing has to pause before the filter reads again. */
 const SEARCH_DEBOUNCE_MS = 300;
 
 const CompletedRow: React.FC<{ item: OutcomeItem }> = ({ item }) => {
+  const [expanded, setExpanded] = useState(false);
+  const updatesId = useId();
+  const updates = item.earlierUpdates ?? [];
   const work = splitWorkTitle(item.title, item.taskType);
   const title = work.title || 'Untitled work';
   return (
-    <li>
+    <li className="py-2.5">
       <RowLink
         href={workHref(item)}
-        className="flex min-w-0 items-start gap-2 px-3 py-2.5 text-left transition-colors hover:bg-slate-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-teal-500"
+        className="flex min-w-0 items-start gap-2 px-3 text-left transition-colors hover:bg-slate-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-teal-500"
       >
         <span className="min-w-0 flex-1">
           <RowMetaLines
@@ -76,8 +75,6 @@ const CompletedRow: React.FC<{ item: OutcomeItem }> = ({ item }) => {
             )}
           />
           <RowTitle type={work.type}>{title}</RowTitle>
-          {(item.eventCount ?? 1) > 1 && <RowDetail>↳ {item.eventCount} events rolled up</RowDetail>}
-          {item.detail && item.detail !== title && <RowDetail>{item.detail}</RowDetail>}
         </span>
         {/*
           A review's score, and nothing else's. Rendered only when one exists,
@@ -95,6 +92,48 @@ const CompletedRow: React.FC<{ item: OutcomeItem }> = ({ item }) => {
           </span>
         )}
       </RowLink>
+      {(updates.length > 0 || (item.detail && item.detail !== title)) && (
+        <div className="mt-0.5 flex min-w-0 items-center gap-2 px-3 text-xs leading-5 text-slate-500">
+          {updates.length > 0 && (
+            <button
+              type="button"
+              aria-expanded={expanded}
+              aria-controls={updatesId}
+              onClick={() => setExpanded(value => !value)}
+              className="flex-none rounded-sm hover:text-slate-900 focus:outline-none focus-visible:ring-2 focus-visible:ring-teal-500"
+            >
+              <span aria-hidden="true">{expanded ? '▾' : '↳'} </span>
+              {expanded ? 'Hide ' : ''}{updates.length} earlier {updates.length === 1 ? 'update' : 'updates'}
+            </button>
+          )}
+          {item.detail && item.detail !== title && (
+            <span className="min-w-0 truncate" title={item.detail}>
+              {updates.length > 0 && <span aria-hidden="true">· </span>}{item.detail}
+            </span>
+          )}
+        </div>
+      )}
+      {updates.length > 0 && (
+        <ul id={updatesId} hidden={!expanded} className="mx-3 mt-1 border-l-2 border-slate-200 pl-2">
+          {expanded && updates.map(update => {
+            const updateWork = splitWorkTitle(update.title, update.taskType);
+            // A missing recap is a run type, never the parent deliverable again.
+            const delta = update.detail && update.detail !== title && update.detail !== item.title
+              && update.detail !== update.title && update.detail !== updateWork.title
+              ? update.detail : `${updateWork.type ?? 'Task'} run`;
+            return (
+              <li key={update.id}>
+                <RowLink href={workHref(update)} className="flex min-w-0 items-center gap-2 rounded-sm py-0.5 text-xs leading-5 text-slate-500 hover:bg-slate-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-teal-500">
+                  <time dateTime={update.occurredAt} className="flex-none whitespace-nowrap">{elapsedLabel(update.occurredAt)} ago</time>
+                  <span aria-hidden="true">·</span>
+                  <span className="min-w-0 flex-1 truncate" title={delta}>{delta}</span>
+                  {update.score !== null && update.score !== undefined && <ScoreBadge score={update.score} bracketed label="Review Score" />}
+                </RowLink>
+              </li>
+            );
+          })}
+        </ul>
+      )}
     </li>
   );
 };
@@ -137,7 +176,7 @@ export const CompletedFeed: React.FC<DashboardSectionProps> = ({ repository, ref
   useNowTick(60_000);
 
   const items = data?.items ?? [];
-  const canCollapse = items.length > VISIBLE_ITEMS + OVERFLOW_SLACK;
+  const canCollapse = items.length > VISIBLE_ITEMS;
   const overflowCount = canCollapse ? items.length - VISIBLE_ITEMS : 0;
   const visible = showAll || !canCollapse ? items : items.slice(0, VISIBLE_ITEMS);
 

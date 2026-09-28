@@ -95,6 +95,8 @@ export interface DashboardActiveResponse {
 export interface OutcomeItem {
   /** Completed task outcomes rolled up; absent on older servers. */
   eventCount?: number;
+  /** Prior completed actions, newest first; excludes the displayed outcome. */
+  earlierUpdates?: Array<Omit<OutcomeItem, 'eventCount' | 'earlierUpdates'>>;
   id: string;
   taskId: string;
   repository: string;

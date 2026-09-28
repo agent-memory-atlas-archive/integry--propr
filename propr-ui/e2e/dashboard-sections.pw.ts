@@ -444,26 +444,35 @@ for (const width of [1440, 390]) {
     await fixture(page, waiting, []);
     await page.route('**/api/dashboard/outcomes?**', route => route.fulfill({ json: {
       repository: 'all', limit: 50,
-      items: outcomes.slice(0, 2).map((item, index) => ({ ...item, eventCount: index === 0 ? 3 : 5 })),
+      items: [...outcomes, { ...outcomes[2], id: 'task:done-5:completed', taskId: 'done-5', prNumber: 64,
+        title: 'Fix PR #64: Preserve repository filters on reload', occurredAt: minutesAgo(360) }].map((item, index) => ({
+        ...item, prNumber: item.prNumber ?? 2461, eventCount: index < 2 ? 3 : 1,
+        earlierUpdates: index < 2 ? [
+          { ...item, id: `${item.id}:prior-1`, taskId: `${item.taskId}:prior-1`, occurredAt: minutesAgo(21), detail: 'Fixed duplicate snapshot boundaries and preserved corrective operator messages through retries', score: index === 0 ? 6 : null },
+          { ...item, id: `${item.id}:prior-2`, taskId: `${item.taskId}:prior-2`, occurredAt: minutesAgo(37), detail: 'Initial review found missing timeline coverage', score: index === 0 ? 4 : null },
+        ] : [],
+      })),
     } }));
     await page.route('**/api/dashboard/active?**', route => route.fulfill({ json: {
       repository: 'all', running: [], queued: [], queue: { queuedCount: 0, reason: null }, counts: { running: 0, queued: 0 },
     } }));
     await page.route('**/api/dashboard/narrative?**', route => route.fulfill({ json: {
       repository: 'all', enabled: true,
-      summary: 'No work is running. Two pull requests have recent completed outcomes. Seven older review requests are waiting for attention.',
+      summary: 'No work is running. Five pull requests have recent completed outcomes. Seven older review requests are waiting for attention.',
     } }));
     await page.goto('/');
     const active = page.getByTestId('happening-now-section');
-    await expect(active).toContainText('No work running');
+    await expect(active).toContainText('No active tasks running');
     await expect(active.getByRole('link', { name: 'View all' })).toHaveCount(0);
     const completed = page.getByTestId('completed-list');
-    await expect(completed.locator('li')).toHaveCount(2);
-    await expect(completed).toContainText('5 events rolled up');
+    await expect(completed.locator(':scope > li')).toHaveCount(5);
+    await expect(completed.getByRole('button', { name: '2 earlier updates' })).toHaveCount(2);
+    await expect(completed.getByText('Initial review found missing timeline coverage')).toHaveCount(0);
     const panel = page.getByTestId('needs-attention-panel');
     await expect(panel.getByRole('heading')).toHaveText('Needs attention (7)');
     await expect(panel).toContainText('Waiting 50d');
-    await expect(panel.getByText('[Stale]', { exact: true })).toHaveCount(3);
+    await expect(panel.getByText('Stale', { exact: true })).toHaveCount(3);
+    await expect(panel.getByTestId('work-type-badge')).toHaveText(['Review', 'Review', 'Review']);
     const more = panel.getByRole('button', { name: 'Show 4 more' });
     await expect(more).toBeVisible();
     const summary = page.getByTestId('dashboard-summary');
@@ -478,6 +487,19 @@ for (const width of [1440, 390]) {
       // Only the dashboard itself: omit unrelated navigation and account data.
       await page.locator('main').screenshot({ animations: 'disabled', path: path.join(directory, `dashboard-cleanup-${width}.png`) });
     }
+    const disclosure = completed.getByRole('button', { name: '2 earlier updates' }).first();
+    await disclosure.click();
+    await expect(disclosure).toHaveAttribute('aria-expanded', 'true');
+    const updates = completed.locator(':scope > li').first().locator('ul');
+    await expect(updates.locator('li')).toHaveCount(2);
+    const lineHeights = await updates.locator('a').evaluateAll(nodes => nodes.map(node => node.getBoundingClientRect().height));
+    expect(lineHeights.every(height => height <= 28)).toBe(true);
+    expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(width);
+    if (process.env.PROPR_CAPTURE_PREVIEWS) {
+      await page.locator('main').screenshot({ animations: 'disabled', path: path.resolve(`../.propr/previews/dashboard-updates-expanded-${width}.png`) });
+    }
+    await disclosure.click();
+    await expect(updates).toBeHidden();
     await more.click();
     await expect(panel.locator('li')).toHaveCount(7);
     await panel.getByRole('button', { name: 'Show fewer' }).click();
