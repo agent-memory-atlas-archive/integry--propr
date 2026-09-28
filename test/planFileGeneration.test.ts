@@ -4,6 +4,8 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { after, beforeEach, describe, mock, test } from 'node:test';
+import type { Agent, AnalyzeOptions } from '../packages/core/src/agents/types.js';
+import type { SyntheticRoutingSession as RoutingSession } from '../packages/core/src/services/syntheticRoutingService.js';
 
 const workspaceRoot = mkdtempSync(path.join(tmpdir(), 'propr-plan-workspaces-'));
 process.env.PROPR_PLAN_WORKSPACE_ROOT = workspaceRoot;
@@ -43,7 +45,12 @@ await mock.module('../packages/core/src/utils/llmEstimation.js', {
   namedExports: { estimateLlmDuration: mock.fn(async () => ({ estimatedDurationMs: 1, isHistoricalEstimate: false, sampleCount: 0, avgMsPerToken: 0 })) },
 });
 const replies: string[] = [];
-const runLightweightLLMAnalysis = mock.fn(async () => {
+const runLightweightLLMAnalysis = mock.fn(async (options: { prompt: string; routingSession?: RoutingSession }) => {
+  if (options.routingSession instanceof SyntheticRoutingSession) {
+    const result = await options.routingSession.analyze(options.prompt);
+    assert.equal(result.success, true);
+    return result.response;
+  }
   const reply = replies.shift();
   if (reply === undefined) throw new Error('Unexpected reply-mode call');
   return reply;
@@ -59,7 +66,7 @@ await mock.module('../packages/core/src/services/syntheticUsageSnapshotProvider.
 await mock.module('../packages/core/src/utils/tokenCalculation.js', {
   namedExports: { estimateTokens: (text: string) => Math.ceil(text.length / 4) },
 });
-const { SyntheticRoutingSession } = await import('../packages/core/src/services/syntheticRoutingService.js');
+const { SyntheticRoutingSession, SyntheticRoutingService, SyntheticPoolExhaustedError } = await import('../packages/core/src/services/syntheticRoutingService.js');
 
 const { PLAN_VALIDATOR_SCRIPT, validatePlanTaskFiles, validatePlanText } = await import('../packages/core/src/services/taskPlanning/planValidation.js');
 const { runPlanFileAgent, PlanFileAgentUnavailableError } = await import('../packages/core/src/services/taskPlanning/planFileAgent.js');
@@ -76,6 +83,7 @@ function fakeAgent(write: (workspace: string, options: TaskOptions) => void | Pr
   return {
     calls,
     session: {
+      fork: () => ({}),
       executeTask: async (options: TaskOptions) => {
         calls.push(options);
         await write(options.worktreePath, options);
@@ -510,9 +518,83 @@ describe('file-based plan generation', () => {
     assert.equal(runLightweightLLMAnalysis.mock.callCount(), 1);
   });
 
+  for (const failure of ['throw', 'result']) {
+    test(`response fallback starts a fresh routing call after all file members fail by ${failure}`, async () => {
+      const fileCalls: string[] = [];
+      const responseCalls: AnalyzeOptions[] = [];
+      const agents = ['first', 'second'].map(alias => ({
+        config: { alias, enabled: true, supportedModels: ['opus'] },
+        executeTask: async () => {
+          fileCalls.push(alias);
+          await Promise.resolve();
+          if (failure === 'throw') throw new Error('temporary transport failure');
+          return { success: false, error: 'temporary transport failure' };
+        },
+        analyze: async (_prompt: string, options: AnalyzeOptions) => {
+          assert.deepEqual(fileCalls, ['first', 'second'], 'file routing exhausted before response generation');
+          assert.deepEqual(readdirSync(workspaceRoot), [], 'all empty file workspaces have been cleaned up');
+          responseCalls.push(options);
+          // Response generation also retains its own normal routing failover.
+          if (alias === 'first') throw new Error('temporary response transport failure');
+          return { success: true, response: json([task('From fresh route')]), modelUsed: 'opus', executionTimeMs: 1 };
+        },
+      }));
+      const router = new SyntheticRoutingService({
+        loadSyntheticConfigs: async () => [{
+          id: 'pool', alias: 'pool', enabled: true, defaultModel: 'smart',
+          models: [{
+            id: 'smart', enabled: true, strategy: 'usage_based',
+            members: agents.map((agent, index) => ({
+              id: agent.config.alias, directAgentAlias: agent.config.alias, model: 'opus', enabled: true, priority: 100 - index,
+            })),
+          }],
+        }],
+        getDirectAgent: alias => agents.find(agent => agent.config.alias === alias) as Agent | undefined,
+      });
+      // Persistence is outside this regression; selection, retries and forks are real.
+      mock.method(router, 'recordAttempt', async () => null);
+      const routingSession = router.begin({ requestedAgentAlias: 'pool', requestedModel: 'smart', requiredTokens: 50_000 });
+      const result = await callLLMForPlan({
+        ...baseOptions, runId: 'run-fallback', fullContext: 'Generate a plan', worktreePath: '/tmp/worktree', tokenLimit: 100_000,
+        repairModel: 'codex:gpt', granularity: 'balanced', routingSession,
+      });
+      assert.deepEqual(result.plan.map(item => item.title), ['From fresh route']);
+      assert.equal(runLightweightLLMAnalysis.mock.callCount(), 1);
+      const responseSession = runLightweightLLMAnalysis.mock.calls[0].arguments[0].routingSession!;
+      assert.notEqual(responseSession, routingSession);
+      assert.notEqual(responseSession.callId, routingSession.callId);
+      assert.equal(responseSession.requiredTokens, routingSession.requiredTokens);
+      assert.equal(responseCalls.length, 2);
+      assert.deepEqual(responseCalls.map(options => {
+        const routing = options.metadata?.syntheticRouting as { callId: string; attemptNumber: number };
+        return { callId: routing.callId, attemptNumber: routing.attemptNumber };
+      }), [
+        { callId: responseSession.callId, attemptNumber: 1 },
+        { callId: responseSession.callId, attemptNumber: 2 },
+      ]);
+      assert.deepEqual([...routingSession.attemptedMembers], ['first', 'second']);
+      await assert.rejects(routingSession.select(), SyntheticPoolExhaustedError);
+    });
+  }
+
+  test('explicit response mode retains the supplied routing session', async () => {
+    process.env.PROPR_PLAN_GENERATION_MODE = 'response';
+    replies.push(json([task('From reply')]));
+    const agent = fakeAgent(() => { throw new Error('must not run'); });
+    const fork = mock.method(agent.session, 'fork');
+    const result = await callLLMForPlan({
+      ...baseOptions, runId: 'run-response', fullContext: 'Generate a plan', worktreePath: '/tmp/worktree', tokenLimit: 100_000,
+      repairModel: 'codex:gpt', granularity: 'balanced', routingSession: agent.session as never,
+    });
+    assert.deepEqual(result.plan.map(item => item.title), ['From reply']);
+    assert.equal(agent.calls.length, 0);
+    assert.equal(fork.mock.callCount(), 0);
+    assert.equal(runLightweightLLMAnalysis.mock.calls[0].arguments[0].routingSession, agent.session);
+  });
+
   test('falls back to the model reply only when the agent could not run', async () => {
     replies.push(json([task('From reply')]));
-    const unavailable = { executeTask: async () => { throw new Error('no container runtime'); } };
+    const unavailable = { fork: () => ({}), executeTask: async () => { throw new Error('no container runtime'); } };
     const result = await callLLMForPlan({
       ...baseOptions, runId: 'run-1', fullContext: 'Generate a plan', worktreePath: '/tmp/worktree', tokenLimit: 100_000,
       repairModel: 'codex:gpt', granularity: 'balanced', routingSession: unavailable as never,
