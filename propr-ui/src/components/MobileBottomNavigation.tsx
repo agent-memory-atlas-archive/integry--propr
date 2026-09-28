@@ -26,6 +26,7 @@ import type { CurrentUser } from '../api/proprTypes';
 import { userHasPermission } from '../contexts/AuthContext';
 import AgentTankSidebar from './AgentTankSidebar';
 import UserAvatar from './UserAvatar';
+import QuickAddTodo from './QuickAddTodo';
 
 interface MobileBottomNavigationProps {
   user: CurrentUser | null;
@@ -38,6 +39,8 @@ interface MobileBottomNavigationProps {
 const focusableSelector = [
   'a[href]',
   'button:not([disabled])',
+  'input:not([disabled])',
+  'textarea:not([disabled])',
   'details > summary',
   '[tabindex]:not([tabindex="-1"])',
 ].join(',');
@@ -261,6 +264,9 @@ const MobileBottomNavigation: React.FC<MobileBottomNavigationProps> = ({
             </div>
 
             <nav aria-label="More navigation" className="grid grid-cols-2 gap-2 p-3">
+              <div className="col-span-2">
+                <QuickAddTodo layout="inline" disabled={isDemoMode} />
+              </div>
               {moreItems.map(item => (
                 <Link
                   key={item.to}
