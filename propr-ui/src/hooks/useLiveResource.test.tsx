@@ -1,3 +1,4 @@
+/* eslint-disable max-lines -- every case drives the hook through one socket and visibility fixture */
 import { act, renderHook } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
@@ -9,8 +10,8 @@ import {
   type GoalUpdatePayload,
   type NotificationUpdatePayload,
   type UsageUpdatePayload,
-} from '@propr/shared';
-import { useLiveResource } from './useLiveResource';
+} from '@propr/shared/dist/activityEvents.js';
+import { matchesInterest, useLiveResource } from './useLiveResource';
 
 type Listener<T> = (payload: T) => void;
 
@@ -410,6 +411,38 @@ describe('useLiveResource', () => {
     expect(socket.listeners.activity.size).toBe(0);
   });
 
+  it('keeps usage-only widgets idle for unrelated activity and retains their last good value', async () => {
+    const read = vi.fn().mockResolvedValueOnce('good').mockRejectedValueOnce(new Error('offline'));
+    const { result } = renderHook(() => useLiveResource({ read, interest: { usage: true } }));
+    await flush();
+    expect(result.current.isLoading).toBe(false);
+    await emitActivity(activityEvent());
+    await advance(100);
+    expect(read).toHaveBeenCalledTimes(1);
+    await act(async () => {
+      socket.listeners.usage.forEach(listener => listener({ eventType: USAGE_UPDATE }));
+    });
+    await advance(100);
+    expect(result.current.data).toBe('good');
+    expect(result.current.error).toBe('offline');
+  });
+
+  it('lets a manual refresh wait until its replacement value has settled', async () => {
+    const pending = deferred<string>();
+    const read = vi.fn().mockResolvedValueOnce('old').mockImplementationOnce(() => pending.promise);
+    const { result } = renderHook(() => useLiveResource({ read, interest: { usage: true } }));
+    await flush();
+    let settled = false;
+    let refresh!: Promise<void>;
+    await act(async () => {
+      refresh = result.current.refreshNow().then(() => { settled = true; });
+    });
+    expect(settled).toBe(false);
+    await act(async () => { pending.resolve('new'); await refresh; });
+    expect(settled).toBe(true);
+    expect(result.current.data).toBe('new');
+  });
+
   it('issues no request at all while disabled', async () => {
     const read = vi.fn(async () => ({ ok: true }));
     const { result } = renderHook(() => useLiveResource({
@@ -446,4 +479,15 @@ describe('hidden initial scopes', () => {
     unmount();
     vi.useRealTimers();
   });
+});
+
+
+it('accepts both health event vocabularies without treating indexing progress as a health change', () => {
+  const interest = { domains: ['health', 'system', 'indexing'], changes: ['updated', 'completed'] } as const;
+  expect(matchesInterest(activityEvent({ domain: 'system', change: 'progressed' }), interest)).toBe(true);
+  expect(matchesInterest({ eventType: ACTIVITY_UPDATE, domain: 'health', change: 'updated',
+    occurredAt: new Date(0).toISOString() }, interest)).toBe(true);
+  expect(matchesInterest(activityEvent({ domain: 'indexing', change: 'progressed' }), interest)).toBe(false);
+  expect(matchesInterest({ eventType: ACTIVITY_UPDATE, domain: 'indexing', change: 'progress',
+    occurredAt: new Date(0).toISOString() }, interest)).toBe(false);
 });

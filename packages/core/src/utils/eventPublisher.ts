@@ -2,17 +2,13 @@ import { Redis } from 'ioredis';
 import logger from './logger.js';
 import {
   REDIS_CHANNELS,
-  ACTIVITY_UPDATE,
-  isTerminalActivityChange,
-  type ActivityUpdatePayload,
+  ACTIVITY_UPDATE, GOAL_UPDATE, NOTIFICATION_UPDATE, USAGE_UPDATE, isTerminalActivityChange,
   TASK_UPDATE,
   DRAFT_UPDATE,
   INDEXING_UPDATE,
   TASK_LIVE_UPDATE,
   QUEUE_STATS_UPDATE,
-  GOAL_UPDATE,
-  NOTIFICATION_UPDATE,
-  USAGE_UPDATE,
+  type NotificationChange,
   type TaskUpdatePayload,
   type DraftUpdatePayload,
   type DraftStatus,
@@ -31,6 +27,27 @@ import {
   type UsageUpdatePayload,
   type EventPayload
 } from '@propr/shared';
+// The activity envelope's own payload shapes. The barrel exports the shell
+// surfaces' variants under these names, so the envelope ones are imported
+// directly rather than aliased through it.
+import type {
+  ActivityUpdatePayload as ScopedActivityUpdatePayload,
+  NotificationUpdatePayload as RecipientListNotificationUpdate,
+} from '@propr/shared/dist/activityEvents.js';
+
+/**
+ * The two notification producer shapes: a change fanned out to every recipient
+ * of one event, or a change for a single recipient carrying its unread count.
+ */
+type NotificationUpdateInput =
+  | (Omit<RecipientListNotificationUpdate, 'eventType' | 'occurredAt'> & { occurredAt?: string })
+  | {
+      change: NotificationChange;
+      recipientId: string;
+      eventId?: string;
+      unreadCount?: number;
+      occurredAt?: string;
+    };
 
 /**
  * Event publisher for real-time updates via Redis pub/sub.
@@ -393,7 +410,7 @@ class EventPublisher {
     await this.publish(REDIS_CHANNELS.QUEUE_STATS, payload);
   }
 
-  async publishActivity(params: Omit<ActivityUpdatePayload, 'eventType' | 'occurredAt' | 'terminal'>): Promise<boolean> {
+  async publishActivity(params: Omit<ScopedActivityUpdatePayload, 'eventType' | 'occurredAt' | 'terminal'>): Promise<boolean> {
     return this.publish(REDIS_CHANNELS.ACTIVITY, {
       ...params, eventType: ACTIVITY_UPDATE, occurredAt: new Date().toISOString(),
       terminal: isTerminalActivityChange(params.change),
@@ -420,34 +437,52 @@ class EventPublisher {
   }
 
   /**
-   * Publish a notification create/read/dismiss change.
-   * `recipientIds` is carried so the API can fan out to per-user rooms; it is
-   * narrowed to the receiving recipient before the frame reaches a browser.
+   * Publish a notification change.
+   *
+   * Producers run outside the process that owns the websocket - the projection
+   * worker creates the notification, and server-side cleanup dismisses it - so
+   * the change reaches the recipient's open tabs through the same Redis relay
+   * as every other event rather than through a socket they cannot see.
+   *
+   * Two producer shapes exist: the notification service fans a change out to
+   * the recipients of one event at once, while per-recipient producers publish
+   * one frame with the recipient's new unread count. The relay routes either to
+   * the recipients' rooms, so both are accepted rather than forcing a producer
+   * to restate what it knows.
    */
   async publishNotificationUpdate(
-    params: Omit<NotificationUpdatePayload, 'eventType' | 'occurredAt'> & { occurredAt?: string }
+    params: NotificationUpdateInput
   ): Promise<boolean> {
-    return this.publish(REDIS_CHANNELS.NOTIFICATIONS, {
-      ...params,
+    if ('recipientIds' in params) {
+      return this.publish(REDIS_CHANNELS.NOTIFICATIONS, {
+        ...params, eventType: NOTIFICATION_UPDATE, occurredAt: params.occurredAt ?? new Date().toISOString(),
+      });
+    }
+    const payload: NotificationUpdatePayload = {
       eventType: NOTIFICATION_UPDATE,
+      change: params.change,
+      recipientId: params.recipientId,
+      ...(params.eventId === undefined ? {} : { eventId: params.eventId }),
+      ...(params.unreadCount === undefined ? {} : { unreadCount: params.unreadCount }),
       occurredAt: params.occurredAt ?? new Date().toISOString()
-    });
+    };
+    return this.publish(REDIS_CHANNELS.NOTIFICATIONS, payload);
   }
 
   /**
-   * Publish an agent usage change.
-   * Deliberately payload-free beyond its source: the client re-reads the
-   * existing usage endpoint, which already owns the projection and the
-   * permission check.
+   * Publish an agent capacity/quota change.
+   *
+   * A bare trigger, not a snapshot: each client re-reads the usage endpoint,
+   * which keeps owning the projection and its permission check.
    */
-  async publishUsageUpdate(
-    params: Partial<Omit<UsageUpdatePayload, 'eventType'>> = {}
-  ): Promise<boolean> {
-    return this.publish(REDIS_CHANNELS.USAGE, {
+  async publishUsageUpdate(params: { provider?: string; source?: 'agent-tank'; occurredAt?: string } = {}): Promise<boolean> {
+    const payload: UsageUpdatePayload & { source: 'agent-tank' } = {
       eventType: USAGE_UPDATE,
       source: params.source ?? 'agent-tank',
+      ...(params.provider === undefined ? {} : { provider: params.provider }),
       occurredAt: params.occurredAt ?? new Date().toISOString()
-    });
+    };
+    return this.publish(REDIS_CHANNELS.USAGE, payload);
   }
 
   /**
@@ -477,6 +512,25 @@ class EventPublisher {
       logger.debug('EventPublisher Redis connection closed');
     }
   }
+}
+
+/**
+ * Relay a notification change to the recipient's open tabs, fire and forget.
+ *
+ * The producers that need this - the projection worker, and the webhook process
+ * closing a merged pull request's cards - run outside the process that owns the
+ * websocket, so the change travels the same Redis path as every other event.
+ * Losing it costs those tabs freshness until their next reconcile, never the
+ * write that caused it.
+ */
+export function publishNotificationUpdateThroughRedis(payload: {
+  change: NotificationChange;
+  recipientId: string;
+  eventId?: string;
+  unreadCount?: number;
+  occurredAt?: string;
+}): void {
+  void getEventPublisher().publishNotificationUpdate(payload).catch(() => undefined);
 }
 
 // Singleton instance

@@ -5,7 +5,14 @@ import { getDrafts, DraftListItem } from '../api/plannerApi';
 import { CONNECTED_RECONCILE_MS } from './useLiveRefreshScheduler';
 import { useSocket } from '../contexts/useSocket';
 import { isDesktopRuntime } from '../config/runtimeMode';
-import type { DraftUpdatePayload, QueueStatsUpdatePayload, TaskUpdatePayload } from '@propr/shared';
+import type {
+  ActivityChange,
+  ActivityDomain,
+  ActivityUpdatePayload,
+  DraftUpdatePayload,
+  QueueStatsUpdatePayload,
+  TaskUpdatePayload,
+} from '@propr/shared';
 import { useCurrentUser } from '../contexts/AuthContext';
 import { getDesktopSocketConfigurationKey } from '../api/apiClient';
 import { useSharedSystemStatus } from '../contexts/SystemStatusContext';
@@ -26,6 +33,7 @@ import {
   saveDismissedIds,
   saveDismissedTaskTimestamps,
 } from './useHeaderStatsHelpers';
+import type { ActivityUpdatePayload as ScopedActivityUpdatePayload } from '@propr/shared/dist/activityEvents.js';
 import type {
   DismissedTaskTimestamps,
   RunningItem,
@@ -40,6 +48,46 @@ const LIVE_INVALIDATION_COALESCE_MS = 100;
 const LIVE_REVALIDATION_RETRY_DELAYS_MS = [1_000, 3_000] as const;
 const FALLBACK_POLL_INTERVAL_MS = 30_000;
 const ALL_STATS_RESOURCES: readonly HeaderStatsResource[] = ['queue', 'drafts', 'tasks', 'status'];
+
+/**
+ * Which header resource reacts to which pushed change.
+ *
+ * The header is mounted on every page, so a timer here would cost requests on
+ * screens that show none of this data. Declaring the interests makes each read
+ * happen because the thing it reads actually changed.
+ */
+const HEADER_INTERESTS: Record<HeaderStatsResource, {
+  domains: readonly (ActivityDomain | 'system')[];
+  changes?: readonly (ActivityChange | 'progressed')[];
+}> = {
+  queue: { domains: ['task', 'queue', 'goal'] },
+  drafts: { domains: ['plan'] },
+  // The task widget shows what needs a person and what just finished, so it
+  // does not need to wake for every intermediate step.
+  tasks: {
+    domains: ['task', 'plan'],
+    changes: ['blocked', 'failed', 'completed', 'cancelled'],
+  },
+  // Status is about the instance, not about one run: health (a worker, the
+  // daemon, Redis, authentication or an agent), indexing and capacity are the
+  // pushed changes that move it, and per-file indexing progress does not change
+  // what the health rows say. A stopped worker produces no run activity at all,
+  // so without the `health` domain a connected client would keep its healthy
+  // snapshot until an unrelated trigger.
+  status: {
+    domains: ['health', 'system', 'indexing', 'usage'],
+    changes: ['created', 'started', 'completed', 'failed', 'cancelled', 'updated'],
+  },
+};
+
+function resourcesAffectedByActivity(payload: ActivityUpdatePayload | ScopedActivityUpdatePayload): HeaderStatsResource[] {
+  return ALL_STATS_RESOURCES.filter(resource => {
+    const interest = HEADER_INTERESTS[resource];
+    if (!interest.domains.includes(payload.domain)) return false;
+    const change = payload.domain === 'system' && payload.change === 'progressed' ? 'updated' : payload.change;
+    return !interest.changes || interest.changes.some(allowedChange => allowedChange === change);
+  });
+}
 
 export type HeaderStatsResourceStatus = 'checking' | 'available' | 'unavailable';
 
@@ -167,6 +215,7 @@ export function useHeaderStats(): HeaderStats {
   const liveRefreshPendingRef = useRef<Set<HeaderStatsResource>>(new Set());
   const liveRefreshRetryAttemptRef = useRef(0);
   const lastQueueStatsFingerprintRef = useRef<string | null>(null);
+  const lastActivityFingerprintsRef = useRef<Map<string, string>>(new Map());
   const pendingQueueStatsFingerprintRef = useRef<string | null>(null);
   const draftsSnapshotRef = useRef<DraftListItem[]>([]);
   const activeJobsSnapshotRef = useRef<Awaited<ReturnType<typeof getQueueStats>>['activeJobs']>([]);
@@ -197,6 +246,7 @@ export function useHeaderStats(): HeaderStats {
     taskFingerprintsRef.current.clear();
     lastQueueStatsFingerprintRef.current = null;
     pendingQueueStatsFingerprintRef.current = null;
+    lastActivityFingerprintsRef.current.clear();
     setRunningItems([]);
     setRunningCount(0);
     setActivePlans([]);
@@ -466,6 +516,9 @@ export function useHeaderStats(): HeaderStats {
       liveRefreshRetryAttemptRef.current = 0;
       pendingQueueStatsFingerprintRef.current = null;
       lastQueueStatsFingerprintRef.current = null;
+      // Anything could have changed while the socket was down, so no pushed
+      // change may be treated as a repeat of what this client already has.
+      lastActivityFingerprintsRef.current.clear();
       ALL_STATS_RESOURCES.forEach(resource => { statsRequestRef.current[resource] += 1; });
       if (isDesktopRuntime()) {
         setRunningItems([]);
@@ -548,29 +601,55 @@ export function useHeaderStats(): HeaderStats {
       scheduleLiveRefresh(['queue']);
     };
 
+    // The derived envelope covers changes that have no dedicated lifecycle
+    // event on this client (repository indexing, capacity, goal transitions).
+    // Only the resources a change can actually move are invalidated, and the
+    // existing scheduler coalesces a burst into one read per resource.
+    const handleActivityUpdate = (payload: ActivityUpdatePayload) => {
+      // Producers repeat a task's state while a run is in flight. Reading again
+      // for a change this client already reconciled would undo the request
+      // reduction the lifecycle handlers above achieve. Aggregate changes carry
+      // no subject and are only published when they actually moved, so they are
+      // never treated as repeats.
+      if (payload.subjectId) {
+        const subject = `${payload.domain}\0${payload.subjectId}`;
+        if (lastActivityFingerprintsRef.current.get(subject) === payload.change) return;
+        lastActivityFingerprintsRef.current.set(subject, payload.change);
+      }
+      const affected = resourcesAffectedByActivity(payload);
+      if (affected.length > 0) scheduleLiveRefresh(affected);
+    };
+
     // Subscribe to every event that can change active work.
     const unsubscribeTask = onTaskUpdate(handleTaskUpdate);
     const unsubscribeDraft = onDraftUpdate(handleDraftUpdate);
     const unsubscribeQueueStats = onQueueStatsUpdate(handleQueueStatsUpdate);
+    const unsubscribeActivity = onActivityUpdate(handleActivityUpdate);
+    // Capacity moves the agent lines in the status popover.
+    const unsubscribeUsage = onUsageUpdate(() => scheduleLiveRefresh(['status']));
 
     return () => {
       unsubscribeTask();
       unsubscribeDraft();
       unsubscribeQueueStats();
+      unsubscribeActivity();
+      unsubscribeUsage();
     };
-  }, [isConnected, onTaskUpdate, onDraftUpdate, onQueueStatsUpdate, scheduleLiveRefresh]);
+  }, [
+    isConnected,
+    onTaskUpdate,
+    onDraftUpdate,
+    onQueueStatsUpdate,
+    onActivityUpdate,
+    onUsageUpdate,
+    scheduleLiveRefresh,
+  ]);
 
   useEffect(() => {
     subscribeToActivity?.();
     const unsubscribeReady = onActivityReady?.(() => scheduleLiveRefresh(ALL_STATS_RESOURCES));
-    const unsubscribe = onActivityUpdate?.(payload => {
-      if (payload.domain === 'goal' || payload.domain === 'queue') scheduleLiveRefresh(['queue']);
-      if (payload.domain === 'plan') scheduleLiveRefresh(['drafts', 'tasks']);
-      if (['system'].includes(payload.domain)) scheduleLiveRefresh(['status']);
-    });
-    const unsubscribeUsage = onUsageUpdate?.(() => scheduleLiveRefresh(['status']));
-    return () => { unsubscribeReady?.(); unsubscribe?.(); unsubscribeUsage?.(); unsubscribeFromActivity?.(); };
-  }, [onActivityReady, onActivityUpdate, onUsageUpdate, subscribeToActivity, unsubscribeFromActivity, scheduleLiveRefresh]);
+    return () => { unsubscribeReady?.(); unsubscribeFromActivity?.(); };
+  }, [onActivityReady, subscribeToActivity, unsubscribeFromActivity, scheduleLiveRefresh]);
 
   // Hidden tabs accumulate invalidations without issuing requests. Becoming
   // visible (or receiving focus after a suspended socket) performs one full

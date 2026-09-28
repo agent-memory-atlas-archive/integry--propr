@@ -1,4 +1,5 @@
-import { useLiveInvalidation } from '../hooks/useLiveInvalidation';
+import { CONNECTED_RECONCILE_MS, useLiveRefreshScheduler } from '../hooks/useLiveRefreshScheduler';
+import { useSocket } from './useSocket';
 /* eslint-disable react-refresh/only-export-components */
 import React, {
   createContext,
@@ -17,6 +18,9 @@ type BadgeNavigator = Navigator & {
   setAppBadge?: (count?: number) => Promise<void>;
   clearAppBadge?: () => Promise<void>;
 };
+
+/** Fallback cadence for the badge, armed only while the websocket is unavailable. */
+const DISCONNECTED_FALLBACK_INTERVAL_MS = 60_000;
 
 interface NotificationCenterValue {
   unreadCount: number | null;
@@ -42,11 +46,13 @@ async function updateInstalledBadge(count: number, enabled: boolean): Promise<vo
 export const NotificationCenterProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const user = useCurrentUser();
   const { isDemoMode } = useDemoMode();
+  const { isConnected, onNotificationUpdate, onActivityReady, subscribeToActivity, unsubscribeFromActivity } = useSocket();
   const [unreadCount, setUnreadCount] = useState<number | null>(null);
   const [badgeEnabled, setBadgeEnabled] = useState(false);
   const activeRef = useRef(true);
   const generationRef = useRef(0);
   const preferenceGenerationRef = useRef(0);
+  const previousConnectedRef = useRef(isConnected);
   const unreadCountRef = useRef(unreadCount);
   const badgeEnabledRef = useRef(badgeEnabled);
   unreadCountRef.current = unreadCount;
@@ -107,9 +113,41 @@ export const NotificationCenterProvider: React.FC<{ children: React.ReactNode }>
     };
   }, [commitBadgeEnabled, commitUnreadCount, identityKey, refreshUnreadCount]);
 
-  useLiveInvalidation({ refresh: refreshUnreadCount, scopeKey: identityKey ?? 'anonymous',
-    disabled: identityKey === null, interest: { domains: [], notifications: true },
-    fallbackPollMs: 60_000 });
+  const schedule = useLiveRefreshScheduler({
+    refresh: () => identityKey === null ? undefined : refreshUnreadCount(),
+    scopeKey: identityKey,
+    isConnected,
+    fallbackPollMs: DISCONNECTED_FALLBACK_INTERVAL_MS,
+    // `notification:update` is published best effort: a notification can be
+    // committed while its publication is dropped, and nothing else would
+    // correct the badge while this socket stays connected and the tab stays
+    // focused. The Inbox keeps the same safety cadence for the same reason.
+    connectedPollMs: CONNECTED_RECONCILE_MS,
+  });
+  const { refreshNow } = schedule;
+  useEffect(() => {
+    if (identityKey !== null) void refreshNow().catch(() => undefined);
+  }, [identityKey, refreshNow]);
+
+  useEffect(() => {
+    if (identityKey === null) return;
+    const unsubscribeNotification = onNotificationUpdate(() => { void refreshNow().catch(() => undefined); });
+    const unsubscribeReady = onActivityReady?.(() => schedule());
+    subscribeToActivity?.();
+    return () => {
+      unsubscribeNotification();
+      unsubscribeReady?.();
+      unsubscribeFromActivity?.();
+    };
+  }, [identityKey, onNotificationUpdate, onActivityReady, subscribeToActivity, unsubscribeFromActivity, schedule, refreshNow]);
+
+  useEffect(() => {
+    const wasConnected = previousConnectedRef.current;
+    previousConnectedRef.current = isConnected;
+    // The badge reconciles immediately; refreshNow also consumes the scheduler's
+    // pending reconnect so the transition still costs only one read.
+    if (identityKey !== null && !wasConnected && isConnected) void refreshNow().catch(() => undefined);
+  }, [identityKey, isConnected, refreshNow]);
 
   const value = useMemo(() => ({
     unreadCount,

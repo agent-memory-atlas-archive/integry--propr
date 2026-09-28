@@ -1,6 +1,7 @@
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { beforeEach, describe, expect, test, vi } from 'vitest';
-import type { NotificationPreferencesResponse } from '@propr/shared';
+import type { NotificationPreferencesResponse, NotificationUpdatePayload } from '@propr/shared';
+import { CONNECTED_RECONCILE_MS } from '../hooks/useLiveRefreshScheduler';
 import { NotificationCenterProvider, useNotificationCenter } from './NotificationCenterContext';
 
 const authState = vi.hoisted(() => ({
@@ -11,7 +12,21 @@ const notificationApi = vi.hoisted(() => ({
   getNotificationUnreadCount: vi.fn(),
 }));
 
+const socketState = vi.hoisted(() => ({
+  isConnected: true,
+  notificationCallbacks: new Set<(payload: NotificationUpdatePayload) => void>(),
+}));
+
 vi.mock('./AuthContext', () => ({ useCurrentUser: () => authState.user }));
+vi.mock('./useSocket', () => ({
+  useSocket: () => ({
+    isConnected: socketState.isConnected,
+    onNotificationUpdate: (callback: (payload: NotificationUpdatePayload) => void) => {
+      socketState.notificationCallbacks.add(callback);
+      return () => socketState.notificationCallbacks.delete(callback);
+    },
+  }),
+}));
 vi.mock('./DemoModeContext', () => ({ useDemoMode: () => ({ isDemoMode: false }) }));
 vi.mock('../api/notificationApi', () => notificationApi);
 
@@ -61,7 +76,17 @@ describe('NotificationCenterProvider', () => {
     notificationApi.getNotificationPreferences.mockReset();
     notificationApi.getNotificationUnreadCount.mockReset();
     notificationApi.getNotificationUnreadCount.mockResolvedValue({ unreadCount: 0 });
+    socketState.isConnected = true;
+    socketState.notificationCallbacks.clear();
     observedActions = null;
+  });
+
+  const pushNotificationUpdate = (change: NotificationUpdatePayload['change'] = 'created') => act(() => {
+    socketState.notificationCallbacks.forEach(callback => callback({
+      eventType: 'notification:update',
+      change,
+      occurredAt: '2026-09-26T12:00:00.000Z',
+    }));
   });
 
   test('does not let an initial preference response overwrite a newer Settings choice', async () => {
@@ -109,5 +134,94 @@ describe('NotificationCenterProvider', () => {
 
     expect(screen.getByText('enabled')).toBeInTheDocument();
     expect(notificationApi.getNotificationPreferences).toHaveBeenCalledTimes(2);
+  });
+
+  test('reads the badge once per pushed notification change, never on a poll while connected', async () => {
+    notificationApi.getNotificationPreferences.mockResolvedValue(preferences(false));
+    notificationApi.getNotificationUnreadCount
+      .mockResolvedValueOnce({ unreadCount: 0 })
+      .mockResolvedValue({ unreadCount: 4 });
+    // Mount on the fake clock so a timer armed during render would be visible
+    // to the idle check below.
+    vi.useFakeTimers();
+    try {
+      renderCenter();
+      await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+      expect(notificationApi.getNotificationUnreadCount).toHaveBeenCalledTimes(1);
+
+      await pushNotificationUpdate('created');
+      await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+
+      expect(screen.getByText('count:4')).toBeInTheDocument();
+      expect(notificationApi.getNotificationUnreadCount).toHaveBeenCalledTimes(2);
+
+      // An idle connected session issues nothing of its own accord until the
+      // connected safety cadence, which exists only to recover a lost
+      // publication and is asserted by its own test below.
+      await act(async () => { await vi.advanceTimersByTimeAsync(CONNECTED_RECONCILE_MS - 1); });
+      expect(notificationApi.getNotificationUnreadCount).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  test('recovers the badge when a committed notification\'s publication was lost', async () => {
+    notificationApi.getNotificationPreferences.mockResolvedValue(preferences(false));
+    notificationApi.getNotificationUnreadCount
+      .mockResolvedValueOnce({ unreadCount: 0 })
+      .mockResolvedValue({ unreadCount: 3 });
+    vi.useFakeTimers();
+    try {
+      renderCenter();
+      await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+      expect(screen.getByText('count:0')).toBeInTheDocument();
+      expect(notificationApi.getNotificationUnreadCount).toHaveBeenCalledTimes(1);
+
+      /*
+        A notification is committed while its best-effort Redis publication is
+        dropped, so no `notification:update` frame ever arrives. The socket
+        stays connected and the tab stays visible, so no reconnect, focus or
+        visibility change would correct the badge either: only the connected
+        safety cadence can, and it has to.
+      */
+      await act(async () => { await vi.advanceTimersByTimeAsync(CONNECTED_RECONCILE_MS + 200); });
+
+      expect(notificationApi.getNotificationUnreadCount).toHaveBeenCalledTimes(2);
+      expect(screen.getByText('count:3')).toBeInTheDocument();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  test('falls back to polling only while the socket is disconnected', async () => {
+    notificationApi.getNotificationPreferences.mockResolvedValue(preferences(false));
+    socketState.isConnected = false;
+    // The fallback interval is armed during render, so the fake clock has to
+    // exist before the provider mounts.
+    vi.useFakeTimers();
+    try {
+      renderCenter();
+      await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+      expect(notificationApi.getNotificationUnreadCount).toHaveBeenCalledTimes(1);
+
+      await act(async () => { await vi.advanceTimersByTimeAsync(60_100); });
+
+      expect(notificationApi.getNotificationUnreadCount).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  test('reconciles the badge once when the socket reconnects', async () => {
+    notificationApi.getNotificationPreferences.mockResolvedValue(preferences(false));
+    socketState.isConnected = false;
+    const view = renderCenter();
+    await waitFor(() => expect(notificationApi.getNotificationUnreadCount).toHaveBeenCalledTimes(1));
+
+    socketState.isConnected = true;
+    await act(async () => { view.rerender(centerTree()); });
+    await act(async () => { view.rerender(centerTree()); });
+
+    expect(notificationApi.getNotificationUnreadCount).toHaveBeenCalledTimes(2);
   });
 });

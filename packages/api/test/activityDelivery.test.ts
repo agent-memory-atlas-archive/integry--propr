@@ -5,7 +5,7 @@ import { after, test } from 'node:test';
 import { Server } from 'socket.io';
 import { io as connect } from 'socket.io-client';
 import { EventPublisher, closeConnection } from '@propr/core';
-import { ACTIVITY_UPDATE, GOAL_UPDATE, NOTIFICATION_UPDATE } from '@propr/shared';
+import { ACTIVITY_UPDATE, GOAL_UPDATE, NOTIFICATION_UPDATE, USAGE_UPDATE } from '@propr/shared';
 import { SocketService } from '../services/socketService.js';
 import { SocketSubscriptionManager, ACTIVITY_ROOM, activityUserRoom } from '../services/socketSubscriptions.js';
 import { ShellActivityBroadcaster } from '../services/shellActivityBroadcaster.js';
@@ -117,4 +117,68 @@ test('shell snapshots emit only real changes and stop after close', async () => 
   assert.equal(events.length, 2);
   percent = 2; await broadcaster.sample(); assert.equal(events.length, 3);
   broadcaster.close(); percent = 3; await broadcaster.sample(); assert.equal(events.length, 3);
+});
+
+test('a malformed publication reaches no browser in either accepted format', () => {
+  const emissions: Array<{ room: string; event: string }> = [];
+  const dropped: string[] = [];
+  const service = Object.create(SocketService.prototype);
+  Object.assign(service, { queueDeps: null,
+    io: { to: (room: string) => ({ emit: (event: string) => emissions.push({ room, event }) }) } });
+  const occurredAt = new Date().toISOString();
+  const warn = console.warn;
+  console.warn = (message: unknown) => { dropped.push(String(message)); };
+  try {
+    // Both published activity formats, each carrying a timestamp nothing can
+    // order by, a vocabulary the contract does not define, a scope no consumer
+    // can filter on, or a terminal flag that contradicts its own change.
+    // Supplying the envelope's missing `entityId` downstream normalizes the
+    // frame; it does not make any of these valid.
+    for (const identity of [{ entityId: 'task-1' }, { subjectId: 'task-1' }]) {
+      for (const invalid of [
+        { occurredAt: 'invalid', terminal: true },
+        { occurredAt, terminal: false },
+        { occurredAt, terminal: true, domain: 'invented' },
+        { occurredAt, terminal: false, change: 'invented' },
+        { occurredAt, terminal: true, repository: 7 },
+      ]) {
+        service.handleEvent('', { eventType: ACTIVITY_UPDATE, domain: 'task', change: 'completed',
+          repository: null, ...identity, ...invalid });
+      }
+    }
+    // A frame claiming the envelope format is held to it: `repository` is
+    // required there, and only its own contract may excuse a missing field.
+    service.handleEvent('', { eventType: ACTIVITY_UPDATE, domain: 'plan', change: 'created',
+      entityId: 'plan-1', terminal: false, occurredAt });
+    service.handleEvent('', { eventType: USAGE_UPDATE, source: 'guesswork', occurredAt });
+    service.handleEvent('', { eventType: USAGE_UPDATE, occurredAt: 'invalid' });
+    service.handleEvent('', { eventType: NOTIFICATION_UPDATE, change: 'read', eventId: 'event-1',
+      recipientId: 'owner', unreadCount: 'three', occurredAt });
+    service.handleEvent('', { eventType: NOTIFICATION_UPDATE, change: 'invented',
+      recipientId: 'owner', occurredAt });
+    assert.deepEqual(emissions, []);
+    // Every dropped frame is reported: a publisher that broke the contract is
+    // the one thing an operator can act on here.
+    assert.equal(dropped.length, 15);
+    assert.equal(dropped.every(message => message.includes('Dropped malformed')), true);
+
+    // Validation is not rejection: every format the relay accepts still reaches
+    // its room, including the shell shape that names no subject.
+    service.handleEvent('', { eventType: ACTIVITY_UPDATE, domain: 'task', change: 'completed',
+      entityId: 'task-1', repository: 'acme/app', terminal: true, occurredAt });
+    service.handleEvent('', { eventType: ACTIVITY_UPDATE, domain: 'queue', change: 'updated',
+      terminal: false, occurredAt });
+    service.handleEvent('', { eventType: USAGE_UPDATE, source: 'agent-tank', occurredAt });
+    service.handleEvent('', { eventType: USAGE_UPDATE, provider: 'agent-tank', occurredAt });
+    service.handleEvent('', { eventType: NOTIFICATION_UPDATE, change: 'dismissed_all',
+      recipientId: 'owner', unreadCount: 0, occurredAt });
+    assert.deepEqual(emissions, [
+      { room: ACTIVITY_ROOM, event: ACTIVITY_UPDATE },
+      { room: ACTIVITY_ROOM, event: ACTIVITY_UPDATE },
+      { room: ACTIVITY_ROOM, event: USAGE_UPDATE },
+      { room: ACTIVITY_ROOM, event: USAGE_UPDATE },
+      { room: activityUserRoom('owner'), event: NOTIFICATION_UPDATE },
+    ]);
+    assert.equal(dropped.length, 15);
+  } finally { console.warn = warn; }
 });

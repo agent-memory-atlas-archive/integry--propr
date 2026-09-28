@@ -1,4 +1,4 @@
-import { useLiveInvalidation } from '../hooks/useLiveInvalidation';
+import { useInboxLiveRefresh } from './useInboxLiveRefresh';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { Notification } from '@propr/shared';
 import {
@@ -10,6 +10,7 @@ import {
 import { useNotificationCenter } from '../contexts/NotificationCenterContext';
 import { useToast } from '../components/ui/useToast';
 import { useDemoMode } from '../contexts/DemoModeContext';
+import { useInboxRefreshTriggers } from './useInboxRefreshTriggers';
 import {
   compareNewestFirst,
   isSystemNotification,
@@ -20,8 +21,6 @@ import {
 const PAGE_SIZE = 25;
 /** Most pages fetched in one go while looking past system-only pages for activity. */
 const MAX_AUTO_PAGE_LOOKAHEAD = 4;
-const AUTO_REFRESH_INTERVAL_MS = 60_000;
-
 /** Background refreshes run silently: no busy state, and errors stay until one succeeds. */
 type FirstPageLoad = 'initial' | 'refresh' | 'background';
 
@@ -224,13 +223,19 @@ export function useInboxNotifications(): InboxNotificationsState {
 
   const refresh = useCallback(() => loadFirstPage('refresh'), [loadFirstPage]);
 
-  const schedule = useLiveInvalidation({
-    refresh: () => {
-      if (!navigator.onLine || clearingRef.current) return;
-      return loadFirstPage(initialLoading ? 'initial' : 'background');
-    },
-    scopeKey: 'inbox', interest: { domains: [], notifications: true },
-    fallbackPollMs: AUTO_REFRESH_INTERVAL_MS,
+  const schedule = useInboxLiveRefresh(() => {
+    if (!navigator.onLine || clearingRef.current) return;
+    return loadFirstPage(initialLoading ? 'initial' : 'background');
+  });
+
+  // The Inbox is told when it has to re-read; see useInboxRefreshTriggers for
+  // the push, reconnect, visibility and disconnected-fallback contract.
+  const { markLocallyMutated } = useInboxRefreshTriggers({
+    canReconcile: useCallback(
+      () => document.visibilityState === 'visible' && navigator.onLine && !clearingRef.current,
+      [],
+    ),
+    reconcile: schedule,
   });
 
   const loadMore = useCallback(async () => {
@@ -302,6 +307,7 @@ export function useInboxNotifications(): InboxNotificationsState {
     if (isDemoMode || dismissingRef.current.has(id)) return;
     const clearEpoch = clearEpochRef.current;
     mutationEpochRef.current += 1;
+    markLocallyMutated(id, 'dismissed');
     dismissingRef.current.add(id);
     hiddenIdsRef.current.add(id);
     const removed = notificationsRef.current.find(notification => notification.id === id);
@@ -335,7 +341,8 @@ export function useInboxNotifications(): InboxNotificationsState {
       dismissSnapshotsRef.current.delete(id);
       void refreshUnreadCount().catch(() => undefined);
     }
-  }, [addToast, commitUnreadCount, isActiveIdentity, isDemoMode, refreshUnreadCount, unreadCount]);
+  }, [addToast, commitUnreadCount, isActiveIdentity, isDemoMode, markLocallyMutated,
+    refreshUnreadCount, unreadCount]);
 
   const clearAll = useCallback(async () => {
     if (isDemoMode || clearingRef.current) return;
@@ -376,6 +383,7 @@ export function useInboxNotifications(): InboxNotificationsState {
     const current = notificationsRef.current.find(notification => notification.id === id);
     if (isDemoMode || !current || current.readAt !== null) return;
     mutationEpochRef.current += 1;
+    markLocallyMutated(id, 'read');
     const clearEpoch = clearEpochRef.current;
     const priorUnreadCount = unreadCount;
     const optimistic = { ...current, readAt: current.createdAt };
@@ -412,7 +420,8 @@ export function useInboxNotifications(): InboxNotificationsState {
       mutationEpochRef.current += 1;
       void refreshUnreadCount().catch(() => undefined);
     });
-  }, [addToast, commitUnreadCount, isActiveIdentity, isDemoMode, refreshUnreadCount, unreadCount]);
+  }, [addToast, commitUnreadCount, isActiveIdentity, isDemoMode, markLocallyMutated,
+    refreshUnreadCount, unreadCount]);
 
   return {
     notifications,

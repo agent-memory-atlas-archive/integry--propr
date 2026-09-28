@@ -5,6 +5,7 @@ import type {
   ActivityUpdatePayload,
   GoalUpdatePayload,
 } from '@propr/shared';
+import type { ActivityUpdatePayload as ScopedActivityUpdatePayload } from '@propr/shared/dist/activityEvents.js';
 import { useSocket } from '../contexts/useSocket';
 import { CONNECTED_RECONCILE_MS, useLiveRefreshScheduler } from './useLiveRefreshScheduler';
 
@@ -14,9 +15,9 @@ export const ALL_SCOPES = 'all';
 /** What a consumer cares about, declared once instead of filtered ad hoc. */
 export interface LiveResourceInterest {
   /** Activity domains that should trigger a refresh. */
-  domains?: readonly ActivityDomain[];
+  domains?: readonly (ActivityDomain | 'system')[];
   /** Narrow further to specific changes, e.g. only terminal ones. */
-  changes?: readonly ActivityChange[];
+  changes?: readonly (ActivityChange | 'progressed' | 'read' | 'dismissed' | 'dismissed_all')[];
   /**
    * `all`, or `owner/repo`. An event for another repository is dropped in the
    * client without a request - dropping it here is the whole point of the
@@ -39,7 +40,7 @@ export interface LiveResourceOptions<T> {
    * Identity of what is being read. A change clears previous data, because rows
    * from another filter are not this scope's data.
    */
-  scopeKey: string;
+  scopeKey?: unknown;
   interest: LiveResourceInterest;
   /**
    * Interval used ONLY while the socket is disconnected. Push is the normal
@@ -47,6 +48,8 @@ export interface LiveResourceOptions<T> {
    * behaviour instead of silently going stale.
    */
   fallbackIntervalMs?: number;
+  fallbackPollMs?: number;
+  coalesceMs?: number;
   /** Skip entirely (e.g. demo mode, unauthenticated). */
   disabled?: boolean;
 }
@@ -55,14 +58,16 @@ export interface LiveResource<T> {
   data: T | null;
   error: string | null;
   loading: boolean;
+  /** Initial loading alias used by shell widgets. */
+  isLoading: boolean;
   /** True while a read for the current scope is in flight. */
   refreshing: boolean;
   /** Force an immediate read, for a retry button. */
-  refreshNow: () => void;
+  refreshNow: () => Promise<void>;
 }
 
 interface ResourceState<T> {
-  scopeKey: string;
+  scopeKey?: unknown;
   data: T | null;
   error: string | null;
   /** A read for this scope has settled, successfully or not. */
@@ -72,16 +77,19 @@ interface ResourceState<T> {
 
 const DEFAULT_FALLBACK_INTERVAL_MS = 30_000;
 
-const emptyState = <T,>(scopeKey: string): ResourceState<T> =>
+const emptyState = <T,>(scopeKey: unknown): ResourceState<T> =>
   ({ scopeKey, data: null, error: null, settled: false, refreshing: false });
 
-export function matchesInterest(payload: ActivityUpdatePayload, interest: LiveResourceInterest): boolean {
-  if (interest.domains && !interest.domains.includes(payload.domain)) return false;
-  if (interest.changes && !interest.changes.includes(payload.change)) return false;
+export function matchesInterest(payload: ActivityUpdatePayload | ScopedActivityUpdatePayload, interest: LiveResourceInterest): boolean {
+  if (!interest.domains?.includes(payload.domain)) return false;
+  // The target branch calls health snapshots system/progressed; indexing
+  // progress still stays excluded from health-only interests.
+  const change = payload.domain === 'system' && payload.change === 'progressed' ? 'updated' : payload.change;
+  if (interest.changes && !interest.changes.includes(change)) return false;
   const scope = interest.repository ?? ALL_SCOPES;
   // A null repository is instance-wide and always relevant; anything else must
   // match the scope the caller is showing.
-  if (scope !== ALL_SCOPES && payload.repository !== null && payload.repository !== scope) return false;
+  if (scope !== ALL_SCOPES && payload.repository != null && payload.repository !== scope) return false;
   return true;
 }
 
@@ -104,6 +112,8 @@ export function useLiveResource<T>({
   scopeKey,
   interest,
   fallbackIntervalMs = DEFAULT_FALLBACK_INTERVAL_MS,
+  fallbackPollMs = fallbackIntervalMs,
+  coalesceMs,
   disabled = false,
 }: LiveResourceOptions<T>): LiveResource<T> {
   const {
@@ -146,6 +156,7 @@ export function useLiveResource<T>({
     // newer request has been issued, or the scope moved on while this one was
     // in flight.
     const superseded = () => !mountedRef.current
+      || controller.signal.aborted
       || requestId !== requestRef.current
       || scope !== scopeRef.current;
     try {
@@ -171,13 +182,14 @@ export function useLiveResource<T>({
     isConnected,
     refresh,
     scopeKey,
-    fallbackPollMs: fallbackIntervalMs,
+    fallbackPollMs,
+    coalesceMs,
     connectedPollMs: disabled ? undefined : CONNECTED_RECONCILE_MS,
   });
   const scheduleRefreshNow = schedule.refreshNow;
 
   const refreshNow = useCallback(() => {
-    void scheduleRefreshNow();
+    return scheduleRefreshNow();
   }, [scheduleRefreshNow]);
 
   useEffect(() => {
@@ -203,8 +215,8 @@ export function useLiveResource<T>({
   // Opt into the activity room only while this hook is mounted and enabled.
   useEffect(() => {
     if (disabled) return;
-    subscribeToActivity();
-    return () => { unsubscribeFromActivity(); };
+    subscribeToActivity?.();
+    return () => { unsubscribeFromActivity?.(); };
   }, [disabled, subscribeToActivity, unsubscribeFromActivity]);
 
   const { goals, notifications, usage } = interest;
@@ -251,6 +263,7 @@ export function useLiveResource<T>({
     data: current.data,
     error: current.error,
     loading: !disabled && !current.settled,
+    isLoading: !disabled && !current.settled,
     refreshing: !disabled && current.refreshing,
     refreshNow,
   }), [current.data, current.error, current.settled, current.refreshing, disabled, refreshNow]);

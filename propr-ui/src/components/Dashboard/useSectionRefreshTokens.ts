@@ -15,11 +15,14 @@
 import { useEffect, useRef, useState } from 'react';
 import { useSocket } from '../../contexts/useSocket';
 import type { ActivityChange, ActivityDomain, ActivityUpdatePayload } from '@propr/shared';
+import type { ActivityUpdatePayload as ScopedActivityUpdatePayload } from '@propr/shared/dist/activityEvents.js';
 import { ALL_REPOSITORIES } from './sectionState';
 
 interface SectionInterest {
-  domains?: readonly ActivityDomain[];
-  changes?: readonly ActivityChange[];
+  // Both published envelope vocabularies: a frame can name its change
+  // `progress` or `progressed`, and notification changes only exist in one.
+  domains?: readonly (ActivityDomain | 'system')[];
+  changes?: readonly (ActivityChange | 'progressed' | 'read' | 'dismissed' | 'dismissed_all')[];
 }
 
 const SECTION_INTERESTS = {
@@ -43,8 +46,17 @@ const SECTION_INTERESTS = {
   stats: {
     changes: ['completed', 'failed', 'cancelled'],
   },
+  // The activity summary is not a pane, but it refreshes on the same terms as
+  // one: work that ended, plus work that a human now has to unblock. It is
+  // declared here rather than subscribing separately so the whole page still
+  // holds one activity listener, and so its interest is readable beside the
+  // panes' rather than buried in the composition root.
+  summary: {
+    changes: ['completed', 'failed', 'cancelled', 'dismissed', 'blocked'],
+  },
 } as const satisfies Record<string, SectionInterest>;
 
+/** Every refresh token the page publishes; `summary` is a widget, not a pane. */
 export type DashboardSectionName = keyof typeof SECTION_INTERESTS;
 export type SectionRefreshTokens = Record<DashboardSectionName, number>;
 
@@ -57,7 +69,7 @@ const zeroTokens = (): SectionRefreshTokens =>
 const GOAL_SECTIONS: readonly DashboardSectionName[] = ['attention', 'active', 'completed'];
 
 function isRelevant(
-  payload: ActivityUpdatePayload,
+  payload: ActivityUpdatePayload | ScopedActivityUpdatePayload,
   section: DashboardSectionName,
   repository: string,
 ): boolean {

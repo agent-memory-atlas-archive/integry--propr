@@ -16,6 +16,15 @@ import {
   type NotificationUpdatePayload,
   type UsageUpdatePayload,
 } from '../packages/shared/src/activityEvents.js';
+import {
+  SHELL_ACTIVITY_CHANGES,
+  isShellActivityUpdatePayload,
+  isShellNotificationUpdatePayload,
+  isShellUsageUpdatePayload,
+  isTerminalShellActivityChange,
+  type ActivityUpdatePayload as ShellActivityUpdatePayload,
+  type NotificationUpdatePayload as ShellNotificationUpdatePayload,
+} from '../packages/shared/src/events.js';
 
 const validPayload: ActivityUpdatePayload = {
   eventType: ACTIVITY_UPDATE,
@@ -136,4 +145,80 @@ test('a usage trigger is validated down to its source', () => {
   assert.equal(isUsageUpdatePayload({ ...validUsage, source: undefined }), false);
   assert.equal(isUsageUpdatePayload({ ...validUsage, occurredAt: 'soon' }), false);
   assert.equal(isUsageUpdatePayload(null), false);
+});
+
+// The shell-shaped wire formats are relayed from the same Redis channels and
+// re-emitted to the same browsers, so supporting them cannot mean trusting
+// them. These guards are what the relay checks a second accepted format with.
+const validShellActivity: ShellActivityUpdatePayload = {
+  eventType: ACTIVITY_UPDATE,
+  domain: 'task',
+  change: 'completed',
+  subjectId: 'task-1',
+  repository: 'integry/propr',
+  terminal: true,
+  occurredAt: '2026-09-26T10:00:00.000Z',
+};
+
+test('a shell activity frame is validated whole, subject and scope included', () => {
+  assert.equal(isShellActivityUpdatePayload(validShellActivity), true);
+  // A queue or health frame has no subject and no repository of its own.
+  assert.equal(isShellActivityUpdatePayload({
+    eventType: ACTIVITY_UPDATE, domain: 'queue', change: 'updated', terminal: false,
+    occurredAt: validShellActivity.occurredAt,
+  }), true);
+  assert.equal(isShellActivityUpdatePayload({ ...validShellActivity, terminal: undefined }), true);
+  assert.equal(isShellActivityUpdatePayload({ ...validShellActivity, occurredAt: 'yesterday' }), false);
+  assert.equal(isShellActivityUpdatePayload({ ...validShellActivity, domain: 'invented' }), false);
+  assert.equal(isShellActivityUpdatePayload({ ...validShellActivity, change: 'progressed' }), false);
+  assert.equal(isShellActivityUpdatePayload({ ...validShellActivity, subjectId: '' }), false);
+  assert.equal(isShellActivityUpdatePayload({ ...validShellActivity, repository: 42 }), false);
+  // A flag that contradicts its own change would have producer and consumer
+  // reading the same event differently.
+  assert.equal(isShellActivityUpdatePayload({ ...validShellActivity, terminal: false }), false);
+  assert.equal(isShellActivityUpdatePayload({ ...validShellActivity, change: 'started' }), false);
+  assert.equal(isShellActivityUpdatePayload({
+    ...validShellActivity, change: 'started', terminal: false,
+  }), true);
+  assert.equal(isShellActivityUpdatePayload({ ...validShellActivity, eventType: USAGE_UPDATE }), false);
+  assert.equal(isShellActivityUpdatePayload(null), false);
+});
+
+test('only the shell terminal changes end a subject', () => {
+  assert.deepEqual(SHELL_ACTIVITY_CHANGES.filter(isTerminalShellActivityChange),
+    ['failed', 'completed', 'cancelled']);
+});
+
+test('a per-recipient notification frame is validated down to its badge count', () => {
+  const validShellNotification: ShellNotificationUpdatePayload = {
+    eventType: NOTIFICATION_UPDATE, change: 'read', eventId: 'event-1',
+    recipientId: 'user-a', unreadCount: 2, occurredAt: validShellActivity.occurredAt,
+  };
+  assert.equal(isShellNotificationUpdatePayload(validShellNotification), true);
+  // A bulk clear and a multi-event dismissal both mean 'reconcile the list',
+  // so neither names a single subject.
+  assert.equal(isShellNotificationUpdatePayload({
+    ...validShellNotification, change: 'dismissed_all', eventId: undefined,
+  }), true);
+  assert.equal(isShellNotificationUpdatePayload({ ...validShellNotification, change: 'archived' }), false);
+  assert.equal(isShellNotificationUpdatePayload({ ...validShellNotification, eventId: 7 }), false);
+  assert.equal(isShellNotificationUpdatePayload({ ...validShellNotification, recipientId: '' }), false);
+  assert.equal(isShellNotificationUpdatePayload({ ...validShellNotification, unreadCount: 'three' }), false);
+  assert.equal(isShellNotificationUpdatePayload({ ...validShellNotification, unreadCount: -1 }), false);
+  assert.equal(isShellNotificationUpdatePayload({ ...validShellNotification, unreadCount: 1.5 }), false);
+  assert.equal(isShellNotificationUpdatePayload({ ...validShellNotification, occurredAt: 'soon' }), false);
+  assert.equal(isShellNotificationUpdatePayload(null), false);
+});
+
+test('a usage trigger is accepted in either published format but never unchecked', () => {
+  const occurredAt = validShellActivity.occurredAt;
+  assert.equal(isShellUsageUpdatePayload({ eventType: USAGE_UPDATE, occurredAt }), true);
+  assert.equal(isShellUsageUpdatePayload({ eventType: USAGE_UPDATE, provider: 'agent-tank', occurredAt }), true);
+  assert.equal(isShellUsageUpdatePayload({ eventType: USAGE_UPDATE, source: 'agent-tank', occurredAt }), true);
+  // Relaxing the required field does not relax what the field means.
+  assert.equal(isShellUsageUpdatePayload({ eventType: USAGE_UPDATE, source: 'guesswork', occurredAt }), false);
+  assert.equal(isShellUsageUpdatePayload({ eventType: USAGE_UPDATE, provider: '', occurredAt }), false);
+  assert.equal(isShellUsageUpdatePayload({ eventType: USAGE_UPDATE, occurredAt: 'soon' }), false);
+  assert.equal(isShellUsageUpdatePayload({ eventType: ACTIVITY_UPDATE, occurredAt }), false);
+  assert.equal(isShellUsageUpdatePayload(null), false);
 });

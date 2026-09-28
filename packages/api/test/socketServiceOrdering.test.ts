@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict';
 import { after, describe, test } from 'node:test';
 import { closeConnection } from '@propr/core';
-import { ACTIVITY_UPDATE, TASK_UPDATE, type TaskUpdatePayload } from '@propr/shared';
-import { ACTIVITY_ROOM } from '../services/activitySocketRooms.js';
+import { ACTIVITY_UPDATE, NOTIFICATION_UPDATE, TASK_UPDATE, type TaskUpdatePayload } from '@propr/shared';
+import { ACTIVITY_ROOM, activityUserRoom } from '../services/socketSubscriptions.js';
 import { SocketService } from '../services/socketService.js';
 import {
   loadDurableTaskRevision,
@@ -21,13 +21,13 @@ describe('SocketService task update ordering', () => {
 
   test('accepts a legacy event without seeding from durable versioned state', async () => {
     let durableReads = 0;
-    const broadcasts: Array<{ rooms: string[]; payload: TaskUpdatePayload }> = [];
+    const broadcasts: Array<{ rooms: string[]; event: string; payload: Record<string, unknown> }> = [];
     const service = Object.create(SocketService.prototype) as SocketService;
     const internals = service as unknown as {
       io: {
         to: (room: string) => {
           to: (additionalRoom: string) => unknown;
-          emit: (event: string, payload: TaskUpdatePayload) => void;
+          emit: (event: string, payload: Record<string, unknown>) => void;
         };
       };
       queueDeps: {
@@ -44,8 +44,8 @@ describe('SocketService task update ordering', () => {
             rooms.push(additionalRoom);
             return operator;
           },
-          emit: (_event: string, emittedPayload: TaskUpdatePayload) => {
-            broadcasts.push({ rooms, payload: emittedPayload });
+          emit: (event: string, emittedPayload: Record<string, unknown>) => {
+            broadcasts.push({ rooms, event, payload: emittedPayload });
           },
         };
         return operator;
@@ -70,23 +70,78 @@ describe('SocketService task update ordering', () => {
     await internals.handleTaskUpdate(payload);
 
     assert.equal(durableReads, 0);
-    // The task frame, plus the one activity envelope derived from it: a task
-    // update that passes the ordering gate is also 'activity happened'.
-    assert.deepEqual(broadcasts, [
-      { rooms: ['instance:operational', 'task:legacy-task'], payload },
-      {
-        rooms: [ACTIVITY_ROOM],
-        payload: {
-          eventType: ACTIVITY_UPDATE,
-          domain: 'task',
-          change: 'started',
-          entityId: 'legacy-task',
-          repository: null,
-          terminal: false,
-          occurredAt: payload.timestamp,
-        } as unknown as TaskUpdatePayload,
-      },
+    assert.deepEqual(broadcasts.map(broadcast => ({ rooms: broadcast.rooms, event: broadcast.event })), [
+      { rooms: ['instance:operational', 'task:legacy-task'], event: TASK_UPDATE },
+      // The same transition also reaches interest-based consumers as the
+      // derived envelope, without a second producer having to publish it.
+      { rooms: [ACTIVITY_ROOM], event: ACTIVITY_UPDATE },
     ]);
+    assert.deepEqual(broadcasts[0].payload, payload);
+    assert.partialDeepStrictEqual(broadcasts[1].payload, {
+      domain: 'task',
+      change: 'started',
+      subjectId: 'legacy-task',
+      terminal: false,
+    });
+  });
+
+  test('publishes a task that stopped for a human as blocked, not progressed', async () => {
+    /*
+      The dashboard summary, its attention pane and the header's attention count
+      all declare an interest in `blocked`. Nothing else in the envelope says a
+      run stopped for a person rather than moving along, so if this transition
+      is published as `progressed` those surfaces stay stale until some
+      unrelated terminal event or a reconnect - the very transition they exist
+      to surface.
+    */
+    const broadcasts: Array<{ event: string; payload: Record<string, unknown> }> = [];
+    const service = Object.create(SocketService.prototype) as SocketService;
+    const internals = service as unknown as {
+      io: {
+        to: (room: string) => {
+          to: (additionalRoom: string) => unknown;
+          emit: (event: string, payload: Record<string, unknown>) => void;
+        };
+      };
+      taskRevisions: Map<string, { version: number; expiresAt: number }>;
+      handleTaskUpdate: (payload: TaskUpdatePayload) => Promise<void>;
+    };
+    internals.io = {
+      to: () => {
+        const operator = {
+          to: () => operator,
+          emit: (event: string, payload: Record<string, unknown>) => {
+            broadcasts.push({ event, payload });
+          },
+        };
+        return operator;
+      },
+    };
+    internals.taskRevisions = new Map();
+
+    // Every spelling the workers emit, as the dashboard projection lists them.
+    for (const state of ['action_required', 'action-required', 'needs_attention', 'needs-attention']) {
+      broadcasts.length = 0;
+      internals.taskRevisions.clear();
+
+      await internals.handleTaskUpdate({
+        eventType: TASK_UPDATE,
+        taskId: `attention-${state}`,
+        state,
+        previousState: 'claude_execution',
+        repository: 'integry/propr',
+        timestamp: new Date(0).toISOString(),
+      });
+
+      const activity = broadcasts.find(broadcast => broadcast.event === ACTIVITY_UPDATE);
+      assert.ok(activity, `expected ${state} to reach the activity room`);
+      assert.partialDeepStrictEqual(activity.payload, {
+        domain: 'task',
+        change: 'blocked',
+        subjectId: `attention-${state}`,
+        terminal: false,
+      });
+    }
   });
 
   test('rejects malformed incoming revisions before they can poison the cache', () => {
@@ -145,4 +200,36 @@ describe('SocketService task update ordering', () => {
       assert.equal(revision, undefined);
     }
   });
+});
+
+
+test('relays both notification publisher formats only to their recipients', () => {
+  const broadcasts: Array<{ room: string; event: string; payload: Record<string, unknown> }> = [];
+  const service = Object.create(SocketService.prototype) as SocketService;
+  const internals = service as unknown as {
+    io: { to: (room: string) => { emit: (event: string, payload: Record<string, unknown>) => void } };
+    handleEvent: (channel: string, payload: Record<string, unknown>) => void;
+  };
+  internals.io = {
+    to: room => ({ emit: (event, payload) => { broadcasts.push({ room, event, payload }); } }),
+  };
+  const common = { eventType: NOTIFICATION_UPDATE, change: 'read', eventId: 'notification-1',
+    occurredAt: new Date(0).toISOString() };
+  internals.handleEvent('', { ...common, recipientId: 'alice' });
+  internals.handleEvent('', { ...common, recipientIds: ['bob', 'bob', 'carol'], repository: null });
+  assert.deepEqual(broadcasts.map(({ room, event }) => ({ room, event })), [
+    { room: activityUserRoom('alice'), event: NOTIFICATION_UPDATE },
+    { room: activityUserRoom('bob'), event: NOTIFICATION_UPDATE },
+    { room: activityUserRoom('bob'), event: ACTIVITY_UPDATE },
+    { room: activityUserRoom('carol'), event: NOTIFICATION_UPDATE },
+    { room: activityUserRoom('carol'), event: ACTIVITY_UPDATE },
+  ]);
+  const notifications = broadcasts.filter(broadcast => broadcast.event === NOTIFICATION_UPDATE);
+  for (const broadcast of notifications) {
+    assert.equal('recipientId' in broadcast.payload, false);
+    assert.equal(broadcast.payload.eventId, common.eventId);
+  }
+  assert.equal('recipientIds' in notifications[0].payload, false);
+  assert.deepEqual(notifications[1].payload.recipientIds, ['bob']);
+  assert.deepEqual(notifications[2].payload.recipientIds, ['carol']);
 });

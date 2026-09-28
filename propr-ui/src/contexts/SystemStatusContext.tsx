@@ -10,7 +10,8 @@ import {
 } from '../api/apiClient';
 import { useCurrentUser } from './AuthContext';
 
-const STATUS_REFRESH_INTERVAL_MS = 30_000;
+/** Fallback cadence, armed only while the websocket is unavailable. */
+const DISCONNECTED_FALLBACK_INTERVAL_MS = 30_000;
 
 interface SharedSystemStatus {
   status?: SystemStatus;
@@ -101,8 +102,9 @@ export const SystemStatusProvider: React.FC<{
   }, [disabled, refreshStatus, scopeKey]);
 
   const schedule = useLiveInvalidation({ refresh: refreshStatus, scopeKey, disabled,
-    interest: { domains: ['system'], usage: true },
-    fallbackPollMs: STATUS_REFRESH_INTERVAL_MS });
+    interest: { domains: ['health', 'system', 'indexing', 'usage'],
+      changes: ['created', 'started', 'completed', 'failed', 'cancelled', 'updated'], usage: true },
+    fallbackPollMs: DISCONNECTED_FALLBACK_INTERVAL_MS });
 
   useEffect(() => {
     if (disabled) return;

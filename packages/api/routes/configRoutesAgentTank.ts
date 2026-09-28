@@ -5,6 +5,22 @@ import {
   observeAgentTankUsageSnapshot,
   type AgentStatusResponse
 } from '@propr/core';
+/**
+ * Tells every open tab that capacity may have moved.
+ *
+ * The event is a trigger, not a snapshot: each client re-reads
+ * `/api/config/agent-tank/usage`, which keeps owning the projection and its
+ * permission check. It goes out over Redis so a tab connected to another API
+ * instance hears about the change too, and a failed publish only costs those
+ * tabs freshness - it must never fail the request that caused it.
+ */
+function publishUsageChanged(): void {
+  try {
+    void configManager.getEventPublisher().publishUsageUpdate();
+  } catch {
+    // Freshness only; the write that caused this already succeeded.
+  }
+}
 
 export function createAgentTankRoutes() {
   async function getAgentTankSettings(_req: Request, res: Response): Promise<void> {
@@ -21,8 +37,11 @@ export function createAgentTankRoutes() {
     try {
       const { enabled, url } = req.body;
       await configManager.saveAgentTankSettings({ enabled: !!enabled, url: url || 'http://0.0.0.0:3456' });
-      await configManager.getEventPublisher().publishUsageUpdate();
       res.json({ success: true });
+      // Enabling, disabling or repointing the integration changes what every
+      // open sidebar should be showing, and the sidebar no longer polls to
+      // find that out for itself.
+      publishUsageChanged();
     } catch (error) {
       console.error('Error in /api/config/agent-tank POST:', error);
       res.status(500).json({ error: 'Failed to save Agent Tank settings' });
@@ -106,8 +125,9 @@ export function createAgentTankRoutes() {
         });
         clearTimeout(timer);
         if (response.ok) {
-          await configManager.getEventPublisher().publishUsageUpdate();
           res.json({ success: true });
+          // A successful re-probe is the moment the numbers actually moved.
+          publishUsageChanged();
         } else {
           res.json({ success: false, error: `HTTP ${response.status}` });
         }

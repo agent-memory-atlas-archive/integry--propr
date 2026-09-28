@@ -9,16 +9,22 @@ import {
   isNotificationUpdatePayload,
   isTerminalActivityChange,
   isUsageUpdatePayload,
-  type ActivityChange,
-  type ActivityUpdatePayload,
   type DraftUpdatePayload,
   type GoalActivityState,
   type GoalUpdatePayload,
-  type NotificationChange,
-  type NotificationUpdatePayload,
   type TaskUpdatePayload,
 } from '@propr/shared';
+// This module produces and validates the envelope surface, so its payload types
+// come from the module that owns it. The barrel exports the shell surfaces'
+// same-named variants, which are a different wire shape.
+import type {
+  ActivityChange,
+  ActivityUpdatePayload,
+  NotificationChange,
+  NotificationUpdatePayload,
+} from '@propr/shared/dist/activityEvents.js';
 import { userRoom } from './socketSubscriptions.js';
+import { ATTENTION_TASK_STATES } from '../routes/dashboardQueries.js';
 
 /**
  * Turns producer events into the general activity envelope and into socket
@@ -54,6 +60,11 @@ const TASK_STATE_CHANGE: Record<string, ActivityChange> = {
   processing: 'started',
   claude_execution: 'progressed',
   post_processing: 'progressed',
+  // A run that stopped for a person is 'blocked', never 'progressed': the
+  // dashboard summary, its attention pane and the header's attention count all
+  // declare that interest. Both spellings the workers emit are listed by
+  // `ATTENTION_TASK_STATES`, which the dashboard projection reads too.
+  ...Object.fromEntries(ATTENTION_TASK_STATES.map(state => [state, 'blocked' as ActivityChange])),
   completed: 'completed',
   failed: 'failed',
   cancelled: 'cancelled',

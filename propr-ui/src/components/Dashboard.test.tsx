@@ -12,7 +12,10 @@ import {
   getDashboardOutcomes,
   getDashboardStats,
 } from '../api/dashboardApi';
-import type { ActivityChange, ActivityDomain, ActivityUpdatePayload, TaskUpdatePayload } from '@propr/shared';
+// The envelope these frames imitate is the one `activityEvents` declares:
+// `entityId` and a resolved `terminal`, which is what the server publishes.
+import type { ActivityChange, ActivityDomain, ActivityUpdatePayload } from '@propr/shared/dist/activityEvents.js';
+import type { TaskUpdatePayload } from '@propr/shared';
 import {
   activeItem,
   activeResponse,
@@ -341,28 +344,26 @@ describe('Dashboard', () => {
   it('regenerates narrative once for a burst of terminal and attention events from the existing socket', async () => {
     await renderLoadedDashboard();
     await waitFor(() => expect(getDashboardNarrative).toHaveBeenCalledTimes(1));
-    for (const [index, state] of ['completed', 'failed', 'cancelled', 'action_required', 'needs-attention'].entries()) {
-      await act(async () => {
-        taskUpdateHandler?.({ taskId: `finished-${index}`, state, repository: 'acme/app' } as TaskUpdatePayload);
-      });
+    for (const [index, change] of (['completed', 'failed', 'cancelled', 'blocked'] as const).entries()) {
+      await push(activity('task', change, { entityId: `finished-${index}` }));
     }
     await waitFor(() => expect(getDashboardNarrative).toHaveBeenCalledTimes(2));
   });
 
   it('does not regenerate narrative for progress updates or completions outside its repository', async () => {
-    await renderLoadedDashboard('/?repository=acme/app');
-    await waitFor(() => expect(getDashboardNarrative).toHaveBeenCalledTimes(1));
-    expect(taskUpdateHandler).not.toBeNull();
+    // A second section read is not proof here: the sections coalesce in a
+    // shorter window than the summary, so the summary's own window is what has
+    // to be outlasted before "it never read again" means anything.
     vi.useFakeTimers();
     try {
-      await act(async () => {
-        taskUpdateHandler?.({ taskId: 'progress', state: 'processing', repository: 'acme/app' } as TaskUpdatePayload);
-        taskUpdateHandler?.({ taskId: 'outside', state: 'completed', repository: 'acme/web' } as TaskUpdatePayload);
-      });
-      // Task updates drive the narrative; section refreshes use activity events.
-      // Let a possible narrative refresh run before asserting it stayed idle.
-      await act(async () => { await vi.advanceTimersByTimeAsync(SUMMARY_COALESCE_MS * 2); });
-      expect(mockActive).toHaveBeenCalledTimes(1);
+      renderDashboard('/?repository=acme/app');
+      await act(async () => { await vi.advanceTimersByTimeAsync(10); });
+      expect(getDashboardNarrative).toHaveBeenCalledTimes(1);
+
+      await push(activity('task', 'progressed', { entityId: 'progress' }));
+      await push(activity('task', 'completed', { entityId: 'outside', repository: 'acme/web' }));
+
+      await act(async () => { await vi.advanceTimersByTimeAsync(SUMMARY_COALESCE_MS * 4); });
       expect(getDashboardNarrative).toHaveBeenCalledTimes(1);
     } finally {
       vi.useRealTimers();

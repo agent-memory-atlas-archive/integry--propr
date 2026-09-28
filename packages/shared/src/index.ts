@@ -27,7 +27,16 @@ export {
   INDEXING_UPDATE,
   TASK_LIVE_UPDATE,
   QUEUE_STATS_UPDATE,
+  ACTIVITY_UPDATE,
+  NOTIFICATION_UPDATE,
+  USAGE_UPDATE,
   REDIS_CHANNELS,
+  SHELL_ACTIVITY_DOMAINS,
+  SHELL_ACTIVITY_CHANGES,
+  isTerminalShellActivityChange,
+  isShellActivityUpdatePayload,
+  isShellNotificationUpdatePayload,
+  isShellUsageUpdatePayload,
   type TaskUpdatePayload,
   type DraftUpdatePayload,
   type PlanStepUpdatePayload,
@@ -35,6 +44,12 @@ export {
   type IndexingUpdatePayload,
   type TaskLiveUpdatePayload,
   type QueueStatsUpdatePayload,
+  type ActivityDomain,
+  type ActivityChange,
+  type ActivityUpdatePayload,
+  type NotificationChange,
+  type NotificationUpdatePayload,
+  type UsageUpdatePayload,
   type ConversationEvent,
   type TodoItem,
   type TokenUsageInfo,
@@ -49,11 +64,18 @@ export {
 // The general activity push surface. Exported from the barrel so the core
 // publishers, the API broadcaster and the UI socket provider all compile
 // against one definition of the wire format.
+//
+// The event names and the payload types this module shares with `events.ts`
+// (`ACTIVITY_UPDATE`, `NOTIFICATION_UPDATE`, `USAGE_UPDATE` and their
+// `*Payload`/`Activity*`/`Notification*` types) are exported from `events.js`
+// above: the barrel can only own one meaning per name, and the shell surfaces'
+// variants are the ones every existing consumer imports unqualified. The event
+// names are the same string constants in both modules, so a producer publishing
+// against either one addresses the same channel. A consumer that needs the
+// envelope-shaped payloads imports them from `@propr/shared/dist/activityEvents.js`
+// directly, as the socket service, the event publisher and the UI hooks do.
 export {
-  ACTIVITY_UPDATE,
   GOAL_UPDATE,
-  NOTIFICATION_UPDATE,
-  USAGE_UPDATE,
   ACTIVITY_DOMAINS,
   ACTIVITY_CHANGES,
   GOAL_ACTIVITY_STATES,
@@ -65,16 +87,10 @@ export {
   isNotificationUpdatePayload,
   isTerminalActivityChange,
   isUsageUpdatePayload,
-  type ActivityChange,
-  type ActivityDomain,
-  type ActivityUpdatePayload,
   type GoalActivityState,
   type GoalUpdatePayload,
   type GoalUpdateTriggerPayload,
-  type NotificationChange,
-  type NotificationUpdatePayload,
   type UsageSource,
-  type UsageUpdatePayload,
 } from './activityEvents.js';
 
 // Export usage configuration and metrics types
