@@ -73,7 +73,8 @@ export class McpPolicy {
       if ((error as { status?: number }).status !== 401) {
         throw new McpError('GITHUB_CREDENTIAL_REQUIRED', 'GitHub authorization is unavailable; sign in again.', 401);
       }
-      // GitHub can revoke a token before its stated expiry; renew it once.
+      // GitHub can revoke a token before its stated expiry; reuse a newer
+      // shared token or renew the rejected token once.
       const renewed = shared ? await this.sharedCredential(user, true) : null;
       if (renewed) user = renewed;
       else if (grant.membershipSource === 'connect') user = await this.renewConnectCredential(bearer, grant, user);
@@ -95,7 +96,12 @@ export class McpPolicy {
    * leaving MCP's own credential in charge.
    */
   private async sharedCredential(user: GitHubUser, forceRefresh = false): Promise<GitHubUser | null> {
-    const shared = await this.userGrants.resolve(user.id, forceRefresh);
+    let shared = await this.userGrants.resolve(user.id);
+    // A delayed 401 can arrive after another caller has rotated the grant.
+    // Refresh only if that rejected token is still current, before any copy write.
+    if (forceRefresh && shared.status === 'active' && shared.accessToken === user.accessToken) {
+      shared = await this.userGrants.resolve(user.id, true);
+    }
     if (shared.status === 'temporarily_unavailable') throw new McpError('GITHUB_UNAVAILABLE', 'GitHub authorization refresh is temporarily unavailable.', 503);
     if (shared.status !== 'active') return null;
     const current: GitHubUser = {

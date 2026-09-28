@@ -28,12 +28,14 @@ class FakeGitHub {
   refreshes = 0;
   validAccessToken = 'ghu_initial';
   unavailable = false;
+  beforeVerify?: (token: string | undefined) => Promise<void>;
   private validRefreshToken = 'refresh-1';
 
   readonly fetch = async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
     const request = new Request(input, init);
     if (request.url === 'https://api.github.com/user') {
       const token = request.headers.get('authorization')?.replace(/^(?:token|bearer) /i, '');
+      await this.beforeVerify?.(token);
       if (token !== this.validAccessToken) return Response.json({ message: 'Bad credentials' }, { status: 401 });
       return Response.json({ id: Number(OWNER), login: 'tester' });
     }
@@ -96,6 +98,12 @@ afterEach(async () => {
 
 const expireSharedGrant = () => db('github_user_grants').where({ github_user_id: OWNER }).update({ access_token_expires_at_ms: Date.now() - 1000 });
 
+function deferred() {
+  let resolve!: () => void;
+  const promise = new Promise<void>(done => { resolve = done; });
+  return { promise, resolve };
+}
+
 test('MCP keeps working after the browser rotated the shared GitHub token pair', async () => {
   // The browser session refreshes first and spends refresh-1.
   assert.equal((await grants.resolve(OWNER, true)).status, 'active');
@@ -126,6 +134,52 @@ test('a token GitHub rejects before its expiry is renewed once through the share
   const principal = await policy.authenticate(bearer);
   assert.equal(principal.user.accessToken, 'ghu_rotated_1');
   assert.equal(fake.refreshes, 1);
+});
+
+test('staggered GitHub rejections reuse the shared refresh without invalidating the first retry', { timeout: 5000 }, async () => {
+  fake.validAccessToken = 'ghu_revoked_elsewhere';
+  const bothInitialRequests = deferred();
+  const firstRetry = deferred();
+  const secondRetry = deferred();
+  let initialRequests = 0;
+  let retries = 0;
+  fake.beforeVerify = async token => {
+    if (token === 'ghu_initial') {
+      initialRequests += 1;
+      if (initialRequests === 1) await bothInitialRequests.promise;
+      else {
+        bothInitialRequests.resolve();
+        // B's rejection arrives after A's refresh has completed.
+        await firstRetry.promise;
+      }
+    } else {
+      retries += 1;
+      if (retries === 1) {
+        firstRetry.resolve();
+        // Check A's token only after B has handled its stale rejection.
+        await secondRetry.promise;
+      } else secondRetry.resolve();
+    }
+  };
+
+  const results = await Promise.allSettled([policy.authenticate(bearer), policy.authenticate(bearer)]);
+  assert.deepEqual(results.map(result => result.status), ['fulfilled', 'fulfilled']);
+  assert.deepEqual(results.map(result => result.status === 'fulfilled' && result.value.user.accessToken), ['ghu_rotated_1', 'ghu_rotated_1']);
+  assert.equal(fake.refreshes, 1);
+  assert.equal((await store.get<GitHubUser>('credential', OWNER))?.accessToken, 'ghu_rotated_1');
+  const shared = await grants.resolve(OWNER);
+  assert.equal(shared.status === 'active' && shared.accessToken, 'ghu_rotated_1');
+});
+
+test('MCP reuses a browser rotation completed while GitHub verification was pending', async () => {
+  fake.beforeVerify = async token => {
+    if (token === 'ghu_initial') assert.equal((await grants.resolve(OWNER, true)).status, 'active');
+  };
+
+  const principal = await policy.authenticate(bearer);
+  assert.equal(principal.user.accessToken, 'ghu_rotated_1');
+  assert.equal(fake.refreshes, 1);
+  assert.equal((await store.get<GitHubUser>('credential', OWNER))?.accessToken, 'ghu_rotated_1');
 });
 
 test('a GitHub outage during refresh is reported as temporary, not as a sign-in requirement', async () => {
