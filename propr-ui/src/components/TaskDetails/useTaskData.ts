@@ -248,7 +248,8 @@ export const useTaskData = (taskId: string | undefined) => {
         finishedLiveReadScope.current = finishedAtRequest ? requestedScope : null;
         // Replay updates over the pre-request state, which has not applied them yet,
         // except those the response already contains (possibly in a newer version)
-        // and those of the execution the response replaced.
+        // and those of executions earlier than the response's, including one first
+        // received during the read.
         setLiveDetails(previous => {
           if (activeRequestScopeRef.current !== requestedScope || sequence !== liveReadSequence.current) return previous;
           const superseded = executionSupersededByRead(atRequest.state ?? previous, data);

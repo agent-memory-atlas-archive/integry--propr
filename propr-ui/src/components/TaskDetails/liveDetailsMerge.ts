@@ -32,14 +32,27 @@ const executionIdentity = (events: LiveEvent[]): string | null => {
 };
 
 /**
+ * Epochs are `<generation>:<execution counter>`, and within one generation of
+ * the log the counter only grows (see core's liveOutputLog), so a lower counter
+ * is an execution a later one replaced. Generations (the log was recreated after
+ * expiring) carry no ordering evidence.
+ */
+const executionPrecedes = (epoch: string, later: string): boolean => {
+  const [earlier, current] = [epoch, later].map(value => value.match(/^(?:(.*):)?(\d+)$/));
+  return Boolean(earlier && current && (earlier[1] ?? '') === (current[1] ?? '') && Number(earlier[2]) < Number(current[2]));
+};
+
+/**
  * A read's position proves it already holds everything an update read at or
  * before the same position carried, including newer versions of events that
- * were still growing. Without positions in one epoch there is no ordering evidence.
+ * were still growing, and that an update of an earlier execution is obsolete.
+ * Without comparable positions there is no ordering evidence.
  */
 export const readCoversUpdate = (read: Pick<LiveDetails, 'liveOutputPosition'>, update: { liveOutputPosition?: LiveOutputPosition }): boolean => {
   const at = read.liveOutputPosition;
   const of = update.liveOutputPosition;
-  return Boolean(at && of && at.epoch === of.epoch && of.offset <= at.offset);
+  if (!at || !of) return false;
+  return at.epoch === of.epoch ? of.offset <= at.offset : executionPrecedes(of.epoch, at.epoch);
 };
 
 /**

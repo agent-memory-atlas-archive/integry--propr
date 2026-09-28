@@ -48,8 +48,10 @@ export function useTaskLiveData(taskId: string | undefined, pollIntervalMs = 5_0
       // already applied them: raw events a large increment evicted there would
       // otherwise be appended again after newer ones. Updates the snapshot already
       // contains are skipped (see applyTaskLiveUpdate): they could hold an older
-      // version of a growing event. Updates of the execution the read replaced are
-      // dropped: they were buffered before the response and are not newer than it.
+      // version of a growing event, or belong to an earlier execution than the
+      // read's, even one first received during it. Updates of the execution the
+      // read replaced are dropped: they were buffered before the response and are
+      // not newer than it.
       setLiveDetails(previous => {
         if (activeTaskId.current !== taskId || sequence !== requestSequence.current) return previous;
         const superseded = executionSupersededByRead(atRequest.state ?? previous, data);
