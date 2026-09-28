@@ -98,24 +98,25 @@ export async function callLLMForPlan(opts: CallLLMOptions): Promise<CallLLMForPl
   };
   const response = await runLightweightLLMAnalysis({ prompt: fullContext, model, correlationId: correlationId || 'plan-generation', worktreePath, githubToken, issueRef, taskId: draftId, executionType: 'plan-generation', metadata: planGenerationMetadata, routingSession: opts.routingSession });
 
+  // Check boundaries before parsing too: the generic parser may otherwise
+  // accept an initial array and silently discard a trailing partial task.
+  const planArray = extractWholeJsonArray(response);
+  if (!planArray) {
+    correlatedLogger.warn({
+      responseLength: response.length, generationModel: model,
+      responseStart: response.slice(0, 200),
+    }, 'Plan response is not a whole JSON array; refusing to repair a fragment');
+    throw new PlanningFailedError(
+      `The model's response was incomplete (${response.length} characters, not a whole JSON plan), so nothing was saved. ` +
+      'Regenerate the plan, or choose a lower granularity for a shorter plan.'
+    );
+  }
+
   let plan: Plan;
   try {
-    plan = parseLlmJson<PlanItem[]>(response);
+    plan = parseLlmJson<PlanItem[]>(planArray);
   } catch (error) {
     if (!(error instanceof JsonParseError)) throw error;
-    // A response that is not a whole array (it starts or ends mid-plan) lost
-    // content before it reached us; repairing it would save a partial plan.
-    const planArray = extractWholeJsonArray(response);
-    if (!planArray) {
-      correlatedLogger.warn({
-        error: error.message, responseLength: response.length, generationModel: model,
-        responseStart: response.slice(0, 200),
-      }, 'Plan response is not a whole JSON array; refusing to repair a fragment');
-      throw new PlanningFailedError(
-        `The model's response was incomplete (${response.length} characters, not a whole JSON plan), so nothing was saved. ` +
-        'Regenerate the plan, or choose a lower granularity for a shorter plan.'
-      );
-    }
 
     correlatedLogger.warn({
       error: error.message, responseLength: response.length, generationModel: model, repairModel,
