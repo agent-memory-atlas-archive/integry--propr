@@ -80,7 +80,7 @@ test('dashboard places tips below stats, persists only deliberate dismissal and 
   expect(tipBounds!.y).toBeGreaterThanOrEqual(statsBounds!.y + statsBounds!.height - 1);
   expect(state.events).toHaveLength(0);
   expect(state.reads).toBe(1);
-  await expect(tips.getByText(/Your instance has repeated manual review and fix runs/)).toBeVisible();
+  await expect(tips.getByText(/Automate repeated manual review and fix runs with \/ultrafix/)).toBeVisible();
   await expect(tips.getByText(/reduce the commands you need to send/)).toBeVisible();
   await capture(page, 'usage-tips-desktop.png', '[data-testid="historical-stats-section"] + section');
   await tips.getByRole('button', { name: 'Dismiss Try /ultrafix' }).click();

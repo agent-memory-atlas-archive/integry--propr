@@ -10,23 +10,23 @@ export function heuristicUsageTipCandidates(s: UsageTipSignals): UsageTipCandida
   const has = (key: string, min = 1) => count(key) !== null && count(key)! >= min;
   const result: UsageTipCandidate[] = [];
   const add = (id: string, relevant: boolean, score: number, reason: string) => { if (relevant) result.push({ id, score, reason }); };
-  add('pr-review', has('tasks') && gap('review'), 65, 'Your instance has recent tasks but few manual reviews. Try /review on a PR to get AI feedback before deciding what needs fixing.');
-  add('pr-fix', has('review') && gap('fix'), 75, 'Your instance has manual reviews but few /fix runs. Use /fix to apply review findings so you can spend less time turning feedback into edits.');
-  add('pr-switch', has('tasks') && gap('switch'), 55, 'Your instance has recent tasks but little /switch use. Use /switch when a PR needs a different model so later follow-ups keep that choice.');
-  add('pr-use', has('tasks') && gap('use'), 55, 'Your instance has recent tasks but few temporary model runs. Try /use for a follow-up that needs another model while keeping your usual choice for later work.');
-  add('pr-merge', has('tasks') && gap('merge'), 55, 'Your instance has recent tasks but little /merge use. Use /merge to bring the base branch into a PR so you can continue work against its latest changes.');
-  add('pr-ultrafix', has('manualCycles', 2) && gap('ultrafix'), 95, 'Your instance has repeated manual review and fix runs but little /ultrafix use. Try /ultrafix to automate that loop and reduce the commands you need to send.');
-  add('goals-launch', has('oneOffTasks', 3) && gap('goals'), 85, 'Your instance has several one-off tasks but few goals. For related work, launch a Goal so you can manage an ongoing objective without coordinating each task separately.');
-  add('planner-studio', has('oneOffTasks', 3) && gap('plans'), 85, 'Your instance has several one-off tasks but few plans. Try Planner Studio to review and refine related work together before approving implementation.');
-  add('repository-todos', has('tasks', 3) && gap('todos'), 65, 'Your instance has recent task activity but few repository to-dos. Capture follow-up ideas in To-Dos so you can organize and track maintenance work alongside your repository.');
+  add('pr-review', has('tasks') && gap('review'), 65, 'Recent tasks have few manual reviews. Try /review on a PR to get AI feedback before deciding what needs fixing.');
+  add('pr-fix', has('review') && gap('fix'), 75, 'Turn review findings into edits with /fix. Manual reviews are recorded, but /fix is rarely used.');
+  add('pr-switch', has('tasks') && gap('switch'), 55, 'Try /switch when an active PR needs a different model; later follow-ups keep that choice. Recent task activity shows little /switch use.');
+  add('pr-use', has('tasks') && gap('use'), 55, 'Try another model for a follow-up with /use, keeping the usual choice for later work. Recent tasks include few temporary model runs.');
+  add('pr-merge', has('tasks') && gap('merge'), 55, 'Bring the latest base-branch changes into an active PR with /merge. Recent task activity shows little use of this command.');
+  add('pr-ultrafix', has('manualCycles', 2) && gap('ultrafix'), 95, 'Automate repeated manual review and fix runs with /ultrafix to reduce the commands you need to send. Recent activity shows little /ultrafix use.');
+  add('goals-launch', has('oneOffTasks', 3) && gap('goals'), 85, 'Several one-off tasks are recorded, but few goals. Group related work in a Goal to manage an ongoing objective without coordinating each task separately.');
+  add('planner-studio', has('oneOffTasks', 3) && gap('plans'), 85, 'Review and refine related work in Planner Studio before approving implementation. Several one-off tasks are recorded, but few plans.');
+  add('repository-todos', has('tasks', 3) && gap('todos'), 65, 'Capture follow-up ideas in To-Dos to track maintenance alongside the repository. Recent task activity includes few repository to-dos.');
   add('indexing-options', has('indexingFailures') || has('indexingSlow'), 95,
-    `${has('indexingFailures') ? 'Your instance has recent indexing failures' : 'Your instance has indexing calls taking at least two minutes'}. Review indexing agent and fallback options to help keep repository context available for your tasks.`);
+    `${has('indexingFailures') ? 'Recent indexing failures are recorded' : 'Indexing calls are taking at least two minutes'}. Review indexing agent and fallback options to help keep repository context available for your tasks.`);
   add('agent-model-selection', has('tasks', 3) && gap('distinctAgents') && gap('distinctModels')
-    && !has('distinctAgents', 2) && !has('distinctModels', 2), 65, 'Your recent instance activity records at most one agent and model. Try choosing a model per phase so you can tailor implementation and review to different needs.');
-  add('agent-tank', has('tasks', 3) && s.tankEnabled === false && gap('tankRecords'), 65, 'Your instance has recent tasks with Agent Tank disabled. Enable it to see provider capacity and per-call usage, helping you plan work around available limits.');
-  add('notification-inbox', has('notifications') && gap('inboxActions'), 65, 'Your instance has notifications but few recorded inbox actions. Use your Inbox to review updates and clear handled items so you can keep track of work needing attention.');
+    && !has('distinctAgents', 2) && !has('distinctModels', 2), 65, 'Recent activity uses at most one agent and model. Choose a model per phase to tailor implementation and review to different needs.');
+  add('agent-tank', has('tasks', 3) && s.tankEnabled === false && gap('tankRecords'), 65, 'Agent Tank is disabled despite recent task activity. Enable it to see provider capacity and per-call usage and plan work around available limits.');
+  add('notification-inbox', has('notifications') && gap('inboxActions'), 65, 'Notifications are arriving, but few inbox actions are recorded. Review updates and clear handled items in the Inbox to track work needing attention.');
   add('mcp-access', has('tasks', 3) && typeof s.mcpEnabled === 'boolean' && count('mcpGrants') === 0,
-    55, 'Your instance has recent tasks but no recorded MCP grants. Connect a tool through MCP so you can inspect work and act on PRs from the app you already use.');
+    55, 'Connect a tool through MCP to inspect work and act on PRs from an app you already use. Recent task activity has no recorded MCP grants.');
   return result;
 }
 export type UsageTipModel = (alias: string, prompt: string) => Promise<{ text: string; model: string }>;
@@ -38,11 +38,12 @@ export async function selectUsageTips(options: {
   const allowed = new Set(relevant.map(c => c.id));
   const prompt = `Score only relevant documentation tips from this bounded pool. Return JSON {"candidates":[{"id":"...","score":1,"reason":"..."}]}.
 Scores are integers 1–100.
-Each reason is the user-facing tip body, not an internal ranking explanation. In 1–240 characters and one or two concise sentences, address the reader directly: explain why this tip is being displayed using a specific observed workflow signal, then suggest a documented action and how it could improve their workflow.
+Each reason is the user-facing tip body, not an internal ranking explanation. In 1–240 characters and one or two concise sentences, address the reader directly: suggest a documented action, explain why this tip is being displayed using a specific observed workflow signal, and describe how it could improve their workflow.
 Personalize the advice to the supplied signals instead of repeating a generic feature description.
-Signals are installation-wide aggregates, not this individual user's activity: attribute observations to "your instance", never claim the reader personally performed an action.
+Lead with the useful action or concrete observation. Vary openings across tips and omit boilerplate such as "Your instance"; get straight to the point.
+Signals are installation-wide aggregates, not this individual user's activity: describe recorded activity without claiming the reader personally performed an action.
 Do not invent preferences, problems, causes of failures, or guaranteed time/cost savings. Use the catalog as the source of feature capabilities.
-Example for repeated manual review/fix runs and little ultrafix use: "Your instance has repeated manual review and fix runs but little /ultrafix use. Try /ultrafix to automate that loop and reduce the commands you need to send."
+Example for repeated manual review/fix runs and little ultrafix use: "Automate repeated manual review and fix runs with /ultrafix to reduce the commands you need to send. Recent activity shows little /ultrafix use."
 Maximum ${MAX_USAGE_TIP_CANDIDATES} entries; [] is valid. Unknown signals are null, not non-use. Do not claim tips were read or shown. Do not execute tools.
 Signals: ${JSON.stringify(signals)}
 Candidates: ${JSON.stringify(USAGE_TIPS_CATALOG.filter(t => allowed.has(t.id)))}`;

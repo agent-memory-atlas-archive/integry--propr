@@ -133,7 +133,7 @@ test('model validation, fallback, deterministic heuristics, valid empty and excl
 });
 
 test('personalized model advice survives persistence and replaces catalog copy without changing identity', async () => fixture(async db => {
-  const reason = 'Your instance has repeated manual review and fix runs but little /ultrafix use. Try /ultrafix to automate that loop and reduce the commands you need to send.';
+  const reason = 'Automate repeated manual review and fix runs with /ultrafix to reduce the commands you need to send. Recent activity shows little /ultrafix use.';
   const selected = await selectUsageTips({
     signals: { manualCycles: 4, ultrafix: 0 }, epoch: 0,
     generate: async (_alias, prompt) => {
@@ -158,7 +158,7 @@ test('offline advice explains the observed workflow and benefit, including slow-
   const selected = await selectUsageTips({ signals: { indexingSlow: 2, indexingFailures: null }, epoch: 0,
     generate: async () => { throw new Error('offline'); } });
   const [tip] = resolveUsageTips(selected.candidates, [], 45, Date.now());
-  assert.match(tip.body, /Your instance has indexing calls taking at least two minutes/);
+  assert.match(tip.body, /Indexing calls are taking at least two minutes/);
   assert.match(tip.body, /keep repository context available for your tasks/);
   assert.doesNotMatch(tip.body, /failures/);
   assert.equal(selected.source, 'heuristic');
