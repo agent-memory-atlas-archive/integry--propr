@@ -1,10 +1,12 @@
 # CI runner routing
 
 The owner chose rootless Docker isolation on gitfix.dev instead of VM migration
-for this pilot. Compatible Linux x64 checks support four workers labelled
-`[self-hosted, Linux, X64, propr-rootless]`. Four independent matrix shard jobs
-remain, one job per available worker, without a nested coordinator. Other
-eligible jobs share this pool, so simultaneous shard starts are not guaranteed.
+for this pilot. Compatible Linux x64 checks run on a pool of six workers
+labelled `[self-hosted, Linux, X64, propr-rootless]`; any idle worker takes the
+next queued job. Four independent matrix shard jobs remain, without a nested
+coordinator. Other eligible jobs share this pool, so simultaneous shard starts
+are not guaranteed. Workers are added with the same per-user setup; the host
+firewall reserves UIDs 62001-62099 for them, so a new worker needs no rule edit.
 These PR check jobs never select the old generic `propr` label.
 
 `PROPR_ROOTLESS_PR_CHECKS` selects one of three modes:
@@ -117,8 +119,8 @@ expected contract, not a claim that the workers are configured or validated:
   this with the actual Docker version and network driver. Ordinary bridge
   networking gives the runner a different loopback and breaks this assumption.
 - Per-user cgroup limits cap the runner and sibling Docker workloads together:
-  target `CPUQuota=200%`, `MemoryHigh=6G`, `MemoryMax=8G` per worker, at most eight
-  CPU equivalents and 32 GiB across four users. Delegate the controllers needed
+  target `CPUQuota=200%`, `MemoryHigh=6G`, `MemoryMax=8G` per worker, at most twelve
+  CPU equivalents and 48 GiB across six users. Delegate the controllers needed
   for CPU, memory and PID limits. The workflow does not configure these limits.
   Redis keeps `--memory 512m --memory-swap 512m --cpus 1 --pids-limit 64`;
   lint tool containers keep `--memory 1g --memory-swap 1g --cpus 1
