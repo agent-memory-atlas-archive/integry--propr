@@ -347,7 +347,12 @@ for (const [name, { head, delta, tool }] of Object.entries(streams)) {
     const parts = Array.from({ length: duplicate === 'none' ? 30 : 60 }, (_, index) => `part ${String(index).padStart(2, '0')} of the message, `);
     const message = parts.join('');
     const repeated = JSON.parse(tool('tool-0'));
-    if (duplicate === 'parts') { repeated.parts = [repeated.part]; delete repeated.part; }
+    if (duplicate === 'parts') {
+      // A parts envelope is a message, not an additional anonymous top-level tool.
+      repeated.type = 'message';
+      repeated.parts = [repeated.part];
+      delete repeated.part;
+    }
     if (duplicate === 'top-level') { Object.assign(repeated, repeated.part); delete repeated.part; }
     const began = `${[delta(parts[0]), ...(duplicate === 'none' ? [] : [JSON.stringify(repeated)]), ...parts.slice(1, 3).map(delta)].join('\n')}\n`;
     const went = `${parts.slice(3).map(delta).join('\n')}\n`;

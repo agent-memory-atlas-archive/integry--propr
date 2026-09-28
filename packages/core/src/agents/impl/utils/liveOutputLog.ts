@@ -327,11 +327,7 @@ export interface LiveOutputLogOptions {
 }
 
 /** A source's unfinished record, or `oversized` while one is discarded up to its newline. */
-interface PartialRecord {
-    text: string;
-    bytes: number;
-    oversized: boolean;
-}
+interface PartialRecord { text: string; bytes: number; oversized: boolean; }
 
 /**
  * Streams one process's output into the task's live log, one complete record

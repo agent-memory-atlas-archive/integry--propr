@@ -16,17 +16,10 @@ import {
     scheduleForceKill,
     setupAbortChecker,
 } from './dockerAbortController.js';
-import {
-    BoundedDiagnosticTail,
-    BoundedProviderRecordBuffer,
-    boundedProviderOutput,
-} from '../../agents/impl/utils/boundedProviderOutput.js';
+import { BoundedDiagnosticTail, BoundedProviderRecordBuffer, boundedProviderOutput } from '../../agents/impl/utils/boundedProviderOutput.js';
 import { LiveOutputLog } from '../../agents/impl/utils/liveOutputLog.js';
 import { buildLiveOutputSnapshot } from './dockerLiveOutputSnapshot.js';
-import {
-    inspectSessionMessageLine,
-    SessionLineInspectionContext,
-} from './dockerSessionOutput.js';
+import { inspectSessionMessageLine, SessionLineInspectionContext } from './dockerSessionOutput.js';
 export { getDockerRootDir } from './dockerRootDir.js';
 
 export { stopDockerContainer } from './dockerContainerControl.js';
