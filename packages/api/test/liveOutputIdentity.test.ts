@@ -5,12 +5,12 @@ import type { Knex } from 'knex';
 import type { RedisClientType } from 'redis';
 import type { Server as SocketIOServer } from 'socket.io';
 import { db, liveOutputKey } from '@propr/core';
-import { LiveOutputProjector, projectLiveOutput, projectLiveOutputRead, type LiveOutputRead, type LiveOutputRedis } from '../services/liveOutputStream.js';
+import { LiveOutputProjector, projectLiveOutput, projectLiveOutputRead, readLiveOutput, type LiveOutputRead, type LiveOutputRedis } from '../services/liveOutputStream.js';
 import { TaskWatcherManager } from '../services/taskWatcher.js';
 import { findLatestExecutionStartForTask } from '../services/taskWatcherLookup.js';
 import { mergeFullLiveDetails } from '../../../propr-ui/src/components/TaskDetails/liveDetailsMerge.js';
 import { buildLiveOutputSnapshot } from '../../core/src/claude/docker/dockerLiveOutputSnapshot.js';
-import { LiveOutputLog, liveOutputMetaKey, liveOutputOrigin } from '../../core/src/agents/impl/utils/liveOutputLog.js';
+import { LiveOutputLog, liveOutputMetaKey, liveOutputOrigin, writeLiveOutput } from '../../core/src/agents/impl/utils/liveOutputLog.js';
 import { withLiveOutputReads } from './liveOutputRedisFake.js';
 
 after(async () => { await db.destroy(); });
@@ -312,3 +312,85 @@ test('bounded Vibe snapshots published through the log keep each message identit
     redis.disconnect();
   }
 });
+
+const streams = {
+  // The first retained record once the ceiling cuts the log mid-message is one of these.
+  'stream deltas': {
+    head: JSON.stringify({ type: 'init', model: 'gemini-2.5-pro' }),
+    delta: (content: string) => JSON.stringify({ type: 'message', role: 'assistant', delta: true, content }),
+    tool: (id: string) => JSON.stringify({ type: 'tool_use', tool_name: 'Bash', tool_id: id, parameters: { command: `echo ${'x'.repeat(60)}` } }),
+  },
+  'OpenCode text parts': {
+    head: JSON.stringify({ type: 'step_start', sessionID: 'session', part: { type: 'step-start' } }),
+    delta: (content: string) => JSON.stringify({ type: 'text', sessionID: 'session', part: { type: 'text', text: content } }),
+    tool: (id: string) => JSON.stringify({ type: 'tool_use', sessionID: 'session', part: { type: 'tool', callID: id, tool: 'bash', state: { status: 'running', input: { command: `echo ${'x'.repeat(60)}` } } } }),
+  },
+};
+
+for (const [name, { head, delta, tool }] of Object.entries(streams)) {
+  test(`a buffered message of ${name} keeps its identity when the log is trimmed before it completes`, async t => {
+    const redis = new Redis({
+      host: process.env.REDIS_HOST ?? '127.0.0.1', port: Number.parseInt(process.env.REDIS_PORT ?? '6379', 10),
+      lazyConnect: true, connectTimeout: 250, maxRetriesPerRequest: 1, retryStrategy: () => null,
+    });
+    redis.on('error', () => {});
+    try { await redis.connect(); } catch {
+      redis.disconnect();
+      t.skip('Redis is not available for live output integration testing');
+      return;
+    }
+    const id = `trimmed-message-${process.pid}-${Date.now()}-${name.length}`;
+    const reader: LiveOutputRedis = { eval: (script, { keys, arguments: args }) => redis.eval(script, keys.length, ...keys, ...args) };
+    const thoughts = (events: Array<{ type: string }>) => events.filter(event => event.type === 'thought') as unknown as Array<{ id: string; content: string }>;
+    const earlier = `${[head, ...Array.from({ length: 12 }, (_, index) => tool(`tool-${index}`))].join('\n')}\n`;
+    const parts = Array.from({ length: 30 }, (_, index) => `part ${String(index).padStart(2, '0')} of the message, `);
+    const message = parts.join('');
+    const began = `${parts.slice(0, 3).map(delta).join('\n')}\n`;
+    const went = `${parts.slice(3).map(delta).join('\n')}\n`;
+    // The ceiling's cut falls inside the third delta, so the log would begin at the fourth.
+    const length = Buffer.byteLength(earlier + began + went);
+    const keep = Buffer.byteLength(went) + 10;
+    const maximumBytes = Math.ceil(keep * 4 / 3);
+    assert.ok(maximumBytes < length && Math.floor(maximumBytes * 3 / 4) === keep);
+
+    // What the running watcher and the page it feeds hold before the trim.
+    let projector: LiveOutputProjector | null = null;
+    const watched: Array<{ id: string; type: string }> = [];
+    const watch = async () => {
+      const read = (await readLiveOutput(reader, id, projector?.offset ?? 0))!;
+      projector ??= new LiveOutputProjector({ taskId: id, epoch: read.epoch, offset: read.from, start: read.start, retained: { offset: read.base, envelopes: read.envelopes } });
+      watched.push(...projector.feed(read.text, read.from));
+      return projector.pending() as { id: string; content: string } | null;
+    };
+    type Details = Parameters<typeof mergeFullLiveDetails>[0];
+    const details = (events: unknown[]) => ({ events, todos: [], currentTask: null, tokenUsage: null }) as unknown as Details;
+    try {
+      await writeLiveOutput(redis, id, earlier + began, { mode: 'reset' });
+      const first = (await watch())!;
+      assert.equal(first.id.split(':').at(-2), String(Buffer.byteLength(earlier)), 'the message is identified by its first delta');
+      await writeLiveOutput(redis, id, went);
+      const buffered = (await watch())!;
+      assert.deepEqual([buffered.id, buffered.content], [first.id, message]);
+      const page = details([...watched, buffered]);
+
+      await writeLiveOutput(redis, id, '', { maximumBytes });
+      const fresh = (await projectLiveOutput(reader, id, null, { selectEvents: false }))!;
+      assert.ok(fresh.truncated, 'the output before the message was trimmed');
+      assert.deepEqual(thoughts(fresh.events).map(event => [event.id, event.content]), [[first.id, message]], 'a fresh read names the message as the running one does');
+      const merged = mergeFullLiveDetails(page, details(fresh.events));
+      assert.deepEqual(thoughts(merged.events).map(event => [event.id, event.content]), [[first.id, message]], 'the page shows the message once');
+
+      // Its completion carries the same ID in the running projection and in a fresh read.
+      await writeLiveOutput(redis, id, `${tool('last')}\n`, { maximumBytes });
+      assert.equal(await watch(), null);
+      assert.deepEqual(thoughts(watched).map(event => [event.id, event.content]), [[first.id, message]]);
+      const completed = (await projectLiveOutput(reader, id, null, { selectEvents: false }))!;
+      assert.deepEqual(thoughts(completed.events).map(event => [event.id, event.content]), [[first.id, message]]);
+      const final = mergeFullLiveDetails(mergeFullLiveDetails(page, details(fresh.events)), details(completed.events));
+      assert.deepEqual(thoughts(final.events).map(event => event.id), [first.id]);
+    } finally {
+      await redis.del(liveOutputKey(id), liveOutputMetaKey(id));
+      redis.disconnect();
+    }
+  });
+}

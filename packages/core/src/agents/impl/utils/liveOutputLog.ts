@@ -20,7 +20,10 @@ import { MAX_PROVIDER_OUTPUT_BYTES } from './boundedProviderOutput.js';
  * Within a generation offsets only grow: a reader that remembers one can tell
  * whether its next bytes are still retained. When the output passes the ceiling
  * the oldest records are dropped at a record boundary (the first record, which
- * identifies the provider format, is kept in `head`).
+ * identifies the provider format, is kept in `head`). A buffered assistant
+ * message still arriving across that boundary is kept from its first delta,
+ * the record readers identify it by, unless its deltas alone exceed an eighth
+ * of the ceiling.
  */
 export const LIVE_OUTPUT_MAX_BYTES = 64 * 1024 * 1024;
 export const LIVE_OUTPUT_TTL_SECONDS = 3600;
@@ -46,6 +49,27 @@ export const liveOutputMetaKey = (taskId: string): string => `agent:output:${tas
  * sequence is a retry of a write whose reply was lost, and is not applied again.
  */
 export const APPEND_LIVE_OUTPUT_SCRIPT = `
+-- Whether a record before the cut leaves a buffered assistant message open:
+-- 0 when it completes one, 2 when it is one of its deltas, 1 when readers skip
+-- it. Mirrors what the API's generic parser (redisOutputParser) buffers: stream
+-- deltas and OpenCode text parts, until a tool or error record.
+local tools = { tool_use = true, tool = true, tool_call = true, tool_result = true, tool_response = true }
+local function continuesMessage(record)
+    if not string.find(record, '^[ \\t\\r]*{') then return 1 end
+    if not string.find(record, '"delta"', 1, true) and not string.find(record, '"parts?"') then return 0 end
+    local decoded, event = pcall(cjson.decode, record)
+    if not decoded then return 1 end
+    if type(event) ~= 'table' then return 0 end
+    local kind = type(event.type) == 'string' and string.lower(event.type) or ''
+    if tools[kind] or kind == 'error' or (event.error ~= nil and event.error ~= cjson.null) then return 0 end
+    local parts = type(event.parts) == 'table' and event.parts or {}
+    if type(event.part) == 'table' then parts = { event.part, unpack(parts) } end
+    for _, part in ipairs(parts) do
+        if type(part) == 'table' and type(part.type) == 'string' and tools[string.lower(part.type)] then return 0 end
+    end
+    if event.delta == true or type(event.delta) == 'string' or kind == 'delta' or #parts > 0 then return 2 end
+    return 0
+end
 local mode = ARGV[4]
 local publication = nil
 if ARGV[6] and ARGV[6] ~= '' then
@@ -97,7 +121,39 @@ if length > maximum then
     local keep = math.floor(maximum * 3 / 4)
     local tail = redis.call('getrange', KEYS[1], length - keep, -1)
     local boundary = string.find(tail, '\\n', 1, true)
-    if boundary then tail = string.sub(tail, boundary + 1) end
+    if boundary then
+        tail = string.sub(tail, boundary + 1)
+        -- Readers identify a buffered assistant message by its first delta, so a
+        -- message still arriving across the cut is retained from that record on.
+        local cut = length - string.len(tail)
+        local from = math.max(0, cut - math.floor((maximum - keep) / 2))
+        -- Reversed, the records before the cut read from the nearest one backwards.
+        local before = string.reverse(redis.call('getrange', KEYS[1], from, cut - 1))
+        local at = 1
+        local message = 0
+        while true do
+            local finish = string.find(before, '\\n', at + 1, true)
+            local record = string.reverse(string.sub(before, at + 1, (finish or 0) - 1))
+            -- The record the window begins in is read whole. Unless it completes
+            -- the message, the message is longer than the ceiling allows, and
+            -- is cut where it was.
+            local whole = finish or from == 0
+            while not finish and from > 0 do
+                local step = math.max(0, from - 65536)
+                local chunk = redis.call('getrange', KEYS[1], step, from - 1)
+                local last = string.find(string.reverse(chunk), '\\n', 1, true)
+                record = (last and string.sub(chunk, string.len(chunk) - last + 2) or chunk) .. record
+                from = last and 0 or step
+            end
+            local continues = continuesMessage(record)
+            if continues == 0 then break end
+            if not whole then message = 0 break end
+            if continues == 2 then message = (finish or string.len(before) + 1) - 1 end
+            if not finish then break end
+            at = finish
+        end
+        if message > 0 then tail = redis.call('getrange', KEYS[1], cut - message, -1) end
+    end
     -- Readers number JSON records to synthesize timestamps; count the trimmed
     -- ones so the retained records keep their ordinals.
     local dropped = redis.call('getrange', KEYS[1], 0, length - string.len(tail) - 1)

@@ -80,6 +80,43 @@ test('trims the oldest records at a record boundary past the ceiling and never m
     }
 });
 
+test('a message still arriving across the trim boundary is retained from its first delta', async t => {
+    const redis = await connect(t);
+    if (!redis) return;
+    const id = taskId('trim-message');
+    const delta = (content: string) => JSON.stringify({ type: 'message', role: 'assistant', delta: true, content: `${content} ${'.'.repeat(40)}` });
+    const tool = (name: string) => JSON.stringify({ type: 'tool_use', tool_name: 'Bash', tool_id: name, parameters: { command: 'x'.repeat(200) } });
+    const lines = (records: string[]) => `${records.join('\n')}\n`;
+    /** Trims `before + after` so that the ceiling's cut falls inside the last record of `before`. */
+    const trim = async (records: string[], after: string[]) => {
+        const before = ['init', ...Array.from({ length: 20 }, (_, index) => tool(`earlier-${index}`)), ...records];
+        const keep = Buffer.byteLength(lines(after)) + 10;
+        await writeLiveOutput(redis, id, lines(before) + lines(after), { mode: 'reset' });
+        await writeLiveOutput(redis, id, '', { maximumBytes: Math.ceil(keep * 4 / 3) });
+        const data = (await redis.get(liveOutputKey(id)))!;
+        const { base, start } = await redis.hgetall(liveOutputMetaKey(id));
+        assert.ok(Buffer.byteLength(data) <= Math.ceil(keep * 4 / 3), 'the retained output stays under the ceiling');
+        assert.notEqual(Number(base), Number(start), 'the output was trimmed');
+        assert.equal(Number(base) - Number(start), Buffer.byteLength(lines(before) + lines(after)) - Buffer.byteLength(data));
+        return data.split('\n')[0];
+    };
+    const rest = Array.from({ length: 40 }, (_, index) => delta(`rest ${index}`));
+    try {
+        // Records readers skip (stderr lines) do not end the message; the tool record before it does.
+        assert.equal(await trim([delta('earlier'), tool('a'), delta('first'), 'stderr: warning', delta('second')], rest), delta('first'));
+        // The message before a completed one is not retained for it.
+        assert.equal(await trim([delta('first'), delta('second'), tool('a')], rest), rest[0]);
+        // Nothing but a message is held back: plain records are cut where they were.
+        assert.equal(await trim(['stderr: a plain diagnostic', 'stderr: a plain diagnostic'], rest), rest[0]);
+        // A message whose deltas alone pass an eighth of the ceiling is cut where it was.
+        const long = Array.from({ length: 12 }, (_, index) => delta(`long ${index}`));
+        assert.equal(await trim(long, rest), rest[0]);
+    } finally {
+        await redis.del(liveOutputKey(id), liveOutputMetaKey(id));
+        redis.disconnect();
+    }
+});
+
 test('snapshot publication consumes reset once and close retains the final snapshot', async () => {
     const writes: Array<{ text: string; mode: string }> = [];
     const redis = {
