@@ -6,16 +6,8 @@ import { createStatsRoutes } from '../routes/statsRoutes.js';
 import { getTasksFromDb } from '../routes/taskHelpers.js';
 import { MAX_WORK_ROWS } from '../routes/dashboardQueries.js';
 import {
-  NOW,
-  call,
-  clearDashboardTestDatabase,
-  createDashboardTestDatabase,
-  createTestDashboardRoutes,
-  daysAgo,
-  minutesAgo,
-  seedTask as seedTaskInto,
-  type QueueStub,
-  type TaskSeed,
+  NOW, call, clearDashboardTestDatabase, createDashboardTestDatabase, createTestDashboardRoutes,
+  daysAgo, minutesAgo, seedTask as seedTaskInto, type QueueStub, type TaskSeed,
 } from './dashboardTestHarness.js';
 
 let database: Knex;
@@ -61,11 +53,7 @@ test('summary returns four integer counts that match the active endpoint for the
 /** The task page behind a dashboard count. */
 async function taskPage(status: string, repository: string, limit = 0): Promise<{ total: number; ids: string[] }> {
   const page = await getTasksFromDb({
-    db: database,
-    status,
-    repository,
-    limit,
-    offset: 0,
+    db: database, status, repository, limit, offset: 0,
     previewReader: { project: async (rows: unknown[]) => rows.map(() => ({ previews: [] })) } as never,
   });
   return { total: page.total, ids: (page.tasks as Array<{ id: string }>).map(task => task.id) };
@@ -202,17 +190,11 @@ test('dismissing every notification for a failed task leaves the task in attenti
   await seedTask({ taskId: 'blocked-task', issueNumber: 61, states: [{ state: 'failed', timestamp: minutesAgo(20), reason: 'Boom' }] });
   // Two inbox notifications about the same failure, for two different people.
   await database('notification_events').insert([
-    {
-      event_id: 'event-failed-1', deduplication_key: 'task-failed:blocked-task', kind: 'task_failed',
-      target_json: JSON.stringify({ type: 'task', repository: 'integry/propr', taskId: 'blocked-task', issueNumber: 61 }),
-      title: 'Task failed', body: 'Boom', occurred_at: minutesAgo(20),
-    },
-    {
-      event_id: 'event-failed-2', deduplication_key: 'task-failed:blocked-task:retry', kind: 'task_failed',
-      target_json: JSON.stringify({ type: 'task', repository: 'integry/propr', taskId: 'blocked-task', issueNumber: 61 }),
-      title: 'Task failed again', body: 'Boom', occurred_at: minutesAgo(19),
-    },
-  ]);
+    { event_id: 'event-failed-1', deduplication_key: 'task-failed:blocked-task', title: 'Task failed', occurred_at: minutesAgo(20) },
+    { event_id: 'event-failed-2', deduplication_key: 'task-failed:blocked-task:retry', title: 'Task failed again', occurred_at: minutesAgo(19) },
+  ].map(event => ({ ...event, kind: 'task_failed', body: 'Boom',
+    target_json: JSON.stringify({ type: 'task', repository: 'integry/propr', taskId: 'blocked-task', issueNumber: 61 }),
+  })));
   await database('notification_user_states').insert([
     { event_id: 'event-failed-1', user_id: 'user-1', read_at: minutesAgo(18), dismissed_at: null },
     { event_id: 'event-failed-2', user_id: 'user-1', read_at: minutesAgo(18), dismissed_at: null },
@@ -259,35 +241,21 @@ test('active reports a phase label and a live progress line, and leaves the line
   assert.deepEqual([queued[0].phase, queued[0].progressLine], ['Waiting', null]);
 });
 
-test('queue reason is null unless the backend knows why work is waiting', async () => {
-  await seedTask({ taskId: 'queued-task', issueNumber: 81, states: [{ state: 'pending', timestamp: minutesAgo(9) }] });
-
-  const idle = await call(routes({ activeCount: 0, workers: 2 }).getActive, { repository: 'all' });
-  assert.equal((idle.body.queue as { reason: string | null }).reason, null);
-
-  // Two workers of one slot each, three jobs running: capacity really is gone.
-  const busy = await call(routes({ activeCount: 3, workers: 2 }).getActive, { repository: 'all' });
-  assert.equal((busy.body.queue as { reason: string | null }).reason, 'All agents are busy');
-
-  // One active job against ten published slots is not a busy fleet, so the
-  // backend has no verified explanation to offer.
-  const spare = await call(routes({ activeCount: 1, workers: 2, capacityPerWorker: 5 }).getActive, { repository: 'all' });
-  assert.equal((spare.body.queue as { reason: string | null }).reason, null);
-
-  const exhausted = await call(routes({ activeCount: 10, workers: 2, capacityPerWorker: 5 }).getActive, { repository: 'all' });
-  assert.equal((exhausted.body.queue as { reason: string | null }).reason, 'All agents are busy');
-
-  // A live worker that publishes no capacity leaves the total unknown, and an
-  // unknown total can never be declared exhausted.
-  const unknown = await call(routes({ activeCount: 9, workers: 2, capacityPerWorker: null }).getActive, { repository: 'all' });
-  assert.equal((unknown.body.queue as { reason: string | null }).reason, null);
-
-  const paused = await call(routes({ paused: true, activeCount: 3, workers: 2 }).getActive, { repository: 'all' });
-  assert.equal((paused.body.queue as { reason: string | null }).reason, 'Queue processing is paused');
-
-  const noWorkers = await call(routes({ activeCount: 0, workers: 0 }).getActive, { repository: 'all' });
-  assert.equal((noWorkers.body.queue as { reason: string | null }).reason, 'No workers are running');
-});
+for (const { name, queue, reason } of [
+  { name: 'idle', queue: { activeCount: 0, workers: 2 }, reason: null },
+  { name: 'busy', queue: { activeCount: 3, workers: 2 }, reason: 'All agents are busy' },
+  { name: 'spare capacity', queue: { activeCount: 1, workers: 2, capacityPerWorker: 5 }, reason: null },
+  { name: 'exhausted capacity', queue: { activeCount: 10, workers: 2, capacityPerWorker: 5 }, reason: 'All agents are busy' },
+  { name: 'unknown capacity', queue: { activeCount: 9, workers: 2, capacityPerWorker: null }, reason: null },
+  { name: 'paused', queue: { paused: true, activeCount: 3, workers: 2 }, reason: 'Queue processing is paused' },
+  { name: 'no workers', queue: { activeCount: 0, workers: 0 }, reason: 'No workers are running' },
+]) {
+  test(`queue reason reflects verified worker availability: ${name}`, async () => {
+    await seedTask({ taskId: 'queued-task', issueNumber: 81, states: [{ state: 'pending', timestamp: minutesAgo(9) }] });
+    const active = await call(routes(queue).getActive, { repository: 'all' });
+    assert.equal((active.body.queue as { reason: string | null }).reason, reason);
+  });
+}
 
 test('queue reason stays null when nothing is queued', async () => {
   await seedTask({ taskId: 'only-running', issueNumber: 91, states: [{ state: 'processing', timestamp: minutesAgo(4) }] });

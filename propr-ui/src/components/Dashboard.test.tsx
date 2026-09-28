@@ -1,5 +1,5 @@
 import { getUsageTips, dismissUsageTip } from '../api/usageTipsApi';
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, waitFor, within, act, fireEvent } from '@testing-library/react';
 import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom';
 import Dashboard from './Dashboard';
@@ -19,8 +19,7 @@ import {
 vi.mock('../api/usageTipsApi', () => ({ getUsageTips: vi.fn(async () => ({ enabled: true, tips: [] })), dismissUsageTip: vi.fn(), USAGE_TIPS_SETTINGS_CHANGED: 'tips-settings-changed' }));
 
 vi.mock('../api/dashboardApi', () => ({
-  getDashboardNarrative: vi.fn(),
-  getDashboardAttention: vi.fn(), getDashboardActive: vi.fn(),
+  getDashboardNarrative: vi.fn(), getDashboardAttention: vi.fn(), getDashboardActive: vi.fn(),
   getDashboardOutcomes: vi.fn(), getDashboardStats: vi.fn(),
 }));
 
@@ -30,29 +29,17 @@ let activityHandler: ((payload: ActivityUpdatePayload) => void) | null = null;
 vi.mock('../contexts/useSocket', () => ({
   useSocket: () => ({
     isConnected: socketConnected,
-    subscribeToActivity: () => {},
-    unsubscribeFromActivity: () => {},
-    onGoalUpdate: () => () => {},
+    subscribeToActivity: () => {}, unsubscribeFromActivity: () => {}, onGoalUpdate: () => () => {},
     onActivityUpdate: (handler: (payload: ActivityUpdatePayload) => void) => {
       activityHandler = handler;
-      return () => {
-        if (activityHandler === handler) activityHandler = null;
-      };
+      return () => { if (activityHandler === handler) activityHandler = null; };
     },
   }),
 }));
 
 /** One pushed activity frame, in the envelope the server publishes. */
-const activity = (
-  domain: ActivityDomain,
-  change: ActivityChange,
-  overrides: Partial<ActivityUpdatePayload> = {},
-): ActivityUpdatePayload => ({
-  eventType: 'activity:update',
-  domain,
-  change,
-  entityId: 'task-1',
-  repository: 'acme/app',
+const activity = (domain: ActivityDomain, change: ActivityChange, overrides: Partial<ActivityUpdatePayload> = {}): ActivityUpdatePayload => ({
+  eventType: 'activity:update', domain, change, entityId: 'task-1', repository: 'acme/app',
   terminal: change === 'completed' || change === 'failed' || change === 'cancelled',
   occurredAt: new Date().toISOString(),
   ...overrides,
@@ -153,6 +140,8 @@ describe('Dashboard', () => {
     mockStats.mockResolvedValue(statsResponse());
   });
 
+  afterEach(() => { vi.useRealTimers(); vi.restoreAllMocks(); });
+
   it('shows running goals beside tasks and links to the scoped goal list and goal details', async () => {
     mockActive.mockResolvedValue(activeResponse([
       activeItem({ id: 'goal:goal-1', goalId: 'goal-1', taskId: 'goal-task-1', taskType: 'goal',
@@ -194,9 +183,7 @@ describe('Dashboard', () => {
     const panel = screen.getByTestId('needs-attention-panel');
     expect(panel).toBeInTheDocument();
     expect(screen.getByRole('heading', { name: /Needs attention/ })).toHaveTextContent('Needs attention (0)');
-    expect(screen.getByTestId('needs-attention-empty')).toHaveTextContent(
-      'All tasks operational — no attention required',
-    );
+    expect(screen.getByTestId('needs-attention-empty')).toHaveTextContent('All tasks operational — no attention required');
     // Nothing to view, so no "View all" link into an empty list.
     expect(within(panel).queryByRole('link', { name: 'View all' })).not.toBeInTheDocument();
   });
@@ -218,19 +205,15 @@ describe('Dashboard', () => {
 
   it('keeps old waits relative and flags only waits over fourteen days as stale', async () => {
     const now = Date.now();
-    const clock = vi.spyOn(Date, 'now').mockReturnValue(now);
-    try {
-      mockAttention.mockResolvedValue(attentionResponse([50, 14, 15].map(days =>
-        attentionItem({ id: `age-${days}`, since: new Date(now - days * 86_400_000).toISOString() }))));
-      renderAttentionPanel();
-      const panel = screen.getByTestId('needs-attention-panel');
-      await within(panel).findByText('Waiting 50d');
-      expect(within(panel).getAllByText('Stale')).toHaveLength(2);
-      expect(within(panel).getByText('Waiting 14d').parentElement).not.toHaveTextContent('Stale');
-      expect(panel).not.toHaveTextContent(/Waiting \d+\/\d+\//);
-    } finally {
-      clock.mockRestore();
-    }
+    vi.spyOn(Date, 'now').mockReturnValue(now);
+    mockAttention.mockResolvedValue(attentionResponse([50, 14, 15].map(days =>
+      attentionItem({ id: `age-${days}`, since: new Date(now - days * 86_400_000).toISOString() }))));
+    renderAttentionPanel();
+    const panel = screen.getByTestId('needs-attention-panel');
+    await within(panel).findByText('Waiting 50d');
+    expect(within(panel).getAllByText('Stale')).toHaveLength(2);
+    expect(within(panel).getByText('Waiting 14d').parentElement).not.toHaveTextContent('Stale');
+    expect(panel).not.toHaveTextContent(/Waiting \d+\/\d+\//);
   });
 
   it('expands typed chronological deltas, preserving findings, scores and destinations', async () => {
@@ -360,33 +343,29 @@ describe('Dashboard', () => {
     // costs a second read. That is correct behaviour and a broken assertion, so
     // the window is stepped explicitly instead of raced against.
     vi.useFakeTimers();
-    try {
-      render(dashboardTree());
-      await act(async () => { await vi.advanceTimersByTimeAsync(10); });
-      expect(screen.getByTestId('historical-stats-section')).toBeInTheDocument();
-      expect(mockActive).toHaveBeenCalledTimes(1);
-      expect(activityHandler).not.toBeNull();
-      expect(getDashboardNarrative).toHaveBeenCalledTimes(1);
+    render(dashboardTree());
+    await act(async () => { await vi.advanceTimersByTimeAsync(10); });
+    expect(screen.getByTestId('historical-stats-section')).toBeInTheDocument();
+    expect(mockActive).toHaveBeenCalledTimes(1);
+    expect(activityHandler).not.toBeNull();
+    expect(getDashboardNarrative).toHaveBeenCalledTimes(1);
 
-      for (let index = 0; index < 10; index += 1) {
-        const change = (['completed', 'failed', 'cancelled', 'blocked'] as const)[index % 4];
-        await push(activity('task', change, { entityId: `task-${index}` }));
-      }
-      // Still inside the window: the burst has cost nothing yet.
-      expect(mockActive).toHaveBeenCalledTimes(1);
-
-      await act(async () => { await vi.advanceTimersByTimeAsync(200); });
-      expectSectionReads(2);
-
-      // And nothing trails in behind the coalesced read.
-      await act(async () => { await vi.advanceTimersByTimeAsync(1_000); });
-      expectSectionReads(2);
-      expect(getDashboardNarrative).toHaveBeenCalledTimes(2);
-      expect(getUsageTips).toHaveBeenCalledTimes(1);
-      expect(dismissUsageTip).not.toHaveBeenCalled();
-    } finally {
-      vi.useRealTimers();
+    for (let index = 0; index < 10; index += 1) {
+      const change = (['completed', 'failed', 'cancelled', 'blocked'] as const)[index % 4];
+      await push(activity('task', change, { entityId: `task-${index}` }));
     }
+    // Still inside the window: the burst has cost nothing yet.
+    expect(mockActive).toHaveBeenCalledTimes(1);
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(200); });
+    expectSectionReads(2);
+
+    // And nothing trails in behind the coalesced read.
+    await act(async () => { await vi.advanceTimersByTimeAsync(1_000); });
+    expectSectionReads(2);
+    expect(getDashboardNarrative).toHaveBeenCalledTimes(2);
+    expect(getUsageTips).toHaveBeenCalledTimes(1);
+    expect(dismissUsageTip).not.toHaveBeenCalled();
   });
 
   it('restores the URL repository filter and ignores progress or completions outside it for narrative', async () => {
@@ -394,23 +373,19 @@ describe('Dashboard', () => {
     // shorter window than the summary, so the summary's own window is what has
     // to be outlasted before "it never read again" means anything.
     vi.useFakeTimers();
-    try {
-      render(dashboardTree('/?repository=acme/app'));
-      await act(async () => { await vi.advanceTimersByTimeAsync(10); });
-      expect(getDashboardNarrative).toHaveBeenCalledTimes(1);
+    render(dashboardTree('/?repository=acme/app'));
+    await act(async () => { await vi.advanceTimersByTimeAsync(10); });
+    expect(getDashboardNarrative).toHaveBeenCalledTimes(1);
 
-      expect(mockAttention).toHaveBeenCalledWith('acme/app');
-      expect(mockActive).toHaveBeenCalledWith('acme/app');
-      expect(mockStats).toHaveBeenCalledWith('acme/app', '7d');
+    expect(mockAttention).toHaveBeenCalledWith('acme/app');
+    expect(mockActive).toHaveBeenCalledWith('acme/app');
+    expect(mockStats).toHaveBeenCalledWith('acme/app', '7d');
 
-      await push(activity('task', 'progressed', { entityId: 'progress' }));
-      await push(activity('task', 'completed', { entityId: 'outside', repository: 'acme/web' }));
+    await push(activity('task', 'progressed', { entityId: 'progress' }));
+    await push(activity('task', 'completed', { entityId: 'outside', repository: 'acme/web' }));
 
-      await act(async () => { await vi.advanceTimersByTimeAsync(SUMMARY_COALESCE_MS * 4); });
-      expect(getDashboardNarrative).toHaveBeenCalledTimes(1);
-    } finally {
-      vi.useRealTimers();
-    }
+    await act(async () => { await vi.advanceTimersByTimeAsync(SUMMARY_COALESCE_MS * 4); });
+    expect(getDashboardNarrative).toHaveBeenCalledTimes(1);
   });
 
   it('does not reorder running work under a pointer when live updates arrive', async () => {
@@ -462,24 +437,16 @@ describe('Dashboard', () => {
     expect(panel).not.toHaveTextContent(absent);
     expect(within(panel).queryByRole('link', { name: 'View all' })).not.toBeInTheDocument();
     expect(screen.queryAllByRole('button', { name: 'Retry' })).toHaveLength(retries);
-  });
-
-  it('retries a failed running-work read on request', async () => {
-    mockActive.mockRejectedValueOnce(new Error('network down'));
-    render(dashboardTree());
-    await waitFor(() =>
-      expect(screen.getByTestId('happening-now-section')).toHaveTextContent('Unable to load running work'),
-    );
-
-    mockActive.mockResolvedValue(activeResponse([activeItem()]));
-    fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
-    await waitFor(() => expect(screen.getByText('Add retry budget')).toBeInTheDocument());
+    if (retries) {
+      mockActive.mockResolvedValue(activeResponse([activeItem()]));
+      fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+      await screen.findByText('Add retry budget');
+    }
   });
 
   it('renders an unknown success rate as unavailable rather than zero', async () => {
     mockStats.mockResolvedValue(statsResponse({
-      successRate: null,
-      recordedSpend: null,
+      successRate: null, recordedSpend: null,
       previous: { completed: 0, successRate: null, recordedSpend: null },
     }));
 
