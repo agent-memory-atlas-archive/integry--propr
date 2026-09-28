@@ -98,7 +98,13 @@ describe('preview thumbnails', () => {
     render(<MemoryRouter><InboxCard notification={notification} onDismiss={vi.fn()} onOpen={onOpen} mutationsEnabled={false} /></MemoryRouter>);
     expect(screen.queryAllByRole('img', { name: /Published screen/ })).toHaveLength(count);
     const details = screen.getByRole('link', { name: /Implement repository media/ });
-    expect(details).toHaveAttribute('href', 'https://github.com/acme/web/pull/42');
+    expect(details).toHaveAttribute('href', completion ? '/tasks/implementation-1' : 'https://github.com/acme/web/pull/42');
+    if (completion) expect(details).not.toHaveAttribute('target');
+    else expect(details).toHaveAttribute('target', '_blank');
+    const pullRequest = screen.getByRole('link', { name: 'PR #42 on GitHub' });
+    expect(pullRequest).toHaveAttribute('href', 'https://github.com/acme/web/pull/42');
+    expect(pullRequest).toHaveAttribute('target', '_blank');
+    expect(pullRequest).toHaveAttribute('rel', 'noopener noreferrer');
     fireEvent.click(details);
     expect(onOpen).toHaveBeenCalledWith(notification.id);
   });
