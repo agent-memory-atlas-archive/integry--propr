@@ -6,6 +6,7 @@ import { McpError } from './config.js';
 import { callWorkflow } from './adapter.js';
 import { type McpTool, type ToolDeps, TERMINAL_PLAN_STATUSES, planScopeShape, planShape, mutationShape, pageShape, repositorySchema, textSchema, idSchema, ok, workflow, markMergedPullRequests } from './tools.js';
 import { planRelationLimit, summarizePlan } from './listSummaries.js';
+import { getPlanRevision, listPlanRevisions, restorePlanRevision } from '../routes/plannerHelpers/planRevisions.js';
 
 const target = { table: 'task_drafts', column: 'draft_id', arg: 'planId', owner: 'user_id' };
 const columns = ['draft_id', 'repository', 'name', 'initial_prompt', 'plan_json', 'attachments', 'status', 'mcp_revision', 'paused', 'created_at', 'updated_at'];
@@ -71,6 +72,21 @@ export function addPlanningTools(tools: McpTool[], deps: ToolDeps, planner: Retu
         });
       if (!changed) throw new McpError('STALE_REVISION', 'Plan changed or an operation is active. Read it again before updating.', 409);
       return ok({ planId: args.planId, revision: args.expectedRevision + 1 });
+    } });
+  tools.push({ name: 'list_plan_revisions', description: 'List earlier versions of your plan, newest first, with their task titles. Every generation, refinement, edit or restore keeps the plan it replaced.', scope: 'read', readOnly: true,
+    schema: z.object(planShape).strict(), target, run: async ({ args }) => ok({ planId: args.planId, revisions: await listPlanRevisions(db, args.planId) }) });
+  tools.push({ name: 'get_plan_revision', description: 'Read the full tasks of one earlier plan version from list_plan_revisions.', scope: 'read', readOnly: true,
+    schema: z.object({ ...planShape, revisionId: z.number().int().positive() }).strict(), target, run: async ({ args }) => {
+      const revision = await getPlanRevision(db, args.planId, args.revisionId);
+      if (!revision) throw new McpError('NOT_FOUND', 'Plan revision not found.', 404);
+      return ok(revision);
+    } });
+  tools.push({ name: 'restore_plan_revision', description: 'Make an earlier plan version current again at an exact revision. The replaced plan stays in the history, so a restore can be undone. Published or busy plans cannot be restored.', scope: 'plan', target,
+    schema: z.object({ ...mutationShape, ...planShape, expectedRevision: z.number().int().min(0), revisionId: z.number().int().positive() }).strict(), run: async ({ args }) => {
+      const result = await restorePlanRevision(db, args.planId, args.revisionId, { expectedRevision: args.expectedRevision });
+      if (!result.restored && result.reason === 'not_found') throw new McpError('NOT_FOUND', 'Plan revision not found.', 404);
+      if (!result.restored) throw new McpError('STALE_REVISION', 'Plan changed, is busy or was already published. Read it again before restoring.', 409);
+      return ok({ planId: args.planId, revision: result.revision, status: 'review', plan: result.plan });
     } });
   tools.push({ name: 'delete_plan', description: 'Delete your idle draft at an exact revision. Published or active plans cannot be deleted through this tool.', scope: 'plan', target,
     schema: z.object({ ...mutationShape, ...planShape, expectedRevision: z.number().int().min(0) }).strict(), run: async ({ principal, args }) => {
