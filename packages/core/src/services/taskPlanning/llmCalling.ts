@@ -13,6 +13,7 @@ import {
 import { enforceGranularity } from './granularity.js';
 import { runPlanFileAgent } from './planFileAgent.js';
 import { extractWholeJsonArray, incompletePlanItems, PLAN_FILE, PLAN_ORIGINAL_FILE } from './planValidation.js';
+import { tryGeneratePlanWithFiles } from './planFileGeneration.js';
 import type { Plan } from '../../claude/prompts/plannerPrompts.js';
 import type { CallLLMOptions, CallLLMForPlanResult } from './types.js';
 
@@ -96,6 +97,15 @@ export async function callLLMForPlan(opts: CallLLMOptions): Promise<CallLLMForPl
     tokenLimit: opts.tokenLimit,
     contextLength: fullContext.length,
   };
+  // File mode: the agent writes and validates the plan in a workspace (see planFileGeneration.ts).
+  const filePlan = await tryGeneratePlanWithFiles({
+    draftId, fullContext, model, repository, githubToken, correlationId, metadata: planGenerationMetadata, routingSession: opts.routingSession,
+  });
+  if (filePlan) {
+    const fileEnforceResult = enforceGranularity(filePlan, granularity, correlatedLogger);
+    return { plan: fileEnforceResult.plan, enforcementMetadata: fileEnforceResult.metadata };
+  }
+
   const response = await runLightweightLLMAnalysis({ prompt: fullContext, model, correlationId: correlationId || 'plan-generation', worktreePath, githubToken, issueRef, taskId: draftId, executionType: 'plan-generation', metadata: planGenerationMetadata, routingSession: opts.routingSession });
 
   let plan: Plan;

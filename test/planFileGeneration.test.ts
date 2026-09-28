@@ -1,0 +1,226 @@
+import assert from 'node:assert/strict';
+import { existsSync, mkdtempSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+import { spawnSync } from 'node:child_process';
+import { after, beforeEach, describe, mock, test } from 'node:test';
+
+const workspaceRoot = mkdtempSync(path.join(tmpdir(), 'propr-plan-workspaces-'));
+process.env.PROPR_PLAN_WORKSPACE_ROOT = workspaceRoot;
+after(() => rmSync(workspaceRoot, { recursive: true, force: true }));
+
+const logger = { info: mock.fn(), warn: mock.fn(), error: mock.fn(), debug: mock.fn() };
+await mock.module('../packages/core/src/utils/logger.js', {
+  defaultExport: { ...logger, withCorrelation: mock.fn(() => logger) },
+});
+
+class PlanningFailedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'PlanningFailedError';
+  }
+}
+await mock.module('../packages/core/src/services/planning/index.js', {
+  namedExports: {
+    PlanningFailedError,
+    updateTraceForRun: mock.fn(async () => undefined),
+    validatePromptTokens: mock.fn(async (prompt: string) => ({ valid: true, tokenCount: Math.ceil(prompt.length / 4), source: 'tiktoken' as const })),
+    CLAUDE_CODE_OVERHEAD: 5_000,
+    getModelHardLimit: mock.fn(() => 200_000),
+    getRawInputCharLimit: mock.fn(() => null),
+  },
+});
+await mock.module('../packages/core/src/config/modelAliases.js', {
+  namedExports: { resolveModelAlias: (model: string) => model },
+});
+await mock.module('../packages/core/src/utils/llmLogger.js', {
+  namedExports: {
+    buildAnalysisWorkRef: (executionType: string, taskId: string, repository: string) => ({ workType: 'plan', planDraftId: taskId, workRepository: repository, executionType }),
+    withTaskLogAttribution: (metadata: Record<string, unknown>, attribution: unknown) => ({ ...metadata, proprLogAttribution: attribution }),
+  },
+});
+await mock.module('../packages/core/src/utils/llmEstimation.js', {
+  namedExports: { estimateLlmDuration: mock.fn(async () => ({ estimatedDurationMs: 1, isHistoricalEstimate: false, sampleCount: 0, avgMsPerToken: 0 })) },
+});
+const replies: string[] = [];
+const runLightweightLLMAnalysis = mock.fn(async () => {
+  const reply = replies.shift();
+  if (reply === undefined) throw new Error('Unexpected reply-mode call');
+  return reply;
+});
+await mock.module('../packages/core/src/claude/claudeService.js', { namedExports: { runLightweightLLMAnalysis } });
+
+const { PLAN_VALIDATOR_SCRIPT, validatePlanTaskFiles, validatePlanText } = await import('../packages/core/src/services/taskPlanning/planValidation.js');
+const { runPlanFileAgent, PlanFileAgentUnavailableError } = await import('../packages/core/src/services/taskPlanning/planFileAgent.js');
+const { buildPlanFilePrompt, resolvePlanGenerationMode, tryGeneratePlanWithFiles } = await import('../packages/core/src/services/taskPlanning/planFileGeneration.js');
+const { callLLMForPlan } = await import('../packages/core/src/services/taskPlanning/llmCalling.js');
+
+const task = (title: string) => ({ title, body: `Why ${title} matters`, implementation: `~~~diff\n+ ${title}\n~~~` });
+const json = (value: unknown) => JSON.stringify(value, null, 2);
+
+type TaskOptions = { worktreePath: string; prompt: string; model?: string; maxTurns?: number; metadata?: Record<string, unknown> };
+/** A routing session whose agent writes files into the workspace it is given. */
+function fakeAgent(write: (workspace: string, options: TaskOptions) => void | Promise<void>, result: Record<string, unknown> = { success: true }) {
+  const calls: TaskOptions[] = [];
+  return {
+    calls,
+    session: {
+      executeTask: async (options: TaskOptions) => {
+        calls.push(options);
+        await write(options.worktreePath, options);
+        return { modifiedFiles: [], logs: '', modelUsed: options.model, executionTimeMs: 1, ...result };
+      },
+    },
+  };
+}
+const writeTasks = (workspace: string, files: Record<string, string>) => {
+  for (const [name, content] of Object.entries(files)) writeFileSync(path.join(workspace, 'tasks', name), content);
+};
+const baseOptions = { model: 'claude:opus', draftId: 'draft-1', repository: 'acme/repo', githubToken: 'token', correlationId: 'plan-1' };
+
+beforeEach(() => {
+  delete process.env.PROPR_PLAN_GENERATION_MODE;
+  replies.length = 0;
+  runLightweightLLMAnalysis.mock.resetCalls();
+});
+
+describe('incremental task-file contract in the validator', () => {
+  test('assembles task files in name order into plan.json', async () => {
+    const report = await validatePlanTaskFiles({ '002.json': json(task('Second')), '001.json': json(task('First')) });
+    assert.equal(report.valid, true, report.errors.join('; '));
+    assert.equal(report.taskCount, 2);
+    assert.deepEqual(JSON.parse(report.planText!).map((item: { title: string }) => item.title), ['First', 'Second']);
+  });
+
+  test('names the file that needs fixing', async () => {
+    const report = await validatePlanTaskFiles({ '001.json': json(task('Fine')), '002.json': '{"title": "Broken",', '003.json': json([task('Array')]) });
+    assert.equal(report.valid, false);
+    assert.equal(report.planText, null);
+    assert.match(report.errors.join('\n'), /tasks\/002\.json is not valid JSON/);
+    assert.match(report.errors.join('\n'), /tasks\/003\.json must hold one task object, not an array/);
+    const incomplete = await validatePlanTaskFiles({ '001.json': json({ title: 'Only a title' }) });
+    assert.match(incomplete.errors[0], /^task 1 \(tasks\/001\.json\) has no non-empty "body" string$/);
+  });
+
+  test('reports a missing or empty tasks directory and keeps the plain plan.json form unchanged', async () => {
+    const directory = mkdtempSync(path.join(tmpdir(), 'propr-validator-'));
+    try {
+      writeFileSync(path.join(directory, 'validate-plan.mjs'), PLAN_VALIDATOR_SCRIPT);
+      const empty = spawnSync(process.execPath, ['validate-plan.mjs', '--tasks', 'tasks'], { cwd: directory, encoding: 'utf8' });
+      assert.equal(empty.status, 1);
+      assert.match(JSON.parse(empty.stdout).errors[0], /no task files: write one task object per file as tasks\/001\.json/);
+      assert.equal(existsSync(path.join(directory, 'plan.json')), false, 'nothing is assembled from no tasks');
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+    const plain = await validatePlanText(json([{ title: 'Only a title' }]));
+    assert.equal(plain.errors[0], 'task 1 has no non-empty "body" string');
+  });
+});
+
+describe('plan file agent with task files', () => {
+  test('returns the plan the agent wrote task by task and cleans the workspace up', async () => {
+    const agent = fakeAgent(workspace => writeTasks(workspace, { '001.json': json(task('One')), '002.json': json(task('Two')) }));
+    const plan = await runPlanFileAgent({ ...baseOptions, purpose: 'generation', prompt: 'Plan it', taskFiles: true, executionType: 'plan-generation', routingSession: agent.session as never });
+    assert.deepEqual(plan.map(item => item.title), ['One', 'Two']);
+    assert.equal(agent.calls[0].model, 'opus');
+    assert.equal(agent.calls[0].maxTurns, 200, 'one turn per task file must fit, beyond the shipped CLAUDE_MAX_TURNS=10');
+    assert.equal((agent.calls[0].metadata?.proprLogAttribution as { executionType: string }).executionType, 'plan-generation');
+    assert.deepEqual(readdirSync(workspaceRoot), [], 'workspace removed');
+  });
+
+  test('re-validates with its own validator and never follows a symlink out of the workspace', async () => {
+    const secret = path.join(workspaceRoot, '..', `secret-${process.pid}.json`);
+    writeFileSync(secret, json(task('Host file')));
+    try {
+      const agent = fakeAgent(workspace => {
+        writeFileSync(path.join(workspace, 'validate-plan.mjs'), 'console.log(JSON.stringify({ valid: true, taskCount: 1, errors: [] }))');
+        writeTasks(workspace, { '001.json': json({ title: 'Stub' }) });
+        symlinkSync(secret, path.join(workspace, 'tasks', '002.json'));
+      });
+      await assert.rejects(
+        runPlanFileAgent({ ...baseOptions, purpose: 'generation', prompt: 'Plan it', taskFiles: true, executionType: 'plan-generation', routingSession: agent.session as never }),
+        (error: Error) => error.name === 'PlanningFailedError' && /task 1 \(tasks\/001\.json\) has no non-empty "body"/.test(error.message) && !/Host file/.test(error.message),
+      );
+    } finally {
+      rmSync(secret, { force: true });
+    }
+  });
+
+  test('an agent that ran but wrote nothing is a planning failure, not an unavailable agent', async () => {
+    const agent = fakeAgent(() => undefined, { success: false, error: 'model refused' });
+    await assert.rejects(
+      runPlanFileAgent({ ...baseOptions, purpose: 'generation', prompt: 'Plan it', taskFiles: true, executionType: 'plan-generation', routingSession: agent.session as never }),
+      (error: Error) => !(error instanceof PlanFileAgentUnavailableError) && /wrote no task files to tasks\/\. The agent reported: model refused/.test(error.message),
+    );
+  });
+
+  test('an agent task that throws is unavailable, except for usage limits, which keep their type', async () => {
+    const throwing = (error: Error) => ({ executeTask: async () => { throw error; } });
+    await assert.rejects(
+      runPlanFileAgent({ ...baseOptions, purpose: 'generation', prompt: 'x', taskFiles: true, executionType: 'plan-generation', routingSession: throwing(new Error('docker unavailable')) as never }),
+      (error: Error) => error instanceof PlanFileAgentUnavailableError && /docker unavailable/.test(error.message),
+    );
+    const usageLimit = Object.assign(new Error('limit reached'), { name: 'UsageLimitError' });
+    await assert.rejects(
+      runPlanFileAgent({ ...baseOptions, purpose: 'generation', prompt: 'x', taskFiles: true, executionType: 'plan-generation', routingSession: throwing(usageLimit) as never }),
+      (error: Error) => error === usageLimit,
+    );
+  });
+});
+
+describe('file-based plan generation', () => {
+  test('selects files unless the reply mode is chosen explicitly', () => {
+    assert.equal(resolvePlanGenerationMode({}), 'file');
+    assert.equal(resolvePlanGenerationMode({ PROPR_PLAN_GENERATION_MODE: 'file' }), 'file');
+    assert.equal(resolvePlanGenerationMode({ PROPR_PLAN_GENERATION_MODE: ' Response ' }), 'response');
+  });
+
+  test('keeps the planner prompt and replaces its reply format with the file contract', () => {
+    const prompt = buildPlanFilePrompt('<context>everything</context>');
+    assert.ok(prompt.startsWith('<context>everything</context>'));
+    assert.match(prompt, /tasks\/001\.json/);
+    assert.match(prompt, /node validate-plan\.mjs --tasks tasks/);
+    assert.match(prompt, /Do not put the plan in your reply/);
+  });
+
+  test('returns null in reply mode without running an agent', async () => {
+    process.env.PROPR_PLAN_GENERATION_MODE = 'response';
+    const agent = fakeAgent(() => { throw new Error('must not run'); });
+    assert.equal(await tryGeneratePlanWithFiles({ ...baseOptions, fullContext: 'x', routingSession: agent.session as never }), null);
+    assert.equal(agent.calls.length, 0);
+  });
+
+  test('callLLMForPlan uses the files and still enforces granularity', async () => {
+    const agent = fakeAgent((workspace, options) => {
+      assert.match(options.prompt, /^Generate a plan/);
+      writeTasks(workspace, { '001.json': json(task('A')), '002.json': json(task('B')) });
+    });
+    const result = await callLLMForPlan({
+      ...baseOptions, runId: 'run-1', fullContext: 'Generate a plan', worktreePath: '/tmp/worktree', tokenLimit: 100_000,
+      repairModel: 'codex:gpt', granularity: 'single', routingSession: agent.session as never,
+    });
+    assert.equal(agent.calls.length, 1);
+    assert.equal(runLightweightLLMAnalysis.mock.callCount(), 0, 'the reply path is not used');
+    assert.equal(result.plan.length, 1, 'single granularity merges the written tasks');
+    assert.equal(result.enforcementMetadata.enforced, true);
+  });
+
+  test('falls back to the model reply only when the agent could not run', async () => {
+    replies.push(json([task('From reply')]));
+    const unavailable = { executeTask: async () => { throw new Error('no container runtime'); } };
+    const result = await callLLMForPlan({
+      ...baseOptions, runId: 'run-1', fullContext: 'Generate a plan', worktreePath: '/tmp/worktree', tokenLimit: 100_000,
+      repairModel: 'codex:gpt', granularity: 'balanced', routingSession: unavailable as never,
+    });
+    assert.deepEqual(result.plan.map(item => item.title), ['From reply']);
+    assert.equal(runLightweightLLMAnalysis.mock.callCount(), 1);
+
+    const invalid = fakeAgent(workspace => writeTasks(workspace, { '001.json': json({ title: 'Stub' }) }));
+    await assert.rejects(callLLMForPlan({
+      ...baseOptions, runId: 'run-2', fullContext: 'Generate a plan', worktreePath: '/tmp/worktree', tokenLimit: 100_000,
+      repairModel: 'codex:gpt', granularity: 'balanced', routingSession: invalid.session as never,
+    }), /Plan generation did not produce a valid plan: task 1 \(tasks\/001\.json\) has no non-empty "body"/);
+    assert.equal(runLightweightLLMAnalysis.mock.callCount(), 1, 'an invalid plan is not regenerated as a reply');
+  });
+});

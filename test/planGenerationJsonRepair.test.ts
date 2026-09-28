@@ -1,6 +1,9 @@
 import assert from 'node:assert/strict';
 import { beforeEach, mock, test } from 'node:test';
 
+// These tests cover parsing the model reply; file-based generation has its own tests.
+process.env.PROPR_PLAN_GENERATION_MODE = 'response';
+
 type AnalysisCall = {
   prompt: string;
   model: string;
