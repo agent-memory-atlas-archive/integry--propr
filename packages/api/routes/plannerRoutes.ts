@@ -24,6 +24,9 @@ import {
   recoverStaleRefinement,
   withAuthCheck,
   createValidateContextRepositoryHandler,
+  createListPlanRevisionsHandler,
+  createGetPlanRevisionHandler,
+  createRestorePlanRevisionHandler,
 } from './plannerHelpers/index.js';
 import { parseSearchWords, scoreDrafts, sortDraftsByScore, removeSearchScore } from './plannerSearchHelpers.js';
 import { buildIssueSummaryMap, parseDraftJsonFields, attachIssueSummaries } from './plannerDraftHelpers.js';
@@ -289,6 +292,9 @@ export function createPlannerRoutes(deps: PlannerRoutesDeps) {
   }
 
   const getAttachmentContent = withAuthCheck(db, createGetAttachmentContentHandler({ verifyOwnership: ownershipVerifier }));
+  const listPlanRevisions = withAuthCheck(db, createListPlanRevisionsHandler({ db, verifyOwnership: ownershipVerifier }));
+  const getPlanRevision = withAuthCheck(db, createGetPlanRevisionHandler({ db, verifyOwnership: ownershipVerifier }));
+  const restorePlanRevision = withAuthCheck(db, createRestorePlanRevisionHandler({ db, verifyOwnership: ownershipVerifier }));
   const getRepositoryInfo = withAuthCheck(db, createGetRepositoryInfoHandler({ verifyOwnership: ownershipVerifier }));
   const downloadContext = withAuthCheck(db, createDownloadContextHandler({ verifyOwnership: ownershipVerifier }));
   const getIssues = withAuthCheck(db, createGetIssuesHandler({ verifyOwnership: ownershipVerifier }));
@@ -356,5 +362,6 @@ export function createPlannerRoutes(deps: PlannerRoutesDeps) {
     resetDraftToSetup, getIssues, implementIssue, updateIssue,
     validateContextRepository, abortGeneration, abortRefinement, reviseDraft,
     pauseDraftExecution, resumeDraftExecution, updateExecutionSettings,
+    listPlanRevisions, getPlanRevision, restorePlanRevision,
   };
 }
