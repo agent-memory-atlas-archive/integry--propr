@@ -69,7 +69,7 @@ const { callLLMForPlan } = await import('../packages/core/src/services/taskPlann
 const task = (title: string) => ({ title, body: `Why ${title} matters`, implementation: `~~~diff\n+ ${title}\n~~~` });
 const json = (value: unknown) => JSON.stringify(value, null, 2);
 
-type TaskOptions = { worktreePath: string; prompt: string; model?: string; maxTurns?: number; metadata?: Record<string, unknown> };
+type TaskOptions = { worktreePath: string; prompt: string; model?: string; taskId?: string; maxTurns?: number; metadata?: Record<string, unknown> };
 /** A routing session whose agent writes files into the workspace it is given. */
 function fakeAgent(write: (workspace: string, options: TaskOptions) => void | Promise<void>, result: Record<string, unknown> = { success: true }) {
   const calls: TaskOptions[] = [];
@@ -431,6 +431,83 @@ describe('file-based plan generation', () => {
       (error: Error) => error === usageLimit,
     );
     assert.deepEqual(readdirSync(workspaceRoot), []);
+  });
+
+  const terminalFailures = {
+    ExecutionAbortedError: { name: 'ExecutionAbortedError' },
+    IndexingCancelledError: { name: 'IndexingCancelledError' },
+    SecurityException: { name: 'SecurityException' },
+    ContextTokenLimitError: { name: 'ContextTokenLimitError' },
+    'invalid configuration': { code: 'INVALID_CONFIGURATION' },
+    'explicit cancellation reason': { terminationReason: 'user_cancelled' },
+    'explicit cancellation message': { message: 'Task was cancelled' },
+  };
+  for (const [kind, details] of Object.entries(terminalFailures)) {
+    test(`preserves ${kind} without routing retry or response fallback`, async () => {
+      const terminal = Object.assign(new Error('terminal failure'), details);
+      const agent = fakeAgent(async (_workspace, options) => {
+        assert.equal(options.taskId, baseOptions.draftId);
+        await Promise.resolve();
+        throw terminal;
+      });
+      const replacement = fakeAgent(() => undefined);
+      await assert.rejects(callLLMForPlan({
+        ...baseOptions, runId: 'run-1', fullContext: 'Generate a plan', worktreePath: '/tmp/worktree', tokenLimit: 100_000,
+        repairModel: 'codex:gpt', granularity: 'balanced', routingSession: routedAgents(agent, replacement),
+      }), (error: unknown) => error === terminal);
+      assert.equal(agent.calls.length, 1);
+      assert.equal(replacement.calls.length, 0);
+      assert.equal(runLightweightLLMAnalysis.mock.callCount(), 0);
+      assert.deepEqual(readdirSync(workspaceRoot), []);
+    });
+  }
+
+  for (const kind of ['no output', 'valid task', 'uninspectable task directory']) {
+    test(`preserves direct execution cancellation with ${kind}`, async () => {
+      const cancellation = Object.assign(new Error('stopped'), { name: 'ExecutionAbortedError' });
+      const agent = fakeAgent(async workspace => {
+        if (kind !== 'no output') partialOutputs[kind as keyof typeof partialOutputs](workspace);
+        await Promise.resolve();
+        throw cancellation;
+      });
+      await assert.rejects(callLLMForPlan({
+        ...baseOptions, runId: 'run-1', fullContext: 'Generate a plan', worktreePath: '/tmp/worktree', tokenLimit: 100_000,
+        repairModel: 'codex:gpt', granularity: 'balanced', routingSession: agent.session as never,
+      }), (error: unknown) => error === cancellation);
+      assert.equal(runLightweightLLMAnalysis.mock.callCount(), 0);
+      assert.deepEqual(readdirSync(workspaceRoot), []);
+    });
+  }
+
+  test('preserves cancellation from the shared file repair runner', async () => {
+    process.env.PROPR_PLAN_GENERATION_MODE = 'response';
+    replies.push('[{"title":"Broken","body":"Body" "implementation":"Fix"}]');
+    const cancellation = Object.assign(new Error('stopped'), { name: 'ExecutionAbortedError' });
+    const repair = fakeAgent(async workspace => {
+      assert.equal(existsSync(path.join(workspace, 'plan.json')), true);
+      await Promise.resolve();
+      throw cancellation;
+    });
+    await assert.rejects(callLLMForPlan({
+      ...baseOptions, runId: 'run-1', fullContext: 'Generate a plan', worktreePath: '/tmp/worktree', tokenLimit: 100_000,
+      repairModel: 'codex:gpt', granularity: 'balanced', repairRoutingSession: repair.session as never,
+    }), (error: unknown) => error === cancellation);
+    assert.equal(repair.calls.length, 1);
+    assert.equal(runLightweightLLMAnalysis.mock.callCount(), 1);
+    assert.deepEqual(readdirSync(workspaceRoot), []);
+  });
+
+  test('an unqualified transport abort still permits response fallback', async () => {
+    replies.push(json([task('From reply')]));
+    const agent = fakeAgent(() => {
+      throw Object.assign(new Error('transport interrupted'), { name: 'AbortError', code: 'ABORT_ERR' });
+    });
+    const result = await callLLMForPlan({
+      ...baseOptions, runId: 'run-1', fullContext: 'Generate a plan', worktreePath: '/tmp/worktree', tokenLimit: 100_000,
+      repairModel: 'codex:gpt', granularity: 'balanced', routingSession: agent.session as never,
+    });
+    assert.deepEqual(result.plan.map(item => item.title), ['From reply']);
+    assert.equal(runLightweightLLMAnalysis.mock.callCount(), 1);
   });
 
   test('falls back to the model reply only when the agent could not run', async () => {

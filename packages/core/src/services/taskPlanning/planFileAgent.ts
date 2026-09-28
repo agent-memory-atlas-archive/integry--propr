@@ -18,6 +18,7 @@ import type { ExecutionType } from '../../utils/llmMetrics.types.js';
 import logger from '../../utils/logger.js';
 import { PlanningFailedError } from '../planning/index.js';
 import type { SyntheticRoutingSession } from '../syntheticRoutingService.js';
+import { isNonRetryableSyntheticFailure } from '../syntheticRoutingTypes.js';
 import { PLAN_FILE, PLAN_TASKS_DIR, PLAN_VALIDATOR_FILE, PLAN_VALIDATOR_SCRIPT, validatePlanTaskFiles, validatePlanText } from './planValidation.js';
 
 const execFileAsync = promisify(execFile);
@@ -215,8 +216,10 @@ export async function runPlanFileAgent(options: PlanFileAgentOptions): Promise<P
         workRef: buildAnalysisWorkRef(executionType, draftId, repository),
       }),
     }, prepareAttemptWorkspace).catch(async error => {
-      // Usage limits drive requeueing upstream and must keep their type.
-      if ((error as Error)?.name === 'UsageLimitError') throw error;
+      // Preserve terminal failures before inspecting output: an empty workspace
+      // does not authorize retrying explicit cancellation or other terminal errors.
+      // Usage limits also keep their identity for upstream requeueing.
+      if ((error as Error)?.name === 'UsageLimitError' || isNonRetryableSyntheticFailure(error)) throw error;
       let producedOutput: boolean;
       try {
         // A later empty attempt must not erase evidence that an earlier one ran.
