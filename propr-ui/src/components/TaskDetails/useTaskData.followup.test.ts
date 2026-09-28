@@ -350,4 +350,84 @@ describe('full history follow-up regressions', () => {
       expect(unordered.liveOutputPosition).toBeUndefined();
     });
   });
+
+  describe('buffered updates of an execution a newer read replaced', () => {
+    const event = (epoch: number, offset: number) => ({
+      id: `live:task:redis:gen%3A${epoch}:${offset}:0`, type: 'thought' as const, content: `Run ${epoch} at ${offset}`, timestamp: '2026-09-27T00:00:00Z',
+    });
+    const position = (epoch: number, offset: number) => ({ epoch: `gen:${epoch}`, offset });
+    const read = (epoch: number, offset: number, todo: string): LiveDetails => ({
+      events: [event(epoch, offset)], todos: [{ id: 'todo', content: todo, status: 'in_progress' }], currentTask: todo,
+      tokenUsage: null, omittedEventCount: 0, liveOutputPosition: position(epoch, offset),
+    });
+    const oldTodos = [{ id: 'todo', content: 'Old run', status: 'completed' }];
+    const oldUpdates = {
+      increment: { taskId: 'task', events: [event(1, 60)], todos: oldTodos, currentTask: 'Old run', liveOutputPosition: position(1, 60) },
+      'full state': { taskId: 'task', ...read(1, 60, 'Old run'), todos: oldTodos },
+    };
+    const expectNewRun = (liveDetails: LiveDetails, events = [event(2, 10)]) => {
+      expect(liveDetails.events).toEqual(events);
+      expect(liveDetails.todos).toEqual([{ id: 'todo', content: 'New run', status: 'in_progress' }]);
+      expect(liveDetails.currentTask).toBe('New run');
+      expect(liveDetails.liveOutputPosition).toEqual(position(2, events.length * 10));
+    };
+    const newRunIncrement = { taskId: 'task', events: [event(2, 20)], liveOutputPosition: position(2, 20) };
+
+    for (const [kind, oldUpdate] of Object.entries(oldUpdates)) {
+      it(`goal page: an old ${kind} buffered before a new-execution read is discarded, as are its late deliveries`, async () => {
+        const pending = deferred<LiveDetails>();
+        apiMocks.getTaskLiveDetails.mockResolvedValueOnce(read(1, 50, 'Old run')).mockReturnValueOnce(pending.promise);
+        const { result, unmount } = renderHook(() => useTaskLiveData('task', 0, 'claude_execution'));
+        await act(async () => {});
+        let refresh!: Promise<LiveDetails | null>;
+        act(() => { refresh = result.current.refreshLiveDetails(); });
+        act(() => socketMocks.liveUpdateHandler?.(oldUpdate));
+        // The worker started a new execution before the server read the log.
+        await act(async () => { pending.resolve(read(2, 10, 'New run')); await refresh; });
+        expectNewRun(result.current.liveDetails);
+        act(() => socketMocks.liveUpdateHandler?.({ ...oldUpdate, events: [event(1, 70)], liveOutputPosition: position(1, 70) }));
+        expectNewRun(result.current.liveDetails);
+        act(() => socketMocks.liveUpdateHandler?.(newRunIncrement));
+        expectNewRun(result.current.liveDetails, [event(2, 10), event(2, 20)]);
+        unmount();
+      });
+
+      it(`finished task page: an old ${kind} buffered before a new-execution read is discarded, as are its late deliveries`, async () => {
+        vi.useFakeTimers();
+        const pending = deferred<LiveDetails>();
+        apiMocks.getTaskHistory.mockResolvedValueOnce({ history: [{ state: 'CLAUDE_EXECUTION' }] });
+        apiMocks.getTaskLiveDetails.mockResolvedValueOnce(read(1, 50, 'Old run')).mockReturnValueOnce(pending.promise);
+        const { result, unmount } = renderHook(() => useTaskData('task'));
+        await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+        expect(result.current.liveDetails.liveOutputPosition).toEqual(position(1, 50));
+        act(() => socketMocks.taskUpdateHandler?.({ taskId: 'task', state: 'COMPLETED' }));
+        await act(async () => { await vi.advanceTimersByTimeAsync(200); });
+        expect(apiMocks.getTaskLiveDetails).toHaveBeenCalledTimes(2);
+        act(() => socketMocks.liveUpdateHandler?.(oldUpdate));
+        await act(async () => { pending.resolve(read(2, 10, 'New run')); await pending.promise; });
+        expectNewRun(result.current.liveDetails);
+        act(() => socketMocks.liveUpdateHandler?.({ ...oldUpdate, events: [event(1, 70)], liveOutputPosition: position(1, 70) }));
+        expectNewRun(result.current.liveDetails);
+        act(() => socketMocks.liveUpdateHandler?.(newRunIncrement));
+        expectNewRun(result.current.liveDetails, [event(2, 10), event(2, 20)]);
+        unmount();
+      });
+    }
+
+    it('goal page: a newer execution arriving through the socket during the read still replaces the read', async () => {
+      const pending = deferred<LiveDetails>();
+      apiMocks.getTaskLiveDetails.mockResolvedValueOnce(read(1, 50, 'Old run')).mockReturnValueOnce(pending.promise);
+      const { result, unmount } = renderHook(() => useTaskLiveData('task', 0, 'claude_execution'));
+      await act(async () => {});
+      let refresh!: Promise<LiveDetails | null>;
+      act(() => { refresh = result.current.refreshLiveDetails(); });
+      act(() => socketMocks.liveUpdateHandler?.(oldUpdates.increment));
+      act(() => socketMocks.liveUpdateHandler?.({ taskId: 'task', ...read(3, 5, 'Newest run') }));
+      await act(async () => { pending.resolve(read(2, 10, 'New run')); await refresh; });
+      expect(result.current.liveDetails.events).toEqual([event(3, 5)]);
+      expect(result.current.liveDetails.currentTask).toBe('Newest run');
+      expect(result.current.liveDetails.liveOutputPosition).toEqual(position(3, 5));
+      unmount();
+    });
+  });
 });

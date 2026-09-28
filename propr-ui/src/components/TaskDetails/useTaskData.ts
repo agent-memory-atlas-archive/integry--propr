@@ -10,7 +10,9 @@ import { trustedPreviewMedia, type PublishedVisualPreview, type TaskUpdatePayloa
 import { isAnalysisData, normalizeAnalysisData } from './apiDataGuards';
 import { useLiveRefreshScheduler } from '../../hooks/useLiveRefreshScheduler';
 import { useCurrentUser } from '../../contexts/AuthContext';
-import { capLiveEvents, isFinishedTask, mergeFullLiveDetails, readCoversUpdate } from './liveDetailsMerge';
+import {
+  capLiveEvents, executionSupersededByRead, isFinishedTask, isSupersededUpdate, mergeFullLiveDetails, readCoversUpdate,
+} from './liveDetailsMerge';
 import { getDesktopSocketConfigurationKey } from '../../api/apiClient';
 export { capLiveEvents, MAX_LIVE_RAW_EVENTS, mergeFullLiveDetails } from './liveDetailsMerge';
 
@@ -187,6 +189,8 @@ export const useTaskData = (taskId: string | undefined) => {
   const liveReadSequence = useRef(0);
   const finishedLiveReadScope = useRef<string | null>(null);
   const pendingLiveRead = useRef<TaskLiveUpdatePayload[] | null>(null);
+  // Executions a read proved were replaced; the watcher can still deliver their updates late.
+  const supersededExecutionsRef = useRef(new Set<string>());
   // Track if we've received initial data from WebSocket (to distinguish initial vs incremental updates)
   // A route parameter can change without unmounting this hook. Late responses
   // from the previous task must never replace the newly selected task's data.
@@ -243,11 +247,15 @@ export const useTaskData = (taskId: string | undefined) => {
       if (!isLive || (!hasReceivedSocketStateRef.current && socketRevision === socketRevisionRef.current)) {
         finishedLiveReadScope.current = finishedAtRequest ? requestedScope : null;
         // Replay updates over the pre-request state, which has not applied them yet,
-        // except those the response already contains (possibly in a newer version).
+        // except those the response already contains (possibly in a newer version)
+        // and those of the execution the response replaced.
         setLiveDetails(previous => {
           if (activeRequestScopeRef.current !== requestedScope || sequence !== liveReadSequence.current) return previous;
-          return updates.reduce((state, update) => applyTaskLiveUpdate(state, update, isLive),
-            mergeFullLiveDetails(atRequest.state ?? previous, data, isLive));
+          const superseded = executionSupersededByRead(atRequest.state ?? previous, data);
+          if (superseded) supersededExecutionsRef.current.add(superseded);
+          return updates.filter(update => !isSupersededUpdate(supersededExecutionsRef.current, update))
+            .reduce((state, update) => applyTaskLiveUpdate(state, update, isLive),
+              mergeFullLiveDetails(atRequest.state ?? previous, data, isLive));
         });
       }
       return data;
@@ -268,6 +276,7 @@ export const useTaskData = (taskId: string | undefined) => {
   useEffect(() => {
     lastNotifiedStateRef.current = null;
     hasReceivedSocketStateRef.current = false;
+    supersededExecutionsRef.current = new Set();
   }, [requestScopeKey]);
 
   // Handle task update from WebSocket
@@ -297,6 +306,7 @@ export const useTaskData = (taskId: string | undefined) => {
   // WebSocket sends full state on initial subscription, then only new events on updates
   const handleTaskLiveUpdate = useCallback((payload: TaskLiveUpdatePayload) => {
     if (payload.taskId !== activeTaskIdRef.current) return;
+    if (isSupersededUpdate(supersededExecutionsRef.current, payload)) return;
 
     hasReceivedSocketStateRef.current = true;
     socketRevisionRef.current += 1;

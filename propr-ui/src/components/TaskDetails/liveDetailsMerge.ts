@@ -42,7 +42,24 @@ export const readCoversUpdate = (read: Pick<LiveDetails, 'liveOutputPosition'>, 
   return Boolean(at && of && at.epoch === of.epoch && of.offset <= at.offset);
 };
 
-export const isFinishedTask = (state: string | undefined): boolean =>
+/**
+ * The execution a state was showing when a read started, if the read found a
+ * different one. Epochs never recur, and the read happened after that state was
+ * known, so the read's execution replaced it: none of its updates may be applied again.
+ */
+export const executionSupersededByRead = (
+  atRequest: Pick<LiveDetails, 'liveOutputPosition'> | undefined,
+  read: Pick<LiveDetails, 'liveOutputPosition'>,
+): string | null => {
+  const superseded = atRequest?.liveOutputPosition?.epoch;
+  const current = read.liveOutputPosition?.epoch;
+  return superseded && current && superseded !== current ? superseded : null;
+};
+
+export const isSupersededUpdate = (superseded: ReadonlySet<string>, update: { liveOutputPosition?: LiveOutputPosition }): boolean =>
+  Boolean(update.liveOutputPosition && superseded.has(update.liveOutputPosition.epoch));
+
+export const isFinishedTask =(state: string | undefined): boolean =>
   ['completed', 'failed', 'cancelled'].includes(state?.toLowerCase() ?? '');
 
 /** Full state sets shared-event order while retaining history collected in this execution. */
