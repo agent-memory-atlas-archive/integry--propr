@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { after, before, beforeEach, test } from 'node:test';
 import type { Knex } from 'knex';
+import { MAX_LIVE_DETAIL_LOOKUPS } from '../routes/dashboardLiveActivity.js';
 import { buildNarrativePrompt, collectNarrativeFacts, createDashboardNarrative, IDLE_NARRATIVE, MAX_NARRATIVE_LENGTH } from '../routes/dashboardNarrative.js';
 import { NOW, minutesAgo, createDashboardTestDatabase, clearDashboardTestDatabase, seedTask } from './dashboardTestHarness.js';
 
@@ -27,7 +28,7 @@ test('idle is deterministic and does not resolve or call a model', async () => {
   assert.equal(await narrative(await collectNarrativeFacts(db, 'all', NOW)), IDLE_NARRATIVE);
 });
 
-test('facts prioritize bounded live details, select progress in policy order and omit a lone completion', async () => {
+test('facts preserve every running task, prioritize bounded live details and omit a lone completion', async () => {
   await seedTask(db, {
     taskId: 'tests', title: 'Cache repository icons', issueNumber: 2574,
     states: [{ state: 'claude_execution', timestamp: minutesAgo(8) }],
@@ -55,12 +56,49 @@ test('facts prioritize bounded live details, select progress in policy order and
     liveActivity: async taskId => live.get(taskId)!,
   });
 
-  assert.deepEqual(snapshot.facts.live.map(item => item.id), ['tests', 'tool']);
+  assert.deepEqual(snapshot.facts.live.map(item => item.id), ['tests', 'tool', 'third']);
   assert.equal(snapshot.facts.live[0].progress, 'Running tests (step 3 of 5)');
   assert.equal(snapshot.facts.live[0].activity, 'Editing stale.ts');
   assert.deepEqual(snapshot.facts.live[0].reference, { kind: 'issue', number: 2574 });
   assert.equal(snapshot.facts.live[1].progress, 'Pushing the branch');
+  assert.equal(snapshot.facts.live[2].progress, snapshot.facts.live[2].lifecyclePhase);
+  assert.match(buildNarrativePrompt(snapshot.facts), /"id":"third"/);
   assert.deepEqual(snapshot.facts.completed, []);
+});
+
+test('tasks beyond the live-detail lookup budget retain lifecycle facts without extra lookups', async () => {
+  for (let index = 0; index <= MAX_LIVE_DETAIL_LOOKUPS; index++) {
+    await seedTask(db, {
+      taskId: `running-${index}`,
+      title: `Running task ${index}`,
+      issueNumber: 3000 + index,
+      states: [{ state: 'processing', timestamp: minutesAgo(index + 1) }],
+    });
+  }
+
+  const lookups: string[] = [];
+  const snapshot = await collectNarrativeFacts(db, 'integry/propr', NOW, {
+    liveActivity: async taskId => {
+      lookups.push(taskId);
+      return {
+        progressLine: `Live details for ${taskId}`,
+        activity: null,
+        step: null,
+        lastActivityAt: null,
+        awaitingFirstOutput: false,
+      };
+    },
+  });
+
+  assert.equal(snapshot.facts.live.length, MAX_LIVE_DETAIL_LOOKUPS + 1);
+  assert.deepEqual(lookups, Array.from({ length: MAX_LIVE_DETAIL_LOOKUPS }, (_, index) => `running-${index}`));
+  const fallback = snapshot.facts.live.find(item => item.id === `running-${MAX_LIVE_DETAIL_LOOKUPS}`);
+  assert.ok(fallback);
+  assert.equal(fallback.title, `Running task ${MAX_LIVE_DETAIL_LOOKUPS}`);
+  assert.deepEqual(fallback.reference, { kind: 'issue', number: 3000 + MAX_LIVE_DETAIL_LOOKUPS });
+  assert.equal(fallback.progress, fallback.lifecyclePhase);
+  assert.equal(fallback.progressLine, null);
+  assert.equal(fallback.activity, null);
 });
 
 test('two recent completions follow live work and no-live facts use the newest meaningful recap', async () => {
@@ -86,6 +124,10 @@ test('two recent completions follow live work and no-live facts use the newest m
 });
 
 test('generating and refining plans are live, owner scoped and use persisted phases and prompt titles', async () => {
+  await seedTask(db, {
+    taskId: 'plan-runner', title: 'Implement the approved plan', issueNumber: 2574,
+    states: [{ state: 'processing', timestamp: minutesAgo(3) }],
+  });
   await db('task_drafts').insert([
     {
       draft_id: 'generated', user_id: 'user', repository: 'integry/propr', name: 'Untitled Plan',
@@ -102,10 +144,11 @@ test('generating and refining plans are live, owner scoped and use persisted pha
   ]);
 
   const snapshot = await collectNarrativeFacts(db, 'integry/propr', NOW, 'user');
-  assert.deepEqual(snapshot.facts.live.map(item => item.id), ['generated', 'refining']);
+  assert.deepEqual(snapshot.facts.live.map(item => item.id), ['generated', 'refining', 'plan-runner']);
   assert.equal(snapshot.facts.live[0].title, 'Make dashboard summaries operational.');
   assert.equal(snapshot.facts.live[0].lifecyclePhase, 'Building repository context');
   assert.equal(snapshot.facts.live[1].lifecyclePhase, 'Refining plan');
+  assert.equal(snapshot.facts.live[2].title, 'Implement the approved plan');
 });
 
 test('prompt treats activity text as untrusted facts and contains no historical dashboard metrics', async () => {
