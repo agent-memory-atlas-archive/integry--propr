@@ -4,7 +4,7 @@ import { getDashboardNarrative } from '../../api/dashboardApi';
 const PAUSE_KEY = 'dashboard-summary-paused';
 export const SUMMARY_COALESCE_MS = 300;
 
-export function useDashboardSummary(repository: string, completionToken: number) {
+export function useDashboardSummary(repository: string, activityToken: number) {
   const [paused, setPaused] = useState(() => {
     try { return localStorage.getItem(PAUSE_KEY) === 'true'; } catch { return false; }
   });
@@ -77,12 +77,12 @@ export function useDashboardSummary(repository: string, completionToken: number)
     };
   }, [repository]);
 
-  const lastToken = useRef(completionToken);
+  const lastToken = useRef(activityToken);
   useEffect(() => {
-    if (lastToken.current === completionToken) return;
-    lastToken.current = completionToken;
+    if (lastToken.current === activityToken) return;
+    lastToken.current = activityToken;
     controller.current?.changed();
-  }, [completionToken]);
+  }, [activityToken]);
 
   useEffect(() => {
     try { localStorage.setItem(PAUSE_KEY, String(paused)); } catch { /* Storage may be unavailable. */ }

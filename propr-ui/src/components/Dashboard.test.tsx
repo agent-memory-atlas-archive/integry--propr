@@ -1,3 +1,4 @@
+import { getUsageTips, dismissUsageTip } from '../api/usageTipsApi';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, waitFor, within, act, fireEvent } from '@testing-library/react';
 import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom';
@@ -20,6 +21,8 @@ import {
   outcomesResponse,
   statsResponse,
 } from './Dashboard.fixtures';
+
+vi.mock('../api/usageTipsApi', () => ({ getUsageTips: vi.fn(async () => ({ enabled: true, tips: [] })), dismissUsageTip: vi.fn(), USAGE_TIPS_SETTINGS_CHANGED: 'tips-settings-changed' }));
 
 vi.mock('../api/dashboardApi', () => ({
   getDashboardNarrative: vi.fn(),
@@ -237,7 +240,7 @@ describe('Dashboard', () => {
     expect(mockStats).toHaveBeenCalledWith('acme/app', '7d');
   });
 
-  it('coalesces a burst of task updates into a single refresh per section', async () => {
+  it('coalesces task updates without refetching tips or acknowledging them', async () => {
     renderDashboard();
     await waitForSections();
 
@@ -261,13 +264,15 @@ describe('Dashboard', () => {
     await waitFor(() => expect(mockStats).toHaveBeenCalledTimes(2));
     expect(mockAttention).toHaveBeenCalledTimes(2);
     expect(mockOutcomes).toHaveBeenCalledTimes(2);
+    expect(getUsageTips).toHaveBeenCalledTimes(1);
+    expect(dismissUsageTip).not.toHaveBeenCalled();
   });
 
-  it('regenerates narrative once for a burst of terminal and attention events from the existing socket', async () => {
+  it('regenerates narrative once for a burst of repository-relevant live and terminal events', async () => {
     renderDashboard();
     await waitForSections();
     await waitFor(() => expect(getDashboardNarrative).toHaveBeenCalledTimes(1));
-    for (const [index, state] of ['completed', 'failed', 'cancelled', 'action_required', 'needs-attention'].entries()) {
+    for (const [index, state] of ['processing', 'claude_execution', 'post_processing', 'completed', 'failed'].entries()) {
       await act(async () => {
         taskUpdateHandler?.({ taskId: `finished-${index}`, state, repository: 'acme/app' } as TaskUpdatePayload);
       });
@@ -275,7 +280,7 @@ describe('Dashboard', () => {
     await waitFor(() => expect(getDashboardNarrative).toHaveBeenCalledTimes(2));
   });
 
-  it('does not regenerate narrative for progress updates or completions outside its repository', async () => {
+  it('regenerates for scoped live progress but ignores updates outside its repository', async () => {
     renderDashboard('/?repository=acme/app');
     await waitForSections();
     await waitFor(() => expect(getDashboardNarrative).toHaveBeenCalledTimes(1));
@@ -284,7 +289,13 @@ describe('Dashboard', () => {
       taskUpdateHandler?.({ taskId: 'outside', state: 'completed', repository: 'acme/web' } as TaskUpdatePayload);
     });
     await waitFor(() => expect(mockActive).toHaveBeenCalledTimes(2));
-    expect(getDashboardNarrative).toHaveBeenCalledTimes(1);
+    await waitFor(() => expect(getDashboardNarrative).toHaveBeenCalledTimes(2));
+
+    await act(async () => {
+      taskUpdateHandler?.({ taskId: 'outside-again', state: 'post_processing', repository: 'acme/web' } as TaskUpdatePayload);
+    });
+    await waitFor(() => expect(mockActive).toHaveBeenCalledTimes(3));
+    expect(getDashboardNarrative).toHaveBeenCalledTimes(2);
   });
 
   it('does not reorder running work under a pointer when live updates arrive', async () => {
