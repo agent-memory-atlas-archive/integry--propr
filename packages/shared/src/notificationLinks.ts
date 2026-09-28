@@ -48,7 +48,14 @@ export function notificationHref(notification: NotificationLinkSource): string {
       const path = `/summaries/${encodeURIComponent(owner)}/${encodeURIComponent(repository)}`;
       const href = action?.type === 'navigate' ? action.href : path;
       const url = new URL(href, 'https://propr.invalid');
-      const branch = target.branch?.replace(/^[ \t\n\r\f\v]+|[ \t\n\r\f\v]+$/g, '');
+      const rawBranch = target.branch ?? '';
+      let start = 0;
+      let end = rawBranch.length;
+      // Trim only ASCII whitespace in linear time, without regex backtracking.
+      const whitespace = ' \t\n\r\f\v';
+      while (start < end && whitespace.includes(rawBranch[start])) start++;
+      while (end > start && whitespace.includes(rawBranch[end - 1])) end--;
+      const branch = rawBranch.slice(start, end);
       if (branch && url.pathname === path && !url.searchParams.has('branch')) {
         url.searchParams.append('branch', branch);
         return `${url.pathname}${url.search}${url.hash}`;
