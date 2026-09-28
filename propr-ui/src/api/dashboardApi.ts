@@ -46,6 +46,7 @@ export interface DashboardAttentionResponse {
 }
 
 export interface ActiveItem {
+  goalId?: string;
   id: string;
   taskId: string;
   repository: string;

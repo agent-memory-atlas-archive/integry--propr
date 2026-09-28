@@ -7,7 +7,7 @@ const now = Date.parse('2026-09-23T12:00:00Z');
 const minutesAgo = (minutes: number) => new Date(now - minutes * 60_000).toISOString();
 
 // Newest first, as the API lists running work.
-const running = [
+const running: import('../src/api/dashboardApi').ActiveItem[] = [
   // Seven, not six: one row over the visible five is simply drawn, so the
   // expand control only appears — and only has to be tested — past that.
   { id: 'task:run-7', taskId: 'run-7', repository: 'example/design-system', issueNumber: 119, prNumber: null, taskType: 'issue', title: 'New Issue: Unify the empty and unavailable states across panels', state: 'processing', phase: 'Preparing', progressLine: null, createdAt: minutesAgo(1), updatedAt: minutesAgo(1) },
@@ -429,7 +429,7 @@ for (const width of [1440, 390]) {
     await page.route('**/api/usage-tips', route => route.fulfill({ json: { enabled: true, tips: USAGE_TIPS_CATALOG.slice(0, 2) } }));
     await page.goto('/');
     const active = page.getByTestId('happening-now-section');
-    await expect(active).toContainText('No active tasks running');
+    await expect(active).toContainText('No active tasks or goals running');
     await expect(active.getByRole('link', { name: 'View all' })).toHaveCount(0);
     const completed = page.getByTestId('completed-list');
     await expect(completed.locator(':scope > li')).toHaveCount(5);
@@ -547,6 +547,34 @@ for (const width of [1920, 390]) {
       const directory = path.resolve('../.propr/previews');
       await mkdir(directory, { recursive: true });
       await section.screenshot({ animations: 'disabled', path: path.join(directory, `completed-event-matrix-${width}.png`) });
+    }
+  });
+}
+
+
+for (const width of [1440, 390]) {
+  test(`running goals appear alongside tasks at ${width}px`, async ({ page }) => {
+    await page.setViewportSize({ width, height: 900 });
+    const goal = {
+      ...running[0], id: 'goal:dashboard-reliability', goalId: 'dashboard-reliability',
+      taskId: 'goal-run', taskType: 'goal', repository: 'example/workspace', issueNumber: null,
+      title: 'Improve dashboard reliability', state: 'claude_execution', phase: 'Implementing',
+      progressLine: 'Checking dashboard tests', activity: 'Running the focused test suite',
+      step: { current: 2, total: 4 }, lastActivityAt: minutesAgo(0.1),
+    };
+    await fixture(page, attention, [goal, running[3]]);
+    await page.goto('/');
+    const section = page.getByTestId('happening-now-section');
+    await expect(section.getByTestId('happening-now-list').locator('li')).toHaveCount(2);
+    await expect(section.getByTestId('work-type-badge').first()).toHaveText('Goal');
+    await expect(section.getByRole('link', { name: /Improve dashboard reliability/ })).toHaveAttribute('href', '/goals/dashboard-reliability');
+    await expect(section.getByRole('link', { name: 'View goals' })).toHaveAttribute('href', '/goals?status=running');
+    await expect(section.getByTestId('running-step').first()).toHaveText('step 2/4');
+    await expect(section).toBeVisible();
+    if (process.env.PROPR_CAPTURE_PREVIEWS) {
+      const directory = path.resolve('../.propr/previews');
+      await mkdir(directory, { recursive: true });
+      await section.screenshot({ animations: 'disabled', path: path.join(directory, `running-goals-${width}.png`) });
     }
   });
 }

@@ -100,7 +100,7 @@ function expectSectionReads(count: number) {
  * facts, and a refactor that collapsed them into one message would otherwise
  * still satisfy a pair of `toHaveTextContent` assertions.
  */
-const IDLE_RUNNING_MESSAGE = 'No active tasks running';
+const IDLE_RUNNING_MESSAGE = 'No active tasks or goals running';
 const UNAVAILABLE_RUNNING_MESSAGE = 'Unable to load running work';
 
 const LocationProbe: React.FC = () => {
@@ -151,6 +151,22 @@ describe('Dashboard', () => {
     mockActive.mockResolvedValue(activeResponse([activeItem()]));
     mockOutcomes.mockResolvedValue(outcomesResponse([outcomeItem()]));
     mockStats.mockResolvedValue(statsResponse());
+  });
+
+  it('shows running goals beside tasks and links to the scoped goal list and goal details', async () => {
+    mockActive.mockResolvedValue(activeResponse([
+      activeItem({ id: 'goal:goal-1', goalId: 'goal-1', taskId: 'goal-task-1', taskType: 'goal',
+        title: 'Improve dashboard reliability', issueNumber: null, prNumber: null,
+        progressLine: 'Checking dashboard tests' }),
+      activeItem(),
+    ]));
+    await renderLoadedDashboard('/?repository=acme%2Fweb');
+    const section = within(screen.getByTestId('happening-now-section'));
+    expect(section.getByText('Goal')).toBeInTheDocument();
+    expect(section.getByRole('link', { name: /Improve dashboard reliability/ })).toHaveAttribute('href', '/goals/goal-1');
+    expect(section.getByRole('link', { name: 'View goals' })).toHaveAttribute('href', '/goals?status=running&repository=acme%2Fweb');
+    expect(section.getByRole('link', { name: 'View tasks' })).toHaveAttribute('href', '/tasks?status=active&repository=acme%2Fweb');
+    expect(section.getAllByText('Checking dashboard tests').length).toBeGreaterThan(0);
   });
 
   it('defers all four initial section reads in a background tab', async () => {

@@ -251,11 +251,13 @@ export const elapsedRunning = (since: string): string => formatDuration(since, n
 
 /** Links a row to a task, or to GitHub when the work has no task of its own. */
 export function workHref(item: {
+  goalId?: string | null;
   taskId?: string | null;
   repository: string;
   issueNumber?: number | null;
   prNumber?: number | null;
 }): string {
+  if (item.goalId) return `/goals/${encodeURIComponent(item.goalId)}`;
   if (item.taskId) return `/tasks/${encodeURIComponent(item.taskId)}`;
   if (item.prNumber) return `https://github.com/${item.repository}/pull/${item.prNumber}`;
   if (item.issueNumber) return `https://github.com/${item.repository}/issues/${item.issueNumber}`;

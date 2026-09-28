@@ -235,11 +235,15 @@ export const HappeningNowSection: React.FC<DashboardSectionProps> = ({ repositor
   const collapsedLimit = canCollapse ? VISIBLE_ITEMS : orderedRunning.length;
   const overflowCount = canCollapse ? orderedRunning.length - VISIBLE_ITEMS : 0;
 
+  const hasGoals = running.some(item => item.goalId);
+  const hasTasks = running.some(item => !item.goalId);
+
   const heading = (
     <SectionHeading id="happening-now-heading" title="Happening now" count={data?.counts.running ?? null}>
-      {(data?.counts.running ?? 0) > 0 && (
-        <SectionLink to={filteredTasksHref('active', repository)}>View all</SectionLink>
+      {hasTasks && (
+        <SectionLink to={filteredTasksHref('active', repository)}>{hasGoals ? 'View tasks' : 'View all'}</SectionLink>
       )}
+      {hasGoals && <SectionLink to={`/goals?${new URLSearchParams({ status: 'running', ...(repository !== 'all' ? { repository } : {}) })}`}>View goals</SectionLink>}
     </SectionHeading>
   );
 
@@ -251,7 +255,7 @@ export const HappeningNowSection: React.FC<DashboardSectionProps> = ({ repositor
       return <SectionError message="Unable to load running work" onRetry={reload} />;
     }
     if (orderedRunning.length === 0) {
-      return <SectionZeroState data-testid="happening-now-empty" icon={<Terminal className="h-6 w-6 text-slate-300" aria-hidden="true" />}>No active tasks running</SectionZeroState>;
+      return <SectionZeroState data-testid="happening-now-empty" icon={<Terminal className="h-6 w-6 text-slate-300" aria-hidden="true" />}>No active tasks or goals running</SectionZeroState>;
     }
 
     const visible = showAll ? orderedRunning : orderedRunning.slice(0, collapsedLimit);

@@ -463,3 +463,44 @@ test('narrative route uses injected model, bypasses cache on refresh and degrade
   assert.equal(unavailable.status, 200);
   assert.equal(unavailable.body.summary, null);
 });
+
+
+test('happening now includes owned running goals with live progress and repository scope', async () => {
+  await seedTask({ taskId: 'ordinary', createdAt: minutesAgo(20), states: [{ state: 'processing', timestamp: minutesAgo(20) }] });
+  const cases = [
+    ['running-goal', 'owner', 'integry/propr', 'running', null, 'claude_execution'],
+    ['other-repo-goal', 'owner', 'integry/docs', 'running', null, 'processing'],
+    ['paused-goal', 'owner', 'integry/propr', 'paused', null, 'claude_execution'],
+    ['finished-goal', 'owner', 'integry/propr', 'running', 'completed', 'claude_execution'],
+    ['failed-goal', 'owner', 'integry/propr', 'running', 'failed', 'failed'],
+    ['cancelled-goal', 'owner', 'integry/propr', 'cancelled', null, 'claude_execution'],
+    ['private-goal', 'someone-else', 'integry/propr', 'running', null, 'claude_execution'],
+    ['starting-goal', 'owner', 'integry/propr', 'running', null, null],
+  ];
+  for (const [id, owner, repository, desired, result, state] of cases) {
+    if (state) await seedTask({ taskId: id!, repository: repository!, taskType: 'goal', states: [
+      { state: 'pending', timestamp: minutesAgo(10) }, { state, timestamp: minutesAgo(2) },
+    ] });
+    await database('goals').insert({ goal_id: id, owner_id: owner, repository,
+      current_task_id: id, title: id === 'running-goal' ? 'Improve dashboard reliability' : null,
+      objective: 'Investigate dashboard reliability', desired_state: desired, result_state: result,
+      created_at: minutesAgo(10), updated_at: minutesAgo(2) });
+  }
+  const dashboard = routes({}, async () => ({ currentTask: 'Checking dashboard tests' }));
+  const result = await call(dashboard.getActive, { repository: 'integry/propr' }, 'owner');
+  assert.equal(result.status, 200);
+  const items = result.body.running as Array<Record<string, unknown>>;
+  assert.deepEqual(items.map(item => item.id), ['goal:running-goal', 'goal:starting-goal', 'task:ordinary']);
+  assert.deepEqual(result.body.counts, { running: 3, queued: 0 });
+  assert.equal(items[0].goalId, 'running-goal');
+  assert.equal(items[0].taskId, 'running-goal');
+  assert.equal(items[0].taskType, 'goal');
+  assert.equal(items[0].title, 'Improve dashboard reliability');
+  assert.equal(items[0].progressLine, 'Checking dashboard tests');
+  assert.equal(items[1].title, 'Investigate dashboard reliability');
+  assert.equal(items[1].phase, 'Waiting');
+  const all = await call(dashboard.getActive, {}, 'owner');
+  assert.equal((all.body.running as unknown[]).length, 4);
+  const anonymous = await call(dashboard.getActive);
+  assert.deepEqual((anonymous.body.running as Array<{ id: string }>).map(item => item.id), ['task:ordinary']);
+});
