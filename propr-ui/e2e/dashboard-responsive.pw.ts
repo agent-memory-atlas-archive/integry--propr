@@ -72,7 +72,7 @@ const user = {
 };
 
 const dashboardResponses = (attentionItems: typeof attention): Record<string, unknown> => ({
-  '/api/dashboard/narrative': { repository: 'all', enabled: true, summary: 'Work is underway on the dashboard and design system, with more tasks queued. Recent reviews are complete; a failed check and pull requests still need your attention.' },
+  '/api/dashboard/narrative': { repository: 'all', enabled: true, summary: `“${LONG_TITLE}” is editing HappeningNowSection.tsx at step 2 of 6 for example/workspace issue #2480. “Tighten the reference chip contrast” was recently completed.` },
   '/api/dashboard/summary': {
     repository: 'all',
     needsAttention: attentionItems.length, running: running.length, queued: 1,
