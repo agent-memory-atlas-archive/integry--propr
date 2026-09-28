@@ -24,6 +24,12 @@ import { MAX_PROVIDER_OUTPUT_BYTES } from './boundedProviderOutput.js';
  */
 export const LIVE_OUTPUT_MAX_BYTES = 64 * 1024 * 1024;
 export const LIVE_OUTPUT_TTL_SECONDS = 3600;
+/**
+ * Most output a writer holds while its publication fails or falls behind. Past
+ * it the writer refuses further output and reports the overflow, so the
+ * execution fails instead of exhausting worker memory.
+ */
+export const LIVE_OUTPUT_MAX_QUEUED_BYTES = 16 * 1024 * 1024;
 
 export const liveOutputKey = (taskId: string): string => `agent:output:${taskId}`;
 export const liveOutputMetaKey = (taskId: string): string => `agent:output:${taskId}:meta`;
@@ -163,6 +169,39 @@ export async function writeLiveOutput(
     ));
 }
 
+/**
+ * The bytes a writer has accepted but not yet had acknowledged. Output that
+ * would take it past the maximum is refused, as is everything after it: the
+ * writer can no longer deliver the execution's output in order, so the
+ * overflow is reported once for the owner to fail the execution.
+ */
+export class LiveOutputBacklog {
+    private bytes = 0;
+    private failure: Error | null = null;
+
+    constructor(
+        private readonly maximumBytes = LIVE_OUTPUT_MAX_QUEUED_BYTES,
+        private readonly onOverflow?: (error: Error) => void,
+        private readonly context: Record<string, unknown> = {},
+    ) {}
+
+    get overflow(): Error | null { return this.failure; }
+
+    reserve(bytes: number): boolean {
+        if (this.failure) return false;
+        if (this.bytes + bytes <= this.maximumBytes) {
+            this.bytes += bytes;
+            return true;
+        }
+        this.failure = new Error(`Live output publication fell more than ${this.maximumBytes} bytes behind`);
+        logger.warn({ ...this.context, maximumBytes: this.maximumBytes }, 'Live output publication fell behind; refusing further output');
+        this.onOverflow?.(this.failure);
+        return false;
+    }
+
+    release(bytes: number): void { this.bytes -= bytes; }
+}
+
 export interface LiveOutputLogOptions {
     /** Start a new execution: the first write replaces whatever an earlier one left. */
     reset?: boolean;
@@ -176,6 +215,10 @@ export interface LiveOutputLogOptions {
      * to the bound the executor's own record buffer applies to provider output.
      */
     maximumRecordBytes?: number;
+    /** Most unpublished output held; see {@link LIVE_OUTPUT_MAX_QUEUED_BYTES}. */
+    maximumQueuedBytes?: number;
+    /** Called once when unpublished output passes the maximum; later output is refused. */
+    onOverflow?: (error: Error) => void;
 }
 
 /** A source's unfinished record, or `oversized` while one is discarded up to its newline. */
@@ -190,14 +233,17 @@ interface PartialRecord {
  * at a time. Partial records wait for their newline (or for close()). Each
  * source (stdout, stderr) is framed on its own, so a record of one is never
  * completed by a newline of the other. A record longer than the maximum is
- * dropped as it grows, so each source buffers at most that much.
+ * dropped as it grows, so each source buffers at most that much. Unpublished
+ * output is bounded too (see {@link LiveOutputBacklog}).
  */
 export class LiveOutputLog {
     private readonly redis: Redis;
     private readonly ownsRedis: boolean;
     private readonly partials = new Map<string, PartialRecord>();
     private pending = '';
-    private readonly writes: Array<{ chunk: string; mode: 'append' | 'replace'; sequence: number; origin?: LiveOutputOrigin }> = [];
+    private pendingBytes = 0;
+    private readonly writes: Array<{ chunk: string; bytes: number; mode: 'append' | 'replace'; sequence: number; origin?: LiveOutputOrigin }> = [];
+    private readonly backlog: LiveOutputBacklog;
     private readonly writer = randomUUID();
     private sequence = 0;
     private resetPending: boolean;
@@ -209,6 +255,7 @@ export class LiveOutputLog {
 
     constructor(private readonly taskId: string, private readonly options: LiveOutputLogOptions = {}) {
         this.resetPending = options.reset === true;
+        this.backlog = new LiveOutputBacklog(options.maximumQueuedBytes, options.onOverflow, { taskId });
         this.ownsRedis = !options.redis;
         this.redis = options.redis ?? new Redis({
             host: process.env.REDIS_HOST || 'redis',
@@ -219,7 +266,7 @@ export class LiveOutputLog {
     }
 
     append(chunk: string, source = 'stdout'): void {
-        if (this.closed || !chunk) return;
+        if (this.closed || this.backlog.overflow || !chunk) return;
         const maximum = this.options.maximumRecordBytes ?? MAX_PROVIDER_OUTPUT_BYTES;
         const partial = this.partials.get(source) ?? { text: '', bytes: 0, oversized: false };
         let records = '';
@@ -253,10 +300,18 @@ export class LiveOutputLog {
      * that it no longer holds, so its records keep their offsets.
      */
     replace(snapshot: string, { discarded = '' }: { discarded?: string } = {}): void {
-        if (this.closed) return;
-        this.enqueuePending();
+        if (this.closed || this.backlog.overflow) return;
+        // The snapshot holds all of the execution's output, so it supersedes
+        // queued writes. The head may already be in flight, so it stays.
+        this.backlog.release(this.pendingBytes);
+        this.pending = '';
+        this.pendingBytes = 0;
+        for (const superseded of this.writes.splice(1)) this.backlog.release(superseded.bytes);
+        const chunk = this.transform(snapshot);
+        const bytes = Buffer.byteLength(chunk);
+        if (!this.backlog.reserve(bytes)) return;
         const origin = liveOutputOrigin(this.transform(discarded));
-        this.writes.push({ chunk: this.transform(snapshot), mode: 'replace', sequence: ++this.sequence, ...(origin ? { origin } : {}) });
+        this.writes.push({ chunk, bytes, mode: 'replace', sequence: ++this.sequence, ...(origin ? { origin } : {}) });
         void this.flush();
     }
 
@@ -264,7 +319,7 @@ export class LiveOutputLog {
         if (this.flushTimer) clearTimeout(this.flushTimer);
         this.flushTimer = null;
         this.enqueuePending();
-        if (this.resetPending && this.writes.length === 0) this.writes.push({ chunk: '', mode: 'append', sequence: ++this.sequence });
+        if (this.resetPending && this.writes.length === 0) this.writes.push({ chunk: '', bytes: 0, mode: 'append', sequence: ++this.sequence });
         this.flushPromise = this.flushPromise.then(async () => {
             while (this.writes.length > 0) {
                 const write = this.writes[0];
@@ -282,6 +337,7 @@ export class LiveOutputLog {
                 }
                 // Only this serialized drain may acknowledge the head, after success.
                 this.resetPending = false;
+                this.backlog.release(write.bytes);
                 this.writes.shift();
             }
         });
@@ -289,7 +345,10 @@ export class LiveOutputLog {
     }
 
     async close(): Promise<void> {
-        if (this.finished) return;
+        if (this.finished) {
+            if (this.backlog.overflow) throw this.backlog.overflow;
+            return;
+        }
         if (this.closePromise) return this.closePromise;
         this.closePromise = this.finishClose();
         try { await this.closePromise; }
@@ -308,18 +367,25 @@ export class LiveOutputLog {
         }
         if (this.ownsRedis) await this.redis.quit().catch(() => undefined);
         this.finished = true;
+        // Everything accepted was published, but the output refused after the overflow was not.
+        if (this.backlog.overflow) throw this.backlog.overflow;
     }
 
     private enqueuePending(): void {
         if (!this.pending) return;
-        this.writes.push({ chunk: this.pending, mode: 'append', sequence: ++this.sequence });
+        this.writes.push({ chunk: this.pending, bytes: this.pendingBytes, mode: 'append', sequence: ++this.sequence });
         this.pending = '';
+        this.pendingBytes = 0;
     }
 
     private queue(records: string): void {
-        this.pending += this.options.transformRecord
+        const text = this.options.transformRecord
             ? records.split('\n').map((record, index, all) => (index === all.length - 1 ? record : this.transform(record))).join('\n')
             : records;
+        const bytes = Buffer.byteLength(text);
+        if (!this.backlog.reserve(bytes)) return;
+        this.pending += text;
+        this.pendingBytes += bytes;
         this.scheduleFlush();
     }
 

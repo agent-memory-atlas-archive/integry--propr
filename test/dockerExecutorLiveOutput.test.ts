@@ -2,10 +2,12 @@ import assert from 'node:assert/strict';
 import { mock, test } from 'node:test';
 
 const writes: string[] = [];
+let failing = false;
 class FakeRedis {
     status = 'ready';
     on() { return this; }
     async eval(_script: string, _keys: number, _data: string, _meta: string, text: string) {
+        if (failing) throw new Error('temporary outage');
         writes.push(text);
         return text.length;
     }
@@ -41,4 +43,27 @@ test('a streamed execution drops a newline-free record past the bound instead of
         })();`;
     await executeDockerCommand(process.execPath, ['-e', script], { taskId: 'docker-oversized', streamToRedis: true, timeout: 10_000 });
     assert.deepEqual(writes.join('').split('\n'), ['before', 'after', '']);
+});
+
+test('a streamed execution fails instead of buffering output it cannot publish past the bound', async () => {
+    failing = true;
+    try {
+        // Over 16 MiB of complete records, then an execution that would otherwise run on.
+        const script = `
+            const record = 'x'.repeat(64 * 1024) + '\\n';
+            (async () => {
+                for (let index = 0; index < 300; index += 1) {
+                    if (!process.stdout.write(record)) await new Promise(done => process.stdout.once('drain', done));
+                }
+                setTimeout(() => undefined, 60_000);
+            })();`;
+        const started = Date.now();
+        await assert.rejects(
+            executeDockerCommand(process.execPath, ['-e', script], { taskId: 'docker-backlog', streamToRedis: true, timeout: 60_000 }),
+            /Live output publication fell more than 16777216 bytes behind/,
+        );
+        assert.ok(Date.now() - started < 30_000, 'the overflow ends the execution');
+    } finally {
+        failing = false;
+    }
 });

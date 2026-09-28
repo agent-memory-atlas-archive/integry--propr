@@ -65,7 +65,8 @@ export class AppServerConnection {
         taskId: string | undefined,
         persistOutput?: (records: string[]) => Promise<void>,
     ) {
-        this.output = new LiveAgentOutput(taskId, persistOutput, 'codex-app-server');
+        // Output that can no longer be published or persisted fails the session.
+        this.output = new LiveAgentOutput(taskId, persistOutput, 'codex-app-server', { onOverflow: error => this.closePending(error) });
         child.stderr?.on('data', chunk => {
             this.stderr = boundedProviderDiagnostic(this.stderr + chunk.toString());
         });

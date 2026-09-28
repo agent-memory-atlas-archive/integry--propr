@@ -276,6 +276,8 @@ export function executeDockerCommand(command: string, args: string[], options: D
             preserveOwnershipFailure(error);
             abortExecution();
         };
+        // Live output that can no longer be published fails this subprocess alone, like a timeout.
+        const failFromLiveOutput = (error: Error): void => { preserveOwnershipFailure(error); abortExecution(true); };
         const invokeExecutionCallback = (callback: () => void | Promise<void>): void => {
             const callbackPromise = Promise.resolve().then(callback).catch(failFromCallback);
             pendingCallbacks.add(callbackPromise);
@@ -315,7 +317,7 @@ export function executeDockerCommand(command: string, args: string[], options: D
             })
             : null;
 
-        const liveOutput = startLiveOutputStreaming({ taskId, streamToRedis, streamStderrToRedis, streamExtraOutput, stripAnsi }, () => stdout, () => stderr);
+        const liveOutput = startLiveOutputStreaming({ taskId, streamToRedis, streamStderrToRedis, streamExtraOutput, stripAnsi, onOverflow: failFromLiveOutput }, () => stdout, () => stderr);
         if (command === 'docker' && args[0] === 'run' && worktreePath) {
             containerDetectionTimer = detectContainerId(
                 worktreePath,
@@ -398,13 +400,13 @@ interface LiveOutputStreaming { stdout(chunk: string): void; stderr(chunk: strin
  * messages) publish that snapshot in place of the previous one instead.
  */
 function startLiveOutputStreaming(
-    options: Pick<DockerCommandOptions, 'taskId' | 'streamToRedis' | 'streamStderrToRedis' | 'streamExtraOutput' | 'stripAnsi'>,
+    options: Pick<DockerCommandOptions, 'taskId' | 'streamToRedis' | 'streamStderrToRedis' | 'streamExtraOutput' | 'stripAnsi'> & { onOverflow: (error: Error) => void },
     readStdout: () => string,
     readStderr: () => string,
 ): LiveOutputStreaming | null {
-    const { taskId, streamToRedis, streamStderrToRedis, streamExtraOutput, stripAnsi } = options;
+    const { taskId, streamToRedis, streamStderrToRedis, streamExtraOutput, stripAnsi, onOverflow } = options;
     if (!streamToRedis || !taskId) return null;
-    const log = new LiveOutputLog(taskId, { reset: true, ...(stripAnsi ? { transformRecord: stripAnsiCodes } : {}) });
+    const log = new LiveOutputLog(taskId, { reset: true, onOverflow, ...(stripAnsi ? { transformRecord: stripAnsiCodes } : {}) });
     if (!streamExtraOutput) {
         return { stdout: chunk => log.append(chunk, 'stdout'), stderr: chunk => { if (streamStderrToRedis) log.append(chunk, 'stderr'); }, close: () => log.close() };
     }

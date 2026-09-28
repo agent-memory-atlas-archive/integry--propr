@@ -300,7 +300,7 @@ for (const failingSink of ['redis', 'durable']) {
             return text.length;
         };
         const redis = { eval: async (_script: string, _keys: number, _data: string, _meta: string, text: string) => write('redis', text) } as unknown as Redis;
-        const output = new LiveAgentOutput('goal-retry', async records => { await write('durable', `${records.join('\n')}\n`); }, 'test', redis);
+        const output = new LiveAgentOutput('goal-retry', async records => { await write('durable', `${records.join('\n')}\n`); }, 'test', { redis });
         output.append('first\n');
         const first = output.flush();
         await entered.promise;
@@ -326,7 +326,7 @@ test('goal output close retains unacknowledged durable records for retry', async
     const output = new LiveAgentOutput('goal-close', async records => {
         if (failing) throw new Error('temporary outage');
         persisted.push(...records);
-    }, 'test', redis);
+    }, 'test', { redis });
     output.append('final\n');
     await assert.rejects(output.close(), /unacknowledged/);
     failing = false;
@@ -335,6 +335,94 @@ test('goal output close retains unacknowledged durable records for retry', async
     assert.equal(publications, 1);
     assert.deepEqual(persisted, ['final']);
 });
+
+test('a process log refuses output past its unpublished bound and fails its close, keeping accepted output in order', async () => {
+    let failing = false;
+    const attempts: Array<{ text: string; sequence: string }> = [];
+    const redis = {
+        eval: async (...args: string[]) => {
+            attempts.push({ text: args[4], sequence: args[10] });
+            if (failing) throw new Error('temporary outage');
+            return args[4].length;
+        },
+    } as unknown as Redis;
+    const overflows: Error[] = [];
+    const log = new LiveOutputLog('bounded-backlog', { reset: true, redis, maximumQueuedBytes: 16, onOverflow: error => overflows.push(error) });
+    log.append('published\n');
+    await log.flush();
+    failing = true;
+    // Published output no longer counts against the bound.
+    log.append('first\n');
+    await log.flush();
+    log.append('second\n');
+    await log.flush();
+    assert.deepEqual(overflows, []);
+    log.append('third\n');
+    log.append('fourth\n');
+    log.replace('snapshot');
+    assert.equal(overflows.length, 1, 'the overflow is reported once');
+    assert.match(overflows[0].message, /fell more than 16 bytes behind/);
+    failing = false;
+    const recoveredAt = attempts.length;
+    await assert.rejects(log.close(), /fell more than 16 bytes behind/, 'refused output fails the close even after the backlog drained');
+    await assert.rejects(log.close(), /fell more than 16 bytes behind/);
+    assert.deepEqual(attempts.slice(recoveredAt), [{ text: 'first\n', sequence: '2' }, { text: 'second\n', sequence: '3' }], 'accepted batches keep their order and identity');
+    assert.ok(attempts.slice(0, recoveredAt).every(attempt => attempt.text !== 'third\n'));
+});
+
+test('queued snapshots supersede each other during an outage instead of accumulating', async () => {
+    let failing = true;
+    const attempts: Array<{ text: string; mode: string }> = [];
+    const redis = {
+        eval: async (_script: string, _keys: number, _data: string, _meta: string, text: string, _max: string, _ttl: string, mode: string) => {
+            attempts.push({ text, mode });
+            if (failing) throw new Error('temporary outage');
+            return text.length;
+        },
+    } as unknown as Redis;
+    let overflowed = false;
+    const log = new LiveOutputLog('bounded-snapshots', { reset: true, redis, maximumQueuedBytes: 20, onOverflow: () => { overflowed = true; } });
+    for (let index = 0; index < 50; index += 1) log.replace(`snap ${String(index).padStart(2, '0')}`);
+    await log.flush();
+    assert.equal(overflowed, false, 'only the in-flight snapshot and the latest one are held');
+    failing = false;
+    const recoveredAt = attempts.length;
+    await log.close();
+    assert.deepEqual(attempts.slice(recoveredAt), [{ text: 'snap 00', mode: 'reset' }, { text: 'snap 49', mode: 'replace' }]);
+});
+
+for (const failingSink of ['redis', 'durable']) {
+    test(`goal output refuses records past its unacknowledged bound while ${failingSink} fails, and keeps the accepted ones`, async () => {
+        let failing = true;
+        const published: string[] = [];
+        const persisted: string[] = [];
+        const write = (sink: 'redis' | 'durable', text: string) => {
+            if (failing && sink === failingSink) throw new Error('temporary outage');
+            (sink === 'redis' ? published : persisted).push(text);
+            return text.length;
+        };
+        const redis = { eval: async (_script: string, _keys: number, _data: string, _meta: string, text: string) => write('redis', text) } as unknown as Redis;
+        const overflows: Error[] = [];
+        const output = new LiveAgentOutput('goal-bounded', async records => { write('durable', `${records.join('\n')}\n`); }, 'test', {
+            redis,
+            maximumQueuedBytes: 16,
+            onOverflow: error => overflows.push(error),
+        });
+        output.append('first\n');
+        await output.flush();
+        output.append('second\n');
+        await output.flush();
+        assert.deepEqual(overflows, []);
+        output.append('third\n');
+        output.append('fourth\n');
+        assert.equal(overflows.length, 1, 'the overflow is reported once');
+        failing = false;
+        await assert.rejects(output.close(), /fell more than 16 bytes behind/);
+        await assert.rejects(output.close(), /fell more than 16 bytes behind/);
+        assert.deepEqual(published, ['first\n', 'second\n'], 'every accepted record is published once, in order');
+        assert.deepEqual(persisted, published, 'every accepted record is persisted once, in order');
+    });
+}
 
 for (const kind of ['process', 'goal']) {
     test(`concurrent ${kind} closes share the failed attempt and remain retryable`, async () => {
@@ -353,7 +441,7 @@ for (const kind of ['process', 'goal']) {
         } as unknown as Redis;
         const output = kind === 'process'
             ? new LiveOutputLog('concurrent-close', { reset: true, redis })
-            : new LiveAgentOutput('concurrent-close', undefined, 'test', redis);
+            : new LiveAgentOutput('concurrent-close', undefined, 'test', { redis });
         output.append('final\n');
         const first = output.close();
         await entered.promise;
@@ -390,7 +478,7 @@ for (const kind of ['process-reset', 'process-append', 'process-snapshot', 'goal
             const before = await redis.hgetall(liveOutputMetaKey(id));
             const lossy = losingReplies(redis, 1);
             const output = kind === 'goal'
-                ? new LiveAgentOutput(id, undefined, 'test', lossy)
+                ? new LiveAgentOutput(id, undefined, 'test', { redis: lossy })
                 : new LiveOutputLog(id, { reset: kind !== 'process-append', redis: lossy });
             const publish = (text: string) => (output instanceof LiveOutputLog && kind === 'process-snapshot' ? output.replace(text) : output.append(text));
             publish('first\n');
