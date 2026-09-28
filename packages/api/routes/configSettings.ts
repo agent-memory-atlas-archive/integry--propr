@@ -49,7 +49,13 @@ async function validatePrReviewModel(raw: unknown): Promise<{ error?: string; va
   return { value: val };
 }
 
-export async function extractSettingSaves(fields: SettingFields): Promise<{ error?: string; saves: LabeledSaveDescriptor[]; normalized: Record<string, unknown> }> {
+interface SettingSavesResult {
+  error?: string;
+  saves: LabeledSaveDescriptor[];
+  normalized: Record<string, unknown>;
+}
+
+function extractUsageTipSettingSaves(fields: SettingFields): SettingSavesResult {
   const saves: LabeledSaveDescriptor[] = [];
   const normalized: Record<string, unknown> = {};
 
@@ -63,6 +69,14 @@ export async function extractSettingSaves(fields: SettingFields): Promise<{ erro
     normalized.usage_tips_dismissal_cooldown_days = fields.usage_tips_dismissal_cooldown_days;
     saves.push({ name: 'usage_tips_dismissal_cooldown_days' });
   }
+
+  return { saves, normalized };
+}
+
+export async function extractSettingSaves(fields: SettingFields): Promise<SettingSavesResult> {
+  const result = extractUsageTipSettingSaves(fields);
+  if (result.error) return result;
+  const { saves, normalized } = result;
 
   if (fields.auto_followup_score_threshold !== undefined) {
     const v = validateStrictInt(fields.auto_followup_score_threshold, 0, 9);

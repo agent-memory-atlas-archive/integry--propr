@@ -141,15 +141,13 @@ export function createConfigRoutes(deps: ConfigRoutesDeps) {
     database,
     preparationDeps: deps.agentPreparationDeps,
   });
-  const syntheticAgentRoutes = createSyntheticAgentConfigRoutes(
-    {
-      redisClient,
-      configStore,
-      publishConfigUpdate,
-      logActivityHelper,
-      refreshAgentRegistry: () => configManager.AgentRegistry.getInstance().refresh(),
-    },
-  );
+  const syntheticAgentRoutes = createSyntheticAgentConfigRoutes({
+    redisClient,
+    configStore,
+    publishConfigUpdate,
+    logActivityHelper,
+    refreshAgentRegistry: () => configManager.AgentRegistry.getInstance().refresh(),
+  });
   const createJsonPostHandler = <T>({ lockKey, pickValue, validate, save, subtype, body, committedErrorMessage, activity }: JsonPostHandlerConfig<T>) => async (req: Request, res: Response): Promise<void> => {
     const bodyValidation = validateJsonObjectBody(req.body);
     if (!bodyValidation.ok) {

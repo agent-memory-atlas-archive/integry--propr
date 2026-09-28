@@ -4,18 +4,18 @@ import { randomUUID } from 'node:crypto';
 import type { Request, Response } from 'express';
 import knex from 'knex';
 import { closeConnection, createUsageTipsStore } from '@propr/core';
-import { USAGE_TIPS_CATALOG, USAGE_TIPS_DAY_MS } from '@propr/shared';
+import { USAGE_TIPS_CATALOG, USAGE_TIPS_DAY_MS, type UsageTipsResponse } from '@propr/shared';
 import { createUsageTipsRoutes } from '../routes/usageTipsRoutes.js';
 import { extractSettingSaves } from '../routes/configSettings.js';
 import { up } from '../../core/src/db/migrations/20260928000000_add_usage_tips.js';
 import { parseSettingValue, isValidSettingKey } from '../../cli/src/api/settings.js';
 
 after(() => closeConnection());
-function response() {
-  let status = 200; let body: any; const headers: Record<string, string> = {};
-  const res = { status(code: number) { status = code; return res; }, json(value: unknown) { body = value; return res; },
+function response<T = unknown>() {
+  let status = 200; let body: T | undefined; const headers: Record<string, string> = {};
+  const res = { status(code: number) { status = code; return res; }, json(value: T) { body = value; return res; },
     setHeader(key: string, value: string) { headers[key] = value; } } as unknown as Response;
-  return { res, get status() { return status; }, get body() { return body; }, headers };
+  return { res, get status() { return status; }, get body() { assert.ok(body !== undefined); return body; }, headers };
 }
 const request = (id?: string, body?: unknown) => ({ user: id ? { id } : undefined, body }) as Request;
 
@@ -40,18 +40,18 @@ test('GET uses only indexed reads; POST authenticates, validates, deduplicates a
     const statements: string[] = [];
     const listener = (q: { sql: string }) => statements.push(q.sql);
     db.on('query', listener);
-    const alice = response(); await routes.get(request('alice'), alice.res);
-    assert.deepEqual(alice.body.tips.map((t: any) => t.id), pool.slice(1, 4).map(t => t.id));
+    const alice = response<UsageTipsResponse>(); await routes.get(request('alice'), alice.res);
+    assert.deepEqual(alice.body.tips.map(t => t.id), pool.slice(1, 4).map(t => t.id));
     assert.equal(alice.headers['Cache-Control'], 'no-store');
     assert.equal(statements.length, 3);
     assert.ok(statements.every(sql => /^select /i.test(sql) && /where /i.test(sql)));
     db.removeListener('query', listener);
-    const bob = response(); await routes.get(request('bob'), bob.res); assert.equal(bob.body.tips[0].id, pool[0].id);
+    const bob = response<UsageTipsResponse>(); await routes.get(request('bob'), bob.res); assert.equal(bob.body.tips[0].id, pool[0].id);
     now += 45 * USAGE_TIPS_DAY_MS;
-    const expired = response(); await routes.get(request('alice'), expired.res); assert.equal(expired.body.tips[0].id, pool[0].id);
+    const expired = response<UsageTipsResponse>(); await routes.get(request('alice'), expired.res); assert.equal(expired.body.tips[0].id, pool[0].id);
     assert.equal((await db('usage_tip_dismissals').first()).dismissal_count, 1);
     await db('system_configs').where({ key: 'usage_tips_dismissal_cooldown_days' }).update({ value: '90' });
-    const longer = response(); await routes.get(request('alice'), longer.res); assert.equal(longer.body.tips[0].id, pool[1].id);
+    const longer = response<UsageTipsResponse>(); await routes.get(request('alice'), longer.res); assert.equal(longer.body.tips[0].id, pool[1].id);
     await db('system_configs').where({ key: 'usage_tips_enabled' }).update({ value: 'false' });
     const disabled = response(); await routes.get(request('bob'), disabled.res); assert.deepEqual(disabled.body, { enabled: false, tips: [] });
   } finally { await db.destroy(); }

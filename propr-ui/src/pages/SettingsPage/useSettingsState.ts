@@ -13,11 +13,7 @@ import {
   SummarizationSettings
 } from '../../api/proprApi';
 import { DEFAULT_REVIEW_CONTEXT_BUDGET_PERCENT, type InstanceCatalogAgent } from '@propr/shared';
-import {
-  getAgentTankSettings,
-  updateAgentTankSettings,
-  getAgentTankStatus
-} from '../../api/revertApi';
+import { getAgentTankSettings, updateAgentTankSettings, getAgentTankStatus } from '../../api/revertApi';
 import { Settings } from './types';
 import { parseLoadedData } from './parseLoadedData';
 import { useListManagement } from './useListManagement';
