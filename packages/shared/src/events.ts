@@ -2,12 +2,19 @@
 // and are aliased here: that module owns the general activity surface, while
 // the declarations below stay the shape the shell surfaces already consume.
 // `EventPayload` has to admit both, so neither publisher is excluded.
-import type {
-  ActivityUpdatePayload as ScopedActivityUpdatePayload,
-  GoalUpdatePayload,
-  GoalUpdateTriggerPayload,
-  NotificationUpdatePayload as RecipientListNotificationUpdatePayload,
-  UsageUpdatePayload as ScopedUsageUpdatePayload,
+// The vocabularies the two formats genuinely share are imported rather than
+// restated: the notification changes and the capacity readings are one list, so
+// a guard here cannot drift from the envelope's, and `isActivityTimestamp` is
+// the single definition of a usable instant.
+import {
+  isActivityTimestamp,
+  NOTIFICATION_CHANGES,
+  USAGE_SOURCES,
+  type ActivityUpdatePayload as ScopedActivityUpdatePayload,
+  type GoalUpdatePayload,
+  type GoalUpdateTriggerPayload,
+  type NotificationUpdatePayload as RecipientListNotificationUpdatePayload,
+  type UsageUpdatePayload as ScopedUsageUpdatePayload,
 } from './activityEvents.js';
 /**
  * Event names for real-time updates via WebSocket
@@ -211,33 +218,56 @@ export interface QueueStatsUpdatePayload {
 /** Command mode for slash-command-driven tasks */
 export type CommandMode = 'default' | 'review' | 'fix';
 
-/** Area of the product an activity event belongs to */
-export type ActivityDomain =
-  | 'task'
-  | 'plan'
-  | 'queue'
-  | 'indexing'
-  | 'goal'
-  | 'notification'
-  | 'usage'
+/**
+ * Area of the product an activity event belongs to.
+ *
+ * A runtime list, not just a union: these frames are decoded from Redis and
+ * re-emitted to browsers, so the relay has to be able to check the same
+ * vocabulary a producer compiles against. Additive: append, never reorder.
+ */
+export const SHELL_ACTIVITY_DOMAINS = [
+  'task',
+  'plan',
+  'queue',
+  'indexing',
+  'goal',
+  'notification',
+  'usage',
   /**
    * Instance health: daemon, workers, Redis, GitHub/agent authentication and
    * agent reachability. Nothing in a run's lifecycle announces that a worker
    * or the daemon stopped, so `health` is published by the watcher that looks
    * at the status snapshot itself.
    */
-  | 'health';
+  'health',
+] as const;
+export type ActivityDomain = (typeof SHELL_ACTIVITY_DOMAINS)[number];
 
 /** What happened to the subject of an activity event */
-export type ActivityChange =
-  | 'created'
-  | 'started'
-  | 'progress'
-  | 'blocked'
-  | 'failed'
-  | 'completed'
-  | 'cancelled'
-  | 'updated';
+export const SHELL_ACTIVITY_CHANGES = [
+  'created',
+  'started',
+  'progress',
+  'blocked',
+  'failed',
+  'completed',
+  'cancelled',
+  'updated',
+] as const;
+export type ActivityChange = (typeof SHELL_ACTIVITY_CHANGES)[number];
+
+/**
+ * Changes that end the subject's lifecycle.
+ *
+ * `terminal` travels on the wire so consumers do not re-derive it; this is what
+ * it has to agree with, both where a producer sets it and where the relay
+ * checks an incoming frame against its own change.
+ */
+const SHELL_TERMINAL_CHANGES = new Set<ActivityChange>(['completed', 'failed', 'cancelled']);
+
+/** Whether a shell-shaped change ends the subject's lifecycle. */
+export const isTerminalShellActivityChange = (change: ActivityChange): boolean =>
+  SHELL_TERMINAL_CHANGES.has(change);
 
 /**
  * Event payload for the derived activity envelope.
@@ -286,6 +316,88 @@ export interface UsageUpdatePayload {
   /** Provider whose capacity moved, when the producer knows it. */
   provider?: string;
   occurredAt: string;
+}
+
+/**
+ * Runtime guards for the shell-shaped wire formats above.
+ *
+ * The relay accepts two published formats per event - the envelope declared in
+ * `activityEvents.ts` and the shell shape declared here - and re-emits either
+ * to browsers unchanged apart from filling in the envelope's required fields.
+ * Supporting the second shape must not cost the first one's validation, so each
+ * accepted format is checked whole - timestamps, enum values, identifiers,
+ * repository scope and terminal consistency - before anything is broadcast.
+ * Normalizing a missing field is not the same as validating the ones that are
+ * present, so these guards, not the normalization, are the trust boundary.
+ */
+
+/** A present identifier. An empty string addresses no record, so it is not one. */
+const isShellIdentifier = (value: unknown): value is string =>
+  typeof value === 'string' && value.length > 0;
+
+/**
+ * An optional identifier or scope. Absent is legitimate - a queue or health
+ * frame has no subject and no repository - but a present one that a consumer
+ * cannot filter on would silently keep or drop the wrong frames.
+ */
+const isOptionalShellIdentifier = (value: unknown): boolean =>
+  value === undefined || value === null || isShellIdentifier(value);
+
+/** An optional whole non-negative count, such as a recipient's unread total. */
+const isOptionalShellCount = (value: unknown): boolean =>
+  value === undefined || (typeof value === 'number' && Number.isSafeInteger(value) && value >= 0);
+
+const isShellMember = (values: readonly string[], value: unknown): boolean =>
+  typeof value === 'string' && values.includes(value);
+
+/** True when `value` satisfies the shell activity contract in full. */
+export function isShellActivityUpdatePayload(value: unknown): value is ActivityUpdatePayload {
+  if (!value || typeof value !== 'object') return false;
+  const candidate = value as Partial<ActivityUpdatePayload>;
+  if (candidate.eventType !== ACTIVITY_UPDATE) return false;
+  if (!isActivityTimestamp(candidate.occurredAt)) return false;
+  if (!isShellMember(SHELL_ACTIVITY_DOMAINS, candidate.domain)) return false;
+  if (!isShellMember(SHELL_ACTIVITY_CHANGES, candidate.change)) return false;
+  if (!isOptionalShellIdentifier(candidate.repository)) return false;
+  if (!isOptionalShellIdentifier(candidate.subjectId)) return false;
+  // A flag that disagrees with its own change means producer and consumer would
+  // read the same event differently, which is malformed rather than redundant.
+  return candidate.terminal === undefined
+    || candidate.terminal === isTerminalShellActivityChange(candidate.change as ActivityChange);
+}
+
+/** True when `value` satisfies the per-recipient notification contract in full. */
+export function isShellNotificationUpdatePayload(
+  value: unknown,
+): value is NotificationUpdatePayload {
+  if (!value || typeof value !== 'object') return false;
+  const candidate = value as Partial<NotificationUpdatePayload>;
+  if (candidate.eventType !== NOTIFICATION_UPDATE) return false;
+  if (!isActivityTimestamp(candidate.occurredAt)) return false;
+  if (!isShellMember(NOTIFICATION_CHANGES, candidate.change)) return false;
+  // `eventId` is absent for `dismissed_all` and for a multi-event dismissal,
+  // which are both 'reconcile the list' to the client, so only its type is
+  // fixed here. `unreadCount` drives the badge, so a non-count is dropped.
+  if (!isOptionalShellIdentifier(candidate.eventId)) return false;
+  if (!isOptionalShellIdentifier(candidate.recipientId)) return false;
+  return isOptionalShellCount(candidate.unreadCount);
+}
+
+/**
+ * True when `value` satisfies the usage trigger contract in full.
+ *
+ * Accepts both published usage formats: the envelope's required `source` and
+ * the shell shape's optional `provider`. A `source` that is present but not a
+ * known capacity reading is rejected rather than forwarded, so relaxing the
+ * required field does not relax what the field means.
+ */
+export function isShellUsageUpdatePayload(value: unknown): value is UsageUpdatePayload {
+  if (!value || typeof value !== 'object') return false;
+  const candidate = value as Partial<UsageUpdatePayload> & { source?: unknown };
+  if (candidate.eventType !== USAGE_UPDATE) return false;
+  if (!isActivityTimestamp(candidate.occurredAt)) return false;
+  if (candidate.source !== undefined && !isShellMember(USAGE_SOURCES, candidate.source)) return false;
+  return candidate.provider === undefined || isShellIdentifier(candidate.provider);
 }
 
 /** Union type for all event payloads */

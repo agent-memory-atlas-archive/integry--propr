@@ -91,6 +91,17 @@ published into the recipient's socket room only, and names the notification it
 concerns so the tab that made the change can recognise its own echo and leave
 its optimistic state alone.
 
+Every frame is validated before it reaches a browser. The relay decodes these
+events from Redis, so `packages/api/services/socketService.ts` checks each one
+against the contract of the format it claims — timestamp, domain, change,
+identifiers, repository scope and `terminal` agreeing with its own change —
+and drops and logs anything that does not satisfy it. Two published formats are
+accepted (`activity:update` with `entityId`, the shell surfaces' form with
+`subjectId`; `usage:update` with `source` or with `provider`), and a frame
+claiming one is held to that one: filling in a missing field on the way out is
+normalization, not validation, so a consumer never has to defend itself against
+a malformed publication.
+
 Three rules are non-negotiable for any surface that consumes these events. A
 plain read gets them from `propr-ui/src/hooks/useLiveResource.ts` (built on
 `useLiveRefreshScheduler`); surfaces that own more local state implement the

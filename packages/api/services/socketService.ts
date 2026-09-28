@@ -10,6 +10,8 @@ import { goalActivityState, type WorkerStateManagerOptions } from '@propr/core';
 import {
   REDIS_CHANNELS,
   GOAL_UPDATE, isActivityTimestamp, isActivityUpdatePayload, isGoalUpdatePayload, isTerminalActivityChange,
+  isShellActivityUpdatePayload, isShellNotificationUpdatePayload, isShellUsageUpdatePayload,
+  isUsageUpdatePayload,
   type GoalUpdatePayload,
   TASK_UPDATE,
   DRAFT_UPDATE,
@@ -209,18 +211,39 @@ export class SocketService {
    */
   private handleEvent(_channel: string, payload: EventPayload | RecipientListNotificationUpdate): void {
     switch (payload.eventType) {
+      // Two published activity formats reach this relay - the envelope's
+      // `entityId` shape and the shell surfaces' `subjectId` shape - and either
+      // is re-emitted to browsers, so each is validated whole against its own
+      // contract first. The format a frame claims decides which contract it has
+      // to satisfy, so supporting the second one does not let an envelope
+      // publisher omit a field the envelope requires. Filling the envelope's
+      // missing fields downstream is normalization, not validation: a frame with
+      // a malformed timestamp, an unknown domain or change, a scope no consumer
+      // can filter on, or a `terminal` flag that disagrees with its own change
+      // is dropped here rather than forwarded.
       case ACTIVITY_UPDATE:
-        if (!('entityId' in payload) || isActivityUpdatePayload(payload)) this.broadcastPushEvent(payload);
+        if ('entityId' in payload
+          ? isActivityUpdatePayload(payload)
+          : isShellActivityUpdatePayload(payload)) this.broadcastPushEvent(payload);
+        else this.dropMalformedFrame(ACTIVITY_UPDATE);
         break;
       case GOAL_UPDATE:
         void this.handleGoalUpdate(payload).catch(error => console.error('Goal broadcast failed:', error));
         break;
       case NOTIFICATION_UPDATE:
         if ('recipientIds' in payload) this.activity.notificationUpdated(payload);
-        else this.broadcastPushEvent(payload);
+        else if (isShellNotificationUpdatePayload(payload)) this.broadcastPushEvent(payload);
+        else this.dropMalformedFrame(NOTIFICATION_UPDATE);
         break;
+      // Same rule for the two usage formats: a trigger naming a `source` is held
+      // to the envelope's capacity readings, and the shell trigger's optional
+      // `provider` is checked in its place. Either way the timestamp has to be
+      // one a consumer can order by.
       case USAGE_UPDATE:
-        this.broadcastPushEvent(payload);
+        if ('source' in payload
+          ? isUsageUpdatePayload(payload)
+          : isShellUsageUpdatePayload(payload)) this.broadcastPushEvent(payload);
+        else this.dropMalformedFrame(USAGE_UPDATE);
         break;
       case TASK_UPDATE:
         this.enqueueTaskUpdate(payload as TaskUpdatePayload);
@@ -240,6 +263,15 @@ export class SocketService {
       default:
         console.warn(`[SocketService] Dropped unsupported event ${payload.eventType}`);
     }
+  }
+
+  /**
+   * A publish that does not satisfy any accepted format for its event is
+   * reported and dropped: forwarding half a contract is what turns one bad
+   * publish into a consumer acting on a change that never happened.
+   */
+  private dropMalformedFrame(eventType: string): void {
+    console.warn(`[SocketService] Dropped malformed ${eventType} frame`);
   }
 
   private broadcastActivity(frame: {
