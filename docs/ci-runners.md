@@ -7,11 +7,40 @@ remain, one job per available worker, without a nested coordinator. Other
 eligible jobs share this pool, so simultaneous shard starts are not guaranteed.
 These PR check jobs never select the old generic `propr` label.
 
-**Leave `PROPR_ROOTLESS_PR_CHECKS` unset until the owner supplies host pilot
-evidence.** Only the explicit value `true` opts in; unset, empty or `false`
-selects GitHub-hosted runners. Set it to `false` or remove it as the operational
-off switch. This implementation does not set repository variables, provision
-host services, change GitHub permissions, merge or deploy.
+`PROPR_ROOTLESS_PR_CHECKS` selects one of three modes:
+
+| Value | Eligible Linux PR checks run on |
+| --- | --- |
+| unset, empty, `false` or anything else | GitHub-hosted runners |
+| `true` | the rootless pool, always |
+| `overflow` | GitHub-hosted runners, and the rootless pool only when hosted runners are saturated |
+
+Hosted standard runners are free for this public repository and start in
+seconds, while the pool shares one server's CPU with production, so `overflow`
+is the intended mode. `false` remains the operational off switch.
+
+### Overflow routing
+
+GitHub cannot fall back between runner types: `runs-on` names one kind of
+runner, and a queued job never moves. In `overflow` mode each of the three PR
+workflows therefore starts with a `route` job (hosted, `actions: read`) that
+runs `scripts/ci-hosted-capacity.mjs` once, before the routed jobs, and the
+shared routing expression uses the pool when it reports `overflow=true`. It
+overflows when either:
+
+- a hosted Linux job of this repository has waited 60 s or more for a runner, or
+- running hosted jobs plus this workflow's own (shards and docs: 5; build
+  check: 3; project options: 2) exceed the account limit minus a reserve of 6
+  for other repositories and the macOS/Windows desktop jobs. The limit defaults
+  to GitHub Pro's 40 concurrent jobs; set `PROPR_HOSTED_JOB_LIMIT` to change it.
+
+The decision is a snapshot, so a burst that arrives after it can still queue on
+hosted runners. The route job only selects the runner: every routed job runs
+whatever its outcome, and a failed, skipped or unreadable check keeps the work
+hosted. The trust conditions below are evaluated unchanged in every mode, so
+forks, Dependabot and non-default-branch dispatches stay hosted. The shards
+still never depend on the classifier. The standard token sees only this
+repository's jobs; the reserve covers the other repositories sharing the limit.
 
 ## Approval-based trust model
 
@@ -402,7 +431,8 @@ verified four-worker inventory and job cgroup summaries. Do not reuse timings
 from an older head as proof. **Resulting-head CI and gitfix.dev placement remain
 pending activation and a new run.**
 
-There is no automatic fallback when activated workers are busy/offline. Set
+With `true` there is no fallback when the workers are busy or offline; with
+`overflow` the pool is used only after the route job's check. Set
 `PROPR_ROOTLESS_PR_CHECKS=false` to route new jobs hosted; already queued jobs
 need cancellation/restart. For partial failures rerun failed jobs and verify
 the aggregate gate, including prior successful shard artifacts.

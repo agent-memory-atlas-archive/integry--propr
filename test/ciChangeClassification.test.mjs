@@ -916,7 +916,7 @@ describe('workflow wiring', () => {
         // test/ciFullSuiteSelection.test.mjs; this pins the wiring.
         const shard = jobBlock(fullSuite, 'shard');
         assert.ok(!shard.includes('classify'), 'backend shards must stay unconditional');
-        assert.ok(!/\n {4}needs:/.test(shard), 'backend shards must not wait for the classifier');
+        assert.ok(/\n {4}needs: route\n/.test(shard), 'backend shards wait only for runner selection, never for the classifier');
         assert.ok(jobBlock(fullSuite, 'classify').includes("if: ${{ github.event_name == 'pull_request' && !github.event.pull_request.draft }}"),
             'manual dispatch never consults the classifier');
         assert.ok(fullSuite.includes('--verify-shard-summaries'),
