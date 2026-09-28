@@ -7,6 +7,7 @@ import {
     type QueueStatsUpdatePayload,
     type TaskUpdatePayload,
 } from '@propr/shared';
+import { ATTENTION_TASK_STATES } from '../routes/dashboardQueries.js';
 
 /**
  * Derives the general activity envelope from the lifecycle events the backend
@@ -26,11 +27,28 @@ const TERMINAL_TASK_CHANGES: Record<string, ActivityChange> = {
     cancelled: 'cancelled',
 };
 
+/**
+ * The task states that mean a human has to act, in every spelling the workers
+ * use. Taken from the dashboard's own definition so the push surface and the
+ * `/api/dashboard/attention` projection cannot disagree about what "blocked"
+ * is: a surface that refreshes on `blocked` must be woken by exactly the
+ * transitions that put a row in front of a person.
+ */
+const ATTENTION_TASK_STATE_SET: ReadonlySet<string> = new Set<string>(ATTENTION_TASK_STATES);
+
+/** Whether a worker state means the task is waiting on a human. */
+export function isAttentionTaskState(state: string | undefined | null): boolean {
+    return typeof state === 'string' && ATTENTION_TASK_STATE_SET.has(state.toLowerCase());
+}
+
 function taskChange(state: string): ActivityChange {
     const normalized = state.toLowerCase();
     const terminal = TERMINAL_TASK_CHANGES[normalized];
     if (terminal) return terminal;
     if (normalized === 'pending' || normalized === 'queued') return 'created';
+    // Non-terminal, but not just progress: this is the transition the dashboard
+    // summary and the header's attention count exist to surface.
+    if (ATTENTION_TASK_STATE_SET.has(normalized)) return 'blocked';
     return 'started';
 }
 

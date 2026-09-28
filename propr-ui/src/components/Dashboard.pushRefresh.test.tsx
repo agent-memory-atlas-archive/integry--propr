@@ -18,6 +18,7 @@ import { SocketContext, type SocketContextValue } from '../contexts/SocketContex
 import {
   getDashboardActive,
   getDashboardAttention,
+  getDashboardNarrative,
   getDashboardOutcomes,
   getDashboardStats,
 } from '../api/dashboardApi';
@@ -37,6 +38,7 @@ import {
 vi.mock('../api/dashboardApi', () => ({
   getDashboardAttention: vi.fn(),
   getDashboardActive: vi.fn(),
+  getDashboardNarrative: vi.fn(),
   getDashboardOutcomes: vi.fn(),
   getDashboardStats: vi.fn(),
 }));
@@ -90,6 +92,7 @@ const mockAttention = vi.mocked(getDashboardAttention);
 const mockActive = vi.mocked(getDashboardActive);
 const mockOutcomes = vi.mocked(getDashboardOutcomes);
 const mockStats = vi.mocked(getDashboardStats);
+const mockNarrative = vi.mocked(getDashboardNarrative);
 
 /** One pushed activity frame, in the envelope the server publishes. */
 const activity = (
@@ -148,6 +151,7 @@ describe('Dashboard push-driven refreshes', () => {
     mockActive.mockResolvedValue(activeResponse([activeItem()]));
     mockOutcomes.mockResolvedValue(outcomesResponse([outcomeItem()]));
     mockStats.mockResolvedValue(statsResponse());
+    mockNarrative.mockResolvedValue({ repository: 'all', enabled: true, summary: 'Work is underway.' });
   });
 
   it('does not re-read aggregate stats for progress-only activity', async () => {
@@ -203,6 +207,19 @@ describe('Dashboard push-driven refreshes', () => {
 
     await waitFor(() => expect(mockAttention).toHaveBeenCalledTimes(2));
     expect(await screen.findByRole('link', { name: /Review pull request/ })).toBeInTheDocument();
+  });
+
+  it('regenerates the activity summary when a task stops for a human', async () => {
+    // The transition the "what needs my attention" narrative exists to surface.
+    // The server publishes it as `blocked`; this is the consumer half of that
+    // contract, held on its own so a terminal frame cannot carry it.
+    renderDashboard();
+    await waitForSections();
+    await waitFor(() => expect(mockNarrative).toHaveBeenCalledTimes(1));
+
+    await push(activity('task', 'blocked', { entityId: 'waiting-on-you' }));
+
+    await waitFor(() => expect(mockNarrative).toHaveBeenCalledTimes(2));
   });
 
   it('issues no request for activity in another repository', async () => {

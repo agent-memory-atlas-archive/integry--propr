@@ -63,6 +63,28 @@ function agentFingerprint(agents: unknown): unknown {
     .sort((left, right) => String(left).localeCompare(String(right)));
 }
 
+/**
+ * The per-worker availability the health surfaces show.
+ *
+ * `worker`/`workerCount` describe the same thing in aggregate, but a snapshot
+ * that carries an explicit `workers` list is what the health panel actually
+ * renders ("2/3 active"), so a worker going away has to move the fingerprint
+ * even when the aggregate fields happen not to. Identity and status only:
+ * heartbeat timestamps and per-worker job counters are not availability, and
+ * publishing for them would ask every connected client to re-read for churn it
+ * does not show.
+ */
+function workerFingerprint(workers: unknown): unknown {
+  if (!Array.isArray(workers)) return workers ?? null;
+  return workers
+    .map(worker => {
+      const record = (worker ?? {}) as Record<string, unknown>;
+      return [record.id ?? '', record.status ?? ''];
+    })
+    // Registry order is not part of health; a reordered list is not a change.
+    .sort((left, right) => String(left).localeCompare(String(right)));
+}
+
 function warningFingerprint(warnings: unknown): unknown {
   if (!Array.isArray(warnings)) return warnings ?? null;
   return warnings
@@ -77,6 +99,7 @@ function warningFingerprint(warnings: unknown): unknown {
 export function healthFingerprint(snapshot: StatusSnapshot): string {
   return JSON.stringify({
     fields: HEALTH_FIELDS.map(field => snapshot[field] ?? null),
+    workers: workerFingerprint(snapshot.workers),
     agents: agentFingerprint(snapshot.agents),
     warnings: warningFingerprint(snapshot.warnings),
   });

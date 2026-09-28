@@ -38,6 +38,7 @@ import {
   activityFromIndexingUpdate,
   activityFromQueueStatsUpdate,
   activityFromTaskUpdate,
+  isAttentionTaskState,
 } from './activityEvents.js';
 import { ActivityBroadcaster, ACTIVITY_ROOM as BROADCAST_ACTIVITY_ROOM } from './activityBroadcast.js';
 import { QueueBroadcaster } from './queueBroadcaster.js';
@@ -349,10 +350,15 @@ export class SocketService {
         repository: payload.repository ?? undefined, occurredAt: payload.timestamp,
       });
     } else if (payload.state !== payload.previousState || payload.metadata?.issueRefUpdated) {
-      const change = payload.state === 'completed' ? 'completed'
+      // A task waiting on a human is `blocked`, not `progressed`: the dashboard
+      // summary, its attention pane and the header's attention count all
+      // declare that interest, and nothing else in the envelope tells them a
+      // run stopped for a person rather than moving along.
+      const change: ActivityChange = payload.state === 'completed' ? 'completed'
         : payload.state === 'failed' ? 'failed'
         : payload.state === 'cancelled' ? 'cancelled'
         : payload.state === 'pending' || payload.state === 'queued' ? 'created'
+        : isAttentionTaskState(payload.state) ? 'blocked'
         : payload.previousState === 'pending' || !payload.previousState ? 'started' : 'progressed';
       this.broadcastActivity({ domain: 'task', entityId: payload.taskId,
         repository: payload.repository ?? null, change, details: activityFromTaskUpdate(payload) });

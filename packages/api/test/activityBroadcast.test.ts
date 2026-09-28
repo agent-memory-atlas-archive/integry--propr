@@ -257,6 +257,12 @@ describe('activity broadcast derivation', () => {
       ['processing', 'started', false],
       ['claude_execution', 'progressed', false],
       ['post_processing', 'progressed', false],
+      // A run that stopped for a person is not progress: the attention pane and
+      // the summary widget react to 'blocked' and to nothing else here.
+      ['action_required', 'blocked', false],
+      ['action-required', 'blocked', false],
+      ['needs_attention', 'blocked', false],
+      ['needs-attention', 'blocked', false],
       ['completed', 'completed', true],
       ['failed', 'failed', true],
       ['cancelled', 'cancelled', true],

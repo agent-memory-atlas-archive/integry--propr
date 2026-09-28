@@ -1,4 +1,4 @@
-import { useLiveRefreshScheduler } from '../hooks/useLiveRefreshScheduler';
+import { CONNECTED_RECONCILE_MS, useLiveRefreshScheduler } from '../hooks/useLiveRefreshScheduler';
 import { useSocket } from './useSocket';
 /* eslint-disable react-refresh/only-export-components */
 import React, {
@@ -118,6 +118,11 @@ export const NotificationCenterProvider: React.FC<{ children: React.ReactNode }>
     scopeKey: identityKey,
     isConnected,
     fallbackPollMs: DISCONNECTED_FALLBACK_INTERVAL_MS,
+    // `notification:update` is published best effort: a notification can be
+    // committed while its publication is dropped, and nothing else would
+    // correct the badge while this socket stays connected and the tab stays
+    // focused. The Inbox keeps the same safety cadence for the same reason.
+    connectedPollMs: CONNECTED_RECONCILE_MS,
   });
   const { refreshNow } = schedule;
   useEffect(() => {

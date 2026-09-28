@@ -88,6 +88,48 @@ describe('system health watcher', { concurrency: false }, () => {
     assert.equal(harness.published, 2);
   });
 
+  test('publishes when the last worker in a workers-list snapshot goes away', async () => {
+    const harness = createWatcher();
+    // The shape the health panel actually renders: a per-worker list. Nothing
+    // else in the snapshot moves when the last one stops, so if this list is
+    // not part of the fingerprint the outage is never announced and every
+    // connected client keeps showing its workers as available.
+    harness.setSnapshot({ ...HEALTHY, workers: [{ id: 1, status: 'active' }] });
+    await harness.watcher.probeOnce();
+
+    harness.setSnapshot({ ...HEALTHY, workers: [] });
+
+    assert.equal(await harness.watcher.probeOnce(), true);
+    assert.equal(harness.published, 2);
+    assert.equal(await harness.watcher.probeOnce(), false, 'the outage is now the baseline');
+    assert.equal(harness.published, 2);
+  });
+
+  test('publishes when one of several workers stops, whatever order they are listed in', async () => {
+    const harness = createWatcher();
+    harness.setSnapshot({
+      ...HEALTHY,
+      workers: [{ id: 1, status: 'active' }, { id: 2, status: 'active' }],
+    });
+    await harness.watcher.probeOnce();
+
+    // Registry order is not health: the same workers, reordered, are not news.
+    harness.setSnapshot({
+      ...HEALTHY,
+      workers: [{ id: 2, status: 'active' }, { id: 1, status: 'active' }],
+    });
+    assert.equal(await harness.watcher.probeOnce(), false);
+    assert.equal(harness.published, 1);
+
+    harness.setSnapshot({
+      ...HEALTHY,
+      workers: [{ id: 2, status: 'active' }, { id: 1, status: 'stopped' }],
+    });
+
+    assert.equal(await harness.watcher.probeOnce(), true);
+    assert.equal(harness.published, 2);
+  });
+
   test('publishes when the daemon stops', async () => {
     const harness = createWatcher();
     await harness.watcher.probeOnce();

@@ -41,6 +41,24 @@ test('a task still running is activity, but not terminal', () => {
     assert.equal(activity.terminal, false);
 });
 
+test('a task waiting on a human reads as blocked, not as progress', () => {
+    // The derived envelope and the inline mapping in `socketService` have to
+    // agree: the summary consumer reacts to `blocked` and nothing else in the
+    // envelope distinguishes a run that stopped for a person.
+    for (const state of ['action_required', 'action-required', 'needs_attention', 'needs-attention']) {
+        const activity = activityFromTaskUpdate({
+            eventType: TASK_UPDATE,
+            taskId: 'task-attention',
+            state,
+            previousState: 'claude_execution',
+            timestamp: '2026-09-26T12:00:04.000Z',
+        });
+
+        assert.equal(activity.change, 'blocked', `expected ${state} to be blocked`);
+        assert.equal(activity.terminal, false);
+    }
+});
+
 test('a queued task reads as created so a new arrival wakes the queue widget', () => {
     const activity = activityFromTaskUpdate({
         eventType: TASK_UPDATE,

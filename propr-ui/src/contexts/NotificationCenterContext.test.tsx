@@ -1,6 +1,7 @@
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { beforeEach, describe, expect, test, vi } from 'vitest';
 import type { NotificationPreferencesResponse, NotificationUpdatePayload } from '@propr/shared';
+import { CONNECTED_RECONCILE_MS } from '../hooks/useLiveRefreshScheduler';
 import { NotificationCenterProvider, useNotificationCenter } from './NotificationCenterContext';
 
 const authState = vi.hoisted(() => ({
@@ -135,7 +136,7 @@ describe('NotificationCenterProvider', () => {
     expect(notificationApi.getNotificationPreferences).toHaveBeenCalledTimes(2);
   });
 
-  test('reads the badge once per pushed notification change and never on a timer', async () => {
+  test('reads the badge once per pushed notification change, never on a poll while connected', async () => {
     notificationApi.getNotificationPreferences.mockResolvedValue(preferences(false));
     notificationApi.getNotificationUnreadCount
       .mockResolvedValueOnce({ unreadCount: 0 })
@@ -154,9 +155,39 @@ describe('NotificationCenterProvider', () => {
       expect(screen.getByText('count:4')).toBeInTheDocument();
       expect(notificationApi.getNotificationUnreadCount).toHaveBeenCalledTimes(2);
 
-      // An idle connected session issues nothing of its own accord.
-      await act(async () => { await vi.advanceTimersByTimeAsync(5 * 60_000); });
+      // An idle connected session issues nothing of its own accord until the
+      // connected safety cadence, which exists only to recover a lost
+      // publication and is asserted by its own test below.
+      await act(async () => { await vi.advanceTimersByTimeAsync(CONNECTED_RECONCILE_MS - 1); });
       expect(notificationApi.getNotificationUnreadCount).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  test('recovers the badge when a committed notification\'s publication was lost', async () => {
+    notificationApi.getNotificationPreferences.mockResolvedValue(preferences(false));
+    notificationApi.getNotificationUnreadCount
+      .mockResolvedValueOnce({ unreadCount: 0 })
+      .mockResolvedValue({ unreadCount: 3 });
+    vi.useFakeTimers();
+    try {
+      renderCenter();
+      await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+      expect(screen.getByText('count:0')).toBeInTheDocument();
+      expect(notificationApi.getNotificationUnreadCount).toHaveBeenCalledTimes(1);
+
+      /*
+        A notification is committed while its best-effort Redis publication is
+        dropped, so no `notification:update` frame ever arrives. The socket
+        stays connected and the tab stays visible, so no reconnect, focus or
+        visibility change would correct the badge either: only the connected
+        safety cadence can, and it has to.
+      */
+      await act(async () => { await vi.advanceTimersByTimeAsync(CONNECTED_RECONCILE_MS + 200); });
+
+      expect(notificationApi.getNotificationUnreadCount).toHaveBeenCalledTimes(2);
+      expect(screen.getByText('count:3')).toBeInTheDocument();
     } finally {
       vi.useRealTimers();
     }

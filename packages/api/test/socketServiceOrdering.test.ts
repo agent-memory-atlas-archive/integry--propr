@@ -85,6 +85,65 @@ describe('SocketService task update ordering', () => {
     });
   });
 
+  test('publishes a task that stopped for a human as blocked, not progressed', async () => {
+    /*
+      The dashboard summary, its attention pane and the header's attention count
+      all declare an interest in `blocked`. Nothing else in the envelope says a
+      run stopped for a person rather than moving along, so if this transition
+      is published as `progressed` those surfaces stay stale until some
+      unrelated terminal event or a reconnect - the very transition they exist
+      to surface.
+    */
+    const broadcasts: Array<{ event: string; payload: Record<string, unknown> }> = [];
+    const service = Object.create(SocketService.prototype) as SocketService;
+    const internals = service as unknown as {
+      io: {
+        to: (room: string) => {
+          to: (additionalRoom: string) => unknown;
+          emit: (event: string, payload: Record<string, unknown>) => void;
+        };
+      };
+      taskRevisions: Map<string, { version: number; expiresAt: number }>;
+      handleTaskUpdate: (payload: TaskUpdatePayload) => Promise<void>;
+    };
+    internals.io = {
+      to: () => {
+        const operator = {
+          to: () => operator,
+          emit: (event: string, payload: Record<string, unknown>) => {
+            broadcasts.push({ event, payload });
+          },
+        };
+        return operator;
+      },
+    };
+    internals.taskRevisions = new Map();
+
+    // Every spelling the workers emit, as the dashboard projection lists them.
+    for (const state of ['action_required', 'action-required', 'needs_attention', 'needs-attention']) {
+      broadcasts.length = 0;
+      internals.taskRevisions.clear();
+
+      await internals.handleTaskUpdate({
+        eventType: TASK_UPDATE,
+        taskId: `attention-${state}`,
+        state,
+        previousState: 'claude_execution',
+        repository: 'integry/propr',
+        timestamp: new Date(0).toISOString(),
+      });
+
+      const activity = broadcasts.find(broadcast => broadcast.event === ACTIVITY_UPDATE);
+      assert.ok(activity, `expected ${state} to reach the activity room`);
+      assert.partialDeepStrictEqual(activity.payload, {
+        domain: 'task',
+        change: 'blocked',
+        subjectId: `attention-${state}`,
+        terminal: false,
+      });
+    }
+  });
+
   test('rejects malformed incoming revisions before they can poison the cache', () => {
     assert.equal(shouldBroadcastTaskUpdate(undefined, -1), false);
     assert.equal(shouldBroadcastTaskUpdate(undefined, 1.5), false);
