@@ -13,6 +13,7 @@ import {
 import { enforceGranularity } from './granularity.js';
 import { runPlanFileAgent } from './planFileAgent.js';
 import { extractWholeJsonArray, incompletePlanItems, PLAN_FILE, PLAN_ORIGINAL_FILE } from './planValidation.js';
+import { resolvePlanGenerationMode, tryGeneratePlanWithFiles } from './planFileGeneration.js';
 import type { Plan } from '../../claude/prompts/plannerPrompts.js';
 import type { CallLLMOptions, CallLLMForPlanResult } from './types.js';
 
@@ -96,7 +97,20 @@ export async function callLLMForPlan(opts: CallLLMOptions): Promise<CallLLMForPl
     tokenLimit: opts.tokenLimit,
     contextLength: fullContext.length,
   };
-  const response = await runLightweightLLMAnalysis({ prompt: fullContext, model, correlationId: correlationId || 'plan-generation', worktreePath, githubToken, issueRef, taskId: draftId, executionType: 'plan-generation', metadata: planGenerationMetadata, routingSession: opts.routingSession });
+  // File mode: the agent writes and validates the plan in a workspace (see planFileGeneration.ts).
+  const fileMode = resolvePlanGenerationMode() === 'file';
+  const filePlan = await tryGeneratePlanWithFiles({
+    draftId, fullContext, model, repository, githubToken, correlationId, metadata: planGenerationMetadata, routingSession: opts.routingSession,
+  });
+  if (filePlan) {
+    const fileEnforceResult = enforceGranularity(filePlan, granularity, correlatedLogger);
+    return { plan: fileEnforceResult.plan, enforcementMetadata: fileEnforceResult.metadata };
+  }
+
+  // Unavailable file execution may have exhausted every routing member. Response
+  // fallback is a distinct call; preserve the supplied session in response mode.
+  const responseRoutingSession = fileMode ? opts.routingSession?.fork() : opts.routingSession;
+  const response = await runLightweightLLMAnalysis({ prompt: fullContext, model, correlationId: correlationId || 'plan-generation', worktreePath, githubToken, issueRef, taskId: draftId, executionType: 'plan-generation', metadata: planGenerationMetadata, routingSession: responseRoutingSession });
 
   // Check boundaries before parsing too: the generic parser may otherwise
   // accept an initial array and silently discard a trailing partial task.

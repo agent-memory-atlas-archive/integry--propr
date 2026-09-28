@@ -95,6 +95,8 @@ Unified image selection, per-agent credential paths, and execution limits. Codin
 | `CODEX_STREAM_IDLE_TIMEOUT_MS` | `1800000` (30 minutes) | Maximum quiet period on a Codex response stream before reconnecting. This is separate from the whole-task `CODEX_TIMEOUT_MS`. | Optional tuning. |
 | `CODEX_STREAM_MAX_RETRIES` | `5` | Number of Codex response-stream reconnect attempts. Zero disables retries. | Optional tuning. |
 | `CONTEXT_ANALYSIS_TIMEOUT_MS` | `3600000` (60 minutes) | Timeout for planner keyword extraction and semantic relevance scoring calls. | Optional. |
+| `PROPR_PLAN_GENERATION_MODE` | `file` | `file`: the planning agent writes one JSON file per issue in a scratch workspace and runs the plan validator until it passes; ProPR re-validates before saving. `response`: the plan is parsed from the agent's reply. If the file workspace or agent cannot be started at all, ProPR falls back to `response` for that run; an invalid plan fails instead. | Optional. |
+| `PROPR_PLAN_WORKSPACE_ROOT` | `/tmp/git-processor/plan-workspaces` | Scratch workspaces for plan agents. Must be the same path for the API and the Docker daemon, like the worktree root. | Custom worktree layouts only. |
 | `ANTIGRAVITY_TIMEOUT_MS` | `86400000` (24 hours) | Antigravity task run timeout. | Optional. |
 | `OPENCODE_TIMEOUT_MS` | `86400000` (24 hours) | OpenCode task run timeout. | Optional. |
 | `VIBE_MAX_TURNS` | `1000` | Maximum agent turns per Vibe run. | Optional. |

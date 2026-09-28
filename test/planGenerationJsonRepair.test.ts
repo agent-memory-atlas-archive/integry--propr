@@ -1,6 +1,9 @@
 import assert from 'node:assert/strict';
 import { beforeEach, mock, test } from 'node:test';
 
+// These tests cover parsing the model reply; file-based generation has its own tests.
+process.env.PROPR_PLAN_GENERATION_MODE = 'response';
+
 type AnalysisCall = {
   prompt: string;
   model: string;
@@ -31,8 +34,9 @@ const runPlanFileAgent = mock.fn(async (options: RepairCall) => {
   if (repairResult instanceof Error) throw repairResult;
   return repairResult;
 });
+class PlanFileAgentUnavailableError extends Error {}
 await mock.module('../packages/core/src/services/taskPlanning/planFileAgent.js', {
-  namedExports: { runPlanFileAgent },
+  namedExports: { runPlanFileAgent, PlanFileAgentUnavailableError },
 });
 
 const correlatedLogger = {
