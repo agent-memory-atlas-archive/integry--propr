@@ -270,17 +270,22 @@ export function withTaskLogAttribution(
   return { ...metadata, [LOG_ATTRIBUTION_KEY]: attribution };
 }
 
-/** Execution type, work reference and remaining metadata for an agent task's log. */
+/**
+ * Execution type, work reference and metadata for an agent task's log, ready
+ * to spread into the log entry: implementation work unless the task was
+ * attributed otherwise. `extraMetadata` is merged over the task metadata.
+ */
 export function resolveTaskLogAttribution(
   metadata: Record<string, unknown> | undefined,
   defaultWorkRef: WorkReference,
+  extraMetadata: Record<string, unknown> = {},
 ): { executionType: ExecutionType; workRef: WorkReference; metadata: Record<string, unknown> } {
   const { [LOG_ATTRIBUTION_KEY]: attribution, ...rest } = metadata ?? {};
   const override = attribution as TaskLogAttribution | undefined;
   return {
     executionType: override?.executionType ?? 'implementation',
     workRef: override?.workRef ?? defaultWorkRef,
-    metadata: rest,
+    metadata: { ...rest, ...extraMetadata },
   };
 }
 

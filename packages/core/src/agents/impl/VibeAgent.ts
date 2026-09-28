@@ -142,9 +142,8 @@ export class VibeAgent implements Agent {
             };
 
             const usage = formatUsageMetrics(usageMetrics);
-            const attribution = resolveTaskLogAttribution(metadata, buildTaskWorkRef(taskId, issueRef.number, repository, prNumber));
             await persistLlmLog(createLlmLogFromAnalysis({
-                executionType: attribution.executionType,
+                ...resolveTaskLogAttribution(metadata, buildTaskWorkRef(taskId, issueRef.number, repository, prNumber), buildLogMetadata({ isRetry, retryReason }, result, !success)),
                 modelUsed,
                 executionTimeMs,
                 success: response.success,
@@ -154,10 +153,8 @@ export class VibeAgent implements Agent {
                 draftId: taskId,
                 repository,
                 agentAlias: this.config.alias,
-                metadata: { ...attribution.metadata, ...buildLogMetadata({ isRetry, retryReason }, result, !success) },
                 usageMetrics: usage.metrics,
                 usageMetricRecords: usage.records,
-                workRef: attribution.workRef,
             }));
 
             if (response.success) {

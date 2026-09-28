@@ -23,6 +23,7 @@ import type { SyntheticRoutingSession } from '../syntheticRoutingService.js';
 import { PLAN_FILE, PLAN_VALIDATOR_FILE, PLAN_VALIDATOR_SCRIPT, validatePlanText } from './planValidation.js';
 
 const execFileAsync = promisify(execFile);
+const PLAN_FILE_AGENT_MAX_TURNS = 200;
 
 /**
  * Agent containers bind the workspace by host path, so it must live where the
@@ -86,6 +87,8 @@ export async function runPlanFileAgent(options: PlanFileAgentOptions): Promise<P
       githubToken,
       model: resolvedModel,
       taskId: draftId,
+      // Run, inspect, edit and re-validate; hosts may set a much lower default.
+      maxTurns: PLAN_FILE_AGENT_MAX_TURNS,
       metadata: withTaskLogAttribution({ ...metadata, planFileAgent: purpose }, {
         executionType,
         workRef: buildAnalysisWorkRef(executionType, draftId, repository),

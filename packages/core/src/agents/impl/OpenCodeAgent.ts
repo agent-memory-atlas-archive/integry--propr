@@ -212,9 +212,8 @@ export class OpenCodeAgent implements Agent {
     }): Promise<void> {
         const { response, executionTime, modelUsed, issueRef, taskId, prNumber, isRetry, retryReason, usageMetrics, metadata } = opts;
         const repository = `${issueRef.repoOwner}/${issueRef.repoName}`;
-        const attribution = resolveTaskLogAttribution(metadata, buildTaskWorkRef(taskId, issueRef.number, repository, prNumber));
         await persistLlmLog(createLlmLogFromAgentExecution({
-            executionType: attribution.executionType,
+            ...resolveTaskLogAttribution(metadata, buildTaskWorkRef(taskId, issueRef.number, repository, prNumber), { isRetry, retryReason }),
             modelUsed,
             executionTimeMs: executionTime,
             success: response.success,
@@ -224,9 +223,7 @@ export class OpenCodeAgent implements Agent {
             draftId: taskId,
             repository,
             agentAlias: this.config.alias,
-            metadata: { ...attribution.metadata, isRetry, retryReason },
             ...formatUsageMetrics(usageMetrics),
-            workRef: attribution.workRef,
         }));
     }
 

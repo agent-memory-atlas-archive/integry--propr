@@ -163,18 +163,15 @@ export class CodexAgent implements Agent {
     }): Promise<void> {
         const { response, parsedOutput, executionTime, modelUsed, usageMetrics, issueRef, repo, taskId, prNumber, isRetry, retryReason, metadata } = params;
         await storeCodexPromptInRedis({ codexOutput: parsedOutput, prompt: params.prompt, issueRef, model: modelUsed, isRetry, retryReason });
-        const attribution = resolveTaskLogAttribution(metadata, buildTaskWorkRef(taskId, issueRef.number, repo, prNumber));
         const logEntry = createLlmLogFromAnalysis({
-            executionType: attribution.executionType, modelUsed,
+            ...resolveTaskLogAttribution(metadata, buildTaskWorkRef(taskId, issueRef.number, repo, prNumber), { isRetry, retryReason, conversationId: parsedOutput.conversationId }), modelUsed,
             executionTimeMs: executionTime, success: response.success,
             tokenUsage: parsedOutput.tokenUsage,
             error: response.success ? undefined : (parsedOutput.error || 'Execution failed'),
             sessionId: parsedOutput.sessionId, draftId: taskId,
             repository: `${issueRef.repoOwner}/${issueRef.repoName}`,
             agentAlias: this.config.alias, reasoningLevel: response.reasoningLevel,
-            metadata: { ...attribution.metadata, isRetry, retryReason, conversationId: parsedOutput.conversationId },
             ...this.formatUsageMetrics(usageMetrics),
-            workRef: attribution.workRef,
         });
         await persistLlmLog(logEntry);
     }

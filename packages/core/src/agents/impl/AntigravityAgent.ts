@@ -310,16 +310,13 @@ export class AntigravityAgent implements Agent {
     }): Promise<void> {
         const { executionTime, issueRef, resolvedModel, finalTokenUsage, agentResult, taskId, prNumber, isRetry, retryReason, usageMetrics, metadata } = opts;
         const repository = `${issueRef.repoOwner}/${issueRef.repoName}`;
-        const attribution = resolveTaskLogAttribution(metadata, buildTaskWorkRef(taskId, issueRef.number, repository, prNumber));
         const logEntry = createLlmLogFromAnalysis({
-            executionType: attribution.executionType, modelUsed: resolvedModel, executionTimeMs: executionTime,
+            ...resolveTaskLogAttribution(metadata, buildTaskWorkRef(taskId, issueRef.number, repository, prNumber), { isRetry, retryReason }), modelUsed: resolvedModel, executionTimeMs: executionTime,
             success: agentResult.success, tokenUsage: finalTokenUsage,
             error: agentResult.success ? undefined : (agentResult.logs || 'Execution failed'),
             sessionId: agentResult.sessionId, draftId: taskId, repository, agentAlias: this.config.alias,
-            metadata: { ...attribution.metadata, isRetry, retryReason },
             usageMetrics: usageMetrics ? { preCall: usageMetrics.preCall, postCall: usageMetrics.postCall, delta: usageMetrics.delta, timestamp: usageMetrics.timestamp, agent: usageMetrics.agent } : undefined,
             usageMetricRecords: usageMetrics?.records,
-            workRef: attribution.workRef,
         });
         await persistLlmLog(logEntry);
     }
