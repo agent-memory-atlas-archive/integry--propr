@@ -118,6 +118,67 @@ test('restoring brings back the plan, keeps the replaced one and is refused for 
   assert.equal((await draft(db)).plan_json, plan('A1', 'A2', 'A3', 'A4'));
 });
 
+test('restoring the oldest version at capacity preserves it through the next edit', async t => {
+  const db = await setup(t);
+  for (let index = 0; index < 50; index += 1) {
+    await setDraft(db, { status: index % 2 ? 'review' : 'approved', plan_json: plan(`P${index}`) });
+  }
+  const original = (await listPlanRevisions(db, draftId))[49];
+  const restoredPlan = plan('A1', 'A2', 'A3', 'A4');
+  assert.equal((await draft(db)).status, 'review');
+  assert.equal((await restorePlanRevision(db, draftId, original.revision_id)).restored, true);
+  assert.equal(await getPlanRevision(db, draftId, original.revision_id), null, 'retention evicts the original snapshot');
+  assert.equal((await draft(db)).plan_json, restoredPlan);
+  assert.equal((await listPlanRevisions(db, draftId))[0].titles[0], 'P49', 'restore itself can be undone');
+
+  await setDraft(db, { plan_json: plan('Bad edit') });
+  const revisions = await listPlanRevisions(db, draftId);
+  assert.equal(revisions.length, 50);
+  assert.deepEqual((await getPlanRevision(db, draftId, revisions[0].revision_id))!.plan, JSON.parse(restoredPlan));
+  await setDraft(db, { plan_json: plan('Another edit') });
+  assert.deepEqual(await listPlanRevisions(db, draftId), revisions, 'later edits still coalesce');
+  assert.equal((await restorePlanRevision(db, draftId, revisions[0].revision_id)).restored, true);
+  assert.equal((await draft(db)).plan_json, restoredPlan);
+});
+
+test('a restore breaks coalescing when the outgoing plan is already the newest snapshot', async t => {
+  const db = await setup(t);
+  await setDraft(db, { status: 'refining' });
+  await setDraft(db, { status: 'review', plan_json: plan('Refined') });
+  await setDraft(db, { plan_json: plan('Edited') });
+  await setDraft(db, { plan_json: plan('Refined') });
+  const [latest, original] = await listPlanRevisions(db, draftId);
+  assert.equal(latest.titles[0], 'Refined');
+  await restorePlanRevision(db, draftId, original.revision_id);
+  assert.equal((await listPlanRevisions(db, draftId)).length, 2, 'no duplicate outgoing snapshot');
+  await setDraft(db, { plan_json: plan('Bad edit') });
+  assert.deepEqual((await listPlanRevisions(db, draftId)).map(revision => revision.titles[0]), ['A1', 'Refined', 'A1']);
+});
+
+test('MCP publication after recent edits preserves the complete pre-publication plan', async t => {
+  const db = await setup(t);
+  await setDraft(db, { plan_json: plan('First edit', 'Second task') });
+  await setDraft(db, { plan_json: plan('Ready to publish', 'Second task') });
+  const before = await draft(db);
+  assert.equal((await listPlanRevisions(db, draftId)).length, 1);
+  let issueNumber = 0;
+  const principal = { user: { id: '123' }, github: { request: async (_route: string, args: { title: string }) => {
+    issueNumber += 1;
+    return { data: { number: issueNumber, html_url: `https://github.com/acme/repo/issues/${issueNumber}`, title: args.title } };
+  } } } as unknown as McpPrincipal;
+  const deps: ToolDeps = { db, policy: { repository: async () => {} } as unknown as McpPolicy,
+    taskQueue: {} as never, redisClient: {} as never, runtimeBuildQueue: {} as never };
+  const tool = createToolCatalog(deps).find(candidate => candidate.name === 'publish_plan')!;
+  await tool.run({ principal, operationId: 'publish-history', args: tool.schema.parse({
+    repository: 'acme/repo', planId: draftId, expectedRevision: before.mcp_revision, idempotencyKey: 'publish-history',
+  }) } as never);
+  assert.equal((await draft(db)).status, 'executed');
+  assert.equal(issueNumber, 2);
+  const revisions = await listPlanRevisions(db, draftId);
+  assert.equal(revisions.length, 2, 'issue-link writes coalesce only within the publishing status');
+  assert.deepEqual((await getPlanRevision(db, draftId, revisions[0].revision_id))!.plan, JSON.parse(before.plan_json));
+});
+
 test('MCP tools list, read and restore plan revisions at an exact revision', async t => {
   const db = await setup(t);
   await setDraft(db, { status: 'refining' });

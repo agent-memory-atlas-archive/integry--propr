@@ -120,6 +120,14 @@ export async function restorePlanRevision(
     }
 
     // A restored plan needs review again, whatever state the replaced one was in.
+    // Even if the outgoing plan was already the latest snapshot (or empty),
+    // the next edit must preserve the restored content. Its original snapshot
+    // may be removed by retention below.
+    const boundary = await tx('task_draft_plan_revisions').where({ draft_id: draftId })
+      .orderBy('revision_id', 'desc').first('revision_id') as Pick<PlanRevisionRow, 'revision_id'> | undefined;
+    if (boundary) {
+      await tx('task_draft_plan_revisions').where({ revision_id: boundary.revision_id }).update({ is_restore: true });
+    }
     await restorable().update({ plan_json: row.plan_json, status: 'review', updated_at: tx.fn.now() });
 
     const kept = tx('task_draft_plan_revisions').where({ draft_id: draftId })

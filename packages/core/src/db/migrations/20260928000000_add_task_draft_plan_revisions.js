@@ -24,6 +24,8 @@ export async function up(knex) {
     table.integer('draft_revision').notNullable();
     table.string('status_before', 50).nullable();
     table.string('status_after', 50).nullable();
+    // A restore ends an edit burst even when it keeps the same status.
+    table.boolean('is_restore').notNullable().defaultTo(false);
     table.timestamp('replaced_at').notNullable().defaultTo(knex.fn.now());
 
     table.foreign('draft_id')
@@ -37,12 +39,14 @@ export async function up(knex) {
     WHEN OLD.plan_json IS NOT NULL AND OLD.plan_json IS NOT NEW.plan_json
       AND NOT EXISTS (
         SELECT 1 FROM (
-          SELECT plan_json, status_before, status_after, replaced_at FROM task_draft_plan_revisions
+          SELECT plan_json, status_before, status_after, is_restore, replaced_at FROM task_draft_plan_revisions
             WHERE draft_id = OLD.draft_id ORDER BY revision_id DESC LIMIT 1
         ) AS latest
         WHERE latest.plan_json = OLD.plan_json
           OR (OLD.status IS NEW.status
+            AND latest.is_restore = 0
             AND latest.status_before IS latest.status_after
+            AND latest.status_after IS OLD.status
             AND latest.replaced_at > datetime('now', '-${EDIT_COALESCE_MINUTES} minutes'))
       )
     BEGIN

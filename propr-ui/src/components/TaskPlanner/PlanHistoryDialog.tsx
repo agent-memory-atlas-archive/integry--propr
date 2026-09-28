@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { History, Loader2, RotateCcw, X } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { getPlanRevision, listPlanRevisions, type PlanRevision, type PlanRevisionSummary } from '../../api/proprApi';
@@ -17,22 +17,29 @@ const parseTimestamp = (value: string) => new Date(/Z|[+-]\d{2}:?\d{2}$/.test(va
 
 export const PlanHistoryDialog: React.FC<PlanHistoryDialogProps> = ({ isOpen, draftId, onClose, onRestore, isReadOnly = false }) => {
   const dialogRef = useRef<HTMLDivElement>(null);
+  const previewRequest = useRef(0);
   const [revisions, setRevisions] = useState<PlanRevisionSummary[] | null>(null);
   const [selected, setSelected] = useState<PlanRevision | null>(null);
   const [loadingId, setLoadingId] = useState<number | null>(null);
   const [isRestoring, setIsRestoring] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  useEffect(() => {
+  // Invalidate the previous dialog session before the new draft can be used.
+  useLayoutEffect(() => {
     if (!isOpen) return;
     let cancelled = false;
     setRevisions(null);
     setSelected(null);
+    setLoadingId(null);
+    setIsRestoring(false);
     setError(null);
     listPlanRevisions(draftId)
       .then(result => { if (!cancelled) setRevisions(result); })
       .catch(err => { if (!cancelled) setError((err as Error).message || 'Failed to load plan history'); });
-    return () => { cancelled = true; };
+    return () => {
+      cancelled = true;
+      previewRequest.current += 1;
+    };
   }, [draftId, isOpen]);
 
   useEffect(() => {
@@ -48,27 +55,31 @@ export const PlanHistoryDialog: React.FC<PlanHistoryDialogProps> = ({ isOpen, dr
   }, [isOpen, isRestoring, onClose]);
 
   const select = useCallback(async (revisionId: number) => {
+    const request = ++previewRequest.current;
+    setSelected(null);
     setLoadingId(revisionId);
     setError(null);
     try {
-      setSelected(await getPlanRevision(draftId, revisionId));
+      const revision = await getPlanRevision(draftId, revisionId);
+      if (request === previewRequest.current) setSelected(revision);
     } catch (err) {
-      setError((err as Error).message || 'Failed to load plan version');
+      if (request === previewRequest.current) setError((err as Error).message || 'Failed to load plan version');
     } finally {
-      setLoadingId(null);
+      if (request === previewRequest.current) setLoadingId(null);
     }
   }, [draftId]);
 
   const restore = async () => {
-    if (!selected || isReadOnly) return;
+    if (!selected || loadingId !== null || isRestoring || isReadOnly) return;
+    const request = previewRequest.current;
     setIsRestoring(true);
     setError(null);
     try {
       await onRestore(selected.revision_id);
     } catch (err) {
-      setError((err as Error).message || 'Failed to restore plan version');
+      if (request === previewRequest.current) setError((err as Error).message || 'Failed to restore plan version');
     } finally {
-      setIsRestoring(false);
+      if (request === previewRequest.current) setIsRestoring(false);
     }
   };
 
@@ -118,6 +129,7 @@ export const PlanHistoryDialog: React.FC<PlanHistoryDialogProps> = ({ isOpen, dr
                     <button
                       type="button"
                       onClick={() => void select(revision.revision_id)}
+                      disabled={isRestoring}
                       aria-current={selected?.revision_id === revision.revision_id}
                       className={`w-full text-left px-4 py-3 border-b border-gray-100 hover:bg-gray-50 ${selected?.revision_id === revision.revision_id ? 'bg-teal-50' : ''}`}
                     >
@@ -156,7 +168,7 @@ export const PlanHistoryDialog: React.FC<PlanHistoryDialogProps> = ({ isOpen, dr
               <button
                 type="button"
                 onClick={() => void restore()}
-                disabled={!selected || isRestoring || isReadOnly}
+                disabled={!selected || loadingId !== null || isRestoring || isReadOnly}
                 title={isReadOnly ? 'Demo mode is read-only' : undefined}
                 className="px-4 py-2 text-sm font-medium text-white bg-teal-700 rounded-md hover:bg-teal-800 transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
               >
