@@ -31,6 +31,7 @@ import {
   SectionHeading,
   SectionSkeleton,
   WorkReference,
+  WorkTypeBadge,
 } from './sectionPrimitives';
 import {
   type DashboardSectionProps,
@@ -47,6 +48,36 @@ const VISIBLE_ITEMS = 5;
 
 /** How long typing has to pause before the filter reads again. */
 const SEARCH_DEBOUNCE_MS = 300;
+
+/** Compact only the structured review prefix; retain the actual findings verbatim. */
+function compactDelta(detail: string): string {
+  const summary = detail.split(' · ')[0].trim();
+  const findings = /^(?:([0-9]+) issues? found|Found ([0-9]+) issues?):\s*(.+)$/i.exec(summary);
+  if (!findings) return summary;
+  const count = findings[1] ?? findings[2];
+  return `${findings[3].replace(/;\s+/g, ' & ')} (${count} ${count === '1' ? 'issue' : 'issues'})`;
+}
+
+function updateType(update: OutcomeItem, type: string | null): string {
+  const detail = update.detail ?? '';
+  // Some older runs record only "pr-comment" or "Follow-up" as their type.
+  // Prefer explicit review evidence, then validation-only recaps. A fix that
+  // merely mentions passing validation must remain a fix.
+  if (type === 'Review' || update.score != null || /^Review\b/i.test(detail)) return 'Review';
+  if (/^(?:validation|verification|validate|verify)$/i.test(type ?? '')
+    || (/\bno (?:further )?changes\b/i.test(detail) && /\b(?:verified|lint passed|tests? passed)\b/i.test(detail))) return 'Verify';
+  if (/^ci(?: checks?)?$/i.test(type ?? '') || /^CI checks? (?:passed|completed)\b/i.test(detail)) return 'CI';
+  if ((type === 'Follow-up' || type === 'PR comment') && /^(?:Fixed|Implemented|Applied|Repaired|Removed)\b/i.test(detail)) return 'Fix';
+  return type ?? 'Task';
+}
+
+function compactElapsedLabel(at: string): string {
+  return elapsedLabel(at)
+    .replace('less than a minute', '<1m')
+    .replace(/ mins?$/, 'm')
+    .replace(/ hrs?$/, 'h')
+    .replace(/ days?$/, 'd');
+}
 
 const CompletedRow: React.FC<{ item: OutcomeItem }> = ({ item }) => {
   const [expanded, setExpanded] = useState(false);
@@ -114,20 +145,28 @@ const CompletedRow: React.FC<{ item: OutcomeItem }> = ({ item }) => {
         </div>
       )}
       {updates.length > 0 && (
-        <ul id={updatesId} hidden={!expanded} className="ml-2 mr-3 mt-1 border-l-2 border-solid border-slate-200 pl-3">
+        <ul id={updatesId} hidden={!expanded} className="ml-3 mr-3 my-2 space-y-1.5 border-l-2 border-solid border-slate-200 pl-3">
           {expanded && updates.map(update => {
             const updateWork = splitWorkTitle(update.title, update.taskType);
+            const type = updateType(update, updateWork.type);
             // A missing recap is a run type, never the parent deliverable again.
             const delta = update.detail && update.detail !== title && update.detail !== item.title
               && update.detail !== update.title && update.detail !== updateWork.title
-              ? update.detail : `${updateWork.type ?? 'Task'} run`;
+              ? update.detail : `${type} run`;
             return (
               <li key={update.id}>
-                <RowLink href={workHref(update)} className="flex min-w-0 items-center gap-2 rounded-sm py-0.5 text-xs leading-5 text-slate-500 hover:bg-slate-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-teal-500">
-                  <time dateTime={update.occurredAt} className="flex-none whitespace-nowrap">{elapsedLabel(update.occurredAt)} ago</time>
-                  <span aria-hidden="true">·</span>
-                  <span className="min-w-0 flex-1 truncate" title={delta}>{delta}</span>
-                  {update.score !== null && update.score !== undefined && <ScoreBadge score={update.score} bracketed label="Review Score" />}
+                <RowLink href={workHref(update)} className="grid min-w-0 grid-cols-[3.5rem_5rem_minmax(0,1fr)_3rem] items-center gap-x-2 rounded-sm py-0.5 text-xs leading-5 text-slate-600 hover:bg-slate-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-teal-500">
+                  <time dateTime={update.occurredAt} title={new Date(update.occurredAt).toLocaleString()} className="whitespace-nowrap font-mono text-[11px] tabular-nums text-slate-400">{compactElapsedLabel(update.occurredAt)} ago</time>
+                  <WorkTypeBadge type={type} compact />
+                  <span className="min-w-0 truncate text-slate-700" title={delta}>{compactDelta(delta)}</span>
+                  <span className="w-12 text-right">
+                    {update.score !== null && update.score !== undefined && (
+                      <>
+                        <ScoreBadge score={update.score} bracketed label="Review Score" />
+                        <span className="sr-only">Review score {update.score} out of 10</span>
+                      </>
+                    )}
+                  </span>
                 </RowLink>
               </li>
             );

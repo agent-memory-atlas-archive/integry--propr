@@ -217,23 +217,36 @@ describe('Dashboard', () => {
     }
   });
 
-  it('keeps earlier updates collapsed and toggles their own recaps without navigating', async () => {
+  it('expands typed chronological deltas, preserving findings, scores and destinations', async () => {
     const earlierUpdates = [
-      outcomeItem({ id: 'earlier-fix', taskId: 'earlier-fix', detail: 'Fixed operator markup', score: null }),
-      outcomeItem({ id: 'earlier-review', taskId: 'earlier-review', detail: 'Missing timeline test', score: 4 }),
+      outcomeItem({ id: 'deferred', taskId: 'deferred', title: 'Review PR #100: Ship the retry budget', detail: 'Review deferred: awaiting checks', score: null }),
+      outcomeItem({ id: 'fix', taskId: 'fix', title: 'Followup: Ship the retry budget', detail: 'Fixed operator markup · Validation: ESLint passed', score: null }),
+      outcomeItem({ id: 'review', taskId: 'review', taskType: 'review', detail: '2 issues found: Allow repairable quotes; Preserve OpenCode attribution', score: 6 }),
+      outcomeItem({ id: 'verify', taskId: 'verify', title: 'Followup: Ship the retry budget', taskType: 'pr-comment', detail: 'The reported lint issue is already fixed. No further changes were needed. · Verified: Lint passed', score: null }),
+      outcomeItem({ id: 'ci', taskId: 'ci', taskType: 'ci', detail: 'Build passed', score: null }),
+      outcomeItem({ id: 'ultrafix', taskId: 'ultrafix', title: 'Ultrafix PR #100: Ship the retry budget', detail: 'Implemented delimiter repair · Validation: Tests passed', score: null }),
+      outcomeItem({ id: 'no-recap', taskId: 'no-recap', title: 'Fix PR #100: Ship the retry budget', detail: 'Ship the retry budget' }),
     ];
-    mockOutcomes.mockResolvedValue(outcomesResponse([outcomeItem({ eventCount: 3, earlierUpdates })]));
+    mockOutcomes.mockResolvedValue(outcomesResponse([outcomeItem({ eventCount: 8, earlierUpdates })]));
     await renderLoadedDashboard();
     const list = await screen.findByTestId('completed-list');
     expect(within(list).getAllByRole('listitem')).toHaveLength(1);
     expect(within(list).queryByText('Fixed operator markup')).toBeNull();
-    const toggle = within(list).getByRole('button', { name: '2 earlier updates' });
+    const toggle = within(list).getByRole('button', { name: '7 earlier updates' });
     expect(toggle).toHaveAttribute('aria-expanded', 'false');
     expect(toggle.closest('a')).toBeNull();
     fireEvent.click(toggle);
     expect(toggle).toHaveAttribute('aria-expanded', 'true');
-    expect(within(list).getByText('Fixed operator markup')).toBeVisible();
-    expect(within(list).getByText('Missing timeline test')).toBeVisible();
+    const updates = within(document.getElementById(toggle.getAttribute('aria-controls')!)!);
+    expect(updates.getAllByTestId('work-type-badge').map(badge => badge.textContent))
+      .toEqual(['Review', 'Fix', 'Review', 'Verify', 'CI', 'Ultrafix', 'Fix']);
+    expect(updates.getByText('Allow repairable quotes & Preserve OpenCode attribution (2 issues)'))
+      .toHaveAttribute('title', earlierUpdates[2].detail);
+    expect(updates.getByText('Review score 6 out of 10')).toBeInTheDocument();
+    expect(updates.getByText('Review deferred: awaiting checks')).toBeVisible();
+    expect(updates.getByText('Fix run')).toBeVisible();
+    expect(updates.getAllByRole('link').map(link => link.getAttribute('href')))
+      .toEqual(earlierUpdates.map(update => `/tasks/${update.taskId}`));
     fireEvent.click(toggle);
     expect(within(list).queryByText('Fixed operator markup')).toBeNull();
   });

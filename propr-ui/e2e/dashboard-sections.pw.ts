@@ -508,3 +508,45 @@ for (const width of [1440, 390]) {
     await summary.screenshot({ animations: 'disabled', path: path.join(directory, `summary-telemetry-idle-${width}.png`) });
   });
 }
+
+for (const width of [1920, 390]) {
+  test(`expanded completed events form a chronological matrix at ${width}px`, async ({ page }) => {
+    await page.setViewportSize({ width, height: 1000 });
+    await fixture(page, [], []);
+    const earlierUpdates = [
+      { title: 'Review PR #2467: Repair plan validation', taskType: 'pr-comment', detail: 'Review deferred: awaiting checks on the latest commit', score: null, minutes: 16 },
+      { title: 'Followup: Repair plan validation', taskType: 'pr-comment', detail: 'Implemented F4 and F5 delimiter syntax repair · Validation: Lint passed', score: null, minutes: 17 },
+      { title: 'Review PR #2467: Repair plan validation', taskType: 'pr-comment', detail: '2 issues found: Allow repairable quotes; Preserve OpenCode attribution', score: 6, minutes: 30 },
+      { title: 'Followup: Repair plan validation', taskType: 'pr-comment', detail: 'Lint passed on planValidation.ts:71 (no changes) · Verified: Core package tests', score: null, minutes: 38 },
+      { title: 'Repair plan validation', taskType: 'ci', detail: 'CI checks passed', score: null, minutes: 40 },
+      { title: 'Ultrafix PR #2467: Repair plan validation', taskType: 'pr-comment', detail: 'Implemented F1–F3 validation task boundaries', score: null, minutes: 45 },
+      { title: 'Review PR #2467: Repair plan validation', taskType: 'pr-comment', detail: '3 issues found: Duplicated tasks; Truncated plans', score: 5, minutes: 53 },
+    ].map((update, index) => ({ ...outcomes[0], ...update, id: `prior-${index}`, taskId: `prior-${index}`, occurredAt: minutesAgo(update.minutes) }));
+    await page.route('**/api/dashboard/outcomes?**', route => route.fulfill({ json: {
+      repository: 'all', limit: 50, items: [{ ...outcomes[0], title: 'Review PR #2467: Repair plan validation', detail: '0 issues found', score: 9, earlierUpdates, eventCount: 8 }],
+    } }));
+    await page.goto('/');
+    const section = page.getByTestId('completed-section');
+    await section.getByRole('button', { name: '7 earlier updates' }).click();
+    const updates = section.locator('li ul');
+    await expect(updates.getByTestId('work-type-badge')).toHaveText(['Review', 'Fix', 'Review', 'Verify', 'CI', 'Ultrafix', 'Review']);
+    await expect(updates.locator('time')).toHaveText(['16m ago', '17m ago', '30m ago', '38m ago', '40m ago', '45m ago', '53m ago']);
+    await expect(updates.getByText('Allow repairable quotes & Preserve OpenCode attribution (2 issues)')).toBeVisible();
+    await expect(updates).toHaveCSS('border-left-width', '2px');
+    const columns = await updates.locator('a').evaluateAll(rows => rows.map(row =>
+      Array.from(row.children).map(cell => ({ x: cell.getBoundingClientRect().x, width: cell.getBoundingClientRect().width })),
+    ));
+    for (const row of columns) {
+      expect(row).toHaveLength(4);
+      expect(row.map(cell => cell.x)).toEqual(columns[0].map(cell => cell.x));
+      expect(row[2].width).toBeGreaterThan(0);
+      expect(row[3].width).toBe(48);
+    }
+    expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(width);
+    if (process.env.PROPR_CAPTURE_PREVIEWS) {
+      const directory = path.resolve('../.propr/previews');
+      await mkdir(directory, { recursive: true });
+      await section.screenshot({ animations: 'disabled', path: path.join(directory, `completed-event-matrix-${width}.png`) });
+    }
+  });
+}
