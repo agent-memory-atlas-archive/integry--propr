@@ -6,7 +6,7 @@ import { Agent, AgentConfig, AgentTaskOptions, AgentExecutionResult, AnalysisRes
 import { executeDockerCommand } from '../../claude/docker/dockerExecutor.js';
 import { verifyWorktreeStructure, verifyWorktreePostExecution, setWorktreeOwnership, UsageLimitError } from '../../claude/claudeHelpers.js';
 import { resolveConfigPath } from '../../config/configManager.js';
-import { persistLlmLog, createLlmLogFromAnalysis, createLlmLogFromAgentExecution, buildTaskWorkRef, buildAnalysisWorkRef, formatUsageMetrics } from '../../utils/llmLogger.js';
+import { persistLlmLog, createLlmLogFromAnalysis, createLlmLogFromAgentExecution, buildTaskWorkRef, buildAnalysisWorkRef, formatUsageMetrics, resolveTaskLogAttribution } from '../../utils/llmLogger.js';
 import { buildAnalysisSafetySuffix, executeWithUsageTracking, type UsageTrackingMetrics } from './utils/index.js';
 import { buildOpenCodeDockerArgs, buildOpenCodePrompt, evaluateOpenCodeAnalysis, parseOpenCodeJsonl, type OpenCodeDockerArgsParams, type ParsedOpenCodeOutput } from './openCodeUtils.js';
 import type { ExecutionType } from '../../utils/llmMetrics.types.js';
@@ -132,7 +132,7 @@ export class OpenCodeAgent implements Agent {
             logger.error({ issueNumber: issueRef.number, repository: repo, executionTime, error: err.message, agentAlias: this.config.alias }, 'Error during OpenCode agent execution');
             const persistedPrompt = prompt ?? customPrompt ?? '';
             const response = buildFailedExecutionResult(err, executionTime, effectiveModel, persistedPrompt);
-            await this.persistExecutionLogSafely({ response, executionTime, modelUsed: response.modelUsed, prompt: persistedPrompt, issueRef, taskId, prNumber, isRetry, retryReason });
+            await this.persistExecutionLogSafely({ response, executionTime, modelUsed: response.modelUsed, prompt: persistedPrompt, issueRef, taskId, prNumber, isRetry, retryReason, metadata });
             return response;
         }
     }
@@ -213,7 +213,7 @@ export class OpenCodeAgent implements Agent {
         const { response, executionTime, modelUsed, issueRef, taskId, prNumber, isRetry, retryReason, usageMetrics, metadata } = opts;
         const repository = `${issueRef.repoOwner}/${issueRef.repoName}`;
         await persistLlmLog(createLlmLogFromAgentExecution({
-            executionType: 'implementation',
+            ...resolveTaskLogAttribution(metadata, buildTaskWorkRef(taskId, issueRef.number, repository, prNumber), { isRetry, retryReason }),
             modelUsed,
             executionTimeMs: executionTime,
             success: response.success,
@@ -223,9 +223,7 @@ export class OpenCodeAgent implements Agent {
             draftId: taskId,
             repository,
             agentAlias: this.config.alias,
-            metadata: { ...metadata, isRetry, retryReason },
             ...formatUsageMetrics(usageMetrics),
-            workRef: buildTaskWorkRef(taskId, issueRef.number, repository, prNumber),
         }));
     }
 

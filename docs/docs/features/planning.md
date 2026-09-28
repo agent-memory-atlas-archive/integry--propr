@@ -25,6 +25,8 @@ Planner Studio moves a draft through three stages, shown in the stepper at the t
 
 A draft can be reset back to setup if the inputs were wrong, which makes planning useful for exploratory work as well as well-defined tickets.
 
+A generated plan is saved only when every issue has a title, a body and an implementation section. If the planning model's JSON is malformed, the default coding agent repairs it in a scratch workspace, fixing syntax only, and a validator rejects any repair that drops, rewords or adds content. A response that holds only part of a plan, for example because the model stopped mid-plan, fails the generation with an error instead of being saved as a partial or empty plan; regenerate it, or choose a lower granularity for a shorter plan.
+
 {/* SCREENSHOT PLACEHOLDER (P1 — same capture as the planner-studio tutorial's Review Plan shot; interim: the site's ui-plan-detail.png): Capture Planner Studio in the Review Plan stage: the stepper showing the three stages, a generated plan with several issues, and the refinement chat input visible. Use a draft generated against a real repository so issue titles look representative. */}
 
 ## Context Assembly
