@@ -29,13 +29,12 @@ import { loadCompletedRows, type CompletedRow } from './dashboardOutcomeQueries.
 import {
   EMPTY_LIVE_ACTIVITY,
   EMPTY_LIVE_DETAILS,
+  MAX_LIVE_DETAIL_LOOKUPS,
   summariseLiveActivity,
   type LiveActivity,
   type LiveDetailsSnapshot,
 } from './dashboardLiveActivity.js';
 
-/** Running work we will pay for a live-details projection on in one request. */
-const MAX_LIVE_DETAIL_LOOKUPS = 20;
 /** Where `src/worker.ts` heartbeats its identity and the concurrency it runs at. */
 const WORKER_SET_KEY = 'system:status:workers';
 const WORKER_CAPACITY_KEY = 'system:status:worker-capacity';
@@ -225,7 +224,10 @@ export function createDashboardRoutes(deps: DashboardRoutesDeps) {
         res.json({ repository, enabled: false, summary: null });
         return;
       }
-      const snapshot = await collectNarrativeFacts(db, repository, now(), req.user?.id ? String(req.user.id) : undefined);
+      const snapshot = await collectNarrativeFacts(db, repository, now(), {
+        ownerId: req.user?.id ? String(req.user.id) : undefined,
+        liveActivity: liveActivityFor,
+      });
       const summary = await narrative(snapshot, req.query.refresh === 'true');
       res.json({ repository, enabled: true, summary });
     } catch {

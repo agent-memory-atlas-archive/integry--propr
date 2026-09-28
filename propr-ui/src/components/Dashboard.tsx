@@ -97,7 +97,7 @@ const Dashboard: React.FC = () => {
   // every section reads, so ten events in a row cost one request per section.
   const { onTaskUpdate, isConnected } = useSocket();
   const [refreshToken, setRefreshToken] = useState(0);
-  const [completionToken, setCompletionToken] = useState(0);
+  const [narrativeActivityToken, setNarrativeActivityToken] = useState(0);
   const taskEventFingerprintsRef = useRef<Map<string, string>>(new Map());
 
   const scheduleLiveRefresh = useLiveRefreshScheduler({
@@ -112,9 +112,11 @@ const Dashboard: React.FC = () => {
       if (taskEventFingerprintsRef.current.get(payload.taskId) === fingerprint) return;
       taskEventFingerprintsRef.current.set(payload.taskId, fingerprint);
       scheduleLiveRefresh();
-      if (['completed', 'failed', 'cancelled', 'action_required', 'action-required', 'needs_attention', 'needs-attention'].includes(payload.state)
-        && (repository === ALL_REPOSITORIES || !payload.repository || payload.repository === repository)) {
-        setCompletionToken(token => token + 1);
+      // A narrative describes what an agent is doing, so lifecycle/progress
+      // updates are just as relevant as terminal transitions. The summary hook
+      // coalesces a burst into one regeneration.
+      if (repository === ALL_REPOSITORIES || !payload.repository || payload.repository === repository) {
+        setNarrativeActivityToken(token => token + 1);
       }
     };
     return onTaskUpdate(handleTaskUpdate);
@@ -190,7 +192,7 @@ const Dashboard: React.FC = () => {
           </div>
         )}
 
-        <DashboardSummary repository={repository} completionToken={completionToken} />
+        <DashboardSummary repository={repository} activityToken={narrativeActivityToken} />
 
         <ConnectSoftPromoBanner />
 

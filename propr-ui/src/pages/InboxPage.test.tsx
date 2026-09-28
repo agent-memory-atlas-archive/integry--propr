@@ -200,7 +200,7 @@ describe('Inbox page', () => {
     expect(screen.queryByRole('article', { name: 'Review completed for PR #1724' })).not.toBeInTheDocument();
   });
 
-  test('offers /review and /ultrafix after a PR run and opens the pull request on click', async () => {
+  test('offers /review and /ultrafix after a PR run and links to its task with a separate GitHub chip', async () => {
     const notification = item('event-pr', 'Fix run completed for PR #1724', null, {
       kind: 'pull_request',
       severity: 'info',
@@ -216,9 +216,13 @@ describe('Inbox page', () => {
     renderInbox();
 
     const link = await screen.findByRole('link', { name: /Fix run completed for PR #1724/ });
-    expect(link).toHaveAttribute('href', 'https://github.com/integry/propr/pull/1724');
-    expect(link).toHaveAttribute('target', '_blank');
-    expect(link).toHaveAttribute('rel', 'noopener noreferrer');
+    expect(link).toHaveAttribute('href', '/tasks/task-fix');
+    expect(link).not.toHaveAttribute('target');
+    const chip = screen.getByRole('link', { name: 'PR #1724 on GitHub' });
+    expect(chip).toHaveAttribute('href', 'https://github.com/integry/propr/pull/1724');
+    expect(chip).toHaveAttribute('target', '_blank');
+    expect(chip).toHaveAttribute('rel', 'noopener noreferrer');
+    expect(chip).toHaveClass('relative', 'z-10');
     expect(screen.getByRole('button', { name: 'Send /review to PR #1724' })).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: 'Send /ultrafix to PR #1724' }));
 
@@ -226,6 +230,22 @@ describe('Inbox page', () => {
     expect(await screen.findByText(/Couldn't send \/ultrafix to PR #1724.*GitHub unavailable/)).toBeInTheDocument();
     expect(screen.getByRole('article', { name: 'Fix run completed for PR #1724' })).toBeInTheDocument();
     expect(dismissNotification).not.toHaveBeenCalled();
+  });
+
+  test('uses an external row fallback only without a producer reference and marks chip opens read', async () => {
+    const notification = item('legacy-pr', 'PR ready', null, {
+      kind: 'pull_request', target: { type: 'pull_request', repository: 'integry/propr', prNumber: 42 },
+    });
+    vi.mocked(listNotifications).mockResolvedValue({ notifications: [notification], unreadCount: 1, nextCursor: null });
+    vi.mocked(markNotificationRead).mockResolvedValue({ notification, unreadCount: 0 });
+    renderInbox();
+    const row = await screen.findByRole('link', { name: 'PR ready' });
+    expect(row).toHaveAttribute('href', 'https://github.com/integry/propr/pull/42');
+    expect(row).toHaveAttribute('target', '_blank');
+    expect(row).toHaveAttribute('rel', 'noopener noreferrer');
+    fireEvent.click(screen.getByRole('link', { name: 'PR #42 on GitHub' }));
+    await waitFor(() => expect(markNotificationRead).toHaveBeenCalledWith('legacy-pr'));
+    expect(screen.getByRole('article')).toBeInTheDocument();
   });
 
   test('expands a system notification in place instead of navigating', async () => {
