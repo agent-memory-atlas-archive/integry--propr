@@ -70,6 +70,38 @@ test('autosaved edits are coalesced until the edit window passes, but never hide
   assert.equal((await listPlanRevisions(db, draftId))[0].titles[0], 'Refined edit 4', 'a refinement inside the edit window still records');
 });
 
+for (const status of ['refining', 'generating']) {
+  test(`${status} preserves its result when the outgoing plan duplicates a recent edit snapshot`, async t => {
+    const db = await setup(t);
+    const originalPlan = (await draft(db)).plan_json;
+    await setDraft(db, { plan_json: plan('B') });
+    await setDraft(db, { plan_json: originalPlan });
+    const [original] = await listPlanRevisions(db, draftId);
+    assert.equal(original.status_before, 'review');
+    assert.equal(original.status_after, 'review');
+
+    await setDraft(db, { status });
+    const beforeOperation = await draft(db);
+    await setDraft(db, { status: 'review', plan_json: plan('C') });
+    const boundary = await listPlanRevisions(db, draftId);
+    assert.equal(boundary.length, 1, 'the duplicate outgoing plan is still stored only once');
+    assert.equal(boundary[0].revision_id, original.revision_id);
+    assert.equal(boundary[0].status_before, status);
+    assert.equal(boundary[0].status_after, 'review');
+    assert.equal(boundary[0].draft_revision, beforeOperation.mcp_revision);
+
+    await setDraft(db, { plan_json: plan('D') });
+    const revisions = await listPlanRevisions(db, draftId);
+    assert.deepEqual(revisions.map(revision => revision.titles[0]), ['C', 'A1'],
+      'the first edit preserves the operation result within the coalescing window');
+    assert.deepEqual((await getPlanRevision(db, draftId, revisions[0].revision_id))!.plan, JSON.parse(plan('C')));
+    await setDraft(db, { plan_json: plan('E') });
+    assert.deepEqual(await listPlanRevisions(db, draftId), revisions, 'subsequent edits still coalesce');
+    assert.equal((await restorePlanRevision(db, draftId, revisions[0].revision_id)).restored, true);
+    assert.equal((await draft(db)).plan_json, plan('C'), 'the complete operation result can be recovered');
+  });
+}
+
 test('history is capped per draft and removed with the draft', async t => {
   const db = await setup(t);
   for (let index = 0; index < 55; index += 1) {
