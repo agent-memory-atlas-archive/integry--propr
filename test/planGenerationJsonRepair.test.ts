@@ -176,3 +176,54 @@ test('a valid plan is returned without repair', async () => {
   assert.deepEqual(result.plan, [task('One'), task('Two')]);
   assert.equal(repairCalls.length, 0);
 });
+
+
+test('brackets in strings cannot turn a truncated response into a repairable plan', async () => {
+  analysisResponses.push('[{"title":"A","body":"b" "implementation":"Use [x] safely"}, {"title":"B","body":"unfinished');
+  await assert.rejects(generate(), /response was incomplete/);
+  assert.equal(repairCalls.length, 0);
+});
+
+test('a parseable first array cannot conceal trailing task content, even after a fence', async () => {
+  const complete = JSON.stringify([task('A')]);
+  for (const response of [
+    `${complete}, {"title":"B","body":"unfinished`,
+    `\`\`\`json\n${complete}\n\`\`\`\n, {"title":"B","body":"unfinished`,
+  ]) {
+    analysisResponses.push(response);
+    await assert.rejects(generate(), /response was incomplete/);
+  }
+  assert.equal(repairCalls.length, 0);
+});
+
+test('repair receives all content containing brackets and literal Unicode escapes', async () => {
+  const original = String.raw`[{"title":"A","body":"Match \\u0041" "implementation":"Use [x] safely"}, {"title":"B","body":"b","implementation":"c"}]`;
+  analysisResponses.push(original);
+  repairResult = JSON.parse(original.replace('" "implementation"', '", "implementation"'));
+  await generate();
+  assert.equal(repairCalls.length, 1);
+  assert.equal(repairCalls[0].original, original);
+  assert.equal(repairCalls[0].files['original.txt'], original);
+  assert.equal(repairCalls[0].files['plan.json'], original);
+});
+
+
+test('an empty whole array retains the empty-plan diagnostic', async () => {
+  analysisResponses.push('[]');
+  await assert.rejects(generate(), /Generated plan is empty/);
+  assert.equal(repairCalls.length, 0);
+});
+
+test('unescaped quotes around a closing bracket reach the repair agent with all content', async () => {
+  const original = '[{"title":"A","body":"Use "]" here","implementation":"c"}]';
+  analysisResponses.push(original);
+  repairResult = [{ title: 'A', body: 'Use "]" here', implementation: 'c' }];
+
+  const result = await generate();
+
+  assert.deepEqual(result.plan, repairResult);
+  assert.equal(repairCalls.length, 1);
+  assert.equal(repairCalls[0].original, original);
+  assert.equal(repairCalls[0].files['original.txt'], original);
+  assert.equal(repairCalls[0].files['plan.json'], original);
+});
