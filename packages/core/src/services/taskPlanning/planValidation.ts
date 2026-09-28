@@ -46,9 +46,20 @@ export function extractWholeJsonArray(response: string): string | null {
   if (start === -1 || /[{}"\]]/.test(text.slice(0, start))) return null;
   if (!/^\[\s*(?:\{|\])/.test(text.slice(start))) return null;
 
-  // Only a balanced outer delimiter outside a string establishes a whole plan.
-  // Scan the full response, including fences: stripping a fence first could
-  // hide evidence of a trailing task or a fence embedded in task text.
+  const end = findJsonArrayEnd(text, start);
+  if (end === null) return null;
+  // Prose and a closing fence are harmless; JSON-looking suffixes are
+  // ambiguous and must not be discarded when establishing the original.
+  if (/[[\]{}"]/.test(text.slice(end + 1))) return null;
+  return text.slice(start, end + 1);
+}
+
+/**
+ * Only a balanced outer delimiter outside a string establishes a whole plan.
+ * Scan the full response, including fences: stripping a fence first could
+ * hide evidence of a trailing task or a fence embedded in task text.
+ */
+function findJsonArrayEnd(text: string, start: number): number | null {
   const closers: string[] = [];
   let inString = false;
   let escaped = false;
@@ -80,12 +91,7 @@ export function extractWholeJsonArray(response: string): string | null {
     else if (char === '{') closers.push('}');
     else if (char === ']' || char === '}') {
       if (closers.pop() !== char) return null;
-      if (closers.length === 0) {
-        // Prose and a closing fence are harmless; JSON-looking suffixes are
-        // ambiguous and must not be discarded when establishing the original.
-        if (/[[\]{}"]/.test(text.slice(i + 1))) return null;
-        return text.slice(start, i + 1);
-      }
+      if (closers.length === 0) return i;
     }
     if (!/\s/.test(char)) previous = char;
   }
