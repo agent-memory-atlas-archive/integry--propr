@@ -88,6 +88,10 @@ const mockActive = vi.mocked(getDashboardActive);
 const mockOutcomes = vi.mocked(getDashboardOutcomes);
 const mockStats = vi.mocked(getDashboardStats);
 
+function expectSectionReads(count: number) {
+  for (const read of [mockAttention, mockActive, mockOutcomes, mockStats]) expect(read).toHaveBeenCalledTimes(count);
+}
+
 /**
  * The two things "Happening now" can say when it has no rows.
  *
@@ -121,10 +125,6 @@ function dashboardTree(initialEntry = '/') {
   );
 }
 
-function renderDashboard(initialEntry = '/') {
-  return render(dashboardTree(initialEntry));
-}
-
 function renderAttentionPanel() {
   return render(<MemoryRouter><NeedsAttentionPanel repository="all" refreshToken={0} /></MemoryRouter>);
 }
@@ -136,7 +136,7 @@ async function waitForSections() {
 }
 
 async function renderLoadedDashboard(initialEntry = '/') {
-  const view = renderDashboard(initialEntry);
+  const view = render(dashboardTree(initialEntry));
   await waitForSections();
   return view;
 }
@@ -155,16 +155,14 @@ describe('Dashboard', () => {
 
   it('defers all four initial section reads in a background tab', async () => {
     Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'hidden' });
-    const view = renderDashboard();
+    const view = render(dashboardTree());
     try {
       await act(async () => { await Promise.resolve(); });
-      for (const read of [mockAttention, mockActive, mockOutcomes, mockStats]) expect(read).not.toHaveBeenCalled();
+      expectSectionReads(0);
       Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'visible' });
       fireEvent(document, new Event('visibilitychange'));
       await waitForSections();
-      await waitFor(() => {
-        for (const read of [mockAttention, mockActive, mockOutcomes, mockStats]) expect(read).toHaveBeenCalledTimes(1);
-      });
+      await waitFor(() => expectSectionReads(1));
     } finally {
       view.unmount();
       Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'visible' });
@@ -217,14 +215,6 @@ describe('Dashboard', () => {
     } finally {
       clock.mockRestore();
     }
-  });
-
-  it('hides the running View all link when no work is running', async () => {
-    mockActive.mockResolvedValue(activeResponse());
-    await renderLoadedDashboard();
-    const panel = screen.getByTestId('happening-now-section');
-    await within(panel).findByText('No active tasks running');
-    expect(within(panel).queryByRole('link', { name: 'View all' })).not.toBeInTheDocument();
   });
 
   it('keeps earlier updates collapsed and toggles their own recaps without navigating', async () => {
@@ -282,8 +272,9 @@ describe('Dashboard', () => {
     // the panel had looked and found nothing.
     expect(screen.getByRole('heading', { name: 'Needs attention' })).not.toHaveTextContent('(0)');
 
-    resolveAttention(attentionResponse([]));
-    await waitFor(() => expect(screen.getByTestId('needs-attention-empty')).toBeInTheDocument());
+    resolveAttention(attentionResponse([attentionItem()]));
+    await screen.findByText('Checkout retries never fire');
+    expect(screen.getByRole('heading', { name: /Needs attention/ })).toHaveTextContent('Needs attention (1)');
   });
 
   it('keeps the heading and offers a retry when the attention read fails', async () => {
@@ -295,15 +286,6 @@ describe('Dashboard', () => {
     expect(screen.getByTestId('needs-attention-panel')).toBeInTheDocument();
     expect(screen.queryByTestId('needs-attention-empty')).not.toBeInTheDocument();
     expect(screen.getByRole('heading', { name: 'Needs attention' })).not.toHaveTextContent('(0)');
-  });
-
-  it('shows the attention list whatever the caller asked for when work is blocked', async () => {
-    mockAttention.mockResolvedValue(attentionResponse([attentionItem()]));
-    renderAttentionPanel();
-
-    await waitFor(() => expect(screen.getByTestId('needs-attention-panel')).toBeInTheDocument());
-    expect(screen.getByText('Needs attention')).toBeInTheDocument();
-    expect(screen.getByTestId('needs-attention-panel')).toHaveTextContent('Checkout retries never fire');
   });
 
   it('counts and lists attention items when work is blocked', async () => {
@@ -341,15 +323,7 @@ describe('Dashboard', () => {
     expect(within(running).getByRole('link', { name: 'View all' })).toHaveAttribute('href', '/tasks?status=active&repository=acme%2Fweb');
   });
 
-  it('restores the repository filter from the URL on load', async () => {
-    await renderLoadedDashboard('/?repository=acme%2Fapp');
-
-    expect(mockAttention).toHaveBeenCalledWith('acme/app');
-    expect(mockActive).toHaveBeenCalledWith('acme/app');
-    expect(mockStats).toHaveBeenCalledWith('acme/app', '7d');
-  });
-
-  it('coalesces a burst of activity per interested section without refetching or dismissing tips', async () => {
+  it('coalesces terminal and attention events per section and narrative without refetching or dismissing tips', async () => {
     // The clock is held still for the burst. Each frame is still delivered in
     // its own flush, so only the scheduler's coalescing can collapse them —
     // but on real timers a loaded machine can spend longer than the coalescing
@@ -358,28 +332,27 @@ describe('Dashboard', () => {
     // the window is stepped explicitly instead of raced against.
     vi.useFakeTimers();
     try {
-      renderDashboard();
+      render(dashboardTree());
       await act(async () => { await vi.advanceTimersByTimeAsync(10); });
       expect(screen.getByTestId('historical-stats-section')).toBeInTheDocument();
       expect(mockActive).toHaveBeenCalledTimes(1);
       expect(activityHandler).not.toBeNull();
+      expect(getDashboardNarrative).toHaveBeenCalledTimes(1);
 
       for (let index = 0; index < 10; index += 1) {
-        await push(activity('task', 'completed', { entityId: `task-${index}` }));
+        const change = (['completed', 'failed', 'cancelled', 'blocked'] as const)[index % 4];
+        await push(activity('task', change, { entityId: `task-${index}` }));
       }
       // Still inside the window: the burst has cost nothing yet.
       expect(mockActive).toHaveBeenCalledTimes(1);
 
       await act(async () => { await vi.advanceTimersByTimeAsync(200); });
-      expect(mockActive).toHaveBeenCalledTimes(2);
-      expect(mockStats).toHaveBeenCalledTimes(2);
-      expect(mockAttention).toHaveBeenCalledTimes(2);
-      expect(mockOutcomes).toHaveBeenCalledTimes(2);
+      expectSectionReads(2);
 
       // And nothing trails in behind the coalesced read.
       await act(async () => { await vi.advanceTimersByTimeAsync(1_000); });
-      expect(mockActive).toHaveBeenCalledTimes(2);
-      expect(mockStats).toHaveBeenCalledTimes(2);
+      expectSectionReads(2);
+      expect(getDashboardNarrative).toHaveBeenCalledTimes(2);
       expect(getUsageTips).toHaveBeenCalledTimes(1);
       expect(dismissUsageTip).not.toHaveBeenCalled();
     } finally {
@@ -387,24 +360,19 @@ describe('Dashboard', () => {
     }
   });
 
-  it('regenerates narrative once for a burst of terminal and attention events from the existing socket', async () => {
-    await renderLoadedDashboard();
-    await waitFor(() => expect(getDashboardNarrative).toHaveBeenCalledTimes(1));
-    for (const [index, change] of (['completed', 'failed', 'cancelled', 'blocked'] as const).entries()) {
-      await push(activity('task', change, { entityId: `finished-${index}` }));
-    }
-    await waitFor(() => expect(getDashboardNarrative).toHaveBeenCalledTimes(2));
-  });
-
-  it('does not regenerate narrative for progress updates or completions outside its repository', async () => {
+  it('restores the URL repository filter and ignores progress or completions outside it for narrative', async () => {
     // A second section read is not proof here: the sections coalesce in a
     // shorter window than the summary, so the summary's own window is what has
     // to be outlasted before "it never read again" means anything.
     vi.useFakeTimers();
     try {
-      renderDashboard('/?repository=acme/app');
+      render(dashboardTree('/?repository=acme/app'));
       await act(async () => { await vi.advanceTimersByTimeAsync(10); });
       expect(getDashboardNarrative).toHaveBeenCalledTimes(1);
+
+      expect(mockAttention).toHaveBeenCalledWith('acme/app');
+      expect(mockActive).toHaveBeenCalledWith('acme/app');
+      expect(mockStats).toHaveBeenCalledWith('acme/app', '7d');
 
       await push(activity('task', 'progressed', { entityId: 'progress' }));
       await push(activity('task', 'completed', { entityId: 'outside', repository: 'acme/web' }));
@@ -452,31 +420,24 @@ describe('Dashboard', () => {
     expect(screen.queryByText(/Reconnecting|Last updated/)).toBeNull();
   });
 
-  it('distinguishes no running work from a failed read of running work', async () => {
-    // The point of the section: the idle line and the unavailable line are not
-    // the same sentence, and neither one is reachable in the other's state.
-    expect(IDLE_RUNNING_MESSAGE).not.toBe(UNAVAILABLE_RUNNING_MESSAGE);
-
-    mockActive.mockResolvedValue(activeResponse([]));
-    const empty = await renderLoadedDashboard();
-    expect(screen.getByTestId('happening-now-section')).toHaveTextContent(IDLE_RUNNING_MESSAGE);
-    expect(screen.getByTestId('happening-now-section')).not.toHaveTextContent(UNAVAILABLE_RUNNING_MESSAGE);
-    // An empty list is normal operation, so it never offers a retry.
-    expect(screen.queryByRole('button', { name: 'Retry' })).not.toBeInTheDocument();
-    empty.unmount();
-
-    mockActive.mockRejectedValue(new Error('network down'));
-    renderDashboard();
-    await waitFor(() =>
-      expect(screen.getByTestId('happening-now-section')).toHaveTextContent(UNAVAILABLE_RUNNING_MESSAGE),
-    );
-    expect(screen.getByTestId('happening-now-section')).not.toHaveTextContent(IDLE_RUNNING_MESSAGE);
-    expect(screen.getByRole('button', { name: 'Retry' })).toBeInTheDocument();
+  it.each([
+    { state: 'idle', message: IDLE_RUNNING_MESSAGE, absent: UNAVAILABLE_RUNNING_MESSAGE, retries: 0 },
+    { state: 'unavailable', message: UNAVAILABLE_RUNNING_MESSAGE, absent: IDLE_RUNNING_MESSAGE, retries: 1 },
+  ])('distinguishes $state running work and offers only appropriate actions', async ({ state, message, absent, retries }) => {
+    // An empty list is normal operation; a failed read must offer a retry.
+    if (state === 'idle') mockActive.mockResolvedValue(activeResponse([]));
+    else mockActive.mockRejectedValue(new Error('network down'));
+    await renderLoadedDashboard();
+    const panel = screen.getByTestId('happening-now-section');
+    await within(panel).findByText(message);
+    expect(panel).not.toHaveTextContent(absent);
+    expect(within(panel).queryByRole('link', { name: 'View all' })).not.toBeInTheDocument();
+    expect(screen.queryAllByRole('button', { name: 'Retry' })).toHaveLength(retries);
   });
 
   it('retries a failed running-work read on request', async () => {
     mockActive.mockRejectedValueOnce(new Error('network down'));
-    renderDashboard();
+    render(dashboardTree());
     await waitFor(() =>
       expect(screen.getByTestId('happening-now-section')).toHaveTextContent('Unable to load running work'),
     );
