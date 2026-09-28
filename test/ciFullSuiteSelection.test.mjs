@@ -153,12 +153,13 @@ const narrowDecision = paths => classifyChanges({
  * `classifier` is a decision object, `'failure'` (the job failed before
  * writing outputs) or `'cancelled'`.
  */
-function simulateRun({ eventName = 'pull_request', draft = false, classifier, results = {}, coverage = 'success', cancelled = false }) {
+function simulateRun({ eventName = 'pull_request', draft = false, classifier, route = 'skipped', results = {}, coverage = 'success', cancelled = false }) {
     const github = {
         event_name: eventName,
         event: eventName === 'pull_request' ? { pull_request: { draft } } : {},
     };
-    const needs = {};
+    // `route` only selects runners; it is skipped unless overflow routing is on.
+    const needs = { route: { result: route, outputs: {} } };
     const context = { github, needs, cancelled };
 
     const classifyBlock = jobBlock(fullSuite, 'classify');
@@ -399,9 +400,9 @@ describe('Full Test Suite job selection', () => {
 
     test('backend shards and their coverage invariant never depend on the classifier', () => {
         const shard = jobBlock(fullSuite, 'shard');
-        assert.deepEqual(jobNeeds(shard), []);
+        assert.deepEqual(jobNeeds(shard), ['route']);
         assert.doesNotMatch(shard, /classify/);
-        assert.equal(jobCondition(shard), "${{ github.event_name == 'workflow_dispatch' || !github.event.pull_request.draft }}");
+        assert.equal(jobCondition(shard), "${{ !cancelled() && (github.event_name == 'workflow_dispatch' || !github.event.pull_request.draft) }}");
         assert.match(shard, /\n\s+npm ci\n|run: npm ci\n/, 'every shard installs dependencies');
         assert.match(shard, /npm run test:prepare\n/, 'every shard enforces test preparation');
         assert.match(fullSuite, /PROPR_TEST_SHARD_COUNT: '4'\n/);
@@ -410,6 +411,14 @@ describe('Full Test Suite job selection', () => {
         for (const classifier of [narrowDecision(PR_2513), narrowDecision(['docs/docs/intro.md']), 'failure']) {
             assert.equal(simulateRun({ classifier }).started.shard, true);
         }
+        // Runner selection cannot hold the shards back either: every outcome
+        // of the route job starts them (a failed or skipped route means hosted).
+        for (const route of ['success', 'failure', 'skipped']) {
+            assert.equal(simulateRun({ classifier: narrowDecision(PR_2513), route }).started.shard, true, route);
+            assert.equal(simulateRun({ classifier: narrowDecision(PR_2513), route }).gate.status, 0, route);
+        }
+        assert.equal(simulateRun({ classifier: narrowDecision(PR_2513), route: 'success', cancelled: true }).started.shard, false,
+            'superseded-run cancellation still stops the shards');
     });
 
     test('gated jobs skip only on an explicit false and keep run cancellation', () => {
@@ -418,7 +427,7 @@ describe('Full Test Suite job selection', () => {
             assert.ok(condition.includes(`needs.classify.outputs.${surface} != 'false'`), job);
             assert.ok(!condition.includes(`needs.classify.outputs.${surface} == 'true'`), job);
             assert.ok(condition.startsWith('${{ !cancelled() &&'), job);
-            assert.deepEqual(jobNeeds(jobBlock(fullSuite, job)), ['classify']);
+            assert.deepEqual(jobNeeds(jobBlock(fullSuite, job)), job === 'docs' ? ['classify', 'route'] : ['classify']);
         }
         const classify = jobBlock(fullSuite, 'classify');
         assert.match(classify, /uses: \.\/\.github\/actions\/classify-changes\n/);
