@@ -89,10 +89,12 @@ export interface DashboardActiveResponse {
 }
 
 /**
- * One successfully completed run, newest first. Failures are attention items,
+ * One entity’s newest successful outcome. Failures are attention items,
  * and cancelled or skipped runs are not listed at all.
  */
 export interface OutcomeItem {
+  /** Completed task outcomes rolled up; absent on older servers. */
+  eventCount?: number;
   id: string;
   taskId: string;
   repository: string;

@@ -223,3 +223,64 @@ test('a completion shows its own run\'s recap and score, never an earlier run\'s
     [minutesAgo(80), 'Added retries across 3 files and opened a pull request.'],
   );
 });
+
+test('entity rollup precedes the limit and keeps the newest recap and complete event count', async () => {
+  for (let index = 0; index < 12; index++) {
+    await seedTask({ taskId: `fix-${index}`, issueNumber: 2583, prNumber: 2583, taskType: 'pr-comment', title: 'Keep plan revision history', states: [
+      { state: 'completed', timestamp: minutesAgo(index + 1), metadata: { notificationRecap: `Revision ${index}` } },
+    ] });
+  }
+  await seedTask({ taskId: 'other-pr', issueNumber: 2565, prNumber: 2565, states: [{ state: 'completed', timestamp: minutesAgo(40) }] });
+  await seedTask({ taskId: 'skip', issueNumber: 2583, prNumber: 2583, states: [{ state: 'completed', timestamp: minutesAgo(0), reason: 'PR comment job skipped: no work' }] });
+  // Repeated terminal bookkeeping still counts as one task outcome.
+  await database('task_history').insert({ task_id: 'fix-0', state: 'completed', timestamp: minutesAgo(0.5), metadata: '{}' });
+  const response = await call(routes().getOutcomes, { limit: '2' });
+  const items = response.body.items as Array<Record<string, unknown>>;
+  assert.deepEqual(items.map(item => [item.prNumber, item.eventCount]), [[2583, 12], [2565, 1]]);
+  assert.equal(items[0].taskId, 'fix-0');
+  assert.equal(items[0].detail, 'Revision 0');
+  const searched = await call(routes().getOutcomes, { search: 'revision', limit: '1' });
+  assert.equal((searched.body.items as Array<Record<string, unknown>>)[0].eventCount, 12);
+});
+
+test('rollup resolves PR identity from persisted, legacy, job and result records', async () => {
+  const seeds = [
+    { taskId: 'explicit', issueNumber: 10, prNumber: 900 },
+    { taskId: 'pr-comment-legacy', issueNumber: 900 },
+    { taskId: 'pr-comments-legacy', issueNumber: 900 },
+    { taskId: 'job-pr', issueNumber: 10 },
+    { taskId: 'result-pr', issueNumber: 10 },
+  ];
+  for (const [index, seed] of seeds.entries()) {
+    await seedTask({ ...seed, title: 'Preserve revision history', states: [{ state: 'completed', timestamp: minutesAgo(index + 1) }] });
+  }
+  await database('tasks').where({ task_id: 'job-pr' }).update({ initial_job_data: JSON.stringify({ pullRequestNumber: 900 }) });
+  await database('tasks').where({ task_id: 'result-pr' }).update({ final_result: JSON.stringify({ postProcessing: { pr: { number: 900 } } }) });
+  // Repository and entity kind must prevent accidental collisions.
+  await seedTask({ taskId: 'other-repo', repository: 'acme/app', prNumber: 900, states: [{ state: 'completed', timestamp: minutesAgo(20) }] });
+  await seedTask({ taskId: 'issue-900', issueNumber: 900, states: [{ state: 'completed', timestamp: minutesAgo(30) }] });
+  const items = (await call(routes().getOutcomes)).body.items as Array<Record<string, unknown>>;
+  assert.deepEqual(items.map(item => item.eventCount), [5, 1, 1]);
+  const scoped = (await call(routes().getOutcomes, { repository: 'acme/app' })).body.items as Array<Record<string, unknown>>;
+  assert.deepEqual(scoped.map(item => item.taskId), ['other-repo']);
+});
+
+test('goal and issue fallback identities roll up while anonymous tasks remain distinct', async () => {
+  for (const taskId of ['goal-a', 'goal-b', 'issue-a', 'issue-b', 'anonymous-a', 'anonymous-b']) {
+    await seedTask({ taskId, issueNumber: taskId.startsWith('issue') ? 42 : null, states: [{ state: 'completed', timestamp: minutesAgo(1) }] });
+  }
+  await database('tasks').whereIn('task_id', ['goal-a', 'goal-b']).update({ initial_job_data: JSON.stringify({ goalId: 'goal-1', title: 'A goal' }) });
+  await database('tasks').where({ task_id: 'anonymous-a' }).update({ initial_job_data: '{invalid', final_result: '{invalid' });
+  const items = (await call(routes().getOutcomes)).body.items as Array<Record<string, unknown>>;
+  assert.deepEqual(items.map(item => item.eventCount), [2, 2, 1, 1]);
+});
+
+test('an untitled latest event keeps the entity title and its own outcome', async () => {
+  await seedTask({ taskId: 'named', prNumber: 900, title: 'Handle "retry budget" failures', states: [{ state: 'completed', timestamp: minutesAgo(10) }] });
+  await seedTask({ taskId: 'untitled', prNumber: 900, states: [{ state: 'completed', timestamp: minutesAgo(1), metadata: { notificationRecap: 'Fixed remaining checks' } }] });
+  await database('tasks').where({ task_id: 'untitled' }).update({ initial_job_data: '{}' });
+  const items = (await call(routes().getOutcomes, { search: '"retry budget"' })).body.items as Array<Record<string, unknown>>;
+  assert.equal(items.length, 1);
+  assert.deepEqual([items[0].taskId, items[0].title, items[0].detail, items[0].eventCount],
+    ['untitled', 'Handle "retry budget" failures', 'Fixed remaining checks', 2]);
+});

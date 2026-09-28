@@ -1,5 +1,5 @@
 /**
- * Completed: a flat feed of work that finished, newest first.
+ * Completed: one row per entity, showing its newest successful outcome.
  *
  * Every row here completed, so no row says so — a status column that repeats
  * one word down the whole feed is noise. Failures are not listed: they are in
@@ -76,6 +76,7 @@ const CompletedRow: React.FC<{ item: OutcomeItem }> = ({ item }) => {
             )}
           />
           <RowTitle type={work.type}>{title}</RowTitle>
+          {(item.eventCount ?? 1) > 1 && <RowDetail>↳ {item.eventCount} events rolled up</RowDetail>}
           {item.detail && item.detail !== title && <RowDetail>{item.detail}</RowDetail>}
         </span>
         {/*

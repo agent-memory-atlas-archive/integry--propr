@@ -82,8 +82,9 @@ export interface ActiveItem {
   updatedAt: string;
 }
 
-/** One successfully completed run. Failures are attention items, not outcomes. */
+/** The newest successful outcome for an entity, with its completed task count. */
 export interface OutcomeItem {
+  eventCount: number;
   id: string;
   taskId: string;
   repository: string;
@@ -120,6 +121,7 @@ function toOutcomeItem(row: CompletedRow): OutcomeItem {
     prNumber: row.prNumber,
     taskType: row.taskType,
     title: row.title,
+    eventCount: row.eventCount,
     detail: row.recap,
     score: row.reviewScore,
     occurredAt: row.stateTimestamp,

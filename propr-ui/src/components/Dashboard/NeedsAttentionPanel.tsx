@@ -16,7 +16,7 @@
  * heading, holding the same geometry as four rows would.
  */
 
-import React, { useCallback } from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
 import { ShieldCheck } from 'lucide-react';
 import { getDashboardAttention, type AttentionItem, type DashboardAttentionResponse } from '../../api/dashboardApi';
 import {
@@ -24,6 +24,8 @@ import {
   RowLink,
   RowTitle,
   SectionError,
+  SectionFooter,
+  SectionFooterButton,
   SectionHeading,
   SectionLink,
   SectionSkeleton,
@@ -41,7 +43,7 @@ import {
 } from './sectionState';
 import { splitWorkTitle, type WorkTitle } from './workTitle';
 
-/** How many items the panel shows before handing off to the full list. */
+/** How many items the panel shows before expanding in place. */
 const VISIBLE_ITEMS = 3;
 
 const REASON_LABELS: Record<AttentionItem['kind'], string> = {
@@ -110,8 +112,9 @@ const AttentionRow: React.FC<{ item: AttentionItem }> = ({ item }) => {
   const href = actionHref(item);
   const work = itemTitle(item);
   const external = isExternalHref(href);
+  const stale = Date.now() - Date.parse(item.since) > 14 * 86_400_000;
   return (
-    <li>
+    <li className={stale ? 'bg-slate-50/70' : undefined}>
       {/*
         One schema for a work row, at every width and in every section.
 
@@ -145,6 +148,7 @@ const AttentionRow: React.FC<{ item: AttentionItem }> = ({ item }) => {
           className="min-w-0 justify-self-end truncate whitespace-nowrap text-gray-500 lg:col-start-1 lg:row-start-3 lg:justify-self-start"
         >
           Waiting {elapsedLabel(item.since)}
+          {stale && <span className="ml-1.5 font-medium text-slate-500">[Stale]</span>}
         </time>
         <span className="flex min-w-0 items-center gap-1.5 lg:col-start-2 lg:row-start-1">
           <RepositoryLabel repository={item.repository} />
@@ -193,6 +197,8 @@ export const NeedsAttentionPanel: React.FC<DashboardSectionProps> = ({
   repository,
   refreshToken,
 }) => {
+  const [showAll, setShowAll] = useState(false);
+  useEffect(() => setShowAll(false), [repository]);
   const load = useCallback(() => getDashboardAttention(repository), [repository]);
   const { data, error, loading, reload } = useDashboardSection<DashboardAttentionResponse>(
     load,
@@ -204,7 +210,8 @@ export const NeedsAttentionPanel: React.FC<DashboardSectionProps> = ({
 
   const items = data?.items ?? [];
   const unavailable = Boolean(error) && items.length === 0;
-  const visible = items.slice(0, VISIBLE_ITEMS);
+  const visible = showAll ? items : items.slice(0, VISIBLE_ITEMS);
+  const overflowCount = items.length - VISIBLE_ITEMS;
 
   /*
     Heading first, always — including while the first read is in flight and
@@ -239,6 +246,15 @@ export const NeedsAttentionPanel: React.FC<DashboardSectionProps> = ({
             <AttentionRow key={item.id} item={item} />
           ))}
         </ul>
+      )}
+      {!loading && overflowCount > 0 && (
+        <SectionFooter data-testid="needs-attention-footer">
+          <span className="ml-auto">
+            <SectionFooterButton expanded={showAll} onClick={() => setShowAll(value => !value)}>
+              {showAll ? 'Show fewer' : `Show ${overflowCount} more`}
+            </SectionFooterButton>
+          </span>
+        </SectionFooter>
       )}
     </section>
   );

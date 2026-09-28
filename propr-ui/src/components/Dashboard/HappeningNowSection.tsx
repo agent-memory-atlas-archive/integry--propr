@@ -236,7 +236,9 @@ export const HappeningNowSection: React.FC<DashboardSectionProps> = ({ repositor
 
   const heading = (
     <SectionHeading id="happening-now-heading" title="Happening now" count={data?.counts.running ?? null}>
-      <SectionLink to={filteredTasksHref('active', repository)}>View all</SectionLink>
+      {(data?.counts.running ?? 0) > 0 && (
+        <SectionLink to={filteredTasksHref('active', repository)}>View all</SectionLink>
+      )}
     </SectionHeading>
   );
 

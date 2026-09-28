@@ -215,6 +215,54 @@ describe('Dashboard', () => {
     expect(within(panel).queryByRole('link', { name: 'View all' })).not.toBeInTheDocument();
   });
 
+  it('expands all seven attention items and collapses them with an accurate footer', async () => {
+    mockAttention.mockResolvedValue(attentionResponse(Array.from({ length: 7 }, (_, index) =>
+      attentionItem({ id: `attention-${index}`, title: `Blocked work ${index}` }))));
+    renderAttentionPanel();
+    const panel = screen.getByTestId('needs-attention-panel');
+    const more = await within(panel).findByRole('button', { name: 'Show 4 more' });
+    expect(within(panel).getByRole('heading')).toHaveTextContent('Needs attention (7)');
+    expect(within(panel).getAllByRole('listitem')).toHaveLength(3);
+    fireEvent.click(more);
+    expect(within(panel).getAllByRole('listitem')).toHaveLength(7);
+    expect(more).toHaveAttribute('aria-expanded', 'true');
+    fireEvent.click(within(panel).getByRole('button', { name: 'Show fewer' }));
+    expect(within(panel).getAllByRole('listitem')).toHaveLength(3);
+  });
+
+  it('keeps old waits relative and flags only waits over fourteen days as stale', async () => {
+    const now = Date.now();
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(now);
+    try {
+      mockAttention.mockResolvedValue(attentionResponse([50, 14, 15].map(days =>
+        attentionItem({ id: `age-${days}`, since: new Date(now - days * 86_400_000).toISOString() }))));
+      renderAttentionPanel();
+      const panel = screen.getByTestId('needs-attention-panel');
+      await within(panel).findByText('Waiting 50d');
+      expect(within(panel).getAllByText('[Stale]')).toHaveLength(2);
+      expect(within(panel).getByText('Waiting 14d').parentElement).not.toHaveTextContent('[Stale]');
+      expect(panel).not.toHaveTextContent(/Waiting \d+\/\d+\//);
+    } finally {
+      clock.mockRestore();
+    }
+  });
+
+  it('hides the running View all link when no work is running', async () => {
+    mockActive.mockResolvedValue(activeResponse());
+    await renderLoadedDashboard();
+    const panel = screen.getByTestId('happening-now-section');
+    await within(panel).findByText('No work running');
+    expect(within(panel).queryByRole('link', { name: 'View all' })).not.toBeInTheDocument();
+  });
+
+  it('discloses rolled-up completion events on the entity row', async () => {
+    mockOutcomes.mockResolvedValue(outcomesResponse([outcomeItem({ eventCount: 5 })]));
+    await renderLoadedDashboard();
+    const list = await screen.findByTestId('completed-list');
+    expect(within(list).getAllByRole('listitem')).toHaveLength(1);
+    expect(list).toHaveTextContent('5 events rolled up');
+  });
+
   it('draws the attention heading before its first read lands, so the column never jumps', async () => {
     let resolveAttention: (value: ReturnType<typeof attentionResponse>) => void = () => {};
     mockAttention.mockReturnValue(new Promise(resolve => { resolveAttention = resolve; }));

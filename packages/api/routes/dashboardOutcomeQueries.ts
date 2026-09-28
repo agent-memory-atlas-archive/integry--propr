@@ -1,7 +1,7 @@
 /**
  * Recorded completions — the dashboard's second source of truth.
  *
- * The "Completed" feed lists runs that finished successfully, newest first.
+ * The "Completed" feed lists one outcome per entity, newest first.
  * Completions are recorded events, so they are read from task history rather
  * than from a task's current state: a run that completed and is now being
  * followed up still completed.
@@ -26,6 +26,8 @@ import {
 } from './dashboardQueries.js';
 
 export interface CompletedRow extends DashboardTaskRow {
+  /** Completed task outcomes rolled into this entity, excluding duplicate transitions. */
+  eventCount: number;
   /**
    * What the run actually produced, from the recap recorded on its completion,
    * or null when the only thing recorded is that it finished.
@@ -37,17 +39,6 @@ export interface CompletedRow extends DashboardTaskRow {
 
 /** Candidates read per page while a title search looks for its matches. */
 const SEARCH_PAGE_SIZE = 500;
-
-/**
- * Searches whose every character appears verbatim wherever it is serialised.
- *
- * JSON escapes quotes, backslashes and control characters, some encoders also
- * escape `/`, `'`, `<`, `>` and `&` or everything outside ASCII, and `%` and
- * `_` are `LIKE` wildcards. A title containing a search made only of the
- * characters below therefore contains it in the raw job data too, so the raw
- * text can narrow the candidates without dropping a title that matches.
- */
-const VERBATIM_SEARCH = /^[a-z0-9 .,:;!?()#@+=*~^$|{}[\]`-]+$/;
 
 /**
  * A completion recorded for a job that decided there was nothing to do. It is
@@ -171,18 +162,66 @@ function meaningfulRecap(recap: string | null): string | null {
 }
 
 /**
- * Recent completions, newest first, optionally narrowed to titles containing
- * `search`.
+ * Group before limiting or searching so retries cannot crowd other entities
+ * off the page. Keep the newest outcome (and its own recap/score), with the
+ * count of completed tasks behind it. Duplicate terminal transitions within a
+ * task and skipped work remain excluded by terminalTransitionQuery.
  *
- * The title is resolved from the job data a run was queued with, so it is
- * matched after decoding rather than in SQL: a word that only appears in an
- * issue body must not make an unrelated run look like a title match, and an
- * escaped quote in the stored JSON must not hide one that does. The raw job
- * data only narrows the candidates when that cannot drop a match (see
- * `VERBATIM_SEARCH`), and candidates are read page by page until the limit is
- * filled or history runs out, so runs that match only in their bodies cannot
- * crowd an older title match out of the result.
+ * Identity follows mapTaskRow's PR resolution, including legacy PR task IDs
+ * and PRs recorded only in final_result. Goal and issue keys are fallbacks;
+ * repository and entity kind are both part of the partition.
  */
+function entityCompletions(db: Knex, repository: string): Knex.QueryBuilder {
+  const completed = terminalTransitionQuery(db, repository, 'completed', { excludeReasonLike: SKIPPED_REASON_PATTERN })
+    .select(TASK_COLUMNS);
+  const validJob = "CASE WHEN json_valid(initial_job_data) THEN initial_job_data ELSE '{}' END";
+  const validResult = "CASE WHEN json_valid(final_result) THEN final_result ELSE '{}' END";
+  const numbered = db.from('completed').select('*').select(db.raw(`
+    COALESCE(pr_number,
+      CASE WHEN json_type(${validJob}, '$.pullRequestNumber') IN ('integer', 'real')
+        THEN json_extract(${validJob}, '$.pullRequestNumber') END,
+      CASE WHEN task_type IN ('pr-comment', 'review', 'merge_conflict')
+        OR substr(task_id, 1, 11) = 'pr-comment-'
+        OR substr(task_id, 1, 12) = 'pr-comments-'
+        THEN issue_number END,
+      CASE WHEN json_type(${validResult}, '$.postProcessing.pr.number') IN ('integer', 'real')
+        THEN json_extract(${validResult}, '$.postProcessing.pr.number') END
+    ) AS entity_pr_number,
+    CASE WHEN json_type(${validJob}, '$.goalId') = 'text'
+      THEN NULLIF(trim(json_extract(${validJob}, '$.goalId')), '') END AS entity_goal_id,
+    COALESCE(
+      CASE WHEN json_type(${validJob}, '$.title') = 'text'
+        THEN NULLIF(trim(json_extract(${validJob}, '$.title')), '') END,
+      CASE WHEN json_type(${validJob}, '$.issueRef.title') = 'text'
+        THEN NULLIF(trim(json_extract(${validJob}, '$.issueRef.title')), '') END,
+      CASE WHEN json_type(${validJob}, '$.branchName') = 'text'
+        THEN NULLIF(trim(json_extract(${validJob}, '$.branchName')), '') END
+    ) AS resolved_title
+  `));
+  const entities = db.from('numbered').select('*').select(db.raw(`
+    CASE
+      WHEN entity_pr_number IS NOT NULL THEN 'pr:' || entity_pr_number
+      WHEN entity_goal_id IS NOT NULL THEN 'goal:' || entity_goal_id
+      WHEN issue_number IS NOT NULL THEN 'issue:' || issue_number
+      ELSE 'task:' || task_id
+    END AS entity_key
+  `));
+  const ranked = db.from('entities').select('*').select(db.raw(`
+    ROW_NUMBER() OVER (
+      PARTITION BY repository, entity_key ORDER BY state_timestamp DESC, task_id DESC
+    ) AS entity_rank,
+    COUNT(*) OVER (PARTITION BY repository, entity_key) AS event_count,
+    FIRST_VALUE(resolved_title) OVER (
+      PARTITION BY repository, entity_key
+      ORDER BY (resolved_title IS NULL), state_timestamp DESC, task_id DESC
+    ) AS entity_title
+  `));
+  return db.with('completed', completed).with('numbered', numbered)
+    .with('entities', entities).with('ranked', ranked)
+    .from('ranked').where('entity_rank', 1);
+}
+
+/** Recent entity outcomes, optionally narrowed by their decoded title. */
 export async function loadCompletedRows(
   db: Knex,
   repository: string,
@@ -190,48 +229,42 @@ export async function loadCompletedRows(
 ): Promise<CompletedRow[]> {
   const limit = Math.min(Math.max(options.limit ?? 20, 1), 100);
   const search = options.search?.trim().toLowerCase() ?? '';
-
-  const candidates = (after: RawTaskRow | null, pageSize: number): Knex.QueryBuilder => {
-    // Skipped completions are left out before each task's latest completion is
-    // chosen: a follow-up that found nothing to do must not hide the earlier
-    // run that did the work.
-    const query = terminalTransitionQuery(db, repository, 'completed', { excludeReasonLike: SKIPPED_REASON_PATTERN })
-      .select(TASK_COLUMNS)
-      .orderBy([{ column: 'h.timestamp', order: 'desc' }, { column: 't.task_id', order: 'desc' }])
+  type EntityRow = RawTaskRow & { event_count: number; entity_title: string | null };
+  const candidates = (after: EntityRow | null, pageSize: number): Knex.QueryBuilder => {
+    const query = entityCompletions(db, repository)
+      .select('*')
+      .orderBy([{ column: 'state_timestamp', order: 'desc' }, { column: 'task_id', order: 'desc' }])
       .limit(pageSize);
-    if (search && VERBATIM_SEARCH.test(search)) query.where('t.initial_job_data', 'like', `%${search}%`);
     if (after) {
       query.where(function (this: Knex.QueryBuilder) {
-        this.where('h.timestamp', '<', after.state_timestamp)
+        this.where('state_timestamp', '<', after.state_timestamp)
           .orWhere(function (this: Knex.QueryBuilder) {
-            this.where('h.timestamp', '=', after.state_timestamp).andWhere('t.task_id', '<', after.task_id);
+            this.where('state_timestamp', '=', after.state_timestamp).andWhere('task_id', '<', after.task_id);
           });
       });
     }
     return query;
   };
 
-  let mapped: DashboardTaskRow[];
-  if (!search) {
-    mapped = (await candidates(null, limit) as unknown as RawTaskRow[]).map(mapTaskRow);
-  } else {
-    mapped = [];
-    let after: RawTaskRow | null = null;
-    while (mapped.length < limit) {
-      const page = await candidates(after, SEARCH_PAGE_SIZE) as unknown as RawTaskRow[];
-      for (const row of page) {
-        const mappedRow = mapTaskRow(row);
-        if ((mappedRow.title ?? '').toLowerCase().includes(search)) mapped.push(mappedRow);
+  const mapped: Array<DashboardTaskRow & { eventCount: number }> = [];
+  let after: EntityRow | null = null;
+  const pageSize = search ? SEARCH_PAGE_SIZE : limit;
+  do {
+    const page = await candidates(after, pageSize) as EntityRow[];
+    for (const row of page) {
+      const mappedRow = { ...mapTaskRow(row), title: row.entity_title };
+      if (!search || (mappedRow.title ?? '').toLowerCase().includes(search)) {
+        mapped.push({ ...mappedRow, eventCount: Number(row.event_count) });
       }
-      if (page.length < SEARCH_PAGE_SIZE) break;
-      after = page[page.length - 1];
     }
-    mapped = mapped.slice(0, limit);
-  }
-  if (mapped.length === 0) return [];
+    if (page.length < pageSize) break;
+    after = page[page.length - 1];
+  } while (mapped.length < limit);
+  const visible = mapped.slice(0, limit);
+  if (visible.length === 0) return [];
 
-  const details = await loadCompletionDetails(db, mapped);
-  return mapped.map(row => {
+  const details = await loadCompletionDetails(db, visible);
+  return visible.map(row => {
     const detail = details.get(row.taskId) ?? { recap: null, commandMode: null };
     if (isReviewRun(row, detail.commandMode)) {
       const review = splitReviewRecap(detail.recap);

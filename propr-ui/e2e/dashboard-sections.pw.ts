@@ -432,3 +432,55 @@ test('the repository filter narrows every section and survives a reload', async 
   await page.reload();
   await expect(page.getByRole('button', { name: /docs/ })).toBeVisible();
 });
+
+for (const width of [1440, 390]) {
+  test(`dashboard cleanup shows entity rollups, stale waits and the attention footer at ${width}px`, async ({ page }) => {
+    await page.setViewportSize({ width, height: 1000 });
+    const waiting = Array.from({ length: 7 }, (_, index) => ({
+      ...attention[1], id: `plan-issue:${index}`, prNumber: 735 - index,
+      title: ['Add live model validation defaults and limits', 'Add VERSION constant', 'Add project version constant'][index % 3],
+      since: minutesAgo((50 + index) * 24 * 60),
+    }));
+    await fixture(page, waiting, []);
+    await page.route('**/api/dashboard/outcomes?**', route => route.fulfill({ json: {
+      repository: 'all', limit: 50,
+      items: outcomes.slice(0, 2).map((item, index) => ({ ...item, eventCount: index === 0 ? 3 : 5 })),
+    } }));
+    await page.route('**/api/dashboard/active?**', route => route.fulfill({ json: {
+      repository: 'all', running: [], queued: [], queue: { queuedCount: 0, reason: null }, counts: { running: 0, queued: 0 },
+    } }));
+    await page.route('**/api/dashboard/narrative?**', route => route.fulfill({ json: {
+      repository: 'all', enabled: true,
+      summary: 'No work is running. Two pull requests have recent completed outcomes. Seven older review requests are waiting for attention.',
+    } }));
+    await page.goto('/');
+    const active = page.getByTestId('happening-now-section');
+    await expect(active).toContainText('No work running');
+    await expect(active.getByRole('link', { name: 'View all' })).toHaveCount(0);
+    const completed = page.getByTestId('completed-list');
+    await expect(completed.locator('li')).toHaveCount(2);
+    await expect(completed).toContainText('5 events rolled up');
+    const panel = page.getByTestId('needs-attention-panel');
+    await expect(panel.getByRole('heading')).toHaveText('Needs attention (7)');
+    await expect(panel).toContainText('Waiting 50d');
+    await expect(panel.getByText('[Stale]', { exact: true })).toHaveCount(3);
+    const more = panel.getByRole('button', { name: 'Show 4 more' });
+    await expect(more).toBeVisible();
+    const summary = page.getByTestId('dashboard-summary');
+    await expect(summary.getByRole('button', { name: 'Pause automatic summary updates' }))
+      .toHaveAttribute('title', 'Pause automatic summary updates');
+    await expect(summary.getByRole('button', { name: 'Refresh activity summary' }))
+      .toHaveAttribute('title', 'Refresh activity summary');
+    expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(width);
+    if (process.env.PROPR_CAPTURE_PREVIEWS) {
+      const directory = path.resolve('../.propr/previews');
+      await mkdir(directory, { recursive: true });
+      // Only the dashboard itself: omit unrelated navigation and account data.
+      await page.locator('main').screenshot({ animations: 'disabled', path: path.join(directory, `dashboard-cleanup-${width}.png`) });
+    }
+    await more.click();
+    await expect(panel.locator('li')).toHaveCount(7);
+    await panel.getByRole('button', { name: 'Show fewer' }).click();
+    await expect(panel.locator('li')).toHaveCount(3);
+  });
+}

@@ -189,9 +189,11 @@ export function useNowTick(intervalMs = 15_000): number {
 
 /**
  * Elapsed wall-clock time since a timestamp, phrased as a duration.
- * `formatRelativeTime` supplies the wording; only the "ago" framing is dropped.
+ * Older waits stay in days instead of falling back to a calendar date.
  */
 export function elapsedLabel(since: string): string {
+  const days = Math.floor((Date.now() - Date.parse(since)) / 86_400_000);
+  if (days >= 14) return `${days}d`;
   const relative = formatRelativeTime(since);
   if (!relative || relative === 'Just now') return 'less than a minute';
   return relative.replace(/ ago$/, '');

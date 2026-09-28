@@ -66,6 +66,8 @@ describe('dashboard narrative', () => {
 
   it('persists pause across mounts, suppresses automatic updates, and permits forced refresh', async () => {
     const view = await mount();
+    expect(screen.getByRole('button', { name: 'Pause automatic summary updates' })).toHaveAttribute('title', 'Pause automatic summary updates');
+    expect(screen.getByRole('button', { name: 'Refresh activity summary' })).toHaveAttribute('title', 'Refresh activity summary');
     fireEvent.click(screen.getByRole('button', { name: 'Pause automatic summary updates' }));
     view.rerender(<DashboardSummary repository="all" activityToken={1} />);
     await tick();
