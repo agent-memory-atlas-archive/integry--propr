@@ -134,7 +134,7 @@ test('the activity briefing leads with specific live progress before recent comp
   const summary = page.getByTestId('dashboard-summary');
   await expect(summary).toContainText('Cache repository icons across dashboard sections');
   await expect(summary).toContainText('running tests at step 3 of 5');
-  await expect(summary).toContainText('PR #2456');
+  await expect(summary).toContainText('workspace#2456');
   const prose = (await summary.textContent()) ?? '';
   expect(prose.indexOf('running tests')).toBeLessThan(prose.indexOf('recently completed'));
   expect(prose).not.toMatch(/past 24 hours|success rate|spend|needs attention/i);
@@ -504,5 +504,42 @@ for (const width of [1440, 390]) {
     await expect(panel.locator('li')).toHaveCount(7);
     await panel.getByRole('button', { name: 'Show fewer' }).click();
     await expect(panel.locator('li')).toHaveCount(3);
+  });
+}
+
+for (const width of [1440, 390]) {
+  test(`summary telemetry stays compact with live controls at ${width}px`, async ({ page }) => {
+    await page.setViewportSize({ width, height: 900 });
+    await fixture(page);
+    await page.route('**/api/dashboard/narrative?**', route => route.fulfill({ json: {
+      repository: 'all', enabled: true,
+      summary: 'Implementing example/workspace pull request #2587: Consolidating overlapping tests in Dashboard.test.tsx and verifying the dashboard activity refresh behavior.',
+    } }));
+    await page.goto('/');
+    const summary = page.getByTestId('dashboard-summary');
+    await expect(summary.getByText('Live', { exact: true })).toBeVisible();
+    await expect(summary).toHaveCSS('height', '40px');
+    await expect(summary.locator('p')).toHaveCSS('text-overflow', 'ellipsis');
+    await expect(summary.locator('code').first()).toHaveText('workspace#2587');
+    await expect(summary.locator('strong').first()).toHaveText('Implementing');
+    await page.clock.pauseAt(new Date(now + 10_000));
+    await page.clock.runFor(4000);
+    await expect(summary).toContainText(/Updated \d+s ago/);
+    expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(width);
+    const directory = path.resolve('../.propr/previews');
+    await mkdir(directory, { recursive: true });
+    await summary.screenshot({ animations: 'disabled', path: path.join(directory, `summary-telemetry-live-${width}.png`) });
+    await summary.getByRole('button', { name: 'Pause automatic summary updates' }).click();
+    await expect(summary.getByText('Paused', { exact: true })).toBeVisible();
+    await summary.getByRole('button', { name: 'Refresh activity summary' }).click();
+    await expect(summary).toContainText('Updated 0s ago');
+    await summary.screenshot({ animations: 'disabled', path: path.join(directory, `summary-telemetry-paused-${width}.png`) });
+    await page.route('**/api/dashboard/narrative?**', route => route.fulfill({ json: {
+      repository: 'all', enabled: true, summary: 'No work is active, and there are no recent completions.',
+    } }));
+    await summary.getByRole('button', { name: 'Resume automatic summary updates' }).click();
+    await summary.getByRole('button', { name: 'Refresh activity summary' }).click();
+    await expect(summary.getByText('Idle', { exact: true })).toBeVisible();
+    await summary.screenshot({ animations: 'disabled', path: path.join(directory, `summary-telemetry-idle-${width}.png`) });
   });
 }

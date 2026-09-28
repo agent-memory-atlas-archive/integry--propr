@@ -27,6 +27,51 @@ beforeEach(() => {
 afterEach(() => { cleanup(); vi.useRealTimers(); });
 
 describe('dashboard narrative', () => {
+  it('ticks freshness without requests and retains its age after failures or while paused', async () => {
+    const view = await mount();
+    expect(screen.getByText('Live')).toBeInTheDocument();
+    expect(screen.getByText('Updated 0s ago')).toBeInTheDocument();
+    await act(async () => { await vi.advanceTimersByTimeAsync(4000); });
+    expect(screen.getByText('Updated 4s ago')).toBeInTheDocument();
+    expect(narrative).toHaveBeenCalledTimes(1);
+    narrative.mockRejectedValueOnce(new Error('Offline'));
+    view.rerender(<DashboardSummary repository="all" activityToken={1} />);
+    await tick();
+    expect(screen.getByText('Idle')).toBeInTheDocument();
+    expect(screen.getByText('Updated 4s ago')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Pause automatic summary updates' }));
+    expect(screen.getByText('Paused')).toBeInTheDocument();
+    await act(async () => { await vi.advanceTimersByTimeAsync(2000); });
+    expect(screen.getByText('Updated 6s ago')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh activity summary' }));
+    await act(async () => {});
+    expect(screen.getByText('Updated 0s ago')).toBeInTheDocument();
+    expect(screen.getByText('Paused')).toBeInTheDocument();
+    view.unmount();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('formats actions, repository references and files while keeping the full summary accessible', async () => {
+    const summary = 'Implementing integry/propr pull request #2587: Consolidating tests in Dashboard.test.tsx';
+    narrative.mockResolvedValueOnce({ ...response, summary });
+    await mount();
+    expect(screen.getByText('Implementing').tagName).toBe('STRONG');
+    expect(screen.getByText('propr#2587').tagName).toBe('CODE');
+    expect(screen.getByText('Dashboard.test.tsx').tagName).toBe('CODE');
+    expect(screen.getByTitle(summary)).toHaveTextContent('Implementing propr#2587: Consolidating tests in Dashboard.test.tsx');
+  });
+
+  it('shows idle for an empty activity summary and clears freshness when repository scope changes', async () => {
+    narrative.mockResolvedValueOnce({ ...response, summary: 'No work is active, and there are no recent completions.' });
+    const view = await mount();
+    expect(screen.getByText('Idle')).toBeInTheDocument();
+    narrative.mockResolvedValueOnce({ ...response, summary: null });
+    view.rerender(<DashboardSummary repository="acme/web" activityToken={0} />);
+    await act(async () => {});
+    expect(screen.getByText('Awaiting data')).toBeInTheDocument();
+    expect(screen.queryByText(/Updated/)).not.toBeInTheDocument();
+  });
+
   it('coalesces activity updates and does not regenerate on a timer', async () => {
     const view = await mount();
     expect(screen.getByText(response.summary)).toBeInTheDocument();
