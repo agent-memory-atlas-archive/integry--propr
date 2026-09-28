@@ -95,8 +95,14 @@ export class BoundedProviderRecordBuffer {
                 return;
             }
             this.completeBytes -= this.recordBytes[this.head];
+            // Release text immediately, even if live records delay compaction.
+            this.records[this.head] = '';
+            this.recordBytes[this.head] = 0;
             this.head += 1;
         }
+        // Bound backing arrays even when output is never read. Copy only when
+        // at least half the queue was consumed, amortizing over dropped records.
+        if (this.head * 2 >= this.records.length) this.compact();
     }
 
     private clearRecords(): void {

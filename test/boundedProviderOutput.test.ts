@@ -86,6 +86,7 @@ describe('BoundedProviderRecordBuffer', () => {
             const maximumBytes = [64, 200, 1000, 4096][seed % 4];
             const reference = new ReferenceRecordBuffer(maximumBytes);
             const buffer = new BoundedProviderRecordBuffer(maximumBytes);
+            const deferredBuffer = new BoundedProviderRecordBuffer(maximumBytes);
             for (let step = 0; step < 400; step += 1) {
                 let chunk = '';
                 const parts = 1 + Math.floor(next() * 6);
@@ -95,10 +96,39 @@ describe('BoundedProviderRecordBuffer', () => {
                 }
                 const expected = reference.append(chunk);
                 buffer.append(chunk);
+                deferredBuffer.append(chunk);
                 assert.equal(buffer.output, expected, `seed ${seed}, step ${step}`);
             }
+            assert.equal(deferredBuffer.output, reference.output, `deferred read, seed ${seed}`);
         }
     });
+
+    for (const [name, chunks] of [
+        ['complete records', ['a\nb\nc\nd\n']],
+        ['partial records', ['a\nb\nc\nd', 'é', '🙂', '\n']],
+        ['mixed record sizes', [`${'é'.repeat(80)}\n`, '\n'.repeat(80), '🙂'.repeat(30), '\n']],
+    ] as const) {
+        test(`bounds backing storage while appending ${name} without reading output`, () => {
+            const maximumBytes = 256;
+            const buffer = new BoundedProviderRecordBuffer(maximumBytes);
+            const reference = new ReferenceRecordBuffer(maximumBytes);
+            buffer.append('first\n');
+            reference.append('first\n');
+            // Over a hundred caps of output, matching callers that read only on exit.
+            for (let step = 0; step < 4096; step += 1) {
+                for (const chunk of chunks) {
+                    buffer.append(chunk);
+                    reference.append(chunk);
+                    // Inspect storage directly: the output getter itself compacts it.
+                    assert.ok(buffer['records'].length <= 2 * maximumBytes, 'record slots stay bounded');
+                    assert.ok(buffer['recordBytes'].length <= 2 * maximumBytes, 'size slots stay bounded');
+                    const storedBytes = buffer['records'].reduce((sum, record) => sum + Buffer.byteLength(record), 0);
+                    assert.ok(storedBytes <= maximumBytes, 'discarded record text is released');
+                }
+            }
+            assert.equal(buffer.output, reference.output);
+        });
+    }
 
     test('stays linear when a provider streams many short records at the cap', () => {
         const buffer = new BoundedProviderRecordBuffer(1024 * 1024);
