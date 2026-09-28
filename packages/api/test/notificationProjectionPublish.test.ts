@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { after, afterEach, beforeEach, describe, test } from 'node:test';
 import type { Knex } from 'knex';
 import { closeConnection, NotificationService } from '@propr/core';
-import { DRAFT_UPDATE, TASK_UPDATE } from '@propr/shared';
+import { DRAFT_UPDATE, INDEXING_UPDATE, TASK_UPDATE } from '@propr/shared';
 import type {
   NotificationProjectionService,
   RecipientNotificationUpdate,
@@ -57,6 +57,96 @@ describe('notification projection publishing', { concurrency: false }, () => {
       created[0].eventId,
       (await database('notification_events').first()).event_id,
     );
+  });
+
+  test('a suppressed plan and a replayed plan never announce an Inbox arrival', async () => {
+    const notifications = new NotificationService({ database, publishUpdate: async () => {} });
+    await database('task_drafts').insert({
+      draft_id: 'draft-muted', user_id: 'draft-owner', repository: 'integry/propr',
+    });
+    await notifications.updateNotificationPreferences('draft-owner', {
+      preferences: { plan: { inboxEnabled: false, pushEnabled: false } },
+    });
+    const payload = {
+      eventType: DRAFT_UPDATE, draftId: 'draft-muted', step: 'complete',
+      status: 'completed' as const, draftStatus: 'review' as const, timestamp: iso(),
+    };
+    await projection.projectDraftUpdate(payload);
+    assert.equal((await database('notification_events')).length, 1, 'the audit event still exists');
+    assert.equal((await database('notification_user_states')).length, 0);
+    assert.deepEqual(published, []);
+
+    await notifications.updateNotificationPreferences('draft-owner', {
+      preferences: { plan: { inboxEnabled: true } },
+    });
+    await projection.projectDraftUpdate(payload);
+    assert.equal(published.length, 1, 'the replay assigns the newly eligible recipient');
+    published.length = 0;
+    await projection.projectDraftUpdate(payload);
+    assert.deepEqual(published, [], 'returning the same event is not another arrival');
+  });
+
+  for (const taskType of ['issue', 'review']) {
+    test(`replayed ${taskType} PR notifications announce only newly assigned receipts`, async () => {
+      await database('tasks').insert({
+        task_id: 'pr-task', repository: 'integry/propr', issue_number: 17,
+        pr_number: 42, task_type: taskType, initial_job_data: '{}',
+      });
+      await new NotificationService({ database, publishUpdate: async () => {} })
+        .updateNotificationPreferences('member-user', {
+          preferences: {
+            task: { inboxEnabled: false, pushEnabled: false },
+            review: { inboxEnabled: false, pushEnabled: false },
+            pull_request: { inboxEnabled: false, pushEnabled: false },
+          },
+        });
+      const payload = {
+        eventType: TASK_UPDATE, taskId: 'pr-task', state: 'completed',
+        repository: 'integry/propr', issueNumber: 17, timestamp: iso(),
+      };
+      await projection.projectTaskUpdate(payload);
+      const receipts = await database('notification_user_states').where({ inbox_enabled: true });
+      assert.ok(receipts.length > 0);
+      assert.equal(changesFor('created').length, receipts.length);
+      assert.ok(published.every(frame => frame.recipientId === 'admin-user'));
+      published.length = 0;
+      await projection.projectTaskUpdate(payload);
+      assert.deepEqual(published, []);
+
+      await database('instance_members').insert({ github_user_id: 'new-member', role: 'member' });
+      await projection.projectTaskUpdate(payload);
+      assert.ok(published.length > 0);
+      assert.ok(published.every(frame => frame.recipientId === 'new-member'));
+    });
+  }
+
+  test('indexing failure and stalled activity replays stay quiet', async () => {
+    const indexing = {
+      eventType: INDEXING_UPDATE, repository: 'integry/propr', branch: 'main',
+      phase: 'failed' as const, timestamp: iso(),
+    };
+    await projection.projectIndexingUpdate(indexing);
+    assert.equal(changesFor('created').length, 1);
+    published.length = 0;
+    await projection.projectIndexingUpdate(indexing);
+    assert.deepEqual(published, []);
+
+    await database('tasks').insert({
+      task_id: 'stalled-task', repository: 'integry/propr', task_type: 'issue',
+      initial_job_data: '{}',
+    });
+    await projection.projectTaskUpdate({
+      eventType: TASK_UPDATE, taskId: 'stalled-task', state: 'processing',
+      repository: 'integry/propr', timestamp: iso(-30_000),
+    });
+    await projection.projectIndexingUpdate({
+      ...indexing, branch: 'stalled-branch', phase: 'indexing', timestamp: iso(-30_000),
+    });
+    await projection.detectStalledActivities();
+    assert.equal(changesFor('created').length, 3, 'task members and indexing administrator');
+    published.length = 0;
+    await projection.detectStalledActivities();
+    assert.deepEqual(published, []);
   });
 
   test('tells every recipient of a completed task, once each', async () => {
@@ -242,7 +332,7 @@ describe('notification projection publishing', { concurrency: false }, () => {
       eventType: TASK_UPDATE, taskId: 'task-passive-cleanup', state: 'failed',
       repository: 'integry/propr', issueNumber: 13, timestamp: iso(),
     });
-    await new NotificationService({ database, now: () => new Date(clock) })
+    await new NotificationService({ database, now: () => new Date(clock), publishUpdate: async () => {} })
       .createNotificationEvent({
         eventId: 'legacy-stalled-card', deduplicationKey: 'legacy-stalled-card',
         kind: 'task', severity: 'warning',

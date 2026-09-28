@@ -1,7 +1,7 @@
 /* eslint-disable max-lines */
 import assert from 'node:assert/strict';
 import { createECDH } from 'node:crypto';
-import { after, describe, test } from 'node:test';
+import { after, describe, mock, test } from 'node:test';
 import express, { type Request, type Response } from 'express';
 import { closeConnection, closeEventPublisher, NotificationValidationError, PushSubscriptionConflictError,
     PushSubscriptionQuotaError, PushSubscriptionRateLimitError } from '@propr/core';
@@ -10,7 +10,16 @@ import { NOTIFICATION_KINDS, parseNotificationPreferencesResponse,
 import { ensureAuthenticated } from '../auth.js';
 import { configureDemoMode, demoModeReadOnlyMiddleware, resetConfiguredDemoMode } from '../demoMode.js';
 import { createApiRequestRateLimiter } from '../requestRateLimits.js';
-import { createNotificationRoutes as buildNotificationRoutes, type NotificationRouteService } from '../routes/notificationRoutes.js';
+import type { NotificationRouteService } from '../routes/notificationRoutes.js';
+import { createNotificationProjectionTestHarness } from './notificationProjectionTestHarness.js';
+
+const routePublications: unknown[] = [];
+mock.module('../services/socketService.js', {
+    namedExports: {
+        getSocketService: () => ({ broadcastPushEvent: (payload: unknown) => routePublications.push(payload) })
+    }
+});
+const { createNotificationRoutes: buildNotificationRoutes } = await import('../routes/notificationRoutes.js');
 
 after(async () => {
   await closeConnection();
@@ -198,57 +207,44 @@ describe('notification routes', () => {
         assert.deepEqual(body(), { unreadCount: 0 });
     });
 
-    test('tells the recipient\'s other tabs about a dismissal', async () => {
-        const published: unknown[] = [];
-        const routes = createNotificationRoutes({
-            publishNotificationUpdate: payload => published.push(payload),
-            service: createService({
-                dismissNotification: async () => ({ unreadCount: 1 })
-            })
-        });
-        const { response, status } = responseRecorder();
-
-        await routes.dismiss(authenticatedRequest({ params: { id: 'event-1' } }), response);
-
-        assert.equal(status(), 200);
-        assert.equal(published.length, 1);
-        const payload = published[0] as Record<string, unknown>;
-        assert.equal(payload.eventType, 'notification:update');
-        assert.equal(payload.change, 'dismissed');
-        assert.equal(payload.eventId, 'event-1');
-        assert.equal(payload.recipientId, 'authenticated-user');
-        assert.equal(payload.unreadCount, 1);
-    });
-
-    test('publishes a bulk clear without naming a notification', async () => {
-        const published: Array<Record<string, unknown>> = [];
-        const routes = createNotificationRoutes({
-            publishNotificationUpdate: payload => published.push(payload as unknown as Record<string, unknown>),
-            service: createService()
-        });
-        const { response, status } = responseRecorder();
-
-        await routes.dismissAll(authenticatedRequest(), response);
-
-        assert.equal(status(), 200);
-        assert.equal(published.length, 1);
-        assert.equal(published[0].change, 'dismissed_all');
-        assert.equal(published[0].eventId, undefined);
-        assert.equal(published[0].recipientId, 'authenticated-user');
-    });
-
-    test('publishes nothing when the notification does not exist', async () => {
-        const published: unknown[] = [];
-        const routes = createNotificationRoutes({
-            publishNotificationUpdate: payload => published.push(payload),
-            service: createService({ dismissNotification: async () => null })
-        });
-        const { response, status } = responseRecorder();
-
-        await routes.dismiss(authenticatedRequest({ params: { id: 'missing' } }), response);
-
-        assert.equal(status(), 404);
-        assert.deepEqual(published, []);
+    test('announces committed route mutations once and stays quiet on repeats and missing receipts', async () => {
+        const { database, projection, notifications, published } =
+            await createNotificationProjectionTestHarness(() => new Date());
+        try {
+            for (const eventId of ['event-1', 'event-2']) {
+                await notifications.createNotificationEvent({
+                    eventId, deduplicationKey: eventId, kind: 'plan', severity: 'info',
+                    target: { type: 'plan', repository: 'integry/propr', draftId: eventId },
+                    title: 'Ready for review', body: 'Review this plan',
+                }, ['authenticated-user']);
+            }
+            published.length = 0;
+            routePublications.length = 0;
+            const routes = createNotificationRoutes({ service: notifications });
+            for (const operation of ['markRead', 'dismiss', 'dismissAll'] as const) {
+                const request = authenticatedRequest({ params: { id: 'event-1' } });
+                const first = responseRecorder();
+                await routes[operation](request, first.response);
+                assert.equal(first.status(), 200);
+                const count = published.length;
+                const repeated = responseRecorder();
+                await routes[operation](request, repeated.response);
+                assert.equal(repeated.status(), 200);
+                assert.equal(published.length, count, `${operation} replay changed no receipt`);
+            }
+            const missing = responseRecorder();
+            await routes.dismiss(authenticatedRequest({ params: { id: 'missing' } }), missing.response);
+            assert.equal(missing.status(), 404);
+            assert.deepEqual(published.map(frame => [frame.change, frame.recipientId]), [
+                ['read', 'authenticated-user'],
+                ['dismissed', 'authenticated-user'],
+                ['dismissed_all', 'authenticated-user'],
+            ]);
+            assert.deepEqual(routePublications, [], 'the route must not duplicate core announcements');
+        } finally {
+            projection.close();
+            await database.destroy();
+        }
     });
 
     test('returns 400 for malformed limits, cursors, and history flags', async () => {

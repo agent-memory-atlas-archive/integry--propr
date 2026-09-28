@@ -55,7 +55,8 @@ export interface NotificationProjectionOptions {
   database: Knex;
   notificationService?: NotificationEventWriter;
   /**
-   * How a committed change reaches the recipient's open Inbox.
+   * Publishes receipt cleanup performed directly by this projection. Mutations
+   * delegated to NotificationService are announced by that service.
    *
    * Production passes `@propr/core`'s `publishNotificationUpdateThroughRedis`:
    * projection runs outside the process that owns the websocket, in a worker
@@ -493,15 +494,6 @@ export class NotificationProjectionService {
     }
   }
 
-  /** Announces a created notification, passing the creation result through. */
-  private announceCreated<T extends { id: string } | null>(
-    event: T,
-    recipients: readonly NotificationRecipient[],
-  ): T {
-    if (event) this.announce('created', recipients, event.id);
-    return event;
-  }
-
   /** Announces receipts a server-side cleanup dismissed, per recipient. */
   private announceDismissed(dismissed: readonly DismissedReceipt[]): void {
     const eventIdsByRecipient = new Map<string, string[]>();
@@ -576,7 +568,7 @@ export class NotificationProjectionService {
     const planRecipients: NotificationRecipient[] = [
       { userId: draft.user_id, pushEnabled: true },
     ];
-    this.announceCreated(await this.notifications.createNotificationEvent({
+    await this.notifications.createNotificationEvent({
       deduplicationKey: stableKey('plan-ready', payload.draftId, 'review', occurredAt),
       kind: 'plan',
       severity: 'success',
@@ -587,7 +579,7 @@ export class NotificationProjectionService {
         : `Ready for review with ${itemCount} planned ${itemCount === 1 ? 'task' : 'tasks'}.`,
       actions: ['refine', 'approve_execute', 'dismiss'],
       occurredAt,
-    }, planRecipients), planRecipients);
+    }, planRecipients);
   }
 
   async projectTaskUpdate(payload: TaskUpdatePayload): Promise<void> {
@@ -657,7 +649,7 @@ export class NotificationProjectionService {
     if (!await this.notificationsEnabledFor(payload.repository)) return;
     const recipients = await this.loadAdministratorRecipients();
 
-    this.announceCreated(await this.notifications.createNotificationEvent({
+    await this.notifications.createNotificationEvent({
       deduplicationKey: stableKey(
         'indexing-failed', payload.repository, payload.branch ?? '', payload.phase, occurredAt,
       ),
@@ -671,7 +663,7 @@ export class NotificationProjectionService {
       body: `Indexing ${payload.branch ? `branch ${payload.branch}` : 'the repository'} stopped before completion.`,
       actions: ['dismiss'],
       occurredAt,
-    }, recipients), recipients);
+    }, recipients);
   }
 
   async detectStalledActivities(): Promise<void> {
@@ -695,7 +687,7 @@ export class NotificationProjectionService {
         const prNumber = positiveInteger(metadata.prNumber);
         const description = compactDisplayText(metadata.description);
         const taskRecipients = await this.loadInstanceMemberRecipients();
-        this.announceCreated(await this.notifications.createSourceActivityNotificationEvent({
+        await this.notifications.createSourceActivityNotificationEvent({
           type: 'task', key: row.activity_key, repository: row.repository,
           lastActivityAt: row.last_activity_at,
         }, {
@@ -715,10 +707,10 @@ export class NotificationProjectionService {
             : `Active work for ${row.repository} has not reported progress.`,
           actions: taskActions({ active: true }),
           occurredAt: row.last_activity_at,
-        }, taskRecipients), taskRecipients);
+        }, taskRecipients);
       } else {
         const indexingRecipients = await this.loadAdministratorRecipients();
-        this.announceCreated(await this.notifications.createSourceActivityNotificationEvent({
+        await this.notifications.createSourceActivityNotificationEvent({
           type: 'indexing', key: row.activity_key, repository: row.repository,
           ...(row.branch === null ? {} : { branch: row.branch }),
           lastActivityAt: row.last_activity_at,
@@ -736,7 +728,7 @@ export class NotificationProjectionService {
           body: `Indexing ${row.branch ? `branch ${row.branch}` : row.repository} has not reported progress.`,
           actions: ['dismiss'],
           occurredAt: row.last_activity_at,
-        }, indexingRecipients), indexingRecipients);
+        }, indexingRecipients);
       }
     }
   }
@@ -766,20 +758,10 @@ export class NotificationProjectionService {
       // Seats are available again, so an earlier seat-limit card is stale. Most
       // health ticks have no such card; read first to keep them write-free.
       if (await this.hasActiveSystemFailureReceipt(CONNECT_SEAT_LIMIT_COMPONENT)) {
-        // The card disappeared without anyone dismissing it, so the Inboxes
-        // still showing it have no other reason to re-read - and the recipients
-        // who hold it are whoever received it then, not the administrators the
-        // snapshot resolves now: a demoted administrator keeps their receipt.
-        this.announceDismissed(await this.notifications
-          .dismissSystemFailureNotifications(CONNECT_SEAT_LIMIT_COMPONENT));
+        await this.notifications.dismissSystemFailureNotifications(CONNECT_SEAT_LIMIT_COMPONENT);
       }
     } else if (seatLimitBlock && seatLimitBlock.blockedAt <= snapshotAt) {
-      // Health ticks repeat the same block, and creation is deduplicated, so
-      // only the tick that first raises the card has anything to announce.
-      const alreadyVisible = await this.hasActiveSystemFailureReceipt(
-        CONNECT_SEAT_LIMIT_COMPONENT,
-      );
-      const seatLimitEvent = await this.notifications.createNotificationEvent({
+      await this.notifications.createNotificationEvent({
         deduplicationKey: stableKey(
           'connect-seat-limit-blocked',
           seatLimitBlock.installationId,
@@ -800,7 +782,6 @@ export class NotificationProjectionService {
         },
         occurredAt: seatLimitBlock.blockedAt,
       }, recipients);
-      if (!alreadyVisible) this.announceCreated(seatLimitEvent, recipients);
     }
 
     for (const [component, healthyValues] of Object.entries(SYSTEM_HEALTH_RULES)) {
@@ -808,7 +789,7 @@ export class NotificationProjectionService {
       if (typeof rawStatus !== 'string') continue;
       const status = compactDisplayText(rawStatus) ?? 'unknown';
       const healthy = healthyValues.has(rawStatus);
-      const transition = await this.notifications.reconcileSystemFailureTransition({
+      await this.notifications.reconcileSystemFailureTransition({
         component,
         status,
         healthy,
@@ -826,15 +807,6 @@ export class NotificationProjectionService {
           occurredAt: failureStartedAt,
         }),
       }, recipients);
-      // A component that stays unhealthy re-persists the same card on every
-      // snapshot; announcing that would ask every admin's Inbox to re-read for
-      // a card it already shows.
-      if (transition.created) this.announceCreated(transition.event, recipients);
-      // A recovered or superseded component dismisses its failure cards without
-      // the recipient asking, so the owners of those receipts are told - which
-      // is not the same set as this snapshot's administrators once someone's
-      // role changed while the failure persisted.
-      this.announceDismissed(transition.dismissedReceipts ?? []);
     }
   }
 
@@ -911,9 +883,7 @@ export class NotificationProjectionService {
     repository: string,
     prNumber: number | undefined,
   ): Promise<{ id: string } | null> {
-    // A PR-aware creation can decline (the pull request closed first), so the
-    // announcement follows the committed result rather than the attempt.
-    const event = prNumber === undefined
+    return prNumber === undefined
       ? await this.notifications.createNotificationEvent(input, recipients)
       : await this.notifications.createPullRequestNotificationEvent(
         repository,
@@ -921,7 +891,6 @@ export class NotificationProjectionService {
         input,
         recipients,
       );
-    return this.announceCreated(event, recipients);
   }
 
   private projectFailedTask(input: TaskEventProjection): Promise<{ id: string } | null> {
@@ -1007,7 +976,7 @@ export class NotificationProjectionService {
     input: PullRequestTaskEventProjection,
   ): Promise<{ id: string } | null> {
     const { payload, context, occurredAt, recipients, pullRequestUrl, prNumber } = input;
-    return this.announceCreated(await this.notifications.createPullRequestAttentionNotificationEvent(
+    return await this.notifications.createPullRequestAttentionNotificationEvent(
       context.repository,
       prNumber,
       {
@@ -1035,7 +1004,7 @@ export class NotificationProjectionService {
         occurredAt,
       },
       recipients,
-    ), recipients);
+    );
   }
 
   private async loadCompletedHistoryMetadata(payload: TaskUpdatePayload): Promise<Record<string, unknown>> {

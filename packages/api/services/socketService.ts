@@ -77,6 +77,13 @@ export interface QueueDependencies {
   notificationProjection?: NotificationProjectionSink;
 }
 
+function shouldRefreshGoalForTask(payload: TaskUpdatePayload): boolean {
+  // Tool-call heartbeats do not change goal resources. Terminal frames still
+  // reconcile the goal, whose result may have just been committed.
+  return payload.state !== payload.previousState
+    || ['completed', 'failed', 'cancelled'].includes(payload.state);
+}
+
 /**
  * SocketService manages WebSocket connections and Redis pub/sub subscriptions.
  * It subscribes to Redis channels and broadcasts events to connected WebSocket clients.
@@ -375,7 +382,7 @@ export class SocketService {
     // Derived after the ordering gate above, so a replayed or out-of-order task
     // event cannot produce an activity frame the task feed itself rejected.
     if (payload.taskId.startsWith('goal-')) {
-      const goal = this.queueDeps && await this.queueDeps.db('goals')
+      const goal = shouldRefreshGoalForTask(payload) && this.queueDeps && await this.queueDeps.db('goals')
         .where({ current_task_id: payload.taskId }).first('goal_id');
       if (goal) await this.handleGoalUpdate({
         eventType: GOAL_UPDATE, goalId: goal.goal_id,

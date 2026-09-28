@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { after, describe, test } from 'node:test';
 import { closeConnection } from '@propr/core';
-import { ACTIVITY_UPDATE, NOTIFICATION_UPDATE, TASK_UPDATE, type TaskUpdatePayload } from '@propr/shared';
+import { ACTIVITY_UPDATE, GOAL_UPDATE, NOTIFICATION_UPDATE, TASK_UPDATE, type TaskUpdatePayload } from '@propr/shared';
 import { ACTIVITY_ROOM, activityUserRoom } from '../services/socketSubscriptions.js';
 import { SocketService } from '../services/socketService.js';
 import {
@@ -162,6 +162,67 @@ describe('SocketService task update ordering', () => {
       broadcasts.length = 0;
       await internals.handleTaskUpdate({ ...resumed, previousState: 'processing' });
       assert.deepEqual(broadcasts.map(frame => frame.event), [TASK_UPDATE]);
+    }
+  });
+
+  test('goal task heartbeats skip goal reads while transitions and terminal frames reconcile', async () => {
+    const broadcasts: Array<{ room: string; event: string }> = [];
+    const goalQueries: unknown[] = [];
+    const service = Object.create(SocketService.prototype);
+    Object.assign(service, {
+      taskRevisions: new Map(),
+      io: {
+        to: (room: string) => {
+          const operator = {
+            to: () => operator,
+            emit: (event: string) => broadcasts.push({ room, event }),
+          };
+          return operator;
+        },
+      },
+      queueDeps: {
+        redisClient: { get: async () => null },
+        db: (table: string) => {
+          assert.equal(table, 'goals');
+          return { where: (filter: unknown) => {
+            goalQueries.push(filter);
+            return { first: async () => ({
+              goal_id: 'private-goal', owner_id: 'owner', repository: 'integry/propr',
+              desired_state: 'running', result_state: null, current_task_id: 'goal-task',
+            }) };
+          } };
+        },
+      },
+    });
+    const payload: TaskUpdatePayload = {
+      eventType: TASK_UPDATE, taskId: 'goal-task', state: 'processing', previousState: 'queued',
+      timestamp: new Date(0).toISOString(), version: 1,
+    };
+    await service.handleTaskUpdate(payload);
+    assert.equal(goalQueries.length, 2);
+    assert.deepEqual(broadcasts.filter(frame => frame.event !== TASK_UPDATE), [
+      { room: activityUserRoom('owner'), event: GOAL_UPDATE },
+      { room: activityUserRoom('owner'), event: ACTIVITY_UPDATE },
+    ]);
+    broadcasts.length = 0;
+    goalQueries.length = 0;
+    for (const version of [2, 3]) {
+      await service.handleTaskUpdate({ ...payload, previousState: 'processing', version });
+    }
+    assert.deepEqual(goalQueries, []);
+    assert.deepEqual(broadcasts.map(frame => frame.event), [TASK_UPDATE, TASK_UPDATE]);
+    await service.handleTaskUpdate({ ...payload, version: 2 });
+    assert.equal(goalQueries.length, 0, 'a stale transition cannot bypass revision ordering');
+
+    for (const [index, state] of ['completed', 'failed', 'cancelled'].entries()) {
+      broadcasts.length = 0;
+      goalQueries.length = 0;
+      const terminal = { ...payload, state, previousState: state, version: index + 4 };
+      await service.handleTaskUpdate(terminal);
+      assert.equal(goalQueries.length, 2, `${state} reconciles even with the same previous state`);
+      assert.equal(broadcasts.filter(frame => frame.event === GOAL_UPDATE).length, 1);
+      await service.handleTaskUpdate(terminal);
+      assert.equal(goalQueries.length, 2, 'an exact terminal replay is rejected');
     }
   });
 
