@@ -129,8 +129,13 @@ for (const width of [390, 1440]) {
     await expect(completion.getByRole('img', { name: 'Task queue', exact: true })).toBeVisible();
     await expect(completion.locator('img')).toHaveCount(1);
     await expect(unrelated.locator('img')).toHaveCount(0);
-    // The whole card opens the pull request; the only button left is the dismiss control.
-    await expect(completion.getByRole('link')).toHaveAttribute('href', notification.action.href);
+    // The card opens the implementation task; the PR chip opens GitHub separately.
+    const taskLink = completion.getByRole('link', { name: notification.title, exact: true });
+    await expect(taskLink).toHaveAttribute('href', '/tasks/task-1');
+    await expect(taskLink).not.toHaveAttribute('target', '_blank');
+    const prLink = completion.getByRole('link', { name: 'PR #42 on GitHub', exact: true });
+    await expect(prLink).toHaveAttribute('href', notification.action.href);
+    await expect(prLink).toHaveAttribute('target', '_blank');
     await expect(completion.getByRole('button')).toHaveCount(1);
     await expect(completion.getByRole('button', { name: `Dismiss ${notification.title}` })).toBeEnabled();
     await expect(page.getByRole('article')).toHaveCount(2);
