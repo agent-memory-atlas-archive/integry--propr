@@ -101,11 +101,12 @@ function actionHref(item: AttentionItem): string {
  * work: `Pull request is awaiting review`.
  *
  * The title is split like every other dashboard title: the task type moves
- * into a badge in front of it, and the entity number and model tag go.
+ * into a badge in front of it, and the entity number and model tag go. Review
+ * decisions omit the badge because their status already names the action.
  */
 function itemTitle(item: AttentionItem): WorkTitle & { title: string } {
   const work = splitWorkTitle(item.title, item.taskType);
-  return { type: item.kind === 'plan_review' ? 'Review' : work.type, title: work.title || item.detail || 'Untitled work' };
+  return { type: item.kind === 'plan_review' ? null : work.type, title: work.title || item.detail || 'Untitled work' };
 }
 
 const AttentionRow: React.FC<{ item: AttentionItem }> = ({ item }) => {

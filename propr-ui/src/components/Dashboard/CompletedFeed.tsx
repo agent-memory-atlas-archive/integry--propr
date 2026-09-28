@@ -114,7 +114,7 @@ const CompletedRow: React.FC<{ item: OutcomeItem }> = ({ item }) => {
         </div>
       )}
       {updates.length > 0 && (
-        <ul id={updatesId} hidden={!expanded} className="mx-3 mt-1 border-l-2 border-slate-200 pl-2">
+        <ul id={updatesId} hidden={!expanded} className="ml-2 mr-3 mt-1 border-l-2 border-solid border-slate-200 pl-3">
           {expanded && updates.map(update => {
             const updateWork = splitWorkTitle(update.title, update.taskType);
             // A missing recap is a run type, never the parent deliverable again.

@@ -248,14 +248,14 @@ describe('Dashboard', () => {
     expect(list.children).toHaveLength(7);
   });
 
-  it('tags review decisions and fix tasks with the shared work types', async () => {
+  it('omits redundant review tags while preserving standard task types', async () => {
     mockAttention.mockResolvedValue(attentionResponse([
       attentionItem({ id: 'review', kind: 'plan_review', taskType: null, title: 'New Issue: Add VERSION constant' }),
       attentionItem({ id: 'fix', kind: 'task_failed', taskType: 'pr-comment', title: 'Fix PR #12: Repair validation' }),
     ]));
     renderAttentionPanel();
     const badges = await within(screen.getByTestId('needs-attention-panel')).findAllByTestId('work-type-badge');
-    expect(badges.map(badge => badge.textContent)).toEqual(['Review', 'Fix']);
+    expect(badges.map(badge => badge.textContent)).toEqual(['Fix']);
   });
 
   it('draws the attention heading before its first read lands, so the column never jumps', async () => {

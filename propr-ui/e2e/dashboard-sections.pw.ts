@@ -1,6 +1,7 @@
 import { expect, test, type Page } from '@playwright/test';
 import { mkdir } from 'node:fs/promises';
 import path from 'node:path';
+import { USAGE_TIPS_CATALOG } from '@propr/shared';
 
 const now = Date.parse('2026-09-23T12:00:00Z');
 const minutesAgo = (minutes: number) => new Date(now - minutes * 60_000).toISOString();
@@ -177,13 +178,14 @@ async function fixture(
   });
 }
 
-async function capture(page: Page, name: string) {
+async function capture(page: Page, name: string, dashboardOnly = false) {
   if (!process.env.PROPR_CAPTURE_PREVIEWS) return;
   // The daily chart draws after its container is measured.
   await page.locator('.recharts-surface').first().waitFor({ state: 'visible' }).catch(() => undefined);
   const directory = path.resolve('../.propr/previews');
   await mkdir(directory, { recursive: true });
-  await page.screenshot({ animations: 'disabled', fullPage: true, path: path.join(directory, `${name}.png`) });
+  if (dashboardOnly) await page.locator('main').screenshot({ animations: 'disabled', path: path.join(directory, `${name}.png`) });
+  else await page.screenshot({ animations: 'disabled', fullPage: true, path: path.join(directory, `${name}.png`) });
 }
 
 test('desktop shows every section with running work in the main column', async ({ page }) => {
@@ -437,9 +439,8 @@ for (const width of [1440, 390]) {
   test(`dashboard cleanup shows entity rollups, stale waits and the attention footer at ${width}px`, async ({ page }) => {
     await page.setViewportSize({ width, height: 1000 });
     const waiting = Array.from({ length: 7 }, (_, index) => ({
-      ...attention[1], id: `plan-issue:${index}`, prNumber: 735 - index,
+      ...attention[1], id: `plan-issue:${index}`, prNumber: 735 - index, since: minutesAgo((50 + index) * 24 * 60),
       title: ['Add live model validation defaults and limits', 'Add VERSION constant', 'Add project version constant'][index % 3],
-      since: minutesAgo((50 + index) * 24 * 60),
     }));
     await fixture(page, waiting, []);
     await page.route('**/api/dashboard/outcomes?**', route => route.fulfill({ json: {
@@ -460,6 +461,7 @@ for (const width of [1440, 390]) {
       repository: 'all', enabled: true,
       summary: 'No work is running. Five pull requests have recent completed outcomes. Seven older review requests are waiting for attention.',
     } }));
+    await page.route('**/api/usage-tips', route => route.fulfill({ json: { enabled: true, tips: USAGE_TIPS_CATALOG.slice(0, 2) } }));
     await page.goto('/');
     const active = page.getByTestId('happening-now-section');
     await expect(active).toContainText('No active tasks running');
@@ -472,32 +474,30 @@ for (const width of [1440, 390]) {
     await expect(panel.getByRole('heading')).toHaveText('Needs attention (7)');
     await expect(panel).toContainText('Waiting 50d');
     await expect(panel.getByText('Stale', { exact: true })).toHaveCount(3);
-    await expect(panel.getByTestId('work-type-badge')).toHaveText(['Review', 'Review', 'Review']);
+    await expect(panel.getByTestId('work-type-badge')).toHaveCount(0);
+    const workflow = page.getByRole('region', { name: 'Usage tips' });
+    await expect(workflow).toContainText('For your workflow');
+    const statsBox = await page.getByTestId('historical-stats-section').boundingBox();
+    expect((await workflow.boundingBox())!.y).toBeGreaterThanOrEqual(statsBox!.y + statsBox!.height);
     const more = panel.getByRole('button', { name: 'Show 4 more' });
     await expect(more).toBeVisible();
     const summary = page.getByTestId('dashboard-summary');
-    await expect(summary.getByRole('button', { name: 'Pause automatic summary updates' }))
-      .toHaveAttribute('title', 'Pause automatic summary updates');
-    await expect(summary.getByRole('button', { name: 'Refresh activity summary' }))
-      .toHaveAttribute('title', 'Refresh activity summary');
+    await expect(summary.getByRole('button', { name: 'Pause automatic summary updates' })).toHaveAttribute('title', 'Pause automatic summary updates');
+    await expect(summary.getByRole('button', { name: 'Refresh activity summary' })).toHaveAttribute('title', 'Refresh activity summary');
     expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(width);
-    if (process.env.PROPR_CAPTURE_PREVIEWS) {
-      const directory = path.resolve('../.propr/previews');
-      await mkdir(directory, { recursive: true });
-      // Only the dashboard itself: omit unrelated navigation and account data.
-      await page.locator('main').screenshot({ animations: 'disabled', path: path.join(directory, `dashboard-cleanup-${width}.png`) });
-    }
+    // Only the dashboard itself: omit unrelated navigation and account data.
+    await capture(page, `dashboard-cleanup-${width}`, true);
     const disclosure = completed.getByRole('button', { name: '2 earlier updates' }).first();
     await disclosure.click();
     await expect(disclosure).toHaveAttribute('aria-expanded', 'true');
     const updates = completed.locator(':scope > li').first().locator('ul');
     await expect(updates.locator('li')).toHaveCount(2);
+    for (const [property, value] of Object.entries({ 'border-left-width': '2px', 'border-left-style': 'solid', 'border-left-color': 'rgb(226, 232, 240)', 'padding-left': '12px' }))
+      await expect(updates).toHaveCSS(property, value);
     const lineHeights = await updates.locator('a').evaluateAll(nodes => nodes.map(node => node.getBoundingClientRect().height));
     expect(lineHeights.every(height => height <= 28)).toBe(true);
     expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(width);
-    if (process.env.PROPR_CAPTURE_PREVIEWS) {
-      await page.locator('main').screenshot({ animations: 'disabled', path: path.resolve(`../.propr/previews/dashboard-updates-expanded-${width}.png`) });
-    }
+    await capture(page, `dashboard-updates-expanded-${width}`, true);
     await disclosure.click();
     await expect(updates).toBeHidden();
     await more.click();
