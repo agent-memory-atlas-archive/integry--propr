@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -50,6 +50,17 @@ const runLightweightLLMAnalysis = mock.fn(async () => {
 });
 await mock.module('../packages/core/src/claude/claudeService.js', { namedExports: { runLightweightLLMAnalysis } });
 
+// Exercise the real routing retry loop without opening database/queue connections.
+await mock.module('../packages/core/src/db/connection.js', { namedExports: { db: {} } });
+await mock.module('../packages/core/src/config/configManager.js', { namedExports: { loadSyntheticAgents: async () => [] } });
+await mock.module('../packages/core/src/services/syntheticUsageSnapshotProvider.js', {
+  namedExports: { AliasSpecificAgentTankSnapshotProvider: class {} },
+});
+await mock.module('../packages/core/src/utils/tokenCalculation.js', {
+  namedExports: { estimateTokens: (text: string) => Math.ceil(text.length / 4) },
+});
+const { SyntheticRoutingSession } = await import('../packages/core/src/services/syntheticRoutingService.js');
+
 const { PLAN_VALIDATOR_SCRIPT, validatePlanTaskFiles, validatePlanText } = await import('../packages/core/src/services/taskPlanning/planValidation.js');
 const { runPlanFileAgent, PlanFileAgentUnavailableError } = await import('../packages/core/src/services/taskPlanning/planFileAgent.js');
 const { buildPlanFilePrompt, resolvePlanGenerationMode, tryGeneratePlanWithFiles } = await import('../packages/core/src/services/taskPlanning/planFileGeneration.js');
@@ -72,6 +83,22 @@ function fakeAgent(write: (workspace: string, options: TaskOptions) => void | Pr
       },
     },
   };
+}
+/** Stub member selection only; physical invocation and failover use the production loop. */
+function routedAgents(...agents: ReturnType<typeof fakeAgent>[]) {
+  let next = 0;
+  return new SyntheticRoutingSession({
+    select: async () => {
+      const agent = agents[next++];
+      if (!agent) throw new Error('routing pool exhausted');
+      return {
+        physicalAgent: agent.session, physicalModel: 'opus', synthetic: true,
+        memberId: `member-${next}`, attemptNumber: next,
+      };
+    },
+    metadataFor: () => ({}),
+    recordAttempt: async () => undefined,
+  } as never, { requestedAgentAlias: 'pool', requestedModel: 'smart', requiredTokens: 0, callId: 'routing-test' });
 }
 const writeTasks = (workspace: string, files: Record<string, string>) => {
   for (const [name, content] of Object.entries(files)) writeFileSync(path.join(workspace, 'tasks', name), content);
@@ -127,6 +154,83 @@ describe('plan file agent with task files', () => {
     assert.equal(agent.calls[0].maxTurns, 200, 'one turn per task file must fit, beyond the shipped CLAUDE_MAX_TURNS=10');
     assert.equal((agent.calls[0].metadata?.proprLogAttribution as { executionType: string }).executionType, 'plan-generation');
     assert.deepEqual(readdirSync(workspaceRoot), [], 'workspace removed');
+  });
+
+  for (const failure of ['result', 'throw']) {
+    test(`isolates task files across routing retries after a failed ${failure}`, async () => {
+      const abandoned = fakeAgent(workspace => {
+        writeTasks(workspace, {
+          '001.json': json(task('Old one')), '002.json': json(task('Old two')), '003.json': json(task('Abandoned')),
+        });
+        const validation = spawnSync(process.execPath, ['validate-plan.mjs', '--tasks', 'tasks'], { cwd: workspace, encoding: 'utf8' });
+        assert.equal(validation.status, 0, validation.stderr);
+        writeFileSync(path.join(workspace, 'validate-plan.mjs'), 'tampered');
+        if (failure === 'throw') throw new Error('transport failed');
+      }, { success: false, error: 'transport failed' });
+      const replacement = fakeAgent(async workspace => {
+        assert.notEqual(workspace, abandoned.calls[0].worktreePath);
+        assert.deepEqual(readdirSync(path.join(workspace, 'tasks')), []);
+        assert.equal(existsSync(path.join(workspace, 'plan.json')), false);
+        assert.equal(readFileSync(path.join(workspace, 'validate-plan.mjs'), 'utf8'), PLAN_VALIDATOR_SCRIPT);
+        await Promise.resolve();
+        // Even a late write to the abandoned workspace cannot enter this plan.
+        writeTasks(abandoned.calls[0].worktreePath, { '004.json': json(task('Late abandoned task')) });
+        writeTasks(workspace, { '001.json': json(task('Replacement one')), '002.json': json(task('Replacement two')) });
+        const validation = spawnSync(process.execPath, ['validate-plan.mjs', '--tasks', 'tasks'], { cwd: workspace, encoding: 'utf8' });
+        assert.equal(validation.status, 0, validation.stderr);
+      });
+      const result = await callLLMForPlan({
+        ...baseOptions, runId: 'run-retry', fullContext: 'Generate a plan', worktreePath: '/tmp/worktree', tokenLimit: 100_000,
+        repairModel: 'codex:gpt', granularity: 'balanced', routingSession: routedAgents(abandoned, replacement),
+      });
+      assert.deepEqual(result.plan.map(item => item.title), ['Replacement one', 'Replacement two']);
+      assert.equal(abandoned.calls.length, 1);
+      assert.equal(replacement.calls.length, 1);
+      assert.equal(runLightweightLLMAnalysis.mock.callCount(), 0);
+      assert.deepEqual(readdirSync(workspaceRoot), []);
+    });
+  }
+
+  for (const taskFiles of [true, false]) {
+    test(`rejects an empty successful retry instead of accepting abandoned ${taskFiles ? 'task files' : 'plan.json'}`, async () => {
+      const abandoned = fakeAgent(workspace => {
+        if (taskFiles) writeTasks(workspace, { '001.json': json(task('Abandoned')) });
+        else writeFileSync(path.join(workspace, 'plan.json'), json([task('Abandoned')]));
+      }, { success: false, error: 'transport failed' });
+      const replacement = fakeAgent(() => undefined);
+      await assert.rejects(runPlanFileAgent({
+        ...baseOptions, purpose: 'generation', prompt: 'Plan it', taskFiles, executionType: 'plan-generation',
+        routingSession: routedAgents(abandoned, replacement),
+      }), taskFiles ? /wrote no task files/ : /produced no plan.json/);
+      assert.deepEqual(readdirSync(workspaceRoot), []);
+    });
+  }
+
+  test('retains earlier output evidence when routing exhausts after an empty retry', async () => {
+    const abandoned = fakeAgent(workspace => writeTasks(workspace, { '001.json': json(task('Abandoned')) }), { success: false });
+    const replacement = fakeAgent(() => { throw new Error('could not run'); });
+    await assert.rejects(tryGeneratePlanWithFiles({
+      ...baseOptions, fullContext: 'Plan it', routingSession: routedAgents(abandoned, replacement),
+    }), (error: Error) => error instanceof PlanningFailedError && !(error instanceof PlanFileAgentUnavailableError)
+      && /failed after producing output/.test(error.message));
+    assert.deepEqual(readdirSync(workspaceRoot), []);
+  });
+
+  test('does not invoke another agent if preparing its isolated workspace fails', async () => {
+    const files = { 'context.txt': 'original context' };
+    const abandoned = fakeAgent(workspace => {
+      writeTasks(workspace, { '001.json': json(task('Abandoned')) });
+      // Make preparation fail on the retry, after the first attempt produced output.
+      Object.assign(files, { 'missing/context.txt': 'cannot write here' });
+    }, { success: false });
+    const replacement = fakeAgent(() => undefined);
+    await assert.rejects(runPlanFileAgent({
+      ...baseOptions, purpose: 'generation', prompt: 'Plan it', taskFiles: true, files, executionType: 'plan-generation',
+      routingSession: routedAgents(abandoned, replacement),
+    }), (error: Error) => error instanceof PlanningFailedError && !(error instanceof PlanFileAgentUnavailableError)
+      && /Could not prepare the plan workspace/.test(error.message));
+    assert.equal(replacement.calls.length, 0);
+    assert.deepEqual(readdirSync(workspaceRoot), []);
   });
 
   test('re-validates with its own validator', async () => {

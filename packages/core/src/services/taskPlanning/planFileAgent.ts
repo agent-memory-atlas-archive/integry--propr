@@ -163,24 +163,38 @@ async function resolveAgent(model: string, routingSession?: SyntheticRoutingSess
   return { runner: agent, model: resolveModelAlias(modelName) };
 }
 
-export async function runPlanFileAgent(options: PlanFileAgentOptions): Promise<PlanItem[]> {
-  const { purpose, prompt, files = {}, original, taskFiles = false, model, draftId, repository, githubToken, executionType, correlationId, metadata, routingSession } = options;
-  const log = correlationId ? logger.withCorrelation(correlationId) : logger;
+/** Track every attempt until cleanup, including one whose preparation fails. */
+async function preparePlanWorkspace(options: PlanFileAgentOptions, workspaces: string[]): Promise<string> {
   const root = planWorkspaceRoot();
   const workspace = await mkdir(root, { recursive: true })
-    .then(() => mkdtemp(path.join(root, `${purpose}-`)))
+    .then(() => mkdtemp(path.join(root, `${options.purpose}-`)))
     .then(directory => realpath(directory))
     .catch(error => { throw new PlanFileAgentUnavailableError(`Could not create a plan workspace under ${root}: ${(error as Error).message}`); });
+  workspaces.push(workspace);
   try {
-    try {
-      await writeFile(path.join(workspace, PLAN_VALIDATOR_FILE), PLAN_VALIDATOR_SCRIPT);
-      for (const [name, content] of Object.entries(files)) await writeFile(path.join(workspace, name), content);
-      if (taskFiles) await mkdir(path.join(workspace, PLAN_TASKS_DIR));
-    } catch (error) {
-      throw new PlanFileAgentUnavailableError(`Could not prepare the plan workspace: ${(error as Error).message}`);
-    }
-    // Some agent CLIs refuse to run outside a git repository.
-    await execFileAsync('git', ['init', '-q'], { cwd: workspace }).catch(() => undefined);
+    await writeFile(path.join(workspace, PLAN_VALIDATOR_FILE), PLAN_VALIDATOR_SCRIPT);
+    for (const [name, content] of Object.entries(options.files || {})) await writeFile(path.join(workspace, name), content);
+    if (options.taskFiles) await mkdir(path.join(workspace, PLAN_TASKS_DIR));
+  } catch (error) {
+    throw new PlanFileAgentUnavailableError(`Could not prepare the plan workspace: ${(error as Error).message}`);
+  }
+  // Some agent CLIs refuse to run outside a git repository.
+  await execFileAsync('git', ['init', '-q'], { cwd: workspace }).catch(() => undefined);
+  return workspace;
+}
+
+export async function runPlanFileAgent(options: PlanFileAgentOptions): Promise<PlanItem[]> {
+  const { purpose, prompt, original, taskFiles = false, model, draftId, repository, githubToken, executionType, correlationId, metadata, routingSession } = options;
+  const log = correlationId ? logger.withCorrelation(correlationId) : logger;
+  const workspaces: string[] = [];
+  try {
+    let workspace = await preparePlanWorkspace(options, workspaces);
+    let firstAttempt = true;
+    const prepareAttemptWorkspace = async () => {
+      if (!firstAttempt) workspace = await preparePlanWorkspace(options, workspaces);
+      firstAttempt = false;
+      return workspace;
+    };
 
     const { runner, model: resolvedModel } = await resolveAgent(model, routingSession).catch(error => {
       throw new PlanFileAgentUnavailableError((error as Error).message);
@@ -200,12 +214,19 @@ export async function runPlanFileAgent(options: PlanFileAgentOptions): Promise<P
         executionType,
         workRef: buildAnalysisWorkRef(executionType, draftId, repository),
       }),
-    }).catch(async error => {
+    }, prepareAttemptWorkspace).catch(async error => {
       // Usage limits drive requeueing upstream and must keep their type.
       if ((error as Error)?.name === 'UsageLimitError') throw error;
       let producedOutput: boolean;
       try {
-        producedOutput = await hasPlanOutput(workspace, taskFiles);
+        // A later empty attempt must not erase evidence that an earlier one ran.
+        producedOutput = false;
+        for (const attemptWorkspace of workspaces) {
+          if (await hasPlanOutput(attemptWorkspace, taskFiles)) {
+            producedOutput = true;
+            break;
+          }
+        }
       } catch (inspectionError) {
         // Absence of output must be established before allowing response fallback.
         throw new PlanningFailedError(`Plan ${purpose} agent failed: ${(error as Error).message}. Could not establish absence of plan output: ${(inspectionError as Error).message}`);
@@ -235,8 +256,10 @@ export async function runPlanFileAgent(options: PlanFileAgentOptions): Promise<P
     log.info({ purpose, model, taskCount: report.taskCount }, 'Plan file agent produced a valid plan');
     return JSON.parse(planText!) as PlanItem[];
   } finally {
-    await rm(workspace, { recursive: true, force: true }).catch(error => {
-      log.warn({ workspace, error: (error as Error).message }, 'Failed to remove plan workspace');
-    });
+    for (const workspace of workspaces) {
+      await rm(workspace, { recursive: true, force: true }).catch(error => {
+        log.warn({ workspace, error: (error as Error).message }, 'Failed to remove plan workspace');
+      });
+    }
   }
 }
