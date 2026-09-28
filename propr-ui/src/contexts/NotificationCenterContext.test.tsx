@@ -136,7 +136,7 @@ describe('NotificationCenterProvider', () => {
     expect(notificationApi.getNotificationPreferences).toHaveBeenCalledTimes(2);
   });
 
-  test('reads the badge once per pushed notification change, never on a poll while connected', async () => {
+  test('coalesces spaced notification pushes into one badge read while connected', async () => {
     notificationApi.getNotificationPreferences.mockResolvedValue(preferences(false));
     notificationApi.getNotificationUnreadCount
       .mockResolvedValueOnce({ unreadCount: 0 })
@@ -149,8 +149,15 @@ describe('NotificationCenterProvider', () => {
       await act(async () => { await vi.advanceTimersByTimeAsync(0); });
       expect(notificationApi.getNotificationUnreadCount).toHaveBeenCalledTimes(1);
 
-      await pushNotificationUpdate('created');
-      await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+      // Each fast response could finish between events. Serialization alone
+      // cannot collapse this burst; the 100 ms scheduling window must do it.
+      const changes = ['created', 'read', 'dismissed', 'dismissed_all'] as const;
+      for (let index = 0; index < 10; index += 1) {
+        await pushNotificationUpdate(changes[index % changes.length]);
+        await act(async () => { await vi.advanceTimersByTimeAsync(9); });
+      }
+      expect(notificationApi.getNotificationUnreadCount).toHaveBeenCalledTimes(1);
+      await act(async () => { await vi.advanceTimersByTimeAsync(10); });
 
       expect(screen.getByText('count:4')).toBeInTheDocument();
       expect(notificationApi.getNotificationUnreadCount).toHaveBeenCalledTimes(2);
@@ -158,7 +165,54 @@ describe('NotificationCenterProvider', () => {
       // An idle connected session issues nothing of its own accord until the
       // connected safety cadence, which exists only to recover a lost
       // publication and is asserted by its own test below.
-      await act(async () => { await vi.advanceTimersByTimeAsync(CONNECTED_RECONCILE_MS - 1); });
+      await act(async () => { await vi.advanceTimersByTimeAsync(CONNECTED_RECONCILE_MS - 101); });
+      expect(notificationApi.getNotificationUnreadCount).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  test('retains one trailing badge read for pushes during an in-flight read', async () => {
+    const initial = deferred<{ unreadCount: number }>();
+    notificationApi.getNotificationPreferences.mockResolvedValue(preferences(false));
+    notificationApi.getNotificationUnreadCount
+      .mockReturnValueOnce(initial.promise)
+      .mockResolvedValue({ unreadCount: 5 });
+    vi.useFakeTimers();
+    try {
+      renderCenter();
+      await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+      await pushNotificationUpdate('created');
+      await act(async () => { await vi.advanceTimersByTimeAsync(50); });
+      await pushNotificationUpdate('read');
+      await act(async () => { await vi.advanceTimersByTimeAsync(100); });
+      expect(notificationApi.getNotificationUnreadCount).toHaveBeenCalledTimes(1);
+
+      // An authoritative local mutation must survive the older response.
+      act(() => observedActions?.commitUnreadCount(4));
+      await act(async () => initial.resolve({ unreadCount: 1 }));
+      expect(screen.getByText('count:4')).toBeInTheDocument();
+      await act(async () => { await vi.advanceTimersByTimeAsync(99); });
+      expect(notificationApi.getNotificationUnreadCount).toHaveBeenCalledTimes(1);
+      await act(async () => { await vi.advanceTimersByTimeAsync(1); });
+      expect(notificationApi.getNotificationUnreadCount).toHaveBeenCalledTimes(2);
+      expect(screen.getByText('count:5')).toBeInTheDocument();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  test('discards a queued badge invalidation when the account changes', async () => {
+    notificationApi.getNotificationPreferences.mockResolvedValue(preferences(false));
+    vi.useFakeTimers();
+    try {
+      const view = renderCenter();
+      await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+      await pushNotificationUpdate();
+      await act(async () => { await vi.advanceTimersByTimeAsync(50); });
+      authState.user = { id: 'user-2', username: 'second-user' };
+      view.rerender(centerTree());
+      await act(async () => { await vi.advanceTimersByTimeAsync(200); });
       expect(notificationApi.getNotificationUnreadCount).toHaveBeenCalledTimes(2);
     } finally {
       vi.useRealTimers();

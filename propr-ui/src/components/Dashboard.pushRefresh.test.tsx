@@ -165,18 +165,52 @@ describe('Dashboard push-driven refreshes', () => {
       await act(async () => { await vi.advanceTimersByTimeAsync(10); });
       expect(mockStats).toHaveBeenCalledTimes(1);
 
-      // A tool-call heartbeat is the noisiest event on a busy instance. Re-running
-      // the completion-count aggregate for it was the single most wasteful refresh
-      // on the page; the stats panel only reacts to finished work.
+      // The server suppresses tool-call heartbeats. Non-terminal state changes
+      // still publish progress, which can clear attention but cannot change
+      // the completion-count aggregate.
       for (let index = 0; index < 5; index += 1) {
         await push(activity('task', 'progressed', { entityId: `task-${index}` }));
       }
 
       await act(async () => { await vi.advanceTimersByTimeAsync(200); });
       expect(mockActive).toHaveBeenCalledTimes(2);
+      expect(mockAttention).toHaveBeenCalledTimes(2);
       expect(mockStats).toHaveBeenCalledTimes(1);
       // Progress is not a completion either, so the outcomes feed stays put.
       expect(mockOutcomes).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('removes a resumed task from attention on its progressed push', async () => {
+    renderDashboard('/?repository=acme%2Fapp');
+    await waitForSections();
+    mockAttention.mockResolvedValue(attentionResponse([
+      attentionItem({ kind: 'task_action_required', state: 'action_required' }),
+    ]));
+    await push(activity('task', 'blocked', { entityId: 'blocked-1' }));
+    expect(await screen.findByText('Checkout retries never fire')).toBeInTheDocument();
+
+    mockAttention.mockResolvedValue(attentionResponse());
+    await push(activity('task', 'progressed', { entityId: 'blocked-1' }));
+
+    await waitFor(() => expect(screen.getByTestId('needs-attention-empty')).toBeInTheDocument());
+    expect(mockAttention).toHaveBeenCalledTimes(3);
+    expect(mockStats).toHaveBeenCalledTimes(1);
+    expect(mockOutcomes).toHaveBeenCalledTimes(1);
+  });
+
+  it('ignores unrelated progress when refreshing attention', async () => {
+    vi.useFakeTimers();
+    try {
+      renderDashboard('/?repository=acme%2Fapp');
+      await act(async () => { await vi.advanceTimersByTimeAsync(10); });
+      await push(activity('task', 'progressed', { repository: 'acme/web' }));
+      await push(activity('plan', 'progressed'));
+      await push(activity('queue', 'progressed'));
+      await act(async () => { await vi.advanceTimersByTimeAsync(200); });
+      expect(mockAttention).toHaveBeenCalledTimes(1);
     } finally {
       vi.useRealTimers();
     }

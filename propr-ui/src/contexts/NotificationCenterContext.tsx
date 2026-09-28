@@ -131,7 +131,7 @@ export const NotificationCenterProvider: React.FC<{ children: React.ReactNode }>
 
   useEffect(() => {
     if (identityKey === null) return;
-    const unsubscribeNotification = onNotificationUpdate(() => { void refreshNow().catch(() => undefined); });
+    const unsubscribeNotification = onNotificationUpdate(() => schedule());
     const unsubscribeReady = onActivityReady?.(() => schedule());
     subscribeToActivity?.();
     return () => {
@@ -139,7 +139,7 @@ export const NotificationCenterProvider: React.FC<{ children: React.ReactNode }>
       unsubscribeReady?.();
       unsubscribeFromActivity?.();
     };
-  }, [identityKey, onNotificationUpdate, onActivityReady, subscribeToActivity, unsubscribeFromActivity, schedule, refreshNow]);
+  }, [identityKey, onNotificationUpdate, onActivityReady, subscribeToActivity, unsubscribeFromActivity, schedule]);
 
   useEffect(() => {
     const wasConnected = previousConnectedRef.current;

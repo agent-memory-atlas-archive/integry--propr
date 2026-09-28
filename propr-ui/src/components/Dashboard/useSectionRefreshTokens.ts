@@ -32,8 +32,7 @@ const SECTION_INTERESTS = {
     domains: ['task', 'goal', 'plan', 'notification'],
     changes: ['blocked', 'failed', 'created', 'started', 'completed', 'cancelled', 'dismissed'],
   },
-  // The only section that legitimately wants progress: it is showing what is
-  // happening right now, including queue depth.
+  // Active work wants progress across its domains, including queue depth.
   active: {
     domains: ['task', 'goal', 'queue'],
   },
@@ -75,7 +74,10 @@ function isRelevant(
 ): boolean {
   const interest: SectionInterest = SECTION_INTERESTS[section];
   if (interest.domains && !interest.domains.includes(payload.domain)) return false;
-  if (interest.changes && !interest.changes.includes(payload.change)) return false;
+  // Task progress can be a departure from an attention state. The server
+  // suppresses same-state heartbeats before publishing these activity frames.
+  const attentionTaskProgress = section === 'attention' && payload.domain === 'task' && payload.change === 'progressed';
+  if (interest.changes && !interest.changes.includes(payload.change) && !attentionTaskProgress) return false;
   // Repository scoping happens here, before any request: an event for a
   // repository the dashboard is not showing must cost nothing at all.
   if (repository !== ALL_REPOSITORIES && payload.repository !== null && payload.repository !== repository) {

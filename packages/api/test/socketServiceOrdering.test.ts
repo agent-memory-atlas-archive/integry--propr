@@ -85,7 +85,7 @@ describe('SocketService task update ordering', () => {
     });
   });
 
-  test('publishes a task that stopped for a human as blocked, not progressed', async () => {
+  test('publishes attention entry and departure but suppresses task heartbeats', async () => {
     /*
       The dashboard summary, its attention pane and the header's attention count
       all declare an interest in `blocked`. Nothing else in the envelope says a
@@ -141,6 +141,27 @@ describe('SocketService task update ordering', () => {
         subjectId: `attention-${state}`,
         terminal: false,
       });
+
+      broadcasts.length = 0;
+      const resumed: TaskUpdatePayload = {
+        eventType: TASK_UPDATE,
+        taskId: `attention-${state}`,
+        state: 'processing',
+        previousState: state,
+        repository: 'integry/propr',
+        timestamp: new Date(1).toISOString(),
+      };
+      await internals.handleTaskUpdate(resumed);
+      assert.partialDeepStrictEqual(broadcasts.find(frame => frame.event === ACTIVITY_UPDATE)?.payload, {
+        domain: 'task',
+        change: 'progressed',
+        subjectId: resumed.taskId,
+        terminal: false,
+      });
+
+      broadcasts.length = 0;
+      await internals.handleTaskUpdate({ ...resumed, previousState: 'processing' });
+      assert.deepEqual(broadcasts.map(frame => frame.event), [TASK_UPDATE]);
     }
   });
 
