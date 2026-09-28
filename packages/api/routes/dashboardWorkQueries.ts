@@ -406,3 +406,39 @@ export async function loadDashboardWork(
   ]);
   return projectDashboardWork(rows, planIssues);
 }
+
+/** Running native goals visible to this user; task-only feeds remain independent. */
+export async function loadRunningDashboardGoals(
+  db: Knex,
+  repository: string,
+  ownerId: string | null,
+): Promise<Array<DashboardTaskRow & { goalId: string }>> {
+  if (!ownerId) return [];
+  const query = db('goals as g')
+    .leftJoin('task_history as h', 'h.history_id', db.raw(`(
+      SELECT latest_h.history_id FROM task_history AS latest_h
+      WHERE latest_h.task_id = g.current_task_id
+      ORDER BY latest_h.timestamp DESC LIMIT 1
+    )`))
+    .where('g.owner_id', ownerId)
+    .where('g.desired_state', 'running')
+    .whereNull('g.result_state')
+    .select('g.goal_id', 'g.current_task_id', 'g.repository', 'g.title', 'g.objective',
+      'g.created_at', 'g.updated_at', 'h.state', 'h.timestamp as state_timestamp');
+  if (repository && repository !== 'all') query.where('g.repository', repository);
+  const rows = await query;
+  return rows.map(row => ({
+    goalId: String(row.goal_id),
+    taskId: String(row.current_task_id),
+    repository: String(row.repository),
+    issueNumber: null,
+    prNumber: null,
+    taskType: 'goal',
+    modelName: null,
+    title: row.title || row.objective || null,
+    state: row.state ?? 'pending',
+    stateTimestamp: toIso(row.state_timestamp ?? row.updated_at),
+    reason: null,
+    createdAt: toIso(row.created_at),
+  }));
+}

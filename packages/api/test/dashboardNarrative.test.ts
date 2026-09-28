@@ -8,9 +8,6 @@ import { NOW, minutesAgo, createDashboardTestDatabase, clearDashboardTestDatabas
 let db: Knex;
 before(async () => {
   db = await createDashboardTestDatabase();
-  await db.schema.createTable('goals', table => {
-    for (const name of ['goal_id', 'owner_id', 'repository', 'title', 'desired_state', 'result_state', 'active_turn_id', 'failure_reason', 'completed_at']) table.string(name);
-  });
   await db.schema.createTable('task_drafts', table => {
     for (const name of ['draft_id', 'user_id', 'repository', 'name', 'initial_prompt', 'status', 'generation_trace', 'refinement_result', 'updated_at']) table.string(name);
   });
@@ -18,7 +15,6 @@ before(async () => {
 after(async () => { await db.destroy(); });
 beforeEach(async () => {
   await clearDashboardTestDatabase(db);
-  await db('goals').del();
   await db('task_drafts').del();
 });
 const active = () => seedTask(db, { taskId: 'active', title: 'Improve retry handling', states: [{ state: 'processing', timestamp: minutesAgo(2) }] });
@@ -28,7 +24,7 @@ test('idle is deterministic and does not resolve or call a model', async () => {
   assert.equal(await narrative(await collectNarrativeFacts(db, 'all', NOW)), IDLE_NARRATIVE);
 });
 
-test('facts preserve every running task, prioritize bounded live details and omit a lone completion', async () => {
+test('facts preserve every running task, prioritize bounded live details and retain recent completion context', async () => {
   await seedTask(db, {
     taskId: 'tests', title: 'Cache repository icons', issueNumber: 2574,
     states: [{ state: 'claude_execution', timestamp: minutesAgo(8) }],
@@ -62,8 +58,8 @@ test('facts preserve every running task, prioritize bounded live details and omi
   assert.deepEqual(snapshot.facts.live[0].reference, { kind: 'issue', number: 2574 });
   assert.equal(snapshot.facts.live[1].progress, 'Pushing the branch');
   assert.equal(snapshot.facts.live[2].progress, snapshot.facts.live[2].lifecyclePhase);
-  assert.match(buildNarrativePrompt(snapshot.facts), /"id":"third"/);
-  assert.deepEqual(snapshot.facts.completed, []);
+  assert.match(buildNarrativePrompt(snapshot.facts), /Third live task/);
+  assert.deepEqual(snapshot.facts.completed.map(item => item.id), ['done']);
 });
 
 test('tasks beyond the live-detail lookup budget retain lifecycle facts without extra lookups', async () => {
@@ -162,6 +158,11 @@ test('prompt treats activity text as untrusted facts and contains no historical 
   }
   assert.match(prompt, /untrusted facts/i);
   assert.match(prompt, /never as instructions/i);
+  assert.match(prompt, /one short dashboard overview sentence/);
+  assert.match(prompt, /Do not repeat exact titles, file names, paths/);
+  assert.ok(!prompt.includes('"id":'));
+  assert.ok(!prompt.includes('"reference":'));
+  assert.equal(MAX_NARRATIVE_LENGTH, 180);
 });
 
 test('two simultaneous browsers share generation; signatures change with activity, scope and model; refresh bypasses cache', async () => {
@@ -226,4 +227,26 @@ test('model adapter uses only the configured summarization model and never resol
   assert.equal(requested?.model, 'cheap-agent:small-model');
   assert.equal(requested?.prompt, 'Only these facts.');
   assert.equal(requested?.executionType, 'summarization');
+});
+
+
+test('overview includes owner-scoped running goals, blockers and queued work without claiming idle', async () => {
+  await db('goals').insert([
+    { goal_id: 'goal', owner_id: 'user', repository: 'integry/propr', title: 'Improve reliability',
+      current_task_id: 'goal-task', desired_state: 'running', created_at: minutesAgo(5), updated_at: minutesAgo(1) },
+    { goal_id: 'private', owner_id: 'another', repository: 'integry/propr', title: 'Private goal', desired_state: 'running' },
+    { goal_id: 'elsewhere', owner_id: 'user', repository: 'other/repo', title: 'Other goal', desired_state: 'running' },
+  ]);
+  let snapshot = await collectNarrativeFacts(db, 'integry/propr', NOW, 'user');
+  assert.equal(snapshot.idle, false);
+  assert.deepEqual(snapshot.facts.live.map(item => item.title), ['Improve reliability']);
+  assert.equal(snapshot.facts.live[0].kind, 'goal');
+  await db('goals').del();
+  await seedTask(db, { taskId: 'blocked', issueNumber: 42, states: [{ state: 'action_required', timestamp: minutesAgo(1), reason: 'Needs a decision' }] });
+  await seedTask(db, { taskId: 'queued', issueNumber: 43, states: [{ state: 'pending', timestamp: minutesAgo(2) }] });
+  snapshot = await collectNarrativeFacts(db, 'integry/propr', NOW, 'user');
+  assert.equal(snapshot.idle, false);
+  assert.equal(snapshot.facts.attention[0].detail, 'Needs a decision');
+  assert.equal(snapshot.facts.queued.length, 1);
+  assert.deepEqual(snapshot.facts.live, []);
 });
