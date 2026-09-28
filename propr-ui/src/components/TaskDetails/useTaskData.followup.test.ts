@@ -163,17 +163,63 @@ describe('full history follow-up regressions', () => {
     unmount();
   });
 
-  it('uses current goal lifecycle across pending reads and refetches on completion', async () => {
-    const stale = deferred<LiveDetails>();
-    apiMocks.getTaskLiveDetails.mockReturnValueOnce(stale.promise);
-    const { result, rerender, unmount } = renderHook(({ state }) => useTaskLiveData('task', 0, state), { initialProps: { state: 'claude_execution' } });
-    rerender({ state: 'completed' });
-    await act(async () => {});
-    await act(async () => { stale.resolve(details(10, 500)); await stale.promise; });
-    expect(result.current.liveDetails.events).toEqual(details(0, 510).events);
-    expect(result.current.liveDetails.omittedEventCount).toBe(0);
-    unmount();
-  });
+  for (const pollIntervalMs of [0, 5_000]) {
+    it.each(['completed', 'failed', 'cancelled'])(`immediately restores goal history on %s with polling interval ${pollIntervalMs}`, async state => {
+      vi.useFakeTimers();
+      apiMocks.getTaskLiveDetails.mockResolvedValueOnce(details(10, 500));
+      const { result, rerender, unmount } = renderHook(
+        ({ state }) => useTaskLiveData('task', pollIntervalMs, state),
+        { initialProps: { state: 'claude_execution' } },
+      );
+      await act(async () => {});
+      expect(result.current.liveDetails.events).toEqual(details(10, 500).events);
+      expect(result.current.liveDetails.omittedEventCount).toBe(10);
+
+      rerender({ state });
+      // No timer tick or manual refresh: the lifecycle transition starts the read.
+      expect(apiMocks.getTaskLiveDetails).toHaveBeenCalledTimes(2);
+      await act(async () => {});
+      expect(result.current.liveDetails.events).toEqual(details(0, 510).events);
+      expect(result.current.liveDetails.omittedEventCount).toBe(0);
+      unmount();
+    });
+
+    it.each(['active first', 'completion first'])(`supersedes the pending active goal read with polling interval ${pollIntervalMs} (%s)`, async order => {
+      vi.useFakeTimers();
+      const stale = deferred<LiveDetails>();
+      const completed = deferred<LiveDetails>();
+      apiMocks.getTaskLiveDetails.mockReturnValueOnce(stale.promise).mockReturnValueOnce(completed.promise);
+      const { result, rerender, unmount } = renderHook(
+        ({ state }) => useTaskLiveData('task', pollIntervalMs, state),
+        { initialProps: { state: 'claude_execution' } },
+      );
+      expect(apiMocks.getTaskLiveDetails).toHaveBeenCalledTimes(1);
+      rerender({ state: 'completed' });
+      expect(apiMocks.getTaskLiveDetails).toHaveBeenCalledTimes(2);
+
+      const resolveStale = async () => {
+        await act(async () => {
+          stale.resolve({ ...details(10, 500), currentTask: 'Still executing' });
+          await stale.promise;
+        });
+      };
+      if (order === 'active first') {
+        await resolveStale();
+        expect(result.current.liveDetails.events).toEqual([]);
+        expect(result.current.liveDetails.currentTask).toBeNull();
+      }
+      // The obsolete read's cleanup must not clear the completion read's socket buffer.
+      act(() => socketMocks.liveUpdateHandler?.({ taskId: 'task', events: [raw(510)] }));
+      await act(async () => { completed.resolve(details(0, 510)); await completed.promise; });
+      expect(result.current.liveDetails.events).toEqual(details(0, 511).events);
+      expect(result.current.liveDetails.omittedEventCount).toBe(0);
+      if (order === 'completion first') await resolveStale();
+      expect(result.current.liveDetails.events).toEqual(details(0, 511).events);
+      expect(result.current.liveDetails.omittedEventCount).toBe(0);
+      expect(result.current.liveDetails.currentTask).toBeNull();
+      unmount();
+    });
+  }
 
   it('keeps the live goal polling omission count accurate without socket delivery', async () => {
     apiMocks.getTaskLiveDetails.mockResolvedValueOnce(details(100, 500)).mockResolvedValue(details(101, 500));
