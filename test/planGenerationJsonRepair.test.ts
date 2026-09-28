@@ -34,8 +34,9 @@ const runPlanFileAgent = mock.fn(async (options: RepairCall) => {
   if (repairResult instanceof Error) throw repairResult;
   return repairResult;
 });
+class PlanFileAgentUnavailableError extends Error {}
 await mock.module('../packages/core/src/services/taskPlanning/planFileAgent.js', {
-  namedExports: { runPlanFileAgent },
+  namedExports: { runPlanFileAgent, PlanFileAgentUnavailableError },
 });
 
 const correlatedLogger = {
