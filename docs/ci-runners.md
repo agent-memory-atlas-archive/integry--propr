@@ -1,10 +1,12 @@
 # CI runner routing
 
 The owner chose rootless Docker isolation on gitfix.dev instead of VM migration
-for this pilot. Compatible Linux x64 checks run on a pool of six workers
-labelled `[self-hosted, Linux, X64, propr-rootless]`; any idle worker takes the
-next queued job. Four independent matrix shard jobs remain, without a nested
-coordinator. Other eligible jobs share this pool, so simultaneous shard starts
+for this pilot. The pool has six workers labelled
+`[self-hosted, Linux, X64, propr-rootless]`; any idle worker takes the next job
+routed to it. In the intended `overflow` mode (below) compatible Linux x64
+checks run on GitHub-hosted runners and use the pool only when those are
+saturated. Four independent matrix shard jobs remain, without a nested
+coordinator. Other eligible jobs share the pool, so simultaneous shard starts
 are not guaranteed. Workers are added with the same per-user setup; the host
 firewall reserves UIDs 62001-62099 for them, so a new worker needs no rule edit.
 These PR check jobs never select the old generic `propr` label.
