@@ -10,7 +10,7 @@ import {
     UsageLimitError
 } from '../../claude/claudeHelpers.js';
 import { resolveConfigPath } from '../../config/configManager.js';
-import { persistLlmLog, createLlmLogFromAnalysis, buildTaskWorkRef, buildAnalysisWorkRef, formatUsageMetrics } from '../../utils/llmLogger.js';
+import { persistLlmLog, createLlmLogFromAnalysis, buildTaskWorkRef, buildAnalysisWorkRef, formatUsageMetrics, resolveTaskLogAttribution } from '../../utils/llmLogger.js';
 import { buildAnalysisSafetySuffix, executeWithUsageTracking, type UsageTrackingMetrics } from './utils/index.js';
 import type { ExecutionType } from '../../utils/llmMetrics.types.js';
 import { DEFAULT_AGENT_EXECUTION_TIMEOUT_MS } from '../constants.js';
@@ -310,15 +310,16 @@ export class AntigravityAgent implements Agent {
     }): Promise<void> {
         const { executionTime, issueRef, resolvedModel, finalTokenUsage, agentResult, taskId, prNumber, isRetry, retryReason, usageMetrics, metadata } = opts;
         const repository = `${issueRef.repoOwner}/${issueRef.repoName}`;
+        const attribution = resolveTaskLogAttribution(metadata, buildTaskWorkRef(taskId, issueRef.number, repository, prNumber));
         const logEntry = createLlmLogFromAnalysis({
-            executionType: 'implementation', modelUsed: resolvedModel, executionTimeMs: executionTime,
+            executionType: attribution.executionType, modelUsed: resolvedModel, executionTimeMs: executionTime,
             success: agentResult.success, tokenUsage: finalTokenUsage,
             error: agentResult.success ? undefined : (agentResult.logs || 'Execution failed'),
             sessionId: agentResult.sessionId, draftId: taskId, repository, agentAlias: this.config.alias,
-            metadata: { ...metadata, isRetry, retryReason },
+            metadata: { ...attribution.metadata, isRetry, retryReason },
             usageMetrics: usageMetrics ? { preCall: usageMetrics.preCall, postCall: usageMetrics.postCall, delta: usageMetrics.delta, timestamp: usageMetrics.timestamp, agent: usageMetrics.agent } : undefined,
             usageMetricRecords: usageMetrics?.records,
-            workRef: buildTaskWorkRef(taskId, issueRef.number, repository, prNumber),
+            workRef: attribution.workRef,
         });
         await persistLlmLog(logEntry);
     }

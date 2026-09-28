@@ -13,7 +13,7 @@ import {
 } from '../../config/configManager.js';
 import { AGENT_DEFAULT_VERSIONS } from '../version/types.js';
 import { DEFAULT_AGENT_EXECUTION_TIMEOUT_MS } from '../constants.js';
-import { persistLlmLog, createLlmLogFromAnalysis, buildTaskWorkRef, buildAnalysisWorkRef } from '../../utils/llmLogger.js';
+import { persistLlmLog, createLlmLogFromAnalysis, buildTaskWorkRef, buildAnalysisWorkRef, resolveTaskLogAttribution } from '../../utils/llmLogger.js';
 import { buildAnalysisSafetySuffix, executeWithUsageTracking } from './utils/index.js';
 import type { ExecutionType } from '../../utils/llmMetrics.types.js';
 import { resolveAgentTerminationReason } from '../termination.js';
@@ -163,17 +163,18 @@ export class CodexAgent implements Agent {
     }): Promise<void> {
         const { response, parsedOutput, executionTime, modelUsed, usageMetrics, issueRef, repo, taskId, prNumber, isRetry, retryReason, metadata } = params;
         await storeCodexPromptInRedis({ codexOutput: parsedOutput, prompt: params.prompt, issueRef, model: modelUsed, isRetry, retryReason });
+        const attribution = resolveTaskLogAttribution(metadata, buildTaskWorkRef(taskId, issueRef.number, repo, prNumber));
         const logEntry = createLlmLogFromAnalysis({
-            executionType: 'implementation', modelUsed,
+            executionType: attribution.executionType, modelUsed,
             executionTimeMs: executionTime, success: response.success,
             tokenUsage: parsedOutput.tokenUsage,
             error: response.success ? undefined : (parsedOutput.error || 'Execution failed'),
             sessionId: parsedOutput.sessionId, draftId: taskId,
             repository: `${issueRef.repoOwner}/${issueRef.repoName}`,
             agentAlias: this.config.alias, reasoningLevel: response.reasoningLevel,
-            metadata: { ...metadata, isRetry, retryReason, conversationId: parsedOutput.conversationId },
+            metadata: { ...attribution.metadata, isRetry, retryReason, conversationId: parsedOutput.conversationId },
             ...this.formatUsageMetrics(usageMetrics),
-            workRef: buildTaskWorkRef(taskId, issueRef.number, repo, prNumber),
+            workRef: attribution.workRef,
         });
         await persistLlmLog(logEntry);
     }

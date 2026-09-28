@@ -12,6 +12,9 @@ import { loadSettings } from '../../config/configManager.js';
 import { resolveConfiguredModel } from '../../config/configuredModel.js';
 import { AgentRegistry } from '../../agents/AgentRegistry.js';
 import { PlanningFailedError, getRawInputCharLimit, type MinimalLogger } from '../planning/index.js';
+import { incompletePlanItems } from './planValidation.js';
+
+export { incompletePlanItems };
 import type { RefinePlanOptions, RefinePlanResult, RefinePlanEstimation } from './types.js';
 
 const TRUNCATION_MARKER = '\n\n…[truncated to fit the model input limit]…\n\n';
@@ -167,22 +170,6 @@ function validateRefinementResponse(
   }
 
   return refinementResponse;
-}
-
-/**
- * Positions (1-based) of refined items that are not complete plan issues: a
- * model sometimes returns edit instructions ("retain issue 3", "extend issue 1
- * with…") or partial issues instead of the rewritten plan.
- */
-export function incompletePlanItems(plan: unknown[]): number[] {
-  const incomplete: number[] = [];
-  plan.forEach((item, index) => {
-    const record = item && typeof item === 'object' ? item as Record<string, unknown> : null;
-    const complete = !!record && (['title', 'body', 'implementation'] as const)
-      .every(field => typeof record[field] === 'string' && (record[field] as string).trim().length > 0);
-    if (!complete) incomplete.push(index + 1);
-  });
-  return incomplete;
 }
 
 function incompletePlanRepairPrompt(currentPlan: PlanItem[], instruction: string, response: string, incomplete: number[]): string {

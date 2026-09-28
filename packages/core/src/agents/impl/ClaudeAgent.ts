@@ -33,7 +33,7 @@ import {
 } from '../../config/configManager.js';
 import { AGENT_DEFAULT_VERSIONS } from '../version/types.js';
 import { DEFAULT_AGENT_EXECUTION_TIMEOUT_MS } from '../constants.js';
-import { persistLlmLog, createLlmLogFromAnalysis, buildTaskWorkRef, buildAnalysisWorkRef, formatUsageMetrics } from '../../utils/llmLogger.js';
+import { persistLlmLog, createLlmLogFromAnalysis, buildTaskWorkRef, buildAnalysisWorkRef, formatUsageMetrics, resolveTaskLogAttribution } from '../../utils/llmLogger.js';
 import { processDockerResult, buildDockerArgs, getCorrectedTokenUsage, ensurePromptInConversationLog, executeWithUsageTracking, getClaudeAnalysisText, buildAnalysisSafetySuffix, type PersistLogsParams } from './utils/index.js';
 import type { ExecutionType } from '../../utils/llmMetrics.types.js';
 import {
@@ -376,21 +376,22 @@ export class ClaudeAgent implements Agent {
         await storePromptInRedis({ claudeOutput, prompt, issueRef, model: modelUsed, isRetry, retryReason });
 
         const repository = `${issueRef.repoOwner}/${issueRef.repoName}`;
+        const attribution = resolveTaskLogAttribution(metadata, buildTaskWorkRef(taskId, issueRef.number, repository, prNumber));
         await persistLlmLog(createLlmLogFromAnalysis({
-            executionType: 'implementation', modelUsed, executionTimeMs: executionTime,
+            executionType: attribution.executionType, modelUsed, executionTimeMs: executionTime,
             success: claudeOutput.success,
             tokenUsage: correctedTokenUsage,
             error: claudeOutput.success ? undefined : (result.stderr || 'Execution failed'),
             sessionId: claudeOutput.sessionId ?? undefined, draftId: taskId, repository,
             agentAlias: this.config.alias,
             reasoningLevel,
-            metadata: { ...metadata, isRetry, retryReason, conversationId: claudeOutput.conversationId },
+            metadata: { ...attribution.metadata, isRetry, retryReason, conversationId: claudeOutput.conversationId },
             usageMetrics: usageMetrics ? {
                 preCall: usageMetrics.preCall, postCall: usageMetrics.postCall,
                 delta: usageMetrics.delta, timestamp: usageMetrics.timestamp, agent: usageMetrics.agent
             } : undefined,
             usageMetricRecords: usageMetrics?.records,
-            workRef: buildTaskWorkRef(taskId, issueRef.number, repository, prNumber),
+            workRef: attribution.workRef,
         }));
     }
 }
