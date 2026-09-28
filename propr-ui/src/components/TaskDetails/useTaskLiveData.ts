@@ -33,16 +33,23 @@ export function useTaskLiveData(taskId: string | undefined, pollIntervalMs = 5_0
     const sequence = ++requestSequence.current;
     const updates: TaskLiveUpdatePayload[] = [];
     pendingRead.current = updates;
+    // State updates apply in order, so this captures exactly the state the buffer
+    // starts from: every update applied before the read and none buffered during it.
+    const atRequest: { state?: LiveDetails } = {};
+    setLiveDetails(previous => { atRequest.state = previous; return previous; });
     try {
       const data = await getTaskLiveDetails(taskId) as LiveDetails;
       if (activeTaskId.current !== taskId || sequence !== requestSequence.current) return data;
       // Replay only socket updates received during this read, including explicit
       // metadata clears and full-state execution resets, over the older snapshot.
+      // They are replayed over the pre-request state, not the current one, which
+      // already applied them: raw events a large increment evicted there would
+      // otherwise be appended again after newer ones.
       const received = [...updates];
       setLiveDetails(previous => {
         if (activeTaskId.current !== taskId || sequence !== requestSequence.current) return previous;
         return received.reduce((state, update) => applyTaskLiveUpdate(state, update, liveSelection.current),
-          mergeFullLiveDetails(previous, data, liveSelection.current));
+          mergeFullLiveDetails(atRequest.state ?? previous, data, liveSelection.current));
       });
       return data;
     } catch {

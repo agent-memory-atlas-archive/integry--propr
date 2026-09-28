@@ -215,4 +215,38 @@ describe('full history follow-up regressions', () => {
     expect(mergeFullLiveDetails(full, next).events).toHaveLength(events.length + 1);
     expect(applyTaskLiveUpdate(empty, { taskId: 'task', events, omittedEventCount: 0 }).events).toEqual(events);
   });
+
+  it('replays a pending goal read increment larger than the raw window once and in order', async () => {
+    const read = deferred<LiveDetails>();
+    apiMocks.getTaskLiveDetails.mockResolvedValueOnce(details(0, 100, 0)).mockReturnValueOnce(read.promise);
+    const { result, unmount } = renderHook(() => useTaskLiveData('task', 0, 'claude_execution'));
+    await act(async () => {});
+    expect(result.current.liveDetails.events).toEqual(details(0, 100).events);
+    let refresh!: Promise<LiveDetails | null>;
+    act(() => { refresh = result.current.refreshLiveDetails(); });
+    act(() => socketMocks.liveUpdateHandler?.({ taskId: 'task', events: details(100, 600).events }));
+    expect(result.current.liveDetails.events).toEqual(details(200, 500).events);
+    // The snapshot predates most of the increment, which evicted events 100-199.
+    await act(async () => { read.resolve(details(0, 150, 0)); await refresh; });
+    expect(result.current.liveDetails.events).toEqual(details(200, 500).events);
+    expect(result.current.liveDetails.omittedEventCount).toBe(200);
+    unmount();
+  });
+
+  it('replays a large increment once when the task finishes during its live read', async () => {
+    vi.useFakeTimers();
+    const read = deferred<LiveDetails>();
+    apiMocks.getTaskHistory.mockResolvedValueOnce({ history: [{ state: 'CLAUDE_EXECUTION' }] });
+    apiMocks.getTaskLiveDetails.mockReturnValueOnce(read.promise).mockReturnValue(new Promise(() => {}));
+    const { result, unmount } = renderHook(() => useTaskData('task'));
+    await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+    act(() => socketMocks.liveUpdateHandler?.({ taskId: 'task', events: details(100, 600).events }));
+    expect(result.current.liveDetails.events).toEqual(details(200, 500).events);
+    act(() => socketMocks.taskUpdateHandler?.({ taskId: 'task', state: 'COMPLETED' }));
+    await act(async () => { await vi.advanceTimersByTimeAsync(200); });
+    await act(async () => { read.resolve(details(0, 100, 0)); await read.promise; });
+    expect(result.current.liveDetails.events).toEqual(details(0, 700).events);
+    expect(result.current.liveDetails.omittedEventCount).toBe(0);
+    unmount();
+  });
 });

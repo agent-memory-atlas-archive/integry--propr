@@ -221,6 +221,10 @@ export const useTaskData = (taskId: string | undefined) => {
     const sequence = ++liveReadSequence.current;
     const updates: TaskLiveUpdatePayload[] = [];
     pendingLiveRead.current = updates;
+    // State updates apply in order, so this captures exactly the state the buffer
+    // starts from: every update applied before the read and none buffered during it.
+    const atRequest: { state?: LiveDetails } = {};
+    setLiveDetails(previous => { atRequest.state = previous; return previous; });
 
     try {
       const data = await getTaskLiveDetails(taskId) as LiveDetails;
@@ -231,11 +235,12 @@ export const useTaskData = (taskId: string | undefined) => {
       const isLive = !isFinishedTask(latestHistoryRef.current.at(-1)?.state);
       if (!isLive || (!hasReceivedSocketStateRef.current && socketRevision === socketRevisionRef.current)) {
         finishedLiveReadScope.current = finishedAtRequest ? requestedScope : null;
+        // Replay updates over the pre-request state, which has not applied them yet.
         const received = [...updates];
         setLiveDetails(previous => {
           if (activeRequestScopeRef.current !== requestedScope || sequence !== liveReadSequence.current) return previous;
           return received.reduce((state, update) => applyTaskLiveUpdate(state, update, isLive),
-            mergeFullLiveDetails(previous, data, isLive));
+            mergeFullLiveDetails(atRequest.state ?? previous, data, isLive));
         });
       }
       return data;
