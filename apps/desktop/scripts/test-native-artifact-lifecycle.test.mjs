@@ -725,6 +725,8 @@ describe('native staged artifact lifecycle authority', () => {
       },
       wait: async milliseconds => { clock += milliseconds; },
       now: () => clock,
+      // Keep the remaining budget below the per-dump cap after the first probe.
+      absenceBudgetMs: 120_000,
     });
     authority.registered = true;
 
@@ -747,6 +749,8 @@ describe('native staged artifact lifecycle authority', () => {
       },
       wait: async milliseconds => { clock += milliseconds; },
       now: () => clock,
+      // One dump must exhaust this fixture's budget, unlike the production window.
+      absenceBudgetMs: 120_000,
     });
     authority.registered = true;
 
