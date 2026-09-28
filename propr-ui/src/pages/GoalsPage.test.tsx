@@ -1,8 +1,8 @@
 /* eslint-disable max-lines -- list and detail behavior share one focused route-level suite */
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
-import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom';
+import { MemoryRouter, Route, Routes, useLocation, useNavigate } from 'react-router-dom';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import GoalsPage from './GoalsPage';
+import GoalsPageView from './GoalsPage';
 import * as goalsApi from '../api/goals';
 import { getInstanceCatalog, getTaskLiveDetails } from '../api/proprApi';
 import ThinkingLog from '../components/TaskDetails/ThinkingLog';
@@ -56,7 +56,16 @@ const goal: goalsApi.Goal = {
 /** Surfaces the query string so filter tests can assert what a shared goals URL carries. */
 const LocationProbe = () => <span data-testid="location-search">{useLocation().search}</span>;
 
-const openGoalCreator = () => fireEvent.click(screen.getByRole('button', { name: 'New goal' }));
+// Mirror the global header's route action while keeping this suite focused on Goals.
+function GoalsPage() {
+  const navigate = useNavigate();
+  return <>
+    <button onClick={() => navigate('/goals?new=1')}>New Goal</button>
+    <GoalsPageView />
+  </>;
+}
+
+const openGoalCreator = () => fireEvent.click(screen.getByRole('button', { name: 'New Goal' }));
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -463,7 +472,9 @@ describe('GoalsPage', () => {
     render(<MemoryRouter initialEntries={['/goals']}><Routes><Route path="/goals" element={<GoalsPage />} /></Routes></MemoryRouter>);
 
     const queue = await screen.findByRole('list', { name: 'Goal work queue' });
-    expect(screen.getByRole('heading', { name: 'Work queue' })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: 'Goals' })).toBeInTheDocument();
+    expect(screen.queryByRole('heading', { name: 'Work queue' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'New goal' })).not.toBeInTheDocument();
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
     expect(screen.queryByLabelText('Objective')).not.toBeInTheDocument();
     expect(within(queue).getAllByRole('link')).toHaveLength(4);
@@ -475,7 +486,7 @@ describe('GoalsPage', () => {
     expect(firstLink).toHaveClass('grid', 'grid-cols-2', 'lg:items-center');
     expect(firstLink.className).toContain('lg:grid-cols-[');
     expect(firstLink.className).toContain('xl:grid-cols-[');
-    expect(queue.parentElement).toHaveClass('border-y');
+    expect(queue.parentElement).toHaveClass('border-b');
     expect(queue.parentElement).not.toHaveClass('rounded-lg', 'shadow-sm');
     expect(screen.getByText(queueGoals[0].objective)).toHaveClass('truncate');
     expect(screen.getByText(queueGoals[0].title)).toHaveClass('truncate', 'text-sm', 'font-semibold');
@@ -484,7 +495,7 @@ describe('GoalsPage', () => {
   it('confirms discarding unsaved creation input and restores focus on cancel or Escape', async () => {
     const confirm = vi.spyOn(window, 'confirm').mockReturnValueOnce(false).mockReturnValueOnce(true);
     render(<MemoryRouter initialEntries={['/goals']}><Routes><Route path="/goals" element={<GoalsPage />} /></Routes></MemoryRouter>);
-    const trigger = screen.getByRole('button', { name: 'New goal' });
+    const trigger = screen.getByRole('button', { name: 'New Goal' });
     trigger.focus();
     fireEvent.click(trigger);
 
