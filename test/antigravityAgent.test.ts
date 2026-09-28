@@ -62,7 +62,7 @@ describe('AntigravityAgent Docker args', () => {
     });
 
     test('lets agy auto-read non-TTY stdin and passes the exact Gemini 3.8 external ID', () => {
-        const tempHome = fs.mkdtempSync(path.join(os.tmpdir(), 'propr-antigravity-model-'));
+        const tempHome = fs.mkdtempSync(path.join(os.tmpdir(), 'propr-antigravity-model-agy-'));
         fs.mkdirSync(path.join(tempHome, '.gemini'), { recursive: true });
 
         try {
@@ -85,7 +85,8 @@ describe('AntigravityAgent Docker args', () => {
 
             // Omitting a prompt flag makes agy read non-TTY stdin. `--print -`
             // would send a literal dash, while an argv prompt can hit E2BIG.
-            const shellCmd = args.find(a => a.includes('agy'));
+            // A generated container name can also contain 'agy'; match the command.
+            const shellCmd = args.find(a => /(?:^|\n)exec agy\s/.test(a));
             assert.ok(shellCmd, 'shell command should invoke agy');
             assert.doesNotMatch(shellCmd, /--print|\s-p(?:\s|$)/, 'shell command must leave the prompt unset so agy reads stdin');
             assert.match(shellCmd, /--dangerously-skip-permissions "\$@"/);

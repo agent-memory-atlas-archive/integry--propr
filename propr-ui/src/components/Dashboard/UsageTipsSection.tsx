@@ -56,7 +56,7 @@ export function UsageTipsSection() {
   };
   if (!tips.length) return null;
   return (
-    <section aria-label="Usage tips" className="border-t border-slate-200 px-4 py-3">
+    <section aria-label="Usage tips" className="border-t border-slate-200 bg-slate-50/70 px-4 py-4">
       <div className="mb-2 flex items-center gap-2 text-[11px] font-medium uppercase tracking-wide text-slate-500">
         <Lightbulb aria-hidden="true" size={13} /> For your workflow
       </div>

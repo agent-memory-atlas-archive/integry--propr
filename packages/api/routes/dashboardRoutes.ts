@@ -24,7 +24,7 @@ import {
   RECENT_COMPLETION_WINDOW_HOURS,
   type DashboardTaskRow,
 } from './dashboardQueries.js';
-import { loadDashboardWork } from './dashboardWorkQueries.js';
+import { loadDashboardWork, loadRunningDashboardGoals } from './dashboardWorkQueries.js';
 import { loadCompletedRows, type CompletedRow } from './dashboardOutcomeQueries.js';
 import {
   EMPTY_LIVE_ACTIVITY,
@@ -58,6 +58,7 @@ export interface DashboardRoutesDeps {
 }
 
 export interface ActiveItem {
+  goalId?: string;
   id: string;
   taskId: string;
   repository: string;
@@ -82,8 +83,10 @@ export interface ActiveItem {
   updatedAt: string;
 }
 
-/** One successfully completed run. Failures are attention items, not outcomes. */
+/** The newest successful outcome for an entity, with its completed run count. */
 export interface OutcomeItem {
+  eventCount: number;
+  earlierUpdates: Array<Omit<OutcomeItem, 'eventCount' | 'earlierUpdates'>>;
   id: string;
   taskId: string;
   repository: string;
@@ -113,13 +116,20 @@ function readRepositoryFilter(req: Request, res: Response): string | null {
 
 function toOutcomeItem(row: CompletedRow): OutcomeItem {
   return {
-    id: `task:${row.taskId}:completed`,
+    id: `task:${row.taskId}:completed:${row.completionId}`,
     taskId: row.taskId,
     repository: row.repository,
     issueNumber: row.issueNumber,
     prNumber: row.prNumber,
     taskType: row.taskType,
     title: row.title,
+    eventCount: row.eventCount,
+    earlierUpdates: row.earlierUpdates.map(update => ({
+      id: `task:${update.taskId}:completed:${update.completionId}`, taskId: update.taskId,
+      repository: update.repository, issueNumber: update.issueNumber, prNumber: update.prNumber,
+      taskType: update.taskType, title: update.title, detail: update.recap,
+      score: update.reviewScore, occurredAt: update.stateTimestamp,
+    })),
     detail: row.recap,
     score: row.reviewScore,
     occurredAt: row.stateTimestamp,
@@ -282,15 +292,22 @@ export function createDashboardRoutes(deps: DashboardRoutesDeps) {
     const repository = readRepositoryFilter(req, res);
     if (repository === null) return;
     try {
-      const work = await timeApiStage('dashboard.active', () =>
-        loadDashboardWork(db, repository, { now: now() }));
+      const [work, goals] = await timeApiStage('dashboard.active', () => Promise.all([
+        loadDashboardWork(db, repository, { now: now() }),
+        loadRunningDashboardGoals(db, repository, req.user?.id ? String(req.user.id) : null),
+      ]));
+      const runningRows = [...work.running, ...goals]
+        .sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt));
 
       const liveActivity = new Map<string, LiveActivity>();
-      for (const row of work.running.slice(0, MAX_LIVE_DETAIL_LOOKUPS)) {
+      for (const row of runningRows.slice(0, MAX_LIVE_DETAIL_LOOKUPS)) {
         liveActivity.set(row.taskId, await liveActivityFor(row.taskId));
       }
 
-      const running = work.running.map(row => toActiveItem(row, liveActivity.get(row.taskId) ?? EMPTY_LIVE_ACTIVITY));
+      const running = runningRows.map(row => ({
+        ...toActiveItem(row, liveActivity.get(row.taskId) ?? EMPTY_LIVE_ACTIVITY),
+        ...('goalId' in row ? { id: `goal:${row.goalId}`, goalId: row.goalId } : {}),
+      }));
       // Queued work has no execution to project progress from.
       const queued = work.queued.map(row => toActiveItem(row, EMPTY_LIVE_ACTIVITY));
 
@@ -302,7 +319,7 @@ export function createDashboardRoutes(deps: DashboardRoutesDeps) {
           queuedCount: work.counts.queued,
           reason: await queueReason(work.counts.queued),
         },
-        counts: { running: work.counts.running, queued: work.counts.queued },
+        counts: { running: running.length, queued: work.counts.queued },
       });
     } catch (error) {
       console.error('Error in /api/dashboard/active:', error);

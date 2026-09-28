@@ -189,9 +189,11 @@ export function useNowTick(intervalMs = 15_000): number {
 
 /**
  * Elapsed wall-clock time since a timestamp, phrased as a duration.
- * `formatRelativeTime` supplies the wording; only the "ago" framing is dropped.
+ * Older waits stay in days instead of falling back to a calendar date.
  */
 export function elapsedLabel(since: string): string {
+  const days = Math.floor((Date.now() - Date.parse(since)) / 86_400_000);
+  if (days >= 14) return `${days}d`;
   const relative = formatRelativeTime(since);
   if (!relative || relative === 'Just now') return 'less than a minute';
   return relative.replace(/ ago$/, '');
@@ -249,11 +251,13 @@ export const elapsedRunning = (since: string): string => formatDuration(since, n
 
 /** Links a row to a task, or to GitHub when the work has no task of its own. */
 export function workHref(item: {
+  goalId?: string | null;
   taskId?: string | null;
   repository: string;
   issueNumber?: number | null;
   prNumber?: number | null;
 }): string {
+  if (item.goalId) return `/goals/${encodeURIComponent(item.goalId)}`;
   if (item.taskId) return `/tasks/${encodeURIComponent(item.taskId)}`;
   if (item.prNumber) return `https://github.com/${item.repository}/pull/${item.prNumber}`;
   if (item.issueNumber) return `https://github.com/${item.repository}/issues/${item.issueNumber}`;
