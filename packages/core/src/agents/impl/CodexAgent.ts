@@ -83,7 +83,9 @@ export class CodexAgent implements Agent {
                     taskId,
                     streamToRedis: true,
                     preserveOutputOnTimeout: true
-                })
+                }),
+                undefined,
+                this.config.alias
             );
 
             const executionTime = Date.now() - startTime;
@@ -246,7 +248,8 @@ export class CodexAgent implements Agent {
                 async () => executeDockerCommand('docker', dockerArgs, {
                     timeout: timeoutMs ?? 1800000, stdinData: analysisPrompt, taskId
                 }),
-                ANALYSIS_AGENT_TANK_TIMEOUT_MS
+                ANALYSIS_AGENT_TANK_TIMEOUT_MS,
+                this.config.alias
             );
 
             const executionTimeMs = Date.now() - startTime;

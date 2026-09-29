@@ -6,7 +6,7 @@
  * coalescing a burst of calls would each start their own container.
  */
 
-import { afterEach, beforeEach, mock, test } from 'node:test';
+import { after, afterEach, beforeEach, mock, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
@@ -91,6 +91,7 @@ let configuredAgents: AgentConfig[] = [];
 
 await mock.module('../packages/core/src/config/configManager.js', {
     namedExports: {
+        loadAgentTankSettings: async () => ({ mode: 'bundled', enabled: true, url: '' }),
         loadAgents: async (): Promise<AgentConfig[]> => configuredAgents,
         resolveConfigPath: (configPath: string): string => configPath,
         resolveCodexConfigPath: (configPath: string): string => configPath,
@@ -458,4 +459,38 @@ test('the daemon error naming a missing bind source is parsed back to the path',
         ['/host/only/.claude'],
     );
     assert.deepEqual(missingBindSources('some other docker failure'), []);
+});
+
+for (const executingAlias of ['claude-primary', 'claude-secondary']) {
+    test(`per-call tracking uses cached credential provenance for ${executingAlias}`, async () => {
+        const { executeWithUsageTracking } = await import('../packages/core/src/agents/impl/utils/usageTrackingWrapper.js');
+        configuredAgents = [
+            agent({ alias: 'claude-primary', configPath: claudeHome }),
+            agent({ alias: 'claude-secondary', configPath: secondaryClaudeHome }),
+        ];
+        await refreshBundledStatuses();
+        const { result, usageMetrics } = await executeWithUsageTracking('claude', async () => {
+            // Let the pre-call cache read settle, then complete a forced refresh
+            // for the inspected account while this call is still executing.
+            await new Promise(resolve => setImmediate(resolve));
+            dockerResult = { ...dockerResult, stdout: JSON.stringify({
+                claude: { name: 'claude', usage: { session: { percent: 58 } }, lastUpdated: '2026-09-26T00:01:00.000Z' },
+            }) };
+            await refreshBundledStatuses({ force: true });
+            return 'output';
+        }, undefined, executingAlias);
+        assert.equal(result, 'output');
+        assert.equal(dockerRuns.length, 2, 'only the initial and explicit refresh run containers');
+        assert.ok(bindMounts(dockerRuns[1]).includes(mountSpec(claudeHome, '/home/node/.claude')));
+        if (executingAlias === 'claude-primary') {
+            assert.deepEqual(usageMetrics?.records, [{ agent: 'claude', metricKey: 'Session', metricValue: 16 }]);
+        } else {
+            assert.equal(usageMetrics, null, 'the uninspected account must not inherit the primary account delta');
+        }
+    });
+}
+
+after(async () => {
+    const { closeConnection } = await import('../packages/core/src/db/connection.js');
+    await closeConnection();
 });

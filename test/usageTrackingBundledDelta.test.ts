@@ -12,7 +12,7 @@
  * These tests drive the real wrapper through the real transport router, mocking
  * only the cached-snapshot reader, so they cover the whole documented chain:
  * `refreshAgent` schedules instead of blocking, `getStatus` reads
- * `getBundledStatusesForDelta`, and the wrapper decides what to record.
+ * `getBundledStatusForAlias`, and the wrapper decides what to record.
  */
 
 import { beforeEach, mock, test } from 'node:test';
@@ -41,13 +41,14 @@ await mock.module('../packages/core/src/config/configManager.js', {
 
 /** The runner's cache, as the hot path sees it. */
 let cachedSnapshot: Record<string, AgentStatusResponse> | undefined;
+let inspectedAlias = 'claude';
 let scheduledRefreshes = 0;
 let forcedContainerRuns = 0;
 
 await mock.module('../packages/core/src/services/agentTankBundledRunner.js', {
     namedExports: {
         getBundledStatusesForDelta: () => cachedSnapshot,
-        getBundledStatusForAlias: () => undefined,
+        getBundledStatusForAlias: (alias: string) => alias === inspectedAlias ? Object.values(cachedSnapshot ?? {})[0] : undefined,
         refreshBundledStatuses: async () => { forcedContainerRuns += 1; return cachedSnapshot; },
         scheduleBundledRefresh: () => { scheduledRefreshes += 1; },
     },
@@ -81,6 +82,7 @@ async function shortCall<T>(value: T, onCall?: () => void): Promise<T> {
 
 beforeEach(() => {
     cachedSnapshot = undefined;
+    inspectedAlias = 'claude';
     scheduledRefreshes = 0;
     forcedContainerRuns = 0;
 });
@@ -150,4 +152,41 @@ test('a cold bundled cache records nothing and still returns the LLM result', as
     assert.equal(result, 'llm-output');
     assert.equal(usageMetrics, null);
     assert.equal(forcedContainerRuns, 0);
+});
+
+for (const provider of ['claude', 'codex', 'antigravity']) {
+    test(`${provider} omits another account's refreshed usage`, async () => {
+        inspectedAlias = `${provider}-primary`;
+        cachedSnapshot = { [provider]: snapshot(42, 31, '2026-09-27T12:00:00.000Z') };
+        const { result, usageMetrics } = await executeWithUsageTracking(provider, () => shortCall('output', () => {
+            cachedSnapshot = { [provider]: snapshot(58, 35, '2026-09-27T12:03:00.000Z') };
+        }), undefined, `${provider}-secondary`);
+        assert.equal(result, 'output');
+        assert.equal(usageMetrics, null);
+        assert.equal(forcedContainerRuns, 0);
+    });
+
+    test(`${provider} records usage for its inspected custom alias`, async () => {
+        inspectedAlias = `${provider}-primary`;
+        cachedSnapshot = { [provider]: snapshot(42, 31, '2026-09-27T12:00:00.000Z') };
+        const { usageMetrics } = await executeWithUsageTracking(provider, () => shortCall('output', () => {
+            cachedSnapshot = { [provider]: snapshot(58, 35, '2026-09-27T12:03:00.000Z') };
+        }), undefined, inspectedAlias);
+        assert.ok(usageMetrics);
+        assert.deepEqual(usageMetrics.records, [
+            { agent: provider, metricKey: 'Session', metricValue: 16 },
+            { agent: provider, metricKey: 'Weekly', metricValue: 4 },
+        ]);
+    });
+}
+
+test('post-call provenance is checked again after execution yields', async () => {
+    inspectedAlias = 'claude-primary';
+    cachedSnapshot = { claude: snapshot(42, 31, '2026-09-27T12:00:00.000Z') };
+    const { usageMetrics } = await executeWithUsageTracking('claude', () => shortCall('output', () => {
+        // A refresh during execution inspected the other configured account.
+        inspectedAlias = 'claude-secondary';
+        cachedSnapshot = { claude: snapshot(58, 35, '2026-09-27T12:03:00.000Z') };
+    }), undefined, 'claude-primary');
+    assert.equal(usageMetrics, null);
 });

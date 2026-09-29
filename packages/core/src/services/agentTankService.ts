@@ -106,7 +106,12 @@ export async function refreshAgent(agent: string, timeoutMs: number = DEFAULT_TI
  *   await refreshAgent('claude');
  *   const status = await getStatus('claude');
  */
-export async function getStatus(agent: string, timeoutMs: number = DEFAULT_TIMEOUT_MS): Promise<AgentStatusResponse> {
+export async function getStatus(
+    agent: string,
+    timeoutMs: number = DEFAULT_TIMEOUT_MS,
+    // Account identity for bundled per-call probes; external endpoints remain provider-based.
+    alias?: string,
+): Promise<AgentStatusResponse> {
     const settings = await loadAgentTankSettings();
     if (settings.mode === 'disabled') {
         throw new Error('Agent Tank is disabled');
@@ -114,8 +119,11 @@ export async function getStatus(agent: string, timeoutMs: number = DEFAULT_TIMEO
     if (settings.mode === 'bundled') {
         // Cache-only: bounded by the delta freshness window so a stale snapshot
         // cannot be subtracted to produce a misleading per-call usage delta.
-        const agents = getBundledStatusesForDelta();
-        const status = agents?.[toAgentTankAgent(agent)];
+        // Per-call readers supply the executing alias. Provider-wide consumers
+        // may still read the aggregate cache without claiming account identity.
+        const status = alias !== undefined
+            ? getBundledStatusForAlias(alias)
+            : getBundledStatusesForDelta()?.[toAgentTankAgent(agent)];
         if (!status) {
             throw new Error(`No fresh bundled Agent Tank snapshot for ${agent}`);
         }

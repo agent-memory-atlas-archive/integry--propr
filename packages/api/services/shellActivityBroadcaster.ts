@@ -1,5 +1,5 @@
 import type { Server } from 'socket.io';
-import { agentTankUsageFingerprint, loadAgentTankSettings, normalizeAgentTankAgents, type AgentStatusResponse } from '@propr/core';
+import { agentTankUsageFingerprint, loadAgentTankSettings, getAgentTankStatuses, type AgentStatusResponse } from '@propr/core';
 import { ACTIVITY_UPDATE, USAGE_UPDATE } from '@propr/shared';
 import { ACTIVITY_ROOM } from './activitySocketRooms.js';
 
@@ -30,12 +30,10 @@ export class ShellActivityBroadcaster {
   constructor(private io: Server, private readStatus?: () => Promise<Record<string, unknown>>,
     private readUsage = async (): Promise<UsageSnapshot> => {
       const settings = await loadAgentTankSettings();
-      if (!settings.enabled) return { enabled: false };
+      if (settings.mode === 'disabled') return { enabled: false };
       try {
-        const response = await fetch(`${settings.url}/status`, { signal: AbortSignal.timeout(5000) });
-        if (!response.ok) return { enabled: true, error: `HTTP ${response.status}` };
-        const agents = normalizeAgentTankAgents(await response.json() as Record<string, AgentStatusResponse>);
-        return { enabled: true, agents };
+        const agents = await getAgentTankStatuses();
+        return agents ? { enabled: true, agents } : { enabled: true, error: 'unreachable' };
       } catch {
         return { enabled: true, error: 'unreachable' };
       }

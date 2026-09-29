@@ -1,5 +1,5 @@
 import * as configManager from '@propr/core';
-import { agentTankUsageFingerprint, type AgentStatusResponse } from '@propr/core';
+import { agentTankUsageFingerprint, type AgentTankSettings, type AgentStatusResponse } from '@propr/core';
 import { USAGE_UPDATE } from '@propr/shared';
 import { getSocketService } from './socketService.js';
 
@@ -15,24 +15,17 @@ import { getSocketService } from './socketService.js';
  */
 
 const DEFAULT_PROBE_INTERVAL_MS = 60_000;
-const PROBE_TIMEOUT_MS = 5_000;
 
 export interface AgentTankUsageWatcherOptions {
   intervalMs?: number;
   /** Test seam; production reads the stored Agent Tank settings. */
-  loadSettings?: () => Promise<{ enabled: boolean; url: string }>;
+  loadSettings?: () => Promise<Pick<AgentTankSettings, 'mode' | 'url'>>;
   /** Test seam; production reads the provider snapshot Agent Tank exposes. */
-  probe?: (url: string, signal: AbortSignal) => Promise<unknown>;
+  readStatuses?: () => Promise<Record<string, AgentStatusResponse> | undefined>;
   /** Test seam; production broadcasts to this instance's operational clients. */
   publish?: () => void;
   /** Whether anyone is connected to be told. */
   hasListeners?: () => boolean;
-}
-
-async function probeAgentTank(url: string, signal: AbortSignal): Promise<unknown> {
-  const response = await fetch(`${url}/status`, { signal });
-  if (!response.ok) return `HTTP ${response.status}`;
-  return response.json();
 }
 
 function publishUsageChanged(): void {
@@ -44,8 +37,8 @@ function publishUsageChanged(): void {
 
 export class AgentTankUsageWatcher {
   private readonly intervalMs: number;
-  private readonly loadSettings: () => Promise<{ enabled: boolean; url: string }>;
-  private readonly probe: (url: string, signal: AbortSignal) => Promise<unknown>;
+  private readonly loadSettings: () => Promise<Pick<AgentTankSettings, 'mode' | 'url'>>;
+  private readonly readStatuses: () => Promise<Record<string, AgentStatusResponse> | undefined>;
   private readonly publish: () => void;
   private readonly hasListeners: () => boolean;
   private timer: NodeJS.Timeout | undefined;
@@ -58,7 +51,7 @@ export class AgentTankUsageWatcher {
     this.intervalMs = options.intervalMs ?? DEFAULT_PROBE_INTERVAL_MS;
     this.loadSettings = options.loadSettings
       ?? (() => configManager.loadAgentTankSettings());
-    this.probe = options.probe ?? probeAgentTank;
+    this.readStatuses = options.readStatuses ?? (() => configManager.getAgentTankStatuses());
     this.publish = options.publish ?? publishUsageChanged;
     this.hasListeners = options.hasListeners
       ?? (() => getSocketService()?.hasConnectedClients() ?? false);
@@ -114,30 +107,28 @@ export class AgentTankUsageWatcher {
 
   /** The current usage snapshot, or null when it could not be read at all. */
   private async readSnapshot(): Promise<string | null> {
-    let settings: { enabled: boolean; url: string };
+    let settings: Pick<AgentTankSettings, 'mode' | 'url'>;
     try {
       settings = await this.loadSettings();
     } catch {
       return null;
     }
-    if (!settings.enabled) return 'disabled';
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), PROBE_TIMEOUT_MS);
+    if (settings.mode === 'disabled') return 'disabled';
+    // A retained external URL is irrelevant to bundled observations.
+    const source = settings.mode === 'external' ? settings.url : 'bundled';
     try {
-      const status = await this.probe(settings.url, controller.signal);
+      const status = await this.readStatuses();
       // Preserve provider membership and errors, but ignore countdowns and
       // refresh timestamps just like the other Agent Tank observers.
       const fingerprint = status && typeof status === 'object'
         ? Object.entries(status as Record<string, AgentStatusResponse>)
           .sort(([a], [b]) => a.localeCompare(b))
           .map(([name, agent]) => [name, agentTankUsageFingerprint({ ...agent, name: agent.name || name })])
-        : status;
-      return JSON.stringify({ url: settings.url, status: fingerprint });
+        : 'unreachable';
+      return JSON.stringify({ source, status: fingerprint });
     } catch {
       // An unreachable Agent Tank is itself a change the sidebar shows.
-      return JSON.stringify({ url: settings.url, status: 'unreachable' });
-    } finally {
-      clearTimeout(timer);
+      return JSON.stringify({ source, status: 'unreachable' });
     }
   }
 }

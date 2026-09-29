@@ -242,3 +242,9 @@ test('an alias-specific read in external mode still asks the daemon by name', as
 
     assert.deepEqual(fetchCalls, ['http://0.0.0.0:3456/status/agy']);
 });
+
+test('external per-call probes keep the provider endpoint when given a custom account alias', async () => {
+    mode = 'external';
+    await getStatus('antigravity', undefined, 'antigravity-secondary');
+    assert.deepEqual(fetchCalls, ['http://0.0.0.0:3456/status/agy']);
+});

@@ -236,9 +236,10 @@ function extractArrayMetricRecords(
 async function refreshAndGetStatus(
     agent: string,
     timeoutMs?: number,
+    alias: string = agent,
 ): Promise<AgentStatusResponse> {
     await refreshAgent(agent, timeoutMs);
-    return getStatus(agent, timeoutMs);
+    return getStatus(agent, timeoutMs, alias);
 }
 
 /**
@@ -278,9 +279,10 @@ async function fetchStatusBestEffort(
     agent: string,
     phase: 'pre-call' | 'post-call',
     timeoutMs?: number,
+    alias: string = agent,
 ): Promise<AgentStatusResponse | null> {
     try {
-        const status = await refreshAndGetStatus(agent, timeoutMs);
+        const status = await refreshAndGetStatus(agent, timeoutMs, alias);
         logger.debug({ agent, phase, usage: status.usage }, `Agent Tank ${phase} status`);
         return status;
     } catch (err: unknown) {
@@ -299,11 +301,12 @@ function startStatusSnapshot(
     agent: string,
     phase: 'pre-call' | 'post-call',
     timeoutMs?: number,
+    alias: string = agent,
 ): StatusSnapshotHandle {
     let settled = false;
     let settledStatus: AgentStatusResponse | null = null;
 
-    const promise = fetchStatusBestEffort(agent, phase, timeoutMs).then(status => {
+    const promise = fetchStatusBestEffort(agent, phase, timeoutMs, alias).then(status => {
         settled = true;
         settledStatus = status;
         return status;
@@ -335,12 +338,14 @@ function startStatusSnapshot(
  * @param agent - The agent identifier to query (e.g. "claude", "antigravity", "codex").
  * @param executeFn - An async function that performs the LLM call and returns its result.
  * @param timeoutMs - Optional timeout for each Agent Tank HTTP request (default: 5000ms).
+ * @param alias - Executing account alias; bundled probes require matching cached provenance.
  * @returns The execution result and usage metrics (metrics are null if tracking was skipped).
  */
 export async function executeWithUsageTracking<T>(
     agent: string,
     executeFn: () => Promise<T>,
     timeoutMs?: number,
+    alias: string = agent,
 ): Promise<UsageTrackingResult<T>> {
     if (!(await isAgentTankEnabled())) {
         logger.debug({ agent }, 'Agent Tank disabled — skipping usage tracking');
@@ -351,7 +356,7 @@ export async function executeWithUsageTracking<T>(
     // Pre-call: start Agent Tank refresh/status capture, but do not wait before
     // launching the LLM. This keeps local usage monitoring from adding latency
     // to model execution, especially for indexing analysis batches.
-    const preCallSnapshot = startStatusSnapshot(agent, 'pre-call', timeoutMs);
+    const preCallSnapshot = startStatusSnapshot(agent, 'pre-call', timeoutMs, alias);
 
     // Execute the LLM call (always runs, even if pre-call failed)
     const result = await executeFn();
@@ -368,7 +373,7 @@ export async function executeWithUsageTracking<T>(
         return { result, usageMetrics: null };
     }
 
-    const postCall = await fetchStatusBestEffort(agent, 'post-call', timeoutMs);
+    const postCall = await fetchStatusBestEffort(agent, 'post-call', timeoutMs, alias);
     if (postCall === null) {
         return { result, usageMetrics: null };
     }
