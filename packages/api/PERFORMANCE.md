@@ -146,3 +146,13 @@ All four results matched the original projection by deep equality. The search
 regression also places a Unicode title behind 505 unrelated parents and checks
 that search uses two rankings regardless of candidate pages; an unfiltered read
 uses one ranking for both parents and earlier updates.
+
+The goal live-details consumer also used an unconditional five-second HTTP
+interval despite consuming `task:live` websocket updates. It now uses the shared
+refresh scheduler: connected clients reconcile every five minutes, disconnected
+clients retain their fallback interval, hidden tabs defer reads, and reconnect
+or visibility recovery triggers one coalesced read. Periodic reads cannot overlap
+an outstanding snapshot. Lifecycle transitions still immediately replace an
+active snapshot with complete terminal history, including when an older HTTP
+read is pending. Focused UI tests exercise these request counts and the existing
+HTTP/socket execution-ordering races.
