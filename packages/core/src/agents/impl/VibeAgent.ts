@@ -229,29 +229,29 @@ export class VibeAgent implements Agent {
             const parsedOutput = parseVibeOutput(result.stdout);
             const tokenUsage = parsedOutput.tokenUsage || readLatestVibeSessionTokenUsage(runtimeHomePath);
             const analysisText = (parsedOutput.summary || '').trim();
-            const success = !result.timedOut && isSuccessfulVibeResult(result.exitCode, parsedOutput);
+            const success = !result.timedOut && isSuccessfulVibeResult(result.exitCode, parsedOutput) && !!analysisText;
             const usage = formatUsageMetrics(usageMetrics);
-
-            if (success && analysisText) {
-                if (!suppressLlmLog) {
-                    await persistLlmLog(createLlmLogFromAnalysis({
-                        executionType: (executionType || 'other') as ExecutionType,
-                        modelUsed: parsedOutput.model || effectiveModel,
-                        executionTimeMs,
-                        success: true,
-                        tokenUsage,
-                        sessionId: parsedOutput.sessionId,
-                        draftId: taskId,
-                        correlationId,
-                        repository,
-                        metadata: buildLogMetadata(metadata || {}, result, false),
-                        agentAlias: this.config.alias,
-                        usageMetrics: usage.metrics,
-                        usageMetricRecords: usage.records,
-                        workRef: buildAnalysisWorkRef(executionType, taskId, repository, { taskNumber, prNumber }),
-                    }));
-                }
-
+            const errorMsg = success ? undefined : buildVibeFailureMessage(result, parsedOutput);
+            if (!suppressLlmLog) {
+                await persistLlmLog(createLlmLogFromAnalysis({
+                    executionType: (executionType || 'other') as ExecutionType,
+                    modelUsed: parsedOutput.model || effectiveModel,
+                    executionTimeMs,
+                    success,
+                    tokenUsage,
+                    error: errorMsg,
+                    sessionId: parsedOutput.sessionId,
+                    draftId: taskId,
+                    correlationId,
+                    repository,
+                    metadata: buildLogMetadata(metadata || {}, result, !success),
+                    agentAlias: this.config.alias,
+                    usageMetrics: usage.metrics,
+                    usageMetricRecords: usage.records,
+                    workRef: buildAnalysisWorkRef(executionType, taskId, repository, { taskNumber, prNumber }),
+                }));
+            }
+            if (success) {
                 return {
                     response: analysisText,
                     modelUsed: parsedOutput.model || effectiveModel,
@@ -260,27 +260,6 @@ export class VibeAgent implements Agent {
                     tokenUsage,
                     sessionId: parsedOutput.sessionId
                 };
-            }
-
-            const errorMsg = buildVibeFailureMessage(result, parsedOutput);
-            if (!suppressLlmLog) {
-                await persistLlmLog(createLlmLogFromAnalysis({
-                    executionType: (executionType || 'other') as ExecutionType,
-                    modelUsed: parsedOutput.model || effectiveModel,
-                    executionTimeMs,
-                    success: false,
-                    tokenUsage,
-                    error: errorMsg,
-                    sessionId: parsedOutput.sessionId,
-                    draftId: taskId,
-                    correlationId,
-                    repository,
-                    metadata: buildLogMetadata(metadata || {}, result, true),
-                    agentAlias: this.config.alias,
-                    usageMetrics: usage.metrics,
-                    usageMetricRecords: usage.records,
-                    workRef: buildAnalysisWorkRef(executionType, taskId, repository, { taskNumber, prNumber }),
-                }));
             }
             return { response: '', modelUsed: effectiveModel, executionTimeMs, success: false, error: `Analysis failed: ${errorMsg}` };
         } catch (error) {
