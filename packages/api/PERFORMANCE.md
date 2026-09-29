@@ -197,3 +197,30 @@ Validation used a clean checkout because an extra ignored local workspace made
 typechecks, the production UI build, 64 focused API tests and 226 dashboard,
 goal and live-update UI tests; context-preview tests were run separately after
 the additional polling change.
+
+## Completion reads off the API thread
+
+After the initial rollout, three authenticated staging rounds measured outcomes
+at a 1.12-second median (previously 3.20 seconds), while the dashboard's outcomes
+request fell from about 7.00 to 2.78 seconds. Unrelated reads still waited behind
+the synchronous projection during dashboard startup.
+
+File-backed SQLite APIs now execute completion projections in a dedicated,
+read-only worker, shared by the feed and narrative. Identical concurrent reads
+share only their in-flight result; subsequent reads query the current database.
+There is no response TTL. The service bounds distinct queued requests at 32,
+terminates a worker after a 30-second request deadline, rejects outstanding
+requests on failure/shutdown, and starts a replacement on a later request.
+In-memory and non-better-sqlite3 fixtures retain their supplied connection.
+
+On the staging snapshot, simultaneous 50-entity feed and 8-entity narrative reads
+took 1,240 ms on the API thread and 1,222 ms in the worker with identical results.
+A foreground timer plus `SELECT 1` probe completed at 1,241 ms before and 11 ms
+after: this isolates request responsiveness rather than claiming the projection
+itself became faster. Tests cover repository/search parity, Unicode titles,
+visibility of subsequent writes, bounded queued work, query-error recovery,
+shutdown, deadline failure, and read-only startup against a missing file.
+
+Add `--worker` to `scripts/benchmark-dashboard-outcomes.ts` to reproduce the
+worker path; each iteration also reports when a 10 ms foreground timer fires.
+The compiled JavaScript worker was separately smoke-tested against the snapshot.

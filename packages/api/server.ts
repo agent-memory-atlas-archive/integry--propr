@@ -1,3 +1,4 @@
+import { startDashboardReadService, type DashboardReadService } from './services/dashboardReadService.js';
 import { createUsageTipsRoutes } from './routes/usageTipsRoutes.js';
 import { dashboardNarrativeModel } from './routes/dashboardNarrativeModel.js';
 import { getConfig } from '@propr/core';
@@ -257,6 +258,7 @@ let taskQueue: Queue;
 let runtimeBuildQueue: Queue;
 let configReloadSubscription: ConfigReloadSubscription | undefined;
 let invalidateStatusAgentCache: (() => void) | undefined;
+let dashboardReads: DashboardReadService | undefined;
 let notificationBackground: NotificationBackgroundService | undefined;
 let webPushDispatcherConfigured = false;
 let resolvedWebPushConfiguration: ValidatedWebPushConfiguration = { configured: false, issue: 'disabled' };
@@ -362,7 +364,7 @@ function setupRoutes(): void {
   const agentRoutes = createAgentRoutes();
   const agentLoginRoutes = createAgentLoginRoutes();
   const statsRoutes = createStatsRoutes({ db });
-  const dashboardRoutes = createDashboardRoutes({ db, redisClient, taskQueue, narrativeModel: dashboardNarrativeModel, isSummaryEnabled: async () => (await getConfig('dashboard_summary_enabled', true)) !== false });
+  const dashboardRoutes = createDashboardRoutes({ db, redisClient, taskQueue, completedRows: dashboardReads?.load, narrativeModel: dashboardNarrativeModel, isSummaryEnabled: async () => (await getConfig('dashboard_summary_enabled', true)) !== false });
   const summaryBrowserRoutes = createSummaryBrowserRoutes();
   const repoChatRoutes = createRepoChatRoutes();
   const repoImprovementsRoutes = createRepoImprovementsRoutes();
@@ -563,6 +565,7 @@ async function start(): Promise<void> {
   try {
     console.log('SQLite persistence is enabled');
     await runMigrations();
+    dashboardReads = await startDashboardReadService(db);
     if (demoMode) console.log('Demo mode enabled: API uses a synthetic user, rejects mutating requests, and skips execution processors');
     await assertInstanceAdministratorConfigured();
     await initRedis();
@@ -681,6 +684,7 @@ async function start(): Promise<void> {
     process.on('SIGTERM', async () => {
       console.log('SIGTERM received, shutting down gracefully...');
       const shutdownTasks: ShutdownTask[] = [
+        { name: 'dashboard read service', close: () => dashboardReads?.close() ?? Promise.resolve() },
         { name: 'task queue', close: () => taskQueue.close() },
         { name: 'agent runtime build queue', close: () => runtimeBuildQueue.close() },
         { name: 'agent login sessions', close: () => agentLoginSessionManager.close() },
