@@ -294,6 +294,10 @@ test('real consent and connected-app routes work at desktop/mobile widths and en
     assert.deepEqual(grant?.repositories, ['acme/web-app']);
     await page.goto(`${origin}/mcp/apps`);
     assert.equal(await page.getByRole('heading', { name: 'Development chat client' }).count(), 1);
+    if (capture) {
+      await page.setViewportSize({ width: 1200, height: 800 });
+      await page.screenshot({ path: '.propr/previews/mcp-connected-apps.png', animations: 'disabled' });
+    }
 
     await page.getByRole('button', { name: 'Revoke access' }).click();
     await page.getByText('No connected apps.').waitFor();

@@ -1,4 +1,5 @@
 import { expect, test, type Page } from '@playwright/test';
+import { mkdir } from 'node:fs/promises';
 
 const timestamp = '2026-09-10T00:00:00.000Z';
 
@@ -120,6 +121,8 @@ async function rowHeights(page: Page) {
 }
 
 test.beforeEach(async ({ page }) => {
+  await page.routeWebSocket('**/socket.io/**', socket => socket.close());
+  await page.clock.install({ time: Date.parse(timestamp) + 120_000 });
   await stubGoalApis(page);
 });
 
@@ -147,6 +150,10 @@ test('keeps the goal work queue within the available 1024px desktop content widt
   const wideDimensions = await contentWidths(page);
   expect(wideDimensions.queueScrollWidth).toBeLessThanOrEqual(wideDimensions.queueClientWidth);
   expect(wideDimensions.mainScrollWidth).toBeLessThanOrEqual(wideDimensions.mainClientWidth);
+  if (process.env.PROPR_CAPTURE_PREVIEWS) {
+    await mkdir('../.propr/previews', { recursive: true });
+    await page.screenshot({ path: '../.propr/previews/goals-queue.png', animations: 'disabled' });
+  }
 });
 
 test('dismisses the repository picker before the dirty goal creator on Escape', async ({ page }) => {
