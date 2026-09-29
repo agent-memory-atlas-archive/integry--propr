@@ -83,7 +83,7 @@ test.each([false, true])('a blank draft survives an earlier write completing (re
 });
 
 test('a blank draft ignores an already running availability probe', async () => {
-  let releaseProbe = (_status: { available: boolean }) => {};
+  let releaseProbe: (status: { available: boolean }) => void = () => {};
   apiMocks.getAgentTankStatus.mockReturnValueOnce(new Promise(resolve => { releaseProbe = resolve; }));
   const { result } = renderHook(() => useAgentTankSettings(vi.fn()));
   act(() => result.current.adopt({ mode: 'external', enabled: true, url: 'http://legacy:3456' }));

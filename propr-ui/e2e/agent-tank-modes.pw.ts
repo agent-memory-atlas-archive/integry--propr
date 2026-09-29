@@ -148,13 +148,17 @@ test('bundled mode is refused on a legacy backend instead of reported as applied
   await page.setViewportSize({ width: 1280, height: 1000 });
   const saved = await installFixture(page, { enabled: true, url: 'http://host.docker.internal:3456' });
   await page.goto('/settings?tab=integrations');
+  await expect(page.getByRole('radio', { name: /External/ })).toBeChecked();
 
-  await page.getByRole('radio', { name: /Bundled/ }).check();
+  // Rejection can restore External before check() verifies the clicked radio.
+  // Click to attempt the change, then assert the rejected state below.
+  await page.getByRole('radio', { name: /Bundled/ }).click();
 
   await expect(page.getByRole('status').filter({ hasText: 'too old' })).toBeVisible();
   // Nothing was written, and the radio shows the mode that is really stored.
   expect(saved).toEqual([]);
   await expect(page.getByRole('radio', { name: /External/ })).toBeChecked();
+  await expect(page.getByRole('radio', { name: /Bundled/ })).not.toBeChecked();
   await captureViewport(page, 'agent-tank-legacy-backend');
 });
 
