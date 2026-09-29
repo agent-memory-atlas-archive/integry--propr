@@ -362,6 +362,20 @@ export class VibeAgent implements Agent {
         const envVars = forwardedEnvVars.dockerArgs;
         envVars.push('-e', 'PROPR_AGENT_TYPE=vibe');
         if (cleanModelName) envVars.push('-e', `VIBE_ACTIVE_MODEL=${cleanModelName}`);
+        // Vibe's bundled catalog does not include Mistral-hosted GLM. Its nested
+        // environment layer merges this preset with existing user/provider config,
+        // including in read-only analysis runs, without editing host credentials.
+        if (cleanModelName === 'zai-glm-5-3' || cleanModelName === 'zai-glm-5-2') {
+            envVars.push('-e', `VIBE_MODELS__${cleanModelName}=${JSON.stringify({
+                name: cleanModelName,
+                alias: cleanModelName,
+                provider: 'mistral',
+                thinking: 'high',
+                input_price: 1.4,
+                cached_input_price: 0.14,
+                output_price: 4.4,
+            })}`);
+        }
         envVars.push('-e', 'VIBE_SOURCE_HOME=/home/node/.vibe');
         if (runtimeHomePath) envVars.push('-e', 'VIBE_RUNTIME_HOME=/tmp/propr-vibe-home', '-e', 'HOME=/tmp/propr-vibe-home');
         if (mode === 'analysis') {
