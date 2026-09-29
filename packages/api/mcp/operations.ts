@@ -106,7 +106,9 @@ export class McpOperations {
     try {
       const result = await invoke(id);
       const state = operationState(result);
-      await this.db('mcp_operations').where({ id }).update({ state, result: JSON.stringify(result.data), updated_at: Date.now() });
+      const recorded = await this.db('mcp_operations').where({ id }).whereNotIn('state', ['completed', 'failed', 'cancelled'])
+        .update({ state, result: JSON.stringify(result.data), updated_at: Date.now() });
+      if (!recorded) return this.project((await this.db<Operation>('mcp_operations').where({ id }).first())!);
       const receipt = { state, result: result.data };
       await this.recordArtifacts(id, artifactsFromReceipt({ repository: repository || null }, receipt));
       const lifecycle = lifecycleFromLegacy(state);
@@ -127,7 +129,9 @@ export class McpOperations {
       // automatically or claim it was rolled back. The handle remains durable.
       const envelope = classifyError(error, { sideEffectsPossible: true });
       const state = envelope.code === 'OUTCOME_UNKNOWN' ? 'unknown' : 'failed';
-      await this.db('mcp_operations').where({ id }).update({ state, result: JSON.stringify({ error: envelope }), updated_at: Date.now() });
+      const recorded = await this.db('mcp_operations').where({ id }).whereNotIn('state', ['completed', 'failed', 'cancelled'])
+        .update({ state, result: JSON.stringify({ error: envelope }), updated_at: Date.now() });
+      if (!recorded) return this.project((await this.db<Operation>('mcp_operations').where({ id }).first())!);
       if (state === 'failed') await this.finish(id, 'failed', envelope);
       else await this.db('mcp_operations').where({ id }).whereIn('lifecycle', ['accepted', 'unknown'])
         .update({ lifecycle: 'unknown', failure: JSON.stringify(envelope), updated_at: Date.now() });
@@ -234,21 +238,29 @@ export class McpOperations {
   }
 
   async recordProgress(id: string, progress: unknown): Promise<void> {
-    await this.db('mcp_operations').where({ id }).update({ progress: JSON.stringify(progress), updated_at: Date.now() });
+    await this.db('mcp_operations').where({ id })
+      .whereIn('lifecycle', ['accepted', 'running', 'unknown'])
+      .whereNotIn('state', ['completed', 'failed', 'cancelled'])
+      .update({ progress: JSON.stringify(progress), updated_at: Date.now() });
   }
 
-  async finish(id: string, outcome: LifecycleOutcome, failure?: McpErrorEnvelope): Promise<void> {
+  async finish(id: string, outcome: LifecycleOutcome, failure?: McpErrorEnvelope, progress?: unknown): Promise<void> {
     const at = Date.now();
     const eligible = this.db('mcp_operations').where({ id }).andWhere(builder => {
       builder.whereIn('lifecycle', ['accepted', 'running', 'unknown']);
       if (outcome === 'failed' && failure) builder.orWhere(nested => nested.where({ lifecycle: 'failed' }).whereNull('failure'));
     });
-    await eligible.update({
+    const update: Record<string, unknown> = {
       lifecycle: outcome,
       finished_at: this.db.raw('COALESCE(finished_at, ?)', [at]),
       failure: failure ? this.db.raw('COALESCE(failure, ?)', [JSON.stringify(failure)]) : null,
       updated_at: at,
-    });
+    };
+    if (progress !== undefined) update.progress = this.db.raw(`CASE
+      WHEN lifecycle IN ('accepted', 'running', 'unknown') THEN ?
+      ELSE COALESCE(progress, ?)
+    END`, [JSON.stringify(progress), JSON.stringify(progress)]);
+    await eligible.update(update);
   }
 
   /** Apply durable cancellation evidence only to the receipt owner's source operation. */

@@ -115,6 +115,115 @@ test('operation lifecycle transitions, artifacts and progress are durable and mo
   assert.equal((projected.lifecycle as { failure: unknown }).failure, null);
 });
 
+test('a delayed invocation result cannot replace terminal evidence persisted by a poll', async t => {
+  const db = knex({ client: 'better-sqlite3', connection: { filename: ':memory:' }, useNullAsDefault: true });
+  t.after(() => db.destroy());
+  await db.schema.createTable('task_drafts', table => table.string('draft_id').primary());
+  await up(db); await lifecycleUp(db);
+  const operations = new McpOperations(db);
+  const principal = { user: { id: 'alice' }, grant: { id: 'grant-a' } } as McpPrincipal;
+  let invocationStarted!: () => void;
+  let finishInvocation!: (result: { status: number; data: unknown }) => void;
+  const started = new Promise<void>(resolve => { invocationStarted = resolve; });
+  const pending = operations.run(principal, {
+    tool: 'review_pull_request', args: { idempotencyKey: 'late-invocation-result' }, repository: 'acme/repo',
+  }, async () => {
+    invocationStarted();
+    return new Promise(resolve => { finishInvocation = resolve; });
+  });
+  await started;
+
+  const row = (await db<Operation>('mcp_operations').where({ idempotency_key: 'late-invocation-result' }).first())!;
+  const targetState = { taskId: 'review-task', state: 'completed', timestamp: '2026-09-29T04:01:00.000Z' };
+  await db('mcp_operations').where({ id: row.id }).update({
+    state: 'completed', result: JSON.stringify({ executionResolved: true, targetState }), updated_at: Date.now(),
+  });
+  await operations.finish(row.id, 'completed', undefined, targetState);
+  finishInvocation({ status: 202, data: { state: 'queued', pullRequest: 42 } });
+
+  const completed = await pending;
+  assert.equal(completed.state, 'completed');
+  assert.deepEqual(completed.result, { executionResolved: true, targetState });
+  assert.deepEqual((completed.lifecycle as { progress: unknown }).progress, targetState);
+});
+
+test('stale concurrent polls cannot replace terminal tracker receipts or lifecycle progress', async t => {
+  const db = knex({ client: 'better-sqlite3', connection: { filename: ':memory:' }, useNullAsDefault: true });
+  t.after(() => db.destroy());
+  await db.schema.createTable('task_drafts', table => table.string('draft_id').primary());
+  await db.schema.createTable('tasks', table => {
+    table.string('task_id').primary(); table.string('repository'); table.string('task_type');
+    table.integer('issue_number'); table.integer('pr_number'); table.text('initial_job_data');
+    table.timestamp('created_at').defaultTo(db.fn.now());
+  });
+  await db.schema.createTable('task_history', table => {
+    table.increments('history_id').primary(); table.string('task_id'); table.string('state');
+    table.timestamp('timestamp'); table.text('reason'); table.text('metadata');
+  });
+  await up(db); await lifecycleUp(db);
+
+  const operations = new McpOperations(db);
+  const args = { idempotencyKey: 'stale-terminal-poll-1' };
+  let releaseStale!: () => void;
+  let staleReachedRefresh!: () => void;
+  const release = new Promise<void>(resolve => { releaseStale = resolve; });
+  const reachedRefresh = new Promise<void>(resolve => { staleReachedRefresh = resolve; });
+  let githubRequests = 0;
+  const principal = {
+    user: { id: 'alice' }, grant: { id: 'grant-a' }, github: { request: async () => {
+      githubRequests++;
+      if (githubRequests === 1) { staleReachedRefresh(); await release; }
+      return { data: { head: { sha: `head-${githubRequests}` } } };
+    } },
+  } as unknown as McpPrincipal;
+  const receipt = await operations.run(principal, { tool: 'review_pull_request', args, repository: 'acme/repo' }, async () => ({
+    status: 202, data: { state: 'queued', pullRequest: 42, commentId: 99 },
+  }));
+  await db('tasks').insert({ task_id: 'review-task', repository: 'acme/repo', task_type: 'issue', issue_number: 42,
+    initial_job_data: JSON.stringify({ commandCommentId: 99, commandMode: 'review' }) });
+  await db('task_history').insert({ task_id: 'review-task', state: 'processing',
+    timestamp: '2026-09-29T04:00:00.000Z', reason: 'Review is running' });
+  const deps = { db, policy: { repository: async () => {}, requirePermission: () => {}, config: {} } as never,
+    taskQueue: {} as never, redisClient: {} as never, runtimeBuildQueue: {} as never } as ToolDeps;
+
+  const staleRow = (await db<Operation>('mcp_operations').where({ id: receipt.operationId }).first())!;
+  const staleReceipt = operations.project(staleRow);
+  const stalePoll = trackExecution(deps, staleRow, principal, staleReceipt);
+  await reachedRefresh;
+
+  const terminalAt = '2026-09-29T04:01:00.000Z';
+  await db('task_history').insert({ task_id: 'review-task', state: 'completed', timestamp: terminalAt,
+    reason: 'Review processing completed successfully' });
+  const terminalRow = (await db<Operation>('mcp_operations').where({ id: receipt.operationId }).first())!;
+  const terminalReceipt = operations.project(terminalRow);
+  await trackExecution(deps, terminalRow, principal, terminalReceipt);
+  await syncLifecycle(operations, terminalRow, terminalReceipt);
+
+  releaseStale();
+  await stalePoll;
+  await syncLifecycle(operations, staleRow, staleReceipt);
+
+  const durable = (await db<Operation>('mcp_operations').where({ id: receipt.operationId }).first())!;
+  const durableResult = JSON.parse(durable.result!);
+  assert.equal(durable.state, 'completed');
+  assert.equal(durable.lifecycle, 'completed');
+  assert.equal(durableResult.executionResolved, true);
+  assert.equal(durableResult.targetState.state, 'completed');
+  assert.equal(durableResult.targetState.reason, 'Review processing completed successfully');
+  assert.deepEqual(JSON.parse(durable.progress!), durableResult.targetState);
+  assert.equal(staleReceipt.state, 'completed', 'the stale caller returns the winning durable observation');
+  assert.deepEqual(staleReceipt.targetState, durableResult.targetState);
+
+  await db('task_history').delete();
+  const replayed = await operations.replay(principal, 'review_pull_request', args);
+  assert.equal((replayed?.lifecycle as { state: string }).state, 'completed');
+  assert.deepEqual((replayed?.lifecycle as { progress: unknown }).progress, durableResult.targetState);
+  const list = createToolCatalog(deps).find(tool => tool.name === 'list_operations')!;
+  const listed = (await list.run({ principal, args: list.schema.parse({}) })).data as { operations: Array<Record<string, unknown>> };
+  const listedReceipt = listed.operations.find(operation => operation.operationId === receipt.operationId)!;
+  assert.deepEqual((listedReceipt.lifecycle as { progress: unknown }).progress, durableResult.targetState);
+});
+
 test('replay recovers terminal lifecycle, artifacts and failure from durable receipts', async t => {
   const db = knex({ client: 'better-sqlite3', connection: { filename: ':memory:' }, useNullAsDefault: true });
   t.after(() => db.destroy());

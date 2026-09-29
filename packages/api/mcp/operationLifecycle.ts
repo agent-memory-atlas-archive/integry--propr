@@ -192,17 +192,20 @@ export async function syncLifecycle(
   if (Object.keys(artifacts).length) await operations.recordArtifacts(row.id, artifacts);
 
   const target = record(receipt.targetState);
-  if (target) await operations.recordProgress(row.id, target);
-
   const targetState = String(target?.state ?? '');
   const receiptState = String(receipt.state ?? '');
   const result = record(receipt.result);
+  const outcome = lifecycleOutcome(row, target, receiptState, targetState);
+  if (target && !outcome) await operations.recordProgress(row.id, target);
+
   const startedAt = observedStartTimestamp(target, result, targetState);
   if (startedAt !== null) await operations.markStarted(row.id, startedAt);
 
-  const outcome = lifecycleOutcome(row, target, receiptState, targetState);
   if (outcome) {
-    await operations.finish(row.id, outcome, outcome === 'failed' ? failureFromReceipt(receipt) : undefined);
+    // Persist the terminal snapshot in the same guarded update as the outcome.
+    // This closes the window where an older nonterminal poll could otherwise
+    // replace terminal progress between two lifecycle writes.
+    await operations.finish(row.id, outcome, outcome === 'failed' ? failureFromReceipt(receipt) : undefined, target);
   } else if (receiptState === 'unknown') {
     await operations.markUnknown(row.id);
   } else if (receiptState === 'queued' && target) {

@@ -120,7 +120,22 @@ export async function trackExecution(deps: ToolDeps, row: Operation, principal: 
   }
   receipt.result = result;
   if (receipt.state === 'unknown') receipt.message = 'Execution cannot yet be confirmed. Inspect the linked comment/job; polling can still resolve it. Do not blindly resubmit.';
-  await db('mcp_operations').where({ id: row.id }).update({ state: receipt.state, result: JSON.stringify(result), updated_at: Date.now() });
+  const recorded = await db('mcp_operations').where({ id: row.id }).whereNotIn('state', terminalStates)
+    .update({ state: receipt.state, result: JSON.stringify(result), updated_at: Date.now() });
+  if (!recorded) {
+    // Another poll persisted terminal evidence while this observation was
+    // awaiting external context. Return that durable receipt and let lifecycle
+    // synchronization use its terminal target instead of this stale snapshot.
+    const current = await db<Operation>('mcp_operations').where({ id: row.id }).first();
+    if (current && terminalStates.includes(current.state)) {
+      const currentResult = current.result ? JSON.parse(current.result) as ExecutionResult & Record<string, unknown> : {};
+      receipt.state = current.state;
+      receipt.result = currentResult;
+      if (currentResult.targetState) receipt.targetState = currentResult.targetState;
+      else delete receipt.targetState;
+      delete receipt.message;
+    }
+  }
 }
 
 interface ExecutionResult {
