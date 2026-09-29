@@ -159,7 +159,7 @@ FROM agent-base AS agent-tank-cli
 # feeds the agent bundle content hash, so bumping it produces a new image tag.
 # An env-only override in CI would NOT change the tag and would silently ship a
 # different binary under an existing tag - do not do that.
-ARG AGENT_TANK_CLI_VERSION=0.9.10
+ARG AGENT_TANK_CLI_VERSION=0.9.11
 USER root
 # node-pty compiles against the toolchain already present in agent-base
 # (build-essential + python3), which is why this needs no extra apt packages.
@@ -211,7 +211,7 @@ ARG CODEX_CLI_VERSION=0.154.0
 ARG ANTIGRAVITY_CLI_VERSION=1.2.4
 ARG OPENCODE_CLI_VERSION=1.18.31
 ARG VIBE_CLI_VERSION=2.25.4
-ARG AGENT_TANK_CLI_VERSION=0.9.10
+ARG AGENT_TANK_CLI_VERSION=0.9.11
 
 LABEL dev.propr.agent-bundle="true" \
       dev.propr.agent.claude.version="${CLAUDE_CLI_VERSION}" \

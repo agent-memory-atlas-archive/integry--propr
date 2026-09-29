@@ -38,7 +38,7 @@ const integrationScript = readFileSync('scripts/integration-test-images.sh', 'ut
 const smokeScript = readFileSync('scripts/smoke-test-images.sh', 'utf8');
 const releaseImageWorkflow = readFileSync('.github/workflows/docker-images.yml', 'utf8');
 const prBuildWorkflow = readFileSync('.github/workflows/pr-build-check.yml', 'utf8');
-const fixturePath = new URL('./fixtures/agent-tank-verifier-pinned-0.9.10.json', import.meta.url)
+const fixturePath = new URL('./fixtures/agent-tank-verifier-pinned-0.9.11.json', import.meta.url)
     .pathname;
 const fixture = JSON.parse(readFileSync(fixturePath, 'utf8')) as {
     cliVersion: string;
@@ -359,7 +359,7 @@ test('an unpublished pin is verified by building the public repository at that r
         const result = runVerification({ bundledVersion });
 
         assert.equal(result.status, 0, `stdout:\n${result.stdout}\nstderr:\n${result.stderr}`);
-        assert.match(result.stdout, /building the pinned ref v0\.9\.10 from https:\/\/github\.com\/integry\/agent-tank\.git/);
+        assert.ok(result.stdout.includes(`building the pinned ref v${PINNED_VERSION} from https://github.com/integry/agent-tank.git`));
         assert.match(result.stdout, new RegExp(`verification passed \\(source runtime, version ${PINNED_VERSION}\\)`));
 
         const args = agentTankRun(result.dockerRuns);

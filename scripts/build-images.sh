@@ -40,7 +40,7 @@ VIBE_CLI_VERSION="${VIBE_CLI_VERSION:-2.25.4}"
 # mismatch here would ship a different Agent Tank build under an existing tag.
 # `assert_agent_tank_version_matches_pin` enforces that, including for an
 # environment override, rather than trusting the convention.
-AGENT_TANK_CLI_VERSION="${AGENT_TANK_CLI_VERSION:-0.9.10}"
+AGENT_TANK_CLI_VERSION="${AGENT_TANK_CLI_VERSION:-0.9.11}"
 PUSH_LATEST="${PUSH_LATEST:-true}"
 
 VERSION="$(node -p "require('./package.json').version")"
