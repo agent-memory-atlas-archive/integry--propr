@@ -208,14 +208,18 @@ export async function startDashboardReadService(db: Knex, options: { timeoutMs?:
   const { loadCompletedRows, loadOutcomeSummaries } = await import('../routes/dashboardOutcomeQueries.js');
   const filename = sqliteFilename(db);
   if (db.client.config.client !== 'better-sqlite3' || !filename || filename === ':memory:') {
-    return { load: Object.assign((repository: string, query?: { limit?: number; search?: string }) => loadCompletedRows(db, repository, query),
-      { summary: (repository: string, query?: { limit?: number; search?: string }) => loadOutcomeSummaries(db, repository, query) }), close: async () => undefined };
+    // Supplied connections have no projection producer. The summary protocol
+    // also accepts legacy rows with embedded earlier updates.
+    const load: CompletionLoader = (repository, query) => loadCompletedRows(db, repository, query);
+    return { load: Object.assign(load, { summary: load }), close: async () => undefined };
   }
   const service = new SQLiteDashboardReads(filename, options.timeoutMs ?? 30_000);
   await service.start();
   const projection = options.projection === false || process.env.DASHBOARD_OUTCOME_PROJECTION === 'legacy' ? undefined : startProjectionWorker(filename);
   let closed = false;
-  const summaries = shareSummaryReads((repository, query) => loadOutcomeSummaries(db, repository, query));
+  const summaries = projection
+    ? shareSummaryReads((repository, query) => loadOutcomeSummaries(db, repository, query))
+    : service.load;
   return {
     load: Object.assign(service.load, { summary: (repository: string, query?: { limit?: number; search?: string }) =>
       closed ? Promise.reject(new Error('Dashboard read service is closed')) : summaries(repository, query) }),

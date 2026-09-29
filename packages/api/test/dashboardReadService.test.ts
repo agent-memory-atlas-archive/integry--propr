@@ -5,9 +5,9 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 import knex from 'knex';
 import { startDashboardReadService } from '../services/dashboardReadService.js';
-import { loadCompletedRows } from '../routes/dashboardOutcomeQueries.js';
+import { loadCompletedRows, OUTCOME_TABLES } from '../routes/dashboardOutcomeQueries.js';
 import { createDashboardRoutes } from '../routes/dashboardRoutes.js';
-import { call, createDashboardTestDatabase, seedTask, minutesAgo } from './dashboardTestHarness.js';
+import { call, createDashboardTestDatabase, seedTask, minutesAgo, NOW } from './dashboardTestHarness.js';
 
 async function fixture(count = 2) {
   const directory = await mkdtemp(join(tmpdir(), 'dashboard-reads-'));
@@ -81,6 +81,50 @@ test('retains the supplied in-memory connection', async () => {
     assert.equal((await service.load('all'))[0].taskId, 'memory');
   } finally { await service.close(); await db.destroy(); }
 });
+
+for (const mode of ['memory', 'disabled', 'legacy'] as const) {
+  test(`unmaintained ${mode} connection serves summaries and narrative with embedded history`, async t => {
+    const previousMode = process.env.DASHBOARD_OUTCOME_PROJECTION;
+    t.after(() => {
+      if (previousMode === undefined) delete process.env.DASHBOARD_OUTCOME_PROJECTION;
+      else process.env.DASHBOARD_OUTCOME_PROJECTION = previousMode;
+    });
+    if (mode === 'legacy') process.env.DASHBOARD_OUTCOME_PROJECTION = 'legacy';
+    else delete process.env.DASHBOARD_OUTCOME_PROJECTION;
+    const data = mode === 'memory' ? undefined : await fixture(0);
+    const db = data?.db ?? await createDashboardTestDatabase();
+    const service = await startDashboardReadService(db, mode === 'disabled' ? { projection: false } : {});
+    try {
+      await seedTask(db, { taskId: 'fallback', title: 'Änderung', states: [
+        { state: 'completed', timestamp: minutesAgo(3) },
+        { state: 'pending', timestamp: minutesAgo(2) },
+        { state: 'completed', timestamp: minutesAgo(1), metadata: { notificationRecap: 'Shipped the change.' } },
+      ] });
+      await seedTask(db, { taskId: 'outside', repository: 'other/repo', states: [{ state: 'completed', timestamp: minutesAgo(0) }] });
+      const query = { search: 'ÄNDERUNG', limit: 1 };
+      assert.deepEqual(await service.load.summary!('integry/propr', query), await loadCompletedRows(db, 'integry/propr', query));
+      const routes = createDashboardRoutes({ db, redisClient: {} as never,
+        taskQueue: { isPaused: async () => false, getActiveCount: async () => 0 },
+        liveDetails: async () => null, completedRows: service.load, now: () => NOW,
+        narrativeModel: async () => ({ id: 'test', generate: async prompt => {
+          assert.match(prompt, /Shipped the change/);
+          return 'Recent work shipped.';
+        } }),
+      });
+      const response = await call(routes.getOutcomes, { view: 'summary', repository: 'integry/propr', search: 'ÄNDERUNG', limit: '1' });
+      assert.equal(response.status, 200);
+      const items = response.body.items as Array<{ taskId: string; eventCount: number; earlierUpdates: unknown[] }>;
+      assert.equal(items.length, 1);
+      assert.equal(items[0].taskId, 'fallback');
+      assert.equal(items[0].eventCount, 2);
+      assert.equal(items[0].earlierUpdates.length, 1);
+      assert.equal((await call(routes.getNarrative, { repository: 'integry/propr' })).body.summary, 'Recent work shipped.');
+      await db('tasks').where('task_id', 'fallback').update({ initial_job_data: JSON.stringify({ title: 'Updated title' }) });
+      assert.equal((await service.load.summary!('integry/propr'))[0].title, 'Updated title');
+      assert.equal(await db.schema.hasTable(OUTCOME_TABLES.state), false);
+    } finally { await service.close(); if (data) await data.close(); else await db.destroy(); }
+  });
+}
 
 test('bounds a stalled read and releases its worker on shutdown', async () => {
   const data = await fixture(2000);

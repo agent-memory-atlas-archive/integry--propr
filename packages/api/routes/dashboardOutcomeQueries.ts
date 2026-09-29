@@ -413,6 +413,14 @@ export async function advanceOutcomeProjection(db: Knex): Promise<boolean> {
     if ((await tx(T.state).where('id', 1).first('epoch')).epoch !== snapshot.epoch) return;
     if (!await tx(T.dirty).where({ task_id: dirty.task_id, token: dirty.token }).first()) return;
     const previous = await tx(T.runs).where('task_id', dirty.task_id).select('*');
+    // History can move between tasks (or be deleted and reinserted with the
+    // same ID). The fenced source snapshot authorizes this task to claim those
+    // completions; include their former entities and repositories in the refresh.
+    // Leave the former tasks queued: their remaining runs still need projecting.
+    for (const batch of chunk(rows)) {
+      previous.push(...await tx(T.runs).whereNot('task_id', dirty.task_id)
+        .whereIn('completion_id', batch.map(row => row.completion_id)).select('*'));
+    }
     const canonical = (values: typeof rows) => JSON.stringify([...values].sort((a, b) => a.completion_id - b.completion_id));
     // Compare named fields; SQLite's column order need not match the JS object.
     const old = previous.map(row => ({ completion_id: row.completion_id, task_id: row.task_id,
@@ -421,7 +429,8 @@ export async function advanceOutcomeProjection(db: Knex): Promise<boolean> {
     if (canonical(old) !== canonical(rows)) {
       const affected = new Set([...previous, ...rows].map(row => row.entity_id));
       await tx(T.runs).where('task_id', dirty.task_id).delete();
-      for (const batch of chunk(rows, 50)) await tx(T.runs).insert(batch.map(row => ({ ...row, source_revision: dirty.token })));
+      for (const batch of chunk(rows, 50)) await tx(T.runs).insert(batch.map(row => ({ ...row, source_revision: dirty.token })))
+        .onConflict('completion_id').merge();
       for (const entityId of affected) {
         const latest = await orderedRuns(tx, entityId).first();
         if (!latest) await tx(T.entities).where('entity_id', entityId).delete();
