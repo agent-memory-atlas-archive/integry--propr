@@ -69,37 +69,87 @@ export async function trackCancellation(deps: ToolDeps, row: Operation, principa
   await deps.db('mcp_operations').where({ id: row.id }).whereNotIn('state', terminalStates).update({ state: receipt.state, result: JSON.stringify(result), updated_at: Date.now() });
 }
 
+async function refreshPullRequestContext(
+  row: Operation,
+  principal: McpPrincipal,
+  result: ExecutionResult & Record<string, unknown>,
+): Promise<void> {
+  if (!result.pullRequest) return;
+  const [owner, repo] = String(row.repository).split('/');
+  const { data: pr } = await principal.github.request('GET /repos/{owner}/{repo}/pulls/{pull_number}', {
+    owner, repo, pull_number: result.pullRequest,
+  });
+  result.currentHead = pr.head.sha;
+  result.results = {
+    tool: 'get_pull_request_discussion', repository: row.repository,
+    pullRequest: result.pullRequest, taskId: result.continuation?.taskId,
+  };
+}
+
+function restoreResolvedTarget(
+  receipt: Record<string, unknown>,
+  result: ExecutionResult,
+  task: TrackingContext['task'] | undefined,
+): void {
+  const target = result.targetState
+    ?? (receipt.targetState as Record<string, unknown> | undefined)
+    ?? {};
+  if (!task && !Object.keys(target).length) return;
+  receipt.targetState = {
+    ...target,
+    ...(task ? { taskId: task.task_id, pr_number: task.pr_number } : {}),
+  };
+}
+
 /** Resolve the execution from the actual job or the exact triggering comment. */
 export async function trackExecution(deps: ToolDeps, row: Operation, principal: McpPrincipal, receipt: Record<string, unknown>): Promise<void> {
   if (!trackedTools.includes(row.tool) || !row.result) return;
   const { db } = deps;
-  const result = JSON.parse(row.result);
+  const result = JSON.parse(row.result) as ExecutionResult & Record<string, unknown>;
   if (['create_task', 'retry_task_submission'].includes(row.tool) && !result.continuation?.taskId) return;
-  if (result.error || (result.executionResolved && terminalStates.includes(row.state))) return;
+  if (result.error) return;
   const task = row.tool === 'index_repository' ? undefined : await findExecutionTask(deps, row, result);
+  if (result.executionResolved && terminalStates.includes(row.state)) {
+    restoreResolvedTarget(receipt, result, task);
+    return;
+  }
   if (task) await trackTask(deps, row, { task, result, receipt });
   else if (result.jobId) await trackQueuedJob(row, result.jobId, receipt);
   else if (Date.now() - Number(row.created_at) > 120000) receipt.state = 'unknown';
-  if (result.pullRequest) {
-    const [owner, repo] = String(row.repository).split('/');
-    const { data: pr } = await principal.github.request('GET /repos/{owner}/{repo}/pulls/{pull_number}', { owner, repo, pull_number: result.pullRequest });
-    result.currentHead = pr.head.sha;
-    result.results = { tool: 'get_pull_request_discussion', repository: row.repository, pullRequest: result.pullRequest, taskId: result.continuation?.taskId };
+  await refreshPullRequestContext(row, principal, result);
+  if (terminalStates.includes(String(receipt.state))) {
+    result.executionResolved = true;
+    result.targetState = receipt.targetState as Record<string, unknown> | undefined;
   }
-  if (terminalStates.includes(String(receipt.state))) result.executionResolved = true;
   receipt.result = result;
   if (receipt.state === 'unknown') receipt.message = 'Execution cannot yet be confirmed. Inspect the linked comment/job; polling can still resolve it. Do not blindly resubmit.';
-  await db('mcp_operations').where({ id: row.id }).update({ state: receipt.state, result: JSON.stringify(result), updated_at: Date.now() });
+  const recorded = await db('mcp_operations').where({ id: row.id }).whereNotIn('state', terminalStates)
+    .update({ state: receipt.state, result: JSON.stringify(result), updated_at: Date.now() });
+  if (!recorded) {
+    // Another poll persisted terminal evidence while this observation was
+    // awaiting external context. Return that durable receipt and let lifecycle
+    // synchronization use its terminal target instead of this stale snapshot.
+    const current = await db<Operation>('mcp_operations').where({ id: row.id }).first();
+    if (current && terminalStates.includes(current.state)) {
+      const currentResult = current.result ? JSON.parse(current.result) as ExecutionResult & Record<string, unknown> : {};
+      receipt.state = current.state;
+      receipt.result = currentResult;
+      if (currentResult.targetState) receipt.targetState = currentResult.targetState;
+      else delete receipt.targetState;
+      delete receipt.message;
+    }
+  }
 }
 
 interface ExecutionResult {
   jobId?: string; commentId?: number; pullRequest?: number;
   continuation?: { taskId?: string; jobId?: string; sourceTaskId?: string };
+  targetState?: Record<string, unknown>;
   reviewResults?: Array<{ success: boolean; commentId?: number; commentUrl?: string }>;
   loop?: { completionStatus?: string | null } & Record<string, unknown>;
 }
 interface TrackingContext {
-  task: { task_id: string; initial_job_data: unknown };
+  task: { task_id: string; pr_number: number | null; initial_job_data: unknown };
   result: ExecutionResult; receipt: Record<string, unknown>;
 }
 
@@ -134,14 +184,15 @@ async function findExecutionTask(deps: ToolDeps, row: Operation, result: Executi
   } else {
     query.andWhere(builder => builder.where('task_id', result.jobId || continuation.taskId).orWhere('job_id', result.jobId || continuation.jobId));
   }
-  return query.orderBy('created_at', 'desc').first('task_id', 'initial_job_data');
+  return query.orderBy('created_at', 'desc').first('task_id', 'pr_number', 'initial_job_data');
 }
 
 async function trackTask(deps: ToolDeps, row: Operation, { task, result, receipt }: TrackingContext): Promise<void> {
   result.continuation = { ...result.continuation, taskId: task.task_id };
   const event = await deps.db('task_history').where({ task_id: task.task_id }).orderBy('history_id', 'desc').first('state', 'timestamp', 'reason', 'metadata');
   const metadata = typeof event?.metadata === 'string' ? JSON.parse(event.metadata) : event?.metadata;
-  receipt.targetState = { taskId: task.task_id, state: event?.state, timestamp: event?.timestamp, reason: event?.reason, reviewResults: metadata?.reviewResults };
+  receipt.targetState = { taskId: task.task_id, pr_number: task.pr_number, state: event?.state,
+    timestamp: event?.timestamp, reason: event?.reason, reviewResults: metadata?.reviewResults };
   if (metadata?.reviewResults) result.reviewResults = metadata.reviewResults;
   receipt.state = terminalStates.includes(event?.state) ? event.state : !event || event.state === 'pending' ? 'queued' : 'running';
   if (event?.state === 'completed' && result.reviewResults?.length && result.reviewResults.every(review => !review.success)) receipt.state = 'failed';

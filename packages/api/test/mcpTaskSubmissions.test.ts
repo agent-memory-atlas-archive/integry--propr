@@ -27,6 +27,10 @@ interface Receipt {
   state: string;
   result: SubmissionData;
   retryAfterSeconds?: number;
+  lifecycle: {
+    state: string; acceptedAt: string; startedAt: string | null; finishedAt: string | null;
+    failure: unknown; artifacts: Record<string, unknown>; progress: unknown;
+  };
 }
 
 async function fixture() {
@@ -37,7 +41,7 @@ async function fixture() {
   await identityMigration(db);
   await db.schema.createTable('tasks', table => {
     table.string('task_id').primary(); table.string('repository'); table.string('task_type');
-    table.string('initial_job_data'); table.timestamp('created_at').defaultTo(db.fn.now());
+    table.integer('pr_number'); table.string('initial_job_data'); table.timestamp('created_at').defaultTo(db.fn.now());
   });
   await db.schema.createTable('task_history', table => {
     table.increments('history_id'); table.string('task_id'); table.string('state');
@@ -90,6 +94,8 @@ test('MCP launches ordinary issue work once and follows delayed task association
     const first = await f.call('create_task', args);
     const receipt = first.data as Receipt;
     assert.equal(receipt.state, 'queued');
+    assert.equal(receipt.lifecycle.state, 'accepted');
+    assert.ok(receipt.lifecycle.acceptedAt);
     assert.equal(receipt.result.taskId, null);
     assert.equal(receipt.result.issueUrl, 'https://github.com/owner/repo/issues/42');
     assert.deepEqual((await f.call('create_task', args)).data, first.data);
@@ -111,16 +117,26 @@ test('MCP launches ordinary issue work once and follows delayed task association
     await f.db('tasks').insert({ task_id: 'ordinary-task', repository: 'owner/repo', task_type: 'issue' });
     await f.db('task_submissions').update({ task_id: 'ordinary-task' });
     await f.db('task_history').insert({ task_id: 'ordinary-task', state: 'processing' });
-    assert.equal((await poll()).state, 'running');
+    const running = await poll();
+    assert.equal(running.state, 'running');
+    assert.equal(running.lifecycle.state, 'running');
+    assert.ok(running.lifecycle.startedAt);
     const status = await f.call('get_task_submission', { repository: 'owner/repo', submissionId: stored.id });
     assert.equal((status.data as SubmissionData).taskId, 'ordinary-task');
     assert.equal(status.links.ui, 'https://instance.example/tasks/ordinary-task');
     await f.db('task_history').insert({ task_id: 'ordinary-task', state: 'completed' });
-    const completed = await poll();
+    const [completed, concurrent] = await Promise.all([poll(), poll()]);
     assert.equal(completed.state, 'completed');
+    assert.equal(completed.lifecycle.state, 'completed');
+    assert.equal(concurrent.lifecycle.state, 'completed');
+    assert.ok(completed.lifecycle.finishedAt);
+    assert.equal(completed.lifecycle.artifacts.taskId, 'ordinary-task');
     assert.equal(completed.result.continuation.taskId, 'ordinary-task');
     assert.equal(completed.retryAfterSeconds, undefined);
-    assert.equal((await poll()).state, 'completed');
+    await f.db('task_history').where({ task_id: 'ordinary-task' }).delete();
+    const durable = await poll();
+    assert.equal(durable.lifecycle.state, 'completed');
+    assert.equal(durable.lifecycle.artifacts.taskId, 'ordinary-task');
   } finally { await f.db.destroy(); }
 });
 

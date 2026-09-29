@@ -1,3 +1,4 @@
+/* eslint-disable max-lines -- MCP tool registration stays centralized so authorization and dispatch remain auditable */
 import { assertPlannerCancellationIdentity, cancellationTarget, cancellationOutcome, trackCancellation, trackExecution } from './operationTracking.js';
 import { z } from 'zod';
 import packageInfo from '../package.json' with { type: 'json' };
@@ -20,6 +21,7 @@ import { createAgentRuntimeRoutes } from '../routes/agentRuntimeRoutes.js';
 import { McpError, type McpScope } from './config.js';
 import { McpPolicy, type McpPrincipal } from './policy.js';
 import { McpOperations, type OperationResult, type Operation } from './operations.js';
+import { syncLifecycle } from './operationLifecycle.js';
 import { callWorkflow, type WorkflowHandler } from './adapter.js';
 import { addTaskSubmissionTools, trackTaskSubmission } from './toolsTaskSubmissions.js';
 import { addPlanningTools } from './toolsPlanning.js';
@@ -296,21 +298,58 @@ export function createToolCatalog(deps: ToolDeps): McpTool[] {
   workflow(tools, { name: 'delete_task', description: 'Delete an exact inactive task and its persisted execution history. Active tasks must first be cancelled.', scope: 'execute', schema: z.object({ ...taskShape, ...mutationShape }).strict(), target: taskTarget }, tasks.deleteTask, args => ({ params: { taskId: args.taskId }, query: { force: 'false' } }));
 
   const operations = new McpOperations(db);
-  tools.push({ name: 'get_operation', description: 'Read a durable mutation receipt and honest acceptance/completion state. Poll no faster than retryAfterSeconds.', scope: 'read', readOnly: true, schema: z.object({ operationId: z.uuid() }).strict(), run: async ({ principal, args }) => {
-    const row = await operations.get(principal, args.operationId);
-    if (row.repository) await policy.repository(principal, row.repository, false, { includeDisabled: row.tool.endsWith('_repository_configuration'), allowUnconfigured: row.tool === 'remove_repository_configuration' });
+  const operationResult = (row: Operation): Record<string, unknown> => {
+    if (!row.result) return {};
+    try { return JSON.parse(row.result); } catch { return {}; }
+  };
+  const authorizeStoredTool = async (
+    row: Operation,
+    principal: McpPrincipal,
+    repositories?: Map<string, Promise<void>>,
+  ): Promise<void> => {
+    if (row.repository) {
+      const options = { includeDisabled: row.tool.endsWith('_repository_configuration'), allowUnconfigured: row.tool === 'remove_repository_configuration' };
+      const key = `${row.repository}\0${Number(options.includeDisabled)}${Number(options.allowUnconfigured)}`;
+      let authorization = repositories?.get(key);
+      if (!authorization) {
+        authorization = policy.repository(principal, row.repository, false, options);
+        repositories?.set(key, authorization);
+      }
+      await authorization;
+    }
     const original = tools.find(tool => tool.name === row.tool);
     if (original?.permission) policy.requirePermission(principal, original.permission);
-    if (row.tool === 'cancel_operation' && row.result && JSON.parse(row.result).operationId) {
-      const source = await operations.get(principal, JSON.parse(row.result).operationId);
-      if (source.repository) await policy.repository(principal, source.repository);
-      row.repository = source.repository;
-    }
+  };
+  const authorizeOperation = async (
+    row: Operation,
+    principal: McpPrincipal,
+    repositories?: Map<string, Promise<void>>,
+  ): Promise<void> => {
+    await authorizeStoredTool(row, principal, repositories);
+    const sourceId = row.tool === 'cancel_operation' ? operationResult(row).operationId : undefined;
+    if (typeof sourceId !== 'string') return;
+    const source = await operations.get(principal, sourceId);
+    await authorizeStoredTool(source, principal, repositories);
+    row.repository = source.repository;
+  };
+  tools.push({ name: 'get_operation', description: 'Read a durable mutation receipt and honest lifecycle. "accepted" means the request was recorded and handed to the backend; "running" means execution was observed; the loop/receipt is only "completed" when the backend reached a terminal success state. Poll no faster than retryAfterSeconds.', scope: 'read', readOnly: true, schema: z.object({ operationId: z.uuid() }).strict(), run: async ({ principal, args }) => {
+    const row = await operations.get(principal, args.operationId);
+    await authorizeOperation(row, principal);
     const receipt = operations.project(row);
-    const result = row.result ? JSON.parse(row.result) : {};
-    const continuation = result.continuation || result;
+    const result = operationResult(row);
+    const continuation = result.continuation && typeof result.continuation === 'object' && !Array.isArray(result.continuation)
+      ? result.continuation as Record<string, unknown> : result;
     if (continuation.planId) receipt.targetState = await db('task_drafts').where({ draft_id: continuation.planId, user_id: principal.user.id }).first('status', 'paused', 'mcp_revision');
-    if (continuation.goalId) receipt.targetState = await db('goals').where({ goal_id: continuation.goalId, owner_id: principal.user.id }).first('desired_state', 'result_state', 'current_task_id');
+    if (continuation.goalId) {
+      const goal = await db('goals').where({ goal_id: continuation.goalId, owner_id: principal.user.id })
+        .first('desired_state', 'result_state', 'current_task_id', 'final_pr_number', 'failure_reason');
+      if (goal) {
+        const currentTask = typeof goal.current_task_id === 'string'
+          ? await db('task_history').where({ task_id: goal.current_task_id }).orderBy('history_id', 'desc').first('state', 'timestamp', 'reason')
+          : undefined;
+        receipt.targetState = { ...goal, ...(currentTask ? { currentTask: { taskId: goal.current_task_id, ...currentTask } } : {}) };
+      }
+    }
     if (continuation.taskId) receipt.targetState = await db('task_history').where({ task_id: continuation.taskId }).orderBy('history_id', 'desc').first('state', 'timestamp');
     updateReceiptState(row, receipt);
     await trackTaskSubmission(deps, row, principal, receipt);
@@ -321,10 +360,58 @@ export function createToolCatalog(deps: ToolDeps): McpTool[] {
       receipt.targetState = { issues };
       if (issues.length === result.issues.length && issues.every(issue => ['under_review', 'merged', 'closed'].includes(issue.status))) receipt.state = 'completed';
     }
+    await syncLifecycle(operations, row, receipt);
+    receipt.lifecycle = operations.project(await operations.get(principal, row.id)).lifecycle;
     if (['accepted', 'posted', 'queued', 'running'].includes(String(receipt.state))) receipt.retryAfterSeconds = 3;
     else delete receipt.retryAfterSeconds;
     return ok(receipt);
   } });
+  const operationLifecycleSchema = z.enum(['accepted', 'running', 'completed', 'failed', 'cancelled', 'unknown', 'active']);
+  tools.push({ name: 'list_operations', description: 'List durable mutation receipts newest first without refreshing backend trackers. "accepted" means the request was recorded and handed to the backend; "running" means execution was observed; the loop/receipt is only "completed" when the backend reached a terminal success state. Use refreshWith on an item when a live refresh is needed.', scope: 'read', readOnly: true,
+    schema: z.object({
+      tool: z.string().min(1).max(128).optional().describe('Exact tool name.'),
+      lifecycle: operationLifecycleSchema.optional(),
+      sinceMinutes: z.number().int().min(1).max(10080).default(1440),
+      repository: repositorySchema.optional(),
+      offset: z.number().int().min(0).max(100000).default(0),
+      limit: z.number().int().min(1).max(50).default(20),
+    }).strict(), run: async ({ principal, args }) => {
+      await operations.reconcileTerminalLifecycles(principal);
+      await operations.markInterruptedInvocations(principal);
+      const query = db<Operation>('mcp_operations').where({ owner_id: principal.user.id, grant_id: principal.grant.id })
+        .where('accepted_at', '>=', Date.now() - args.sinceMinutes * 60_000);
+      if (args.tool) query.where('tool', args.tool);
+      if (args.repository) query.andWhere(builder => builder.where('repository', args.repository).orWhere('tool', 'cancel_operation'));
+      if (args.lifecycle === 'active') query.whereIn('lifecycle', ['accepted', 'running']);
+      else if (args.lifecycle) query.where('lifecycle', args.lifecycle);
+      const ordered = query.orderBy('accepted_at', 'desc').orderBy('id', 'desc');
+      const authorized: Operation[] = [];
+      const repositoryAuthorizations = new Map<string, Promise<void>>();
+      const wanted = args.offset + args.limit + 1;
+      const batchSize = Math.max(50, args.limit);
+      let databaseOffset = 0;
+      while (authorized.length < wanted) {
+        const rows = await ordered.clone().offset(databaseOffset).limit(batchSize);
+        if (!rows.length) break;
+        databaseOffset += rows.length;
+        for (const row of rows) {
+          try {
+            await authorizeOperation(row, principal, repositoryAuthorizations);
+            if (args.repository && row.repository !== args.repository) continue;
+            authorized.push(row);
+          } catch (error) {
+            // Discovery is a filtered view: current authorization failures do
+            // not reveal that a matching receipt exists.
+            if (!(error instanceof McpError) || ![403, 404].includes(error.status)) throw error;
+          }
+          if (authorized.length >= wanted) break;
+        }
+        if (rows.length < batchSize) break;
+      }
+      const page = authorized.slice(args.offset, args.offset + args.limit);
+      return ok({ operations: page.map(row => ({ ...operations.project(row), refreshWith: 'get_operation' })),
+        nextOffset: authorized.length > args.offset + args.limit ? args.offset + args.limit : null });
+    } });
   tools.push({ name: 'cancel_operation', description: 'Request cancellation of an accepted plan generation, goal or task operation. Completed external effects cannot be undone.', scope: 'execute', schema: z.object({ ...mutationShape, operationId: z.uuid() }).strict(), run: async ({ principal, args }) => {
     const row = await operations.get(principal, args.operationId);
     if (row.repository) await policy.repository(principal, row.repository, true);
