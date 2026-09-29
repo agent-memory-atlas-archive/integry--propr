@@ -1,3 +1,4 @@
+/* eslint-disable max-lines -- both MCP SDK eras share one end-to-end workflow fixture */
 import assert from 'node:assert/strict';
 import { test, mock } from 'node:test';
 import { randomBytes, randomUUID } from 'node:crypto';

@@ -89,9 +89,7 @@ function publicFailure(code: string, message: string, details?: Record<string, u
   return { code, message: redactSecrets(message), stage: 'internal', retryable: false, status: 500, ...(details ? { details } : {}) };
 }
 
-/** Normalize durable backend failure evidence into the public error envelope. */
-export function failureFromReceipt(receipt: Record<string, unknown>): McpErrorEnvelope | undefined {
-  const result = record(receipt.result);
+function resultFailure(result: Record<string, unknown> | undefined): McpErrorEnvelope | undefined {
   const resultError = record(result?.error);
   if (resultError && typeof resultError.code === 'string' && typeof resultError.message === 'string'
     && typeof resultError.retryable === 'boolean' && typeof resultError.status === 'number') {
@@ -99,9 +97,16 @@ export function failureFromReceipt(receipt: Record<string, unknown>): McpErrorEn
   }
 
   const loop = record(result?.loop);
-  if (loop?.completionStatus === 'failed') {
-    return publicFailure('EXECUTION_FAILED', nonEmptyString(loop.completionReason) ?? 'Ultrafix loop failed.');
-  }
+  return loop?.completionStatus === 'failed'
+    ? publicFailure('EXECUTION_FAILED', nonEmptyString(loop.completionReason) ?? 'Ultrafix loop failed.')
+    : undefined;
+}
+
+/** Normalize durable backend failure evidence into the public error envelope. */
+export function failureFromReceipt(receipt: Record<string, unknown>): McpErrorEnvelope | undefined {
+  const result = record(receipt.result);
+  const backendFailure = resultFailure(result);
+  if (backendFailure) return backendFailure;
 
   const target = record(receipt.targetState);
   const reviewResults = Array.isArray(target?.reviewResults) ? target.reviewResults
@@ -140,6 +145,20 @@ async function syncCancellation(
   if (sourceId && result?.cancellation === 'confirmed') await operations.finish(sourceId, 'cancelled');
 }
 
+function observedStartTimestamp(
+  target: Record<string, unknown> | undefined,
+  result: Record<string, unknown> | undefined,
+  targetState: string,
+): number | null | undefined {
+  const loop = record(result?.loop);
+  const currentTask = record(target?.currentTask);
+  const currentTaskState = String(currentTask?.state ?? '');
+  const observedStart = startedTaskStates.has(targetState) || executedGoalTaskStates.has(currentTaskState)
+    || target?.queueState === 'active' || loop?.active === true;
+  if (!observedStart) return null;
+  return epochMilliseconds(currentTask?.timestamp) ?? epochMilliseconds(target?.timestamp);
+}
+
 /** Persist tracker observations without allowing stale concurrent polls to undo newer lifecycle facts. */
 export async function syncLifecycle(
   operations: McpOperations,
@@ -155,14 +174,8 @@ export async function syncLifecycle(
   const targetState = String(target?.state ?? '');
   const receiptState = String(receipt.state ?? '');
   const result = record(receipt.result);
-  const loop = record(result?.loop);
-  const currentTask = record(target?.currentTask);
-  const currentTaskState = String(currentTask?.state ?? '');
-  const observedStart = startedTaskStates.has(targetState) || executedGoalTaskStates.has(currentTaskState)
-    || target?.queueState === 'active' || loop?.active === true;
-  if (observedStart) {
-    await operations.markStarted(row.id, epochMilliseconds(currentTask?.timestamp) ?? epochMilliseconds(target?.timestamp));
-  }
+  const startedAt = observedStartTimestamp(target, result, targetState);
+  if (startedAt !== null) await operations.markStarted(row.id, startedAt);
 
   const outcome = lifecycleOutcome(row, target, receiptState, targetState);
   if (outcome) {
