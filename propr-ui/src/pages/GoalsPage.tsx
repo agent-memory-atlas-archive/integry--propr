@@ -1,3 +1,4 @@
+import TextareaAutosize from 'react-textarea-autosize';
 import { CreationDialog } from '../components/CreationDialog';
 import { PreviewThumbnails } from '../components/PreviewMedia';
 /* eslint-disable max-lines -- goal list and split-pane console intentionally share this route-level surface */
@@ -294,6 +295,7 @@ function CreateGoalForm({ onCancel, onCreated, onDirtyChange, onSubmittingChange
   const [files, setFiles] = useState<File[]>([]);
   const [launchStrategy, setLaunchStrategy] = useState<GoalLaunchStrategy>(previousSettings.launchStrategy);
   const [parallelism, setParallelism] = useState(previousSettings.maxParallelTasks?.toString() || '');
+  const [optionsOpen, setOptionsOpen] = useState(false);
   const [ultrafix, setUltrafix] = useState(previousSettings.ultrafix);
   const [checkpointInterval, setCheckpointInterval] = useState(previousSettings.checkpointIntervalMinutes);
   const [submitting, setSubmitting] = useState(false);
@@ -397,13 +399,13 @@ function CreateGoalForm({ onCancel, onCreated, onDirtyChange, onSubmittingChange
         <div className="mt-5">
         <label htmlFor="goal-prompt" className="mb-2 block text-sm font-medium text-slate-700">Prompt</label>
         <div className={`rounded-md border focus-within:ring-1 ${objectiveTooLong ? 'border-red-500 focus-within:border-red-500 focus-within:ring-red-500' : 'border-slate-200 focus-within:border-teal-500 focus-within:ring-teal-500'}`}>
-        <textarea id="goal-prompt" aria-label="Prompt" aria-invalid={objectiveTooLong || undefined} aria-describedby={objectiveMaxCharacters === null ? undefined : 'goal-objective-limit'} value={objective} onChange={event => { markDirty(); setObjective(event.target.value); }} onPaste={event => {
+        <TextareaAutosize id="goal-prompt" aria-label="Prompt" aria-invalid={objectiveTooLong || undefined} aria-describedby={objectiveMaxCharacters === null ? undefined : 'goal-objective-limit'} value={objective} onChange={event => { markDirty(); setObjective(event.target.value); }} onPaste={event => {
           const pasted = clipboardImageFiles(event);
           if (!pasted.length) return;
           event.preventDefault();
           markDirty();
           void addGoalFiles(files, pasted, setFiles, setError);
-        }} rows={6} placeholder="Describe the outcome you want…" className="block w-full rounded-t-md border-none p-3 text-sm leading-6 focus:outline-none focus:ring-0" required />
+        }} minRows={6} maxRows={16} placeholder="Describe the outcome you want…" className="block w-full resize-none rounded-t-md border-none p-3 text-sm leading-6 focus:outline-none focus:ring-0" required />
         <GoalAttachmentInput docked files={files} onFilesSelected={markDirty} onChange={nextFiles => { markDirty(); setFiles(nextFiles); }} onError={setError} disabled={submitting} />
         </div>
         {objectiveMaxCharacters !== null && <div id="goal-objective-limit" className={`mt-1 flex flex-wrap items-center justify-between gap-x-3 text-xs ${objectiveTooLong ? 'text-red-600' : 'text-slate-500'}`}>
@@ -412,8 +414,8 @@ function CreateGoalForm({ onCancel, onCreated, onDirtyChange, onSubmittingChange
         </div>}
 
         </div>
-        <details className="mt-5 border-y border-slate-200 py-4">
-          <summary className="cursor-pointer text-sm font-medium text-slate-700">Advanced Options <span className="ml-2 font-normal text-slate-500">{getModelDisplayName(model) || 'Default model'} · {parallelism ? `${parallelism} parallel tasks` : 'Default concurrency'} · {launchStrategy === 'direct' ? 'Direct' : 'Orchestrate'}</span></summary>
+        <details className="mt-5 border-y border-slate-200 py-4" onToggle={event => setOptionsOpen(event.currentTarget.open)}>
+          <summary className="cursor-pointer text-sm font-medium text-slate-700">Advanced Options {!optionsOpen && <span className="ml-2 font-normal text-slate-500">{getModelDisplayName(model) || 'Default model'} · {parallelism ? `${parallelism} parallel tasks` : 'Default concurrency'} · {launchStrategy === 'direct' ? 'Direct' : 'Orchestrate'}</span>}</summary>
           <div className="mt-4 grid gap-4 sm:grid-cols-2">
         <label className="text-sm font-medium text-slate-700">Coding agent
           <select aria-label="Coding agent" value={agentId} onChange={event => { markDirty(); setAgentId(event.target.value); }} className="mt-1 w-full rounded-md border border-slate-300 p-2" required>
@@ -425,15 +427,18 @@ function CreateGoalForm({ onCancel, onCreated, onDirtyChange, onSubmittingChange
             {(selectedAgent?.models || []).map(item => <option key={item} value={item}>{getModelDisplayName(item)}</option>)}
           </select>
         </label>
-        <label className="text-sm font-medium text-slate-700">Maximum parallel tasks (optional)
-          <input aria-label="Maximum parallel tasks" type="number" min="1" max="32" value={parallelism} onChange={event => { markDirty(); setParallelism(event.target.value); }} className="mt-1 w-full rounded-md border border-slate-300 p-2" />
+        <label className="text-sm font-medium text-slate-700 sm:col-span-2">Maximum parallel tasks (optional)
+          <span className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-2">
+          <input aria-label="Maximum parallel tasks" aria-describedby="goal-parallelism-help" type="number" min="1" max="32" value={parallelism} onChange={event => { markDirty(); setParallelism(event.target.value); }} className="w-32 rounded-md border border-slate-300 p-2" />
+          <span id="goal-parallelism-help" className="text-xs font-normal text-slate-500">Leave blank to use default concurrency.</span>
+          </span>
         </label>
         </div>
         <fieldset className="mt-4">
         <legend className="text-sm font-medium text-slate-700">Goal launch strategy</legend>
         <div className="mt-2 flex flex-wrap gap-x-6 gap-y-2">
-          <label className="flex cursor-pointer items-center gap-2 text-sm text-slate-700"><input aria-label="Agent implements directly" type="radio" name="launch-strategy" value="direct" checked={launchStrategy === 'direct'} onChange={() => { markDirty(); setLaunchStrategy('direct'); }} /><span>Direct</span></label>
-          <label className="flex cursor-pointer items-center gap-2 text-sm text-slate-700"><input aria-label="Agent orchestrates through ProPR" type="radio" name="launch-strategy" value="orchestrate" checked={launchStrategy === 'orchestrate'} onChange={() => { markDirty(); setLaunchStrategy('orchestrate'); }} /><span>Orchestrate through ProPR</span></label>
+          <label className="flex cursor-pointer items-center gap-2 text-sm text-slate-700"><input aria-label="Agent implements directly" type="radio" className="accent-teal-600" name="launch-strategy" value="direct" checked={launchStrategy === 'direct'} onChange={() => { markDirty(); setLaunchStrategy('direct'); }} /><span>Direct</span></label>
+          <label className="flex cursor-pointer items-center gap-2 text-sm text-slate-700"><input aria-label="Agent orchestrates through ProPR" type="radio" className="accent-teal-600" name="launch-strategy" value="orchestrate" checked={launchStrategy === 'orchestrate'} onChange={() => { markDirty(); setLaunchStrategy('orchestrate'); }} /><span>Orchestrate through ProPR</span></label>
         </div>
         </fieldset>
         {launchStrategy === 'direct' && <div className="mt-4 max-w-xl">

@@ -197,11 +197,12 @@ for (const [device, viewport] of Object.entries({ desktop: { width: 1440, height
     await dialog.getByLabel('Maximum parallel tasks').fill('5');
     await dialog.getByLabel('Agent orchestrates through ProPR').check();
     await expect(dialog.getByLabel('Checkpoint target cadence', { exact: true })).toHaveCount(0);
-    await expect(dialog.locator('summary')).toContainText('5 parallel tasks · Orchestrate');
+    await expect(dialog.locator('summary')).toHaveText('Advanced Options');
     if (process.env.PROPR_CAPTURE_PREVIEWS) {
       await page.screenshot({ path: `../.propr/previews/new-goal-options-${device}.png`, animations: 'disabled' });
     }
     await dialog.locator('summary').click();
+    await expect(dialog.locator('summary')).toContainText('5 parallel tasks · Orchestrate');
     const submit = page.waitForRequest(request => new URL(request.url()).pathname === '/api/goals' && request.method() === 'POST');
     await page.route('**/api/goals', route => route.request().method() === 'POST'
       ? route.fulfill({ status: 503, json: { error: 'Preview submission unavailable' } })

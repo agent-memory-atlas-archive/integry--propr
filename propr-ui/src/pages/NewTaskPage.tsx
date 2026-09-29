@@ -1,3 +1,4 @@
+import TextareaAutosize from 'react-textarea-autosize';
 import { useEffect, useRef, useState } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { ScrollText } from 'lucide-react';
@@ -174,8 +175,9 @@ type LauncherState = ReturnType<typeof useNewTaskLauncher>;
 
 function TaskRoutingOptions({ agentAlias, setAgent, model, setModel, catalog, selection, invalidRouting, locked, isDemoMode,
   snapshot, planFirst, ready, busy, processingFiles, repository, instruction }: LauncherState) {
-  return <details className="border-y border-slate-200 py-4" open={invalidRouting || undefined}>
-    <summary className="cursor-pointer text-sm font-medium text-slate-700">Advanced Options <span className="ml-2 font-normal text-slate-500">{agentAlias || 'Default agent'} · {model || 'Default model'}</span></summary>
+  const [optionsOpen, setOptionsOpen] = useState(invalidRouting);
+  return <details className="border-y border-slate-200 py-4" open={invalidRouting || undefined} onToggle={event => setOptionsOpen(event.currentTarget.open)}>
+    <summary className="cursor-pointer text-sm font-medium text-slate-700">Advanced Options {!optionsOpen && <span className="ml-2 font-normal text-slate-500">{agentAlias || 'Default agent'} · {model || 'Default model'}</span>}</summary>
     <fieldset disabled={locked || isDemoMode} className="mt-4 grid gap-4 sm:grid-cols-2">
       <label className="text-sm text-slate-700">Agent<select aria-label="Agent" value={agentAlias} onChange={event => { setAgent(event.target.value); setModel(''); }} className="mt-1 w-full rounded border border-slate-300 p-2"><option value="">Instance default</option>{invalidRouting && !selection && <option value={agentAlias}>{agentAlias} (unavailable)</option>}{catalog?.agents.map(agent => <option key={agent.alias} value={agent.alias}>{agent.alias}</option>)}</select></label>
       <label className="text-sm text-slate-700">Model<select aria-label="Model" value={model} disabled={!agentAlias} onChange={event => setModel(event.target.value)} className="mt-1 w-full rounded border border-slate-300 p-2"><option value="">Agent default</option>{model && !selection?.supportedModels.includes(model) && <option value={model}>{model} (unavailable)</option>}{selection?.supportedModels.map(model => <option key={model}>{model}</option>)}</select></label>
@@ -245,7 +247,7 @@ function NewTaskLauncher({ scope }: { scope: string }) {
         <div><label className="mb-2 block text-sm font-medium text-slate-700">Repository</label><RepositorySelector repos={catalog?.repositories.map(({ name, enabled }) => ({ name, enabled }))} selectedRepo={repository} onRepoChange={value => { setDirty(true); setRepository(value); }} disabled={locked || isDemoMode} placeholder="Select a repository" /></div>
         <div><label htmlFor="task-instruction" className="mb-2 block text-sm font-medium text-slate-700">Prompt</label>
           <div className="rounded-md border border-slate-200 focus-within:border-teal-500 focus-within:ring-1 focus-within:ring-teal-500">
-          <textarea id="task-instruction" required maxLength={50000} value={instruction} onChange={event => setInstruction(event.target.value)} onPaste={event => {
+          <TextareaAutosize id="task-instruction" required maxLength={50000} value={instruction} onChange={event => setInstruction(event.target.value)} onPaste={event => {
             const incoming = clipboardImageFiles(event);
             if (!incoming.length || locked || processingFiles) return;
             event.preventDefault();
@@ -254,7 +256,7 @@ function NewTaskLauncher({ scope }: { scope: string }) {
             setProcessingFiles(true);
             void Promise.all(incoming.map(resizeImage)).then(processed => setFiles(current => [...current, ...processed]))
               .catch(() => setError('Could not process pasted images.')).finally(() => setProcessingFiles(false));
-          }} rows={6} placeholder="Fix the invoice date format…" className="block w-full rounded-t-md border-none p-3 text-sm leading-6 focus:outline-none focus:ring-0" />
+          }} minRows={6} maxRows={16} placeholder="Fix the invoice date format…" className="block w-full resize-none rounded-t-md border-none p-3 text-sm leading-6 focus:outline-none focus:ring-0" />
           <GoalAttachmentInput docked files={files} onFilesSelected={() => setDirty(true)} onChange={next => { setDirty(true); setFiles(next); }} onError={setError} onProcessingChange={setProcessingFiles} disabled={locked || processingFiles || isDemoMode} />
           </div>
         </div>
