@@ -18,6 +18,13 @@ const renderPage = () => render(<MemoryRouter initialEntries={[{ pathname: '/tas
 
 beforeEach(() => { vi.clearAllMocks(); localStorage.clear(); sessionStorage.clear(); vi.mocked(submissions.taskSnapshotStorage).mockResolvedValue(undefined); vi.mocked(submissions.listTaskSnapshots).mockResolvedValue([]); });
 describe('New Task issue launcher', () => {
+  it('shows plan and goal icons on the related creation actions', () => {
+    renderPage();
+
+    expect(screen.getByRole('link', { name: /New Plan/ }).querySelector('svg')).toHaveClass('lucide-scroll-text');
+    expect(screen.getByRole('link', { name: /New Goal/ }).querySelector('svg')).toHaveClass('lucide-target');
+  });
+
   it('retains the issue and request on failure, retries that submission, then opens the ordinary task', async () => {
     vi.mocked(submissions.submitTask).mockResolvedValue(pending);
     vi.mocked(submissions.retryTaskSubmission).mockResolvedValue({ ...pending, state: 'queued', error: null, taskId: 'ordinary-issue-task' });
