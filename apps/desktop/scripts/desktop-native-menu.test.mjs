@@ -99,8 +99,16 @@ it('Linux/macOS menu dispatch reaches actual search, sidebar, task creation, con
       await expect(launcher.getByRole('textbox', { name: 'Prompt', exact: true })).toBeVisible();
       await expect(launcher.getByRole('textbox', { name: 'Prompt', exact: true })).toBeFocused();
       await expect(launcher.getByRole('button', { name: 'Run task', exact: true })).toBeVisible();
-      await expect(launcher.getByRole('button', { name: 'Plan first', exact: true })).toBeHidden();
+      await expect(launcher.getByRole('button', { name: 'Plan first', exact: true })).toBeVisible();
+      await expect(launcher.getByRole('combobox', { name: 'Agent', exact: true })).toBeHidden();
+      await expect(launcher.getByRole('combobox', { name: 'Model', exact: true })).toBeHidden();
       await launcher.getByText('Advanced Options', { exact: false }).click();
+      await expect(launcher.getByRole('combobox', { name: 'Agent', exact: true })).toBeVisible();
+      await expect(launcher.getByRole('combobox', { name: 'Model', exact: true })).toBeVisible();
+      await expect(launcher.getByRole('button', { name: 'Plan first', exact: true })).toBeVisible();
+      await launcher.getByText('Advanced Options', { exact: false }).click();
+      await expect(launcher.getByRole('combobox', { name: 'Agent', exact: true })).toBeHidden();
+      await expect(launcher.getByRole('combobox', { name: 'Model', exact: true })).toBeHidden();
       await expect(launcher.getByRole('button', { name: 'Plan first', exact: true })).toBeVisible();
       await capture('new-task', launcher, 'File → New Task opens the GitHub issue task launcher');
       await page.close();
