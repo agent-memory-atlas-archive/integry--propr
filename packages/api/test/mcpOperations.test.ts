@@ -535,6 +535,72 @@ test('interrupted accepted invocations become durable unknown while acknowledged
   assert.equal((resolved.lifecycle as { state: string }).state, 'accepted');
 });
 
+test('tracker-observed running operations remain active when their projection timestamp ages', async t => {
+  const db = knex({ client: 'better-sqlite3', connection: { filename: ':memory:' }, useNullAsDefault: true });
+  t.after(() => db.destroy());
+  await db.schema.createTable('task_drafts', table => table.string('draft_id').primary());
+  await db.schema.createTable('tasks', table => {
+    table.string('task_id').primary(); table.string('job_id'); table.string('repository'); table.string('task_type');
+    table.integer('pr_number'); table.text('initial_job_data'); table.timestamp('created_at').defaultTo(db.fn.now());
+  });
+  await db.schema.createTable('task_history', table => {
+    table.increments('history_id').primary(); table.string('task_id'); table.string('state');
+    table.timestamp('timestamp'); table.text('reason'); table.text('metadata');
+  });
+  await up(db);
+
+  const operations = new McpOperations(db);
+  const principal = { user: { id: 'alice' }, grant: { id: 'grant-a' } } as McpPrincipal;
+  const args = { idempotencyKey: 'long-running-tracker-1' };
+  const receipt = await operations.run(principal, {
+    tool: 'send_task_followup', args, repository: 'acme/repo',
+  }, async () => ({ status: 202, data: {
+    state: 'queued', jobId: 'long-running-job', continuation: { taskId: 'long-running-task' },
+  } }));
+  await db('tasks').insert({
+    task_id: 'long-running-task', job_id: 'long-running-job', repository: 'acme/repo', task_type: 'issue',
+    initial_job_data: JSON.stringify({}),
+  });
+  await db('task_history').insert({
+    task_id: 'long-running-task', state: 'processing', timestamp: new Date(), reason: 'Task is still running',
+  });
+  const deps = { db, policy: { repository: async () => {}, requirePermission: () => {}, config: {} } as never,
+    taskQueue: {} as never, redisClient: {} as never, runtimeBuildQueue: {} as never } as ToolDeps;
+  const catalog = createToolCatalog(deps);
+  const get = catalog.find(tool => tool.name === 'get_operation')!;
+  const list = catalog.find(tool => tool.name === 'list_operations')!;
+
+  const polled = (await get.run({
+    principal, args: get.schema.parse({ operationId: receipt.operationId }),
+  })).data as Record<string, unknown>;
+  assert.equal(polled.state, 'running');
+  assert.equal((polled.lifecycle as { state: string }).state, 'running');
+
+  await db('mcp_operations').where({ id: receipt.operationId }).update({ updated_at: Date.now() - 120_001 });
+  const assertRunning = (projected: Record<string, unknown> | undefined) => {
+    assert.equal(projected?.state, 'running');
+    assert.equal((projected?.lifecycle as { state: string }).state, 'running');
+    assert.equal(projected?.retryAfterSeconds, 3);
+    assert.equal(projected?.message, undefined);
+  };
+
+  const active = (await list.run({
+    principal, args: list.schema.parse({ lifecycle: 'active' }),
+  })).data as { operations: Array<Record<string, unknown>> };
+  assertRunning(active.operations.find(operation => operation.operationId === receipt.operationId));
+  assertRunning(await operations.replay(principal, 'send_task_followup', args));
+
+  let invoked = false;
+  const duplicate = await operations.run(principal, {
+    tool: 'send_task_followup', args, repository: 'acme/repo',
+  }, async () => {
+    invoked = true;
+    return { status: 200, data: {} };
+  });
+  assert.equal(invoked, false);
+  assertRunning(duplicate);
+});
+
 test('tracker uncertainty resolves from later evidence and preserves observed timestamps and terminal outcomes', async t => {
   const db = knex({ client: 'better-sqlite3', connection: { filename: ':memory:' }, useNullAsDefault: true });
   t.after(() => db.destroy());

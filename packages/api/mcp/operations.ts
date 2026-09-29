@@ -301,7 +301,7 @@ export class McpOperations {
   project(row: Operation): Record<string, unknown> {
     const interrupted = invocationInterrupted(row);
     const terminal = ['completed', 'failed', 'cancelled'].includes(row.lifecycle);
-    const stale = !terminal && (interrupted || (row.state === 'running' && Date.now() - Number(row.updated_at) > interruptionTimeoutMs));
+    const stale = !terminal && interrupted;
     const state = terminal ? row.lifecycle : stale ? 'unknown' : row.state;
     return { operationId: row.id, tool: row.tool, state, result: json(row.result), lifecycle: {
       state: interrupted && !terminal ? 'unknown' : row.lifecycle,
