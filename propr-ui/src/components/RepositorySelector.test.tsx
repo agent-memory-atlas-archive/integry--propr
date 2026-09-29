@@ -222,7 +222,7 @@ describe('RepositorySelector', () => {
     expect(trigger.textContent).toContain('(develop)');
 
     fireEvent.click(trigger);
-    const selectedItem = getVisibleRepoButtons().find(btn => btn.className.includes('bg-indigo-50'));
+    const selectedItem = getVisibleRepoButtons().find(btn => btn.getAttribute('aria-pressed') === 'true');
     expect(selectedItem?.textContent).toContain('(develop)');
   });
 
