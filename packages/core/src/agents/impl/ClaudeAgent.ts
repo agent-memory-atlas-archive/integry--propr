@@ -33,7 +33,7 @@ import {
 } from '../../config/configManager.js';
 import { AGENT_DEFAULT_VERSIONS } from '../version/types.js';
 import { DEFAULT_AGENT_EXECUTION_TIMEOUT_MS } from '../constants.js';
-import { persistLlmLog, createLlmLogFromAnalysis, buildTaskWorkRef, buildAnalysisWorkRef, formatUsageMetrics } from '../../utils/llmLogger.js';
+import { persistLlmLog, createLlmLogFromAnalysis, buildTaskWorkRef, buildAnalysisWorkRef, formatUsageMetrics, resolveTaskLogAttribution } from '../../utils/llmLogger.js';
 import { processDockerResult, buildDockerArgs, getCorrectedTokenUsage, ensurePromptInConversationLog, executeWithUsageTracking, getClaudeAnalysisText, buildAnalysisSafetySuffix, type PersistLogsParams } from './utils/index.js';
 import type { ExecutionType } from '../../utils/llmMetrics.types.js';
 import {
@@ -83,6 +83,15 @@ export function resolveAnalysisOutcome(claudeOutput: ClaudeOutput, stderr: strin
     return { isSuccess: false, errorDetail };
 }
 
+/** Logs when the answer came from several messages rather than the final one. */
+function warnIfAnswerContinued(claudeOutput: ClaudeOutput, analysisText: string, context: { agentAlias: string; model: string }): void {
+    const resultLength = (claudeOutput.finalResult?.result || '').trim().length;
+    if (resultLength > 0 && analysisText.length > resultLength) {
+        logger.warn({ ...context, resultLength, responseLength: analysisText.length },
+            'Claude continued its answer across messages; using the whole answer rather than the final message');
+    }
+}
+
 export class ClaudeAgent implements Agent {
     readonly config: AgentConfig;
     readonly goalCapable = true;
@@ -126,7 +135,7 @@ export class ClaudeAgent implements Agent {
             const worktreeGitContent = verifyWorktreeStructure(worktreePath, issueRef.number);
 
             effectiveReasoningLevel = await this.resolveEffectiveReasoningLevel(reasoningLevel, effectiveModel);
-            const dockerArgs = buildDockerArgs(this.config, this.maxTurns, {
+            const dockerArgs = buildDockerArgs(this.config, options.maxTurns ?? this.maxTurns, {
                 worktreePath, githubToken, modelName: effectiveModel, issueNumber: issueRef.number,
                 systemPrompt, tools, environment, taskId,
                 reasoningLevel: effectiveReasoningLevel
@@ -290,6 +299,7 @@ export class ClaudeAgent implements Agent {
             const outcome = resolveAnalysisOutcome(claudeOutput, result.stderr);
             if (outcome.isSuccess) {
                 const analysisText = getClaudeAnalysisText(claudeOutput);
+                warnIfAnswerContinued(claudeOutput, analysisText, { agentAlias: this.config.alias, model: effectiveModel });
                 logger.info({
                     agentAlias: this.config.alias, responseLength: analysisText.length, model: effectiveModel,
                     executionTimeMs, reportedTokens: claudeOutput.tokenUsage, correctedTokens: correctedTokenUsage,
@@ -377,20 +387,18 @@ export class ClaudeAgent implements Agent {
 
         const repository = `${issueRef.repoOwner}/${issueRef.repoName}`;
         await persistLlmLog(createLlmLogFromAnalysis({
-            executionType: 'implementation', modelUsed, executionTimeMs: executionTime,
+            ...resolveTaskLogAttribution(metadata, buildTaskWorkRef(taskId, issueRef.number, repository, prNumber), { isRetry, retryReason, conversationId: claudeOutput.conversationId }), modelUsed, executionTimeMs: executionTime,
             success: claudeOutput.success,
             tokenUsage: correctedTokenUsage,
             error: claudeOutput.success ? undefined : (result.stderr || 'Execution failed'),
             sessionId: claudeOutput.sessionId ?? undefined, draftId: taskId, repository,
             agentAlias: this.config.alias,
             reasoningLevel,
-            metadata: { ...metadata, isRetry, retryReason, conversationId: claudeOutput.conversationId },
             usageMetrics: usageMetrics ? {
                 preCall: usageMetrics.preCall, postCall: usageMetrics.postCall,
                 delta: usageMetrics.delta, timestamp: usageMetrics.timestamp, agent: usageMetrics.agent
             } : undefined,
             usageMetricRecords: usageMetrics?.records,
-            workRef: buildTaskWorkRef(taskId, issueRef.number, repository, prNumber),
         }));
     }
 }

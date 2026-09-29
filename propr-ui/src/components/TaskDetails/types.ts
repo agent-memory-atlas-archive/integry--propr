@@ -1,4 +1,4 @@
-import type { PublishedVisualPreview } from '@propr/shared';
+import type { LiveOutputPosition, PublishedVisualPreview } from '@propr/shared';
 
 export interface TokenUsage {
   input_tokens?: number | null;
@@ -138,6 +138,12 @@ export interface LiveDetails {
   todos: TodoItem[];
   currentTask: string | null;
   tokenUsage?: TokenUsage | null;
+  /** Raw terminal events of this execution not held here; readable events are never left out. */
+  omittedEventCount?: number;
+  /** The server discarded earlier output of this execution; neither `events` nor `omittedEventCount` accounts for it. */
+  historyTruncated?: boolean;
+  /** Where in the live output log this state was read (see `LiveOutputPosition`). */
+  liveOutputPosition?: LiveOutputPosition;
 }
 
 export interface AnalysisData {

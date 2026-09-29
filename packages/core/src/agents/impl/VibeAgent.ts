@@ -5,7 +5,7 @@ import { executeDockerCommand } from '../../claude/docker/dockerExecutor.js';
 import { buildAgentContainerResourceArgs, wrapDockerRunArgsWithRepoSetup } from '../../claude/docker/repoSetupWrapper.js';
 import { verifyWorktreeStructure, verifyWorktreePostExecution, setWorktreeOwnership, UsageLimitError } from '../../claude/claudeHelpers.js';
 import { resolveConfigPath, loadSettings } from '../../config/configManager.js';
-import { persistLlmLog, createLlmLogFromAnalysis, buildTaskWorkRef, buildAnalysisWorkRef, formatUsageMetrics } from '../../utils/llmLogger.js';
+import { persistLlmLog, createLlmLogFromAnalysis, buildTaskWorkRef, buildAnalysisWorkRef, formatUsageMetrics, resolveTaskLogAttribution } from '../../utils/llmLogger.js';
 import { buildAnalysisSafetySuffix, executeWithUsageTracking } from './utils/index.js';
 import { parseVibeConversationLog, parseVibeOutput } from './utils/vibeOutputParser.js';
 import { getAnalysisSandboxArgs, getForwardedVibeEnvVars, isSuccessfulVibeResult, splitVibeCliArgs, getDefaultVibeCliArgs, buildPromptWithRetryContext, buildLogMetadata, buildVibeFailureMessage, writeVibePromptFile, writeVibeSecretEnvFile, cleanupTempFile, buildVibeContainerName, resolveHostBindPath, getMistralApiKeyFromSettings, readLatestVibeSessionMessages, readLatestVibeSessionTokenUsage, ensureAnalysisWorkspace, prepareRuntimeHome, cleanupRuntimeHome, hasUsableVibeConfigDir, hasStructuredOutputArg } from './utils/vibeAgentHelpers.js';
@@ -143,7 +143,7 @@ export class VibeAgent implements Agent {
 
             const usage = formatUsageMetrics(usageMetrics);
             await persistLlmLog(createLlmLogFromAnalysis({
-                executionType: 'implementation',
+                ...resolveTaskLogAttribution(metadata, buildTaskWorkRef(taskId, issueRef.number, repository, prNumber), buildLogMetadata({ isRetry, retryReason }, result, !success)),
                 modelUsed,
                 executionTimeMs,
                 success: response.success,
@@ -153,10 +153,8 @@ export class VibeAgent implements Agent {
                 draftId: taskId,
                 repository,
                 agentAlias: this.config.alias,
-                metadata: { ...metadata, ...buildLogMetadata({ isRetry, retryReason }, result, !success) },
                 usageMetrics: usage.metrics,
                 usageMetricRecords: usage.records,
-                workRef: buildTaskWorkRef(taskId, issueRef.number, repository, prNumber),
             }));
 
             if (response.success) {

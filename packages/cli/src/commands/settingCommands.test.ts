@@ -9,6 +9,8 @@ import {
 import type { SystemSettings } from "../api/settings.js";
 
 const SETTINGS: SystemSettings = {
+  usage_tips_enabled: true,
+  usage_tips_dismissal_cooldown_days: 45,
   default_agent_alias: "codex",
   worker_concurrency: 2,
   github_user_whitelist: ["octocat"],
@@ -17,6 +19,7 @@ const SETTINGS: SystemSettings = {
   planner_generation_model: "generation-model",
   auto_followup_score_threshold: 7,
   auto_resolve_merge_conflicts: true,
+  dashboard_summary_enabled: true,
   model_reasoning_level: "",
   pr_review_model: "",
   pr_review_prompt: "",

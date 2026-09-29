@@ -11,6 +11,18 @@ export const daysAgo = (days: number): string => new Date(NOW.getTime() - days *
 /** An in-memory database shaped like the tables the dashboard and stats routes read. */
 export async function createDashboardTestDatabase(): Promise<Knex> {
   const database = knex({ client: 'better-sqlite3', connection: { filename: ':memory:' }, useNullAsDefault: true });
+  await database.schema.createTable('goals', table => {
+    table.string('goal_id').primary();
+    table.string('owner_id');
+    table.string('repository');
+    table.string('current_task_id');
+    table.string('title');
+    table.text('objective');
+    table.string('desired_state');
+    table.string('result_state');
+    table.timestamp('created_at');
+    table.timestamp('updated_at');
+  });
   await database.schema.createTable('tasks', table => {
     table.string('task_id').primary();
     table.string('repository').notNullable();
@@ -70,6 +82,7 @@ export async function createDashboardTestDatabase(): Promise<Knex> {
 }
 
 export async function clearDashboardTestDatabase(database: Knex): Promise<void> {
+  await database('goals').del();
   await database('task_history').del();
   await database('tasks').del();
   await database('plan_issues').del();
@@ -160,6 +173,7 @@ function jsonResponse(): {
   let statusCode = 200;
   let payload: Record<string, unknown> = {};
   const response = {
+    setHeader() { return response; },
     status(code: number) { statusCode = code; return response; },
     json(body: Record<string, unknown>) { payload = body; return response; },
   } as unknown as ExpressResponse;
@@ -171,8 +185,11 @@ const request = (query: Record<string, string> = {}): Request => ({ query } as u
 export async function call(
   handler: (req: Request, res: ExpressResponse) => Promise<void>,
   query: Record<string, string> = {},
+  ownerId?: string,
 ): Promise<{ status: number; body: Record<string, unknown> }> {
   const recorder = jsonResponse();
-  await handler(request(query), recorder.response);
+  const req = request(query);
+  if (ownerId) req.user = { id: ownerId } as Request['user'];
+  await handler(req, recorder.response);
   return { status: recorder.status(), body: recorder.body() };
 }

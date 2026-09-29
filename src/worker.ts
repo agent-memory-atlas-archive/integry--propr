@@ -1,3 +1,4 @@
+import { startUsageTipsSelectionRunner } from './usageTipsSelectionRunner.js';
 import 'dotenv/config';
 import { Queue, Worker } from 'bullmq';
 import { Redis } from 'ioredis';
@@ -400,8 +401,11 @@ async function startWorker(options: WorkerOptions = {}): Promise<StartedWorker> 
         }),
     });
 
+    const usageTipsRunner = await startUsageTipsSelectionRunner();
+
     const close = async (): Promise<void> => {
         clearInterval(heartbeatInterval);
+        await usageTipsRunner.close();
         await taskStateRecovery.close();
         await worker.close();
         await attachedTaskStateFinalizers.close();

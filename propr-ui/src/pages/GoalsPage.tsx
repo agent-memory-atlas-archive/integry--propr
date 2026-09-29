@@ -27,6 +27,7 @@ import { RepositorySelector, type RepoOption } from '../components/RepositorySel
 import { ProviderLogo } from '../components/ui/ProviderLogo';
 import { RepositoryChip } from '../components/ui/RepositoryChip';
 import { useDocumentTitle } from '../hooks/useDocumentTitle';
+import { useLiveResource } from '../hooks/useLiveResource';
 import { formatAgentLabel } from '../utils/agentStatus';
 import { getModelDisplayName } from '../utils/modelDisplay';
 import { GoalAttachmentInput } from '../components/Goals/GoalAttachmentInput';
@@ -662,15 +663,8 @@ function GoalQueueRow({ goal, goalAgents }: { goal: Goal; goalAgents: Array<{ ty
 
 function GoalList() {
   const navigate = useNavigate();
-  const newGoalButtonRef = useRef<HTMLButtonElement>(null);
   const [searchParams, setSearchParams] = useSearchParams();
-  const [goals, setGoals] = useState<Goal[]>([]);
-  const [initialLoading, setInitialLoading] = useState(true);
-  const [refreshing, setRefreshing] = useState(false);
-  const [hasSuccessfulRead, setHasSuccessfulRead] = useState(false);
-  const [error, setError] = useState<string | null>(null);
   const [isCreating, setIsCreating] = useState(false);
-  const requestGenerationRef = useRef(0);
   const repositoryFilter = searchParams.get('repository') || 'all';
   const statusFilter = searchParams.get('status') || 'all';
   const urlSearch = searchParams.get('search') || '';
@@ -683,34 +677,30 @@ function GoalList() {
     setSearchParams(current => { const next = new URLSearchParams(current); next.delete('new'); return next; }, { replace: true });
   }, [searchParams, setSearchParams]);
   useDocumentTitle('Goals');
-  const refresh = useCallback(async (initial = false) => {
-    const generation = ++requestGenerationRef.current;
-    if (initial) setInitialLoading(true);
-    else setRefreshing(true);
-    setError(null);
-    try {
-      const data = await listGoals();
-      if (generation !== requestGenerationRef.current) return;
-      setGoals(data.goals);
-      setHasSuccessfulRead(true);
-    } catch (err) {
-      if (generation !== requestGenerationRef.current) return;
-      setError((err as Error).message);
-    } finally {
-      if (generation === requestGenerationRef.current) {
-        setInitialLoading(false);
-        setRefreshing(false);
-      }
-    }
-  }, []);
-  useEffect(() => {
-    void refresh(true);
-    const timer = window.setInterval(() => { void refresh(); }, 10_000);
-    return () => {
-      requestGenerationRef.current += 1;
-      window.clearInterval(timer);
-    };
-  }, [refresh]);
+  /*
+    The queue refreshes because a goal changed, not because a timer fired.
+
+    A goal can run for hours, and its state was only observable by reading it
+    back, so the console polled every ten seconds for the whole run. `goal:update`
+    is published from the transition itself, so a pause, a block or a completion
+    arrives immediately, and task activity covers the progress in between. The
+    hook keeps the last known goals on screen if a refresh fails, does nothing
+    while the tab is hidden, and falls back to interval polling only while the
+    websocket is unavailable — so an instance without a socket behaves as before.
+
+    The interest is not repository-scoped: the queue lists every repository and
+    filters client-side, and the "x of y" count is over all of them.
+  */
+  const goalsResource = useLiveResource({
+    read: signal => listGoals({ signal }),
+    scopeKey: 'goals',
+    interest: { domains: ['goal', 'task'], goals: true },
+  });
+  const goals = useMemo(() => goalsResource.data?.goals ?? [], [goalsResource.data]);
+  const hasSuccessfulRead = goalsResource.data !== null;
+  const initialLoading = goalsResource.loading;
+  const refreshing = goalsResource.refreshing;
+  const error = goalsResource.error;
   const repositoryOptions = useMemo<RepoOption[]>(() => {
     const counts = new Map<string, number>();
     goals.forEach(goal => counts.set(goal.repository, (counts.get(goal.repository) || 0) + 1));
@@ -764,60 +754,55 @@ function GoalList() {
   const goalAgents = goals.map(goal => ({ type: goal.agent.type, alias: goal.agent.alias }));
   const closeCreator = useCallback(() => {
     setIsCreating(false);
-    newGoalButtonRef.current?.focus();
   }, []);
-  const openCreator = useCallback(() => setIsCreating(true), []);
-  return <div className="min-h-full w-full min-w-0 bg-white pb-6">
-    <div className="flex flex-wrap items-start justify-between gap-3 px-4 pb-3 pt-4 sm:px-6">
-      <div className="min-w-0"><h1 className="text-xl font-bold text-slate-900">Goals</h1><p className="mt-0.5 text-sm text-slate-600">Long-running work kept in one exact coding-agent session.</p></div>
-      <button ref={newGoalButtonRef} type="button" onClick={openCreator} className={`${buttonClass} min-h-10 flex-none justify-center bg-primary-600 text-white hover:bg-primary-700`}><Plus className="h-4 w-4" />New goal</button>
-    </div>
-    {error && <p role="alert" className="mx-4 mb-3 border-l-2 border-red-500 bg-red-50 p-3 text-sm text-red-700 sm:mx-6">{error}</p>}
-    <section aria-labelledby="goal-work-queue-title">
-      {/* One toolbar rail: the queue count sits with the filter that changes it. The list border below closes the bar. */}
-      <div className="flex flex-col gap-2 border-t border-slate-200 bg-slate-50 px-4 py-2 sm:flex-row sm:items-center sm:justify-between sm:px-6">
-        <div className="flex items-baseline gap-2"><h2 id="goal-work-queue-title" className="text-[10px] font-bold uppercase tracking-wider text-slate-500">Work queue</h2>{hasSuccessfulRead && <span className="text-xs tabular-nums text-slate-500">{visibleGoals.length} of {goals.length}</span>}{refreshing && hasSuccessfulRead && <span role="status" className="text-xs text-slate-500">Refreshing…</span>}</div>
-        {goals.length > 0 && <div className="flex min-w-0 flex-col gap-2 sm:flex-row sm:items-center sm:gap-3">
-          <div className="relative min-w-0 sm:w-64">
-            <Search aria-hidden="true" className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
-            <input
-              type="text"
-              value={searchQuery}
-              onChange={event => setSearchQuery(event.target.value)}
-              aria-label="Search goals"
-              placeholder="Search goals..."
-              className="w-full rounded-md border border-slate-300 bg-white py-1.5 pl-9 pr-8 text-sm text-slate-700 focus:border-primary-500 focus:outline-none focus:ring-2 focus:ring-primary-500"
+  return <div className="flex h-full w-full min-w-0 flex-col bg-white">
+    <header className="flex flex-none items-center justify-between gap-2 border-b border-gray-200 bg-slate-50 px-4 py-2 sm:gap-4 sm:px-6 sm:py-4">
+      <h1 id="goals-title" className="flex-none text-lg font-bold text-gray-800 sm:text-2xl">Goals</h1>
+      {goals.length > 0 && <div className="flex min-w-0 flex-1 items-center justify-end gap-2 sm:gap-4">
+        <div className="relative hidden min-w-0 max-w-64 flex-1 sm:block">
+          <Search aria-hidden="true" className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
+          <input
+            type="text"
+            value={searchQuery}
+            onChange={event => setSearchQuery(event.target.value)}
+            aria-label="Search goals"
+            placeholder="Search goals..."
+            className="w-full rounded-md border border-gray-300 bg-white py-2 pl-9 pr-8 text-sm text-gray-700 focus:border-teal-500 focus:outline-none focus:ring-2 focus:ring-teal-500"
+          />
+          {searchQuery && <button
+            type="button"
+            onClick={clearSearch}
+            title="Clear search"
+            aria-label="Clear search"
+            className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600"
+          ><X className="h-4 w-4" /></button>}
+        </div>
+        <div className="flex min-w-0 items-center justify-end gap-2 sm:flex-1 sm:max-w-[480px]">
+          <Filter className="hidden h-4 w-4 flex-none text-gray-500 sm:block" aria-hidden="true" />
+          <select
+            value={statusFilter}
+            onChange={event => setStatusFilter(event.target.value)}
+            aria-label="Filter goals by status"
+            className="w-[120px] flex-none rounded-md border border-gray-300 bg-white px-2 py-1.5 text-sm text-gray-700 focus:border-teal-500 focus:outline-none focus:ring-2 focus:ring-teal-500 sm:w-auto sm:px-3 sm:py-2"
+          >
+            {goalStatusFilters.map(option => <option key={option.value} value={option.value}>{option.label}</option>)}
+          </select>
+          <div role="group" aria-label="Filter goals by repository" className="min-w-0 max-w-[220px] flex-1 sm:max-w-[320px]">
+            <RepositorySelector
+              repos={repositoryOptions}
+              selectedRepo={repositoryFilter}
+              onRepoChange={setRepositoryFilter}
+              labelLayout="stacked"
+              className="w-full min-w-0"
             />
-            {searchQuery && <button
-              type="button"
-              onClick={clearSearch}
-              title="Clear search"
-              aria-label="Clear search"
-              className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600"
-            ><X className="h-4 w-4" /></button>}
           </div>
-          <div className="flex min-w-0 items-center gap-2">
-            <Filter className="h-4 w-4 flex-none text-slate-400" aria-hidden="true" />
-            <select
-              value={statusFilter}
-              onChange={event => setStatusFilter(event.target.value)}
-              aria-label="Filter goals by status"
-              className="flex-none rounded-md border border-slate-300 bg-white px-2 py-1.5 text-sm text-slate-700 focus:border-primary-500 focus:outline-none focus:ring-2 focus:ring-primary-500"
-            >
-              {goalStatusFilters.map(option => <option key={option.value} value={option.value}>{option.label}</option>)}
-            </select>
-            <div role="group" aria-label="Filter goals by repository" className="min-w-0 flex-1 sm:w-[240px] sm:flex-none">
-              <RepositorySelector
-                repos={repositoryOptions}
-                selectedRepo={repositoryFilter}
-                onRepoChange={setRepositoryFilter}
-                labelLayout="stacked"
-                className="w-full min-w-0"
-              />
-            </div>
-          </div>
-        </div>}
-      </div>
+        </div>
+      </div>}
+    </header>
+    <section aria-labelledby="goals-title" className="min-h-0 flex-1 overflow-auto pb-6">
+      {error && <p role="alert" className="mx-4 my-3 border-l-2 border-red-500 bg-red-50 p-3 text-sm text-red-700 sm:mx-6">{error}</p>}
+      {hasSuccessfulRead && <span className="sr-only">{visibleGoals.length} of {goals.length}</span>}
+      {refreshing && hasSuccessfulRead && <p role="status" className="px-4 py-3 text-xs text-slate-500 sm:px-6">Refreshing…</p>}
       {!hasSuccessfulRead && (initialLoading || refreshing)
         ? <div role="status" className="flex items-center justify-center gap-2 border-y border-slate-200 py-10 text-sm text-slate-500"><LoaderCircle className="h-4 w-4 animate-spin" aria-hidden="true" />Loading goals…</div>
         : error && goals.length === 0
@@ -826,7 +811,7 @@ function GoalList() {
         ? <div className="border-y border-dashed border-slate-300 py-10 text-center"><p className="text-sm font-medium text-slate-700">No goals yet</p><p className="mt-1 text-sm text-slate-500">Start a goal to add dedicated agent work to this queue.</p></div>
         : visibleGoals.length === 0
           ? <div className="border-y border-dashed border-slate-300 py-10 text-center"><p className="text-sm font-medium text-slate-700">{queueEmptyReason}</p><button type="button" onClick={clearFilters} className="mt-2 text-sm font-medium text-primary-700 hover:underline">Show all goals</button></div>
-          : <div className="border-y border-slate-200 bg-white">
+          : <div className="border-b border-slate-200 bg-white">
             <div aria-hidden="true" data-testid="goal-queue-columns" className={`hidden gap-x-4 border-b border-slate-200 bg-slate-50 px-6 py-2 text-[10px] font-bold uppercase tracking-wider text-slate-500 ${queueGridColumns} lg:grid`}>
               <span>Goal</span><span>Repository</span><span>Status</span>
               <span data-testid="goal-queue-column-tokens" className="hidden text-right xl:block">Tokens</span>
@@ -853,7 +838,7 @@ function GoalDetails({ goalId }: { goalId: string }) {
   const [error, setError] = useState<string | null>(null);
   const [outputMode, setOutputMode] = useState<'readable' | 'terminal'>('readable');
   const [visualPreviews, setVisualPreviews] = useState<GoalVisualPreview[]>([]);
-  const { liveDetails: live } = useTaskLiveData(goal?.taskId);
+  const { liveDetails: live } = useTaskLiveData(goal?.taskId, 5_000, goal?.taskState);
   const goalHistory = useMemo(() => goal?.startedAt
     ? [{ state: 'CLAUDE_EXECUTION', timestamp: goal.startedAt }]
     : [], [goal?.startedAt]);
@@ -869,16 +854,46 @@ function GoalDetails({ goalId }: { goalId: string }) {
   );
   useDocumentTitle(goal?.title || 'Goal');
 
-  const refresh = useCallback(async () => {
-    try {
-      const data = await getGoal(goalId); setGoal(data.goal);
-      if (models.length === 0) {
-        const capabilityData = await getGoalCapabilities();
-        setModels(capabilityData.agents.find(agent => agent.agentId === data.goal.agent.id)?.models || [data.goal.requestedModel]);
-      }
-    } catch (err) { setError((err as Error).message); }
-  }, [goalId, models.length]);
-  useEffect(() => { refresh(); const timer = window.setInterval(refresh, 5_000); return () => window.clearInterval(timer); }, [refresh]);
+  /*
+    The open goal follows its own transitions instead of a five-second timer.
+
+    `goal:update` carries the transition, and task activity for the goal's own
+    task carries the progress between transitions. Scoping the read by goal id
+    means navigating to another goal discards the previous goal's in-flight
+    request rather than letting it land on the new one.
+  */
+  const goalResource = useLiveResource({
+    read: signal => getGoal(goalId, { signal }),
+    scopeKey: `goal::${goalId}`,
+    interest: { domains: ['goal', 'task'], goals: true, repository: goal?.repository },
+  });
+  useEffect(() => {
+    // Another goal's data is not this goal's data, so the console says it is
+    // loading rather than showing the goal that was open a moment ago.
+    setGoal(null);
+    setError(null);
+  }, [goalId]);
+  useEffect(() => {
+    // The read is the source of truth; a mutation's own response is applied
+    // immediately for feedback and replaced by the next pushed read.
+    if (goalResource.data) setGoal(goalResource.data.goal);
+  }, [goalResource.data]);
+  const agentId = goalResource.data?.goal.agent.id;
+  const requestedModel = goalResource.data?.goal.requestedModel;
+  useEffect(() => {
+    // The model list belongs to the agent, not to the goal's current state, so
+    // it is read once rather than alongside every refresh of the goal.
+    if (!agentId || models.length > 0) return;
+    let active = true;
+    void getGoalCapabilities()
+      .then(capabilityData => {
+        if (!active) return;
+        const agentModels = capabilityData.agents.find(agent => agent.agentId === agentId)?.models;
+        setModels(agentModels || (requestedModel ? [requestedModel] : []));
+      })
+      .catch(err => { if (active) setError((err as Error).message); });
+    return () => { active = false; };
+  }, [agentId, models.length, requestedModel]);
   useEffect(() => {
     if (!goal?.finalPr?.number) {
       setVisualPreviews([]);
@@ -890,7 +905,12 @@ function GoalDetails({ goalId }: { goalId: string }) {
       .then(data => { if (active && !data.unavailable) setVisualPreviews(trustedPreviewMedia(data.previews, 8)); })
       .catch(() => { /* Keep the last successfully fetched GitHub previews. */ });
     void refreshPreviews();
-    const timer = window.setInterval(refreshPreviews, 30_000);
+    // Previews are published to GitHub by the run rather than by a state change,
+    // so this one keeps an interval — but a backgrounded tab issues no request.
+    const timer = window.setInterval(() => {
+      if (document.visibilityState === 'hidden') return;
+      void refreshPreviews();
+    }, 30_000);
     return () => { active = false; window.clearInterval(timer); };
   }, [goal?.finalPr?.number, goalId]);
   const act = async (operation: () => Promise<{ goal: Goal }>) => { if (isDemoMode) return; setBusy(true); setError(null); try { setGoal((await operation()).goal); } catch (err) { setError((err as Error).message); } finally { setBusy(false); } };
@@ -914,7 +934,7 @@ function GoalDetails({ goalId }: { goalId: string }) {
     () => tokenTotal(live.tokenUsage || null) || goal?.liveSummary.nativeGoal?.tokensUsed || 0,
     [goal?.liveSummary.nativeGoal?.tokensUsed, live.tokenUsage],
   );
-  if (!goal) return <div className="p-6 text-slate-600">{error || 'Loading goal…'}</div>;
+  if (!goal) return <div className="p-6 text-slate-600">{error || goalResource.error || 'Loading goal…'}</div>;
   const terminal = Boolean(goal.resultState);
   const cancelling = !terminal && goal.desiredState === 'cancelled';
   const mutable = !terminal && !cancelling;
@@ -1057,10 +1077,10 @@ function GoalDetails({ goalId }: { goalId: string }) {
           </header>
           {outputMode === 'readable'
             ? <div className="min-h-32 py-4">{readableTimeline.length > 0
-              ? <ThinkingLog events={readableTimeline} todos={live.todos} showHeader={false} />
+              ? <ThinkingLog events={readableTimeline} todos={live.todos} showHeader={false} historyTruncated={live.historyTruncated} />
               : <p className="text-sm text-slate-500">No human-readable output yet.</p>}</div>
             : <div className="mt-4 min-h-32 bg-slate-950 p-4 text-slate-100">{terminalTimeline.length > 0
-              ? <ExecutionEventLog events={terminalTimeline} collapsed={false} onToggleCollapse={() => undefined} lastThought={thinkingLog.lastThought} isTaskActive={mutable && goal.desiredState === 'running'} taskInfo={null} />
+              ? <ExecutionEventLog events={terminalTimeline} omittedEventCount={live.omittedEventCount} historyTruncated={live.historyTruncated} collapsed={false} onToggleCollapse={() => undefined} lastThought={thinkingLog.lastThought} isTaskActive={mutable && goal.desiredState === 'running'} taskInfo={null} />
               : <p className="text-sm text-slate-400">No terminal output yet.</p>}</div>}
         </section>
       </main>

@@ -1,5 +1,7 @@
+import { getEventPublisher } from '../utils/eventPublisher.js';
 import logger from '../utils/logger.js';
 import { loadAgentTankSettings } from '../config/configManager.js';
+import { observeAgentTankUsage } from './agentTankUsageEvents.js';
 import {
     getBundledStatusForAlias,
     getBundledStatusesForDelta,
@@ -42,6 +44,14 @@ async function getAgentTankBaseUrl(): Promise<string> {
     }
 }
 
+export {
+    agentTankUsageFingerprint,
+    observeAgentTankUsage,
+    observeAgentTankUsageSnapshot,
+    resetAgentTankUsageTracking,
+    type UsageUpdatePublisher
+} from './agentTankUsageEvents.js';
+
 /**
  * Trigger a refresh for the given agent on Agent Tank.
  *
@@ -78,6 +88,7 @@ export async function refreshAgent(agent: string, timeoutMs: number = DEFAULT_TI
         if (!response.ok) {
             throw new Error(`Agent Tank refresh returned HTTP ${response.status}: ${response.statusText}`);
         }
+        await getEventPublisher().publishUsageUpdate();
     } catch (err: unknown) {
         if (err instanceof DOMException && err.name === 'AbortError') {
             throw new Error(`Agent Tank refresh timed out after ${timeoutMs}ms`);
@@ -124,7 +135,12 @@ export async function getStatus(agent: string, timeoutMs: number = DEFAULT_TIMEO
             throw new Error(`Agent Tank returned HTTP ${response.status}: ${response.statusText}`);
         }
         const data = (await response.json()) as AgentStatusResponse;
-        return normalizeAgentTankStatus(data);
+        const normalized = normalizeAgentTankStatus(data);
+        // Published here rather than on a timer: this is the only component that
+        // reads the external service, so it is the only one that can tell a
+        // changed snapshot from an unchanged poll.
+        await observeAgentTankUsage(normalized);
+        return normalized;
     } catch (err: unknown) {
         if (err instanceof DOMException && err.name === 'AbortError') {
             throw new Error(`Agent Tank request timed out after ${timeoutMs}ms`);

@@ -262,7 +262,7 @@ describe('PWA service worker', () => {
     expect(harness.badgeCounts).toEqual([7]);
   });
 
-  test('focuses and navigates an existing PWA window for same-origin deep links', async () => {
+  test.each(['/tasks/task-1', '/goals/goal-1', '/studio/plan-1'])('focuses and navigates an existing PWA window for %s', async path => {
     const harness = createHarness();
     const focus = vi.fn(async () => undefined);
     const navigate = vi.fn(async () => ({ focus }));
@@ -271,13 +271,13 @@ describe('PWA service worker', () => {
       navigate,
       focus: vi.fn(async () => undefined),
     }]);
-    const notification = { data: { deepLink: '/tasks/task-1', unreadCount: 2 }, close: vi.fn() };
+    const notification = { data: { deepLink: path, unreadCount: 2 }, close: vi.fn() };
     const click = waitableEvent({ notification, action: '' });
 
     harness.listeners.get('notificationclick')?.(click.event);
     await click.completion();
 
-    expect(navigate).toHaveBeenCalledWith('https://app.example.com/tasks/task-1');
+    expect(navigate).toHaveBeenCalledWith(`https://app.example.com${path}`);
     expect(focus).toHaveBeenCalled();
     expect(harness.openedUrls).toEqual([]);
     expect(harness.badgeCounts).toEqual([1]);

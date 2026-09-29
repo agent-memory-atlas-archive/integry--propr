@@ -126,6 +126,8 @@ export interface MonitoredRepo {
   cancelCiDuringFollowup?: boolean;
   /** Exactly which validation workflows that option may cancel: file names, paths, display names or IDs. Empty cancels nothing. */
   cancelCiDuringFollowupWorkflows?: string[];
+  /** Check run names (`*` matches any text) that never block ProPR's CI-driven automation. */
+  nonBlockingChecks?: string[];
   /** Whether Inbox and push notifications are generated for this repository. Missing values are on. */
   notificationsEnabled?: boolean;
   /** Generated media to embed in PRs when a change has a visible result. */
@@ -205,6 +207,8 @@ export interface SystemSettings {
   planner_context_model?: string;
   planner_generation_model?: string;
   auto_followup_score_threshold?: number;
+  usage_tips_enabled?: boolean;
+  usage_tips_dismissal_cooldown_days?: number;
   auto_resolve_merge_conflicts?: boolean;
   model_reasoning_level?: string;
   pr_review_model?: string;

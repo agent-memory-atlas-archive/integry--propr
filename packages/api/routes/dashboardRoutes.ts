@@ -12,6 +12,7 @@
  * dismissal state: dismissing a notification must not resolve a blocker.
  */
 
+import { collectNarrativeFacts, createDashboardNarrative, type NarrativeModel } from './dashboardNarrative.js';
 import type { Request, Response } from 'express';
 import type { Knex } from 'knex';
 import type { Queue } from 'bullmq';
@@ -23,18 +24,17 @@ import {
   RECENT_COMPLETION_WINDOW_HOURS,
   type DashboardTaskRow,
 } from './dashboardQueries.js';
-import { loadDashboardWork } from './dashboardWorkQueries.js';
+import { loadDashboardWork, loadRunningDashboardGoals } from './dashboardWorkQueries.js';
 import { loadCompletedRows, type CompletedRow } from './dashboardOutcomeQueries.js';
 import {
   EMPTY_LIVE_ACTIVITY,
   EMPTY_LIVE_DETAILS,
+  MAX_LIVE_DETAIL_LOOKUPS,
   summariseLiveActivity,
   type LiveActivity,
   type LiveDetailsSnapshot,
 } from './dashboardLiveActivity.js';
 
-/** Running work we will pay for a live-details projection on in one request. */
-const MAX_LIVE_DETAIL_LOOKUPS = 20;
 /** Where `src/worker.ts` heartbeats its identity and the concurrency it runs at. */
 const WORKER_SET_KEY = 'system:status:workers';
 const WORKER_CAPACITY_KEY = 'system:status:worker-capacity';
@@ -53,9 +53,12 @@ export interface DashboardRoutesDeps {
    */
   liveDetails?: (taskId: string) => Promise<LiveDetailsSnapshot | null>;
   now?: () => Date;
+  narrativeModel?: NarrativeModel;
+  isSummaryEnabled?: () => Promise<boolean>;
 }
 
 export interface ActiveItem {
+  goalId?: string;
   id: string;
   taskId: string;
   repository: string;
@@ -80,8 +83,10 @@ export interface ActiveItem {
   updatedAt: string;
 }
 
-/** One successfully completed run. Failures are attention items, not outcomes. */
+/** The newest successful outcome for an entity, with its completed run count. */
 export interface OutcomeItem {
+  eventCount: number;
+  earlierUpdates: Array<Omit<OutcomeItem, 'eventCount' | 'earlierUpdates'>>;
   id: string;
   taskId: string;
   repository: string;
@@ -111,13 +116,20 @@ function readRepositoryFilter(req: Request, res: Response): string | null {
 
 function toOutcomeItem(row: CompletedRow): OutcomeItem {
   return {
-    id: `task:${row.taskId}:completed`,
+    id: `task:${row.taskId}:completed:${row.completionId}`,
     taskId: row.taskId,
     repository: row.repository,
     issueNumber: row.issueNumber,
     prNumber: row.prNumber,
     taskType: row.taskType,
     title: row.title,
+    eventCount: row.eventCount,
+    earlierUpdates: row.earlierUpdates.map(update => ({
+      id: `task:${update.taskId}:completed:${update.completionId}`, taskId: update.taskId,
+      repository: update.repository, issueNumber: update.issueNumber, prNumber: update.prNumber,
+      taskType: update.taskType, title: update.title, detail: update.recap,
+      score: update.reviewScore, occurredAt: update.stateTimestamp,
+    })),
     detail: row.recap,
     score: row.reviewScore,
     occurredAt: row.stateTimestamp,
@@ -211,6 +223,29 @@ export function createDashboardRoutes(deps: DashboardRoutesDeps) {
     }
   }
 
+  const narrative = createDashboardNarrative(deps.narrativeModel ?? (async () => null));
+
+  async function getNarrative(req: Request, res: Response): Promise<void> {
+    const repository = readRepositoryFilter(req, res);
+    if (repository === null) return;
+    res.setHeader('Cache-Control', 'no-store');
+    try {
+      if (deps.isSummaryEnabled && !await deps.isSummaryEnabled()) {
+        res.json({ repository, enabled: false, summary: null });
+        return;
+      }
+      const snapshot = await collectNarrativeFacts(db, repository, now(), {
+        ownerId: req.user?.id ? String(req.user.id) : undefined,
+        liveActivity: liveActivityFor,
+      });
+      const summary = await narrative(snapshot, req.query.refresh === 'true');
+      res.json({ repository, enabled: true, summary });
+    } catch {
+      // A transient data/model failure is unavailable, never a dashboard failure.
+      res.json({ repository, enabled: true, summary: null });
+    }
+  }
+
   async function getSummary(req: Request, res: Response): Promise<void> {
     const repository = readRepositoryFilter(req, res);
     if (repository === null) return;
@@ -257,15 +292,22 @@ export function createDashboardRoutes(deps: DashboardRoutesDeps) {
     const repository = readRepositoryFilter(req, res);
     if (repository === null) return;
     try {
-      const work = await timeApiStage('dashboard.active', () =>
-        loadDashboardWork(db, repository, { now: now() }));
+      const [work, goals] = await timeApiStage('dashboard.active', () => Promise.all([
+        loadDashboardWork(db, repository, { now: now() }),
+        loadRunningDashboardGoals(db, repository, req.user?.id ? String(req.user.id) : null),
+      ]));
+      const runningRows = [...work.running, ...goals]
+        .sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt));
 
       const liveActivity = new Map<string, LiveActivity>();
-      for (const row of work.running.slice(0, MAX_LIVE_DETAIL_LOOKUPS)) {
+      for (const row of runningRows.slice(0, MAX_LIVE_DETAIL_LOOKUPS)) {
         liveActivity.set(row.taskId, await liveActivityFor(row.taskId));
       }
 
-      const running = work.running.map(row => toActiveItem(row, liveActivity.get(row.taskId) ?? EMPTY_LIVE_ACTIVITY));
+      const running = runningRows.map(row => ({
+        ...toActiveItem(row, liveActivity.get(row.taskId) ?? EMPTY_LIVE_ACTIVITY),
+        ...('goalId' in row ? { id: `goal:${row.goalId}`, goalId: row.goalId } : {}),
+      }));
       // Queued work has no execution to project progress from.
       const queued = work.queued.map(row => toActiveItem(row, EMPTY_LIVE_ACTIVITY));
 
@@ -277,7 +319,7 @@ export function createDashboardRoutes(deps: DashboardRoutesDeps) {
           queuedCount: work.counts.queued,
           reason: await queueReason(work.counts.queued),
         },
-        counts: { running: work.counts.running, queued: work.counts.queued },
+        counts: { running: running.length, queued: work.counts.queued },
       });
     } catch (error) {
       console.error('Error in /api/dashboard/active:', error);
@@ -313,5 +355,5 @@ export function createDashboardRoutes(deps: DashboardRoutesDeps) {
     }
   }
 
-  return { getSummary, getAttention, getActive, getOutcomes };
+  return { getSummary, getAttention, getActive, getOutcomes, getNarrative };
 }

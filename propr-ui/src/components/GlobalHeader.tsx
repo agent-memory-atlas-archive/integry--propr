@@ -1,6 +1,6 @@
-import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { useNavigate } from 'react-router-dom';
-import { ChevronDown, Zap } from 'lucide-react';
+import React, { useState, useEffect, useRef } from 'react';
+import { useLocation, useNavigate } from 'react-router-dom';
+import { ChevronDown } from 'lucide-react';
 import { DESKTOP_UI_COMMAND_EVENT } from '../desktop/useDesktopNativeCommands';
 import { useDesktop } from '../desktop/DesktopContext';
 import GlobalSearch from './GlobalSearch';
@@ -13,6 +13,7 @@ import { useHeaderStats, type HeaderStats } from '../hooks/useHeaderStats';
 import { SystemHealth } from './GlobalHeaderComponents';
 import type { CurrentUser } from '../api/proprTypes';
 import MobileBottomNavigation from './MobileBottomNavigation';
+import { getCreationActions } from './creationActions';
 
 interface GlobalHeaderProps {
   user: CurrentUser | null;
@@ -105,13 +106,10 @@ function useDismissOnOutsideInteraction(
   return containerRef;
 }
 
-interface NewTaskButtonProps {
+interface CreationButtonProps {
   disabled: boolean;
   /** Visual pressed state used by the layout preview harness. */
   pressed: boolean;
-  onNewTask: () => void;
-  onNewPlan: () => void;
-  onNewGoal: () => void;
 }
 
 /**
@@ -122,17 +120,17 @@ interface NewTaskButtonProps {
  * beside it. The two halves stay separate `<button>` elements because they do
  * different things and need different accessible names.
  */
-const NewTaskButton: React.FC<NewTaskButtonProps> = ({
+const CreationButton: React.FC<CreationButtonProps> = ({
   disabled,
   pressed,
-  onNewTask,
-  onNewPlan,
-  onNewGoal,
 }) => {
+  const { pathname } = useLocation();
+  const navigate = useNavigate();
+  const { primary, secondary } = getCreationActions(pathname);
   const [isMenuOpen, setIsMenuOpen] = useState(false);
   const containerRef = useDismissOnOutsideInteraction(isMenuOpen, () => setIsMenuOpen(false));
 
-  const title = disabled ? 'Demo mode is read-only' : 'New Task';
+  const title = disabled ? 'Demo mode is read-only' : primary.label;
   const shell = disabled
     ? 'bg-gray-300 text-gray-600'
     : `text-white ${pressed ? 'bg-teal-800' : 'bg-teal-600'}`;
@@ -140,9 +138,10 @@ const NewTaskButton: React.FC<NewTaskButtonProps> = ({
   // shell never lights up on hover while still showing its explanatory title.
   const hover = disabled ? 'cursor-not-allowed' : 'hover:bg-teal-700';
 
-  const choose = (action: () => void) => {
+  const choose = (to: string) => {
+    if (disabled) return;
     setIsMenuOpen(false);
-    action();
+    navigate(to);
   };
 
   return (
@@ -150,13 +149,13 @@ const NewTaskButton: React.FC<NewTaskButtonProps> = ({
       <div className={`flex items-stretch overflow-hidden rounded-lg border-0 text-sm font-medium transition-colors ${shell}`}>
         <button
           type="button"
-          onClick={onNewTask}
+          onClick={() => choose(primary.to)}
           disabled={disabled}
           title={title}
           className={`flex items-center gap-2 whitespace-nowrap px-3 py-1.5 transition-colors xl:px-4 ${hover}`}
         >
-          <Zap className="h-4 w-4" aria-hidden="true" />
-          <span>New Task</span>
+          <primary.icon className="h-4 w-4" aria-hidden="true" />
+          <span>{primary.label}</span>
         </button>
         {/* A hairline inset from the top and bottom edges: it separates the two
             halves without cutting the shell into two visual buttons. */}
@@ -180,24 +179,19 @@ const NewTaskButton: React.FC<NewTaskButtonProps> = ({
           aria-label="More creation options"
           className="absolute right-0 top-full z-50 mt-1 w-36 rounded border border-slate-200 bg-white p-1 shadow-lg"
         >
-          <button
-            type="button"
-            role="menuitem"
-            disabled={disabled}
-            onClick={() => choose(onNewPlan)}
-            className="block w-full rounded p-2 text-left text-sm text-slate-700 hover:bg-slate-50 disabled:cursor-not-allowed disabled:text-slate-400"
-          >
-            New Plan
-          </button>
-          <button
-            type="button"
-            role="menuitem"
-            disabled={disabled}
-            onClick={() => choose(onNewGoal)}
-            className="block w-full rounded p-2 text-left text-sm text-slate-700 hover:bg-slate-50 disabled:cursor-not-allowed disabled:text-slate-400"
-          >
-            New Goal
-          </button>
+          {secondary.map(action => (
+            <button
+              key={action.id}
+              type="button"
+              role="menuitem"
+              disabled={disabled}
+              onClick={() => choose(action.to)}
+              className="flex w-full items-center gap-2 rounded p-2 text-left text-sm text-slate-700 hover:bg-slate-50 disabled:cursor-not-allowed disabled:text-slate-400"
+            >
+              <action.icon className="h-4 w-4 flex-none" aria-hidden="true" />
+              {action.label}
+            </button>
+          ))}
         </div>
       )}
     </div>
@@ -205,7 +199,6 @@ const NewTaskButton: React.FC<NewTaskButtonProps> = ({
 };
 
 const GlobalHeader: React.FC<GlobalHeaderProps> = ({ user, onLogout, onMenuToggle, MenuIcon, isDemoMode = false, headerStatsOverride, newPlanPressedOverride = false, inboxUnreadCount = null, scopeSlotRef }) => {
-  const navigate = useNavigate();
   const desktop = useDesktop();
   const searchInputRef = useRef<HTMLInputElement>(null);
   const [quickAddOpen, setQuickAddOpen] = useState(false);
@@ -213,23 +206,6 @@ const GlobalHeader: React.FC<GlobalHeaderProps> = ({ user, onLogout, onMenuToggl
 
   const headerStats = useHeaderStats();
   const { systemHealth } = resolveHeaderStats(headerStatsOverride, headerStats);
-
-  // Named for what it does. The old `handleNewPlan` navigated to /tasks/new,
-  // which made the caret menu's real "New Plan" entry read as a duplicate.
-  const handleNewTask = useCallback(() => {
-    if (isDemoMode) return;
-    navigate('/tasks/new');
-  }, [isDemoMode, navigate]);
-  // The menu entries are demo-guarded here rather than relying on the disabled
-  // attribute alone, so a keyboard activation can never slip past the guard.
-  const handleNewPlan = useCallback(() => {
-    if (isDemoMode) return;
-    navigate('/studio/new');
-  }, [isDemoMode, navigate]);
-  const handleNewGoal = useCallback(() => {
-    if (isDemoMode) return;
-    navigate('/goals?new=1');
-  }, [isDemoMode, navigate]);
 
   useHeaderKeyboardShortcuts(searchInputRef, setQuickAddOpen);
   useEffect(() => {
@@ -290,12 +266,9 @@ const GlobalHeader: React.FC<GlobalHeaderProps> = ({ user, onLogout, onMenuToggl
           onExternalOpenHandled={() => setQuickAddOpen(false)}
           disabled={isDemoMode}
         />
-        <NewTaskButton
+        <CreationButton
           disabled={isDemoMode}
           pressed={newPlanPressedOverride}
-          onNewTask={handleNewTask}
-          onNewPlan={handleNewPlan}
-          onNewGoal={handleNewGoal}
         />
         <SystemHealth systemHealth={systemHealth} />
       </div>

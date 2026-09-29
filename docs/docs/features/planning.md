@@ -25,6 +25,8 @@ Planner Studio moves a draft through three stages, shown in the stepper at the t
 
 A draft can be reset back to setup if the inputs were wrong, which makes planning useful for exploratory work as well as well-defined tickets.
 
+A generated plan is saved only when every issue has a title, a body and an implementation section. If the planning model's JSON is malformed, the default coding agent repairs it in a scratch workspace, fixing syntax only, and a validator rejects any repair that drops, rewords or adds content. A response that holds only part of a plan, for example because the model stopped mid-plan, fails the generation with an error instead of being saved as a partial or empty plan; regenerate it, or choose a lower granularity for a shorter plan.
+
 {/* SCREENSHOT PLACEHOLDER (P1 — same capture as the planner-studio tutorial's Review Plan shot; interim: the site's ui-plan-detail.png): Capture Planner Studio in the Review Plan stage: the stepper showing the three stages, a generated plan with several issues, and the refinement chat input visible. Use a draft generated against a real repository so issue titles look representative. */}
 
 ## Context Assembly
@@ -38,6 +40,10 @@ Planner Studio can include several kinds of context before generation:
 - Context statistics and an estimated issue count before generation
 
 The goal is not to flood the model with every file. The goal is to make the proposed work easy to inspect before it runs, so reviewers can tell whether the agent saw enough relevant context. Repository summaries and indexing improve this step; see [Repository Knowledge](./repository-knowledge.md).
+
+## How The Plan Is Written
+
+The planning agent writes the plan to files instead of returning it in its reply: one file per issue, checked by a validator it runs itself and fixes until the plan is complete. ProPR validates the files again before saving the plan. A plan too long for one model message therefore arrives whole, and a plan with an incomplete issue fails with a clear error instead of being saved. Set `PROPR_PLAN_GENERATION_MODE=response` to parse the plan from the reply instead (see the [configuration reference](../operations/configuration-reference.md)).
 
 ## Review Before Running
 

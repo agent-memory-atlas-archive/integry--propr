@@ -46,6 +46,7 @@ export interface DashboardAttentionResponse {
 }
 
 export interface ActiveItem {
+  goalId?: string;
   id: string;
   taskId: string;
   repository: string;
@@ -89,10 +90,14 @@ export interface DashboardActiveResponse {
 }
 
 /**
- * One successfully completed run, newest first. Failures are attention items,
+ * One entity’s newest successful outcome. Failures are attention items,
  * and cancelled or skipped runs are not listed at all.
  */
 export interface OutcomeItem {
+  /** Completed task outcomes rolled up; absent on older servers. */
+  eventCount?: number;
+  /** Prior completed actions, newest first; excludes the displayed outcome. */
+  earlierUpdates?: Array<Omit<OutcomeItem, 'eventCount' | 'earlierUpdates'>>;
   id: string;
   taskId: string;
   repository: string;
@@ -180,4 +185,19 @@ export const getDashboardStats = (
     readJson<DashboardStatsResponse>(
       `/api/stats/dashboard?${repositoryQuery(repository)}&period=${encodeURIComponent(period)}`,
       signal,
+    ));
+
+export interface DashboardNarrativeResponse {
+  repository: RepositoryFilter;
+  enabled: boolean;
+  summary: string | null;
+}
+
+export const getDashboardNarrative = (
+  repository: RepositoryFilter = 'all',
+  refresh = false,
+): Promise<DashboardNarrativeResponse> =>
+  shareInFlightApiRead(`dashboard-narrative:${repository}:${refresh}`, signal =>
+    readJson<DashboardNarrativeResponse>(
+      `/api/dashboard/narrative?${repositoryQuery(repository)}${refresh ? '&refresh=true' : ''}`, signal,
     ));

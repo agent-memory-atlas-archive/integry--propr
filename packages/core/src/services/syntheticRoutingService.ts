@@ -163,15 +163,20 @@ export class SyntheticRoutingSession {
     }
   }
 
-  async executeTask(options: AgentTaskOptions): Promise<AgentExecutionResult> {
+  /** prepareWorkspace is awaited before every physical invocation, including failover. */
+  async executeTask(options: AgentTaskOptions, prepareWorkspace?: () => Promise<string>): Promise<AgentExecutionResult> {
     this.constrain(estimateTaskRequiredTokens(options));
     for (;;) {
       const selection = await this.select();
       this.executionAttemptCount += 1;
+      // Preparation failures belong to the caller, not to a physical agent.
+      // Do not retry them or invoke an agent with an earlier attempt's workspace.
+      const worktreePath = prepareWorkspace ? await prepareWorkspace() : options.worktreePath;
       const attemptHistoryId = await this.service.recordAttempt(selection, options.taskId);
       try {
         const result = await selection.physicalAgent.executeTask({
           ...options,
+          worktreePath,
           model: selection.physicalModel,
           isRetry: selection.attemptNumber > 1 || options.isRetry,
           retryReason: selection.attemptNumber > 1

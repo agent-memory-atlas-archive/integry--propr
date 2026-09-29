@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { Link, useLocation, useNavigate } from 'react-router-dom';
-import { Play, ScrollText, Zap } from 'lucide-react';
+import { Play, ScrollText, Target, Zap } from 'lucide-react';
 import { getInstanceCatalog } from '../api/proprApi';
 import type { InstanceCatalogResponse } from '../api/proprTypes';
 import { createDraft, uploadAttachment } from '../api/plannerApi';
@@ -250,6 +250,21 @@ function NewTaskLauncher({ scope }: { scope: string }) {
       <TaskSubmissionFeedback {...launcher} />
       <TaskLauncherActions {...launcher} />
     </form>
-    {!snapshot && <div className="mt-8 grid gap-3 border-t border-slate-200 pt-6 sm:grid-cols-2"><Link to="/studio/new" className="rounded-lg border border-slate-200 p-4 text-sm"><strong>New Plan</strong><p className="mt-1 text-slate-500">Plan and review work before implementation.</p></Link><Link to="/goals?new=1" className="rounded-lg border border-slate-200 p-4 text-sm"><strong>New Goal</strong><p className="mt-1 text-slate-500">Start an ongoing agent session.</p></Link></div>}
+    {!snapshot && <div className="mt-8 grid gap-3 border-t border-slate-200 pt-6 sm:grid-cols-2">
+      <Link to="/studio/new" className="rounded-lg border border-slate-200 p-4 text-sm">
+        <strong className="flex items-center gap-2">
+          <ScrollText className="h-4 w-4 text-teal-600" aria-hidden="true" />
+          New Plan
+        </strong>
+        <p className="mt-1 text-slate-500">Plan and review work before implementation.</p>
+      </Link>
+      <Link to="/goals?new=1" className="rounded-lg border border-slate-200 p-4 text-sm">
+        <strong className="flex items-center gap-2">
+          <Target className="h-4 w-4 text-teal-600" aria-hidden="true" />
+          New Goal
+        </strong>
+        <p className="mt-1 text-slate-500">Start an ongoing agent session.</p>
+      </Link>
+    </div>}
   </main>;
 }

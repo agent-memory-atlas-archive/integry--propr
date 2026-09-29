@@ -15,6 +15,7 @@ import { toNodeHandler } from '@modelcontextprotocol/node';
 import type { McpPrincipal } from '../mcp/policy.js';
 import type { CommentJobData, UnprocessedComment } from '@propr/core';
 import type { ToolDeps } from '../mcp/tools.js';
+import { withLiveOutputReads } from './liveOutputRedisFake.js';
 
 test('both SDK eras drive persisted goal, TODO, notification, settings and guarded PR workflows', async () => {
   const root = await mkdtemp(path.join(tmpdir(), 'propr-mcp-workflows-'));
@@ -102,7 +103,12 @@ test('both SDK eras drive persisted goal, TODO, notification, settings and guard
     const jobs: Array<Record<string, unknown>> = [];
     const redisValues = new Map<string, string>();
     const pendingComments = new Map<string, string[]>();
-    const evalRedis = async (script: string, _keyCount: number, key: string) => {
+    const liveOutputRedis = withLiveOutputReads({ get: async (key: string) => redisValues.get(key) ?? null });
+    const evalRedis = async (script: string, options: number | { keys: string[]; arguments: string[] }, key = '') => {
+      // Live-output reads use node-redis options; pending-comment claims use ioredis arguments.
+      if (typeof options !== 'number' && options.keys[0].startsWith('agent:output:')) {
+        return liveOutputRedis.eval(script, options);
+      }
       if (script.includes('return comments')) {
         const claimed = pendingComments.get(key) ?? [];
         if (claimed.length > 0) pendingComments.delete(key);
@@ -395,6 +401,6 @@ test('both SDK eras drive persisted goal, TODO, notification, settings and guard
     redisBoundary.restore(); boundary.restore();
     if (server) { server.closeAllConnections(); await new Promise<void>(resolve => server!.close(() => resolve())); }
     await Promise.all(attachmentDirectories.map(directory => rm(directory, { recursive: true, force: true })));
-    await core.closeConnection(); await rm(root, { recursive: true, force: true });
+    await core.closeConnection(); await core.closeEventPublisher(); await rm(root, { recursive: true, force: true });
   }
 });
