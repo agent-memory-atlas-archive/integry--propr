@@ -1,3 +1,4 @@
+/* eslint-disable max-lines -- MCP tool registration stays centralized so authorization and dispatch remain auditable */
 import { assertPlannerCancellationIdentity, cancellationTarget, cancellationOutcome, trackCancellation, trackExecution } from './operationTracking.js';
 import { z } from 'zod';
 import packageInfo from '../package.json' with { type: 'json' };
