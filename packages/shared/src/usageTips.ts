@@ -84,9 +84,21 @@ export function rotateUsageTipCandidates(candidates: UsageTipCandidate[], epoch:
 }
 export function resolveUsageTips(candidates: UsageTipCandidate[], dismissals: UsageTipDismissal[], baseDays: number, now: number): UsageTip[] {
   const byId = new Map(dismissals.map(d => [d.tip_id, d]));
-  const eligible = parseUsageTipCandidates(candidates)
-    .filter(c => isUsageTipEligible(byId.get(c.id), baseDays, now));
-  return mixUsageTipKinds(eligible).map(c => ({ ...USAGE_TIPS_BY_ID.get(c.id)!, body: c.reason }));
+  const pool = parseUsageTipCandidates(candidates);
+  const eligible = pool.filter(c => isUsageTipEligible(byId.get(c.id), baseDays, now));
+  const selected = new Set<string>();
+  // Derive slots from the saved pool before cooldowns, so dismissals retain
+  // the same kind allocation across reads without recording display history.
+  for (const slot of mixUsageTipKinds(pool)) {
+    const next = eligible.find(c => !selected.has(c.id) && usageTipKind(c.id) === usageTipKind(slot.id));
+    if (next) selected.add(next.id);
+  }
+  // Transfer unfilled slots only after exhausting their original kind.
+  for (const candidate of eligible) {
+    if (selected.size >= MAX_SELECTED_USAGE_TIPS) break;
+    selected.add(candidate.id);
+  }
+  return eligible.filter(c => selected.has(c.id)).map(c => ({ ...USAGE_TIPS_BY_ID.get(c.id)!, body: c.reason }));
 }
 /** Reserve a slot for each eligible kind without reordering the rotated pool. */
 export function mixUsageTipKinds(candidates: UsageTipCandidate[]): UsageTipCandidate[] {

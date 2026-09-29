@@ -1,17 +1,18 @@
 import { expect, test, type Page } from '@playwright/test';
 import { mkdir } from 'node:fs/promises';
 import path from 'node:path';
-import { resolveUsageTips } from '@propr/shared';
+import { resolveUsageTips, rotateUsageTipCandidates, USAGE_TIPS_BY_ID, type UsageTipCandidate } from '@propr/shared';
 import { heuristicUsageTipCandidates } from '../../packages/core/src/services/usageTips/selection';
 
-async function fixture(page: Page, discovery = false) {
-  const dismissed = new Set<string>();
+async function fixture(page: Page, discovery = false, savedCandidates?: UsageTipCandidate[]) {
+  const dismissed = new Map<string, number>();
   const events: string[] = [];
   const pool = ['pr-ultrafix', 'planner-studio', 'indexing-options', 'repository-todos',
     ...(discovery ? ['mcp-chat-control', 'visual-previews'] : [])];
   const candidates = heuristicUsageTipCandidates({ tasks: 12, manualCycles: 4, ultrafix: 0,
     oneOffTasks: 8, plans: 0, indexingFailures: 2, todos: 0,
     ...(discovery ? { mcpUsage: 0, visualPreviewRepos: 0 } : {}) });
+  const savedPool = savedCandidates ?? pool.map(id => candidates.find(c => c.id === id)!);
   let reads = 0;
   const settings = { usage_tips_enabled: true, usage_tips_dismissal_cooldown_days: 45 };
   await page.routeWebSocket('**/socket.io/**', socket => socket.close());
@@ -20,10 +21,12 @@ async function fixture(page: Page, discovery = false) {
     if (url === '/api/usage-tips') {
       reads++;
       return route.fulfill({ json: { enabled: settings.usage_tips_enabled,
-        tips: settings.usage_tips_enabled ? resolveUsageTips(pool.filter(id => !dismissed.has(id)).map(id => candidates.find(c => c.id === id)!), [], 45, Date.now()) : [] } });
+        tips: settings.usage_tips_enabled ? resolveUsageTips(savedPool,
+          [...dismissed].map(([tip_id, dismissed_at]) => ({ tip_id, dismissed_at, dismissal_count: 1 })),
+          settings.usage_tips_dismissal_cooldown_days, Date.now()) : [] } });
     }
     if (url === '/api/usage-tips/dismiss') {
-      const body = route.request().postDataJSON(); events.push(body.eventId); dismissed.add(body.tipId);
+      const body = route.request().postDataJSON(); events.push(body.eventId); dismissed.set(body.tipId, Date.now());
       return route.fulfill({ json: { success: true } });
     }
     if (url === '/api/config/settings' && route.request().method() === 'POST') {
@@ -134,3 +137,27 @@ test('discovery tips share the strip and dismissal replaces the discovery slot',
   await page.setViewportSize({ width: 390, height: 844 });
   await capture(page, 'discovery-tips-mobile.png', '[aria-label="Usage tips"]');
 });
+
+for (const [kind, ids, scores] of [
+  ['corrective', ['pr-ultrafix', 'planner-studio', 'mcp-chat-control', 'visual-previews', 'pr-switch'], [95, 85, 78, 76, 55]],
+  ['discovery', ['epic-auto-merge', 'mcp-chat-control', 'pr-fix', 'pr-review', 'visual-previews'], [79, 78, 77, 76, 70]],
+] as const) {
+  test(`interleaved pool preserves the dismissed ${kind} slot after reload`, async ({ page }) => {
+    await page.setViewportSize({ width: 1360, height: 1000 });
+    const pool = rotateUsageTipCandidates(ids.map((id, i) => ({ id, score: scores[i], reason: USAGE_TIPS_BY_ID.get(id)!.body })), 0);
+    const state = await fixture(page, true, pool);
+    await page.goto('/');
+    const tips = page.getByRole('region', { name: 'Usage tips' });
+    const title = (id: string) => USAGE_TIPS_BY_ID.get(id)!.title;
+    await expect(tips.getByRole('link')).toHaveText(ids.slice(0, 3).map(title));
+    await tips.getByRole('button', { name: `Dismiss ${title(ids[1])}` }).click();
+    const expected = [ids[0], ids[2], ids[4]].map(title);
+    await expect(tips.getByRole('link')).toHaveText(expected);
+    await expect(tips.getByText('New to you')).toHaveCount(kind === 'corrective' ? 1 : 2);
+    expect(state.events).toHaveLength(1);
+    await page.reload();
+    await expect(tips.getByRole('link')).toHaveText(expected);
+    expect(state.events).toHaveLength(1);
+    await capture(page, `dismissal-${kind}-replacement.png`, '[aria-label="Usage tips"]');
+  });
+}

@@ -288,6 +288,49 @@ test('mix preserves pool order, caps both kinds, and fills all slots for a sole 
   }
 });
 
+for (const [kind, primaryIds, secondaryIds, scores] of [
+  ['corrective', ['pr-ultrafix', 'planner-studio', 'pr-switch'], ['mcp-chat-control', 'repository-chat', 'visual-previews'], [95, 85, 78, 76, 74, 55]],
+  ['discovery', ['epic-auto-merge', 'mcp-chat-control', 'visual-previews'], ['pr-fix', 'pr-review', 'pr-switch'], [79, 78, 77, 76, 75, 70]],
+] as const) {
+  const ids = [primaryIds[0], primaryIds[1], ...secondaryIds, primaryIds[2]];
+  const pool = rotateUsageTipCandidates(ids.map((id, i) => ({ id, score: scores[i], reason: 'Relevant recorded activity.' })), 0);
+  const initialIds = [primaryIds[0], primaryIds[1], secondaryIds[0]];
+
+  test(`interleaved ${kind}-majority pool replaces either kind without changing its allocation`, () => {
+    assert.deepEqual(pool.map(c => c.id), ids);
+    assert.deepEqual(resolveUsageTips(pool, [], 45, 1).map(t => t.id), initialIds);
+    for (const dismissedId of initialIds) {
+      const replacement = dismissedId === secondaryIds[0] ? secondaryIds[1] : primaryIds[2];
+      const expected = new Set([...initialIds.filter(id => id !== dismissedId), replacement]);
+      const dismissals = [{ tip_id: dismissedId, dismissed_at: 0, dismissal_count: 1 }];
+      assert.deepEqual(resolveUsageTips(pool, dismissals, 45, 1).map(t => t.id), ids.filter(id => expected.has(id)));
+    }
+  });
+
+  test(`persisted ${kind} slots survive reloads and transfer only on exhaustion`, async () => fixture(async db => {
+    let now = 1000;
+    let store = createUsageTipsStore(db, () => now);
+    await store.persist({ ...selection, candidates: pool }, null);
+    const shown = async () => (await store.get('alice')).tips.map(t => t.id);
+    assert.deepEqual(await shown(), initialIds);
+    const event = randomUUID();
+    await store.dismiss('alice', primaryIds[1], event);
+    store = createUsageTipsStore(db, () => now);
+    await store.dismiss('alice', primaryIds[1], event);
+    assert.deepEqual(await shown(), [primaryIds[0], secondaryIds[0], primaryIds[2]]);
+    assert.deepEqual((await store.get('bob')).tips.map(t => t.id), initialIds);
+    await store.dismiss('alice', primaryIds[2], randomUUID());
+    assert.deepEqual(await shown(), [primaryIds[0], secondaryIds[0], secondaryIds[1]]);
+    await store.dismiss('alice', secondaryIds[0], randomUUID());
+    assert.deepEqual(await shown(), [primaryIds[0], secondaryIds[1], secondaryIds[2]]);
+    await store.dismiss('alice', primaryIds[0], randomUUID());
+    assert.deepEqual(await shown(), [secondaryIds[1], secondaryIds[2]]);
+    now += 45 * DAY;
+    assert.deepEqual(await shown(), initialIds);
+    assert.deepEqual((await store.current())?.candidates, pool);
+  }));
+}
+
 test('rotation never lets discovery scores displace urgent corrective scores, including 80', () => {
   const urgent = candidates.slice(0, 3).map((c, i) => ({ ...c, score: 80 + i * 5 }));
   for (let epoch = 0; epoch < 10; epoch++) {
