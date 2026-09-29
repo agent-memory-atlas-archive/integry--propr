@@ -292,3 +292,21 @@ test('lifecycle filters map UI labels onto the worker states stored in history',
   });
   assert.deepEqual((await idsFor('attention')).ids, ['completed-task', 'blocked-task']);
 });
+
+test('task count covering index preserves repository lookups and rolls back', async () => {
+  const database = await createDatabase();
+  const migration = await import('../../core/src/db/migrations/20260929000000_cover_task_list_counts.js');
+  await database.schema.alterTable('tasks', table => table.index('repository'));
+  await migration.up(database);
+  for (const suffix of ['', " AND t.repository = 'acme/widget'"]) {
+    const plan = await database.raw(`EXPLAIN QUERY PLAN
+      SELECT count(*) FROM tasks t
+      WHERE (t.task_type IS NULL OR t.task_type <> 'goal')
+        AND EXISTS (SELECT 1 FROM task_history h WHERE h.task_id = t.task_id) ${suffix}`) as Array<{ detail: string }>;
+    assert.ok(plan.some(row => row.detail.includes('COVERING INDEX tasks_repository_type_identity_index')));
+  }
+  await migration.down(database);
+  const indexes = await database.raw("PRAGMA index_list('tasks')") as Array<{ name: string }>;
+  assert.ok(indexes.some(row => row.name === 'tasks_repository_index'));
+  assert.ok(!indexes.some(row => row.name === 'tasks_repository_type_identity_index'));
+});

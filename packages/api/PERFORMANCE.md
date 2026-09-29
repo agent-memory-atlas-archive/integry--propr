@@ -156,3 +156,13 @@ an outstanding snapshot. Lifecycle transitions still immediately replace an
 active snapshot with complete terminal history, including when an older HTTP
 read is pending. Focused UI tests exercise these request counts and the existing
 HTTP/socket execution-ordering races.
+
+Task-list counts now use history existence when no state filter is requested;
+they still exclude tasks without history. A covering
+`tasks(repository, task_type, task_id)` index replaces the narrower repository
+index, retaining its prefix lookup without keeping redundant indexes. On the
+snapshot, the original all-task count took 35–37 ms warm; the covering-index
+existence query took 6.5–6.7 ms. State-filtered counts retain their latest-state
+join. Complete task-list responses matched the prior implementation across
+all, search, review, active, waiting, attention, repository and offset cases.
+Migration tests verify covering-index selection and rollback.
