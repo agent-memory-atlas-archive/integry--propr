@@ -41,6 +41,13 @@ function errorEnvelope(value: unknown): McpErrorEnvelope | undefined {
     ? envelope as McpErrorEnvelope : undefined;
 }
 
+function operationState(result: OperationResult): string {
+  const reported = (result.data as { state?: string })?.state;
+  if (reported === 'browser_required') return reported;
+  if (result.status !== 202) return 'completed';
+  return ['posted', 'queued', 'unknown', 'failed'].includes(reported || '') ? reported! : 'accepted';
+}
+
 export class McpOperations {
   constructor(readonly db: Knex) {}
 
@@ -68,8 +75,7 @@ export class McpOperations {
     }
     try {
       const result = await invoke(id);
-      const reported = (result.data as { state?: string })?.state;
-      const state = reported === 'browser_required' ? reported : result.status === 202 && ['posted', 'queued', 'unknown', 'failed'].includes(reported || '') ? reported! : result.status === 202 ? 'accepted' : 'completed';
+      const state = operationState(result);
       await this.db('mcp_operations').where({ id }).update({ state, result: JSON.stringify(result.data), updated_at: Date.now() });
       const lifecycle = lifecycleFromLegacy(state);
       if (['completed', 'failed', 'cancelled'].includes(lifecycle)) {

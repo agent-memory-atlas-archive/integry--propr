@@ -84,6 +84,28 @@ export function artifactsFromReceipt(row: Operation, receipt: Record<string, unk
   return artifacts;
 }
 
+function lifecycleOutcome(
+  row: Operation,
+  target: Record<string, unknown> | undefined,
+  receiptState: string,
+  targetState: string,
+): LifecycleOutcome | undefined {
+  if (terminalStates.has(receiptState as LifecycleOutcome)) return receiptState as LifecycleOutcome;
+  if (row.tool === 'run_ultrafix' || (!target?.taskId && !target?.task_id)) return undefined;
+  return terminalStates.has(targetState as LifecycleOutcome) ? targetState as LifecycleOutcome : undefined;
+}
+
+async function syncCancellation(
+  operations: McpOperations,
+  row: Operation,
+  receipt: Record<string, unknown>,
+): Promise<void> {
+  if (row.tool !== 'cancel_operation') return;
+  const result = record(receipt.result);
+  const sourceId = nonEmptyString(result?.operationId);
+  if (sourceId && result?.cancellation === 'confirmed') await operations.finish(sourceId, 'cancelled');
+}
+
 /** Persist tracker observations without allowing stale concurrent polls to undo newer lifecycle facts. */
 export async function syncLifecycle(
   operations: McpOperations,
@@ -102,18 +124,11 @@ export async function syncLifecycle(
     await operations.markStarted(row.id, epochMilliseconds(target?.timestamp));
   }
 
-  const outcome = terminalStates.has(receiptState as LifecycleOutcome)
-    ? receiptState as LifecycleOutcome
-    : row.tool !== 'run_ultrafix' && (target?.taskId || target?.task_id) && terminalStates.has(targetState as LifecycleOutcome)
-      ? targetState as LifecycleOutcome : undefined;
+  const outcome = lifecycleOutcome(row, target, receiptState, targetState);
   if (outcome) {
     const result = record(receipt.result);
     await operations.finish(row.id, outcome, record(result?.error) as McpErrorEnvelope | undefined);
   }
 
-  if (row.tool === 'cancel_operation') {
-    const result = record(receipt.result);
-    const sourceId = nonEmptyString(result?.operationId);
-    if (sourceId && result?.cancellation === 'confirmed') await operations.finish(sourceId, 'cancelled');
-  }
+  await syncCancellation(operations, row, receipt);
 }
