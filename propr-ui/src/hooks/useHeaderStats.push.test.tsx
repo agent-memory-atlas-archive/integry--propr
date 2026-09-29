@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { getQueueStats, getSystemStatus, getTasks } from '../api/proprApi';
 import { getDrafts } from '../api/plannerApi';
 import { useHeaderStats } from './useHeaderStats';
-import type { ActivityUpdatePayload, UsageUpdatePayload } from '@propr/shared';
+import type { ActivityUpdatePayload, UsageUpdatePayload, QueueStatsUpdatePayload } from '@propr/shared';
 
 /**
  * The header is mounted on every page, so what it reads - and, more
@@ -15,6 +15,7 @@ import type { ActivityUpdatePayload, UsageUpdatePayload } from '@propr/shared';
 const socketState = vi.hoisted(() => ({
   isConnected: true,
   activityCallbacks: new Set<(payload: ActivityUpdatePayload) => void>(),
+  queueCallbacks: new Set<(payload: QueueStatsUpdatePayload) => void>(),
   usageCallbacks: new Set<(payload: UsageUpdatePayload) => void>(),
 }));
 const identityState = vi.hoisted(() => ({ configuration: 'instance-a', userId: 'user-a' }));
@@ -37,7 +38,10 @@ vi.mock('../contexts/useSocket', () => ({
     isConnected: socketState.isConnected,
     onTaskUpdate: () => () => undefined,
     onDraftUpdate: () => () => undefined,
-    onQueueStatsUpdate: () => () => undefined,
+    onQueueStatsUpdate: (callback: (payload: QueueStatsUpdatePayload) => void) => {
+      socketState.queueCallbacks.add(callback);
+      return () => socketState.queueCallbacks.delete(callback);
+    },
     onActivityUpdate: (callback: (payload: ActivityUpdatePayload) => void) => {
       socketState.activityCallbacks.add(callback);
       return () => socketState.activityCallbacks.delete(callback);
@@ -77,6 +81,7 @@ describe('useHeaderStats pushed changes', () => {
     socketState.isConnected = true;
     socketState.activityCallbacks.clear();
     socketState.usageCallbacks.clear();
+    socketState.queueCallbacks.clear();
     vi.mocked(getQueueStats).mockResolvedValue({
       active: 0, activeJobs: [], waiting: 0, delayed: 0, completed: 0, failed: 0, paused: 0,
     } as never);
@@ -89,6 +94,22 @@ describe('useHeaderStats pushed changes', () => {
     vi.useRealTimers();
     vi.clearAllMocks();
     localStorage.clear();
+  });
+
+  it('does not re-read the queue for its subscription snapshot', async () => {
+    vi.useFakeTimers();
+    renderHook(() => useHeaderStats());
+    await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+    const payload: QueueStatsUpdatePayload = { eventType: 'queue:stats:update', initial: true,
+      stats: { active: 0, waiting: 0, completed: 0, failed: 0, delayed: 0, total: 0 },
+      timestamp: new Date().toISOString() };
+    act(() => socketState.queueCallbacks.forEach(callback => callback(payload)));
+    await act(async () => { await vi.advanceTimersByTimeAsync(200); });
+    expect(getQueueStats).toHaveBeenCalledTimes(1);
+    act(() => socketState.queueCallbacks.forEach(callback => callback({ ...payload, initial: false,
+      stats: { ...payload.stats, active: 1, total: 1 } })));
+    await act(async () => { await vi.advanceTimersByTimeAsync(200); });
+    expect(getQueueStats).toHaveBeenCalledTimes(2);
   });
 
   it('issues no read at all over an idle period while the socket is connected', async () => {

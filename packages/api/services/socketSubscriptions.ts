@@ -367,7 +367,7 @@ export class SocketSubscriptionManager {
         room: 'queue:stats',
         authorize: () => true,
       })) return;
-      await this.dependencies.getQueueBroadcaster()?.broadcastQueueStats(true);
+      await this.dependencies.getQueueBroadcaster()?.broadcastQueueStats(true, socket.id);
     });
     socket.on('unsubscribe:queue:stats', async () => {
       const room = 'queue:stats';

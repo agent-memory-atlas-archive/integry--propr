@@ -233,6 +233,8 @@ export interface QueueStatsData {
 
 /** Event payload for queue statistics updates */
 export interface QueueStatsUpdatePayload {
+  /** Subscription snapshot, not a change requiring an HTTP reconciliation. */
+  initial?: boolean;
   eventType: typeof QUEUE_STATS_UPDATE;
   stats: QueueStatsData;
   timestamp: string;

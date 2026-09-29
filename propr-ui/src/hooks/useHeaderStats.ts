@@ -605,6 +605,7 @@ export function useHeaderStats(): HeaderStats {
     };
 
     const handleQueueStatsUpdate = (payload: QueueStatsUpdatePayload) => {
+      if (payload.initial) return;
       const fingerprint = queueStatsFingerprint(payload);
       if (fingerprint === lastQueueStatsFingerprintRef.current
         || fingerprint === pendingQueueStatsFingerprintRef.current) return;

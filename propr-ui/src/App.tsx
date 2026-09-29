@@ -4,6 +4,7 @@ import React, { Suspense, useEffect, useState } from 'react'
 import { BrowserRouter, HashRouter, Routes, Route, Link, useLocation, useNavigate } from 'react-router-dom'
 import Layout from './components/Layout'
 import { ToastProvider } from './components/ui/Toast'
+import { SocketBootstrap } from './contexts/SocketBootstrap'
 import { SocketProvider } from './contexts/SocketProvider'
 import { useDemoMode } from './contexts/DemoModeContext'
 import { DemoModeProvider } from './contexts/DemoModeProvider'
@@ -335,7 +336,10 @@ const AppContent: React.FC = () => {
       disabled={Object.values(disableReasons).some(Boolean)}
       disableReasons={disableReasons}
     >
-      {content}
+      <SocketBootstrap disabled={Object.values(disableReasons).some(Boolean)}
+        identity={currentUser?.id ?? 'anonymous'} fallback={<LoadingSpinner />}>
+        {content}
+      </SocketBootstrap>
     </SocketProvider>
   );
 };

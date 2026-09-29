@@ -85,7 +85,7 @@ export class QueueBroadcaster {
   /**
    * Broadcast current queue statistics to subscribed clients
    */
-  async broadcastQueueStats(force = false): Promise<void> {
+  async broadcastQueueStats(force = false, recipientId?: string): Promise<void> {
     try {
       const [waiting, activeJobs, completed, failed, delayed] = await Promise.all([
         this.queue.getWaitingCount(),
@@ -112,16 +112,21 @@ export class QueueBroadcaster {
       // the authoritative queue snapshot has not changed. A new subscriber can
       // force one snapshot so it never waits for the next transition.
       const fingerprint = JSON.stringify(stats);
-      if (!force && fingerprint === this.lastBroadcastFingerprint) return;
+      const changed = fingerprint !== this.lastBroadcastFingerprint;
+      const initial = force && (!changed || this.lastBroadcastFingerprint === null);
+      if (!force && !changed) return;
       this.lastBroadcastFingerprint = fingerprint;
 
       const payload: QueueStatsUpdatePayload = {
         eventType: QUEUE_STATS_UPDATE,
         stats,
+        ...(initial ? { initial: true } : {}),
         timestamp: new Date().toISOString()
       };
 
-      this.io.to('queue:stats').emit(QUEUE_STATS_UPDATE, payload);
+      this.io.to(initial && recipientId ? recipientId : 'queue:stats').emit(QUEUE_STATS_UPDATE, payload);
+      // Joining a room must not look like a queue transition to every dashboard.
+      if (initial) return;
       this.io.to(ACTIVITY_ROOM).emit(ACTIVITY_UPDATE, { eventType: ACTIVITY_UPDATE,
         domain: 'queue', change: 'progressed', entityId: 'queue', repository: null, terminal: false,
         occurredAt: payload.timestamp });

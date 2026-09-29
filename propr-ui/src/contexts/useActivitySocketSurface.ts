@@ -28,6 +28,7 @@ export interface ActivitySocketSurface {
   /** The part of the context value this surface owns. */
   subscriptions: Pick<
     SocketContextValue,
+    | 'activityReady'
     | 'shellSnapshots'
     | 'onShellSnapshot'
     | 'subscribeToActivity'
@@ -63,6 +64,7 @@ const useRegistry = <T,>() => {
  * reference-counted, and the count has to outlive all of them.
  */
 export function useActivitySocketSurface(): ActivitySocketSurface {
+  const [isActivityReady, setActivityReady] = useState(false);
   const [shellSnapshots, setShellSnapshots] = useState(false);
   const snapshots = useRegistry<ShellSnapshot>();
   const ready = useRegistry<void>();
@@ -100,6 +102,7 @@ export function useActivitySocketSurface(): ActivitySocketSurface {
     };
     const activityReady = (capabilities?: { shellSnapshots?: boolean }) => {
       if (!isCurrentScope()) return;
+      setActivityReady(true);
       setShellSnapshots(capabilities?.shellSnapshots === true);
       fanOut(ready)(undefined);
     };
@@ -136,6 +139,7 @@ export function useActivitySocketSurface(): ActivitySocketSurface {
   }, []);
 
   const handleDisconnected = useCallback(() => {
+    setActivityReady(false);
     setShellSnapshots(false);
     connectedRef.current = false;
     socketRef.current = null;
@@ -167,6 +171,7 @@ export function useActivitySocketSurface(): ActivitySocketSurface {
     handleConnected,
     handleDisconnected,
     subscriptions: {
+      activityReady: isActivityReady,
       shellSnapshots,
       onShellSnapshot: snapshots.subscribe,
       subscribeToActivity,
@@ -178,6 +183,7 @@ export function useActivitySocketSurface(): ActivitySocketSurface {
       onUsageUpdate: usage.subscribe,
     },
   }), [
+    isActivityReady,
     shellSnapshots,
     snapshots.subscribe,
     activity.subscribe,

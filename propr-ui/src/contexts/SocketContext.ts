@@ -20,6 +20,8 @@ export interface ShellSnapshot {
 export interface SocketContextValue {
   /** Server supplies status and authorized usage projections directly. */
   shellSnapshots?: boolean;
+  /** The current socket has joined the authorized activity rooms. */
+  activityReady?: boolean;
   onShellSnapshot?: (callback: (payload: ShellSnapshot) => void) => () => void;
   socket: Socket | null;
   isConnected: boolean;
