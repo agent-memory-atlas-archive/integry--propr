@@ -15,6 +15,7 @@ import { parseClientMetadataDocument } from '../mcp/clients.js';
 import { createToolCatalog, type ToolDeps } from '../mcp/tools.js';
 import type { McpPrincipal } from '../mcp/policy.js';
 import { artifactsFromReceipt, failureFromReceipt, syncLifecycle } from '../mcp/operationLifecycle.js';
+import { trackExecution } from '../mcp/operationTracking.js';
 
 after(closeConnection);
 
@@ -170,29 +171,49 @@ test('list_operations recovers terminal lifecycle, artifacts and failure before 
   const db = knex({ client: 'better-sqlite3', connection: { filename: ':memory:' }, useNullAsDefault: true });
   t.after(() => db.destroy());
   await db.schema.createTable('task_drafts', table => table.string('draft_id').primary());
+  await db.schema.createTable('tasks', table => {
+    table.string('task_id').primary(); table.string('job_id'); table.string('repository'); table.string('task_type');
+    table.integer('pr_number'); table.text('initial_job_data'); table.timestamp('created_at').defaultTo(db.fn.now());
+  });
+  await db.schema.createTable('task_history', table => {
+    table.increments('history_id').primary(); table.string('task_id'); table.string('state');
+    table.timestamp('timestamp'); table.text('reason'); table.text('metadata');
+  });
   await up(db); await lifecycleUp(db);
   const principal = { user: { id: 'alice' }, grant: { id: 'grant-a' } } as McpPrincipal;
   const operations = new McpOperations(db);
   const receipt = await operations.run(principal, {
     tool: 'send_task_followup', args: { idempotencyKey: 'tracker-interrupt-1' }, repository: 'acme/repo',
   }, async () => ({ status: 202, data: { state: 'queued' } }));
+  const failedArgs = { idempotencyKey: 'tracker-failure-02' };
   const failed = await operations.run(principal, {
-    tool: 'send_task_followup', args: { idempotencyKey: 'tracker-failure-02' }, repository: 'acme/repo',
-  }, async () => ({ status: 202, data: { state: 'queued' } }));
+    tool: 'send_task_followup', args: failedArgs, repository: 'acme/repo',
+  }, async () => ({ status: 202, data: { state: 'queued', jobId: 'job-failed', continuation: { taskId: 'task-failed' } } }));
   const persistedAt = Date.now() - 500;
-  // This is the tracker write immediately before get_operation would normally
-  // call syncLifecycle; a stopped process leaves exactly this durable row.
+  // Keep coverage for a legacy terminal receipt whose identifiers are directly
+  // in the result alongside the tracker-shaped receipt below.
   await db('mcp_operations').where({ id: receipt.operationId }).update({
     state: 'completed', result: JSON.stringify({ state: 'queued', continuation: { taskId: 'task-1' }, executionResolved: true }),
     updated_at: persistedAt,
   });
-  const failure = { code: 'TASK_FAILED', message: 'Task execution failed.', stage: 'internal', retryable: false, status: 500 };
-  await db('mcp_operations').where({ id: failed.operationId }).update({
-    state: 'failed', result: JSON.stringify({ error: failure }), updated_at: persistedAt,
-  });
-
   const deps = { db, policy: { repository: async () => {}, requirePermission: () => {}, config: {} } as never,
     taskQueue: {} as never, redisClient: {} as never, runtimeBuildQueue: {} as never } as ToolDeps;
+  const observedAt = '2026-09-29T03:00:00.000Z';
+  await db('tasks').insert({ task_id: 'task-failed', job_id: 'job-failed', repository: 'acme/repo', task_type: 'issue', pr_number: 73 });
+  await db('task_history').insert({ task_id: 'task-failed', state: 'failed', timestamp: observedAt, reason: 'Agent stopped after tests failed.' });
+  const failedRow = await db<Operation>('mcp_operations').where({ id: failed.operationId }).first();
+  // Stop immediately after the awaited tracker write, before syncLifecycle can
+  // project its nested targetState into lifecycle columns.
+  await trackExecution(deps, failedRow!, principal, operations.project(failedRow!));
+  const trackerWrite = await db<Operation>('mcp_operations').where({ id: failed.operationId }).first();
+  assert.equal(trackerWrite?.state, 'failed');
+  assert.equal(trackerWrite?.lifecycle, 'accepted');
+  assert.equal(trackerWrite?.failure, null);
+  assert.equal(trackerWrite?.progress, null);
+  assert.deepEqual(JSON.parse(trackerWrite!.result!).targetState, {
+    taskId: 'task-failed', pr_number: 73, state: 'failed', timestamp: observedAt, reason: 'Agent stopped after tests failed.',
+  });
+
   const list = createToolCatalog(deps).find(tool => tool.name === 'list_operations')!;
   const active = (await list.run({ principal, args: list.schema.parse({ lifecycle: 'active' }) })).data as { operations: Array<Record<string, unknown>> };
   const completed = (await list.run({ principal, args: list.schema.parse({ lifecycle: 'completed' }) })).data as { operations: Array<Record<string, unknown>> };
@@ -203,7 +224,19 @@ test('list_operations recovers terminal lifecycle, artifacts and failure before 
   assert.equal((completed.operations[0].lifecycle as { finishedAt: string }).finishedAt, new Date(persistedAt).toISOString());
   assert.deepEqual((completed.operations[0].lifecycle as { artifacts: unknown }).artifacts, { taskId: 'task-1' });
   assert.deepEqual(failures.operations.map(row => row.operationId), [failed.operationId]);
-  assert.deepEqual((failures.operations[0].lifecycle as { failure: unknown }).failure, failure);
+  const recoveredLifecycle = failures.operations[0].lifecycle as Record<string, unknown>;
+  assert.deepEqual(recoveredLifecycle.failure, {
+    code: 'EXECUTION_FAILED', message: 'Agent stopped after tests failed.', stage: 'internal', retryable: false, status: 500,
+  });
+  assert.deepEqual(recoveredLifecycle.artifacts, {
+    taskId: 'task-failed',
+    pullRequest: { repository: 'acme/repo', number: 73, url: 'https://github.com/acme/repo/pull/73' },
+  });
+  assert.deepEqual(recoveredLifecycle.progress, {
+    taskId: 'task-failed', pr_number: 73, state: 'failed', timestamp: observedAt, reason: 'Agent stopped after tests failed.',
+  });
+  const replay = await operations.replay(principal, 'send_task_followup', failedArgs);
+  assert.deepEqual(replay?.lifecycle, recoveredLifecycle);
   assert.deepEqual(await db('mcp_operations').where({ id: receipt.operationId }).first('state', 'lifecycle', 'finished_at'), {
     state: 'completed', lifecycle: 'completed', finished_at: persistedAt,
   });

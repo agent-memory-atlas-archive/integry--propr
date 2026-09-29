@@ -29,6 +29,16 @@ function json(value: unknown): unknown {
   try { return JSON.parse(value); } catch { return null; }
 }
 
+function record(value: unknown): Record<string, unknown> | undefined {
+  return value !== null && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
+}
+
+function recoveryReceipt(row: Pick<Operation, 'state' | 'result'>) {
+  const result = json(row.result);
+  const targetState = record(record(result)?.targetState);
+  return { state: row.state, result, ...(targetState ? { targetState } : {}) };
+}
+
 function iso(value: number | null | undefined): string | null {
   if (value === null || value === undefined) return null;
   const date = new Date(Number(value));
@@ -134,7 +144,8 @@ export class McpOperations {
     if (id) query.andWhere({ id });
     const rows = await query.select<Operation[]>();
     for (const row of rows) {
-      const receipt = { state: row.state, result: json(row.result) };
+      const receipt = recoveryReceipt(row);
+      const targetState = receipt.targetState;
       const artifacts = artifactsFromReceipt(row, receipt);
       const storedArtifacts = json(row.artifacts);
       const artifactRecord = storedArtifacts && typeof storedArtifacts === 'object' && !Array.isArray(storedArtifacts)
@@ -143,7 +154,8 @@ export class McpOperations {
         .filter(([key, value]) => canonical(artifactRecord[key]) !== canonical(value)));
       const failure = row.state === 'failed' ? failureFromReceipt(receipt) : undefined;
       const lifecycleMissing = ['accepted', 'running', 'unknown'].includes(row.lifecycle) || row.finished_at === null;
-      if (!lifecycleMissing && !Object.keys(missingArtifacts).length && !(failure && row.failure === null)) continue;
+      const progressMissing = row.progress === null && targetState !== undefined;
+      if (!lifecycleMissing && !Object.keys(missingArtifacts).length && !(failure && row.failure === null) && !progressMissing) continue;
 
       const update: Record<string, unknown> = { updated_at: Date.now() };
       if (lifecycleMissing) {
@@ -157,6 +169,9 @@ export class McpOperations {
       }
       if (failure && row.failure === null) {
         update.failure = this.db.raw('COALESCE(failure, ?)', [JSON.stringify(failure)]);
+      }
+      if (progressMissing) {
+        update.progress = this.db.raw('COALESCE(progress, ?)', [JSON.stringify(targetState)]);
       }
 
       // Do not attach metadata derived from a receipt that changed after the
