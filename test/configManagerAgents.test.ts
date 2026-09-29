@@ -149,6 +149,7 @@ describe('agent config migration', () => {
         assert.strictEqual(agent.dockerImage, 'propr/agent:latest');
         assert.ok(agent.supportedModels.includes('claude-opus-5-5'));
         assert.ok(agent.supportedModels.includes('claude-opus-5'));
+        assert.ok(agent.supportedModels.includes('claude-sonnet-5-5'));
         assert.ok(agent.supportedModels.includes('claude-sonnet-5'));
         assert.ok(agent.supportedModels.includes('claude-fable-5-1'));
         assert.ok(agent.supportedModels.includes('claude-opus-4-6'));

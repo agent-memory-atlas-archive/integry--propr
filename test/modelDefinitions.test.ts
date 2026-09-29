@@ -42,10 +42,20 @@ test('Claude Opus 5.5 leads the Claude catalog as the default Claude model', () 
     assert.strictEqual(MODEL_INFO_MAP['claude-opus-5-5']?.maxTokens, 1000000);
     // Opus 5.5 shipped in Claude Code 2.1.280, so the pinned CLI must support it
     assert.strictEqual(MODEL_INFO_MAP['claude-opus-5-5']?.minAgentVersion, '2.1.280');
-    assert.strictEqual(AGENT_DEFAULTS.claude.defaultCliVersion, '2.1.280');
+    assert.strictEqual(AGENT_DEFAULTS.claude.defaultCliVersion, '2.1.284');
 });
 
-test('Claude Fable 5.1, Opus 5, and Sonnet 5 are current Claude Code models', () => {
+test('Claude Sonnet 5.5 is the current canonical Sonnet model', () => {
+    assert.ok(CLAUDE_MODELS.some(model => model.id === 'claude-sonnet-5-5'));
+    assert.strictEqual(MODEL_INFO_MAP['claude-sonnet-5-5']?.githubLabel, 'llm-claude-sonnet55');
+    assert.strictEqual(MODEL_INFO_MAP['claude-sonnet-5-5']?.shortAlias, 'sonnet55');
+    assert.strictEqual(MODEL_INFO_MAP['claude-sonnet-5-5']?.openRouterId, 'anthropic/claude-sonnet-5.5');
+    assert.strictEqual(MODEL_INFO_MAP['claude-sonnet-5-5']?.contextWindow, '1M');
+    assert.strictEqual(MODEL_INFO_MAP['claude-sonnet-5-5']?.maxTokens, 1000000);
+    assert.strictEqual(MODEL_INFO_MAP['claude-sonnet-5-5']?.minAgentVersion, '2.1.284');
+});
+
+test('Claude Fable 5.1, Opus 5, and Sonnet 5 remain supported Claude Code models', () => {
     assert.ok(CLAUDE_MODELS.some(model => model.id === 'claude-fable-5-1'));
     assert.strictEqual(MODEL_INFO_MAP['claude-fable-5-1']?.githubLabel, 'llm-claude-fable51');
     assert.strictEqual(MODEL_INFO_MAP['claude-fable-5-1']?.minAgentVersion, '2.1.257');

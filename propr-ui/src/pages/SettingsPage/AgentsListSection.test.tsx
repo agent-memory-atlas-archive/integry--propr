@@ -81,6 +81,34 @@ describe('AgentsListSection web login', () => {
     expect(screen.queryByRole('button', { name: 'Select GPT-5.2 from codex in Playground' })).not.toBeInTheDocument();
   });
 
+  it('shows Sonnet 5.5 as current and folds older Sonnet models', () => {
+    render(
+      <AgentsListSection
+        agents={[{
+          ...agents[0],
+          type: 'claude',
+          alias: 'claude',
+          supportedModels: ['claude-sonnet-5-5', 'claude-sonnet-5', 'claude-sonnet-4-6'],
+        }]}
+        loading={false}
+        saving={false}
+        error={null}
+        success={null}
+        warning={null}
+        onSaveAgents={vi.fn()}
+        onSelectModel={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByRole('button', { name: 'Select Claude Sonnet 5.5 from claude in Playground' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Select Claude Sonnet 5 from claude in Playground' })).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Show 2 legacy models' }));
+
+    expect(screen.getByRole('button', { name: 'Select Claude Sonnet 5 from claude in Playground' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Select Claude Sonnet 4.6 from claude in Playground' })).toBeInTheDocument();
+  });
+
   it('offers login for supported agents and opens their dialog', () => {
     renderList();
 
