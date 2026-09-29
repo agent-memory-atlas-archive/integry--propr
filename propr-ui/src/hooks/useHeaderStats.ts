@@ -401,7 +401,7 @@ export function useHeaderStats(): HeaderStats {
           const reviewableGroups = buildReviewGroups(response);
           setReviewGroups(reviewableGroups);
           setReviewCount(reviewableGroups.length);
-        } else {
+        } else if (!managedStatus) {
           setSystemHealth(buildSystemHealth(value as SystemStatus));
         }
       }

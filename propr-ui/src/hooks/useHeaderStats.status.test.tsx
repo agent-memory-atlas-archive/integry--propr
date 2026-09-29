@@ -2,6 +2,8 @@ import { renderHook, waitFor } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { getQueueStats, getSystemStatus, getTasks } from '../api/proprApi';
 import { getDrafts } from '../api/plannerApi';
+import * as systemStatusContext from '../contexts/SystemStatusContext';
+import type { SystemStatus } from '../api/proprTypes';
 import { useHeaderStats } from './useHeaderStats';
 
 vi.mock('../api/proprApi', () => ({
@@ -25,7 +27,22 @@ vi.mock('../contexts/useSocket', () => ({
 describe('useHeaderStats system health', () => {
   afterEach(() => {
     vi.clearAllMocks();
+    vi.restoreAllMocks();
     localStorage.clear();
+  });
+
+  it('keeps the shared pushed status when the initial read returns an older snapshot', async () => {
+    vi.mocked(getQueueStats).mockResolvedValue({ active: 0, waiting: 0, completed: 0, failed: 0, delayed: 0, paused: 0 });
+    vi.mocked(getDrafts).mockResolvedValue({ drafts: [] } as never);
+    vi.mocked(getTasks).mockResolvedValue({ tasks: [] });
+    const status = { daemon: 'Running', workers: [], agents: [], warnings: [] } as unknown as SystemStatus;
+    const read = vi.fn(async () => ({ ...status, daemon: 'Stopped' }));
+    vi.spyOn(systemStatusContext, 'useSharedSystemStatus').mockReturnValue({
+      managed: true, status, isLoading: false, error: null, getStatus: read, refreshStatus: read,
+    });
+    const { result } = renderHook(() => useHeaderStats());
+    await waitFor(() => expect(result.current.isLoading).toBe(false));
+    expect(result.current.systemHealth.daemon).toBe('Running');
   });
 
   it('treats zero enabled agents as healthy when core services are healthy', async () => {
