@@ -81,6 +81,23 @@ function restoreResolvedTarget(
   };
 }
 
+async function refreshPullRequestContext(
+  row: Operation,
+  principal: McpPrincipal,
+  result: ExecutionResult & Record<string, unknown>,
+): Promise<void> {
+  if (!result.pullRequest) return;
+  const [owner, repo] = String(row.repository).split('/');
+  const { data: pr } = await principal.github.request('GET /repos/{owner}/{repo}/pulls/{pull_number}', {
+    owner, repo, pull_number: result.pullRequest,
+  });
+  result.currentHead = pr.head.sha;
+  result.results = {
+    tool: 'get_pull_request_discussion', repository: row.repository,
+    pullRequest: result.pullRequest, taskId: result.continuation?.taskId,
+  };
+}
+
 /** Resolve the execution from the actual job or the exact triggering comment. */
 export async function trackExecution(deps: ToolDeps, row: Operation, principal: McpPrincipal, receipt: Record<string, unknown>): Promise<void> {
   if (!trackedTools.includes(row.tool) || !row.result) return;
@@ -96,12 +113,7 @@ export async function trackExecution(deps: ToolDeps, row: Operation, principal: 
   if (task) await trackTask(deps, row, { task, result, receipt });
   else if (result.jobId) await trackQueuedJob(row, result.jobId, receipt);
   else if (Date.now() - Number(row.created_at) > 120000) receipt.state = 'unknown';
-  if (result.pullRequest) {
-    const [owner, repo] = String(row.repository).split('/');
-    const { data: pr } = await principal.github.request('GET /repos/{owner}/{repo}/pulls/{pull_number}', { owner, repo, pull_number: result.pullRequest });
-    result.currentHead = pr.head.sha;
-    result.results = { tool: 'get_pull_request_discussion', repository: row.repository, pullRequest: result.pullRequest, taskId: result.continuation?.taskId };
-  }
+  await refreshPullRequestContext(row, principal, result);
   if (terminalStates.includes(String(receipt.state))) {
     result.executionResolved = true;
     result.targetState = receipt.targetState as Record<string, unknown> | undefined;

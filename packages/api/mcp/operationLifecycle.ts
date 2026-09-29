@@ -40,6 +40,29 @@ function taskIdFromReceipt(
     ...targetIssues.flatMap(issue => [issue.taskId, issue.task_id]));
 }
 
+function issueNumbersFromReceipt(
+  result: Record<string, unknown>,
+  continuation: Record<string, unknown>,
+  target: Record<string, unknown>,
+  targetIssues: Record<string, unknown>[],
+): number[] {
+  const issueNumbers = new Set<number>();
+  for (const value of [result.issueNumber, result.issue_number, continuation.issueNumber, target.issueNumber, target.issue_number]) {
+    const number = positiveInteger(value);
+    if (number) issueNumbers.add(number);
+  }
+  if (Array.isArray(result.issues)) for (const value of result.issues) {
+    const issue = record(value);
+    const number = positiveInteger(issue?.number, issue?.issueNumber, value);
+    if (number) issueNumbers.add(number);
+  }
+  for (const issue of targetIssues) {
+    const number = positiveInteger(issue.number, issue.issueNumber, issue.issue_number);
+    if (number) issueNumbers.add(number);
+  }
+  return [...issueNumbers];
+}
+
 /** Translate the compatibility state into the persisted public lifecycle. */
 export function lifecycleFromLegacy(state: unknown): LifecycleState {
   if (['running', 'accepted', 'posted', 'queued', 'browser_required'].includes(String(state))) return 'accepted';
@@ -72,20 +95,8 @@ export function artifactsFromReceipt(row: Pick<Operation, 'repository'>, receipt
     url: `https://github.com/${repository}/pull/${pullRequestNumber}`,
   };
 
-  const issueNumbers = new Set<number>();
-  for (const value of [result.issueNumber, result.issue_number, continuation.issueNumber, target.issueNumber, target.issue_number]) {
-    const number = positiveInteger(value);
-    if (number) issueNumbers.add(number);
-  }
-  if (Array.isArray(result.issues)) for (const value of result.issues) {
-    const number = positiveInteger(record(value)?.number, record(value)?.issueNumber, value);
-    if (number) issueNumbers.add(number);
-  }
-  for (const issue of targetIssues) {
-    const number = positiveInteger(issue.number, issue.issueNumber, issue.issue_number);
-    if (number) issueNumbers.add(number);
-  }
-  if (repository && issueNumbers.size) artifacts.issues = [...issueNumbers].map(number => ({
+  const issueNumbers = issueNumbersFromReceipt(result, continuation, target, targetIssues);
+  if (repository && issueNumbers.length) artifacts.issues = issueNumbers.map(number => ({
     repository,
     number,
     url: `https://github.com/${repository}/issues/${number}`,
