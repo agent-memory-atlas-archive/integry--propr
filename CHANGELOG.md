@@ -144,6 +144,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   alias. The bundled Claude Code CLI moves to 2.1.280, which is the first release
   that serves Opus 5.5. Claude agents still defaulting to Opus 5 are migrated to
   Opus 5.5 on startup; deliberate picks in other tiers are left alone.
+- **Claude Sonnet 5.5**: added to the Claude model catalog
+  (`llm-claude-sonnet55`, 1M context) and made the target of the plain `sonnet`
+  alias. The bundled Claude Code CLI moves to 2.1.284, the first release that
+  serves Sonnet 5.5. Existing agents gain the model on startup.
 - **Per-repository notifications**: Repositories → Settings now has a
   **Notifications** toggle that stops Inbox and push notifications for plan, task,
   review, pull request, and indexing activity in that repository while automation
@@ -207,11 +211,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   speech or microphone API is touched. Browser and PWA users who used Voice Briefings
   before this release must opt in once per account, instance, and device; existing
   desktop opt-ins are preserved.
-- **Claude Opus 5 and Opus 4.8 are legacy models**: both now sit behind the
-  *Show legacy models* fold on Coding Agents, leaving Opus 5.5, Fable 5.1, and
-  Sonnet 5 in the Claude agent's current list, and neither is offered as a
-  recommended model for plan generation or PR review. They remain fully
-  selectable, and agents already configured with them keep running them.
+- **Older Claude models are legacy models**: Opus 5, Opus 4.8, and Sonnet 5 now
+  sit behind the *Show legacy models* fold on Coding Agents, leaving Opus 5.5,
+  Fable 5.1, and Sonnet 5.5 in the Claude agent's current list. None of the
+  legacy models is offered as a recommended model for plan generation or PR
+  review. They remain fully selectable, and agents already configured with them
+  keep running them.
 
 ### Fixed
 
