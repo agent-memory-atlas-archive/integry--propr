@@ -6,12 +6,17 @@
  * than from a task's current state: a run that completed and is now being
  * followed up still completed.
  *
+ * The legacy reader below is also the backfill parity oracle. Serving reads
+ * use the durable, versioned projection at the end of this module.
+ *
  * Failures are not listed here: an unresolved failure is something a person
  * has to act on, so it belongs in the attention list. Cancellations and jobs
  * that were skipped or rescheduled are bookkeeping, not results, and appear in
  * neither.
  */
 
+import { isDeepStrictEqual } from 'node:util';
+import { createHash, randomUUID } from 'node:crypto';
 import type { Knex } from 'knex';
 import {
   chunk,
@@ -130,7 +135,7 @@ async function loadCompletionDetails(db: Knex, rows: readonly CompletionRow[]): 
   return details;
 }
 
-function isReviewRun(row: DashboardTaskRow, commandMode: string | null): boolean {
+function isReviewRun(row: Pick<DashboardTaskRow, 'taskType' | 'title'>, commandMode: string | null): boolean {
   if (commandMode !== null) return commandMode === 'review';
   return row.taskType === 'review' || /^Review PR #\d+:/i.test(row.title ?? '');
 }
@@ -175,10 +180,11 @@ function meaningfulRecap(recap: string | null): string | null {
  * and PRs recorded only in final_result. Goal and issue keys are fallbacks;
  * repository and entity kind are both part of the partition.
  */
-function entityCompletions(db: Knex, repository: string): Knex.QueryBuilder {
+function entityCompletions(db: Knex, repository: string, taskId?: string): Knex.QueryBuilder {
   // Keep one outcome per run, not per task: a review and a subsequent fix can
   // reuse the same task ID. Consecutive completion writes are still one run.
   const history = db('task_history')
+    .modify(query => { if (taskId !== undefined) query.where('task_id', taskId); })
     .whereIn('state', ['completed', ...RUN_START_STATES])
     .select('task_id', 'history_id', 'state', 'timestamp', 'reason').select(db.raw(`
     SUM(CASE WHEN state IN (${RUN_START_STATES.map(() => '?').join(', ')}) THEN 1 ELSE 0 END)
@@ -253,6 +259,7 @@ export async function loadCompletedRows(
   db: Knex,
   repository: string,
   options: { limit?: number; search?: string } = {},
+  taskId?: string, // Internal bounded parity oracle during background backfill.
 ): Promise<CompletedRow[]> {
   const limit = Math.min(Math.max(options.limit ?? 20, 1), 100);
   const search = options.search?.trim().toLowerCase() ?? '';
@@ -264,7 +271,7 @@ export async function loadCompletedRows(
     .orderBy([{ column: 'state_timestamp', order: 'desc' }, { column: 'task_id', order: 'desc' }]);
   let selectedKeys: Array<[string, string]> | undefined;
   if (search) {
-    const titles = await entityCompletions(db, repository).where('entity_rank', 1)
+    const titles = await entityCompletions(db, repository, taskId).where('entity_rank', 1)
       .select('repository', 'entity_key', 'entity_title')
       .orderBy([{ column: 'state_timestamp', order: 'desc' }, { column: 'task_id', order: 'desc' }]) as EntityRow[];
     selectedKeys = titles.filter(row => (row.entity_title ?? '').toLowerCase().includes(search))
@@ -274,7 +281,7 @@ export async function loadCompletedRows(
 
   // A single materialized ranking supplies both parents and earlier updates.
   // Limiting parents never limits an entity's history or changes its count.
-  const selectedQuery = entityCompletions(db, repository);
+  const selectedQuery = entityCompletions(db, repository, taskId);
   if (selectedKeys) selectedQuery.whereIn(['repository', 'entity_key'], selectedKeys);
   else selectedQuery.whereIn(['repository', 'entity_key'], parents().select('repository', 'entity_key').limit(limit));
   const selected = await selectedQuery.select('*')
@@ -293,24 +300,298 @@ export async function loadCompletedRows(
   const earlier = selected.filter(row => Number(row.entity_rank) > 1);
   const earlierRows = earlier.map(hydrate);
   const details = await loadCompletionDetails(db, [...visible, ...earlierRows]);
-  const withDetails = (row: CompletionRow): CompletionUpdate => {
-    const detail = details.get(row.completionId) ?? { recap: null, commandMode: null };
-    if (isReviewRun(row, detail.commandMode)) {
-      const review = splitReviewRecap(detail.recap);
-      return { ...row, taskType: 'review', recap: meaningfulRecap(review.detail), reviewScore: review.score };
-    }
-    const taskType = detail.commandMode === 'default' ? 'follow-up' : detail.commandMode ?? row.taskType;
-    return { ...row, taskType, recap: meaningfulRecap(detail.recap), reviewScore: null };
-  };
   const updates = new Map<string, CompletionUpdate[]>();
   for (const [index, raw] of earlier.entries()) {
     const key = JSON.stringify([raw.repository, raw.entity_key]);
     const group = updates.get(key) ?? [];
-    group.push(withDetails(earlierRows[index]));
+    group.push(withCompletionDetails(earlierRows[index], details));
     updates.set(key, group);
   }
   return visible.map(row => ({
-    ...withDetails(row), eventCount: row.eventCount,
+    ...withCompletionDetails(row, details), eventCount: row.eventCount,
     earlierUpdates: updates.get(JSON.stringify([row.repository, row.entityKey])) ?? [],
   }));
+}
+
+function withCompletionDetails<Row extends Pick<CompletionRow, 'completionId' | 'taskType' | 'title'>>(
+  row: Row, details: Map<number, CompletionDetails>,
+): Omit<Row, 'taskType'> & Pick<CompletionUpdate, 'taskType' | 'recap' | 'reviewScore'> {
+  const detail = details.get(row.completionId) ?? { recap: null, commandMode: null };
+  if (isReviewRun(row, detail.commandMode)) {
+    const review = splitReviewRecap(detail.recap);
+    return { ...row, taskType: 'review', recap: meaningfulRecap(review.detail), reviewScore: review.score };
+  }
+  const taskType = detail.commandMode === 'default' ? 'follow-up' : detail.commandMode ?? row.taskType;
+  return { ...row, taskType, recap: meaningfulRecap(detail.recap), reviewScore: null };
+}
+
+// This private, versioned catalog deliberately does not participate in Knex's
+// shared migration ledger: older Node services can still validate that ledger.
+export const OUTCOME_TABLES = {
+  state: 'dashboard_outcome_v1_state', dirty: 'dashboard_outcome_v1_dirty',
+  runs: 'dashboard_outcome_v1_runs', entities: 'dashboard_outcome_v1_entities',
+  outbox: 'dashboard_outcome_v1_outbox',
+} as const;
+const T = OUTCOME_TABLES;
+export type OutcomeUpdate = Pick<CompletionUpdate, 'taskId' | 'repository' | 'issueNumber' | 'prNumber'
+  | 'taskType' | 'title' | 'stateTimestamp' | 'completionId' | 'recap' | 'reviewScore'>;
+
+/** Only rendering fields enter the serving tables; source payloads remain authoritative. */
+export function compactOutcome(row: OutcomeUpdate): OutcomeUpdate {
+  return { taskId: row.taskId, repository: row.repository, issueNumber: row.issueNumber, prNumber: row.prNumber,
+    taskType: row.taskType, title: row.title, stateTimestamp: row.stateTimestamp, completionId: row.completionId,
+    recap: row.recap, reviewScore: row.reviewScore };
+}
+
+export type SummaryRow = OutcomeUpdate & { eventCount: number; entityId: string; revision: string };
+export type OutcomeReadRow = OutcomeUpdate & {
+  eventCount: number; earlierUpdates?: OutcomeUpdate[]; entityId?: string; revision?: string;
+};
+export class OutcomeProjectionError extends Error {
+  constructor(public status: number, public code: string) { super(code); }
+}
+
+/** Install capture before starting the keyset backfill. No source rows are copied here. */
+export async function installOutcomeProjection(db: Knex): Promise<void> {
+  await db.transaction(async tx => {
+    // Lock before reading the catalog, including when multiple APIs start together.
+    await tx.raw(`CREATE TABLE IF NOT EXISTS ${T.state} (
+      id INTEGER PRIMARY KEY CHECK (id = 1), version INTEGER NOT NULL DEFAULT 1,
+      cursor TEXT NOT NULL DEFAULT '', seeded INTEGER NOT NULL DEFAULT 0,
+      ready INTEGER NOT NULL DEFAULT 0, processed INTEGER NOT NULL DEFAULT 0,
+      failures INTEGER NOT NULL DEFAULT 0, error TEXT, updated_at INTEGER, epoch TEXT NOT NULL)`);
+    await tx(T.state).insert({ id: 1, epoch: randomUUID() }).onConflict('id').ignore();
+    await tx.raw(`CREATE TABLE IF NOT EXISTS ${T.dirty} (
+      task_id TEXT PRIMARY KEY, token TEXT NOT NULL, changed_at INTEGER NOT NULL)`);
+    await tx.raw(`CREATE INDEX IF NOT EXISTS dashboard_outcome_v1_dirty_age ON ${T.dirty}(changed_at, task_id)`);
+    // No affinity on sort_at: preserve SQLite ordering for legacy numeric as
+    // well as textual source timestamps instead of coercing them to text.
+    await tx.raw(`CREATE TABLE IF NOT EXISTS ${T.runs} (
+      completion_id INTEGER PRIMARY KEY, task_id TEXT NOT NULL, repository TEXT NOT NULL,
+      entity_id TEXT NOT NULL, source_revision TEXT NOT NULL, sort_at NOT NULL, title TEXT, base_type TEXT, raw_recap TEXT, command_mode TEXT, payload TEXT NOT NULL)`);
+    await tx.raw(`CREATE INDEX IF NOT EXISTS dashboard_outcome_v1_task ON ${T.runs}(task_id)`);
+    await tx.raw(`CREATE INDEX IF NOT EXISTS dashboard_outcome_v1_history ON ${T.runs}
+      (entity_id, sort_at DESC, task_id DESC, completion_id DESC)`);
+    await tx.raw(`CREATE INDEX IF NOT EXISTS dashboard_outcome_v1_title ON ${T.runs}
+      (entity_id, sort_at DESC, task_id DESC, completion_id DESC) WHERE title IS NOT NULL`);
+    await tx.raw(`CREATE TABLE IF NOT EXISTS ${T.entities} (
+      entity_id TEXT PRIMARY KEY, repository TEXT NOT NULL, sort_at NOT NULL,
+      task_id TEXT NOT NULL, completion_id INTEGER NOT NULL, title TEXT,
+      revision TEXT NOT NULL, payload TEXT NOT NULL)`);
+    for (const [name, prefix] of [['feed', ''], ['repository', 'repository, ']]) {
+      await tx.raw(`CREATE INDEX IF NOT EXISTS dashboard_outcome_v1_${name} ON ${T.entities}
+        (${prefix}sort_at DESC, task_id DESC, completion_id DESC, entity_id)`);
+    }
+    await tx.raw(`CREATE TABLE IF NOT EXISTS ${T.outbox} (repository TEXT PRIMARY KEY, token TEXT NOT NULL)`);
+    for (const table of ['tasks', 'task_history']) {
+      for (const action of ['INSERT', 'UPDATE', 'DELETE']) {
+        const refs = action === 'UPDATE' ? ['OLD', 'NEW'] : [action === 'DELETE' ? 'OLD' : 'NEW'];
+        const updateColumns = table === 'tasks'
+          ? 'task_id, repository, issue_number, pr_number, task_type, model_name, created_at, initial_job_data, final_result'
+          : 'task_id, history_id, state, timestamp, reason, metadata';
+        await tx.raw(`CREATE TRIGGER IF NOT EXISTS dashboard_outcome_v1_${table}_${action.toLowerCase()}
+          AFTER ${action === 'UPDATE' ? `UPDATE OF ${updateColumns}` : action} ON ${table} BEGIN
+          ${refs.map(ref => `INSERT INTO ${T.dirty}(task_id, token, changed_at)
+            VALUES (${ref}.task_id, lower(hex(randomblob(16))), unixepoch())
+            ON CONFLICT(task_id) DO UPDATE SET token = excluded.token;`).join('\n')}
+          END`);
+      }
+    }
+  });
+}
+
+const runOrder = [
+  { column: 'sort_at', order: 'desc' }, { column: 'task_id', order: 'desc' },
+  { column: 'completion_id', order: 'desc' },
+] as const;
+const orderedRuns = (db: Knex, entityId: string) => db(T.runs).where('entity_id', entityId).orderBy([...runOrder]);
+const entityIdFor = (repository: string, key: string) => createHash('sha256').update(JSON.stringify([1, repository, key])).digest('base64url');
+
+/** Only this task's history is ranked. The legacy reader remains the semantic oracle. */
+async function projectTask(db: Knex, taskId: string) {
+  const rows = await entityCompletions(db, 'all', taskId).select('*') as Array<RawTaskRow & {
+    history_id: number; entity_key: string; resolved_title: string | null;
+  }>;
+  if (!rows.length) return [];
+  const task = await db('tasks').where('task_id', taskId).first('initial_job_data', 'final_result');
+  const mapped = rows.map(row => ({ ...mapTaskRow({ ...row, ...task }), completionId: row.history_id }));
+  const details = await loadCompletionDetails(db, mapped);
+  return rows.map((row, index) => ({
+    completion_id: row.history_id, task_id: taskId, repository: row.repository,
+    entity_id: entityIdFor(row.repository, row.entity_key), sort_at: row.state_timestamp,
+    title: row.resolved_title, base_type: mapped[index].taskType,
+    raw_recap: details.get(row.history_id)?.recap ?? null, command_mode: details.get(row.history_id)?.commandMode ?? null, payload: JSON.stringify(compactOutcome(withCompletionDetails(mapped[index], details))),
+  }));
+}
+
+/** One bounded backfill batch, or one dirty task. Safe to retry after any crash. */
+export async function advanceOutcomeProjection(db: Knex): Promise<boolean> {
+  const state = await db(T.state).where('id', 1).first();
+  if (!state.seeded) {
+    await db.transaction(async tx => {
+      await tx(T.state).where('id', 1).update({ updated_at: Date.now() });
+      const current = await tx(T.state).where('id', 1).first();
+      if (current.seeded) return;
+      const tasks = await tx('tasks').where('task_id', '>', current.cursor).orderBy('task_id').limit(100).select('task_id');
+      for (const task of tasks) {
+        await tx(T.dirty).insert({ task_id: task.task_id, token: randomUUID(), changed_at: Math.floor(Date.now() / 1000) })
+          .onConflict('task_id').ignore();
+      }
+      await tx(T.state).where('id', 1).update(tasks.length
+        ? { cursor: tasks[tasks.length - 1].task_id } : { seeded: 1 });
+    });
+    return true;
+  }
+  // The expensive work is in a read snapshot, outside the short write transaction.
+  const snapshot = await db.transaction(async tx => {
+    const generation = await tx(T.state).where('id', 1).first('epoch', 'ready');
+    const dirty = await tx(T.dirty).orderBy('changed_at').orderBy('task_id').first();
+    if (!dirty) return null;
+    const rows = await projectTask(tx, dirty.task_id);
+    if (!generation.ready) {
+      // Compare both implementations in one source snapshot before cutover.
+      // Each check is bounded to one task, and subsequent source changes must
+      // still pass the token fence before the results can commit.
+      const oracle = await loadCompletedRows(tx, 'all', {}, dirty.task_id);
+      const expected = oracle.flatMap(({ earlierUpdates, eventCount: _count, ...latest }) => {
+        delete (latest as unknown as Record<string, unknown>).entityKey;
+        return [latest, ...earlierUpdates].map(compactOutcome);
+      }).sort((a, b) => a.completionId - b.completionId);
+      const actual = rows.map(row => JSON.parse(row.payload) as OutcomeUpdate).sort((a, b) => a.completionId - b.completionId);
+      if (!isDeepStrictEqual(actual, expected)) throw new Error(`Outcome backfill parity mismatch for task ${dirty.task_id}`);
+    }
+    return { dirty, rows, epoch: generation.epoch };
+  });
+  if (!snapshot) {
+    if (state.ready) return false;
+    await db.transaction(async tx => {
+      await tx(T.state).where('id', 1).update({ updated_at: Date.now() });
+      if (!await tx(T.dirty).first()) {
+        const activated = await tx(T.state).where({ id: 1, seeded: 1, ready: 0 }).update({ ready: 1, error: null });
+        // An empty backfill has no entity events, but unavailable clients still
+        // need a wake-up when the projection becomes ready.
+        if (activated) await tx(T.outbox).insert({ repository: '*', token: randomUUID() }).onConflict('repository').merge();
+      }
+    });
+    return false;
+  }
+  await db.transaction(async tx => {
+    // Acquiring the writer lock first makes the token check + replacement atomic.
+    await tx(T.state).where('id', 1).update({ updated_at: Date.now() });
+    const { dirty, rows } = snapshot;
+    if ((await tx(T.state).where('id', 1).first('epoch')).epoch !== snapshot.epoch) return;
+    if (!await tx(T.dirty).where({ task_id: dirty.task_id, token: dirty.token }).first()) return;
+    const previous = await tx(T.runs).where('task_id', dirty.task_id).select('*');
+    const canonical = (values: typeof rows) => JSON.stringify([...values].sort((a, b) => a.completion_id - b.completion_id));
+    // Compare named fields; SQLite's column order need not match the JS object.
+    const old = previous.map(row => ({ completion_id: row.completion_id, task_id: row.task_id,
+      repository: row.repository, entity_id: row.entity_id, sort_at: row.sort_at, title: row.title, base_type: row.base_type,
+      raw_recap: row.raw_recap, command_mode: row.command_mode, payload: row.payload }));
+    if (canonical(old) !== canonical(rows)) {
+      const affected = new Set([...previous, ...rows].map(row => row.entity_id));
+      await tx(T.runs).where('task_id', dirty.task_id).delete();
+      for (const batch of chunk(rows, 50)) await tx(T.runs).insert(batch.map(row => ({ ...row, source_revision: dirty.token })));
+      for (const entityId of affected) {
+        const latest = await orderedRuns(tx, entityId).first();
+        if (!latest) await tx(T.entities).where('entity_id', entityId).delete();
+        else {
+          const title = await orderedRuns(tx, entityId).whereNotNull('title').first('title');
+          const count = await tx(T.runs).where('entity_id', entityId).count({ count: '*' }).first();
+          const revision = randomUUID();
+          const visible: OutcomeUpdate = { ...JSON.parse(latest.payload), title: title?.title ?? null, taskType: latest.base_type };
+          const summary: SummaryRow = { ...withCompletionDetails(visible, new Map([[latest.completion_id,
+            { recap: latest.raw_recap, commandMode: latest.command_mode }]])),
+            eventCount: Number(count?.count), entityId, revision };
+          await tx(T.entities).insert({ entity_id: entityId, repository: latest.repository,
+            sort_at: latest.sort_at, task_id: latest.task_id, completion_id: latest.completion_id,
+            title: summary.title, revision, payload: JSON.stringify(summary) }).onConflict('entity_id').merge();
+        }
+      }
+      // Coalesced durable outbox: a crash after commit cannot lose the wake-up.
+      for (const repository of new Set([...previous, ...rows].map(row => row.repository))) {
+        await tx(T.outbox).insert({ repository, token: randomUUID() }).onConflict('repository').merge();
+      }
+    }
+    await tx(T.runs).where('task_id', dirty.task_id).update({ source_revision: dirty.token });
+    await tx(T.dirty).where({ task_id: dirty.task_id, token: dirty.token }).delete();
+    await tx(T.state).where('id', 1).increment('processed', 1);
+  });
+  return true;
+}
+
+export async function outcomeProjectionStatus(db: Knex) {
+  if (!await db.schema.hasTable(T.state)) return { version: 1, ready: false };
+  const state = await db(T.state).where('id', 1).first();
+  const pending = await db(T.dirty).count({ count: '*' }).min({ oldest: 'changed_at' }).first();
+  return { ...state, ready: Boolean(state?.ready), pending: Number(pending?.count ?? 0),
+    lagMs: pending?.oldest ? Math.max(0, Date.now() - Number(pending.oldest) * 1000) : 0 };
+}
+
+async function requireOutcomeProjection(db: Knex): Promise<void> {
+  if (process.env.DASHBOARD_OUTCOME_PROJECTION === 'legacy' || !await db.schema.hasTable(T.state)
+    || !(await db(T.state).where('id', 1).first('ready'))?.ready) {
+    throw new OutcomeProjectionError(503, 'OUTCOMES_NOT_READY');
+  }
+}
+
+/** Serving reads never touch tasks or task_history, even for Unicode search. */
+export async function loadOutcomeSummaries(db: Knex, repository: string, options: { limit?: number; search?: string } = {}): Promise<SummaryRow[]> {
+  return db.transaction(async tx => {
+    await requireOutcomeProjection(tx);
+    const limit = Math.min(Math.max(options.limit ?? 20, 1), 100);
+    const query = tx(T.entities).modify(q => { if (repository !== 'all') q.where({ repository }); })
+      .orderBy([...runOrder, { column: 'entity_id', order: 'asc' }]);
+    const search = options.search?.trim().toLowerCase();
+    if (!search) return (await query.select('payload').limit(limit) as Array<{ payload: string }>).map(row => JSON.parse(row.payload));
+    const titles = await query.select('entity_id', 'title') as Array<{ entity_id: string; title: string | null }>;
+    const ids = titles.filter(row => (row.title ?? '').toLowerCase().includes(search)).slice(0, limit).map(row => row.entity_id);
+    const rows = await tx(T.entities).whereIn('entity_id', ids).select('entity_id', 'payload');
+    const byId = new Map(rows.map(row => [row.entity_id, row.payload]));
+    return ids.map(id => JSON.parse(byId.get(id)));
+  });
+}
+
+type HistoryCursor = { v: number; entity: string; repository: string; revision: string; at: string | number; task: string; completion: number };
+export async function loadOutcomeHistory(db: Knex, repository: string, entityId: string, revision: string,
+  options: { limit?: number; cursor?: string } = {}): Promise<{ updates: OutcomeUpdate[]; nextCursor: string | null }> {
+  // Concrete repository required even when the feed was requested with "all".
+  if (!repository || repository === 'all') throw new OutcomeProjectionError(400, 'REPOSITORY_REQUIRED');
+  const limit = Math.min(Math.max(options.limit ?? 20, 1), 50);
+  return db.transaction(async tx => {
+    await requireOutcomeProjection(tx);
+    const entity = await tx(T.entities).where({ entity_id: entityId, repository }).first();
+    if (!entity) throw new OutcomeProjectionError(404, 'OUTCOME_NOT_FOUND');
+    if (entity.revision !== revision) throw new OutcomeProjectionError(409, 'OUTCOME_HISTORY_STALE');
+    let boundary: HistoryCursor = { v: 1, entity: entityId, repository, revision,
+      at: entity.sort_at, task: entity.task_id, completion: entity.completion_id };
+    if (options.cursor) {
+      try {
+        if (options.cursor.length > 2048) throw new Error();
+        const parsed = JSON.parse(Buffer.from(options.cursor, 'base64url').toString()) as HistoryCursor;
+        if (parsed.v !== 1 || parsed.entity !== entityId || parsed.repository !== repository || parsed.revision !== revision
+          || !(typeof parsed.at === 'string' || (typeof parsed.at === 'number' && Number.isFinite(parsed.at))) || typeof parsed.task !== 'string' || !Number.isSafeInteger(parsed.completion)) throw new Error();
+        // A cursor must name an actual earlier run in this revision, not an arbitrary offset.
+        if (!await tx(T.runs).where({ entity_id: entityId, sort_at: parsed.at, task_id: parsed.task, completion_id: parsed.completion })
+          .whereRaw('(sort_at, task_id, completion_id) < (?, ?, ?)', [entity.sort_at, entity.task_id, entity.completion_id]).first()) throw new Error();
+        boundary = parsed;
+      } catch { throw new OutcomeProjectionError(400, 'INVALID_HISTORY_CURSOR'); }
+    }
+    const rows = await orderedRuns(tx, entityId)
+      .whereRaw('(sort_at, task_id, completion_id) < (?, ?, ?)', [boundary.at, boundary.task, boundary.completion]).limit(limit + 1);
+    const page = rows.slice(0, limit);
+    const last = page[page.length - 1];
+    return { updates: page.map(row => JSON.parse(row.payload)),
+      nextCursor: rows.length > limit ? Buffer.from(JSON.stringify({ ...boundary,
+        at: last.sort_at, task: last.task_id, completion: last.completion_id })).toString('base64url') : null };
+  });
+}
+
+/** Explicit rebuild; capture stays installed and source data is never modified. */
+export async function rebuildOutcomeProjection(db: Knex): Promise<void> {
+  await installOutcomeProjection(db);
+  await db.transaction(async tx => {
+    await tx(T.state).where('id', 1).update({ ready: 0, seeded: 0, cursor: '', processed: 0, failures: 0, error: null, epoch: randomUUID() });
+    await tx(T.runs).delete();
+    await tx(T.entities).delete();
+  });
 }

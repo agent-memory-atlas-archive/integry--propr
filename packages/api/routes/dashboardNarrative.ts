@@ -117,7 +117,8 @@ export async function collectNarrativeFacts(
 
   const [work, outcomes, plans, goals] = await Promise.all([
     loadDashboardWork(db, repository, { now }),
-    (options.completedRows ?? ((scope, query) => loadCompletedRows(db, scope, query)))(repository, { limit: MAX_NARRATIVE_COMPLETIONS }),
+    ((!['legacy', 'shadow'].includes(process.env.DASHBOARD_OUTCOME_PROJECTION ?? '') ? options.completedRows?.summary : undefined)
+      ?? options.completedRows ?? ((scope, query) => loadCompletedRows(db, scope, query)))(repository, { limit: MAX_NARRATIVE_COMPLETIONS }),
     plansQuery,
     loadRunningDashboardGoals(db, repository, options.ownerId ?? null),
   ]);

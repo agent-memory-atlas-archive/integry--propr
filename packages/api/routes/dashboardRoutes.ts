@@ -1,4 +1,4 @@
-import type { CompletionLoader } from '../services/dashboardReadService.js';
+import { setOutcomeActivityPublisher, type CompletionLoader } from '../services/dashboardReadService.js';
 /**
  * Dashboard read APIs.
  *
@@ -26,7 +26,7 @@ import {
   type DashboardTaskRow,
 } from './dashboardQueries.js';
 import { loadDashboardWork, loadRunningDashboardGoals } from './dashboardWorkQueries.js';
-import { loadCompletedRows, type CompletedRow } from './dashboardOutcomeQueries.js';
+import { loadCompletedRows, loadOutcomeSummaries, loadOutcomeHistory, outcomeProjectionStatus, OutcomeProjectionError, type OutcomeUpdate, type OutcomeReadRow } from './dashboardOutcomeQueries.js';
 import {
   EMPTY_LIVE_ACTIVITY,
   EMPTY_LIVE_DETAILS,
@@ -88,7 +88,9 @@ export interface ActiveItem {
 /** The newest successful outcome for an entity, with its completed run count. */
 export interface OutcomeItem {
   eventCount: number;
-  earlierUpdates: Array<Omit<OutcomeItem, 'eventCount' | 'earlierUpdates'>>;
+  entityId?: string;
+  revision?: string;
+  earlierUpdates?: Array<Omit<OutcomeItem, 'eventCount' | 'earlierUpdates'>>;
   id: string;
   taskId: string;
   repository: string;
@@ -116,31 +118,28 @@ function readRepositoryFilter(req: Request, res: Response): string | null {
   return repository || 'all';
 }
 
-function toOutcomeItem(row: CompletedRow): OutcomeItem {
-  return {
-    id: `task:${row.taskId}:completed:${row.completionId}`,
-    taskId: row.taskId,
-    repository: row.repository,
-    issueNumber: row.issueNumber,
-    prNumber: row.prNumber,
-    taskType: row.taskType,
-    title: row.title,
-    eventCount: row.eventCount,
-    earlierUpdates: row.earlierUpdates.map(update => ({
-      id: `task:${update.taskId}:completed:${update.completionId}`, taskId: update.taskId,
-      repository: update.repository, issueNumber: update.issueNumber, prNumber: update.prNumber,
-      taskType: update.taskType, title: update.title, detail: update.recap,
-      score: update.reviewScore, occurredAt: update.stateTimestamp,
-    })),
-    detail: row.recap,
-    score: row.reviewScore,
-    occurredAt: row.stateTimestamp,
-  };
+export function toOutcomeUpdate(row: OutcomeUpdate) {
+  return { id: `task:${row.taskId}:completed:${row.completionId}`, taskId: row.taskId,
+    repository: row.repository, issueNumber: row.issueNumber, prNumber: row.prNumber,
+    taskType: row.taskType, title: row.title, detail: row.recap,
+    score: row.reviewScore, occurredAt: row.stateTimestamp };
+}
+
+export function toOutcomeItem(row: OutcomeReadRow): OutcomeItem {
+  return { ...toOutcomeUpdate(row), eventCount: row.eventCount,
+    ...(row.entityId ? { entityId: row.entityId, revision: row.revision } : {}),
+    ...(row.earlierUpdates ? { earlierUpdates: row.earlierUpdates.map(toOutcomeUpdate) } : {}) };
 }
 
 export function createDashboardRoutes(deps: DashboardRoutesDeps) {
   const { db, redisClient, taskQueue } = deps;
-  const completedRows = deps.completedRows ?? ((repository, options) => loadCompletedRows(db, repository, options));
+  const completedRows: CompletionLoader = deps.completedRows ?? ((repository, options) => loadCompletedRows(db, repository, options));
+  setOutcomeActivityPublisher(async repository => {
+    await redisClient.publish('propr:events:activity', JSON.stringify({
+      eventType: 'activity:update', domain: 'task', change: 'completed', repository: repository === '*' ? null : repository,
+      entityId: 'dashboard-outcomes', terminal: true, occurredAt: new Date().toISOString(),
+    }));
+  });
   const now = deps.now ?? (() => new Date());
   // Loaded lazily so a dashboard read only reaches the live-details module
   // (and its provider parsers) when there is running work to project. A read
@@ -335,7 +334,11 @@ export function createDashboardRoutes(deps: DashboardRoutesDeps) {
     const repository = readRepositoryFilter(req, res);
     if (repository === null) return;
 
-    const limitValidation = validatePositiveInteger(req.query.limit, 'Limit', { max: MAX_OUTCOME_LIMIT });
+    res.setHeader('Cache-Control', 'no-store');
+    const vary = res.getHeader?.('Vary');
+    res.setHeader('Vary', vary ? `${vary}, Accept` : 'Accept');
+    const history = req.query.view === 'history';
+    const limitValidation = validatePositiveInteger(req.query.limit, 'Limit', { max: history ? 50 : MAX_OUTCOME_LIMIT });
     if (!limitValidation.valid) {
       res.status(400).json({ error: limitValidation.error });
       return;
@@ -350,10 +353,28 @@ export function createDashboardRoutes(deps: DashboardRoutesDeps) {
     const search = typeof req.query.search === 'string' ? req.query.search.trim() : '';
 
     try {
-      const rows = await timeApiStage('dashboard.outcomes', () =>
-        completedRows(repository, { limit, search }));
+      if (req.query.view === 'status') { res.json(await outcomeProjectionStatus(db)); return; }
+      if (history) {
+        const { entityId, revision, cursor } = req.query;
+        if (typeof entityId !== 'string' || entityId.length > 100 || typeof revision !== 'string' || revision.length > 100
+          || (cursor !== undefined && (typeof cursor !== 'string' || cursor.length > 2048))) {
+          res.status(400).json({ error: 'Invalid history reference' }); return;
+        }
+        const page = await timeApiStage('dashboard.outcomeHistory', () => loadOutcomeHistory(db, repository, entityId, revision,
+          { limit, cursor: cursor as string | undefined }));
+        res.json({ repository, entityId, revision, items: page.updates.map(toOutcomeUpdate), nextCursor: page.nextCursor });
+        return;
+      }
+      const summaryRequested = req.query.view === 'summary'
+        || req.headers?.accept?.includes('application/vnd.propr.outcome-summaries+json');
+      const summary = summaryRequested && !['legacy', 'shadow'].includes(process.env.DASHBOARD_OUTCOME_PROJECTION ?? '');
+      const rows = await timeApiStage<OutcomeReadRow[]>('dashboard.outcomes', () =>
+        (summary ? completedRows.summary ?? ((scope, options) => loadOutcomeSummaries(db, scope, options)) : completedRows)(repository, { limit, search }));
       res.json({ repository, limit, search, items: rows.map(toOutcomeItem) });
     } catch (error) {
+      if (error instanceof OutcomeProjectionError) {
+        res.status(error.status).json({ error: error.code, code: error.code }); return;
+      }
       console.error('Error in /api/dashboard/outcomes:', error);
       res.status(500).json({ error: 'Failed to fetch completed work' });
     }
