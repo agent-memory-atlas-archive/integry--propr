@@ -43,9 +43,6 @@ export interface CompletedRow extends CompletionUpdate {
   earlierUpdates: CompletionUpdate[];
 }
 
-/** Candidates read per page while a title search looks for its matches. */
-const SEARCH_PAGE_SIZE = 500;
-
 /**
  * A completion recorded for a job that decided there was nothing to do. It is
  * stored as `completed` so the run is not retried, but nothing was produced.
@@ -248,10 +245,7 @@ function entityCompletions(db: Knex, repository: string): Knex.QueryBuilder {
   `));
   return db.with('completion_history', history).with('completion_runs', runs).with('completed', completed).with('numbered', numbered)
     .with('entities', entities).with('ranked', ranked)
-    .from(db.from('ranked as r')
-      .join('tasks as payload', 'payload.task_id', 'r.task_id')
-      .select('r.*', 'payload.initial_job_data', 'payload.final_result')
-      .as('hydrated'));
+    .from('ranked');
 }
 
 /** Recent entity outcomes, optionally narrowed by their decoded title. */
@@ -263,49 +257,41 @@ export async function loadCompletedRows(
   const limit = Math.min(Math.max(options.limit ?? 20, 1), 100);
   const search = options.search?.trim().toLowerCase() ?? '';
   type EntityRow = RawTaskRow & { history_id: number; event_count: number; entity_key: string; entity_title: string | null };
-  const candidates = (after: EntityRow | null, pageSize: number): Knex.QueryBuilder => {
-    const query = entityCompletions(db, repository)
-      .where('entity_rank', 1)
-      .select('*')
-      .orderBy([{ column: 'state_timestamp', order: 'desc' }, { column: 'task_id', order: 'desc' }])
-      .limit(pageSize);
-    if (after) {
-      query.where(function (this: Knex.QueryBuilder) {
-        this.where('state_timestamp', '<', after.state_timestamp)
-          .orWhere(function (this: Knex.QueryBuilder) {
-            this.where('state_timestamp', '=', after.state_timestamp).andWhere('task_id', '<', after.task_id);
-          });
-      });
-    }
-    return query;
-  };
+  // Choose parents before hydrating any task JSON. Searching decodes titles
+  // with JavaScript's Unicode case folding, as before, but reads the compact
+  // parent titles once instead of rerunning all windows for every 500 matches.
+  const parents = () => db.from('ranked').where('entity_rank', 1)
+    .orderBy([{ column: 'state_timestamp', order: 'desc' }, { column: 'task_id', order: 'desc' }]);
+  let selectedKeys: Array<[string, string]> | undefined;
+  if (search) {
+    const titles = await entityCompletions(db, repository).where('entity_rank', 1)
+      .select('repository', 'entity_key', 'entity_title')
+      .orderBy([{ column: 'state_timestamp', order: 'desc' }, { column: 'task_id', order: 'desc' }]) as EntityRow[];
+    selectedKeys = titles.filter(row => (row.entity_title ?? '').toLowerCase().includes(search))
+      .slice(0, limit).map(row => [row.repository, row.entity_key]);
+    if (selectedKeys.length === 0) return [];
+  }
 
-  const mapped: Array<CompletionRow & { eventCount: number; entityKey: string }> = [];
-  let after: EntityRow | null = null;
-  const pageSize = search ? SEARCH_PAGE_SIZE : limit;
-  do {
-    const page = await candidates(after, pageSize) as EntityRow[];
-    for (const row of page) {
-      const mappedRow = { ...mapTaskRow(row), completionId: row.history_id, title: row.entity_title };
-      if (!search || (mappedRow.title ?? '').toLowerCase().includes(search)) {
-        mapped.push({ ...mappedRow, eventCount: Number(row.event_count), entityKey: row.entity_key });
-      }
-    }
-    if (page.length < pageSize) break;
-    after = page[page.length - 1];
-  } while (mapped.length < limit);
-  const visible = mapped.slice(0, limit);
-  if (visible.length === 0) return [];
-
-  // Read prior outcomes only for the selected parents, using the same identity
-  // partition as the feed. The parent limit never applies to individual updates.
-  const earlier = await entityCompletions(db, repository)
-    .where('entity_rank', '>', 1)
-    .whereIn(['repository', 'entity_key'], db.from('ranked')
-      .select('repository', 'entity_key').whereIn('task_id', visible.map(row => row.taskId)))
-    .select('*')
-    .orderBy([{ column: 'state_timestamp', order: 'desc' }, { column: 'task_id', order: 'desc' }, { column: 'history_id', order: 'desc' }]) as EntityRow[];
-  const earlierRows = earlier.map(row => ({ ...mapTaskRow(row), completionId: row.history_id }));
+  // A single materialized ranking supplies both parents and earlier updates.
+  // Limiting parents never limits an entity's history or changes its count.
+  const selectedQuery = entityCompletions(db, repository);
+  if (selectedKeys) selectedQuery.whereIn(['repository', 'entity_key'], selectedKeys);
+  else selectedQuery.whereIn(['repository', 'entity_key'], parents().select('repository', 'entity_key').limit(limit));
+  const selected = await selectedQuery.select('*')
+    .orderBy([{ column: 'state_timestamp', order: 'desc' }, { column: 'task_id', order: 'desc' }, { column: 'history_id', order: 'desc' }]) as Array<EntityRow & { entity_rank: number }>;
+  const payloads = new Map<string, Pick<RawTaskRow, 'initial_job_data' | 'final_result'>>();
+  for (const batch of chunk([...new Set(selected.map(row => row.task_id))])) {
+    for (const row of await db('tasks').whereIn('task_id', batch)
+      .select('task_id', 'initial_job_data', 'final_result')) payloads.set(row.task_id, row);
+  }
+  const hydrate = (row: EntityRow): CompletionRow => ({
+    ...mapTaskRow({ ...row, ...payloads.get(row.task_id) }), completionId: row.history_id,
+  });
+  const visible = selected.filter(row => Number(row.entity_rank) === 1).map(row => ({
+    ...hydrate(row), title: row.entity_title, eventCount: Number(row.event_count), entityKey: row.entity_key,
+  }));
+  const earlier = selected.filter(row => Number(row.entity_rank) > 1);
+  const earlierRows = earlier.map(hydrate);
   const details = await loadCompletionDetails(db, [...visible, ...earlierRows]);
   const withDetails = (row: CompletionRow): CompletionUpdate => {
     const detail = details.get(row.completionId) ?? { recap: null, commandMode: null };

@@ -130,3 +130,19 @@ node --import tsx scripts/benchmark-dashboard-outcomes.ts --database=/path/to/sn
 
 Optional `--repository=owner/repo` and `--search=text` exercise filtered reads.
 The benchmark opens SQLite read-only and prints only timings and row counts.
+
+A second change shares the ranking between selected parents and earlier
+updates, and searches compact parent titles once instead of repeating the
+projection for each 500 candidates. Paired snapshot reads then measured:
+
+| Read (50-entity limit) | Original | Optimized |
+| --- | ---: | ---: |
+| All repositories | 1,662 ms | 689 ms |
+| `integry/propr` | 1,187 ms | 511 ms |
+| Title search `dashboard` | 4,784 ms | 974 ms |
+| No-match title search | 4,008 ms | 438 ms |
+
+All four results matched the original projection by deep equality. The search
+regression also places a Unicode title behind 505 unrelated parents and checks
+that search uses two rankings regardless of candidate pages; an unfiltered read
+uses one ranking for both parents and earlier updates.

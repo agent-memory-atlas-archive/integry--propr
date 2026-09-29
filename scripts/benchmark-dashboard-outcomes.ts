@@ -7,7 +7,7 @@ const filename = process.argv.find(value => value.startsWith('--database='))?.sl
 if (!filename) throw new Error('Pass --database=/path/to/offline-snapshot.sqlite');
 const repository = process.argv.find(value => value.startsWith('--repository='))?.slice('--repository='.length) ?? 'all';
 const search = process.argv.find(value => value.startsWith('--search='))?.slice('--search='.length);
-const db = knex({ client: 'better-sqlite3', connection: { filename, readonly: true }, useNullAsDefault: true });
+const db = knex({ client: 'better-sqlite3', connection: { filename, options: { readonly: true } }, useNullAsDefault: true });
 try {
   for (let iteration = 0; iteration < 3; iteration++) {
     const start = performance.now();

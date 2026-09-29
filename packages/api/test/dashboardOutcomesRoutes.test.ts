@@ -345,3 +345,27 @@ test('same-millisecond review and fix completions keep distinct IDs, recaps and 
     [['fix', null, 'Fixed the review findings.'], ['review', 6, '2 issues found']]);
   assert.equal(new Set([items[0].id, ...updates.map(item => item.id)]).size, 3);
 });
+
+test('title search ranks once per phase even when the Unicode match is beyond 500 parents', async () => {
+  for (let index = 0; index < 505; index++) {
+    await seedTask({ taskId: `unrelated-${index}`, issueNumber: 10000 + index,
+      title: `Unrelated ${index}`, states: [{ state: 'completed', timestamp: minutesAgo(1) }] });
+  }
+  await seedTask({ taskId: 'unicode-parent', issueNumber: 20000, title: 'Änderung: retry budget',
+    states: [{ state: 'completed', timestamp: minutesAgo(30) }] });
+  const rankings: string[] = [];
+  const observe = ({ sql }: { sql: string }) => {
+    if (sql.includes('completion_history')) rankings.push(sql);
+  };
+  database.on('query', observe);
+  try {
+    const result = await call(routes().getOutcomes, { search: 'ÄNDERUNG', limit: '1' });
+    assert.deepEqual((result.body.items as Array<Record<string, unknown>>).map(row => row.taskId), ['unicode-parent']);
+    assert.equal(rankings.length, 2, 'one compact title search and one selected-entity read');
+    rankings.length = 0;
+    await call(routes().getOutcomes, { limit: '1' });
+    assert.equal(rankings.length, 1, 'parents and earlier updates share one ranking');
+  } finally {
+    database.removeListener('query', observe);
+  }
+});
