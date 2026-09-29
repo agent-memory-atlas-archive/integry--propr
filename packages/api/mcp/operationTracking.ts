@@ -3,8 +3,14 @@ import type { ToolDeps } from './tools.js';
 import type { Operation } from './operations.js';
 import type { McpPrincipal } from './policy.js';
 import { McpError } from './config.js';
+import {
+  COMMAND_NOT_PICKED_UP_FAILURE,
+  PICKUP_DEADLINE_MS,
+  detectPickup,
+  ultrafixProgress,
+} from './commandProgress.js';
 
-const commentTools = ['review_pull_request', 'fix_review_findings', 'run_ultrafix'];
+const commentTools = ['review_pull_request', 'fix_review_findings', 'run_ultrafix', 'comment_on_pull_request'];
 const trackedTools = ['create_task', 'retry_task_submission', ...commentTools, 'send_task_followup', 'revert_pull_request_commit', 'index_repository'];
 const terminalStates = ['completed', 'failed', 'cancelled'];
 
@@ -102,6 +108,7 @@ function restoreResolvedTarget(
 }
 
 /** Resolve the execution from the actual job or the exact triggering comment. */
+// eslint-disable-next-line complexity -- tool-specific recovery paths converge on one guarded receipt write
 export async function trackExecution(deps: ToolDeps, row: Operation, principal: McpPrincipal, receipt: Record<string, unknown>): Promise<void> {
   if (!trackedTools.includes(row.tool) || !row.result) return;
   const { db } = deps;
@@ -113,9 +120,14 @@ export async function trackExecution(deps: ToolDeps, row: Operation, principal: 
     restoreResolvedTarget(receipt, result, task);
     return;
   }
+  let pickupTimedOut = false;
   if (task) await trackTask(deps, row, { task, result, receipt });
   else if (result.jobId) await trackQueuedJob(row, result.jobId, receipt);
-  else if (Date.now() - Number(row.created_at) > 120000) receipt.state = 'unknown';
+  else if (commentTools.includes(row.tool) && Date.now() - Number(row.created_at) > PICKUP_DEADLINE_MS) {
+    pickupTimedOut = true;
+    receipt.state = 'unknown';
+    receipt.lifecycleFailure = COMMAND_NOT_PICKED_UP_FAILURE;
+  } else if (!commentTools.includes(row.tool) && Date.now() - Number(row.created_at) > 120000) receipt.state = 'unknown';
   await refreshPullRequestContext(row, principal, result);
   if (terminalStates.includes(String(receipt.state))) {
     result.executionResolved = true;
@@ -123,17 +135,29 @@ export async function trackExecution(deps: ToolDeps, row: Operation, principal: 
   }
   receipt.result = result;
   if (receipt.state === 'unknown') receipt.message = 'Execution cannot yet be confirmed. Inspect the linked comment/job; polling can still resolve it. Do not blindly resubmit.';
-  const recorded = await db('mcp_operations').where({ id: row.id }).whereNotIn('state', terminalStates)
-    .update({ state: receipt.state, result: JSON.stringify(result), updated_at: Date.now() });
+  const eligible = db('mcp_operations').where({ id: row.id }).whereNotIn('state', terminalStates);
+  if (pickupTimedOut) {
+    const validResult = "CASE WHEN json_valid(result) THEN result ELSE '{}' END";
+    const validArtifacts = "CASE WHEN json_valid(artifacts) THEN artifacts ELSE '{}' END";
+    eligible.whereNot('state', 'running').whereNull('started_at')
+      .whereRaw(`json_extract(${validResult}, '$.continuation.taskId') IS NULL`)
+      .whereRaw(`json_extract(${validArtifacts}, '$.taskId') IS NULL`);
+  }
+  const recorded = await eligible.update({ state: receipt.state, result: JSON.stringify(result), updated_at: Date.now() });
   if (!recorded) {
-    // Another poll persisted terminal evidence while this observation was
-    // awaiting external context. Return that durable receipt and let lifecycle
-    // synchronization use its terminal target instead of this stale snapshot.
+    // Another poll persisted stronger evidence while this observation was
+    // awaiting external context. Adopt its receipt so both the response and
+    // lifecycle synchronization retain the confirmed continuation/outcome.
     const current = await db<Operation>('mcp_operations').where({ id: row.id }).first();
-    if (current && terminalStates.includes(current.state)) {
+    if (current) {
       const currentResult = current.result ? JSON.parse(current.result) as ExecutionResult & Record<string, unknown> : {};
       receipt.state = current.state;
       receipt.result = currentResult;
+      // Losing the guarded timeout write proves a task/start or terminal fact
+      // was recorded. Do not let this poll's older pickup failure outrank it.
+      delete receipt.lifecycleFailure;
+      if (currentResult.ultrafixProgress !== undefined) receipt.lifecycleProgress = currentResult.ultrafixProgress;
+      else delete receipt.lifecycleProgress;
       if (currentResult.targetState) receipt.targetState = currentResult.targetState;
       else delete receipt.targetState;
       delete receipt.message;
@@ -143,10 +167,12 @@ export async function trackExecution(deps: ToolDeps, row: Operation, principal: 
 
 interface ExecutionResult {
   jobId?: string; commentId?: number; pullRequest?: number;
+  goal?: number; maxCycles?: number;
   continuation?: { taskId?: string; jobId?: string; sourceTaskId?: string };
   targetState?: Record<string, unknown>;
   reviewResults?: Array<{ success: boolean; commentId?: number; commentUrl?: string }>;
   loop?: { completionStatus?: string | null } & Record<string, unknown>;
+  ultrafixProgress?: unknown;
 }
 interface TrackingContext {
   task: { task_id: string; pr_number: number | null; initial_job_data: unknown };
@@ -156,30 +182,15 @@ interface TrackingContext {
 async function findExecutionTask(deps: ToolDeps, row: Operation, result: ExecutionResult) {
   const { db } = deps;
   const continuation = result.continuation || {};
-  const query = db('tasks').where({ repository: row.repository }).whereNot('task_type', 'goal');
   if (commentTools.includes(row.tool)) {
-    if (!result.commentId || !result.pullRequest) return undefined;
-    const data = `CASE WHEN json_valid(initial_job_data) THEN initial_job_data ELSE '{}' END`;
-    // The selected command owns the execution. Batch membership alone must not
-    // attach an older, superseded command to the new command's outcome.
-    query.where({ issue_number: result.pullRequest }).whereRaw(`CASE
-      WHEN json_extract(${data}, '$.commandCommentId') IS NOT NULL THEN
-        json_extract(${data}, '$.commandCommentId') = ?
-        AND COALESCE(json_extract(${data}, '$.commandCommentType'), 'issue') = 'issue'
-      WHEN json_type(${data}, '$.comments') = 'array' THEN EXISTS (
-        SELECT 1 FROM json_each(${data}, '$.comments')
-        WHERE json_extract(json_each.value, '$.id') = ?
-          AND COALESCE(json_extract(json_each.value, '$.type'), 'issue') = 'issue'
-      )
-      ELSE json_extract(${data}, '$.commentId') = ?
-    END`, [result.commentId, result.commentId, result.commentId]);
-    if (row.tool === 'run_ultrafix') {
-      // Ultrafix starts as either a review or fix and is bound to its work epoch.
-      query.whereRaw(`json_extract(${data}, '$.ultrafixMeta.workEpoch') IS NOT NULL`);
-    } else {
-      query.whereRaw(`json_extract(${data}, '$.commandMode') = ?`, [row.tool === 'review_pull_request' ? 'review' : 'fix']);
-    }
-  } else if (['create_task', 'retry_task_submission'].includes(row.tool)) {
+    if (!result.commentId || !result.pullRequest || !row.repository) return undefined;
+    return detectPickup(db, {
+      repository: row.repository, pullRequest: result.pullRequest,
+      commentId: result.commentId, tool: row.tool,
+    });
+  }
+  const query = db('tasks').where({ repository: row.repository }).whereNot('task_type', 'goal');
+  if (['create_task', 'retry_task_submission'].includes(row.tool)) {
     query.where('task_id', continuation.taskId);
   } else {
     query.andWhere(builder => builder.where('task_id', result.jobId || continuation.taskId).orWhere('job_id', result.jobId || continuation.jobId));
@@ -187,6 +198,7 @@ async function findExecutionTask(deps: ToolDeps, row: Operation, result: Executi
   return query.orderBy('created_at', 'desc').first('task_id', 'pr_number', 'initial_job_data');
 }
 
+// eslint-disable-next-line complexity -- command pickup and terminal review normalization share the same task snapshot
 async function trackTask(deps: ToolDeps, row: Operation, { task, result, receipt }: TrackingContext): Promise<void> {
   result.continuation = { ...result.continuation, taskId: task.task_id };
   const event = await deps.db('task_history').where({ task_id: task.task_id }).orderBy('history_id', 'desc').first('state', 'timestamp', 'reason', 'metadata');
@@ -194,7 +206,9 @@ async function trackTask(deps: ToolDeps, row: Operation, { task, result, receipt
   receipt.targetState = { taskId: task.task_id, pr_number: task.pr_number, state: event?.state,
     timestamp: event?.timestamp, reason: event?.reason, reviewResults: metadata?.reviewResults };
   if (metadata?.reviewResults) result.reviewResults = metadata.reviewResults;
-  receipt.state = terminalStates.includes(event?.state) ? event.state : !event || event.state === 'pending' ? 'queued' : 'running';
+  receipt.state = terminalStates.includes(event?.state) ? event.state
+    : commentTools.includes(row.tool) ? 'running'
+    : !event || event.state === 'pending' ? 'queued' : 'running';
   if (event?.state === 'completed' && result.reviewResults?.length && result.reviewResults.every(review => !review.success)) receipt.state = 'failed';
   if (row.tool === 'run_ultrafix') await trackUltrafix(deps, row, { task, result, receipt });
 }
@@ -217,24 +231,57 @@ function queueReceiptState(state: string | undefined, indexing: boolean): string
   return ['waiting', 'delayed', 'prioritized', 'waiting-children', 'paused'].includes(state || '') ? 'queued' : 'unknown';
 }
 
+// eslint-disable-next-line complexity -- durable progress plus Redis compatibility must preserve strict epoch ownership
 async function trackUltrafix(deps: ToolDeps, row: Operation, context: TrackingContext): Promise<void> {
   const { task, result, receipt } = context;
-  if (result.loop?.completionStatus) { receipt.state = result.loop.completionStatus === 'succeeded' ? 'completed' : 'failed'; return; }
   if (!result.pullRequest) { receipt.state = 'unknown'; return; }
-  const jobData = typeof task.initial_job_data === 'string' ? JSON.parse(task.initial_job_data) : task.initial_job_data as { ultrafixMeta?: { workEpoch?: number } } | null;
+  const jobData = typeof task.initial_job_data === 'string' ? JSON.parse(task.initial_job_data) : task.initial_job_data as { ultrafixMeta?: { workEpoch?: number; goal?: number; maxCycles?: number } } | null;
   const epoch = jobData?.ultrafixMeta?.workEpoch;
-  const [owner, repo] = String(row.repository).split('/');
-  const stored = await deps.redisClient.get(`ultrafix:state:${owner}:${repo}:${result.pullRequest}`);
-  const loop = stored ? JSON.parse(stored) : null;
-  if (epoch === undefined || !loop || loop.workEpoch !== epoch) {
+  if (!Number.isSafeInteger(epoch) || Number(epoch) < 0 || !row.repository) {
     receipt.state = 'unknown';
     return;
   }
-  const tasks = await deps.db('tasks').where({ repository: row.repository, issue_number: result.pullRequest }).whereNot('task_type', 'goal')
-    .whereRaw(`json_extract(CASE WHEN json_valid(initial_job_data) THEN initial_job_data ELSE '{}' END, '$.ultrafixMeta.workEpoch') = ?`, [epoch])
-    .orderBy('created_at', 'desc').limit(50).select('task_id');
-  result.loop = { workEpoch: epoch, active: loop.active, cycleCount: loop.cycleCount, reviewCount: loop.reviewCount, fixCount: loop.fixCount,
-    completionStatus: loop.completionStatus, completionReason: loop.completionReason, finalScore: loop.finalScore, tasks: tasks.map(task => task.task_id) };
-  result.continuation = { ...result.continuation, sourceTaskId: task.task_id, taskId: tasks[0]?.task_id || task.task_id };
-  receipt.state = loop.active ? 'running' : loop.completionStatus === 'succeeded' ? 'completed' : loop.completionStatus === 'failed' ? 'failed' : 'unknown';
+  const progress = await ultrafixProgress(deps.db, {
+    repository: row.repository, pullRequest: result.pullRequest, sinceMs: Number(row.created_at), workEpoch: epoch,
+    goal: Number(result.goal ?? jobData?.ultrafixMeta?.goal ?? 9),
+    maxCycles: Number(result.maxCycles ?? jobData?.ultrafixMeta?.maxCycles ?? 3),
+  });
+  if (!progress.outcome && row.progress) {
+    try {
+      if (JSON.parse(row.progress).phase === 'stopping') progress.phase = 'stopping';
+    } catch { /* Ignore malformed legacy progress. */ }
+  }
+  let legacyState: string | undefined;
+  if (!progress.outcome) {
+    try {
+      const [owner, repo] = row.repository.split('/');
+      const stored = await deps.redisClient.get(`ultrafix:state:${owner}:${repo}:${result.pullRequest}`);
+      const loop = stored ? JSON.parse(stored) : null;
+      if (loop && loop.workEpoch !== epoch) {
+        receipt.state = 'unknown';
+        return;
+      }
+      if (loop?.completionStatus === 'succeeded') {
+        progress.outcome = 'goal_reached'; progress.phase = 'done';
+        progress.cycle = Number(loop.cycleCount ?? progress.cycle);
+        progress.lastScore = loop.finalScore ?? progress.lastScore;
+      } else if (loop?.completionStatus === 'failed') {
+        progress.outcome = 'failed'; progress.phase = 'done';
+        progress.cycle = Number(loop.cycleCount ?? progress.cycle);
+        progress.lastScore = loop.finalScore ?? progress.lastScore;
+        legacyState = 'failed';
+      }
+      if (loop) result.loop = { workEpoch: epoch, active: loop.active, cycleCount: loop.cycleCount,
+        completionStatus: loop.completionStatus, completionReason: loop.completionReason, finalScore: loop.finalScore };
+    } catch { /* Durable task history remains authoritative when Redis is unavailable. */ }
+  }
+  result.ultrafixProgress = progress;
+  result.loop = { ...result.loop, workEpoch: epoch,
+    tasks: progress.cycles.flatMap(cycle => [cycle.reviewTaskId, cycle.fixTaskId].filter(Boolean)),
+    completionStatus: result.loop?.completionStatus ?? progress.outcome };
+  result.continuation = { ...result.continuation, sourceTaskId: task.task_id,
+    taskId: progress.latestTaskId ?? task.task_id };
+  receipt.lifecycleProgress = progress;
+  receipt.state = legacyState ?? (progress.outcome === 'goal_reached' || progress.outcome === 'cycles_exhausted' ? 'completed'
+    : progress.outcome === 'stopped' ? 'cancelled' : progress.outcome === 'failed' ? 'failed' : 'running');
 }
