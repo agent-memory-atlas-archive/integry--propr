@@ -695,6 +695,13 @@ test('tracker task and review failures populate and can enrich the durable failu
     pullRequest: { repository: 'acme/repo', number: 64, url: 'https://github.com/acme/repo/pull/64' },
   });
   assert.deepEqual(artifactsFromReceipt({ repository: 'acme/repo' }, {
+    targetState: { taskId: 'completed-task', state: 'completed' },
+    result: {
+      continuation: { taskId: 'retry-task' },
+      progress: { task: { id: 'retry-task', state: 'processing' } },
+    },
+  }), { taskId: 'completed-task' });
+  assert.deepEqual(artifactsFromReceipt({ repository: 'acme/repo' }, {
     result: { pullRequest: true, commentId: true, reviewResults: [{ commentId: false }] },
   }), {});
 });
@@ -710,7 +717,8 @@ test('goal failures and generated task pull requests remain durable after backen
   });
   await db.schema.createTable('tasks', table => {
     table.string('task_id').primary(); table.string('job_id'); table.string('repository'); table.string('task_type');
-    table.integer('pr_number'); table.text('initial_job_data'); table.timestamp('created_at').defaultTo(db.fn.now());
+    table.integer('pr_number'); table.text('initial_job_data'); table.text('final_result');
+    table.timestamp('created_at').defaultTo(db.fn.now());
   });
   await db.schema.createTable('task_history', table => {
     table.increments('history_id').primary(); table.string('task_id'); table.string('state');
@@ -721,6 +729,10 @@ test('goal failures and generated task pull requests remain durable after backen
     table.string('repository'); table.text('payload'); table.text('attachments'); table.string('state');
     table.integer('issue_number'); table.text('issue_url'); table.string('task_id'); table.string('retry_event_id');
     table.boolean('dispatch_complete'); table.text('error'); table.timestamp('created_at').defaultTo(db.fn.now());
+  });
+  await db.schema.createTable('notification_pull_request_state', table => {
+    table.string('repository'); table.integer('pr_number'); table.string('merged_at');
+    table.primary(['repository', 'pr_number']);
   });
   await up(db);
 
@@ -765,13 +777,13 @@ test('goal failures and generated task pull requests remain durable after backen
   await db('task_history').insert({ task_id: taskId, state: 'completed', reason: 'Task completed successfully' });
 
   const completedWithoutPr = (await get.run({ principal, args: get.schema.parse({ operationId: taskReceipt.operationId }) })).data as Record<string, unknown>;
-  assert.deepEqual((completedWithoutPr.lifecycle as { artifacts: unknown }).artifacts, { taskId });
+  assert.deepEqual((completedWithoutPr.lifecycle as { artifacts: unknown }).artifacts, { submissionId, taskId });
   // Task completion is published before tasks.pr_number, so a later poll must
   // still enrich the already-terminal durable receipt.
   await db('tasks').where({ task_id: taskId }).update({ pr_number: 73 });
   const completedWithPr = (await get.run({ principal, args: get.schema.parse({ operationId: taskReceipt.operationId }) })).data as Record<string, unknown>;
   assert.deepEqual((completedWithPr.lifecycle as { artifacts: unknown }).artifacts, {
-    taskId, pullRequest: { repository: 'acme/repo', number: 73, url: 'https://github.com/acme/repo/pull/73' },
+    submissionId, taskId, pullRequest: { repository: 'acme/repo', number: 73, url: 'https://github.com/acme/repo/pull/73' },
   });
 
   await db('task_history').delete();
@@ -786,7 +798,7 @@ test('goal failures and generated task pull requests remain durable after backen
     { taskId: goalTaskId, pullRequest: { repository: 'acme/repo', number: 61, url: 'https://github.com/acme/repo/pull/61' } });
   const durableTask = await operations.replay(principal, 'create_task', taskArgs);
   assert.deepEqual((durableTask?.lifecycle as { artifacts: unknown }).artifacts,
-    { taskId, pullRequest: { repository: 'acme/repo', number: 73, url: 'https://github.com/acme/repo/pull/73' } });
+    { submissionId, taskId, pullRequest: { repository: 'acme/repo', number: 73, url: 'https://github.com/acme/repo/pull/73' } });
   const replayedGoal = await operations.replay(principal, 'create_goal', goalArgs);
   assert.equal(replayedGoal?.state, 'failed');
   assert.equal(replayedGoal?.retryAfterSeconds, undefined);
