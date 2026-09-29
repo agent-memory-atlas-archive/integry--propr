@@ -52,7 +52,7 @@ function operationState(result: OperationResult): string {
 
 function invocationInterrupted(row: Operation, now = Date.now()): boolean {
   const invokedAt = Number(row.accepted_at ?? row.created_at);
-  return row.state === 'accepted' && row.result === null && Number.isFinite(invokedAt)
+  return ['accepted', 'running'].includes(row.state) && row.result === null && Number.isFinite(invokedAt)
     && now - invokedAt > interruptionTimeoutMs;
 }
 
@@ -125,8 +125,8 @@ export class McpOperations {
 
   async markInterruptedInvocations(principal: McpPrincipal, id?: string): Promise<void> {
     const now = Date.now();
-    const query = this.db('mcp_operations').where({ owner_id: principal.user.id, grant_id: principal.grant.id, state: 'accepted' })
-      .whereNull('result').whereIn('lifecycle', ['accepted', 'running', 'unknown'])
+    const query = this.db('mcp_operations').where({ owner_id: principal.user.id, grant_id: principal.grant.id })
+      .whereIn('state', ['accepted', 'running']).whereNull('result').whereIn('lifecycle', ['accepted', 'running', 'unknown'])
       .whereRaw('COALESCE(accepted_at, created_at) < ?', [now - interruptionTimeoutMs]);
     if (id) query.andWhere({ id });
     await query.update({ state: 'unknown', lifecycle: 'unknown', updated_at: now });

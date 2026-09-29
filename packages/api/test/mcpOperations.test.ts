@@ -1,3 +1,4 @@
+/* eslint-disable max-lines -- MCP operation and migration regressions share one database fixture. */
 import assert from 'node:assert/strict';
 import { after, test } from 'node:test';
 import { mkdtemp, rm } from 'node:fs/promises';
@@ -382,6 +383,46 @@ test('operation lifecycle migration backfills and rolls back on SQLite', async t
   await lifecycleDown(db);
   assert.equal(await db.schema.hasColumn('mcp_operations', 'lifecycle'), false);
   assert.equal(await db.schema.hasColumn('mcp_operations', 'accepted_at'), false);
+});
+
+test('migration reconciles an interrupted legacy running receipt across filters and repeated polls', async t => {
+  const db = knex({ client: 'better-sqlite3', connection: { filename: ':memory:' }, useNullAsDefault: true });
+  t.after(() => db.destroy());
+  await db.schema.createTable('task_drafts', table => table.string('draft_id').primary());
+  await up(db);
+  const operationId = '00000000-0000-4000-8000-000000000007';
+  const invokedAt = Date.now() - 120_001;
+  await db('mcp_operations').insert({
+    id: operationId, owner_id: 'alice', grant_id: 'grant-a', idempotency_key: 'legacy-running-1',
+    tool: 'fixture', payload_hash: 'legacy', state: 'running', result: null,
+    created_at: invokedAt, updated_at: invokedAt,
+  });
+  await lifecycleUp(db);
+  assert.deepEqual(await db('mcp_operations').where({ id: operationId }).first('state', 'lifecycle', 'accepted_at'), {
+    state: 'running', lifecycle: 'accepted', accepted_at: invokedAt,
+  });
+
+  const principal = { user: { id: 'alice' }, grant: { id: 'grant-a' } } as McpPrincipal;
+  const deps = { db, policy: { repository: async () => {}, requirePermission: () => {}, config: {} } as never,
+    taskQueue: {} as never, redisClient: {} as never, runtimeBuildQueue: {} as never } as ToolDeps;
+  const catalog = createToolCatalog(deps);
+  const list = catalog.find(tool => tool.name === 'list_operations')!;
+  const get = catalog.find(tool => tool.name === 'get_operation')!;
+
+  const active = (await list.run({ principal, args: list.schema.parse({ lifecycle: 'active' }) })).data as { operations: Array<Record<string, unknown>> };
+  const unknown = (await list.run({ principal, args: list.schema.parse({ lifecycle: 'unknown' }) })).data as { operations: Array<Record<string, unknown>> };
+  assert.deepEqual(active.operations, []);
+  assert.deepEqual(unknown.operations.map(row => row.operationId), [operationId]);
+
+  for (let poll = 0; poll < 2; poll++) {
+    const receipt = (await get.run({ principal, args: get.schema.parse({ operationId }) })).data as Record<string, unknown>;
+    assert.equal(receipt.state, 'unknown');
+    assert.equal((receipt.lifecycle as { state: string }).state, 'unknown');
+    assert.equal(receipt.retryAfterSeconds, undefined);
+  }
+  assert.deepEqual(await db('mcp_operations').where({ id: operationId }).first('state', 'lifecycle'), {
+    state: 'unknown', lifecycle: 'unknown',
+  });
 });
 
 test('CIMD intersects plural supported methods with public PKCE instead of trusting a legacy preference', () => {
