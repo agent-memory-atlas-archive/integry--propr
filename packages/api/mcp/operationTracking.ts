@@ -91,9 +91,12 @@ function restoreResolvedTarget(
   result: ExecutionResult,
   task: TrackingContext['task'] | undefined,
 ): void {
-  if (!result.targetState) return;
+  const target = result.targetState
+    ?? (receipt.targetState as Record<string, unknown> | undefined)
+    ?? {};
+  if (!task && !Object.keys(target).length) return;
   receipt.targetState = {
-    ...result.targetState,
+    ...target,
     ...(task ? { taskId: task.task_id, pr_number: task.pr_number } : {}),
   };
 }

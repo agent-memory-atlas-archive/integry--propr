@@ -300,10 +300,11 @@ export class McpOperations {
 
   project(row: Operation): Record<string, unknown> {
     const interrupted = invocationInterrupted(row);
-    const stale = interrupted || (row.state === 'running' && Date.now() - Number(row.updated_at) > interruptionTimeoutMs);
-    const state = stale ? 'unknown' : row.state;
+    const terminal = ['completed', 'failed', 'cancelled'].includes(row.lifecycle);
+    const stale = !terminal && (interrupted || (row.state === 'running' && Date.now() - Number(row.updated_at) > interruptionTimeoutMs));
+    const state = terminal ? row.lifecycle : stale ? 'unknown' : row.state;
     return { operationId: row.id, tool: row.tool, state, result: json(row.result), lifecycle: {
-      state: interrupted ? 'unknown' : row.lifecycle,
+      state: interrupted && !terminal ? 'unknown' : row.lifecycle,
       acceptedAt: iso(row.accepted_at),
       startedAt: iso(row.started_at),
       finishedAt: iso(row.finished_at),

@@ -222,6 +222,41 @@ test('stale concurrent polls cannot replace terminal tracker receipts or lifecyc
   assert.deepEqual((listedReceipt.lifecycle as { progress: unknown }).progress, durableResult.targetState);
 });
 
+test('terminal execution restoration preserves target state resolved by get_operation', async t => {
+  const db = knex({ client: 'better-sqlite3', connection: { filename: ':memory:' }, useNullAsDefault: true });
+  t.after(() => db.destroy());
+  await db.schema.createTable('task_drafts', table => table.string('draft_id').primary());
+  await db.schema.createTable('tasks', table => {
+    table.string('task_id').primary(); table.string('job_id'); table.string('repository'); table.string('task_type');
+    table.integer('pr_number'); table.text('initial_job_data'); table.timestamp('created_at').defaultTo(db.fn.now());
+  });
+  await db.schema.createTable('task_history', table => {
+    table.increments('history_id').primary(); table.string('task_id'); table.string('state'); table.timestamp('timestamp');
+  });
+  await up(db);
+
+  const principal = { user: { id: 'alice' }, grant: { id: 'grant-a' } } as McpPrincipal;
+  const operations = new McpOperations(db);
+  const receipt = await operations.run(principal, {
+    tool: 'send_task_followup', args: { idempotencyKey: 'resolved-target-fallback' }, repository: 'acme/repo',
+  }, async () => ({ status: 202, data: { state: 'queued', continuation: { taskId: 'resolved-task' } } }));
+  const observedAt = '2026-09-29T05:00:00.000Z';
+  await db('tasks').insert({ task_id: 'resolved-task', job_id: 'resolved-job', repository: 'acme/repo', task_type: 'issue', pr_number: 81 });
+  await db('task_history').insert({ task_id: 'resolved-task', state: 'completed', timestamp: observedAt });
+  await db('mcp_operations').where({ id: receipt.operationId }).update({
+    state: 'completed', lifecycle: 'completed', finished_at: Date.now(),
+    result: JSON.stringify({ jobId: 'resolved-job', continuation: { taskId: 'resolved-task' }, executionResolved: true }),
+  });
+
+  const deps = { db, policy: { repository: async () => {}, requirePermission: () => {}, config: {} } as never,
+    taskQueue: {} as never, redisClient: {} as never, runtimeBuildQueue: {} as never } as ToolDeps;
+  const get = createToolCatalog(deps).find(tool => tool.name === 'get_operation')!;
+  const restored = (await get.run({ principal, args: get.schema.parse({ operationId: receipt.operationId }) })).data as Record<string, unknown>;
+  assert.deepEqual(restored.targetState, {
+    state: 'completed', timestamp: observedAt, taskId: 'resolved-task', pr_number: 81,
+  });
+});
+
 test('replay recovers terminal lifecycle, artifacts and failure from durable receipts', async t => {
   const db = knex({ client: 'better-sqlite3', connection: { filename: ':memory:' }, useNullAsDefault: true });
   t.after(() => db.destroy());
@@ -683,9 +718,15 @@ test('goal failures and generated task pull requests remain durable after backen
   const durableTask = await operations.replay(principal, 'create_task', taskArgs);
   assert.deepEqual((durableTask?.lifecycle as { artifacts: unknown }).artifacts,
     { taskId, pullRequest: { repository: 'acme/repo', number: 73, url: 'https://github.com/acme/repo/pull/73' } });
+  const replayedGoal = await operations.replay(principal, 'create_goal', goalArgs);
+  assert.equal(replayedGoal?.state, 'failed');
+  assert.equal(replayedGoal?.retryAfterSeconds, undefined);
   const listed = (await list.run({ principal, args: list.schema.parse({}) })).data as { operations: Array<Record<string, unknown>> };
   assert.equal(listed.operations.length, 2);
   assert.ok(listed.operations.every(operation => Object.keys((operation.lifecycle as { artifacts: object }).artifacts).length > 0));
+  const listedGoal = listed.operations.find(operation => operation.operationId === goalReceipt.operationId)!;
+  assert.equal(listedGoal.state, 'failed');
+  assert.equal(listedGoal.retryAfterSeconds, undefined);
 });
 
 test('list_operations filters active receipts by exact owner and grant without refreshing trackers', async t => {
