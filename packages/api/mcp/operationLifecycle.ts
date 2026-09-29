@@ -2,6 +2,7 @@ import { redactSecrets, type McpErrorEnvelope } from './errorEnvelope.js';
 import type { McpOperations, LifecycleOutcome, LifecycleState, Operation } from './operations.js';
 
 const startedTaskStates = new Set(['processing', 'claude_execution', 'post_processing']);
+const executedGoalTaskStates = new Set([...startedTaskStates, 'completed', 'failed']);
 const terminalStates = new Set<LifecycleOutcome>(['completed', 'failed', 'cancelled']);
 
 function record(value: unknown): Record<string, unknown> | undefined {
@@ -97,6 +98,11 @@ export function failureFromReceipt(receipt: Record<string, unknown>): McpErrorEn
     return resultError as unknown as McpErrorEnvelope;
   }
 
+  const loop = record(result?.loop);
+  if (loop?.completionStatus === 'failed') {
+    return publicFailure('EXECUTION_FAILED', nonEmptyString(loop.completionReason) ?? 'Ultrafix loop failed.');
+  }
+
   const target = record(receipt.targetState);
   const reviewResults = Array.isArray(target?.reviewResults) ? target.reviewResults
     : Array.isArray(result?.reviewResults) ? result.reviewResults : [];
@@ -150,9 +156,12 @@ export async function syncLifecycle(
   const receiptState = String(receipt.state ?? '');
   const result = record(receipt.result);
   const loop = record(result?.loop);
-  const observedStart = startedTaskStates.has(targetState) || target?.queueState === 'active' || loop?.active === true;
+  const currentTask = record(target?.currentTask);
+  const currentTaskState = String(currentTask?.state ?? '');
+  const observedStart = startedTaskStates.has(targetState) || executedGoalTaskStates.has(currentTaskState)
+    || target?.queueState === 'active' || loop?.active === true;
   if (observedStart) {
-    await operations.markStarted(row.id, epochMilliseconds(target?.timestamp));
+    await operations.markStarted(row.id, epochMilliseconds(currentTask?.timestamp) ?? epochMilliseconds(target?.timestamp));
   }
 
   const outcome = lifecycleOutcome(row, target, receiptState, targetState);

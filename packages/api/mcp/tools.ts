@@ -340,7 +340,16 @@ export function createToolCatalog(deps: ToolDeps): McpTool[] {
     const continuation = result.continuation && typeof result.continuation === 'object' && !Array.isArray(result.continuation)
       ? result.continuation as Record<string, unknown> : result;
     if (continuation.planId) receipt.targetState = await db('task_drafts').where({ draft_id: continuation.planId, user_id: principal.user.id }).first('status', 'paused', 'mcp_revision');
-    if (continuation.goalId) receipt.targetState = await db('goals').where({ goal_id: continuation.goalId, owner_id: principal.user.id }).first('desired_state', 'result_state', 'current_task_id');
+    if (continuation.goalId) {
+      const goal = await db('goals').where({ goal_id: continuation.goalId, owner_id: principal.user.id })
+        .first('desired_state', 'result_state', 'current_task_id');
+      if (goal) {
+        const currentTask = typeof goal.current_task_id === 'string'
+          ? await db('task_history').where({ task_id: goal.current_task_id }).orderBy('history_id', 'desc').first('state', 'timestamp')
+          : undefined;
+        receipt.targetState = { ...goal, ...(currentTask ? { currentTask: { taskId: goal.current_task_id, ...currentTask } } : {}) };
+      }
+    }
     if (continuation.taskId) receipt.targetState = await db('task_history').where({ task_id: continuation.taskId }).orderBy('history_id', 'desc').first('state', 'timestamp');
     updateReceiptState(row, receipt);
     await trackTaskSubmission(deps, row, principal, receipt);

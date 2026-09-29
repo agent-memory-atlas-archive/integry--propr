@@ -14,7 +14,7 @@ import { callWorkflow } from '../mcp/adapter.js';
 import { parseClientMetadataDocument } from '../mcp/clients.js';
 import { createToolCatalog, type ToolDeps } from '../mcp/tools.js';
 import type { McpPrincipal } from '../mcp/policy.js';
-import { syncLifecycle } from '../mcp/operationLifecycle.js';
+import { failureFromReceipt, syncLifecycle } from '../mcp/operationLifecycle.js';
 
 after(closeConnection);
 
@@ -377,6 +377,21 @@ test('tracker task and review failures populate and can enrich the durable failu
     code: 'REVIEW_FAILED', message: 'Reviewer unavailable; Model timed out', stage: 'internal', retryable: false, status: 500,
     details: { failedReviewCount: 2 },
   });
+
+  const ultrafix = await create('run_ultrafix', 'ultrafix-failure-1');
+  const ultrafixRow = await operations.get(principal, String(ultrafix.operationId));
+  await syncLifecycle(operations, ultrafixRow, { ...ultrafix, state: 'failed',
+    targetState: { taskId: 'ultrafix-task', state: 'completed', reason: 'Task completed successfully' },
+    result: { loop: { completionStatus: 'failed', completionReason: 'Maximum cycles reached without resolving the findings.' } },
+  });
+  assert.deepEqual((operations.project(await operations.get(principal, ultrafixRow.id)).lifecycle as { failure: unknown }).failure, {
+    code: 'EXECUTION_FAILED', message: 'Maximum cycles reached without resolving the findings.',
+    stage: 'internal', retryable: false, status: 500,
+  });
+  assert.equal(failureFromReceipt({
+    targetState: { state: 'completed', reason: 'Task completed successfully' },
+    result: { loop: { completionStatus: 'failed' } },
+  })?.message, 'Ultrafix loop failed.');
 });
 
 test('list_operations filters active receipts by exact owner and grant without refreshing trackers', async t => {
