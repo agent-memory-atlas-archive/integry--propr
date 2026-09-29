@@ -6,6 +6,8 @@ import { digest } from './store.js';
 import type { McpPrincipal } from './policy.js';
 import { artifactsFromReceipt, failureFromReceipt, lifecycleFromLegacy } from './operationLifecycle.js';
 
+const interruptionTimeoutMs = 120_000;
+
 export interface OperationResult { status: number; data: unknown }
 export type LifecycleState = 'accepted' | 'running' | 'completed' | 'failed' | 'cancelled' | 'unknown';
 export type LifecycleOutcome = 'completed' | 'failed' | 'cancelled';
@@ -48,13 +50,22 @@ function operationState(result: OperationResult): string {
   return ['posted', 'queued', 'unknown', 'failed'].includes(reported || '') ? reported! : 'accepted';
 }
 
+function invocationInterrupted(row: Operation, now = Date.now()): boolean {
+  const invokedAt = Number(row.accepted_at ?? row.created_at);
+  return row.state === 'accepted' && row.result === null && Number.isFinite(invokedAt)
+    && now - invokedAt > interruptionTimeoutMs;
+}
+
 export class McpOperations {
   constructor(readonly db: Knex) {}
 
   async replay(principal: McpPrincipal, tool: string, args: Record<string, unknown>): Promise<Record<string, unknown> | undefined> {
-    const previous = await this.db<Operation>('mcp_operations').where({ owner_id: principal.user.id, grant_id: principal.grant.id, idempotency_key: String(args.idempotencyKey) }).first();
+    const identity = { owner_id: principal.user.id, grant_id: principal.grant.id, idempotency_key: String(args.idempotencyKey) };
+    let previous = await this.db<Operation>('mcp_operations').where(identity).first();
     if (!previous) return undefined;
     if (previous.payload_hash !== digest(canonical({ tool, args }))) throw new McpError('IDEMPOTENCY_CONFLICT', 'This key was already used with different arguments.', 409);
+    await this.markInterruptedInvocations(principal, previous.id);
+    previous = (await this.db<Operation>('mcp_operations').where(identity).first())!;
     return this.project(previous);
   }
 
@@ -87,6 +98,10 @@ export class McpOperations {
         const failure = errorEnvelope((result.data as { error?: unknown } | null)?.error);
         await this.db('mcp_operations').where({ id }).whereIn('lifecycle', ['accepted', 'unknown'])
           .update({ lifecycle: 'unknown', failure: failure ? JSON.stringify(failure) : null, updated_at: Date.now() });
+      } else if (lifecycle === 'accepted') {
+        // A live invocation result is authoritative if a concurrent poll had
+        // already classified its previously result-less receipt as interrupted.
+        await this.markAccepted(id);
       }
     } catch (error) {
       // A transport failure can follow an external side effect. Never replay it
@@ -102,9 +117,19 @@ export class McpOperations {
   }
 
   async get(principal: McpPrincipal, id: string): Promise<Operation> {
+    await this.markInterruptedInvocations(principal, id);
     const row = await this.db<Operation>('mcp_operations').where({ id, owner_id: principal.user.id, grant_id: principal.grant.id }).first();
     if (!row) throw new McpError('NOT_FOUND', 'Operation not found.', 404);
     return row;
+  }
+
+  async markInterruptedInvocations(principal: McpPrincipal, id?: string): Promise<void> {
+    const now = Date.now();
+    const query = this.db('mcp_operations').where({ owner_id: principal.user.id, grant_id: principal.grant.id, state: 'accepted' })
+      .whereNull('result').whereIn('lifecycle', ['accepted', 'running', 'unknown'])
+      .whereRaw('COALESCE(accepted_at, created_at) < ?', [now - interruptionTimeoutMs]);
+    if (id) query.andWhere({ id });
+    await query.update({ state: 'unknown', lifecycle: 'unknown', updated_at: now });
   }
 
   async markStarted(id: string, at = Date.now()): Promise<void> {
@@ -156,10 +181,11 @@ export class McpOperations {
   }
 
   project(row: Operation): Record<string, unknown> {
-    const stale = row.state === 'running' && Date.now() - Number(row.updated_at) > 120_000;
+    const interrupted = invocationInterrupted(row);
+    const stale = interrupted || (row.state === 'running' && Date.now() - Number(row.updated_at) > interruptionTimeoutMs);
     const state = stale ? 'unknown' : row.state;
     return { operationId: row.id, tool: row.tool, state, result: json(row.result), lifecycle: {
-      state: row.lifecycle ?? lifecycleFromLegacy(row.state),
+      state: interrupted ? 'unknown' : row.lifecycle ?? lifecycleFromLegacy(row.state),
       acceptedAt: iso(row.accepted_at ?? row.created_at),
       startedAt: iso(row.started_at),
       finishedAt: iso(row.finished_at),

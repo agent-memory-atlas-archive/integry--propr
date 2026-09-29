@@ -146,6 +146,71 @@ test('polling an accepted wrapper does not fabricate backend execution start', a
   assert.equal((queued.lifecycle as { startedAt: unknown }).startedAt, null);
 });
 
+test('interrupted accepted invocations become durable unknown while acknowledged queues remain active', async t => {
+  const db = knex({ client: 'better-sqlite3', connection: { filename: ':memory:' }, useNullAsDefault: true });
+  t.after(() => db.destroy());
+  await db.schema.createTable('task_drafts', table => table.string('draft_id').primary());
+  await up(db); await lifecycleUp(db);
+  const operations = new McpOperations(db);
+  const principal = { user: { id: 'alice' }, grant: { id: 'grant-a' } } as McpPrincipal;
+  let finishInvocation!: (result: { status: number; data: unknown }) => void;
+  let invocationStarted!: () => void;
+  const started = new Promise<void>(resolve => { invocationStarted = resolve; });
+  const args = { idempotencyKey: 'interrupted-wrapper-1' };
+  const pending = operations.run(principal, { tool: 'review_pull_request', args, repository: 'acme/repo' }, async () => {
+    invocationStarted();
+    return new Promise(resolve => { finishInvocation = resolve; });
+  });
+  await started;
+
+  const interrupted = await db<Operation>('mcp_operations').where({ idempotency_key: args.idempotencyKey }).first();
+  const invokedAt = Date.now() - 120_001;
+  await db('mcp_operations').where({ id: interrupted!.id }).update({ accepted_at: invokedAt, created_at: invokedAt, updated_at: Date.now() });
+  const projected = operations.project((await db<Operation>('mcp_operations').where({ id: interrupted!.id }).first())!);
+  assert.equal(projected.state, 'unknown');
+  assert.equal((projected.lifecycle as { state: string }).state, 'unknown');
+  assert.equal(projected.retryAfterSeconds, undefined);
+  assert.match(String(projected.message), /may have been interrupted/);
+
+  const queued = await operations.run(principal, {
+    tool: 'review_pull_request', args: { idempotencyKey: 'acknowledged-queue-1' }, repository: 'acme/repo',
+  }, async () => ({ status: 202, data: { state: 'queued', commentId: 42 } }));
+  await db('mcp_operations').where({ id: queued.operationId }).update({ accepted_at: invokedAt, created_at: invokedAt, updated_at: Date.now() });
+
+  const deps = { db, policy: { repository: async () => {}, requirePermission: () => {}, config: {} } as never,
+    taskQueue: {} as never, redisClient: {} as never, runtimeBuildQueue: {} as never } as ToolDeps;
+  const catalog = createToolCatalog(deps);
+  const list = catalog.find(tool => tool.name === 'list_operations')!;
+  const get = catalog.find(tool => tool.name === 'get_operation')!;
+  const active = (await list.run({ principal, args: list.schema.parse({ lifecycle: 'active' }) })).data as { operations: Array<Record<string, unknown>> };
+  const unknown = (await list.run({ principal, args: list.schema.parse({ lifecycle: 'unknown' }) })).data as { operations: Array<Record<string, unknown>> };
+  assert.deepEqual(active.operations.map(row => row.operationId), [queued.operationId]);
+  assert.deepEqual(unknown.operations.map(row => row.operationId), [interrupted!.id]);
+
+  const refreshed = (await get.run({ principal, args: get.schema.parse({ operationId: interrupted!.id }) })).data as Record<string, unknown>;
+  assert.equal(refreshed.state, 'unknown');
+  assert.equal((refreshed.lifecycle as { state: string }).state, 'unknown');
+  let replayed = false;
+  const replay = await operations.run(principal, { tool: 'review_pull_request', args, repository: 'acme/repo' }, async () => {
+    replayed = true;
+    return { status: 200, data: {} };
+  });
+  assert.equal(replayed, false);
+  assert.equal(replay.state, 'unknown');
+  assert.equal((replay.lifecycle as { state: string }).state, 'unknown');
+
+  const queuedRow = await operations.get(principal, String(queued.operationId));
+  assert.equal(queuedRow.state, 'queued');
+  assert.equal(queuedRow.lifecycle, 'accepted');
+
+  // If the original process is merely slow rather than gone, its fresh result
+  // remains authoritative and resolves the unavoidable timeout race.
+  finishInvocation({ status: 202, data: { state: 'queued', commentId: 99 } });
+  const resolved = await pending;
+  assert.equal(resolved.state, 'queued');
+  assert.equal((resolved.lifecycle as { state: string }).state, 'accepted');
+});
+
 test('tracker uncertainty resolves from later evidence and preserves observed timestamps and terminal outcomes', async t => {
   const db = knex({ client: 'better-sqlite3', connection: { filename: ':memory:' }, useNullAsDefault: true });
   t.after(() => db.destroy());
