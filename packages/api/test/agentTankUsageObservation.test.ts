@@ -5,7 +5,7 @@
  */
 
 import assert from 'node:assert/strict';
-import { after, beforeEach, mock, test } from 'node:test';
+import { after, before, beforeEach, mock, test } from 'node:test';
 import type { Request as ExpressRequest, Response as ExpressResponse } from 'express';
 import type { AgentStatusResponse } from '@propr/core';
 
@@ -16,7 +16,7 @@ const core = await import('@propr/core');
 
 type AgentMap = Record<string, AgentStatusResponse>;
 
-const settings = { enabled: true, url: 'http://agent-tank.test' };
+const settings = { mode: 'external' as const, url: 'http://agent-tank.test' };
 const observed: AgentMap[] = [];
 let published = 0;
 const originalFetch = globalThis.fetch;
@@ -24,7 +24,6 @@ const originalFetch = globalThis.fetch;
 const coreMock = await mock.module('@propr/core', {
   namedExports: {
     ...core,
-    loadAgentTankSettings: async () => settings,
     // Real change detection, test publisher: what matters here is that the route
     // feeds its snapshot through the shared observer at all.
     observeAgentTankUsageSnapshot: async (agents: AgentMap) => {
@@ -39,10 +38,15 @@ const { ShellActivityBroadcaster } = await import('../services/shellActivityBroa
 const { ACTIVITY_ROOM } = await import('../services/activitySocketRooms.js');
 const { USAGE_UPDATE } = await import('@propr/shared');
 
+// The route and the shared status service must read the same persisted mode.
+// Mocking the barrel's settings export does not replace the service's internal
+// config import, which would otherwise see the default disabled mode.
+before(async () => { await core.runMigrations(); });
 
 after(async () => {
   coreMock.restore();
   globalThis.fetch = originalFetch;
+  await core.db('system_configs').where('key', 'agent_tank').delete();
   await core.closeConnection();
 });
 
@@ -75,10 +79,11 @@ async function readUsage(): Promise<unknown> {
   return record.body;
 }
 
-beforeEach(() => {
+beforeEach(async () => {
   observed.length = 0;
   published = 0;
   core.resetAgentTankUsageTracking();
+  await core.saveAgentTankSettings(settings);
 });
 
 test('a changed aggregate usage read publishes a trigger', async () => {
@@ -112,7 +117,7 @@ test('an unchanged aggregate usage read publishes nothing', async () => {
 test('a usage read that Agent Tank refuses observes nothing', async () => {
   globalThis.fetch = (async () => new globalThis.Response('nope', { status: 503 })) as typeof globalThis.fetch;
 
-  assert.deepEqual(await readUsage(), { enabled: true, error: 'HTTP 503' });
+  assert.deepEqual(await readUsage(), { enabled: true, mode: 'external', error: 'unreachable' });
   assert.equal(observed.length, 0);
 });
 
@@ -142,10 +147,11 @@ test('shell sampling ignores countdowns and ordering but detects quota, membersh
     tankReports({ agy: 0, claude: 43 }); await sampler.sample();
     assert.equal(events.length, 3, 'agent ordering is not a change');
     tankReports({ claude: 43 }); await sampler.sample();
-    settings.enabled = false; await sampler.sample(); await sampler.sample();
-    settings.enabled = true; await sampler.sample();
+    await core.saveAgentTankSettings({ ...settings, mode: 'disabled' });
+    await sampler.sample(); await sampler.sample();
+    await core.saveAgentTankSettings(settings); await sampler.sample();
     assert.equal(events.length, 6, 'quota, additions, removals and enable transitions each invalidate');
-  } finally { settings.enabled = true; sampler.close(); }
+  } finally { sampler.close(); }
 });
 
 test('shell sampling announces HTTP, unreachable and recovery transitions once each', async () => {
