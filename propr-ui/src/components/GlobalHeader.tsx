@@ -186,8 +186,9 @@ const CreationButton: React.FC<CreationButtonProps> = ({
               role="menuitem"
               disabled={disabled}
               onClick={() => choose(action.to)}
-              className="block w-full rounded p-2 text-left text-sm text-slate-700 hover:bg-slate-50 disabled:cursor-not-allowed disabled:text-slate-400"
+              className="flex w-full items-center gap-2 rounded p-2 text-left text-sm text-slate-700 hover:bg-slate-50 disabled:cursor-not-allowed disabled:text-slate-400"
             >
+              <action.icon className="h-4 w-4 flex-none" aria-hidden="true" />
               {action.label}
             </button>
           ))}

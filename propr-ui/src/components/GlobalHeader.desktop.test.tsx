@@ -118,10 +118,15 @@ describe('GlobalHeader desktop toolbar', () => {
     const destinations: Record<string, string> = {
       'New Task': '/tasks/new', 'New Plan': '/studio/new', 'New Goal': '/goals?new=1',
     };
+    const icons: Record<string, string> = {
+      'New Task': 'lucide-zap', 'New Plan': 'lucide-scroll-text', 'New Goal': 'lucide-target',
+    };
     for (const option of options) {
       fireEvent.click(screen.getByRole('button', { name: 'More creation options' }));
       expect(screen.getAllByRole('menuitem').map(item => item.textContent)).toEqual(options);
-      fireEvent.click(screen.getByRole('menuitem', { name: option }));
+      const menuItem = screen.getByRole('menuitem', { name: option });
+      expect(menuItem.querySelector('svg')).toHaveClass(icons[option]);
+      fireEvent.click(menuItem);
       expect(mocks.navigate).toHaveBeenLastCalledWith(destinations[option]);
       expect(screen.queryByRole('menu')).not.toBeInTheDocument();
     }
