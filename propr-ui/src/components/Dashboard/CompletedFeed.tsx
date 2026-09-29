@@ -128,6 +128,85 @@ function useOutcomeHistory(item: OutcomeItem, expanded: boolean, onStale: () => 
     loadMore: () => void loadPage(true), retry: () => void loadPage(cache.current.loaded) };
 }
 
+function EarlierUpdates({ item, title, updates, history }: {
+  item: OutcomeItem;
+  title: string;
+  updates: OutcomeItem[];
+  history: ReturnType<typeof useOutcomeHistory>;
+}) {
+  return (
+    <>
+      {history.loading && <li role="status" className="text-xs text-slate-500">Loading earlier updates…</li>}
+      {history.error && <li className="text-xs text-slate-600" role="alert">
+        {history.error} <button type="button" onClick={history.retry} className="underline">Retry</button>
+      </li>}
+      {item.entityId && history.loaded && !history.loading && !history.error && updates.length === 0
+        && <li className="text-xs text-slate-500">No earlier updates</li>}
+      {updates.map(update => {
+        const updateWork = splitWorkTitle(update.title, update.taskType);
+        const type = updateType(update, RECORDED_WORK_TYPES[update.taskType ?? ''] ?? updateWork.type);
+        // A missing recap is a run type, never the parent deliverable again.
+        const delta = update.detail && update.detail !== title && update.detail !== item.title
+          && update.detail !== update.title && update.detail !== updateWork.title
+          ? update.detail : `${type} run`;
+        return (
+          <li key={update.id}>
+            <RowLink href={workHref(update)} className="grid min-w-0 grid-cols-[3.5rem_5rem_minmax(0,1fr)_3rem] items-center gap-x-2 rounded-sm py-0.5 text-xs leading-5 text-slate-600 hover:bg-slate-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-teal-500">
+              <time dateTime={update.occurredAt} title={new Date(update.occurredAt).toLocaleString()} className="whitespace-nowrap font-mono text-[11px] tabular-nums text-slate-400">{compactElapsedLabel(update.occurredAt)} ago</time>
+              <WorkTypeBadge type={type} compact />
+              <span className="min-w-0 truncate text-slate-700" title={delta}>{compactDelta(delta)}</span>
+              <span className="w-12 text-right">
+                {update.score !== null && update.score !== undefined && (
+                  <>
+                    <ScoreBadge score={update.score} bracketed label="Review Score" />
+                    <span className="sr-only">Review score {update.score} out of 10</span>
+                  </>
+                )}
+              </span>
+            </RowLink>
+          </li>
+        );
+      })}
+      {history.nextCursor && !history.error && <li>
+        <button type="button" onClick={history.loadMore} disabled={history.loading}
+          className="text-xs text-slate-600 underline disabled:opacity-50">Load more updates</button>
+      </li>}
+    </>
+  );
+}
+
+function OutcomeDetail({ item, title, earlierCount, expanded, updatesId, onToggle }: {
+  item: OutcomeItem;
+  title: string;
+  earlierCount: number;
+  expanded: boolean;
+  updatesId: string;
+  onToggle: () => void;
+}) {
+  if (!(earlierCount > 0 || (item.detail && item.detail !== title))) return null;
+  return (
+    <div className="mt-0.5 flex min-w-0 items-center gap-2 px-3 text-xs leading-5 text-slate-500">
+      {earlierCount > 0 && (
+        <button
+          type="button"
+          aria-expanded={expanded}
+          aria-controls={updatesId}
+          onClick={onToggle}
+          className="flex-none rounded-sm hover:text-slate-900 focus:outline-none focus-visible:ring-2 focus-visible:ring-teal-500"
+        >
+          <span aria-hidden="true">{expanded ? '▾' : '↳'} </span>
+          {expanded ? 'Hide ' : ''}{earlierCount} earlier {earlierCount === 1 ? 'update' : 'updates'}
+        </button>
+      )}
+      {item.detail && item.detail !== title && (
+        <span className="min-w-0 truncate" title={item.detail}>
+          {earlierCount > 0 && <span aria-hidden="true">· </span>}{item.detail}
+        </span>
+      )}
+    </div>
+  );
+}
+
 const CompletedRow: React.FC<{ item: OutcomeItem; onStale: () => void }> = ({ item, onStale }) => {
   const [expanded, setExpanded] = useState(false);
   const updatesId = useId();
@@ -174,64 +253,11 @@ const CompletedRow: React.FC<{ item: OutcomeItem; onStale: () => void }> = ({ it
           </span>
         )}
       </RowLink>
-      {(earlierCount > 0 || (item.detail && item.detail !== title)) && (
-        <div className="mt-0.5 flex min-w-0 items-center gap-2 px-3 text-xs leading-5 text-slate-500">
-          {earlierCount > 0 && (
-            <button
-              type="button"
-              aria-expanded={expanded}
-              aria-controls={updatesId}
-              onClick={() => setExpanded(value => !value)}
-              className="flex-none rounded-sm hover:text-slate-900 focus:outline-none focus-visible:ring-2 focus-visible:ring-teal-500"
-            >
-              <span aria-hidden="true">{expanded ? '▾' : '↳'} </span>
-              {expanded ? 'Hide ' : ''}{earlierCount} earlier {earlierCount === 1 ? 'update' : 'updates'}
-            </button>
-          )}
-          {item.detail && item.detail !== title && (
-            <span className="min-w-0 truncate" title={item.detail}>
-              {earlierCount > 0 && <span aria-hidden="true">· </span>}{item.detail}
-            </span>
-          )}
-        </div>
-      )}
+      <OutcomeDetail item={item} title={title} earlierCount={earlierCount} expanded={expanded}
+        updatesId={updatesId} onToggle={() => setExpanded(value => !value)} />
       {earlierCount > 0 && (
         <ul id={updatesId} hidden={!expanded} className="ml-3 mr-3 my-2 space-y-1.5 border-l-2 border-solid border-slate-200 pl-3">
-          {expanded && history.loading && <li role="status" className="text-xs text-slate-500">Loading earlier updates…</li>}
-          {expanded && history.error && <li className="text-xs text-slate-600" role="alert">
-            {history.error} <button type="button" onClick={history.retry} className="underline">Retry</button>
-          </li>}
-          {expanded && item.entityId && history.loaded && !history.loading && !history.error && updates.length === 0
-            && <li className="text-xs text-slate-500">No earlier updates</li>}
-          {expanded && updates.map(update => {
-            const updateWork = splitWorkTitle(update.title, update.taskType);
-            const type = updateType(update, RECORDED_WORK_TYPES[update.taskType ?? ''] ?? updateWork.type);
-            // A missing recap is a run type, never the parent deliverable again.
-            const delta = update.detail && update.detail !== title && update.detail !== item.title
-              && update.detail !== update.title && update.detail !== updateWork.title
-              ? update.detail : `${type} run`;
-            return (
-              <li key={update.id}>
-                <RowLink href={workHref(update)} className="grid min-w-0 grid-cols-[3.5rem_5rem_minmax(0,1fr)_3rem] items-center gap-x-2 rounded-sm py-0.5 text-xs leading-5 text-slate-600 hover:bg-slate-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-teal-500">
-                  <time dateTime={update.occurredAt} title={new Date(update.occurredAt).toLocaleString()} className="whitespace-nowrap font-mono text-[11px] tabular-nums text-slate-400">{compactElapsedLabel(update.occurredAt)} ago</time>
-                  <WorkTypeBadge type={type} compact />
-                  <span className="min-w-0 truncate text-slate-700" title={delta}>{compactDelta(delta)}</span>
-                  <span className="w-12 text-right">
-                    {update.score !== null && update.score !== undefined && (
-                      <>
-                        <ScoreBadge score={update.score} bracketed label="Review Score" />
-                        <span className="sr-only">Review score {update.score} out of 10</span>
-                      </>
-                    )}
-                  </span>
-                </RowLink>
-              </li>
-            );
-          })}
-          {expanded && history.nextCursor && !history.error && <li>
-            <button type="button" onClick={history.loadMore} disabled={history.loading}
-              className="text-xs text-slate-600 underline disabled:opacity-50">Load more updates</button>
-          </li>}
+          {expanded && <EarlierUpdates item={item} title={title} updates={updates} history={history} />}
         </ul>
       )}
     </li>

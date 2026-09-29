@@ -18,6 +18,8 @@
 import { isDeepStrictEqual } from 'node:util';
 import { createHash, randomUUID } from 'node:crypto';
 import type { Knex } from 'knex';
+import { OUTCOME_TABLES as T, seedOutcomeProjection } from '../services/dashboardReadService.js';
+export { OUTCOME_TABLES, installOutcomeProjection, rebuildOutcomeProjection, outcomeProjectionStatus } from '../services/dashboardReadService.js';
 import {
   chunk,
   mapTaskRow,
@@ -325,14 +327,6 @@ function withCompletionDetails<Row extends Pick<CompletionRow, 'completionId' | 
   return { ...row, taskType, recap: meaningfulRecap(detail.recap), reviewScore: null };
 }
 
-// This private, versioned catalog deliberately does not participate in Knex's
-// shared migration ledger: older Node services can still validate that ledger.
-export const OUTCOME_TABLES = {
-  state: 'dashboard_outcome_v1_state', dirty: 'dashboard_outcome_v1_dirty',
-  runs: 'dashboard_outcome_v1_runs', entities: 'dashboard_outcome_v1_entities',
-  outbox: 'dashboard_outcome_v1_outbox',
-} as const;
-const T = OUTCOME_TABLES;
 export type OutcomeUpdate = Pick<CompletionUpdate, 'taskId' | 'repository' | 'issueNumber' | 'prNumber'
   | 'taskType' | 'title' | 'stateTimestamp' | 'completionId' | 'recap' | 'reviewScore'>;
 
@@ -349,55 +343,6 @@ export type OutcomeReadRow = OutcomeUpdate & {
 };
 export class OutcomeProjectionError extends Error {
   constructor(public status: number, public code: string) { super(code); }
-}
-
-/** Install capture before starting the keyset backfill. No source rows are copied here. */
-export async function installOutcomeProjection(db: Knex): Promise<void> {
-  await db.transaction(async tx => {
-    // Lock before reading the catalog, including when multiple APIs start together.
-    await tx.raw(`CREATE TABLE IF NOT EXISTS ${T.state} (
-      id INTEGER PRIMARY KEY CHECK (id = 1), version INTEGER NOT NULL DEFAULT 1,
-      cursor TEXT NOT NULL DEFAULT '', seeded INTEGER NOT NULL DEFAULT 0,
-      ready INTEGER NOT NULL DEFAULT 0, processed INTEGER NOT NULL DEFAULT 0,
-      failures INTEGER NOT NULL DEFAULT 0, error TEXT, updated_at INTEGER, epoch TEXT NOT NULL)`);
-    await tx(T.state).insert({ id: 1, epoch: randomUUID() }).onConflict('id').ignore();
-    await tx.raw(`CREATE TABLE IF NOT EXISTS ${T.dirty} (
-      task_id TEXT PRIMARY KEY, token TEXT NOT NULL, changed_at INTEGER NOT NULL)`);
-    await tx.raw(`CREATE INDEX IF NOT EXISTS dashboard_outcome_v1_dirty_age ON ${T.dirty}(changed_at, task_id)`);
-    // No affinity on sort_at: preserve SQLite ordering for legacy numeric as
-    // well as textual source timestamps instead of coercing them to text.
-    await tx.raw(`CREATE TABLE IF NOT EXISTS ${T.runs} (
-      completion_id INTEGER PRIMARY KEY, task_id TEXT NOT NULL, repository TEXT NOT NULL,
-      entity_id TEXT NOT NULL, source_revision TEXT NOT NULL, sort_at NOT NULL, title TEXT, base_type TEXT, raw_recap TEXT, command_mode TEXT, payload TEXT NOT NULL)`);
-    await tx.raw(`CREATE INDEX IF NOT EXISTS dashboard_outcome_v1_task ON ${T.runs}(task_id)`);
-    await tx.raw(`CREATE INDEX IF NOT EXISTS dashboard_outcome_v1_history ON ${T.runs}
-      (entity_id, sort_at DESC, task_id DESC, completion_id DESC)`);
-    await tx.raw(`CREATE INDEX IF NOT EXISTS dashboard_outcome_v1_title ON ${T.runs}
-      (entity_id, sort_at DESC, task_id DESC, completion_id DESC) WHERE title IS NOT NULL`);
-    await tx.raw(`CREATE TABLE IF NOT EXISTS ${T.entities} (
-      entity_id TEXT PRIMARY KEY, repository TEXT NOT NULL, sort_at NOT NULL,
-      task_id TEXT NOT NULL, completion_id INTEGER NOT NULL, title TEXT,
-      revision TEXT NOT NULL, payload TEXT NOT NULL)`);
-    for (const [name, prefix] of [['feed', ''], ['repository', 'repository, ']]) {
-      await tx.raw(`CREATE INDEX IF NOT EXISTS dashboard_outcome_v1_${name} ON ${T.entities}
-        (${prefix}sort_at DESC, task_id DESC, completion_id DESC, entity_id)`);
-    }
-    await tx.raw(`CREATE TABLE IF NOT EXISTS ${T.outbox} (repository TEXT PRIMARY KEY, token TEXT NOT NULL)`);
-    for (const table of ['tasks', 'task_history']) {
-      for (const action of ['INSERT', 'UPDATE', 'DELETE']) {
-        const refs = action === 'UPDATE' ? ['OLD', 'NEW'] : [action === 'DELETE' ? 'OLD' : 'NEW'];
-        const updateColumns = table === 'tasks'
-          ? 'task_id, repository, issue_number, pr_number, task_type, model_name, created_at, initial_job_data, final_result'
-          : 'task_id, history_id, state, timestamp, reason, metadata';
-        await tx.raw(`CREATE TRIGGER IF NOT EXISTS dashboard_outcome_v1_${table}_${action.toLowerCase()}
-          AFTER ${action === 'UPDATE' ? `UPDATE OF ${updateColumns}` : action} ON ${table} BEGIN
-          ${refs.map(ref => `INSERT INTO ${T.dirty}(task_id, token, changed_at)
-            VALUES (${ref}.task_id, lower(hex(randomblob(16))), unixepoch())
-            ON CONFLICT(task_id) DO UPDATE SET token = excluded.token;`).join('\n')}
-          END`);
-      }
-    }
-  });
 }
 
 const runOrder = [
@@ -428,18 +373,7 @@ async function projectTask(db: Knex, taskId: string) {
 export async function advanceOutcomeProjection(db: Knex): Promise<boolean> {
   const state = await db(T.state).where('id', 1).first();
   if (!state.seeded) {
-    await db.transaction(async tx => {
-      await tx(T.state).where('id', 1).update({ updated_at: Date.now() });
-      const current = await tx(T.state).where('id', 1).first();
-      if (current.seeded) return;
-      const tasks = await tx('tasks').where('task_id', '>', current.cursor).orderBy('task_id').limit(100).select('task_id');
-      for (const task of tasks) {
-        await tx(T.dirty).insert({ task_id: task.task_id, token: randomUUID(), changed_at: Math.floor(Date.now() / 1000) })
-          .onConflict('task_id').ignore();
-      }
-      await tx(T.state).where('id', 1).update(tasks.length
-        ? { cursor: tasks[tasks.length - 1].task_id } : { seeded: 1 });
-    });
+    await seedOutcomeProjection(db);
     return true;
   }
   // The expensive work is in a read snapshot, outside the short write transaction.
@@ -453,10 +387,7 @@ export async function advanceOutcomeProjection(db: Knex): Promise<boolean> {
       // Each check is bounded to one task, and subsequent source changes must
       // still pass the token fence before the results can commit.
       const oracle = await loadCompletedRows(tx, 'all', {}, dirty.task_id);
-      const expected = oracle.flatMap(({ earlierUpdates, eventCount: _count, ...latest }) => {
-        delete (latest as unknown as Record<string, unknown>).entityKey;
-        return [latest, ...earlierUpdates].map(compactOutcome);
-      }).sort((a, b) => a.completionId - b.completionId);
+      const expected = oracle.flatMap(row => [row, ...row.earlierUpdates].map(compactOutcome)).sort((a, b) => a.completionId - b.completionId);
       const actual = rows.map(row => JSON.parse(row.payload) as OutcomeUpdate).sort((a, b) => a.completionId - b.completionId);
       if (!isDeepStrictEqual(actual, expected)) throw new Error(`Outcome backfill parity mismatch for task ${dirty.task_id}`);
     }
@@ -519,14 +450,6 @@ export async function advanceOutcomeProjection(db: Knex): Promise<boolean> {
   return true;
 }
 
-export async function outcomeProjectionStatus(db: Knex) {
-  if (!await db.schema.hasTable(T.state)) return { version: 1, ready: false };
-  const state = await db(T.state).where('id', 1).first();
-  const pending = await db(T.dirty).count({ count: '*' }).min({ oldest: 'changed_at' }).first();
-  return { ...state, ready: Boolean(state?.ready), pending: Number(pending?.count ?? 0),
-    lagMs: pending?.oldest ? Math.max(0, Date.now() - Number(pending.oldest) * 1000) : 0 };
-}
-
 async function requireOutcomeProjection(db: Knex): Promise<void> {
   if (process.env.DASHBOARD_OUTCOME_PROJECTION === 'legacy' || !await db.schema.hasTable(T.state)
     || !(await db(T.state).where('id', 1).first('ready'))?.ready) {
@@ -552,8 +475,10 @@ export async function loadOutcomeSummaries(db: Knex, repository: string, options
 }
 
 type HistoryCursor = { v: number; entity: string; repository: string; revision: string; at: string | number; task: string; completion: number };
-export async function loadOutcomeHistory(db: Knex, repository: string, entityId: string, revision: string,
-  options: { limit?: number; cursor?: string } = {}): Promise<{ updates: OutcomeUpdate[]; nextCursor: string | null }> {
+export async function loadOutcomeHistory(db: Knex, repository: string,
+  ...reference: [entityId: string, revision: string, options?: { limit?: number; cursor?: string }]
+): Promise<{ updates: OutcomeUpdate[]; nextCursor: string | null }> {
+  const [entityId, revision, options = {}] = reference;
   // Concrete repository required even when the feed was requested with "all".
   if (!repository || repository === 'all') throw new OutcomeProjectionError(400, 'REPOSITORY_REQUIRED');
   const limit = Math.min(Math.max(options.limit ?? 20, 1), 50);
@@ -583,15 +508,5 @@ export async function loadOutcomeHistory(db: Knex, repository: string, entityId:
     return { updates: page.map(row => JSON.parse(row.payload)),
       nextCursor: rows.length > limit ? Buffer.from(JSON.stringify({ ...boundary,
         at: last.sort_at, task: last.task_id, completion: last.completion_id })).toString('base64url') : null };
-  });
-}
-
-/** Explicit rebuild; capture stays installed and source data is never modified. */
-export async function rebuildOutcomeProjection(db: Knex): Promise<void> {
-  await installOutcomeProjection(db);
-  await db.transaction(async tx => {
-    await tx(T.state).where('id', 1).update({ ready: 0, seeded: 0, cursor: '', processed: 0, failures: 0, error: null, epoch: randomUUID() });
-    await tx(T.runs).delete();
-    await tx(T.entities).delete();
   });
 }

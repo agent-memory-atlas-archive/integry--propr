@@ -330,6 +330,18 @@ export function createDashboardRoutes(deps: DashboardRoutesDeps) {
     }
   }
 
+  async function getOutcomeHistory(req: Request, res: Response, options: { repository: string; limit: number }): Promise<void> {
+    const { repository, limit } = options;
+    const { entityId, revision, cursor } = req.query;
+    if (typeof entityId !== 'string' || entityId.length > 100 || typeof revision !== 'string' || revision.length > 100
+      || (cursor !== undefined && (typeof cursor !== 'string' || cursor.length > 2048))) {
+      res.status(400).json({ error: 'Invalid history reference' }); return;
+    }
+    const page = await timeApiStage('dashboard.outcomeHistory', () => loadOutcomeHistory(db, repository, entityId, revision,
+      { limit, cursor: cursor as string | undefined }));
+    res.json({ repository, entityId, revision, items: page.updates.map(toOutcomeUpdate), nextCursor: page.nextCursor });
+  }
+
   async function getOutcomes(req: Request, res: Response): Promise<void> {
     const repository = readRepositoryFilter(req, res);
     if (repository === null) return;
@@ -355,14 +367,7 @@ export function createDashboardRoutes(deps: DashboardRoutesDeps) {
     try {
       if (req.query.view === 'status') { res.json(await outcomeProjectionStatus(db)); return; }
       if (history) {
-        const { entityId, revision, cursor } = req.query;
-        if (typeof entityId !== 'string' || entityId.length > 100 || typeof revision !== 'string' || revision.length > 100
-          || (cursor !== undefined && (typeof cursor !== 'string' || cursor.length > 2048))) {
-          res.status(400).json({ error: 'Invalid history reference' }); return;
-        }
-        const page = await timeApiStage('dashboard.outcomeHistory', () => loadOutcomeHistory(db, repository, entityId, revision,
-          { limit, cursor: cursor as string | undefined }));
-        res.json({ repository, entityId, revision, items: page.updates.map(toOutcomeUpdate), nextCursor: page.nextCursor });
+        await getOutcomeHistory(req, res, { repository, limit });
         return;
       }
       const summaryRequested = req.query.view === 'summary'
