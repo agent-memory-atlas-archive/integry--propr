@@ -65,6 +65,7 @@ export function UsageTipsSection() {
           <div key={tip.id} className="flex items-start gap-3 text-xs">
             <div className="min-w-0 flex-1">
               <a href={tip.docUrl} target="_blank" rel="noreferrer" className="font-medium text-slate-800 hover:underline">{tip.title}</a>
+              {tip.kind === 'discovery' && <span className="ml-2 text-[10px] text-slate-500">New to you</span>}
               <p className="mt-0.5 leading-5 text-slate-500">{tip.body}</p>
               {failures[tip.id] && <button className="mt-1 text-slate-600 underline" onClick={() => void dismiss(tip)}>Dismissal not saved. Retry</button>}
             </div>
