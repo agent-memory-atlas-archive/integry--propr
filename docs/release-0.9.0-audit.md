@@ -136,3 +136,31 @@ This follow-up changes only the migration test and this audit. The earlier
 build/link/visual review remains recorded above; no application behavior or UI
 changed, so no new visual previews were generated. The PR must remain **draft**
 with Ultrafix disabled.
+
+## Issue #2637 validation follow-up
+
+On 2026-09-29, reproduced the API lint regression in `mcpBrowser.test.ts`: the
+real-consent test callback had complexity 21 against the existing limit of 20.
+Extracted the optional connected-app capture into `captureConnectedAppsPreview`,
+reducing the callback complexity to 20. The capture flag, viewport, screenshot
+path and animation setting are preserved, as are all real browser assertions
+and lint rules. No application behavior changed.
+
+Passed after the refactor on the `release/0.9.0-docs-fixed` base
+(`73da70a516e41c94d2969ff8648972eb0fb3fc54`):
+
+- `npm run lint -w @propr/api -- --max-warnings 0`: exit 0, zero errors and zero warnings across the full API workspace.
+- `MCP_CAPTURE_PREVIEWS=false npm run test:mcp:browser`: 3 tests passed, 0 failed, 0 skipped; real HTTPS consent, desktop/mobile selection, CSRF, revocation and reauthentication assertions remain intact.
+- `node --test test/orchestratorMigrationPhase.test.mjs test/releaseValidation.test.mjs`: 28 tests passed (13 migration-phase and 15 release-validation), 0 failed, 0 skipped.
+- `npx --no-install tsx --test test/orchestratorProprUrlsDrift.test.ts`: 13 version/URL-drift tests passed, 0 failed, 0 skipped.
+- `EXPECTED_VERSION=0.9.0 RELEASE_TAG=v0.9.0 RELEASE_CANDIDATE=true npm run release:verify`: exit 0; release metadata consistent for v0.9.0.
+
+The browser fixture still reports its intentionally absent `mcp_access_log`
+table. Screenshot capture was disabled; all 12 existing documentation PNGs
+retain their pre-refactor SHA-256 hashes. No screenshots were recaptured and no
+preview files were generated for this nonvisual change. Only the browser test
+and this audit were edited; the release/docs implementation and migration fix
+are preserved. These are local targeted validation results, not a claim that
+broader CI or the full backend suite passed. The resulting PR must remain
+**draft**, with ProPR owning commits, push and PR creation; no merge, release
+publication, deployment, Ultrafix or recursive tasks were performed.
