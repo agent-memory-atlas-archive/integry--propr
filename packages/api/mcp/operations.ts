@@ -4,7 +4,7 @@ import { McpError } from './config.js';
 import { classifyError, type McpErrorEnvelope } from './errorEnvelope.js';
 import { digest } from './store.js';
 import type { McpPrincipal } from './policy.js';
-import { lifecycleFromLegacy } from './operationLifecycle.js';
+import { artifactsFromReceipt, failureFromReceipt, lifecycleFromLegacy } from './operationLifecycle.js';
 
 export interface OperationResult { status: number; data: unknown }
 export type LifecycleState = 'accepted' | 'running' | 'completed' | 'failed' | 'cancelled' | 'unknown';
@@ -66,7 +66,7 @@ export class McpOperations {
     const id = randomUUID();
     const acceptedAt = Date.now();
     const inserted = await this.db('mcp_operations').insert({ ...identity, id, tool, repository: repository || null,
-      payload_hash: payloadHash, state: 'running', lifecycle: 'accepted', accepted_at: acceptedAt, artifacts: JSON.stringify({}),
+      payload_hash: payloadHash, state: 'accepted', lifecycle: 'accepted', accepted_at: acceptedAt, artifacts: JSON.stringify({}),
       created_at: acceptedAt, updated_at: acceptedAt }).onConflict(['owner_id', 'grant_id', 'idempotency_key']).ignore().returning('id');
     if (!inserted.length) {
       const previous = await this.db<Operation>('mcp_operations').where(identity).first();
@@ -77,9 +77,11 @@ export class McpOperations {
       const result = await invoke(id);
       const state = operationState(result);
       await this.db('mcp_operations').where({ id }).update({ state, result: JSON.stringify(result.data), updated_at: Date.now() });
+      const receipt = { state, result: result.data };
+      await this.recordArtifacts(id, artifactsFromReceipt({ repository: repository || null }, receipt));
       const lifecycle = lifecycleFromLegacy(state);
       if (['completed', 'failed', 'cancelled'].includes(lifecycle)) {
-        const failure = errorEnvelope((result.data as { error?: unknown } | null)?.error);
+        const failure = errorEnvelope((result.data as { error?: unknown } | null)?.error) ?? failureFromReceipt(receipt);
         await this.finish(id, lifecycle as LifecycleOutcome, failure);
       } else if (lifecycle === 'unknown') {
         const failure = errorEnvelope((result.data as { error?: unknown } | null)?.error);
@@ -113,6 +115,20 @@ export class McpOperations {
     });
   }
 
+  async markUnknown(id: string): Promise<void> {
+    await this.db('mcp_operations').where({ id }).whereIn('lifecycle', ['accepted', 'running', 'unknown']).update({
+      lifecycle: 'unknown',
+      updated_at: Date.now(),
+    });
+  }
+
+  async markAccepted(id: string): Promise<void> {
+    await this.db('mcp_operations').where({ id, lifecycle: 'unknown' }).whereNull('started_at').update({
+      lifecycle: 'accepted',
+      updated_at: Date.now(),
+    });
+  }
+
   async recordArtifacts(id: string, partial: Record<string, unknown>): Promise<void> {
     if (!Object.keys(partial).length) return;
     await this.db('mcp_operations').where({ id }).update({
@@ -127,10 +143,14 @@ export class McpOperations {
 
   async finish(id: string, outcome: LifecycleOutcome, failure?: McpErrorEnvelope): Promise<void> {
     const at = Date.now();
-    await this.db('mcp_operations').where({ id }).whereIn('lifecycle', ['accepted', 'running', 'unknown']).update({
+    const eligible = this.db('mcp_operations').where({ id }).andWhere(builder => {
+      builder.whereIn('lifecycle', ['accepted', 'running', 'unknown']);
+      if (outcome === 'failed' && failure) builder.orWhere(nested => nested.where({ lifecycle: 'failed' }).whereNull('failure'));
+    });
+    await eligible.update({
       lifecycle: outcome,
-      finished_at: at,
-      failure: failure ? JSON.stringify(failure) : null,
+      finished_at: this.db.raw('COALESCE(finished_at, ?)', [at]),
+      failure: failure ? this.db.raw('COALESCE(failure, ?)', [JSON.stringify(failure)]) : null,
       updated_at: at,
     });
   }

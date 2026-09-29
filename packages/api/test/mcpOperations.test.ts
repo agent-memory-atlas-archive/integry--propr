@@ -7,12 +7,13 @@ import knex from 'knex';
 import { closeConnection } from '@propr/core';
 import { up } from '../../core/src/db/migrations/20260910220000_add_mcp.js';
 import { down as lifecycleDown, up as lifecycleUp } from '../../core/src/db/migrations/20261001000000_add_mcp_operation_lifecycle.js';
-import { McpOperations } from '../mcp/operations.js';
+import { McpOperations, type Operation } from '../mcp/operations.js';
 import { McpError } from '../mcp/config.js';
 import { callWorkflow } from '../mcp/adapter.js';
 import { parseClientMetadataDocument } from '../mcp/clients.js';
 import { createToolCatalog, type ToolDeps } from '../mcp/tools.js';
 import type { McpPrincipal } from '../mcp/policy.js';
+import { syncLifecycle } from '../mcp/operationLifecycle.js';
 
 after(closeConnection);
 
@@ -83,6 +84,13 @@ test('operation lifecycle transitions, artifacts and progress are durable and mo
   }, async () => ({ status: 202, data: { state: 'queued', pullRequest: 42, commentId: 99 } }));
   assert.equal((receipt.lifecycle as { state: string }).state, 'accepted');
   assert.equal((receipt.lifecycle as { startedAt: unknown }).startedAt, null);
+  assert.deepEqual((receipt.lifecycle as { artifacts: unknown }).artifacts, {
+    pullRequest: { repository: 'acme/repo', number: 42, url: 'https://github.com/acme/repo/pull/42' }, commentId: 99,
+  });
+  const replay = await operations.run(principal, {
+    tool: 'run_ultrafix', args: { idempotencyKey: 'lifecycle-key-1' }, repository: 'acme/repo',
+  }, async () => { throw new Error('Must not invoke on replay'); });
+  assert.deepEqual((replay.lifecycle as { artifacts: unknown }).artifacts, (receipt.lifecycle as { artifacts: unknown }).artifacts);
 
   const id = String(receipt.operationId);
   await operations.markStarted(id, 1_800_000_000_000);
@@ -99,10 +107,115 @@ test('operation lifecycle transitions, artifacts and progress are durable and mo
   assert.equal((projected.lifecycle as { startedAt: string }).startedAt, '2027-01-15T08:00:00.000Z');
   assert.ok((projected.lifecycle as { finishedAt: string }).finishedAt);
   assert.deepEqual((projected.lifecycle as { artifacts: unknown }).artifacts, {
-    taskId: 'task-1', pullRequest: { repository: 'acme/repo', number: 42, url: 'https://github.com/acme/repo/pull/42' },
+    taskId: 'task-1', pullRequest: { repository: 'acme/repo', number: 42, url: 'https://github.com/acme/repo/pull/42' }, commentId: 99,
   });
   assert.deepEqual((projected.lifecycle as { progress: unknown }).progress, { taskId: 'task-1', state: 'processing' });
   assert.equal((projected.lifecycle as { failure: unknown }).failure, null);
+});
+
+test('polling an accepted wrapper does not fabricate backend execution start', async t => {
+  const db = knex({ client: 'better-sqlite3', connection: { filename: ':memory:' }, useNullAsDefault: true });
+  t.after(() => db.destroy());
+  await db.schema.createTable('task_drafts', table => table.string('draft_id').primary());
+  await up(db); await lifecycleUp(db);
+  const operations = new McpOperations(db);
+  const principal = { user: { id: 'alice' }, grant: { id: 'grant-a' } } as McpPrincipal;
+  let finishInvocation!: (result: { status: number; data: unknown }) => void;
+  let invocationStarted!: () => void;
+  const started = new Promise<void>(resolve => { invocationStarted = resolve; });
+  const pending = operations.run(principal, {
+    tool: 'review_pull_request', args: { idempotencyKey: 'pending-wrapper-1' }, repository: 'acme/repo',
+  }, async () => {
+    invocationStarted();
+    return new Promise(resolve => { finishInvocation = resolve; });
+  });
+  await started;
+
+  const row = await db('mcp_operations').first() as Operation;
+  const polled = operations.project(row);
+  assert.equal(polled.state, 'accepted');
+  await syncLifecycle(operations, row, polled);
+  const unchanged = operations.project(await operations.get(principal, row.id));
+  assert.equal((unchanged.lifecycle as { state: string }).state, 'accepted');
+  assert.equal((unchanged.lifecycle as { startedAt: unknown }).startedAt, null);
+
+  finishInvocation({ status: 202, data: { state: 'queued' } });
+  const queued = await pending;
+  assert.equal(queued.state, 'queued');
+  assert.equal((queued.lifecycle as { state: string }).state, 'accepted');
+  assert.equal((queued.lifecycle as { startedAt: unknown }).startedAt, null);
+});
+
+test('tracker uncertainty resolves from later evidence and preserves observed timestamps and terminal outcomes', async t => {
+  const db = knex({ client: 'better-sqlite3', connection: { filename: ':memory:' }, useNullAsDefault: true });
+  t.after(() => db.destroy());
+  await db.schema.createTable('task_drafts', table => table.string('draft_id').primary());
+  await up(db); await lifecycleUp(db);
+  const operations = new McpOperations(db);
+  const principal = { user: { id: 'alice' }, grant: { id: 'grant-a' } } as McpPrincipal;
+  const receipt = await operations.run(principal, {
+    tool: 'send_task_followup', args: { idempotencyKey: 'tracker-unknown-1' }, repository: 'acme/repo',
+  }, async () => ({ status: 202, data: { state: 'queued' } }));
+  const id = String(receipt.operationId);
+  const row = await operations.get(principal, id);
+
+  await syncLifecycle(operations, row, { ...receipt, state: 'unknown' });
+  assert.equal((operations.project(await operations.get(principal, id)).lifecycle as { state: string }).state, 'unknown');
+  const deps = { db, policy: { repository: async () => {}, requirePermission: () => {}, config: {} } as never,
+    taskQueue: {} as never, redisClient: {} as never, runtimeBuildQueue: {} as never } as ToolDeps;
+  const list = createToolCatalog(deps).find(tool => tool.name === 'list_operations')!;
+  const unknown = (await list.run({ principal, args: list.schema.parse({ lifecycle: 'unknown' }) })).data as { operations: unknown[] };
+  const active = (await list.run({ principal, args: list.schema.parse({ lifecycle: 'active' }) })).data as { operations: unknown[] };
+  assert.equal(unknown.operations.length, 1);
+  assert.deepEqual(active.operations, []);
+  await syncLifecycle(operations, row, { ...receipt, state: 'queued', targetState: { taskId: 'task-1', state: 'pending' } });
+  assert.equal((operations.project(await operations.get(principal, id)).lifecycle as { state: string }).state, 'accepted');
+
+  const observedAt = 1_800_000_000_000;
+  await syncLifecycle(operations, row, { ...receipt, state: 'running', targetState: { taskId: 'task-1', state: 'processing', timestamp: observedAt } });
+  await syncLifecycle(operations, row, { ...receipt, state: 'unknown' });
+  let lifecycle = operations.project(await operations.get(principal, id)).lifecycle as { state: string; startedAt: string | null };
+  assert.equal(lifecycle.state, 'unknown');
+  assert.equal(lifecycle.startedAt, '2027-01-15T08:00:00.000Z');
+  await syncLifecycle(operations, row, { ...receipt, state: 'running', targetState: { taskId: 'task-1', state: 'processing' } });
+  lifecycle = operations.project(await operations.get(principal, id)).lifecycle as typeof lifecycle;
+  assert.equal(lifecycle.state, 'running');
+  assert.equal(lifecycle.startedAt, '2027-01-15T08:00:00.000Z');
+  await operations.finish(id, 'completed');
+  await syncLifecycle(operations, row, { ...receipt, state: 'unknown' });
+  assert.equal((operations.project(await operations.get(principal, id)).lifecycle as { state: string }).state, 'completed');
+});
+
+test('tracker task and review failures populate and can enrich the durable failure envelope', async t => {
+  const db = knex({ client: 'better-sqlite3', connection: { filename: ':memory:' }, useNullAsDefault: true });
+  t.after(() => db.destroy());
+  await db.schema.createTable('task_drafts', table => table.string('draft_id').primary());
+  await up(db); await lifecycleUp(db);
+  const operations = new McpOperations(db);
+  const principal = { user: { id: 'alice' }, grant: { id: 'grant-a' } } as McpPrincipal;
+  const create = (tool: string, key: string) => operations.run(principal, {
+    tool, args: { idempotencyKey: key }, repository: 'acme/repo',
+  }, async () => ({ status: 202, data: { state: 'queued' } }));
+
+  const task = await create('send_task_followup', 'tracker-failure-1');
+  const taskRow = await operations.get(principal, String(task.operationId));
+  await syncLifecycle(operations, taskRow, { ...task, state: 'failed', targetState: { taskId: 'task-1', state: 'failed' } });
+  assert.equal((operations.project(await operations.get(principal, taskRow.id)).lifecycle as { failure: unknown }).failure, null);
+  await syncLifecycle(operations, taskRow, { ...task, state: 'failed', targetState: { taskId: 'task-1', state: 'failed', reason: 'Agent stopped' } });
+  assert.deepEqual((operations.project(await operations.get(principal, taskRow.id)).lifecycle as { failure: unknown }).failure, {
+    code: 'EXECUTION_FAILED', message: 'Agent stopped', stage: 'internal', retryable: false, status: 500,
+  });
+
+  const review = await create('review_pull_request', 'review-failure-01');
+  const reviewRow = await operations.get(principal, String(review.operationId));
+  await syncLifecycle(operations, reviewRow, { ...review, state: 'failed', targetState: {
+    taskId: 'review-task', state: 'completed', reason: 'Review processing completed successfully',
+    reviewResults: [{ success: false, error: 'Reviewer unavailable' }, { success: false, error: 'Model timed out' }],
+  } });
+  assert.deepEqual((operations.project(await operations.get(principal, reviewRow.id)).lifecycle as { failure: unknown }).failure, {
+    code: 'REVIEW_FAILED', message: 'Reviewer unavailable; Model timed out', stage: 'internal', retryable: false, status: 500,
+    details: { failedReviewCount: 2 },
+  });
 });
 
 test('list_operations filters active receipts by exact owner and grant without refreshing trackers', async t => {
@@ -122,7 +235,8 @@ test('list_operations filters active receipts by exact owner and grant without r
   await operations.run(principal, { tool: 'run_ultrafix', args: { idempotencyKey: 'done-ultrafix-01' }, repository: 'acme/repo' },
     async () => ({ status: 200, data: { changed: true } }));
 
-  const deps = { db, policy: {} as never, taskQueue: {} as never, redisClient: {} as never, runtimeBuildQueue: {} as never } as ToolDeps;
+  const deps = { db, policy: { repository: async () => {}, requirePermission: () => {}, config: {} } as never,
+    taskQueue: {} as never, redisClient: {} as never, runtimeBuildQueue: {} as never } as ToolDeps;
   const tool = createToolCatalog(deps).find(candidate => candidate.name === 'list_operations')!;
   const args = tool.schema.parse({ tool: 'run_ultrafix', lifecycle: 'active' });
   const result = (await tool.run({ principal, args })).data as { operations: Array<Record<string, unknown>>; nextOffset: number | null };
@@ -132,6 +246,56 @@ test('list_operations filters active receipts by exact owner and grant without r
   assert.equal(result.operations[0].refreshWith, 'get_operation');
   const hidden = (await tool.run({ principal: otherGrant, args: tool.schema.parse({ tool: 'run_ultrafix', lifecycle: 'active' }) })).data as { operations: unknown[] };
   assert.deepEqual(hidden.operations, []);
+});
+
+test('list_operations filters current repository, tool permission and cancellation-source authorization before paging', async t => {
+  const db = knex({ client: 'better-sqlite3', connection: { filename: ':memory:' }, useNullAsDefault: true });
+  t.after(() => db.destroy());
+  await db.schema.createTable('task_drafts', table => table.string('draft_id').primary());
+  await up(db); await lifecycleUp(db);
+  const operations = new McpOperations(db);
+  const principal = { user: { id: 'alice' }, grant: { id: 'grant-a' }, authorization: { permissions: [] } } as unknown as McpPrincipal;
+  const run = (tool: string, key: string, repository?: string, data: Record<string, unknown> = {}) => operations.run(principal, {
+    tool, args: { idempotencyKey: key }, repository,
+  }, async () => ({ status: 200, data }));
+  const forbiddenPermission = await run('update_execution_settings', 'permission-hidden-1', undefined, { secret: 'permission-secret' });
+  const forbiddenRepository = await run('run_ultrafix', 'repository-hidden1', 'acme/forbidden', { secret: 'repository-secret' });
+  const firstAllowed = await run('run_ultrafix', 'allowed-operation1', 'acme/allowed', { marker: 'first' });
+  const secondAllowed = await run('review_pull_request', 'allowed-operation2', 'acme/allowed', { marker: 'second' });
+  const source = await run('review_pull_request', 'cancel-source-key', 'acme/forbidden', { marker: 'source' });
+  const cancellation = await run('cancel_operation', 'cancel-receipt-01', undefined, { operationId: source.operationId, cancellation: 'requested' });
+  const now = Date.now();
+  for (const [receipt, acceptedAt] of [[forbiddenPermission, now], [forbiddenRepository, now - 1], [firstAllowed, now - 2], [secondAllowed, now - 3], [source, now - 4], [cancellation, now - 5]] as const) {
+    await db('mcp_operations').where({ id: receipt.operationId }).update({ accepted_at: acceptedAt, created_at: acceptedAt });
+  }
+
+  const policy = {
+    config: {},
+    repository: async (_actor: McpPrincipal, repository: string) => {
+      if (repository === 'acme/forbidden') throw new McpError('REPOSITORY_FORBIDDEN', 'No current access', 403);
+    },
+    requirePermission: (actor: McpPrincipal, permission: string) => {
+      if (!actor.authorization.permissions.includes(permission as never)) throw new McpError('INSUFFICIENT_INSTANCE_PERMISSION', 'Permission removed', 403);
+    },
+  };
+  const deps = { db, policy, taskQueue: {} as never, redisClient: {} as never, runtimeBuildQueue: {} as never } as unknown as ToolDeps;
+  const catalog = createToolCatalog(deps);
+  const list = catalog.find(tool => tool.name === 'list_operations')!;
+  const get = catalog.find(tool => tool.name === 'get_operation')!;
+
+  const pageOne = (await list.run({ principal, args: list.schema.parse({ limit: 1 }) })).data as { operations: Array<Record<string, unknown>>; nextOffset: number | null };
+  assert.deepEqual(pageOne.operations.map(item => item.operationId), [firstAllowed.operationId]);
+  assert.equal(pageOne.nextOffset, 1);
+  assert.doesNotMatch(JSON.stringify(pageOne), /permission-secret|repository-secret/);
+  const pageTwo = (await list.run({ principal, args: list.schema.parse({ offset: 1, limit: 1 }) })).data as { operations: Array<Record<string, unknown>>; nextOffset: number | null };
+  assert.deepEqual(pageTwo.operations.map(item => item.operationId), [secondAllowed.operationId]);
+  assert.equal(pageTwo.nextOffset, null);
+  const cancellations = (await list.run({ principal, args: list.schema.parse({ tool: 'cancel_operation' }) })).data as { operations: unknown[] };
+  assert.deepEqual(cancellations.operations, []);
+
+  await assert.rejects(get.run({ principal, args: get.schema.parse({ operationId: forbiddenPermission.operationId }) }), /Permission removed/);
+  await assert.rejects(get.run({ principal, args: get.schema.parse({ operationId: forbiddenRepository.operationId }) }), /No current access/);
+  await assert.rejects(get.run({ principal, args: get.schema.parse({ operationId: cancellation.operationId }) }), /No current access/);
 });
 
 test('operation lifecycle migration backfills and rolls back on SQLite', async t => {

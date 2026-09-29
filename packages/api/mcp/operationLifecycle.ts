@@ -1,4 +1,4 @@
-import type { McpErrorEnvelope } from './errorEnvelope.js';
+import { redactSecrets, type McpErrorEnvelope } from './errorEnvelope.js';
 import type { McpOperations, LifecycleOutcome, LifecycleState, Operation } from './operations.js';
 
 const startedTaskStates = new Set(['processing', 'claude_execution', 'post_processing']);
@@ -35,7 +35,7 @@ export function lifecycleFromLegacy(state: unknown): LifecycleState {
 }
 
 /** Collect stable output handles regardless of which legacy receipt layer exposed them. */
-export function artifactsFromReceipt(row: Operation, receipt: Record<string, unknown>): Record<string, unknown> {
+export function artifactsFromReceipt(row: Pick<Operation, 'repository'>, receipt: Record<string, unknown>): Record<string, unknown> {
   const result = record(receipt.result) ?? {};
   const continuation = record(result.continuation) ?? {};
   const target = record(receipt.targetState) ?? {};
@@ -84,6 +84,34 @@ export function artifactsFromReceipt(row: Operation, receipt: Record<string, unk
   return artifacts;
 }
 
+function publicFailure(code: string, message: string, details?: Record<string, unknown>): McpErrorEnvelope {
+  return { code, message: redactSecrets(message), stage: 'internal', retryable: false, status: 500, ...(details ? { details } : {}) };
+}
+
+/** Normalize durable backend failure evidence into the public error envelope. */
+export function failureFromReceipt(receipt: Record<string, unknown>): McpErrorEnvelope | undefined {
+  const result = record(receipt.result);
+  const resultError = record(result?.error);
+  if (resultError && typeof resultError.code === 'string' && typeof resultError.message === 'string'
+    && typeof resultError.retryable === 'boolean' && typeof resultError.status === 'number') {
+    return resultError as unknown as McpErrorEnvelope;
+  }
+
+  const target = record(receipt.targetState);
+  const reviewResults = Array.isArray(target?.reviewResults) ? target.reviewResults
+    : Array.isArray(result?.reviewResults) ? result.reviewResults : [];
+  const failedReviews = reviewResults.map(record).filter((review): review is Record<string, unknown> => review?.success === false);
+  if (failedReviews.length && failedReviews.length === reviewResults.length) {
+    const reasons = failedReviews.flatMap(review => typeof review.error === 'string' && review.error.length ? [review.error] : []);
+    return publicFailure('REVIEW_FAILED', reasons.length ? reasons.join('; ') : 'Every requested review failed.', {
+      failedReviewCount: failedReviews.length,
+    });
+  }
+
+  const reason = nonEmptyString(target?.reason, result?.reason);
+  return reason ? publicFailure('EXECUTION_FAILED', reason) : undefined;
+}
+
 function lifecycleOutcome(
   row: Operation,
   target: Record<string, unknown> | undefined,
@@ -120,14 +148,22 @@ export async function syncLifecycle(
 
   const targetState = String(target?.state ?? '');
   const receiptState = String(receipt.state ?? '');
-  if (startedTaskStates.has(targetState) || receiptState === 'running') {
+  const result = record(receipt.result);
+  const loop = record(result?.loop);
+  const observedStart = startedTaskStates.has(targetState) || target?.queueState === 'active' || loop?.active === true;
+  if (observedStart) {
     await operations.markStarted(row.id, epochMilliseconds(target?.timestamp));
   }
 
   const outcome = lifecycleOutcome(row, target, receiptState, targetState);
   if (outcome) {
-    const result = record(receipt.result);
-    await operations.finish(row.id, outcome, record(result?.error) as McpErrorEnvelope | undefined);
+    await operations.finish(row.id, outcome, outcome === 'failed' ? failureFromReceipt(receipt) : undefined);
+  } else if (receiptState === 'unknown') {
+    await operations.markUnknown(row.id);
+  } else if (receiptState === 'queued' && target) {
+    // A task or queue can appear after an earlier timeout. Resolve pre-start
+    // uncertainty without erasing evidence that execution had already begun.
+    await operations.markAccepted(row.id);
   }
 
   await syncCancellation(operations, row, receipt);

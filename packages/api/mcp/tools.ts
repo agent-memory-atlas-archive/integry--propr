@@ -297,19 +297,47 @@ export function createToolCatalog(deps: ToolDeps): McpTool[] {
   workflow(tools, { name: 'delete_task', description: 'Delete an exact inactive task and its persisted execution history. Active tasks must first be cancelled.', scope: 'execute', schema: z.object({ ...taskShape, ...mutationShape }).strict(), target: taskTarget }, tasks.deleteTask, args => ({ params: { taskId: args.taskId }, query: { force: 'false' } }));
 
   const operations = new McpOperations(db);
-  tools.push({ name: 'get_operation', description: 'Read a durable mutation receipt and honest lifecycle. "accepted" means the request was recorded and handed to the backend; "running" means execution was observed; the loop/receipt is only "completed" when the backend reached a terminal success state. Poll no faster than retryAfterSeconds.', scope: 'read', readOnly: true, schema: z.object({ operationId: z.uuid() }).strict(), run: async ({ principal, args }) => {
-    const row = await operations.get(principal, args.operationId);
-    if (row.repository) await policy.repository(principal, row.repository, false, { includeDisabled: row.tool.endsWith('_repository_configuration'), allowUnconfigured: row.tool === 'remove_repository_configuration' });
+  const operationResult = (row: Operation): Record<string, unknown> => {
+    if (!row.result) return {};
+    try { return JSON.parse(row.result); } catch { return {}; }
+  };
+  const authorizeStoredTool = async (
+    row: Operation,
+    principal: McpPrincipal,
+    repositories?: Map<string, Promise<void>>,
+  ): Promise<void> => {
+    if (row.repository) {
+      const options = { includeDisabled: row.tool.endsWith('_repository_configuration'), allowUnconfigured: row.tool === 'remove_repository_configuration' };
+      const key = `${row.repository}\0${Number(options.includeDisabled)}${Number(options.allowUnconfigured)}`;
+      let authorization = repositories?.get(key);
+      if (!authorization) {
+        authorization = policy.repository(principal, row.repository, false, options);
+        repositories?.set(key, authorization);
+      }
+      await authorization;
+    }
     const original = tools.find(tool => tool.name === row.tool);
     if (original?.permission) policy.requirePermission(principal, original.permission);
-    if (row.tool === 'cancel_operation' && row.result && JSON.parse(row.result).operationId) {
-      const source = await operations.get(principal, JSON.parse(row.result).operationId);
-      if (source.repository) await policy.repository(principal, source.repository);
-      row.repository = source.repository;
-    }
+  };
+  const authorizeOperation = async (
+    row: Operation,
+    principal: McpPrincipal,
+    repositories?: Map<string, Promise<void>>,
+  ): Promise<void> => {
+    await authorizeStoredTool(row, principal, repositories);
+    const sourceId = row.tool === 'cancel_operation' ? operationResult(row).operationId : undefined;
+    if (typeof sourceId !== 'string') return;
+    const source = await operations.get(principal, sourceId);
+    await authorizeStoredTool(source, principal, repositories);
+    row.repository = source.repository;
+  };
+  tools.push({ name: 'get_operation', description: 'Read a durable mutation receipt and honest lifecycle. "accepted" means the request was recorded and handed to the backend; "running" means execution was observed; the loop/receipt is only "completed" when the backend reached a terminal success state. Poll no faster than retryAfterSeconds.', scope: 'read', readOnly: true, schema: z.object({ operationId: z.uuid() }).strict(), run: async ({ principal, args }) => {
+    const row = await operations.get(principal, args.operationId);
+    await authorizeOperation(row, principal);
     const receipt = operations.project(row);
-    const result = row.result ? JSON.parse(row.result) : {};
-    const continuation = result.continuation || result;
+    const result = operationResult(row);
+    const continuation = result.continuation && typeof result.continuation === 'object' && !Array.isArray(result.continuation)
+      ? result.continuation as Record<string, unknown> : result;
     if (continuation.planId) receipt.targetState = await db('task_drafts').where({ draft_id: continuation.planId, user_id: principal.user.id }).first('status', 'paused', 'mcp_revision');
     if (continuation.goalId) receipt.targetState = await db('goals').where({ goal_id: continuation.goalId, owner_id: principal.user.id }).first('desired_state', 'result_state', 'current_task_id');
     if (continuation.taskId) receipt.targetState = await db('task_history').where({ task_id: continuation.taskId }).orderBy('history_id', 'desc').first('state', 'timestamp');
@@ -344,10 +372,32 @@ export function createToolCatalog(deps: ToolDeps): McpTool[] {
       if (args.repository) query.where('repository', args.repository);
       if (args.lifecycle === 'active') query.whereIn('lifecycle', ['accepted', 'running']);
       else if (args.lifecycle) query.where('lifecycle', args.lifecycle);
-      const rows = await query.orderByRaw('COALESCE(accepted_at, created_at) DESC').orderBy('id', 'desc')
-        .offset(args.offset).limit(args.limit);
-      return ok({ operations: rows.map(row => ({ ...operations.project(row), refreshWith: 'get_operation' })),
-        nextOffset: rows.length === args.limit ? args.offset + args.limit : null });
+      const ordered = query.orderByRaw('COALESCE(accepted_at, created_at) DESC').orderBy('id', 'desc');
+      const authorized: Operation[] = [];
+      const repositoryAuthorizations = new Map<string, Promise<void>>();
+      const wanted = args.offset + args.limit + 1;
+      const batchSize = Math.max(50, args.limit);
+      let databaseOffset = 0;
+      while (authorized.length < wanted) {
+        const rows = await ordered.clone().offset(databaseOffset).limit(batchSize);
+        if (!rows.length) break;
+        databaseOffset += rows.length;
+        for (const row of rows) {
+          try {
+            await authorizeOperation(row, principal, repositoryAuthorizations);
+            authorized.push(row);
+          } catch (error) {
+            // Discovery is a filtered view: current authorization failures do
+            // not reveal that a matching receipt exists.
+            if (!(error instanceof McpError) || ![403, 404].includes(error.status)) throw error;
+          }
+          if (authorized.length >= wanted) break;
+        }
+        if (rows.length < batchSize) break;
+      }
+      const page = authorized.slice(args.offset, args.offset + args.limit);
+      return ok({ operations: page.map(row => ({ ...operations.project(row), refreshWith: 'get_operation' })),
+        nextOffset: authorized.length > args.offset + args.limit ? args.offset + args.limit : null });
     } });
   tools.push({ name: 'cancel_operation', description: 'Request cancellation of an accepted plan generation, goal or task operation. Completed external effects cannot be undone.', scope: 'execute', schema: z.object({ ...mutationShape, operationId: z.uuid() }).strict(), run: async ({ principal, args }) => {
     const row = await operations.get(principal, args.operationId);
