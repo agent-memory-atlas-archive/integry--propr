@@ -79,3 +79,16 @@ Safe runs are also about what happens when something fails:
 - Revert operations run as signed system tasks: requests are authorized with `SYSTEM_TASK_SECRET`, so a revert cannot be injected through normal intake paths.
 
 For operational details, see [Observability And Control](./observability.md) and the architecture pages.
+
+## Goals and recovery
+
+[Direct goals](./goals.md) use a long-lived workspace and draft PR with coherent
+checkpoints. ProPR owns commits and pushes; checkpoint cadence is guidance, not a
+forced timer. Orchestrated goals let the agent decompose work and submit it through
+ProPR. Corrective input and pause/cancel acknowledgement follow the provider's
+capabilities and execution boundaries.
+
+Task reconciliation persists completion and recovery state. Follow-up cleanup
+finishes before releasing its worktree lock, and interrupted CI cancellation
+retains a restart obligation for a still-current PR head. See [CI cancellation](./pr-followup.md#cancelling-obsolete-checks-during-follow-up)
+for opt-in workflow selection and recovery behavior.

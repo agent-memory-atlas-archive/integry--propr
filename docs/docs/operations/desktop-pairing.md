@@ -19,7 +19,7 @@ authentication capabilities:
 {
   "schemaVersion": 1,
   "product": "ProPR",
-  "version": "0.8.15",
+  "version": "0.9.0",
   "apiCompatibility": "2026-06-27",
   "uiCompatibility": "2026-06-27",
   "canonicalEndpoint": "https://t-abc123.propr.dev",

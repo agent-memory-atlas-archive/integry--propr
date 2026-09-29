@@ -11,7 +11,7 @@ import { createServer } from 'node:https';
 import type { AddressInfo } from 'node:net';
 import express from 'express';
 import session from 'express-session';
-import { chromium } from 'playwright';
+import { chromium, type Page } from 'playwright';
 import knex from 'knex';
 import { closeConnection } from '@propr/core';
 import { up } from '../../core/src/db/migrations/20260910220000_add_mcp.js';
@@ -23,6 +23,13 @@ import { mountMcp } from '../mcp/server.js';
 import { configureApiProxyTrust } from '../requestRateLimits.js';
 
 after(async () => closeConnection());
+
+async function captureConnectedAppsPreview(page: Page, capture: boolean) {
+  if (capture) {
+    await page.setViewportSize({ width: 1200, height: 800 });
+    await page.screenshot({ path: '.propr/previews/mcp-connected-apps.png', animations: 'disabled' });
+  }
+}
 
 test('authorize limits GET and POST before client lookup and respects explicit proxy trust', async t => {
   const environment = {
@@ -294,6 +301,7 @@ test('real consent and connected-app routes work at desktop/mobile widths and en
     assert.deepEqual(grant?.repositories, ['acme/web-app']);
     await page.goto(`${origin}/mcp/apps`);
     assert.equal(await page.getByRole('heading', { name: 'Development chat client' }).count(), 1);
+    await captureConnectedAppsPreview(page, capture);
 
     await page.getByRole('button', { name: 'Revoke access' }).click();
     await page.getByText('No connected apps.').waitFor();

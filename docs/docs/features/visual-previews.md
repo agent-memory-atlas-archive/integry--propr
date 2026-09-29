@@ -50,7 +50,7 @@ must be replaced in Settings or re-imported by running setup again.
 
 ## Configure A Repository
 
-On **Repositories**, turn on **Visual previews** beneath the repository entry. Choose **Images**, **Videos**, or both, then optionally add capture instructions such as:
+On **Repositories**, open the repository settings and turn on **Visual previews**. Choose **Images**, **Videos**, or both, then optionally add capture instructions such as:
 
 ```text
 Capture separate desktop and mobile views. Open the new settings dialog and focus the changed controls.
@@ -233,3 +233,11 @@ future retention timestamp before publishing a link.
 
 See [managed preview operations](../operations/propr-connect.md#managed-preview-storage-operations)
 for quota recovery, offline behavior, log handling, and release validation.
+
+## View previews and recover private images
+
+Task and goal details show published previews beside the work that produced them. Select an image to open the lightbox; double-click to zoom, use arrow keys to move between images and Escape to close it. Videos use their playback controls.
+
+![Task detail showing published visual evidence in the full-width preview gallery](/img/screenshots/0.9.0/previews.png)
+
+Private GitHub attachments use ProPR's authenticated media endpoint, including through the desktop network boundary. If an image is unavailable, follow the displayed diagnostic and check that the current GitHub authorization can read that repository and PR. Reauthenticate with GitHub when requested; a public attachment URL alone does not grant access to private evidence. Managed-original viewer links have their own Connect sign-in and repository authorization requirements. See [Desktop troubleshooting](../operations/desktop-application.md#troubleshooting) for the distinction between GitHub reauthorization and re-pairing an instance.
