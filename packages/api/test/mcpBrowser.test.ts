@@ -111,7 +111,12 @@ test('real consent and connected-app routes work at desktop/mobile widths and en
   const origin = `https://127.0.0.1:${(server.address() as AddressInfo).port}`;
   const oauth = new McpOAuthProvider(new McpStore(db, randomBytes(32)), { origin, resource: `${origin}/api/mcp`, instanceId: 'development-instance', encryptionKey: randomBytes(32) });
   let accessibleRepositories = ['acme/web-app', 'acme/api-service'];
-  mountMcpBrowser(app, oauth, { accessibleRepositories: async () => accessibleRepositories });
+  mountMcpBrowser(app, oauth, {
+    accessibleRepositories: async () => accessibleRepositories,
+    repositoryPresentation: async names => names.map(name => ({
+      name, starred: name === 'acme/web-app', iconPath: name === 'acme/web-app' ? 'public/logo.png' : null, iconRevision: 'main',
+    })),
+  });
   const client = await oauth.clientsStore.registerClient!({ client_name: 'Development chat client', token_endpoint_auth_method: 'none', redirect_uris: ['https://client.example/callback'], grant_types: ['authorization_code', 'refresh_token'], response_types: ['code'] });
   const verifier = randomBytes(32).toString('base64url');
   const authorize = async (scopes = ['read', 'plan', 'execute'], clientName = client.client_name) => {
@@ -125,6 +130,11 @@ test('real consent and connected-app routes work at desktop/mobile widths and en
     browser = await chromium.launch({ executablePath, args: ['--no-sandbox'] });
     const context = await browser.newContext({ viewport: { width: 1200, height: 1000 }, ignoreHTTPSErrors: true });
     const page = await context.newPage();
+    // Serve the project's logo through the real repository icon URL; no external requests.
+    const fixtureIcon = await readFile('propr-ui/public/logo.png');
+    await page.route('https://raw.githubusercontent.com/**', route => route.fulfill({
+      contentType: 'image/png', body: fixtureIcon,
+    }));
     const response = await page.goto(consent);
     assert.equal(response?.headers()['cache-control'], 'no-store');
     const policy = response?.headers()['content-security-policy'] || '';
@@ -134,6 +144,7 @@ test('real consent and connected-app routes work at desktop/mobile widths and en
     assert.match(policy, /frame-ancestors 'none'; base-uri 'none'/);
     assert.ok(policy.includes(`form-action 'self' https://client.example`));
     assert.ok(policy.includes(`style-src 'nonce-${nonce}'`));
+    assert.ok(policy.includes('img-src https://raw.githubusercontent.com'));
     assert.doesNotMatch(policy, /unsafe-inline|unsafe-eval|\*/);
     assert.equal(await page.locator('script').evaluate(element => (element as HTMLScriptElement).nonce), nonce);
     assert.equal(await page.locator('style').evaluate(element => (element as HTMLStyleElement).nonce), nonce);
@@ -215,6 +226,8 @@ test('real consent and connected-app routes work at desktop/mobile widths and en
       await assertCounts(2, 0);
       if (device === 'desktop') {
         await page.keyboard.press('Tab');
+        assert.equal(await page.getByRole('searchbox', { name: 'Filter repositories' }).evaluate(element => element === document.activeElement), true);
+        await page.keyboard.press('Tab');
         assert.equal(await page.getByLabel('acme/web-app').evaluate(element => element === document.activeElement), true);
         await page.keyboard.press('Space');
       } else await page.getByLabel('acme/web-app').check();
@@ -229,10 +242,40 @@ test('real consent and connected-app routes work at desktop/mobile widths and en
       assert.equal(page.url(), consent);
       assert.equal(consentPosts, 0, 'bulk and individual selection must never submit consent');
       assert.equal((await db('mcp_records').where({ kind: 'grant' })).length, 0);
-      if (capture) await page.screenshot({ path: `.propr/previews/mcp-consent-${device}.png`, fullPage: true });
+      if (capture) await repositories.screenshot({ path: `.propr/previews/mcp-consent-${device}.png` });
     };
     await exerciseSelections('desktop');
     await exerciseSelections('mobile');
+    assert.equal(await repositories.getByText('Starred', { exact: true }).isVisible(), true);
+    assert.equal(await repositories.getByText('All Repositories', { exact: true }).isVisible(), true);
+    assert.deepEqual(await repositories.getByRole('checkbox').evaluateAll(elements => elements.map(element => (element as HTMLInputElement).value)), ['acme/web-app', 'acme/api-service']);
+    const filter = page.getByRole('searchbox', { name: 'Filter repositories' });
+    await filter.fill(' API-SERVICE ');
+    assert.equal(await page.getByLabel('acme/web-app').isVisible(), false);
+    assert.equal(await repositories.getByText('Starred', { exact: true }).isVisible(), false);
+    assert.equal(await page.getByLabel('acme/api-service').isVisible(), true);
+    await assertCounts(2, 1);
+    if (capture) await repositories.screenshot({ path: '.propr/previews/mcp-consent-filtered.png' });
+    await filter.press('Enter');
+    assert.equal(consentPosts, 0, 'filter Enter must not approve access');
+    await repositories.getByRole('button', { name: 'Select all repositories' }).click();
+    await assertCounts(2, 2);
+    await repositories.getByRole('button', { name: 'Clear repositories' }).click();
+    await assertCounts(2, 0);
+    await filter.fill('no-match');
+    assert.equal(await repositories.getByText('No repositories found').isVisible(), true);
+    assert.equal(await repositories.getByRole('checkbox').count(), 0);
+    await filter.press('Escape');
+    assert.equal(await repositories.getByRole('checkbox').count(), 2);
+    await page.getByLabel('acme/web-app').check();
+    // Failed icons use the same GitHub fallback as the main app.
+    await page.route('https://raw.githubusercontent.com/**', route => route.abort());
+    const icon = repositories.getByTestId('repository-icon-image');
+    await icon.evaluate(image => { (image as HTMLImageElement).src += '?retry=1'; });
+    await repositories.locator('[data-repository-icon-fallback]').waitFor({ state: 'visible' });
+    // A selected repository hidden by filtering must still be submitted.
+    await filter.fill('api');
+    await assertCounts(2, 1);
     // Repositories are reauthorized at submission, even if they were originally offered.
     accessibleRepositories = ['acme/api-service'];
     assert.equal((await context.request.post(`${origin}/mcp/consent`, { form: forgedForm, headers: { Origin: origin } })).status(), 400);
@@ -262,6 +305,7 @@ test('real consent and connected-app routes work at desktop/mobile widths and en
     await noScriptPage.goto(await authorize());
     assert.equal(await noScriptPage.getByRole('button', { name: 'Select all permissions' }).isVisible(), false);
     assert.equal(await noScriptPage.getByRole('button', { name: 'Clear repositories' }).isVisible(), false);
+    assert.equal(await noScriptPage.getByRole('searchbox', { name: 'Filter repositories' }).isVisible(), false);
     await noScriptPage.getByLabel('plan', { exact: true }).check();
     await noScriptPage.getByLabel('plan', { exact: true }).uncheck();
     await noScriptPage.getByLabel('acme/api-service').check();
@@ -298,8 +342,9 @@ test('real consent and connected-app routes work at desktop/mobile widths and en
     assert.equal(new URL(page.url()).searchParams.has('code'), false);
     assert.equal((await db('mcp_records').where({ kind: 'grant' })).length, 2, 'denial must not create another grant');
     if (capture) await writeFile('.propr/previews/manifest.json', JSON.stringify({ previews: [
-      { path: '.propr/previews/mcp-consent-desktop.png', title: 'MCP consent bulk controls', description: 'Actual consent route after bulk selection and individual changes, with separate permission/repository controls and selected counts. Fictional fixture data.' },
-      { path: '.propr/previews/mcp-consent-mobile.png', title: 'Mobile MCP consent bulk controls', description: 'The same selected consent state at a 390-pixel mobile viewport.' },
+      { path: '.propr/previews/mcp-consent-desktop.png', title: 'MCP repository selection', description: 'Actual consent route with shared repository rows, icons, starred grouping and a name filter. Fictional fixture data.' },
+      { path: '.propr/previews/mcp-consent-mobile.png', title: 'Mobile MCP repository selection', description: 'The same selected consent state at a 390-pixel mobile viewport.' },
+      { path: '.propr/previews/mcp-consent-filtered.png', title: 'Filtered repository selection', description: 'Name filtering shows the matching repository while retaining the selected repository outside the filter.' },
     ], toolSuggestions: [] }, null, 2));
   } finally { await browser?.close(); server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())); await db.destroy(); }
 });
