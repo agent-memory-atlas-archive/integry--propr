@@ -78,6 +78,13 @@ export function useAgentTankSettings(reportError: (message: string | null) => vo
     setSettings(newSettings);
     setAvailable(null);
     reportError(null);
+    // Clearing the URL is an intermediate edit, not a saveable external
+    // configuration. Keep the draft (and its selection id) so older writes and
+    // probes cannot replace it; the next non-blank edit resumes saving.
+    if (newSettings.mode === 'external' && newSettings.url.trim() === '') {
+      setCheckingStatus(false);
+      return;
+    }
     // No probe yet: until this selection is actually persisted the backend still
     // runs the mode being replaced, so a status answer would describe that one -
     // reporting "bundled unavailable" because bundled was never stored. The
@@ -95,8 +102,8 @@ export function useAgentTankSettings(reportError: (message: string | null) => vo
         if (newSettings.mode !== 'disabled') probeStatus(STATUS_PROBE_DELAY, selection);
       } catch (err) {
         console.error('Failed to save Agent Tank settings:', err);
-        // A newer selection is already displayed and is queued behind this
-        // write, so its state is the one that will be persisted: rolling back to
+        // A newer selection is already displayed, either queued behind this
+        // write or held as a URL draft: rolling back to
         // this write's predecessor, or reporting an error about a mode the
         // operator has since replaced, would describe a selection that no longer
         // exists.

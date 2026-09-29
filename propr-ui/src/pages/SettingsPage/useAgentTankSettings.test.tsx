@@ -27,6 +27,85 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
+test.each(['', ' \t '])('an external URL draft %j stays local until a non-blank edit', async (url) => {
+  const reportError = vi.fn();
+  const { result } = renderHook(() => useAgentTankSettings(reportError));
+  await act(async () => result.current.adopt({ mode: 'external', enabled: true, url: 'http://legacy:3456' }));
+  apiMocks.getAgentTankStatus.mockClear();
+
+  await act(async () => result.current.change({ mode: 'external', enabled: true, url }));
+  await act(async () => { await vi.advanceTimersByTimeAsync(STATUS_PROBE_DELAY + 100); });
+
+  expect(apiMocks.updateAgentTankSettings).not.toHaveBeenCalled();
+  expect(apiMocks.getAgentTankStatus).not.toHaveBeenCalled();
+  expect(reportError).not.toHaveBeenCalledWith(expect.any(String));
+  expect(result.current.settings.url).toBe(url);
+  expect(result.current.available).toBeNull();
+  expect(result.current.checkingStatus).toBe(false);
+
+  await act(async () => result.current.change({ mode: 'external', enabled: true, url: 'http://replacement:3456' }));
+  expect(apiMocks.updateAgentTankSettings).toHaveBeenCalledExactlyOnceWith({ mode: 'external', url: 'http://replacement:3456' });
+  await act(async () => { await vi.advanceTimersByTimeAsync(STATUS_PROBE_DELAY); });
+  expect(result.current.settings.url).toBe('http://replacement:3456');
+  expect(result.current.available).toBe(true);
+  expect(reportError).not.toHaveBeenCalledWith(expect.any(String));
+});
+
+test.each([false, true])('a blank draft survives an earlier write completing (rejected: %s)', async (rejected) => {
+  let releaseWrite = () => {};
+  const writeGate = new Promise<void>(resolve => { releaseWrite = resolve; });
+  apiMocks.updateAgentTankSettings.mockImplementationOnce(async () => {
+    await writeGate;
+    if (rejected) throw new Error('Earlier write failed');
+  });
+  const reportError = vi.fn();
+  const { result } = renderHook(() => useAgentTankSettings(reportError));
+  await act(async () => result.current.adopt({ mode: 'external', enabled: true, url: 'http://legacy:3456' }));
+  apiMocks.getAgentTankStatus.mockClear();
+  await act(async () => result.current.change({ mode: 'external', enabled: true, url: 'h' }));
+  await act(async () => result.current.change({ mode: 'external', enabled: true, url: '' }));
+  await act(async () => { releaseWrite(); });
+  await act(async () => { await vi.advanceTimersByTimeAsync(STATUS_PROBE_DELAY + 100); });
+
+  expect(apiMocks.updateAgentTankSettings).toHaveBeenCalledTimes(1);
+  expect(result.current.settings.url).toBe('');
+  expect(reportError).not.toHaveBeenCalledWith(expect.any(String));
+  expect(apiMocks.getAgentTankStatus).not.toHaveBeenCalled();
+  expect(result.current.available).toBeNull();
+  expect(result.current.checkingStatus).toBe(false);
+
+  // The draft never becomes rollback evidence, even when the older write
+  // succeeds while it is displayed. Only a confirmed write is persisted.
+  apiMocks.updateAgentTankSettings.mockRejectedValueOnce(new Error('Replacement failed'));
+  await act(async () => result.current.change({ mode: 'external', enabled: true, url: 'http://replacement:3456' }));
+  expect(result.current.settings.url).toBe(rejected ? 'http://legacy:3456' : 'h');
+  expect(reportError).toHaveBeenCalledWith('Replacement failed');
+});
+
+test('a blank draft ignores an already running availability probe', async () => {
+  let releaseProbe = (_status: { available: boolean }) => {};
+  apiMocks.getAgentTankStatus.mockReturnValueOnce(new Promise(resolve => { releaseProbe = resolve; }));
+  const { result } = renderHook(() => useAgentTankSettings(vi.fn()));
+  act(() => result.current.adopt({ mode: 'external', enabled: true, url: 'http://legacy:3456' }));
+
+  await act(async () => result.current.change({ mode: 'external', enabled: true, url: '' }));
+  await act(async () => { releaseProbe({ available: true }); });
+
+  expect(result.current.settings.url).toBe('');
+  expect(result.current.available).toBeNull();
+  expect(result.current.checkingStatus).toBe(false);
+});
+
+test.each(['disabled', 'bundled'] as const)('leaving a blank external draft for %s still saves the mode', async (mode) => {
+  const { result } = renderHook(() => useAgentTankSettings(vi.fn()));
+  await act(async () => result.current.adopt({ mode: 'external', enabled: true, url: 'http://legacy:3456' }));
+  await act(async () => result.current.change({ mode: 'external', enabled: true, url: '' }));
+  await act(async () => result.current.change({ mode, enabled: mode !== 'disabled', url: '' }));
+
+  expect(apiMocks.updateAgentTankSettings).toHaveBeenCalledExactlyOnceWith({ mode, url: '' });
+  expect(result.current.settings.mode).toBe(mode);
+});
+
 test('a rejected mode change is reported and the shown mode goes back to what is persisted', async () => {
   // An older backend cannot store bundled mode, so the client refuses the
   // write. Leaving "bundled" selected would claim a change that never happened.
