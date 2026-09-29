@@ -166,3 +166,34 @@ existence query took 6.5–6.7 ms. State-filtered counts retain their latest-sta
 join. Complete task-list responses matched the prior implementation across
 all, search, review, active, waiting, attention, repository and offset cases.
 Migration tests verify covering-index selection and rollback.
+
+Context previews likewise use pushed draft completion events instead of a
+five-second connected poll. A pending preview has a 30-second connected safety
+read so a lost publication cannot stall an interactive operation for minutes;
+the five-second interval remains only when disconnected. Snapshot reads are
+serialized by the shared scheduler and stop doing network work when the preview
+settles. The regression holds a connected preview open for 20 seconds with just
+its initial read, then disconnects and verifies recovery through one fallback.
+
+### Browser and integration validation
+
+Headless Chromium loaded the hosted UI twice, routing only dashboard outcomes
+and narrative reads to a loopback, read-only snapshot harness. Both runs used
+the same database and disabled narrative model generation; other reads retained
+the staging backend. The original queries rendered the Completed feed at
+5,777 ms and the optimized queries at 2,137 ms, with no page errors. This measures
+the query changes inside the real UI; it is not a post-deployment measurement.
+
+The remaining frequent network timers have narrower purposes: submission
+creation waits, runtime-package operations, and GitHub preview publication
+without a corresponding push event. Dashboard/task refreshes already use push,
+visible-tab disconnected fallback, and five-minute recovery reads. Elapsed-time
+and animation timers do not issue network calls. Analytics panels retain their
+five-minute refreshes. Removing recovery reads entirely would risk stale data
+when a best-effort publication is missed.
+
+Validation used a clean checkout because an extra ignored local workspace made
+`npm ci` fail in the original directory. The clean checkout passed server/UI
+typechecks, the production UI build, 64 focused API tests and 226 dashboard,
+goal and live-update UI tests; context-preview tests were run separately after
+the additional polling change.
