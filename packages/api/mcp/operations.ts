@@ -130,15 +130,45 @@ export class McpOperations {
   /** Repair a process interruption after its terminal receipt write but before lifecycle synchronization. */
   async reconcileTerminalLifecycles(principal: McpPrincipal, id?: string): Promise<void> {
     const query = this.db('mcp_operations').where({ owner_id: principal.user.id, grant_id: principal.grant.id })
-      .whereIn('state', ['completed', 'failed', 'cancelled'])
-      .whereIn('lifecycle', ['accepted', 'running', 'unknown']);
+      .whereIn('state', ['completed', 'failed', 'cancelled']);
     if (id) query.andWhere({ id });
-    await query.update({
-      lifecycle: this.db.raw('state'),
-      // The receipt update time is the strongest durable evidence of when the
-      // terminal outcome was persisted; recovery itself must not move it.
-      finished_at: this.db.raw('COALESCE(finished_at, updated_at, ?)', [Date.now()]),
-    });
+    const rows = await query.select<Operation[]>();
+    for (const row of rows) {
+      const receipt = { state: row.state, result: json(row.result) };
+      const artifacts = artifactsFromReceipt(row, receipt);
+      const storedArtifacts = json(row.artifacts);
+      const artifactRecord = storedArtifacts && typeof storedArtifacts === 'object' && !Array.isArray(storedArtifacts)
+        ? storedArtifacts as Record<string, unknown> : {};
+      const missingArtifacts = Object.fromEntries(Object.entries(artifacts)
+        .filter(([key, value]) => canonical(artifactRecord[key]) !== canonical(value)));
+      const failure = row.state === 'failed' ? failureFromReceipt(receipt) : undefined;
+      const lifecycleMissing = ['accepted', 'running', 'unknown'].includes(row.lifecycle) || row.finished_at === null;
+      if (!lifecycleMissing && !Object.keys(missingArtifacts).length && !(failure && row.failure === null)) continue;
+
+      const update: Record<string, unknown> = { updated_at: Date.now() };
+      if (lifecycleMissing) {
+        update.lifecycle = row.state;
+        // The receipt update time is the strongest durable evidence of when
+        // the terminal outcome was persisted; recovery itself must not move it.
+        update.finished_at = this.db.raw('COALESCE(finished_at, ?, ?)', [row.updated_at, Date.now()]);
+      }
+      if (Object.keys(missingArtifacts).length) {
+        update.artifacts = this.db.raw("json_patch(COALESCE(artifacts, '{}'), ?)", [JSON.stringify(missingArtifacts)]);
+      }
+      if (failure && row.failure === null) {
+        update.failure = this.db.raw('COALESCE(failure, ?)', [JSON.stringify(failure)]);
+      }
+
+      // Do not attach metadata derived from a receipt that changed after the
+      // read. A later reconciliation will use the newer durable evidence.
+      const eligible = this.db('mcp_operations').where({
+        id: row.id, owner_id: row.owner_id, grant_id: row.grant_id,
+        state: row.state, lifecycle: row.lifecycle,
+      });
+      if (row.result === null) eligible.whereNull('result');
+      else eligible.andWhere('result', row.result);
+      await eligible.update(update);
+    }
   }
 
   async markInterruptedInvocations(principal: McpPrincipal, id?: string): Promise<void> {

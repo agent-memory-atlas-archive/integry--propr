@@ -372,7 +372,7 @@ export function createToolCatalog(deps: ToolDeps): McpTool[] {
       const query = db<Operation>('mcp_operations').where({ owner_id: principal.user.id, grant_id: principal.grant.id })
         .whereRaw('COALESCE(accepted_at, created_at) >= ?', [Date.now() - args.sinceMinutes * 60_000]);
       if (args.tool) query.where('tool', args.tool);
-      if (args.repository) query.where('repository', args.repository);
+      if (args.repository) query.andWhere(builder => builder.where('repository', args.repository).orWhere('tool', 'cancel_operation'));
       if (args.lifecycle === 'active') query.whereIn('lifecycle', ['accepted', 'running']);
       else if (args.lifecycle) query.where('lifecycle', args.lifecycle);
       const ordered = query.orderByRaw('COALESCE(accepted_at, created_at) DESC').orderBy('id', 'desc');
@@ -388,6 +388,7 @@ export function createToolCatalog(deps: ToolDeps): McpTool[] {
         for (const row of rows) {
           try {
             await authorizeOperation(row, principal, repositoryAuthorizations);
+            if (args.repository && row.repository !== args.repository) continue;
             authorized.push(row);
           } catch (error) {
             // Discovery is a filtered view: current authorization failures do

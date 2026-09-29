@@ -114,7 +114,7 @@ test('operation lifecycle transitions, artifacts and progress are durable and mo
   assert.equal((projected.lifecycle as { failure: unknown }).failure, null);
 });
 
-test('replay reconciles an invocation interrupted after its terminal receipt was persisted', async t => {
+test('replay recovers terminal lifecycle, artifacts and failure from durable receipts', async t => {
   const db = knex({ client: 'better-sqlite3', connection: { filename: ':memory:' }, useNullAsDefault: true });
   t.after(() => db.destroy());
   await db.schema.createTable('task_drafts', table => table.string('draft_id').primary());
@@ -126,7 +126,7 @@ test('replay reconciles an invocation interrupted after its terminal receipt was
     async () => ({ status: 202, data: { state: 'queued' } }));
   const persistedAt = Date.now() - 500;
   await db('mcp_operations').where({ id: receipt.operationId }).update({
-    state: 'completed', result: JSON.stringify({ changed: true }), updated_at: persistedAt,
+    state: 'completed', result: JSON.stringify({ changed: true, taskId: 'task-recovered' }), updated_at: persistedAt,
   });
   assert.deepEqual(await db('mcp_operations').where({ id: receipt.operationId }).first('state', 'lifecycle', 'finished_at'), {
     state: 'completed', lifecycle: 'accepted', finished_at: null,
@@ -135,15 +135,16 @@ test('replay reconciles an invocation interrupted after its terminal receipt was
   const restarted = new McpOperations(db);
   const replay = await restarted.replay(principal, 'fixture_action', args);
   assert.equal(replay?.state, 'completed');
-  assert.deepEqual(replay?.result, { changed: true });
+  assert.deepEqual(replay?.result, { changed: true, taskId: 'task-recovered' });
   assert.deepEqual(replay?.lifecycle, {
     state: 'completed', acceptedAt: (receipt.lifecycle as { acceptedAt: string }).acceptedAt,
     startedAt: null, finishedAt: new Date(persistedAt).toISOString(), failure: null,
-    artifacts: {}, progress: null,
+    artifacts: { taskId: 'task-recovered' }, progress: null,
   });
 
-  // Ordinary duplicate dispatch has the same recovery boundary as explicit replay.
-  await db('mcp_operations').where({ id: receipt.operationId }).update({ lifecycle: 'accepted', finished_at: null });
+  // Repeat entry points also repair rows left terminal by the older
+  // lifecycle-only reconciliation.
+  await db('mcp_operations').where({ id: receipt.operationId }).update({ artifacts: JSON.stringify({}) });
   let invoked = false;
   const duplicate = await restarted.run(principal, { tool: 'fixture_action', args, repository: 'acme/repo' }, async () => {
     invoked = true;
@@ -151,9 +152,21 @@ test('replay reconciles an invocation interrupted after its terminal receipt was
   });
   assert.equal(invoked, false);
   assert.equal((duplicate.lifecycle as { state: string }).state, 'completed');
+  assert.deepEqual((duplicate.lifecycle as { artifacts: unknown }).artifacts, { taskId: 'task-recovered' });
+
+  const failedArgs = { idempotencyKey: 'interrupted-failure-1' };
+  const failed = await operations.run(principal, { tool: 'fixture_action', args: failedArgs, repository: 'acme/repo' },
+    async () => ({ status: 202, data: { state: 'queued' } }));
+  const failure = { code: 'WORKFLOW_FAILED', message: 'The durable workflow failed.', stage: 'internal', retryable: false, status: 500 };
+  await db('mcp_operations').where({ id: failed.operationId }).update({
+    state: 'failed', result: JSON.stringify({ error: failure }), updated_at: persistedAt,
+  });
+  const failedReplay = await restarted.replay(principal, 'fixture_action', failedArgs);
+  assert.equal((failedReplay?.lifecycle as { state: string }).state, 'failed');
+  assert.deepEqual((failedReplay?.lifecycle as { failure: unknown }).failure, failure);
 });
 
-test('list_operations reconciles a tracker interruption before lifecycle filtering', async t => {
+test('list_operations recovers terminal lifecycle, artifacts and failure before filtering', async t => {
   const db = knex({ client: 'better-sqlite3', connection: { filename: ':memory:' }, useNullAsDefault: true });
   t.after(() => db.destroy());
   await db.schema.createTable('task_drafts', table => table.string('draft_id').primary());
@@ -162,7 +175,10 @@ test('list_operations reconciles a tracker interruption before lifecycle filteri
   const operations = new McpOperations(db);
   const receipt = await operations.run(principal, {
     tool: 'send_task_followup', args: { idempotencyKey: 'tracker-interrupt-1' }, repository: 'acme/repo',
-  }, async () => ({ status: 202, data: { state: 'queued', continuation: { taskId: 'task-1' } } }));
+  }, async () => ({ status: 202, data: { state: 'queued' } }));
+  const failed = await operations.run(principal, {
+    tool: 'send_task_followup', args: { idempotencyKey: 'tracker-failure-02' }, repository: 'acme/repo',
+  }, async () => ({ status: 202, data: { state: 'queued' } }));
   const persistedAt = Date.now() - 500;
   // This is the tracker write immediately before get_operation would normally
   // call syncLifecycle; a stopped process leaves exactly this durable row.
@@ -170,16 +186,24 @@ test('list_operations reconciles a tracker interruption before lifecycle filteri
     state: 'completed', result: JSON.stringify({ state: 'queued', continuation: { taskId: 'task-1' }, executionResolved: true }),
     updated_at: persistedAt,
   });
+  const failure = { code: 'TASK_FAILED', message: 'Task execution failed.', stage: 'internal', retryable: false, status: 500 };
+  await db('mcp_operations').where({ id: failed.operationId }).update({
+    state: 'failed', result: JSON.stringify({ error: failure }), updated_at: persistedAt,
+  });
 
   const deps = { db, policy: { repository: async () => {}, requirePermission: () => {}, config: {} } as never,
     taskQueue: {} as never, redisClient: {} as never, runtimeBuildQueue: {} as never } as ToolDeps;
   const list = createToolCatalog(deps).find(tool => tool.name === 'list_operations')!;
   const active = (await list.run({ principal, args: list.schema.parse({ lifecycle: 'active' }) })).data as { operations: Array<Record<string, unknown>> };
   const completed = (await list.run({ principal, args: list.schema.parse({ lifecycle: 'completed' }) })).data as { operations: Array<Record<string, unknown>> };
+  const failures = (await list.run({ principal, args: list.schema.parse({ lifecycle: 'failed' }) })).data as { operations: Array<Record<string, unknown>> };
   assert.deepEqual(active.operations, []);
   assert.deepEqual(completed.operations.map(row => row.operationId), [receipt.operationId]);
   assert.equal((completed.operations[0].lifecycle as { state: string }).state, 'completed');
   assert.equal((completed.operations[0].lifecycle as { finishedAt: string }).finishedAt, new Date(persistedAt).toISOString());
+  assert.deepEqual((completed.operations[0].lifecycle as { artifacts: unknown }).artifacts, { taskId: 'task-1' });
+  assert.deepEqual(failures.operations.map(row => row.operationId), [failed.operationId]);
+  assert.deepEqual((failures.operations[0].lifecycle as { failure: unknown }).failure, failure);
   assert.deepEqual(await db('mcp_operations').where({ id: receipt.operationId }).first('state', 'lifecycle', 'finished_at'), {
     state: 'completed', lifecycle: 'completed', finished_at: persistedAt,
   });
@@ -429,6 +453,17 @@ test('list_operations filters current repository, tool permission and cancellati
   assert.equal(pageTwo.nextOffset, null);
   const cancellations = (await list.run({ principal, args: list.schema.parse({ tool: 'cancel_operation' }) })).data as { operations: unknown[] };
   assert.deepEqual(cancellations.operations, []);
+
+  const allowedSource = await run('review_pull_request', 'allowed-cancel-src', 'acme/allowed', { marker: 'allowed-source' });
+  const allowedCancellation = await run('cancel_operation', 'allowed-cancel-rct', undefined,
+    { operationId: allowedSource.operationId, cancellation: 'requested' });
+  const otherSource = await run('review_pull_request', 'other-cancel-src-1', 'acme/other', { marker: 'other-source' });
+  await run('cancel_operation', 'other-cancel-rct1', undefined,
+    { operationId: otherSource.operationId, cancellation: 'requested' });
+  const repositoryCancellations = (await list.run({ principal, args: list.schema.parse({
+    tool: 'cancel_operation', repository: 'acme/allowed', limit: 1,
+  }) })).data as { operations: Array<Record<string, unknown>> };
+  assert.deepEqual(repositoryCancellations.operations.map(item => item.operationId), [allowedCancellation.operationId]);
 
   await assert.rejects(get.run({ principal, args: get.schema.parse({ operationId: forbiddenPermission.operationId }) }), /Permission removed/);
   await assert.rejects(get.run({ principal, args: get.schema.parse({ operationId: forbiddenRepository.operationId }) }), /No current access/);
