@@ -39,6 +39,12 @@ function recoveryReceipt(row: Pick<Operation, 'state' | 'result'>) {
   return { state: row.state, result, ...(targetState ? { targetState } : {}) };
 }
 
+function confirmedCancellationSource(row: Pick<Operation, 'tool'>, receipt: ReturnType<typeof recoveryReceipt>): string | undefined {
+  const result = record(receipt.result);
+  return row.tool === 'cancel_operation' && result?.cancellation === 'confirmed'
+    && typeof result.operationId === 'string' && result.operationId.length > 0 ? result.operationId : undefined;
+}
+
 function iso(value: number | null | undefined): string | null {
   if (value === null || value === undefined) return null;
   const date = new Date(Number(value));
@@ -145,6 +151,8 @@ export class McpOperations {
     const rows = await query.select<Operation[]>();
     for (const row of rows) {
       const receipt = recoveryReceipt(row);
+      const cancellationSourceId = confirmedCancellationSource(row, receipt);
+      await this.finishCancellationSource(row, cancellationSourceId);
       const targetState = receipt.targetState;
       const artifacts = artifactsFromReceipt(row, receipt);
       const storedArtifacts = json(row.artifacts);
@@ -240,6 +248,30 @@ export class McpOperations {
       finished_at: this.db.raw('COALESCE(finished_at, ?)', [at]),
       failure: failure ? this.db.raw('COALESCE(failure, ?)', [JSON.stringify(failure)]) : null,
       updated_at: at,
+    });
+  }
+
+  /** Apply durable cancellation evidence only to the receipt owner's source operation. */
+  async finishCancellationSource(
+    cancellation: Pick<Operation, 'id' | 'owner_id' | 'grant_id'>,
+    sourceId: string | undefined,
+  ): Promise<void> {
+    if (!sourceId) return;
+    const durable = await this.db<Operation>('mcp_operations').where({
+      id: cancellation.id, owner_id: cancellation.owner_id, grant_id: cancellation.grant_id, tool: 'cancel_operation',
+    }).whereIn('state', ['completed', 'failed', 'cancelled']).first('result', 'updated_at');
+    const result = record(json(durable?.result));
+    if (result?.cancellation !== 'confirmed' || result.operationId !== sourceId) return;
+
+    const now = Date.now();
+    const confirmedAt = Number(durable?.updated_at);
+    await this.db('mcp_operations').where({
+      id: sourceId, owner_id: cancellation.owner_id, grant_id: cancellation.grant_id,
+    }).whereIn('lifecycle', ['accepted', 'running', 'unknown']).update({
+      lifecycle: 'cancelled',
+      finished_at: this.db.raw('COALESCE(finished_at, ?)', [Number.isFinite(confirmedAt) ? confirmedAt : now]),
+      failure: null,
+      updated_at: now,
     });
   }
 

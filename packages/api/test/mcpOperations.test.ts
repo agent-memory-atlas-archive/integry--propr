@@ -15,7 +15,7 @@ import { parseClientMetadataDocument } from '../mcp/clients.js';
 import { createToolCatalog, type ToolDeps } from '../mcp/tools.js';
 import type { McpPrincipal } from '../mcp/policy.js';
 import { artifactsFromReceipt, failureFromReceipt, syncLifecycle } from '../mcp/operationLifecycle.js';
-import { trackExecution } from '../mcp/operationTracking.js';
+import { trackCancellation, trackExecution } from '../mcp/operationTracking.js';
 
 after(closeConnection);
 
@@ -240,6 +240,76 @@ test('list_operations recovers terminal lifecycle, artifacts and failure before 
   assert.deepEqual(await db('mcp_operations').where({ id: receipt.operationId }).first('state', 'lifecycle', 'finished_at'), {
     state: 'completed', lifecycle: 'completed', finished_at: persistedAt,
   });
+});
+
+test('replay and listing recover confirmed cancellation propagation after the tracker write', async t => {
+  const db = knex({ client: 'better-sqlite3', connection: { filename: ':memory:' }, useNullAsDefault: true });
+  t.after(() => db.destroy());
+  await db.schema.createTable('task_drafts', table => table.string('draft_id').primary());
+  await db.schema.createTable('tasks', table => {
+    table.string('task_id').primary(); table.string('repository'); table.string('task_type');
+  });
+  await db.schema.createTable('goals', table => {
+    table.string('goal_id').primary(); table.string('current_task_id');
+  });
+  await db.schema.createTable('task_history', table => {
+    table.increments('history_id').primary(); table.string('task_id'); table.string('state'); table.timestamp('timestamp');
+  });
+  await up(db); await lifecycleUp(db);
+  const principal = { user: { id: 'alice' }, grant: { id: 'grant-a' } } as McpPrincipal;
+  const otherGrant = { user: { id: 'alice' }, grant: { id: 'grant-b' } } as McpPrincipal;
+  const operations = new McpOperations(db);
+  const deps = { db, policy: { repository: async () => {}, requirePermission: () => {}, config: {} } as never,
+    taskQueue: {} as never, redisClient: {} as never, runtimeBuildQueue: {} as never } as ToolDeps;
+  const createInterruptedConfirmation = async (suffix: string) => {
+    const taskId = `cancel-task-${suffix}`;
+    const source = await operations.run(principal, {
+      tool: 'review_pull_request', args: { idempotencyKey: `cancel-source-${suffix}` }, repository: 'acme/repo',
+    }, async () => ({ status: 202, data: { state: 'queued', continuation: { taskId } } }));
+    const args = { idempotencyKey: `cancel-receipt-${suffix}` };
+    const cancellation = await operations.run(principal, { tool: 'cancel_operation', args, repository: 'acme/repo' }, async () => ({
+      status: 202, data: { operationId: source.operationId, cancellation: 'requested', continuation: { taskId }, targetTool: 'review_pull_request' },
+    }));
+    await db('tasks').insert({ task_id: taskId, repository: 'acme/repo', task_type: 'issue' });
+    await db('task_history').insert({ task_id: taskId, state: 'cancelled', timestamp: new Date() });
+    const row = (await db<Operation>('mcp_operations').where({ id: cancellation.operationId }).first())!;
+    await trackCancellation(deps, row, principal, operations.project(row));
+    const persisted = (await db<Operation>('mcp_operations').where({ id: cancellation.operationId }).first())!;
+    assert.equal(persisted.state, 'completed');
+    assert.equal(persisted.lifecycle, 'accepted');
+    assert.equal((await db<Operation>('mcp_operations').where({ id: source.operationId }).first())!.lifecycle, 'accepted');
+    return { args, cancellation, persisted, source };
+  };
+
+  const replayCase = await createInterruptedConfirmation('replay-01');
+  const replayed = await operations.replay(principal, 'cancel_operation', replayCase.args);
+  assert.equal((replayed?.lifecycle as { state: string }).state, 'completed');
+  const replayedSource = (await db<Operation>('mcp_operations').where({ id: replayCase.source.operationId }).first())!;
+  assert.equal(replayedSource.lifecycle, 'cancelled');
+  assert.equal(replayedSource.finished_at, replayCase.persisted.updated_at);
+
+  const listCase = await createInterruptedConfirmation('listing-1');
+  const foreignSource = await operations.run(otherGrant, {
+    tool: 'review_pull_request', args: { idempotencyKey: 'foreign-cancel-source' }, repository: 'acme/repo',
+  }, async () => ({ status: 202, data: { state: 'queued' } }));
+  await operations.run(principal, {
+    tool: 'cancel_operation', args: { idempotencyKey: 'foreign-cancel-proof' },
+  }, async () => ({ status: 200, data: { operationId: foreignSource.operationId, cancellation: 'confirmed', executionResolved: true } }));
+  const completedSource = await operations.run(principal, {
+    tool: 'review_pull_request', args: { idempotencyKey: 'completed-cancel-source' }, repository: 'acme/repo',
+  }, async () => ({ status: 200, data: { changed: true } }));
+  await operations.run(principal, {
+    tool: 'cancel_operation', args: { idempotencyKey: 'completed-cancel-proof' }, repository: 'acme/repo',
+  }, async () => ({ status: 200, data: { operationId: completedSource.operationId, cancellation: 'confirmed', executionResolved: true } }));
+
+  const list = createToolCatalog(deps).find(tool => tool.name === 'list_operations')!;
+  const listed = (await list.run({ principal, args: list.schema.parse({}) })).data as { operations: Array<Record<string, unknown>> };
+  assert.ok(listed.operations.some(row => row.operationId === listCase.cancellation.operationId));
+  const listedSource = (await db<Operation>('mcp_operations').where({ id: listCase.source.operationId }).first())!;
+  assert.equal(listedSource.lifecycle, 'cancelled');
+  assert.equal(listedSource.finished_at, listCase.persisted.updated_at);
+  assert.equal((await db<Operation>('mcp_operations').where({ id: foreignSource.operationId }).first())!.lifecycle, 'accepted');
+  assert.equal((await db<Operation>('mcp_operations').where({ id: completedSource.operationId }).first())!.lifecycle, 'completed');
 });
 
 test('polling an accepted wrapper does not fabricate backend execution start', async t => {

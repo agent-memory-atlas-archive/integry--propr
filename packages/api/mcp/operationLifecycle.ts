@@ -165,7 +165,7 @@ async function syncCancellation(
   if (row.tool !== 'cancel_operation') return;
   const result = record(receipt.result);
   const sourceId = nonEmptyString(result?.operationId);
-  if (sourceId && result?.cancellation === 'confirmed') await operations.finish(sourceId, 'cancelled');
+  if (sourceId && result?.cancellation === 'confirmed') await operations.finishCancellationSource(row, sourceId);
 }
 
 function observedStartTimestamp(
