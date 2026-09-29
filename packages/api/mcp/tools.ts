@@ -342,10 +342,10 @@ export function createToolCatalog(deps: ToolDeps): McpTool[] {
     if (continuation.planId) receipt.targetState = await db('task_drafts').where({ draft_id: continuation.planId, user_id: principal.user.id }).first('status', 'paused', 'mcp_revision');
     if (continuation.goalId) {
       const goal = await db('goals').where({ goal_id: continuation.goalId, owner_id: principal.user.id })
-        .first('desired_state', 'result_state', 'current_task_id');
+        .first('desired_state', 'result_state', 'current_task_id', 'final_pr_number', 'failure_reason');
       if (goal) {
         const currentTask = typeof goal.current_task_id === 'string'
-          ? await db('task_history').where({ task_id: goal.current_task_id }).orderBy('history_id', 'desc').first('state', 'timestamp')
+          ? await db('task_history').where({ task_id: goal.current_task_id }).orderBy('history_id', 'desc').first('state', 'timestamp', 'reason')
           : undefined;
         receipt.targetState = { ...goal, ...(currentTask ? { currentTask: { taskId: goal.current_task_id, ...currentTask } } : {}) };
       }

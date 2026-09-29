@@ -43,7 +43,7 @@ async function fixture() {
   await identityMigration(db);
   await db.schema.createTable('tasks', table => {
     table.string('task_id').primary(); table.string('repository'); table.string('task_type');
-    table.string('initial_job_data'); table.timestamp('created_at').defaultTo(db.fn.now());
+    table.integer('pr_number'); table.string('initial_job_data'); table.timestamp('created_at').defaultTo(db.fn.now());
   });
   await db.schema.createTable('task_history', table => {
     table.increments('history_id'); table.string('task_id'); table.string('state');

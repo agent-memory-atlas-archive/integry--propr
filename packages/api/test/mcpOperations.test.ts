@@ -14,7 +14,7 @@ import { callWorkflow } from '../mcp/adapter.js';
 import { parseClientMetadataDocument } from '../mcp/clients.js';
 import { createToolCatalog, type ToolDeps } from '../mcp/tools.js';
 import type { McpPrincipal } from '../mcp/policy.js';
-import { failureFromReceipt, syncLifecycle } from '../mcp/operationLifecycle.js';
+import { artifactsFromReceipt, failureFromReceipt, syncLifecycle } from '../mcp/operationLifecycle.js';
 
 after(closeConnection);
 
@@ -392,6 +392,107 @@ test('tracker task and review failures populate and can enrich the durable failu
     targetState: { state: 'completed', reason: 'Task completed successfully' },
     result: { loop: { completionStatus: 'failed' } },
   })?.message, 'Ultrafix loop failed.');
+  assert.equal(failureFromReceipt({ targetState: { currentTask: { reason: 'Nested goal task failed' } } })?.message,
+    'Nested goal task failed');
+  assert.deepEqual(artifactsFromReceipt({ repository: 'acme/repo' }, {
+    targetState: { currentTask: { taskId: 'nested-goal-task' }, final_pr_number: 64 },
+  }), {
+    taskId: 'nested-goal-task',
+    pullRequest: { repository: 'acme/repo', number: 64, url: 'https://github.com/acme/repo/pull/64' },
+  });
+});
+
+test('goal failures and generated task pull requests remain durable after backend history is removed', async t => {
+  const db = knex({ client: 'better-sqlite3', connection: { filename: ':memory:' }, useNullAsDefault: true });
+  t.after(() => db.destroy());
+  await db.schema.createTable('task_drafts', table => table.string('draft_id').primary());
+  await db.schema.createTable('goals', table => {
+    table.string('goal_id').primary(); table.string('owner_id'); table.string('repository');
+    table.string('desired_state'); table.string('result_state'); table.string('current_task_id');
+    table.integer('final_pr_number'); table.text('failure_reason');
+  });
+  await db.schema.createTable('tasks', table => {
+    table.string('task_id').primary(); table.string('job_id'); table.string('repository'); table.string('task_type');
+    table.integer('pr_number'); table.text('initial_job_data'); table.timestamp('created_at').defaultTo(db.fn.now());
+  });
+  await db.schema.createTable('task_history', table => {
+    table.increments('history_id').primary(); table.string('task_id'); table.string('state');
+    table.timestamp('timestamp').defaultTo(db.fn.now()); table.text('reason'); table.text('metadata');
+  });
+  await db.schema.createTable('task_submissions', table => {
+    table.string('id').primary(); table.string('user_id'); table.string('submission_key'); table.string('payload_hash');
+    table.string('repository'); table.text('payload'); table.text('attachments'); table.string('state');
+    table.integer('issue_number'); table.text('issue_url'); table.string('task_id'); table.string('retry_event_id');
+    table.boolean('dispatch_complete'); table.text('error'); table.timestamp('created_at').defaultTo(db.fn.now());
+  });
+  await up(db); await lifecycleUp(db);
+
+  const principal = { user: { id: 'alice' }, grant: { id: 'grant-a' } } as McpPrincipal;
+  const operations = new McpOperations(db);
+  const deps = { db, policy: { repository: async () => {}, requirePermission: () => {}, config: {} } as never,
+    taskQueue: {} as never, redisClient: {} as never, runtimeBuildQueue: {} as never } as ToolDeps;
+  const catalog = createToolCatalog(deps);
+  const get = catalog.find(tool => tool.name === 'get_operation')!;
+  const list = catalog.find(tool => tool.name === 'list_operations')!;
+
+  const goalArgs = { idempotencyKey: 'durable-goal-output-1' };
+  const goalId = 'goal-output-1';
+  const goalTaskId = 'goal-task-output-1';
+  const goalReceipt = await operations.run(principal, { tool: 'create_goal', args: goalArgs, repository: 'acme/repo' },
+    async () => ({ status: 202, data: { state: 'accepted', continuation: { goalId } } }));
+  await db('tasks').insert({ task_id: goalTaskId, repository: 'acme/repo', task_type: 'goal' });
+  await db('task_history').insert({ task_id: goalTaskId, state: 'failed', reason: 'Backing task stopped' });
+  await db('goals').insert({ goal_id: goalId, owner_id: 'alice', repository: 'acme/repo', desired_state: 'running',
+    result_state: 'failed', current_task_id: goalTaskId, final_pr_number: 61, failure_reason: 'Provider exhausted its retry budget' });
+
+  const failedGoal = (await get.run({ principal, args: get.schema.parse({ operationId: goalReceipt.operationId }) })).data as Record<string, unknown>;
+  assert.deepEqual(failedGoal.lifecycle, {
+    state: 'failed', acceptedAt: (goalReceipt.lifecycle as { acceptedAt: string }).acceptedAt,
+    startedAt: (failedGoal.lifecycle as { startedAt: string }).startedAt,
+    finishedAt: (failedGoal.lifecycle as { finishedAt: string }).finishedAt,
+    failure: { code: 'EXECUTION_FAILED', message: 'Provider exhausted its retry budget', stage: 'internal', retryable: false, status: 500 },
+    artifacts: { taskId: goalTaskId, pullRequest: { repository: 'acme/repo', number: 61, url: 'https://github.com/acme/repo/pull/61' } },
+    progress: (failedGoal.lifecycle as { progress: unknown }).progress,
+  });
+
+  const submissionId = 'submission-output-1';
+  const taskId = 'ordinary-task-output-1';
+  const taskArgs = { idempotencyKey: 'durable-task-output-1' };
+  const taskReceipt = await operations.run(principal, { tool: 'create_task', args: taskArgs, repository: 'acme/repo' }, async () => ({
+    status: 202, data: { id: submissionId, submissionId, submissionState: 'queued', state: 'queued',
+      continuation: { submissionId, taskId } },
+  }));
+  await db('task_submissions').insert({ id: submissionId, user_id: 'alice', submission_key: 'submission-key', payload_hash: 'hash',
+    repository: 'acme/repo', payload: '{}', attachments: '[]', state: 'queued', task_id: taskId, dispatch_complete: true });
+  await db('tasks').insert({ task_id: taskId, repository: 'acme/repo', task_type: 'issue' });
+  await db('task_history').insert({ task_id: taskId, state: 'completed', reason: 'Task completed successfully' });
+
+  const completedWithoutPr = (await get.run({ principal, args: get.schema.parse({ operationId: taskReceipt.operationId }) })).data as Record<string, unknown>;
+  assert.deepEqual((completedWithoutPr.lifecycle as { artifacts: unknown }).artifacts, { taskId });
+  // Task completion is published before tasks.pr_number, so a later poll must
+  // still enrich the already-terminal durable receipt.
+  await db('tasks').where({ task_id: taskId }).update({ pr_number: 73 });
+  const completedWithPr = (await get.run({ principal, args: get.schema.parse({ operationId: taskReceipt.operationId }) })).data as Record<string, unknown>;
+  assert.deepEqual((completedWithPr.lifecycle as { artifacts: unknown }).artifacts, {
+    taskId, pullRequest: { repository: 'acme/repo', number: 73, url: 'https://github.com/acme/repo/pull/73' },
+  });
+
+  await db('task_history').delete();
+  await db('goals').delete();
+  await db('tasks').delete();
+  await db('task_submissions').delete();
+
+  const durableGoal = (await get.run({ principal, args: get.schema.parse({ operationId: goalReceipt.operationId }) })).data as Record<string, unknown>;
+  assert.deepEqual((durableGoal.lifecycle as { failure: unknown }).failure,
+    { code: 'EXECUTION_FAILED', message: 'Provider exhausted its retry budget', stage: 'internal', retryable: false, status: 500 });
+  assert.deepEqual((durableGoal.lifecycle as { artifacts: unknown }).artifacts,
+    { taskId: goalTaskId, pullRequest: { repository: 'acme/repo', number: 61, url: 'https://github.com/acme/repo/pull/61' } });
+  const durableTask = await operations.replay(principal, 'create_task', taskArgs);
+  assert.deepEqual((durableTask?.lifecycle as { artifacts: unknown }).artifacts,
+    { taskId, pullRequest: { repository: 'acme/repo', number: 73, url: 'https://github.com/acme/repo/pull/73' } });
+  const listed = (await list.run({ principal, args: list.schema.parse({}) })).data as { operations: Array<Record<string, unknown>> };
+  assert.equal(listed.operations.length, 2);
+  assert.ok(listed.operations.every(operation => Object.keys((operation.lifecycle as { artifacts: object }).artifacts).length > 0));
 });
 
 test('list_operations filters active receipts by exact owner and grant without refreshing trackers', async t => {

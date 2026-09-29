@@ -73,10 +73,18 @@ export async function trackCancellation(deps: ToolDeps, row: Operation, principa
 export async function trackExecution(deps: ToolDeps, row: Operation, principal: McpPrincipal, receipt: Record<string, unknown>): Promise<void> {
   if (!trackedTools.includes(row.tool) || !row.result) return;
   const { db } = deps;
-  const result = JSON.parse(row.result);
+  const result = JSON.parse(row.result) as ExecutionResult & Record<string, unknown>;
   if (['create_task', 'retry_task_submission'].includes(row.tool) && !result.continuation?.taskId) return;
-  if (result.error || (result.executionResolved && terminalStates.includes(row.state))) return;
+  if (result.error) return;
   const task = row.tool === 'index_repository' ? undefined : await findExecutionTask(deps, row, result);
+  if (result.executionResolved && terminalStates.includes(row.state)) {
+    const persistedTarget = result.targetState ?? {};
+    if (task || Object.keys(persistedTarget).length) receipt.targetState = {
+      ...persistedTarget,
+      ...(task ? { taskId: task.task_id, pr_number: task.pr_number } : {}),
+    };
+    return;
+  }
   if (task) await trackTask(deps, row, { task, result, receipt });
   else if (result.jobId) await trackQueuedJob(row, result.jobId, receipt);
   else if (Date.now() - Number(row.created_at) > 120000) receipt.state = 'unknown';
@@ -86,7 +94,10 @@ export async function trackExecution(deps: ToolDeps, row: Operation, principal: 
     result.currentHead = pr.head.sha;
     result.results = { tool: 'get_pull_request_discussion', repository: row.repository, pullRequest: result.pullRequest, taskId: result.continuation?.taskId };
   }
-  if (terminalStates.includes(String(receipt.state))) result.executionResolved = true;
+  if (terminalStates.includes(String(receipt.state))) {
+    result.executionResolved = true;
+    result.targetState = receipt.targetState as Record<string, unknown> | undefined;
+  }
   receipt.result = result;
   if (receipt.state === 'unknown') receipt.message = 'Execution cannot yet be confirmed. Inspect the linked comment/job; polling can still resolve it. Do not blindly resubmit.';
   await db('mcp_operations').where({ id: row.id }).update({ state: receipt.state, result: JSON.stringify(result), updated_at: Date.now() });
@@ -95,11 +106,12 @@ export async function trackExecution(deps: ToolDeps, row: Operation, principal: 
 interface ExecutionResult {
   jobId?: string; commentId?: number; pullRequest?: number;
   continuation?: { taskId?: string; jobId?: string; sourceTaskId?: string };
+  targetState?: Record<string, unknown>;
   reviewResults?: Array<{ success: boolean; commentId?: number; commentUrl?: string }>;
   loop?: { completionStatus?: string | null } & Record<string, unknown>;
 }
 interface TrackingContext {
-  task: { task_id: string; initial_job_data: unknown };
+  task: { task_id: string; pr_number: number | null; initial_job_data: unknown };
   result: ExecutionResult; receipt: Record<string, unknown>;
 }
 
@@ -134,14 +146,15 @@ async function findExecutionTask(deps: ToolDeps, row: Operation, result: Executi
   } else {
     query.andWhere(builder => builder.where('task_id', result.jobId || continuation.taskId).orWhere('job_id', result.jobId || continuation.jobId));
   }
-  return query.orderBy('created_at', 'desc').first('task_id', 'initial_job_data');
+  return query.orderBy('created_at', 'desc').first('task_id', 'pr_number', 'initial_job_data');
 }
 
 async function trackTask(deps: ToolDeps, row: Operation, { task, result, receipt }: TrackingContext): Promise<void> {
   result.continuation = { ...result.continuation, taskId: task.task_id };
   const event = await deps.db('task_history').where({ task_id: task.task_id }).orderBy('history_id', 'desc').first('state', 'timestamp', 'reason', 'metadata');
   const metadata = typeof event?.metadata === 'string' ? JSON.parse(event.metadata) : event?.metadata;
-  receipt.targetState = { taskId: task.task_id, state: event?.state, timestamp: event?.timestamp, reason: event?.reason, reviewResults: metadata?.reviewResults };
+  receipt.targetState = { taskId: task.task_id, pr_number: task.pr_number, state: event?.state,
+    timestamp: event?.timestamp, reason: event?.reason, reviewResults: metadata?.reviewResults };
   if (metadata?.reviewResults) result.reviewResults = metadata.reviewResults;
   receipt.state = terminalStates.includes(event?.state) ? event.state : !event || event.state === 'pending' ? 'queued' : 'running';
   if (event?.state === 'completed' && result.reviewResults?.length && result.reviewResults.every(review => !review.success)) receipt.state = 'failed';

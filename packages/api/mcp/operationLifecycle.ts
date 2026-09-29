@@ -40,11 +40,13 @@ export function artifactsFromReceipt(row: Pick<Operation, 'repository'>, receipt
   const result = record(receipt.result) ?? {};
   const continuation = record(result.continuation) ?? {};
   const target = record(receipt.targetState) ?? {};
+  const currentTask = record(target.currentTask) ?? {};
   const targetIssues: Record<string, unknown>[] = Array.isArray(target.issues)
     ? target.issues.map(record).filter((value): value is Record<string, unknown> => !!value) : [];
   const artifacts: Record<string, unknown> = {};
 
-  const taskId = nonEmptyString(target.taskId, target.task_id, continuation.taskId, result.taskId,
+  const taskId = nonEmptyString(target.taskId, target.task_id, target.current_task_id, currentTask.taskId,
+    currentTask.task_id, continuation.taskId, result.taskId,
     ...targetIssues.flatMap(issue => [issue.taskId, issue.task_id]));
   if (taskId) artifacts.taskId = taskId;
 
@@ -52,7 +54,7 @@ export function artifactsFromReceipt(row: Pick<Operation, 'repository'>, receipt
   const pullRequestNumber = positiveInteger(
     result.pullRequest, result.pr_number, result.prNumber,
     continuation.pullRequest, continuation.pr_number,
-    target.pullRequest, target.pr_number,
+    target.pullRequest, target.pr_number, target.final_pr_number,
     ...targetIssues.flatMap(issue => [issue.pullRequest, issue.pr_number]),
   );
   if (repository && pullRequestNumber) artifacts.pullRequest = {
@@ -119,7 +121,8 @@ export function failureFromReceipt(receipt: Record<string, unknown>): McpErrorEn
     });
   }
 
-  const reason = nonEmptyString(target?.reason, result?.reason);
+  const currentTask = record(target?.currentTask);
+  const reason = nonEmptyString(target?.failure_reason, currentTask?.reason, target?.reason, result?.reason);
   return reason ? publicFailure('EXECUTION_FAILED', reason) : undefined;
 }
 
