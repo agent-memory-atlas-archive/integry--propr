@@ -4,12 +4,14 @@ import path from 'node:path';
 import { resolveUsageTips } from '@propr/shared';
 import { heuristicUsageTipCandidates } from '../../packages/core/src/services/usageTips/selection';
 
-async function fixture(page: Page) {
+async function fixture(page: Page, discovery = false) {
   const dismissed = new Set<string>();
   const events: string[] = [];
-  const pool = ['pr-ultrafix', 'planner-studio', 'indexing-options', 'repository-todos'];
+  const pool = ['pr-ultrafix', 'planner-studio', 'indexing-options', 'repository-todos',
+    ...(discovery ? ['mcp-chat-control', 'visual-previews'] : [])];
   const candidates = heuristicUsageTipCandidates({ tasks: 12, manualCycles: 4, ultrafix: 0,
-    oneOffTasks: 8, plans: 0, indexingFailures: 2, todos: 0 });
+    oneOffTasks: 8, plans: 0, indexingFailures: 2, todos: 0,
+    ...(discovery ? { mcpUsage: 0, visualPreviewRepos: 0 } : {}) });
   let reads = 0;
   const settings = { usage_tips_enabled: true, usage_tips_dismissal_cooldown_days: 45 };
   await page.routeWebSocket('**/socket.io/**', socket => socket.close());
@@ -111,4 +113,24 @@ test('automation settings save both tip fields', async ({ page }) => {
   await page.getByLabel('Show usage tips').uncheck();
   await page.getByLabel('Show usage tips').blur();
   await expect.poll(() => state.settings.usage_tips_enabled).toBe(false);
+});
+
+
+test('discovery tips share the strip and dismissal replaces the discovery slot', async ({ page }) => {
+  await page.setViewportSize({ width: 1360, height: 1000 });
+  const state = await fixture(page, true);
+  await page.goto('/');
+  const tips = page.getByRole('region', { name: 'Usage tips' });
+  await expect(tips.getByText('New to you')).toHaveCount(1);
+  await expect(tips.getByRole('link', { name: 'Run ProPR from your chat assistant' })).toBeVisible();
+  await expect(tips.getByRole('link')).toHaveCount(3);
+  expect(state.reads).toBe(1);
+  expect(state.events).toHaveLength(0);
+  await capture(page, 'discovery-tips-desktop.png', '[aria-label="Usage tips"]');
+  await tips.getByRole('button', { name: 'Dismiss Run ProPR from your chat assistant' }).click();
+  await expect(tips.getByRole('link', { name: 'See visual previews on pull requests' })).toBeVisible();
+  await expect(tips.getByText('New to you')).toHaveCount(1);
+  expect(state.events).toHaveLength(1);
+  await page.setViewportSize({ width: 390, height: 844 });
+  await capture(page, 'discovery-tips-mobile.png', '[aria-label="Usage tips"]');
 });

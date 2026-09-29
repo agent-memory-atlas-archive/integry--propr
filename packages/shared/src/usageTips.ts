@@ -4,11 +4,22 @@ export const MAX_SELECTED_USAGE_TIPS = 3;
 export const MAX_USAGE_TIP_CANDIDATES = 30;
 export const DEFAULT_USAGE_TIPS_COOLDOWN_DAYS = 45;
 export const USAGE_TIPS_DAY_MS = 86_400_000;
-export interface UsageTip {
-  id: string; topic: string; title: string; body: string; docPath: string; docUrl: string; signalHints: string[];
+export const USAGE_TIP_KINDS = ['corrective', 'discovery'] as const;
+export type UsageTipKind = typeof USAGE_TIP_KINDS[number];
+export function isUsageTipKind(value: unknown): value is UsageTipKind {
+  return value === 'corrective' || value === 'discovery';
 }
-export const USAGE_TIPS_CATALOG: readonly UsageTip[] = catalog;
+export interface UsageTip {
+  id: string; kind: UsageTipKind; topic: string; title: string; body: string; docPath: string; docUrl: string; signalHints: string[];
+}
+export const USAGE_TIPS_CATALOG: readonly UsageTip[] = catalog.map(tip => {
+  if (!isUsageTipKind(tip.kind)) throw new Error(`Invalid usage tip kind: ${tip.id}`);
+  return { ...tip, kind: tip.kind };
+});
 export const USAGE_TIPS_BY_ID = new Map(USAGE_TIPS_CATALOG.map(tip => [tip.id, tip]));
+export function usageTipKind(id: string): UsageTipKind | undefined {
+  return USAGE_TIPS_BY_ID.get(id)?.kind;
+}
 /** reason is the signal-grounded, user-facing recommendation and workflow benefit. */
 export interface UsageTipCandidate { id: string; score: number; reason: string }
 export interface UsageTipDismissal { tip_id: string; dismissed_at: number; dismissal_count: number }
@@ -60,7 +71,9 @@ export function rotateUsageTipCandidates(candidates: UsageTipCandidate[], epoch:
   if (!Number.isSafeInteger(epoch) || epoch < 0) throw new Error('Invalid rotation epoch');
   const bands = new Map<number, UsageTipCandidate[]>();
   for (const candidate of parseUsageTipCandidates(candidates)) {
-    const band = Math.floor((candidate.score - 1) / 10);
+    // Keep the existing ten-point bands, splitting the 71–80 boundary so an
+    // urgent score of 80 never rotates behind a discovery score of 70–79.
+    const band = Math.floor((candidate.score - 1) / 10) * 2 + Number(candidate.score >= 80);
     bands.set(band, [...(bands.get(band) ?? []), candidate]);
   }
   return [...bands.entries()].sort(([a], [b]) => b - a).flatMap(([, band]) => {
@@ -71,9 +84,21 @@ export function rotateUsageTipCandidates(candidates: UsageTipCandidate[], epoch:
 }
 export function resolveUsageTips(candidates: UsageTipCandidate[], dismissals: UsageTipDismissal[], baseDays: number, now: number): UsageTip[] {
   const byId = new Map(dismissals.map(d => [d.tip_id, d]));
-  return parseUsageTipCandidates(candidates)
-    .filter(c => isUsageTipEligible(byId.get(c.id), baseDays, now))
-    .slice(0, MAX_SELECTED_USAGE_TIPS).map(c => ({ ...USAGE_TIPS_BY_ID.get(c.id)!, body: c.reason }));
+  const eligible = parseUsageTipCandidates(candidates)
+    .filter(c => isUsageTipEligible(byId.get(c.id), baseDays, now));
+  return mixUsageTipKinds(eligible).map(c => ({ ...USAGE_TIPS_BY_ID.get(c.id)!, body: c.reason }));
+}
+/** Reserve a slot for each eligible kind without reordering the rotated pool. */
+export function mixUsageTipKinds(candidates: UsageTipCandidate[]): UsageTipCandidate[] {
+  const kinds = new Set(candidates.map(c => usageTipKind(c.id)));
+  const perKind = kinds.has('corrective') && kinds.has('discovery') ? MAX_SELECTED_USAGE_TIPS - 1 : MAX_SELECTED_USAGE_TIPS;
+  const counts = new Map<UsageTipKind, number>();
+  return candidates.filter(c => {
+    const kind = usageTipKind(c.id);
+    if (!kind || (counts.get(kind) ?? 0) >= perKind) return false;
+    counts.set(kind, (counts.get(kind) ?? 0) + 1);
+    return true;
+  }).slice(0, MAX_SELECTED_USAGE_TIPS);
 }
 export function isUsageTipEventId(value: unknown): value is string {
   return typeof value === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value);

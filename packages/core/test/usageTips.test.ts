@@ -225,3 +225,151 @@ test('invalid persisted selections fail closed without writes; invalid results c
   assert.deepEqual(await store.get('alice'), { enabled: true, tips: [] });
   assert.equal((await db('usage_tip_dismissal_events')).length, 0);
 }));
+
+const discoveryIds = ['mcp-chat-control', 'visual-previews', 'repository-chat', 'epic-auto-merge'];
+const unusedDiscovery = { tasks: 3, plans: 2, mcpUsage: 0, visualPreviewRepos: 0, repoChatMessages: 0, epicPlans: 0 };
+const discoveryPool = discoveryIds.map((id, i) => ({ id, score: 78 - i, reason: 'Recorded activity with an unused capability.' }));
+
+test('catalog kinds preserve corrective identities and order, and discovery has documentation', async () => {
+  const { isUsageTipKind, usageTipKind, parseUsageTipCandidates } = await import('@propr/shared');
+  const { access } = await import('node:fs/promises');
+  assert.deepEqual(USAGE_TIPS_CATALOG.filter(t => t.kind === 'corrective').map(t => t.id), [
+    'pr-review', 'pr-fix', 'pr-switch', 'pr-use', 'pr-ultrafix', 'pr-merge', 'goals-launch',
+    'planner-studio', 'repository-todos', 'indexing-options', 'agent-model-selection', 'agent-tank', 'notification-inbox', 'mcp-access',
+  ]);
+  assert.deepEqual(USAGE_TIPS_CATALOG.filter(t => t.kind === 'discovery').map(t => t.id), discoveryIds);
+  assert.ok(USAGE_TIPS_CATALOG.every(t => isUsageTipKind(t.kind)));
+  assert.equal(isUsageTipKind('invented'), false);
+  assert.equal(usageTipKind('removed'), undefined);
+  assert.ok(USAGE_TIPS_CATALOG.slice(0, -4).every(t => t.kind === 'corrective'));
+  for (const tip of USAGE_TIPS_CATALOG.slice(-4)) {
+    await access(new URL(`../../../${tip.docPath}`, import.meta.url));
+    assert.ok(tip.body.length <= 240);
+  }
+  assert.deepEqual(parseUsageTipCandidates([{ ...discoveryPool[0], kind: 'corrective' }]), [discoveryPool[0]]);
+});
+
+test('discovery requires exact zero usage and known prerequisite activity', async () => {
+  const { DISCOVERY_RULES, discoveryUsageTipCandidates, isDiscoveryTipApplicable } = await import('../src/services/usageTips/selection.js');
+  assert.deepEqual(discoveryUsageTipCandidates(unusedDiscovery).map(c => c.id), discoveryIds);
+  for (const rule of DISCOVERY_RULES) {
+    for (const usage of [null, undefined, 1, 3, -1, false, NaN]) {
+      const signals = { ...unusedDiscovery, [rule.usage]: usage };
+      if (usage === undefined) delete signals[rule.usage];
+      assert.equal(isDiscoveryTipApplicable(rule.id, signals), false);
+      assert.ok(!heuristicUsageTipCandidates(signals).some(c => c.id === rule.id));
+    }
+    for (const activity of [null, 0, rule.minimum - 1]) {
+      assert.equal(isDiscoveryTipApplicable(rule.id, { ...unusedDiscovery, [rule.prerequisite]: activity }), false);
+    }
+  }
+  assert.deepEqual(discoveryUsageTipCandidates({ mcpUsage: 0, visualPreviewRepos: 0, repoChatMessages: 0, epicPlans: 0 }), []);
+  assert.deepEqual(heuristicUsageTipCandidates({ tasks: 50, plans: 5, mcpUsage: 1, visualPreviewRepos: 1, repoChatMessages: 1, epicPlans: 1 }), []);
+  assert.ok(discoveryUsageTipCandidates(unusedDiscovery).every(c => c.score >= 70 && c.score <= 79 && c.reason.length <= 240));
+});
+
+test('mix preserves pool order, caps both kinds, and fills all slots for a sole kind', () => {
+  const corrective = candidates.slice(0, 5).map((c, i) => ({ ...c, score: 95 - i * 2 }));
+  for (const pool of [[...corrective, ...discoveryPool.slice(0, 2)], [...discoveryPool, ...corrective]]) {
+    const shown = resolveUsageTips(pool, [], 45, 1);
+    assert.equal(shown.length, 3);
+    assert.ok(shown.filter(t => t.kind === 'discovery').length >= 1);
+    assert.ok(shown.filter(t => t.kind === 'corrective').length >= 1);
+    assert.deepEqual(shown.map(t => t.id), pool.filter(c => shown.some(t => t.id === c.id)).map(c => c.id));
+  }
+  assert.equal(resolveUsageTips(discoveryPool, [], 45, 1).length, 3);
+  assert.equal(resolveUsageTips(corrective, [], 45, 1).length, 3);
+  for (const [primary, secondary] of [[corrective, discoveryPool], [discoveryPool, corrective]]) {
+    const pool = [...primary, ...secondary];
+    const dismissals = secondary.slice(0, 1).map(c => ({ tip_id: c.id, dismissed_at: 0, dismissal_count: 1 }));
+    assert.deepEqual(resolveUsageTips(pool, dismissals, 45, 1).map(t => t.id), [primary[0].id, primary[1].id, secondary[1].id]);
+    const allSecondary = secondary.map(c => ({ tip_id: c.id, dismissed_at: 0, dismissal_count: 1 }));
+    assert.deepEqual(resolveUsageTips(pool, allSecondary, 45, 1).map(t => t.id), primary.slice(0, 3).map(c => c.id));
+  }
+});
+
+test('rotation never lets discovery scores displace urgent corrective scores, including 80', () => {
+  const urgent = candidates.slice(0, 3).map((c, i) => ({ ...c, score: 80 + i * 5 }));
+  for (let epoch = 0; epoch < 10; epoch++) {
+    const rotated = rotateUsageTipCandidates([...discoveryPool, ...urgent], epoch);
+    assert.deepEqual(new Set(rotated.slice(0, 3).map(c => c.id)), new Set(urgent.map(c => c.id)));
+    const resolved = resolveUsageTips(rotated, [], 45, 1);
+    assert.deepEqual(resolved.slice(0, 2).map(t => t.kind), ['corrective', 'corrective']);
+    assert.equal(resolved[2].kind, 'discovery');
+  }
+});
+
+test('model discovery is post-filtered, band-limited and supplemented without overriding empty answers', async () => {
+  const run = (signals: Record<string, number | boolean | null>, output: unknown[]) => selectUsageTips({ signals, epoch: 0,
+    generate: async (_alias, prompt) => {
+      assert.match(prompt, /usage signal is exactly 0/);
+      assert.match(prompt, /"kind":"discovery"/);
+      return { text: JSON.stringify({ candidates: output }), model: 'test' };
+    } });
+  const corrective = { id: 'indexing-options', score: 95, reason: 'Indexing failures are recorded.' };
+  const signals = { ...unusedDiscovery, indexingFailures: 2 };
+  const supplemented = await run(signals, [corrective]);
+  assert.equal(supplemented.source, 'model');
+  assert.deepEqual(supplemented.candidates.map(c => c.id), [corrective.id, ...discoveryIds.slice(0, 2)]);
+  assert.deepEqual((await run(signals, [])).candidates, []);
+  const filtered = await run({ ...signals, mcpUsage: null }, [discoveryPool[0], discoveryPool[1]]);
+  assert.deepEqual(filtered.candidates.map(c => c.id), ['visual-previews']);
+  assert.deepEqual((await run({ ...signals, mcpUsage: 1 }, [discoveryPool[0]])).candidates, []);
+  assert.deepEqual((await run({ ...signals, tasks: 0 }, [discoveryPool[0], discoveryPool[3]])).candidates, [discoveryPool[3]]);
+  for (const score of [1, 100]) {
+    const result = await run(signals, [{ ...discoveryPool[0], score, kind: 'corrective' }, corrective]);
+    assert.equal(result.candidates[0].id, corrective.id);
+    assert.ok(result.candidates[1].score >= 70 && result.candidates[1].score <= 79);
+    assert.equal('kind' in result.candidates[1], false);
+  }
+});
+
+test('persisted candidates omit kind; mixed dismissals remain per-user and preserve replacements', async () => fixture(async db => {
+  const store = createUsageTipsStore(db, () => 100);
+  await store.persist({ ...selection, candidates: [...candidates, ...discoveryPool] }, null);
+  const stored = JSON.parse((await db('usage_tip_selection').first()).candidates);
+  assert.ok(stored.every((c: object) => !('kind' in c)));
+  const before = (await store.get('alice')).tips;
+  assert.equal(before[2].kind, 'discovery');
+  await store.dismiss('alice', before[2].id, randomUUID());
+  const after = (await store.get('alice')).tips;
+  assert.equal(after[2].id, discoveryPool[1].id);
+  assert.deepEqual((await store.get('bob')).tips, before);
+}));
+
+test('discovery signals use guarded adoption metadata and never infer zero from incomplete JSON samples', async () => fixture(async db => {
+  const keys = ['mcpUsage', 'visualPreviewRepos', 'repoChatMessages', 'epicPlans'];
+  const read = async () => {
+    const signals = await collectUsageTipSignals(db);
+    return keys.map(key => signals[key]);
+  };
+  assert.deepEqual(await read(), [null, null, null, null]);
+  await db.schema.createTable('mcp_access_log', t => { t.increments('id'); t.string('kind'); });
+  await db.schema.createTable('repo_chat_messages', t => { t.increments('id'); });
+  await db.schema.createTable('task_drafts', t => { t.increments('id'); t.text('context_config'); t.timestamp('created_at'); });
+  await db('system_configs').insert({ key: 'repos_to_monitor', value: JSON.stringify([{ name: 'example/workspace' }]) });
+  await db('mcp_access_log').insert({ kind: 'auth' });
+  await db('task_drafts').insert([{ context_config: '{}' }, { context_config: null }]);
+  assert.deepEqual(await read(), [0, 0, 0, 0]);
+  await db('mcp_access_log').insert({ kind: 'tool' });
+  await db('repo_chat_messages').insert({});
+  await db('task_drafts').insert({ context_config: JSON.stringify({ useEpic: true }) });
+  await db('system_configs').where({ key: 'repos_to_monitor' }).update({ value: JSON.stringify([
+    { name: 'example/workspace', visualPreview: { enabled: true } }, { name: 'example/workspace', visualPreview: { enabled: true } },
+  ]) });
+  assert.deepEqual(await read(), [1, 1, 1, 1]);
+  for (const value of ['broken', 'null', '[]', '{"useEpic":"false"}']) {
+    await db('task_drafts').update({ context_config: value });
+    assert.equal((await collectUsageTipSignals(db)).epicPlans, null);
+  }
+  for (const value of ['broken', '{}', 'null', '[null]', '[{"name":"example/workspace","visualPreview":{"enabled":"false"}}]']) {
+    await db('system_configs').where({ key: 'repos_to_monitor' }).update({ value });
+    assert.equal((await collectUsageTipSignals(db)).visualPreviewRepos, null);
+  }
+  await db('task_drafts').delete();
+  for (let i = 0; i < 10; i++) await db('task_drafts').insert(Array.from({ length: 100 }, () => ({ context_config: '{}' })));
+  await db('system_configs').where({ key: 'repos_to_monitor' }).update({ value: JSON.stringify(Array.from({ length: 1000 }, (_, i) => ({ name: `example/repo-${i}` }))) });
+  const bounded = await collectUsageTipSignals(db);
+  assert.equal(bounded.epicPlans, null);
+  assert.equal(bounded.visualPreviewRepos, null);
+}));

@@ -73,6 +73,7 @@ const sidebars: SidebarsConfig = {
       items: [
         'features/pr-followup',
         'features/pr-commands',
+        'features/mcp-chat',
         'features/visual-previews',
       ],
     },
