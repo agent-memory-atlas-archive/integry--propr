@@ -104,3 +104,29 @@ The repeated task-list and repository-stat calls in the capture were separated
 by a later live task event. The first pair is the Tasks-page mount snapshot and
 the second pair is its freshness invalidation, rather than two overlapping
 mount requests. Existing burst coalescing and reconnect recovery remain intact.
+
+## September 29 staging read investigation
+
+Authenticated sequential HTTPS measurements (three rounds) found warmed task
+list/search reads around 200–235 ms, but `/api/dashboard/outcomes` took
+3.08–4.09 seconds. A headless Chromium dashboard load also showed unrelated
+reads completing together around seven seconds; both the outcomes feed and
+narrative collect the completion projection on the API's synchronous SQLite
+connection. The staging snapshot contains 14,436 tasks and 65,782 history rows,
+with `task_history_task_id_timestamp_index` already present.
+
+The completion projection now keeps task job/result JSON out of its entity
+window sorts and retrieves those payloads after ranking. Against the same
+read-only staging snapshot, the first paired 50-entity measurement fell from
+2,374 ms to 1,080 ms; repository-scoped reads fell from 1,083 ms to 834 ms.
+Returned objects were compared with deep equality, including every earlier
+update. These are local query measurements, not deployed API timings.
+
+Reproduce the current query against an offline snapshot with:
+
+```sh
+node --import tsx scripts/benchmark-dashboard-outcomes.ts --database=/path/to/snapshot.sqlite
+```
+
+Optional `--repository=owner/repo` and `--search=text` exercise filtered reads.
+The benchmark opens SQLite read-only and prints only timings and row counts.

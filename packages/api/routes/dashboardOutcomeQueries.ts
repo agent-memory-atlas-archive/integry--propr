@@ -221,7 +221,14 @@ function entityCompletions(db: Knex, repository: string): Knex.QueryBuilder {
         THEN NULLIF(trim(json_extract(${validJob}, '$.branchName')), '') END
     ) AS resolved_title
   `));
-  const entities = db.from('numbered').select('*').select(db.raw(`
+  // Window sorts must not carry the task's potentially megabyte-sized job
+  // and result JSON. Resolve identity/title first, rank compact rows, then
+  // retrieve payloads for the selected outcomes.
+  const entities = db.from('numbered').select(
+    'task_id', 'repository', 'issue_number', 'pr_number', 'task_type', 'model_name',
+    'created_at', 'state', 'state_timestamp', 'reason', 'history_id',
+    'resolved_title',
+  ).select(db.raw(`
     CASE
       WHEN entity_pr_number IS NOT NULL THEN 'pr:' || entity_pr_number
       WHEN entity_goal_id IS NOT NULL THEN 'goal:' || entity_goal_id
@@ -241,7 +248,10 @@ function entityCompletions(db: Knex, repository: string): Knex.QueryBuilder {
   `));
   return db.with('completion_history', history).with('completion_runs', runs).with('completed', completed).with('numbered', numbered)
     .with('entities', entities).with('ranked', ranked)
-    .from('ranked');
+    .from(db.from('ranked as r')
+      .join('tasks as payload', 'payload.task_id', 'r.task_id')
+      .select('r.*', 'payload.initial_job_data', 'payload.final_result')
+      .as('hydrated'));
 }
 
 /** Recent entity outcomes, optionally narrowed by their decoded title. */
