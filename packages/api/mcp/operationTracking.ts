@@ -69,18 +69,6 @@ export async function trackCancellation(deps: ToolDeps, row: Operation, principa
   await deps.db('mcp_operations').where({ id: row.id }).whereNotIn('state', terminalStates).update({ state: receipt.state, result: JSON.stringify(result), updated_at: Date.now() });
 }
 
-function restoreResolvedTarget(
-  receipt: Record<string, unknown>,
-  result: ExecutionResult,
-  task: TrackingContext['task'] | undefined,
-): void {
-  const persistedTarget = result.targetState ?? {};
-  if (task || Object.keys(persistedTarget).length) receipt.targetState = {
-    ...persistedTarget,
-    ...(task ? { taskId: task.task_id, pr_number: task.pr_number } : {}),
-  };
-}
-
 async function refreshPullRequestContext(
   row: Operation,
   principal: McpPrincipal,
@@ -95,6 +83,18 @@ async function refreshPullRequestContext(
   result.results = {
     tool: 'get_pull_request_discussion', repository: row.repository,
     pullRequest: result.pullRequest, taskId: result.continuation?.taskId,
+  };
+}
+
+function restoreResolvedTarget(
+  receipt: Record<string, unknown>,
+  result: ExecutionResult,
+  task: TrackingContext['task'] | undefined,
+): void {
+  if (!result.targetState) return;
+  receipt.targetState = {
+    ...result.targetState,
+    ...(task ? { taskId: task.task_id, pr_number: task.pr_number } : {}),
   };
 }
 

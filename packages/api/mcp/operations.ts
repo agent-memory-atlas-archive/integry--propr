@@ -4,7 +4,7 @@ import { McpError } from './config.js';
 import { classifyError, type McpErrorEnvelope } from './errorEnvelope.js';
 import { digest } from './store.js';
 import type { McpPrincipal } from './policy.js';
-import { artifactsFromReceipt, failureFromReceipt, lifecycleFromLegacy } from './operationLifecycle.js';
+import { artifactsFromReceipt, failureFromReceipt } from './operationLifecycle.js';
 
 const interruptionTimeoutMs = 120_000;
 
@@ -14,7 +14,7 @@ export type LifecycleOutcome = 'completed' | 'failed' | 'cancelled';
 export interface Operation {
   id: string; owner_id: string; grant_id: string; idempotency_key: string; tool: string; repository: string | null;
   state: string; result: string | null; created_at: number; updated_at: number; payload_hash: string;
-  lifecycle: LifecycleState; accepted_at: number | null; started_at: number | null; finished_at: number | null;
+  lifecycle: LifecycleState; accepted_at: number; started_at: number | null; finished_at: number | null;
   failure: string | null; artifacts: string | null; progress: string | null;
 }
 
@@ -67,9 +67,19 @@ function operationState(result: OperationResult): string {
 }
 
 function invocationInterrupted(row: Operation, now = Date.now()): boolean {
-  const invokedAt = Number(row.accepted_at ?? row.created_at);
-  return ['accepted', 'running'].includes(row.state) && row.result === null && Number.isFinite(invokedAt)
+  const invokedAt = Number(row.accepted_at);
+  return row.state === 'accepted' && row.result === null && Number.isFinite(invokedAt)
     && now - invokedAt > interruptionTimeoutMs;
+}
+
+function needsProgressRecovery(targetState: unknown, lifecycleMissing: boolean, progress: string | null): boolean {
+  if (targetState === undefined) return false;
+  return lifecycleMissing || progress === null;
+}
+
+function recoveredProgress(db: Knex, targetState: unknown, lifecycleMissing: boolean): unknown {
+  if (lifecycleMissing) return JSON.stringify(targetState);
+  return db.raw('COALESCE(progress, ?)', [JSON.stringify(targetState)]);
 }
 
 export class McpOperations {
@@ -111,15 +121,14 @@ export class McpOperations {
       if (!recorded) return this.project((await this.db<Operation>('mcp_operations').where({ id }).first())!);
       const receipt = { state, result: result.data };
       await this.recordArtifacts(id, artifactsFromReceipt({ repository: repository || null }, receipt));
-      const lifecycle = lifecycleFromLegacy(state);
-      if (['completed', 'failed', 'cancelled'].includes(lifecycle)) {
+      if (['completed', 'failed', 'cancelled'].includes(state)) {
         const failure = errorEnvelope((result.data as { error?: unknown } | null)?.error) ?? failureFromReceipt(receipt);
-        await this.finish(id, lifecycle as LifecycleOutcome, failure);
-      } else if (lifecycle === 'unknown') {
+        await this.finish(id, state as LifecycleOutcome, failure);
+      } else if (state === 'unknown') {
         const failure = errorEnvelope((result.data as { error?: unknown } | null)?.error);
         await this.db('mcp_operations').where({ id }).whereIn('lifecycle', ['accepted', 'unknown'])
           .update({ lifecycle: 'unknown', failure: failure ? JSON.stringify(failure) : null, updated_at: Date.now() });
-      } else if (lifecycle === 'accepted') {
+      } else {
         // A live invocation result is authoritative if a concurrent poll had
         // already classified its previously result-less receipt as interrupted.
         await this.markAccepted(id);
@@ -166,8 +175,8 @@ export class McpOperations {
         .filter(([key, value]) => canonical(artifactRecord[key]) !== canonical(value)));
       const failure = row.state === 'failed' ? failureFromReceipt(receipt) : undefined;
       const lifecycleMissing = ['accepted', 'running', 'unknown'].includes(row.lifecycle) || row.finished_at === null;
-      const progressMissing = row.progress === null && targetState !== undefined;
-      if (!lifecycleMissing && !Object.keys(missingArtifacts).length && !(failure && row.failure === null) && !progressMissing) continue;
+      const progressNeedsRecovery = needsProgressRecovery(targetState, lifecycleMissing, row.progress);
+      if (!lifecycleMissing && !Object.keys(missingArtifacts).length && !(failure && row.failure === null) && !progressNeedsRecovery) continue;
 
       const update: Record<string, unknown> = { updated_at: Date.now() };
       if (lifecycleMissing) {
@@ -182,8 +191,10 @@ export class McpOperations {
       if (failure && row.failure === null) {
         update.failure = this.db.raw('COALESCE(failure, ?)', [JSON.stringify(failure)]);
       }
-      if (progressMissing) {
-        update.progress = this.db.raw('COALESCE(progress, ?)', [JSON.stringify(targetState)]);
+      if (progressNeedsRecovery) {
+        // A terminal tracker receipt is newer than any nonterminal progress
+        // recorded before lifecycle synchronization was interrupted.
+        update.progress = recoveredProgress(this.db, targetState, lifecycleMissing);
       }
 
       // Do not attach metadata derived from a receipt that changed after the
@@ -201,8 +212,8 @@ export class McpOperations {
   async markInterruptedInvocations(principal: McpPrincipal, id?: string): Promise<void> {
     const now = Date.now();
     const query = this.db('mcp_operations').where({ owner_id: principal.user.id, grant_id: principal.grant.id })
-      .whereIn('state', ['accepted', 'running']).whereNull('result').whereIn('lifecycle', ['accepted', 'running', 'unknown'])
-      .whereRaw('COALESCE(accepted_at, created_at) < ?', [now - interruptionTimeoutMs]);
+      .where({ state: 'accepted' }).whereNull('result').whereIn('lifecycle', ['accepted', 'running', 'unknown'])
+      .where('accepted_at', '<', now - interruptionTimeoutMs);
     if (id) query.andWhere({ id });
     await query.update({ state: 'unknown', lifecycle: 'unknown', updated_at: now });
   }
@@ -292,8 +303,8 @@ export class McpOperations {
     const stale = interrupted || (row.state === 'running' && Date.now() - Number(row.updated_at) > interruptionTimeoutMs);
     const state = stale ? 'unknown' : row.state;
     return { operationId: row.id, tool: row.tool, state, result: json(row.result), lifecycle: {
-      state: interrupted ? 'unknown' : row.lifecycle ?? lifecycleFromLegacy(row.state),
-      acceptedAt: iso(row.accepted_at ?? row.created_at),
+      state: interrupted ? 'unknown' : row.lifecycle,
+      acceptedAt: iso(row.accepted_at),
       startedAt: iso(row.started_at),
       finishedAt: iso(row.finished_at),
       failure: json(row.failure),

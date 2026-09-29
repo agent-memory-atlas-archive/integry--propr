@@ -379,12 +379,12 @@ export function createToolCatalog(deps: ToolDeps): McpTool[] {
       await operations.reconcileTerminalLifecycles(principal);
       await operations.markInterruptedInvocations(principal);
       const query = db<Operation>('mcp_operations').where({ owner_id: principal.user.id, grant_id: principal.grant.id })
-        .whereRaw('COALESCE(accepted_at, created_at) >= ?', [Date.now() - args.sinceMinutes * 60_000]);
+        .where('accepted_at', '>=', Date.now() - args.sinceMinutes * 60_000);
       if (args.tool) query.where('tool', args.tool);
       if (args.repository) query.andWhere(builder => builder.where('repository', args.repository).orWhere('tool', 'cancel_operation'));
       if (args.lifecycle === 'active') query.whereIn('lifecycle', ['accepted', 'running']);
       else if (args.lifecycle) query.where('lifecycle', args.lifecycle);
-      const ordered = query.orderByRaw('COALESCE(accepted_at, created_at) DESC').orderBy('id', 'desc');
+      const ordered = query.orderBy('accepted_at', 'desc').orderBy('id', 'desc');
       const authorized: Operation[] = [];
       const repositoryAuthorizations = new Map<string, Promise<void>>();
       const wanted = args.offset + args.limit + 1;

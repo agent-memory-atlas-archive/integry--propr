@@ -5,7 +5,6 @@ import knex from 'knex';
 import { z } from 'zod';
 import { associateSubmissionTask, closeConnection } from '@propr/core';
 import { up as mcpMigration } from '../../core/src/db/migrations/20260910220000_add_mcp.js';
-import { up as operationLifecycleMigration } from '../../core/src/db/migrations/20261001000000_add_mcp_operation_lifecycle.js';
 import { up as submissionMigration } from '../../core/src/db/migrations/20260922000000_add_task_submissions.js';
 import { up as identityMigration } from '../../core/src/db/migrations/20260922010000_preserve_task_submission_identity.js';
 import { createToolCatalog, executeTool, type ToolDeps } from '../mcp/tools.js';
@@ -38,7 +37,6 @@ async function fixture() {
   const db = knex({ client: 'better-sqlite3', connection: { filename: ':memory:' }, useNullAsDefault: true });
   await db.schema.createTable('task_drafts', table => { table.string('draft_id').primary(); });
   await mcpMigration(db);
-  await operationLifecycleMigration(db);
   await submissionMigration(db);
   await identityMigration(db);
   await db.schema.createTable('tasks', table => {

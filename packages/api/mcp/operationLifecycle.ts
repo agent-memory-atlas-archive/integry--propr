@@ -1,5 +1,5 @@
 import { redactSecrets, type McpErrorEnvelope } from './errorEnvelope.js';
-import type { McpOperations, LifecycleOutcome, LifecycleState, Operation } from './operations.js';
+import type { McpOperations, LifecycleOutcome, Operation } from './operations.js';
 
 const startedTaskStates = new Set(['processing', 'claude_execution', 'post_processing']);
 const executedGoalTaskStates = new Set([...startedTaskStates, 'completed', 'failed']);
@@ -63,14 +63,7 @@ function issueNumbersFromReceipt(
   return [...issueNumbers];
 }
 
-/** Translate the compatibility state into the persisted public lifecycle. */
-export function lifecycleFromLegacy(state: unknown): LifecycleState {
-  if (['running', 'accepted', 'posted', 'queued', 'browser_required'].includes(String(state))) return 'accepted';
-  if (['completed', 'failed', 'cancelled'].includes(String(state))) return String(state) as LifecycleState;
-  return 'unknown';
-}
-
-/** Collect stable output handles regardless of which legacy receipt layer exposed them. */
+/** Collect stable output handles from mutation results and tracker observations. */
 export function artifactsFromReceipt(row: Pick<Operation, 'repository'>, receipt: Record<string, unknown>): Record<string, unknown> {
   const result = record(receipt.result) ?? {};
   const continuation = record(result.continuation) ?? {};
