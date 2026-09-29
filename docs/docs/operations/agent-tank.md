@@ -53,6 +53,7 @@ That means:
 - **Nothing to install.** No `npm install -g agent-tank`, no daemon to keep alive, no second copy of the agent CLIs.
 - **No networking.** There is no HTTP endpoint and therefore no `localhost` vs `host.docker.internal` mistake to make.
 - **Same credentials as your runs.** Bundled Agent Tank inspects exactly the directories the agents themselves use, so the numbers describe the accounts doing the work. The mounts are read-only, so a usage probe can never modify or corrupt them.
+- **Private provider state.** Claude and Codex receive only a copy of their authentication file in a private, writable container directory. Codex can initialize its SQLite state there; Claude uses Agent Tank’s direct usage API. Host sessions, databases, plugins, and MCP configuration are not copied. Runtime state and credential copies disappear when the refresh container is removed. AGY continues reading its existing read-only mount.
 - **A cached snapshot, not a live daemon.** Starting a container and driving `/usage` through a pseudo-terminal takes time, so ProPR caches the result and refreshes out of band. The per-LLM-call probes only ever read that cache; the sidebar's refresh button forces a fresh run.
 
 Enable it with:

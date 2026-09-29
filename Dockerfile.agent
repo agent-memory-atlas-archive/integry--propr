@@ -241,6 +241,7 @@ ENV UV_TOOL_DIR=/opt/uv/tools \
 
 COPY --chown=node:node \
     scripts/agent-entrypoint.sh \
+    scripts/agent-tank-runtime.mjs \
     scripts/claude-entrypoint.sh \
     scripts/codex-entrypoint.sh \
     scripts/antigravity-entrypoint.sh \

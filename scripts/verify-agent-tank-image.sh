@@ -4,7 +4,7 @@
 # The mocked unit coverage can only prove ProPR *asks* for the right thing: the
 # right image, read-only credential mounts, the generated config schema. What it
 # cannot prove is that the runtime inside the image answers - that `agent-tank`
-# drives the shipped `claude`/`codex`/`agy` CLIs through a pseudo-terminal and
+# uses the Claude usage API and the shipped Codex/AGY runtimes and
 # comes back with real usage numbers. That is what this script does, against the
 # operator's own authenticated credentials.
 #
@@ -66,14 +66,16 @@ esac
 # packages/core/src/services/agentTankBundledRunner.ts: this script is only
 # evidence about production if it runs the command production runs.
 # test/agentTankImageVerification.test.ts asserts the two stay in sync.
-BUNDLED_BOOTSTRAP='set -e; mkdir -p "$(dirname "$1")"; printf %s "$PROPR_AGENT_TANK_CONFIG" > "$1"; exec agent-tank --once --json --config "$1"'
+BUNDLED_BOOTSTRAP='set -e; umask 077; mkdir -p "$(dirname "$1")"; printf %s "$PROPR_AGENT_TANK_CONFIG" > "$1"; node /home/node/agent-tank-runtime.mjs "$1"; exec agent-tank --once --json --config "$1"'
 # Same contract, different binary: clone the pinned ref, build it in the image,
 # and exec that build. The clone is quiet and npm's chatter goes to stderr so
 # stdout stays the pure JSON document the production parser reads. node-pty
 # compiles against the toolchain the agent image already carries.
 SOURCE_BOOTSTRAP='set -e
+umask 077
 mkdir -p "$(dirname "$1")"
 printf %s "$PROPR_AGENT_TANK_CONFIG" > "$1"
+node /home/node/agent-tank-runtime.mjs "$1"
 checkout=/tmp/propr-agent-tank-src
 rm -rf "$checkout"
 git clone --quiet --depth 1 --branch "$AGENT_TANK_GIT_REF" "$AGENT_TANK_REPO_URL" "$checkout"
@@ -354,7 +356,7 @@ if ! usage_summary="$(
   exit 1
 fi
 printf '%s\n' "$usage_summary"
-echo "✓ every mounted provider returned usage through the shipped CLIs"
+echo "✓ every mounted provider returned usage through the bundled runtime"
 
 # --- Read-only mounts, no provider entrypoint -------------------------------
 probe_output=""
