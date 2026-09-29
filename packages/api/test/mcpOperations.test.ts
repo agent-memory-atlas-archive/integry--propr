@@ -1,14 +1,20 @@
 import assert from 'node:assert/strict';
-import { test } from 'node:test';
+import { after, test } from 'node:test';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import knex from 'knex';
+import { closeConnection } from '@propr/core';
 import { up } from '../../core/src/db/migrations/20260910220000_add_mcp.js';
+import { down as lifecycleDown, up as lifecycleUp } from '../../core/src/db/migrations/20261001000000_add_mcp_operation_lifecycle.js';
 import { McpOperations } from '../mcp/operations.js';
 import { McpError } from '../mcp/config.js';
 import { callWorkflow } from '../mcp/adapter.js';
 import { parseClientMetadataDocument } from '../mcp/clients.js';
+import { createToolCatalog, type ToolDeps } from '../mcp/tools.js';
+import type { McpPrincipal } from '../mcp/policy.js';
+
+after(closeConnection);
 
 test('mutation deduplication survives concurrent callers and reopening the SQLite database', async () => {
   const root = await mkdtemp(path.join(tmpdir(), 'propr-mcp-'));
@@ -17,6 +23,7 @@ test('mutation deduplication survives concurrent callers and reopening the SQLit
   try {
     await db.schema.createTable('task_drafts', table => { table.string('draft_id').primary(); table.string('name'); });
     await up(db);
+    await lifecycleUp(db);
     const principal = { user: { id: '123' }, grant: { id: 'grant-1' } } as never;
     const args = { idempotencyKey: 'durable-key-1', value: 'payload' };
     let invoked = 0;
@@ -28,6 +35,9 @@ test('mutation deduplication survives concurrent callers and reopening the SQLit
     const restarted = new McpOperations(db);
     const result = await restarted.run(principal, { tool: 'fixture_action', args, repository: 'acme/repo' }, async () => { throw new Error('Must not replay'); });
     assert.equal(result.state, 'completed'); assert.deepEqual(result.result, { changed: true });
+    assert.equal((result.lifecycle as { state: string }).state, 'completed');
+    assert.match((result.lifecycle as { acceptedAt: string }).acceptedAt, /^\d{4}-\d\d-\d\dT/);
+    assert.ok((result.lifecycle as { finishedAt: string }).finishedAt);
     await assert.rejects(restarted.run(principal, { tool: 'fixture_action', args: { ...args, value: 'changed' }, repository: 'acme/repo' }, async () => ({ status: 200, data: {} })), /different arguments/);
     await assert.rejects(restarted.get({ user: { id: '999' }, grant: { id: 'grant-1' } } as never, String(result.operationId)), /not found/);
     const uncertain = await restarted.run(principal, { tool: 'external_action', args: { idempotencyKey: 'uncertain-key-1' }, repository: 'acme/repo' }, async () => { throw new Error('Network disconnected after possible side effect'); });
@@ -46,6 +56,7 @@ test('mutation deduplication survives concurrent callers and reopening the SQLit
     } });
     const rejected = await restarted.run(principal, { tool: 'guarded_action', args: { idempotencyKey: 'rejected-key-1' }, repository: 'acme/repo' }, async () => { throw new McpError('STALE_HEAD', 'Head changed', 409); });
     assert.equal(rejected.state, 'failed');
+    assert.deepEqual((rejected.lifecycle as { failure: unknown }).failure, rejected.result && (rejected.result as { error: unknown }).error);
     const workflowFailure = await restarted.run(principal, { tool: 'workflow_action', args: { idempotencyKey: 'workflow-failure-1' }, repository: 'acme/repo' }, async () =>
       callWorkflow(async (_req, res) => { res.status(500).json({ error: 'The workflow may have changed the target.' }); }, principal, {}));
     assert.equal(workflowFailure.state, 'unknown');
@@ -58,6 +69,90 @@ test('mutation deduplication survives concurrent callers and reopening the SQLit
     await db('task_drafts').where({ draft_id: 'plan-1' }).update({ name: 'Background edit' });
     assert.equal((await db('task_drafts').where({ draft_id: 'plan-1' }).first()).mcp_revision, 2);
   } finally { await db.destroy(); await rm(root, { recursive: true, force: true }); }
+});
+
+test('operation lifecycle transitions, artifacts and progress are durable and monotonic', async t => {
+  const db = knex({ client: 'better-sqlite3', connection: { filename: ':memory:' }, useNullAsDefault: true });
+  t.after(() => db.destroy());
+  await db.schema.createTable('task_drafts', table => table.string('draft_id').primary());
+  await up(db); await lifecycleUp(db);
+  const operations = new McpOperations(db);
+  const principal = { user: { id: 'alice' }, grant: { id: 'grant-a' } } as never;
+  const receipt = await operations.run(principal, {
+    tool: 'run_ultrafix', args: { idempotencyKey: 'lifecycle-key-1' }, repository: 'acme/repo',
+  }, async () => ({ status: 202, data: { state: 'queued', pullRequest: 42, commentId: 99 } }));
+  assert.equal((receipt.lifecycle as { state: string }).state, 'accepted');
+  assert.equal((receipt.lifecycle as { startedAt: unknown }).startedAt, null);
+
+  const id = String(receipt.operationId);
+  await operations.markStarted(id, 1_800_000_000_000);
+  await Promise.all([
+    operations.recordArtifacts(id, { taskId: 'task-1' }),
+    operations.recordArtifacts(id, { pullRequest: { repository: 'acme/repo', number: 42, url: 'https://github.com/acme/repo/pull/42' } }),
+  ]);
+  await operations.recordProgress(id, { taskId: 'task-1', state: 'processing' });
+  await Promise.all([operations.finish(id, 'completed'), operations.markStarted(id, 1_700_000_000_000)]);
+  await operations.finish(id, 'failed', { code: 'LATE_FAILURE', message: 'stale', stage: null, retryable: false, status: 500 });
+
+  const projected = operations.project(await operations.get(principal, id));
+  assert.equal((projected.lifecycle as { state: string }).state, 'completed');
+  assert.equal((projected.lifecycle as { startedAt: string }).startedAt, '2027-01-15T08:00:00.000Z');
+  assert.ok((projected.lifecycle as { finishedAt: string }).finishedAt);
+  assert.deepEqual((projected.lifecycle as { artifacts: unknown }).artifacts, {
+    taskId: 'task-1', pullRequest: { repository: 'acme/repo', number: 42, url: 'https://github.com/acme/repo/pull/42' },
+  });
+  assert.deepEqual((projected.lifecycle as { progress: unknown }).progress, { taskId: 'task-1', state: 'processing' });
+  assert.equal((projected.lifecycle as { failure: unknown }).failure, null);
+});
+
+test('list_operations filters active receipts by exact owner and grant without refreshing trackers', async t => {
+  const db = knex({ client: 'better-sqlite3', connection: { filename: ':memory:' }, useNullAsDefault: true });
+  t.after(() => db.destroy());
+  await db.schema.createTable('task_drafts', table => table.string('draft_id').primary());
+  await up(db); await lifecycleUp(db);
+  const operations = new McpOperations(db);
+  const principal = { user: { id: 'alice' }, grant: { id: 'grant-a' } } as McpPrincipal;
+  const otherGrant = { user: { id: 'alice' }, grant: { id: 'grant-b' } } as McpPrincipal;
+  const accepted = async (actor: McpPrincipal, tool: string, key: string) => operations.run(actor, {
+    tool, args: { idempotencyKey: key }, repository: 'acme/repo',
+  }, async () => ({ status: 202, data: { state: 'queued' } }));
+  await accepted(principal, 'run_ultrafix', 'active-ultrafix-1');
+  await accepted(principal, 'review_pull_request', 'active-review-0001');
+  await accepted(otherGrant, 'review_pull_request', 'other-grant-run1');
+  await operations.run(principal, { tool: 'run_ultrafix', args: { idempotencyKey: 'done-ultrafix-01' }, repository: 'acme/repo' },
+    async () => ({ status: 200, data: { changed: true } }));
+
+  const deps = { db, policy: {} as never, taskQueue: {} as never, redisClient: {} as never, runtimeBuildQueue: {} as never } as ToolDeps;
+  const tool = createToolCatalog(deps).find(candidate => candidate.name === 'list_operations')!;
+  const args = tool.schema.parse({ tool: 'run_ultrafix', lifecycle: 'active' });
+  const result = (await tool.run({ principal, args })).data as { operations: Array<Record<string, unknown>>; nextOffset: number | null };
+  assert.equal(result.operations.length, 1);
+  assert.equal(result.operations[0].tool, 'run_ultrafix');
+  assert.equal((result.operations[0].lifecycle as { state: string }).state, 'accepted');
+  assert.equal(result.operations[0].refreshWith, 'get_operation');
+  const hidden = (await tool.run({ principal: otherGrant, args: tool.schema.parse({ tool: 'run_ultrafix', lifecycle: 'active' }) })).data as { operations: unknown[] };
+  assert.deepEqual(hidden.operations, []);
+});
+
+test('operation lifecycle migration backfills and rolls back on SQLite', async t => {
+  const db = knex({ client: 'better-sqlite3', connection: { filename: ':memory:' }, useNullAsDefault: true });
+  t.after(() => db.destroy());
+  await db.schema.createTable('task_drafts', table => table.string('draft_id').primary());
+  await up(db);
+  await db('mcp_operations').insert([
+    { id: 'completed', owner_id: 'alice', grant_id: 'grant-a', idempotency_key: 'completed-key', tool: 'fixture', payload_hash: 'a', state: 'completed', result: '{}', created_at: 10, updated_at: 20 },
+    { id: 'failed', owner_id: 'alice', grant_id: 'grant-a', idempotency_key: 'failed-key-01', tool: 'fixture', payload_hash: 'b', state: 'failed', result: JSON.stringify({ error: { code: 'BROKEN' } }), created_at: 30, updated_at: 40 },
+    { id: 'queued', owner_id: 'alice', grant_id: 'grant-a', idempotency_key: 'queued-key-01', tool: 'fixture', payload_hash: 'c', state: 'queued', result: '{}', created_at: 50, updated_at: 60 },
+  ]);
+  await lifecycleUp(db);
+  const rows = await db('mcp_operations').orderBy('created_at');
+  assert.deepEqual(rows.map(row => [row.lifecycle, row.accepted_at, row.finished_at]), [
+    ['completed', 10, 20], ['failed', 30, 40], ['accepted', 50, null],
+  ]);
+  assert.deepEqual(JSON.parse(rows[1].failure), { code: 'BROKEN' });
+  await lifecycleDown(db);
+  assert.equal(await db.schema.hasColumn('mcp_operations', 'lifecycle'), false);
+  assert.equal(await db.schema.hasColumn('mcp_operations', 'accepted_at'), false);
 });
 
 test('CIMD intersects plural supported methods with public PKCE instead of trusting a legacy preference', () => {

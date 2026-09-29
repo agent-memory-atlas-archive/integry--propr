@@ -20,6 +20,7 @@ import { createAgentRuntimeRoutes } from '../routes/agentRuntimeRoutes.js';
 import { McpError, type McpScope } from './config.js';
 import { McpPolicy, type McpPrincipal } from './policy.js';
 import { McpOperations, type OperationResult, type Operation } from './operations.js';
+import { syncLifecycle } from './operationLifecycle.js';
 import { callWorkflow, type WorkflowHandler } from './adapter.js';
 import { addTaskSubmissionTools, trackTaskSubmission } from './toolsTaskSubmissions.js';
 import { addPlanningTools } from './toolsPlanning.js';
@@ -296,7 +297,7 @@ export function createToolCatalog(deps: ToolDeps): McpTool[] {
   workflow(tools, { name: 'delete_task', description: 'Delete an exact inactive task and its persisted execution history. Active tasks must first be cancelled.', scope: 'execute', schema: z.object({ ...taskShape, ...mutationShape }).strict(), target: taskTarget }, tasks.deleteTask, args => ({ params: { taskId: args.taskId }, query: { force: 'false' } }));
 
   const operations = new McpOperations(db);
-  tools.push({ name: 'get_operation', description: 'Read a durable mutation receipt and honest acceptance/completion state. Poll no faster than retryAfterSeconds.', scope: 'read', readOnly: true, schema: z.object({ operationId: z.uuid() }).strict(), run: async ({ principal, args }) => {
+  tools.push({ name: 'get_operation', description: 'Read a durable mutation receipt and honest lifecycle. "accepted" means the request was recorded and handed to the backend; "running" means execution was observed; the loop/receipt is only "completed" when the backend reached a terminal success state. Poll no faster than retryAfterSeconds.', scope: 'read', readOnly: true, schema: z.object({ operationId: z.uuid() }).strict(), run: async ({ principal, args }) => {
     const row = await operations.get(principal, args.operationId);
     if (row.repository) await policy.repository(principal, row.repository, false, { includeDisabled: row.tool.endsWith('_repository_configuration'), allowUnconfigured: row.tool === 'remove_repository_configuration' });
     const original = tools.find(tool => tool.name === row.tool);
@@ -321,10 +322,33 @@ export function createToolCatalog(deps: ToolDeps): McpTool[] {
       receipt.targetState = { issues };
       if (issues.length === result.issues.length && issues.every(issue => ['under_review', 'merged', 'closed'].includes(issue.status))) receipt.state = 'completed';
     }
+    await syncLifecycle(operations, row, receipt);
+    receipt.lifecycle = operations.project(await operations.get(principal, row.id)).lifecycle;
     if (['accepted', 'posted', 'queued', 'running'].includes(String(receipt.state))) receipt.retryAfterSeconds = 3;
     else delete receipt.retryAfterSeconds;
     return ok(receipt);
   } });
+  const operationLifecycleSchema = z.enum(['accepted', 'running', 'completed', 'failed', 'cancelled', 'unknown', 'active']);
+  tools.push({ name: 'list_operations', description: 'List durable mutation receipts newest first without refreshing backend trackers. "accepted" means the request was recorded and handed to the backend; "running" means execution was observed; the loop/receipt is only "completed" when the backend reached a terminal success state. Use refreshWith on an item when a live refresh is needed.', scope: 'read', readOnly: true,
+    schema: z.object({
+      tool: z.string().min(1).max(128).optional().describe('Exact tool name.'),
+      lifecycle: operationLifecycleSchema.optional(),
+      sinceMinutes: z.number().int().min(1).max(10080).default(1440),
+      repository: repositorySchema.optional(),
+      offset: z.number().int().min(0).max(100000).default(0),
+      limit: z.number().int().min(1).max(50).default(20),
+    }).strict(), run: async ({ principal, args }) => {
+      const query = db<Operation>('mcp_operations').where({ owner_id: principal.user.id, grant_id: principal.grant.id })
+        .whereRaw('COALESCE(accepted_at, created_at) >= ?', [Date.now() - args.sinceMinutes * 60_000]);
+      if (args.tool) query.where('tool', args.tool);
+      if (args.repository) query.where('repository', args.repository);
+      if (args.lifecycle === 'active') query.whereIn('lifecycle', ['accepted', 'running']);
+      else if (args.lifecycle) query.where('lifecycle', args.lifecycle);
+      const rows = await query.orderByRaw('COALESCE(accepted_at, created_at) DESC').orderBy('id', 'desc')
+        .offset(args.offset).limit(args.limit);
+      return ok({ operations: rows.map(row => ({ ...operations.project(row), refreshWith: 'get_operation' })),
+        nextOffset: rows.length === args.limit ? args.offset + args.limit : null });
+    } });
   tools.push({ name: 'cancel_operation', description: 'Request cancellation of an accepted plan generation, goal or task operation. Completed external effects cannot be undone.', scope: 'execute', schema: z.object({ ...mutationShape, operationId: z.uuid() }).strict(), run: async ({ principal, args }) => {
     const row = await operations.get(principal, args.operationId);
     if (row.repository) await policy.repository(principal, row.repository, true);
