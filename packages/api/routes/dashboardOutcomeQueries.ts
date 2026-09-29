@@ -566,7 +566,7 @@ export async function loadOutcomeHistory(db: Knex, repository: string, entityId:
       at: entity.sort_at, task: entity.task_id, completion: entity.completion_id };
     if (options.cursor) {
       try {
-        if (options.cursor.length > 2048) throw new Error();
+        if (typeof options.cursor !== 'string' || options.cursor.length > 2048) throw new Error();
         const parsed = JSON.parse(Buffer.from(options.cursor, 'base64url').toString()) as HistoryCursor;
         if (parsed.v !== 1 || parsed.entity !== entityId || parsed.repository !== repository || parsed.revision !== revision
           || !(typeof parsed.at === 'string' || (typeof parsed.at === 'number' && Number.isFinite(parsed.at))) || typeof parsed.task !== 'string' || !Number.isSafeInteger(parsed.completion)) throw new Error();
