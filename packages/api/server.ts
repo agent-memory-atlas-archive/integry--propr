@@ -316,7 +316,15 @@ function setupRoutes(): void {
       ) => notificationBackground!.projectSystemSnapshot(snapshot, additionalAdministratorIds),
     }),
   });
-  readSystemStatus = statusRoutes.getStatusSnapshot;
+  readSystemStatus = async () => {
+    const snapshot = await statusRoutes.getStatusSnapshot();
+    // Health notifications must keep advancing when connected clients consume
+    // snapshots and no longer call the HTTP route that also projects them.
+    void notificationBackground?.projectSystemSnapshot(snapshot, []).catch(error => {
+      console.warn('Failed to project pushed system health notifications:', error);
+    });
+    return snapshot;
+  };
   invalidateStatusAgentCache = statusRoutes.invalidateAgentStatusCache;
   const desktopAuthRoutes = createDesktopAuthRoutes();
   // INTENTIONALLY UNAUTHENTICATED: compatibility/discovery and the bounded
