@@ -272,7 +272,7 @@ describe('GoalsPage', () => {
     fireEvent.submit(screen.getByRole('button', { name: 'Start goal' }).closest('form')!);
     expect(goalsApi.createGoal).not.toHaveBeenCalled();
 
-    fireEvent.change(screen.getByLabelText('Coding agent'), { target: { value: 'agent-2' } });
+    fireEvent.change(screen.getByLabelText('Agent'), { target: { value: 'agent-2' } });
     await waitFor(() => expect(screen.getByLabelText('Model')).toHaveValue('gemini-3-pro'));
     expect(screen.queryByLabelText('Prompt character count')).not.toBeInTheDocument();
     expect(objective).not.toHaveAttribute('aria-invalid');
@@ -355,7 +355,7 @@ describe('GoalsPage', () => {
 
     expect(await screen.findByRole('option', { name: 'Claude' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /acme.*api/ })).toBeInTheDocument();
-    expect(screen.getByLabelText('Coding agent')).toHaveValue('agent-2');
+    expect(screen.getByLabelText('Agent')).toHaveValue('agent-2');
     expect(screen.getByLabelText('Model')).toHaveValue('claude-opus-4-6');
     expect(screen.getByLabelText('Maximum parallel tasks')).toHaveValue(6);
     expect(screen.getByLabelText('Agent implements directly')).toBeChecked();

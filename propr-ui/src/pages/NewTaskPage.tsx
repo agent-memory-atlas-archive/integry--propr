@@ -1,7 +1,7 @@
 import TextareaAutosize from 'react-textarea-autosize';
 import { useEffect, useRef, useState } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
-import { ScrollText } from 'lucide-react';
+import { ScrollText, Zap } from 'lucide-react';
 import { getInstanceCatalog } from '../api/proprApi';
 import type { InstanceCatalogResponse } from '../api/proprTypes';
 import { createDraft, uploadAttachment } from '../api/plannerApi';
@@ -173,8 +173,7 @@ function useNewTaskLauncher(scope: string) {
 
 type LauncherState = ReturnType<typeof useNewTaskLauncher>;
 
-function TaskRoutingOptions({ agentAlias, setAgent, model, setModel, catalog, selection, invalidRouting, locked, isDemoMode,
-  snapshot, planFirst, ready, busy, processingFiles, repository, instruction }: LauncherState) {
+function TaskRoutingOptions({ agentAlias, setAgent, model, setModel, catalog, selection, invalidRouting, locked, isDemoMode }: LauncherState) {
   const [optionsOpen, setOptionsOpen] = useState(invalidRouting);
   return <details className="border-y border-slate-200 py-4" open={invalidRouting || undefined} onToggle={event => setOptionsOpen(event.currentTarget.open)}>
     <summary className="cursor-pointer text-sm font-medium text-slate-700">Advanced Options {!optionsOpen && <span className="ml-2 font-normal text-slate-500">{agentAlias || 'Default agent'} · {model || 'Default model'}</span>}</summary>
@@ -183,7 +182,6 @@ function TaskRoutingOptions({ agentAlias, setAgent, model, setModel, catalog, se
       <label className="text-sm text-slate-700">Model<select aria-label="Model" value={model} disabled={!agentAlias} onChange={event => setModel(event.target.value)} className="mt-1 w-full rounded border border-slate-300 p-2"><option value="">Agent default</option>{model && !selection?.supportedModels.includes(model) && <option value={model}>{model} (unavailable)</option>}{selection?.supportedModels.map(model => <option key={model}>{model}</option>)}</select></label>
     </fieldset>
     <p className="mt-3 text-xs text-slate-500">Base branch and automatic review settings follow the repository’s issue workflow.</p>
-    {!snapshot && <button type="button" onClick={() => void planFirst()} disabled={!ready || busy || processingFiles || isDemoMode || !repository || !instruction.trim()} className={`${button} mt-3 border-slate-300 bg-white text-slate-700`}><ScrollText size={16} />Plan first</button>}
   </details>;
 }
 
@@ -207,13 +205,14 @@ function TaskSubmissionFeedback({ busy, result, snapshot, error, invalidRouting 
   </>;
 }
 
-function TaskLauncherActions({ onCancel, snapshot, result, startOver, ready, busy, processingFiles, isDemoMode, repository, instruction, planDraft, invalidRouting }:
-  Pick<LauncherState, 'snapshot' | 'result' | 'startOver' | 'ready' | 'busy' | 'processingFiles' | 'isDemoMode' | 'repository' | 'instruction' | 'planDraft' | 'invalidRouting'> & { onCancel: () => void }) {
+function TaskLauncherActions({ onCancel, snapshot, result, startOver, ready, busy, processingFiles, isDemoMode, repository, instruction, planDraft, planFirst, invalidRouting }:
+  Pick<LauncherState, 'snapshot' | 'result' | 'startOver' | 'ready' | 'busy' | 'processingFiles' | 'isDemoMode' | 'repository' | 'instruction' | 'planDraft' | 'planFirst' | 'invalidRouting'> & { onCancel: () => void }) {
   const launchDisabled = !ready || busy || processingFiles || isDemoMode || !repository || !instruction.trim();
 
   return <div className="flex flex-none flex-wrap justify-end gap-3 border-t border-slate-200 bg-slate-50 px-5 py-4 sm:px-7">
-    <button type="button" onClick={onCancel} disabled={busy || processingFiles} className={`${button} border-transparent text-slate-700 hover:bg-slate-100`}>Cancel</button>
+    <button type="button" onClick={onCancel} disabled={busy || processingFiles} className={`${button} mr-auto border-transparent text-slate-700 hover:bg-slate-100`}>Cancel</button>
     {snapshot && <button type="button" onClick={() => void startOver()} disabled={busy || isDemoMode} className={`${button} border-slate-300 bg-white text-slate-700`}>{result?.state === 'prepared' ? 'Edit request' : 'Start over'}</button>}
+    {!snapshot && <button type="button" onClick={() => void planFirst()} disabled={launchDisabled} className={`${button} border-slate-300 bg-white text-slate-700 hover:bg-slate-100`}><ScrollText aria-hidden="true" size={16} />Plan first</button>}
     {result?.state !== 'queued' && <button type="submit" disabled={launchDisabled || Boolean(planDraft) || invalidRouting} className={`${button} border-teal-600 bg-teal-600 text-white hover:bg-teal-700`}>{busy ? 'Submitting…' : snapshot ? 'Retry submission' : 'Run task'}</button>}
   </div>;
 }
@@ -231,7 +230,7 @@ function NewTaskLauncher({ scope }: { scope: string }) {
     navigate('/tasks', { replace: true });
   };
 
-  return <CreationDialog title="New task" description="Describe the change you want. Run task creates an issue and starts implementation."
+  return <CreationDialog title="New task" icon={Zap} description="Describe the change you want. Run task creates an issue and starts implementation."
     closeLabel="Close task creation" onClose={requestClose} busy={launcher.busy || processingFiles}>
     <form className="flex min-h-0 flex-col" onChange={() => setDirty(true)} onSubmit={event => { event.preventDefault(); void run(); }}>
       <div className="min-h-0 overflow-y-auto px-5 py-5 sm:px-7 space-y-5">

@@ -73,7 +73,6 @@ describe('New Task issue launcher', () => {
     renderPage();
     const file = new File(['Invoice date: 09/22/2026'], 'invoice.txt', { type: 'text/plain' });
     await act(async () => fireEvent.change(screen.getByLabelText('Attach files'), { target: { files: [file] } }));
-    fireEvent.click(screen.getByText('Advanced Options'));
     const plan = screen.getByRole('button', { name: 'Plan first' });
     await waitFor(() => expect(plan).toBeEnabled());
     fireEvent.click(plan);

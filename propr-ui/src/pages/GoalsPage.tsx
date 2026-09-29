@@ -7,7 +7,7 @@ import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import {
   Activity, AlertTriangle, Check, CheckCircle2, CircleDot, CirclePause, CirclePlay, CircleSlash, CircleStop,
   Copy, ExternalLink, FileText, Filter, GitPullRequest, LoaderCircle, Search, Send,
-  MoreHorizontal, Terminal, Trash2, X,
+  MoreHorizontal, Target, Terminal, Trash2, X,
 } from 'lucide-react';
 import { getInstanceCatalog } from '../api/proprApi';
 import type { InstanceCatalogRepository } from '../api/proprTypes';
@@ -417,8 +417,8 @@ function CreateGoalForm({ onCancel, onCreated, onDirtyChange, onSubmittingChange
         <details className="mt-5 border-y border-slate-200 py-4" onToggle={event => setOptionsOpen(event.currentTarget.open)}>
           <summary className="cursor-pointer text-sm font-medium text-slate-700">Advanced Options {!optionsOpen && <span className="ml-2 font-normal text-slate-500">{getModelDisplayName(model) || 'Default model'} · {parallelism ? `${parallelism} parallel tasks` : 'Default concurrency'} · {launchStrategy === 'direct' ? 'Direct' : 'Orchestrate'}</span>}</summary>
           <div className="mt-4 grid gap-4 sm:grid-cols-2">
-        <label className="text-sm font-medium text-slate-700">Coding agent
-          <select aria-label="Coding agent" value={agentId} onChange={event => { markDirty(); setAgentId(event.target.value); }} className="mt-1 w-full rounded-md border border-slate-300 p-2" required>
+        <label className="text-sm font-medium text-slate-700">Agent
+          <select aria-label="Agent" value={agentId} onChange={event => { markDirty(); setAgentId(event.target.value); }} className="mt-1 w-full rounded-md border border-slate-300 p-2" required>
             {agents.map(agent => <option key={agent.agentId} value={agent.agentId} disabled={!agent.goalCapable}>{capabilityAgentLabel(agent, agents)}{agent.goalCapable ? '' : ' — unsupported'}</option>)}
           </select>
         </label>
@@ -468,7 +468,7 @@ function CreateGoalForm({ onCancel, onCreated, onDirtyChange, onSubmittingChange
       </fieldset>
       </div>
       <div className="flex flex-none justify-end gap-3 border-t border-slate-200 bg-slate-50 px-5 py-4 sm:px-7">
-        <button type="button" onClick={onCancel} disabled={submitting} className={`${buttonClass} min-h-11 px-4 text-slate-700 hover:bg-slate-100`}>Cancel</button>
+        <button type="button" onClick={onCancel} disabled={submitting} className={`${buttonClass} mr-auto min-h-11 px-4 text-slate-700 hover:bg-slate-100`}>Cancel</button>
         <button type="submit" disabled={isDemoMode || submitting || objectiveTooLong || !repository || !agentId || !model || !objective.trim() || !selectedAgent?.goalCapable} title={isDemoMode ? 'Demo mode is read-only' : undefined} className={`${buttonClass} min-h-11 px-4 bg-teal-600 text-white hover:bg-teal-700`}>{submitting ? 'Starting…' : 'Start goal'}</button>
       </div>
     </form>
@@ -495,7 +495,7 @@ function CreateGoalDialog({ isOpen, onClose, onCreated }: CreateGoalDialogProps)
   }, [isOpen]);
 
   if (!isOpen) return null;
-  return <CreationDialog title="Start a goal" description="Your reusable session settings are remembered after creation."
+  return <CreationDialog title="Start a goal" icon={Target} description="Your reusable session settings are remembered after creation."
     closeLabel="Close goal creation" onClose={requestClose} busy={submitting}>
     <CreateGoalForm onCancel={requestClose} onCreated={onCreated} onDirtyChange={setDirty} onSubmittingChange={setSubmitting} />
   </CreationDialog>;

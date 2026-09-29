@@ -182,7 +182,7 @@ for (const [device, viewport] of Object.entries({ desktop: { width: 1440, height
     const dialog = page.getByRole('dialog', { name: 'Start a goal' });
     const prompt = dialog.getByLabel('Prompt', { exact: true });
     await expect(prompt).toBeFocused();
-    await expect(dialog.getByLabel('Coding agent', { exact: true })).toBeHidden();
+    await expect(dialog.getByLabel('Agent', { exact: true })).toBeHidden();
     await prompt.fill('Ship the customer analytics dashboard with accessible filters and responsive charts.');
     await dialog.getByLabel('Attach files', { exact: true }).setInputFiles({ name: 'dashboard-requirements.txt', mimeType: 'text/plain', buffer: Buffer.from('Support keyboard navigation and mobile layouts.') });
     await expect(dialog.getByText('dashboard-requirements.txt')).toBeVisible();
@@ -193,7 +193,7 @@ for (const [device, viewport] of Object.entries({ desktop: { width: 1440, height
       await page.screenshot({ path: `../.propr/previews/new-goal-${device}.png`, animations: 'disabled' });
     }
     await dialog.locator('summary').click();
-    await expect(dialog.getByLabel('Coding agent', { exact: true })).toBeVisible();
+    await expect(dialog.getByLabel('Agent', { exact: true })).toBeVisible();
     await dialog.getByLabel('Maximum parallel tasks').fill('5');
     await dialog.getByLabel('Agent orchestrates through ProPR').check();
     await expect(dialog.getByLabel('Checkpoint target cadence', { exact: true })).toHaveCount(0);

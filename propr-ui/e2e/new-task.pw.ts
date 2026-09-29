@@ -70,6 +70,8 @@ for (const [device, viewport] of Object.entries({ desktop: { width: 1440, height
     const dialog = page.getByRole('dialog', { name: 'New task' });
     await expect(dialog).toBeVisible();
     await expect(dialog.getByLabel('Agent', { exact: true })).toBeHidden();
+    await expect(dialog.getByRole('button', { name: 'Plan first', exact: true })).toBeVisible();
+    await expect(dialog.getByRole('button', { name: 'Plan first', exact: true })).toBeEnabled();
     await expect(dialog.getByRole('link', { name: /New Plan|New Goal/ })).toHaveCount(0);
     await screenshot(page, `new-task-${device}`);
     await page.getByRole('button', { name: 'Run task', exact: true }).click();
