@@ -28,6 +28,18 @@ function epochMilliseconds(value: unknown): number | undefined {
   return Number.isNaN(parsed) ? undefined : parsed;
 }
 
+function taskIdFromReceipt(
+  target: Record<string, unknown>,
+  continuation: Record<string, unknown>,
+  result: Record<string, unknown>,
+  targetIssues: Record<string, unknown>[],
+): string | undefined {
+  const currentTask = record(target.currentTask) ?? {};
+  return nonEmptyString(target.taskId, target.task_id, target.current_task_id, currentTask.taskId,
+    currentTask.task_id, continuation.taskId, result.taskId,
+    ...targetIssues.flatMap(issue => [issue.taskId, issue.task_id]));
+}
+
 /** Translate the compatibility state into the persisted public lifecycle. */
 export function lifecycleFromLegacy(state: unknown): LifecycleState {
   if (['running', 'accepted', 'posted', 'queued', 'browser_required'].includes(String(state))) return 'accepted';
@@ -40,14 +52,11 @@ export function artifactsFromReceipt(row: Pick<Operation, 'repository'>, receipt
   const result = record(receipt.result) ?? {};
   const continuation = record(result.continuation) ?? {};
   const target = record(receipt.targetState) ?? {};
-  const currentTask = record(target.currentTask) ?? {};
   const targetIssues: Record<string, unknown>[] = Array.isArray(target.issues)
     ? target.issues.map(record).filter((value): value is Record<string, unknown> => !!value) : [];
   const artifacts: Record<string, unknown> = {};
 
-  const taskId = nonEmptyString(target.taskId, target.task_id, target.current_task_id, currentTask.taskId,
-    currentTask.task_id, continuation.taskId, result.taskId,
-    ...targetIssues.flatMap(issue => [issue.taskId, issue.task_id]));
+  const taskId = taskIdFromReceipt(target, continuation, result, targetIssues);
   if (taskId) artifacts.taskId = taskId;
 
   const repository = nonEmptyString(result.repository, row.repository);

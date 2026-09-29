@@ -69,6 +69,18 @@ export async function trackCancellation(deps: ToolDeps, row: Operation, principa
   await deps.db('mcp_operations').where({ id: row.id }).whereNotIn('state', terminalStates).update({ state: receipt.state, result: JSON.stringify(result), updated_at: Date.now() });
 }
 
+function restoreResolvedTarget(
+  receipt: Record<string, unknown>,
+  result: ExecutionResult,
+  task: TrackingContext['task'] | undefined,
+): void {
+  const persistedTarget = result.targetState ?? {};
+  if (task || Object.keys(persistedTarget).length) receipt.targetState = {
+    ...persistedTarget,
+    ...(task ? { taskId: task.task_id, pr_number: task.pr_number } : {}),
+  };
+}
+
 /** Resolve the execution from the actual job or the exact triggering comment. */
 export async function trackExecution(deps: ToolDeps, row: Operation, principal: McpPrincipal, receipt: Record<string, unknown>): Promise<void> {
   if (!trackedTools.includes(row.tool) || !row.result) return;
@@ -78,11 +90,7 @@ export async function trackExecution(deps: ToolDeps, row: Operation, principal: 
   if (result.error) return;
   const task = row.tool === 'index_repository' ? undefined : await findExecutionTask(deps, row, result);
   if (result.executionResolved && terminalStates.includes(row.state)) {
-    const persistedTarget = result.targetState ?? {};
-    if (task || Object.keys(persistedTarget).length) receipt.targetState = {
-      ...persistedTarget,
-      ...(task ? { taskId: task.task_id, pr_number: task.pr_number } : {}),
-    };
+    restoreResolvedTarget(receipt, result, task);
     return;
   }
   if (task) await trackTask(deps, row, { task, result, receipt });
