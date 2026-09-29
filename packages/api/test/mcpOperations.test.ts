@@ -114,6 +114,77 @@ test('operation lifecycle transitions, artifacts and progress are durable and mo
   assert.equal((projected.lifecycle as { failure: unknown }).failure, null);
 });
 
+test('replay reconciles an invocation interrupted after its terminal receipt was persisted', async t => {
+  const db = knex({ client: 'better-sqlite3', connection: { filename: ':memory:' }, useNullAsDefault: true });
+  t.after(() => db.destroy());
+  await db.schema.createTable('task_drafts', table => table.string('draft_id').primary());
+  await up(db); await lifecycleUp(db);
+  const principal = { user: { id: 'alice' }, grant: { id: 'grant-a' } } as McpPrincipal;
+  const operations = new McpOperations(db);
+  const args = { idempotencyKey: 'interrupted-success-1' };
+  const receipt = await operations.run(principal, { tool: 'fixture_action', args, repository: 'acme/repo' },
+    async () => ({ status: 202, data: { state: 'queued' } }));
+  const persistedAt = Date.now() - 500;
+  await db('mcp_operations').where({ id: receipt.operationId }).update({
+    state: 'completed', result: JSON.stringify({ changed: true }), updated_at: persistedAt,
+  });
+  assert.deepEqual(await db('mcp_operations').where({ id: receipt.operationId }).first('state', 'lifecycle', 'finished_at'), {
+    state: 'completed', lifecycle: 'accepted', finished_at: null,
+  });
+
+  const restarted = new McpOperations(db);
+  const replay = await restarted.replay(principal, 'fixture_action', args);
+  assert.equal(replay?.state, 'completed');
+  assert.deepEqual(replay?.result, { changed: true });
+  assert.deepEqual(replay?.lifecycle, {
+    state: 'completed', acceptedAt: (receipt.lifecycle as { acceptedAt: string }).acceptedAt,
+    startedAt: null, finishedAt: new Date(persistedAt).toISOString(), failure: null,
+    artifacts: {}, progress: null,
+  });
+
+  // Ordinary duplicate dispatch has the same recovery boundary as explicit replay.
+  await db('mcp_operations').where({ id: receipt.operationId }).update({ lifecycle: 'accepted', finished_at: null });
+  let invoked = false;
+  const duplicate = await restarted.run(principal, { tool: 'fixture_action', args, repository: 'acme/repo' }, async () => {
+    invoked = true;
+    return { status: 200, data: {} };
+  });
+  assert.equal(invoked, false);
+  assert.equal((duplicate.lifecycle as { state: string }).state, 'completed');
+});
+
+test('list_operations reconciles a tracker interruption before lifecycle filtering', async t => {
+  const db = knex({ client: 'better-sqlite3', connection: { filename: ':memory:' }, useNullAsDefault: true });
+  t.after(() => db.destroy());
+  await db.schema.createTable('task_drafts', table => table.string('draft_id').primary());
+  await up(db); await lifecycleUp(db);
+  const principal = { user: { id: 'alice' }, grant: { id: 'grant-a' } } as McpPrincipal;
+  const operations = new McpOperations(db);
+  const receipt = await operations.run(principal, {
+    tool: 'send_task_followup', args: { idempotencyKey: 'tracker-interrupt-1' }, repository: 'acme/repo',
+  }, async () => ({ status: 202, data: { state: 'queued', continuation: { taskId: 'task-1' } } }));
+  const persistedAt = Date.now() - 500;
+  // This is the tracker write immediately before get_operation would normally
+  // call syncLifecycle; a stopped process leaves exactly this durable row.
+  await db('mcp_operations').where({ id: receipt.operationId }).update({
+    state: 'completed', result: JSON.stringify({ state: 'queued', continuation: { taskId: 'task-1' }, executionResolved: true }),
+    updated_at: persistedAt,
+  });
+
+  const deps = { db, policy: { repository: async () => {}, requirePermission: () => {}, config: {} } as never,
+    taskQueue: {} as never, redisClient: {} as never, runtimeBuildQueue: {} as never } as ToolDeps;
+  const list = createToolCatalog(deps).find(tool => tool.name === 'list_operations')!;
+  const active = (await list.run({ principal, args: list.schema.parse({ lifecycle: 'active' }) })).data as { operations: Array<Record<string, unknown>> };
+  const completed = (await list.run({ principal, args: list.schema.parse({ lifecycle: 'completed' }) })).data as { operations: Array<Record<string, unknown>> };
+  assert.deepEqual(active.operations, []);
+  assert.deepEqual(completed.operations.map(row => row.operationId), [receipt.operationId]);
+  assert.equal((completed.operations[0].lifecycle as { state: string }).state, 'completed');
+  assert.equal((completed.operations[0].lifecycle as { finishedAt: string }).finishedAt, new Date(persistedAt).toISOString());
+  assert.deepEqual(await db('mcp_operations').where({ id: receipt.operationId }).first('state', 'lifecycle', 'finished_at'), {
+    state: 'completed', lifecycle: 'completed', finished_at: persistedAt,
+  });
+});
+
 test('polling an accepted wrapper does not fabricate backend execution start', async t => {
   const db = knex({ client: 'better-sqlite3', connection: { filename: ':memory:' }, useNullAsDefault: true });
   t.after(() => db.destroy());

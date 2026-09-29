@@ -367,6 +367,7 @@ export function createToolCatalog(deps: ToolDeps): McpTool[] {
       offset: z.number().int().min(0).max(100000).default(0),
       limit: z.number().int().min(1).max(50).default(20),
     }).strict(), run: async ({ principal, args }) => {
+      await operations.reconcileTerminalLifecycles(principal);
       await operations.markInterruptedInvocations(principal);
       const query = db<Operation>('mcp_operations').where({ owner_id: principal.user.id, grant_id: principal.grant.id })
         .whereRaw('COALESCE(accepted_at, created_at) >= ?', [Date.now() - args.sinceMinutes * 60_000]);

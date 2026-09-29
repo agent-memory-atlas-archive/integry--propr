@@ -64,6 +64,7 @@ export class McpOperations {
     let previous = await this.db<Operation>('mcp_operations').where(identity).first();
     if (!previous) return undefined;
     if (previous.payload_hash !== digest(canonical({ tool, args }))) throw new McpError('IDEMPOTENCY_CONFLICT', 'This key was already used with different arguments.', 409);
+    await this.reconcileTerminalLifecycles(principal, previous.id);
     await this.markInterruptedInvocations(principal, previous.id);
     previous = (await this.db<Operation>('mcp_operations').where(identity).first())!;
     return this.project(previous);
@@ -80,8 +81,10 @@ export class McpOperations {
       payload_hash: payloadHash, state: 'accepted', lifecycle: 'accepted', accepted_at: acceptedAt, artifacts: JSON.stringify({}),
       created_at: acceptedAt, updated_at: acceptedAt }).onConflict(['owner_id', 'grant_id', 'idempotency_key']).ignore().returning('id');
     if (!inserted.length) {
-      const previous = await this.db<Operation>('mcp_operations').where(identity).first();
+      let previous = await this.db<Operation>('mcp_operations').where(identity).first();
       if (!previous || previous.payload_hash !== payloadHash) throw new McpError('IDEMPOTENCY_CONFLICT', 'This key was already used with different arguments.', 409);
+      await this.reconcileTerminalLifecycles(principal, previous.id);
+      previous = (await this.db<Operation>('mcp_operations').where(identity).first())!;
       return this.project(previous);
     }
     try {
@@ -117,10 +120,25 @@ export class McpOperations {
   }
 
   async get(principal: McpPrincipal, id: string): Promise<Operation> {
+    await this.reconcileTerminalLifecycles(principal, id);
     await this.markInterruptedInvocations(principal, id);
     const row = await this.db<Operation>('mcp_operations').where({ id, owner_id: principal.user.id, grant_id: principal.grant.id }).first();
     if (!row) throw new McpError('NOT_FOUND', 'Operation not found.', 404);
     return row;
+  }
+
+  /** Repair a process interruption after its terminal receipt write but before lifecycle synchronization. */
+  async reconcileTerminalLifecycles(principal: McpPrincipal, id?: string): Promise<void> {
+    const query = this.db('mcp_operations').where({ owner_id: principal.user.id, grant_id: principal.grant.id })
+      .whereIn('state', ['completed', 'failed', 'cancelled'])
+      .whereIn('lifecycle', ['accepted', 'running', 'unknown']);
+    if (id) query.andWhere({ id });
+    await query.update({
+      lifecycle: this.db.raw('state'),
+      // The receipt update time is the strongest durable evidence of when the
+      // terminal outcome was persisted; recovery itself must not move it.
+      finished_at: this.db.raw('COALESCE(finished_at, updated_at, ?)', [Date.now()]),
+    });
   }
 
   async markInterruptedInvocations(principal: McpPrincipal, id?: string): Promise<void> {
