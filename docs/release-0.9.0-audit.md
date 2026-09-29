@@ -72,7 +72,7 @@ Copy only inspected captures into the committed asset directory:
 | `goals-queue` | `goals.png` |
 | `new-task-desktop` | `new-task.png` |
 | `settings-ai-models`, `settings-personal-notifications` | `settings.png`, `notifications.png` |
-| `settings-mcp`, `mcp-connected-apps` | `mcp-settings.png`, `mcp-apps.png`, `mcp-consent.png` |
+| `settings-mcp`, `mcp-connected-apps` | `mcp-settings.png`, `mcp-apps.png` |
 | `mcp-consent-desktop` | `mcp-consent.png` |
 | `desktop/linux-connect` | `desktop-connect.png` |
 
@@ -109,3 +109,30 @@ the MCP fixture reports its intentionally absent access-log table. No release,
 tag, deployment or GitHub workflow operation was performed. The orchestrator
 should keep the resulting PR **draft**.
 
+## Issue #2636 validation follow-up
+
+Reproduced the migration-owner argv failure: the launcher correctly selected
+`propr/app:0.9.0`, while the test expected `propr/app:0.8.15`. The expectation now
+reads `images.app` from the checked-in launcher manifest; the full strict argv
+assertion still checks every flag, environment value, bind and command.
+
+Audited the other `0.8.15` test references, including escaped regex literals.
+The desktop local-setup discovery-401 compatibility cases and setup recovery
+fixtures intentionally describe the legacy runtime. Desktop runtime-manifest and
+preview-image tests retain legacy image rejection checks. The remaining desktop,
+CLI and client references are explicit discovery, pairing, IPC, connection,
+About/menu or version-validation fixtures, not current-release expectations.
+All of these fixtures are preserved. The screenshot mapping now associates
+`settings-mcp` and `mcp-connected-apps` only with their respective assets;
+`mcp-consent-desktop` retains its separate consent row. All 12 assets are unchanged.
+
+Passed after the fix:
+
+- `node --test test/orchestratorMigrationPhase.test.mjs test/releaseValidation.test.mjs`: 28 tests (13 migration-phase and 15 release-validation).
+- `npx --no-install tsx --test test/orchestratorProprUrlsDrift.test.ts`: 13 version/URL-drift tests.
+- `EXPECTED_VERSION=0.9.0 RELEASE_TAG=v0.9.0 RELEASE_CANDIDATE=true npm run release:verify`: release metadata consistent for v0.9.0.
+
+This follow-up changes only the migration test and this audit. The earlier
+build/link/visual review remains recorded above; no application behavior or UI
+changed, so no new visual previews were generated. The PR must remain **draft**
+with Ultrafix disabled.
