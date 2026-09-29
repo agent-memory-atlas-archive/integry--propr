@@ -285,7 +285,9 @@ test('the run carries the generated config and the container writes it itself', 
     const expected = configEnvValue(args);
     // `agent-tank` only exists in the agent image, so the final exec is swapped
     // for a no-op; everything before it is the part under test.
-    const bootstrap = command[2].replace('exec agent-tank', 'exec true');
+    assert.ok(command[2].includes('node /home/node/agent-tank-runtime.mjs "$1"'));
+    const bootstrap = command[2].replace('node /home/node/agent-tank-runtime.mjs "$1";', '')
+        .replace('exec agent-tank', 'exec true');
     execFileSync('sh', ['-c', bootstrap, command[3], target], {
         env: { ...process.env, PROPR_AGENT_TANK_CONFIG: expected },
     });

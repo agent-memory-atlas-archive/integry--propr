@@ -4,7 +4,7 @@
  * The rest of the bundled-mode coverage mocks Docker away, so it can only prove
  * ProPR *asks* the right thing. `scripts/verify-agent-tank-image.sh` is the
  * check that the runtime inside the image answers: real credentials mounted
- * read-only, no provider entrypoint, usage numbers back out of the shipped CLIs.
+ * read-only, no provider entrypoint, usage numbers back out of the bundled runtime.
  *
  * These tests drive that script with a fake `docker` on PATH, so they assert two
  * things a real run cannot: that the command it sends is byte-for-byte the one
@@ -289,7 +289,7 @@ test('an authenticated image run reports usage for every mounted provider', () =
     assert.match(result.stdout, /claude: session\.percent=42, weeklyAll\.percent=31/);
     assert.match(result.stdout, /codex: fiveHour\.percentUsed=9/);
     assert.match(result.stdout, /agy: models\[Gemini 3\.8 Flash\]\.percentUsed=16/);
-    assert.match(result.stdout, /every mounted provider returned usage through the shipped CLIs/);
+    assert.match(result.stdout, /every mounted provider returned usage through the bundled runtime/);
     assert.match(result.stdout, /credential mounts are read-only and no provider entrypoint ran/);
     assert.match(result.stdout, /host credential directories are byte-for-byte unchanged/);
     assert.match(result.stdout, new RegExp(`verification passed \\(bundled runtime, version ${PINNED_VERSION}\\)`));

@@ -63,8 +63,10 @@ const CONFIG_ENV_VAR = 'PROPR_AGENT_TANK_CONFIG';
  */
 const CONFIG_BOOTSTRAP = [
     'set -e',
+    'umask 077',
     'mkdir -p "$(dirname "$1")"',
     `printf %s "$${CONFIG_ENV_VAR}" > "$1"`,
+    'node /home/node/agent-tank-runtime.mjs "$1"',
     'exec agent-tank --once --json --config "$1"',
 ].join('; ');
 
