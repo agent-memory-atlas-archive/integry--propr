@@ -149,6 +149,7 @@ export const NotFoundRouteContent: React.FC<{ hostname?: string }> = ({ hostname
 );
 
 const AppContent: React.FC = () => {
+  const [socketConnected, setSocketConnected] = useState(false);
   const { isDemoMode, isLoading: isDemoModeLoading } = useDemoMode();
   const {
     currentUser,
@@ -156,7 +157,7 @@ const AppContent: React.FC = () => {
     currentUserLoading,
     isInitialLoading,
     refreshCurrentUser,
-  } = useCurrentUserBootstrap({ isDemoMode });
+  } = useCurrentUserBootstrap({ isDemoMode, socketConnected });
 
   useEffect(() => {
     preloadInitialRouteChunk(currentUiPathname());
@@ -329,6 +330,8 @@ const AppContent: React.FC = () => {
   };
   return (
     <SocketProvider
+      onConnectionChange={setSocketConnected}
+      onAuthenticationError={refreshCurrentUser}
       disabled={Object.values(disableReasons).some(Boolean)}
       disableReasons={disableReasons}
     >

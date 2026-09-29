@@ -175,7 +175,7 @@ export interface HeaderStats {
 
 export function useHeaderStats(): HeaderStats {
   const currentUser = useCurrentUser();
-  const { getStatus, refreshStatus } = useSharedSystemStatus();
+  const { getStatus, refreshStatus, status: sharedStatus, managed: managedStatus } = useSharedSystemStatus();
   const requestIdentityKey = `${getDesktopSocketConfigurationKey()}\0${currentUser?.id ?? 'anonymous'}`;
   const [runningCount, setRunningCount] = useState<number>(0);
   const [runningItems, setRunningItems] = useState<RunningItem[]>([]);
@@ -199,6 +199,10 @@ export function useHeaderStats(): HeaderStats {
   });
   const [isLoading, setIsLoading] = useState<boolean>(true);
   const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (sharedStatus) setSystemHealth(buildSystemHealth(sharedStatus));
+  }, [sharedStatus]);
 
   // Dismissed IDs state
   const [dismissedPlanIds, setDismissedPlanIds] = useState<string[]>(() => getDismissedIds(DISMISSED_PLAN_IDS_KEY));
@@ -331,7 +335,7 @@ export function useHeaderStats(): HeaderStats {
           ? coalesceHeaderStatsRead(requestIdentityKey, 'tasks', () =>
             getTasks({ limit: 30, forReview: true, excludeMerged: true })) : null,
         status: requested.has('status')
-          ? coalesceHeaderStatsRead(requestIdentityKey, 'status', isInitialLoad ? getStatus : refreshStatus) : null,
+          ? coalesceHeaderStatsRead(requestIdentityKey, 'status', isInitialLoad || managedStatus ? getStatus : refreshStatus) : null,
       };
       const entries = await Promise.all((Object.entries(reads) as Array<[
         HeaderStatsResource, Promise<unknown> | null
@@ -445,7 +449,7 @@ export function useHeaderStats(): HeaderStats {
         setIsLoading(false);
       }
     }
-  }, [getStatus, refreshStatus, requestIdentityKey]);
+  }, [getStatus, refreshStatus, requestIdentityKey, managedStatus]);
   /* eslint-enable complexity */
 
   // Refresh function for manual refresh
@@ -456,7 +460,9 @@ export function useHeaderStats(): HeaderStats {
   // Queue, task, and draft transitions are often emitted together. Collect the
   // affected resources and reconcile each at most once after the burst.
   const scheduleLiveRefresh = useCallback((resources: readonly HeaderStatsResource[] = ALL_STATS_RESOURCES) => {
-    resources.forEach(resource => liveRefreshPendingRef.current.add(resource));
+    resources.forEach(resource => {
+      if (resource !== 'status' || !managedStatus) liveRefreshPendingRef.current.add(resource);
+    });
     if (documentIsHidden()) return;
     if (liveRefreshTimerRef.current !== null || liveRefreshInFlightRef.current) return;
 
@@ -496,7 +502,7 @@ export function useHeaderStats(): HeaderStats {
     };
 
     armRefresh(LIVE_INVALIDATION_COALESCE_MS);
-  }, [fetchStats]);
+  }, [fetchStats, managedStatus]);
 
   // A reconnect can carry a forced queue snapshot whose counts match the last
   // payload even though drafts, tasks, or health changed while offline. Reset

@@ -243,7 +243,7 @@ export class SocketSubscriptionManager {
         for (const room of rooms) {
           if (!await this.join(socket, { event: 'subscribe:activity', room, authorize: () => true })) return;
         }
-        if (socket.connected) socket.emit('activity:ready');
+        if (socket.connected) socket.emit('activity:ready', { shellSnapshots: true });
       });
       return tail;
     });

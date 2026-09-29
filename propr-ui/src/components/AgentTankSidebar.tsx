@@ -363,17 +363,10 @@ const AgentTankSidebar: React.FC<AgentTankSidebarProps> = ({ allowManualRefresh 
   const [refreshing, setRefreshing] = useState(false);
   const [expandedAgents, setExpandedAgents] = useState<Set<string>>(() => loadExpandedAgents());
 
-  /*
-    Usage is re-read when the server says a quota moved.
-
-    `usage:update` is a bare trigger rather than a snapshot on purpose: the
-    usage endpoint owns the projection and its permission check, so pushing the
-    numbers would mean authorizing them in two places. The read is the same one
-    as before - it just no longer happens on a timer.
-  */
   const { data: usage, error: usageError, isLoading: loading, refreshNow } = useLiveResource<AgentTankUsageResponse>({
     read: signal => getAgentTankUsage({ signal }),
     scopeKey: 'agent-tank-usage',
+    snapshotResource: 'usage',
     interest: { usage: true },
   });
   // A failed read keeps the last good numbers; with nothing read yet the widget

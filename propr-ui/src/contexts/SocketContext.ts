@@ -12,7 +12,15 @@ import {
   UsageUpdatePayload,
 } from '@propr/shared';
 
+export interface ShellSnapshot {
+  resource: 'system' | 'usage';
+  data: Record<string, unknown>;
+}
+
 export interface SocketContextValue {
+  /** Server supplies status and authorized usage projections directly. */
+  shellSnapshots?: boolean;
+  onShellSnapshot?: (callback: (payload: ShellSnapshot) => void) => () => void;
   socket: Socket | null;
   isConnected: boolean;
   subscribeToTask: (taskId: string) => void;

@@ -491,6 +491,10 @@ export class SocketService {
     payload: ActivityUpdatePayload | ScopedActivityUpdatePayload
       | NotificationUpdatePayload | RecipientListNotificationUpdate | UsageUpdatePayload | ScopedUsageUpdatePayload,
   ): void {
+    if (payload.eventType === USAGE_UPDATE
+      || (payload.eventType === ACTIVITY_UPDATE && ['health', 'system', 'indexing'].includes(payload.domain))) {
+      void this.shellBroadcaster?.sample();
+    }
     if (payload.eventType === NOTIFICATION_UPDATE) {
       const { recipientIds, recipientId, ...frame } = payload as NotificationUpdatePayload & Partial<RecipientListNotificationUpdate>;
       const recipients = Array.isArray(recipientIds) ? recipientIds : recipientId ? [recipientId] : [];

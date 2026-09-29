@@ -6,6 +6,7 @@ import type {
   GoalUpdatePayload,
 } from '@propr/shared';
 import type { ActivityUpdatePayload as ScopedActivityUpdatePayload } from '@propr/shared/dist/activityEvents.js';
+import type { ShellSnapshot } from '../contexts/SocketContext';
 import { useSocket } from '../contexts/useSocket';
 import { CONNECTED_RECONCILE_MS, useLiveRefreshScheduler } from './useLiveRefreshScheduler';
 
@@ -52,6 +53,8 @@ export interface LiveResourceOptions<T> {
   coalesceMs?: number;
   /** Skip entirely (e.g. demo mode, unauthenticated). */
   disabled?: boolean;
+  /** Replace invalidation reads with a server-owned projection when supported. */
+  snapshotResource?: ShellSnapshot['resource'];
 }
 
 export interface LiveResource<T> {
@@ -115,9 +118,12 @@ export function useLiveResource<T>({
   fallbackPollMs = fallbackIntervalMs,
   coalesceMs,
   disabled = false,
+  snapshotResource,
 }: LiveResourceOptions<T>): LiveResource<T> {
   const {
     isConnected,
+    shellSnapshots,
+    onShellSnapshot,
     subscribeToActivity,
     unsubscribeFromActivity,
     onActivityReady,
@@ -127,6 +133,7 @@ export function useLiveResource<T>({
     onUsageUpdate,
   } = useSocket();
 
+  const receivesSnapshots = Boolean(snapshotResource && shellSnapshots);
   const [state, setState] = useState<ResourceState<T>>(() => emptyState<T>(scopeKey));
   const mountedRef = useRef(true);
   const requestRef = useRef(0);
@@ -184,7 +191,7 @@ export function useLiveResource<T>({
     scopeKey,
     fallbackPollMs,
     coalesceMs,
-    connectedPollMs: disabled ? undefined : CONNECTED_RECONCILE_MS,
+    connectedPollMs: disabled || receivesSnapshots ? undefined : CONNECTED_RECONCILE_MS,
   });
   const scheduleRefreshNow = schedule.refreshNow;
 
@@ -221,7 +228,7 @@ export function useLiveResource<T>({
 
   const { goals, notifications, usage } = interest;
   useEffect(() => {
-    if (disabled) return;
+    if (disabled || receivesSnapshots) return;
     const unsubscribers: Array<() => void> = [
       onActivityReady?.(() => schedule()) ?? (() => {}),
       onActivityUpdate((payload: ActivityUpdatePayload) => {
@@ -244,6 +251,7 @@ export function useLiveResource<T>({
     return () => { for (const unsubscribe of unsubscribers) unsubscribe(); };
   }, [
     disabled,
+    receivesSnapshots,
     goals,
     notifications,
     usage,
@@ -254,6 +262,16 @@ export function useLiveResource<T>({
     onUsageUpdate,
     schedule,
   ]);
+
+  useEffect(() => {
+    if (disabled || !snapshotResource) return;
+    return onShellSnapshot?.(payload => {
+      if (payload.resource !== snapshotResource) return;
+      requestRef.current += 1;
+      controllerRef.current?.abort();
+      setState({ scopeKey, data: payload.data as T, error: null, settled: true, refreshing: false });
+    });
+  }, [disabled, onShellSnapshot, snapshotResource, scopeKey]);
 
   // The render that introduces a new scope happens before the effect that
   // clears the previous scope's rows, so the stale state is ignored here too -

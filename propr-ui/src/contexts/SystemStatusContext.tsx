@@ -3,6 +3,9 @@ import { useLiveInvalidation } from '../hooks/useLiveInvalidation';
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import { useLocation } from 'react-router-dom';
 import { getSystemStatus, INSTANCE_AUTHORIZATION_CHANGED_EVENT } from '../api/proprApi';
+import { useOptionalSocket } from './useSocket';
+import { mapSystemStatus } from '../api/systemStatusApi';
+import type { StatusResponse } from '../api/proprTypes';
 import type { SystemStatus } from '../api/proprTypes';
 import {
   getDesktopSocketConfigurationKey,
@@ -14,6 +17,7 @@ import { useCurrentUser } from './AuthContext';
 const DISCONNECTED_FALLBACK_INTERVAL_MS = 30_000;
 
 interface SharedSystemStatus {
+  managed?: boolean;
   status?: SystemStatus;
   isLoading: boolean;
   error: Error | null;
@@ -44,6 +48,7 @@ export const SystemStatusProvider: React.FC<{
   disabled?: boolean;
 }> = ({ children, disabled = false }) => {
   const user = useCurrentUser();
+  const socket = useOptionalSocket();
   const location = useLocation();
   const desktopConfigurationKey = useSyncExternalStore(
     subscribeDesktopConnectionScope,
@@ -55,6 +60,7 @@ export const SystemStatusProvider: React.FC<{
   const currentScopeRef = useRef(scopeKey);
   currentScopeRef.current = scopeKey;
   const mountedRef = useRef(true);
+  const versionRef = useRef(0);
   const [state, setState] = useState<ScopedStatusState>({
     scopeKey,
     isLoading: !disabled,
@@ -64,18 +70,19 @@ export const SystemStatusProvider: React.FC<{
   stateRef.current = state;
 
   const refreshStatus = useCallback(async (): Promise<SystemStatus> => {
+    const version = ++versionRef.current;
     const requestScope = scopeKey;
     setState(current => current.scopeKey === requestScope
       ? { ...current, isLoading: true, error: null }
       : { scopeKey: requestScope, isLoading: true, error: null });
     try {
       const status = await getSystemStatus();
-      if (mountedRef.current && currentScopeRef.current === requestScope) {
+      if (mountedRef.current && versionRef.current === version && currentScopeRef.current === requestScope) {
         setState({ scopeKey: requestScope, status, isLoading: false, error: null });
       }
       return status;
     } catch (error) {
-      if (mountedRef.current && currentScopeRef.current === requestScope) {
+      if (mountedRef.current && versionRef.current === version && currentScopeRef.current === requestScope) {
         setState({
           scopeKey: requestScope,
           isLoading: false,
@@ -104,7 +111,7 @@ export const SystemStatusProvider: React.FC<{
   const schedule = useLiveInvalidation({ refresh: refreshStatus, scopeKey, disabled,
     interest: { domains: ['health', 'system', 'indexing', 'usage'],
       changes: ['created', 'started', 'completed', 'failed', 'cancelled', 'updated'], usage: true },
-    fallbackPollMs: DISCONNECTED_FALLBACK_INTERVAL_MS });
+    fallbackPollMs: DISCONNECTED_FALLBACK_INTERVAL_MS, pushOnly: socket?.shellSnapshots });
 
   useEffect(() => {
     if (disabled) return;
@@ -116,10 +123,22 @@ export const SystemStatusProvider: React.FC<{
     return () => window.removeEventListener(INSTANCE_AUTHORIZATION_CHANGED_EVENT, handleAuthorizationChange);
   }, [disabled, schedule, scopeKey]);
 
+  const onShellSnapshot = socket?.onShellSnapshot;
+  useEffect(() => {
+    if (disabled) return;
+    return onShellSnapshot?.(payload => {
+      if (payload.resource !== 'system') return;
+      versionRef.current += 1;
+      const status = mapSystemStatus(payload.data as unknown as StatusResponse);
+      setState({ scopeKey, status, isLoading: false, error: null });
+    });
+  }, [disabled, onShellSnapshot, scopeKey]);
+
   const activeState = state.scopeKey === scopeKey
     ? state
     : { scopeKey, isLoading: !disabled, error: null };
   const value = useMemo<SharedSystemStatus>(() => ({
+    managed: true,
     status: activeState.status,
     isLoading: activeState.isLoading,
     error: activeState.error,

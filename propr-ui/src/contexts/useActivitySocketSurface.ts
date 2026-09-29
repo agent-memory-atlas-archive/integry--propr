@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useRef } from 'react';
+import { useCallback, useMemo, useRef, useState } from 'react';
 import type { Socket } from '@propr/client';
 import {
   ACTIVITY_UPDATE,
@@ -10,7 +10,7 @@ import {
   type NotificationUpdatePayload,
   type UsageUpdatePayload,
 } from '@propr/shared';
-import type { SocketContextValue } from './SocketContext';
+import type { ShellSnapshot, SocketContextValue } from './SocketContext';
 
 type Listener<T> = (payload: T) => void;
 
@@ -28,6 +28,8 @@ export interface ActivitySocketSurface {
   /** The part of the context value this surface owns. */
   subscriptions: Pick<
     SocketContextValue,
+    | 'shellSnapshots'
+    | 'onShellSnapshot'
     | 'subscribeToActivity'
     | 'unsubscribeFromActivity'
     | 'onActivityReady'
@@ -61,6 +63,8 @@ const useRegistry = <T,>() => {
  * reference-counted, and the count has to outlive all of them.
  */
 export function useActivitySocketSurface(): ActivitySocketSurface {
+  const [shellSnapshots, setShellSnapshots] = useState(false);
+  const snapshots = useRegistry<ShellSnapshot>();
   const ready = useRegistry<void>();
   const activity = useRegistry<ActivityUpdatePayload>();
   const goal = useRegistry<GoalUpdatePayload>();
@@ -94,7 +98,13 @@ export function useActivitySocketSurface(): ActivitySocketSurface {
       if (!isCurrentScope()) return;
       registry.listeners.current.forEach(callback => callback(payload));
     };
-    const activityReady = fanOut(ready);
+    const activityReady = (capabilities?: { shellSnapshots?: boolean }) => {
+      if (!isCurrentScope()) return;
+      setShellSnapshots(capabilities?.shellSnapshots === true);
+      fanOut(ready)(undefined);
+    };
+    const shellSnapshot = fanOut(snapshots);
+    socket.on('shell:snapshot', shellSnapshot);
     const activityUpdated = fanOut(activity);
     const goalUpdated = fanOut(goal);
     const notificationUpdated = fanOut(notification);
@@ -107,13 +117,14 @@ export function useActivitySocketSurface(): ActivitySocketSurface {
     socket.on(USAGE_UPDATE, usageUpdated);
 
     return () => {
+      socket.off('shell:snapshot', shellSnapshot);
       socket.off('activity:ready', activityReady);
       socket.off(ACTIVITY_UPDATE, activityUpdated);
       socket.off(GOAL_UPDATE, goalUpdated);
       socket.off(NOTIFICATION_UPDATE, notificationUpdated);
       socket.off(USAGE_UPDATE, usageUpdated);
     };
-  }, [activity, goal, notification, usage, ready]);
+  }, [activity, goal, notification, usage, ready, snapshots]);
 
   const handleConnected = useCallback((socket: Socket) => {
     socketRef.current = socket;
@@ -125,6 +136,7 @@ export function useActivitySocketSurface(): ActivitySocketSurface {
   }, []);
 
   const handleDisconnected = useCallback(() => {
+    setShellSnapshots(false);
     connectedRef.current = false;
     socketRef.current = null;
   }, []);
@@ -155,6 +167,8 @@ export function useActivitySocketSurface(): ActivitySocketSurface {
     handleConnected,
     handleDisconnected,
     subscriptions: {
+      shellSnapshots,
+      onShellSnapshot: snapshots.subscribe,
       subscribeToActivity,
       unsubscribeFromActivity,
       onActivityReady: ready.subscribe,
@@ -164,6 +178,8 @@ export function useActivitySocketSurface(): ActivitySocketSurface {
       onUsageUpdate: usage.subscribe,
     },
   }), [
+    shellSnapshots,
+    snapshots.subscribe,
     activity.subscribe,
     ready.subscribe,
     attach,
