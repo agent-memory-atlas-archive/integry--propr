@@ -1,11 +1,12 @@
 import { useEffect, useRef, useState } from 'react';
-import { Link, useLocation, useNavigate } from 'react-router-dom';
-import { Play, ScrollText, Target, Zap } from 'lucide-react';
+import { useLocation, useNavigate } from 'react-router-dom';
+import { Play, ScrollText } from 'lucide-react';
 import { getInstanceCatalog } from '../api/proprApi';
 import type { InstanceCatalogResponse } from '../api/proprTypes';
 import { createDraft, uploadAttachment } from '../api/plannerApi';
 import { API_BASE_URL } from '../api/apiClient';
 import { getTaskSubmission, retryTaskSubmission, submitTask, taskSnapshotStorage, listTaskSnapshots, type TaskSnapshot, type TaskSubmission } from '../api/taskSubmissions';
+import { CreationDialog } from '../components/CreationDialog';
 import { RepositorySelector } from '../components/RepositorySelector';
 import { clipboardImageFiles } from '../components/Goals/goalAttachmentUtils';
 import { resizeImage } from '../components/TaskPlanner/imageUtils';
@@ -14,7 +15,7 @@ import { useCurrentUser } from '../contexts/AuthContext';
 import { useDemoMode } from '../contexts/DemoModeContext';
 import { useDocumentTitle } from '../hooks/useDocumentTitle';
 
-const button = 'scroll-mb-24 md:scroll-mb-0 inline-flex min-h-11 items-center justify-center gap-2 rounded-md border px-4 py-2 text-sm font-medium disabled:opacity-50';
+const button = 'inline-flex min-h-11 items-center justify-center gap-2 rounded-md border px-4 py-2 text-sm font-medium disabled:opacity-50';
 interface Prefill { initialRepository?: string; initialPrompt?: string; todoIds?: string[] }
 function savedRouting(scope: string): { agentAlias?: string; model?: string } {
   try { return JSON.parse(localStorage.getItem(`task-routing:${scope}`) || '{}'); } catch { return {}; }
@@ -171,15 +172,16 @@ function useNewTaskLauncher(scope: string) {
 
 type LauncherState = ReturnType<typeof useNewTaskLauncher>;
 
-function TaskRoutingOptions({ agentAlias, setAgent, model, setModel, catalog, selection, invalidRouting }:
-  Pick<LauncherState, 'agentAlias' | 'setAgent' | 'model' | 'setModel' | 'catalog' | 'selection' | 'invalidRouting'>) {
+function TaskRoutingOptions({ agentAlias, setAgent, model, setModel, catalog, selection, invalidRouting, locked, isDemoMode,
+  snapshot, planFirst, ready, busy, processingFiles, repository, instruction }: LauncherState) {
   return <details className="border-y border-slate-200 py-4" open={invalidRouting || undefined}>
-    <summary className="cursor-pointer text-sm font-medium text-slate-700">Options <span className="ml-2 font-normal text-slate-500">{agentAlias || 'Default agent'} · {model || 'Default model'}</span></summary>
-    <div className="mt-4 grid gap-4 sm:grid-cols-2">
+    <summary className="cursor-pointer text-sm font-medium text-slate-700">Advanced Options <span className="ml-2 font-normal text-slate-500">{agentAlias || 'Default agent'} · {model || 'Default model'}</span></summary>
+    <fieldset disabled={locked || isDemoMode} className="mt-4 grid gap-4 sm:grid-cols-2">
       <label className="text-sm text-slate-700">Agent<select aria-label="Agent" value={agentAlias} onChange={event => { setAgent(event.target.value); setModel(''); }} className="mt-1 w-full rounded border border-slate-300 p-2"><option value="">Instance default</option>{invalidRouting && !selection && <option value={agentAlias}>{agentAlias} (unavailable)</option>}{catalog?.agents.map(agent => <option key={agent.alias} value={agent.alias}>{agent.alias}</option>)}</select></label>
       <label className="text-sm text-slate-700">Model<select aria-label="Model" value={model} disabled={!agentAlias} onChange={event => setModel(event.target.value)} className="mt-1 w-full rounded border border-slate-300 p-2"><option value="">Agent default</option>{model && !selection?.supportedModels.includes(model) && <option value={model}>{model} (unavailable)</option>}{selection?.supportedModels.map(model => <option key={model}>{model}</option>)}</select></label>
-    </div>
+    </fieldset>
     <p className="mt-3 text-xs text-slate-500">Base branch and automatic review settings follow the repository’s issue workflow.</p>
+    {!snapshot && <button type="button" onClick={() => void planFirst()} disabled={!ready || busy || processingFiles || isDemoMode || !repository || !instruction.trim()} className={`${button} mt-3 border-slate-300 bg-white text-slate-700`}><ScrollText size={16} />Plan first</button>}
   </details>;
 }
 
@@ -197,19 +199,19 @@ function TaskSubmissionFeedback({ busy, result, snapshot, error, invalidRouting 
   const status = submissionStatus(busy, result, snapshot);
 
   return <>
-    {invalidRouting && <p role="alert" className="text-sm text-red-700">The saved agent or model is unavailable. Choose a supported selection in Options.</p>}
+    {invalidRouting && <p role="alert" className="text-sm text-red-700">The saved agent or model is unavailable. Choose a supported selection in Advanced Options.</p>}
     {(error || result?.error) && <p role="alert" className="break-words rounded-md bg-red-50 p-3 text-sm text-red-800">{error || result?.error}</p>}
     {status && <div role="status" className="rounded-md border border-teal-200 bg-teal-50 p-4 text-sm text-slate-700"><p className="font-semibold">{status}</p>{result?.issueUrl && <a href={result.issueUrl} target="_blank" rel="noreferrer" className="mt-2 inline-block text-teal-700 underline">Open issue #{result.issueNumber}</a>}{snapshot && !result?.issueUrl && <p className="mt-2">Retry checks this submission before creating anything else.</p>}{snapshot && result?.state !== 'prepared' && <p className="mt-2">Start over opens a new request. It does not cancel this submission.</p>}</div>}
   </>;
 }
 
-function TaskLauncherActions({ snapshot, result, startOver, planFirst, ready, busy, processingFiles, isDemoMode, repository, instruction, planDraft, invalidRouting }:
-  Pick<LauncherState, 'snapshot' | 'result' | 'startOver' | 'planFirst' | 'ready' | 'busy' | 'processingFiles' | 'isDemoMode' | 'repository' | 'instruction' | 'planDraft' | 'invalidRouting'>) {
+function TaskLauncherActions({ onCancel, snapshot, result, startOver, ready, busy, processingFiles, isDemoMode, repository, instruction, planDraft, invalidRouting }:
+  Pick<LauncherState, 'snapshot' | 'result' | 'startOver' | 'ready' | 'busy' | 'processingFiles' | 'isDemoMode' | 'repository' | 'instruction' | 'planDraft' | 'invalidRouting'> & { onCancel: () => void }) {
   const launchDisabled = !ready || busy || processingFiles || isDemoMode || !repository || !instruction.trim();
 
-  return <div className="flex flex-wrap justify-end gap-3">
+  return <div className="flex flex-none flex-wrap justify-end gap-3 border-t border-slate-200 bg-slate-50 px-5 py-4 sm:px-7">
+    <button type="button" onClick={onCancel} disabled={busy || processingFiles} className={`${button} border-transparent text-slate-700 hover:bg-slate-100`}>Cancel</button>
     {snapshot && <button type="button" onClick={() => void startOver()} disabled={busy || isDemoMode} className={`${button} border-slate-300 bg-white text-slate-700`}>{result?.state === 'prepared' ? 'Edit request' : 'Start over'}</button>}
-    {!snapshot && <button type="button" onClick={() => void planFirst()} disabled={launchDisabled} className={`${button} border-slate-300 bg-white text-slate-700`}><ScrollText size={16} />Plan first</button>}
     {result?.state !== 'queued' && <button type="submit" disabled={launchDisabled || Boolean(planDraft) || invalidRouting} className={`${button} border-teal-600 bg-teal-600 text-white hover:bg-teal-700`}><Play size={16} />{busy ? 'Submitting…' : snapshot ? 'Retry submission' : 'Run task'}</button>}
   </div>;
 }
@@ -219,9 +221,18 @@ function NewTaskLauncher({ scope }: { scope: string }) {
   const { catalog, repository, setRepository, instruction, setInstruction, files, setFiles,
     setError, processingFiles, setProcessingFiles, locked, isDemoMode, run, snapshot } = launcher;
 
-  return <main className="mx-auto w-full max-w-3xl px-4 pt-6 pb-28 sm:px-8 md:py-10">
-    <h1 className="flex items-center gap-2 text-2xl font-semibold text-slate-900"><Zap className="h-6 w-6 text-teal-600" />New task</h1>
-    <p className="mt-2 text-sm leading-6 text-slate-600">Describe the change you want. Run task creates a GitHub issue and starts implementation using the repository’s settings.</p>
+  const navigate = useNavigate();
+  const [dirty, setDirty] = useState(false);
+  const requestClose = () => {
+    if (launcher.busy || processingFiles) return;
+    if (!snapshot && dirty && !window.confirm('Discard this unsaved task? Your prompt, attachments, and form changes will be lost.')) return;
+    navigate('/tasks', { replace: true });
+  };
+
+  return <CreationDialog title="New task" description="Describe the change you want. Run task creates an issue and starts implementation."
+    closeLabel="Close task creation" onClose={requestClose} busy={launcher.busy || processingFiles}>
+    <form className="flex min-h-0 flex-col" onChange={() => setDirty(true)} onSubmit={event => { event.preventDefault(); void run(); }}>
+      <div className="min-h-0 overflow-y-auto px-5 py-5 sm:px-7 space-y-5">
     {!snapshot && !launcher.planDraft && launcher.recoverable.length > 0 && <section aria-label="Unresolved submissions" className="mt-6 rounded-md border border-amber-200 bg-amber-50 p-4 text-sm text-slate-700">
       <h2 className="font-semibold">Unresolved submissions</h2>
       <p className="mt-1">Reopen a previous request to check its status and finish starting the task.</p>
@@ -230,41 +241,26 @@ function NewTaskLauncher({ scope }: { scope: string }) {
         <button type="button" disabled={!launcher.ready || launcher.busy || processingFiles || isDemoMode} onClick={() => void launcher.reopen(value.key)} className={`${button} shrink-0 border-slate-300 bg-white`}>Reopen submission</button>
       </li>)}</ul>
     </section>}
-    <form className="mt-6 space-y-5" onSubmit={event => { event.preventDefault(); void run(); }}>
       <fieldset disabled={locked || isDemoMode} className="space-y-5">
-        <div><label className="mb-2 block text-sm font-medium text-slate-700">Repository</label><RepositorySelector repos={catalog?.repositories} selectedRepo={repository} onRepoChange={setRepository} disabled={locked || isDemoMode} placeholder="Select a repository" /></div>
-        <div><label htmlFor="task-instruction" className="mb-2 block text-sm font-medium text-slate-700">Instruction</label>
+        <div><label className="mb-2 block text-sm font-medium text-slate-700">Repository</label><RepositorySelector repos={catalog?.repositories} selectedRepo={repository} onRepoChange={value => { setDirty(true); setRepository(value); }} disabled={locked || isDemoMode} placeholder="Select a repository" /></div>
+        <div><label htmlFor="task-instruction" className="mb-2 block text-sm font-medium text-slate-700">Prompt</label>
           <textarea id="task-instruction" required maxLength={50000} value={instruction} onChange={event => setInstruction(event.target.value)} onPaste={event => {
             const incoming = clipboardImageFiles(event);
             if (!incoming.length || locked || processingFiles) return;
             event.preventDefault();
+            setDirty(true);
             if (incoming.length + files.length > 10) { setError('Attach up to 10 files.'); return; }
             setProcessingFiles(true);
             void Promise.all(incoming.map(resizeImage)).then(processed => setFiles(current => [...current, ...processed]))
               .catch(() => setError('Could not process pasted images.')).finally(() => setProcessingFiles(false));
-          }} rows={7} placeholder="Fix the invoice date format…" className="w-full rounded-md border border-slate-300 p-3 text-sm leading-6 focus:border-teal-500 focus:outline-none focus:ring-1 focus:ring-teal-500" />
-          <GoalAttachmentInput files={files} onChange={setFiles} onError={setError} onProcessingChange={setProcessingFiles} disabled={locked || processingFiles || isDemoMode} />
+          }} rows={6} placeholder="Fix the invoice date format…" className="block w-full rounded-t-md border border-slate-300 p-3 text-sm leading-6 focus:border-teal-500 focus:outline-none focus:ring-1 focus:ring-teal-500" />
+          <GoalAttachmentInput docked files={files} onFilesSelected={() => setDirty(true)} onChange={next => { setDirty(true); setFiles(next); }} onError={setError} onProcessingChange={setProcessingFiles} disabled={locked || processingFiles || isDemoMode} />
         </div>
-        <TaskRoutingOptions {...launcher} />
       </fieldset>
+      <TaskRoutingOptions {...launcher} />
       <TaskSubmissionFeedback {...launcher} />
-      <TaskLauncherActions {...launcher} />
+      </div>
+      <TaskLauncherActions {...launcher} onCancel={requestClose} />
     </form>
-    {!snapshot && <div className="mt-8 grid gap-3 border-t border-slate-200 pt-6 sm:grid-cols-2">
-      <Link to="/studio/new" className="rounded-lg border border-slate-200 p-4 text-sm">
-        <strong className="flex items-center gap-2">
-          <ScrollText className="h-4 w-4 text-teal-600" aria-hidden="true" />
-          New Plan
-        </strong>
-        <p className="mt-1 text-slate-500">Plan and review work before implementation.</p>
-      </Link>
-      <Link to="/goals?new=1" className="rounded-lg border border-slate-200 p-4 text-sm">
-        <strong className="flex items-center gap-2">
-          <Target className="h-4 w-4 text-teal-600" aria-hidden="true" />
-          New Goal
-        </strong>
-        <p className="mt-1 text-slate-500">Start an ongoing agent session.</p>
-      </Link>
-    </div>}
-  </main>;
+  </CreationDialog>;
 }

@@ -232,12 +232,12 @@ describe('GoalsPage', () => {
   it('creates exactly one native goal from repository, agent, model and objective', async () => {
     vi.mocked(goalsApi.createGoal).mockResolvedValue({ goal });
     render(<MemoryRouter initialEntries={['/goals']}><Routes><Route path="/goals" element={<GoalsPage />} /><Route path="/goals/:goalId" element={<div>Goal detail</div>} /></Routes></MemoryRouter>);
-    expect(screen.queryByLabelText('Objective')).not.toBeInTheDocument();
+    expect(screen.queryByLabelText('Prompt')).not.toBeInTheDocument();
     openGoalCreator();
     await screen.findByRole('option', { name: 'Codex' });
     expect(screen.getByRole('button', { name: /acme.*web/ })).toBeInTheDocument();
     expect(screen.getByRole('option', { name: 'GPT-5.6 Sol' })).toHaveValue('gpt-5.6-sol');
-    fireEvent.change(screen.getByLabelText('Objective'), { target: { value: 'Ship the dashboard' } });
+    fireEvent.change(screen.getByLabelText('Prompt'), { target: { value: 'Ship the dashboard' } });
     fireEvent.click(screen.getByLabelText('Agent orchestrates through ProPR'));
     fireEvent.click(screen.getByRole('button', { name: 'Start goal' }));
     await waitFor(() => expect(goalsApi.createGoal).toHaveBeenCalledWith(expect.objectContaining({ repository: 'acme/web', agentId: 'agent-1', model: 'gpt-5.6-sol', objective: 'Ship the dashboard', launchStrategy: 'orchestrate' })));
@@ -259,22 +259,22 @@ describe('GoalsPage', () => {
     openGoalCreator();
     await screen.findByRole('option', { name: 'Codex' });
 
-    const objective = screen.getByLabelText('Objective');
+    const objective = screen.getByLabelText('Prompt');
     const exactCodexObjective = `${'x'.repeat(3_993)}😀`;
     fireEvent.change(objective, { target: { value: exactCodexObjective } });
-    expect(screen.getByLabelText('Objective character count')).toHaveTextContent('3,994 / 3,994 characters');
+    expect(screen.getByLabelText('Prompt character count')).toHaveTextContent('3,994 / 3,994 characters');
     expect(screen.getByRole('button', { name: 'Start goal' })).toBeEnabled();
 
     fireEvent.change(objective, { target: { value: `${exactCodexObjective}x` } });
     expect(objective).toHaveAttribute('aria-invalid', 'true');
-    expect(screen.getByLabelText('Objective character count')).toHaveTextContent('3,995 / 3,994 characters');
+    expect(screen.getByLabelText('Prompt character count')).toHaveTextContent('3,995 / 3,994 characters');
     expect(screen.getByRole('button', { name: 'Start goal' })).toBeDisabled();
     fireEvent.submit(screen.getByRole('button', { name: 'Start goal' }).closest('form')!);
     expect(goalsApi.createGoal).not.toHaveBeenCalled();
 
     fireEvent.change(screen.getByLabelText('Coding agent'), { target: { value: 'agent-2' } });
     await waitFor(() => expect(screen.getByLabelText('Model')).toHaveValue('gemini-3-pro'));
-    expect(screen.queryByLabelText('Objective character count')).not.toBeInTheDocument();
+    expect(screen.queryByLabelText('Prompt character count')).not.toBeInTheDocument();
     expect(objective).not.toHaveAttribute('aria-invalid');
     expect(screen.getByRole('button', { name: 'Start goal' })).toBeEnabled();
   });
@@ -294,19 +294,19 @@ describe('GoalsPage', () => {
     openGoalCreator();
     await screen.findByRole('option', { name: 'Claude' });
 
-    const objective = screen.getByLabelText('Objective');
+    const objective = screen.getByLabelText('Prompt');
     fireEvent.change(objective, { target: { value: '😀'.repeat(2_000) } });
-    expect(screen.getByLabelText('Objective character count')).toHaveTextContent('4,000 / 4,000 characters');
+    expect(screen.getByLabelText('Prompt character count')).toHaveTextContent('4,000 / 4,000 characters');
     expect(screen.getByText(/Claude accepts up to 4,000 characters \(emoji and some symbols count as two\)/)).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Start goal' })).toBeEnabled();
 
     fireEvent.change(objective, { target: { value: `${'😀'.repeat(2_000)}x` } });
-    expect(screen.getByLabelText('Objective character count')).toHaveTextContent('4,001 / 4,000 characters');
+    expect(screen.getByLabelText('Prompt character count')).toHaveTextContent('4,001 / 4,000 characters');
     expect(objective).toHaveAttribute('aria-invalid', 'true');
     expect(screen.getByRole('button', { name: 'Start goal' })).toBeDisabled();
 
     fireEvent.change(objective, { target: { value: `  ${'x'.repeat(4_000)}\n` } });
-    expect(screen.getByLabelText('Objective character count')).toHaveTextContent('4,000 / 4,000 characters');
+    expect(screen.getByLabelText('Prompt character count')).toHaveTextContent('4,000 / 4,000 characters');
     expect(screen.getByRole('button', { name: 'Start goal' })).toBeEnabled();
   });
 
@@ -318,7 +318,7 @@ describe('GoalsPage', () => {
     expect(await screen.findByText('Demo mode is read-only. You can inspect existing goals, but cannot start a new one.')).toBeInTheDocument();
     expect(screen.getByRole('group', { name: 'Goal creation controls' })).toBeDisabled();
     expect(screen.getByRole('button', { name: 'Start goal' })).toBeDisabled();
-    expect(screen.getByLabelText('Objective')).toBeDisabled();
+    expect(screen.getByLabelText('Prompt')).toBeDisabled();
 
     fireEvent.submit(screen.getByRole('button', { name: 'Start goal' }).closest('form')!);
     expect(goalsApi.createGoal).not.toHaveBeenCalled();
@@ -361,9 +361,9 @@ describe('GoalsPage', () => {
     expect(screen.getByLabelText('Agent implements directly')).toBeChecked();
     expect(screen.getByRole('checkbox', { name: 'Ask the coding agent to use Ultrafix' })).toBeChecked();
     expect(screen.getByRole('slider', { name: 'Checkpoint target cadence' })).toHaveAttribute('aria-valuetext', '60 minutes');
-    expect(screen.getByLabelText('Objective')).toHaveValue('');
+    expect(screen.getByLabelText('Prompt')).toHaveValue('');
 
-    fireEvent.change(screen.getByLabelText('Objective'), { target: { value: 'Ship the API' } });
+    fireEvent.change(screen.getByLabelText('Prompt'), { target: { value: 'Ship the API' } });
     fireEvent.click(screen.getByLabelText('Agent orchestrates through ProPR'));
     fireEvent.click(screen.getByRole('button', { name: 'Start goal' }));
 
@@ -384,7 +384,7 @@ describe('GoalsPage', () => {
     render(<MemoryRouter initialEntries={['/goals']}><Routes><Route path="/goals" element={<GoalsPage />} /><Route path="/goals/:goalId" element={<div>Goal detail</div>} /></Routes></MemoryRouter>);
     openGoalCreator();
     await screen.findByRole('option', { name: 'Codex' });
-    fireEvent.change(screen.getByLabelText('Objective'), { target: { value: 'Ship the dashboard' } });
+    fireEvent.change(screen.getByLabelText('Prompt'), { target: { value: 'Ship the dashboard' } });
     const checkpointSlider = screen.getByRole('slider', { name: 'Checkpoint target cadence' });
     expect(checkpointSlider).toHaveAttribute('aria-valuetext', '15 minutes');
     const checkpointOptions = screen.getByLabelText('Checkpoint target cadence options');
@@ -404,7 +404,7 @@ describe('GoalsPage', () => {
     render(<MemoryRouter initialEntries={['/goals']}><Routes><Route path="/goals" element={<GoalsPage />} /><Route path="/goals/:goalId" element={<div>Goal detail</div>} /></Routes></MemoryRouter>);
     openGoalCreator();
     await screen.findByRole('option', { name: 'Codex' });
-    const objective = screen.getByLabelText('Objective');
+    const objective = screen.getByLabelText('Prompt');
     fireEvent.change(objective, { target: { value: 'Implement the attached design' } });
     const textFile = new File(['expected layout'], 'requirements.txt', { type: 'text/plain' });
     fireEvent.change(screen.getByLabelText('Attach files'), { target: { files: [textFile] } });
@@ -451,7 +451,7 @@ describe('GoalsPage', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Recheck runtimes' }));
     await waitFor(() => expect(goalsApi.getGoalCapabilities).toHaveBeenCalledWith(true));
     await waitFor(() => expect(screen.queryByText('Codex schema lacks thread/goal/clear')).not.toBeInTheDocument());
-    fireEvent.change(screen.getByLabelText('Objective'), { target: { value: 'Ship the dashboard' } });
+    fireEvent.change(screen.getByLabelText('Prompt'), { target: { value: 'Ship the dashboard' } });
     expect(screen.getByRole('button', { name: 'Start goal' })).toBeEnabled();
   });
 
@@ -476,7 +476,7 @@ describe('GoalsPage', () => {
     expect(screen.queryByRole('heading', { name: 'Work queue' })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'New goal' })).not.toBeInTheDocument();
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
-    expect(screen.queryByLabelText('Objective')).not.toBeInTheDocument();
+    expect(screen.queryByLabelText('Prompt')).not.toBeInTheDocument();
     expect(within(queue).getAllByRole('link')).toHaveLength(4);
     expect(screen.getByText('4 of 4')).toBeInTheDocument();
     expect(screen.queryByText(longTodo)).not.toBeInTheDocument();
@@ -500,10 +500,10 @@ describe('GoalsPage', () => {
     fireEvent.click(trigger);
 
     expect(await screen.findByRole('dialog', { name: 'Start a goal' })).toBeInTheDocument();
-    fireEvent.change(screen.getByLabelText('Objective'), { target: { value: 'Unsaved goal details' } });
+    fireEvent.change(screen.getByLabelText('Prompt'), { target: { value: 'Unsaved goal details' } });
     fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
     expect(screen.getByRole('dialog', { name: 'Start a goal' })).toBeInTheDocument();
-    expect(screen.getByLabelText('Objective')).toHaveValue('Unsaved goal details');
+    expect(screen.getByLabelText('Prompt')).toHaveValue('Unsaved goal details');
 
     fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
     expect(screen.queryByRole('dialog', { name: 'Start a goal' })).not.toBeInTheDocument();
@@ -556,7 +556,7 @@ describe('GoalsPage', () => {
     openGoalCreator();
 
     const dialog = await screen.findByRole('dialog', { name: 'Start a goal' });
-    fireEvent.change(within(dialog).getByLabelText('Objective'), { target: { value: 'Keep this draft' } });
+    fireEvent.change(within(dialog).getByLabelText('Prompt'), { target: { value: 'Keep this draft' } });
     fireEvent.click(within(dialog).getByRole('button', { name: /acme.*web/ }));
     const repositoryFilter = within(dialog).getByPlaceholderText('Filter repositories...');
     expect(repositoryFilter).toHaveFocus();
@@ -565,7 +565,7 @@ describe('GoalsPage', () => {
 
     expect(screen.queryByPlaceholderText('Filter repositories...')).not.toBeInTheDocument();
     expect(dialog).toBeInTheDocument();
-    expect(within(dialog).getByLabelText('Objective')).toHaveValue('Keep this draft');
+    expect(within(dialog).getByLabelText('Prompt')).toHaveValue('Keep this draft');
     expect(confirm).not.toHaveBeenCalled();
     confirm.mockRestore();
   });

@@ -13,6 +13,7 @@ interface GoalAttachmentInputProps {
   onError: (message: string) => void;
   disabled?: boolean;
   compact?: boolean;
+  docked?: boolean;
 }
 
 function SelectedFile({ file, onRemove, disabled }: { file: File; onRemove: () => void; disabled: boolean }) {
@@ -32,7 +33,7 @@ function SelectedFile({ file, onRemove, disabled }: { file: File; onRemove: () =
   </div>;
 }
 
-export function GoalAttachmentInput({ files, onChange, onFilesSelected, onProcessingChange, onError, disabled = false, compact = false }: GoalAttachmentInputProps) {
+export function GoalAttachmentInput({ files, onChange, onFilesSelected, onProcessingChange, onError, disabled = false, compact = false, docked = false }: GoalAttachmentInputProps) {
   const inputId = useId();
   const inputRef = useRef<HTMLInputElement>(null);
   const [processing, setProcessing] = useState(false);
@@ -68,18 +69,18 @@ export function GoalAttachmentInput({ files, onChange, onFilesSelected, onProces
     void addFiles(Array.from(event.dataTransfer.files || []));
   };
 
-  return <div className={compact ? 'space-y-2' : 'mt-2 space-y-2'}>
-    {files.length > 0 && <div aria-label="Files attached to prompt" className="flex flex-wrap gap-2">
+  return <div className={docked ? 'rounded-b-md border border-t-0 border-slate-300 bg-slate-50' : compact ? 'space-y-2' : 'mt-2 space-y-2'}>
+    {files.length > 0 && <div aria-label="Files attached to prompt" className={`flex flex-wrap gap-2 ${docked ? 'px-3 pt-2' : ''}`}>
       {files.map((file, index) => <SelectedFile key={`${file.name}-${file.size}-${file.lastModified}-${index}`} file={file} disabled={disabled || processing} onRemove={() => onChange(files.filter((_, candidate) => candidate !== index))} />)}
     </div>}
     <div
       onDrop={dropFiles}
       onDragOver={event => { event.preventDefault(); setDragging(true); }}
       onDragLeave={event => { event.preventDefault(); setDragging(false); }}
-      className={`flex items-center gap-2 rounded-md border border-dashed px-3 py-2 text-xs transition ${dragging ? 'border-primary-400 bg-primary-50 text-primary-700' : 'border-slate-300 text-slate-500 hover:border-slate-400'} ${disabled ? 'opacity-50' : ''}`}
+      className={`flex items-center gap-2 ${docked ? 'border-t border-dashed' : 'rounded-md border border-dashed'} px-3 py-2 text-xs transition ${dragging ? 'border-primary-400 bg-primary-50 text-primary-700' : 'border-slate-300 text-slate-500 hover:border-slate-400'} ${disabled ? 'opacity-50' : ''}`}
     >
-      <input ref={inputRef} id={inputId} type="file" multiple accept={goalAttachmentAccept} disabled={disabled || processing} onChange={chooseFiles} className="hidden" />
-      <label htmlFor={inputId} className={`inline-flex items-center gap-1.5 font-medium ${disabled || processing ? 'cursor-not-allowed' : 'cursor-pointer hover:text-slate-700'}`}>
+      <input ref={inputRef} id={inputId} type="file" multiple accept={goalAttachmentAccept} disabled={disabled || processing} onChange={chooseFiles} className="peer sr-only" />
+      <label htmlFor={inputId} className={`inline-flex items-center gap-1.5 rounded font-medium peer-focus-visible:ring-2 peer-focus-visible:ring-teal-500 ${disabled || processing ? 'cursor-not-allowed' : 'cursor-pointer hover:text-slate-700'}`}>
         {processing ? <Loader2 className="h-4 w-4 animate-spin" /> : <Paperclip className="h-4 w-4" />}
         {processing ? 'Preparing files…' : 'Attach files'}
       </label>

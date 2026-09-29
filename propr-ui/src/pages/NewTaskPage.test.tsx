@@ -18,11 +18,23 @@ const renderPage = () => render(<MemoryRouter initialEntries={[{ pathname: '/tas
 
 beforeEach(() => { vi.clearAllMocks(); localStorage.clear(); sessionStorage.clear(); vi.mocked(submissions.taskSnapshotStorage).mockResolvedValue(undefined); vi.mocked(submissions.listTaskSnapshots).mockResolvedValue([]); });
 describe('New Task issue launcher', () => {
-  it('shows plan and goal icons on the related creation actions', () => {
+  it('opens a modal with collapsed settings and no promotional cards', async () => {
     renderPage();
+    expect(screen.getByRole('dialog', { name: 'New task' })).toBeInTheDocument();
+    expect(screen.getByText('Advanced Options').closest('details')).not.toHaveAttribute('open');
+    expect(screen.queryByRole('link', { name: /New Plan|New Goal/ })).not.toBeInTheDocument();
+    await waitFor(() => expect(screen.getByLabelText('Prompt')).toHaveFocus());
+  });
 
-    expect(screen.getByRole('link', { name: /New Plan/ }).querySelector('svg')).toHaveClass('lucide-scroll-text');
-    expect(screen.getByRole('link', { name: /New Goal/ }).querySelector('svg')).toHaveClass('lucide-target');
+  it('protects edited input on dismissal and returns to tasks on cancel', async () => {
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValueOnce(false).mockReturnValueOnce(true);
+    renderPage();
+    fireEvent.change(screen.getByLabelText('Prompt'), { target: { value: 'Keep this request' } });
+    fireEvent.keyDown(document, { key: 'Escape' });
+    expect(screen.getByLabelText('Prompt')).toHaveValue('Keep this request');
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+    expect(await screen.findByTestId('destination')).toHaveTextContent('/tasks');
+    confirm.mockRestore();
   });
 
   it('retains the issue and request on failure, retries that submission, then opens the ordinary task', async () => {
@@ -31,7 +43,7 @@ describe('New Task issue launcher', () => {
     renderPage();
     const run = await screen.findByRole('button', { name: 'Run task' });
     await waitFor(() => expect(run).toBeEnabled());
-    expect(screen.getByLabelText('Instruction')).toHaveValue('Fix invoice dates');
+    expect(screen.getByLabelText('Prompt')).toHaveValue('Fix invoice dates');
     fireEvent.click(run);
     expect(await screen.findByText('Could not start task')).toBeInTheDocument();
     expect(screen.getByRole('link', { name: 'Open issue #42' })).toHaveAttribute('href', pending.issueUrl);
@@ -51,7 +63,7 @@ describe('New Task issue launcher', () => {
     vi.mocked(submissions.getTaskSubmission).mockResolvedValue(pending);
     renderPage();
     expect(await screen.findByText('Could not start task')).toBeInTheDocument();
-    expect(screen.getByLabelText('Instruction')).toHaveValue('Saved request');
+    expect(screen.getByLabelText('Prompt')).toHaveValue('Saved request');
     expect(submissions.getTaskSubmission).toHaveBeenCalledWith('saved-key');
     expect(submissions.submitTask).not.toHaveBeenCalled();
   });
@@ -61,6 +73,7 @@ describe('New Task issue launcher', () => {
     renderPage();
     const file = new File(['Invoice date: 09/22/2026'], 'invoice.txt', { type: 'text/plain' });
     await act(async () => fireEvent.change(screen.getByLabelText('Attach files'), { target: { files: [file] } }));
+    fireEvent.click(screen.getByText('Advanced Options'));
     const plan = screen.getByRole('button', { name: 'Plan first' });
     await waitFor(() => expect(plan).toBeEnabled());
     fireEvent.click(plan);
@@ -89,13 +102,13 @@ describe('New Task issue launcher', () => {
     fireEvent.click(run);
     const reset = await screen.findByRole('button', { name: state === 'prepared' ? 'Edit request' : 'Start over' });
     await waitFor(() => expect(reset).toBeEnabled());
-    expect(screen.getByLabelText('Instruction')).toBeDisabled();
+    expect(screen.getByLabelText('Prompt')).toBeDisabled();
     const oldKey = vi.mocked(submissions.submitTask).mock.calls[0][0];
     fireEvent.click(reset);
-    await waitFor(() => expect(screen.getByLabelText('Instruction')).toBeEnabled());
+    await waitFor(() => expect(screen.getByLabelText('Prompt')).toBeEnabled());
     expect(submissions.taskSnapshotStorage).toHaveBeenCalledWith(`${API_BASE_URL}:alice`, oldKey, null);
-    expect(screen.getByLabelText('Instruction')).toHaveValue(state === 'prepared' ? 'Fix invoice dates' : '');
-    fireEvent.change(screen.getByLabelText('Instruction'), { target: { value: 'Corrected invoice request' } });
+    expect(screen.getByLabelText('Prompt')).toHaveValue(state === 'prepared' ? 'Fix invoice dates' : '');
+    fireEvent.change(screen.getByLabelText('Prompt'), { target: { value: 'Corrected invoice request' } });
     fireEvent.click(screen.getByRole('button', { name: 'Run task' }));
     await waitFor(() => expect(submissions.submitTask).toHaveBeenCalledTimes(2));
     expect(vi.mocked(submissions.submitTask).mock.calls[1][0]).not.toBe(oldKey);
@@ -117,7 +130,7 @@ describe('New Task issue launcher', () => {
     await waitFor(() => expect(submissions.retryTaskSubmission).toHaveBeenCalledWith(key));
     await waitFor(() => expect(screen.getByRole('button', { name: 'Start over' })).toBeEnabled());
     fireEvent.click(screen.getByRole('button', { name: 'Start over' }));
-    await waitFor(() => expect(screen.getByLabelText('Instruction')).toBeEnabled());
+    await waitFor(() => expect(screen.getByLabelText('Prompt')).toBeEnabled());
     expect(submissions.taskSnapshotStorage).not.toHaveBeenCalledWith(`${API_BASE_URL}:alice`, key, null);
   });
 
@@ -140,7 +153,7 @@ describe('New Task issue launcher', () => {
     const original = vi.mocked(submissions.submitTask).mock.calls[0];
     fireEvent.click(screen.getByRole('button', { name: 'Start over' }));
     expect(await screen.findByRole('region', { name: 'Unresolved submissions' })).toHaveTextContent('Fix invoice dates');
-    fireEvent.change(screen.getByLabelText('Instruction'), { target: { value: 'Another request' } });
+    fireEvent.change(screen.getByLabelText('Prompt'), { target: { value: 'Another request' } });
     fireEvent.click(screen.getByRole('button', { name: 'Run task' }));
     await waitFor(() => expect(submissions.submitTask).toHaveBeenCalledTimes(2));
     await waitFor(() => expect(screen.getByRole('button', { name: 'Start over' })).toBeEnabled());
@@ -151,7 +164,7 @@ describe('New Task issue launcher', () => {
     const reopen = await screen.findAllByRole('button', { name: 'Reopen submission' });
     fireEvent.click(reopen[0]);
     await waitFor(() => expect(screen.getByRole('button', { name: 'Retry submission' })).toBeEnabled());
-    expect(screen.getByLabelText('Instruction')).toHaveValue('Fix invoice dates');
+    expect(screen.getByLabelText('Prompt')).toHaveValue('Fix invoice dates');
     expect(screen.getByText('invoice.txt')).toBeInTheDocument();
     expect(submissions.getTaskSubmission).toHaveBeenLastCalledWith(original[0]);
     vi.mocked(submissions.submitTask).mockResolvedValue({ ...pending, state: 'queued', taskId: 'recovered-task', error: null });
