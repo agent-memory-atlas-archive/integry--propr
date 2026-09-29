@@ -175,7 +175,7 @@ export interface HeaderStats {
 
 export function useHeaderStats(): HeaderStats {
   const currentUser = useCurrentUser();
-  const { getStatus, refreshStatus, status: sharedStatus, managed: managedStatus } = useSharedSystemStatus();
+  const { getStatus, refreshStatus, status: sharedStatus, error: sharedStatusError, managed: managedStatus } = useSharedSystemStatus();
   const requestIdentityKey = `${getDesktopSocketConfigurationKey()}\0${currentUser?.id ?? 'anonymous'}`;
   const [runningCount, setRunningCount] = useState<number>(0);
   const [runningItems, setRunningItems] = useState<RunningItem[]>([]);
@@ -199,10 +199,6 @@ export function useHeaderStats(): HeaderStats {
   });
   const [isLoading, setIsLoading] = useState<boolean>(true);
   const [error, setError] = useState<string | null>(null);
-
-  useEffect(() => {
-    if (sharedStatus) setSystemHealth(buildSystemHealth(sharedStatus));
-  }, [sharedStatus]);
 
   // Dismissed IDs state
   const [dismissedPlanIds, setDismissedPlanIds] = useState<string[]>(() => getDismissedIds(DISMISSED_PLAN_IDS_KEY));
@@ -233,6 +229,16 @@ export function useHeaderStats(): HeaderStats {
   const { onTaskUpdate, onDraftUpdate, onQueueStatsUpdate, onActivityReady, onActivityUpdate, onUsageUpdate, subscribeToActivity, unsubscribeFromActivity, isConnected } = useSocket();
   const socketConnectedRef = useRef(isConnected);
   socketConnectedRef.current = isConnected;
+
+  useEffect(() => {
+    if (!managedStatus || (!sharedStatus && !sharedStatusError)) return;
+    statsRequestRef.current.status += 1;
+    if (sharedStatus) setSystemHealth(buildSystemHealth(sharedStatus));
+    resourceErrorsRef.current.status = sharedStatusError?.message ?? null;
+    setResourceStatuses(previous => ({ ...previous, status: sharedStatusError ? 'unavailable' : 'available' }));
+    setError(ALL_STATS_RESOURCES.map(resource => resourceErrorsRef.current[resource])
+      .find((message): message is string => message !== null) ?? null);
+  }, [managedStatus, sharedStatus, sharedStatusError]);
 
   // A mounted desktop renderer can switch instances/accounts without a page
   // reload. Drop every account-derived snapshot before starting reads under
