@@ -322,6 +322,54 @@ describe('goal live refresh races', () => {
     apiMocks.getTaskLiveDetails.mockResolvedValue({ events: [], todos: [], currentTask: null });
   });
 
+  it('uses push while connected, polls only offline, and reconciles reconnect and visibility', async () => {
+    vi.useFakeTimers();
+    const { rerender, unmount } = renderHook(() => useTaskLiveData('task', 5_000));
+    try {
+      await act(async () => {});
+      await act(async () => { await vi.advanceTimersByTimeAsync(30_000); });
+      expect(apiMocks.getTaskLiveDetails).toHaveBeenCalledTimes(1);
+      socketMocks.isConnected = false;
+      rerender();
+      await act(async () => { await vi.advanceTimersByTimeAsync(5_100); });
+      expect(apiMocks.getTaskLiveDetails).toHaveBeenCalledTimes(2);
+      socketMocks.isConnected = true;
+      rerender();
+      await act(async () => { await vi.advanceTimersByTimeAsync(100); });
+      expect(apiMocks.getTaskLiveDetails).toHaveBeenCalledTimes(3);
+      Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'hidden' });
+      act(() => document.dispatchEvent(new Event('visibilitychange')));
+      await act(async () => { await vi.advanceTimersByTimeAsync(300_000); });
+      expect(apiMocks.getTaskLiveDetails).toHaveBeenCalledTimes(3);
+      Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'visible' });
+      act(() => document.dispatchEvent(new Event('visibilitychange')));
+      await act(async () => { await vi.advanceTimersByTimeAsync(100); });
+      expect(apiMocks.getTaskLiveDetails).toHaveBeenCalledTimes(4);
+    } finally {
+      unmount();
+      Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'visible' });
+      vi.useRealTimers();
+    }
+  });
+
+  it('does not overlap disconnected fallback reads', async () => {
+    vi.useFakeTimers();
+    socketMocks.isConnected = false;
+    const pending = deferred<LiveDetails>();
+    apiMocks.getTaskLiveDetails.mockReturnValueOnce(pending.promise);
+    const { unmount } = renderHook(() => useTaskLiveData('task', 5_000));
+    try {
+      await act(async () => { await vi.advanceTimersByTimeAsync(15_100); });
+      expect(apiMocks.getTaskLiveDetails).toHaveBeenCalledTimes(1);
+      await act(async () => { pending.resolve({ events: [], todos: [], currentTask: null }); });
+      await act(async () => { await vi.advanceTimersByTimeAsync(5_000); });
+      expect(apiMocks.getTaskLiveDetails).toHaveBeenCalledTimes(2);
+    } finally {
+      unmount();
+      vi.useRealTimers();
+    }
+  });
+
   it('preserves grown messages and metadata received during a pending read while adding snapshot history', async () => {
     const read = deferred<LiveDetails>();
     apiMocks.getTaskLiveDetails.mockReturnValue(read.promise);

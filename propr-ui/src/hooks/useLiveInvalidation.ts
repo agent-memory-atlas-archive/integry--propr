@@ -4,12 +4,13 @@ import { matchesInterest, type LiveResourceInterest } from './useLiveResource';
 import { CONNECTED_RECONCILE_MS, useLiveRefreshScheduler } from './useLiveRefreshScheduler';
 
 /** Push scheduling for projections that already own state and mutation ordering. */
-export function useLiveInvalidation({ refresh, scopeKey, interest, disabled = false, fallbackPollMs = 30_000 }: {
+export function useLiveInvalidation({ refresh, scopeKey, interest, disabled = false, fallbackPollMs = 30_000, pushOnly = false }: {
   refresh: () => unknown | Promise<unknown>;
   scopeKey: string;
   interest: LiveResourceInterest;
   disabled?: boolean;
   fallbackPollMs?: number;
+  pushOnly?: boolean;
 }) {
   // Through the same accessor every other surface uses, so a shell provider
   // mounted without a socket takes the disconnected contract and a consumer
@@ -20,7 +21,7 @@ export function useLiveInvalidation({ refresh, scopeKey, interest, disabled = fa
     refresh: () => disabled ? undefined : refresh(),
     scopeKey,
     fallbackPollMs,
-    connectedPollMs: disabled ? undefined : CONNECTED_RECONCILE_MS,
+    connectedPollMs: disabled || pushOnly ? undefined : CONNECTED_RECONCILE_MS,
   });
   const { refreshNow } = schedule;
   useEffect(() => {
@@ -30,7 +31,7 @@ export function useLiveInvalidation({ refresh, scopeKey, interest, disabled = fa
     onNotificationUpdate, onUsageUpdate } = socket ?? {};
   const interestKey = JSON.stringify(interest);
   useEffect(() => {
-    if (disabled) return;
+    if (disabled || pushOnly) return;
     const filter = JSON.parse(interestKey) as LiveResourceInterest;
     const cleanups = [onActivityReady?.(() => schedule()), onActivityUpdate?.(payload => {
       if (matchesInterest(payload, filter)) schedule();
@@ -43,7 +44,7 @@ export function useLiveInvalidation({ refresh, scopeKey, interest, disabled = fa
       cleanups.forEach(cleanup => cleanup?.());
       unsubscribeFromActivity?.();
     };
-  }, [disabled, interestKey, subscribeToActivity, unsubscribeFromActivity, onActivityReady, onActivityUpdate,
+  }, [disabled, pushOnly, interestKey, subscribeToActivity, unsubscribeFromActivity, onActivityReady, onActivityUpdate,
     onGoalUpdate, onNotificationUpdate, onUsageUpdate, schedule]);
   return schedule;
 }

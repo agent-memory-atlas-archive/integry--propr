@@ -1,3 +1,4 @@
+import type { CompletionLoader } from '../services/dashboardReadService.js';
 /** Dashboard activity facts and signature cache. No LLM implementation is imported here. */
 import { createHash } from 'node:crypto';
 import type { Knex } from 'knex';
@@ -91,6 +92,7 @@ function selectedProgress(live: LiveActivity, phase: string): string {
 }
 
 interface NarrativeCollectionOptions {
+  completedRows?: CompletionLoader;
   ownerId?: string;
   liveActivity?: (taskId: string) => Promise<LiveActivity>;
 }
@@ -115,7 +117,7 @@ export async function collectNarrativeFacts(
 
   const [work, outcomes, plans, goals] = await Promise.all([
     loadDashboardWork(db, repository, { now }),
-    loadCompletedRows(db, repository, { limit: MAX_NARRATIVE_COMPLETIONS }),
+    (options.completedRows ?? ((scope, query) => loadCompletedRows(db, scope, query)))(repository, { limit: MAX_NARRATIVE_COMPLETIONS }),
     plansQuery,
     loadRunningDashboardGoals(db, repository, options.ownerId ?? null),
   ]);

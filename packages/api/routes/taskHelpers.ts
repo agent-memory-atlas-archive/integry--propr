@@ -124,8 +124,17 @@ export async function getTasksFromDb(
   // Count only the filtered task identity/state set. Processing timestamps,
   // completion timestamps and critique JSON are presentation enrichments and
   // previously made the count repeat all three full-history joins.
+  const countQuery = baseQuery.clone();
+  if ((!status || status === 'all') && !forReview) {
+    // Without a state filter the latest history row is irrelevant to the
+    // count. Preserve exclusion of tasks without history with an index-only
+    // existence check instead of fetching a full history row for every task.
+    countQuery.clear('join').whereExists(
+      db('task_history as count_h').select(db.raw('1')).whereRaw('count_h.task_id = t.task_id')
+    );
+  }
   const totalResult = await timeApiStage('sql.tasks.count', () =>
-    baseQuery.clone().count('* as total').first()
+    countQuery.count('* as total').first()
   );
   const total = parseInt(String(totalResult?.total || 0), 10);
 

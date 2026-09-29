@@ -71,6 +71,17 @@ const centerTree = () => (
 function renderCenter() { return render(centerTree()); }
 
 describe('NotificationCenterProvider', () => {
+  test('uses a pushed unread count without another HTTP read', async () => {
+    notificationApi.getNotificationPreferences.mockResolvedValue(preferences(false));
+    renderCenter();
+    await waitFor(() => expect(screen.getByText('count:0')).toBeTruthy());
+    act(() => socketState.notificationCallbacks.forEach(callback => callback({
+      eventType: 'notification:update', unreadCount: 7, occurredAt: new Date().toISOString(),
+    } as NotificationUpdatePayload)));
+    expect(screen.getByText('count:7')).toBeTruthy();
+    expect(notificationApi.getNotificationUnreadCount).toHaveBeenCalledTimes(1);
+  });
+
   beforeEach(() => {
     authState.user = { id: 'user-1', username: 'first-user' };
     notificationApi.getNotificationPreferences.mockReset();

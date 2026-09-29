@@ -1,6 +1,7 @@
 import type { Server } from 'socket.io';
 import { agentTankUsageFingerprint, loadAgentTankSettings, normalizeAgentTankAgents, type AgentStatusResponse } from '@propr/core';
 import { ACTIVITY_UPDATE, USAGE_UPDATE } from '@propr/shared';
+import { healthFingerprint } from './systemHealthWatcher.js';
 import { ACTIVITY_ROOM } from './activitySocketRooms.js';
 
 interface UsageSnapshot {
@@ -71,10 +72,20 @@ export class ShellActivityBroadcaster {
       });
       if (this.closed) return;
       // Snapshot timestamps/countdowns are not resource changes.
-      const fingerprint = key === 'usage' ? usageFingerprint(snapshot as UsageSnapshot) : JSON.stringify(snapshot, (name, value) =>
-        ['timestamp', 'updatedAt', 'lastUpdated', 'fetchedAt', 'resetsIn', 'lastAckAt'].includes(name) ? undefined : value);
+      const fingerprint = key === 'usage' ? usageFingerprint(snapshot as UsageSnapshot) : JSON.stringify([healthFingerprint(snapshot as Record<string, unknown>),
+        (snapshot as Record<string, unknown>).connectAccount], (name, value) => name === 'sentAt' ? undefined : value);
       if (this.fingerprints.get(key) === fingerprint) return;
       this.fingerprints.set(key, fingerprint);
+      // Send the projection itself. Usage has the same permission boundary as
+      // its HTTP route; the general activity room also contains read-only users.
+      for (const socket of this.io.sockets.sockets.values()) {
+        if (!socket.rooms.has(ACTIVITY_ROOM)) continue;
+        const principal = socket.data.principal;
+        if (!principal) continue;
+        if (key === 'usage' && principal.authorization.source !== 'demo'
+          && !principal.authorization.permissions.includes('instance.manage_agents')) continue;
+        socket.emit('shell:snapshot', { resource: key, data: snapshot });
+      }
       emit();
     } catch (error) { console.warn(`Unable to sample ${key} activity:`, error); }
   }

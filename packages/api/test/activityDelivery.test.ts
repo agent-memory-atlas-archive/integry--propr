@@ -114,15 +114,34 @@ test('activity subscriptions require successful authentication revalidation', as
 
 test('shell snapshots emit only real changes and stop after close', async () => {
   const events: string[] = [];
+  const snapshots: Array<{ resource: string; data: unknown }> = [];
   let percent = 1;
-  const io = { sockets: { adapter: { rooms: new Map([[ACTIVITY_ROOM, new Set(['socket'])]]) } },
+  const socket = {
+    rooms: new Set([ACTIVITY_ROOM]),
+    data: { principal: { authorization: { source: 'local', permissions: ['instance.manage_agents'] } } },
+    emit: (event: string, payload: { resource: string; data: unknown }) => {
+      assert.equal(event, 'shell:snapshot');
+      snapshots.push(payload);
+    },
+  };
+  const io = { sockets: { adapter: { rooms: new Map([[ACTIVITY_ROOM, new Set(['socket'])]]) },
+    sockets: new Map([['socket', socket]]) },
     to: () => ({ emit: (event: string) => events.push(event) }) };
   const broadcaster = new ShellActivityBroadcaster(io as never,
     async () => ({ daemon: 'running', timestamp: new Date().toISOString() }), async () => ({ enabled: true, agents: { claude: { name: 'claude', usage: { percent } } } }));
   await broadcaster.sample(); await broadcaster.sample();
-  assert.equal(events.length, 2);
-  percent = 2; await broadcaster.sample(); assert.equal(events.length, 3);
-  broadcaster.close(); percent = 3; await broadcaster.sample(); assert.equal(events.length, 3);
+  assert.deepEqual(events.slice().sort(), [ACTIVITY_UPDATE, USAGE_UPDATE].sort());
+  assert.deepEqual(snapshots.map(snapshot => snapshot.resource).sort(), ['system', 'usage']);
+  percent = 2; await broadcaster.sample();
+  assert.equal(events.length, 3);
+  assert.equal(events[2], USAGE_UPDATE);
+  assert.equal(snapshots.length, 3);
+  assert.deepEqual(snapshots[2], {
+    resource: 'usage', data: { enabled: true, agents: { claude: { name: 'claude', usage: { percent: 2 } } } },
+  });
+  broadcaster.close(); percent = 3; await broadcaster.sample();
+  assert.equal(events.length, 3);
+  assert.equal(snapshots.length, 3);
 });
 
 test('a malformed publication reaches no browser in either accepted format', () => {

@@ -1,3 +1,4 @@
+import type { CompletionLoader } from '../services/dashboardReadService.js';
 /**
  * Dashboard read APIs.
  *
@@ -44,6 +45,7 @@ const MAX_OUTCOME_SEARCH_LENGTH = 200;
 
 export interface DashboardRoutesDeps {
   db: Knex;
+  completedRows?: CompletionLoader;
   redisClient: RedisClientType;
   taskQueue: Pick<Queue, 'isPaused' | 'getActiveCount'>;
   /**
@@ -138,6 +140,7 @@ function toOutcomeItem(row: CompletedRow): OutcomeItem {
 
 export function createDashboardRoutes(deps: DashboardRoutesDeps) {
   const { db, redisClient, taskQueue } = deps;
+  const completedRows = deps.completedRows ?? ((repository, options) => loadCompletedRows(db, repository, options));
   const now = deps.now ?? (() => new Date());
   // Loaded lazily so a dashboard read only reaches the live-details module
   // (and its provider parsers) when there is running work to project. A read
@@ -237,6 +240,7 @@ export function createDashboardRoutes(deps: DashboardRoutesDeps) {
       const snapshot = await collectNarrativeFacts(db, repository, now(), {
         ownerId: req.user?.id ? String(req.user.id) : undefined,
         liveActivity: liveActivityFor,
+        completedRows,
       });
       const summary = await narrative(snapshot, req.query.refresh === 'true');
       res.json({ repository, enabled: true, summary });
@@ -347,7 +351,7 @@ export function createDashboardRoutes(deps: DashboardRoutesDeps) {
 
     try {
       const rows = await timeApiStage('dashboard.outcomes', () =>
-        loadCompletedRows(db, repository, { limit, search }));
+        completedRows(repository, { limit, search }));
       res.json({ repository, limit, search, items: rows.map(toOutcomeItem) });
     } catch (error) {
       console.error('Error in /api/dashboard/outcomes:', error);
