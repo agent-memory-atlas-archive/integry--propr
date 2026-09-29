@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
-import { Play, ScrollText } from 'lucide-react';
+import { ScrollText } from 'lucide-react';
 import { getInstanceCatalog } from '../api/proprApi';
 import type { InstanceCatalogResponse } from '../api/proprTypes';
 import { createDraft, uploadAttachment } from '../api/plannerApi';
@@ -212,7 +212,7 @@ function TaskLauncherActions({ onCancel, snapshot, result, startOver, ready, bus
   return <div className="flex flex-none flex-wrap justify-end gap-3 border-t border-slate-200 bg-slate-50 px-5 py-4 sm:px-7">
     <button type="button" onClick={onCancel} disabled={busy || processingFiles} className={`${button} border-transparent text-slate-700 hover:bg-slate-100`}>Cancel</button>
     {snapshot && <button type="button" onClick={() => void startOver()} disabled={busy || isDemoMode} className={`${button} border-slate-300 bg-white text-slate-700`}>{result?.state === 'prepared' ? 'Edit request' : 'Start over'}</button>}
-    {result?.state !== 'queued' && <button type="submit" disabled={launchDisabled || Boolean(planDraft) || invalidRouting} className={`${button} border-teal-600 bg-teal-600 text-white hover:bg-teal-700`}><Play size={16} />{busy ? 'Submitting…' : snapshot ? 'Retry submission' : 'Run task'}</button>}
+    {result?.state !== 'queued' && <button type="submit" disabled={launchDisabled || Boolean(planDraft) || invalidRouting} className={`${button} border-teal-600 bg-teal-600 text-white hover:bg-teal-700`}>{busy ? 'Submitting…' : snapshot ? 'Retry submission' : 'Run task'}</button>}
   </div>;
 }
 
@@ -242,8 +242,9 @@ function NewTaskLauncher({ scope }: { scope: string }) {
       </li>)}</ul>
     </section>}
       <fieldset disabled={locked || isDemoMode} className="space-y-5">
-        <div><label className="mb-2 block text-sm font-medium text-slate-700">Repository</label><RepositorySelector repos={catalog?.repositories} selectedRepo={repository} onRepoChange={value => { setDirty(true); setRepository(value); }} disabled={locked || isDemoMode} placeholder="Select a repository" /></div>
+        <div><label className="mb-2 block text-sm font-medium text-slate-700">Repository</label><RepositorySelector repos={catalog?.repositories.map(({ name, enabled }) => ({ name, enabled }))} selectedRepo={repository} onRepoChange={value => { setDirty(true); setRepository(value); }} disabled={locked || isDemoMode} placeholder="Select a repository" /></div>
         <div><label htmlFor="task-instruction" className="mb-2 block text-sm font-medium text-slate-700">Prompt</label>
+          <div className="rounded-md border border-slate-200 focus-within:border-teal-500 focus-within:ring-1 focus-within:ring-teal-500">
           <textarea id="task-instruction" required maxLength={50000} value={instruction} onChange={event => setInstruction(event.target.value)} onPaste={event => {
             const incoming = clipboardImageFiles(event);
             if (!incoming.length || locked || processingFiles) return;
@@ -253,8 +254,9 @@ function NewTaskLauncher({ scope }: { scope: string }) {
             setProcessingFiles(true);
             void Promise.all(incoming.map(resizeImage)).then(processed => setFiles(current => [...current, ...processed]))
               .catch(() => setError('Could not process pasted images.')).finally(() => setProcessingFiles(false));
-          }} rows={6} placeholder="Fix the invoice date format…" className="block w-full rounded-t-md border border-slate-300 p-3 text-sm leading-6 focus:border-teal-500 focus:outline-none focus:ring-1 focus:ring-teal-500" />
+          }} rows={6} placeholder="Fix the invoice date format…" className="block w-full rounded-t-md border-none p-3 text-sm leading-6 focus:outline-none focus:ring-0" />
           <GoalAttachmentInput docked files={files} onFilesSelected={() => setDirty(true)} onChange={next => { setDirty(true); setFiles(next); }} onError={setError} onProcessingChange={setProcessingFiles} disabled={locked || processingFiles || isDemoMode} />
+          </div>
         </div>
       </fieldset>
       <TaskRoutingOptions {...launcher} />

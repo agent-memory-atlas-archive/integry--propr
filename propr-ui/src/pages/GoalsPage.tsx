@@ -310,8 +310,6 @@ function CreateGoalForm({ onCancel, onCreated, onDirtyChange, onSubmittingChange
   const repositoryOptions = useMemo<RepoOption[]>(() => repositories.map(repo => ({
     name: repo.name,
     enabled: repo.enabled,
-    ...(repo.alias ? { displayName: repo.alias } : {}),
-    ...(repo.baseBranch ? { baseBranch: repo.baseBranch } : {}),
   })), [repositories]);
   const markDirty = useCallback(() => onDirtyChange(true), [onDirtyChange]);
 
@@ -398,14 +396,16 @@ function CreateGoalForm({ onCancel, onCreated, onDirtyChange, onSubmittingChange
         </div>
         <div className="mt-5">
         <label htmlFor="goal-prompt" className="mb-2 block text-sm font-medium text-slate-700">Prompt</label>
+        <div className={`rounded-md border focus-within:ring-1 ${objectiveTooLong ? 'border-red-500 focus-within:border-red-500 focus-within:ring-red-500' : 'border-slate-200 focus-within:border-teal-500 focus-within:ring-teal-500'}`}>
         <textarea id="goal-prompt" aria-label="Prompt" aria-invalid={objectiveTooLong || undefined} aria-describedby={objectiveMaxCharacters === null ? undefined : 'goal-objective-limit'} value={objective} onChange={event => { markDirty(); setObjective(event.target.value); }} onPaste={event => {
           const pasted = clipboardImageFiles(event);
           if (!pasted.length) return;
           event.preventDefault();
           markDirty();
           void addGoalFiles(files, pasted, setFiles, setError);
-        }} rows={6} placeholder="Describe the outcome you want…" className={`block w-full rounded-t-md border p-3 text-sm leading-6 focus:border-teal-500 focus:outline-none focus:ring-1 focus:ring-teal-500 ${objectiveTooLong ? 'border-red-500' : 'border-slate-300'}`} required />
+        }} rows={6} placeholder="Describe the outcome you want…" className="block w-full rounded-t-md border-none p-3 text-sm leading-6 focus:outline-none focus:ring-0" required />
         <GoalAttachmentInput docked files={files} onFilesSelected={markDirty} onChange={nextFiles => { markDirty(); setFiles(nextFiles); }} onError={setError} disabled={submitting} />
+        </div>
         {objectiveMaxCharacters !== null && <div id="goal-objective-limit" className={`mt-1 flex flex-wrap items-center justify-between gap-x-3 text-xs ${objectiveTooLong ? 'text-red-600' : 'text-slate-500'}`}>
           <span>{objectiveLimitProvider?.name ?? selectedAgent?.agentAlias} accepts up to {objectiveMaxCharacters.toLocaleString('en-US')} {objectiveLimitProvider?.unit ?? 'characters'} for the prompt.</span>
           <output aria-label="Prompt character count" aria-live="polite">{objectiveCharacters.toLocaleString('en-US')} / {objectiveMaxCharacters.toLocaleString('en-US')} characters</output>
