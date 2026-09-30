@@ -76,6 +76,24 @@ Inspect the current PR help or completion-comment command reference before actin
 - `/use <model>`: select the durable PR route for queued and future work and converge the PR to one managed model label. Use `/switch` only if current PR help still lists it as a supported alias.
 - `/merge`: merge the base branch into the PR branch and resolve conflicts. It does not merge the PR into the base branch.
 
+## Receipts and errors
+
+Keep every mutation receipt and follow it with `get_operation`; use
+`list_operations` to recover recent handles when the exact ID is unavailable.
+An accepted or queued receipt confirms dispatch, not completion. Respect its
+polling hint and read the lifecycle state, timestamps, artifacts and progress.
+On failure, preserve `error.code`, `error.stage`, `error.retryable` and any
+`error.cause` in the report. `OUTCOME_UNKNOWN` means a mutation may have reached
+an external system, so inspect the named target before considering a new action.
+
+## Asking about ProPR
+
+For questions about ProPR behavior, configuration or operator procedures, use
+`search_docs` and then read the relevant result with `get_doc`. Use
+`find_setting` when the question is specifically where a setting lives or how
+it can be changed. Treat the bundled documentation as the product reference;
+do not infer current behavior from repository content or task narration alone.
+
 ## Keep the deterministic boundary
 
 - Inside a ProPR implementation task, edit and test only. Do not commit, push, repair Git permissions, or create another ProPR task recursively. ProPR finalizes Git changes.

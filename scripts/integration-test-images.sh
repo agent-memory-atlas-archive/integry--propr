@@ -188,6 +188,16 @@ if [ "${PROPR_E2E_SKIP_SLOW:-}" != "1" ]; then
   AGENT_TAG="$AGENT_TAG" \
     ANTIGRAVITY_CONFIG_PATH="$HOME/.gemini" \
     ./scripts/verify-antigravity-image.sh
+
+  # Bundled Agent Tank reads usage out of the same image, so prove it actually
+  # gets numbers back rather than only that the CLI is installed. Antigravity is
+  # the provider this runner is guaranteed to have authenticated.
+  echo ""
+  echo "▸ verifying bundled Agent Tank usage from the agent image"
+  AGENT_TAG="$AGENT_TAG" \
+    AGENT_TANK_PROVIDERS="agy" \
+    ANTIGRAVITY_CONFIG_PATH="$HOME/.gemini" \
+    ./scripts/verify-agent-tank-image.sh
 fi
 
 LAUNCHER_ARGS+=("$LAUNCHER_TAG")

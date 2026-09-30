@@ -30,13 +30,15 @@ export interface HistoryItemMetadata {
   tokenUsage?: TokenUsage;
   commandMode?: 'default' | 'review' | 'fix' | 'switch' | 'use' | 'ultrafix';
   consumedReviewCommentIds?: number[];
-  ultrafixCycle?: boolean;
+  /** Legacy entries store `true`; current entries store the 1-based cycle number. */
+  ultrafixCycle?: boolean | number;
   ultrafixGoal?: number;
   ultrafixCycleCount?: number;
   ultrafixMaxCycles?: number;
   ultrafixScore?: number;
   ultrafixNextAction?: string;
   ultrafixStopReason?: string;
+  ultrafixOutcome?: 'goal_reached' | 'cycles_exhausted' | 'stopped' | 'failed';
   syntheticRouting?: {
     virtualAgentAlias?: string;
     virtualModel?: string;
@@ -71,6 +73,7 @@ export interface TaskInfo {
   model?: string;
   llmProvider?: string;
   commandMode?: 'default' | 'review' | 'fix' | 'switch' | 'use' | 'ultrafix';
+  /** Normalized by the API: `true` whenever any history entry belongs to an ultrafix cycle. */
   ultrafixCycle?: boolean;
   previewMedia?: PublishedVisualPreview[];
 }

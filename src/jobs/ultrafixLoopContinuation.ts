@@ -81,6 +81,9 @@ export interface ContinuationResult {
     score?: number | null;
     cycleCount?: number;
     deferred?: boolean;
+    outcome?: 'goal_reached' | 'cycles_exhausted' | 'stopped' | 'failed';
+    goal?: number;
+    maxCycles?: number;
 }
 
 async function deferNextAction(
@@ -227,7 +230,7 @@ export async function continueUltrafixLoop(
         { owner, repo, pr: pullRequestNumber },
         workEpoch,
     )) {
-        return { continued: false, reason: 'ultrafix_superseded' };
+        return { continued: false, reason: 'ultrafix_superseded', outcome: 'stopped' };
     }
 
     // 1. Load current loop state
@@ -241,6 +244,7 @@ export async function continueUltrafixLoop(
         return {
             continued: false,
             reason: state && stateWorkEpoch !== workEpoch ? 'ultrafix_superseded' : 'no_active_loop',
+            outcome: 'stopped',
         };
     }
 
@@ -249,14 +253,16 @@ export async function continueUltrafixLoop(
         owner, repo, pr: pullRequestNumber, action: completedAction, workEpoch,
     });
     if (!updatedState) {
-        return {
-            continued: false,
-            reason: await isUltrafixAutomaticWorkCurrent(
-                redisClient,
-                { owner, repo, pr: pullRequestNumber },
-                workEpoch,
-            ) ? 'state_lost_after_record' : 'ultrafix_superseded',
-        };
+        // One epoch read decides both fields, so they cannot disagree when the
+        // epoch moves between two separate Redis reads.
+        const stillCurrent = await isUltrafixAutomaticWorkCurrent(
+            redisClient,
+            { owner, repo, pr: pullRequestNumber },
+            workEpoch,
+        );
+        return stillCurrent
+            ? { continued: false, reason: 'state_lost_after_record', outcome: 'failed' }
+            : { continued: false, reason: 'ultrafix_superseded', outcome: 'stopped' };
     }
 
     correlatedLogger.info(
@@ -279,7 +285,8 @@ export async function continueUltrafixLoop(
             { owner, repo, pr: pullRequestNumber },
             workEpoch,
         );
-        return { continued: false, reason: 'label_removed', cycleCount: updatedState.cycleCount };
+        return { continued: false, reason: 'label_removed', cycleCount: updatedState.cycleCount,
+            outcome: 'stopped', goal: updatedState.goal, maxCycles: updatedState.maxCycles };
     }
 
     // 4. Get the latest review score

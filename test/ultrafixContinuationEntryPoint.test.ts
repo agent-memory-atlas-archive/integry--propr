@@ -254,4 +254,56 @@ describe('Ultrafix continuation entry point', () => {
         assert.match(result.reason, /partial diff coverage/i);
         assert.equal(mockEnableAutoMerge.mock.callCount(), 0);
     });
+    test('state lost after record decides reason and outcome from one epoch read', async () => {
+        const { getUltrafixStateKey } = await import('../src/jobs/ultrafixOrchestrationService.js');
+        const { getUltrafixAutomaticWorkEpochKey } = await import('../src/jobs/ultrafixAutomaticWorkEpoch.js');
+        const stateKey = getUltrafixStateKey('acme', 'web', 45);
+        const epochKey = getUltrafixAutomaticWorkEpochKey('acme', 'web', 45);
+
+        const run = async (moveEpochAfterLoad: boolean) => {
+            const redis = createMockRedis();
+            await startLoop(redis as never, { owner: 'acme', repo: 'web', pr: 45, goal: 8 }, false);
+            let stateReads = 0;
+            let epochReadsAfterLoss = 0;
+            const originalGet = redis.get.bind(redis);
+            redis.get = async (key: string) => {
+                if (key === stateKey) {
+                    stateReads += 1;
+                    // The first read serves continuation's own load; the record
+                    // step then finds the state gone (cleared by a concurrent stop).
+                    if (stateReads > 1) {
+                        if (moveEpochAfterLoad) await redis.set(epochKey, '1');
+                        return null;
+                    }
+                }
+                if (key === epochKey && stateReads > 1) epochReadsAfterLoss += 1;
+                return originalGet(key);
+            };
+            const result = await continueUltrafixLoop({
+                owner: 'acme',
+                repo: 'web',
+                pullRequestNumber: 45,
+                completedAction: 'review',
+                ultrafixMeta: { mode: 'ultrafix', goal: 8, instructions: '' },
+                redisClient: redis as never,
+                correlatedLogger: logger as never,
+                correlationId: 'lost-state-correlation-id',
+                currentJobId: 'completed-review-job',
+            });
+            return { result, epochReadsAfterLoss };
+        };
+
+        const lost = await run(false);
+        assert.equal(lost.result.continued, false);
+        assert.equal(lost.result.reason, 'state_lost_after_record');
+        assert.equal(lost.result.outcome, 'failed');
+        assert.equal(lost.epochReadsAfterLoss, 1, 'reason and outcome derive from a single epoch read');
+
+        const superseded = await run(true);
+        assert.equal(superseded.result.continued, false);
+        assert.equal(superseded.result.reason, 'ultrafix_superseded');
+        assert.equal(superseded.result.outcome, 'stopped');
+        assert.equal(superseded.epochReadsAfterLoss, 1);
+        assert.equal(mockQueueAdd.mock.callCount(), 0);
+    });
 });
