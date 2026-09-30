@@ -126,6 +126,7 @@ const sidebars: SidebarsConfig = {
           items: [
             'architecture/worker-runtime',
             'architecture/git-runtime',
+            'architecture/preview-storage-relay',
           ],
         },
       ],
