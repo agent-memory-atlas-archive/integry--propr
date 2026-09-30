@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { getTaskLiveDetails } from '../../api/proprApi';
 import { useSocket } from '../../contexts/useSocket';
+import { CONNECTED_RECONCILE_MS, useLiveRefreshScheduler } from '../../hooks/useLiveRefreshScheduler';
 import type { TaskLiveUpdatePayload } from '@propr/shared';
 import type { LiveDetails } from './types';
 import { executionSupersededByRead, isFinishedTask, isSupersededUpdate } from './liveDetailsMerge';
@@ -67,12 +68,23 @@ export function useTaskLiveData(taskId: string | undefined, pollIntervalMs = 5_0
     }
   }, [taskId]);
 
+  // Socket updates carry the live projection. HTTP reconciles reconnects,
+  // visibility recovery and occasional missed publications; frequent reads
+  // remain only as a disconnected fallback, without overlapping a pending read.
+  const scheduleRefresh = useLiveRefreshScheduler({
+    isConnected: isConnected || pollIntervalMs <= 0,
+    refresh: async () => { if (!pendingRead.current) await refresh(); },
+    scopeKey: taskId,
+    fallbackPollMs: pollIntervalMs > 0 ? pollIntervalMs : 30_000,
+    connectedPollMs: pollIntervalMs > 0 ? CONNECTED_RECONCILE_MS : undefined,
+  });
+
   useEffect(() => {
-    void refresh();
-    if (!taskId || pollIntervalMs <= 0) return;
-    const timer = window.setInterval(() => { void refresh(); }, pollIntervalMs);
-    return () => window.clearInterval(timer);
-  }, [isLive, pollIntervalMs, refresh, taskId]);
+    // A terminal transition must still supersede an in-flight active snapshot
+    // immediately so the complete history replaces the bounded live window.
+    if (document.visibilityState === 'hidden') scheduleRefresh();
+    else void refresh();
+  }, [isLive, refresh, scheduleRefresh]);
 
   useEffect(() => {
     if (!taskId || !isConnected) return;

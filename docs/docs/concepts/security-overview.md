@@ -74,3 +74,17 @@ Configuration lives in the Web UI settings and `.env` — see [GitHub Authentica
 ## Data At Rest
 
 Application state lives in the stack directory on your host: the database under `data/`, logs under `logs/`, repository clones and worktrees under `repos/`, and queue state in the Redis volume. Direct-login credentials live in the managed credential root, which is below `~/.propr` for native/Compose installs or below the launcher data directory. Treat that root as persistent secret data when backing up or removing a deployment — see [Teardown](../operations/maintenance.md#teardown).
+
+## Connected clients and private media
+
+[MCP connections](../features/mcp.md) use separate OAuth grants with a scope ceiling
+and explicit repository consent. Instance membership and repository authorization
+are rechecked on calls; GitHub REST bearer credentials are not MCP access tokens.
+Revoking a connected app invalidates its grant. The MCP access log records metadata
+without tool arguments or result bodies.
+
+[Desktop pairing](../operations/desktop-pairing.md) approves a connection in the
+browser and keeps credentials behind the native boundary. Private PR preview
+images use authenticated application media access; [managed originals](../features/visual-previews.md)
+require Connect sign-in and repository authorization. A screenshot URL is not an
+access grant.

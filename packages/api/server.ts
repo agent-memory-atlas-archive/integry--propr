@@ -1,3 +1,4 @@
+import { startDashboardReadService, type DashboardReadService } from './services/dashboardReadService.js';
 import { createUsageTipsRoutes } from './routes/usageTipsRoutes.js';
 import { dashboardNarrativeModel } from './routes/dashboardNarrativeModel.js';
 import { getConfig } from '@propr/core';
@@ -19,8 +20,6 @@ import { authenticateSocketRequest, setupAuth } from './auth.js';
 import { configureDemoMode, createDemoRedisClient, demoModeReadOnlyMiddleware } from './demoMode.js';
 import { resolveGithubAuthMode, resolveGithubEventIntakeMode, validateIntakeModePrerequisites } from '@propr/shared';
 import { initSocketService, closeSocketService } from './services/socketService.js';
-import { AgentTankUsageWatcher } from './services/agentTankUsageWatcher.js';
-import { SystemHealthWatcher } from './services/systemHealthWatcher.js';
 import { CORS_PREFLIGHT_MAX_AGE_SECONDS, corsRejectionHandler, createCorsOriginValidator, isTrustedMcpWebOrigin, type CorsOriginValidator } from './corsValidation.js';
 import {
   createStatusRoutes, createTaskRoutes,
@@ -257,15 +256,12 @@ let taskQueue: Queue;
 let runtimeBuildQueue: Queue;
 let configReloadSubscription: ConfigReloadSubscription | undefined;
 let invalidateStatusAgentCache: (() => void) | undefined;
+let dashboardReads: DashboardReadService | undefined;
 let notificationBackground: NotificationBackgroundService | undefined;
 let webPushDispatcherConfigured = false;
 let resolvedWebPushConfiguration: ValidatedWebPushConfiguration = { configured: false, issue: 'disabled' };
 let desktopPairingCleanupTimer: NodeJS.Timeout | undefined;
 let visualPreviewOAuthRefreshScheduler: VisualPreviewOAuthRefreshScheduler | undefined;
-let agentTankUsageWatcher: AgentTankUsageWatcher | undefined;
-let systemHealthWatcher: SystemHealthWatcher | undefined;
-/** The status snapshot builder the health watcher compares; set up with the routes. */
-let readStatusSnapshot: (() => Promise<Record<string, unknown> & { timestamp: string }>) | undefined;
 
 function createDemoTaskQueue(): Queue {
   return {
@@ -320,9 +316,16 @@ function setupRoutes(): void {
       ) => notificationBackground!.projectSystemSnapshot(snapshot, additionalAdministratorIds),
     }),
   });
-  readSystemStatus = statusRoutes.getStatusSnapshot;
+  readSystemStatus = async () => {
+    const snapshot = await statusRoutes.getStatusSnapshot();
+    // Health notifications must keep advancing when connected clients consume
+    // snapshots and no longer call the HTTP route that also projects them.
+    void notificationBackground?.projectSystemSnapshot(snapshot, []).catch(error => {
+      console.warn('Failed to project pushed system health notifications:', error);
+    });
+    return snapshot;
+  };
   invalidateStatusAgentCache = statusRoutes.invalidateAgentStatusCache;
-  readStatusSnapshot = statusRoutes.readStatusSnapshot;
   const desktopAuthRoutes = createDesktopAuthRoutes();
   // INTENTIONALLY UNAUTHENTICATED: compatibility/discovery and the bounded
   // pairing bootstrap, poll, and browser entry are registered before the guard.
@@ -362,7 +365,7 @@ function setupRoutes(): void {
   const agentRoutes = createAgentRoutes();
   const agentLoginRoutes = createAgentLoginRoutes();
   const statsRoutes = createStatsRoutes({ db });
-  const dashboardRoutes = createDashboardRoutes({ db, redisClient, taskQueue, narrativeModel: dashboardNarrativeModel, isSummaryEnabled: async () => (await getConfig('dashboard_summary_enabled', true)) !== false });
+  const dashboardRoutes = createDashboardRoutes({ db, redisClient, taskQueue, completedRows: dashboardReads?.load, narrativeModel: dashboardNarrativeModel, isSummaryEnabled: async () => (await getConfig('dashboard_summary_enabled', true)) !== false });
   const summaryBrowserRoutes = createSummaryBrowserRoutes();
   const repoChatRoutes = createRepoChatRoutes();
   const repoImprovementsRoutes = createRepoImprovementsRoutes();
@@ -563,6 +566,7 @@ async function start(): Promise<void> {
   try {
     console.log('SQLite persistence is enabled');
     await runMigrations();
+    dashboardReads = await startDashboardReadService(db);
     if (demoMode) console.log('Demo mode enabled: API uses a synthetic user, rejects mutating requests, and skips execution processors');
     await assertInstanceAdministratorConfigured();
     await initRedis();
@@ -635,17 +639,6 @@ async function start(): Promise<void> {
         notificationProjection: notificationBackground,
       });
       console.log('[WebSocket] Queue features initialized for real-time updates');
-      // Agent Tank cannot call us, so this instance watches its quotas once for
-      // every connected client instead of each sidebar polling for itself.
-      agentTankUsageWatcher = new AgentTankUsageWatcher();
-      agentTankUsageWatcher.start();
-      // A worker, the daemon, Redis or an agent can stop without any run
-      // lifecycle event saying so, and the health surfaces no longer poll to
-      // find out. This instance watches the status snapshot for all of them.
-      if (readStatusSnapshot) {
-        systemHealthWatcher = new SystemHealthWatcher({ readSnapshot: readStatusSnapshot });
-        systemHealthWatcher.start();
-      }
       await initializeUltrafix(getIoRedisClient());
       // Register the webhook processors in THIS (API) process ONLY when the API
       // actually serves webhooks — i.e. direct_webhook mode, where this process
@@ -681,6 +674,7 @@ async function start(): Promise<void> {
     process.on('SIGTERM', async () => {
       console.log('SIGTERM received, shutting down gracefully...');
       const shutdownTasks: ShutdownTask[] = [
+        { name: 'dashboard read service', close: () => dashboardReads?.close() ?? Promise.resolve() },
         { name: 'task queue', close: () => taskQueue.close() },
         { name: 'agent runtime build queue', close: () => runtimeBuildQueue.close() },
         { name: 'agent login sessions', close: () => agentLoginSessionManager.close() },
@@ -693,8 +687,6 @@ async function start(): Promise<void> {
           { name: 'visual-preview OAuth refresh scheduler', close: () => visualPreviewOAuthRefreshScheduler?.close() ?? Promise.resolve() },
           { name: 'config reload subscriber', close: () => configReloadSubscription?.close() ?? Promise.resolve() },
           { name: 'ultrafix state redis', close: () => closeUltrafixStateRedis() },
-          { name: 'agent tank usage watcher', close: () => agentTankUsageWatcher?.close() ?? Promise.resolve() },
-          { name: 'system health watcher', close: () => systemHealthWatcher?.close() ?? Promise.resolve() },
           { name: 'socket service', close: () => closeSocketService() },
           { name: 'io redis client', close: () => getIoRedisClient().quit() }
         );

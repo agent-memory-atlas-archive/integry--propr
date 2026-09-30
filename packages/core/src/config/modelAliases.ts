@@ -89,8 +89,12 @@ const MODEL_ALIASES: Record<ModelAlias, ModelId> = {
     'opus-4-8': 'claude-opus-4-8',
     'claude-opus-4-8': 'claude-opus-4-8',
 
-    'sonnet': 'claude-sonnet-5',
-    'claude-sonnet': 'claude-sonnet-5',
+    'sonnet': 'claude-sonnet-5-5',
+    'claude-sonnet': 'claude-sonnet-5-5',
+
+    'sonnet55': 'claude-sonnet-5-5',
+    'sonnet-5-5': 'claude-sonnet-5-5',
+    'claude-sonnet-5-5': 'claude-sonnet-5-5',
 
     'sonnet5': 'claude-sonnet-5',
     'sonnet-5': 'claude-sonnet-5',

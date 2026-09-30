@@ -104,3 +104,123 @@ The repeated task-list and repository-stat calls in the capture were separated
 by a later live task event. The first pair is the Tasks-page mount snapshot and
 the second pair is its freshness invalidation, rather than two overlapping
 mount requests. Existing burst coalescing and reconnect recovery remain intact.
+
+## September 29 staging read investigation
+
+Authenticated sequential HTTPS measurements (three rounds) found warmed task
+list/search reads around 200–235 ms, but `/api/dashboard/outcomes` took
+3.08–4.09 seconds. A headless Chromium dashboard load also showed unrelated
+reads completing together around seven seconds; both the outcomes feed and
+narrative collect the completion projection on the API's synchronous SQLite
+connection. The staging snapshot contains 14,436 tasks and 65,782 history rows,
+with `task_history_task_id_timestamp_index` already present.
+
+The completion projection now keeps task job/result JSON out of its entity
+window sorts and retrieves those payloads after ranking. Against the same
+read-only staging snapshot, the first paired 50-entity measurement fell from
+2,374 ms to 1,080 ms; repository-scoped reads fell from 1,083 ms to 834 ms.
+Returned objects were compared with deep equality, including every earlier
+update. These are local query measurements, not deployed API timings.
+
+Reproduce the current query against an offline snapshot with:
+
+```sh
+node --import tsx scripts/benchmark-dashboard-outcomes.ts --database=/path/to/snapshot.sqlite
+```
+
+Optional `--repository=owner/repo` and `--search=text` exercise filtered reads.
+The benchmark opens SQLite read-only and prints only timings and row counts.
+
+A second change shares the ranking between selected parents and earlier
+updates, and searches compact parent titles once instead of repeating the
+projection for each 500 candidates. Paired snapshot reads then measured:
+
+| Read (50-entity limit) | Original | Optimized |
+| --- | ---: | ---: |
+| All repositories | 1,662 ms | 689 ms |
+| `integry/propr` | 1,187 ms | 511 ms |
+| Title search `dashboard` | 4,784 ms | 974 ms |
+| No-match title search | 4,008 ms | 438 ms |
+
+All four results matched the original projection by deep equality. The search
+regression also places a Unicode title behind 505 unrelated parents and checks
+that search uses two rankings regardless of candidate pages; an unfiltered read
+uses one ranking for both parents and earlier updates.
+
+The goal live-details consumer also used an unconditional five-second HTTP
+interval despite consuming `task:live` websocket updates. It now uses the shared
+refresh scheduler: connected clients reconcile every five minutes, disconnected
+clients retain their fallback interval, hidden tabs defer reads, and reconnect
+or visibility recovery triggers one coalesced read. Periodic reads cannot overlap
+an outstanding snapshot. Lifecycle transitions still immediately replace an
+active snapshot with complete terminal history, including when an older HTTP
+read is pending. Focused UI tests exercise these request counts and the existing
+HTTP/socket execution-ordering races.
+
+Task-list counts now use history existence when no state filter is requested;
+they still exclude tasks without history. A covering
+`tasks(repository, task_type, task_id)` index replaces the narrower repository
+index, retaining its prefix lookup without keeping redundant indexes. On the
+snapshot, the original all-task count took 35–37 ms warm; the covering-index
+existence query took 6.5–6.7 ms. State-filtered counts retain their latest-state
+join. Complete task-list responses matched the prior implementation across
+all, search, review, active, waiting, attention, repository and offset cases.
+Migration tests verify covering-index selection and rollback.
+
+Context previews likewise use pushed draft completion events instead of a
+five-second connected poll. A pending preview has a 30-second connected safety
+read so a lost publication cannot stall an interactive operation for minutes;
+the five-second interval remains only when disconnected. Snapshot reads are
+serialized by the shared scheduler and stop doing network work when the preview
+settles. The regression holds a connected preview open for 20 seconds with just
+its initial read, then disconnects and verifies recovery through one fallback.
+
+### Browser and integration validation
+
+Headless Chromium loaded the hosted UI twice, routing only dashboard outcomes
+and narrative reads to a loopback, read-only snapshot harness. Both runs used
+the same database and disabled narrative model generation; other reads retained
+the staging backend. The original queries rendered the Completed feed at
+5,777 ms and the optimized queries at 2,137 ms, with no page errors. This measures
+the query changes inside the real UI; it is not a post-deployment measurement.
+
+The remaining frequent network timers have narrower purposes: submission
+creation waits, runtime-package operations, and GitHub preview publication
+without a corresponding push event. Dashboard/task refreshes already use push,
+visible-tab disconnected fallback, and five-minute recovery reads. Elapsed-time
+and animation timers do not issue network calls. Analytics panels retain their
+five-minute refreshes. Removing recovery reads entirely would risk stale data
+when a best-effort publication is missed.
+
+Validation used a clean checkout because an extra ignored local workspace made
+`npm ci` fail in the original directory. The clean checkout passed server/UI
+typechecks, the production UI build, 64 focused API tests and 226 dashboard,
+goal and live-update UI tests; context-preview tests were run separately after
+the additional polling change.
+
+## Completion reads off the API thread
+
+After the initial rollout, three authenticated staging rounds measured outcomes
+at a 1.12-second median (previously 3.20 seconds), while the dashboard's outcomes
+request fell from about 7.00 to 2.78 seconds. Unrelated reads still waited behind
+the synchronous projection during dashboard startup.
+
+File-backed SQLite APIs now execute completion projections in a dedicated,
+read-only worker, shared by the feed and narrative. Identical concurrent reads
+share only their in-flight result; subsequent reads query the current database.
+There is no response TTL. The service bounds distinct queued requests at 32,
+terminates a worker after a 30-second request deadline, rejects outstanding
+requests on failure/shutdown, and starts a replacement on a later request.
+In-memory and non-better-sqlite3 fixtures retain their supplied connection.
+
+On the staging snapshot, simultaneous 50-entity feed and 8-entity narrative reads
+took 1,240 ms on the API thread and 1,222 ms in the worker with identical results.
+A foreground timer plus `SELECT 1` probe completed at 1,241 ms before and 11 ms
+after: this isolates request responsiveness rather than claiming the projection
+itself became faster. Tests cover repository/search parity, Unicode titles,
+visibility of subsequent writes, bounded queued work, query-error recovery,
+shutdown, deadline failure, and read-only startup against a missing file.
+
+Add `--worker` to `scripts/benchmark-dashboard-outcomes.ts` to reproduce the
+worker path; each iteration also reports when a 10 ms foreground timer fires.
+The compiled JavaScript worker was separately smoke-tested against the snapshot.

@@ -31,3 +31,12 @@ it('preserves personalized advice while retaining catalog titles and documentati
   ] })));
   expect((await getUsageTips()).tips).toEqual([{ ...tip, body }]);
 });
+
+it('resolves kind from the local catalog instead of trusting API metadata', async () => {
+  const corrective = USAGE_TIPS_CATALOG[0];
+  const discovery = USAGE_TIPS_CATALOG.find(t => t.kind === 'discovery')!;
+  vi.mocked(apiFetch).mockResolvedValue(new Response(JSON.stringify({ enabled: true, tips: [
+    { ...corrective, kind: 'discovery' }, { ...discovery, kind: 'corrective' },
+  ] })));
+  expect((await getUsageTips()).tips).toEqual([corrective, discovery]);
+});

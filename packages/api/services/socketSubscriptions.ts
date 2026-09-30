@@ -243,7 +243,7 @@ export class SocketSubscriptionManager {
         for (const room of rooms) {
           if (!await this.join(socket, { event: 'subscribe:activity', room, authorize: () => true })) return;
         }
-        if (socket.connected) socket.emit('activity:ready');
+        if (socket.connected) socket.emit('activity:ready', { shellSnapshots: true });
       });
       return tail;
     });
@@ -367,7 +367,7 @@ export class SocketSubscriptionManager {
         room: 'queue:stats',
         authorize: () => true,
       })) return;
-      await this.dependencies.getQueueBroadcaster()?.broadcastQueueStats(true);
+      await this.dependencies.getQueueBroadcaster()?.broadcastQueueStats(true, socket.id);
     });
     socket.on('unsubscribe:queue:stats', async () => {
       const room = 'queue:stats';

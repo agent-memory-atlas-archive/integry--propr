@@ -88,16 +88,18 @@ The optional dispatcher interval, batch, lease, request-timeout, TTL, attempt, a
 retry variables are listed in [Configuration Reference](./configuration-reference.md).
 After configuration changes, run `propr check` and `propr start --restart`.
 
+For everyday Inbox actions and repository suppression, see [Inbox and notifications](../features/inbox.md).
+
 ## Install and enable notifications
 
-In a supported desktop or Android browser, install ProPR from the browser's install control, open the installed app, then go to **Settings → Personal notifications → Enable on this browser**. Permission is requested only from that button click. Enable Push for the desired categories after the browser is subscribed.
+In a supported desktop or Android browser, install ProPR from the browser's install control, open the installed app, then go to **Settings → Notifications → Personal notifications → Enable on this browser**. Permission is requested only from that button click. Enable Push for the desired categories after the browser is subscribed.
 
 On **iOS or iPadOS 16.4 and later**, Web Push is available only to a Home Screen web app:
 
 1. Open the ProPR UI in Safari.
 2. Open **Share**, choose **Add to Home Screen**, and confirm.
 3. Launch ProPR from its new Home Screen icon, not the original Safari tab.
-4. Sign in, open **Settings → Personal notifications**, and choose **Enable on this browser**.
+4. Sign in, open **Settings → Notifications → Personal notifications**, and choose **Enable on this browser**.
 5. Accept the system notification prompt, then enable the desired Push categories.
 
 Apple describes the platform behavior in [Web Push for Web Apps on iOS and iPadOS](https://webkit.org/blog/13878/web-push-for-web-apps-on-ios-and-ipados/). A permission prompt cannot be triggered silently; it must follow the user's action. If permission is denied, ProPR cannot ask again until it is allowed in browser/site or OS notification settings.

@@ -6,6 +6,17 @@ same URL using `createMcpHandler({ legacy: 'stateless' })` and one catalog.
 There is no session-global selected instance. MCP authentication is separate
 from the existing GitHub-bearer API middleware.
 
+## Enable through Settings
+
+Administrators can open **Settings → Integrations → MCP Server**, confirm enablement
+and choose a scope ceiling. With `MCP_ENABLED` unset, this UI-managed path derives
+an HTTPS origin from `MCP_PUBLIC_ORIGIN`, `API_PUBLIC_URL` or the GitHub callback,
+and derives its encryption key from `MCP_ENCRYPTION_KEY` or the existing credential,
+system-task or session secret chain. It persists an instance identity. Preserve
+these secrets across restarts; changing the key requires reconnecting clients.
+`MCP_ENABLED=false` forces MCP off; `true` selects the explicit environment-managed
+setup below. See the [illustrated connection guide](docs/features/mcp.md).
+
 ## Direct instance setup
 
 Configure an ordinary working ProPR instance, including GitHub browser OAuth,

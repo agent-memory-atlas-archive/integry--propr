@@ -69,3 +69,25 @@ test('queue periodic snapshots emit only when the aggregate changes', async () =
   await broadcaster.broadcastQueueStats(true);
   assert.equal(emitted.length, 3, 'a new subscriber can request an immediate snapshot');
 });
+
+test('subscription snapshots reach only the joining socket without invalidating dashboard reads', async () => {
+  const emitted: Array<{ room: string; event: string; payload: { initial?: boolean } }> = [];
+  const io = { to: (room: string) => ({ emit: (event: string, payload: { initial?: boolean }) => emitted.push({ room, event, payload }) }) };
+  let waiting = 0;
+  const queue = {
+    getWaitingCount: async () => waiting, getJobs: async () => [],
+    getCompletedCount: async () => 0, getFailedCount: async () => 0, getDelayedCount: async () => 0,
+  };
+  const broadcaster = new QueueBroadcaster(io as never, queue as never);
+  await broadcaster.broadcastQueueStats(true, 'first-socket');
+  await broadcaster.broadcastQueueStats(true, 'second-socket');
+  assert.deepEqual(emitted.map(frame => [frame.room, frame.event, frame.payload.initial]), [
+    ['first-socket', QUEUE_STATS_UPDATE, true], ['second-socket', QUEUE_STATS_UPDATE, true],
+  ]);
+  waiting = 1;
+  await broadcaster.broadcastQueueStats(true, 'third-socket');
+  assert.deepEqual(emitted.slice(2).map(frame => [frame.room, frame.event]), [
+    ['queue:stats', QUEUE_STATS_UPDATE], ['activity:updates', 'activity:update'],
+  ]);
+  assert.equal(emitted[2].payload.initial, undefined);
+});

@@ -96,6 +96,22 @@ describe('provider API pricing', () => {
     assert.strictEqual(pricing?.completion, 10 / 1_000_000);
   });
 
+  test('uses the published Claude Sonnet 5.5 rates, including prompt cache prices', async () => {
+    const pricing = getOfficialModelPricing('anthropic/claude-sonnet-5.5');
+
+    assert.deepStrictEqual(pricing, {
+      prompt: 2 / 1_000_000,
+      completion: 10 / 1_000_000,
+      cacheCreation: 2.5 / 1_000_000,
+      cacheRead: 0.2 / 1_000_000,
+    });
+    assert.strictEqual(
+      await getModelPricing('anthropic/claude-sonnet-5.5'),
+      pricing,
+      'official pricing should resolve without relying on the OpenRouter cache',
+    );
+  });
+
   test('uses model-specific OpenAI cached-input pricing', () => {
     const pricing = getOfficialModelPricing('openai/gpt-5.6-sol');
     assert.ok(pricing);

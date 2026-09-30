@@ -119,8 +119,14 @@ test('a usage read that Agent Tank refuses observes nothing', async () => {
 
 function shellSampler() {
   const events: string[] = [];
+  const socket = {
+    rooms: new Set([ACTIVITY_ROOM]),
+    data: { principal: { authorization: { source: 'local', permissions: ['instance.manage_agents'] } } },
+    emit() {},
+  };
   const io = {
-    sockets: { adapter: { rooms: new Map([[ACTIVITY_ROOM, new Set(['connected-client'])]]) } },
+    sockets: { adapter: { rooms: new Map([[ACTIVITY_ROOM, new Set(['connected-client'])]]) },
+      sockets: new Map([['connected-client', socket]]) },
     to: () => ({ emit: (event: string) => events.push(event) }),
   };
   return { sampler: new ShellActivityBroadcaster(io as never), events };

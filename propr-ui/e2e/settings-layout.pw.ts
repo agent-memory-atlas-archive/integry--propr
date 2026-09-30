@@ -14,7 +14,7 @@ const notificationPreferences = Object.fromEntries([
 ].map(kind => [kind, { inboxEnabled: true, pushEnabled: kind === 'system_failure', updatedAt: null }]));
 
 const catalogAgents = [
-  { id: 'claude', kind: 'direct' as const, alias: 'claude', enabled: true, supportedModels: ['claude-opus-5', 'claude-sonnet-5'] },
+  { id: 'claude', kind: 'direct' as const, alias: 'claude', enabled: true, supportedModels: ['claude-opus-5-5', 'claude-sonnet-5-5'] },
   { id: 'codex', kind: 'direct' as const, alias: 'codex', enabled: true, supportedModels: ['gpt-5-codex'] },
 ];
 
@@ -38,9 +38,9 @@ async function installSettingsFixture(page: Page): Promise<void> {
         ultrafix_pause_seconds: 60,
         default_agent_alias: 'claude',
         model_reasoning_level: 'high',
-        planner_context_model: 'claude:claude-sonnet-5',
-        planner_generation_model: 'claude:claude-opus-5',
-        pr_review_model: 'claude:claude-opus-5',
+        planner_context_model: 'claude:claude-sonnet-5-5',
+        planner_generation_model: 'claude:claude-opus-5-5',
+        pr_review_model: 'claude:claude-opus-5-5',
         analysis_model_fast: 'codex:gpt-5-codex',
         pr_review_context_enabled: true,
         pr_review_context_model: '',
@@ -53,7 +53,7 @@ async function installSettingsFixture(page: Page): Promise<void> {
       '/api/config/pr-label': { pr_label: 'propr' },
       '/api/config/primary-processing-labels': { primary_processing_labels: ['AI'] },
       '/api/config/agents': { agents: [] },
-      '/api/config/summarization': { enabled: true, agent_alias: 'claude:claude-sonnet-5', fallback_agent_alias: '' },
+      '/api/config/summarization': { enabled: true, agent_alias: 'claude:claude-sonnet-5-5', fallback_agent_alias: '' },
       '/api/config/agent-tank': { enabled: true, url: 'http://0.0.0.0:3456' },
       '/api/config/agent-tank/status': { available: true },
       '/api/config/visual-preview-auth': {
@@ -65,8 +65,8 @@ async function installSettingsFixture(page: Page): Promise<void> {
         status: 'ready', images: { claude: 'sha256:preview' }, updatedAt: '',
       },
       '/api/admin/mcp': {
-        status: { enabled: false, resource: null, origin: null },
-        settings: { enabled: false, scopeCeiling: ['read'] },
+        status: { enabled: true, resource: 'https://propr.example/api/mcp', origin: 'https://propr.example', scopeCeiling: ['read', 'plan', 'execute'] },
+        settings: { enabled: true, scopeCeiling: ['read', 'plan', 'execute'], connectEnabled: false },
       },
       '/api/instance/catalog': { agents: catalogAgents, repositories: [] },
       '/api/notifications/config': { push: { configured: false, vapidPublicKey: null } },
@@ -128,6 +128,7 @@ test('lays settings out as one contained, single-column form', async ({ page }) 
   await expect(page.getByRole('heading', { name: 'LLM Usage Tracking' })).toBeVisible();
   await expect(page.getByText('Agent Tank connected')).toBeVisible();
   await capture(page, 'settings-integrations');
+  await capture(page, 'settings-mcp', page.getByRole('region', { name: 'MCP Server', exact: true }));
 
   // Card Hell stays banned: these blocks are separated by rules, not boxes.
   for (const name of ['Managed preview storage', 'Voice briefings · Experimental']) {
@@ -146,6 +147,9 @@ test('lays settings out as one contained, single-column form', async ({ page }) 
   const centre = (box: { x: number; width: number } | null): number => (box!.x + box!.width / 2);
   expect(Math.abs(centre(checkboxBox) - centre(headerBox))).toBeLessThanOrEqual(2);
   await capture(page, 'settings-notifications');
+  if (process.env.PROPR_CAPTURE_PREVIEWS) {
+    await page.getByRole('region', { name: 'Personal notifications' }).screenshot({ path: '../.propr/previews/settings-personal-notifications.png', animations: 'disabled' });
+  }
 });
 
 test('keeps the contained settings column usable on a phone', async ({ page }) => {

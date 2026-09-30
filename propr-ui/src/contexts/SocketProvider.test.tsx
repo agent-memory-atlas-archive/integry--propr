@@ -308,6 +308,38 @@ describe('SocketProvider', () => {
     expect(connectSocketMock).toHaveBeenCalledOnce();
   });
 
+  it('negotiates direct snapshots without recreating the connection', () => {
+    runtime.desktop = false;
+    const snapshots = vi.fn();
+    const Observer = () => {
+      const { shellSnapshots, onShellSnapshot } = useSocket();
+      useEffect(() => onShellSnapshot?.(snapshots), [onShellSnapshot]);
+      return <span>{shellSnapshots ? 'push' : 'fallback'}</span>;
+    };
+    const view = render(<SocketProvider><Observer /></SocketProvider>);
+    act(() => sockets[0].handlers.get('connect')?.());
+    act(() => sockets[0].handlers.get('activity:ready')?.({ shellSnapshots: true }));
+    expect(view.getByText('push')).toBeTruthy();
+    act(() => sockets[0].handlers.get('shell:snapshot')?.({ resource: 'usage', data: { enabled: false } }));
+    expect(snapshots).toHaveBeenCalledOnce();
+    expect(connectSocketMock).toHaveBeenCalledOnce();
+    expect(sockets[0].disconnect).not.toHaveBeenCalled();
+    act(() => sockets[0].handlers.get('disconnect')?.('transport close'));
+    expect(view.getByText('fallback')).toBeTruthy();
+  });
+
+  it('refreshes browser authorization before reconnecting after a permission change', async () => {
+    runtime.desktop = false;
+    let finish!: () => void;
+    const refresh = vi.fn(() => new Promise<void>(resolve => { finish = resolve; }));
+    render(<SocketProvider onAuthenticationError={refresh}><div>app</div></SocketProvider>);
+    act(() => sockets[0].handlers.get('authentication:error')?.({ code: 'AUTHORIZATION_CHANGED' }));
+    expect(refresh).toHaveBeenCalledOnce();
+    expect(sockets[0].connect).not.toHaveBeenCalled();
+    await act(async () => finish());
+    expect(sockets[0].connect).toHaveBeenCalledOnce();
+  });
+
   it('delivers activity, goal, notification and usage events without logging their payloads', () => {
     const observed = {
       activity: vi.fn(),
