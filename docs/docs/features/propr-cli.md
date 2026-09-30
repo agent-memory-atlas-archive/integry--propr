@@ -6,6 +6,8 @@ sidebar_position: 12
 
 The ProPR CLI (`propr`, npm package [`propr-cli`](https://www.npmjs.com/package/propr-cli)) is both the **control plane for a local ProPR stack** (scaffold, verify, start, stop — no hand-written `docker run`) and a **client for a running backend** (plans, issue implementation, tasks, repositories, agents, to-dos, settings, logs). Backend commands talk to the same API as the Web UI, so everything shows up in the dashboard and follows the normal review path.
 
+[Goals](./goals.md) have no CLI commands; launch and steer them from the Web UI or [MCP](./mcp.md).
+
 This page documents the end-user CLI. For developing or operating ProPR itself from a source checkout (compose stacks, image builds), see [CLI Workflows](./cli-workflows.md).
 
 ## Installation
