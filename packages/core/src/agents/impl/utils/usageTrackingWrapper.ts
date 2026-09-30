@@ -230,28 +230,24 @@ function extractArrayMetricRecords(
 /**
  * Refresh the agent and then fetch its current status.
  *
- * Always calls POST /refresh/:agent first to ensure Agent Tank has the
- * latest data, then calls GET /status/:agent to retrieve it.
+ * External mode refreshes over HTTP. Bundled mode awaits the phase-specific
+ * refresh with its own budget before reading the snapshot.
  */
 async function refreshAndGetStatus(
     agent: string,
-    timeoutMs?: number,
-    alias: string = agent,
+    timeoutMs: number | undefined,
+    alias: string,
+    phase: 'pre-call' | 'post-call',
 ): Promise<AgentStatusResponse> {
-    await refreshAgent(agent, timeoutMs);
+    await refreshAgent(agent, timeoutMs, phase);
     return getStatus(agent, timeoutMs, alias);
 }
 
 /**
  * Whether the post-call status is the *same snapshot* the pre-call read returned.
  *
- * Bundled mode answers both probes from a cached snapshot, because a refresh
- * means starting a container and the hot path must never wait for one. A call
- * that begins and ends between two refreshes therefore sees one snapshot twice,
- * and subtracting it from itself would record a confident "this call consumed
- * 0%" for a call that really did consume capacity. Recording nothing is the
- * documented contract (`docs/docs/operations/agent-tank.md`): a snapshot that did
- * not move is not a measurement of this call.
+ * A successful refresh can still return unchanged provider data. Subtracting
+ * that snapshot from itself is not evidence of this call's consumption.
  *
  * `lastUpdated` is the transport-independent identity of a snapshot - Agent Tank
  * stamps it when it reads the CLI - and the usage payload is compared too so a
@@ -282,7 +278,7 @@ async function fetchStatusBestEffort(
     alias: string = agent,
 ): Promise<AgentStatusResponse | null> {
     try {
-        const status = await refreshAndGetStatus(agent, timeoutMs, alias);
+        const status = await refreshAndGetStatus(agent, timeoutMs, alias, phase);
         logger.debug({ agent, phase, usage: status.usage }, `Agent Tank ${phase} status`);
         return status;
     } catch (err: unknown) {
@@ -326,18 +322,18 @@ function startStatusSnapshot(
  * 3. Uses the pre-call snapshot only if it is already available when the LLM
  *    call finishes.
  * 4. Refreshes the agent again and fetches status (post-call).
- * 5. Skips the measurement when both probes returned the same snapshot — in
- *    bundled mode they are cache reads, so a short call can see one snapshot
- *    twice, and a self-subtracted snapshot is not a measurement.
+ * 5. Skips the measurement when both probes returned the same snapshot.
+ *    Bundled post-call probes await a new run with a bundled-specific timeout.
  * 6. Computes the delta and extracts structured metric records.
  * 7. Returns both the execution result and the usage metrics.
  *
  * If Agent Tank is disabled or a status fetch fails, the LLM call still
- * proceeds — usage tracking is best-effort and never blocks execution.
+ * proceeds — usage tracking never delays starting execution. Returning the
+ * result may wait for the bounded post-call probe.
  *
  * @param agent - The agent identifier to query (e.g. "claude", "antigravity", "codex").
  * @param executeFn - An async function that performs the LLM call and returns its result.
- * @param timeoutMs - Optional timeout for each Agent Tank HTTP request (default: 5000ms).
+ * @param timeoutMs - Optional timeout for each HTTP request; bundled mode uses AGENT_TANK_BUNDLED_TIMEOUT_MS.
  * @param alias - Executing account alias; bundled probes require matching cached provenance.
  * @returns The execution result and usage metrics (metrics are null if tracking was skipped).
  */

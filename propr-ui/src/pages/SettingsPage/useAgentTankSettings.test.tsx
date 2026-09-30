@@ -96,14 +96,18 @@ test('a blank draft ignores an already running availability probe', async () => 
   expect(result.current.checkingStatus).toBe(false);
 });
 
-test.each(['disabled', 'bundled'] as const)('leaving a blank external draft for %s still saves the mode', async (mode) => {
+test.each(['disabled', 'bundled'] as const)('leaving a blank external draft for %s preserves the URL when returning to External', async (mode) => {
   const { result } = renderHook(() => useAgentTankSettings(vi.fn()));
   await act(async () => result.current.adopt({ mode: 'external', enabled: true, url: 'http://legacy:3456' }));
   await act(async () => result.current.change({ mode: 'external', enabled: true, url: '' }));
   await act(async () => result.current.change({ mode, enabled: mode !== 'disabled', url: '' }));
 
-  expect(apiMocks.updateAgentTankSettings).toHaveBeenCalledExactlyOnceWith({ mode, url: '' });
+  expect(apiMocks.updateAgentTankSettings).toHaveBeenCalledExactlyOnceWith({ mode, url: 'http://legacy:3456' });
   expect(result.current.settings.mode).toBe(mode);
+  expect(result.current.settings.url).toBe('http://legacy:3456');
+  await act(async () => result.current.change({ ...result.current.settings, mode: 'external', enabled: true }));
+  expect(apiMocks.updateAgentTankSettings).toHaveBeenLastCalledWith({ mode: 'external', url: 'http://legacy:3456' });
+  expect(result.current.settings.mode).toBe('external');
 });
 
 test('a rejected mode change is reported and the shown mode goes back to what is persisted', async () => {
@@ -276,4 +280,20 @@ test('a refused selection restores the availability of the mode that is persiste
   await waitFor(() => expect(result.current.settings.mode).toBe('external'));
   await waitFor(() => expect(result.current.available).toBe(true));
   expect(result.current.checkingStatus).toBe(false);
+});
+
+test.each(['disabled', 'bundled'] as const)('a queued %s save preserves the URL confirmed by the preceding write', async (mode) => {
+  let release = () => {};
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  apiMocks.updateAgentTankSettings.mockImplementationOnce(() => gate);
+  const { result } = renderHook(() => useAgentTankSettings(vi.fn()));
+  await act(async () => result.current.adopt({ mode: 'external', enabled: true, url: 'http://legacy:3456' }));
+  await act(async () => result.current.change({ mode: 'external', enabled: true, url: '  http://replacement:3456  ' }));
+  await act(async () => result.current.change({ mode: 'external', enabled: true, url: '' }));
+  await act(async () => result.current.change({ mode, enabled: mode !== 'disabled', url: '' }));
+  await act(async () => { release(); });
+  expect(apiMocks.updateAgentTankSettings).toHaveBeenLastCalledWith({ mode, url: 'http://replacement:3456' });
+  expect(result.current.settings.url).toBe('http://replacement:3456');
+  await act(async () => result.current.change({ ...result.current.settings, mode: 'external', enabled: true }));
+  expect(apiMocks.updateAgentTankSettings).toHaveBeenLastCalledWith({ mode: 'external', url: 'http://replacement:3456' });
 });

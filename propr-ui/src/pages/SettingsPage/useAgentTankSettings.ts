@@ -75,7 +75,14 @@ export function useAgentTankSettings(reportError: (message: string | null) => vo
 
   const change = useCallback((newSettings: AgentTankSettings) => {
     const selection = ++selectionRef.current;
-    setSettings(newSettings);
+    // A blank URL is only an external editing draft. Leaving that draft must
+    // retain the saved URL so selecting External again can actually save.
+    const preserveUrl = newSettings.mode !== 'external' && newSettings.url.trim() === '';
+    const selectionSettings = {
+      ...newSettings,
+      url: preserveUrl ? persistedRef.current.url : newSettings.url,
+    };
+    setSettings(selectionSettings);
     setAvailable(null);
     reportError(null);
     // Clearing the URL is an intermediate edit, not a saveable external
@@ -94,11 +101,18 @@ export function useAgentTankSettings(reportError: (message: string | null) => vo
 
     writeQueueRef.current = writeQueueRef.current.then(async () => {
       try {
-        await updateAgentTankSettings({ mode: newSettings.mode, url: newSettings.url });
-        persistedRef.current = newSettings;
+        // Resolve preserved values at the head of the queue: an earlier write
+        // may have confirmed a different URL while this selection was waiting.
+        const saved = {
+          ...newSettings,
+          url: preserveUrl ? persistedRef.current.url : newSettings.url.trim(),
+        };
+        await updateAgentTankSettings({ mode: saved.mode, url: saved.url });
+        persistedRef.current = saved;
         // The backend now holds this mode, so a probe can finally speak for it -
         // unless a newer selection has taken over the indicator in the meantime.
         if (selection !== selectionRef.current) return;
+        setSettings(saved);
         if (newSettings.mode !== 'disabled') probeStatus(STATUS_PROBE_DELAY, selection);
       } catch (err) {
         console.error('Failed to save Agent Tank settings:', err);

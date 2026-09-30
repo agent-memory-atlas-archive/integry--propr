@@ -244,3 +244,24 @@ test('bundled availability is reported only once bundled is the stored mode', as
   expect(backendCalls).toEqual(['save:bundled', 'status:bundled']);
   await capture(page, 'agent-tank-bundled-ready-after-save');
 });
+
+for (const mode of ['disabled', 'bundled'] as const) {
+  test(`restores the saved URL after leaving a blank draft through ${mode}`, async ({ page }) => {
+    await page.setViewportSize({ width: 1280, height: 1000 });
+    const url = 'http://host.docker.internal:3456';
+    const saved = await installFixture(page, { mode: 'external', enabled: true, url });
+    await page.goto('/settings?tab=integrations');
+    await expect(page.getByLabel('Daemon URL')).toHaveValue(url);
+
+    await page.getByLabel('Daemon URL').fill('');
+    await page.getByRole('radio', { name: mode === 'disabled' ? /Disabled/ : /Bundled/ }).check();
+    await expect.poll(() => saved.at(-1)).toMatchObject({ mode, url });
+    await page.getByRole('radio', { name: /External/ }).check();
+
+    await expect.poll(() => saved.at(-1)).toMatchObject({ mode: 'external', enabled: true, url });
+    await expect(page.getByLabel('Daemon URL')).toHaveValue(url);
+    await expect(page.getByRole('region', { name: 'LLM Usage Tracking' }).getByRole('status'))
+      .toContainText('Agent Tank connected');
+    await capture(page, `agent-tank-url-restored-after-${mode}`);
+  });
+}

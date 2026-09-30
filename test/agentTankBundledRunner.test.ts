@@ -154,6 +154,7 @@ beforeEach(() => {
 afterEach(() => {
     clearBundledAgentTankCache();
     delete process.env.PROPR_CONTAINERIZED;
+    delete process.env.AGENT_TANK_BUNDLED_TIMEOUT_MS;
 });
 
 test('ten concurrent refreshes coalesce onto exactly one container run', async () => {
@@ -302,13 +303,12 @@ test('the run carries the generated config and the container writes it itself', 
     fs.rmSync(path.dirname(path.dirname(target)), { recursive: true, force: true });
 });
 
-test('the two probes around one LLM call read one snapshot and start no container', async () => {
+test('cache-only capacity reads reuse a snapshot without starting a container', async () => {
     await refreshBundledStatuses();
     assert.equal(dockerRuns.length, 1);
 
-    // `executeWithUsageTracking` reads this before and after every LLM call. A
-    // call that finishes inside the freshness window sees the same snapshot
-    // twice, which is why the wrapper records no delta for it (covered by
+    // Cache-only reads inside the freshness window see the same snapshot
+    // twice. The wrapper also rejects unchanged provider snapshots (covered by
     // usageTrackingBundledDelta) - and neither read may start a container.
     const preCall = getBundledStatusesForDelta();
     const postCall = getBundledStatusesForDelta();
@@ -470,18 +470,17 @@ for (const executingAlias of ['claude-primary', 'claude-secondary']) {
         ];
         await refreshBundledStatuses();
         const { result, usageMetrics } = await executeWithUsageTracking('claude', async () => {
-            // Let the pre-call cache read settle, then complete a forced refresh
-            // for the inspected account while this call is still executing.
+            // Let the baseline settle and change the provider response for the
+            // post-call refresh.
             await new Promise(resolve => setImmediate(resolve));
             dockerResult = { ...dockerResult, stdout: JSON.stringify({
                 claude: { name: 'claude', usage: { session: { percent: 58 } }, lastUpdated: '2026-09-26T00:01:00.000Z' },
             }) };
-            await refreshBundledStatuses({ force: true });
             return 'output';
         }, undefined, executingAlias);
         assert.equal(result, 'output');
-        assert.equal(dockerRuns.length, 2, 'only the initial and explicit refresh run containers');
-        assert.ok(bindMounts(dockerRuns[1]).includes(mountSpec(claudeHome, '/home/node/.claude')));
+        assert.equal(dockerRuns.length, executingAlias === 'claude-primary' ? 2 : 1);
+        assert.ok(bindMounts(dockerRuns[0]).includes(mountSpec(claudeHome, '/home/node/.claude')));
         if (executingAlias === 'claude-primary') {
             assert.deepEqual(usageMetrics?.records, [{ agent: 'claude', metricKey: 'Session', metricValue: 16 }]);
         } else {
@@ -489,6 +488,103 @@ for (const executingAlias of ['claude-primary', 'claude-secondary']) {
         }
     });
 }
+
+for (const provider of ['claude', 'codex', 'antigravity'] as const) {
+    for (const baseline of ['cold', 'fresh', 'stale'] as const) {
+        test(`${provider} records a 91s call with a ${baseline} worker cache`, async (t) => {
+            const { executeWithUsageTracking } = await import('../packages/core/src/agents/impl/utils/usageTrackingWrapper.js');
+            t.mock.timers.enable({ apis: ['Date'], now: 1_000_000 });
+            const key = provider === 'antigravity' ? 'agy' : provider;
+            const alias = `${provider}-primary`;
+            configuredAgents = [agent({ type: provider, alias })];
+            const output = (percent: number) => JSON.stringify({
+                [key]: { name: key, usage: { session: { percent } }, lastUpdated: new Date().toISOString() },
+            });
+            dockerResult.stdout = output(42);
+            if (baseline !== 'cold') await refreshBundledStatuses();
+            if (baseline === 'stale') {
+                // Capacity gauges may accept older data; a per-call baseline
+                // must still obey its own freshness window.
+                process.env.AGENT_TANK_BUNDLED_CACHE_TTL_MS = '300000';
+                t.mock.timers.tick(91_000);
+            }
+            const { result, usageMetrics } = await executeWithUsageTracking(provider, async () => {
+                // Wait for the wrapper's own cold-cache run, including its
+                // dynamic image import, without warming it from another caller.
+                for (let attempt = 0; !getBundledStatusForAlias(alias) && attempt < 100; attempt++) {
+                    await new Promise(resolve => setTimeout(resolve, 1));
+                }
+                assert.ok(getBundledStatusForAlias(alias), 'the wrapper populated its worker cache');
+                await new Promise(resolve => setImmediate(resolve));
+                t.mock.timers.tick(91_000);
+                assert.equal(getBundledStatusForAlias(alias), undefined, 'the baseline has aged out of the shared cache');
+                dockerResult.stdout = output(58);
+                return 'output';
+            }, undefined, alias);
+            assert.equal(result, 'output');
+            assert.deepEqual(usageMetrics?.records, [{ agent: provider, metricKey: 'Session', metricValue: 16 }]);
+            assert.equal(usageMetrics?.postCall.lastUpdated, new Date().toISOString());
+            assert.equal(dockerRuns.length, baseline === 'stale' ? 3 : 2);
+        });
+    }
+}
+
+test('post-call capture waits past an older in-flight refresh and runs again', async () => {
+    const { executeWithUsageTracking } = await import('../packages/core/src/agents/impl/utils/usageTrackingWrapper.js');
+    await refreshBundledStatuses();
+    let release = () => {};
+    let olderRun: Promise<unknown> | undefined;
+    const { usageMetrics } = await executeWithUsageTracking('claude', async () => {
+        await new Promise(resolve => setImmediate(resolve));
+        dockerGate = new Promise<void>(resolve => { release = resolve; });
+        dockerResultQueue = [
+            { ...dockerResult, stdout: JSON.stringify({ claude: { name: 'claude', usage: { session: { percent: 45 } } } }) },
+            { ...dockerResult, stdout: JSON.stringify({ claude: { name: 'claude', usage: { session: { percent: 58 } } } }) },
+        ];
+        olderRun = refreshBundledStatuses({ force: true });
+        await new Promise(resolve => setImmediate(resolve));
+        // Finish this container only after the post-call phase has begun.
+        setImmediate(release);
+        return 'output';
+    });
+    await olderRun;
+    assert.equal(dockerRuns.length, 3);
+    assert.deepEqual(usageMetrics?.records, [{ agent: 'claude', metricKey: 'Session', metricValue: 16 }]);
+});
+
+test('a failed post-call refresh cannot reuse a still-fresh baseline', async () => {
+    const { executeWithUsageTracking } = await import('../packages/core/src/agents/impl/utils/usageTrackingWrapper.js');
+    await refreshBundledStatuses();
+    const { result, usageMetrics } = await executeWithUsageTracking('claude', async () => {
+        await new Promise(resolve => setImmediate(resolve));
+        dockerResult.exitCode = 1;
+        return 'output';
+    });
+    assert.equal(result, 'output');
+    assert.equal(usageMetrics, null);
+    assert.ok(getBundledStatusForAlias('claude'), 'failed refresh retains the capacity cache');
+});
+
+test('the post-call budget includes an older run and starts no deferred run after timeout', async () => {
+    const { executeWithUsageTracking } = await import('../packages/core/src/agents/impl/utils/usageTrackingWrapper.js');
+    process.env.AGENT_TANK_BUNDLED_TIMEOUT_MS = '10';
+    await refreshBundledStatuses();
+    let release = () => {};
+    let olderRun: Promise<unknown> | undefined;
+    const { result, usageMetrics } = await executeWithUsageTracking('claude', async () => {
+        await new Promise(resolve => setImmediate(resolve));
+        dockerGate = new Promise<void>(resolve => { release = resolve; });
+        olderRun = refreshBundledStatuses({ force: true });
+        await new Promise(resolve => setImmediate(resolve));
+        return 'output';
+    });
+    assert.equal(result, 'output');
+    assert.equal(usageMetrics, null);
+    release();
+    await olderRun;
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(dockerRuns.length, 2);
+});
 
 after(async () => {
     const { closeConnection } = await import('../packages/core/src/db/connection.js');

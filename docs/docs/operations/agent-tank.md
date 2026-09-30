@@ -54,7 +54,7 @@ That means:
 - **No networking.** There is no HTTP endpoint and therefore no `localhost` vs `host.docker.internal` mistake to make.
 - **Same credentials as your runs.** Bundled Agent Tank inspects exactly the directories the agents themselves use, so the numbers describe the accounts doing the work. The mounts are read-only, so a usage probe can never modify or corrupt them.
 - **Private provider state.** Claude and Codex receive only a copy of their authentication file in a private, writable container directory. Codex can initialize its SQLite state there; Claude uses Agent Tank’s direct usage API. Host sessions, databases, plugins, and MCP configuration are not copied. Runtime state and credential copies disappear when the refresh container is removed. AGY continues reading its existing read-only mount.
-- **A cached snapshot, not a live daemon.** Starting a container and driving `/usage` through a pseudo-terminal takes time, so ProPR caches the result and refreshes out of band. The per-LLM-call probes only ever read that cache; the sidebar's refresh button forces a fresh run.
+- **A cached snapshot, not a live daemon.** Starting a container and driving `/usage` through a pseudo-terminal takes time, so ProPR caches the result and refreshes out of band. Per-call tracking reuses a fresh baseline or starts a refresh alongside the model call on a cold worker. After the call it awaits a new refresh, bounded by `AGENT_TANK_BUNDLED_TIMEOUT_MS`; the sidebar's refresh button also forces a fresh run.
 
 Enable it with:
 
@@ -143,13 +143,13 @@ Because this is a backend setting rather than a stack container, `propr tank` ta
 - **Per-call usage deltas.** Around each agent run ProPR snapshots usage before and after the call, computes the delta per metric, and stores it next to the [LLM Log](./metrics.md) entry. The task detail context strip shows a compact session/weekly delta chip for the run.
 - **Capacity in your metrics.** Provider capacity pressure becomes a first-class signal alongside cost and cycle time — see [Metrics](./metrics.md).
 
-In bundled mode the deltas come from cached snapshots, so a call that starts and finishes between two refreshes sees the same snapshot twice. ProPR records no usage at all on that call's log entry rather than subtracting a snapshot from itself and reporting a confident 0%.
+In bundled mode a baseline must be fresh when acquired near the start of the call; it does not expire while a long task runs. The post-call snapshot comes from a refresh started after the call finishes. A short call that finishes before its baseline is ready, a failed or timed-out refresh, or unchanged provider data produces no delta rather than a guessed measurement.
 
 {/* SCREENSHOT PLACEHOLDER (P3 — needs a running Agent Tank instance; interim: the site's ui-agent-tank.png): Capture the sidebar Usage section with Agent Tank enabled, showing provider rows (for example Claude and Codex) with colored usage bars and percentages, and one provider expanded to show its session and weekly metrics. Requires a running Agent Tank instance configured in Settings. */}
 
 ## Best-Effort By Design
 
-The integration never blocks a task. If Agent Tank is disabled, unreachable, slow, or — in bundled mode — the agent image is missing or the container fails:
+The integration never delays starting the model call. Returning its result may wait for the bounded post-call usage refresh. If Agent Tank is disabled, unreachable, slow, or — in bundled mode — the agent image is missing or the container fails:
 
 - the pre/post-call usage probes are skipped or time out quietly,
 - the LLM call runs and completes normally with no usage delta recorded, and

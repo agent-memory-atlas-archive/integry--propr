@@ -63,16 +63,20 @@ export {
  *   await refreshAgent('claude');
  *   const status = await getStatus('claude');
  */
-export async function refreshAgent(agent: string, timeoutMs: number = DEFAULT_TIMEOUT_MS): Promise<void> {
+export async function refreshAgent(
+    agent: string,
+    timeoutMs: number = DEFAULT_TIMEOUT_MS,
+    phase?: 'pre-call' | 'post-call',
+): Promise<void> {
     const settings = await loadAgentTankSettings();
     if (settings.mode === 'disabled') return;
     if (settings.mode === 'bundled') {
-        // Bundled refresh means starting a container, which can take a minute.
-        // Callers of refreshAgent (notably the per-LLM-call usage wrapper) run
-        // on a short budget, so we only *schedule* the work here and let the
-        // next read pick up the newer snapshot. Explicit user-driven refreshes
-        // go through the API route, which awaits `refreshBundledStatuses`.
-        scheduleBundledRefresh();
+        if (phase) {
+            const statuses = await refreshBundledStatuses({ phase });
+            if (!statuses) throw new Error('Bundled Agent Tank refresh failed or timed out');
+        } else {
+            scheduleBundledRefresh();
+        }
         return;
     }
     const baseUrl = await getAgentTankBaseUrl();

@@ -1,18 +1,9 @@
 /**
  * Per-call usage deltas in bundled Agent Tank mode.
  *
- * Bundled mode answers both usage probes from a cached snapshot, because a
- * refresh means starting a container and the LLM call must never wait for one.
- * The documented consequence is that "a call that finishes between two refreshes
- * records no delta rather than a guessed one"
- * (docs/docs/operations/agent-tank.md): the two probes return the same snapshot,
- * and subtracting it from itself would record a confident 0% for a call that did
- * consume capacity.
- *
- * These tests drive the real wrapper through the real transport router, mocking
- * only the cached-snapshot reader, so they cover the whole documented chain:
- * `refreshAgent` schedules instead of blocking, `getStatus` reads
- * `getBundledStatusForAlias`, and the wrapper decides what to record.
+ * The real wrapper and transport router use a mocked runner here to exercise
+ * snapshot identity and account provenance. Cold caches, long calls, refresh
+ * boundaries and timeouts are covered with the real runner in its test suite.
  */
 
 import { beforeEach, mock, test } from 'node:test';
@@ -43,13 +34,13 @@ await mock.module('../packages/core/src/config/configManager.js', {
 let cachedSnapshot: Record<string, AgentStatusResponse> | undefined;
 let inspectedAlias = 'claude';
 let scheduledRefreshes = 0;
-let forcedContainerRuns = 0;
+let refreshes = 0;
 
 await mock.module('../packages/core/src/services/agentTankBundledRunner.js', {
     namedExports: {
         getBundledStatusesForDelta: () => cachedSnapshot,
         getBundledStatusForAlias: (alias: string) => alias === inspectedAlias ? Object.values(cachedSnapshot ?? {})[0] : undefined,
-        refreshBundledStatuses: async () => { forcedContainerRuns += 1; return cachedSnapshot; },
+        refreshBundledStatuses: async () => { refreshes += 1; return cachedSnapshot; },
         scheduleBundledRefresh: () => { scheduledRefreshes += 1; },
     },
 });
@@ -84,7 +75,7 @@ beforeEach(() => {
     cachedSnapshot = undefined;
     inspectedAlias = 'claude';
     scheduledRefreshes = 0;
-    forcedContainerRuns = 0;
+    refreshes = 0;
 });
 
 test('a call that sees the same cached snapshot twice records no usage delta', async () => {
@@ -96,10 +87,9 @@ test('a call that sees the same cached snapshot twice records no usage delta', a
     // Not `{ delta: { session: { percent: 0 } } }`: a snapshot subtracted from
     // itself would claim this call consumed nothing.
     assert.equal(usageMetrics, null);
-    // The probes stayed on the hot path's budget: they scheduled the out-of-band
-    // refresh and never forced a container run.
-    assert.equal(scheduledRefreshes, 2);
-    assert.equal(forcedContainerRuns, 0);
+    // Both phases await the runner; neither merely schedules a refresh.
+    assert.equal(scheduledRefreshes, 0);
+    assert.equal(refreshes, 2);
 });
 
 test('a snapshot refreshed during the call records the delta it actually measured', async () => {
@@ -144,14 +134,14 @@ test('a daemon that reports new numbers under an unchanged timestamp is still a 
     assert.equal((usageMetrics?.delta.session as { percent: number }).percent, 7);
 });
 
-test('a cold bundled cache records nothing and still returns the LLM result', async () => {
+test('an unsuccessful bundled refresh records nothing and still returns the LLM result', async () => {
     cachedSnapshot = undefined;
 
     const { result, usageMetrics } = await executeWithUsageTracking('claude', () => shortCall('llm-output'));
 
     assert.equal(result, 'llm-output');
     assert.equal(usageMetrics, null);
-    assert.equal(forcedContainerRuns, 0);
+    assert.equal(refreshes, 1);
 });
 
 for (const provider of ['claude', 'codex', 'antigravity']) {
@@ -163,7 +153,7 @@ for (const provider of ['claude', 'codex', 'antigravity']) {
         }), undefined, `${provider}-secondary`);
         assert.equal(result, 'output');
         assert.equal(usageMetrics, null);
-        assert.equal(forcedContainerRuns, 0);
+        assert.equal(refreshes, 1);
     });
 
     test(`${provider} records usage for its inspected custom alias`, async () => {

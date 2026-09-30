@@ -22,8 +22,8 @@ import { toAgentTankAgent, type AgentStatusResponse } from './agentTankTypes.js'
 
 /**
  * A bundled refresh starts a container and drives interactive `/usage` calls
- * through a PTY, so it is slow by nature. Callers never block on it: the hot
- * path reads `getCachedBundledStatuses()` and a refresh happens out of band.
+ * through a PTY, so it is slow by nature. Capacity reads use the cache; per-call
+ * measurements await a bounded refresh without delaying model execution.
  */
 const DEFAULT_REFRESH_TIMEOUT_MS = 120_000;
 /**
@@ -468,8 +468,34 @@ export function getBundledStatusForAlias(
  * coalescing concurrent callers onto one container run.
  */
 export async function refreshBundledStatuses(
-    options: { force?: boolean } = {}
+    options: { force?: boolean; phase?: 'pre-call' | 'post-call' } = {}
 ): Promise<Record<string, AgentStatusResponse> | undefined> {
+    if (options.phase) {
+        // A run already in flight may have read provider usage before the call
+        // ended. Wait for it, then start a new run for the post-call measurement.
+        // Bound the entire wait, including that earlier run and any bind retries.
+        const precedingRun = inFlight;
+        let expired = false;
+        const refresh = async () => {
+            if (options.phase === 'pre-call') {
+                return getBundledStatusesForDelta() ?? refreshBundledStatuses({ force: true });
+            }
+            if (precedingRun) await precedingRun;
+            if (expired) return undefined;
+            return refreshBundledStatuses({ force: true });
+        };
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        try {
+            return await Promise.race([
+                refresh(),
+                new Promise<undefined>(resolve => {
+                    timer = setTimeout(() => { expired = true; resolve(undefined); }, timeoutMs());
+                }),
+            ]);
+        } finally {
+            clearTimeout(timer);
+        }
+    }
     if (!options.force) {
         const fresh = getCachedBundledStatuses();
         if (fresh) return fresh;
