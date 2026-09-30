@@ -373,8 +373,18 @@ export function createDashboardRoutes(deps: DashboardRoutesDeps) {
       const summaryRequested = req.query.view === 'summary'
         || req.headers?.accept?.includes('application/vnd.propr.outcome-summaries+json');
       const summary = summaryRequested && !['legacy', 'shadow'].includes(process.env.DASHBOARD_OUTCOME_PROJECTION ?? '');
-      const rows = await timeApiStage<OutcomeReadRow[]>('dashboard.outcomes', () =>
-        (summary ? completedRows.summary ?? ((scope, options) => loadOutcomeSummaries(db, scope, options)) : completedRows)(repository, { limit, search }));
+      const rows = await timeApiStage<OutcomeReadRow[]>('dashboard.outcomes', async () => {
+        if (summary) {
+          try {
+            return await (completedRows.summary ?? ((scope, options) => loadOutcomeSummaries(db, scope, options)))(repository, { limit, search });
+          } catch (error) {
+            if (!(error instanceof OutcomeProjectionError) || error.code !== 'OUTCOMES_NOT_READY') throw error;
+            // Startup and rebuilds must keep serving completed work until the
+            // projection is ready. Summary clients also accept embedded history.
+          }
+        }
+        return completedRows(repository, { limit, search });
+      });
       res.json({ repository, limit, search, items: rows.map(toOutcomeItem) });
     } catch (error) {
       if (error instanceof OutcomeProjectionError) {

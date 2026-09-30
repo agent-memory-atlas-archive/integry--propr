@@ -4,7 +4,7 @@ import { createHash } from 'node:crypto';
 import type { Knex } from 'knex';
 import { phaseLabel, RECENT_COMPLETION_WINDOW_HOURS, toIso } from './dashboardQueries.js';
 import { loadDashboardWork, loadRunningDashboardGoals } from './dashboardWorkQueries.js';
-import { loadCompletedRows } from './dashboardOutcomeQueries.js';
+import { loadCompletedRows, OutcomeProjectionError } from './dashboardOutcomeQueries.js';
 import { EMPTY_LIVE_ACTIVITY, MAX_LIVE_DETAIL_LOOKUPS, type LiveActivity } from './dashboardLiveActivity.js';
 
 export type NarrativeModel = () => Promise<{
@@ -115,10 +115,22 @@ export async function collectNarrativeFacts(
       .limit(MAX_LIVE_DETAIL_LOOKUPS)
     : Promise.resolve([]);
 
+  const completedRows: CompletionLoader = options.completedRows ?? ((scope, query) => loadCompletedRows(db, scope, query));
+  const loadCompletions = async () => {
+    if (!['legacy', 'shadow'].includes(process.env.DASHBOARD_OUTCOME_PROJECTION ?? '') && completedRows.summary) {
+      try {
+        return await completedRows.summary(repository, { limit: MAX_NARRATIVE_COMPLETIONS });
+      } catch (error) {
+        if (!(error instanceof OutcomeProjectionError) || error.code !== 'OUTCOMES_NOT_READY') throw error;
+        // Keep recent completion facts available throughout startup and rebuilds.
+      }
+    }
+    return completedRows(repository, { limit: MAX_NARRATIVE_COMPLETIONS });
+  };
+
   const [work, outcomes, plans, goals] = await Promise.all([
     loadDashboardWork(db, repository, { now }),
-    ((!['legacy', 'shadow'].includes(process.env.DASHBOARD_OUTCOME_PROJECTION ?? '') ? options.completedRows?.summary : undefined)
-      ?? options.completedRows ?? ((scope, query) => loadCompletedRows(db, scope, query)))(repository, { limit: MAX_NARRATIVE_COMPLETIONS }),
+    loadCompletions(),
     plansQuery,
     loadRunningDashboardGoals(db, repository, options.ownerId ?? null),
   ]);

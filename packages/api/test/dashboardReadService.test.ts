@@ -5,7 +5,9 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 import knex from 'knex';
 import { startDashboardReadService } from '../services/dashboardReadService.js';
-import { loadCompletedRows, OUTCOME_TABLES } from '../routes/dashboardOutcomeQueries.js';
+import { advanceOutcomeProjection, installOutcomeProjection, loadCompletedRows, loadOutcomeSummaries,
+  OutcomeProjectionError, OUTCOME_TABLES, rebuildOutcomeProjection } from '../routes/dashboardOutcomeQueries.js';
+import { collectNarrativeFacts } from '../routes/dashboardNarrative.js';
 import { createDashboardRoutes } from '../routes/dashboardRoutes.js';
 import { call, createDashboardTestDatabase, seedTask, minutesAgo, NOW } from './dashboardTestHarness.js';
 
@@ -163,4 +165,121 @@ test('outcomes and narrative route their completion reads through the supplied s
       { repository: 'acme/other', limit: 8 },
     ]);
   } finally { await service.close(); await data.close(); }
+});
+
+
+for (const summaryLoader of ['supplied', 'direct'] as const) {
+  test(`summary requests and narrative remain available during backfill and rebuild (${summaryLoader} loader)`, async t => {
+    const previousMode = process.env.DASHBOARD_OUTCOME_PROJECTION;
+    delete process.env.DASHBOARD_OUTCOME_PROJECTION;
+    t.after(() => {
+      if (previousMode === undefined) delete process.env.DASHBOARD_OUTCOME_PROJECTION;
+      else process.env.DASHBOARD_OUTCOME_PROJECTION = previousMode;
+    });
+    const data = await fixture(0);
+    // Advance the projection explicitly to exercise each lifecycle state without
+    // racing a background producer; legacy reads still use the real read worker.
+    const service = await startDashboardReadService(data.db, { projection: false });
+    const legacyCalls: Array<{ repository: string; limit?: number; search?: string }> = [];
+    const legacy = (repository: string, options?: { limit?: number; search?: string }) => {
+      legacyCalls.push({ repository, ...options });
+      return service.load(repository, options);
+    };
+    const completedRows = summaryLoader === 'supplied'
+      ? Object.assign(legacy, { summary: (repository: string, options?: { limit?: number; search?: string }) =>
+        loadOutcomeSummaries(data.db, repository, options) })
+      : legacy;
+    const routes = createDashboardRoutes({ db: data.db, redisClient: {} as never,
+      taskQueue: { isPaused: async () => false, getActiveCount: async () => 0 },
+      liveDetails: async () => null, completedRows, now: () => NOW,
+      narrativeModel: async () => ({ id: 'test', generate: async prompt => {
+        assert.match(prompt, /Shipped the change/);
+        assert.doesNotMatch(prompt, /Outside repository/);
+        return 'Recent work shipped.';
+      } }),
+    });
+    try {
+      await seedTask(data.db, { taskId: 'fallback', title: 'Änderung', states: [
+        { state: 'completed', timestamp: minutesAgo(3) },
+        { state: 'pending', timestamp: minutesAgo(2) },
+        { state: 'completed', timestamp: minutesAgo(1), metadata: { notificationRecap: 'Shipped the change.' } },
+      ] });
+      await seedTask(data.db, { taskId: 'outside', repository: 'other/repo', title: 'Outside repository',
+        states: [{ state: 'completed', timestamp: minutesAgo(0) }] });
+      await seedTask(data.db, { taskId: 'nonmatch', title: 'Unrelated title', issueNumber: 2,
+        states: [{ state: 'completed', timestamp: minutesAgo(0) }] });
+      const query = { repository: 'integry/propr', search: 'ÄNDERUNG', limit: '1' };
+      const expected = await call(routes.getOutcomes, query);
+      const drain = async () => {
+        for (let attempt = 0; attempt < 20; attempt++) if (!await advanceOutcomeProjection(data.db)) return;
+        assert.fail('projection did not drain');
+      };
+      for (const phase of ['absent', 'backfill', 'failed backfill', 'ready', 'rebuild', 'ready again']) {
+        if (phase === 'backfill') {
+          await installOutcomeProjection(data.db);
+          await advanceOutcomeProjection(data.db);
+        }
+        if (phase === 'failed backfill') await data.db(OUTCOME_TABLES.state).update({ failures: 1, error: 'parity mismatch' });
+        if (phase === 'rebuild') await rebuildOutcomeProjection(data.db);
+        if (phase.startsWith('ready')) await drain();
+        const ready = phase.startsWith('ready');
+        const state = phase === 'absent' ? undefined : await data.db(OUTCOME_TABLES.state).first();
+        const dirty = phase === 'absent' ? [] : await data.db(OUTCOME_TABLES.dirty).orderBy('task_id');
+        legacyCalls.length = 0;
+        for (const negotiation of ['accept', 'query']) {
+          const response = await call((req, res) => {
+            if (negotiation === 'accept') req.headers = { accept: 'application/vnd.propr.outcome-summaries+json' };
+            return routes.getOutcomes(req, res);
+          }, { ...query, ...(negotiation === 'query' ? { view: 'summary' } : {}) });
+          assert.equal(response.status, 200, phase);
+          if (!ready) assert.deepEqual(response.body, expected.body, phase);
+          else {
+            const items = response.body.items as Array<Record<string, unknown>>;
+            assert.deepEqual(items.map(item => item.taskId), ['fallback']);
+            assert.equal(items[0].eventCount, 2);
+            assert.equal(items[0].earlierUpdates, undefined);
+            assert.equal(typeof items[0].revision, 'string');
+          }
+        }
+        assert.deepEqual(legacyCalls, ready ? [] : [
+          { repository: query.repository, limit: 1, search: query.search },
+          { repository: query.repository, limit: 1, search: query.search },
+        ], phase);
+        legacyCalls.length = 0;
+        assert.equal((await call(routes.getNarrative, { repository: query.repository, refresh: 'true' })).body.summary, 'Recent work shipped.', phase);
+        assert.deepEqual(legacyCalls, ready && summaryLoader === 'supplied' ? [] : [
+          { repository: query.repository, limit: 8 },
+        ], phase);
+        if (state) {
+          assert.deepEqual(await data.db(OUTCOME_TABLES.state).first(), state, 'fallback does not change projection readiness');
+          assert.deepEqual(await data.db(OUTCOME_TABLES.dirty).orderBy('task_id'), dirty, 'fallback does not acknowledge pending work');
+        }
+      }
+    } finally { await service.close(); await data.close(); }
+  });
+}
+
+test('summary failures other than not-ready do not invoke the legacy fallback', async t => {
+  const previousMode = process.env.DASHBOARD_OUTCOME_PROJECTION;
+  delete process.env.DASHBOARD_OUTCOME_PROJECTION;
+  t.after(() => {
+    if (previousMode === undefined) delete process.env.DASHBOARD_OUTCOME_PROJECTION;
+    else process.env.DASHBOARD_OUTCOME_PROJECTION = previousMode;
+  });
+  t.mock.method(console, 'error', () => undefined);
+  const db = await createDashboardTestDatabase();
+  try {
+    for (const error of [new OutcomeProjectionError(409, 'OUTCOME_HISTORY_STALE'), new Error('read failed')]) {
+      let legacyCalls = 0;
+      const completedRows = Object.assign(async () => { legacyCalls++; return []; }, {
+        summary: async () => { await Promise.resolve(); throw error; },
+      });
+      const routes = createDashboardRoutes({ db, redisClient: {} as never,
+        taskQueue: {} as never, liveDetails: async () => null, completedRows });
+      const response = await call(routes.getOutcomes, { view: 'summary' });
+      assert.equal(response.status, error instanceof OutcomeProjectionError ? 409 : 500);
+      await assert.rejects(collectNarrativeFacts(db, 'all', NOW, { completedRows }), caught => caught === error);
+      assert.equal(legacyCalls, 0);
+    }
+  } finally { await db.destroy(); }
 });
