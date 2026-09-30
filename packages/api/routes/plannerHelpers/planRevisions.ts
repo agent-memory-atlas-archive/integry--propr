@@ -64,6 +64,22 @@ export async function getCurrentPlanCause(db: Knex, draftId: string): Promise<Pl
   return normalizeCause(draft?.plan_cause);
 }
 
+/**
+ * Plan columns written when a refinement run finishes. `plan_cause` records
+ * what created the live plan, so only a run that actually replaced the plan
+ * claims it: an answer or a clarification hands the caller's plan back and
+ * keeps the provenance that plan already had, as does a "modified" result
+ * that is byte-identical to the stored plan.
+ */
+export function refinementPlanUpdates(db: Knex, action: unknown, plan: unknown): Record<string, unknown> {
+  const serializedPlan = JSON.stringify(plan);
+  if (action !== 'modified') return { plan_json: serializedPlan };
+  return {
+    plan_json: serializedPlan,
+    plan_cause: db.raw('CASE WHEN ?? = ? THEN ?? ELSE ? END', ['plan_json', serializedPlan, 'plan_cause', 'refinement']),
+  };
+}
+
 function summarize(row: PlanRevisionRow, currentCause: PlanRevisionCause): PlanRevisionSummary {
   const plan = parsePlan(row.plan_json);
   return {

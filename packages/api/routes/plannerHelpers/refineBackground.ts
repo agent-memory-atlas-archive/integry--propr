@@ -9,6 +9,7 @@ import { Redis } from 'ioredis';
 import { buildPlannerAbortSignalKey, normalizeRefinedPlan, refinePlan, RefinementOutputError, runWithPlannerAbortContext } from '@propr/core';
 import type { Plan } from '@propr/core';
 import { getRefineRepoContext } from './repoSetup.js';
+import { refinementPlanUpdates } from './planRevisions.js';
 
 export interface BackgroundRefinementOptions {
   db: Knex;
@@ -162,8 +163,7 @@ export async function runBackgroundRefinement(
     console.log('[refine] Storing refinement result', { draftId, refinementMeta });
 
     const persisted = await persistActiveRefinement(db, draftId, runId, {
-      plan_json: JSON.stringify(normalized.plan),
-      plan_cause: 'refinement',
+      ...refinementPlanUpdates(db, result.action, normalized.plan),
       refinement_result: JSON.stringify(refinementMeta),
       status: 'review',
     });

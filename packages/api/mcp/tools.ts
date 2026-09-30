@@ -340,7 +340,8 @@ export function createToolCatalog(deps: ToolDeps): McpTool[] {
       if (issues.length === result.issues.length && issues.every(issue => ['under_review', 'merged', 'closed'].includes(issue.status))) receipt.state = 'completed';
     }
     await syncReceiptLifecycle(operations, row, receipt, !!unavailableOutcome);
-    const durableReceipt = operations.project(await operations.get(principal, row.id));
+    const durableRow = await operations.get(principal, row.id);
+    const durableReceipt = operations.project(durableRow);
     receipt.lifecycle = durableReceipt.lifecycle;
     if (unavailableOutcome) {
       // A concurrent poll may have retained exact terminal evidence before the
@@ -349,6 +350,7 @@ export function createToolCatalog(deps: ToolDeps): McpTool[] {
       receipt.result = durableReceipt.result;
       if (durableReceipt.state !== 'unknown') delete receipt.message;
     }
+    reportDurableOutcome(durableRow, receipt);
     if (['accepted', 'posted', 'queued', 'running'].includes(String(receipt.state))) receipt.retryAfterSeconds = 3;
     else delete receipt.retryAfterSeconds;
     return ok(receipt);
@@ -445,12 +447,39 @@ async function syncReceiptLifecycle(
   if (!outcomeUnavailable) await syncLifecycle(operations, row, receipt);
 }
 
+const TERMINAL_LIFECYCLES = ['completed', 'failed', 'cancelled'];
+
+/**
+ * A terminal lifecycle is the receipt's durable outcome, but these receipts
+ * keep `state: 'accepted'` and point at a draft or goal that later operations
+ * can change. A fresh reading of that target may restate the recorded
+ * outcome; it must never replace it with a different one.
+ */
+function mayObserveOutcome(row: Operation, outcome: unknown): boolean {
+  return !TERMINAL_LIFECYCLES.includes(row.lifecycle) || row.lifecycle === outcome;
+}
+
+/**
+ * A receipt that stays `accepted` records its outcome only in the lifecycle,
+ * so the guarded lifecycle write decides how it finished. When this poll read
+ * something else (a concurrent poll settled the receipt before the target
+ * changed), answer with the durable outcome so the top-level state and the
+ * lifecycle cannot disagree. Tracker-owned receipts persist their own state
+ * and are left to the trackers.
+ */
+function reportDurableOutcome(durable: Operation, receipt: Record<string, unknown>): void {
+  if (durable.state !== 'accepted' || !TERMINAL_LIFECYCLES.includes(durable.lifecycle)) return;
+  if (receipt.state === durable.lifecycle) return;
+  receipt.state = durable.lifecycle;
+  delete receipt.message;
+}
+
 // eslint-disable-next-line complexity -- tool-specific terminal evidence is normalized at the receipt boundary
 function updateReceiptState(row: Operation, receipt: Record<string, unknown>): McpErrorEnvelope | undefined {
   const target = receipt.targetState as Record<string, unknown> | undefined;
   if (row.state === 'accepted' && target) {
-    if (row.tool === 'generate_plan' && target.status === 'review') receipt.state = 'completed';
-    if (row.tool === 'generate_plan' && target.status === 'failed') receipt.state = 'failed';
+    if (row.tool === 'generate_plan' && target.status === 'review' && mayObserveOutcome(row, 'completed')) receipt.state = 'completed';
+    if (row.tool === 'generate_plan' && target.status === 'failed' && mayObserveOutcome(row, 'failed')) receipt.state = 'failed';
     if (row.tool === 'refine_plan') {
       let refinement: Record<string, unknown> = {};
       try {
@@ -464,6 +493,7 @@ function updateReceiptState(row: Operation, receipt: Record<string, unknown>): M
       const hasRunIdentity = typeof result.runId === 'string';
       const matchesRun = hasRunIdentity && refinement.runId === result.runId;
       if (matchesRun && target.status === 'review' && refinement.status === 'failed') {
+        if (!mayObserveOutcome(row, 'failed')) return undefined;
         const invalidOutput = refinement.code === 'REFINEMENT_OUTPUT_INVALID';
         const error = {
           code: invalidOutput ? refinement.code : 'REFINEMENT_FAILED',
@@ -477,7 +507,7 @@ function updateReceiptState(row: Operation, receipt: Record<string, unknown>): M
         receipt.targetState = { ...target, status: 'failed', error };
         receipt.result = { ...result, error };
       } else if (matchesRun && target.status === 'review' && (refinement.status === 'completed' || refinement.action)) {
-        receipt.state = 'completed';
+        if (mayObserveOutcome(row, 'completed')) receipt.state = 'completed';
       } else if (!['completed', 'failed', 'cancelled'].includes(row.lifecycle)
         && ((!hasRunIdentity && target.status === 'review')
           || (!matchesRun && hasRunIdentity && typeof refinement.runId === 'string'))) {
@@ -496,7 +526,7 @@ function updateReceiptState(row: Operation, receipt: Record<string, unknown>): M
         return failure;
       }
     }
-    if (row.tool === 'create_goal' && target.result_state) receipt.state = target.result_state;
+    if (row.tool === 'create_goal' && target.result_state && mayObserveOutcome(row, target.result_state)) receipt.state = target.result_state;
   }
   return undefined;
 }

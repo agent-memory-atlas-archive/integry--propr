@@ -7,6 +7,7 @@ import { Knex } from 'knex';
 import { generateCorrelationId, normalizeRefinedPlan, RefinementOutputError } from '@propr/core';
 import type { OwnershipResult } from '../types.js';
 import { getRefineRepoContext } from '../repoSetup.js';
+import { refinementPlanUpdates } from '../planRevisions.js';
 
 interface AbortGenerationDeps {
   db: Knex;
@@ -115,8 +116,7 @@ export function createRefineHandler(deps: RefineDeps) {
           };
 
           await deps.db('task_drafts').where({ draft_id: draftId }).update({
-            plan_json: JSON.stringify(normalized.plan),
-            plan_cause: 'refinement',
+            ...refinementPlanUpdates(deps.db, result.action, normalized.plan),
             refinement_result: JSON.stringify(refinementMeta),
             status: 'review',
             updated_at: deps.db.fn.now()

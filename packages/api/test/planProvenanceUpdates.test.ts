@@ -5,7 +5,8 @@ import knex, { type Knex } from 'knex';
 import { closeConnection } from '@propr/core';
 import { createToolCatalog, type ToolDeps } from '../mcp/tools.js';
 import { createPlannerRoutes } from '../routes/plannerRoutes.js';
-import { listPlanRevisions, restorePlanRevision } from '../routes/plannerHelpers/planRevisions.js';
+import { getCurrentPlanCause, listPlanRevisions, restorePlanRevision } from '../routes/plannerHelpers/planRevisions.js';
+import { runBackgroundRefinement } from '../routes/plannerHelpers/refineBackground.js';
 import type { McpPolicy, McpPrincipal } from '../mcp/policy.js';
 
 after(async () => closeConnection());
@@ -91,3 +92,51 @@ for (const cause of ['generation', 'refinement', 'restore'] as const) {
     assert.equal((await draft(db)).plan_cause, 'manual_edit');
   });
 }
+
+async function refineInBackground(db: Knex, currentPlan: string, result: { action: string; plan: unknown }): Promise<void> {
+  const runId = `refinement-${result.action}`;
+  await setDraft(db, { status: 'refining', refinement_result: JSON.stringify({ status: 'in_progress', runId }) });
+  await runBackgroundRefinement({ db, draftId, currentPlan: JSON.parse(currentPlan), instruction: 'How does this work?',
+    generationModel: 'test-model', correlationId: runId, accessToken: 'token', runId }, {
+    checkAborted: async () => false,
+    getRepoContext: async () => ({ worktreePath: '/tmp/worktree', repository: 'acme/repo', authToken: 'token' }),
+    refine: async () => ({ summary: 'Refinement finished.', model: 'test-model', ...result }) as never,
+  });
+  const refined = await draft(db);
+  assert.equal(refined.status, 'review');
+  assert.equal(JSON.parse(refined.refinement_result).action, result.action);
+}
+
+for (const action of ['answered', 'clarify'] as const) {
+  test(`a refinement that only ${action === 'answered' ? 'answers' : 'asks for clarification'} keeps generation provenance in the history`, async t => {
+    t.mock.method(console, 'log', () => undefined);
+    const db = await setup(t);
+    const generated = plan('A1', 'A2', 'A3', 'A4');
+    await setDraft(db, { plan_cause: 'generation' });
+
+    await refineInBackground(db, generated, { action, plan: JSON.parse(plan('Unrequested')) });
+    assert.equal((await draft(db)).plan_json, generated);
+    assert.equal((await draft(db)).plan_cause, 'generation');
+    assert.equal(await getCurrentPlanCause(db, draftId), 'generation');
+    assert.deepEqual(await listPlanRevisions(db, draftId), [], 'the preserved plan does not create a snapshot');
+
+    await setDraft(db, { plan_json: plan('Edited later'), plan_cause: 'manual_edit' });
+    const [snapshot] = await listPlanRevisions(db, draftId);
+    assert.deepEqual(snapshot.titles, ['A1', 'A2', 'A3', 'A4']);
+    assert.equal(snapshot.cause, 'generation', 'the generated plan is not recorded as a refined version');
+  });
+}
+
+test('a refinement that replaces the plan records refinement provenance for the new plan only', async t => {
+  t.mock.method(console, 'log', () => undefined);
+  const db = await setup(t);
+  await setDraft(db, { plan_cause: 'generation' });
+
+  await refineInBackground(db, plan('A1', 'A2', 'A3', 'A4'), { action: 'modified', plan: JSON.parse(plan('B1', 'B2')) });
+  assert.equal((await draft(db)).plan_json, plan('B1', 'B2'));
+  assert.equal((await draft(db)).plan_cause, 'refinement');
+  const [snapshot] = await listPlanRevisions(db, draftId);
+  assert.deepEqual(snapshot.titles, ['A1', 'A2', 'A3', 'A4']);
+  assert.equal(snapshot.cause, 'generation');
+  assert.equal(snapshot.currentCause, 'refinement');
+});

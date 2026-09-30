@@ -535,6 +535,129 @@ test('get_operation preserves terminal refinement evidence after a later run rep
   assert.equal(retained.retryAfterSeconds, undefined);
 });
 
+for (const [firstOutcome, laterOutcome] of [['completed', 'failed'], ['failed', 'completed']] as const) {
+  test(`get_operation keeps a ${firstOutcome} generation receipt when a later generation of the same draft is ${laterOutcome}`, async t => {
+    const db = knex({ client: 'better-sqlite3', connection: { filename: ':memory:' }, useNullAsDefault: true });
+    t.after(() => db.destroy());
+    await db.schema.createTable('task_drafts', table => {
+      table.string('draft_id').primary(); table.string('user_id'); table.string('repository');
+      table.string('status'); table.boolean('paused');
+    });
+    await up(db);
+    await lifecycleMigration(db);
+    const draftStatus = { completed: 'review', failed: 'failed' } as const;
+    const principal = { user: { id: 'alice' }, grant: { id: 'grant-a' } } as McpPrincipal;
+    const operations = new McpOperations(db);
+    const args = { idempotencyKey: `generation-${firstOutcome}-first` };
+    const receipt = await operations.run(principal, { tool: 'generate_plan', args, repository: 'acme/repo' },
+      async () => ({ status: 202, data: { planId: 'plan-regenerated', runId: 'generation-run-a' } }));
+    await db('task_drafts').insert({ draft_id: 'plan-regenerated', user_id: 'alice', repository: 'acme/repo',
+      status: draftStatus[firstOutcome], paused: false });
+    const deps = { db, policy: { repository: async () => {}, requirePermission: () => {}, config: {} } as never,
+      taskQueue: {} as never, redisClient: {} as never, runtimeBuildQueue: {} as never } as ToolDeps;
+    const catalog = createToolCatalog(deps);
+    const get = catalog.find(tool => tool.name === 'get_operation')!;
+    const list = catalog.find(tool => tool.name === 'list_operations')!;
+    const poll = async () => (await get.run({ principal, args: get.schema.parse({ operationId: receipt.operationId }) })).data as Record<string, any>; // eslint-disable-line @typescript-eslint/no-explicit-any
+
+    const settled = await poll();
+    assert.equal(settled.state, firstOutcome);
+    assert.equal(settled.lifecycle.state, firstOutcome);
+    // Only the lifecycle is persisted; the stored state still reads as accepted.
+    assert.deepEqual(await db('mcp_operations').where({ id: receipt.operationId }).first('state', 'lifecycle'),
+      { state: 'accepted', lifecycle: firstOutcome });
+
+    for (const status of ['generating', draftStatus[laterOutcome]]) {
+      await db('task_drafts').where({ draft_id: 'plan-regenerated' }).update({ status });
+      const retained = await poll();
+      assert.equal(retained.state, firstOutcome, `the receipt outcome survives the draft becoming ${status}`);
+      assert.equal(retained.lifecycle.state, firstOutcome);
+      assert.equal(retained.lifecycle.finishedAt, settled.lifecycle.finishedAt);
+      assert.deepEqual(retained.lifecycle.failure, settled.lifecycle.failure);
+      assert.equal(retained.retryAfterSeconds, undefined);
+      assert.equal(retained.targetState.status, status, 'the current draft status remains visible as context');
+    }
+
+    const replay = await operations.replay(principal, 'generate_plan', args);
+    assert.equal(replay?.state, firstOutcome);
+    const listed = (await list.run({ principal, args: list.schema.parse({}) })).data as { operations: Array<Record<string, unknown>> };
+    assert.equal(listed.operations[0].state, firstOutcome);
+  });
+}
+
+test('get_operation reports the durable outcome when a concurrent poll settles the receipt before the draft changes', async t => {
+  const db = knex({ client: 'better-sqlite3', connection: { filename: ':memory:' }, useNullAsDefault: true });
+  t.after(() => db.destroy());
+  await db.schema.createTable('task_drafts', table => {
+    table.string('draft_id').primary(); table.string('user_id'); table.string('repository');
+    table.string('status'); table.boolean('paused');
+  });
+  await up(db);
+  await lifecycleMigration(db);
+  const principal = { user: { id: 'alice' }, grant: { id: 'grant-a' } } as McpPrincipal;
+  const operations = new McpOperations(db);
+  const receipt = await operations.run(principal, {
+    tool: 'generate_plan', args: { idempotencyKey: 'generation-concurrent-polls' }, repository: 'acme/repo',
+  }, async () => ({ status: 202, data: { planId: 'plan-concurrent-polls', runId: 'generation-run-a' } }));
+  await db('task_drafts').insert({ draft_id: 'plan-concurrent-polls', user_id: 'alice', repository: 'acme/repo',
+    status: 'review', paused: false });
+
+  // Repository authorization runs after a poll has read its receipt row and
+  // before it reads the draft, which is where another poll can interleave.
+  let interleave: (() => Promise<void>) | undefined;
+  const deps = { db, policy: { repository: async () => { const run = interleave; interleave = undefined; await run?.(); },
+    requirePermission: () => {}, config: {} } as never,
+    taskQueue: {} as never, redisClient: {} as never, runtimeBuildQueue: {} as never } as ToolDeps;
+  const get = createToolCatalog(deps).find(tool => tool.name === 'get_operation')!;
+  const poll = async () => (await get.run({ principal, args: get.schema.parse({ operationId: receipt.operationId }) })).data as Record<string, any>; // eslint-disable-line @typescript-eslint/no-explicit-any
+
+  interleave = async () => {
+    const winner = await poll();
+    assert.equal(winner.state, 'completed');
+    await db('task_drafts').where({ draft_id: 'plan-concurrent-polls' }).update({ status: 'failed' });
+  };
+  const stale = await poll();
+  assert.equal(interleave, undefined, 'the concurrent poll ran inside the stale poll');
+  assert.equal(stale.state, 'completed');
+  assert.equal(stale.lifecycle.state, 'completed');
+  assert.equal(stale.lifecycle.failure, null);
+  assert.equal(stale.retryAfterSeconds, undefined);
+});
+
+test('get_operation keeps a failed goal receipt after the goal is resumed and completes', async t => {
+  const db = knex({ client: 'better-sqlite3', connection: { filename: ':memory:' }, useNullAsDefault: true });
+  t.after(() => db.destroy());
+  await db.schema.createTable('task_drafts', table => table.string('draft_id').primary());
+  await db.schema.createTable('goals', table => {
+    table.string('goal_id').primary(); table.string('owner_id'); table.string('repository');
+    table.string('desired_state'); table.string('result_state'); table.string('current_task_id');
+    table.integer('final_pr_number'); table.text('failure_reason');
+  });
+  await up(db);
+  await lifecycleMigration(db);
+  const principal = { user: { id: 'alice' }, grant: { id: 'grant-a' } } as McpPrincipal;
+  const operations = new McpOperations(db);
+  const receipt = await operations.run(principal, { tool: 'create_goal', args: { idempotencyKey: 'resumed-goal-1' }, repository: 'acme/repo' },
+    async () => ({ status: 202, data: { state: 'accepted', continuation: { goalId: 'goal-resumed-1' } } }));
+  await db('goals').insert({ goal_id: 'goal-resumed-1', owner_id: 'alice', repository: 'acme/repo', desired_state: 'running',
+    result_state: 'failed', failure_reason: 'Provider exhausted its retry budget' });
+  const deps = { db, policy: { repository: async () => {}, requirePermission: () => {}, config: {} } as never,
+    taskQueue: {} as never, redisClient: {} as never, runtimeBuildQueue: {} as never } as ToolDeps;
+  const get = createToolCatalog(deps).find(tool => tool.name === 'get_operation')!;
+  const poll = async () => (await get.run({ principal, args: get.schema.parse({ operationId: receipt.operationId }) })).data as Record<string, any>; // eslint-disable-line @typescript-eslint/no-explicit-any
+
+  const failed = await poll();
+  assert.equal(failed.state, 'failed');
+  assert.equal(failed.lifecycle.state, 'failed');
+
+  await db('goals').where({ goal_id: 'goal-resumed-1' }).update({ result_state: 'completed', failure_reason: null });
+  const retained = await poll();
+  assert.equal(retained.state, 'failed');
+  assert.equal(retained.lifecycle.state, 'failed');
+  assert.equal(retained.lifecycle.failure.message, 'Provider exhausted its retry budget');
+  assert.equal(retained.targetState.result_state, 'completed');
+});
+
 test('replay recovers terminal lifecycle, artifacts and failure from durable receipts', async t => {
   const db = knex({ client: 'better-sqlite3', connection: { filename: ':memory:' }, useNullAsDefault: true });
   t.after(() => db.destroy());

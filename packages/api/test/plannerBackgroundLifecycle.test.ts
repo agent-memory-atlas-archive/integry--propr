@@ -361,6 +361,7 @@ describe('planner background abort reconciliation', () => {
       draft_id: draftId,
       status: 'refining',
       plan_json: JSON.stringify(currentPlan),
+      plan_cause: 'generation',
       refinement_result: JSON.stringify({ status: 'in_progress', runId }),
     });
 
@@ -392,6 +393,31 @@ describe('planner background abort reconciliation', () => {
     assert.equal(plan[1].body, 'Second body\n\nMore');
     assert.equal(metadata.merged, true);
     assert.match(metadata.summary, /^Applied 2 edits to the existing plan\./);
+    assert.equal(current.plan_cause, 'refinement', 'a saved refined plan records refinement provenance');
+  });
+
+  test('keeps the existing provenance when a modified result equals the stored plan', async t => {
+    t.mock.method(console, 'log', () => undefined);
+    const draftId = 'refinement-identical-output';
+    const runId = 'refinement-run-identical-output';
+    const currentPlan = [{ title: 'Keep me', body: 'Complete body', implementation: 'Complete implementation' }];
+    await database('task_drafts').insert({
+      draft_id: draftId, status: 'refining', plan_json: JSON.stringify(currentPlan), plan_cause: 'restore',
+      refinement_result: JSON.stringify({ status: 'in_progress', runId }),
+    });
+
+    await runBackgroundRefinement({ db: database, draftId, currentPlan, instruction: 'Tidy up',
+      generationModel: 'test-model', correlationId: runId, accessToken: 'token', runId }, {
+      checkAborted: async () => false,
+      getRepoContext: async () => ({ worktreePath: '/tmp/worktree', repository: 'owner/repo', authToken: 'token' }),
+      refine: async () => ({ action: 'modified', summary: 'Nothing needed changing.', model: 'test-model',
+        plan: currentPlan }) as never,
+    });
+
+    const current = await database('task_drafts').where({ draft_id: draftId }).first();
+    assert.equal(JSON.parse(current.refinement_result).status, 'completed');
+    assert.equal(current.plan_json, JSON.stringify(currentPlan));
+    assert.equal(current.plan_cause, 'restore');
   });
 
   test('commits generation completion only for the matching active run snapshot', async () => {
@@ -479,7 +505,7 @@ for (const action of ['answered', 'clarify'] as const) {
     const draftId = `incomplete-${action}`;
     const runId = `run-${action}`;
     const currentPlan = [{ title: 'Add metrics', body: 'Emit counters' }];
-    await database('task_drafts').insert({ draft_id: draftId, status: 'refining',
+    await database('task_drafts').insert({ draft_id: draftId, status: 'refining', plan_cause: 'generation',
       plan_json: JSON.stringify(currentPlan), refinement_result: JSON.stringify({ status: 'in_progress', runId }) });
     await runBackgroundRefinement({ db: database, draftId, currentPlan, instruction: 'How?',
       generationModel: 'test-model', correlationId: runId, accessToken: 'token', runId }, {
@@ -495,6 +521,28 @@ for (const action of ['answered', 'clarify'] as const) {
     const meta = JSON.parse(current.refinement_result);
     assert.equal(meta.status, 'completed');
     assert.equal(meta.action, action);
+    assert.equal(current.plan_cause, 'generation', 'a preserved plan keeps the cause that created it');
+  });
+
+  test(`${action} in background keeps provenance when the caller's copy of the plan is saved`, async t => {
+    t.mock.method(console, 'log', () => undefined);
+    const draftId = `client-copy-${action}`;
+    const runId = `run-client-copy-${action}`;
+    const storedPlan = [{ title: 'Add metrics', body: 'Emit counters', implementation: 'Use the registry' }];
+    // The editor sends its in-memory copy, which carries client-side task ids.
+    const currentPlan = storedPlan.map((task, index) => ({ ...task, id: `task-${index}` }));
+    await database('task_drafts').insert({ draft_id: draftId, status: 'refining', plan_cause: 'generation',
+      plan_json: JSON.stringify(storedPlan), refinement_result: JSON.stringify({ status: 'in_progress', runId }) });
+    await runBackgroundRefinement({ db: database, draftId, currentPlan: currentPlan as never, instruction: 'How?',
+      generationModel: 'test-model', correlationId: runId, accessToken: 'token', runId }, {
+      checkAborted: async () => false,
+      getRepoContext: async () => ({ worktreePath: '/tmp/worktree', repository: 'owner/repo', authToken: 'token' }),
+      refine: async () => ({ action, summary: 'Use a counter.', model: 'test-model', plan: currentPlan }) as never,
+    });
+    const current = await database('task_drafts').where({ draft_id: draftId }).first();
+    assert.deepEqual(JSON.parse(current.plan_json), currentPlan);
+    assert.equal(JSON.parse(current.refinement_result).action, action);
+    assert.equal(current.plan_cause, 'generation');
   });
 }
 
@@ -503,7 +551,8 @@ for (const action of ['answered', 'clarify'] as const) {
   test(`${action} in the legacy handler preserves incomplete current tasks`, async () => {
     const draftId = `legacy-${action}`;
     const currentPlan = [{ title: 'Add metrics', body: 'Emit counters' }];
-    await database('task_drafts').insert({ draft_id: draftId, status: 'review', plan_json: JSON.stringify(currentPlan) });
+    await database('task_drafts').insert({ draft_id: draftId, status: 'review', plan_cause: 'generation',
+      plan_json: JSON.stringify(currentPlan) });
     const handler = createRefineHandler({ db: database, verifyOwnership: async () => ({ authorized: true }),
       refinePlan: async () => ({ action, summary: 'Use a counter.', plan: [{ title: 'Unrequested change' }] }) });
     let resolve!: () => void;
@@ -521,5 +570,32 @@ for (const action of ['answered', 'clarify'] as const) {
     assert.deepEqual(JSON.parse(current.plan_json), currentPlan);
     assert.equal(JSON.parse(current.refinement_result).action, action);
     assert.equal(JSON.parse(current.refinement_result).error, undefined);
+    assert.equal(current.plan_cause, 'generation', 'a preserved plan keeps the cause that created it');
   });
 }
+
+test('modified in the legacy handler records refinement provenance for the saved plan', async t => {
+  t.mock.method(console, 'log', () => undefined);
+  const draftId = 'legacy-modified';
+  const currentPlan = [{ title: 'Add metrics', body: 'Emit counters', implementation: 'Use the registry' }];
+  const refinedPlan = [{ title: 'Add metrics', body: 'Emit counters and gauges', implementation: 'Use the registry' }];
+  await database('task_drafts').insert({ draft_id: draftId, status: 'review', plan_cause: 'generation',
+    plan_json: JSON.stringify(currentPlan) });
+  const handler = createRefineHandler({ db: database, verifyOwnership: async () => ({ authorized: true }),
+    refinePlan: async () => ({ action: 'modified', summary: 'Added gauges.', plan: refinedPlan }) });
+  let resolve!: () => void;
+  const saved = new Promise<void>(done => { resolve = done; });
+  const onQuery = (_response: unknown, query: { sql: string; bindings: unknown[] }) => {
+    if (query.sql.startsWith('update `task_drafts`') && query.bindings.includes('review')) resolve();
+  };
+  database.on('query-response', onQuery);
+  try {
+    const response = { status: () => response, json: () => response };
+    await handler({ body: { draftId, plan: currentPlan, instruction: 'Add gauges' }, user: { id: 'user' } } as never, response as never);
+    await saved;
+  } finally { database.off('query-response', onQuery); }
+  const current = await database('task_drafts').where({ draft_id: draftId }).first();
+  assert.deepEqual(JSON.parse(current.plan_json), refinedPlan);
+  assert.equal(JSON.parse(current.refinement_result).action, 'modified');
+  assert.equal(current.plan_cause, 'refinement');
+});
