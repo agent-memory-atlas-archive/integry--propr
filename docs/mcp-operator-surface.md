@@ -1,6 +1,6 @@
-# MCP operator surface (epic scaffold)
+# MCP operator surface
 
-This epic branch aggregates the work that turns ProPR's MCP server from a
+This page summarizes the work that turns ProPR's MCP server from a
 per-object read/write catalog into a surface an operator's connected agent can
 actually run an instance from.
 
@@ -37,9 +37,7 @@ The delivered capabilities are:
    persisted and environment-owned values, while `find_setting` explains each
    setting's UI, MCP, CLI or environment location and access requirements.
 
-Each capability lands as its own pull request against this branch. The
-authoritative capability mapping is `docs/mcp-coverage.md` and the operator
-walkthrough is `docs/mcp.md`; both were reconciled against the shipped code in
-`packages/api/mcp/` on 2026-09-30. The operator flow remains covered by
+The authoritative capability mapping is `docs/mcp-coverage.md` and the operator
+walkthrough is `docs/mcp.md`. The operator flow remains covered by
 `packages/api/test/mcpOperatorSurface.test.ts`; the combined observable contract
 is covered by `packages/api/test/mcpObservableSurface.test.ts`.

@@ -5,12 +5,8 @@ modules. `tools/list` filters capabilities by the authenticated grant and
 current administrator permissions. All listed tools have implementations;
 there is no generic REST or shell execution tool.
 
-Core [PR #2291](https://github.com/integry/propr/pull/2291) remains the coordinating
-epic for [routing PR #180](https://github.com/integry/propr-routing/pull/180) and
-[site PR #90](https://github.com/integry/propr-site/pull/90). Routing PR #180 is merged at `1fcf82fd1a843fbdf199d79b8f92843dc74a89e0`.
 The catalog covers the supported backend workflows below, including non-secret
-configuration. Live provider/host acceptance and independent root verification
-remain separate gates.
+configuration. Live provider and chat-host acceptance are separate from this catalog.
 
 ## Product-operation mapping
 
@@ -136,8 +132,7 @@ settings that are intentionally browser-only or environment-only.
   implementation → followup → review/fix → guarded merge. Local tests do not
   provision Docker agents, spend provider credits or merge real PRs.
 - [ ] Live GitHub login, ChatGPT/Claude OAuth and host voice sessions.
-- [x] Companion PRs linked above; pinned routing/core integration runs locally.
-- [ ] Final site capability reconciliation and root verification of both companion heads.
+- [x] Paired Connect gateway/core integration runs locally against an authorized routing checkout.
 - [ ] Live tunnel unavailability/version mismatch/cancellation/streaming
   verification against the deployed gateway. The expected mapping is in
   `mcp-connect-contract.md`; the gateway is not part of this checkout.
@@ -193,110 +188,7 @@ target. They are never reported as rolled back or blindly retried. In
 particular, a partly published plan remains busy with persisted created issue
 links. Cancelling a receipt cannot undo already published issues or comments.
 
-## Prior Connect integration follow-up evidence (at 6147abc)
-
-Run on 2026-09-10 with Node **v22.23.1**. Source identities:
-
-- Core base: `ec8043b1ebc29d9a024476990895241c1256c1e4`, plus this **uncommitted**
-  PR #2291 follow-up. The system owns the eventual commit.
-- Core implementation/fixture SHA-256 reported by the runner:
-  `ac4c403ac844fb0c3ed47025b347b34a615016908dfca285edbf622fce44a89b`.
-  The runner defines and reports the hashed source set; this identifies the
-  working implementation without pretending the old commit contains these fixes.
-- Routing archive: `0c8ca02044c88b181395ca8e15425c0821e588e4`, unmodified source.
-- Published SDKs actually loaded: server/node/client **2.0.0**, legacy SDK
-  **1.30.0**. Routing dependencies come from that archive's lockfile.
-
-Exact commands and final results:
-
-```sh
-MCP_ROUTING_REPOSITORY=/tmp/git-processor/clones/integry/propr-routing npm run test:mcp:connect
-# 1 integration scenario passed, 0 failed, 0 skipped (4.664 s test process).
-
-npm run test:mcp
-# 12 passed, 0 failed, 0 skipped.
-
-MCP_CAPTURE_PREVIEWS=true npm run test:mcp:browser
-# 1 passed, 0 failed, 0 skipped; Chromium desktop/mobile consent captures.
-
-node scripts/run-test-suite.mjs packages/api/test/connectAuth.test.ts packages/api/test/authGithubTokens.test.ts packages/api/test/instanceAuthorization.test.ts packages/api/test/routeAuthorization.test.ts packages/api/test/oauthState.test.ts
-# 5 files, 45 tests passed; 0 failed (12.2 s).
-
-npm run typecheck
-npm run typecheck -w @propr/api
-npm run build
-# All passed.
-
-npx eslint --config packages/api/eslint.config.js packages/api/mcp/connect.ts packages/api/mcp/config.ts packages/api/mcp/policy.ts packages/api/mcp/oauth.ts packages/api/mcp/browser.ts packages/api/mcp/clients.ts packages/api/mcp/server.ts packages/api/mcp/tools.ts packages/api/test/mcpConnectIntegration.test.ts packages/api/test/fixtures/routingD1.ts packages/api/test/mcpOAuth.test.ts packages/api/test/mcpOperations.test.ts packages/api/test/mcpDelegation.test.ts packages/api/test/mcpBrowser.test.ts scripts/mcp-connect-register.ts
-# 0 errors, 9 complexity/parameter-count/nesting warnings.
-```
-
-For another operator, replace `MCP_ROUTING_REPOSITORY` with their routing Git
-checkout containing the pinned commit. The runner makes a temporary Git archive,
-installs with `npm ci --ignore-scripts --workspaces=false --no-audit --no-fund`,
-and bundles `src/index.ts`, including the real relay authenticator, OAuth
-server, MCP gateway and existing credential redemption endpoint. It prints
-source identities and retains a `commits.json` in its temporary fixture directory.
-The generic test runner skips the dedicated cross-repository case without its
-fixture environment. Required PR CI now invokes the dedicated runner explicitly
-as described below; that invocation cannot skip. The historical run had no skips.
-
-The integration traverses actual production core `mountMcp`, `McpPolicy`,
-`McpConnect`, `McpOAuthProvider`, tool catalog, plan handler, operation ledger,
-resource and prompt implementations. Both public SDK clients reach core through
-routing. There is no replacement policy, synthetic core principal, or invented
-MCP gateway. The only infrastructure adapters are routing's existing unused
-DurableObject base stub, a D1 API adapter executing the actual routing schema/SQL
-and transactional batches on SQLite, local tunnel DNS mapping to core's HTTP
-listener, and canned GitHub `/user`/repository responses. Unrecognized network
-requests fail. Core uses a temporary SQLite file and real relevant migrations;
-a second connection reopens it to verify persisted drafts.
-
-Passing assertions cover:
-
-- Persisted key creation and repeat registration through core's actual operator
-  setup function; current tunnel/installation binding, wrong relay/tunnel denial,
-  encrypted private-key storage and one-use registration assertions.
-- Public discovery of all scopes; DCR, S256 PKCE/consent, bad verifier and code
-  replay rejection; granted subsets and no GitHub credentials in public tokens.
-- Both SDK eras: tool/resource/prompt discovery, actual `get_connection`,
-  `create_plan`, duplicate mutation receipts, plan resource reads and prompts;
-  two persisted core draft mutations, no provider work or GitHub publication.
-- Exact claim types/audience/resource/key binding, online validation on each
-  invocation, proof hash/audience/freshness, `pia_mcp_` issuance and real atomic
-  redemption; encrypted core storage, consumed-code denial and renewal of a
-  stale stored GitHub credential after browser consent.
-- Wrong signed instance/installation/key/scope/repository, wrong proof key/hash,
-  untrusted resource hint, malformed/discrepant validation responses, online
-  service outage, tunnel outage, version mismatch, core malformed-JSON response
-  marking, and both SDKs' real notification/transport behavior.
-- Current local membership removal, Connect membership removal, public and
-  direct-to-core revocation denial, and non-revival after membership restoration,
-  tunnel deletion/restoration or registration key replacement/restoration.
-- Separate direct tests preserve independent OAuth/GitHub refresh, reject CIMD
-  malformed arrays/preferences, support plural/legacy/omitted public-method
-  metadata, and reject assertions, code-scope overrides and refresh escalation.
-  The browser test selects read-only access and rejects forged consent escalation.
-
-The first paired run exposed an additional real incompatibility: empty legacy
-202 notifications lacked a content type and became an incompatible body stream
-at the gateway. Core now marks them JSON; the final paired test passes unchanged
-routing code. No routing implementation change is needed for this pinned gate.
-The exact documentation follow-up for root to dispatch is recorded at the end
-of [the contract](mcp-connect-contract.md).
-
-This evidence is local integration, not Cloudflare runtime/deployment, real
-GitHub login, live host OAuth, real provider/Docker execution, or complete chat
-coverage. Routing's own Workers-runtime suite and root's independent full-chat
-coverage review remain complementary gates. Site PR #90 still needs capability
-reconciliation. Attempts to refresh current companion PR metadata with
-`gh pr view 180 --repo integry/propr-routing --json number,state,headRefOid,url`
-and the corresponding site PR #90 command returned **HTTP 401**; the linked PRs
-and pinned routing commit came from the supplied request and local Git objects.
-No production configuration was altered; no provider credits were spent; no
-real target was merged; no new companion task, PR, commit or deployment was made.
-
-## Full-chat follow-up verification and required CI
+## Verification in CI
 
 The public core repository's required `Build & Lint Check` → `Validate Changes`
 job builds shared/core/CLI dependencies, installs Playwright Chromium, and runs
@@ -306,65 +198,30 @@ identity, concurrency, and real TLS browser consent/revocation. Any failure
 fails the existing required job; missing Chromium is a failure, not a skip.
 They require no private checkout, extra token, or permission change.
 
-**Core CI is not paired gateway coverage.** Actual cross-repository paired CI
-belongs in the **private** routing repository (companion
-[routing issue #186](https://github.com/integry/propr-routing/issues/186), delegated
-separately by root). Its existing `GITHUB_TOKEN` can check out routing and the
-public core commit. The private job must check out the exact core candidate SHA,
-pass its routing candidate's full SHA as `MCP_ROUTING_REVISION`, and run core's
-unchanged actual Worker/core harness with `MCP_ROUTING_REPOSITORY` pointing to
-that authorized checkout. Do not upload its private source archive/bundle to
-core or vendor routing implementation into this public repository.
-
-Before merging either companion change, root must require passing **private
-paired evidence for both exact candidate commits**, plus core's required checks
-and hosted CodeQL on the system-generated core commit. A local paired pass or
-core-only CI pass does not satisfy that private CI gate. This task does not
-implement or claim completion of the separately delegated routing workflow.
-
-Manual verification defaults to routing's merged implementation at
-`1fcf82fd1a843fbdf199d79b8f92843dc74a89e0`. An explicit full lowercase 40-character
-`MCP_ROUTING_REVISION` overrides it; abbreviations, refs, revision expressions,
-missing objects and non-commit objects are rejected before extraction/install.
-The harness verifies exact commit identity, disables Git replacement objects,
-archives that commit locally, installs its own dependency lockfile and reports
-`routingHead`, its lockfile SHA-256, `coreHead`, the core implementation digest
-and SDK versions. The archive is temporary private runtime data, never a public
-artifact. To refresh manual verification, fetch an authorized routing checkout,
-select the reviewed full SHA, run the paired command and record both identities
-and its result. Update the default pin only after merged routing evidence is
-reviewed; private candidate CI must always pass its candidate explicitly.
+Paired gateway coverage runs against the separately maintained Connect routing service and is not
+part of core CI.
 
 For local paired verification:
 
 ```sh
 npm run test:prepare
 npm run test:mcp
-MCP_ROUTING_REPOSITORY=/path/to/propr-routing npm run test:mcp:connect
+MCP_ROUTING_REPOSITORY=/path/to/routing-checkout npm run test:mcp:connect  # requires an authorized routing checkout
 npx playwright install --with-deps chromium
 npm run test:mcp:browser
 npm run build
 npm run typecheck -w @propr/api
 ```
 
-The new concurrency regression pauses an MCP adapter after loading its snapshot,
+The concurrency regression pauses an MCP adapter after loading its snapshot,
 lets a second repository/agent mutation persist, then resumes the first and
 verifies a conflict plus preservation of the second edit. Workflow regressions
 keep the original task completed while the new task advances, exercise queue
 uncertainty/failure, and persist posted reviews/F# findings before selecting and
 observing a fix. No live agent credits, merges, deployments or permission changes
-are part of these tests. Root still owns independent verification and merge.
+are part of these tests.
 
-Historical local verification of the preceding follow-up (2026-09-10): 13 MCP tests,
-the paired Connect scenario and Chromium consent test passed without skips;
-288 fast unit tests and eight related configuration/review/authorization test
-files passed. Full build, API typecheck, changed-code ESLint and workflow
-`actionlint` passed. The previous CI correction at `420aad1bf` and Connect
-implementation at `6147abc9b` are the base of this worktree. The CodeQL workflow is unchanged; its hosted result must be checked on the system’s
-resulting commit (the CodeQL CLI is not installed in this implementation image).
-
-
-## Cancellation and security follow-up (2026-09-11)
+## Cancellation and security behavior
 
 Cancellation receipts remain `accepted` while the goal only has
 `desired_state='cancelled'`, the task only has an abort signal, or a planner abort
@@ -393,32 +250,10 @@ recognizes the package constructor and maps that node into routing order. No
 query is disabled or dismissed; runtime rejection still precedes body parsing
 and client lookup. The existing Secure-cookie TLS browser fixture is preserved.
 
-These edits start from core `c6b5ee96a6bce023b8d680ff937b534dc08b7330` and preserve
-its queued review/fix/ultrafix command-identity regressions. Hosted alert #126
-inspection returned HTTP 403 (`Resource not accessible by integration`) in this
-implementation environment, and the CodeQL CLI is unavailable. Consequently no
-hosted CodeQL pass is claimed: inspect the normal CodeQL workflow and alerts
-#126/#127 on the resulting system-generated commit before merge. No commit,
-merge, deployment, added credential, or companion task was created here.
+## Operator surface limits
 
-
-Local validation of this working tree: 14 MCP tests, two browser/security tests,
-26 planner lifecycle/abort/proxy-limit tests, dependency builds, full TypeScript
-build, API typecheck, changed-file ESLint and workflow actionlint passed without
-skips. The actual paired harness passed both with the default merged routing
-SHA and with explicit `MCP_ROUTING_REVISION=0c8ca02044c88b181395ca8e15425c0821e588e4`
-(the previously reviewed routing PR head), demonstrating candidate selection.
-These are local results on uncommitted core changes; the paired runner reports
-the base `coreHead` plus an implementation digest. They are not hosted CI results
-for the future system-generated commit.
-
-
-## Operator surface reconciliation (2026-09-25)
-
-The rows above were re-read against `packages/api/mcp/` on the epic branch rather
-than against any earlier specification: every tool name, argument, resource URI
-and prompt named here exists in `tools.ts`, `toolsActivity.ts`,
-`toolsPullRequests.ts`, `goalTaskDetail.ts`, `pullRequestInventory.ts`,
+Every tool name, argument, resource URI and prompt named above exists in `tools.ts`,
+`toolsActivity.ts`, `toolsPullRequests.ts`, `goalTaskDetail.ts`, `pullRequestInventory.ts`,
 `accessLog.ts` and `server.ts`. `docs/mcp.md` carries the operator walkthrough.
 
 What this surface deliberately does **not** claim:
@@ -483,61 +318,12 @@ What this surface deliberately does **not** claim:
   **Logs** group next to **LLM Log**; the entry and the page require the same
   `instance.manage_settings` permission. See `docs/docs/features/web-ui.md`.
 
-Local validation of this working tree:
+## Observable surface verification
 
-```sh
-npm run test:mcp
-# 99 tests passed, 0 failed, 0 skipped (including the new end-to-end
-# packages/api/test/mcpOperatorSurface.test.ts).
-
-npm run typecheck -w @propr/api
-npm run build
-# Both passed.
-
-npx eslint --config packages/api/eslint.config.js packages/api/test/mcpOperatorSurface.test.ts
-# 0 errors, 0 warnings.
-```
-
-The new regression drives the real tool catalog, schemas, authorization,
-persistence and access recording against in-memory SQLite with the repository's
-existing migrations. The GitHub API, the configured repository list and the
-agent registry are the only fixtures: no live GitHub, no provider credits, no
-real merge, and no production configuration was changed. These are local
-results, not hosted CI results for the resulting commit.
-
-## Observable surface reconciliation (2026-09-30)
-
-The mapping was reconciled again after the receipt/error, work overview, plan
-recovery, docs, preview and configuration-discovery work landed. The regression
-at `packages/api/test/mcpObservableSurface.test.ts` uses the production catalog,
-policy, schemas, operation ledger, docs index and SQLite migrations. GitHub,
-queue/dispatch, Redis compatibility and preview-media fetches are the external
-fixtures. It also extracts every backticked `^[a-z_]+$` token in `docs/mcp.md`
-and requires it to be an admin-visible catalog tool or a named non-tool token.
-
-Local validation on 2026-09-30:
-
-```sh
-NODE_ENV=test npx tsx --test packages/api/test/mcpObservableSurface.test.ts
-# 1 passed, 0 failed, 0 skipped.
-
-npm run test:mcp
-# 191 tests passed, 0 failed, 0 skipped (including nested subtests and the
-# observable-surface regression).
-
-npm run typecheck -w @propr/api
-# Passed.
-
-npm run build
-# Passed.
-
-npm run build --prefix docs
-# Docusaurus production build passed.
-
-npx eslint --config packages/api/eslint.config.js \
-  packages/api/test/mcpObservableSurface.test.ts packages/api/mcp/server.ts
-# 0 errors, 0 warnings.
-```
-
-These checks use no live GitHub writes, agents, provider credits, merges or
-deployment changes and are not hosted CI evidence for the resulting commit.
+The regression at `packages/api/test/mcpObservableSurface.test.ts` covers the
+receipt/error, work overview, plan recovery, docs, preview and
+configuration-discovery surface using the production catalog, policy, schemas,
+operation ledger, docs index and SQLite migrations. GitHub, queue/dispatch,
+Redis compatibility and preview-media fetches are the external fixtures. It
+also extracts every backticked `^[a-z_]+$` token in `docs/mcp.md` and requires it
+to be an admin-visible catalog tool or a named non-tool token.

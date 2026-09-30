@@ -4,13 +4,13 @@ A compact strip beneath historical dashboard statistics links to documented ProP
 
 ## Goals and launch strategies
 
-Goals support two launch strategies: **Agent implements directly** opens a draft PR and commits changes at checkpoints; **Agent orchestrates through ProPR** lets the agent decompose work, create issues, and start and monitor their implementation. Use Goals for an ongoing objective and Planner Studio when you want to inspect and refine a plan before running it.
+Goals support two launch strategies: **Direct** (the agent implements directly) opens a draft PR and commits changes at checkpoints; **Orchestrate through ProPR** lets the agent decompose work, create issues, and start and monitor their implementation. Use Goals for an ongoing objective and Planner Studio when you want to inspect and refine a plan before running it.
 
 ## Temporary dismissal
 
 Dismissals belong to your user account. Dismissing a tip hides it immediately and starts a cooling-off period. At the default 45 days, successive deliberate dismissals cool down for **45, 180, 720, and 2,880 days**. Further growth is capped at **3,650 days**. Expiry retains the lifetime dismissal count. A tip becomes eligible exactly at the cooldown boundary, but only appears if it remains relevant in the current selection. New relevance never overrides an active cooldown.
 
-Settings → Automation exposes **Usage tips** (enabled by default) and **Dismissal cooldown days** (an integer from 1 to 365, default 45). Changing the base period recalculates existing cooldowns from each stored dismissal timestamp and lifetime count. Disabling tips hides the strip and stops daily selection.
+Settings → Automation → **Usage tips** exposes **Show usage tips** (enabled by default) and **Dismissal cooldown days** (an integer from 1 to 365, default 45). Changing the base period recalculates existing cooldowns from each stored dismissal timestamp and lifetime count. Disabling tips hides the strip and stops daily selection.
 
 The CLI exposes the same settings:
 

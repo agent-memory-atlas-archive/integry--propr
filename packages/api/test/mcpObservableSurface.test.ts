@@ -292,7 +292,7 @@ test('observable MCP surface keeps receipts, errors, overview, docs and previews
     'executing', 'failed', 'format', 'generating', 'github', 'goal_reached', 'head', 'instruction',
     'instructions', 'internal', 'iss', 'issue_created', 'items', 'kind', 'labels', 'limit', 'manage',
     'mcp_access_log', 'mcp_operations', 'mcp_records', 'merge', 'merged', 'message', 'model', 'models',
-    'name', 'node', 'none', 'null', 'number', 'offset', 'outcome', 'page', 'path', 'plan', 'plan_issues',
+    'name', 'node', 'none', 'notifications', 'null', 'number', 'offset', 'outcome', 'page', 'path', 'plan', 'plan_issues',
     'posted', 'pr_created', 'precondition', 'private_key_jwt', 'progress', 'prompt', 'propr', 'publish',
     'queue', 'queued', 'read', 'refining', 'repositories', 'repository', 'resource', 'retryable', 'review',
     'role', 'running', 'section', 'since', 'stage', 'state', 'status', 'stopped', 'submitted', 'success', 'true',

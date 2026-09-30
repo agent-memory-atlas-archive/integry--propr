@@ -6,6 +6,8 @@ sidebar_position: 12
 
 The ProPR CLI (`propr`, npm package [`propr-cli`](https://www.npmjs.com/package/propr-cli)) is both the **control plane for a local ProPR stack** (scaffold, verify, start, stop — no hand-written `docker run`) and a **client for a running backend** (plans, issue implementation, tasks, repositories, agents, to-dos, settings, logs). Backend commands talk to the same API as the Web UI, so everything shows up in the dashboard and follows the normal review path.
 
+[Goals](./goals.md) have no CLI commands; launch and steer them from the Web UI or [MCP](./mcp.md).
+
 This page documents the end-user CLI. For developing or operating ProPR itself from a source checkout (compose stacks, image builds), see [CLI Workflows](./cli-workflows.md).
 
 ## Installation
@@ -26,10 +28,11 @@ Bring up a complete ProPR stack from the terminal:
 propr setup              # guided one-time bootstrap: scaffold, verify, configure, start (re-runnable)
 propr init stack         # scaffold .env + data/ logs/ repos/, detect agent credentials
 propr check              # verify Docker, images, agents, and GitHub auth mode (--verify smoke-tests agents)
+propr images pull        # pull missing or stale images without starting the stack
 propr start              # pull images and start the stack with a live dashboard
 propr status             # local stack status (--json for scripts)
-propr ui                 # open the Web UI (http://localhost:5173)
-propr docs               # open the bundled docs site
+propr ui on|off          # start or stop the Web UI service (http://localhost:5173)
+propr docs on|off        # start or stop the bundled docs service
 propr stop               # stop the stack (--keep to stop without removing containers)
 propr tunnel on          # expose the stack to the hosted UI through a Cloudflare Tunnel
 propr tunnel off         # stop the tunnel (token and env values are kept)
@@ -133,7 +136,7 @@ Configuration is stored in `~/.propr/config.json`.
 | Option | Description |
 |--------|-------------|
 | `-p, --project <owner/repo>` | Target project for this invocation (overrides `propr use`) |
-| `-j, --json` | Machine-readable output (supported by most commands) |
+| `-j, --json` | Machine-readable output (a per-command flag supported by most commands; a few accept only `--json`) |
 | `-V, --version` | Print the CLI version |
 | `-h, --help` | Help for any command or subcommand |
 
@@ -179,7 +182,7 @@ propr plan delete <draft-id> --force             # Delete without confirmation
 
 | Option | Applies to | Description |
 |--------|-----------|-------------|
-| `-b, --branch` | `create` | Target branch (default: the repo's configured default) |
+| `-b, --branch` | `create` | Target branch (default: `main`) |
 | `-w, --wait` | `create`, `generate` | Block until plan generation completes |
 | `-f, --force` | `delete` | Skip the confirmation prompt |
 
@@ -214,7 +217,9 @@ propr task inspect <task-id>               # Current details and full run histor
 propr task get <task-id>                   # Details with run history
 propr task stop <task-id>                  # Stop a running task
 propr task delete <task-id> --force        # Force-delete an active task
-propr task revert owner/repo <pr> <sha> <issue>   # Revert a commit from a PR
+propr task followup <task-id> "Also add tests"    # Post and queue a follow-up (or --file / --stdin)
+propr task import "Recover missing tasks"  # Reconcile or recover tasks from GitHub
+propr task revert owner/repo <pr> <sha> [comment-id]   # Revert a commit from a PR (--dry-run to preview)
 ```
 
 Status values for `-s`: `pending`, `queued`, `processing`, `completed`, `failed`, `cancelled`, `all`. These are queue-level filters; task details additionally display the finer-grained worker states `claude_execution` ("Executing", agent run for any agent type) and `post_processing` (see [Worker Runtime](../architecture/worker-runtime.md)).
@@ -335,11 +340,21 @@ Settings keys:
 | `planner_generation_model` | Model for planner generation |
 | `auto_followup_score_threshold` | Score threshold (0–9) for auto-followup |
 | `auto_resolve_merge_conflicts` | Automatically resolve merge conflicts |
+| `dashboard_summary_enabled` | Enable AI-generated dashboard activity summaries |
+| `model_reasoning_level` | Reasoning level for GPT and Claude agents (empty = agent default) |
+| `usage_tips_enabled` | Show daily documentation tips on the dashboard |
+| `usage_tips_dismissal_cooldown_days` | Base dismissal cooldown for tips (1–365 days) |
 | `pr_review_model` | Model for full PR reviews |
 | `pr_review_prompt` | Override for the PR review prompt guidance (empty = built-in default) |
+| `pr_review_context_enabled` | Gather related unchanged code before PR reviews |
+| `pr_review_context_model` | Model for read-only PR review context scouting |
+| `pr_review_max_context_tokens` | Legacy absolute PR review input token cap (0 = none) |
+| `pr_review_context_budget_percent` | Review context budget as % of each reviewer's safe input capacity (10–100, steps of 10) |
 | `ultrafix_rating_goal` | Target quality rating for ultrafix cycles |
 | `ultrafix_max_cycles` | Maximum number of ultrafix cycles |
 | `ultrafix_pause_seconds` | Pause duration between ultrafix cycles |
+
+`propr setting update` also accepts `pr-label`, `ai-primary-tag`, `primary-processing-labels`, and `followup-keywords` (comma-separated for the list keys).
 
 ## Scripting
 

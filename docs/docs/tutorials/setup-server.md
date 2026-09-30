@@ -44,14 +44,15 @@ Set the URLs in `.env` to your domain:
 
 ```bash
 FRONTEND_URL=https://propr.example.com
+API_PUBLIC_URL=https://propr.example.com
 GH_OAUTH_CALLBACK_URL=https://propr.example.com/api/auth/github/callback
 ```
 
-The GitHub OAuth App callback URL must match.
+`API_PUBLIC_URL` otherwise defaults to `http://localhost:4000`, which breaks auth redirects and attachment links behind a proxy. The GitHub OAuth App callback URL must match.
 
 ## GitHub Event Intake
 
-By default ProPR receives GitHub events through the hosted ProPR GitHub App over WebSocket routing (`GITHUB_EVENT_INTAKE_MODE=routing_websocket`). Events stream to ProPR over an **outbound** WebSocket with near-immediate delivery, so a server needs **no inbound public URL** for intake and no webhook secret — the recommended path for almost every server. `propr relay enroll` provisions the shared-App install and the routing/relay credentials; see [GitHub Authentication](../operations/github-auth.md). Note that `GH_WEBHOOK_SECRET` applies only to the own-App webhook option below and is ignored in routing mode.
+By default ProPR receives GitHub events through the hosted ProPR GitHub App over WebSocket routing (`GITHUB_EVENT_INTAKE_MODE=routing_websocket`). Events stream to ProPR over an **outbound** WebSocket with near-immediate delivery, so a server needs **no inbound public URL** for intake and no webhook secret — the recommended path for almost every server. Once the shared App is installed, `propr relay enroll` provisions the routing/relay credentials; see [GitHub Authentication](../operations/github-auth.md). Note that `GH_WEBHOOK_SECRET` applies only to the own-App webhook option below and is ignored in routing mode.
 
 Two advanced intake modes are available when you have a specific reason to use them:
 
@@ -89,7 +90,7 @@ sudo mkdir -p /srv/propr && sudo chown -R "$USER":"$USER" /srv/propr && cd /srv/
 propr setup --root /srv/propr  # guided, re-runnable bootstrap
 ```
 
-Over SSH, run `propr setup --no-tui` if your terminal lacks raw-mode support; setup then prompts line-by-line. Choosing **Token relay** at the auth step enrolls the shared App automatically (logging you in if needed, then writing the relay/routing credentials to `.env`), so no separate `propr relay enroll` is needed. Setup is safe to re-run after editing public URLs or switching intake mode: it skips already-satisfied steps and never overwrites `.env` or deletes data.
+Over SSH, run `propr setup --no-tui` if your terminal lacks raw-mode support; setup then prompts line-by-line. Choosing **ProPR Connect (default ProPR GitHub App)** at the auth step enrolls the shared App automatically (logging you in if needed, then writing the relay/routing credentials to `.env`), so no separate `propr relay enroll` is needed. Setup is safe to re-run after editing public URLs or switching intake mode: it skips already-satisfied steps and never overwrites `.env` or deletes data.
 
 ### Manual / Advanced Flow
 
@@ -117,7 +118,6 @@ To reuse an existing Antigravity account, authenticate on the host with `agy log
 docker run --rm \
   -v /var/run/docker.sock:/var/run/docker.sock \
   -v "$PWD/.env:/app/.env:ro" \
-  -v "$PWD/your-app-private-key.pem:/app/config/your-app-private-key.pem:ro" \
   -e PROPR_ENV_FILE="$PWD/.env" \
   -e PROPR_DATA_DIR="$PWD/data" \
   -e PROPR_LOGS_DIR="$PWD/logs" \
@@ -133,7 +133,7 @@ docker run --rm \
   propr/launcher:latest
 ```
 
-Omit the OpenCode and Vibe lines if you do not enable those agents. To update later, run `docker pull propr/launcher:latest` and re-run the same command.
+Omit the OpenCode and Vibe lines if you do not enable those agents. If you run your own GitHub App, set `HOST_GH_PRIVATE_KEY` in `.env` to the absolute host path of the `.pem`; the launcher bind-mounts it into the app containers. To update later, run `docker pull propr/launcher:latest` and re-run the same command.
 
 ## Finish In The Web UI
 
