@@ -370,14 +370,29 @@ export { toAntigravityCliModelId } from './agents/impl/antigravityModelIds.js';
 export {
     toAgentTankAgent,
     toProprAgent,
+    hasAgentTankStatuses,
+    hasUsableAgentTankStatuses,
+    isUsableAgentTankStatus,
     normalizeAgentTankStatus,
     normalizeAgentTankAgents,
+    getStatusForAlias as getAgentTankStatusForAlias,
+    getAllStatuses as getAgentTankStatuses,
     agentTankUsageFingerprint,
     observeAgentTankUsage,
     observeAgentTankUsageSnapshot,
     resetAgentTankUsageTracking
 } from './services/agentTankService.js';
 export type { AgentStatusResponse } from './services/agentTankService.js';
+export {
+    buildBundledAgentTankConfig,
+    canRunBundledAgentTank,
+    parseBundledAgentTankOutput,
+    refreshBundledStatuses,
+    getCachedBundledStatuses,
+    getBundledStatusesForDelta,
+    getBundledStatusForAlias,
+    clearBundledAgentTankCache
+} from './services/agentTankBundledRunner.js';
 export type { BuildOpenCodePromptOptions, OpenCodeDockerArgsParams, OpenCodeEvent, ParsedOpenCodeOutput } from './agents/impl/openCodeUtils.js';
 export { VibeAgent, parseVibeConversationLog, parseVibeOutput } from './agents/impl/VibeAgent.js';
 export type {
