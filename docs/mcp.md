@@ -237,6 +237,12 @@ An interrupted or uncertain external operation is not blindly replayed.
 Inspect the target before using a new key. Publication marks a draft busy
 before issuing GitHub requests; partial publication remains inspectable in
 `plan_issues` and the draft, with marker comments identifying the operation.
+A publication cut off by a server restart leaves its draft claimed as `active`.
+The publishing attempt renews that claim before each issue and aborts an issue
+request that outlives the renewal by one minute, so `publish_plan` with
+`resume: true` and a new key takes the claim over once it has gone unrenewed
+for two minutes, adopting marked issues before creating missing ones. An
+earlier resume fails with `PRECONDITION_FAILED` and `details.claimLapsesAt`.
 Automatic recovery of uncertain external effects is not implemented.
 
 ## Errors

@@ -6,7 +6,7 @@ import { once } from 'node:events';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { publicationOwner, publicationOwnerStopped } from '../mcp/planPublication.js';
+import { PUBLICATION_LEASE_MS, PUBLICATION_TAKEOVER_GRACE_MS, publicationLeaseLapsed, publicationOwner, publicationOwnerStopped } from '../mcp/planPublication.js';
 import { fileURLToPath } from 'node:url';
 import knex, { type Knex } from 'knex';
 import { closeConnection } from '@propr/core';
@@ -508,6 +508,186 @@ test('a timeout cannot reclaim an active publication while its GitHub POST is aw
   assert.deepEqual(((result.result as { issues: Array<{ number: number }> }).issues).map(issue => issue.number), [61, 62, 63]);
   assert.equal(postCount, 2, 'only the original owner creates the two remaining issues');
   assert.equal((await db('task_drafts').where({ draft_id: id }).first()).status, 'executed');
+});
+
+const takeoverAfterMs = PUBLICATION_LEASE_MS + PUBLICATION_TAKEOVER_GRACE_MS;
+
+/** An active claim left behind by a runtime whose PID namespace no longer exists. */
+function restartedRuntimeClaim(operationId: string, attemptId: string, times: { claimedAt: string; renewedAt?: string }) {
+  return { publication: { state: 'active', operationId, attemptId,
+    created: [{ index: 0, number: 71, url: 'https://github.com/acme/repo/issues/71' }], ...times,
+    owner: { ...publicationOwner()!, pidNamespace: 'pid:[4026539999]' } } };
+}
+
+test('a resume takes over a lapsed claim left by a restarted runtime and adopts its marked issue', async t => {
+  const id = '10000000-0000-4000-8000-000000000014';
+  const db = await setup(t, id);
+  const claimedAt = new Date(Date.now() - 10 * 60_000).toISOString();
+  // The owner renewed recently: it may still have an issue POST in flight.
+  const renewing = restartedRuntimeClaim('restart-original', 'restart-attempt',
+    { claimedAt, renewedAt: new Date(Date.now() - takeoverAfterMs + 30_000).toISOString() });
+  await db('task_drafts').where({ draft_id: id }).update({ status: 'executing', context_config: JSON.stringify(renewing) });
+  await db('plan_issues').insert({ draft_id: id, repository, issue_number: 71 });
+  // The container died mid-POST, so its receipt never stored a result.
+  await recordAttempt(db, { id: 'restart-attempt', state: 'unknown', lifecycle: 'unknown', claimedAt });
+  assert.equal(publicationOwnerStopped(renewing.publication.owner), false, 'the old PID namespace cannot be inspected');
+  const remote = [{ number: 72, html_url: 'https://github.com/acme/repo/issues/72', title: 'Second',
+    body: '<!-- propr-mcp:restart-original:1 -->' }];
+  let getCount = 0;
+  let postCount = 0;
+  const request = (async (route: string, args: Record<string, unknown>) => {
+    if (route === 'GET /repos/{owner}/{repo}/issues') { getCount += 1; return { data: remote }; }
+    postCount += 1;
+    return { data: { number: 73, html_url: 'https://github.com/acme/repo/issues/73', title: args.title } };
+  }) as McpPrincipal['github']['request'];
+  const { callPublish } = tools(db, request);
+  const before = await db('task_drafts').where({ draft_id: id }).first();
+
+  await assert.rejects(callPublish(id, before.mcp_revision, 'restart-too-early', true), error => {
+    assert.ok(error instanceof McpError);
+    assert.equal(error.code, 'PRECONDITION_FAILED');
+    assert.equal(error.stage, 'precondition');
+    assert.match(error.message, /not recoverable yet/i);
+    assert.equal(Date.parse(String(error.details?.claimLapsesAt)),
+      Date.parse(renewing.publication.renewedAt!) + takeoverAfterMs);
+    return true;
+  });
+  assert.equal(getCount + postCount, 0, 'a claim inside its lease is never contacted or replaced');
+  assert.deepEqual(await db('task_drafts').where({ draft_id: id }).first(), before);
+
+  for (const [attempt, times] of [
+    { claimedAt, renewedAt: new Date(Date.now() - takeoverAfterMs - 1_000).toISOString() },
+    // A claim that died before its first renewal lapses from its claim time.
+    { claimedAt },
+  ].entries()) {
+    postCount = 0;
+    await db('plan_issues').where({ draft_id: id }).whereNot({ issue_number: 71 }).delete();
+    await db('task_drafts').where({ draft_id: id }).update({ status: 'executing', plan_json: JSON.stringify(tasks),
+      context_config: JSON.stringify(restartedRuntimeClaim('restart-original', 'restart-attempt', times)) });
+    const lapsed = await db('task_drafts').where({ draft_id: id }).first();
+    const result = (await callPublish(id, lapsed.mcp_revision, `restart-takeover-${attempt}`, true)).data as
+      { adopted: number[]; issues: Array<{ number: number }> };
+    assert.deepEqual(result.adopted, [1], 'the issue created before the restart is adopted, not duplicated');
+    assert.deepEqual(result.issues.map(issue => issue.number), [71, 72, 73]);
+    assert.equal(postCount, 1, 'only the task without a marked issue is created');
+    assert.equal((await db('task_drafts').where({ draft_id: id }).first()).status, 'executed');
+    assert.deepEqual(await db('mcp_operations').where({ id: 'restart-attempt' }).first('state', 'lifecycle', 'result'),
+      { state: 'unknown', lifecycle: 'unknown', result: null });
+  }
+});
+
+test('a takeover fails its claim when the owner renews after the lapsed lease was read', async t => {
+  const id = '10000000-0000-4000-8000-000000000015';
+  const db = await setup(t, id);
+  const claimedAt = new Date(Date.now() - 10 * 60_000).toISOString();
+  await db('task_drafts').where({ draft_id: id }).update({ status: 'executing',
+    context_config: JSON.stringify(restartedRuntimeClaim('renewed-original', 'renewed-attempt', { claimedAt })) });
+  await db('plan_issues').insert({ draft_id: id, repository, issue_number: 71 });
+  await recordAttempt(db, { id: 'renewed-attempt', state: 'unknown', lifecycle: 'unknown', claimedAt });
+  let contacts = 0;
+  const { callPublish } = tools(db, (async () => { contacts += 1; throw new Error('unreachable'); }) as McpPrincipal['github']['request'],
+    async () => { contacts += 1; });
+  const before = await db('task_drafts').where({ draft_id: id }).first();
+  const renewed = JSON.stringify(restartedRuntimeClaim('renewed-original', 'renewed-attempt',
+    { claimedAt, renewedAt: new Date().toISOString() }));
+  // The owner, slow but alive in another runtime, renews while the resume is
+  // still gathering evidence from the receipt table.
+  const query = db.client.query.bind(db.client);
+  let renewedByOwner = false;
+  db.client.query = async (connection: unknown, statement: { sql?: string }) => {
+    if (!renewedByOwner && /^select .* from `mcp_operations`/i.test(statement.sql || '')) {
+      renewedByOwner = true;
+      // The single in-memory connection is already held by the intercepted query.
+      await query(connection, { method: 'update', sql: 'update `task_drafts` set `context_config` = ? where `draft_id` = ?',
+        bindings: [renewed, id] });
+    }
+    return query(connection, statement);
+  };
+
+  await assert.rejects(callPublish(id, before.mcp_revision, 'raced-takeover', true), error => {
+    assert.ok(error instanceof McpError);
+    assert.equal(error.code, 'PRECONDITION_FAILED');
+    assert.match(error.message, /no longer available to resume/i);
+    return true;
+  });
+  assert.equal(renewedByOwner, true);
+  assert.equal(contacts, 0, 'the stale takeover never reaches GitHub');
+  assert.deepEqual(await db('task_drafts').where({ draft_id: id }).first('status', 'mcp_revision', 'context_config'),
+    { status: 'executing', mcp_revision: before.mcp_revision + 1, context_config: renewed });
+});
+
+test('the owner renews its claim before each issue and aborts a request at the lease deadline', async t => {
+  const id = '10000000-0000-4000-8000-000000000016';
+  const db = await setup(t, id, tasks.slice(0, 2));
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const renewals: string[] = [];
+  const remote: Array<{ number: number; html_url: string; title: string; body: string }> = [];
+  let hang = true;
+  let hung!: () => void;
+  const hanging = new Promise<void>(resolve => { hung = resolve; });
+  const request = (async (route: string, args: Record<string, unknown>) => {
+    if (route === 'GET /repos/{owner}/{repo}/issues') return { data: remote };
+    const publication = JSON.parse((await db('task_drafts').where({ draft_id: id }).first()).context_config).publication;
+    renewals.push(publication.renewedAt);
+    const signal = (args.request as { signal: AbortSignal }).signal;
+    assert.equal(signal.aborted, false, 'a request starts inside its lease');
+    if (renewals.length === 2 && hang) {
+      // GitHub never answers: only the lease deadline can end this request.
+      hung();
+      await new Promise((_resolve, reject) => signal.addEventListener('abort', () => reject(signal.reason), { once: true }));
+    }
+    const issue = { number: 80 + renewals.length, html_url: `https://github.com/acme/repo/issues/${80 + renewals.length}`,
+      title: String(args.title), body: String(args.body) };
+    remote.push(issue);
+    return { data: issue };
+  }) as McpPrincipal['github']['request'];
+  const { callPublish } = tools(db, request);
+  const before = await db('task_drafts').where({ draft_id: id }).first();
+
+  const publishing = callPublish(id, before.mcp_revision, 'leased-attempt');
+  const outcome = assert.rejects(publishing, error => {
+    assert.ok(error instanceof McpError);
+    assert.equal(error.code, 'PUBLISH_PARTIAL');
+    assert.equal(error.details?.step, 'create_issue');
+    assert.equal(error.details?.failedIndex, 1);
+    assert.equal((error.details?.cause as { code: string }).code, 'UPSTREAM_TIMEOUT');
+    return true;
+  });
+  await hanging;
+  assert.equal(renewals.length, 2);
+  assert.ok(renewals.every(renewedAt => Number.isFinite(Date.parse(renewedAt))), 'each issue request follows a stored renewal');
+  t.mock.timers.tick(PUBLICATION_LEASE_MS - 1);
+  assert.equal((await db('task_drafts').where({ draft_id: id }).first()).status, 'executing');
+  assert.equal(JSON.parse((await db('task_drafts').where({ draft_id: id }).first()).context_config).publication.state, 'active');
+  t.mock.timers.tick(1);
+  await outcome;
+
+  // The aborted owner released its claim as a partial publication, so recovery
+  // does not have to wait for the takeover grace.
+  const partial = await db('task_drafts').where({ draft_id: id }).first();
+  assert.equal(JSON.parse(partial.context_config).publication.state, 'partial');
+  hang = false;
+  const recovered = (await callPublish(id, partial.mcp_revision, 'leased-recovery', true)).data as
+    { adopted: number[]; issues: Array<{ number: number }> };
+  assert.deepEqual(recovered.adopted, []);
+  assert.deepEqual(recovered.issues.map(issue => issue.number), [81, 83]);
+  assert.equal((await db('task_drafts').where({ draft_id: id }).first()).status, 'executed');
+});
+
+test('a claim lapses only after its lease and the takeover grace have both passed', () => {
+  const now = Date.parse('2026-09-30T12:00:00.000Z');
+  const at = (ageMs: number) => new Date(now - ageMs).toISOString();
+  assert.equal(publicationLeaseLapsed({ claimedAt: at(takeoverAfterMs) }, now), false);
+  assert.equal(publicationLeaseLapsed({ claimedAt: at(takeoverAfterMs + 1) }, now), true);
+  assert.equal(publicationLeaseLapsed({ claimedAt: at(PUBLICATION_LEASE_MS + 1) }, now), false,
+    'the lease deadline alone leaves an aborted request unsettled');
+  assert.equal(publicationLeaseLapsed({ claimedAt: at(10 * takeoverAfterMs), renewedAt: at(takeoverAfterMs) }, now), false,
+    'a renewal restarts the lease of an old claim');
+  assert.equal(publicationLeaseLapsed({ claimedAt: at(10 * takeoverAfterMs), renewedAt: at(takeoverAfterMs + 1) }, now), true);
+  assert.equal(publicationLeaseLapsed({ claimedAt: at(-60_000) }, now), false, 'a claim from the future is still held');
+  assert.equal(publicationLeaseLapsed({ claimedAt: at(takeoverAfterMs + 1), renewedAt: 'not a time' }, now), true,
+    'an unreadable renewal cannot strand the draft');
+  assert.equal(publicationLeaseLapsed({ claimedAt: 'not a time' }, now), false);
 });
 
 test('an incomplete marker window preserves recovery state and refuses a POST', async t => {

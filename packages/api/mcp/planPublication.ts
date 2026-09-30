@@ -1,4 +1,5 @@
 import { readFileSync, readlinkSync } from 'node:fs';
+import { McpError } from './config.js';
 import type { McpPrincipal } from './policy.js';
 
 export interface PublishedIssue {
@@ -22,8 +23,15 @@ export interface ActivePublication {
   attemptId: string;
   created: PublishedIssue[];
   claimedAt: string;
+  /** Last lease renewal by the owning attempt; the claim time stands in when it is absent. */
+  renewedAt?: string;
   owner?: PublicationOwner;
 }
+
+/** After a renewal the owning attempt may keep one issue POST in flight for at most this long. */
+export const PUBLICATION_LEASE_MS = 60_000;
+/** Time for GitHub to settle and list a request that was aborted at the lease deadline. */
+export const PUBLICATION_TAKEOVER_GRACE_MS = 60_000;
 
 /** Linux process generation, scoped to the boot and PID namespace we can inspect. */
 export interface PublicationOwner {
@@ -53,6 +61,45 @@ export function publicationOwnerStopped(owner: PublicationOwner | undefined): bo
     || !Number.isSafeInteger(owner.pid) || owner.pid <= 0 || !/^\d+$/.test(owner.started)) return false;
   try { return processStart(owner.pid) !== owner.started; }
   catch (error) { return (error as NodeJS.ErrnoException).code === 'ENOENT'; }
+}
+
+/**
+ * The owning attempt renews its claim before each issue POST and aborts that
+ * POST at the lease deadline, so a claim left unrenewed past the deadline and
+ * the settling grace has no request in flight. Unlike the /proc check this
+ * holds for an owner in a restarted container or another replica. The later
+ * of the claim and its renewal counts, so a future timestamp keeps the door
+ * closed only until it passes and an unreadable renewal cannot strand the draft.
+ */
+export function publicationLeaseLapsesAt(publication: Pick<ActivePublication, 'claimedAt' | 'renewedAt'>): number {
+  const claimedAt = Date.parse(publication.claimedAt);
+  const renewedAt = Date.parse(publication.renewedAt ?? '');
+  const leaseStart = Number.isFinite(renewedAt) ? Math.max(claimedAt, renewedAt) : claimedAt;
+  return leaseStart + PUBLICATION_LEASE_MS + PUBLICATION_TAKEOVER_GRACE_MS;
+}
+
+export function publicationLeaseLapsed(publication: Pick<ActivePublication, 'claimedAt' | 'renewedAt'>, now = Date.now()): boolean {
+  // An unreadable claim time yields NaN, which never compares as lapsed.
+  return now > publicationLeaseLapsesAt(publication);
+}
+
+export const PUBLICATION_LEASE_EXPIRED = 'PUBLICATION_LEASE_EXPIRED';
+
+/**
+ * Send one issue request inside the claim lease. Another attempt may take the
+ * claim over once the lease and its grace have passed, so the request never
+ * starts after the deadline and is aborted at it. The client's own request
+ * timeout is not relied on for that bound.
+ */
+export async function withinPublicationLease<T>(leaseDeadline: number, send: (signal: AbortSignal) => Promise<T>): Promise<T> {
+  const remaining = leaseDeadline - Date.now();
+  if (remaining <= 0) throw new McpError(PUBLICATION_LEASE_EXPIRED,
+    'The publication claim was not renewed in time. No issue was created for this task.', 409,
+    { stage: 'database', retryable: true });
+  const deadline = new AbortController();
+  const timer = setTimeout(() => deadline.abort(new DOMException('The issue request exceeded the publication lease.', 'TimeoutError')), remaining);
+  try { return await send(deadline.signal); }
+  finally { clearTimeout(timer); }
 }
 
 export type MarkerLookup = { state: 'found'; issue: { number: number; url: string; title: string } }
@@ -99,7 +146,8 @@ export function activePublication(value: unknown): ActivePublication | undefined
     && typeof issue.url === 'string');
   if (created.length !== publication.created.length) return undefined;
   return { state: 'active', operationId: publication.operationId, attemptId: publication.attemptId,
-    created, claimedAt: publication.claimedAt, owner: publication.owner };
+    created, claimedAt: publication.claimedAt,
+    ...(typeof publication.renewedAt === 'string' ? { renewedAt: publication.renewedAt } : {}), owner: publication.owner };
 }
 
 export function publicationSummary(value: unknown): Record<string, unknown> | null {

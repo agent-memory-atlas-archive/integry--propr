@@ -8,7 +8,7 @@ import { type McpTool, type ToolDeps, TERMINAL_PLAN_STATUSES, planScopeShape, pl
 import { planRelationLimit, summarizePlan } from './listSummaries.js';
 import { getCurrentPlanCause, getPlanRevision, listPlanRevisions, restorePlanRevision } from '../routes/plannerHelpers/planRevisions.js';
 import { classifyError, type McpErrorStage } from './errorEnvelope.js';
-import { activePublication as parseActivePublication, findMarkedIssue, parseContextConfig, partialPublication, publicationSummary, publicationOwner, publicationOwnerStopped, type ActivePublication, type PublishedIssue } from './planPublication.js';
+import { activePublication as parseActivePublication, findMarkedIssue, parseContextConfig, partialPublication, publicationLeaseLapsed, publicationLeaseLapsesAt, publicationSummary, publicationOwner, publicationOwnerStopped, withinPublicationLease, PUBLICATION_LEASE_EXPIRED, PUBLICATION_LEASE_MS, type ActivePublication, type PublishedIssue } from './planPublication.js';
 import { McpOperations } from './operations.js';
 
 const target = { table: 'task_drafts', column: 'draft_id', arg: 'planId', owner: 'user_id' };
@@ -177,27 +177,43 @@ export function addPlanningTools(tools: McpTool[], deps: ToolDeps, planner: Retu
       const partial = args.resume ? partialPublication(initialContext.publication) : undefined;
       const active = args.resume ? parseActivePublication(initialContext.publication) : undefined;
       if (active) await new McpOperations(db).markInterruptedInvocations(principal, active.attemptId);
-      // A persisted callback result or an OS-verified dead process permits
-      // marker reconciliation. Lifecycle timeout/cancellation alone cannot prove
-      // that an invocation has stopped making external requests.
+      // A persisted callback result, an OS-verified dead process or a lapsed
+      // claim lease permits marker reconciliation. Lifecycle timeout or
+      // cancellation alone cannot prove that an invocation has stopped making
+      // external requests; the lease can, because its owner aborts each issue
+      // POST at the lease deadline. It is the only proof available after the
+      // runtime restarted into a fresh PID namespace.
       const stoppedActiveAttempt = active ? await db('mcp_operations').where({
         id: active.attemptId, owner_id: principal.user.id, tool: 'publish_plan', repository: args.repository,
       }).whereIn('state', ['completed', 'failed', 'cancelled', 'unknown']).whereNotNull('result')
         .where('updated_at', '>=', Date.parse(active.claimedAt)).first('id') : undefined;
-      const priorPublication = partial ?? (active && (stoppedActiveAttempt || publicationOwnerStopped(active.owner)) ? active : undefined);
+      const priorPublication = partial ?? (active && (stoppedActiveAttempt || publicationOwnerStopped(active.owner)
+        || publicationLeaseLapsed(active)) ? active : undefined);
       const previousStatus = String(draft.status || 'draft');
+      if (args.resume && draft.status === 'executing' && active && !priorPublication) {
+        // The owner may renew again, so the lapse time is a lower bound and this
+        // stays non-retryable: a later resume needs a new idempotency key.
+        throw new McpError('PRECONDITION_FAILED', 'Plan is not recoverable yet. Its prior publication attempt may still be running; resume with a new idempotencyKey once its claim has lapsed.', 409, {
+          stage: 'precondition', details: { claimLapsesAt: new Date(publicationLeaseLapsesAt(active)).toISOString() },
+        });
+      }
       if (args.resume && (draft.status !== 'executing' || !priorPublication)) {
         throw new McpError('PRECONDITION_FAILED', 'Plan is not recoverable. Resume requires a partial publication or an active publication whose prior attempt has stopped.', 409);
       }
       const originalOperationId = priorPublication?.operationId ?? String(operationId);
+      const claimedAt = Date.now();
       const activePublication: ActivePublication = { state: 'active', operationId: originalOperationId,
-        attemptId: String(operationId), created: priorPublication?.created ?? [], claimedAt: new Date().toISOString(), owner: publicationOwner() };
+        attemptId: String(operationId), created: priorPublication?.created ?? [], claimedAt: new Date(claimedAt).toISOString(),
+        renewedAt: new Date(claimedAt).toISOString(), owner: publicationOwner() };
       const activeContext: Record<string, unknown> = { ...initialContext, publication: activePublication };
-      const activeContextJson = JSON.stringify(activeContext);
+      // The stored context and revision are this attempt's claim token. Each
+      // lease renewal replaces both, so later claim predicates read the current values.
+      let activeContextJson = JSON.stringify(activeContext);
+      let leaseDeadline = claimedAt + PUBLICATION_LEASE_MS;
       const claim = db('task_drafts').where({ draft_id: args.planId, mcp_revision: args.expectedRevision });
       if (args.resume) claim.andWhere({ status: 'executing', context_config: draft.context_config });
       else claim.whereIn('status', ['draft', 'review', 'approved']);
-      const claimedRevision = args.expectedRevision + 1;
+      let claimedRevision = args.expectedRevision + 1;
       const claimed = await claim.update({ status: 'executing', context_config: activeContextJson,
         updated_at: db.fn.now(), mcp_revision: claimedRevision });
       if (!claimed) throw new McpError('PRECONDITION_FAILED', args.resume
@@ -209,10 +225,28 @@ export function addPlanningTools(tools: McpTool[], deps: ToolDeps, planner: Retu
 
       const ownsClaim = () => db('task_drafts').where({ draft_id: args.planId, status: 'executing',
         mcp_revision: claimedRevision, context_config: activeContextJson }).first('draft_id');
+      const claimLost = () => new McpError('PUBLICATION_CLAIM_LOST',
+        'The publication attempt no longer owns this plan. Inspect its current state before recovery.', 409,
+        { stage: 'database', retryable: false });
       const assertClaim = async (): Promise<void> => {
-        if (!await ownsClaim()) throw new McpError('PUBLICATION_CLAIM_LOST',
-          'The publication attempt no longer owns this plan. Inspect its current state before recovery.', 409,
-          { stage: 'database', retryable: false });
+        if (!await ownsClaim()) throw claimLost();
+      };
+      // Renewal doubles as the claim check: one statement proves this attempt
+      // still owns the draft and restarts the lease that bounds its next issue
+      // POST. A takeover compares the stored context and revision too, so it
+      // cannot act on a lease that was renewed after it was read. The revision
+      // is advanced here because the draft trigger would advance it regardless.
+      const renewClaim = async (): Promise<void> => {
+        const renewedAt = Date.now();
+        const renewedContextJson = JSON.stringify({ ...activeContext,
+          publication: { ...activePublication, renewedAt: new Date(renewedAt).toISOString() } });
+        const renewed = await db('task_drafts').where({ draft_id: args.planId, status: 'executing',
+          mcp_revision: claimedRevision, context_config: activeContextJson })
+          .update({ context_config: renewedContextJson, mcp_revision: claimedRevision + 1 });
+        if (!renewed) throw claimLost();
+        activeContextJson = renewedContextJson;
+        claimedRevision += 1;
+        leaseDeadline = renewedAt + PUBLICATION_LEASE_MS;
       };
 
       const fail = async (error: unknown, failure: { index: number; title: string; step: PublicationStep;
@@ -243,8 +277,8 @@ export function addPlanningTools(tools: McpTool[], deps: ToolDeps, planner: Retu
           stage: failureStage(failure.step, classified.stage), retryable: false, details,
         });
       };
-      const requireClaim = async (failure: { index: number; title: string }): Promise<void> => {
-        try { await assertClaim(); }
+      const requireClaim = async (failure: { index: number; title: string }, renew = false): Promise<void> => {
+        try { await (renew ? renewClaim() : assertClaim()); }
         catch (error) {
           if (error instanceof McpError && error.code === 'PUBLICATION_CLAIM_LOST') throw error;
           await fail(error, { ...failure, step: 'verify_claim' });
@@ -303,7 +337,8 @@ export function addPlanningTools(tools: McpTool[], deps: ToolDeps, planner: Retu
         // claim and marker recovery prevent a replay after an uncertain response.
         try { await policy.repository(principal, args.repository, true); }
         catch (error) { await fail(error, { index, title: String(task.title), step: 'authorize' }); }
-        await requireClaim({ index, title: String(task.title) });
+        // One renewal per task, placed directly before its issue is created or adopted.
+        await requireClaim({ index, title: String(task.title) }, !args.resume);
         let issue: { number: number; url: string; title: string } | undefined;
         if (args.resume) {
           try {
@@ -317,15 +352,18 @@ export function addPlanningTools(tools: McpTool[], deps: ToolDeps, planner: Retu
               { stage: 'github', retryable: false });
           }
           catch (error) { await fail(error, { index, title: String(task.title), step: 'create_issue' }); }
-          await requireClaim({ index, title: String(task.title) });
+          await requireClaim({ index, title: String(task.title) }, true);
         }
         if (!issue) {
           try {
-            const response = await principal.github.request('POST /repos/{owner}/{repo}/issues', { owner, repo, title: String(task.title),
-              body: `${task.body}\n\n## Implementation\n${task.implementation}${task.notes ? `\n\n## Notes\n${task.notes}` : ''}\n\n<!-- propr-mcp:${originalOperationId}:${index} -->`, labels: ['propr-planned'] });
+            const response = await withinPublicationLease(leaseDeadline, signal => principal.github.request('POST /repos/{owner}/{repo}/issues', { owner, repo, title: String(task.title),
+              body: `${task.body}\n\n## Implementation\n${task.implementation}${task.notes ? `\n\n## Notes\n${task.notes}` : ''}\n\n<!-- propr-mcp:${originalOperationId}:${index} -->`, labels: ['propr-planned'],
+              request: { signal } }));
             issue = { number: response.data.number, url: response.data.html_url, title: response.data.title };
           } catch (error) {
-            await fail(error, { index, title: String(task.title), step: 'create_issue', sideEffectsPossible: true });
+            // A lease that ran out before the request started sent nothing.
+            const sent = !(error instanceof McpError && error.code === PUBLICATION_LEASE_EXPIRED);
+            await fail(error, { index, title: String(task.title), step: sent ? 'create_issue' : 'verify_claim', sideEffectsPossible: sent });
           }
         } else adopted.push(index);
         if (!issue) throw new McpError('INTERNAL_ERROR', 'Issue publication returned no result.', 500, { stage: 'internal' });
