@@ -212,7 +212,7 @@ const AppContent: React.FC = () => {
                         </Layout>
                       }
                     />
-                    <Route path="/tasks/new" element={<Layout><NewTaskPage /></Layout>} />
+                    <Route path="/tasks/new" element={<Layout><TasksPage /><NewTaskPage /></Layout>} />
                     <Route
                       path="/tasks/:taskId"
                       element={

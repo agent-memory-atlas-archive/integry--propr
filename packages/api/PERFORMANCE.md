@@ -224,3 +224,185 @@ shutdown, deadline failure, and read-only startup against a missing file.
 Add `--worker` to `scripts/benchmark-dashboard-outcomes.ts` to reproduce the
 worker path; each iteration also reports when a 10 ms foreground timer fires.
 The compiled JavaScript worker was separately smoke-tested against the snapshot.
+
+## Incremental outcomes and expansion-only history (#2621)
+
+The file-backed SQLite API starts a separate projection worker. The normal
+summary and narrative completion reads use `dashboard_outcome_v1_entities`;
+history reads use `dashboard_outcome_v1_runs`. These tables contain rendering
+fields, ordering keys and revisions, never job/result JSON. The old reader is
+retained as the parity oracle and for clients using the legacy contract.
+
+### Contracts and authorization
+
+- Summary: `GET /api/dashboard/outcomes?repository=all&limit=50&view=summary`,
+  or the same URL without `view`, with
+  `Accept: application/vnd.propr.outcome-summaries+json` (the new UI uses this).
+  Items retain their existing visible IDs/fields and total `eventCount`, add
+  `entityId` and `revision`, and **omit** `earlierUpdates`.
+- History: `GET /api/dashboard/outcomes?view=history&repository=owner/repo&entityId=...&revision=...&limit=20`.
+  `items` contains earlier outcomes only. `nextCursor` is null at the end;
+  otherwise pass it as `cursor`. The maximum page size is 50. A concrete
+  repository is required, including when expanding a row in the all-repo feed.
+- Status: `GET /api/dashboard/outcomes?view=status` exposes version, readiness,
+  backfill cursor, seeded state, processed tasks, pending task count, oldest
+  pending age (`lagMs`, second precision), failure count and last error.
+- Requests without the summary opt-in retain embedded history. Old desktop/UI
+  clients continue working; new clients also understand legacy responses from
+  older servers or an explicit fallback. Responses are non-cacheable and vary
+  by Accept header.
+
+All variants use the existing authenticated dashboard route and instance-access
+boundary. History additionally looks up `(entityId, repository)` on **every**
+request. IDs do not grant access. Cursors bind the schema version, entity,
+repository, entity revision and complete ordering boundary. Each history page
+uses a database snapshot. A changed revision returns HTTP 409
+`OUTCOME_HISTORY_STALE`; the UI drops those pages, refreshes the summary and
+restarts the expanded history. Invalid/foreign cursors return 400, repository
+mismatches return 404, and an incomplete projection returns 503
+`OUTCOMES_NOT_READY`, never a partial/empty successful feed.
+
+### Capture, backfill and recovery
+
+Installation creates only the private versioned catalog, indexes and triggers
+in a short transaction; startup neither seeds all tasks nor rebuilds histories.
+The existing source task-history lookup index remains in use. This catalog
+intentionally does not add names to `knex_migrations`: older running Node
+services can continue validating the shared migration catalog.
+
+Triggers capture relevant INSERT/UPDATE/DELETE operations on `tasks` and
+`task_history` in the **same transaction as the source write**. The dirty table
+coalesces work by task, with a fresh token for every mutation. The source-write
+review covered worker creation/transitions (`workerStateManager`,
+`workerStateTransition`), persisted restart/recovery (`persistedTaskStateStore`,
+`taskSubmissionRetry`), goal attempts and synthetic routing, late completed
+metadata (`ultrafixContinuationMeta`), task payload/final-result changes, import
+jobs, and the transactional task/history deletion in `taskRoutes`. All SQL
+writers enter the same capture mechanism, including bulk imports and history
+retention; no lifecycle publisher needs to remember a second projection write.
+
+The worker seeds task IDs in 100-task keyset batches, then processes one dirty
+task at a time. Expensive per-task reconstruction occurs in a read snapshot.
+During backfill it compares that task's projected completions against the old
+reader in the **same snapshot**. A short write transaction checks the dirty
+token and rebuild generation before replacing that task's runs and reconciling
+both its old and new entity summaries. A concurrent source write leaves a new
+token queued; a concurrent rebuild invalidates the old calculation. Duplicate
+workers/delivery cannot double-count. Unchanged rendering data keeps its entity
+revision. Readiness is committed only after seeding and catch-up finish with an
+empty queue under the writer lock. A failed parity check leaves the projection
+unready and records the failure.
+
+A transactional outbox records affected repository invalidations. The API
+publishes them on the existing activity channel **after projection commit** and
+acknowledges the outbox only after publication succeeds. It uses the existing
+completion activity subscription; an initial readiness transition also wakes
+clients, including an empty database. Lost delivery/reconnect still uses the
+existing dashboard reconciliation scheduler. The projection worker checks its
+durable queue every 250 ms while idle; no new browser polling loop was added.
+Collapsed entities never request history. Expanded pages remain local to the
+mounted row and are keyed by repository/entity/revision and authenticated API
+scope; concurrent identical requests use the existing shared-read mechanism.
+
+Retention deliberately follows the old reader: removing a task removes its
+outcomes; removing history can remove completions or merge surviving run
+boundaries. The next projection reflects those surviving sources rather than
+keeping archival outcomes. Restarting a task alone does not erase completed
+runs. PR resolution, title fallback, Unicode substring matching, timestamp/task/
+completion ordering, skipped-work and goal-task exclusions, and run-local recap
+and review-score rules are unchanged.
+
+### Rollout, rebuild and rollback
+
+1. Start with `DASHBOARD_OUTCOME_PROJECTION=shadow`. The worker builds and checks
+   the projection while feed/narrative clients continue using legacy reads.
+2. Monitor the status variant until `ready` is true and `pending`/`lagMs` settle.
+   Compare a consistent SQLite backup with `--verify --projected` below. The
+   serving process continues capturing/catching up concurrent writes.
+3. Remove the variable and restart the API to enable summaries for opted-in
+   clients and projected narrative completions. Legacy clients retain their
+   existing contract. With the variable unset on first installation, summary
+   clients get explicit 503 readiness responses until backfill completes.
+4. Roll back with `DASHBOARD_OUTCOME_PROJECTION=legacy` and restart. This disables
+   the projection worker and uses the old reader for feed/narrative; source
+   capture remains installed so re-enabling can catch up. Older binaries can
+   also run with the private tables/triggers present. Do not drop source data
+   or edit the shared migration ledger.
+
+An online rebuild invalidates cursors and makes projected reads unavailable
+until ready. In shadow mode it can run behind the legacy reader:
+
+```sh
+npx tsx scripts/benchmark-dashboard-outcomes.ts --database=/path/to/propr.sqlite --rebuild --enqueue-only
+npx tsx scripts/benchmark-dashboard-outcomes.ts --database=/path/to/propr.sqlite --status
+```
+
+`--enqueue-only` resets only derived tables and the durable backfill checkpoint;
+source records are untouched. The running projection worker resumes the bounded
+backfill. Without that flag, `--rebuild` also drains the backfill in the command
+process (use this on an offline snapshot). Worker crashes/restarts resume their
+checkpoint and dirty tokens. The rebuild generation prevents pre-rebuild work
+from replacing newer results.
+
+### Reproduction and evidence
+
+```sh
+# Assertions: oracle parity, fully paginated history, metadata, identity,
+# retention, cursor/repository isolation, source rollback, concurrent writes,
+# resumable backfill, rebuild, worker restart and serving SQL traces.
+npx tsx scripts/benchmark-dashboard-outcomes.ts --self-test
+
+# 50 entities, 20 then 200 runs/entity; 30 warm samples plus the first read,
+# query plans, concurrent feed/narrative input reads and incremental write cost.
+npx tsx scripts/benchmark-dashboard-outcomes.ts --synthetic
+
+# A writable OFFLINE backup: build projection, compare both readers in a
+# snapshot, print 30 warm samples, first read, payload sizes and query plans.
+npx tsx scripts/benchmark-dashboard-outcomes.ts --database=/tmp/outcomes.sqlite --rebuild --projected --verify
+# Measure connection-first-read behavior separately from rebuilding:
+npx tsx scripts/benchmark-dashboard-outcomes.ts --database=/tmp/outcomes.sqlite --projected
+
+# Production browser bundle with the existing dashboard fixture:
+npm run build --workspace propr-ui
+npm run preview --workspace propr-ui -- --host 127.0.0.1 --port 4173
+# In another terminal; --capture is optional and writes transient evidence.
+npx tsx scripts/benchmark-dashboard-outcomes.ts --browser-test --url=http://127.0.0.1:4173 --capture
+```
+
+The browser harness checks one startup summary and zero history requests,
+expansion-only loading, local retry, pagination, reopening without a new read,
+new completions while expanded, collapsed push/reconnect, stale-cursor recovery,
+and ignoring an in-flight history result after switching repository. It captures
+the loading and first-page/load-more states using Playwright Chromium.
+
+The synthetic fixture includes 64 KiB of unused job payload per task. Query
+plans select `dashboard_outcome_v1_feed`, `dashboard_outcome_v1_repository` and
+`dashboard_outcome_v1_history`; the serving SQL trace contains no `tasks` or
+`task_history` reads and no history windows. Search alone scans compact titles
+with JavaScript Unicode case folding.
+
+These local fixtures are **not** the staging snapshot/hardware or an authenticated
+remote end-to-end measurement. First-read samples do not evict the OS cache,
+and the synthetic fixture has just been built in memory. Reader measurements
+exclude HTTP queueing, network/transfer, model generation and browser rendering.
+Staging acceptance still requires at least 30 authenticated handler and client
+samples, cold behavior separately, and committed-completion visibility lag under
+normal load. Record Server-Timing, client TTFB/transfer and browser render time
+separately; do not report network latency as SQL time. Incremental projection
+cost can grow with the changed task's history; the serving pages do not.
+
+Local synthetic results (2026-09-29, 30 warm reads and 30 incremental writes per
+fixture; milliseconds, same container):
+
+| Runs | Summary p95 | History p95 | Concurrent 50 + 8 p95 | Source commit p95 | Projection apply p95 |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 1,000 | 0.76 | 0.96 | 1.57 | 0.27 | 13.23 |
+| 10,000 | 0.74 | 0.83 | 1.01 | 0.14 | 38.94 |
+
+First summary/history reads after fixture construction were 0.77/0.86 ms and
+0.39/0.48 ms respectively; these are **warm-memory first reads, not cold disk**.
+Serialized summary responses were 19,147 and 19,247 bytes. The earlier-update
+pages were 5,105 bytes (19 available updates) and 5,663 bytes (20 updates plus a
+cursor). Backfills took 0.54 and 2.50 seconds. Projection-apply cost measures a
+synchronously drained dirty task in the harness; it excludes the background
+queue wait and must not be reported as staging visibility lag.
