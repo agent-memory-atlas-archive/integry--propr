@@ -47,18 +47,20 @@ describe('agent tank settings publishing', { concurrency: false }, () => {
     );
 
     assert.deepEqual(body(), { success: true });
-    assert.deepEqual(savedSettings, [{ enabled: true, url: 'http://agent-tank.test' }]);
+    assert.deepEqual(savedSettings, [{ mode: 'external', url: 'http://agent-tank.test' }]);
     assert.deepEqual(published.map(payload => payload.eventType), ['usage:update']);
   });
 
   test('tells them about a disable too, so the widget can leave', async () => {
-    const { response } = responseRecorder();
+    const { response, body } = responseRecorder();
 
     await createAgentTankRoutes().postAgentTankSettings(
       { body: { enabled: false, url: 'http://agent-tank.test' } } as Request,
       response,
     );
 
+    assert.deepEqual(body(), { success: true });
+    assert.deepEqual(savedSettings, [{ mode: 'disabled', url: 'http://agent-tank.test' }]);
     assert.deepEqual(published.map(payload => payload.eventType), ['usage:update']);
   });
 });

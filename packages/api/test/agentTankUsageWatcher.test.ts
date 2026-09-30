@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { after, describe, test } from 'node:test';
-import { closeConnection } from '@propr/core';
+import { closeConnection, type AgentTankSettings, type AgentStatusResponse } from '@propr/core';
 import { AgentTankUsageWatcher } from '../services/agentTankUsageWatcher.js';
 
 after(async () => closeConnection());
@@ -9,25 +9,25 @@ interface WatcherHarness {
   watcher: AgentTankUsageWatcher;
   published: number;
   setStatus(status: unknown): void;
-  setSettings(settings: { enabled: boolean; url: string }): void;
+  setSettings(settings: Pick<AgentTankSettings, 'mode' | 'url'>): void;
   setListeners(listening: boolean): void;
 }
 
 function createWatcher(): WatcherHarness {
   let status: unknown = { claude: { usage: { session: { percent: 1 } } } };
-  let settings = { enabled: true, url: 'http://agent-tank.test' };
+  let settings: Pick<AgentTankSettings, 'mode' | 'url'> = { mode: 'external', url: 'http://agent-tank.test' };
   let listening = true;
   const harness = {
     published: 0,
     setStatus(next: unknown) { status = next; },
-    setSettings(next: { enabled: boolean; url: string }) { settings = next; },
+    setSettings(next: Pick<AgentTankSettings, 'mode' | 'url'>) { settings = next; },
     setListeners(next: boolean) { listening = next; },
   } as WatcherHarness;
   harness.watcher = new AgentTankUsageWatcher({
     loadSettings: async () => settings,
-    probe: async () => {
+    readStatuses: async () => {
       if (status instanceof Error) throw status;
-      return status;
+      return status as Record<string, AgentStatusResponse> | undefined;
     },
     publish: () => { harness.published += 1; },
     hasListeners: () => listening,
@@ -72,31 +72,30 @@ describe('agent tank usage watcher', { concurrency: false }, () => {
       { claude },
       { claude: { ...claude, error: 'Quota unavailable' } },
       { claude },
-      'HTTP 503',
-      new Error('Agent Tank is unreachable'),
+      undefined,
       { claude },
     ]) {
       harness.setStatus(status);
       assert.equal(await harness.watcher.probeOnce(), true);
       assert.equal(await harness.watcher.probeOnce(), false);
     }
-    assert.equal(harness.published, 8);
+    assert.equal(harness.published, 7);
   });
 
   test('preserves configured URL changes even when usage is identical', async () => {
     const harness = createWatcher();
     await harness.watcher.probeOnce();
-    harness.setSettings({ enabled: true, url: 'http://replacement.test' });
+    harness.setSettings({ mode: 'external', url: 'http://replacement.test' });
     assert.equal(await harness.watcher.probeOnce(), true);
     assert.equal(await harness.watcher.probeOnce(), false);
   });
 
   test('does not publish a snapshot that completes after shutdown', async () => {
-    let resolveProbe!: (status: unknown) => void;
+    let resolveProbe!: (status: Record<string, AgentStatusResponse>) => void;
     let published = 0;
     const watcher = new AgentTankUsageWatcher({
-      loadSettings: async () => ({ enabled: true, url: 'http://agent-tank.test' }),
-      probe: () => new Promise(resolve => { resolveProbe = resolve; }),
+      loadSettings: async () => ({ mode: 'external', url: 'http://agent-tank.test' }),
+      readStatuses: () => new Promise(resolve => { resolveProbe = resolve; }),
       publish: () => { published += 1; },
       hasListeners: () => true,
     });
@@ -104,7 +103,7 @@ describe('agent tank usage watcher', { concurrency: false }, () => {
     await Promise.resolve();
     assert.equal(await watcher.probeOnce(), false, 'overlapping probes are suppressed');
     await watcher.close();
-    resolveProbe({ claude: { usage: { session: { percent: 42 } } } });
+    resolveProbe({ claude: { name: 'claude', usage: { session: { percent: 42 } } } });
     assert.equal(await probing, false);
     assert.equal(published, 0);
   });
@@ -138,7 +137,7 @@ describe('agent tank usage watcher', { concurrency: false }, () => {
     const harness = createWatcher();
     await harness.watcher.probeOnce();
 
-    harness.setSettings({ enabled: false, url: 'http://agent-tank.test' });
+    harness.setSettings({ mode: 'disabled', url: 'http://agent-tank.test' });
 
     assert.equal(await harness.watcher.probeOnce(), true);
     assert.equal(harness.published, 2);
