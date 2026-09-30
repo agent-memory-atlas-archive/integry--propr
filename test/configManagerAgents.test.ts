@@ -340,7 +340,39 @@ describe('agent config migration', () => {
         });
 
         assert.strictEqual(migrateAgentConfig(agent), true);
-        assert.deepStrictEqual(agent.supportedModels, ['mistral-medium-3.5']);
+        assert.deepStrictEqual(agent.supportedModels, AGENT_DEFAULTS.vibe.defaultModels);
         assert.strictEqual(agent.defaultModel, 'mistral-medium-3.5');
     });
+});
+
+
+test('Vibe migration preserves configured models, credentials, defaults and explicit CLI pins', () => {
+    for (const defaultModel of ['mistral-medium-3.5', 'local', 'my-private-model', 'zai-glm-5-2']) {
+        const agent = createAgent({ type: 'vibe', supportedModels: [defaultModel], defaultModel,
+            configPath: '/srv/vibe-account', envVars: { MISTRAL_API_KEY: 'test-key' },
+            cliVersionType: 'specific', cliVersion: '2.25.4', cliVersionResolved: '2.25.4' });
+        assert.strictEqual(migrateAgentConfig(agent), true);
+        assert.ok(agent.supportedModels.includes('zai-glm-5-3'));
+        assert.ok(agent.supportedModels.includes(defaultModel));
+        assert.strictEqual(agent.defaultModel, defaultModel);
+        assert.strictEqual(agent.configPath, '/srv/vibe-account');
+        assert.strictEqual(agent.envVars?.MISTRAL_API_KEY, 'test-key');
+        assert.strictEqual(agent.cliVersionResolved, '2.25.4');
+        assert.strictEqual(migrateAgentConfig(agent), false);
+    }
+});
+
+
+test('retired Vibe defaults migrate to Medium even when it was already enabled', () => {
+    for (const retired of ['devstral-small', 'devstral-small-latest', 'devstral-2', 'devstral-2512']) {
+        const agent = createAgent({ type: 'vibe',
+            supportedModels: ['mistral-medium-3.5', retired], defaultModel: retired,
+            cliVersionType: 'default', cliVersionResolved: '2.25.4' });
+        assert.equal(migrateAgentConfig(agent), true);
+        assert.equal(agent.defaultModel, 'mistral-medium-3.5');
+        assert.equal(agent.cliVersionResolved, '2.25.8');
+        assert.ok(!agent.supportedModels.includes(retired));
+        assert.ok(agent.supportedModels.includes('zai-glm-5-3'));
+        assert.equal(migrateAgentConfig(agent), false);
+    }
 });
