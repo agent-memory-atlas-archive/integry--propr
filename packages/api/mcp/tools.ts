@@ -1,3 +1,4 @@
+/* eslint-disable max-lines -- MCP tool registration stays centralized so authorization and dispatch remain auditable */
 import { assertPlannerCancellationIdentity, cancellationTarget, cancellationOutcome, trackCancellation, trackExecution } from './operationTracking.js';
 import { z } from 'zod';
 import packageInfo from '../package.json' with { type: 'json' };
@@ -18,8 +19,10 @@ import { createNotificationRoutes } from '../routes/notificationRoutes.js';
 import { createConfigRoutes } from '../routes/configRoutes.js';
 import { createAgentRuntimeRoutes } from '../routes/agentRuntimeRoutes.js';
 import { McpError, type McpScope } from './config.js';
+import type { McpErrorEnvelope } from './errorEnvelope.js';
 import { McpPolicy, type McpPrincipal } from './policy.js';
 import { McpOperations, type OperationResult, type Operation } from './operations.js';
+import { syncLifecycle } from './operationLifecycle.js';
 import { callWorkflow, type WorkflowHandler } from './adapter.js';
 import { addTaskSubmissionTools, trackTaskSubmission } from './toolsTaskSubmissions.js';
 import { addPlanningTools } from './toolsPlanning.js';
@@ -30,9 +33,16 @@ import { addArtifactTools } from './toolsArtifacts.js';
 import { addManagementTools } from './toolsManagement.js';
 import { addNotificationTools } from './toolsNotifications.js';
 import { addActivityTools } from './toolsActivity.js';
-import { summarizeGoal, summarizeTask } from './listSummaries.js';
+import { addWorkOverviewTools } from './toolsWorkOverview.js';
+import { addDocsTools } from './toolsDocs.js';
+import { getDocsMetadata } from './docsIndex.js';
+import { summarizeGoal } from './listSummaries.js';
 import { getAgentActivity } from './agentActivity.js';
-import { GOAL_DETAIL_COLUMNS, TERMINAL_TASK_STATES, goalDetail, goalInputPage, taskDetail, type GoalDetailRow } from './goalTaskDetail.js';
+import { GOAL_DETAIL_COLUMNS, goalDetail, goalInputPage, taskDetail, type GoalDetailRow } from './goalTaskDetail.js';
+import { queryTaskSummaries } from './taskListing.js';
+import { addVisualPreviewTools, type VisualPreviewToolServices } from './toolsPreviews.js';
+
+export { applyTaskVisibility } from './taskListing.js';
 
 export const repositorySchema = z.string().regex(/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/).max(255);
 export const idSchema = z.string().min(1).max(255);
@@ -57,10 +67,11 @@ export interface ToolContext { principal: McpPrincipal; args: Args; operationId?
 export interface McpTool {
   name: string; description: string; scope: McpScope; schema: z.ZodObject; readOnly?: boolean;
   permission?: InstancePermission;
-  target?: { table: string; column: string; arg: string; owner?: string };
+  /** `optional` opts one arm of an exactly-one-of schema out of the target check; the default fails closed. */
+  target?: { table: string; column: string; arg: string; owner?: string; optional?: boolean };
   run: (context: ToolContext) => Promise<OperationResult>;
 }
-export interface ToolDeps { db: Knex; taskQueue: Queue; redisClient: RedisClientType; runtimeBuildQueue: Queue; policy: McpPolicy; taskSubmissionServices?: Parameters<typeof createTaskSubmissionRoutes>[0]['services']; goalServices?: Omit<Parameters<typeof createGoalRoutes>[0], 'db' | 'taskQueue' | 'redisClient'> }
+export interface ToolDeps { db: Knex; taskQueue: Queue; redisClient: RedisClientType; runtimeBuildQueue: Queue; policy: McpPolicy; taskSubmissionServices?: Parameters<typeof createTaskSubmissionRoutes>[0]['services']; goalServices?: Omit<Parameters<typeof createGoalRoutes>[0], 'db' | 'taskQueue' | 'redisClient'>; visualPreviews?: VisualPreviewToolServices }
 export const ok = (data: unknown): OperationResult => ({ status: 200, data });
 
 export async function markMergedPullRequests(
@@ -74,17 +85,6 @@ export async function markMergedPullRequests(
     .whereIn('pr_number', numbers).whereNotNull('merged_at').select('pr_number');
   const merged = new Set(rows.map(row => Number(row.pr_number)));
   for (const item of items) if (merged.has(Number(item[fields.number]))) item[fields.state] = 'merged';
-}
-
-/**
- * Hide other users' private goal tasks. A goal's current task is visible only
- * to that goal's owner, and a goal-typed task with no owning goal is visible to
- * nobody. Shared by every tool that lists tasks so one predicate governs them.
- */
-export function applyTaskVisibility(db: Knex, query: Knex.QueryBuilder, userId: string): Knex.QueryBuilder {
-  query.whereNotIn('tasks.task_id', db('goals').select('current_task_id').whereNot('owner_id', userId).whereNotNull('current_task_id'));
-  query.andWhere(builder => builder.whereNot('tasks.task_type', 'goal').orWhereIn('tasks.task_id', db('goals').select('current_task_id').where({ owner_id: userId })));
-  return query;
 }
 
 /** Cross-repository list results carry their own repository, so merge state is resolved per repository. */
@@ -132,10 +132,11 @@ export function createToolCatalog(deps: ToolDeps): McpTool[] {
   const notifications = createNotificationRoutes({ webPushDispatcherConfigured: false });
   const config = createConfigRoutes({ redisClient });
   const runtime = createAgentRuntimeRoutes({ getRuntimeBuildQueue: () => deps.runtimeBuildQueue });
-  tools.push({ name: 'get_connection', description: 'Get identity, stable instance, scopes, effective tools, version and browser setup links.', scope: 'read', readOnly: true, schema: z.object({}).strict(), run: async ({ principal }) => ok({
+  tools.push({ name: 'get_connection', description: 'Get identity, stable instance, scopes, effective tools, version, bundled docs and browser setup links.', scope: 'read', readOnly: true, schema: z.object({}).strict(), run: async ({ principal }) => ok({
     identity: { id: principal.user.id, username: principal.user.username }, instanceId: policy.config.instanceId,
     scopes: principal.scopes, permissions: principal.authorization.permissions, repositories: principal.grant.repositories,
     version: packageInfo.version, connectContractVersion: 'propr-connect-mcp/1', resource: principal.grant.resource, protocolVersions: ['2026-07-28', '2025-11-25'],
+    docs: await getDocsMetadata(),
     capabilities: tools.filter(tool => principal.scopes.includes(tool.scope) && (!tool.permission || principal.authorization.permissions.includes(tool.permission))).map(tool => tool.name),
     connectedAppsUrl: principal.grant.membershipSource === 'connect' ? 'https://connect.propr.dev/connected-apps' : `${policy.config.origin}/mcp/apps`, setupUrl: `${process.env.FRONTEND_URL || policy.config.origin}/settings`,
     limitations: ['Deployment/release uses the existing operator CLI; no deployment backend is exposed by this instance.', 'Voice availability depends on the host.', 'Cancellation requests may take time to stop running work.'],
@@ -178,6 +179,9 @@ export function createToolCatalog(deps: ToolDeps): McpTool[] {
   addManagementTools(tools, deps, { todos, config, runtime });
   addNotificationTools(tools, deps, notifications);
   addActivityTools(tools, deps);
+  addWorkOverviewTools(tools, deps, listScope);
+  addDocsTools(tools, deps);
+  addVisualPreviewTools(tools, deps);
 
   tools.push({ name: 'list_goals', description: 'List compact goal summaries, progress, runtime and pull request context. Omit repository to list every repository in this grant; filter with state to see only what is still running.', scope: 'read', readOnly: true, schema: z.object({ ...listScopeShape, ...pageShape }).strict(), run: async ({ principal, args }) => {
     const query = db('goals').where({ owner_id: principal.user.id });
@@ -219,38 +223,10 @@ export function createToolCatalog(deps: ToolDeps): McpTool[] {
   const taskTarget = { table: 'tasks', column: 'task_id', arg: 'taskId' };
   const taskColumns = ['task_id', 'repository', 'issue_number', 'task_type', 'created_at'];
   tools.push({ name: 'list_tasks', description: 'List compact task summaries, execution timing and pull request context, excluding other users’ private goal tasks. Omit repository to list every repository in this grant; filter with state to see only what is still running.', scope: 'read', readOnly: true, schema: z.object({ ...listScopeShape, ...pageShape }).strict(), run: async ({ principal, args }) => {
-    // Correlated indexed lookups avoid materializing history for unrelated tasks.
-    const latestHistoryId = db('task_history').select('history_id')
-      .where('task_id', db.ref('tasks.task_id')).orderBy('history_id', 'desc').limit(1);
-    const taskStart = db('task_history').min('timestamp')
-      .where('task_id', db.ref('tasks.task_id')).whereIn('state', ['processing', 'claude_execution', 'post_processing']);
-    // Keep PR state and agent/model fields from the same latest relation row.
-    const latestPlanIssueId = db('plan_issues').select('id')
-      .where('task_id', db.ref('tasks.task_id')).orderBy('id', 'desc').limit(1);
-    const query = db('tasks');
-    scopeRepositories(query, 'tasks.repository', args.repository, await listScope(principal, args));
-    applyTaskVisibility(db, query, principal.user.id);
-    // The lifecycle filter reads the same newest history row the summary reports, before paging.
-    if (args.state && args.state !== 'all') {
-      const latestState = db('task_history').select('state')
-        .where('task_id', db.ref('tasks.task_id')).orderBy('history_id', 'desc').limit(1);
-      if (args.state === 'active') query.whereRaw(`coalesce((?), 'pending') not in (${TERMINAL_TASK_STATES.map(() => '?').join(', ')})`, [latestState, ...TERMINAL_TASK_STATES]);
-      else query.whereRaw('(?) = ?', [latestState, args.state]);
-    }
-    // Apply visibility and pagination before looking up history or plan relations.
-    const taskPage = query.select(...taskColumns, 'model_name', 'pr_number', 'initial_job_data')
-      .orderBy('tasks.created_at', 'desc').orderBy('tasks.task_id', 'desc').offset(args.offset).limit(args.limit).as('tasks');
-    const rows = await db.from(taskPage)
-      .leftJoin('task_history as latest_history', 'latest_history.history_id', db.raw('(?)', [latestHistoryId]))
-      .leftJoin('plan_issues as task_plan_issue', 'task_plan_issue.id', db.raw('(?)', [latestPlanIssueId]))
-      .select('tasks.*', 'latest_history.state', 'latest_history.timestamp as updated_at', 'latest_history.reason as state_reason',
-        'latest_history.metadata as state_metadata', taskStart.as('started_at'),
-        'task_plan_issue.pr_number as plan_pr_number', 'task_plan_issue.status as plan_issue_status',
-        'task_plan_issue.agent_alias as plan_agent_alias', 'task_plan_issue.model_name as plan_model_name')
-      .orderBy('tasks.created_at', 'desc').orderBy('tasks.task_id', 'desc');
-    const tasks = rows.map(row => summarizeTask(row));
-    await markMergedListPullRequests(db, tasks);
-    return ok({ tasks, nextOffset: rows.length === args.limit ? args.offset + args.limit : null });
+    const repositories = args.repository ? [args.repository] : await listScope(principal, args) ?? [];
+    const taskSummaries = await queryTaskSummaries(db, { repositories, state: args.state, principalUserId: principal.user.id,
+      offset: args.offset, limit: args.limit });
+    return ok({ tasks: taskSummaries, nextOffset: taskSummaries.length === args.limit ? args.offset + args.limit : null });
   } });
   tools.push({ name: 'get_task', description: 'Read a task’s persisted state with its most recent events, newest narration, execution timing, changed-file counts and linked pull request. changesSummary is null when no file-change data is persisted; it never reports zero for unknown.', scope: 'read', readOnly: true, schema: z.object(taskShape).strict(), target: taskTarget, run: async ({ principal, args }) => ok({
     ...await db('tasks').where({ task_id: args.taskId }).first(taskColumns),
@@ -296,23 +272,66 @@ export function createToolCatalog(deps: ToolDeps): McpTool[] {
   workflow(tools, { name: 'delete_task', description: 'Delete an exact inactive task and its persisted execution history. Active tasks must first be cancelled.', scope: 'execute', schema: z.object({ ...taskShape, ...mutationShape }).strict(), target: taskTarget }, tasks.deleteTask, args => ({ params: { taskId: args.taskId }, query: { force: 'false' } }));
 
   const operations = new McpOperations(db);
-  tools.push({ name: 'get_operation', description: 'Read a durable mutation receipt and honest acceptance/completion state. Poll no faster than retryAfterSeconds.', scope: 'read', readOnly: true, schema: z.object({ operationId: z.uuid() }).strict(), run: async ({ principal, args }) => {
-    const row = await operations.get(principal, args.operationId);
-    if (row.repository) await policy.repository(principal, row.repository, false, { includeDisabled: row.tool.endsWith('_repository_configuration'), allowUnconfigured: row.tool === 'remove_repository_configuration' });
+  const operationResult = (row: Operation): Record<string, unknown> => {
+    if (!row.result) return {};
+    try { return JSON.parse(row.result); } catch { return {}; }
+  };
+  const authorizeStoredTool = async (
+    row: Operation,
+    principal: McpPrincipal,
+    repositories?: Map<string, Promise<void>>,
+  ): Promise<void> => {
+    if (row.repository) {
+      const options = { includeDisabled: row.tool.endsWith('_repository_configuration'), allowUnconfigured: row.tool === 'remove_repository_configuration' };
+      const key = `${row.repository}\0${Number(options.includeDisabled)}${Number(options.allowUnconfigured)}`;
+      let authorization = repositories?.get(key);
+      if (!authorization) {
+        authorization = policy.repository(principal, row.repository, false, options);
+        repositories?.set(key, authorization);
+      }
+      await authorization;
+    }
     const original = tools.find(tool => tool.name === row.tool);
     if (original?.permission) policy.requirePermission(principal, original.permission);
-    if (row.tool === 'cancel_operation' && row.result && JSON.parse(row.result).operationId) {
-      const source = await operations.get(principal, JSON.parse(row.result).operationId);
-      if (source.repository) await policy.repository(principal, source.repository);
-      row.repository = source.repository;
-    }
+  };
+  const authorizeOperation = async (
+    row: Operation,
+    principal: McpPrincipal,
+    repositories?: Map<string, Promise<void>>,
+  ): Promise<void> => {
+    await authorizeStoredTool(row, principal, repositories);
+    const sourceId = row.tool === 'cancel_operation' ? operationResult(row).operationId : undefined;
+    if (typeof sourceId !== 'string') return;
+    const source = await operations.get(principal, sourceId);
+    await authorizeStoredTool(source, principal, repositories);
+    row.repository = source.repository;
+  };
+  tools.push({ name: 'get_operation', description: 'Read a durable mutation receipt and honest lifecycle. "accepted" means the request was recorded and handed to the backend; "running" means execution was observed; the loop/receipt is only "completed" when the backend reached a terminal success state. Poll no faster than retryAfterSeconds.', scope: 'read', readOnly: true, schema: z.object({ operationId: z.uuid() }).strict(), run: async ({ principal, args }) => {
+    const row = await operations.get(principal, args.operationId);
+    await authorizeOperation(row, principal);
     const receipt = operations.project(row);
-    const result = row.result ? JSON.parse(row.result) : {};
-    const continuation = result.continuation || result;
-    if (continuation.planId) receipt.targetState = await db('task_drafts').where({ draft_id: continuation.planId, user_id: principal.user.id }).first('status', 'paused', 'mcp_revision');
-    if (continuation.goalId) receipt.targetState = await db('goals').where({ goal_id: continuation.goalId, owner_id: principal.user.id }).first('desired_state', 'result_state', 'current_task_id');
+    const result = operationResult(row);
+    const continuation = result.continuation && typeof result.continuation === 'object' && !Array.isArray(result.continuation)
+      ? result.continuation as Record<string, unknown> : result;
+    if (continuation.planId) {
+      const columns = ['status', 'paused', 'mcp_revision'];
+      if (row.tool === 'refine_plan') columns.push('refinement_result');
+      receipt.targetState = await db('task_drafts')
+        .where({ draft_id: continuation.planId, user_id: principal.user.id }).first(...columns);
+    }
+    if (continuation.goalId) {
+      const goal = await db('goals').where({ goal_id: continuation.goalId, owner_id: principal.user.id })
+        .first('desired_state', 'result_state', 'current_task_id', 'final_pr_number', 'failure_reason');
+      if (goal) {
+        const currentTask = typeof goal.current_task_id === 'string'
+          ? await db('task_history').where({ task_id: goal.current_task_id }).orderBy('history_id', 'desc').first('state', 'timestamp', 'reason')
+          : undefined;
+        receipt.targetState = { ...goal, ...(currentTask ? { currentTask: { taskId: goal.current_task_id, ...currentTask } } : {}) };
+      }
+    }
     if (continuation.taskId) receipt.targetState = await db('task_history').where({ task_id: continuation.taskId }).orderBy('history_id', 'desc').first('state', 'timestamp');
-    updateReceiptState(row, receipt);
+    const unavailableOutcome = updateReceiptState(row, receipt);
+    if (unavailableOutcome) await operations.markOutcomeUnavailable(row.id, unavailableOutcome);
     await trackTaskSubmission(deps, row, principal, receipt);
     await trackExecution(deps, row, principal, receipt);
     await trackCancellation(deps, row, principal, receipt);
@@ -321,10 +340,71 @@ export function createToolCatalog(deps: ToolDeps): McpTool[] {
       receipt.targetState = { issues };
       if (issues.length === result.issues.length && issues.every(issue => ['under_review', 'merged', 'closed'].includes(issue.status))) receipt.state = 'completed';
     }
+    await syncReceiptLifecycle(operations, row, receipt, !!unavailableOutcome);
+    const durableRow = await operations.get(principal, row.id);
+    const durableReceipt = operations.project(durableRow);
+    receipt.lifecycle = durableReceipt.lifecycle;
+    if (unavailableOutcome) {
+      // A concurrent poll may have retained exact terminal evidence before the
+      // draft metadata was replaced. Return that winning durable observation.
+      receipt.state = durableReceipt.state;
+      receipt.result = durableReceipt.result;
+      if (durableReceipt.state !== 'unknown') delete receipt.message;
+    }
+    reportDurableOutcome(durableRow, receipt);
     if (['accepted', 'posted', 'queued', 'running'].includes(String(receipt.state))) receipt.retryAfterSeconds = 3;
     else delete receipt.retryAfterSeconds;
     return ok(receipt);
   } });
+  const operationLifecycleSchema = z.enum(['accepted', 'running', 'completed', 'failed', 'cancelled', 'unknown', 'active']);
+  tools.push({ name: 'list_operations', description: 'List durable mutation receipts newest first without refreshing backend trackers. "accepted" means the request was recorded and handed to the backend; "running" means execution was observed; the loop/receipt is only "completed" when the backend reached a terminal success state. Use refreshWith on an item when a live refresh is needed.', scope: 'read', readOnly: true,
+    schema: z.object({
+      tool: z.string().min(1).max(128).optional().describe('Exact tool name.'),
+      lifecycle: operationLifecycleSchema.optional(),
+      sinceMinutes: z.number().int().min(1).max(10080).default(1440),
+      repository: repositorySchema.optional(),
+      offset: z.number().int().min(0).max(100000).default(0),
+      limit: z.number().int().min(1).max(50).default(20),
+    }).strict(), run: async ({ principal, args }) => {
+      const acceptedSince = Date.now() - args.sinceMinutes * 60_000;
+      // Recovery is bounded to the listed window so the call stays constant as
+      // receipt history grows; get_operation repairs any older receipt on read.
+      await operations.reconcileTerminalLifecycles(principal, undefined, { acceptedSince });
+      await operations.markInterruptedInvocations(principal);
+      const query = db<Operation>('mcp_operations').where({ owner_id: principal.user.id, grant_id: principal.grant.id })
+        .where('accepted_at', '>=', acceptedSince);
+      if (args.tool) query.where('tool', args.tool);
+      if (args.repository) query.andWhere(builder => builder.where('repository', args.repository).orWhere('tool', 'cancel_operation'));
+      if (args.lifecycle === 'active') query.whereIn('lifecycle', ['accepted', 'running']);
+      else if (args.lifecycle) query.where('lifecycle', args.lifecycle);
+      const ordered = query.orderBy('accepted_at', 'desc').orderBy('id', 'desc');
+      const authorized: Operation[] = [];
+      const repositoryAuthorizations = new Map<string, Promise<void>>();
+      const wanted = args.offset + args.limit + 1;
+      const batchSize = Math.max(50, args.limit);
+      let databaseOffset = 0;
+      while (authorized.length < wanted) {
+        const rows = await ordered.clone().offset(databaseOffset).limit(batchSize);
+        if (!rows.length) break;
+        databaseOffset += rows.length;
+        for (const row of rows) {
+          try {
+            await authorizeOperation(row, principal, repositoryAuthorizations);
+            if (args.repository && row.repository !== args.repository) continue;
+            authorized.push(row);
+          } catch (error) {
+            // Discovery is a filtered view: current authorization failures do
+            // not reveal that a matching receipt exists.
+            if (!(error instanceof McpError) || ![403, 404].includes(error.status)) throw error;
+          }
+          if (authorized.length >= wanted) break;
+        }
+        if (rows.length < batchSize) break;
+      }
+      const page = authorized.slice(args.offset, args.offset + args.limit);
+      return ok({ operations: page.map(row => ({ ...operations.project(row), refreshWith: 'get_operation' })),
+        nextOffset: authorized.length > args.offset + args.limit ? args.offset + args.limit : null });
+    } });
   tools.push({ name: 'cancel_operation', description: 'Request cancellation of an accepted plan generation, goal or task operation. Completed external effects cannot be undone.', scope: 'execute', schema: z.object({ ...mutationShape, operationId: z.uuid() }).strict(), run: async ({ principal, args }) => {
     const row = await operations.get(principal, args.operationId);
     if (row.repository) await policy.repository(principal, row.repository, true);
@@ -360,13 +440,99 @@ export function createToolCatalog(deps: ToolDeps): McpTool[] {
   return tools;
 }
 
-function updateReceiptState(row: Operation, receipt: Record<string, unknown>): void {
+async function syncReceiptLifecycle(
+  operations: McpOperations,
+  row: Operation,
+  receipt: Record<string, unknown>,
+  outcomeUnavailable: boolean,
+): Promise<void> {
+  // A different run's draft snapshot is context, not progress evidence for
+  // this receipt. The guarded unavailable-outcome write is sufficient.
+  if (!outcomeUnavailable) await syncLifecycle(operations, row, receipt);
+}
+
+const TERMINAL_LIFECYCLES = ['completed', 'failed', 'cancelled'];
+
+/**
+ * A terminal lifecycle is the receipt's durable outcome, but these receipts
+ * keep `state: 'accepted'` and point at a draft or goal that later operations
+ * can change. A fresh reading of that target may restate the recorded
+ * outcome; it must never replace it with a different one.
+ */
+function mayObserveOutcome(row: Operation, outcome: unknown): boolean {
+  return !TERMINAL_LIFECYCLES.includes(row.lifecycle) || row.lifecycle === outcome;
+}
+
+/**
+ * A receipt that stays `accepted` records its outcome only in the lifecycle,
+ * so the guarded lifecycle write decides how it finished. When this poll read
+ * something else (a concurrent poll settled the receipt before the target
+ * changed), answer with the durable outcome so the top-level state and the
+ * lifecycle cannot disagree. Tracker-owned receipts persist their own state
+ * and are left to the trackers.
+ */
+function reportDurableOutcome(durable: Operation, receipt: Record<string, unknown>): void {
+  if (durable.state !== 'accepted' || !TERMINAL_LIFECYCLES.includes(durable.lifecycle)) return;
+  if (receipt.state === durable.lifecycle) return;
+  receipt.state = durable.lifecycle;
+  delete receipt.message;
+}
+
+// eslint-disable-next-line complexity -- tool-specific terminal evidence is normalized at the receipt boundary
+function updateReceiptState(row: Operation, receipt: Record<string, unknown>): McpErrorEnvelope | undefined {
   const target = receipt.targetState as Record<string, unknown> | undefined;
   if (row.state === 'accepted' && target) {
-    if (['generate_plan', 'refine_plan'].includes(row.tool) && target.status === 'review') receipt.state = 'completed';
-    if (['generate_plan', 'refine_plan'].includes(row.tool) && target.status === 'failed') receipt.state = 'failed';
-    if (row.tool === 'create_goal' && target.result_state) receipt.state = target.result_state;
+    if (row.tool === 'generate_plan' && target.status === 'review' && mayObserveOutcome(row, 'completed')) receipt.state = 'completed';
+    if (row.tool === 'generate_plan' && target.status === 'failed' && mayObserveOutcome(row, 'failed')) receipt.state = 'failed';
+    if (row.tool === 'refine_plan') {
+      let refinement: Record<string, unknown> = {};
+      try {
+        refinement = typeof target.refinement_result === 'string'
+          ? JSON.parse(target.refinement_result) as Record<string, unknown>
+          : target.refinement_result as Record<string, unknown> || {};
+      } catch { /* An unreadable in-progress value is not terminal evidence. */ }
+      delete target.refinement_result;
+      const result = receipt.result && typeof receipt.result === 'object' && !Array.isArray(receipt.result)
+        ? receipt.result as Record<string, unknown> : {};
+      const hasRunIdentity = typeof result.runId === 'string';
+      const matchesRun = hasRunIdentity && refinement.runId === result.runId;
+      if (matchesRun && target.status === 'review' && refinement.status === 'failed') {
+        if (!mayObserveOutcome(row, 'failed')) return undefined;
+        const invalidOutput = refinement.code === 'REFINEMENT_OUTPUT_INVALID';
+        const error = {
+          code: invalidOutput ? refinement.code : 'REFINEMENT_FAILED',
+          stage: 'workflow',
+          retryable: true,
+          status: 500,
+          message: invalidOutput && typeof refinement.error === 'string' ? refinement.error : 'Plan refinement failed.',
+          ...(invalidOutput && refinement.details && typeof refinement.details === 'object' ? { details: refinement.details } : {}),
+        };
+        receipt.state = 'failed';
+        receipt.targetState = { ...target, status: 'failed', error };
+        receipt.result = { ...result, error };
+      } else if (matchesRun && target.status === 'review' && (refinement.status === 'completed' || refinement.action)) {
+        if (mayObserveOutcome(row, 'completed')) receipt.state = 'completed';
+      } else if (!['completed', 'failed', 'cancelled'].includes(row.lifecycle)
+        && ((!hasRunIdentity && target.status === 'review')
+          || (!matchesRun && hasRunIdentity && typeof refinement.runId === 'string'))) {
+        const legacyReceipt = !hasRunIdentity;
+        const failure: McpErrorEnvelope = {
+          code: 'REFINEMENT_OUTCOME_UNAVAILABLE',
+          stage: 'workflow',
+          retryable: false,
+          status: 500,
+          message: legacyReceipt
+            ? 'The historical refinement outcome is unavailable because this legacy receipt has no planner run identity.'
+            : 'The historical refinement outcome is unavailable because a later refinement replaced its metadata.',
+        };
+        receipt.state = 'unknown';
+        receipt.message = failure.message;
+        return failure;
+      }
+    }
+    if (row.tool === 'create_goal' && target.result_state && mayObserveOutcome(row, target.result_state)) receipt.state = target.result_state;
   }
+  return undefined;
 }
 
 export function workflow(tools: McpTool[], definition: Omit<McpTool, 'run'>, handler: WorkflowHandler, input: (args: Args) => Parameters<typeof callWorkflow>[2]): void {
