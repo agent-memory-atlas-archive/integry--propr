@@ -144,3 +144,42 @@ test('rejects untrusted redirects and non-media responses', async () => {
   await oversized.routes.getPullMedia(request(), oversizedResult.res);
   assert.equal(oversizedResult.state.status, 413);
 });
+
+test('a repository without visual previews answers 404 before any GitHub credential is resolved', async () => {
+  let tokenResolved = 0;
+  let enablementReads = 0;
+  const routes = createPreviewMediaRoutes({
+    reader: { enabledRepositories: async () => { enablementReads += 1; return new Set<string>(); } },
+    resolveToken: async () => { tokenResolved += 1; throw Object.assign(new Error('no GitHub credential'), { status: 401 }); },
+    createOctokit: () => ({ request: async () => { throw new Error('GitHub must not be reached'); } }) as never,
+    fetch: async () => { throw new Error('media must not be fetched'); },
+  });
+  const disabled = response();
+  await routes.getPullMedia(request(), disabled.res);
+  assert.equal(disabled.state.status, 404);
+  assert.deepEqual(disabled.state.body, { error: 'Preview media not found' });
+  assert.equal(tokenResolved, 0, 'the credential is not resolved for a disabled repository');
+  assert.equal(enablementReads, 1);
+});
+
+test('an enabled repository reads enablement once and keeps preview 404s distinct from repository access', async () => {
+  let enablementReads = 0;
+  const { routes } = fixture({
+    body: '<!-- propr-visual-preview -->\n### Different\n\n![Different](https://github.com/user-attachments/assets/other)',
+  });
+  const counted = createPreviewMediaRoutes({
+    reader: { enabledRepositories: async () => { enablementReads += 1; return new Set(['acme/web']); } },
+    resolveToken: async () => 'github-user-token',
+    createOctokit: () => ({ request: async () => ({ data: { body: publishedBody, body_html: '' } }) }) as never,
+    fetch: async () => new globalThis.Response('png', { status: 200, headers: { 'Content-Type': 'image/png' } }),
+  });
+  const served = response();
+  await counted.getPullMedia(request(), served.res);
+  assert.equal(served.state.status, 200);
+  assert.equal(enablementReads, 1, 'the route and the service share one enablement read');
+
+  const missing = response();
+  await routes.getPullMedia(request(), missing.res);
+  assert.equal(missing.state.status, 404);
+  assert.deepEqual(missing.state.body, { error: 'Preview media not found' });
+});

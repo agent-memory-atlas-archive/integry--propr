@@ -1,3 +1,4 @@
+/* eslint-disable max-lines -- both MCP SDK eras share one end-to-end workflow fixture */
 import assert from 'node:assert/strict';
 import { test, mock } from 'node:test';
 import { randomBytes, randomUUID } from 'node:crypto';
@@ -246,8 +247,17 @@ test('both SDK eras drive persisted goal, TODO, notification, settings and guard
         const created = await call('create_goal', { repository, objective: 'Improve reliability', agentId: agent.config.id, model: 'fixture-model', launchStrategy: 'direct' }, true);
         assert.equal(created.state, 'accepted', JSON.stringify(created));
         const goalId = created.result.continuation.goalId;
-        assert.equal((await db('goals').where({ goal_id: goalId }).first()).desired_state, 'running');
+        const createdGoal = await db('goals').where({ goal_id: goalId }).first();
+        assert.equal(createdGoal.desired_state, 'running');
         assert.ok(jobs.some(job => job.goalId === goalId));
+        await db('tasks').insert({ task_id: createdGoal.current_task_id, repository, task_type: 'goal' });
+        await db('task_history').insert({ task_id: createdGoal.current_task_id, state: 'processing' });
+        await db('task_history').insert({ task_id: createdGoal.current_task_id, state: 'completed', reason: 'Goal task completed successfully' });
+        const runningGoal = await call('get_operation', { operationId: created.operationId });
+        assert.equal(runningGoal.lifecycle.state, 'running');
+        assert.ok(runningGoal.lifecycle.startedAt);
+        const runningOperations = await call('list_operations', { lifecycle: 'running' });
+        assert.ok(runningOperations.operations.some((operation: { operationId: string }) => operation.operationId === created.operationId));
         const input = await call('send_goal_input', { repository, goalId, message: 'Add error handling' }, true); assert.equal(input.state, 'completed', JSON.stringify(input));
         assert.ok(await db('goal_inputs').where({ goal_id: goalId, message: 'Add error handling' }).first());
         await call('pause_goal', { repository, goalId }, true); assert.equal((await db('goals').where({ goal_id: goalId }).first()).desired_state, 'paused');
@@ -283,7 +293,7 @@ test('both SDK eras drive persisted goal, TODO, notification, settings and guard
         assert.equal(reviewRequest.state, 'posted');
         const reviewTaskId = `review-task-${modern}`;
         await pendingTask(reviewTaskId, reviewRequest.result.commentId, 'review');
-        assert.equal((await call('get_operation', { operationId: reviewRequest.operationId })).state, 'queued');
+        assert.equal((await call('get_operation', { operationId: reviewRequest.operationId })).state, 'running');
         await db('task_history').insert({ task_id: reviewTaskId, state: 'processing' });
         assert.equal((await call('get_operation', { operationId: reviewRequest.operationId })).state, 'running');
         const { buildReviewComment } = await import('../../../src/jobs/reviewCommentFormatter.js');
@@ -304,7 +314,7 @@ test('both SDK eras drive persisted goal, TODO, notification, settings and guard
         assert.equal(fix.state, 'posted'); assert.ok(comments.at(-1)!.startsWith('/fix F1'));
         const fixTaskId = `fix-task-${modern}`;
         await pendingTask(fixTaskId, fix.result.commentId, 'fix');
-        assert.equal((await call('get_operation', { operationId: fix.operationId })).state, 'queued');
+        assert.equal((await call('get_operation', { operationId: fix.operationId })).state, 'running');
         await db('task_history').insert({ task_id: fixTaskId, state: 'processing' });
         assert.equal((await call('get_operation', { operationId: fix.operationId })).state, 'running');
         head = 'c'.repeat(40);
@@ -316,24 +326,25 @@ test('both SDK eras drive persisted goal, TODO, notification, settings and guard
         const ultrafix = await call('run_ultrafix', pr, true); assert.equal(ultrafix.state, 'posted');
         const loopTask = `ultrafix-start-${modern}`, workEpoch = modern ? 1 : 2;
         await pendingTask(loopTask, ultrafix.result.commentId, modern ? 'review' : 'fix', workEpoch);
-        await db('task_history').insert({ task_id: loopTask, state: 'completed' });
+        await db('task_history').insert({ task_id: loopTask, state: 'completed', reason: 'Task completed successfully' });
         const loop = { active: true, workEpoch, cycleCount: 0, completionStatus: null as string | null, completionReason: null as string | null };
         redisValues.set('ultrafix:state:acme:repo:42', JSON.stringify(loop));
         assert.equal((await call('get_operation', { operationId: ultrafix.operationId })).state, 'running');
-        loop.active = false; loop.completionStatus = 'succeeded'; loop.completionReason = 'Goal reached';
+        loop.active = false; loop.completionStatus = modern ? 'succeeded' : 'failed';
+        loop.completionReason = modern ? 'Goal reached' : 'Maximum cycles reached without resolving the findings.';
         redisValues.set('ultrafix:state:acme:repo:42', JSON.stringify(loop));
         const completedLoop = await call('get_operation', { operationId: ultrafix.operationId });
-        assert.equal(completedLoop.state, 'completed');
-        assert.equal(completedLoop.result.loop.workEpoch, workEpoch);
-        assert.equal(completedLoop.result.loop.completionStatus, 'succeeded');
+        assert.equal(completedLoop.state, modern ? 'completed' : 'failed');
+        assert.equal(completedLoop.result.loop.workEpoch, workEpoch); assert.equal(completedLoop.result.loop.completionStatus, loop.completionStatus);
+        if (!modern) assert.equal(completedLoop.lifecycle.failure.message, loop.completionReason);
         assert.equal(completedLoop.result.continuation.sourceTaskId, loopTask);
         redisValues.set('ultrafix:state:acme:repo:42', JSON.stringify({ ...loop, workEpoch: workEpoch + 1, active: true, completionStatus: null }));
-        assert.equal((await call('get_operation', { operationId: ultrafix.operationId })).state, 'completed');
+        assert.equal((await call('get_operation', { operationId: ultrafix.operationId })).state, modern ? 'completed' : 'failed');
         const lostIntake = await call('review_pull_request', pr, true);
-        await db('mcp_operations').where({ id: lostIntake.operationId }).update({ created_at: Date.now() - 180000 });
+        await db('mcp_operations').where({ id: lostIntake.operationId }).update({ created_at: Date.now() - 11 * 60_000 });
         assert.equal((await call('get_operation', { operationId: lostIntake.operationId })).state, 'unknown');
         await pendingTask(`late-review-${modern}`, lostIntake.result.commentId, 'review');
-        assert.equal((await call('get_operation', { operationId: lostIntake.operationId })).state, 'queued');
+        assert.equal((await call('get_operation', { operationId: lostIntake.operationId })).state, 'running');
         await db('task_history').insert({ task_id: `late-review-${modern}`, state: 'processing' });
         assert.equal((await call('get_operation', { operationId: lostIntake.operationId })).state, 'running');
         await db('task_history').insert({ task_id: `late-review-${modern}`, state: 'cancelled' });
@@ -346,7 +357,7 @@ test('both SDK eras drive persisted goal, TODO, notification, settings and guard
           const execution = `review-${shape}-${modern}`;
           await persistCommentTask(execution, { ...baseJob, commandMode: 'review',
             ...(shape === 'direct' ? { commentId: comment.id, commentBody: comment.body, commentAuthor: comment.author } : { comments: [comment] }) });
-          assert.equal((await call('get_operation', { operationId: request.operationId })).state, 'queued');
+          assert.equal((await call('get_operation', { operationId: request.operationId })).state, 'running');
           await db('task_history').insert({ task_id: execution, state: 'processing' });
           assert.equal((await call('get_operation', { operationId: request.operationId })).state, 'running');
           await db('task_history').insert({ task_id: execution, state: 'completed', metadata: JSON.stringify({ reviewResults: [{ success: false }] }) });
@@ -366,7 +377,7 @@ test('both SDK eras drive persisted goal, TODO, notification, settings and guard
           await db('task_history').insert({ task_id: execution, state: 'completed' });
           assert.equal((await call('get_operation', { operationId: selected.operationId })).state, 'completed');
           assert.equal((await call('get_operation', { operationId: superseded.operationId })).state, 'posted');
-          await db('mcp_operations').where({ id: superseded.operationId }).update({ created_at: Date.now() - 180000 });
+          await db('mcp_operations').where({ id: superseded.operationId }).update({ created_at: Date.now() - 11 * 60_000 });
           assert.equal((await call('get_operation', { operationId: superseded.operationId })).state, 'unknown');
         }
         const unexecuted = await call('review_pull_request', pr, true);
@@ -382,15 +393,15 @@ test('both SDK eras drive persisted goal, TODO, notification, settings and guard
           await db('task_history').insert({ task_id: execution, state: 'completed' });
         }
         assert.equal((await call('get_operation', { operationId: unexecuted.operationId })).state, 'posted');
-        await db('mcp_operations').where({ id: unexecuted.operationId }).update({ created_at: Date.now() - 180000 });
+        await db('mcp_operations').where({ id: unexecuted.operationId }).update({ created_at: Date.now() - 11 * 60_000 });
         assert.equal((await call('get_operation', { operationId: unexecuted.operationId })).state, 'unknown');
         // A loop without a matching durable epoch cannot borrow a later loop's result.
         const staleLoop = await call('run_ultrafix', pr, true);
         await pendingTask(`stale-loop-${modern}`, staleLoop.result.commentId, 'review', workEpoch);
         assert.equal((await call('get_operation', { operationId: staleLoop.operationId })).state, 'unknown');
         assert.ok(comments.some(comment => comment.startsWith('/ultrafix goal=9 max=3')));
-        checks = 'FAILURE'; assert.equal((await call('merge_pull_request', pr, true)).result.error.code, 'CHECKS_NOT_PASSED'); assert.equal(merged, false);
-        checks = 'SUCCESS'; mergeState = 'BLOCKED'; assert.equal((await call('merge_pull_request', pr, true)).result.error.code, 'CHECKS_NOT_PASSED'); assert.equal(merged, false);
+        checks = 'FAILURE'; assert.equal((await call('merge_pull_request', pr, true)).result.error.code, 'CHECKS_FAILING'); assert.equal(merged, false);
+        checks = 'SUCCESS'; mergeState = 'BLOCKED'; assert.equal((await call('merge_pull_request', pr, true)).result.error.code, 'BRANCH_PROTECTION_BLOCKED'); assert.equal(merged, false);
         mergeState = 'CLEAN'; await call('update_pull_request_branch', pr, true); assert.equal(merged, false);
         assert.equal((await call('merge_pull_request', pr, true)).result.error.code, 'STALE_HEAD');
         assert.equal((await call('merge_pull_request', { ...pr, expectedHead: head }, true)).state, 'completed'); assert.equal(merged, true);

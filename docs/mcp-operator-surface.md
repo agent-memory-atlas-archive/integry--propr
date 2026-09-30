@@ -23,9 +23,21 @@ The delivered capabilities are:
    **LLM Log** (and from **More** on mobile). The entry and the page are shown
    only to users with the `instance.manage_settings` permission; the page reads
    `GET /api/admin/mcp/logs` and `GET /api/admin/mcp/logs/stats`.
+5. **Receipts and errors** — durable lifecycle state, timestamps, artifacts,
+   task-submission and ultrafix progress, recent receipt discovery through
+   `list_operations`, and one sanitized structured error envelope with stable
+   codes, stages, retry guidance and nested causes.
+6. **Product documentation** — `list_docs`, `search_docs` and `get_doc` expose
+   bundled, versioned and bounded product/operator documentation, including the
+   MCP guide at `mcp/guide`.
+7. **Visual previews** — `list_visual_previews` discovers published evidence
+   for one task or pull request and `get_visual_preview` returns a bounded image;
+   video evidence remains metadata-only and linked back to GitHub.
+8. **Configuration reachability** — trigger access reads/updates distinguish
+   persisted and environment-owned values, while `find_setting` explains each
+   setting's UI, MCP, CLI or environment location and access requirements.
 
-Each capability lands as its own pull request against this branch. The
-authoritative capability mapping is `docs/mcp-coverage.md` and the operator
-walkthrough is `docs/mcp.md`; both were reconciled against the shipped code in
-`packages/api/mcp/` on 2026-09-25, and
-`packages/api/test/mcpOperatorSurface.test.ts` exercises the surface end to end.
+The authoritative capability mapping is `docs/mcp-coverage.md` and the operator
+walkthrough is `docs/mcp.md`. The operator flow remains covered by
+`packages/api/test/mcpOperatorSurface.test.ts`; the combined observable contract
+is covered by `packages/api/test/mcpObservableSurface.test.ts`.

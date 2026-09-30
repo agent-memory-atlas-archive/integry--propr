@@ -41,12 +41,13 @@ Commands that take a model accept the model IDs configured in AI Agents. The `ll
 
 ProPR filters PR comments by author before processing anything (commands and natural follow-ups alike):
 
-- Bot accounts (usernames containing `[bot]` or with user type `Bot`) and ProPR's own bot account are ignored.
-- If `GITHUB_USER_WHITELIST` is set (comma-separated usernames), only those users can trigger processing.
-- Users listed in `GITHUB_USER_BLACKLIST` are ignored.
+- Bot accounts (usernames containing `[bot]` or with user type `Bot`) and ProPR's own bot account are ignored by default.
+- The GitHub User Whitelist (Settings, or `GITHUB_USER_WHITELIST` as comma-separated logins) is exclusive: when it has any entries, **only** listed users and bots can trigger processing, and the bot and blacklist checks are skipped for them. Matching ignores a `[bot]` suffix, so `name` also admits `name[bot]`. To exempt a bot, add it to the whitelist in Settings or with the MCP `update_trigger_access_configuration` tool's `addBots` operation — and add every human who should keep access, because adding one bot to an empty whitelist blocks everyone else. Environment-managed entries are read-only through MCP.
+- Users listed in `GITHUB_USER_BLACKLIST` are ignored when no whitelist is set.
+- MCP administrators with `instance.manage_settings` can inspect all three lists with `get_trigger_access_configuration`. User and bot allowlist changes use `update_trigger_access_configuration`; the environment-only blocklist is reported but cannot be edited by the tool.
 - Comments containing a configured follow-up ignore keyword are skipped.
 
-Slash commands from an allowed author are processed directly. Natural follow-up comments are additionally gated: the PR must carry one of the configured processing labels (for example `AI` or `propr`), or the comment must contain a trigger keyword from `PR_FOLLOWUP_TRIGGER_KEYWORDS` (for example `!propr`).
+Slash commands from an allowed author are processed directly. Natural follow-up comments are additionally gated: the PR must carry one of the configured processing labels (for example `AI` or `propr`), or the comment must contain a trigger keyword from `PR_FOLLOWUP_TRIGGER_KEYWORDS` (for example `!propr`). When `PR_FOLLOWUP_TRIGGER_KEYWORDS` is empty or unset, every comment from an allowed author triggers a follow-up, labeled PR or not.
 
 ## Review And Fix
 
