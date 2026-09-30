@@ -106,6 +106,7 @@ COPY --from=builder /build/docs/mcp.md /build/docs/mcp-coverage.md /build/docs/m
 # through the mounted Docker socket, using /usr/src/app as the Docker context.
 COPY Dockerfile.agent ./Dockerfile.agent
 COPY scripts/agent-entrypoint.sh ./scripts/agent-entrypoint.sh
+COPY scripts/agent-tank-runtime.mjs ./scripts/agent-tank-runtime.mjs
 COPY scripts/claude-entrypoint.sh ./scripts/claude-entrypoint.sh
 COPY scripts/codex-entrypoint.sh ./scripts/codex-entrypoint.sh
 COPY scripts/antigravity-entrypoint.sh ./scripts/antigravity-entrypoint.sh

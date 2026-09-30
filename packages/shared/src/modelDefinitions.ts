@@ -107,9 +107,12 @@ export const OPENCODE_MODELS: ModelInfo[] = [
 ];
 
 // Mistral Vibe coding models
-// Available hosted model from `vibe /model`: mistral-medium-3.5 (plus local models)
+// Hosted coding models verified against Mistral docs and Vibe 2.25.8 (2026-09-29).
+// GLM presets are supplied at runtime; Medium remains the default.
 export const VIBE_MODELS: ModelInfo[] = [
   { id: 'mistral-medium-3.5', name: 'Mistral Medium 3.5', shortName: 'Mistral Medium', shortAlias: 'mistral', githubLabel: 'llm-vibe-mistral', contextWindow: '256K', maxTokens: 256000, openRouterId: 'mistralai/mistral-medium-3-5' },
+  { id: 'zai-glm-5-3', name: 'GLM 5.3', shortName: 'GLM 5.3', shortAlias: 'glm53', githubLabel: 'llm-vibe-glm53', contextWindow: '1M', maxTokens: 1000000, openRouterId: 'z-ai/glm-5.3', minAgentVersion: '2.25.8' },
+  { id: 'zai-glm-5-2', name: 'GLM 5.2', shortName: 'GLM 5.2', shortAlias: 'glm52', githubLabel: 'llm-vibe-glm52', contextWindow: '1M', maxTokens: 1000000, openRouterId: 'z-ai/glm-5.2', minAgentVersion: '2.25.8' },
 ];
 
 // All models combined
@@ -194,7 +197,7 @@ export const AGENT_DEFAULTS: Record<AgentType, {
     defaultModels: VIBE_MODELS.map(m => m.id),
     defaultAlias: 'vibe',
     npmPackage: 'mistral-vibe',
-    defaultCliVersion: '2.25.4'
+    defaultCliVersion: '2.25.8'
   }
 };
 

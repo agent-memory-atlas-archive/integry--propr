@@ -229,29 +229,29 @@ export class VibeAgent implements Agent {
             const parsedOutput = parseVibeOutput(result.stdout);
             const tokenUsage = parsedOutput.tokenUsage || readLatestVibeSessionTokenUsage(runtimeHomePath);
             const analysisText = (parsedOutput.summary || '').trim();
-            const success = !result.timedOut && isSuccessfulVibeResult(result.exitCode, parsedOutput);
+            const success = !result.timedOut && isSuccessfulVibeResult(result.exitCode, parsedOutput) && !!analysisText;
             const usage = formatUsageMetrics(usageMetrics);
-
-            if (success && analysisText) {
-                if (!suppressLlmLog) {
-                    await persistLlmLog(createLlmLogFromAnalysis({
-                        executionType: (executionType || 'other') as ExecutionType,
-                        modelUsed: parsedOutput.model || effectiveModel,
-                        executionTimeMs,
-                        success: true,
-                        tokenUsage,
-                        sessionId: parsedOutput.sessionId,
-                        draftId: taskId,
-                        correlationId,
-                        repository,
-                        metadata: buildLogMetadata(metadata || {}, result, false),
-                        agentAlias: this.config.alias,
-                        usageMetrics: usage.metrics,
-                        usageMetricRecords: usage.records,
-                        workRef: buildAnalysisWorkRef(executionType, taskId, repository, { taskNumber, prNumber }),
-                    }));
-                }
-
+            const errorMsg = success ? undefined : buildVibeFailureMessage(result, parsedOutput);
+            if (!suppressLlmLog) {
+                await persistLlmLog(createLlmLogFromAnalysis({
+                    executionType: (executionType || 'other') as ExecutionType,
+                    modelUsed: parsedOutput.model || effectiveModel,
+                    executionTimeMs,
+                    success,
+                    tokenUsage,
+                    error: errorMsg,
+                    sessionId: parsedOutput.sessionId,
+                    draftId: taskId,
+                    correlationId,
+                    repository,
+                    metadata: buildLogMetadata(metadata || {}, result, !success),
+                    agentAlias: this.config.alias,
+                    usageMetrics: usage.metrics,
+                    usageMetricRecords: usage.records,
+                    workRef: buildAnalysisWorkRef(executionType, taskId, repository, { taskNumber, prNumber }),
+                }));
+            }
+            if (success) {
                 return {
                     response: analysisText,
                     modelUsed: parsedOutput.model || effectiveModel,
@@ -260,27 +260,6 @@ export class VibeAgent implements Agent {
                     tokenUsage,
                     sessionId: parsedOutput.sessionId
                 };
-            }
-
-            const errorMsg = buildVibeFailureMessage(result, parsedOutput);
-            if (!suppressLlmLog) {
-                await persistLlmLog(createLlmLogFromAnalysis({
-                    executionType: (executionType || 'other') as ExecutionType,
-                    modelUsed: parsedOutput.model || effectiveModel,
-                    executionTimeMs,
-                    success: false,
-                    tokenUsage,
-                    error: errorMsg,
-                    sessionId: parsedOutput.sessionId,
-                    draftId: taskId,
-                    correlationId,
-                    repository,
-                    metadata: buildLogMetadata(metadata || {}, result, true),
-                    agentAlias: this.config.alias,
-                    usageMetrics: usage.metrics,
-                    usageMetricRecords: usage.records,
-                    workRef: buildAnalysisWorkRef(executionType, taskId, repository, { taskNumber, prNumber }),
-                }));
             }
             return { response: '', modelUsed: effectiveModel, executionTimeMs, success: false, error: `Analysis failed: ${errorMsg}` };
         } catch (error) {
@@ -362,6 +341,20 @@ export class VibeAgent implements Agent {
         const envVars = forwardedEnvVars.dockerArgs;
         envVars.push('-e', 'PROPR_AGENT_TYPE=vibe');
         if (cleanModelName) envVars.push('-e', `VIBE_ACTIVE_MODEL=${cleanModelName}`);
+        // Vibe's bundled catalog does not include Mistral-hosted GLM. Its nested
+        // environment layer merges this preset with existing user/provider config,
+        // including in read-only analysis runs, without editing host credentials.
+        if (cleanModelName === 'zai-glm-5-3' || cleanModelName === 'zai-glm-5-2') {
+            envVars.push('-e', `VIBE_MODELS__${cleanModelName}=${JSON.stringify({
+                name: cleanModelName,
+                alias: cleanModelName,
+                provider: 'mistral',
+                thinking: 'high',
+                input_price: 1.4,
+                cached_input_price: 0.14,
+                output_price: 4.4,
+            })}`);
+        }
         envVars.push('-e', 'VIBE_SOURCE_HOME=/home/node/.vibe');
         if (runtimeHomePath) envVars.push('-e', 'VIBE_RUNTIME_HOME=/tmp/propr-vibe-home', '-e', 'HOME=/tmp/propr-vibe-home');
         if (mode === 'analysis') {

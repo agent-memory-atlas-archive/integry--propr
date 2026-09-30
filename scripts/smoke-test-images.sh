@@ -330,11 +330,17 @@ check_ui_api_configuration
 # --- Agent and launcher artifact checks ------------------------------------
 docker run --rm "$AGENT_TAG" sh -c '
   set -eu
-  for executable in claude codex agy opencode vibe git gh rg python3; do
+  for executable in claude codex agy opencode vibe agent-tank git gh rg python3; do
     command -v "$executable" >/dev/null
   done
 ' >/dev/null
 echo "✓ agent runtime exposes every bundled CLI"
+
+# Bundled Agent Tank runs through the shared entrypoint's agent-tank branch,
+# which must not hand it a provider entrypoint. This is the unauthenticated half
+# of that check; scripts/verify-agent-tank-image.sh drives real usage through it.
+docker run --rm --network none -e PROPR_AGENT_TYPE=agent-tank "$AGENT_TAG" agent-tank --version >/dev/null
+echo "✓ agent-tank runs through the entrypoint without a provider entrypoint"
 
 # Exercise GitHub CLI through every normal agent entrypoint. Merely checking
 # command -v is insufficient because each entrypoint places gh-wrapper first in
