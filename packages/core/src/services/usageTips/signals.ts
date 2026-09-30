@@ -21,6 +21,7 @@ export async function collectUsageTipSignals(database: Knex, now = Date.now()): 
     'tasks', 'oneOffTasks', 'review', 'fix', 'switch', 'use', 'merge', 'ultrafix', 'manualCycles',
     'goals', 'plans', 'todos', 'indexingFailures', 'indexingSlow', 'distinctAgents', 'distinctModels',
     'tankEnabled', 'tankRecords', 'mcpEnabled', 'mcpGrants', 'notifications', 'inboxActions',
+    'mcpUsage', 'visualPreviewRepos', 'repoChatMessages', 'epicPlans',
   ].map(key => [key, null]));
   const recent = (value: unknown) => {
     const time = usageSignalTimestamp(value);
@@ -85,6 +86,48 @@ export async function collectUsageTipSignals(database: Knex, now = Date.now()): 
     guarded(async () => {
       // Grants are encrypted. Presence establishes adoption; never decrypt them for tips.
       signals.mcpGrants = (await database('mcp_records').where({ kind: 'grant' }).select('id').limit(3)).length;
+    }),
+    guarded(async () => {
+      if (!await database.schema.hasTable('mcp_access_log')) return;
+      // Authentication alone is not feature use. Read no identities or payloads.
+      signals.mcpUsage = (await database('mcp_access_log').whereIn('kind', ['tool', 'resource', 'prompt']).select('id').limit(LIMIT)).length;
+    }),
+    guarded(async () => {
+      if (!await database.schema.hasTable('repo_chat_messages')) return;
+      signals.repoChatMessages = (await database('repo_chat_messages').select('id').limit(LIMIT)).length;
+    }),
+    guarded(async () => {
+      if (!await database.schema.hasTable('task_drafts')) return;
+      // Project only adoption metadata; never load plan text. Legacy missing
+      // settings mean disabled, but malformed settings and truncated reads do not.
+      const config = "CASE WHEN json_valid(context_config) THEN context_config ELSE '{}' END";
+      const rows = await database('task_drafts').select(
+        database.raw(`context_config IS NULL OR (json_valid(context_config) AND json_type(${config}) = 'object') AS valid`),
+        database.raw(`json_extract(${config}, '$.useEpic') AS enabled`),
+        database.raw(`json_type(${config}, '$.useEpic') AS enabled_type`),
+        database.raw(`json_extract(${config}, '$.epicLabel') AS label`),
+      ).limit(LIMIT);
+      const used = rows.filter(r => r.enabled === 1 || (typeof r.label === 'string' && r.label.length > 0)).length;
+      signals.epicPlans = used || (rows.length < LIMIT && rows.every(r => r.valid && [null, 'true', 'false'].includes(r.enabled_type)) ? 0 : null);
+    }),
+    guarded(async () => {
+      // Repository settings are a JSON array in system_configs, not columns in
+      // the indexed repositories table. Extract flags only, leaving secrets in DB.
+      const row = await database('system_configs').where({ key: 'repos_to_monitor' }).first(
+        database.raw("CASE WHEN json_valid(value) THEN json_type(value) END AS type"));
+      if (!row || row.type !== 'array') return;
+      const rows = await database('system_configs').crossJoin(database.raw('json_each(system_configs.value) AS repo'))
+        .where('system_configs.key', 'repos_to_monitor').select(
+          database.raw("json_extract(repo.value, '$.name') AS name"),
+          database.raw("json_type(repo.value) AS type"),
+          database.raw("json_type(repo.value, '$.visualPreview') AS preview_type"),
+          database.raw("json_extract(repo.value, '$.visualPreview.enabled') AS enabled"),
+          database.raw("json_type(repo.value, '$.visualPreview.enabled') AS enabled_type"),
+        ).limit(LIMIT);
+      const used = new Set(rows.filter(r => r.enabled === 1).map(r => r.name)).size;
+      signals.visualPreviewRepos = used || (rows.length < LIMIT && rows.every(r => r.type === 'object'
+        && typeof r.name === 'string' && [null, 'object'].includes(r.preview_type)
+        && [null, 'true', 'false'].includes(r.enabled_type)) ? 0 : null);
     }),
     guarded(async () => { signals.notifications = (await database('notification_events').select('event_id').limit(3)).length; }),
     guarded(async () => {

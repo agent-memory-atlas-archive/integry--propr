@@ -23,7 +23,14 @@ A failed dismissal is retried with the same event identifier. If persistence sti
 
 ## Relevance and privacy
 
-The daily job uses guarded aggregate feature-usage signals; unavailable signals remain unknown. Features already used regularly are excluded. Candidates rotate deterministically within ten-point relevance bands, without displacing higher-band tips. The saved order remains stable across reloads, and a single relevant tip can recur daily.
+There are two kinds of tips:
+
+- **Corrective** tips suggest improvements to observed workflows, such as replacing repeated manual review and fix cycles with `/ultrafix`.
+- **Discovery** tips introduce unused capabilities and carry a small **New to you** label. They cover [MCP chat control](./mcp-chat.md), visual previews, repository chat, and Epic mode with auto-merge.
+
+The daily job uses guarded installation-wide aggregates; unavailable signals remain unknown. Discovery requires a known usage count of exactly zero and a useful prerequisite: at least three recent tasks for MCP, visual previews, and repository chat, or at least two plans for Epic mode. Unknown usage or any recorded use excludes discovery. An installation without known activity gets no discovery tips. Counts describe retained activity or current configuration, not a personal feature history: previews use enabled repository settings, chat uses saved messages, Epic uses plan configuration, and MCP uses recorded calls. Corrective tips exclude features already used regularly.
+
+Discovery scores occupy the 70–79 range, below strong corrective gaps. Candidates rotate deterministically within ten-point relevance bands. After unknown IDs and cooling tips are removed, the strip mixes up to three tips: when both kinds are eligible, at least one and at most two of each kind appear, preserving their order in the rotated pool. Dismissing one replaces it with the next eligible tip of that kind; the other kind fills the space only when none remain. A sole eligible kind can fill all three slots and recur daily. The saved order remains stable across reloads.
 
 **Display history is not tracked.** Rendering, mounting, reloading and reading tips record no impressions, display counts, first/last-shown timestamps, or acknowledgements. Only an explicit dismissal records acknowledgement. Previous selection does not make a tip ineligible.
 

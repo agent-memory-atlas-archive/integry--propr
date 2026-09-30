@@ -27,7 +27,13 @@ A draft can be reset back to setup if the inputs were wrong, which makes plannin
 
 A generated plan is saved only when every issue has a title, a body and an implementation section. If the planning model's JSON is malformed, the default coding agent repairs it in a scratch workspace, fixing syntax only, and a validator rejects any repair that drops, rewords or adds content. A response that holds only part of a plan, for example because the model stopped mid-plan, fails the generation with an error instead of being saved as a partial or empty plan; regenerate it, or choose a lower granularity for a shorter plan.
 
-{/* SCREENSHOT PLACEHOLDER (P1 — same capture as the planner-studio tutorial's Review Plan shot; interim: the site's ui-plan-detail.png): Capture Planner Studio in the Review Plan stage: the stepper showing the three stages, a generated plan with several issues, and the refinement chat input visible. Use a draft generated against a real repository so issue titles look representative. */}
+## Revision history and refinement
+
+Open **Plan history** in the plan editor to inspect the plan saved before each generation, refinement or edit. Select a version to preview its tasks, then choose **Restore this version**. Restoring also saves the current plan in history. This persistent history is separate from the editor's immediate undo/redo controls and does not undo already-created GitHub issues or code changes.
+
+Refinement returns the complete plan, including unchanged tasks, so review the full result before finalizing. Generation uses a structured file output and rejects incomplete issues rather than silently accepting a partial plan. Setup prompts auto-save; returning to setup lets you change context before regenerating.
+
+![Plan history dialog showing a saved version, its two tasks and the Restore this version action](/img/screenshots/0.9.0/plan-history.png)
 
 ## Context Assembly
 

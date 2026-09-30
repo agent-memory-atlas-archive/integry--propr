@@ -60,7 +60,11 @@ const sidebars: SidebarsConfig = {
       type: 'category',
       label: 'Core Workflow',
       items: [
+        'features/launching-work',
+        'features/goals',
         'features/planning',
+        'features/inbox',
+        'features/mcp',
         'features/usage-tips',
         'features/work-splitting',
         'features/execution-safety',
@@ -73,6 +77,7 @@ const sidebars: SidebarsConfig = {
       items: [
         'features/pr-followup',
         'features/pr-commands',
+        'features/mcp-chat',
         'features/visual-previews',
       ],
     },

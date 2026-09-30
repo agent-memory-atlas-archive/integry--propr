@@ -553,6 +553,7 @@ jobs:
               scripts/smoke-test-images.sh \
               scripts/smoke-test-preview-runtime-images.sh \
               scripts/smoke-test-sqlite-startup.sh \
+              scripts/verify-agent-tank-image.sh \
               scripts/verify-antigravity-image.sh
           } > >(tee -a build_log.txt) 2>&1
 

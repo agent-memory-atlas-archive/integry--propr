@@ -54,6 +54,7 @@ export { AGENT_IMAGE_NAME };
 export const AGENT_BUNDLE_CONTENT_FILES = [
     'Dockerfile.agent',
     'scripts/agent-entrypoint.sh',
+    'scripts/agent-tank-runtime.mjs',
     'scripts/claude-entrypoint.sh',
     'scripts/codex-entrypoint.sh',
     'scripts/antigravity-entrypoint.sh',

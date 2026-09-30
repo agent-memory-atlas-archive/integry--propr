@@ -1,11 +1,13 @@
+import TextareaAutosize from 'react-textarea-autosize';
+import { CreationDialog } from '../components/CreationDialog';
 import { PreviewThumbnails } from '../components/PreviewMedia';
 /* eslint-disable max-lines -- goal list and split-pane console intentionally share this route-level surface */
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import {
   Activity, AlertTriangle, Check, CheckCircle2, CircleDot, CirclePause, CirclePlay, CircleSlash, CircleStop,
-  Copy, ExternalLink, FileText, Filter, GitPullRequest, LoaderCircle, Plus, Search, Send,
-  MoreHorizontal, Terminal, Trash2, X,
+  Copy, ExternalLink, FileText, Filter, GitPullRequest, LoaderCircle, Search, Send,
+  MoreHorizontal, Target, Terminal, Trash2, X,
 } from 'lucide-react';
 import { getInstanceCatalog } from '../api/proprApi';
 import type { InstanceCatalogRepository } from '../api/proprTypes';
@@ -293,6 +295,7 @@ function CreateGoalForm({ onCancel, onCreated, onDirtyChange, onSubmittingChange
   const [files, setFiles] = useState<File[]>([]);
   const [launchStrategy, setLaunchStrategy] = useState<GoalLaunchStrategy>(previousSettings.launchStrategy);
   const [parallelism, setParallelism] = useState(previousSettings.maxParallelTasks?.toString() || '');
+  const [optionsOpen, setOptionsOpen] = useState(false);
   const [ultrafix, setUltrafix] = useState(previousSettings.ultrafix);
   const [checkpointInterval, setCheckpointInterval] = useState(previousSettings.checkpointIntervalMinutes);
   const [submitting, setSubmitting] = useState(false);
@@ -309,8 +312,6 @@ function CreateGoalForm({ onCancel, onCreated, onDirtyChange, onSubmittingChange
   const repositoryOptions = useMemo<RepoOption[]>(() => repositories.map(repo => ({
     name: repo.name,
     enabled: repo.enabled,
-    ...(repo.alias ? { displayName: repo.alias } : {}),
-    ...(repo.baseBranch ? { baseBranch: repo.baseBranch } : {}),
   })), [repositories]);
   const markDirty = useCallback(() => onDirtyChange(true), [onDirtyChange]);
 
@@ -351,7 +352,7 @@ function CreateGoalForm({ onCancel, onCreated, onDirtyChange, onSubmittingChange
     event.preventDefault();
     if (isDemoMode) return;
     if (objectiveTooLong) {
-      setError(`Objective exceeds this coding agent's ${objectiveMaxCharacters?.toLocaleString('en-US')} character limit.`);
+      setError(`Prompt exceeds this coding agent's ${objectiveMaxCharacters?.toLocaleString('en-US')} character limit.`);
       return;
     }
     setSubmitting(true);
@@ -391,13 +392,33 @@ function CreateGoalForm({ onCancel, onCreated, onDirtyChange, onSubmittingChange
         </ul>
         <button type="button" disabled={rechecking} onClick={recheckCapabilities} className="mt-2 font-medium underline disabled:opacity-50">{rechecking ? 'Rechecking…' : 'Recheck runtimes'}</button>
       </div>}
-      <fieldset disabled={isDemoMode} aria-label="Goal creation controls" className={`min-w-0 border-0 p-0 ${isDemoMode ? 'opacity-70' : ''}`}>
-        <div className="grid gap-4 md:grid-cols-2">
+      <fieldset disabled={isDemoMode || submitting} aria-label="Goal creation controls" className={`min-w-0 border-0 p-0 ${isDemoMode ? 'opacity-70' : ''}`}>
         <div className="text-sm font-medium text-slate-700">Repository
           <RepositorySelector repos={repositoryOptions} selectedRepo={repository} onRepoChange={value => { markDirty(); setRepository(value); }} className="mt-1" />
         </div>
-        <label className="text-sm font-medium text-slate-700">Coding agent
-          <select aria-label="Coding agent" value={agentId} onChange={event => { markDirty(); setAgentId(event.target.value); }} className="mt-1 w-full rounded-md border border-slate-300 p-2" required>
+        <div className="mt-5">
+        <label htmlFor="goal-prompt" className="mb-2 block text-sm font-medium text-slate-700">Prompt</label>
+        <div className={`rounded-md border focus-within:ring-1 ${objectiveTooLong ? 'border-red-500 focus-within:border-red-500 focus-within:ring-red-500' : 'border-slate-200 focus-within:border-teal-500 focus-within:ring-teal-500'}`}>
+        <TextareaAutosize id="goal-prompt" aria-label="Prompt" aria-invalid={objectiveTooLong || undefined} aria-describedby={objectiveMaxCharacters === null ? undefined : 'goal-objective-limit'} value={objective} onChange={event => { markDirty(); setObjective(event.target.value); }} onPaste={event => {
+          const pasted = clipboardImageFiles(event);
+          if (!pasted.length) return;
+          event.preventDefault();
+          markDirty();
+          void addGoalFiles(files, pasted, setFiles, setError);
+        }} minRows={6} maxRows={16} placeholder="Describe the outcome you want…" className="block w-full resize-none rounded-t-md border-none p-3 text-sm leading-6 focus:outline-none focus:ring-0" required />
+        <GoalAttachmentInput docked files={files} onFilesSelected={markDirty} onChange={nextFiles => { markDirty(); setFiles(nextFiles); }} onError={setError} disabled={submitting} />
+        </div>
+        {objectiveMaxCharacters !== null && <div id="goal-objective-limit" className={`mt-1 flex flex-wrap items-center justify-between gap-x-3 text-xs ${objectiveTooLong ? 'text-red-600' : 'text-slate-500'}`}>
+          <span>{objectiveLimitProvider?.name ?? selectedAgent?.agentAlias} accepts up to {objectiveMaxCharacters.toLocaleString('en-US')} {objectiveLimitProvider?.unit ?? 'characters'} for the prompt.</span>
+          <output aria-label="Prompt character count" aria-live="polite">{objectiveCharacters.toLocaleString('en-US')} / {objectiveMaxCharacters.toLocaleString('en-US')} characters</output>
+        </div>}
+
+        </div>
+        <details className="mt-5 border-y border-slate-200 py-4" onToggle={event => setOptionsOpen(event.currentTarget.open)}>
+          <summary className="cursor-pointer text-sm font-medium text-slate-700">Advanced Options {!optionsOpen && <span className="ml-2 font-normal text-slate-500">{getModelDisplayName(model) || 'Default model'} · {parallelism ? `${parallelism} parallel tasks` : 'Default concurrency'} · {launchStrategy === 'direct' ? 'Direct' : 'Orchestrate'}</span>}</summary>
+          <div className="mt-4 grid gap-4 sm:grid-cols-2">
+        <label className="text-sm font-medium text-slate-700">Agent
+          <select aria-label="Agent" value={agentId} onChange={event => { markDirty(); setAgentId(event.target.value); }} className="mt-1 w-full rounded-md border border-slate-300 p-2" required>
             {agents.map(agent => <option key={agent.agentId} value={agent.agentId} disabled={!agent.goalCapable}>{capabilityAgentLabel(agent, agents)}{agent.goalCapable ? '' : ' — unsupported'}</option>)}
           </select>
         </label>
@@ -406,15 +427,18 @@ function CreateGoalForm({ onCancel, onCreated, onDirtyChange, onSubmittingChange
             {(selectedAgent?.models || []).map(item => <option key={item} value={item}>{getModelDisplayName(item)}</option>)}
           </select>
         </label>
-        <label className="text-sm font-medium text-slate-700">Maximum parallel tasks (optional)
-          <input aria-label="Maximum parallel tasks" type="number" min="1" max="32" value={parallelism} onChange={event => { markDirty(); setParallelism(event.target.value); }} className="mt-1 w-full rounded-md border border-slate-300 p-2" />
+        <label className="text-sm font-medium text-slate-700 sm:col-span-2">Maximum parallel tasks (optional)
+          <span className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-2">
+          <input aria-label="Maximum parallel tasks" aria-describedby="goal-parallelism-help" type="number" min="1" max="32" value={parallelism} onChange={event => { markDirty(); setParallelism(event.target.value); }} className="w-32 rounded-md border border-slate-300 p-2" />
+          <span id="goal-parallelism-help" className="text-xs font-normal text-slate-500">Leave blank to use default concurrency.</span>
+          </span>
         </label>
         </div>
         <fieldset className="mt-4">
         <legend className="text-sm font-medium text-slate-700">Goal launch strategy</legend>
-        <div className="mt-2 grid gap-3 md:grid-cols-2">
-          <label className="flex cursor-pointer gap-3 border border-slate-200 p-3 text-sm text-slate-700"><input aria-label="Agent implements directly" type="radio" name="launch-strategy" value="direct" checked={launchStrategy === 'direct'} onChange={() => { markDirty(); setLaunchStrategy('direct'); }} /><span><strong className="block text-slate-900">Agent implements directly</strong>ProPR opens the draft PR before work begins and safely commits the agent's changes at checkpoints.</span></label>
-          <label className="flex cursor-pointer gap-3 border border-slate-200 p-3 text-sm text-slate-700"><input aria-label="Agent orchestrates through ProPR" type="radio" name="launch-strategy" value="orchestrate" checked={launchStrategy === 'orchestrate'} onChange={() => { markDirty(); setLaunchStrategy('orchestrate'); }} /><span><strong className="block text-slate-900">Agent orchestrates through ProPR</strong>The agent owns decomposition, creates issues, and starts and monitors their implementation through ProPR.</span></label>
+        <div className="mt-2 flex flex-wrap gap-x-6 gap-y-2">
+          <label className="flex cursor-pointer items-center gap-2 text-sm text-slate-700"><input aria-label="Agent implements directly" type="radio" className="accent-teal-600" name="launch-strategy" value="direct" checked={launchStrategy === 'direct'} onChange={() => { markDirty(); setLaunchStrategy('direct'); }} /><span>Direct</span></label>
+          <label className="flex cursor-pointer items-center gap-2 text-sm text-slate-700"><input aria-label="Agent orchestrates through ProPR" type="radio" className="accent-teal-600" name="launch-strategy" value="orchestrate" checked={launchStrategy === 'orchestrate'} onChange={() => { markDirty(); setLaunchStrategy('orchestrate'); }} /><span>Orchestrate through ProPR</span></label>
         </div>
         </fieldset>
         {launchStrategy === 'direct' && <div className="mt-4 max-w-xl">
@@ -439,26 +463,13 @@ function CreateGoalForm({ onCancel, onCreated, onDirtyChange, onSubmittingChange
         </div>
         <p className="mt-2 text-xs text-slate-500">Guidance for the agent, not a timer. ProPR commits only when the agent declares a coherent checkpoint ready.</p>
         </div>}
-        <div className="mt-4 text-sm font-medium text-slate-700">Objective
-        <textarea aria-label="Objective" aria-invalid={objectiveTooLong || undefined} aria-describedby={objectiveMaxCharacters === null ? undefined : 'goal-objective-limit'} value={objective} onChange={event => { markDirty(); setObjective(event.target.value); }} onPaste={event => {
-          const pasted = clipboardImageFiles(event);
-          if (!pasted.length) return;
-          event.preventDefault();
-          markDirty();
-          void addGoalFiles(files, pasted, setFiles, setError);
-        }} rows={5} className={`mt-1 w-full rounded-md border p-2 ${objectiveTooLong ? 'border-red-500' : 'border-slate-300'}`} required />
-        {objectiveMaxCharacters !== null && <div id="goal-objective-limit" className={`mt-1 flex flex-wrap items-center justify-between gap-x-3 text-xs ${objectiveTooLong ? 'text-red-600' : 'text-slate-500'}`}>
-          <span>{objectiveLimitProvider?.name ?? selectedAgent?.agentAlias} accepts up to {objectiveMaxCharacters.toLocaleString('en-US')} {objectiveLimitProvider?.unit ?? 'characters'} for the objective.</span>
-          <output aria-label="Objective character count" aria-live="polite">{objectiveCharacters.toLocaleString('en-US')} / {objectiveMaxCharacters.toLocaleString('en-US')} characters</output>
-        </div>}
-        <GoalAttachmentInput files={files} onFilesSelected={markDirty} onChange={nextFiles => { markDirty(); setFiles(nextFiles); }} onError={setError} disabled={submitting} />
-        </div>
         <label className="mt-3 flex items-center gap-2 text-sm text-slate-700"><input type="checkbox" checked={ultrafix} onChange={event => { markDirty(); setUltrafix(event.target.checked); }} /> Ask the coding agent to use Ultrafix</label>
+        </details>
       </fieldset>
       </div>
       <div className="flex flex-none justify-end gap-3 border-t border-slate-200 bg-slate-50 px-5 py-4 sm:px-7">
-        <button type="button" onClick={onCancel} disabled={submitting} className={`${buttonClass} border border-slate-300 bg-white text-slate-700 hover:bg-slate-50`}>Cancel</button>
-        <button type="submit" disabled={isDemoMode || submitting || objectiveTooLong || !repository || !agentId || !model || !objective.trim() || !selectedAgent?.goalCapable} title={isDemoMode ? 'Demo mode is read-only' : undefined} className={`${buttonClass} bg-primary-600 text-white hover:bg-primary-700`}>{submitting ? 'Starting…' : 'Start goal'}</button>
+        <button type="button" onClick={onCancel} disabled={submitting} className={`${buttonClass} mr-auto min-h-11 px-4 text-slate-700 hover:bg-slate-100`}>Cancel</button>
+        <button type="submit" disabled={isDemoMode || submitting || objectiveTooLong || !repository || !agentId || !model || !objective.trim() || !selectedAgent?.goalCapable} title={isDemoMode ? 'Demo mode is read-only' : undefined} className={`${buttonClass} min-h-11 px-4 bg-teal-600 text-white hover:bg-teal-700`}>{submitting ? 'Starting…' : 'Start goal'}</button>
       </div>
     </form>
   );
@@ -471,82 +482,23 @@ interface CreateGoalDialogProps {
 }
 
 function CreateGoalDialog({ isOpen, onClose, onCreated }: CreateGoalDialogProps) {
-  const paneRef = useRef<HTMLDivElement>(null);
-  const previousFocusRef = useRef<HTMLElement | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const dirtyRef = useRef(false);
-  const submittingRef = useRef(submitting);
-  submittingRef.current = submitting;
   const setDirty = useCallback((dirty: boolean) => { dirtyRef.current = dirty; }, []);
-
-  const requestClose = useCallback(() => {
-    if (submittingRef.current) return;
-    if (dirtyRef.current && !window.confirm('Discard this unsaved goal? Your objective, attachments, and form changes will be lost.')) return;
+  const requestClose = () => {
+    if (submitting) return;
+    if (dirtyRef.current && !window.confirm('Discard this unsaved goal? Your prompt, attachments, and form changes will be lost.')) return;
     onClose();
-  }, [onClose]);
-
+  };
   useEffect(() => {
-    if (!isOpen) return;
-    dirtyRef.current = false;
-    setSubmitting(false);
-    previousFocusRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-    const previousOverflow = document.body.style.overflow;
-    document.body.style.overflow = 'hidden';
-    const frame = window.requestAnimationFrame(() => {
-      if (paneRef.current && !paneRef.current.contains(document.activeElement)) paneRef.current.focus();
-    });
-    const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') {
-        if (event.defaultPrevented) return;
-        event.preventDefault();
-        requestClose();
-        return;
-      }
-      if (event.key !== 'Tab' || !paneRef.current) return;
-      const focusable = Array.from(paneRef.current.querySelectorAll<HTMLElement>(
-        'button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [href], [tabindex]:not([tabindex="-1"])',
-      ));
-      if (focusable.length === 0) return;
-      const first = focusable[0];
-      const last = focusable[focusable.length - 1];
-      const activeElement = document.activeElement;
-      if (!paneRef.current.contains(activeElement)) { event.preventDefault(); first.focus(); }
-      else if (event.shiftKey && (activeElement === first || activeElement === paneRef.current)) { event.preventDefault(); last.focus(); }
-      else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
-    };
-    document.addEventListener('keydown', handleKeyDown);
-    return () => {
-      window.cancelAnimationFrame(frame);
-      document.body.style.overflow = previousOverflow;
-      document.removeEventListener('keydown', handleKeyDown);
-      if (previousFocusRef.current?.isConnected) previousFocusRef.current.focus();
-    };
-  }, [isOpen, requestClose]);
+    if (isOpen) { dirtyRef.current = false; setSubmitting(false); }
+  }, [isOpen]);
 
   if (!isOpen) return null;
-  return <div
-    className="fixed inset-0 z-50 flex justify-end bg-slate-950/40 sm:p-3 lg:p-5"
-    onMouseDown={event => { if (event.target === event.currentTarget) requestClose(); }}
-  >
-    <div
-      ref={paneRef}
-      role="dialog"
-      aria-modal="true"
-      aria-labelledby="create-goal-title"
-      aria-describedby="create-goal-description"
-      tabIndex={-1}
-      className="flex h-full w-full min-w-0 flex-col bg-white shadow-2xl outline-none sm:max-w-3xl sm:border sm:border-slate-200"
-    >
-      <header className="flex flex-none items-start justify-between gap-4 border-b border-slate-200 px-5 py-4 sm:px-7">
-        <div>
-          <h2 id="create-goal-title" className="flex items-center gap-2 text-lg font-semibold text-slate-900"><Plus className="h-5 w-5 text-primary-600" />Start a goal</h2>
-          <p id="create-goal-description" className="mt-1 text-sm text-slate-500">Configure a dedicated coding-agent session. Your reusable settings are remembered after creation.</p>
-        </div>
-        <button type="button" onClick={requestClose} disabled={submitting} aria-label="Close goal creation" className="inline-flex h-10 w-10 flex-none items-center justify-center text-slate-500 hover:bg-slate-100 hover:text-slate-800 disabled:opacity-50"><X className="h-5 w-5" /></button>
-      </header>
-      <CreateGoalForm onCancel={requestClose} onCreated={onCreated} onDirtyChange={setDirty} onSubmittingChange={setSubmitting} />
-    </div>
-  </div>;
+  return <CreationDialog title="Start a goal" icon={Target} description="Your reusable session settings are remembered after creation."
+    closeLabel="Close goal creation" onClose={requestClose} busy={submitting}>
+    <CreateGoalForm onCancel={requestClose} onCreated={onCreated} onDirtyChange={setDirty} onSubmittingChange={setSubmitting} />
+  </CreationDialog>;
 }
 
 // The steering rail pads its own rows so the separating rules reach both edges of the pane.

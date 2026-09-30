@@ -11,6 +11,17 @@ const tips = USAGE_TIPS_CATALOG.slice(0, 3);
 beforeEach(() => { vi.resetAllMocks(); vi.mocked(getUsageTips).mockResolvedValue({ enabled: true, tips: [...tips] }); });
 
 describe('usage tips', () => {
+  it('labels only discovery tips while mounting still only reads once', async () => {
+    const discovery = USAGE_TIPS_CATALOG.find(t => t.kind === 'discovery')!;
+    vi.mocked(getUsageTips).mockResolvedValue({ enabled: true, tips: [tips[0], discovery] });
+    render(<UsageTipsSection />);
+    const label = await screen.findByText('New to you');
+    expect(screen.getAllByText('New to you')).toHaveLength(1);
+    expect(label.parentElement).toContainElement(screen.getByRole('link', { name: discovery.title }));
+    expect(label.parentElement).not.toContainElement(screen.getByRole('link', { name: tips[0].title }));
+    expect(getUsageTips).toHaveBeenCalledTimes(1);
+    expect(dismissUsageTip).not.toHaveBeenCalled();
+  });
   it('shows the complete personalized recommendation supplied by the API', async () => {
     const body = 'Your instance has recent tasks but few manual reviews. Try /review on a PR to get AI feedback before deciding what needs fixing.';
     vi.mocked(getUsageTips).mockResolvedValue({ enabled: true, tips: [{ ...tips[0], body }] });
