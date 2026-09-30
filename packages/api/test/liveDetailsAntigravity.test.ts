@@ -142,6 +142,17 @@ test('Antigravity 1.1.12 stream text remains visible through live details', asyn
   });
 });
 
+test('an Antigravity goal stream with only its init envelope renders no raw protocol JSON', async () => {
+  const { parseStoredOutputContent } = await import('../routes/liveDetailsRoutes.js');
+  const [init] = fs.readFileSync(new URL('../../core/test/fixtures/antigravity-stream-1.1.12.jsonl', import.meta.url), 'utf8').split('\n');
+
+  const parsed = parseStoredOutputContent(`${init}\n`);
+
+  assert.equal(parsed.format, 'antigravity');
+  assert.equal(parsed.parsed, null);
+  assert.equal(parsed.rawFallback, null);
+});
+
 test('stored output detection and live-details rendering consume Antigravity stream arrays', async () => {
   const { parseStoredOutputContent } = await import('../routes/liveDetailsRoutes.js');
   const output = JSON.stringify([

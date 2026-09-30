@@ -359,7 +359,9 @@ function projectStoredOutputResult(stored: ParsedStoredOutput): ConversationResu
 export function parseStoredOutputContent(output: string): ParsedStoredOutput {
   if (!output.trim()) return { parsed: null, rawFallback: null, format: 'unknown' };
   const format = detectStoredOutputFormat(output);
-  const rawFallback = buildRawOutputConversationResult(output);
+  // Recognized Antigravity output is protocol JSON throughout; before its first
+  // narration (a goal turn's init envelope alone), showing it raw leaks envelopes.
+  const rawFallback = format === 'antigravity' ? null : buildRawOutputConversationResult(output);
   if (format !== 'unknown') return parseStoredOutputWithFormat(output, format, rawFallback);
   for (const fallbackFormat of STORED_OUTPUT_FALLBACK_ORDER) {
     const parsed = parseStoredOutputForFormat(output, fallbackFormat);
