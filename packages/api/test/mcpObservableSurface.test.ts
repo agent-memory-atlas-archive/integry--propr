@@ -295,7 +295,7 @@ test('observable MCP surface keeps receipts, errors, overview, docs and previews
     'name', 'node', 'none', 'null', 'number', 'offset', 'outcome', 'page', 'path', 'plan', 'plan_issues',
     'posted', 'pr_created', 'precondition', 'private_key_jwt', 'progress', 'prompt', 'propr', 'publish',
     'queue', 'queued', 'read', 'refining', 'repositories', 'repository', 'resource', 'retryable', 'review',
-    'role', 'running', 'section', 'since', 'stage', 'state', 'status', 'stopped', 'submitted', 'success',
+    'role', 'running', 'section', 'since', 'stage', 'state', 'status', 'stopped', 'submitted', 'success', 'true',
     'timing', 'token_endpoint_auth_methods_supported', 'tool', 'transport', 'truncated', 'tunnel_id',
     'ultrafix', 'unknown', 'until', 'validation', 'workflow',
     // Prompt names share tool-like spelling but are discovered under prompts/list.
