@@ -60,6 +60,10 @@ For more autonomous cleanup, `/ultrafix` alternates review and fix cycles until 
 
 Full syntax, parameters, and trigger rules for every command are in [PR Comment Commands](./pr-commands.md).
 
+## Automatic Follow-Up For Failed CI
+
+**Auto CI follow-up** (Repositories → repository → Automation, or `propr repo toggle owner/repo --auto-ci-followup`) is off by default. When enabled, a failing check run or commit status on the current head of a pull request makes ProPR post one comment naming the check, the commit, and the failure output; that comment starts follow-up work like any other, without a processing label or trigger keyword. Each failing check is reported at most once per commit. Enable it only where CI failures are trustworthy signals.
+
 ## Cancelling Obsolete Checks During Follow-Up
 
 While a follow-up implements, the checks running on the commit it is about to replace are already obsolete, and on a busy repository they keep runners occupied for work nobody will read. GitHub's own `cancel-in-progress` concurrency only helps once a replacement workflow starts, which is after the new commit is pushed.
@@ -91,7 +95,7 @@ Some checks are worth running but should not decide whether ProPR moves a pull r
 
 A failure of a listed check:
 
-- does not hold back auto-merge (`/merge`) or ultrafix continuation;
+- does not hold back auto-merge or ultrafix continuation;
 - does not start an automatic failed-CI follow-up;
 - is shown to reviews as neutral and marked *(non-blocking)*, not as a failure of the change.
 

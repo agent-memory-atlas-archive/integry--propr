@@ -4,7 +4,8 @@ The ProPR backend (daemon, workers, API) acts on GitHub as a **GitHub App** —
 it reads labeled issues, pushes branches, and opens pull requests as the app's
 bot identity. There are three ways to configure how the backend obtains a GitHub
 **installation access token**. The mode is inferred from your environment
-(precedence: demo → relay → app), or set explicitly with `GH_AUTH_MODE`.
+(precedence: demo → relay → app), or set explicitly with `GH_AUTH_MODE`, which
+overrides inference except for `PROPR_DEMO_MODE=true`.
 
 For the hosted bridge that provides relay auth, GitHub event routing, failed
 delivery recovery, and optional hosted UI tunnels, see
@@ -35,7 +36,7 @@ private key. Instead the stack fetches short-lived installation tokens from a
 vendor-run **relay**, authenticated by a durable per-installation credential.
 
 ```bash
-GH_AUTH_MODE=relay                                # optional but recommended; relay is also inferred from URL+token
+GH_AUTH_MODE=relay                                # optional but recommended; relay is also inferred from the token
 PROPR_GH_RELAY_URL=https://webhook.propr.dev/v1   # optional; defaults to the hosted relay. https required (http only for localhost), include version prefix
 PROPR_GH_RELAY_TOKEN=your_relay_token             # durable credential issued for your installation
 GH_INSTALLATION_ID=987654                         # optional; which installation

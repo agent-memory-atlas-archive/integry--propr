@@ -85,6 +85,7 @@ The acknowledgement may also carry a machine-readable `reason` (such as `unsuppo
 ```json
 {
   "type": "ack",
+  "sequence": 42,
   "deliveryId": "…",
   "status": "ignored",
   "reason": "user_not_allowed",
@@ -212,9 +213,6 @@ source to Git. Temporary staged evidence is cleaned up after publication.
 Run `npm run test:visual-previews` from the repository root. This builds the shared
 packages and runs deterministic mocked Connect/GitHub coverage, API/settings
 checks, publication and log-redaction checks, and runtime-directory regression
-tests. It requires no live Connect storage credentials. The same command runs on
-pull requests in CI; the normal full test suite also discovers these tests.
-
-Keep the epic integration PR targeting `2280-epic-create-a-j2x` open for maintainer
-review. Validation must not merge the epic into `main`; only maintainers explicitly
-authorize that release step. The release test job has read-only repository access.
+tests. It requires no live Connect storage credentials. CI does not run this
+command separately: the full test suite that runs on every pull request
+discovers the same tests.

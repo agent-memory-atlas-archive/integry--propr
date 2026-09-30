@@ -23,7 +23,7 @@ This makes concurrent work possible across issues, PR comments, and models witho
 Worker execution is split into three phases. The agent only participates in the middle one:
 
 1. **Pre-agent setup (ProPR)**: pull the job from the queue, update the base branch, create the isolated git worktree, create the task branch, and prepare the prompt and context.
-2. **Agent implementation (agent)**: run the selected agent inside its container against the worktree. The agent edits files; it does not push, create branches, or open pull requests.
+2. **Agent implementation (agent)**: run the selected agent inside its container against the worktree. The agent edits files; its instructions tell it not to commit, push, create branches, or open pull requests, because ProPR does that next.
 3. **Post-agent finalization (ProPR)**: inspect changed files, commit, push to GitHub, create or update the pull request with issue linking, and update labels and task state.
 
 Because the git and GitHub steps are deterministic code rather than agent decisions, branch mistakes are rare and failures are easier to attribute: a failure in phase 1 or 3 is a git/GitHub problem, a failure in phase 2 is an agent problem.
@@ -51,14 +51,17 @@ Branch names include the model identifier, so concurrent multi-model runs never 
 Each agent run starts a dedicated container from the unified `propr/agent` image. The container gets:
 
 - The task worktree mounted as its working directory
-- The agent credential directories mounted read-write from the host at their original paths (for example `~/.claude`, `~/.codex`, `~/.gemini`) so CLIs can refresh auth state; only the `.env` file is mounted read-only
+- The agent's credential directory (for example `~/.claude`, `~/.codex`, `~/.gemini`) mounted read-write into the container's home so the CLI can refresh auth state (Vibe's config is mounted read-only)
+- For most agents, the shared git directory (`/tmp/git-processor`, which holds every repository's clone and worktrees) so git works inside the linked worktree
+- On implementation runs, a GitHub installation token as `GH_TOKEN`, so the agent can read issue and PR context with `gh`; the token carries the GitHub App installation's permissions, so the no-push rule is a workflow instruction rather than a permission boundary
+- Memory, CPU, and process limits (defaults `6g`, up to 4 CPUs, and 512 PIDs; override with `AGENT_CONTAINER_MEMORY_LIMIT`, `AGENT_CONTAINER_CPU_LIMIT`, `AGENT_CONTAINER_PIDS_LIMIT`) and the `no-new-privileges` security option
 - A per-agent timeout (`CLAUDE_TIMEOUT_MS`, `CODEX_TIMEOUT_MS`, `ANTIGRAVITY_TIMEOUT_MS`, `OPENCODE_TIMEOUT_MS`, `VIBE_TIMEOUT_MS`)
 
 The image-based install starts service and agent containers from published images. Source builds can use local images during development.
 
 ## Network Firewall (Optional, Off By Default)
 
-The unified agent image ships `scripts/init-firewall.sh`, an iptables script that drops all traffic except loopback, DNS, SSH, and HTTPS to provider and GitHub endpoints (for example `api.anthropic.com`, `api.github.com`, `github.com`, `objects.githubusercontent.com`).
+The unified agent image ships `scripts/init-firewall.sh`, an iptables script that drops all traffic except loopback, DNS, outbound SSH, and HTTPS to `api.anthropic.com`, `api.github.com`, `github.com`, and `objects.githubusercontent.com`. Its allowlist has no entries for OpenAI, Google, OpenCode providers, or Mistral, so enabling it as shipped would block every agent except Claude Code.
 
 The script is **not executed by default**. Every agent entrypoint (`scripts/claude-entrypoint.sh`, `codex-entrypoint.sh`, `antigravity-entrypoint.sh`, `opencode-entrypoint.sh`, `vibe-entrypoint.sh`) currently skips it and logs:
 

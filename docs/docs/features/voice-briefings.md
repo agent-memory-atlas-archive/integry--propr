@@ -79,7 +79,7 @@ A leading or trailing `please` is accepted. Follow-up text is limited to 1,000 c
 
 ### Confirmation is mandatory for mutations
 
-`stop` and `follow up` never mutate state from the initial transcript. ProPR shows and speaks a specific confirmation prompt, and the user must select **Confirm action** or make a separate listening request and say `confirm`. Selecting **Cancel**, saying `cancel` or `never mind`, closing the panel, or sending another command does not execute the pending mutation. `open`, briefing, and repeat commands do not mutate server state and do not require confirmation.
+`stop` and `follow up` never mutate state from the initial transcript. ProPR shows and speaks a specific confirmation prompt, and the user must select **Confirm** or make a separate listening request and say `confirm`. Selecting **Cancel**, saying `cancel` or `never mind`, closing the panel, or sending another command does not execute the pending mutation. `open`, briefing, and repeat commands do not mutate server state and do not require confirmation.
 
 The grammar is intentionally closed. Voice Briefings do **not** execute arbitrary shell commands, URLs, API requests, or free-form browser navigation.
 

@@ -15,9 +15,9 @@ Synthetic pools cannot run goals. Availability is also checked against the confi
 
 ## Start and monitor a goal
 
-1. Open **Goals**, choose **New Goal**, then select a repository and a goal-capable agent/model.
-2. Choose a launch strategy (see below) and, optionally, the maximum number of parallel tasks and whether the agent runs Ultrafix before it finishes.
-3. Enter the objective and attach supporting material. Respect the character limit shown for the selected provider. Start the goal and open it from the work queue.
+1. Open **Goals**, choose **New Goal**, then select a repository.
+2. Enter the objective in **Prompt** and attach supporting material. Respect the character limit shown for the selected provider.
+3. Under **Advanced Options**, choose a goal-capable agent and model, a launch strategy (see below) and, optionally, the maximum number of parallel tasks and whether the agent runs Ultrafix before it finishes. Choose **Start goal** and open it from the work queue.
 
 ![Goals work queue showing an active analytics goal and a completed billing goal with status and progress](/img/screenshots/0.9.0/goals.png)
 
@@ -25,9 +25,9 @@ The detail console brings together context, current activity, progress, artifact
 
 ## Launch strategies
 
-**Agent implements directly.** The agent works in the goal workspace. ProPR opens a draft PR on the goal branch and owns every commit and push. When a coherent set of changes is ready, the agent requests a checkpoint; ProPR validates the listed paths, commits only that scope, pushes, records the commit and publishes current visual previews to the draft PR. The checkpoint cadence defaults to roughly every 15 minutes. It is guidance to the agent, not a timer that interrupts it.
+**Direct** (agent implements directly). The agent works in the goal workspace. ProPR opens a draft PR on the goal branch and owns every commit and push. When a coherent set of changes is ready, the agent requests a checkpoint; ProPR validates the listed paths, commits only that scope, pushes, records the commit and publishes current visual previews to the draft PR. The **Checkpoint target cadence** defaults to roughly every 15 minutes and can be set from 5 to 120 minutes. It is guidance to the agent, not a timer that interrupts it.
 
-**Agent orchestrates through ProPR.** The agent decides how to break the objective down, creates GitHub issues, and starts and monitors their implementation through ProPR, optionally building an epic PR from the resulting PRs. It must track every issue and PR it creates and finish with a validated draft PR containing the final implementation.
+**Orchestrate through ProPR.** The agent decides how to break the objective down, creates GitHub issues, and starts and monitors their implementation through ProPR, optionally building an epic PR from the resulting PRs. It must track every issue and PR it creates and finish with a validated draft PR containing the final implementation.
 
 In both strategies, **max parallel tasks** is a limit the agent enforces itself; ProPR does not schedule a plan graph for goals. With **Ultrafix** enabled, the agent runs Ultrafix as part of delivery before declaring the goal complete; with it disabled, the agent runs Ultrafix only if a later correction asks for it.
 

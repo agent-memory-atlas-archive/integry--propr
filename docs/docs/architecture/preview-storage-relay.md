@@ -80,3 +80,7 @@ again. Staged evidence retains its task ID for existing publication callers.
 
 Failures are isolated per asset, including local file errors and unavailable or
 disabled storage. Codes are a bounded union (`PreviewStorageErrorCodeV1`,
+`plus_required`, or `disabled`); raw remote errors are discarded. A failed asset
+does not discard successful results or stop later uploads or GitHub publication.
+Only these codes may be used for fallback text. Never log or publish upload grants,
+object keys, relay tokens, or raw remote response/error bodies.

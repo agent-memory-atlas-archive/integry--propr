@@ -162,7 +162,7 @@ for quota recovery, offline behavior, log handling, and release validation.
 
 ## View previews and recover private images
 
-Task and goal details show published previews beside the work that produced them. Select an image to open the lightbox; double-click to zoom, use arrow keys to move between images and Escape to close it. Videos use their playback controls.
+Task and goal details show published previews beside the work that produced them. Select an image to open the lightbox; double-click to zoom, use arrow keys to move between images and Escape to close it. Videos use their playback controls. [MCP](./mcp.md) clients can list a task's or pull request's published previews with `list_visual_previews` and fetch a downscaled image with `get_visual_preview`; videos are metadata only there and open on GitHub.
 
 ![Task detail showing published visual evidence in the full-width preview gallery](/img/screenshots/0.9.0/previews.png)
 

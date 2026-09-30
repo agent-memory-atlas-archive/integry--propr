@@ -13,7 +13,7 @@ local ProPR stack for you. The desktop app does not change the browser Web UI, C
 | Platform | Packages | Connect to an instance | Guided local setup |
 | --- | --- | --- | --- |
 | Linux x64 | DEB, RPM, ZIP | Yes | Yes |
-| Linux arm64 | DEB, RPM, ZIP | Yes | No: the ProPR runtime images are published for `amd64` only |
+| Linux arm64 | DEB, RPM, ZIP | Yes | No: the `propr/agent` image is published for `amd64` only |
 | macOS Intel | DMG, ZIP | Yes | No |
 | macOS Apple Silicon | DMG, ZIP | Yes | No |
 | Windows | Not available yet | | |
@@ -125,7 +125,7 @@ stack's containers with the packaged versions and keeps its database, credential
 ## Version and diagnostics
 
 **About ProPR** shows the app version and a **Copy Version Details** action. **Connection Diagnostics** shows the
-connected server and runtime version separately. Updating the desktop app does not upgrade a remote instance.
+desktop app version and the connected instance's version separately. Updating the desktop app does not upgrade a remote instance.
 
 Installation-level **Settings** belong to the connected server. Connection management and diagnostics belong to the app.
 
@@ -133,10 +133,13 @@ Installation-level **Settings** belong to the connected server. Connection manag
 
 | Menu | Actions and shortcuts |
 | --- | --- |
-| ProPR | About ProPR, Settings… (`Cmd+,`), Services, Hide, Quit ProPR |
-| File | New Plan (`Cmd+N`), Switch / Manage Instances… (`Cmd+Shift+I`), Close Window |
-| Go | Back (`Cmd+[`), Forward (`Cmd+]`), Dashboard (`Cmd+1`), Inbox (`Cmd+2`), Plans (`Cmd+3`), Goals (`Cmd+4`), Tasks (`Cmd+5`), Repositories (`Cmd+6`), LLM Log (`Cmd+7`) |
-| Edit / View / Window | Native editing, zoom/fullscreen, minimize, zoom window, bring all to front |
+| ProPR | About ProPR, Settings… (`Cmd+,`), Services and Hide (macOS only), Quit ProPR (`Cmd+Q`) |
+| File | New Plan (`Cmd+N`), New Task…, Connect Instance…, Switch Account / Instance… (`Cmd+Shift+I`), Close Window |
+| Edit | Native editing |
+| View | Toggle Sidebar, zoom, full screen |
+| Navigate | Back (`Cmd+[`), Forward (`Cmd+]`), Search / Go To… (`Cmd+K`), Dashboard, Inbox, Plans, Goals, Tasks, Repositories |
+| Window | Minimize; on macOS also zoom window and bring all to front |
+| Help | ProPR Website, Documentation, Connection Help, Connection Diagnostics…, Report a Problem… |
 
 On Linux, use `Ctrl` in place of `Cmd`. The Linux tray icon and the macOS menu-bar item show task and plan counts and
 offer New Plan, Tasks, Plans, Inbox, instance switching, notification settings, and pausing or resuming native
@@ -166,7 +169,7 @@ Saved instances and accounts are kept across updates.
 
 ## Troubleshooting
 
-- **No local setup option:** guided setup is available on Linux x64 only.
+- **No local setup option:** guided setup is offered on Linux only, and supported on x64.
 - **Docker absent, down or permission denied:** install and start Docker, add your user to the `docker` group, then retry.
 - **Authentication terminal unavailable:** install one of the supported terminal emulators and retry.
 - **Secure storage unavailable:** start an unlocked Secret Service keyring session. Pairing never falls back to a
