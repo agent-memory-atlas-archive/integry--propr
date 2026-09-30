@@ -11,7 +11,7 @@ Slash commands are for specific actions: AI review, applying AI review feedback,
 
 ## Works On Any Pull Request
 
-You can run `/review`, `/fix`, and the others on any eligible pull request — including ones opened by a teammate, another agent, or yourself outside ProPR — as long as you are an allowed author. A slash command from an allowed author is processed directly and does not require the PR to carry a processing label.
+You can run `/review`, `/fix`, and the others on any eligible pull request — including ones opened by a teammate, another agent, or yourself outside ProPR — as long as you are an allowed author. A slash command from an allowed author is processed directly and does not require the PR to carry a processing label; the exception is `/merge`, which only runs on PRs that carry one.
 
 To **take over an existing PR** for ongoing work (so that natural follow-up comments are picked up alongside commands), add a configured processing label such as `AI` or `propr` to the PR. See [Use ProPR On Any Pull Request](./pr-followup.md#use-propr-on-any-pull-request).
 
@@ -35,7 +35,7 @@ To **take over an existing PR** for ongoing work (so that natural follow-up comm
 
 ## Model IDs
 
-Commands that take a model accept the model IDs configured in AI Agents. The `llm-` prefix is optional in command arguments — `/switch claude-opus5` and `/switch llm-claude-opus5` are equivalent. Unrecognized models are rejected. The built-in catalog is listed in [Agents and Models](./agents-and-models.md).
+Commands that take a model accept the model IDs configured in AI Agents. The `llm-` prefix is optional in command arguments — `/switch claude-opus5` and `/switch llm-claude-opus5` are equivalent. `/switch` and `/use` ignore a model that is neither in the catalog nor configured on an enabled agent; `/review` skips models it cannot resolve and fails only when none of the requested models resolve. The built-in catalog is listed in [Agents and Models](./agents-and-models.md).
 
 ## Who Can Trigger Commands
 
@@ -178,8 +178,10 @@ Keep the public helper signature unchanged.
   independently — a review with no merge blocker still continues the `S#` count.
 - Identifiers are read from the command line only, and are case-insensitive
   (`/fix f20 s3` is `/fix F20 S3`).
-- Everything after the last identifier on that line, plus every following line,
-  is passed to the agent as instructions. The identifiers themselves are not.
+- Identifiers end at the first word on that line that is not one (commas may
+  separate identifiers, and a `;` ends the list explicitly). That word, the rest
+  of the line, and every following line are passed to the agent as
+  instructions. The identifiers themselves are not.
 - An identifier no current review offers fails the whole command closed, even
   when other identifiers in the same request are available: nothing is applied,
   and ProPR names the identifiers it could not resolve on the pull request. This
@@ -223,7 +225,7 @@ Use model routing commands when the current PR should use a different configured
 
 ProPR replaces the PR's `llm-*` label with the new model's label. Later comments, commands, and ultrafix cycles on this PR use the new model.
 
-`/switch` takes exactly one model argument; extra arguments are ignored with a warning. The model must be a known catalog model or a model configured on an enabled agent — unrecognized models are rejected.
+`/switch` takes exactly one model argument; extra arguments are ignored. The model must be a known catalog model or a model configured on an enabled agent — otherwise the command is ignored and the label stays unchanged.
 
 If you include instructions on the lines below the command, ProPR switches the label and also queues one follow-up run with the new model using those instructions:
 
@@ -268,10 +270,12 @@ Post:
 /merge
 ```
 
-ProPR merges the base branch into the PR branch inside an isolated worktree. Merging the PR itself into the base branch remains your call — a human clicks that merge button. An agent run accompanies the branch update:
+`/merge` runs only on PRs that carry a configured processing label (for example `AI` or `propr`). ProPR merges the base branch into the PR branch inside an isolated worktree. Merging the PR itself into the base branch remains your call — a human clicks that merge button. An agent run accompanies the branch update:
 
 - On a clean merge, the agent verifies the result before it is pushed.
-- On conflicts, the agent resolves the conflict markers; ProPR then scans the tree to confirm no conflict markers remain before pushing. If markers remain, the task fails and the broken merge stays unpushed.
+- On conflicts, the agent resolves the conflict markers.
+
+In both cases ProPR then scans the tree to confirm no conflict markers remain before pushing. If markers remain, the task fails and the broken merge stays unpushed.
 
 ProPR posts a status comment on the PR when the merge starts and updates it with the result.
 
@@ -308,8 +312,8 @@ A bare number is treated as the goal: `/ultrafix 8` is the same as `/ultrafix go
 
 Before each cycle, ProPR checks readiness:
 
-- Required CI checks must be passing; if they are not, the continuation is deferred and resumes when check results arrive.
-- The PR must be inactive, so the loop does not race human pushes or comments.
+- Before each review cycle, CI on the PR head must be passing (every check run and commit status, except checks the repository marks [non-blocking](./pr-followup.md#checks-that-never-block-automation)); if it is not, the continuation is deferred and resumes when check results arrive. Fix cycles do not wait for CI.
+- The PR must be inactive — no other queued or running job and no pending batched comments — so the loop does not race other work on the PR.
 - The configured `pause` delay is applied between cycles.
 
 #### Stopping The Loop
@@ -319,7 +323,7 @@ The loop is controlled by the visible `ultrafix` PR label, which acts as a circu
 #### Completion
 
 - **Goal reached**: the `ultrafix` label is removed. If the PR belongs to a planned issue labeled `auto-merge`, ProPR re-enables GitHub auto-merge on the PR.
-- **Max cycles exhausted**: ProPR posts a warning comment with the requested goal and the last score, and manual review takes over.
+- **Stopped before the goal** (max cycles exhausted, or a review that cannot advance the loop): ProPR posts a warning comment with the requested goal and the last score, and manual review takes over. The `ultrafix` label is left on the PR; remove it once you take over.
 
 Reserve `/ultrafix` for stronger cleanup passes. For small edits and direct changes, a normal PR comment is usually better.
 

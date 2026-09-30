@@ -13,5 +13,6 @@ MCP must be enabled and configured on the instance first. Client support varies,
 - Ask what is running, queued, or blocked across the authorized repositories.
 - Ask for details about a task or pull request before deciding on the next action.
 - Request a new task, a review, or a fix with the appropriate permissions, then check its progress. An accepted task is not yet completed work.
+- Ask what you started in the last hour and whether it finished, or ask how a ProPR feature or setting works.
 
 Use [the MCP access log](./web-ui.md#mcp-access-log) to inspect the assistant's calls. Manage or revoke direct instance connections at `/mcp/apps` on your instance.

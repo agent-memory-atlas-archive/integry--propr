@@ -1,6 +1,6 @@
-# MCP operator surface (epic scaffold)
+# MCP operator surface
 
-This epic branch aggregates the work that turns ProPR's MCP server from a
+This page summarizes the work that turns ProPR's MCP server from a
 per-object read/write catalog into a surface an operator's connected agent can
 actually run an instance from.
 

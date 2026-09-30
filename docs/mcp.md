@@ -13,7 +13,8 @@ and choose a scope ceiling. With `MCP_ENABLED` unset, this UI-managed path deriv
 an HTTPS origin from `MCP_PUBLIC_ORIGIN`, `API_PUBLIC_URL` or the GitHub callback,
 and derives its encryption key from `MCP_ENCRYPTION_KEY` or the existing credential,
 system-task or session secret chain. It persists an instance identity. Preserve
-these secrets across restarts; changing the key requires reconnecting clients.
+these secrets across restarts. A changed key turns MCP off (**Reconnect required**)
+until an administrator revokes all connections; clients then reconnect.
 `MCP_ENABLED=false` forces MCP off; `true` selects the explicit environment-managed
 setup below. See the [illustrated connection guide](docs/features/mcp.md).
 
@@ -54,7 +55,7 @@ Discovery endpoints:
 Use the exact `https://your-instance.example/api/mcp` as the OAuth `resource`
 in authorization, code exchange and refresh. Public clients use
 authorization-code + S256 PKCE. Codes last 60 seconds and are consumed
-transactionally. Access tokens last five minutes. Refresh tokens rotate;
+transactionally. Access tokens last 15 minutes. Refresh tokens rotate;
 reuse revokes the entire 30-day grant, including newly rotated access tokens.
 GitHub credentials are separately encrypted server-side and never returned
 to clients. Instance membership, allowlist and repository access are checked
@@ -141,9 +142,10 @@ been exercised by the local fixture tests.
 
 ## Connect instance registration
 
-Core [PR #2291](https://github.com/integry/propr/pull/2291) coordinates
-[routing PR #180](https://github.com/integry/propr-routing/pull/180) and
-[site PR #90](https://github.com/integry/propr-site/pull/90).
+Connect lets public clients reach an instance through the hosted ProPR Connect
+gateway at `https://mcp.propr.dev`. That hosted gateway is not yet publicly
+available; this section describes the instance side, which is implemented.
+Connect trust requires the environment-managed setup (`MCP_ENABLED=true`).
 Direct OAuth works independently of Connect trust. Hosted access uses the
 [implemented Connect contract](mcp-connect-contract.md).
 
@@ -188,8 +190,8 @@ Direct OAuth works independently of Connect trust. Hosted access uses the
    `MCP_INSTANCE_ID` cannot overwrite an existing identity.
 5. Restart the API with the matching configuration. Add each intended user
    through the existing Access settings and configure the allowed repositories.
-   Connect membership alone does not create local access. Connect a public
-   client to `https://mcp.propr.dev/mcp`, then explicitly select its installation,
+   Connect membership alone does not create local access. Once the hosted
+   gateway is available, connect a public client to `https://mcp.propr.dev/mcp`, then explicitly select its installation,
    requested permissions and repositories in the Connect browser consent flow.
    GitHub credential handoff happens server-to-server on the first request.
 
@@ -205,7 +207,6 @@ The existing managed tunnel routes `/api/*`, which covers delegated MCP. It does
 not automatically expose direct `/.well-known`, `/authorize`, `/mcp/consent`, etc.
 To offer **direct OAuth through a domain**, use the complete reverse-proxy routes
 listed in direct setup; public Connect clients use Connect's discovery/consent.
-No production configuration was changed by this PR.
 
 ## Tools and ordinary workflows
 
@@ -214,8 +215,8 @@ The [capability matrix](mcp-coverage.md) maps supported operations to tools.
 permissions. Scope families are `read`, `plan`, `publish`, `execute`, `review`,
 `merge`, `deploy`, `manage`; scopes never grant extra GitHub or instance access.
 Repository restrictions are explicit lists. Administrative tools additionally
-require the existing `instance.manage_settings`, `instance.manage_agents` or
-`instance.manage_runtime` permission. Goal and plan ownership is preserved.
+require the existing `instance.manage_settings`, `instance.manage_agents`,
+`instance.manage_runtime` or `instance.manage_members` permission. Goal and plan ownership is preserved.
 Ordinary repository task history follows the existing shared repository model;
 native goal tasks remain private and can only be mutated through goal controls.
 
@@ -273,8 +274,9 @@ corresponding `get_*` tool without inflating large list pages.
 defaults to the 20 most recent entries and returns newest-first, timestamped
 pages with `nextOffset` for older narration. Each entry is whitespace-normalized
 and capped at 500 characters. The feed includes assistant progress commentary
-and a separate current-focus value when available; provider reasoning, raw
+and a separate current-focus value when available; raw provider reasoning, raw
 protocol envelopes, tool inputs, and tool results are excluded.
+`includeReasoningSummaries: true` opts in to Codex app-server reasoning summaries.
 
 ## Operating an instance from a chat client
 
@@ -524,9 +526,3 @@ partial publication/implementation, an operator must reconcile the receipt,
 GitHub markers, issue labels and queue state before explicitly recovering it.
 No deployment, auto-merge activation or production migration was performed.
 
-
-The Connect follow-up also runs both actual repositories at the pinned routing
-commit, including registration, public OAuth, both SDK eras and proof-bound
-credential handoff. Exact commands/results and the remaining full-chat gates
-are in [the follow-up evidence](mcp-coverage.md#connect-integration-follow-up-evidence).
-Earlier test counts above describe the original PR baseline, not the follow-up.

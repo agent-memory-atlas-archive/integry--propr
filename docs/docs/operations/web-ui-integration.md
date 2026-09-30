@@ -38,7 +38,7 @@ The UI is not served by the API container. In both the launcher stack and the de
 
 - Browser sessions start at `GET /api/auth/github` and finish at `GET /api/auth/github/callback`. Relay-enrolled stacks use `PROPR_WEB_AUTH_MODE=connect` for local loopback URLs and hosted tunnels: Connect owns the shared GitHub OAuth client and hands the instance a short-lived one-use code. Custom deployments may use `PROPR_WEB_AUTH_MODE=github` with their own `GH_OAUTH_CLIENT_ID` and `GH_OAUTH_CLIENT_SECRET`.
 - Sessions are stored in Redis (`propr:session:` prefix) and sent as cookies; all frontend fetches use `credentials: 'include'`.
-- All `/api/*` routes require authentication; CORS is configured from `FRONTEND_URL`.
+- Operational `/api/*` routes require authentication; only the login flow, `/api/compatibility`, the desktop discovery/pairing bootstrap, and MCP (which checks its own bearer tokens) sit outside the shared guard. CORS is configured from `FRONTEND_URL`.
 - Bearer token authentication (GitHub tokens validated against the GitHub API, cached briefly in Redis) is enabled by default for the CLI; disable it with `ENABLE_BEARER_AUTH=false`.
 - `PROPR_DEMO_MODE=true` allows read-only access without login and blocks mutating requests.
 
@@ -75,7 +75,7 @@ because of that event.
 | `queue:stats:update` | queue depth or throughput changes | header activity monitor |
 | `notification:update` | a notification is created, read or dismissed | Inbox, unread badge |
 | `usage:update` | agent capacity or quota changes | usage sidebar, system status |
-| `activity:update` | derived from the lifecycle events above, plus the `health` domain when the instance's own health moves | header stats, shared system status (which ignores `change: 'progress'`) |
+| `activity:update` | derived from the lifecycle events above, plus the `system` domain when the instance's own status snapshot moves | header stats, shared system status (which ignores `change: 'progress'`) |
 
 `activity:update` is the general envelope (`domain`, `change`, `repository`,
 `subjectId`, `terminal`, `occurredAt`). It is derived in
@@ -138,26 +138,21 @@ above has one:
   (`publishNotificationUpdateThroughRedis`) and the socket service relays the
   event to the recipient's room.
 - `usage:update` is published when Agent Tank settings are saved, when a manual
-  re-probe succeeds, and by `packages/api/services/agentTankUsageWatcher.ts`.
-  Agent Tank cannot call us, so that watcher is one of the two timers left in
-  the system: the API probes it for the whole instance — only while a client is
-  connected — and publishes only when the snapshot actually moved. One backend
-  probe replaces the same poll in every open tab.
-- `activity:update` with `domain: 'health'` is published by
-  `packages/api/services/systemHealthWatcher.ts`, the other remaining timer. A
-  worker, the daemon, Redis, GitHub authentication or a coding agent can stop
-  while the API and every client socket stay up, and no run lifecycle event says
-  so, so there is nothing to derive a health change from: the watcher compares
-  the same `/api/status` snapshot the clients read (the route exposes it as
-  `readStatusSnapshot`) against an allowlist of the health fields, ignoring the
-  response timestamp and routing diagnostics, and publishes only when what the
-  health surfaces show actually moved. The one snapshot it watches replaces the
-  30-second `/api/status` poll that used to run in every open tab.
-
-Both watchers publish the first state they observe while a client is connected.
-A client that read before the first probe may already be behind, and suppressing
-that first publication would strand it: every later probe sees the same state
-and stays silent, so nothing would ever correct it while its socket stays up.
+  re-probe succeeds, and by `packages/api/services/shellActivityBroadcaster.ts`.
+  Agent Tank cannot call us, so the broadcaster samples it for the whole
+  instance every 30 seconds — only while a client is subscribed — and publishes
+  only when the snapshot's fingerprint actually moved, alongside a
+  `shell:snapshot` frame carrying the snapshot to sockets permitted to read it.
+  One backend sample replaces the same poll in every open tab.
+- `activity:update` with `domain: 'system'` is published by the same
+  broadcaster. A worker, the daemon, Redis, GitHub authentication or a coding
+  agent can stop while the API and every client socket stay up, and no run
+  lifecycle event says so, so there is nothing to derive a health change from:
+  the broadcaster compares the same `/api/status` snapshot the clients read
+  (the route exposes it as `readStatusSnapshot`) by its health fingerprint and
+  publishes only when what the health surfaces show actually moved. The one
+  snapshot it watches replaces the `/api/status` poll that used to run in every
+  open tab.
 
 ## Running The UI In Development
 
