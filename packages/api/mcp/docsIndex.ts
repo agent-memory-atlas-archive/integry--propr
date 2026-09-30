@@ -237,7 +237,8 @@ function plainHeading(markdown: string): string {
     .replace(/[ \t]+\{#[^}]+\}[ \t]*$/, '')
     .replace(/!\[([^\]]*)\]\([^)]*\)/g, '$1')
     .replace(/\[([^\]]+)\]\([^)]*\)/g, '$1')
-    .replace(/<[^>]+>/g, '')
+    // Consume unfinished tags too, so no opening angle bracket survives.
+    .replace(/<[^>]*(?:>|$)/g, '')
     .replace(/[*_~`]/g, '')
     .trim();
 }
@@ -278,7 +279,8 @@ function summaryText(content: string, outline: DocOutlineEntry[]): string {
   const plain = paragraph
     .replace(/!\[([^\]]*)\]\([^)]*\)/g, '$1')
     .replace(/\[([^\]]+)\]\([^)]*\)/g, '$1')
-    .replace(/<[^>]+>/g, '')
+    // Consume unfinished tags too, so no opening angle bracket survives.
+    .replace(/<[^>]*(?:>|$)/g, '')
     .replace(/[*_`]/g, '')
     .replace(/\s+/g, ' ')
     .trim();
