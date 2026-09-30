@@ -15,6 +15,7 @@ import { chromium, type Page } from 'playwright';
 import knex from 'knex';
 import { closeConnection } from '@propr/core';
 import { up } from '../../core/src/db/migrations/20260910220000_add_mcp.js';
+import { up as lifecycleMigration } from '../../core/src/db/migrations/20261001000000_add_mcp_operation_lifecycle.js';
 import { McpStore } from '../mcp/store.js';
 import { McpOAuthProvider, type McpGrant } from '../mcp/oauth.js';
 import { GitHubReauthRequired, mountMcpBrowser } from '../mcp/browser.js';
@@ -45,7 +46,7 @@ test('authorize limits GET and POST before client lookup and respects explicit p
   configureDemoMode(false);
   const db = knex({ client: 'better-sqlite3', connection: { filename: ':memory:' }, useNullAsDefault: true });
   t.after(() => db.destroy());
-  await db.schema.createTable('task_drafts', table => table.string('draft_id').primary()); await up(db);
+  await db.schema.createTable('task_drafts', table => table.string('draft_id').primary()); await up(db); await lifecycleMigration(db);
   const oauth = new McpOAuthProvider(new McpStore(db, Buffer.from(environment.MCP_ENCRYPTION_KEY, 'base64')), {
     origin: environment.MCP_PUBLIC_ORIGIN, resource: `${environment.MCP_PUBLIC_ORIGIN}/api/mcp`,
     instanceId: environment.MCP_INSTANCE_ID, encryptionKey: Buffer.from(environment.MCP_ENCRYPTION_KEY, 'base64'),
@@ -101,7 +102,7 @@ test('real consent and connected-app routes work at desktop/mobile widths and en
   assert.ok(existsSync(executablePath), 'Install Chromium with npx playwright install --with-deps chromium or set CHROMIUM_PATH');
   configureDemoMode(false);
   const db = knex({ client: 'better-sqlite3', connection: { filename: ':memory:' }, useNullAsDefault: true });
-  await db.schema.createTable('task_drafts', table => table.string('draft_id').primary()); await up(db);
+  await db.schema.createTable('task_drafts', table => table.string('draft_id').primary()); await up(db); await lifecycleMigration(db);
   await db.schema.createTable('instance_members', table => { table.string('github_user_id').primary(); table.string('role'); table.string('source'); });
   // Exercise real TLS and Secure cookies with an ephemeral, local-only certificate.
   const tlsDirectory = await mkdtemp(join(tmpdir(), 'propr-mcp-browser-tls-'));
@@ -360,7 +361,7 @@ test('real consent and connected-app routes work at desktop/mobile widths and en
 test('a rejected GitHub session token sends consent back through sign-in instead of failing', async () => {
   configureDemoMode(false);
   const db = knex({ client: 'better-sqlite3', connection: { filename: ':memory:' }, useNullAsDefault: true });
-  await db.schema.createTable('task_drafts', table => table.string('draft_id').primary()); await up(db);
+  await db.schema.createTable('task_drafts', table => table.string('draft_id').primary()); await up(db); await lifecycleMigration(db);
   const app = express();
   app.use(session({ secret: randomBytes(32).toString('hex'), resave: false, saveUninitialized: true }));
   app.use((req, _res, next) => { req.user = { id: '123', username: 'demo-developer', login: 'demo-developer', displayName: 'Demo developer', email: null, avatarUrl: null, accessToken: 'revoked-fixture' }; req.isAuthenticated = (() => true) as never; next(); });

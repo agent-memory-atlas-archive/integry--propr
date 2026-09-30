@@ -6,6 +6,7 @@ import knex from 'knex';
 import { z } from 'zod';
 import { associateSubmissionTask, closeConnection } from '@propr/core';
 import { up as mcpMigration } from '../../core/src/db/migrations/20260910220000_add_mcp.js';
+import { up as lifecycleMigration } from '../../core/src/db/migrations/20261001000000_add_mcp_operation_lifecycle.js';
 import { up as submissionMigration } from '../../core/src/db/migrations/20260922000000_add_task_submissions.js';
 import { up as identityMigration } from '../../core/src/db/migrations/20260922010000_preserve_task_submission_identity.js';
 import { createToolCatalog, executeTool, type ToolDeps } from '../mcp/tools.js';
@@ -13,6 +14,7 @@ import { McpPolicy, type McpPrincipal } from '../mcp/policy.js';
 import { McpError } from '../mcp/config.js';
 import { McpStore } from '../mcp/store.js';
 import { McpOAuthProvider } from '../mcp/oauth.js';
+import { syncLifecycle } from '../mcp/operationLifecycle.js';
 import { McpOperations, type Operation } from '../mcp/operations.js';
 import { trackExecution } from '../mcp/operationTracking.js';
 import { trackTaskSubmission } from '../mcp/toolsTaskSubmissions.js';
@@ -49,6 +51,7 @@ async function fixture() {
   const db = knex({ client: 'better-sqlite3', connection: { filename: ':memory:' }, useNullAsDefault: true });
   await db.schema.createTable('task_drafts', table => { table.string('draft_id').primary(); });
   await mcpMigration(db);
+  await lifecycleMigration(db);
   await submissionMigration(db);
   await identityMigration(db);
   await db.schema.createTable('tasks', table => {
@@ -373,6 +376,12 @@ test('terminal task events between submission and execution tracking reconcile t
       assert.equal(resolving.result.progress.next, terminal === 'failed'
         ? 'The task failed; inspect the failure reason before retrying.' : 'The task completed.');
 
+      assert.doesNotMatch(JSON.stringify(await f.db('mcp_operations').where({ id: created.operationId }).first()),
+        /github_pat_secret_value_1234567890/);
+      await syncLifecycle(operations, row, resolving as unknown as Record<string, unknown>);
+      const persisted = await f.db('mcp_operations').where({ id: created.operationId }).first();
+      assert.doesNotMatch(JSON.stringify(persisted), /github_pat_secret_value_1234567890/);
+
       // A later poll also repairs receipts persisted by the former interleaving bug.
       const storedResult = JSON.parse((await f.db('mcp_operations').where({ id: created.operationId }).first()).result);
       await f.db('mcp_operations').where({ id: created.operationId })
@@ -385,6 +394,16 @@ test('terminal task events between submission and execution tracking reconcile t
       assert.equal(durable.result.progress.task?.failureReason,
         terminal === 'failed' ? 'Provider rejected [REDACTED]' : null);
       assert.equal(durable.retryAfterSeconds, undefined);
+      if (terminal === 'failed') {
+        // A terminal submission refresh can also encounter an older raw snapshot.
+        const refreshRow = (await f.db<Operation>('mcp_operations').where({ id: created.operationId }).first())!;
+        const legacyResult = JSON.parse(refreshRow.result!);
+        legacyResult.targetState.reason = 'Provider rejected github_pat_secret_value_1234567890';
+        refreshRow.result = JSON.stringify(legacyResult);
+        await trackTaskSubmission(f.deps, refreshRow, f.principal, operations.project(refreshRow));
+        assert.doesNotMatch(JSON.stringify(await f.db('mcp_operations').where({ id: created.operationId }).first()),
+          /github_pat_secret_value_1234567890/);
+      }
     } finally { await f.db.destroy(); }
   }
 });

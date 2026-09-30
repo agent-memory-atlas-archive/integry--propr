@@ -127,7 +127,9 @@ export async function runBackgroundRefinement(
       draftId,
       generationModel
     }));
-    const normalized = normalizeRefinedPlan(currentPlan, result.action === 'modified' ? result.plan : currentPlan);
+    const normalized = result.action === 'modified'
+      ? normalizeRefinedPlan(currentPlan, result.plan)
+      : { ok: true as const, plan: currentPlan, merged: false, operations: undefined };
     if (!normalized.ok) throw new RefinementOutputError(normalized.message, normalized.details);
     const merged = result.merged === true || normalized.merged;
     const operations = result.operations ?? normalized.operations;

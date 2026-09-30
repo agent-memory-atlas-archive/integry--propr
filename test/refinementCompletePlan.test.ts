@@ -120,6 +120,25 @@ describe('plan refinement returns complete plans only', () => {
             assert.equal(runLightweightLLMAnalysis.mock.callCount(), 1);
         });
 
+        test(`${action} keeps an incomplete current plan without a repair call`, async () => {
+            const incomplete = [{ title: 'Add metrics', body: 'Emit counters' }];
+            llmResponses.push(JSON.stringify({ action, summary: 'Use a counter.', plan: [issue('Unrequested change')] }));
+            const result = await refinePlan({ ...options, currentPlan: incomplete });
+            assert.equal(result.action, action);
+            assert.deepEqual(result.plan, incomplete);
+            assert.equal(result.merged, false);
+            assert.equal(runLightweightLLMAnalysis.mock.callCount(), 1);
+        });
+
+        test(`${action} during repair also preserves an incomplete current plan`, async () => {
+            const incomplete = [{ title: 'Add metrics', body: 'Emit counters' }];
+            llmResponses.push(editsAsPlan, JSON.stringify({ action, summary: 'Use a counter.', plan: incomplete }));
+            const result = await refinePlan({ ...options, currentPlan: incomplete });
+            assert.equal(result.action, action);
+            assert.deepEqual(result.plan, incomplete);
+            assert.equal(runLightweightLLMAnalysis.mock.callCount(), 2);
+        });
+
         for (const [description, plan] of [
             ['a different complete plan', [issue('Unrequested replacement')]],
             ['an incomplete plan', [{ number: 1, action: 'retain' }]],

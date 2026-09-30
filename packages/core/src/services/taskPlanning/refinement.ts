@@ -350,7 +350,9 @@ ${response}`;
     refinementResponse.plan = currentPlan;
   }
 
-  let normalized = normalizeRefinedPlan(currentPlan, refinementResponse.plan);
+  let normalized = refinementResponse.action === 'modified'
+    ? normalizeRefinedPlan(currentPlan, refinementResponse.plan)
+    : { ok: true as const, plan: currentPlan, merged: false, operations: undefined };
   if (!normalized.ok) {
     const repaired = await requestCompletePlan(normalized.details, {
       currentPlan, instruction, response, charLimit, correlatedLogger,
@@ -368,7 +370,9 @@ ${response}`;
     });
     if (repaired) {
       refinementResponse = repaired;
-      normalized = normalizeRefinedPlan(currentPlan, refinementResponse.plan);
+      normalized = refinementResponse.action === 'modified'
+        ? normalizeRefinedPlan(currentPlan, refinementResponse.plan)
+        : { ok: true as const, plan: currentPlan, merged: false, operations: undefined };
     }
   }
   if (!normalized.ok) {

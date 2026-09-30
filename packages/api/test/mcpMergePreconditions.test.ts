@@ -4,6 +4,7 @@ import { parse } from 'graphql';
 import knex from 'knex';
 import { closeConnection } from '@propr/core';
 import { up } from '../../core/src/db/migrations/20260910220000_add_mcp.js';
+import { up as lifecycleMigration } from '../../core/src/db/migrations/20261001000000_add_mcp_operation_lifecycle.js';
 import { up as addAccessLog } from '../../core/src/db/migrations/20260923010000_add_mcp_access_log.js';
 import { McpError } from '../mcp/config.js';
 import {
@@ -166,6 +167,7 @@ test('executeTool persists specific PR state failures and get_operation returns 
   t.after(() => db.destroy());
   await db.schema.createTable('task_drafts', table => table.string('draft_id').primary());
   await up(db);
+  await lifecycleMigration(db);
   await addAccessLog(db);
 
   const mergedAt = '2026-09-28T12:00:00Z';

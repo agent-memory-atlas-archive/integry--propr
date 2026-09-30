@@ -18,6 +18,7 @@ import { up as planIssueTasks } from '../../core/src/db/migrations/2026012100000
 import { up as taskPullRequests } from '../../core/src/db/migrations/20260216000000_add_pr_number_to_tasks.js';
 import { up as pullRequestState } from '../../core/src/db/migrations/20260829010000_add_notification_pull_request_state.js';
 import { up as mcpMigration } from '../../core/src/db/migrations/20260910220000_add_mcp.js';
+import { up as lifecycleMigration } from '../../core/src/db/migrations/20261001000000_add_mcp_operation_lifecycle.js';
 import { up as taskSubmissions } from '../../core/src/db/migrations/20260922000000_add_task_submissions.js';
 import { up as submissionIdentity } from '../../core/src/db/migrations/20260922010000_preserve_task_submission_identity.js';
 import { up as taskFinalResult } from '../../core/src/db/migrations/20260925000000_add_final_result_to_tasks.js';
@@ -36,7 +37,8 @@ after(async () => closeConnection());
 test('both official SDK protocol eras execute real draft/revision/publication/task transitions over the same HTTP endpoint', async () => {
   const db = knex({ client: 'better-sqlite3', connection: { filename: ':memory:' }, useNullAsDefault: true });
   await initial(db); await planIssues(db); await planIssueTasks(db); await taskPullRequests(db); await pullRequestState(db);
-  await mcpMigration(db); await taskSubmissions(db); await submissionIdentity(db); await taskFinalResult(db);
+  await mcpMigration(db);
+  await lifecycleMigration(db); await taskSubmissions(db); await submissionIdentity(db); await taskFinalResult(db);
   await planRevisions(db); await planRevisionCauses(db);
   await db.schema.alterTable('task_drafts', table => table.boolean('paused').defaultTo(false));
   await db.schema.createTable('goals', table => {

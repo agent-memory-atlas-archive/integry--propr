@@ -3,6 +3,7 @@ import type { ToolDeps } from './tools.js';
 import type { Operation } from './operations.js';
 import type { McpPrincipal } from './policy.js';
 import { McpError } from './config.js';
+import { redactDetails } from './errorEnvelope.js';
 import {
   COMMAND_NOT_PICKED_UP_FAILURE,
   PICKUP_DEADLINE_MS,
@@ -73,7 +74,7 @@ export async function trackCancellation(deps: ToolDeps, row: Operation, principa
     result.targetState = receipt.targetState;
   }
   receipt.result = result;
-  await deps.db('mcp_operations').where({ id: row.id }).whereNotIn('state', terminalStates).update({ state: receipt.state, result: JSON.stringify(result), updated_at: Date.now() });
+  await deps.db('mcp_operations').where({ id: row.id }).whereNotIn('state', terminalStates).update({ state: receipt.state, result: JSON.stringify(redactDetails(result)), updated_at: Date.now() });
 }
 
 async function refreshPullRequestContext(
@@ -154,7 +155,7 @@ export async function trackExecution(deps: ToolDeps, row: Operation, principal: 
       .whereRaw(`json_extract(${validResult}, '$.continuation.taskId') IS NULL`)
       .whereRaw(`json_extract(${validArtifacts}, '$.taskId') IS NULL`);
   }
-  const recorded = await eligible.update({ state: receipt.state, result: JSON.stringify(result), updated_at: Date.now() });
+  const recorded = await eligible.update({ state: receipt.state, result: JSON.stringify(redactDetails(result)), updated_at: Date.now() });
   if (!recorded) {
     // Another poll persisted stronger evidence while this observation was
     // awaiting external context. Adopt its receipt so both the response and

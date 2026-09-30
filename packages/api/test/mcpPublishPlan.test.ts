@@ -1,6 +1,12 @@
 /* eslint-disable max-lines -- publication recovery and failure-stage regressions share one database fixture */
 import assert from 'node:assert/strict';
 import { after, test } from 'node:test';
+import { spawn } from 'node:child_process';
+import { once } from 'node:events';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+import { publicationOwner, publicationOwnerStopped } from '../mcp/planPublication.js';
 import { fileURLToPath } from 'node:url';
 import knex, { type Knex } from 'knex';
 import { closeConnection } from '@propr/core';
@@ -15,8 +21,8 @@ const tasks = ['First', 'Second', 'Third'].map(title => ({ title, body: `${title
 
 after(async () => closeConnection());
 
-async function setup(t: { after: (fn: () => Promise<void>) => void }, id: string, plan: unknown = tasks): Promise<Knex> {
-  const db = knex({ client: 'better-sqlite3', connection: { filename: ':memory:' }, useNullAsDefault: true });
+async function setup(t: { after: (fn: () => Promise<void>) => void }, id: string, plan: unknown = tasks, filename = ':memory:'): Promise<Knex> {
+  const db = knex({ client: 'better-sqlite3', connection: { filename }, useNullAsDefault: true });
   t.after(() => db.destroy());
   await db.migrate.latest({ directory: fileURLToPath(new URL('../../core/src/db/migrations/', import.meta.url)) });
   await db('task_drafts').insert({ draft_id: id, user_id: userId, repository, status: 'review', plan_json: JSON.stringify(plan) });
@@ -491,6 +497,11 @@ test('a timeout cannot reclaim an active publication while its GitHub POST is aw
   assert.deepEqual(await db('mcp_operations').where({ id: activePublication.attemptId }).first('state', 'lifecycle', 'result'),
     { state: 'unknown', lifecycle: 'unknown', result: null });
 
+  await db('mcp_operations').where({ id: activePublication.attemptId }).update({ lifecycle: 'cancelled' });
+  await assert.rejects(callPublish(id, active.mcp_revision, 'timeout-resume-c', true), /not recoverable/);
+  assert.equal(postCount, 1, 'a lifecycle cancellation is not proof that the callback has stopped');
+  await db('mcp_operations').where({ id: activePublication.attemptId }).update({ lifecycle: 'unknown' });
+
   releasePost();
   const result = await firstResume;
   assert.equal(result.state, 'completed');
@@ -565,4 +576,95 @@ test('invalid plans and non-partial resume requests fail before claiming or cont
   });
   assert.equal((await db('task_drafts').where({ draft_id: id }).first()).status, 'review');
   assert.equal(contacts, 0);
+});
+
+
+for (const resume of [false, true]) {
+  test(`process death during ${resume ? 'resumed' : 'initial'} publication permits marker recovery`, { timeout: 30000 }, async t => {
+    const root = await mkdtemp(path.join(tmpdir(), 'publication-owner-'));
+    t.after(() => rm(root, { recursive: true, force: true }));
+    const filename = path.join(root, 'db.sqlite');
+    const id = '10000000-0000-4000-8000-000000000020';
+    const db = await setup(t, id, tasks.slice(0, 2), filename);
+    if (resume) {
+      await db('task_drafts').where({ draft_id: id }).update({ status: 'executing', context_config: JSON.stringify({
+        publication: { state: 'partial', operationId: 'dead-original',
+          created: [{ index: 0, number: 301, url: 'https://github.com/acme/repo/issues/301' }], failedIndex: 1,
+          failedAt: new Date().toISOString(), cause: { code: 'UPSTREAM_UNREACHABLE', message: 'lost' } },
+      }) });
+      await db('plan_issues').insert({ draft_id: id, repository, issue_number: 301 });
+    }
+    const child = spawn(process.execPath, ['--import', 'tsx', '--input-type=module', '-e', `
+      import knex from 'knex';
+      import { createToolCatalog } from './packages/api/mcp/tools.ts';
+      import { McpOperations } from './packages/api/mcp/operations.ts';
+      const db = knex({ client: 'better-sqlite3', connection: { filename: process.env.PUBLICATION_DB }, useNullAsDefault: true });
+      const draft = await db('task_drafts').first();
+      const principal = { user: { id: '123' }, grant: { id: 'grant-1' }, github: { request: async (route, args) => {
+        if (route.startsWith('GET')) return { data: [] };
+        // GitHub accepted this issue, but the process dies before storing the response.
+        process.send({ number: 302, html_url: 'https://github.com/acme/repo/issues/302', title: args.title, body: args.body });
+        setInterval(() => {}, 1000);
+        await new Promise(() => {});
+      } } };
+      const tool = createToolCatalog({ db, policy: { repository: async () => {} }, taskQueue: {}, redisClient: {}, runtimeBuildQueue: {} })
+        .find(tool => tool.name === 'publish_plan');
+      const args = tool.schema.parse({ repository: 'acme/repo', planId: draft.draft_id, expectedRevision: draft.mcp_revision,
+        resume: process.env.PUBLICATION_RESUME === 'true', idempotencyKey: 'dead-process-attempt' });
+      await new McpOperations(db).run(principal, { tool: tool.name, args, repository: 'acme/repo' },
+        operationId => tool.run({ principal, operationId, args }));
+    `], { cwd: fileURLToPath(new URL('../../../', import.meta.url)),
+      env: { ...process.env, PUBLICATION_DB: filename, PUBLICATION_RESUME: String(resume) }, stdio: ['ignore', 'ignore', 'inherit', 'ipc'] });
+    t.after(() => { child.kill('SIGKILL'); });
+    const [remote] = await once(child, 'message');
+    const active = await db('task_drafts').where({ draft_id: id }).first();
+    const marker = JSON.parse(active.context_config).publication;
+    assert.equal(marker.owner.pid, child.pid);
+    assert.equal(publicationOwnerStopped(marker.owner), false);
+    await db('mcp_operations').where({ id: marker.attemptId }).update({ accepted_at: Date.now() - 180000 });
+    let posts = 0;
+    const { callPublish } = tools(db, (async (route: string, args: Record<string, unknown>) => {
+      if (route.startsWith('GET')) return { data: [remote] };
+      posts += 1;
+      return { data: { number: 303, html_url: 'https://github.com/acme/repo/issues/303', title: args.title } };
+    }) as McpPrincipal['github']['request']);
+    await assert.rejects(callPublish(id, active.mcp_revision, 'still-alive', true), /not recoverable/);
+    assert.deepEqual(await db('mcp_operations').where({ id: marker.attemptId }).first('state', 'result'), { state: 'unknown', result: null });
+    const exited = once(child, 'exit');
+    child.kill('SIGKILL');
+    await exited;
+    assert.equal(publicationOwnerStopped(marker.owner), true);
+    const recovered = (await callPublish(id, active.mcp_revision, 'after-process-death', true)).data as { adopted: number[] };
+    assert.deepEqual(recovered.adopted, [resume ? 1 : 0]);
+    assert.equal(posts, resume ? 0 : 1);
+    assert.equal((await db('task_drafts').where({ draft_id: id }).first()).status, 'executed');
+    assert.equal((await db('plan_issues').where({ draft_id: id })).length, 2);
+  });
+}
+
+test('unverifiable process ownership never authorizes publication takeover', () => {
+  const owner = publicationOwner()!;
+  assert.ok(owner);
+  assert.equal(publicationOwnerStopped(owner), false);
+  assert.equal(publicationOwnerStopped(undefined), false);
+  assert.equal(publicationOwnerStopped({ ...owner, bootId: 'another-boot' }), false);
+  assert.equal(publicationOwnerStopped({ ...owner, pidNamespace: 'another-namespace' }), false);
+  // A reused PID no longer identifies the process that claimed the draft.
+  assert.equal(publicationOwnerStopped({ ...owner, started: '0' }), true);
+});
+
+test('losing the draft claim during issue creation prevents the old publisher from recording or releasing it', async t => {
+  const id = '10000000-0000-4000-8000-000000000021';
+  const db = await setup(t, id, tasks.slice(0, 1));
+  let replacement: unknown;
+  const { callPublish } = tools(db, (async () => {
+    await db('task_drafts').where({ draft_id: id }).update({ context_config: JSON.stringify({ publication: { state: 'replacement' } }) });
+    replacement = await db('task_drafts').where({ draft_id: id }).first();
+    return { data: { number: 401, html_url: 'https://github.com/acme/repo/issues/401', title: 'First' } };
+  }) as McpPrincipal['github']['request']);
+  const before = await db('task_drafts').where({ draft_id: id }).first();
+  await assert.rejects(callPublish(id, before.mcp_revision, 'lost-claim'), (error: unknown) =>
+    error instanceof McpError && error.code === 'PUBLICATION_CLAIM_LOST');
+  assert.deepEqual(await db('task_drafts').where({ draft_id: id }).first(), replacement);
+  assert.deepEqual(await db('plan_issues').where({ draft_id: id }), []);
 });

@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import type { Knex } from 'knex';
 import { McpError } from './config.js';
-import { classifyError, type McpErrorEnvelope } from './errorEnvelope.js';
+import { classifyError, redactDetails, type McpErrorEnvelope } from './errorEnvelope.js';
 import { digest } from './store.js';
 import type { McpPrincipal } from './policy.js';
 import type { ContentBlock } from '@modelcontextprotocol/sdk/types.js';
@@ -38,6 +38,12 @@ function record(value: unknown): Record<string, unknown> | undefined {
 
 function recoveryReceipt(row: Pick<Operation, 'state' | 'result'>) {
   const result = json(row.result);
+  const object = record(result);
+  // Sanitize tracker diagnostics without changing unrelated tool payloads
+  // (for example configuration keys describing token budgets).
+  if (object) for (const key of ['targetState', 'progress', 'ultrafixProgress', 'reviewResults', 'loop']) {
+    if (object[key] !== undefined) object[key] = redactDetails({ value: object[key] }).value;
+  }
   const targetState = record(record(result)?.targetState);
   return { state: row.state, result, ...(targetState ? { targetState } : {}) };
 }
@@ -88,9 +94,13 @@ function needsProgressRecovery(targetState: unknown, lifecycleMissing: boolean, 
   return lifecycleMissing || progress === null;
 }
 
+function safeJson(value: unknown): string {
+  return JSON.stringify(redactDetails({ value }).value);
+}
+
 function recoveredProgress(db: Knex, targetState: unknown, lifecycleMissing: boolean): unknown {
-  if (lifecycleMissing) return JSON.stringify(targetState);
-  return db.raw('COALESCE(progress, ?)', [JSON.stringify(targetState)]);
+  if (lifecycleMissing) return safeJson(targetState);
+  return db.raw('COALESCE(progress, ?)', [safeJson(targetState)]);
 }
 
 export class McpOperations {
@@ -138,7 +148,7 @@ export class McpOperations {
       } else if (state === 'unknown') {
         const failure = errorEnvelope((result.data as { error?: unknown } | null)?.error);
         await this.db('mcp_operations').where({ id }).whereIn('lifecycle', ['accepted', 'unknown'])
-          .update({ lifecycle: 'unknown', failure: failure ? JSON.stringify(failure) : null, updated_at: Date.now() });
+          .update({ lifecycle: 'unknown', failure: failure ? safeJson(failure) : null, updated_at: Date.now() });
       } else {
         // A live invocation result is authoritative if a concurrent poll had
         // already classified its previously result-less receipt as interrupted.
@@ -154,7 +164,7 @@ export class McpOperations {
       if (!recorded) return this.project((await this.db<Operation>('mcp_operations').where({ id }).first())!);
       if (state === 'failed') await this.finish(id, 'failed', envelope);
       else await this.db('mcp_operations').where({ id }).whereIn('lifecycle', ['accepted', 'unknown'])
-        .update({ lifecycle: 'unknown', failure: JSON.stringify(envelope), updated_at: Date.now() });
+        .update({ lifecycle: 'unknown', failure: safeJson(envelope), updated_at: Date.now() });
     }
     return this.project((await this.db<Operation>('mcp_operations').where({ id }).first())!);
   }
@@ -195,9 +205,12 @@ export class McpOperations {
       const failureNeedsUpdate = failureNeedsRecovery || failureNeedsClearing;
       const lifecycleMissing = ['accepted', 'running', 'unknown'].includes(row.lifecycle) || row.finished_at === null;
       const progressNeedsRecovery = needsProgressRecovery(terminalProgress, lifecycleMissing, row.progress);
-      if (!lifecycleMissing && !Object.keys(missingArtifacts).length && !failureNeedsUpdate && !progressNeedsRecovery) continue;
+      const safeResult = row.result === null ? null : JSON.stringify(receipt.result);
+      const resultNeedsRedaction = row.result !== null && safeResult !== JSON.stringify(json(row.result));
+      if (!lifecycleMissing && !Object.keys(missingArtifacts).length && !failureNeedsUpdate && !progressNeedsRecovery && !resultNeedsRedaction) continue;
 
       const update: Record<string, unknown> = { updated_at: Date.now() };
+      if (resultNeedsRedaction) update.result = safeResult;
       if (lifecycleMissing) {
         update.lifecycle = row.state;
         // The receipt update time is the strongest durable evidence of when
@@ -210,7 +223,7 @@ export class McpOperations {
       if (failureNeedsRecovery) {
         // A pickup timeout is only nonterminal evidence. Once the durable
         // receipt proves execution failed, its failure supersedes that timeout.
-        update.failure = JSON.stringify(failure);
+        update.failure = safeJson(failure);
       } else if (failureNeedsClearing) {
         // Terminal receipts without recoverable failure detail still prove the
         // pickup timeout obsolete, but have no failure to store in its place.
@@ -268,7 +281,7 @@ export class McpOperations {
     }
     await eligible.update({
       lifecycle: 'unknown',
-      ...(failure ? { failure: JSON.stringify(failure) } : {}),
+      ...(failure ? { failure: safeJson(failure) } : {}),
       updated_at: Date.now(),
     });
   }
@@ -281,7 +294,7 @@ export class McpOperations {
       .update({
         state: 'unknown',
         lifecycle: 'unknown',
-        failure: JSON.stringify(failure),
+        failure: safeJson(failure),
         updated_at: Date.now(),
       });
   }
@@ -302,7 +315,7 @@ export class McpOperations {
   }
 
   async recordProgress(id: string, progress: unknown): Promise<void> {
-    const serialized = JSON.stringify(progress);
+    const serialized = safeJson(progress);
     await this.db('mcp_operations').where({ id })
       .whereIn('lifecycle', ['accepted', 'running', 'unknown'])
       .whereNotIn('state', ['completed', 'failed', 'cancelled'])
@@ -332,13 +345,13 @@ export class McpOperations {
       failure: failure ? this.db.raw(`CASE
         WHEN failure IS NULL OR json_extract(CASE WHEN json_valid(failure) THEN failure ELSE '{}' END, '$.code') IN (?, ?) THEN ?
         ELSE failure
-      END`, [COMMAND_NOT_PICKED_UP_FAILURE.code, REFINEMENT_OUTCOME_UNAVAILABLE, JSON.stringify(failure)]) : null,
+      END`, [COMMAND_NOT_PICKED_UP_FAILURE.code, REFINEMENT_OUTCOME_UNAVAILABLE, safeJson(failure)]) : null,
       updated_at: at,
     };
     if (progress !== undefined) update.progress = this.db.raw(`CASE
       WHEN lifecycle IN ('accepted', 'running', 'unknown') THEN ?
       ELSE COALESCE(progress, ?)
-    END`, [JSON.stringify(progress), JSON.stringify(progress)]);
+    END`, [safeJson(progress), safeJson(progress)]);
     await eligible.update(update);
   }
 

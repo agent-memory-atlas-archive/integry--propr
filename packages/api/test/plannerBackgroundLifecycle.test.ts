@@ -17,6 +17,7 @@ const {
 const { closeConnection } = await import('@propr/core');
 const { persistGenerationCompletion } = await import('../../core/src/services/taskPlanningService.js');
 const { runBackgroundGeneration } = await import('../routes/plannerHelpers/utils.js');
+const { createRefineHandler } = await import('../routes/plannerHelpers/handlers/generationHandlers.js');
 const { runBackgroundRefinement } = await import('../routes/plannerHelpers/refineBackground.js');
 type AbortRedisFactory = import('../../core/src/claude/docker/dockerExecutor.js').AbortRedisFactory;
 
@@ -29,6 +30,7 @@ const database = knex({
 before(async () => {
   await database.schema.createTable('task_drafts', table => {
     table.string('draft_id').primary();
+    table.string('repository').defaultTo('unconfigured');
     table.string('status').notNullable();
     table.text('generation_trace');
     table.text('refinement_result');
@@ -470,3 +472,54 @@ describe('planner background abort reconciliation', () => {
     assert.equal(disconnectCalls, 1);
   });
 });
+
+
+for (const action of ['answered', 'clarify'] as const) {
+  test(`${action} in background preserves incomplete current tasks`, async () => {
+    const draftId = `incomplete-${action}`;
+    const runId = `run-${action}`;
+    const currentPlan = [{ title: 'Add metrics', body: 'Emit counters' }];
+    await database('task_drafts').insert({ draft_id: draftId, status: 'refining',
+      plan_json: JSON.stringify(currentPlan), refinement_result: JSON.stringify({ status: 'in_progress', runId }) });
+    await runBackgroundRefinement({ db: database, draftId, currentPlan, instruction: 'How?',
+      generationModel: 'test-model', correlationId: runId, accessToken: 'token', runId }, {
+      checkAborted: async () => false,
+      getRepoContext: async () => ({ worktreePath: '/tmp/worktree', repository: 'owner/repo', authToken: 'token' }),
+      refine: async () => ({ action, summary: 'Use a counter.', model: 'test-model',
+        plan: [{ title: 'Unrequested', body: 'Change', implementation: 'Steps' }] }) as never,
+      getPublisher: () => ({ publishDraftUpdate: async () => undefined }) as never,
+    });
+    const current = await database('task_drafts').where({ draft_id: draftId }).first();
+    assert.equal(current.status, 'review');
+    assert.deepEqual(JSON.parse(current.plan_json), currentPlan);
+    const meta = JSON.parse(current.refinement_result);
+    assert.equal(meta.status, 'completed');
+    assert.equal(meta.action, action);
+  });
+}
+
+
+for (const action of ['answered', 'clarify'] as const) {
+  test(`${action} in the legacy handler preserves incomplete current tasks`, async () => {
+    const draftId = `legacy-${action}`;
+    const currentPlan = [{ title: 'Add metrics', body: 'Emit counters' }];
+    await database('task_drafts').insert({ draft_id: draftId, status: 'review', plan_json: JSON.stringify(currentPlan) });
+    const handler = createRefineHandler({ db: database, verifyOwnership: async () => ({ authorized: true }),
+      refinePlan: async () => ({ action, summary: 'Use a counter.', plan: [{ title: 'Unrequested change' }] }) });
+    let resolve!: () => void;
+    const saved = new Promise<void>(done => { resolve = done; });
+    const onQuery = (_response: unknown, query: { sql: string; bindings: unknown[] }) => {
+      if (query.sql.startsWith('update `task_drafts`') && query.bindings.includes('review')) resolve();
+    };
+    database.on('query-response', onQuery);
+    try {
+      const response = { status: () => response, json: () => response };
+      await handler({ body: { draftId, plan: currentPlan, instruction: 'How?' }, user: { id: 'user' } } as never, response as never);
+      await saved;
+    } finally { database.off('query-response', onQuery); }
+    const current = await database('task_drafts').where({ draft_id: draftId }).first();
+    assert.deepEqual(JSON.parse(current.plan_json), currentPlan);
+    assert.equal(JSON.parse(current.refinement_result).action, action);
+    assert.equal(JSON.parse(current.refinement_result).error, undefined);
+  });
+}

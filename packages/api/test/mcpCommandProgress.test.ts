@@ -4,6 +4,7 @@ import { after, test, type TestContext } from 'node:test';
 import knex, { type Knex } from 'knex';
 import { closeConnection } from '@propr/core';
 import { up } from '../../core/src/db/migrations/20260910220000_add_mcp.js';
+import { up as lifecycleMigration } from '../../core/src/db/migrations/20261001000000_add_mcp_operation_lifecycle.js';
 import {
   COMMAND_NOT_PICKED_UP_FAILURE,
   PICKUP_DEADLINE_MS,
@@ -32,6 +33,7 @@ async function fixture(t: TestContext): Promise<Knex> {
   });
   await db.schema.createTable('task_drafts', table => table.string('draft_id').primary());
   await up(db);
+  await lifecycleMigration(db);
   return db;
 }
 

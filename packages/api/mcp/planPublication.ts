@@ -1,3 +1,4 @@
+import { readFileSync, readlinkSync } from 'node:fs';
 import type { McpPrincipal } from './policy.js';
 
 export interface PublishedIssue {
@@ -21,6 +22,37 @@ export interface ActivePublication {
   attemptId: string;
   created: PublishedIssue[];
   claimedAt: string;
+  owner?: PublicationOwner;
+}
+
+/** Linux process generation, scoped to the boot and PID namespace we can inspect. */
+export interface PublicationOwner {
+  bootId: string;
+  pidNamespace: string;
+  pid: number;
+  started: string;
+}
+
+function processStart(pid: number): string {
+  const stat = readFileSync(`/proc/${pid}/stat`, 'utf8');
+  // comm may contain spaces and parentheses; starttime is field 22.
+  return stat.slice(stat.lastIndexOf(')') + 2).split(' ')[19];
+}
+
+export function publicationOwner(): PublicationOwner | undefined {
+  try {
+    return { bootId: readFileSync('/proc/sys/kernel/random/boot_id', 'utf8').trim(),
+      pidNamespace: readlinkSync('/proc/self/ns/pid'), pid: process.pid, started: processStart(process.pid) };
+  } catch { return undefined; }
+}
+
+/** A timeout or a different server is not proof of death. Fail closed when unverifiable. */
+export function publicationOwnerStopped(owner: PublicationOwner | undefined): boolean {
+  const current = publicationOwner();
+  if (!owner || !current || owner.bootId !== current.bootId || owner.pidNamespace !== current.pidNamespace
+    || !Number.isSafeInteger(owner.pid) || owner.pid <= 0 || !/^\d+$/.test(owner.started)) return false;
+  try { return processStart(owner.pid) !== owner.started; }
+  catch (error) { return (error as NodeJS.ErrnoException).code === 'ENOENT'; }
 }
 
 export type MarkerLookup = { state: 'found'; issue: { number: number; url: string; title: string } }
@@ -67,7 +99,7 @@ export function activePublication(value: unknown): ActivePublication | undefined
     && typeof issue.url === 'string');
   if (created.length !== publication.created.length) return undefined;
   return { state: 'active', operationId: publication.operationId, attemptId: publication.attemptId,
-    created, claimedAt: publication.claimedAt };
+    created, claimedAt: publication.claimedAt, owner: publication.owner };
 }
 
 export function publicationSummary(value: unknown): Record<string, unknown> | null {

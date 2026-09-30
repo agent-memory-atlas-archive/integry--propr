@@ -8,7 +8,7 @@ import { type McpTool, type ToolDeps, TERMINAL_PLAN_STATUSES, planScopeShape, pl
 import { planRelationLimit, summarizePlan } from './listSummaries.js';
 import { getCurrentPlanCause, getPlanRevision, listPlanRevisions, restorePlanRevision } from '../routes/plannerHelpers/planRevisions.js';
 import { classifyError, type McpErrorStage } from './errorEnvelope.js';
-import { activePublication as parseActivePublication, findMarkedIssue, parseContextConfig, partialPublication, publicationSummary, type ActivePublication, type PublishedIssue } from './planPublication.js';
+import { activePublication as parseActivePublication, findMarkedIssue, parseContextConfig, partialPublication, publicationSummary, publicationOwner, publicationOwnerStopped, type ActivePublication, type PublishedIssue } from './planPublication.js';
 import { McpOperations } from './operations.js';
 
 const target = { table: 'task_drafts', column: 'draft_id', arg: 'planId', owner: 'user_id' };
@@ -177,24 +177,21 @@ export function addPlanningTools(tools: McpTool[], deps: ToolDeps, planner: Retu
       const partial = args.resume ? partialPublication(initialContext.publication) : undefined;
       const active = args.resume ? parseActivePublication(initialContext.publication) : undefined;
       if (active) await new McpOperations(db).markInterruptedInvocations(principal, active.attemptId);
-      // A live accepted/running receipt retains the claim. Terminal or durable
-      // unknown evidence must postdate this exact claim before it can be fenced off.
-      // Timeout recovery writes unknown without a result and is not evidence that
-      // the invocation stopped; its callback may still have an in-flight POST.
+      // A persisted callback result or an OS-verified dead process permits
+      // marker reconciliation. Lifecycle timeout/cancellation alone cannot prove
+      // that an invocation has stopped making external requests.
       const stoppedActiveAttempt = active ? await db('mcp_operations').where({
         id: active.attemptId, owner_id: principal.user.id, tool: 'publish_plan', repository: args.repository,
-      }).where(builder => builder.whereIn('state', ['completed', 'failed', 'cancelled'])
-        .orWhereIn('lifecycle', ['completed', 'failed', 'cancelled'])
-        .orWhere(unknown => unknown.where({ state: 'unknown' }).whereNotNull('result')))
+      }).whereIn('state', ['completed', 'failed', 'cancelled', 'unknown']).whereNotNull('result')
         .where('updated_at', '>=', Date.parse(active.claimedAt)).first('id') : undefined;
-      const priorPublication = partial ?? (stoppedActiveAttempt ? active : undefined);
+      const priorPublication = partial ?? (active && (stoppedActiveAttempt || publicationOwnerStopped(active.owner)) ? active : undefined);
       const previousStatus = String(draft.status || 'draft');
       if (args.resume && (draft.status !== 'executing' || !priorPublication)) {
         throw new McpError('PRECONDITION_FAILED', 'Plan is not recoverable. Resume requires a partial publication or an active publication whose prior attempt has stopped.', 409);
       }
       const originalOperationId = priorPublication?.operationId ?? String(operationId);
       const activePublication: ActivePublication = { state: 'active', operationId: originalOperationId,
-        attemptId: String(operationId), created: priorPublication?.created ?? [], claimedAt: new Date().toISOString() };
+        attemptId: String(operationId), created: priorPublication?.created ?? [], claimedAt: new Date().toISOString(), owner: publicationOwner() };
       const activeContext: Record<string, unknown> = { ...initialContext, publication: activePublication };
       const activeContextJson = JSON.stringify(activeContext);
       const claim = db('task_drafts').where({ draft_id: args.planId, mcp_revision: args.expectedRevision });
@@ -254,6 +251,16 @@ export function addPlanningTools(tools: McpTool[], deps: ToolDeps, planner: Retu
         }
       };
 
+      const recordIssue = async (number: number): Promise<void> => {
+        // The authority check and insert share one statement, including after
+        // a GitHub await. Losing the claim cannot append rows to a newer attempt.
+        const inserted = await db.raw(`insert into \`plan_issues\` (draft_id, repository, issue_number)
+          select draft_id, ?, ? from task_drafts
+          where draft_id = ? and status = 'executing' and mcp_revision = ? and context_config = ?
+          returning id`, [args.repository, number, args.planId, claimedRevision, activeContextJson]);
+        if (!inserted.length) await assertClaim();
+      };
+
       const recordedRows: Array<{ issue_number: unknown }> = await (async () => {
         try { return await db('plan_issues').where({ draft_id: args.planId }).select('issue_number').orderBy('id'); }
         catch (error) {
@@ -282,7 +289,7 @@ export function addPlanningTools(tools: McpTool[], deps: ToolDeps, planner: Retu
       for (const issue of [...created.values()].sort((left, right) => left.index - right.index)) {
         if (recorded.has(issue.number)) continue;
         try {
-          await db('plan_issues').insert({ draft_id: args.planId, repository: args.repository, issue_number: issue.number });
+          await recordIssue(issue.number);
           recorded.add(issue.number);
         } catch (error) {
           await fail(error, { index: issue.index,
@@ -325,7 +332,7 @@ export function addPlanningTools(tools: McpTool[], deps: ToolDeps, planner: Retu
         const published = { index, number: issue.number, url: issue.url };
         created.set(index, published);
         try {
-          await db('plan_issues').insert({ draft_id: args.planId, repository: args.repository, issue_number: issue.number });
+          await recordIssue(issue.number);
           recorded.add(issue.number);
         } catch (error) { await fail(error, { index, title: String(task.title), step: 'record_issue' }); }
       }

@@ -6,7 +6,8 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import knex from 'knex';
 import { closeConnection } from '@propr/core';
-import { up } from '../../core/src/db/migrations/20260910220000_add_mcp.js';
+import { up, down } from '../../core/src/db/migrations/20260910220000_add_mcp.js';
+import { up as lifecycleMigration, down as lifecycleDown } from '../../core/src/db/migrations/20261001000000_add_mcp_operation_lifecycle.js';
 import { McpOperations, type Operation } from '../mcp/operations.js';
 import { McpError } from '../mcp/config.js';
 import { callWorkflow } from '../mcp/adapter.js';
@@ -25,6 +26,7 @@ test('mutation deduplication survives concurrent callers and reopening the SQLit
   try {
     await db.schema.createTable('task_drafts', table => { table.string('draft_id').primary(); table.string('name'); });
     await up(db);
+    await lifecycleMigration(db);
     const principal = { user: { id: '123' }, grant: { id: 'grant-1' } } as never;
     const args = { idempotencyKey: 'durable-key-1', value: 'payload' };
     let invoked = 0;
@@ -77,6 +79,7 @@ test('operation lifecycle transitions, artifacts and progress are durable and mo
   t.after(() => db.destroy());
   await db.schema.createTable('task_drafts', table => table.string('draft_id').primary());
   await up(db);
+  await lifecycleMigration(db);
   const operations = new McpOperations(db);
   const principal = { user: { id: 'alice' }, grant: { id: 'grant-a' } } as never;
   const receipt = await operations.run(principal, {
@@ -118,6 +121,7 @@ test('a delayed invocation result cannot replace terminal evidence persisted by 
   t.after(() => db.destroy());
   await db.schema.createTable('task_drafts', table => table.string('draft_id').primary());
   await up(db);
+  await lifecycleMigration(db);
   const operations = new McpOperations(db);
   const principal = { user: { id: 'alice' }, grant: { id: 'grant-a' } } as McpPrincipal;
   let invocationStarted!: () => void;
@@ -159,6 +163,7 @@ test('stale concurrent polls cannot replace terminal tracker receipts or lifecyc
     table.timestamp('timestamp'); table.text('reason'); table.text('metadata');
   });
   await up(db);
+  await lifecycleMigration(db);
 
   const operations = new McpOperations(db);
   const args = { idempotencyKey: 'stale-terminal-poll-1' };
@@ -234,6 +239,7 @@ test('terminal execution restoration preserves target state resolved by get_oper
     table.increments('history_id').primary(); table.string('task_id'); table.string('state'); table.timestamp('timestamp');
   });
   await up(db);
+  await lifecycleMigration(db);
 
   const principal = { user: { id: 'alice' }, grant: { id: 'grant-a' } } as McpPrincipal;
   const operations = new McpOperations(db);
@@ -265,6 +271,7 @@ test('get_operation exposes structured invalid-refinement failures', async t => 
     table.string('status'); table.boolean('paused'); table.text('refinement_result');
   });
   await up(db);
+  await lifecycleMigration(db);
   const principal = { user: { id: 'alice' }, grant: { id: 'grant-a' } } as McpPrincipal;
   const operations = new McpOperations(db);
   const receipt = await operations.run(principal, {
@@ -301,6 +308,7 @@ test('an exact refinement failure supersedes uncertainty written by a concurrent
     table.string('status'); table.boolean('paused'); table.text('refinement_result');
   });
   await up(db);
+  await lifecycleMigration(db);
   const principal = { user: { id: 'alice' }, grant: { id: 'grant-a' } } as McpPrincipal;
   const operations = new McpOperations(db);
   const receipt = await operations.run(principal, {
@@ -366,6 +374,7 @@ test('replay repairs an already-failed lifecycle that retained unavailable refin
   t.after(() => db.destroy());
   await db.schema.createTable('task_drafts', table => table.string('draft_id').primary());
   await up(db);
+  await lifecycleMigration(db);
   const principal = { user: { id: 'alice' }, grant: { id: 'grant-a' } } as McpPrincipal;
   const operations = new McpOperations(db);
   const args = { idempotencyKey: 'recover-refinement-failure' };
@@ -400,6 +409,7 @@ test('get_operation settles a legacy refinement receipt without run identity whe
     table.string('status'); table.boolean('paused'); table.text('refinement_result');
   });
   await up(db);
+  await lifecycleMigration(db);
   const principal = { user: { id: 'alice' }, grant: { id: 'grant-a' } } as McpPrincipal;
   const operations = new McpOperations(db);
   const args = { idempotencyKey: 'legacy-refinement-receipt' };
@@ -441,6 +451,7 @@ test('get_operation settles a displaced refinement receipt as unknown without at
     table.string('status'); table.boolean('paused'); table.text('refinement_result');
   });
   await up(db);
+  await lifecycleMigration(db);
   const principal = { user: { id: 'alice' }, grant: { id: 'grant-a' } } as McpPrincipal;
   const operations = new McpOperations(db);
   const first = await operations.run(principal, {
@@ -496,6 +507,7 @@ test('get_operation preserves terminal refinement evidence after a later run rep
     table.string('status'); table.boolean('paused'); table.text('refinement_result');
   });
   await up(db);
+  await lifecycleMigration(db);
   const principal = { user: { id: 'alice' }, grant: { id: 'grant-a' } } as McpPrincipal;
   const operations = new McpOperations(db);
   const receipt = await operations.run(principal, {
@@ -528,6 +540,7 @@ test('replay recovers terminal lifecycle, artifacts and failure from durable rec
   t.after(() => db.destroy());
   await db.schema.createTable('task_drafts', table => table.string('draft_id').primary());
   await up(db);
+  await lifecycleMigration(db);
   const principal = { user: { id: 'alice' }, grant: { id: 'grant-a' } } as McpPrincipal;
   const operations = new McpOperations(db);
   const args = { idempotencyKey: 'interrupted-success-1' };
@@ -588,6 +601,7 @@ test('list_operations recovers tracker lifecycle, artifacts and failure before f
     table.timestamp('timestamp'); table.text('reason'); table.text('metadata');
   });
   await up(db);
+  await lifecycleMigration(db);
   const principal = { user: { id: 'alice' }, grant: { id: 'grant-a' } } as McpPrincipal;
   const operations = new McpOperations(db);
   const failedArgs = { idempotencyKey: 'tracker-failure-02' };
@@ -647,6 +661,7 @@ test('replay and listing recover confirmed cancellation propagation after the tr
     table.increments('history_id').primary(); table.string('task_id'); table.string('state'); table.timestamp('timestamp');
   });
   await up(db);
+  await lifecycleMigration(db);
   const principal = { user: { id: 'alice' }, grant: { id: 'grant-a' } } as McpPrincipal;
   const otherGrant = { user: { id: 'alice' }, grant: { id: 'grant-b' } } as McpPrincipal;
   const operations = new McpOperations(db);
@@ -708,6 +723,7 @@ test('polling an accepted wrapper does not fabricate backend execution start', a
   t.after(() => db.destroy());
   await db.schema.createTable('task_drafts', table => table.string('draft_id').primary());
   await up(db);
+  await lifecycleMigration(db);
   const operations = new McpOperations(db);
   const principal = { user: { id: 'alice' }, grant: { id: 'grant-a' } } as McpPrincipal;
   let finishInvocation!: (result: { status: number; data: unknown }) => void;
@@ -741,6 +757,7 @@ test('interrupted accepted invocations become durable unknown while acknowledged
   t.after(() => db.destroy());
   await db.schema.createTable('task_drafts', table => table.string('draft_id').primary());
   await up(db);
+  await lifecycleMigration(db);
   const operations = new McpOperations(db);
   const principal = { user: { id: 'alice' }, grant: { id: 'grant-a' } } as McpPrincipal;
   let finishInvocation!: (result: { status: number; data: unknown }) => void;
@@ -814,6 +831,7 @@ test('tracker-observed running operations remain active when their projection ti
     table.timestamp('timestamp'); table.text('reason'); table.text('metadata');
   });
   await up(db);
+  await lifecycleMigration(db);
 
   const operations = new McpOperations(db);
   const principal = { user: { id: 'alice' }, grant: { id: 'grant-a' } } as McpPrincipal;
@@ -872,6 +890,7 @@ test('tracker uncertainty resolves from later evidence and preserves observed ti
   t.after(() => db.destroy());
   await db.schema.createTable('task_drafts', table => table.string('draft_id').primary());
   await up(db);
+  await lifecycleMigration(db);
   const operations = new McpOperations(db);
   const principal = { user: { id: 'alice' }, grant: { id: 'grant-a' } } as McpPrincipal;
   const receipt = await operations.run(principal, {
@@ -912,6 +931,7 @@ test('tracker task and review failures populate and can enrich the durable failu
   t.after(() => db.destroy());
   await db.schema.createTable('task_drafts', table => table.string('draft_id').primary());
   await up(db);
+  await lifecycleMigration(db);
   const operations = new McpOperations(db);
   const principal = { user: { id: 'alice' }, grant: { id: 'grant-a' } } as McpPrincipal;
   const create = (tool: string, key: string) => operations.run(principal, {
@@ -1001,6 +1021,7 @@ test('goal failures and generated task pull requests remain durable after backen
     table.primary(['repository', 'pr_number']);
   });
   await up(db);
+  await lifecycleMigration(db);
 
   const principal = { user: { id: 'alice' }, grant: { id: 'grant-a' } } as McpPrincipal;
   const operations = new McpOperations(db);
@@ -1081,6 +1102,7 @@ test('list_operations filters active receipts by exact owner and grant without r
   t.after(() => db.destroy());
   await db.schema.createTable('task_drafts', table => table.string('draft_id').primary());
   await up(db);
+  await lifecycleMigration(db);
   const operations = new McpOperations(db);
   const principal = { user: { id: 'alice' }, grant: { id: 'grant-a' } } as McpPrincipal;
   const otherGrant = { user: { id: 'alice' }, grant: { id: 'grant-b' } } as McpPrincipal;
@@ -1111,6 +1133,7 @@ test('list_operations filters current repository, tool permission and cancellati
   t.after(() => db.destroy());
   await db.schema.createTable('task_drafts', table => table.string('draft_id').primary());
   await up(db);
+  await lifecycleMigration(db);
   const operations = new McpOperations(db);
   const principal = { user: { id: 'alice' }, grant: { id: 'grant-a' }, authorization: { permissions: [] } } as unknown as McpPrincipal;
   const run = (tool: string, key: string, repository?: string, data: Record<string, unknown> = {}) => operations.run(principal, {
@@ -1205,4 +1228,72 @@ test('CIMD accepts Claude by intersecting broader advertised grant capabilities'
   for (const grantTypes of [[], ['authorization_code', 42], ['authorization_code', ''], ['authorization code'], 'authorization_code']) {
     assert.throws(() => parseClientMetadataDocument({ ...document, grant_types: grantTypes }, id));
   }
+});
+
+
+test('forward lifecycle migration upgrades legacy receipts without rerunning the MCP migration', async t => {
+  const db = knex({ client: 'better-sqlite3', connection: { filename: ':memory:' }, useNullAsDefault: true });
+  t.after(() => db.destroy());
+  await db.schema.createTable('task_drafts', table => { table.string('draft_id').primary(); });
+  const migrations = {
+    '20260910220000_add_mcp.js': { up, down },
+    '20261001000000_add_mcp_operation_lifecycle.js': { up: lifecycleMigration, down: lifecycleDown },
+  };
+  const source = (names: Array<keyof typeof migrations>) => ({
+    getMigrations: async () => names,
+    getMigrationName: (name: string) => name,
+    getMigration: async (name: keyof typeof migrations) => migrations[name],
+  });
+  await db.migrate.latest({ migrationSource: source(['20260910220000_add_mcp.js']) });
+  assert.equal(await db.schema.hasColumn('mcp_operations', 'lifecycle'), false);
+  const states = ['completed', 'failed', 'cancelled', 'unknown', 'accepted', 'queued', 'posted'];
+  for (const state of states) await db('mcp_operations').insert({
+    id: state, owner_id: 'alice', grant_id: 'grant', idempotency_key: `legacy-${state}`,
+    tool: 'fixture', repository: 'acme/repo', payload_hash: 'hash', state,
+    result: JSON.stringify({ preserved: state }), created_at: 100, updated_at: 200,
+  });
+  await db.migrate.latest({ migrationSource: source(Object.keys(migrations) as Array<keyof typeof migrations>) });
+  for (const state of states) {
+    const row = await db('mcp_operations').where({ id: state }).first();
+    assert.equal(row.lifecycle, ['completed', 'failed', 'cancelled', 'unknown'].includes(state) ? state : 'accepted');
+    assert.equal(row.accepted_at, 100);
+    assert.equal(row.finished_at, ['completed', 'failed', 'cancelled'].includes(state) ? 200 : null);
+    assert.equal(row.result, JSON.stringify({ preserved: state }));
+    assert.equal(row.artifacts, '{}');
+  }
+  const indexes = await db.raw("PRAGMA index_list('mcp_operations')");
+  assert.ok(indexes.some((index: { name: string }) => index.name === 'mcp_operations_owner_grant_accepted_idx'));
+  const operations = new McpOperations(db);
+  const principal = { user: { id: 'alice' }, grant: { id: 'grant' } } as McpPrincipal;
+  assert.equal((await operations.get(principal, 'completed')).result, '{"preserved":"completed"}');
+  const receipt = await operations.run(principal, { tool: 'fixture', args: { idempotencyKey: 'upgraded-operation' } },
+    async () => ({ status: 200, data: { upgraded: true } }));
+  assert.equal(receipt.state, 'completed');
+});
+
+test('lifecycle progress and recovery redact credentials before persistence', async t => {
+  const db = knex({ client: 'better-sqlite3', connection: { filename: ':memory:' }, useNullAsDefault: true });
+  t.after(() => db.destroy());
+  await db.schema.createTable('task_drafts', table => { table.string('draft_id').primary(); });
+  await up(db);
+  await lifecycleMigration(db);
+  const operations = new McpOperations(db);
+  const principal = { user: { id: 'alice' }, grant: { id: 'grant' } } as McpPrincipal;
+  const secret = 'github_pat_failure_secret';
+  const progress = { state: 'failed', reason: `Rejected ${secret}`, nested: { authorization: 'private-value' } };
+  const receipt = await operations.run(principal, { tool: 'fixture', args: { idempotencyKey: 'redacted-progress' } },
+    async () => ({ status: 202, data: { state: 'queued' } }));
+  const id = String(receipt.operationId);
+  await operations.recordProgress(id, progress);
+  assert.doesNotMatch(JSON.stringify(await db('mcp_operations').where({ id }).first()), /github_pat_failure_secret|private-value/);
+  await operations.finish(id, 'failed', undefined, progress);
+  assert.doesNotMatch(JSON.stringify(await db('mcp_operations').where({ id }).first()), /github_pat_failure_secret|private-value/);
+  // Simulate interruption after an older tracker's terminal receipt write.
+  await db('mcp_operations').where({ id }).update({ state: 'failed', lifecycle: 'running', finished_at: null,
+    progress: null, result: JSON.stringify({ targetState: progress }) });
+  await operations.get(principal, id);
+  const recovered = await db('mcp_operations').where({ id }).first();
+  assert.equal(recovered.lifecycle, 'failed');
+  assert.match(recovered.progress, /REDACTED/);
+  assert.doesNotMatch(JSON.stringify(recovered), /github_pat_failure_secret|private-value/);
 });

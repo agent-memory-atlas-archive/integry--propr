@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { redactDetails } from './errorEnvelope.js';
 import type { TaskSubmission } from '@propr/core';
 import { createTaskSubmissionRoutes } from '../routes/taskSubmissionRoutes.js';
 import { callWorkflow } from './adapter.js';
@@ -159,7 +160,7 @@ export async function trackTaskSubmission(deps: ToolDeps, row: Operation, princi
     const refreshed = { ...result, ...(progress ? { progress } : {}), executionResolved: true, targetState: result.targetState };
     receipt.result = refreshed;
     receipt.targetState = result.targetState;
-    await deps.db('mcp_operations').where({ id: row.id }).update({ result: JSON.stringify(refreshed), updated_at: Date.now() });
+    await deps.db('mcp_operations').where({ id: row.id }).update({ result: JSON.stringify(redactDetails(refreshed)), updated_at: Date.now() });
     return;
   }
   const { current, taskId } = await projectOperationSubmission(deps, submission, result);
@@ -169,7 +170,7 @@ export async function trackTaskSubmission(deps: ToolDeps, row: Operation, princi
   receipt.targetState = { submissionId: submission.id, state: current.progress.stage, taskId,
     pullRequest: current.progress.pullRequest?.number };
   // Feed the newly associated task into ordinary execution tracking in this same poll.
-  row.result = JSON.stringify(current);
+  row.result = JSON.stringify(redactDetails(current));
   row.state = current.state;
   await deps.db('mcp_operations').where({ id: row.id }).whereNotIn('state', ['completed', 'failed', 'cancelled'])
     .update({ state: row.state, result: row.result, updated_at: Date.now() });

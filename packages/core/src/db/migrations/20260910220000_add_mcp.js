@@ -19,17 +19,9 @@ export async function up(knex) {
     table.string('payload_hash', 64).notNullable();
     table.string('state').notNullable();
     table.text('result').nullable();
-    table.string('lifecycle', 16).notNullable();
-    table.bigInteger('accepted_at').notNullable();
-    table.bigInteger('started_at').nullable();
-    table.bigInteger('finished_at').nullable();
-    table.json('failure').nullable();
-    table.json('artifacts').notNullable();
-    table.json('progress').nullable();
     table.bigInteger('created_at').notNullable();
     table.bigInteger('updated_at').notNullable();
     table.unique(['owner_id', 'grant_id', 'idempotency_key']);
-    table.index(['owner_id', 'grant_id', 'accepted_at'], 'mcp_operations_owner_grant_accepted_idx');
   });
   await knex.schema.alterTable('task_drafts', table => { table.integer('mcp_revision').notNullable().defaultTo(0); });
   // Every writer, including browser handlers and background workers, invalidates
