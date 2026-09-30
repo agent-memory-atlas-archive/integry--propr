@@ -4,6 +4,7 @@ import {
   getAntigravityAnalysisText,
   parseAntigravityJsonl,
   parseVibeConversationLog,
+  splitAntigravityInvocations,
   type AntigravityOutputEvent,
 } from '@propr/core';
 import {
@@ -40,17 +41,59 @@ function resolveAntigravityLiveDetailsTokenUsage(
   return usage;
 }
 
+/**
+ * A goal conversation records one stream per invocation. `result.usage` is
+ * cumulative over the conversation, so later invocations report their own cost
+ * through step usage instead.
+ */
+function sumInvocationTokenUsage(usages: TokenUsage[], stepUsages: Array<Partial<TokenUsage> | null>): TokenUsage {
+  if (usages.length === 1) return usages[0];
+  return usages.reduce<TokenUsage>((total, usage, index) => {
+    const own = stepUsages[index] ?? usage;
+    return {
+      input_tokens: total.input_tokens + (own.input_tokens ?? 0),
+      output_tokens: total.output_tokens + (own.output_tokens ?? 0),
+      cache_creation_input_tokens: 0,
+      cache_read_input_tokens: total.cache_read_input_tokens + (own.cache_read_input_tokens ?? 0),
+    };
+  }, { input_tokens: 0, output_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 });
+}
+
+function stepTokenUsage(events: AntigravityOutputEvent[]): Partial<TokenUsage> | null {
+  const steps = new Map<number, { input_tokens?: number; output_tokens?: number; cache_read_tokens?: number }>();
+  for (const event of events) {
+    if ('event' in event && event.event === 'step_update' && event.step_update.usage) steps.set(event.step_update.step_index, event.step_update.usage);
+  }
+  if (steps.size === 0) return null;
+  const usage = { input_tokens: 0, output_tokens: 0, cache_read_input_tokens: 0 };
+  for (const step of steps.values()) {
+    usage.input_tokens += step.input_tokens ?? 0;
+    usage.output_tokens += step.output_tokens ?? 0;
+    usage.cache_read_input_tokens += step.cache_read_tokens ?? 0;
+  }
+  return usage;
+}
+
+/**
+ * A running Antigravity invocation publishes its init envelope before any
+ * narration; showing that protocol JSON raw would leak envelopes. Terminal and
+ * malformed output keeps its raw fallback so failures stay diagnosable.
+ */
+export function isAntigravityStreamAwaitingNarration(output: string): boolean {
+  const latest = parseAntigravityJsonl(splitAntigravityInvocations(output).pop() ?? '');
+  return latest.hasStreamEnvelopes && !latest.terminalStatus && !latest.protocolError;
+}
+
 export function parseAntigravityOutputToConversationResult(output: string): ConversationResult | null {
-  const parsed = parseAntigravityJsonl(output);
-  const events = filterAntigravityAnalysisEvents(aggregateDeltaMessages(parsed.conversationLog)).map(event => ({
+  const invocations = splitAntigravityInvocations(output).map(invocation => parseAntigravityJsonl(invocation));
+  const events = invocations.flatMap(parsed => filterAntigravityAnalysisEvents(aggregateDeltaMessages(parsed.conversationLog))).map(event => ({
     type: 'thought',
     content: getAntigravityAnalysisText(event) ?? '',
     timestamp: 'created_at' in event ? event.created_at : 'timestamp' in event ? event.timestamp : undefined
   })).filter(event => event.content);
-  const tokenUsage = resolveAntigravityLiveDetailsTokenUsage(
-    parsed.tokenUsage,
-    parsed.conversationLog,
-    parsed.protocolError !== undefined,
+  const tokenUsage = sumInvocationTokenUsage(
+    invocations.map(parsed => resolveAntigravityLiveDetailsTokenUsage(parsed.tokenUsage, parsed.conversationLog, parsed.protocolError !== undefined)),
+    invocations.map(parsed => stepTokenUsage(parsed.conversationLog)),
   );
   const hasTokens = tokenUsage.input_tokens > 0
     || tokenUsage.output_tokens > 0

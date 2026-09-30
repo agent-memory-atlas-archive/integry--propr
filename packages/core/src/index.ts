@@ -303,6 +303,7 @@ export {
     getAntigravityAnalysisText,
     parseAntigravityJsonl,
 } from './agents/impl/utils/antigravityOutputParser.js';
+export { splitAntigravityInvocations } from './agents/impl/utils/antigravityInvocations.js';
 export type {
     AntigravityOutputEvent,
     AntigravityParsedOutput,

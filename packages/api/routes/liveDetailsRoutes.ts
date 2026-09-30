@@ -11,7 +11,7 @@ import {
   isConversationResultEmpty, parseClaudeOutputToConversationResult,
   parseCodexOutputToConversationResult, type ConversationResult
 } from './liveDetailsCodexParser.js';
-import { parseAntigravityOutputToConversationResult, parseVibeOutputToConversationResult } from './liveDetailsOutputParsers.js';
+import { isAntigravityStreamAwaitingNarration, parseAntigravityOutputToConversationResult, parseVibeOutputToConversationResult } from './liveDetailsOutputParsers.js';
 import { parseOpenCodeOutputToConversationResult } from './liveDetailsOpenCodeParser.js';
 import { parseExecutionDetailsRows, type ExecutionDetailRow } from './liveDetailsExecutionParser.js';
 import { detectStoredOutputFormat, hasCodexAppServerNotification, type StoredOutputFormat } from './liveDetailsStoredOutputFormat.js';
@@ -359,9 +359,7 @@ function projectStoredOutputResult(stored: ParsedStoredOutput): ConversationResu
 export function parseStoredOutputContent(output: string): ParsedStoredOutput {
   if (!output.trim()) return { parsed: null, rawFallback: null, format: 'unknown' };
   const format = detectStoredOutputFormat(output);
-  // Recognized Antigravity output is protocol JSON throughout; before its first
-  // narration (a goal turn's init envelope alone), showing it raw leaks envelopes.
-  const rawFallback = format === 'antigravity' ? null : buildRawOutputConversationResult(output);
+  const rawFallback = format === 'antigravity' && isAntigravityStreamAwaitingNarration(output) ? null : buildRawOutputConversationResult(output);
   if (format !== 'unknown') return parseStoredOutputWithFormat(output, format, rawFallback);
   for (const fallbackFormat of STORED_OUTPUT_FALLBACK_ORDER) {
     const parsed = parseStoredOutputForFormat(output, fallbackFormat);

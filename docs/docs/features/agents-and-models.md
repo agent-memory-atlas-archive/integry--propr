@@ -41,9 +41,9 @@ To reuse an account that is already authenticated on the host, select **Use exis
 
 ## Goal sessions
 
-Codex and Claude expose native goal control. Antigravity supports ProPR goals through its persistent CLI conversations: ProPR streams activity, saves the conversation ID, and resumes that exact conversation at checkpoint and operator-input boundaries. Availability is checked against the configured image's CLI capabilities.
+Codex, Claude and Antigravity run goals on their native goal support. Antigravity goals use its `/goal` command in a persistent CLI conversation: ProPR streams activity, saves the conversation ID, and delivers checkpoints, operator input, pause and cancel by interrupting at the next finished step and resuming that exact conversation. Availability is checked against the configured image's CLI capabilities.
 
-Antigravity operator input uses a safe boundary and conversation resume; it is not delivered through a live steering API. Keep its mounted configuration directory across goal attempts. See [Goals](./goals.md) for checkpoint, pause/resume, cancellation, and draft PR behavior.
+Keep Antigravity's mounted configuration directory across goal attempts, since it holds the goal conversation. See [Goals](./goals.md) for checkpoint, pause/resume, cancellation, and draft PR behavior.
 
 ## Agent Configuration
 

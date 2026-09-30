@@ -15,6 +15,7 @@ import {
 import {
   GoalCapabilityProbe,
   antigravityConversationIdentity,
+  antigravityGoalCommandProbeSucceeded,
   antigravityHelpSupportsWholeSession,
   claudeHelpSupportsWholeSession,
   claudeHelpSupportsNativeGoal,
@@ -27,8 +28,6 @@ import {
 import { buildDockerArgs as buildClaudeDockerArgs } from '../packages/core/src/agents/impl/utils/dockerArgsBuilder.ts';
 import { buildCodexAppServerDockerArgs, buildCodexDockerArgs } from '../packages/core/src/agents/impl/utils/codexDockerArgsBuilder.ts';
 import { AntigravityAgent } from '../packages/core/src/agents/impl/AntigravityAgent.ts';
-import { resolveAntigravityGoalSessionError } from '../packages/core/src/agents/impl/utils/antigravityProtocol.ts';
-import { inspectSessionMessageLine } from '../packages/core/src/claude/docker/dockerSessionOutput.ts';
 import type { Agent, AgentConfig } from '../packages/core/src/agents/types.ts';
 
 let codexConfigPath: string;
@@ -214,19 +213,22 @@ describe('native goal provider contract', () => {
 
   test('Antigravity retains state and resumes the exact conversation', () => {
     const agent = new AntigravityAgent(baseConfig('antigravity')) as unknown as {
-      buildDockerArgs(params: typeof common & { executionMode?: 'task' | 'goal'; resumeConversationId?: string }): string[];
+      buildDockerArgs(params: typeof common & { executionMode?: 'task' | 'goal'; resumeConversationId?: string; nativeGoalLaunch?: boolean }): string[];
     };
     const normal = agent.buildDockerArgs(common);
-    const initial = agent.buildDockerArgs({ ...common, executionMode: 'goal' });
+    const initial = agent.buildDockerArgs({ ...common, executionMode: 'goal', nativeGoalLaunch: true });
     const resumed = agent.buildDockerArgs({ ...common, executionMode: 'goal', resumeConversationId: 'agy-conversation' });
     assert.ok(normal.includes('PROPR_EPHEMERAL_STATE=1'));
     assert.ok(normal.some(argument => argument.endsWith(':/home/node/.gemini-source:rw')));
     assert.equal(initial.includes('PROPR_EPHEMERAL_STATE=1'), false);
     assert.ok(initial.some(argument => argument.endsWith(':/home/node/.gemini:rw')));
+    // Only the launch expands the native `/goal` command; resumed invocations
+    // carry operator input that slash commands must not consume.
     assert.equal(normal.includes('--disable-slash-commands'), false);
-    assert.ok(initial.includes('--disable-slash-commands'));
+    assert.equal(initial.includes('--disable-slash-commands'), false);
     assert.ok(resumed.includes('--disable-slash-commands'));
-    for (const args of [normal, initial, resumed]) {
+    assert.equal(normal.includes('--output-format'), false);
+    for (const args of [initial, resumed]) {
       assert.deepEqual(args.slice(args.indexOf('--output-format'), args.indexOf('--output-format') + 2),
         ['--output-format', 'stream-json']);
     }
@@ -261,23 +263,13 @@ describe('native goal provider contract', () => {
     ].join('\n')), undefined);
   });
 
-  test('Antigravity publishes its recorded conversation before the result for goal controls', () => {
-    const lines = readFileSync('packages/core/test/fixtures/antigravity-stream-1.1.12.jsonl', 'utf8').trim().split('\n');
-    const identities: Array<[string, string | undefined]> = [];
-    const context = {
-      messageTimestamps: new Map<string, string>(),
-      state: { sessionIdDetected: false },
-      onSessionId: (sessionId: string, conversationId?: string) => { identities.push([sessionId, conversationId]); },
-      invokeExecutionCallback: (callback: () => void | Promise<void>) => { void callback(); },
-    };
-    inspectSessionMessageLine(lines[0], '2026-09-27T00:00:00Z', context);
-    assert.deepEqual(identities, [['conversation-sanitized', 'conversation-sanitized']]);
-    for (const line of lines.slice(1)) inspectSessionMessageLine(line, '2026-09-27T00:00:01Z', context);
-    assert.equal(identities.length, 1);
-    assert.equal(resolveAntigravityGoalSessionError(true, identities[0][1]), undefined);
-    assert.match(resolveAntigravityGoalSessionError(false, undefined)!, /resumable stream-json conversation/);
-    assert.match(resolveAntigravityGoalSessionError(true, undefined)!, /resumable stream-json conversation/);
-    assert.match(resolveAntigravityGoalSessionError(false, 'legacy-session')!, /resumable stream-json conversation/);
+  test('the pinned Antigravity CLI help exposes every goal flag', () => {
+    const help = readFileSync('packages/core/test/fixtures/antigravity-help-1.2.4.txt', 'utf8');
+    assert.equal(antigravityHelpSupportsWholeSession(help), true);
+    assert.equal(antigravityHelpSupportsWholeSession(help.replace(/^\s*--conversation .*$/m, '')), false);
+    assert.equal(antigravityGoalCommandProbeSucceeded('1\n'), true);
+    assert.equal(antigravityGoalCommandProbeSucceeded('0\n'), false);
+    assert.equal(antigravityGoalCommandProbeSucceeded(''), false);
   });
 
   test('recognizes the pinned Codex experimental schema only when every goal method is present', () => {
@@ -337,7 +329,11 @@ describe('native goal provider contract', () => {
         '===PROPR-CLAUDE-GOAL-PROBE===',
         JSON.stringify({ type: 'result', is_error: false, result: 'No goal set. Usage: `/goal <condition>`' }),
       ].join('\n'),
-      antigravity: '--print\n--conversation <id>\n--output-format <format>\n--disable-slash-commands',
+      antigravity: [
+        '--print\n--conversation <id>\n--output-format <format>\n--disable-slash-commands',
+        '===PROPR-ANTIGRAVITY-GOAL-PROBE===',
+        '1',
+      ].join('\n'),
     };
     for (const type of ['codex', 'claude', 'antigravity'] as const) {
       const calls: Array<{ args: string[]; stdinData?: string }> = [];
@@ -364,8 +360,13 @@ describe('native goal provider contract', () => {
         assert.deepEqual(capability.lifecycle, { launch: 'native-goal', resume: 'native-goal', runningInput: 'live-steer' });
         assert.equal(capability.controls.liveInput, true);
       } else {
-        assert.doesNotMatch(calls[0].args.join(' '), /\/goal/);
-        assert.ok(calls[0].args.includes('--help'));
+        // The native `/goal` command is detected in the binary: no model call.
+        assert.match(calls[0].args.join(' '), /agy --help; .*grep -c -a -F 'Run until the specified goal is completely finished\.'/);
+        assert.doesNotMatch(calls[0].args.join(' '), /agy -p|--print/);
+      }
+      if (type !== 'codex') {
+        assert.deepEqual(capability.lifecycle, { launch: 'native-goal', resume: 'native-goal', runningInput: 'live-steer' });
+        assert.equal(capability.controls.liveInput, true);
       }
     }
   });

@@ -153,6 +153,44 @@ test('an Antigravity goal stream with only its init envelope renders no raw prot
   assert.equal(parsed.rawFallback, null);
 });
 
+test('Antigravity terminal errors without narration keep their raw fallback', async () => {
+  const { parseStoredOutputContent } = await import('../routes/liveDetailsRoutes.js');
+  const output = [
+    JSON.stringify({ event: 'init', conversation_id: 'agy-goal', init: { model: 'gemini-3.8-flash-medium' } }),
+    JSON.stringify({ event: 'result', result: { conversation_id: 'agy-goal', status: 'ERROR', response: '' } }),
+  ].join('\n');
+
+  const parsed = parseStoredOutputContent(output);
+
+  assert.equal(parsed.parsed, null);
+  assert.ok(parsed.rawFallback);
+});
+
+test('a native goal stream renders narration from every resumed invocation of its conversation', async () => {
+  const { parseStoredOutputContent } = await import('../routes/liveDetailsRoutes.js');
+  const init = JSON.stringify({ event: 'init', conversation_id: 'agy-goal', init: { model: 'gemini-3.8-flash-medium' } });
+  const step = (index: number, text: string, input: number) => JSON.stringify({ event: 'step_update', step_update: {
+    conversation_id: 'agy-goal', step_index: index, state: 'DONE', step_type: 'agent_response', text_delta: text,
+    usage: { input_tokens: input, output_tokens: 1 },
+  } });
+  // result.usage is cumulative over the conversation; step usage is per call.
+  const result = (input: number) => JSON.stringify({ event: 'result', result: {
+    conversation_id: 'agy-goal', status: 'ERROR', response: '', usage: { input_tokens: input, output_tokens: 1 },
+  } });
+  const output = [
+    'entrypoint banner', init, step(1, 'Adding subtract.', 100), result(100),
+    init, step(3, 'Applying the operator correction.', 40), JSON.stringify({ event: 'result', result: {
+      conversation_id: 'agy-goal', status: 'SUCCESS', response: 'Applying the operator correction.', usage: { input_tokens: 140, output_tokens: 2 },
+    } }),
+  ].join('\n');
+
+  const parsed = parseStoredOutputContent(output);
+
+  assert.equal(parsed.format, 'antigravity');
+  assert.deepEqual(parsed.parsed?.events.map(event => event.content), ['Adding subtract.', 'Applying the operator correction.']);
+  assert.equal(parsed.parsed?.tokenUsage?.input_tokens, 140);
+});
+
 test('stored output detection and live-details rendering consume Antigravity stream arrays', async () => {
   const { parseStoredOutputContent } = await import('../routes/liveDetailsRoutes.js');
   const output = JSON.stringify([

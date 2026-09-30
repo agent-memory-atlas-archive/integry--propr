@@ -10,14 +10,3 @@ export function resolveAntigravityProtocolError(
     }
     return undefined;
 }
-
-/** Goals must retain a provider conversation for checkpoints and operator input. */
-export function resolveAntigravityGoalSessionError(
-    hasStreamEnvelopes: boolean,
-    conversationId: string | undefined,
-): string | undefined {
-    if (!hasStreamEnvelopes || !conversationId) {
-        return 'Antigravity goal execution did not report a resumable stream-json conversation';
-    }
-    return undefined;
-}

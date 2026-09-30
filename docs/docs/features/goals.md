@@ -18,19 +18,19 @@ The detail console brings together context, current activity, progress, artifact
 
 ## Native execution and corrections
 
-Codex and Claude Code have native goal execution support. Antigravity supports goals through persistent CLI conversations, as described below. Availability is checked against the configured runtime: an agent listed for ordinary tasks is not necessarily goal-capable. If none is available, use the capability diagnostics and recheck after updating the runtime.
+Codex, Claude Code and Antigravity run goals on their own native goal support. Availability is checked against the configured runtime: an agent listed for ordinary tasks is not necessarily goal-capable. If none is available, use the capability diagnostics and recheck after updating the runtime.
 
-Send a correction from the goal console or through MCP's `send_goal_input` to steer the existing session. The timeline records your message verbatim so you can distinguish operator input from agent output. Delivery follows the provider's reported capability: Codex and Claude use native live controls, while other supported providers may resume at a safe boundary. A queued input is not proof that the agent has already acted on it.
+Send a correction from the goal console or through MCP's `send_goal_input` to steer the existing session. The timeline records your message verbatim so you can distinguish operator input from agent output. All three deliver it into the running goal: Codex and Claude over their live control channels, and Antigravity by stopping at the next finished step and resuming the same conversation (see below). A queued input is not proof that the agent has already acted on it.
 
 **Pause**, **Resume** and **Cancel** also follow provider boundaries. A pending pause or cancellation can take time to acknowledge; watch the displayed state. Model changes apply at a boundary. Terminal goals no longer accept corrections. Inspect earlier inputs with MCP's `list_goal_inputs`, or use `get_goal` for progress and current activity.
 
-## Antigravity sessions
+## Antigravity goals
 
-Antigravity uses the same ProPR goal lifecycle as the other supported agents, backed by its native persistent conversation storage. The CLI must support noninteractive execution, `--output-format stream-json`, and exact `--conversation` resume. ProPR mounts persistent Antigravity configuration for goals and saves the conversation identity from the initial stream event. Ordinary task invocations continue to use disposable state.
+ProPR launches an Antigravity goal with the CLI's native `/goal` command, sent together with ProPR's delivery context. Antigravity then owns the goal loop: it keeps working until it marks the goal complete. ProPR saves the conversation ID from the first stream event and mounts persistent Antigravity configuration for goals; ordinary tasks keep disposable state.
 
-The stream supplies live narration and activity to goal details and `get_agent_activity`. A successful goal invocation must report a resumable conversation and a terminal success result. CLI success alone does not prove delivery.
+The CLI's print mode holds new messages until a goal finishes, so ProPR reaches control boundaries itself. When a checkpoint is declared, input is sent, or a pause, cancel or model change is requested, ProPR interrupts at the next finished step. It then resumes the exact conversation, where the goal is still set, with the checkpoint acknowledgement or your message. Resumed messages are sent with slash commands disabled, so they reach the conversation verbatim.
 
-Antigravity queues operator input for a safe boundary and resumes the saved conversation with the correction. Pause stops execution at a resumable boundary; resume continues that conversation. Cancel terminates the goal through the shared lifecycle. Antigravity does not advertise live steering; Codex and Claude have separate native control transports within this same lifecycle.
+The stream supplies live narration to goal details and `get_agent_activity`. A goal completes only when Antigravity marks it complete; a turn that ends without that mark is nudged to continue, and repeated unexplained stops fail the goal. The capability check requires the pinned CLI to expose `--print`, `--output-format`, `--conversation`, `--disable-slash-commands` and the built-in `/goal` command.
 
 ## Checkpoints and controls
 
