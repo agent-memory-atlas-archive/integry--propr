@@ -1,3 +1,5 @@
+import { startDashboardReadService, type DashboardReadService } from './services/dashboardReadService.js';
+import { createUsageTipsRoutes } from './routes/usageTipsRoutes.js';
 import { dashboardNarrativeModel } from './routes/dashboardNarrativeModel.js';
 import { getConfig } from '@propr/core';
 import { createTaskSubmissionRoutes, taskSubmissionUpload } from './routes/taskSubmissionRoutes.js';
@@ -254,6 +256,7 @@ let taskQueue: Queue;
 let runtimeBuildQueue: Queue;
 let configReloadSubscription: ConfigReloadSubscription | undefined;
 let invalidateStatusAgentCache: (() => void) | undefined;
+let dashboardReads: DashboardReadService | undefined;
 let notificationBackground: NotificationBackgroundService | undefined;
 let webPushDispatcherConfigured = false;
 let resolvedWebPushConfiguration: ValidatedWebPushConfiguration = { configured: false, issue: 'disabled' };
@@ -301,6 +304,8 @@ async function initRedis(): Promise<void> {
   console.log('Connected to Redis');
 }
 
+let readSystemStatus: (() => Promise<Record<string, unknown>>) | undefined;
+
 function setupRoutes(): void {
   const statusRoutes = createStatusRoutes({
     redisClient,
@@ -311,6 +316,15 @@ function setupRoutes(): void {
       ) => notificationBackground!.projectSystemSnapshot(snapshot, additionalAdministratorIds),
     }),
   });
+  readSystemStatus = async () => {
+    const snapshot = await statusRoutes.getStatusSnapshot();
+    // Health notifications must keep advancing when connected clients consume
+    // snapshots and no longer call the HTTP route that also projects them.
+    void notificationBackground?.projectSystemSnapshot(snapshot, []).catch(error => {
+      console.warn('Failed to project pushed system health notifications:', error);
+    });
+    return snapshot;
+  };
   invalidateStatusAgentCache = statusRoutes.invalidateAgentStatusCache;
   const desktopAuthRoutes = createDesktopAuthRoutes();
   // INTENTIONALLY UNAUTHENTICATED: compatibility/discovery and the bounded
@@ -351,13 +365,14 @@ function setupRoutes(): void {
   const agentRoutes = createAgentRoutes();
   const agentLoginRoutes = createAgentLoginRoutes();
   const statsRoutes = createStatsRoutes({ db });
-  const dashboardRoutes = createDashboardRoutes({ db, redisClient, taskQueue, narrativeModel: dashboardNarrativeModel, isSummaryEnabled: async () => (await getConfig('dashboard_summary_enabled', true)) !== false });
+  const dashboardRoutes = createDashboardRoutes({ db, redisClient, taskQueue, completedRows: dashboardReads?.load, narrativeModel: dashboardNarrativeModel, isSummaryEnabled: async () => (await getConfig('dashboard_summary_enabled', true)) !== false });
   const summaryBrowserRoutes = createSummaryBrowserRoutes();
   const repoChatRoutes = createRepoChatRoutes();
   const repoImprovementsRoutes = createRepoImprovementsRoutes();
   const repoTodoRoutes = createRepoTodoRoutes();
   const userRepoPreferencesRoutes = createUserRepoPreferencesRoutes();
   const agentRuntimeRoutes = createAgentRuntimeRoutes({ getRuntimeBuildQueue: () => runtimeBuildQueue });
+  const usageTipsRoutes = createUsageTipsRoutes();
   const notificationRoutes = createNotificationRoutes({ webPushDispatcherConfigured, resolvedWebPushConfiguration });
   const voiceBriefingService = createVoiceBriefingService({
     database: db,
@@ -395,9 +410,13 @@ function setupRoutes(): void {
     ['post', '/api/planner/drafts/:id/issues/:issueNumber/implement', plannerRoutes.implementIssue], ['patch', '/api/planner/drafts/:id/issues/:issueNumber', plannerRoutes.updateIssue], ['post', '/api/planner/context/stats', plannerRoutes.getContextStats],
     ['post', '/api/planner/preview', plannerRoutes.previewContext], ['post', '/api/planner/preview/context', plannerRoutes.downloadContext], ['post', '/api/planner/generate', plannerRoutes.generate], ['post', '/api/planner/abort', plannerRoutes.abortGeneration],
     ['post', '/api/planner/refine', plannerRoutes.refine], ['post', '/api/planner/abort-refinement', plannerRoutes.abortRefinement], ['post', '/api/planner/finalize', plannerRoutes.finalize], ['post', '/api/planner/drafts/:id/reset-to-setup', plannerRoutes.resetDraftToSetup],
+    ['get', '/api/planner/drafts/:id/revisions', plannerRoutes.listPlanRevisions],
+    ['get', '/api/planner/drafts/:id/revisions/:revisionId', plannerRoutes.getPlanRevision],
+    ['post', '/api/planner/drafts/:id/revisions/:revisionId/restore', plannerRoutes.restorePlanRevision],
     ['post', '/api/planner/drafts/:id/revise', plannerRoutes.reviseDraft], ['post', '/api/planner/validate-context-repository', plannerRoutes.validateContextRepository], ['post', '/api/planner/drafts/:id/pause', plannerRoutes.pauseDraftExecution], ['post', '/api/planner/drafts/:id/resume', plannerRoutes.resumeDraftExecution],
     ['patch', '/api/planner/drafts/:id/execution-settings', plannerRoutes.updateExecutionSettings], ['post', '/api/planner/relevance', relevanceRoutes.analyzeRelevance], ['get', '/api/stats/tasks', statsRoutes.getTaskStats], ['get', '/api/stats/repositories', statsRoutes.getRepositoryStats],
     ['get', '/api/stats/overview', statsRoutes.getOverview], ['get', '/api/stats/generating-plans', statsRoutes.getGeneratingPlansCount], ['get', '/api/stats/dashboard', statsRoutes.getDashboardStats],
+    ['get', '/api/usage-tips', usageTipsRoutes.get], ['post', '/api/usage-tips/dismiss', usageTipsRoutes.dismiss],
     ['get', '/api/dashboard/narrative', dashboardRoutes.getNarrative], ['get', '/api/dashboard/summary', dashboardRoutes.getSummary], ['get', '/api/dashboard/attention', dashboardRoutes.getAttention], ['get', '/api/dashboard/active', dashboardRoutes.getActive], ['get', '/api/dashboard/outcomes', dashboardRoutes.getOutcomes],
     ['get', '/api/summaries/:owner/:repo/status', summaryBrowserRoutes.getIndexingStatus], ['get', '/api/summaries/:owner/:repo/tree', summaryBrowserRoutes.getDirectoryTree],
     ['get', SUMMARY_TREE_ROUTE_PATH, summaryBrowserRoutes.getDirectoryTree], ['get', SUMMARY_PATH_ROUTE_PATH, summaryBrowserRoutes.getPathSummary], ['post', '/api/repos/chat', repoChatRoutes.postChat], ['get', '/api/repos/chat/messages', repoChatRoutes.getMessages],
@@ -547,6 +566,7 @@ async function start(): Promise<void> {
   try {
     console.log('SQLite persistence is enabled');
     await runMigrations();
+    dashboardReads = await startDashboardReadService(db);
     if (demoMode) console.log('Demo mode enabled: API uses a synthetic user, rejects mutating requests, and skips execution processors');
     await assertInstanceAdministratorConfigured();
     await initRedis();
@@ -614,6 +634,7 @@ async function start(): Promise<void> {
       });
       console.log('[WebSocket] Socket.IO server initialized');
       socketService.initQueueFeatures({
+        readSystemStatus,
         taskQueue, redisClient, db,
         notificationProjection: notificationBackground,
       });
@@ -653,6 +674,7 @@ async function start(): Promise<void> {
     process.on('SIGTERM', async () => {
       console.log('SIGTERM received, shutting down gracefully...');
       const shutdownTasks: ShutdownTask[] = [
+        { name: 'dashboard read service', close: () => dashboardReads?.close() ?? Promise.resolve() },
         { name: 'task queue', close: () => taskQueue.close() },
         { name: 'agent runtime build queue', close: () => runtimeBuildQueue.close() },
         { name: 'agent login sessions', close: () => agentLoginSessionManager.close() },

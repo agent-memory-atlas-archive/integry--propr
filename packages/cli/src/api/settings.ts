@@ -1,3 +1,4 @@
+import { isUsageTipsCooldownDays } from '@propr/shared';
 /**
  * System Settings API
  *
@@ -28,6 +29,8 @@ const MAX_PR_REVIEW_PROMPT_LENGTH = 20000;
  * These settings control global system behavior.
  */
 export interface SystemSettings {
+  usage_tips_enabled: boolean;
+  usage_tips_dismissal_cooldown_days: number;
   /**
    * Alias of the default implementation agent.
    */
@@ -155,6 +158,8 @@ export type GetSettingsResponse = SystemSettings;
  * Supports partial updates - only include fields you want to change.
  */
 export interface UpdateSettingsOptions {
+  usage_tips_enabled?: boolean;
+  usage_tips_dismissal_cooldown_days?: number;
   /**
    * Alias of the default implementation agent.
    */
@@ -272,6 +277,8 @@ export type SettingKey = keyof SystemSettings;
  * List of valid setting keys for validation.
  */
 export const VALID_SETTING_KEYS: SettingKey[] = [
+  "usage_tips_enabled",
+  "usage_tips_dismissal_cooldown_days",
   "default_agent_alias",
   "worker_concurrency",
   "github_user_whitelist",
@@ -313,6 +320,11 @@ export function isValidSettingKey(key: string): key is SettingKey {
  */
 export function parseSettingValue(key: SettingKey, value: string): number | string | string[] | boolean {
   switch (key) {
+    case "usage_tips_dismissal_cooldown_days": {
+      const parsed = /^\d+$/.test(value) ? Number(value) : NaN;
+      if (!isUsageTipsCooldownDays(parsed)) throw new Error('Cooldown must be an integer from 1 to 365');
+      return parsed;
+    }
     case "worker_concurrency":
     case "auto_followup_score_threshold": {
       if (!/^-?\d+$/.test(value)) {
@@ -374,6 +386,7 @@ export function parseSettingValue(key: SettingKey, value: string): number | stri
       }
       return parsed;
     }
+    case "usage_tips_enabled":
     case "dashboard_summary_enabled":
     case "auto_resolve_merge_conflicts":
     case "pr_review_context_enabled": {

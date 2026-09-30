@@ -65,7 +65,8 @@ export class AppServerConnection {
         taskId: string | undefined,
         persistOutput?: (records: string[]) => Promise<void>,
     ) {
-        this.output = new LiveAgentOutput(taskId, persistOutput, 'codex-app-server');
+        // Output that can no longer be published or persisted fails the session.
+        this.output = new LiveAgentOutput(taskId, persistOutput, 'codex-app-server', { onOverflow: error => this.closePending(error) });
         child.stderr?.on('data', chunk => {
             this.stderr = boundedProviderDiagnostic(this.stderr + chunk.toString());
         });
@@ -198,7 +199,6 @@ export class AppServerConnection {
     }
 
     async close(): Promise<void> {
-        await this.output.close();
         this.child.stdin?.end();
         const force = setTimeout(() => this.child.kill('SIGTERM'), 500);
         await new Promise<void>(resolve => {
@@ -206,5 +206,6 @@ export class AppServerConnection {
             else this.child.once('close', () => resolve());
         });
         clearTimeout(force);
+        await this.output.close();
     }
 }

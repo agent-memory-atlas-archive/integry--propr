@@ -21,7 +21,7 @@ Use the Web UI to:
 
 Environment variables and CLI commands are mostly for install and development work.
 
-{/* SCREENSHOT PLACEHOLDER (P1 — one capture also serves operations/metrics.md's dashboard shot; interim: the site's ui-dashboard.png): Capture the dashboard home page with at least a few completed tasks, showing Happening now, and Completed. Run two or three small test issues first so the dashboard has real data. */}
+![Dashboard showing current activity, attention items and completed work](/img/screenshots/0.9.0/dashboard.png)
 
 ## Run Work From An Issue
 
@@ -104,3 +104,11 @@ Most recovery starts from the PR conversation: add a clearer follow-up comment, 
 - For larger work, see [Work Splitting](../features/work-splitting.md).
 - For task records and logs, see [Observability And Control](../features/observability.md).
 - For CLI and source-development commands, see [CLI Workflows](../features/cli-workflows.md).
+
+## Launch from the UI and follow up
+
+Use [New Task](../features/launching-work.md) for a single instruction, a [goal](../features/goals.md)
+for continuing work with corrections, or Planner Studio for a reviewed issue plan.
+The dashboard summarizes current activity and [Inbox](../features/inbox.md) opens
+the corresponding task, plan or goal. Notification preferences are personal;
+repository settings can suppress future notifications without stopping work.

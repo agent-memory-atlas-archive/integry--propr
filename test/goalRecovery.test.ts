@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { after, test } from 'node:test';
+import { after, test, mock } from 'node:test';
 import knex from 'knex';
 import type { GoalRecoveryQueue } from '../src/goalRecovery.ts';
 
@@ -8,11 +8,17 @@ const database = knex({ client: 'better-sqlite3', connection: { filename: ':memo
 after(async () => {
   await database.destroy();
   const { closeConnection } = await import('../packages/core/src/db/connection.ts');
+  const { closeEventPublisher } = await import('../packages/core/src/utils/eventPublisher.ts');
   await closeConnection();
+  // Goal transitions now publish a push event; close the publisher's Redis
+  // client so a test process is not held open by best-effort telemetry.
+  await closeEventPublisher();
 });
 
 test('goal recovery repairs pause crashes and failed-before-claim jobs while preserving exact identity', async () => {
   process.env.PROPR_DEMO_MODE = 'true';
+  const { getEventPublisher } = await import('@propr/core');
+  mock.method(getEventPublisher(), 'publishGoalUpdate', async () => true);
   const { recoverNonterminalGoals } = await import('../src/goalRecovery.ts');
   await database.schema.createTable('goals', table => {
     table.string('goal_id'); table.string('current_task_id'); table.string('repository');

@@ -84,6 +84,11 @@ export interface AgentTaskOptions {
 
     // Additional options
     tools?: string;
+    /**
+     * Turn limit for this task when it needs more than the configured default
+     * (for example writing a plan task by task). Agents without a turn limit ignore it.
+     */
+    maxTurns?: number;
     /** Optional per-task reasoning level override. Omitted means use the global setting. */
     reasoningLevel?: ReasoningLevel;
     /** Per-execution environment variables to inject into the agent container. */

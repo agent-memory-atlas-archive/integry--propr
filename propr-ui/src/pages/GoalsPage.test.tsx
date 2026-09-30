@@ -1,8 +1,8 @@
 /* eslint-disable max-lines -- list and detail behavior share one focused route-level suite */
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
-import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom';
+import { MemoryRouter, Route, Routes, useLocation, useNavigate } from 'react-router-dom';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import GoalsPage from './GoalsPage';
+import GoalsPageView from './GoalsPage';
 import * as goalsApi from '../api/goals';
 import { getInstanceCatalog, getTaskLiveDetails } from '../api/proprApi';
 import ThinkingLog from '../components/TaskDetails/ThinkingLog';
@@ -21,8 +21,11 @@ vi.mock('../contexts/DemoModeContext', () => ({ useDemoMode: () => demoState }))
 const socket = vi.hoisted(() => ({
   isConnected: false as boolean, subscribeToTask: vi.fn(), unsubscribeFromTask: vi.fn(),
   subscribeToTaskLive: vi.fn(), unsubscribeFromTaskLive: vi.fn(),
+  subscribeToActivity: vi.fn(), unsubscribeFromActivity: vi.fn(),
   onTaskUpdate: vi.fn((handler?: (payload: never) => void) => { void handler; return vi.fn(); }),
   onTaskLiveUpdate: vi.fn((handler?: (payload: never) => void) => { void handler; return vi.fn(); }),
+  onActivityUpdate: vi.fn((handler?: (payload: never) => void) => { void handler; return vi.fn(); }),
+  onGoalUpdate: vi.fn((handler?: (payload: never) => void) => { void handler; return vi.fn(); }),
 }));
 vi.mock('../contexts/useSocket', () => ({ useSocket: () => socket }));
 
@@ -53,7 +56,16 @@ const goal: goalsApi.Goal = {
 /** Surfaces the query string so filter tests can assert what a shared goals URL carries. */
 const LocationProbe = () => <span data-testid="location-search">{useLocation().search}</span>;
 
-const openGoalCreator = () => fireEvent.click(screen.getByRole('button', { name: 'New goal' }));
+// Mirror the global header's route action while keeping this suite focused on Goals.
+function GoalsPage() {
+  const navigate = useNavigate();
+  return <>
+    <button onClick={() => navigate('/goals?new=1')}>New Goal</button>
+    <GoalsPageView />
+  </>;
+}
+
+const openGoalCreator = () => fireEvent.click(screen.getByRole('button', { name: 'New Goal' }));
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -73,6 +85,8 @@ describe('GoalsPage', () => {
     socket.isConnected = false;
     socket.onTaskUpdate.mockImplementation(() => vi.fn());
     socket.onTaskLiveUpdate.mockImplementation(() => vi.fn());
+    socket.onActivityUpdate.mockImplementation(() => vi.fn());
+    socket.onGoalUpdate.mockImplementation(() => vi.fn());
     resizeImage.mockImplementation((file: File) => Promise.resolve(file));
     vi.mocked(goalsApi.getGoalCapabilities).mockResolvedValue({ agents: [capability] });
     vi.mocked(getInstanceCatalog).mockResolvedValue({ agents: [], repositories: [{ name: 'acme/web', enabled: true }] });
@@ -85,6 +99,21 @@ describe('GoalsPage', () => {
     vi.mocked(goalsApi.cancelGoal).mockResolvedValue({ goal: { ...goal, desiredState: 'cancelled', resultState: null } });
     vi.mocked(goalsApi.deleteGoal).mockResolvedValue();
     vi.mocked(goalsApi.requestGoalModel).mockResolvedValue({ goal: { ...goal, requestedModel: 'gpt-5.6-luna' } });
+  });
+
+  it('defers the initial Goals list read in a background tab', async () => {
+    Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'hidden' });
+    const view = render(<MemoryRouter><GoalsPage /></MemoryRouter>);
+    try {
+      await act(async () => { await Promise.resolve(); });
+      expect(goalsApi.listGoals).not.toHaveBeenCalled();
+      Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'visible' });
+      fireEvent(document, new Event('visibilitychange'));
+      await waitFor(() => expect(goalsApi.listGoals).toHaveBeenCalledTimes(1));
+    } finally {
+      view.unmount();
+      Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'visible' });
+    }
   });
 
   it('renders up to three inline previews in the responsive goal row without per-row requests', async () => {
@@ -119,15 +148,96 @@ describe('GoalsPage', () => {
     expect(screen.queryByText('No goals yet')).not.toBeInTheDocument();
   });
 
+  it('refreshes the queue once per goal transition, without a timer', async () => {
+    let goalHandler: ((payload: { goalId: string; repository: string | null }) => void) | undefined;
+    socket.onGoalUpdate.mockImplementation(handler => {
+      goalHandler = handler as unknown as (payload: { goalId: string; repository: string | null }) => void;
+      return vi.fn();
+    });
+    socket.isConnected = true;
+    vi.mocked(goalsApi.listGoals).mockResolvedValue({ goals: [goal] });
+    render(<MemoryRouter initialEntries={['/goals']}><Routes><Route path="/goals" element={<GoalsPage />} /></Routes></MemoryRouter>);
+    await screen.findByRole('heading', { name: goal.title });
+    expect(goalsApi.listGoals).toHaveBeenCalledTimes(1);
+
+    // The goal's own transition is the signal. A pause becomes visible because
+    // the goal changed, not because the next tick of a poll happened to see it.
+    vi.mocked(goalsApi.listGoals).mockResolvedValue({ goals: [{ ...goal, desiredState: 'paused' }] });
+    await act(async () => {
+      goalHandler?.({ goalId: goal.id, repository: goal.repository });
+      await Promise.resolve();
+    });
+
+    await waitFor(() => expect(goalsApi.listGoals).toHaveBeenCalledTimes(2));
+    expect(await screen.findByText('Paused')).toBeInTheDocument();
+    expect(goalsApi.listGoals).toHaveBeenCalledTimes(2);
+  });
+
+  it('issues no queue request on a timer while the socket is connected', async () => {
+    vi.useFakeTimers();
+    try {
+      socket.isConnected = true;
+      vi.mocked(goalsApi.listGoals).mockResolvedValue({ goals: [goal] });
+      render(<MemoryRouter initialEntries={['/goals']}><Routes><Route path="/goals" element={<GoalsPage />} /></Routes></MemoryRouter>);
+      await act(async () => { await vi.advanceTimersByTimeAsync(10); });
+      expect(goalsApi.listGoals).toHaveBeenCalledTimes(1);
+
+      // Six times the old ten-second poll interval, and nothing is happening on
+      // the instance: an open console costs nothing at all.
+      await act(async () => { await vi.advanceTimersByTimeAsync(60_000); });
+      expect(goalsApi.listGoals).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('falls back to interval polling while the socket is down, keeping the rows on screen', async () => {
+    vi.useFakeTimers();
+    try {
+      socket.isConnected = false;
+      vi.mocked(goalsApi.listGoals).mockResolvedValue({ goals: [goal] });
+      render(<MemoryRouter initialEntries={['/goals']}><Routes><Route path="/goals" element={<GoalsPage />} /></Routes></MemoryRouter>);
+      await act(async () => { await vi.advanceTimersByTimeAsync(10); });
+      expect(goalsApi.listGoals).toHaveBeenCalledTimes(1);
+
+      await act(async () => { await vi.advanceTimersByTimeAsync(65_000); });
+      // Push is the normal path; without a socket the console degrades to a
+      // bounded poll rather than silently going stale.
+      expect(vi.mocked(goalsApi.listGoals).mock.calls.length).toBeGreaterThan(1);
+      // The rows are the report, and nothing narrates the connection.
+      expect(screen.getByRole('heading', { name: goal.title })).toBeInTheDocument();
+      expect(screen.queryByText(/Reconnecting/)).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('reconciles the queue exactly once when the socket comes back', async () => {
+    socket.isConnected = false;
+    vi.mocked(goalsApi.listGoals).mockResolvedValue({ goals: [goal] });
+    const view = render(<MemoryRouter initialEntries={['/goals']}><Routes><Route path="/goals" element={<GoalsPage />} /></Routes></MemoryRouter>);
+    await screen.findByRole('heading', { name: goal.title });
+    expect(goalsApi.listGoals).toHaveBeenCalledTimes(1);
+
+    // One catch-up read after the transition, not one per frame that queued up
+    // while the socket was down.
+    socket.isConnected = true;
+    view.rerender(<MemoryRouter initialEntries={['/goals']}><Routes><Route path="/goals" element={<GoalsPage />} /></Routes></MemoryRouter>);
+
+    await waitFor(() => expect(goalsApi.listGoals).toHaveBeenCalledTimes(2));
+    await act(async () => { await new Promise(resolve => setTimeout(resolve, 300)); });
+    expect(goalsApi.listGoals).toHaveBeenCalledTimes(2);
+  });
+
   it('creates exactly one native goal from repository, agent, model and objective', async () => {
     vi.mocked(goalsApi.createGoal).mockResolvedValue({ goal });
     render(<MemoryRouter initialEntries={['/goals']}><Routes><Route path="/goals" element={<GoalsPage />} /><Route path="/goals/:goalId" element={<div>Goal detail</div>} /></Routes></MemoryRouter>);
-    expect(screen.queryByLabelText('Objective')).not.toBeInTheDocument();
+    expect(screen.queryByLabelText('Prompt')).not.toBeInTheDocument();
     openGoalCreator();
     await screen.findByRole('option', { name: 'Codex' });
     expect(screen.getByRole('button', { name: /acme.*web/ })).toBeInTheDocument();
     expect(screen.getByRole('option', { name: 'GPT-5.6 Sol' })).toHaveValue('gpt-5.6-sol');
-    fireEvent.change(screen.getByLabelText('Objective'), { target: { value: 'Ship the dashboard' } });
+    fireEvent.change(screen.getByLabelText('Prompt'), { target: { value: 'Ship the dashboard' } });
     fireEvent.click(screen.getByLabelText('Agent orchestrates through ProPR'));
     fireEvent.click(screen.getByRole('button', { name: 'Start goal' }));
     await waitFor(() => expect(goalsApi.createGoal).toHaveBeenCalledWith(expect.objectContaining({ repository: 'acme/web', agentId: 'agent-1', model: 'gpt-5.6-sol', objective: 'Ship the dashboard', launchStrategy: 'orchestrate' })));
@@ -149,22 +259,22 @@ describe('GoalsPage', () => {
     openGoalCreator();
     await screen.findByRole('option', { name: 'Codex' });
 
-    const objective = screen.getByLabelText('Objective');
+    const objective = screen.getByLabelText('Prompt');
     const exactCodexObjective = `${'x'.repeat(3_993)}😀`;
     fireEvent.change(objective, { target: { value: exactCodexObjective } });
-    expect(screen.getByLabelText('Objective character count')).toHaveTextContent('3,994 / 3,994 characters');
+    expect(screen.getByLabelText('Prompt character count')).toHaveTextContent('3,994 / 3,994 characters');
     expect(screen.getByRole('button', { name: 'Start goal' })).toBeEnabled();
 
     fireEvent.change(objective, { target: { value: `${exactCodexObjective}x` } });
     expect(objective).toHaveAttribute('aria-invalid', 'true');
-    expect(screen.getByLabelText('Objective character count')).toHaveTextContent('3,995 / 3,994 characters');
+    expect(screen.getByLabelText('Prompt character count')).toHaveTextContent('3,995 / 3,994 characters');
     expect(screen.getByRole('button', { name: 'Start goal' })).toBeDisabled();
     fireEvent.submit(screen.getByRole('button', { name: 'Start goal' }).closest('form')!);
     expect(goalsApi.createGoal).not.toHaveBeenCalled();
 
-    fireEvent.change(screen.getByLabelText('Coding agent'), { target: { value: 'agent-2' } });
+    fireEvent.change(screen.getByLabelText('Agent'), { target: { value: 'agent-2' } });
     await waitFor(() => expect(screen.getByLabelText('Model')).toHaveValue('gemini-3-pro'));
-    expect(screen.queryByLabelText('Objective character count')).not.toBeInTheDocument();
+    expect(screen.queryByLabelText('Prompt character count')).not.toBeInTheDocument();
     expect(objective).not.toHaveAttribute('aria-invalid');
     expect(screen.getByRole('button', { name: 'Start goal' })).toBeEnabled();
   });
@@ -184,19 +294,19 @@ describe('GoalsPage', () => {
     openGoalCreator();
     await screen.findByRole('option', { name: 'Claude' });
 
-    const objective = screen.getByLabelText('Objective');
+    const objective = screen.getByLabelText('Prompt');
     fireEvent.change(objective, { target: { value: '😀'.repeat(2_000) } });
-    expect(screen.getByLabelText('Objective character count')).toHaveTextContent('4,000 / 4,000 characters');
+    expect(screen.getByLabelText('Prompt character count')).toHaveTextContent('4,000 / 4,000 characters');
     expect(screen.getByText(/Claude accepts up to 4,000 characters \(emoji and some symbols count as two\)/)).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Start goal' })).toBeEnabled();
 
     fireEvent.change(objective, { target: { value: `${'😀'.repeat(2_000)}x` } });
-    expect(screen.getByLabelText('Objective character count')).toHaveTextContent('4,001 / 4,000 characters');
+    expect(screen.getByLabelText('Prompt character count')).toHaveTextContent('4,001 / 4,000 characters');
     expect(objective).toHaveAttribute('aria-invalid', 'true');
     expect(screen.getByRole('button', { name: 'Start goal' })).toBeDisabled();
 
     fireEvent.change(objective, { target: { value: `  ${'x'.repeat(4_000)}\n` } });
-    expect(screen.getByLabelText('Objective character count')).toHaveTextContent('4,000 / 4,000 characters');
+    expect(screen.getByLabelText('Prompt character count')).toHaveTextContent('4,000 / 4,000 characters');
     expect(screen.getByRole('button', { name: 'Start goal' })).toBeEnabled();
   });
 
@@ -208,7 +318,7 @@ describe('GoalsPage', () => {
     expect(await screen.findByText('Demo mode is read-only. You can inspect existing goals, but cannot start a new one.')).toBeInTheDocument();
     expect(screen.getByRole('group', { name: 'Goal creation controls' })).toBeDisabled();
     expect(screen.getByRole('button', { name: 'Start goal' })).toBeDisabled();
-    expect(screen.getByLabelText('Objective')).toBeDisabled();
+    expect(screen.getByLabelText('Prompt')).toBeDisabled();
 
     fireEvent.submit(screen.getByRole('button', { name: 'Start goal' }).closest('form')!);
     expect(goalsApi.createGoal).not.toHaveBeenCalled();
@@ -245,15 +355,15 @@ describe('GoalsPage', () => {
 
     expect(await screen.findByRole('option', { name: 'Claude' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /acme.*api/ })).toBeInTheDocument();
-    expect(screen.getByLabelText('Coding agent')).toHaveValue('agent-2');
+    expect(screen.getByLabelText('Agent')).toHaveValue('agent-2');
     expect(screen.getByLabelText('Model')).toHaveValue('claude-opus-4-6');
     expect(screen.getByLabelText('Maximum parallel tasks')).toHaveValue(6);
     expect(screen.getByLabelText('Agent implements directly')).toBeChecked();
     expect(screen.getByRole('checkbox', { name: 'Ask the coding agent to use Ultrafix' })).toBeChecked();
     expect(screen.getByRole('slider', { name: 'Checkpoint target cadence' })).toHaveAttribute('aria-valuetext', '60 minutes');
-    expect(screen.getByLabelText('Objective')).toHaveValue('');
+    expect(screen.getByLabelText('Prompt')).toHaveValue('');
 
-    fireEvent.change(screen.getByLabelText('Objective'), { target: { value: 'Ship the API' } });
+    fireEvent.change(screen.getByLabelText('Prompt'), { target: { value: 'Ship the API' } });
     fireEvent.click(screen.getByLabelText('Agent orchestrates through ProPR'));
     fireEvent.click(screen.getByRole('button', { name: 'Start goal' }));
 
@@ -274,7 +384,7 @@ describe('GoalsPage', () => {
     render(<MemoryRouter initialEntries={['/goals']}><Routes><Route path="/goals" element={<GoalsPage />} /><Route path="/goals/:goalId" element={<div>Goal detail</div>} /></Routes></MemoryRouter>);
     openGoalCreator();
     await screen.findByRole('option', { name: 'Codex' });
-    fireEvent.change(screen.getByLabelText('Objective'), { target: { value: 'Ship the dashboard' } });
+    fireEvent.change(screen.getByLabelText('Prompt'), { target: { value: 'Ship the dashboard' } });
     const checkpointSlider = screen.getByRole('slider', { name: 'Checkpoint target cadence' });
     expect(checkpointSlider).toHaveAttribute('aria-valuetext', '15 minutes');
     const checkpointOptions = screen.getByLabelText('Checkpoint target cadence options');
@@ -294,7 +404,7 @@ describe('GoalsPage', () => {
     render(<MemoryRouter initialEntries={['/goals']}><Routes><Route path="/goals" element={<GoalsPage />} /><Route path="/goals/:goalId" element={<div>Goal detail</div>} /></Routes></MemoryRouter>);
     openGoalCreator();
     await screen.findByRole('option', { name: 'Codex' });
-    const objective = screen.getByLabelText('Objective');
+    const objective = screen.getByLabelText('Prompt');
     fireEvent.change(objective, { target: { value: 'Implement the attached design' } });
     const textFile = new File(['expected layout'], 'requirements.txt', { type: 'text/plain' });
     fireEvent.change(screen.getByLabelText('Attach files'), { target: { files: [textFile] } });
@@ -341,7 +451,7 @@ describe('GoalsPage', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Recheck runtimes' }));
     await waitFor(() => expect(goalsApi.getGoalCapabilities).toHaveBeenCalledWith(true));
     await waitFor(() => expect(screen.queryByText('Codex schema lacks thread/goal/clear')).not.toBeInTheDocument());
-    fireEvent.change(screen.getByLabelText('Objective'), { target: { value: 'Ship the dashboard' } });
+    fireEvent.change(screen.getByLabelText('Prompt'), { target: { value: 'Ship the dashboard' } });
     expect(screen.getByRole('button', { name: 'Start goal' })).toBeEnabled();
   });
 
@@ -362,9 +472,11 @@ describe('GoalsPage', () => {
     render(<MemoryRouter initialEntries={['/goals']}><Routes><Route path="/goals" element={<GoalsPage />} /></Routes></MemoryRouter>);
 
     const queue = await screen.findByRole('list', { name: 'Goal work queue' });
-    expect(screen.getByRole('heading', { name: 'Work queue' })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: 'Goals' })).toBeInTheDocument();
+    expect(screen.queryByRole('heading', { name: 'Work queue' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'New goal' })).not.toBeInTheDocument();
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
-    expect(screen.queryByLabelText('Objective')).not.toBeInTheDocument();
+    expect(screen.queryByLabelText('Prompt')).not.toBeInTheDocument();
     expect(within(queue).getAllByRole('link')).toHaveLength(4);
     expect(screen.getByText('4 of 4')).toBeInTheDocument();
     expect(screen.queryByText(longTodo)).not.toBeInTheDocument();
@@ -374,7 +486,7 @@ describe('GoalsPage', () => {
     expect(firstLink).toHaveClass('grid', 'grid-cols-2', 'lg:items-center');
     expect(firstLink.className).toContain('lg:grid-cols-[');
     expect(firstLink.className).toContain('xl:grid-cols-[');
-    expect(queue.parentElement).toHaveClass('border-y');
+    expect(queue.parentElement).toHaveClass('border-b');
     expect(queue.parentElement).not.toHaveClass('rounded-lg', 'shadow-sm');
     expect(screen.getByText(queueGoals[0].objective)).toHaveClass('truncate');
     expect(screen.getByText(queueGoals[0].title)).toHaveClass('truncate', 'text-sm', 'font-semibold');
@@ -383,15 +495,15 @@ describe('GoalsPage', () => {
   it('confirms discarding unsaved creation input and restores focus on cancel or Escape', async () => {
     const confirm = vi.spyOn(window, 'confirm').mockReturnValueOnce(false).mockReturnValueOnce(true);
     render(<MemoryRouter initialEntries={['/goals']}><Routes><Route path="/goals" element={<GoalsPage />} /></Routes></MemoryRouter>);
-    const trigger = screen.getByRole('button', { name: 'New goal' });
+    const trigger = screen.getByRole('button', { name: 'New Goal' });
     trigger.focus();
     fireEvent.click(trigger);
 
     expect(await screen.findByRole('dialog', { name: 'Start a goal' })).toBeInTheDocument();
-    fireEvent.change(screen.getByLabelText('Objective'), { target: { value: 'Unsaved goal details' } });
+    fireEvent.change(screen.getByLabelText('Prompt'), { target: { value: 'Unsaved goal details' } });
     fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
     expect(screen.getByRole('dialog', { name: 'Start a goal' })).toBeInTheDocument();
-    expect(screen.getByLabelText('Objective')).toHaveValue('Unsaved goal details');
+    expect(screen.getByLabelText('Prompt')).toHaveValue('Unsaved goal details');
 
     fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
     expect(screen.queryByRole('dialog', { name: 'Start a goal' })).not.toBeInTheDocument();
@@ -444,7 +556,7 @@ describe('GoalsPage', () => {
     openGoalCreator();
 
     const dialog = await screen.findByRole('dialog', { name: 'Start a goal' });
-    fireEvent.change(within(dialog).getByLabelText('Objective'), { target: { value: 'Keep this draft' } });
+    fireEvent.change(within(dialog).getByLabelText('Prompt'), { target: { value: 'Keep this draft' } });
     fireEvent.click(within(dialog).getByRole('button', { name: /acme.*web/ }));
     const repositoryFilter = within(dialog).getByPlaceholderText('Filter repositories...');
     expect(repositoryFilter).toHaveFocus();
@@ -453,7 +565,7 @@ describe('GoalsPage', () => {
 
     expect(screen.queryByPlaceholderText('Filter repositories...')).not.toBeInTheDocument();
     expect(dialog).toBeInTheDocument();
-    expect(within(dialog).getByLabelText('Objective')).toHaveValue('Keep this draft');
+    expect(within(dialog).getByLabelText('Prompt')).toHaveValue('Keep this draft');
     expect(confirm).not.toHaveBeenCalled();
     confirm.mockRestore();
   });

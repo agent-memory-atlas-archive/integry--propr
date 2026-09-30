@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mock, test } from 'node:test';
 import type { Request, Response } from 'express';
 import knex from 'knex';
-import { AgentRegistry, closeConnection } from '@propr/core';
+import { AgentRegistry, closeConnection, closeEventPublisher, getEventPublisher } from '@propr/core';
 import { up as createGoals } from '../../core/src/db/migrations/20260902000000_create_goals.js';
 import { up as hardenGoals } from '../../core/src/db/migrations/20260902010000_harden_native_goals.js';
 import { up as addGoalCheckpoints } from '../../core/src/db/migrations/20260903000000_add_direct_goal_checkpoints.js';
@@ -12,6 +12,7 @@ import { up as addGoalTitles } from '../../core/src/db/migrations/20260907000000
 import { up as addGoalAttachments } from '../../core/src/db/migrations/20260908000000_add_goal_attachments.js';
 import { up as addGoalInputDisplayBody } from '../../core/src/db/migrations/20260923000000_add_goal_input_display_body.js';
 import { createGoalRoutes } from '../routes/goalRoutes.js';
+import { withLiveOutputReads } from './liveOutputRedisFake.js';
 
 function request(userId: string, params: Record<string, string> = {}, body: unknown = {}): Request {
     return {
@@ -32,6 +33,13 @@ function response() {
 
 test('goal routes keep metadata owner-scoped and queue ordinary input on the same task/session', async () => {
     const database = knex({ client: 'better-sqlite3', connection: { filename: ':memory:' }, useNullAsDefault: true });
+    const published: Array<{ goalId: string; desiredState?: string; resultState?: string; ownerId?: string }> = [];
+    const publication = mock.method(getEventPublisher(), 'publishGoalUpdate', async payload => {
+        const stored = await database('goals').where({ goal_id: payload.goalId }).first();
+        published.push({ goalId: payload.goalId, desiredState: stored?.desired_state,
+            resultState: stored?.result_state, ownerId: payload.ownerId });
+        return true;
+    });
     const queued: Array<{ name: string; data: Record<string, unknown>; options: { jobId: string } }> = [];
     const stopped: string[] = [];
     const stopAttempts = new Map<string, number>();
@@ -116,7 +124,7 @@ test('goal routes keep metadata owner-scoped and queue ordinary input on the sam
                     queued.push({ name, data, options });
                 },
             } as never,
-            redisClient: {
+            redisClient: withLiveOutputReads({
                 get: async (key: string) => key === 'agent:output:goal-task-1' ? [
                     JSON.stringify({ type: 'assistant', timestamp: '2026-09-02T20:00:00Z', message: {
                         content: [{ type: 'tool_use', name: 'TodoWrite', input: { todos: [
@@ -126,7 +134,7 @@ test('goal routes keep metadata owner-scoped and queue ordinary input on the sam
                     } }),
                 ].join('\n') : null,
                 del: async () => 1,
-            } as never,
+            }) as never,
             stopExecution: async taskId => {
                 stopped.push(taskId);
                 const attempt = (stopAttempts.get(taskId) ?? 0) + 1;
@@ -456,8 +464,16 @@ test('goal routes keep metadata owner-scoped and queue ordinary input on the sam
         assert.equal(await database('task_history').where({ task_id: 'goal-task-9' }).first(), undefined);
         assert.equal(await database('llm_executions').where({ task_id: 'goal-task-9' }).first(), undefined);
         assert.equal(await database('llm_execution_details').where({ execution_id: 'goal-execution-9' }).first(), undefined);
+        assert(published.some(event => event.desiredState === 'running'));
+        assert(published.some(event => event.desiredState === 'paused'));
+        assert(published.some(event => event.resultState === 'cancelled'));
+        assert(published.some(event => event.goalId === 'goal-9' && event.ownerId === 'owner-2'));
     } finally {
+        publication.mock.restore();
         await database.destroy();
         await closeConnection();
+        // Goal transitions now publish a push event; close the publisher's Redis
+        // client so a test process is not held open by best-effort telemetry.
+        await closeEventPublisher();
     }
 });

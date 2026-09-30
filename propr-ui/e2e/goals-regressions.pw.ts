@@ -1,4 +1,5 @@
 import { expect, test, type Page } from '@playwright/test';
+import { mkdir } from 'node:fs/promises';
 
 const timestamp = '2026-09-10T00:00:00.000Z';
 
@@ -38,6 +39,7 @@ const catalog = {
 };
 
 async function stubGoalApis(page: Page): Promise<void> {
+  await page.routeWebSocket('**/socket.io/**', socket => socket.close());
   await page.route('**/api/**', async route => {
     const url = new URL(route.request().url());
     const { pathname } = url;
@@ -120,6 +122,8 @@ async function rowHeights(page: Page) {
 }
 
 test.beforeEach(async ({ page }) => {
+  await page.routeWebSocket('**/socket.io/**', socket => socket.close());
+  await page.clock.install({ time: Date.parse(timestamp) + 120_000 });
   await stubGoalApis(page);
 });
 
@@ -147,16 +151,20 @@ test('keeps the goal work queue within the available 1024px desktop content widt
   const wideDimensions = await contentWidths(page);
   expect(wideDimensions.queueScrollWidth).toBeLessThanOrEqual(wideDimensions.queueClientWidth);
   expect(wideDimensions.mainScrollWidth).toBeLessThanOrEqual(wideDimensions.mainClientWidth);
+  if (process.env.PROPR_CAPTURE_PREVIEWS) {
+    await mkdir('../.propr/previews', { recursive: true });
+    await page.screenshot({ path: '../.propr/previews/goals-queue.png', animations: 'disabled' });
+  }
 });
 
 test('dismisses the repository picker before the dirty goal creator on Escape', async ({ page }) => {
   await page.setViewportSize({ width: 1024, height: 820 });
   await page.goto('/goals');
-  await page.getByRole('button', { name: 'New goal' }).click();
+  await page.getByRole('button', { name: 'New Goal', exact: true }).click();
 
   const creator = page.getByRole('dialog', { name: 'Start a goal' });
   await expect(creator).toBeVisible();
-  await creator.getByLabel('Objective').fill('Preserve this browser-tested draft');
+  await creator.getByLabel('Prompt').fill('Preserve this browser-tested draft');
   await creator.getByRole('button', { name: /acme.*web/i }).click();
   const repositoryFilter = creator.getByPlaceholder('Filter repositories...');
   await expect(repositoryFilter).toBeFocused();
@@ -170,6 +178,48 @@ test('dismisses the repository picker before the dirty goal creator on Escape', 
 
   await expect(repositoryFilter).toBeHidden();
   await expect(creator).toBeVisible();
-  await expect(creator.getByLabel('Objective')).toHaveValue('Preserve this browser-tested draft');
+  await expect(creator.getByLabel('Prompt')).toHaveValue('Preserve this browser-tested draft');
   expect(discardPrompts).toBe(0);
 });
+
+for (const [device, viewport] of Object.entries({ desktop: { width: 1440, height: 960 }, mobile: { width: 390, height: 844 } })) {
+  test(`goal creation uses collapsed session settings and docked attachments on ${device}`, async ({ page }) => {
+    await page.setViewportSize(viewport);
+    await page.goto('/goals?new=1');
+    const dialog = page.getByRole('dialog', { name: 'Start a goal' });
+    const prompt = dialog.getByLabel('Prompt', { exact: true });
+    await expect(prompt).toBeFocused();
+    await expect(dialog.getByLabel('Agent', { exact: true })).toBeHidden();
+    await prompt.fill('Ship the customer analytics dashboard with accessible filters and responsive charts.');
+    await dialog.getByLabel('Attach files', { exact: true }).setInputFiles({ name: 'dashboard-requirements.txt', mimeType: 'text/plain', buffer: Buffer.from('Support keyboard navigation and mobile layouts.') });
+    await expect(dialog.getByText('dashboard-requirements.txt')).toBeVisible();
+    await expect(dialog.getByRole('button', { name: 'Start goal' })).toBeEnabled();
+    if (process.env.PROPR_CAPTURE_PREVIEWS) {
+      const { mkdir } = await import('node:fs/promises');
+      await mkdir('../.propr/previews', { recursive: true });
+      await page.screenshot({ path: `../.propr/previews/new-goal-${device}.png`, animations: 'disabled' });
+    }
+    await dialog.locator('summary').click();
+    await expect(dialog.getByLabel('Agent', { exact: true })).toBeVisible();
+    await dialog.getByLabel('Maximum parallel tasks').fill('5');
+    await dialog.getByLabel('Agent orchestrates through ProPR').check();
+    await expect(dialog.getByLabel('Checkpoint target cadence', { exact: true })).toHaveCount(0);
+    await expect(dialog.locator('summary')).toHaveText('Advanced Options');
+    if (process.env.PROPR_CAPTURE_PREVIEWS) {
+      await page.screenshot({ path: `../.propr/previews/new-goal-options-${device}.png`, animations: 'disabled' });
+    }
+    await dialog.locator('summary').click();
+    await expect(dialog.locator('summary')).toContainText('5 parallel tasks · Orchestrate');
+    const submit = page.waitForRequest(request => new URL(request.url()).pathname === '/api/goals' && request.method() === 'POST');
+    await page.route('**/api/goals', route => route.request().method() === 'POST'
+      ? route.fulfill({ status: 503, json: { error: 'Preview submission unavailable' } })
+      : route.fallback());
+    await dialog.getByRole('button', { name: 'Start goal' }).click();
+    const request = await submit;
+    expect(request.postData()).toContain('Ship the customer analytics dashboard');
+    expect(request.postData()).toContain('orchestrate');
+    expect(request.postData()).toContain('dashboard-requirements.txt');
+    await expect(dialog.getByRole('alert')).toBeVisible();
+    await expect(prompt).toHaveValue('Ship the customer analytics dashboard with accessible filters and responsive charts.');
+  });
+}

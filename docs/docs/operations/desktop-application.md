@@ -7,6 +7,16 @@ title: Desktop application
 ProPR Desktop runs the existing Web UI inside a sandboxed Electron application and connects it to one or more ProPR
 instances. The first release supports Linux and macOS. It does not change browser Web UI, CLI, API, or self-hosted behavior.
 
+## Connect, configure and identify the running version
+
+Choose an instance or use **Connect Instance…**, enter its address and complete browser-approved pairing. Use the instance manager to switch saved accounts or instances. Installation-level **Settings** belong to the connected server; desktop connection management and **Connection Diagnostics** belong to the app.
+
+![Desktop connection editor with display name, instance URL and Connect action](/img/screenshots/0.9.0/desktop-connect.png)
+
+This capture uses the production desktop renderer with an isolated Chromium fixture. It demonstrates the connection UI, not native OS window decorations, an installed package or a completed pairing handshake.
+
+Use **About ProPR** for the app version and the **Copy Version Details** action. The sidebar intentionally omits version metadata. Connection diagnostics identify the server/runtime separately: updating the desktop package does not upgrade a remote instance. Follow the [pairing protocol guide](./desktop-pairing.md) for authentication details. The 0.9.0 source metadata does not imply that a stable installer has been published; platform and publication constraints below still apply.
+
 ## Saved GitHub accounts
 
 Desktop supports multiple saved GitHub accounts, including two accounts at the same instance URL.

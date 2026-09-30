@@ -1,6 +1,26 @@
 import { Request, Response } from 'express';
 import * as configManager from '@propr/core';
-import { normalizeAgentTankAgents, type AgentStatusResponse } from '@propr/core';
+import {
+  normalizeAgentTankAgents,
+  observeAgentTankUsageSnapshot,
+  type AgentStatusResponse
+} from '@propr/core';
+/**
+ * Tells every open tab that capacity may have moved.
+ *
+ * The event is a trigger, not a snapshot: each client re-reads
+ * `/api/config/agent-tank/usage`, which keeps owning the projection and its
+ * permission check. It goes out over Redis so a tab connected to another API
+ * instance hears about the change too, and a failed publish only costs those
+ * tabs freshness - it must never fail the request that caused it.
+ */
+function publishUsageChanged(): void {
+  try {
+    void configManager.getEventPublisher().publishUsageUpdate();
+  } catch {
+    // Freshness only; the write that caused this already succeeded.
+  }
+}
 
 export function createAgentTankRoutes() {
   async function getAgentTankSettings(_req: Request, res: Response): Promise<void> {
@@ -18,6 +38,10 @@ export function createAgentTankRoutes() {
       const { enabled, url } = req.body;
       await configManager.saveAgentTankSettings({ enabled: !!enabled, url: url || 'http://0.0.0.0:3456' });
       res.json({ success: true });
+      // Enabling, disabling or repointing the integration changes what every
+      // open sidebar should be showing, and the sidebar no longer polls to
+      // find that out for itself.
+      publishUsageChanged();
     } catch (error) {
       console.error('Error in /api/config/agent-tank POST:', error);
       res.status(500).json({ error: 'Failed to save Agent Tank settings' });
@@ -65,7 +89,13 @@ export function createAgentTankRoutes() {
         clearTimeout(timer);
         if (response.ok) {
           const data = await response.json() as Record<string, AgentStatusResponse>;
-          res.json({ enabled: true, agents: normalizeAgentTankAgents(data) });
+          const agents = normalizeAgentTankAgents(data);
+          // This is the read that supplies the client's usage snapshot, so it is
+          // also where a changed snapshot is observed: announced before the
+          // response, so a client woken by it cannot re-read older state. The
+          // observer seeds silently and says nothing about an unchanged read.
+          await observeAgentTankUsageSnapshot(agents);
+          res.json({ enabled: true, agents });
         } else {
           res.json({ enabled: true, error: `HTTP ${response.status}` });
         }
@@ -96,6 +126,8 @@ export function createAgentTankRoutes() {
         clearTimeout(timer);
         if (response.ok) {
           res.json({ success: true });
+          // A successful re-probe is the moment the numbers actually moved.
+          publishUsageChanged();
         } else {
           res.json({ success: false, error: `HTTP ${response.status}` });
         }

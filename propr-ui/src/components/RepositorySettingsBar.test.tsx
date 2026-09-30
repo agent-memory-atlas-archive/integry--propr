@@ -25,6 +25,7 @@ const repo: MonitoredRepo = {
 function renderBar(overrides: Partial<MonitoredRepo> = {}, isReadOnly = false) {
   const onToggleCancelCiDuringFollowup = vi.fn();
   const onUpdateCancelCiWorkflows = vi.fn();
+  const onUpdateNonBlockingChecks = vi.fn();
   const { unmount } = render(
     <MemoryRouter>
       <RepositorySettingsBar
@@ -39,13 +40,14 @@ function renderBar(overrides: Partial<MonitoredRepo> = {}, isReadOnly = false) {
         onToggleAutoCiFollowup={vi.fn()}
         onToggleCancelCiDuringFollowup={onToggleCancelCiDuringFollowup}
         onUpdateCancelCiWorkflows={onUpdateCancelCiWorkflows}
+        onUpdateNonBlockingChecks={onUpdateNonBlockingChecks}
         onToggleNotifications={vi.fn()}
         onUpdateVisualPreview={vi.fn()}
         isReadOnly={isReadOnly}
       />
     </MemoryRouter>
   );
-  return { onToggleCancelCiDuringFollowup, onUpdateCancelCiWorkflows, unmount };
+  return { onToggleCancelCiDuringFollowup, onUpdateCancelCiWorkflows, onUpdateNonBlockingChecks, unmount };
 }
 
 const controlName = 'Cancel CI during follow-up implementation for integry/propr';
@@ -327,5 +329,33 @@ describe('RepositorySettingsBar detected workflows', () => {
   it('does not ask GitHub for workflows while the option is off', () => {
     renderBar();
     expect(getRepoWorkflows).not.toHaveBeenCalled();
+  });
+});
+
+describe('RepositorySettingsBar non-blocking checks', () => {
+  const checksName = 'Checks that never block automation for integry/propr';
+
+  it('shows the stored checks and saves an edited list on blur', () => {
+    const { onUpdateNonBlockingChecks } = renderBar({ nonBlockingChecks: ['Packaged Connect*'] });
+    const input = screen.getByRole('textbox', { name: checksName });
+    expect(input).toHaveValue('Packaged Connect*');
+    fireEvent.change(input, { target: { value: 'Packaged Connect*, Validate unsigned * package, packaged connect*' } });
+    fireEvent.blur(input);
+    expect(onUpdateNonBlockingChecks).toHaveBeenCalledWith('repo-1', ['Packaged Connect*', 'Validate unsigned * package']);
+  });
+
+  it('does not save unchanged or malformed input', () => {
+    const { onUpdateNonBlockingChecks } = renderBar({ nonBlockingChecks: ['Packaged Connect*'] });
+    const input = screen.getByRole('textbox', { name: checksName });
+    fireEvent.blur(input);
+    fireEvent.change(input, { target: { value: '"unclosed' } });
+    fireEvent.blur(input);
+    expect(onUpdateNonBlockingChecks).not.toHaveBeenCalled();
+    expect(screen.getByRole('alert')).toHaveTextContent(/Changes have not been saved/);
+  });
+
+  it('is hidden for read-only viewers', () => {
+    renderBar({ nonBlockingChecks: ['Packaged Connect*'] }, true);
+    expect(screen.queryByRole('textbox', { name: checksName })).not.toBeInTheDocument();
   });
 });

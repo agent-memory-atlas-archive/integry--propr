@@ -47,6 +47,8 @@ function formatValue(value: unknown): string {
  */
 function getSettingDescription(key: SettingKey): string {
   const descriptions: Record<SettingKey, string> = {
+    usage_tips_enabled: "Show daily documentation tips on the dashboard",
+    usage_tips_dismissal_cooldown_days: "Base dismissal cooldown (1–365 days; changes recalculate existing cooldowns)",
     default_agent_alias: "Alias of the default implementation agent",
     worker_concurrency: "Number of concurrent workers for processing tasks",
     github_user_whitelist: "GitHub usernames allowed to use the system",

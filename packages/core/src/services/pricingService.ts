@@ -91,6 +91,10 @@ const OFFICIAL_MODEL_PRICING: Readonly<Record<string, ModelPricing>> = {
         prompt: perMillion(2), completion: perMillion(10),
         cacheCreation: perMillion(2.5), cacheRead: perMillion(0.2)
     },
+    'anthropic/claude-sonnet-5.5': {
+        prompt: perMillion(2), completion: perMillion(10),
+        cacheCreation: perMillion(2.5), cacheRead: perMillion(0.2)
+    },
     'anthropic/claude-sonnet-4.6': {
         prompt: perMillion(3), completion: perMillion(15),
         cacheCreation: perMillion(3.75), cacheRead: perMillion(0.3)

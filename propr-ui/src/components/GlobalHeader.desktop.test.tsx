@@ -1,5 +1,5 @@
-import { fireEvent, render, screen, within } from '@testing-library/react';
-import { MemoryRouter } from 'react-router-dom';
+import { act, fireEvent, render, screen, within } from '@testing-library/react';
+import { createMemoryRouter, MemoryRouter, RouterProvider } from 'react-router-dom';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { CurrentUser } from '../api/proprTypes';
 import GlobalHeader from './GlobalHeader';
@@ -86,21 +86,70 @@ describe('GlobalHeader desktop toolbar', () => {
     mocks.navigate.mockClear();
   });
 
-  const renderToolbar = () => {
-    const { container } = render(
-      <MemoryRouter>
+  const renderToolbar = (route = '/') => {
+    const router = createMemoryRouter([{ path: '*', element: (
         <GlobalHeader
           user={user}
           onLogout={vi.fn()}
           onMenuToggle={vi.fn()}
           MenuIcon={() => null}
         />
-      </MemoryRouter>,
-    );
+    ) }], { initialEntries: [route] });
+    const { container } = render(<RouterProvider router={router} />);
     const toolbar = container.querySelector<HTMLElement>('header.desktop-content-toolbar')!;
     const [left, right] = Array.from(toolbar.children) as HTMLElement[];
-    return { toolbar, left, right };
+    return { toolbar, left, right, router };
   };
+
+  it.each([
+    ['/', 'New Task', '/tasks/new', 'lucide-zap', ['New Plan', 'New Goal']],
+    ['/tasks/task-1', 'New Task', '/tasks/new', 'lucide-zap', ['New Plan', 'New Goal']],
+    ['/plans', 'New Plan', '/studio/new', 'lucide-scroll-text', ['New Task', 'New Goal']],
+    ['/studio/draft-1', 'New Plan', '/studio/new', 'lucide-scroll-text', ['New Task', 'New Goal']],
+    ['/goals', 'New Goal', '/goals?new=1', 'lucide-target', ['New Task', 'New Plan']],
+    ['/goals/goal-1?tab=activity#latest', 'New Goal', '/goals?new=1', 'lucide-target', ['New Task', 'New Plan']],
+  ])('uses the route action and remaining menu options on %s', (route, label, to, icon, options) => {
+    renderToolbar(route);
+    const primary = screen.getByRole('button', { name: label });
+    expect(primary.querySelector('svg')).toHaveClass(icon);
+    fireEvent.click(primary);
+    expect(mocks.navigate).toHaveBeenLastCalledWith(to);
+
+    const destinations: Record<string, string> = {
+      'New Task': '/tasks/new', 'New Plan': '/studio/new', 'New Goal': '/goals?new=1',
+    };
+    const icons: Record<string, string> = {
+      'New Task': 'lucide-zap', 'New Plan': 'lucide-scroll-text', 'New Goal': 'lucide-target',
+    };
+    for (const option of options) {
+      fireEvent.click(screen.getByRole('button', { name: 'More creation options' }));
+      expect(screen.getAllByRole('menuitem').map(item => item.textContent)).toEqual(options);
+      const menuItem = screen.getByRole('menuitem', { name: option });
+      expect(menuItem.querySelector('svg')).toHaveClass(icons[option]);
+      fireEvent.click(menuItem);
+      expect(mocks.navigate).toHaveBeenLastCalledWith(destinations[option]);
+      expect(screen.queryByRole('menu')).not.toBeInTheDocument();
+    }
+  });
+
+  it('follows client navigation and history while keeping the menu in sync', async () => {
+    const { router } = renderToolbar('/plans');
+    fireEvent.click(screen.getByRole('button', { name: 'More creation options' }));
+    const expectActions = (primary: string, options: string[]) => {
+      expect(screen.getByRole('button', { name: primary })).toBeInTheDocument();
+      expect(screen.getAllByRole('menuitem').map(item => item.textContent)).toEqual(options);
+    };
+    await act(() => router.navigate('/goals/goal-1'));
+    expectActions('New Goal', ['New Task', 'New Plan']);
+    await act(() => router.navigate('/repositories'));
+    expectActions('New Task', ['New Plan', 'New Goal']);
+    await act(() => router.navigate(-1));
+    expectActions('New Goal', ['New Task', 'New Plan']);
+    await act(() => router.navigate(-1));
+    expectActions('New Plan', ['New Task', 'New Goal']);
+    await act(() => router.navigate(1));
+    expectActions('New Goal', ['New Task', 'New Plan']);
+  });
 
   it('leads with search, puts the page scope control beside it, and keeps app actions right', () => {
     const { toolbar, left, right } = renderToolbar();
@@ -195,9 +244,9 @@ describe('GlobalHeader desktop toolbar', () => {
     expect(mocks.navigate).toHaveBeenCalledWith('/tasks/new');
   });
 
-  it('keeps every creation control inert in demo mode', () => {
+  it.each([['/', 'New Task'], ['/plans', 'New Plan'], ['/goals', 'New Goal']])('keeps creation inert in demo mode on %s', (route, label) => {
     render(
-      <MemoryRouter>
+      <MemoryRouter initialEntries={[route]}>
         <GlobalHeader
           user={user}
           onLogout={vi.fn()}
@@ -208,7 +257,7 @@ describe('GlobalHeader desktop toolbar', () => {
       </MemoryRouter>,
     );
 
-    const newTask = screen.getByRole('button', { name: 'New Task' });
+    const newTask = screen.getByRole('button', { name: label });
     expect(newTask).toBeDisabled();
     expect(newTask).toHaveAttribute('title', 'Demo mode is read-only');
     expect(newTask.parentElement).toHaveClass('bg-gray-300');
