@@ -170,8 +170,10 @@ resolve an uncertain submission when its task appears. PR command receipts link
 to tasks by their exact triggering comment in persisted job data, expose posted
 review result IDs/URLs, and report the resulting current PR head. Ultrafix polls
 the associated work epoch through loop completion; a newer loop cannot satisfy
-an earlier receipt. Missing intake becomes `unknown` after two minutes instead
-of remaining accepted forever; later polling can still find the task.
+an earlier receipt. A PR command receipt whose comment no worker has picked up
+within ten minutes reports `unknown` with a `COMMAND_NOT_PICKED_UP` failure
+instead of remaining accepted forever; a later poll that finds the task still
+adopts it.
 
 `get_pull_request_discussion` pages GitHub issue comments (maximum 20 per page),
 returns 4096-character body chunks and parsed F# findings and S# suggestions

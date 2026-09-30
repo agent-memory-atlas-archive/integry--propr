@@ -43,18 +43,37 @@ function stripAbsolutePaths(value: string): string {
     (_match, prefix: string, filename: string) => `${prefix}${filename}`);
 }
 
-function redactDetailValue(value: unknown, seen: WeakSet<object>): unknown {
+const PATH_LIKE_KEY_WORDS = new Set([
+  'path', 'paths', 'file', 'files', 'filename', 'filenames', 'filepath', 'filepaths',
+  'dir', 'dirs', 'directory', 'directories', 'folder', 'folders', 'root', 'roots', 'cwd', 'workdir', 'workspace',
+]);
+
+/**
+ * Whether a detail key names a filesystem location (`path`, `logsPath`,
+ * `source_file`, `directories`, ...). Only such fields are reduced to a
+ * basename as a whole; free-text fields such as `reason`, `error` or `title`
+ * keep a leading slash (for example a `/merge` command title) and are only
+ * stripped of multi-segment absolute paths inside their prose.
+ */
+export function isPathLikeDetailKey(key: string): boolean {
+  const lastWord = key.replace(/([a-z0-9])([A-Z])/g, '$1 $2').split(/[\s_.-]+/).filter(Boolean).pop();
+  return lastWord !== undefined && PATH_LIKE_KEY_WORDS.has(lastWord.toLowerCase());
+}
+
+function redactDetailValue(value: unknown, seen: WeakSet<object>, pathLike: boolean): unknown {
   if (typeof value === 'string') {
     const redacted = redactSecrets(value);
-    // Detail fields often carry paths directly or inside diagnostic prose.
-    // Keep only filenames for POSIX, Windows-drive and UNC absolute paths.
-    if (redacted.startsWith('/') || /^[A-Za-z]:[\\/]/.test(redacted)) return basename(redacted);
+    // Path-like fields carry a location directly: keep only the filename for
+    // POSIX, Windows-drive and UNC absolute paths. Every other string is
+    // diagnostic prose, where only embedded absolute paths are reduced.
+    if (pathLike && (redacted.startsWith('/') || /^[A-Za-z]:[\\/]/.test(redacted))) return basename(redacted);
     return stripAbsolutePaths(redacted);
   }
   if (Array.isArray(value)) {
     if (seen.has(value)) return '[REDACTED]';
     seen.add(value);
-    return value.map(item => redactDetailValue(item, seen));
+    // Items of `files: [...]` inherit the path-like treatment of their key.
+    return value.map(item => redactDetailValue(item, seen, pathLike));
   }
   if (value && typeof value === 'object') {
     if (seen.has(value)) return '[REDACTED]';
@@ -62,7 +81,7 @@ function redactDetailValue(value: unknown, seen: WeakSet<object>): unknown {
     const result: Record<string, unknown> = {};
     for (const [key, item] of Object.entries(value)) {
       if (SENSITIVE_DETAIL_KEY.test(key)) continue;
-      result[redactSecrets(key)] = redactDetailValue(item, seen);
+      result[redactSecrets(key)] = redactDetailValue(item, seen, isPathLikeDetailKey(key));
     }
     return result;
   }
@@ -72,7 +91,7 @@ function redactDetailValue(value: unknown, seen: WeakSet<object>): unknown {
 
 /** Recursively sanitize optional structured error detail. Sensitive keys are omitted. */
 export function redactDetails(details: Record<string, unknown>): Record<string, unknown> {
-  return redactDetailValue(details, new WeakSet()) as Record<string, unknown>;
+  return redactDetailValue(details, new WeakSet(), false) as Record<string, unknown>;
 }
 
 type ErrorLike = {

@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { z } from 'zod';
 import { McpError } from '../mcp/config.js';
-import { classifyError, redactDetails, toToolErrorResult } from '../mcp/errorEnvelope.js';
+import { classifyError, isPathLikeDetailKey, redactDetails, toToolErrorResult } from '../mcp/errorEnvelope.js';
 
 test('McpError keeps legacy defaults and round-trips optional envelope fields', () => {
   assert.deepEqual(new McpError('STALE_HEAD', 'Pull request head changed.', 409).toEnvelope(), {
@@ -66,4 +66,32 @@ test('all envelope strings and details redact credentials and local paths', () =
   }
   assert.equal(envelope.details?.path, 'file.txt');
   assert.match(String(envelope.details?.message), /source\.ts/);
+});
+
+test('whole-string basename reduction applies only to path-like detail keys', () => {
+  for (const key of ['path', 'file', 'logsPath', 'prompt_path', 'source-file', 'files', 'directories', 'repoRoot', 'cwd', 'workspace', 'workDir']) {
+    assert.equal(isPathLikeDetailKey(key), true, key);
+  }
+  for (const key of ['reason', 'error', 'title', 'message', 'progress', 'targetState', 'profile', 'value']) {
+    assert.equal(isPathLikeDetailKey(key), false, key);
+  }
+
+  const details = redactDetails({
+    path: '/home/user/private/file.txt',
+    files: ['/home/user/private/a.ts', 'C:\\Users\\me\\b.ts', 'relative.ts'],
+    root: '/',
+    reason: '/merge was rejected because /var/lib/propr/state/plan.json is stale',
+    error: '/fix S26 S27 S28 failed',
+    title: '/docs cleanup',
+    targetState: { state: '/tmp/queue/pending', taskTitle: '/api tidy' },
+    nested: { logsPath: '/var/log/propr/task.log' },
+  });
+  assert.equal(details.path, 'file.txt');
+  assert.deepEqual(details.files, ['a.ts', 'b.ts', 'relative.ts']);
+  assert.equal(details.root, '[REDACTED_PATH]');
+  assert.equal(details.reason, '/merge was rejected because plan.json is stale');
+  assert.equal(details.error, '/fix S26 S27 S28 failed');
+  assert.equal(details.title, '/docs cleanup');
+  assert.deepEqual(details.targetState, { state: 'pending', taskTitle: '/api tidy' });
+  assert.deepEqual(details.nested, { logsPath: 'task.log' });
 });

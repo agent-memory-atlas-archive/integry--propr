@@ -48,13 +48,20 @@ export function createPreviewMediaRoutes(dependencies: PreviewMediaDependencies 
     const parsed = parseRequest(req, kind);
     if (!parsed) { res.status(400).json({ error: 'Invalid preview media identity' }); return; }
     try {
+      // Same order as before the extraction: a repository without visual
+      // previews answers 404 before any GitHub credential is resolved, so a
+      // caller without a GitHub token never sees a credential error for it.
+      const { repository } = parsed.association;
+      const enabled = await reader.enabledRepositories([repository]);
+      if (!enabled.has(repository)) { res.status(404).json({ error: 'Preview media not found' }); return; }
       const token = await resolveToken(req);
       const result = await loadPublishedPreview({
         ...parsed,
         token,
         octokit: createOctokit(token),
         fetch: fetcher,
-        reader,
+        // The service re-checks enablement; reuse this request's read.
+        reader: { enabledRepositories: async () => enabled },
       });
       res.set({
         'Cache-Control': 'private, no-store',
@@ -66,6 +73,9 @@ export function createPreviewMediaRoutes(dependencies: PreviewMediaDependencies 
       });
       res.status(200).send(result.body);
     } catch (error) {
+      // PreviewMediaError first: its 404s (asset not published, media gone)
+      // were direct responses before the extraction and must not be rewritten
+      // into the repository-access 404 by the status-based GitHub handler.
       if (error instanceof PreviewMediaError) { res.status(error.status).json({ error: error.message }); return; }
       if (await handleGitHubRepositoryAccessError(req, res, error)) return;
       res.status(502).json({ error: 'Preview media is temporarily unavailable' });

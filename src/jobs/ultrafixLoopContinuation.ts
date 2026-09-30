@@ -253,19 +253,16 @@ export async function continueUltrafixLoop(
         owner, repo, pr: pullRequestNumber, action: completedAction, workEpoch,
     });
     if (!updatedState) {
-        return {
-            continued: false,
-            reason: await isUltrafixAutomaticWorkCurrent(
-                redisClient,
-                { owner, repo, pr: pullRequestNumber },
-                workEpoch,
-            ) ? 'state_lost_after_record' : 'ultrafix_superseded',
-            outcome: await isUltrafixAutomaticWorkCurrent(
-                redisClient,
-                { owner, repo, pr: pullRequestNumber },
-                workEpoch,
-            ) ? 'failed' : 'stopped',
-        };
+        // One epoch read decides both fields, so they cannot disagree when the
+        // epoch moves between two separate Redis reads.
+        const stillCurrent = await isUltrafixAutomaticWorkCurrent(
+            redisClient,
+            { owner, repo, pr: pullRequestNumber },
+            workEpoch,
+        );
+        return stillCurrent
+            ? { continued: false, reason: 'state_lost_after_record', outcome: 'failed' }
+            : { continued: false, reason: 'ultrafix_superseded', outcome: 'stopped' };
     }
 
     correlatedLogger.info(
