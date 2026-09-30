@@ -440,7 +440,14 @@ test('a resolved launch receipt stays with its completed execution while submiss
     assert.equal(submissionRead.progress.task?.id, 'retry-task');
     assert.equal(submissionRead.progress.pullRequest?.number, 99);
 
-    for (const resolved of [await poll(), await poll()]) {
+    const settled = await poll();
+    const stored = await f.db('mcp_operations').where({ id: receipt.operationId }).first('result', 'updated_at');
+    await new Promise(resolve => setTimeout(resolve, 5));
+    const repeated = await poll();
+    // A poll that learns nothing new must not rewrite the terminal receipt:
+    // updated_at is the recovery evidence for when the outcome was persisted.
+    assert.deepEqual(await f.db('mcp_operations').where({ id: receipt.operationId }).first('result', 'updated_at'), stored);
+    for (const resolved of [settled, repeated]) {
       assert.equal(resolved.state, 'completed');
       assert.equal(resolved.lifecycle.state, 'completed');
       assert.equal(resolved.result.taskId, 'completed-task');

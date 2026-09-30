@@ -8,7 +8,11 @@ export async function up(knex) {
     table.json('artifacts').notNullable().defaultTo('{}');
     table.json('progress').nullable();
   });
+  // The previous runner inserted in-flight receipts as 'running' with no
+  // result. Such a row survived a restart mid-flight; record it as an accepted
+  // invocation so the interruption timeout can settle it as unknown.
   await knex('mcp_operations').update({
+    state: knex.raw("CASE WHEN state = 'running' AND result IS NULL THEN 'accepted' ELSE state END"),
     lifecycle: knex.raw("CASE WHEN state IN ('completed', 'failed', 'cancelled', 'unknown') THEN state ELSE 'accepted' END"),
     accepted_at: knex.ref('created_at'),
     finished_at: knex.raw("CASE WHEN state IN ('completed', 'failed', 'cancelled') THEN updated_at ELSE NULL END"),

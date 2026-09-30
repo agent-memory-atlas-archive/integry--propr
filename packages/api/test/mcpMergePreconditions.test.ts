@@ -174,6 +174,7 @@ test('executeTool persists specific PR state failures and get_operation returns 
   const mergeCommitSha = NEXT_HEAD;
   let requestedPull = 42;
   let mergeQuery = '';
+  const mergeAttempts: number[] = [];
   const paginationCalls: Args[] = [];
   const successfulChecks = Array.from({ length: 50 }, (_, index) => ({
     name: `successful-${index + 1}`, status: 'COMPLETED', conclusion: 'SUCCESS',
@@ -183,7 +184,10 @@ test('executeTool persists specific PR state failures and get_operation returns 
       if (route === 'GET /repos/{owner}/{repo}/pulls/{pull_number}') {
         requestedPull = Number(args.pull_number);
         if (requestedPull === 43) return { data: rest({ number: 43, state: 'closed', closed_at: '2026-09-27T12:00:00Z' }) };
-        if ([44, 45, 46, 47].includes(requestedPull)) return { data: rest({ number: requestedPull }) };
+        if ([44, 45, 46, 47, 48, 49].includes(requestedPull)) return { data: rest({ number: requestedPull }) };
+        if (requestedPull === 50) throw Object.assign(new Error('Server Error'), {
+          name: 'HttpError', status: 502, response: { status: 502, headers: {}, data: { message: 'Server Error' } },
+        });
         return { data: rest({ state: 'closed', merged: true, merged_at: mergedAt, merge_commit_sha: mergeCommitSha }) };
       }
       if (route === 'PUT /repos/{owner}/{repo}/pulls/{pull_number}/merge' && Number(args.pull_number) === 44) {
@@ -194,6 +198,7 @@ test('executeTool persists specific PR state failures and get_operation returns 
       if (route === 'PUT /repos/{owner}/{repo}/pulls/{pull_number}/merge' && Number(args.pull_number) === 45) {
         return { data: { merged: false, message: 'Base branch policy rejected this merge.' } };
       }
+      if (route === 'PUT /repos/{owner}/{repo}/pulls/{pull_number}/merge') mergeAttempts.push(Number(args.pull_number));
       throw new Error(`Unexpected GitHub request: ${route}`);
     },
     graphql: async (query: string, args: Args) => {
@@ -209,8 +214,16 @@ test('executeTool persists specific PR state failures and get_operation returns 
           nodes: [{ name: 'e2e', status: 'IN_PROGRESS', conclusion: null }],
           pageInfo: { hasNextPage: false, endCursor: null },
         } } } };
+        // A malformed continuation page: GitHub omitted pageInfo.
+        if (args.commitId === 'commit-48') return { node: { statusCheckRollup: { contexts: { nodes: [] } } } };
         throw new Error(`Unexpected check-context commit: ${args.commitId}`);
       }
+      if (requestedPull === 49) throw Object.assign(new Error('Bad Gateway'), {
+        name: 'GraphqlResponseError', status: 502, response: { status: 502, headers: {}, data: { message: 'Bad Gateway' } },
+      });
+      if (requestedPull === 48) return { repository: { pullRequest: graph({ commits: rollup(
+        'SUCCESS', successfulChecks, { commitId: 'commit-48', hasNextPage: true, endCursor: 'cursor-48' },
+      ) }) } };
       if (requestedPull === 46) return { repository: { pullRequest: graph({ commits: rollup('FAILURE', [
         { name: 'build', status: 'COMPLETED', conclusion: 'FAILURE' }, ...successfulChecks.slice(1),
       ], { commitId: 'commit-46', hasNextPage: true, endCursor: 'cursor-46' }) }) } };
@@ -291,6 +304,30 @@ test('executeTool persists specific PR state failures and get_operation returns 
     { commitId: 'commit-46', after: 'cursor-46' },
     { commitId: 'commit-47', after: 'cursor-47' },
   ]);
+
+  // Failures raised while merge_pull_request is still reading issued no write,
+  // so they fail as ordinary retryable errors rather than an uncertain outcome.
+  for (const readFailure of [
+    { pullRequest: 48, code: 'GITHUB_RESPONSE_INVALID', message: /omitted pagination data/ },
+    { pullRequest: 49, code: 'GITHUB_UNAVAILABLE', message: /Bad Gateway/ },
+    { pullRequest: 50, code: 'GITHUB_UNAVAILABLE', message: /Server Error/ },
+  ]) {
+    const readFailed = (await executeTool(tool('merge_pull_request'), {
+      repository: 'acme/repo', pullRequest: readFailure.pullRequest, expectedHead: HEAD, method: 'squash',
+      idempotencyKey: `read-failure-${readFailure.pullRequest}`,
+    }, principal, deps)).data as Args;
+    assert.equal(readFailed.state, 'failed');
+    assert.equal(readFailed.result.error.code, readFailure.code);
+    assert.equal(readFailed.result.error.stage, 'github');
+    assert.equal(readFailed.result.error.retryable, true);
+    assert.match(readFailed.result.error.message, readFailure.message);
+    assert.equal(readFailed.lifecycle.state, 'failed');
+    assert.equal(readFailed.message, undefined);
+  }
+  assert.deepEqual(mergeAttempts, []);
+  const readFailureAccess = await db('mcp_access_log').where({ name: 'merge_pull_request' })
+    .whereIn('error_code', ['GITHUB_RESPONSE_INVALID', 'GITHUB_UNAVAILABLE']).select('error_code');
+  assert.equal(readFailureAccess.length, 3);
 
   const rejected405 = (await executeTool(tool('merge_pull_request'), {
     repository: 'acme/repo', pullRequest: 44, expectedHead: HEAD, method: 'squash', idempotencyKey: 'merge-rejected-405',

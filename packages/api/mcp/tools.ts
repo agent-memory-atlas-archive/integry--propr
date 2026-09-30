@@ -67,7 +67,8 @@ export interface ToolContext { principal: McpPrincipal; args: Args; operationId?
 export interface McpTool {
   name: string; description: string; scope: McpScope; schema: z.ZodObject; readOnly?: boolean;
   permission?: InstancePermission;
-  target?: { table: string; column: string; arg: string; owner?: string };
+  /** `optional` opts one arm of an exactly-one-of schema out of the target check; the default fails closed. */
+  target?: { table: string; column: string; arg: string; owner?: string; optional?: boolean };
   run: (context: ToolContext) => Promise<OperationResult>;
 }
 export interface ToolDeps { db: Knex; taskQueue: Queue; redisClient: RedisClientType; runtimeBuildQueue: Queue; policy: McpPolicy; taskSubmissionServices?: Parameters<typeof createTaskSubmissionRoutes>[0]['services']; goalServices?: Omit<Parameters<typeof createGoalRoutes>[0], 'db' | 'taskQueue' | 'redisClient'>; visualPreviews?: VisualPreviewToolServices }
@@ -365,10 +366,13 @@ export function createToolCatalog(deps: ToolDeps): McpTool[] {
       offset: z.number().int().min(0).max(100000).default(0),
       limit: z.number().int().min(1).max(50).default(20),
     }).strict(), run: async ({ principal, args }) => {
-      await operations.reconcileTerminalLifecycles(principal);
+      const acceptedSince = Date.now() - args.sinceMinutes * 60_000;
+      // Recovery is bounded to the listed window so the call stays constant as
+      // receipt history grows; get_operation repairs any older receipt on read.
+      await operations.reconcileTerminalLifecycles(principal, undefined, { acceptedSince });
       await operations.markInterruptedInvocations(principal);
       const query = db<Operation>('mcp_operations').where({ owner_id: principal.user.id, grant_id: principal.grant.id })
-        .where('accepted_at', '>=', Date.now() - args.sinceMinutes * 60_000);
+        .where('accepted_at', '>=', acceptedSince);
       if (args.tool) query.where('tool', args.tool);
       if (args.repository) query.andWhere(builder => builder.where('repository', args.repository).orWhere('tool', 'cancel_operation'));
       if (args.lifecycle === 'active') query.whereIn('lifecycle', ['accepted', 'running']);

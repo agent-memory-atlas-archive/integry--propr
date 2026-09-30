@@ -125,7 +125,7 @@ export function addVisualPreviewTools(tools: McpTool[], deps: ToolDeps): void {
     scope: 'read',
     readOnly: true,
     schema: listSchema,
-    target: { table: 'tasks', column: 'task_id', arg: 'taskId' },
+    target: { table: 'tasks', column: 'task_id', arg: 'taskId', optional: true },
     run: async ({ principal, args }) => {
       const repository = String(args.repository);
       const association = args.taskId

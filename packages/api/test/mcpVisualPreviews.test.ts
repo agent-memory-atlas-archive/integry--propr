@@ -82,6 +82,14 @@ test('visual preview tools list task-scoped media and return bounded image block
   const catalog = createToolCatalog(deps);
   const tool = (name: string) => catalog.find(candidate => candidate.name === name)!;
 
+  // Only a target declared optional skips its check on a missing argument; a
+  // tool that leaves out that declaration fails closed instead.
+  const previewTarget = tool('list_visual_previews').target;
+  assert.equal(previewTarget?.optional, true);
+  await assert.rejects(executeTool({ ...tool('list_visual_previews'), target: { ...previewTarget!, optional: false } },
+    { repository, pullRequest: 49 }, principal, deps), (error: unknown) => error instanceof McpError && error.code === 'NOT_FOUND');
+  assert.equal(githubCalls, 0);
+
   const listed = await executeTool(tool('list_visual_previews'), { repository, pullRequest: 49 }, principal, deps);
   assert.deepEqual((listed.data as { previews: unknown[] }).previews, [
     { previewId: 'pull:49:image-asset', type: 'image', title: 'Dashboard [redacted]', description: 'Rendered [redacted] dashboard.', fetchable: true },

@@ -169,15 +169,19 @@ function assertOpenState(pr: PullRequestStateSource, action: string, snapshot: P
   );
 }
 
-/** Require an open pull request. Merging additionally rejects drafts; other mutations continue to allow them. */
-export function assertPullRequestOpen(pr: PullRequestStateSource, action: string): void {
-  const snapshot = pullRequestSnapshot(pr);
-  assertOpenState(pr, action, snapshot);
-  if (action === 'merge' && snapshot.draft) throw preconditionError(
+function assertNotDraft(pr: PullRequestStateSource, snapshot: PullRequestSnapshot): void {
+  if (snapshot.draft) throw preconditionError(
     'PULL_REQUEST_DRAFT',
     `Cannot merge ${pullRequestName(pr)}: the pull request is still a draft. Mark it ready for review before merging.`,
     'notDraft', snapshot,
   );
+}
+
+/** Require an open pull request. Merging additionally rejects drafts; other mutations continue to allow them. */
+export function assertPullRequestOpen(pr: PullRequestStateSource, action: string): void {
+  const snapshot = pullRequestSnapshot(pr);
+  assertOpenState(pr, action, snapshot);
+  if (action === 'merge') assertNotDraft(pr, snapshot);
 }
 
 /** Preserve optimistic head checks for every mutation while giving them a stable precondition stage. */
@@ -210,8 +214,8 @@ export function assertMergePreconditions(
     'headMatchesExpected', snapshot,
     { details: { expectedHead, currentHead: snapshot.head } },
   );
-  // This call deliberately follows the head check: draft is the second ordered merge guard.
-  assertPullRequestOpen({ ...pr, ...snapshot, number: pr.number }, 'merge');
+  // Draft is the second ordered merge guard, so it deliberately follows the head check.
+  assertNotDraft(pr, snapshot);
   if (snapshot.reviewDecision === 'CHANGES_REQUESTED') throw preconditionError(
     'CHANGES_REQUESTED',
     `Cannot merge ${name}: changes have been requested. Resolve them before merging.`,

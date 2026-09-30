@@ -268,18 +268,21 @@ For mutations, a connection or server failure can happen after an external
 side effect. Such a receipt is `unknown` with `error.code: "OUTCOME_UNKNOWN"`
 and a sanitized `cause` describing the original failure. It is deliberately
 not retryable: inspect the receipt's artifacts and the target in GitHub or
-ProPR before deciding whether a new action is safe.
+ProPR before deciding whether a new action is safe. A failure raised while a
+mutation is still reading (for example the pull request or merge-state read
+before a merge) issued no write, so it is reported with its ordinary code and
+`retryable` flag instead.
 
 Stable codes introduced by the observable operator surface are:
 
 | Code | Meaning |
 | --- | --- |
 | `INVALID_INPUT` | Arguments failed schema or semantic validation. |
-| `GITHUB_*`: `GITHUB_AUTH_FAILED`, `GITHUB_FORBIDDEN`, `GITHUB_NOT_FOUND`, `GITHUB_RATE_LIMITED`, `GITHUB_REJECTED`, `GITHUB_UNAVAILABLE` | GitHub rejected, denied, could not find, throttled or could not serve the request. |
+| `GITHUB_*`: `GITHUB_AUTH_FAILED`, `GITHUB_FORBIDDEN`, `GITHUB_NOT_FOUND`, `GITHUB_RATE_LIMITED`, `GITHUB_REJECTED`, `GITHUB_UNAVAILABLE`, `GITHUB_RESPONSE_INVALID` | GitHub rejected, denied, could not find, throttled or could not serve the request, or returned a response the tool could not act on. |
 | `UPSTREAM_*`: `UPSTREAM_TIMEOUT`, `UPSTREAM_UNREACHABLE` | A non-GitHub upstream timed out or could not be reached. |
 | `DATABASE_BUSY` | SQLite is temporarily busy; retry after the indicated delay. |
 | `PLAN_INVALID` | A plan is incomplete or malformed and cannot be published. |
-| `PUBLISH_FAILED` | Publication failed before any issue was created; the plan claim was released. |
+| `PUBLISH_FAILED` | Publication failed before any issue was created; the plan claim was released. `details.currentRevision` is the revision to pass when retrying. |
 | `PUBLISH_PARTIAL` | Some publication effect may exist; inspect the saved publication state and resume explicitly. |
 | `PULL_REQUEST_ALREADY_MERGED`, `PULL_REQUEST_CLOSED`, `PULL_REQUEST_DRAFT` | The pull-request lifecycle does not permit the requested action. |
 | `CHECKS_FAILING`, `CHECKS_PENDING`, `REVIEW_REQUIRED`, `CHANGES_REQUESTED`, `BRANCH_BEHIND_BASE`, `MERGE_CONFLICT`, `BRANCH_PROTECTION_BLOCKED`, `MERGE_STATE_UNKNOWN`, `MERGE_REJECTED` | A specific guarded-merge precondition or GitHub merge decision blocked the merge. |

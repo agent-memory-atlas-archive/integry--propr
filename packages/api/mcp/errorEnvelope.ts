@@ -205,10 +205,34 @@ function classifyKnown(error: unknown): McpErrorEnvelope {
   return { code: 'INTERNAL_ERROR', message: 'The request could not be completed.', stage: 'internal', retryable: false, status: 500 };
 }
 
+const NO_SIDE_EFFECTS = Symbol.for('propr.mcp.noSideEffects');
+
+/**
+ * Run the read phase of a mutation. A failure raised here happened before any
+ * external write, so the runner reports it as an ordinary, often retryable,
+ * error instead of an uncertain outcome that the caller must go and inspect.
+ */
+export async function beforeSideEffects<T>(run: () => Promise<T>): Promise<T> {
+  try {
+    return await run();
+  } catch (error) {
+    if (error && typeof error === 'object') {
+      Object.defineProperty(error, NO_SIDE_EFFECTS, { value: true, enumerable: false, configurable: true });
+    }
+    throw error;
+  }
+}
+
+/** Whether a failure was raised by a read phase that provably issued no external write. */
+export function raisedBeforeSideEffects(error: unknown): boolean {
+  return !!error && typeof error === 'object' && (error as Record<symbol, unknown>)[NO_SIDE_EFFECTS] === true;
+}
+
 /** Classify any thrown value, retaining mutation uncertainty when effects may have occurred. */
 export function classifyError(error: unknown, options: { sideEffectsPossible: boolean }): McpErrorEnvelope {
   const classified = classifyKnown(error);
-  if (!options.sideEffectsPossible || (isMcpError(error) && classified.status < 500)) return classified;
+  const sideEffectsPossible = options.sideEffectsPossible && !raisedBeforeSideEffects(error);
+  if (!sideEffectsPossible || (isMcpError(error) && classified.status < 500)) return classified;
   return {
     code: 'OUTCOME_UNKNOWN',
     message: 'Outcome uncertain. Inspect the target before issuing a new action.',

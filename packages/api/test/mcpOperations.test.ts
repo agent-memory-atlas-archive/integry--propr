@@ -1369,29 +1369,111 @@ test('forward lifecycle migration upgrades legacy receipts without rerunning the
   });
   await db.migrate.latest({ migrationSource: source(['20260910220000_add_mcp.js']) });
   assert.equal(await db.schema.hasColumn('mcp_operations', 'lifecycle'), false);
-  const states = ['completed', 'failed', 'cancelled', 'unknown', 'accepted', 'queued', 'posted'];
+  const states = ['completed', 'failed', 'cancelled', 'unknown', 'accepted', 'queued', 'posted', 'running'];
   for (const state of states) await db('mcp_operations').insert({
     id: state, owner_id: 'alice', grant_id: 'grant', idempotency_key: `legacy-${state}`,
     tool: 'fixture', repository: 'acme/repo', payload_hash: 'hash', state,
     result: JSON.stringify({ preserved: state }), created_at: 100, updated_at: 200,
   });
+  // The previous runner marked an invocation in flight as 'running' with no
+  // result; one that outlived the upgrade was interrupted by the restart.
+  await db('mcp_operations').insert({
+    id: 'in-flight', owner_id: 'alice', grant_id: 'grant', idempotency_key: 'legacy-in-flight',
+    tool: 'fixture', repository: 'acme/repo', payload_hash: 'hash', state: 'running', result: null,
+    created_at: 100, updated_at: 100,
+  });
   await db.migrate.latest({ migrationSource: source(Object.keys(migrations) as Array<keyof typeof migrations>) });
   for (const state of states) {
     const row = await db('mcp_operations').where({ id: state }).first();
+    assert.equal(row.state, state, 'a receipt with a result keeps its transport state');
     assert.equal(row.lifecycle, ['completed', 'failed', 'cancelled', 'unknown'].includes(state) ? state : 'accepted');
     assert.equal(row.accepted_at, 100);
     assert.equal(row.finished_at, ['completed', 'failed', 'cancelled'].includes(state) ? 200 : null);
     assert.equal(row.result, JSON.stringify({ preserved: state }));
     assert.equal(row.artifacts, '{}');
   }
+  const inFlight = await db('mcp_operations').where({ id: 'in-flight' }).first();
+  assert.equal(inFlight.state, 'accepted');
+  assert.equal(inFlight.lifecycle, 'accepted');
+  assert.equal(inFlight.accepted_at, 100);
   const indexes = await db.raw("PRAGMA index_list('mcp_operations')");
   assert.ok(indexes.some((index: { name: string }) => index.name === 'mcp_operations_owner_grant_accepted_idx'));
   const operations = new McpOperations(db);
   const principal = { user: { id: 'alice' }, grant: { id: 'grant' } } as McpPrincipal;
   assert.equal((await operations.get(principal, 'completed')).result, '{"preserved":"completed"}');
+  const upgraded = operations.project((await db<Operation>('mcp_operations').where({ id: 'in-flight' }).first())!);
+  assert.equal(upgraded.state, 'unknown');
+  assert.match(String(upgraded.message), /may have been interrupted/);
+  assert.equal(upgraded.retryAfterSeconds, undefined);
+  const settled = operations.project(await operations.get(principal, 'in-flight'));
+  assert.equal(settled.state, 'unknown');
+  assert.equal((settled.lifecycle as { state: string }).state, 'unknown');
+  assert.deepEqual(await db('mcp_operations').where({ id: 'in-flight' }).first('state', 'lifecycle'), { state: 'unknown', lifecycle: 'unknown' });
   const receipt = await operations.run(principal, { tool: 'fixture', args: { idempotencyKey: 'upgraded-operation' } },
     async () => ({ status: 200, data: { upgraded: true } }));
   assert.equal(receipt.state, 'completed');
+});
+
+test('a legacy in-flight receipt that was upgraded without state normalization still settles as interrupted', async t => {
+  const db = knex({ client: 'better-sqlite3', connection: { filename: ':memory:' }, useNullAsDefault: true });
+  t.after(() => db.destroy());
+  await db.schema.createTable('task_drafts', table => table.string('draft_id').primary());
+  await up(db);
+  await lifecycleMigration(db);
+  const invokedAt = Date.now() - 180_000;
+  await db('mcp_operations').insert({
+    id: 'legacy-running', owner_id: 'alice', grant_id: 'grant', idempotency_key: 'legacy-running-key',
+    tool: 'review_pull_request', repository: 'acme/repo', payload_hash: 'hash', state: 'running', result: null,
+    lifecycle: 'accepted', artifacts: '{}', accepted_at: invokedAt, created_at: invokedAt, updated_at: invokedAt,
+  });
+  const operations = new McpOperations(db);
+  const principal = { user: { id: 'alice' }, grant: { id: 'grant' } } as McpPrincipal;
+  const projected = operations.project((await db<Operation>('mcp_operations').where({ id: 'legacy-running' }).first())!);
+  assert.equal(projected.state, 'unknown');
+  assert.equal(projected.retryAfterSeconds, undefined);
+  const settled = operations.project(await operations.get(principal, 'legacy-running'));
+  assert.equal(settled.state, 'unknown');
+  assert.equal((settled.lifecycle as { state: string }).state, 'unknown');
+  assert.deepEqual(await db('mcp_operations').where({ id: 'legacy-running' }).first('state', 'lifecycle'), { state: 'unknown', lifecycle: 'unknown' });
+});
+
+test('list_operations bounds terminal recovery to its window while get_operation repairs older receipts on read', async t => {
+  const db = knex({ client: 'better-sqlite3', connection: { filename: ':memory:' }, useNullAsDefault: true });
+  t.after(() => db.destroy());
+  await db.schema.createTable('task_drafts', table => table.string('draft_id').primary());
+  await up(db);
+  await lifecycleMigration(db);
+  const principal = { user: { id: 'alice' }, grant: { id: 'grant-a' } } as McpPrincipal;
+  const now = Date.now();
+  // Both receipts stopped after their terminal write but before lifecycle
+  // synchronization; only one was accepted inside the listing window.
+  for (const [id, acceptedAt] of [['recent-terminal', now - 10 * 60_000], ['old-terminal', now - 3 * 60 * 60_000]] as const) {
+    await db('mcp_operations').insert({
+      id, owner_id: 'alice', grant_id: 'grant-a', idempotency_key: `${id}-key`, tool: 'send_task_followup',
+      repository: 'acme/repo', payload_hash: 'hash', state: 'completed', lifecycle: 'accepted', artifacts: '{}',
+      result: JSON.stringify({ state: 'completed', continuation: { taskId: `${id}-task` } }),
+      accepted_at: acceptedAt, created_at: acceptedAt, updated_at: acceptedAt + 1_000,
+    });
+  }
+  const deps = { db, policy: { repository: async () => {}, requirePermission: () => {}, config: {} } as never,
+    taskQueue: {} as never, redisClient: {} as never, runtimeBuildQueue: {} as never } as ToolDeps;
+  const catalog = createToolCatalog(deps);
+  const list = catalog.find(tool => tool.name === 'list_operations')!;
+  const listed = (await list.run({ principal, args: list.schema.parse({ sinceMinutes: 60 }) })).data as { operations: Array<Record<string, unknown>> };
+  assert.deepEqual(listed.operations.map(row => row.operationId), ['recent-terminal']);
+  assert.equal((listed.operations[0].lifecycle as { state: string }).state, 'completed');
+  assert.deepEqual(await db('mcp_operations').where({ id: 'recent-terminal' }).first('lifecycle', 'finished_at'),
+    { lifecycle: 'completed', finished_at: now - 10 * 60_000 + 1_000 });
+  assert.deepEqual(await db('mcp_operations').where({ id: 'old-terminal' }).first('lifecycle', 'finished_at'),
+    { lifecycle: 'accepted', finished_at: null }, 'a receipt outside the window is not swept by the listing');
+
+  const operations = new McpOperations(db);
+  const repaired = operations.project(await operations.get(principal, 'old-terminal'));
+  assert.equal(repaired.state, 'completed');
+  assert.equal((repaired.lifecycle as { state: string; finishedAt: string }).state, 'completed');
+  assert.equal((repaired.lifecycle as { artifacts: { taskId: string } }).artifacts.taskId, 'old-terminal-task');
+  const wide = (await list.run({ principal, args: list.schema.parse({ sinceMinutes: 600 }) })).data as { operations: Array<Record<string, unknown>> };
+  assert.deepEqual(wide.operations.map(row => row.operationId), ['recent-terminal', 'old-terminal']);
 });
 
 test('lifecycle progress and recovery redact credentials before persistence', async t => {

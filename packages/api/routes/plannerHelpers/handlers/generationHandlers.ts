@@ -4,10 +4,11 @@
 
 import { Request, Response } from 'express';
 import { Knex } from 'knex';
-import { generateCorrelationId, normalizeRefinedPlan, RefinementOutputError } from '@propr/core';
+import { generateCorrelationId, RefinementOutputError } from '@propr/core';
 import type { OwnershipResult } from '../types.js';
 import { getRefineRepoContext } from '../repoSetup.js';
 import { refinementPlanUpdates } from '../planRevisions.js';
+import { resolveRefinementOutcome } from '../refinementOutcome.js';
 
 interface AbortGenerationDeps {
   db: Knex;
@@ -97,26 +98,18 @@ export function createRefineHandler(deps: RefineDeps) {
             originalContext: originalContext || undefined, draftId
           });
 
-          const normalized = result.action === 'modified'
-            ? normalizeRefinedPlan(currentPlan, result.plan)
-            : { ok: true as const, plan: currentPlan, merged: false, operations: undefined };
-          if (!normalized.ok) throw new RefinementOutputError(normalized.message, normalized.details);
-          const merged = result.merged === true || normalized.merged;
-          const operations = result.operations ?? normalized.operations;
-          const mergeSummary = merged && !result.summary.includes('Applied ')
-            ? `Applied ${operations} edits to the existing plan. ${result.summary}`
-            : result.summary;
+          const outcome = resolveRefinementOutcome(currentPlan, result);
 
           // Store the refinement result including action and summary
           const refinementMeta = {
             action: result.action,
-            summary: mergeSummary,
-            ...(merged ? { merged: true } : {}),
+            summary: outcome.summary,
+            ...(outcome.merged ? { merged: true } : {}),
             timestamp: new Date().toISOString()
           };
 
           await deps.db('task_drafts').where({ draft_id: draftId }).update({
-            ...refinementPlanUpdates(deps.db, result.action, normalized.plan),
+            ...refinementPlanUpdates(deps.db, result.action, outcome.plan),
             refinement_result: JSON.stringify(refinementMeta),
             status: 'review',
             updated_at: deps.db.fn.now()

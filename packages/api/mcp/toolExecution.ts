@@ -22,9 +22,13 @@ async function authorizePlanContext(row: Args, principal: McpPrincipal, policy: 
 
 async function authorizeTarget(tool: McpTool, args: Args, principal: McpPrincipal, deps: ToolDeps): Promise<void> {
   const target = tool.target!;
-  // A target may guard one arm of an exactly-one-of schema (for example task
-  // versus pull request). The other arm is authorized by repository policy.
-  if (args[target.arg] === undefined) return;
+  if (args[target.arg] === undefined) {
+    // Only a target declared optional may guard one arm of an exactly-one-of
+    // schema (for example task versus pull request), leaving the other arm to
+    // repository policy. Every other target fails closed on a missing argument.
+    if (target.optional) return;
+    throw new McpError('NOT_FOUND', 'Target not found in your authorized repository.', 404);
+  }
   const row = await deps.db(target.table).where({ [target.column]: args[target.arg] }).first();
   if (!row || row.repository !== args.repository || (target.owner && row[target.owner] !== principal.user.id)) throw new McpError('NOT_FOUND', 'Target not found in your authorized repository.', 404);
   if (target.table === 'task_drafts') await authorizePlanContext(row, principal, deps.policy);

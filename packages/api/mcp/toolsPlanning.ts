@@ -176,7 +176,6 @@ export function addPlanningTools(tools: McpTool[], deps: ToolDeps, planner: Retu
       const initialContext = parseContextConfig(draft.context_config);
       const partial = args.resume ? partialPublication(initialContext.publication) : undefined;
       const active = args.resume ? parseActivePublication(initialContext.publication) : undefined;
-      if (active) await new McpOperations(db).markInterruptedInvocations(principal, active.attemptId);
       // A persisted callback result, an OS-verified dead process or a lapsed
       // claim lease permits marker reconciliation. Lifecycle timeout or
       // cancellation alone cannot prove that an invocation has stopped making
@@ -187,6 +186,10 @@ export function addPlanningTools(tools: McpTool[], deps: ToolDeps, planner: Retu
         id: active.attemptId, owner_id: principal.user.id, tool: 'publish_plan', repository: args.repository,
       }).whereIn('state', ['completed', 'failed', 'cancelled', 'unknown']).whereNotNull('result')
         .where('updated_at', '>=', Date.parse(active.claimedAt)).first('id') : undefined;
+      // Settle the prior attempt's own receipt for anyone polling it. This only
+      // reclassifies a result-less receipt as unknown; it never writes a result,
+      // so it cannot supply the stopped-attempt evidence read above.
+      if (active) await new McpOperations(db).markInterruptedInvocations(principal, active.attemptId);
       const priorPublication = partial ?? (active && (stoppedActiveAttempt || publicationOwnerStopped(active.owner)
         || publicationLeaseLapsed(active)) ? active : undefined);
       const previousStatus = String(draft.status || 'draft');
@@ -262,8 +265,11 @@ export function addPlanningTools(tools: McpTool[], deps: ToolDeps, planner: Retu
             mcp_revision: claimedRevision, context_config: activeContextJson })
             .update({ status: previousStatus, context_config: JSON.stringify(initialContext), updated_at: db.fn.now() });
           if (!released) await assertClaim();
+          // The claim and its renewals advanced the revision, so a retry with the
+          // caller's expectedRevision would fail as stale. Report the current one.
+          const currentRevision = await db('task_drafts').where({ draft_id: args.planId }).first('mcp_revision').then(row => row?.mcp_revision, () => undefined);
           throw new McpError('PUBLISH_FAILED', `Plan publication failed while processing task ${failure.index + 1}.`, 409, {
-            stage: failureStage(failure.step, classified.stage), retryable: classified.retryable, details,
+            stage: failureStage(failure.step, classified.stage), retryable: classified.retryable, details: { ...details, currentRevision },
           });
         }
         const context: Record<string, unknown> = { ...activeContext };

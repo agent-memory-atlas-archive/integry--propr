@@ -21,7 +21,8 @@ export interface Operation {
   failure: string | null; artifacts: string | null; progress: string | null;
 }
 
-function canonical(value: unknown): string {
+/** Key-order independent serialization, so equivalent receipts compare equal. */
+export function canonical(value: unknown): string {
   if (Array.isArray(value)) return `[${value.map(canonical).join(',')}]`;
   if (value && typeof value === 'object') return `{${Object.entries(value).sort(([a], [b]) => a.localeCompare(b)).map(([key, item]) => `${JSON.stringify(key)}:${canonical(item)}`).join(',')}}`;
   return JSON.stringify(value);
@@ -83,9 +84,16 @@ function operationState(result: OperationResult): string {
   return ['posted', 'queued', 'unknown', 'failed'].includes(reported || '') ? reported! : 'accepted';
 }
 
+/**
+ * States a result-less receipt can hold while its invocation is in flight.
+ * 'running' is the marker the pre-lifecycle runner wrote; any such row that
+ * survived the upgrade was mid-flight during a restart.
+ */
+const IN_FLIGHT_STATES = ['accepted', 'running'];
+
 function invocationInterrupted(row: Operation, now = Date.now()): boolean {
   const invokedAt = Number(row.accepted_at);
-  return row.state === 'accepted' && row.result === null && Number.isFinite(invokedAt)
+  return IN_FLIGHT_STATES.includes(row.state) && row.result === null && Number.isFinite(invokedAt)
     && now - invokedAt > interruptionTimeoutMs;
 }
 
@@ -177,12 +185,18 @@ export class McpOperations {
     return row;
   }
 
-  /** Repair a process interruption after its terminal receipt write but before lifecycle synchronization. */
+  /**
+   * Repair a process interruption after its terminal receipt write but before
+   * lifecycle synchronization. An unscoped sweep must be bounded by
+   * `acceptedSince`: receipts outside a listing's window are never shown by it,
+   * and each is still repaired on its own read or replay.
+   */
   // eslint-disable-next-line complexity -- recovery atomically reconciles lifecycle, artifacts, failure, and progress
-  async reconcileTerminalLifecycles(principal: McpPrincipal, id?: string): Promise<void> {
+  async reconcileTerminalLifecycles(principal: McpPrincipal, id?: string, scope: { acceptedSince?: number } = {}): Promise<void> {
     const query = this.db('mcp_operations').where({ owner_id: principal.user.id, grant_id: principal.grant.id })
       .whereIn('state', ['completed', 'failed', 'cancelled']);
     if (id) query.andWhere({ id });
+    else if (scope.acceptedSince !== undefined) query.where('accepted_at', '>=', scope.acceptedSince);
     const rows = await query.select<Operation[]>();
     for (const row of rows) {
       const receipt = recoveryReceipt(row);
@@ -255,7 +269,7 @@ export class McpOperations {
   async markInterruptedInvocations(principal: McpPrincipal, id?: string): Promise<void> {
     const now = Date.now();
     const query = this.db('mcp_operations').where({ owner_id: principal.user.id, grant_id: principal.grant.id })
-      .where({ state: 'accepted' }).whereNull('result').whereIn('lifecycle', ['accepted', 'running', 'unknown'])
+      .whereIn('state', IN_FLIGHT_STATES).whereNull('result').whereIn('lifecycle', ['accepted', 'running', 'unknown'])
       .where('accepted_at', '<', now - interruptionTimeoutMs);
     if (id) query.andWhere({ id });
     await query.update({ state: 'unknown', lifecycle: 'unknown', updated_at: now });
@@ -308,10 +322,12 @@ export class McpOperations {
 
   async recordArtifacts(id: string, partial: Record<string, unknown>): Promise<void> {
     if (!Object.keys(partial).length) return;
-    await this.db('mcp_operations').where({ id }).update({
-      artifacts: this.db.raw("json_patch(COALESCE(artifacts, '{}'), ?)", [JSON.stringify(partial)]),
-      updated_at: Date.now(),
-    });
+    const patch = JSON.stringify(partial);
+    // Write only when the patch changes something: every poll re-derives the
+    // same artifacts, and updated_at is recovery evidence for terminal receipts.
+    await this.db('mcp_operations').where({ id })
+      .whereRaw("json_patch(COALESCE(artifacts, '{}'), ?) IS NOT json(COALESCE(artifacts, '{}'))", [patch])
+      .update({ artifacts: this.db.raw("json_patch(COALESCE(artifacts, '{}'), ?)", [patch]), updated_at: Date.now() });
   }
 
   async recordProgress(id: string, progress: unknown): Promise<void> {

@@ -95,6 +95,7 @@ test('a first-issue GitHub rejection releases the claimed review plan and permit
   const { callPublish } = tools(db, request);
   const before = await db('task_drafts').where({ draft_id: id }).first();
 
+  let currentRevision: number | undefined;
   await assert.rejects(callPublish(id, before.mcp_revision, 'first-attempt'), error => {
     assert.ok(error instanceof McpError);
     assert.equal(error.code, 'PUBLISH_FAILED');
@@ -103,14 +104,20 @@ test('a first-issue GitHub rejection releases the claimed review plan and permit
     assert.equal(error.details?.failedIndex, 0);
     assert.equal((error.details?.cause as { code: string }).code, 'GITHUB_REJECTED');
     assert.deepEqual(error.details?.createdIssues, []);
+    currentRevision = error.details?.currentRevision as number;
     return true;
   });
   let draft = await db('task_drafts').where({ draft_id: id }).first();
   assert.equal(draft.status, 'review');
   assert.equal(await db('plan_issues').where({ draft_id: id }).first(), undefined);
+  // The claim advanced the revision; the failure reports the one a retry needs
+  // so the caller does not have to re-read the plan or hit STALE_REVISION.
+  assert.notEqual(currentRevision, before.mcp_revision);
+  assert.equal(currentRevision, draft.mcp_revision);
 
   reject = false;
-  const result = await callPublish(id, draft.mcp_revision, 'second-attempt');
+  await assert.rejects(callPublish(id, before.mcp_revision, 'stale-retry'), (error: McpError) => error.code === 'STALE_REVISION');
+  const result = await callPublish(id, currentRevision!, 'second-attempt');
   assert.equal((result.data as { resumed: boolean }).resumed, false);
   draft = await db('task_drafts').where({ draft_id: id }).first();
   assert.equal(draft.status, 'executed');

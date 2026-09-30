@@ -396,6 +396,37 @@ describe('planner background abort reconciliation', () => {
     assert.equal(current.plan_cause, 'refinement', 'a saved refined plan records refinement provenance');
   });
 
+  test('saves a result that core already normalised without merging or prefixing it again', async t => {
+    t.mock.method(console, 'log', () => undefined);
+    const draftId = 'refinement-core-normalised';
+    const runId = 'refinement-run-core-normalised';
+    const currentPlan = [{ title: 'First', body: 'First body', implementation: 'First implementation' }];
+    // An edit-shaped task title proves the handler does not normalise again.
+    const refinedPlan = [
+      { title: 'First', body: 'First body\n\nMore', implementation: 'First implementation' },
+      { title: 'action', body: 'Second body', implementation: 'Second implementation' },
+    ];
+    await database('task_drafts').insert({
+      draft_id: draftId, status: 'refining', plan_json: JSON.stringify(currentPlan), plan_cause: 'generation',
+      refinement_result: JSON.stringify({ status: 'in_progress', runId }),
+    });
+
+    await runBackgroundRefinement({ db: database, draftId, currentPlan, instruction: 'extend and add',
+      generationModel: 'test-model', correlationId: runId, accessToken: 'token', runId }, {
+      checkAborted: async () => false,
+      getRepoContext: async () => ({ worktreePath: '/tmp/worktree', repository: 'owner/repo', authToken: 'token' }),
+      refine: async () => ({ action: 'modified', summary: 'Applied 2 edits to the existing plan. Extended the work.',
+        model: 'test-model', plan: refinedPlan, merged: true, operations: 2 }) as never,
+    });
+
+    const current = await database('task_drafts').where({ draft_id: draftId }).first();
+    const metadata = JSON.parse(current.refinement_result);
+    assert.deepEqual(JSON.parse(current.plan_json), refinedPlan);
+    assert.equal(metadata.merged, true);
+    assert.equal(metadata.summary, 'Applied 2 edits to the existing plan. Extended the work.');
+    assert.equal(current.plan_cause, 'refinement');
+  });
+
   test('keeps the existing provenance when a modified result equals the stored plan', async t => {
     t.mock.method(console, 'log', () => undefined);
     const draftId = 'refinement-identical-output';

@@ -4,7 +4,7 @@ import type { TaskSubmission } from '@propr/core';
 import { createTaskSubmissionRoutes } from '../routes/taskSubmissionRoutes.js';
 import { callWorkflow } from './adapter.js';
 import { McpError } from './config.js';
-import type { Operation } from './operations.js';
+import { canonical, type Operation } from './operations.js';
 import type { McpPrincipal } from './policy.js';
 import { type McpTool, type ToolDeps, mutationShape, repositorySchema, idSchema, ok } from './tools.js';
 import { reconcileTerminalSubmissionProgress, submissionProgress, type SubmissionProgress, type SubmissionProgressStage } from './submissionProgress.js';
@@ -160,7 +160,12 @@ export async function trackTaskSubmission(deps: ToolDeps, row: Operation, princi
     const refreshed = { ...result, ...(progress ? { progress } : {}), executionResolved: true, targetState: result.targetState };
     receipt.result = refreshed;
     receipt.targetState = result.targetState;
-    await deps.db('mcp_operations').where({ id: row.id }).update({ result: JSON.stringify(redactDetails(refreshed)), updated_at: Date.now() });
+    // Persist only a genuinely newer projection. Rewriting an unchanged terminal
+    // receipt would move updated_at, which recovery reads as finished_at evidence.
+    const serialized = JSON.stringify(redactDetails(refreshed));
+    if (canonical(JSON.parse(serialized)) !== canonical(result)) {
+      await deps.db('mcp_operations').where({ id: row.id }).update({ result: serialized, updated_at: Date.now() });
+    }
     return;
   }
   const { current, taskId } = await projectOperationSubmission(deps, submission, result);
