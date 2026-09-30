@@ -21,18 +21,20 @@ remain separate gates.
 | Exact/fuzzy reference lookup | `resolve_reference`; ambiguous names return candidates |
 | Cross-repository “what is happening now” | `get_current_activity`; running tasks, active goals, plans being generated, queued work and blockers waiting on a human, for every repository in the grant at once. Optional exact `repository`; `includeRoutine` keeps filtered Inbox noise; `activity` resource |
 | “What has been done recently” | `get_recent_activity`; one merged newest-first timeline of terminal tasks, opened/merged pull requests, finished goals, published plans, reviews, ultrafix loops and blocking notifications. `sinceMinutes` or `since`/`until`, default 60 minutes and at most seven days; `activity/recent` resource |
+| Task/PR work overview | `get_work_overview`; running, recent or all task summaries joined to bounded current PR head, review, checks, merge state, newest ProPR review and ultrafix state, using one aliased GraphQL call per repository |
 | Draft list/read/create/update/delete | `list_plans`, `get_plan`, `create_plan`, `update_plan`, `delete_plan`; `list_plans` takes an optional `status` filter (`active`, any persisted plan status such as `draft`/`generating`/`refining`/`review`/`approved`/`executed`/`executing`/`pr_created`/`merged`/`failed`, or `all`, the default), applied in the query so `offset`/`limit` page the filtered set |
-| Plan revision history | `list_plan_revisions`, `get_plan_revision`, `restore_plan_revision`; every replaced plan is kept (up to 50 per plan), and a restore requires the exact `expectedRevision` and is refused for published or busy plans |
-| Generate/refine a plan | `generate_plan`, `refine_plan` |
-| Publish GitHub issues | `publish_plan`; publication does not start implementation |
+| Plan revision history | `list_plan_revisions`, `get_plan_revision`, `restore_plan_revision`; every replaced plan is kept (up to 50 per plan), revisions expose their persisted cause (`generation`, `refinement`, `manual_edit`, `restore`, `rename` or `unknown`), and a restore requires the exact `expectedRevision` and is refused for published or busy plans |
+| Generate/refine a plan | `generate_plan`, `refine_plan`; refinement output is schema-validated before replacement and an invalid result remains observable as `REFINEMENT_OUTPUT_INVALID` without destroying the prior plan |
+| Publish GitHub issues | `publish_plan`; publication does not start implementation. A recoverable partial publication stays inspectable and requires a fresh receipt with `resume: true`, which adopts marked issues before creating missing ones |
 | Selected issues, model, epic, bounded ultrafix and explicit auto-merge | `implement_plan` |
 | Plan scheduling | `pause_plan`, `resume_plan` |
 | Native goal capabilities/start/read/input | `get_goal_capabilities`, `create_goal`, `list_goals`, `get_goal`, `list_goal_inputs`, `get_agent_activity`, `send_goal_input`; `list_goals` takes an optional `repository` and a `state` filter (`active`/`completed`/`failed`/`all`), `get_goal` adds newest narration, task progress, checkpoint state, `pendingInput` and the pull requests the goal produced, and `send_goal_input` takes a `kind` (`instruction` or `question`) that distinguishes the request without changing the single durable goal input this backend persists |
 | Goal controls/model changes | `pause_goal`, `resume_goal`, `cancel_goal`, `set_goal_model` |
-| Start one-off work through a new GitHub issue | `create_task`, `get_task_submission`, `retry_task_submission`; ordinary issue execution without a plan or goal. `create_task` takes the same bounded `runUltrafix`/`ultrafixGoal`/`ultrafixMaxCycles` and `autoMerge` options as `implement_plan`, applied as the shared `ultrafix` and `auto-merge` issue labels |
+| Start one-off work through a new GitHub issue | `create_task`, `get_task_submission`, `list_task_submissions`, `retry_task_submission`; ordinary issue execution without a plan or goal. Submission progress distinguishes issue creation, queueing, running and terminal task/PR state. `create_task` takes the same bounded `runUltrafix`/`ultrafixGoal`/`ultrafixMaxCycles` and `autoMerge` options as `implement_plan`, applied as the shared `ultrafix` and `auto-merge` issue labels |
 | Task progress, narrated agent activity, history and bounded execution logs | `list_tasks`, `get_task`, `get_agent_activity`, `get_task_events`, `get_task_logs`; `list_tasks` takes an optional `repository` and the same `state` filter, and `get_task` adds recent events, newest narration, execution timing, `changesSummary` counts and its linked pull request |
 | File changes and followup | `get_task_changes`, `send_task_followup` |
-| Task/operation cancellation and receipts | `cancel_task`, `get_operation`, `cancel_operation` |
+| Task/operation cancellation and receipts | `cancel_task`, `get_operation`, `list_operations`, `cancel_operation`; durable lifecycle, timestamps, artifacts, progress and sanitized structured failures. `list_operations` is a bounded receipt index with repository/tool/lifecycle/time filters; refresh one result with `get_operation` |
+| Structured failure diagnosis | Every tool failure returns the shared `error` envelope: stable `code`, safe `message`, `stage`, `retryable`, `status`, optional bounded `details`, and optional sanitized `cause`. Mutations with uncertain external effects persist `OUTCOME_UNKNOWN` instead of claiming rollback or safe replay |
 | Delete inactive task history | `delete_task`; bulk cleanup uses explicit individual handles |
 | Pull request inventory across the grant | `list_pull_requests`; newest-first, with ProPR task/goal/plan correlation, `openedWithinMinutes`/`updatedWithinMinutes` recency filters, an optional newest comment and `propr.ultrafixActive`. Omit `repository` to cover the grant; `repositories/{owner}/{repo}/pulls` resource |
 | Ordinary PR follow-up comment | `comment_on_pull_request`; optional `expectedHead`, natural-language message only. An omitted head is resolved by the server and every receipt reports `resolvedHead`/`headSource`. A message that starts a slash command is rejected with `USE_EXPLICIT_TOOL` |
@@ -42,6 +44,9 @@ remain separate gates.
 | Update branch (`/merge`) | `update_pull_request_branch`; `expectedHead` is required to avoid updating code the caller has not seen |
 | Guarded PR merge | `merge_pull_request`; `expectedHead` is required to avoid merging code the caller has not seen |
 | Preview/revert a PR commit | `get_pull_request_revert_preview`, `revert_pull_request_commit`; exact commit, comment and head |
+| Published visual evidence | `list_visual_previews`, `get_visual_preview`; list exact task/PR preview metadata, then fetch bounded/downscaled image content. Videos remain metadata-only; `repositories/{owner}/{repo}/previews/{previewId}` resource |
+| Bundled product documentation | `list_docs`, `search_docs`, `get_doc`; stable paths, bounded section/chunk reads, normalized redacted content and `docs/{path}` resource. The MCP guide is `mcp/guide` |
+| Configuration discovery | `find_setting`; structured UI/MCP/CLI/environment reachability, permissions, restart requirements and browser/environment-only boundaries |
 | Indexed overview/tree/path/search/freshness | `get_repository_context` |
 | Indexing launch/cancellation | `index_repository`, `stop_repository_indexing`; explicit repository/branch |
 | Repository TODO CRUD/category CRUD | `list_todos`, `get_todo`, `create_todo`, `update_todo`, `delete_todo`, `list_todo_categories`, `create_todo_category`, `update_todo_category`, `delete_todo_category` |
@@ -497,3 +502,40 @@ existing migrations. The GitHub API, the configured repository list and the
 agent registry are the only fixtures: no live GitHub, no provider credits, no
 real merge, and no production configuration was changed. These are local
 results, not hosted CI results for the resulting commit.
+
+## Observable surface reconciliation (2026-09-30)
+
+The mapping was reconciled again after the receipt/error, work overview, plan
+recovery, docs, preview and configuration-discovery work landed. The regression
+at `packages/api/test/mcpObservableSurface.test.ts` uses the production catalog,
+policy, schemas, operation ledger, docs index and SQLite migrations. GitHub,
+queue/dispatch, Redis compatibility and preview-media fetches are the external
+fixtures. It also extracts every backticked `^[a-z_]+$` token in `docs/mcp.md`
+and requires it to be an admin-visible catalog tool or a named non-tool token.
+
+Local validation on 2026-09-30:
+
+```sh
+NODE_ENV=test npx tsx --test packages/api/test/mcpObservableSurface.test.ts
+# 1 passed, 0 failed, 0 skipped.
+
+npm run test:mcp
+# 191 tests passed, 0 failed, 0 skipped (including nested subtests and the
+# observable-surface regression).
+
+npm run typecheck -w @propr/api
+# Passed.
+
+npm run build
+# Passed.
+
+npm run build --prefix docs
+# Docusaurus production build passed.
+
+npx eslint --config packages/api/eslint.config.js \
+  packages/api/test/mcpObservableSurface.test.ts packages/api/mcp/server.ts
+# 0 errors, 0 warnings.
+```
+
+These checks use no live GitHub writes, agents, provider credits, merges or
+deployment changes and are not hosted CI evidence for the resulting commit.

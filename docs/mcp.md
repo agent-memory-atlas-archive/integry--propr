@@ -239,6 +239,86 @@ before issuing GitHub requests; partial publication remains inspectable in
 `plan_issues` and the draft, with marker comments identifying the operation.
 Automatic recovery of uncertain external effects is not implemented.
 
+## Errors
+
+Every tool failure uses one structured `error` envelope. `code` is the stable,
+machine-readable reason; `message` is a safe operator explanation; `stage`
+identifies where the failure occurred; `retryable` says whether repeating the
+same request can reasonably succeed without changing its inputs; and `status`
+is the corresponding HTTP-style status. `details` contains bounded diagnostic
+state such as a failed merge precondition or current pull-request snapshot.
+`cause`, when present, is the sanitized lower-level `{ code, message }` that
+caused the higher-level workflow error.
+
+`stage` is one of `validation`, `authorization`, `precondition`, `github`,
+`transport`, `database`, `queue`, `workflow`, `internal`, or `null` when no
+more precise boundary is known. A retryable error is not an instruction to
+retry immediately: respect `retryAfterSeconds`, re-read any mutable target and
+reuse the original `idempotencyKey` only for the exact same action and inputs.
+A non-retryable error usually needs changed input, authorization, configuration
+or target state.
+
+For mutations, a connection or server failure can happen after an external
+side effect. Such a receipt is `unknown` with `error.code: "OUTCOME_UNKNOWN"`
+and a sanitized `cause` describing the original failure. It is deliberately
+not retryable: inspect the receipt's artifacts and the target in GitHub or
+ProPR before deciding whether a new action is safe.
+
+Stable codes introduced by the observable operator surface are:
+
+| Code | Meaning |
+| --- | --- |
+| `INVALID_INPUT` | Arguments failed schema or semantic validation. |
+| `GITHUB_*`: `GITHUB_AUTH_FAILED`, `GITHUB_FORBIDDEN`, `GITHUB_NOT_FOUND`, `GITHUB_RATE_LIMITED`, `GITHUB_REJECTED`, `GITHUB_UNAVAILABLE` | GitHub rejected, denied, could not find, throttled or could not serve the request. |
+| `UPSTREAM_*`: `UPSTREAM_TIMEOUT`, `UPSTREAM_UNREACHABLE` | A non-GitHub upstream timed out or could not be reached. |
+| `DATABASE_BUSY` | SQLite is temporarily busy; retry after the indicated delay. |
+| `PLAN_INVALID` | A plan is incomplete or malformed and cannot be published. |
+| `PUBLISH_FAILED` | Publication failed before any issue was created; the plan claim was released. |
+| `PUBLISH_PARTIAL` | Some publication effect may exist; inspect the saved publication state and resume explicitly. |
+| `PULL_REQUEST_ALREADY_MERGED`, `PULL_REQUEST_CLOSED`, `PULL_REQUEST_DRAFT` | The pull-request lifecycle does not permit the requested action. |
+| `CHECKS_FAILING`, `CHECKS_PENDING`, `REVIEW_REQUIRED`, `CHANGES_REQUESTED`, `BRANCH_BEHIND_BASE`, `MERGE_CONFLICT`, `BRANCH_PROTECTION_BLOCKED`, `MERGE_STATE_UNKNOWN`, `MERGE_REJECTED` | A specific guarded-merge precondition or GitHub merge decision blocked the merge. |
+| `COMMAND_NOT_PICKED_UP` | Event intake did not associate the posted command with a worker before the bounded deadline. |
+| `ULTRAFIX_CYCLE_FAILED` | A tracked ultrafix cycle ended in failure. |
+| `REFINEMENT_OUTPUT_INVALID` | Planner refinement ended without a valid replacement plan. |
+| `DOCS_UNAVAILABLE`, `DOC_NOT_FOUND` | Bundled documentation is unavailable or the stable path does not exist. |
+| `PREVIEW_NOT_FOUND`, `PREVIEW_NOT_RENDERABLE`, `PREVIEW_TOO_LARGE` | Preview evidence is absent, is metadata-only/invalid, or cannot fit the MCP response bound. |
+| `SETTING_ENVIRONMENT_MANAGED` | A setting is controlled by deployment environment and is read-only through MCP. |
+| `CONFIRMATION_REQUIRED` | The requested configuration change needs its explicit safety confirmation flag. |
+
+## Did it actually happen? Following a receipt
+
+Every mutation returns an `operationId`. Follow it with `get_operation` until
+its `lifecycle.state` is terminal. Lifecycle states are `accepted` (durably
+recorded), `running` (backend work observed), `completed`, `failed`,
+`cancelled`, and `unknown` (the outcome cannot yet be proved). Tool-specific
+top-level states such as `queued` or `posted` add context but do not mean the
+work completed.
+
+The lifecycle includes `acceptedAt`, `startedAt` and `finishedAt` timestamps,
+plus stable `artifacts` such as submission, task, comment and pull-request
+identities. Its `progress` is tool-specific. For `run_ultrafix`, progress names
+the goal, maximum cycles, current `cycle`, phase, last score, per-cycle review
+and fix task IDs, and terminal outcome (`goal_reached`, `cycles_exhausted`,
+`stopped` or `failed`). The lifecycle summary distinguishes reaching the goal
+from merely exhausting the allowed cycles.
+
+If the handle is no longer in the conversation, use `list_operations`. It is a
+bounded, newest-first receipt index and does not itself refresh backend
+trackers. For example, “what did I start in the last hour?” is:
+
+```json
+{ "sinceMinutes": 60, "limit": 20 }
+```
+
+To find one kind of work, add an exact tool filter:
+
+```json
+{ "sinceMinutes": 60, "tool": "run_ultrafix", "limit": 20 }
+```
+
+Each result includes `refreshWith: "get_operation"`; call that tool with the
+selected `operationId` when current backend progress is needed.
+
 Poll at the returned interval (normally three seconds); never unboundedly
 poll in one request. `cancel_operation`, `cancel_goal` and `cancel_task`
 distinguish a cancellation request from a stopped backend. A completed
@@ -298,6 +378,19 @@ on a human: failed tasks, a goal paused with no result, and blocking Inbox
 cards. Routine notification noise is filtered out; `includeRoutine: true` keeps
 it. A repository the credential can no longer read is skipped, and
 `repositoriesTruncated` reports that the fan-out hit its 20-repository bound.
+
+When the question is specifically about implementation work and the pull
+requests it produced, `get_work_overview` is the shorter starting point. It
+joins each task to current head, review, checks, mergeability, newest ProPR
+review and ultrafix state with one bounded GraphQL request per repository:
+
+```json
+{ "state": "active", "limit": 20, "includeChecks": true }
+```
+
+Use `state: "recent"` with `sinceMinutes`, or `state: "all"`, when completed
+work belongs in the answer. `githubLookups` reports the requested/completed
+enrichment count and whether the bounded lookup was truncated.
 
 For what already finished, `get_recent_activity` merges one newest-first
 timeline — terminal tasks, opened and merged pull requests, finished goals,
@@ -431,7 +524,52 @@ additionally requires review scope, and requires
 `circuitBreaker: "cleared"` and says plainly that a cycle already running may
 still finish — inspect the pull request to confirm.
 
-**5. Read the MCP log.** Every one of the calls above left exactly one row in
+**5. Follow a one-off task.** After `create_task`, keep both the returned
+`operationId` and `submissionId`. The submission view explains the handoff from
+GitHub issue creation to worker execution:
+
+```json
+{ "repository": "acme/web", "submissionId": "9ab36d7e-11c5-4f83-8dd4-986f9a2237c1" }
+```
+
+`get_task_submission.progress.stage` advances through `submitted`,
+`issue_created`, `queued`, `running` and a terminal `completed`, `failed` or
+`cancelled` stage. Its progress includes the issue, associated task, pull
+request and a concise next action. Follow the mutation itself with
+`get_operation`; only its terminal lifecycle proves the launch receipt's
+backend outcome.
+
+**6. Look at the result.** Preview evidence is discovered from one exact task
+or pull request:
+
+```json
+{ "repository": "acme/web", "pullRequest": 42 }
+```
+
+Call `list_visual_previews`, then pass an image result's `previewId` to
+`get_visual_preview` with an optional `maxDimension` and `format`. The latter
+returns bounded image content plus dimensions and byte counts. Video previews
+are metadata-only in MCP and should be opened on the linked GitHub pull request.
+An empty list with `previewsEnabled: false` means preview publication is not
+enabled for that repository, not that an image fetch failed.
+
+**7. Ask ProPR about itself.** Use `search_docs` for product behavior and
+operator procedures, then pass the stable result `path` and optional `section`
+to `get_doc`. Use `list_docs` to browse pages; this guide is `mcp/guide`.
+
+```json
+{ "query": "ultrafix progress", "limit": 5 }
+```
+
+For configuration reachability, `find_setting` answers where a setting lives,
+whether MCP can read or change it, required permissions/scopes, and whether a
+restart is needed:
+
+```json
+{ "query": "bot whitelist" }
+```
+
+**8. Read the MCP log.** Every one of the calls above left exactly one row in
 the durable MCP access log, including the denials. An administrator with the
 `instance.manage_settings` instance permission reads them:
 
@@ -459,8 +597,9 @@ Resource URIs use `propr://instances/{instance_id}/`: `connection`,
 `repositories`, `models`, `activity`, `activity/recent`, `plans/{id}`,
 `goals/{id}`, `tasks/{id}`, `changes/{task_id}`, `repositories/{owner}/{repo}`,
 `repositories/{owner}/{repo}/pulls`,
-`repositories/{owner}/{repo}/pulls/{number}`, `artifacts/{id}` and
-`{plans|goals}/{parent_id}/attachments/{id}`. `activity` and `activity/recent`
+`repositories/{owner}/{repo}/pulls/{number}`, `submissions/{id}`,
+`repositories/{owner}/{repo}/previews/{previewId}`, `docs/{path}`,
+`artifacts/{id}` and `{plans|goals}/{parent_id}/attachments/{id}`. `activity` and `activity/recent`
 read `get_current_activity` and `get_recent_activity` with their defaults.
 Reads invoke the same tool guards. Links never confer access. Tools provide
 the same essential data without relying on a host's resource UI.
@@ -491,7 +630,11 @@ operation, activity digest, goal/task depth, pull request surface and access log
 tests, including the end-to-end operator-surface regression in
 `packages/api/test/mcpOperatorSurface.test.ts`, which drives one session from
 `get_current_activity` through the goal, task and pull request behind it to the
-access rows it leaves. `npm run test:mcp:browser` additionally needs Playwright and
+access rows it leaves. The combined observable-surface regression in
+`packages/api/test/mcpObservableSurface.test.ts` follows a one-off task and
+ultrafix receipt through completion, exercises overview, merge/publication
+failures, docs, settings and previews, and checks documented tool names against
+the admin catalog. `npm run test:mcp:browser` additionally needs Playwright and
 Chromium (`CHROMIUM_PATH`, default `/usr/bin/chromium`). Set
 `MCP_CAPTURE_PREVIEWS=true` only when capturing changed UI evidence.
 
