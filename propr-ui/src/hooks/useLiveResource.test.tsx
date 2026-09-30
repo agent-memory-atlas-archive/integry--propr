@@ -20,16 +20,19 @@ const socket = vi.hoisted(() => {
   const goal = new Set<Listener<unknown>>();
   const notification = new Set<Listener<unknown>>();
   const usage = new Set<Listener<unknown>>();
+  const snapshot = new Set<Listener<unknown>>();
   const register = (registry: Set<Listener<unknown>>) => (callback: Listener<never>) => {
     registry.add(callback as Listener<unknown>);
     return () => { registry.delete(callback as Listener<unknown>); };
   };
   return {
-    listeners: { activity, goal, notification, usage },
+    listeners: { activity, goal, notification, usage, snapshot },
     // One object identity for every render: the real provider also hands out
     // stable callbacks, and an unstable one would hide subscription churn.
     value: {
       isConnected: true,
+      shellSnapshots: false,
+      onShellSnapshot: register(snapshot),
       subscribeToActivity: vi.fn(),
       unsubscribeFromActivity: vi.fn(),
       onActivityUpdate: register(activity),
@@ -80,6 +83,7 @@ describe('useLiveResource', () => {
     vi.useFakeTimers();
     setVisibility('visible');
     socket.value.isConnected = true;
+    socket.value.shellSnapshots = false;
     socket.value.subscribeToActivity.mockClear();
     socket.value.unsubscribeFromActivity.mockClear();
     Object.values(socket.listeners).forEach(registry => registry.clear());
@@ -87,6 +91,29 @@ describe('useLiveResource', () => {
 
   afterEach(() => {
     vi.useRealTimers();
+  });
+
+  it('applies pushed snapshots without HTTP on usage events or connected timers', async () => {
+    socket.value.shellSnapshots = true;
+    const read = vi.fn(async () => ({ enabled: false }));
+    const { result, rerender } = renderHook(() => useLiveResource({
+      read, scopeKey: 'usage', interest: { usage: true }, snapshotResource: 'usage',
+    }));
+    await flush();
+    for (let index = 0; index < 30; index++) {
+      await act(async () => {
+        socket.listeners.snapshot.forEach(listener => listener({ resource: 'usage', data: { enabled: true } }));
+        socket.listeners.usage.forEach(listener => listener({ eventType: 'usage:update' }));
+      });
+      await advance(20_000);
+    }
+    expect(result.current.data).toEqual({ enabled: true });
+    expect(read).toHaveBeenCalledTimes(1);
+    socket.value.isConnected = false;
+    socket.value.shellSnapshots = false;
+    rerender();
+    await advance(30_100);
+    expect(read).toHaveBeenCalledTimes(2);
   });
 
   it('reads once on mount and collapses a burst of matching events into one read', async () => {
@@ -161,6 +188,7 @@ describe('useLiveResource', () => {
     expect(read).toHaveBeenCalledTimes(1);
 
     socket.value.isConnected = true;
+    socket.value.shellSnapshots = false;
     rerender();
     await emitActivity(activityEvent({ repository: null, entityId: 'queued-1' }));
     await emitActivity(activityEvent({ repository: null, entityId: 'queued-2' }));
@@ -186,6 +214,7 @@ describe('useLiveResource', () => {
     expect(read).toHaveBeenCalledTimes(3);
 
     socket.value.isConnected = true;
+    socket.value.shellSnapshots = false;
     rerender();
     await advance(100);
     expect(read).toHaveBeenCalledTimes(4);

@@ -1,9 +1,32 @@
-import { USAGE_TIPS_CATALOG, MAX_USAGE_TIP_CANDIDATES, parseUsageTipCandidates, rotateUsageTipCandidates,
+import { USAGE_TIPS_CATALOG, MAX_USAGE_TIP_CANDIDATES, parseUsageTipCandidates, rotateUsageTipCandidates, usageTipKind,
   type UsageTipSignals, type UsageTipCandidate, type UsageTipSelection } from '@propr/shared';
 
 function indexingUsageTipReason(hasFailures: boolean): string {
   const observation = hasFailures ? 'Recent indexing failures are recorded' : 'Indexing calls are taking at least two minutes';
   return `${observation}. Review indexing agent and fallback options to help keep repository context available for your tasks.`;
+}
+
+export const DISCOVERY_RULES = [
+  { id: 'mcp-chat-control', usage: 'mcpUsage', prerequisite: 'tasks', minimum: 3, score: 78,
+    reason: 'Recent task activity has no recorded MCP calls. Connect your chat assistant to inspect work and act on pull requests without leaving the conversation.' },
+  { id: 'visual-previews', usage: 'visualPreviewRepos', prerequisite: 'tasks', minimum: 3, score: 76,
+    reason: 'Recent tasks are recorded, but no repositories have visual previews enabled. Enable previews to see user-visible changes directly on pull requests.' },
+  { id: 'repository-chat', usage: 'repoChatMessages', prerequisite: 'tasks', minimum: 3, score: 74,
+    reason: 'Recent tasks are recorded, but no repository chat messages are saved. Ask questions in the Chat tab to explore a codebase using its indexed context.' },
+  { id: 'epic-auto-merge', usage: 'epicPlans', prerequisite: 'plans', minimum: 2, score: 72,
+    reason: 'At least two plans are recorded, but none use Epic mode. Try Epic mode with auto-merge to run planned issues in sequence, merging each PR before the next starts.' },
+] as const;
+
+export function isDiscoveryTipApplicable(id: string, signals: UsageTipSignals): boolean {
+  const rule = DISCOVERY_RULES.find(rule => rule.id === id);
+  if (!rule || signals[rule.usage] !== 0) return false;
+  const activity = signals[rule.prerequisite];
+  return typeof activity === 'number' && Number.isFinite(activity) && activity >= rule.minimum;
+}
+
+export function discoveryUsageTipCandidates(signals: UsageTipSignals): UsageTipCandidate[] {
+  return DISCOVERY_RULES.filter(rule => isDiscoveryTipApplicable(rule.id, signals))
+    .map(({ id, score, reason }) => ({ id, score, reason }));
 }
 
 /** Explicit positive evidence for relevance, shared by model and heuristic paths.
@@ -32,7 +55,7 @@ export function heuristicUsageTipCandidates(s: UsageTipSignals): UsageTipCandida
   add('notification-inbox', has('notifications') && gap('inboxActions'), 65, 'Notifications are arriving, but few inbox actions are recorded. Review updates and clear handled items in the Inbox to track work needing attention.');
   add('mcp-access', has('tasks', 3) && typeof s.mcpEnabled === 'boolean' && count('mcpGrants') === 0,
     55, 'Connect a tool through MCP to inspect work and act on PRs from an app you already use. Recent task activity has no recorded MCP grants.');
-  return result;
+  return [...result, ...discoveryUsageTipCandidates(s)];
 }
 export type UsageTipModel = (alias: string, prompt: string) => Promise<{ text: string; model: string }>;
 export async function selectUsageTips(options: {
@@ -43,6 +66,8 @@ export async function selectUsageTips(options: {
   const allowed = new Set(relevant.map(c => c.id));
   const prompt = `Score only relevant documentation tips from this bounded pool. Return JSON {"candidates":[{"id":"...","score":1,"reason":"..."}]}.
 Scores are integers 1–100.
+Each catalog entry has a kind: corrective or discovery. Propose a discovery tip only when its usage signal is exactly 0 and its prerequisite holds. Unknown or positive usage excludes discovery. Discovery scores must be 70–79; strong corrective gaps rank above them.
+Discovery usage signals and prerequisites: ${JSON.stringify(DISCOVERY_RULES.map(({ id, usage, prerequisite, minimum }) => ({ id, usage, prerequisite, minimum })))}
 Each reason is the user-facing tip body, not an internal ranking explanation. In 1–240 characters and one or two concise sentences, address the reader directly: suggest a documented action, explain why this tip is being displayed using a specific observed workflow signal, and describe how it could improve their workflow.
 Personalize the advice to the supplied signals instead of repeating a generic feature description.
 Lead with the useful action or concrete observation. Vary openings across tips and omit boilerplate such as "Your instance"; get straight to the point.
@@ -60,7 +85,13 @@ Candidates: ${JSON.stringify(USAGE_TIPS_CATALOG.filter(t => allowed.has(t.id)))}
       const response = await generate(alias, prompt);
       if (typeof response.model !== 'string' || !response.model.trim() || response.model.length > 512) throw new Error('Invalid model identity');
       const output = JSON.parse(response.text.trim().replace(/^```(?:json)?\s*\n?/, '').replace(/\s*```$/, ''));
-      candidates = parseUsageTipCandidates(output.candidates).filter(c => allowed.has(c.id));
+      candidates = parseUsageTipCandidates(output.candidates).filter(c => allowed.has(c.id)
+        && (usageTipKind(c.id) !== 'discovery' || isDiscoveryTipApplicable(c.id, signals)))
+        .map(c => usageTipKind(c.id) === 'discovery' ? { ...c, score: Math.max(70, Math.min(79, c.score)) } : c);
+      // A valid empty answer remains empty. Supplement only usable model advice.
+      if (candidates.length && !candidates.some(c => usageTipKind(c.id) === 'discovery')) {
+        candidates.push(...discoveryUsageTipCandidates(signals).slice(0, Math.min(2, MAX_USAGE_TIP_CANDIDATES - candidates.length)));
+      }
       model = response.model;
       source = 'model';
       break;

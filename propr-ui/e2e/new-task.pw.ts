@@ -67,7 +67,15 @@ for (const [device, viewport] of Object.entries({ desktop: { width: 1440, height
     await page.getByRole('button', { name: /acme.*billing/ }).click();
     await page.getByLabel('Instruction').fill('Fix the invoice date format. Use the account locale on the invoice page and PDF export.');
     await expect(page.getByRole('button', { name: 'Run task', exact: true })).toBeEnabled();
+    await expect(page.getByRole('link', { name: /New Plan/ }).locator('svg')).toHaveClass(/lucide-scroll-text/);
+    await expect(page.getByRole('link', { name: /New Goal/ }).locator('svg')).toHaveClass(/lucide-target/);
+    if (device === 'desktop') {
+      await page.getByRole('button', { name: 'More creation options' }).click();
+      await expect(page.getByRole('menuitem', { name: 'New Plan' }).locator('svg')).toHaveClass(/lucide-scroll-text/);
+      await expect(page.getByRole('menuitem', { name: 'New Goal' }).locator('svg')).toHaveClass(/lucide-target/);
+    }
     await screenshot(page, `new-task-${device}`);
+    if (device === 'desktop') await page.keyboard.press('Escape');
     await page.getByRole('button', { name: 'Run task', exact: true }).click();
     await expect(page.getByRole('link', { name: 'Open issue #42' })).toBeVisible();
     await expect(page).toHaveURL(new RegExp(`/tasks/${taskId}$`));

@@ -175,7 +175,7 @@ export interface HeaderStats {
 
 export function useHeaderStats(): HeaderStats {
   const currentUser = useCurrentUser();
-  const { getStatus, refreshStatus } = useSharedSystemStatus();
+  const { getStatus, refreshStatus, status: sharedStatus, error: sharedStatusError, managed: managedStatus } = useSharedSystemStatus();
   const requestIdentityKey = `${getDesktopSocketConfigurationKey()}\0${currentUser?.id ?? 'anonymous'}`;
   const [runningCount, setRunningCount] = useState<number>(0);
   const [runningItems, setRunningItems] = useState<RunningItem[]>([]);
@@ -229,6 +229,16 @@ export function useHeaderStats(): HeaderStats {
   const { onTaskUpdate, onDraftUpdate, onQueueStatsUpdate, onActivityReady, onActivityUpdate, onUsageUpdate, subscribeToActivity, unsubscribeFromActivity, isConnected } = useSocket();
   const socketConnectedRef = useRef(isConnected);
   socketConnectedRef.current = isConnected;
+
+  useEffect(() => {
+    if (!managedStatus || (!sharedStatus && !sharedStatusError)) return;
+    statsRequestRef.current.status += 1;
+    if (sharedStatus) setSystemHealth(buildSystemHealth(sharedStatus));
+    resourceErrorsRef.current.status = sharedStatusError?.message ?? null;
+    setResourceStatuses(previous => ({ ...previous, status: sharedStatusError ? 'unavailable' : 'available' }));
+    setError(ALL_STATS_RESOURCES.map(resource => resourceErrorsRef.current[resource])
+      .find((message): message is string => message !== null) ?? null);
+  }, [managedStatus, sharedStatus, sharedStatusError]);
 
   // A mounted desktop renderer can switch instances/accounts without a page
   // reload. Drop every account-derived snapshot before starting reads under
@@ -331,7 +341,7 @@ export function useHeaderStats(): HeaderStats {
           ? coalesceHeaderStatsRead(requestIdentityKey, 'tasks', () =>
             getTasks({ limit: 30, forReview: true, excludeMerged: true })) : null,
         status: requested.has('status')
-          ? coalesceHeaderStatsRead(requestIdentityKey, 'status', isInitialLoad ? getStatus : refreshStatus) : null,
+          ? coalesceHeaderStatsRead(requestIdentityKey, 'status', isInitialLoad || managedStatus ? getStatus : refreshStatus) : null,
       };
       const entries = await Promise.all((Object.entries(reads) as Array<[
         HeaderStatsResource, Promise<unknown> | null
@@ -397,7 +407,7 @@ export function useHeaderStats(): HeaderStats {
           const reviewableGroups = buildReviewGroups(response);
           setReviewGroups(reviewableGroups);
           setReviewCount(reviewableGroups.length);
-        } else {
+        } else if (!managedStatus) {
           setSystemHealth(buildSystemHealth(value as SystemStatus));
         }
       }
@@ -445,7 +455,7 @@ export function useHeaderStats(): HeaderStats {
         setIsLoading(false);
       }
     }
-  }, [getStatus, refreshStatus, requestIdentityKey]);
+  }, [getStatus, refreshStatus, requestIdentityKey, managedStatus]);
   /* eslint-enable complexity */
 
   // Refresh function for manual refresh
@@ -456,7 +466,9 @@ export function useHeaderStats(): HeaderStats {
   // Queue, task, and draft transitions are often emitted together. Collect the
   // affected resources and reconcile each at most once after the burst.
   const scheduleLiveRefresh = useCallback((resources: readonly HeaderStatsResource[] = ALL_STATS_RESOURCES) => {
-    resources.forEach(resource => liveRefreshPendingRef.current.add(resource));
+    resources.forEach(resource => {
+      if (resource !== 'status' || !managedStatus) liveRefreshPendingRef.current.add(resource);
+    });
     if (documentIsHidden()) return;
     if (liveRefreshTimerRef.current !== null || liveRefreshInFlightRef.current) return;
 
@@ -496,7 +508,7 @@ export function useHeaderStats(): HeaderStats {
     };
 
     armRefresh(LIVE_INVALIDATION_COALESCE_MS);
-  }, [fetchStats]);
+  }, [fetchStats, managedStatus]);
 
   // A reconnect can carry a forced queue snapshot whose counts match the last
   // payload even though drafts, tasks, or health changed while offline. Reset
@@ -593,6 +605,7 @@ export function useHeaderStats(): HeaderStats {
     };
 
     const handleQueueStatsUpdate = (payload: QueueStatsUpdatePayload) => {
+      if (payload.initial) return;
       const fingerprint = queueStatsFingerprint(payload);
       if (fingerprint === lastQueueStatsFingerprintRef.current
         || fingerprint === pendingQueueStatsFingerprintRef.current) return;
