@@ -2,12 +2,17 @@ import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
 import { GOAL_CONTINUE_INPUT } from '../packages/core/src/goals.ts';
 import { probeGoalCapability } from '../packages/core/src/agents/goalCapabilities.ts';
+import { EventEmitter } from 'node:events';
+import { PassThrough } from 'node:stream';
+import type { ChildProcess } from 'node:child_process';
 import {
+    antigravityGoalConversationLog,
     runAntigravityGoalProtocol,
     type StartAntigravitySegment,
 } from '../packages/core/src/agents/impl/antigravityNativeGoal.ts';
 import {
     ANTIGRAVITY_GOAL_COMPLETE_MARKER,
+    AntigravityGoalStream,
     sumAntigravityStepUsage,
     type AntigravityGoalSegment,
     type AntigravitySegmentResult,
@@ -231,7 +236,8 @@ describe('Antigravity native goal protocol', () => {
 
         assert.deepEqual(segments[0].options, { conversationId: 'agy-conversation', launch: false });
         assert.equal(segments[0].message, 'ProPR accepted your checkpoint.');
-        assert.deepEqual(state.sessions, []);
+        // Every attempt reports its confirmed identity once, so the worker acknowledges controls.
+        assert.deepEqual(state.sessions, ['agy-conversation']);
     });
 
     test('a resumed attempt without feedback or input nudges the goal to continue', async () => {
@@ -295,5 +301,67 @@ describe('Antigravity goal accounting and capability', () => {
         }));
         assert.equal(capability.goalCapable, false);
         assert.match(capability.reason ?? '', /native \/goal command/);
+    });
+});
+
+describe('Antigravity goal stream adapter', () => {
+    function fakeChild() {
+        const child = new EventEmitter() as EventEmitter & { stdout: PassThrough; stderr: PassThrough; stdin: PassThrough; signals: string[]; kill(signal: string): boolean };
+        child.stdout = new PassThrough();
+        child.stderr = new PassThrough();
+        child.stdin = new PassThrough();
+        child.signals = [];
+        child.kill = signal => { child.signals.push(signal); return true; };
+        return child;
+    }
+    const line = (value: unknown) => `${JSON.stringify(value)}\n`;
+    const step = (index: number, state: string, extra: Record<string, unknown> = {}) => line({
+        event: 'step_update', step_update: { conversation_id: 'agy', step_index: index, state, step_type: 'agent_response', ...extra },
+    });
+
+    test('assembles fragmented narration, tracks step boundaries, and reports the terminal result', async () => {
+        const child = fakeChild();
+        const recorded: string[] = [];
+        const stream = new AntigravityGoalStream(child as unknown as ChildProcess, { append: (value: string) => { recorded.push(value); } } as never);
+        child.stdout.write(line({ event: 'init', conversation_id: 'agy', init: { model: 'gemini-3.8-flash-medium' } }));
+        child.stdout.write(step(1, 'ACTIVE', { text_delta: 'Adding sub' }));
+        await stream.waitForActivity(50);
+        assert.equal(stream.conversationId, 'agy');
+        assert.equal(stream.stepActive, true);
+        assert.deepEqual(stream.textsAfter(0), []);
+
+        child.stdout.write(step(1, 'DONE', { text_delta: 'tract.', usage: { input_tokens: 30, output_tokens: 2 } }));
+        child.stdout.write(line({ event: 'step_update', step_update: { conversation_id: 'agy', step_index: 2, state: 'DONE', step_type: 'tool', usage: { input_tokens: 10 } } }));
+        child.stdout.write(line({ event: 'result', result: { conversation_id: 'agy', status: 'ERROR', response: '', usage: { input_tokens: 999 } } }));
+        child.stderr.write('Switching to node user...\nerror: interrupted\n');
+        stream.interrupt();
+        child.stdout.end();
+        child.stderr.end();
+        await new Promise(resolve => setImmediate(resolve));
+        child.emit('close', 130);
+        await stream.waitForExit();
+
+        assert.deepEqual(child.signals, ['SIGINT']);
+        assert.equal(stream.stepActive, false);
+        assert.deepEqual(stream.textsAfter(0), ['Adding subtract.']);
+        assert.deepEqual(stream.result, { status: 'error', response: '' });
+        assert.equal(stream.errorText, 'error: interrupted');
+        assert.deepEqual(stream.tokenUsage, { input_tokens: 40, output_tokens: 2, cache_read_input_tokens: 0, reasoning_output_tokens: 0 });
+        assert.equal(stream.exited, true);
+        assert.equal(recorded.length, 5);
+    });
+
+    test("a goal attempt's conversation log keeps narration from interrupted invocations", () => {
+        const init = line({ event: 'init', conversation_id: 'agy', init: { model: 'gemini-3.8-flash-medium' } });
+        const raw = [
+            init, step(1, 'DONE', { text_delta: 'Adding subtract.' }),
+            line({ event: 'result', result: { conversation_id: 'agy', status: 'ERROR', response: '' } }),
+            init, step(3, 'DONE', { text_delta: 'Applying the correction.' }),
+            line({ event: 'result', result: { conversation_id: 'agy', status: 'SUCCESS', response: 'Applying the correction.' } }),
+        ].join('');
+        const texts = antigravityGoalConversationLog(raw).map(event => JSON.stringify(event));
+        assert.equal(texts.length, 2);
+        assert.match(texts[0], /Adding subtract\./);
+        assert.match(texts[1], /Applying the correction\./);
     });
 });

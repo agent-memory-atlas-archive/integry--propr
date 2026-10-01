@@ -1,6 +1,6 @@
 import { execFile, spawn, type ChildProcess } from 'node:child_process';
 import { promisify } from 'node:util';
-import { GOAL_CONTINUE_INPUT, parseGoalCheckpointDeclaration } from '../../goals.js';
+import { GOAL_CONTINUE_INPUT, NATIVE_GOAL_COMMAND_PREFIX, parseGoalCheckpointDeclaration } from '../../goals.js';
 import {
     getDockerRunContainerName,
     getExecutionAbortError,
@@ -19,6 +19,7 @@ import {
     filterAntigravityAnalysisEvents,
     normalizeAntigravityModelId,
     parseAntigravityJsonl,
+    type AntigravityOutputEvent,
 } from './utils/antigravityOutputParser.js';
 import { splitAntigravityInvocations } from './utils/antigravityInvocations.js';
 import { LiveAgentOutput } from './utils/liveAgentOutput.js';
@@ -79,6 +80,7 @@ interface SegmentObservation {
 class AntigravityGoalProtocol {
     private turn = 0;
     private readonly control: GoalExecutionControl;
+    private identityReported = false;
     conversationId?: string;
     readonly segments: AntigravityGoalSegment[] = [];
     lastResponse?: string;
@@ -124,8 +126,12 @@ class AntigravityGoalProtocol {
         if (this.conversationId && segment.conversationId !== this.conversationId) {
             throw new Error(`Antigravity resumed conversation "${segment.conversationId}" instead of "${this.conversationId}"`);
         }
-        if (!this.conversationId) {
-            this.conversationId = segment.conversationId;
+        this.conversationId = segment.conversationId;
+        // Every attempt reports its confirmed identity once, as the Claude and
+        // Codex siblings do: the worker acknowledges controls and marks the
+        // backing task as executing from this callback.
+        if (!this.identityReported) {
+            this.identityReported = true;
             await this.options.onSessionId?.(segment.conversationId, segment.conversationId);
         }
     }
@@ -302,10 +308,16 @@ export async function executeAntigravityNativeGoal(
     let run: Awaited<ReturnType<typeof runAntigravityGoalProtocol>> | undefined;
     let failure: string | undefined;
     try {
-        run = await runAntigravityGoalProtocol(startSegment, options, options.nativeGoalObjective);
+        const command = options.nativeGoalObjective.startsWith(NATIVE_GOAL_COMMAND_PREFIX)
+            ? options.nativeGoalObjective
+            : `${NATIVE_GOAL_COMMAND_PREFIX}${options.nativeGoalObjective}`;
+        run = await runAntigravityGoalProtocol(startSegment, options, command);
     } catch (error) {
         failure = (getExecutionAbortError(ownership?.signal) ?? error as Error).message;
     } finally {
+        // An abort kills the running invocation, which the protocol sees as a
+        // CLI failure; report the abort itself instead.
+        failure ??= getExecutionAbortError(ownership?.signal)?.message;
         clearTimeout(deadline);
         ownership?.signal.removeEventListener('abort', stopCurrent);
         stopCurrent();
@@ -315,6 +327,18 @@ export async function executeAntigravityNativeGoal(
     return goalAttemptResult(run, { failure, raw: output.raw, model: launch.model, executionTimeMs: Date.now() - start });
 }
 
+/**
+ * Analysis events of a goal attempt's recorded stream. Each invocation is
+ * filtered on its own: an interrupted invocation's narration must not be
+ * superseded by a later invocation's terminal response.
+ */
+export function antigravityGoalConversationLog(raw: string): AntigravityOutputEvent[] {
+    return splitAntigravityInvocations(raw).flatMap(invocation =>
+        filterAntigravityAnalysisEvents(aggregateDeltaMessages(parseAntigravityJsonl(invocation).conversationLog)))
+        // An empty ERROR result is an interrupt at a control boundary, not a failure.
+        .filter(event => !('event' in event && event.event === 'result' && !event.result.response));
+}
+
 function goalAttemptResult(
     run: Awaited<ReturnType<typeof runAntigravityGoalProtocol>> | undefined,
     { failure, raw, model: requestedModel, executionTimeMs }: { failure?: string; raw: string; model: string; executionTimeMs: number },
@@ -322,9 +346,7 @@ function goalAttemptResult(
     const segments = run?.segments ?? [];
     const reportedModel = segments.map(segment => segment.model).filter(Boolean).pop();
     const model = reportedModel ? normalizeAntigravityModelId(reportedModel) : requestedModel;
-    const conversationLog = filterAntigravityAnalysisEvents(aggregateDeltaMessages(
-        splitAntigravityInvocations(raw).flatMap(invocation => parseAntigravityJsonl(invocation).conversationLog),
-    ));
+    const conversationLog = antigravityGoalConversationLog(raw);
     const success = !failure && run?.status === 'completed';
     return {
         success,
@@ -339,7 +361,9 @@ function goalAttemptResult(
         conversationId: run?.conversationId,
         modelUsed: model,
         providerModel: model,
-        tokenUsage: segments.reduce<TokenUsage>((total, segment) => addTokenUsage(total, segment.tokenUsage), {}),
+        tokenUsage: segments.reduce<TokenUsage>((total, segment) => addTokenUsage(total, segment.tokenUsage), {
+            input_tokens: 0, output_tokens: 0, cache_read_input_tokens: 0, reasoning_output_tokens: 0,
+        }),
         exitCode: success ? 0 : 1,
         error: success ? undefined : failure || run?.error || 'Antigravity native goal did not complete',
     };

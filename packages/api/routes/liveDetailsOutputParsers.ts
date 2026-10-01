@@ -42,42 +42,41 @@ function resolveAntigravityLiveDetailsTokenUsage(
 }
 
 /**
- * A goal conversation records one stream per invocation. `result.usage` is
- * cumulative over the conversation, so later invocations report their own cost
- * through step usage instead.
+ * The usage attributable to one invocation. `result.usage` is cumulative over
+ * the whole conversation, so it is this invocation's own cost only while the
+ * conversation has a single turn; a resumed invocation (num_turns > 1) is
+ * measured by its per-step usage instead.
  */
-function sumInvocationTokenUsage(usages: TokenUsage[], stepUsages: Array<Partial<TokenUsage> | null>): TokenUsage {
-  if (usages.length === 1) return usages[0];
-  return usages.reduce<TokenUsage>((total, usage, index) => {
-    const own = stepUsages[index] ?? usage;
-    return {
-      input_tokens: total.input_tokens + (own.input_tokens ?? 0),
-      output_tokens: total.output_tokens + (own.output_tokens ?? 0),
-      cache_creation_input_tokens: 0,
-      cache_read_input_tokens: total.cache_read_input_tokens + (own.cache_read_input_tokens ?? 0),
-    };
-  }, { input_tokens: 0, output_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 });
-}
-
-function stepTokenUsage(events: AntigravityOutputEvent[]): Partial<TokenUsage> | null {
+function invocationTokenUsage(usage: TokenUsage, events: AntigravityOutputEvent[]): TokenUsage {
+  const result = events.find(event => 'event' in event && event.event === 'result');
+  const turns = result && 'event' in result && result.event === 'result' ? result.result.num_turns : undefined;
+  if (turns === undefined || turns <= 1) return usage;
   const steps = new Map<number, { input_tokens?: number; output_tokens?: number; cache_read_tokens?: number }>();
   for (const event of events) {
     if ('event' in event && event.event === 'step_update' && event.step_update.usage) steps.set(event.step_update.step_index, event.step_update.usage);
   }
-  if (steps.size === 0) return null;
-  const usage = { input_tokens: 0, output_tokens: 0, cache_read_input_tokens: 0 };
+  const own = { input_tokens: 0, output_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 };
   for (const step of steps.values()) {
-    usage.input_tokens += step.input_tokens ?? 0;
-    usage.output_tokens += step.output_tokens ?? 0;
-    usage.cache_read_input_tokens += step.cache_read_tokens ?? 0;
+    own.input_tokens += step.input_tokens ?? 0;
+    own.output_tokens += step.output_tokens ?? 0;
+    own.cache_read_input_tokens += step.cache_read_tokens ?? 0;
   }
-  return usage;
+  return own;
+}
+
+function sumTokenUsage(usages: TokenUsage[]): TokenUsage {
+  return usages.reduce<TokenUsage>((total, usage) => ({
+    input_tokens: total.input_tokens + usage.input_tokens,
+    output_tokens: total.output_tokens + usage.output_tokens,
+    cache_creation_input_tokens: total.cache_creation_input_tokens + usage.cache_creation_input_tokens,
+    cache_read_input_tokens: total.cache_read_input_tokens + usage.cache_read_input_tokens,
+  }), { input_tokens: 0, output_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 });
 }
 
 /**
  * A running Antigravity invocation publishes its init envelope before any
- * narration; showing that protocol JSON raw would leak envelopes. Terminal and
- * malformed output keeps its raw fallback so failures stay diagnosable.
+ * narration; while its task is live, showing that protocol JSON raw would leak
+ * envelopes. Terminal, malformed, and finished output keeps its raw fallback.
  */
 export function isAntigravityStreamAwaitingNarration(output: string): boolean {
   const latest = parseAntigravityJsonl(splitAntigravityInvocations(output).pop() ?? '');
@@ -91,10 +90,10 @@ export function parseAntigravityOutputToConversationResult(output: string): Conv
     content: getAntigravityAnalysisText(event) ?? '',
     timestamp: 'created_at' in event ? event.created_at : 'timestamp' in event ? event.timestamp : undefined
   })).filter(event => event.content);
-  const tokenUsage = sumInvocationTokenUsage(
-    invocations.map(parsed => resolveAntigravityLiveDetailsTokenUsage(parsed.tokenUsage, parsed.conversationLog, parsed.protocolError !== undefined)),
-    invocations.map(parsed => stepTokenUsage(parsed.conversationLog)),
-  );
+  const tokenUsage = sumTokenUsage(invocations.map(parsed => invocationTokenUsage(
+    resolveAntigravityLiveDetailsTokenUsage(parsed.tokenUsage, parsed.conversationLog, parsed.protocolError !== undefined),
+    parsed.conversationLog,
+  )));
   const hasTokens = tokenUsage.input_tokens > 0
     || tokenUsage.output_tokens > 0
     || tokenUsage.cache_read_input_tokens > 0;
