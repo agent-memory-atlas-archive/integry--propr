@@ -21,7 +21,7 @@ Planner Studio moves a draft through three stages, shown in the stepper at the t
 
 1. **Define & Context** — enter the request, select the repository (and with it the configured base branch), choose the planning model, adjust the context level, and attach files. ProPR previews gathered context and an estimated issue count before generation.
 2. **Review Plan** — inspect the generated issues, edit or delete individual items, restore deleted ones, undo and redo edits, and send the plan back through refinement chat with follow-up instructions.
-3. **Execution** — after the plan is finalized into GitHub issues, track each issue's status (Pending, Processing, Under Review, Merged), pause or resume execution, and open the resulting pull requests.
+3. **Execution** — after the plan is finalized into GitHub issues, track each issue's status (Pending, Processing, Review, Merged), pause or resume execution, and open the resulting pull requests.
 
 A draft can be reset back to setup if the inputs were wrong, which makes planning useful for exploratory work as well as well-defined tickets.
 
@@ -29,7 +29,7 @@ A generated plan is saved only when every issue has a title, a body and an imple
 
 ## Revision history and refinement
 
-Open **Plan history** in the plan editor to inspect the plan saved before each generation, refinement or edit. Select a version to preview its tasks, then choose **Restore this version**. Restoring also saves the current plan in history. This persistent history is separate from the editor's immediate undo/redo controls and does not undo already-created GitHub issues or code changes.
+Open **Plan history** in the plan editor to inspect the plan saved before each generation, refinement, edit or rename. Each version is labeled with how it was created (**Generated**, **Refined**, **Manual edit**, **Restored** or **Renamed**; older versions show **Legacy**), and edits made within a few minutes of each other share one version. History keeps the latest 50 versions. Select a version to preview its tasks, then choose **Restore this version**. Restoring also saves the current plan in history. This persistent history is separate from the editor's immediate undo/redo controls and does not undo already-created GitHub issues or code changes.
 
 Refinement returns the complete plan, including unchanged tasks, so review the full result before finalizing. Generation uses a structured file output and rejects incomplete issues rather than silently accepting a partial plan. Setup prompts auto-save; returning to setup lets you change context before regenerating.
 

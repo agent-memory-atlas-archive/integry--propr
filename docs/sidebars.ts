@@ -126,6 +126,7 @@ const sidebars: SidebarsConfig = {
           items: [
             'architecture/worker-runtime',
             'architecture/git-runtime',
+            'architecture/preview-storage-relay',
           ],
         },
       ],
@@ -144,6 +145,7 @@ const sidebars: SidebarsConfig = {
         'operations/desktop-pairing',
         'operations/pwa-web-push',
         'operations/configuration-reference',
+        'operations/settings-locations',
         'operations/metrics',
         'operations/agent-tank',
         'operations/maintenance',

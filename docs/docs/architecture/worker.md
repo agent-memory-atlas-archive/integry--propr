@@ -77,11 +77,12 @@ If the agent made no changes, the worker records that result instead of creating
 
 The worker registers BullMQ processors for several job names:
 
-- `processGitHubIssue` — labeled GitHub issues and Planner Studio implementation tasks
+- `processGitHubIssue` — labeled GitHub issues and Planner Studio implementation tasks (a parent job fans out one child job per base branch × model)
 - `processPullRequestComment` — PR follow-up comments and AI review/fix commands
 - `processTaskImport` — task imports
 - `processSystemTask` — signed system tasks such as reverts and recovery actions
 - `processMergeConflict` — merge and conflict-resolution commands
+- `processGoal` — long-running [goal](../features/goals.md) sessions
 
 Separate `analysis-worker` and `indexing-worker` services handle repository analysis and indexing jobs so heavy implementation work does not block them.
 

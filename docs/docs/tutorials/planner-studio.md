@@ -73,11 +73,11 @@ Start execution, watch the task records in the Web UI, and review the created pu
 The same flow is available from the `propr` CLI:
 
 ```bash
-propr plan create
+propr plan create "<request>"
 propr plan generate <plan-id>
 propr plan finalize <plan-id>
 propr plan abort <plan-id>
-propr issue implement <issue> --epic --auto-merge
+propr issue implement <plan-id>/<issue-number> --epic --auto-merge
 ```
 
 See [ProPR CLI](../features/propr-cli.md) for the full command reference.

@@ -4,6 +4,7 @@ import { after, afterEach, beforeEach, test } from 'node:test';
 import knex, { type Knex } from 'knex';
 import { closeConnection } from '@propr/core';
 import { up as mcpMigration } from '../../core/src/db/migrations/20260910220000_add_mcp.js';
+import { up as lifecycleMigration } from '../../core/src/db/migrations/20261001000000_add_mcp_operation_lifecycle.js';
 import { up as grantsMigration } from '../../core/src/db/migrations/20260908000000_create_github_user_grants.js';
 import { up as grantRevisionMigration } from '../../core/src/db/migrations/20260908010000_add_github_oauth_grant_revision.js';
 import { McpStore, digest } from '../mcp/store.js';
@@ -70,7 +71,8 @@ beforeEach(async () => {
   Object.assign(process.env, environment, { GITHUB_USER_WHITELIST: 'tester' });
   db = knex({ client: 'better-sqlite3', connection: { filename: ':memory:' }, useNullAsDefault: true });
   await db.schema.createTable('task_drafts', table => table.string('draft_id').primary());
-  await mcpMigration(db); await grantsMigration(db); await grantRevisionMigration(db);
+  await mcpMigration(db);
+  await lifecycleMigration(db); await grantsMigration(db); await grantRevisionMigration(db);
   await db.schema.createTable('instance_members', table => { table.string('github_user_id').primary(); table.string('role'); table.string('source'); });
   await db('instance_members').insert({ github_user_id: OWNER, role: 'member', source: 'local' });
   fake = new FakeGitHub();

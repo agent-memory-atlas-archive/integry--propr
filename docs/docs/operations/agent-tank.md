@@ -112,7 +112,7 @@ This whole section is why bundled mode exists — none of it applies there.
 
 There are three ways to set it. All write the same backend setting.
 
-**Detection banner (easiest).** While tracking is off, the dashboard and LLM Log page show a dismissible banner offering to turn it on in one click. If a daemon is already answering at `http://host.docker.internal:3456` the banner offers `external` pointed at it; otherwise it offers `bundled`.
+**Detection banner (easiest).** While tracking is off, the dashboard shows a dismissible banner offering to turn it on in one click. If a daemon is already answering at `http://host.docker.internal:3456` the banner offers `external` pointed at it; otherwise it offers `bundled`, as long as at least one enabled Claude, Codex, or Antigravity agent has a credential directory to inspect.
 
 **Settings → LLM Usage Tracking.** Pick one of the three modes. The **Daemon URL** field only appears for `external`, because an external URL means nothing in the other two. The section shows a live status indicator so you can confirm the mode works before relying on it.
 

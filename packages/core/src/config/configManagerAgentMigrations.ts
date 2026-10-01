@@ -37,6 +37,7 @@ const RETIRED_OPENCODE_DEFAULT_MODELS = new Set([
     'opencode-ling-3.0-flash-free',
     'opencode-north-mini-code-free'
 ]);
+const RETIRED_VIBE_MODELS = new Set(['devstral-small', 'devstral-small-latest', 'devstral-2', 'devstral-2512']);
 const MANAGED_AGENT_IMAGE_PREFIX = 'propr/agent:';
 
 function migrateCliVersion(agent: AgentConfig): boolean {
@@ -250,15 +251,20 @@ function removeDeprecatedModels(agent: AgentConfig): boolean {
         return false;
     }
 
-    const validModels = agent.supportedModels.filter(m => MODEL_INFO_MAP[m]);
-    const removedModels = agent.supportedModels.filter(m => !MODEL_INFO_MAP[m]);
+    // Vibe supports local and custom provider aliases. Retire only the known
+    // removed hosted defaults, preserving user-defined models and their defaults.
+    const isRetired = (model: string) => agent.type === 'vibe'
+        ? RETIRED_VIBE_MODELS.has(model)
+        : !MODEL_INFO_MAP[model];
+    const validModels = agent.supportedModels.filter(m => !isRetired(m));
+    const removedModels = agent.supportedModels.filter(isRetired);
     if (removedModels.length === 0) {
         return false;
     }
 
     agent.supportedModels = validModels;
     if (!agent.defaultModel || !validModels.includes(agent.defaultModel)) {
-        agent.defaultModel = validModels[0];
+        agent.defaultModel = agent.type === 'vibe' ? AGENT_DEFAULTS.vibe.defaultModels[0] : validModels[0];
     }
     logger.info({ agentAlias: agent.alias, removedModels, defaultModel: agent.defaultModel }, 'Removed deprecated models from agent');
     return true;

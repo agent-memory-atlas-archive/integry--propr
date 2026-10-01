@@ -318,7 +318,7 @@ function getAgentTypeFromModel(modelId: string): AgentType {
     if (isOpenCodeModelId(lowerModel)) return 'opencode';
     if (lowerModel.startsWith('antigravity')) return 'antigravity';
     if (lowerModel.startsWith('claude')) return 'claude';
-    if (lowerModel.startsWith('mistral') || lowerModel.startsWith('devstral') || lowerModel.includes('vibe')) return 'vibe';
+    if (lowerModel.startsWith('zai-glm-') || lowerModel.startsWith('mistral') || lowerModel.startsWith('devstral') || lowerModel.includes('vibe')) return 'vibe';
     if (lowerModel.startsWith('gpt') || lowerModel.includes('codex')) return 'codex';
     return 'claude'; // Default fallback
 }

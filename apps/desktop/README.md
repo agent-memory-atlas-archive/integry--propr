@@ -282,6 +282,9 @@ capability-scoped file/secret selections; renderer code cannot choose arbitrary 
 
 ## Desktop distributables and releases
 
+Validation logs, follow-up design notes, signing internals, QA checklists and the release-verification
+workflow previously kept in the user guide live in [docs/engineering-notes.md](./docs/engineering-notes.md).
+
 Desktop releases have their own `desktop-v<major>.<minor>.<patch>` tags. They do not use or require the monorepo's
 `v<version>` tag. `PROPR_DESKTOP_VERSION` propagates the tag version into the packaged application, renderer, native
 metadata, Linux packages, the deferred protected machine MSI, artifact names, and release manifest without changing the monorepo

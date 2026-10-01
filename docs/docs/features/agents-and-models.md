@@ -4,7 +4,7 @@ sidebar_position: 5
 
 # Agents and Models
 
-ProPR runs coding work through configurable agents. Each agent is a CLI tool packaged in its own Docker image, with an isolated credential directory mounted into that image. Models are addressed by stable ProPR model IDs that work everywhere a model can be chosen: issue labels, the Web UI, the CLI (`-a`/`-m`), and PR commands (`/switch`, `/use`, `/review <model>`).
+ProPR runs coding work through configurable agents. Each agent is a CLI tool that runs in the unified `propr/agent` Docker image, with an isolated credential directory mounted into its container. Models are addressed by stable ProPR model IDs that work everywhere a model can be chosen: issue labels, the Web UI, the CLI (`-a`/`-m`), and PR commands (`/switch`, `/use`, `/review <model>`).
 
 The canonical catalog lives in `packages/shared/src/modelDefinitions.ts`. The tables below reflect that file; if they ever disagree, the source file wins. Custom model IDs can also be added per agent in the Web UI (**AI Agents**) or with `propr agent add`.
 
@@ -180,6 +180,10 @@ For an existing host account, install the CLI, run `opencode auth login`, and us
 | Model | Label | Context |
 |-------|-------|---------|
 | Mistral Medium 3.5 | `llm-vibe-mistral` | 256K |
+| GLM 5.3 | `llm-vibe-glm53` | 1M |
+| GLM 5.2 | `llm-vibe-glm52` | 1M |
+
+Vibe uses CLI 2.25.8. GLM runs through Mistral with the same `MISTRAL_API_KEY` or Vibe credentials; no separate Z.ai account is needed. Select `zai-glm-5-3` (or `zai-glm-5-2`) in **AI Agents**, per-task model controls, or the CLI. Mistral Medium remains the default. Existing agents gain these choices on load; custom/local models, credentials, explicit CLI pins, and supported defaults are preserved. Retired hosted Devstral defaults move to Mistral Medium. Use the default CLI version for the verified GLM integration.
 
 ## Choosing Models per Phase
 

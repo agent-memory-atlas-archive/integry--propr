@@ -42,7 +42,7 @@ chmod 600 your-app-private-key.pem
 | `your-app-private-key.pem` | GitHub App private key — **only in own GitHub App mode**; relay mode (`GH_AUTH_MODE=relay`) stores no key file here |
 | `data/` | SQLite database (`propr.sqlite` plus `-wal`/`-shm` files) |
 | `logs/` | Log directory mounted into the service containers at `/usr/src/app/logs` |
-| `repos/` | Git working area: `clones/` (cached repository clones) and `worktrees/` (per-task worktrees) |
+| `repos/` | Mounted into the worker at `/usr/src/app/repos`. Cached clones and per-task worktrees live under `/tmp/git-processor` on the host by default (`GIT_CLONES_BASE_PATH`, `GIT_WORKTREES_BASE_PATH`) |
 
 Redis data lives outside this directory, in the Docker volume `propr-redis-data`.
 
@@ -63,24 +63,16 @@ Images are published to Docker Hub under the `propr/` namespace. Docker Hub is t
 
 ## Environment
 
-Use `.env` for server-specific wiring. The GitHub App private-key variable
-depends on whether you start the stack with the **CLI** or the **launcher**:
-
-| Variable | When to use | Value |
-|---|---|---|
-| `HOST_GH_PRIVATE_KEY` | **CLI** (`propr start`) | Absolute **host** path to the `.pem` file — the CLI bind-mounts it into the container |
-| `GH_PRIVATE_KEY_PATH` | **Launcher** (`docker run propr/launcher`) | Path **inside the launcher container** (typically `/app/config/...` via a `-v` mount) |
-
-Do not mix them — the CLI cannot resolve a container-internal path, and the
-launcher cannot resolve a host path it has not mounted itself.
+Use `.env` for server-specific wiring. Point `HOST_GH_PRIVATE_KEY` at the GitHub
+App private key (`.pem`) using an absolute **host** path. Both the CLI (`propr start`)
+and the launcher bind-mount that file read-only into the app containers at the same
+path and set `GH_PRIVATE_KEY_PATH` for them, so you don't set `GH_PRIVATE_KEY_PATH`
+yourself or mount the key into the launcher.
 
 ```bash
 GH_APP_ID=your-github-app-id
 GH_INSTALLATION_ID=your-installation-id
-
-# Pick ONE of the following, depending on your start method:
-HOST_GH_PRIVATE_KEY=/srv/propr/your-app-private-key.pem          # CLI
-# GH_PRIVATE_KEY_PATH=/app/config/your-app-private-key.pem       # Launcher
+HOST_GH_PRIVATE_KEY=/srv/propr/your-app-private-key.pem
 
 FRONTEND_URL=https://propr.example.com
 GH_OAUTH_CLIENT_ID=your_github_oauth_client_id
@@ -88,14 +80,12 @@ GH_OAUTH_CLIENT_SECRET=your_github_oauth_client_secret
 GH_OAUTH_CALLBACK_URL=https://propr.example.com/api/auth/github/callback
 SESSION_SECRET=generate-a-strong-secret-here
 
-DB_FILENAME=/app/data/propr.sqlite
-GIT_CLONES_BASE_PATH=/app/repos/clones
-GIT_WORKTREES_BASE_PATH=/app/repos/worktrees
+DB_FILENAME=./data/propr.sqlite
 ```
 
 All `HOST_*_DIR` values and launcher path variables must be absolute host paths. `.env` parsing does not expand `~` or `$HOME`.
 
-Manage repositories, labels, branches, and agents in the Web UI after startup. Direct-login agent accounts need no `HOST_*` path: native installs store them below `~/.propr/agent-credentials`, while the launcher derives an isolated root below `PROPR_DATA_DIR`.
+Manage repositories, labels, branches, and agents in the Web UI after startup. Direct-login agent accounts need no `HOST_*` path: CLI-started, native and Compose installs store them below `~/.propr/agent-credentials`, while the launcher container derives an isolated root below `PROPR_DATA_DIR`.
 
 For Antigravity agents, install the CLI on the host and authenticate before launching the stack:
 
@@ -202,7 +192,6 @@ container provides the same orchestration:
 docker run --rm \
   -v /var/run/docker.sock:/var/run/docker.sock \
   -v "$PWD/.env:/app/.env:ro" \
-  -v "$PWD/your-app-private-key.pem:/app/config/your-app-private-key.pem:ro" \
   -e PROPR_ENV_FILE="$PWD/.env" \
   -e PROPR_DATA_DIR="$PWD/data" \
   -e PROPR_LOGS_DIR="$PWD/logs" \
@@ -213,12 +202,9 @@ docker run --rm \
   propr/launcher:latest
 ```
 
-The private-key mount (`-v ...your-app-private-key.pem...`) is needed **only in
-own GitHub App mode**, where it pairs with `GH_PRIVATE_KEY_PATH=/app/config/...`
-in `.env`. In relay mode (`GH_AUTH_MODE=relay`) there is no key file — omit that
-line. Do not also set `HOST_GH_PRIVATE_KEY` here: that variable is for the CLI
-start path, and the two key variables must not be mixed (see
-[Environment](#environment) above).
+In own GitHub App mode, set `HOST_GH_PRIVATE_KEY` in `.env` to the key's absolute
+host path; the launcher mounts it into the app containers (see
+[Environment](#environment) above). Relay mode (`GH_AUTH_MODE=relay`) needs no key.
 
 The path variables are passed as environment values; mounting them would not work because the launcher spawns sibling containers through the host Docker daemon, and every `-v` value it passes must resolve on the host.
 

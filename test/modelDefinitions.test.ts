@@ -12,7 +12,7 @@ test('Mistral Medium uses the OpenRouter pricing model ID', () => {
 });
 
 test('Vibe catalog matches the current hosted model set', () => {
-    assert.deepStrictEqual(VIBE_MODELS.map(model => model.id), ['mistral-medium-3.5']);
+    assert.deepStrictEqual(VIBE_MODELS.map(model => model.id), ['mistral-medium-3.5', 'zai-glm-5-3', 'zai-glm-5-2']);
     assert.strictEqual(MODEL_INFO_MAP['devstral-small'], undefined);
 });
 
@@ -134,4 +134,19 @@ test('long model labels use the configured agent alias', () => {
     );
     assert.ok(longAliasLabel.length <= 50);
     assert.match(longAliasLabel, /^llm-codex-account.*~/);
+});
+
+
+test('Vibe GLM models share defaults, names, labels, limits, and runtime version', () => {
+    for (const minor of ['3', '2']) {
+        const id = `zai-glm-5-${minor}`;
+        assert.ok(AGENT_DEFAULTS.vibe.defaultModels.includes(id));
+        assert.strictEqual(MODEL_INFO_MAP[id].name, `GLM 5.${minor}`);
+        assert.strictEqual(MODEL_INFO_MAP[id].githubLabel, `llm-vibe-glm5${minor}`);
+        assert.strictEqual(MODEL_INFO_MAP[id].maxTokens, 1000000);
+        assert.strictEqual(MODEL_INFO_MAP[id].minAgentVersion, '2.25.8');
+    }
+    assert.strictEqual(AGENT_DEFAULTS.vibe.defaultModels[0], 'mistral-medium-3.5');
+    assert.strictEqual(AGENT_DEFAULTS.vibe.defaultCliVersion, '2.25.8');
+    assert.strictEqual(AGENT_DEFAULT_VERSIONS.vibe, '2.25.8');
 });

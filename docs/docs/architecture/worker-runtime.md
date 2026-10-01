@@ -80,7 +80,7 @@ ANTIGRAVITY_TIMEOUT_MS=86400000
 OPENCODE_TIMEOUT_MS=86400000
 VIBE_TIMEOUT_MS=86400000
 
-# Git paths (defaults shown; override for image-based installs)
+# Git paths (defaults shown; keep them for image-based installs)
 GIT_CLONES_BASE_PATH=/tmp/git-processor/clones
 GIT_WORKTREES_BASE_PATH=/tmp/git-processor/worktrees
 ```

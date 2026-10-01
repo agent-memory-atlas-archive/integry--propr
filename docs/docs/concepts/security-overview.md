@@ -13,7 +13,7 @@ ProPR is self-hosted: the delivery layer, task history, credentials, and reposit
 | --- | --- | --- |
 | **Your ProPR stack** | Everything: repository clones, plans, prompts, task records, logs, usage data, credentials | — |
 | **GitHub** | Branches, commits, pull requests, comments, labels, status checks | Plans, task logs, provider credentials |
-| **Selected model provider** | The prompt and code context for the specific task routed to it | Unrelated repositories, other providers' credentials, the task archive |
+| **Selected model provider** | The prompt and code context for the specific task routed to it, plus whatever the agent reads inside its container | Other providers' credentials, the task archive |
 | **ProPR Connect** (optional) | GitHub webhook payloads it relays, plus the installation metadata needed to route and bill them | Repository contents. Successful deliveries are not stored; failed deliveries are cached briefly for replay |
 
 Model calls go directly from your stack to the provider you configured. ProPR is not a proxy for LLM traffic and never sees or marks up your tokens.
@@ -24,7 +24,9 @@ Model calls go directly from your stack to the provider you configured. ProPR is
 
 Every implementation task runs in its own Docker container and its own Git worktree on a dedicated branch. The agent edits files; it does not commit, push, or open PRs — ProPR performs those Git and GitHub operations deterministically after the agent finishes. The main checkout is never touched, and a wrong result is contained to a branch you can review, retry, or discard. Details: [Execution Safety](../features/execution-safety.md).
 
-Outbound network access from agent containers is **unrestricted by default**. An optional allowlist firewall (model provider, GitHub, DNS only) ships in the unified agent image but is off by default because it requires privileged containers — do not assume network sandboxing unless you enabled it.
+The container isolates the workspace; it does not keep ProPR's GitHub access or other clones away from the agent. Implementation containers receive a GitHub installation token (`GH_TOKEN`) with the installation's permissions, so the no-push rule is enforced by the workflow instructions rather than by token scope. Most agents also mount the shared git directory that holds every repository clone on the host, so an agent can read other repositories ProPR has cloned. Run repositories with different trust levels on separate stacks.
+
+Outbound network access from agent containers is **unrestricted by default**. An optional allowlist firewall (Anthropic API, GitHub, DNS, and outbound SSH only) ships in the unified agent image but is off by default because it requires privileged containers, and its allowlist covers only Claude Code's provider — do not assume network sandboxing unless you enabled it.
 
 The API and worker use the host Docker socket to launch task containers; the API also uses it for authenticated agent-login sessions. Docker-socket access is root-equivalent control of the host. Treat the API container as part of the trusted control plane, restrict dashboard access, and do not expose the socket to unrelated containers. Login sessions run only the provider-specific allowlisted command in the configured agent image, keep output in memory, and remove their temporary container on completion, cancellation, timeout, graceful shutdown, or the next API startup after a crash.
 
@@ -66,14 +68,14 @@ Configuration lives in the Web UI settings and `.env` — see [GitHub Authentica
 
 ## Secrets And Credentials
 
-- **`.env` in the stack root** holds deployment secrets; it is mounted read-only into containers.
+- **`.env` in the stack root** holds deployment secrets; it is mounted read-only into the service containers, not into agent containers.
 - **Agent credentials** are mounted read-write so agent CLIs can refresh their own auth state. Direct-login accounts are isolated by agent ID below ProPR's managed credential root (`~/.propr/agent-credentials` for native/Compose installs or the launcher data directory); reused host accounts keep their configured paths (`~/.claude`, `~/.codex`, `~/.gemini`, …).
 - **GitHub access**: on the default relay path your stack holds a revocable relay token and mints short-lived installation tokens — no GitHub App private key on disk. On the own-App path, the private key stays on your host.
 - **Tunnel token**: `PROPR_UI_TUNNEL_TOKEN` is a live Cloudflare credential — keep it in `.env` only.
 
 ## Data At Rest
 
-Application state lives in the stack directory on your host: the database under `data/`, logs under `logs/`, repository clones and worktrees under `repos/`, and queue state in the Redis volume. Direct-login credentials live in the managed credential root, which is below `~/.propr` for native/Compose installs or below the launcher data directory. Treat that root as persistent secret data when backing up or removing a deployment — see [Teardown](../operations/maintenance.md#teardown).
+Application state lives in the stack directory on your host: the database under `data/`, logs under `logs/`, and queue state in the Redis volume. Repository clones and task worktrees live on the host under `/tmp/git-processor` by default (`GIT_CLONES_BASE_PATH`, `GIT_WORKTREES_BASE_PATH`). Direct-login credentials live in the managed credential root, which is below `~/.propr` for native/Compose installs or below the launcher data directory. Treat that root as persistent secret data when backing up or removing a deployment — see [Teardown](../operations/maintenance.md#teardown).
 
 ## Connected clients and private media
 
