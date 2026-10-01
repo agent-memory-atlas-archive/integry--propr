@@ -136,37 +136,60 @@ class AntigravityGoalProtocol {
         }
     }
 
-    private async observe(segment: AntigravityGoalSegment): Promise<SegmentObservation> {
+    /** Whether a pause, cancel, or queued input calls for a boundary, and which stop. */
+    private async controlBoundary(): Promise<{ boundary: boolean; stop: StopState | null }> {
+        const snapshot = await this.control.load();
+        const stop = snapshot.desiredState === 'running' ? null : snapshot.desiredState;
+        return { boundary: Boolean(stop) || snapshot.pendingInputs.length > 0, stop };
+    }
+
+    private async observe(segment: AntigravityGoalSegment, launch: boolean): Promise<SegmentObservation> {
         let cursor = 0;
         let declaration: Declaration = null;
         let stopRequested: StopState | null = null;
         let interruptRequestedAt: number | null = null;
         let interrupted = false;
         let completing = false;
+        let nextControlCheck = 0;
         while (!segment.exited) {
             for (const text of segment.textsAfter(cursor)) {
                 declaration = parseGoalCheckpointDeclaration(text) ?? declaration;
                 completing ||= text.includes(ANTIGRAVITY_GOAL_COMPLETE_MARKER);
             }
             cursor = segment.textCursor;
-            if (!segment.result && interruptRequestedAt === null) {
-                const snapshot = await this.control.load();
-                if (snapshot.desiredState !== 'running') stopRequested = snapshot.desiredState;
-                // A checkpoint ends the agent's turn, as it does for Claude and
-                // Codex, unless the goal is already finishing on its own.
-                const checkpointBoundary = Boolean(declaration) && !completing;
-                if (stopRequested || checkpointBoundary || snapshot.pendingInputs.length) interruptRequestedAt = Date.now();
+            // A checkpoint ends the agent's turn, as it does for Claude and Codex,
+            // unless the goal is already finishing on its own.
+            let boundary = interruptRequestedAt !== null || (Boolean(declaration) && !completing);
+            // Stream lines wake this loop far more often than controls change.
+            if (Date.now() >= nextControlCheck) {
+                nextControlCheck = Date.now() + CONTROL_POLL_MS;
+                await this.control.heartbeat();
+                if (!boundary && !segment.result) {
+                    const controls = await this.controlBoundary();
+                    stopRequested = controls.stop;
+                    boundary = controls.boundary;
+                }
             }
-            if (interruptRequestedAt !== null && !interrupted && !segment.result
-                && (!segment.stepActive || Date.now() - interruptRequestedAt >= STEP_BOUNDARY_GRACE_MS)) {
+            if (boundary) interruptRequestedAt ??= Date.now();
+            if (!interrupted && !segment.result && interruptRequestedAt !== null
+                && this.atBoundary(segment, launch, interruptRequestedAt)) {
                 interrupted = true;
                 segment.interrupt();
             }
             await segment.waitForActivity(CONTROL_POLL_MS);
-            await this.control.heartbeat();
         }
         for (const text of segment.textsAfter(cursor)) declaration = parseGoalCheckpointDeclaration(text) ?? declaration;
         return { segment, stopRequested, interrupted, declaration };
+    }
+
+    /**
+     * Interrupt after a finished step, or once the grace period runs out. A
+     * launch waits for its first finished step, so the native goal is
+     * established before the conversation is resumed.
+     */
+    private atBoundary(segment: AntigravityGoalSegment, launch: boolean, requestedAt: number): boolean {
+        if (Date.now() - requestedAt >= STEP_BOUNDARY_GRACE_MS) return true;
+        return !segment.stepActive && (segment.stepCompleted || !launch);
     }
 
     private async publish(declaration: NonNullable<Declaration>, turnId: string): Promise<string> {
@@ -181,6 +204,14 @@ class AntigravityGoalProtocol {
             kind: 'agent', commitMessage: declaration.message,
             include: declaration.include, exclude: declaration.exclude, summary: declaration.summary,
         }, turnId));
+    }
+
+    /** The goal is finished, so input queued while it ran can no longer reach it. */
+    private async settleUndeliveredInputs(): Promise<void> {
+        const { pendingInputs } = await this.control.load();
+        for (const input of pendingInputs) {
+            await this.control.markInputUndeliverable(input.id, 'Antigravity native goal completed before this input could be delivered');
+        }
     }
 
     /** Operator input queued while the goal ran, delivered as the next invocation's message. */
@@ -205,7 +236,7 @@ class AntigravityGoalProtocol {
             for (const inputId of message.inputIds) await this.control.markInputDelivered(inputId, turnId);
         }
         await this.control.setActiveTurn(turnId);
-        const observation = await this.observe(segment);
+        const observation = await this.observe(segment, launch);
         await this.control.setActiveTurn(null);
         if (segment.result?.response) this.lastResponse = segment.result.response;
         return { ...observation, turnId };
@@ -213,31 +244,44 @@ class AntigravityGoalProtocol {
 
     async run(): Promise<AntigravityGoalCompletion> {
         if (await this.requestedStop()) return { status: 'interrupted', error: 'Goal stopped at a provider turn boundary' };
-        let message = this.initialMessage();
-        let nudges = 0;
-        while (true) {
-            const { segment, stopRequested, interrupted, declaration, turnId } = await this.runSegment(message);
-            if (!segment.conversationId) {
-                return { status: 'failed', error: segment.errorText || 'Antigravity goal invocation did not report a resumable conversation' };
-            }
-            const feedback = declaration ? await this.publish(declaration, turnId) : undefined;
-            if (stopRequested || await this.requestedStop()) {
-                return { status: 'interrupted', error: 'Goal stopped at a provider turn boundary' };
-            }
-            const result = segment.result;
-            // Input queued while the goal finished stays pending for the next attempt.
-            if (result?.status === 'success' && result.response.includes(ANTIGRAVITY_GOAL_COMPLETE_MARKER)) {
-                return { status: 'completed' };
-            }
-            if (!interrupted && result?.status !== 'success') {
-                return { status: 'failed', error: segment.errorText || 'Antigravity goal invocation ended with an error' };
-            }
-            nudges = interrupted || feedback ? 0 : nudges + 1;
-            if (nudges > MAX_UNEXPLAINED_TURN_ENDS) {
-                return { status: 'failed', error: 'Antigravity repeatedly ended its turn without marking the native goal complete' };
-            }
-            message = await this.nextMessage(feedback);
+        let message: GoalMessage | AntigravityGoalCompletion = this.initialMessage();
+        const counters = { nudges: 0, rejections: 0 };
+        while (!('status' in message)) {
+            const observation = await this.runSegment(message);
+            message = await this.settle(observation, counters);
         }
+        return message;
+    }
+
+    /** Decide what an invocation's end means: completion, stop, failure, or the next message. */
+    private async settle(
+        { segment, stopRequested, interrupted, declaration, turnId }: SegmentObservation & { turnId: string },
+        counters: { nudges: number; rejections: number },
+    ): Promise<GoalMessage | AntigravityGoalCompletion> {
+        if (!segment.conversationId) {
+            return { status: 'failed', error: segment.errorText || 'Antigravity goal invocation did not report a resumable conversation' };
+        }
+        const feedback = declaration ? await this.publish(declaration, turnId) : undefined;
+        const stop = stopRequested ?? await this.requestedStop();
+        const result = segment.result;
+        // A goal that finished keeps its completion unless it was cancelled.
+        if (stop !== 'cancelled' && result?.status === 'success' && result.response.includes(ANTIGRAVITY_GOAL_COMPLETE_MARKER)) {
+            await this.settleUndeliveredInputs();
+            return { status: 'completed' };
+        }
+        if (stop) return { status: 'interrupted', error: 'Goal stopped at a provider turn boundary' };
+        counters.rejections = declaration && 'rejected' in declaration ? counters.rejections + 1 : 0;
+        if (counters.rejections > MAX_UNEXPLAINED_TURN_ENDS) {
+            return { status: 'failed', error: 'Antigravity repeatedly declared checkpoints that ProPR rejected' };
+        }
+        if (!interrupted && result?.status !== 'success') {
+            return { status: 'failed', error: segment.errorText || 'Antigravity goal invocation ended with an error' };
+        }
+        counters.nudges = interrupted || feedback ? 0 : counters.nudges + 1;
+        if (counters.nudges > MAX_UNEXPLAINED_TURN_ENDS) {
+            return { status: 'failed', error: 'Antigravity repeatedly ended its turn without marking the native goal complete' };
+        }
+        return this.nextMessage(feedback);
     }
 }
 
@@ -317,7 +361,8 @@ export async function executeAntigravityNativeGoal(
     } finally {
         // An abort kills the running invocation, which the protocol sees as a
         // CLI failure; report the abort itself instead.
-        failure ??= getExecutionAbortError(ownership?.signal)?.message;
+        failure ??= getExecutionAbortError(ownership?.signal)?.message
+            ?? (expired ? 'Antigravity native goal attempt exceeded its execution timeout' : undefined);
         clearTimeout(deadline);
         ownership?.signal.removeEventListener('abort', stopCurrent);
         stopCurrent();

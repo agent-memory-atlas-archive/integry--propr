@@ -45,11 +45,14 @@ class ScriptedSegment implements AntigravityGoalSegment {
     conversationId?: string;
     model = 'gemini-3.8-flash-medium';
     stepActive = false;
+    stepCompleted = false;
     result?: AntigravitySegmentResult;
     exited = false;
     errorText?: string;
     tokenUsage = { input_tokens: 10, output_tokens: 1 };
     interrupts = 0;
+    stepsBeforeInterrupt?: number;
+    private consumed = 0;
     private texts: string[] = [];
 
     constructor(
@@ -66,6 +69,7 @@ class ScriptedSegment implements AntigravityGoalSegment {
 
     interrupt(): void {
         this.interrupts += 1;
+        this.stepsBeforeInterrupt ??= this.consumed;
         this.result = { status: 'error', response: '' };
         this.errorText = 'error: interrupted';
         this.exited = true;
@@ -80,6 +84,8 @@ class ScriptedSegment implements AntigravityGoalSegment {
             this.exited = true;
             return;
         }
+        this.stepCompleted = true;
+        this.consumed += 1;
         if (step.text) this.texts.push(step.text);
         if (step.result) {
             this.result = step.result;
@@ -96,13 +102,14 @@ interface Harness {
     delivered: Array<[string, string]>;
     published: string[];
     rejected: string[];
+    undeliverable: string[];
     sessions: string[];
 }
 
 function harness(outcome: GoalCheckpointOutcome = { accepted: true, commitSha: 'abc1234' }): Harness {
     const state: Harness = {
         snapshot: { desiredState: 'running', requestedModel: 'antigravity-gemini-3.8-flash-medium', pendingInputs: [], controlGeneration: 1 },
-        delivered: [], published: [], rejected: [], sessions: [],
+        delivered: [], published: [], rejected: [], undeliverable: [], sessions: [],
         control: undefined as never,
     };
     state.control = {
@@ -113,7 +120,10 @@ function harness(outcome: GoalCheckpointOutcome = { accepted: true, commitSha: '
             state.delivered.push([inputId, turnId]);
             state.snapshot.pendingInputs = state.snapshot.pendingInputs.filter(input => input.id !== inputId);
         },
-        markInputUndeliverable: async () => undefined,
+        markInputUndeliverable: async inputId => {
+            state.undeliverable.push(inputId);
+            state.snapshot.pendingInputs = state.snapshot.pendingInputs.filter(input => input.id !== inputId);
+        },
         publishCheckpoint: async request => { state.published.push(request.commitMessage); return outcome; },
         rejectCheckpoint: async request => { state.rejected.push(request.error); },
         appendOutput: async () => undefined,
@@ -213,6 +223,53 @@ describe('Antigravity native goal protocol', () => {
         assert.equal(segments[0].interrupts, 1);
         assert.equal(segments[1].message, 'Also add multiply(a, b).');
         assert.deepEqual(state.delivered, [['input-1', 'agy-conversation:2']]);
+    });
+
+    test('a launch is not interrupted before its first finished step', async () => {
+        const state = harness();
+        const { segments, start } = scripted([[{}, {}], [completed()]]);
+        const running = runAntigravityGoalProtocol(start, taskOptions(state), COMMAND);
+        state.snapshot.pendingInputs = [{ id: 'input-1', message: 'Queued before launch.' }];
+        await running;
+
+        assert.equal(segments[0].stepsBeforeInterrupt, 1);
+        assert.equal(segments[1].message, 'Queued before launch.');
+    });
+
+    test('a pause that lands as the goal completes keeps the completion', async () => {
+        const state = harness();
+        const { start } = scripted([[completed()]]);
+        const running = runAntigravityGoalProtocol(start, taskOptions(state), COMMAND);
+        state.snapshot.desiredState = 'paused';
+        assert.equal((await running).status, 'completed');
+    });
+
+    test('input still queued when the goal completes is settled as undeliverable', async () => {
+        const state = harness();
+        const { start } = scripted([[completed()]]);
+        const running = runAntigravityGoalProtocol(start, taskOptions(state), COMMAND);
+        state.snapshot.pendingInputs = [{ id: 'late-input', message: 'Too late.' }];
+        assert.equal((await running).status, 'completed');
+        assert.deepEqual(state.undeliverable, ['late-input']);
+    });
+
+    test('a rejected final checkpoint beside the goal marker is recorded and the goal completes', async () => {
+        // The worker's final checkpoint still publishes every remaining change.
+        const state = harness();
+        const text = `Done.\n{"checkpointReady":true,"message":""}\n${ANTIGRAVITY_GOAL_COMPLETE_MARKER}`;
+        const { start } = scripted([[completed(text)]]);
+        assert.equal((await runAntigravityGoalProtocol(start, taskOptions(state), COMMAND)).status, 'completed');
+        assert.equal(state.rejected.length, 1);
+    });
+
+    test('repeatedly rejected checkpoints fail instead of looping', async () => {
+        const state = harness();
+        const rejected = (): ScriptedStep[] => [{ text: '{"checkpointReady":true,"message":""}' }, {}];
+        const { segments, start } = scripted([rejected(), rejected(), rejected(), rejected(), rejected()]);
+        const result = await runAntigravityGoalProtocol(start, taskOptions(state), COMMAND);
+        assert.equal(result.status, 'failed');
+        assert.match(result.error ?? '', /checkpoints that ProPR rejected/);
+        assert.equal(segments.length, 4);
     });
 
     test('pause stops at a boundary without starting another invocation', async () => {

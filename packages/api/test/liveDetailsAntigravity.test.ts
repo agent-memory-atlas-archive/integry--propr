@@ -173,6 +173,11 @@ test('a live Antigravity goal awaiting narration projects nothing, and raw outpu
   try {
     assert.equal(await project('claude_execution'), null);
     assert.equal((await project('failed'))?.events[0]?.rawFallback, true);
+    // The persisted goal records fall back the same way once Redis has nothing.
+    await db('task_history').insert({ task_id: 'goal-task', state: 'claude_execution', timestamp: '2026-10-01T00:00:00.000Z',
+      metadata: JSON.stringify({ goalOutputRecords: [init] }) });
+    const empty = withLiveOutputReads({ get: async () => null });
+    assert.equal(await projectTaskLiveDetails(empty as never, db, 'goal-task'), null);
   } finally {
     await db.destroy();
   }

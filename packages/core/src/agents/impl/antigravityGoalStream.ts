@@ -55,6 +55,8 @@ export interface AntigravityGoalSegment {
     readonly model?: string;
     /** Whether the latest step is still running (not a safe interrupt boundary). */
     readonly stepActive: boolean;
+    /** Whether any step of this invocation has finished. */
+    readonly stepCompleted: boolean;
     readonly result?: AntigravitySegmentResult;
     readonly exited: boolean;
     readonly errorText?: string;
@@ -77,6 +79,7 @@ export class AntigravityGoalStream implements AntigravityGoalSegment {
     conversationId?: string;
     model?: string;
     stepActive = false;
+    stepCompleted = false;
     result?: AntigravitySegmentResult;
     exited = false;
 
@@ -143,6 +146,7 @@ export class AntigravityGoalStream implements AntigravityGoalSegment {
         if (step.usage) this.stepUsage.set(index, step.usage);
         const done = step.state === 'DONE';
         this.stepActive = !done;
+        this.stepCompleted ||= done;
         if (step.step_type !== 'agent_response') return;
         const text = (this.pendingText.get(index) ?? '') + (step.text_delta ?? '');
         if (!done) {

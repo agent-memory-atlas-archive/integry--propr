@@ -50,7 +50,7 @@ export function createLiveDetailsRoutes(deps: LiveDetailsRoutesDeps) {
           send(res, activeRedisResult);
           return;
         }
-        const persistedGoalResult = await parsePersistedGoalOutput(db, taskId);
+        const persistedGoalResult = await parsePersistedGoalOutput(db, taskId, () => isLiveTask(redisClient, db, taskId));
         if (persistedGoalResult) { send(res, withStableResultEventIds(taskId, 'stored', taskId, persistedGoalResult)); return; }
         console.log('[live-details] No sessionId found in either SQLite or Redis');
         send(res, { events: [], todos: [], currentTask: null });
@@ -80,7 +80,7 @@ export function createLiveDetailsRoutes(deps: LiveDetailsRoutesDeps) {
             send(res, withStableResultEventIds(taskId, 'stored', sessionId, rawStoredOutput.rawFallback));
             return;
           }
-          const persistedGoalResult = await parsePersistedGoalOutput(db, taskId);
+          const persistedGoalResult = await parsePersistedGoalOutput(db, taskId, () => isLiveTask(redisClient, db, taskId));
           if (persistedGoalResult) { send(res, withStableResultEventIds(taskId, 'stored', sessionId, persistedGoalResult)); return; }
           send(res, { events: [], todos: [], currentTask: null });
           return;
@@ -317,13 +317,13 @@ export async function projectTaskLiveDetails(
   try {
     const details = sessionId ? await parseExecutionDetailsFromDb(db, taskId, sessionId) : null;
     if (details) return details;
-    return await parsePersistedGoalOutput(db, taskId);
+    return await parsePersistedGoalOutput(db, taskId, () => isLiveTask(redisClient, db, taskId));
   } catch (error) {
     if (rethrowReadErrors) throw error;
     return null;
   }
 }
-async function parsePersistedGoalOutput(db: Knex, taskId: string): Promise<ConversationResult | null> {
+async function parsePersistedGoalOutput(db: Knex, taskId: string, isLive: () => Promise<boolean>): Promise<ConversationResult | null> {
   const history = await db('task_history').where({ task_id: taskId }).orderBy('timestamp', 'asc').select('metadata');
   const records = history.flatMap(entry => {
     try {
@@ -334,7 +334,7 @@ async function parsePersistedGoalOutput(db: Knex, taskId: string): Promise<Conve
   });
   if (records.length === 0) return null;
   const stored = parseStoredOutputContent(records.join('\n'));
-  return projectStoredOutputResult(stored);
+  return projectStoredOutputResult(stored, Boolean(stored.awaitingNarration) && await isLive());
 }
 /** A live stream still awaiting its first narration shows nothing rather than raw protocol JSON. */
 function projectStoredOutputResult(stored: ParsedStoredOutput, live = false): ConversationResult | null {
