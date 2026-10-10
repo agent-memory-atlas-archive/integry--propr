@@ -348,7 +348,7 @@ done
 
 Failures exit 1. With `--json` they print a `goal-error` document to stdout whose `error.code` is one of `invalid_arguments`, `validation_failed`, `unauthorized`, `forbidden`, `not_found`, `idempotency_conflict`, `agent_not_goal_capable`, `state_conflict`, `outcome_uncertain`, `invalid_cursor`, `cursor_expired`, `wait_limit`, `boundary_not_established`, `server_error`, `network_error` or `request_failed`, plus the server message, HTTP status, idempotency key and recovery hint where relevant. Another user's goal reads as `not_found`.
 
-## Automations {#agents-saved-automations}
+## Automations {/* #agents-saved-automations */}
 
 Automations, the saved prompts on the **Automations** page of the Web UI, are driven by `propr automation` (alias `propr automations`). The group is separate from `propr agent`, which manages coding-agent configurations. See [Automations](./agents.md) for what a run does, autonomy and the cost gate.
 
