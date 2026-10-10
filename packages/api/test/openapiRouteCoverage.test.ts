@@ -214,3 +214,17 @@ describe('Routes registered outside routeRegistry.ts', () => {
     }
   });
 });
+
+it('documents canonical automation routes and deprecates only the legacy automation aliases', () => {
+  const all = operations(buildOpenApiDocument());
+  const canonical = [...all].filter(([key]) => / \/api\/automation-(definitions|runs)(?:\/|$)/.test(key));
+  assert.equal(canonical.length, 15);
+  for (const [key, operation] of canonical) {
+    assert.deepEqual(operation.tags, ['Automations']);
+    assert.equal(operation.deprecated, undefined);
+    const legacy = all.get(key.replace('/automation-', '/agent-'));
+    assert.ok(legacy, key);
+    assert.equal(legacy.deprecated, true);
+  }
+  assert.equal(all.get('GET /api/agents/{agentType}/images')?.deprecated, undefined);
+});

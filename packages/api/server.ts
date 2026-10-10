@@ -47,8 +47,8 @@ import {
   createAdminRoutes,
   createAdminMcpRoutes,
   createGoalRoutes,
-  createAgentDefinitionRoutes,
-  agentDefinitionAttachmentUpload,
+  createAutomationDefinitionRoutes,
+  automationDefinitionAttachmentUpload,
   createVisualPreviewAuthRoutes,
   createVoiceRoutes,
   createInstanceCatalogRoutes,
@@ -415,13 +415,13 @@ function setupRoutes(): void {
   const activeWorkRoutes = createActiveWorkRoutes({ db, taskQueue });
   const taskSubmissionRoutes = createTaskSubmissionRoutes({ db });
   const goalRoutes = createGoalRoutes({ db, taskQueue, redisClient });
-  const agentDefinitionRoutes = createAgentDefinitionRoutes({ db, redisClient });
+  const automationDefinitionRoutes = createAutomationDefinitionRoutes({ db, redisClient });
 
   app.use([...GOAL_TASK_GUARD_MOUNTS], goalRoutes.requireGoalTaskOwnership);
 
   const operationalRoutes = createOperationalRouteEntries({
     activeWorkRoutes,
-    agentDefinitionRoutes,
+    automationDefinitionRoutes,
     dashboardRoutes,
     dockerRoutes,
     executionRoutes,
@@ -454,7 +454,7 @@ function setupRoutes(): void {
     taskSubmissionUpload,
     goalAttachmentUpload,
     attachmentUpload,
-    agentDefinitionAttachmentUpload,
+    automationDefinitionAttachmentUpload,
   });
   const routes = [
     ...operationalRoutes,

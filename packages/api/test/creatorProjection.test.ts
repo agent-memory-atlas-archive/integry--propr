@@ -20,7 +20,7 @@ const { attachCreator, projectCreator, projectCreators, rememberCreator } = awai
 const { goalCreator, loadGoalCreators, serializeGoal } = await import('../services/goalProjection.js');
 type GoalProjectionRow = import('../services/goalProjection.js').GoalProjectionRow;
 const { createPlannerRoutes } = await import('../routes/plannerRoutes.js');
-const { createAgentDefinitionRoutes } = await import('../routes/agentDefinitionRoutes.js');
+const { createAutomationDefinitionRoutes } = await import('../routes/automationDefinitionRoutes.js');
 const { createRepoTodoRoutes } = await import('../routes/repoTodoRoutes.js');
 const { withLiveOutputReads } = await import('./liveOutputRedisFake.js');
 
@@ -210,7 +210,7 @@ describe('creator projection', () => {
   });
 
   describe('automations', () => {
-    const routes = () => createAgentDefinitionRoutes({ db, services: { validateRuntime: async () => null, now: () => Date.UTC(2026, 9, 9) } });
+    const routes = () => createAutomationDefinitionRoutes({ db, services: { validateRuntime: async () => null, now: () => Date.UTC(2026, 9, 9) } });
 
     test('create, get and list carry createdBy, null when the creator is unknown', async () => {
       const creator = { id: '606', login: 'automator', username: 'automator', avatarUrl: 'https://avatars.example/u/606', accessToken: 'token' };

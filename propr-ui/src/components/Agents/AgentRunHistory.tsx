@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { History, Loader2 } from 'lucide-react';
-import { getAgentRun, listAgentRuns, type AgentRunRecord } from '../../api/agentDefinitionsApi';
+import { getAutomationRun, listAutomationRuns, type AutomationRunRecord } from '../../api/automationDefinitionsApi';
 import { ListSkeleton } from '../ui/Skeleton';
 import { SystemAlert } from '../ui/SystemAlert';
 import { AgentRunStateBadge } from './AgentRunStateBadge';
@@ -29,7 +29,7 @@ const runPath = (definitionId: string, runId: string) =>
   `/automations/${encodeURIComponent(definitionId)}/runs/${encodeURIComponent(runId)}`;
 
 /** Whether a run has a report worth reading for its preview. */
-const hasReport = (run: AgentRunRecord) => run.reportedAt !== null;
+const hasReport = (run: AutomationRunRecord) => run.reportedAt !== null;
 
 /**
  * A run's one-line report preview. The list carries no reports, so the run is
@@ -45,10 +45,10 @@ function useReportPreviews() {
     return () => { activeRef.current = false; };
   }, []);
 
-  const load = useCallback((run: AgentRunRecord) => {
+  const load = useCallback((run: AutomationRunRecord) => {
     if (!hasReport(run) || recalledReportPreview(run.id) !== undefined || inFlight.current.has(run.id)) return;
     inFlight.current.add(run.id);
-    void getAgentRun(run.id)
+    void getAutomationRun(run.id)
       .then(detail => {
         rememberReportPreview(run.id, detail.report);
         if (activeRef.current) setVersion(version => version + 1);
@@ -60,7 +60,7 @@ function useReportPreviews() {
   return load;
 }
 
-const AgentRunRow: React.FC<{ definitionId: string; run: AgentRunRecord; now: number; onPreview: (run: AgentRunRecord) => void }> = ({
+const AgentRunRow: React.FC<{ definitionId: string; run: AutomationRunRecord; now: number; onPreview: (run: AutomationRunRecord) => void }> = ({
   definitionId, run, now, onPreview,
 }) => {
   const preview = recalledReportPreview(run.id);
@@ -90,7 +90,7 @@ const AgentRunRow: React.FC<{ definitionId: string; run: AgentRunRecord; now: nu
 
 /** The agent's runs, newest first, a page at a time; a row opens the run. */
 export const AgentRunHistory: React.FC<AgentRunHistoryProps> = ({ definitionId, now = Date.now() }) => {
-  const [runs, setRuns] = useState<AgentRunRecord[] | null>(null);
+  const [runs, setRuns] = useState<AutomationRunRecord[] | null>(null);
   const [nextOffset, setNextOffset] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loadingMore, setLoadingMore] = useState(false);
@@ -106,7 +106,7 @@ export const AgentRunHistory: React.FC<AgentRunHistoryProps> = ({ definitionId, 
     let active = true;
     setRuns(null);
     setError(null);
-    listAgentRuns(definitionId, { limit: AGENT_RUN_PAGE_SIZE, offset: 0 })
+    listAutomationRuns(definitionId, { limit: AGENT_RUN_PAGE_SIZE, offset: 0 })
       .then(page => {
         if (!active) return;
         setRuns(page.runs);
@@ -121,7 +121,7 @@ export const AgentRunHistory: React.FC<AgentRunHistoryProps> = ({ definitionId, 
     setLoadingMore(true);
     setError(null);
     try {
-      const page = await listAgentRuns(definitionId, { limit: AGENT_RUN_PAGE_SIZE, offset: nextOffset });
+      const page = await listAutomationRuns(definitionId, { limit: AGENT_RUN_PAGE_SIZE, offset: nextOffset });
       if (!activeRef.current) return;
       // A run started since the first page shifts older runs down a page; keep each once.
       setRuns(current => {

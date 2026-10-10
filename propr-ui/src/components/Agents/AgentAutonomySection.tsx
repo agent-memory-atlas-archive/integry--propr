@@ -1,16 +1,16 @@
 import React from 'react';
-import { AGENT_AUTONOMY_MODES, type AgentAutonomyMode } from '@propr/shared';
+import { AUTOMATION_AUTONOMY_MODES, type AutomationAutonomyMode } from '@propr/shared';
 import { AgentFormRow } from './AgentFormRow';
 
 interface AgentAutonomySectionProps {
-  autonomy: AgentAutonomyMode;
-  onChange: (autonomy: AgentAutonomyMode) => void;
+  autonomy: AutomationAutonomyMode;
+  onChange: (autonomy: AutomationAutonomyMode) => void;
   /** The acting step needs ProPR tools, so coding agents without them are limited to dry runs. */
   actingAvailable: boolean;
   disabled: boolean;
 }
 
-const AUTONOMY_TEXT: Record<AgentAutonomyMode, { label: string; description: string }> = {
+const AUTONOMY_TEXT: Record<AutomationAutonomyMode, { label: string; description: string }> = {
   dry_run: {
     label: 'Dry run',
     description: 'The report is saved for you to read. Nothing else happens.',
@@ -37,7 +37,7 @@ export const AgentAutonomySection: React.FC<AgentAutonomySectionProps> = ({ auto
     hint={actingAvailable ? 'What happens after the report is written.' : 'The selected coding agent cannot use ProPR tools, so this automation can only run dry.'}
   >
     <div role="radiogroup" aria-label="Autonomy" className="inline-flex overflow-hidden rounded-md border border-slate-300">
-      {AGENT_AUTONOMY_MODES.map((mode, index) => {
+      {AUTOMATION_AUTONOMY_MODES.map((mode, index) => {
         const locked = mode !== 'dry_run' && !actingAvailable;
         const selected = autonomy === mode;
         const unavailable = disabled || locked;

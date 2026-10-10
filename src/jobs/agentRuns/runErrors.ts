@@ -1,4 +1,4 @@
-import { AGENT_ACTION_SUMMARY_MAX_CHARS } from '@propr/shared';
+import { AUTOMATION_ACTION_SUMMARY_MAX_CHARS } from '@propr/shared';
 import { AGENT_REPORT_TRUNCATED_MARKER, extractAgentReport } from './reportPrompt.js';
 import { describeAgentTermination, resolveAgentTerminationReason, type AgentExecutionResult } from '@propr/core';
 
@@ -51,6 +51,6 @@ export function reportFromResult(result: AgentExecutionResult): string {
 /** The acting step's summary of what it did, cut to the stored maximum. */
 export function actionSummaryFromResult(result: AgentExecutionResult): string {
     const summary = finalMessageFromResult(result, 'The acting agent finished without a summary');
-    if (summary.length <= AGENT_ACTION_SUMMARY_MAX_CHARS) return summary;
-    return `${summary.slice(0, AGENT_ACTION_SUMMARY_MAX_CHARS).trimEnd()}\n${AGENT_REPORT_TRUNCATED_MARKER}`;
+    if (summary.length <= AUTOMATION_ACTION_SUMMARY_MAX_CHARS) return summary;
+    return `${summary.slice(0, AUTOMATION_ACTION_SUMMARY_MAX_CHARS).trimEnd()}\n${AGENT_REPORT_TRUNCATED_MARKER}`;
 }

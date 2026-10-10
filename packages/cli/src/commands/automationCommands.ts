@@ -1,8 +1,8 @@
 /**
  * Automation Commands
  *
- * The `automation` command group (alias `automations`) drives Agents, the
- * saved automations shown as "Agents" in the Web UI. It is a separate group
+ * The `automation` command group (alias `automations`) drives Automations, the
+ * saved automations shown as "Automations" in the Web UI. It is a separate group
  * because `propr agent` manages coding-agent configurations (Claude, Codex, …).
  *
  * `run` is the CLI surface of the trigger primitive, and the simplest hook
@@ -12,7 +12,7 @@
  */
 
 import { Command } from "commander";
-import { TERMINAL_AGENT_RUN_STATES, type AgentRunState } from "@propr/shared";
+import { TERMINAL_AUTOMATION_RUN_STATES, type AutomationRunState } from "@propr/shared";
 import { ApiError } from "../api/errors.js";
 import { GoalMutationUncertainError, resolveIdempotencyKey } from "../api/goals.js";
 import {
@@ -47,7 +47,7 @@ export const AUTOMATION_RUN_DEFAULT_TIMEOUT_SECONDS = 1_800;
 export const AUTOMATION_RUN_MAX_TIMEOUT_SECONDS = 86_400;
 
 /** States at which `run --wait` stops polling. Deferred runs may wait hours for capacity. */
-const WAIT_STOP_STATES: readonly AgentRunState[] = [...TERMINAL_AGENT_RUN_STATES, "awaiting_approval", "deferred"];
+const WAIT_STOP_STATES: readonly AutomationRunState[] = [...TERMINAL_AUTOMATION_RUN_STATES, "awaiting_approval", "deferred"];
 
 export type AutomationFailureCode =
   | "invalid_arguments"
@@ -71,7 +71,7 @@ export interface AutomationCommandOptions {
 }
 
 /** Exit code for a run in `state`; `null` while the run is still in progress. */
-export function automationRunExitCode(state: AgentRunState): number | null {
+export function automationRunExitCode(state: AutomationRunState): number | null {
   switch (state) {
     case "completed":
       return AUTOMATION_RUN_EXIT_CODES.completed;
@@ -122,7 +122,7 @@ function scheduleLabel(automation: Automation): string {
 }
 
 function printAutomation(automation: Automation): void {
-  console.log(`Agent:        ${automation.id}`);
+  console.log(`Automation:   ${automation.id}`);
   console.log(`Name:         ${automation.name}`);
   if (automation.description) console.log(`Description:  ${automation.description}`);
   console.log(`Enabled:      ${automation.enabled ? "yes" : "no"}`);
@@ -143,7 +143,7 @@ function printAutomation(automation: Automation): void {
 /** Run metadata as `key: value` lines, written to `write` (stdout or stderr). */
 function printRunMetadata(run: AutomationRun, write: (line: string) => void): void {
   write(`run: ${run.id}`);
-  write(`agent: ${run.definitionId}`);
+  write(`automation: ${run.definitionId}`);
   write(`state: ${run.state}`);
   write(`trigger: ${run.trigger}${run.triggerSource ? ` (${run.triggerSource})` : ""}`);
   write(`created at: ${formatTimestamp(run.createdAt)}`);
@@ -173,7 +173,7 @@ function writeReport(report: string): void {
 }
 
 function runJson(run: AutomationRun): Record<string, unknown> {
-  return { ...run, terminal: (TERMINAL_AGENT_RUN_STATES as readonly string[]).includes(run.state) };
+  return { ...run, terminal: (TERMINAL_AUTOMATION_RUN_STATES as readonly string[]).includes(run.state) };
 }
 
 interface FailureContext {
@@ -201,7 +201,7 @@ function failureCode(error: unknown): { code: AutomationFailureCode; status?: nu
 }
 
 function notFoundMessage(context: FailureContext): string {
-  return context.runId ? `Error: Agent run not found: ${context.runId}` : `Error: Agent not found${context.automationId ? `: ${context.automationId}` : ""}`;
+  return context.runId ? `Error: Automation run not found: ${context.runId}` : `Error: Automation not found${context.automationId ? `: ${context.automationId}` : ""}`;
 }
 
 function recoveryHint(error: unknown, context: FailureContext, code: AutomationFailureCode): string | null {
@@ -359,11 +359,11 @@ export function createAutomationCommand(commandOptions: AutomationCommandOptions
 
   const automation = new Command("automation")
     .alias("automations")
-    .description("Agents (saved automations): list, run, and review agent runs and reports")
+    .description("Automations: list, run, and review automation runs and reports")
     .addHelpText("after", `
-Agents (saved automations) are reusable prompts that run on demand or on a
+Automations are reusable prompts that run on demand or on a
 schedule and produce a report; in preview mode their acting step waits for
-your approval. They are shown as "Agents" in the Web UI. This group is
+your approval. They are shown as "Automations" in the Web UI. This group is
 separate from 'propr agent', which manages coding-agent configurations
 (Claude, Codex, ...).
 
@@ -373,18 +373,18 @@ document with a machine-readable error.code.
 
 Examples:
   $ propr automation list
-  $ propr automation show <agent-id>
-  $ propr automation run <agent-id> --wait
-  $ propr automation runs <agent-id> --limit 5
+  $ propr automation show <automation-id>
+  $ propr automation run <automation-id> --wait
+  $ propr automation runs <automation-id> --limit 5
   $ propr automation report <run-id> > report.md
   $ propr automation approve <run-id> --note "Only open issues for the top two findings"
 `);
 
   automation
     .command("list")
-    .description("List your agents (saved automations)")
+    .description("List your automations")
     .option("-l, --limit <limit>", "Page size (1-200)")
-    .option("--offset <offset>", "Number of agents to skip")
+    .option("--offset <offset>", "Number of automations to skip")
     .option("-j, --json", "Output the version 1 automation-list JSON document")
     .action(async (options: { limit?: string; offset?: string; json?: boolean }) => {
       try {
@@ -394,7 +394,7 @@ Examples:
           return;
         }
         if (page.automations.length === 0) {
-          console.log("No agents found. Create one on the Agents page of the Web UI.");
+          console.log("No automations found. Create one on the Automations page of the Web UI.");
           return;
         }
         const items = page.automations;
@@ -409,7 +409,7 @@ Examples:
         const next = page.offset + items.length;
         if (next < page.total) {
           console.log("");
-          console.log(`Showing ${items.length} of ${page.total}. More agents: --offset ${next}`);
+          console.log(`Showing ${items.length} of ${page.total}. More automations: --offset ${next}`);
         }
       } catch (error) {
         return fail(error, { command: "list", json: options.json });
@@ -418,7 +418,7 @@ Examples:
 
   automation
     .command("show <id>")
-    .description("Show an agent's prompt, schedule, autonomy and repositories")
+    .description("Show an automation's prompt, schedule, autonomy and repositories")
     .option("-j, --json", "Output the version 1 automation JSON document")
     .action(async (id: string, options: { json?: boolean }) => {
       try {
@@ -435,7 +435,7 @@ Examples:
 
   automation
     .command("run <id>")
-    .description("Trigger a run of an agent (idempotent with --idempotency-key)")
+    .description("Trigger a run of an automation (idempotent with --idempotency-key)")
     .option("--idempotency-key <key>", "Reuse a key to retry this trigger without creating a second run (default: a new cli-<uuid>)")
     .option("--source <label>", "Free-form label recorded with the run (e.g. github-actions)")
     .option("--wait", "Poll the run every 5 seconds until it finishes or awaits approval, then print the report")
@@ -458,7 +458,7 @@ Exit codes:
   ${AUTOMATION_RUN_EXIT_CODES.completed}  completed (or, without --wait, accepted and in progress)
   ${AUTOMATION_RUN_EXIT_CODES.timed_out}  timed out waiting (the run continues on the server)
   ${AUTOMATION_RUN_EXIT_CODES.not_run}  skipped or deferred (the reason is on stderr)
-  ${AUTOMATION_RUN_EXIT_CODES.awaiting_approval}  awaiting approval (preview agents)
+  ${AUTOMATION_RUN_EXIT_CODES.awaiting_approval}  awaiting approval (preview automations)
   ${AUTOMATION_RUN_EXIT_CODES.error}  failed, rejected, cancelled, or error
 
 JSON:
@@ -467,10 +467,10 @@ JSON:
     "exitCode": n, "run": { "id", "state", "report", "skipReason", "failureReason", ... } }
 
 GitHub Actions example:
-  - name: Run the weekly triage agent
-    run: npx propr-cli automation run "$AGENT_ID" --idempotency-key "$GITHUB_RUN_ID" --source github-actions --wait > report.md
+  - name: Run the weekly triage automation
+    run: npx propr-cli automation run "$AUTOMATION_ID" --idempotency-key "$GITHUB_RUN_ID" --source github-actions --wait > report.md
     env:
-      AGENT_ID: <agent-id>
+      AUTOMATION_ID: <automation-id>
 `)
     .action(async (id: string, options: RunOptions) => {
       let key: string | undefined;
@@ -535,7 +535,7 @@ GitHub Actions example:
 
   automation
     .command("runs <id>")
-    .description("List an agent's runs, newest first")
+    .description("List an automation's runs, newest first")
     .option("-l, --limit <limit>", "Page size (1-200)", "20")
     .option("--offset <offset>", "Number of runs to skip")
     .option("-j, --json", "Output the version 1 automation-runs JSON document")
@@ -547,7 +547,7 @@ GitHub Actions example:
           return;
         }
         if (page.runs.length === 0) {
-          console.log("This agent has no runs yet.");
+          console.log("This automation has no runs yet.");
           return;
         }
         const runs = page.runs;

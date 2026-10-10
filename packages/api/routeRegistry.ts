@@ -2,7 +2,7 @@ import type { Express, RequestHandler } from 'express';
 import type {
   createAdminRoutes,
   createAdminMcpRoutes,
-  createAgentDefinitionRoutes,
+  createAutomationDefinitionRoutes,
   createAgentLoginRoutes,
   createAgentRuntimeRoutes,
   createAgentVersionRoutes,
@@ -68,7 +68,7 @@ interface ManagementRouteDeps {
 
 interface OperationalRouteDeps {
   activeWorkRoutes: ReturnType<typeof createActiveWorkRoutes>;
-  agentDefinitionRoutes: ReturnType<typeof createAgentDefinitionRoutes>;
+  automationDefinitionRoutes: ReturnType<typeof createAutomationDefinitionRoutes>;
   dashboardRoutes: ReturnType<typeof createDashboardRoutes>;
   dockerRoutes: ReturnType<typeof createDockerRoutes>;
   executionRoutes: ReturnType<typeof createExecutionRoutes>;
@@ -102,7 +102,7 @@ interface OperationalRouteDeps {
   taskSubmissionUpload: RequestHandler;
   goalAttachmentUpload: RequestHandler;
   attachmentUpload: RequestHandler;
-  agentDefinitionAttachmentUpload: RequestHandler;
+  automationDefinitionAttachmentUpload: RequestHandler;
 }
 
 interface MemberCatalogRouteDeps {
@@ -198,7 +198,7 @@ export function createManagementRouteEntries({
 export function createOperationalRouteEntries(deps: OperationalRouteDeps): RouteEntry[] {
   const {
     activeWorkRoutes,
-    agentDefinitionRoutes,
+    automationDefinitionRoutes,
     dashboardRoutes,
     dockerRoutes,
     executionRoutes,
@@ -231,7 +231,7 @@ export function createOperationalRouteEntries(deps: OperationalRouteDeps): Route
     taskSubmissionUpload,
     goalAttachmentUpload,
     attachmentUpload,
-    agentDefinitionAttachmentUpload,
+    automationDefinitionAttachmentUpload,
   } = deps;
   return [
     ['get', '/api/desktop/active-work', activeWorkRoutes.getActiveWork],
@@ -254,21 +254,51 @@ export function createOperationalRouteEntries(deps: OperationalRouteDeps): Route
     ['patch', '/api/goals/:goalId/model', goalRoutes.requestModel],
     ['post', '/api/goals/:goalId/input', goalAttachmentUpload, goalRoutes.input],
     ['get', '/api/goals/:goalId/attachments/:attachmentId', goalRoutes.attachment],
-    ['get', '/api/agent-definitions', agentDefinitionRoutes.list],
-    ['get', '/api/agent-definitions/contract', agentDefinitionRoutes.contract],
-    ['post', '/api/agent-definitions', agentDefinitionRoutes.create],
-    ['get', '/api/agent-definitions/:id', agentDefinitionRoutes.get],
-    ['patch', '/api/agent-definitions/:id', agentDefinitionRoutes.update],
-    ['delete', '/api/agent-definitions/:id', agentDefinitionRoutes.remove],
-    ['post', '/api/agent-definitions/:id/attachments', agentDefinitionAttachmentUpload, agentDefinitionRoutes.uploadAttachments],
-    ['delete', '/api/agent-definitions/:id/attachments/:attachmentId', agentDefinitionRoutes.deleteAttachment],
-    ['post', '/api/agent-definitions/:id/runs', agentDefinitionRoutes.triggerRun],
-    ['get', '/api/agent-definitions/:id/capacity', agentDefinitionRoutes.capacity],
-    ['get', '/api/agent-definitions/:id/runs', agentDefinitionRoutes.listRuns],
-    ['get', '/api/agent-runs/:runId', agentDefinitionRoutes.getRun],
-    ['post', '/api/agent-runs/:runId/cancel', agentDefinitionRoutes.cancelRun],
-    ['post', '/api/agent-runs/:runId/approve', agentDefinitionRoutes.approveRun],
-    ['post', '/api/agent-runs/:runId/reject', agentDefinitionRoutes.rejectRun],
+    ['get', '/api/automation-definitions', automationDefinitionRoutes.list],
+    // Deprecated compatibility alias.
+    ['get', '/api/agent-definitions', automationDefinitionRoutes.list],
+    ['get', '/api/automation-definitions/contract', automationDefinitionRoutes.contract],
+    // Deprecated compatibility alias.
+    ['get', '/api/agent-definitions/contract', automationDefinitionRoutes.contract],
+    ['post', '/api/automation-definitions', automationDefinitionRoutes.create],
+    // Deprecated compatibility alias.
+    ['post', '/api/agent-definitions', automationDefinitionRoutes.create],
+    ['get', '/api/automation-definitions/:id', automationDefinitionRoutes.get],
+    // Deprecated compatibility alias.
+    ['get', '/api/agent-definitions/:id', automationDefinitionRoutes.get],
+    ['patch', '/api/automation-definitions/:id', automationDefinitionRoutes.update],
+    // Deprecated compatibility alias.
+    ['patch', '/api/agent-definitions/:id', automationDefinitionRoutes.update],
+    ['delete', '/api/automation-definitions/:id', automationDefinitionRoutes.remove],
+    // Deprecated compatibility alias.
+    ['delete', '/api/agent-definitions/:id', automationDefinitionRoutes.remove],
+    ['post', '/api/automation-definitions/:id/attachments', automationDefinitionAttachmentUpload, automationDefinitionRoutes.uploadAttachments],
+    // Deprecated compatibility alias.
+    ['post', '/api/agent-definitions/:id/attachments', automationDefinitionAttachmentUpload, automationDefinitionRoutes.uploadAttachments],
+    ['delete', '/api/automation-definitions/:id/attachments/:attachmentId', automationDefinitionRoutes.deleteAttachment],
+    // Deprecated compatibility alias.
+    ['delete', '/api/agent-definitions/:id/attachments/:attachmentId', automationDefinitionRoutes.deleteAttachment],
+    ['post', '/api/automation-definitions/:id/runs', automationDefinitionRoutes.triggerRun],
+    // Deprecated compatibility alias.
+    ['post', '/api/agent-definitions/:id/runs', automationDefinitionRoutes.triggerRun],
+    ['get', '/api/automation-definitions/:id/capacity', automationDefinitionRoutes.capacity],
+    // Deprecated compatibility alias.
+    ['get', '/api/agent-definitions/:id/capacity', automationDefinitionRoutes.capacity],
+    ['get', '/api/automation-definitions/:id/runs', automationDefinitionRoutes.listRuns],
+    // Deprecated compatibility alias.
+    ['get', '/api/agent-definitions/:id/runs', automationDefinitionRoutes.listRuns],
+    ['get', '/api/automation-runs/:runId', automationDefinitionRoutes.getRun],
+    // Deprecated compatibility alias.
+    ['get', '/api/agent-runs/:runId', automationDefinitionRoutes.getRun],
+    ['post', '/api/automation-runs/:runId/cancel', automationDefinitionRoutes.cancelRun],
+    // Deprecated compatibility alias.
+    ['post', '/api/agent-runs/:runId/cancel', automationDefinitionRoutes.cancelRun],
+    ['post', '/api/automation-runs/:runId/approve', automationDefinitionRoutes.approveRun],
+    // Deprecated compatibility alias.
+    ['post', '/api/agent-runs/:runId/approve', automationDefinitionRoutes.approveRun],
+    ['post', '/api/automation-runs/:runId/reject', automationDefinitionRoutes.rejectRun],
+    // Deprecated compatibility alias.
+    ['post', '/api/agent-runs/:runId/reject', automationDefinitionRoutes.rejectRun],
     ['get', '/api/status', statusRoutes.getStatus],
     ['get', '/api/tasks', taskRoutes.getTasks],
     ['get', '/api/tasks/revert-preview', taskRoutes.getRevertPreview],

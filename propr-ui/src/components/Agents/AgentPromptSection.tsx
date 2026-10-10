@@ -1,8 +1,8 @@
 import React, { useRef, useState } from 'react';
 import TextareaAutosize from 'react-textarea-autosize';
 import { FileText, Loader2, Paperclip, X } from 'lucide-react';
-import { AGENT_PROMPT_MAX_LENGTH, MAX_AGENT_ATTACHMENTS, MAX_AGENT_PREVIOUS_REPORTS } from '@propr/shared';
-import type { AgentDefinitionAttachment } from '../../api/agentDefinitionsApi';
+import { AUTOMATION_PROMPT_MAX_LENGTH, MAX_AUTOMATION_ATTACHMENTS, MAX_AUTOMATION_PREVIOUS_REPORTS } from '@propr/shared';
+import type { AutomationDefinitionAttachment } from '../../api/automationDefinitionsApi';
 import { AGENT_CHIP_CLASSES, AGENT_INPUT_CLASSES, AgentFormRow } from './AgentFormRow';
 
 interface AgentPromptSectionProps {
@@ -11,7 +11,7 @@ interface AgentPromptSectionProps {
   previousReportCount: number;
   onPreviousReportCountChange: (count: number) => void;
   /** Saved input files; null until the agent exists, which keeps the drop zone disabled. */
-  attachments: AgentDefinitionAttachment[] | null;
+  attachments: AutomationDefinitionAttachment[] | null;
   onUpload: (files: File[]) => Promise<void>;
   onRemoveAttachment: (attachmentId: string) => Promise<void>;
   disabled: boolean;
@@ -29,7 +29,7 @@ export const AgentPromptSection: React.FC<AgentPromptSectionProps> = ({
   const [busy, setBusy] = useState(false);
   const [fileError, setFileError] = useState<string | null>(null);
   const saved = attachments !== null;
-  const canUpload = saved && !disabled && !busy && attachments.length < MAX_AGENT_ATTACHMENTS;
+  const canUpload = saved && !disabled && !busy && attachments.length < MAX_AUTOMATION_ATTACHMENTS;
 
   const run = async (work: () => Promise<void>) => {
     setBusy(true);
@@ -64,7 +64,7 @@ export const AgentPromptSection: React.FC<AgentPromptSectionProps> = ({
             onChange={event => onPromptChange(event.target.value)}
             minRows={6}
             maxRows={24}
-            maxLength={AGENT_PROMPT_MAX_LENGTH}
+            maxLength={AUTOMATION_PROMPT_MAX_LENGTH}
             disabled={disabled}
             placeholder="Review open pull requests in these repositories and summarize which ones are blocked and why."
             className="block w-full resize-none rounded-t-md border-0 px-3 py-2 text-sm text-slate-900 placeholder:text-slate-400 focus:outline-none focus:ring-0 disabled:bg-slate-50"
@@ -142,7 +142,7 @@ export const AgentPromptSection: React.FC<AgentPromptSectionProps> = ({
                 onChange={event => onPreviousReportCountChange(Number(event.target.value))}
                 className={`${AGENT_INPUT_CLASSES} w-auto py-1`}
               >
-                {Array.from({ length: MAX_AGENT_PREVIOUS_REPORTS }, (_, index) => index + 1).map(count => (
+                {Array.from({ length: MAX_AUTOMATION_PREVIOUS_REPORTS }, (_, index) => index + 1).map(count => (
                   <option key={count} value={count}>{count}</option>
                 ))}
               </select>

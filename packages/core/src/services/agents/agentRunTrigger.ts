@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import type { JobsOptions } from 'bullmq';
 import type { Knex } from 'knex';
-import { agentTypeSupportsProprMcp, type AgentRunTrigger, type SyntheticAgentConfig } from '@propr/shared';
+import { agentTypeSupportsProprMcp, type AutomationRunTrigger, type SyntheticAgentConfig } from '@propr/shared';
 import { loadMonitoredReposRaw, loadSettings, type RepoToMonitor } from '../../config/configManager.js';
 import { loadAgents, type AgentConfig } from '../../config/configManagerAgents.js';
 import { loadSyntheticAgents } from '../../config/configManagerSyntheticAgents.js';
@@ -81,7 +81,7 @@ export type AgentRunGateDecision =
 
 export interface AgentRunGateContext {
   definition: StoredAgentDefinition;
-  trigger: AgentRunTrigger;
+  trigger: AutomationRunTrigger;
   triggerSource: string | null;
   /**
    * The existing run when one is re-evaluated: a deferred run being retried,
@@ -97,7 +97,7 @@ export type AgentRunGate = (context: AgentRunGateContext) => Promise<AgentRunGat
 
 export interface TriggerAgentRunInput {
   definition: StoredAgentDefinition;
-  trigger: AgentRunTrigger;
+  trigger: AutomationRunTrigger;
   /** Who or what fired the run, e.g. a user id or the schedule slot. */
   triggerSource?: string | null;
   /** Replays with the same key return the existing run without enqueueing again. */
@@ -321,7 +321,7 @@ export async function triggerAgentRun(
     if (existing) return { run: existing, created: false, enqueued: false };
   }
 
-  if (!definition.enabled) throw new AgentRunTriggerError('Agent is disabled', 409, 'AGENT_DISABLED');
+  if (!definition.enabled) throw new AgentRunTriggerError('Automation is disabled', 409, 'AGENT_DISABLED');
   const invalid = await validateAgentDefinitionRuntime(definition, deps);
   if (invalid) throw new AgentRunTriggerError(invalid, 400, 'AGENT_INVALID');
 
@@ -346,7 +346,7 @@ export async function triggerAgentRun(
   } catch (error) {
     if (keepQueuedOnEnqueueFailure) throw error;
     const message = error instanceof Error ? error.message : String(error);
-    const failureReason = `Failed to enqueue the agent run on the job queue: ${message}`;
+    const failureReason = `Failed to enqueue the automation run on the job queue: ${message}`;
     try {
       await transitionAgentRun(run.id, ['queued'], 'failed', { failureReason }, storeDeps);
     } catch (transitionError) {

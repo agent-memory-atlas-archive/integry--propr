@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { after, describe, test } from 'node:test';
-import { AGENT_PREVIOUS_REPORT_MAX_CHARS, AGENT_REPORT_PROMPT_MAX_CHARS } from '@propr/shared';
+import { AUTOMATION_PREVIOUS_REPORT_MAX_CHARS, AUTOMATION_REPORT_PROMPT_MAX_CHARS } from '@propr/shared';
 import {
   AGENT_REPORT_COMPARISON_INSTRUCTION,
   AGENT_REPORT_TRUNCATED_MARKER,
@@ -85,11 +85,11 @@ describe('buildAgentReportPrompt', () => {
   });
 
   test('truncates long previous reports with a visible marker', () => {
-    const long = 'x'.repeat(AGENT_PREVIOUS_REPORT_MAX_CHARS + 500);
+    const long = 'x'.repeat(AUTOMATION_PREVIOUS_REPORT_MAX_CHARS + 500);
     const prompt = buildAgentReportPrompt(input({ previousReports: [{ runId: 'run-2', reportedAt: NOW, report: long }] }));
     const body = prompt.split('<previous-report run="run-2"')[1]!.split('</previous-report>')[0]!;
     assert.ok(body.includes(AGENT_REPORT_TRUNCATED_MARKER));
-    assert.equal(body.match(/x/g)?.length, AGENT_PREVIOUS_REPORT_MAX_CHARS);
+    assert.equal(body.match(/x/g)?.length, AUTOMATION_PREVIOUS_REPORT_MAX_CHARS);
   });
 
   test('a report containing a closing fence cannot break out of it', () => {
@@ -137,14 +137,14 @@ describe('buildAgentReportPrompt', () => {
   });
 
   test('stays under the size limit by dropping the oldest reports first', () => {
-    const big = (label: string) => `${label} `.repeat(Math.ceil(AGENT_PREVIOUS_REPORT_MAX_CHARS / (label.length + 1)));
+    const big = (label: string) => `${label} `.repeat(Math.ceil(AUTOMATION_PREVIOUS_REPORT_MAX_CHARS / (label.length + 1)));
     const previousReports = Array.from({ length: 30 }, (_, index) => ({
       runId: `run-${30 - index}`,
       reportedAt: NOW - index * DAY,
       report: big(`r${30 - index}`),
     }));
     const prompt = buildAgentReportPrompt(input({ previousReports }));
-    assert.ok(prompt.length <= AGENT_REPORT_PROMPT_MAX_CHARS);
+    assert.ok(prompt.length <= AUTOMATION_REPORT_PROMPT_MAX_CHARS);
     assert.ok(prompt.includes('run="run-30"'), 'newest report kept');
     assert.ok(!prompt.includes('run="run-1"'), 'oldest report dropped');
     assert.match(prompt, /older previous report\(s\) were left out/);

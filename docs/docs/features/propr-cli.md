@@ -348,15 +348,15 @@ done
 
 Failures exit 1. With `--json` they print a `goal-error` document to stdout whose `error.code` is one of `invalid_arguments`, `validation_failed`, `unauthorized`, `forbidden`, `not_found`, `idempotency_conflict`, `agent_not_goal_capable`, `state_conflict`, `outcome_uncertain`, `invalid_cursor`, `cursor_expired`, `wait_limit`, `boundary_not_established`, `server_error`, `network_error` or `request_failed`, plus the server message, HTTP status, idempotency key and recovery hint where relevant. Another user's goal reads as `not_found`.
 
-## Agents (saved automations)
+## Automations {#agents-saved-automations}
 
 Automations, the saved prompts on the **Automations** page of the Web UI, are driven by `propr automation` (alias `propr automations`). The group is separate from `propr agent`, which manages coding-agent configurations. See [Automations](./agents.md) for what a run does, autonomy and the cost gate.
 
 ```bash
-propr automation list                          # Your agents (--limit, --offset)
-propr automation show <agent-id>               # Prompt, schedule, autonomy, repositories
-propr automation run <agent-id>                # Trigger a run (--idempotency-key, --source, --wait, --timeout)
-propr automation runs <agent-id> --limit 5     # Run history, newest first
+propr automation list                          # Your automations (--limit, --offset)
+propr automation show <automation-id>               # Prompt, schedule, autonomy, repositories
+propr automation run <automation-id>                # Trigger a run (--idempotency-key, --source, --wait, --timeout)
+propr automation runs <automation-id> --limit 5     # Run history, newest first
 propr automation report <run-id> > report.md   # Report Markdown on stdout, metadata on stderr
 propr automation approve <run-id> --note "Only the top finding"   # Preview runs
 propr automation reject <run-id>
@@ -370,11 +370,11 @@ With `--wait`, the CLI polls the run every 5 seconds until it reaches a terminal
 The trigger works from your own cron or a GitHub Actions step:
 
 ```yaml
-- name: Run the weekly triage agent
-  run: npx propr-cli automation run "$AGENT_ID" --idempotency-key "$GITHUB_RUN_ID" --source github-actions --wait > report.md
+- name: Run the weekly triage automation
+  run: npx propr-cli automation run "$AUTOMATION_ID" --idempotency-key "$GITHUB_RUN_ID" --source github-actions --wait > report.md
 ```
 
-With `--json`, every command prints a `{ "version": 1, "kind": ... }` document with one of the kinds `automation-list`, `automation`, `automation-runs` or `automation-run`. Failures print `automation-error`. A missing or another user's agent prints `Agent not found`.
+With `--json`, every command prints a `{ "version": 1, "kind": ... }` document with one of the kinds `automation-list`, `automation`, `automation-runs` or `automation-run`. Failures print `automation-error`. A missing or another user's automation prints `Automation not found`.
 
 ## Tasks
 

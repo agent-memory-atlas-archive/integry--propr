@@ -1,6 +1,6 @@
 import React from 'react';
 import { Loader2, Plus, Save, Trash2 } from 'lucide-react';
-import { AGENT_DESCRIPTION_MAX_LENGTH, AGENT_NAME_MAX_LENGTH } from '@propr/shared';
+import { AUTOMATION_DESCRIPTION_MAX_LENGTH, AUTOMATION_NAME_MAX_LENGTH } from '@propr/shared';
 import { AgentModelSelector } from '../TaskPlanner/AgentModelSelector';
 import { AGENT_INPUT_CLASSES, AgentFormRow } from './AgentFormRow';
 import { AgentScopeSection } from './AgentScopeSection';
@@ -55,7 +55,7 @@ export const AgentSettingsForm: React.FC<AgentSettingsFormProps> = ({ editor, is
           <input
             id="agent-name"
             value={form.name}
-            maxLength={AGENT_NAME_MAX_LENGTH}
+            maxLength={AUTOMATION_NAME_MAX_LENGTH}
             onChange={event => update({ name: event.target.value })}
             placeholder="Weekly dependency review"
             className={AGENT_INPUT_CLASSES}
@@ -65,7 +65,7 @@ export const AgentSettingsForm: React.FC<AgentSettingsFormProps> = ({ editor, is
           <input
             id="agent-description"
             value={form.description}
-            maxLength={AGENT_DESCRIPTION_MAX_LENGTH}
+            maxLength={AUTOMATION_DESCRIPTION_MAX_LENGTH}
             onChange={event => update({ description: event.target.value })}
             className={AGENT_INPUT_CLASSES}
           />

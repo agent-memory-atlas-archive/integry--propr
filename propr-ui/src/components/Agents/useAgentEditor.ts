@@ -1,19 +1,19 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
-import { agentTypeSupportsProprMcp, validateAgentDefinitionInput, type InstanceCatalogAgent } from '@propr/shared';
+import { agentTypeSupportsProprMcp, validateAutomationDefinitionInput, type InstanceCatalogAgent } from '@propr/shared';
 import { getInstanceCatalog } from '../../api/proprApi';
 import {
-  createAgentDefinition,
-  deleteAgentAttachment,
-  deleteAgentDefinition,
-  getAgentCapacity,
-  getAgentDefinition,
-  isAgentConflictError,
-  triggerAgentRun,
-  updateAgentDefinition,
-  uploadAgentAttachment,
-  type AgentDefinitionRecord,
-  type AgentRunRecord,
-} from '../../api/agentDefinitionsApi';
+  createAutomationDefinition,
+  deleteAutomationAttachment,
+  deleteAutomationDefinition,
+  getAutomationCapacity,
+  getAutomationDefinition,
+  isAutomationConflictError,
+  triggerAutomationRun,
+  updateAutomationDefinition,
+  uploadAutomationAttachment,
+  type AutomationDefinitionRecord,
+  type AutomationRunRecord,
+} from '../../api/automationDefinitionsApi';
 import { emptyAgentForm, formFromDefinition, formToInput, type AgentEditorForm, type AgentEditorFormPatch } from './agentEditorForm';
 import type { ProprMcpSupport } from './AgentCapabilitiesSection';
 import { capacityWarning } from './agentRunPresentation';
@@ -24,9 +24,9 @@ export interface AgentEditorCallbacks {
    * the response came back: the list should still learn of the result, but
    * nothing may navigate on its behalf, since another editor may be showing.
    */
-  onSaved: (definition: AgentDefinitionRecord, created: boolean, open: boolean) => void;
+  onSaved: (definition: AutomationDefinitionRecord, created: boolean, open: boolean) => void;
   onDeleted: (definitionId: string, open: boolean) => void;
-  onRunStarted?: (run: AgentRunRecord) => void;
+  onRunStarted?: (run: AutomationRunRecord) => void;
 }
 
 /** A short confirmation of what a save or Run now did, shown as a toast rather than in the header. */
@@ -34,7 +34,7 @@ export type AgentEditorNotify = (message: string, type: 'success' | 'info') => v
 
 interface AgentEditorOptions {
   /** Opens a run Run now started (or the one already in progress), while this editor is still open. */
-  openRun?: (run: AgentRunRecord) => void;
+  openRun?: (run: AutomationRunRecord) => void;
   notify?: AgentEditorNotify;
 }
 
@@ -61,7 +61,7 @@ export function runAvailability(isDemoMode: boolean, { running, saving, dirty, c
 }
 
 /** Whether the form would save something other than the definition as loaded. */
-export function formDiffersFrom(form: AgentEditorForm, definition: AgentDefinitionRecord): boolean {
+export function formDiffersFrom(form: AgentEditorForm, definition: AutomationDefinitionRecord): boolean {
   return JSON.stringify(formToInput(form)) !== JSON.stringify(formToInput(formFromDefinition(definition)));
 }
 
@@ -84,7 +84,7 @@ export function useAgentEditor(
   { onSaved, onDeleted, onRunStarted }: AgentEditorCallbacks,
   { openRun, notify }: AgentEditorOptions = {},
 ) {
-  const [definition, setDefinition] = useState<AgentDefinitionRecord | null>(null);
+  const [definition, setDefinition] = useState<AutomationDefinitionRecord | null>(null);
   const [form, setForm] = useState<AgentEditorForm>(emptyAgentForm);
   const [loading, setLoading] = useState(definitionId !== null);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -123,7 +123,7 @@ export function useAgentEditor(
     setLoading(true);
     setLoadError(null);
     try {
-      const loaded = await getAgentDefinition(id);
+      const loaded = await getAutomationDefinition(id);
       if (!isActive()) return;
       setDefinition(loaded);
       setForm(formFromDefinition(loaded));
@@ -190,7 +190,7 @@ export function useAgentEditor(
   const save = useCallback(async () => {
     const input = formToInput(form);
     if (proprMcpSupport === 'unsupported') input.capabilities = input.capabilities?.filter(capability => capability !== 'propr_mcp');
-    const invalid = validateAgentDefinitionInput(input);
+    const invalid = validateAutomationDefinitionInput(input);
     if (invalid) { setError(invalid); return; }
     // Both return a whole definition; a save answered after an attachment change would restore the old file list.
     if (attachmentsPendingRef.current > 0) return;
@@ -199,8 +199,8 @@ export function useAgentEditor(
     setError(null);
     try {
       const saved = definition
-        ? await updateAgentDefinition(definition.id, input, definition.revision)
-        : await createAgentDefinition(input);
+        ? await updateAutomationDefinition(definition.id, input, definition.revision)
+        : await createAutomationDefinition(input);
       if (!openRef.current) { onSaved(saved, !definition, false); return; }
       setDefinition(saved);
       setForm(formFromDefinition(saved));
@@ -208,7 +208,7 @@ export function useAgentEditor(
       onSaved(saved, !definition, true);
     } catch (saveFailure) {
       if (!openRef.current) return;
-      if (isAgentConflictError(saveFailure)) {
+      if (isAutomationConflictError(saveFailure)) {
         conflictRef.current = true;
         setConflict(true);
       }
@@ -225,7 +225,7 @@ export function useAgentEditor(
     setDeleting(true);
     setError(null);
     try {
-      await deleteAgentDefinition(definition.id);
+      await deleteAutomationDefinition(definition.id);
       onDeleted(definition.id, openRef.current);
       return true;
     } catch (deleteFailure) {
@@ -237,12 +237,12 @@ export function useAgentEditor(
   }, [definition, onDeleted]);
 
   /** Input files do not change the revision, so only the attachment list is taken from the response. */
-  const applyAttachments = useCallback((changed: AgentDefinitionRecord) => {
+  const applyAttachments = useCallback((changed: AutomationDefinitionRecord) => {
     setDefinition(current => (current ? { ...current, attachments: changed.attachments } : current));
   }, []);
 
   /** Counts an attachment change as outstanding until its response arrives, whatever the outcome. */
-  const trackAttachments = useCallback(async (change: () => Promise<AgentDefinitionRecord>) => {
+  const trackAttachments = useCallback(async (change: () => Promise<AutomationDefinitionRecord>) => {
     attachmentsPendingRef.current += 1;
     setAttachmentsPending(count => count + 1);
     try {
@@ -256,12 +256,12 @@ export function useAgentEditor(
   // A reload answered after the change would bring back the file list from before it.
   const upload = useCallback(async (files: File[]) => {
     if (!definition || savingRef.current || loadingRef.current) return;
-    await trackAttachments(async () => (await uploadAgentAttachment(definition.id, files)).definition);
+    await trackAttachments(async () => (await uploadAutomationAttachment(definition.id, files)).definition);
   }, [definition, trackAttachments]);
 
   const removeAttachment = useCallback(async (attachmentId: string) => {
     if (!definition || savingRef.current || loadingRef.current) return;
-    await trackAttachments(() => deleteAgentAttachment(definition.id, attachmentId));
+    await trackAttachments(() => deleteAutomationAttachment(definition.id, attachmentId));
   }, [definition, trackAttachments]);
 
   const runBlocked = useCallback(
@@ -276,7 +276,7 @@ export function useAgentEditor(
     setRunning(true);
     setError(null);
     try {
-      const result = await triggerAgentRun(current.id);
+      const result = await triggerAutomationRun(current.id);
       if (result.created) notify?.('Run started', 'success');
       else notify?.('A run is already in progress', 'info');
       onRunStarted?.(result.run);
@@ -302,7 +302,7 @@ export function useAgentEditor(
     try {
       let warning: string | null = null;
       try {
-        warning = capacityWarning(await getAgentCapacity(definition.id));
+        warning = capacityWarning(await getAutomationCapacity(definition.id));
       } catch {
         warning = null;
       }

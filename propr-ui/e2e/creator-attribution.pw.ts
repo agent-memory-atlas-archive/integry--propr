@@ -87,7 +87,7 @@ async function stub(page: Page, creators: Creator[], todoCategories: (string | n
       ...Object.fromEntries(goals.map(item => [`/api/goals/${item.id}`, { goal: item }])),
       ...Object.fromEntries(goals.map(item => [`/api/goals/${item.id}/previews`, { previews: [] }])),
       ...Object.fromEntries(goals.map(item => [`/api/task/${item.taskId}/live-details`, { events: [], todos: [], currentTask: null }])),
-      '/api/agent-definitions': { definitions, total: definitions.length, limit: 200, offset: 0 },
+      '/api/automation-definitions': { definitions, total: definitions.length, limit: 200, offset: 0 },
       '/api/config/repos': { success: true, repos_to_monitor: repos },
       '/api/github/repos': { repos: [] },
       '/api/config/settings': {},

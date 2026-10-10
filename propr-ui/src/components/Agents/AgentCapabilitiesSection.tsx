@@ -1,5 +1,5 @@
 import React from 'react';
-import { AGENT_CAPABILITIES, type AgentCapability } from '@propr/shared';
+import { AUTOMATION_CAPABILITIES, type AutomationCapability } from '@propr/shared';
 import { AgentFormRow } from './AgentFormRow';
 import { agentTypeLabel } from './agentPresentation';
 
@@ -11,15 +11,15 @@ import { agentTypeLabel } from './agentPresentation';
 export type ProprMcpSupport = 'supported' | 'unsupported' | 'unknown';
 
 interface AgentCapabilitiesSectionProps {
-  capabilities: AgentCapability[];
-  onChange: (capabilities: AgentCapability[]) => void;
+  capabilities: AutomationCapability[];
+  onChange: (capabilities: AutomationCapability[]) => void;
   proprMcpSupport: ProprMcpSupport;
   /** Runtime of the selected agent, for the hints; null when not known. */
   agentType: string | null;
   disabled: boolean;
 }
 
-const CAPABILITY_TEXT: Record<AgentCapability, { label: string; description: string }> = {
+const CAPABILITY_TEXT: Record<AutomationCapability, { label: string; description: string }> = {
   repository_read: {
     label: 'Read repositories',
     description: 'Check out the selected repositories read-only so the agent can inspect the code.',
@@ -40,14 +40,14 @@ const NATIVE_WEB_RUNTIMES = new Set(['claude', 'codex']);
 export const AgentCapabilitiesSection: React.FC<AgentCapabilitiesSectionProps> = ({
   capabilities, onChange, proprMcpSupport, agentType, disabled,
 }) => {
-  const toggle = (capability: AgentCapability, enabled: boolean) => {
+  const toggle = (capability: AutomationCapability, enabled: boolean) => {
     const next = new Set(capabilities);
     if (enabled) next.add(capability);
     else next.delete(capability);
-    onChange(AGENT_CAPABILITIES.filter(candidate => next.has(candidate)));
+    onChange(AUTOMATION_CAPABILITIES.filter(candidate => next.has(candidate)));
   };
 
-  const hintFor = (capability: AgentCapability): string | null => {
+  const hintFor = (capability: AutomationCapability): string | null => {
     if (capability === 'propr_mcp' && proprMcpSupport === 'unsupported') {
       return `Not available for ${agentType ? agentTypeLabel(agentType) : 'this coding agent'}: only Claude and Codex agents can use ProPR tools.`;
     }
@@ -60,7 +60,7 @@ export const AgentCapabilitiesSection: React.FC<AgentCapabilitiesSectionProps> =
   return (
     <AgentFormRow label="Capabilities" hint="What the coding agent may use while it writes the report.">
       <ul className="space-y-3">
-        {AGENT_CAPABILITIES.map(capability => {
+        {AUTOMATION_CAPABILITIES.map(capability => {
           const text = CAPABILITY_TEXT[capability];
           const locked = capability === 'propr_mcp' && proprMcpSupport === 'unsupported';
           const hint = hintFor(capability);

@@ -3,16 +3,16 @@ import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-li
 import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom';
 import { AGENT_RUN_PAGE_SIZE, AgentRunHistory } from './AgentRunHistory';
 import { forgetReportPreviews } from './agentRunPresentation';
-import { getAgentRun, listAgentRuns, type AgentRunRecord } from '../../api/agentDefinitionsApi';
+import { getAutomationRun, listAutomationRuns, type AutomationRunRecord } from '../../api/automationDefinitionsApi';
 
-vi.mock('../../api/agentDefinitionsApi', () => ({
-  listAgentRuns: vi.fn(),
-  getAgentRun: vi.fn(),
+vi.mock('../../api/automationDefinitionsApi', () => ({
+  listAutomationRuns: vi.fn(),
+  getAutomationRun: vi.fn(),
 }));
 
 const NOW = 1_800_000_000_000;
 
-const run = (id: string, patch: Partial<AgentRunRecord> = {}): AgentRunRecord => ({
+const run = (id: string, patch: Partial<AutomationRunRecord> = {}): AutomationRunRecord => ({
   id, definitionId: 'agent-1', ownerId: '1', trigger: 'schedule', triggerSource: 'scheduler', idempotencyKey: null,
   state: 'completed', autonomyMode: 'dry_run', reportTaskId: `task-${id}`, actionTaskId: null, reportTruncated: false,
   actionSummary: null, skipReason: null, failureReason: null, approvedBy: null, operatorNote: null, deferredUntil: null,
@@ -41,7 +41,7 @@ describe('AgentRunHistory', () => {
   });
 
   it('shows a skeleton, then rows newest first with trigger, state and duration', async () => {
-    vi.mocked(listAgentRuns).mockResolvedValue({
+    vi.mocked(listAutomationRuns).mockResolvedValue({
       runs: [
         run('r2', { trigger: 'manual', triggerSource: 'user:octocat', state: 'awaiting_approval', startedAt: NOW - 5 * 60_000, createdAt: NOW - 5 * 60_000, finishedAt: null }),
         run('r1'),
@@ -66,22 +66,22 @@ describe('AgentRunHistory', () => {
 
   it('loads the next page from nextOffset and appends it', async () => {
     const first = Array.from({ length: AGENT_RUN_PAGE_SIZE }, (_, index) => run(`a${index}`));
-    vi.mocked(listAgentRuns)
+    vi.mocked(listAutomationRuns)
       .mockResolvedValueOnce({ runs: first, total: AGENT_RUN_PAGE_SIZE + 1, limit: AGENT_RUN_PAGE_SIZE, offset: 0, nextOffset: AGENT_RUN_PAGE_SIZE })
       .mockResolvedValueOnce({ runs: [run('oldest')], total: AGENT_RUN_PAGE_SIZE + 1, limit: AGENT_RUN_PAGE_SIZE, offset: AGENT_RUN_PAGE_SIZE, nextOffset: null });
     renderHistory();
 
     expect(await screen.findAllByTestId('agent-run-row')).toHaveLength(AGENT_RUN_PAGE_SIZE);
-    expect(listAgentRuns).toHaveBeenLastCalledWith('agent-1', { limit: AGENT_RUN_PAGE_SIZE, offset: 0 });
+    expect(listAutomationRuns).toHaveBeenLastCalledWith('agent-1', { limit: AGENT_RUN_PAGE_SIZE, offset: 0 });
     fireEvent.click(screen.getByRole('button', { name: 'Load more' }));
 
     await waitFor(() => expect(screen.getAllByTestId('agent-run-row')).toHaveLength(AGENT_RUN_PAGE_SIZE + 1));
-    expect(listAgentRuns).toHaveBeenLastCalledWith('agent-1', { limit: AGENT_RUN_PAGE_SIZE, offset: AGENT_RUN_PAGE_SIZE });
+    expect(listAutomationRuns).toHaveBeenLastCalledWith('agent-1', { limit: AGENT_RUN_PAGE_SIZE, offset: AGENT_RUN_PAGE_SIZE });
     expect(screen.queryByRole('button', { name: 'Load more' })).not.toBeInTheDocument();
   });
 
   it('opens a run when its row is clicked', async () => {
-    vi.mocked(listAgentRuns).mockResolvedValue({ runs: [run('r1')], total: 1, limit: AGENT_RUN_PAGE_SIZE, offset: 0, nextOffset: null });
+    vi.mocked(listAutomationRuns).mockResolvedValue({ runs: [run('r1')], total: 1, limit: AGENT_RUN_PAGE_SIZE, offset: 0, nextOffset: null });
     renderHistory();
 
     fireEvent.click(await screen.findByTestId('agent-run-row'));
@@ -90,19 +90,19 @@ describe('AgentRunHistory', () => {
   });
 
   it('reads the report preview once, on first hover', async () => {
-    vi.mocked(listAgentRuns).mockResolvedValue({ runs: [run('r1')], total: 1, limit: AGENT_RUN_PAGE_SIZE, offset: 0, nextOffset: null });
-    vi.mocked(getAgentRun).mockResolvedValue({ ...run('r1'), report: '\n\n## Three outdated packages\n\nDetails…' });
+    vi.mocked(listAutomationRuns).mockResolvedValue({ runs: [run('r1')], total: 1, limit: AGENT_RUN_PAGE_SIZE, offset: 0, nextOffset: null });
+    vi.mocked(getAutomationRun).mockResolvedValue({ ...run('r1'), report: '\n\n## Three outdated packages\n\nDetails…' });
     renderHistory();
 
     const row = await screen.findByTestId('agent-run-row');
     fireEvent.mouseEnter(row);
     expect(await within(row).findByText('Three outdated packages')).toBeInTheDocument();
     fireEvent.mouseEnter(row);
-    expect(getAgentRun).toHaveBeenCalledTimes(1);
+    expect(getAutomationRun).toHaveBeenCalledTimes(1);
   });
 
   it('explains an empty history', async () => {
-    vi.mocked(listAgentRuns).mockResolvedValue({ runs: [], total: 0, limit: AGENT_RUN_PAGE_SIZE, offset: 0, nextOffset: null });
+    vi.mocked(listAutomationRuns).mockResolvedValue({ runs: [], total: 0, limit: AGENT_RUN_PAGE_SIZE, offset: 0, nextOffset: null });
     renderHistory();
     expect(await screen.findByTestId('agent-runs-empty')).toHaveTextContent('No runs yet');
   });

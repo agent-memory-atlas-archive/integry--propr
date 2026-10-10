@@ -9,7 +9,7 @@ import { AgentRunsPane } from './AgentRunsPane';
 import { AgentConflictBanner, AgentDetailTabs, AgentEditorHeader, AgentRunBreadcrumb, type AgentDetailSection } from './AgentEditorHeader';
 import { AgentSettingsForm } from './AgentSettingsForm';
 import { runAvailability, useAgentEditor, type AgentEditorCallbacks, type AgentEditorNotify } from './useAgentEditor';
-import type { AgentRunRecord } from '../../api/agentDefinitionsApi';
+import type { AutomationRunRecord } from '../../api/automationDefinitionsApi';
 
 interface AgentEditorProps extends AgentEditorCallbacks {
   /** The agent to edit, or null to create one. */
@@ -68,7 +68,7 @@ const AgentEditorTop: React.FC<AgentEditorTopProps> = ({ definitionId, editor, s
 export const AgentEditor: React.FC<AgentEditorProps> = ({ definitionId, headerControls, section: requestedSection = 'settings', runId = null, ...callbacks }) => {
   const { isDemoMode } = useDemoMode();
   const navigate = useNavigate();
-  const openRun = useCallback((run: AgentRunRecord) => {
+  const openRun = useCallback((run: AutomationRunRecord) => {
     navigate(`/automations/${encodeURIComponent(run.definitionId)}/runs/${encodeURIComponent(run.id)}`);
   }, [navigate]);
   const toast = useOptionalToast();

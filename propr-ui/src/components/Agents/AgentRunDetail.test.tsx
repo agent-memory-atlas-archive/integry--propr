@@ -5,7 +5,7 @@ import type { TaskUpdatePayload } from '@propr/shared';
 import { AgentRunDetail } from './AgentRunDetail';
 import { AGENT_RUN_REFRESH_MS } from './useAgentRun';
 import { apiFetch } from '../../api/apiClient';
-import type { AgentRunRecord } from '../../api/agentDefinitionsApi';
+import type { AutomationRunRecord } from '../../api/automationDefinitionsApi';
 import { SocketContext } from '../../contexts/SocketContext';
 import { createInertSocketContextValue } from '../../test/socketContext';
 
@@ -15,7 +15,7 @@ vi.mock('../../api/apiClient', () => ({
   handleApiResponse: vi.fn(async (response: Response) => { if (!response.ok) throw new Error('Request failed'); }),
 }));
 
-const baseRun: AgentRunRecord = {
+const baseRun: AutomationRunRecord = {
   id: 'run-1', definitionId: 'agent-1', ownerId: '1', trigger: 'manual', triggerSource: 'user:octocat', idempotencyKey: null,
   state: 'completed', autonomyMode: 'dry_run', reportTaskId: 'task-report', actionTaskId: null,
   report: '# Weekly findings\n\n- **lodash** is outdated\n\n[advisory](https://example.com/advisory)',
@@ -32,7 +32,7 @@ interface Call { method: string; path: string; body: unknown }
  * A fake run endpoint: GET answers with the current run, approve/reject/cancel
  * move it on. Every call is recorded with its parsed body.
  */
-function serveRun(initial: AgentRunRecord, reads: AgentRunRecord[] = []) {
+function serveRun(initial: AutomationRunRecord, reads: AutomationRunRecord[] = []) {
   let current = initial;
   const calls: Call[] = [];
   vi.mocked(apiFetch).mockImplementation(async (input, init = {}) => {
@@ -171,7 +171,7 @@ describe('AgentRunDetail', () => {
 
     await waitFor(() => expect(screen.getByTestId('agent-run-state')).toHaveTextContent('Acting'));
     const approve = server.calls.find(call => call.method === 'POST');
-    expect(approve).toEqual({ method: 'POST', path: '/api/agent-runs/run-1/approve', body: { note: 'Only fix lodash.' } });
+    expect(approve).toEqual({ method: 'POST', path: '/api/automation-runs/run-1/approve', body: { note: 'Only fix lodash.' } });
     expect(screen.queryByTestId('agent-run-approval')).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Approve and act' })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Reject' })).not.toBeInTheDocument();
@@ -192,7 +192,7 @@ describe('AgentRunDetail', () => {
     fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Reject' }));
 
     await waitFor(() => expect(screen.getByTestId('agent-run-state')).toHaveTextContent('Rejected'));
-    expect(server.calls.filter(call => call.method === 'POST').map(call => call.path)).toEqual(['/api/agent-runs/run-1/reject']);
+    expect(server.calls.filter(call => call.method === 'POST').map(call => call.path)).toEqual(['/api/automation-runs/run-1/reject']);
     expect(screen.queryByTestId('agent-run-approval')).not.toBeInTheDocument();
   });
 
@@ -211,7 +211,7 @@ describe('AgentRunDetail', () => {
     fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Cancel run' }));
 
     await waitFor(() => expect(screen.getByTestId('agent-run-state')).toHaveTextContent('Cancelled'));
-    expect(server.calls.filter(call => call.method === 'POST').map(call => call.path)).toEqual(['/api/agent-runs/run-1/cancel']);
+    expect(server.calls.filter(call => call.method === 'POST').map(call => call.path)).toEqual(['/api/automation-runs/run-1/cancel']);
     expect(screen.queryByRole('button', { name: 'Cancel run' })).not.toBeInTheDocument();
   });
 

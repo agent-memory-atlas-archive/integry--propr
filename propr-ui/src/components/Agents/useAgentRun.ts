@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { approveAgentRun, cancelAgentRun, getAgentRun, rejectAgentRun, type AgentRunRecord } from '../../api/agentDefinitionsApi';
+import { approveAutomationRun, cancelAutomationRun, getAutomationRun, rejectAutomationRun, type AutomationRunRecord } from '../../api/automationDefinitionsApi';
 import { useOptionalSocket } from '../../contexts/useSocket';
 import { isTerminalRunState, rememberReportPreview } from './agentRunPresentation';
 
@@ -19,7 +19,7 @@ export type AgentRunAction = 'approve' | 'reject' | 'cancel';
  * agent instead, and no action can be taken on it from here.
  */
 export function useAgentRun(definitionId: string, runId: string) {
-  const [run, setRun] = useState<AgentRunRecord | null>(null);
+  const [run, setRun] = useState<AutomationRunRecord | null>(null);
   const [foreignDefinitionId, setForeignDefinitionId] = useState<string | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
@@ -32,7 +32,7 @@ export function useAgentRun(definitionId: string, runId: string) {
     return () => { activeRef.current = false; };
   }, []);
 
-  const record = useCallback((next: AgentRunRecord) => {
+  const record = useCallback((next: AutomationRunRecord) => {
     version.current += 1;
     if (next.definitionId !== definitionId) {
       setRun(null);
@@ -47,7 +47,7 @@ export function useAgentRun(definitionId: string, runId: string) {
     if (inFlight.current) return;
     inFlight.current = true;
     const sentAt = version.current;
-    void getAgentRun(runId)
+    void getAutomationRun(runId)
       .then(loaded => {
         if (!activeRef.current || version.current !== sentAt) return;
         record(loaded);
@@ -87,8 +87,8 @@ export function useAgentRun(definitionId: string, runId: string) {
     setActionError(null);
     try {
       const changed = action === 'approve'
-        ? await approveAgentRun(runId, note)
-        : action === 'reject' ? await rejectAgentRun(runId) : await cancelAgentRun(runId);
+        ? await approveAutomationRun(runId, note)
+        : action === 'reject' ? await rejectAutomationRun(runId) : await cancelAutomationRun(runId);
       if (activeRef.current) record(changed);
       return true;
     } catch (failure) {

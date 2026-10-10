@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { Ban, Check, Copy, ExternalLink, Loader2 } from 'lucide-react';
-import type { AgentRunRecord } from '../../api/agentDefinitionsApi';
+import type { AutomationRunRecord } from '../../api/automationDefinitionsApi';
 import { useDocumentTitle } from '../../hooks/useDocumentTitle';
 import MarkdownRenderer from '../TaskDetails/MarkdownRenderer';
 import { ListSkeleton } from '../ui/Skeleton';
@@ -27,7 +27,7 @@ const SECONDARY_BUTTON = 'inline-flex items-center gap-1.5 rounded-md border bor
 const TASK_LINK = 'inline-flex items-center gap-1 text-sm font-medium text-teal-700 hover:underline';
 
 /** Why the run did not go ahead or did not finish, worded by the server (cost-gate messages included). */
-function runReason(run: AgentRunRecord): { title: string; message: string } | null {
+function runReason(run: AutomationRunRecord): { title: string; message: string } | null {
   if (run.state === 'failed' && run.failureReason) return { title: 'Run failed', message: run.failureReason };
   if (run.state === 'skipped' && run.skipReason) return { title: 'Run skipped', message: run.skipReason };
   if (run.state === 'awaiting_approval' && run.skipReason) return { title: 'Automatic acting paused for approval', message: run.skipReason };
@@ -65,12 +65,12 @@ const CopyButton: React.FC<{ text: string }> = ({ text }) => {
 };
 
 /** Why a run shows no report: not written yet, never written, or empty. */
-const missingReportText = (run: AgentRunRecord): string => {
+const missingReportText = (run: AutomationRunRecord): string => {
   if (run.reportedAt !== null) return 'This run produced an empty report.';
   return isTerminalRunState(run.state) ? 'This run ended without a report.' : 'The report appears here once the agent has written it.';
 };
 
-const AgentRunReport: React.FC<{ run: AgentRunRecord }> = ({ run }) => (
+const AgentRunReport: React.FC<{ run: AutomationRunRecord }> = ({ run }) => (
   <section aria-labelledby="agent-run-report-title" className="rounded-lg border border-slate-200 bg-white">
     <header className="flex items-center justify-between gap-3 border-b border-slate-200 px-4 py-2">
       <h2 id="agent-run-report-title" className="text-sm font-semibold text-slate-900">Report</h2>
@@ -88,7 +88,7 @@ const AgentRunReport: React.FC<{ run: AgentRunRecord }> = ({ run }) => (
 );
 
 /** State, trigger, autonomy and timeline of a run, with its actions on the right. */
-const AgentRunHeader: React.FC<{ run: AgentRunRecord; actions?: React.ReactNode }> = ({ run, actions }) => (
+const AgentRunHeader: React.FC<{ run: AutomationRunRecord; actions?: React.ReactNode }> = ({ run, actions }) => (
   <header className="space-y-3">
     <div className="flex items-start justify-between gap-3">
       <div className="flex flex-wrap items-center gap-2">
@@ -112,7 +112,7 @@ const AgentRunHeader: React.FC<{ run: AgentRunRecord; actions?: React.ReactNode 
 );
 
 /** The acting step's summary, once the run is acting or has acted. */
-const AgentRunAction: React.FC<{ run: AgentRunRecord }> = ({ run }) => {
+const AgentRunAction: React.FC<{ run: AutomationRunRecord }> = ({ run }) => {
   const shown = run.state === 'acting' || run.actionSummary !== null || run.actionTaskId !== null;
   if (!shown) return null;
   return (
@@ -128,7 +128,7 @@ const AgentRunAction: React.FC<{ run: AgentRunRecord }> = ({ run }) => {
 };
 
 /** The report and acting steps are ordinary tasks; their live output, cost and logs live on the task page. */
-const AgentRunTaskLinks: React.FC<{ run: AgentRunRecord }> = ({ run }) => {
+const AgentRunTaskLinks: React.FC<{ run: AutomationRunRecord }> = ({ run }) => {
   if (!run.reportTaskId && !run.actionTaskId) return null;
   return (
     <nav aria-label="Run tasks" className="flex flex-wrap gap-4">

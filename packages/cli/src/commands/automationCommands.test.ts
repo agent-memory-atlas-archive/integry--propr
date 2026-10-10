@@ -152,7 +152,7 @@ test("run --wait polls the run and prints only the report on stdout when it comp
   assert.match(result.stderr, /run: run-1/);
   assert.match(result.stderr, /state: running/);
   assert.match(result.stderr, /state: completed/);
-  assert.deepEqual(result.requests.slice(1).map((request) => request.url.pathname), ["/api/agent-runs/run-1", "/api/agent-runs/run-1"]);
+  assert.deepEqual(result.requests.slice(1).map((request) => request.url.pathname), ["/api/automation-runs/run-1", "/api/automation-runs/run-1"]);
 });
 
 test("a deferred trigger exits 3 with the usage gate's reason on stderr", async () => {
@@ -241,13 +241,13 @@ test("run --json prints a version 1 automation-run document with the exit code",
   assert.equal(document.run.terminal, true);
 });
 
-test("a missing agent prints 'Agent not found' and exits 1", async () => {
-  const result = await run(["run", "missing-agent"], () => ({ status: 404, body: { error: "Agent definition not found" } }));
+test("a missing agent prints 'Automation not found' and exits 1", async () => {
+  const result = await run(["run", "missing-agent"], () => ({ status: 404, body: { error: "Automation definition not found" } }));
   assert.equal(result.exitCode, 1);
-  assert.match(result.stderr, /Agent not found: missing-agent/);
+  assert.match(result.stderr, /Automation not found: missing-agent/);
   assert.match(result.stderr, /--idempotency-key cli-/);
 
-  const shown = await run(["show", "missing-agent", "--json"], () => ({ status: 404, body: { error: "Agent definition not found" } }));
+  const shown = await run(["show", "missing-agent", "--json"], () => ({ status: 404, body: { error: "Automation definition not found" } }));
   const document = JSON.parse(shown.stdout);
   assert.equal(document.kind, "automation-error");
   assert.equal(document.error.code, "not_found");
@@ -282,7 +282,7 @@ test("report writes the Markdown to stdout and metadata to stderr", async () => 
   assert.equal(result.stdout, "# Findings");
   assert.match(result.stderr, /run: run-1/);
   assert.match(result.stderr, /state: completed/);
-  assert.equal(result.requests[0].url.pathname, "/api/agent-runs/run-1");
+  assert.equal(result.requests[0].url.pathname, "/api/automation-runs/run-1");
 });
 
 test("report exits 1 when the run has no report yet", async () => {
@@ -307,17 +307,17 @@ test("report --json still exits 1 when the run has no report yet", async () => {
 test("approve sends the note; reject and cancel post to their endpoints", async () => {
   const responder: Responder = (request) => ({ body: { run: runFixture({ state: request.url.pathname.endsWith("approve") ? "acting" : "rejected" }) } });
   const approved = await run(["approve", "run-1", "--note", "Only the first issue"], responder);
-  assert.equal(approved.requests[0].url.pathname, "/api/agent-runs/run-1/approve");
+  assert.equal(approved.requests[0].url.pathname, "/api/automation-runs/run-1/approve");
   assert.deepEqual(approved.requests[0].body, { note: "Only the first issue" });
   assert.match(approved.stdout, /Approved run run-1/);
 
   const rejected = await run(["reject", "run-1"], responder);
-  assert.equal(rejected.requests[0].url.pathname, "/api/agent-runs/run-1/reject");
+  assert.equal(rejected.requests[0].url.pathname, "/api/automation-runs/run-1/reject");
   const cancelled = await run(["cancel", "run-1", "--json"], responder);
-  assert.equal(cancelled.requests[0].url.pathname, "/api/agent-runs/run-1/cancel");
+  assert.equal(cancelled.requests[0].url.pathname, "/api/automation-runs/run-1/cancel");
   assert.equal(JSON.parse(cancelled.stdout).action, "cancel");
 
-  const conflict = await run(["approve", "run-1"], () => ({ status: 409, body: { error: "Agent run is completed and is not awaiting approval" } }));
+  const conflict = await run(["approve", "run-1"], () => ({ status: 409, body: { error: "Automation run is completed and is not awaiting approval" } }));
   assert.equal(conflict.exitCode, 1);
   assert.match(conflict.stderr, /not awaiting approval/);
 });

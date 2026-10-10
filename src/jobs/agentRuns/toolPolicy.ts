@@ -1,4 +1,4 @@
-import type { AgentCapability } from '@propr/shared';
+import type { AutomationCapability } from '@propr/shared';
 import { PROPR_MCP_BEARER_TOKEN_ENV, PROPR_MCP_SERVER_NAME, type AgentToolPolicy } from '@propr/core';
 
 /** Run-scoped ProPR MCP credential issued for one agent run (issue 9). */
@@ -21,7 +21,7 @@ function proprMcpServer(grant: AgentRunMcpGrant): NonNullable<AgentToolPolicy['m
  */
 export function agentRunToolPolicy(input: {
     phase: AgentRunPhase;
-    capabilities: readonly AgentCapability[];
+    capabilities: readonly AutomationCapability[];
     mcpGrant?: AgentRunMcpGrant | null;
 }): AgentToolPolicy {
     const { phase, capabilities, mcpGrant } = input;

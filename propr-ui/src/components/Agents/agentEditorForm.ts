@@ -1,11 +1,11 @@
 import {
-  DEFAULT_AGENT_AUTONOMY_MODE,
-  DEFAULT_AGENT_CAPABILITIES,
-  type AgentAutonomyMode,
-  type AgentCapability,
-  type AgentDefinitionInput,
+  DEFAULT_AUTOMATION_AUTONOMY_MODE,
+  DEFAULT_AUTOMATION_CAPABILITIES,
+  type AutomationAutonomyMode,
+  type AutomationCapability,
+  type AutomationDefinitionInput,
 } from '@propr/shared';
-import type { AgentDefinitionRecord } from '../../api/agentDefinitionsApi';
+import type { AutomationDefinitionRecord } from '../../api/automationDefinitionsApi';
 
 /** The editor's working copy of a definition, shaped for its inputs. */
 export interface AgentEditorForm {
@@ -16,11 +16,11 @@ export interface AgentEditorForm {
   previousReportCount: number;
   agentId: string | null;
   model: string | null;
-  capabilities: AgentCapability[];
+  capabilities: AutomationCapability[];
   /** Kept while the schedule is off, so turning it back on restores the expression. */
   schedule: string;
   scheduleEnabled: boolean;
-  autonomy: AgentAutonomyMode;
+  autonomy: AutomationAutonomyMode;
 }
 
 export type AgentEditorFormPatch = Partial<AgentEditorForm>;
@@ -33,13 +33,13 @@ export const emptyAgentForm = (): AgentEditorForm => ({
   previousReportCount: 0,
   agentId: null,
   model: null,
-  capabilities: [...DEFAULT_AGENT_CAPABILITIES],
+  capabilities: [...DEFAULT_AUTOMATION_CAPABILITIES],
   schedule: '',
   scheduleEnabled: false,
-  autonomy: DEFAULT_AGENT_AUTONOMY_MODE,
+  autonomy: DEFAULT_AUTOMATION_AUTONOMY_MODE,
 });
 
-export const formFromDefinition = (definition: AgentDefinitionRecord): AgentEditorForm => ({
+export const formFromDefinition = (definition: AutomationDefinitionRecord): AgentEditorForm => ({
   name: definition.name,
   description: definition.description ?? '',
   repositories: [...definition.repositories],
@@ -54,7 +54,7 @@ export const formFromDefinition = (definition: AgentDefinitionRecord): AgentEdit
 });
 
 /** The request body for a create or a full-form update, in the shared input contract. */
-export const formToInput = (form: AgentEditorForm): AgentDefinitionInput => ({
+export const formToInput = (form: AgentEditorForm): AutomationDefinitionInput => ({
   name: form.name.trim(),
   description: form.description.trim() || null,
   prompt: form.prompt,

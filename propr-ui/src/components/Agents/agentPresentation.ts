@@ -1,23 +1,23 @@
-import { nextCronOccurrence, validateAgentSchedule, type AgentAutonomyMode, type AgentRunState, type InstanceCatalogAgent } from '@propr/shared';
-import type { AgentDefinitionRecord } from '../../api/agentDefinitionsApi';
+import { nextCronOccurrence, validateAutomationSchedule, type AutomationAutonomyMode, type AutomationRunState, type InstanceCatalogAgent } from '@propr/shared';
+import type { AutomationDefinitionRecord } from '../../api/automationDefinitionsApi';
 import { AGENT_DISPLAY, type AgentType } from '../../config/modelDefinitions';
 import { formatModelName } from '../../utils/modelDisplay';
 
 /** How the Agents list and editor name and color definitions, schedules and runs. */
 
-export const AUTONOMY_LABELS: Record<AgentAutonomyMode, string> = {
+export const AUTONOMY_LABELS: Record<AutomationAutonomyMode, string> = {
   dry_run: 'Dry run',
   preview: 'Preview',
   auto: 'Auto',
 };
 
-export const AUTONOMY_BADGE_CLASSES: Record<AgentAutonomyMode, string> = {
+export const AUTONOMY_BADGE_CLASSES: Record<AutomationAutonomyMode, string> = {
   dry_run: 'border-slate-200 bg-white text-slate-600',
   preview: 'border-amber-300 bg-white text-amber-700',
   auto: 'border-teal-600 bg-teal-600 text-white',
 };
 
-export const RUN_STATE_LABELS: Record<AgentRunState, string> = {
+export const RUN_STATE_LABELS: Record<AutomationRunState, string> = {
   queued: 'Queued',
   deferred: 'Deferred',
   running: 'Running',
@@ -36,7 +36,7 @@ export const RUN_STATE_LABELS: Record<AgentRunState, string> = {
  * human is amber, success is green, failure is red, and runs that ended
  * without a result recede to slate.
  */
-export const RUN_STATE_BADGE_CLASSES: Record<AgentRunState, string> = {
+export const RUN_STATE_BADGE_CLASSES: Record<AutomationRunState, string> = {
   queued: 'border-slate-200 bg-slate-100 text-slate-600',
   deferred: 'border-slate-200 bg-slate-100 text-slate-600',
   running: 'border-teal-200 bg-teal-50 text-teal-700',
@@ -99,7 +99,7 @@ export const describeCron = (expression: string): string => {
 
 /** The next fire time of a valid cron expression, or null. */
 export const nextScheduledRun = (expression: string, now: Date): Date | null => {
-  if (validateAgentSchedule(expression)) return null;
+  if (validateAutomationSchedule(expression)) return null;
   try {
     return nextCronOccurrence(expression, now);
   } catch {
@@ -112,7 +112,7 @@ export const nextScheduledRun = (expression: string, now: Date): Date | null => 
  * The stored next run is read when the list loads, so once a page left open
  * passes it, the next occurrence is worked out from the schedule instead.
  */
-export const scheduleSummary = (definition: Pick<AgentDefinitionRecord, 'scheduleCron' | 'scheduleEnabled' | 'nextRunAt' | 'enabled'>, now: number): string => {
+export const scheduleSummary = (definition: Pick<AutomationDefinitionRecord, 'scheduleCron' | 'scheduleEnabled' | 'nextRunAt' | 'enabled'>, now: number): string => {
   if (!definition.scheduleCron || !definition.scheduleEnabled) return 'Manual';
   const name = describeCron(definition.scheduleCron);
   if (!definition.enabled) return `${name} · paused`;
@@ -157,7 +157,7 @@ export const defaultRunner = (agents: readonly InstanceCatalogAgent[], configure
 };
 
 /** What runs an agent, for the list: the model's name, else the agent's, else the instance default. */
-export const runnerLabel = (definition: Pick<AgentDefinitionRecord, 'agentAlias' | 'modelName'>, agents: readonly InstanceCatalogAgent[]): string => {
+export const runnerLabel = (definition: Pick<AutomationDefinitionRecord, 'agentAlias' | 'modelName'>, agents: readonly InstanceCatalogAgent[]): string => {
   if (definition.modelName) return formatModelName(definition.modelName);
   if (definition.agentAlias) return agentDisplayName(definition.agentAlias, agents);
   return 'Default agent';

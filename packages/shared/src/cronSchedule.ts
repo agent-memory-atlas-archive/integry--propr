@@ -19,10 +19,10 @@ export const CRON_MACROS = {
   '@monthly': '0 0 1 * *',
 } as const;
 
-/** Agent schedules may not fire more often than this (cost guard). */
-export const MIN_AGENT_SCHEDULE_INTERVAL_MINUTES = 15;
+/** Automation schedules may not fire more often than this (cost guard). */
+export const MIN_AUTOMATION_SCHEDULE_INTERVAL_MINUTES = 15;
 /** Upper bound for a cron expression string accepted from users. */
-export const AGENT_SCHEDULE_MAX_LENGTH = 128;
+export const AUTOMATION_SCHEDULE_MAX_LENGTH = 128;
 /** nextCronOccurrence gives up when no match exists within this window. */
 export const CRON_SEARCH_LIMIT_DAYS = 366;
 
@@ -199,11 +199,11 @@ function firesOnConsecutiveDays(matchingDays: readonly number[]): boolean {
 /**
  * Validate an agent schedule. Returns a user-facing error, or null when the
  * expression is valid, fires at least once a year and no more often than every
- * MIN_AGENT_SCHEDULE_INTERVAL_MINUTES.
+ * MIN_AUTOMATION_SCHEDULE_INTERVAL_MINUTES.
  */
-export function validateAgentSchedule(expr: unknown): string | null {
+export function validateAutomationSchedule(expr: unknown): string | null {
   if (typeof expr !== 'string' || !expr.trim()) return 'schedule must be a cron expression';
-  if (expr.length > AGENT_SCHEDULE_MAX_LENGTH) return `schedule must be at most ${AGENT_SCHEDULE_MAX_LENGTH} characters`;
+  if (expr.length > AUTOMATION_SCHEDULE_MAX_LENGTH) return `schedule must be at most ${AUTOMATION_SCHEDULE_MAX_LENGTH} characters`;
   let cron: ParsedCronExpression;
   try {
     cron = parseCronExpression(expr);
@@ -217,8 +217,17 @@ export function validateAgentSchedule(expr: unknown): string | null {
     || lastGap > CRON_SEARCH_LIMIT_DAYS
     || days.some((day, index) => index > 0 && day - days[index - 1] > CRON_SEARCH_LIMIT_DAYS);
   if (yearlyGapExceeded) return 'schedule must fire at least once a year';
-  if (minimumCronIntervalMinutes(cron, days) < MIN_AGENT_SCHEDULE_INTERVAL_MINUTES) {
-    return `schedule must not run more often than every ${MIN_AGENT_SCHEDULE_INTERVAL_MINUTES} minutes`;
+  if (minimumCronIntervalMinutes(cron, days) < MIN_AUTOMATION_SCHEDULE_INTERVAL_MINUTES) {
+    return `schedule must not run more often than every ${MIN_AUTOMATION_SCHEDULE_INTERVAL_MINUTES} minutes`;
   }
   return null;
 }
+
+/** @deprecated Use MIN_AUTOMATION_SCHEDULE_INTERVAL_MINUTES. */
+export const MIN_AGENT_SCHEDULE_INTERVAL_MINUTES = MIN_AUTOMATION_SCHEDULE_INTERVAL_MINUTES;
+
+/** @deprecated Use AUTOMATION_SCHEDULE_MAX_LENGTH. */
+export const AGENT_SCHEDULE_MAX_LENGTH = AUTOMATION_SCHEDULE_MAX_LENGTH;
+
+/** @deprecated Use validateAutomationSchedule. */
+export const validateAgentSchedule = validateAutomationSchedule;

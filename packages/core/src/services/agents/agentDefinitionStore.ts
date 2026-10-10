@@ -1,13 +1,13 @@
 import { randomUUID } from 'node:crypto';
 import type { Knex } from 'knex';
 import {
-  DEFAULT_AGENT_AUTONOMY_MODE,
-  DEFAULT_AGENT_CAPABILITIES,
-  isAgentAutonomyMode,
-  isAgentCapability,
+  DEFAULT_AUTOMATION_AUTONOMY_MODE,
+  DEFAULT_AUTOMATION_CAPABILITIES,
+  isAutomationAutonomyMode,
+  isAutomationCapability,
   nextCronOccurrence,
-  type AgentAutonomyMode,
-  type AgentCapability,
+  type AutomationAutonomyMode,
+  type AutomationCapability,
 } from '@propr/shared';
 import { db } from '../../db/connection.js';
 import type { Attachment } from '../attachmentService.js';
@@ -37,7 +37,7 @@ export interface StoredAgentDefinition {
   attachments: Attachment[];
   agentAlias: string | null;
   modelName: string | null;
-  capabilities: AgentCapability[];
+  capabilities: AutomationCapability[];
   includePreviousReports: boolean;
   previousReportsLimit: number;
   scheduleCron: string | null;
@@ -45,7 +45,7 @@ export interface StoredAgentDefinition {
   scheduleEnabled: boolean;
   /** Next UTC fire time (epoch ms); null unless enabled, scheduled and a cron is set. */
   nextRunAt: number | null;
-  autonomyMode: AgentAutonomyMode;
+  autonomyMode: AutomationAutonomyMode;
   enabled: boolean;
   /** Optimistic concurrency token, incremented on every field update. */
   revision: number;
@@ -75,12 +75,12 @@ export interface CreateAgentDefinitionInput {
   attachments?: Attachment[];
   agentAlias?: string | null;
   modelName?: string | null;
-  capabilities?: AgentCapability[];
+  capabilities?: AutomationCapability[];
   includePreviousReports?: boolean;
   previousReportsLimit?: number;
   scheduleCron?: string | null;
   scheduleEnabled?: boolean;
-  autonomyMode?: AgentAutonomyMode;
+  autonomyMode?: AutomationAutonomyMode;
   enabled?: boolean;
 }
 
@@ -133,14 +133,14 @@ export function rowToAgentDefinition(row: AgentDefinitionRow): StoredAgentDefini
     attachments: parseJsonArray(row.attachments).filter(isAttachment),
     agentAlias: row.agent_alias ?? null,
     modelName: row.model_name ?? null,
-    capabilities: parseJsonArray(row.capabilities).filter(isAgentCapability),
+    capabilities: parseJsonArray(row.capabilities).filter(isAutomationCapability),
     includePreviousReports: Boolean(row.include_previous_reports),
     previousReportsLimit: Number(row.previous_reports_limit),
     scheduleCron: row.schedule_cron ?? null,
     scheduleTimezone: row.schedule_timezone || SCHEDULE_TIMEZONE,
     scheduleEnabled: Boolean(row.schedule_enabled),
     nextRunAt: row.next_run_at == null ? null : Number(row.next_run_at),
-    autonomyMode: isAgentAutonomyMode(row.autonomy_mode) ? row.autonomy_mode : DEFAULT_AGENT_AUTONOMY_MODE,
+    autonomyMode: isAutomationAutonomyMode(row.autonomy_mode) ? row.autonomy_mode : DEFAULT_AUTOMATION_AUTONOMY_MODE,
     enabled: Boolean(row.enabled),
     revision: Number(row.revision),
     createdAt: Number(row.created_at),
@@ -182,14 +182,14 @@ export async function createAgentDefinition(
     attachments: JSON.stringify(input.attachments ?? []),
     agent_alias: input.agentAlias ?? null,
     model_name: input.modelName ?? null,
-    capabilities: JSON.stringify(input.capabilities ?? DEFAULT_AGENT_CAPABILITIES),
+    capabilities: JSON.stringify(input.capabilities ?? DEFAULT_AUTOMATION_CAPABILITIES),
     include_previous_reports: input.includePreviousReports ?? true,
     previous_reports_limit: input.previousReportsLimit ?? 1,
     schedule_cron: scheduleCron,
     schedule_timezone: SCHEDULE_TIMEZONE,
     schedule_enabled: scheduleEnabled,
     next_run_at: computeAgentDefinitionNextRunAt({ scheduleCron, scheduleEnabled, enabled }, timestamp),
-    autonomy_mode: input.autonomyMode ?? DEFAULT_AGENT_AUTONOMY_MODE,
+    autonomy_mode: input.autonomyMode ?? DEFAULT_AUTOMATION_AUTONOMY_MODE,
     enabled,
     revision: 0,
     created_at: timestamp,
@@ -285,14 +285,14 @@ export async function updateAgentDefinition(
   if (!row) return undefined;
   const current = rowToAgentDefinition(row);
   if (expectedRevision !== undefined && expectedRevision !== current.revision) {
-    throw statusError(`Agent definition was changed (revision ${current.revision}, expected ${expectedRevision}); reload and retry`, 409);
+    throw statusError(`Automation definition was changed (revision ${current.revision}, expected ${expectedRevision}); reload and retry`, 409);
   }
 
   const timestamp = now();
   const changes = { ...patchToRowChanges(patch), ...patchToScheduleChanges(patch, current, timestamp) };
   const updated = await database(TABLE).where({ id, owner_id: ownerId, revision: current.revision })
     .update({ ...changes, revision: current.revision + 1, updated_at: timestamp });
-  if (updated === 0) throw statusError('Agent definition was changed concurrently; reload and retry', 409);
+  if (updated === 0) throw statusError('Automation definition was changed concurrently; reload and retry', 409);
   return getAgentDefinition(id, ownerId, { database });
 }
 
@@ -480,7 +480,7 @@ export async function changeAgentDefinitionAttachments(
       .returning('*') as AgentDefinitionRow[];
     if (updated) return { definition: rowToAgentDefinition(updated), previous };
   }
-  throw statusError('Agent input files were changed concurrently; retry', 409);
+  throw statusError('Automation input files were changed concurrently; retry', 409);
 }
 
 /**

@@ -1,10 +1,10 @@
-import { TERMINAL_AGENT_RUN_STATES, type AgentRunState, type AgentRunTrigger } from '@propr/shared';
-import type { AgentCapacity, AgentRunRecord } from '../../api/agentDefinitionsApi';
+import { TERMINAL_AUTOMATION_RUN_STATES, type AutomationRunState, type AutomationRunTrigger } from '@propr/shared';
+import type { AutomationCapacity, AutomationRunRecord } from '../../api/automationDefinitionsApi';
 import { agentTypeLabel, formatDuration } from './agentPresentation';
 
 /** How the run history and run detail name triggers, times and capacity. */
 
-export const RUN_TRIGGER_LABELS: Record<AgentRunTrigger, string> = {
+export const RUN_TRIGGER_LABELS: Record<AutomationRunTrigger, string> = {
   manual: 'Run now',
   schedule: 'Schedule',
   api: 'API',
@@ -13,13 +13,13 @@ export const RUN_TRIGGER_LABELS: Record<AgentRunTrigger, string> = {
 };
 
 /** States a run can still be cancelled from. */
-export const CANCELLABLE_RUN_STATES: readonly AgentRunState[] = ['queued', 'deferred', 'running', 'awaiting_approval', 'acting'];
+export const CANCELLABLE_RUN_STATES: readonly AutomationRunState[] = ['queued', 'deferred', 'running', 'awaiting_approval', 'acting'];
 
-export const isTerminalRunState = (state: AgentRunState): boolean =>
-  (TERMINAL_AGENT_RUN_STATES as readonly AgentRunState[]).includes(state);
+export const isTerminalRunState = (state: AutomationRunState): boolean =>
+  (TERMINAL_AUTOMATION_RUN_STATES as readonly AutomationRunState[]).includes(state);
 
 /** When the run began working, or when it was created if it never started. */
-export const runStartedAt = (run: Pick<AgentRunRecord, 'startedAt' | 'createdAt'>): number => run.startedAt ?? run.createdAt;
+export const runStartedAt = (run: Pick<AutomationRunRecord, 'startedAt' | 'createdAt'>): number => run.startedAt ?? run.createdAt;
 
 /** `just now`, `5m ago`, `3h ago`, `2d ago`. */
 export const formatRelativeTime = (timestamp: number, now: number): string => {
@@ -29,7 +29,7 @@ export const formatRelativeTime = (timestamp: number, now: number): string => {
 };
 
 /** `45s`, `12m`, `2h`: how long a run took, or has taken so far; `—` before it starts. */
-export const runDuration = (run: Pick<AgentRunRecord, 'startedAt' | 'finishedAt' | 'state'>, now: number): string => {
+export const runDuration = (run: Pick<AutomationRunRecord, 'startedAt' | 'finishedAt' | 'state'>, now: number): string => {
   if (run.startedAt === null) return '—';
   const end = run.finishedAt ?? (isTerminalRunState(run.state) ? null : now);
   if (end === null) return '—';
@@ -67,7 +67,7 @@ export const forgetReportPreviews = (): void => reportPreviews.clear();
  * "Claude is at 94% of its session window (pause threshold 90%). Run anyway?",
  * or null when the agent's subscription is not near its limit.
  */
-export const capacityWarning = ({ capacity, threshold }: AgentCapacity): string | null => {
+export const capacityWarning = ({ capacity, threshold }: AutomationCapacity): string | null => {
   if (capacity.status !== 'near_limit') return null;
   const provider = agentTypeLabel(capacity.provider);
   const { sessionPercent, weeklyPercent } = capacity;

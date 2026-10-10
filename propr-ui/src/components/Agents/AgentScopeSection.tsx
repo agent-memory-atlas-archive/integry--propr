@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { X } from 'lucide-react';
-import { MAX_AGENT_REPOSITORIES } from '@propr/shared';
+import { MAX_AUTOMATION_REPOSITORIES } from '@propr/shared';
 import { RepositorySelector, type RepoOption } from '../RepositorySelector';
 import { fetchEnabledRepos } from '../../utils/repoHelpers';
 import { AGENT_CHIP_CLASSES, AgentFormRow } from './AgentFormRow';
@@ -28,12 +28,12 @@ export const AgentScopeSection: React.FC<AgentScopeSectionProps> = ({ repositori
     () => options?.filter(option => !selected.has(option.name.toLowerCase())),
     [options, selected],
   );
-  const full = repositories.length >= MAX_AGENT_REPOSITORIES;
+  const full = repositories.length >= MAX_AUTOMATION_REPOSITORIES;
 
   return (
     <AgentFormRow
       label="Repositories"
-      hint={`The repositories this automation may read. Up to ${MAX_AGENT_REPOSITORIES}; leave empty for an automation that needs no code.`}
+      hint={`The repositories this automation may read. Up to ${MAX_AUTOMATION_REPOSITORIES}; leave empty for an automation that needs no code.`}
     >
       {repositories.length > 0 && (
         <ul className="mb-2 flex flex-wrap gap-1.5" aria-label="Selected repositories">
@@ -63,7 +63,7 @@ export const AgentScopeSection: React.FC<AgentScopeSectionProps> = ({ repositori
           onRepoChange={repository => { if (repository && !full) onChange([...repositories, repository]); }}
           disabled={disabled || full}
           isLoading={options === undefined}
-          placeholder={full ? `Limit of ${MAX_AGENT_REPOSITORIES} reached` : 'Add repository…'}
+          placeholder={full ? `Limit of ${MAX_AUTOMATION_REPOSITORIES} reached` : 'Add repository…'}
           size="compact"
         />
       )}
