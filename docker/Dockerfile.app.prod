@@ -37,6 +37,9 @@ COPY packages/shared ./packages/shared
 COPY packages/local-setup ./packages/local-setup
 COPY packages/core ./packages/core
 COPY packages/api ./packages/api
+# Compile-time input only: scripts/check-client-contract.ts imports the client's
+# operation table. The client is not installed or shipped as a workspace here.
+COPY packages/client/src ./packages/client/src
 
 # Record the exact release and source revision alongside the Markdown that is
 # shipped. sidebars.ts is parsed as text and is never executed by this step.
@@ -118,6 +121,7 @@ COPY --from=builder /build/docs/mcp.md /build/docs/mcp-coverage.md /build/docs/m
 COPY Dockerfile.agent ./Dockerfile.agent
 COPY scripts/agent-entrypoint.sh ./scripts/agent-entrypoint.sh
 COPY scripts/agent-tank-runtime.mjs ./scripts/agent-tank-runtime.mjs
+COPY patches/agent-tank-0.9.11.patch ./patches/agent-tank-0.9.11.patch
 COPY scripts/claude-entrypoint.sh ./scripts/claude-entrypoint.sh
 COPY scripts/codex-entrypoint.sh ./scripts/codex-entrypoint.sh
 COPY scripts/antigravity-entrypoint.sh ./scripts/antigravity-entrypoint.sh
