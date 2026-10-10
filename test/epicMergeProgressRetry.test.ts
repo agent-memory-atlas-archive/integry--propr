@@ -106,6 +106,9 @@ function fakeEpicOctokit() {
             return snapshot;
         },
         async request(route: string, parameters: Record<string, unknown>) {
+            if (route === 'GET /repos/{owner}/{repo}/pulls/{pull_number}') {
+                return { data: { merged: false, base: { ref: 'main' } } };
+            }
             assert.equal(route, 'POST /repos/{owner}/{repo}/issues/{issue_number}/comments');
             comments.push({ id: comments.length + 1, body: parameters.body as string, user: { login: 'propr-dev[bot]' } });
             return { data: {} };

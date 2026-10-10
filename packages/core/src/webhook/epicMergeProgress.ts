@@ -4,6 +4,7 @@ import { PlanIssueStatus, type PlanIssue } from '../config/planIssueManager.js';
 import logger from '../utils/logger.js';
 
 export const EPIC_PROGRESS_MARKER = '<!-- propr:epic-merge-progress -->';
+export const EPIC_FINAL_MERGE_MARKER = '<!-- propr:epic-final-merge -->';
 export const EPIC_COMPLETE_MARKER = '<!-- propr:epic-merge-complete -->';
 
 export interface EpicChildPullRequest {
@@ -26,8 +27,8 @@ export interface EpicMergeProgressRequest {
     repo: string;
     epicBranch: string;
     epicPrNumber: number;
-    /** The child PR whose merge triggered this update. */
-    mergedChildPrNumber: number;
+    /** The child PR whose merge triggered this update; null for the epic PR merge. */
+    mergedChildPrNumber: number | null;
     planName?: string;
     /** Plan issues of the epic; planned work without a child PR yet counts as unmerged. */
     planIssues?: PlanIssue[];
@@ -62,13 +63,13 @@ export interface EpicMergeProgressResult {
  */
 export function computeEpicMergeProgress(
     childPullRequests: EpicChildPullRequest[],
-    mergedChildPrNumber: number,
+    mergedChildPrNumber: number | null,
     planIssues: PlanIssue[] = [],
 ): EpicMergeProgress {
     const mergedNumbers = new Set(childPullRequests.filter(pr => pr.merged).map(pr => pr.number));
-    mergedNumbers.add(mergedChildPrNumber);
+    if (mergedChildPrNumber !== null) mergedNumbers.add(mergedChildPrNumber);
     const childNumbers = new Set(childPullRequests.filter(pr => !pr.abandoned).map(pr => pr.number));
-    childNumbers.add(mergedChildPrNumber);
+    if (mergedChildPrNumber !== null) childNumbers.add(mergedChildPrNumber);
 
     let merged = [...childNumbers].filter(number => mergedNumbers.has(number)).length;
     let total = childNumbers.size;
@@ -109,7 +110,7 @@ export function buildEpicProgressComment(progress: EpicMergeProgress, planName?:
     const lines = [
         `### Epic progress${planName ? `: ${planName}` : ''}`,
         '',
-        `**${progress.merged} of ${progress.total} PRs merged** ${complete ? '✅' : '⏳'}`,
+        `**${progress.merged} out of ${progress.total} PRs merged** ${complete ? '✅' : '⏳'}`,
         '',
         `\`${renderProgressBar(progress.merged, progress.total)}\` ${percent}%`,
     ];
@@ -125,7 +126,7 @@ export function buildEpicProgressComment(progress: EpicMergeProgress, planName?:
 
 export function buildEpicCompleteComment(progress: EpicMergeProgress, planName?: string): string {
     return [
-        `### ✅ Epic fully merged${planName ? `: ${planName}` : ''}`,
+        `### ✅ Epic ready for final merge${planName ? `: ${planName}` : ''}`,
         '',
         `All ${progress.total} child PR${progress.total === 1 ? ' has' : 's have'} been merged into this epic branch. This epic PR is ready for final review and merge.`,
         '',
@@ -170,9 +171,9 @@ async function listChildPullRequests(octokit: EpicProgressOctokit, owner: string
 }
 
 /**
- * Keeps a single "x of y PRs merged" tracking comment on the epic PR up to
- * date, and posts a one-time confirmation comment once every child PR has
- * merged. Both comments are located by their hidden markers, so webhook
+ * Keeps a single "x out of y PRs merged" tracking comment on the epic PR up to
+ * date, posts a readiness notice once every child PR has merged, and
+ * confirms completion separately when the aggregate epic PR merges. Both comments are located by their hidden markers, so webhook
  * redeliveries edit in place instead of posting duplicates. Ownership is
  * re-checked before every write, so a stale snapshot is never written.
  */
@@ -188,11 +189,23 @@ export async function updateEpicMergeProgress(
     const assertOwned = dependencies.assertOwned ?? (async () => {});
     const { owner, repo, epicPrNumber } = request;
 
+    // Re-read the aggregate PR even for child deliveries: a delayed webhook or
+    // retry must not announce readiness after the epic itself has merged.
+    const epic = (await octokit.request('GET /repos/{owner}/{repo}/pulls/{pull_number}', {
+        owner, repo, pull_number: epicPrNumber,
+    })).data;
+    let epicMerged = request.mergedChildPrNumber === null || (isRecord(epic) && epic.merged === true);
+    const baseBranch = isRecord(epic) && isRecord(epic.base) && typeof epic.base.ref === 'string'
+        ? epic.base.ref : 'the target branch';
+
     const children = await listChildPullRequests(octokit, owner, repo, request.epicBranch);
     const progress = computeEpicMergeProgress(children, request.mergedChildPrNumber, request.planIssues);
     const comments = await listBotComments(octokit, owner, repo, epicPrNumber);
+    // A final confirmation is also durable evidence if a subsequent GET lags.
+    epicMerged ||= comments.some(comment => comment.body.includes(EPIC_FINAL_MERGE_MARKER));
 
-    const body = buildEpicProgressComment(progress, request.planName);
+    const body = buildEpicProgressComment(progress, request.planName)
+        + (epicMerged ? '\n\n✅ This epic PR has been merged into ' + baseBranch + '.' : '');
     const existing = comments.find(comment => comment.body.includes(EPIC_PROGRESS_MARKER));
     let trackingComment: EpicMergeProgressResult['trackingComment'];
     if (!existing) {
@@ -212,10 +225,21 @@ export async function updateEpicMergeProgress(
     }
 
     let completionPosted = false;
-    if (isEpicMergeComplete(progress) && !comments.some(comment => comment.body.includes(EPIC_COMPLETE_MARKER))) {
+    const completionMarker = epicMerged ? EPIC_FINAL_MERGE_MARKER : EPIC_COMPLETE_MARKER;
+    if ((epicMerged || isEpicMergeComplete(progress)) && !comments.some(comment => comment.body.includes(completionMarker))) {
         await assertOwned();
         await octokit.request('POST /repos/{owner}/{repo}/issues/{issue_number}/comments', {
-            owner, repo, issue_number: epicPrNumber, body: buildEpicCompleteComment(progress, request.planName),
+            owner, repo, issue_number: epicPrNumber, body: epicMerged
+                ? [
+                    `### ✅ Epic merged${request.planName ? `: ${request.planName}` : ''}`,
+                    '',
+                    `Epic PR #${epicPrNumber} has been merged into ${baseBranch}.`,
+                    '',
+                    `**${progress.merged} out of ${progress.total} PRs merged** into the epic branch.`,
+                    ...(isEpicMergeComplete(progress) ? ['', 'All planned epic work is now merged.'] : []),
+                    '', '*Posted automatically by ProPR*', EPIC_FINAL_MERGE_MARKER,
+                ].join('\n')
+                : buildEpicCompleteComment(progress, request.planName),
         });
         completionPosted = true;
     }

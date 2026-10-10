@@ -197,7 +197,8 @@ ${fixesLine}
  * Ensures Epic PR exists when a child PR is merged to an epic branch.
  * When the epic branch was first created, there were no commits so the PR couldn't be created.
  * Now that a child PR has merged, we can create the Epic PR with proper details.
- * Afterwards the Epic PR's merge progress comment is refreshed.
+ * Also reports the aggregate epic PR's final merge. All progress updates
+ * share the per-epic lease and retry sweep.
  */
 export async function handleEpicPRCreationOnMerge(
     payload: PullRequestEvent,
@@ -207,6 +208,22 @@ export async function handleEpicPRCreationOnMerge(
     // Only process closed PRs that were merged
     if (payload.action !== 'closed' || !payload.pull_request.merged) {
         return;
+    }
+
+    // The aggregate epic PR merges out of the epic branch, rather than into it.
+    // Reuse the same lease and durable retry sweep as child progress updates.
+    const headBranch = payload.pull_request.head?.ref;
+    if (headBranch && isEpicBranch(headBranch)) {
+        const [owner, repo] = payload.repository.full_name.split('/');
+        const target: EpicProgressTarget = {
+            owner, repo, epicBranch: headBranch,
+            epicPrNumber: payload.pull_request.number, mergedChildPrNumber: null,
+        };
+        await runEpicProgressUpdate(target, {
+            redis: getUltrafixStateRedis(),
+            update: lease => applyEpicMergeProgress(target, { lease, correlationId, correlatedLogger }),
+            log: correlatedLogger,
+        });
     }
 
     const baseBranch = payload.pull_request.base.ref;
@@ -267,19 +284,19 @@ interface EpicBranchContext {
 
 type Octokit = Awaited<ReturnType<typeof getAuthenticatedOctokit>>;
 
-/** Looks up the open Epic PR of an epic branch; null when there is none. */
-async function findOpenEpicPRNumber(octokit: Octokit, owner: string, repo: string, epicBranch: string): Promise<number | null> {
+/** Looks up an open or merged Epic PR of an epic branch; null when there is none. */
+async function findEpicPRNumber(octokit: Octokit, owner: string, repo: string, epicBranch: string): Promise<number | null> {
     const response = await octokit.request('GET /repos/{owner}/{repo}/pulls', {
         owner,
         repo,
         head: `${owner}:${epicBranch}`,
-        state: 'open'
+        state: 'all'
     });
-    return response.data[0]?.number ?? null;
+    return response.data.find(pr => pr.state === 'open' || pr.merged_at)?.number ?? null;
 }
 
 /**
- * Finds the open Epic PR of an epic branch, refreshing its body with the
+ * Finds an open or merged Epic PR of an epic branch, refreshing its body with the
  * plan's issues, or creates the Epic PR when there is none yet. Throws when
  * the PR could neither be found nor created, so the caller keeps a retry
  * obligation instead of treating a missing epic PR as done.
@@ -290,7 +307,7 @@ async function ensureEpicPR(
 ): Promise<number> {
     const { owner, repo, baseBranch } = context;
     const octokit = await getAuthenticatedOctokit();
-    const existingPrNumber = await findOpenEpicPRNumber(octokit, owner, repo, baseBranch);
+    const existingPrNumber = await findEpicPRNumber(octokit, owner, repo, baseBranch);
     if (existingPrNumber === null) {
         return await createEpicPR(octokit, context, correlatedLogger);
     }

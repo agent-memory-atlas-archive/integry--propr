@@ -4,6 +4,7 @@ import { closeConnection } from '../packages/core/src/db/connection.js';
 import { PlanIssueStatus, type PlanIssue } from '../packages/core/src/config/planIssueManager.js';
 import {
     EPIC_COMPLETE_MARKER,
+    EPIC_FINAL_MERGE_MARKER,
     EPIC_PROGRESS_MARKER,
     buildEpicProgressComment,
     computeEpicMergeProgress,
@@ -43,6 +44,7 @@ function createOctokit(pulls: unknown[], initialComments: FakeComment[] = []) {
     const calls: Array<{ route: string; parameters: Record<string, unknown> }> = [];
     let nextId = 1000;
     const octokit = {
+        epicMerged: false,
         calls,
         comments,
         async paginate(route: string, parameters: Record<string, unknown>) {
@@ -53,6 +55,9 @@ function createOctokit(pulls: unknown[], initialComments: FakeComment[] = []) {
         },
         async request(route: string, parameters: Record<string, unknown>) {
             calls.push({ route, parameters });
+            if (route === 'GET /repos/{owner}/{repo}/pulls/{pull_number}') {
+                return { data: { merged: octokit.epicMerged, base: { ref: 'main' } } };
+            }
             if (route === 'POST /repos/{owner}/{repo}/issues/{issue_number}/comments') {
                 comments.push({ id: nextId++, body: parameters.body as string, user: { login: 'propr-dev[bot]' } });
                 return { data: {} };
@@ -147,7 +152,7 @@ describe('computeEpicMergeProgress', () => {
 describe('buildEpicProgressComment', () => {
     test('renders the x of y status with the tracking marker', () => {
         const body = buildEpicProgressComment({ merged: 2, total: 4, excluded: 0, mergedPullRequests: [201, 202] }, 'Big Plan');
-        assert.match(body, /\*\*2 of 4 PRs merged\*\*/);
+        assert.match(body, /\*\*2 out of 4 PRs merged\*\*/);
         assert.match(body, /50%/);
         assert.match(body, /#201, #202/);
         assert.ok(body.includes(EPIC_PROGRESS_MARKER));
@@ -165,7 +170,7 @@ describe('updateEpicMergeProgress', () => {
         assert.strictEqual(result.trackingComment, 'created');
         assert.strictEqual(result.completionPosted, false);
         assert.strictEqual(octokit.comments.length, 1);
-        assert.match(octokit.comments[0].body, /1 of 2 PRs merged/);
+        assert.match(octokit.comments[0].body, /1 out of 2 PRs merged/);
         const listPulls = octokit.calls.find(call => call.route === 'GET /repos/{owner}/{repo}/pulls');
         assert.strictEqual(listPulls?.parameters.base, baseRequest.epicBranch);
         assert.strictEqual(listPulls?.parameters.state, 'all');
@@ -188,10 +193,10 @@ describe('updateEpicMergeProgress', () => {
         assert.strictEqual(result.completionPosted, true);
         const tracking = octokit.comments.filter(c => c.body.includes(EPIC_PROGRESS_MARKER));
         assert.strictEqual(tracking.length, 1);
-        assert.match(tracking[0].body, /2 of 2 PRs merged/);
+        assert.match(tracking[0].body, /2 out of 2 PRs merged/);
         const completion = octokit.comments.filter(c => c.body.includes(EPIC_COMPLETE_MARKER));
         assert.strictEqual(completion.length, 1);
-        assert.match(completion[0].body, /Epic fully merged: Big Plan/);
+        assert.match(completion[0].body, /Epic ready for final merge: Big Plan/);
         assert.match(completion[0].body, /All 2 child PRs have been merged/);
     });
 
@@ -217,7 +222,7 @@ describe('updateEpicMergeProgress', () => {
             { getOctokit: async () => octokit },
         );
         assert.strictEqual(result.completionPosted, false);
-        assert.match(octokit.comments[0].body, /1 of 2 PRs merged/);
+        assert.match(octokit.comments[0].body, /1 out of 2 PRs merged/);
         assert.ok(!octokit.comments.some(c => c.body.includes(EPIC_COMPLETE_MARKER)));
     });
 
@@ -228,8 +233,8 @@ describe('updateEpicMergeProgress', () => {
             getOctokit: async () => octokit,
             assertOwned: async () => {
                 checks++;
-                // Both reads have completed before ownership is checked.
-                assert.strictEqual(octokit.calls.length, 2);
+                // All reads have completed before ownership is checked.
+                assert.strictEqual(octokit.calls.length, 3);
                 throw new Error('lease lost');
             },
         }), /lease lost/);
@@ -260,4 +265,42 @@ describe('updateEpicMergeProgress', () => {
         assert.strictEqual(result.trackingComment, 'created');
         assert.strictEqual(octokit.comments.find(c => c.id === 7)?.body, `copied ${EPIC_PROGRESS_MARKER}`);
     });
+});
+
+test('confirms the aggregate merge once, independently of the child readiness notice', async () => {
+    const octokit = createOctokit([{ number: 201, state: 'closed', merged_at: '2026-10-09T00:00:00Z' }]);
+    const dependencies = { getOctokit: async () => octokit };
+    await updateEpicMergeProgress(baseRequest, 'test', dependencies);
+    assert.ok(!octokit.comments.some(c => c.body.includes(EPIC_FINAL_MERGE_MARKER)));
+    // The webhook is authoritative even if the GET has not caught up yet.
+    const finalRequest = { ...baseRequest, mergedChildPrNumber: null };
+    const result = await updateEpicMergeProgress(finalRequest, 'test', dependencies);
+    assert.strictEqual(result.completionPosted, true);
+    assert.strictEqual(result.progress.total, 1, 'the aggregate PR is not a child');
+    const final = octokit.comments.find(c => c.body.includes(EPIC_FINAL_MERGE_MARKER))!;
+    assert.match(final.body, /Epic PR #500 has been merged into main/);
+    assert.match(final.body, /All planned epic work is now merged/);
+    assert.strictEqual((await updateEpicMergeProgress(finalRequest, 'test', dependencies)).completionPosted, false);
+    // An older child delivery must not regress the final tracking state.
+    assert.strictEqual((await updateEpicMergeProgress(baseRequest, 'test', dependencies)).trackingComment, 'unchanged');
+    assert.strictEqual(octokit.comments.filter(c => c.body.includes(EPIC_FINAL_MERGE_MARKER)).length, 1);
+});
+
+test('a delayed child update discovers the aggregate merge and posts final confirmation', async () => {
+    const octokit = createOctokit([{ number: 201, state: 'closed', merged_at: '2026-10-09T00:00:00Z' }]);
+    octokit.epicMerged = true;
+    await updateEpicMergeProgress(baseRequest, 'test', { getOctokit: async () => octokit });
+    assert.ok(octokit.comments.some(c => c.body.includes(EPIC_FINAL_MERGE_MARKER)));
+    assert.ok(!octokit.comments.some(c => c.body.includes(EPIC_COMPLETE_MARKER)));
+});
+
+test('an early aggregate merge does not claim unfinished planned work is complete', async () => {
+    const octokit = createOctokit([]);
+    await updateEpicMergeProgress({
+        ...baseRequest, mergedChildPrNumber: null,
+        planIssues: [planIssue(100, PlanIssueStatus.PENDING)],
+    }, 'test', { getOctokit: async () => octokit });
+    const final = octokit.comments.find(c => c.body.includes(EPIC_FINAL_MERGE_MARKER))!;
+    assert.match(final.body, /0 out of 1 PRs merged/);
+    assert.ok(!final.body.includes('All planned epic work is now merged'));
 });

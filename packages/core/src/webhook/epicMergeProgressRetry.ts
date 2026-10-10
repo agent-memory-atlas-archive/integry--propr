@@ -52,7 +52,8 @@ export interface EpicProgressTarget {
     epicBranch: string;
     /** Null when the epic PR could not be located yet; the retry resolves it. */
     epicPrNumber: number | null;
-    mergedChildPrNumber: number;
+    /** Null for the aggregate epic PR merge. */
+    mergedChildPrNumber: number | null;
 }
 
 export interface EpicProgressRetry extends EpicProgressTarget {
@@ -99,7 +100,7 @@ function parseRetry(value: string | null | undefined): EpicProgressRetry | null 
         const parsed = JSON.parse(value) as Partial<EpicProgressRetry>;
         if (typeof parsed.owner !== 'string' || typeof parsed.repo !== 'string' || typeof parsed.epicBranch !== 'string'
             || (typeof parsed.epicPrNumber !== 'number' && parsed.epicPrNumber !== null)
-            || typeof parsed.mergedChildPrNumber !== 'number') return null;
+            || (typeof parsed.mergedChildPrNumber !== 'number' && parsed.mergedChildPrNumber !== null)) return null;
         return {
             owner: parsed.owner, repo: parsed.repo, epicBranch: parsed.epicBranch,
             epicPrNumber: parsed.epicPrNumber, mergedChildPrNumber: parsed.mergedChildPrNumber,

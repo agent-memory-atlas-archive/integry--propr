@@ -23,6 +23,7 @@ let failingPlanListReads = 0;
 let failingEpicLookups = 0;
 // Whether the epic branch has an open epic PR (#500) to find.
 let epicPrExists = true;
+let epicPrMerged = false;
 // Number of epic PR creations that fail before GitHub recovers.
 let failingEpicCreations = 0;
 let createdEpicPRs = 0;
@@ -62,7 +63,7 @@ await mock.module('../packages/core/src/auth/githubAuth.js', { namedExports: {
                 failingEpicLookups--;
                 throw new Error('GitHub unavailable');
             }
-            return { data: epicPrExists ? [{ number: 500, body: '' }] : [] };
+            return { data: epicPrExists ? [{ number: 500, body: '', state: epicPrMerged ? 'closed' : 'open', merged_at: epicPrMerged ? '2026-10-10T20:00:00Z' : null }] : [] };
         }
         if (route === 'GET /repos/{owner}/{repo}') return { data: { default_branch: 'main' } };
         if (route === 'GET /repos/{owner}/{repo}/issues/{issue_number}') {
@@ -148,6 +149,7 @@ beforeEach(() => {
     failingPlanListReads = 0;
     failingEpicLookups = 0;
     epicPrExists = true;
+    epicPrMerged = false;
     failingEpicCreations = 0;
     createdEpicPRs = 0;
     epicPRCreations.length = 0;
@@ -386,4 +388,42 @@ test('overlapping child merge deliveries run one update at a time and the sweep 
     assert.equal(progressRequests[1].mergedChildPrNumber, 202);
     assert.equal(progressRequests[1].epicPrNumber, 500);
     assert.equal(redis.hash.size, 0);
+});
+
+const finalPayload = {
+    ...payload,
+    pull_request: {
+        number: 500, merged: true, head: { ref: EPIC_BRANCH }, base: { ref: 'main' },
+    },
+} as unknown as PullRequestEvent;
+
+test('the aggregate merge reports completion through the same retry lifecycle', async () => {
+    failingProgressUpdates = 1;
+    await handleEpicPRCreationOnMerge(finalPayload, 'test', logger.withCorrelation('test'));
+    assert.equal(redis.hash.size, 1);
+    assert.equal(JSON.parse([...redis.hash.values()][0]).mergedChildPrNumber, null);
+    elapseRetryBackoff();
+    assert.equal(await retryPendingEpicMergeProgress(), 1);
+    assert.equal(progressRequests[0].epicPrNumber, 500);
+    assert.equal(progressRequests[0].mergedChildPrNumber, null);
+    assert.equal(redis.hash.size, 0);
+    assert.equal(createdEpicPRs, 0);
+});
+
+test('closing an epic without merging, or merging an ordinary PR, posts nothing', async () => {
+    await handleEpicPRCreationOnMerge({
+        ...finalPayload, pull_request: { ...finalPayload.pull_request, merged: false },
+    } as PullRequestEvent, 'test', logger.withCorrelation('test'));
+    await handleEpicPRCreationOnMerge({
+        ...finalPayload, pull_request: { ...finalPayload.pull_request, head: { ref: 'feature' } },
+    } as PullRequestEvent, 'test', logger.withCorrelation('test'));
+    assert.equal(progressRequests.length, 0);
+    assert.equal(redis.hash.size, 0);
+});
+
+test('a delayed child delivery locates the already merged epic instead of creating another', async () => {
+    epicPrMerged = true;
+    await handleEpicPRCreationOnMerge(payload, 'test', logger.withCorrelation('test'));
+    assert.equal(createdEpicPRs, 0);
+    assert.equal(progressRequests[0].epicPrNumber, 500);
 });
