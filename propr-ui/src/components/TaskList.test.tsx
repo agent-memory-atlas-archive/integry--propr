@@ -339,7 +339,8 @@ describe('TaskList', () => {
       mockGetRepositoryStats.mockResolvedValue({ repositories: [] });
       renderAt('/tasks');
       expect(await screen.findByText('task table')).toBeInTheDocument();
-      expect(screen.getByTestId('assignee-options')).toHaveTextContent('me|all|Me-User|octocat');
+      // Page assignees are collected by an effect after the task table renders.
+      await waitFor(() => expect(screen.getByTestId('assignee-options')).toHaveTextContent('me|all|Me-User|octocat'));
     });
 
     it('keeps listing people from earlier pages once the filter narrows the list', async () => {
