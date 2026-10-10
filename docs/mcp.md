@@ -1077,6 +1077,10 @@ The receipt reports the posted `commentId`, `resolvedHead` and `baseBranch`.
 Follow it with `get_operation`: it is `running` once the merge task picks up
 the comment, then `completed` or `failed` with that task, and `unknown` with
 `COMMAND_NOT_PICKED_UP` if no worker picks it up.
+Pickup requires a merge-conflict task that explicitly records this command's
+`commentId`; an unrelated follow-up that merely reads the comment as context
+does not count. Retry the same request with the same `idempotencyKey` and
+arguments to retrieve its receipt without posting another `/merge` comment.
 
 **5. Follow a one-off task.** After `create_task`, keep both the returned
 `operationId` and `submissionId`. The submission view explains the handoff from
@@ -1240,4 +1244,3 @@ from launching an already requested issue again. Following an uncertain
 partial publication/implementation, an operator must reconcile the receipt,
 GitHub markers, issue labels and queue state before explicitly recovering it.
 No deployment, auto-merge activation or production migration was performed.
-
