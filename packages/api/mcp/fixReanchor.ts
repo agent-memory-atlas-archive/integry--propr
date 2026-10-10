@@ -174,7 +174,7 @@ async function changedSince(principal: McpPrincipal, repository: string, from: s
  *
  * A deleted path alone does not show the code is gone: it may have moved into a file
  * the review never named. So nothing is withheld unless the comparison rules that out
- * by listing, in full, no surviving file that gained a line; otherwise every record is
+ * by listing, in full, only removals and in-place edits without added lines; otherwise every record is
  * applied and the fixing agent judges the current code.
  */
 export async function reanchorFixRecords(
@@ -200,8 +200,11 @@ export async function reanchorFixRecords(
   }
   // Code may have moved into any surviving file that gained lines, cited or not; an
   // unknown addition count, or a comparison too long to be listed in full, may hide one.
+  // Renames/copies measure additions against their source, so zero added lines
+  // does not rule out code arriving at the destination. Only in-place edits with
+  // known zero additions provide that evidence; keep unfamiliar statuses too.
   const relocationRuledOut = files.length < COMPARE_FILE_LIMIT
-    && files.every(file => file.status === 'removed' || file.additions === 0);
+    && files.every(file => file.status === 'removed' || (file.status === 'modified' && file.additions === 0));
   const report: FixReanchorReport = { ...base, reanchored: true, comparison: 'compared', applied: [], skipped: [] };
   const cited = records.map(record => ({ ...record, paths: citedPaths(record.text) }));
   const allRemoved = ({ text, paths }: { text: string; paths: string[] }) =>
