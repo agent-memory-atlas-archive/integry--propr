@@ -64,6 +64,7 @@ const AccessManagementPage: React.FC = () => {
   const [error, setError] = useState('');
   const [auditError, setAuditError] = useState('');
   const [triggerWhitelist, setTriggerWhitelist] = useState<string[] | null>(null);
+  const [whitelistNotice, setWhitelistNotice] = useState('');
   const [whitelistOffer, setWhitelistOffer] = useState<WhitelistOffer | null>(null);
   const membersRequestIdRef = useRef(0);
   const auditRequestIdRef = useRef(0);
@@ -122,13 +123,15 @@ const AccessManagementPage: React.FC = () => {
     };
   }, [loadAudit, loadMembers, loadTriggerWhitelist]);
 
-  const runMutation = async (mutation: () => Promise<unknown>): Promise<boolean> => {
+  const runMutation = async (mutation: () => Promise<unknown>, afterSuccess?: () => Promise<void>): Promise<boolean> => {
     setSaving(true);
     setError('');
+    setWhitelistNotice('');
     try {
       await mutation();
       await refreshCurrentUser();
       await Promise.all([loadMembers(), loadAudit()]);
+      await afterSuccess?.();
       return true;
     } catch (mutationError) {
       setError(mutationError instanceof Error ? mutationError.message : 'Role update failed');
@@ -142,10 +145,23 @@ const AccessManagementPage: React.FC = () => {
   // everyone else out and removing the last one would open access; neither is offered here.
   const offerWhitelistChange = async (action: WhitelistOffer['action'], githubUsername: string) => {
     const whitelist = await loadTriggerWhitelist();
-    if (!whitelist || whitelist.length === 0) return;
+    if (!whitelist) {
+      setWhitelistNotice('Instance role updated. Trigger access could not be checked. Review the trigger whitelist in Settings.');
+      return;
+    }
+    if (whitelist.length === 0) {
+      setWhitelistNotice('Instance role updated. The trigger whitelist is empty, so every GitHub user can still trigger ProPR.');
+      return;
+    }
     const listed = isLoginInWhitelist(whitelist, githubUsername);
     if (action === 'add' && !listed) setWhitelistOffer({ action, username: githubUsername });
-    if (action === 'remove' && listed && whitelist.length > 1) setWhitelistOffer({ action, username: githubUsername });
+    if (action === 'remove' && listed) {
+      if (whitelist.every(entry => entry === githubUsername)) {
+        setWhitelistNotice(`@${githubUsername} still has trigger access. Removing the final trigger whitelist entry would allow every GitHub user to trigger ProPR. Review the whitelist in Settings.`);
+      } else {
+        setWhitelistOffer({ action, username: githubUsername });
+      }
+    }
   };
 
   const applyWhitelistOffer = async () => {
@@ -169,14 +185,13 @@ const AccessManagementPage: React.FC = () => {
   const addMember = async (event: React.FormEvent) => {
     event.preventDefault();
     const normalizedUsername = username.trim();
-    if (!normalizedUsername) return;
+    if (saving || whitelistOffer || !normalizedUsername) return;
     setWhitelistOffer(null);
     let added: InstanceMember | undefined;
-    const succeeded = await runMutation(async () => {
+    await runMutation(async () => {
       added = await addInstanceMember(normalizedUsername, role);
       setUsername('');
-    });
-    if (succeeded) await offerWhitelistChange('add', added?.githubUsername ?? normalizedUsername);
+    }, () => offerWhitelistChange('add', added?.githubUsername ?? normalizedUsername));
   };
 
   const updateRole = (member: InstanceMember, nextRole: InstanceRole) => {
@@ -187,10 +202,13 @@ const AccessManagementPage: React.FC = () => {
   const removeMember = async (member: InstanceMember) => {
     if (!window.confirm(`Remove the instance role assigned to @${member.githubUsername}?`)) return;
     setWhitelistOffer(null);
-    const succeeded = await runMutation(() => removeInstanceMember(member.githubUserId));
-    if (succeeded) await offerWhitelistChange('remove', member.githubUsername);
+    await runMutation(
+      () => removeInstanceMember(member.githubUserId),
+      () => offerWhitelistChange('remove', member.githubUsername)
+    );
   };
 
+  const roleControlsDisabled = saving || whitelistOffer !== null;
   const canStoreBootstrapRole = currentUser?.authorizationSource === 'bootstrap'
     && !data.members.some(member => member.githubUserId === currentUser.id && member.role === 'admin');
   const memberState = getCollectionState(loading, data.members.length, error);
@@ -226,7 +244,7 @@ const AccessManagementPage: React.FC = () => {
           </p>
           <button
             type="button"
-            disabled={saving}
+            disabled={roleControlsDisabled}
             onClick={() => void runMutation(claimBootstrapAdmin)}
             className="mt-3 rounded-md bg-amber-900 px-3 py-2 text-sm font-medium text-white disabled:opacity-50"
           >
@@ -238,6 +256,12 @@ const AccessManagementPage: React.FC = () => {
       {error && (
         <div role="alert" className="mb-6 rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-700">
           {error}
+        </div>
+      )}
+
+      {whitelistNotice && (
+        <div role="status" className="mb-6 rounded-lg border border-blue-200 bg-blue-50 p-4 text-sm text-blue-900">
+          {whitelistNotice}
         </div>
       )}
 
@@ -295,7 +319,7 @@ const AccessManagementPage: React.FC = () => {
           </label>
           <button
             type="submit"
-            disabled={saving || !username.trim()}
+            disabled={roleControlsDisabled || !username.trim()}
             className="inline-flex items-center justify-center gap-2 rounded-md bg-primary-600 px-4 py-2 text-sm font-medium text-white hover:bg-primary-700 disabled:opacity-50"
           >
             <UserPlus className="h-4 w-4" />
@@ -304,13 +328,15 @@ const AccessManagementPage: React.FC = () => {
         </div>
         <p className="mt-3 text-xs text-gray-500">
           Instance roles and the GitHub trigger whitelist are separate. After adding or removing a user, you
-          will be offered the matching trigger whitelist change; the full whitelist is managed in Settings.
+          can confirm a matching trigger whitelist change when access is restricted. An empty whitelist allows
+          every GitHub user to trigger ProPR. Manage the full whitelist in Settings.
         </p>
       </form>
 
       <div className="overflow-hidden rounded-lg border border-gray-200 bg-white shadow-sm">
         <div className="border-b border-gray-200 px-5 py-4">
           <h2 className="font-medium text-gray-900">Assigned instance roles</h2>
+          <p className="mt-1 text-sm text-gray-500">Roles assigned directly to users, separate from environment administrator access.</p>
         </div>
         {memberState === 'loading' ? (
           <ListSkeleton rows={3} layout="row" label="Loading access assignments…" className="px-5 py-4" />
@@ -330,7 +356,7 @@ const AccessManagementPage: React.FC = () => {
                       )}
                     </div>
                     <div className="mt-1 text-xs text-gray-500">
-                      GitHub ID {member.githubUserId} · source: {member.source}
+                      GitHub ID {member.githubUserId} · {member.source === 'managed' ? 'Managed assignment' : 'Assigned in this instance'}
                       {triggerWhitelist && triggerWhitelist.length > 0 && isLoginInWhitelist(triggerWhitelist, member.githubUsername)
                         && ' · on trigger whitelist'}
                     </div>
@@ -339,7 +365,7 @@ const AccessManagementPage: React.FC = () => {
                     <select
                       aria-label={`Role for ${member.githubUsername}`}
                       value={member.role}
-                      disabled={saving}
+                      disabled={roleControlsDisabled}
                       onChange={event => updateRole(member, event.target.value as InstanceRole)}
                       className="rounded-md border border-gray-300 px-3 py-2 text-sm disabled:bg-gray-100"
                     >
@@ -350,7 +376,7 @@ const AccessManagementPage: React.FC = () => {
                       type="button"
                       aria-label={`Remove ${member.githubUsername}`}
                       title="Remove assigned instance role"
-                      disabled={saving}
+                      disabled={roleControlsDisabled}
                       onClick={() => void removeMember(member)}
                       className="rounded-md p-2 text-gray-500 hover:bg-red-50 hover:text-red-600 disabled:opacity-40"
                     >
