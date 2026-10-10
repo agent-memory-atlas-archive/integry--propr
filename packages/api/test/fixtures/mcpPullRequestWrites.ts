@@ -341,7 +341,8 @@ export async function verifyPullRequestWrites(
     const labels = findPullRequest('acme/repo', 42).labels;
     labels.push('AI');
     try {
-      const started = await mutate('resolve_merge_conflicts', pull);
+      const args = { ...pull, idempotencyKey: 'merge-conflicts-retry' };
+      const started = await call('resolve_merge_conflicts', args);
       assert.equal(started.state, 'posted');
       assert.equal(started.lifecycle.state, 'accepted');
       assert.equal(started.result.resolvedHead, 'a'.repeat(40));
@@ -351,6 +352,13 @@ export async function verifyPullRequestWrites(
       assert.match(body, /^\/merge\n\n<!-- propr-mcp:[^;]+; head:a{40} -->$/);
       assert.equal(started.result.commentId, comments.at(-1)!.id);
       assert.equal(posted(), before + 1);
+      const retried = await call('resolve_merge_conflicts', args);
+      assert.equal(retried.operationId, started.operationId);
+      assert.equal(retried.result.commentId, started.result.commentId);
+      assert.equal(posted(), before + 1, 'retrying must not post a second /merge');
+      const receipt = await call('get_operation', { operationId: started.operationId });
+      assert.equal(receipt.operationId, started.operationId);
+      assert.equal(receipt.result.commentId, started.result.commentId);
       // The comment-driven path does the merge; the clean update-branch endpoint is never called.
       assert.ok(!restCalls.some(item => item.route === 'PUT /repos/{owner}/{repo}/pulls/{pull_number}/update-branch'));
     } finally {

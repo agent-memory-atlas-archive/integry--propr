@@ -479,6 +479,13 @@ test('a /merge receipt follows the merge task that recorded its comment', async 
       created_at: new Date(), initial_job_data: JSON.stringify({ number: 42, type: 'merge_conflict', pullRequestNumber: 42 }) },
     { task_id: 'merge-conflict-other', repository: 'acme/repo', issue_number: 42, pr_number: 42, task_type: 'merge_conflict',
       created_at: new Date(), initial_job_data: JSON.stringify({ number: 42, type: 'merge_conflict', pullRequestNumber: 42, commandCommentId: 600 }) },
+    // Reading a command as follow-up context is not execution of that command.
+    { task_id: 'followup-context', repository: 'acme/repo', issue_number: 42, pr_number: 42, task_type: 'pr-comment',
+      created_at: new Date(), initial_job_data: JSON.stringify({ comments: [{ id: 601 }] }) },
+    { task_id: 'followup-command', repository: 'acme/repo', issue_number: 42, pr_number: 42, task_type: 'pr-comment',
+      created_at: new Date(), initial_job_data: JSON.stringify({ commandCommentId: 601 }) },
+    { task_id: 'merge-context', repository: 'acme/repo', issue_number: 42, pr_number: 42, task_type: 'merge_conflict',
+      created_at: new Date(), initial_job_data: JSON.stringify({ comments: [{ id: 601 }] }) },
   ]);
   assert.equal(((await poll()).lifecycle as { state: string }).state, 'accepted');
 
