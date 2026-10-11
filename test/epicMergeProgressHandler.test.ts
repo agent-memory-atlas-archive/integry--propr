@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { after, beforeEach, mock, test } from 'node:test';
 import type { PullRequestEvent } from '@octokit/webhooks-types';
 
+const actualProgress = await import('../packages/core/src/webhook/epicMergeProgress.js');
 const actualConnection = await import('../packages/core/src/db/connection.js');
 const actualGithubAuth = await import('../packages/core/src/auth/githubAuth.js');
 const actualCheckRunHelpers = await import('../packages/core/src/webhook/checkRunHelpers.js');
@@ -143,10 +144,31 @@ await mock.module('../packages/core/src/webhook/checkRunHelpers.js', {
 const progressRequests: Array<Record<string, unknown>> = [];
 let failingProgressUpdates = 0;
 let completionNotices = 0;
+let useRealProgress = false;
+const comments: Array<{ id: number; issue_number: number; body: string; user: { login: string } }> = [];
+const progressOctokit = {
+    async paginate(route: string, parameters: Record<string, unknown>) {
+        if (route === 'GET /repos/{owner}/{repo}/pulls') return [{ number: 201, state: 'closed', merged_at: childMergedAt }];
+        return comments.filter(comment => comment.issue_number === parameters.issue_number).map(comment => ({ ...comment }));
+    },
+    async request(route: string, parameters: Record<string, unknown>) {
+        if (route === 'GET /repos/{owner}/{repo}/pulls/{pull_number}') {
+            return { data: { merged: parameters.pull_number === 500 && epicPrMerged, base: { ref: 'main' } } };
+        }
+        if (route === 'PATCH /repos/{owner}/{repo}/issues/comments/{comment_id}') {
+            comments.find(comment => comment.id === parameters.comment_id)!.body = parameters.body as string;
+        } else {
+            assert.equal(route, 'POST /repos/{owner}/{repo}/issues/{issue_number}/comments');
+            comments.push({ id: comments.length + 1, issue_number: parameters.issue_number as number,
+                body: parameters.body as string, user: { login: 'propr-dev[bot]' } });
+        }
+        return { data: {} };
+    },
+};
 // Holds the next progress update open, as if its GitHub requests were in flight.
 let holdNextProgressUpdate: { until: Promise<void>; onHeld: () => void } | null = null;
 await mock.module('../packages/core/src/webhook/epicMergeProgress.js', { namedExports: {
-    updateEpicMergeProgress: async (request: Record<string, unknown>) => {
+    updateEpicMergeProgress: async (request: Record<string, unknown>, correlationId: string, dependencies: import('../packages/core/src/webhook/epicMergeProgress.js').EpicMergeProgressDependencies) => {
         if (failingProgressUpdates > 0) {
             failingProgressUpdates--;
             throw new Error('GitHub comment request failed');
@@ -157,6 +179,10 @@ await mock.module('../packages/core/src/webhook/epicMergeProgress.js', { namedEx
             hold.onHeld();
             await hold.until;
         }
+        if (useRealProgress) await actualProgress.updateEpicMergeProgress(
+            request as unknown as import('../packages/core/src/webhook/epicMergeProgress.js').EpicMergeProgressRequest,
+            correlationId, { ...dependencies, getOctokit: async () => progressOctokit },
+        );
         progressRequests.push(request);
         if (completionNotices === 0) completionNotices++;
     },
@@ -180,6 +206,8 @@ beforeEach(() => {
     onIssueFetch = () => {};
     failingProgressUpdates = 0;
     completionNotices = 0;
+    useRealProgress = false;
+    comments.length = 0;
     holdNextProgressUpdate = null;
     progressRequests.length = 0;
     redis = fakeRedis();
@@ -568,5 +596,55 @@ test('refreshes plan membership after resolving a successor for a saved retry', 
     assert.equal(progressRequests[0].epicPrNumber, 501);
     const planIssues = progressRequests[0].planIssues as PlanIssueRow[];
     assert.equal(planIssues[1].pr_number, 202);
+    assert.equal(redis.hash.size, 0);
+});
+
+for (const aggregateFirst of [true, false]) {
+    for (const secondFails of [true, false]) {
+        test(`preserves independent aggregate and successor retries (aggregate first: ${aggregateFirst}, second fails: ${secondFails})`, async () => {
+            useRealProgress = true;
+            epicPrMerged = true;
+            childMergedAt = '2026-10-10T21:00:00Z';
+            const first = aggregateFirst ? finalPayload : payload;
+            const second = aggregateFirst ? payload : finalPayload;
+            failingProgressUpdates = 1;
+            await handleEpicPRCreationOnMerge(first, 'test', logger.withCorrelation('test'));
+            const [firstField, firstValue] = [...redis.hash.entries()][0];
+            failingProgressUpdates = secondFails ? 1 : 0;
+            await handleEpicPRCreationOnMerge(second, 'test', logger.withCorrelation('test'));
+            assert.equal(createdEpicPRs, 1);
+            assert.equal(redis.hash.get(firstField), firstValue);
+            assert.equal(redis.hash.size, secondFails ? 2 : 1);
+
+            elapseRetryBackoff();
+            assert.equal(await retryPendingEpicMergeProgress(), secondFails ? 2 : 1);
+            assert.equal(redis.hash.size, 0);
+            assert.equal(comments.filter(c => c.issue_number === 500 && c.body.includes(actualProgress.EPIC_FINAL_MERGE_MARKER)).length, 1);
+            assert.ok(comments.some(c => c.issue_number === 500 && c.body.includes(actualProgress.EPIC_PROGRESS_MARKER) && c.body.includes('merged into main')));
+            assert.ok(comments.some(c => c.issue_number === 501 && c.body.includes(actualProgress.EPIC_PROGRESS_MARKER)));
+            assert.equal(await retryPendingEpicMergeProgress(), 0);
+        });
+    }
+}
+
+test('redirecting a saved child retry does not fulfil the original epic confirmation', async () => {
+    childMergedAt = '2026-10-10T21:00:00Z';
+    failingProgressUpdates = 1;
+    await handleEpicPRCreationOnMerge(payload, 'test', logger.withCorrelation('test'));
+    epicPrMerged = true;
+    failingProgressUpdates = 1;
+    await handleEpicPRCreationOnMerge(finalPayload, 'test', logger.withCorrelation('test'));
+    assert.equal(redis.hash.size, 2);
+    // Only the child retry is due; its success on #501 cannot release #500.
+    for (const [field, value] of redis.hash) {
+        if (JSON.parse(value).mergedChildPrNumber !== null) redis.hash.set(field, JSON.stringify({ ...JSON.parse(value), nextAttemptAt: 0 }));
+    }
+    assert.equal(await retryPendingEpicMergeProgress(), 1);
+    assert.equal(progressRequests[0].epicPrNumber, 501);
+    assert.equal(redis.hash.size, 1);
+    assert.equal(JSON.parse([...redis.hash.values()][0]).mergedChildPrNumber, null);
+    elapseRetryBackoff();
+    assert.equal(await retryPendingEpicMergeProgress(), 1);
+    assert.equal(progressRequests[1].epicPrNumber, 500);
     assert.equal(redis.hash.size, 0);
 });

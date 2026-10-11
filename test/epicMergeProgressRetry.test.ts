@@ -12,7 +12,7 @@ after(async () => { await closeConnection(); });
 
 const log = { debug() {}, info() {}, warn() {}, error() {} } as never;
 const target: EpicProgressTarget = { owner: 'integry', repo: 'propr', epicBranch: '100-epic-big-plan-abc', epicPrNumber: 500, mergedChildPrNumber: 203 };
-const field = epicProgressRetryField(target.owner, target.repo, target.epicBranch);
+const field = epicProgressRetryField(target.owner, target.repo, target.epicBranch, target.epicPrNumber, target.mergedChildPrNumber);
 
 function fakeRedis() {
     const hash = new Map<string, string>();
@@ -286,7 +286,7 @@ describe('runEpicProgressUpdate lease ownership', () => {
 
     test('never runs the update when the lease is busy and the retry cannot be recorded', async () => {
         const redis = fakeRedis();
-        redis.keys.set(`epic:merge-progress-lock:${field}`, 'other-owner');
+        redis.keys.set(`epic:merge-progress-lock:${target.owner}/${target.repo}#${target.epicBranch}`, 'other-owner');
         redis.hset = async () => { throw new Error('redis write failed'); };
         let updates = 0;
         const outcome = await runEpicProgressUpdate(target, {
@@ -299,14 +299,18 @@ describe('runEpicProgressUpdate lease ownership', () => {
 });
 
 describe('recordEpicProgressRetry', () => {
-    test('keeps a known epic PR number when a later failure could not locate it', async () => {
+    test('keeps unresolved child work separate from a known epic PR', async () => {
         const redis = fakeRedis();
         await recordEpicProgressRetry(redis as never, target, 1_000);
         await recordEpicProgressRetry(redis as never, { ...target, epicPrNumber: null, mergedChildPrNumber: 204 }, 2_000);
         const retry = JSON.parse(redis.hash.get(field)!);
         assert.equal(retry.epicPrNumber, 500);
-        assert.equal(retry.mergedChildPrNumber, 204);
-        assert.equal(retry.attempts, 2);
+        assert.equal(retry.mergedChildPrNumber, 203);
+        assert.equal(retry.attempts, 1);
+        const unresolved = JSON.parse(redis.hash.get(epicProgressRetryField(target.owner, target.repo, target.epicBranch, null, 204))!);
+        assert.equal(unresolved.epicPrNumber, null);
+        assert.equal(unresolved.mergedChildPrNumber, 204);
+        assert.equal(redis.hash.size, 2);
     });
 });
 
@@ -333,4 +337,44 @@ describe('sweepEpicProgressRetries', () => {
         assert.equal(retries, 0);
         assert.equal(redis.hash.size, 0);
     });
+});
+
+test('a successor deferred while the aggregate holds the branch lease keeps its own obligation', async () => {
+    const redis = fakeRedis();
+    const aggregate = { ...target, mergedChildPrNumber: null };
+    const successor = { ...target, epicPrNumber: 501 };
+    await recordEpicProgressRetry(redis as never, aggregate, 1_000);
+    const outcome = await runEpicProgressUpdate(aggregate, {
+        redis: redis as never, log,
+        update: async () => {
+            assert.equal(await runEpicProgressUpdate(successor, {
+                redis: redis as never, log, now: () => 2_000,
+                update: async () => { assert.fail('the branch lease must serialize different targets'); },
+            }), 'retry_scheduled');
+            return true;
+        },
+    });
+    assert.equal(outcome, 'updated');
+    assert.equal(redis.hash.size, 1);
+    assert.equal(JSON.parse([...redis.hash.values()][0]).epicPrNumber, 501);
+});
+
+test('the sweep releases a legacy branch record only after retrying its own target', async () => {
+    const redis = fakeRedis();
+    const aggregate = { ...target, mergedChildPrNumber: null };
+    const legacyField = `${target.owner}/${target.repo}#${target.epicBranch}`;
+    const legacyValue = JSON.stringify({ ...aggregate, attempts: 1, firstFailedAt: 1_000, nextAttemptAt: 0 });
+    redis.hash.set(legacyField, legacyValue);
+    await runEpicProgressUpdate({ ...target, epicPrNumber: 501 }, {
+        redis: redis as never, log, update: async () => true,
+    });
+    assert.equal(redis.hash.get(legacyField), legacyValue);
+    assert.equal(await sweepEpicProgressRetries({
+        redis: redis as never, log, now: () => 2_000,
+        retry: pending => runEpicProgressUpdate(pending, {
+            redis: redis as never, log,
+            update: async () => { assert.deepEqual(pending, aggregate); return true; },
+        }),
+    }), 1);
+    assert.equal(redis.hash.size, 0);
 });

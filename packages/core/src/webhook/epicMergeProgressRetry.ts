@@ -90,8 +90,20 @@ export interface EpicProgressUpdateOptions {
     log?: ReturnType<typeof logger.withCorrelation>;
 }
 
-export function epicProgressRetryField(owner: string, repo: string, epicBranch: string): string {
+function epicProgressBranchField(owner: string, repo: string, epicBranch: string): string {
     return `${owner.toLowerCase()}/${repo.toLowerCase()}#${epicBranch}`;
+}
+
+/**
+ * Keep each target separate: a child can be redirected to a successor while
+ * the original epic still needs its final-merge confirmation. Unknown targets
+ * must not inherit the PR number of an unrelated obligation on the branch.
+ */
+export function epicProgressRetryField(
+    owner: string, repo: string, epicBranch: string,
+    epicPrNumber: number | null, mergedChildPrNumber: number | null,
+): string {
+    return JSON.stringify([owner.toLowerCase(), repo.toLowerCase(), epicBranch, epicPrNumber, mergedChildPrNumber]);
 }
 
 function parseRetry(value: string | null | undefined): EpicProgressRetry | null {
@@ -114,16 +126,14 @@ function parseRetry(value: string | null | undefined): EpicProgressRetry | null 
 }
 
 /**
- * Records (or extends) the retry obligation for an epic. A target without an
- * epic PR number keeps the number already known from an earlier failure.
+ * Records (or extends) the retry obligation for this specific target.
  */
 export async function recordEpicProgressRetry(redis: EpicProgressRetryRedis, target: EpicProgressTarget, now: number = Date.now()): Promise<void> {
-    const field = epicProgressRetryField(target.owner, target.repo, target.epicBranch);
+    const field = epicProgressRetryField(target.owner, target.repo, target.epicBranch, target.epicPrNumber, target.mergedChildPrNumber);
     const previous = parseRetry(await redis.hget(EPIC_PROGRESS_RETRY_KEY, field));
     const attempts = (previous?.attempts ?? 0) + 1;
     const retry: EpicProgressRetry = {
         ...target,
-        epicPrNumber: target.epicPrNumber ?? previous?.epicPrNumber ?? null,
         attempts,
         firstFailedAt: previous?.firstFailedAt || now,
         nextAttemptAt: now + Math.min(RETRY_MAX_DELAY_MS, RETRY_BASE_DELAY_MS * 2 ** (attempts - 1)),
@@ -147,8 +157,8 @@ export async function runEpicProgressUpdate(
     target: EpicProgressTarget,
     { redis, update, now = Date.now, log = logger.withCorrelation('epic-merge-progress') }: EpicProgressUpdateOptions,
 ): Promise<EpicProgressUpdateOutcome> {
-    const field = epicProgressRetryField(target.owner, target.repo, target.epicBranch);
-    const lockKey = `${EPIC_PROGRESS_LOCK_PREFIX}${field}`;
+    const field = epicProgressRetryField(target.owner, target.repo, target.epicBranch, target.epicPrNumber, target.mergedChildPrNumber);
+    const lockKey = `${EPIC_PROGRESS_LOCK_PREFIX}${epicProgressBranchField(target.owner, target.repo, target.epicBranch)}`;
     const token = randomUUID();
     /**
      * Records a retry for an update that must not run now. 'skipped' means
@@ -258,7 +268,12 @@ export async function sweepEpicProgressRetries(
         }
         if (pending.nextAttemptAt > current) continue;
         const { owner, repo, epicBranch, epicPrNumber, mergedChildPrNumber } = pending;
-        if (await retry({ owner, repo, epicBranch, epicPrNumber, mergedChildPrNumber }) === 'updated') updated++;
+        if (await retry({ owner, repo, epicBranch, epicPrNumber, mergedChildPrNumber }) === 'updated') {
+            // Also release records written using the former branch-only field.
+            // Only this exact target's successful retry fulfils that obligation.
+            await redis.eval(COMPARE_AND_DELETE_FIELD, 1, EPIC_PROGRESS_RETRY_KEY, field, value);
+            updated++;
+        }
     }
     return updated;
 }
