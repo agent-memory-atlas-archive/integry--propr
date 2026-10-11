@@ -32,6 +32,7 @@ import { processGoalJob } from './jobs/processGoalJob.js';
 import { processAgentRunJob } from './jobs/processAgentRunJob.js';
 import { processAgentActionJob } from './jobs/processAgentActionJob.js';
 import { createConfiguredMainWorker } from './workerFactory.js';
+import { resolveWorkerConcurrency } from './workerConcurrency.js';
 import type { MainWorker } from './workerFactory.js';
 import { attachPRCommentTaskStateFinalizers, type PRCommentTaskStateFinalizers } from './jobs/prCommentTaskStateFinalizers.js';
 import { startWorkerTaskStateRecovery } from './workerTaskStateRecovery.js';
@@ -192,7 +193,7 @@ export interface StartedWorker {
 
 async function startWorker(options: WorkerOptions = {}): Promise<StartedWorker> {
     const workerId = `worker:${generateCorrelationId()}`;
-    let workerConcurrency = parseInt(process.env.WORKER_CONCURRENCY || '5', 10);
+    let workerConcurrency = resolveWorkerConcurrency();
     let aiPrimaryTag = 'AI';
 
     validateAttachmentBaseUrlConfig();
@@ -203,12 +204,8 @@ async function startWorker(options: WorkerOptions = {}): Promise<StartedWorker> 
     try {
         if (process.env.CONFIG_REPO) {
             const settings = await loadSettings();
-            if (settings.worker_concurrency && typeof settings.worker_concurrency === 'number') {
-                workerConcurrency = settings.worker_concurrency;
-                logger.info({ concurrency: workerConcurrency }, 'Successfully loaded worker_concurrency from config repo');
-            } else {
-                logger.info({ concurrency: workerConcurrency }, 'Using worker_concurrency from environment variable');
-            }
+            workerConcurrency = resolveWorkerConcurrency(settings?.worker_concurrency);
+            logger.info({ concurrency: workerConcurrency }, 'Resolved worker concurrency with config repo override');
             await loadSettingsFromConfig();
             logger.info('Successfully initialized runtime settings from config repo');
         }
