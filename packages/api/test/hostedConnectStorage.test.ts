@@ -8,6 +8,7 @@ import { execFileSync } from 'node:child_process';
 import { createServer } from 'node:https';
 import type { AddressInfo } from 'node:net';
 import express from 'express';
+import { rateLimit } from 'express-rate-limit';
 import cors from 'cors';
 import session from 'express-session';
 import { chromium } from 'playwright';
@@ -125,7 +126,12 @@ test('real HTTPS hosted session, storage authority and Connect frontend', async 
   const service = new InstanceStorageService({ lifecycle: new StorageLifecycle(path.join(root, 'control')), clonesRoot: path.join(root, 'clones'),
     roots: [{ category: 'database_config', path: owned }], taskHistory: taskHistoryControl(db), hasPendingTasks: async () => false });
   const app = express();
-  const instance = express(); corsBoundary(instance); instance.use(express.json()); setupAuth(instance, false);
+  // Bound both fixture apps before authentication and file-serving handlers.
+  // Each app has its own in-memory budget with room for browser acceptance.
+  app.use(rateLimit({ windowMs: 60_000, limit: 600 }));
+  const instance = express();
+  instance.use(rateLimit({ windowMs: 60_000, limit: 600 }));
+  corsBoundary(instance); instance.use(express.json()); setupAuth(instance, false);
   app.use((req, res, next) => req.hostname === 't-storage-test.propr.dev' ? instance(req, res, next) : next());
   // Local test-only identity provider: exercise the production Connect callback
   // with an isolated grant redeemer; never contact a real relay or GitHub account.
