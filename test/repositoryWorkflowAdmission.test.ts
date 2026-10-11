@@ -14,11 +14,14 @@ import { runWithExecutionAbortSignal, ExecutionAbortedError } from '../packages/
 import { executeWithRepositoryWorkflow } from '../packages/core/src/workflow/workflowExecution.js';
 import { executeWithNetworkPolicy, networkEgressReportFromError } from '../packages/core/src/network/egressExecution.js';
 import { resolveNetworkPolicy } from '../packages/core/src/network/networkPolicy.js';
+import { resolveWorkerConcurrency } from '../src/workerConcurrency.js';
+import { createConfiguredMainWorker, type MainJobProcessors } from '../src/workerFactory.js';
 
 let settings: Record<string, unknown> = {};
+let settingsReads = 0;
 await mock.module('@propr/core', { namedExports: {
     withRepositoryWorkflowSlot, releaseRepositoryWorkflowSlot, reconcileRepositoryWorkflowSlot, forgetRepositoryWorkflowWaiter, RepositoryWorkflowCapacityError, RepositoryWorkflowLeaseLostError, loadRepositoryWorkflow, WORKFLOW_MAX_BYTES, WORKFLOW_PATH,
-    executeWithRepositoryWorkflow, loadSettings: async () => settings, RepositoryWorkflowPolicyError, withRetry,
+    executeWithRepositoryWorkflow, loadSettings: async () => { settingsReads++; return settings; }, RepositoryWorkflowPolicyError, withRetry,
     retryConfigs: { githubApi: { maxAttempts: 3, baseDelay: 1, maxDelay: 1, exponentialBase: 1, retryableErrors: [] } },
     TaskStates: { CANCELLED: 'cancelled', FAILED: 'failed', COMPLETED: 'completed' },
     executeWithNetworkPolicy, networkEgressReportFromError, resolveNetworkPolicy,
@@ -110,7 +113,9 @@ test('transient GitHub failures while reading policy are retried instead of fail
 test('an unusable instance worker_concurrency falls back instead of blaming the workflow file', async () => {
     const { octokit } = githubFixture({ main: { sha: 'main-sha', workflow: 'limits: { max_parallel_tasks: 50 }' } });
     const previous = process.env.WORKER_CONCURRENCY;
+    const previousConfigRepo = process.env.CONFIG_REPO;
     try {
+        process.env.CONFIG_REPO = 'owner/config';
         for (const [setting, env, expected] of [['', undefined, 5], ['abc', '3', 3], [0, undefined, 5], [7, undefined, 7], ['6', undefined, 6]] as const) {
             settings = { worker_concurrency: setting };
             if (env === undefined) delete process.env.WORKER_CONCURRENCY; else process.env.WORKER_CONCURRENCY = env;
@@ -119,10 +124,40 @@ test('an unusable instance worker_concurrency falls back instead of blaming the 
     } finally {
         settings = {};
         if (previous === undefined) delete process.env.WORKER_CONCURRENCY; else process.env.WORKER_CONCURRENCY = previous;
+        if (previousConfigRepo === undefined) delete process.env.CONFIG_REPO; else process.env.CONFIG_REPO = previousConfigRepo;
     }
     // Other callers passing a malformed instance value get an error naming the instance setting.
     await assert.rejects(loadRepositoryWorkflow({ resolveRevision: async () => assert.fail('validated first'), readFile: async () => null }, 'main', { maxParallelTasks: Number.NaN }),
         (error: Error) => error.message === 'Invalid instance setting: worker_concurrency must be a positive integer' && !(error instanceof RepositoryWorkflowPolicyError));
+});
+
+test('worker and workflow ceilings agree at 2/6/12, with opt-in config overrides and lower repository caps', async () => {
+    const previous = { CONFIG_REPO: process.env.CONFIG_REPO, WORKER_CONCURRENCY: process.env.WORKER_CONCURRENCY };
+    try {
+        for (const ceiling of [2, 6, 12]) {
+            process.env.WORKER_CONCURRENCY = String(ceiling);
+            for (const configRepo of [undefined, '', 'owner/config']) {
+                if (configRepo === undefined) delete process.env.CONFIG_REPO; else process.env.CONFIG_REPO = configRepo;
+                for (const setting of [undefined, 1, 50, '6', '', 'bad', '6workers', 0, -1, 1.5, Infinity, true]) {
+                    settings = { worker_concurrency: setting };
+                    const expected = configRepo && (setting === 1 || setting === 50 || setting === '6') ? Number(setting) : ceiling;
+                    assert.equal(resolveWorkerConcurrency(setting), expected);
+                    for (const repoCap of [1, 100]) {
+                        const { octokit } = githubFixture({ main: { sha: 'matrix', workflow: `limits: { max_parallel_tasks: ${repoCap} }` } });
+                        const reads = settingsReads;
+                        const workflow = await prepareRepositoryWorkflow({ octokit, repoOwner: 'owner', repoName: 'repo', defaultBranch: 'main' });
+                        assert.equal(workflow?.maxParallelTasks, Math.min(repoCap, expected));
+                        assert.equal(settingsReads - reads, configRepo ? 1 : 0, 'Hosted must not consult stored concurrency');
+                    }
+                }
+            }
+        }
+    } finally {
+        settings = {};
+        for (const [key, value] of Object.entries(previous)) {
+            if (value === undefined) delete process.env[key]; else process.env[key] = value;
+        }
+    }
 });
 
 test('an invalid workflow file fails the job once instead of re-reporting it on every retry', async () => {
@@ -392,6 +427,107 @@ test('the capacity slot ends when the agent container exits, not when publicatio
 
 const binary = process.env.PROPR_TEST_REDIS_SERVER || 'redis-server';
 const available = spawnSync(binary, ['--version']).status === 0;
+test('one configured main worker admits N of N+1 runnable jobs at Hosted 2/6/12', {
+    skip: !available && 'redis-server is needed for the queue integration test', timeout: 30_000,
+}, async t => {
+    const directory = await mkdtemp(path.join(tmpdir(), 'hosted-concurrency-'));
+    const socket = path.join(directory, 'redis.sock');
+    const server = spawn(binary, ['--port', '0', '--unixsocket', socket, '--save', '', '--appendonly', 'no'], { stdio: 'ignore' });
+    const redis = new Redis({ path: socket, lazyConnect: true, retryStrategy: () => 25, maxRetriesPerRequest: null });
+    redis.on('error', () => {});
+    const previous = { CONFIG_REPO: process.env.CONFIG_REPO, WORKER_CONCURRENCY: process.env.WORKER_CONCURRENCY };
+    const waitUntil = async (condition: () => boolean) => {
+        const deadline = Date.now() + 5000;
+        while (!condition()) {
+            if (Date.now() > deadline) assert.fail('Timed out waiting for queue progress');
+            await new Promise(resolve => setTimeout(resolve, 10));
+        }
+    };
+    try {
+        for (let attempt = 0; ; attempt++) {
+            try { await access(socket); break; }
+            catch { if (attempt > 100) throw new Error('Redis socket unavailable'); await new Promise(resolve => setTimeout(resolve, 25)); }
+        }
+        await redis.connect();
+        delete process.env.CONFIG_REPO;
+        let scenario = 0;
+        for (const ceiling of [2, 6, 12]) {
+            // The final scenario has no workflow and spreads jobs across repositories.
+            for (const setting of [undefined, 1, 50, 'malformed', 'no-workflow']) {
+                await t.test(`N=${ceiling}, persisted=${String(setting)}`, async () => {
+                    process.env.WORKER_CONCURRENCY = String(ceiling);
+                    settings = { worker_concurrency: setting };
+                    const hasWorkflow = setting !== 'no-workflow';
+                    const { octokit } = githubFixture({ main: { sha: `queue-${++scenario}`,
+                        workflow: hasWorkflow ? 'limits: { max_parallel_tasks: 100 }' : undefined } });
+                    const workflow = await prepareRepositoryWorkflow({ octokit, repoOwner: 'owner', repoName: 'repo', defaultBranch: 'main' });
+                    const queue = new Queue(`hosted-concurrency-${scenario}`, { connection: redis });
+                    let worker: Worker | undefined;
+                    let active = 0;
+                    let peak = 0;
+                    let completed = 0;
+                    const started: number[] = [];
+                    const errors: Error[] = [];
+                    const releases: (() => void)[] = [];
+                    const gates = Array.from({ length: ceiling + 1 }, () => new Promise<void>(resolve => releases.push(resolve)));
+                    const processor: MainJobProcessors['processGitHubIssueJob'] = job => withRepositoryWorkflowAdmission({
+                        workflow, repoOwner: 'owner', repoName: hasWorkflow ? `repo-${scenario}` : `repo-${scenario}-${job.id}`,
+                        taskId: job.id!, redisClient: redis,
+                        stateManager: { getTaskState: async () => ({ state: 'pending' }) } as never, correlatedLogger: log as never,
+                    }, async () => {
+                        const index = Number(job.id) - 1;
+                        started.push(index);
+                        peak = Math.max(peak, ++active);
+                        try { await gates[index]; return { status: 'completed' }; }
+                        finally { active--; }
+                    });
+                    const names = ['processGitHubIssue', 'processPullRequestComment', 'processTaskImport', 'processSystemTask',
+                        'processMergeConflict', 'processGoal', 'processAgentRun', 'processAgentAction'];
+                    try {
+                        await queue.addBulk(gates.map((_, index) => ({ name: names[index % names.length], data: {} })));
+                        worker = await createConfiguredMainWorker({
+                            queueName: queue.name, concurrency: resolveWorkerConcurrency(settings.worker_concurrency),
+                            workerFactory: async (name, process, options) => new Worker(name, process, { ...options, connection: redis }),
+                            processors: Object.fromEntries(names.map(name => [`${name}Job`, processor])) as unknown as MainJobProcessors,
+                            beforeRun: worker => {
+                                worker.on('error', error => errors.push(error));
+                                worker.on('failed', (_job, error) => errors.push(error));
+                                worker.on('completed', () => { completed++; });
+                            },
+                        });
+                        await waitUntil(() => started.length >= ceiling);
+                        await new Promise(resolve => setTimeout(resolve, 75));
+                        assert.equal(started.length, ceiling, 'N+1 must remain unadmitted while all N runs are held');
+                        assert.equal(await queue.getActiveCount(), ceiling);
+                        assert.equal(await queue.getWaitingCount(), 1);
+                        assert.equal(await queue.getDelayedCount(), 0);
+                        releases[started[0]]();
+                        await waitUntil(() => started.length === ceiling + 1);
+                        assert.equal(active, ceiling, 'one released slot admits exactly one waiting run');
+                        assert.equal(peak, ceiling);
+                        releases.forEach(release => release());
+                        await waitUntil(() => completed === ceiling + 1);
+                        assert.deepEqual(errors, []);
+                    } finally {
+                        releases.forEach(release => release());
+                        await worker?.close();
+                        await queue.close();
+                    }
+                });
+            }
+        }
+    } finally {
+        settings = {};
+        for (const [key, value] of Object.entries(previous)) {
+            if (value === undefined) delete process.env[key]; else process.env[key] = value;
+        }
+        redis.disconnect();
+        server.kill('SIGTERM');
+        await new Promise<void>(resolve => server.once('exit', () => resolve()));
+        await rm(directory, { recursive: true, force: true });
+    }
+});
+
 test('saturated repository jobs release shared BullMQ processors so another repository runs', {
     skip: !available && 'redis-server is needed for the queue integration test', timeout: 15_000,
 }, async () => {
