@@ -188,6 +188,16 @@ export interface AdmittedAgent {
     finish(): Promise<void>;
 }
 
+function createAdmissionClient(): Redis {
+    const client = new Redis({
+        host: process.env.REDIS_HOST || 'redis', port: Number(process.env.REDIS_PORT || 6379),
+        connectTimeout: 5000, commandTimeout: 5000, maxRetriesPerRequest: 1,
+        retryStrategy: () => null,
+    });
+    client.on('error', error => logger.error({ error: error.message }, 'Agent admission Redis unavailable'));
+    return client;
+}
+
 /** Acquire exactly once, at the physical Docker boundary, never at logical wrappers.
  * create -> fenced ID registration -> start ID makes crash recovery safe even
  * when a process resumes after its lease expired. Recovery removes that exact
@@ -195,12 +205,7 @@ export interface AdmittedAgent {
 export async function prepareAdmittedAgent(args: string[], options: AdmissionOptions = {}): Promise<AdmittedAgent | null> {
     const config = options.config ?? resolveAgentRunAdmission();
     if (!config) return null;
-    const ownedClient = options.client ? undefined : new Redis({
-        host: process.env.REDIS_HOST || 'redis', port: Number(process.env.REDIS_PORT || 6379),
-        connectTimeout: 5000, commandTimeout: 5000, maxRetriesPerRequest: 1,
-        retryStrategy: () => null,
-    });
-    ownedClient?.on('error', error => logger.error({ error: error.message }, 'Agent admission Redis unavailable'));
+    const ownedClient = options.client ? undefined : createAdmissionClient();
     const client = options.client ?? ownedClient!;
     const environment = { ...process.env, ...options.extraEnvVars };
     const runtime = options.docker ?? admissionDocker(environment, options.cwd);
@@ -264,6 +269,16 @@ export async function prepareAdmittedAgent(args: string[], options: AdmissionOpt
             })();
         }, Math.max(10, Math.floor(leaseMs / 3)));
     };
+    const initialize = async (identity: string) => {
+        try { await runtime.assertEmpty(config.instance); }
+        catch (error) {
+            // Another process can initialize and launch between our
+            // missing-config observation and Docker inspection.
+            if (await client.get(configKey) === identity) return;
+            throw error;
+        }
+        await call('initialize', token, identity);
+    };
     try {
         const identity = JSON.stringify({ limit: config.limit, daemon: await runtime.daemon(), ...(config.generation ? { generation: config.generation } : {}) });
         await checkCancelled();
@@ -275,14 +290,7 @@ export async function prepareAdmittedAgent(args: string[], options: AdmissionOpt
             const result = await call('acquire', token, identity, String(config.limit));
             if (result === 1) { acquired = true; break; }
             if (result === -1) {
-                try { await runtime.assertEmpty(config.instance); }
-                catch (error) {
-                    // Another process can initialize and launch between our
-                    // missing-config observation and Docker inspection.
-                    if (await client.get(configKey) === identity) continue;
-                    throw error;
-                }
-                await call('initialize', token, identity);
+                await initialize(identity);
                 continue;
             }
             await delay(options.pollMs ?? 250, undefined, { signal });

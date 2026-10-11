@@ -5,13 +5,8 @@ import { StringDecoder } from 'node:string_decoder';
 import fs from 'fs';
 import logger from '../../utils/logger.js';
 import {
-    abortSpawnedExecution,
-    createDockerExecutionState,
-    ExecutionAbortedError,
-    getExecutionAbortError,
-    getDockerRunContainerName,
-    getExecutionOwnershipContext,
-    resolveExecutionArgs,
+    abortSpawnedExecution, createDockerExecutionState, ExecutionAbortedError,
+    getExecutionAbortError, getDockerRunContainerName, getExecutionOwnershipContext, resolveExecutionArgs,
 } from './dockerExecutionOwnership.js';
 import { plannerAbortSignalKeyForTask, scheduleForceKill, setupAbortChecker } from './dockerAbortController.js';
 import { BoundedDiagnosticTail, BoundedProviderRecordBuffer, boundedProviderOutput } from '../../agents/impl/utils/boundedProviderOutput.js';
@@ -27,17 +22,11 @@ export { getDockerRootDir } from './dockerRootDir.js';
 
 export { stopDockerContainer } from './dockerContainerControl.js';
 export {
-    addTaskAttemptLabelsToDockerArgs,
-    ExecutionAbortedError,
-    runWithExecutionAbortSignal,
+    addTaskAttemptLabelsToDockerArgs, ExecutionAbortedError, runWithExecutionAbortSignal,
 } from './dockerExecutionOwnership.js';
 export {
-    buildPlannerAbortSignalKey,
-    checkAbortSignal,
-    clearWorkerAbortSignal,
-    plannerAbortSignalKeyForTask,
-    runWithPlannerAbortContext,
-    shouldTerminateAfterAbortLookupFailure,
+    buildPlannerAbortSignalKey, checkAbortSignal, clearWorkerAbortSignal,
+    plannerAbortSignalKeyForTask, runWithPlannerAbortContext, shouldTerminateAfterAbortLookupFailure,
 } from './dockerAbortController.js';
 export type { AbortRedisClient, AbortRedisFactory } from './dockerAbortController.js';
 
@@ -244,7 +233,7 @@ async function startDockerCommand(
         : null;
     try {
         admission?.signal.throwIfAborted();
-        return await runDockerCommand(command, args, options, { ownershipContext, executionSignal: admission?.signal ?? executionSignal }, admission);
+        return await runDockerCommand(command, args, options, { ownershipContext, executionSignal: admission?.signal ?? executionSignal, admission });
     } finally {
         await admission?.finish();
     }
@@ -254,8 +243,7 @@ function runDockerCommand(
     command: string,
     args: string[],
     options: DockerCommandOptions,
-    { ownershipContext, executionSignal }: { ownershipContext: ReturnType<typeof getExecutionOwnershipContext>; executionSignal: AbortSignal | undefined },
-    admission: AdmittedAgent | null,
+    { ownershipContext, executionSignal, admission }: { ownershipContext: ReturnType<typeof getExecutionOwnershipContext>; executionSignal: AbortSignal | undefined; admission: AdmittedAgent | null },
 ): Promise<ExecutionResult> {
     return new Promise((resolve, reject) => {
         const { timeout = 300000, cwd, onSessionId, onContainerId, worktreePath, stdinData, extraEnvVars, taskId, streamToRedis, streamStderrToRedis, streamExtraOutput, stripAnsi, preserveOutputOnTimeout = false, model, costCapExempt } = options;
@@ -397,19 +385,17 @@ function runDockerCommand(
         const recordWatchdogActivity = (): void => watchdog.recordActivity();
 
         const liveOutput = startLiveOutputStreaming({ taskId, streamToRedis, streamStderrToRedis, streamExtraOutput, stripAnsi, onOverflow: warnFromLiveOutput, onActivity: recordWatchdogActivity, onTranscriptRecord: watchdog.observeLine }, readStdout, () => stderrTail.value);
-        if (admission) {
-            // Admission already owns the immutable ID. A volume-based lookup
-            // could pick a sibling execution sharing the same worktree.
-            state.containerIdDetected = true;
-            if (onContainerId) invokeExecutionCallback(() => onContainerId(admission.id, namedContainer ?? admission.id));
-        } else if (command === 'docker' && args[0] === 'run' && worktreePath) {
-            containerDetectionTimer = detectContainerId(
-                worktreePath,
-                state,
-                onContainerId,
-                invokeExecutionCallback,
-            );
-        }
+        const detectExecutionContainer = () => {
+            if (admission) {
+                // Admission already owns the immutable ID. A volume-based lookup
+                // could pick a sibling execution sharing the same worktree.
+                state.containerIdDetected = true;
+                if (onContainerId) invokeExecutionCallback(() => onContainerId(admission.id, namedContainer ?? admission.id));
+            } else if (command === 'docker' && args[0] === 'run' && worktreePath) {
+                containerDetectionTimer = detectContainerId(worktreePath, state, onContainerId, invokeExecutionCallback);
+            }
+        };
+        detectExecutionContainer();
 
         child.stdout?.on('data', (data: Buffer) => {
             const chunk = stdoutDecoder.write(data), ts = new Date().toISOString();
@@ -426,6 +412,14 @@ function runDockerCommand(
             liveOutput?.stderr(chunk);
         });
 
+        const finishExecution = async (beforeAbortClose?: () => void) => {
+            if (containerDetectionTimer) clearTimeout(containerDetectionTimer);
+            await finishCostExecution();
+            beforeAbortClose?.();
+            await abortChecker?.close();
+            await Promise.allSettled([...pendingCallbacks]);
+            await state.teardownPromise;
+        };
         child.on('close', async (exitCode: number | null) => {
             clearTimeout(timeoutHandle);
             watchdog.stop();
@@ -438,11 +432,7 @@ function runDockerCommand(
             liveOutput?.stdout(finalStdout);
             liveOutput?.stderr(finalStderr);
             inspectSessionLines(finalStdout, new Date().toISOString(), true);
-            if (containerDetectionTimer) clearTimeout(containerDetectionTimer);
-            await finishCostExecution();
-            if (abortChecker) await abortChecker.close();
-            await Promise.allSettled([...pendingCallbacks]);
-            if (state.teardownPromise) await state.teardownPromise;
+            await finishExecution();
             await watchdog.settled();
             executionSignal?.removeEventListener('abort', abortForExecutionSignal);
             try { await liveOutput?.close(); }
@@ -472,12 +462,7 @@ function runDockerCommand(
             clearTimeout(timeoutHandle);
             watchdog.stop();
             inspectSessionLines('', new Date().toISOString(), true);
-            if (containerDetectionTimer) clearTimeout(containerDetectionTimer);
-            await finishCostExecution();
-            executionSignal?.removeEventListener('abort', abortForExecutionSignal);
-            if (abortChecker) await abortChecker.close();
-            await Promise.allSettled([...pendingCallbacks]);
-            if (state.teardownPromise) await state.teardownPromise;
+            await finishExecution(() => executionSignal?.removeEventListener('abort', abortForExecutionSignal));
             await liveOutput?.close().catch(() => undefined);
             reject(hasOwnershipFailure ? ownershipFailure : error);
         });
