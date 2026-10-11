@@ -7,6 +7,8 @@ import {
     EPIC_FINAL_MERGE_MARKER,
     EPIC_PROGRESS_MARKER,
     buildEpicProgressComment,
+    buildEpicCompleteComment,
+    buildEpicFinalMergeComment,
     computeEpicMergeProgress,
     isEpicMergeComplete,
     updateEpicMergeProgress,
@@ -45,11 +47,12 @@ function createOctokit(pulls: unknown[], initialComments: FakeComment[] = []) {
     let nextId = 1000;
     const octokit = {
         epicMerged: false,
+        history: [] as unknown[],
         calls,
         comments,
         async paginate(route: string, parameters: Record<string, unknown>) {
             calls.push({ route, parameters });
-            if (route === 'GET /repos/{owner}/{repo}/pulls') return pulls;
+            if (route === 'GET /repos/{owner}/{repo}/pulls') return parameters.head ? octokit.history : pulls;
             if (route === 'GET /repos/{owner}/{repo}/issues/{issue_number}/comments') return comments.map(c => ({ ...c }));
             throw new Error(`Unexpected paginate ${route}`);
         },
@@ -234,7 +237,7 @@ describe('updateEpicMergeProgress', () => {
             assertOwned: async () => {
                 checks++;
                 // All reads have completed before ownership is checked.
-                assert.strictEqual(octokit.calls.length, 3);
+                assert.strictEqual(octokit.calls.length, 4);
                 throw new Error('lease lost');
             },
         }), /lease lost/);
@@ -303,4 +306,93 @@ test('an early aggregate merge does not claim unfinished planned work is complet
     const final = octokit.comments.find(c => c.body.includes(EPIC_FINAL_MERGE_MARKER))!;
     assert.match(final.body, /0 out of 1 PRs merged/);
     assert.ok(!final.body.includes('All planned epic work is now merged'));
+});
+
+test('final merge builder preserves counts, optional plan title and completion wording', () => {
+    for (const total of [0, 1, 2]) {
+        const progress = { merged: total, total, excluded: 0, mergedPullRequests: [] };
+        const body = buildEpicFinalMergeComment(progress, { epicPrNumber: 501, baseBranch: 'trunk' });
+        assert.match(body, /### ✅ Epic merged\n/);
+        assert.match(body, /Epic PR #501 has been merged into trunk/);
+        assert.ok(body.includes(`**${total} out of ${total} PRs merged**`));
+        assert.equal(body.includes('All planned epic work is now merged.'), total > 0);
+        assert.ok(body.includes(EPIC_FINAL_MERGE_MARKER));
+        if (total > 0) assert.ok(buildEpicCompleteComment(progress).includes(
+            total === 1 ? '1 child PR has' : '2 child PRs have'));
+    }
+    const incomplete = buildEpicFinalMergeComment(
+        { merged: 1, total: 2, excluded: 0, mergedPullRequests: [201] },
+        { epicPrNumber: 501, baseBranch: 'main', planName: 'Big Plan' },
+    );
+    assert.match(incomplete, /Epic merged: Big Plan/);
+    assert.ok(!incomplete.includes('All planned epic work'));
+});
+
+test('final marker skips the PR read and preserves the confirmed target branch', async () => {
+    const octokit = createOctokit([{ number: 201, state: 'closed', merged_at: '2026-10-09T00:00:00Z' }]);
+    await updateEpicMergeProgress({ ...baseRequest, mergedChildPrNumber: null }, 'test', { getOctokit: async () => octokit });
+    octokit.calls.length = 0;
+    const result = await updateEpicMergeProgress(baseRequest, 'test', { getOctokit: async () => octokit });
+    assert.equal(result.trackingComment, 'unchanged');
+    assert.ok(!octokit.calls.some(c => c.route === 'GET /repos/{owner}/{repo}/pulls/{pull_number}'));
+});
+
+test('a human final marker cannot suppress the PR read or readiness', async () => {
+    const octokit = createOctokit([], [{
+        id: 1, user: { login: 'someone' },
+        body: 'Epic PR #500 has been merged into main.\n' + EPIC_FINAL_MERGE_MARKER,
+    }]);
+    await updateEpicMergeProgress(baseRequest, 'test', { getOctokit: async () => octokit });
+    assert.ok(octokit.calls.some(c => c.route === 'GET /repos/{owner}/{repo}/pulls/{pull_number}'));
+    assert.ok(octokit.comments.some(c => c.body.includes(EPIC_COMPLETE_MARKER)));
+});
+
+for (const mergedChildPrNumber of [201, 202, null]) {
+    test(`successor excludes shipped children and plan placeholders (trigger ${mergedChildPrNumber})`, async () => {
+        const octokit = createOctokit([
+            { number: 201, state: 'closed', merged_at: '2026-10-09T00:00:00Z' },
+            { number: 202, state: 'closed', merged_at: '2026-10-09T02:00:00Z' },
+            { number: 203, state: 'open', merged_at: null },
+        ]);
+        octokit.history = [
+            { number: 500, merged_at: '2026-10-09T01:00:00Z' },
+            { number: 499, merged_at: 'invalid' },
+            { number: 501, merged_at: '2026-10-09T03:00:00Z' },
+            { number: 502, merged_at: '2026-10-09T04:00:00Z' },
+        ];
+        const result = await updateEpicMergeProgress({
+            ...baseRequest, epicPrNumber: 501, mergedChildPrNumber,
+            planIssues: [
+                planIssue(100, PlanIssueStatus.MERGED, 201),
+                planIssue(101, PlanIssueStatus.MERGED, 202),
+                planIssue(102, PlanIssueStatus.UNDER_REVIEW, 203),
+                planIssue(103, PlanIssueStatus.PENDING),
+            ],
+        }, 'test', { getOctokit: async () => octokit });
+        assert.deepEqual(result.progress, { merged: 1, total: 3, excluded: 0, mergedPullRequests: [202] });
+        assert.ok(!octokit.comments.some(c => c.body.includes(EPIC_COMPLETE_MARKER)));
+        assert.ok(!octokit.comments.some(c => c.body.includes('All planned epic work')));
+    });
+}
+
+test('successor readiness counts only its children, retaining ambiguous merge timestamps', async () => {
+    const octokit = createOctokit([
+        { number: 201, state: 'closed', merged_at: '2026-10-09T00:00:00Z' },
+        { number: 202, state: 'closed', merged_at: '2026-10-09T01:00:00Z' },
+    ]);
+    octokit.history = [{ number: 500, merged_at: '2026-10-09T01:00:00Z' }];
+    await updateEpicMergeProgress({ ...baseRequest, epicPrNumber: 501, mergedChildPrNumber: 202 },
+        'test', { getOctokit: async () => octokit });
+    assert.ok(octokit.comments.some(c => c.body.includes('All 1 child PR has been merged')));
+});
+
+test('failed predecessor reads write no comments and propagate for durable retry', async () => {
+    const octokit = createOctokit([]);
+    const paginate = octokit.paginate;
+    octokit.paginate = async (route, parameters) => {
+        if (parameters.head) throw new Error('history unavailable');
+        return paginate(route, parameters);
+    };
+    await assert.rejects(updateEpicMergeProgress(baseRequest, 'test', { getOctokit: async () => octokit }), /history unavailable/);
+    assert.equal(octokit.comments.length, 0);
 });

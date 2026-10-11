@@ -24,6 +24,7 @@ let failingPlanListReads = 0;
 let failingEpicLookups = 0;
 // Whether the epic branch has an open epic PR (#500) to find.
 let epicPrExists = true;
+let closedHistoryCount = 0;
 let epicPrMerged = false;
 let childMergedAt: string | null = '2026-10-10T19:00:00Z';
 let failingChildReads = 0;
@@ -61,17 +62,21 @@ await mock.module('../packages/core/src/db/connection.js', {
 });
 await mock.module('../packages/core/src/auth/githubAuth.js', { namedExports: {
     ...actualGithubAuth,
-    getAuthenticatedOctokit: async () => ({ request: async (route: string, parameters: { pull_number?: number }) => {
-        if (route === 'GET /repos/{owner}/{repo}/pulls') {
+    getAuthenticatedOctokit: async () => ({
+        paginate: async (route: string, parameters: Record<string, unknown>) => {
+            assert.equal(route, 'GET /repos/{owner}/{repo}/pulls');
+            assert.equal(parameters.per_page, 100);
             if (failingEpicLookups > 0) {
                 failingEpicLookups--;
                 throw new Error('GitHub unavailable');
             }
-            return { data: [
-                ...(epicPrExists ? [{ number: 500, body: '', state: epicPrMerged ? 'closed' : 'open', merged_at: epicPrMerged ? '2026-10-10T20:00:00Z' : null }] : []),
+            return [
+                ...Array.from({ length: closedHistoryCount }, (_, i) => ({ number: 600 + i, state: 'closed', merged_at: null })),
+                ...(epicPrExists ? [{ number: 500, state: epicPrMerged ? 'closed' : 'open', merged_at: epicPrMerged ? '2026-10-10T20:00:00Z' : null }] : []),
                 ...(createdEpicPRs ? [{ number: 501, state: 'open', merged_at: null }] : []),
-            ] };
-        }
+            ];
+        },
+        request: async (route: string, parameters: { pull_number?: number }) => {
         if (route === 'GET /repos/{owner}/{repo}/pulls/{pull_number}') {
             if (parameters.pull_number === 500) return { data: {
                 state: epicPrMerged ? 'closed' : 'open', merged_at: epicPrMerged ? '2026-10-10T20:00:00Z' : null,
@@ -145,10 +150,17 @@ const progressRequests: Array<Record<string, unknown>> = [];
 let failingProgressUpdates = 0;
 let completionNotices = 0;
 let useRealProgress = false;
+let failingHistoryReads = 0;
 const comments: Array<{ id: number; issue_number: number; body: string; user: { login: string } }> = [];
 const progressOctokit = {
     async paginate(route: string, parameters: Record<string, unknown>) {
-        if (route === 'GET /repos/{owner}/{repo}/pulls') return [{ number: 201, state: 'closed', merged_at: childMergedAt }];
+        if (parameters.head && failingHistoryReads > 0) {
+            failingHistoryReads--;
+            throw new Error('History unavailable');
+        }
+        if (route === 'GET /repos/{owner}/{repo}/pulls') return parameters.head
+            ? [{ number: 500, state: epicPrMerged ? 'closed' : 'open', merged_at: epicPrMerged ? '2026-10-10T20:00:00Z' : null }]
+            : [{ number: 201, state: 'closed', merged_at: childMergedAt }];
         return comments.filter(comment => comment.issue_number === parameters.issue_number).map(comment => ({ ...comment }));
     },
     async request(route: string, parameters: Record<string, unknown>) {
@@ -168,6 +180,7 @@ const progressOctokit = {
 // Holds the next progress update open, as if its GitHub requests were in flight.
 let holdNextProgressUpdate: { until: Promise<void>; onHeld: () => void } | null = null;
 await mock.module('../packages/core/src/webhook/epicMergeProgress.js', { namedExports: {
+    ...actualProgress,
     updateEpicMergeProgress: async (request: Record<string, unknown>, correlationId: string, dependencies: import('../packages/core/src/webhook/epicMergeProgress.js').EpicMergeProgressDependencies) => {
         if (failingProgressUpdates > 0) {
             failingProgressUpdates--;
@@ -196,6 +209,7 @@ beforeEach(() => {
     failingPlanListReads = 0;
     failingEpicLookups = 0;
     epicPrExists = true;
+    closedHistoryCount = 0;
     epicPrMerged = false;
     childMergedAt = '2026-10-10T19:00:00Z';
     failingChildReads = 0;
@@ -207,6 +221,7 @@ beforeEach(() => {
     failingProgressUpdates = 0;
     completionNotices = 0;
     useRealProgress = false;
+    failingHistoryReads = 0;
     comments.length = 0;
     holdNextProgressUpdate = null;
     progressRequests.length = 0;
@@ -221,7 +236,7 @@ function elapseRetryBackoff() {
 const payload = {
     action: 'closed',
     pull_request: { number: 201, merged: true, base: { ref: EPIC_BRANCH } },
-    repository: { full_name: 'integry/propr', name: 'propr', owner: { login: 'integry' } },
+    repository: { default_branch: 'main', full_name: 'integry/propr', name: 'propr', owner: { login: 'integry' } },
 } as unknown as PullRequestEvent;
 
 test('skips the progress update when the plan cannot be read, keeping a retry', async () => {
@@ -647,4 +662,49 @@ test('redirecting a saved child retry does not fulfil the original epic confirma
     assert.equal(await retryPendingEpicMergeProgress(), 1);
     assert.equal(progressRequests[1].epicPrNumber, 500);
     assert.equal(redis.hash.size, 0);
+});
+
+for (const merged of [true, false]) {
+    test(`finds an eligible epic beyond the first page (merged: ${merged})`, async () => {
+        closedHistoryCount = 100;
+        epicPrMerged = merged;
+        await handleEpicPRCreationOnMerge(payload, 'test', logger.withCorrelation('test'));
+        assert.equal(createdEpicPRs, 0);
+        assert.equal(progressRequests[0].epicPrNumber, 500);
+    });
+}
+
+for (const base of ['release/next', '200-epic-other-plan-abc']) {
+    test(`does not report a final aggregate merge into ${base}`, async () => {
+        const event = { ...finalPayload, pull_request: { ...finalPayload.pull_request, base: { ref: base } } } as PullRequestEvent;
+        await handleEpicPRCreationOnMerge(event, 'test', logger.withCorrelation('test'));
+        assert.ok(!progressRequests.some(r => r.mergedChildPrNumber === null));
+        if (base.includes('-epic-')) assert.ok(progressRequests.some(r => r.epicBranch === base));
+        else assert.equal(progressRequests.length, 0);
+    });
+}
+
+test('reports aggregate merges into a non-main default branch', async () => {
+    const event = {
+        ...finalPayload,
+        repository: { ...finalPayload.repository, default_branch: 'trunk' },
+        pull_request: { ...finalPayload.pull_request, base: { ref: 'trunk' } },
+    } as PullRequestEvent;
+    await handleEpicPRCreationOnMerge(event, 'test', logger.withCorrelation('test'));
+    assert.equal(progressRequests[0].mergedChildPrNumber, null);
+});
+
+test('history failure retains the successor obligation until scoped progress is written', async () => {
+    useRealProgress = true;
+    epicPrMerged = true;
+    childMergedAt = '2026-10-10T21:00:00Z';
+    failingHistoryReads = 1;
+    await handleEpicPRCreationOnMerge(payload, 'test', logger.withCorrelation('test'));
+    assert.equal(createdEpicPRs, 1);
+    assert.equal(comments.length, 0);
+    assert.equal(redis.hash.size, 1);
+    elapseRetryBackoff();
+    assert.equal(await retryPendingEpicMergeProgress(), 1);
+    assert.equal(redis.hash.size, 0);
+    assert.ok(comments.some(c => c.issue_number === 501 && c.body.includes('1 out of 3 PRs merged')));
 });

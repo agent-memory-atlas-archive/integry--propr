@@ -2,7 +2,7 @@ import logger, { generateCorrelationId } from '../utils/logger.js';
 import { getAuthenticatedOctokit } from '../auth/githubAuth.js';
 import { isEpicBranch, EPIC_BRANCH_PATTERN } from '../services/taskExecutionService.js';
 import { createEpicPRWithDraftFallback } from '../services/epicPRService.js';
-import { updateEpicMergeProgress } from './epicMergeProgress.js';
+import { canCarryChild, findEpicPRNumber, updateEpicMergeProgress } from './epicMergeProgress.js';
 import {
     recordEpicProgressRetry, runEpicProgressUpdate, sweepEpicProgressRetries,
     type EpicProgressLease, type EpicProgressRetryRedis, type EpicProgressTarget,
@@ -142,10 +142,14 @@ async function fetchIssueDetails(
     for (const issueNumber of issueNumbers) {
         try {
             const response = await octokit.request('GET /repos/{owner}/{repo}/issues/{issue_number}', {
-                owner, repo,
+                owner,
+                repo,
                 issue_number: issueNumber
             });
-            details.push({ number: issueNumber, title: response.data.title });
+            details.push({
+                number: issueNumber,
+                title: response.data.title
+            });
         } catch (error) {
             log.debug({ issueNumber, error: (error as Error).message }, 'Failed to fetch issue details');
             // Still include the issue, just without title
@@ -209,11 +213,11 @@ export async function handleEpicPRCreationOnMerge(
     // The aggregate epic PR merges out of the epic branch, rather than into it.
     // Reuse the same lease and durable retry sweep as child progress updates.
     const headBranch = payload.pull_request.head?.ref;
-    if (headBranch && isEpicBranch(headBranch)) {
+    if (headBranch && isEpicBranch(headBranch)
+        && payload.pull_request.base.ref === payload.repository.default_branch) {
         const [owner, repo] = payload.repository.full_name.split('/');
         const target: EpicProgressTarget = {
-            owner, repo, epicBranch: headBranch,
-            epicPrNumber: payload.pull_request.number, mergedChildPrNumber: null,
+            owner, repo, epicBranch: headBranch, epicPrNumber: payload.pull_request.number, mergedChildPrNumber: null,
         };
         await runEpicProgressUpdate(target, {
             redis: getUltrafixStateRedis(),
@@ -234,7 +238,9 @@ export async function handleEpicPRCreationOnMerge(
 
     correlatedLogger.info({
         prNumber: payload.pull_request.number,
-        baseBranch, owner, repo
+        baseBranch,
+        owner,
+        repo
     }, 'Child PR merged to epic branch, ensuring Epic PR exists');
 
     let epicPrNumber: number | null = null;
@@ -244,7 +250,9 @@ export async function handleEpicPRCreationOnMerge(
         const err = error as Error & { status?: number };
         correlatedLogger.warn({
             error: err.message,
-            baseBranch, owner, repo
+            baseBranch,
+            owner,
+            repo
         }, 'Failed to create Epic PR after child merge');
     }
 
@@ -277,40 +285,6 @@ interface EpicBranchContext {
 
 type Octokit = Awaited<ReturnType<typeof getAuthenticatedOctokit>>;
 
-/** A merged epic can only carry a child that merged before it. */
-async function canCarryChild(
-    octokit: Octokit,
-    { owner, repo, mergedChildPrNumber }: Pick<EpicProgressTarget, 'owner' | 'repo' | 'mergedChildPrNumber'>,
-    pr: { state: string; merged_at: string | null },
-): Promise<boolean> {
-    if (pr.state === 'open') return true;
-    if (!pr.merged_at || mergedChildPrNumber === null) return false;
-    const child = await octokit.request('GET /repos/{owner}/{repo}/pulls/{pull_number}', {
-        owner, repo, pull_number: mergedChildPrNumber,
-    });
-    // Missing, invalid, or equal timestamps do not establish that the child
-    // was included. Fall back to creating a PR for the remaining commits.
-    return !!child.data.merged_at && Date.parse(child.data.merged_at) < Date.parse(pr.merged_at);
-}
-
-/** Prefer an open Epic PR; reuse a merged one only for an included child. */
-async function findEpicPRNumber(
-    octokit: Octokit, context: EpicBranchContext,
-): Promise<number | null> {
-    const { owner, repo, baseBranch } = context;
-    const response = await octokit.request('GET /repos/{owner}/{repo}/pulls', {
-        owner, repo,
-        head: `${owner}:${baseBranch}`,
-        state: 'all'
-    });
-    const open = response.data.find(pr => pr.state === 'open');
-    if (open) return open.number;
-    for (const pr of response.data) {
-        if (await canCarryChild(octokit, context, pr)) return pr.number;
-    }
-    return null;
-}
-
 /**
  * Finds an Epic PR that can carry this child's changes, refreshing its body
  * with the plan's issues, or creates a new Epic PR. Throws when
@@ -324,10 +298,8 @@ async function ensureEpicPR(
 ): Promise<number> {
     const { owner, repo, baseBranch } = context;
     const octokit = await getAuthenticatedOctokit();
-    const existingPrNumber = await findEpicPRNumber(octokit, context);
-    if (existingPrNumber === null) {
-        return await createEpicPR(octokit, context, correlatedLogger, lease);
-    }
+    const existingPrNumber = await findEpicPRNumber(octokit, { ...context, epicBranch: baseBranch });
+    if (existingPrNumber === null) return await createEpicPR(octokit, context, correlatedLogger, lease);
 
     correlatedLogger.debug({ prNumber: existingPrNumber, baseBranch }, 'Epic PR already exists, updating body');
     try {
@@ -337,7 +309,9 @@ async function ensureEpicPR(
         correlatedLogger.warn({
             error: (error as Error).message,
             prNumber: existingPrNumber,
-            baseBranch, owner, repo
+            baseBranch,
+            owner,
+            repo
         }, 'Failed to update Epic PR body after child merge');
     }
     return existingPrNumber;
@@ -360,12 +334,16 @@ async function updateEpicPRBody(
 
     await lease?.assertOwned();
     await octokit.request('PATCH /repos/{owner}/{repo}/pulls/{pull_number}', {
-        owner, repo,
+        owner,
+        repo,
         pull_number: epicPrNumber,
         body: newBody
     });
 
-    correlatedLogger.info({ prNumber: epicPrNumber, issueCount: issueDetails.length }, 'Updated Epic PR body with latest issues');
+    correlatedLogger.info({
+        prNumber: epicPrNumber,
+        issueCount: issueDetails.length
+    }, 'Updated Epic PR body with latest issues');
 }
 
 /**
@@ -404,9 +382,7 @@ async function applyEpicMergeProgress(
     // reporting progress and allowing the durable obligation to be released.
     if (target.mergedChildPrNumber !== null) {
         const octokit = await getAuthenticatedOctokit();
-        const epic = await octokit.request('GET /repos/{owner}/{repo}/pulls/{pull_number}', {
-            owner, repo, pull_number: epicPrNumber,
-        });
+        const epic = await octokit.request('GET /repos/{owner}/{repo}/pulls/{pull_number}', { owner, repo, pull_number: epicPrNumber });
         if (!await canCarryChild(octokit, target, epic.data)) {
             epicPrNumber = await ensureEpicPR({
                 owner, repo, repository, baseBranch: epicBranch, mergedChildPrNumber: target.mergedChildPrNumber,
@@ -458,7 +434,10 @@ async function createEpicPR(
     lease?: EpicProgressLease,
 ): Promise<number> {
     // Get the default branch to use as base
-    const repoResponse = await octokit.request('GET /repos/{owner}/{repo}', { owner, repo });
+    const repoResponse = await octokit.request('GET /repos/{owner}/{repo}', {
+        owner,
+        repo
+    });
     const defaultBranch = repoResponse.data.default_branch;
 
     // Get plan details for the Epic PR
@@ -483,7 +462,8 @@ async function createEpicPR(
     // Create the Epic PR
     await lease?.assertOwned();
     const prResponse = await createEpicPRWithDraftFallback(octokit, {
-        owner, repo,
+        owner,
+        repo,
         title,
         head: baseBranch,
         base: defaultBranch,
@@ -528,7 +508,10 @@ export async function handleEpicPRLabelCleanup(
 
     correlatedLogger.info({
         prNumber: payload.pull_request.number,
-        branchName, labelName, owner, repo
+        branchName,
+        labelName,
+        owner,
+        repo
     }, 'Epic PR merged, cleaning up base label');
 
     try {
@@ -536,19 +519,30 @@ export async function handleEpicPRLabelCleanup(
 
         // Delete the label from the repository
         await octokit.request('DELETE /repos/{owner}/{repo}/labels/{name}', {
-            owner, repo,
+            owner,
+            repo,
             name: labelName
         });
 
-        correlatedLogger.info({ labelName, owner, repo }, 'Epic label deleted successfully');
+        correlatedLogger.info({
+            labelName,
+            owner,
+            repo
+        }, 'Epic label deleted successfully');
     } catch (error) {
         const err = error as Error & { status?: number };
         if (err.status === 404) {
-            correlatedLogger.debug({ labelName, owner, repo }, 'Epic label not found, may have already been deleted');
+            correlatedLogger.debug({
+                labelName,
+                owner,
+                repo
+            }, 'Epic label not found, may have already been deleted');
         } else {
             correlatedLogger.warn({
                 error: err.message,
-                labelName, owner, repo
+                labelName,
+                owner,
+                repo
             }, 'Failed to delete Epic label');
         }
     }

@@ -378,3 +378,19 @@ test('the sweep releases a legacy branch record only after retrying its own targ
     }), 1);
     assert.equal(redis.hash.size, 0);
 });
+
+for (const aggregateFirst of [true, false]) {
+    test(`same epic retains both child and aggregate evidence (aggregate first: ${aggregateFirst})`, async () => {
+        const redis = fakeRedis();
+        const aggregate = { ...target, mergedChildPrNumber: null };
+        const first = aggregateFirst ? aggregate : target;
+        const second = aggregateFirst ? target : aggregate;
+        await recordEpicProgressRetry(redis as never, first, 1_000);
+        await recordEpicProgressRetry(redis as never, second, 2_000);
+        assert.equal(redis.hash.size, 2);
+        assert.equal(JSON.parse(redis.hash.get(epicProgressRetryField(first))!).mergedChildPrNumber, first.mergedChildPrNumber);
+        await runEpicProgressUpdate(second, { redis: redis as never, log, update: async () => true });
+        assert.equal(redis.hash.size, 1);
+        assert.ok(redis.hash.has(epicProgressRetryField(first)));
+    });
+}
