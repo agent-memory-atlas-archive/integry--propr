@@ -1,9 +1,9 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import {
-  chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, renameSync, symlinkSync, writeFileSync,
+  chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, symlinkSync, writeFileSync,
 } from 'node:fs';
-import { createServer } from 'node:net';
+import { connect, createServer } from 'node:net';
 import { join } from 'node:path';
 import { describe, test } from 'node:test';
 import { fakeDockerClient } from './fixtures/integration-image-harness/fake-docker.mjs';
@@ -189,6 +189,64 @@ describe('image integration harness fake Docker transport', { skip: unsupported 
     });
   }
 
+  test('rejects missing and wrong capabilities before touching state or an external owned sentinel', { timeout: 10_000 }, async (t) => {
+    const workspace = makeWorkspace();
+    t.after(() => forceRemove(workspace.root));
+    seedUnrelatedDocker(workspace);
+    writeFileSync(join(workspace.state, 'calls.jsonl'), '', { mode: 0o600 });
+    writeFileSync(join(workspace.state, 'observed.json'), '{"synthetic":true}', { mode: 0o600 });
+    chmodSync(join(workspace.state, 'state.json'), 0o600);
+    const external = join(workspace.root, 'external-owned');
+    mkdirSync(external, { mode: 0o700 });
+    const sentinel = join(external, 'sentinel');
+    writeFileSync(sentinel, 'synthetic sentinel', { mode: 0o400 });
+    chmodSync(external, 0o500);
+    const snapshot = () => ({
+      stateMode: modeOf(workspace.state),
+      files: readdirSync(workspace.state).sort().map((name) => [name, modeOf(join(workspace.state, name)), readFileSync(join(workspace.state, name), 'utf8')]),
+      externalMode: modeOf(external), sentinelMode: modeOf(sentinel), sentinel: readFileSync(sentinel, 'utf8'),
+    });
+    const before = snapshot();
+    const served = fakeDockerDaemon.served();
+    const cleanup = ['run', '--entrypoint', 'find', '--network', 'none', '--cap-drop', 'ALL',
+      '--mount', `type=bind,source=${external},target=/itest-root`, 'synthetic-image'];
+    const request = async (prefix, state, args) => new Promise((resolvePromise, reject) => {
+      const socket = connect(fakeDockerDaemon.port, '127.0.0.1');
+      let response = '';
+      socket.setTimeout(2_000, () => socket.destroy(new Error('fake docker request timed out')));
+      socket.on('error', reject);
+      socket.on('data', (chunk) => { response += chunk; });
+      socket.on('end', () => resolvePromise(response));
+      socket.on('connect', () => socket.write([...prefix, '1', String(args.length), `FAKE_DOCKER_STATE=${state}`, ...args, ''].join('\0')));
+    });
+    for (const prefix of [[], [''], ['0'.repeat(64)]]) {
+      for (const args of [cleanup, ['network', 'create', 'unauthorized']]) {
+        assert.equal(await request(prefix, workspace.state, args), '125\0\0fake docker authentication failed\n\0');
+        assert.deepEqual(snapshot(), before);
+        assert.equal(fakeDockerDaemon.served(), served);
+      }
+      // A nonexistent state path must not be consulted either (even logging would fail).
+      assert.equal(await request(prefix, join(workspace.root, 'absent-state'), cleanup), '125\0\0fake docker authentication failed\n\0');
+      assert.equal(existsSync(join(workspace.root, 'absent-state')), false);
+      assert.deepEqual(snapshot(), before);
+    }
+    assert.equal(modeOf(workspace.root), '700');
+    assert.equal(modeOf(join(workspace.bin, 'docker')), '700');
+    const result = await runClient(join(workspace.bin, 'docker'), cleanup, { PATH: process.env.PATH, FAKE_DOCKER_STATE: workspace.state });
+    assert.deepEqual(result, { code: 0, stdout: '', stderr: '' });
+    assert.equal(existsSync(sentinel), false, 'authenticated cleanup emulates DAC override on owned synthetic data');
+    assert.equal(modeOf(external), '700');
+    assert.equal(fakeDockerDaemon.served(), served + 1);
+    assert.deepEqual(dockerCalls(workspace), [cleanup]);
+    assert.equal(readFileSync(join(workspace.state, 'state.json'), 'utf8'), before.files.find(([name]) => name === 'state.json')[2]);
+    const capability = /[a-f0-9]{64}/.exec(readFileSync(join(workspace.bin, 'docker'), 'utf8'))?.[0];
+    assert.ok(capability, 'client contains the generated capability');
+    assert.ok(!JSON.stringify({ result, files: snapshotStateFiles() }).includes(capability), 'capability is absent from responses and state logs');
+    function snapshotStateFiles() {
+      return readdirSync(workspace.state).map((name) => readFileSync(join(workspace.state, name), 'utf8'));
+    }
+  });
+
   test('docker calls are served in-process and replay output, errors and exit status using only bash', async (t) => {
     const workspace = makeWorkspace();
     t.after(() => forceRemove(workspace.root));
@@ -230,7 +288,7 @@ describe('image integration harness fake Docker transport', { skip: unsupported 
     const { port } = closed.address();
     await new Promise((resolvePromise) => closed.close(resolvePromise));
     const unreachable = join(workspace.bin, 'docker-unreachable');
-    writeFileSync(unreachable, fakeDockerClient(port), { mode: 0o755 });
+    writeFileSync(unreachable, fakeDockerClient(port, '0'.repeat(64)), { mode: 0o755 });
     const refused = await runClient(unreachable, ['container', 'inspect', 'personal-propr-api'], { PATH: onlyBash, FAKE_DOCKER_STATE: workspace.state });
     assert.equal(refused.code, 125);
     assert.match(refused.stderr, /fake docker daemon unreachable/);

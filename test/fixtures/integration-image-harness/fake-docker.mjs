@@ -249,23 +249,43 @@ function fakeDocker(args, env, out) {
   }
 }
 
-// Request: NUL-terminated fields "<env count>", "<arg count>", then each
+// Request: NUL-terminated capability, "<env count>", "<arg count>", then each
 // NAME=value and each argument. Response: "<status>", stdout and stderr, each
 // NUL-terminated. Requests are handled synchronously, one at a time, so state
 // updates never interleave. The server is unref'd: it never keeps a test
 // process alive, while a pending harness child does.
 export async function startFakeDockerDaemon() {
+  // Keep this in memory and in generated clients inside the private workspace;
+  // never export it in environment variables, argv, or invocation logs.
+  const capability = randomBytes(32).toString('hex');
   let served = 0;
   const server = createServer((socket) => {
     let buffered = Buffer.alloc(0);
+    let finished = false;
+    socket.setTimeout(10_000, () => socket.destroy());
     socket.on('data', (chunk) => {
+      if (finished) return;
       buffered = Buffer.concat([buffered, chunk]);
       const fields = buffered.toString('utf8').split('\0');
       fields.pop();
+      if (fields.length < 1) return;
+      // Authenticate before interpreting any caller-selected environment or path.
+      // Never echo the supplied or expected capability in diagnostics.
+      if (fields.shift() !== capability) {
+        finished = true;
+        socket.end('125\0\0fake docker authentication failed\n\0');
+        return;
+      }
       if (fields.length < 2) return;
       const envCount = Number(fields[0]);
       const argCount = Number(fields[1]);
+      if (!Number.isSafeInteger(envCount) || envCount < 0 || !Number.isSafeInteger(argCount) || argCount < 0) {
+        finished = true;
+        socket.end('125\0\0invalid fake docker request\n\0');
+        return;
+      }
       if (fields.length < 2 + envCount + argCount) return;
+      finished = true;
       const env = Object.fromEntries(fields.slice(2, 2 + envCount).map((entry) => {
         const separator = entry.indexOf('=');
         return [entry.slice(0, separator), entry.slice(separator + 1)];
@@ -281,16 +301,18 @@ export async function startFakeDockerDaemon() {
     server.listen(0, '127.0.0.1', resolvePromise);
   });
   server.unref();
-  return { port: server.address().port, served: () => served };
+  const port = server.address().port;
+  return { port, served: () => served, client: () => fakeDockerClient(port, capability) };
 }
 
 // A `docker` executable that only uses bash builtins: no process is started
 // per call. An unreachable daemon fails the invocation instead of passing.
-export function fakeDockerClient(port) {
+export function fakeDockerClient(port, capability) {
+  if (!/^[a-f0-9]{64}$/.test(capability)) throw new Error('invalid fake docker client capability');
   return `#!/usr/bin/env bash
 exec 3<>"/dev/tcp/127.0.0.1/${port}" || { echo "fake docker daemon unreachable" >&2; exit 125; }
 names=(\${!FAKE_DOCKER_@})
-printf '%s\\0' "\${#names[@]}" "$#" >&3
+printf '%s\\0' "${capability}" "\${#names[@]}" "$#" >&3
 for name in "\${names[@]}"; do printf '%s=%s\\0' "$name" "\${!name}" >&3; done
 if [ "$#" -gt 0 ]; then printf '%s\\0' "$@" >&3; fi
 IFS= read -r -d '' code <&3 && IFS= read -r -d '' stdout <&3 && IFS= read -r -d '' stderr <&3 \\

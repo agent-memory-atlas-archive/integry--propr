@@ -14,7 +14,7 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { fakeDockerClient, startFakeDockerDaemon } from './fake-docker.mjs';
+import { startFakeDockerDaemon } from './fake-docker.mjs';
 
 const repoRoot = resolve(import.meta.dirname, '../../..');
 const harnessScript = join(repoRoot, 'scripts/integration-test-images.sh');
@@ -64,7 +64,7 @@ export function makeWorkspace() {
     '',
   ].join('\n'), { mode: 0o600 });
 
-  writeFileSync(join(workspace.bin, 'docker'), fakeDockerClient(fakeDockerDaemon.port), { mode: 0o755 });
+  writeFileSync(join(workspace.bin, 'docker'), fakeDockerDaemon.client(), { mode: 0o700 });
   // curl records its argv and whether the bearer token arrived via stdin config.
   writeFileSync(join(workspace.bin, 'curl'), `#!/usr/bin/env bash
 config=""
