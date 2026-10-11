@@ -10,9 +10,9 @@ import { assertRealDirectory } from './lifecycle.js';
 
 const exec = promisify(execFile);
 const gitEnvironment = () => ({ PATH: process.env.PATH, HOME: os.tmpdir(), LANG: 'C', GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null', GIT_TERMINAL_PROMPT: '0', GIT_NO_REPLACE_OBJECTS: '1', GIT_OPTIONAL_LOCKS: '0' });
-async function git(directory: string, args: string[]): Promise<string> {
+async function git(directory: string, args: string[], signal?: AbortSignal): Promise<string> {
   const { stdout } = await exec('git', ['-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false', '-c', 'core.untrackedCache=false', '-c', 'credential.helper=', '-c', 'protocol.ext.allow=never', '-C', directory, ...args], {
-    env: gitEnvironment(), timeout: 30_000, maxBuffer: 16 * 1024 * 1024,
+    signal, env: gitEnvironment(), timeout: 30_000, maxBuffer: 16 * 1024 * 1024,
   });
   return stdout;
 }
@@ -26,7 +26,7 @@ export async function repositoryIdentity(directory: string): Promise<RepositoryI
 }
 
 /** Walk only the candidate, refusing symlinks, mounts, excessive trees and substitution. */
-async function inspectTree(directory: string, identity: RepositoryIdentity): Promise<{ bytes: number; fingerprint: string }> {
+async function inspectTree(directory: string, identity: RepositoryIdentity, signal?: AbortSignal): Promise<{ bytes: number; fingerprint: string }> {
   if (process.platform !== 'linux') throw new Error('unsupported');
   const hash = createHash('sha256');
   const seen = new Set<string>();
@@ -34,6 +34,7 @@ async function inspectTree(directory: string, identity: RepositoryIdentity): Pro
   let count = 0;
   const deadline = Date.now() + 5_000;
   const visit = async (target: string, relative: string): Promise<void> => {
+    signal?.throwIfAborted();
     if (++count > 100_000 || Date.now() > deadline) throw new Error('unsafe_path');
     const stat = await fs.lstat(target);
     if (stat.isSymbolicLink() || stat.dev !== identity.device || (!stat.isDirectory() && !stat.isFile())) throw new Error('unsafe_path');
@@ -50,6 +51,7 @@ async function inspectTree(directory: string, identity: RepositoryIdentity): Pro
         const directoryHandle = await fs.opendir(pinnedPath);
         const names: string[] = [];
         for await (const entry of directoryHandle) {
+          signal?.throwIfAborted();
           if (names.length + count > 100_000 || Date.now() > deadline) throw new Error('unsafe_path');
           names.push(entry.name);
         }
@@ -65,12 +67,14 @@ async function inspectTree(directory: string, identity: RepositoryIdentity): Pro
 
 export interface RepositoryAudit { reasons: StorageProtection[]; bytes: number | null; fingerprint: string | null }
 /** Remote is server-derived, never read from origin or supplied by an HTTP client. */
-export async function auditRepository(directory: string, identity: RepositoryIdentity, remote: string, options: { token?: string; allowTestFileRemote?: boolean; metadataFingerprint?: string } = {}): Promise<RepositoryAudit> {
+export async function auditRepository(directory: string, identity: RepositoryIdentity, remote: string, options: { token?: string; allowTestFileRemote?: boolean; metadataFingerprint?: string; signal?: AbortSignal } = {}): Promise<RepositoryAudit> {
   const retained = (reason: StorageProtection): RepositoryAudit => ({ reasons: [reason], bytes: null, fingerprint: null });
+  const proofGit = (args: string[]) => git(directory, args, options.signal);
   try {
+    options.signal?.throwIfAborted();
     const current = await repositoryIdentity(directory);
     if (current.device !== identity.device || current.inode !== identity.inode) return retained('unknown_ownership');
-    const tree = await inspectTree(directory, identity);
+    const tree = await inspectTree(directory, identity, options.signal);
     if (options.metadataFingerprint && await repositoryMetadataFingerprint(directory) !== options.metadataFingerprint) return retained('private_work');
     const config = await fs.readFile(path.join(directory, '.git', 'config'), 'utf8');
     if (/^\s*\[\s*(?:include|includeIf)\b/im.test(config)) return retained('unknown_git_state');
@@ -79,22 +83,22 @@ export async function auditRepository(directory: string, identity: RepositoryIde
     }
     // Status can invoke clean filters from local config. Permit only inert, managed
     // clone configuration before asking Git to inspect the working copy.
-    const keys = (await git(directory, ['config', '--local', '--no-includes', '--name-only', '--list'])).trim().split('\n');
+    const keys = (await proofGit(['config', '--local', '--no-includes', '--name-only', '--list'])).trim().split('\n');
     const inert = /^(?:core\.(?:repositoryformatversion|filemode|bare|logallrefupdates|ignorecase|precomposeunicode)|remote\.origin\.(?:url|fetch)|branch\..+\.(?:remote|merge)|extensions\.objectformat)$/i;
     if (keys.some(key => !inert.test(key))) return retained('unknown_git_state');
-    const flags = await git(directory, ['ls-files', '-v']);
+    const flags = await proofGit(['ls-files', '-v']);
     if (flags.split('\n').some(line => line && (line[0] === 'S' || line[0] === line[0].toLowerCase()))) return retained('private_work');
 
     // Never walk alternate object stores, nested submodules, shallow boundaries or linked gitdirs.
     for (const name of ['objects/info/alternates', 'objects/info/http-alternates', 'shallow', 'modules', 'worktrees']) {
       if (await fs.lstat(path.join(directory, '.git', name)).then(() => true, error => { if (error.code === 'ENOENT') return false; throw error; })) return retained(name === 'worktrees' ? 'worktrees' : 'unknown_git_state');
     }
-    if ((await git(directory, ['rev-parse', '--show-toplevel'])).trim() !== directory) return retained('unsafe_path');
-    if ((await git(directory, ['status', '--porcelain=v1', '--untracked-files=all', '--ignored', '--ignore-submodules=all'])).length) return retained('private_work');
-    if ((await git(directory, ['ls-files', '--stage'])).split('\n').some(line => line.startsWith('160000 '))) return retained('unknown_git_state');
-    const refs = await git(directory, ['for-each-ref', '--format=%(refname)']);
+    if ((await proofGit(['rev-parse', '--show-toplevel'])).trim() !== directory) return retained('unsafe_path');
+    if ((await proofGit(['status', '--porcelain=v1', '--untracked-files=all', '--ignored', '--ignore-submodules=all'])).length) return retained('private_work');
+    if ((await proofGit(['ls-files', '--stage'])).split('\n').some(line => line.startsWith('160000 '))) return retained('unknown_git_state');
+    const refs = await proofGit(['for-each-ref', '--format=%(refname)']);
     if (refs.split('\n').some(ref => ref.startsWith('refs/stash') || ref.includes('rescue'))) return retained('salvage');
-    if ((await git(directory, ['fsck', '--full', '--no-reflogs'])).trim()) return retained('local_history');
+    if ((await proofGit(['fsck', '--full', '--no-reflogs'])).trim()) return retained('local_history');
     const protocol = new URL(remote).protocol;
     if (!(protocol === 'https:' || (options.allowTestFileRemote && protocol === 'file:'))) return retained('remote_unavailable');
     // A neutral cwd prevents local URL rewrites, credential helpers and transport commands.
@@ -108,21 +112,21 @@ export async function auditRepository(directory: string, identity: RepositoryIde
       }
       try {
         advertised = (await exec('git', ['-c', 'credential.helper=', '-c', 'core.hooksPath=/dev/null', '-c', 'protocol.ext.allow=never', 'ls-remote', '--heads', '--tags', '--', remote], {
-          cwd: neutral, env, timeout: 30_000, maxBuffer: 4 * 1024 * 1024,
+          signal: options.signal, cwd: neutral, env, timeout: 30_000, maxBuffer: 4 * 1024 * 1024,
         })).stdout;
-      } catch { return retained('remote_unavailable'); }
+      } catch { return retained(options.signal?.aborted ? 'busy' : 'remote_unavailable'); }
     } finally { await fs.rmdir(neutral); }
     const tips = [...new Set(advertised.split('\n').filter(Boolean).map(line => line.split('\t')[0]))];
     if (!tips.length || tips.length > 10_000 || tips.some(tip => !/^[0-9a-f]{40,64}$/.test(tip))) return retained('unknown_git_state');
     // Prove EVERY local object recoverable from freshly advertised remote tips. This also
     // protects detached/reflog-only commits, dangling blobs, tags and private stash objects.
-    const remoteObjects = new Set((await git(directory, ['rev-list', '--objects', '--no-object-names', ...tips, '--'])).trim().split('\n'));
-    const localObjects = (await git(directory, ['cat-file', '--batch-all-objects', '--batch-check=%(objectname)'])).trim().split('\n');
+    const remoteObjects = new Set((await proofGit(['rev-list', '--objects', '--no-object-names', ...tips, '--'])).trim().split('\n'));
+    const localObjects = (await proofGit(['cat-file', '--batch-all-objects', '--batch-check=%(objectname)'])).trim().split('\n');
     if (localObjects.some(object => !remoteObjects.has(object))) return retained('local_history');
-    const finalTree = await inspectTree(directory, identity);
+    const finalTree = await inspectTree(directory, identity, options.signal);
     if (finalTree.fingerprint !== tree.fingerprint) return retained('changed');
     return { reasons: [], bytes: tree.bytes, fingerprint: tree.fingerprint };
-  } catch { return retained('unknown_git_state'); }
+  } catch { return retained(options.signal?.aborted ? 'busy' : 'unknown_git_state'); }
 }
 
 /** Managed metadata that cannot be reconstructed from remote objects must remain unchanged. */

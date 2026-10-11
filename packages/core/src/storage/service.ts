@@ -140,16 +140,17 @@ export class InstanceStorageService {
     try { await handle.writeFile(JSON.stringify({ at: new Date().toISOString(), actor, action, detail }) + '\n'); }
     finally { await handle.close(); }
   }
-  private async evaluate(record: CacheRecord, busy: boolean): Promise<{ candidate: StorageCandidate; fingerprint: string | null }> {
+  private async evaluate(record: CacheRecord, busy: boolean, signal?: AbortSignal): Promise<{ candidate: StorageCandidate; fingerprint: string | null }> {
     if (!record.metadataFingerprint) return { candidate: { id: record.id, category: 'repository_caches', estimatedBytes: null, protectedReasons: ['unknown_ownership'] }, fingerprint: null };
-    if (busy) return { candidate: { id: record.id, category: 'repository_caches', estimatedBytes: null, protectedReasons: ['busy'] }, fingerprint: null };
-    const result = await this.auditCache(resolveRepositoryClonePath(this.services.clonesRoot, record.owner, record.name), record);
+    if (busy || signal?.aborted) return { candidate: { id: record.id, category: 'repository_caches', estimatedBytes: null, protectedReasons: ['busy'] }, fingerprint: null };
+    const result = await this.auditCache(resolveRepositoryClonePath(this.services.clonesRoot, record.owner, record.name), record, signal);
     return { candidate: { id: record.id, category: 'repository_caches', estimatedBytes: result.bytes, protectedReasons: result.reasons }, fingerprint: result.fingerprint };
   }
-  private async auditCache(directory: string, record: CacheRecord) {
-    return (this.services.auditRepository ?? auditRepository)(directory, record.identity, `https://github.com/${record.owner}/${record.name}.git`, { token: await this.services.remoteToken?.().catch(() => undefined), metadataFingerprint: record.metadataFingerprint });
+  private async auditCache(directory: string, record: CacheRecord, signal?: AbortSignal) {
+    if (signal?.aborted) return { reasons: ['busy'] as StorageProtection[], bytes: null, fingerprint: null };
+    return (this.services.auditRepository ?? auditRepository)(directory, record.identity, `https://github.com/${record.owner}/${record.name}.git`, { signal, token: await this.services.remoteToken?.().catch(() => undefined), metadataFingerprint: record.metadataFingerprint });
   }
-  private async removeCache(record: CacheRecord, fingerprint: string): Promise<StorageProtection[]> {
+  private async removeCache(record: CacheRecord, fingerprint: string, signal: AbortSignal): Promise<StorageProtection[]> {
     const directory = resolveRepositoryClonePath(this.services.clonesRoot, record.owner, record.name);
     await assertRealDirectory(this.services.clonesRoot);
     await assertRealDirectory(path.dirname(directory));
@@ -165,13 +166,13 @@ export class InstanceStorageService {
       // Rename isolates the exact inode; a substituted source is retained, never followed.
       // On interruption the quarantine remains intact and is never age-pruned.
       const realQuarantine = await fs.realpath(`${quarantine}/repository`);
-      const final = await this.auditCache(realQuarantine, record);
-      if (final.reasons.length || final.fingerprint !== fingerprint) {
+      const final = await this.auditCache(realQuarantine, record, signal);
+      if (signal.aborted || final.reasons.length || final.fingerprint !== fingerprint) {
         // Restore only when the original name is still absent; lifecycle peers cannot race
         // here. If an external writer replaced it, retain both directories for recovery.
         const occupied = await fs.lstat(source).then(() => true, error => { if (error.code === 'ENOENT') return false; throw error; });
         if (!occupied) await fs.rename(`${quarantine}/repository`, source);
-        return final.reasons.length ? final.reasons : ['changed'];
+        return signal.aborted ? ['busy'] : final.reasons.length ? final.reasons : ['changed'];
       }
       await fs.rm(`${quarantine}/repository`, { recursive: true });
       await fs.unlink(path.join(this.root, 'repositories', `${record.id}.json`));
@@ -186,7 +187,7 @@ export class InstanceStorageService {
     if (taskIds.length > 10 || new Set(taskIds).size !== taskIds.length || taskIds.some(id => typeof id !== 'string' || !/^[A-Za-z0-9_-]{1,255}$/.test(id))) throw new StorageContractError(400, 'Invalid task selection');
     if (taskIds.length && !categories.includes('task_history')) throw new StorageContractError(400, 'Task selection requires task_history category');
     if (!categories.length || new Set(categories).size !== categories.length || categories.length > 7) throw new StorageContractError(400, 'Select explicit categories');
-    return this.services.lifecycle.exclusive(async () => {
+    return this.services.lifecycle.cleanup(async signal => {
       const candidates: StorageCandidate[] = [];
       const fingerprints: Record<string, string> = {};
       const busy = await this.busy() || !await this.services.lifecycle.lastUse();
@@ -216,7 +217,7 @@ export class InstanceStorageService {
           registeredIds.add(id);
         }
         for (const record of registered) {
-          const evaluated = await this.evaluate(record, busy);
+          const evaluated = await this.evaluate(record, busy, signal);
           candidates.push(evaluated.candidate);
           if (evaluated.fingerprint) fingerprints[record.id] = evaluated.fingerprint;
         }
@@ -234,7 +235,7 @@ export class InstanceStorageService {
   async execute(instanceId: string, confirmation: string, actor: string): Promise<StorageCleanupResult> {
     await this.assertInstance(instanceId);
     if (!/^[0-9a-f-]{36}$/.test(confirmation)) throw new StorageContractError(400, 'Invalid confirmation');
-    return this.services.lifecycle.exclusive(async () => {
+    return this.services.lifecycle.cleanup(async signal => {
       let saved: SavedPreview;
       try { saved = await this.read<SavedPreview>(`preview-${confirmation}.json`); }
       catch { throw new StorageContractError(409, 'Confirmation unavailable or consumed'); }
@@ -256,18 +257,18 @@ export class InstanceStorageService {
       for (const candidate of saved.preview.candidates) {
         let reasons: StorageProtection[] = [...candidate.protectedReasons];
         const record = records.get(candidate.id);
-        if (!reasons.length && (busy || clockChanged)) reasons = [busy ? 'busy' : 'changed'];
+        if (!reasons.length && (busy || signal.aborted || clockChanged)) reasons = [busy || signal.aborted ? 'busy' : 'changed'];
         if (!reasons.length && candidate.category === 'task_history' && this.services.taskHistory) {
           if (await this.services.taskHistory.erase(candidate.id, saved.fingerprints[candidate.id])) result.deleted.push(candidate.id);
           else reasons = ['changed'];
         } else if (!reasons.length && record) {
-          const current = await this.evaluate(record, false);
+          const current = await this.evaluate(record, false, signal);
           reasons = current.candidate.protectedReasons;
           if (!reasons.length && current.fingerprint !== saved.fingerprints[candidate.id]) reasons = ['changed'];
           if (!reasons.length) {
             // The same cross-process barrier covers remote proof, final identity and removal.
             // No unchecked force/remove fallback exists elsewhere in the cache lifecycle.
-            reasons = await this.removeCache(record, saved.fingerprints[candidate.id]);
+            reasons = await this.removeCache(record, saved.fingerprints[candidate.id], signal);
             if (!reasons.length) result.deleted.push(record.id);
           }
         } else if (!reasons.length) reasons = ['unknown_ownership'];

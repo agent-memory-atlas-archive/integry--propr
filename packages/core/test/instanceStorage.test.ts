@@ -129,7 +129,7 @@ test('policy defaults persist; confirmation is instance/actor bound and single u
 
 });
 
-async function serviceFixture(t: test.TestContext) {
+async function serviceFixture(t: test.TestContext, proof?: typeof auditRepository) {
   const f = await fixture(t);
   const clones = path.join(f.root, 'clones');
   await fs.mkdir(path.join(clones, 'owner'), { recursive: true });
@@ -137,12 +137,12 @@ async function serviceFixture(t: test.TestContext) {
   await fs.rename(f.clone, clone);
   const { createHash } = await import('node:crypto');
   const id = createHash('sha256').update('owner/repo').digest('hex');
-  const control = path.join(f.root, 'control');
+  const control = path.join(f.root, '.clones-storage-lifecycle');
   const lifecycle = new StorageLifecycle(control);
   let pending = false;
   const service = new InstanceStorageService({
     lifecycle, clonesRoot: clones, roots: [], hasPendingTasks: async () => pending,
-    auditRepository: (directory, identity, _remote, options) => auditRepository(directory, identity, `file://${f.remote}`, { ...options, allowTestFileRemote: true }),
+    auditRepository: (directory, identity, _remote, options) => (proof ?? auditRepository)(directory, identity, `file://${f.remote}`, { ...options, allowTestFileRemote: true }),
   });
   const instanceId = await service.initialize();
   await fs.mkdir(path.join(control, 'repositories'));
@@ -278,4 +278,139 @@ test('unawaited nested repository work keeps its claim after the parent returns'
   assert.equal(await lifecycle.exclusive(() => lifecycle.busy()), true);
   release(); await nested;
   assert.equal(await lifecycle.exclusive(() => lifecycle.busy()), false);
+});
+
+// Exercise the production producer and worker wrappers in another process, with
+// real Redis/BullMQ jobs. No lifecycle or queue mocks participate in admission.
+for (const phase of ['preview', 'execute', 'quarantine'] as const) {
+  for (const admission of ['producer', 'worker'] as const) {
+    test(`slow ${phase} proof yields to real ${admission} admission in another process`, { timeout: 30_000 }, async t => {
+      const { spawn, spawnSync } = await import('node:child_process');
+      const binary = process.env.PROPR_TEST_REDIS_SERVER || 'redis-server';
+      const localRedis = spawnSync(binary, ['--version']).status === 0;
+      if (!localRedis && !process.env.REDIS_PORT) { t.skip('Requires redis-server or CI REDIS_PORT'); return; }
+      const { createServer } = await import('node:net');
+      let slow = false;
+      let entered!: () => void;
+      const proving = new Promise<void>(resolve => { entered = resolve; });
+      let cancelled = false;
+      // Accept TCP but stall the TLS handshake: real git ls-remote would wait
+      // beyond the former admission deadline, without contacting any service.
+      const sockets = new Set<import('node:net').Socket>();
+      const remoteServer = createServer(socket => {
+        sockets.add(socket);
+        socket.on('error', () => undefined);
+        socket.on('close', () => sockets.delete(socket));
+        socket.setTimeout(11_000, () => socket.destroy());
+        entered();
+      });
+      await new Promise<void>(resolve => remoteServer.listen(0, '127.0.0.1', resolve));
+      const remotePort = (remoteServer.address() as import('node:net').AddressInfo).port;
+      t.after(async () => {
+        for (const socket of sockets) socket.destroy();
+        await new Promise<void>(resolve => remoteServer.close(() => resolve()));
+      });
+      const f = await serviceFixture(t, async (directory, identity, remote, options) => {
+        if (slow && (phase !== 'quarantine' || directory.includes('.cleanup-'))) {
+          const result = await auditRepository(directory, identity, `https://127.0.0.1:${remotePort}/repo.git`, options);
+          cancelled = result.reasons.includes('busy');
+          return result;
+        }
+        return auditRepository(directory, identity, remote, options);
+      });
+      const reservation = createServer();
+      await new Promise<void>(resolve => reservation.listen(0, '127.0.0.1', resolve));
+      let port = (reservation.address() as import('node:net').AddressInfo).port;
+      await new Promise<void>(resolve => reservation.close(() => resolve()));
+      if (localRedis) {
+        const redis = spawn(binary, ['--bind', '127.0.0.1', '--port', String(port), '--save', '', '--appendonly', 'no'], { stdio: ['ignore', 'pipe', 'pipe'] });
+        t.after(() => { redis.kill(); });
+        await new Promise<void>((resolve, reject) => {
+          redis.on('error', reject);
+          redis.stdout.on('data', data => { if (String(data).includes('Ready to accept connections')) resolve(); });
+          redis.on('exit', code => reject(new Error(`Redis exited ${code}`)));
+        });
+      } else { port = Number(process.env.REDIS_PORT); }
+      const source = `
+        import assert from 'node:assert/strict';
+        import fs from 'node:fs/promises';
+        const [queueUrl, admission, clone] = process.argv.slice(2);
+        const { getIssueQueue, createWorker, shutdownQueue, GITHUB_ISSUE_QUEUE_NAME } = await import(queueUrl);
+        const queue = await getIssueQueue();
+        let job;
+        if (admission === 'worker') job = await queue.add('storage-contention', {}, { attempts: 1 });
+        process.send('ready');
+        await new Promise(resolve => process.once('message', resolve));
+        const worker = await createWorker(GITHUB_ISSUE_QUEUE_NAME, async () => {
+          assert.equal(await fs.readFile(clone + '/public', 'utf8'), 'published sentinel');
+          return { success: true };
+        }, { autorun: false });
+        // Metrics are unrelated to this integration and have their own connections.
+        worker.removeAllListeners('completed');
+        worker.removeAllListeners('failed');
+        const completed = new Promise((resolve, reject) => {
+          worker.once('completed', resolve); worker.once('failed', (_job, error) => reject(error)); worker.once('error', reject);
+        });
+        if (admission === 'producer') job = await queue.add('storage-contention', {}, { attempts: 1 });
+        void worker.run();
+        await completed;
+        const stored = await queue.getJob(job.id);
+        assert.equal(await stored.getState(), 'completed');
+        assert.equal(stored.attemptsMade, 1);
+        assert.equal(await queue.getFailedCount(), 0);
+        await worker.close();
+        await queue.obliterate();
+        await shutdownQueue();
+        process.disconnect();
+      `;
+      const script = path.join(f.root, 'admission.mjs');
+      await fs.writeFile(script, source);
+      const child = spawn(process.execPath, ['--import', 'tsx', script, new URL('../src/queue/taskQueue.ts', import.meta.url).href, admission, f.clone], {
+        env: { ...process.env, REDIS_HOST: localRedis ? '127.0.0.1' : process.env.REDIS_HOST || '127.0.0.1', REDIS_PORT: String(port), GIT_CLONES_BASE_PATH: path.join(f.root, 'clones'), GITHUB_ISSUE_QUEUE_NAME: `storage-${path.basename(f.root)}-${phase}-${admission}`, LOG_LEVEL: 'silent' },
+        stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
+      });
+      t.after(() => { child.kill(); });
+      let stderr = '';
+      child.stderr.on('data', data => { stderr += data; });
+      const exited = new Promise<void>((resolve, reject) => {
+        child.on('error', reject);
+        child.on('exit', code => code === 0 ? resolve() : reject(new Error(`Admission child exited ${code}: ${stderr}`)));
+      });
+      // Handle early startup failure while awaiting the handshake too.
+      await Promise.race([new Promise(resolve => child.once('message', resolve)), exited.then(() => { throw new Error('Child exited before ready'); })]);
+      const preview = phase === 'preview' ? undefined : await f.service.preview(f.instanceId, ['repository_caches'], 'admin');
+      slow = true;
+      const cleanup = phase === 'preview'
+        ? f.service.preview(f.instanceId, ['repository_caches'], 'admin')
+        : f.service.execute(f.instanceId, preview!.confirmation, 'admin');
+      await proving;
+      const start = Date.now();
+      child.send('admit');
+      const [result] = await Promise.all([cleanup, exited]);
+      assert.equal(cancelled, true, 'waiting admission cancels optional proof');
+      assert.ok(Date.now() - start < 8_000, 'admission completes before the former 10-second failure deadline');
+      if ('deleted' in result) { assert.deepEqual(result.deleted, []); assert.deepEqual(result.retained[0].reasons, ['busy']); }
+      else assert.deepEqual(result.candidates[0].protectedReasons, ['busy']);
+      assert.equal(await fs.readFile(path.join(f.clone, 'public'), 'utf8'), 'published sentinel');
+      assert.deepEqual(await fs.readdir(path.join(f.control, 'readers')), []);
+    });
+  }
+}
+
+test('admission waits past the former deadline without stealing an exclusive gate', { timeout: 20_000 }, async t => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'storage-long-gate-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const a = new StorageLifecycle(root);
+  const b = new StorageLifecycle(root);
+  let ran = false;
+  let admission!: Promise<void>;
+  await a.exclusive(async () => {
+    admission = b.use(async () => { ran = true; });
+    await new Promise(resolve => setTimeout(resolve, 11_000));
+    assert.equal(ran, false);
+    assert.equal(await a.busy(), true);
+  });
+  await admission;
+  assert.equal(ran, true);
+  assert.equal(await a.busy(), false);
 });

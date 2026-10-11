@@ -3,6 +3,7 @@ import { constants } from 'node:fs';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { AsyncLocalStorage } from 'node:async_hooks';
+import { setTimeout as delay } from 'node:timers/promises';
 
 /** Durable instance policy, registry and audit records, outside repository working copies. */
 export function storageControlRoot(): string {
@@ -58,6 +59,29 @@ export class StorageLifecycle {
     finally { await fs.rmdir(gate); }
   }
 
+  /** Optional cleanup yields its proof to published admissions, across processes.
+   * Cancellation is cooperative: never release the gate while proof/deletion is running.
+   */
+  async cleanup<T>(run: (signal: AbortSignal) => Promise<T>): Promise<T> {
+    return this.exclusive(async () => {
+      const controller = new AbortController();
+      const stopped = new AbortController();
+      const monitor = (async () => {
+        while (!stopped.signal.aborted) {
+          try {
+            if (await this.busy()) { controller.abort(); return; }
+            await delay(25, undefined, { signal: stopped.signal });
+          } catch {
+            if (!stopped.signal.aborted) controller.abort();
+            return;
+          }
+        }
+      })();
+      try { return await run(controller.signal); }
+      finally { stopped.abort(); await monitor; }
+    });
+  }
+
   async busy(): Promise<boolean> {
     const reader = await fs.opendir(path.join(this.root, 'readers'));
     try { return (await reader.read()) !== null; }
@@ -89,10 +113,14 @@ export class StorageLifecycle {
       finally { await this.release(existing); }
     }
     const claim = path.join(this.root, 'readers', randomUUID());
-    await this.exclusive(async () => {
-      await fs.writeFile(claim, '', { flag: 'wx' });
-      await this.touch();
-    });
+    // Publish intent before waiting: cleanup cancels proof, while the gate still
+    // prevents this operation racing any in-progress rename or deletion. A crash
+    // leaves a protective claim; elapsed time never authorizes stealing it.
+    // Admission (and release) waits without a deadline; an abandoned gate still
+    // requires explicit recovery, rather than failing an accepted worker job.
+    await this.initialize();
+    await fs.writeFile(claim, '', { flag: 'wx' });
+    await this.exclusive(() => this.touch(), Infinity);
     const scope = { active: true, users: 1, claim };
     return this.context.run(scope, async () => {
       try { return await run(); }
@@ -106,7 +134,7 @@ export class StorageLifecycle {
     await this.exclusive(async () => {
       await this.touch();
       await fs.unlink(scope.claim);
-    });
+    }, Infinity);
   }
 
 }
