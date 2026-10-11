@@ -5,6 +5,13 @@ import type { StorageCategory, StorageObservation } from '@propr/shared';
 import { assertRealDirectory } from './lifecycle.js';
 
 export interface StorageRoot { category: StorageCategory; path: string }
+function mergeCategory(categories: StorageObservation['categories'], observed: StorageObservation['categories'][number]): void {
+  const existing = categories.find(category => category.category === observed.category);
+  if (!existing) { categories.push(observed); return; }
+  existing.bytes = existing.bytes === null && observed.bytes === null ? null : (existing.bytes ?? 0) + (observed.bytes ?? 0);
+  if (observed.state !== 'complete') existing.state = existing.bytes === null ? 'unknown' : 'partial';
+}
+
 /** Bounded async scan. Linux directory descriptors pin traversal across rename/symlink swaps. */
 export async function observeStorage(instanceId: string, roots: StorageRoot[], options: { maxEntries?: number; maxMs?: number } = {}): Promise<StorageObservation> {
   const started = Date.now();
@@ -57,12 +64,7 @@ export async function observeStorage(instanceId: string, roots: StorageRoot[], o
       await assertRealDirectory(path.dirname(path.resolve(root.path)));
       await visit(root.path);
     } catch { partial = true; }
-    const existing = categories.find(category => category.category === root.category);
-    const state = partial ? (found ? 'partial' : 'unknown') : 'complete';
-    if (existing) {
-      existing.bytes = existing.bytes === null && !found ? null : (existing.bytes ?? 0) + bytes;
-      if (state !== 'complete') existing.state = existing.bytes === null ? 'unknown' : 'partial';
-    } else categories.push({ category: root.category, bytes: found ? bytes : null, state });
+    mergeCategory(categories, { category: root.category, bytes: found ? bytes : null, state: partial ? (found ? 'partial' : 'unknown') : 'complete' });
   }
   const allCategories: StorageCategory[] = ['database_config', 'repository_caches', 'worktrees', 'salvage', 'logs_artifacts', 'provider_credentials', 'task_history'];
   for (const category of allCategories) if (!categories.some(value => value.category === category)) categories.push({ category, bytes: null, state: 'unsupported' });

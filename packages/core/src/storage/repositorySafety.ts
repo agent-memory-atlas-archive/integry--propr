@@ -25,6 +25,17 @@ export async function repositoryIdentity(directory: string): Promise<RepositoryI
   return { device: stat.dev, inode: stat.ino };
 }
 
+async function readTreeNames(directory: string, count: number, deadline: number, signal?: AbortSignal): Promise<string[]> {
+  const handle = await fs.opendir(directory);
+  const names: string[] = [];
+  for await (const entry of handle) {
+    signal?.throwIfAborted();
+    if (names.length + count > 100_000 || Date.now() > deadline) throw new Error('unsafe_path');
+    names.push(entry.name);
+  }
+  return names;
+}
+
 /** Walk only the candidate, refusing symlinks, mounts, excessive trees and substitution. */
 async function inspectTree(directory: string, identity: RepositoryIdentity, signal?: AbortSignal): Promise<{ bytes: number; fingerprint: string }> {
   if (process.platform !== 'linux') throw new Error('unsupported');
@@ -48,13 +59,7 @@ async function inspectTree(directory: string, identity: RepositoryIdentity, sign
       if (!seen.has(key)) { bytes += stat.blocks * 512; seen.add(key); }
       if (stat.isDirectory()) {
         const pinnedPath = `/proc/self/fd/${handle.fd}`;
-        const directoryHandle = await fs.opendir(pinnedPath);
-        const names: string[] = [];
-        for await (const entry of directoryHandle) {
-          signal?.throwIfAborted();
-          if (names.length + count > 100_000 || Date.now() > deadline) throw new Error('unsafe_path');
-          names.push(entry.name);
-        }
+        const names = await readTreeNames(pinnedPath, count, deadline, signal);
         for (const name of names.sort()) await visit(path.join(pinnedPath, name), path.join(relative, name));
         const after = await handle.stat();
         if (after.mtimeMs !== stat.mtimeMs) throw new Error('unsafe_path');
@@ -63,6 +68,57 @@ async function inspectTree(directory: string, identity: RepositoryIdentity, sign
   };
   await visit(directory, '');
   return { bytes, fingerprint: hash.digest('hex') };
+}
+
+async function inspectLocalGit(directory: string, proofGit: (args: string[]) => Promise<string>): Promise<StorageProtection | null> {
+  const config = await fs.readFile(path.join(directory, '.git', 'config'), 'utf8');
+  if (/^\s*\[\s*(?:include|includeIf)\b/im.test(config)) return 'unknown_git_state';
+  for (const name of ['info/grafts', 'index.lock', 'config.lock', 'MERGE_HEAD', 'REBASE_HEAD', 'rebase-merge', 'rebase-apply', 'sequencer']) {
+    if (await fs.lstat(path.join(directory, '.git', name)).then(() => true, error => { if (error.code === 'ENOENT') return false; throw error; })) return 'unknown_git_state';
+  }
+  // Status can invoke clean filters from local config. Permit only inert, managed
+  // clone configuration before asking Git to inspect the working copy.
+  const keys = (await proofGit(['config', '--local', '--no-includes', '--name-only', '--list'])).trim().split('\n');
+  const inert = /^(?:core\.(?:repositoryformatversion|filemode|bare|logallrefupdates|ignorecase|precomposeunicode)|remote\.origin\.(?:url|fetch)|branch\..+\.(?:remote|merge)|extensions\.objectformat)$/i;
+  if (keys.some(key => !inert.test(key))) return 'unknown_git_state';
+  const flags = await proofGit(['ls-files', '-v']);
+  if (flags.split('\n').some(line => line && (line[0] === 'S' || line[0] === line[0].toLowerCase()))) return 'private_work';
+
+  // Never walk alternate object stores, nested submodules, shallow boundaries or linked gitdirs.
+  for (const name of ['objects/info/alternates', 'objects/info/http-alternates', 'shallow', 'modules', 'worktrees']) {
+    if (await fs.lstat(path.join(directory, '.git', name)).then(() => true, error => { if (error.code === 'ENOENT') return false; throw error; })) return name === 'worktrees' ? 'worktrees' : 'unknown_git_state';
+  }
+  if ((await proofGit(['rev-parse', '--show-toplevel'])).trim() !== directory) return 'unsafe_path';
+  if ((await proofGit(['status', '--porcelain=v1', '--untracked-files=all', '--ignored', '--ignore-submodules=all'])).length) return 'private_work';
+  if ((await proofGit(['ls-files', '--stage'])).split('\n').some(line => line.startsWith('160000 '))) return 'unknown_git_state';
+  const refs = await proofGit(['for-each-ref', '--format=%(refname)']);
+  if (refs.split('\n').some(ref => ref.startsWith('refs/stash') || ref.includes('rescue'))) return 'salvage';
+  if ((await proofGit(['fsck', '--full', '--no-reflogs'])).trim()) return 'local_history';
+  return null;
+}
+
+async function advertisedRemoteRefs(remote: string, options: { token?: string; signal?: AbortSignal }): Promise<string | null> {
+  // A neutral cwd prevents local URL rewrites, credential helpers and transport commands.
+  const neutral = await fs.mkdtemp(path.join(os.tmpdir(), 'propr-storage-remote-'));
+  let advertised: string | null;
+  try {
+    const env: Record<string, string | undefined> = { ...gitEnvironment(), GIT_CEILING_DIRECTORIES: path.dirname(neutral) };
+    if (options.token) {
+      env.GIT_CONFIG_COUNT = '1'; env.GIT_CONFIG_KEY_0 = 'http.https://github.com/.extraheader';
+      env.GIT_CONFIG_VALUE_0 = `Authorization: Basic ${Buffer.from(`x-access-token:${options.token}`).toString('base64')}`;
+    }
+    try {
+      advertised = (await exec('git', ['-c', 'credential.helper=', '-c', 'core.hooksPath=/dev/null', '-c', 'protocol.ext.allow=never', 'ls-remote', '--heads', '--tags', '--', remote], {
+        signal: options.signal, cwd: neutral, env, timeout: 30_000, maxBuffer: 4 * 1024 * 1024,
+      })).stdout;
+    } catch { advertised = null; }
+  } finally { await fs.rmdir(neutral); }
+  return advertised;
+}
+
+function remoteTips(advertised: string): string[] | null {
+  const tips = [...new Set(advertised.split('\n').filter(Boolean).map(line => line.split('\t')[0]))];
+  return !tips.length || tips.length > 10_000 || tips.some(tip => !/^[0-9a-f]{40,64}$/.test(tip)) ? null : tips;
 }
 
 export interface RepositoryAudit { reasons: StorageProtection[]; bytes: number | null; fingerprint: string | null }
@@ -76,48 +132,14 @@ export async function auditRepository(directory: string, identity: RepositoryIde
     if (current.device !== identity.device || current.inode !== identity.inode) return retained('unknown_ownership');
     const tree = await inspectTree(directory, identity, options.signal);
     if (options.metadataFingerprint && await repositoryMetadataFingerprint(directory) !== options.metadataFingerprint) return retained('private_work');
-    const config = await fs.readFile(path.join(directory, '.git', 'config'), 'utf8');
-    if (/^\s*\[\s*(?:include|includeIf)\b/im.test(config)) return retained('unknown_git_state');
-    for (const name of ['info/grafts', 'index.lock', 'config.lock', 'MERGE_HEAD', 'REBASE_HEAD', 'rebase-merge', 'rebase-apply', 'sequencer']) {
-      if (await fs.lstat(path.join(directory, '.git', name)).then(() => true, error => { if (error.code === 'ENOENT') return false; throw error; })) return retained('unknown_git_state');
-    }
-    // Status can invoke clean filters from local config. Permit only inert, managed
-    // clone configuration before asking Git to inspect the working copy.
-    const keys = (await proofGit(['config', '--local', '--no-includes', '--name-only', '--list'])).trim().split('\n');
-    const inert = /^(?:core\.(?:repositoryformatversion|filemode|bare|logallrefupdates|ignorecase|precomposeunicode)|remote\.origin\.(?:url|fetch)|branch\..+\.(?:remote|merge)|extensions\.objectformat)$/i;
-    if (keys.some(key => !inert.test(key))) return retained('unknown_git_state');
-    const flags = await proofGit(['ls-files', '-v']);
-    if (flags.split('\n').some(line => line && (line[0] === 'S' || line[0] === line[0].toLowerCase()))) return retained('private_work');
-
-    // Never walk alternate object stores, nested submodules, shallow boundaries or linked gitdirs.
-    for (const name of ['objects/info/alternates', 'objects/info/http-alternates', 'shallow', 'modules', 'worktrees']) {
-      if (await fs.lstat(path.join(directory, '.git', name)).then(() => true, error => { if (error.code === 'ENOENT') return false; throw error; })) return retained(name === 'worktrees' ? 'worktrees' : 'unknown_git_state');
-    }
-    if ((await proofGit(['rev-parse', '--show-toplevel'])).trim() !== directory) return retained('unsafe_path');
-    if ((await proofGit(['status', '--porcelain=v1', '--untracked-files=all', '--ignored', '--ignore-submodules=all'])).length) return retained('private_work');
-    if ((await proofGit(['ls-files', '--stage'])).split('\n').some(line => line.startsWith('160000 '))) return retained('unknown_git_state');
-    const refs = await proofGit(['for-each-ref', '--format=%(refname)']);
-    if (refs.split('\n').some(ref => ref.startsWith('refs/stash') || ref.includes('rescue'))) return retained('salvage');
-    if ((await proofGit(['fsck', '--full', '--no-reflogs'])).trim()) return retained('local_history');
+    const localProtection = await inspectLocalGit(directory, proofGit);
+    if (localProtection) return retained(localProtection);
     const protocol = new URL(remote).protocol;
     if (!(protocol === 'https:' || (options.allowTestFileRemote && protocol === 'file:'))) return retained('remote_unavailable');
-    // A neutral cwd prevents local URL rewrites, credential helpers and transport commands.
-    const neutral = await fs.mkdtemp(path.join(os.tmpdir(), 'propr-storage-remote-'));
-    let advertised: string;
-    try {
-      const env: Record<string, string | undefined> = { ...gitEnvironment(), GIT_CEILING_DIRECTORIES: path.dirname(neutral) };
-      if (options.token) {
-        env.GIT_CONFIG_COUNT = '1'; env.GIT_CONFIG_KEY_0 = 'http.https://github.com/.extraheader';
-        env.GIT_CONFIG_VALUE_0 = `Authorization: Basic ${Buffer.from(`x-access-token:${options.token}`).toString('base64')}`;
-      }
-      try {
-        advertised = (await exec('git', ['-c', 'credential.helper=', '-c', 'core.hooksPath=/dev/null', '-c', 'protocol.ext.allow=never', 'ls-remote', '--heads', '--tags', '--', remote], {
-          signal: options.signal, cwd: neutral, env, timeout: 30_000, maxBuffer: 4 * 1024 * 1024,
-        })).stdout;
-      } catch { return retained(options.signal?.aborted ? 'busy' : 'remote_unavailable'); }
-    } finally { await fs.rmdir(neutral); }
-    const tips = [...new Set(advertised.split('\n').filter(Boolean).map(line => line.split('\t')[0]))];
-    if (!tips.length || tips.length > 10_000 || tips.some(tip => !/^[0-9a-f]{40,64}$/.test(tip))) return retained('unknown_git_state');
+    const advertised = await advertisedRemoteRefs(remote, options);
+    if (advertised === null) return retained(options.signal?.aborted ? 'busy' : 'remote_unavailable');
+    const tips = remoteTips(advertised);
+    if (!tips) return retained('unknown_git_state');
     // Prove EVERY local object recoverable from freshly advertised remote tips. This also
     // protects detached/reflog-only commits, dangling blobs, tags and private stash objects.
     const remoteObjects = new Set((await proofGit(['rev-list', '--objects', '--no-object-names', ...tips, '--'])).trim().split('\n'));

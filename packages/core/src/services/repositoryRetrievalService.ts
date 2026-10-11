@@ -483,9 +483,8 @@ async function searchRepositoryFilesInternal(options: SearchRepositoryFilesOptio
  * Reads a bounded line range of a file from the git object database at the
  * requested ref, without touching the working tree.
  */
-export async function readRepositoryFileContent(options: ReadRepositoryFileOptions): Promise<ReadRepositoryFileResult> {
-  return repositoryStorageLifecycle.use(() => readRepositoryFileContentInternal(options));
-}
+export const readRepositoryFileContent = async (options: ReadRepositoryFileOptions): Promise<ReadRepositoryFileResult> =>
+  repositoryStorageLifecycle.use(() => readRepositoryFileContentInternal(options));
 
 async function readRepositoryFileContentInternal(options: ReadRepositoryFileOptions): Promise<ReadRepositoryFileResult> {
   const filePath = canonicalRepositoryPath(options.path);

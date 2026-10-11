@@ -232,6 +232,18 @@ export class InstanceStorageService {
       return preview;
     });
   }
+  private async executeCandidate(candidate: StorageCandidate, record: CacheRecord | undefined, fingerprint: string, signal: AbortSignal): Promise<StorageProtection[]> {
+    if (candidate.category === 'task_history' && this.services.taskHistory) {
+      return await this.services.taskHistory.erase(candidate.id, fingerprint) ? [] : ['changed'];
+    }
+    if (!record) return ['unknown_ownership'];
+    const current = await this.evaluate(record, false, signal);
+    if (current.candidate.protectedReasons.length) return current.candidate.protectedReasons;
+    if (current.fingerprint !== fingerprint) return ['changed'];
+    // The same cross-process barrier covers remote proof, final identity and removal.
+    // No unchecked force/remove fallback exists elsewhere in the cache lifecycle.
+    return this.removeCache(record, fingerprint, signal);
+  }
   async execute(instanceId: string, confirmation: string, actor: string): Promise<StorageCleanupResult> {
     await this.assertInstance(instanceId);
     if (!/^[0-9a-f-]{36}$/.test(confirmation)) throw new StorageContractError(400, 'Invalid confirmation');
@@ -258,20 +270,10 @@ export class InstanceStorageService {
         let reasons: StorageProtection[] = [...candidate.protectedReasons];
         const record = records.get(candidate.id);
         if (!reasons.length && (busy || signal.aborted || clockChanged)) reasons = [busy || signal.aborted ? 'busy' : 'changed'];
-        if (!reasons.length && candidate.category === 'task_history' && this.services.taskHistory) {
-          if (await this.services.taskHistory.erase(candidate.id, saved.fingerprints[candidate.id])) result.deleted.push(candidate.id);
-          else reasons = ['changed'];
-        } else if (!reasons.length && record) {
-          const current = await this.evaluate(record, false, signal);
-          reasons = current.candidate.protectedReasons;
-          if (!reasons.length && current.fingerprint !== saved.fingerprints[candidate.id]) reasons = ['changed'];
-          if (!reasons.length) {
-            // The same cross-process barrier covers remote proof, final identity and removal.
-            // No unchecked force/remove fallback exists elsewhere in the cache lifecycle.
-            reasons = await this.removeCache(record, saved.fingerprints[candidate.id], signal);
-            if (!reasons.length) result.deleted.push(record.id);
-          }
-        } else if (!reasons.length) reasons = ['unknown_ownership'];
+        if (!reasons.length) {
+          reasons = await this.executeCandidate(candidate, record, saved.fingerprints[candidate.id], signal);
+          if (!reasons.length) result.deleted.push(candidate.id);
+        }
         if (reasons.length) result.retained.push({ id: candidate.id, reasons });
         await this.write(`result-${confirmation}.json`, { actor, result });
       }
