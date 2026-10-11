@@ -19,6 +19,18 @@ import { isRescueRef } from './rescueRefs.js';
 const CLONES_BASE_PATH = process.env.GIT_CLONES_BASE_PATH || '/tmp/git-processor/clones';
 
 /**
+ * Inspect ref output rather than promise resolution: simple-git can resolve a
+ * nonzero exit without stderr (including show-ref in an empty repository).
+ * Listing heads gives us exact names and reports corrupt refs as Git errors.
+ * Let those errors propagate rather than treating an unreadable repo as empty.
+ */
+async function localBranchExists(git: SimpleGit, branchName: string): Promise<boolean> {
+    const ref = `refs/heads/${branchName}`;
+    const refs = await git.raw(['show-ref', '--heads']);
+    return refs.split('\n').some(line => line.split(' ')[1] === ref);
+}
+
+/**
  * Create a worktree branch without recording an upstream in the shared clone
  * config. Parallel issue jobs use the same clone, so implicit tracking writes
  * from `git worktree add` can race on `.git/config.lock` even though their
@@ -35,7 +47,7 @@ export async function addWorktreeWithoutTracking(
 ): Promise<string> {
     const { startPoint, resetBranch = false } = options;
     if (resetBranch) {
-        const exists = await git.raw(['show-ref', '--verify', '--quiet', `refs/heads/${branchName}`]).then(() => true, () => false);
+        const exists = await localBranchExists(git, branchName);
         if (exists) return git.raw(['worktree', 'add', worktreePath, branchName]);
     }
     return git.raw([
@@ -50,7 +62,7 @@ export async function addWorktreeWithoutTracking(
 }
 
 export async function cleanupExistingBranch(git: SimpleGit, branchName: string): Promise<void> {
-    const exists = await git.raw(['show-ref', '--verify', '--quiet', `refs/heads/${branchName}`]).then(() => true, () => false);
+    const exists = await localBranchExists(git, branchName);
     if (exists) throw new Error('Existing branch retained; use a new task branch');
 }
 
