@@ -301,3 +301,129 @@ test('planner screens on a mobile viewport', async ({ page }) => {
   await page.waitForTimeout(500);
   await capture(page, 'mobile-execution-17-issues-queue');
 });
+
+// Use the production dialog through PlanEditor, with all API calls intercepted by fixtures.
+for (const width of [320, 360, 390, 430, 520, 768, 1280]) {
+  test.describe(`plan history at ${width}px`, () => {
+    test.use({ hasTouch: width < 640, isMobile: width < 640 });
+    for (const readOnly of [false, true]) {
+      test(`footer is usable ${readOnly ? 'read-only' : 'during selection and restore'}`, async ({ page }) => {
+        await page.setViewportSize({ width, height: width === 320 ? 568 : width < 640 ? 844 : 900 });
+        const snapshot = {
+          revision_id: 7, draft_revision: 3, status_before: 'refining', status_after: 'review',
+          cause: 'generation', replaced_at: '2026-09-28 10:00:00', issue_count: 1,
+          titles: ['Add project metrics'],
+          plan: [{ id: 'metrics', title: 'Add project metrics', body: 'Count completed tasks and display progress in the project overview.', implementation: '' }],
+        };
+        let releasePreview!: () => void;
+        let releaseRestore!: () => void;
+        const previewGate = new Promise<void>(resolve => { releasePreview = resolve; });
+        const restoreGate = new Promise<void>(resolve => { releaseRestore = resolve; });
+        let previewRequests = 0;
+        let restoreRequests = 0;
+        if (readOnly) await page.route('**/api/auth/demo-mode', route => route.fulfill({ json: { demoMode: true } }));
+        await page.route('**/api/planner/drafts/plan-short/revisions**', async route => {
+          const path = new URL(route.request().url()).pathname;
+          if (path.endsWith('/restore')) {
+            expect(route.request().method()).toBe('POST');
+            restoreRequests++;
+            await restoreGate;
+            return route.fulfill({ json: { plan_json: snapshot.plan } });
+          }
+          if (path.endsWith('/7')) {
+            previewRequests++;
+            await previewGate;
+            return route.fulfill({ json: snapshot });
+          }
+          return route.fulfill({ json: { revisions: [snapshot] } });
+        });
+        try {
+          await page.goto('/studio/plan-short');
+          if (width < 768) {
+            await page.getByRole('button', { name: 'More plan actions' }).click();
+            await page.getByRole('menuitem', { name: 'Plan history' }).click();
+          } else await page.getByRole('button', { name: 'Plan history' }).click();
+          const dialog = page.getByRole('dialog', { name: 'Plan history' });
+          const restore = dialog.getByRole('button', { name: 'Restore this version' });
+          const revision = dialog.getByRole('button', { name: /before refinement/i });
+          const note = dialog.getByText('Restoring keeps the current plan in this history.');
+          const assertLayout = async () => {
+            await expect(restore).toBeInViewport({ ratio: 1 });
+            await expect(note).toBeInViewport({ ratio: 1 });
+            await expect(dialog).toHaveCSS('transform', 'none');
+            const geometry = await restore.evaluate(button => {
+              const box = button.getBoundingClientRect();
+              const range = document.createRange();
+              const label = [...button.childNodes].find(node => node.nodeType === Node.TEXT_NODE && node.textContent?.includes('Restore this version'))!;
+              range.selectNodeContents(label);
+              const lines = [...range.getClientRects()].filter(rect => rect.width > 0);
+              return {
+                height: box.height, lines: lines.length,
+                contained: lines.every(rect => rect.left >= box.left && rect.right <= box.right && rect.top >= box.top && rect.bottom <= box.bottom),
+              };
+            });
+            expect(geometry.lines).toBe(1);
+            expect(geometry.contained).toBe(true);
+            expect(geometry.height).toBeGreaterThanOrEqual(44);
+            expect(await dialog.evaluate(el => el.scrollWidth <= el.clientWidth)).toBe(true);
+            expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+            expect(await note.evaluate(el => el.scrollHeight <= el.clientHeight && el.scrollWidth <= el.clientWidth)).toBe(true);
+            const buttonBox = (await restore.boundingBox())!;
+            const noteBox = (await note.boundingBox())!;
+            if (width < 640) expect(buttonBox.y).toBeGreaterThanOrEqual(noteBox.y + noteBox.height + 11);
+            else {
+              expect(buttonBox.x).toBeGreaterThan(noteBox.x + noteBox.width);
+              expect(Math.abs(buttonBox.y + buttonBox.height / 2 - noteBox.y - noteBox.height / 2)).toBeLessThanOrEqual(1);
+            }
+          };
+          await expect(revision).toBeVisible();
+          await expect(restore).toBeDisabled();
+          await assertLayout();
+          if (width < 640) await revision.tap();
+          else await revision.click();
+          await expect.poll(() => previewRequests).toBe(1);
+          await expect(restore).toBeDisabled();
+          await expect(revision.locator('.animate-spin')).toBeVisible();
+          await assertLayout();
+          expect(restoreRequests).toBe(0);
+          releasePreview();
+          await expect(dialog.getByText(snapshot.plan[0].body)).toBeVisible();
+          await assertLayout();
+          if (readOnly) {
+            await expect(restore).toBeDisabled();
+            await expect(restore).toHaveAttribute('title', 'Demo mode is read-only');
+            const box = (await restore.boundingBox())!;
+            await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
+            await revision.focus();
+            await page.keyboard.press('Tab');
+            await expect(restore).not.toBeFocused();
+            expect(restoreRequests).toBe(0);
+          } else {
+            await expect(restore).toBeEnabled();
+            await revision.focus();
+            await page.keyboard.press('Tab');
+            await expect(restore).toBeFocused();
+            await capture(page, `plan-history-${width}`);
+            if (width < 640) await restore.tap();
+            else await page.keyboard.press('Enter');
+            await expect.poll(() => restoreRequests).toBe(1);
+            await expect(restore).toBeDisabled();
+            await expect(revision).toBeDisabled();
+            await expect(dialog.getByRole('button', { name: 'Close', exact: true })).toBeDisabled();
+            await expect(restore.locator('.animate-spin')).toBeVisible();
+            await assertLayout();
+            await page.keyboard.press('Escape');
+            await expect(dialog).toBeVisible();
+            expect(restoreRequests).toBe(1);
+            releaseRestore();
+            await expect(dialog).toBeHidden();
+            await expect(page.getByText('Earlier plan version restored')).toBeVisible();
+          }
+        } finally {
+          releasePreview();
+          releaseRestore();
+        }
+      });
+    }
+  });
+}
