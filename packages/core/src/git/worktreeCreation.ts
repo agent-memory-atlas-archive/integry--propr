@@ -66,17 +66,20 @@ export async function cleanupExistingBranch(git: SimpleGit, branchName: string):
     if (exists) throw new Error('Existing branch retained; use a new task branch');
 }
 
-async function handleExistingWorktreePath(_worktreePath: string, _localRepoPath: string, _branchName: string): Promise<void> {
+async function handleExistingWorktreePath(): Promise<void> {
     throw new Error('Existing worktree retained; use a new worktree path');
 }
 
 /** Missing checkouts remain protected until their administrative history is proven recoverable. */
 export async function removeStaleWorktreeRegistration(_git: SimpleGit, _worktreePath: string): Promise<boolean> {
+    // Keep the legacy call signature without using it to prune protected state.
+    void _git;
+    void _worktreePath;
     // A missing checkout does not prove the administrative HEAD recoverable.
     return false;
 }
 
-async function handleWorktreeConflict(_git: SimpleGit, _error: Error, _worktreePath: string, _branchName: string): Promise<void> {
+async function handleWorktreeConflict(): Promise<void> {
     throw new Error('Existing worktree retained; branch is in use');
 }
 
@@ -127,7 +130,7 @@ async function createWorktreeFromRemote(git: SimpleGit, worktreePath: string, br
 
     } catch (error) {
         if ((error as Error).message && (error as Error).message.includes('is already used by worktree')) {
-            await handleWorktreeConflict(git, error as Error, worktreePath, branchName);
+            await handleWorktreeConflict();
         } else if ((error as Error).message && (error as Error).message.includes('.git is a directory')) {
             await handleImproperWorktree(worktreePath, branchName, error as Error);
         } else {
@@ -184,7 +187,7 @@ async function createWorktreeFromExistingBranchInternal(localRepoPath: string, b
         const git: SimpleGit = createHooklessGit(localRepoPath);
 
         if (await fs.pathExists(worktreePath)) {
-            await handleExistingWorktreePath(worktreePath, localRepoPath, branchName);
+            await handleExistingWorktreePath();
         }
 
         await fs.ensureDir(path.dirname(worktreePath));

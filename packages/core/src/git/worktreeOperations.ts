@@ -2,7 +2,6 @@ import { SimpleGit } from 'simple-git';
 import fs from 'fs-extra';
 import path from 'path';
 import logger from '../utils/logger.js';
-import { handleError } from '../utils/errorHandler.js';
 import { createHooklessGit } from './hooklessGit.js';
 import { resolveRepositoryWorktreePath } from './repositoryPaths.js';
 import { redactAuthenticatedGitUrl } from './repoBranching.js';
@@ -80,6 +79,8 @@ export async function cleanupExpiredWorktrees(worktreesBasePath: string = WORKTR
 
 /** Missing directories may still have unique detached commits in their administrative refs. */
 export async function safePruneWorktrees(localRepoPath: string, _minAgeHours: number = 1): Promise<{ pruned: number; skipped: number }> {
+    // Retain caller compatibility; age cannot authorize pruning protected worktrees.
+    void _minAgeHours;
     const exists = await fs.pathExists(path.join(localRepoPath, '.git', 'worktrees'));
     return { pruned: 0, skipped: exists ? 1 : 0 };
 }
