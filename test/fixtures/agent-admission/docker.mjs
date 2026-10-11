@@ -23,6 +23,8 @@ else if (command === 'create') {
     if (args.includes('fixture-fail-create')) { console.error(args.join(' ')); process.exit(1); }
     const id = randomBytes(32).toString('hex');
     writeRecord({ id, args, state: 'created' });
+    // Hold the create response after the daemon has created the immutable ID.
+    if (args.includes('fixture-slow-create')) await new Promise(resolve => setTimeout(resolve, 600));
     console.log(id);
 } else if (command === 'start') {
     const id = args.at(-1);

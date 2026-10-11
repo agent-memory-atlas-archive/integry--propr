@@ -280,6 +280,7 @@ export async function prepareAdmittedAgent(args: string[], options: AdmissionOpt
         await call('initialize', token, identity);
     };
     try {
+        await checkCancelled();
         const identity = JSON.stringify({ limit: config.limit, daemon: await runtime.daemon(), ...(config.generation ? { generation: config.generation } : {}) });
         await checkCancelled();
         logger.info({ instance: config.instance, limit: config.limit }, 'Waiting for physical agent admission');
@@ -299,7 +300,9 @@ export async function prepareAdmittedAgent(args: string[], options: AdmissionOpt
         renew();
         await checkCancelled();
         // No agent executes during create. Keep the caller's security, mounts,
-        // names, environment and network policy arguments intact.
+        // names, environment and network policy arguments intact. Do not race or
+        // abandon create on cancellation: collect its immutable ID (the Docker
+        // call is separately bounded), then remove it without ever starting it.
         id = await runtime.create(['run', '--label', `propr.agent-admission.token=${token}`, '--label', `propr.agent-admission.instance=${createHash('sha256').update(config.instance).digest('hex')}`, ...args.slice(1)], options.extraEnvVars, options.cwd);
         await checkCancelled();
         if (await call('attach', token, id) !== 1) throw new Error('Agent admission lost before container start');

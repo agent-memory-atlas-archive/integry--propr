@@ -204,21 +204,51 @@ function spawnCommandProcess(
     return child;
 }
 
-export function executeDockerCommand(command: string, args: string[], options: DockerCommandOptions = {}): Promise<ExecutionResult> {
+/** One caller budget, including admission; teardown keeps its own bounded budget. */
+interface ExecutionDeadline {
+    remaining(): number;
+    stop(): void;
+}
+
+export async function executeDockerCommand(command: string, args: string[], options: DockerCommandOptions = {}): Promise<ExecutionResult> {
     const ownershipContext = getExecutionOwnershipContext();
-    const executionSignal = options.signal ?? ownershipContext?.signal;
-    const initialAbortError = getExecutionAbortError(executionSignal);
-    if (initialAbortError) return Promise.reject(initialAbortError);
-    // A chargeable container starts only once its run's cap admitted it: a run
-    // whose recorded spend already reaches the cap launches nothing.
-    const admission = admitCostExecution(command, args, options);
-    if (!admission) return startWithNetworkPolicy(command, args, { executionSignal, networkPolicyExempt: options.networkPolicyExempt }, runArgs => startDockerCommand(command, runArgs, options, { ownershipContext, executionSignal }));
-    return admission.then(refusal => {
-        if (refusal) return refuseCostExecution(refusal, options.preserveOutputOnTimeout ?? false);
-        const abortError = getExecutionAbortError(executionSignal);
-        if (abortError) throw abortError;
-        return startWithNetworkPolicy(command, args, { executionSignal, networkPolicyExempt: options.networkPolicyExempt }, runArgs => startDockerCommand(command, runArgs, options, { ownershipContext, executionSignal }));
-    });
+    const signals = [options.signal, ownershipContext?.signal].filter((signal): signal is AbortSignal => Boolean(signal));
+    const ownerSignal = signals.length ? AbortSignal.any(signals) : undefined;
+    const initialAbortError = getExecutionAbortError(ownerSignal);
+    if (initialAbortError) throw initialAbortError;
+    const timeout = options.timeout ?? 300000;
+    const expiresAt = performance.now() + timeout;
+    const timeoutError = new Error(`Command timed out after ${timeout}ms`);
+    const controller = new AbortController();
+    const executionSignal = AbortSignal.any([...signals, controller.signal]);
+    const timer = setTimeout(() => controller.abort(timeoutError), timeout);
+    const deadline: ExecutionDeadline = {
+        remaining() {
+            executionSignal.throwIfAborted();
+            const remaining = Math.ceil(expiresAt - performance.now());
+            if (remaining <= 0) throw timeoutError;
+            return remaining;
+        },
+        stop() { clearTimeout(timer); },
+    };
+    try {
+        // A chargeable container starts only once its run's cap admitted it.
+        const admission = admitCostExecution(command, args, options);
+        if (admission) {
+            const refusal = await admission;
+            deadline.remaining();
+            if (refusal) return await refuseCostExecution(refusal, options.preserveOutputOnTimeout ?? false);
+        }
+        return await startWithNetworkPolicy(command, args, { executionSignal, networkPolicyExempt: options.networkPolicyExempt },
+            runArgs => startDockerCommand(command, runArgs, options, { ownershipContext, executionSignal }, deadline));
+    } catch (error) {
+        if (error !== timeoutError) throw error;
+        return await new Promise<ExecutionResult>((resolve, reject) => settleTimeoutStop(timeout,
+            { exitCode: null, stdout: '', stderr: '', messageTimestamps: new Map() },
+            options.preserveOutputOnTimeout ?? false, { resolve, reject }));
+    } finally {
+        deadline.stop();
+    }
 }
 
 async function startDockerCommand(
@@ -226,14 +256,19 @@ async function startDockerCommand(
     args: string[],
     options: DockerCommandOptions,
     { ownershipContext, executionSignal }: { ownershipContext: ReturnType<typeof getExecutionOwnershipContext>; executionSignal: AbortSignal | undefined },
+    deadline: ExecutionDeadline,
 ): Promise<ExecutionResult> {
-    const executionArgs = resolveExecutionArgs(command, withWorkflowExecutionDeadline(command, args, options.timeout ?? 300000), options.taskId, ownershipContext?.attemptGeneration);
+    const executionArgs = resolveExecutionArgs(command, withWorkflowExecutionDeadline(command, args, deadline.remaining()), options.taskId, ownershipContext?.attemptGeneration);
     const admission = command === 'docker' && args[0] === 'run' && !options.costCapExempt
         ? await prepareAdmittedAgent(executionArgs, { signal: executionSignal, taskId: options.taskId, extraEnvVars: options.extraEnvVars, cwd: options.cwd && fs.existsSync(options.cwd) ? options.cwd : undefined })
         : null;
     try {
         admission?.signal.throwIfAborted();
-        return await runDockerCommand(command, args, options, { ownershipContext, executionSignal: admission?.signal ?? executionSignal, admission });
+        const remainingMs = deadline.remaining();
+        // Transfer the same budget to the subprocess timer. Keep timeout reporting
+        // in terms of the caller's original limit and preserve partial output.
+        deadline.stop();
+        return await runDockerCommand(command, args, options, { ownershipContext, executionSignal: admission?.signal ?? executionSignal, admission }, remainingMs);
     } finally {
         await admission?.finish();
     }
@@ -244,10 +279,11 @@ function runDockerCommand(
     args: string[],
     options: DockerCommandOptions,
     { ownershipContext, executionSignal, admission }: { ownershipContext: ReturnType<typeof getExecutionOwnershipContext>; executionSignal: AbortSignal | undefined; admission: AdmittedAgent | null },
+    remainingMs: number,
 ): Promise<ExecutionResult> {
     return new Promise((resolve, reject) => {
         const { timeout = 300000, cwd, onSessionId, onContainerId, worktreePath, stdinData, extraEnvVars, taskId, streamToRedis, streamStderrToRedis, streamExtraOutput, stripAnsi, preserveOutputOnTimeout = false, model, costCapExempt } = options;
-        const executionArgs = resolveExecutionArgs(command, withWorkflowExecutionDeadline(command, args, timeout), taskId, ownershipContext?.attemptGeneration);
+        const executionArgs = resolveExecutionArgs(command, withWorkflowExecutionDeadline(command, args, remainingMs), taskId, ownershipContext?.attemptGeneration);
         const executablePath = command;
         const namedContainer = command === 'docker' ? getDockerRunContainerName(executionArgs) : null;
         // Agent containers count toward their run's spend cap; reaching it stops
@@ -369,7 +405,7 @@ function runDockerCommand(
             state.timedOut = true;
             timeoutInitiatedAbort = !state.aborted.value;
             abortExecution(true);
-        }, timeout);
+        }, remainingMs);
         const plannerAbortKey = taskId ? plannerAbortSignalKeyForTask(taskId) : null;
         const abortChecker = taskId && plannerAbortKey
             ? setupAbortChecker({

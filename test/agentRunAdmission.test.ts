@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict';
-import { after, before, test } from 'node:test';
+import { after, before, test, mock } from 'node:test';
+import childProcess from 'node:child_process';
+import { syncBuiltinESMExports } from 'node:module';
 import { spawn, spawnSync, fork, type ChildProcess } from 'node:child_process';
 import { mkdtemp, mkdir, readFile, readdir, writeFile, rename, chmod, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -44,9 +46,19 @@ before(async () => {
     const bin = path.join(root, 'bin'); await mkdir(bin);
     await writeFile(path.join(bin, 'docker'), `#!${process.execPath}\n${await readFile('test/fixtures/agent-admission/docker.mjs', 'utf8')}`);
     await chmod(path.join(bin, 'docker'), 0o755);
+    // The executor's legacy teardown uses an absolute Docker path. Route it
+    // through this simulator too: no test may contact a real Docker daemon.
+    const execFile = childProcess.execFile;
+    mock.method(childProcess, 'execFile', (file: string, ...args: unknown[]) => {
+        if (file !== 'docker' && file !== '/usr/bin/docker') throw new Error('Unexpected fixture executable');
+        return Reflect.apply(execFile, childProcess, ['docker', ...args]);
+    });
+    syncBuiltinESMExports();
     Object.assign(process.env, { REDIS_HOST: '127.0.0.1', REDIS_PORT: String(port), PATH: `${bin}:${process.env.PATH}`, PROPR_DEMO_MODE: 'true' });
 });
 after(async () => {
+    mock.restoreAll();
+    syncBuiltinESMExports();
     for (const child of children) child.kill('SIGKILL');
     redis?.disconnect(); server?.kill('SIGTERM');
     if (root) await rm(root, { force: true, recursive: true });
@@ -362,4 +374,124 @@ test('caller Docker host/context and PATH apply to identity, create, start, read
     for (const command of ['info', 'create', 'start', 'ps', 'rm']) assert.ok(commands.includes(command), command);
     assert.equal(await redis.hlen(agentAdmissionKeys('docker-context')[0]), 0);
     assert.equal((await readdir(directory)).filter(f => f.endsWith('.json')).length, 0);
+});
+
+test('caller deadline expires in a saturated physical queue without task ownership or a late launch', integration, async () => {
+    const { executeDockerCommand } = await import('../packages/core/src/claude/docker/dockerExecutor.js');
+    const directory = path.join(root, 'deadline-queue'); await mkdir(directory);
+    const saved = { ...process.env };
+    const instance = 'deadline-queue';
+    Object.assign(process.env, { PROPR_INSTANCE_ID: instance, PROPR_FLEET_CONTROL_SECRET: 'fixture', WORKER_CONCURRENCY: '2', PROPR_TEST_ADMISSION_DOCKER: directory });
+    const { runtime } = lifecycle();
+    const holders = await Promise.all(Array.from({ length: 2 }, () => prepareAdmittedAgent(['run', 'agent'], {
+        client: redis, docker: { ...runtime, daemon: async () => 'test-daemon' }, config: { instance, limit: 2 }, leaseMs: 150,
+    })));
+    // The request deliberately has no signal or execution ownership.
+    let settled = false;
+    const started = Date.now();
+    const request = executeDockerCommand('docker', ['run', '--rm', 'fixture-agent'], { timeout: 300 })
+        .then(value => { settled = true; return value; }, error => { settled = true; throw error; });
+    const rejected = assert.rejects(request, /Command timed out after 300ms/);
+    try {
+        await until(async () => (await agentAdmissionMetrics(redis, instance)).waiting === 1);
+        await delay(600);
+        assert.equal(settled, true, 'caller deadline must include the capacity wait');
+        await rejected;
+        assert.ok(Date.now() - started < 1500);
+        assert.equal((await agentAdmissionMetrics(redis, instance)).waiting, 0);
+        assert.equal((await agentAdmissionMetrics(redis, instance)).running, 2);
+    } finally {
+        await Promise.all(holders.map(holder => holder!.finish()));
+        // On the unfixed implementation, release lets the abandoned request run
+        // and eventually timeout, so the regression test cannot hang the suite.
+        await rejected;
+        for (const key of Object.keys(process.env)) if (!(key in saved)) delete process.env[key];
+        Object.assign(process.env, saved);
+    }
+    await delay(350);
+    const commands = (await readFile(path.join(directory, 'commands'), 'utf8')).trim().split('\n');
+    assert.ok(!commands.includes('create') && !commands.includes('start'), 'expired helpers never launch after capacity returns');
+});
+
+for (const mode of ['cancel', 'ownership', 'preserve', 'remaining']) test(`physical queue honors ${mode} within the caller budget`, integration, async () => {
+    const { executeDockerCommand, runWithExecutionAbortSignal } = await import('../packages/core/src/claude/docker/dockerExecutor.js');
+    const instance = `deadline-${mode}`;
+    const directory = path.join(root, instance); await mkdir(directory);
+    const saved = { ...process.env };
+    Object.assign(process.env, { PROPR_INSTANCE_ID: instance, PROPR_FLEET_CONTROL_SECRET: 'fixture', WORKER_CONCURRENCY: '2', PROPR_TEST_ADMISSION_DOCKER: directory });
+    const { runtime } = lifecycle();
+    const holders = await Promise.all(Array.from({ length: 2 }, () => prepareAdmittedAgent(['run', 'agent'], {
+        client: redis, docker: { ...runtime, daemon: async () => 'test-daemon' }, config: { instance, limit: 2 }, leaseMs: 150,
+    })));
+    const controller = new AbortController();
+    const cancellation = new Error('helper cancelled');
+    const timeout = mode === 'preserve' ? 300 : 2000;
+    const started = performance.now();
+    const run = () => executeDockerCommand('docker', ['run', '--rm', 'fixture-agent'], {
+        timeout, preserveOutputOnTimeout: true,
+        // A local signal must not hide inherited ownership cancellation.
+        signal: mode === 'cancel' ? controller.signal : mode === 'ownership' ? new AbortController().signal : undefined,
+    });
+    const request = mode === 'ownership' ? runWithExecutionAbortSignal(controller.signal, run) : run();
+    const result = mode === 'cancel' || mode === 'ownership'
+        ? assert.rejects(request, error => error === cancellation)
+        : request.then(value => {
+            assert.equal(value.timedOut, true);
+            assert.equal(value.timeoutMs, timeout);
+            assert.match(value.stderr, new RegExp(`timed out after ${timeout}ms`));
+        });
+    try {
+        await until(async () => (await agentAdmissionMetrics(redis, instance)).waiting === 1);
+        if (mode === 'remaining') {
+            await delay(Math.max(0, started + 1200 - performance.now()));
+            await holders[0]!.finish();
+            await until(async () => (await readRecords(directory)).some(record => record.state === 'running'));
+        } else if (mode !== 'preserve') controller.abort(cancellation);
+        await result;
+        if (mode === 'remaining') {
+            assert.ok(performance.now() - started < 2800, 'queueing must not be followed by a fresh 2000ms execution budget');
+            assert.match(await readFile(path.join(directory, 'starts'), 'utf8'), /[a-f0-9]{64}/);
+        }
+        assert.equal((await agentAdmissionMetrics(redis, instance)).waiting, 0);
+    } finally {
+        await Promise.all(holders.map(holder => holder!.finish()));
+        await result;
+        for (const key of Object.keys(process.env)) if (!(key in saved)) delete process.env[key];
+        Object.assign(process.env, saved);
+    }
+    await delay(300);
+    assert.equal((await readRecords(directory)).length, 0);
+    if (mode !== 'remaining') {
+        const commands = (await readFile(path.join(directory, 'commands'), 'utf8')).trim().split('\n');
+        assert.ok(!commands.includes('create') && !commands.includes('start'));
+    }
+});
+
+for (const cancel of [false, true]) test(`caller ${cancel ? 'cancellation' : 'deadline'} during create removes the ID without starting it`, integration, async () => {
+    const { executeDockerCommand } = await import('../packages/core/src/claude/docker/dockerExecutor.js');
+    const instance = `create-deadline-${cancel}`;
+    const directory = path.join(root, instance); await mkdir(directory);
+    const saved = { ...process.env };
+    Object.assign(process.env, { PROPR_INSTANCE_ID: instance, PROPR_FLEET_CONTROL_SECRET: 'fixture', WORKER_CONCURRENCY: '2', PROPR_TEST_ADMISSION_DOCKER: directory });
+    const controller = new AbortController();
+    const request = executeDockerCommand('docker', ['run', '--rm', 'fixture-slow-create'], {
+        timeout: cancel ? 5000 : 300, signal: controller.signal,
+    });
+    const rejected = assert.rejects(request, cancel ? /cancel during create/ : /timed out after 300ms/);
+    try {
+        await until(async () => (await readRecords(directory)).length === 1);
+        if (cancel) controller.abort(new Error('cancel during create'));
+        else await delay(320);
+        assert.equal(await redis.hlen(agentAdmissionKeys(instance)[0]), 1, 'retain capacity while create is still settling');
+        await rejected;
+        const commands = (await readFile(path.join(directory, 'commands'), 'utf8')).trim().split('\n');
+        assert.ok(commands.includes('create') && commands.includes('rm'));
+        assert.ok(!commands.includes('start'));
+        assert.equal((await readRecords(directory)).length, 0);
+        assert.equal(await redis.hlen(agentAdmissionKeys(instance)[0]), 0);
+    } finally {
+        await rejected;
+        for (const key of Object.keys(process.env)) if (!(key in saved)) delete process.env[key];
+        Object.assign(process.env, saved);
+    }
 });
