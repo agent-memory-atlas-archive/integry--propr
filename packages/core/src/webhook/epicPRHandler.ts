@@ -147,8 +147,7 @@ async function fetchIssueDetails(
                 issue_number: issueNumber
             });
             details.push({
-                number: issueNumber,
-                title: response.data.title
+                number: issueNumber, title: response.data.title
             });
         } catch (error) {
             log.debug({ issueNumber, error: (error as Error).message }, 'Failed to fetch issue details');
@@ -239,8 +238,7 @@ export async function handleEpicPRCreationOnMerge(
     correlatedLogger.info({
         prNumber: payload.pull_request.number,
         baseBranch,
-        owner,
-        repo
+        owner, repo
     }, 'Child PR merged to epic branch, ensuring Epic PR exists');
 
     let epicPrNumber: number | null = null;
@@ -251,8 +249,7 @@ export async function handleEpicPRCreationOnMerge(
         correlatedLogger.warn({
             error: err.message,
             baseBranch,
-            owner,
-            repo
+            owner, repo
         }, 'Failed to create Epic PR after child merge');
     }
 
@@ -310,8 +307,7 @@ async function ensureEpicPR(
             error: (error as Error).message,
             prNumber: existingPrNumber,
             baseBranch,
-            owner,
-            repo
+            owner, repo
         }, 'Failed to update Epic PR body after child merge');
     }
     return existingPrNumber;
@@ -339,10 +335,7 @@ async function updateEpicPRBody(
     if (epic.data.state !== 'open') return;
     await lease?.assertOwned();
     await octokit.request('PATCH /repos/{owner}/{repo}/pulls/{pull_number}', {
-        owner,
-        repo,
-        pull_number: epicPrNumber,
-        body: newBody
+        owner, repo, pull_number: epicPrNumber, body: newBody
     });
 
     correlatedLogger.info({
@@ -459,8 +452,7 @@ async function createEpicPR(
 ): Promise<number> {
     // Get the default branch to use as base
     const repoResponse = await octokit.request('GET /repos/{owner}/{repo}', {
-        owner,
-        repo
+        owner, repo
     });
     const defaultBranch = repoResponse.data.default_branch;
 
@@ -486,12 +478,7 @@ async function createEpicPR(
     // Create the Epic PR
     await lease?.assertOwned();
     const prResponse = await createEpicPRWithDraftFallback(octokit, {
-        owner,
-        repo,
-        title,
-        head: baseBranch,
-        base: defaultBranch,
-        body
+        owner, repo, title, head: baseBranch, base: defaultBranch, body
     });
 
     correlatedLogger.info({
@@ -532,10 +519,7 @@ export async function handleEpicPRLabelCleanup(
 
     correlatedLogger.info({
         prNumber: payload.pull_request.number,
-        branchName,
-        labelName,
-        owner,
-        repo
+        branchName, labelName, owner, repo
     }, 'Epic PR merged, cleaning up base label');
 
     try {
@@ -543,30 +527,24 @@ export async function handleEpicPRLabelCleanup(
 
         // Delete the label from the repository
         await octokit.request('DELETE /repos/{owner}/{repo}/labels/{name}', {
-            owner,
-            repo,
-            name: labelName
+            owner, repo, name: labelName
         });
 
         correlatedLogger.info({
-            labelName,
-            owner,
-            repo
+            labelName, owner, repo
         }, 'Epic label deleted successfully');
     } catch (error) {
         const err = error as Error & { status?: number };
         if (err.status === 404) {
             correlatedLogger.debug({
                 labelName,
-                owner,
-                repo
+                owner, repo
             }, 'Epic label not found, may have already been deleted');
         } else {
             correlatedLogger.warn({
                 error: err.message,
                 labelName,
-                owner,
-                repo
+                owner, repo
             }, 'Failed to delete Epic label');
         }
     }

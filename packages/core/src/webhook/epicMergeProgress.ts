@@ -191,9 +191,9 @@ async function listShippedChildren(
     octokit: EpicProgressOctokit,
     request: EpicMergeProgressRequest,
     children: EpicChildPullRequest[],
-    baseBranch: string,
-    mergedAt = Infinity,
+    { baseBranch, mergedAt, epicMerged }: { baseBranch?: string; mergedAt: number; epicMerged: boolean },
 ): Promise<Set<number>> {
+    if (!baseBranch) return new Set<number>();
     const { owner, repo, epicBranch, epicPrNumber } = request;
     const parameters = { owner, repo, head: `${owner}:${epicBranch}`, base: baseBranch, state: 'closed', per_page: 100 };
     const data = octokit.paginate
@@ -202,7 +202,7 @@ async function listShippedChildren(
     const predecessorTimes = (Array.isArray(data) ? data : []).flatMap(pr =>
         isRecord(pr) && typeof pr.number === 'number' && pr.number < epicPrNumber && typeof pr.merged_at === 'string'
             ? [Date.parse(pr.merged_at)] : []);
-    const cutoff = Math.max(...predecessorTimes.filter(time => Number.isFinite(time) && time < mergedAt));
+    const cutoff = Math.max(...predecessorTimes.filter(time => Number.isFinite(time) && time < (epicMerged ? mergedAt : Infinity)));
     // Equal timestamps cannot prove inclusion (the same rule as canCarryChild).
     return new Set(children.filter(pr => pr.mergedAt && Date.parse(pr.mergedAt) < cutoff).map(pr => pr.number));
 }
@@ -230,6 +230,26 @@ async function readEpicMergeState(octokit: EpicProgressOctokit, request: EpicMer
     return { comments, epicMerged, baseBranch, mergedAt };
 }
 
+/** Recover merge-time evidence when GitHub's child list lags the webhook. */
+async function includeTriggeringChild(
+    octokit: EpicProgressOctokit,
+    request: EpicMergeProgressRequest,
+    children: EpicChildPullRequest[],
+    epicMerged: boolean,
+): Promise<void> {
+    const { owner, repo } = request;
+    if (epicMerged && request.mergedChildPrNumber !== null
+        && !children.some(pr => pr.number === request.mergedChildPrNumber)) {
+        // The child list can lag a delivered merge. Read its timestamp rather
+        // than allowing the event alone to bypass the aggregate boundary.
+        const child = (await octokit.request('GET /repos/{owner}/{repo}/pulls/{pull_number}', {
+            owner, repo, pull_number: request.mergedChildPrNumber,
+        })).data;
+        const childMergedAt = isRecord(child) && typeof child.merged_at === 'string' ? child.merged_at : undefined;
+        children.push({ number: request.mergedChildPrNumber, merged: !!childMergedAt, mergedAt: childMergedAt, abandoned: false });
+    }
+}
+
 /**
  * Keeps a single "x out of y PRs merged" tracking comment on the epic PR up to
  * date, posts a readiness notice once every child PR has merged, and
@@ -252,17 +272,8 @@ export async function updateEpicMergeProgress(
 
     const children = await listChildPullRequests(octokit, owner, repo, request.epicBranch);
     const { comments, epicMerged, baseBranch, mergedAt } = await readEpicMergeState(octokit, request);
-    if (epicMerged && request.mergedChildPrNumber !== null
-        && !children.some(pr => pr.number === request.mergedChildPrNumber)) {
-        // The child list can lag a delivered merge. Read its timestamp rather
-        // than allowing the event alone to bypass the aggregate boundary.
-        const child = (await octokit.request('GET /repos/{owner}/{repo}/pulls/{pull_number}', {
-            owner, repo, pull_number: request.mergedChildPrNumber,
-        })).data;
-        const childMergedAt = isRecord(child) && typeof child.merged_at === 'string' ? child.merged_at : undefined;
-        children.push({ number: request.mergedChildPrNumber, merged: !!childMergedAt, mergedAt: childMergedAt, abandoned: false });
-    }
-    const shipped = baseBranch ? await listShippedChildren(octokit, request, children, baseBranch, epicMerged ? mergedAt : Infinity) : new Set<number>();
+    await includeTriggeringChild(octokit, request, children, epicMerged);
+    const shipped = await listShippedChildren(octokit, request, children, { baseBranch, mergedAt, epicMerged });
     // For a final report, neither current plan status nor the triggering event
     // proves inclusion. Keep later/unknown children outstanding for this PR.
     const included = new Set(children.filter(pr => pr.mergedAt && Date.parse(pr.mergedAt) < mergedAt).map(pr => pr.number));
