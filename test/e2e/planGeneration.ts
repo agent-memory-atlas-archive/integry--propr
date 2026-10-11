@@ -43,7 +43,7 @@ export const PLAN_TEST_BUDGET_MS = PLAN_GENERATION_TIMEOUT_MS + PLAN_ISSUES_TIME
 // deadline expires first and produces a descriptive failure.
 export const PLAN_TEST_TIMEOUT_MS = PLAN_TEST_BUDGET_MS + PLAN_SUITE_CLEANUP_MS;
 // The model matrix collects issues from several plans before implementing them
-// inside its 60-minute suite; plan creation may use at most this share of it.
+// inside its bounded model suite; plan creation may use at most this share of it.
 export const MODEL_MATRIX_PLAN_BUDGET_MS = 25 * 60_000;
 
 export const PLAN_POLL_INTERVAL_MS = 5_000;
@@ -51,7 +51,7 @@ export const PLAN_ISSUES_POLL_INTERVAL_MS = 3_000;
 
 /**
  * Absolute epoch-ms deadline by which E2E work must have stopped for the
- * nightly job (120 minutes, which also runs the full test suite first) to still
+ * dedicated nightly live job (120 minutes) to still
  * upload its diagnostics. Unset or invalid means no job-level bound.
  */
 export function parseJobDeadline(raw: string | undefined): number | undefined {

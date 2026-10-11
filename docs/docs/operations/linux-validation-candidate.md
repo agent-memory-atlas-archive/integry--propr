@@ -1,9 +1,171 @@
-# Validation only: combined Linux candidate (#2980)
+# Validation only: stage-one Linux candidate (#3002)
 
 This remains a **draft validation candidate**, not merge or publication approval.
-It combines the selected planning/nightly, smoke cleanup, production setup wizard,
-and Electron/private crash-capture corrections from #2953, #2967, #2974 and #2975.
+It preserves the previously integrated planning/nightly, smoke cleanup, production
+setup wizard and Electron/private crash-capture corrections from #2953, #2967,
+#2974 and #2975, and stages all five reviewed corrections below.
 Original feature issues remain open; macOS qualification stays separate in #2976.
+
+## Exact integration scope
+
+Base: `103409d6979969a3b0e9c069002cc739716cf3a4` (main). Remote main and
+all five remote PR heads matched these revisions when inspected on 2026-10-11.
+No source advancement was substituted. Target branch: `main`. ProPR owns the
+final commit and draft PR; this document cannot attest a not-yet-created head.
+
+| PR | Proper diff base | Incorporated head | Correction |
+| --- | --- | --- | --- |
+| #2991 | `103409d6979969a3b0e9c069002cc739716cf3a4` | `95f4b24a7d4745795b34f223851ae86bb188fd1b` | Unconditional RPM strip override and real-maker native payload/identity regression |
+| #2995 | `9fbca5e587ad1fb94e41de8c89be3af31177d59b` | `7db383f7b293b5d40e7079553176a02281a054c8` | Mobile contextual labels constrained to tab width; eight touch/accessibility/destination cases |
+| #2996 | `9fbca5e587ad1fb94e41de8c89be3af31177d59b` | `1aaf068283eddad85d53a81c12574ac4d07cd699` | Independent full/live jobs and whole-phase budgets; sanitized, fail-closed health/bundle evidence |
+| #2998 | `103409d6979969a3b0e9c069002cc739716cf3a4` | `4ee489625db477819a5fcd9c6476cc6ae6f530b9` | Current-history search writes retain selection, filters, hash and navigation intent |
+| #3001 | `103409d6979969a3b0e9c069002cc739716cf3a4` | `7c338d09311fd173f56dedb0cb9f39d5d0b7727a` | Caller deadline includes admission; combined cancellation and synchronous workflow budget before create |
+
+The 26 input paths are disjoint. For every existing path, its content at the
+proper source base equaled its content on main; the three added paths were absent
+on main. Thus there was no conflict to resolve and no production integration
+adjustment. Each path below is **byte-identical to its listed source head**, with
+the Git blob ID provided for independent verification. This preserves all other
+main paths, including Hosted worker resolution and physical admission ancestry.
+
+| Final changed path | Source PR | Source and candidate blob |
+| --- | --- | --- |
+| `apps/desktop/assets/linux/rpm.spec.ejs` | #2991 | `1168e8b6e2b10e08d52718c7689b3d3506f01cea` |
+| `apps/desktop/src/rpm-maker.test.ts` | #2991 | `43f72cf075b8e0140ecd41b0d11a6499ac045967` |
+| `propr-ui/e2e/automations.pw.ts` | #2995 | `e8e5fc0f58dced0b15f8ea292594d4db82a17c2c` |
+| `propr-ui/src/components/MobileBottomNavigation.tsx` | #2995 | `3ed5661adcfa932565437a09725557509f1e026d` |
+| `.github/workflows/test-nightly.yml` | #2996 | `9bf0424f08050c1a59807246488e17ea0fb8c2f5` |
+| `apps/desktop/scripts/nightly-native-bundle.mjs` | #2996 | `e171a40584f49bc7cb7b8a9d2d370c061f86bb6e` |
+| `apps/desktop/scripts/nightly-native-bundle.test.mjs` | #2996 | `a696a67bc1b66af2ae48ed2adffedd6401eda381` |
+| `scripts/nightly-health-issue.mjs` | #2996 | `7d7b9e479630da773958fd1a9aee49b96068cd36` |
+| `test/e2e.test.ts` | #2996 | `4aad59dbe364e687bd2fe073886c5b8b47942235` |
+| `test/e2e/helpers.ts` | #2996 | `720cd24e0e8b82c27d1986ffd023389f51ffad1a` |
+| `test/e2e/modelTaskTimeout.ts` | #2996 | `672ccb819a60ff1023d9265750b51436bbdb060a` |
+| `test/e2e/planGeneration.ts` | #2996 | `0130ae0b02844ab80cf74d551758ec291cc825ae` |
+| `test/e2eModelTaskTimeout.test.ts` | #2996 | `20d65c8663965414326009b6ad837933fa3aafe9` |
+| `test/nightlyHealthIssue.test.mjs` | #2996 | `586118e6a93f4d9b26f20f91fd192879ee6d3fbf` |
+| `test/nightlyWorkflowContract.test.mjs` | #2996 | `15ab37275d50a9c5deaffec3113a8e3db6e99a02` |
+| `propr-ui/e2e/task-list-search.pw.ts` | #2998 | `a0d6c28a00bc876a63b29348db329c563720a1b1` |
+| `propr-ui/src/components/TaskList.test.tsx` | #2998 | `519b5a96db8993abb9340f30dbe30a565d518e0b` |
+| `propr-ui/src/components/TaskList.tsx` | #2998 | `b821f7a4f34f3eb8eb31f1b91335dec1e97bf92b` |
+| `propr-ui/src/components/TaskList/hooks.ts` | #2998 | `9b41e5f456d18b97a9efab801e6c89123b1e8858` |
+| `propr-ui/src/hooks/useTaskSelection.ts` | #2998 | `c9a48623cc2205e8bf3ff8594cb5aa4d3fca96f8` |
+| `docs/docs/architecture/agent-run-admission.md` | #3001 | `363ad0eb69cae7e291b1c2adf60207e953183600` |
+| `packages/core/src/agents/agentRunAdmission.ts` | #3001 | `17d51db822d8da5359e71234d297f75f81a6c119` |
+| `packages/core/src/claude/docker/dockerExecutionDeadline.ts` | #3001 | `bf6f0634c50ad1edfd8a44592e3aa6e148c3ac74` |
+| `packages/core/src/claude/docker/dockerExecutor.ts` | #3001 | `b5fdad3161955eda83813a8a46aa97791e0a0f5c` |
+| `test/agentRunAdmission.test.ts` | #3001 | `116cf637ccebb1276d926d213624d5c2cf84b84e` |
+| `test/fixtures/agent-admission/docker.mjs` | #3001 | `6929ab2f7e4a2d4184996bbea09c9550adaf4cfd` |
+
+The only additional changed path is
+`docs/docs/operations/linux-validation-candidate.md` (this file): the validation
+handoff, equivalence map and operator instructions. It extends the inherited
+#2980 runbook without changing acceptance gates. Total: **27 changed paths**.
+Compare each listed path with `git diff <incorporated-head> -- <path>` after the
+final orchestration commit; each comparison must be empty. Compare the complete
+base-to-candidate path list with this inventory, and rerun checks if any bytes
+change. Do not infer combined CI success from any source PR's results.
+
+## Local combined validation
+
+Environment: Debian 12 x64, uid 1000, Node 22.23.3, npm 10.9.9. All checks
+used the combined files in the equivalence map. Root lockfile SHA256:
+`6595f11797cad0660146317e3f7fe7bfd0ebcd8cfb095ca53c5458fe670c6108`.
+These checks are fixture
+evidence, not final-head CI, independent review, live nightly, actual Fleet
+acceptance or normal installed-user qualification.
+
+| Check | Result |
+| --- | --- |
+| Root locked `npm ci` | Passed; lockfile unchanged; npm reported 8 high vulnerabilities, evaluated separately by the unchanged scoped audit policy below |
+| `npm run test:prepare` and `npm run build` | Passed for the shared/client/core/local-setup/CLI workspaces and root |
+| `npm run desktop:typecheck` | Passed on one isolated rerun, including desktop and UI; original concurrent invocation aborted with exit 134 (retained) |
+| Changed core and UI ESLint, `--max-warnings=0` | Passed, including both browser test files and TaskList tests; no threshold changes |
+| TaskList and MobileBottomNavigation Vitest | 54 passed, 0 skipped |
+| Nightly budget/plan/model/health/bundle and canonical-runner contracts | 207 passed, 0 failed, 0 skipped |
+| Execution/admission/network/cost/workflow and Hosted worker tests | Canonical sequential runner: 15/15 files, 249 passed, 0 failed, 0 skipped, 111.4s; initial concurrent run: 245 passed, 1 failed, 0 skipped |
+| Isolated real-Redis admission diagnostic rerun | 27 passed, 0 failed, 0 skipped, including both deterministic workflow-budget cases and saturation at 2/6/12 |
+| Real RPM/DEB/ZIP maker regression and libsolv metadata tests | 9 passed, 0 failed, 0 skipped after completing user-local tool setup; initial attempt: 7 passed, 2 RPM payload cases skipped because cpio was outside PATH |
+| Production-build Chromium, automations + desktop task list + delayed search | 34 passed, 0 skipped, 0 retries; includes all eight mobile 320/390px cases and original keyboard/dialog/typing assertions |
+| WebKit | Blocked before testing: browser downloaded, launch failed for missing GTK4/GStreamer/libsecret and other runtime libraries; no WebKit pass claimed |
+| Runtime / desktop packaging dependency audits | Passed under unchanged policy; runtime braces-related exception remains present and expires 2026-10-17T00:00:00Z; packaging audit passed without exception |
+| Canonical discovery and four-shard coverage | 806 unique units, shards 202/202/201/201; union equals full discovery, no duplication; discovery is not execution |
+| Changed documentation | MDX compilation passed |
+
+The initial execution failure was `physical Docker wrappers saturate 12 across
+processes and standard/native entrypoints` (`Timed out`). The single isolated
+admission rerun passed without changing assertions or timing. Concurrent resource
+contention is plausible, but its root cause was not established. The typecheck
+abort is likewise preserved rather than erased by its successful isolated rerun.
+The final serial focused run passed with the canonical runner's original
+180,000ms per-unit timeout and no retries.
+No production code, skips, assertions, timeouts or lint thresholds were altered
+in response to these results.
+
+Redis 7.0.15 and packaging tools were obtained from Debian package indexes into
+an owned `/tmp/propr-3002-tools` directory, without installing services or changing
+host permissions. The Redis fixtures bind separate loopback ports with persistence
+disabled and own their teardown. Docker is simulated in these execution tests.
+The real makers verified identical native payload hashes across RPM, DEB and ZIP:
+
+- Linux x64: `7199378f1c7b443a05c596eae7c66f9a77cc01b4a493c07748df0df1083950f6`.
+- Linux ARM64: `916679f413251c4b23c51167987a874bbbdd9d96991882bfac9093e0ea5fa051`.
+
+All three x64 payloads passed real non-root identity publication and fresh-process
+persistence. ARM64 payload bytes/ELF were verified, but ARM64 native execution was
+not performed on this x64 container. The real makers package fixture applications,
+not the complete installed desktop. Focused Chromium screenshots of mobile labels
+and the closed pane were directly inspected; they are UI evidence only.
+
+Reproduction of the focused checks (use the repository's locked dependencies and
+real Redis/packaging binaries; missing prerequisites remain a limitation):
+
+```sh
+npm ci
+npm run test:prepare
+npm run build
+npm run desktop:typecheck
+(cd packages/core && npx eslint --max-warnings=0 \
+  src/agents/agentRunAdmission.ts src/claude/docker/dockerExecutionDeadline.ts \
+  src/claude/docker/dockerExecutor.ts)
+(cd propr-ui && npx eslint --max-warnings=0 \
+  src/components/MobileBottomNavigation.tsx src/components/TaskList.tsx \
+  src/components/TaskList/hooks.ts src/components/TaskList.test.tsx \
+  src/hooks/useTaskSelection.ts e2e/automations.pw.ts e2e/task-list-search.pw.ts)
+npm exec --workspace propr-ui -- vitest run \
+  src/components/TaskList.test.tsx src/components/MobileBottomNavigation.test.tsx
+NODE_ENV=test npx tsx --experimental-test-module-mocks --test \
+  test/e2eModelTaskTimeout.test.ts test/e2ePlanGeneration.test.ts \
+  test/e2eTaskMatching.test.ts test/e2eTaskCompletion.test.ts test/e2eModelMatrix.test.ts \
+  test/nightlyHealthIssue.test.mjs test/nightlyWorkflowContract.test.mjs \
+  apps/desktop/scripts/nightly-native-bundle.test.mjs \
+  test/testSuiteRunner.test.mjs test/ciFullSuiteSelection.test.mjs
+# Use a real redis-server binary; do not substitute a fake or accept skips.
+PROPR_TEST_REDIS_SERVER="$(command -v redis-server)" NODE_ENV=test PROPR_DEMO_MODE=true \
+  node scripts/run-test-suite.mjs \
+  test/agentRunAdmission.test.ts test/dockerExecutorWatchdog.test.ts \
+  test/dockerExecutorEnvironment.test.ts test/dockerExecutorLiveOutput.test.ts \
+  test/dockerTaskContainer.test.ts test/agentRunCostGate.test.ts \
+  test/runCostCapEnforcement.test.ts test/repositoryWorkflowAdmission.test.ts \
+  packages/core/test/dockerExecutionOwnership.test.ts \
+  packages/core/test/dockerAbortController.test.ts \
+  packages/core/test/dockerContainerControl.test.ts \
+  packages/core/test/networkEgressExecution.test.ts \
+  packages/core/test/repositoryWorkflow.test.ts \
+  packages/core/test/workflowConcurrency.test.ts test/workerConcurrency.test.ts
+npx tsx --test apps/desktop/src/rpm-maker.test.ts
+(cd propr-ui && npx playwright test e2e/automations.pw.ts \
+  e2e/task-list-desktop.pw.ts e2e/task-list-search.pw.ts --retries=0)
+npm run audit:runtime
+npm run desktop:audit:packaging
+```
+
+Local logs retain original failures separately from reruns under
+`/tmp/propr-3002-*.log`, with the canonical focused summary at
+`/tmp/propr-3002-execution-summary.json`. These transient files are not durable CI
+artifacts; the results above are the handoff record. Complete 806-unit execution,
+all-workspace/backend/UI/dependency/migration qualification and actual live E2E
+remain required on the final candidate.
 
 ## Evidence policy
 
@@ -32,9 +194,11 @@ draft, and the cancelled heading **Setup needs attention**. Unit and browser
 fixture results do not establish these native behaviors. The original menu
 Back-click timeout and concurrent stress crash remain unexplained.
 
-## Reproduce on gram: native Linux x64
+## Reproduce on gram and the operator openSUSE machine
 
-Use an isolated clean checkout of the final candidate commit, with the qualified
+Run separately on gram and the operator's openSUSE machine, recording each host.
+The coding container used here is Debian 12, not that openSUSE host. Use an
+isolated clean checkout of the final candidate commit, with the qualified
 ordinary-user X11/Secret Service synthetic-fixture session already available.
 Do not change keyrings, credentials, permissions, sandbox policy, host libraries,
 or grants to make a run pass. Run each command once initially; retain its exit,
@@ -43,14 +207,14 @@ have a declared count and retain every outcome. Commands below build local files
 only; they do not publish or write image tags.
 
 From the repository root, replace the placeholder with the final orchestration
-commit (not one of the four input heads):
+commit (not one of the five input heads):
 
 ```sh
 set -euo pipefail
 candidate_sha=<full-final-candidate-commit>
 test "$(git rev-parse HEAD)" = "$candidate_sha"
 test -z "$(git status --porcelain --untracked-files=normal)"
-evidence_dir=$(mktemp -d /tmp/propr-2980-evidence-XXXXXXXX)
+evidence_dir=$(mktemp -d /tmp/propr-3002-evidence-XXXXXXXX)
 printf '%s\n' "$candidate_sha" > "$evidence_dir/source.txt"
 node --version > "$evidence_dir/build-node.txt"
 uname -a > "$evidence_dir/kernel.txt"
@@ -67,7 +231,7 @@ sha256sum apps/desktop/out/propr-desktop-linux-x64/propr-desktop \
   apps/desktop/out/propr-desktop-linux-x64/resources/app.asar \
   > "$evidence_dir/package.sha256"
 npm run desktop:smoke 2>&1 | tee "$evidence_dir/smoke-ordinary.log"
-crash_evidence_dir=$(mktemp -d /tmp/propr-2980-crashes-XXXXXXXX)
+crash_evidence_dir=$(mktemp -d /tmp/propr-3002-crashes-XXXXXXXX)
 PROPR_DESKTOP_NATIVE_CRASH_DIRECTORY="$crash_evidence_dir" \
   npm run desktop:smoke 2>&1 | tee "$evidence_dir/smoke-capture.log"
 env -u PROPR_DESKTOP_ACCEPTANCE_OUTPUT \
@@ -131,3 +295,99 @@ risk acceptance and runtime exception expiry are unchanged. #2976 macOS guided
 setup stays on its separate qualification branch; human Safe Storage approval and
 real GUI lifecycle remain pending, not excluded or implicitly complete. No
 user-owned server cleanup, TTL, or repository inventory work is included.
+
+## Package and installed-lifecycle operator gates
+
+From the same clean, source-identified checkout and evidence directory above,
+run on native Linux x64 and separately on native ARM64 (cross-build success does
+not establish ARM execution). Record the explicit target and all six DEB/RPM/ZIP
+artifact hashes, metadata architecture, sandbox owner/mode, fuse and native-addon
+hash checks. Do not edit pins or strip/sandbox settings to accommodate the host.
+
+```sh
+# Set to x64 on gram/the x64 openSUSE host; arm64 only on a native ARM64 host.
+target_arch=x64
+PROPR_DESKTOP_ENABLE_DEB=1 PROPR_DESKTOP_ENABLE_RPM=1 \
+  npm run make --workspace=@propr/desktop -- --platform=linux --arch="$target_arch" \
+  2>&1 | tee "$evidence_dir/make-$target_arch.log"
+npx tsx --test apps/desktop/src/rpm-maker.test.ts \
+  2>&1 | tee "$evidence_dir/maker-payloads-$target_arch.log"
+find apps/desktop/out/make -type f \
+  \( -name '*.deb' -o -name '*.rpm' -o -name '*.zip' \) \
+  -exec sha256sum {} + > "$evidence_dir/packages-$target_arch.sha256"
+```
+
+Require all real-maker cases to execute; missing tools/skips remain pending.
+The maker tests use fixture applications with actual pinned native addons. Their
+x64 identity probe does not prove installation, sign-in, pairing or a real task.
+Extract each actual application package with `dpkg-deb -x`, `rpm2cpio | cpio`, or
+`unzip` into separately owned evidence directories and compare its unpacked
+`directory-operations.node` to the checked-in architecture-specific prebuild;
+record the packaged runtime manifest as well. Inspect DEB/RPM architecture and
+sandbox metadata, not merely the filename. Repeat unchanged packaged smoke and
+native acceptance against the matching actual package, retaining every failure.
+
+For installed install/launch/upgrade/relaunch/remove evidence, use the existing
+`npm run desktop:acceptance:install-linux --` harness with its explicit `--arch`,
+`--previous-version`, `--version`, `--previous-deb`, `--deb`, `--previous-rpm`,
+`--rpm`, and `--sandbox-isolation` arguments. It requires canonical artifact
+names, strictly ordered versions, a matching native host, approved disposable
+package-manager containers and `PROPR_DESKTOP_REAL_LINUX_PACKAGE_ACCEPTANCE=1`.
+For example, with already prepared canonical artifacts and versions, the
+existing default-isolation invocation is:
+
+```sh
+# Operator supplies previous_version, candidate_version, previous_deb, candidate_deb,
+# previous_rpm and candidate_rpm from the approved artifact inventory.
+PROPR_DESKTOP_REAL_LINUX_PACKAGE_ACCEPTANCE=1 \
+  npm run desktop:acceptance:install-linux -- \
+  --arch "$target_arch" \
+  --previous-version "$previous_version" --version "$candidate_version" \
+  --previous-deb "$previous_deb" --deb "$candidate_deb" \
+  --previous-rpm "$previous_rpm" --rpm "$candidate_rpm" \
+  --sandbox-isolation docker-default \
+  2>&1 | tee "$evidence_dir/installed-$target_arch.log"
+```
+
+Select only an already authorized isolation mode; do not add host permissions or
+access grants for this task. Preserve failed lifecycle evidence and user-data
+preservation assertions. Disposable package-manager tests supplement the human
+normal installation and first-user session on the openSUSE machine; they do not
+replace it.
+
+Ordinary CI artifacts with checked-in c2de/version runtime bindings stay
+**unbound to this candidate**. Source-bound acceptance requires an independently
+approved manifest whose source is the final candidate SHA, whose compatibility
+and architecture match, and whose app/UI/agent image references are immutable
+verified digests. Record manifest, source/tree, lockfile, binary and artifact
+hashes together. The above commands neither create nor authorize runtime image
+publication. If no approved matching runtime exists, full source-bound setup and
+real-task qualification remains blocked, even when payload tests pass.
+
+## Full release scope retained
+
+- Exact integrated source, complete final-head CI and independent review, all
+  canonical workspace/backend/UI tests, dependency audits and migration checks.
+- Actual live E2E; assignment, GitHub and intake behavior; partial-failure actor
+  boundaries and creator attribution; cancellation, entitlement, cost and network
+  enforcement. Semantic API disconnect propagation is still incomplete; finite
+  execution deadlines do not claim to complete it.
+- Phone/tablet/touch, keyboard/dialog/typing ownership, zoom and accessibility;
+  mobile targets remain at least 44px. Native wizard 67-capture and seven 200%
+  keyboard gates, unchanged smoke, and bounded real setup lifecycle remain required.
+- Linux x64/ARM64 package payload integrity and installed lifecycles; this
+  openSUSE machine's normal first-user install, sign-in/pairing/secure-store and
+  real task; all three existing authorized repository fixtures and access
+  boundaries. Fake Docker fixtures are not actual Fleet acceptance.
+- Separate #2976 Mac human GUI/Keychain/Safe Storage lifecycle and publication
+  gates. Exact 681 preview publication decisions and existing docs risk
+  acceptance are unchanged; runtime exception expiry stays **2026-10-17**.
+
+The original actual nightly run 681 result (**34 passed, 3 failed**, shared deadline)
+is retained and not waived. No replacement actual live nightly was dispatched.
+The four #3001 full-suite shards were still running in the supplied review record;
+no eventual pass is inherited here. Source reviews are provenance only; combined
+review and qualification remain pending. No merge, publication, deployment,
+image/tag write, protected approval, credential/keychain operation, access grant,
+user-owned storage cleanup or repository inventory is part of this candidate.
+The five original issues are not closed and their PRs are not claimed merged.

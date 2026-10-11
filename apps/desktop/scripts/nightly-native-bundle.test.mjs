@@ -46,7 +46,8 @@ const readRuntimeManifest = async () => launcherManifest;
 
 const needsWith = (overrides = {}) => {
   const needs = {
-    'e2e-tests': { result: 'success', outputs: { full_tests: 'success', e2e_config: 'success', e2e_tests: 'success' } },
+    'full-tests': { result: 'success', outputs: { full_tests: 'success' } },
+    'e2e-tests': { result: 'success', outputs: { e2e_config: 'success', e2e_tests: 'success' } },
     'native-electron': { result: 'success', outputs: {} },
     'desktop-package': { result: 'success', outputs: { version } },
     'desktop-connect': { result: 'success', outputs: {} },
@@ -459,7 +460,7 @@ describe('nightly download workflow wiring', () => {
   const stepOrder = names => names.map(name => download.indexOf(`- name: ${name}\n`));
 
   test('runs after every nightly check, read-only, and without secrets or publication', () => {
-    assert.match(download, /\n {4}needs: \[e2e-tests, native-electron, desktop-package, desktop-connect\]\n/);
+    assert.match(download, /\n {4}needs: \[full-tests, e2e-tests, native-electron, desktop-package, desktop-connect\]\n/);
     assert.match(download, /\n {4}if: \$\{\{ !cancelled\(\) \}\}\n/);
     assert.match(download, /\n {4}permissions:\n {6}contents: read\n {4}[a-z]/);
     assert.match(download, /NEEDS_JSON: \$\{\{ toJSON\(needs\) \}\}/);
@@ -556,7 +557,7 @@ describe('nightly download workflow wiring', () => {
     assert.match(trigger, /\n {2}workflow_call:\n {4}# [^\n]+\n {4}# [^\n]+\n {4}outputs:\n {6}version:\n {8}description: [^\n]+\n {8}value: \$\{\{ jobs\.validation-version\.outputs\.version \}\}\n/);
     assert.doesNotMatch(trigger, /inputs:|secrets:/);
     assert.match(jobBlock(nightly, 'nightly-health'),
-      /needs: \[e2e-tests, native-electron, desktop-package, desktop-connect, desktop-nightly-download\]/);
+      /needs: \[full-tests, e2e-tests, native-electron, desktop-package, desktop-connect, desktop-nightly-download\]/);
     assert.ok(jobBlock(nightly, 'desktop-package').includes('uses: ./.github/workflows/desktop-release-guard.yml'));
   });
 });

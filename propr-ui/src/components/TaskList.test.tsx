@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, waitFor, act, fireEvent } from '@testing-library/react';
 import { MemoryRouter, Route, Routes, useLocation, useNavigate } from 'react-router-dom';
 import TaskList from './TaskList';
+import { useTaskSelection } from '../hooks/useTaskSelection';
 import { getTasks, getRepositoryStats } from '../api/proprApi';
 import type { TaskUpdatePayload } from '@propr/shared';
 import { AuthProvider } from '../contexts/AuthContext';
@@ -44,7 +45,9 @@ vi.mock('../contexts/useSocket', () => ({
 }));
 
 vi.mock('./TaskList/Filters', () => ({
-  Filters: ({ availableRepos, reposLoading, filter, setFilter, assigneeFilter, setAssigneeFilter, assigneePeople, canFilterToMe }: {
+  Filters: ({ searchQuery, setSearchQuery, availableRepos, reposLoading, filter, setFilter, assigneeFilter, setAssigneeFilter, assigneePeople, canFilterToMe }: {
+    searchQuery: string;
+    setSearchQuery: (value: string) => void;
     availableRepos: Array<{ name: string; count?: number }>;
     reposLoading: boolean;
     filter: string;
@@ -55,6 +58,7 @@ vi.mock('./TaskList/Filters', () => ({
     canFilterToMe: boolean;
   }) => (
     <div data-testid="filters">
+      <input aria-label="Search tasks" value={searchQuery} onChange={event => setSearchQuery(event.target.value)} />
       <span data-testid="repos-loading">{String(reposLoading)}</span>
       <span data-testid="repo-summary">{availableRepos.map(repo => `${repo.name}:${repo.count ?? 'na'}`).join('|')}</span>
       <select data-testid="status-filter" value={filter} onChange={(e) => setFilter(e.target.value)}>
@@ -380,5 +384,88 @@ describe('TaskList', () => {
       renderAt('/tasks?assignee=!!');
       expect(await screen.findByText('assignee contains an invalid GitHub login: !!')).toBeInTheDocument();
     });
+  });
+});
+
+
+// Fire after history changes but before React commits the router transition.
+// Waiting for a render between these events hides the race.
+describe.each([false, true])('delayed task search URL writes (render committed: %s)', committed => {
+  const initial = '/tasks?task=old&search=j&page=3&repository=integry%2Fpropr&status=active&assignee=me';
+  function Harness() {
+    const { select } = useTaskSelection();
+    const navigate = useNavigate();
+    const location = useLocation();
+    return <>
+      <LocationProbe />
+      <span data-testid="pathname">{location.pathname}</span>
+      <button onClick={() => select(null)}>Close pane</button>
+      <button onClick={() => select('new')}>Select next</button>
+      <button onClick={() => navigate('/tasks?task=new&repository=other%2Frepo&status=failed&assignee=octocat', { replace: true })}>Change filters</button>
+      <button onClick={() => navigate('/plans?repository=other')}>Leave</button>
+      <button onClick={() => navigate('/tasks?task=external&search=navigation&page=5')}>Navigate task</button>
+      <button onClick={() => navigate(-1)}>Back</button>
+      <TaskList limit={10} />
+    </>;
+  }
+
+  async function mount() {
+    mockGetTasks.mockResolvedValue({ tasks: [], total: 0 });
+    mockGetRepositoryStats.mockResolvedValue({ repositories: [] });
+    await act(async () => {
+      render(<MemoryRouter initialEntries={['/tasks?search=earlier&page=7', initial]}><Harness /></MemoryRouter>);
+    });
+    fireEvent.change(screen.getByLabelText('Search tasks'), { target: { value: '' } });
+    act(() => { vi.advanceTimersByTime(399); });
+  }
+
+  async function actBeforeDeadline(action: string) {
+    if (committed) {
+      await act(async () => { screen.getByRole('button', { name: action }).click(); });
+      await act(async () => { vi.advanceTimersByTime(1); });
+    } else {
+      await act(async () => {
+        screen.getByRole('button', { name: action }).click();
+        vi.advanceTimersByTime(1);
+      });
+    }
+  }
+
+  it.each([
+    ['Close pane', null],
+    ['Select next', 'new'],
+    ['Change filters', 'new'],
+  ] as const)('merges the pending search clear after %s into current history', async (action, task) => {
+    vi.useFakeTimers();
+    try {
+      await mount();
+      await actBeforeDeadline(action);
+      const params = new URLSearchParams(screen.getByTestId('location-search').textContent!);
+      expect(params.get('task')).toBe(task);
+      expect(params.has('search')).toBe(false);
+      expect(params.has('page')).toBe(false);
+      expect(params.get('repository')).toBe(action === 'Change filters' ? 'other/repo' : 'integry/propr');
+      expect(params.get('status')).toBe(action === 'Change filters' ? 'failed' : 'active');
+      expect(params.get('assignee')).toBe(action === 'Change filters' ? 'octocat' : 'me');
+      // Both writes replace: Back still reaches the entry preceding the edit.
+      await act(async () => { screen.getByRole('button', { name: 'Back' }).click(); });
+      expect(screen.getByTestId('location-search')).toHaveTextContent('?search=earlier&page=7');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it.each(['Leave', 'Back', 'Navigate task'])('does not undo %s when the old timer fires', async action => {
+    vi.useFakeTimers();
+    try {
+      await mount();
+      await actBeforeDeadline(action);
+      expect(screen.getByTestId('pathname')).toHaveTextContent(action === 'Leave' ? '/plans' : '/tasks');
+      expect(screen.getByTestId('location-search').textContent).toBe(
+        action === 'Leave' ? '?repository=other' : action === 'Back' ? '?search=earlier&page=7' : '?task=external&search=navigation&page=5',
+      );
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

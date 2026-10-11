@@ -19,7 +19,7 @@ import {
   type ImplementIssueResponse,
 } from "../../packages/cli/src/api/implement.js";
 import { findUnclaimedModelTask } from "./taskMatching.js";
-import { parseModelTaskTimeoutMs } from "./modelTaskTimeout.js";
+import { parseModelTaskTimeoutMs, MODEL_TASK_DISCOVERY_POLLS, MODEL_TASK_POLL_INTERVAL_MS } from "./modelTaskTimeout.js";
 import { isProviderUsageLimitFailure } from "./providerUsageLimit.js";
 import { isProviderAuthenticationFailure } from "./providerAuthentication.js";
 
@@ -189,13 +189,13 @@ export async function waitForTasks(
   results: ModelTestResult[],
   repo: string,
   client: ApiClient,
-  timeoutPolls = 60,
+  timeoutPolls = MODEL_TASK_DISCOVERY_POLLS,
 ): Promise<void> {
   if (results.length === 0) return;
 
   const claimedTaskIds = new Set(results.map((result) => result.taskId).filter(Boolean) as string[]);
   for (let poll = 0; poll < timeoutPolls; poll++) {
-    await sleep(10_000, workSignals.get(client));
+    await sleep(MODEL_TASK_POLL_INTERVAL_MS, workSignals.get(client));
     const taskList = await listTasks({ repository: repo, limit: 1000 }, client);
 
     let allFound = true;
@@ -239,7 +239,7 @@ export async function pollTasksToCompletion(
   const deadline = Date.now() + timeoutMs;
 
   while (Date.now() < deadline) {
-    await sleep(10_000, workSignals.get(client));
+    await sleep(MODEL_TASK_POLL_INTERVAL_MS, workSignals.get(client));
     pollCount++;
 
     for (const r of withTasks) {

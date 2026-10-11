@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
-import { useNavigate, useSearchParams } from 'react-router-dom';
+import { useNavigate } from 'react-router-dom';
 import { Inbox } from 'lucide-react';
 import { getTasks, getRepositoryStats } from '../api/proprApi';
 import { useSocket } from '../contexts/useSocket';
@@ -21,7 +21,7 @@ import {
   groupTasksForDisplay,
   selectValue,
 } from './TaskList/utils';
-import { useDebouncedCallback } from './TaskList/hooks';
+import { useDebouncedCallback, useTaskSearchParams } from './TaskList/hooks';
 import { isDialogOpen, isTypingTarget } from './TaskList/keyboardOwnership';
 import { useLiveRefreshScheduler } from '../hooks/useLiveRefreshScheduler';
 import type { TaskUpdatePayload } from '@propr/shared';
@@ -141,7 +141,7 @@ function useRowKeyboardNavigation(
 }
 
 const TaskList: React.FC<TaskListProps> = ({ limit, showViewAll = false, hideFilters = false, selectedTaskId = null, onSelectTask, refreshKey = 0, onGroupsChange }) => {
-  const [searchParams, setSearchParams] = useSearchParams();
+  const [searchParams, setSearchParams] = useTaskSearchParams();
   const navigate = useNavigate();
   const { onTaskUpdate, isConnected } = useSocket();
   const currentUser = useCurrentUser();
@@ -276,8 +276,8 @@ const TaskList: React.FC<TaskListProps> = ({ limit, showViewAll = false, hideFil
     () => setLocalCurrentPage(0)
   ), [useUrlState, updateSearchParams]);
 
-  // Debounce search query
-  useDebouncedCallback(searchQuery, handleSearchChange, 400);
+  // Keep a pending search tied to its edit, even while selection renders.
+  useDebouncedCallback(searchQuery, handleSearchChange, 400, true);
 
   // Memoize fetchTasks to allow WebSocket handler to call it
   const fetchTasks = useCallback(async () => {
