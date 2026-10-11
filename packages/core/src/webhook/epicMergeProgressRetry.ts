@@ -100,8 +100,7 @@ function epicProgressBranchField(owner: string, repo: string, epicBranch: string
  * must not inherit the PR number of an unrelated obligation on the branch.
  */
 export function epicProgressRetryField(
-    owner: string, repo: string, epicBranch: string,
-    epicPrNumber: number | null, mergedChildPrNumber: number | null,
+    { owner, repo, epicBranch, epicPrNumber, mergedChildPrNumber }: EpicProgressTarget,
 ): string {
     return JSON.stringify([owner.toLowerCase(), repo.toLowerCase(), epicBranch, epicPrNumber, mergedChildPrNumber]);
 }
@@ -129,7 +128,7 @@ function parseRetry(value: string | null | undefined): EpicProgressRetry | null 
  * Records (or extends) the retry obligation for this specific target.
  */
 export async function recordEpicProgressRetry(redis: EpicProgressRetryRedis, target: EpicProgressTarget, now: number = Date.now()): Promise<void> {
-    const field = epicProgressRetryField(target.owner, target.repo, target.epicBranch, target.epicPrNumber, target.mergedChildPrNumber);
+    const field = epicProgressRetryField(target);
     const previous = parseRetry(await redis.hget(EPIC_PROGRESS_RETRY_KEY, field));
     const attempts = (previous?.attempts ?? 0) + 1;
     const retry: EpicProgressRetry = {
@@ -157,7 +156,7 @@ export async function runEpicProgressUpdate(
     target: EpicProgressTarget,
     { redis, update, now = Date.now, log = logger.withCorrelation('epic-merge-progress') }: EpicProgressUpdateOptions,
 ): Promise<EpicProgressUpdateOutcome> {
-    const field = epicProgressRetryField(target.owner, target.repo, target.epicBranch, target.epicPrNumber, target.mergedChildPrNumber);
+    const field = epicProgressRetryField(target);
     const lockKey = `${EPIC_PROGRESS_LOCK_PREFIX}${epicProgressBranchField(target.owner, target.repo, target.epicBranch)}`;
     const token = randomUUID();
     /**

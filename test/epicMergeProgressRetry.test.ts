@@ -12,7 +12,7 @@ after(async () => { await closeConnection(); });
 
 const log = { debug() {}, info() {}, warn() {}, error() {} } as never;
 const target: EpicProgressTarget = { owner: 'integry', repo: 'propr', epicBranch: '100-epic-big-plan-abc', epicPrNumber: 500, mergedChildPrNumber: 203 };
-const field = epicProgressRetryField(target.owner, target.repo, target.epicBranch, target.epicPrNumber, target.mergedChildPrNumber);
+const field = epicProgressRetryField(target);
 
 function fakeRedis() {
     const hash = new Map<string, string>();
@@ -307,7 +307,7 @@ describe('recordEpicProgressRetry', () => {
         assert.equal(retry.epicPrNumber, 500);
         assert.equal(retry.mergedChildPrNumber, 203);
         assert.equal(retry.attempts, 1);
-        const unresolved = JSON.parse(redis.hash.get(epicProgressRetryField(target.owner, target.repo, target.epicBranch, null, 204))!);
+        const unresolved = JSON.parse(redis.hash.get(epicProgressRetryField({ ...target, epicPrNumber: null, mergedChildPrNumber: 204 }))!);
         assert.equal(unresolved.epicPrNumber, null);
         assert.equal(unresolved.mergedChildPrNumber, 204);
         assert.equal(redis.hash.size, 2);
