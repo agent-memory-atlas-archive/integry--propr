@@ -75,8 +75,8 @@ describe('TaskDetails embedded beside the task list', () => {
     expect(loadedTaskIds).toContain('pane-task');
     expect(document.title).toBe('Tasks | ProPR');
     // A pane is never wide enough for the timeline/output split: no desktop-only column classes.
-    expect(screen.getByTestId('task-workspace-scroll').className).not.toContain('lg:flex-row');
-    expect(screen.getByTestId('task-timeline-scroll').className).not.toContain('lg:w-[30%]');
+    expect(screen.getByTestId('task-workspace-scroll').className).not.toContain('[@container_task-workspace_(min-width:960px)]:flex-row');
+    expect(screen.getByTestId('task-timeline-scroll').className).not.toContain('[@container_task-workspace_(min-width:960px)]:w-[max(30%,576px)]');
     // The list is beside the pane: no breadcrumb back to it.
     expect(screen.queryByTestId('task-breadcrumb')).not.toBeInTheDocument();
 
@@ -99,7 +99,7 @@ describe('TaskDetails embedded beside the task list', () => {
     );
     expect(loadedTaskIds).toContain('route-task');
     expect(document.title).toContain('ProPR');
-    expect(screen.getByTestId('task-workspace-scroll').className).toContain('lg:flex-row');
+    expect(screen.getByTestId('task-workspace-scroll').className).toContain('[@container_task-workspace_(min-width:960px)]:flex-row');
     await act(async () => { fireEvent.click(screen.getAllByRole('button', { name: 'Delete task' })[0]); });
     expect(screen.getByTestId('location')).toHaveTextContent(/^\/tasks$/);
   });

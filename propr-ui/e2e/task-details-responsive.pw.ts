@@ -194,7 +194,7 @@ for (const viewport of [
     await expect(taskDetails.getByRole('button', { name: 'Prompt' })).toBeVisible();
     await expect(taskDetails.getByRole('button', { name: 'Logs' })).toBeVisible();
 
-    if (viewport.width < 1024) {
+    if ((await workspace.boundingBox())!.width < 960) {
       const metrics = await scrollRegionMetrics(workspace);
       expect(metrics.overflowY).toBe('auto');
       expect(metrics.scrollHeight).toBeGreaterThan(metrics.clientHeight);
