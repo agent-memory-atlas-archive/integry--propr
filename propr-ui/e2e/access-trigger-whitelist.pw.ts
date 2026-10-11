@@ -77,3 +77,17 @@ test('offers a trigger whitelist removal after removing a user', async ({ page }
   await expect(page.getByRole('status')).toContainText('@octocat is still on the trigger whitelist');
   await capture(page, 'access-remove-whitelist-offer');
 });
+
+test('explains retained trigger access for the final whitelist user', async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 900 });
+  await installFixture(page, [member('1042', 'preview', 'admin'), member('3001', 'octocat', 'member')], ['octocat']);
+  await page.goto('/admin/members');
+
+  await expect(page.getByText(/Roles assigned directly to users/)).toBeVisible();
+  page.once('dialog', dialog => void dialog.accept());
+  await page.getByRole('button', { name: 'Remove octocat' }).click();
+  await expect(page.getByRole('status')).toContainText('@octocat still has trigger access');
+  await expect(page.getByRole('status')).toContainText('would allow every GitHub user');
+  await expect(page.getByRole('button', { name: 'Remove from trigger whitelist' })).toHaveCount(0);
+  await capture(page, 'access-final-whitelist-user');
+});
