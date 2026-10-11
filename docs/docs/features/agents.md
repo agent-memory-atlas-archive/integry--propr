@@ -151,7 +151,7 @@ jobs:
           propr login "${{ secrets.PROPR_GITHUB_TOKEN }}"
       - name: Run the automation
         run: |
-          propr automation run "${{ vars.PROPR_AGENT_ID }}" \
+          propr automation run "${{ vars.PROPR_AUTOMATION_ID }}" \
             --idempotency-key "gha-${{ github.run_id }}-${{ github.run_attempt }}" \
             --source "github-actions: ${{ github.workflow }}" \
             --wait --timeout 3600 > report.md
@@ -291,8 +291,7 @@ For a synthetic pool, a run is held back only when every enabled member is over 
 - Structured or typed actions parsed from reports.
 - Sharing or transferring automations between users.
 
-
-### Naming and compatibility
+## Naming and compatibility
 
 Use `list_automation_definitions`, `get_automation_definition`,
 `get_automation_definition_contract`, `list_automation_runs`, `get_automation_run`,
@@ -318,3 +317,30 @@ The configured execution backend still uses `agentId`, `agentAlias`, and
 saved automations. Persisted database tables, queue identifiers, settings,
 internal worker grant endpoints and existing error codes keep their wire names
 so upgrades do not invalidate stored runs or workers.
+
+### Upgrade order
+
+Upgrade the backend to a release that serves `/api/automation-definitions` and
+`/api/automation-runs` before upgrading `propr-cli` or using Automations in the
+hosted UI against a local stack through the tunnel. These clients use only the
+new paths for definitions, input files, capacity, runs and run decisions; they
+do not fall back to the legacy paths. An older backend returns 404 even when the
+automation exists, and the CLI may report "Automation not found". Upgrade the
+local stack to resolve this; CLI users can keep their previous CLI version until
+then. Server-side aliases support older clients on newer backends, not newer
+clients on older backends.
+
+### MCP alias retirement plan
+
+All eight deprecated `*_agent_*` tools remain callable and discoverable in this
+release. MCP clients should migrate discovery and calls to the canonical
+`*_automation_*` names now; hosts with tool-count limits should select those
+canonical tools when configuring their allowed tools.
+
+Plan retirement for a future breaking release: announce the target release and
+migration instructions at least one stable release in advance, then remove the
+eight aliases from `tools/list` while keeping direct calls working for one more
+stable release. Remove callable aliases only in a subsequent breaking release.
+No retirement version is assigned yet, and this rename does not hide aliases.
+Legacy stored operation receipts keep their original field names throughout
+this migration.

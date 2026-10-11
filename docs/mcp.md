@@ -159,31 +159,9 @@ authorization for the owner (`GITHUB_AUTHORIZATION_REQUIRED` otherwise).
 
 ### Naming and compatibility
 
-Use `list_automation_definitions`, `get_automation_definition`,
-`get_automation_definition_contract`, `list_automation_runs`, `get_automation_run`,
-`trigger_automation_run`, `approve_automation_run` and `reject_automation_run`.
-Their former `*_agent_*` names remain callable as deprecated aliases with the
-same scopes, repository authorization, recursion guard and input schemas.
-Canonical mutation receipts use `continuation.automationRunId`; `get_operation`
-uses `targetState.automationRunId` for those receipts. Legacy calls and stored
-legacy operations retain `agentRunId`. A trigger retried across the two names
-with the same arguments and idempotency key returns the original receipt
-(including its original field names) and still creates only one run.
-
-REST clients use `/api/automation-definitions` and `/api/automation-runs`;
-`/api/agent-definitions` and `/api/agent-runs` remain deprecated aliases with the
-same request and response shapes. Shared clients use `AutomationDefinition`,
-`AutomationDefinitionInput`, `AutomationRun`, and `AUTOMATION_DEFINITION_CONTRACT`
-from `@propr/shared`; the old exports remain deprecated compatibility aliases.
-`AutomationRun.automationDefinitionId` replaces the legacy shared type's
-`agentDefinitionId`; REST and MCP run records continue to use `definitionId`.
-
-The configured execution backend still uses `agentId`, `agentAlias`, and
-`proprMcpAgentTypes` (`claude`, `codex`): these identify coding agents, not
-saved automations. Persisted database tables, queue identifiers, settings,
-internal worker grant endpoints and existing error codes keep their wire names
-so upgrades do not invalidate stored runs or workers.
-
+See [Automations: naming and compatibility](./docs/features/agents.md#naming-and-compatibility)
+for canonical names, legacy receipts, backend-first upgrade requirements and the
+MCP alias retirement plan.
 
 ## Client compatibility and verified upstream details
 

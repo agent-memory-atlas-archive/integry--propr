@@ -427,7 +427,7 @@ export function createAutomationDefinitionRoutes(deps: AutomationDefinitionRoute
       const definition = await requireDefinition(req, owner);
       if (files.length === 0) throw new RouteError(400, 'No files uploaded');
       if (definition.attachments.length + files.length > MAX_AUTOMATION_ATTACHMENTS) {
-        throw new RouteError(400, `An agent can have at most ${MAX_AUTOMATION_ATTACHMENTS} input files`);
+        throw new RouteError(400, `An automation can have at most ${MAX_AUTOMATION_ATTACHMENTS} input files`);
       }
       for (const file of files) {
         try {
@@ -440,7 +440,7 @@ export function createAutomationDefinitionRoutes(deps: AutomationDefinitionRoute
       // Append to the list stored now, not the one read before processing, and re-check the limit against it.
       const changed = await changeAgentDefinitionAttachments(definition.id, owner, current => {
         if (current.length + processed.length > MAX_AUTOMATION_ATTACHMENTS) {
-          throw new RouteError(400, `An agent can have at most ${MAX_AUTOMATION_ATTACHMENTS} input files`);
+          throw new RouteError(400, `An automation can have at most ${MAX_AUTOMATION_ATTACHMENTS} input files`);
         }
         return [...current, ...processed];
       }, storeDeps);

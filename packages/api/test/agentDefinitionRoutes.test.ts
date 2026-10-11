@@ -446,6 +446,7 @@ describe('automation definition routes', () => {
       params: { id: definition.id }, files: Array.from({ length: 10 }, (_, index) => ({ ...file, originalname: `f${index}.md` })),
     }));
     assert.equal(tooMany.status, 400);
+    assert.equal(tooMany.body.error, 'An automation can have at most 10 input files');
 
     const missing = await call(routes.deleteAttachment, request('alice', { params: { id: definition.id, attachmentId: 'nope' } }));
     assert.equal(missing.status, 404);
@@ -500,19 +501,26 @@ describe('automation definition routes', () => {
     removedFiles = [];
 
     const processing = deferred();
+    const bothProcessing = deferred();
+    let started = 0;
     const slow = createAutomationDefinitionRoutes({ db: database, services: {
       ...services(),
       processUpload: async (file, definitionId) => {
+        if (++started === 2) bothProcessing.release();
         await processing.promise;
         return services().processUpload!(file, definitionId);
       },
     } });
     const uploads = ['x', 'y'].map(prefix =>
       call(slow.uploadAttachments, request('alice', { params: { id: definition.id }, files: batch(prefix, 2) })));
+    await bothProcessing.promise;
     processing.release();
 
-    const statuses = (await Promise.all(uploads)).map(result => result.status).sort();
+    const results = await Promise.all(uploads);
+    const statuses = results.map(result => result.status).sort();
     assert.deepEqual(statuses, [201, 400]);
+    assert.equal(results.find(result => result.status === 400)?.body.error,
+      'An automation can have at most 10 input files');
     assert.equal((await storedAttachmentIds(definition.id)).length, 10);
     assert.equal(removedFiles.length, 1, 'the rejected upload removes the files it processed');
   });

@@ -81,7 +81,7 @@ async function readyRun(f: Awaited<ReturnType<typeof fixture>>, definitionId: st
   return id;
 }
 
-testWithFixture('agent tools are listed with valid schemas and only for the scopes they need', async f => {
+testWithFixture('automation tools are listed with valid schemas and only for the scopes they need', async f => {
   for (const name of AUTOMATION_TOOLS) assert.ok(z.toJSONSchema(f.catalog.find(tool => tool.name === name)!.schema), name);
   const visible = (scopes: string[]) => f.catalog.filter(tool => scopes.includes(tool.scope)).map(tool => tool.name)
     .filter(name => AUTOMATION_TOOLS.includes(name)).sort();
