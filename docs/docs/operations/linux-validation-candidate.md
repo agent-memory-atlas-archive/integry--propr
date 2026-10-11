@@ -86,16 +86,25 @@ npm run desktop:smoke 2>&1 | tee "$evidence_dir/smoke-ordinary.log"
 crash_evidence_dir=$(mktemp -d /tmp/propr-2980-crashes-XXXXXXXX)
 PROPR_DESKTOP_NATIVE_CRASH_DIRECTORY="$crash_evidence_dir" \
   npm run desktop:smoke 2>&1 | tee "$evidence_dir/smoke-capture.log"
-PROPR_DESKTOP_ACCEPTANCE_OUTPUT="$evidence_dir/visual" \
+env -u PROPR_DESKTOP_ACCEPTANCE_OUTPUT \
   npm run desktop:acceptance 2>&1 | tee "$evidence_dir/visual.log"
-PROPR_DESKTOP_ACCEPTANCE_OUTPUT="$evidence_dir/visual" \
+env -u PROPR_DESKTOP_ACCEPTANCE_OUTPUT \
   npm run desktop:acceptance:verify 2>&1 | tee "$evidence_dir/visual-verify.log"
+cp -a desktop-acceptance-artifacts "$evidence_dir/visual"
 PROPR_DESKTOP_REAL_LINUX_SETUP_ACCEPTANCE=1 \
 PROPR_DESKTOP_SETUP_ACCEPTANCE_SOURCE_SHA="$candidate_sha" \
 PROPR_DESKTOP_SETUP_ACCEPTANCE_OUTPUT="$evidence_dir/linux-setup-lifecycle.json" \
   npm run desktop:acceptance:setup-linux 2>&1 | tee "$evidence_dir/setup-lifecycle.log"
 sha256sum -c "$evidence_dir/package.sha256"
 ```
+
+Capture and verification both use the supported default
+`<repository-root>/desktop-acceptance-artifacts`, with any inherited
+`PROPR_DESKTOP_ACCEPTANCE_OUTPUT` override unset for each command. Only after
+verification succeeds is that directory copied into the owned evidence directory;
+the copy is optional. Do not use the evidence directory as the capture output:
+artifact cleanup requires the dedicated basename and an allowlisted canonical
+parent, and rejects symlinks.
 
 Stop on failure and retain the result; subsequent independent checks can be run
 separately with that failure still recorded. The complete smoke is four isolated
