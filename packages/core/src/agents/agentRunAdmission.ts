@@ -10,7 +10,9 @@ import { ExecutionAbortedError } from '../claude/docker/dockerExecutionOwnership
 /** Fleet's existing server-side activation boundary is PROPR_FLEET_CONTROL_SECRET.
  * WORKER_CONCURRENCY is provisioned by Fleet, not the persisted UI setting.
  * Deliberately separate from #2989's per-worker CONFIG_REPO resolver. */
-export function resolveAgentRunAdmission(env: NodeJS.ProcessEnv = process.env): { instance: string; limit: number } | null {
+export interface AdmissionConfig { instance: string; limit: number; generation?: number }
+
+export function resolveAgentRunAdmission(env: NodeJS.ProcessEnv = process.env): AdmissionConfig | null {
     const hosted = Boolean(env.PROPR_FLEET_CONTROL_SECRET);
     if (!hosted && env.PROPR_AGENT_RUN_LIMIT === undefined) return null;
     const raw = hosted ? env.WORKER_CONCURRENCY : env.PROPR_AGENT_RUN_LIMIT;
@@ -20,7 +22,11 @@ export function resolveAgentRunAdmission(env: NodeJS.ProcessEnv = process.env): 
     }
     const instance = env.PROPR_INSTANCE_ID?.trim();
     if (!instance) throw new Error('Agent-run admission requires PROPR_INSTANCE_ID');
-    return { instance, limit };
+    const generation = env.PROPR_AGENT_RUN_GENERATION === undefined ? 0 : Number(env.PROPR_AGENT_RUN_GENERATION);
+    if (!Number.isSafeInteger(generation) || generation < 0 || env.PROPR_AGENT_RUN_GENERATION?.trim() === '') {
+        throw new Error('Invalid PROPR_AGENT_RUN_GENERATION; expected a nonnegative safe integer');
+    }
+    return generation ? { instance, limit, generation } : { instance, limit };
 }
 
 // Records NEVER expire. Expiry permits fencing and Docker removal, not reuse.
@@ -33,6 +39,10 @@ if op == 'acquire' then
   local config = redis.call('GET', KEYS[2])
   if not config then return -1 end
   if config ~= ARGV[4] then return redis.error_reply('Agent admission configuration/daemon mismatch; drain before reconfiguration') end
+  local all = redis.call('HVALS', KEYS[1])
+  for _,value in ipairs(all) do
+    if cjson.decode(value).state == 'recovering' then return 0 end
+  end
   if redis.call('HLEN', KEYS[1]) >= tonumber(ARGV[5]) then return 0 end
   redis.call('HSET', KEYS[1], token, cjson.encode({deadline=now+tonumber(ARGV[3]), state='reserved'}))
   return 1
@@ -42,7 +52,20 @@ if op == 'initialize' then
 end
 if op == 'expired' then
   local config = redis.call('GET', KEYS[2])
-  if config and config ~= ARGV[4] then return redis.error_reply('Agent admission configuration/daemon mismatch; drain before reconfiguration') end
+  if config and config ~= ARGV[4] then
+    local old, next = cjson.decode(config), cjson.decode(ARGV[4])
+    if old.daemon ~= next.daemon or (next.generation or 0) <= (old.generation or 0) then
+      return redis.error_reply('Agent admission configuration/daemon mismatch; stale generation or unsupported daemon change')
+    end
+    -- The new operator generation fences every reservation atomically with the
+    -- config change. No capacity is reusable until removal is confirmed below.
+    local all = redis.call('HGETALL', KEYS[1])
+    for i=1,#all,2 do
+      local r = cjson.decode(all[i+1]); r.state = 'recovering'
+      redis.call('HSET', KEYS[1], all[i], cjson.encode(r))
+    end
+    redis.call('SET', KEYS[2], ARGV[4])
+  end
   if not config and redis.call('HLEN', KEYS[1]) > 0 then return redis.error_reply('Agent admission configuration missing; drain before recovery') end
   local result = {}
   local all = redis.call('HGETALL', KEYS[1])
@@ -94,39 +117,40 @@ export interface AdmissionDocker {
     remove(id: string): Promise<void>;
 }
 const exec = promisify(execFile);
-const docker: AdmissionDocker = {
-    async daemon() {
-        const { stdout } = await exec('docker', ['info', '--format', '{{.ID}}'], { timeout: 10_000 });
-        if (!stdout.trim()) throw new Error('Docker daemon identity unavailable');
-        return stdout.trim();
-    },
-    async assertEmpty(instance) {
-        const scope = createHash('sha256').update(instance).digest('hex');
-        const { stdout } = await exec('docker', ['ps', '-aq', '--filter', `label=propr.agent-admission.instance=${scope}`], { timeout: 10_000 });
-        if (stdout.trim()) throw new Error('Agent admission state missing while Docker containers survive; drain before recovery');
-    },
-    async create(args, env, cwd) {
-        // execFile errors embed the full command, which can contain credentials.
-        // Never propagate that error or its cause outside this boundary.
-        const { stdout } = await exec('docker', ['create', ...args.slice(1)], {
-            timeout: 120_000, maxBuffer: 1024 * 1024, cwd, env: env ? { ...process.env, ...env } : process.env,
-        }).catch(() => { throw new Error('Docker could not create the admitted agent container; inspect the Docker daemon for details'); });
-        const id = stdout.trim();
-        if (!/^[a-f0-9]{64}$/.test(id)) throw new Error('Docker create returned no immutable container ID');
-        return id;
-    },
-    async remove(id) {
-        if (!/^[a-f0-9]{64}$/.test(id)) throw new Error('Invalid admission container ID');
-        // A successful daemon query, not an ambiguous CLI error, proves absence.
-        const { stdout } = await exec('docker', ['ps', '-aq', '--no-trunc', '--filter', `id=${id}`], { timeout: 10_000 });
-        if (!stdout.split('\n').includes(id)) return;
-        try { await exec('docker', ['rm', '-f', id], { timeout: 30_000 }); }
-        catch (error) {
-            const check = await exec('docker', ['ps', '-aq', '--no-trunc', '--filter', `id=${id}`], { timeout: 10_000 });
-            if (check.stdout.split('\n').includes(id)) throw error;
-        }
-    },
-};
+function admissionDocker(env: NodeJS.ProcessEnv, cwd?: string): AdmissionDocker {
+    const execute = (args: string[], timeout: number) => exec('docker', args, { env, cwd, timeout, maxBuffer: 1024 * 1024 });
+    return {
+        async daemon() {
+            const { stdout } = await execute(['info', '--format', '{{.ID}}'], 10_000);
+            if (!stdout.trim()) throw new Error('Docker daemon identity unavailable');
+            return stdout.trim();
+        },
+        async assertEmpty(instance) {
+            const scope = createHash('sha256').update(instance).digest('hex');
+            const { stdout } = await execute(['ps', '-aq', '--filter', `label=propr.agent-admission.instance=${scope}`], 10_000);
+            if (stdout.trim()) throw new Error('Agent admission state missing while Docker containers survive; drain before recovery');
+        },
+        async create(args) {
+            // execFile errors embed the full command, which can contain credentials.
+            // Never propagate that error or its cause outside this boundary.
+            const { stdout } = await execute(['create', ...args.slice(1)], 120_000).catch(() => { throw new Error('Docker could not create the admitted agent container; inspect the Docker daemon for details'); });
+            const id = stdout.trim();
+            if (!/^[a-f0-9]{64}$/.test(id)) throw new Error('Docker create returned no immutable container ID');
+            return id;
+        },
+        async remove(id) {
+            if (!/^[a-f0-9]{64}$/.test(id)) throw new Error('Invalid admission container ID');
+            // A successful daemon query, not an ambiguous CLI error, proves absence.
+            const { stdout } = await execute(['ps', '-aq', '--no-trunc', '--filter', `id=${id}`], 10_000);
+            if (!stdout.split('\n').includes(id)) return;
+            try { await execute(['rm', '-f', id], 30_000); }
+            catch (error) {
+                const check = await execute(['ps', '-aq', '--no-trunc', '--filter', `id=${id}`], 10_000);
+                if (check.stdout.split('\n').includes(id)) throw error;
+            }
+        },
+    };
+}
 
 export function agentAdmissionKeys(instance: string): [string, string, string] {
     const scope = createHash('sha256').update(instance).digest('hex');
@@ -152,12 +176,13 @@ export interface AdmissionOptions {
     /** Infrastructure injection for real Redis tests; never sourced from request data. */
     client?: AdmissionRedis;
     docker?: AdmissionDocker;
-    config?: { instance: string; limit: number };
+    config?: AdmissionConfig;
     leaseMs?: number;
     pollMs?: number;
 }
 export interface AdmittedAgent {
     args: string[];
+    environment: NodeJS.ProcessEnv;
     id: string;
     signal: AbortSignal;
     finish(): Promise<void>;
@@ -177,7 +202,8 @@ export async function prepareAdmittedAgent(args: string[], options: AdmissionOpt
     });
     ownedClient?.on('error', error => logger.error({ error: error.message }, 'Agent admission Redis unavailable'));
     const client = options.client ?? ownedClient!;
-    const runtime = options.docker ?? docker;
+    const environment = { ...process.env, ...options.extraEnvVars };
+    const runtime = options.docker ?? admissionDocker(environment, options.cwd);
     const [holders, configKey, waiting] = agentAdmissionKeys(config.instance);
     const token: string = randomUUID();
     const leaseMs = options.leaseMs ?? 30_000;
@@ -239,7 +265,7 @@ export async function prepareAdmittedAgent(args: string[], options: AdmissionOpt
         }, Math.max(10, Math.floor(leaseMs / 3)));
     };
     try {
-        const identity = JSON.stringify({ limit: config.limit, daemon: await runtime.daemon() });
+        const identity = JSON.stringify({ limit: config.limit, daemon: await runtime.daemon(), ...(config.generation ? { generation: config.generation } : {}) });
         await checkCancelled();
         logger.info({ instance: config.instance, limit: config.limit }, 'Waiting for physical agent admission');
         while (true) {
@@ -271,7 +297,7 @@ export async function prepareAdmittedAgent(args: string[], options: AdmissionOpt
         if (await call('attach', token, id) !== 1) throw new Error('Agent admission lost before container start');
         signal.throwIfAborted();
         logger.info({ instance: config.instance, containerId: id, ...await agentAdmissionMetrics(client, config.instance) }, 'Physical agent admitted');
-        return { id, args: ['start', '--attach', '--interactive', id], signal, finish };
+        return { id, args: ['start', '--attach', '--interactive', id], environment, signal, finish };
     } catch (error) {
         try { await finish(); }
         catch (cleanupError) { logger.error({ error: String(cleanupError) }, 'Agent admission retained for recovery'); }

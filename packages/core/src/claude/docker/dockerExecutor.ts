@@ -82,16 +82,6 @@ export interface DockerCommandOptions extends Pick<ExecutionWatchdogOptions, 'wa
     costCapExempt?: boolean;
 }
 
-function resolveDockerPath(command: string): string {
-    if (command !== 'docker') return command;
-    const paths = ['/usr/bin/docker', '/usr/local/bin/docker', '/bin/docker'];
-    for (const p of paths) {
-        try { if (fs.existsSync(p)) { fs.accessSync(p, fs.constants.X_OK); logger.debug({ dockerPath: p }, 'Found docker executable'); return p; } } catch { /* continue */ }
-    }
-    logger.debug('Using docker from PATH');
-    return 'docker';
-}
-
 /**
  * Finds an agent container in any lifecycle state by its exact task label and,
  * when supplied, its attempt-generation label. Name suffixes are intentionally excluded:
@@ -207,10 +197,10 @@ export async function inspectLegacyDockerContainerLivenessForTask(taskId: string
 function spawnCommandProcess(
     executablePath: string,
     args: string[],
-    { cwd, stdinData, extraEnvVars }: { cwd?: string; stdinData?: string; extraEnvVars?: Record<string, string> },
+    { cwd, stdinData, extraEnvVars, environment }: { cwd?: string; stdinData?: string; extraEnvVars?: Record<string, string>; environment?: NodeJS.ProcessEnv },
 ): ChildProcess {
     // Extra variables reach the container through `-e NAME`, keeping their values out of the argument list.
-    const env = extraEnvVars && Object.keys(extraEnvVars).length > 0 ? { ...process.env, ...extraEnvVars } : process.env;
+    const env = environment ?? (extraEnvVars && Object.keys(extraEnvVars).length > 0 ? { ...process.env, ...extraEnvVars } : process.env);
     const spawnOptions: SpawnOptions = { stdio: [stdinData ? 'pipe' : 'ignore', 'pipe', 'pipe'], env };
     if (cwd && fs.existsSync(cwd)) spawnOptions.cwd = cwd;
     else if (cwd) logger.warn({ cwd }, 'Working directory does not exist, spawning from current directory');
@@ -270,7 +260,7 @@ function runDockerCommand(
     return new Promise((resolve, reject) => {
         const { timeout = 300000, cwd, onSessionId, onContainerId, worktreePath, stdinData, extraEnvVars, taskId, streamToRedis, streamStderrToRedis, streamExtraOutput, stripAnsi, preserveOutputOnTimeout = false, model, costCapExempt } = options;
         const executionArgs = resolveExecutionArgs(command, withWorkflowExecutionDeadline(command, args, timeout), taskId, ownershipContext?.attemptGeneration);
-        const executablePath = resolveDockerPath(command);
+        const executablePath = command;
         const namedContainer = command === 'docker' ? getDockerRunContainerName(executionArgs) : null;
         // Agent containers count toward their run's spend cap; reaching it stops
         // them like a timeout, so their partial work can still be published. Once
@@ -284,7 +274,7 @@ function runDockerCommand(
         }
         const costExecution = costCap.execution;
         let child: ReturnType<typeof spawnCommandProcess>;
-        try { child = spawnCommandProcess(executablePath, admission?.args ?? executionArgs, { cwd, stdinData, extraEnvVars }); } catch (error) {
+        try { child = spawnCommandProcess(executablePath, admission?.args ?? executionArgs, { cwd, stdinData, extraEnvVars, environment: admission?.environment }); } catch (error) {
             // A container that never started must not stay registered with the guard.
             void costExecution?.finish().catch(() => null);
             throw error;

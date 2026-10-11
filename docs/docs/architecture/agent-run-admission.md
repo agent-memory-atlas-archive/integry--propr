@@ -12,7 +12,7 @@ The existing server-side Hosted activation boundary is `PROPR_FLEET_CONTROL_SECR
 
 Self-hosted installations retain their execution behavior unless `PROPR_AGENT_RUN_LIMIT` is explicitly set to a positive integer, with `PROPR_INSTANCE_ID`. A Hosted instance ignores this optional self-hosted override.
 
-PR [#2989](https://github.com/integry/propr/pull/2989), following #2987, resolves **per-worker job** and repository-workflow ceilings. It was open with no submitted reviews when this implementation was prepared, and its resolver was absent from this checkout. This patch does not copy or replace that resolver. Its reviewed resolution should still be integrated through the normal workflow. It changes different implementation files; the worker-runtime documentation may need both additions retained. The physical entitlement resolver intentionally has stricter semantics: it recognizes Hosted by the existing Fleet boundary and never accepts a config-repository override. Existing repository semaphores and lower repository limits remain in place.
+PR [#2989](https://github.com/integry/propr/pull/2989), following #2987, merged at `9fbca5e587ad1fb94e41de8c89be3af31177d59b`, which this PR base already contains. Its resolver controls **per-worker job** and repository-workflow ceilings; this patch does not copy or replace it. The physical entitlement resolver intentionally has stricter semantics: it recognizes Hosted by the existing Fleet boundary and never accepts a config-repository override. Existing repository semaphores and lower repository limits remain in place.
 
 ## Covered execution paths
 
@@ -32,7 +32,7 @@ Excluded non-agent work: image pulls/builds/preparation, trusted runtime package
 
 ## Lifecycle and supported scope
 
-The supported topology is multiple processes sharing **one instance ID, one Redis database and one Docker daemon**. The stored configuration includes the daemon identity and limit; a process with different configuration cannot admit or reap work. Multiple Docker hosts for one instance are deliberately unsupported: safely reclaiming an unreachable host's live executions requires an external fencing mechanism. All execution processes must run this implementation; mixed old/new workers are not an enforcement boundary.
+The supported topology is multiple processes sharing **one instance ID, one Redis database and one Docker daemon**. The stored configuration includes the daemon identity, limit and admission generation; a process with different configuration cannot admit or reap work. Multiple Docker hosts for one instance are deliberately unsupported: safely reclaiming an unreachable host's live executions requires an external fencing mechanism. All execution processes must run this implementation; mixed old/new workers are not an enforcement boundary.
 
 Redis holds unique owner tokens in a persistent hash. A 30-second renewable deadline uses Redis server time; it is **not** a key TTL. Expiry changes ownership to `recovering`, but does not free capacity. Recovery removes the recorded immutable container ID, then releases that token. Docker/Redis failures retain capacity and surface errors; they never silently skip an agent call or fall back to unrestricted execution.
 
@@ -40,7 +40,15 @@ Execution uses Docker **create → register immutable ID → start ID**. Create 
 
 Use durable Redis with **no eviction** for these records. Do not flush/delete admission state while executions or suspended launchers survive. Missing configuration with surviving labelled containers refuses initialization. Redis data loss, restoration from an older snapshot, or deliberate state edits require stopping all execution processes and draining their containers before reinitialization; asynchronous Redis failover that loses acknowledged writes is outside the supported consistency guarantee. A crash during Docker create can leave a non-running `created` container before its ID is recorded; drain such labelled artifacts during recovery if they prevent reuse of a caller's fixed container name. They cannot start without a successful token registration.
 
-Changing entitlement or Docker daemon requires a coordinated drain: stop intake and all launchers, let/remove existing agent containers, verify no holders or in-flight creates remain, remove only the drained instance's admission `config` key, then start all processes with matching configuration. This patch performs no Fleet rollout, secret mutation, release or preview-pin change.
+### Fleet resize/reconcile integration
+
+For an entitlement change, Fleet's environment reconciliation must provision `PROPR_AGENT_RUN_GENERATION` together with `WORKER_CONCURRENCY` to **every** execution process. Use a persisted, monotonically increasing nonnegative integer generation per instance; increment it for every resize, including rollback to a previous tier. An absent generation means legacy generation zero. Do not derive it from the tier or reuse it. This is an explicit rollout prerequisite for the Fleet controller that provisions the environment; changing only `WORKER_CONCURRENCY` intentionally fails closed.
+
+The normal Docker admission lifecycle performs the transition on the first execution with the new generation. Redis atomically installs the new configuration and fences all existing reservations. Admission then removes their registered immutable Docker IDs and releases the fenced reservations before allowing any new start. This interrupts old-generation runs; stop intake and allow useful work to finish before reconciling if graceful completion is required. A failed removal retains capacity; another attempt with the same new configuration resumes draining. No Redis key deletion or operator Redis mutation is required, including when the previous tier has zero holders.
+
+For example, reconcile Solo `WORKER_CONCURRENCY=2` / generation `0` to Team `WORKER_CONCURRENCY=6` / generation `1`; a later downgrade uses limit `2` / generation `2`. Old launchers cannot revert the configuration, reap newer work, renew fenced reservations, or register a late create. A launcher suspended after registration cannot start its removed immutable ID. Retrying the same reconciliation is idempotent. A different Docker daemon is rejected even with a higher generation; daemon migration still requires stopping all launchers and an infrastructure-managed drain/state migration.
+
+All Docker lifecycle commands use PATH selection and the same captured caller environment and working directory, including `DOCKER_HOST`, `DOCKER_CONTEXT` and `DOCKER_CONFIG`. A caller targeting a different daemon is refused by the stored daemon identity before creation. This patch performs no Fleet rollout, secret mutation, release or preview-pin change.
 
 ## Observability
 
@@ -57,7 +65,7 @@ PROPR_TEST_REDIS_SERVER=/path/to/redis-server NODE_ENV=test \
   node --import tsx --test test/agentRunAdmission.test.ts
 ```
 
-The tests use real Redis scripts and separate Node processes through both production Docker wrappers, with a Docker lifecycle simulator. They saturate 2/6/12, prove N+1 cannot create/start, and prove one release admits one waiter. Additional cases cover renewal, waiting/running cancellation, nested logical calls, fallback, holder-process death, delayed creation, stale release, blocked physical removal, configuration/daemon conflicts and Redis loss. These are not live Docker/provider or end-to-end planner/chat acceptance tests; the following Fleet checks are still required.
+The tests use real Redis scripts and separate Node processes through both production Docker wrappers, with a Docker lifecycle simulator. They saturate 2/6/12, prove N+1 cannot create/start, and prove one release admits one waiter. Additional cases cover renewal, waiting/running cancellation, nested logical calls, fallback, holder-process death, delayed creation, stale release, blocked physical removal, configuration/daemon conflicts, Redis loss, generation-based upgrades/downgrades, suspended old-generation creation, repeated-tier stale launchers, and Docker caller-environment isolation. The wrapper fixture simulates an installed absolute Docker binary and refuses non-PATH spawns before contacting a daemon. These are not live Docker/provider or end-to-end planner/chat acceptance tests; the following Fleet checks are still required.
 
 ## Exact live Fleet acceptance
 

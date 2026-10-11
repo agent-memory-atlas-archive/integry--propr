@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { after, before, test } from 'node:test';
 import { spawn, spawnSync, fork, type ChildProcess } from 'node:child_process';
-import { mkdtemp, mkdir, readFile, readdir, writeFile, chmod, rm } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, readdir, writeFile, rename, chmod, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { createServer } from 'node:net';
@@ -17,6 +17,18 @@ const previous = { ...process.env };
 async function until(check: () => Promise<boolean>, timeout = 15_000) {
     const end = Date.now() + timeout;
     while (!await check()) { if (Date.now() > end) assert.fail('Timed out'); await delay(20); }
+}
+async function writeRecord(directory: string, record: { id: string }) {
+    const target = path.join(directory, `${record.id}.json`);
+    await writeFile(target + '.tmp', JSON.stringify(record));
+    await rename(target + '.tmp', target);
+}
+async function readRecords(directory: string) {
+    const values = await Promise.all((await readdir(directory)).filter(f => f.endsWith('.json')).map(async file => {
+        try { return JSON.parse(await readFile(path.join(directory, file), 'utf8')); }
+        catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null; throw error; }
+    }));
+    return values.filter(Boolean);
 }
 before(async () => {
     if (!available) return;
@@ -51,6 +63,10 @@ test('Hosted entitlement is authoritative; self-hosted keeps existing behavior u
     for (const value of [undefined, '', 'bad', '2workers', '0', '-1', '3', '6.5']) {
         assert.throws(() => resolveAgentRunAdmission({ PROPR_FLEET_CONTROL_SECRET: 'configured', PROPR_INSTANCE_ID: 'fleet', WORKER_CONCURRENCY: value }));
     }
+    for (const generation of ['', '-1', '1.5', 'NaN', '9007199254740992']) {
+        assert.throws(() => resolveAgentRunAdmission({ PROPR_AGENT_RUN_LIMIT: '2', PROPR_INSTANCE_ID: 'self', PROPR_AGENT_RUN_GENERATION: generation }), /GENERATION/);
+    }
+    assert.deepEqual(resolveAgentRunAdmission({ PROPR_FLEET_CONTROL_SECRET: 'configured', PROPR_INSTANCE_ID: 'fleet', WORKER_CONCURRENCY: '6', PROPR_AGENT_RUN_GENERATION: '1' }), { instance: 'fleet', limit: 6, generation: 1 });
     assert.throws(() => resolveAgentRunAdmission({ PROPR_AGENT_RUN_LIMIT: '2' }), /INSTANCE_ID/);
     assert.deepEqual(resolveAgentRunAdmission({ PROPR_AGENT_RUN_LIMIT: '1', PROPR_INSTANCE_ID: 'self' }), { instance: 'self', limit: 1 });
 });
@@ -140,7 +156,7 @@ for (const limit of [2, 6, 12]) test(`physical Docker wrappers saturate ${limit}
     const directory = path.join(root, `docker-${limit}`); await mkdir(directory);
     const instance = `wrappers-${limit}`;
     const env = { ...process.env, PROPR_INSTANCE_ID: instance, PROPR_FLEET_CONTROL_SECRET: 'test-only-activation', WORKER_CONCURRENCY: String(limit), PROPR_TEST_ADMISSION_DOCKER: directory };
-    const records = async () => Promise.all((await readdir(directory)).filter(f => f.endsWith('.json')).map(async file => JSON.parse(await readFile(path.join(directory, file), 'utf8'))));
+    const records = () => readRecords(directory);
     const startWorker = (kind: string) => {
         const child = fork(path.resolve('test/fixtures/agent-admission/worker.ts'), [kind], { env, execArgv: ['--import', 'tsx'], stdio: ['ignore', 'ignore', 'pipe', 'ipc'] });
         let stderr = ''; child.stderr?.on('data', chunk => { stderr += chunk; });
@@ -159,10 +175,10 @@ for (const limit of [2, 6, 12]) test(`physical Docker wrappers saturate ${limit}
     await until(async () => (await agentAdmissionMetrics(redis, instance)).waiting === 1, 40_000);
     assert.equal((await records()).length, limit, 'N+1 cannot even create its container');
     const first = (await records())[0]; first.stop = true;
-    await writeFile(path.join(directory, `${first.id}.json`), JSON.stringify(first));
+    await writeRecord(directory, first);
     await until(async () => (await readFile(path.join(directory, 'starts'), 'utf8')).trim().split('\n').length === limit + 1);
     assert.equal((await records()).filter(r => r.state === 'running').length, limit);
-    for (const record of await records()) { record.stop = true; await writeFile(path.join(directory, `${record.id}.json`), JSON.stringify(record)); }
+    for (const record of await records()) { record.stop = true; await writeRecord(directory, record); }
     await Promise.all([...workers, waiter].map(w => w.done));
     await until(async () => await redis.hlen(agentAdmissionKeys(instance)[0]) === 0);
 });
@@ -189,7 +205,7 @@ test('physical wrappers handle waiting/running cancellation, fallback and holder
     const instance = 'wrapper-lifecycle';
     const env = { ...process.env, PROPR_INSTANCE_ID: instance, PROPR_AGENT_RUN_LIMIT: '1', PROPR_TEST_ADMISSION_DOCKER: directory };
     delete env.PROPR_FLEET_CONTROL_SECRET;
-    const records = async () => Promise.all((await readdir(directory)).filter(f => f.endsWith('.json')).map(async file => JSON.parse(await readFile(path.join(directory, file), 'utf8'))));
+    const records = () => readRecords(directory);
     const launch = (kind = 'standard') => {
         const child = fork(path.resolve('test/fixtures/agent-admission/worker.ts'), [kind], { env, execArgv: ['--import', 'tsx'], stdio: ['ignore', 'ignore', 'ignore', 'ipc'] });
         const messages: unknown[] = []; child.on('message', m => messages.push(m));
@@ -212,7 +228,7 @@ test('physical wrappers handle waiting/running cancellation, fallback and holder
     for (let attempt = 0; attempt < 2; attempt++) {
         await until(async () => (await records()).some(r => r.state === 'running'));
         const [record] = await records(); record.stop = true;
-        await writeFile(path.join(directory, `${record.id}.json`), JSON.stringify(record));
+        await writeRecord(directory, record);
         await until(async () => !(await records()).some(r => r.id === record.id));
     }
     await fallback.exit; assert.deepEqual(fallback.messages, ['done']);
@@ -277,4 +293,73 @@ test('Docker create errors cannot expose credential-bearing arguments', integrat
     });
     assert.equal(await redis.hlen(agentAdmissionKeys(config.instance)[0]), 0);
     delete process.env.PROPR_TEST_ADMISSION_DOCKER;
+});
+
+for (const [from, to] of [[2, 6], [6, 2]]) test(`generation transition ${from} -> ${to} drains and rejects stale launchers`, integration, async () => {
+    const { runtime, alive } = lifecycle();
+    const instance = `resize-${from}-${to}`;
+    const oldConfig = { instance, limit: from };
+    const nextConfig = { instance, limit: to, generation: 1 };
+    const options = { client: redis, docker: runtime, leaseMs: 60_000 };
+    // Legacy generation-zero records migrate without operator Redis edits.
+    const completed = await prepareAdmittedAgent(['run', 'agent'], { ...options, config: oldConfig });
+    await completed!.finish();
+    const next = await prepareAdmittedAgent(['run', 'agent'], { ...options, config: nextConfig });
+    await assert.rejects(prepareAdmittedAgent(['run', 'agent'], { ...options, config: oldConfig }), /mismatch/);
+    await next!.finish();
+    // A repeated tier must never make the old generation valid again (ABA).
+    const currentConfig = { instance, limit: from, generation: 2 };
+    const active = await prepareAdmittedAgent(['run', 'agent'], { ...options, config: currentConfig });
+    await assert.rejects(prepareAdmittedAgent(['run', 'agent'], { ...options, config: oldConfig }), /mismatch/, 'returning to the same tier does not revive generation zero');
+    let created!: () => void, resume!: () => void;
+    const reached = new Promise<void>(resolve => { created = resolve; });
+    const paused = new Promise<void>(resolve => { resume = resolve; });
+    const suspended = prepareAdmittedAgent(['run', 'agent'], { ...options, config: currentConfig, docker: { ...runtime, create: async (...args) => {
+        const id = await runtime.create(...args); created(); await paused; return id;
+    } } });
+    const rejected = assert.rejects(suspended, /lost before container start/);
+    await reached;
+    let blockRemoval = true;
+    const guarded = { ...runtime, remove: async (id: string) => { if (blockRemoval) throw new Error('removal blocked'); await runtime.remove(id); } };
+    const latest = { instance, limit: to, generation: 3 };
+    await assert.rejects(prepareAdmittedAgent(['run', 'agent'], { ...options, docker: guarded, config: latest }), /removal blocked/);
+    assert.ok(Object.values(await redis.hgetall(agentAdmissionKeys(instance)[0])).some(value => JSON.parse(value).id === active!.id), 'failed removal retains the physical holder');
+    await assert.rejects(prepareAdmittedAgent(['run', 'agent'], { ...options, config: currentConfig }), /mismatch/);
+    blockRemoval = false;
+    const replacement = await prepareAdmittedAgent(['run', 'agent'], { ...options, config: latest });
+    resume(); await rejected;
+    await active!.finish();
+    assert.equal(alive.size, 1, 'stale cleanup cannot remove the replacement');
+    const holders = [replacement!];
+    for (let i = 1; i < to; i++) holders.push((await prepareAdmittedAgent(['run', 'agent'], { ...options, config: latest }))!);
+    const controller = new AbortController();
+    const waiter = prepareAdmittedAgent(['run', 'agent'], { ...options, config: latest, signal: controller.signal, pollMs: 10 });
+    const cancelled = assert.rejects(waiter);
+    await until(async () => (await agentAdmissionMetrics(redis, instance)).waiting === 1);
+    assert.equal(alive.size, to, 'new entitlement is enforced after the drain');
+    controller.abort(); await cancelled;
+    await Promise.all(holders.map(holder => holder.finish()));
+    await assert.rejects(prepareAdmittedAgent(['run', 'agent'], { ...options, config: oldConfig }), /mismatch/);
+    await assert.rejects(prepareAdmittedAgent(['run', 'agent'], { ...options, config: nextConfig }), /mismatch/, 'same limit with a retired generation stays rejected');
+    await assert.rejects(prepareAdmittedAgent(['run', 'agent'], { ...options, config: latest, docker: { ...runtime, daemon: async () => 'different' } }), /mismatch/);
+});
+
+test('caller Docker host/context and PATH apply to identity, create, start, readback and removal', integration, async () => {
+    const directory = path.join(root, 'docker-context'); await mkdir(directory);
+    const env = { ...process.env, PROPR_INSTANCE_ID: 'docker-context', PROPR_FLEET_CONTROL_SECRET: 'fixture', WORKER_CONCURRENCY: '2',
+        PATH: '/fixture-parent-path-must-not-be-used', DOCKER_HOST: 'invalid-parent-host', DOCKER_CONTEXT: 'invalid-parent-context',
+        PROPR_TEST_EXTRA_ENV: JSON.stringify({ PATH: process.env.PATH, DOCKER_HOST: 'fixture-host', DOCKER_CONTEXT: 'fixture-context',
+            PROPR_TEST_ADMISSION_DOCKER: directory, PROPR_TEST_EXPECT_HOST: 'fixture-host', PROPR_TEST_EXPECT_CONTEXT: 'fixture-context' }) };
+    const child = fork(path.resolve('test/fixtures/agent-admission/worker.ts'), ['standard'], { env, execArgv: ['--import', 'tsx'], stdio: ['ignore', 'ignore', 'pipe', 'ipc'] });
+    children.push(child);
+    let error: unknown;
+    child.on('message', message => { if (typeof message === 'object') error = message; });
+    const done = new Promise<void>(resolve => child.once('exit', () => resolve()));
+    await until(async () => { if (error) assert.fail(JSON.stringify(error)); return (await readdir(directory)).some(f => f.endsWith('.json')); }, 40_000);
+    await until(async () => { try { return (await readFile(path.join(directory, 'starts'), 'utf8')).length > 0; } catch { return false; } });
+    child.send('cancel'); await done;
+    const commands = (await readFile(path.join(directory, 'commands'), 'utf8')).trim().split('\n');
+    for (const command of ['info', 'create', 'start', 'ps', 'rm']) assert.ok(commands.includes(command), command);
+    assert.equal(await redis.hlen(agentAdmissionKeys('docker-context')[0]), 0);
+    assert.equal((await readdir(directory)).filter(f => f.endsWith('.json')).length, 0);
 });
