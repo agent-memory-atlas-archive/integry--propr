@@ -77,23 +77,15 @@ export interface DockerCommandOptions extends Pick<ExecutionWatchdogOptions, 'wa
  * they are not unique enough to authorize a destructive container stop.
  */
 export async function findTaskContainer(taskId: string, attemptGenerationOrExecutor?: string | typeof executeDockerCommand, executor: typeof executeDockerCommand = executeDockerCommand): Promise<RunningTaskContainer | null> {
-    const attemptGeneration = typeof attemptGenerationOrExecutor === 'string'
-        ? attemptGenerationOrExecutor
-        : undefined;
-    const commandExecutor = typeof attemptGenerationOrExecutor === 'function'
-        ? attemptGenerationOrExecutor
-        : executor;
+    const attemptGeneration = typeof attemptGenerationOrExecutor === 'string' ? attemptGenerationOrExecutor : undefined;
+    const commandExecutor = typeof attemptGenerationOrExecutor === 'function' ? attemptGenerationOrExecutor : executor;
     const filters = attemptGeneration ? [
         '--filter', `label=propr.task.id=${taskId}`,
         '--filter', `label=propr.task.attempt-generation=${attemptGeneration}`,
     ] : ['--filter', `label=propr.task.id=${taskId}`];
 
     try {
-        const result = await commandExecutor('docker', [
-            'ps', '-a',
-            ...filters,
-            '--format', '{{.ID}}:{{.Names}}',
-        ], { timeout: 10000 });
+        const result = await commandExecutor('docker', ['ps', '-a', ...filters, '--format', '{{.ID}}:{{.Names}}'], { timeout: 10000 });
         if (result.exitCode !== 0) {
             logger.warn({ taskId, stderr: result.stderr }, 'Failed to inspect running Docker containers for task');
             return null;
@@ -121,14 +113,10 @@ const STOPPED_CONTAINER_STATES = new Set(['created', 'exited', 'dead']);
  * containers as evidence that an agent is still executing. Unknown Docker
  * states and daemon failures remain unavailable so callers can fail closed.
  */
-export async function inspectTaskContainerLivenessForTask(
-    taskId: string,
-    executor: typeof executeDockerCommand = executeDockerCommand,
-): Promise<TaskContainerInspection> {
+export async function inspectTaskContainerLivenessForTask(taskId: string, executor: typeof executeDockerCommand = executeDockerCommand): Promise<TaskContainerInspection> {
     try {
         const result = await executor('docker', [
-            'ps', '-a',
-            '--filter', `label=propr.task.id=${taskId}`,
+            'ps', '-a', '--filter', `label=propr.task.id=${taskId}`,
             '--format', '{{.ID}}\t{{.Names}}\t{{.State}}',
         ], { timeout: 10000 });
         if (result.exitCode !== 0) {
@@ -184,8 +172,7 @@ export async function inspectLegacyDockerContainerLivenessForTask(taskId: string
 }
 
 function spawnCommandProcess(
-    executablePath: string,
-    args: string[],
+    executablePath: string, args: string[],
     { cwd, stdinData, extraEnvVars, environment }: { cwd?: string; stdinData?: string; extraEnvVars?: Record<string, string>; environment?: NodeJS.ProcessEnv },
 ): ChildProcess {
     // Extra variables reach the container through `-e NAME`, keeping their values out of the argument list.
@@ -240,7 +227,7 @@ export async function executeDockerCommand(command: string, args: string[], opti
             if (refusal) return await refuseCostExecution(refusal, options.preserveOutputOnTimeout ?? false);
         }
         return await startWithNetworkPolicy(command, args, { executionSignal, networkPolicyExempt: options.networkPolicyExempt },
-            runArgs => startDockerCommand(command, runArgs, options, { ownershipContext, executionSignal }, deadline));
+            runArgs => startDockerCommand(command, runArgs, options, { ownershipContext, executionSignal, deadline }));
     } catch (error) {
         if (error !== timeoutError) throw error;
         return await new Promise<ExecutionResult>((resolve, reject) => settleTimeoutStop(timeout,
@@ -252,11 +239,8 @@ export async function executeDockerCommand(command: string, args: string[], opti
 }
 
 async function startDockerCommand(
-    command: string,
-    args: string[],
-    options: DockerCommandOptions,
-    { ownershipContext, executionSignal }: { ownershipContext: ReturnType<typeof getExecutionOwnershipContext>; executionSignal: AbortSignal | undefined },
-    deadline: ExecutionDeadline,
+    command: string, args: string[], options: DockerCommandOptions,
+    { ownershipContext, executionSignal, deadline }: { ownershipContext: ReturnType<typeof getExecutionOwnershipContext>; executionSignal: AbortSignal | undefined; deadline: ExecutionDeadline },
 ): Promise<ExecutionResult> {
     const executionArgs = resolveExecutionArgs(command, withWorkflowExecutionDeadline(command, args, deadline.remaining()), options.taskId, ownershipContext?.attemptGeneration);
     const admission = command === 'docker' && args[0] === 'run' && !options.costCapExempt
@@ -268,18 +252,15 @@ async function startDockerCommand(
         // Transfer the same budget to the subprocess timer. Keep timeout reporting
         // in terms of the caller's original limit and preserve partial output.
         deadline.stop();
-        return await runDockerCommand(command, args, options, { ownershipContext, executionSignal: admission?.signal ?? executionSignal, admission }, remainingMs);
+        return await runDockerCommand(command, args, options, { ownershipContext, executionSignal: admission?.signal ?? executionSignal, admission, remainingMs });
     } finally {
         await admission?.finish();
     }
 }
 
 function runDockerCommand(
-    command: string,
-    args: string[],
-    options: DockerCommandOptions,
-    { ownershipContext, executionSignal, admission }: { ownershipContext: ReturnType<typeof getExecutionOwnershipContext>; executionSignal: AbortSignal | undefined; admission: AdmittedAgent | null },
-    remainingMs: number,
+    command: string, args: string[], options: DockerCommandOptions,
+    { ownershipContext, executionSignal, admission, remainingMs }: { ownershipContext: ReturnType<typeof getExecutionOwnershipContext>; executionSignal: AbortSignal | undefined; admission: AdmittedAgent | null; remainingMs: number },
 ): Promise<ExecutionResult> {
     return new Promise((resolve, reject) => {
         const { timeout = 300000, cwd, onSessionId, onContainerId, worktreePath, stdinData, extraEnvVars, taskId, streamToRedis, streamStderrToRedis, streamExtraOutput, stripAnsi, preserveOutputOnTimeout = false, model, costCapExempt } = options;
@@ -322,22 +303,17 @@ function runDockerCommand(
         let containerDetectionTimer: ReturnType<typeof setTimeout> | null = null;
         const messageTimestamps = new Map<string, string>();
         const abortExecution = (executionTimeout = false): void => {
-            void abortSpawnedExecution(
-                child,
-                state,
-                {
-                    namedContainer,
-                    scheduleForceKill,
-                    // A command timeout belongs only to this subprocess. Using
-                    // the task-generation fence here leaves a teardown sweep
-                    // running for several seconds, which can kill the next
-                    // analysis container started by the same task. Ownership
-                    // loss and explicit cancellation still require the broad,
-                    // generation-fenced cleanup below.
-                    taskId: executionTimeout ? undefined : taskId,
-                    attemptGeneration: executionTimeout ? undefined : ownershipContext?.attemptGeneration,
-                },
-            );
+            void abortSpawnedExecution(child, state, {
+                namedContainer, scheduleForceKill,
+                // A command timeout belongs only to this subprocess. Using
+                // the task-generation fence here leaves a teardown sweep
+                // running for several seconds, which can kill the next
+                // analysis container started by the same task. Ownership
+                // loss and explicit cancellation still require the broad,
+                // generation-fenced cleanup below.
+                taskId: executionTimeout ? undefined : taskId,
+                attemptGeneration: executionTimeout ? undefined : ownershipContext?.attemptGeneration,
+            });
         };
         const watchdog = startExecutionWatchdog(options, () => {
             // A run already being stopped (deadline, user, ownership) keeps that outcome.
@@ -369,12 +345,7 @@ function runDockerCommand(
             pendingCallbacks.add(callbackPromise);
             void callbackPromise.finally(() => pendingCallbacks.delete(callbackPromise));
         };
-        const sessionInspectionContext: SessionLineInspectionContext = {
-            messageTimestamps,
-            state,
-            onSessionId,
-            invokeExecutionCallback,
-        };
+        const sessionInspectionContext: SessionLineInspectionContext = { messageTimestamps, state, onSessionId, invokeExecutionCallback };
         const inspectSessionLines = (chunk: string, timestamp: string, flush = false): void => {
             sessionLineBuffer = boundedProviderOutput(sessionLineBuffer + chunk);
             const lines = sessionLineBuffer.split('\n');
@@ -409,11 +380,7 @@ function runDockerCommand(
         const plannerAbortKey = taskId ? plannerAbortSignalKeyForTask(taskId) : null;
         const abortChecker = taskId && plannerAbortKey
             ? setupAbortChecker({
-                taskId,
-                plannerAbortKey,
-                child,
-                state,
-                namedContainer,
+                taskId, plannerAbortKey, child, state, namedContainer,
                 attemptGeneration: ownershipContext?.attemptGeneration,
             })
             : null;
