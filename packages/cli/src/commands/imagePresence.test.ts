@@ -33,7 +33,7 @@ is_present() {
 }
 case "$1" in
   --version) echo "Docker version 27.0.0"; exit 0 ;;
-  info) exit 0 ;;
+  info) echo "linux"; exit 0 ;;
   images)
     case "$3" in *@*) exit 0 ;; esac
     is_present "$3" && echo "0123456789ab"
@@ -109,6 +109,8 @@ test("propr check reports pulled digest-pinned images and ordinary tagged images
   const root = stackFixture(t);
 
   const skipped = await runChecks({ root, skipRemoteImageCheck: true, verify: true, agents: ["claude"] });
+  assert.equal(find(skipped.results, "Docker daemon")?.status, "ok");
+  assert.ok(docker.log().includes("info --format {{.OSType}}"));
   assert.deepEqual(find(skipped.results, "Image agent"), { name: "Image agent", status: "ok", detail: `${PINNED_AGENT} (local; remote check skipped)`, group: "Images" });
   assert.deepEqual(find(skipped.results, "Image app"), { name: "Image app", status: "ok", detail: `${PINNED_APP} (local; remote check skipped)`, group: "Images" });
   assert.equal(find(skipped.results, "Image redis")?.status, "ok");
