@@ -29,9 +29,12 @@ let epicPrMerged = false;
 let epicBase = 'main';
 let childMergedAt: string | null = '2026-10-10T19:00:00Z';
 let childMergeCommitSha: string | null = null;
-let epicMergeCommitSha: string | null = null;
-// `ahead_by` reported for any merge-commit comparison.
+// The epic PR's head as GitHub preserves it after the merge, whatever the merge method.
+let epicHeadSha: string | null = null;
+// `ahead_by` reported for any epic-head/child-merge-commit comparison.
 let compareAheadBy = 1;
+// A 422 message GitHub refuses epic PR creation with, if any.
+let epicCreationRefusal: string | null = null;
 let failingChildReads = 0;
 // Every GitHub request route the handler issued.
 const githubRequests: string[] = [];
@@ -68,7 +71,8 @@ function fakeQuery(table: string) {
 function epicPullRequest() {
     return {
         number: 500, base: { ref: epicBase }, state: epicPrMerged ? 'closed' : 'open',
-        merged_at: epicPrMerged ? '2026-10-10T20:00:00Z' : null, merge_commit_sha: epicPrMerged ? epicMergeCommitSha : null,
+        merged_at: epicPrMerged ? '2026-10-10T20:00:00Z' : null, merge_commit_sha: epicPrMerged ? 'squashed-e1' : null,
+        head: { ref: EPIC_BRANCH, sha: epicHeadSha },
     };
 }
 
@@ -126,6 +130,7 @@ await mock.module('../packages/core/src/services/epicPRService.js', { namedExpor
             failingEpicCreations--;
             throw new Error('GitHub unavailable');
         }
+        if (epicCreationRefusal) throw Object.assign(new Error(epicCreationRefusal), { status: 422 });
         createdEpicPRs++;
         epicPRCreations.push(parameters);
         return { data: { number: 501, html_url: 'https://github.com/integry/propr/pull/501' } };
@@ -151,9 +156,11 @@ function fakeRedis() {
         async eval(script: string, _numberOfKeys: number, key: string, ...args: string[]) {
             switch (script) {
                 case EPIC_PROGRESS_SCRIPTS.compareAndDeleteField:
-                case EPIC_PROGRESS_SCRIPTS.migrateLegacyField:
                     if (hash.get(args[0]) !== args[1]) return 0;
-                    if (script === EPIC_PROGRESS_SCRIPTS.migrateLegacyField && !hash.has(args[2])) hash.set(args[2], args[1]);
+                    return Number(hash.delete(args[0]));
+                case EPIC_PROGRESS_SCRIPTS.migrateLegacyField:
+                    if (hash.get(args[0]) !== args[1] || (hash.get(args[2]) ?? '') !== args[3]) return 0;
+                    hash.set(args[2], args[4]);
                     return Number(hash.delete(args[0]));
                 case EPIC_PROGRESS_SCRIPTS.compareAndExtendKey:
                     return keys.get(key) === args[0] ? 1 : 0;
@@ -247,8 +254,9 @@ beforeEach(() => {
     epicBase = 'main';
     childMergedAt = '2026-10-10T19:00:00Z';
     childMergeCommitSha = null;
-    epicMergeCommitSha = null;
+    epicHeadSha = null;
     compareAheadBy = 1;
+    epicCreationRefusal = null;
     failingChildReads = 0;
     githubRequests.length = 0;
     bodyUpdates.length = 0;
@@ -553,7 +561,7 @@ test('a child merged after the epic creates a new epic PR and reports progress t
     assert.equal(redis.hash.size, 0);
 });
 
-for (const mergedAt of [null, 'invalid', '2026-10-10T20:00:00Z']) {
+for (const mergedAt of [null, 'invalid']) {
     test(`does not reuse a merged epic without an earlier child merge time (${mergedAt})`, async () => {
         epicPrMerged = true;
         childMergedAt = mergedAt;
@@ -563,17 +571,79 @@ for (const mergedAt of [null, 'invalid', '2026-10-10T20:00:00Z']) {
     });
 }
 
-test('reuses an epic merged in the same second as the child once containment is proven', async () => {
+test('a child merged in the epic\'s second but after its head creates a successor', async () => {
     epicPrMerged = true;
     childMergedAt = '2026-10-10T20:00:00Z';
     childMergeCommitSha = 'c1';
-    epicMergeCommitSha = 'e1';
+    epicHeadSha = 'h1';
+    compareAheadBy = 1;
+    await handleEpicPRCreationOnMerge(payload, 'test', logger.withCorrelation('test'));
+    assert.equal(createdEpicPRs, 1);
+    assert.equal(progressRequests[0].epicPrNumber, 501);
+    assert.equal(redis.hash.size, 0);
+});
+
+test('reuses a squash-merged epic from the same second once its pre-merge head proves inclusion', async () => {
+    epicPrMerged = true;
+    childMergedAt = '2026-10-10T20:00:00Z';
+    childMergeCommitSha = 'c1';
+    epicHeadSha = 'h1';
     compareAheadBy = 0;
     await handleEpicPRCreationOnMerge(payload, 'test', logger.withCorrelation('test'));
     assert.equal(createdEpicPRs, 0);
     assert.equal(progressRequests[0].epicPrNumber, 500);
     assert.equal(redis.hash.size, 0);
     assert.ok(githubRequests.includes('GET /repos/{owner}/{repo}/compare/{basehead}'));
+});
+
+for (const [detail, prepare] of [
+    ['epic head', () => { epicHeadSha = null; }],
+    ['child merge commit', () => { childMergeCommitSha = null; }],
+] as const) {
+    test(`a same-second child with no ${detail} evidence keeps the obligation rather than creating a successor`, async () => {
+        epicPrMerged = true;
+        childMergedAt = '2026-10-10T20:00:00Z';
+        childMergeCommitSha = 'c1';
+        epicHeadSha = 'h1';
+        compareAheadBy = 0;
+        prepare();
+        await handleEpicPRCreationOnMerge(payload, 'test', logger.withCorrelation('test'));
+        assert.equal(createdEpicPRs, 0);
+        assert.equal(progressRequests.length, 0);
+        assert.equal(redis.hash.size, 1);
+    });
+}
+
+test('a successor refused for lack of commits attributes the child to the last merged epic', async () => {
+    epicPrMerged = true;
+    childMergedAt = '2026-10-10T21:00:00Z';
+    epicCreationRefusal = `Validation Failed: No commits between main and ${EPIC_BRANCH}`;
+    await handleEpicPRCreationOnMerge(payload, 'test', logger.withCorrelation('test'));
+    assert.equal(createdEpicPRs, 0);
+    assert.equal(progressRequests.length, 1);
+    assert.equal(progressRequests[0].epicPrNumber, 500);
+    assert.equal(progressRequests[0].mergedChildPrNumber, 201);
+    assert.equal(redis.hash.size, 0);
+    // The settled epic is not re-read before each write.
+    assert.equal(githubRequests.filter(route => route === 'GET /repos/{owner}/{repo}/pulls/{pull_number}:500').length, 0);
+});
+
+test('a successor refused for lack of commits keeps the obligation when no merged epic exists', async () => {
+    epicPrExists = false;
+    epicCreationRefusal = `Validation Failed: No commits between main and ${EPIC_BRANCH}`;
+    await handleEpicPRCreationOnMerge(payload, 'test', logger.withCorrelation('test'));
+    assert.equal(createdEpicPRs, 0);
+    assert.equal(progressRequests.length, 0);
+    assert.equal(redis.hash.size, 1);
+});
+
+test('other 422 refusals of a successor keep the obligation', async () => {
+    epicPrMerged = true;
+    childMergedAt = '2026-10-10T21:00:00Z';
+    epicCreationRefusal = 'Validation Failed: A pull request already exists';
+    await handleEpicPRCreationOnMerge(payload, 'test', logger.withCorrelation('test'));
+    assert.equal(progressRequests.length, 0);
+    assert.equal(redis.hash.size, 1);
 });
 
 test('a merged epic\'s child evidence is read once and reused by every containment check', async () => {

@@ -30,14 +30,19 @@ end
 return 0
 `;
 
-// Move the exact legacy snapshot atomically, preserving any newer target
-// record (including its backoff) and any concurrently replaced legacy record.
+// Move the exact legacy snapshot atomically into the target record the
+// caller computed from it and the exact target record it observed (ARGV[4],
+// empty when absent), so a concurrently replaced legacy or target record is
+// left alone for the next sweep.
 const MIGRATE_LEGACY_FIELD = `
-if redis.call('HGET', KEYS[1], ARGV[1]) == ARGV[2] then
-    redis.call('HSETNX', KEYS[1], ARGV[3], ARGV[2])
-    return redis.call('HDEL', KEYS[1], ARGV[1])
+if redis.call('HGET', KEYS[1], ARGV[1]) ~= ARGV[2] then
+    return 0
 end
-return 0
+if (redis.call('HGET', KEYS[1], ARGV[3]) or '') ~= ARGV[4] then
+    return 0
+end
+redis.call('HSET', KEYS[1], ARGV[3], ARGV[5])
+return redis.call('HDEL', KEYS[1], ARGV[1])
 `;
 
 const COMPARE_AND_DELETE_KEY = `
@@ -265,6 +270,22 @@ export interface EpicProgressRetrySweepOptions {
 }
 
 /**
+ * The record a legacy branch-keyed obligation migrates into. An existing
+ * record for the same target keeps its backoff, but inherits the older first
+ * failure and the higher attempt count, so the migration neither resets the
+ * drop window nor forgets attempts already made.
+ */
+function mergeLegacyRetry(legacy: EpicProgressRetry, current: EpicProgressRetry | null): EpicProgressRetry {
+    if (!current) return legacy;
+    const firstFailures = [current.firstFailedAt, legacy.firstFailedAt].filter(Boolean);
+    return {
+        ...current,
+        attempts: Math.max(current.attempts, legacy.attempts),
+        firstFailedAt: firstFailures.length > 0 ? Math.min(...firstFailures) : 0,
+    };
+}
+
+/**
  * Retries every due epic progress obligation; returns how many were updated.
  * An obligation whose first failure is older than
  * {@link EPIC_PROGRESS_RETRY_MAX_AGE_MS} (or that can no longer be parsed) is
@@ -278,7 +299,10 @@ export async function sweepEpicProgressRetries(
     for (const [field, value] of Object.entries(entries)) {
         const pending = parseRetry(value);
         if (pending && field === epicProgressBranchField(pending.owner, pending.repo, pending.epicBranch)) {
-            await redis.eval(MIGRATE_LEGACY_FIELD, 1, EPIC_PROGRESS_RETRY_KEY, field, value, epicProgressRetryField(pending));
+            const targetField = epicProgressRetryField(pending);
+            const current = entries[targetField];
+            const merged = current === undefined ? value : JSON.stringify(mergeLegacyRetry(pending, parseRetry(current)));
+            await redis.eval(MIGRATE_LEGACY_FIELD, 1, EPIC_PROGRESS_RETRY_KEY, field, value, targetField, current ?? '', merged);
             migrated = true;
         }
     }

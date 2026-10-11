@@ -4,7 +4,7 @@ import { isEpicBranch, EPIC_BRANCH_PATTERN } from '../services/taskExecutionServ
 import { createEpicPRWithDraftFallback } from '../services/epicPRService.js';
 import { updateEpicMergeProgress } from './epicMergeProgress.js';
 import {
-    canCarryChild, findEpicPRNumber, readChildMergeEvidence,
+    canCarryChild, findEpicPRNumber, findLatestMergedEpicPRNumber, readChildMergeEvidence,
     type ChildMergeEvidence, type ChildMergeEvidenceSource,
 } from './epicMergeEvidence.js';
 import {
@@ -264,6 +264,16 @@ interface EpicBranchContext {
 
 type Octokit = Awaited<ReturnType<typeof getAuthenticatedOctokit>>;
 
+interface EpicPRResolution {
+    epicPrNumber: number;
+    /**
+     * The child is known to have shipped through this epic (GitHub refused a
+     * successor because the branch has nothing beyond the default branch), so
+     * a timestamp-based carry check must not override it.
+     */
+    carried: boolean;
+}
+
 /**
  * Finds an Epic PR that can carry this child's changes, refreshing its body
  * with the plan's issues, or creates a new Epic PR. Throws when
@@ -274,7 +284,7 @@ async function ensureEpicPR(
     context: EpicBranchContext,
     correlatedLogger: ReturnType<typeof logger.withCorrelation>,
     { lease, evidence }: { lease: EpicProgressLease; evidence?: ChildMergeEvidenceSource },
-): Promise<number> {
+): Promise<EpicPRResolution> {
     const { owner, repo, baseBranch } = context;
     const octokit = await getAuthenticatedOctokit();
     const existingPrNumber = await findEpicPRNumber(octokit, { ...context, epicBranch: baseBranch }, evidence);
@@ -292,7 +302,7 @@ async function ensureEpicPR(
             owner, repo
         }, 'Failed to update Epic PR body after child merge');
     }
-    return existingPrNumber;
+    return { epicPrNumber: existingPrNumber, carried: false };
 }
 
 /** Rewrites an existing Epic PR's body to include every issue of its plan. */
@@ -353,11 +363,24 @@ async function applyEpicMergeProgress(
     // reuse it for every containment check of this update.
     let evidence: Promise<ChildMergeEvidence> | undefined;
     const childEvidence = () => (evidence ??= readChildMergeEvidence(octokit, context, mergedChildPrNumber!));
+    // Epic PRs settled as carrying the child for the rest of this update, so
+    // they are not re-read before each write: GitHub reported the branch as
+    // already shipped through them. An epic merely observed open is not
+    // settled, as it can still be retargeted off the default branch and
+    // merged while this update awaits GitHub. The lease check before each
+    // write still guards against a lapsed heartbeat.
+    const settled = new Set<number>();
     const carries = async (epicPrNumber: number) => {
+        if (settled.has(epicPrNumber)) return true;
         const epic = await octokit.request('GET /repos/{owner}/{repo}/pulls/{pull_number}', { owner, repo, pull_number: epicPrNumber });
         return await canCarryChild(octokit, target, epic.data, childEvidence);
     };
-    let epicPrNumber = target.epicPrNumber ?? await ensureEpicPR(context, correlatedLogger, { lease, evidence: childEvidence });
+    const resolveEpicPR = async () => {
+        const resolution = await ensureEpicPR(context, correlatedLogger, { lease, evidence: childEvidence });
+        if (resolution.carried) settled.add(resolution.epicPrNumber);
+        return resolution.epicPrNumber;
+    };
+    let epicPrNumber = target.epicPrNumber ?? await resolveEpicPR();
     let planLookup = await loadPlanDetails(epicBranch, repository, correlatedLogger);
     if (planLookup.status === 'unavailable') {
         // Without the plan, unstarted planned work is invisible and progress
@@ -370,7 +393,7 @@ async function applyEpicMergeProgress(
     // may now identify an epic merged before this child. Revalidate it before
     // reporting progress and allowing the durable obligation to be released.
     if (mergedChildPrNumber !== null && !await carries(epicPrNumber)) {
-        epicPrNumber = await ensureEpicPR(context, correlatedLogger, { lease, evidence: childEvidence });
+        epicPrNumber = await resolveEpicPR();
         // Resolving the successor can await issue/body reads; refresh the
         // plan again so those waits cannot hide newly linked child PRs.
         planLookup = await loadPlanDetails(epicBranch, repository, correlatedLogger);
@@ -416,14 +439,18 @@ export async function retryPendingEpicMergeProgress(
 }
 
 /**
- * Creates the Epic PR for an epic branch that does not have one yet.
+ * Creates the Epic PR for an epic branch that does not have one yet. When
+ * GitHub refuses because the branch has no commits beyond the default
+ * branch, the child has already shipped through the branch's most recently
+ * merged epic PR, which is returned as carrying it instead of retrying a
+ * creation that can never succeed.
  */
 async function createEpicPR(
     octokit: Octokit,
     { owner, repo, repository, baseBranch }: EpicBranchContext,
     correlatedLogger: ReturnType<typeof logger.withCorrelation>,
     lease: EpicProgressLease,
-): Promise<number> {
+): Promise<EpicPRResolution> {
     // Get the default branch to use as base
     const repoResponse = await octokit.request('GET /repos/{owner}/{repo}', {
         owner, repo
@@ -451,9 +478,20 @@ async function createEpicPR(
 
     // Create the Epic PR
     await lease.assertOwned();
-    const prResponse = await createEpicPRWithDraftFallback(octokit, {
-        owner, repo, title, head: baseBranch, base: defaultBranch, body
-    });
+    let prResponse: Awaited<ReturnType<typeof createEpicPRWithDraftFallback>>;
+    try {
+        prResponse = await createEpicPRWithDraftFallback(octokit, {
+            owner, repo, title, head: baseBranch, base: defaultBranch, body
+        });
+    } catch (error) {
+        const err = error as Error & { status?: number };
+        if (err.status !== 422 || !/No commits between/i.test(err.message ?? '')) throw error;
+        const shippedBy = await findLatestMergedEpicPRNumber(octokit, { owner, repo, epicBranch: baseBranch, defaultBranch });
+        if (shippedBy === null) throw error;
+        correlatedLogger.info({ prNumber: shippedBy, baseBranch, owner, repo },
+            'Epic branch has no commits beyond the default branch; child already shipped through the last merged Epic PR');
+        return { epicPrNumber: shippedBy, carried: true };
+    }
 
     correlatedLogger.info({
         prNumber: prResponse.data.number,
@@ -462,7 +500,7 @@ async function createEpicPR(
         planName: planDetails?.planName
     }, 'Epic PR created after child PR merge');
 
-    return prResponse.data.number;
+    return { epicPrNumber: prResponse.data.number, carried: false };
 }
 
 /**

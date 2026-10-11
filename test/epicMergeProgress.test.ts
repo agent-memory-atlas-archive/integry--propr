@@ -56,11 +56,14 @@ function createOctokit(pulls: FakePull[], initialComments: FakeComment[] = []) {
     const octokit = {
         epicMerged: false,
         mergedAt: '2026-10-10T20:00:00Z',
+        /** The epic's merge commit; squash and rebase merges make it unrelated to the branch history. */
         mergeCommitSha: null as string | null,
+        /** The epic PR's head as preserved after its merge. */
+        headSha: null as string | null,
         base: 'main' as string | undefined,
         history: [] as unknown[],
         childReads: {} as Record<number, Record<string, unknown>>,
-        /** `ahead_by` per compared `{epic}...{child}` merge commit pair. */
+        /** `ahead_by` per compared `{epic head}...{child merge commit}` pair. */
         containment: {} as Record<string, number>,
         calls,
         comments,
@@ -79,7 +82,7 @@ function createOctokit(pulls: FakePull[], initialComments: FakeComment[] = []) {
                 if (child) return { data: { base: { ref: baseRequest.epicBranch }, ...child } };
                 return { data: {
                     merged: octokit.epicMerged, merged_at: octokit.epicMerged ? octokit.mergedAt : null,
-                    merge_commit_sha: octokit.mergeCommitSha, base: { ref: octokit.base },
+                    merge_commit_sha: octokit.mergeCommitSha, head: { sha: octokit.headSha }, base: { ref: octokit.base },
                 } };
             }
             if (route === 'GET /repos/{owner}/{repo}/compare/{basehead}') {
@@ -412,15 +415,24 @@ for (const mergedChildPrNumber of [201, 202, null]) {
     });
 }
 
-test('successor readiness counts only its children, retaining ambiguous merge timestamps', async () => {
+test('successor readiness counts only its children, retaining a same-second child the predecessor head excludes', async () => {
     const octokit = createOctokit([
         { number: 201, state: 'closed', merged_at: '2026-10-09T00:00:00Z' },
-        { number: 202, state: 'closed', merged_at: '2026-10-09T01:00:00Z' },
+        { number: 202, state: 'closed', merged_at: '2026-10-09T01:00:00Z', merge_commit_sha: 'c2' },
     ]);
-    octokit.history = [{ number: 500, merged_at: '2026-10-09T01:00:00Z' }];
+    octokit.history = [{ number: 500, merged_at: '2026-10-09T01:00:00Z', head: { sha: 'p1' } }];
+    octokit.containment['p1...c2'] = 1;
     await updateEpicMergeProgress({ ...baseRequest, epicPrNumber: 501, mergedChildPrNumber: 202 },
         'test', { getOctokit: async () => octokit });
     assert.ok(octokit.comments.some(c => c.body.includes('All 1 child PR has been merged')));
+});
+
+test('a same-second predecessor child without inclusion evidence keeps the obligation instead of being counted', async () => {
+    const octokit = createOctokit([{ number: 202, state: 'closed', merged_at: '2026-10-09T01:00:00Z' }]);
+    octokit.history = [{ number: 500, merged_at: '2026-10-09T01:00:00Z', head: { sha: 'p1' } }];
+    await assert.rejects(updateEpicMergeProgress({ ...baseRequest, epicPrNumber: 501, mergedChildPrNumber: 202 },
+        'test', { getOctokit: async () => octokit }), /could not be resolved/);
+    assert.equal(octokit.comments.length, 0);
 });
 
 test('failed predecessor reads write no comments and propagate for durable retry', async () => {
@@ -440,9 +452,12 @@ for (const trigger of [null, 201]) {
         const octokit = createOctokit([
             { number: 201, state: 'closed', merged_at: '2026-10-10T19:00:00Z' },
             { number: 202, state: 'closed', merged_at: '2026-10-10T21:00:00Z' },
-            { number: 203, state: 'closed', merged_at: '2026-10-10T20:00:00Z' },
+            { number: 203, state: 'closed', merged_at: '2026-10-10T20:00:00Z', merge_commit_sha: 'c3' },
         ]);
         octokit.epicMerged = true;
+        octokit.headSha = 'h1';
+        // #203 merged into the epic branch after the epic's head was merged.
+        octokit.containment['h1...c3'] = 1;
         const result = await updateEpicMergeProgress({ ...baseRequest, mergedChildPrNumber: trigger,
             planIssues: [201, 202, 203, 204].map(n => planIssue(n, PlanIssueStatus.MERGED, n)),
         }, 'test', { getOctokit: async () => octokit });
@@ -639,62 +654,143 @@ test('a stale triggering row on an open epic recovers its timestamp for the ship
     assert.deepEqual(result.progress, { merged: 1, total: 1, excluded: 0, mergedPullRequests: [202] });
 });
 
-for (const [aheadBy, merged] of [[0, 1], [1, 0]] as const) {
-    test(`a child merged in the epic's second counts only when its merge commit is contained (ahead_by ${aheadBy})`, async () => {
+// The epic's merge commit per merge method: only a merge commit keeps the child's commit as an ancestor.
+const EPIC_MERGE_COMMITS = { merge: 'e1', squash: 'squashed-e1', rebase: 'rebased-e1' } as const;
+
+for (const [method, mergeCommitSha] of Object.entries(EPIC_MERGE_COMMITS)) {
+    test(`a child merged in the epic's second is included when the epic's pre-merge head contains it (${method} merge)`, async () => {
         const octokit = createOctokit([{ number: 201, state: 'closed', merged_at: '2026-10-10T20:00:00Z', merge_commit_sha: 'c1' }]);
         octokit.epicMerged = true;
-        octokit.mergeCommitSha = 'e1';
-        octokit.containment['e1...c1'] = aheadBy;
+        octokit.mergeCommitSha = mergeCommitSha;
+        octokit.headSha = 'h1';
+        octokit.containment['h1...c1'] = 0;
         const result = await updateEpicMergeProgress({ ...baseRequest, mergedChildPrNumber: null }, 'test', { getOctokit: async () => octokit });
-        assert.equal(result.progress.merged, merged);
-        assert.equal(result.progress.total, 1);
+        assert.deepEqual(result.progress, { merged: 1, total: 1, excluded: 0, mergedPullRequests: [201] });
+        const final = octokit.comments.find(c => c.body.includes(EPIC_FINAL_MERGE_MARKER))!;
+        assert.match(final.body, /1 out of 1 PRs merged/);
+        assert.match(final.body, /All planned epic work is now merged/);
+        const compares = octokit.calls.filter(c => c.route === 'GET /repos/{owner}/{repo}/compare/{basehead}');
+        assert.ok(compares.length > 0);
+        assert.ok(compares.every(c => c.parameters.basehead === 'h1...c1'), 'the rewritten merge commit is never the comparison base');
+    });
+
+    test(`a child merged into the epic branch in the epic's second after its head is excluded (${method} merge)`, async () => {
+        const octokit = createOctokit([{ number: 201, state: 'closed', merged_at: '2026-10-10T20:00:00Z', merge_commit_sha: 'c1' }]);
+        octokit.epicMerged = true;
+        octokit.mergeCommitSha = mergeCommitSha;
+        octokit.headSha = 'h1';
+        octokit.containment['h1...c1'] = 1;
+        const result = await updateEpicMergeProgress({ ...baseRequest, mergedChildPrNumber: null }, 'test', { getOctokit: async () => octokit });
+        assert.deepEqual(result.progress, { merged: 0, total: 1, excluded: 0, mergedPullRequests: [] });
+        const final = octokit.comments.find(c => c.body.includes(EPIC_FINAL_MERGE_MARKER))!;
+        assert.match(final.body, /0 out of 1 PRs merged/);
+        assert.ok(!final.body.includes('All planned epic work'));
     });
 }
 
-test('same-second containment treats unknown commits as not contained and propagates other failures', async () => {
+test('a same-second plan issue proven included keeps its merged status in the final report', async () => {
     const octokit = createOctokit([{ number: 201, state: 'closed', merged_at: '2026-10-10T20:00:00Z', merge_commit_sha: 'c1' }]);
     octokit.epicMerged = true;
-    octokit.mergeCommitSha = 'e1';
-    const request = octokit.request;
-    let status = 404;
-    octokit.request = async (route, parameters) => {
-        if (route === 'GET /repos/{owner}/{repo}/compare/{basehead}') throw Object.assign(new Error('compare failed'), { status });
-        return request(route, parameters);
-    };
-    const dependencies = { getOctokit: async () => octokit };
-    assert.equal((await updateEpicMergeProgress({ ...baseRequest, mergedChildPrNumber: null }, 'test', dependencies)).progress.merged, 0);
-    status = 500;
-    await assert.rejects(updateEpicMergeProgress({ ...baseRequest, mergedChildPrNumber: null, epicPrNumber: 501 }, 'test', dependencies), /compare failed/);
+    octokit.mergeCommitSha = 'squashed-e1';
+    octokit.headSha = 'h1';
+    octokit.containment['h1...c1'] = 0;
+    const result = await updateEpicMergeProgress({
+        ...baseRequest, mergedChildPrNumber: 201,
+        planIssues: [planIssue(100, PlanIssueStatus.MERGED, 201), planIssue(101, PlanIssueStatus.MERGED, 202)],
+    }, 'test', { getOctokit: async () => octokit });
+    assert.deepEqual(result.progress, { merged: 1, total: 2, excluded: 0, mergedPullRequests: [201] });
 });
 
-test('a child merged in the predecessor\'s second is shipped once its merge commit is contained', async () => {
+for (const detail of ['the comparison returns 404', 'the epic head is unknown', 'the child merge commit is unknown'] as const) {
+    test(`same-second inclusion is unresolved, not exclusion, when ${detail}`, async () => {
+        const childMergeCommitSha = detail === 'the child merge commit is unknown' ? null : 'c1';
+        const octokit = createOctokit([{ number: 201, state: 'closed', merged_at: '2026-10-10T20:00:00Z', merge_commit_sha: childMergeCommitSha }]);
+        octokit.epicMerged = true;
+        octokit.headSha = detail === 'the epic head is unknown' ? null : 'h1';
+        if (detail === 'the comparison returns 404') {
+            const request = octokit.request;
+            octokit.request = async (route, parameters) => {
+                if (route === 'GET /repos/{owner}/{repo}/compare/{basehead}') throw Object.assign(new Error('compare failed'), { status: 404 });
+                return request(route, parameters);
+            };
+        }
+        await assert.rejects(updateEpicMergeProgress({ ...baseRequest, mergedChildPrNumber: null }, 'test', { getOctokit: async () => octokit }), /could not be resolved/);
+        assert.equal(octokit.comments.length, 0);
+    });
+}
+
+test('same-second containment propagates other comparison failures', async () => {
+    const octokit = createOctokit([{ number: 201, state: 'closed', merged_at: '2026-10-10T20:00:00Z', merge_commit_sha: 'c1' }]);
+    octokit.epicMerged = true;
+    octokit.headSha = 'h1';
+    const request = octokit.request;
+    octokit.request = async (route, parameters) => {
+        if (route === 'GET /repos/{owner}/{repo}/compare/{basehead}') throw Object.assign(new Error('compare failed'), { status: 500 });
+        return request(route, parameters);
+    };
+    await assert.rejects(updateEpicMergeProgress({ ...baseRequest, mergedChildPrNumber: null }, 'test', { getOctokit: async () => octokit }), /compare failed/);
+    assert.equal(octokit.comments.length, 0);
+});
+
+test('a child merged in the predecessor\'s second is shipped once the predecessor head contains it, with no empty tracking comment', async () => {
     const octokit = createOctokit([
         { number: 201, state: 'closed', merged_at: '2026-10-09T00:00:00Z' },
         { number: 202, state: 'closed', merged_at: '2026-10-09T01:00:00Z', merge_commit_sha: 'c2' },
     ]);
-    octokit.history = [{ number: 500, merged_at: '2026-10-09T01:00:00Z', merge_commit_sha: 'p1' }];
+    octokit.history = [{ number: 500, merged_at: '2026-10-09T01:00:00Z', merge_commit_sha: 'squashed-p1', head: { sha: 'p1' } }];
     octokit.containment['p1...c2'] = 0;
     const result = await updateEpicMergeProgress({ ...baseRequest, epicPrNumber: 501, mergedChildPrNumber: 202 },
         'test', { getOctokit: async () => octokit });
     assert.deepEqual(result.progress, { merged: 0, total: 0, excluded: 0, mergedPullRequests: [] });
-    assert.ok(!octokit.comments.some(c => c.body.includes(EPIC_COMPLETE_MARKER)));
+    assert.equal(result.trackingComment, 'skipped');
+    assert.deepEqual(octokit.comments, []);
 });
 
-test('canCarryChild settles equal merge timestamps with the merge commits and reuses given evidence', async () => {
+test('an existing tracking comment is still updated when nothing remains to track', async () => {
+    const octokit = createOctokit([], [{ id: 1, body: `stale\n${EPIC_PROGRESS_MARKER}`, user: { login: 'propr-dev[bot]' } }]);
+    octokit.childReads[201] = { merged_at: '2026-10-09T00:00:00Z' };
+    octokit.history = [{ number: 500, merged_at: '2026-10-09T01:00:00Z' }];
+    const result = await updateEpicMergeProgress({ ...baseRequest, epicPrNumber: 501 }, 'test', { getOctokit: async () => octokit });
+    assert.equal(result.trackingComment, 'updated');
+    assert.match(octokit.comments[0].body, /0 out of 0 PRs merged/);
+});
+
+test('planned issues closed without a merge are still reported when no PR is counted', async () => {
+    const octokit = createOctokit([]);
+    octokit.childReads[201] = { merged_at: '2026-10-09T00:00:00Z' };
+    octokit.history = [{ number: 500, merged_at: '2026-10-09T01:00:00Z' }];
+    const result = await updateEpicMergeProgress({ ...baseRequest, epicPrNumber: 501, planIssues: [planIssue(100, PlanIssueStatus.CLOSED, 202)] },
+        'test', { getOctokit: async () => octokit });
+    assert.equal(result.trackingComment, 'created');
+    assert.match(octokit.comments[0].body, /1 planned issue was closed without a merge/);
+});
+
+test('the merged-into line of the tracking comment precedes its marker', async () => {
+    const octokit = createOctokit([{ number: 201, state: 'closed', merged_at: '2026-10-09T00:00:00Z' }]);
+    octokit.epicMerged = true;
+    await updateEpicMergeProgress({ ...baseRequest, mergedChildPrNumber: null }, 'test', { getOctokit: async () => octokit });
+    const tracking = octokit.comments.find(c => c.body.includes(EPIC_PROGRESS_MARKER))!;
+    assert.ok(tracking.body.endsWith(EPIC_PROGRESS_MARKER));
+    assert.match(tracking.body, /✅ This epic PR has been merged into main\.\n\n---/);
+    assert.equal(tracking.body, buildEpicProgressComment(
+        { merged: 1, total: 1, excluded: 0, mergedPullRequests: [201] }, 'Big Plan', 'main'));
+});
+
+test('canCarryChild settles equal merge timestamps against the epic head and reuses given evidence', async () => {
     const { canCarryChild } = await import('../packages/core/src/webhook/epicMergeEvidence.js');
     const routes: string[] = [];
     const octokit = {
         async request(route: string, parameters: Record<string, unknown>) {
             routes.push(route);
-            if (route === 'GET /repos/{owner}/{repo}/compare/{basehead}') return { data: { ahead_by: parameters.basehead === 'e1...c1' ? 0 : 1 } };
+            if (route === 'GET /repos/{owner}/{repo}/compare/{basehead}') return { data: { ahead_by: parameters.basehead === 'h1...c1' ? 0 : 1 } };
             throw new Error(`Unexpected ${route}`);
         },
     } as never;
-    const epic = { state: 'closed', merged_at: '2026-10-10T20:00:00Z', base: { ref: 'main' }, merge_commit_sha: 'e1' };
+    const epic = { state: 'closed', merged_at: '2026-10-10T20:00:00Z', base: { ref: 'main' }, merge_commit_sha: 'squashed-e1', head: { sha: 'h1' } };
     const evidence = { defaultBranch: 'main', childMergedAt: '2026-10-10T20:00:00Z', childMergeCommitSha: 'c1' };
     assert.equal(await canCarryChild(octokit, baseRequest, epic, evidence), true);
     assert.equal(await canCarryChild(octokit, baseRequest, epic, async () => ({ ...evidence, childMergeCommitSha: 'c2' })), false);
-    assert.equal(await canCarryChild(octokit, baseRequest, epic, { ...evidence, childMergeCommitSha: null }), false);
-    assert.equal(await canCarryChild(octokit, baseRequest, { ...epic, merge_commit_sha: null }, evidence), false);
+    await assert.rejects(canCarryChild(octokit, baseRequest, epic, { ...evidence, childMergeCommitSha: null }), /could not be resolved/);
+    await assert.rejects(canCarryChild(octokit, baseRequest, { ...epic, head: null }, evidence), /could not be resolved/);
     assert.deepEqual(routes, ['GET /repos/{owner}/{repo}/compare/{basehead}', 'GET /repos/{owner}/{repo}/compare/{basehead}']);
 });

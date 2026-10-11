@@ -33,9 +33,11 @@ function fakeRedis() {
         async eval(script: string, _n: number, key: string, ...args: string[]) {
             switch (script) {
                 case EPIC_PROGRESS_SCRIPTS.compareAndDeleteField:
-                case EPIC_PROGRESS_SCRIPTS.migrateLegacyField:
                     if (hash.get(args[0]) !== args[1]) return 0;
-                    if (script === EPIC_PROGRESS_SCRIPTS.migrateLegacyField && !hash.has(args[2])) hash.set(args[2], args[1]);
+                    return Number(hash.delete(args[0]));
+                case EPIC_PROGRESS_SCRIPTS.migrateLegacyField:
+                    if (hash.get(args[0]) !== args[1] || (hash.get(args[2]) ?? '') !== args[3]) return 0;
+                    hash.set(args[2], args[4]);
                     return Number(hash.delete(args[0]));
                 case EPIC_PROGRESS_SCRIPTS.compareAndExtendKey:
                     if (keys.get(key) !== args[0]) return 0;
@@ -100,8 +102,9 @@ function fakeEpicOctokit() {
         get commentReads() { return commentReads; },
         /** Holds the next comment read open after its snapshot is taken; queued holds apply to later reads in order. */
         holdCommentRead(until: Promise<void>, onHeld: () => void) { commentReadHolds.push({ until, onHeld }); },
-        async paginate(route: string) {
-            if (route === 'GET /repos/{owner}/{repo}/pulls') return [{ number: 203, state: 'closed', merged_at: '2026-10-09T00:00:00Z' }];
+        async paginate(route: string, parameters: Record<string, unknown>) {
+            // Child PRs of the epic branch; the branch has no merged predecessor epic.
+            if (route === 'GET /repos/{owner}/{repo}/pulls') return parameters.head ? [] : [{ number: 203, state: 'closed', merged_at: '2026-10-09T00:00:00Z' }];
             commentReads++;
             const snapshot = comments.map(comment => ({ ...comment }));
             const hold = commentReadHolds.shift();
@@ -431,7 +434,7 @@ test('migration preserves a newer target backoff and a concurrently replaced leg
         retry: async () => { assert.fail('new target backoff must be respected'); },
     });
     await sweep();
-    assert.equal(redis.hash.get(field), newer);
+    assert.deepEqual(JSON.parse(redis.hash.get(field)!), JSON.parse(newer));
     assert.equal(redis.hash.has(legacy), false);
     redis.hash.set(legacy, old);
     const evaluate = redis.eval;
@@ -441,4 +444,37 @@ test('migration preserves a newer target backoff and a concurrently replaced leg
     };
     await sweep();
     assert.equal(redis.hash.get(legacy), newer);
+});
+
+test('migration into an existing target record keeps its backoff but inherits the older age and attempts', async () => {
+    const redis = fakeRedis();
+    const legacy = `${target.owner}/${target.repo}#${target.epicBranch}`;
+    redis.hash.set(legacy, JSON.stringify({ ...target, attempts: 3, firstFailedAt: 1_000, nextAttemptAt: 0 }));
+    redis.hash.set(field, JSON.stringify({ ...target, attempts: 1, firstFailedAt: 5_000, nextAttemptAt: 900_000 }));
+    await sweepEpicProgressRetries({ redis: redis as never, log, now: () => 6_000,
+        retry: async () => { assert.fail('the merged record is not due yet'); },
+    });
+    assert.equal(redis.hash.has(legacy), false);
+    assert.deepEqual(JSON.parse(redis.hash.get(field)!), { ...target, attempts: 3, firstFailedAt: 1_000, nextAttemptAt: 900_000 });
+    // The merged age, not the newer record's, decides when the obligation is dropped.
+    await sweepEpicProgressRetries({ redis: redis as never, log, now: () => 1_000 + EPIC_PROGRESS_RETRY_MAX_AGE_MS + 1,
+        retry: async () => { assert.fail('an expired obligation is dropped, not retried'); },
+    });
+    assert.equal(redis.hash.size, 0);
+});
+
+test('migration leaves a target record replaced since the sweep read it for the next sweep', async () => {
+    const redis = fakeRedis();
+    const legacy = `${target.owner}/${target.repo}#${target.epicBranch}`;
+    const old = JSON.stringify({ ...target, attempts: 1, firstFailedAt: 1_000, nextAttemptAt: 0 });
+    const replaced = JSON.stringify({ ...target, attempts: 2, firstFailedAt: 3_000, nextAttemptAt: 900_000 });
+    redis.hash.set(legacy, old);
+    const evaluate = redis.eval;
+    redis.eval = async (...args) => {
+        if (args[0] === EPIC_PROGRESS_SCRIPTS.migrateLegacyField) redis.hash.set(field, replaced);
+        return evaluate(...args);
+    };
+    await sweepEpicProgressRetries({ redis: redis as never, log, now: () => 2_000, retry: async () => 'retry_scheduled' });
+    assert.equal(redis.hash.get(legacy), old);
+    assert.equal(redis.hash.get(field), replaced);
 });
