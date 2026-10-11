@@ -25,7 +25,7 @@ import { authenticateSocketRequest, setupAuth } from './auth.js';
 import { configureDemoMode, createDemoRedisClient, demoModeReadOnlyMiddleware } from './demoMode.js';
 import { resolveGithubAuthMode, resolveGithubEventIntakeMode, validateIntakeModePrerequisites } from '@propr/shared';
 import { initSocketService, closeSocketService } from './services/socketService.js';
-import { CORS_PREFLIGHT_MAX_AGE_SECONDS, corsRejectionHandler, createCorsOriginValidator, isTrustedMcpWebOrigin, type CorsOriginValidator } from './corsValidation.js';
+import { CORS_PREFLIGHT_MAX_AGE_SECONDS, corsRejectionHandler, createConnectStorageCorsMiddleware, createCorsOriginValidator, isTrustedMcpWebOrigin, type CorsOriginValidator } from './corsValidation.js';
 import {
   createStatusRoutes, createTaskRoutes,
   createTaskHistoryRoutes, createLiveDetailsRoutes,
@@ -217,7 +217,10 @@ try {
 // Mark even parser/rate-limit/error responses at the instance boundary.
 app.use('/api/mcp', (req, res, next) => { if (isMcpEnabledSync()) { mcpResponseHeaders(req, res, next); } else { next(); } });
 
+app.use(createConnectStorageCorsMiddleware());
+
 app.use((req, res, next) => {
+  if (res.locals.connectStorageCors) { next(); return; }
   // Server-rendered MCP consent forms submit on the API's own public origin,
   // which can differ from FRONTEND_URL. Known remote MCP web clients also need
   // their exact origin accepted at the bearer-authenticated MCP endpoint. Keep

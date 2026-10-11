@@ -16,7 +16,7 @@ unsupported category, or absent observation **must never render as zero storage*
 
 Base: `/api/instance/storage/v1`. All mutations require `Content-Type: application/json`
 and `X-ProPR-Storage: 1`. Browser requests therefore require a CORS preflight under the
-existing API origin allowlist. Never broaden that allowlist for this feature. Requests
+route-scoped hosted Connect CORS policy described below (or the existing UI allowlist). Requests
 with unknown JSON keys are rejected. Do not forward installation credentials as user auth.
 
 | Method/path | Request | Response |
@@ -140,3 +140,62 @@ non-forcibly detaches completed checkouts to release the branch for subsequent t
 repository working copies. Refetching cannot recover uncommitted work or unpublished
 commits. Local private-data deletion does not purge the fleet's 60-day retained backups or
 external services. Backup expiration and provider revocation are separate operations.
+
+
+## Hosted Connect browser integration (#2979)
+
+For a canonical hosted `API_PUBLIC_URL=https://t-<instance>.propr.dev`, Express
+permits the **exact** configured `PROPR_CONNECT_URL` (default
+`https://connect.propr.dev`) on `GET /api/auth/user` and only the method/path pairs
+in the table above. The Connect URL uses the same bare-HTTPS-origin validator as
+the existing instance login bridge; this exception additionally requires an HTTPS
+`*.propr.dev` origin without a nondefault port so it shares the hosted instance's
+site. Configuration is trusted server configuration, never a request Host header
+or a caller-supplied destination. A custom cross-site Connect URL gets no exception.
+
+Mutation preflights allow only `Content-Type` and `X-ProPR-Storage`; read
+preflights allow no additional headers. Authorization, desktop markers, unrelated
+REST routes, Socket.IO, preview origins, suffix lookalikes, HTTP, arbitrary ports,
+and opaque `null` origins receive no new permission. Successful OPTIONS responses
+only report browser transport policy: they do not create sessions, authenticate a
+principal, authorize a mutation, or issue cleanup confirmations. Every actual
+storage request still resolves the instance administrator and
+`instance.manage_settings`; JSON and `X-ProPR-Storage: 1` remain mandatory for
+mutations. Confirmations remain instance/actor-bound and single-use.
+
+The existing login bridge creates the host-only, Secure, HttpOnly, SameSite=Lax
+cookie on the instance. Connect sends `credentials: "include"` and checks
+`/api/auth/user` against its selected account before each storage operation, as
+routing#202 already does. CORS is not authentication and grants no installation
+credential access. No adapter protocol change is needed for this integration.
+A wrong account must cause Connect to clear displayed authority and refuse the
+storage operation; signing in to Connect alone does not replace an instance session.
+
+This does **not** fix cross-site self-hosted cookie restrictions. Noncanonical or
+customer API origins receive no additional CORS allowance, and third-party cookie
+restrictions can still prevent an instance session from reaching the server.
+Connect must show unknown/unavailable usage and disabled mutation controls on
+these failures, never zero usage or successful cleanup. Do not work around this by
+setting `COOKIE_DOMAIN=.propr.dev`, changing SameSite, allowing arbitrary origins,
+or forwarding an installation token.
+
+Regression coverage: `packages/api/test/hostedConnectStorage.test.ts` exercises
+production CORS, login callback, session middleware, authorization, and storage
+handlers with temporary SQLite/storage and HTTPS Chromium host mappings. Redis
+transport and the external grant redeemer are isolated fixtures; instance API
+responses are not intercepted. Run with:
+
+```sh
+node --import tsx --experimental-test-module-mocks --test packages/api/test/hostedConnectStorage.test.ts
+```
+
+UI acceptance was exercised against routing#202 head
+`e928c87a8632feef63c072c00dfcb7b70e942fa6`. To repeat it, build that frontend with
+`VITE_API_BASE_URL='' npm run frontend:build` in a separate routing checkout, then
+set `CONNECT_STORAGE_FRONTEND_DIST` to its absolute `apps/frontend/dist` directory
+when running that command. The fixture serves the real frontend and a local
+Connect account/tunnel inventory; storage reads, policy changes, preview and
+execution reach the real isolated instance API. Chromium (`CHROMIUM_PATH` may
+select it) and OpenSSL are required. No live relay, account, or customer storage
+is used. The browser checks default OFF/24h, explicit opt-in, confirmation,
+unsupported-origin behavior, and generates focused transient preview evidence.
