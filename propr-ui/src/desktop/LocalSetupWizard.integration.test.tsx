@@ -19,14 +19,26 @@ vi.mock('../config/runtimeConfig', () => ({ setDesktopApiBaseUrl: runtimeMock.se
 describe('production local setup journey', () => {
   beforeEach(() => vi.clearAllMocks());
 
-  it('shows Docker Desktop and AMD64 emulation guidance in the production Mac wizard', async () => {
-    render(<LocalSetupWizard adapter={guidedAdapter({ status: async () => ({ ...idle,
-      capability: { supported: true, kind: 'local', platform: 'darwin' },
-    }) })} onBack={() => undefined} onComplete={() => undefined} />);
+  it.each(['linux', 'macos'] as const)('opens the production wizard from the %s chooser', async platform => {
+    const adapters = adaptersFor();
+    adapters.platform = platform;
+    const setup = guidedAdapter({ status: vi.fn(async (): Promise<DesktopSetupSnapshot> => ({ ...idle,
+      capability: { supported: true, kind: 'local', platform: platform === 'macos' ? 'darwin' : 'linux' },
+    })) });
+    adapters.localSetup = setup;
+    render(<DesktopExperience adapters={adapters}><div>Connected app</div></DesktopExperience>);
+    fireEvent.click(await screen.findByRole('button', { name: /Set up this computer/i }));
     await screen.findByRole('heading', { name: 'Check the essentials' });
-    expect(screen.getByText(/Open Docker Desktop/).textContent).toContain('AMD64');
-    expect(screen.queryByText(/ProPR needs Linux/)).toBeNull();
-    expect(screen.getByRole('button', { name: /Continue/ })).toBeEnabled();
+    expect(setup.status).toHaveBeenCalled();
+    if (platform === 'macos') {
+      expect(screen.getByText(/Open Docker Desktop/).textContent).toContain('AMD64');
+      expect(screen.queryByText(/ProPR needs Linux/)).toBeNull();
+    }
+    fireEvent.click(screen.getByRole('button', { name: /Continue/ }));
+    await screen.findByRole('heading', { name: 'Private local storage' });
+    expect(setup.start).not.toHaveBeenCalled();
+    expect(adapters.profiles.save).not.toHaveBeenCalled();
+    expect(screen.queryByText('Connected app')).not.toBeInTheDocument();
   });
 
   it('shows the authenticated identity, installation types, and explicit recovery controls', async () => {

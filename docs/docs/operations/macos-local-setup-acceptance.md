@@ -4,6 +4,31 @@ Issue #2969 changes the production wizard and shared host, not a Mac-only replic
 production wizard acceptance/zoom coverage. The Mac entry point reuses its existing packaged lifecycle driver.
 Do not alter the frozen fd4960f preview, publish, sign, notarize, deploy, or replace an installed release for this check.
 
+## Native evidence at 7cc97e1
+
+PR #2976 comment6104149475 reports native MacBook results for exact
+`7cc97e179dbc8832c8e975ae115a2b0e763c7549`:
+
+- Node 22 locked installation and desktop/UI type checks passed. The Darwin identity
+  regression passed 1/1 after restoring ordinary checkout file modes. The initial
+  archive transport made the tracked broker mode 0775; its authority rejection and
+  the subsequent correction are separate evidence.
+- Native ARM64 packaging and package/fuse inspection passed. Those checks did **not**
+  establish that setup resources existed in `Contents/Resources`.
+- The held-pull lifecycle failed before setup: `connectOverCDP` timed out after
+  30 seconds. A diagnostic using the same app with a fresh profile reached HTTP
+  `/json/version` 200 (Electron 44.0.0 / Chrome 152.0.7977.54), then exited 1 before
+  WebSocket connection. Logs showed `desktop.app.ready`, macOS Keychain error
+  -25308 (`errSecInteractionNotAllowed`), and `desktop.app.start_failed` /
+  `OPERATION_FAILED`. No proxy environment variables were present.
+
+No setup interaction, provisioning, cancellation, or retry has passed on that native
+run. The Linux-only chooser and resource gates independently blocked macOS setup at
+that revision. Their corrections and automated regressions do not resolve or prove
+resolution of the separate Keychain startup failure. Repeat native resource inspection
+and the production chooser-to-wizard lifecycle on the repaired revision once startup
+succeeds; full provisioning evidence remains outstanding.
+
 ## Read-only prerequisites and held-pull lifecycle
 
 On a native Mac with Node, the repository's Playwright dependency, and Docker Desktop already running:
