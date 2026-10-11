@@ -23,6 +23,8 @@ import {
   PLAN_TEST_TIMEOUT_MS, PLAN_SUITE_CLEANUP_MS, PLAN_RETRY_MIN_REMAINING_MS,
   MODEL_MATRIX_PLAN_BUDGET_MS, PlanWorkTracker, planDeadline,
 } from "./e2e/planGeneration.js";
+import { modelPhaseBudgetMs, modelMatrixSuiteTimeoutMs, MODEL_MATRIX_FOLLOWUP_BUDGET_MS } from "./e2e/modelTaskTimeout.js";
+
 import { writeReport } from "./e2e/report.js";
 import { parseModelPairLimit, selectAgentModelPairs } from "./e2e/modelMatrix.js";
 
@@ -49,6 +51,8 @@ import { implementIssue, getTaskStatus } from "../packages/cli/src/api/implement
 // ---------------------------------------------------------------------------
 // Shared state
 // ---------------------------------------------------------------------------
+
+const MODEL_PHASE_BUDGET_MS = modelPhaseBudgetMs(MODEL_TASK_TIMEOUT_MS);
 
 let client: ApiClient;
 let availableAgents: AgentConfig[] = [];
@@ -465,7 +469,7 @@ describe("ProPR CLI E2E", {
   });
 
   // 11. Bounded model-matrix implementation
-  describe("11. Model matrix", { timeout: MODEL_MATRIX_PLAN_BUDGET_MS + 2 * MODEL_TASK_TIMEOUT_MS + 5 * 60_000, skip: SKIP_SLOW ? "SKIP_SLOW" : false }, () => {
+  describe("11. Model matrix", { timeout: modelMatrixSuiteTimeoutMs(MODEL_TASK_TIMEOUT_MS), skip: SKIP_SLOW ? "SKIP_SLOW" : false }, () => {
     it("create plans with enough issues", { timeout: MODEL_MATRIX_PLAN_BUDGET_MS + PLAN_SUITE_CLEANUP_MS }, async (t) => {
       const pairs = allPairs();
       if (pairs.length === 0) return;
@@ -499,7 +503,7 @@ describe("ProPR CLI E2E", {
       assert.ok(collected.length >= needed, `Expected at least ${needed} issues, got ${collected.length}`);
     });
 
-    it("multi-model parallel: all models on one issue", async (t) => withE2EWork(client, t.signal, async (client) => {
+    it("multi-model parallel: all models on one issue", { timeout: MODEL_PHASE_BUDGET_MS + PLAN_SUITE_CLEANUP_MS }, async (t) => withE2EWork(client, t.signal, async (client) => {
       const pairs = allPairs();
       if (pairs.length < 2) return;
 
@@ -521,9 +525,9 @@ describe("ProPR CLI E2E", {
       await waitForTasks(pr, REPO!, client);
       await pollTasksToCompletion(pr, client);
       assertModelTasksSucceeded(pr);
-    }));
+    }, planDeadline(MODEL_PHASE_BUDGET_MS)));
 
-    it("single-model: each model on a separate issue", async (t) => withE2EWork(client, t.signal, async (client) => {
+    it("single-model: each model on a separate issue", { timeout: MODEL_PHASE_BUDGET_MS + PLAN_SUITE_CLEANUP_MS }, async (t) => withE2EWork(client, t.signal, async (client) => {
       const pairs = allPairs();
       const used = new Set(modelTestResults.map((r) => r.issueNumber));
 
@@ -547,18 +551,18 @@ describe("ProPR CLI E2E", {
       await waitForTasks(sr, REPO!, client);
       await pollTasksToCompletion(sr, client);
       assertModelTasksSucceeded(sr);
-    }));
+    }, planDeadline(MODEL_PHASE_BUDGET_MS)));
 
-    it("every model has execution history", async (t) => withE2EWork(client, t.signal, async (client) => {
+    it("every model has execution history", { timeout: MODEL_MATRIX_FOLLOWUP_BUDGET_MS + PLAN_SUITE_CLEANUP_MS }, async (t) => withE2EWork(client, t.signal, async (client) => {
       for (const r of modelTestResults.filter((r) => r.taskId)) {
         const s = await getTaskStatus(r.taskId!, client);
         r.hasHistory = s.history.length > 1;
         r.historyCount = s.history.length;
         assert.ok(s.history.length > 0, `${r.agent_alias}/${r.model_name} no history`);
       }
-    }));
+    }, planDeadline(MODEL_MATRIX_FOLLOWUP_BUDGET_MS)));
 
-    it("collect LLM logs", async (t) => withE2EWork(client, t.signal, async (client) => {
+    it("collect LLM logs", { timeout: MODEL_MATRIX_FOLLOWUP_BUDGET_MS + PLAN_SUITE_CLEANUP_MS }, async (t) => withE2EWork(client, t.signal, async (client) => {
       const withTasks = modelTestResults.filter((r) => r.taskId && r.finalState);
       for (const pid of createdPlanIds) {
         const logs = await listAllLlmLogs({ draftId: pid }, client);
@@ -570,7 +574,7 @@ describe("ProPR CLI E2E", {
           r.outputTokens += ml.reduce((s, l) => s + (l.outputTokens ?? 0), 0);
         }
       }
-    }));
+    }, planDeadline(MODEL_MATRIX_FOLLOWUP_BUDGET_MS)));
   });
 
   // 12. Report + verification
