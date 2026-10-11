@@ -6,6 +6,9 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, it, test } from 'node:test';
 import {
+  assertMacGuiSession,
+  awaitMacStartupReview,
+  isolatedAgentPaths,
   createIsolatedSetupEnvironment,
   createLinuxSetupIsolation,
   createInterruptedRelaunchDiagnostics,
@@ -273,4 +276,88 @@ test('Mac acceptance permits only local endpoint handoff and the required platfo
   assert.equal(dockerOperation(['image', 'inspect', '--format', '{"Os":{{json .Os}},"Architecture":{{json .Architecture}}}', 'propr/app:test']), 'image-inspect');
   assert.equal(dockerOperation(['pull', '--platform', 'linux/amd64', 'propr/agent:test']), 'pull');
   assert.equal(dockerOperation(['pull', '--platform', 'windows/amd64', 'propr/agent:test']), 'rejected');
+});
+
+
+test('macOS retains GUI HOME while Linux retains disposable HOME and session allowlist', () => {
+  const profile = Object.fromEntries(['root', 'home', 'temporary', 'xdgCache', 'xdgConfig', 'xdgData', 'xdgRuntime']
+    .map(key => [key, `/tmp/private/${key}`]));
+  const options = {
+    baseEnvironment: { HOME: '/Users/tester', USER: 'tester', LOGNAME: 'tester', PATH: '/usr/bin:/bin',
+      DISPLAY: ':99', DBUS_SESSION_BUS_ADDRESS: 'test', __CF_USER_TEXT_ENCODING: '0:0:0',
+      NODE_OPTIONS: 'unsafe', ELECTRON_RUN_AS_NODE: '1', GH_TOKEN: 'secret', OPENAI_API_KEY: 'secret',
+      DOCKER_CONFIG: '/Users/tester/.docker', HOST_CODEX_DIR: '/Users/tester/.codex' },
+    profile, wrapperDirectory: '/tmp/private/wrapper', isolation: createLinuxSetupIsolation(), ports: [40001, 40002, 40003],
+    localDockerEndpoint: 'unix:///Users/tester/.docker/run/docker.sock',
+  };
+  const mac = createIsolatedSetupEnvironment({ ...options, platform: 'darwin' });
+  const linux = createIsolatedSetupEnvironment({ ...options, platform: 'linux' });
+  assert.equal(mac.HOME, '/Users/tester');
+  assert.equal(linux.HOME, profile.home);
+  assert.equal(mac.USER, 'tester');
+  assert.equal(mac.DISPLAY, undefined);
+  assert.equal(linux.DISPLAY, ':99');
+  assert.equal(mac.DOCKER_CONFIG, '/tmp/private/home/.docker');
+  assert.equal(mac.PATH, '/tmp/private/wrapper:/usr/bin:/bin');
+  assert.equal(mac.DOCKER_HOST, options.localDockerEndpoint);
+  assert.equal(mac.XDG_CONFIG_HOME, profile.xdgConfig);
+  for (const [key, value] of Object.entries(isolatedAgentPaths(profile))) {
+    assert.equal(mac[key], value);
+    assert.ok(value.startsWith(profile.home + '/'));
+  }
+  for (const key of ['GH_TOKEN', 'OPENAI_API_KEY', 'NODE_OPTIONS', 'ELECTRON_RUN_AS_NODE']) assert.equal(mac[key], undefined);
+  assert.throws(() => createIsolatedSetupEnvironment({ ...options, platform: 'darwin', baseEnvironment: { HOME: 'relative' } }), /GUI user HOME/);
+  assert.throws(() => createIsolatedSetupEnvironment({ ...options, platform: 'darwin', localDockerEndpoint: 'tcp://remote' }), /local Docker/);
+});
+
+test('macOS session preflight rejects SSH, non-GUI, root and noninteractive launches', () => {
+  const session = { environment: {}, uid: 501, consoleUid: 501, managerName: 'Aqua\n', interactive: true };
+  assert.doesNotThrow(() => assertMacGuiSession(session));
+  for (const override of [ { environment: { SSH_CONNECTION: 'test' } }, { environment: { SSH_TTY: 'test' } },
+    { accountHome: '/Users/actual' }, { uid: 0 }, { consoleUid: 502 }, { managerName: 'Background' }, { interactive: false } ]) {
+    assert.throws(() => assertMacGuiSession({ ...session, ...override }), /GUI session/);
+  }
+});
+
+test('human startup review remains unverified and resumable until explicit input', async () => {
+  let report;
+  let resume;
+  let closed = false;
+  let completed = false;
+  const review = awaitMacStartupReview({ outputPath: 'unused', sourceSha: 'a'.repeat(40), userData: '/tmp/private/data',
+    reportWriter: async (_, value) => { report = value; },
+    terminalFactory: () => ({ question: async message => {
+      assert.match(message, /human approval is required/);
+      assert.match(message, /Never reset a Keychain/);
+      await new Promise(resolve => { resume = resolve; });
+    }, close: () => { closed = true; } }),
+  }).then(() => { completed = true; });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(report.result, 'unverified');
+  assert.equal(report.unverifiedPhase, 'native-startup-human-review');
+  assert.match(report.resume, /running GUI Terminal/);
+  assert.equal(completed, false);
+  resume();
+  await review;
+  assert.equal(closed, true);
+  assert.equal(report.result, 'unverified'); // Enter is never evidence of success.
+});
+
+
+test('startup review abort rejects instead of approving or completing the gate', async () => {
+  let signal;
+  let closed = false;
+  const review = awaitMacStartupReview({ outputPath: 'unused', sourceSha: 'a'.repeat(40), userData: '/tmp/private/data',
+    reportWriter: async () => {},
+    terminalFactory: () => ({ question: (_, options) => {
+      signal = options.signal;
+      return new Promise((_, reject) => signal.addEventListener('abort', () => reject(new Error('aborted')), { once: true }));
+    }, close: () => { closed = true; } }),
+  });
+  const rejected = assert.rejects(review, /aborted/);
+  await new Promise(resolve => setImmediate(resolve));
+  process.emit('SIGTERM');
+  await rejected;
+  assert.equal(signal.aborted, true);
+  assert.equal(closed, true);
 });

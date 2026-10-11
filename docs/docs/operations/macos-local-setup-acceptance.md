@@ -31,7 +31,7 @@ succeeds; full provisioning evidence remains outstanding.
 
 ## Read-only prerequisites and held-pull lifecycle
 
-On a native Mac with Node, the repository's Playwright dependency, and Docker Desktop already running:
+In Terminal opened in the logged-in, unlocked macOS GUI session (not SSH, sudo, or a background job), with Node, the repository's Playwright dependency, and Docker Desktop already running:
 
 1. Independently build the current source and its native application. Keep it separate from the existing preview.
 2. Run `npx tsx --test packages/cli/src/localSetupDarwin.test.ts`. This uses actual Darwin descriptors and the
@@ -43,12 +43,43 @@ On a native Mac with Node, the repository's Playwright dependency, and Docker De
    node apps/desktop/scripts/run-packaged-macos-setup-lifecycle.mjs '/absolute/path/propr-desktop.app/Contents/MacOS/propr-desktop'
    ```
 
-The driver uses a private disposable HOME/user-data directory, unique stack/network names, reserved loopback ports,
-and a Docker command boundary. It reads only the active local Docker endpoint, not Docker/provider credentials.
+The Mac driver preserves the GUI user's HOME for the normal Keychain context. It directly launches the
+executable from that GUI Terminal, inheriting its security session; it rejects SSH, non-Aqua, different-console-user,
+and noninteractive execution. This is not an `open -n` launch and still needs native validation. Linux continues
+using its disposable HOME and existing session allowlist.
+
+App data (`--user-data-dir`), runtime root, XDG directories, agent credential mount paths in the runtime `.env`,
+Docker config, stack/network names and loopback ports remain isolated. The driver locates a local Docker socket
+by metadata (or explicit `DOCKER_HOST`), without loading the user's Docker config or credential helpers. No
+provider credentials are read or copied. Agent installation detection may check default directory existence;
+no agents are selected for this held-pull test, and credential mount paths point into the private profile.
+The Docker command boundary remains in front of every production setup Docker command.
 It compares existing container/network identities before and after. Only read-only Docker commands reach the daemon;
 pulls are held so cancellation, retry, and interrupted relaunch can be observed before GitHub enrollment.
 No Docker resource is deleted. The report must retain its limitations: **this is not full provisioning, health,
 agent compatibility, enrollment, or pairing proof**. Docker-unavailable reports are unverified, not passes.
+
+At each app launch, the driver writes an **unverified** `native-startup-human-review` report and pauses
+in Terminal before CDP attachment. Inspect the actual app. If macOS asks for ProPR Safe Storage access,
+human approval is required; the harness neither detects nor approves the prompt. Never reset a Keychain,
+change trust/permissions, disable safeStorage, or disable the Chromium sandbox. Leave the Terminal and app
+running while awaiting a decision, then press Enter to resume that same launch/profile. Enter only starts
+the automated checks; it cannot mark the gate passed. Ctrl-C/SIGTERM during this pause aborts the launch
+and records failure. To retry after an abort, rerun the command with a new isolated profile. A CDP failure
+is not classified as proof of a Keychain cause. Docker-unavailable and GUI-session-unavailable states are
+unverified and exit unsuccessfully; lifecycle failures also cannot pass the gate.
+
+The reusable local signing identity reported on the test Mac verifies across two builds; first ProPR Safe
+Storage approval remains a separate human prerequisite. The harness does not sign the app or change trust.
+This is no claim of Developer ID, notarization, or credential persistence.
+
+Follow-up evidence at e648365 (fdb2031 changes only two tests): locked install, types, native ARM64
+package/fuses and 18 packaging regressions passed. Normal `open -n` launch after unlocking reached the
+production chooser and first wizard step, with both original screenshots inspected. That proves availability
+only. SSH CDP timed out; the GUI Terminal harness run was terminated with exit 143 after a reported Keychain
+reset prompt. No reset occurred. Disposable HOME is a hypothesis, not established causality. The revised
+harness still requires native cancellation of an admitted held pull, retry with fresh inspection, and
+interrupted-relaunch recovery before lifecycle acceptance can be claimed.
 
 Also test the production wizard with Docker Desktop stopped (actionable start guidance) and without the Docker CLI
 (actionable installation guidance), then reopen Docker Desktop and retry. Do not change socket permissions or grant
