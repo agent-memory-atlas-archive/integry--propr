@@ -14,6 +14,12 @@ const jobs = workflow.jobs;
 const full = jobs['full-tests'];
 const live = jobs['e2e-tests'];
 const step = (job, id) => job.steps.find(s => s.id === id);
+function assertClockDeadline(ms, before, after) {
+  // date +%s truncates a sample taken during the child process, not at before.
+  assert.ok(Number.isSafeInteger(ms) && ms % 1000 === 0);
+  assert.ok(ms >= Math.floor(before / 1000) * 1000 + 110 * 60_000);
+  assert.ok(ms <= Math.floor(after / 1000) * 1000 + 110 * 60_000);
+}
 // Evaluate this workflow's actual expressions with Actions-style status functions.
 function evaluate(expression, { needs = {}, steps = {}, success = true, cancelled = false } = {}) {
   const js = expression.replace(/^\$\{\{\s*|\s*\}\}$/g, '')
@@ -64,10 +70,11 @@ test('each clock is bounded independently; pipeline failures preserve status and
       writeFileSync(envFile, '');
       const before = Date.now();
       const clock = spawnSync('bash', ['-e', '-c', job.steps[0].run], { env: { ...process.env, GITHUB_ENV: envFile } });
+      const after = Date.now();
       assert.equal(clock.status, 0);
       const value = readFileSync(envFile, 'utf8').trim().split('=')[1];
       const ms = Number(value) * (deadline.endsWith('SECONDS') ? 1000 : 1);
-      assert.ok(ms - before > 109 * 60_000 && ms - before <= 110 * 60_000);
+      assertClockDeadline(ms, before, after);
       assert.equal(job['timeout-minutes'], 120);
       const result = spawnSync('bash', ['--noprofile', '--norc', '-eo', 'pipefail', '-c', step(job, id).run], {
         cwd: root, encoding: 'utf8', env: { ...process.env, PATH: `${root}:${process.env.PATH}`, [deadline]: value, GITHUB_OUTPUT: join(root, 'output') },
@@ -76,6 +83,34 @@ test('each clock is bounded independently; pipeline failures preserve status and
       assert.match(readFileSync(join(root, filename), 'utf8'), /terminal TAP: failed/);
       assert.match(readFileSync(join(root, 'output'), 'utf8'), /result=failure/);
     }
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test('both clock contracts accept second-boundary samples and reject out-of-bracket deadlines', () => {
+  const root = mkdtempSync(join(tmpdir(), 'nightly-clock-boundary-'));
+  try {
+    writeFileSync(join(root, 'date'), '#!/bin/sh\n[ "$#" -eq 1 ] && [ "$1" = "+%s" ] || exit 1\nprintf "%s\\n" "$SAMPLE_SECONDS"\n', { mode: 0o755 });
+    // Model a spawn spanning 1000.999s to 1001.001s without wall-clock sleeps.
+    const before = 1_000_999;
+    const after = 1_001_001;
+    for (const [job, deadline, scale] of [[full, 'PROPR_FULL_DEADLINE_SECONDS', 1000], [live, 'PROPR_E2E_DEADLINE_EPOCH_MS', 1]]) {
+      for (const sampleSeconds of [1000, 1001]) {
+        const envFile = join(root, 'env');
+        writeFileSync(envFile, '');
+        const clock = spawnSync('bash', ['-e', '-c', job.steps[0].run], {
+          encoding: 'utf8', env: { ...process.env, PATH: `${root}:${process.env.PATH}`, SAMPLE_SECONDS: String(sampleSeconds), GITHUB_ENV: envFile },
+        });
+        assert.equal(clock.status, 0, clock.stderr);
+        const ms = (sampleSeconds + 110 * 60) * 1000;
+        assert.equal(readFileSync(envFile, 'utf8').trim(), `${deadline}=${ms / scale}`);
+        assertClockDeadline(ms, before, after);
+        if (sampleSeconds === 1001) {
+          assert.ok(ms - before > 110 * 60_000, 'the old upper bound rejects this valid boundary sample');
+        }
+      }
+    }
+    assert.throws(() => assertClockDeadline((999 + 110 * 60) * 1000, before, after), assert.AssertionError);
+    assert.throws(() => assertClockDeadline((1002 + 110 * 60) * 1000, before, after), assert.AssertionError);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
