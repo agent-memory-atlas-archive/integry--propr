@@ -11,6 +11,7 @@ const MAX_DISPLAY_DIMENSION = 32_768;
 const MAX_XAUTHORITY_BYTES = 64 * 1024;
 const PRIVATE_SMOKE_PREFIX = 'propr-desktop-smoke-';
 const createdProfiles = new WeakSet();
+const removingProfiles = new WeakSet();
 
 const assertDimension = (value, description) => {
   if (!Number.isInteger(value) || value <= 0 || value > MAX_DISPLAY_DIMENSION) {
@@ -209,17 +210,26 @@ export const removePrivateSmokeProfile = async (profile, {
   if (!profile || !createdProfiles.has(profile)) {
     throw new Error('Packaged smoke cleanup rejected an unknown profile');
   }
-  createdProfiles.delete(profile);
-  // Retry the whole owned root, not every recursive entry: at most four passes
-  // and 600ms of backoff. A late Chromium write can invalidate an empty scan.
-  for (let attempt = 0; ; attempt += 1) {
-    try {
-      await removeDirectory(profile.root, { recursive: true, force: true });
-      return;
-    } catch (error) {
-      if (error?.code !== 'ENOTEMPTY' || attempt === 3) throw error;
-      await wait(100 * (attempt + 1));
+  if (removingProfiles.has(profile)) {
+    throw new Error('Packaged smoke cleanup already in progress for this profile');
+  }
+  removingProfiles.add(profile);
+  try {
+    // Retry the whole owned root, not every recursive entry: at most four passes
+    // and 600ms of backoff. A late Chromium write can invalidate an empty scan.
+    for (let attempt = 0; ; attempt += 1) {
+      try {
+        await removeDirectory(profile.root, { recursive: true, force: true });
+        // A failed removal remains owned so callers can retry later.
+        createdProfiles.delete(profile);
+        return;
+      } catch (error) {
+        if (error?.code !== 'ENOTEMPTY' || attempt === 3) throw error;
+        await wait(100 * (attempt + 1));
+      }
     }
+  } finally {
+    removingProfiles.delete(profile);
   }
 };
 

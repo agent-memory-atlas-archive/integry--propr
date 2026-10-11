@@ -520,10 +520,35 @@ describe('packaged smoke failure cleanup', () => {
         assert.equal(attempts, code === 'ENOTEMPTY' ? 4 : 1);
         assert.deepEqual(waits, code === 'ENOTEMPTY' ? [100, 200, 300] : []);
         assert.ok((await lstat(profile.root)).isDirectory());
+        await removePrivateSmokeProfile(profile);
+        await assert.rejects(lstat(profile.root), { code: 'ENOENT' });
+        await assert.rejects(removePrivateSmokeProfile(profile), /unknown profile/);
       } finally {
         await removePrivateSmokeProfile(outer);
       }
     }
+  });
+
+  test('excludes concurrent cleanup while retaining a failed removal for later retry', async () => {
+    const profile = await createPrivateSmokeProfile();
+    let rejectRemoval;
+    const pendingRemoval = new Promise((_, reject) => { rejectRemoval = reject; });
+    const failure = Object.assign(new Error('synthetic failure'), { code: 'EACCES' });
+    const cleanup = removePrivateSmokeProfile(profile, { removeDirectory: () => pendingRemoval });
+    const rejected = assert.rejects(cleanup, error => error === failure);
+    let duplicateAttempted = false;
+    try {
+      await assert.rejects(removePrivateSmokeProfile(profile, {
+        removeDirectory: async () => { duplicateAttempted = true; },
+      }), /already in progress/);
+      assert.equal(duplicateAttempted, false);
+    } finally {
+      rejectRemoval(failure);
+      await rejected;
+      await removePrivateSmokeProfile(profile);
+    }
+    await assert.rejects(lstat(profile.root), { code: 'ENOENT' });
+    await assert.rejects(removePrivateSmokeProfile(profile), /unknown profile/);
   });
 
   test('rejects forged profiles before any deletion or retry', async () => {
