@@ -126,8 +126,9 @@ const config: ForgeConfig = {
     asar: { unpack: '**/.vite/native/prebuilds/**' },
     extraResource: [
       desktopTrayIcon,
-      ...(process.platform === 'linux' ? [
-        desktopLinuxIcon,
+      ...(process.platform === 'linux' ? [desktopLinuxIcon] : []),
+      // Both setup hosts resolve these files directly from process.resourcesPath.
+      ...((process.platform === 'linux' || process.platform === 'darwin') ? [
         resolve(connectOrchestrator, 'orchestrator.mjs'),
         desktopRuntimeManifest,
         setupAssets,

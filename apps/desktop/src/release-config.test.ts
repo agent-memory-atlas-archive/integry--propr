@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
 import { generateKeyPairSync } from 'node:crypto';
 import { readFileSync } from 'node:fs';
+import { basename } from 'node:path';
 import { describe, test } from 'node:test';
 import {
   readCompleteEnvironmentGroup,
@@ -31,6 +33,26 @@ const isLinuxMaker = (maker: unknown): maker is LinuxMaker => {
 };
 
 describe('desktop release configuration', () => {
+  test('ships the external setup-host resources on both Linux and macOS', () => {
+    for (const platform of ['linux', 'darwin', 'win32']) {
+      // Evaluate the real Forge configuration for each native build host in an
+      // isolated process, including Darwin when this regression runs on Linux.
+      const output = execFileSync(process.execPath, ['--import', 'tsx', '--input-type=module', '-e', `
+        // Load the bundler's native dependencies for the actual test host first.
+        await import('@electron-forge/plugin-vite');
+        Object.defineProperty(process, 'platform', { value: ${JSON.stringify(platform)} });
+        const { default: config } = await import(${JSON.stringify(new URL('../forge.config.ts', import.meta.url).href)});
+        console.log(JSON.stringify(config.packagerConfig.extraResource));
+      `], { encoding: 'utf8', cwd: new URL('../', import.meta.url) });
+      const resources = (JSON.parse(output) as string[]).map(path => basename(path));
+      for (const resource of ['orchestrator.mjs', 'manifest.json', 'assets']) {
+        assert.equal(resources.includes(resource), platform !== 'win32', `${platform}: ${resource}`);
+      }
+      assert.equal(resources.includes('propr-desktop.png'), platform === 'linux');
+      assert.ok(resources.includes('propr-tray.png'));
+    }
+  });
+
   test('selects configured Linux makers and keeps their executables aligned', async () => {
     const previousDeb = process.env.PROPR_DESKTOP_ENABLE_DEB;
     const previousRpm = process.env.PROPR_DESKTOP_ENABLE_RPM;
