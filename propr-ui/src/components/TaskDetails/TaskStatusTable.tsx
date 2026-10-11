@@ -363,9 +363,9 @@ const BranchSteps: React.FC<{
       const isRunning = isLast && !['COMPLETED', 'FAILED', 'CANCELLED'].includes(stateUpper);
       const isFailure = stateUpper === 'FAILED' && !item.metadata?.event;
       return (
-        <li key={`${item.state}-${item.timestamp}-${index}`} className={`relative flex min-w-0 items-start gap-2 [@container(max-width:639px)]:flex-col [@container(max-width:639px)]:items-stretch [@container(max-width:639px)]:gap-0 py-0.5 ${RUN_LEAD_INSET} pr-1 text-xs leading-5`}>
+        <li key={`${item.state}-${item.timestamp}-${index}`} className={`relative flex min-w-0 items-start gap-2 [@container(max-width:527px)]:flex-col [@container(max-width:527px)]:items-stretch [@container(max-width:527px)]:gap-0 py-0.5 ${RUN_LEAD_INSET} pr-1 text-xs leading-5`}>
           <span aria-hidden="true" className="absolute left-[9px] top-[10px] h-px w-6 bg-slate-300" />
-          <span className={`${RUN_TAG_COLUMN} [@container(max-width:639px)]:w-auto flex-none font-mono text-[11px] tabular-nums text-slate-400`}>
+          <span className={`${RUN_TAG_COLUMN} [@container(max-width:527px)]:w-auto flex-none font-mono text-[11px] tabular-nums text-slate-400`}>
             {item.timestamp ? formatTimeOnly(item.timestamp) : '--:--'}
           </span>
           <span className="min-w-0 flex-1">
@@ -380,7 +380,7 @@ const BranchSteps: React.FC<{
             <NetworkEgressDetail metadata={item.metadata} />
             <PushFailureDetails metadata={item.metadata} />
           </span>
-          <span className={`${RUN_DURATION_COLUMN} [@container(max-width:639px)]:w-auto [@container(max-width:639px)]:text-left flex-none whitespace-nowrap text-right font-mono text-[11px] tabular-nums ${isRunning ? 'font-medium text-teal-700' : 'text-slate-500'}`}>
+          <span className={`${RUN_DURATION_COLUMN} [@container(max-width:527px)]:w-auto [@container(max-width:527px)]:text-left flex-none whitespace-nowrap text-right font-mono text-[11px] tabular-nums ${isRunning ? 'font-medium text-teal-700' : 'text-slate-500'}`}>
             {isRunning ? 'Running…' : item.duration !== null ? formatRelativeTime(item.duration) : ''}
           </span>
         </li>

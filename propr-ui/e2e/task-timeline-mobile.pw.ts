@@ -1,4 +1,5 @@
 import { expect, test } from '@playwright/test';
+import { DESKTOP_UI_COMMAND_EVENT } from '../src/desktop/useDesktopNativeCommands';
 import { capture, fixRun, fixture } from './task-list-desktop.fixture';
 
 test('390px the full-page timeline wraps each run\'s result, time and duration under a readable summary', async ({ page }) => {
@@ -33,11 +34,16 @@ test('390px the full-page timeline wraps each run\'s result, time and duration u
 
 // Exercise the production task page and TaskStatusTable, with long execution labels
 // supplied through its history API (all other requests use the privacy-safe fixture).
-for (const width of [320, 360, 390, 430, 520, 768, 1280, 2560]) {
-  test(`${width}px expanded steps keep readable labels and usable run controls`, async ({ browser }) => {
-    const context = await browser.newContext({ viewport: { width, height: 1000 }, hasTouch: true });
+const layoutsToCheck = [
+  ...[320, 360, 390, 430, 520, 667, 768, 915, 1280, 1920, 2560].map(width => ({ width, hasTouch: true, hideSidebar: false })),
+  ...[520, 768, 1280, 1920, 2560].map(width => ({ width, hasTouch: false, hideSidebar: false })),
+  ...[true, false].map(hasTouch => ({ width: 1920, hasTouch, hideSidebar: true })),
+];
+for (const { width, hasTouch, hideSidebar } of layoutsToCheck) {
+  test(`${width}px ${hasTouch ? 'touch' : 'mouse'} ${hideSidebar ? 'sidebar hidden' : 'sidebar visible'} expanded steps keep readable labels and usable run controls`, async ({ browser }) => {
+    const context = await browser.newContext({ viewport: { width, height: hasTouch && [667, 915].includes(width) ? 390 : 1000 }, hasTouch });
     const page = await context.newPage();
-    await fixture(page);
+    await fixture(page, hideSidebar ? 'linux' : undefined);
     const label = 'Review CheckoutSummary.tsx and verify the checkout confirmation keyboard navigation';
     await page.route(`**/api/task/${fixRun}/history`, async route => {
       // No live server is needed: use the same fixture history with a realistic long label.
@@ -54,19 +60,28 @@ for (const width of [320, 360, 390, 430, 520, 768, 1280, 2560]) {
     await page.goto(`/tasks/${fixRun}`);
     const runs = page.getByTestId('run-timeline-run');
     await expect(runs).toHaveCount(8);
+    if (hideSidebar) {
+      await page.evaluate(event => window.dispatchEvent(new CustomEvent(event, { detail: 'toggle-sidebar' })), DESKTOP_UI_COMMAND_EVENT);
+      await expect(page.locator('.desktop-sidebar-hidden')).toBeVisible();
+    }
     const assertRunControlHeights = async () => {
       const heights = await runs.locator(':scope > button').evaluateAll(buttons =>
         buttons.map(button => button.getBoundingClientRect().height));
       expect(heights).toHaveLength(8);
       for (const [index, height] of heights.entries()) {
-        expect(height, `Run ${index + 1} at ${width}px; all heights: ${heights}`).toBeGreaterThanOrEqual(width < 640 ? 44 : 32);
+        expect(height, `Run ${index + 1} at ${width}px; all heights: ${heights}`).toBeGreaterThanOrEqual(hasTouch || width < 1024 ? 44 : 32);
+      }
+      if (!hasTouch && (width === 2560 || hideSidebar)) {
+        // Short closed rows retain the ordinary wide mouse density.
+        expect(heights[0]).toBe(32);
       }
     };
     const open = runs.nth(1).getByRole('button');
     const steps = page.getByRole('list', { name: 'Run steps' });
     await expect(steps).toContainText(label);
-    // The full-page desktop uses a 30% pane: 1280 exercises stacking there,
-    // while 768 and 2560 exercise the unchanged aligned columns.
+    // The 30% pane stacks at 1280. At 1920 the web sidebar leaves only 467px;
+    // the desktop hide-sidebar command gives it ~539px and aligned labels.
+    // Tablet/landscape and 2560 also have room for the aligned columns.
     const timelineWidth = await steps.evaluate(el => el.getBoundingClientRect().width);
     const layouts = await steps.locator(':scope > li').evaluateAll(rows => rows.map(row => {
       const [time, content, duration] = Array.from(row.children).slice(1) as HTMLElement[];
@@ -77,12 +92,13 @@ for (const width of [320, 360, 390, 430, 520, 768, 1280, 2560]) {
     }));
     for (const layout of layouts) {
       expect(layout.overflow, JSON.stringify(layout)).toBe(false);
-      if (timelineWidth < 640) {
+      if (width <= 520 || width === 1280 || (width === 1920 && !hideSidebar)) {
         expect(layout.label.width).toBeGreaterThanOrEqual(timelineWidth - 53);
         expect(layout.label.top).toBeGreaterThanOrEqual(layout.time.bottom);
         expect(layout.duration.top).toBeGreaterThanOrEqual(layout.label.bottom);
         expect(layout.duration.left).toBe(layout.label.left);
       } else {
+        expect(layout.label.width).toBeGreaterThanOrEqual(260);
         const run = await open.evaluate(button => ({
           summary: button.querySelector('[title].truncate')!.getBoundingClientRect().left,
           duration: button.querySelector('[data-testid="run-timeline-meta"]')!.lastElementChild!.getBoundingClientRect().right,
@@ -104,8 +120,12 @@ for (const width of [320, 360, 390, 430, 520, 768, 1280, 2560]) {
     expect(control!.x).toBeGreaterThanOrEqual(0);
     expect(control!.x + control!.width).toBeLessThanOrEqual(width);
     await assertRunControlHeights();
-    await capture(page, `task-step-labels-${width}`);
-    await open.tap();
+    const previewName = `task-step-labels-${width}-${hasTouch ? 'touch' : 'mouse'}${hideSidebar ? '-sidebar-hidden' : ''}`;
+    await capture(page, previewName);
+    if (process.env.PROPR_CAPTURE_PREVIEWS) {
+      await scroller.screenshot({ animations: 'disabled', path: `../.propr/previews/${previewName}-timeline.png` });
+    }
+    await open[hasTouch ? 'tap' : 'click']();
     await expect(open).toHaveAttribute('aria-expanded', 'false');
     await expect(steps).toHaveCount(0);
     await assertRunControlHeights();
@@ -115,10 +135,10 @@ for (const width of [320, 360, 390, 430, 520, 768, 1280, 2560]) {
     await expect(steps).toContainText(label);
     await page.keyboard.press('Space');
     await expect(open).toHaveAttribute('aria-expanded', 'false');
-    await open.tap();
+    await open[hasTouch ? 'tap' : 'click']();
     await expect(steps).toContainText(label);
     // Selecting another run still loads its own history and leaves just that run open.
-    await runs.nth(2).getByRole('button').tap();
+    await runs.nth(2).getByRole('button')[hasTouch ? 'tap' : 'click']();
     await expect(runs.nth(2).getByRole('button')).toHaveAttribute('aria-expanded', 'true');
     await expect(open).toHaveAttribute('aria-expanded', 'false');
     await expect(steps).toHaveCount(1);

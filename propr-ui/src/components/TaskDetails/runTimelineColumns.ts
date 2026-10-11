@@ -6,8 +6,11 @@
  *   ●  ▾  Run 3  REVIEW   Found 2 issues  [6]  39 mins ago   3m 00s
  *   │  ├──  11:21:00      Task Queued                        12s
  *
- * BranchSteps stacks these fields when its container is narrower than 640px,
- * including narrow desktop panes, so fixed columns cannot crush step labels.
+ * BranchSteps stacks below 528px of container width, including narrow desktop
+ * panes. Aligned rows spend 268px on the lead inset (48), tag (136), duration
+ * (64), two gaps (16) and right padding (4), leaving at least 260px for labels.
+ * Thus a ~539px pane at 1920px with the sidebar hidden stays aligned;
+ * 1280px/30% panes and 1920px panes narrowed by the web sidebar still stack.
  */
 
 /** Node box (16px + 4px margin), gap, caret (12px), gap: where the tag column starts. */
