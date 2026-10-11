@@ -698,8 +698,7 @@ describe('PR check routing', () => {
 
     test('reports cancelled shards as cancelled and posts no report for a superseded run', () => {
         const gate = jobBlock(fullSuite, 'test');
-        assert.match(gate, /\$\{\{ always\(\) &&\n/, 'the gate still fails a cancelled run closed');
-        assert.doesNotMatch(gate, /cancelled\(\)/);
+        assert.match(gate, /\$\{\{ !cancelled\(\) &&\n/, 'cancelled runs must not emit synthetic aggregate failures');
         const comment = jobBlock(fullSuite, 'comment');
         assert.match(comment, /\$\{\{ always\(\) && !cancelled\(\) && github\.event_name == 'pull_request' &&\n/);
 
