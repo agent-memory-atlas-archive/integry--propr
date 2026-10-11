@@ -10,7 +10,7 @@ import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
 
 import {
-  API_URL, REPO, SKIP_SLOW, NO_CLEANUP, MISSING_ENV,
+  MODEL_TASK_TIMEOUT_MS, API_URL, REPO, SKIP_SLOW, NO_CLEANUP, MISSING_ENV,
   createTestClient, sleep, withE2EWork,
   type ModelTestResult, type AgentModelPair,
   newModelResult,
@@ -465,7 +465,7 @@ describe("ProPR CLI E2E", {
   });
 
   // 11. Bounded model-matrix implementation
-  describe("11. Model matrix", { timeout: 3_600_000, skip: SKIP_SLOW ? "SKIP_SLOW" : false }, () => {
+  describe("11. Model matrix", { timeout: MODEL_MATRIX_PLAN_BUDGET_MS + 2 * MODEL_TASK_TIMEOUT_MS + 5 * 60_000, skip: SKIP_SLOW ? "SKIP_SLOW" : false }, () => {
     it("create plans with enough issues", { timeout: MODEL_MATRIX_PLAN_BUDGET_MS + PLAN_SUITE_CLEANUP_MS }, async (t) => {
       const pairs = allPairs();
       if (pairs.length === 0) return;

@@ -119,7 +119,7 @@ export function formatFailureReport({ runUrl, sha, failures, heading = "Nightly 
       parts.push("_No log excerpt is available; see the run._");
     }
   }
-  parts.push("", "Sanitized test output is attached to the run as the `nightly-test-output` artifact when the suite ran.");
+  parts.push("", "Sanitized test output is attached to the run as `nightly-test-output-<run>-<attempt>-full` and `nightly-test-output-<run>-<attempt>-live` artifacts when the corresponding suite failed.");
   return parts.join("\n");
 }
 
@@ -204,7 +204,7 @@ const readText = (path) => {
 
 const responseText = (data) => (typeof data === "string" ? data : Buffer.from(data ?? "").toString("utf8"));
 
-// The suite job's test steps continue on error and report their outcomes as
+// The suite jobs' test steps continue on error and report their outcomes as
 // job outputs; only a failed test step has an output artifact describing it.
 // A configuration failure, or any failure after passing tests, is read from
 // the job log instead.
@@ -223,10 +223,10 @@ function suiteArtifactExcerpt(diagnosticsDir, failedSteps) {
 
 /**
  * Names the failed jobs and steps of this run attempt with a log excerpt each.
- * The suite job's excerpt comes from the sanitized output artifact of its
+ * Each suite job's excerpt comes from the sanitized output artifact of its
  * failed test step; anything else uses the GitHub job log.
  */
-export async function collectFailures({ github, owner, repo, runId, runAttempt, diagnosticsDir, suiteJobName, suiteStepOutcomes = {}, currentJobName, log = () => {} }) {
+export async function collectFailures({ github, owner, repo, runId, runAttempt, diagnosticsDir, suiteJobs = {}, currentJobName, log = () => {} }) {
   const jobs = await github.paginate(github.rest.actions.listJobsForWorkflowRunAttempt, {
     owner,
     repo,
@@ -239,8 +239,9 @@ export async function collectFailures({ github, owner, repo, runId, runAttempt, 
     if (job.name === currentJobName || !FAILED_CONCLUSIONS.has(job.conclusion)) continue;
     const steps = (job.steps ?? []).filter((step) => FAILED_CONCLUSIONS.has(step.conclusion)).map((step) => step.name);
     let excerpt = "";
-    if (job.name === suiteJobName) {
-      const failedSteps = SUITE_STEPS.filter((step) => suiteStepOutcomes?.[step.output] === "failure");
+    const outcomes = suiteJobs[job.name];
+    if (outcomes) {
+      const failedSteps = SUITE_STEPS.filter((step) => outcomes[step.output] === "failure");
       for (const step of [...failedSteps].reverse()) {
         if (!steps.includes(step.name)) steps.unshift(step.name);
       }
@@ -279,8 +280,8 @@ export async function runNightlyHealth({ github, context, core, env = process.en
       runId: context.runId,
       runAttempt: Number(env.GITHUB_RUN_ATTEMPT) || 1,
       diagnosticsDir: env.NIGHTLY_DIAGNOSTICS_DIR,
-      suiteJobName: env.NIGHTLY_SUITE_JOB_NAME,
-      suiteStepOutcomes: needs[env.NIGHTLY_SUITE_JOB_ID]?.outputs ?? {},
+      suiteJobs: Object.fromEntries(Object.entries(JSON.parse(env.NIGHTLY_SUITE_JOBS || "{}"))
+        .map(([id, name]) => [name, needs[id]?.outputs ?? {}])),
       currentJobName: env.NIGHTLY_HEALTH_JOB_NAME,
       log,
     })

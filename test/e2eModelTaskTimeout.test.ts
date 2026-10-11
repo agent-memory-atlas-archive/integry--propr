@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import { MODEL_MATRIX_PLAN_BUDGET_MS, PLAN_SUITE_CLEANUP_MS } from "./e2e/planGeneration.js";
 import { describe, test } from "node:test";
 import assert from "node:assert/strict";
 import {
@@ -22,4 +24,16 @@ describe("E2E model-task timeout configuration", () => {
       assert.equal(parseModelTaskTimeoutMs(value, fallback), fallback, value);
     }
   });
+});
+
+// Read the live suite declaration without importing or executing live tests.
+test("model suite accommodates plan creation, both polling phases and cleanup within the live work budget", () => {
+  const source = readFileSync(new URL("./e2e.test.ts", import.meta.url), "utf8");
+  const expression = source.match(/describe\("11\. Model matrix", \{ timeout: ([^,]+),/)?.[1];
+  assert.ok(expression);
+  for (const taskBudget of [1_500_000, DEFAULT_MODEL_TASK_TIMEOUT_MS]) {
+    const suiteBudget = Function("MODEL_MATRIX_PLAN_BUDGET_MS", "MODEL_TASK_TIMEOUT_MS", `return ${expression}`)(MODEL_MATRIX_PLAN_BUDGET_MS, taskBudget);
+    assert.ok(suiteBudget >= MODEL_MATRIX_PLAN_BUDGET_MS + 2 * taskBudget + PLAN_SUITE_CLEANUP_MS);
+    assert.ok(suiteBudget < 110 * 60_000);
+  }
 });
