@@ -36,15 +36,16 @@ export const CHECKSUMS = 'SHA256SUMS';
 const FINAL_MANIFEST = 'desktop-release.json';
 
 // Every nightly job whose outcome bears on the bundle. `job` names the caller's
-// `needs` key; `output` names a step outcome the E2E job exports, because its
+// `needs` key; `output` names a step outcome a suite job exports, because its
 // test steps continue on error and only the step outcome says which one failed.
 export const NIGHTLY_CHECKS = Object.freeze([
   { id: 'native-packaging', label: 'Native packaging, install lifecycle, and checksum finalization', job: 'desktop-package' },
   { id: 'packaged-connect', label: 'Packaged Connect discovery', job: 'desktop-connect' },
   { id: 'native-electron', label: 'Native Electron units', job: 'native-electron' },
-  { id: 'full-test-suite', label: 'Full test suite', job: 'e2e-tests', output: 'full_tests' },
+  { id: 'full-test-suite', label: 'Full test suite', job: 'full-tests', output: 'full_tests' },
   { id: 'live-e2e-configuration', label: 'Live E2E configuration', job: 'e2e-tests', output: 'e2e_config' },
   { id: 'live-e2e', label: 'Live E2E (plan generation and model tasks)', job: 'e2e-tests', output: 'e2e_tests' },
+  { id: 'full-suite-job', label: 'Run Full Test Suite job', job: 'full-tests' },
   { id: 'e2e-job', label: 'Run E2E Test Suite job', job: 'e2e-tests' },
 ].map(check => Object.freeze(check)));
 

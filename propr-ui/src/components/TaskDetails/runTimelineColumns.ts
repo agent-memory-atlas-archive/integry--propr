@@ -1,10 +1,16 @@
 /**
  * The columns a run row and its steps share, so a step reads as part of its
- * run: its time sits in the run's tag column (`Run 3  REVIEW`), its label
+ * run on wide timelines: its time sits in the run's tag column (`Run 3  REVIEW`), its label
  * starts where the run's summary does, and its duration ends on the run's.
  *
  *   ●  ▾  Run 3  REVIEW   Found 2 issues  [6]  39 mins ago   3m 00s
  *   │  ├──  11:21:00      Task Queued                        12s
+ *
+ * BranchSteps stacks below 528px of container width, including narrow desktop
+ * panes. Aligned rows spend 268px on the lead inset (48), tag (136), duration
+ * (64), two gaps (16) and right padding (4), leaving at least 260px for labels.
+ * Thus a ~539px pane at 1920px with the sidebar hidden stays aligned;
+ * 1280px/30% panes and 1920px panes narrowed by the web sidebar still stack.
  */
 
 /** Node box (16px + 4px margin), gap, caret (12px), gap: where the tag column starts. */

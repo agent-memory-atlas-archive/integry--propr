@@ -193,7 +193,7 @@ describe("nightly health issue", () => {
       const messages = [];
       const failures = await collectFailures({
         github, owner: OWNER, repo: REPO, runId: 42, runAttempt: 2, diagnosticsDir: diagnostics,
-        suiteJobName: "Run E2E Test Suite", suiteStepOutcomes: { full_tests: "failure", e2e_config: "skipped", e2e_tests: "skipped" },
+        suiteJobs: { "Run E2E Test Suite": { full_tests: "failure", e2e_config: "skipped", e2e_tests: "skipped" } },
         currentJobName: "Nightly test health", log: (message) => messages.push(message),
       });
       assert.deepEqual(failures, [
@@ -218,7 +218,7 @@ describe("nightly health issue", () => {
       });
       const [failure] = await collectFailures({
         github, owner: OWNER, repo: REPO, runId: 42, runAttempt: 1, diagnosticsDir: diagnostics,
-        suiteJobName: "Run E2E Test Suite", suiteStepOutcomes: outcomes, currentJobName: "Nightly test health",
+        suiteJobs: { "Run E2E Test Suite": outcomes }, currentJobName: "Nightly test health",
       });
       return { failure, downloaded: github.calls.some(({ name }) => name === "downloadJobLogs") };
     } finally {
@@ -324,12 +324,11 @@ describe("nightly health issue", () => {
   it("is wired into the nightly workflow as a final job with issue write access", () => {
     const workflow = readFileSync(new URL("../.github/workflows/test-nightly.yml", import.meta.url), "utf8");
     const job = workflow.slice(workflow.indexOf("\n  nightly-health:\n"));
-    assert.match(job, /needs: \[e2e-tests, native-electron, desktop-package, desktop-connect, desktop-nightly-download\]/);
+    assert.match(job, /needs: \[full-tests, e2e-tests, native-electron, desktop-package, desktop-connect, desktop-nightly-download\]/);
     assert.match(job, /if: \$\{\{ !cancelled\(\) \}\}/);
     assert.match(job, /permissions:\n\s+contents: read\n\s+actions: read\n\s+issues: write\n/);
-    assert.match(job, /NIGHTLY_SUITE_JOB_ID: e2e-tests\n/);
-    assert.match(job, /NIGHTLY_SUITE_JOB_NAME: Run E2E Test Suite\n/);
-    const suiteJob = workflow.slice(workflow.indexOf("\n  e2e-tests:\n"), workflow.indexOf("\n  native-electron:\n"));
+    assert.match(job, /NIGHTLY_SUITE_JOBS:/);
+    const suiteJob = workflow.slice(workflow.indexOf("\n  full-tests:\n"), workflow.indexOf("\n  native-electron:\n"));
     for (const id of ["full_tests", "e2e_config", "e2e_tests"]) {
       assert.match(suiteJob, new RegExp(`\\n {6}${id}: \\$\\{\\{ steps\\.${id}\\.outcome \\}\\}\\n`), `the suite job exports the ${id} outcome`);
       assert.match(suiteJob, new RegExp(`\\n {8}id: ${id}\\n`));
