@@ -1,41 +1,5 @@
 import type { Express, RequestHandler } from 'express';
-import type {
-  createAdminRoutes,
-  createAdminMcpRoutes,
-  createAutomationDefinitionRoutes,
-  createAgentLoginRoutes,
-  createAgentRuntimeRoutes,
-  createAgentVersionRoutes,
-  createConfigRoutes,
-  createInstanceCatalogRoutes,
-  createVisualPreviewAuthRoutes,
-  createActiveWorkRoutes,
-  createDashboardRoutes,
-  createDockerRoutes,
-  createExecutionRoutes,
-  createFileChangesRoutes,
-  createGitHubRoutes,
-  createGoalRoutes,
-  createLLMMetricsRoutes,
-  createLiveDetailsRoutes,
-  createLlmLogsRoutes,
-  createNotificationRoutes,
-  createPlannerRoutes,
-  createQueueRoutes,
-  createRelevanceRoutes,
-  createRepoChatRoutes,
-  createRepoImprovementsRoutes,
-  createRepoTodoRoutes,
-  createReviewScoreRoutes,
-  createStatsRoutes,
-  createStatusRoutes,
-  createSummaryBrowserRoutes,
-  createTaskAssignmentRoutes,
-  createTaskHistoryRoutes,
-  createTaskRoutes,
-  createUserRepoPreferencesRoutes,
-  createVoiceRoutes,
-} from './routes/index.js';
+import type * as routes from './routes/index.js';
 import type { createPreviewMediaRoutes } from './routes/previewMediaRoutes.js';
 import type { createRepositoryMediaRoutes } from './routes/repositoryMediaRoutes.js';
 import type { createTaskSubmissionRoutes } from './routes/taskSubmissionRoutes.js';
@@ -57,47 +21,47 @@ export type RouteMethod = 'get' | 'post' | 'put' | 'patch' | 'delete';
 export type RouteEntry = [RouteMethod, string, ...RequestHandler<never>[]];
 
 interface ManagementRouteDeps {
-  adminRoutes: ReturnType<typeof createAdminRoutes>;
-  adminMcpRoutes: ReturnType<typeof createAdminMcpRoutes>;
-  agentLoginRoutes: ReturnType<typeof createAgentLoginRoutes>;
-  agentRuntimeRoutes: ReturnType<typeof createAgentRuntimeRoutes>;
-  agentVersionRoutes: ReturnType<typeof createAgentVersionRoutes>;
-  configRoutes: ReturnType<typeof createConfigRoutes>;
-  visualPreviewAuthRoutes: ReturnType<typeof createVisualPreviewAuthRoutes>;
+  adminRoutes: ReturnType<typeof routes.createAdminRoutes>;
+  adminMcpRoutes: ReturnType<typeof routes.createAdminMcpRoutes>;
+  agentLoginRoutes: ReturnType<typeof routes.createAgentLoginRoutes>;
+  agentRuntimeRoutes: ReturnType<typeof routes.createAgentRuntimeRoutes>;
+  agentVersionRoutes: ReturnType<typeof routes.createAgentVersionRoutes>;
+  configRoutes: ReturnType<typeof routes.createConfigRoutes>;
+  visualPreviewAuthRoutes: ReturnType<typeof routes.createVisualPreviewAuthRoutes>;
 }
 
 interface OperationalRouteDeps {
-  activeWorkRoutes: ReturnType<typeof createActiveWorkRoutes>;
-  automationDefinitionRoutes: ReturnType<typeof createAutomationDefinitionRoutes>;
-  dashboardRoutes: ReturnType<typeof createDashboardRoutes>;
-  dockerRoutes: ReturnType<typeof createDockerRoutes>;
-  executionRoutes: ReturnType<typeof createExecutionRoutes>;
-  fileChangesRoutes: ReturnType<typeof createFileChangesRoutes>;
-  githubRoutes: ReturnType<typeof createGitHubRoutes>;
-  goalRoutes: ReturnType<typeof createGoalRoutes>;
-  liveDetailsRoutes: ReturnType<typeof createLiveDetailsRoutes>;
-  llmLogsRoutes: ReturnType<typeof createLlmLogsRoutes>;
-  llmMetricsRoutes: ReturnType<typeof createLLMMetricsRoutes>;
-  notificationRoutes: ReturnType<typeof createNotificationRoutes>;
-  plannerRoutes: ReturnType<typeof createPlannerRoutes>;
+  activeWorkRoutes: ReturnType<typeof routes.createActiveWorkRoutes>;
+  automationDefinitionRoutes: ReturnType<typeof routes.createAutomationDefinitionRoutes>;
+  dashboardRoutes: ReturnType<typeof routes.createDashboardRoutes>;
+  dockerRoutes: ReturnType<typeof routes.createDockerRoutes>;
+  executionRoutes: ReturnType<typeof routes.createExecutionRoutes>;
+  fileChangesRoutes: ReturnType<typeof routes.createFileChangesRoutes>;
+  githubRoutes: ReturnType<typeof routes.createGitHubRoutes>;
+  goalRoutes: ReturnType<typeof routes.createGoalRoutes>;
+  liveDetailsRoutes: ReturnType<typeof routes.createLiveDetailsRoutes>;
+  llmLogsRoutes: ReturnType<typeof routes.createLlmLogsRoutes>;
+  llmMetricsRoutes: ReturnType<typeof routes.createLLMMetricsRoutes>;
+  notificationRoutes: ReturnType<typeof routes.createNotificationRoutes>;
+  plannerRoutes: ReturnType<typeof routes.createPlannerRoutes>;
   previewMediaRoutes: ReturnType<typeof createPreviewMediaRoutes>;
-  queueRoutes: ReturnType<typeof createQueueRoutes>;
-  relevanceRoutes: ReturnType<typeof createRelevanceRoutes>;
-  repoChatRoutes: ReturnType<typeof createRepoChatRoutes>;
-  repoImprovementsRoutes: ReturnType<typeof createRepoImprovementsRoutes>;
-  repoTodoRoutes: ReturnType<typeof createRepoTodoRoutes>;
+  queueRoutes: ReturnType<typeof routes.createQueueRoutes>;
+  relevanceRoutes: ReturnType<typeof routes.createRelevanceRoutes>;
+  repoChatRoutes: ReturnType<typeof routes.createRepoChatRoutes>;
+  repoImprovementsRoutes: ReturnType<typeof routes.createRepoImprovementsRoutes>;
+  repoTodoRoutes: ReturnType<typeof routes.createRepoTodoRoutes>;
   repositoryMediaRoutes: ReturnType<typeof createRepositoryMediaRoutes>;
-  reviewScoreRoutes: ReturnType<typeof createReviewScoreRoutes>;
-  statsRoutes: ReturnType<typeof createStatsRoutes>;
-  statusRoutes: ReturnType<typeof createStatusRoutes>;
-  summaryBrowserRoutes: ReturnType<typeof createSummaryBrowserRoutes>;
-  taskAssignmentRoutes: ReturnType<typeof createTaskAssignmentRoutes>;
-  taskHistoryRoutes: ReturnType<typeof createTaskHistoryRoutes>;
-  taskRoutes: ReturnType<typeof createTaskRoutes>;
+  reviewScoreRoutes: ReturnType<typeof routes.createReviewScoreRoutes>;
+  statsRoutes: ReturnType<typeof routes.createStatsRoutes>;
+  statusRoutes: ReturnType<typeof routes.createStatusRoutes>;
+  summaryBrowserRoutes: ReturnType<typeof routes.createSummaryBrowserRoutes>;
+  taskAssignmentRoutes: ReturnType<typeof routes.createTaskAssignmentRoutes>;
+  taskHistoryRoutes: ReturnType<typeof routes.createTaskHistoryRoutes>;
+  taskRoutes: ReturnType<typeof routes.createTaskRoutes>;
   taskSubmissionRoutes: ReturnType<typeof createTaskSubmissionRoutes>;
   usageTipsRoutes: ReturnType<typeof createUsageTipsRoutes>;
-  userRepoPreferencesRoutes: ReturnType<typeof createUserRepoPreferencesRoutes>;
-  voiceRoutes: ReturnType<typeof createVoiceRoutes>;
+  userRepoPreferencesRoutes: ReturnType<typeof routes.createUserRepoPreferencesRoutes>;
+  voiceRoutes: ReturnType<typeof routes.createVoiceRoutes>;
   /** Multipart parsers that must run before their route handlers. */
   taskSubmissionUpload: RequestHandler;
   goalAttachmentUpload: RequestHandler;
@@ -106,7 +70,7 @@ interface OperationalRouteDeps {
 }
 
 interface MemberCatalogRouteDeps {
-  instanceCatalogRoutes: ReturnType<typeof createInstanceCatalogRoutes>;
+  instanceCatalogRoutes: ReturnType<typeof routes.createInstanceCatalogRoutes>;
 }
 
 export function createManagementRouteEntries({
