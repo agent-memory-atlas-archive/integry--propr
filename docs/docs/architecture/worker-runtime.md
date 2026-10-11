@@ -30,7 +30,9 @@ Higher concurrency is not always better. Watch queue depth, model rate limits, r
 
 The separate `indexing-worker` service processes repository indexing jobs independently of implementation work.
 
-### Admission scope and Hosted follow-up (#2987)
+Hosted physical agent executions also share an instance-wide Redis admission boundary across workers, API and indexing. See [Physical agent-run admission](./agent-run-admission.md) for entitlement configuration, supported topology, the #2989 dependency and exact Fleet acceptance steps. Queue concurrency and physical execution capacity are separate limits.
+
+### Queue and physical admission scope
 
 The launcher defines one `worker` service per stack, alongside API and indexing services (`docker/launcher/orchestrator.mjs`). The following audit distinguishes queue slots from concurrent agent executions:
 
@@ -44,9 +46,9 @@ The launcher defines one `worker` service per stack, alongside API and indexing 
 | Usage tips | `src/usageTipsSelectionRunner.ts` calls analysis from a worker background timer. Its own singleton lease does not reserve a main-queue slot. |
 | Image preparation/runtime builds | Separate workers build artifacts; their concurrency settings are not agent-run admission limits. |
 
-**Separate scoped follow-up: instance-wide agent admission across worker, API and indexing execution.** Even with one main worker, N main-queue agent executions plus a planner, chat, indexing or usage-tip execution can exceed N concurrent agent runs. For example, Codex `analyze` launches an agent container, so calling these operations “analysis” does not exclude them from the audit. This change fixes concurrency resolution and tests the main-queue boundary; it does not close these bypasses or establish global entitlement enforcement.
+Queue admission alone does not bound instance-wide agent executions: even with one main worker, N main-queue agent executions plus planner, chat, indexing or usage-tip work can exceed N physical runs. Codex `analyze`, for example, launches an agent container. The shared physical admission boundary covers these container-backed paths independently of queue slots, including fallback/retry attempts. A global BullMQ main-queue limit alone would leave those paths outside the limit.
 
-The follow-up should put a shared instance-scoped admission lease around physical agent executions (`executeTask` and container-backed `analyze`), including sequential fallback/retry attempts. It needs cancellation-aware waiting, lease renewal/loss handling, crash recovery, release after container exit, and protection against double acquisition for nested calls. Regression coverage must saturate N slots and contend from API, indexing, background work and multiple workers, proving no N+1 execution starts and one release admits one waiter. A global BullMQ main-queue limit alone would leave the other paths open. This is a documented follow-up scope, not a recursively created task.
+The [physical agent-run admission guide](./agent-run-admission.md) describes cancellation-aware waiting, renewal/loss handling, crash recovery, release after container removal and avoidance of double acquisition for nested calls. Its regression and live acceptance checks cover contention from API, indexing, background work and multiple workers, proving no N+1 physical execution starts and one release admits one waiter.
 
 ### Fleet live acceptance of the exact core preview
 
@@ -54,7 +56,7 @@ Use normal ProPR orchestration to obtain the core preview for the resulting comm
 
 For Solo/Team/Scale desired concurrency 2/6/12, verify `CONFIG_REPO` is absent and each process receives the entitled `WORKER_CONCURRENCY`. In disposable acceptance fixtures, exercise absent, lower (`1`), higher (`50`) and malformed stored settings. Queue N+1 independent, runnable tasks through ordinary ProPR submission, keeping N agent executions open long enough to observe the boundary. Verify worker startup logs resolve N; workflow metadata with an explicit cap above N resolves N; exactly N main-queue jobs become active; the extra job stays waiting with no agent container; and releasing one admits the extra job. Repeat across repositories and without a workflow. Separately set a repository cap of 1, verify its other tasks defer while another repository can run, then verify release wakes a waiter.
 
-Self-hosted acceptance should additionally set `CONFIG_REPO` and verify valid lower/higher overrides and malformed-value fallback. Record queue states, task IDs, resolved workflow metadata, timestamps and agent container lifetimes, not just queue counts. Exercise the planner/chat/indexing/background paths while the main queue is saturated and report those results separately against the follow-up above; passing the queued-task checks is not proof of an instance-wide entitlement cap. Live acceptance must also confirm the actual Fleet topology matches the single-worker assumption. These are validation instructions; no live Fleet acceptance was performed by this patch.
+Self-hosted acceptance should additionally set `CONFIG_REPO` and verify valid lower/higher overrides and malformed-value fallback. Record queue states, task IDs, resolved workflow metadata, timestamps and agent container lifetimes, not just queue counts. Exercise the planner/chat/indexing/background paths while physical capacity is saturated and report those results against the physical admission guide; passing the queued-task checks alone is not proof of an instance-wide entitlement cap. Run the per-process queue checks with one main worker, then repeat physical admission acceptance with multiple workers sharing the instance ID, Redis database and Docker daemon required by that guide. These are validation instructions; no live Fleet acceptance was performed by this patch.
 
 ## Model-Specific Processing
 
