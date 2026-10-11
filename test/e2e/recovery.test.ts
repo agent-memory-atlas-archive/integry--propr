@@ -8,6 +8,7 @@
  * Optional: PROPR_E2E_SKIP_SLOW=1, PROPR_E2E_NO_CLEANUP=1
  */
 
+import { PlanWorkTracker, PLAN_SUITE_CLEANUP_MS, planDeadline } from "./planGeneration.js";
 import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
 
@@ -132,6 +133,8 @@ async function waitForTaskCancelled(
 // Root
 // ---------------------------------------------------------------------------
 
+const planWork = new PlanWorkTracker();
+
 describe("E2E Task Recovery", {
   skip: MISSING_ENV ? "Missing PROPR_E2E_API_URL, PROPR_E2E_TOKEN, PROPR_E2E_REPO" : false,
 }, () => {
@@ -140,6 +143,9 @@ describe("E2E Task Recovery", {
   });
 
   after(async () => {
+    if (!(await planWork.settle(PLAN_SUITE_CLEANUP_MS))) {
+      throw new Error(`Recovery cleanup deferred: ${planWork.size} plan operation(s) still running`);
+    }
     if (NO_CLEANUP) {
       console.log("  [cleanup] Skipped");
       return;
@@ -184,13 +190,14 @@ describe("E2E Task Recovery", {
     let testTaskId: string | null = null;
     let testDraftId: string | null = null;
 
-    it("create a plan with an issue for testing", async () => {
-      const { planId, issues } = await createAndGeneratePlan(
+    it("create a plan with an issue for testing", async (t) => {
+      const { planId, issues } = await planWork.track(createAndGeneratePlan(
         REPO!,
         "Create a simple utility function called 'formatDate' that takes a Date object and returns a formatted string in ISO format. Add it to src/utils/dateUtils.ts",
         client,
         createdPlanIds,
-      );
+        { signal: t.signal, deadline: planDeadline(240_000), tracker: planWork },
+      ));
 
       testDraftId = planId;
       assert.ok(issues.length > 0, "Expected at least 1 issue in the plan");

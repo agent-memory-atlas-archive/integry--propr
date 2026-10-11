@@ -39,6 +39,7 @@ function createRequest(): CiFailureFollowupRequest {
 function createRedis() {
     const values = new Map<string, string>();
     return {
+        get: mock.fn(async (key: string) => values.get(key) ?? null),
         set: mock.fn(async (key: string, value: string, ...args: Array<string | number>) => {
             if (args.includes('NX') && values.has(key)) return null;
             values.set(key, value);
@@ -89,8 +90,12 @@ describe('automatic failed-CI follow-up', () => {
         };
 
         const first = await postCiFailureFollowup(createRequest(), 'enabled-test', dependencies);
+        const requestsBeforeRedelivery = octokit.request.mock.callCount();
+        const paginationBeforeRedelivery = octokit.paginate.mock.callCount();
         const redelivery = await postCiFailureFollowup(createRequest(), 'redelivery-test', dependencies);
 
+        assert.strictEqual(octokit.request.mock.callCount(), requestsBeforeRedelivery);
+        assert.strictEqual(octokit.paginate.mock.callCount(), paginationBeforeRedelivery);
         assert.strictEqual(first.posted, true);
         assert.deepStrictEqual(redelivery, { posted: false, reason: 'duplicate' });
         assert.strictEqual(postedBodies.length, 1);
@@ -101,6 +106,28 @@ describe('automatic failed-CI follow-up', () => {
         assert.match(postedBodies[0], /expected 2 jobs but received 1/);
         assert.doesNotMatch(postedBodies[0], /long, generic job summary/);
         assert.ok(isCiFailureFollowupComment(postedBodies[0]));
+    });
+
+    test('a failed Redis pre-check still uses the atomic claim', async () => {
+        const redis = createRedis();
+        redis.get.mock.mockImplementation(async () => { throw new Error('GET unavailable'); });
+        const octokit = {
+            paginate: async () => [],
+            request: mock.fn(async () => ({ data: {} })),
+        };
+        const dependencies = {
+            isEnabled: async () => true,
+            getOctokit: async () => octokit,
+            redisClient: redis as never,
+        };
+        const results = await Promise.all([
+            postCiFailureFollowup(createRequest(), 'concurrent-a', dependencies),
+            postCiFailureFollowup(createRequest(), 'concurrent-b', dependencies),
+        ]);
+        assert.strictEqual(results.filter(result => result.posted).length, 1);
+        assert.strictEqual(results.filter(result => result.reason === 'duplicate').length, 1);
+        assert.strictEqual(redis.set.mock.callCount(), 2);
+        assert.strictEqual(redis.del.mock.callCount(), 0);
     });
 
     test('recognizes and strips only the hidden CI control marker', () => {

@@ -4,9 +4,115 @@ Draft staging/review candidate, targeting `main`. This is not release qualificat
 publication approval, or a replacement for the original feature PRs. No original
 issue should be closed by this candidate.
 
-## Exact source scope
+## Reconciliation addendum — 2026-10-11
 
-Base: `e44c57330e7a02628bc9206724d07470354fb61a`. Remote `main` matched this
+This follow-up started at `b430f376d64521bcfa71447cb59058ea1eb9e03f`,
+reconciled with main `a064a22c8d4110e0cec6f5f149344d408488362f`.
+The original `e44c573…` base, 53-path reconstruction, byte comparisons, hashes,
+and initial pending results below are retained history, not current qualification.
+No new main reconciliation or nightly dispatch was performed in this follow-up.
+
+The supplied operator history records these intervening revisions; these are
+reported prior-source results, not measurements made by this run:
+
+| Revision | Reconciliation / evidence boundary |
+| --- | --- |
+| `624eea7` | Original combined candidate; reported gram and CI-native 67 captures, eight smoke launches, and matching Electron/app.asar bytes apply here |
+| `dcddbc1` | Managed headless-shell menu fixture correction only; packaged byte equality was expected, but fresh binary/app.asar hashes at this revision are not available here |
+| `4080a7e` | Reviewed dispatch-owner child launch repair from #2953; historical live nightly `38110213760` failed, with cause still unknown |
+| `60204b6` | F1 capture recipe uses supported default output, then copies verified artifacts |
+| `6ed1c69` | Reconciled main `598574f4c54a5addd9ab236ea349e2edc39fb1f2`, including aggregate cancellation guard and three CI regression files |
+| `f4233f5` / `cf814a4` | F2 listener capability authentication and main `7e63393` incorporation, followed by actual ancestry reconciliation; reported cf814 full-suite and gram results remain prior-source evidence |
+| `b430f376` | Reconciled main `a064a22c`; operator reports 14 main paths across both #2983 and #2986, not just the latest merge's five paths |
+
+F2 is already present: a fresh random 32-byte daemon capability is checked before
+caller environment/path interpretation or filesystem access, and authenticated
+clients reside in private workspaces. This run rechecked all fixture client
+callers and retained the missing/empty/wrong-capability sentinel, state, mode,
+non-disclosure, and authenticated-cleanup regressions. The stray
+`.propr/validation-f2/final-paths.txt` operator report is removed.
+
+Selected follow-ups add the missing coordinator crash phases (including verified
+sibling omissions), early-review success, minimum first-attempt budget, bounded
+sequential/model polling and requests, cancellable recovery plan creation, a
+non-claiming Redis dedupe pre-check, empty-log handling, and the acceptance bridge
+type. Redis NX remains authoritative for concurrent deliveries; cancellation
+provenance still precedes any new claim. The E2E request scopes check cancellation
+on both sides of awaited requests and revoke further calls when closed. They
+cannot atomically cancel mutations already accepted by an external API; cleanup
+keeps its separate client and budget.
+
+The renderer fixture now records its actual browser path/version. Hosted workflow
+and `.propr/setup.sh` install commands use `playwright install chromium` without
+`--no-shell`; the managed launch requires the headless shell and fails loudly if
+it is absent. The original 30-second Back-click timeout and reported concurrent
+stress crash remain unexplained. This fixture change is not a root-cause claim.
+
+The main zoom authorization listener uses `on`, not a one-shot listener; the local
+regression checks repeated attestation for the same webContents. That is not a
+native reload test. At the next exact-head gram run, explicitly verify repeat
+preload attestation after each reload, Electron zoom persistence, all five
+Continue stages with the default draft, and the cancelled heading **Setup needs
+attention**. The first native run of these paths is a test, not confirmation of
+unit-proven behavior. Require the existing strict 67-capture gate, eight ordinary
+plus captured smoke launches, and setup-lifecycle report with `verified`.
+
+### Evidence from this follow-up
+
+Local results describe `b430f376` plus this working-tree correction only. The final
+candidate SHA is assigned after this work; no local result is represented as
+final-head CI or release qualification. No packaged executable or `app.asar` is
+available in this checkout, so neither historical `dcddbc1` re-hashing nor current
+native byte comparison was performed. Rebuild/hash at the final candidate using
+the recipe below, recording source/tree, lock and both artifact hashes together.
+The crash-phase change now affects packaged source, so old package hashes cannot
+qualify this correction.
+
+Canonical discovery was run anew with `node scripts/run-test-suite.mjs --list`:
+**803 unique units**, no duplicate identifiers. SHA-256 of sorted
+`kind:id` identifiers, newline terminated:
+`aa33ef76e595c4a3cac72c2581dfe1bed381fe336d3f0f85592041439bb32cd5`.
+This is discovery, not full-suite execution. Final-head CI must record its own
+manifest and prove every unit completed exactly once; prior 800/802-unit results
+must not be substituted.
+
+Focused checks on this correction tree:
+
+| Check | Result |
+| --- | --- |
+| Plan generation, implementation deadline, CI follow-up, shutdown phases, zoom authorization | 80 tests passed; no skips |
+| Three fake-Docker integration harness files | 24 tests passed; no skips |
+| Managed headless-shell menu fixture | 1 test passed; Chromium `151.0.7922.34`; no retry |
+| Four affected renderer fixture files | 32 tests passed; UI import-boundary checks also passed |
+| Desktop and UI typechecks; targeted E2E TypeScript check | Passed |
+| CI follow-up ESLint; documentation build; `git diff --check` | Passed |
+| Native package hashes, ordinary/captured Electron smoke, strict 67 captures, verified setup lifecycle, full final-head CI | Not run here; remain exact-head gates |
+
+The first focused invocation omitted test/demo configuration and could not load
+GitHub auth for the CI follow-up test. Its shutdown assertions also exposed the
+three sibling phase omissions now fixed. The initial UI typecheck identified the
+five stale bridge mocks now corrected; the targeted E2E typecheck identified test
+annotations now corrected. Subsequent focused checks above passed. No credentials
+or environment setup policy was changed to obtain these results.
+
+Keep further live-nightly dispatch paused until serving API evidence explains the
+historical failure. Dependent early returns do not demonstrate successful model
+implementation. Runtime binding, first-user installation/pairing/task behavior,
+the three repository actor boundaries, and separate Mac GUI qualification remain
+outside demonstrated results. Browser fixture results never replace native
+Electron coverage. The clean final-SHA recipe and all existing qualification
+boundaries below still apply.
+
+### Separate observation outside the selected corrections
+
+The main E2E cleanup in `test/e2e.test.ts` logs a plan-work settlement timeout and
+then continues deleting known plans. If a request remains pending beyond that
+wait, cleanup can overlap it. This existing behavior is unchanged; the recovery
+call updated for S17 instead defers cleanup when its new tracker cannot settle.
+
+## Original preparation scope (historical)
+
+Original preparation base: `e44c57330e7a02628bc9206724d07470354fb61a`. Remote `main` matched this
 revision when preparation began and on the preparation recheck. Recheck it at handoff; a changed main requires
 explicit reconciliation and new evidence, not a silent rebase.
 
@@ -33,7 +139,7 @@ data-only fixtures and normal keyboard actions, and Electron 44.7.0 with opt-in
 private Linux crash diagnostics. No assertion, fuse, sandbox, authorization,
 timeout, or cleanup ownership boundary was relaxed to integrate them.
 
-## Evidence status and retained failures
+## Original evidence status and retained failures (historical)
 
 Local implementation checks are recorded below. They do not transfer the four
 PRs' review scores, CI passes, native captures, or nightly results to this combined
@@ -148,7 +254,7 @@ setup stays on its separate qualification branch; human Safe Storage approval an
 real GUI lifecycle remain pending, not excluded or implicitly complete. No
 user-owned server cleanup, TTL, or repository inventory work is included.
 
-## Local validation
+## Original local validation (historical)
 
 Implementation workspace: Linux x64, build Node 22.23.3. Evidence applies to the
 exact base plus the incorporated working-tree delta, not a future final commit.
@@ -198,7 +304,7 @@ npm run gen:openapi:check
 npm run check:client-contract
 ```
 
-Byte comparison verified 52 incorporated paths (including deletions) exactly
+At initial preparation, byte comparison verified 52 incorporated paths (including deletions) exactly
 match their requested heads; the 53rd is the reconciled PR-follow-up documentation.
 The real image integration script/root helper, Forge security configuration and
 bounded Linux setup lifecycle harness remain byte-identical to base. `git diff
@@ -215,7 +321,11 @@ Local artifact SHA-256 values (not final-head native qualification):
 Full local logs are retained under `/tmp/propr-2980/` for this workspace session.
 These transient logs are not a substitute for durable final-head CI artifacts.
 
-## Changed paths
+## Changed paths against reconciled main
+
+Current correction tree versus `a064a22c`: 61 paths. Regenerate with
+`git diff --name-only a064a22c8d4110e0cec6f5f149344d408488362f <final-candidate-sha>`
+at final handoff; this supersedes the original preparation path list.
 
 ```text
 .github/workflows/test-nightly.yml
@@ -223,6 +333,7 @@ apps/desktop/README.md
 apps/desktop/package.json
 apps/desktop/scripts/acceptance-artifacts.mjs
 apps/desktop/scripts/acceptance-artifacts.test.mjs
+apps/desktop/scripts/desktop-native-menu.test.mjs
 apps/desktop/scripts/native-shutdown-diagnostics.test.mjs
 apps/desktop/scripts/packaged-acceptance-setup.mjs
 apps/desktop/scripts/packaged-acceptance-setup.test.mjs
@@ -233,6 +344,7 @@ apps/desktop/scripts/run-packaged-acceptance.mjs
 apps/desktop/scripts/smoke-packaged.mjs
 apps/desktop/src/acceptance-setup.test.ts
 apps/desktop/src/acceptance-setup.ts
+apps/desktop/src/acceptance-zoom.test.ts
 apps/desktop/src/credential-service.ts
 apps/desktop/src/main.ts
 apps/desktop/src/native-shutdown-diagnostics.test.ts
@@ -252,7 +364,9 @@ packages/api/test/plannerBackgroundLifecycle.test.ts
 packages/cli/src/api/plans.ts
 packages/core/src/webhook/ciCancellationProvenance.ts
 packages/core/src/webhook/ciFailureFollowup.ts
+packages/core/test/taskSubmissionService.test.ts
 propr-ui/src/App.hostedFlow.test.tsx
+propr-ui/src/api/currentUserResponse.test.ts
 propr-ui/src/desktop/DesktopExperience.tsx
 propr-ui/src/desktop/LocalSetupWizard.integration.test.tsx
 propr-ui/src/desktop/PackagedAcceptanceLocalSetup.test.tsx
@@ -260,11 +374,14 @@ propr-ui/src/desktop/PackagedAcceptanceLocalSetup.tsx
 propr-ui/src/desktop/desktop.css
 propr-ui/src/desktop/desktopExperienceState.ts
 propr-ui/src/desktop/packagedAcceptanceLocalSetupSurface.ts
+propr-ui/src/desktop/packagedAcceptanceRendererLifecycle.test.ts
+propr-ui/src/hooks/useCurrentUserBootstrap.mainProxy.test.tsx
 propr-ui/src/vite-env.d.ts
 test/ciFailureFollowup.test.ts
 test/e2e.test.ts
 test/e2e/helpers.ts
 test/e2e/planGeneration.ts
+test/e2e/recovery.test.ts
 test/e2ePlanGeneration.test.ts
 test/e2eTaskCompletion.test.ts
 test/fixtures/integration-image-harness/fake-docker.mjs

@@ -33,7 +33,7 @@ export const PLAN_ISSUES_TIMEOUT_MS = 2 * 60_000;
 // Time the enclosing test keeps after the helper's deadline to report the
 // failure and let the suite's own cleanup run before node:test cancels it.
 export const PLAN_SUITE_CLEANUP_MS = 60_000;
-// A retry is only started when this much of the budget is left; a shorter
+// An attempt is only started when this much of the retry-managed budget is left; a shorter
 // attempt could not plausibly reach review and finalization.
 export const PLAN_RETRY_MIN_REMAINING_MS = 5 * 60_000;
 // Budget of one plan-creation test: one full slow attempt plus room for a quick
@@ -284,7 +284,7 @@ async function runPlanAttempt(
       `Plan ${label} was still ${currentPlan.status} when its generation deadline expired; it did not reach review.`,
     );
   }
-  if (!sawGenerating || currentPlan.status === "failed") {
+  if ((!sawGenerating && currentPlan.status !== "review") || currentPlan.status === "failed") {
     const reason = currentPlan.generation_trace?.error;
     if (typeof reason === "string" && reason) {
       log(`    Plan ${label} failed: ${reason}`);
@@ -339,7 +339,7 @@ export async function createPlanWithRetries(
   let lastResult: { planId: string; issues: PlanIssue[] } | null = null;
   for (let attempt = 1; attempt <= attempts; attempt++) {
     planOptions.signal?.throwIfAborted();
-    if (attempt > 1 && deadline - now() < PLAN_RETRY_MIN_REMAINING_MS) {
+    if (deadline - now() < PLAN_RETRY_MIN_REMAINING_MS) {
       log(`    ${label} plan: ${Math.max(0, deadline - now())}ms left, not starting attempt ${attempt}`);
       break;
     }

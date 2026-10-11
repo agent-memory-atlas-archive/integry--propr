@@ -11,7 +11,7 @@ import assert from "node:assert/strict";
 
 import {
   API_URL, REPO, SKIP_SLOW, NO_CLEANUP, MISSING_ENV,
-  createTestClient, sleep,
+  createTestClient, sleep, withE2EWork,
   type ModelTestResult, type AgentModelPair,
   newModelResult,
   createAndGeneratePlan, createPlanWithRetries, waitForTasks, pollTasksToCompletion, assertModelTasksSucceeded,
@@ -71,10 +71,10 @@ function allPairs(): AgentModelPair[] {
   return selectAgentModelPairs(availableAgents, modelPairLimit);
 }
 
-async function listAllLlmLogs(options: Omit<ListLlmLogsOptions, "page" | "limit">): Promise<LlmLogEntry[]> {
+async function listAllLlmLogs(options: Omit<ListLlmLogsOptions, "page" | "limit">, logClient = client): Promise<LlmLogEntry[]> {
   const logs: LlmLogEntry[] = [];
   for (let page = 1; ; page++) {
-    const result = await listLlmLogs({ ...options, page, limit: 100 }, client);
+    const result = await listLlmLogs({ ...options, page, limit: 100 }, logClient);
     logs.push(...result.logs);
     if (!result.pagination.hasNextPage) return logs;
   }
@@ -350,7 +350,7 @@ describe("ProPR CLI E2E", {
       console.log(`    Created plan with ${issues.length} issues`);
     });
 
-    it("trigger sequential processing (useEpic + autoMerge)", async () => {
+    it("trigger sequential processing (useEpic + autoMerge)", async (t) => withE2EWork(client, t.signal, async (client) => {
       if (!sequentialPlanId) {
         console.log("    Skipping: no plan created");
         return;
@@ -366,9 +366,9 @@ describe("ProPR CLI E2E", {
 
       console.log(`    Epic label: ${result.epicLabel}`);
       console.log(`    Auto-merge: ${result.autoMergeEnabled}`);
-    });
+    }));
 
-    it("first issue is in-progress, subsequent issues remain pending", async () => {
+    it("first issue is in-progress, subsequent issues remain pending", async (t) => withE2EWork(client, t.signal, async (client, sleep) => {
       if (!sequentialPlanId) {
         console.log("    Skipping: no plan created");
         return;
@@ -392,9 +392,9 @@ describe("ProPR CLI E2E", {
       for (const issue of issues) {
         console.log(`    Issue #${issue.issue_number}: ${issue.status}`);
       }
-    });
+    }));
 
-    it("in-progress issue blocks next trigger", async () => {
+    it("in-progress issue blocks next trigger", async (t) => withE2EWork(client, t.signal, async (client) => {
       if (!sequentialPlanId) {
         console.log("    Skipping: no plan created");
         return;
@@ -428,9 +428,9 @@ describe("ProPR CLI E2E", {
       );
 
       console.log(`    Verified: ${pendingIssues.length} pending issue(s) blocked by in-progress issue #${inProgressIssue.issue_number}`);
-    });
+    }));
 
-    it("poll first issue to completion", { timeout: 600_000 }, async () => {
+    it("poll first issue to completion", { timeout: 600_000 }, async (t) => withE2EWork(client, t.signal, async (client) => {
       if (!sequentialPlanId) {
         console.log("    Skipping: no plan created");
         return;
@@ -461,7 +461,7 @@ describe("ProPR CLI E2E", {
       assert.ok(progressedIssue, "Expected at least one issue to progress to under_review, merged, or closed");
 
       console.log(`    Issue #${progressedIssue!.issue_number} progressed to: ${progressedIssue!.status}`);
-    });
+    }));
   });
 
   // 11. Bounded model-matrix implementation
@@ -499,7 +499,7 @@ describe("ProPR CLI E2E", {
       assert.ok(collected.length >= needed, `Expected at least ${needed} issues, got ${collected.length}`);
     });
 
-    it("multi-model parallel: all models on one issue", async () => {
+    it("multi-model parallel: all models on one issue", async (t) => withE2EWork(client, t.signal, async (client) => {
       const pairs = allPairs();
       if (pairs.length < 2) return;
 
@@ -521,9 +521,9 @@ describe("ProPR CLI E2E", {
       await waitForTasks(pr, REPO!, client);
       await pollTasksToCompletion(pr, client);
       assertModelTasksSucceeded(pr);
-    });
+    }));
 
-    it("single-model: each model on a separate issue", async () => {
+    it("single-model: each model on a separate issue", async (t) => withE2EWork(client, t.signal, async (client) => {
       const pairs = allPairs();
       const used = new Set(modelTestResults.map((r) => r.issueNumber));
 
@@ -547,21 +547,21 @@ describe("ProPR CLI E2E", {
       await waitForTasks(sr, REPO!, client);
       await pollTasksToCompletion(sr, client);
       assertModelTasksSucceeded(sr);
-    });
+    }));
 
-    it("every model has execution history", async () => {
+    it("every model has execution history", async (t) => withE2EWork(client, t.signal, async (client) => {
       for (const r of modelTestResults.filter((r) => r.taskId)) {
         const s = await getTaskStatus(r.taskId!, client);
         r.hasHistory = s.history.length > 1;
         r.historyCount = s.history.length;
         assert.ok(s.history.length > 0, `${r.agent_alias}/${r.model_name} no history`);
       }
-    });
+    }));
 
-    it("collect LLM logs", async () => {
+    it("collect LLM logs", async (t) => withE2EWork(client, t.signal, async (client) => {
       const withTasks = modelTestResults.filter((r) => r.taskId && r.finalState);
       for (const pid of createdPlanIds) {
-        const logs = await listAllLlmLogs({ draftId: pid });
+        const logs = await listAllLlmLogs({ draftId: pid }, client);
         for (const r of withTasks) {
           const ml = logs.filter((l) => l.agentAlias === r.agent_alias);
           r.logCount += ml.length;
@@ -570,7 +570,7 @@ describe("ProPR CLI E2E", {
           r.outputTokens += ml.reduce((s, l) => s + (l.outputTokens ?? 0), 0);
         }
       }
-    });
+    }));
   });
 
   // 12. Report + verification

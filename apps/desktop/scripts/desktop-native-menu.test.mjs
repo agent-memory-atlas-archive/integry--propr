@@ -39,14 +39,21 @@ it('Linux/macOS menu dispatch reaches actual search, sidebar, task creation, con
       response.end(await readFile(join(directory, asset)));
     });
     await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
-    // Let Playwright select its headless shell for the managed browser. Passing
-    // chromium.executablePath() forces full Chrome instead; avoid that compositor
-    // path for the animation-frame stability checks that timed out in CI.
-    // Keep the system Chromium fallback for machines without a managed install.
+    // The managed path requires chromium-headless-shell: install with
+    // `playwright install chromium` (without --no-shell), as CI and setup do.
+    // chromium.executablePath() above checks full Chromium, not shell presence;
+    // an incomplete managed installation must fail loudly at launch.
+    // Shell and system Chromium exercise different rendering paths. This fixture
+    // choice does not establish the cause of the prior Back-click timeout or
+    // the reported concurrent-stress crash; native Electron evidence is separate.
+    context.diagnostic(executablePath === chromium.executablePath()
+      ? 'Renderer: Playwright managed chromium-headless-shell'
+      : `Renderer: full system Chromium (${executablePath})`);
     browser = await chromium.launch({
       executablePath: executablePath === chromium.executablePath() ? undefined : executablePath,
       args: ['--no-sandbox'],
     });
+    context.diagnostic(`Browser version: ${browser.version()}`);
     for (const platform of ['darwin', 'linux']) {
       const page = await browser.newPage({ viewport: { width: 1280, height: 820 } });
       await page.addInitScript(platform => { window.__FIXTURE_PLATFORM__ = platform; Object.defineProperty(navigator, 'platform', { value: platform === 'darwin' ? 'MacIntel' : 'Linux x86_64' }); }, platform);

@@ -54,7 +54,7 @@ interface CiFailureOctokit {
     paginate?: (route: string, parameters: Record<string, unknown>) => Promise<unknown[]>;
 }
 
-type DedupeRedis = Pick<Redis, 'set' | 'del'>;
+type DedupeRedis = Pick<Redis, 'get' | 'set' | 'del'>;
 
 export interface CiFailureFollowupDependencies {
     isEnabled?: (owner: string, repo: string) => Promise<boolean>;
@@ -191,12 +191,19 @@ export async function postCiFailureFollowup(
     const getOctokit = dependencies.getOctokit
         ?? (async () => await getAuthenticatedOctokit() as unknown as CiFailureOctokit);
     const octokit = await getOctokit();
-    if (await isCancellationInduced(octokit, request, dependencies, log)) {
-        return { posted: false, reason: 'cancellation_induced' };
-    }
     const dedupeKey = buildCiFailureDedupeKey(request);
     const redis = dependencies.redisClient ?? getUltrafixStateRedis();
     const redisKey = `ci-failure-followup:${dedupeKey}`;
+    // This read is only a cheap pre-check. Concurrent first deliveries still
+    // need provenance followed by the atomic NX claim below.
+    try {
+        if (await redis.get(redisKey) !== null) return { posted: false, reason: 'duplicate' };
+    } catch (error) {
+        log.warn({ error: (error as Error).message }, 'Could not pre-check failed-CI follow-up claim');
+    }
+    if (await isCancellationInduced(octokit, request, dependencies, log)) {
+        return { posted: false, reason: 'cancellation_induced' };
+    }
     let claimed = false;
 
     try {

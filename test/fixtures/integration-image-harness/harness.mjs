@@ -103,7 +103,7 @@ export const readState = (workspace) => JSON.parse(readFileSync(join(workspace.s
 export const readObserved = (workspace) => JSON.parse(readFileSync(join(workspace.state, 'observed.json'), 'utf8'));
 export const dockerCalls = (workspace) => {
   const path = join(workspace.state, 'calls.jsonl');
-  return existsSync(path) ? readFileSync(path, 'utf8').trim().split('\n').map((line) => JSON.parse(line)) : [];
+  return existsSync(path) ? readFileSync(path, 'utf8').split('\n').filter((line) => line.trim()).map((line) => JSON.parse(line)) : [];
 };
 export const isMutation = ([command, subcommand]) => ['run', 'rm', 'stop'].includes(command)
   || (command === 'network' && ['rm', 'create'].includes(subcommand));

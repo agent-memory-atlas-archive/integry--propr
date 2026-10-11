@@ -124,6 +124,28 @@ describe("E2E plan generation budget", () => {
 });
 
 describe("E2E plan creation", () => {
+  test("review reached before the first poll is finalized", async () => {
+    const clock = virtualClock();
+    const server = fakePlanServer(clock, { generationMs: 0 });
+    const result = await createAndGeneratePlan("repo", "prompt", client, [], {
+      api: server.api, now: clock.now, sleep: clock.sleep, log: () => {}, deadline: PLAN_TEST_BUDGET_MS,
+    });
+    assert.equal(result.issues.length, 2);
+    assert.equal(server.calls.filter(call => call.startsWith("finalize:")).length, 1);
+  });
+
+  test("the first retry-managed attempt requires enough remaining job budget", async () => {
+    const clock = virtualClock();
+    const server = fakePlanServer(clock, { generationMs: 0 });
+    const ids: string[] = [];
+    const result = await createPlanWithRetries("repo", "Short budget", "prompt", client, ids, {
+      api: server.api, now: clock.now, sleep: clock.sleep, log: () => {}, deadline: 60_000,
+    });
+    assert.deepEqual(result, { planId: "", issues: [] });
+    assert.deepEqual(server.calls, []);
+    assert.deepEqual(ids, []);
+  });
+
   test("a successful generation slower than the former 600s window is finalized and yields its issues", async () => {
     const clock = virtualClock();
     const server = fakePlanServer(clock, { generationMs: OBSERVED_SLOW_GENERATION_MS });

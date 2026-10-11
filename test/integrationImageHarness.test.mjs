@@ -194,6 +194,7 @@ describe('image integration harness fake Docker transport', { skip: unsupported 
     t.after(() => forceRemove(workspace.root));
     seedUnrelatedDocker(workspace);
     writeFileSync(join(workspace.state, 'calls.jsonl'), '', { mode: 0o600 });
+    assert.deepEqual(dockerCalls(workspace), [], 'an empty invocation log has no calls');
     writeFileSync(join(workspace.state, 'observed.json'), '{"synthetic":true}', { mode: 0o600 });
     chmodSync(join(workspace.state, 'state.json'), 0o600);
     const external = join(workspace.root, 'external-owned');
