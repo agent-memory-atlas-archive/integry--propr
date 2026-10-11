@@ -1,3 +1,4 @@
+import { createExecutionDeadline, type ExecutionDeadline } from './dockerExecutionDeadline.js';
 import { prepareAdmittedAgent, type AdmittedAgent } from '../../agents/agentRunAdmission.js';
 import { captureWorkflowMarkers, withWorkflowExecutionDeadline } from '../../workflow/workflowExecution.js';
 import { spawn, SpawnOptions, ChildProcess } from 'child_process';
@@ -191,33 +192,10 @@ function spawnCommandProcess(
     return child;
 }
 
-/** One caller budget, including admission; teardown keeps its own bounded budget. */
-interface ExecutionDeadline {
-    remaining(): number;
-    stop(): void;
-}
-
 export async function executeDockerCommand(command: string, args: string[], options: DockerCommandOptions = {}): Promise<ExecutionResult> {
     const ownershipContext = getExecutionOwnershipContext();
-    const signals = [options.signal, ownershipContext?.signal].filter((signal): signal is AbortSignal => Boolean(signal));
-    const ownerSignal = signals.length ? AbortSignal.any(signals) : undefined;
-    const initialAbortError = getExecutionAbortError(ownerSignal);
-    if (initialAbortError) throw initialAbortError;
     const timeout = options.timeout ?? 300000;
-    const expiresAt = performance.now() + timeout;
-    const timeoutError = new Error(`Command timed out after ${timeout}ms`);
-    const controller = new AbortController();
-    const executionSignal = AbortSignal.any([...signals, controller.signal]);
-    const timer = setTimeout(() => controller.abort(timeoutError), timeout);
-    const deadline: ExecutionDeadline = {
-        remaining() {
-            executionSignal.throwIfAborted();
-            const remaining = Math.ceil(expiresAt - performance.now());
-            if (remaining <= 0) throw timeoutError;
-            return remaining;
-        },
-        stop() { clearTimeout(timer); },
-    };
+    const { deadline, executionSignal, timeoutError } = createExecutionDeadline(timeout, options.signal, ownershipContext?.signal);
     try {
         // A chargeable container starts only once its run's cap admitted it.
         const admission = admitCostExecution(command, args, options);
@@ -242,12 +220,18 @@ async function startDockerCommand(
     command: string, args: string[], options: DockerCommandOptions,
     { ownershipContext, executionSignal, deadline }: { ownershipContext: ReturnType<typeof getExecutionOwnershipContext>; executionSignal: AbortSignal | undefined; deadline: ExecutionDeadline },
 ): Promise<ExecutionResult> {
-    const executionArgs = resolveExecutionArgs(command, withWorkflowExecutionDeadline(command, args, deadline.remaining()), options.taskId, ownershipContext?.attemptGeneration);
+    const executionArgs = resolveExecutionArgs(command, args, options.taskId, ownershipContext?.attemptGeneration);
+    deadline.remaining();
     const admission = command === 'docker' && args[0] === 'run' && !options.costCapExempt
-        ? await prepareAdmittedAgent(executionArgs, { signal: executionSignal, taskId: options.taskId, extraEnvVars: options.extraEnvVars, cwd: options.cwd && fs.existsSync(options.cwd) ? options.cwd : undefined })
+        ? await prepareAdmittedAgent(executionArgs, {
+            createArgs: () => withWorkflowExecutionDeadline(command, executionArgs, deadline.remaining()),
+            signal: executionSignal, taskId: options.taskId, extraEnvVars: options.extraEnvVars,
+            cwd: options.cwd && fs.existsSync(options.cwd) ? options.cwd : undefined,
+        })
         : null;
     try {
-        admission?.signal.throwIfAborted();
+        const abortError = getExecutionAbortError(admission?.signal);
+        if (abortError) throw abortError;
         const remainingMs = deadline.remaining();
         // Transfer the same budget to the subprocess timer. Keep timeout reporting
         // in terms of the caller's original limit and preserve partial output.

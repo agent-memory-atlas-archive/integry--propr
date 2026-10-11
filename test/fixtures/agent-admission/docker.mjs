@@ -24,12 +24,15 @@ else if (command === 'create') {
     const id = randomBytes(32).toString('hex');
     writeRecord({ id, args, state: 'created' });
     // Hold the create response after the daemon has created the immutable ID.
-    if (args.includes('fixture-slow-create')) await new Promise(resolve => setTimeout(resolve, 600));
+    if (args.includes('fixture-slow-create')) {
+        while (!fs.existsSync(path.join(root, 'release-create'))) await new Promise(resolve => setTimeout(resolve, 10));
+    }
     console.log(id);
 } else if (command === 'start') {
     const id = args.at(-1);
     if (!fs.existsSync(file(id))) process.exit(1);
     const r = JSON.parse(fs.readFileSync(file(id), 'utf8'));
+    if (r.args.includes('fixture-slow-create')) console.log('fixture partial output');
     r.state = 'running';
     writeRecord(r);
     fs.appendFileSync(path.join(root, 'starts'), id + '\n');

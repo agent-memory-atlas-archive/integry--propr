@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { after, before, test, mock } from 'node:test';
 import childProcess from 'node:child_process';
+import { promisify } from 'node:util';
 import { syncBuiltinESMExports } from 'node:module';
 import { spawn, spawnSync, fork, type ChildProcess } from 'node:child_process';
 import { mkdtemp, mkdir, readFile, readdir, writeFile, rename, chmod, rm } from 'node:fs/promises';
@@ -49,10 +50,13 @@ before(async () => {
     // The executor's legacy teardown uses an absolute Docker path. Route it
     // through this simulator too: no test may contact a real Docker daemon.
     const execFile = childProcess.execFile;
-    mock.method(childProcess, 'execFile', (file: string, ...args: unknown[]) => {
-        if (file !== 'docker' && file !== '/usr/bin/docker') throw new Error('Unexpected fixture executable');
-        return Reflect.apply(execFile, childProcess, ['docker', ...args]);
+    const executable = (file: string) => file === '/usr/bin/docker' ? 'docker' : file;
+    const replacement = Object.assign((file: string, ...args: unknown[]) =>
+        Reflect.apply(execFile, childProcess, [executable(file), ...args]), {
+        [promisify.custom]: (file: string, ...args: unknown[]) =>
+            Reflect.apply(promisify(execFile), childProcess, [executable(file), ...args]),
     });
+    mock.method(childProcess, 'execFile', replacement);
     syncBuiltinESMExports();
     Object.assign(process.env, { REDIS_HOST: '127.0.0.1', REDIS_PORT: String(port), PATH: `${bin}:${process.env.PATH}`, PROPR_DEMO_MODE: 'true' });
 });
@@ -413,7 +417,7 @@ test('caller deadline expires in a saturated physical queue without task ownersh
     assert.ok(!commands.includes('create') && !commands.includes('start'), 'expired helpers never launch after capacity returns');
 });
 
-for (const mode of ['cancel', 'ownership', 'preserve', 'remaining']) test(`physical queue honors ${mode} within the caller budget`, integration, async () => {
+for (const mode of ['cancel', 'ownership', 'cancel-string', 'ownership-string', 'preserve']) test(`physical queue honors ${mode} within the caller budget`, integration, async () => {
     const { executeDockerCommand, runWithExecutionAbortSignal } = await import('../packages/core/src/claude/docker/dockerExecutor.js');
     const instance = `deadline-${mode}`;
     const directory = path.join(root, instance); await mkdir(directory);
@@ -424,17 +428,16 @@ for (const mode of ['cancel', 'ownership', 'preserve', 'remaining']) test(`physi
         client: redis, docker: { ...runtime, daemon: async () => 'test-daemon' }, config: { instance, limit: 2 }, leaseMs: 150,
     })));
     const controller = new AbortController();
-    const cancellation = new Error('helper cancelled');
+    const cancellation = mode.endsWith('-string') ? 'helper cancelled' : new Error('helper cancelled');
     const timeout = mode === 'preserve' ? 300 : 2000;
-    const started = performance.now();
     const run = () => executeDockerCommand('docker', ['run', '--rm', 'fixture-agent'], {
         timeout, preserveOutputOnTimeout: true,
         // A local signal must not hide inherited ownership cancellation.
-        signal: mode === 'cancel' ? controller.signal : mode === 'ownership' ? new AbortController().signal : undefined,
+        signal: mode.startsWith('cancel') ? controller.signal : mode.startsWith('ownership') ? new AbortController().signal : undefined,
     });
-    const request = mode === 'ownership' ? runWithExecutionAbortSignal(controller.signal, run) : run();
-    const result = mode === 'cancel' || mode === 'ownership'
-        ? assert.rejects(request, error => error === cancellation)
+    const request = mode.startsWith('ownership') ? runWithExecutionAbortSignal(controller.signal, run) : run();
+    const result = mode !== 'preserve'
+        ? assert.rejects(request, error => typeof cancellation === 'string' ? (error as Error).name === 'ExecutionAbortedError' : error === cancellation)
         : request.then(value => {
             assert.equal(value.timedOut, true);
             assert.equal(value.timeoutMs, timeout);
@@ -442,16 +445,8 @@ for (const mode of ['cancel', 'ownership', 'preserve', 'remaining']) test(`physi
         });
     try {
         await until(async () => (await agentAdmissionMetrics(redis, instance)).waiting === 1);
-        if (mode === 'remaining') {
-            await delay(Math.max(0, started + 1200 - performance.now()));
-            await holders[0]!.finish();
-            await until(async () => (await readRecords(directory)).some(record => record.state === 'running'));
-        } else if (mode !== 'preserve') controller.abort(cancellation);
+        if (mode !== 'preserve') controller.abort(cancellation);
         await result;
-        if (mode === 'remaining') {
-            assert.ok(performance.now() - started < 2800, 'queueing must not be followed by a fresh 2000ms execution budget');
-            assert.match(await readFile(path.join(directory, 'starts'), 'utf8'), /[a-f0-9]{64}/);
-        }
         assert.equal((await agentAdmissionMetrics(redis, instance)).waiting, 0);
     } finally {
         await Promise.all(holders.map(holder => holder!.finish()));
@@ -461,10 +456,8 @@ for (const mode of ['cancel', 'ownership', 'preserve', 'remaining']) test(`physi
     }
     await delay(300);
     assert.equal((await readRecords(directory)).length, 0);
-    if (mode !== 'remaining') {
-        const commands = (await readFile(path.join(directory, 'commands'), 'utf8')).trim().split('\n');
-        assert.ok(!commands.includes('create') && !commands.includes('start'));
-    }
+    const commands = (await readFile(path.join(directory, 'commands'), 'utf8')).trim().split('\n');
+    assert.ok(!commands.includes('create') && !commands.includes('start'));
 });
 
 for (const cancel of [false, true]) test(`caller ${cancel ? 'cancellation' : 'deadline'} during create removes the ID without starting it`, integration, async () => {
@@ -483,6 +476,7 @@ for (const cancel of [false, true]) test(`caller ${cancel ? 'cancellation' : 'de
         if (cancel) controller.abort(new Error('cancel during create'));
         else await delay(320);
         assert.equal(await redis.hlen(agentAdmissionKeys(instance)[0]), 1, 'retain capacity while create is still settling');
+        await writeFile(path.join(directory, 'release-create'), '');
         await rejected;
         const commands = (await readFile(path.join(directory, 'commands'), 'utf8')).trim().split('\n');
         assert.ok(commands.includes('create') && commands.includes('rm'));
@@ -490,7 +484,89 @@ for (const cancel of [false, true]) test(`caller ${cancel ? 'cancellation' : 'de
         assert.equal((await readRecords(directory)).length, 0);
         assert.equal(await redis.hlen(agentAdmissionKeys(instance)[0]), 0);
     } finally {
+        await writeFile(path.join(directory, 'release-create'), '');
         await rejected;
+        for (const key of Object.keys(process.env)) if (!(key in saved)) delete process.env[key];
+        Object.assign(process.env, saved);
+    }
+});
+
+test('execFile fixture preserves unrelated commands and promisified stdout/stderr', integration, async () => {
+    const result = await promisify(childProcess.execFile)(process.execPath, ['-e', 'process.stdout.write("out"); process.stderr.write("err")']);
+    assert.equal(result.stdout, 'out');
+    assert.equal(result.stderr, 'err');
+});
+
+test('deadline checkpoints normalize non-Error cancellation and retain Error identity', async () => {
+    const { createExecutionDeadline } = await import('../packages/core/src/claude/docker/dockerExecutionDeadline.js');
+    for (const reason of ['cancelled', new Error('cancelled')]) {
+        const controller = new AbortController();
+        const { deadline } = createExecutionDeadline(60_000, controller.signal);
+        try {
+            controller.abort(reason);
+            assert.throws(() => deadline.remaining(), error => typeof reason === 'string'
+                ? (error as Error).name === 'ExecutionAbortedError' : error === reason);
+        } finally { deadline.stop(); }
+    }
+});
+
+for (const createElapsed of [0, 5000]) test(`saturated workflow transfers remaining budget across a ${createElapsed}ms create`, integration, async (t) => {
+    const { executeDockerCommand } = await import('../packages/core/src/claude/docker/dockerExecutor.js');
+    const { executeWithRepositoryWorkflow, repositoryWorkflowExecution } = await import('../packages/core/src/workflow/workflowExecution.js');
+    const instance = `workflow-budget-${createElapsed}`;
+    const directory = path.join(root, instance); await mkdir(directory);
+    const transportBudget = 40_000 - createElapsed;
+    const saved = { ...process.env };
+    Object.assign(process.env, { PROPR_INSTANCE_ID: instance, PROPR_FLEET_CONTROL_SECRET: 'fixture', WORKER_CONCURRENCY: '2', PROPR_TEST_ADMISSION_DOCKER: directory });
+    const { runtime } = lifecycle();
+    const holders = await Promise.all(Array.from({ length: 2 }, () => prepareAdmittedAgent(['run', 'agent'], {
+        client: redis, docker: { ...runtime, daemon: async () => 'test-daemon' }, config: { instance, limit: 2 },
+    })));
+    let now = 0;
+    t.mock.method(performance, 'now', () => now);
+    const timers: number[] = [];
+    let expireExecution: (() => void) | undefined;
+    let output: import('../packages/core/src/claude/docker/dockerExecutor.js').ExecutionResult | undefined;
+    const schedule = globalThis.setTimeout;
+    t.mock.method(globalThis, 'setTimeout', (callback: (...args: unknown[]) => void, ms?: number, ...args: unknown[]) => {
+        if (ms !== undefined) timers.push(ms);
+        if (ms === transportBudget) expireExecution = () => callback(...args);
+        return schedule(callback, ms, ...args);
+    });
+    const controller = new AbortController();
+    const cancellation = new Error('workflow complete');
+    const request = executeWithRepositoryWorkflow({ revision: 'base', fileRevision: 'blob', baseBranch: 'main', config: { validation: ['npm test'] }, timeoutMs: 1000, maxParallelTasks: 2 }, async () => {
+        const { marker } = repositoryWorkflowExecution.getStore()!;
+        output = await executeDockerCommand('docker', ['run', '--rm', 'fixture-slow-create', '-lc', `script ${marker}`], { timeout: 60_000, signal: controller.signal, preserveOutputOnTimeout: true });
+        return { success: true, logs: '', modifiedFiles: [], modelUsed: 'fixture', executionTimeMs: 0 };
+    });
+    // Observe failures immediately; finally still cancels and drains a failed assertion.
+    void request.catch(() => undefined);
+    try {
+        await until(async () => (await agentAdmissionMetrics(redis, instance)).waiting === 1);
+        now = 20_000; // Capacity wait consumes one third of the caller budget.
+        await holders[0]!.finish();
+        await until(async () => (await readRecords(directory)).length === 1);
+        const [created] = await readRecords(directory);
+        assert.deepEqual(created.args.filter((arg: string) => arg.startsWith('PROPR_EXECUTION_TIMEOUT_MS=')), ['PROPR_EXECUTION_TIMEOUT_MS=40000']);
+        now = 20_000 + createElapsed; // Bounded create also consumes budget before attach/start.
+        await writeFile(path.join(directory, 'release-create'), '');
+        await until(async () => (await readRecords(directory)).some(record => record.state === 'running'));
+        assert.ok(timers.includes(transportBudget), 'subprocess timer receives only the post-create remainder');
+        if (createElapsed) assert.ok(!timers.includes(40_000), 'create budget must not reset the subprocess timer');
+        assert.ok(expireExecution);
+        expireExecution();
+        await request;
+        assert.equal(output?.timedOut, true);
+        assert.equal(output?.timeoutMs, 60_000, 'report the original caller limit');
+        assert.match(output?.stdout ?? '', /fixture partial output/, 'preserve output buffered before timeout');
+        assert.match(output?.stderr ?? '', /timed out after 60000ms/);
+        assert.equal((await readRecords(directory)).length, 0);
+    } finally {
+        controller.abort(cancellation);
+        await writeFile(path.join(directory, 'release-create'), '');
+        await Promise.all(holders.map(holder => holder!.finish()));
+        await request.catch(() => undefined);
         for (const key of Object.keys(process.env)) if (!(key in saved)) delete process.env[key];
         Object.assign(process.env, saved);
     }
