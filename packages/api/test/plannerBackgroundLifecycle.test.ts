@@ -211,13 +211,15 @@ describe('planner background abort reconciliation', () => {
       'OAuth token revoked',
       'Request unauthorized by provider',
       'Missing credentials for provider',
+      'Auth failed',
+      '(OAuth) token revoked',
     ]) {
       assert.equal(getSafePlannerFailureMessage(new Error(detail)), authFailure, detail);
     }
-    assert.equal(
-      getSafePlannerFailureMessage(new Error('provider failed at /srv/private/repo')),
-      'Plan generation failed. Detailed diagnostics are available in server logs.',
-    );
+    for (const path of ['/srv/private/repo', '/srv/auth/config', '/srv/oauth/config', '/srv/credentials/config', String.raw`C:\srv\auth\config`, '/srv/auth', 'auth/config']) {
+      const summary = getSafePlannerFailureMessage(new Error(`provider failed at ${path}`));
+      assert.equal(summary, 'Plan generation failed. Detailed diagnostics are available in server logs.', path);
+    }
   });
 
   test('retries a failure CAS miss while the same generation run remains active', async t => {

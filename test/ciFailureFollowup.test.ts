@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs';
 import { after, describe, test, mock } from 'node:test';
 import assert from 'node:assert';
 import { closeConnection } from '../packages/core/src/db/connection.js';
@@ -558,5 +559,17 @@ test('the webhook reads the runs the worker recorded for its follow-up suspensio
         assert.deepStrictEqual(await loadProprCancelledRuns('integry/propr', 2954, database), []);
     } finally {
         await database.destroy();
+    }
+});
+
+test('recognized cancellation gate steps match the workflow', () => {
+    const source = readFileSync(new URL('../packages/core/src/webhook/ciCancellationProvenance.ts', import.meta.url), 'utf8');
+    const workflow = readFileSync(new URL('../.github/workflows/pr-test-on-label.yml', import.meta.url), 'utf8');
+    for (const constant of ['DEPENDENCY_GATE_STEPS', 'CANCELLATION_CONSEQUENCE_STEPS']) {
+        const values = source.match(new RegExp(`const ${constant} = new Set\\(\\[([^\\]]+)\\]\\)`));
+        assert.ok(values, constant);
+        const names = [...values[1].matchAll(/'([^']+)'/g)].map(match => match[1]);
+        assert.ok(names.length > 0);
+        for (const name of names) assert.ok(workflow.includes(`- name: ${name}\n`), name);
     }
 });

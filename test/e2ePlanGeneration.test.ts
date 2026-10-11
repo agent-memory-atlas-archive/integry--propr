@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs';
+import { ScriptTarget, transpile } from 'typescript';
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 import { ApiClient } from "../packages/cli/src/api/client.js";
@@ -469,4 +471,46 @@ describe("E2E plan cleanup", () => {
     assert.equal(await tracker.settle(5), false);
     assert.equal(tracker.size, 1);
   });
+});
+
+describe('recovery suite plan lifecycle contracts', () => {
+  const source = readFileSync(new URL('./e2e/recovery.test.ts', import.meta.url), 'utf8');
+
+  test('keeps the full plan budget inside the enclosing recovery suite', () => {
+    assert.match(source, /deadline: planDeadline\(\)/);
+    assert.match(source, /it\("create a plan with an issue for testing", \{ timeout: PLAN_TEST_TIMEOUT_MS \}/);
+    assert.match(source, /describe\("2\. Task Stop Mid-Execution", \{ timeout: PLAN_TEST_TIMEOUT_MS \+ 300_000/);
+    assert.ok(PLAN_TEST_BUDGET_MS >= PLAN_GENERATION_TIMEOUT_MS + PLAN_ISSUES_TIMEOUT_MS);
+  });
+
+  for (const settled of [true, false]) {
+    for (const noCleanup of [true, false]) {
+      test(`recovery cleanup settles=${settled}, disabled=${noCleanup}`, async () => {
+        // Execute the actual hook with synthetic API calls; never contact a live server.
+        const hook = source.match(/  after\(async \(\) => \{([\s\S]*?)\n  \}\);/)?.[1];
+        assert.ok(hook);
+        const events: string[] = [];
+        const bindings = {
+          planWork: { size: 1, settle: async (ms: number) => {
+            assert.equal(ms, PLAN_SUITE_CLEANUP_MS);
+            events.push('settle');
+            return settled;
+          } },
+          PLAN_SUITE_CLEANUP_MS,
+          NO_CLEANUP: noCleanup,
+          modelTestResults: [{ taskId: 'task' }], stoppedTaskIds: ['task', 'stopped'],
+          createdPlanIds: ['plan-a', 'plan-b'], client,
+          console: { log: () => {} },
+          stopTask: async (id: string) => { events.push(`stop:${id}`); throw new Error('already stopped'); },
+          deleteTask: async (id: string) => { events.push(`task:${id}`); },
+          deletePlan: async (id: string) => { events.push(`plan:${id}`); },
+        };
+        const compiled = transpile(`async function cleanup() { ${hook} }`, { target: ScriptTarget.ES2022 });
+        await new Function(...Object.keys(bindings), `${compiled}; return cleanup();`)(...Object.values(bindings));
+        assert.deepEqual(events, noCleanup ? ['settle'] : [
+          'settle', 'stop:task', 'task:task', 'stop:stopped', 'task:stopped', 'plan:plan-a', 'plan:plan-b',
+        ]);
+      });
+    }
+  }
 });
