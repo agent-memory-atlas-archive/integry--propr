@@ -115,7 +115,12 @@ export async function detectPickup(db: Knex, input: {
       ELSE json_extract(${data}, '$.commentId') = ?
     END`, [input.commentId, input.commentId, input.commentId]);
 
-  if (isUltrafixCommandTool(input.tool)) {
+  if (input.tool === 'resolve_merge_conflicts') {
+    // A follow-up task may have read the /merge comment as context. Only the
+    // merge worker's explicit command identity proves this request was picked up.
+    query.where('task_type', 'merge_conflict')
+      .whereRaw(`json_extract(${data}, '$.commandCommentId') = ?`, [input.commentId]);
+  } else if (isUltrafixCommandTool(input.tool)) {
     query.whereRaw(`json_type(${data}, '$.ultrafixMeta.workEpoch') = 'integer'`);
   } else {
     const mode = input.tool === 'review_pull_request' ? 'review'

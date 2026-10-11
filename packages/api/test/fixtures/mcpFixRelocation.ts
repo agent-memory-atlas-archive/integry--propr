@@ -23,6 +23,11 @@ export async function verifyFixRelocation({ t, mutate, comments, comparisons, tr
     // A new file, or a modification whose addition count is unknown, may hold it too.
     assert.deepEqual((await run([lease, { filename: 'src/lease/owner.ts', status: 'added', additions: 30 }])).skipped, []);
     assert.deepEqual((await run([lease, { filename: 'src/worker.ts', status: 'modified' }])).skipped, []);
+    // Rename/copy statistics are relative to the source file. Zero additions
+    // cannot establish that no code arrived at the destination path.
+    for (const status of ['renamed', 'copied']) {
+      assert.deepEqual((await run([lease, { filename: 'src/worker.ts', status, additions: 0 }])).skipped, []);
+    }
     // A comparison GitHub may have cut short can hide the destination.
     const many = Array.from({ length: 299 }, (_, index) => ({ filename: `old/${index}.ts`, status: 'removed' }));
     assert.deepEqual((await run([lease, ...many])).skipped, []);
@@ -57,6 +62,19 @@ export async function verifyFixRelocation({ t, mutate, comments, comparisons, tr
     assert.equal(comments.at(-1)!.body.split('\n')[0], '/fix F20 F21');
     assert.deepEqual(mixed.result.findingIds, ['F20', 'F21']);
     assert.deepEqual(mixed.result.skipped, []);
+    // A renamed destination can retain its source's contents without any added
+    // lines. Keep the same selection instead of treating that as proven removal.
+    comparisons.set(`${reviewedHead}...${head}`, [
+      { filename: 'src/lease.ts', status: 'removed' },
+      { filename: 'src/worker.ts', previous_filename: 'src/legacy-worker.ts', status: 'renamed', additions: 0 } as { filename: string; status: string; previous_filename: string },
+    ]);
+    for (const findingIds of [['F21'], ['F20', 'F21']]) {
+      const renamed = await mutate('fix_review_findings', { ...pull, reviewCommentId, findingIds });
+      assert.equal(renamed.state, 'posted', JSON.stringify(renamed));
+      assert.equal(comments.at(-1)!.body.split('\n')[0], `/fix ${findingIds.join(' ')}`);
+      assert.deepEqual(renamed.result.findingIds, findingIds);
+      assert.deepEqual(renamed.result.skipped, []);
+    }
     comparisons.delete(`${reviewedHead}...${head}`);
     trees.delete(head);
   });
