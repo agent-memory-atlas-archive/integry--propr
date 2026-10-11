@@ -54,6 +54,14 @@ for (const width of [320, 360, 390, 430, 520, 768, 1280, 2560]) {
     await page.goto(`/tasks/${fixRun}`);
     const runs = page.getByTestId('run-timeline-run');
     await expect(runs).toHaveCount(8);
+    const assertRunControlHeights = async () => {
+      const heights = await runs.locator(':scope > button').evaluateAll(buttons =>
+        buttons.map(button => button.getBoundingClientRect().height));
+      expect(heights).toHaveLength(8);
+      for (const [index, height] of heights.entries()) {
+        expect(height, `Run ${index + 1} at ${width}px; all heights: ${heights}`).toBeGreaterThanOrEqual(width < 640 ? 44 : 32);
+      }
+    };
     const open = runs.nth(1).getByRole('button');
     const steps = page.getByRole('list', { name: 'Run steps' });
     await expect(steps).toContainText(label);
@@ -95,11 +103,12 @@ for (const width of [320, 360, 390, 430, 520, 768, 1280, 2560]) {
     const control = await open.boundingBox();
     expect(control!.x).toBeGreaterThanOrEqual(0);
     expect(control!.x + control!.width).toBeLessThanOrEqual(width);
-    expect(control!.height).toBeGreaterThanOrEqual(32);
+    await assertRunControlHeights();
     await capture(page, `task-step-labels-${width}`);
     await open.tap();
     await expect(open).toHaveAttribute('aria-expanded', 'false');
     await expect(steps).toHaveCount(0);
+    await assertRunControlHeights();
     await open.focus();
     await page.keyboard.press('Enter');
     await expect(open).toHaveAttribute('aria-expanded', 'true');
@@ -114,6 +123,7 @@ for (const width of [320, 360, 390, 430, 520, 768, 1280, 2560]) {
     await expect(open).toHaveAttribute('aria-expanded', 'false');
     await expect(steps).toHaveCount(1);
     await expect(steps).toContainText('Review the withdrawal handlers');
+    await assertRunControlHeights();
     await context.close();
   });
 }
