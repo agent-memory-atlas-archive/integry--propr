@@ -118,7 +118,7 @@ const MobileNavLink: React.FC<MobileNavLinkProps> = ({
       {icon}
       {badge}
     </span>
-    <span className="truncate">{label}</span>
+    <span className="max-w-full truncate">{label}</span>
   </Link>
 );
 
@@ -365,7 +365,9 @@ const MobileBottomNavigation: React.FC<MobileBottomNavigationProps> = ({
           <span className={`flex h-8 w-9 items-center justify-center rounded-lg ${isDemoMode ? 'bg-slate-200' : 'bg-primary-600 text-white shadow-sm'}`}>
             <primary.icon className="h-4 w-4" aria-hidden="true" />
           </span>
-          <span className="truncate">{primary.label}</span>
+          {/* Centered flex children keep their intrinsic width unless constrained;
+              truncate alone cannot clip a label wider than its tab. */}
+          <span className="max-w-full truncate">{primary.label}</span>
         </button>
         <MobileNavLink
           to="/repositories"
