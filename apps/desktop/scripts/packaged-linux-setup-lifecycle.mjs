@@ -18,7 +18,7 @@ export const LINUX_SETUP_ACCEPTANCE_OUTPUT = 'PROPR_DESKTOP_SETUP_ACCEPTANCE_OUT
 
 const TIMEOUT_MS = 60_000;
 const OUTPUT_LIMIT = 64 * 1024;
-const SAFE_DOCKER_OPERATIONS = new Set(['version', 'info', 'images', 'image-inspect']);
+const SAFE_DOCKER_OPERATIONS = new Set(['version', 'info', 'images', 'image-inspect', 'manifest-inspect']);
 const SOURCE_SHA = /^[a-f0-9]{40}$/;
 const ISOLATION_ID = /^[a-f0-9]{16}$/;
 const INTERRUPTED_RECOVERY_MESSAGE = 'Setup was interrupted. Review the saved choices to continue.';
@@ -86,6 +86,7 @@ export const createIsolatedSetupEnvironment = ({
   baseEnvironment,
   profile,
   wrapperDirectory,
+  localDockerEndpoint,
   isolation,
   ports,
 }) => {
@@ -96,12 +97,14 @@ export const createIsolatedSetupEnvironment = ({
     || new Set(ports).size !== ports.length) {
     throw new Error('Linux setup acceptance environment input is invalid');
   }
+  if (localDockerEndpoint !== undefined && !/^unix:\/\/\/[^\0\r\n]+$/.test(localDockerEndpoint)) throw new Error('Acceptance requires a local Docker endpoint');
   const allowed = {};
   for (const name of ['DBUS_SESSION_BUS_ADDRESS', 'DISPLAY', 'GNOME_KEYRING_CONTROL', 'LANG', 'PATH', 'XAUTHORITY']) {
     if (baseEnvironment[name]) allowed[name] = baseEnvironment[name];
   }
   return Object.freeze({
     ...allowed,
+    ...(localDockerEndpoint ? { DOCKER_HOST: localDockerEndpoint } : {}),
     HOME: profile.home,
     TMPDIR: profile.temporary,
     XDG_CACHE_HOME: profile.xdgCache,
@@ -137,10 +140,11 @@ export const dockerOperation = args => {
   }
   // Read-only exact-reference presence check used by the CLI and launcher.
   if (args.length === 5 && args[0] === 'image' && args[1] === 'inspect'
-    && args[2] === '--format' && args[3] === '{{.Id}}' && exactReference(args[4])) {
+    && args[2] === '--format' && ['{{.Id}}', '{"Os":{{json .Os}},"Architecture":{{json .Architecture}}}'].includes(args[3]) && exactReference(args[4])) {
     return 'image-inspect';
   }
-  if (args[0] === 'pull' && args.length === 2) return 'pull';
+  if (args.length === 4 && args[0] === 'manifest' && args[1] === 'inspect' && args[2] === '--verbose' && exactReference(args[3])) return 'manifest-inspect';
+  if (args[0] === 'pull' && (args.length === 2 || (args.length === 4 && args[1] === '--platform' && /^linux\/(amd64|arm64)$/.test(args[2])))) return 'pull';
   return 'rejected';
 };
 
@@ -183,7 +187,7 @@ export const parseDockerEvents = contents => {
     if (!value || typeof value !== 'object' || Array.isArray(value)
       || Object.keys(value).sort().join(',') !== ['event', 'operation', 'pid', 'ppid', 'schemaVersion', 'time'].sort().join(',')
       || value.schemaVersion !== 1 || !['invoked', 'sigterm', 'sigint', 'delegate-error', 'rejected'].includes(value.event)
-      || !['version', 'info', 'images', 'image-inspect', 'pull', 'rejected'].includes(value.operation)
+      || !['version', 'info', 'images', 'image-inspect', 'manifest-inspect', 'pull', 'rejected'].includes(value.operation)
       || !Number.isSafeInteger(value.pid) || value.pid <= 1
       || !Number.isSafeInteger(value.ppid) || value.ppid <= 0
       || !Number.isSafeInteger(value.time) || value.time <= 0) {
@@ -335,7 +339,7 @@ const launchPackagedApp = async ({ binaryPath, userData, environment }) => {
     '--disable-gpu',
     '--remote-debugging-port=0',
     `--user-data-dir=${userData}`,
-    '--password-store=gnome-libsecret',
+    ...(process.platform === 'linux' ? ['--password-store=gnome-libsecret'] : []),
   ], {
     cwd: userData,
     detached: true,
@@ -442,11 +446,12 @@ const writeReport = async (outputPath, report) => {
 export const runPackagedLinuxSetupLifecycle = async ({
   environment = process.env,
   binaryPath = resolve('out', 'propr-desktop-linux-x64', 'propr-desktop'),
+  nativeMac = false,
 } = {}) => {
   if (environment[LINUX_SETUP_ACCEPTANCE_OPT_IN] !== '1') {
     throw new Error(`Real Linux setup acceptance is opt-in; set ${LINUX_SETUP_ACCEPTANCE_OPT_IN}=1`);
   }
-  if (process.platform !== 'linux' || process.arch !== 'x64') {
+  if (nativeMac ? (process.platform !== 'darwin' || !['arm64', 'x64'].includes(process.arch)) : (process.platform !== 'linux' || process.arch !== 'x64')) {
     throw new Error('Real packaged setup acceptance is supported only on Linux x64');
   }
   const sourceSha = validateSourceSha(environment[LINUX_SETUP_ACCEPTANCE_SOURCE_SHA]);
@@ -455,7 +460,9 @@ export const runPackagedLinuxSetupLifecycle = async ({
   await access(binaryPath);
   const dockerPath = await resolveDocker(environment.PATH);
   const dockerSupport = await probeDockerSupport(dockerPath);
-  const command = `${LINUX_SETUP_ACCEPTANCE_OPT_IN}=1 ${LINUX_SETUP_ACCEPTANCE_SOURCE_SHA}=${sourceSha} npm run desktop:acceptance:setup-linux`;
+  const command = nativeMac
+    ? `PROPR_DESKTOP_REAL_MACOS_SETUP_ACCEPTANCE=1 ${LINUX_SETUP_ACCEPTANCE_SOURCE_SHA}=${sourceSha} node apps/desktop/scripts/run-packaged-macos-setup-lifecycle.mjs <app-executable>`
+    : `${LINUX_SETUP_ACCEPTANCE_OPT_IN}=1 ${LINUX_SETUP_ACCEPTANCE_SOURCE_SHA}=${sourceSha} npm run desktop:acceptance:setup-linux`;
   if (!dockerSupport.supported) {
     const report = {
       schemaVersion: 1,
@@ -493,6 +500,7 @@ export const runPackagedLinuxSetupLifecycle = async ({
     await chmod(wrapperPath, 0o700);
     const childEnvironment = createIsolatedSetupEnvironment({
       baseEnvironment: environment,
+      ...(nativeMac ? { localDockerEndpoint: environment.DOCKER_HOST } : {}),
       profile,
       wrapperDirectory,
       isolation,
@@ -524,7 +532,7 @@ export const runPackagedLinuxSetupLifecycle = async ({
     const retryEvents = await readDockerEvents(eventPath);
     if (retryStatus.phase !== 'running'
       || !retryStatus.logs.includes('Retrying setup with a fresh host inspection…')
-      || retryEvents.filter(event => event.event === 'invoked' && event.operation === 'info').length !== 2
+      || retryEvents.filter(event => event.event === 'invoked' && event.operation === 'info').length !== (nativeMac ? 4 : 2)
       || processExists(firstPull.pid) || !processExists(secondPull.pid)) {
       throw new Error('Real setup retry did not perform one fresh host inspection and one fresh execution');
     }

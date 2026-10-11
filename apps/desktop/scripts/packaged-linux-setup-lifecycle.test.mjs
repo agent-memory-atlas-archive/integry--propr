@@ -4,7 +4,7 @@ import { once } from 'node:events';
 import { chmod, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { describe, it } from 'node:test';
+import { describe, it, test } from 'node:test';
 import {
   createIsolatedSetupEnvironment,
   createLinuxSetupIsolation,
@@ -265,4 +265,12 @@ fs.appendFileSync = (...args) => {
       ],
     }).failedConditions, []);
   });
+});
+
+
+test('Mac acceptance permits only local endpoint handoff and the required platform inspection forms', () => {
+  assert.equal(dockerOperation(['manifest', 'inspect', '--verbose', 'propr/app:test']), 'manifest-inspect');
+  assert.equal(dockerOperation(['image', 'inspect', '--format', '{"Os":{{json .Os}},"Architecture":{{json .Architecture}}}', 'propr/app:test']), 'image-inspect');
+  assert.equal(dockerOperation(['pull', '--platform', 'linux/amd64', 'propr/agent:test']), 'pull');
+  assert.equal(dockerOperation(['pull', '--platform', 'windows/amd64', 'propr/agent:test']), 'rejected');
 });

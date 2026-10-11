@@ -130,7 +130,7 @@ function assertSafeAgentCredentialDir(path: string, name = "Agent credential pat
     path.includes(":") ||
     /[\u0000-\u001f\u007f-\u009f]/.test(path)
   ) {
-    throw new Error(`${name} must be an absolute, non-root Linux path without ':' or control characters`);
+    throw new Error(`${name} must be an absolute, non-root POSIX path without ':' or control characters`);
   }
 }
 
@@ -511,12 +511,12 @@ export interface RunSetupOptions {
 }
 
 export type LocalSetupCapability =
-  | { supported: true; kind: "local"; platform: "linux" }
+  | { supported: true; kind: "local"; platform: "linux" | "darwin" }
   | { supported: false; kind: "remote-only"; platform: NodeJS.Platform; reason: string };
 
 /** Desktop-facing capability metadata; the platform-neutral engine does not use it as an execution gate. */
 export function getLocalSetupCapability(platform: NodeJS.Platform = process.platform): LocalSetupCapability {
-  if (platform === "linux") return { supported: true, kind: "local", platform };
+  if (platform === "linux" || platform === "darwin") return { supported: true, kind: "local", platform };
   return {
     supported: false,
     kind: "remote-only",
@@ -900,7 +900,9 @@ async function runSetupAttempt(options: RunSetupOptions): Promise<SetupRunResult
     settle("check", {
       status: "failed",
       detail: dockerProblem,
-      nextAction: "Install/start Docker and ensure this user can run `docker info`, then re-run setup.",
+      nextAction: (options.platform ?? process.platform) === "darwin"
+        ? "Open Docker Desktop and wait for its engine to start, then retry. If the CLI is missing, install Docker Desktop yourself in Applications. No permissions or access are changed by setup."
+        : "Install/start Docker and ensure this user can run `docker info`, then re-run setup.",
     });
     return finish();
   }

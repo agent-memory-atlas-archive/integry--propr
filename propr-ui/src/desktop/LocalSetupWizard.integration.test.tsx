@@ -19,6 +19,16 @@ vi.mock('../config/runtimeConfig', () => ({ setDesktopApiBaseUrl: runtimeMock.se
 describe('production local setup journey', () => {
   beforeEach(() => vi.clearAllMocks());
 
+  it('shows Docker Desktop and AMD64 emulation guidance in the production Mac wizard', async () => {
+    render(<LocalSetupWizard adapter={guidedAdapter({ status: async () => ({ ...idle,
+      capability: { supported: true, kind: 'local', platform: 'darwin' },
+    }) })} onBack={() => undefined} onComplete={() => undefined} />);
+    await screen.findByRole('heading', { name: 'Check the essentials' });
+    expect(screen.getByText(/Open Docker Desktop/).textContent).toContain('AMD64');
+    expect(screen.queryByText(/ProPR needs Linux/)).toBeNull();
+    expect(screen.getByRole('button', { name: /Continue/ })).toBeEnabled();
+  });
+
   it('shows the authenticated identity, installation types, and explicit recovery controls', async () => {
     const choosing: DesktopSetupSnapshot = {
       ...idle, phase: 'running', githubIdentity: {

@@ -73,8 +73,8 @@ Native macOS notifications may not be delivered by an unsigned build.
 
 ## First launch and connection
 
-On Linux, choose **Set up this computer** to install a desktop-managed local stack, or **Connect to an existing instance**
-to use a stack that is already running. On macOS, connect to an existing instance.
+On Linux or macOS, choose **Set up this computer** to install a desktop-managed local stack, or **Connect to an existing instance**
+to use a stack that is already running. Windows guided setup remains unsupported.
 
 1. Enter the instance address. Remote instances need HTTPS, such as your own host or a ProPR Connect managed tunnel
    (`https://t-<instance>.propr.dev`). Plain HTTP is accepted only for loopback development addresses.
@@ -103,24 +103,49 @@ account. ProPR never collects GitHub passwords or signs the browser out of GitHu
 One account is active per window. Switching accounts reloads the app under the new account; server work already started
 by the previous account keeps running. Logging out retires only the active account's credential.
 
-## Guided local setup (Linux x64)
+## Guided local setup (Linux and macOS)
 
 **Set up this computer** installs a ProPR stack managed by the app, using the same setup engine as `propr setup` in the
 CLI. Before starting, make sure that:
 
-- Docker is installed and running, and your user can run `docker info` without `sudo`;
+- Docker Engine (Linux) or Docker Desktop (macOS) is installed and running, and your user can run `docker info` without `sudo`;
 - the machine can reach GitHub and Docker Hub;
 - a terminal emulator is installed (`x-terminal-emulator`, GNOME Terminal, Konsole or xterm) for interactive GitHub and
-  agent logins.
+  agent logins on Linux. macOS uses Terminal for explicit GitHub and agent authentication.
 
 The wizard checks the host before changing anything. You choose GitHub authentication, event intake, coding agents and an
 optional user allowlist. Setup then pulls the runtime images that match the desktop release, opens a terminal for
-interactive logins, starts the services, verifies their health, and pairs the new local instance automatically.
+interactive logins, starts the services, verifies their health, and opens the normal secure identity and browser-pairing flow. GitHub authorization, installation selection, coding-agent login, and pairing approval remain explicit interactions.
 
-**Cancel safely** stops the current step and rolls back. A failed, cancelled or interrupted run reopens in recovery: use
+**Cancel safely** stops the current step and retains durable data for retry. It does not remove unrelated Docker resources. A failed, cancelled or interrupted run reopens in recovery: use
 **Retry setup** after fixing a host problem, or **Review saved choices** to change credentials or other selections. When
 an existing desktop-managed stack runs an incompatible version, **Restart with aligned runtime** replaces only that
 stack's containers with the packaged versions and keeps its database, credentials, logs and repositories.
+
+### macOS prerequisites and recovery
+
+Finder launches do not inherit a terminal shell profile. Setup adds Docker Desktop's standard
+`/Applications/Docker.app/Contents/Resources/bin`, `~/.docker/bin`, `/opt/homebrew/bin`, and `/usr/local/bin`
+to its own process search path. It does not edit shell files, install Docker, change Docker permissions, or grant access.
+If Docker is missing, install Docker Desktop yourself. If its daemon is unavailable, open Docker Desktop,
+wait for the engine, check the selected Docker context, and retry.
+
+The fixed runtime root is `~/Library/Application Support/propr-desktop/local-runtime` (inside the app's user-data directory).
+The host uses the integrity-pinned Darwin descriptor/ACL helpers for identity publication; symbolic links,
+unexpected owners, writable ancestry, unsafe ACLs, and replaced inodes fail closed. The Linux API container
+uses its existing descriptor-relative adapter. Missing native authority helpers are an error, not a fallback to path-only writes.
+
+Docker Desktop must be able to bind the runtime and selected agent directories. If Docker reports a mount denied
+or file-sharing error, review **Settings → Resources → File sharing** yourself and retry; the original Docker error
+is retained. Setup does not grant access automatically. Local service URLs remain loopback URLs.
+
+On Apple Silicon, service images must declare Linux ARM64 in their actual manifest (or local image metadata for
+source builds). The current coding-agent image is **Linux AMD64**, pulled and authenticated explicitly using that
+platform; Docker Desktop emulation is required. An ARM64 desktop binary is not proof that the agent image is ARM64.
+Image inspection and later agent validation fail visibly when the required platform or execution is unavailable.
+
+Native Mac verification for this change is still required before claiming a qualified macOS release. See
+[the macOS acceptance contract](./macos-local-setup-acceptance.md); Linux CI and held-pull checks alone do not prove full provisioning.
 
 ## Version and diagnostics
 
@@ -169,7 +194,7 @@ Saved instances and accounts are kept across updates.
 
 ## Troubleshooting
 
-- **No local setup option:** guided setup is offered on Linux only, and supported on x64.
+- **No local setup option:** use a build with guided Linux/macOS support. Windows remains remote-only.
 - **Docker absent, down or permission denied:** install and start Docker, add your user to the `docker` group, then retry.
 - **Authentication terminal unavailable:** install one of the supported terminal emulators and retry.
 - **Secure storage unavailable:** start an unlocked Secret Service keyring session. Pairing never falls back to a

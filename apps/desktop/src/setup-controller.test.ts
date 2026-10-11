@@ -287,7 +287,7 @@ describe('desktop local setup controller', () => {
     }
   });
 
-  it('reports remote-only capability and rejects setup outside Linux', async () => {
+  it('reports remote-only capability and rejects setup on Windows', async () => {
     const appData = realpathSync.native(mkdtempSync(join(tmpdir(), 'propr-setup-controller-')));
     const controller = new DesktopSetupController({
       actions: {} as SetupActions, platform: 'win32', appDataDir: appData,

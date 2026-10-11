@@ -6,6 +6,7 @@
  * are present. It is also what bare `propr` runs.
  */
 
+import { localSetupSearchPath } from "../utils/localSetupPlatform.js";
 import { checkGithubApp, githubAppCheckFailure } from "./githubAppApi.js";
 import { Command } from "commander";
 import { spawnSync } from "node:child_process";
@@ -121,6 +122,7 @@ const ANSI = {
 };
 
 export interface RunChecksOptions {
+  signal?: AbortSignal;
   root?: string;
   verify?: boolean;
   agents?: string[];
@@ -209,6 +211,7 @@ export function configurationErrorCheck(error: string): CheckResult {
 
 /** Run all checks and return the structured outcome (no printing). */
 export async function runChecks(options: RunChecksOptions = {}): Promise<ChecksOutcome> {
+  if (process.platform === "darwin") process.env.PATH = localSetupSearchPath();
   const results: CheckResult[] = [];
   // Record a finalized result and notify any live presenter immediately.
   const emit = (result: CheckResult, opts: { record?: boolean } = {}): void => {
@@ -222,39 +225,60 @@ export async function runChecks(options: RunChecksOptions = {}): Promise<ChecksO
   runCliChecks(emit);
 
   // 1. Docker installed
-  const dockerVersion = spawnSync("docker", ["--version"], { encoding: "utf-8" });
+  const { orch, cfg, rootDir } = await getHostConfig({ configManager, root: options.root });
+  const dockerVersion = await orch.dockerAsync(["--version"], { timeout: 10_000, signal: options.signal });
   if (dockerVersion.status === 0) {
-    emit({ name: "Docker installed", status: "ok", detail: dockerVersion.stdout.trim(), group: "Docker" });
+    emit({ name: "Docker installed", status: "ok", detail: (dockerVersion.stdout ?? "").trim(), group: "Docker" });
   } else {
     emit({
       name: "Docker installed",
       status: "fail",
       detail: "`docker` command not found",
       group: "Docker",
-      fix: "Install Docker: https://docs.docker.com/get-docker/",
+      fix: process.platform === "darwin"
+        ? "Install Docker Desktop in /Applications, then open it and retry. Setup does not install it for you."
+        : "Install Docker: https://docs.docker.com/get-docker/",
     });
   }
 
-  const { orch, cfg, rootDir } = await getHostConfig({ configManager, root: options.root });
-
   // 2. Docker daemon running
-  const daemonUp = orch.dockerAvailable();
+  const daemon = dockerVersion.status === 0
+    ? await orch.dockerAsync(["info", "--format", "{{.OSType}}"], { timeout: 10_000, signal: options.signal })
+    : undefined;
+  const daemonUp = daemon?.status === 0 && daemon.stdout?.trim() === "linux";
   emit(
     daemonUp
       ? { name: "Docker daemon", status: "ok", detail: "daemon is reachable", group: "Docker" }
       : {
           name: "Docker daemon",
           status: "fail",
-          detail: "cannot reach the Docker daemon (`docker info` failed)",
+          detail: daemon?.status === 0
+            ? "Docker must be running Linux containers"
+            : `cannot reach the Docker daemon (docker info failed)${daemon?.stderr?.trim() ? `: ${daemon.stderr.trim().slice(0, 2048)}` : ""}`,
           group: "Docker",
-          fix: "Start Docker (e.g. `sudo systemctl start docker`) and ensure your user can access it.",
-          remediation: { kind: "start-docker" },
+          fix: process.platform === "darwin"
+            ? "Open Docker Desktop, wait for the engine to start, and retry. Check the selected Docker context if it still fails."
+            : "Start Docker (e.g. `sudo systemctl start docker`) and ensure your user can access it.",
+          ...(process.platform === "darwin" ? {} : { remediation: { kind: "start-docker" as const } }),
         }
   );
 
+  if (process.platform === "darwin" && daemonUp) {
+    // Local bind sources cannot be handed to a remote engine. Respect Docker's
+    // context-over-host precedence without reading/copying its credentials.
+    const context = !process.env.DOCKER_CONTEXT && process.env.DOCKER_HOST
+      ? { status: 0, stdout: process.env.DOCKER_HOST }
+      : await orch.dockerAsync(["context", "inspect", "--format", "{{.Endpoints.docker.Host}}"], { timeout: 10_000, signal: options.signal });
+    const local = context.status === 0 && /^unix:\/\/\/[^\0\r\n]+$/.test((context.stdout ?? "").trim());
+    emit({ name: "Docker local endpoint", status: local ? "ok" : "fail", group: "Docker",
+      detail: local ? "local Docker endpoint verified" : "Guided macOS setup requires a local Docker Desktop engine for host bind mounts.",
+      ...(!local ? { fix: "Select the Docker Desktop context yourself, then retry. Setup does not change Docker contexts." } : {}),
+    });
+  }
+
   // 3. Docker socket (informational — only relevant for the default socket setup)
   const socketPath = "/var/run/docker.sock";
-  if (existsSync(socketPath)) {
+  if (process.platform !== "darwin" && existsSync(socketPath)) {
     let accessible = true;
     try {
       accessSync(socketPath, fsConstants.R_OK | fsConstants.W_OK);

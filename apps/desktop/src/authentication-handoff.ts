@@ -7,10 +7,20 @@ import type { AuthenticationCommandHandoff } from '@propr/cli/desktop-local-setu
 
 export interface TerminalCandidate {
   command: string;
+  commandFile?: boolean;
   args(title: string, command: string, args: string[]): string[];
 }
 
-const terminals: TerminalCandidate[] = [
+export const darwinTerminal: TerminalCandidate = {
+  command: '/usr/bin/open',
+  commandFile: true,
+  args: (_title, command) => ['-a', 'Terminal', command],
+};
+
+/** POSIX single-quote escaping; no command or argument becomes shell source. */
+export const quoteAuthenticationArgument = (value: string): string => "'" + value.replaceAll("'", "'\\''") + "'";
+
+const terminals: TerminalCandidate[] = process.platform === 'darwin' ? [darwinTerminal] : [
   { command: 'x-terminal-emulator', args: (title, command, args) => ['-T', title, '-e', command, ...args] },
   { command: 'gnome-terminal', args: (title, command, args) => ['--wait', `--title=${title}`, '--', command, ...args] },
   { command: 'konsole', args: (title, command, args) => ['--nofork', '-p', `tabtitle=${title}`, '-e', command, ...args] },
@@ -252,8 +262,17 @@ const tryTerminal = async (
   let cancellationWritten = false;
   try {
     await writeFile(wrapperPath, commandWrapper, { mode: 0o700, flag: 'wx' });
+    let launchPath = wrapperPath;
+    if (terminal.commandFile) {
+      launchPath = join(runtimeDirectory, 'ProPR authentication.command');
+      // LaunchServices cannot pass argv to a .command file. The private file
+      // carries only the explicit login command, never provider credentials.
+      const argv = ['/usr/bin/env', `PATH=${process.env.PATH ?? '/usr/bin:/bin'}`, wrapperPath, stateBase, command, ...args];
+      await writeFile(launchPath, `#!/bin/sh\nexec ${argv.map(quoteAuthenticationArgument).join(' ')}\n`, { mode: 0o700, flag: 'wx' });
+    }
+    signal?.throwIfAborted();
     const admission = await new Promise<'spawned' | 'missing'>((resolve, reject) => {
-      const child = spawn(terminal.command, terminal.args(title, wrapperPath, [stateBase, command, ...args]), {
+      const child = spawn(terminal.command, terminal.args(title, launchPath, [stateBase, command, ...args]), {
         stdio: 'ignore',
         detached: true,
       });
@@ -320,7 +339,9 @@ export const createDesktopAuthenticationLauncher = (
     const status = await tryTerminal(terminal, command, args, options.title, options.signal);
     if (status !== undefined) return { status };
   }
-  throw new Error('No supported desktop terminal is installed. Install x-terminal-emulator, GNOME Terminal, Konsole, or xterm and retry.');
+  throw new Error(process.platform === 'darwin'
+    ? 'Terminal could not be opened. Open Terminal on this Mac and retry authentication.'
+    : 'No supported desktop terminal is installed. Install x-terminal-emulator, GNOME Terminal, Konsole, or xterm and retry.');
 };
 
 /** Open interactive authentication in a real desktop terminal without blocking Electron's main loop. */

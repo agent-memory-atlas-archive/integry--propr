@@ -22,7 +22,6 @@ import {
 import {
   directoryDescriptorAccess,
   mkdirAt,
-  lstatAt,
   openAuthorityDirectoryNoFollow,
   openAt,
   renameAt,
@@ -230,8 +229,8 @@ function openRootNoFollow(rootDir: string, platform: NodeJS.Platform): AcquiredR
       fd = next;
       visible = nextVisible;
       const named = lstatSync(visible);
-      const pinned = fstatSync(fd);
-      if (named.isSymbolicLink() || !sameIdentity(named, pinned)) throw new ConnectRootError();
+      const pinned = fstatSync(fd, { bigint: true });
+      if (named.isSymbolicLink() || !sameIdentity(lstatSync(visible, { bigint: true }), pinned)) throw new ConnectRootError();
       ancestry.push({ path: visible, stat: named, fd });
     }
     return { root: heldDirectory(fd, platform, visible), ancestry };
@@ -626,12 +625,17 @@ function assertNamedEntry(rootDir: string, name: string, held: Stats): void {
 
 function identifyHeldChild(directory: HeldDirectory, platform: NodeJS.Platform, name: string) {
   if (platform === "darwin") {
-    const stat = lstatAt(directory.fd, name);
-    return {
-      device: exactIdentityValue(stat.dev).toString(10),
-      file: exactIdentityValue(stat.ino).toString(10),
-      kind: stat.kind,
-    };
+    // The shipped addon's lstatAt exposes doubles, which cannot represent
+    // every APFS inode. Open relative to the pinned dirfd and let Node obtain
+    // exact 64-bit metadata instead. O_NONBLOCK also refuses FIFO hangs.
+    const fd = directory.openChild(name, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+    try {
+      const stat = fstatSync(fd, { bigint: true });
+      return {
+        device: stat.dev.toString(10), file: stat.ino.toString(10),
+        kind: stat.isFile() ? "file" as const : stat.isDirectory() ? "directory" as const : "other" as const,
+      };
+    } finally { closeSync(fd); }
   }
   const stat = lstatSync(platform === "linux"
     ? join(descriptorRoot(), String(directory.fd), name)
@@ -1001,10 +1005,18 @@ export async function getOrCreatePublicInstanceIdentity(
       unlink: (name) => unlinkAt(held!.fd, name),
     };
     const identity = await getOrCreatePublicInstanceIdentityPinned(directory, { generate, role: "host" });
-    const named = lstatSync(dataPath);
-    const pinned = fstatSync(held.fd);
+    const named = lstatSync(dataPath, { bigint: true });
+    const pinned = fstatSync(held.fd, { bigint: true });
     if (named.isSymbolicLink() || !sameIdentity(named, pinned)) throw new PublicInstanceIdentityError();
-    assertPrivateData(pinned, callerUid, platform);
+    assertPrivateData(fstatSync(held.fd), callerUid, platform);
+    // Reacquire visible ancestry after asynchronous ACL/identity work. A held
+    // descriptor authorizes publication, but a replaced path must not escape
+    // as a Docker bind source.
+    const visible = openRootNoFollow(dataPath, platform);
+    try {
+      if (!sameIdentity(pinned, fstatSync(visible.root.fd, { bigint: true }))) throw new PublicInstanceIdentityError();
+      await assertPlatformAuthority(visible, platform, nativeConnectRootAuthorityInspector, callerUid);
+    } finally { closeAcquired(visible); }
     return identity;
   } catch (error) {
     if (error instanceof PublicInstanceIdentityError) throw error;
@@ -1037,4 +1049,16 @@ export async function readSnapshotPublicInstanceIdentity(
     if (error instanceof PublicInstanceIdentityError) throw error;
     throw new PublicInstanceIdentityError();
   }
+}
+
+/** Verify the native authority of a fixed desktop root before host work. */
+export async function assertOwnedLocalSetupRoot(rootDir: string): Promise<void> {
+  const path = resolve(rootDir);
+  if (realpathSync.native(path) !== path) throw new ConnectRootError();
+  const acquired = openRootNoFollow(path, process.platform);
+  try {
+    await assertPlatformAuthority(acquired, process.platform, nativeConnectRootAuthorityInspector, process.getuid?.());
+    const named = lstatSync(path, { bigint: true });
+    if (named.isSymbolicLink() || !sameIdentity(named, fstatSync(acquired.root.fd, { bigint: true }))) throw new ConnectRootError();
+  } finally { closeAcquired(acquired); }
 }

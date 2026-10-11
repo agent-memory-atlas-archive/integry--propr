@@ -572,6 +572,10 @@ function validateAncestorOwnership(stats: Stats[], terminalOwner: number, role: 
   }
 }
 
+// This path-only adapter is used by the Linux API container. Darwin hosts
+// deliberately use CLI connectIdentity's integrity-pinned native *at/ACL
+// adapter and getOrCreatePublicInstanceIdentityPinned; /dev/fd is not a safe
+// substitute for descriptor-relative child operations on macOS.
 function openPinnedDataDirectory(dataDir: string, role: PublicIdentityRole): {
   directory: PinnedPublicIdentityDirectory;
   close(): void;

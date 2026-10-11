@@ -52,12 +52,15 @@ export function createDefaultAgentSetupActions(configManager?: ConfigManager, op
           return { available: true, success: false, detail: `image ${plan.image} not present locally — run \`propr images pull\`` };
         }
         mkdirSync(plan.hostDir, { recursive: true, mode: 0o700 });
+        const dockerArgs = process.platform === "darwin"
+          ? [plan.dockerArgs[0], "--platform", "linux/amd64", ...plan.dockerArgs.slice(1)]
+          : plan.dockerArgs;
         const result = options.authenticationHandoff
-          ? await options.authenticationHandoff("docker", plan.dockerArgs, {
+          ? await options.authenticationHandoff("docker", dockerArgs, {
               title: `ProPR · ${type} authentication`,
               signal: loginOptions.signal,
             })
-          : spawnSync("docker", plan.dockerArgs, { stdio: "inherit" });
+          : spawnSync("docker", dockerArgs, { stdio: "inherit" });
         loginOptions.signal?.throwIfAborted();
         return result.status === 0
           ? { available: true, success: true, detail: `${type} login finished — credentials written to ${plan.hostDir}` }

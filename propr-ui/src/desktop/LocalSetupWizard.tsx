@@ -188,7 +188,7 @@ const Recovery: React.FC<{ snapshot: DesktopSetupSnapshot; busy: boolean; error:
 };
 
 const Form: React.FC<{ stage: Stage; draft: Draft; busy: boolean; error: string | null; back(): void; next(): void;
-  allowGithubKeep: boolean; setDraft: React.Dispatch<React.SetStateAction<Draft>>; chooseKey(): void; acquireSecret(): void }> = props => {
+  platform: DesktopSetupSnapshot['capability']['platform']; allowGithubKeep: boolean; setDraft: React.Dispatch<React.SetStateAction<Draft>>; chooseKey(): void; acquireSecret(): void }> = props => {
   const { stage, draft, setDraft } = props;
   const index = stages.indexOf(stage);
   const githubModes = githubModesFor(props.allowGithubKeep);
@@ -199,7 +199,7 @@ const Form: React.FC<{ stage: Stage; draft: Draft; busy: boolean; error: string 
       : mode === 'app' && current.intakeMode === 'routing_websocket' ? 'polling' : current.intakeMode }));
   return <main className="desktop-setup-wizard"><button type="button" className="desktop-back-button" onClick={props.back}><ArrowLeft /> Back</button>
     <span className="desktop-eyebrow">Local setup · {index + 1} of {stages.length}</span>
-    {stage === 'prerequisites' && <><h1>Check the essentials</h1><p>ProPR needs Linux and a running Docker Engine. Setup checks Docker before changing the local stack and reports anything you need to fix.</p></>}
+    {stage === 'prerequisites' && <><h1>Check the essentials</h1><p>{props.platform === 'darwin' ? 'Open Docker Desktop and wait for its engine to start. On Apple Silicon, the AMD64 coding-agent image requires Docker Desktop emulation. Setup never installs Docker or grants file access for you.' : 'ProPR needs Linux and a running Docker Engine.'} Setup checks Docker before changing the local stack and reports anything you need to fix.</p></>}
     {stage === 'directory' && <><h1>Private local storage</h1><p>Environment, data, logs, and repositories stay in a fixed owner-only directory managed by ProPR Desktop.</p><div className="desktop-setup-note">Desktop-managed local runtime</div></>}
     {stage === 'github' && <><h1>Connect GitHub</h1><p>Secrets stay in the trusted desktop process and are never returned to this page.</p>
       {draft.githubMode === 'demo' && <div className="desktop-setup-recovery">Demo mode is no longer available in desktop setup. Select a supported GitHub configuration to continue.</div>}
@@ -295,5 +295,5 @@ export const LocalSetupWizard: React.FC<{ adapter: DesktopGuidedLocalSetupAdapte
     if (stage === 'github' && draft.githubMode === 'app' && (!/^\d{1,20}$/.test(draft.appId) || !/^\d{1,20}$/.test(draft.installationId) || !draft.privateKey)) return setError('Enter numeric App and installation IDs, then choose the private key.');
     if (stage === 'intake' && draft.intakeMode === 'direct_webhook' && !draft.webhookSecret) return setError('Enter the webhook secret securely.');
     if (index === stages.length - 1) void run(reconfiguring); else setStage(stages[index + 1]); };
-  return <Form stage={stage} draft={draft} allowGithubKeep={!recoveringLegacyDemo} setDraft={setDraft} busy={busy} error={error} chooseKey={() => void chooseKey()} acquireSecret={() => void acquireSecret()} next={next} back={index ? () => setStage(stages[index - 1]) : onBack} />;
+  return <Form platform={snapshot.capability.platform} stage={stage} draft={draft} allowGithubKeep={!recoveringLegacyDemo} setDraft={setDraft} busy={busy} error={error} chooseKey={() => void chooseKey()} acquireSecret={() => void acquireSecret()} next={next} back={index ? () => setStage(stages[index - 1]) : onBack} />;
 };

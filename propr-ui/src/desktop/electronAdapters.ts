@@ -192,7 +192,7 @@ export const createElectronDesktopAdapters = (bridge: DesktopBridge): DesktopAda
   },
   externalBrowser: { open: url => bridge.external.open(url) },
   localSetup: {
-    supported: desktopPlatform === 'linux',
+    supported: desktopPlatform === 'linux' || desktopPlatform === 'macos',
     status: () => bridge.localSetup.status(),
     start: request => bridge.localSetup.start(request),
     retry: request => bridge.localSetup.retry(request),

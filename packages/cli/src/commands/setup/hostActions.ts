@@ -1,3 +1,5 @@
+import { inspectSetupImagePlatform } from "./imagePlatform.js";
+import { localSetupSearchPath } from "../../utils/localSetupPlatform.js";
 import { mkdirSync } from "node:fs";
 import { hostname } from "node:os";
 import { isAbsolute, normalize } from "node:path";
@@ -34,7 +36,7 @@ const sleep = (ms: number, signal?: AbortSignal): Promise<void> => new Promise((
 
 function assertSafeAgentCredentialDir(path: string, name = "Agent credential path"): void {
   if (!isAbsolute(path) || normalize(path) === "/" || path.includes(":") || /[\u0000-\u001f\u007f-\u009f]/.test(path)) {
-    throw new Error(`${name} must be an absolute, non-root Linux path without ':' or control characters`);
+    throw new Error(`${name} must be an absolute, non-root POSIX path without ':' or control characters`);
   }
 }
 
@@ -42,6 +44,7 @@ export function createDefaultActions(configManager?: ConfigManager, options: {
   authenticationHandoff?: AuthenticationCommandHandoff;
   capturedCommand?: CapturedCommandRunner;
 } = {}): SetupActions {
+  if (process.platform === "darwin") process.env.PATH = localSetupSearchPath();
   /** A client pointed at the local stack's API port (not the saved remote URL). */
   const localApiClient = async (rootDir: string): Promise<import("../../api/client.js").ApiClient> => {
     const { getHostConfig } = await import("../../orchestrator/index.js");
@@ -82,12 +85,18 @@ export function createDefaultActions(configManager?: ConfigManager, options: {
       throw new Error(`stack environment is not ready:\n  - ${validation.errors.join("\n  - ")}`);
     }
     await orch.ensureNetworkAsync(cfg, onLog, signal);
-    await orch.startStackAsync(cfg, {
-      ui: ui ?? configManager?.getUiEnabled() ?? true,
-      docs: docs ?? cfg.docsEnabled,
-      onLog,
-      signal,
-    });
+    try {
+      await orch.startStackAsync(cfg, {
+        ui: ui ?? configManager?.getUiEnabled() ?? true,
+        docs: docs ?? cfg.docsEnabled,
+        onLog,
+        signal,
+      });
+    } catch (error) {
+      signal?.throwIfAborted();
+      if (process.platform === "darwin") throw new Error(`${(error as Error).message}\nIf Docker reports a denied bind mount, review Docker Desktop Settings → Resources → File sharing for this stack directory. Grant access yourself only if intended, then retry.`);
+      throw error;
+    }
     signal?.throwIfAborted();
   };
 
@@ -138,6 +147,11 @@ export function createDefaultActions(configManager?: ConfigManager, options: {
         // (api/worker/daemon/redis/…) always pull.
         if (isAgent && selected.size === 0) continue;
 
+        const platform = process.platform === "darwin"
+          ? await inspectSetupImagePlatform(orch, tag, isAgent, sourceBuiltImageKeys.has(key), signal)
+          : undefined;
+        if (platform) onLog?.(`${tag}: ${platform}${isAgent ? " (Docker Desktop emulation required on Apple Silicon)" : ""}`);
+
         // A source validation manifest deliberately names images built into the
         // local Docker daemon.  They are never claimed to be published and must
         // not be sent to Docker Hub; inspect the exact tag instead.  A missing
@@ -154,7 +168,7 @@ export function createDefaultActions(configManager?: ConfigManager, options: {
         onLog?.(`pulling ${tag}…`);
         // Async exec keeps the event loop free so the wizard's Ink spinner keeps
         // animating while the (often slow) pull runs, instead of freezing.
-        const pulled = await orch.dockerAsync(["pull", tag], { signal });
+        const pulled = await orch.dockerAsync(["pull", ...(platform ? ["--platform", platform] : []), tag], { signal });
         signal?.throwIfAborted();
         if (pulled.status === 0) {
           try {
@@ -164,6 +178,7 @@ export function createDefaultActions(configManager?: ConfigManager, options: {
           }
           (isAgent ? result.pulledAgents : result.pulledCore).push(tag);
         } else {
+          onLog?.(`Docker pull failed for ${tag}: ${pulled.stderr || pulled.error?.message || "unknown Docker error"}`);
           (isAgent ? result.failedAgents : result.failedCore).push(tag);
         }
       }

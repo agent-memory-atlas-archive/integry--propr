@@ -10,13 +10,14 @@ import {
 
 const unusedActions = {} as SetupActions;
 
-test("platform capabilities support Linux and make macOS/Windows explicitly remote-only", () => {
+test("platform capabilities support Linux and macOS while Windows remains remote-only", () => {
   assert.deepEqual(getLocalSetupCapability("linux"), {
     supported: true,
     kind: "local",
     platform: "linux",
   });
-  for (const platform of ["darwin", "win32"] as const) {
+  assert.deepEqual(getLocalSetupCapability("darwin"), { supported: true, kind: "local", platform: "darwin" });
+  for (const platform of ["win32"] as const) {
     const capability = getLocalSetupCapability(platform);
     assert.equal(capability.supported, false);
     assert.equal(capability.kind, "remote-only");
@@ -41,7 +42,7 @@ for (const platform of ["darwin", "win32"] as const) {
 
     assert.equal(checksRun, true);
     assert.equal(result.completed, false);
-    assert.equal(result.capability.kind, "remote-only");
+    assert.equal(result.capability.kind, platform === "darwin" ? "local" : "remote-only");
     assert.notEqual(result.errors[0]?.code, "local-unsupported");
   });
 }
