@@ -1,16 +1,12 @@
+import { prepareAdmittedAgent, type AdmittedAgent } from '../../agents/agentRunAdmission.js';
 import { captureWorkflowMarkers, withWorkflowExecutionDeadline } from '../../workflow/workflowExecution.js';
 import { spawn, SpawnOptions, ChildProcess } from 'child_process';
 import { StringDecoder } from 'node:string_decoder';
 import fs from 'fs';
 import logger from '../../utils/logger.js';
 import {
-    abortSpawnedExecution,
-    createDockerExecutionState,
-    ExecutionAbortedError,
-    getExecutionAbortError,
-    getDockerRunContainerName,
-    getExecutionOwnershipContext,
-    resolveExecutionArgs,
+    abortSpawnedExecution, createDockerExecutionState, ExecutionAbortedError,
+    getExecutionAbortError, getDockerRunContainerName, getExecutionOwnershipContext, resolveExecutionArgs,
 } from './dockerExecutionOwnership.js';
 import { plannerAbortSignalKeyForTask, scheduleForceKill, setupAbortChecker } from './dockerAbortController.js';
 import { BoundedDiagnosticTail, BoundedProviderRecordBuffer, boundedProviderOutput } from '../../agents/impl/utils/boundedProviderOutput.js';
@@ -26,17 +22,11 @@ export { getDockerRootDir } from './dockerRootDir.js';
 
 export { stopDockerContainer } from './dockerContainerControl.js';
 export {
-    addTaskAttemptLabelsToDockerArgs,
-    ExecutionAbortedError,
-    runWithExecutionAbortSignal,
+    addTaskAttemptLabelsToDockerArgs, ExecutionAbortedError, runWithExecutionAbortSignal,
 } from './dockerExecutionOwnership.js';
 export {
-    buildPlannerAbortSignalKey,
-    checkAbortSignal,
-    clearWorkerAbortSignal,
-    plannerAbortSignalKeyForTask,
-    runWithPlannerAbortContext,
-    shouldTerminateAfterAbortLookupFailure,
+    buildPlannerAbortSignalKey, checkAbortSignal, clearWorkerAbortSignal,
+    plannerAbortSignalKeyForTask, runWithPlannerAbortContext, shouldTerminateAfterAbortLookupFailure,
 } from './dockerAbortController.js';
 export type { AbortRedisClient, AbortRedisFactory } from './dockerAbortController.js';
 
@@ -79,16 +69,6 @@ export interface DockerCommandOptions extends Pick<ExecutionWatchdogOptions, 'wa
     model?: string;
     /** A container that runs no agent and spends nothing (e.g. a usage probe): not counted toward, or refused by, the run's spend cap. */
     costCapExempt?: boolean;
-}
-
-function resolveDockerPath(command: string): string {
-    if (command !== 'docker') return command;
-    const paths = ['/usr/bin/docker', '/usr/local/bin/docker', '/bin/docker'];
-    for (const p of paths) {
-        try { if (fs.existsSync(p)) { fs.accessSync(p, fs.constants.X_OK); logger.debug({ dockerPath: p }, 'Found docker executable'); return p; } } catch { /* continue */ }
-    }
-    logger.debug('Using docker from PATH');
-    return 'docker';
 }
 
 /**
@@ -206,10 +186,10 @@ export async function inspectLegacyDockerContainerLivenessForTask(taskId: string
 function spawnCommandProcess(
     executablePath: string,
     args: string[],
-    { cwd, stdinData, extraEnvVars }: { cwd?: string; stdinData?: string; extraEnvVars?: Record<string, string> },
+    { cwd, stdinData, extraEnvVars, environment }: { cwd?: string; stdinData?: string; extraEnvVars?: Record<string, string>; environment?: NodeJS.ProcessEnv },
 ): ChildProcess {
     // Extra variables reach the container through `-e NAME`, keeping their values out of the argument list.
-    const env = extraEnvVars && Object.keys(extraEnvVars).length > 0 ? { ...process.env, ...extraEnvVars } : process.env;
+    const env = environment ?? (extraEnvVars && Object.keys(extraEnvVars).length > 0 ? { ...process.env, ...extraEnvVars } : process.env);
     const spawnOptions: SpawnOptions = { stdio: [stdinData ? 'pipe' : 'ignore', 'pipe', 'pipe'], env };
     if (cwd && fs.existsSync(cwd)) spawnOptions.cwd = cwd;
     else if (cwd) logger.warn({ cwd }, 'Working directory does not exist, spawning from current directory');
@@ -241,16 +221,34 @@ export function executeDockerCommand(command: string, args: string[], options: D
     });
 }
 
-function startDockerCommand(
+async function startDockerCommand(
     command: string,
     args: string[],
     options: DockerCommandOptions,
     { ownershipContext, executionSignal }: { ownershipContext: ReturnType<typeof getExecutionOwnershipContext>; executionSignal: AbortSignal | undefined },
 ): Promise<ExecutionResult> {
+    const executionArgs = resolveExecutionArgs(command, withWorkflowExecutionDeadline(command, args, options.timeout ?? 300000), options.taskId, ownershipContext?.attemptGeneration);
+    const admission = command === 'docker' && args[0] === 'run' && !options.costCapExempt
+        ? await prepareAdmittedAgent(executionArgs, { signal: executionSignal, taskId: options.taskId, extraEnvVars: options.extraEnvVars, cwd: options.cwd && fs.existsSync(options.cwd) ? options.cwd : undefined })
+        : null;
+    try {
+        admission?.signal.throwIfAborted();
+        return await runDockerCommand(command, args, options, { ownershipContext, executionSignal: admission?.signal ?? executionSignal, admission });
+    } finally {
+        await admission?.finish();
+    }
+}
+
+function runDockerCommand(
+    command: string,
+    args: string[],
+    options: DockerCommandOptions,
+    { ownershipContext, executionSignal, admission }: { ownershipContext: ReturnType<typeof getExecutionOwnershipContext>; executionSignal: AbortSignal | undefined; admission: AdmittedAgent | null },
+): Promise<ExecutionResult> {
     return new Promise((resolve, reject) => {
         const { timeout = 300000, cwd, onSessionId, onContainerId, worktreePath, stdinData, extraEnvVars, taskId, streamToRedis, streamStderrToRedis, streamExtraOutput, stripAnsi, preserveOutputOnTimeout = false, model, costCapExempt } = options;
         const executionArgs = resolveExecutionArgs(command, withWorkflowExecutionDeadline(command, args, timeout), taskId, ownershipContext?.attemptGeneration);
-        const executablePath = resolveDockerPath(command);
+        const executablePath = command;
         const namedContainer = command === 'docker' ? getDockerRunContainerName(executionArgs) : null;
         // Agent containers count toward their run's spend cap; reaching it stops
         // them like a timeout, so their partial work can still be published. Once
@@ -264,7 +262,7 @@ function startDockerCommand(
         }
         const costExecution = costCap.execution;
         let child: ReturnType<typeof spawnCommandProcess>;
-        try { child = spawnCommandProcess(executablePath, executionArgs, { cwd, stdinData, extraEnvVars }); } catch (error) {
+        try { child = spawnCommandProcess(executablePath, admission?.args ?? executionArgs, { cwd, stdinData, extraEnvVars, environment: admission?.environment }); } catch (error) {
             // A container that never started must not stay registered with the guard.
             void costExecution?.finish().catch(() => null);
             throw error;
@@ -278,6 +276,7 @@ function startDockerCommand(
         const stdoutDecoder = new StringDecoder('utf8');
         const stderrDecoder = new StringDecoder('utf8');
         const state = createDockerExecutionState();
+        if (admission) state.containerId.value = admission.id;
         let ownershipFailure: unknown;
         let hasOwnershipFailure = false;
         let processError: Error | undefined;
@@ -386,14 +385,17 @@ function startDockerCommand(
         const recordWatchdogActivity = (): void => watchdog.recordActivity();
 
         const liveOutput = startLiveOutputStreaming({ taskId, streamToRedis, streamStderrToRedis, streamExtraOutput, stripAnsi, onOverflow: warnFromLiveOutput, onActivity: recordWatchdogActivity, onTranscriptRecord: watchdog.observeLine }, readStdout, () => stderrTail.value);
-        if (command === 'docker' && args[0] === 'run' && worktreePath) {
-            containerDetectionTimer = detectContainerId(
-                worktreePath,
-                state,
-                onContainerId,
-                invokeExecutionCallback,
-            );
-        }
+        const detectExecutionContainer = () => {
+            if (admission) {
+                // Admission already owns the immutable ID. A volume-based lookup
+                // could pick a sibling execution sharing the same worktree.
+                state.containerIdDetected = true;
+                if (onContainerId) invokeExecutionCallback(() => onContainerId(admission.id, namedContainer ?? admission.id));
+            } else if (command === 'docker' && args[0] === 'run' && worktreePath) {
+                containerDetectionTimer = detectContainerId(worktreePath, state, onContainerId, invokeExecutionCallback);
+            }
+        };
+        detectExecutionContainer();
 
         child.stdout?.on('data', (data: Buffer) => {
             const chunk = stdoutDecoder.write(data), ts = new Date().toISOString();
@@ -410,6 +412,14 @@ function startDockerCommand(
             liveOutput?.stderr(chunk);
         });
 
+        const finishExecution = async (beforeAbortClose?: () => void) => {
+            if (containerDetectionTimer) clearTimeout(containerDetectionTimer);
+            await finishCostExecution();
+            beforeAbortClose?.();
+            await abortChecker?.close();
+            await Promise.allSettled([...pendingCallbacks]);
+            await state.teardownPromise;
+        };
         child.on('close', async (exitCode: number | null) => {
             clearTimeout(timeoutHandle);
             watchdog.stop();
@@ -422,11 +432,7 @@ function startDockerCommand(
             liveOutput?.stdout(finalStdout);
             liveOutput?.stderr(finalStderr);
             inspectSessionLines(finalStdout, new Date().toISOString(), true);
-            if (containerDetectionTimer) clearTimeout(containerDetectionTimer);
-            await finishCostExecution();
-            if (abortChecker) await abortChecker.close();
-            await Promise.allSettled([...pendingCallbacks]);
-            if (state.teardownPromise) await state.teardownPromise;
+            await finishExecution();
             await watchdog.settled();
             executionSignal?.removeEventListener('abort', abortForExecutionSignal);
             try { await liveOutput?.close(); }
@@ -456,12 +462,7 @@ function startDockerCommand(
             clearTimeout(timeoutHandle);
             watchdog.stop();
             inspectSessionLines('', new Date().toISOString(), true);
-            if (containerDetectionTimer) clearTimeout(containerDetectionTimer);
-            await finishCostExecution();
-            executionSignal?.removeEventListener('abort', abortForExecutionSignal);
-            if (abortChecker) await abortChecker.close();
-            await Promise.allSettled([...pendingCallbacks]);
-            if (state.teardownPromise) await state.teardownPromise;
+            await finishExecution(() => executionSignal?.removeEventListener('abort', abortForExecutionSignal));
             await liveOutput?.close().catch(() => undefined);
             reject(hasOwnershipFailure ? ownershipFailure : error);
         });

@@ -8,6 +8,7 @@ import type { getAuthenticatedOctokit, ResolvedRepositoryWorkflow, WorkerStateMa
 import type { Redis } from 'ioredis';
 import type { Logger } from 'pino';
 import { runWithNetworkPolicy } from './networkEgress.js';
+import { resolveWorkerConcurrency } from '../workerConcurrency.js';
 
 type Octokit = Awaited<ReturnType<typeof getAuthenticatedOctokit>>;
 type RepositoryWorkflowDeferralData = Pick<IssueJobData, 'repositoryWorkflow' | 'repositoryWorkflowBaseBranch' | 'repositoryWorkflowDeferrals' | 'repositoryWorkflowRetryAt'>;
@@ -45,15 +46,6 @@ function isEmptyRepositoryError(error: unknown): boolean {
     return status === 409 && /repository is empty/i.test(`${response?.data?.message ?? ''} ${message ?? ''}`);
 }
 
-/** Instance `worker_concurrency`, falling back like the worker does when the setting is unusable. */
-function instanceWorkerConcurrency(setting: unknown): number {
-    for (const value of [setting, process.env.WORKER_CONCURRENCY]) {
-        const parsed = typeof value === 'string' && value.trim() ? Number(value) : value;
-        if (Number.isSafeInteger(parsed) && (parsed as number) > 0) return parsed as number;
-    }
-    return 5;
-}
-
 export async function prepareRepositoryWorkflow(options: {
     octokit: Octokit; repoOwner: string; repoName: string; baseBranch?: string | null;
     /** Known default branch (e.g. from the dispatched repository payload) to avoid a repository lookup. */
@@ -87,7 +79,7 @@ export async function prepareRepositoryWorkflow(options: {
     }
     const absentKey = absentWorkflowKey(owner, repo, revision);
     if (isKnownAbsentWorkflow(absentKey)) return undefined;
-    const settings = await loadSettings();
+    const settings = process.env.CONFIG_REPO ? await loadSettings() : undefined;
     const workflow = await loadRepositoryWorkflow({
         resolveRevision: async () => revision,
         readFile: async (path, ref) => {
@@ -111,7 +103,7 @@ export async function prepareRepositoryWorkflow(options: {
             }
         },
     }, baseBranch, {
-        maxParallelTasks: instanceWorkerConcurrency(settings?.worker_concurrency),
+        maxParallelTasks: resolveWorkerConcurrency(settings?.worker_concurrency),
     });
     if (!workflow) rememberAbsentWorkflow(absentKey);
     return workflow;
