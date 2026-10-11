@@ -1,10 +1,13 @@
 /**
  * The columns a run row and its steps share, so a step reads as part of its
- * run: its time sits in the run's tag column (`Run 3  REVIEW`), its label
+ * run on wide timelines: its time sits in the run's tag column (`Run 3  REVIEW`), its label
  * starts where the run's summary does, and its duration ends on the run's.
  *
  *   ●  ▾  Run 3  REVIEW   Found 2 issues  [6]  39 mins ago   3m 00s
  *   │  ├──  11:21:00      Task Queued                        12s
+ *
+ * BranchSteps stacks these fields when its container is narrower than 640px,
+ * including narrow desktop panes, so fixed columns cannot crush step labels.
  */
 
 /** Node box (16px + 4px margin), gap, caret (12px), gap: where the tag column starts. */

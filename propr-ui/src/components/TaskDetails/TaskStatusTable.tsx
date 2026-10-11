@@ -348,23 +348,24 @@ const coalescePipelineHistory = (history: HistoryItem[]): HistoryItem[] => {
  * One run's steps hanging off the run rail (2px at 7px in): each step branches
  * off it with a tic under the run's caret, and keeps to the run row's columns:
  * its time in the tag column, its label under the run's summary, its duration
- * under the run's.
+ * under the run's. In a narrow timeline, stack time, label and duration in reading order
+ * so metadata never competes with the label for horizontal space.
  */
 const BranchSteps: React.FC<{
   items: Array<HistoryItem & { duration: number | null }>;
   history: HistoryItem[];
   commandMode?: string;
 }> = ({ items, history, commandMode }) => (
-  <ol aria-label="Run steps" className="m-0 list-none p-0">
+  <ol aria-label="Run steps" className="m-0 list-none p-0 [container-type:inline-size]">
     {items.map((item, index) => {
       const stateUpper = item.state?.toUpperCase() || '';
       const isLast = index === items.length - 1;
       const isRunning = isLast && !['COMPLETED', 'FAILED', 'CANCELLED'].includes(stateUpper);
       const isFailure = stateUpper === 'FAILED' && !item.metadata?.event;
       return (
-        <li key={`${item.state}-${item.timestamp}-${index}`} className={`relative flex min-w-0 items-start gap-2 py-0.5 ${RUN_LEAD_INSET} pr-1 text-xs leading-5`}>
+        <li key={`${item.state}-${item.timestamp}-${index}`} className={`relative flex min-w-0 items-start gap-2 [@container(max-width:639px)]:flex-col [@container(max-width:639px)]:items-stretch [@container(max-width:639px)]:gap-0 py-0.5 ${RUN_LEAD_INSET} pr-1 text-xs leading-5`}>
           <span aria-hidden="true" className="absolute left-[9px] top-[10px] h-px w-6 bg-slate-300" />
-          <span className={`${RUN_TAG_COLUMN} flex-none font-mono text-[11px] tabular-nums text-slate-400`}>
+          <span className={`${RUN_TAG_COLUMN} [@container(max-width:639px)]:w-auto flex-none font-mono text-[11px] tabular-nums text-slate-400`}>
             {item.timestamp ? formatTimeOnly(item.timestamp) : '--:--'}
           </span>
           <span className="min-w-0 flex-1">
@@ -379,7 +380,7 @@ const BranchSteps: React.FC<{
             <NetworkEgressDetail metadata={item.metadata} />
             <PushFailureDetails metadata={item.metadata} />
           </span>
-          <span className={`${RUN_DURATION_COLUMN} flex-none whitespace-nowrap text-right font-mono text-[11px] tabular-nums ${isRunning ? 'font-medium text-teal-700' : 'text-slate-500'}`}>
+          <span className={`${RUN_DURATION_COLUMN} [@container(max-width:639px)]:w-auto [@container(max-width:639px)]:text-left flex-none whitespace-nowrap text-right font-mono text-[11px] tabular-nums ${isRunning ? 'font-medium text-teal-700' : 'text-slate-500'}`}>
             {isRunning ? 'Running…' : item.duration !== null ? formatRelativeTime(item.duration) : ''}
           </span>
         </li>
