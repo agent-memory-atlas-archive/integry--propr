@@ -122,6 +122,11 @@ interactive logins, starts the services, verifies their health, and opens the no
 an existing desktop-managed stack runs an incompatible version, **Restart with aligned runtime** replaces only that
 stack's containers with the packaged versions and keeps its database, credentials, logs and repositories.
 
+Desktop-managed runtime roots require owner-only mode `0700` on Linux and macOS. Opening an existing owned
+root normalizes its mode before authority is acquired; provisioning does not broaden it. A later permission change
+invalidates the active setup authority. Stop setup, restore owner-only permissions on the verified managed directory,
+then reopen setup; never relax ancestor, ownership, or symlink checks.
+
 ### macOS prerequisites and recovery
 
 Finder launches do not inherit a terminal shell profile. Setup adds Docker Desktop's standard
@@ -195,9 +200,9 @@ Saved instances and accounts are kept across updates.
 ## Troubleshooting
 
 - **No local setup option:** use a build with guided Linux/macOS support. Windows remains remote-only.
-- **Docker absent, down or permission denied:** install and start Docker, add your user to the `docker` group, then retry.
-- **Authentication terminal unavailable:** install one of the supported terminal emulators and retry.
-- **Secure storage unavailable:** start an unlocked Secret Service keyring session. Pairing never falls back to a
+- **Docker absent, down or permission denied:** on Linux, install and start Docker and add your user to the `docker` group. On macOS, open Docker Desktop and check that the selected context uses its local Linux engine, then retry.
+- **Authentication terminal unavailable:** on Linux, install one of the supported terminal emulators. On macOS, open Terminal and retry.
+- **Secure storage unavailable:** on Linux, start an unlocked Secret Service keyring session. On macOS, use the unlocked GUI session and review the ProPR Safe Storage Keychain prompt; approve access only if intended, without resetting the Keychain. Pairing never falls back to a
   plaintext credential file.
 - **Offline:** restore network access to the instance and retry. The saved connection is kept.
 - **Connection revoked or expired:** pair again in the browser. A role or allowlist change can also require a new approval.

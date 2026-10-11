@@ -172,6 +172,12 @@ export function normalizeDesktopRuntimeManifestMode(path) {
   chmodSync(path, DESKTOP_RUNTIME_MANIFEST_MODE);
 }
 
+export function normalizePackagedDesktopRuntimeManifestMode({ buildPath, platform }) {
+  if (platform !== 'linux' && platform !== 'darwin') return;
+  normalizeDesktopRuntimeManifestMode(resolve(buildPath,
+    ...(platform === 'darwin' ? ['propr-desktop.app', 'Contents', 'Resources'] : ['resources']), 'manifest.json'));
+}
+
 export function writeDesktopRuntimeManifest(path, manifest) {
   mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
   writeFileSync(path, `${JSON.stringify(manifest, null, 2)}\n`, { mode: DESKTOP_RUNTIME_MANIFEST_MODE });

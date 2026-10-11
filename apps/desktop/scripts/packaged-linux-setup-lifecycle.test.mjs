@@ -1,3 +1,6 @@
+import { EventEmitter } from 'node:events';
+import { PassThrough } from 'node:stream';
+import { createInterface } from 'node:readline/promises';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
@@ -326,7 +329,7 @@ test('human startup review remains unverified and resumable until explicit input
   let completed = false;
   const review = awaitMacStartupReview({ outputPath: 'unused', sourceSha: 'a'.repeat(40), userData: '/tmp/private/data',
     reportWriter: async (_, value) => { report = value; },
-    terminalFactory: () => ({ question: async message => {
+    terminalFactory: () => Object.assign(new EventEmitter(), { question: async message => {
       assert.match(message, /human approval is required/);
       assert.match(message, /Never reset a Keychain/);
       await new Promise(resolve => { resume = resolve; });
@@ -349,7 +352,7 @@ test('startup review abort rejects instead of approving or completing the gate',
   let closed = false;
   const review = awaitMacStartupReview({ outputPath: 'unused', sourceSha: 'a'.repeat(40), userData: '/tmp/private/data',
     reportWriter: async () => {},
-    terminalFactory: () => ({ question: (_, options) => {
+    terminalFactory: () => Object.assign(new EventEmitter(), { question: (_, options) => {
       signal = options.signal;
       return new Promise((_, reject) => signal.addEventListener('abort', () => reject(new Error('aborted')), { once: true }));
     }, close: () => { closed = true; } }),
@@ -360,4 +363,62 @@ test('startup review abort rejects instead of approving or completing the gate',
   await rejected;
   assert.equal(signal.aborted, true);
   assert.equal(closed, true);
+});
+
+
+for (const action of ['ctrl-c', 'close', 'enter']) {
+  test(`real terminal startup review settles on ${action}`, { timeout: 2000 }, async () => {
+    const input = new PassThrough();
+    const output = new PassThrough();
+    input.isTTY = output.isTTY = true;
+    input.setRawMode = () => input;
+    let terminal;
+    const review = awaitMacStartupReview({
+      outputPath: 'unused', sourceSha: 'a'.repeat(40), userData: '/tmp/private/data',
+      reportWriter: async () => {},
+      terminalFactory: () => (terminal = createInterface({ input, output, terminal: true })),
+    });
+    const outcome = action === 'enter' ? review : assert.rejects(review, { name: 'AbortError' });
+    await new Promise(resolve => setImmediate(resolve));
+    if (action === 'close') terminal.close();
+    else input.write(action === 'ctrl-c' ? '\x03' : '\n');
+    await outcome;
+    assert.equal(terminal.listenerCount('SIGINT'), 0);
+    input.destroy();
+    output.destroy();
+  });
+}
+
+test('prelaunch Docker failures remove the allocated profile and replace stale reports', { skip: process.platform !== 'linux' || process.arch !== 'x64' }, async () => {
+  const { createPrivateSmokeProfile } = await import('./packaged-smoke-support.mjs');
+  const { runPackagedLinuxSetupLifecycle, lifecycleFailureCategory } = await import('./packaged-linux-setup-lifecycle.mjs');
+  const { access } = await import('node:fs/promises');
+  const directory = await mkdtemp(join(tmpdir(), 'propr-prelaunch-failure-'));
+  try {
+    for (const script of ['#!/missing-fixture-interpreter\n', '#!/bin/sh\n[ "$1" = info ] && exit 0\nexit 1\n']) {
+      const docker = join(directory, 'docker');
+      await writeFile(docker, script, { mode: 0o700 });
+      const output = join(directory, 'report.json');
+      await writeFile(output, '{"result":"passed"}');
+      let profile;
+      await assert.rejects(runPackagedLinuxSetupLifecycle({
+        binaryPath: process.execPath,
+        environment: {
+          PATH: directory,
+          PROPR_DESKTOP_REAL_LINUX_SETUP_ACCEPTANCE: '1',
+          PROPR_DESKTOP_SETUP_ACCEPTANCE_SOURCE_SHA: 'a'.repeat(40),
+          PROPR_DESKTOP_SETUP_ACCEPTANCE_OUTPUT: output,
+        },
+        createProfile: async () => (profile = await createPrivateSmokeProfile(directory)),
+      }));
+      assert.ok(profile);
+      await assert.rejects(access(profile.root));
+      const report = JSON.parse(await readFile(output, 'utf8'));
+      assert.equal(report.result, 'failed');
+      assert.equal(report.unverifiedPhase, 'docker-prerequisites');
+      assert.equal(report.cleanup.temporaryRootRemoved, true);
+      assert.ok(['docker-command', 'lifecycle-assertion'].includes(report.failureCategory));
+    }
+    assert.equal(lifecycleFailureCategory(new Error('timeout token=private-value /private/user')), 'timeout');
+  } finally { await rm(directory, { recursive: true, force: true }); }
 });

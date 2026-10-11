@@ -211,7 +211,6 @@ export function configurationErrorCheck(error: string): CheckResult {
 
 /** Run all checks and return the structured outcome (no printing). */
 export async function runChecks(options: RunChecksOptions = {}): Promise<ChecksOutcome> {
-  if (process.platform === "darwin") process.env.PATH = localSetupSearchPath();
   const results: CheckResult[] = [];
   // Record a finalized result and notify any live presenter immediately.
   const emit = (result: CheckResult, opts: { record?: boolean } = {}): void => {
@@ -225,7 +224,7 @@ export async function runChecks(options: RunChecksOptions = {}): Promise<ChecksO
   runCliChecks(emit);
 
   // 1. Docker installed
-  const { orch, cfg, rootDir } = await getHostConfig({ configManager, root: options.root });
+  const orch = await loadOrchestrator();
   const dockerVersion = await orch.dockerAsync(["--version"], { timeout: 10_000, signal: options.signal });
   if (dockerVersion.status === 0) {
     emit({ name: "Docker installed", status: "ok", detail: (dockerVersion.stdout ?? "").trim(), group: "Docker" });
@@ -297,6 +296,8 @@ export async function runChecks(options: RunChecksOptions = {}): Promise<ChecksO
           }
     );
   }
+
+  const { cfg, rootDir } = await getHostConfig({ configManager, root: options.root });
 
   // 4. Stack root + .env
   const envPath = join(rootDir, ".env");
@@ -527,7 +528,7 @@ export async function runChecks(options: RunChecksOptions = {}): Promise<ChecksO
         });
         continue;
       }
-      const run = spawnSync("docker", ["run", "--rm", "--network=none", "--memory=512m", "-e", `PROPR_AGENT_TYPE=${runtimeType}`, tag, agent.bin, "--version"], { encoding: "utf-8", timeout: 60000 });
+      const run = spawnSync("docker", ["run", "--rm", "--network=none", "--memory=512m", "-e", `PROPR_AGENT_TYPE=${runtimeType}`, tag, agent.bin, "--version"], { encoding: "utf-8", timeout: 60000, env: { ...process.env, PATH: localSetupSearchPath() } });
       if (run.status === 0) {
         emit({ name: `Verify: ${agent.type}`, status: "ok", detail: `image runs (${(run.stdout || "").trim().split("\n")[0]})`, group: "Agents" });
       } else {

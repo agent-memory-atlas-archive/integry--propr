@@ -1,12 +1,13 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { chmodSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { describe, test } from 'node:test';
 import {
   createDesktopRuntimeManifest,
   normalizeDesktopRuntimeManifestMode,
+  normalizePackagedDesktopRuntimeManifestMode,
   validateDesktopRuntimeManifest,
   validatePublishedDesktopRuntimeImageInspection,
   validatePublishedManagedAgentInspection,
@@ -227,4 +228,20 @@ describe('desktop source runtime build inputs', () => {
     const launch = smoke.indexOf('docker run -d --name "$API_CONTAINER"');
     assert.ok(create >= 0 && protect > create && launch > protect);
   });
+});
+
+
+test('packaged Linux and macOS manifests normalize checkout write modes at their actual resource layouts', { skip: process.platform === 'win32' }, () => {
+  const directory = mkdtempSync(join(tmpdir(), 'propr-manifest-mode-'));
+  try {
+    for (const platform of ['linux', 'darwin']) {
+      const resources = join(directory, ...(platform === 'darwin' ? ['propr-desktop.app', 'Contents', 'Resources'] : ['resources']));
+      mkdirSync(resources, { recursive: true });
+      const manifest = join(resources, 'manifest.json');
+      writeFileSync(manifest, '{}');
+      chmodSync(manifest, 0o775);
+      normalizePackagedDesktopRuntimeManifestMode({ buildPath: directory, platform });
+      assert.equal(statSync(manifest).mode & 0o777, 0o644);
+    }
+  } finally { rmSync(directory, { recursive: true, force: true }); }
 });

@@ -16,7 +16,7 @@ import {
   resolveTrustedUpdateBuildConfig,
 } from './src/release-config';
 import {
-  normalizeDesktopRuntimeManifestMode,
+  normalizePackagedDesktopRuntimeManifestMode,
   readDesktopRuntimeManifest,
 } from './scripts/desktop-runtime-manifest.mjs';
 import { brandMacOSPackage } from './src/macos-branding';
@@ -57,14 +57,9 @@ if (configuredRuntimeManifest) {
       : {}),
   });
 }
-const linuxSetupResources = process.platform === 'linux'
-  ? {
-      afterCopyExtraResources: [({ buildPath, platform }: { buildPath: string; platform: string }) => {
-        if (platform === 'linux') {
-          normalizeDesktopRuntimeManifestMode(resolve(buildPath, 'resources', 'manifest.json'));
-        }
-      }],
-    }
+const setupResources = ['linux', 'darwin'].includes(process.platform)
+  ? { afterCopyExtraResources: [normalizePackagedDesktopRuntimeManifestMode,
+    ...(process.platform === 'darwin' ? [brandMacOSPackage] : [])] }
   : {};
 
 const desktopPackage = JSON.parse(
@@ -134,8 +129,7 @@ const config: ForgeConfig = {
         setupAssets,
       ] : []),
     ],
-    ...linuxSetupResources,
-    ...(process.platform === 'darwin' ? { afterCopyExtraResources: [brandMacOSPackage] } : {}),
+    ...setupResources,
     appBundleId: 'dev.propr.desktop',
     extendInfo: {
       NSMicrophoneUsageDescription: DESKTOP_MICROPHONE_USAGE_DESCRIPTION,

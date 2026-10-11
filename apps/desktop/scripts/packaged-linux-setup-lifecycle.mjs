@@ -169,11 +169,15 @@ export const awaitMacStartupReview = async ({ outputPath, sourceSha, userData, t
   const stop = () => abort.abort();
   process.once('SIGINT', stop);
   process.once('SIGTERM', stop);
+  terminal.on('SIGINT', stop);
+  terminal.once('close', stop);
   try {
     await terminal.question('Inspect the app in the GUI. If ProPR Safe Storage requests access, human approval is required; this harness cannot grant it. Never reset a Keychain. Signing identity consent is separate from HOME isolation. Leave this Terminal running to resume; press Enter when ready to test startup, or Ctrl-C to abort.\n', { signal: abort.signal });
   } finally {
     process.removeListener('SIGINT', stop);
     process.removeListener('SIGTERM', stop);
+    terminal.removeListener('SIGINT', stop);
+    terminal.removeListener('close', stop);
     terminal.close();
   }
 };
@@ -498,16 +502,27 @@ const writeReport = async (outputPath, report) => {
   await writeFile(outputPath, `${JSON.stringify(report, null, 2)}\n`, { mode: 0o600 });
 };
 
+// Reports never retain child output, paths, environment values, or arbitrary
+// error messages: those can contain credentials even in an isolated run.
+export const lifecycleFailureCategory = error => {
+  if (error?.name === 'AbortError') return 'cancelled';
+  if (/timeout|timed out/i.test(String(error?.message))) return 'timeout';
+  if (/Docker/i.test(String(error?.message))) return 'docker-command';
+  if (/CDP|WebSocket|startup/i.test(String(error?.message))) return 'application-startup';
+  return 'lifecycle-assertion';
+};
+
 export const runPackagedLinuxSetupLifecycle = async ({
   environment = process.env,
   binaryPath = resolve('out', 'propr-desktop-linux-x64', 'propr-desktop'),
   nativeMac = false,
+  createProfile = createPrivateSmokeProfile,
 } = {}) => {
   if (environment[LINUX_SETUP_ACCEPTANCE_OPT_IN] !== '1') {
     throw new Error(`Real Linux setup acceptance is opt-in; set ${LINUX_SETUP_ACCEPTANCE_OPT_IN}=1`);
   }
   if (nativeMac ? (process.platform !== 'darwin' || !['arm64', 'x64'].includes(process.arch)) : (process.platform !== 'linux' || process.arch !== 'x64')) {
-    throw new Error('Real packaged setup acceptance is supported only on Linux x64');
+    throw new Error(nativeMac ? 'Real packaged macOS setup acceptance requires macOS arm64 or x64' : 'Real packaged setup acceptance is supported only on Linux x64');
   }
   const sourceSha = validateSourceSha(environment[LINUX_SETUP_ACCEPTANCE_SOURCE_SHA]);
   const outputPath = resolve(environment[LINUX_SETUP_ACCEPTANCE_OUTPUT]
@@ -524,38 +539,7 @@ export const runPackagedLinuxSetupLifecycle = async ({
       throw error;
     }
   }
-  const profile = await createPrivateSmokeProfile();
-  const dockerRun = nativeMac
-    ? (path, args, options) => runDocker(path, args, { ...options, environment: {
-      PATH: environment.PATH, HOME: profile.home, DOCKER_CONFIG: join(profile.home, '.docker'), DOCKER_HOST: environment.DOCKER_HOST,
-    } }) : runDocker;
-  const dockerPath = await resolveDocker(environment.PATH);
-  const dockerSupport = await probeDockerSupport(dockerPath, dockerRun);
-  const command = nativeMac
-    ? `PROPR_DESKTOP_REAL_MACOS_SETUP_ACCEPTANCE=1 ${LINUX_SETUP_ACCEPTANCE_SOURCE_SHA}=${sourceSha} node apps/desktop/scripts/run-packaged-macos-setup-lifecycle.mjs <app-executable>`
-    : `${LINUX_SETUP_ACCEPTANCE_OPT_IN}=1 ${LINUX_SETUP_ACCEPTANCE_SOURCE_SHA}=${sourceSha} npm run desktop:acceptance:setup-linux`;
-  if (!dockerSupport.supported) {
-    const report = {
-      schemaVersion: 1,
-      result: 'unverified',
-      sourceSha,
-      command,
-      platform: `${process.platform}-${process.arch}`,
-      verifiedPhases: ['packaged-artifact-present'],
-      unverifiedPhase: dockerSupport.phase,
-      limitations: [dockerSupport.limitation, 'Cancellation, retry, and relaunch were not executed.'],
-      cleanup: { applicationStarted: false, runtimeRootCreated: false, dockerResourcesCreated: false },
-    };
-    await removePrivateSmokeProfile(profile);
-    await writeReport(outputPath, report);
-    return report;
-  }
-
-  const isolation = createLinuxSetupIsolation();
-  const ports = await reserveFreeLoopbackPorts();
-  const baseline = await dockerBaseline(dockerPath, dockerRun);
-  const wrapperDirectory = join(profile.root, 'docker-command-boundary');
-  const eventPath = join(profile.root, 'docker-events.jsonl');
+  const profile = await createProfile();
   let launch;
   let relaunch;
   let firstPull;
@@ -563,8 +547,44 @@ export const runPackagedLinuxSetupLifecycle = async ({
   let primaryOutput = Buffer.alloc(0);
   let relaunchOutput = Buffer.alloc(0);
   let cleanupEvidence;
-  let phase = 'isolated-runtime-preparation';
+  let failureReport;
+  let phase = 'docker-prerequisites';
+  let dockerPath;
+  let isolation;
+  let dockerRun;
   try {
+    dockerRun = nativeMac
+      ? (path, args, options) => runDocker(path, args, { ...options, environment: {
+        PATH: environment.PATH, HOME: profile.home, DOCKER_CONFIG: join(profile.home, '.docker'), DOCKER_HOST: environment.DOCKER_HOST,
+      } }) : runDocker;
+    dockerPath = await resolveDocker(environment.PATH);
+    const dockerSupport = await probeDockerSupport(dockerPath, dockerRun);
+    const command = nativeMac
+      ? `PROPR_DESKTOP_REAL_MACOS_SETUP_ACCEPTANCE=1 ${LINUX_SETUP_ACCEPTANCE_SOURCE_SHA}=${sourceSha} node apps/desktop/scripts/run-packaged-macos-setup-lifecycle.mjs <app-executable>`
+      : `${LINUX_SETUP_ACCEPTANCE_OPT_IN}=1 ${LINUX_SETUP_ACCEPTANCE_SOURCE_SHA}=${sourceSha} npm run desktop:acceptance:setup-linux`;
+    if (!dockerSupport.supported) {
+      const report = {
+        schemaVersion: 1,
+        result: 'unverified',
+        sourceSha,
+        command,
+        platform: `${process.platform}-${process.arch}`,
+        verifiedPhases: ['packaged-artifact-present'],
+        unverifiedPhase: dockerSupport.phase,
+        limitations: [dockerSupport.limitation, 'Cancellation, retry, and relaunch were not executed.'],
+        cleanup: { applicationStarted: false, runtimeRootCreated: false, dockerResourcesCreated: false },
+      };
+      await removePrivateSmokeProfile(profile);
+      await writeReport(outputPath, report);
+      return report;
+    }
+
+    isolation = createLinuxSetupIsolation();
+    const ports = await reserveFreeLoopbackPorts();
+    const baseline = await dockerBaseline(dockerPath, dockerRun);
+    const wrapperDirectory = join(profile.root, 'docker-command-boundary');
+    const eventPath = join(profile.root, 'docker-events.jsonl');
+    phase = 'isolated-runtime-preparation';
     await mkdir(wrapperDirectory, { mode: 0o700 });
     await prepareIsolatedRoot({ profile, isolation, ports, nativeMac });
     const wrapperPath = join(wrapperDirectory, 'docker');
@@ -611,7 +631,7 @@ export const runPackagedLinuxSetupLifecycle = async ({
     const retryEvents = await readDockerEvents(eventPath);
     if (retryStatus.phase !== 'running'
       || !retryStatus.logs.includes('Retrying setup with a fresh host inspection…')
-      || retryEvents.filter(event => event.event === 'invoked' && event.operation === 'info').length !== (nativeMac ? 4 : 2)
+      || retryEvents.filter(event => event.event === 'invoked' && event.operation === 'info').length <= cancellationEvents.filter(event => event.event === 'invoked' && event.operation === 'info').length
       || processExists(firstPull.pid) || !processExists(secondPull.pid)) {
       throw new Error('Real setup retry did not perform one fresh host inspection and one fresh execution');
     }
@@ -690,22 +710,28 @@ export const runPackagedLinuxSetupLifecycle = async ({
     await writeReport(outputPath, report);
     return report;
   } catch (error) {
-    await writeReport(outputPath, {
+    failureReport = {
       schemaVersion: 1, result: 'failed', sourceSha, platform: `${process.platform}-${process.arch}`,
       unverifiedPhase: phase,
+      failureCategory: lifecycleFailureCategory(error),
       limitations: ['Lifecycle did not complete. Startup/Keychain consent must be reviewed in the GUI; a timeout does not establish its cause. Rerun in GUI Terminal after resolving the prerequisite; no permissions are changed by the harness.'],
-    });
+    };
     throw error;
   } finally {
-    if (launch) await terminateLaunch(launch, 'SIGKILL').catch(() => undefined);
-    if (relaunch) await terminateLaunch(relaunch, 'SIGKILL').catch(() => undefined);
+    let cleanupFailed = false;
+    if (launch) await terminateLaunch(launch, 'SIGKILL').catch(() => { cleanupFailed = true; });
+    if (relaunch) await terminateLaunch(relaunch, 'SIGKILL').catch(() => { cleanupFailed = true; });
     if (firstPull && processExists(firstPull.pid)) {
-      try { process.kill(firstPull.pid, 'SIGKILL'); } catch { /* already gone */ }
+      try { process.kill(firstPull.pid, 'SIGKILL'); } catch (error) { if (error?.code !== 'ESRCH') cleanupFailed = true; }
     }
     if (secondPull && processExists(secondPull.pid)) {
-      try { process.kill(secondPull.pid, 'SIGKILL'); } catch { /* already gone */ }
+      try { process.kill(secondPull.pid, 'SIGKILL'); } catch (error) { if (error?.code !== 'ESRCH') cleanupFailed = true; }
     }
-    if (!cleanupEvidence) await assertNoOwnedDockerResources(dockerPath, isolation, dockerRun).catch(() => undefined);
-    await rm(profile.root, { recursive: true, force: true }).catch(() => undefined);
+    if (!cleanupEvidence && dockerPath && isolation) await assertNoOwnedDockerResources(dockerPath, isolation, dockerRun).catch(() => { cleanupFailed = true; });
+    let temporaryRootRemoved = false;
+    await rm(profile.root, { recursive: true, force: true }).then(() => { temporaryRootRemoved = true; }, () => { cleanupFailed = true; });
+    if (failureReport) await writeReport(outputPath, { ...failureReport,
+      cleanup: { outcome: cleanupFailed ? 'incomplete' : 'no-cleanup-error', temporaryRootRemoved },
+    });
   }
 };

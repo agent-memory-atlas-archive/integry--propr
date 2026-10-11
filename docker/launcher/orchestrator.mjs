@@ -525,12 +525,23 @@ export function validateDockerBindPath(name, value, { containerPath = false } = 
 
 const REMOTE_IMAGE_CHECK_TIMEOUT_MS = 5000;
 
+// Finder launches do not read shell profiles. Scope discovery to Docker children;
+// never change the Electron host's environment or other programs' search paths.
+export function dockerExecutionEnvironment(env = process.env, platform = process.platform) {
+    if (platform !== 'darwin') return env;
+    return { ...env, PATH: [...new Set([
+        ...(env.PATH ?? '/usr/bin:/bin:/usr/sbin:/sbin').split(':').filter(path => path.startsWith('/')),
+        '/Applications/Docker.app/Contents/Resources/bin',
+        join(env.HOME ?? homedir(), '.docker', 'bin'), '/opt/homebrew/bin', '/usr/local/bin',
+    ])].join(':') };
+}
+
 export function docker(args, { capture = false, timeout, env, maxBuffer } = {}) {
     const res = spawnSync('docker', args, {
         stdio: capture ? ['ignore', 'pipe', 'pipe'] : 'inherit',
         encoding: 'utf8',
         timeout,
-        env,
+        env: dockerExecutionEnvironment(env),
         maxBuffer,
     });
     if (res.status !== 0 && !capture) {
@@ -547,10 +558,10 @@ export function docker(args, { capture = false, timeout, env, maxBuffer } = {}) 
  * On timeout it kills the child and reports an ETIMEDOUT error, matching the
  * spawnSync timeout contract that `dockerError` inspects.
  */
-export function dockerAsync(args, { timeout, signal } = {}) {
+export function dockerAsync(args, { timeout, signal, env } = {}) {
     signal?.throwIfAborted();
     return new Promise((resolveResult, reject) => {
-        const child = spawn('docker', args, { stdio: ['ignore', 'pipe', 'pipe'] });
+        const child = spawn('docker', args, { stdio: ['ignore', 'pipe', 'pipe'], env: dockerExecutionEnvironment(env) });
         let stdout = '';
         let stderr = '';
         let settled = false;
@@ -2045,7 +2056,7 @@ export function getServiceLogs(cfg, service, { follow = false, tail = 'all', std
     const args = ['logs'];
     if (follow) args.push('-f');
     args.push('--tail', String(tail), `${cfg.stack}-${service}`);
-    return spawn('docker', args, { stdio });
+    return spawn('docker', args, { stdio, env: dockerExecutionEnvironment() });
 }
 
 // ---------------------------------------------------------------------------

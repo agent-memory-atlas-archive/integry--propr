@@ -1,5 +1,4 @@
-import { inspectSetupImagePlatform } from "./imagePlatform.js";
-import { localSetupSearchPath } from "../../utils/localSetupPlatform.js";
+import { inspectSetupEngineArchitecture, inspectSetupImagePlatform } from "./imagePlatform.js";
 import { mkdirSync } from "node:fs";
 import { hostname } from "node:os";
 import { isAbsolute, normalize } from "node:path";
@@ -44,7 +43,6 @@ export function createDefaultActions(configManager?: ConfigManager, options: {
   authenticationHandoff?: AuthenticationCommandHandoff;
   capturedCommand?: CapturedCommandRunner;
 } = {}): SetupActions {
-  if (process.platform === "darwin") process.env.PATH = localSetupSearchPath();
   /** A client pointed at the local stack's API port (not the saved remote URL). */
   const localApiClient = async (rootDir: string): Promise<import("../../api/client.js").ApiClient> => {
     const { getHostConfig } = await import("../../orchestrator/index.js");
@@ -94,7 +92,7 @@ export function createDefaultActions(configManager?: ConfigManager, options: {
       });
     } catch (error) {
       signal?.throwIfAborted();
-      if (process.platform === "darwin") throw new Error(`${(error as Error).message}\nIf Docker reports a denied bind mount, review Docker Desktop Settings → Resources → File sharing for this stack directory. Grant access yourself only if intended, then retry.`);
+      if (process.platform === "darwin" && error instanceof Error) error.message += `\nIf Docker reports a denied bind mount, review Docker Desktop Settings → Resources → File sharing for this stack directory. Grant access yourself only if intended, then retry.`;
       throw error;
     }
     signal?.throwIfAborted();
@@ -139,6 +137,7 @@ export function createDefaultActions(configManager?: ConfigManager, options: {
         ? new Set(["app", "ui"])
         : new Set<string>();
 
+      let architecture: string | undefined;
       for (const [key, tag] of Object.entries(cfg.images)) {
         signal?.throwIfAborted();
         if (key === "docs" && !cfg.docsEnabled) continue;
@@ -146,11 +145,6 @@ export function createDefaultActions(configManager?: ConfigManager, options: {
         // Pull the shared agent image when the user selected any agent; core images
         // (api/worker/daemon/redis/…) always pull.
         if (isAgent && selected.size === 0) continue;
-
-        const platform = process.platform === "darwin"
-          ? await inspectSetupImagePlatform(orch, tag, isAgent, sourceBuiltImageKeys.has(key), signal)
-          : undefined;
-        if (platform) onLog?.(`${tag}: ${platform}${isAgent ? " (Docker Desktop emulation required on Apple Silicon)" : ""}`);
 
         // A source validation manifest deliberately names images built into the
         // local Docker daemon.  They are never claimed to be published and must
@@ -160,9 +154,47 @@ export function createDefaultActions(configManager?: ConfigManager, options: {
           onLog?.(`checking source-built image ${tag}…`);
           const inspected = await orch.dockerAsync(["image", "inspect", tag], { signal });
           signal?.throwIfAborted();
-          if (inspected.status === 0) result.pulledCore.push(tag);
+          if (inspected.status === 0) {
+            try {
+              if (process.platform === "darwin") {
+                architecture ??= await inspectSetupEngineArchitecture(orch, signal);
+                await inspectSetupImagePlatform(orch, tag, isAgent, true, signal, architecture);
+              }
+              result.pulledCore.push(tag);
+            } catch (error) {
+              signal?.throwIfAborted();
+              onLog?.(`Source-built image ${tag} is unavailable or incompatible: ${(error as Error).message}`);
+              result.failedCore.push(tag);
+            }
+          }
           else result.failedCore.push(tag);
           continue;
+        }
+
+        let platform: string | undefined;
+        let localPlatformVerified = false;
+        if (process.platform === "darwin") {
+          architecture ??= await inspectSetupEngineArchitecture(orch, signal);
+          const present = await orch.dockerAsync(["image", "inspect", tag], { signal });
+          signal?.throwIfAborted();
+          const skipRemote = /^(1|true|yes)$/i.test(process.env.PROPR_SKIP_REMOTE_IMAGE_CHECK ?? "");
+          if (present.status === 0) {
+            try {
+              platform = await inspectSetupImagePlatform(orch, tag, isAgent, true, signal, architecture);
+              localPlatformVerified = true;
+            } catch (error) {
+              signal?.throwIfAborted();
+              if (skipRemote) throw error;
+              // An incompatible local variant must not prevent pulling the
+              // required platform from a published multi-platform manifest.
+            }
+          }
+          platform ??= await inspectSetupImagePlatform(orch, tag, isAgent, false, signal, architecture);
+          onLog?.(`${tag}: ${platform}${isAgent ? " (AMD64 agent; emulation required on Apple Silicon)" : ""}`);
+          if (localPlatformVerified && skipRemote) {
+            (isAgent ? result.pulledAgents : result.pulledCore).push(tag);
+            continue;
+          }
         }
 
         onLog?.(`pulling ${tag}…`);
@@ -170,7 +202,18 @@ export function createDefaultActions(configManager?: ConfigManager, options: {
         // animating while the (often slow) pull runs, instead of freezing.
         const pulled = await orch.dockerAsync(["pull", ...(platform ? ["--platform", platform] : []), tag], { signal });
         signal?.throwIfAborted();
-        if (pulled.status === 0) {
+        // A failed pull awaited an external API. Reinspect before relying on
+        // local availability; the earlier presence check is not durable proof.
+        if (pulled.status !== 0 && localPlatformVerified) {
+          try {
+            await inspectSetupImagePlatform(orch, tag, isAgent, true, signal, architecture);
+          } catch {
+            signal?.throwIfAborted();
+            localPlatformVerified = false;
+          }
+        }
+        if (pulled.status === 0 || localPlatformVerified) {
+          if (pulled.status !== 0) onLog?.(`Using verified local image ${tag}; registry pull unavailable.`);
           try {
             orch.tagAgentLatest(key, tag);
           } catch {

@@ -26,23 +26,32 @@ export function selectSetupImagePlatform(platforms: readonly string[], architect
   // The released agent is AMD64. Its ARM64 compatibility must be independently
   // qualified before changing this policy. Docker Desktop supplies emulation.
   const selected = agent ? 'linux/amd64' : native;
-  if (!platforms.includes(selected)) throw new Error(`Image does not declare the required ${selected} platform`);
+  if (!platforms.includes(selected)) throw new Error(agent
+    ? 'Image does not declare the required linux/amd64 platform. ARM64 agent images, including source builds, are not yet qualified; build or select an AMD64 agent image.'
+    : `Image does not declare the required ${selected} platform`);
   return selected;
 }
 
-export async function inspectSetupImagePlatform(
-  orch: OrchestratorModule, image: string, agent: boolean, local: boolean, signal?: AbortSignal,
-): Promise<string> {
+export async function inspectSetupEngineArchitecture(orch: OrchestratorModule, signal?: AbortSignal): Promise<string> {
   const engine = await orch.dockerAsync(['info', '--format', '{{.Architecture}}'], { timeout: 10_000, signal });
+  signal?.throwIfAborted();
   if (engine.status !== 0) throw new Error('Docker Desktop engine architecture could not be verified');
+  return (engine.stdout ?? '').trim();
+}
+
+export async function inspectSetupImagePlatform(
+  orch: OrchestratorModule, image: string, agent: boolean, local: boolean, signal?: AbortSignal, architecture?: string,
+): Promise<string> {
+  const engineArchitecture = architecture ?? await inspectSetupEngineArchitecture(orch, signal);
   const result = await orch.dockerAsync(local
     ? ['image', 'inspect', '--format', '{"Os":{{json .Os}},"Architecture":{{json .Architecture}}}', image]
     : ['manifest', 'inspect', '--verbose', image], { timeout: 30_000, signal });
+  signal?.throwIfAborted();
   if (result.status !== 0) throw new Error(`Cannot verify image platforms for ${image}: ${result.stderr || result.error?.message || 'Docker inspection failed'}`);
   let value: unknown;
   try { value = JSON.parse(result.stdout ?? ''); }
   catch { throw new Error(`Docker returned invalid platform metadata for ${image}`); }
   const row = value as { Os?: string; Architecture?: string };
   const platforms = local ? (row.Os === 'linux' ? [`linux/${row.Architecture}`] : []) : manifestPlatforms(value);
-  return selectSetupImagePlatform(platforms, (engine.stdout ?? '').trim(), agent);
+  return selectSetupImagePlatform(platforms, engineArchitecture, agent);
 }

@@ -24,6 +24,7 @@ export interface DesktopRuntimeManifest {
 export const DESKTOP_RUNTIME_MANIFEST_MODE: number;
 export const MANAGED_AGENT_PLATFORMS: readonly ['linux/amd64'];
 export function normalizeDesktopRuntimeManifestMode(path: string): void;
+export function normalizePackagedDesktopRuntimeManifestMode(options: { buildPath: string; platform: string }): void;
 export function writeDesktopRuntimeManifest(path: string, manifest: unknown): void;
 
 export function validateDesktopRuntimeManifest(

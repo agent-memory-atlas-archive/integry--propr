@@ -1,3 +1,4 @@
+import { localSetupSearchPath } from "../utils/localSetupPlatform.js";
 /**
  * Shared GitHub authentication via the `gh` CLI.
  *
@@ -154,7 +155,7 @@ export async function loginWithGithubCli(
 const runCapturedCommand: CapturedCommandRunner = async (command, args, signal) => {
   const { spawn } = await import("node:child_process");
   return new Promise((resolve, reject) => {
-    const child = spawn(command, args, { stdio: ["ignore", "pipe", "ignore"], signal });
+    const child = spawn(command, args, { env: { ...process.env, PATH: localSetupSearchPath() }, stdio: ["ignore", "pipe", "ignore"], signal });
     let stdout = "";
     child.stdout.setEncoding("utf8");
     child.stdout.on("data", chunk => { if (stdout.length < 65_536) stdout += String(chunk); });

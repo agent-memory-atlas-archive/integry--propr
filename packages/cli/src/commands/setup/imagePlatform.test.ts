@@ -29,3 +29,18 @@ test('source-built images are inspected locally and cancellation reaches both pr
   assert.equal(calls[1][0], 'image');
   assert.equal(calls[1].includes('manifest'), false);
 });
+
+
+test('platform inspection stops at awaited cancellation boundaries', async () => {
+  for (const abortOn of ['info', 'image']) {
+    const controller = new AbortController();
+    const calls: string[] = [];
+    const orch = { dockerAsync: async (args: string[]) => {
+      calls.push(args[0]);
+      if (args[0] === abortOn) controller.abort();
+      return { status: 0, stdout: args[0] === 'info' ? 'arm64' : '{"Os":"linux","Architecture":"arm64"}' };
+    } } as unknown as OrchestratorModule;
+    await assert.rejects(inspectSetupImagePlatform(orch, 'local/app', false, true, controller.signal), { name: 'AbortError' });
+    assert.deepEqual(calls, abortOn === 'info' ? ['info'] : ['info', 'image']);
+  }
+});

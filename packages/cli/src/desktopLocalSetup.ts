@@ -1,6 +1,6 @@
-import { assertOwnedLocalSetupRoot } from './connectIdentity.js';
 import { existsSync, lstatSync, realpathSync } from 'node:fs';
 import { join, resolve } from 'node:path';
+import { assertOwnedLocalSetupRoot } from './connectIdentity.js';
 import type { SetupActions } from '@propr/local-setup';
 import {
   evaluateProprApiCompatibility,

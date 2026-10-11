@@ -1,3 +1,4 @@
+import { localSetupSearchPath } from "../utils/localSetupPlatform.js";
 /**
  * Live agent validation for `propr check` (opt-in, see --validate-agents).
  *
@@ -64,7 +65,7 @@ function execAsync(
 ): Promise<ExecResult> {
   opts.signal?.throwIfAborted();
   return new Promise((resolve, reject) => {
-    const child = spawn(cmd, args, { cwd: opts.cwd, env: opts.env, stdio: ["pipe", "pipe", "pipe"] });
+    const child = spawn(cmd, args, { cwd: opts.cwd, env: cmd === "docker" ? { ...(opts.env ?? process.env), PATH: localSetupSearchPath(process.platform, (opts.env ?? process.env).PATH) } : opts.env, stdio: ["pipe", "pipe", "pipe"] });
     let stdout = "";
     let stderr = "";
     let settled = false;

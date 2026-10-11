@@ -103,3 +103,36 @@ infer success from a discovered installation, or treat a healthy HTTP endpoint a
 Cancel and retry during provisioning; interrupt/relaunch and verify recovery without duplicate execution. Check that
 existing Docker container/network identities and existing desktop profiles are unchanged. Retain the isolated runtime
 for review; do not perform destructive cleanup. Full proof remains unverified until these native actions succeed.
+
+## Remaining native evidence and host side effects
+
+This revision's automated Linux regressions are not macOS acceptance. No available result establishes that changing
+HOME caused or fixed `errSecInteractionNotAllowed`. Preserve the real HOME and compare the current exact build's
+normal GUI launch with the GUI Terminal harness, recording startup outcome and human-observed consent separately.
+The earlier successful `open -n` run only proves that earlier build's chooser and first wizard step.
+
+Before acceptance, verify root acquisition and revalidation with both `assertOwnedLocalSetupRoot` and
+`RootDirectoryAuthority` under the actual `~/Library/Application Support/propr-desktop/local-runtime` ancestry.
+Record ancestor ACLs, including `group:everyone deny delete` on HOME/Library, without removing ACEs or weakening
+checks. Use a disposable owned directory under that ancestry without modifying an installed runtime. Retain exact
+revision evidence for this check, Keychain startup, keyboard Ctrl-C, held-pull cancellation/retry/relaunch, and full
+provisioning separately. These native gates remain outstanding and Linux CI cannot satisfy them.
+
+Real HOME preserves Keychain context but is not complete filesystem isolation. The shared bundle ID can affect
+`~/Library/Logs/propr-desktop`, `~/Library/Preferences/dev.propr.desktop.plist`, saved application state, and
+LaunchServices registration of `propr://` against the test bundle. Before and after the run, record existence and
+modification metadata for those locations and inspect the registered handler/bundle path. Confirm the installed
+release still launches and retains its intended URL handler. Report changes; do not delete shared files, reset
+Keychain items, or change registrations automatically.
+
+Terminal authentication forwards HOME, Docker endpoint/context/configuration and TLS certificate locations, GH
+configuration location, XDG locations, TMPDIR, and the Docker search path using literal shell arguments. Unset host
+selectors clear Terminal defaults, preserving context-over-host precedence. Agent credential mounts and additional
+non-secret agent settings are explicit login arguments. GH_TOKEN is an optional container environment input, not an
+interactive-login prerequisite; GH_TOKEN, GITHUB_TOKEN and Docker auth JSON are deliberately not transferred or
+written into command files. Authentication uses the selected configuration and explicit interactive consent.
+
+Published and source-built agent images must declare Linux AMD64; native ARM64 agents are not qualified by this PR.
+Already-local images are inspected locally. With remote checks skipped they are reused; otherwise a failed pull
+can reuse an image only after its local platform is reverified. This does not make Docker's inspection and execution
+atomic: external image deletion or endpoint changes can still cause the later Docker command to fail.

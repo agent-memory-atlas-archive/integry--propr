@@ -1,3 +1,5 @@
+import { inspectSetupImagePlatform } from "./imagePlatform.js";
+import { localSetupSearchPath } from "../../utils/localSetupPlatform.js";
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -52,6 +54,8 @@ export function createDefaultAgentSetupActions(configManager?: ConfigManager, op
           return { available: true, success: false, detail: `image ${plan.image} not present locally — run \`propr images pull\`` };
         }
         mkdirSync(plan.hostDir, { recursive: true, mode: 0o700 });
+        if (process.platform === "darwin") await inspectSetupImagePlatform(orch, plan.image, true, true, loginOptions.signal);
+        loginOptions.signal?.throwIfAborted();
         const dockerArgs = process.platform === "darwin"
           ? [plan.dockerArgs[0], "--platform", "linux/amd64", ...plan.dockerArgs.slice(1)]
           : plan.dockerArgs;
@@ -60,7 +64,7 @@ export function createDefaultAgentSetupActions(configManager?: ConfigManager, op
               title: `ProPR · ${type} authentication`,
               signal: loginOptions.signal,
             })
-          : spawnSync("docker", dockerArgs, { stdio: "inherit" });
+          : spawnSync("docker", dockerArgs, { stdio: "inherit", env: { ...process.env, PATH: localSetupSearchPath() } });
         loginOptions.signal?.throwIfAborted();
         return result.status === 0
           ? { available: true, success: true, detail: `${type} login finished — credentials written to ${plan.hostDir}` }

@@ -1,8 +1,8 @@
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 
-/** Finder does not read shell startup files. Extend only this process's search
- * path; do not run a shell, install tools, or modify the user's configuration. */
+/** Finder does not read shell startup files. Return a search path for setup
+ * children without changing the host environment or the user's configuration. */
 export function localSetupSearchPath(
   platform: NodeJS.Platform = process.platform,
   path = process.env.PATH,

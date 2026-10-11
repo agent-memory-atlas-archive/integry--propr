@@ -32,6 +32,8 @@ function fakeDocker(pulled: boolean): { orch: OrchestratorModule; calls: string[
   };
   const run = (args: string[]): DockerCommandResult => {
     calls.push(args);
+    if (args[0] === "info") return { status: 0, stdout: "arm64", stderr: "" };
+    if (args.includes('{"Os":{{json .Os}},"Architecture":{{json .Architecture}}}')) return { status: 0, stdout: '{"Os":"linux","Architecture":"amd64"}', stderr: "" };
     if (args[0] === "images" && args[1] === "-q") {
       return { status: 0, stdout: tags.has(args[2]) ? "0123456789ab\n" : "", stderr: "" };
     }
@@ -83,7 +85,7 @@ test("setup login launches authentication for a pulled digest-pinned preview age
   assert.equal(result.success, true, result.detail);
   assert.equal(handoffs.length, 1);
   assert.ok(handoffs[0].includes(PINNED));
-  assert.deepEqual(calls.filter((args) => args[0] === "image").map((args) => args.at(-1)), [PINNED]);
+  assert.deepEqual(calls.filter((args) => args[0] === "image").map((args) => args.at(-1)), process.platform === "darwin" ? [PINNED, PINNED] : [PINNED]);
   assert.equal(calls.some((args) => args[0] === "images"), false);
 });
 
@@ -127,4 +129,20 @@ test("setup agent validation treats a pulled digest-pinned preview agent image a
   assert.equal(row.type, "claude");
   assert.doesNotMatch(row.detail ?? "", /not present/);
   assert.match(row.detail ?? "", /HOST_CLAUDE_DIR is not set/);
+});
+
+
+test("Darwin agent login rejects unqualified ARM64 source images before handoff", async t => {
+  const descriptor = Object.getOwnPropertyDescriptor(process, 'platform')!;
+  Object.defineProperty(process, 'platform', { value: 'darwin' });
+  t.after(() => Object.defineProperty(process, 'platform', descriptor));
+  const { orch } = fakeDocker(true);
+  orch.dockerAsync = async args => ({ status: 0, stderr: '', stdout: args[0] === 'info' ? 'arm64' : '{"Os":"linux","Architecture":"arm64"}' });
+  let handedOff = false;
+  const actions = createDefaultAgentSetupActions(undefined, {
+    loadHostConfig: async () => ({ orch, cfg: { images: { agent: PINNED }, hostClaudeDir: hostDirFixture(t) } as unknown as OrchestratorConfig }),
+    authenticationHandoff: async () => { handedOff = true; return { status: 0 }; },
+  });
+  await assert.rejects(actions.loginAgent('/stack', 'claude'), /including source builds, are not yet qualified/);
+  assert.equal(handedOff, false);
 });

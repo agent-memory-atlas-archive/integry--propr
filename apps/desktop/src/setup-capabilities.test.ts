@@ -54,3 +54,28 @@ describe('desktop setup private-key capability', () => {
     }
   });
 });
+
+it('normalizes an older root at acquisition and rejects mode changes across awaited actions', async () => {
+  const { mkdirSync, statSync } = await import('node:fs');
+  const appData = realpathSync.native(mkdtempSync(join(tmpdir(), 'propr-root-modes-')));
+  const root = join(appData, 'local-runtime');
+  mkdirSync(root);
+  chmodSync(root, 0o755);
+  const authority = RootDirectoryAuthority.open(root, appData);
+  try {
+    assert.equal(statSync(root).mode & 0o777, 0o700);
+    authority.validate();
+    const { scaffoldStack } = await import('../../../packages/cli/src/commands/initStack.js');
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      await scaffoldStack({ root }, { persistStackRoot: async () => {} });
+      authority.validate();
+      assert.equal(statSync(root).mode & 0o777, 0o700);
+    }
+    const bound = bindRootOperations({
+      isStackRunning: async () => { await Promise.resolve(); chmodSync(root, 0o755); return true; },
+    } as unknown as SetupActions, authority);
+    await assert.rejects(bound.isStackRunning(root), /no longer private/);
+    chmodSync(root, 0o700);
+    authority.validate();
+  } finally { authority.close(); rmSync(appData, { recursive: true, force: true }); }
+});

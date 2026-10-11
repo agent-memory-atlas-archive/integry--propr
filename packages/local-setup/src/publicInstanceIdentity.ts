@@ -103,7 +103,9 @@ function sameIdentity(left: ExactPublicFileIdentity, right: ExactPublicFileIdent
   return samePublicFileIdentity(left, right);
 }
 
-function validateDirectoryMode(stat: Stats): void {
+type DirectoryStat = Pick<Stats, "uid" | "mode" | "isDirectory" | "isSymbolicLink">;
+
+function validateDirectoryMode(stat: DirectoryStat): void {
   if (!stat.isDirectory() || stat.isSymbolicLink()) throw new Error("public identity data directory is invalid");
   if (process.platform !== "win32" && (stat.mode & 0o777) !== PUBLIC_IDENTITY_DIRECTORY_MODE) {
     throw new Error("public identity data directory is not private");
@@ -550,7 +552,7 @@ function descriptorRoot(): string {
   throw new Error("safe directory-handle access is unavailable");
 }
 
-function validateAncestorOwnership(stats: Stats[], terminalOwner: number, role: PublicIdentityRole): void {
+function validateAncestorOwnership(stats: DirectoryStat[], terminalOwner: number, role: PublicIdentityRole): void {
   const caller = process.getuid?.();
   if (role === "host" && caller !== undefined && terminalOwner !== caller) {
     throw new Error("public identity data directory is not owned by the host caller");
@@ -603,7 +605,7 @@ function openPinnedDataDirectory(dataDir: string, role: PublicIdentityRole): {
   const flags = constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW;
   const fdRoot = descriptorRoot();
   let fd = openSync(parse(absolute).root, flags);
-  const ancestry: Stats[] = [];
+  const ancestry: DirectoryStat[] = [];
   try {
     let visible = parse(absolute).root;
     for (const component of absolute.slice(parse(absolute).root.length).split(sep).filter(Boolean)) {
@@ -611,15 +613,18 @@ function openPinnedDataDirectory(dataDir: string, role: PublicIdentityRole): {
       closeSync(fd);
       fd = next;
       visible = join(visible, component);
-      const visibleStat = lstatSync(visible);
       const visibleIdentityStat = lstatSync(visible, { bigint: true });
-      if (visibleStat.isSymbolicLink() || !sameIdentity(
+      if (visibleIdentityStat.isSymbolicLink() || !sameIdentity(
         { device: visibleIdentityStat.dev.toString(10), file: visibleIdentityStat.ino.toString(10) },
         exactIdentity(fd),
       )) {
         throw new Error("public identity directory changed during acquisition");
       }
-      ancestry.push(visibleStat);
+      ancestry.push({
+        uid: Number(visibleIdentityStat.uid), mode: Number(visibleIdentityStat.mode),
+        isDirectory: () => visibleIdentityStat.isDirectory(),
+        isSymbolicLink: () => visibleIdentityStat.isSymbolicLink(),
+      });
     }
     const terminal = fstatSync(fd);
     validateAncestorOwnership(ancestry, terminal.uid, role);

@@ -234,5 +234,5 @@ export interface OrchestratorModule {
 
   containerExists(cfg: OrchestratorConfig, name: string): boolean;
   docker(args: string[], opts?: DockerCommandOptions): DockerCommandResult;
-  dockerAsync(args: string[], opts?: { timeout?: number; signal?: AbortSignal }): Promise<DockerCommandResult>;
+  dockerAsync(args: string[], opts?: { timeout?: number; signal?: AbortSignal; env?: NodeJS.ProcessEnv }): Promise<DockerCommandResult>;
 }

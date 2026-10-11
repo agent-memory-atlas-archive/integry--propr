@@ -11,7 +11,7 @@ import {
   realpathSync,
   unlinkSync,
 } from "node:fs";
-import type { Stats } from "node:fs";
+import type { BigIntStats, Stats } from "node:fs";
 import { basename, dirname, join, parse, resolve, sep } from "node:path";
 import { userInfo } from "node:os";
 import {
@@ -105,7 +105,7 @@ interface HeldDirectory {
 
 interface AcquiredRoot {
   root: HeldDirectory;
-  ancestry: Array<{ path: string; stat: Stats; fd: number }>;
+  ancestry: Array<{ path: string; stat: BigIntStats; fd: number }>;
 }
 
 class ConnectSnapshotOperationError extends Error {
@@ -173,12 +173,12 @@ function heldDirectory(fd: number, platform: NodeJS.Platform, visiblePath: strin
   throw new ConnectRootError();
 }
 
-function assertSafeAncestry(ancestry: Stats[], callerUid: number): void {
+function assertSafeAncestry(ancestry: BigIntStats[], callerUid: number): void {
   for (const stat of ancestry) {
     if (!stat.isDirectory() || stat.isSymbolicLink()) throw new ConnectRootError();
-    if (stat.uid !== 0 && stat.uid !== callerUid) throw new ConnectRootError();
-    const writableByOthers = (stat.mode & 0o022) !== 0;
-    const sticky = (stat.mode & 0o1000) !== 0;
+    if (stat.uid !== 0n && stat.uid !== BigInt(callerUid)) throw new ConnectRootError();
+    const writableByOthers = (stat.mode & 0o022n) !== 0n;
+    const sticky = (stat.mode & 0o1000n) !== 0n;
     if (writableByOthers && !sticky) throw new ConnectRootError();
   }
 }
@@ -215,7 +215,7 @@ function openRootNoFollow(rootDir: string, platform: NodeJS.Platform): AcquiredR
   if (platform !== "win32") directoryDescriptorAccess(platform);
   const parsed = parse(rootDir);
   let fd = openAuthorityDirectoryNoFollow(parsed.root);
-  const ancestry: Array<{ path: string; stat: Stats; fd: number }> = [];
+  const ancestry: Array<{ path: string; stat: BigIntStats; fd: number }> = [];
   let visible = parsed.root;
   try {
     for (const component of rootDir.slice(parsed.root.length).split(sep).filter(Boolean)) {
@@ -228,9 +228,9 @@ function openRootNoFollow(rootDir: string, platform: NodeJS.Platform): AcquiredR
       if (visible === parsed.root) closeSync(fd);
       fd = next;
       visible = nextVisible;
-      const named = lstatSync(visible);
+      const named = lstatSync(visible, { bigint: true });
       const pinned = fstatSync(fd, { bigint: true });
-      if (named.isSymbolicLink() || !sameIdentity(lstatSync(visible, { bigint: true }), pinned)) throw new ConnectRootError();
+      if (named.isSymbolicLink() || !sameIdentity(named, pinned)) throw new ConnectRootError();
       ancestry.push({ path: visible, stat: named, fd });
     }
     return { root: heldDirectory(fd, platform, visible), ancestry };
