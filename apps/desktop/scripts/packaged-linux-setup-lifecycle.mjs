@@ -20,7 +20,7 @@ export const LINUX_SETUP_ACCEPTANCE_OUTPUT = 'PROPR_DESKTOP_SETUP_ACCEPTANCE_OUT
 
 const TIMEOUT_MS = 60_000;
 const OUTPUT_LIMIT = 64 * 1024;
-const SAFE_DOCKER_OPERATIONS = new Set(['version', 'info', 'images', 'image-inspect', 'manifest-inspect']);
+const SAFE_DOCKER_OPERATIONS = new Set(['version', 'info', 'daemon-host-inspection', 'architecture-inspection', 'images', 'image-inspect', 'manifest-inspect']);
 const SOURCE_SHA = /^[a-f0-9]{40}$/;
 const ISOLATION_ID = /^[a-f0-9]{16}$/;
 const INTERRUPTED_RECOVERY_MESSAGE = 'Setup was interrupted. Review the saved choices to continue.';
@@ -134,7 +134,8 @@ export const createIsolatedSetupEnvironment = ({
     UI_PORT: `127.0.0.1:${ports[1]}`,
     DOCS_PORT: `127.0.0.1:${ports[2]}`,
     DOCS_ENABLED: 'false',
-    PROPR_SKIP_REMOTE_IMAGE_CHECK: '1',
+    // Darwin must reach a production pull even when compatible images are cached.
+    ...(platform === 'linux' ? { PROPR_SKIP_REMOTE_IMAGE_CHECK: '1' } : {}),
     PROPR_UI_TUNNEL_ENABLED: 'false',
     [LINUX_SETUP_ACCEPTANCE_OPT_IN]: '1',
   });
@@ -187,6 +188,10 @@ export const dockerOperation = args => {
   const exactReference = value => typeof value === 'string'
     && value.length > 0 && value === value.trim() && !value.startsWith('-');
   if (args.length === 1 && args[0] === '--version') return 'version';
+  if (args.length === 3 && args[0] === 'info' && args[1] === '--format') {
+    if (args[2] === '{{.OSType}}') return 'daemon-host-inspection';
+    if (args[2] === '{{.Architecture}}') return 'architecture-inspection';
+  }
   if (args[0] === 'info') return 'info';
   if (args[0] === 'images' && args[1] === '-q' && args.length === 3) return 'images';
   if (args.length === 3 && args[0] === 'image' && args[1] === 'inspect' && exactReference(args[2])) {
@@ -241,7 +246,7 @@ export const parseDockerEvents = contents => {
     if (!value || typeof value !== 'object' || Array.isArray(value)
       || Object.keys(value).sort().join(',') !== ['event', 'operation', 'pid', 'ppid', 'schemaVersion', 'time'].sort().join(',')
       || value.schemaVersion !== 1 || !['invoked', 'sigterm', 'sigint', 'delegate-error', 'rejected'].includes(value.event)
-      || !['version', 'info', 'images', 'image-inspect', 'manifest-inspect', 'pull', 'rejected'].includes(value.operation)
+      || !['version', 'info', 'daemon-host-inspection', 'architecture-inspection', 'images', 'image-inspect', 'manifest-inspect', 'pull', 'rejected'].includes(value.operation)
       || !Number.isSafeInteger(value.pid) || value.pid <= 1
       || !Number.isSafeInteger(value.ppid) || value.ppid <= 0
       || !Number.isSafeInteger(value.time) || value.time <= 0) {
@@ -249,6 +254,21 @@ export const parseDockerEvents = contents => {
     }
     return value;
   });
+};
+
+// Count only the production runChecks OSType probe, never pull-phase architecture probes.
+export const daemonHostInspectionCount = events => events.filter(event =>
+  event.event === 'invoked' && event.operation === 'daemon-host-inspection').length;
+
+export const hasFreshRetryExecution = (cancellationEvents, retryEvents) => {
+  const executions = events => events.filter(event => event.event === 'invoked'
+    && ['daemon-host-inspection', 'pull'].includes(event.operation)).map(event => event.operation);
+  return daemonHostInspectionCount(cancellationEvents) === 1
+    && daemonHostInspectionCount(retryEvents) === 2
+    && JSON.stringify(executions(cancellationEvents)) === JSON.stringify(['daemon-host-inspection', 'pull'])
+    && JSON.stringify(executions(retryEvents)) === JSON.stringify([
+      'daemon-host-inspection', 'pull', 'daemon-host-inspection', 'pull',
+    ]);
 };
 
 export const createInterruptedRelaunchDiagnostics = ({ interrupted, events }) => {
@@ -631,7 +651,7 @@ export const runPackagedLinuxSetupLifecycle = async ({
     const retryEvents = await readDockerEvents(eventPath);
     if (retryStatus.phase !== 'running'
       || !retryStatus.logs.includes('Retrying setup with a fresh host inspection…')
-      || retryEvents.filter(event => event.event === 'invoked' && event.operation === 'info').length <= cancellationEvents.filter(event => event.event === 'invoked' && event.operation === 'info').length
+      || !hasFreshRetryExecution(cancellationEvents, retryEvents)
       || processExists(firstPull.pid) || !processExists(secondPull.pid)) {
       throw new Error('Real setup retry did not perform one fresh host inspection and one fresh execution');
     }
@@ -679,7 +699,7 @@ export const runPackagedLinuxSetupLifecycle = async ({
         privateTemporaryRoot: true,
       },
       evidence: {
-        realDockerDaemonInspections: events.filter(event => event.event === 'invoked' && event.operation === 'info').length,
+        realDockerDaemonInspections: daemonHostInspectionCount(events),
         admittedPullExecutions: events.filter(event => event.event === 'invoked' && event.operation === 'pull').length,
         firstCancellationSettled: true,
         visibleCancellationRecovery: true,

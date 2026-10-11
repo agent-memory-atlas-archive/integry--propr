@@ -116,6 +116,59 @@ test('offline skip avoids pulls and failed pull cannot reuse a vanished local im
   assert.deepEqual((await createDefaultActions().pullImages({ rootDir: '/tmp/root', agentTypes: [] })).failedCore, ['redis:7']);
 });
 
+for (const cached of [true, false]) {
+  test(`Mac acceptance environment admits and cancels a production pull (cached=${cached})`, async t => {
+    // The acceptance harness is JavaScript and has no TypeScript declaration.
+    // @ts-expect-error untyped desktop test harness
+    const { createIsolatedSetupEnvironment, createLinuxSetupIsolation } = await import('../../../../../apps/desktop/scripts/packaged-linux-setup-lifecycle.mjs');
+    const environment = createIsolatedSetupEnvironment({
+      platform: 'darwin', baseEnvironment: { HOME: '/Users/tester', PROPR_SKIP_REMOTE_IMAGE_CHECK: '1' },
+      profile: { root: '/tmp/private', home: '/tmp/private/home' }, wrapperDirectory: '/tmp/private/bin',
+      isolation: createLinuxSetupIsolation(), ports: [40001, 40002, 40003],
+    });
+    platform(t, 'darwin');
+    const old = process.env.PROPR_SKIP_REMOTE_IMAGE_CHECK;
+    t.after(() => { if (old === undefined) delete process.env.PROPR_SKIP_REMOTE_IMAGE_CHECK; else process.env.PROPR_SKIP_REMOTE_IMAGE_CHECK = old; });
+    assert.equal(environment.PROPR_SKIP_REMOTE_IMAGE_CHECK, undefined);
+    delete process.env.PROPR_SKIP_REMOTE_IMAGE_CHECK;
+    cfg = { images: { app: 'local/app', ui: 'local/ui', redis: 'redis:7' }, docsEnabled: false,
+      manifest: { desktopRuntime: { schemaVersion: 1, distribution: 'local' } },
+    } as unknown as OrchestratorConfig;
+    const calls: string[][] = [];
+    const controller = new AbortController();
+    let admit!: () => void;
+    const admitted = new Promise<void>(resolve => { admit = resolve; });
+    let tagged = false;
+    orch = { dockerAsync: async (args: string[], options: { signal: AbortSignal }) => {
+      calls.push(args);
+      if (args[0] === 'info') return { status: 0, stdout: 'arm64' };
+      if (args[0] === 'pull') {
+        // Match the held boundary: publish admission only after cancellation is armed.
+        return new Promise((_, reject) => {
+          options.signal.addEventListener('abort', () => reject(options.signal.reason), { once: true });
+          admit();
+        });
+      }
+      if (args[0] === 'manifest') return { status: 0, stdout: '{"manifests":[{"platform":{"os":"linux","architecture":"arm64"}}]}' };
+      if (!cached && args.at(-1) === 'redis:7') return { status: 1 };
+      return { status: 0, stdout: '{"Os":"linux","Architecture":"arm64"}' };
+    }, tagAgentLatest: () => { tagged = true; } } as unknown as OrchestratorModule;
+    let settled = false;
+    const pulling = createDefaultActions().pullImages({ rootDir: '/tmp/root', agentTypes: [], signal: controller.signal });
+    void pulling.then(() => { settled = true; }, () => { settled = true; });
+    const aborted = assert.rejects(pulling, { name: 'AbortError' });
+    try {
+      await Promise.race([admitted, pulling.then(() => { throw new Error('production setup skipped the held pull'); })]);
+      assert.equal(settled, false);
+      assert.deepEqual(calls.filter(args => args[0] === 'pull'), [['pull', '--platform', 'linux/arm64', 'redis:7']]);
+      assert.equal(calls.some(args => args[0] === 'manifest'), !cached);
+      assert.equal(tagged, false);
+    } finally { controller.abort(); }
+    await aborted;
+    assert.equal(tagged, false);
+  });
+}
+
 test('Darwin stack hint preserves the exact typed error', async t => {
   platform(t, 'darwin');
   cfg = {} as OrchestratorConfig;

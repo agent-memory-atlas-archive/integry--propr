@@ -15,6 +15,8 @@ import {
   createIsolatedSetupEnvironment,
   createLinuxSetupIsolation,
   createInterruptedRelaunchDiagnostics,
+  daemonHostInspectionCount,
+  hasFreshRetryExecution,
   dockerOperation,
   dockerWrapperSource,
   parseDockerEvents,
@@ -155,6 +157,8 @@ process.stdout.write(JSON.stringify(args));
       assert.deepEqual(JSON.parse(inspectOutput), ['image', 'inspect', 'propr/app:test']);
 
       for (const args of [
+        ['info', '--format', '{{.OSType}}'],
+        ['info', '--format', '{{.Architecture}}'],
         ['image', 'inspect', '--format', '{{.Id}}', 'propr/agent:0123abc'],
         ['image', 'inspect', '--format', '{{.Id}}', `propr/agent:0123abc@${digest}`],
       ]) {
@@ -190,7 +194,7 @@ fs.appendFileSync = (...args) => {
 };
 `);
       const held = spawn(process.execPath, ['--require', slowEventWriter, wrapper, 'pull', 'propr/app:test']);
-      const admittedBeforePull = 5 + rejectedDockerCommands.length * 2;
+      const admittedBeforePull = 7 + rejectedDockerCommands.length * 2;
       const events = await waitForEventCount(eventsPath, admittedBeforePull + 1);
       assert.equal(events.at(-1).operation, 'pull');
       held.kill('SIGTERM');
@@ -198,7 +202,7 @@ fs.appendFileSync = (...args) => {
       const final = await waitForEventCount(eventsPath, admittedBeforePull + 2);
       assert.equal(final.at(-1).event, 'sigterm');
       assert.deepEqual(final.filter(event => event.event === 'invoked').map(event => event.operation), [
-        'version', 'image-inspect', 'image-inspect', 'image-inspect', 'image-inspect',
+        'version', 'image-inspect', 'daemon-host-inspection', 'architecture-inspection', 'image-inspect', 'image-inspect', 'image-inspect',
         ...rejectedDockerCommands.map(() => 'rejected'), 'pull',
       ]);
       assert.equal(final.filter(event => event.event === 'rejected').length, rejectedDockerCommands.length);
@@ -289,12 +293,14 @@ test('macOS retains GUI HOME while Linux retains disposable HOME and session all
     baseEnvironment: { HOME: '/Users/tester', USER: 'tester', LOGNAME: 'tester', PATH: '/usr/bin:/bin',
       DISPLAY: ':99', DBUS_SESSION_BUS_ADDRESS: 'test', __CF_USER_TEXT_ENCODING: '0:0:0',
       NODE_OPTIONS: 'unsafe', ELECTRON_RUN_AS_NODE: '1', GH_TOKEN: 'secret', OPENAI_API_KEY: 'secret',
-      DOCKER_CONFIG: '/Users/tester/.docker', HOST_CODEX_DIR: '/Users/tester/.codex' },
+      PROPR_SKIP_REMOTE_IMAGE_CHECK: '1', DOCKER_CONFIG: '/Users/tester/.docker', HOST_CODEX_DIR: '/Users/tester/.codex' },
     profile, wrapperDirectory: '/tmp/private/wrapper', isolation: createLinuxSetupIsolation(), ports: [40001, 40002, 40003],
     localDockerEndpoint: 'unix:///Users/tester/.docker/run/docker.sock',
   };
   const mac = createIsolatedSetupEnvironment({ ...options, platform: 'darwin' });
   const linux = createIsolatedSetupEnvironment({ ...options, platform: 'linux' });
+  assert.equal(mac.PROPR_SKIP_REMOTE_IMAGE_CHECK, undefined);
+  assert.equal(linux.PROPR_SKIP_REMOTE_IMAGE_CHECK, '1');
   assert.equal(mac.HOME, '/Users/tester');
   assert.equal(linux.HOME, profile.home);
   assert.equal(mac.USER, 'tester');
@@ -422,3 +428,26 @@ test('prelaunch Docker failures remove the allocated profile and replace stale r
     assert.equal(lifecycleFailureCategory(new Error('timeout token=private-value /private/user')), 'timeout');
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
+
+for (const platform of ['linux', 'darwin']) {
+  test(`${platform} retry evidence requires exactly one new host check and execution`, () => {
+    const event = operation => ({ event: 'invoked', operation });
+    const host = dockerOperation(['info', '--format', '{{.OSType}}']);
+    const arch = dockerOperation(['info', '--format', '{{.Architecture}}']);
+    assert.equal(host, 'daemon-host-inspection');
+    assert.equal(arch, 'architecture-inspection');
+    const run = [event(host), ...(platform === 'darwin' ? [event(arch)] : []), event('pull')];
+    assert.equal(hasFreshRetryExecution(run, [...run, ...run]), true);
+    assert.equal(daemonHostInspectionCount([...run, ...run]), 2);
+    for (const retry of [
+      [event(arch), event('pull')], // extra info is not a host inspection
+      [event('info'), event('pull')],
+      [event(host), ...run], // duplicated host check
+      [event(host)], // no fresh execution
+      [...run, event('pull')], // duplicated execution
+      [event('pull'), event(host)], // inspection must precede execution
+    ]) assert.equal(hasFreshRetryExecution(run, [...run, ...retry]), false);
+    assert.equal(hasFreshRetryExecution([event('pull')], [event('pull'), ...run]), false);
+    assert.equal(hasFreshRetryExecution([event(host), ...run], [event(host), ...run, ...run]), false);
+  });
+}

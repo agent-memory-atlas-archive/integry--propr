@@ -55,7 +55,12 @@ provider credentials are read or copied. Agent installation detection may check 
 no agents are selected for this held-pull test, and credential mount paths point into the private profile.
 The Docker command boundary remains in front of every production setup Docker command.
 It compares existing container/network identities before and after. Only read-only Docker commands reach the daemon;
-pulls are held so cancellation, retry, and interrupted relaunch can be observed before GitHub enrollment.
+read-only manifest inspection may also contact the registry. The Mac child omits `PROPR_SKIP_REMOTE_IMAGE_CHECK`
+even if set in the parent, so production setup admits a pull with compatible cached images too. Source-built
+app/UI images remain local inspections. Pulls are held at the command boundary without reaching the daemon
+or downloading images, so cancellation, retry, and interrupted relaunch can be observed before GitHub enrollment.
+Retry evidence requires exactly one initial OSType host inspection and one new OSType inspection before one
+fresh pull execution; architecture probes do not count as daemon host inspections.
 No Docker resource is deleted. The report must retain its limitations: **this is not full provisioning, health,
 agent compatibility, enrollment, or pairing proof**. Docker-unavailable reports are unverified, not passes.
 
