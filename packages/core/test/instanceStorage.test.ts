@@ -235,8 +235,15 @@ test('exclusive barrier blocks repository use in another process until deletion 
   const marker = path.join(root, 'started');
   let completed!: Promise<void>;
   await lifecycle.exclusive(async () => {
-    const source = `import fs from 'node:fs/promises'; import { StorageLifecycle } from ${JSON.stringify(new URL('../src/storage/lifecycle.ts', import.meta.url).href)}; console.log('ready'); await new StorageLifecycle(${JSON.stringify(root)}).use(() => fs.writeFile(${JSON.stringify(marker)}, 'used'));`;
-    const child = spawn(process.execPath, ['--import', 'tsx', '--input-type=module', '-e', source], { stdio: ['ignore', 'pipe', 'pipe'] });
+    // Keep paths as data rather than interpolating them into executable source.
+    const source = `
+      import fs from 'node:fs/promises';
+      const [lifecycleUrl, root, marker] = process.argv.slice(1);
+      const { StorageLifecycle } = await import(lifecycleUrl);
+      console.log('ready');
+      await new StorageLifecycle(root).use(() => fs.writeFile(marker, 'used'));
+    `;
+    const child = spawn(process.execPath, ['--import', 'tsx', '--input-type=module', '-e', source, '--', new URL('../src/storage/lifecycle.ts', import.meta.url).href, root, marker], { stdio: ['ignore', 'pipe', 'pipe'] });
     completed = new Promise<void>((resolve, reject) => { child.on('error', reject); child.on('exit', code => code === 0 ? resolve() : reject(new Error(`child exited ${code}`))); });
     await new Promise<void>(resolve => child.stdout.once('data', () => resolve()));
     await new Promise(resolve => setTimeout(resolve, 100));
