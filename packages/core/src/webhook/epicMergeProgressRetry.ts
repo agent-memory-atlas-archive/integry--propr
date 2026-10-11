@@ -30,6 +30,16 @@ end
 return 0
 `;
 
+// Move the exact legacy snapshot atomically, preserving any newer target
+// record (including its backoff) and any concurrently replaced legacy record.
+const MIGRATE_LEGACY_FIELD = `
+if redis.call('HGET', KEYS[1], ARGV[1]) == ARGV[2] then
+    redis.call('HSETNX', KEYS[1], ARGV[3], ARGV[2])
+    return redis.call('HDEL', KEYS[1], ARGV[1])
+end
+return 0
+`;
+
 const COMPARE_AND_DELETE_KEY = `
 if redis.call('GET', KEYS[1]) == ARGV[1] then
     return redis.call('DEL', KEYS[1])
@@ -255,7 +265,16 @@ export interface EpicProgressRetrySweepOptions {
 export async function sweepEpicProgressRetries(
     { redis, retry, now = Date.now, log = logger.withCorrelation('epic-merge-progress') }: EpicProgressRetrySweepOptions,
 ): Promise<number> {
-    const entries = await redis.hgetall(EPIC_PROGRESS_RETRY_KEY);
+    let entries = await redis.hgetall(EPIC_PROGRESS_RETRY_KEY);
+    let migrated = false;
+    for (const [field, value] of Object.entries(entries)) {
+        const pending = parseRetry(value);
+        if (pending && field === epicProgressBranchField(pending.owner, pending.repo, pending.epicBranch)) {
+            await redis.eval(MIGRATE_LEGACY_FIELD, 1, EPIC_PROGRESS_RETRY_KEY, field, value, epicProgressRetryField(pending));
+            migrated = true;
+        }
+    }
+    if (migrated) entries = await redis.hgetall(EPIC_PROGRESS_RETRY_KEY);
     let updated = 0;
     for (const [field, value] of Object.entries(entries)) {
         const pending = parseRetry(value);
@@ -268,8 +287,7 @@ export async function sweepEpicProgressRetries(
         if (pending.nextAttemptAt > current) continue;
         const { owner, repo, epicBranch, epicPrNumber, mergedChildPrNumber } = pending;
         if (await retry({ owner, repo, epicBranch, epicPrNumber, mergedChildPrNumber }) === 'updated') {
-            // Also release records written using the former branch-only field.
-            // Only this exact target's successful retry fulfils that obligation.
+            // Only release the snapshot whose own target succeeded.
             await redis.eval(COMPARE_AND_DELETE_FIELD, 1, EPIC_PROGRESS_RETRY_KEY, field, value);
             updated++;
         }

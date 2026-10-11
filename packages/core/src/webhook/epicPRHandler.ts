@@ -332,6 +332,11 @@ async function updateEpicPRBody(
     const issueDetails = await fetchIssueDetails(owner, repo, issueNumbers, correlatedLogger);
     const newBody = buildEpicPRBody(planDetails.planName, issueDetails);
 
+    // Issue and plan reads may take long enough for the aggregate to merge.
+    const epic = await octokit.request('GET /repos/{owner}/{repo}/pulls/{pull_number}', {
+        owner, repo, pull_number: epicPrNumber,
+    });
+    if (epic.data.state !== 'open') return;
     await lease?.assertOwned();
     await octokit.request('PATCH /repos/{owner}/{repo}/pulls/{pull_number}', {
         owner,
@@ -391,15 +396,34 @@ async function applyEpicMergeProgress(
             // plan again so those waits cannot hide newly linked child PRs.
             planLookup = await loadPlanDetails(epicBranch, repository, correlatedLogger);
             if (planLookup.status === 'unavailable') return false;
+            const resolved = await octokit.request('GET /repos/{owner}/{repo}/pulls/{pull_number}', {
+                owner, repo, pull_number: epicPrNumber,
+            });
+            if (!await canCarryChild(octokit, target, resolved.data)) return false;
         }
     }
+    const assertCurrentTarget = async () => {
+        if (target.mergedChildPrNumber !== null) {
+            const octokit = await getAuthenticatedOctokit();
+            const epic = await octokit.request('GET /repos/{owner}/{repo}/pulls/{pull_number}', {
+                owner, repo, pull_number: epicPrNumber,
+            });
+            if (!await canCarryChild(octokit, target, epic.data)) {
+                throw new Error('Epic can no longer carry the child merge');
+            }
+        }
+        await lease.assertOwned();
+    };
     const planDetails = planLookup.status === 'found' ? planLookup.details : null;
     await updateEpicMergeProgress({
         ...target,
         epicPrNumber,
         planName: planDetails?.planName,
         planIssues: planDetails?.issues
-    }, correlationId, { assertOwned: lease.assertOwned });
+    }, correlationId, { assertOwned: assertCurrentTarget });
+    // Even an unchanged comment must not release an obligation using a target
+    // that became invalid during the awaited progress reads/writes.
+    await assertCurrentTarget();
     return true;
 }
 

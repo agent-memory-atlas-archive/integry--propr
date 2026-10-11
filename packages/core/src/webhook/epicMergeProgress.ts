@@ -146,7 +146,7 @@ export function buildEpicFinalMergeComment(
         '',
         `Epic PR #${epicPrNumber} has been merged into ${baseBranch}.`,
         '',
-        `**${progress.merged} out of ${progress.total} PRs merged** into the epic branch.`,
+        `**${progress.merged} out of ${progress.total} PRs merged** into ${baseBranch} through this epic PR.`,
         ...(isEpicMergeComplete(progress) ? ['', 'All planned epic work is now merged.'] : []),
         '', '*Posted automatically by ProPR*', EPIC_FINAL_MERGE_MARKER,
     ].join('\n');
@@ -192,6 +192,7 @@ async function listShippedChildren(
     request: EpicMergeProgressRequest,
     children: EpicChildPullRequest[],
     baseBranch: string,
+    mergedAt = Infinity,
 ): Promise<Set<number>> {
     const { owner, repo, epicBranch, epicPrNumber } = request;
     const parameters = { owner, repo, head: `${owner}:${epicBranch}`, base: baseBranch, state: 'closed', per_page: 100 };
@@ -201,7 +202,7 @@ async function listShippedChildren(
     const predecessorTimes = (Array.isArray(data) ? data : []).flatMap(pr =>
         isRecord(pr) && typeof pr.number === 'number' && pr.number < epicPrNumber && typeof pr.merged_at === 'string'
             ? [Date.parse(pr.merged_at)] : []);
-    const cutoff = Math.max(...predecessorTimes.filter(Number.isFinite));
+    const cutoff = Math.max(...predecessorTimes.filter(time => Number.isFinite(time) && time < mergedAt));
     // Equal timestamps cannot prove inclusion (the same rule as canCarryChild).
     return new Set(children.filter(pr => pr.mergedAt && Date.parse(pr.mergedAt) < cutoff).map(pr => pr.number));
 }
@@ -210,17 +211,23 @@ async function readEpicMergeState(octokit: EpicProgressOctokit, request: EpicMer
     const { owner, repo, epicPrNumber } = request;
     const comments = await listBotComments(octokit, owner, repo, epicPrNumber);
     const finalComment = comments.find(comment => comment.body.includes(EPIC_FINAL_MERGE_MARKER));
-    // A bot's final confirmation is durable merge evidence. Reuse its target
-    // branch when available; old or edited wording falls back to the PR read.
-    const confirmedBase = finalComment?.body.match(/^Epic PR #\d+ has been merged into (.+)\.$/m)?.[1];
-    const epic = confirmedBase ? null : (await octokit.request('GET /repos/{owner}/{repo}/pulls/{pull_number}', {
+    // A confirmation proves the merge happened, but cannot establish which
+    // children it included. Always read the immutable aggregate merge time.
+    const epic = (await octokit.request('GET /repos/{owner}/{repo}/pulls/{pull_number}', {
         owner, repo, pull_number: epicPrNumber,
     })).data;
     const epicMerged = !!finalComment || request.mergedChildPrNumber === null || (isRecord(epic) && epic.merged === true);
-    const baseBranch = confirmedBase ?? (isRecord(epic) && isRecord(epic.base) && typeof epic.base.ref === 'string'
-        ? epic.base.ref : 'the target branch');
-
-    return { comments, epicMerged, baseBranch };
+    const baseBranch = isRecord(epic) && isRecord(epic.base) && typeof epic.base.ref === 'string'
+        ? epic.base.ref : undefined;
+    const mergedAt = isRecord(epic) && typeof epic.merged_at === 'string' ? Date.parse(epic.merged_at) : NaN;
+    if (epicMerged && !Number.isFinite(mergedAt)) throw new Error('Epic merge boundary unavailable');
+    if (epicMerged && request.mergedChildPrNumber !== null) {
+        const repository = (await octokit.request('GET /repos/{owner}/{repo}', { owner, repo })).data;
+        if (!baseBranch || !isRecord(repository) || baseBranch !== repository.default_branch) {
+            throw new Error('Merged epic does not target the default branch');
+        }
+    }
+    return { comments, epicMerged, baseBranch, mergedAt };
 }
 
 /**
@@ -243,18 +250,33 @@ export async function updateEpicMergeProgress(
     const assertOwned = dependencies.assertOwned ?? (async () => {});
     const { owner, repo, epicPrNumber } = request;
 
-    const { comments, epicMerged, baseBranch } = await readEpicMergeState(octokit, request);
-
     const children = await listChildPullRequests(octokit, owner, repo, request.epicBranch);
-    const shipped = await listShippedChildren(octokit, request, children, baseBranch);
+    const { comments, epicMerged, baseBranch, mergedAt } = await readEpicMergeState(octokit, request);
+    if (epicMerged && request.mergedChildPrNumber !== null
+        && !children.some(pr => pr.number === request.mergedChildPrNumber)) {
+        // The child list can lag a delivered merge. Read its timestamp rather
+        // than allowing the event alone to bypass the aggregate boundary.
+        const child = (await octokit.request('GET /repos/{owner}/{repo}/pulls/{pull_number}', {
+            owner, repo, pull_number: request.mergedChildPrNumber,
+        })).data;
+        const childMergedAt = isRecord(child) && typeof child.merged_at === 'string' ? child.merged_at : undefined;
+        children.push({ number: request.mergedChildPrNumber, merged: !!childMergedAt, mergedAt: childMergedAt, abandoned: false });
+    }
+    const shipped = baseBranch ? await listShippedChildren(octokit, request, children, baseBranch, epicMerged ? mergedAt : Infinity) : new Set<number>();
+    // For a final report, neither current plan status nor the triggering event
+    // proves inclusion. Keep later/unknown children outstanding for this PR.
+    const included = new Set(children.filter(pr => pr.mergedAt && Date.parse(pr.mergedAt) < mergedAt).map(pr => pr.number));
+    const displayBase = baseBranch ?? 'the target branch';
     const progress = computeEpicMergeProgress(
-        children.filter(pr => !shipped.has(pr.number)),
-        request.mergedChildPrNumber !== null && shipped.has(request.mergedChildPrNumber) ? null : request.mergedChildPrNumber,
-        request.planIssues?.filter(issue => issue.pr_number == null || !shipped.has(issue.pr_number)),
+        children.filter(pr => !shipped.has(pr.number)).map(pr => epicMerged ? { ...pr, merged: included.has(pr.number) } : pr),
+        epicMerged || (request.mergedChildPrNumber !== null && shipped.has(request.mergedChildPrNumber)) ? null : request.mergedChildPrNumber,
+        request.planIssues?.filter(issue => issue.pr_number == null || !shipped.has(issue.pr_number))
+            .map(issue => epicMerged && issue.status === PlanIssueStatus.MERGED
+                ? { ...issue, status: PlanIssueStatus.UNDER_REVIEW } : issue),
     );
 
     const body = buildEpicProgressComment(progress, request.planName)
-        + (epicMerged ? '\n\n✅ This epic PR has been merged into ' + baseBranch + '.' : '');
+        + (epicMerged ? '\n\n✅ This epic PR has been merged into ' + displayBase + '.' : '');
     const existing = comments.find(comment => comment.body.includes(EPIC_PROGRESS_MARKER));
     let trackingComment: EpicMergeProgressResult['trackingComment'];
     if (!existing) {
@@ -275,14 +297,23 @@ export async function updateEpicMergeProgress(
 
     let completionPosted = false;
     const completionMarker = epicMerged ? EPIC_FINAL_MERGE_MARKER : EPIC_COMPLETE_MARKER;
-    if ((epicMerged || isEpicMergeComplete(progress)) && !comments.some(comment => comment.body.includes(completionMarker))) {
-        await assertOwned();
-        await octokit.request('POST /repos/{owner}/{repo}/issues/{issue_number}/comments', {
-            owner, repo, issue_number: epicPrNumber, body: epicMerged
-                ? buildEpicFinalMergeComment(progress, { epicPrNumber, baseBranch, planName: request.planName })
-                : buildEpicCompleteComment(progress, request.planName),
-        });
-        completionPosted = true;
+    const completion = comments.find(comment => comment.body.includes(completionMarker));
+    if (epicMerged || isEpicMergeComplete(progress)) {
+        const completionBody = epicMerged
+            ? buildEpicFinalMergeComment(progress, { epicPrNumber, baseBranch: displayBase, planName: request.planName })
+            : buildEpicCompleteComment(progress, request.planName);
+        if (!completion) {
+            await assertOwned();
+            await octokit.request('POST /repos/{owner}/{repo}/issues/{issue_number}/comments', {
+                owner, repo, issue_number: epicPrNumber, body: completionBody,
+            });
+            completionPosted = true;
+        } else if (epicMerged && completion.body !== completionBody) {
+            await assertOwned();
+            await octokit.request('PATCH /repos/{owner}/{repo}/issues/comments/{comment_id}', {
+                owner, repo, comment_id: completion.id, body: completionBody,
+            });
+        }
     }
 
     log.info({
@@ -299,16 +330,19 @@ type Octokit = Awaited<ReturnType<typeof getAuthenticatedOctokit>>;
 export async function canCarryChild(
     octokit: Octokit,
     { owner, repo, mergedChildPrNumber }: Pick<EpicMergeProgressRequest, 'owner' | 'repo' | 'mergedChildPrNumber'>,
-    pr: { state: string; merged_at: string | null },
+    pr: { state: string; merged_at: string | null; base?: { ref: string } },
+    evidence?: { defaultBranch: string; childMergedAt: string | null },
 ): Promise<boolean> {
     if (pr.state === 'open') return true;
     if (!pr.merged_at || mergedChildPrNumber === null) return false;
-    const child = await octokit.request('GET /repos/{owner}/{repo}/pulls/{pull_number}', {
+    const defaultBranch = evidence?.defaultBranch ?? (await octokit.request('GET /repos/{owner}/{repo}', { owner, repo })).data.default_branch;
+    if (pr.base?.ref !== defaultBranch) return false;
+    const childMergedAt = evidence ? evidence.childMergedAt : (await octokit.request('GET /repos/{owner}/{repo}/pulls/{pull_number}', {
         owner, repo, pull_number: mergedChildPrNumber,
-    });
+    })).data.merged_at;
     // Missing, invalid, or equal timestamps do not establish that the child
     // was included. Fall back to creating a PR for the remaining commits.
-    return !!child.data.merged_at && Date.parse(child.data.merged_at) < Date.parse(pr.merged_at);
+    return !!childMergedAt && Date.parse(childMergedAt) < Date.parse(pr.merged_at);
 }
 
 /** Prefer an open Epic PR; reuse a merged one only for an included child. */
@@ -324,8 +358,15 @@ export async function findEpicPRNumber(
     });
     const open = pulls.find(pr => pr.state === 'open');
     if (open) return open.number;
-    for (const pr of pulls) {
-        if (await canCarryChild(octokit, context, pr)) return pr.number;
+    const candidates = pulls.filter(pr => pr.merged_at && Number.isFinite(Date.parse(pr.merged_at)))
+        .sort((a, b) => Date.parse(a.merged_at!) - Date.parse(b.merged_at!));
+    if (candidates.length === 0 || context.mergedChildPrNumber === null) return null;
+    const defaultBranch = (await octokit.request('GET /repos/{owner}/{repo}', { owner, repo })).data.default_branch;
+    const childMergedAt = (await octokit.request('GET /repos/{owner}/{repo}/pulls/{pull_number}', {
+        owner, repo, pull_number: context.mergedChildPrNumber,
+    })).data.merged_at;
+    for (const pr of candidates) {
+        if (await canCarryChild(octokit, context, pr, { defaultBranch, childMergedAt })) return pr.number;
     }
     return null;
 }

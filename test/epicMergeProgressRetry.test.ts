@@ -33,6 +33,7 @@ function fakeRedis() {
         async eval(script: string, _n: number, key: string, ...args: string[]) {
             if (script.includes('HGET')) {
                 if (hash.get(args[0]) !== args[1]) return 0;
+                if (script.includes('HSETNX') && !hash.has(args[2])) hash.set(args[2], args[1]);
                 return Number(hash.delete(args[0]));
             }
             if (keys.get(key) !== args[0]) return 0;
@@ -394,3 +395,45 @@ for (const aggregateFirst of [true, false]) {
         assert.ok(redis.hash.has(epicProgressRetryField(first)));
     });
 }
+
+test('failed legacy retry migrates once and retains exponential backoff and age', async () => {
+    const redis = fakeRedis();
+    const legacy = `${target.owner}/${target.repo}#${target.epicBranch}`;
+    redis.hash.set(legacy, JSON.stringify({ ...target, attempts: 3, firstFailedAt: 1_000, nextAttemptAt: 2_000 }));
+    let attempts = 0;
+    let now = 3_000;
+    const sweep = () => sweepEpicProgressRetries({ redis: redis as never, log, now: () => now,
+        retry: pending => runEpicProgressUpdate(pending, { redis: redis as never, log, now: () => now,
+            update: async () => { attempts++; return false; } }),
+    });
+    await sweep();
+    assert.equal(redis.hash.has(legacy), false);
+    assert.equal(redis.hash.size, 1);
+    assert.deepEqual(JSON.parse(redis.hash.get(field)!), { ...target, attempts: 4, firstFailedAt: 1_000, nextAttemptAt: 483_000 });
+    now += 60_000;
+    await sweep();
+    assert.equal(attempts, 1);
+});
+
+test('migration preserves a newer target backoff and a concurrently replaced legacy record', async () => {
+    const redis = fakeRedis();
+    const legacy = `${target.owner}/${target.repo}#${target.epicBranch}`;
+    const old = JSON.stringify({ ...target, attempts: 1, firstFailedAt: 1_000, nextAttemptAt: 0 });
+    const newer = JSON.stringify({ ...target, attempts: 5, firstFailedAt: 1_000, nextAttemptAt: 900_000 });
+    redis.hash.set(legacy, old);
+    redis.hash.set(field, newer);
+    const sweep = () => sweepEpicProgressRetries({ redis: redis as never, log, now: () => 2_000,
+        retry: async () => { assert.fail('new target backoff must be respected'); },
+    });
+    await sweep();
+    assert.equal(redis.hash.get(field), newer);
+    assert.equal(redis.hash.has(legacy), false);
+    redis.hash.set(legacy, old);
+    const evaluate = redis.eval;
+    redis.eval = async (...args) => {
+        if (args[0].includes('HSETNX')) redis.hash.set(legacy, newer);
+        return evaluate(...args);
+    };
+    await sweep();
+    assert.equal(redis.hash.get(legacy), newer);
+});
