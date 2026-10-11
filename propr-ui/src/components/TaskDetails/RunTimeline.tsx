@@ -95,7 +95,7 @@ const RunTimeline: React.FC<RunTimelineProps> = ({ runs, selectedTaskId, onSelec
                 aria-expanded={open}
                 title={describeRun(run)}
                 onClick={() => (selected ? setExpanded(value => !value) : onSelectRun(run.task.id))}
-                className={`group flex w-full min-w-0 flex-wrap items-center gap-x-2 gap-y-0.5 rounded-sm py-1.5 pr-1 text-left text-xs leading-5 transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-teal-500 ${selected ? 'bg-slate-100/80' : 'hover:bg-slate-50'}`}
+                className={`group flex w-full min-w-0 max-lg:min-h-11 [@media(any-pointer:coarse)]:min-h-11 flex-wrap items-center gap-x-2 gap-y-0.5 rounded-sm py-1.5 pr-1 text-left text-xs leading-5 transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-teal-500 ${selected ? 'bg-slate-100/80' : 'hover:bg-slate-50'}`}
               >
                 {/* A plain node on the rail, on the row's own background. */}
                 <span className="relative z-[2] mr-1 flex h-4 w-4 flex-none items-center justify-center">

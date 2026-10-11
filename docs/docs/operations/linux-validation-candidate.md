@@ -3,13 +3,15 @@
 This remains a **draft validation candidate**, not merge or publication approval.
 It preserves the previously integrated planning/nightly, smoke cleanup, production
 setup wizard and Electron/private crash-capture corrections from #2953, #2967,
-#2974 and #2975, and stages all five reviewed corrections below.
+#2974 and #2975, and stages all seven reviewed corrections below.
 Original feature issues remain open; macOS qualification stays separate in #2976.
 
 ## Exact integration scope
 
 Base: `103409d6979969a3b0e9c069002cc739716cf3a4` (main). Remote main and
-all five remote PR heads matched these revisions when inspected on 2026-10-11.
+the initial five remote PR heads matched these revisions when inspected on 2026-10-11.
+This follow-up extends candidate `37fc70d6694e6a4b29e9ef6d6090ad051817431f`
+serially. Remote main was checked again and still equals the exact base above.
 No source advancement was substituted. Target branch: `main`. ProPR owns the
 final commit and draft PR; this document cannot attest a not-yet-created head.
 
@@ -20,11 +22,16 @@ final commit and draft PR; this document cannot attest a not-yet-created head.
 | #2996 | `9fbca5e587ad1fb94e41de8c89be3af31177d59b` | `1aaf068283eddad85d53a81c12574ac4d07cd699` | Independent full/live jobs and whole-phase budgets; sanitized, fail-closed health/bundle evidence |
 | #2998 | `103409d6979969a3b0e9c069002cc739716cf3a4` | `4ee489625db477819a5fcd9c6476cc6ae6f530b9` | Current-history search writes retain selection, filters, hash and navigation intent |
 | #3001 | `103409d6979969a3b0e9c069002cc739716cf3a4` | `7c338d09311fd173f56dedb0cb9f39d5d0b7727a` | Caller deadline includes admission; combined cancellation and synchronous workflow budget before create |
+| #3003 | `103409d6979969a3b0e9c069002cc739716cf3a4` | `205cdb7f89f49b1bd35dc33cfcffa87633933481` | Container-width step labels and metadata; narrow/coarse-pointer run targets |
+| #3004 | `103409d6979969a3b0e9c069002cc739716cf3a4` | `406f192eb7898abe2dec8d405de1c8b51855d7ec` | Single-line 44px plan-history restore footer and state/interaction regressions |
 
-The 26 input paths are disjoint. For every existing path, its content at the
-proper source base equaled its content on main; the three added paths were absent
-on main. Thus there was no conflict to resolve and no production integration
-adjustment. Each path below is **byte-identical to its listed source head**, with
+The 32 input paths are disjoint. The original 26 paths remain byte-identical
+to their five source heads; all six mobile paths equal their two exact heads.
+The full mobile diffs were inspected against `103409d`, not unrelated ancestry.
+Their base blobs also equal the serial candidate blobs, so neither integration
+required a conflict resolution or any test/production adjustment. For every
+existing path, its content at the proper source base equaled its content on main;
+the three added paths were absent on main. Each path below is **byte-identical to its listed source head**, with
 the Git blob ID provided for independent verification. This preserves all other
 main paths, including Hosted worker resolution and physical admission ancestry.
 
@@ -56,17 +63,135 @@ main paths, including Hosted worker resolution and physical admission ancestry.
 | `packages/core/src/claude/docker/dockerExecutor.ts` | #3001 | `b5fdad3161955eda83813a8a46aa97791e0a0f5c` |
 | `test/agentRunAdmission.test.ts` | #3001 | `116cf637ccebb1276d926d213624d5c2cf84b84e` |
 | `test/fixtures/agent-admission/docker.mjs` | #3001 | `6929ab2f7e4a2d4184996bbea09c9550adaf4cfd` |
+| `propr-ui/e2e/task-timeline-mobile.pw.ts` | #3003 | `36650152307d6cbdabef0f36a7988eaaec033f0f` |
+| `propr-ui/src/components/TaskDetails/RunTimeline.tsx` | #3003 | `4e3e926d6a077afa04fc36099467013b10dc3c4b` |
+| `propr-ui/src/components/TaskDetails/TaskStatusTable.tsx` | #3003 | `e7e41dfa0639204de85d2937fe5e73ab6d5bee1d` |
+| `propr-ui/src/components/TaskDetails/runTimelineColumns.ts` | #3003 | `33fa0a8fba50ea21b32b7108b2e7782aaabcd530` |
+| `propr-ui/e2e/planner-studio-mobile.pw.ts` | #3004 | `be5546e05228bb422c7d3e4d16388433ba28f8ed` |
+| `propr-ui/src/components/TaskPlanner/PlanHistoryDialog.tsx` | #3004 | `c122d9c9526621ead34a066c9477c33f79198cae` |
 
 The only additional changed path is
 `docs/docs/operations/linux-validation-candidate.md` (this file): the validation
 handoff, equivalence map and operator instructions. It extends the inherited
-#2980 runbook without changing acceptance gates. Total: **27 changed paths**.
+#2980 runbook without changing acceptance gates. Total: **33 changed paths**.
 Compare each listed path with `git diff <incorporated-head> -- <path>` after the
 final orchestration commit; each comparison must be empty. Compare the complete
 base-to-candidate path list with this inventory, and rerun checks if any bytes
 change. Do not infer combined CI success from any source PR's results.
 
-## Local combined validation
+## Seven-correction source evidence and boundaries
+
+The initial candidate CI reported **42 success / 14 skip**. Skips are not passes,
+and that result does not qualify this seven-correction candidate. The following
+source evidence is supplied by the operator in the follow-up request, rather than
+new executions or CI attestations by this staging session:
+
+- #3003 exact `205cdb7`: independent **24 WebKit + 24 Chromium**, zero skips,
+  retries or flaky cases; all **3394 tracked regular files** unchanged during
+  qualification; 520px touch and 1920px aligned screenshots directly inspected.
+  Both F1/F2 blockers resolved; independent Claude review **6113939661: 8/no
+  blockers**. Optional S5/S6 gaps are closed by rendered browser runs, including
+  wide coarse-pointer cases. Preserve intentional 44px hybrid-touch usability.
+  Original standalone CI **38175937555 / 38175937592** was still running in the
+  supplied record: no terminal result or inherited approval is claimed.
+- #3004 exact `406f192`: root **19 WebKit + 19 Chromium** passed; original
+  old-code footer control failed **3 lines versus 1**. Independent review **8/no
+  blockers**; all **21 active CI** green, **805 canonical units once**, **325
+  Build & Lint Chromium**; all five actual CI checkout trees equaled that head.
+- Correction to stale #3001 evidence: exact `7c338d0` full suite passed **805
+  canonical units once**, with all four original transports and exact-CI
+  whole-tree equality. Independent **145 real-Redis/fake-Docker** cases and
+  review **8/no blockers**. This does not qualify live providers or real Docker.
+
+#3003 retains the 528px actual-container cutoff (stack below it), at least
+260px labels in aligned rows, all narrow/coarse-pointer run buttons >=44px and
+ordinary wide mouse density. Its source coverage includes touch/mouse, sidebar,
+landscape and tablet. The standalone task-list Escape/search race is already
+resolved by #2998; its existing cases are retained, neither duplicated nor waived.
+#3004 retains a single-line 44px restore button fitting a 320px dialog, a
+non-overflowing note, and read-only/loading/selection/restoring plus keyboard/tap
+semantics. All original assertions remain intact.
+
+Root still must independently review and test the **final combined head** in
+Chromium, WebKit and native Linux. This reversible draft staging is not release
+approval or completion. No publication, deployment, live nightly/provider
+operation, credential/access change or cleanup feature is authorized here. Mac
+remains separately deferred. Original preview publication authorization for
+**681 applies only to 681**; runtime exception expiry remains **2026-10-17**.
+
+## Seven-correction local validation
+
+Executed on Debian 12 x64 as uid 1000, Node 22.23.3/npm 10.9.9, using the
+seven-correction working tree above. The root lockfile remains SHA256
+`6595f11797cad0660146317e3f7fe7bfd0ebcd8cfb095ca53c5458fe670c6108`.
+Historical initial-candidate results in the next section are kept separately.
+
+| Check | This follow-up execution |
+| --- | --- |
+| Locked `npm ci` | Passed; lockfile unchanged; reported 8 high vulnerabilities, assessed by unchanged scoped audits |
+| `npm run test:prepare`, `npm run build`, `npm run desktop:typecheck` | All passed, including desktop and UI types |
+| Strict relevant ESLint | Passed with `--max-warnings=0` for the prior core/UI correction files and all six new mobile paths |
+| Focused Vitest | 97 passed in 5 files: TaskList, MobileBottomNavigation, RunTimeline, TaskStatusTable, PlanHistoryDialog; no failures/skips |
+| Nightly/budget/plan/model/health/bundle/canonical-runner contracts | 207 passed, zero failures/skips |
+| Execution/admission/cancellation/lease fencing/cost/network/workflow/Hosted worker | Canonical sequential runner: 15/15 files, 249 passed, zero failures/skips/cancellations, 109.0s; attempt 1, original 180,000ms per-unit timeout, real Redis/fake Docker |
+| Real RPM/DEB/ZIP makers and libsolv metadata | Final run 9 passed, zero failures/skips. Initial run 7 passed / 2 skipped because extracted `cpio` was outside PATH; retained, not counted as passes |
+| Production-build combined Chromium | 72 passed, zero failures/skips/retries, 3.5 minutes: 15 automations + 19 planner-mobile + 17 desktop-task-list + 2 search + 19 timeline-mobile |
+| WebKit | Download succeeded; launch failed before tests for missing GTK4/GStreamer/libsecret and other runtime libraries; no combined WebKit execution/pass claimed |
+| Runtime / packaging dependency audits | Both passed under unchanged policy; runtime exception remains present and expires 2026-10-17T00:00:00Z |
+| Canonical discovery / four shards | 806 unique units; 202/202/201/201 exact disjoint union. Discovery only, not complete suite execution |
+| Source/path equivalence | All 32 source paths match the seven exact heads in content and mode; exactly 33 changed paths against main including this runbook; no other main delta |
+| Documentation | MDX compilation passed |
+
+Temporary Debian package indexes and extracted tools under `/tmp/propr-3005-tools`
+supply real Redis 7.0.15 and packaging prerequisites, without installing services,
+changing host libraries or changing credentials/access. Initial Redis/RPM tool
+launches exposed missing local dependencies; setup was completed before their
+respective tests. The packaging retry only added the extracted `bin` directory
+containing `cpio` to PATH; no assertions or source were changed. Real makers
+verified the original pinned x64/ARM64 bytes and ELF identity; x64 performed
+non-root identity publication and fresh-process persistence. ARM64 execution was
+not performed on this x64 host. These fixture packages do not qualify the full
+installed desktop, native GUI, preload/reload, secure store or setup lifecycle.
+
+Logs are transient `/tmp/propr-3005-*.log`, with canonical focused results at
+`/tmp/propr-3005-execution-summary.json`; the table is the handoff record.
+The source-head browser counts above are operator evidence, not these local
+combined counts. Full final-head CI, independent review, complete canonical
+execution, native Linux/source-bound runtime qualification, live providers and
+real Docker remain unqualified here. No acceptance gate, timeout, assertion,
+retry policy, skip condition, native pin or runtime binding was weakened.
+
+Reproduce the added combined UI checks with the locked production build (the
+Playwright configuration builds and serves it locally). Keep all existing cases
+and disable retries explicitly:
+
+```sh
+(cd propr-ui && npx eslint --max-warnings=0 \
+  e2e/task-timeline-mobile.pw.ts e2e/planner-studio-mobile.pw.ts \
+  src/components/TaskDetails/RunTimeline.tsx \
+  src/components/TaskDetails/TaskStatusTable.tsx \
+  src/components/TaskDetails/runTimelineColumns.ts \
+  src/components/TaskPlanner/PlanHistoryDialog.tsx)
+(cd propr-ui && npx vitest run \
+  src/components/TaskList.test.tsx src/components/MobileBottomNavigation.test.tsx \
+  src/components/TaskDetails/RunTimeline.test.tsx \
+  src/components/TaskDetails/TaskStatusTable.test.tsx \
+  src/components/TaskPlanner/PlanHistoryDialog.test.tsx)
+(cd propr-ui && npx playwright test e2e/automations.pw.ts \
+  e2e/task-list-desktop.pw.ts e2e/task-list-search.pw.ts \
+  e2e/task-timeline-mobile.pw.ts e2e/planner-studio-mobile.pw.ts --retries=0)
+```
+
+The original reproduction commands below retain the core lint, contract tests,
+15-file canonical execution selection, maker regression and audit invocations.
+They also document the initial narrower UI selection; use the combined UI
+selection above for this follow-up. The local browser runs use privacy-safe
+intercepted APIs, without provider operations. The 320px history footer, 520px
+touch timeline and 1920px aligned sidebar-hidden touch timeline screenshots were
+directly inspected. Captures are transient review evidence only, not authorization
+to publish runtime artifacts or a release.
+
+## Initial five-correction validation (historical)
 
 Environment: Debian 12 x64, uid 1000, Node 22.23.3, npm 10.9.9. All checks
 used the combined files in the equivalence map. Root lockfile SHA256:
@@ -207,7 +332,7 @@ have a declared count and retain every outcome. Commands below build local files
 only; they do not publish or write image tags.
 
 From the repository root, replace the placeholder with the final orchestration
-commit (not one of the five input heads):
+commit (not one of the seven input heads):
 
 ```sh
 set -euo pipefail
@@ -385,9 +510,9 @@ real-task qualification remains blocked, even when payload tests pass.
 
 The original actual nightly run 681 result (**34 passed, 3 failed**, shared deadline)
 is retained and not waived. No replacement actual live nightly was dispatched.
-The four #3001 full-suite shards were still running in the supplied review record;
-no eventual pass is inherited here. Source reviews are provenance only; combined
-review and qualification remain pending. No merge, publication, deployment,
+The corrected #3001 exact-head evidence is recorded above; its pass is source
+provenance and is not inherited as final combined qualification. Combined review
+and qualification remain pending. No merge, publication, deployment,
 image/tag write, protected approval, credential/keychain operation, access grant,
 user-owned storage cleanup or repository inventory is part of this candidate.
-The five original issues are not closed and their PRs are not claimed merged.
+The original issues are not closed and their PRs are not claimed merged.

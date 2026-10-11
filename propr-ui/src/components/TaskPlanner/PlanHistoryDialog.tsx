@@ -165,14 +165,14 @@ export const PlanHistoryDialog: React.FC<PlanHistoryDialogProps> = ({ isOpen, dr
 
             {error && <div className="px-5 py-2 text-sm text-red-700 bg-red-50 border-t border-red-200" role="alert">{error}</div>}
 
-            <div className="flex items-center justify-between gap-3 px-5 py-3 border-t border-gray-200 bg-gray-50 rounded-b-lg">
+            <div className="flex flex-none flex-col items-start sm:flex-row sm:items-center justify-between gap-3 px-5 py-3 border-t border-gray-200 bg-gray-50 rounded-b-lg">
               <p className="text-xs text-gray-500">Restoring keeps the current plan in this history.</p>
               <button
                 type="button"
                 onClick={() => void restore()}
                 disabled={!selected || loadingId !== null || isRestoring || isReadOnly}
                 title={isReadOnly ? 'Demo mode is read-only' : undefined}
-                className="px-4 py-2 text-sm font-medium text-white bg-teal-700 rounded-md hover:bg-teal-800 transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
+                className="flex-none whitespace-nowrap min-h-11 px-4 py-2 text-sm font-medium text-white bg-teal-700 rounded-md hover:bg-teal-800 transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
               >
                 {isRestoring ? <Loader2 size={14} className="animate-spin" /> : <RotateCcw size={14} />}
                 Restore this version
