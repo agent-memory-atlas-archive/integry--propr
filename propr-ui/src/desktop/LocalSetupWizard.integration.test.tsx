@@ -16,6 +16,13 @@ const runtimeMock = vi.hoisted(() => ({ setDesktopApiBaseUrl: vi.fn() }));
 vi.mock('../api/apiClient', () => ({ setApiBaseUrl: apiMock.setApiBaseUrl }));
 vi.mock('../config/runtimeConfig', () => ({ setDesktopApiBaseUrl: runtimeMock.setDesktopApiBaseUrl }));
 
+async function continueThrough(...headings: string[]) {
+  for (const heading of headings) {
+    fireEvent.click(screen.getByRole('button', { name: /Continue/i }));
+    await screen.findByRole('heading', { name: heading });
+  }
+}
+
 describe('production local setup journey', () => {
   beforeEach(() => vi.clearAllMocks());
 
@@ -339,10 +346,7 @@ describe('production local setup journey', () => {
     expect(screen.getByRole('alert')).toHaveTextContent('Select ProPR Connect');
 
     fireEvent.click(screen.getByRole('radio', { name: 'ProPR Connect' }));
-    for (const heading of ['GitHub event intake', 'Select coding agents', 'Ready to install']) {
-      fireEvent.click(screen.getByRole('button', { name: /Continue/i }));
-      await screen.findByRole('heading', { name: heading });
-    }
+    await continueThrough('GitHub event intake', 'Select coding agents', 'Ready to install');
     expect(screen.getByLabelText('Selected configuration')).toHaveTextContent('ProPR Connect');
     expect(screen.getByLabelText('Selected configuration')).toHaveTextContent('WebSocket');
     fireEvent.click(screen.getByRole('button', { name: /Install ProPR/i }));
@@ -369,10 +373,7 @@ describe('production local setup journey', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Review saved choices' }));
     expect(await screen.findByText('ProPR Connect uses a persistent WebSocket connection for GitHub events.')).toBeInTheDocument();
     expect(screen.queryByRole('radio')).not.toBeInTheDocument();
-    for (const heading of ['Select coding agents', 'Ready to install']) {
-      fireEvent.click(screen.getByRole('button', { name: /Continue/i }));
-      await screen.findByRole('heading', { name: heading });
-    }
+    await continueThrough('Select coding agents', 'Ready to install');
     fireEvent.click(screen.getByRole('button', { name: /Install ProPR/i }));
     expect(retry).toHaveBeenCalledWith(expect.objectContaining({ intake: { mode: 'routing_websocket' } }));
   });
@@ -393,10 +394,7 @@ describe('production local setup journey', () => {
     fireEvent.click(await screen.findByRole('button', { name: 'Review saved choices' }));
     expect(await screen.findByRole('heading', { name: 'Connect GitHub' })).toBeInTheDocument();
     fireEvent.click(screen.getByRole('radio', { name: 'Keep existing configuration' }));
-    for (const heading of ['GitHub event intake', 'Select coding agents', 'Ready to install']) {
-      fireEvent.click(screen.getByRole('button', { name: /Continue/i }));
-      await screen.findByRole('heading', { name: heading });
-    }
+    await continueThrough('GitHub event intake', 'Select coding agents', 'Ready to install');
     fireEvent.click(screen.getByRole('button', { name: /Install ProPR/i }));
 
     expect(await screen.findByRole('heading', { name: 'ProPR is ready' })).toBeInTheDocument();
@@ -432,10 +430,7 @@ describe('production local setup journey', () => {
     expect(await screen.findByRole('heading', { name: 'GitHub event intake' })).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: 'Enter webhook secret securely' }));
     await screen.findByText('Secret entered');
-    fireEvent.click(screen.getByRole('button', { name: /Continue/i }));
-    await screen.findByRole('heading', { name: 'Select coding agents' });
-    fireEvent.click(screen.getByRole('button', { name: /Continue/i }));
-    await screen.findByRole('heading', { name: 'Ready to install' });
+    await continueThrough('Select coding agents', 'Ready to install');
     fireEvent.click(screen.getByRole('button', { name: /Install ProPR/i }));
 
     expect(await screen.findByRole('heading', { name: 'Setup needs attention' })).toBeInTheDocument();
