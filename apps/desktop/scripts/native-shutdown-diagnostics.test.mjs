@@ -1,4 +1,4 @@
-import { mkdtempSync, mkdirSync, rmSync, chmodSync, symlinkSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, realpathSync, rmSync, chmodSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import assert from 'node:assert/strict';
@@ -6,7 +6,8 @@ import { test } from 'node:test';
 import { createPackagedSmokeLaunch, PACKAGED_SMOKE_LAUNCH_MODES } from './packaged-smoke-plan.mjs';
 
 test('native capture preserves every smoke mode, environment, and required marker', t => {
-  const root = mkdtempSync(join(tmpdir(), 'crash-preflight-'));
+  // macOS temporary directories can have symlinked ancestors; valid evidence must be canonical.
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'crash-preflight-')));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const profile = join(root, 'profile');
   const evidence = join(root, 'evidence');
@@ -32,7 +33,7 @@ test('native capture preserves every smoke mode, environment, and required marke
 });
 
 test('crash capture preflight rejects invalid directories before launch', t => {
-  const root = mkdtempSync(join(tmpdir(), 'crash-preflight-'));
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'crash-preflight-')));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const profile = join(root, 'profile');
   const evidence = join(root, 'evidence');
