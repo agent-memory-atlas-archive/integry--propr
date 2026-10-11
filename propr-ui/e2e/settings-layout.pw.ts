@@ -134,7 +134,7 @@ test('lays settings out as one contained, single-column form', async ({ page }) 
 
   // The "Add" action is a real button, and the chips wrap in a plain flex row
   // rather than sitting inside a padded grey box.
-  const whitelist = page.getByRole('region', { name: 'GitHub User Whitelist' });
+  const whitelist = page.getByRole('region', { name: 'GitHub trigger whitelist' });
   await expect(whitelist.getByRole('button', { name: 'Add' })).toBeVisible();
   const chipRemove = whitelist.getByRole('button', { name: 'Remove octocat' });
   await expect(chipRemove).toBeVisible();

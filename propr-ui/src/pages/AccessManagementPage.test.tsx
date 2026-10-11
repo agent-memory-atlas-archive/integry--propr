@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import AccessManagementPage from './AccessManagementPage';
 import { AuthProvider } from '../contexts/AuthContext';
 import {
@@ -70,7 +70,8 @@ const mockRemoveFromWhitelist = vi.mocked(removeFromTriggerWhitelist);
 
 describe('AccessManagementPage', () => {
   beforeEach(() => {
-    vi.clearAllMocks();
+    vi.restoreAllMocks();
+    vi.resetAllMocks();
     mockGetMembers.mockResolvedValue({
       bootstrapAdmins: [],
       members: [{
@@ -309,4 +310,70 @@ describe('AccessManagementPage', () => {
 
     expect(await screen.findByRole('alert')).toHaveTextContent('Configuration changed');
   });
+  it('explains direct assignments without exposing internal source names', async () => {
+    renderPage();
+    expect(await screen.findByText(/Assigned in this instance/)).toBeInTheDocument();
+    expect(screen.getByText(/Roles assigned directly to users/)).toBeInTheDocument();
+    expect(screen.queryByText(/source: local/)).not.toBeInTheDocument();
+  });
+
+  it('disables role changes while checking trigger access and until the offer is resolved', async () => {
+    let resolveWhitelist!: (value: string[]) => void;
+    mockGetWhitelist.mockResolvedValueOnce(['owner']).mockImplementationOnce(
+      () => new Promise(resolve => { resolveWhitelist = resolve; })
+    );
+    await addDeveloper();
+    await waitFor(() => expect(mockGetWhitelist).toHaveBeenCalledTimes(2));
+    expect(screen.getByRole('button', { name: 'Remove owner' })).toBeDisabled();
+    await act(async () => resolveWhitelist(['owner']));
+    expect(await screen.findByRole('button', { name: 'Add to trigger whitelist' })).toBeEnabled();
+    expect(screen.getByRole('button', { name: 'Remove owner' })).toBeDisabled();
+    fireEvent.click(screen.getByRole('button', { name: 'Not now' }));
+    expect(screen.getByRole('button', { name: 'Remove owner' })).toBeEnabled();
+  });
+
+  it('explains a failed trigger access check after a successful role change', async () => {
+    mockGetWhitelist.mockRejectedValue(new Error('Settings unavailable'));
+    await addDeveloper();
+    expect(await screen.findByRole('status')).toHaveTextContent('Instance role updated. Trigger access could not be checked');
+    expect(mockAddToWhitelist).not.toHaveBeenCalled();
+  });
+
+  it('explains that removing a role does not revoke open trigger access', async () => {
+    await removeDeveloper();
+    expect(await screen.findByRole('status')).toHaveTextContent('every GitHub user can still trigger ProPR');
+    expect(mockRemoveFromWhitelist).not.toHaveBeenCalled();
+  });
+
+  it.each([[['developer']], [['developer', 'developer']]])(
+    'explains why the final listed user cannot be removed (%j)',
+    async (whitelist) => {
+      mockGetWhitelist.mockResolvedValue(whitelist);
+      await removeDeveloper();
+      expect(await screen.findByRole('status')).toHaveTextContent('@developer still has trigger access');
+      expect(screen.getByRole('status')).toHaveTextContent('would allow every GitHub user');
+      expect(screen.queryByRole('button', { name: 'Remove from trigger whitelist' })).not.toBeInTheDocument();
+    }
+  );
+
+  it('does not offer trigger changes when adding the instance role fails', async () => {
+    mockAddMember.mockRejectedValue(new Error('Cannot assign role'));
+    mockGetWhitelist.mockResolvedValue(['owner']);
+    renderPage();
+    await screen.findByText('@owner');
+    fireEvent.change(screen.getByPlaceholderText('GitHub username'), { target: { value: 'developer' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Add user' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent('Cannot assign role');
+    expect(mockGetWhitelist).toHaveBeenCalledTimes(1);
+    expect(screen.queryByRole('button', { name: 'Add to trigger whitelist' })).not.toBeInTheDocument();
+  });
+
+  it('leaves trigger access unchanged when the removal offer is declined', async () => {
+    mockGetWhitelist.mockResolvedValue(['owner', 'developer']);
+    await removeDeveloper();
+    fireEvent.click(await screen.findByRole('button', { name: 'Not now' }));
+    expect(mockRemoveFromWhitelist).not.toHaveBeenCalled();
+    expect(screen.queryByRole('status')).not.toBeInTheDocument();
+  });
+
 });
