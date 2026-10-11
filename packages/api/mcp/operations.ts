@@ -28,6 +28,14 @@ export function canonical(value: unknown): string {
   return JSON.stringify(value);
 }
 
+/** Automation aliases identify the same mutation, including receipts saved before the rename. */
+function matchesPayload(hash: string, tool: string, args: Record<string, unknown>): boolean {
+  if (hash === digest(canonical({ tool, args }))) return true;
+  if (!/^(trigger|approve|reject)_(agent|automation)_run$/.test(tool)) return false;
+  const alias = tool.includes('_automation_') ? tool.replace('_automation_', '_agent_') : tool.replace('_agent_', '_automation_');
+  return hash === digest(canonical({ tool: alias, args }));
+}
+
 function json(value: unknown): unknown {
   if (typeof value !== 'string') return value ?? null;
   try { return JSON.parse(value); } catch { return null; }
@@ -118,7 +126,7 @@ export class McpOperations {
     const identity = { owner_id: principal.user.id, grant_id: principal.grant.id, idempotency_key: String(args.idempotencyKey) };
     let previous = await this.db<Operation>('mcp_operations').where(identity).first();
     if (!previous) return undefined;
-    if (previous.payload_hash !== digest(canonical({ tool, args }))) throw new McpError('IDEMPOTENCY_CONFLICT', 'This key was already used with different arguments.', 409);
+    if (!matchesPayload(previous.payload_hash, tool, args)) throw new McpError('IDEMPOTENCY_CONFLICT', 'This key was already used with different arguments.', 409);
     await this.reconcileTerminalLifecycles(principal, previous.id);
     await this.markInterruptedInvocations(principal, previous.id);
     previous = (await this.db<Operation>('mcp_operations').where(identity).first())!;
@@ -137,7 +145,7 @@ export class McpOperations {
       created_at: acceptedAt, updated_at: acceptedAt }).onConflict(['owner_id', 'grant_id', 'idempotency_key']).ignore().returning('id');
     if (!inserted.length) {
       let previous = await this.db<Operation>('mcp_operations').where(identity).first();
-      if (!previous || previous.payload_hash !== payloadHash) throw new McpError('IDEMPOTENCY_CONFLICT', 'This key was already used with different arguments.', 409);
+      if (!previous || !matchesPayload(previous.payload_hash, tool, args)) throw new McpError('IDEMPOTENCY_CONFLICT', 'This key was already used with different arguments.', 409);
       await this.reconcileTerminalLifecycles(principal, previous.id);
       previous = (await this.db<Operation>('mcp_operations').where(identity).first())!;
       return this.project(previous);

@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { validateAgentSchedule } from '@propr/shared';
+import { validateAutomationSchedule } from '@propr/shared';
 import { AGENT_INPUT_CLASSES, AgentFormRow } from './AgentFormRow';
 import { SCHEDULE_PRESETS, formatUtc, nextScheduledRun } from './agentPresentation';
 
@@ -25,7 +25,7 @@ function useMinuteClock(): Date {
 /** Off, or a UTC cron expression with presets, a live next-run preview and inline validation. */
 export const AgentScheduleSection: React.FC<AgentScheduleSectionProps> = ({ enabled, expression, onChange, disabled }) => {
   const now = useMinuteClock();
-  const error = enabled && expression.trim() ? validateAgentSchedule(expression.trim()) : null;
+  const error = enabled && expression.trim() ? validateAutomationSchedule(expression.trim()) : null;
   const next = enabled && !error && expression.trim() ? nextScheduledRun(expression.trim(), now) : null;
 
   return (

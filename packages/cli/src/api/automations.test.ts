@@ -56,7 +56,7 @@ test("triggerAutomationRun sends the Idempotency-Key and a cli trigger with the 
     assert.equal(result.idempotencyKey, "abc12345");
     assert.equal(requests.length, 1);
     assert.equal(requests[0].method, "POST");
-    assert.equal(requests[0].url.pathname, "/api/agent-definitions/agent-1/runs");
+    assert.equal(requests[0].url.pathname, "/api/automation-definitions/agent-1/runs");
     assert.equal(requests[0].headers["Idempotency-Key"], "abc12345");
     assert.deepEqual(requests[0].body, { trigger: "cli", source: "github-actions" });
   } finally {
@@ -105,7 +105,7 @@ test("triggerAutomationRun surfaces exhausted retries as uncertain with the key"
 
 test("list, runs and run reads use the agent definition and run endpoints", async () => {
   const { client, requests, restore } = clientWith((request) => {
-    if (request.url.pathname === "/api/agent-definitions") return { body: { definitions: [{ id: "agent-1" }], total: 1, limit: 50, offset: 0 } };
+    if (request.url.pathname === "/api/automation-definitions") return { body: { definitions: [{ id: "agent-1" }], total: 1, limit: 50, offset: 0 } };
     if (request.url.pathname.endsWith("/runs")) return { body: { runs: [run], total: 1, limit: 5, offset: 0 } };
     return { body: { run: { ...run, report: "# Report" } } };
   });
@@ -114,11 +114,11 @@ test("list, runs and run reads use the agent definition and run endpoints", asyn
     assert.deepEqual(page.automations.map((item) => item.id), ["agent-1"]);
     const runs = await listAutomationRuns("agent 1", { limit: 5 }, { client });
     assert.equal(runs.runs.length, 1);
-    assert.equal(requests[1].url.pathname, "/api/agent-definitions/agent%201/runs");
+    assert.equal(requests[1].url.pathname, "/api/automation-definitions/agent%201/runs");
     assert.equal(requests[1].url.searchParams.get("limit"), "5");
     const detail = await getAutomationRun("run-1", { client });
     assert.equal(detail.report, "# Report");
-    assert.equal(requests[2].url.pathname, "/api/agent-runs/run-1");
+    assert.equal(requests[2].url.pathname, "/api/automation-runs/run-1");
   } finally {
     restore();
   }
@@ -131,9 +131,9 @@ test("approve, reject and cancel post once to the run action endpoints", async (
     await rejectAutomationRun("run-1", { client });
     await cancelAutomationRun("run-1", { client });
     assert.deepEqual(requests.map((request) => `${request.method} ${request.url.pathname}`), [
-      "POST /api/agent-runs/run-1/approve",
-      "POST /api/agent-runs/run-1/reject",
-      "POST /api/agent-runs/run-1/cancel",
+      "POST /api/automation-runs/run-1/approve",
+      "POST /api/automation-runs/run-1/reject",
+      "POST /api/automation-runs/run-1/cancel",
     ]);
     assert.deepEqual(requests[0].body, { note: "Only the top finding" });
     assert.deepEqual(requests[1].body, {});

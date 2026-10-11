@@ -27,7 +27,7 @@ async function automationsFixture(page: Page) {
   await page.route('**/api/**', route => {
     const request = route.request();
     const pathname = new URL(request.url()).pathname;
-    if (request.method() === 'POST' && pathname === `/api/agent-definitions/${definition.id}/runs`) {
+    if (request.method() === 'POST' && pathname === `/api/automation-definitions/${definition.id}/runs`) {
       return route.fulfill({ status: 201, json: { run, created: true } });
     }
     const responses: Record<string, unknown> = {
@@ -41,11 +41,11 @@ async function automationsFixture(page: Page) {
         defaultAgentAlias: 'claude-main',
         repositories: [{ name: 'integry/propr', enabled: true }],
       },
-      '/api/agent-definitions': { definitions: [definition], total: 1, limit: 200, offset: 0 },
-      [`/api/agent-definitions/${definition.id}`]: { definition },
-      [`/api/agent-definitions/${definition.id}/runs`]: { runs: [run], total: 1, limit: 1, offset: 0 },
-      [`/api/agent-definitions/${definition.id}/capacity`]: { capacity: { status: 'ok', sessionPercent: 20, provider: 'codex' }, threshold: 90 },
-      [`/api/agent-runs/${run.id}`]: { run },
+      '/api/automation-definitions': { definitions: [definition], total: 1, limit: 200, offset: 0 },
+      [`/api/automation-definitions/${definition.id}`]: { definition },
+      [`/api/automation-definitions/${definition.id}/runs`]: { runs: [run], total: 1, limit: 1, offset: 0 },
+      [`/api/automation-definitions/${definition.id}/capacity`]: { capacity: { status: 'ok', sessionPercent: 20, provider: 'codex' }, threshold: 90 },
+      [`/api/automation-runs/${run.id}`]: { run },
       '/api/tasks': { tasks: [], total: 0 },
       '/api/notifications/unread-count': { unreadCount: 0 },
       '/api/notifications/preferences': { preferences: {}, quietHours: {}, badgeEnabled: false },

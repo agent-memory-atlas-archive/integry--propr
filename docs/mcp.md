@@ -104,18 +104,18 @@ Repeating `create_task` with its original key returns its durable receipt;
 using a different key starts a separate request. MCP direct task submission
 currently accepts text instructions; file uploads remain available in the UI.
 
-## Agents
+## Automations
 
-Agents are saved, reusable definitions that run on demand or on a schedule and
-produce a free-form report (see the [Agents guide](docs/features/agents.md)). With read scope, `list_agent_definitions` (optional
-`repository` filter) and `get_agent_definition` show your agents, including the
+Automations are saved, reusable definitions that run on demand or on a schedule and
+produce a free-form report (see the [Automations guide](docs/features/agents.md)). With read scope, `list_automation_definitions` (optional
+`repository` filter) and `get_automation_definition` show your automations, including the
 schedule, next run, capabilities and autonomy mode;
-`get_agent_definition_contract` returns the shared field contract.
-`list_agent_runs` lists a definition's runs newest first without report bodies,
-and `get_agent_run` returns one run with its report. A report over 200 KB is
+`get_automation_definition_contract` returns the shared field contract.
+`list_automation_runs` lists a definition's runs newest first without report bodies,
+and `get_automation_run` returns one run with its report. A report over 200 KB is
 truncated with `reportTruncated: true`; the full report is at the run's `url`.
 
-With execute scope, `trigger_agent_run` starts a run now:
+With execute scope, `trigger_automation_run` starts a run now:
 
 ```json
 {
@@ -126,7 +126,7 @@ With execute scope, `trigger_agent_run` starts a run now:
 ```
 
 The receipt carries `runId`, the run `state` and `created`, with
-`continuation.agentRunId`. Repeating the call with the same `idempotencyKey`
+`continuation.automationRunId`. Repeating the call with the same `idempotencyKey`
 returns the same run. Runs are cost-gated: when provider usage is near its limit
 the run is created `deferred` (retried after the usage window resets) or
 `skipped` instead of `queued`. Poll `get_operation`: its `targetState` reports
@@ -134,19 +134,19 @@ the run's `state`, `reportedAt` and `finishedAt`, and the receipt becomes
 `completed` once the run completes, is rejected or is skipped, and `failed` when
 the run fails.
 
-Whether a run acts on its report depends on the agent's autonomy mode:
+Whether a run acts on its report depends on the automation's autonomy mode:
 `dry_run` only reports, `auto` acts immediately, and `preview` waits in
-`awaiting_approval` for `approve_agent_run` (optional `note` for the acting step)
-or `reject_agent_run`.
+`awaiting_approval` for `approve_automation_run` (optional `note` for the acting step)
+or `reject_automation_run`.
 
-Every repository of a definition must be in the grant; otherwise the agent is
+Every repository of a definition must be in the grant; otherwise the automation is
 hidden from lists and its tools fail with `REPOSITORY_FORBIDDEN`. Tokens that
-ProPR issues to a running agent cannot call `trigger_agent_run`,
-`approve_agent_run` or `reject_agent_run` (`AGENT_RECURSION_FORBIDDEN`), so an
-agent never starts or approves agent runs.
+ProPR issues to a running agent cannot call `trigger_automation_run`,
+`approve_automation_run` or `reject_automation_run` (`AGENT_RECURSION_FORBIDDEN`), so an
+agent never starts or approves automation runs.
 
-Agent runs are also MCP clients. A report run with the `propr_mcp` capability,
-and every acting step of a `preview` or `auto` agent, receives a delegated
+Automation runs are also MCP clients. A report run with the `propr_mcp` capability,
+and every acting step of a `preview` or `auto` automation, receives a delegated
 grant from the internal client **ProPR Agent**. The grant acts as the agent's
 owner, is limited to the definition's repositories, and carries `read` scope for
 the report run or `read`, `plan` and `execute` for the acting step, never
@@ -156,6 +156,12 @@ connected apps and recorded in the MCP access log. It expires after two hours
 at the latest and is revoked as soon as its step ends. Issuing it requires
 MCP to be enabled (`MCP_DISABLED` otherwise) and a current GitHub
 authorization for the owner (`GITHUB_AUTHORIZATION_REQUIRED` otherwise).
+
+### Naming and compatibility
+
+See [Automations: naming and compatibility](./docs/features/agents.md#naming-and-compatibility)
+for canonical names, legacy receipts, backend-first upgrade requirements and the
+MCP alias retirement plan.
 
 ## Client compatibility and verified upstream details
 

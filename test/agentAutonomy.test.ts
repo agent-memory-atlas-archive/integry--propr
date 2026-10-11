@@ -3,7 +3,7 @@ import { after, afterEach, beforeEach, describe, test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import type { Request, RequestHandler, Response } from 'express';
 import knex, { type Knex } from 'knex';
-import type { AgentRunState } from '@propr/shared';
+import type { AutomationRunState } from '@propr/shared';
 import {
   claimAgentRunAction,
   createAgentDefinition,
@@ -18,7 +18,7 @@ import {
 } from '@propr/core';
 
 const { advanceAfterReport, notifyAgentReportAwaitingApproval } = await import('../src/jobs/agentRuns/autonomy.ts');
-const { createAgentDefinitionRoutes } = await import('../packages/api/routes/agentDefinitionRoutes.ts');
+const { createAutomationDefinitionRoutes } = await import('../packages/api/routes/automationDefinitionRoutes.ts');
 
 after(async () => {
   const { closeConnection } = await import('../packages/core/src/db/connection.ts');
@@ -57,8 +57,8 @@ const proceed = () => ({ action: 'proceed' as const });
 /** In-memory compare-and-set store for one run. */
 function store(initial: StoredAgentRun) {
   let current = initial;
-  const transitions: Array<[readonly AgentRunState[], AgentRunState]> = [];
-  const transitionRun = (async (_id: string, from: readonly AgentRunState[], to: AgentRunState, patch: Record<string, unknown> = {}) => {
+  const transitions: Array<[readonly AutomationRunState[], AutomationRunState]> = [];
+  const transitionRun = (async (_id: string, from: readonly AutomationRunState[], to: AutomationRunState, patch: Record<string, unknown> = {}) => {
     transitions.push([from, to]);
     if (!from.includes(current.state)) return null;
     current = { ...current, ...patch, state: to } as StoredAgentRun;
@@ -201,14 +201,14 @@ async function call(route: RequestHandler, userId: string, runId: string, body: 
 describe('approve and reject routes', () => {
   let database: Knex;
   let started: Array<{ runId: string; note: string | null }>;
-  let routes: ReturnType<typeof createAgentDefinitionRoutes>;
+  let routes: ReturnType<typeof createAutomationDefinitionRoutes>;
 
   beforeEach(async () => {
     database = knex({ client: 'better-sqlite3', connection: { filename: ':memory:' }, useNullAsDefault: true });
     await database.raw('PRAGMA foreign_keys = ON');
     await database.migrate.latest({ directory: migrations });
     started = [];
-    routes = createAgentDefinitionRoutes({
+    routes = createAutomationDefinitionRoutes({
       db: database,
       services: {
         now: () => NOW,
@@ -221,13 +221,13 @@ describe('approve and reject routes', () => {
     await database.destroy();
   });
 
-  async function runIn(state: AgentRunState): Promise<StoredAgentRun> {
+  async function runIn(state: AutomationRunState): Promise<StoredAgentRun> {
     const stored = await createAgentDefinition({
       ownerId: 'alice', name: 'Watch', prompt: 'Check', repositories: ['acme/web'], autonomyMode: 'preview',
     }, { database, now: () => NOW });
     const { run } = await createAgentRun({ definition: stored, trigger: 'manual' }, { database, now: () => NOW });
-    const path: AgentRunState[] = ['running', 'report_ready', 'awaiting_approval', 'acting', 'completed'];
-    let from: AgentRunState = 'queued';
+    const path: AutomationRunState[] = ['running', 'report_ready', 'awaiting_approval', 'acting', 'completed'];
+    let from: AutomationRunState = 'queued';
     for (const next of path) {
       if (from === state) break;
       await transitionAgentRun(run.id, [from], next, next === 'report_ready' ? { report: 'Report' } : {}, { database, now: () => NOW });
@@ -249,7 +249,7 @@ describe('approve and reject routes', () => {
   test('a double-clicked approve moves the run once and both requests dispatch the same acting step', async () => {
     const run = await runIn('awaiting_approval');
     const enqueued: Array<{ jobId: unknown; data: AgentRunJobData }> = [];
-    routes = createAgentDefinitionRoutes({
+    routes = createAutomationDefinitionRoutes({
       db: database,
       services: {
         now: () => NOW,
@@ -276,7 +276,7 @@ describe('approve and reject routes', () => {
     // The first approval committed, then its process stopped before enqueueing the acting step.
     await transitionAgentRun(run.id, ['awaiting_approval'], 'acting', { approvedBy: 'alice', operatorNote: 'Only file TODOs.' }, { database, now: () => NOW });
     const enqueued: AgentRunJobData[] = [];
-    routes = createAgentDefinitionRoutes({
+    routes = createAutomationDefinitionRoutes({
       db: database,
       services: {
         now: () => NOW,
@@ -296,7 +296,7 @@ describe('approve and reject routes', () => {
   test('a failed redundant dispatch does not fail an approval the worker already claimed', async () => {
     const run = await runIn('awaiting_approval');
     let dispatches = 0;
-    routes = createAgentDefinitionRoutes({
+    routes = createAutomationDefinitionRoutes({
       db: database,
       services: {
         now: () => NOW,
@@ -415,7 +415,7 @@ describe('approve and reject routes', () => {
   });
 
   test('approve fails the run when its acting step cannot be enqueued', async () => {
-    routes = createAgentDefinitionRoutes({
+    routes = createAutomationDefinitionRoutes({
       db: database,
       services: {
         now: () => NOW,

@@ -1,6 +1,6 @@
 import type { Job } from 'bullmq';
 import type { Logger } from 'pino';
-import type { AgentRunState } from '@propr/shared';
+import type { AutomationRunState } from '@propr/shared';
 import {
     AgentRegistry,
     enqueueAgentRunActionOrFail,
@@ -149,7 +149,7 @@ export function agentReportRecap(report: string): string | undefined {
 
 const UNREADABLE_DEFINITION_REASON = 'The agent definition snapshot is unreadable';
 /** States in which the report phase is over and its task is complete. */
-const REPORTED_RUN_STATES = new Set<AgentRunState>(['report_ready', 'awaiting_approval', 'acting', 'completed']);
+const REPORTED_RUN_STATES = new Set<AutomationRunState>(['report_ready', 'awaiting_approval', 'acting', 'completed']);
 const TERMINAL_TASK_STATES = new Set<string>([TaskStates.COMPLETED, TaskStates.FAILED, TaskStates.CANCELLED]);
 
 export function createAgentRunProcessor(overrides: Partial<AgentRunProcessorDeps> = {}) {
@@ -163,7 +163,7 @@ export function createAgentRunProcessor(overrides: Partial<AgentRunProcessorDeps
      * there first). Throws `AgentRunPersistenceError` when the transition
      * itself could not be stored.
      */
-    async function failRun(runId: string, from: AgentRunState[], reason: string, log: Logger): Promise<boolean> {
+    async function failRun(runId: string, from: AutomationRunState[], reason: string, log: Logger): Promise<boolean> {
         let failed: StoredAgentRun | null;
         try {
             failed = await deps.transitionRun(runId, from, 'failed', { failureReason: reason });
@@ -184,7 +184,7 @@ export function createAgentRunProcessor(overrides: Partial<AgentRunProcessorDeps
      */
     async function settleTaskWithRun(
         { runId, taskId, stateManager, log }: { runId: string; taskId: string; stateManager: AgentRunStateManager; log: Logger },
-    ): Promise<AgentRunState | null> {
+    ): Promise<AutomationRunState | null> {
         try {
             const current = await deps.getRun(runId);
             if (current?.state === 'cancelled') {
@@ -377,7 +377,7 @@ export function createAgentRunProcessor(overrides: Partial<AgentRunProcessorDeps
      * undefined when there is no task or it already ended; otherwise the run
      * state the task followed. Errors propagate so the delivery is retried.
      */
-    async function settleExistingTask(context: RunContext): Promise<AgentRunState | null | undefined> {
+    async function settleExistingTask(context: RunContext): Promise<AutomationRunState | null | undefined> {
         const { runId, taskId, stateManager, log } = context;
         let task: Awaited<ReturnType<AgentRunStateManager['getTaskState']>>;
         try {

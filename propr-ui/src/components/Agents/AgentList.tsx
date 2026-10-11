@@ -1,8 +1,8 @@
 import React, { useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { Clock, Plus, Workflow } from 'lucide-react';
-import type { AgentRunState, InstanceCatalogAgent } from '@propr/shared';
-import type { AgentDefinitionRecord } from '../../api/agentDefinitionsApi';
+import type { AutomationRunState, InstanceCatalogAgent } from '@propr/shared';
+import type { AutomationDefinitionRecord } from '../../api/automationDefinitionsApi';
 import { ListSearchInput } from '../ListSearchInput';
 import { ListSkeleton } from '../ui/Skeleton';
 import { CodeChip } from '../ui/CodeChip';
@@ -17,9 +17,9 @@ import {
 import { AgentRunStateBadge } from './AgentRunStateBadge';
 
 interface AgentListProps {
-  definitions: AgentDefinitionRecord[] | null;
+  definitions: AutomationDefinitionRecord[] | null;
   /** Latest run state per agent id; agents without a run are absent. */
-  lastRunStates: Record<string, AgentRunState>;
+  lastRunStates: Record<string, AutomationRunState>;
   error: string | null;
   selectedId: string | null;
   /** Disables the empty state's "New automation" (demo mode). */
@@ -32,7 +32,7 @@ interface AgentListProps {
 
 const MAX_REPO_CHIPS = 3;
 
-const matches = (definition: AgentDefinitionRecord, query: string, agents: readonly InstanceCatalogAgent[]): boolean => {
+const matches = (definition: AutomationDefinitionRecord, query: string, agents: readonly InstanceCatalogAgent[]): boolean => {
   if (!query) return true;
   const haystack = [definition.name, definition.description ?? '', runnerLabel(definition, agents), ...definition.repositories]
     .join(' ')
@@ -40,7 +40,7 @@ const matches = (definition: AgentDefinitionRecord, query: string, agents: reado
   return query.toLowerCase().split(/\s+/).every(term => haystack.includes(term));
 };
 
-const AgentRow: React.FC<{ definition: AgentDefinitionRecord; lastRunState?: AgentRunState; selected: boolean; now: number; agents: readonly InstanceCatalogAgent[] }> = ({
+const AgentRow: React.FC<{ definition: AutomationDefinitionRecord; lastRunState?: AutomationRunState; selected: boolean; now: number; agents: readonly InstanceCatalogAgent[] }> = ({
   definition, lastRunState, selected, now, agents,
 }) => {
   const extraRepos = definition.repositories.length - MAX_REPO_CHIPS;

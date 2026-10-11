@@ -6,7 +6,7 @@
  * ProPR MCP tools; this prompt hands it the report as data and sets the rules.
  */
 
-import { AGENT_ACTION_OPERATOR_NOTE_MAX_CHARS, AGENT_REPORT_PROMPT_MAX_CHARS } from '@propr/shared';
+import { AUTOMATION_ACTION_OPERATOR_NOTE_MAX_CHARS, AUTOMATION_REPORT_PROMPT_MAX_CHARS } from '@propr/shared';
 import { AGENT_REPORT_TRUNCATED_MARKER, escapeAgentPromptFences } from './reportPrompt.js';
 
 export interface AgentActionPromptDefinition {
@@ -125,7 +125,7 @@ function outputSection(): string {
 
 function assemble(input: AgentActionPromptInput, report: string): string {
     const { definition, run } = input;
-    const note = input.operatorNote?.trim().slice(0, AGENT_ACTION_OPERATOR_NOTE_MAX_CHARS);
+    const note = input.operatorNote?.trim().slice(0, AUTOMATION_ACTION_OPERATOR_NOTE_MAX_CHARS);
     const sections = [
         roleSection(),
         rulesSection(definition, run.id),
@@ -139,12 +139,12 @@ function assemble(input: AgentActionPromptInput, report: string): string {
 
 /**
  * Build the acting-step prompt. Pure: everything it needs is passed in. A
- * report that would push the prompt over `AGENT_REPORT_PROMPT_MAX_CHARS` is
+ * report that would push the prompt over `AUTOMATION_REPORT_PROMPT_MAX_CHARS` is
  * cut and marked as truncated.
  */
 export function buildAgentActionPrompt(input: AgentActionPromptInput): string {
     const prompt = assemble(input, input.report);
-    if (prompt.length <= AGENT_REPORT_PROMPT_MAX_CHARS) return prompt;
-    const keep = Math.max(input.report.length - (prompt.length - AGENT_REPORT_PROMPT_MAX_CHARS) - AGENT_REPORT_TRUNCATED_MARKER.length - 1, 0);
+    if (prompt.length <= AUTOMATION_REPORT_PROMPT_MAX_CHARS) return prompt;
+    const keep = Math.max(input.report.length - (prompt.length - AUTOMATION_REPORT_PROMPT_MAX_CHARS) - AGENT_REPORT_TRUNCATED_MARKER.length - 1, 0);
     return assemble(input, `${input.report.slice(0, keep).trimEnd()}\n${AGENT_REPORT_TRUNCATED_MARKER}`);
 }

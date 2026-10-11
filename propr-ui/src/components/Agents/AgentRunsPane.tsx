@@ -1,10 +1,10 @@
 import React from 'react';
-import type { AgentDefinitionRecord } from '../../api/agentDefinitionsApi';
+import type { AutomationDefinitionRecord } from '../../api/automationDefinitionsApi';
 import { AgentRunDetail } from './AgentRunDetail';
 import { AgentRunHistory } from './AgentRunHistory';
 
 interface AgentRunsPaneProps {
-  definition: AgentDefinitionRecord;
+  definition: AutomationDefinitionRecord;
   /** The run to show, or null for the run history. */
   runId: string | null;
   readOnly: boolean;

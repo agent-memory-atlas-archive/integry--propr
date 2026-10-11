@@ -2,15 +2,15 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, cleanup, fireEvent, render, renderHook, screen, waitFor } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import { AgentEditor } from './AgentEditor';
-import { deleteAgentDefinition, getAgentDefinition, updateAgentDefinition, type AgentDefinitionRecord } from '../../api/agentDefinitionsApi';
+import { deleteAutomationDefinition, getAutomationDefinition, updateAutomationDefinition, type AutomationDefinitionRecord } from '../../api/automationDefinitionsApi';
 import { getInstanceCatalog } from '../../api/proprApi';
 import { useAgentEditor } from './useAgentEditor';
 
-vi.mock('../../api/agentDefinitionsApi', async importOriginal => ({
-  ...(await importOriginal<typeof import('../../api/agentDefinitionsApi')>()),
-  getAgentDefinition: vi.fn(),
-  updateAgentDefinition: vi.fn(),
-  deleteAgentDefinition: vi.fn(),
+vi.mock('../../api/automationDefinitionsApi', async importOriginal => ({
+  ...(await importOriginal<typeof import('../../api/automationDefinitionsApi')>()),
+  getAutomationDefinition: vi.fn(),
+  updateAutomationDefinition: vi.fn(),
+  deleteAutomationDefinition: vi.fn(),
 }));
 
 vi.mock('../../api/proprApi', () => ({ getInstanceCatalog: vi.fn() }));
@@ -18,7 +18,7 @@ vi.mock('../../utils/repoHelpers', () => ({
   fetchEnabledRepos: vi.fn().mockResolvedValue([{ name: 'integry/propr', enabled: true }]),
 }));
 
-const definition: AgentDefinitionRecord = {
+const definition: AutomationDefinitionRecord = {
   id: 'agent-1', ownerId: '1', name: 'Dependency review', description: null, repositories: ['integry/propr'],
   prompt: 'Review dependencies', attachments: [], agentAlias: 'claude-main', modelName: 'claude-opus-4-5',
   capabilities: ['repository_read'], includePreviousReports: false, previousReportsLimit: 0,
@@ -28,16 +28,16 @@ const definition: AgentDefinitionRecord = {
 
 /** A save answered after its agent was deleted would describe an agent that no longer exists, so deletion waits for it. */
 describe('AgentEditor deletion while saving', () => {
-  let finishSave: (saved: AgentDefinitionRecord) => void = () => undefined;
+  let finishSave: (saved: AutomationDefinitionRecord) => void = () => undefined;
 
   beforeEach(() => {
     vi.mocked(getInstanceCatalog).mockResolvedValue({
       agents: [{ alias: 'claude-main', type: 'claude', enabled: true, supportedModels: ['claude-opus-4-5'] }],
       repositories: [],
     } as unknown as Awaited<ReturnType<typeof getInstanceCatalog>>);
-    vi.mocked(getAgentDefinition).mockResolvedValue(definition);
-    vi.mocked(updateAgentDefinition).mockReturnValue(new Promise(resolve => { finishSave = resolve; }));
-    vi.mocked(deleteAgentDefinition).mockResolvedValue(undefined as never);
+    vi.mocked(getAutomationDefinition).mockResolvedValue(definition);
+    vi.mocked(updateAutomationDefinition).mockReturnValue(new Promise(resolve => { finishSave = resolve; }));
+    vi.mocked(deleteAutomationDefinition).mockResolvedValue(undefined as never);
   });
 
   afterEach(() => {
@@ -71,7 +71,7 @@ describe('AgentEditor deletion while saving', () => {
       removed = await remove();
     });
     expect(removed).toBe(false);
-    expect(deleteAgentDefinition).not.toHaveBeenCalled();
+    expect(deleteAutomationDefinition).not.toHaveBeenCalled();
     expect(onDeleted).not.toHaveBeenCalled();
 
     await act(async () => {

@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { Check, ShieldCheck, X } from 'lucide-react';
-import { AGENT_ACTION_OPERATOR_NOTE_MAX_CHARS } from '@propr/shared';
+import { AUTOMATION_ACTION_OPERATOR_NOTE_MAX_CHARS } from '@propr/shared';
 import { AgentConfirmDialog } from './AgentConfirmDialog';
 import { repoShortName } from './agentPresentation';
 
@@ -46,13 +46,13 @@ export const AgentRunApprovalPanel: React.FC<AgentRunApprovalPanelProps> = ({ re
         id="agent-run-note"
         value={note}
         onChange={event => setNote(event.target.value)}
-        maxLength={AGENT_ACTION_OPERATOR_NOTE_MAX_CHARS}
+        maxLength={AUTOMATION_ACTION_OPERATOR_NOTE_MAX_CHARS}
         rows={3}
         disabled={disabled || busy}
         placeholder="Only act on the first two findings."
         className="mt-1 block w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm focus:border-teal-500 focus:outline-none focus:ring-1 focus:ring-teal-500 disabled:bg-slate-50"
       />
-      <p className="mt-1 text-right text-[11px] tabular-nums text-slate-500">{note.length.toLocaleString()} / {AGENT_ACTION_OPERATOR_NOTE_MAX_CHARS.toLocaleString()}</p>
+      <p className="mt-1 text-right text-[11px] tabular-nums text-slate-500">{note.length.toLocaleString()} / {AUTOMATION_ACTION_OPERATOR_NOTE_MAX_CHARS.toLocaleString()}</p>
       <div className="mt-2 flex flex-wrap justify-end gap-2">
         <button
           type="button"

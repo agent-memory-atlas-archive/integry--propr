@@ -1,41 +1,5 @@
 import type { Express, RequestHandler } from 'express';
-import type {
-  createAdminRoutes,
-  createAdminMcpRoutes,
-  createAgentDefinitionRoutes,
-  createAgentLoginRoutes,
-  createAgentRuntimeRoutes,
-  createAgentVersionRoutes,
-  createConfigRoutes,
-  createInstanceCatalogRoutes,
-  createVisualPreviewAuthRoutes,
-  createActiveWorkRoutes,
-  createDashboardRoutes,
-  createDockerRoutes,
-  createExecutionRoutes,
-  createFileChangesRoutes,
-  createGitHubRoutes,
-  createGoalRoutes,
-  createLLMMetricsRoutes,
-  createLiveDetailsRoutes,
-  createLlmLogsRoutes,
-  createNotificationRoutes,
-  createPlannerRoutes,
-  createQueueRoutes,
-  createRelevanceRoutes,
-  createRepoChatRoutes,
-  createRepoImprovementsRoutes,
-  createRepoTodoRoutes,
-  createReviewScoreRoutes,
-  createStatsRoutes,
-  createStatusRoutes,
-  createSummaryBrowserRoutes,
-  createTaskAssignmentRoutes,
-  createTaskHistoryRoutes,
-  createTaskRoutes,
-  createUserRepoPreferencesRoutes,
-  createVoiceRoutes,
-} from './routes/index.js';
+import type * as routes from './routes/index.js';
 import type { createPreviewMediaRoutes } from './routes/previewMediaRoutes.js';
 import type { createRepositoryMediaRoutes } from './routes/repositoryMediaRoutes.js';
 import type { createTaskSubmissionRoutes } from './routes/taskSubmissionRoutes.js';
@@ -57,56 +21,56 @@ export type RouteMethod = 'get' | 'post' | 'put' | 'patch' | 'delete';
 export type RouteEntry = [RouteMethod, string, ...RequestHandler<never>[]];
 
 interface ManagementRouteDeps {
-  adminRoutes: ReturnType<typeof createAdminRoutes>;
-  adminMcpRoutes: ReturnType<typeof createAdminMcpRoutes>;
-  agentLoginRoutes: ReturnType<typeof createAgentLoginRoutes>;
-  agentRuntimeRoutes: ReturnType<typeof createAgentRuntimeRoutes>;
-  agentVersionRoutes: ReturnType<typeof createAgentVersionRoutes>;
-  configRoutes: ReturnType<typeof createConfigRoutes>;
-  visualPreviewAuthRoutes: ReturnType<typeof createVisualPreviewAuthRoutes>;
+  adminRoutes: ReturnType<typeof routes.createAdminRoutes>;
+  adminMcpRoutes: ReturnType<typeof routes.createAdminMcpRoutes>;
+  agentLoginRoutes: ReturnType<typeof routes.createAgentLoginRoutes>;
+  agentRuntimeRoutes: ReturnType<typeof routes.createAgentRuntimeRoutes>;
+  agentVersionRoutes: ReturnType<typeof routes.createAgentVersionRoutes>;
+  configRoutes: ReturnType<typeof routes.createConfigRoutes>;
+  visualPreviewAuthRoutes: ReturnType<typeof routes.createVisualPreviewAuthRoutes>;
 }
 
 interface OperationalRouteDeps {
-  activeWorkRoutes: ReturnType<typeof createActiveWorkRoutes>;
-  agentDefinitionRoutes: ReturnType<typeof createAgentDefinitionRoutes>;
-  dashboardRoutes: ReturnType<typeof createDashboardRoutes>;
-  dockerRoutes: ReturnType<typeof createDockerRoutes>;
-  executionRoutes: ReturnType<typeof createExecutionRoutes>;
-  fileChangesRoutes: ReturnType<typeof createFileChangesRoutes>;
-  githubRoutes: ReturnType<typeof createGitHubRoutes>;
-  goalRoutes: ReturnType<typeof createGoalRoutes>;
-  liveDetailsRoutes: ReturnType<typeof createLiveDetailsRoutes>;
-  llmLogsRoutes: ReturnType<typeof createLlmLogsRoutes>;
-  llmMetricsRoutes: ReturnType<typeof createLLMMetricsRoutes>;
-  notificationRoutes: ReturnType<typeof createNotificationRoutes>;
-  plannerRoutes: ReturnType<typeof createPlannerRoutes>;
+  activeWorkRoutes: ReturnType<typeof routes.createActiveWorkRoutes>;
+  automationDefinitionRoutes: ReturnType<typeof routes.createAutomationDefinitionRoutes>;
+  dashboardRoutes: ReturnType<typeof routes.createDashboardRoutes>;
+  dockerRoutes: ReturnType<typeof routes.createDockerRoutes>;
+  executionRoutes: ReturnType<typeof routes.createExecutionRoutes>;
+  fileChangesRoutes: ReturnType<typeof routes.createFileChangesRoutes>;
+  githubRoutes: ReturnType<typeof routes.createGitHubRoutes>;
+  goalRoutes: ReturnType<typeof routes.createGoalRoutes>;
+  liveDetailsRoutes: ReturnType<typeof routes.createLiveDetailsRoutes>;
+  llmLogsRoutes: ReturnType<typeof routes.createLlmLogsRoutes>;
+  llmMetricsRoutes: ReturnType<typeof routes.createLLMMetricsRoutes>;
+  notificationRoutes: ReturnType<typeof routes.createNotificationRoutes>;
+  plannerRoutes: ReturnType<typeof routes.createPlannerRoutes>;
   previewMediaRoutes: ReturnType<typeof createPreviewMediaRoutes>;
-  queueRoutes: ReturnType<typeof createQueueRoutes>;
-  relevanceRoutes: ReturnType<typeof createRelevanceRoutes>;
-  repoChatRoutes: ReturnType<typeof createRepoChatRoutes>;
-  repoImprovementsRoutes: ReturnType<typeof createRepoImprovementsRoutes>;
-  repoTodoRoutes: ReturnType<typeof createRepoTodoRoutes>;
+  queueRoutes: ReturnType<typeof routes.createQueueRoutes>;
+  relevanceRoutes: ReturnType<typeof routes.createRelevanceRoutes>;
+  repoChatRoutes: ReturnType<typeof routes.createRepoChatRoutes>;
+  repoImprovementsRoutes: ReturnType<typeof routes.createRepoImprovementsRoutes>;
+  repoTodoRoutes: ReturnType<typeof routes.createRepoTodoRoutes>;
   repositoryMediaRoutes: ReturnType<typeof createRepositoryMediaRoutes>;
-  reviewScoreRoutes: ReturnType<typeof createReviewScoreRoutes>;
-  statsRoutes: ReturnType<typeof createStatsRoutes>;
-  statusRoutes: ReturnType<typeof createStatusRoutes>;
-  summaryBrowserRoutes: ReturnType<typeof createSummaryBrowserRoutes>;
-  taskAssignmentRoutes: ReturnType<typeof createTaskAssignmentRoutes>;
-  taskHistoryRoutes: ReturnType<typeof createTaskHistoryRoutes>;
-  taskRoutes: ReturnType<typeof createTaskRoutes>;
+  reviewScoreRoutes: ReturnType<typeof routes.createReviewScoreRoutes>;
+  statsRoutes: ReturnType<typeof routes.createStatsRoutes>;
+  statusRoutes: ReturnType<typeof routes.createStatusRoutes>;
+  summaryBrowserRoutes: ReturnType<typeof routes.createSummaryBrowserRoutes>;
+  taskAssignmentRoutes: ReturnType<typeof routes.createTaskAssignmentRoutes>;
+  taskHistoryRoutes: ReturnType<typeof routes.createTaskHistoryRoutes>;
+  taskRoutes: ReturnType<typeof routes.createTaskRoutes>;
   taskSubmissionRoutes: ReturnType<typeof createTaskSubmissionRoutes>;
   usageTipsRoutes: ReturnType<typeof createUsageTipsRoutes>;
-  userRepoPreferencesRoutes: ReturnType<typeof createUserRepoPreferencesRoutes>;
-  voiceRoutes: ReturnType<typeof createVoiceRoutes>;
+  userRepoPreferencesRoutes: ReturnType<typeof routes.createUserRepoPreferencesRoutes>;
+  voiceRoutes: ReturnType<typeof routes.createVoiceRoutes>;
   /** Multipart parsers that must run before their route handlers. */
   taskSubmissionUpload: RequestHandler;
   goalAttachmentUpload: RequestHandler;
   attachmentUpload: RequestHandler;
-  agentDefinitionAttachmentUpload: RequestHandler;
+  automationDefinitionAttachmentUpload: RequestHandler;
 }
 
 interface MemberCatalogRouteDeps {
-  instanceCatalogRoutes: ReturnType<typeof createInstanceCatalogRoutes>;
+  instanceCatalogRoutes: ReturnType<typeof routes.createInstanceCatalogRoutes>;
 }
 
 export function createManagementRouteEntries({
@@ -198,7 +162,7 @@ export function createManagementRouteEntries({
 export function createOperationalRouteEntries(deps: OperationalRouteDeps): RouteEntry[] {
   const {
     activeWorkRoutes,
-    agentDefinitionRoutes,
+    automationDefinitionRoutes,
     dashboardRoutes,
     dockerRoutes,
     executionRoutes,
@@ -231,7 +195,7 @@ export function createOperationalRouteEntries(deps: OperationalRouteDeps): Route
     taskSubmissionUpload,
     goalAttachmentUpload,
     attachmentUpload,
-    agentDefinitionAttachmentUpload,
+    automationDefinitionAttachmentUpload,
   } = deps;
   return [
     ['get', '/api/desktop/active-work', activeWorkRoutes.getActiveWork],
@@ -254,21 +218,51 @@ export function createOperationalRouteEntries(deps: OperationalRouteDeps): Route
     ['patch', '/api/goals/:goalId/model', goalRoutes.requestModel],
     ['post', '/api/goals/:goalId/input', goalAttachmentUpload, goalRoutes.input],
     ['get', '/api/goals/:goalId/attachments/:attachmentId', goalRoutes.attachment],
-    ['get', '/api/agent-definitions', agentDefinitionRoutes.list],
-    ['get', '/api/agent-definitions/contract', agentDefinitionRoutes.contract],
-    ['post', '/api/agent-definitions', agentDefinitionRoutes.create],
-    ['get', '/api/agent-definitions/:id', agentDefinitionRoutes.get],
-    ['patch', '/api/agent-definitions/:id', agentDefinitionRoutes.update],
-    ['delete', '/api/agent-definitions/:id', agentDefinitionRoutes.remove],
-    ['post', '/api/agent-definitions/:id/attachments', agentDefinitionAttachmentUpload, agentDefinitionRoutes.uploadAttachments],
-    ['delete', '/api/agent-definitions/:id/attachments/:attachmentId', agentDefinitionRoutes.deleteAttachment],
-    ['post', '/api/agent-definitions/:id/runs', agentDefinitionRoutes.triggerRun],
-    ['get', '/api/agent-definitions/:id/capacity', agentDefinitionRoutes.capacity],
-    ['get', '/api/agent-definitions/:id/runs', agentDefinitionRoutes.listRuns],
-    ['get', '/api/agent-runs/:runId', agentDefinitionRoutes.getRun],
-    ['post', '/api/agent-runs/:runId/cancel', agentDefinitionRoutes.cancelRun],
-    ['post', '/api/agent-runs/:runId/approve', agentDefinitionRoutes.approveRun],
-    ['post', '/api/agent-runs/:runId/reject', agentDefinitionRoutes.rejectRun],
+    ['get', '/api/automation-definitions', automationDefinitionRoutes.list],
+    // Deprecated compatibility alias.
+    ['get', '/api/agent-definitions', automationDefinitionRoutes.list],
+    ['get', '/api/automation-definitions/contract', automationDefinitionRoutes.contract],
+    // Deprecated compatibility alias.
+    ['get', '/api/agent-definitions/contract', automationDefinitionRoutes.contract],
+    ['post', '/api/automation-definitions', automationDefinitionRoutes.create],
+    // Deprecated compatibility alias.
+    ['post', '/api/agent-definitions', automationDefinitionRoutes.create],
+    ['get', '/api/automation-definitions/:id', automationDefinitionRoutes.get],
+    // Deprecated compatibility alias.
+    ['get', '/api/agent-definitions/:id', automationDefinitionRoutes.get],
+    ['patch', '/api/automation-definitions/:id', automationDefinitionRoutes.update],
+    // Deprecated compatibility alias.
+    ['patch', '/api/agent-definitions/:id', automationDefinitionRoutes.update],
+    ['delete', '/api/automation-definitions/:id', automationDefinitionRoutes.remove],
+    // Deprecated compatibility alias.
+    ['delete', '/api/agent-definitions/:id', automationDefinitionRoutes.remove],
+    ['post', '/api/automation-definitions/:id/attachments', automationDefinitionAttachmentUpload, automationDefinitionRoutes.uploadAttachments],
+    // Deprecated compatibility alias.
+    ['post', '/api/agent-definitions/:id/attachments', automationDefinitionAttachmentUpload, automationDefinitionRoutes.uploadAttachments],
+    ['delete', '/api/automation-definitions/:id/attachments/:attachmentId', automationDefinitionRoutes.deleteAttachment],
+    // Deprecated compatibility alias.
+    ['delete', '/api/agent-definitions/:id/attachments/:attachmentId', automationDefinitionRoutes.deleteAttachment],
+    ['post', '/api/automation-definitions/:id/runs', automationDefinitionRoutes.triggerRun],
+    // Deprecated compatibility alias.
+    ['post', '/api/agent-definitions/:id/runs', automationDefinitionRoutes.triggerRun],
+    ['get', '/api/automation-definitions/:id/capacity', automationDefinitionRoutes.capacity],
+    // Deprecated compatibility alias.
+    ['get', '/api/agent-definitions/:id/capacity', automationDefinitionRoutes.capacity],
+    ['get', '/api/automation-definitions/:id/runs', automationDefinitionRoutes.listRuns],
+    // Deprecated compatibility alias.
+    ['get', '/api/agent-definitions/:id/runs', automationDefinitionRoutes.listRuns],
+    ['get', '/api/automation-runs/:runId', automationDefinitionRoutes.getRun],
+    // Deprecated compatibility alias.
+    ['get', '/api/agent-runs/:runId', automationDefinitionRoutes.getRun],
+    ['post', '/api/automation-runs/:runId/cancel', automationDefinitionRoutes.cancelRun],
+    // Deprecated compatibility alias.
+    ['post', '/api/agent-runs/:runId/cancel', automationDefinitionRoutes.cancelRun],
+    ['post', '/api/automation-runs/:runId/approve', automationDefinitionRoutes.approveRun],
+    // Deprecated compatibility alias.
+    ['post', '/api/agent-runs/:runId/approve', automationDefinitionRoutes.approveRun],
+    ['post', '/api/automation-runs/:runId/reject', automationDefinitionRoutes.rejectRun],
+    // Deprecated compatibility alias.
+    ['post', '/api/agent-runs/:runId/reject', automationDefinitionRoutes.rejectRun],
     ['get', '/api/status', statusRoutes.getStatus],
     ['get', '/api/tasks', taskRoutes.getTasks],
     ['get', '/api/tasks/revert-preview', taskRoutes.getRevertPreview],

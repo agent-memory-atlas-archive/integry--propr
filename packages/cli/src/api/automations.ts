@@ -1,9 +1,8 @@
 /**
  * Automations API
  *
- * Typed access to the owner-scoped Agents endpoints (`/api/agent-definitions`
- * and `/api/agent-runs`). The CLI calls these "automations" because
- * `propr agent` already manages coding-agent configurations.
+ * Typed access to the owner-scoped Automations endpoints (`/api/automation-definitions`
+ * and `/api/automation-runs`). `propr agent` manages coding-agent configurations.
  *
  * Triggering a run carries an Idempotency-Key; transient transport failures
  * are retried with the same key, so a retried trigger never creates a second
@@ -11,7 +10,7 @@
  * {@link GoalMutationUncertainError} with the key needed to retry safely.
  */
 
-import type { AgentAutonomyMode, AgentCapability, AgentRunState, AgentRunTrigger } from "@propr/shared";
+import type { AutomationAutonomyMode, AutomationCapability, AutomationRunState, AutomationRunTrigger } from "@propr/shared";
 import { ApiClient, createApiClient } from "./client.js";
 import { mutate } from "./goals.js";
 
@@ -24,7 +23,7 @@ export interface AutomationAttachment {
   [key: string]: unknown;
 }
 
-/** A saved agent definition (UI label: "Agent"). */
+/** A saved automation definition. */
 export interface Automation {
   id: string;
   ownerId: string;
@@ -35,30 +34,30 @@ export interface Automation {
   attachments: AutomationAttachment[];
   agentAlias: string | null;
   modelName: string | null;
-  capabilities: AgentCapability[];
+  capabilities: AutomationCapability[];
   includePreviousReports: boolean;
   previousReportsLimit: number;
   scheduleCron: string | null;
   scheduleTimezone: string;
   scheduleEnabled: boolean;
   nextRunAt: number | null;
-  autonomyMode: AgentAutonomyMode;
+  autonomyMode: AutomationAutonomyMode;
   enabled: boolean;
   revision: number;
   createdAt: number;
   updatedAt: number;
 }
 
-/** One run of an agent. `report` and `definitionSnapshot` are absent from history rows. */
+/** One run of an automation. `report` and `definitionSnapshot` are absent from history rows. */
 export interface AutomationRun {
   id: string;
   definitionId: string;
   ownerId: string;
-  trigger: AgentRunTrigger;
+  trigger: AutomationRunTrigger;
   triggerSource: string | null;
   idempotencyKey: string | null;
-  state: AgentRunState;
-  autonomyMode: AgentAutonomyMode;
+  state: AutomationRunState;
+  autonomyMode: AutomationAutonomyMode;
   definitionSnapshot?: Automation | null;
   reportTaskId: string | null;
   actionTaskId: string | null;
@@ -114,11 +113,11 @@ async function resolveClient(options: AutomationApiOptions): Promise<ApiClient> 
 }
 
 function definitionPath(id: string, suffix = ""): string {
-  return `/api/agent-definitions/${encodeURIComponent(id)}${suffix}`;
+  return `/api/automation-definitions/${encodeURIComponent(id)}${suffix}`;
 }
 
 function runPath(runId: string, suffix = ""): string {
-  return `/api/agent-runs/${encodeURIComponent(runId)}${suffix}`;
+  return `/api/automation-runs/${encodeURIComponent(runId)}${suffix}`;
 }
 
 function pageParams(page: { limit?: number; offset?: number }): Record<string, number | undefined> {
@@ -131,7 +130,7 @@ export async function listAutomations(
 ): Promise<AutomationPage> {
   const client = await resolveClient(options);
   const response = await client.get<{ definitions?: Automation[]; total?: number; limit?: number; offset?: number }>(
-    "/api/agent-definitions",
+    "/api/automation-definitions",
     { params: pageParams(page) },
   );
   const automations = response.data.definitions ?? [];

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { after, describe, mock, test } from 'node:test';
 import type { Job } from 'bullmq';
-import type { AgentRunState } from '@propr/shared';
+import type { AutomationRunState } from '@propr/shared';
 import type { AgentRunJobData, AgentTaskOptions, StoredAgentDefinition, StoredAgentRun } from '@propr/core';
 
 const {
@@ -60,7 +60,7 @@ const SUCCESS = {
 function harness(options: { run?: StoredAgentRun; execute?: (options: AgentTaskOptions) => Promise<unknown>; task?: string | null } = {}) {
   let current = options.run ?? actingRun();
   let task: string | null = options.task ?? null;
-  const transitions: Array<{ from: readonly AgentRunState[]; to: AgentRunState; patch: Record<string, unknown> }> = [];
+  const transitions: Array<{ from: readonly AutomationRunState[]; to: AutomationRunState; patch: Record<string, unknown> }> = [];
   const stateCalls: Array<[string, ...unknown[]]> = [];
   const terminal = new Set(['completed', 'failed', 'cancelled']);
   const taskStates: Record<string, string> = { create: 'pending', completed: 'completed', failed: 'failed', cancelled: 'cancelled' };
@@ -70,7 +70,7 @@ function harness(options: { run?: StoredAgentRun; execute?: (options: AgentTaskO
     if (name === 'create' ? task === null : task === null || !terminal.has(task)) task = next;
     return null;
   };
-  const transitionRun = (async (_id: string, from: readonly AgentRunState[], to: AgentRunState, patch: Record<string, unknown> = {}) => {
+  const transitionRun = (async (_id: string, from: readonly AutomationRunState[], to: AutomationRunState, patch: Record<string, unknown> = {}) => {
     transitions.push({ from, to, patch });
     if (!from.includes(current.state)) return null;
     current = { ...current, ...patch, state: to } as StoredAgentRun;

@@ -3,9 +3,9 @@ import { createPortal } from 'react-dom';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { ArrowLeft, GripVertical, X } from 'lucide-react';
 import { Panel, PanelGroup, PanelResizeHandle } from 'react-resizable-panels';
-import { TERMINAL_AGENT_RUN_STATES, type AgentRunState, type InstanceCatalogAgent } from '@propr/shared';
+import { TERMINAL_AUTOMATION_RUN_STATES, type AutomationRunState, type InstanceCatalogAgent } from '@propr/shared';
 import { getInstanceCatalog } from '../api/proprApi';
-import { listAgentDefinitions, listAgentRuns, type AgentDefinitionRecord } from '../api/agentDefinitionsApi';
+import { listAutomationDefinitions, listAutomationRuns, type AutomationDefinitionRecord } from '../api/automationDefinitionsApi';
 import { AgentList } from '../components/Agents/AgentList';
 import { AgentEditor } from '../components/Agents/AgentEditor';
 import { useDemoMode } from '../contexts/DemoModeContext';
@@ -56,11 +56,11 @@ const DEFINITION_PAGE_SIZE = 200;
  * by last update, so an edit elsewhere between page reads can shift a row
  * across a page boundary; rows are de-duplicated by id.
  */
-async function listAllAgentDefinitions(isActive: () => boolean): Promise<AgentDefinitionRecord[]> {
-  const byId = new Map<string, AgentDefinitionRecord>();
+async function listAllAgentDefinitions(isActive: () => boolean): Promise<AutomationDefinitionRecord[]> {
+  const byId = new Map<string, AutomationDefinitionRecord>();
   let offset = 0;
   for (;;) {
-    const page = await listAgentDefinitions({ limit: DEFINITION_PAGE_SIZE, offset });
+    const page = await listAutomationDefinitions({ limit: DEFINITION_PAGE_SIZE, offset });
     if (!isActive()) return [];
     page.definitions.forEach(definition => { if (!byId.has(definition.id)) byId.set(definition.id, definition); });
     offset += page.definitions.length;
@@ -77,7 +77,7 @@ const RUN_STATE_REFRESH_MS = 5_000;
  */
 const RUN_STATE_DISCOVERY_MS = 30_000;
 
-const isTerminalRunState = (state: AgentRunState) => (TERMINAL_AGENT_RUN_STATES as readonly AgentRunState[]).includes(state);
+const isTerminalRunState = (state: AutomationRunState) => (TERMINAL_AUTOMATION_RUN_STATES as readonly AutomationRunState[]).includes(state);
 
 /**
  * The latest run state of each listed agent. Runs move on after they start,
@@ -87,8 +87,8 @@ const isTerminalRunState = (state: AgentRunState) => (TERMINAL_AGENT_RUN_STATES 
  * newer was recorded for that agent after it was sent: a run started from the
  * editor in the meantime must not be overwritten by the run before it.
  */
-function useLastRunStates(definitions: AgentDefinitionRecord[] | null) {
-  const [lastRunStates, setLastRunStates] = useState<Record<string, AgentRunState>>({});
+function useLastRunStates(definitions: AutomationDefinitionRecord[] | null) {
+  const [lastRunStates, setLastRunStates] = useState<Record<string, AutomationRunState>>({});
   /** Bumped per agent whenever its state is recorded, so an older read in flight is discarded. */
   const versions = useRef(new Map<string, number>());
   const inFlight = useRef(new Set<string>());
@@ -98,7 +98,7 @@ function useLastRunStates(definitions: AgentDefinitionRecord[] | null) {
     return () => { activeRef.current = false; };
   }, []);
 
-  const record = useCallback((definitionId: string, state: AgentRunState) => {
+  const record = useCallback((definitionId: string, state: AutomationRunState) => {
     versions.current.set(definitionId, (versions.current.get(definitionId) ?? 0) + 1);
     setLastRunStates(current => ({ ...current, [definitionId]: state }));
   }, []);
@@ -108,7 +108,7 @@ function useLastRunStates(definitions: AgentDefinitionRecord[] | null) {
     if (inFlight.current.has(definitionId)) return;
     inFlight.current.add(definitionId);
     const sentAt = versions.current.get(definitionId) ?? 0;
-    void listAgentRuns(definitionId, { limit: 1 })
+    void listAutomationRuns(definitionId, { limit: 1 })
       .then(runs => {
         const latest = runs.runs[0];
         if (activeRef.current && latest && (versions.current.get(definitionId) ?? 0) === sentAt) record(definitionId, latest.state);
@@ -141,12 +141,12 @@ function useLastRunStates(definitions: AgentDefinitionRecord[] | null) {
 
 /** Saves and deletions made in an editor while the list's first read was in flight. */
 interface PendingChanges {
-  saved: Map<string, AgentDefinitionRecord>;
+  saved: Map<string, AutomationDefinitionRecord>;
   deleted: ReadonlySet<string>;
 }
 
 /** The later of two saved revisions of one agent; a response answered late must not roll the row back. */
-const laterRevision = (current: AgentDefinitionRecord | undefined, incoming: AgentDefinitionRecord): AgentDefinitionRecord =>
+const laterRevision = (current: AutomationDefinitionRecord | undefined, incoming: AutomationDefinitionRecord): AutomationDefinitionRecord =>
   current && current.revision > incoming.revision ? current : incoming;
 
 /**
@@ -155,7 +155,7 @@ const laterRevision = (current: AgentDefinitionRecord | undefined, incoming: Age
  * happened. A save replaces the row it read unless the row read is a later
  * revision, and a save of an agent the read did not include is listed first.
  */
-function reconcileLoadedDefinitions(loaded: AgentDefinitionRecord[], pending: PendingChanges): AgentDefinitionRecord[] {
+function reconcileLoadedDefinitions(loaded: AutomationDefinitionRecord[], pending: PendingChanges): AutomationDefinitionRecord[] {
   const kept = loaded
     .filter(definition => !pending.deleted.has(definition.id))
     .map(definition => {
@@ -168,11 +168,11 @@ function reconcileLoadedDefinitions(loaded: AgentDefinitionRecord[], pending: Pe
 
 /** Saved agents plus the latest run state of each, for the list. */
 function useAgentDefinitions() {
-  const [definitions, setDefinitions] = useState<AgentDefinitionRecord[] | null>(null);
+  const [definitions, setDefinitions] = useState<AutomationDefinitionRecord[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const { lastRunStates, recordRun, refresh: refreshRunState } = useLastRunStates(definitions);
   /** Saves recorded until the first read is applied; null afterwards, when saves apply to the list directly. */
-  const pendingSaves = useRef<Map<string, AgentDefinitionRecord> | null>(new Map());
+  const pendingSaves = useRef<Map<string, AutomationDefinitionRecord> | null>(new Map());
   /**
    * Every agent deleted from this page, kept for as long as the page is open:
    * a save of that agent answered after the deletion must not list it again.
@@ -184,7 +184,7 @@ function useAgentDefinitions() {
     listAllAgentDefinitions(() => active)
       .then(read => {
         if (!active) return;
-        const saved = pendingSaves.current ?? new Map<string, AgentDefinitionRecord>();
+        const saved = pendingSaves.current ?? new Map<string, AutomationDefinitionRecord>();
         const loaded = reconcileLoadedDefinitions(read, { saved, deleted: deleted.current });
         pendingSaves.current = null;
         setDefinitions(loaded);
@@ -195,7 +195,7 @@ function useAgentDefinitions() {
     return () => { active = false; };
   }, [refreshRunState]);
 
-  const upsert = useCallback((definition: AgentDefinitionRecord) => {
+  const upsert = useCallback((definition: AutomationDefinitionRecord) => {
     if (deleted.current.has(definition.id)) return;
     const pending = pendingSaves.current;
     pending?.set(definition.id, laterRevision(pending.get(definition.id), definition));
@@ -249,7 +249,7 @@ const AgentsPage: React.FC<{ isNew?: boolean; section?: 'settings' | 'runs' }> =
 
   // A save or delete that finishes after its editor was closed only updates the list:
   // navigating would replace whichever editor is open now and discard its edits.
-  const onSaved = useCallback((definition: AgentDefinitionRecord, created: boolean, open: boolean) => {
+  const onSaved = useCallback((definition: AutomationDefinitionRecord, created: boolean, open: boolean) => {
     upsert(definition);
     if (created && open) navigate(`/automations/${encodeURIComponent(definition.id)}`, { replace: true });
   }, [navigate, upsert]);

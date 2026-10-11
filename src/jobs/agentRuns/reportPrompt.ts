@@ -9,10 +9,10 @@
  */
 
 import {
-    AGENT_PREVIOUS_REPORT_MAX_CHARS,
-    AGENT_REPORT_PROMPT_MAX_CHARS,
-    type AgentCapability,
-    type AgentRunTrigger,
+    AUTOMATION_PREVIOUS_REPORT_MAX_CHARS,
+    AUTOMATION_REPORT_PROMPT_MAX_CHARS,
+    type AutomationCapability,
+    type AutomationRunTrigger,
 } from '@propr/shared';
 import { redactSecrets, sanitizeAgentReport } from '@propr/core';
 
@@ -22,13 +22,13 @@ export interface AgentReportPromptDefinition {
     description?: string | null;
     prompt: string;
     repositories: readonly string[];
-    capabilities: readonly AgentCapability[];
+    capabilities: readonly AutomationCapability[];
     includePreviousReports: boolean;
 }
 
 export interface AgentReportPromptRun {
     id: string;
-    trigger: AgentRunTrigger;
+    trigger: AutomationRunTrigger;
     triggerSource: string | null;
     /** Epoch milliseconds. */
     createdAt: number;
@@ -96,8 +96,8 @@ function formatTimestamp(epochMs: number): string {
 }
 
 function truncateReport(report: string): string {
-    if (report.length <= AGENT_PREVIOUS_REPORT_MAX_CHARS) return report;
-    return `${report.slice(0, AGENT_PREVIOUS_REPORT_MAX_CHARS).trimEnd()}\n${AGENT_REPORT_TRUNCATED_MARKER}`;
+    if (report.length <= AUTOMATION_PREVIOUS_REPORT_MAX_CHARS) return report;
+    return `${report.slice(0, AUTOMATION_PREVIOUS_REPORT_MAX_CHARS).trimEnd()}\n${AGENT_REPORT_TRUNCATED_MARKER}`;
 }
 
 function roleSection(proprMcp: boolean): string {
@@ -221,7 +221,7 @@ function assemble(input: AgentReportPromptInput, reportCount: number, attachment
 
 /**
  * Build the report-run prompt. Pure: everything it needs is passed in. When
- * the prompt would exceed `AGENT_REPORT_PROMPT_MAX_CHARS`, the oldest previous
+ * the prompt would exceed `AUTOMATION_REPORT_PROMPT_MAX_CHARS`, the oldest previous
  * reports are dropped first, then the input file list is shortened.
  */
 export function buildAgentReportPrompt(input: AgentReportPromptInput): string {
@@ -229,11 +229,11 @@ export function buildAgentReportPrompt(input: AgentReportPromptInput): string {
     let attachmentCount = input.attachments.length;
     let prompt = assemble(input, reportCount, attachmentCount);
 
-    while (prompt.length > AGENT_REPORT_PROMPT_MAX_CHARS && reportCount > 0) {
+    while (prompt.length > AUTOMATION_REPORT_PROMPT_MAX_CHARS && reportCount > 0) {
         reportCount -= 1;
         prompt = assemble(input, reportCount, attachmentCount);
     }
-    while (prompt.length > AGENT_REPORT_PROMPT_MAX_CHARS && attachmentCount > 0) {
+    while (prompt.length > AUTOMATION_REPORT_PROMPT_MAX_CHARS && attachmentCount > 0) {
         attachmentCount -= 1;
         prompt = assemble(input, reportCount, attachmentCount);
     }

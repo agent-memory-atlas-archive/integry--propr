@@ -4,9 +4,9 @@ import {
     isGithubUserWhitelisted,
     nextCronOccurrence,
     parseCronExpression,
-    isAgentRunState,
-    isTerminalAgentRunState,
-    type AgentRunState,
+    isAutomationRunState,
+    isTerminalAutomationRunState,
+    type AutomationRunState,
     type ParsedCronExpression,
 } from '@propr/shared';
 import {
@@ -360,7 +360,7 @@ function toEpochMs(value: unknown): number | null {
 }
 
 /** One page of runs in any of `states`, ordered by id and starting after `afterId`. */
-async function listAgentRunsInStates(states: readonly AgentRunState[], limit: number, afterId: string | null, database: Knex): Promise<StoredAgentRun[]> {
+async function listAgentRunsInStates(states: readonly AutomationRunState[], limit: number, afterId: string | null, database: Knex): Promise<StoredAgentRun[]> {
     const query = database('agent_runs').whereIn('state', [...states]);
     if (afterId !== null) query.where('id', '>', afterId);
     const rows = await query.orderBy('id', 'asc').limit(limit).select<AgentRunRow[]>();
@@ -368,9 +368,9 @@ async function listAgentRunsInStates(states: readonly AgentRunState[], limit: nu
 }
 
 /** The run states of `ids`; ids without a run are absent from the map. */
-async function getAgentRunStates(ids: readonly string[], database: Knex): Promise<Map<string, AgentRunState>> {
+async function getAgentRunStates(ids: readonly string[], database: Knex): Promise<Map<string, AutomationRunState>> {
     const rows = await database('agent_runs').whereIn('id', [...new Set(ids)]).select<Pick<AgentRunRow, 'id' | 'state'>[]>('id', 'state');
-    return new Map(rows.map(row => [row.id, isAgentRunState(row.state) ? row.state : 'failed']));
+    return new Map(rows.map(row => [row.id, isAutomationRunState(row.state) ? row.state : 'failed']));
 }
 
 /** The task a `running` or `acting` run is waiting on, if it has one. */
@@ -494,7 +494,7 @@ async function revokeLeftoverGrants(
     for (const grant of grants) {
         const state = states.get(grant.runId);
         const expired = grant.expiresAt !== null && grant.expiresAt <= timestamp;
-        const ended = state === undefined || isTerminalAgentRunState(state);
+        const ended = state === undefined || isTerminalAutomationRunState(state);
         if (!expired && !ended) continue;
         try {
             // A live run may replace an expired grant by retrying its phase, so

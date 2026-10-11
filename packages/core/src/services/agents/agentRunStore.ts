@@ -1,14 +1,14 @@
 import { randomUUID } from 'node:crypto';
 import type { Knex } from 'knex';
 import {
-  AGENT_REPORT_MAX_CHARS,
-  DEFAULT_AGENT_AUTONOMY_MODE,
-  isAgentAutonomyMode,
-  isAgentRunState,
-  isTerminalAgentRunState,
-  type AgentAutonomyMode,
-  type AgentRunState,
-  type AgentRunTrigger,
+  AUTOMATION_REPORT_MAX_CHARS,
+  DEFAULT_AUTOMATION_AUTONOMY_MODE,
+  isAutomationAutonomyMode,
+  isAutomationRunState,
+  isTerminalAutomationRunState,
+  type AutomationAutonomyMode,
+  type AutomationRunState,
+  type AutomationRunTrigger,
 } from '@propr/shared';
 import { db } from '../../db/connection.js';
 import type { StoredAgentDefinition } from './agentDefinitionStore.js';
@@ -39,7 +39,7 @@ export const MAX_AGENT_RUN_PAGE_SIZE = 200;
  * - acting            → completed | failed | cancelled | awaiting_approval (an unclaimed
  *                       unattended acting step held back by the cost gate)
  */
-export const AGENT_RUN_TRANSITIONS: Readonly<Record<AgentRunState, readonly AgentRunState[]>> = {
+export const AGENT_RUN_TRANSITIONS: Readonly<Record<AutomationRunState, readonly AutomationRunState[]>> = {
   queued: ['running', 'deferred', 'skipped', 'cancelled', 'failed'],
   deferred: ['queued', 'skipped', 'cancelled'],
   running: ['report_ready', 'failed', 'cancelled'],
@@ -54,12 +54,12 @@ export const AGENT_RUN_TRANSITIONS: Readonly<Record<AgentRunState, readonly Agen
 };
 
 /** States of runs that produced a report, i.e. usable as previous reports. */
-export const AGENT_RUN_STATES_WITH_REPORT: readonly AgentRunState[] = ['report_ready', 'awaiting_approval', 'acting', 'completed', 'rejected'];
+export const AGENT_RUN_STATES_WITH_REPORT: readonly AutomationRunState[] = ['report_ready', 'awaiting_approval', 'acting', 'completed', 'rejected'];
 
 /** States a run may be created in. */
 export type AgentRunInitialState = 'queued' | 'deferred' | 'skipped';
 
-export function isAgentRunTransitionAllowed(from: AgentRunState, to: AgentRunState): boolean {
+export function isAgentRunTransitionAllowed(from: AutomationRunState, to: AutomationRunState): boolean {
   return AGENT_RUN_TRANSITIONS[from].includes(to);
 }
 
@@ -67,12 +67,12 @@ export interface StoredAgentRun {
   id: string;
   definitionId: string;
   ownerId: string;
-  trigger: AgentRunTrigger;
+  trigger: AutomationRunTrigger;
   triggerSource: string | null;
   idempotencyKey: string | null;
-  state: AgentRunState;
+  state: AutomationRunState;
   /** Autonomy captured at creation so later definition edits do not change it. */
-  autonomyMode: AgentAutonomyMode;
+  autonomyMode: AutomationAutonomyMode;
   /** Definition as it was when the run was created; null if the stored JSON is unreadable. */
   definitionSnapshot: StoredAgentDefinition | null;
   reportTaskId: string | null;
@@ -129,12 +129,12 @@ export function rowToAgentRun(row: AgentRunRow): StoredAgentRun {
     id: row.id,
     definitionId: row.definition_id,
     ownerId: row.owner_id,
-    trigger: row.trigger as AgentRunTrigger,
+    trigger: row.trigger as AutomationRunTrigger,
     triggerSource: row.trigger_source ?? null,
     idempotencyKey: row.idempotency_key ?? null,
     // An unknown stored state is treated as failed so it is never picked up again.
-    state: isAgentRunState(row.state) ? row.state : 'failed',
-    autonomyMode: isAgentAutonomyMode(row.autonomy_mode) ? row.autonomy_mode : DEFAULT_AGENT_AUTONOMY_MODE,
+    state: isAutomationRunState(row.state) ? row.state : 'failed',
+    autonomyMode: isAutomationAutonomyMode(row.autonomy_mode) ? row.autonomy_mode : DEFAULT_AUTOMATION_AUTONOMY_MODE,
     definitionSnapshot: parseSnapshot(row.definition_snapshot),
     reportTaskId: row.report_task_id ?? null,
     actionTaskId: row.action_task_id ?? null,
@@ -157,13 +157,13 @@ export function rowToAgentRun(row: AgentRunRow): StoredAgentRun {
 
 /** Truncate a report to the stored maximum; the full output stays in the task logs. */
 export function truncateAgentReport(report: string): { report: string; truncated: boolean } {
-  if (report.length <= AGENT_REPORT_MAX_CHARS) return { report, truncated: false };
-  return { report: report.slice(0, AGENT_REPORT_MAX_CHARS), truncated: true };
+  if (report.length <= AUTOMATION_REPORT_MAX_CHARS) return { report, truncated: false };
+  return { report: report.slice(0, AUTOMATION_REPORT_MAX_CHARS), truncated: true };
 }
 
 export interface CreateAgentRunInput {
   definition: StoredAgentDefinition;
-  trigger: AgentRunTrigger;
+  trigger: AutomationRunTrigger;
   /** Who or what fired the run, e.g. a user id or the scheduler slot. */
   triggerSource?: string | null;
   /** Replays with the same key for the same definition return the existing run. */
@@ -219,7 +219,7 @@ export async function createAgentRun(
     created_at: timestamp,
     started_at: null,
     reported_at: null,
-    finished_at: isTerminalAgentRunState(state) ? timestamp : null,
+    finished_at: isTerminalAutomationRunState(state) ? timestamp : null,
     updated_at: timestamp,
   };
   // RETURNING binds the receipt to this insert: a run transitioned by another
@@ -251,7 +251,7 @@ export async function recordSkippedRun(
 export interface AgentRunTransitionPatch {
   reportTaskId?: string | null;
   actionTaskId?: string | null;
-  /** Truncated to `AGENT_REPORT_MAX_CHARS`; `report_truncated` is set accordingly. */
+  /** Truncated to `AUTOMATION_REPORT_MAX_CHARS`; `report_truncated` is set accordingly. */
   report?: string | null;
   actionSummary?: string | null;
   skipReason?: string | null;
@@ -291,8 +291,8 @@ function patchToRowChanges(patch: AgentRunTransitionPatch): Record<string, unkno
 // eslint-disable-next-line max-params -- id, the from → to pair and its patch, plus the shared store dependencies
 export async function transitionAgentRun(
   id: string,
-  from: readonly AgentRunState[],
-  to: AgentRunState,
+  from: readonly AutomationRunState[],
+  to: AutomationRunState,
   patch: AgentRunTransitionPatch = {},
   deps: AgentRunStoreDependencies = {},
 ): Promise<StoredAgentRun | null> {
@@ -309,7 +309,7 @@ export async function transitionAgentRun(
 export async function transitionDeferredAgentRun(
   id: string,
   evaluatedDeferredUntil: number,
-  to: AgentRunState,
+  to: AutomationRunState,
   patch: AgentRunTransitionPatch = {},
   deps: AgentRunStoreDependencies = {},
 ): Promise<StoredAgentRun | null> {
@@ -319,8 +319,8 @@ export async function transitionDeferredAgentRun(
 // eslint-disable-next-line max-params -- the transition arguments plus the extra row guard
 async function applyAgentRunTransition(
   id: string,
-  from: readonly AgentRunState[],
-  to: AgentRunState,
+  from: readonly AutomationRunState[],
+  to: AutomationRunState,
   patch: AgentRunTransitionPatch,
   { database = db, now = Date.now }: AgentRunStoreDependencies,
   guard: Record<string, unknown>,
@@ -340,7 +340,7 @@ async function applyAgentRunTransition(
   if (to === 'running') changes.started_at = database.raw('COALESCE(started_at, ?)', [timestamp]);
   if (to === 'report_ready') changes.reported_at = timestamp;
   if (to === 'deferred') changes.deferrals = database.raw('deferrals + 1');
-  if (isTerminalAgentRunState(to)) changes.finished_at = timestamp;
+  if (isTerminalAutomationRunState(to)) changes.finished_at = timestamp;
 
   // RETURNING yields the row this update produced; a separate read could see a
   // competing transition that landed after it.

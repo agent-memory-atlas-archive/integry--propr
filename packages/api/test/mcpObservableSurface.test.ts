@@ -317,6 +317,8 @@ test('observable MCP surface keeps receipts, errors, overview, docs and previews
     'branch', 'categories', 'architecture', 'documentation', 'performance', 'scalability', 'security', 'testing',
     // Agent run receipt fields, run states, autonomy modes and capabilities of the agent run tools.
     'created', 'deferred', 'awaiting_approval', 'dry_run', 'preview', 'auto', 'note', 'propr_mcp',
+    // Coding-agent backend values of proprMcpAgentTypes, not automation tools.
+    'claude', 'codex',
     // Inputs, modes and result fields of search_repository_files and read_repository_file.
     'caveat', 'commit', 'content', 'freshness', 'literal', 'matches', 'mode', 'query', 'reasons', 'ref', 'semantic',
     // Prompt names share tool-like spelling but are discovered under prompts/list.

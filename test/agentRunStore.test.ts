@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { after, afterEach, beforeEach, describe, test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import knex, { type Knex } from 'knex';
-import { AGENT_REPORT_MAX_CHARS, AGENT_RUN_STATES } from '@propr/shared';
+import { AUTOMATION_REPORT_MAX_CHARS, AUTOMATION_RUN_STATES } from '@propr/shared';
 import { createAgentDefinition, type StoredAgentDefinition } from '../packages/core/src/services/agents/agentDefinitionStore.ts';
 import {
   AGENT_RUN_TRANSITIONS,
@@ -37,7 +37,7 @@ async function openDatabase(): Promise<Knex> {
 
 describe('AGENT_RUN_TRANSITIONS', () => {
   test('covers every state and terminal states have no outgoing edges', () => {
-    assert.deepEqual(Object.keys(AGENT_RUN_TRANSITIONS).sort(), [...AGENT_RUN_STATES].sort());
+    assert.deepEqual(Object.keys(AGENT_RUN_TRANSITIONS).sort(), [...AUTOMATION_RUN_STATES].sort());
     for (const state of ['completed', 'failed', 'skipped', 'rejected', 'cancelled'] as const) {
       assert.deepEqual(AGENT_RUN_TRANSITIONS[state], []);
     }
@@ -240,8 +240,8 @@ describe('agentRunStore', () => {
   });
 
   test('truncates long reports', async () => {
-    const run = await runWithReport('x'.repeat(AGENT_REPORT_MAX_CHARS + 10));
-    assert.equal(run.report?.length, AGENT_REPORT_MAX_CHARS);
+    const run = await runWithReport('x'.repeat(AUTOMATION_REPORT_MAX_CHARS + 10));
+    assert.equal(run.report?.length, AUTOMATION_REPORT_MAX_CHARS);
     assert.equal(run.reportTruncated, true);
     const short = await runWithReport('short');
     assert.equal(short.reportTruncated, false);

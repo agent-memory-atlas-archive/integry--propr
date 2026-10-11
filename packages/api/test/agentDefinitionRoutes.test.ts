@@ -1,4 +1,4 @@
-/* eslint-disable max-lines -- one suite covers every agent definition and run route, including their race regressions */
+/* eslint-disable max-lines -- one suite covers every automation definition and run route, including their race regressions */
 import assert from 'node:assert/strict';
 import { after, afterEach, beforeEach, describe, test } from 'node:test';
 import { fileURLToPath } from 'node:url';
@@ -12,11 +12,11 @@ import {
   type MulterFile,
   type StoredAgentRun,
 } from '@propr/core';
-import { AGENT_DEFINITION_CONTRACT } from '@propr/shared';
+import { AUTOMATION_DEFINITION_CONTRACT } from '@propr/shared';
 import {
-  createAgentDefinitionRoutes,
-  type AgentDefinitionRouteServices,
-} from '../routes/agentDefinitionRoutes.js';
+  createAutomationDefinitionRoutes,
+  type AutomationDefinitionRouteServices,
+} from '../routes/automationDefinitionRoutes.js';
 
 after(closeConnection);
 
@@ -63,7 +63,7 @@ async function call(route: RequestHandler, req: Request) {
   return state as { status: number; body: any; ended: boolean };
 }
 
-describe('agent definition routes', () => {
+describe('automation definition routes', () => {
   let database: Knex;
   let accessible: Set<string>;
   let verified: Array<{ repository: string; token: string }>;
@@ -71,9 +71,9 @@ describe('agent definition routes', () => {
   let enqueued: string[];
   let runtimeError: string | null;
   let removedFiles: Array<{ definitionId: string; attachments: readonly Attachment[] | 'all' }>;
-  let routes: ReturnType<typeof createAgentDefinitionRoutes>;
+  let routes: ReturnType<typeof createAutomationDefinitionRoutes>;
 
-  const services = (): AgentDefinitionRouteServices => ({
+  const services = (): AutomationDefinitionRouteServices => ({
     now: () => NOW,
     resolveToken: async req => String(req.user!.accessToken),
     verifyAccess: async (repository, token) => {
@@ -111,7 +111,7 @@ describe('agent definition routes', () => {
     enqueued = [];
     runtimeError = null;
     removedFiles = [];
-    routes = createAgentDefinitionRoutes({ db: database, services: services() });
+    routes = createAutomationDefinitionRoutes({ db: database, services: services() });
   });
 
   afterEach(async () => {
@@ -228,7 +228,7 @@ describe('agent definition routes', () => {
 
   test('serves the definition contract', async () => {
     const result = await call(routes.contract, request('alice'));
-    assert.deepEqual(result.body, AGENT_DEFINITION_CONTRACT);
+    assert.deepEqual(result.body, AUTOMATION_DEFINITION_CONTRACT);
   });
 
   test('rejects invalid input and runtime-invalid definitions with 400', async () => {
@@ -301,7 +301,7 @@ describe('agent definition routes', () => {
   });
 
   test('the trigger applies the cost gate and records a held run without enqueueing', async () => {
-    const gated = createAgentDefinitionRoutes({ db: database, services: { ...services(),
+    const gated = createAutomationDefinitionRoutes({ db: database, services: { ...services(),
       gate: ({ trigger }) => trigger === 'manual' ? null : { action: 'skip', reason: 'Weekly subscription usage for claude is at 95% (pause threshold 90%).' } } });
     const definition = await createDefinition('alice');
     const api = await call(gated.triggerRun, request('alice', { params: { id: definition.id }, body: { trigger: 'api' } }));
@@ -325,7 +325,7 @@ describe('agent definition routes', () => {
   test('triggering a disabled agent maps the core error to { error, code }', async () => {
     const definition = await createDefinition('alice', { enabled: false });
     const result = await triggerRun(definition.id);
-    assert.deepEqual(result.body, { error: 'Agent is disabled', code: 'AGENT_DISABLED' });
+    assert.deepEqual(result.body, { error: 'Automation is disabled', code: 'AGENT_DISABLED' });
     assert.equal(result.status, 409);
   });
 
@@ -446,6 +446,7 @@ describe('agent definition routes', () => {
       params: { id: definition.id }, files: Array.from({ length: 10 }, (_, index) => ({ ...file, originalname: `f${index}.md` })),
     }));
     assert.equal(tooMany.status, 400);
+    assert.equal(tooMany.body.error, 'An automation can have at most 10 input files');
 
     const missing = await call(routes.deleteAttachment, request('alice', { params: { id: definition.id, attachmentId: 'nope' } }));
     assert.equal(missing.status, 404);
@@ -474,7 +475,7 @@ describe('agent definition routes', () => {
     await call(routes.uploadAttachments, request('alice', { params: { id: definition.id }, files: [seed] }));
 
     const processing = deferred();
-    const slow = createAgentDefinitionRoutes({ db: database, services: {
+    const slow = createAutomationDefinitionRoutes({ db: database, services: {
       ...services(),
       processUpload: async (file, definitionId) => {
         await processing.promise;
@@ -500,19 +501,26 @@ describe('agent definition routes', () => {
     removedFiles = [];
 
     const processing = deferred();
-    const slow = createAgentDefinitionRoutes({ db: database, services: {
+    const bothProcessing = deferred();
+    let started = 0;
+    const slow = createAutomationDefinitionRoutes({ db: database, services: {
       ...services(),
       processUpload: async (file, definitionId) => {
+        if (++started === 2) bothProcessing.release();
         await processing.promise;
         return services().processUpload!(file, definitionId);
       },
     } });
     const uploads = ['x', 'y'].map(prefix =>
       call(slow.uploadAttachments, request('alice', { params: { id: definition.id }, files: batch(prefix, 2) })));
+    await bothProcessing.promise;
     processing.release();
 
-    const statuses = (await Promise.all(uploads)).map(result => result.status).sort();
+    const results = await Promise.all(uploads);
+    const statuses = results.map(result => result.status).sort();
     assert.deepEqual(statuses, [201, 400]);
+    assert.equal(results.find(result => result.status === 400)?.body.error,
+      'An automation can have at most 10 input files');
     assert.equal((await storedAttachmentIds(definition.id)).length, 10);
     assert.equal(removedFiles.length, 1, 'the rejected upload removes the files it processed');
   });
@@ -521,4 +529,21 @@ describe('agent definition routes', () => {
     const result = await call(routes.list, request('alice', { query: { limit: '-1' } }));
     assert.equal(result.status, 400);
   });
+});
+
+test('canonical REST routes and deprecated aliases share all handlers and upload guards', async () => {
+  const { createOperationalRouteEntries, assertNoDuplicateRoutes } = await import('../routeRegistry.js');
+  const handler = () => undefined;
+  const handlers = new Proxy({}, { get: () => handler });
+  const deps = new Proxy({}, { get: () => handlers }) as Parameters<typeof createOperationalRouteEntries>[0];
+  const routes = createOperationalRouteEntries(deps);
+  assertNoDuplicateRoutes(routes);
+  const canonical = routes.filter(([, path]) => /^\/api\/automation-(definitions|runs)(?:\/|$)/.test(path));
+  assert.equal(canonical.length, 15);
+  for (const [method, path, ...chain] of canonical) {
+    const legacyPath = path.replace('/automation-', '/agent-');
+    const legacy = routes.find(([verb, route]) => verb === method && route === legacyPath);
+    assert.ok(legacy, `${method} ${legacyPath}`);
+    assert.deepEqual(legacy.slice(2), chain, `${method} ${path}`);
+  }
 });

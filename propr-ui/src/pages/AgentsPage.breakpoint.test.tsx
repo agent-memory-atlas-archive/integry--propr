@@ -2,22 +2,22 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import AgentsPage from './AgentsPage';
-import { getAgentDefinition, listAgentDefinitions, listAgentRuns, type AgentDefinitionRecord } from '../api/agentDefinitionsApi';
+import { getAutomationDefinition, listAutomationDefinitions, listAutomationRuns, type AutomationDefinitionRecord } from '../api/automationDefinitionsApi';
 import { getInstanceCatalog } from '../api/proprApi';
 
 // The real editor is rendered here: what matters is that its working form survives a layout change.
-vi.mock('../api/agentDefinitionsApi', async importOriginal => ({
-  ...(await importOriginal<typeof import('../api/agentDefinitionsApi')>()),
-  listAgentDefinitions: vi.fn(),
-  listAgentRuns: vi.fn(),
-  getAgentDefinition: vi.fn(),
+vi.mock('../api/automationDefinitionsApi', async importOriginal => ({
+  ...(await importOriginal<typeof import('../api/automationDefinitionsApi')>()),
+  listAutomationDefinitions: vi.fn(),
+  listAutomationRuns: vi.fn(),
+  getAutomationDefinition: vi.fn(),
 }));
 vi.mock('../api/proprApi', () => ({ getInstanceCatalog: vi.fn() }));
 vi.mock('../utils/repoHelpers', () => ({
   fetchEnabledRepos: vi.fn().mockResolvedValue([{ name: 'integry/propr', enabled: true }]),
 }));
 
-const saved: AgentDefinitionRecord = {
+const saved: AutomationDefinitionRecord = {
   id: 'a1', ownerId: '1', name: 'Dependency review', description: null, repositories: ['integry/propr'],
   prompt: 'Review dependencies', attachments: [], agentAlias: 'claude-main', modelName: 'claude-opus-4-5',
   capabilities: ['repository_read'], includePreviousReports: false, previousReportsLimit: 0,
@@ -52,9 +52,9 @@ const renderAt = (url: string) => render(
 
 describe('AgentsPage across the split breakpoint', () => {
   beforeEach(() => {
-    vi.mocked(listAgentDefinitions).mockResolvedValue({ definitions: [saved], total: 1, limit: 200, offset: 0 });
-    vi.mocked(listAgentRuns).mockResolvedValue({ runs: [], total: 0, limit: 1, offset: 0, nextOffset: null });
-    vi.mocked(getAgentDefinition).mockResolvedValue(saved);
+    vi.mocked(listAutomationDefinitions).mockResolvedValue({ definitions: [saved], total: 1, limit: 200, offset: 0 });
+    vi.mocked(listAutomationRuns).mockResolvedValue({ runs: [], total: 0, limit: 1, offset: 0, nextOffset: null });
+    vi.mocked(getAutomationDefinition).mockResolvedValue(saved);
     vi.mocked(getInstanceCatalog).mockResolvedValue({
       agents: [{ alias: 'claude-main', type: 'claude', enabled: true, supportedModels: ['claude-opus-4-5'], defaultModel: 'claude-opus-4-5' }],
       repositories: [],
@@ -102,6 +102,6 @@ describe('AgentsPage across the split breakpoint', () => {
     resize(false);
     expect(screen.getByTestId('agents-detail-page')).toContainElement(screen.getByTestId('agent-editor'));
     expect(screen.getByLabelText('Name')).toHaveValue('Dependency review (weekly)');
-    expect(getAgentDefinition).toHaveBeenCalledTimes(1);
+    expect(getAutomationDefinition).toHaveBeenCalledTimes(1);
   });
 });

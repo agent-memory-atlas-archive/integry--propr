@@ -2,12 +2,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom';
 import AgentsPage from './AgentsPage';
-import { listAgentDefinitions, listAgentRuns, type AgentDefinitionRecord } from '../api/agentDefinitionsApi';
+import { listAutomationDefinitions, listAutomationRuns, type AutomationDefinitionRecord } from '../api/automationDefinitionsApi';
 import { getInstanceCatalog } from '../api/proprApi';
 
-vi.mock('../api/agentDefinitionsApi', () => ({
-  listAgentDefinitions: vi.fn(),
-  listAgentRuns: vi.fn(),
+vi.mock('../api/automationDefinitionsApi', () => ({
+  listAutomationDefinitions: vi.fn(),
+  listAutomationRuns: vi.fn(),
 }));
 
 vi.mock('../api/proprApi', () => ({ getInstanceCatalog: vi.fn() }));
@@ -24,7 +24,7 @@ vi.mock('../components/Agents/AgentEditor', () => ({
   },
 }));
 
-const agent = (id: string, name: string, patch: Partial<AgentDefinitionRecord> = {}): AgentDefinitionRecord => ({
+const agent = (id: string, name: string, patch: Partial<AutomationDefinitionRecord> = {}): AutomationDefinitionRecord => ({
   id, ownerId: '1', name, description: null, repositories: ['integry/propr'], prompt: 'Report', attachments: [],
   agentAlias: 'claude-main', modelName: 'claude-opus-4-5', capabilities: ['repository_read'],
   includePreviousReports: false, previousReportsLimit: 0, scheduleCron: null, scheduleTimezone: 'UTC',
@@ -54,14 +54,14 @@ const setViewport = (wide: boolean) => {
 
 describe('AgentsPage', () => {
   beforeEach(() => {
-    vi.mocked(listAgentDefinitions).mockResolvedValue({
+    vi.mocked(listAutomationDefinitions).mockResolvedValue({
       definitions: [
         agent('a1', 'Dependency review', { scheduleCron: '0 9 * * *', scheduleEnabled: true, nextRunAt: Date.now() + 3 * 3_600_000, autonomyMode: 'preview' }),
         agent('a2', 'Issue triage'),
       ],
       total: 2, limit: 200, offset: 0,
     });
-    vi.mocked(listAgentRuns).mockImplementation(async id => ({
+    vi.mocked(listAutomationRuns).mockImplementation(async id => ({
       runs: id === 'a1' ? [{ id: 'r1', state: 'completed' } as never] : [], total: 0, limit: 1, offset: 0, nextOffset: null,
     }));
     vi.mocked(getInstanceCatalog).mockResolvedValue({
@@ -101,7 +101,7 @@ describe('AgentsPage', () => {
   });
 
   it('names models and agents rather than showing their ids', async () => {
-    vi.mocked(listAgentDefinitions).mockResolvedValue({
+    vi.mocked(listAutomationDefinitions).mockResolvedValue({
       definitions: [
         agent('a1', 'Dependency review'),
         agent('a2', 'Issue triage', { modelName: null }),
@@ -142,7 +142,7 @@ describe('AgentsPage', () => {
 
   it('opens the new-automation editor from the empty state', async () => {
     setViewport(true);
-    vi.mocked(listAgentDefinitions).mockResolvedValue({ definitions: [], total: 0, limit: 200, offset: 0 });
+    vi.mocked(listAutomationDefinitions).mockResolvedValue({ definitions: [], total: 0, limit: 200, offset: 0 });
     renderAt('/automations');
     fireEvent.click(await screen.findByRole('link', { name: 'New automation' }));
     expect(screen.getByTestId('location')).toHaveTextContent('/automations/new');
@@ -152,7 +152,7 @@ describe('AgentsPage', () => {
   it('reads every page so agents past the first page can be found by search', async () => {
     setViewport(true);
     const firstPage = Array.from({ length: 200 }, (_, index) => agent(`p${index}`, `Agent ${index}`));
-    vi.mocked(listAgentDefinitions).mockImplementation(async page => (page?.offset ?? 0) === 0
+    vi.mocked(listAutomationDefinitions).mockImplementation(async page => (page?.offset ?? 0) === 0
       ? { definitions: firstPage, total: 202, limit: 200, offset: 0 }
       // The last row of page one shifted down while paging; it must not appear twice.
       : { definitions: [firstPage[199], agent('late', 'Quarterly audit')], total: 202, limit: 200, offset: 200 });
@@ -163,8 +163,8 @@ describe('AgentsPage', () => {
     fireEvent.change(screen.getByLabelText('Search automations'), { target: { value: 'Quarterly' } });
 
     expect(await screen.findByRole('link', { name: /Quarterly audit/ })).toBeInTheDocument();
-    expect(listAgentDefinitions).toHaveBeenCalledWith({ limit: 200, offset: 0 });
-    expect(listAgentDefinitions).toHaveBeenCalledWith({ limit: 200, offset: 200 });
+    expect(listAutomationDefinitions).toHaveBeenCalledWith({ limit: 200, offset: 0 });
+    expect(listAutomationDefinitions).toHaveBeenCalledWith({ limit: 200, offset: 200 });
     fireEvent.change(screen.getByLabelText('Search automations'), { target: { value: 'Agent 199' } });
     expect(screen.getAllByRole('link', { name: /Agent 199/ })).toHaveLength(1);
   });
@@ -250,7 +250,7 @@ describe('AgentsPage', () => {
   const delayListRead = () => {
     let finish: () => void = () => undefined;
     const gate = new Promise<void>(resolve => { finish = resolve; });
-    vi.mocked(listAgentDefinitions).mockImplementationOnce(async () => {
+    vi.mocked(listAutomationDefinitions).mockImplementationOnce(async () => {
       await gate;
       return { definitions: [agent('a1', 'Dependency review'), agent('a2', 'Issue triage')], total: 2, limit: 200, offset: 0 };
     });
@@ -301,7 +301,7 @@ describe('AgentsPage', () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     vi.setSystemTime(new Date('2026-10-07T08:00:00Z'));
     setViewport(true);
-    vi.mocked(listAgentDefinitions).mockResolvedValue({
+    vi.mocked(listAutomationDefinitions).mockResolvedValue({
       definitions: [agent('a1', 'Dependency review', { scheduleCron: '0 9 * * *', scheduleEnabled: true, nextRunAt: Date.parse('2026-10-07T09:00:00Z') })],
       total: 1, limit: 200, offset: 0,
     });
@@ -316,7 +316,7 @@ describe('AgentsPage', () => {
 
   it('explains what an agent is when there are none', async () => {
     setViewport(true);
-    vi.mocked(listAgentDefinitions).mockResolvedValue({ definitions: [], total: 0, limit: 200, offset: 0 });
+    vi.mocked(listAutomationDefinitions).mockResolvedValue({ definitions: [], total: 0, limit: 200, offset: 0 });
     renderAt('/automations');
     expect(await screen.findByText('No automations yet')).toBeInTheDocument();
     expect(screen.getByText(/runs on demand or on a schedule/)).toBeInTheDocument();
@@ -325,7 +325,7 @@ describe('AgentsPage', () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     setViewport(true);
     const states: Record<string, string> = { a1: 'completed', a2: 'running' };
-    vi.mocked(listAgentRuns).mockImplementation(async id => ({ runs: [{ id: `r-${id}`, state: states[id] } as never], total: 1, limit: 1, offset: 0, nextOffset: null }));
+    vi.mocked(listAutomationRuns).mockImplementation(async id => ({ runs: [{ id: `r-${id}`, state: states[id] } as never], total: 1, limit: 1, offset: 0, nextOffset: null }));
     renderAt('/automations/a1');
 
     const triage = await screen.findByRole('link', { name: /Issue triage/ });
@@ -338,9 +338,9 @@ describe('AgentsPage', () => {
     expect(within(triage).getByText('Completed')).toBeInTheDocument();
 
     // Settled agents are no longer read at the in-progress pace.
-    vi.mocked(listAgentRuns).mockClear();
+    vi.mocked(listAutomationRuns).mockClear();
     await act(async () => { await vi.advanceTimersByTimeAsync(15_000); });
-    expect(listAgentRuns).not.toHaveBeenCalled();
+    expect(listAutomationRuns).not.toHaveBeenCalled();
 
     const review = screen.getByRole('link', { name: /Dependency review/ });
     states.a1 = 'queued';
@@ -349,18 +349,18 @@ describe('AgentsPage', () => {
     states.a1 = 'failed';
     await act(async () => { await vi.advanceTimersByTimeAsync(5_000); });
     expect(within(review).getByText('Failed')).toBeInTheDocument();
-    expect(listAgentRuns).toHaveBeenCalledWith('a1', { limit: 1 });
+    expect(listAutomationRuns).toHaveBeenCalledWith('a1', { limit: 1 });
   });
 
   it('discovers runs started outside the editor for settled, never-run and unread agents', async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     setViewport(true);
-    vi.mocked(listAgentDefinitions).mockResolvedValue({
+    vi.mocked(listAutomationDefinitions).mockResolvedValue({
       definitions: [agent('a1', 'Dependency review'), agent('a2', 'Issue triage'), agent('a3', 'Docs sweep')],
       total: 3, limit: 200, offset: 0,
     });
     const states: Record<string, string | null> = { a1: 'completed', a2: null };
-    vi.mocked(listAgentRuns).mockImplementation(async id => {
+    vi.mocked(listAutomationRuns).mockImplementation(async id => {
       if (id === 'a3' && !states.a3) throw new Error('Network down');
       return { runs: states[id] ? [{ id: `r-${id}`, state: states[id] } as never] : [], total: 1, limit: 1, offset: 0, nextOffset: null };
     });
@@ -370,7 +370,7 @@ describe('AgentsPage', () => {
     const triage = screen.getByRole('link', { name: /Issue triage/ });
     const docs = screen.getByRole('link', { name: /Docs sweep/ });
     expect(await within(review).findByText('Completed')).toBeInTheDocument();
-    await waitFor(() => expect(listAgentRuns).toHaveBeenCalledWith('a3', { limit: 1 }));
+    await waitFor(() => expect(listAutomationRuns).toHaveBeenCalledWith('a3', { limit: 1 }));
     expect(within(triage).getByText('Never run')).toBeInTheDocument();
     expect(within(docs).getByText('Never run')).toBeInTheDocument();
 
@@ -385,19 +385,19 @@ describe('AgentsPage', () => {
   it('does not let a discovery read sent before a run started overwrite that run', async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     setViewport(true);
-    vi.mocked(listAgentRuns).mockResolvedValue({ runs: [{ id: 'old', state: 'completed' } as never], total: 1, limit: 1, offset: 0, nextOffset: null });
+    vi.mocked(listAutomationRuns).mockResolvedValue({ runs: [{ id: 'old', state: 'completed' } as never], total: 1, limit: 1, offset: 0, nextOffset: null });
     renderAt('/automations/a1');
     const review = await screen.findByRole('link', { name: /Dependency review/ });
     expect(await within(review).findByText('Completed')).toBeInTheDocument();
 
     let finishRead: () => void = () => undefined;
-    vi.mocked(listAgentRuns).mockClear();
-    vi.mocked(listAgentRuns).mockImplementation(async id => {
+    vi.mocked(listAutomationRuns).mockClear();
+    vi.mocked(listAutomationRuns).mockImplementation(async id => {
       if (id === 'a1') await new Promise<void>(resolve => { finishRead = resolve; });
       return { runs: [{ id: 'old', state: 'completed' } as never], total: 1, limit: 1, offset: 0, nextOffset: null };
     });
     await act(async () => { await vi.advanceTimersByTimeAsync(30_000); });
-    expect(listAgentRuns).toHaveBeenCalledWith('a1', { limit: 1 });
+    expect(listAutomationRuns).toHaveBeenCalledWith('a1', { limit: 1 });
     act(() => editorCallbacks.get('a1')!.onRunStarted!({ id: 'new', definitionId: 'a1', state: 'queued' } as never));
     await act(async () => { finishRead(); });
     expect(within(review).getByText('Queued')).toBeInTheDocument();
@@ -407,13 +407,13 @@ describe('AgentsPage', () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     setViewport(true);
     let finishRead: () => void = () => undefined;
-    vi.mocked(listAgentRuns).mockImplementation(async id => {
+    vi.mocked(listAutomationRuns).mockImplementation(async id => {
       if (id === 'a1') await new Promise<void>(resolve => { finishRead = resolve; });
       return { runs: id === 'a1' ? [{ id: 'old', state: 'completed' } as never] : [], total: 1, limit: 1, offset: 0, nextOffset: null };
     });
     renderAt('/automations/a1');
     const review = await screen.findByRole('link', { name: /Dependency review/ });
-    await waitFor(() => expect(listAgentRuns).toHaveBeenCalledWith('a1', { limit: 1 }));
+    await waitFor(() => expect(listAutomationRuns).toHaveBeenCalledWith('a1', { limit: 1 }));
 
     act(() => editorCallbacks.get('a1')!.onRunStarted!({ id: 'new', definitionId: 'a1', state: 'queued' } as never));
     await act(async () => { finishRead(); });
@@ -423,14 +423,14 @@ describe('AgentsPage', () => {
   it('stops refreshing run states when the page unmounts', async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     setViewport(true);
-    vi.mocked(listAgentRuns).mockResolvedValue({ runs: [{ id: 'r', state: 'running' } as never], total: 1, limit: 1, offset: 0, nextOffset: null });
+    vi.mocked(listAutomationRuns).mockResolvedValue({ runs: [{ id: 'r', state: 'running' } as never], total: 1, limit: 1, offset: 0, nextOffset: null });
     const { unmount } = renderAt('/automations');
     const triage = await screen.findByRole('link', { name: /Issue triage/ });
     await within(triage).findByText('Running');
 
     unmount();
-    vi.mocked(listAgentRuns).mockClear();
+    vi.mocked(listAutomationRuns).mockClear();
     await act(async () => { await vi.advanceTimersByTimeAsync(20_000); });
-    expect(listAgentRuns).not.toHaveBeenCalled();
+    expect(listAutomationRuns).not.toHaveBeenCalled();
   });
 });

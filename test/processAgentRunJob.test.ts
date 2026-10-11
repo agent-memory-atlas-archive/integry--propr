@@ -4,7 +4,7 @@ import path from 'node:path';
 import { after, describe, mock, test } from 'node:test';
 import fs from 'fs-extra';
 import type { Job } from 'bullmq';
-import type { AgentRunState } from '@propr/shared';
+import type { AutomationRunState } from '@propr/shared';
 import type { AgentRunJobData, AgentTaskOptions, StoredAgentDefinition, StoredAgentRun } from '@propr/core';
 import { UsageLimitError } from '../packages/core/src/claude/claudeHelpers.ts';
 
@@ -71,7 +71,7 @@ const job = { id: 'agent-run-run-1-report', data: { runId: 'run-1', definitionId
 interface Harness {
   deps: Partial<AgentRunProcessorDeps>;
   run: () => StoredAgentRun;
-  transitions: Array<{ from: readonly AgentRunState[]; to: AgentRunState; patch: Record<string, unknown> }>;
+  transitions: Array<{ from: readonly AutomationRunState[]; to: AutomationRunState; patch: Record<string, unknown> }>;
   stateCalls: Array<[string, ...unknown[]]>;
   taskState: () => string | null;
   executeTask: ReturnType<typeof mock.fn>;
@@ -109,7 +109,7 @@ function harness(options: {
     return null;
   };
 
-  const transitionRun = (async (_id: string, from: readonly AgentRunState[], to: AgentRunState, patch: Record<string, unknown> = {}) => {
+  const transitionRun = (async (_id: string, from: readonly AutomationRunState[], to: AutomationRunState, patch: Record<string, unknown> = {}) => {
     transitions.push({ from, to, patch });
     if (!from.includes(current.state)) return null;
     current = { ...current, ...patch, state: to } as StoredAgentRun;

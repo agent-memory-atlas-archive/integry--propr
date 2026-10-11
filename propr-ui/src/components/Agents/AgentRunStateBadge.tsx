@@ -1,9 +1,9 @@
 import React from 'react';
-import type { AgentRunState } from '@propr/shared';
+import type { AutomationRunState } from '@propr/shared';
 import { RUN_STATE_BADGE_CLASSES, RUN_STATE_LABELS } from './agentPresentation';
 
 interface AgentRunStateBadgeProps {
-  state: AgentRunState;
+  state: AutomationRunState;
   /**
    * Calls a run awaiting approval "Needs review", so preview-mode work stands
    * out in the Agents list; the run views keep the state's own name.
