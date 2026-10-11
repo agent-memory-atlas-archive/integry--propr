@@ -26,6 +26,8 @@ Higher concurrency is not always better. Watch queue depth, model rate limits, r
 
 The separate `indexing-worker` service processes repository indexing jobs independently of implementation work.
 
+Hosted physical agent executions also share an instance-wide Redis admission boundary across workers, API and indexing. See [Physical agent-run admission](./agent-run-admission.md) for entitlement configuration, supported topology, the #2989 dependency and exact Fleet acceptance steps. Queue concurrency and physical execution capacity are separate limits.
+
 ## Model-Specific Processing
 
 Jobs carry model and agent metadata. Workers use that metadata to:

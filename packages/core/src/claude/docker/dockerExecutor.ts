@@ -1,3 +1,4 @@
+import { prepareAdmittedAgent, type AdmittedAgent } from '../../agents/agentRunAdmission.js';
 import { captureWorkflowMarkers, withWorkflowExecutionDeadline } from '../../workflow/workflowExecution.js';
 import { spawn, SpawnOptions, ChildProcess } from 'child_process';
 import { StringDecoder } from 'node:string_decoder';
@@ -241,11 +242,30 @@ export function executeDockerCommand(command: string, args: string[], options: D
     });
 }
 
-function startDockerCommand(
+async function startDockerCommand(
     command: string,
     args: string[],
     options: DockerCommandOptions,
     { ownershipContext, executionSignal }: { ownershipContext: ReturnType<typeof getExecutionOwnershipContext>; executionSignal: AbortSignal | undefined },
+): Promise<ExecutionResult> {
+    const executionArgs = resolveExecutionArgs(command, withWorkflowExecutionDeadline(command, args, options.timeout ?? 300000), options.taskId, ownershipContext?.attemptGeneration);
+    const admission = command === 'docker' && args[0] === 'run' && !options.costCapExempt
+        ? await prepareAdmittedAgent(executionArgs, { signal: executionSignal, taskId: options.taskId, extraEnvVars: options.extraEnvVars, cwd: options.cwd && fs.existsSync(options.cwd) ? options.cwd : undefined })
+        : null;
+    try {
+        admission?.signal.throwIfAborted();
+        return await runDockerCommand(command, args, options, { ownershipContext, executionSignal: admission?.signal ?? executionSignal }, admission);
+    } finally {
+        await admission?.finish();
+    }
+}
+
+function runDockerCommand(
+    command: string,
+    args: string[],
+    options: DockerCommandOptions,
+    { ownershipContext, executionSignal }: { ownershipContext: ReturnType<typeof getExecutionOwnershipContext>; executionSignal: AbortSignal | undefined },
+    admission: AdmittedAgent | null,
 ): Promise<ExecutionResult> {
     return new Promise((resolve, reject) => {
         const { timeout = 300000, cwd, onSessionId, onContainerId, worktreePath, stdinData, extraEnvVars, taskId, streamToRedis, streamStderrToRedis, streamExtraOutput, stripAnsi, preserveOutputOnTimeout = false, model, costCapExempt } = options;
@@ -264,7 +284,7 @@ function startDockerCommand(
         }
         const costExecution = costCap.execution;
         let child: ReturnType<typeof spawnCommandProcess>;
-        try { child = spawnCommandProcess(executablePath, executionArgs, { cwd, stdinData, extraEnvVars }); } catch (error) {
+        try { child = spawnCommandProcess(executablePath, admission?.args ?? executionArgs, { cwd, stdinData, extraEnvVars }); } catch (error) {
             // A container that never started must not stay registered with the guard.
             void costExecution?.finish().catch(() => null);
             throw error;
@@ -278,6 +298,7 @@ function startDockerCommand(
         const stdoutDecoder = new StringDecoder('utf8');
         const stderrDecoder = new StringDecoder('utf8');
         const state = createDockerExecutionState();
+        if (admission) state.containerId.value = admission.id;
         let ownershipFailure: unknown;
         let hasOwnershipFailure = false;
         let processError: Error | undefined;
@@ -386,7 +407,12 @@ function startDockerCommand(
         const recordWatchdogActivity = (): void => watchdog.recordActivity();
 
         const liveOutput = startLiveOutputStreaming({ taskId, streamToRedis, streamStderrToRedis, streamExtraOutput, stripAnsi, onOverflow: warnFromLiveOutput, onActivity: recordWatchdogActivity, onTranscriptRecord: watchdog.observeLine }, readStdout, () => stderrTail.value);
-        if (command === 'docker' && args[0] === 'run' && worktreePath) {
+        if (admission) {
+            // Admission already owns the immutable ID. A volume-based lookup
+            // could pick a sibling execution sharing the same worktree.
+            state.containerIdDetected = true;
+            if (onContainerId) invokeExecutionCallback(() => onContainerId(admission.id, namedContainer ?? admission.id));
+        } else if (command === 'docker' && args[0] === 'run' && worktreePath) {
             containerDetectionTimer = detectContainerId(
                 worktreePath,
                 state,
