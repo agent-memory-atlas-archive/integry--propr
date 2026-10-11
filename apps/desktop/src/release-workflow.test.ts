@@ -481,7 +481,8 @@ describe('desktop trusted release workflow', () => {
     assert.equal(workflow.match(/\*Machine-Setup\.msi/g)?.length, 1);
     assert.equal(workflow.match(/run-installed-windows-app-harness\.ps1/g)?.length, 1);
     assert.equal(workflow.match(/PROPR_DESKTOP_WINDOWS_INSTALLED_APP=1/g)?.length, 1);
-    assert.match(forgeConfig, /const linuxSetupResources = process\.platform === 'linux'[\s\S]*extraResource:/);
+    assert.match(forgeConfig, /const setupResources = \['linux', 'darwin'\]\.includes\(process\.platform\)/);
+    assert.match(forgeConfig, /extraResource: \[[\s\S]*?\.\.\.\(\(process\.platform === 'linux' \|\| process\.platform === 'darwin'\) \? \[\s*resolve\(connectOrchestrator, 'orchestrator\.mjs'\),\s*desktopRuntimeManifest,\s*setupAssets,\s*\] : \[\]\),\s*\],\s*\.\.\.setupResources,/);
     assert.doesNotMatch(forgeConfig, /windows-authority/);
     assert.match(forgeConfig, /buildWindowsMachineInstaller/);
     assert.match(forgeConfig, /wixDirectory: process\.env\.PROPR_DESKTOP_WIX_DIRECTORY/);
