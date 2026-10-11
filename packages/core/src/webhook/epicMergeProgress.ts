@@ -1,7 +1,8 @@
-import { getAuthenticatedOctokit } from '../auth/githubAuth.js';
 import { getBotUsername } from '../daemon/configLoader.js';
+import { getAuthenticatedOctokit } from '../auth/githubAuth.js';
 import { PlanIssueStatus, type PlanIssue } from '../config/planIssueManager.js';
 import logger from '../utils/logger.js';
+import { isMergeContained, isRecord, type EpicProgressOctokit } from './epicMergeEvidence.js';
 
 export const EPIC_PROGRESS_MARKER = '<!-- propr:epic-merge-progress -->';
 export const EPIC_FINAL_MERGE_MARKER = '<!-- propr:epic-final-merge -->';
@@ -11,6 +12,8 @@ export interface EpicChildPullRequest {
     number: number;
     merged: boolean;
     mergedAt?: string;
+    /** Resolves a merge that shares its second with an epic boundary. */
+    mergeCommitSha?: string | null;
     /** Closed without being merged; such PRs are not counted towards the epic. */
     abandoned: boolean;
 }
@@ -33,11 +36,6 @@ export interface EpicMergeProgressRequest {
     planName?: string;
     /** Plan issues of the epic; planned work without a child PR yet counts as unmerged. */
     planIssues?: PlanIssue[];
-}
-
-interface EpicProgressOctokit {
-    request: (route: string, parameters: Record<string, unknown>) => Promise<{ data: unknown }>;
-    paginate?: (route: string, parameters: Record<string, unknown>) => Promise<unknown[]>;
 }
 
 export interface EpicMergeProgressDependencies {
@@ -146,7 +144,9 @@ export function buildEpicFinalMergeComment(
         '',
         `Epic PR #${epicPrNumber} has been merged into ${baseBranch}.`,
         '',
-        `**${progress.merged} out of ${progress.total} PRs merged** into ${baseBranch} through this epic PR.`,
+        progress.total === 0
+            ? 'No child PRs or planned issues were tracked for this epic.'
+            : `**${progress.merged} out of ${progress.total} PRs merged** into ${baseBranch} through this epic PR.`,
         ...(isEpicMergeComplete(progress) ? ['', 'All planned epic work is now merged.'] : []),
         '', '*Posted automatically by ProPR*', EPIC_FINAL_MERGE_MARKER,
     ].join('\n');
@@ -155,10 +155,6 @@ export function buildEpicFinalMergeComment(
 interface IssueComment {
     id: number;
     body: string;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-    return typeof value === 'object' && value !== null;
 }
 
 async function listBotComments(octokit: EpicProgressOctokit, owner: string, repo: string, issueNumber: number): Promise<IssueComment[]> {
@@ -182,8 +178,36 @@ async function listChildPullRequests(octokit: EpicProgressOctokit, owner: string
     return (Array.isArray(data) ? data : []).flatMap(pr => {
         if (!isRecord(pr) || typeof pr.number !== 'number') return [];
         const merged = typeof pr.merged_at === 'string' && pr.merged_at.length > 0;
-        return [{ number: pr.number, merged, mergedAt: merged ? pr.merged_at as string : undefined, abandoned: pr.state === 'closed' && !merged }];
+        return [{
+            number: pr.number, merged, mergedAt: merged ? pr.merged_at as string : undefined,
+            mergeCommitSha: typeof pr.merge_commit_sha === 'string' ? pr.merge_commit_sha : null,
+            abandoned: pr.state === 'closed' && !merged,
+        }];
     });
+}
+
+interface MergeBoundary {
+    mergedAt: number;
+    mergeCommitSha: string | null;
+}
+
+/** Children merged before the boundary, or in its second and provably contained in it. */
+async function childrenWithin(
+    octokit: EpicProgressOctokit,
+    request: EpicMergeProgressRequest,
+    children: EpicChildPullRequest[],
+    boundary: MergeBoundary,
+): Promise<Set<number>> {
+    const within = new Set<number>();
+    for (const pr of children) {
+        if (!pr.mergedAt) continue;
+        const time = Date.parse(pr.mergedAt);
+        if (time < boundary.mergedAt
+            || (time === boundary.mergedAt && await isMergeContained(octokit, request, pr.mergeCommitSha, boundary.mergeCommitSha))) {
+            within.add(pr.number);
+        }
+    }
+    return within;
 }
 
 /** Only confirmed earlier merges establish work shipped by a predecessor. */
@@ -199,12 +223,15 @@ async function listShippedChildren(
     const data = octokit.paginate
         ? await octokit.paginate('GET /repos/{owner}/{repo}/pulls', parameters)
         : (await octokit.request('GET /repos/{owner}/{repo}/pulls', parameters)).data;
-    const predecessorTimes = (Array.isArray(data) ? data : []).flatMap(pr =>
-        isRecord(pr) && typeof pr.number === 'number' && pr.number < epicPrNumber && typeof pr.merged_at === 'string'
-            ? [Date.parse(pr.merged_at)] : []);
-    const cutoff = Math.max(...predecessorTimes.filter(time => Number.isFinite(time) && time < (epicMerged ? mergedAt : Infinity)));
-    // Equal timestamps cannot prove inclusion (the same rule as canCarryChild).
-    return new Set(children.filter(pr => pr.mergedAt && Date.parse(pr.mergedAt) < cutoff).map(pr => pr.number));
+    // The latest predecessor merge is the cutoff; everything it carried has shipped.
+    let cutoff: MergeBoundary = { mergedAt: -Infinity, mergeCommitSha: null };
+    for (const pr of Array.isArray(data) ? data : []) {
+        if (!isRecord(pr) || typeof pr.number !== 'number' || pr.number >= epicPrNumber || typeof pr.merged_at !== 'string') continue;
+        const time = Date.parse(pr.merged_at);
+        if (!Number.isFinite(time) || time >= (epicMerged ? mergedAt : Infinity) || time <= cutoff.mergedAt) continue;
+        cutoff = { mergedAt: time, mergeCommitSha: typeof pr.merge_commit_sha === 'string' ? pr.merge_commit_sha : null };
+    }
+    return await childrenWithin(octokit, request, children, cutoff);
 }
 
 async function readEpicMergeState(octokit: EpicProgressOctokit, request: EpicMergeProgressRequest) {
@@ -220,6 +247,7 @@ async function readEpicMergeState(octokit: EpicProgressOctokit, request: EpicMer
     const baseBranch = isRecord(epic) && isRecord(epic.base) && typeof epic.base.ref === 'string'
         ? epic.base.ref : undefined;
     const mergedAt = isRecord(epic) && typeof epic.merged_at === 'string' ? Date.parse(epic.merged_at) : NaN;
+    const mergeCommitSha = isRecord(epic) && typeof epic.merge_commit_sha === 'string' ? epic.merge_commit_sha : null;
     if (epicMerged && !Number.isFinite(mergedAt)) throw new Error('Epic merge boundary unavailable');
     if (epicMerged && request.mergedChildPrNumber !== null) {
         const repository = (await octokit.request('GET /repos/{owner}/{repo}', { owner, repo })).data;
@@ -227,27 +255,81 @@ async function readEpicMergeState(octokit: EpicProgressOctokit, request: EpicMer
             throw new Error('Merged epic does not target the default branch');
         }
     }
-    return { comments, epicMerged, baseBranch, mergedAt };
+    return { comments, epicMerged, baseBranch, mergedAt, mergeCommitSha };
 }
 
-/** Recover merge-time evidence when GitHub's child list lags the webhook. */
-async function includeTriggeringChild(
+/** PRs whose merge the list has not confirmed but that must be merged for a correct report. */
+function listUnconfirmedChildren(request: EpicMergeProgressRequest, children: EpicChildPullRequest[], epicMerged: boolean): Set<number> {
+    const listedMerged = (number: number) => children.some(pr => pr.number === number && pr.merged);
+    const unconfirmed = new Set<number>();
+    if (request.mergedChildPrNumber !== null && !listedMerged(request.mergedChildPrNumber)) unconfirmed.add(request.mergedChildPrNumber);
+    if (!epicMerged) return unconfirmed;
+    for (const issue of request.planIssues ?? []) {
+        if (issue.status === PlanIssueStatus.MERGED && issue.pr_number != null && !listedMerged(issue.pr_number)) unconfirmed.add(issue.pr_number);
+    }
+    return unconfirmed;
+}
+
+/** Reads one PR; returns its merge evidence only if it merged into the epic branch. */
+async function readMergedChild(
+    octokit: EpicProgressOctokit, request: EpicMergeProgressRequest, number: number,
+): Promise<EpicChildPullRequest | null> {
+    const { owner, repo, epicBranch } = request;
+    const pr = (await octokit.request('GET /repos/{owner}/{repo}/pulls/{pull_number}', { owner, repo, pull_number: number })).data;
+    if (!isRecord(pr)) return null;
+    const mergedAt = typeof pr.merged_at === 'string' && Number.isFinite(Date.parse(pr.merged_at)) ? pr.merged_at : undefined;
+    const base = isRecord(pr.base) && typeof pr.base.ref === 'string' ? pr.base.ref : epicBranch;
+    if (!mergedAt || base !== epicBranch) return null;
+    return { number, merged: true, mergedAt, abandoned: false, mergeCommitSha: typeof pr.merge_commit_sha === 'string' ? pr.merge_commit_sha : null };
+}
+
+/**
+ * Recover merge-time evidence when GitHub's child list lags a merge. The
+ * triggering child is merged by contract, and a final report must not demote
+ * plan issues recorded as merged because their list row is missing or still
+ * shows the pre-merge state. Each such PR is read individually; a read that
+ * fails propagates, and a triggering child whose merge cannot be confirmed
+ * throws, so the obligation is retried rather than reported from stale rows.
+ * Returns the plan PRs that remained unconfirmed (not merged, or merged
+ * into a different base) for the caller to report.
+ */
+async function reconcileChildEvidence(
     octokit: EpicProgressOctokit,
     request: EpicMergeProgressRequest,
     children: EpicChildPullRequest[],
     epicMerged: boolean,
-): Promise<void> {
-    const { owner, repo } = request;
-    if (epicMerged && request.mergedChildPrNumber !== null
-        && !children.some(pr => pr.number === request.mergedChildPrNumber)) {
-        // The child list can lag a delivered merge. Read its timestamp rather
-        // than allowing the event alone to bypass the aggregate boundary.
-        const child = (await octokit.request('GET /repos/{owner}/{repo}/pulls/{pull_number}', {
-            owner, repo, pull_number: request.mergedChildPrNumber,
-        })).data;
-        const childMergedAt = isRecord(child) && typeof child.merged_at === 'string' ? child.merged_at : undefined;
-        children.push({ number: request.mergedChildPrNumber, merged: !!childMergedAt, mergedAt: childMergedAt, abandoned: false });
+): Promise<number[]> {
+    const unresolved: number[] = [];
+    for (const number of listUnconfirmedChildren(request, children, epicMerged)) {
+        const evidence = await readMergedChild(octokit, request, number);
+        if (!evidence) {
+            if (number === request.mergedChildPrNumber) throw new Error(`Merge of triggering child PR #${number} could not be confirmed`);
+            unresolved.push(number);
+            continue;
+        }
+        const row = children.find(pr => pr.number === number);
+        if (row) Object.assign(row, evidence); else children.push(evidence);
     }
+    return unresolved;
+}
+
+/**
+ * Plan issues as this report may count them: work shipped by a predecessor
+ * is dropped, and once the epic has merged a recorded merge only counts if
+ * the PR is proven inside this epic's merge. Issues a final report keeps
+ * outstanding are collected into `demoted`.
+ */
+function reportablePlanIssues(
+    request: EpicMergeProgressRequest,
+    { epicMerged, shipped, included }: { epicMerged: boolean; shipped: Set<number>; included: Set<number> },
+    demoted: number[],
+): PlanIssue[] | undefined {
+    return request.planIssues?.filter(issue => issue.pr_number == null || !shipped.has(issue.pr_number))
+        .map(issue => {
+            if (!epicMerged || issue.status !== PlanIssueStatus.MERGED) return issue;
+            if (issue.pr_number == null || !included.has(issue.pr_number)) demoted.push(issue.issue_number);
+            return { ...issue, status: PlanIssueStatus.UNDER_REVIEW };
+        });
 }
 
 /**
@@ -271,20 +353,24 @@ export async function updateEpicMergeProgress(
     const { owner, repo, epicPrNumber } = request;
 
     const children = await listChildPullRequests(octokit, owner, repo, request.epicBranch);
-    const { comments, epicMerged, baseBranch, mergedAt } = await readEpicMergeState(octokit, request);
-    await includeTriggeringChild(octokit, request, children, epicMerged);
+    const { comments, epicMerged, baseBranch, mergedAt, mergeCommitSha } = await readEpicMergeState(octokit, request);
+    const unresolved = await reconcileChildEvidence(octokit, request, children, epicMerged);
     const shipped = await listShippedChildren(octokit, request, children, { baseBranch, mergedAt, epicMerged });
     // For a final report, neither current plan status nor the triggering event
     // proves inclusion. Keep later/unknown children outstanding for this PR.
-    const included = new Set(children.filter(pr => pr.mergedAt && Date.parse(pr.mergedAt) < mergedAt).map(pr => pr.number));
+    const included = epicMerged ? await childrenWithin(octokit, request, children, { mergedAt, mergeCommitSha }) : new Set<number>();
     const displayBase = baseBranch ?? 'the target branch';
+    const demoted: number[] = [];
     const progress = computeEpicMergeProgress(
         children.filter(pr => !shipped.has(pr.number)).map(pr => epicMerged ? { ...pr, merged: included.has(pr.number) } : pr),
         epicMerged || (request.mergedChildPrNumber !== null && shipped.has(request.mergedChildPrNumber)) ? null : request.mergedChildPrNumber,
-        request.planIssues?.filter(issue => issue.pr_number == null || !shipped.has(issue.pr_number))
-            .map(issue => epicMerged && issue.status === PlanIssueStatus.MERGED
-                ? { ...issue, status: PlanIssueStatus.UNDER_REVIEW } : issue),
+        reportablePlanIssues(request, { epicMerged, shipped, included }, demoted),
     );
+    if (demoted.length > 0) {
+        // No later event revises a final report; name the issues it keeps outstanding.
+        log.debug({ owner, repo, epicPrNumber, issues: demoted, unresolvedPullRequests: unresolved },
+            'Merged plan issues not carried by this epic PR remain outstanding in its final report');
+    }
 
     const body = buildEpicProgressComment(progress, request.planName)
         + (epicMerged ? '\n\n✅ This epic PR has been merged into ' + displayBase + '.' : '');
@@ -333,51 +419,4 @@ export async function updateEpicMergeProgress(
         trackingComment, completionPosted,
     }, 'Updated epic merge progress');
     return { progress, trackingComment, completionPosted };
-}
-
-type Octokit = Awaited<ReturnType<typeof getAuthenticatedOctokit>>;
-
-/** A merged epic can only carry a child that merged before it. */
-export async function canCarryChild(
-    octokit: Octokit,
-    { owner, repo, mergedChildPrNumber }: Pick<EpicMergeProgressRequest, 'owner' | 'repo' | 'mergedChildPrNumber'>,
-    pr: { state: string; merged_at: string | null; base?: { ref: string } },
-    evidence?: { defaultBranch: string; childMergedAt: string | null },
-): Promise<boolean> {
-    if (pr.state === 'open') return true;
-    if (!pr.merged_at || mergedChildPrNumber === null) return false;
-    const defaultBranch = evidence?.defaultBranch ?? (await octokit.request('GET /repos/{owner}/{repo}', { owner, repo })).data.default_branch;
-    if (pr.base?.ref !== defaultBranch) return false;
-    const childMergedAt = evidence ? evidence.childMergedAt : (await octokit.request('GET /repos/{owner}/{repo}/pulls/{pull_number}', {
-        owner, repo, pull_number: mergedChildPrNumber,
-    })).data.merged_at;
-    // Missing, invalid, or equal timestamps do not establish that the child
-    // was included. Fall back to creating a PR for the remaining commits.
-    return !!childMergedAt && Date.parse(childMergedAt) < Date.parse(pr.merged_at);
-}
-
-/** Prefer an open Epic PR; reuse a merged one only for an included child. */
-export async function findEpicPRNumber(
-    octokit: Octokit, context: Pick<EpicMergeProgressRequest, 'owner' | 'repo' | 'epicBranch' | 'mergedChildPrNumber'>,
-): Promise<number | null> {
-    const { owner, repo, epicBranch } = context;
-    const pulls = await octokit.paginate('GET /repos/{owner}/{repo}/pulls', {
-        owner, repo,
-        head: `${owner}:${epicBranch}`,
-        state: 'all',
-        per_page: 100,
-    });
-    const open = pulls.find(pr => pr.state === 'open');
-    if (open) return open.number;
-    const candidates = pulls.filter(pr => pr.merged_at && Number.isFinite(Date.parse(pr.merged_at)))
-        .sort((a, b) => Date.parse(a.merged_at!) - Date.parse(b.merged_at!));
-    if (candidates.length === 0 || context.mergedChildPrNumber === null) return null;
-    const defaultBranch = (await octokit.request('GET /repos/{owner}/{repo}', { owner, repo })).data.default_branch;
-    const childMergedAt = (await octokit.request('GET /repos/{owner}/{repo}/pulls/{pull_number}', {
-        owner, repo, pull_number: context.mergedChildPrNumber,
-    })).data.merged_at;
-    for (const pr of candidates) {
-        if (await canCarryChild(octokit, context, pr, { defaultBranch, childMergedAt })) return pr.number;
-    }
-    return null;
 }

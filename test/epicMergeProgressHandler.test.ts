@@ -7,7 +7,7 @@ const actualConnection = await import('../packages/core/src/db/connection.js');
 const actualGithubAuth = await import('../packages/core/src/auth/githubAuth.js');
 const actualCheckRunHelpers = await import('../packages/core/src/webhook/checkRunHelpers.js');
 const actualEpicPRService = await import('../packages/core/src/services/epicPRService.js');
-const { EPIC_PROGRESS_RETRY_KEY } = await import('../packages/core/src/webhook/epicMergeProgressRetry.js');
+const { EPIC_PROGRESS_RETRY_KEY, EPIC_PROGRESS_SCRIPTS, epicProgressRetryField } = await import('../packages/core/src/webhook/epicMergeProgressRetry.js');
 after(actualConnection.closeConnection);
 
 const EPIC_BRANCH = '100-epic-big-plan-abc';
@@ -28,7 +28,13 @@ let closedHistoryCount = 0;
 let epicPrMerged = false;
 let epicBase = 'main';
 let childMergedAt: string | null = '2026-10-10T19:00:00Z';
+let childMergeCommitSha: string | null = null;
+let epicMergeCommitSha: string | null = null;
+// `ahead_by` reported for any merge-commit comparison.
+let compareAheadBy = 1;
 let failingChildReads = 0;
+// Every GitHub request route the handler issued.
+const githubRequests: string[] = [];
 const bodyUpdates: number[] = [];
 // Number of epic PR creations that fail before GitHub recovers.
 let failingEpicCreations = 0;
@@ -36,7 +42,7 @@ let createdEpicPRs = 0;
 // Parameters of every epic PR creation request.
 const epicPRCreations: Array<Record<string, unknown>> = [];
 // Runs while the handler fetches issue details for the epic PR body.
-let onIssueFetch: () => void = () => {};
+let onIssueFetch: () => void | Promise<void> = () => {};
 
 function fakeQuery(table: string) {
     let filter: Record<string, unknown> = {};
@@ -58,6 +64,14 @@ function fakeQuery(table: string) {
     return query;
 }
 
+/** Epic PR #500 as GitHub reports it: a merge boundary exists only once it has merged. */
+function epicPullRequest() {
+    return {
+        number: 500, base: { ref: epicBase }, state: epicPrMerged ? 'closed' : 'open',
+        merged_at: epicPrMerged ? '2026-10-10T20:00:00Z' : null, merge_commit_sha: epicPrMerged ? epicMergeCommitSha : null,
+    };
+}
+
 await mock.module('../packages/core/src/db/connection.js', {
     namedExports: { ...actualConnection, db: (table: string) => fakeQuery(table) },
 });
@@ -65,6 +79,7 @@ await mock.module('../packages/core/src/auth/githubAuth.js', { namedExports: {
     ...actualGithubAuth,
     getAuthenticatedOctokit: async () => ({
         paginate: async (route: string, parameters: Record<string, unknown>) => {
+            githubRequests.push(route);
             assert.equal(route, 'GET /repos/{owner}/{repo}/pulls');
             assert.equal(parameters.per_page, 100);
             if (failingEpicLookups > 0) {
@@ -73,25 +88,28 @@ await mock.module('../packages/core/src/auth/githubAuth.js', { namedExports: {
             }
             return [
                 ...Array.from({ length: closedHistoryCount }, (_, i) => ({ number: 600 + i, state: 'closed', merged_at: null })),
-                ...(epicPrExists ? [{ number: 500, base: { ref: epicBase }, state: epicPrMerged ? 'closed' : 'open', merged_at: epicPrMerged ? '2026-10-10T20:00:00Z' : null }] : []),
+                ...(epicPrExists ? [epicPullRequest()] : []),
                 ...(createdEpicPRs ? [{ number: 501, state: 'open', merged_at: null }] : []),
             ];
         },
         request: async (route: string, parameters: { pull_number?: number }) => {
+        githubRequests.push(parameters.pull_number ? `${route}:${parameters.pull_number}` : route);
         if (route === 'GET /repos/{owner}/{repo}/pulls/{pull_number}') {
-            if (parameters.pull_number === 500) return { data: {
-                base: { ref: epicBase }, state: epicPrMerged ? 'closed' : 'open', merged_at: epicPrMerged ? '2026-10-10T20:00:00Z' : null,
-            } };
+            if (parameters.pull_number === 500) return { data: epicPullRequest() };
             if (parameters.pull_number === 501) return { data: { state: 'open', merged_at: null } };
             if (failingChildReads > 0) {
                 failingChildReads--;
                 throw new Error('Child merge time unavailable');
             }
-            return { data: { merged_at: additionalChildren.find(pr => pr.number === parameters.pull_number)?.merged_at ?? childMergedAt } };
+            return { data: {
+                merged_at: additionalChildren.find(pr => pr.number === parameters.pull_number)?.merged_at ?? childMergedAt,
+                merge_commit_sha: childMergeCommitSha,
+            } };
         }
         if (route === 'GET /repos/{owner}/{repo}') return { data: { default_branch: 'main' } };
+        if (route === 'GET /repos/{owner}/{repo}/compare/{basehead}') return { data: { ahead_by: compareAheadBy } };
         if (route === 'GET /repos/{owner}/{repo}/issues/{issue_number}') {
-            onIssueFetch();
+            await onIssueFetch();
             return { data: { title: 'Issue' } };
         }
         if (route === 'PATCH /repos/{owner}/{repo}/pulls/{pull_number}') {
@@ -131,14 +149,19 @@ function fakeRedis() {
             return 'OK';
         },
         async eval(script: string, _numberOfKeys: number, key: string, ...args: string[]) {
-            if (script.includes('HGET')) {
-                if (hash.get(args[0]) !== args[1]) return 0;
-                if (script.includes('HSETNX') && !hash.has(args[2])) hash.set(args[2], args[1]);
-                return Number(hash.delete(args[0]));
+            switch (script) {
+                case EPIC_PROGRESS_SCRIPTS.compareAndDeleteField:
+                case EPIC_PROGRESS_SCRIPTS.migrateLegacyField:
+                    if (hash.get(args[0]) !== args[1]) return 0;
+                    if (script === EPIC_PROGRESS_SCRIPTS.migrateLegacyField && !hash.has(args[2])) hash.set(args[2], args[1]);
+                    return Number(hash.delete(args[0]));
+                case EPIC_PROGRESS_SCRIPTS.compareAndExtendKey:
+                    return keys.get(key) === args[0] ? 1 : 0;
+                case EPIC_PROGRESS_SCRIPTS.compareAndDeleteKey:
+                    return keys.get(key) === args[0] ? Number(keys.delete(key)) : 0;
+                default:
+                    throw new Error(`Unknown script: ${script}`);
             }
-            if (keys.get(key) !== args[0]) return 0;
-            if (script.includes('PEXPIRE')) return 1;
-            return Number(keys.delete(key));
         },
     };
 }
@@ -171,7 +194,11 @@ const progressOctokit = {
     async request(route: string, parameters: Record<string, unknown>) {
         if (route === 'GET /repos/{owner}/{repo}') return { data: { default_branch: 'main' } };
         if (route === 'GET /repos/{owner}/{repo}/pulls/{pull_number}') {
-            return { data: { merged: parameters.pull_number === 500 && epicPrMerged, merged_at: '2026-10-10T20:00:00Z', base: { ref: epicBase } } };
+            const number = parameters.pull_number as number;
+            if (number === 500) return { data: { merged: epicPrMerged, ...epicPullRequest() } };
+            if (number === 501) return { data: { merged: false, state: 'open', merged_at: null, base: { ref: 'main' } } };
+            const child = number === 201 ? { merged_at: childMergedAt } : additionalChildren.find(pr => pr.number === number);
+            return { data: { merged_at: child?.merged_at ?? null, base: { ref: EPIC_BRANCH } } };
         }
         if (route === 'PATCH /repos/{owner}/{repo}/issues/comments/{comment_id}') {
             comments.find(comment => comment.id === parameters.comment_id)!.body = parameters.body as string;
@@ -219,7 +246,11 @@ beforeEach(() => {
     epicPrMerged = false;
     epicBase = 'main';
     childMergedAt = '2026-10-10T19:00:00Z';
+    childMergeCommitSha = null;
+    epicMergeCommitSha = null;
+    compareAheadBy = 1;
     failingChildReads = 0;
+    githubRequests.length = 0;
     bodyUpdates.length = 0;
     failingEpicCreations = 0;
     createdEpicPRs = 0;
@@ -242,6 +273,12 @@ function elapseRetryBackoff() {
     for (const [field, value] of redis.hash) redis.hash.set(field, JSON.stringify({ ...JSON.parse(value), nextAttemptAt: 0 }));
 }
 
+/** A due obligation whose epic PR had been resolved when it was recorded. */
+function seedSavedRetry(epicPrNumber: number, mergedChildPrNumber: number) {
+    const target = { owner: 'integry', repo: 'propr', epicBranch: EPIC_BRANCH, epicPrNumber, mergedChildPrNumber };
+    redis.hash.set(epicProgressRetryField(target), JSON.stringify({ ...target, attempts: 1, firstFailedAt: Date.now(), nextAttemptAt: 0 }));
+}
+
 const payload = {
     action: 'closed',
     pull_request: { number: 201, merged: true, base: { ref: EPIC_BRANCH } },
@@ -253,7 +290,7 @@ test('skips the progress update when the plan cannot be read, keeping a retry', 
     await handleEpicPRCreationOnMerge(payload, 'test', logger.withCorrelation('test'));
     assert.deepEqual(progressRequests, []);
     const [retry] = [...redis.hash.values()].map(value => JSON.parse(value));
-    assert.equal(retry.epicPrNumber, 500);
+    assert.equal(retry.epicPrNumber, null);
     assert.equal(retry.epicBranch, EPIC_BRANCH);
     assert.equal(retry.attempts, 1);
 });
@@ -449,7 +486,7 @@ test('overlapping child merge deliveries run one update at a time and the sweep 
     assert.equal(redis.hash.size, 1);
     const [retry] = [...redis.hash.values()].map(value => JSON.parse(value));
     assert.equal(retry.mergedChildPrNumber, 202);
-    assert.equal(retry.epicPrNumber, 500);
+    assert.equal(retry.epicPrNumber, null);
 
     releaseFirst();
     await first;
@@ -526,6 +563,59 @@ for (const mergedAt of [null, 'invalid', '2026-10-10T20:00:00Z']) {
     });
 }
 
+test('reuses an epic merged in the same second as the child once containment is proven', async () => {
+    epicPrMerged = true;
+    childMergedAt = '2026-10-10T20:00:00Z';
+    childMergeCommitSha = 'c1';
+    epicMergeCommitSha = 'e1';
+    compareAheadBy = 0;
+    await handleEpicPRCreationOnMerge(payload, 'test', logger.withCorrelation('test'));
+    assert.equal(createdEpicPRs, 0);
+    assert.equal(progressRequests[0].epicPrNumber, 500);
+    assert.equal(redis.hash.size, 0);
+    assert.ok(githubRequests.includes('GET /repos/{owner}/{repo}/compare/{basehead}'));
+});
+
+test('a merged epic\'s child evidence is read once and reused by every containment check', async () => {
+    epicPrMerged = true;
+    await handleEpicPRCreationOnMerge(payload, 'test', logger.withCorrelation('test'));
+    assert.equal(progressRequests[0].epicPrNumber, 500);
+    assert.equal(githubRequests.filter(route => route === 'GET /repos/{owner}/{repo}').length, 1);
+    assert.equal(githubRequests.filter(route => route === 'GET /repos/{owner}/{repo}/pulls/{pull_number}:201').length, 1);
+    // The epic itself is re-read for every check, as its state can change.
+    assert.equal(githubRequests.filter(route => route === 'GET /repos/{owner}/{repo}/pulls/{pull_number}:500').length, 3);
+});
+
+test('concurrent late child merges resolve the successor under the lease, creating it once', async () => {
+    epicPrMerged = true;
+    childMergedAt = '2026-10-10T21:00:00Z';
+    let releaseFirst!: () => void;
+    let onHeld!: () => void;
+    const held = new Promise<void>(resolve => { onHeld = resolve; });
+    // The first delivery is held while creating the successor's body.
+    onIssueFetch = () => { onIssueFetch = () => {}; onHeld(); return new Promise<void>(resolve => { releaseFirst = resolve; }); };
+    const secondPayload = { ...payload, pull_request: { ...payload.pull_request, number: 202 } } as unknown as PullRequestEvent;
+
+    const first = handleEpicPRCreationOnMerge(payload, 'first', logger.withCorrelation('first'));
+    await held;
+    await handleEpicPRCreationOnMerge(secondPayload, 'second', logger.withCorrelation('second'));
+    // The second delivery deferred before looking the epic up or creating anything.
+    assert.equal(createdEpicPRs, 0);
+    assert.equal(redis.hash.size, 1);
+    assert.equal(JSON.parse([...redis.hash.values()][0]).mergedChildPrNumber, 202);
+
+    releaseFirst();
+    await first;
+    assert.equal(createdEpicPRs, 1);
+    assert.equal(progressRequests[0].epicPrNumber, 501);
+    elapseRetryBackoff();
+    assert.equal(await retryPendingEpicMergeProgress(), 1);
+    assert.equal(createdEpicPRs, 1);
+    assert.equal(progressRequests[1].epicPrNumber, 501);
+    assert.equal(progressRequests[1].mergedChildPrNumber, 202);
+    assert.equal(redis.hash.size, 0);
+});
+
 test('prefers the open successor even when a merged epic appears first in the lookup', async () => {
     epicPrMerged = true;
     createdEpicPRs = 1;
@@ -550,12 +640,9 @@ test('a late child retry resolves an unknown epic to a new PR', async () => {
 
 test('revalidates a saved epic PR before releasing a late child retry', async () => {
     childMergedAt = '2026-10-10T21:00:00Z';
-    failingProgressUpdates = 1;
-    await handleEpicPRCreationOnMerge(payload, 'test', logger.withCorrelation('test'));
-    assert.equal(JSON.parse([...redis.hash.values()][0]).epicPrNumber, 500);
+    seedSavedRetry(500, 201);
     epicPrMerged = true;
     failingEpicCreations = 1;
-    elapseRetryBackoff();
     assert.equal(await retryPendingEpicMergeProgress(), 0);
     assert.equal(redis.hash.size, 1);
     assert.equal(progressRequests.length, 0);
@@ -721,15 +808,10 @@ test('history failure retains the successor obligation until scoped progress is 
 for (const savedRetry of [false, true]) {
     test(`non-default merged aggregate cannot discharge child work (saved retry: ${savedRetry})`, async () => {
         useRealProgress = true;
-        if (savedRetry) {
-            failingProgressUpdates = 1;
-            await handleEpicPRCreationOnMerge(payload, 'test', logger.withCorrelation('test'));
-            assert.equal(JSON.parse([...redis.hash.values()][0]).epicPrNumber, 500);
-        }
+        if (savedRetry) seedSavedRetry(500, 201);
         epicPrMerged = true;
         epicBase = 'release/next';
         if (savedRetry) {
-            elapseRetryBackoff();
             assert.equal(await retryPendingEpicMergeProgress(), 1);
         } else {
             await handleEpicPRCreationOnMerge(payload, 'test', logger.withCorrelation('test'));

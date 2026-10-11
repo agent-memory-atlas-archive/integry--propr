@@ -3,7 +3,7 @@ import { after, describe, mock, test } from 'node:test';
 import { closeConnection } from '../packages/core/src/db/connection.js';
 import { EPIC_COMPLETE_MARKER, EPIC_PROGRESS_MARKER, updateEpicMergeProgress } from '../packages/core/src/webhook/epicMergeProgress.js';
 import {
-    EPIC_PROGRESS_RETRY_KEY, EPIC_PROGRESS_RETRY_MAX_AGE_MS, EpicProgressLeaseLostError, epicProgressRetryField,
+    EPIC_PROGRESS_RETRY_KEY, EPIC_PROGRESS_RETRY_MAX_AGE_MS, EPIC_PROGRESS_SCRIPTS, EpicProgressLeaseLostError, epicProgressRetryField,
     recordEpicProgressRetry, runEpicProgressUpdate, sweepEpicProgressRetries,
     type EpicProgressTarget,
 } from '../packages/core/src/webhook/epicMergeProgressRetry.js';
@@ -31,17 +31,22 @@ function fakeRedis() {
             return 'OK';
         },
         async eval(script: string, _n: number, key: string, ...args: string[]) {
-            if (script.includes('HGET')) {
-                if (hash.get(args[0]) !== args[1]) return 0;
-                if (script.includes('HSETNX') && !hash.has(args[2])) hash.set(args[2], args[1]);
-                return Number(hash.delete(args[0]));
+            switch (script) {
+                case EPIC_PROGRESS_SCRIPTS.compareAndDeleteField:
+                case EPIC_PROGRESS_SCRIPTS.migrateLegacyField:
+                    if (hash.get(args[0]) !== args[1]) return 0;
+                    if (script === EPIC_PROGRESS_SCRIPTS.migrateLegacyField && !hash.has(args[2])) hash.set(args[2], args[1]);
+                    return Number(hash.delete(args[0]));
+                case EPIC_PROGRESS_SCRIPTS.compareAndExtendKey:
+                    if (keys.get(key) !== args[0]) return 0;
+                    extensions.push(args[1]);
+                    return 1;
+                case EPIC_PROGRESS_SCRIPTS.compareAndDeleteKey:
+                    if (keys.get(key) !== args[0]) return 0;
+                    return Number(keys.delete(key));
+                default:
+                    throw new Error(`Unknown script: ${script}`);
             }
-            if (keys.get(key) !== args[0]) return 0;
-            if (script.includes('PEXPIRE')) {
-                extensions.push(args[1]);
-                return 1;
-            }
-            return Number(keys.delete(key));
         },
     };
 }
@@ -431,7 +436,7 @@ test('migration preserves a newer target backoff and a concurrently replaced leg
     redis.hash.set(legacy, old);
     const evaluate = redis.eval;
     redis.eval = async (...args) => {
-        if (args[0].includes('HSETNX')) redis.hash.set(legacy, newer);
+        if (args[0] === EPIC_PROGRESS_SCRIPTS.migrateLegacyField) redis.hash.set(legacy, newer);
         return evaluate(...args);
     };
     await sweep();

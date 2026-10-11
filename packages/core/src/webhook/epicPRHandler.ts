@@ -2,9 +2,13 @@ import logger, { generateCorrelationId } from '../utils/logger.js';
 import { getAuthenticatedOctokit } from '../auth/githubAuth.js';
 import { isEpicBranch, EPIC_BRANCH_PATTERN } from '../services/taskExecutionService.js';
 import { createEpicPRWithDraftFallback } from '../services/epicPRService.js';
-import { canCarryChild, findEpicPRNumber, updateEpicMergeProgress } from './epicMergeProgress.js';
+import { updateEpicMergeProgress } from './epicMergeProgress.js';
 import {
-    recordEpicProgressRetry, runEpicProgressUpdate, sweepEpicProgressRetries,
+    canCarryChild, findEpicPRNumber, readChildMergeEvidence,
+    type ChildMergeEvidence, type ChildMergeEvidenceSource,
+} from './epicMergeEvidence.js';
+import {
+    runEpicProgressUpdate, sweepEpicProgressRetries,
     type EpicProgressLease, type EpicProgressRetryRedis, type EpicProgressTarget,
 } from './epicMergeProgressRetry.js';
 import { getUltrafixStateRedis } from './checkRunHelpers.js';
@@ -232,8 +236,7 @@ export async function handleEpicPRCreationOnMerge(
         return;
     }
 
-    const repository = payload.repository.full_name;
-    const [owner, repo] = repository.split('/');
+    const [owner, repo] = payload.repository.full_name.split('/');
 
     correlatedLogger.info({
         prNumber: payload.pull_request.number,
@@ -241,30 +244,9 @@ export async function handleEpicPRCreationOnMerge(
         owner, repo
     }, 'Child PR merged to epic branch, ensuring Epic PR exists');
 
-    let epicPrNumber: number | null = null;
-    try {
-        epicPrNumber = await ensureEpicPR({ owner, repo, repository, baseBranch, mergedChildPrNumber: payload.pull_request.number }, correlatedLogger);
-    } catch (error) {
-        const err = error as Error & { status?: number };
-        correlatedLogger.warn({
-            error: err.message,
-            baseBranch,
-            owner, repo
-        }, 'Failed to create Epic PR after child merge');
-    }
-
-    const target: EpicProgressTarget = { owner, repo, epicBranch: baseBranch, epicPrNumber, mergedChildPrNumber: payload.pull_request.number };
-    if (epicPrNumber === null) {
-        // The epic PR could not be located or created; keep the obligation so
-        // the retry sweep finds or creates the epic PR and refreshes its progress.
-        try {
-            await recordEpicProgressRetry(getUltrafixStateRedis(), target);
-        } catch (error) {
-            correlatedLogger.error({ ...target, error: (error as Error).message }, 'Failed to record Epic PR merge progress retry');
-        }
-        return;
-    }
-
+    // The epic PR is found or created under the lease, so concurrent late
+    // child merges cannot both attempt to create a successor.
+    const target: EpicProgressTarget = { owner, repo, epicBranch: baseBranch, epicPrNumber: null, mergedChildPrNumber: payload.pull_request.number };
     await runEpicProgressUpdate(target, {
         redis: getUltrafixStateRedis(),
         update: lease => applyEpicMergeProgress(target, { lease, correlationId, correlatedLogger }),
@@ -291,11 +273,11 @@ type Octokit = Awaited<ReturnType<typeof getAuthenticatedOctokit>>;
 async function ensureEpicPR(
     context: EpicBranchContext,
     correlatedLogger: ReturnType<typeof logger.withCorrelation>,
-    lease?: EpicProgressLease,
+    { lease, evidence }: { lease: EpicProgressLease; evidence?: ChildMergeEvidenceSource },
 ): Promise<number> {
     const { owner, repo, baseBranch } = context;
     const octokit = await getAuthenticatedOctokit();
-    const existingPrNumber = await findEpicPRNumber(octokit, { ...context, epicBranch: baseBranch });
+    const existingPrNumber = await findEpicPRNumber(octokit, { ...context, epicBranch: baseBranch }, evidence);
     if (existingPrNumber === null) return await createEpicPR(octokit, context, correlatedLogger, lease);
 
     correlatedLogger.debug({ prNumber: existingPrNumber, baseBranch }, 'Epic PR already exists, updating body');
@@ -317,7 +299,7 @@ async function ensureEpicPR(
 async function updateEpicPRBody(
     octokit: Octokit,
     { owner, repo, repository, baseBranch }: EpicBranchContext,
-    { epicPrNumber, lease }: { epicPrNumber: number; lease?: EpicProgressLease },
+    { epicPrNumber, lease }: { epicPrNumber: number; lease: EpicProgressLease },
     correlatedLogger: ReturnType<typeof logger.withCorrelation>,
 ): Promise<void> {
     const planLookup = await loadPlanDetails(baseBranch, repository, correlatedLogger);
@@ -333,7 +315,7 @@ async function updateEpicPRBody(
         owner, repo, pull_number: epicPrNumber,
     });
     if (epic.data.state !== 'open') return;
-    await lease?.assertOwned();
+    await lease.assertOwned();
     await octokit.request('PATCH /repos/{owner}/{repo}/pulls/{pull_number}', {
         owner, repo, pull_number: epicPrNumber, body: newBody
     });
@@ -363,10 +345,19 @@ async function applyEpicMergeProgress(
         correlatedLogger: ReturnType<typeof logger.withCorrelation>;
     }
 ): Promise<boolean> {
-    const { owner, repo, epicBranch } = target;
+    const { owner, repo, epicBranch, mergedChildPrNumber } = target;
     const repository = `${owner}/${repo}`;
-    let epicPrNumber = target.epicPrNumber
-        ?? await ensureEpicPR({ owner, repo, repository, baseBranch: epicBranch, mergedChildPrNumber: target.mergedChildPrNumber }, correlatedLogger, lease);
+    const context: EpicBranchContext = { owner, repo, repository, baseBranch: epicBranch, mergedChildPrNumber };
+    const octokit = await getAuthenticatedOctokit();
+    // The child's merge evidence does not change; read it at most once and
+    // reuse it for every containment check of this update.
+    let evidence: Promise<ChildMergeEvidence> | undefined;
+    const childEvidence = () => (evidence ??= readChildMergeEvidence(octokit, context, mergedChildPrNumber!));
+    const carries = async (epicPrNumber: number) => {
+        const epic = await octokit.request('GET /repos/{owner}/{repo}/pulls/{pull_number}', { owner, repo, pull_number: epicPrNumber });
+        return await canCarryChild(octokit, target, epic.data, childEvidence);
+    };
+    let epicPrNumber = target.epicPrNumber ?? await ensureEpicPR(context, correlatedLogger, { lease, evidence: childEvidence });
     let planLookup = await loadPlanDetails(epicBranch, repository, correlatedLogger);
     if (planLookup.status === 'unavailable') {
         // Without the plan, unstarted planned work is invisible and progress
@@ -378,33 +369,16 @@ async function applyEpicMergeProgress(
     // A saved retry target (or a lookup before the awaited plan/body reads)
     // may now identify an epic merged before this child. Revalidate it before
     // reporting progress and allowing the durable obligation to be released.
-    if (target.mergedChildPrNumber !== null) {
-        const octokit = await getAuthenticatedOctokit();
-        const epic = await octokit.request('GET /repos/{owner}/{repo}/pulls/{pull_number}', { owner, repo, pull_number: epicPrNumber });
-        if (!await canCarryChild(octokit, target, epic.data)) {
-            epicPrNumber = await ensureEpicPR({
-                owner, repo, repository, baseBranch: epicBranch, mergedChildPrNumber: target.mergedChildPrNumber,
-            }, correlatedLogger, lease);
-            // Resolving the successor can await issue/body reads; refresh the
-            // plan again so those waits cannot hide newly linked child PRs.
-            planLookup = await loadPlanDetails(epicBranch, repository, correlatedLogger);
-            if (planLookup.status === 'unavailable') return false;
-            const resolved = await octokit.request('GET /repos/{owner}/{repo}/pulls/{pull_number}', {
-                owner, repo, pull_number: epicPrNumber,
-            });
-            if (!await canCarryChild(octokit, target, resolved.data)) return false;
-        }
+    if (mergedChildPrNumber !== null && !await carries(epicPrNumber)) {
+        epicPrNumber = await ensureEpicPR(context, correlatedLogger, { lease, evidence: childEvidence });
+        // Resolving the successor can await issue/body reads; refresh the
+        // plan again so those waits cannot hide newly linked child PRs.
+        planLookup = await loadPlanDetails(epicBranch, repository, correlatedLogger);
+        if (planLookup.status === 'unavailable') return false;
+        if (!await carries(epicPrNumber)) return false;
     }
     const assertCurrentTarget = async () => {
-        if (target.mergedChildPrNumber !== null) {
-            const octokit = await getAuthenticatedOctokit();
-            const epic = await octokit.request('GET /repos/{owner}/{repo}/pulls/{pull_number}', {
-                owner, repo, pull_number: epicPrNumber,
-            });
-            if (!await canCarryChild(octokit, target, epic.data)) {
-                throw new Error('Epic can no longer carry the child merge');
-            }
-        }
+        if (mergedChildPrNumber !== null && !await carries(epicPrNumber)) throw new Error('Epic can no longer carry the child merge');
         await lease.assertOwned();
     };
     const planDetails = planLookup.status === 'found' ? planLookup.details : null;
@@ -448,7 +422,7 @@ async function createEpicPR(
     octokit: Octokit,
     { owner, repo, repository, baseBranch }: EpicBranchContext,
     correlatedLogger: ReturnType<typeof logger.withCorrelation>,
-    lease?: EpicProgressLease,
+    lease: EpicProgressLease,
 ): Promise<number> {
     // Get the default branch to use as base
     const repoResponse = await octokit.request('GET /repos/{owner}/{repo}', {
@@ -476,7 +450,7 @@ async function createEpicPR(
     }
 
     // Create the Epic PR
-    await lease?.assertOwned();
+    await lease.assertOwned();
     const prResponse = await createEpicPRWithDraftFallback(octokit, {
         owner, repo, title, head: baseBranch, base: defaultBranch, body
     });

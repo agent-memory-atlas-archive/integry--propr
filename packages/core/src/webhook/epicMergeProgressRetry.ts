@@ -54,6 +54,14 @@ end
 return 0
 `;
 
+/** The Lua scripts this module evaluates, exported so fakes can match them by identity. */
+export const EPIC_PROGRESS_SCRIPTS = {
+    compareAndDeleteField: COMPARE_AND_DELETE_FIELD,
+    migrateLegacyField: MIGRATE_LEGACY_FIELD,
+    compareAndDeleteKey: COMPARE_AND_DELETE_KEY,
+    compareAndExtendKey: COMPARE_AND_EXTEND_KEY,
+} as const;
+
 export type EpicProgressRetryRedis = Pick<Redis, 'hget' | 'hset' | 'hgetall' | 'set' | 'eval'>;
 
 export interface EpicProgressTarget {
@@ -287,7 +295,10 @@ export async function sweepEpicProgressRetries(
         if (pending.nextAttemptAt > current) continue;
         const { owner, repo, epicBranch, epicPrNumber, mergedChildPrNumber } = pending;
         if (await retry({ owner, repo, epicBranch, epicPrNumber, mergedChildPrNumber }) === 'updated') {
-            // Only release the snapshot whose own target succeeded.
+            // The update normally releases the snapshot it observed itself;
+            // this repeats that release in case it failed after the update
+            // (e.g. the delete call errored), still only for the snapshot
+            // whose own target succeeded.
             await redis.eval(COMPARE_AND_DELETE_FIELD, 1, EPIC_PROGRESS_RETRY_KEY, field, value);
             updated++;
         }
