@@ -1,3 +1,6 @@
+import { createStorageRouteEntries } from './instanceStorageRouteRegistry.js';
+import { protectStorageQueue } from '../core/src/storage/lifecycle.js';
+import { createDefaultStorageService, createInstanceStorageRoutes } from './routes/instanceStorageRoutes.js';
 import { startDashboardReadService, type DashboardReadService } from './services/dashboardReadService.js';
 import { createUsageTipsRoutes } from './routes/usageTipsRoutes.js';
 import { dashboardNarrativeModel } from './routes/dashboardNarrativeModel.js';
@@ -299,9 +302,9 @@ async function initRedis(): Promise<void> {
   await redisClient.connect();
   
   const queueName = process.env.GITHUB_ISSUE_QUEUE_NAME || 'github-issue-processor';
-  taskQueue = new Queue(queueName, {
+  taskQueue = protectStorageQueue(new Queue(queueName, {
     connection: { ...redisRuntimeConfig.options }
-  });
+  }));
   runtimeBuildQueue = new Queue(AGENT_RUNTIME_BUILD_QUEUE_NAME, {
     connection: { ...redisRuntimeConfig.options }
   });
@@ -411,6 +414,13 @@ function setupRoutes(): void {
     managedStorage: createManagedPreviewStorageClient(() => redisClient.get(ROUTING_STATUS_REDIS_KEY)),
   });
   const instanceCatalogRoutes = createInstanceCatalogRoutes();
+  const storageService = createDefaultStorageService();
+  const storageRoutes = createInstanceStorageRoutes(storageService);
+  // Background work is bounded/coalesced; no startup deletion or live-data scan.
+  const storageSweep = setInterval(() => {
+    void storageService.sweep().catch(() => undefined);
+  }, 60_000);
+  storageSweep.unref();
   const agentVersionRoutes = createAgentVersionRoutes();
   const activeWorkRoutes = createActiveWorkRoutes({ db, taskQueue });
   const taskSubmissionRoutes = createTaskSubmissionRoutes({ db });
@@ -458,6 +468,7 @@ function setupRoutes(): void {
   });
   const routes = [
     ...operationalRoutes,
+    ...createStorageRouteEntries(storageRoutes),
     ...createMemberCatalogRouteEntries({ instanceCatalogRoutes }),
     ...createManagementRouteEntries({
       adminRoutes,

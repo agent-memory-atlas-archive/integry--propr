@@ -1,10 +1,10 @@
+import { repositoryStorageLifecycle } from '../storage/lifecycle.js';
 import { SimpleGit } from 'simple-git';
 import fs from 'fs-extra';
 import path from 'path';
 import logger from '../utils/logger.js';
 import { handleError } from '../utils/errorHandler.js';
 import {
-    cleanupWorktree,
     setupWorktreePermissions,
     addToSafeDirectories,
     verifyWorktreeCreation,
@@ -34,159 +34,41 @@ export async function addWorktreeWithoutTracking(
     },
 ): Promise<string> {
     const { startPoint, resetBranch = false } = options;
+    if (resetBranch) {
+        const exists = await git.raw(['show-ref', '--verify', '--quiet', `refs/heads/${branchName}`]).then(() => true, () => false);
+        if (exists) return git.raw(['worktree', 'add', worktreePath, branchName]);
+    }
     return git.raw([
         'worktree',
         'add',
         '--no-track',
-        resetBranch ? '-B' : '-b',
+        '-b',
         branchName,
         worktreePath,
         startPoint,
     ]);
 }
 
-async function removeWorktreeForBranch(git: SimpleGit, worktreeLines: string[], branchName: string): Promise<void> {
-    for (let i = 0; i < worktreeLines.length; i++) {
-        const line = worktreeLines[i];
-        if (!line.startsWith('worktree ')) continue;
-
-        const wtPath = line.substring('worktree '.length);
-        const branchLine = worktreeLines[i + 1];
-        const isBranchMatch = branchLine &&
-            branchLine.startsWith('branch ') &&
-            branchLine.substring('branch refs/heads/'.length) === branchName;
-
-        if (isBranchMatch) {
-            logger.info({ worktreePath: wtPath, branchName }, 'Removing existing worktree for branch');
-            try {
-                await git.raw(['worktree', 'remove', wtPath, '--force']);
-            } catch (removeError) {
-                logger.warn({ worktreePath: wtPath, error: (removeError as Error).message }, 'Failed to remove existing worktree');
-            }
-        }
-    }
-}
-
 export async function cleanupExistingBranch(git: SimpleGit, branchName: string): Promise<void> {
-    try {
-        await git.revparse([branchName]);
-        logger.info({ branchName }, 'Branch already exists, will delete and recreate');
-
-        try {
-            const worktreeList = await git.raw(['worktree', 'list', '--porcelain']);
-            const worktreeLines = worktreeList.split('\n');
-            await removeWorktreeForBranch(git, worktreeLines, branchName);
-        } catch (listError) {
-            logger.debug({ error: (listError as Error).message }, 'Failed to list worktrees');
-        }
-
-        try {
-            await git.branch(['-D', branchName]);
-            logger.info({ branchName }, 'Deleted existing branch');
-        } catch (deleteError) {
-            logger.warn({ branchName, error: (deleteError as Error).message }, 'Failed to delete existing branch, continuing anyway');
-        }
-    } catch {
-        logger.debug({ branchName }, 'Branch does not exist, will create new one');
-    }
+    const exists = await git.raw(['show-ref', '--verify', '--quiet', `refs/heads/${branchName}`]).then(() => true, () => false);
+    if (exists) throw new Error('Existing branch retained; use a new task branch');
 }
 
-async function handleExistingWorktreePath(worktreePath: string, localRepoPath: string, branchName: string): Promise<void> {
-    logger.warn({ worktreePath, branchName }, 'Worktree path already exists. Checking if it\'s a valid worktree...');
-
-    const gitPath = path.join(worktreePath, '.git');
-    let isProperWorktree = false;
-
-    if (await fs.pathExists(gitPath)) {
-        const stats = await fs.stat(gitPath);
-        isProperWorktree = stats.isFile();
-    }
-
-    if (!isProperWorktree) {
-        logger.warn({ worktreePath, gitPath, isDirectory: await fs.pathExists(gitPath) ? (await fs.stat(gitPath)).isDirectory() : false }, 'Not a proper worktree, removing directory directly');
-        await fs.remove(worktreePath);
-    } else {
-        await cleanupWorktree(localRepoPath, worktreePath, branchName);
-    }
-
-    if (await fs.pathExists(worktreePath)) {
-        logger.warn({ worktreePath }, 'Directory still exists after cleanup, forcing removal');
-        await fs.remove(worktreePath);
-    }
+async function handleExistingWorktreePath(_worktreePath: string, _localRepoPath: string, _branchName: string): Promise<void> {
+    throw new Error('Existing worktree retained; use a new worktree path');
 }
 
-/**
- * Drops git's registration of one worktree whose directory is already gone,
- * which `git worktree remove` refuses to touch. Only an entry git itself reports
- * as prunable is removed, and only that entry: a global `git worktree prune` can
- * race worktrees other tasks are still creating.
- */
-export async function removeStaleWorktreeRegistration(git: SimpleGit, worktreePath: string): Promise<boolean> {
-    const target = path.resolve(worktreePath);
-    const listing = await git.raw(['worktree', 'list', '--porcelain']);
-    const entry = listing.split(/\n\s*\n/).find(block => {
-        const [first] = block.trim().split('\n');
-        return first.startsWith('worktree ') && path.resolve(first.slice('worktree '.length)) === target;
-    });
-    if (!entry || !/^prunable\b/m.test(entry)) return false;
-
-    const commonDir = (await git.raw(['rev-parse', '--path-format=absolute', '--git-common-dir'])).trim();
-    const adminRoot = path.join(commonDir, 'worktrees');
-    if (!await fs.pathExists(adminRoot)) return false;
-    for (const name of await fs.readdir(adminRoot)) {
-        const gitdirFile = path.join(adminRoot, name, 'gitdir');
-        if (!await fs.pathExists(gitdirFile)) continue;
-        const gitdir = (await fs.readFile(gitdirFile, 'utf8')).trim();
-        if (path.resolve(path.dirname(gitdir)) !== target) continue;
-        await fs.remove(path.join(adminRoot, name));
-        return true;
-    }
+/** Missing checkouts remain protected until their administrative history is proven recoverable. */
+export async function removeStaleWorktreeRegistration(_git: SimpleGit, _worktreePath: string): Promise<boolean> {
+    // A missing checkout does not prove the administrative HEAD recoverable.
     return false;
 }
 
-async function handleWorktreeConflict(git: SimpleGit, error: Error, worktreePath: string, branchName: string): Promise<void> {
-    logger.error({ branchName, error: error.message }, 'Branch is already checked out in another worktree');
-
-    const match = error.message.match(/worktree at '([^']+)'/);
-    if (match) {
-        const existingWorktreePath = match[1];
-        logger.info({ branchName, existingWorktreePath, newWorktreePath: worktreePath }, 'Attempting to remove existing worktree to allow new one');
-
-        try {
-            try {
-                await git.raw(['worktree', 'remove', existingWorktreePath, '--force']);
-                logger.info({ existingWorktreePath }, 'Successfully removed existing worktree');
-            } catch (removeError) {
-                if (!await removeStaleWorktreeRegistration(git, existingWorktreePath)) throw removeError;
-                logger.warn({ branchName, existingWorktreePath }, 'Removed the stale registration of a worktree whose directory was already gone');
-            }
-
-            const worktreeAddResult = await addWorktreeWithoutTracking(
-                git,
-                worktreePath,
-                branchName,
-                { startPoint: `origin/${branchName}`, resetBranch: true },
-            );
-            logger.info({ branchName, worktreePath, gitOutput: worktreeAddResult.trim() }, 'Successfully created worktree after removing existing one');
-        } catch (retryError) {
-            logger.error({ branchName, existingWorktreePath, error: (retryError as Error).message }, 'Failed to handle existing worktree conflict');
-            throw new Error(`Cannot create worktree: branch '${branchName}' is locked by another worktree`);
-        }
-    } else {
-        throw new Error(`Cannot create worktree: branch '${branchName}' is already checked out elsewhere`);
-    }
+async function handleWorktreeConflict(_git: SimpleGit, _error: Error, _worktreePath: string, _branchName: string): Promise<void> {
+    throw new Error('Existing worktree retained; branch is in use');
 }
 
-async function handleImproperWorktree(worktreePath: string, branchName: string, error: Error): Promise<void> {
-    logger.error({ branchName, worktreePath, error: error.message }, 'Worktree creation failed - improper structure detected');
-
-    try {
-        await fs.remove(worktreePath);
-        logger.info({ worktreePath }, 'Removed improperly created worktree directory');
-    } catch (cleanupError) {
-        logger.error({ worktreePath, error: (cleanupError as Error).message }, 'Failed to clean up improper worktree directory');
-    }
-
+async function handleImproperWorktree(_worktreePath: string, _branchName: string, error: Error): Promise<void> {
     throw error;
 }
 
@@ -276,6 +158,10 @@ interface WorktreeResult {
 }
 
 export async function createWorktreeFromExistingBranch(localRepoPath: string, branchName: string, options: CreateWorktreeFromExistingBranchOptions): Promise<WorktreeResult> {
+    return repositoryStorageLifecycle.use(() => createWorktreeFromExistingBranchInternal(localRepoPath, branchName, options));
+}
+
+async function createWorktreeFromExistingBranchInternal(localRepoPath: string, branchName: string, options: CreateWorktreeFromExistingBranchOptions): Promise<WorktreeResult> {
     const { worktreeDirName, owner, repoName } = options;
     // Rescue refs preserve rejected pushes; they are never a branch a task works on.
     if (isRescueRef(branchName)) throw new Error(`Refusing to use push salvage rescue ref ${branchName} as a task branch`);
