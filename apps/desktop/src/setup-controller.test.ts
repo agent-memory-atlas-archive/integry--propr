@@ -2,7 +2,9 @@ import assert from 'node:assert/strict';
 import { chmodSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { performance } from 'node:perf_hooks';
 import { describe, it } from 'node:test';
+import { setTimeout as delay } from 'node:timers/promises';
 import type { SetupActions } from '@propr/local-setup';
 import { DesktopSetupController } from './setup-controller';
 import type { DesktopSetupRequest } from './shared/contract';
@@ -54,12 +56,23 @@ const waitForSnapshot = async (
   controller: DesktopSetupController,
   predicate: (snapshot: Awaited<ReturnType<DesktopSetupController['status']>>) => boolean,
 ) => {
-  for (let attempt = 0; attempt < 100; attempt += 1) {
-    const snapshot = await controller.status();
+  const timeoutMs = 10_000;
+  const deadline = performance.now() + timeoutMs;
+  let snapshot;
+  while (true) {
+    snapshot = await controller.status();
     if (predicate(snapshot)) return snapshot;
-    await new Promise(resolve => setImmediate(resolve));
+    const remainingMs = deadline - performance.now();
+    if (remainingMs <= 0) break;
+    // Account discovery includes filesystem I/O; event-loop turns are not a time budget.
+    await delay(Math.min(25, remainingMs));
   }
-  throw new Error('Timed out waiting for setup snapshot');
+  throw new Error(`Timed out waiting for setup snapshot after ${timeoutMs}ms; last state: ${JSON.stringify({
+    phase: snapshot.phase,
+    githubIdentityStatus: snapshot.githubIdentity?.status,
+    steps: snapshot.state?.steps.map(step => ({ id: step.id, status: step.status })),
+    error: snapshot.error,
+  })}`);
 };
 
 const relayActions = (rootDir: string, overrides: Partial<SetupActions> = {}): SetupActions => {
