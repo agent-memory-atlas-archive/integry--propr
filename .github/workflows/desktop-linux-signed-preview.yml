@@ -1,4 +1,4 @@
-name: Desktop Linux Signed RPM Preview
+name: Desktop Linux Authenticated Preview
 
 on:
   workflow_dispatch:
@@ -92,7 +92,7 @@ jobs:
           node-version-file: '.nvmrc'
       - run: |
           sudo apt-get update
-          sudo apt-get install --yes rpm gnupg cpio
+          sudo apt-get install --yes rpm gnupg cpio apt dpkg
       - name: Exercise disposable keys, native fixtures, and signed publication rejection
         env:
           PROPR_REQUIRE_RPM_TESTS: '1'
@@ -127,10 +127,10 @@ jobs:
           ref: ${{ inputs.source_revision }}
           path: frozen-source
           persist-credentials: false
-      - name: Install RPM signing and package inspection tools
+      - name: Install Linux signing and package inspection tools
         run: |
           sudo apt-get update
-          sudo apt-get install --yes rpm gnupg cpio
+          sudo apt-get install --yes rpm gnupg cpio apt dpkg
       - name: Download only the exact finalized unsigned bundle
         uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6
         with:
@@ -147,7 +147,7 @@ jobs:
           const manifest = JSON.parse(readFileSync('unsigned-preview/linux-preview.json'));
           if (manifest.workflowRunId !== process.env.UNSIGNED_RUN_ID) throw new Error('Original preview run mismatch');
           NODE
-      - name: Sign both RPM architectures, independently verify, then finalize metadata
+      - name: Authenticate both DEB and RPM architectures and APT metadata
         env:
           PROPR_DESKTOP_RPM_PRIVATE_KEY: ${{ secrets.PROPR_DESKTOP_RPM_PRIVATE_KEY }}
           PROPR_DESKTOP_RPM_PASSPHRASE: ${{ secrets.PROPR_DESKTOP_RPM_PASSPHRASE }}
@@ -156,7 +156,7 @@ jobs:
           VERSION: ${{ needs.identity.outputs.version }}
           SOURCE_REVISION: ${{ inputs.source_revision }}
         run: |
-          node apps/desktop/scripts/linux-preview-release.mjs sign-bundle --signed-rpm \
+          node apps/desktop/scripts/linux-preview-release.mjs sign-bundle --signed-linux \
             --version "$VERSION" --source-revision "$SOURCE_REVISION" \
             --repository "${{ github.repository }}" --source-directory frozen-source \
             --input unsigned-preview --output signed-preview
@@ -164,7 +164,7 @@ jobs:
       - name: Upload only final signed bytes
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
-          name: propr-desktop-rpm-signed-${{ github.run_id }}
+          name: propr-desktop-linux-signed-${{ github.run_id }}
           path: signed-preview
           if-no-files-found: error
           retention-days: 90
@@ -188,10 +188,10 @@ jobs:
           persist-credentials: false
       - run: |
           sudo apt-get update
-          sudo apt-get install --yes rpm gnupg cpio
+          sudo apt-get install --yes rpm gnupg cpio apt dpkg
       - uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6
         with:
-          name: propr-desktop-rpm-signed-${{ github.run_id }}
+          name: propr-desktop-linux-signed-${{ github.run_id }}
           path: signed-preview
       - name: Reverify signed bundle and stage or resume exact draft bytes
         env:
@@ -201,7 +201,7 @@ jobs:
           VERSION: ${{ needs.identity.outputs.version }}
           SOURCE_REVISION: ${{ inputs.source_revision }}
         run: |
-          node apps/desktop/scripts/linux-preview-release.mjs stage-draft --signed-rpm \
+          node apps/desktop/scripts/linux-preview-release.mjs stage-draft --signed-linux \
             --version "$VERSION" --source-revision "$SOURCE_REVISION" \
             --repository "${{ github.repository }}" --source-directory frozen-source \
             --directory signed-preview
@@ -231,7 +231,7 @@ jobs:
           persist-credentials: false
       - run: |
           sudo apt-get update
-          sudo apt-get install --yes rpm gnupg cpio
+          sudo apt-get install --yes rpm gnupg cpio apt dpkg
       - name: Download exact draft bytes and reverify signatures and payload before publication
         env:
           GITHUB_TOKEN: ${{ github.token }}
@@ -240,6 +240,6 @@ jobs:
           VERSION: ${{ needs.identity.outputs.version }}
           SOURCE_REVISION: ${{ inputs.source_revision }}
         run: |
-          node apps/desktop/scripts/linux-preview-release.mjs publish-draft --signed-rpm \
+          node apps/desktop/scripts/linux-preview-release.mjs publish-draft --signed-linux \
             --version "$VERSION" --source-revision "$SOURCE_REVISION" \
             --repository "${{ github.repository }}" --source-directory frozen-source

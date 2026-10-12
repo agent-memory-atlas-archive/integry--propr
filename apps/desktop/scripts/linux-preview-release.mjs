@@ -9,8 +9,8 @@ import { basename, join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { promisify } from 'node:util';
 import { requireRpmIdentity, rpmIdentityFromEnvironment, verifyRpm, signRpm, rpmContentDigest } from './rpm-signing.mjs';
+import { authAssets, aptAssets, createApt, verifyApt, signMetadata, verifyMetadata } from './linux-package-auth.mjs';
 import { inspectSignedPreviewPayload } from './rpm-preview-payload.mjs';
-import { inspectArtifactArchitecture } from './release-architecture.mjs';
 import {
   expectedProfileArtifacts,
   LINUX_PREVIEW_RELEASE_PROFILE,
@@ -39,7 +39,7 @@ export const linuxPreviewTag = (version, sourceRevision, rpmIdentity) => {
     throw new Error('Linux preview identity requires a semantic version and full lowercase source revision');
   }
   if (rpmIdentity) requireRpmIdentity(rpmIdentity);
-  return `desktop-linux-preview-v${version}-${sourceRevision.slice(0, 12)}${rpmIdentity ? '-rpm-signed' : ''}`;
+  return `desktop-linux-preview-v${version}-${sourceRevision.slice(0, 12)}${rpmIdentity ? '-all-signed' : ''}`;
 };
 
 const sha256 = async path => {
@@ -144,11 +144,13 @@ export const linuxPreviewInstallNotes = ({ version, sourceRevision, tag, rpmIden
   let notes = unsignedInstallNotes({ version, sourceRevision, tag });
   if (!rpmIdentity) return notes;
   requireRpmIdentity(rpmIdentity);
-  notes = notes.replace('an explicitly unsigned preview', 'a preview with signed RPMs and unsigned standalone DEBs')
+  notes = notes.replace('an explicitly unsigned preview', 'an authenticated DEB and RPM preview')
     .replace('sudo dnf install ', 'sudo dnf --setopt=localpkg_gpgcheck=1 install ')
     .replace('sudo dnf upgrade ', 'sudo dnf --setopt=localpkg_gpgcheck=1 upgrade ')
     .replace('sudo dnf reinstall ', 'sudo dnf --setopt=localpkg_gpgcheck=1 reinstall ');
-  const bootstrap = `## RPM public-key trust bootstrap (including openSUSE Leap 15.6)
+  const bootstrap = `Before any installation, complete "Verify every download before installation" below.
+
+## RPM public-key trust bootstrap (including openSUSE Leap 15.6)
 
 Both RPM architectures carry native RSA/SHA256 header and package signatures.
 Expected full OpenPGP fingerprint: \`${rpmIdentity.fingerprint}\`.
@@ -194,13 +196,56 @@ node ./rpm-signing.mjs verify \\
   --fingerprint "${rpmIdentity.fingerprint}"
 \`\`\`
 
-Run it only after independently confirming that fingerprint. SHA256SUMS describes final signed RPM bytes;
+Run it only after independently confirming that fingerprint. SHA256SUMS describes all final DEB/RPM and repository bytes;
 never replace them with originals from the unsigned preview or a build fragment.
 
-Standalone DEBs are not authenticated by RPM signatures. An apt repository normally
-uses signed repository metadata (InRelease/Release.gpg) binding package hashes; this
-preview does not provide an apt repository. These standalone DEBs have transport and
-checksum integrity only, not apt repository authentication.
+Direct DEB downloads are authenticated by the detached signature on SHA256SUMS,
+then the package hash. APT authenticates repository metadata and package hashes;
+it does not verify an embedded DEB signature.
+
+## Verify every download before installation
+
+Obtain propr-desktop-release.asc from the independently reviewed public release-key
+notice in the project docs. Confirm its complete fingerprint is
+\`${rpmIdentity.fingerprint}\`. Use a fresh isolated keyring, with no host trust:
+
+\`\`\`sh
+KEYHOME="$(mktemp -d)"
+chmod 700 "$KEYHOME"
+gpg --homedir "$KEYHOME" --import propr-desktop-release.asc
+gpg --homedir "$KEYHOME" --with-colons --fingerprint
+# Stop unless there is exactly one primary key with the full fingerprint above.
+gpg --homedir "$KEYHOME" --verify SHA256SUMS.asc SHA256SUMS
+# Stop on failure, expiration, revocation, or a different signer.
+sha256sum --check SHA256SUMS
+# Only after both checks succeed, install the chosen DEB using the command below.
+\`\`\`
+
+## Exported APT repository bundle (no hosted endpoint)
+
+The APT-* assets and the same final DEBs form an exported repository. After the
+checks above, assemble it locally; no production APT URL is provisioned:
+
+\`\`\`sh
+mkdir -p apt-repository/dists/preview/main/binary-amd64 apt-repository/dists/preview/main/binary-arm64 apt-repository/pool
+cp APT-Packages-amd64 apt-repository/dists/preview/main/binary-amd64/Packages
+cp APT-Packages-arm64 apt-repository/dists/preview/main/binary-arm64/Packages
+cp APT-Release apt-repository/dists/preview/Release
+cp APT-InRelease apt-repository/dists/preview/InRelease
+cp APT-Release.gpg apt-repository/dists/preview/Release.gpg
+cp ProPR-Desktop-${version}-linux-*.deb apt-repository/pool/
+gpg --homedir "$KEYHOME" --verify APT-Release.gpg APT-Release
+gpg --homedir "$KEYHOME" --output "$KEYHOME/Release" --decrypt APT-InRelease
+cmp APT-Release "$KEYHOME/Release"
+gpg --homedir "$KEYHOME" --export '${rpmIdentity.fingerprint}' > propr-desktop-release.gpg
+\`\`\`
+
+For a locally served or file-backed copy, use a source entry of the form
+\`deb [signed-by=/absolute/path/propr-desktop-release.gpg] file:/absolute/path/apt-repository preview main\`.
+The public keyring and repository must be readable by APT. Keep Signed-By scoped to
+this source. Run apt update before downloading; stop on any authentication or hash
+failure. Release metadata expires after 30 days. This is not a live hosted endpoint,
+a stable/latest promotion, or a self-update feed.
 
 `;
   return notes.replace('## Debian and Ubuntu (DEB)', `${bootstrap}## Debian and Ubuntu (DEB)`);
@@ -231,21 +276,21 @@ const validateArtifactMetadata = (artifacts, version) => {
   return [...artifacts].sort((left, right) => left.fileName.localeCompare(right.fileName));
 };
 
-const validateManifest = (manifest, { version, sourceRevision, repository, rpmIdentity }) => {
+const validateManifest = (manifest, { version, sourceRevision, repository, rpmIdentity, historicalRpmOnly = false }) => {
   if (rpmIdentity) requireRpmIdentity(rpmIdentity);
-  const expectedSchema = rpmIdentity ? 3 : PREVIEW_SCHEMA_VERSION;
+  const expectedSchema = rpmIdentity ? (historicalRpmOnly ? 3 : 4) : PREVIEW_SCHEMA_VERSION;
   if (manifest?.schemaVersion !== expectedSchema) {
     throw new Error(`Linux preview manifest schema ${manifest?.schemaVersion} is not the managed-agent-bound schema ${expectedSchema}; select the correct preview mode`);
   }
   exactKeys(manifest, [
     'schemaVersion', 'channel', 'trust', 'version', 'sourceRevision', 'tag', 'createdAt',
     'repository', 'workflowRunId', 'runtime', 'upgrade', 'artifacts',
-    ...(rpmIdentity ? ['rpmSigning'] : []),
+    ...(rpmIdentity ? ['rpmSigning', ...(historicalRpmOnly ? [] : ['signing'])] : []),
   ], 'Linux preview manifest');
   if (manifest.channel !== 'linux-preview'
-    || manifest.trust !== (rpmIdentity ? 'rpm-signed-preview' : 'unsigned-preview') || manifest.version !== version
+    || manifest.trust !== (rpmIdentity ? (historicalRpmOnly ? 'rpm-signed-preview' : 'authenticated-linux-preview') : 'unsigned-preview') || manifest.version !== version
     || manifest.sourceRevision !== sourceRevision
-    || manifest.tag !== linuxPreviewTag(version, sourceRevision, rpmIdentity)
+    || manifest.tag !== (historicalRpmOnly ? `${linuxPreviewTag(version, sourceRevision)}-rpm-signed` : linuxPreviewTag(version, sourceRevision, rpmIdentity))
     || manifest.repository !== repository
     || typeof manifest.workflowRunId !== 'string' || !/^\d+$/.test(manifest.workflowRunId)
     || Number.isNaN(Date.parse(manifest.createdAt))) {
@@ -266,6 +311,15 @@ const validateManifest = (manifest, { version, sourceRevision, repository, rpmId
     throw new Error('Linux preview must keep self-update disabled and use package-manager upgrades');
   }
   if (rpmIdentity) {
+    if (!historicalRpmOnly) {
+      exactKeys(manifest.signing, ['createdAt', 'originalDebs'], 'Linux authentication evidence');
+      if (typeof manifest.signing.createdAt !== 'string' || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(manifest.signing.createdAt)) throw new Error('Invalid signing date');
+      const debs = previewFileNames(version).filter(name => name.endsWith('.deb'));
+      exactKeys(manifest.signing.originalDebs, debs, 'Original DEBs');
+      for (const name of debs) {
+        if (manifest.signing.originalDebs[name] !== manifest.artifacts.find(a => a.fileName === name)?.sha256) throw new Error('DEB changed from original bytes');
+      }
+    }
     exactKeys(manifest.rpmSigning, ['fingerprint', 'publicKey', 'originals'], 'RPM signing evidence');
     if (manifest.rpmSigning.fingerprint !== rpmIdentity.fingerprint
       || manifest.rpmSigning.publicKey !== rpmIdentity.publicKey) throw new Error('RPM signing identity differs from configured public identity');
@@ -280,7 +334,20 @@ const validateManifest = (manifest, { version, sourceRevision, repository, rpmId
   return validateArtifactMetadata(manifest.artifacts, version);
 };
 
-const expectedBundleNames = version => [...previewFileNames(version), INSTALL_NOTES, PREVIEW_MANIFEST, CHECKSUMS].sort();
+// Audit-only metadata reader. This does not verify packages or authenticate the
+// old manifest/checksums; no staging/publication API accepts this result as trust.
+export async function readHistoricalLinuxPreviewMetadata({ path, version, sourceRevision, repository, rpmIdentity }) {
+  const manifest = JSON.parse(await readFile(path, 'utf8'));
+  if (![2, 3].includes(manifest.schemaVersion)) throw new Error('Expected historical schema 2 or 3');
+  const historicalRpmOnly = manifest.schemaVersion === 3;
+  if (historicalRpmOnly && !rpmIdentity) throw new Error('Historical RPM identity required');
+  validateManifest(manifest, { version, sourceRevision, repository,
+    rpmIdentity: historicalRpmOnly ? rpmIdentity : undefined, historicalRpmOnly });
+  return { manifest, trust: manifest.trust, metadataAuthenticated: false, publicationEligible: false };
+}
+
+const expectedBundleNames = (version, identity) => [...previewFileNames(version), INSTALL_NOTES, PREVIEW_MANIFEST, CHECKSUMS, ...(identity ? authAssets : [])].sort();
+const checksumNames = (version, identity) => expectedBundleNames(version, identity).filter(name => name !== CHECKSUMS && name !== 'SHA256SUMS.asc');
 
 export const inspectLinuxPackageVersion = async ({ path, kind, version }) => {
   const { stdout } = kind === 'deb'
@@ -373,15 +440,21 @@ export const prepareLinuxPreview = async ({
 
 export const readLinuxPreviewBundle = async ({ directory, version, sourceRevision, repository, rpmIdentity, sourceDirectory }) => {
   const names = (await readdir(directory)).sort();
-  const expectedNames = expectedBundleNames(version);
+  const expectedNames = expectedBundleNames(version, rpmIdentity);
   if (names.length !== expectedNames.length || names.some((name, index) => name !== expectedNames[index])) {
     throw new Error('Linux preview bundle contains missing or unexpected assets');
   }
+  for (const name of expectedNames) {
+    const details = await lstat(join(directory, name));
+    if (!details.isFile() || details.size <= 0) throw new Error('Linux preview requires regular nonempty files');
+    if (!previewFileNames(version).includes(name) && details.size > MAX_METADATA_BYTES) throw new Error('Oversized preview metadata');
+  }
+  if (rpmIdentity) await verifyMetadata({ path: join(directory, CHECKSUMS), signature: join(directory, 'SHA256SUMS.asc'), identity: rpmIdentity });
   const manifest = JSON.parse(await readFile(join(directory, PREVIEW_MANIFEST), 'utf8'));
   const artifacts = validateManifest(manifest, { version, sourceRevision, repository, rpmIdentity });
   const expectedChecksums = new Map([
     ...artifacts.map(artifact => [artifact.fileName, artifact.sha256]),
-    ...await Promise.all([INSTALL_NOTES, PREVIEW_MANIFEST]
+    ...await Promise.all([INSTALL_NOTES, PREVIEW_MANIFEST, ...(rpmIdentity ? aptAssets : [])]
       .map(async name => [name, await sha256(join(directory, name))])),
   ]);
   const checksums = parseChecksums(await readFile(join(directory, CHECKSUMS), 'utf8'));
@@ -397,12 +470,13 @@ export const readLinuxPreviewBundle = async ({ directory, version, sourceRevisio
     if (artifact && details.size !== artifact.size) throw new Error(`Linux preview asset size mismatch: ${name}`);
     if (!details.isFile() || details.size <= 0) throw new Error(`Linux preview asset is not a regular file: ${name}`);
     const digest = await sha256(path);
-    if (name !== CHECKSUMS && checksums.get(name) !== digest) {
+    if (name !== CHECKSUMS && name !== 'SHA256SUMS.asc' && checksums.get(name) !== digest) {
       throw new Error(`Linux preview asset digest mismatch: ${name}`);
     }
     assets.set(name, { name, path, size: details.size, sha256: digest });
   }
   if (rpmIdentity) {
+    await verifyApt({ directory, manifest, identity: rpmIdentity });
     if (await readFile(join(directory, INSTALL_NOTES), 'utf8') !== linuxPreviewInstallNotes({ version, sourceRevision, tag: manifest.tag, rpmIdentity })) {
       throw new Error('Signed preview install instructions differ from canonical trust bootstrap');
     }
@@ -430,6 +504,7 @@ export async function signLinuxPreviewBundle({ directory, outputDirectory, versi
   const { manifest } = await readLinuxPreviewBundle({ directory, version, sourceRevision, repository });
   // Never mutate or overwrite an unsigned bundle or an existing signed candidate.
   await mkdir(outputDirectory);
+  const originalDebs = Object.fromEntries(manifest.artifacts.filter(a => a.kind === 'deb').map(a => [a.fileName, a.sha256]));
   const originals = {};
   for (const artifact of manifest.artifacts) {
     const source = join(directory, artifact.fileName);
@@ -444,10 +519,11 @@ export async function signLinuxPreviewBundle({ directory, outputDirectory, versi
     artifact.sha256 = await sha256(destination);
     artifact.size = (await stat(destination)).size;
   }
-  manifest.schemaVersion = 3;
-  manifest.trust = 'rpm-signed-preview';
+  manifest.schemaVersion = 4;
+  manifest.trust = 'authenticated-linux-preview';
   manifest.tag = linuxPreviewTag(version, sourceRevision, rpmIdentity);
   manifest.rpmSigning = { ...rpmIdentity, originals };
+  manifest.signing = { createdAt: new Date().toISOString(), originalDebs };
   validateManifest(manifest, { version, sourceRevision, repository, rpmIdentity });
   // Reinspect final bytes before producing final metadata/checksums.
   for (const artifact of manifest.artifacts) {
@@ -455,9 +531,12 @@ export async function signLinuxPreviewBundle({ directory, outputDirectory, versi
   }
   await writeFile(join(outputDirectory, PREVIEW_MANIFEST), `${JSON.stringify(manifest, null, 2)}\n`);
   await writeFile(join(outputDirectory, INSTALL_NOTES), linuxPreviewInstallNotes({ version, sourceRevision, tag: manifest.tag, rpmIdentity }));
-  const names = expectedBundleNames(version).filter(name => name !== CHECKSUMS);
+  await createApt({ directory: outputDirectory, manifest, identity: rpmIdentity, privateKey, passphrase });
+  const names = checksumNames(version, rpmIdentity);
   await writeFile(join(outputDirectory, CHECKSUMS), `${(await Promise.all(names.map(async name =>
     `${await sha256(join(outputDirectory, name))}  ${name}`))).join('\n')}\n`);
+  await signMetadata({ path: join(outputDirectory, CHECKSUMS), output: join(outputDirectory, 'SHA256SUMS.asc'), identity: rpmIdentity, privateKey, passphrase });
+  await readLinuxPreviewBundle({ directory: outputDirectory, version, sourceRevision, repository, rpmIdentity, sourceDirectory });
   return manifest;
 }
 
@@ -492,7 +571,7 @@ const githubClient = ({ repository, token, apiUrl, fetchImpl }) => {
 };
 
 const previewReleaseName = (version, sourceRevision, rpmIdentity) => (
-  `ProPR Desktop Linux preview ${version} (${sourceRevision.slice(0, 12)})${rpmIdentity ? ' (signed RPMs)' : ''}`
+  `ProPR Desktop Linux preview ${version} (${sourceRevision.slice(0, 12)})${rpmIdentity ? ' (authenticated DEB and RPM)' : ''}`
 );
 
 const assertDraft = (release, { tag, sourceRevision, version, rpmIdentity }) => {
@@ -628,7 +707,10 @@ export const stageLinuxPreviewDraft = async ({
   }
   const complete = await listAssets(json, release.id);
   if (complete.length !== assets.size) throw new Error('Linux preview draft asset upload is incomplete');
+  const completeNames = new Set();
   for (const asset of complete) {
+    if (completeNames.has(asset.name)) throw new Error('Duplicate completed draft asset');
+    completeNames.add(asset.name);
     const expected = assets.get(asset.name);
     if (!expected) throw new Error(`Linux preview draft contains unexpected asset: ${asset.name}`);
     await verifyRemoteAsset({ request, asset, expected, apiOrigin });
@@ -640,9 +722,8 @@ export const stageLinuxPreviewDraft = async ({
 export const publishLinuxPreviewDraft = async ({
   version, sourceRevision, repository, token, rpmIdentity, sourceDirectory,
   apiUrl = 'https://api.github.com', fetchImpl = fetch,
-  inspectArchitecture = inspectArtifactArchitecture,
-  inspectPackageVersion = inspectLinuxPackageVersion,
 }) => {
+  if (!rpmIdentity) throw new Error('Public Linux publication requires authenticated DEB and RPM mode');
   if (!REPOSITORY.test(repository) || !token) throw new Error('Linux preview publication inputs are invalid');
   const tag = linuxPreviewTag(version, sourceRevision, rpmIdentity);
   const apiOrigin = new URL(apiUrl).origin;
@@ -653,7 +734,7 @@ export const publishLinuxPreviewDraft = async ({
   const release = await findReleaseByTag(json, tag);
   assertDraft(release, { tag, sourceRevision, version, rpmIdentity });
   const listed = await listAssets(json, release.id);
-  const expectedNames = expectedBundleNames(version);
+  const expectedNames = expectedBundleNames(version, rpmIdentity);
   if (listed.length !== expectedNames.length) throw new Error('Linux preview draft does not contain the exact asset set');
   const assets = new Map();
   for (const asset of listed) {
@@ -663,7 +744,7 @@ export const publishLinuxPreviewDraft = async ({
     assets.set(asset.name, asset);
   }
 
-  for (const name of [PREVIEW_MANIFEST, INSTALL_NOTES, CHECKSUMS]) {
+  for (const name of [PREVIEW_MANIFEST, INSTALL_NOTES, CHECKSUMS, ...(rpmIdentity ? authAssets : [])]) {
     const asset = assets.get(name);
     if (!asset || asset.size > MAX_METADATA_BYTES
       || (asset.digest != null && !/^sha256:[a-f0-9]{64}$/.test(asset.digest))) {
@@ -671,7 +752,7 @@ export const publishLinuxPreviewDraft = async ({
     }
   }
   const metadata = {};
-  for (const name of [PREVIEW_MANIFEST, INSTALL_NOTES, CHECKSUMS]) {
+  for (const name of [PREVIEW_MANIFEST, INSTALL_NOTES, CHECKSUMS, ...(rpmIdentity ? authAssets : [])]) {
     const asset = assets.get(name);
     metadata[name] = await verifyRemoteAsset({
       request,
@@ -686,7 +767,7 @@ export const publishLinuxPreviewDraft = async ({
     throw new Error('Linux preview install and channel instructions do not match the approved identity');
   }
   const checksums = parseChecksums(metadata[CHECKSUMS].toString('utf8'));
-  if (checksums.size !== expectedNames.length - 1) throw new Error('Linux preview checksum allowlist is incomplete');
+  if (checksums.size !== checksumNames(version, rpmIdentity).length) throw new Error('Linux preview checksum allowlist is incomplete');
   for (const name of [PREVIEW_MANIFEST, INSTALL_NOTES]) {
     const digest = createHash('sha256').update(metadata[name]).digest('hex');
     if (checksums.get(name) !== digest) throw new Error(`Linux preview checksum mismatch: ${name}`);
@@ -694,6 +775,8 @@ export const publishLinuxPreviewDraft = async ({
 
   const downloadDirectory = await mkdtemp(join(tmpdir(), 'propr-linux-preview-publish-'));
   try {
+    for (const [name, bytes] of Object.entries(metadata)) await writeFile(join(downloadDirectory, name), bytes);
+    await verifyMetadata({ path: join(downloadDirectory, CHECKSUMS), signature: join(downloadDirectory, 'SHA256SUMS.asc'), identity: rpmIdentity });
     for (const artifact of artifactMetadata) {
       const asset = assets.get(artifact.fileName);
       if (!asset || asset.size !== artifact.size || asset.size > MAX_PACKAGE_BYTES
@@ -708,18 +791,9 @@ export const publishLinuxPreviewDraft = async ({
         apiOrigin,
         outputPath,
       });
-      if (rpmIdentity) {
-        await verifySignedArtifact({ path: outputPath, artifact, manifest, rpmIdentity, sourceDirectory });
-      } else {
-        await inspectArchitecture({
-          path: outputPath,
-          kind: artifact.kind,
-          platform: 'linux',
-          arch: artifact.arch,
-        });
-        await inspectPackageVersion({ path: outputPath, kind: artifact.kind, version });
-      }
+
     }
+    await readLinuxPreviewBundle({ directory: downloadDirectory, version, sourceRevision, repository, rpmIdentity, sourceDirectory });
   } finally {
     await rm(downloadDirectory, { recursive: true, force: true });
   }
@@ -730,6 +804,12 @@ export const publishLinuxPreviewDraft = async ({
   if (await json(`/git/ref/tags/${encodeURIComponent(tag)}`, { allowNotFound: true }) !== undefined) {
     throw new Error('Linux preview tag appeared during authorization; refusing publication');
   }
+  const finalAssets = await listAssets(json, release.id);
+  if (finalAssets.length !== assets.size || new Set(finalAssets.map(a => a.name)).size !== assets.size
+    || finalAssets.some(a => {
+      const checked = assets.get(a.name);
+      return !checked || a.id !== checked.id || a.size !== checked.size || a.digest !== checked.digest || a.state !== 'uploaded';
+    })) throw new Error('Draft assets changed during publication verification');
   const published = await json(`/releases/${release.id}`, {
     method: 'PATCH',
     json: { draft: false, prerelease: true, make_latest: 'false' },
@@ -761,10 +841,10 @@ if (process.argv[1] && pathToFileURL(resolve(process.argv[1])).href === import.m
     const version = argument('--version');
     const sourceRevision = argument('--source-revision');
     const repository = argument('--repository');
-    const rpmIdentity = process.argv.includes('--signed-rpm') ? rpmIdentityFromEnvironment() : undefined;
+    const rpmIdentity = (process.argv.includes('--signed-linux') || process.argv.includes('--signed-rpm')) ? rpmIdentityFromEnvironment() : undefined;
     const sourceDirectory = argument('--source-directory');
     if (command === 'sign-bundle') {
-      if (!rpmIdentity) throw new Error('sign-bundle requires --signed-rpm');
+      if (!rpmIdentity) throw new Error('sign-bundle requires --signed-linux');
       await signLinuxPreviewBundle({ directory: resolve(argument('--input')), outputDirectory: resolve(argument('--output')),
         version, sourceRevision, repository, rpmIdentity, sourceDirectory,
         privateKey, passphrase });

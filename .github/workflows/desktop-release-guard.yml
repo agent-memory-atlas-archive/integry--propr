@@ -124,7 +124,7 @@ jobs:
       - name: Install disposable RPM test tools
         run: |
           sudo apt-get update
-          sudo apt-get install --yes rpm gnupg cpio
+          sudo apt-get install --yes rpm gnupg cpio apt dpkg
 
       - name: Require real disposable-key and RPM release helper tests
         env:

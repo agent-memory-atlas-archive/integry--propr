@@ -146,6 +146,8 @@ const sidebars: SidebarsConfig = {
         'operations/connect-dashboard',
         'operations/hosted-ui-tunnel',
         'operations/desktop-application',
+        'operations/linux-release-key',
+        'operations/linux-rpm-signing',
         'operations/desktop-pairing',
         'operations/pwa-web-push',
         'operations/configuration-reference',

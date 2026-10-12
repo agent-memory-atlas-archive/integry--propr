@@ -6,21 +6,23 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { test } from 'node:test';
 import { inspectSignedPreviewPayload } from './rpm-preview-payload.mjs';
-import { assertRpmSignatures, requireRpmIdentity, rpmContentDigest, signRpm, verifyRpm } from './rpm-signing.mjs';
-import { linuxPreviewTag, prepareLinuxPreview, readLinuxPreviewBundle, stageLinuxPreviewDraft, publishLinuxPreviewDraft } from './linux-preview-release.mjs';
+import { OWNER_FINGERPRINT, withKey, assertRpmSignatures, requireRpmIdentity, rpmContentDigest, signRpm, verifyRpm } from './rpm-signing.mjs';
+import { linuxPreviewTag, prepareLinuxPreview, readLinuxPreviewBundle, signLinuxPreviewBundle, stageLinuxPreviewDraft, publishLinuxPreviewDraft } from './linux-preview-release.mjs';
+import { aptAcceptance } from './apt-auth-acceptance.mjs';
+import { authAssets, aptAssets, signMetadata, verifyMetadata, verifyApt } from './linux-package-auth.mjs';
 import { createDesktopRuntimeManifest } from './desktop-runtime-manifest.mjs';
 
 const sha256 = bytes => createHash('sha256').update(bytes).digest('hex');
-const tools = ['gpg', 'rpm', 'rpmsign', 'rpmkeys', 'rpmdb', 'rpmbuild', 'rpm2cpio', 'cpio', 'dpkg-deb'];
+const tools = ['gpg', 'rpm', 'rpmsign', 'rpmkeys', 'rpmdb', 'rpmbuild', 'rpm2cpio', 'cpio', 'dpkg-deb', 'apt-get', 'gpgv'];
 const missing = tools.filter(tool => spawnSync('which', [tool], { stdio: 'ignore' }).status !== 0);
 if (process.env.PROPR_REQUIRE_RPM_TESTS === '1' && missing.length) throw new Error(`Missing required RPM test tools: ${missing}`);
 const run = (command, args, options = {}) => execFileSync(command, args, { encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'], ...options });
 const repositoryRoot = resolve(import.meta.dirname, '../../..');
 
-async function key(root, name) {
+async function key(root, name, historical = false) {
   const home = join(root, name);
   await mkdir(home, { mode: 0o700 });
-  const args = ['--homedir', home, '--batch', '--pinentry-mode', 'loopback', '--passphrase-fd', '0'];
+  const args = ['--homedir', home, ...(historical ? ['--faked-system-time', '1577836800'] : []), '--batch', '--pinentry-mode', 'loopback', '--passphrase-fd', '0'];
   const passphrase = 'disposable-test-passphrase';
   run('gpg', [...args, '--quick-generate-key', `${name} <${name}@example.invalid>`, 'rsa2048', 'sign', '1d'], { input: passphrase });
   const listing = run('gpg', ['--homedir', home, '--with-colons', '--list-keys']);
@@ -129,6 +131,19 @@ test('signed mode requires exact public identity inputs', async () => {
   }
 });
 
+test('documented owner public export has the exact complete RSA4096 identity and expiry', {
+  skip: missing.length ? `Missing tools: ${missing}` : false,
+}, async () => {
+  const publicKey = await readFile(join(repositoryRoot, 'docs/static/keys/propr-desktop-release.asc'), 'utf8');
+  await withKey({ fingerprint: OWNER_FINGERPRINT, publicKey }, async home => {
+    const records = run('gpg', ['--homedir', home, '--with-colons', '--list-keys']).split('\n').map(l => l.split(':'));
+    const primary = records.find(r => r[0] === 'pub');
+    assert.equal(primary[2], '4096');
+    assert.equal(new Date(Number(primary[5]) * 1000).toISOString(), '2026-10-12T13:07:27.000Z');
+    assert.equal(new Date(Number(primary[6]) * 1000).toISOString(), '2028-10-11T13:11:25.000Z');
+  });
+});
+
 test('signature status parsing ignores filename tokens but requires both pinned signatures', () => {
   const fingerprint = 'A'.repeat(32) + '1234ABCD';
   const header = '    Header V4 RSA/SHA256 Signature, key ID 1234abcd: OK';
@@ -148,12 +163,12 @@ test('signature status parsing ignores filename tokens but requires both pinned 
       }
     }
   }
-  assert.throws(() => assertRpmSignatures(`/tmp/unsigned.rpm:\n${digest}\n`, fingerprint), /signatures/);
+  assert.throws(() => assertRpmSignatures(`/tmp/unsigned.rpm:\n${digest}\n`, fingerprint), /signature|tool failed/);
 });
 
 test('real RPM signatures and signed preview bundles fail closed and preserve frozen payloads', {
   skip: missing.length ? `Missing tools: ${missing.join(', ')}` : false,
-  timeout: 180_000,
+  timeout: 300_000,
 }, async t => {
   const root = await mkdtemp(join(tmpdir(), 'propr-rpm-test-'));
   t.after(() => rm(root, { recursive: true, force: true }));
@@ -193,7 +208,7 @@ test('real RPM signatures and signed preview bundles fail closed and preserve fr
   await assert.rejects(signRpm({ path: unsignedRpm, ...correct, identity: wrong.identity }), /private key/);
   await assert.rejects(verifyRpm({ path: unsignedRpm,
     identity: { ...correct.identity, fingerprint: wrong.identity.fingerprint } }), /pinned/);
-  await assert.rejects(readLinuxPreviewBundle({ ...options, directory, rpmIdentity: correct.identity }), /schema/);
+  await assert.rejects(readLinuxPreviewBundle({ ...options, directory, rpmIdentity: correct.identity }), /missing or unexpected/);
 
   const signed = join(root, 'signed');
   // Every package parser must see a scrubbed environment, before and after signing.
@@ -202,37 +217,84 @@ test('real RPM signatures and signed preview bundles fail closed and preserve fr
   await mkdir(wrappers);
   for (const tool of ['rpm', 'dpkg-deb', 'rpm2cpio', 'cpio']) {
     const executable = run('which', [tool]).trim();
-    await writeFile(join(wrappers, tool), `#!${process.execPath}
-import { appendFileSync } from 'node:fs';
-import { spawnSync } from 'node:child_process';
-if ('PROPR_DESKTOP_RPM_PRIVATE_KEY' in process.env || 'PROPR_DESKTOP_RPM_PASSPHRASE' in process.env) process.exit(99);
-appendFileSync(${JSON.stringify(parserLog)}, ${JSON.stringify(tool + '\n')});
-const result = spawnSync(${JSON.stringify(executable)}, process.argv.slice(2), { stdio: 'inherit' });
-process.exit(result.status ?? 98);
+    const quote = value => "'" + value.replaceAll("'", "'\\''") + "'";
+    await writeFile(join(wrappers, tool), `#!/bin/sh
+if [ "\${PROPR_DESKTOP_RPM_PRIVATE_KEY+x}" = x ] || [ "\${PROPR_DESKTOP_RPM_PASSPHRASE+x}" = x ]; then exit 99; fi
+printf '%s\\n' ${quote(tool)} >> ${quote(parserLog)}
+exec ${quote(executable)} "$@"
 `, { mode: 0o755 });
   }
-  // Extensionless parser wrappers use ESM under this explicit package boundary.
-  await writeFile(join(wrappers, 'package.json'), '{"type":"module"}');
-  run(process.execPath, ['apps/desktop/scripts/linux-preview-release.mjs', 'sign-bundle', '--signed-rpm',
-    '--input', directory, '--output', signed, '--version', version, '--source-revision', sourceRevision,
-    '--repository', repository, '--source-directory', repositoryRoot], { cwd: repositoryRoot,
-    env: { ...process.env, PATH: `${wrappers}:${process.env.PATH}`,
-      PROPR_DESKTOP_RPM_PRIVATE_KEY: correct.privateKey, PROPR_DESKTOP_RPM_PASSPHRASE: correct.passphrase,
-      PROPR_DESKTOP_RPM_PUBLIC_KEY: correct.identity.publicKey, PROPR_DESKTOP_RPM_FINGERPRINT: correct.identity.fingerprint } });
+  run(process.execPath, ['--input-type=module', '-e', `
+    import { signLinuxPreviewBundle } from './apps/desktop/scripts/linux-preview-release.mjs';
+    const privateKey = process.env.PROPR_DESKTOP_RPM_PRIVATE_KEY;
+    const passphrase = process.env.PROPR_DESKTOP_RPM_PASSPHRASE;
+    delete process.env.PROPR_DESKTOP_RPM_PRIVATE_KEY;
+    delete process.env.PROPR_DESKTOP_RPM_PASSPHRASE;
+    await signLinuxPreviewBundle({ ...JSON.parse(process.env.TEST_OPTIONS), privateKey, passphrase });
+  `], { cwd: repositoryRoot, env: { ...process.env, PATH: `${wrappers}:${process.env.PATH}`,
+    TEST_OPTIONS: JSON.stringify({ ...options, directory, outputDirectory: signed,
+      sourceDirectory: repositoryRoot, rpmIdentity: correct.identity }),
+    PROPR_DESKTOP_RPM_PRIVATE_KEY: correct.privateKey, PROPR_DESKTOP_RPM_PASSPHRASE: correct.passphrase } });
   const parserCalls = (await readFile(parserLog, 'utf8')).trim().split('\n');
   for (const tool of ['rpm', 'dpkg-deb', 'rpm2cpio', 'cpio']) {
     assert.ok(parserCalls.filter(call => call === tool).length >= 4, `${tool} inspected both architectures before and after signing`);
   }
   const manifest = JSON.parse(await readFile(join(signed, 'linux-preview.json'), 'utf8'));
-  assert.equal(manifest.tag, `${linuxPreviewTag(version, sourceRevision)}-rpm-signed`);
-  assert.equal(manifest.trust, 'rpm-signed-preview');
+  assert.equal(manifest.tag, `${linuxPreviewTag(version, sourceRevision)}-all-signed`);
+  assert.equal(manifest.trust, 'authenticated-linux-preview');
   const bundle = await readLinuxPreviewBundle({ ...options, directory: signed,
     rpmIdentity: correct.identity, sourceDirectory: repositoryRoot });
-  assert.equal(bundle.assets.size, 7);
+  assert.equal(bundle.assets.size, 13);
   assert.match(bundle.notes, /sudo zypper install/);
   assert.match(bundle.notes, /NOKEY/);
-  assert.match(bundle.notes, /Standalone DEBs are not authenticated by RPM signatures/);
+  assert.match(bundle.notes, /Direct DEB downloads are authenticated/);
   assert.doesNotMatch(bundle.notes, /--allow-unsigned-rpm|--nogpgcheck|--no-gpg-checks/);
+  await aptAcceptance({ root, directory: signed, manifest, identity: correct.identity });
+  for (const [data, signature, clear] of [['SHA256SUMS', 'SHA256SUMS.asc', false],
+    ['APT-Release', 'APT-InRelease', true], ['APT-Release', 'APT-Release.gpg', false]]) {
+    const verify = identity => verifyMetadata({ path: join(signed, data), signature: join(signed, signature), clear, identity });
+    await verify(correct.identity);
+    await assert.rejects(verify(wrong.identity), /failed|signature/);
+    const replacement = join(root, `wrong-${signature}`);
+    await signMetadata({ path: join(signed, data), output: replacement, clear, ...wrong });
+    await assert.rejects(verifyMetadata({ path: join(signed, data), signature: replacement, clear, identity: correct.identity }), /failed|signature/);
+  }
+  const expired = await key(root, 'expired', true);
+  await assert.rejects(signMetadata({ path: join(signed, 'SHA256SUMS'), output: join(root, 'expired.sig'), ...expired }), /usable RSA/);
+  const expiredSignature = join(root, 'expired-real.asc');
+  run('gpg', ['--homedir', join(root, 'expired'), '--batch', '--faked-system-time', '1577836810',
+    '--pinentry-mode', 'loopback', '--passphrase-fd', '0', '--local-user', `${expired.identity.fingerprint}!`,
+    '--digest-algo', 'SHA256', '--armor', '--output', expiredSignature, '--detach-sign', join(signed, 'SHA256SUMS')], { input: expired.passphrase });
+  run('gpgconf', ['--homedir', join(root, 'expired'), '--kill', 'gpg-agent']);
+  await assert.rejects(verifyMetadata({ path: join(signed, 'SHA256SUMS'), signature: expiredSignature, identity: expired.identity }), /usable RSA/);
+  const revoked = await key(root, 'revoked');
+  const revokedSignature = join(root, 'revoked-real.asc');
+  await signMetadata({ path: join(signed, 'SHA256SUMS'), output: revokedSignature, ...revoked });
+  const revokePath = join(root, 'revoked', 'openpgp-revocs.d', `${revoked.identity.fingerprint}.rev`);
+  const certificate = (await readFile(revokePath, 'utf8')).replace(':-----BEGIN', '-----BEGIN');
+  run('gpg', ['--homedir', join(root, 'revoked'), '--batch', '--import'], { input: certificate });
+  revoked.identity.publicKey = run('gpg', ['--homedir', join(root, 'revoked'), '--armor', '--export', revoked.identity.fingerprint]);
+  run('gpgconf', ['--homedir', join(root, 'revoked'), '--kill', 'gpg-agent']);
+  await assert.rejects(signMetadata({ path: join(signed, 'SHA256SUMS'), output: join(root, 'revoked.sig'), ...revoked }), /usable RSA/);
+  await assert.rejects(verifyRpm({ path: unsignedRpm, identity: revoked.identity }), /usable RSA/);
+  await assert.rejects(verifyMetadata({ path: join(signed, 'SHA256SUMS'), signature: revokedSignature, identity: revoked.identity }), /usable RSA/);
+  await assert.rejects(verifyApt({ directory: signed, manifest: { ...manifest, signing: { ...manifest.signing, createdAt: '2020-01-01T00:00:00.000Z' } }, identity: correct.identity }), /stale/);
+  const readSigned = () => readLinuxPreviewBundle({ ...options, directory: signed, rpmIdentity: correct.identity, sourceDirectory: repositoryRoot });
+  for (const name of [...bundle.assets.keys()]) {
+    const path = join(signed, name);
+    const bytes = await readFile(path);
+    await rm(path);
+    await assert.rejects(readSigned(), /missing or unexpected/);
+    const changed = Buffer.from(bytes); changed[changed.length - 1] ^= 1;
+    await writeFile(path, changed);
+    await assert.rejects(readSigned(), undefined, `Tampered ${name}`);
+    if (aptAssets.includes(name) || name.endsWith('.deb')) await assert.rejects(verifyApt({ directory: signed, manifest, identity: correct.identity }));
+    await writeFile(path, bytes);
+  }
+  await writeFile(join(signed, 'unexpected'), 'extra');
+  await assert.rejects(readSigned(), /unexpected/);
+  await rm(join(signed, 'unexpected'));
+  await assert.rejects(readLinuxPreviewBundle({ ...options, sourceRevision: '2'.repeat(40), directory: signed, rpmIdentity: correct.identity }), /identity/);
   const publicPath = join(root, 'public.asc');
   await writeFile(publicPath, correct.identity.publicKey);
   const cli = ['apps/desktop/scripts/rpm-signing.mjs', 'verify', '--rpm',
@@ -270,16 +332,16 @@ process.exit(result.status ?? 98);
       await assert.rejects(verifyRpm({ path: final, identity: wrong.identity }), /failed|signatures/);
     }
   }
-  await assert.rejects(readLinuxPreviewBundle({ ...options, directory: signed }), /schema/);
+  await assert.rejects(readLinuxPreviewBundle({ ...options, directory: signed }), /missing or unexpected/);
   await assert.rejects(readLinuxPreviewBundle({ ...options, directory: signed,
-    rpmIdentity: wrong.identity, sourceDirectory: repositoryRoot }), /identity/);
+    rpmIdentity: wrong.identity, sourceDirectory: repositoryRoot }), /identity|tool failed/);
   const remote = github(sourceRevision);
   const publication = { ...options, directory: signed, rpmIdentity: correct.identity,
     sourceDirectory: repositoryRoot, token: 'disposable-test-token', fetchImpl: remote.fetchImpl };
   await stageLinuxPreviewDraft(publication);
-  const signedTitle = `ProPR Desktop Linux preview ${version} (${sourceRevision.slice(0, 12)}) (signed RPMs)`;
+  const signedTitle = `ProPR Desktop Linux preview ${version} (${sourceRevision.slice(0, 12)}) (authenticated DEB and RPM)`;
   assert.equal(remote.release.name, signedTitle);
-  remote.release.name = signedTitle.replace(' (signed RPMs)', '');
+  remote.release.name = signedTitle.replace(' (authenticated DEB and RPM)', '');
   await assert.rejects(stageLinuxPreviewDraft(publication), /exact unpublished/);
   await assert.rejects(publishLinuxPreviewDraft(publication), /exact unpublished/);
   assert.equal(remote.publications, 0);
@@ -304,6 +366,23 @@ process.exit(result.status ?? 98);
   await assert.rejects(publishLinuxPreviewDraft(publication), /metadata mismatch|digest mismatch/);
   assert.equal(remote.publications, 0);
   Object.assign(remoteRpm, originalRemote);
+  const firstAsset = remote.assets[0];
+  const secondAsset = remote.assets[1];
+  remote.assets[1] = firstAsset;
+  await assert.rejects(publishLinuxPreviewDraft(publication), /duplicate/);
+  remote.assets[1] = secondAsset;
+  const savedName = firstAsset.name;
+  firstAsset.name = '../escape';
+  await assert.rejects(publishLinuxPreviewDraft(publication), /invalid/);
+  firstAsset.name = savedName;
+  for (const asset of remote.assets) {
+    const saved = { ...asset };
+    const changed = Buffer.from(asset.bytes); changed[changed.length - 1] ^= 1;
+    Object.assign(asset, { bytes: changed, digest: `sha256:${sha256(changed)}` });
+    await assert.rejects(publishLinuxPreviewDraft(publication));
+    assert.equal(remote.publications, 0);
+    Object.assign(asset, saved);
+  }
   await publishLinuxPreviewDraft(publication);
   assert.equal(remote.publications, 1);
 
@@ -327,9 +406,9 @@ process.exit(result.status ?? 98);
   target.sha256 = sha256(await readFile(path));
   target.size = (await readFile(path)).length;
   await writeFile(join(signed, 'linux-preview.json'), JSON.stringify(manifest));
-  const names = [...manifest.artifacts.map(a => a.fileName), 'INSTALL.md', 'linux-preview.json'].sort();
+  const names = [...manifest.artifacts.map(a => a.fileName), 'INSTALL.md', 'linux-preview.json', ...aptAssets].sort();
   await writeFile(join(signed, 'SHA256SUMS'), (await Promise.all(names.map(async name =>
     `${sha256(await readFile(join(signed, name)))}  ${name}\n`))).join(''));
   await assert.rejects(readLinuxPreviewBundle({ ...options, directory: signed,
-    rpmIdentity: correct.identity, sourceDirectory: repositoryRoot }), /signatures/);
+    rpmIdentity: correct.identity, sourceDirectory: repositoryRoot }), /signature|tool failed/);
 });

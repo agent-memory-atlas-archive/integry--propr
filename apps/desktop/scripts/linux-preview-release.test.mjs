@@ -12,6 +12,7 @@ import {
   prepareLinuxPreview,
   publishLinuxPreviewDraft,
   readLinuxPreviewBundle,
+  readHistoricalLinuxPreviewMetadata,
   stageLinuxPreviewDraft,
 } from './linux-preview-release.mjs';
 import { signReleaseMetadata } from './release-artifacts.mjs';
@@ -384,23 +385,10 @@ describe('Linux preview release channel', () => {
     assert.equal(github.assets.length, 7);
     assert.equal(github.patchCalls, 0);
 
-    const published = await publishLinuxPreviewDraft({
-      version,
-      sourceRevision,
-      repository,
-      token: 'token',
-      fetchImpl: github.fetchImpl,
-      inspectArchitecture: async ({ kind, arch }) => ({
-        format: kind,
-        executable: { platform: 'linux', architectures: [arch] },
-      }),
-      inspectPackageVersion: async () => undefined,
-    });
-    assert.equal(published.draft, false);
-    assert.equal(published.prerelease, true);
-    assert.equal(github.patchCalls, 1);
-    assert.equal(github.tagLookupCalls, 0);
-    assert.deepEqual(github.releaseListCalls, [1, 1, 2, 1, 2]);
+    await assert.rejects(publishLinuxPreviewDraft({ version, sourceRevision, repository,
+      token: 'token', fetchImpl: github.fetchImpl }), /requires authenticated DEB and RPM/);
+    assert.equal(github.patchCalls, 0);
+    assert.deepEqual(github.releaseListCalls, [1, 1, 2]);
   });
 
   test('fails closed if finalized package bytes change before preview preparation', async () => {
@@ -447,7 +435,7 @@ process.exit(42);
     encoding: 'utf8', env: { ...process.env, PATH: bin,
       PROPR_DESKTOP_RPM_PRIVATE_KEY: 'private-test-sentinel', PROPR_DESKTOP_RPM_PASSPHRASE: 'password-test-sentinel',
       PROPR_DESKTOP_RPM_PUBLIC_KEY: '-----BEGIN PGP PUBLIC KEY BLOCK-----',
-      PROPR_DESKTOP_RPM_FINGERPRINT: 'A'.repeat(40) },
+      PROPR_DESKTOP_RPM_FINGERPRINT: 'DD4E7F65CE2345A1F4597D643CF856B53093D3A3' },
   });
   assert.equal(result.status, 1);
   assert.deepEqual(JSON.parse(await readFile(evidence, 'utf8')), { key: false, passphrase: false });
@@ -464,4 +452,31 @@ test('signed install notes make rpmkeys primary and offer a standalone pinned-so
   assert.ok(notes.includes('https://raw.githubusercontent.com/integry/propr/${HELPER_REVISION}/apps/desktop/scripts/rpm-signing.mjs'));
   assert.match(notes, /node \.\/rpm-signing.mjs verify/);
   assert.doesNotMatch(notes, /node apps\/desktop\/scripts/);
+});
+
+
+test('historical metadata remains explicitly unauthenticated and cannot enter all-signed publication', async () => {
+  const { directory } = await createBundle();
+  const path = join(directory, 'linux-preview.json');
+  const options = { path, version, sourceRevision, repository };
+  const unsigned = await readHistoricalLinuxPreviewMetadata(options);
+  assert.equal(unsigned.trust, 'unsigned-preview');
+  assert.equal(unsigned.metadataAuthenticated, false);
+  assert.equal(unsigned.publicationEligible, false);
+  const manifest = unsigned.manifest;
+  const rpmIdentity = { fingerprint: 'A'.repeat(40), publicKey: '-----BEGIN PGP PUBLIC KEY BLOCK-----' };
+  manifest.schemaVersion = 3;
+  manifest.trust = 'rpm-signed-preview';
+  manifest.tag += '-rpm-signed';
+  manifest.rpmSigning = { ...rpmIdentity, originals: Object.fromEntries(manifest.artifacts.filter(a => a.kind === 'rpm')
+    .map(a => [a.fileName, { sha256: a.sha256, contentSha256: 'b'.repeat(64) }])) };
+  await writeFile(path, JSON.stringify(manifest));
+  const old = await readHistoricalLinuxPreviewMetadata({ ...options, rpmIdentity });
+  assert.equal(old.trust, 'rpm-signed-preview');
+  assert.equal(old.metadataAuthenticated, false);
+  assert.equal(old.publicationEligible, false);
+  await assert.rejects(readLinuxPreviewBundle({ directory, version, sourceRevision, repository, rpmIdentity }), /missing or unexpected/);
+  manifest.trust = 'authenticated-linux-preview';
+  await writeFile(path, JSON.stringify(manifest));
+  await assert.rejects(readHistoricalLinuxPreviewMetadata({ ...options, rpmIdentity }), /identity/);
 });
