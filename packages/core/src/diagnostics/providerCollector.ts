@@ -3,6 +3,7 @@ import { nativeCredentialValues } from './credentialRedaction.js';
 import fs from 'node:fs';
 import { ManagedLogSpool, digest, type LogIdentity, type Cursor } from './managedLogSpool.js';
 import { PinnedDirectory } from './privateDirectory.js';
+import { assertProviderOwner, isProviderOwnershipError } from './providerOwnership.js';
 
 export type DiagnosticProvider = 'codex' | 'claude' | 'antigravity' | 'opencode' | 'vibe';
 // Exact structural allowlists. No glob of an entire home; no repository paths.
@@ -51,19 +52,24 @@ export interface NativeInventory {
 export function collectProvider(spool: ManagedLogSpool, input: ProviderRoot & { measureOnly?: boolean; pinnedRoot?: PinnedDirectory; rejectUnsafe?: boolean }, now = Date.now()): boolean {
     const summary: LogIdentity = { provider: input.provider, agent: input.agent, source: input.transient ? `native-state:${digest(input.root)}` : 'native-state' };
     const transientRoot = input.transient ? input.root : undefined;
-    let root: PinnedDirectory;
-    try { root = input.pinnedRoot ?? PinnedDirectory.open(input.root); }
-    catch (e) {
-        spool.report(summary, (e as NodeJS.ErrnoException).code === 'ENOENT' ? 'ownership-unverified' : 'unsafe-source');
+    const rejectRoot = (e: unknown): false => {
+        spool.report(summary, isProviderOwnershipError(e) ? 'ownership-unsupported'
+            : (e as NodeJS.ErrnoException).code === 'ENOENT' ? 'ownership-unverified' : 'unsafe-source');
         if (input.rejectUnsafe) throw e;
         return false;
-    }
+    };
+    let root: PinnedDirectory;
+    try { root = input.pinnedRoot ?? PinnedDirectory.open(input.root); }
+    catch (e) { return rejectRoot(e); }
+    const rootStat = fs.fstatSync(root.fd);
+    // Unsupported worker/container UID mappings fail closed before any read.
+    try { assertProviderOwner(rootStat.uid); }
+    catch (e) { if (!input.pinnedRoot) root.close(); return rejectRoot(e); }
     let credentials: readonly string[];
     try { credentials = input.measureOnly ? [] : [...input.credentials, ...nativeCredentialValues(input.root, input.provider, root)]; }
     catch { if (!input.pinnedRoot) root.close(); spool.report(summary, 'unsafe-source'); return false; }
     rememberDiagnosticCredentials(credentials);
     let count = 0, readBytes = 0, protectedBytes = 0;
-    const rootStat = fs.fstatSync(root.fd);
     const inventory: NativeInventory = { rootIdentity: digest(`${rootStat.dev}:${rootStat.ino}`), diagnosticBytes: 0, sessionBytes: 0, databaseBytes: 0,
         diagnosticFiles: 0, sessionFiles: 0, databaseFiles: 0, excludedEntries: 0 };
     const measure = (relative: string, size: number) => {
@@ -75,10 +81,16 @@ export function collectProvider(spool: ManagedLogSpool, input: ProviderRoot & { 
     };
     let deadline = performance.now() + spool.limits.scanMs;
     let limited = false, inventoryIncomplete = false, unsafe = false;
+    // Entries whose owner differs from the supported root are unsafe sources,
+    // never a UID-mapping remedy: the foreign owner may be adversarial.
+    const refuse = (identity?: LogIdentity): void => {
+        unsafe = true; inventoryIncomplete = true; spool.report(summary, 'unsafe-source');
+        if (identity) spool.report(identity, 'unsafe-source');
+    };
     const measureProtectedFile = (dir: PinnedDirectory, entry: fs.Dirent, relative: string): void => {
         let fd: number | undefined;
         try { fd = dir.file(entry.name); measure(relative, fs.fstatSync(fd).size); }
-        catch { unsafe = true; inventoryIncomplete = true; spool.report(summary, 'unsafe-source'); }
+        catch { refuse(); }
         finally { if (fd !== undefined) fs.closeSync(fd); }
     };
     const collectFile = (dir: PinnedDirectory, entry: fs.Dirent, relative: string): void => {
@@ -87,32 +99,33 @@ export function collectProvider(spool: ManagedLogSpool, input: ProviderRoot & { 
         try {
             if (!input.measureOnly) spool.trackNativeSource(identity, transientRoot);
             fd = dir.file(entry.name);
-            const stat = fs.fstatSync(fd);
-            measure(relative, stat.size);
+            const stat = fs.fstatSync(fd, { bigint: true });
+            const size = Number(stat.size);
+            measure(relative, size);
             if (input.measureOnly || !input.credentialContextComplete) return;
             if (readBytes >= spool.limits.scanBytes) { limited = true; return; }
             const before = spool.cursor(identity);
-            const inode = `${stat.dev}:${stat.ino}:${stat.birthtimeMs}`;
+            const current = { ...fileIdentity(stat), size };
             let offset = before.offset ?? 0;
             const anchorAt = (position: number) => {
                 const bytes = Buffer.alloc(Math.min(128, position));
                 const n = fs.readSync(fd!, bytes, 0, bytes.length, position - bytes.length);
                 return digest(bytes.subarray(0, n));
             };
-            const replaced = sourceWasReplaced(before, { offset, size: stat.size, inode }, anchorAt);
+            const replaced = sourceWasReplaced(before, { ...current, offset }, anchorAt);
             if (replaced) {
-                spool.report(identity, 'source-replaced', Math.max(0, offset - stat.size)); offset = 0;
+                spool.report(identity, 'source-replaced', Math.max(0, offset - size)); offset = 0;
             }
-            if (sourceIsCaughtUp(before, { offset, size: stat.size, inode }, replaced)) return;
-            const buffer = Buffer.alloc(Math.min(spool.limits.scanBytes - readBytes, stat.size - offset));
+            if (sourceIsCaughtUp(before, { ...current, offset }, replaced)) return;
+            const buffer = Buffer.alloc(Math.min(spool.limits.scanBytes - readBytes, size - offset));
             const length = fs.readSync(fd, buffer, 0, buffer.length, offset);
             readBytes += length;
             const { records, start, dropped, discard, recordBound } = readCommittedRecords(buffer.subarray(0, length),
                 spool.limits.recordBytes, replaced ? false : before.discard ?? false);
             if (recordBound) limited = true;
             spool.append(identity, records, relative.endsWith('.jsonl') ? 'jsonl' : 'text', { credentials, now,
-                cursor: { before, after: { inode, offset: offset + start, discard, anchor: anchorAt(offset + start) } }, droppedBytes: dropped });
-        } catch { unsafe = true; inventoryIncomplete = true; spool.report(summary, 'unsafe-source'); spool.report(identity, 'unsafe-source'); }
+                cursor: { before, after: { inode: current.inode, birth: current.birth, offset: offset + start, discard, anchor: anchorAt(offset + start) } }, droppedBytes: dropped });
+        } catch { refuse(identity); }
         finally { if (fd !== undefined) fs.closeSync(fd); }
     };
     const visitEntry = (dir: PinnedDirectory, entry: fs.Dirent, relative: string): void => {
@@ -125,8 +138,12 @@ export function collectProvider(spool: ManagedLogSpool, input: ProviderRoot & { 
         }
         else if (directories[input.provider].test(relative)) {
             let child: PinnedDirectory | undefined;
-            try { child = dir.child(entry.name); walk(child, relative + '/'); }
-            catch { unsafe = true; inventoryIncomplete = true; spool.report(summary, 'unsafe-source'); }
+            try {
+                child = dir.child(entry.name);
+                assertProviderOwner(fs.fstatSync(child.fd).uid, rootStat.uid);
+                walk(child, relative + '/');
+            }
+            catch { refuse(); }
             finally { child?.close(); }
         }
         else {
@@ -155,13 +172,31 @@ export function collectProvider(spool: ManagedLogSpool, input: ProviderRoot & { 
     return !inventoryIncomplete;
 }
 
-function sourceWasReplaced(before: Cursor, current: { offset: number; size: number; inode: string }, anchorAt: (position: number) => string): boolean {
-    const { offset, size, inode } = current;
-    return Boolean((before.anchor && offset <= size && before.anchor !== anchorAt(offset)) || (before.inode && before.inode !== inode) || offset > size);
+/** Stable provider-file identity. Without a filesystem birth time Node
+ * substitutes ctime, which every append changes; birth time therefore only
+ * participates when it is distinguishable from ctime. Inode and anchor checks
+ * still detect replacement and rewrites. */
+export function fileIdentity(stat: fs.BigIntStats): { inode: string; birth?: string } {
+    const inode = `${stat.dev}:${stat.ino}`;
+    return stat.birthtimeNs > 0n && stat.birthtimeNs !== stat.ctimeNs ? { inode, birth: String(stat.birthtimeNs) } : { inode };
 }
 
-function sourceIsCaughtUp(before: Cursor, current: { offset: number; size: number; inode: string }, replaced: boolean): boolean {
-    return !replaced && before.inode === current.inode && current.offset === current.size;
+/** Legacy cursors stored `dev:ino:birthtimeMs`, possibly a substituted ctime. */
+function cursorIdentity(before: Cursor): { inode?: string; birth?: string } {
+    const legacy = before.inode?.match(/^(\d+:\d+):[^:]*$/);
+    return legacy ? { inode: legacy[1] } : { inode: before.inode, birth: before.birth };
+}
+
+type Current = { offset: number; size: number; inode: string; birth?: string };
+function sourceWasReplaced(before: Cursor, current: Current, anchorAt: (position: number) => string): boolean {
+    const { offset, size, inode, birth } = current;
+    const previous = cursorIdentity(before);
+    return Boolean((before.anchor && offset <= size && before.anchor !== anchorAt(offset)) || (previous.inode && previous.inode !== inode)
+        || (previous.birth && birth && previous.birth !== birth) || offset > size);
+}
+
+function sourceIsCaughtUp(before: Cursor, current: Current, replaced: boolean): boolean {
+    return !replaced && cursorIdentity(before).inode === current.inode && current.offset === current.size;
 }
 
 /** Keep oversized unfinished lines discarded across bounded reads. */
