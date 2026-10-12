@@ -4,6 +4,7 @@ import { hostname } from "node:os";
 import { isAbsolute, normalize } from "node:path";
 import { DEFAULT_PROPR_GH_RELAY_URL } from "@propr/shared";
 import {
+  GithubBrowserSignInError,
   applyEnvSelection,
   clearEnvKeys,
   classifyBackendAccessError,
@@ -44,6 +45,8 @@ export function createDefaultActions(configManager?: ConfigManager, options: {
   capturedCommand?: CapturedCommandRunner;
   githubBrowserLogin?: (options: { signal?: AbortSignal; onLog?: (line: string) => void }) => Promise<string>;
 } = {}): SetupActions {
+  let browserLoginFailure: string | undefined;
+  let browserTokenSaveFailed = false;
   /** A client pointed at the local stack's API port (not the saved remote URL). */
   const localApiClient = async (rootDir: string): Promise<import("../../api/client.js").ApiClient> => {
     const { getHostConfig } = await import("../../orchestrator/index.js");
@@ -337,8 +340,14 @@ export function createDefaultActions(configManager?: ConfigManager, options: {
       const client = await localApiClient(rootDir);
       await updateSetting("github_user_whitelist", users, client);
     },
+    githubLoginRecovery() {
+      return options.githubBrowserLogin ? {
+        detail: browserLoginFailure ?? "GitHub browser sign-in is required to continue.",
+        nextAction: "Choose Retry setup to start a new GitHub browser sign-in, then return to ProPR and confirm the intended account.",
+      } : undefined;
+    },
     hasGithubToken() {
-      return Boolean(configManager?.getGithubToken());
+      return !browserTokenSaveFailed && Boolean(configManager?.getGithubToken());
     },
     async fetchRelayInstallations({ relayUrl }) {
       const { fetchAuthenticatedUser } = await import("../../api/relay.js");
@@ -355,17 +364,27 @@ export function createDefaultActions(configManager?: ConfigManager, options: {
     async loginWithGithub({ onLog, signal, force } = {}) {
       if (!configManager) return false;
       if (options.githubBrowserLogin) {
+        browserLoginFailure = undefined;
         let token: string;
         try {
           token = await options.githubBrowserLogin({ signal, onLog });
-        } catch {
+        } catch (error) {
           signal?.throwIfAborted();
           // Injected providers/transport errors may contain credentials. Never log them.
-          onLog?.("GitHub authentication did not complete. Try again or keep the current account.");
+          browserLoginFailure = GithubBrowserSignInError.safeMessage(error);
+          onLog?.(browserLoginFailure);
           return false;
         }
         signal?.throwIfAborted();
-        await configManager.setGithubToken(token);
+        try {
+          await configManager.setGithubToken(token);
+          browserTokenSaveFailed = false;
+        } catch {
+          browserTokenSaveFailed = true;
+          browserLoginFailure = "GitHub account was confirmed, but ProPR could not save sign-in on this computer. Check available storage and retry.";
+          onLog?.(browserLoginFailure);
+          return false;
+        }
         return true;
       }
       const { loginWithGithubCli } = await import("../../auth/githubLogin.js");
@@ -387,6 +406,7 @@ export function createDefaultActions(configManager?: ConfigManager, options: {
    * the default base URL; an explicit `relayUrl` (self-hosted) overrides it.
    */
   function relayClient(relayUrl?: string): RelayClientOptions {
+    if (browserTokenSaveFailed) throw new Error("GitHub sign-in could not be saved. Choose Retry setup to sign in again.");
     const githubToken = configManager?.getGithubToken();
     if (!githubToken) {
       throw new Error("Not logged in to GitHub. Run `propr login` first.");

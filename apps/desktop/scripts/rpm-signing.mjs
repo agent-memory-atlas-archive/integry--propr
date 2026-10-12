@@ -80,8 +80,9 @@ export function assertRpmSignatures(stdout, fingerprint) {
     .some(match => match[1].toLowerCase() === id);
   const packageSignature = [...statuses.matchAll(/^\s*V[34] RSA\/SHA256 Signature, key ID ([a-f0-9]{8}): OK$/gmi)]
     .some(match => match[1].toLowerCase() === id);
+  // Failure words must be result values, not substrings of hexadecimal key IDs.
   if (!header || !packageSignature
-    || /NOT OK|NOKEY|NOTTRUSTED|BAD|UNKNOWN/i.test(statuses)) {
+    || /:[ \t]*(?:NOT OK|NOKEY|NOTTRUSTED|BAD|UNKNOWN)\b/i.test(statuses)) {
     throw new Error('RPM must have verified header and package signatures from the pinned identity');
   }
 }

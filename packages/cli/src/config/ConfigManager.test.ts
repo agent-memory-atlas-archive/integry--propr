@@ -54,6 +54,49 @@ test("getRemoteProfiles returns copied profiles and includes an empty default pr
   }
 });
 
+for (const existingProfile of [false, true]) {
+  for (const genericSetter of [false, true]) {
+    test(`failed token save rolls back ${existingProfile ? "an existing" : "an absent"} profile via ${genericSetter ? "set" : "setGithubToken"}`, async t => {
+      const tempDir = createTempDir();
+      try {
+        const manager = new ConfigManager(tempDir);
+        await manager.init();
+        if (existingProfile) {
+          writeProfileConfig(tempDir);
+          await manager.load();
+          await manager.setRemoteProfile("other", { githubToken: "other-token" });
+        }
+        await manager.setStackRoot("/previous/root");
+        const previous = manager.getAll();
+        const previousDisk = readFileSync(join(tempDir, "config.json"), "utf8");
+        const saveError = new Error("fixture save failure");
+        const failedSave = t.mock.method(manager, "save", async () => { throw saveError; });
+
+        await assert.rejects(
+          genericSetter ? manager.set("githubToken", "rejected-token") : manager.setGithubToken("rejected-token"),
+          error => error === saveError,
+        );
+        assert.deepEqual(manager.getAll(), previous);
+        assert.equal(manager.getGithubToken(), existingProfile ? "stored-token" : undefined);
+        assert.equal(readFileSync(join(tempDir, "config.json"), "utf8"), previousDisk);
+
+        failedSave.mock.restore();
+        await manager.setStackRoot("/next/root");
+        const disk = new ConfigManager(tempDir);
+        await disk.init();
+        assert.deepEqual(disk.getAll(), { ...previous, stackRoot: "/next/root" });
+
+        await manager.setGithubToken("retry-token");
+        await disk.load();
+        assert.equal(manager.getGithubToken(), "retry-token");
+        assert.equal(disk.getGithubToken(), "retry-token");
+      } finally {
+        cleanupTempDir(tempDir);
+      }
+    });
+  }
+}
+
 test("read-only configuration inspection never repairs permissions or writes", async () => {
   if (process.platform === "win32") return;
   const tempDir = createTempDir();

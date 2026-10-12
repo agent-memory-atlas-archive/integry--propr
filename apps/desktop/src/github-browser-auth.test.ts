@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import type { MessageBoxOptions } from 'electron';
+import { createGithubCodePresenter } from './github-code-presenter';
 import { createGithubBrowserLogin, type GithubBrowserAuthDependencies } from './github-browser-auth';
 
 const device = { device_code: 'a'.repeat(40), user_code: 'ABCD-EFGH', verification_uri: 'https://github.com/login/device', expires_in: 900, interval: 5 };
@@ -122,6 +124,64 @@ test('browser-open failure aborts the attempt without polling', async () => {
   assert.equal(f.calls.length, 1);
 });
 
+for (const failure of ['browser rejection', 'unsafe URL', 'shutdown response', 'dialog rejection']) test(`real presenter preserves safe browser failure through login: ${failure}`, async () => {
+  const f = fixture(); const logs: string[] = [];
+  let opened = 0; let closed = 0;
+  const present = createGithubCodePresenter({
+    isShuttingDown: () => failure === 'shutdown response',
+    copy: () => assert.fail('failure must not copy'),
+    openExternal: async () => { opened++; throw new Error(`${device.device_code} ${device.user_code} private OS details`); },
+    showDialog: async options => {
+      if (failure === 'dialog rejection') throw new Error(`${device.user_code} private dialog details`);
+      if (!opened) return { response: 0 };
+      return new Promise(resolve => options.signal!.addEventListener('abort', () => {
+        closed++; resolve({ response: 1 });
+      }, { once: true }));
+    },
+  });
+  f.dependencies.presentCode = (code, url, signal, cancel) => present(code, failure === 'unsafe URL' ? 'javascript:alert(1)' : url, signal, cancel);
+  delete f.dependencies.sleep;
+  await assert.rejects(createGithubBrowserLogin(f.dependencies)({ onLog: line => logs.push(line) }), error => {
+    assert.equal((error as Error).message, 'GitHub browser sign-in could not complete. Check your browser and connection, then retry.');
+    assert.notEqual((error as Error).name, 'AbortError');
+    return true;
+  });
+  assert.equal(opened, failure === 'browser rejection' ? 1 : 0);
+  assert.equal(closed, failure === 'browser rejection' ? 1 : 0);
+  assert.equal(f.calls.length, 1);
+  assert.deepEqual(f.identities, []);
+  for (const secret of [device.device_code, device.user_code, token.access_token]) assert.ok(!logs.join().includes(secret));
+});
+
+test('browser launch failure discards an in-flight token before identity lookup', async () => {
+  const f = fixture(); let rejectOpen!: (error: Error) => void; let releaseToken!: () => void;
+  let pollStarted!: () => void; let dialogs = 0;
+  const polling = new Promise<void>(resolve => { pollStarted = resolve; });
+  const pending = new Promise<void>(resolve => { releaseToken = resolve; });
+  const fetch = f.dependencies.fetch!;
+  f.dependencies.fetch = async (url, options) => {
+    if (String(url).endsWith('/access_token')) { pollStarted(); await pending; }
+    return fetch(url, options);
+  };
+  f.dependencies.presentCode = createGithubCodePresenter({
+    isShuttingDown: () => false, copy: () => assert.fail('must not copy'),
+    openExternal: () => new Promise((_, reject) => { rejectOpen = reject; }),
+    showDialog: async options => {
+      if (++dialogs === 1) return { response: 0 };
+      return new Promise(resolve => options.signal!.addEventListener('abort', () => resolve({ response: 1 }), { once: true }));
+    },
+  });
+  const result = createGithubBrowserLogin(f.dependencies)();
+  const rejected = assert.rejects(result, /browser sign-in could not complete/);
+  await polling;
+  rejectOpen(new Error(`${device.device_code} private browser details`));
+  await settle();
+  releaseToken();
+  await rejected;
+  assert.equal(f.calls.length, 2);
+  assert.deepEqual(f.identities, []);
+});
+
 test('unsupported expiring credentials fail clearly before storage or identity confirmation', async () => {
   const f = fixture([device, { ...token, expires_in: 28800, refresh_token: 'fixture_refresh' }]);
   await assert.rejects(createGithubBrowserLogin(f.dependencies)(), /non-expiring user tokens/);
@@ -157,4 +217,110 @@ for (const field of ['device_code', 'user_code']) for (const value of ['', 'a\nb
   const f = fixture([{ ...device, [field]: value }]);
   await assert.rejects(createGithubBrowserLogin(f.dependencies)(), /unavailable/);
   assert.equal(f.calls.length, 1);
+});
+
+
+// Model Electron's async native dialog: it stays open until a button or abort.
+function nativeFixture(responses?: unknown[]) {
+  const f = fixture(responses);
+  const dialogs: { options: MessageBoxOptions; respond(response: number): void; closed: boolean }[] = [];
+  const copied: string[] = []; const opened: string[] = [];
+  f.dependencies.presentCode = createGithubCodePresenter({
+    isShuttingDown: () => false,
+    copy: code => copied.push(code),
+    openExternal: async url => { opened.push(url); },
+    showDialog: options => new Promise(resolve => {
+      const entry = { options, closed: false, respond: (response: number) => {
+        entry.closed = true;
+        options.signal!.removeEventListener('abort', abort);
+        resolve({ response });
+      } };
+      const abort = () => entry.respond(options.cancelId!);
+      dialogs.push(entry);
+      options.signal!.addEventListener('abort', abort, { once: true });
+      if (options.signal!.aborted) abort();
+    }),
+  });
+  f.dependencies.confirmIdentity = async login => {
+    assert.ok(dialogs.length > 0);
+    assert.ok(dialogs.every(dialog => dialog.closed), 'native code UI closes before confirmation');
+    f.identities.push(login);
+    return true;
+  };
+  return { ...f, dialogs, copied, opened };
+}
+const settle = () => new Promise<void>(resolve => setImmediate(resolve));
+
+for (const action of ['leave open', 'copy', 'open browser']) test(`real native presenter advances to verified confirmation with initial action: ${action}`, async () => {
+  const f = nativeFixture(); let approve!: () => void;
+  f.dependencies.sleep = () => new Promise(resolve => { approve = resolve; });
+  const logs: string[] = [];
+  const result = createGithubBrowserLogin(f.dependencies)({ onLog: line => logs.push(line) });
+  await settle();
+  assert.equal(f.dialogs.length, 1);
+  assert.equal(f.dialogs[0].closed, false);
+  assert.equal(f.calls.length, 1);
+  if (action !== 'leave open') {
+    f.dialogs[0].respond(action === 'copy' ? 1 : 0);
+    await settle();
+    assert.equal(f.dialogs.length, 2);
+    assert.equal(f.dialogs[1].closed, false);
+  }
+  // Approval in another browser needs no response from the open native dialog.
+  approve();
+  assert.equal(await result, token.access_token);
+  assert.deepEqual(f.identities, ['propr-ultrafix']);
+  assert.ok(f.dialogs.every(dialog => dialog.closed));
+  assert.deepEqual(f.copied, action === 'copy' ? [device.user_code] : []);
+  assert.deepEqual(f.opened, action === 'open browser' ? [device.verification_uri] : []);
+  for (const secret of [device.user_code, device.device_code, token.access_token]) assert.ok(!logs.join().includes(secret));
+});
+
+for (const ending of ['native cancel', 'shutdown', 'deadline', 'provider expiry', 'device expiry']) test(`held initial native dialog closes on ${ending} and allows retry`, async () => {
+  const f = nativeFixture(ending === 'provider expiry' ? [device, { error: 'expired_token' }] : undefined);
+  if (ending === 'deadline') f.dependencies.deadlineMs = 10;
+  if (ending === 'device expiry') {
+    const fetch = f.dependencies.fetch!;
+    f.dependencies.fetch = async (url, options) => String(url).endsWith('/device/code')
+      ? Response.json({ ...device, expires_in: 1 }) : fetch(url, options);
+  }
+  if (ending !== 'provider expiry') delete f.dependencies.sleep;
+  const caller = new AbortController();
+  const login = createGithubBrowserLogin(f.dependencies);
+  const result = login({ signal: caller.signal });
+  const rejected = assert.rejects(result, ending.includes('expiry') ? /expired/ : ending === 'deadline' ? /timed out/ : /cancelled/);
+  await settle();
+  if (ending === 'native cancel') f.dialogs[0].respond(2);
+  if (ending === 'shutdown') caller.abort();
+  await rejected;
+  assert.ok(f.dialogs.every(dialog => dialog.closed));
+  assert.deepEqual(f.identities, []);
+  const fresh = nativeFixture(); Object.assign(f.dependencies, fresh.dependencies);
+  assert.equal(await login(), token.access_token);
+  assert.deepEqual(fresh.identities, ['propr-ultrafix']);
+  assert.ok(fresh.dialogs.every(dialog => dialog.closed));
+});
+
+test('repeated native attempts close superseded initial dialog before a fresh confirmation', async () => {
+  const f = nativeFixture(); delete f.dependencies.sleep;
+  const login = createGithubBrowserLogin(f.dependencies);
+  const old = login(); const rejected = assert.rejects(old);
+  await settle();
+  assert.equal(f.dialogs[0].closed, false);
+  const fresh = nativeFixture(); Object.assign(f.dependencies, fresh.dependencies);
+  assert.equal(await login(), token.access_token);
+  await rejected;
+  assert.ok(f.dialogs.every(dialog => dialog.closed));
+  assert.deepEqual(f.identities, []);
+  assert.deepEqual(fresh.identities, ['propr-ultrafix']);
+});
+
+test('host-safe failures use fixed messages even if an Error message is overwritten', async () => {
+  const { GithubBrowserSignInError } = await import('@propr/local-setup');
+  const failure = new GithubBrowserSignInError('GitHub account was not confirmed. Retry sign-in and choose the intended account in GitHub.');
+  failure.message = `${token.access_token} ${device.device_code} ${device.user_code}`;
+  assert.match(GithubBrowserSignInError.safeMessage(failure), /account was not confirmed/);
+  const arbitrary = GithubBrowserSignInError.safeMessage(new Error(failure.message));
+  assert.match(arbitrary, /browser sign-in could not complete/);
+  for (const secret of [token.access_token, device.device_code, device.user_code]) assert.ok(!arbitrary.includes(secret));
 });

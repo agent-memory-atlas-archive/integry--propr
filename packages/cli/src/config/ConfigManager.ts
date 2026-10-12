@@ -273,13 +273,20 @@ export class ConfigManager {
 
   private async updateActiveProfile(patch: Partial<RemoteProfile>): Promise<void> {
     const name = this.getActiveProfileName();
-    const profiles = { ...(this.config.profiles ?? {}) };
+    const previousProfiles = this.config.profiles;
+    const profiles = { ...(previousProfiles ?? {}) };
     profiles[name] = {
       ...(profiles[name] ?? {}),
       ...patch,
     };
     this.config.profiles = profiles;
-    await this.save();
+    try {
+      await this.save();
+    } catch (error) {
+      // A later config write must not persist a profile update that failed.
+      this.config.profiles = previousProfiles;
+      throw error;
+    }
   }
 
   /**

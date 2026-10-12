@@ -166,6 +166,20 @@ test('signature status parsing ignores filename tokens but requires both pinned 
   assert.throws(() => assertRpmSignatures(`/tmp/unsigned.rpm:\n${digest}\n`, fingerprint), /signature|tool failed/);
 });
 
+test('signature status parsing accepts BAD within a verified hexadecimal key ID', () => {
+  for (const id of ['bad12345', '12bad345', '12345bad']) {
+    const fingerprint = 'A'.repeat(32) + id.toUpperCase();
+    const header = `    Header V4 RSA/SHA256 Signature, key ID ${id}: OK`;
+    const payload = `    V4 RSA/SHA256 Signature, key ID ${id}: OK`;
+    const output = `/tmp/signed.rpm:\n${header}\n${payload}\n`;
+    assert.doesNotThrow(() => assertRpmSignatures(output, fingerprint));
+    for (const line of [header, payload]) {
+      assert.throws(() => assertRpmSignatures(output.replace(line, line.replace(': OK', ': BAD')), fingerprint), /signatures/);
+    }
+    assert.throws(() => assertRpmSignatures(`${output}    Payload SHA256 digest: BAD\n`, fingerprint), /signatures/);
+  }
+});
+
 test('real RPM signatures and signed preview bundles fail closed and preserve frozen payloads', {
   skip: missing.length ? `Missing tools: ${missing.join(', ')}` : false,
   timeout: 300_000,

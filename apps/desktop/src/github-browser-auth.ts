@@ -2,15 +2,18 @@ import { validateGithubClientId } from './github-client-config';
 import { randomBytes } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 
-class SignInError extends Error {}
+import { GithubBrowserSignInError as SignInError } from '@propr/local-setup';
 
 const VERIFICATION_URL = 'https://github.com/login/device';
+const browserFailed = () => new SignInError('GitHub browser sign-in could not complete. Check your browser and connection, then retry.');
 const cancelled = () => Object.assign(new SignInError('GitHub sign-in was cancelled. Retry when ready.'), { name: 'AbortError' });
 
 export interface GithubBrowserAuthDependencies {
   clientId?: string;
-  /** Trusted native UI only: never send this code through renderer IPC. */
-  presentCode(code: string, url: string, signal: AbortSignal, cancel: () => void): Promise<() => Promise<void>>;
+  /** Start trusted native UI and return cleanup without waiting for user action.
+   * Never send this code through renderer IPC. Pass browser-failure when native
+   * presentation or browser launch fails; omit the reason for user cancellation. */
+  presentCode(code: string, url: string, signal: AbortSignal, cancel: (reason?: 'browser-failure') => void): Promise<() => Promise<void>>;
   confirmIdentity(login: string, signal: AbortSignal): Promise<boolean>;
   fetch?: typeof fetch;
   deadlineMs?: number;
@@ -32,8 +35,9 @@ export const createGithubBrowserLogin = (dependencies: GithubBrowserAuthDependen
     active?.controller.abort();
     const attempt = { nonce: randomBytes(32).toString('hex'), controller: new AbortController() };
     active = attempt;
-    const cancel = () => attempt.controller.abort(cancelled());
-    caller?.addEventListener('abort', cancel, { once: true });
+    const cancel = (reason?: 'browser-failure') => attempt.controller.abort(reason === 'browser-failure' ? browserFailed() : cancelled());
+    const onCallerAbort = () => cancel();
+    caller?.addEventListener('abort', onCallerAbort, { once: true });
     const timer = setTimeout(() => attempt.controller.abort(new SignInError('GitHub sign-in timed out. Retry to start a new browser sign-in.')), Math.min(dependencies.deadlineMs ?? 900_000, 900_000));
     let closePrompt: (() => Promise<void>) | undefined;
     let expiryTimer: ReturnType<typeof setTimeout> | undefined;
@@ -111,11 +115,11 @@ export const createGithubBrowserLogin = (dependencies: GithubBrowserAuthDependen
       if (signal.aborted) throw signal.reason ?? cancelled();
       // Do not propagate transport/provider exceptions: they can contain request secrets.
       if (error instanceof SignInError) throw error;
-      throw new SignInError('GitHub browser sign-in could not complete. Check your browser and connection, then retry.');
+      throw browserFailed();
     } finally {
       clearTimeout(timer);
       clearTimeout(expiryTimer);
-      caller?.removeEventListener('abort', cancel);
+      caller?.removeEventListener('abort', onCallerAbort);
       if (active?.nonce === attempt.nonce) active = undefined;
       attempt.controller.abort(); // closes native waiting UI; nothing survives relaunch
       await closePrompt?.();

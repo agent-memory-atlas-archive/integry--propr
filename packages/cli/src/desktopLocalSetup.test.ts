@@ -426,7 +426,7 @@ for (const failure of ['cancel', 'denied', 'wrong-account', 'transport']) test(`
     });
     assert.equal(await host.actions.loginWithGithub({ force: true, onLog: line => logs.push(line) }), false);
     assert.equal(await readStoredToken(configDir), 'original-token');
-    assert.deepEqual(logs, ['GitHub authentication did not complete. Try again or keep the current account.']);
+    assert.deepEqual(logs, ['GitHub browser sign-in could not complete. Check your browser and connection, then retry.']);
     fail = false;
     assert.equal(await host.actions.loginWithGithub({ force: true }), true);
     assert.equal(await readStoredToken(configDir), 'replacement-token');

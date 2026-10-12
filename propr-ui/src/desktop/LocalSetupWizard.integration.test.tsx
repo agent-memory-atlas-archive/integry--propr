@@ -5,41 +5,31 @@ import type { DesktopGithubInstallationDecision, DesktopSetupSnapshot } from '..
 import { DesktopExperience } from './DesktopExperience';
 import { adaptersFor, localProfile } from './DesktopExperience.testSupport';
 import { LocalSetupWizard } from './LocalSetupWizard';
-import { completed, guidedAdapter, idle, openAndSubmitWizard } from './LocalSetupWizard.integration.testSupport';
+import { clickAndWaitForHeading, completed, continueThrough, guidedAdapter, idle, installationSnapshot, openAndSubmitWizard } from './LocalSetupWizard.integration.testSupport';
 
 const apiMock = vi.hoisted(() => ({ setApiBaseUrl: vi.fn() }));
 const runtimeMock = vi.hoisted(() => ({ setDesktopApiBaseUrl: vi.fn() }));
 vi.mock('../api/apiClient', () => ({ setApiBaseUrl: apiMock.setApiBaseUrl }));
 vi.mock('../config/runtimeConfig', () => ({ setDesktopApiBaseUrl: runtimeMock.setDesktopApiBaseUrl }));
 
-async function clickAndWaitForHeading(button: string | RegExp, heading: string) {
-  fireEvent.click(await screen.findByRole('button', { name: button }));
-  expect(await screen.findByRole('heading', { name: heading })).toBeInTheDocument();
-}
-
-async function continueThrough(...headings: string[]) {
-  for (const heading of headings) {
-    await clickAndWaitForHeading(/Continue/i, heading);
-  }
-}
-
-function installationSnapshot(
-  identity: Partial<NonNullable<DesktopSetupSnapshot['githubIdentity']>> = {},
-): DesktopSetupSnapshot {
-  return {
-    ...idle, phase: 'running', githubIdentity: {
-      status: 'selection-required', username: 'member-user', installAvailable: true,
-      installations: [
-        { installationId: '100', accountLogin: 'acme', accountType: 'Organization' },
-        { installationId: '200', accountLogin: 'member-user', accountType: 'User' },
-      ],
-      ...identity,
-    },
-  };
-}
-
 describe('production local setup journey', () => {
   beforeEach(() => vi.clearAllMocks());
+
+  it('shows a safe browser failure and retries through the desktop action', async () => {
+    const retry = vi.fn(async () => completed);
+    const setup = guidedAdapter({ status: vi.fn(async () => ({ ...idle, phase: 'failed' as const,
+      state: { rootDir: '/private/local-runtime', steps: [{ id: 'github-auth', title: 'GitHub authentication', status: 'failed',
+        detail: 'GitHub account was not confirmed. Retry sign-in and choose the intended account in GitHub.',
+        nextAction: 'Choose Retry setup to start a new GitHub browser sign-in, then return to ProPR and confirm the intended account.',
+      }] },
+    } as DesktopSetupSnapshot)), retry });
+    render(<LocalSetupWizard adapter={setup} onBack={() => undefined} onComplete={() => undefined} />);
+    expect(await screen.findByText(/GitHub account was not confirmed/)).toBeInTheDocument();
+    expect(screen.getByText(/Choose Retry setup to start a new GitHub browser sign-in/)).toBeInTheDocument();
+    expect(screen.queryByText(/propr login|propr setup/)).toBeNull();
+    await clickAndWaitForHeading('Retry setup', 'ProPR is ready');
+    expect(retry).toHaveBeenCalled();
+  });
 
   it.each(['linux', 'macos'] as const)('opens the production wizard from the %s chooser', async platform => {
     const adapters = adaptersFor();
@@ -288,16 +278,12 @@ describe('production local setup journey', () => {
   it('requires the dedicated recovery control before replacing an incompatible running stack', async () => {
     const incompatible: DesktopSetupSnapshot = {
       ...idle, phase: 'failed',
-      state: {
-        rootDir: '/redacted',
-        steps: [{
-          id: 'start-stack', title: 'Start stack', description: 'Launch services.', optional: false,
-          status: 'failed', detail: 'The retained runtime is incompatible.',
-          nextAction: 'Only this Desktop-managed stack is replaced; data and credentials are retained.',
-          recoveryAction: 'replace-running-stack',
-        }],
-      },
-      resumeAvailable: true,
+      state: { rootDir: '/redacted', steps: [{
+        id: 'start-stack', title: 'Start stack', description: 'Launch services.', optional: false,
+        status: 'failed', detail: 'The retained runtime is incompatible.',
+        nextAction: 'Only this Desktop-managed stack is replaced; data and credentials are retained.',
+        recoveryAction: 'replace-running-stack',
+      }] }, resumeAvailable: true,
       resume: {
         agents: [], reinitialize: false, github: { mode: 'relay' }, intake: { mode: 'routing_websocket' },
         whitelist: null, repository: null,
@@ -311,9 +297,7 @@ describe('production local setup journey', () => {
     expect(retry).not.toHaveBeenCalled();
     fireEvent.click(replace);
     expect(await screen.findByRole('heading', { name: 'ProPR is ready' })).toBeInTheDocument();
-    expect(retry).toHaveBeenCalledWith({
-      sessionId: idle.sessionId, recoveryAction: 'replace-running-stack',
-    });
+    expect(retry).toHaveBeenCalledWith({ sessionId: idle.sessionId, recoveryAction: 'replace-running-stack' });
   });
 
   it('offers credential review without replacing ordinary retry for a transient failure', async () => {
@@ -359,9 +343,7 @@ describe('production local setup journey', () => {
     expect(screen.getByLabelText('Selected configuration')).toHaveTextContent('ProPR Connect');
     expect(screen.getByLabelText('Selected configuration')).toHaveTextContent('WebSocket');
     fireEvent.click(screen.getByRole('button', { name: /Install ProPR/i }));
-    expect(retry).toHaveBeenCalledWith(expect.objectContaining({
-      github: { mode: 'relay' }, intake: { mode: 'routing_websocket' },
-    }));
+    expect(retry).toHaveBeenCalledWith(expect.objectContaining({ github: { mode: 'relay' }, intake: { mode: 'routing_websocket' } }));
   });
 
   it('shows and confirms corrected WebSocket intake for stale ProPR Connect recovery', async () => {
@@ -404,9 +386,7 @@ describe('production local setup journey', () => {
     fireEvent.click(screen.getByRole('radio', { name: 'Keep existing configuration' }));
     await continueThrough('GitHub event intake', 'Select coding agents', 'Ready to install');
     await clickAndWaitForHeading(/Install ProPR/i, 'ProPR is ready');
-    expect(retry).toHaveBeenCalledWith(expect.objectContaining({
-      github: { mode: 'keep' }, intake: { mode: 'routing_websocket' },
-    }));
+    expect(retry).toHaveBeenCalledWith(expect.objectContaining({ github: { mode: 'keep' }, intake: { mode: 'routing_websocket' } }));
   });
 
   it.each(['failed', 'cancelled'] as const)('returns a %s reconfigured retry to credential-free recovery', async phase => {
@@ -415,14 +395,10 @@ describe('production local setup journey', () => {
       intake: { mode: 'direct_webhook' as const, reconfigurationRequired: true as const },
       whitelist: null, repository: null, reconfigurationStage: 'intake' as const,
     };
-    const requiresSecret: DesktopSetupSnapshot = {
-      ...idle, phase: 'failed', error: 'Enter the webhook secret again.', resume,
-      resumeAvailable: true, reconfigurationRequired: true,
-    };
-    const terminal: DesktopSetupSnapshot = {
-      ...requiresSecret, phase, error: phase === 'cancelled' ? 'Setup was cancelled safely.' : 'Webhook setup failed.',
-      reconfigurationRequired: false,
-    };
+    const requiresSecret: DesktopSetupSnapshot = { ...idle, phase: 'failed', resume,
+      error: 'Enter the webhook secret again.', resumeAvailable: true, reconfigurationRequired: true };
+    const terminal: DesktopSetupSnapshot = { ...requiresSecret, phase, reconfigurationRequired: false,
+      error: phase === 'cancelled' ? 'Setup was cancelled safely.' : 'Webhook setup failed.' };
     const retry = vi.fn().mockResolvedValueOnce(terminal).mockResolvedValueOnce(completed);
     const adapter = guidedAdapter({
       status: vi.fn(async () => requiresSecret), retry,
