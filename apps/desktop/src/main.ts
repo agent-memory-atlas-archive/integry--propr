@@ -1,9 +1,13 @@
+import { resolveGithubClientId } from './github-client-config';
+import { createGithubCodePresenter } from './github-code-presenter';
+import { openAllowedExternalUrl as openExternalWithPolicy } from './external-url';
+declare const __PROPR_DESKTOP_GITHUB_CLIENT_ID__: string | undefined;
 import { randomBytes } from 'node:crypto';
 import { lstatSync, realpathSync } from 'node:fs';
 import { basename, isAbsolute, join, relative, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { app, BrowserWindow, clipboard, crashReporter, dialog, ipcMain, Menu, nativeImage, net, Notification, protocol, safeStorage, screen, session, shell, systemPreferences, Tray } from 'electron';
-import type { Rectangle } from 'electron';
+import type { MessageBoxOptions, Rectangle } from 'electron';
 import {
   DESKTOP_RENDERER_ORIGIN,
   DESKTOP_TRANSPORT_SCOPE_HEADER,
@@ -16,6 +20,7 @@ import {
 } from '@propr/cli/desktop-discovery';
 import { createDesktopSetupHost } from '@propr/cli/desktop-local-setup';
 import type { SetupActions } from '@propr/local-setup';
+import { createGithubBrowserLogin } from './github-browser-auth';
 import { launchDesktopAuthentication } from './authentication-handoff';
 import { DesktopConnectDiscoveryService } from './connect-discovery';
 import { requestDesktopMicrophoneConsent } from './microphone-consent';
@@ -75,7 +80,6 @@ import {
   createLatestRendererReloader,
   deepLinkFromArguments,
   hasExactArgument,
-  isSafeExternalUrl,
   isTrustedRendererUrl,
   normalizeApiBaseUrl,
   normalizeDeepLink,
@@ -667,11 +671,7 @@ const configurePackagedRendererProtocol = (
 
 const openAllowedExternalUrl = async (url: string): Promise<void> => {
   if (shutdownStarted) return;
-  if (!isSafeExternalUrl(url)) {
-    log('warn', 'desktop.external_url.rejected');
-    return;
-  }
-  await shell.openExternal(url);
+  await openExternalWithPolicy(url, value => shell.openExternal(value), () => log('warn', 'desktop.external_url.rejected'));
 };
 
 const inspectPackagedLayout = async (window: BrowserWindow): Promise<Record<string, unknown>> => {
@@ -1872,10 +1872,35 @@ if (!hasSingleInstanceLock) {
       commands: desktopNativeCommands,
       log: (level, event, fields) => log(level, event, fields),
     });
+    const showGithubDialog = (options: MessageBoxOptions) => {
+      if (!mainWindow || mainWindow.isDestroyed()) throw new Error('Desktop window is unavailable');
+      // macOS can only abort an asynchronous message box when it has a parent.
+      return dialog.showMessageBox(mainWindow, options);
+    };
     const setupHost = (process.platform === 'linux' || process.platform === 'darwin')
       ? await createDesktopSetupHost({
           configDir: join(app.getPath('userData'), 'local-setup', 'cli'),
           authenticationHandoff: launchDesktopAuthentication,
+          githubBrowserLogin: createGithubBrowserLogin({
+            clientId: resolveGithubClientId(app.isPackaged, __PROPR_DESKTOP_GITHUB_CLIENT_ID__, process.env.PROPR_DESKTOP_GITHUB_CLIENT_ID),
+            presentCode: createGithubCodePresenter({
+              showDialog: showGithubDialog,
+              copy: code => clipboard.writeText(code),
+              openExternal: openAllowedExternalUrl,
+              isShuttingDown: () => shutdownStarted,
+            }),
+            confirmIdentity: async (login, signal) => {
+              mainWindow?.show();
+              mainWindow?.focus();
+              const result = await showGithubDialog({
+                type: 'question', title: 'Confirm GitHub account',
+                message: `Continue as @${login}?`,
+                detail: 'This identity was verified with GitHub. If it is the wrong account, cancel and retry sign-in, then switch accounts in GitHub before approving. Installation access will be checked next.',
+                buttons: ['Use this account', 'Cancel'], defaultId: 1, cancelId: 1, signal,
+              });
+              return result.response === 0;
+            },
+          }),
           ...(app.isPackaged ? { resourcesPath: process.resourcesPath } : {}),
           ...(!app.isPackaged && process.env.PROPR_DESKTOP_RUNTIME_MANIFEST
             ? { runtimeManifestPath: process.env.PROPR_DESKTOP_RUNTIME_MANIFEST }

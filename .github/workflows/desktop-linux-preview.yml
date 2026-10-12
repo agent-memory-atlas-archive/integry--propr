@@ -28,6 +28,9 @@ on:
         required: false
         type: string
 
+env:
+  PROPR_DESKTOP_GITHUB_CLIENT_ID: ${{ vars.PROPR_DESKTOP_GITHUB_CLIENT_ID }}
+
 permissions:
   contents: read
 

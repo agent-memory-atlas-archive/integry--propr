@@ -175,3 +175,7 @@ entrypoint) found no step that changes the root directory's own mode: every `chm
 (`0600`), the `data`/`logs`/`repos` subdirectories, the identity data directory, or cache/credential directories, and
 the compose mounts bind `.env` and those subdirectories, never the root. This review does not replace the observation;
 full Linux provisioning for this invariant remains unverified where Docker is unavailable.
+
+## GitHub browser sign-in
+
+Desktop GitHub authentication now uses the browser device flow described in [Desktop GitHub browser sign-in](desktop-github-browser-sign-in.md). Provision the public OAuth client before testing. Prior terminal-handoff acceptance is historical evidence, not acceptance of the new flow; repeat the native packaged journey without `gh` or a terminal, and never capture the native verification code dialog. Agent registry authentication retains its existing terminal handoff.

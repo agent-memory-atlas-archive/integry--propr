@@ -21,6 +21,9 @@ on:
         description: Unsigned validation desktop package version
         value: ${{ jobs.validation-version.outputs.version }}
 
+env:
+  PROPR_DESKTOP_GITHUB_CLIENT_ID: ${{ vars.PROPR_DESKTOP_GITHUB_CLIENT_ID }}
+
 permissions:
   contents: read
 
