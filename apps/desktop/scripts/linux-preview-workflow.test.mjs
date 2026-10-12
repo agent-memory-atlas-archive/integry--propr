@@ -50,7 +50,6 @@ describe('desktop Linux preview workflow', () => {
     assert.match(workflow, /runtime_agent_image:\n\s+description: Stage only - propr\/agent:<source SHA>@sha256:<digest> published linux\/amd64/);
     assert.match(identity, /agent_pattern="propr\/agent:\$\{REQUESTED_SHA\}@sha256:"/);
     assert.match(identity, /\[\[ "\$RUNTIME_AGENT_IMAGE" =~ \^\$\{agent_pattern\}\[a-f0-9\]\{64\}\$ \]\] \|\| \{/);
-    assert.match(identity, /test -z "\$RUNTIME_APP_IMAGE" && test -z "\$RUNTIME_UI_IMAGE" && test -z "\$RUNTIME_AGENT_IMAGE"/);
     assert.match(identity, /echo "runtime_agent_image=\$RUNTIME_AGENT_IMAGE"/);
     assert.match(preflight, /--agent-image "\$RUNTIME_AGENT_IMAGE"/);
     assert.match(packageJob, /desktop-runtime-manifest\.mjs release[\s\S]+--agent-image "\$RUNTIME_AGENT_IMAGE"/);
@@ -62,18 +61,12 @@ describe('desktop Linux preview workflow', () => {
     assert.match(packageJob, /- arch: x64\n[\s\S]+- arch: arm64\n/);
   });
 
-  test('stages a private draft and requires a separately authorized operation to publish a prerelease', () => {
-    const stage = job('stage-draft', 'publish-draft');
-    const publish = job('publish-draft');
+  test('unsigned staging has no public publication route', () => {
+    const stage = job('stage-draft');
     assert.match(stage, /if: inputs\.operation == 'stage-draft'/);
     assert.match(stage, /contents: write/);
     assert.match(stage, /stage-draft/);
-    assert.doesNotMatch(stage, /publish-draft/);
-    assert.match(publish, /if: inputs\.operation == 'publish-draft'/);
-    assert.match(publish, /environment:\n\s+name: desktop-linux-preview-publication/);
-    assert.match(publish, /PROPR_DESKTOP_LINUX_PREVIEW_PUBLICATION_AUTHORIZED/);
-    assert.match(publish, /publish-draft/);
-    assert.match(publish, /contents: write/);
+    assert.doesNotMatch(workflow, /publish-draft|desktop-linux-preview-publication/);
   });
 
   test('finalizes architecture-labelled assets and a SHA256 preview manifest without trusted update metadata', () => {
@@ -92,7 +85,7 @@ const signedWorkflow = await readFile(
 const signedJob = (name, next) => signedWorkflow.slice(signedWorkflow.indexOf(`\n  ${name}:`),
   next ? signedWorkflow.indexOf(`\n  ${next}:`) : undefined);
 
-describe('protected signed RPM preview workflow', () => {
+describe('protected authenticated Linux preview workflow', () => {
   test('is explicitly manual and main-only with frozen source and exact run provenance', () => {
     assert.match(signedWorkflow, /^on:\n  workflow_dispatch:/m);
     assert.doesNotMatch(signedWorkflow, /^  (?:push|pull_request|pull_request_target|workflow_run|schedule):/m);
@@ -119,7 +112,7 @@ describe('protected signed RPM preview workflow', () => {
     assert.equal(signedWorkflow.match(/secrets\./g)?.length, 2);
     assert.doesNotMatch(signedJob('identity', 'sign') + signedJob('stage-draft'), /secrets\./);
     assert.doesNotMatch(workflow, /secrets\./);
-    assert.match(sign, /sign-bundle --signed-rpm/);
+    assert.match(sign, /sign-bundle --signed-linux/);
     assert.match(sign, /manifest.workflowRunId !== process.env.UNSIGNED_RUN_ID/);
     assert.match(sign, /name: \$\{\{ needs.identity.outputs.unsigned_artifact \}\}/);
     assert.doesNotMatch(sign, /pattern:/);
@@ -128,9 +121,9 @@ describe('protected signed RPM preview workflow', () => {
   test('stages only final signed bytes and re-verifies with public inputs on publication', () => {
     const stage = signedJob('stage-draft', 'publish-draft');
     const publish = signedJob('publish-draft');
-    assert.match(stage, /name: propr-desktop-rpm-signed-\$\{\{ github.run_id \}\}/);
-    assert.match(stage, /stage-draft --signed-rpm/);
-    assert.match(publish, /publish-draft --signed-rpm/);
+    assert.match(stage, /name: propr-desktop-linux-signed-\$\{\{ github.run_id \}\}/);
+    assert.match(stage, /stage-draft --signed-linux/);
+    assert.match(publish, /publish-draft --signed-linux/);
     for (const block of [stage, publish]) {
       assert.match(block, /PROPR_DESKTOP_RPM_PUBLIC_KEY/);
       assert.match(block, /PROPR_DESKTOP_RPM_FINGERPRINT/);
