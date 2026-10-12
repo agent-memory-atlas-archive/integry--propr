@@ -125,15 +125,23 @@ export function providerCredentialRoot(agent: DiagnosticAgent, resolve?: (value:
     }
     return root;
 }
-/** Establish redaction context immediately before spawning with final arguments. */
-export function prepareProviderCapture(agent: DiagnosticAgent, args: string[] = [], extraEnv: Record<string, string | undefined> = {}) {
-    const db = availableDiagnostics();
-    if (!db) return null;
-    const secrets = [...configuredDiagnosticSecrets(), ...configuredDiagnosticSecrets(agent.credentials ?? {}), ...configuredDiagnosticSecrets(extraEnv)];
+function argumentDiagnosticSecrets(args: readonly string[]): string[] {
+    const secrets: string[] = [];
     for (let i = 0; i < args.length - 1; i++) if (args[i] === '-e' || args[i] === '--env') {
         const separator = args[i + 1].indexOf('=');
         if (separator > 0) secrets.push(...configuredDiagnosticSecrets({ [args[i + 1].slice(0, separator)]: args[i + 1].slice(separator + 1) }));
     }
+    return secrets;
+}
+/** Establish redaction context immediately before spawning with final arguments.
+ * Create-time arguments are separate because admission may replace them with a
+ * container start command; credentials from both vectors must remain redacted.
+ */
+export function prepareProviderCapture(agent: DiagnosticAgent, args: string[] = [], extraEnv: Record<string, string | undefined> = {}, createArgs: readonly string[] = []) {
+    const db = availableDiagnostics();
+    if (!db) return null;
+    const secrets = [...configuredDiagnosticSecrets(), ...configuredDiagnosticSecrets(agent.credentials ?? {}), ...configuredDiagnosticSecrets(extraEnv),
+        ...argumentDiagnosticSecrets(createArgs), ...argumentDiagnosticSecrets(args)];
     try {
         const root = providerCredentialRoot(agent);
         if (!root) throw new Error('credential root unavailable');
@@ -172,8 +180,8 @@ export function attachProviderCapture(child: ChildProcess, capture: ReturnType<t
     });
 }
 
-export function prepareCommandCapture(agent: DiagnosticAgent | undefined, args: string[], extraEnv?: Record<string, string | undefined>) {
-    const capture = agent ? prepareProviderCapture(agent, args, extraEnv) : null;
+export function prepareCommandCapture(agent: DiagnosticAgent | undefined, args: string[], extraEnv?: Record<string, string | undefined>, createArgs?: readonly string[]) {
+    const capture = agent ? prepareProviderCapture(agent, args, extraEnv, createArgs) : null;
     return {
         capture,
         stdout: capture?.stdout,

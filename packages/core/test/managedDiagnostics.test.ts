@@ -605,11 +605,12 @@ test('executor and native goal admission retain create and final argument secret
                 const create = ['run','-e','GITHUB_TOKEN=opaque-create-canary','image'];
                 const final = ['start','--attach','--interactive','container','--env','RUN_SECRET=opaque-final-canary'];
                 let captures = 0;
-                const capture = (agent, args, env) => {
+                const capture = (agent, args, env, createArgs) => {
                     captures++;
-                    assert.ok(args.includes('GITHUB_TOKEN=opaque-create-canary'));
-                    assert.ok(args.includes('RUN_SECRET=opaque-final-canary'));
-                    const result = runtime.prepareProviderCapture({...agent,authenticationRoot:${JSON.stringify(root)}}, args, env);
+                    assert.ok(createArgs.includes('GITHUB_TOKEN=opaque-create-canary'));
+                    assert.ok(!createArgs.includes('RUN_SECRET=opaque-final-canary'));
+                    assert.deepEqual(args, final);
+                    const result = runtime.prepareProviderCapture({...agent,authenticationRoot:${JSON.stringify(root)}}, args, env, createArgs);
                     assert.ok(result);
                     result.stdout.write('INFO opaque-create-canary opaque-final-canary\\n'); result.stdout.close(); result.stderr.close();
                     throw new Error('capture-verified');

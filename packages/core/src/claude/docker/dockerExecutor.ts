@@ -245,7 +245,7 @@ async function startDockerCommand(
 }
 
 function prepareExecutionCapture(options: DockerCommandOptions, args: string[], admission: AdmittedAgent | null) {
-    return prepareCommandCapture(options.diagnostics, [...args, ...(admission?.args ?? [])], { ...options.extraEnvVars, ...admission?.environment });
+    return prepareCommandCapture(options.diagnostics, admission?.args ?? args, { ...options.extraEnvVars, ...admission?.environment }, args);
 }
 
 function runDockerCommand(
