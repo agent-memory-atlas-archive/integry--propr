@@ -51,3 +51,29 @@ test('extraEnvVars stay out of the argument list', async () => {
     });
     assert.ok(!result.stdout.includes(TOKEN));
 });
+
+test('measured diagnostics capacity warns without blocking a provider launch', async () => {
+    const fs = await import('node:fs');
+    const os = await import('node:os');
+    const path = await import('node:path');
+    const { managedDiagnostics } = await import('../packages/core/src/diagnostics/managedLogRuntime.js');
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'diagnostic-admission-'));
+    const previous = { PROPR_MANAGED_LOGS: process.env.PROPR_MANAGED_LOGS, PROPR_INSTANCE_ID: process.env.PROPR_INSTANCE_ID, PROPR_DIAGNOSTIC_ROOT: process.env.PROPR_DIAGNOSTIC_ROOT };
+    Object.assign(process.env, { PROPR_MANAGED_LOGS: '1', PROPR_INSTANCE_ID: 'test-instance', PROPR_DIAGNOSTIC_ROOT: path.join(root, 'spool') });
+    try {
+        const db = managedDiagnostics()!;
+        db.report({ provider: 'codex', agent: 'full', source: 'native-state' }, 'protected-native-state', db.limits.protectedBytes);
+        const result = await executeDockerCommand(process.execPath, ['-e', `process.stdout.write('INFO launch succeeded\\n')`], {
+            timeout: 10000, diagnostics: { provider: 'codex', agent: 'running', authenticationRoot: root },
+        });
+        assert.equal(result.exitCode, 0);
+        assert.match(result.stdout, /launch succeeded/);
+        assert.ok((db.status() as { sources: Array<{ capacityWarning: boolean }> }).sources.some(source => source.capacityWarning));
+        db.close();
+    } finally {
+        for (const [key, value] of Object.entries(previous)) {
+            if (value === undefined) delete process.env[key]; else process.env[key] = value;
+        }
+        fs.rmSync(root, { recursive: true, force: true });
+    }
+});

@@ -1,3 +1,5 @@
+import path from 'node:path';
+import { isManagedAgentConfigPath } from '@propr/shared';
 import { parse as parseEnv } from 'dotenv';
 import fs from 'node:fs';
 import { PinnedDirectory } from './privateDirectory.js';
@@ -59,4 +61,15 @@ function parseCredentialContent(name: string, content: string): unknown {
     }
     if (name.endsWith('antigravity-oauth-token') && /^[A-Za-z0-9._-]+\s*$/.test(content)) return content.trim();
     return JSON.parse(content);
+}
+
+/** Shared with the provider launch path, including legacy .antigravity homes. */
+export function antigravityCredentialRoot(configPath: string, resolve: (value: string) => string): string {
+    const managed = isManagedAgentConfigPath(configPath);
+    const root = resolve(managed ? configPath : process.env.ANTIGRAVITY_CONFIG_PATH || configPath);
+    if (!managed && path.basename(root) === '.antigravity') {
+        const sibling = path.join(path.dirname(root), '.gemini');
+        if (fs.existsSync(sibling) && fs.statSync(sibling).isDirectory()) return sibling;
+    }
+    return root;
 }

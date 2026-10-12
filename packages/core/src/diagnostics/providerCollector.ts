@@ -26,12 +26,12 @@ const directories: Record<DiagnosticProvider, RegExp> = {
     vibe: /^(?:logs|logs\/session|logs\/session\/[\w.-]+)$/,
     antigravity: /^(?:antigravity-cli|antigravity-cli\/log|antigravity-cli\/brain|antigravity-cli\/brain\/[\w.-]+(?:\/\.system_generated(?:\/logs)?)?)$/,
 };
-export interface ProviderRoot { provider: DiagnosticProvider; agent: string; root: string; credentials: readonly string[] }
+export interface ProviderRoot { provider: DiagnosticProvider; agent: string; root: string; credentials: readonly string[]; credentialContextComplete?: boolean; transient?: boolean }
 
 /** Snapshot only committed newline-delimited records. Never modifies the writer's
  * descriptor, native filename, DB, resume state, or live UI watcher. */
 export function collectProvider(spool: ManagedLogSpool, input: ProviderRoot, now = Date.now()): void {
-    const summary: LogIdentity = { provider: input.provider, agent: input.agent, source: 'native-state' };
+    const summary: LogIdentity = { provider: input.provider, agent: input.agent, source: input.transient ? `native-state:${digest(input.root)}` : 'native-state' };
     let root: PinnedDirectory;
     try { root = PinnedDirectory.open(input.root); }
     catch (e) {
@@ -43,7 +43,7 @@ export function collectProvider(spool: ManagedLogSpool, input: ProviderRoot, now
     catch { root.close(); spool.report(summary, 'unsafe-source'); return; }
     rememberDiagnosticCredentials(credentials);
     let count = 0, readBytes = 0, protectedBytes = 0;
-    const deadline = performance.now() + spool.limits.scanMs;
+    let deadline = performance.now() + spool.limits.scanMs;
     let limited = false, inventoryIncomplete = false;
     const measureProtectedFile = (dir: PinnedDirectory, entry: fs.Dirent): void => {
         let fd: number | undefined;
@@ -52,12 +52,13 @@ export function collectProvider(spool: ManagedLogSpool, input: ProviderRoot, now
         finally { if (fd !== undefined) fs.closeSync(fd); }
     };
     const collectFile = (dir: PinnedDirectory, entry: fs.Dirent, relative: string): void => {
-        const identity = { provider: input.provider, agent: input.agent, source: digest(relative) };
+        const identity = { provider: input.provider, agent: input.agent, source: digest(input.transient ? `${input.root}:${relative}` : relative) };
         let fd: number | undefined;
         try {
             fd = dir.file(entry.name);
             const stat = fs.fstatSync(fd);
             protectedBytes += stat.size;
+            if (!input.credentialContextComplete) return;
             if (readBytes >= spool.limits.scanBytes) { limited = true; return; }
             const before = spool.cursor(identity);
             const inode = `${stat.dev}:${stat.ino}:${stat.birthtimeMs}`;
@@ -71,6 +72,7 @@ export function collectProvider(spool: ManagedLogSpool, input: ProviderRoot, now
             if (replaced) {
                 spool.report(identity, 'source-replaced', Math.max(0, offset - stat.size)); offset = 0;
             }
+            if (sourceIsCaughtUp(before, { offset, size: stat.size, inode }, replaced)) return;
             const buffer = Buffer.alloc(Math.min(spool.limits.scanBytes - readBytes, stat.size - offset));
             const length = fs.readSync(fd, buffer, 0, buffer.length, offset);
             readBytes += length;
@@ -94,7 +96,11 @@ export function collectProvider(spool: ManagedLogSpool, input: ProviderRoot, now
     const visitEntry = (dir: PinnedDirectory, entry: fs.Dirent, relative: string): void => {
         // File matches precede directory matches (Claude session basenames).
         if (protectedFiles[input.provider].test(relative)) measureProtectedFile(dir, entry);
-        else if (files[input.provider].test(relative)) collectFile(dir, entry, relative);
+        else if (files[input.provider].test(relative)) {
+            const started = performance.now();
+            collectFile(dir, entry, relative);
+            deadline += performance.now() - started;
+        }
         else if (directories[input.provider].test(relative)) {
             let child: PinnedDirectory | undefined;
             try { child = dir.child(entry.name); walk(child, relative + '/'); }
@@ -114,11 +120,16 @@ export function collectProvider(spool: ManagedLogSpool, input: ProviderRoot, now
     };
     try { walk(root, ''); }
     finally { root.close(); }
-    spool.report(summary, 'protected-native-state', inventoryIncomplete ? Math.max(protectedBytes, spool.limits.protectedBytes) : protectedBytes);
-    if (limited) spool.report(summary, 'scan-limit');
+    spool.measureNativeState(summary, protectedBytes, !inventoryIncomplete);
+    if (limited || inventoryIncomplete) spool.report(summary, 'scan-limit');
+    if (!input.credentialContextComplete) spool.report(summary, 'ownership-unverified');
 }
 
 function sourceWasReplaced(before: Cursor, current: { offset: number; size: number; inode: string }, anchorAt: (position: number) => string): boolean {
     const { offset, size, inode } = current;
     return Boolean((before.anchor && offset <= size && before.anchor !== anchorAt(offset)) || (before.inode && before.inode !== inode) || offset > size);
+}
+
+function sourceIsCaughtUp(before: Cursor, current: { offset: number; size: number; inode: string }, replaced: boolean): boolean {
+    return !replaced && before.inode === current.inode && current.offset === current.size;
 }

@@ -31,6 +31,25 @@ await mock.module('node:child_process', { namedExports: { ...childProcess,
     },
 } });
 
+let beforeNetwork: () => Promise<void> = async () => {};
+let authenticationVersion = 'initial';
+let diagnosticCaptures: Array<{ args: string[]; authentication: string }> = [];
+const diagnostics = await import('../packages/core/src/diagnostics/managedLogRuntime.js');
+await mock.module('../packages/core/src/diagnostics/managedLogRuntime.js', { namedExports: {
+    ...diagnostics,
+    prepareProviderCapture: (_agent: unknown, args: string[]) => {
+        diagnosticCaptures.push({ args, authentication: authenticationVersion });
+        return null;
+    },
+} });
+await mock.module('../packages/core/src/claude/docker/dockerNetworkPolicy.js', { namedExports: {
+    startWithNetworkPolicy: () => { throw new Error('Unexpected shared executor'); },
+    spawnWithNetworkPolicy: async (args: string[], spawn: (args: string[]) => unknown) => {
+        await beforeNetwork();
+        return spawn([...args, '-e', 'INJECTED_TOKEN=final-run-canary']);
+    },
+} });
+
 const claudeNative = await import('../packages/core/src/agents/impl/claudeNativeGoal.js');
 const antigravityNative = await import('../packages/core/src/agents/impl/antigravityNativeGoal.js');
 const { executeCodexAppServerGoal } = await import('../packages/core/src/agents/impl/codexAppServer.js');
@@ -50,7 +69,7 @@ const options: AgentTaskOptions = {
     githubToken: 'stale-worker-token', prompt: 'Goal', executionMode: 'goal',
     environment: { PROPR_GOAL_LAUNCH_STRATEGY: 'direct' }, nativeGoalObjective: 'Ship it', goalControl: control, initialControlInputId: 'input-1', initialControlInputMessage: 'Pending input',
 };
-beforeEach(() => { mints = 0; failMint = false; spawned = []; beforeMint = async () => {}; });
+beforeEach(() => { mints = 0; failMint = false; spawned = []; beforeMint = async () => {}; beforeNetwork = async () => {}; authenticationVersion = 'initial'; diagnosticCaptures = []; });
 after(async () => { await closeConnection(); await fs.rm(root, { recursive: true, force: true }); });
 
 
@@ -87,3 +106,27 @@ test('Antigravity timeout during preparation prevents spawn and preserves queued
     assert.equal(spawned.length, 0);
     assert.equal((control.markInputDelivered as ReturnType<typeof mock.fn>).mock.callCount(), 0);
 });
+
+for (const provider of ['claude', 'antigravity', 'codex'] as const) {
+    test(`${provider} establishes diagnostic context after awaited network preparation with final arguments`, async () => {
+        beforeNetwork = async () => { await Promise.resolve(); authenticationVersion = 'rotated'; };
+        const diagnosticAgent = { provider, agent: provider, authenticationRoot: root };
+        if (provider === 'claude') {
+            await assert.rejects(claudeNative.executeClaudeNativeGoal(options, {
+                diagnostics: diagnosticAgent, buildDockerArgs: async () => ['run', 'image'],
+                sessionId: 'session', transcriptPath: path.join(root, 'transcript'), model: 'test-model', timeoutMs: 1000,
+            }), /Captured spawn/);
+        } else if (provider === 'antigravity') {
+            const result = await antigravityNative.executeAntigravityNativeGoal(options, {
+                diagnostics: diagnosticAgent, buildDockerArgs: async () => ['run', 'image'], model: 'test-model', timeoutMs: 1000,
+            });
+            assert.match(result.error!, /Captured spawn/);
+        } else {
+            await assert.rejects(executeCodexAppServerGoal(config('codex'), options, 1000), /Captured spawn/);
+        }
+        assert.equal(diagnosticCaptures.length, 1);
+        assert.equal(diagnosticCaptures[0].authentication, 'rotated');
+        assert.ok(diagnosticCaptures[0].args.includes('INJECTED_TOKEN=final-run-canary'));
+        assert.deepEqual(diagnosticCaptures[0].args, spawned[0]);
+    });
+}

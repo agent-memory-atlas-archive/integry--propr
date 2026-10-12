@@ -4,7 +4,7 @@ let rememberedBytes = 0, credentialOverflow = false;
 /** Process-local only; learned credentials never enter status or manifests. */
 export function rememberDiagnosticCredentials(values: readonly string[]): void {
     for (const value of values) {
-        if (!value || rememberedCredentials.has(value)) continue;
+        if (value.length < 8 || rememberedCredentials.has(value)) continue;
         if (rememberedCredentials.size >= 512 || rememberedBytes + value.length > 512 * 1024) { credentialOverflow = true; return; }
         rememberedCredentials.add(value); rememberedBytes += value.length;
     }
@@ -20,7 +20,7 @@ export function redactRecord(line: string, format: 'jsonl' | 'text', credentials
     if (/[\x00-\x08\x0b\x0c\x0e-\x1f]/.test(line)) return null;
     if (/^[A-Za-z0-9+/=]{40,}$/.test(line.trim()) || line.includes('\uFFFD') || /-----BEGIN .*PRIVATE KEY-----/.test(line)) return null;
     const text = (value: string): string => {
-        for (const credential of credentials) if (credential) {
+        for (const credential of credentials) if (credential.length >= 8) {
             for (const variant of [credential, encodeURIComponent(credential), JSON.stringify(credential).slice(1, -1)]) value = value.split(variant).join('[REDACTED]');
         }
         return value.replace(known, '[REDACTED]')

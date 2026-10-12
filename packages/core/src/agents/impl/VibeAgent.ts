@@ -1,3 +1,4 @@
+import { retireProviderRuntime } from '../../diagnostics/managedLogRuntime.js';
 import { withPromptOnlyToolPolicy } from '../agentToolPolicy.js';
 import fs from 'fs';
 import { buildAgentGitCredentialArgs, buildAgentGitMountArgs, prepareAgentGitAccess, prepareAnalysisGitAccess } from '../agentGitAccess.js';
@@ -104,7 +105,7 @@ export class VibeAgent implements Agent {
             });
             const { result, usageMetrics } = await executeWithUsageTracking(
                 'vibe',
-                async () => executeDockerCommand('docker', dockerArgs, { diagnostics: { provider: this.config.type, agent: this.config.id, configPath: this.config.configPath, nativeRoot: runtimeHomePath, credentials: { ...this.config.envVars, MISTRAL_API_KEY: mistralApiKey || '' } },
+                async () => executeDockerCommand('docker', dockerArgs, { diagnostics: this.diagnosticContext(runtimeHomePath, mistralApiKey, githubToken),
                     timeout: this.timeoutMs,
                     cwd: worktreePath,
                     onSessionId,
@@ -182,6 +183,7 @@ export class VibeAgent implements Agent {
             cleanupTempFile(promptFilePath);
             cleanupTempFile(envFilePath);
             cleanupRuntimeHome(runtimeHomePath);
+            retireProviderRuntime(this.config.id, runtimeHomePath);
         }
     }
 
@@ -228,7 +230,7 @@ export class VibeAgent implements Agent {
             });
             const { result, usageMetrics } = await executeWithUsageTracking(
                 'vibe',
-                async () => executeDockerCommand('docker', dockerArgs, { diagnostics: { provider: this.config.type, agent: this.config.id, configPath: this.config.configPath, nativeRoot: runtimeHomePath, credentials: { ...this.config.envVars, MISTRAL_API_KEY: mistralApiKey || '' } },
+                async () => executeDockerCommand('docker', dockerArgs, { diagnostics: this.diagnosticContext(runtimeHomePath, mistralApiKey, gitAccess.githubToken),
                     timeout: timeoutMs ?? parseInt(process.env.VIBE_ANALYSIS_TIMEOUT_MS || '1800000', 10),
                     taskId,
                     model: effectiveModel
@@ -283,6 +285,7 @@ export class VibeAgent implements Agent {
             cleanupTempFile(promptFilePath);
             cleanupTempFile(envFilePath);
             cleanupRuntimeHome(runtimeHomePath);
+            retireProviderRuntime(this.config.id, runtimeHomePath);
             if (analysisWorkspace && !readOnlyWorkspacePath) {
                 try { fs.rmSync(analysisWorkspace, { recursive: true, force: true }); } catch { /* best-effort cleanup */ }
             }
@@ -349,6 +352,14 @@ export class VibeAgent implements Agent {
             }
         }
         return args;
+    }
+
+    private diagnosticContext(nativeRoot: string | undefined, mistralApiKey?: string, githubToken?: string) {
+        const configPath = resolveConfigPath(process.env.VIBE_CONFIG_PATH || this.config.configPath);
+        const hasUsableConfig = hasUsableVibeConfigDir(configPath, mistralApiKey);
+        return { provider: this.config.type, agent: this.config.id, configPath, nativeRoot,
+            authenticationRoot: hasUsableConfig ? configPath : nativeRoot, nativeCredentialContextComplete: !hasUsableConfig,
+            credentials: { ...this.config.envVars, MISTRAL_API_KEY: mistralApiKey || '', GITHUB_TOKEN: githubToken || '' } };
     }
 
     private resolveCredentialsAndConfig(mistralApiKey?: string): { configPath: string; resolvedApiKey: string | undefined; hasUsableConfig: boolean; configMountArgs: string[] } {

@@ -1,4 +1,4 @@
-import { prepareCommandCapture, finishDiagnosticOutput, scheduleProviderCapture, managedDiagnostics, type DiagnosticAgent } from '../../diagnostics/managedLogRuntime.js';
+import { prepareCommandCapture, finishDiagnosticOutput, scheduleProviderCapture, type DiagnosticAgent } from '../../diagnostics/managedLogRuntime.js';
 import { createExecutionDeadline, type ExecutionDeadline } from './dockerExecutionDeadline.js';
 import { prepareAdmittedAgent, type AdmittedAgent } from '../../agents/agentRunAdmission.js';
 import { captureWorkflowMarkers, withWorkflowExecutionDeadline } from '../../workflow/workflowExecution.js';
@@ -195,7 +195,6 @@ function spawnCommandProcess(
 }
 
 export async function executeDockerCommand(command: string, args: string[], options: DockerCommandOptions = {}): Promise<ExecutionResult> {
-    if (options.diagnostics) managedDiagnostics()?.assertCapacity();
     const ownershipContext = getExecutionOwnershipContext();
     const timeout = options.timeout ?? 300000;
     const { deadline, executionSignal, timeoutError } = createExecutionDeadline(timeout, options.signal, ownershipContext?.signal);
@@ -245,14 +244,18 @@ async function startDockerCommand(
     }
 }
 
+function prepareExecutionCapture(options: DockerCommandOptions, args: string[], admission: AdmittedAgent | null) {
+    return prepareCommandCapture(options.diagnostics, admission?.args ?? args, { ...options.extraEnvVars, ...admission?.environment });
+}
+
 function runDockerCommand(
     command: string, args: string[], options: DockerCommandOptions,
     { ownershipContext, executionSignal, admission, remainingMs }: { ownershipContext: ReturnType<typeof getExecutionOwnershipContext>; executionSignal: AbortSignal | undefined; admission: AdmittedAgent | null; remainingMs: number },
 ): Promise<ExecutionResult> {
     return new Promise((resolve, reject) => {
         const { timeout = 300000, cwd, onSessionId, onContainerId, worktreePath, stdinData, extraEnvVars, taskId, streamToRedis, streamStderrToRedis, streamExtraOutput, stripAnsi, preserveOutputOnTimeout = false, model, costCapExempt } = options;
-        const { capture, stdout: diagnosticStdout, stderr: diagnosticStderr } = prepareCommandCapture(options.diagnostics, args, extraEnvVars);
         const executionArgs = resolveExecutionArgs(command, withWorkflowExecutionDeadline(command, args, remainingMs), taskId, ownershipContext?.attemptGeneration);
+        const { capture, stdout: diagnosticStdout, stderr: diagnosticStderr } = prepareExecutionCapture(options, executionArgs, admission);
         const executablePath = command;
         const namedContainer = command === 'docker' ? getDockerRunContainerName(executionArgs) : null;
         // Agent containers count toward their run's spend cap; reaching it stops

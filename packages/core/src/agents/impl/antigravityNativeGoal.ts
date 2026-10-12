@@ -385,9 +385,12 @@ export async function executeAntigravityNativeGoal(
         if (ownership?.signal.aborted) throw getExecutionAbortError(ownership.signal)!;
         if (expired) throw new Error('Antigravity native goal attempt exceeded its execution timeout');
         const args = resolveExecutionArgs('docker', dockerArgs, options.taskId, ownership?.attemptGeneration);
-        const capture = launch.diagnostics ? prepareProviderCapture(launch.diagnostics, args) : null;
-        const child = await spawnWithNetworkPolicy(args, runArgs => spawn('docker', runArgs, { stdio: ['pipe', 'pipe', 'pipe'], cwd: options.worktreePath }));
-        attachProviderCapture(child, capture);
+        const child = await spawnWithNetworkPolicy(args, runArgs => {
+            const capture = launch.diagnostics ? prepareProviderCapture(launch.diagnostics, runArgs) : null;
+            const spawned = spawn('docker', runArgs, { stdio: ['pipe', 'pipe', 'pipe'], cwd: options.worktreePath });
+            attachProviderCapture(spawned, capture);
+            return spawned;
+        });
         current = child;
         // Print mode reads the prompt from non-TTY stdin, avoiding argv limits.
         child.stdin?.end(message);

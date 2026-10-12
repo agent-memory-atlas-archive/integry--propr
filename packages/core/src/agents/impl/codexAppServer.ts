@@ -91,9 +91,12 @@ export async function executeCodexAppServerGoal(
         taskId: options.taskId,
     });
     const args = resolveExecutionArgs('docker', dockerArgs, options.taskId, ownership?.attemptGeneration);
-    const capture = prepareProviderCapture({ provider: config.type, agent: config.id, configPath: config.configPath, credentials: config.envVars }, args);
-    const child = await spawnWithNetworkPolicy(args, runArgs => spawn('docker', runArgs, { stdio: ['pipe', 'pipe', 'pipe'], cwd: options.worktreePath }));
-    attachProviderCapture(child, capture);
+    const child = await spawnWithNetworkPolicy(args, runArgs => {
+        const capture = prepareProviderCapture({ provider: config.type, agent: config.id, configPath: config.configPath, credentials: config.envVars }, runArgs);
+        const spawned = spawn('docker', runArgs, { stdio: ['pipe', 'pipe', 'pipe'], cwd: options.worktreePath });
+        attachProviderCapture(spawned, capture);
+        return spawned;
+    });
     const abort = (): void => { child.kill('SIGTERM'); };
     ownership?.signal.addEventListener('abort', abort, { once: true });
     const connection = new AppServerConnection(child, options.taskId, records => control.appendOutput(records));

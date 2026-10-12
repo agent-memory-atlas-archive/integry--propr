@@ -1,15 +1,16 @@
+import { PinnedDirectory } from './privateDirectory.js';
 import { rememberDiagnosticCredentials, diagnosticCredentials } from './redaction.js';
 import path from 'node:path';
 import type { ChildProcess } from 'node:child_process';
 import { StringDecoder } from 'node:string_decoder';
 import { getManagedAgentConfigRelativePath } from '@propr/shared';
 import { collectProvider } from './providerCollector.js';
-import { nativeCredentialValues } from './credentialRedaction.js';
+import { nativeCredentialValues, antigravityCredentialRoot } from './credentialRedaction.js';
 import { ManagedLogSpool, type LogIdentity } from './managedLogSpool.js';
 
 let spool: ManagedLogSpool | undefined;
 let warningAt = 0;
-let applicationLostBytes = 0;
+let applicationLostBytes = 0, applicationOverflowBytes = 0;
 export function diagnosticsFailure(): void {
     if (Date.now() - warningAt > 60_000) {
         warningAt = Date.now();
@@ -26,18 +27,33 @@ export function managedDiagnostics(): ManagedLogSpool | null {
     return spool;
 }
 export function configuredDiagnosticSecrets(env: Record<string, string | undefined> = process.env): string[] {
-    return Object.entries(env).filter(([k, v]) => /secret|token|password|key|credential/i.test(k) && v).map(([, v]) => v!);
+    return Object.entries(env).filter(([k, v]) => /secret|token|password|key|credential/i.test(k) && v && v.length >= 8).map(([, v]) => v!);
 }
-/** Application hook receives complete Pino JSON records before pretty printing. */
-export function captureApplicationRecord(line: string): void {
-    const identity = { provider: 'application', agent: 'application', source: 'pino' };
+const applicationIdentity = { provider: 'application', agent: 'application', source: 'pino' };
+let applicationLines: string[] = [], applicationBytes = 0;
+let applicationTimer: NodeJS.Timeout | undefined;
+export function flushApplicationRecords(): void {
+    if (applicationTimer) clearTimeout(applicationTimer);
+    applicationTimer = undefined;
+    const lines = applicationLines;
     try {
         const db = managedDiagnostics();
-        if (applicationLostBytes && db) { db.report(identity, 'storage-unavailable', applicationLostBytes); applicationLostBytes = 0; }
+        if (!db) return;
+        if (applicationLostBytes) { db.report(applicationIdentity, 'storage-unavailable', applicationLostBytes); applicationLostBytes = 0; }
+        if (applicationOverflowBytes) { db.report(applicationIdentity, 'buffer-capacity', applicationOverflowBytes); applicationOverflowBytes = 0; }
         const known = diagnosticCredentials();
-        if (db && known === null) db.report(identity, 'unsafe-source', Buffer.byteLength(line));
-        else db?.append(identity, [line], 'jsonl', { credentials: [...configuredDiagnosticSecrets(), ...(known ?? [])] });
-    } catch { applicationLostBytes = Math.min(Number.MAX_SAFE_INTEGER, applicationLostBytes + Buffer.byteLength(line)); diagnosticsFailure(); }
+        if (known === null) db.report(applicationIdentity, 'unsafe-source', applicationBytes);
+        else if (lines.length) db.append(applicationIdentity, lines, 'jsonl', { credentials: [...configuredDiagnosticSecrets(), ...known] });
+    } catch { applicationLostBytes = Math.min(Number.MAX_SAFE_INTEGER, applicationLostBytes + applicationBytes); diagnosticsFailure(); }
+    finally { applicationLines = []; applicationBytes = 0; }
+}
+/** Bounded queue: the synchronous Pino hook never opens a transaction. */
+export function captureApplicationRecord(line: string): void {
+    if (process.env.PROPR_MANAGED_LOGS !== '1') return;
+    const size = Buffer.byteLength(line);
+    if (applicationBytes + size > 1024 * 1024 || applicationLines.length >= 4096) applicationOverflowBytes = Math.min(Number.MAX_SAFE_INTEGER, applicationOverflowBytes + size);
+    else { applicationLines.push(line); applicationBytes += size; }
+    if (!applicationTimer) applicationTimer = setTimeout(flushApplicationRecords, 25);
 }
 export function captureProviderOutput(identity: LogIdentity, secrets: readonly string[]): { write(chunk: string): void; close(): void } {
     let pending = '', discard = false, lostBytes = 0;
@@ -83,8 +99,11 @@ export function captureProviderOutput(identity: LogIdentity, secrets: readonly s
     };
 }
 
-export interface DiagnosticAgent { provider: string; agent: string; configPath?: string; credentials?: Record<string, string>; nativeRoot?: string }
-function providerCredentialRoot(agent: DiagnosticAgent): string | undefined {
+export interface DiagnosticAgent { provider: string; agent: string; configPath?: string; credentials?: Record<string, string>; nativeRoot?: string; authenticationRoot?: string; nativeCredentialContextComplete?: boolean }
+export function providerCredentialRoot(agent: DiagnosticAgent, resolve?: (value: string) => string): string | undefined {
+    if (agent.authenticationRoot) return agent.authenticationRoot;
+    if (agent.provider === 'vibe' && agent.nativeRoot) return agent.nativeRoot;
+    if (agent.provider === 'antigravity' && agent.configPath && resolve) return antigravityCredentialRoot(agent.configPath, resolve);
     const relative = getManagedAgentConfigRelativePath(agent.configPath ?? '');
     const mounts: Record<string, string | undefined> = {
         codex: process.env.CODEX_CONFIG_PATH || process.env.HOST_CODEX_DIR,
@@ -102,23 +121,26 @@ function providerCredentialRoot(agent: DiagnosticAgent): string | undefined {
     }
     return root;
 }
-/** Prepare BEFORE spawning so protected-state backpressure cannot orphan a child. */
-export function prepareProviderCapture(agent: DiagnosticAgent, args: string[] = [], extraEnv: Record<string, string> = {}) {
+/** Establish redaction context immediately before spawning with final arguments. */
+export function prepareProviderCapture(agent: DiagnosticAgent, args: string[] = [], extraEnv: Record<string, string | undefined> = {}) {
     const db = managedDiagnostics();
     if (!db) return null;
-    db.assertCapacity();
-    const secrets = [...configuredDiagnosticSecrets(), ...Object.values(agent.credentials ?? {}), ...configuredDiagnosticSecrets(extraEnv)];
+    const secrets = [...configuredDiagnosticSecrets(), ...configuredDiagnosticSecrets(agent.credentials ?? {}), ...configuredDiagnosticSecrets(extraEnv)];
     for (let i = 0; i < args.length - 1; i++) if (args[i] === '-e' || args[i] === '--env') {
         const separator = args[i + 1].indexOf('=');
         if (separator > 0) secrets.push(...configuredDiagnosticSecrets({ [args[i + 1].slice(0, separator)]: args[i + 1].slice(separator + 1) }));
     }
     try {
         const root = providerCredentialRoot(agent);
-        if (root) secrets.push(...nativeCredentialValues(root, agent.provider));
+        if (!root) throw new Error('credential root unavailable');
+        // Missing roots cannot establish native authentication context.
+        const pinned = PinnedDirectory.open(root);
+        try { secrets.push(...nativeCredentialValues(root, agent.provider, pinned)); }
+        finally { pinned.close(); }
         rememberDiagnosticCredentials(secrets);
         const snapshot = () => {
             if (db && agent.provider === 'vibe' && agent.nativeRoot) {
-                try { collectProvider(db, { provider: 'vibe', agent: agent.agent, root: agent.nativeRoot, credentials: secrets }); }
+                try { collectProvider(db, { provider: 'vibe', agent: agent.agent, root: agent.nativeRoot, credentials: secrets, credentialContextComplete: agent.nativeCredentialContextComplete === true, transient: true }); }
                 catch { diagnosticsFailure(); }
             }
         };
@@ -146,7 +168,7 @@ export function attachProviderCapture(child: ChildProcess, capture: ReturnType<t
     });
 }
 
-export function prepareCommandCapture(agent: DiagnosticAgent | undefined, args: string[], extraEnv?: Record<string, string>) {
+export function prepareCommandCapture(agent: DiagnosticAgent | undefined, args: string[], extraEnv?: Record<string, string | undefined>) {
     const capture = agent ? prepareProviderCapture(agent, args, extraEnv) : null;
     return {
         capture,
@@ -166,4 +188,10 @@ export function scheduleProviderCapture(capture: ReturnType<typeof prepareProvid
     const timer = capture ? setInterval(capture.snapshot, 30_000) : undefined;
     timer?.unref();
     return timer;
+}
+
+export function retireProviderRuntime(agent: string, root: string | undefined): void {
+    if (!root) return;
+    try { managedDiagnostics()?.retireNativeRoot({ provider: 'vibe', agent }, root); }
+    catch { diagnosticsFailure(); }
 }

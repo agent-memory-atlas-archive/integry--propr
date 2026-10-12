@@ -58,10 +58,10 @@ test('actual managed Codex and Claude layouts: active append-only writers, prote
             const writer = fs.openSync(path.join(home, native), 'a');
             fs.writeSync(writer, '{"type":"session_meta","authorization":"Bearer credential-canary"}\n{"type":');
             const args = { provider, agent: 'agent-a', root: home, credentials: ['credential-canary', 'secret-canary'] };
-            collectProvider(f.spool, args);
+            collectProvider(f.spool, { ...args, credentialContextComplete: true });
             fs.writeSync(writer, '"message","text":"customer prompt credential-canary"}\n');
-            collectProvider(f.spool, args);
-            collectProvider(f.spool, args);
+            collectProvider(f.spool, { ...args, credentialContextComplete: true });
+            collectProvider(f.spool, { ...args, credentialContextComplete: true });
             fs.closeSync(writer);
             assert.equal(fs.readFileSync(path.join(home, auth), 'utf8'), '{"access_token":"credential-canary"}');
             assert.equal(fs.readFileSync(path.join(home, native), 'utf8').split('\n').length, 3);
@@ -99,7 +99,7 @@ test('hostile symlink, hardlink, FIFO, traversal and ancestor replacement', () =
         fs.symlinkSync(outside, path.join(home, 'debug', 'symlink.txt'));
         fs.linkSync(outside, path.join(home, 'debug', 'hardlink.txt'));
         execFileSync('mkfifo', [path.join(home, 'debug', 'fifo.txt')]);
-        collectProvider(f.spool, { provider: 'claude', agent: 'a', root: home, credentials: [] });
+        collectProvider(f.spool, { credentialContextComplete: true, provider: 'claude', agent: 'a', root: home, credentials: [] });
         assert.equal(f.spool.exportOne(), null);
         assert.ok(JSON.stringify(f.spool.status()).includes('unsafe-source'));
         assert.throws(() => PinnedDirectory.open(home + '/../secret'));
@@ -118,8 +118,8 @@ test('oversized partial records are discarded through newline without tail leaka
         const file = path.join(home, 'debug', 'active.txt');
         fs.writeFileSync(file, 'x'.repeat(100_000));
         const args = { provider: 'claude' as const, agent: 'a', root: home, credentials: [] };
-        collectProvider(f.spool, args);
-        fs.appendFileSync(file, 'tail-that-must-not-ship\nINFO ready\n'); collectProvider(f.spool, args);
+        collectProvider(f.spool, { ...args, credentialContextComplete: true });
+        fs.appendFileSync(file, 'tail-that-must-not-ship\nINFO ready\n'); collectProvider(f.spool, { ...args, credentialContextComplete: true });
         const output = drain(f.spool).map(e => e.text).join('');
         assert.ok(!output.includes('tail-that-must-not-ship'));
         assert.ok(output.includes('ready'));
@@ -161,7 +161,7 @@ test('all remaining enabled provider layouts have explicit safe collection and p
             if (provider === 'vibe') fs.writeFileSync(path.join(root, '.env'), 'MISTRAL_API_KEY=opaque-vibe-key\n');
             fs.writeFileSync(path.join(root, 'settings.json'), 'NEVER-EXPORT-CONFIG');
             if (provider === 'opencode') fs.writeFileSync(path.join(root, 'opencode.db'), 'NATIVE-RESUMABLE-STATE');
-            collectProvider(f.spool, { provider: provider as keyof typeof layouts, root, agent: 'a', credentials: [] });
+            collectProvider(f.spool, { credentialContextComplete: true, provider: provider as keyof typeof layouts, root, agent: 'a', credentials: [] });
         }
         const data = drain(f.spool);
         assert.equal(data.length, 3);
@@ -175,11 +175,11 @@ test('credential canary loaded for redaction only; unsafe auth store refuses all
         const home = path.join(f.root, 'codex'); fs.mkdirSync(path.join(home, 'log'), { recursive: true });
         fs.writeFileSync(path.join(home, 'auth.json'), '{"tokens":{"access_token":"opaque-value-without-known-prefix"}}');
         fs.writeFileSync(path.join(home, 'log/codex-tui.log'), 'INFO opaque-value-without-known-prefix\n');
-        collectProvider(f.spool, { provider: 'codex', root: home, agent: 'a', credentials: [] });
+        collectProvider(f.spool, { credentialContextComplete: true, provider: 'codex', root: home, agent: 'a', credentials: [] });
         assert.ok(!drain(f.spool).map(s => s.text).join('').includes('opaque-value'));
         fs.writeFileSync(path.join(home, 'auth.json'), '{malformed');
         fs.appendFileSync(path.join(home, 'log/codex-tui.log'), 'INFO must-not-export\n');
-        collectProvider(f.spool, { provider: 'codex', root: home, agent: 'a', credentials: [] });
+        collectProvider(f.spool, { credentialContextComplete: true, provider: 'codex', root: home, agent: 'a', credentials: [] });
         assert.equal(f.spool.exportOne(), null);
     } finally { f.close(); }
 });
@@ -212,7 +212,7 @@ test('sparse multi-GB provider log is bounded and warns rather than truncating n
         const file = path.join(home, 'log/codex-tui.log');
         const fd = fs.openSync(file, 'w'); fs.ftruncateSync(fd, 3 * 1024 ** 3); fs.closeSync(fd);
         const before = process.memoryUsage().rss;
-        collectProvider(f.spool, { provider: 'codex', root: home, agent: 'large', credentials: [] });
+        collectProvider(f.spool, { credentialContextComplete: true, provider: 'codex', root: home, agent: 'large', credentials: [] });
         assert.ok(process.memoryUsage().rss - before < 32 * 1024 ** 2);
         assert.equal(fs.statSync(file).size, 3 * 1024 ** 3);
         assert.throws(() => f.spool.assertCapacity(), /protected native state/);
@@ -242,11 +242,11 @@ test('real application Pino hook exports redacted operational records', () => {
     try {
         const env = { ...process.env, NODE_ENV: 'production', PROPR_MANAGED_LOGS: '1', PROPR_DIAGNOSTIC_ROOT: path.join(f.root, 'spool'), PROPR_INSTANCE_ID: 'tenant-a', DIAGNOSTIC_TEST_SECRET: 'configured-opaque-canary' };
         const result = spawnSync(process.execPath, ['--import', 'tsx', '--input-type=module', '-e',
-            `import logger from './packages/core/src/utils/logger.ts'; logger.info({ authorization: 'Bearer auth-canary' }, 'configured-opaque-canary');`], { env, encoding: 'utf8' });
+            `import logger from './packages/core/src/utils/logger.ts'; logger.info({ preview: '/tmp/propr-previews/hidden-preview.png', authorization: 'Bearer auth-canary' }, 'configured-opaque-canary');`], { env, encoding: 'utf8' });
         assert.equal(result.status, 0, result.stderr);
         const records = drain(f.spool).map(e => e.text).join('');
         assert.ok(records.includes('REDACTED'));
-        assert.ok(!records.includes('auth-canary')); assert.ok(!records.includes('configured-opaque-canary'));
+        assert.ok(!records.includes('hidden-preview.png')); assert.ok(!records.includes('auth-canary')); assert.ok(!records.includes('configured-opaque-canary'));
     } finally { f.close(); }
 });
 test('concurrent process rotation, export and cursor CAS recover without duplicate committed records', async () => {
@@ -291,10 +291,10 @@ test('file replacement, malicious spool roots and cross-instance access fail saf
         const home = path.join(f.root, 'home'); fs.mkdirSync(path.join(home, 'debug'), { recursive: true });
         const log = path.join(home, 'debug/session.txt'); fs.writeFileSync(log, 'INFO original-record\n');
         const args = { provider: 'claude' as const, root: home, agent: 'a', credentials: [] };
-        collectProvider(f.spool, args);
+        collectProvider(f.spool, { ...args, credentialContextComplete: true });
         // Reuse the same inode, regrow past its old offset before the next scan.
         fs.writeFileSync(log, 'INFO replaced-record-with-longer-value\n');
-        collectProvider(f.spool, args);
+        collectProvider(f.spool, { ...args, credentialContextComplete: true });
         assert.ok(JSON.stringify(f.spool.status()).includes('source-replaced'));
         const output = drain(f.spool).map(e => e.text).join('');
         assert.ok(output.includes('original-record')); assert.ok(output.includes('replaced-record'));
@@ -342,7 +342,7 @@ test('runtime diagnostics require explicit activation and reject missing, invali
                             const db = managedDiagnostics();
                             assert.equal(Boolean(db), enabled);
                             const capture = prepareProviderCapture({ provider: 'codex', agent: 'agent-a' });
-                            assert.equal(Boolean(capture), enabled);
+                            assert.equal(capture, null); // No established native authentication root.
                             captureApplicationRecord('{"message":"explicit policy"}');
                             capture?.stdout.write('INFO explicit provider policy\\n');
                             capture?.stdout.close();
@@ -376,5 +376,130 @@ test('native source uncertainty is separate from bounded collected spool bytes',
         assert.deepEqual(status.spool, { segments: 0, bytes: 0 });
         assert.ok(status.nativeSources.unmeasured.includes('container-only'));
         assert.throws(() => f.spool.assertCapacity(), /protected native state/);
+    } finally { f.close(); }
+});
+
+test('mature segments accept a 2,000 record batch without CPU deadline losses', () => {
+    const f = fixture();
+    try {
+        f.spool.append(identity, Array.from({ length: 4 }, () => JSON.stringify({ message: 'x'.repeat(50_000) })), 'jsonl', { credentials: [] });
+        const started = performance.now();
+        f.spool.append(identity, Array.from({ length: 2000 }, (_, n) => JSON.stringify({ n, message: 'ordinary output' })), 'jsonl', { credentials: [] });
+        assert.ok(performance.now() - started < 1000, 'batch should finish comfortably without per-record recompression');
+        assert.equal(drain(f.spool).flatMap(e => e.text.trim().split('\n')).length, 2004);
+        assert.equal((f.spool.status() as any).sources[0].gaps, 0);
+    } finally { f.close(); }
+});
+
+test('ordinary homes and incomplete inventories never fabricate capacity', () => {
+    const f = fixture();
+    try {
+        const home = path.join(f.root, 'home');
+        fs.mkdirSync(path.join(home, 'projects/project'), { recursive: true });
+        for (let n = 0; n < 40; n++) fs.writeFileSync(path.join(home, `projects/project/session-${n}.jsonl`), '{"message":"hello"}\n');
+        for (let n = 0; n < 2; n++) collectProvider(f.spool, { provider: 'claude', agent: 'a', root: home, credentials: [], credentialContextComplete: true });
+        assert.doesNotThrow(() => f.spool.assertCapacity());
+        assert.equal((f.spool.status() as any).sources.find((s: any) => s.source === 'native-state').inventoryComplete, true);
+        fs.renameSync(home, home + '-moved');
+        collectProvider(f.spool, { provider: 'claude', agent: 'a', root: home, credentials: [], credentialContextComplete: true });
+        assert.equal((f.spool.status() as any).sources.find((s: any) => s.source === 'native-state').inventoryComplete, false);
+        fs.renameSync(home + '-moved', home);
+        const limited = new ManagedLogSpool(path.join(f.root, 'limited'), 'tenant-a', { scanFiles: 1 });
+        try {
+            collectProvider(limited, { provider: 'claude', agent: 'a', root: home, credentials: [] });
+            assert.doesNotThrow(() => limited.assertCapacity());
+            const state = (limited.status() as any).sources[0];
+            assert.equal(state.inventoryComplete, false);
+            assert.equal(state.capacityWarning, false);
+        } finally { limited.close(); }
+    } finally { f.close(); }
+});
+
+test('short configuration values survive substring redaction', () => {
+    const output = redactRecord('{"message":"run 123 production !propr opaque-secret-canary"}', 'jsonl', ['1', '!propr', 'opaque-secret-canary'])!;
+    assert.ok(output.includes('123 production !propr'));
+    assert.ok(!output.includes('opaque-secret-canary'));
+});
+
+test('unknown native run context refuses content while complete context redacts both copies', () => {
+    const f = fixture();
+    try {
+        const home = path.join(f.root, 'vibe');
+        fs.mkdirSync(path.join(home, 'logs/session/run'), { recursive: true });
+        fs.writeFileSync(path.join(home, 'logs/session/run/messages.jsonl'), '{"message":"opaque-run-canary"}\n');
+        collectProvider(f.spool, { provider: 'vibe', agent: 'a', root: home, credentials: [] });
+        assert.equal(f.spool.exportOne(), null);
+        const env = { ...process.env, PROPR_MANAGED_LOGS: '1', PROPR_DIAGNOSTIC_ROOT: path.join(f.root, 'spool'), PROPR_INSTANCE_ID: 'tenant-a' };
+        const script = `import assert from 'node:assert/strict';
+            import { prepareProviderCapture, captureApplicationRecord, flushApplicationRecords, configuredDiagnosticSecrets, managedDiagnostics } from './packages/core/src/diagnostics/managedLogRuntime.ts';
+            assert.deepEqual(configuredDiagnosticSecrets({DEBUG:'1', NODE_ENV:'production', PR_FOLLOWUP_TRIGGER_KEYWORDS:'!propr', MISTRAL_API_KEY:'opaque-run-canary'}), ['opaque-run-canary']);
+            managedDiagnostics().report({provider:'vibe',agent:'other',source:'native-state'}, 'protected-native-state', 999999999);
+            const capture = prepareProviderCapture({provider:'vibe', agent:'a', nativeCredentialContextComplete:true, nativeRoot:${JSON.stringify(home)}, credentials:{DEBUG:'1', NODE_ENV:'production'}}, ['-e','MISTRAL_API_KEY=opaque-run-canary']);
+            assert.ok(capture);
+            capture.stdout.write('INFO 123 production opaque-run-canary\\n'); capture.stdout.close(); capture.snapshot();
+            const db = managedDiagnostics(); const append = db.append.bind(db); let calls = 0;
+            db.append = (...args) => { calls++; return append(...args); };
+            for (let n=0;n<100;n++) captureApplicationRecord(JSON.stringify({message:'123 production opaque-run-canary',n}));
+            assert.equal(calls,0); flushApplicationRecords(); assert.equal(calls,1);`;
+        const result = spawnSync(process.execPath, ['--import', 'tsx', '--input-type=module', '-e', script], { env, encoding: 'utf8', timeout: 10000 });
+        assert.equal(result.status, 0, result.stderr);
+        const output = drain(f.spool).map(e => e.text).join('');
+        assert.ok(output.includes('123 production'));
+        assert.ok(!output.includes('opaque-run-canary'));
+        assert.equal(output.trim().split('\n').length, 102);
+    } finally { f.close(); }
+});
+
+test('transient roots retire only on confirmed absence and preserve concurrent roots after restart', () => {
+    const f = fixture();
+    try {
+        const roots = ['run-a', 'run-b'].map(name => path.join(f.root, name));
+        for (const root of roots) {
+            fs.mkdirSync(path.join(root, 'logs/session/run'), { recursive: true });
+            fs.writeFileSync(path.join(root, 'logs/session/run/messages.jsonl'), '{"message":"hello"}\n');
+            collectProvider(f.spool, { provider: 'vibe', agent: 'a', root, credentials: [], credentialContextComplete: true, transient: true });
+        }
+        const who = { provider: 'vibe', agent: 'a' };
+        f.spool.retireNativeRoot(who, roots[0]);
+        let native = (f.spool.status() as any).sources.filter((s: any) => s.source.startsWith('native-state:'));
+        assert.ok(native.every((s: any) => s.protectedBytes > 0));
+        fs.rmSync(roots[0], { recursive: true });
+        f.spool.retireNativeRoot(who, roots[0]);
+        const restarted = new ManagedLogSpool(path.join(f.root, 'spool'), 'tenant-a');
+        try {
+            native = (restarted.status() as any).sources.filter((s: any) => s.source.startsWith('native-state:'));
+            assert.deepEqual(native.map((s: any) => s.protectedBytes).sort((a: number, b: number) => a-b), [0, 20]);
+        } finally { restarted.close(); }
+        assert.equal(drain(f.spool).length, 2);
+    } finally { f.close(); }
+});
+
+test('Antigravity capture uses the effective override and refuses unavailable authentication', () => {
+    const f = fixture();
+    try {
+        const actual = path.join(f.root, '.gemini'); fs.mkdirSync(actual);
+        fs.writeFileSync(path.join(actual, 'oauth_creds.json'), '{"access_token":"opaque-actual-root-canary"}');
+        const env = { ...process.env, PROPR_MANAGED_LOGS: '1', PROPR_DIAGNOSTIC_ROOT: path.join(f.root, 'spool'), PROPR_INSTANCE_ID: 'tenant-a', ANTIGRAVITY_CONFIG_PATH: actual };
+        const script = `import assert from 'node:assert/strict';
+            import fs from 'node:fs';
+            import { antigravityCredentialRoot } from './packages/core/src/diagnostics/credentialRedaction.ts';
+            import { prepareProviderCapture, providerCredentialRoot } from './packages/core/src/diagnostics/managedLogRuntime.ts';
+            const saved = '/saved/absolute/root';
+            const effective = antigravityCredentialRoot(saved, value => value);
+            assert.equal(effective, process.env.ANTIGRAVITY_CONFIG_PATH);
+            const agent = {provider:'antigravity',agent:'a',configPath:saved};
+            assert.equal(providerCredentialRoot(agent, value => value), effective);
+            const capture = prepareProviderCapture({...agent, authenticationRoot:effective});
+            assert.ok(capture); capture.stdout.write('INFO opaque-actual-root-canary\\n'); capture.stdout.close();
+            fs.writeFileSync(effective + '/oauth_creds.json', '{invalid');
+            assert.equal(prepareProviderCapture({...agent, authenticationRoot:effective}), null);
+            assert.equal(prepareProviderCapture({...agent, authenticationRoot:effective + '/missing'}), null);
+            assert.equal(prepareProviderCapture(agent), null);`;
+        const result = spawnSync(process.execPath, ['--import', 'tsx', '--input-type=module', '-e', script], { env, encoding: 'utf8', timeout: 10000 });
+        assert.equal(result.status, 0, result.stderr);
+        const output = drain(f.spool).map(e => e.text).join('');
+        assert.ok(output.includes('REDACTED')); assert.ok(!output.includes('opaque-actual-root-canary'));
+        const source = fs.readFileSync('packages/core/src/agents/impl/AntigravityAgent.ts', 'utf8');
+        assert.equal((source.match(/authenticationRoot: this.getHostConfigPath\(\)/g) ?? []).length, 3);
     } finally { f.close(); }
 });

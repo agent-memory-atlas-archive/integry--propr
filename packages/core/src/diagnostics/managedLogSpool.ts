@@ -23,7 +23,7 @@ export interface AppendOptions {
     cursor?: { before: Cursor; after: Cursor };
     droppedBytes?: number;
 }
-interface Source { id: string; identity: string; cursor: string; next: number; dropped: number; gaps: number; last_success: number | null; reason: string | null; protected_bytes: number; protection: string | null }
+interface Source { id: string; identity: string; cursor: string; next: number; dropped: number; gaps: number; last_success: number | null; reason: string | null; protected_bytes: number; inventory_complete: number; protection: string | null }
 interface Segment { id: number; source: string; day: string; first: number; last: number; start: number; end: number; raw: number; digest: string; data: Buffer; sealed: number; ack: number }
 export const digest = (value: string | Buffer): string => createHash('sha256').update(value).digest('hex');
 
@@ -59,6 +59,9 @@ export class ManagedLogSpool {
                     digest TEXT NOT NULL, data BLOB NOT NULL, sealed INTEGER NOT NULL DEFAULT 0, ack INTEGER NOT NULL DEFAULT 0);
                 CREATE INDEX IF NOT EXISTS segments_source ON segments(source,id); COMMIT; PRAGMA busy_timeout=100;`);
             this.atomic(() => {
+                if (!(this.db.prepare('PRAGMA table_info(sources)').all() as Array<{ name: string }>).some(column => column.name === 'inventory_complete')) {
+                    this.db.exec('ALTER TABLE sources ADD COLUMN inventory_complete INTEGER NOT NULL DEFAULT 0');
+                }
                 const binding = JSON.stringify({ instance, policy: this.limits });
                 this.db.prepare('INSERT OR IGNORE INTO settings VALUES (?,?)').run('binding', binding);
                 if ((this.db.prepare('SELECT value FROM settings WHERE key=?').get('binding') as { value: string }).value !== binding) throw new Error('diagnostic policy/instance mismatch');
@@ -82,17 +85,31 @@ export class ManagedLogSpool {
         return source;
     }
     private gap(source: Source, bytes: number, reason: string): void {
-        this.db.prepare('UPDATE sources SET dropped=dropped+?,gaps=gaps+1,reason=? WHERE id=?').run(bytes, reason, source.id);
+        this.db.prepare('UPDATE sources SET dropped=dropped+?,gaps=gaps+1,reason=?,inventory_complete=0 WHERE id=?').run(bytes, reason, source.id);
     }
-    report(identity: LogIdentity, reason: 'unsafe-source' | 'scan-limit' | 'source-replaced' | 'capture-interrupted' | 'protected-native-state' | 'ownership-unverified' | 'storage-unavailable', bytes = 0): void {
+    report(identity: LogIdentity, reason: 'buffer-capacity' | 'unsafe-source' | 'scan-limit' | 'source-replaced' | 'capture-interrupted' | 'protected-native-state' | 'ownership-unverified' | 'storage-unavailable', bytes = 0): void {
         this.atomic(() => {
             const source = this.source(identity);
             if (reason === 'protected-native-state') this.db.prepare('UPDATE sources SET protected_bytes=?,protection=? WHERE id=?').run(bytes, reason, source.id);
             else this.gap(source, bytes, reason);
         });
     }
+    measureNativeState(identity: LogIdentity, bytes: number, complete: boolean): void {
+        this.atomic(() => {
+            const source = this.source(identity);
+            this.db.prepare('UPDATE sources SET protected_bytes=?,protection=?,inventory_complete=? WHERE id=?')
+                .run(bytes, 'protected-native-state', Number(complete), source.id);
+        });
+    }
+    /** Only confirmed absence releases a transient root's measured contribution. */
+    retireNativeRoot(identity: Pick<LogIdentity, 'provider' | 'agent'>, root: string): void {
+        try { fs.lstatSync(root); return; }
+        catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+        this.measureNativeState({ ...identity, source: `native-state:${digest(root)}` }, 0, true);
+    }
     cursor(identity: LogIdentity): Cursor {
-        return this.atomic(() => JSON.parse(this.source(identity).cursor) as Cursor);
+        const existing = this.db.prepare('SELECT cursor FROM sources WHERE id=?').get(digest(JSON.stringify(identity))) as { cursor: string } | undefined;
+        return existing ? JSON.parse(existing.cursor) as Cursor : this.atomic(() => JSON.parse(this.source(identity).cursor) as Cursor);
     }
     /** Cursor CAS + segments commit together. Concurrent/restarted scans cannot duplicate records. */
     append(identity: LogIdentity, records: string[], format: 'jsonl' | 'text', options: AppendOptions): boolean {
@@ -103,38 +120,57 @@ export class ManagedLogSpool {
             if (cursor && source.cursor !== JSON.stringify(cursor.before)) return false;
             this.prune(now);
             let next = source.next;
-            const deadline = performance.now() + this.limits.scanMs;
+            const batch: Array<{ text: string; seq: number; size: number }> = [];
+            const flush = () => { if (batch.length) this.appendRecords(source, batch.splice(0), now); };
             if (droppedBytes) this.gap(source, droppedBytes, 'oversize-record');
             for (const record of records) {
                 const size = Buffer.byteLength(record) + (record.endsWith('\n') ? 0 : 1);
-                const redacted = performance.now() <= deadline && size <= this.limits.recordBytes ? redactRecord(record, format, credentials) : null;
+                const redacted = size <= this.limits.recordBytes ? redactRecord(record, format, credentials) : null;
                 const seq = next++;
-                if (!redacted || Buffer.byteLength(redacted) > this.limits.recordBytes) { this.gap(source, size, 'unsafe-record'); continue; }
-                this.appendRecord(source, redacted, { seq, now, size });
+                if (!redacted || Buffer.byteLength(redacted) > this.limits.recordBytes) { flush(); this.gap(source, size, 'unsafe-record'); continue; }
+                batch.push({ text: redacted, seq, size });
             }
+            flush();
             this.db.prepare('UPDATE sources SET next=?,cursor=?,last_success=? WHERE id=?').run(next, cursor ? JSON.stringify(cursor.after) : source.cursor,
                 (this.db.prepare('SELECT gaps FROM sources WHERE id=?').get(source.id) as { gaps: number }).gaps === source.gaps ? now : source.last_success, source.id);
             return true;
         });
     }
-    private appendRecord(source: Source, redacted: string, { seq, now, size }: { seq: number; now: number; size: number }): void {
+    private appendRecords(source: Source, records: Array<{ text: string; seq: number; size: number }>, now: number): void {
         const day = new Date(now).toISOString().slice(0, 10);
         let segment = this.db.prepare('SELECT * FROM segments WHERE source=? ORDER BY id DESC LIMIT 1').get(source.id) as Segment | undefined;
-        if (segment && (segment.sealed || segment.day !== day || segment.raw + Buffer.byteLength(redacted) > this.limits.segmentBytes || segment.last !== seq - 1)) segment = undefined;
-        const data = Buffer.from(redacted);
-        const raw = segment ? Buffer.concat([gunzipSync(segment.data, { maxOutputLength: this.limits.segmentBytes }), data]) : data;
+        if (segment && (segment.sealed || segment.day !== day || segment.last !== records[0].seq - 1)) segment = undefined;
+        let index = 0;
+        while (index < records.length) {
+            const parts: Buffer[] = segment ? [gunzipSync(segment.data, { maxOutputLength: this.limits.segmentBytes })] : [];
+            let bytes = segment?.raw ?? 0;
+            const start = index;
+            while (index < records.length && bytes + Buffer.byteLength(records[index].text) <= this.limits.segmentBytes) {
+                const data = Buffer.from(records[index++].text); parts.push(data); bytes += data.length;
+            }
+            if (start === index && segment) { segment = undefined; continue; }
+            if (start === index) { this.gap(source, records[index++].size, 'oversize-record'); continue; }
+            const raw = Buffer.concat(parts);
+            this.storeBatch(source, { segment, day, raw, records: records.slice(start, index), now });
+            segment = undefined;
+        }
+    }
+    private storeBatch(source: Source, batch: { segment?: Segment; day: string; raw: Buffer; records: Array<{ seq: number; size: number }>; now: number }): void {
+        const { segment, day, raw, records, now } = batch;
         const compressed = gzipSync(raw, { level: 6 });
         const total = this.db.prepare('SELECT coalesce(sum(length(data)),0) AS bytes, count(*) AS n FROM segments').get() as { bytes: number; n: number };
         const perSource = this.db.prepare('SELECT coalesce(sum(length(data)),0) AS bytes FROM segments WHERE source=?').get(source.id) as { bytes: number };
         const added = compressed.length - (segment?.data.length ?? 0);
         if (total.bytes + added > this.limits.spoolBytes || perSource.bytes + added > this.limits.sourceBytes || (!segment && total.n >= this.limits.segments)) {
-            this.gap(source, size, 'unacknowledged-capacity'); return;
+            for (const record of records) this.gap(source, record.size, 'unacknowledged-capacity');
+            return;
         }
-        if (segment) this.db.prepare('UPDATE segments SET last=?,end=?,raw=?,digest=?,data=? WHERE id=?').run(seq, now, raw.length, digest(compressed), compressed, segment.id);
+        const last = records.at(-1)!.seq;
+        if (segment) this.db.prepare('UPDATE segments SET last=?,end=?,raw=?,digest=?,data=? WHERE id=?').run(last, now, raw.length, digest(compressed), compressed, segment.id);
         else {
             this.db.prepare('UPDATE segments SET sealed=1 WHERE source=?').run(source.id);
             this.db.prepare('INSERT INTO segments(source,day,first,last,start,end,raw,digest,data) VALUES (?,?,?,?,?,?,?,?,?)')
-                .run(source.id, day, seq, seq, now, now, raw.length, digest(compressed), compressed);
+                .run(source.id, day, records[0].seq, last, now, now, raw.length, digest(compressed), compressed);
         }
     }
     private prune(now: number): void {
@@ -148,14 +184,14 @@ export class ManagedLogSpool {
         return { policyVersion: 1, redactionVersion: REDACTION_VERSION, instance: this.instance, private: true, historyComplete: false,
             offsiteRetentionDays: 14, limits: this.limits, sourceCapacityWarning: sources.length >= this.limits.sources,
             sources: sources.map(s => ({ ...JSON.parse(s.identity), id: s.id, nextSequence: s.next, droppedBytes: s.dropped, gaps: s.gaps,
-                lastSuccessfulCollection: s.last_success, reason: s.reason, protectedReason: s.protection, protectedBytes: s.protection && !s.reason && JSON.parse(s.identity).source === 'native-state' ? s.protected_bytes : null, capacityWarning: s.protected_bytes >= this.limits.protectedBytes })),
+                inventoryComplete: Boolean(s.inventory_complete), lastSuccessfulCollection: s.last_success, reason: s.reason, protectedReason: s.protection, protectedBytes: s.protection && !s.reason && JSON.parse(s.identity).source.startsWith('native-state') ? s.protected_bytes : null, capacityWarning: s.protected_bytes >= this.limits.protectedBytes })),
             nativeSources: {
                 rotation: 'none', growthBounded: false, inventoryComplete: false,
                 unmeasured: ['container-only', 'unowned', 'excluded-or-unrecognized'],
-                sources: sources.filter(s => ['native-state', 'unmapped-native-state', 'shared-tmp-claude-logs'].includes(JSON.parse(s.identity).source))
+                sources: sources.filter(s => (/^(?:native-state(?::|$)|unmapped-native-state$|shared-tmp-claude-logs$)/).test(JSON.parse(s.identity).source))
                     .map(s => ({ ...JSON.parse(s.identity), protected: true, growthBounded: false,
-                        measurement: s.protection && !s.reason && JSON.parse(s.identity).source === 'native-state' ? 'allowlisted-files-only' : 'unknown',
-                        measuredBytes: s.protection && !s.reason && JSON.parse(s.identity).source === 'native-state' ? s.protected_bytes : null })),
+                        measurement: s.protection && !s.reason && JSON.parse(s.identity).source.startsWith('native-state') ? 'allowlisted-files-only' : 'unknown',
+                        measuredBytes: s.protection && !s.reason && JSON.parse(s.identity).source.startsWith('native-state') ? s.protected_bytes : null })),
             },
             spool: this.db.prepare('SELECT count(*) AS segments,coalesce(sum(length(data)),0) AS bytes FROM segments').get() };
     }
