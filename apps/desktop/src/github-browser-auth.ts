@@ -9,7 +9,8 @@ const cancelled = () => Object.assign(new SignInError('GitHub sign-in was cancel
 
 export interface GithubBrowserAuthDependencies {
   clientId?: string;
-  /** Trusted native UI only: never send this code through renderer IPC. */
+  /** Start trusted native UI and return cleanup without waiting for user action.
+   * Never send this code through renderer IPC. */
   presentCode(code: string, url: string, signal: AbortSignal, cancel: () => void): Promise<() => Promise<void>>;
   confirmIdentity(login: string, signal: AbortSignal): Promise<boolean>;
   fetch?: typeof fetch;
