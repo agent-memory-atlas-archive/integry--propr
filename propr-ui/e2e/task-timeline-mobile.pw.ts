@@ -35,8 +35,8 @@ test('390px the full-page timeline wraps each run\'s result, time and duration u
 // Exercise the production task page and TaskStatusTable, with long execution labels
 // supplied through its history API (all other requests use the privacy-safe fixture).
 const layoutsToCheck = [
-  ...[320, 360, 390, 430, 520, 667, 768, 915, 1280, 1920, 2560].map(width => ({ width, hasTouch: true, hideSidebar: false })),
-  ...[520, 768, 1280, 1920, 2560].map(width => ({ width, hasTouch: false, hideSidebar: false })),
+  ...[320, 360, 390, 430, 520, 667, 768, 915, 1024, 1199, 1200, 1280, 1920, 2560].map(width => ({ width, hasTouch: true, hideSidebar: false })),
+  ...[520, 768, 1024, 1199, 1200, 1280, 1920, 2560].map(width => ({ width, hasTouch: false, hideSidebar: false })),
   ...[true, false].map(hasTouch => ({ width: 1920, hasTouch, hideSidebar: true })),
 ];
 for (const { width, hasTouch, hideSidebar } of layoutsToCheck) {
@@ -79,10 +79,20 @@ for (const { width, hasTouch, hideSidebar } of layoutsToCheck) {
     const open = runs.nth(1).getByRole('button');
     const steps = page.getByRole('list', { name: 'Run steps' });
     await expect(steps).toContainText(label);
-    // The 30% pane stacks at 1280. At 1920 the web sidebar leaves only 467px;
-    // the desktop hide-sidebar command gives it ~539px and aligned labels.
-    // Tablet/landscape and 2560 also have room for the aligned columns.
+    const workspace = await page.getByTestId('task-workspace-scroll').boundingBox();
+    const pane = await page.getByTestId('task-timeline-scroll').boundingBox();
+    const output = await page.getByTestId('task-output-scroll').boundingBox();
+    if (workspace!.width >= 960) {
+      expect(pane!.width).toBeGreaterThanOrEqual(576);
+      expect(output!.width).toBeGreaterThanOrEqual(384);
+      expect(output!.x).toBeGreaterThanOrEqual(pane!.x + pane!.width);
+      expect(output!.y).toBe(pane!.y);
+    } else {
+      expect(pane!.width).toBeCloseTo(workspace!.width, 0);
+      expect(output!.y).toBeGreaterThanOrEqual(pane!.y + pane!.height);
+    }
     const timelineWidth = await steps.evaluate(el => el.getBoundingClientRect().width);
+    if (width >= 667) expect(timelineWidth).toBeGreaterThanOrEqual(528);
     const layouts = await steps.locator(':scope > li').evaluateAll(rows => rows.map(row => {
       const [time, content, duration] = Array.from(row.children).slice(1) as HTMLElement[];
       const box = (element: Element) => element.getBoundingClientRect().toJSON();
@@ -92,7 +102,7 @@ for (const { width, hasTouch, hideSidebar } of layoutsToCheck) {
     }));
     for (const layout of layouts) {
       expect(layout.overflow, JSON.stringify(layout)).toBe(false);
-      if (width <= 520 || width === 1280 || (width === 1920 && !hideSidebar)) {
+      if (width <= 520) {
         expect(layout.label.width).toBeGreaterThanOrEqual(timelineWidth - 53);
         expect(layout.label.top).toBeGreaterThanOrEqual(layout.time.bottom);
         expect(layout.duration.top).toBeGreaterThanOrEqual(layout.label.bottom);

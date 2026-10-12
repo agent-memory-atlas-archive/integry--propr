@@ -351,18 +351,18 @@ const TaskDetails: React.FC<TaskDetailsProps> = ({ taskId: taskIdProp, embedded 
         todos={taskData.liveDetails.todos}
       />
 
-      {/* Main Content Area - 30/70 Split */}
-      <div className="flex flex-col min-w-0 sm:min-h-0 sm:flex-1 sm:overflow-hidden">
+      {/* Split only when the 576px timeline and at least 384px of output fit. */}
+      <div className="flex flex-col min-w-0 sm:min-h-0 sm:flex-1 sm:overflow-hidden [container:task-workspace/inline-size]">
         <div
           data-testid="task-workspace-scroll"
-          className={`scrollbar-stealth flex flex-col min-w-0 sm:min-h-0 sm:flex-1 sm:overflow-y-auto sm:overscroll-contain${wideOnly(embedded, 'lg:flex-row lg:overflow-hidden')}`}
+          className={`scrollbar-stealth flex flex-col min-w-0 sm:min-h-0 sm:flex-1 sm:overflow-y-auto sm:overscroll-contain${wideOnly(embedded, '[@container_task-workspace_(min-width:960px)]:flex-row [@container_task-workspace_(min-width:960px)]:overflow-hidden')}`}
         >
-          {/* LEFT PANE (30%) */}
+          {/* Keep 528px for step columns after pane padding, scrollbar and border. */}
           <div
             data-testid="task-timeline-scroll"
             role="region"
             aria-label="Task timeline"
-            className={`w-full min-w-0 flex-shrink-0 border-b border-gray-200 scrollbar-stealth${wideOnly(embedded, 'lg:min-h-0 lg:w-[30%] lg:overflow-y-auto lg:overscroll-contain lg:border-b-0 lg:border-r')}`}
+            className={`w-full min-w-0 flex-shrink-0 border-b border-gray-200 scrollbar-stealth${wideOnly(embedded, '[@container_task-workspace_(min-width:960px)]:min-h-0 [@container_task-workspace_(min-width:960px)]:w-[max(30%,576px)] [@container_task-workspace_(min-width:960px)]:overflow-y-auto [@container_task-workspace_(min-width:960px)]:overscroll-contain [@container_task-workspace_(min-width:960px)]:border-b-0 [@container_task-workspace_(min-width:960px)]:border-r')}`}
           >
             <div className={`z-[1] flex ${PANE_HEADER_HEIGHT} items-center justify-between gap-3 border-b border-slate-200 bg-white px-4 sm:sticky sm:top-0`}>
               <TimelineHeading runCount={runs?.length ?? 0} />
@@ -384,13 +384,13 @@ const TaskDetails: React.FC<TaskDetailsProps> = ({ taskId: taskIdProp, embedded 
             />
           </div>
 
-          {/* RIGHT PANE (70%): the run's deliverables first, then the trace of how it got there. */}
-          <div className={`flex flex-col min-w-0${wideOnly(embedded, 'lg:flex-1 lg:min-h-0 lg:overflow-hidden')}`}>
+          {/* RIGHT PANE: the run's deliverables first, then the trace of how it got there. */}
+          <div className={`flex flex-col min-w-0${wideOnly(embedded, '[@container_task-workspace_(min-width:960px)]:flex-1 [@container_task-workspace_(min-width:960px)]:min-h-0 [@container_task-workspace_(min-width:960px)]:overflow-hidden')}`}>
             <div
               data-testid="task-output-scroll"
               role="region"
               aria-label="Task implementation log"
-              className={`min-w-0 overflow-x-clip scrollbar-stealth${wideOnly(embedded, 'lg:min-h-0 lg:flex-1 lg:overflow-y-auto lg:overscroll-contain')}`}
+              className={`min-w-0 overflow-x-clip scrollbar-stealth${wideOnly(embedded, '[@container_task-workspace_(min-width:960px)]:min-h-0 [@container_task-workspace_(min-width:960px)]:flex-1 [@container_task-workspace_(min-width:960px)]:overflow-y-auto [@container_task-workspace_(min-width:960px)]:overscroll-contain')}`}
             >
               {/* Visual evidence is an outcome with its own header; its bottom rule divides it from the trace. */}
               <TaskVisualPreviews previews={taskData.previewMedia} />
