@@ -25,6 +25,8 @@ interface ActionBarProps {
    * task works, and everything else moves into the overflow menu.
    */
   compact?: boolean;
+  /** Expanded mobile summary: Follow Up stays beside the overflow. */
+  mobileSummary?: boolean;
   /** Mobile: the overflow opens as a bottom action sheet rather than a popover. */
   sheet?: boolean;
 }
@@ -203,21 +205,27 @@ const TaskOverflowMenu: React.FC<{
 
 /** The collapsed header's actions: Stop while the task works, everything else in the action sheet. */
 const CompactActions: React.FC<{
+  summary?: boolean;
   stopButtons: React.ReactNode;
   deletion?: DeletionProps;
   onFollowUp?: () => void;
   historyItemWithPaths?: HistoryItem;
   onViewPrompt: (promptPath: string) => void;
   onViewLogs: (logsPath: string) => void;
-}> = ({ stopButtons, deletion, onFollowUp, historyItemWithPaths, onViewPrompt, onViewLogs }) => {
+}> = ({ summary, stopButtons, deletion, onFollowUp, historyItemWithPaths, onViewPrompt, onViewLogs }) => {
   const { promptPath, logsPath } = historyItemWithPaths ?? {};
   const items: OverflowMenuItem[] = [];
-  if (onFollowUp) items.push({ label: 'Follow Up', title: 'Follow Up - Post a follow-up comment', icon: <MessageSquarePlus size={18} />, onSelect: onFollowUp });
+  if (onFollowUp && !summary) items.push({ label: 'Follow Up', title: 'Follow Up - Post a follow-up comment', icon: <MessageSquarePlus size={18} />, onSelect: onFollowUp });
   if (promptPath) items.push({ label: 'Prompt', title: 'View Prompt', icon: <FileText size={18} />, onSelect: () => onViewPrompt(promptPath) });
   if (logsPath) items.push({ label: 'Logs', title: 'View Logs', icon: <Terminal size={18} />, onSelect: () => onViewLogs(logsPath) });
   // Stop is a safety control, so it never folds into the sheet.
   return (
-    <div className="flex flex-none items-center gap-1.5">
+    <div className={`flex flex-none items-center gap-1.5${summary ? ' [&_button[aria-haspopup=menu]]:h-6 [&_button[aria-haspopup=menu]]:w-6' : ''}`}>
+      {summary && onFollowUp && (
+        <button onClick={onFollowUp} className="inline-flex items-center gap-1 whitespace-nowrap rounded py-1 text-[11px] leading-4 font-medium text-slate-600" title="Follow Up - Post a follow-up comment">
+          <MessageSquarePlus size={12} /><span>Follow Up</span>
+        </button>
+      )}
       {stopButtons}
       {(items.length > 0 || deletion) && <TaskActionSheet items={items} deletion={deletion} />}
     </div>
@@ -245,6 +253,7 @@ const ActionBar: React.FC<ActionBarProps> = ({
   onFollowUp,
   liveRun,
   compact,
+  mobileSummary,
   sheet,
 }) => {
   const isActive = ACTIVE_STATUSES.includes(currentStatus);
@@ -257,12 +266,16 @@ const ActionBar: React.FC<ActionBarProps> = ({
     <StopButtons isActive={isActive} stopsLiveRun={stopsLiveRun} stoppingExecution={stoppingExecution} onStopExecution={onStopExecution} liveRun={liveRun} />
   );
 
-  if (compact) {
+
+  const followUp = taskBusy ? undefined : onFollowUp;
+
+  if (compact || mobileSummary) {
     return (
       <CompactActions
+        summary={mobileSummary}
         stopButtons={stopButtons}
         deletion={deletion}
-        onFollowUp={taskBusy ? undefined : onFollowUp}
+        onFollowUp={followUp}
         historyItemWithPaths={historyItemWithPaths}
         onViewPrompt={onViewPrompt}
         onViewLogs={onViewLogs}
@@ -299,9 +312,9 @@ const ActionBar: React.FC<ActionBarProps> = ({
       )}
 
       {/* Follow Up Button - Ghost style */}
-      {onFollowUp && !taskBusy && (
+      {followUp && (
         <button
-          onClick={onFollowUp}
+          onClick={followUp}
           title="Follow Up - Post a follow-up comment"
           className={ghostButtonClass}
         >

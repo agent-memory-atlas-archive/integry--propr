@@ -234,7 +234,7 @@ const AssignmentEditor: React.FC<EditorProps> = ({ id, assignment, onClose }) =>
  * facts, with an editor for viewers who may change it. A task with nothing
  * to assign (a goal task) renders nothing at all; a failed read offers a retry.
  */
-const AssignmentControl: React.FC<{ assignment: TaskAssignment }> = ({ assignment }) => {
+const AssignmentControl: React.FC<{ assignment: TaskAssignment; dense?: boolean }> = ({ assignment, dense }) => {
   const { assignees, loading, error, reload, unavailable, editable, saving } = assignment;
   const [open, setOpen] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -296,7 +296,7 @@ const AssignmentControl: React.FC<{ assignment: TaskAssignment }> = ({ assignmen
       }}
     >
       {assignees.length > 0
-        ? <AssigneeList assignees={assignees} variant="prominent" />
+        ? <AssigneeList assignees={assignees} variant={dense ? "default" : "prominent"} className={dense ? "!flex-nowrap !gap-x-1 [&_[role=listitem]]:gap-0.5 [&_[aria-hidden=true]]:text-[10px]" : undefined} />
         : <span data-testid="assignment-unassigned" className="text-xs text-slate-500">Unassigned</span>}
       {editable && (
         <button

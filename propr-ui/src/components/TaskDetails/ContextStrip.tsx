@@ -26,6 +26,7 @@ const GitHubIcon: React.FC<{ size?: number; className?: string }> = ({ size = 14
 
 // Model name mapping for human-readable names
 const MODEL_DISPLAY_NAMES: Record<string, string> = {
+  'claude-opus-5-5': 'Opus 5.5',
   'claude-opus-4-5-20251101': 'Opus 4.5',
   'claude-sonnet-4-20250514': 'Sonnet 4',
   'claude-3-5-sonnet-20241022': 'Sonnet 3.5',
@@ -111,19 +112,19 @@ const LinkedIssueChip: React.FC<{ taskInfo: TaskInfo }> = ({ taskInfo }) => {
 };
 
 // Model chip component
-const ModelChip: React.FC<{ modelName: string; duration?: number | null; synthetic?: boolean }> = ({ modelName, duration, synthetic }) => (
+const ModelChip: React.FC<{ modelName: string; duration?: number | null; synthetic?: boolean; compact?: boolean }> = ({ modelName, duration, synthetic, compact }) => (
   <>
     <span
-      className="inline-flex items-center gap-1 rounded border border-slate-200 bg-slate-100 px-1.5 py-0.5 font-mono text-xs text-slate-800"
+      className="inline-flex min-w-0 items-center gap-1 rounded border border-slate-200 bg-slate-100 px-1.5 py-0.5 font-mono text-xs text-slate-800 [&>svg]:shrink-0"
       title={modelName}
     >
       {synthetic
         ? <Layers3 className="h-3 w-3" aria-label="Synthetic pool" />
         : <ProviderLogo provider={modelName} className="w-3 h-3" />}
-      {getDisplayModelName(modelName)}
+      <span className={compact ? "truncate" : undefined}>{getDisplayModelName(modelName)}</span>
     </span>
     {duration !== null && duration !== undefined && (
-      <span className="text-gray-500 font-mono text-xs">{formatRelativeTime(duration)}</span>
+      <span className="shrink-0 text-gray-500 font-mono text-xs">{formatRelativeTime(duration)}</span>
     )}
   </>
 );
@@ -342,6 +343,39 @@ const CompactTitleLine: React.FC<{ taskInfo: TaskInfo | null; prInfo?: { url?: s
     </div>
   );
 };
+
+/** Mobile keeps repository and PR identity together, with secondary Git links beside it. */
+export const MobileGitContext: React.FC<Pick<ContextStripProps, 'taskInfo' | 'prInfo' | 'commitInfo'>> = ({ taskInfo, prInfo, commitInfo }) => {
+  if (!taskInfo) return null;
+  const repoUrl = `https://github.com/${taskInfo.repoOwner}/${taskInfo.repoName}`;
+  const pr = prInfo?.url ? prInfo : taskInfo.type === 'pr-comment' && taskInfo.number
+    ? { url: `${repoUrl}/pull/${taskInfo.number}`, number: taskInfo.number } : null;
+  return (
+    <div role="group" aria-label="Git context" className="flex min-w-0 items-center gap-1 text-xs [&>a]:shrink-0">
+      <a href={pr?.url || repoUrl} target="_blank" rel="noopener noreferrer"
+        title={`${taskInfo.repoOwner}/${taskInfo.repoName}${pr ? ` PR #${pr.number}` : ''}`}
+        className="!shrink inline-flex min-w-0 items-center gap-1 rounded bg-green-50 px-1.5 py-0.5 text-green-700">
+        {pr ? <GitPullRequest size={12} className="shrink-0" /> : <GitHubIcon size={12} className="shrink-0" />}
+        <span className="truncate font-medium">{taskInfo.repoName}</span>
+        {pr && <span className="shrink-0 font-mono">#{pr.number}</span>}
+        <ExternalLink size={10} className="shrink-0 opacity-60" />
+      </a>
+      {Boolean(taskInfo.number) && (taskInfo.type !== 'pr-comment' || taskInfo.number !== pr?.number) && <IssuePRChip taskInfo={taskInfo} />}
+      <LinkedIssueChip taskInfo={taskInfo} />
+      {commitInfo && <CommitInfoChip commitInfo={commitInfo} />}
+      <AttemptLineage taskInfo={taskInfo} />
+    </div>
+  );
+};
+
+export const MobilePeopleRuntime: React.FC<Pick<ContextStripProps, 'assignment' | 'modelName' | 'duration' | 'synthetic'>> = ({ assignment, modelName, duration, synthetic }) => (
+  <div data-testid="task-mobile-people-runtime" className="flex min-w-0 items-center justify-between gap-2">
+    {assignment?.taskId && <AssignmentControl assignment={assignment} dense />}
+    <div role="group" aria-label="Execution runtime" className="ml-auto flex min-w-0 max-w-[50%] shrink-0 items-center gap-1 whitespace-nowrap [&>span]:text-[10px] [&>span]:leading-3">
+      <ModelChip modelName={modelName} duration={duration} synthetic={synthetic} compact />
+    </div>
+  </div>
+);
 
 interface ContextStripProps {
   taskInfo: TaskInfo | null;

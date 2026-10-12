@@ -8,7 +8,7 @@ import ResultOverview from './ResultOverview';
 import PromptModal from './PromptModal';
 import LogFilesModal from './LogFilesModal';
 import FollowupModal from './FollowupModal';
-import ContextStrip from './ContextStrip';
+import ContextStrip, { MobileGitContext, MobilePeopleRuntime } from './ContextStrip';
 import ActionBar from './ActionBar';
 import TaskHeader, { ReturnToRunButton } from './TaskHeader';
 import ProgressBar from './ProgressBar';
@@ -46,12 +46,12 @@ const MobileSummary = React.forwardRef<HTMLDivElement, MobileHeaderProps>(({ con
   <div ref={ref} className="sm:hidden flex-shrink-0 bg-white">
     <div className="px-3 py-1.5 bg-slate-50 border-b border-slate-200">
       {/* The title block above already names the task; repeating it here stacked the title twice. */}
-      <div className="flex flex-col gap-2">
-        <div className="flex min-w-0 items-center gap-2">
-          <ContextStrip {...contextStripProps} mobileRepoOnly={true} />
+      <div data-testid="task-mobile-metadata" className="flex flex-col gap-1">
+        <div className="flex min-w-0 items-center justify-between gap-1">
+          <MobileGitContext {...contextStripProps} />
+          <ActionBar {...actionBarProps} mobileSummary />
         </div>
-        <ActionBar {...actionBarProps} sheet={true} />
-        <ContextStrip {...contextStripProps} mobileMetadataOnly={true} />
+        <MobilePeopleRuntime {...contextStripProps} />
       </div>
     </div>
     <ProgressBar todos={todos} />

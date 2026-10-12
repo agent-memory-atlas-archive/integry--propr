@@ -244,37 +244,60 @@ test('traps focus in the popover and returns it to the trigger on Escape', async
   await expect(gitContext(page).getByRole('listitem', { name: 'Assigned to @hubot' })).toHaveCount(0);
 });
 
-test('shows the assignment in the expanded mobile summary and leaves the compact bar alone at 390px', async ({ page }) => {
-  await fixture(page, { assignees: [octocat, hubot] });
-  await page.setViewportSize({ width: 390, height: 844 });
-  await page.goto(`/tasks/${taskId}`);
+for (const width of [320, 390]) {
+  test(`shows the assignment in the expanded mobile summary and leaves the compact bar alone at ${width}px`, async ({ page }) => {
+    await fixture(page, { assignees: [octocat, hubot] });
+    await page.setViewportSize({ width, height: 844 });
+    await page.goto(`/tasks/${taskId}`);
 
-  const details = page.getByTestId('task-details');
-  const assignment = details.getByTestId('task-assignment').filter({ visible: true });
-  await expect(assignment).toHaveCount(1);
-  await expect(assignment.getByRole('listitem', { name: 'Assigned to @octocat' })).toBeVisible();
+    const details = page.getByTestId('task-details');
+    const assignment = details.getByTestId('task-assignment').filter({ visible: true });
+    await expect(assignment).toHaveCount(1);
+    await expect(assignment.getByRole('listitem', { name: 'Assigned to @octocat' })).toBeVisible();
 
-  await assignment.getByRole('button', { name: 'Edit assignees' }).click();
-  const editor = page.getByRole('dialog', { name: 'Assign users' });
-  await expect(editor).toBeVisible();
-  const box = (await editor.boundingBox())!;
-  expect(box.x).toBeGreaterThanOrEqual(0);
-  expect(box.x + box.width).toBeLessThanOrEqual(390);
-  await expectNoHorizontalOverflow(page);
-  await capture(page, 'task-assignment-editor-390');
-  await page.keyboard.press('Escape');
+    const metadata = page.getByTestId('task-mobile-metadata');
+    const git = metadata.getByRole('group', { name: 'Git context' });
+    await expect(git.getByRole('link', { name: 'propr #2911' })).toHaveAttribute('href', 'https://github.com/integry/propr/pull/2911');
+    await expect(git.getByRole('link', { name: '#2894' })).toBeVisible();
+    await expect(git).not.toContainText('integry/');
+    const runtime = metadata.getByRole('group', { name: 'Execution runtime' });
+    await expect(runtime).toContainText('Opus 5.5');
+    await expect(runtime).toContainText('20m 0s');
+    const peopleBox = (await assignment.boundingBox())!;
+    const runtimeBox = (await runtime.boundingBox())!;
+    expect(Math.abs(peopleBox.y - runtimeBox.y)).toBeLessThan(4);
+    expect(peopleBox.x + peopleBox.width).toBeLessThanOrEqual(runtimeBox.x);
+    expect((await metadata.boundingBox())!.height).toBeLessThanOrEqual(48);
+    await expect(metadata.getByRole('button', { name: 'Follow Up', exact: true })).toBeVisible();
+    await expectNoHorizontalOverflow(page);
+    if (process.env.PROPR_CAPTURE_PREVIEWS && width === 390) {
+      await mkdir('../.propr/previews', { recursive: true });
+      await metadata.screenshot({ path: '../.propr/previews/mobile-metadata-390.png' });
+    }
 
-  const bar = page.getByTestId('task-mobile-compact-bar');
-  await details.evaluate(element => {
-    element.append(Object.assign(document.createElement('div'), { style: 'height: 1200px; flex: none' }));
-    element.scrollTop = 600;
+    await assignment.getByRole('button', { name: 'Edit assignees' }).click();
+    const editor = page.getByRole('dialog', { name: 'Assign users' });
+    await expect(editor).toBeVisible();
+    const box = (await editor.boundingBox())!;
+    expect(box.x).toBeGreaterThanOrEqual(0);
+    expect(box.x + box.width).toBeLessThanOrEqual(width);
+    await expectNoHorizontalOverflow(page);
+    // The focused metadata preview above captures this change.
+    await page.keyboard.press('Escape');
+
+    const bar = page.getByTestId('task-mobile-compact-bar');
+    await details.evaluate(element => {
+      element.append(Object.assign(document.createElement('div'), { style: 'height: 1200px; flex: none' }));
+      element.scrollTop = 600;
+    });
+    await expect(bar).toBeVisible();
+    expect(Math.round((await bar.boundingBox())!.height)).toBe(44);
+    await expect(bar).toHaveText('#2911:Show and edit task assignment on the task detail page');
+    await expect(bar.getByTestId('task-assignment')).toHaveCount(0);
+    await expectNoHorizontalOverflow(page);
   });
-  await expect(bar).toBeVisible();
-  expect(Math.round((await bar.boundingBox())!.height)).toBe(44);
-  await expect(bar).toHaveText('#2911:Show and edit task assignment on the task detail page');
-  await expect(bar.getByTestId('task-assignment')).toHaveCount(0);
-  await expectNoHorizontalOverflow(page);
-});
+
+}
 
 test('1440px renders exactly one visible assignment control, with one edit button', async ({ page }) => {
   await fixture(page, { assignees: [octocat] });
