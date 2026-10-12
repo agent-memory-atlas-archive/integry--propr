@@ -86,8 +86,8 @@ export function collectProvider(spool: ManagedLogSpool, input: ProviderRoot, now
             // An oversized unfinished line is consumed in bounded pieces,
             // and its tail can NEVER be reclassified as a safe record.
             if (!recordBound && (discard || length - start > spool.limits.recordBytes)) { dropped += length - start; start = length; discard = true; }
-            spool.append(identity, records, relative.endsWith('.jsonl') ? 'jsonl' : 'text', credentials, now,
-                { before, after: { inode, offset: offset + start, discard, anchor: anchorAt(offset + start) } }, dropped);
+            spool.append(identity, records, relative.endsWith('.jsonl') ? 'jsonl' : 'text', { credentials, now,
+                cursor: { before, after: { inode, offset: offset + start, discard, anchor: anchorAt(offset + start) } }, droppedBytes: dropped });
         } catch { inventoryIncomplete = true; spool.report(summary, 'unsafe-source'); spool.report(identity, 'unsafe-source'); }
         finally { if (fd !== undefined) fs.closeSync(fd); }
     };

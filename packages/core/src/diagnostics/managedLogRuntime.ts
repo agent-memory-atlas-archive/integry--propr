@@ -36,7 +36,7 @@ export function captureApplicationRecord(line: string): void {
         if (applicationLostBytes && db) { db.report(identity, 'storage-unavailable', applicationLostBytes); applicationLostBytes = 0; }
         const known = diagnosticCredentials();
         if (db && known === null) db.report(identity, 'unsafe-source', Buffer.byteLength(line));
-        else db?.append(identity, [line], 'jsonl', [...configuredDiagnosticSecrets(), ...(known ?? [])]);
+        else db?.append(identity, [line], 'jsonl', { credentials: [...configuredDiagnosticSecrets(), ...(known ?? [])] });
     } catch { applicationLostBytes = Math.min(Number.MAX_SAFE_INTEGER, applicationLostBytes + Buffer.byteLength(line)); diagnosticsFailure(); }
 }
 export function captureProviderOutput(identity: LogIdentity, secrets: readonly string[]): { write(chunk: string): void; close(): void } {
@@ -53,7 +53,7 @@ export function captureProviderOutput(identity: LogIdentity, secrets: readonly s
                 const records: string[] = [];
                 let dropped = 0, start = 0, bytes = 0;
                 const flush = () => {
-                    if (records.length || dropped) db.append(identity, records, 'text', secrets, Date.now(), undefined, dropped);
+                    if (records.length || dropped) db.append(identity, records, 'text', { credentials: secrets, droppedBytes: dropped });
                     records.length = 0; dropped = 0; bytes = 0;
                 };
                 for (let i = 0; i < chunk.length; i++) {
@@ -76,7 +76,7 @@ export function captureProviderOutput(identity: LogIdentity, secrets: readonly s
             } catch { lostBytes = Math.min(Number.MAX_SAFE_INTEGER, lostBytes + Buffer.byteLength(chunk) + Buffer.byteLength(pending)); pending = ''; discard = true; diagnosticsFailure(); }
         },
         close() {
-            try { if (lostBytes) db.report(identity, 'storage-unavailable', lostBytes); if (pending || discard) db.append(identity, [], 'text', secrets, Date.now(), undefined, Buffer.byteLength(pending) || 1); }
+            try { if (lostBytes) db.report(identity, 'storage-unavailable', lostBytes); if (pending || discard) db.append(identity, [], 'text', { credentials: secrets, droppedBytes: Buffer.byteLength(pending) || 1 }); }
             catch { diagnosticsFailure(); }
             pending = '';
         },

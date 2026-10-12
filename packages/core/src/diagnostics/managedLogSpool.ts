@@ -17,6 +17,12 @@ export const MANAGED_LOG_POLICY = Object.freeze({
 });
 export type LogIdentity = { provider: string; agent: string; source: string };
 export type Cursor = { inode?: string; offset?: number; discard?: boolean; anchor?: string };
+export interface AppendOptions {
+    credentials: readonly string[];
+    now?: number;
+    cursor?: { before: Cursor; after: Cursor };
+    droppedBytes?: number;
+}
 interface Source { id: string; identity: string; cursor: string; next: number; dropped: number; gaps: number; last_success: number | null; reason: string | null; protected_bytes: number; protection: string | null }
 interface Segment { id: number; source: string; day: string; first: number; last: number; start: number; end: number; raw: number; digest: string; data: Buffer; sealed: number; ack: number }
 export const digest = (value: string | Buffer): string => createHash('sha256').update(value).digest('hex');
@@ -89,8 +95,8 @@ export class ManagedLogSpool {
         return this.atomic(() => JSON.parse(this.source(identity).cursor) as Cursor);
     }
     /** Cursor CAS + segments commit together. Concurrent/restarted scans cannot duplicate records. */
-    append(identity: LogIdentity, records: string[], format: 'jsonl' | 'text', ...options: [credentials: readonly string[], now?: number, cursor?: { before: Cursor; after: Cursor }, droppedBytes?: number]): boolean {
-        const [credentials, now = Date.now(), cursor, droppedBytes = 0] = options;
+    append(identity: LogIdentity, records: string[], format: 'jsonl' | 'text', options: AppendOptions): boolean {
+        const { credentials, now = Date.now(), cursor, droppedBytes = 0 } = options;
         if (records.length > 4096 || records.reduce((sum, r) => sum + Buffer.byteLength(r), 0) > this.limits.scanBytes) throw new Error('diagnostic batch exceeds bound');
         return this.atomic(() => {
             const source = this.source(identity);

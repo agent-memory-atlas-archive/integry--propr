@@ -30,9 +30,9 @@ test('UTC midnight, multiple size rolls, stable sealed export, restart and curso
     try {
         const lines = Array.from({ length: 20 }, (_, n) => JSON.stringify({ n, message: 'a'.repeat(30_000) }));
         const before = Date.parse('2026-10-11T23:59:59Z');
-        f.spool.append(identity, lines.slice(0, 10), 'jsonl', [], before);
-        f.spool.append(identity, lines.slice(10), 'jsonl', [], before + 2000, { before: {}, after: { offset: 20 } });
-        assert.equal(f.spool.append(identity, lines, 'jsonl', [], before, { before: {}, after: { offset: 20 } }), false);
+        f.spool.append(identity, lines.slice(0, 10), 'jsonl', { credentials: [], now: before });
+        f.spool.append(identity, lines.slice(10), 'jsonl', { credentials: [], now: before + 2000, cursor: { before: {}, after: { offset: 20 } } });
+        assert.equal(f.spool.append(identity, lines, 'jsonl', { credentials: [], now: before, cursor: { before: {}, after: { offset: 20 } } }), false);
         const second = new ManagedLogSpool(path.join(f.root, 'spool'), 'tenant-a');
         assert.deepEqual(second.exportOne(), f.spool.exportOne());
         second.close();
@@ -77,7 +77,7 @@ test('no acknowledgement preserves old export, bounded outage drops new data and
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'diagnostic-cap-'));
     const spool = new ManagedLogSpool(path.join(root, 'spool'), 'tenant-a', { segments: 2, segmentBytes: 80 });
     try {
-        for (let n = 0; n < 20; n++) spool.append(identity, [JSON.stringify({ n, text: 'a'.repeat(50) })], 'jsonl', []);
+        for (let n = 0; n < 20; n++) spool.append(identity, [JSON.stringify({ n, text: 'a'.repeat(50) })], 'jsonl', { credentials: [] });
         const status = spool.status() as any;
         assert.equal(status.spool.segments, 2);
         assert.equal(status.sources[0].gaps, 18);
@@ -135,7 +135,7 @@ test('structured and text redaction fail closed', () => {
 test('CLI private export and readback acknowledgement integration', () => {
     const f = fixture();
     try {
-        f.spool.append(identity, ['{"msg":"hello"}'], 'jsonl', []);
+        f.spool.append(identity, ['{"msg":"hello"}'], 'jsonl', { credentials: [] });
         const env = { ...process.env, PROPR_MANAGED_LOGS: '1', PROPR_DIAGNOSTIC_ROOT: path.join(f.root, 'spool'), PROPR_INSTANCE_ID: 'tenant-a' };
         const cli = (...args: string[]) => spawnSync(process.execPath, ['--import', 'tsx', 'scripts/managed-diagnostics.ts', ...args], { env, encoding: 'utf8' });
         const result = cli('export'); assert.equal(result.status, 0, result.stderr);
@@ -192,7 +192,7 @@ test('SQLite full fault rolls back both data and cursor, keeping last acknowledg
         for (let i = 0; i < 50; i++) {
             const cursor = spool.cursor(identity);
             const random = Array.from({ length: 1000 }, (_, n) => digest(`${i}-${n}`)).join('');
-            try { spool.append(identity, [JSON.stringify({ message: random })], 'jsonl', [], Date.now(), { before: cursor, after: { offset: i + 1 } }); }
+            try { spool.append(identity, [JSON.stringify({ message: random })], 'jsonl', { credentials: [], now: Date.now(), cursor: { before: cursor, after: { offset: i + 1 } } }); }
             catch {
                 assert.deepEqual(spool.cursor(identity), cursor);
                 failed = true; break;
@@ -230,10 +230,10 @@ test('injected ENOSPC during commit is atomic and retry preserves committed reco
             if (sql === 'COMMIT' && fail) { fail = false; throw Object.assign(new Error('disk full'), { code: 'ENOSPC' }); }
             return execute(sql);
         };
-        assert.throws(() => f.spool.append(identity, ['{"n":1}'], 'jsonl', [], 1000, { before: {}, after: { offset: 8 } }), /disk full/);
+        assert.throws(() => f.spool.append(identity, ['{"n":1}'], 'jsonl', { credentials: [], now: 1000, cursor: { before: {}, after: { offset: 8 } } }), /disk full/);
         assert.deepEqual(f.spool.cursor(identity), {});
         assert.equal(f.spool.exportOne(), null);
-        f.spool.append(identity, ['{"n":1}'], 'jsonl', [], 1000, { before: {}, after: { offset: 8 } });
+        f.spool.append(identity, ['{"n":1}'], 'jsonl', { credentials: [], now: 1000, cursor: { before: {}, after: { offset: 8 } } });
         assert.equal(drain(f.spool)[0].text, '{"n":1}\n');
     } finally { f.close(); }
 });
@@ -257,7 +257,7 @@ test('concurrent process rotation, export and cursor CAS recover without duplica
         const script = `import { ManagedLogSpool } from ${JSON.stringify(modulePath)};
             const spool = new ManagedLogSpool(${JSON.stringify(path.join(f.root, 'spool'))}, 'tenant-a');
             const identity = ${JSON.stringify(identity)};
-            for (let n=0;n<12;n++) { let done=false; while(!done) { try { spool.append(identity,[JSON.stringify({writer:process.env.WRITER,n})],'jsonl',[]); done=true; } catch(e) { if(e.code!=='SQLITE_BUSY') throw e; } } }
+            for (let n=0;n<12;n++) { let done=false; while(!done) { try { spool.append(identity,[JSON.stringify({writer:process.env.WRITER,n})],'jsonl',{credentials:[]}); done=true; } catch(e) { if(e.code!=='SQLITE_BUSY') throw e; } } }
             spool.close();`;
         const run = (writer: string) => new Promise<void>((resolve, reject) => {
             const child = spawn(process.execPath, ['--import', 'tsx', '--input-type=module', '-e', script], { env: { ...process.env, WRITER: writer }, stdio: ['ignore', 'ignore', 'pipe'] });
