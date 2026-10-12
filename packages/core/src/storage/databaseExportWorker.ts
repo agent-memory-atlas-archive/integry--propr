@@ -7,12 +7,25 @@ export function isExportSecretName(name: string): boolean {
   // HOST_GH_PRIVATE_KEY is a host PEM path despite its name (.env.example).
   if (key === 'HOST_GH_PRIVATE_KEY' || /(?:^|[_-])(?:PATH|FILE|DIR|DIRECTORY)$/.test(key)) return false;
   if (/(?:^|[_-])PUBLIC[_-]?KEY(?:$|[_-])/.test(key)) return false;
-  return /(?:^|[_-])(?:SECRETS?|TOKENS?|PASSWORDS?|CREDENTIALS?|PRIVATE[_-]?KEY|API[_-]?KEY|ACCESS[_-]?KEY|ENCRYPTION[_-]?KEY)(?:$|[_-])/.test(key);
+  const credential = /(?:^|[_-])(?:SECRETS?|PASSWORDS?|CREDENTIALS?|PRIVATE[_-]?KEY|API[_-]?KEY|ACCESS[_-]?KEY|ENCRYPTION[_-]?KEY)(?:$|[_-])/.test(key);
+  const token = /(?:^|[_-])TOKENS?(?:$|[_-])/.test(key);
+  const tuning = /(?:^|[_-])(?:MAX|LIMITS?|COUNTS?|BUDGETS?)(?:$|[_-])/.test(key);
+  return credential || (token && !tuning);
+}
+
+/** Common scalar configuration must not become a database-wide substring ban.
+ * Keep the original value for matching; only classification uses trimmed text.
+ */
+export function isExportSecretValue(value: unknown): value is string {
+  if (typeof value !== 'string') return false;
+  const text = value.trim();
+  return text.length >= 8 && !(/^[+-]?(?:\d+\.?\d*|\.\d+)(?:e[+-]?\d+)?$/i.test(text)) && !/^(?:true|false)$/i.test(text);
 }
 
 /** Runs in a disposable worker: SQLite integrity/VACUUM cannot block API requests. */
 export const databaseExportWorker = String.raw`
 const isExportSecretName = ${isExportSecretName.toString()};
+const isExportSecretValue = ${isExportSecretValue.toString()};
 const { workerData: d, parentPort } = require('node:worker_threads');
 const fs = require('node:fs');
 const path = require('node:path');
@@ -62,7 +75,7 @@ const SQLite = require(d.sqliteModule);
           if (!Array.isArray(agents)) throw Error('scope');
           for (const agent of agents) {
             for (const [key, value] of Object.entries(agent.envVars || {})) {
-              if (isExportSecretName(key) && typeof value === 'string' && value) d.forbiddenSecrets.push(value);
+              if (isExportSecretName(key) && isExportSecretValue(value)) d.forbiddenSecrets.push(value);
             }
             delete agent.envVars; delete agent.configPath;
           }

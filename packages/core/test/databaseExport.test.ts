@@ -7,6 +7,7 @@ import { createRequire } from 'node:module';
 import { createHash } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 import { configuredExportSecrets, DatabaseExports } from '../src/storage/databaseExport.js';
+import { isExportSecretName } from '../src/storage/databaseExportWorker.js';
 const SQLite = createRequire(import.meta.url)('better-sqlite3');
 const allow = async () => {};
 async function fixture(t: test.TestContext) {
@@ -284,3 +285,61 @@ test('current agent credential family is removed and historical copies fail clos
   assert.equal((await settled(f.exports, job.operationId)).state, 'failed');
   await assert.rejects(f.exports.redeem('instance', f.exports.generation, job.operationId, 'admin', allow));
 });
+
+
+test('token tuning names are configuration while credential families remain secrets', () => {
+  for (const name of [
+    'MAX_THINKING_TOKENS', 'CLAUDE_CODE_MAX_OUTPUT_TOKENS', 'MAX_TOKENS',
+    'TOKEN_LIMIT', 'TOKENS_COUNT', 'THINKING_TOKEN_BUDGET', 'maxThinkingTokens',
+    'provider-token-limit',
+  ]) {
+    assert.equal(isExportSecretName(name), false, name);
+    // A long, nonnumeric value must not mask a name-policy regression.
+    assert.deepEqual(configuredExportSecrets({ [name]: 'unlimited-tuning-value' }), [], name);
+  }
+  for (const name of ['GITHUB_TOKEN', 'PROVIDER_TOKENS', 'MAX_PROVIDER_API_KEY']) {
+    assert.equal(isExportSecretName(name), true, name);
+  }
+  for (const value of ['', 'short', '1234567', '100000000', '9'.repeat(400), '1.234567e8', 'true', '   FALSE   ', '        ']) {
+    assert.deepEqual(configuredExportSecrets({ PROVIDER_TOKEN: value }), [], JSON.stringify(value));
+  }
+  assert.deepEqual(configuredExportSecrets({ PROVIDER_TOKEN: 'aB3dE6gH' }), ['aB3dE6gH']);
+});
+
+for (const source of ['process', 'agent', 'both']) {
+  test(`export stays ready with token tuning and scalar values from ${source}`, async t => {
+    const f = await fixture(t);
+    const envVars = {
+      MAX_THINKING_TOKENS: '10000', CLAUDE_CODE_MAX_OUTPUT_TOKENS: '32000',
+      MAX_TOKENS: 'unlimited-tuning-value', TOKEN_COUNT: 'configured-count-value',
+      SHORT_TOKEN: 'short', NUMERIC_TOKEN: '123456789012', BOOLEAN_TOKEN: '   FALSE   ',
+    };
+    if (source !== 'agent') {
+      for (const [name, value] of Object.entries(envVars)) {
+        const previous = process.env[name]; process.env[name] = value;
+        t.after(() => { if (previous === undefined) delete process.env[name]; else process.env[name] = previous; });
+      }
+    }
+    if (source !== 'process') {
+      f.db.prepare("UPDATE system_configs SET value=? WHERE key='agents'").run(JSON.stringify([
+        { id: 'agent', envVars: { ...envVars, API_KEY: 'operator-env-canary' } },
+      ]));
+    }
+    const body = 'customer token settings: ' + Object.values(envVars).join(', ');
+    f.db.prepare('INSERT INTO customer(body) VALUES(?)').run(body);
+    f.db.exec('CREATE TABLE customer_payloads(value BLOB)');
+    // Exercise the raw UTF-16 scans as well as logical text/UTF-8 matching.
+    f.db.prepare('INSERT INTO customer_payloads VALUES(?)').run(Buffer.from(body, 'utf16le'));
+    f.db.prepare('INSERT INTO customer_payloads VALUES(?)').run(Buffer.from(body, 'utf16le').swap16());
+    const job = await f.start();
+    assert.equal((await settled(f.exports, job.operationId)).state, 'ready');
+    const download = await f.exports.redeem('instance', f.exports.generation, job.operationId, 'admin', allow);
+    try {
+      const data = await download.file.readFile();
+      assert.equal(data.includes(Buffer.from(body)), true);
+      assert.equal(data.includes(Buffer.from(body, 'utf16le')), true);
+      assert.equal(data.includes(Buffer.from(body, 'utf16le').swap16()), true);
+      assert.equal(data.includes(Buffer.from('operator-env-canary')), false);
+    } finally { await download.file.close(); await download.dispose(); }
+  });
+}

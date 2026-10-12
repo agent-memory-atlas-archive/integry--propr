@@ -6,7 +6,7 @@ import { createRequire } from 'node:module';
 import { Worker } from 'node:worker_threads';
 import type { DatabaseExportStatus } from '@propr/shared';
 import { assertRealDirectory } from './lifecycle.js';
-import { databaseExportWorker, isExportSecretName } from './databaseExportWorker.js';
+import { databaseExportWorker, isExportSecretName, isExportSecretValue } from './databaseExportWorker.js';
 
 const require = createRequire(import.meta.url);
 const MAX_BYTES = 512 * 1024 ** 2;
@@ -16,7 +16,7 @@ const TTL = 5 * 60_000;
 // through job metadata, diagnostics, or errors.
 export function configuredExportSecrets(env: NodeJS.ProcessEnv = process.env): string[] {
   return [...new Set(Object.entries(env).flatMap(([name, value]) =>
-    isExportSecretName(name) && value ? [value] : []))];
+    isExportSecretName(name) && isExportSecretValue(value) ? [value] : []))];
 }
 export type StorageAuthority = () => Promise<void>;
 // Compatibility boundary for existing storage callers.
