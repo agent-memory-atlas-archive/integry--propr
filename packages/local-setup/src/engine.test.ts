@@ -113,3 +113,21 @@ test("retry preserves the previous root and re-evaluates platform capability", a
   assert.equal(retried.rootDir, "/chosen/root");
   assert.equal(retried.capability.platform, "darwin");
 });
+
+test('Darwin remote Docker endpoint blocks provisioning with endpoint-specific recovery', async () => {
+  const fix = 'Select a local Docker Desktop context; unset DOCKER_HOST pointing to a remote daemon.';
+  let pulls = 0;
+  const result = await runSetup({ root: '/stack', platform: 'darwin', actions: {
+    runChecks: async () => ({ rootDir: '/stack', anyFail: true, results: [
+      { name: 'Docker daemon', group: 'Docker', status: 'ok', detail: 'ready' },
+      { name: 'Docker local endpoint', group: 'Docker', status: 'fail', detail: 'Remote endpoint', fix },
+    ] }),
+    pullImages: async () => { pulls++; throw new Error('must not pull'); },
+  } as unknown as SetupActions });
+  assert.equal(pulls, 0);
+  assert.equal(result.completed, false);
+  const check = result.state.steps.find(step => step.id === 'check');
+  assert.equal(check?.status, 'failed');
+  assert.equal(check?.detail, 'Remote endpoint');
+  assert.equal(check?.nextAction, fix);
+});

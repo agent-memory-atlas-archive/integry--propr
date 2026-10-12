@@ -141,3 +141,10 @@ Published and source-built agent images must declare Linux AMD64; native ARM64 a
 Already-local images are inspected locally. With remote checks skipped they are reused; otherwise a failed pull
 can reuse an image only after its local platform is reverified. This does not make Docker's inspection and execution
 atomic: external image deletion or endpoint changes can still cause the later Docker command to fail.
+
+Selected follow-up verification also covers the Library deny-delete ACL policy, first-use root creation,
+and root mode revalidation after awaited startup actions in unit tests. These do not replace native evidence.
+For the next full Linux provisioning run, record the runtime root mode before startup, after `startStack`,
+and after protected health succeeds; it must remain `0700`. Record actual container mounts and any entrypoint
+permission changes. The default mounts target root subdirectories (data/logs/repos), not the root itself.
+Full Linux provisioning for this invariant remains unverified where Docker is unavailable.

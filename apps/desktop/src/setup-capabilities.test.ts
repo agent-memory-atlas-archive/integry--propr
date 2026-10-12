@@ -79,3 +79,32 @@ it('normalizes an older root at acquisition and rejects mode changes across awai
     authority.validate();
   } finally { authority.close(); rmSync(appData, { recursive: true, force: true }); }
 });
+
+it('creates a first-use root before checks and validates startup across awaited boundaries', async () => {
+  const { existsSync, statSync } = await import('node:fs');
+  const appData = realpathSync.native(mkdtempSync(join(tmpdir(), 'propr-first-root-')));
+  const root = join(appData, 'nested', 'local-runtime');
+  assert.equal(existsSync(root), false);
+  const authority = RootDirectoryAuthority.open(root, appData);
+  let checks = false;
+  const bound = bindRootOperations({
+    runChecks: async () => {
+      assert.equal(statSync(root).mode & 0o777, 0o700);
+      checks = true;
+      return { rootDir: root, anyFail: false, results: [] };
+    },
+    startStack: async () => { await Promise.resolve(); assert.equal(checks, true); },
+  } as unknown as SetupActions, authority);
+  try {
+    await bound.runChecks({ root });
+    await bound.startStack({ rootDir: root });
+    authority.validate();
+    for (const operation of ['startStack', 'replaceRunningStack'] as const) {
+      const changed = bindRootOperations({
+        [operation]: async () => { await Promise.resolve(); chmodSync(root, 0o755); },
+      } as unknown as SetupActions, authority);
+      await assert.rejects(changed[operation]!({ rootDir: root }), /no longer private/);
+      chmodSync(root, 0o700);
+    }
+  } finally { authority.close(); rmSync(appData, { recursive: true, force: true }); }
+});

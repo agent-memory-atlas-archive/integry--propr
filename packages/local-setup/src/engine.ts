@@ -330,6 +330,8 @@ export type RelayInstallationDecision =
 
 /** Minimal environment-check contract consumed by the setup state machine. */
 export interface SetupCheckResult {
+  /** Actionable recovery supplied by the host check. */
+  fix?: string;
   name: string;
   status: "ok" | "warn" | "fail";
   detail: string;
@@ -899,10 +901,10 @@ async function runSetupAttempt(options: RunSetupOptions): Promise<SetupRunResult
   if (dockerProblem) {
     settle("check", {
       status: "failed",
-      detail: dockerProblem,
-      nextAction: (options.platform ?? process.platform) === "darwin"
+      detail: dockerProblem.detail,
+      nextAction: dockerProblem.fix ?? ((options.platform ?? process.platform) === "darwin"
         ? "Open Docker Desktop and wait for its engine to start, then retry. If the CLI is missing, install Docker Desktop yourself in Applications. No permissions or access are changed by setup."
-        : "Install/start Docker and ensure this user can run `docker info`, then re-run setup.",
+        : "Install/start Docker and ensure this user can run `docker info`, then re-run setup."),
     });
     return finish();
   }
@@ -1587,10 +1589,10 @@ export function retrySetup(previous: SetupRunResult, options: Omit<RunSetupOptio
  * Keyed off the structured `Docker` check group rather than exact check names,
  * so re-wording a check in checkCommands.ts can't silently let setup continue
  * past a missing/unreachable engine. Within that group only the engine checks
- * ("Docker installed", "Docker daemon") ever report `fail`; the socket check is
+ * ("Docker installed", "Docker daemon", "Docker local endpoint") report `fail`; the socket check is
  * informational and tops out at `warn`, so a `fail` here always means Docker
  * itself cannot run the stack.
  */
-function blockingDockerFailure(outcome: ChecksOutcome): string | undefined {
-  return outcome.results.find((r) => r.group === "Docker" && r.status === "fail")?.detail;
+function blockingDockerFailure(outcome: ChecksOutcome): ChecksOutcome["results"][number] | undefined {
+  return outcome.results.find((r) => r.group === "Docker" && r.status === "fail");
 }

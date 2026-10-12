@@ -1,4 +1,3 @@
-import { localSetupSearchPath } from "../utils/localSetupPlatform.js";
 /**
  * Live agent validation for `propr check` (opt-in, see --validate-agents).
  *
@@ -18,6 +17,7 @@ import { localSetupSearchPath } from "../utils/localSetupPlatform.js";
  * reconstructions — verify against real images on the host.
  */
 
+import { localSetupSearchPath } from "../utils/localSetupPlatform.js";
 import { spawn, spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";

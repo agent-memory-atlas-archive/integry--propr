@@ -1,4 +1,3 @@
-import { localSetupSearchPath } from "../utils/localSetupPlatform.js";
 /**
  * Shared GitHub authentication via the `gh` CLI.
  *
@@ -9,6 +8,7 @@ import { localSetupSearchPath } from "../utils/localSetupPlatform.js";
  * the console or calling process.exit, leaving presentation to the caller.
  */
 
+import { localSetupSearchPath } from "../utils/localSetupPlatform.js";
 import type { ConfigManager } from "../config/index.js";
 
 /** Scopes requested when launching the interactive `gh auth login`. */

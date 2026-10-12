@@ -333,7 +333,17 @@ const tryTerminal = async (
         cancellationWritten = true;
       }
       if (!started && terminalClosed && terminalStatus !== 0) {
+        // Completion can be published during the awaited started-marker read.
+        const completedStatus = parseStatus(await readOwnedMarker(resultPath));
+        if (completedStatus !== null) {
+          completed = true;
+          if (cancellationWritten) throw abortError();
+          return completedStatus;
+        }
+        started ||= hasStartedCommand(await readOwnedMarker(`${stateBase}.started`));
+        if (started) continue;
         if (signal?.aborted) throw abortError();
+        if (terminal.commandFile) throw new Error('Terminal could not be opened. Open Terminal on this Mac and retry authentication.');
         return terminalStatus;
       }
       if (!started && Date.now() >= startDeadline) {

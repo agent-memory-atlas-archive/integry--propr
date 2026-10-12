@@ -527,3 +527,10 @@ test('command-file retries preserve host Docker selection over Terminal defaults
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test('command-file launch refusal reports Terminal recovery before the startup deadline', { timeout: 5000 }, async () => {
+  const launcher = createDesktopAuthenticationLauncher([{
+    command: '/bin/sh', commandFile: true, args: () => ['-c', 'exit 23'],
+  }]);
+  await assert.rejects(launcher(process.execPath, ['-e', 'process.exit(0)'], { title: 'Refused launch' }), /Terminal could not be opened/);
+});

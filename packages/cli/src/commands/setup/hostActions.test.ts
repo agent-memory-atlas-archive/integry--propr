@@ -242,3 +242,66 @@ test('GitHub probes retain Finder tool discovery without changing the parent PAT
   assert.ok(paths.every(path => path.includes('/opt/homebrew/bin')));
   assert.equal(process.env.PATH, parentPath);
 });
+
+for (const skip of [false, true]) {
+  test(`Darwin image failures remain structured and cancellation propagates (skipRemote=${skip})`, async t => {
+    platform(t, 'darwin');
+    const old = process.env.PROPR_SKIP_REMOTE_IMAGE_CHECK;
+    t.after(() => { if (old === undefined) delete process.env.PROPR_SKIP_REMOTE_IMAGE_CHECK; else process.env.PROPR_SKIP_REMOTE_IMAGE_CHECK = old; });
+    process.env.PROPR_SKIP_REMOTE_IMAGE_CHECK = String(skip);
+    cfg = { images: { redis: 'redis:7', agent: 'agent:latest' }, manifest: {} } as unknown as OrchestratorConfig;
+    const calls: string[][] = [];
+    const logs: string[] = [];
+    const controller = new AbortController();
+    let cancel = false;
+    orch = { dockerAsync: async (args: string[]) => {
+      calls.push(args);
+      if (args[0] === 'info') return { status: 0, stdout: 'arm64' };
+      if (cancel) controller.abort();
+      return { status: 1, stderr: 'registry access denied' };
+    } } as unknown as OrchestratorModule;
+    const result = await createDefaultActions().pullImages({ rootDir: '/tmp/root', agentTypes: ['claude'], onLog: line => logs.push(line) });
+    assert.deepEqual(result.failedCore, ['redis:7']);
+    assert.deepEqual(result.failedAgents, ['agent:latest']);
+    assert.equal(calls.some(args => args[0] === 'manifest'), !skip);
+    assert.equal(calls.some(args => args[0] === 'pull'), false);
+    assert.match(logs.join('\n'), skip ? /remote image checks are disabled/ : /registry access denied/);
+    cancel = true;
+    await assert.rejects(createDefaultActions().pullImages({ rootDir: '/tmp/root', agentTypes: ['claude'], signal: controller.signal }), { name: 'AbortError' });
+  });
+}
+
+test('Darwin verified offline agent is retagged best-effort without registry access', async t => {
+  platform(t, 'darwin');
+  const old = process.env.PROPR_SKIP_REMOTE_IMAGE_CHECK;
+  t.after(() => { if (old === undefined) delete process.env.PROPR_SKIP_REMOTE_IMAGE_CHECK; else process.env.PROPR_SKIP_REMOTE_IMAGE_CHECK = old; });
+  process.env.PROPR_SKIP_REMOTE_IMAGE_CHECK = '1';
+  cfg = { images: { agent: 'agent:pinned' }, manifest: {} } as unknown as OrchestratorConfig;
+  const tags: string[][] = [];
+  orch = { dockerAsync: async (args: string[]) => {
+    assert.ok(!['manifest', 'pull'].includes(args[0]));
+    return { status: 0, stdout: args[0] === 'info' ? 'arm64' : '{"Os":"linux","Architecture":"amd64"}' };
+  }, tagAgentLatest: (key: string, tag: string) => { tags.push([key, tag]); throw new Error('best effort'); } } as unknown as OrchestratorModule;
+  assert.deepEqual((await createDefaultActions().pullImages({ rootDir: '/tmp/root', agentTypes: ['claude'] })).pulledAgents, ['agent:pinned']);
+  assert.deepEqual(tags, [['agent', 'agent:pinned']]);
+});
+
+test('Darwin thrown manifest errors and incompatible offline cache remain per-image failures', async t => {
+  platform(t, 'darwin');
+  const old = process.env.PROPR_SKIP_REMOTE_IMAGE_CHECK;
+  t.after(() => { if (old === undefined) delete process.env.PROPR_SKIP_REMOTE_IMAGE_CHECK; else process.env.PROPR_SKIP_REMOTE_IMAGE_CHECK = old; });
+  cfg = { images: { redis: 'redis:7' }, manifest: {} } as unknown as OrchestratorConfig;
+  for (const skip of [false, true]) {
+    process.env.PROPR_SKIP_REMOTE_IMAGE_CHECK = String(skip);
+    orch = { dockerAsync: async (args: string[]) => {
+      if (args[0] === 'info') return { status: 0, stdout: 'arm64' };
+      if (args[0] === 'manifest') throw new Error('registry transport unavailable');
+      assert.notEqual(args[0], 'pull');
+      return { status: 0, stdout: '{"Os":"linux","Architecture":"amd64"}' };
+    } } as unknown as OrchestratorModule;
+    const logs: string[] = [];
+    const result = await createDefaultActions().pullImages({ rootDir: '/tmp/root', agentTypes: [], onLog: line => logs.push(line) });
+    assert.deepEqual(result.failedCore, ['redis:7']);
+    assert.match(logs.join('\n'), skip ? /required linux\/arm64/ : /registry transport unavailable/);
+  }
+});

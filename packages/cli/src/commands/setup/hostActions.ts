@@ -174,25 +174,34 @@ export function createDefaultActions(configManager?: ConfigManager, options: {
         let platform: string | undefined;
         let localPlatformVerified = false;
         if (process.platform === "darwin") {
-          architecture ??= await inspectSetupEngineArchitecture(orch, signal);
-          const present = await orch.dockerAsync(["image", "inspect", tag], { signal });
-          signal?.throwIfAborted();
-          const skipRemote = /^(1|true|yes)$/i.test(process.env.PROPR_SKIP_REMOTE_IMAGE_CHECK ?? "");
-          if (present.status === 0) {
-            try {
-              platform = await inspectSetupImagePlatform(orch, tag, isAgent, true, signal, architecture);
-              localPlatformVerified = true;
-            } catch (error) {
-              signal?.throwIfAborted();
-              if (skipRemote) throw error;
-              // An incompatible local variant must not prevent pulling the
-              // required platform from a published multi-platform manifest.
+          try {
+            architecture ??= await inspectSetupEngineArchitecture(orch, signal);
+            const present = await orch.dockerAsync(["image", "inspect", tag], { signal });
+            signal?.throwIfAborted();
+            const skipRemote = /^(1|true|yes)$/i.test(process.env.PROPR_SKIP_REMOTE_IMAGE_CHECK ?? "");
+            if (present.status === 0) {
+              try {
+                platform = await inspectSetupImagePlatform(orch, tag, isAgent, true, signal, architecture);
+                localPlatformVerified = true;
+              } catch (error) {
+                signal?.throwIfAborted();
+                if (skipRemote) throw error;
+                // An incompatible local variant must not prevent pulling the
+                // required platform from a published multi-platform manifest.
+              }
             }
-          }
-          platform ??= await inspectSetupImagePlatform(orch, tag, isAgent, false, signal, architecture);
-          onLog?.(`${tag}: ${platform}${isAgent ? " (AMD64 agent; emulation required on Apple Silicon)" : ""}`);
-          if (localPlatformVerified && skipRemote) {
-            (isAgent ? result.pulledAgents : result.pulledCore).push(tag);
+            if (skipRemote && !localPlatformVerified) throw new Error(`Image ${tag} is not available locally; remote image checks are disabled.`);
+            platform ??= await inspectSetupImagePlatform(orch, tag, isAgent, false, signal, architecture);
+            onLog?.(`${tag}: ${platform}${isAgent ? " (AMD64 agent; emulation required on Apple Silicon)" : ""}`);
+            if (localPlatformVerified && skipRemote) {
+              try { orch.tagAgentLatest(key, tag); } catch { /* best-effort local retag */ }
+              (isAgent ? result.pulledAgents : result.pulledCore).push(tag);
+              continue;
+            }
+          } catch (error) {
+            signal?.throwIfAborted();
+            onLog?.(`Cannot prepare image ${tag}: ${(error as Error).message}`);
+            (isAgent ? result.failedAgents : result.failedCore).push(tag);
             continue;
           }
         }
