@@ -246,7 +246,7 @@ test('traps focus in the popover and returns it to the trigger on Escape', async
 
 for (const width of [320, 390]) {
   test(`shows the assignment in the expanded mobile summary and leaves the compact bar alone at ${width}px`, async ({ page }) => {
-    await fixture(page, { assignees: [octocat, hubot] });
+    const state = await fixture(page, { assignees: [octocat, hubot] });
     await page.setViewportSize({ width, height: 844 });
     await page.goto(`/tasks/${taskId}`);
 
@@ -261,7 +261,7 @@ for (const width of [320, 390]) {
     await expect(git.getByRole('link', { name: '#2894' })).toBeVisible();
     await expect(git).not.toContainText('integry/');
     const runtime = metadata.getByRole('group', { name: 'Execution runtime' });
-    await expect(runtime).toContainText('Opus 5.5');
+    expect(await runtime.locator('[title="claude-opus-5-5"] > span').textContent()).toBe('Opus 5.5');
     await expect(runtime).toContainText('20m 0s');
     const peopleBox = (await assignment.boundingBox())!;
     const runtimeBox = (await runtime.boundingBox())!;
@@ -282,8 +282,41 @@ for (const width of [320, 390]) {
     expect(box.x).toBeGreaterThanOrEqual(0);
     expect(box.x + box.width).toBeLessThanOrEqual(width);
     await expectNoHorizontalOverflow(page);
-    // The focused metadata preview above captures this change.
-    await page.keyboard.press('Escape');
+    expect(box.x).toBe(0);
+    expect(box.width).toBe(width);
+    await expect.poll(async () => {
+      const settled = (await editor.boundingBox())!;
+      return Math.round(settled.y + settled.height);
+    }).toBe(844);
+    const backdrop = page.getByTestId('assignment-backdrop');
+    await expect(backdrop).toHaveCSS('background-color', 'rgba(15, 23, 42, 0.4)');
+    for (const row of await editor.getByTestId('assignment-option').all()) {
+      expect((await row.boundingBox())!.height).toBeGreaterThanOrEqual(44);
+    }
+    await editor.getByTestId('assignment-option').filter({ hasText: '@monalisa' }).click();
+    await expect(editor.getByRole('checkbox', { name: /@monalisa/ })).toBeChecked();
+    const save = editor.getByRole('button', { name: 'Save Assignments' });
+    const cancel = editor.getByRole('button', { name: 'Cancel' });
+    const saveBox = (await save.boundingBox())!;
+    expect(saveBox.height).toBeGreaterThanOrEqual(44);
+    expect(saveBox.width).toBe(width - 32);
+    expect((await cancel.boundingBox())!.y).toBeGreaterThanOrEqual(saveBox.y + saveBox.height);
+    await cancel.focus();
+    await page.keyboard.press('Tab');
+    await expect(editor.getByRole('searchbox')).toBeFocused();
+    await capture(page, `task-assignment-sheet-${width}`);
+    await cancel.click();
+    expect(state.puts).toHaveLength(0);
+    await assignment.getByRole('button', { name: 'Edit assignees' }).click();
+    await expect(editor.getByRole('checkbox', { name: /@monalisa/ })).not.toBeChecked();
+    await backdrop.click({ position: { x: 10, y: 10 } });
+    await expect(editor).toBeHidden();
+    await expect(assignment.getByRole('button', { name: 'Edit assignees' })).toBeFocused();
+    await assignment.getByRole('button', { name: 'Edit assignees' }).click();
+    await editor.getByRole('checkbox', { name: /@monalisa/ }).check();
+    await save.click();
+    await expect(editor).toBeHidden();
+    expect(state.puts.at(-1)?.logins).toEqual(expect.arrayContaining(['octocat', 'hubot', 'monalisa']));
 
     const bar = page.getByTestId('task-mobile-compact-bar');
     await details.evaluate(element => {

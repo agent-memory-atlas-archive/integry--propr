@@ -37,7 +37,7 @@ const MODEL_DISPLAY_NAMES: Record<string, string> = {
 };
 
 const getDisplayModelName = (modelId: string): string => {
-  return MODEL_DISPLAY_NAMES[modelId] || modelId;
+  return (MODEL_DISPLAY_NAMES[modelId] || modelId).replace(/\s+/g, ' ').trim();
 };
 
 // Format token count for display (e.g., 1234 -> "1.2k", 1234567 -> "1.2M")
