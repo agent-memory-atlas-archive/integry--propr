@@ -76,8 +76,16 @@ for (const width of [390, 1440]) {
       await expect(task.getByRole('group', { name: 'Git context' })).toBeVisible();
       await expect(task.getByRole('group', { name: 'Execution runtime' })).toBeVisible();
       const consumption = task.getByRole('group', { name: 'Consumption' });
-      await expect(consumption).toContainText('↑3.9M↓30k');
-      await expect(consumption).toContainText(`(${completed ? '1.0' : '0.4'}% quota)`);
+      if (width === 390) {
+        // The compact two-row mobile summary shows people and runtime; consumption is desktop-only.
+        const metadata = task.getByTestId('task-mobile-metadata');
+        await expect(metadata).toBeVisible();
+        await expect(metadata.getByRole('group', { name: 'Execution runtime' })).toContainText('gpt-6-astra');
+        await expect(consumption).toHaveCount(0);
+      } else {
+        await expect(consumption).toContainText('↑3.9M↓30k');
+        await expect(consumption).toContainText(`(${completed ? '1.0' : '0.4'}% quota)`);
+      }
       await expect(task.getByText('Analyzing Request', { exact: true })).toHaveCount(1);
       await expect(task.getByText('8s', { exact: true })).toBeVisible();
       for (const label of ['Task Queued', 'Analyzing Request', 'Implementing Changes', ...(completed ? ['Task Completed'] : [])]) {
@@ -114,8 +122,9 @@ for (const width of [390, 1440]) {
       expect(filenameSize.height).toBe(filenameSize.lineHeight);
       await expect(task.getByTestId('task-assignment-error').filter({ visible: true })).toHaveCSS('background-color', 'rgb(255, 251, 235)');
       const more = task.getByRole('button', { name: 'More task actions' });
-      await expect(more).toHaveCSS('width', '32px');
-      await expect(more).toHaveCSS('height', '32px');
+      const actionSize = width === 390 ? '24px' : '32px';
+      await expect(more).toHaveCSS('width', actionSize);
+      await expect(more).toHaveCSS('height', actionSize);
       await expect(more).toHaveCSS('border-radius', '6px');
       await more.click();
       // On mobile the overflow is a bottom sheet laid over the whole page, outside the task pane.
