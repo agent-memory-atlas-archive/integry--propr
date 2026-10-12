@@ -16,6 +16,7 @@ const authField = /auth|token|cookie|password|passwd|secret|credential|private.?
 const known = /(?:\b(?:sk-[a-zA-Z0-9_-]{8,}|gh[pousr]_[a-zA-Z0-9_]{8,}|github_pat_[a-zA-Z0-9_]+|AIza[a-zA-Z0-9_-]{20,})\b|\beyJ[a-zA-Z0-9_-]+\.[a-zA-Z0-9_-]+\.[a-zA-Z0-9_-]+)/g;
 export function redactRecord(line: string, format: 'jsonl' | 'text', credentials: readonly string[]): string | null {
     if (credentials.length > 512 || credentials.reduce((n, value) => n + value.length, 0) > 512 * 1024) return null;
+    // eslint-disable-next-line no-control-regex -- Intentionally reject control characters except tab, LF, and CR.
     if (/[\x00-\x08\x0b\x0c\x0e-\x1f]/.test(line)) return null;
     if (/^[A-Za-z0-9+/=]{40,}$/.test(line.trim()) || line.includes('\uFFFD') || /-----BEGIN .*PRIVATE KEY-----/.test(line)) return null;
     const text = (value: string): string => {
