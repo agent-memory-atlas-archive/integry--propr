@@ -249,6 +249,7 @@ export async function createDesktopSetupHost(options: {
   runtimeManifestPath?: string;
   authenticationHandoff: AuthenticationCommandHandoff;
   capturedCommand?: CapturedCommandRunner;
+  githubBrowserLogin?: (options: { signal?: AbortSignal; onLog?: (line: string) => void }) => Promise<string>;
 }): Promise<DesktopSetupHost> {
   if (options.resourcesPath) {
     const root = realpathSync(options.resourcesPath);
@@ -263,6 +264,9 @@ export async function createDesktopSetupHost(options: {
   const baseActions = createDefaultActions(config, {
     authenticationHandoff: options.authenticationHandoff,
     capturedCommand: options.capturedCommand,
+    githubBrowserLogin: options.githubBrowserLogin ?? (async () => {
+      throw new Error("GitHub browser sign-in is not configured. Install a desktop build with GitHub browser authentication configured.");
+    }),
   });
   const actions: SetupActions = {
     ...baseActions,

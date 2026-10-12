@@ -3,7 +3,7 @@ import { lstatSync, realpathSync } from 'node:fs';
 import { basename, isAbsolute, join, relative, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { app, BrowserWindow, clipboard, crashReporter, dialog, ipcMain, Menu, nativeImage, net, Notification, protocol, safeStorage, screen, session, shell, systemPreferences, Tray } from 'electron';
-import type { Rectangle } from 'electron';
+import type { MessageBoxOptions, Rectangle } from 'electron';
 import {
   DESKTOP_RENDERER_ORIGIN,
   DESKTOP_TRANSPORT_SCOPE_HEADER,
@@ -16,6 +16,7 @@ import {
 } from '@propr/cli/desktop-discovery';
 import { createDesktopSetupHost } from '@propr/cli/desktop-local-setup';
 import type { SetupActions } from '@propr/local-setup';
+import { createGithubBrowserLogin } from './github-browser-auth';
 import { launchDesktopAuthentication } from './authentication-handoff';
 import { DesktopConnectDiscoveryService } from './connect-discovery';
 import { requestDesktopMicrophoneConsent } from './microphone-consent';
@@ -1872,10 +1873,51 @@ if (!hasSingleInstanceLock) {
       commands: desktopNativeCommands,
       log: (level, event, fields) => log(level, event, fields),
     });
+    const showGithubDialog = (options: MessageBoxOptions) => {
+      if (!mainWindow || mainWindow.isDestroyed()) throw new Error('Desktop window is unavailable');
+      // macOS can only abort an asynchronous message box when it has a parent.
+      return dialog.showMessageBox(mainWindow, options);
+    };
     const setupHost = (process.platform === 'linux' || process.platform === 'darwin')
       ? await createDesktopSetupHost({
           configDir: join(app.getPath('userData'), 'local-setup', 'cli'),
           authenticationHandoff: launchDesktopAuthentication,
+          githubBrowserLogin: createGithubBrowserLogin({
+            clientId: process.env.PROPR_DESKTOP_GITHUB_CLIENT_ID,
+            presentCode: async (code, url, signal, cancel) => {
+              const approval = await showGithubDialog({
+                type: 'info', title: 'Sign in via GitHub',
+                message: 'Open GitHub in your browser',
+                detail: `Enter this one-time code on GitHub: ${code}\nChoose the GitHub account you intend to use. You can switch accounts on GitHub before approving. Return to ProPR afterward.`,
+                buttons: ['Open GitHub', 'Cancel'], defaultId: 0, cancelId: 1, signal,
+              });
+              signal.throwIfAborted();
+              if (approval.response !== 0) { cancel(); signal.throwIfAborted(); }
+              // Fixed, protocol-validated URL, also subject to the desktop external URL policy.
+              if (shutdownStarted || !isSafeExternalUrl(url)) throw new Error('Browser unavailable');
+              await openAllowedExternalUrl(url);
+              signal.throwIfAborted();
+              const prompt = new AbortController();
+              const waiting = showGithubDialog({
+                type: 'info', title: 'Waiting for GitHub', message: 'Finish signing in in your browser',
+                detail: `Enter this one-time code on GitHub: ${code}\nCheck the account before approving. Return to ProPR to confirm your verified account.`,
+                buttons: ['Cancel sign-in'], cancelId: 0,
+                signal: AbortSignal.any([signal, prompt.signal]),
+              }).then(() => { if (!signal.aborted && !prompt.signal.aborted) cancel(); }, () => cancel());
+              return async () => { prompt.abort(); await waiting; };
+            },
+            confirmIdentity: async (login, signal) => {
+              mainWindow?.show();
+              mainWindow?.focus();
+              const result = await showGithubDialog({
+                type: 'question', title: 'Confirm GitHub account',
+                message: `Continue as @${login}?`,
+                detail: 'This identity was verified with GitHub. If it is the wrong account, cancel and retry sign-in, then switch accounts in GitHub before approving. Installation access will be checked next.',
+                buttons: ['Use this account', 'Cancel'], defaultId: 1, cancelId: 1, signal,
+              });
+              return result.response === 0;
+            },
+          }),
           ...(app.isPackaged ? { resourcesPath: process.resourcesPath } : {}),
           ...(!app.isPackaged && process.env.PROPR_DESKTOP_RUNTIME_MANIFEST
             ? { runtimeManifestPath: process.env.PROPR_DESKTOP_RUNTIME_MANIFEST }

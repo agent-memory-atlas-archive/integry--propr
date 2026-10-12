@@ -207,13 +207,7 @@ describe('desktop setup host authentication boundary', () => {
   test('hands unauthenticated GitHub startup to a visible asynchronous host action', async () => {
     const configDir = fixtureDirectory();
     const calls: string[] = [];
-    let tokenChecks = 0;
-    const capturedCommand: CapturedCommandRunner = async (command, args) => {
-      calls.push([command, ...args].join(' '));
-      if (args[0] === '--version') return { status: 0, stdout: 'gh version fixture' };
-      tokenChecks += 1;
-      return { status: tokenChecks === 1 ? 1 : 0, stdout: tokenChecks === 1 ? '' : 'fixture-token\n' };
-    };
+    const capturedCommand: CapturedCommandRunner = async () => { throw new Error('No gh binary is available'); };
     let markStarted!: () => void;
     let release!: () => void;
     const started = new Promise<void>(resolve => { markStarted = resolve; });
@@ -222,17 +216,18 @@ describe('desktop setup host authentication boundary', () => {
       const host = await createDesktopSetupHost({
         configDir,
         capturedCommand,
-        authenticationHandoff: async (command, args) => {
-          calls.push(`visible:${[command, ...args].join(' ')}`);
+        authenticationHandoff: async () => { throw new Error('No terminal is available'); },
+        githubBrowserLogin: async () => {
+          calls.push('browser');
           markStarted();
           await admitted;
-          return { status: 0 };
+          return 'fixture-token';
         },
       });
       assert.equal(host.actions.hasGithubToken(), false);
       const login = host.actions.loginWithGithub();
       await started;
-      assert.match(calls.at(-1) ?? '', /^visible:gh auth login/);
+      assert.equal(calls.at(-1), 'browser');
       assert.equal(host.actions.hasGithubToken(), false);
       release();
       assert.equal(await login, true);
@@ -240,6 +235,34 @@ describe('desktop setup host authentication boundary', () => {
     } finally {
       rmSync(configDir, { recursive: true, force: true });
     }
+  });
+
+  test('desktop fails closed without browser authentication instead of launching gh', async () => {
+    const configDir = fixtureDirectory();
+    try {
+      const host = await createDesktopSetupHost({ configDir,
+        capturedCommand: async () => { throw new Error('must not probe gh'); },
+        authenticationHandoff: async () => { throw new Error('must not open a terminal'); },
+      });
+      await assert.rejects(host.actions.loginWithGithub(), /browser sign-in is not configured/);
+      assert.equal(host.actions.hasGithubToken(), false);
+    } finally { rmSync(configDir, { recursive: true, force: true }); }
+  });
+
+  test('change account requests fresh browser authentication even with a stored token', async () => {
+    const configDir = fixtureDirectory();
+    let attempts = 0;
+    try {
+      const host = await createDesktopSetupHost({ configDir,
+        capturedCommand: async () => { throw new Error('must not probe gh'); },
+        authenticationHandoff: async () => { throw new Error('must not open a terminal'); },
+        githubBrowserLogin: async () => `fixture-token-${++attempts}`,
+      });
+      assert.equal(await host.actions.loginWithGithub(), true);
+      assert.equal(host.actions.hasGithubToken(), true);
+      assert.equal(await host.actions.loginWithGithub({ force: true }), true);
+      assert.equal(attempts, 2);
+    } finally { rmSync(configDir, { recursive: true, force: true }); }
   });
 
   test('aborts and reaps a production Docker operation without waiting for its natural exit', async () => {
@@ -299,7 +322,8 @@ setInterval(() => undefined, 1000);
       const host = await createDesktopSetupHost({
         configDir,
         capturedCommand: async (_command, args) => ({ status: args[0] === '--version' ? 0 : 1, stdout: '' }),
-        authenticationHandoff: async (_command, _args, options) => new Promise((_resolve, reject) => {
+        authenticationHandoff: async () => { throw new Error('No terminal is available'); },
+        githubBrowserLogin: async (options) => new Promise((_resolve, reject) => {
           admitted();
           options.signal?.addEventListener('abort', () => reject(Object.assign(new Error('cancelled'), { name: 'AbortError' })), { once: true });
         }),

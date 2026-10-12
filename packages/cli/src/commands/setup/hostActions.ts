@@ -42,6 +42,7 @@ function assertSafeAgentCredentialDir(path: string, name = "Agent credential pat
 export function createDefaultActions(configManager?: ConfigManager, options: {
   authenticationHandoff?: AuthenticationCommandHandoff;
   capturedCommand?: CapturedCommandRunner;
+  githubBrowserLogin?: (options: { signal?: AbortSignal; onLog?: (line: string) => void }) => Promise<string>;
 } = {}): SetupActions {
   /** A client pointed at the local stack's API port (not the saved remote URL). */
   const localApiClient = async (rootDir: string): Promise<import("../../api/client.js").ApiClient> => {
@@ -353,6 +354,12 @@ export function createDefaultActions(configManager?: ConfigManager, options: {
     },
     async loginWithGithub({ onLog, signal, force } = {}) {
       if (!configManager) return false;
+      if (options.githubBrowserLogin) {
+        const token = await options.githubBrowserLogin({ signal, onLog });
+        signal?.throwIfAborted();
+        await configManager.setGithubToken(token);
+        return true;
+      }
       const { loginWithGithubCli } = await import("../../auth/githubLogin.js");
       const result = await loginWithGithubCli(configManager, {
         interactive: true, onLog, signal, force,

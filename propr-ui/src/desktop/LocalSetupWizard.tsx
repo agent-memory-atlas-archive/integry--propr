@@ -119,6 +119,7 @@ const GithubInstallationChoice: React.FC<{
     <div className="desktop-github-identity"><Github aria-hidden="true" /><div><small>Authenticated GitHub account</small><strong>@{identity.username}</strong></div></div>
     <h2 id="desktop-github-choice-title">Choose a GitHub App installation</h2>
     <p>Discovery shows installations this account can access. The relay separately verifies enrollment permission after you choose.</p>
+    {identity.status === 'reauthenticating' && <p role="status">Waiting for GitHub sign-in in your browser. Choose your intended account, then return to ProPR to confirm it. You can cancel setup below.</p>}
     {identity.permissionExplanation && <div className="desktop-inline-error" role="alert">{identity.permissionExplanation}</div>}
     {identity.installations.length > 0 ? <div className="desktop-setup-options desktop-github-installations">
       {identity.installations.map(installation => <label key={installation.installationId}>
@@ -153,6 +154,8 @@ const Running: React.FC<{ snapshot: DesktopSetupSnapshot; busy: boolean; choiceB
       <span>{step.status === 'active' ? <LoaderCircle className="desktop-spin" /> : step.status === 'done' ? <Check /> : step.status === 'failed' ? <X /> : null}</span>
       <div><strong>{step.title}</strong><small>{step.detail || step.description}</small></div>
     </div>)}</div>
+    {!snapshot.githubIdentity && snapshot.state?.steps.some(step => step.id === 'github-auth' && step.status === 'active')
+      && <p role="status">Sign in via GitHub using the desktop sign-in dialog. Finish in your browser, then return to ProPR to confirm your account. You can cancel setup below.</p>}
     {snapshot.githubIdentity && snapshot.githubIdentity.status !== 'enrolled'
       && <GithubInstallationChoice snapshot={snapshot} busy={choiceBusy} choose={choose} />}
     {snapshot.logs.length > 0 && <pre className="desktop-setup-log">{snapshot.logs.slice(-8).join('\n')}</pre>}

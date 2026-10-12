@@ -103,6 +103,33 @@ describe('production local setup journey', () => {
     expect(screen.getByRole('button', { name: 'Change GitHub account' })).toBeInTheDocument();
   });
 
+  it('announces browser account switching and keeps cancellation usable', async () => {
+    const waiting: DesktopSetupSnapshot = {
+      ...idle, phase: 'running', githubIdentity: {
+        status: 'reauthenticating', username: 'example-user', installAvailable: true, installations: [],
+      },
+    };
+    const adapter = guidedAdapter({ status: vi.fn(async () => waiting) });
+    render(<LocalSetupWizard adapter={adapter} onBack={vi.fn()} onComplete={vi.fn()} />);
+    expect(await screen.findByRole('status')).toHaveTextContent('Waiting for GitHub sign-in in your browser');
+    expect(screen.getByRole('button', { name: 'Change GitHub account' })).toBeDisabled();
+    const cancel = screen.getByRole('button', { name: 'Cancel safely' });
+    expect(cancel).toBeEnabled();
+    fireEvent.click(cancel);
+    await waitFor(() => expect(adapter.cancel).toHaveBeenCalled());
+    expect(await screen.findByRole('button', { name: 'Retry setup' })).toBeEnabled();
+  });
+
+  it('announces initial browser sign-in without exposing authorization codes', async () => {
+    const waiting: DesktopSetupSnapshot = { ...idle, phase: 'running', state: {
+      rootDir: '/fixture', steps: [{ id: 'github-auth', title: 'GitHub authentication',
+        description: 'Connect GitHub', optional: false, status: 'active' }],
+    } };
+    render(<LocalSetupWizard adapter={guidedAdapter({ status: vi.fn(async () => waiting) })} onBack={vi.fn()} onComplete={vi.fn()} />);
+    expect(await screen.findByRole('status')).toHaveTextContent('return to ProPR to confirm your account');
+    expect(screen.getByRole('button', { name: 'Cancel safely' })).toBeEnabled();
+  });
+
   it('requires a fresh choice after reauthentication even when identity metadata is unchanged', async () => {
     const choosing: DesktopSetupSnapshot = {
       ...idle, phase: 'running', githubIdentity: {
