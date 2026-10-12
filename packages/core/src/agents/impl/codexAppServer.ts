@@ -1,3 +1,4 @@
+import { prepareProviderCapture, attachProviderCapture } from '../../diagnostics/managedLogRuntime.js';
 import { prepareAgentGitAccess } from '../agentGitAccess.js';
 import { spawn, execFile } from 'node:child_process';
 import { promisify } from 'node:util';
@@ -90,7 +91,12 @@ export async function executeCodexAppServerGoal(
         taskId: options.taskId,
     });
     const args = resolveExecutionArgs('docker', dockerArgs, options.taskId, ownership?.attemptGeneration);
-    const child = await spawnWithNetworkPolicy(args, runArgs => spawn('docker', runArgs, { stdio: ['pipe', 'pipe', 'pipe'], cwd: options.worktreePath }));
+    const child = await spawnWithNetworkPolicy(args, runArgs => {
+        const capture = prepareProviderCapture({ provider: config.type, agent: config.id, configPath: config.configPath, credentials: config.envVars }, runArgs, undefined, args);
+        const spawned = spawn('docker', runArgs, { stdio: ['pipe', 'pipe', 'pipe'], cwd: options.worktreePath });
+        attachProviderCapture(spawned, capture);
+        return spawned;
+    });
     const abort = (): void => { child.kill('SIGTERM'); };
     ownership?.signal.addEventListener('abort', abort, { once: true });
     const connection = new AppServerConnection(child, options.taskId, records => control.appendOutput(records));

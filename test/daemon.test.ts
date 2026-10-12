@@ -229,3 +229,46 @@ test('fetchIssuesForRepo returns [] gracefully on API error', async () => {
 test('fetchIssuesForRepo is exported from @propr/core', () => {
     assert.strictEqual(typeof fetchIssuesForRepo, 'function');
 });
+
+test('daemon diagnostic scheduling requires explicit policy and valid instance binding', async () => {
+    const { spawnSync } = await import('node:child_process');
+    const fs = await import('node:fs');
+    const os = await import('node:os');
+    const path = await import('node:path');
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'daemon-diagnostic-policy-'));
+    try {
+        for (const secret of ['', 'test-fleet-auth']) {
+            for (const flag of ['', '0', '1']) {
+                for (const instance of ['tenant-a', '', '../tenant-b', 'tenant-b']) {
+                    const result = spawnSync(process.execPath, ['--experimental-test-module-mocks', '--import', 'tsx', '--input-type=module', '-e', `
+                        import assert from 'node:assert/strict';
+                        import { mock } from 'node:test';
+                        let loads = 0;
+                        mock.module('@propr/core', { namedExports: {
+                            loadAgents: async () => { loads++; return []; },
+                            resolveConfigPath: value => value,
+                        } });
+                        const { scheduleManagedDiagnostics } = await import('./src/daemon/managedDiagnostics.ts');
+                        const { ManagedLogSpool } = await import('./packages/core/src/diagnostics/managedLogSpool.ts');
+                        const seeded = new ManagedLogSpool(process.env.PROPR_DIAGNOSTIC_ROOT, 'tenant-a');
+                        seeded.close();
+                        const enabled = process.env.PROPR_MANAGED_LOGS === '1';
+                        const valid = process.env.PROPR_INSTANCE_ID === 'tenant-a';
+                        if (enabled && !valid) {
+                            assert.throws(() => scheduleManagedDiagnostics(), /invalid diagnostic instance|instance mismatch/);
+                        } else {
+                            const stop = scheduleManagedDiagnostics();
+                            await new Promise(resolve => setImmediate(resolve));
+                            stop();
+                        }
+                        assert.equal(loads, enabled && valid ? 1 : 0);
+                    `], { encoding: 'utf8', env: { ...process.env,
+                        PROPR_MANAGED_LOGS: flag, PROPR_FLEET_CONTROL_SECRET: secret,
+                        PROPR_INSTANCE_ID: instance, PROPR_DIAGNOSTIC_ROOT: path.join(root, 'spool'),
+                    } });
+                    assert.equal(result.status, 0, result.stderr);
+                }
+            }
+        }
+    } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});

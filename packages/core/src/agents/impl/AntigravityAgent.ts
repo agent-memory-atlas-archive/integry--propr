@@ -1,7 +1,8 @@
+import { antigravityCredentialRoot } from '../../diagnostics/credentialRedaction.js';
 import { assertToolPolicySupported, withPromptOnlyToolPolicy } from '../agentToolPolicy.js';
 import { prepareAgentGitAccess, prepareAnalysisGitAccess } from '../agentGitAccess.js';
 import logger from '../../utils/logger.js';
-import { isManagedAgentConfigPath, type ModelReasoningLevel } from '@propr/shared';
+import { type ModelReasoningLevel } from '@propr/shared';
 import { Agent, AgentConfig, AgentTaskOptions, AgentExecutionResult, AnalysisResult, AnalyzeOptions, type TokenUsage } from '../types.js';
 import { executeDockerCommand } from '../../claude/docker/dockerExecutor.js';
 import { wrapDockerRunArgsWithRepoSetup } from '../../claude/docker/repoSetupWrapper.js';
@@ -73,18 +74,7 @@ export class AntigravityAgent implements Agent {
     }
 
     private getHostConfigPath(): string {
-        // Provider-wide environment overrides remain the compatibility path for
-        // existing host credentials. ProPR-managed paths are per-agent and must
-        // win so multiple Antigravity accounts do not collapse onto one mount.
-        const configPath = isManagedAgentConfigPath(this.config.configPath)
-            ? this.config.configPath
-            : process.env.ANTIGRAVITY_CONFIG_PATH || this.config.configPath;
-        const resolved = resolveConfigPath(configPath);
-        if (!isManagedAgentConfigPath(this.config.configPath) && path.basename(resolved) === '.antigravity') {
-            const sibling = path.join(path.dirname(resolved), '.gemini');
-            if (fs.existsSync(sibling) && fs.statSync(sibling).isDirectory()) return sibling;
-        }
-        return resolved;
+        return antigravityCredentialRoot(this.config.configPath, resolveConfigPath);
     }
 
     async executeTask(options: AgentTaskOptions): Promise<AgentExecutionResult> {
@@ -113,7 +103,7 @@ export class AntigravityAgent implements Agent {
 
             const { result, usageMetrics } = await executeWithUsageTracking(
                 'antigravity',
-                async () => executeDockerCommand('docker', dockerArgs, {
+                async () => executeDockerCommand('docker', dockerArgs, { diagnostics: { provider: this.config.type, agent: this.config.id, configPath: this.config.configPath, authenticationRoot: this.getHostConfigPath(), credentials: this.config.envVars },
                     timeout: this.timeoutMs, cwd: worktreePath, onSessionId, onContainerId, worktreePath, stdinData: prompt,
                     taskId, streamToRedis: true, preserveOutputOnTimeout: true, model: effectiveModel
                 }),
@@ -145,6 +135,7 @@ export class AntigravityAgent implements Agent {
             const worktreeGitContent = verifyWorktreeStructure(worktreePath, issueRef.number);
             const reasoningLevel = await this.resolveReasoningLevel(options.reasoningLevel, model);
             const response = await executeAntigravityNativeGoal(options, {
+                diagnostics: { provider: this.config.type, agent: this.config.id, configPath: this.config.configPath, authenticationRoot: this.getHostConfigPath(), credentials: this.config.envVars },
                 buildDockerArgs: async ({ conversationId, launch }) => {
                     const { githubToken, gitMountArgs } = await prepareAgentGitAccess(options);
                     return this.buildDockerArgs({
@@ -385,7 +376,7 @@ export class AntigravityAgent implements Agent {
 
             const { result, usageMetrics } = await executeWithUsageTracking(
                 'antigravity',
-                async () => executeDockerCommand('docker', dockerArgs, { timeout: effectiveTimeoutMs, stdinData: fullPrompt, taskId, model: effectiveModel }),
+                async () => executeDockerCommand('docker', dockerArgs, { diagnostics: { provider: this.config.type, agent: this.config.id, configPath: this.config.configPath, authenticationRoot: this.getHostConfigPath(), credentials: this.config.envVars }, timeout: effectiveTimeoutMs, stdinData: fullPrompt, taskId, model: effectiveModel }),
                 ANALYSIS_AGENT_TANK_TIMEOUT_MS,
                 this.config.alias,
                 options?.skipUsageTracking

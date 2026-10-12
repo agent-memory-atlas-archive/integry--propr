@@ -1,4 +1,5 @@
 import 'dotenv/config';
+import { scheduleManagedDiagnostics } from './daemon/managedDiagnostics.js';
 import { reconcileTaskIntentsSafely } from './daemon/taskIntentReconciliation.js';
 import { Redis } from 'ioredis';
 import type { Logger } from 'pino';
@@ -288,6 +289,7 @@ async function startDaemon(options: DaemonOptions = {}): Promise<void> {
     // Fires scheduled agents, retries runs the cost gate deferred, fails runs
     // whose worker stopped, and revokes leftover run-scoped MCP grants.
     const stopAgentRunSweeps = scheduleAgentRunSweeps();
+    const stopManagedDiagnostics = scheduleManagedDiagnostics();
 
     let intervalId: NodeJS.Timeout | null = null;
     let routingService: RoutingWebSocketIntakeService | null = null;
@@ -462,6 +464,7 @@ async function startDaemon(options: DaemonOptions = {}): Promise<void> {
         clearInterval(ultrafixResumeSweepInterval);
         clearInterval(epicMergeProgressRetryInterval);
         clearInterval(mergeConflictSweepInterval);
+        stopManagedDiagnostics();
         await stopAgentRunSweeps();
         // Stop the routing service first so it can drain in-flight deliveries and
         // send their ACKs while the connection is still up, THEN stop the publisher

@@ -1,0 +1,50 @@
+import { loadAgents, resolveConfigPath } from '@propr/core';
+import { DiagnosticPolicyError } from '../../packages/core/src/diagnostics/managedLogSpool.js';
+import { collectProvider } from '../../packages/core/src/diagnostics/providerCollector.js';
+import { managedDiagnostics, configuredDiagnosticSecrets, diagnosticsFailure, providerCredentialRoot } from '../../packages/core/src/diagnostics/managedLogRuntime.js';
+
+/** Daemon measures native inventories; workers own capture with run credentials.
+ * Only configured managed roots and explicit launcher mounts are eligible. */
+export function scheduleManagedDiagnostics(): () => void {
+    try { if (!managedDiagnostics()) return () => {}; }
+    catch (error) {
+        if (error instanceof DiagnosticPolicyError) throw error;
+        diagnosticsFailure();
+    }
+    let running = false, nextAgent = 0;
+    const collect = async (): Promise<void> => {
+        if (running) return;
+        running = true;
+        try {
+            const spool = managedDiagnostics()!;
+            spool.report({ provider: 'claude', agent: 'unknown', source: 'shared-tmp-claude-logs' }, 'ownership-unverified');
+            const agents = (await loadAgents()).filter(a => a.enabled);
+            const inventory = { provider: 'application', agent: 'application', source: 'agent-inventory' };
+            spool.report(inventory, 'protected-native-state', 0);
+            if (agents.length > 128) spool.report(inventory, 'scan-limit');
+            const deadline = performance.now() + 2000;
+            const count = Math.min(agents.length, 128);
+            for (let visited = 0; visited < count; visited++) {
+                if (performance.now() > deadline) {
+                    spool.report({ provider: 'application', agent: 'application', source: 'agent-inventory' }, 'scan-limit');
+                    break;
+                }
+                const agent = agents[nextAgent % count];
+                nextAgent = (nextAgent + 1) % count;
+                const root = providerCredentialRoot({ provider: agent.type, agent: agent.id, configPath: agent.configPath }, resolveConfigPath);
+                if (!root) {
+                    spool.report({ provider: agent.type, agent: agent.id, source: 'unmapped-native-state' }, 'ownership-unverified');
+                    continue;
+                }
+                collectProvider(spool, { provider: agent.type, agent: agent.id, root,
+                    credentials: [...configuredDiagnosticSecrets(), ...configuredDiagnosticSecrets(agent.envVars ?? {})] });
+                await new Promise<void>(resolve => setImmediate(resolve));
+            }
+        } catch { diagnosticsFailure(); }
+        finally { running = false; }
+    };
+    void collect();
+    const timer = setInterval(() => { void collect(); }, 30_000);
+    timer.unref();
+    return () => clearInterval(timer);
+}

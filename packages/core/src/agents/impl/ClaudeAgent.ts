@@ -147,7 +147,7 @@ export class ClaudeAgent implements Agent {
 
             const { result, usageMetrics } = await executeWithUsageTracking(
                 'claude',
-                async () => executeDockerCommand('docker', dockerArgs, {
+                async () => executeDockerCommand('docker', dockerArgs, { diagnostics: { provider: this.config.type, agent: this.config.id, configPath: this.config.configPath, credentials: this.config.envVars },
                     timeout: this.timeoutMs, cwd: worktreePath, onSessionId, onContainerId,
                     worktreePath, stdinData: prompt, taskId,
                     streamToRedis: true, preserveOutputOnTimeout: true, model: effectiveModel,
@@ -235,7 +235,7 @@ export class ClaudeAgent implements Agent {
             };
             const response = await executeClaudeNativeGoal(
                 { ...options, resumeSessionId: resumable ? sessionId : undefined },
-                { buildDockerArgs: buildGoalDockerArgs, sessionId, transcriptPath, model, timeoutMs: this.timeoutMs },
+                { diagnostics: { provider: this.config.type, agent: this.config.id, configPath: this.config.configPath, credentials: this.config.envVars }, buildDockerArgs: buildGoalDockerArgs, sessionId, transcriptPath, model, timeoutMs: this.timeoutMs },
             );
             if (effectiveReasoningLevel) response.reasoningLevel = effectiveReasoningLevel;
             if (response.success) verifyWorktreePostExecution(worktreePath, issueRef.number, worktreeGitContent);
@@ -287,7 +287,7 @@ export class ClaudeAgent implements Agent {
 
             const { result, usageMetrics } = await executeWithUsageTracking(
                 'claude',
-                async () => executeDockerCommand('docker', dockerArgs, {
+                async () => executeDockerCommand('docker', dockerArgs, { diagnostics: { provider: this.config.type, agent: this.config.id, configPath: this.config.configPath, credentials: this.config.envVars },
                     timeout: timeoutMs ?? 1800000, stdinData: analysisPrompt, taskId, model: effectiveModel
                 }),
                 ANALYSIS_AGENT_TANK_TIMEOUT_MS,
