@@ -374,6 +374,9 @@ To use a nightly in release validation:
 
 ### Independent Linux preview channel
 
+For native RPM signatures, use the separate opt-in [signed RPM preview path](../../docs/docs/operations/linux-rpm-signing.md).
+It preserves the unsigned validation route below and requires an owner-provisioned stable release key.
+
 The recommended first Linux delivery is the manual **Desktop Linux Preview Release** GitHub Actions workflow and GitHub
 Releases. It is independent of the tag-driven production workflow: it runs only on manual dispatch from `main`, uses
 native `ubuntu-24.04` x64 and ARM64 runners, reads no Apple, Windows, update-signing, or publication secret, and emits
