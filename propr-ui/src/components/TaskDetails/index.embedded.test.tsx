@@ -45,7 +45,11 @@ vi.mock('./ResultOverview', () => ({ default: () => null }));
 vi.mock('./PromptModal', () => ({ default: () => null }));
 vi.mock('./LogFilesModal', () => ({ default: () => null }));
 vi.mock('./FollowupModal', () => ({ default: () => null }));
-vi.mock('./ContextStrip', () => ({ default: ({ lead }: { lead?: React.ReactNode }) => <>{lead}</> }));
+vi.mock('./ContextStrip', () => ({
+  default: ({ lead }: { lead?: React.ReactNode }) => <>{lead}</>,
+  MobileGitContext: () => null,
+  MobilePeopleRuntime: () => null,
+}));
 vi.mock('./TaskHeader', async importOriginal => ({ ...await importOriginal<typeof import('./TaskHeader')>(), default: () => null }));
 // The newest run is read from the API in its own suite.
 vi.mock('./useTaskHeadSummary', async importOriginal => ({ ...await importOriginal<typeof import('./useTaskHeadSummary')>(), useTaskHeadSummary: () => null }));
