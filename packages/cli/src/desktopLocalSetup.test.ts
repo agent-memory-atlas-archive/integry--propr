@@ -1,10 +1,11 @@
 import assert from 'node:assert/strict';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, test } from 'node:test';
 import { PROPR_API_COMPATIBILITY, PROPR_UI_COMPATIBILITY } from '@propr/shared';
 import { checkDesktopRuntimeCompatibility, createDesktopSetupHost } from './desktopLocalSetup.js';
+import { assertOwnedLocalSetupRoot, ConnectRootError } from './connectIdentity.js';
 import type { CapturedCommandRunner } from './auth/githubLogin.js';
 
 const fixtureDirectory = (): string => realpathSync.native(mkdtempSync(join(tmpdir(), 'propr-desktop-host-')));
@@ -311,5 +312,74 @@ setInterval(() => undefined, 1000);
     } finally {
       rmSync(configDir, { recursive: true, force: true });
     }
+  });
+});
+
+
+test('Darwin host checks and startup surface safe actionable root refusal details', async () => {
+  const directory = fixtureDirectory();
+  const descriptor = Object.getOwnPropertyDescriptor(process, 'platform')!;
+  try {
+    const root = join(directory, 'private-root');
+    mkdirSync(root, { mode: 0o700 });
+    const alias = join(directory, 'alias');
+    symlinkSync(root, alias);
+    const host = await createDesktopSetupHost({
+      configDir: join(directory, 'config'),
+      authenticationHandoff: async () => { throw new Error('must not authenticate'); },
+    });
+    Object.defineProperty(process, 'platform', { value: 'darwin', configurable: true });
+    for (const check of [
+      () => host.actions.runChecks({ root: alias }),
+      () => host.actions.startStack({ rootDir: alias }),
+    ]) {
+      await assert.rejects(check(), error => {
+        assert.ok(error instanceof ConnectRootError);
+        assert.equal(error.reason, 'NON_CANONICAL');
+        assert.match(error.message, /without symlinked components/);
+        assert.ok(!error.message.includes(directory));
+        return true;
+      });
+    }
+  } finally {
+    Object.defineProperty(process, 'platform', descriptor);
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+
+test('local setup authority diagnostics distinguish unsafe mode, ownership, and unavailable authority without paths', async t => {
+  const directory = fixtureDirectory();
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  // The message promises exactly 0700, matching the desktop RootDirectoryAuthority,
+  // so a root that is merely free of group/other write bits must still be refused.
+  for (const mode of [0o777, 0o755, 0o750, 0o705]) {
+    chmodSync(directory, mode);
+    await assert.rejects(assertOwnedLocalSetupRoot(directory), error => {
+      assert.ok(error instanceof ConnectRootError);
+      assert.equal(error.reason, 'UNSAFE_MODE');
+      assert.match(error.message, /require mode 0700/);
+      assert.match(error.message, new RegExp(`mode 0${mode.toString(8)};`));
+      assert.ok(!error.message.includes(directory));
+      return true;
+    }, `mode 0${mode.toString(8)}`);
+  }
+  chmodSync(directory, 0o700);
+  await assertOwnedLocalSetupRoot(directory);
+  const uid = process.getuid!();
+  const getuid = t.mock.method(process as NodeJS.Process & { getuid(): number }, 'getuid', () => uid + 1);
+  await assert.rejects(assertOwnedLocalSetupRoot(directory), error => {
+    assert.ok(error instanceof ConnectRootError);
+    assert.equal(error.reason, 'NOT_OWNER');
+    assert.match(error.message, /owned by the current user/);
+    return true;
+  });
+  getuid.mock.restore();
+  await assert.rejects(assertOwnedLocalSetupRoot(join(directory, 'missing')), error => {
+    assert.ok(error instanceof ConnectRootError);
+    assert.equal(error.reason, 'AUTHORITY_UNVERIFIED');
+    assert.match(error.message, /accessible/);
+    assert.ok(!error.message.includes(directory));
+    return true;
   });
 });

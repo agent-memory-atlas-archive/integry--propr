@@ -1,14 +1,22 @@
+import { EventEmitter } from 'node:events';
+import { PassThrough } from 'node:stream';
+import { createInterface } from 'node:readline/promises';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { chmod, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { describe, it } from 'node:test';
+import { describe, it, test } from 'node:test';
 import {
+  assertMacGuiSession,
+  awaitMacStartupReview,
+  isolatedAgentPaths,
   createIsolatedSetupEnvironment,
   createLinuxSetupIsolation,
   createInterruptedRelaunchDiagnostics,
+  daemonHostInspectionCount,
+  hasFreshRetryExecution,
   dockerOperation,
   dockerWrapperSource,
   parseDockerEvents,
@@ -149,6 +157,8 @@ process.stdout.write(JSON.stringify(args));
       assert.deepEqual(JSON.parse(inspectOutput), ['image', 'inspect', 'propr/app:test']);
 
       for (const args of [
+        ['info', '--format', '{{.OSType}}'],
+        ['info', '--format', '{{.Architecture}}'],
         ['image', 'inspect', '--format', '{{.Id}}', 'propr/agent:0123abc'],
         ['image', 'inspect', '--format', '{{.Id}}', `propr/agent:0123abc@${digest}`],
       ]) {
@@ -184,7 +194,7 @@ fs.appendFileSync = (...args) => {
 };
 `);
       const held = spawn(process.execPath, ['--require', slowEventWriter, wrapper, 'pull', 'propr/app:test']);
-      const admittedBeforePull = 5 + rejectedDockerCommands.length * 2;
+      const admittedBeforePull = 7 + rejectedDockerCommands.length * 2;
       const events = await waitForEventCount(eventsPath, admittedBeforePull + 1);
       assert.equal(events.at(-1).operation, 'pull');
       held.kill('SIGTERM');
@@ -192,7 +202,7 @@ fs.appendFileSync = (...args) => {
       const final = await waitForEventCount(eventsPath, admittedBeforePull + 2);
       assert.equal(final.at(-1).event, 'sigterm');
       assert.deepEqual(final.filter(event => event.event === 'invoked').map(event => event.operation), [
-        'version', 'image-inspect', 'image-inspect', 'image-inspect', 'image-inspect',
+        'version', 'image-inspect', 'daemon-host-inspection', 'architecture-inspection', 'image-inspect', 'image-inspect', 'image-inspect',
         ...rejectedDockerCommands.map(() => 'rejected'), 'pull',
       ]);
       assert.equal(final.filter(event => event.event === 'rejected').length, rejectedDockerCommands.length);
@@ -266,3 +276,178 @@ fs.appendFileSync = (...args) => {
     }).failedConditions, []);
   });
 });
+
+
+test('Mac acceptance permits only local endpoint handoff and the required platform inspection forms', () => {
+  assert.equal(dockerOperation(['manifest', 'inspect', '--verbose', 'propr/app:test']), 'manifest-inspect');
+  assert.equal(dockerOperation(['image', 'inspect', '--format', '{"Os":{{json .Os}},"Architecture":{{json .Architecture}}}', 'propr/app:test']), 'image-inspect');
+  assert.equal(dockerOperation(['pull', '--platform', 'linux/amd64', 'propr/agent:test']), 'pull');
+  assert.equal(dockerOperation(['pull', '--platform', 'windows/amd64', 'propr/agent:test']), 'rejected');
+});
+
+
+test('macOS retains GUI HOME while Linux retains disposable HOME and session allowlist', () => {
+  const profile = Object.fromEntries(['root', 'home', 'temporary', 'xdgCache', 'xdgConfig', 'xdgData', 'xdgRuntime']
+    .map(key => [key, `/tmp/private/${key}`]));
+  const options = {
+    baseEnvironment: { HOME: '/Users/tester', USER: 'tester', LOGNAME: 'tester', PATH: '/usr/bin:/bin',
+      DISPLAY: ':99', DBUS_SESSION_BUS_ADDRESS: 'test', __CF_USER_TEXT_ENCODING: '0:0:0',
+      NODE_OPTIONS: 'unsafe', ELECTRON_RUN_AS_NODE: '1', GH_TOKEN: 'secret', OPENAI_API_KEY: 'secret',
+      PROPR_SKIP_REMOTE_IMAGE_CHECK: '1', DOCKER_CONFIG: '/Users/tester/.docker', HOST_CODEX_DIR: '/Users/tester/.codex' },
+    profile, wrapperDirectory: '/tmp/private/wrapper', isolation: createLinuxSetupIsolation(), ports: [40001, 40002, 40003],
+    localDockerEndpoint: 'unix:///Users/tester/.docker/run/docker.sock',
+  };
+  const mac = createIsolatedSetupEnvironment({ ...options, platform: 'darwin' });
+  const linux = createIsolatedSetupEnvironment({ ...options, platform: 'linux' });
+  assert.equal(mac.PROPR_SKIP_REMOTE_IMAGE_CHECK, undefined);
+  assert.equal(linux.PROPR_SKIP_REMOTE_IMAGE_CHECK, '1');
+  assert.equal(mac.HOME, '/Users/tester');
+  assert.equal(linux.HOME, profile.home);
+  assert.equal(mac.USER, 'tester');
+  assert.equal(mac.DISPLAY, undefined);
+  assert.equal(linux.DISPLAY, ':99');
+  assert.equal(mac.DOCKER_CONFIG, '/tmp/private/home/.docker');
+  assert.equal(mac.PATH, '/tmp/private/wrapper:/usr/bin:/bin');
+  assert.equal(mac.DOCKER_HOST, options.localDockerEndpoint);
+  assert.equal(mac.XDG_CONFIG_HOME, profile.xdgConfig);
+  for (const [key, value] of Object.entries(isolatedAgentPaths(profile))) {
+    assert.equal(mac[key], value);
+    assert.ok(value.startsWith(profile.home + '/'));
+  }
+  for (const key of ['GH_TOKEN', 'OPENAI_API_KEY', 'NODE_OPTIONS', 'ELECTRON_RUN_AS_NODE']) assert.equal(mac[key], undefined);
+  assert.throws(() => createIsolatedSetupEnvironment({ ...options, platform: 'darwin', baseEnvironment: { HOME: 'relative' } }), /GUI user HOME/);
+  assert.throws(() => createIsolatedSetupEnvironment({ ...options, platform: 'darwin', localDockerEndpoint: 'tcp://remote' }), /local Docker/);
+});
+
+test('macOS session preflight rejects SSH, non-GUI, root and noninteractive launches', () => {
+  const session = { environment: {}, uid: 501, consoleUid: 501, managerName: 'Aqua\n', interactive: true };
+  assert.doesNotThrow(() => assertMacGuiSession(session));
+  for (const override of [ { environment: { SSH_CONNECTION: 'test' } }, { environment: { SSH_TTY: 'test' } },
+    { accountHome: '/Users/actual' }, { uid: 0 }, { consoleUid: 502 }, { managerName: 'Background' }, { interactive: false } ]) {
+    assert.throws(() => assertMacGuiSession({ ...session, ...override }), /GUI session/);
+  }
+});
+
+test('human startup review remains unverified and resumable until explicit input', async () => {
+  let report;
+  let resume;
+  let closed = false;
+  let completed = false;
+  const review = awaitMacStartupReview({ outputPath: 'unused', sourceSha: 'a'.repeat(40), userData: '/tmp/private/data',
+    reportWriter: async (_, value) => { report = value; },
+    terminalFactory: () => Object.assign(new EventEmitter(), { question: async message => {
+      assert.match(message, /human approval is required/);
+      assert.match(message, /Never reset a Keychain/);
+      await new Promise(resolve => { resume = resolve; });
+    }, close: () => { closed = true; } }),
+  }).then(() => { completed = true; });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(report.result, 'unverified');
+  assert.equal(report.unverifiedPhase, 'native-startup-human-review');
+  assert.match(report.resume, /running GUI Terminal/);
+  assert.equal(completed, false);
+  resume();
+  await review;
+  assert.equal(closed, true);
+  assert.equal(report.result, 'unverified'); // Enter is never evidence of success.
+});
+
+
+test('startup review abort rejects instead of approving or completing the gate', async () => {
+  let signal;
+  let closed = false;
+  const review = awaitMacStartupReview({ outputPath: 'unused', sourceSha: 'a'.repeat(40), userData: '/tmp/private/data',
+    reportWriter: async () => {},
+    terminalFactory: () => Object.assign(new EventEmitter(), { question: (_, options) => {
+      signal = options.signal;
+      return new Promise((_, reject) => signal.addEventListener('abort', () => reject(new Error('aborted')), { once: true }));
+    }, close: () => { closed = true; } }),
+  });
+  const rejected = assert.rejects(review, /aborted/);
+  await new Promise(resolve => setImmediate(resolve));
+  process.emit('SIGTERM');
+  await rejected;
+  assert.equal(signal.aborted, true);
+  assert.equal(closed, true);
+});
+
+
+for (const action of ['ctrl-c', 'close', 'enter']) {
+  test(`real terminal startup review settles on ${action}`, { timeout: 2000 }, async () => {
+    const input = new PassThrough();
+    const output = new PassThrough();
+    input.isTTY = output.isTTY = true;
+    input.setRawMode = () => input;
+    let terminal;
+    const review = awaitMacStartupReview({
+      outputPath: 'unused', sourceSha: 'a'.repeat(40), userData: '/tmp/private/data',
+      reportWriter: async () => {},
+      terminalFactory: () => (terminal = createInterface({ input, output, terminal: true })),
+    });
+    const outcome = action === 'enter' ? review : assert.rejects(review, { name: 'AbortError' });
+    await new Promise(resolve => setImmediate(resolve));
+    if (action === 'close') terminal.close();
+    else input.write(action === 'ctrl-c' ? '\x03' : '\n');
+    await outcome;
+    assert.equal(terminal.listenerCount('SIGINT'), 0);
+    input.destroy();
+    output.destroy();
+  });
+}
+
+test('prelaunch Docker failures remove the allocated profile and replace stale reports', { skip: process.platform !== 'linux' || process.arch !== 'x64' }, async () => {
+  const { createPrivateSmokeProfile } = await import('./packaged-smoke-support.mjs');
+  const { runPackagedLinuxSetupLifecycle, lifecycleFailureCategory } = await import('./packaged-linux-setup-lifecycle.mjs');
+  const { access } = await import('node:fs/promises');
+  const directory = await mkdtemp(join(tmpdir(), 'propr-prelaunch-failure-'));
+  try {
+    for (const script of ['#!/missing-fixture-interpreter\n', '#!/bin/sh\n[ "$1" = info ] && exit 0\nexit 1\n']) {
+      const docker = join(directory, 'docker');
+      await writeFile(docker, script, { mode: 0o700 });
+      const output = join(directory, 'report.json');
+      await writeFile(output, '{"result":"passed"}');
+      let profile;
+      await assert.rejects(runPackagedLinuxSetupLifecycle({
+        binaryPath: process.execPath,
+        environment: {
+          PATH: directory,
+          PROPR_DESKTOP_REAL_LINUX_SETUP_ACCEPTANCE: '1',
+          PROPR_DESKTOP_SETUP_ACCEPTANCE_SOURCE_SHA: 'a'.repeat(40),
+          PROPR_DESKTOP_SETUP_ACCEPTANCE_OUTPUT: output,
+        },
+        createProfile: async () => (profile = await createPrivateSmokeProfile(directory)),
+      }));
+      assert.ok(profile);
+      await assert.rejects(access(profile.root));
+      const report = JSON.parse(await readFile(output, 'utf8'));
+      assert.equal(report.result, 'failed');
+      assert.equal(report.unverifiedPhase, 'docker-prerequisites');
+      assert.equal(report.cleanup.temporaryRootRemoved, true);
+      assert.ok(['docker-command', 'lifecycle-assertion'].includes(report.failureCategory));
+    }
+    assert.equal(lifecycleFailureCategory(new Error('timeout token=private-value /private/user')), 'timeout');
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
+for (const platform of ['linux', 'darwin']) {
+  test(`${platform} retry evidence requires exactly one new host check and execution`, () => {
+    const event = operation => ({ event: 'invoked', operation });
+    const host = dockerOperation(['info', '--format', '{{.OSType}}']);
+    const arch = dockerOperation(['info', '--format', '{{.Architecture}}']);
+    assert.equal(host, 'daemon-host-inspection');
+    assert.equal(arch, 'architecture-inspection');
+    const run = [event(host), ...(platform === 'darwin' ? [event(arch)] : []), event('pull')];
+    assert.equal(hasFreshRetryExecution(run, [...run, ...run]), true);
+    assert.equal(daemonHostInspectionCount([...run, ...run]), 2);
+    for (const retry of [
+      [event(arch), event('pull')], // extra info is not a host inspection
+      [event('info'), event('pull')],
+      [event(host), ...run], // duplicated host check
+      [event(host)], // no fresh execution
+      [...run, event('pull')], // duplicated execution
+      [event('pull'), event(host)], // inspection must precede execution
+    ]) assert.equal(hasFreshRetryExecution(run, [...run, ...retry]), false);
+    assert.equal(hasFreshRetryExecution([event('pull')], [event('pull'), ...run]), false);
+    assert.equal(hasFreshRetryExecution([event(host), ...run], [event(host), ...run, ...run]), false);
+  });
+}

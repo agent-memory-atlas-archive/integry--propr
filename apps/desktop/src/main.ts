@@ -1872,7 +1872,7 @@ if (!hasSingleInstanceLock) {
       commands: desktopNativeCommands,
       log: (level, event, fields) => log(level, event, fields),
     });
-    const setupHost = process.platform === 'linux'
+    const setupHost = (process.platform === 'linux' || process.platform === 'darwin')
       ? await createDesktopSetupHost({
           configDir: join(app.getPath('userData'), 'local-setup', 'cli'),
           authenticationHandoff: launchDesktopAuthentication,

@@ -17,6 +17,7 @@
  * reconstructions — verify against real images on the host.
  */
 
+import { localSetupSearchPath } from "../utils/localSetupPlatform.js";
 import { spawn, spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
@@ -64,7 +65,7 @@ function execAsync(
 ): Promise<ExecResult> {
   opts.signal?.throwIfAborted();
   return new Promise((resolve, reject) => {
-    const child = spawn(cmd, args, { cwd: opts.cwd, env: opts.env, stdio: ["pipe", "pipe", "pipe"] });
+    const child = spawn(cmd, args, { cwd: opts.cwd, env: cmd === "docker" ? { ...(opts.env ?? process.env), PATH: localSetupSearchPath(process.platform, (opts.env ?? process.env).PATH) } : opts.env, stdio: ["pipe", "pipe", "pipe"] });
     let stdout = "";
     let stderr = "";
     let settled = false;

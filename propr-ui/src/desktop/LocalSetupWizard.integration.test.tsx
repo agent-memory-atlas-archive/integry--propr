@@ -12,8 +12,39 @@ const runtimeMock = vi.hoisted(() => ({ setDesktopApiBaseUrl: vi.fn() }));
 vi.mock('../api/apiClient', () => ({ setApiBaseUrl: apiMock.setApiBaseUrl }));
 vi.mock('../config/runtimeConfig', () => ({ setDesktopApiBaseUrl: runtimeMock.setDesktopApiBaseUrl }));
 
+async function clickAndWaitForHeading(button: string | RegExp, heading: string) {
+  fireEvent.click(await screen.findByRole('button', { name: button }));
+  expect(await screen.findByRole('heading', { name: heading })).toBeInTheDocument();
+}
+
+async function continueThrough(...headings: string[]) {
+  for (const heading of headings) {
+    await clickAndWaitForHeading(/Continue/i, heading);
+  }
+}
+
 describe('production local setup journey', () => {
   beforeEach(() => vi.clearAllMocks());
+
+  it.each(['linux', 'macos'] as const)('opens the production wizard from the %s chooser', async platform => {
+    const adapters = adaptersFor();
+    adapters.platform = platform;
+    const setup = guidedAdapter({ status: vi.fn(async (): Promise<DesktopSetupSnapshot> => ({ ...idle,
+      capability: { supported: true, kind: 'local', platform: platform === 'macos' ? 'darwin' : 'linux' },
+    })) });
+    adapters.localSetup = setup;
+    render(<DesktopExperience adapters={adapters}><div>Connected app</div></DesktopExperience>);
+    await clickAndWaitForHeading(/Set up this computer/i, 'Check the essentials');
+    expect(setup.status).toHaveBeenCalled();
+    if (platform === 'macos') {
+      expect(screen.getByText(/Open Docker Desktop/).textContent).toContain('AMD64');
+      expect(screen.queryByText(/ProPR needs Linux/)).toBeNull();
+    }
+    await clickAndWaitForHeading(/Continue/, 'Private local storage');
+    expect(setup.start).not.toHaveBeenCalled();
+    expect(adapters.profiles.save).not.toHaveBeenCalled();
+    expect(screen.queryByText('Connected app')).not.toBeInTheDocument();
+  });
 
   it('keeps the production wizard and secure connection action in acceptance mode', async () => {
     window.__PROPR_PACKAGED_ACCEPTANCE__ = { setZoomFactor: vi.fn(), setupEvidence: vi.fn() };
@@ -37,8 +68,7 @@ describe('production local setup journey', () => {
     const fixture = createPackagedAcceptanceSetup(true, 'setup-error')!;
     render(<LocalSetupWizard adapter={{ supported: true, ...fixture.localSetup }} onBack={vi.fn()} onComplete={vi.fn()} />);
     const label = { retry: 'Retry setup', replace: 'Restart with aligned runtime', review: 'Review saved choices' }[action];
-    fireEvent.click(await screen.findByRole('button', { name: label }));
-    await screen.findByRole('heading', { name: action === 'review' ? 'Connect GitHub' : 'Setting up ProPR' });
+    await clickAndWaitForHeading(label, action === 'review' ? 'Connect GitHub' : 'Setting up ProPR');
     expect(fixture.evidence().calls).toEqual(action === 'review' ? [] : [action === 'retry' ? 'retry' : 'replace-running-stack']);
   });
 
@@ -133,14 +163,11 @@ describe('production local setup journey', () => {
     render(<LocalSetupWizard adapter={guidedAdapter()} onBack={vi.fn()} onComplete={vi.fn()} />);
 
     await screen.findByRole('heading', { name: 'Check the essentials' });
-    fireEvent.click(screen.getByRole('button', { name: /Continue/i }));
-    fireEvent.click(screen.getByRole('button', { name: /Continue/i }));
-    expect(await screen.findByRole('heading', { name: 'Connect GitHub' })).toBeInTheDocument();
+    await continueThrough('Private local storage', 'Connect GitHub');
     expect(screen.queryByRole('radio', { name: /Demo/i })).not.toBeInTheDocument();
     expect(screen.getByRole('radio', { name: 'ProPR Connect' })).toBeChecked();
 
-    fireEvent.click(screen.getByRole('button', { name: /Continue/i }));
-    expect(await screen.findByRole('heading', { name: 'GitHub event intake' })).toBeInTheDocument();
+    await clickAndWaitForHeading(/Continue/i, 'GitHub event intake');
     expect(screen.getByText('ProPR Connect uses a persistent WebSocket connection for GitHub events.')).toBeInTheDocument();
     expect(screen.queryByRole('radio')).not.toBeInTheDocument();
   });
@@ -152,16 +179,13 @@ describe('production local setup journey', () => {
     render(<LocalSetupWizard adapter={adapter} onBack={vi.fn()} onComplete={vi.fn()} />);
 
     await screen.findByRole('heading', { name: 'Check the essentials' });
-    fireEvent.click(screen.getByRole('button', { name: /Continue/i }));
-    fireEvent.click(screen.getByRole('button', { name: /Continue/i }));
+    await continueThrough('Private local storage', 'Connect GitHub');
     fireEvent.click(await screen.findByRole('radio', { name: 'Custom GitHub App' }));
     fireEvent.change(screen.getByLabelText('App ID'), { target: { value: '123' } });
     fireEvent.change(screen.getByLabelText('Installation ID'), { target: { value: '456' } });
     fireEvent.click(screen.getByRole('button', { name: 'Choose private key' }));
     await screen.findByText('github-app.pem');
-    fireEvent.click(screen.getByRole('button', { name: /Continue/i }));
-
-    expect(await screen.findByRole('heading', { name: 'GitHub event intake' })).toBeInTheDocument();
+    await clickAndWaitForHeading(/Continue/i, 'GitHub event intake');
     expect(screen.getByRole('radio', { name: 'Polling' })).toBeChecked();
     expect(screen.getByRole('radio', { name: 'Direct webhook' })).toBeInTheDocument();
     expect(screen.queryByRole('radio', { name: 'WebSocket' })).not.toBeInTheDocument();
@@ -186,10 +210,8 @@ describe('production local setup journey', () => {
 
     await openAndSubmitWizard();
     expect(await screen.findByRole('heading', { name: 'Setting up ProPR' })).toBeInTheDocument();
-    fireEvent.click(screen.getByRole('button', { name: /Cancel safely/i }));
-    expect(await screen.findByRole('heading', { name: 'Setup needs attention' })).toBeInTheDocument();
-    fireEvent.click(screen.getByRole('button', { name: /Retry setup/i }));
-    expect(await screen.findByRole('heading', { name: 'ProPR is ready' })).toBeInTheDocument();
+    await clickAndWaitForHeading(/Cancel safely/i, 'Setup needs attention');
+    await clickAndWaitForHeading(/Retry setup/i, 'ProPR is ready');
     expect(cancel).toHaveBeenCalledOnce();
     expect(retry).toHaveBeenCalledWith();
   });
@@ -224,8 +246,7 @@ describe('production local setup journey', () => {
 
     expect(await screen.findByRole('heading', { name: 'Could not load setup' })).toBeInTheDocument();
     expect(screen.getByRole('alert')).toHaveTextContent('Setup status is unavailable.');
-    fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
-    expect(await screen.findByRole('heading', { name: 'Check the essentials' })).toBeInTheDocument();
+    await clickAndWaitForHeading('Retry', 'Check the essentials');
     expect(adapter.status).toHaveBeenCalledTimes(2);
     fireEvent.click(screen.getByRole('button', { name: 'Back' }));
     expect(onBack).toHaveBeenCalledOnce();
@@ -306,8 +327,7 @@ describe('production local setup journey', () => {
     render(<LocalSetupWizard adapter={adapter} onBack={vi.fn()} onComplete={vi.fn()} />);
 
     expect(await screen.findByRole('button', { name: 'Review saved choices' })).toBeInTheDocument();
-    fireEvent.click(screen.getByRole('button', { name: 'Retry setup' }));
-    expect(await screen.findByRole('heading', { name: 'ProPR is ready' })).toBeInTheDocument();
+    await clickAndWaitForHeading('Retry setup', 'ProPR is ready');
     expect(retry).toHaveBeenCalledWith();
   });
 
@@ -324,18 +344,14 @@ describe('production local setup journey', () => {
     render(<LocalSetupWizard adapter={guidedAdapter({ status: vi.fn(async () => legacy), retry })} onBack={vi.fn()} onComplete={vi.fn()} />);
 
     expect(await screen.findByLabelText('Selected configuration')).toHaveTextContent('Demo mode (unsupported)');
-    fireEvent.click(screen.getByRole('button', { name: 'Review saved choices' }));
-    expect(await screen.findByRole('heading', { name: 'Connect GitHub' })).toBeInTheDocument();
+    await clickAndWaitForHeading('Review saved choices', 'Connect GitHub');
     expect(screen.queryByRole('radio', { name: /Demo/i })).not.toBeInTheDocument();
     expect(screen.queryByRole('radio', { name: 'Keep existing configuration' })).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: /Continue/i }));
     expect(screen.getByRole('alert')).toHaveTextContent('Select ProPR Connect');
 
     fireEvent.click(screen.getByRole('radio', { name: 'ProPR Connect' }));
-    for (const heading of ['GitHub event intake', 'Select coding agents', 'Ready to install']) {
-      fireEvent.click(screen.getByRole('button', { name: /Continue/i }));
-      await screen.findByRole('heading', { name: heading });
-    }
+    await continueThrough('GitHub event intake', 'Select coding agents', 'Ready to install');
     expect(screen.getByLabelText('Selected configuration')).toHaveTextContent('ProPR Connect');
     expect(screen.getByLabelText('Selected configuration')).toHaveTextContent('WebSocket');
     fireEvent.click(screen.getByRole('button', { name: /Install ProPR/i }));
@@ -362,10 +378,7 @@ describe('production local setup journey', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Review saved choices' }));
     expect(await screen.findByText('ProPR Connect uses a persistent WebSocket connection for GitHub events.')).toBeInTheDocument();
     expect(screen.queryByRole('radio')).not.toBeInTheDocument();
-    for (const heading of ['Select coding agents', 'Ready to install']) {
-      fireEvent.click(screen.getByRole('button', { name: /Continue/i }));
-      await screen.findByRole('heading', { name: heading });
-    }
+    await continueThrough('Select coding agents', 'Ready to install');
     fireEvent.click(screen.getByRole('button', { name: /Install ProPR/i }));
     expect(retry).toHaveBeenCalledWith(expect.objectContaining({ intake: { mode: 'routing_websocket' } }));
   });
@@ -383,16 +396,10 @@ describe('production local setup journey', () => {
     const adapter = guidedAdapter({ status: vi.fn(async () => recoverable), retry });
     render(<LocalSetupWizard adapter={adapter} onBack={vi.fn()} onComplete={vi.fn()} />);
 
-    fireEvent.click(await screen.findByRole('button', { name: 'Review saved choices' }));
-    expect(await screen.findByRole('heading', { name: 'Connect GitHub' })).toBeInTheDocument();
+    await clickAndWaitForHeading('Review saved choices', 'Connect GitHub');
     fireEvent.click(screen.getByRole('radio', { name: 'Keep existing configuration' }));
-    for (const heading of ['GitHub event intake', 'Select coding agents', 'Ready to install']) {
-      fireEvent.click(screen.getByRole('button', { name: /Continue/i }));
-      await screen.findByRole('heading', { name: heading });
-    }
-    fireEvent.click(screen.getByRole('button', { name: /Install ProPR/i }));
-
-    expect(await screen.findByRole('heading', { name: 'ProPR is ready' })).toBeInTheDocument();
+    await continueThrough('GitHub event intake', 'Select coding agents', 'Ready to install');
+    await clickAndWaitForHeading(/Install ProPR/i, 'ProPR is ready');
     expect(retry).toHaveBeenCalledWith(expect.objectContaining({
       github: { mode: 'keep' }, intake: { mode: 'routing_websocket' },
     }));
@@ -419,19 +426,12 @@ describe('production local setup journey', () => {
     });
     render(<LocalSetupWizard adapter={adapter} onBack={vi.fn()} onComplete={vi.fn()} />);
 
-    fireEvent.click(await screen.findByRole('button', { name: 'Review saved choices' }));
-    expect(await screen.findByRole('heading', { name: 'GitHub event intake' })).toBeInTheDocument();
+    await clickAndWaitForHeading('Review saved choices', 'GitHub event intake');
     fireEvent.click(screen.getByRole('button', { name: 'Enter webhook secret securely' }));
     await screen.findByText('Secret entered');
-    fireEvent.click(screen.getByRole('button', { name: /Continue/i }));
-    await screen.findByRole('heading', { name: 'Select coding agents' });
-    fireEvent.click(screen.getByRole('button', { name: /Continue/i }));
-    await screen.findByRole('heading', { name: 'Ready to install' });
-    fireEvent.click(screen.getByRole('button', { name: /Install ProPR/i }));
-
-    expect(await screen.findByRole('heading', { name: 'Setup needs attention' })).toBeInTheDocument();
-    fireEvent.click(screen.getByRole('button', { name: 'Retry setup' }));
-    expect(await screen.findByRole('heading', { name: 'ProPR is ready' })).toBeInTheDocument();
+    await continueThrough('Select coding agents', 'Ready to install');
+    await clickAndWaitForHeading(/Install ProPR/i, 'Setup needs attention');
+    await clickAndWaitForHeading('Retry setup', 'ProPR is ready');
     expect(retry).toHaveBeenNthCalledWith(1, expect.objectContaining({
       intake: { mode: 'direct_webhook', secretCapability: 'webhook-secret-capability' },
     }));

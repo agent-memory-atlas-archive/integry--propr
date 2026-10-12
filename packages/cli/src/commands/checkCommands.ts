@@ -6,6 +6,7 @@
  * are present. It is also what bare `propr` runs.
  */
 
+import { localSetupSearchPath } from "../utils/localSetupPlatform.js";
 import { checkGithubApp, githubAppCheckFailure } from "./githubAppApi.js";
 import { Command } from "commander";
 import { spawnSync } from "node:child_process";
@@ -121,6 +122,7 @@ const ANSI = {
 };
 
 export interface RunChecksOptions {
+  signal?: AbortSignal;
   root?: string;
   verify?: boolean;
   agents?: string[];
@@ -208,6 +210,38 @@ export function configurationErrorCheck(error: string): CheckResult {
 }
 
 /** Run all checks and return the structured outcome (no printing). */
+/**
+ * Go template errors from `docker info --format {{.OSType}}` on CLIs whose
+ * info document lacks that field (for example podman-docker). A daemon that is
+ * merely unreachable does not produce a template error.
+ */
+export function isDockerInfoTemplateError(stderr: string | undefined): boolean {
+  const text = (stderr ?? "").trim();
+  if (!text) return false;
+  return /\btemplate\b|can't evaluate field|cannot evaluate field|executing "[^"]*" at <\.OSType>/i.test(text);
+}
+
+/**
+ * Bound a Docker failure to its first meaningful line, without the user's
+ * home path. Docker Desktop embeds the socket under HOME in its connection
+ * errors and diagnostics elsewhere in the project avoid leaking paths.
+ */
+export function summarizeDockerFailure(stderr: string | undefined, home: string = homedir()): string {
+  const line = (stderr ?? "")
+    .split(/\r?\n/)
+    .map(entry => entry.replace(/[\u0000-\u001f\u007f]/g, " ").trim())
+    .find(entry => entry.length > 0);
+  if (!line) return "";
+  let summary = line;
+  if (home && home !== "/") {
+    const escaped = home.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    summary = summary.replace(new RegExp(escaped, "g"), "~");
+  }
+  const limit = 200;
+  if (summary.length > limit) summary = `${summary.slice(0, limit - 1)}…`;
+  return `: ${summary}`;
+}
+
 export async function runChecks(options: RunChecksOptions = {}): Promise<ChecksOutcome> {
   const results: CheckResult[] = [];
   // Record a finalized result and notify any live presenter immediately.
@@ -222,39 +256,78 @@ export async function runChecks(options: RunChecksOptions = {}): Promise<ChecksO
   runCliChecks(emit);
 
   // 1. Docker installed
-  const dockerVersion = spawnSync("docker", ["--version"], { encoding: "utf-8" });
+  const orch = await loadOrchestrator();
+  const dockerVersion = await orch.dockerAsync(["--version"], { timeout: 10_000, signal: options.signal });
   if (dockerVersion.status === 0) {
-    emit({ name: "Docker installed", status: "ok", detail: dockerVersion.stdout.trim(), group: "Docker" });
+    emit({ name: "Docker installed", status: "ok", detail: (dockerVersion.stdout ?? "").trim(), group: "Docker" });
   } else {
     emit({
       name: "Docker installed",
       status: "fail",
       detail: "`docker` command not found",
       group: "Docker",
-      fix: "Install Docker: https://docs.docker.com/get-docker/",
+      fix: process.platform === "darwin"
+        ? "Install Docker Desktop in /Applications, then open it and retry. Setup does not install it for you."
+        : "Install Docker: https://docs.docker.com/get-docker/",
     });
   }
 
-  const { orch, cfg, rootDir } = await getHostConfig({ configManager, root: options.root });
-
   // 2. Docker daemon running
-  const daemonUp = orch.dockerAvailable();
+  const daemon = dockerVersion.status === 0
+    ? await orch.dockerAsync(["info", "--format", "{{.OSType}}"], { timeout: 10_000, signal: options.signal })
+    : undefined;
+  let daemonUp = daemon?.status === 0 && daemon.stdout?.trim() === "linux";
+  let engineOsTypeUnreported = false;
+  if (daemon && daemon.status !== 0 && process.platform !== "darwin" && isDockerInfoTemplateError(daemon.stderr)) {
+    // Docker-compatible front-ends such as podman-docker reject the OSType
+    // template but still answer plain `docker info`. Linux previously accepted
+    // them, so keep that behavior; macOS requires Docker Desktop and stays strict.
+    const plain = await orch.dockerAsync(["info"], { timeout: 10_000, signal: options.signal });
+    if (plain.status === 0) {
+      daemonUp = true;
+      engineOsTypeUnreported = true;
+    }
+  }
   emit(
     daemonUp
-      ? { name: "Docker daemon", status: "ok", detail: "daemon is reachable", group: "Docker" }
+      ? {
+          name: "Docker daemon",
+          status: "ok",
+          detail: engineOsTypeUnreported
+            ? "daemon is reachable (this Docker-compatible CLI does not report the engine OS type; Linux containers assumed)"
+            : "daemon is reachable",
+          group: "Docker",
+        }
       : {
           name: "Docker daemon",
           status: "fail",
-          detail: "cannot reach the Docker daemon (`docker info` failed)",
+          detail: daemon?.status === 0
+            ? "Docker must be running Linux containers"
+            : `cannot reach the Docker daemon (docker info failed)${summarizeDockerFailure(daemon?.stderr)}`,
           group: "Docker",
-          fix: "Start Docker (e.g. `sudo systemctl start docker`) and ensure your user can access it.",
-          remediation: { kind: "start-docker" },
+          fix: process.platform === "darwin"
+            ? "Open Docker Desktop, wait for the engine to start, and retry. Check the selected Docker context if it still fails."
+            : "Start Docker (e.g. `sudo systemctl start docker`) and ensure your user can access it.",
+          ...(process.platform === "darwin" ? {} : { remediation: { kind: "start-docker" as const } }),
         }
   );
 
+  if (process.platform === "darwin" && daemonUp) {
+    // Local bind sources cannot be handed to a remote engine. Respect Docker's
+    // context-over-host precedence without reading/copying its credentials.
+    const context = !process.env.DOCKER_CONTEXT && process.env.DOCKER_HOST
+      ? { status: 0, stdout: process.env.DOCKER_HOST }
+      : await orch.dockerAsync(["context", "inspect", "--format", "{{.Endpoints.docker.Host}}"], { timeout: 10_000, signal: options.signal });
+    const local = context.status === 0 && /^unix:\/\/\/[^\0\r\n]+$/.test((context.stdout ?? "").trim());
+    emit({ name: "Docker local endpoint", status: local ? "ok" : "fail", group: "Docker",
+      detail: local ? "local Docker endpoint verified" : "Guided macOS setup requires a local Docker Desktop engine for host bind mounts.",
+      ...(!local ? { fix: "Select the Docker Desktop context yourself, then retry. Setup does not change Docker contexts." } : {}),
+    });
+  }
+
   // 3. Docker socket (informational — only relevant for the default socket setup)
   const socketPath = "/var/run/docker.sock";
-  if (existsSync(socketPath)) {
+  if (process.platform !== "darwin" && existsSync(socketPath)) {
     let accessible = true;
     try {
       accessSync(socketPath, fsConstants.R_OK | fsConstants.W_OK);
@@ -273,6 +346,8 @@ export async function runChecks(options: RunChecksOptions = {}): Promise<ChecksO
           }
     );
   }
+
+  const { cfg, rootDir } = await getHostConfig({ configManager, root: options.root });
 
   // 4. Stack root + .env
   const envPath = join(rootDir, ".env");
@@ -503,7 +578,7 @@ export async function runChecks(options: RunChecksOptions = {}): Promise<ChecksO
         });
         continue;
       }
-      const run = spawnSync("docker", ["run", "--rm", "--network=none", "--memory=512m", "-e", `PROPR_AGENT_TYPE=${runtimeType}`, tag, agent.bin, "--version"], { encoding: "utf-8", timeout: 60000 });
+      const run = spawnSync("docker", ["run", "--rm", "--network=none", "--memory=512m", "-e", `PROPR_AGENT_TYPE=${runtimeType}`, tag, agent.bin, "--version"], { encoding: "utf-8", timeout: 60000, env: { ...process.env, PATH: localSetupSearchPath() } });
       if (run.status === 0) {
         emit({ name: `Verify: ${agent.type}`, status: "ok", detail: `image runs (${(run.stdout || "").trim().split("\n")[0]})`, group: "Agents" });
       } else {

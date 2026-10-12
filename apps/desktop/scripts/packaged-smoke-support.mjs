@@ -1,4 +1,4 @@
-import { chmod, lstat, mkdir, mkdtemp, rm } from 'node:fs/promises';
+import { chmod, lstat, mkdir, mkdtemp, realpath, rm } from 'node:fs/promises';
 import { setTimeout as delay } from 'node:timers/promises';
 import { tmpdir } from 'node:os';
 import { dirname, isAbsolute, join, relative, resolve, win32 } from 'node:path';
@@ -159,7 +159,7 @@ const ensurePrivateDirectory = async path => {
 };
 
 export const createPrivateSmokeProfile = async (temporaryDirectory = tmpdir()) => {
-  const root = await mkdtemp(join(resolve(temporaryDirectory), PRIVATE_SMOKE_PREFIX));
+  const root = await mkdtemp(join(await realpath(resolve(temporaryDirectory)), PRIVATE_SMOKE_PREFIX));
   try {
     await ensurePrivateDirectory(root);
     const profile = {

@@ -1,5 +1,6 @@
 import { existsSync, lstatSync, realpathSync } from 'node:fs';
 import { join, resolve } from 'node:path';
+import { assertOwnedLocalSetupRoot } from './connectIdentity.js';
 import type { SetupActions } from '@propr/local-setup';
 import {
   evaluateProprApiCompatibility,
@@ -265,6 +266,14 @@ export async function createDesktopSetupHost(options: {
   });
   const actions: SetupActions = {
     ...baseActions,
+    async runChecks(params) {
+      if (process.platform === 'darwin' && params.root) await assertOwnedLocalSetupRoot(params.root);
+      return baseActions.runChecks(params);
+    },
+    async startStack(params) {
+      if (process.platform === 'darwin') await assertOwnedLocalSetupRoot(params.rootDir);
+      return baseActions.startStack(params);
+    },
     async checkBackendHealth(params) {
       const health = await baseActions.checkBackendHealth(params);
       if (!health.healthy) return health;

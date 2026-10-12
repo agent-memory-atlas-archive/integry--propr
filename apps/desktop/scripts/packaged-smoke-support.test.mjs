@@ -588,3 +588,18 @@ describe('packaged smoke failure cleanup', () => {
     stuck.emit('close');
   });
 });
+
+test('private smoke profiles canonicalize a symlinked temporary parent', { skip: process.platform === 'win32' }, async () => {
+  const { realpath, symlink } = await import('node:fs/promises');
+  const parent = await mkdtemp(join(tmpdir(), 'propr-canonical-temp-'));
+  let profile;
+  try {
+    await symlink(parent, join(parent, 'alias'), 'dir');
+    profile = await createPrivateSmokeProfile(join(parent, 'alias'));
+    assert.equal(profile.root, await realpath(profile.root));
+    assert.equal(profile.home, join(profile.root, 'home'));
+  } finally {
+    if (profile) await removePrivateSmokeProfile(profile);
+    await rm(parent, { recursive: true, force: true });
+  }
+});

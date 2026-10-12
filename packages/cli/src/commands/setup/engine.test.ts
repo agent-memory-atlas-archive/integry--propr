@@ -340,7 +340,7 @@ test("rejects unsafe agent credential paths before filesystem preparation", asyn
 
     assert.equal(prepareCalled, false, `must not prepare unsafe path ${JSON.stringify(unsafePath)}`);
     assert.equal(statusOf(result.state, "configure-agents"), "failed");
-    assert.match(getStep(result.state, "configure-agents")?.detail ?? "", /absolute, non-root Linux path/);
+    assert.match(getStep(result.state, "configure-agents")?.detail ?? "", /absolute, non-root POSIX path/);
   }
 });
 

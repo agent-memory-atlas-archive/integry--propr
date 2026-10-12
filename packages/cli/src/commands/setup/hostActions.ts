@@ -1,3 +1,4 @@
+import { inspectSetupEngineArchitecture, inspectSetupImagePlatform } from "./imagePlatform.js";
 import { mkdirSync } from "node:fs";
 import { hostname } from "node:os";
 import { isAbsolute, normalize } from "node:path";
@@ -34,7 +35,7 @@ const sleep = (ms: number, signal?: AbortSignal): Promise<void> => new Promise((
 
 function assertSafeAgentCredentialDir(path: string, name = "Agent credential path"): void {
   if (!isAbsolute(path) || normalize(path) === "/" || path.includes(":") || /[\u0000-\u001f\u007f-\u009f]/.test(path)) {
-    throw new Error(`${name} must be an absolute, non-root Linux path without ':' or control characters`);
+    throw new Error(`${name} must be an absolute, non-root POSIX path without ':' or control characters`);
   }
 }
 
@@ -82,12 +83,19 @@ export function createDefaultActions(configManager?: ConfigManager, options: {
       throw new Error(`stack environment is not ready:\n  - ${validation.errors.join("\n  - ")}`);
     }
     await orch.ensureNetworkAsync(cfg, onLog, signal);
-    await orch.startStackAsync(cfg, {
-      ui: ui ?? configManager?.getUiEnabled() ?? true,
-      docs: docs ?? cfg.docsEnabled,
-      onLog,
-      signal,
-    });
+    try {
+      await orch.startStackAsync(cfg, {
+        ui: ui ?? configManager?.getUiEnabled() ?? true,
+        docs: docs ?? cfg.docsEnabled,
+        onLog,
+        signal,
+      });
+    } catch (error) {
+      signal?.throwIfAborted();
+      if (process.platform === "darwin" && error instanceof Error
+        && /mounts? denied|(?:bind mount|mounting|mount source path)[^\n]*(?:permission denied|operation not permitted|not shared)|(?:permission denied|operation not permitted)[^\n]*(?:bind mount|mount source path)/i.test(error.message)) error.message += `\nIf Docker reports a denied bind mount, review Docker Desktop Settings → Resources → File sharing for this stack directory. Grant access yourself only if intended, then retry.`;
+      throw error;
+    }
     signal?.throwIfAborted();
   };
 
@@ -130,6 +138,8 @@ export function createDefaultActions(configManager?: ConfigManager, options: {
         ? new Set(["app", "ui"])
         : new Set<string>();
 
+      let architecture: string | undefined;
+      let architectureFailed = false;
       for (const [key, tag] of Object.entries(cfg.images)) {
         signal?.throwIfAborted();
         if (key === "docs" && !cfg.docsEnabled) continue;
@@ -137,6 +147,22 @@ export function createDefaultActions(configManager?: ConfigManager, options: {
         // Pull the shared agent image when the user selected any agent; core images
         // (api/worker/daemon/redis/…) always pull.
         if (isAgent && selected.size === 0) continue;
+
+        if (process.platform === "darwin") {
+          if (architecture === undefined && !architectureFailed) {
+            try {
+              architecture = await inspectSetupEngineArchitecture(orch, signal);
+            } catch (error) {
+              signal?.throwIfAborted();
+              architectureFailed = true;
+              onLog?.(`Cannot prepare images: ${(error as Error).message}`);
+            }
+          }
+          if (architectureFailed) {
+            (isAgent ? result.failedAgents : result.failedCore).push(tag);
+            continue;
+          }
+        }
 
         // A source validation manifest deliberately names images built into the
         // local Docker daemon.  They are never claimed to be published and must
@@ -146,17 +172,73 @@ export function createDefaultActions(configManager?: ConfigManager, options: {
           onLog?.(`checking source-built image ${tag}…`);
           const inspected = await orch.dockerAsync(["image", "inspect", tag], { signal });
           signal?.throwIfAborted();
-          if (inspected.status === 0) result.pulledCore.push(tag);
+          if (inspected.status === 0) {
+            try {
+              if (process.platform === "darwin") {
+                await inspectSetupImagePlatform(orch, tag, isAgent, true, signal, architecture);
+              }
+              result.pulledCore.push(tag);
+            } catch (error) {
+              signal?.throwIfAborted();
+              onLog?.(`Source-built image ${tag} is unavailable or incompatible: ${(error as Error).message}`);
+              result.failedCore.push(tag);
+            }
+          }
           else result.failedCore.push(tag);
           continue;
+        }
+
+        let platform: string | undefined;
+        let localPlatformVerified = false;
+        if (process.platform === "darwin") {
+          try {
+            const present = await orch.dockerAsync(["image", "inspect", tag], { signal });
+            signal?.throwIfAborted();
+            const skipRemote = /^(1|true|yes)$/i.test(process.env.PROPR_SKIP_REMOTE_IMAGE_CHECK ?? "");
+            if (present.status === 0) {
+              try {
+                platform = await inspectSetupImagePlatform(orch, tag, isAgent, true, signal, architecture);
+                localPlatformVerified = true;
+              } catch (error) {
+                signal?.throwIfAborted();
+                if (skipRemote) throw error;
+                // An incompatible local variant must not prevent pulling the
+                // required platform from a published multi-platform manifest.
+              }
+            }
+            if (skipRemote && !localPlatformVerified) throw new Error(`Image ${tag} is not available locally; remote image checks are disabled.`);
+            platform ??= await inspectSetupImagePlatform(orch, tag, isAgent, false, signal, architecture);
+            onLog?.(`${tag}: ${platform}${isAgent ? " (AMD64 agent; emulation required on Apple Silicon)" : ""}`);
+            if (localPlatformVerified && skipRemote) {
+              try { orch.tagAgentLatest(key, tag); } catch { /* best-effort local retag */ }
+              (isAgent ? result.pulledAgents : result.pulledCore).push(tag);
+              continue;
+            }
+          } catch (error) {
+            signal?.throwIfAborted();
+            onLog?.(`Cannot prepare image ${tag}: ${(error as Error).message}`);
+            (isAgent ? result.failedAgents : result.failedCore).push(tag);
+            continue;
+          }
         }
 
         onLog?.(`pulling ${tag}…`);
         // Async exec keeps the event loop free so the wizard's Ink spinner keeps
         // animating while the (often slow) pull runs, instead of freezing.
-        const pulled = await orch.dockerAsync(["pull", tag], { signal });
+        const pulled = await orch.dockerAsync(["pull", ...(platform ? ["--platform", platform] : []), tag], { signal });
         signal?.throwIfAborted();
-        if (pulled.status === 0) {
+        // A failed pull awaited an external API. Reinspect before relying on
+        // local availability; the earlier presence check is not durable proof.
+        if (pulled.status !== 0 && localPlatformVerified) {
+          try {
+            await inspectSetupImagePlatform(orch, tag, isAgent, true, signal, architecture);
+          } catch {
+            signal?.throwIfAborted();
+            localPlatformVerified = false;
+          }
+        }
+        if (pulled.status === 0 || localPlatformVerified) {
+          if (pulled.status !== 0) onLog?.(`Using verified local image ${tag}; registry pull unavailable.`);
           try {
             orch.tagAgentLatest(key, tag);
           } catch {
@@ -164,6 +246,7 @@ export function createDefaultActions(configManager?: ConfigManager, options: {
           }
           (isAgent ? result.pulledAgents : result.pulledCore).push(tag);
         } else {
+          onLog?.(`Docker pull failed for ${tag}: ${pulled.stderr || pulled.error?.message || "unknown Docker error"}`);
           (isAgent ? result.failedAgents : result.failedCore).push(tag);
         }
       }
