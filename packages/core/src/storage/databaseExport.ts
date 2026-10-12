@@ -19,6 +19,8 @@ export function configuredExportSecrets(env: NodeJS.ProcessEnv = process.env): s
     isExportSecretName(name) && value ? [value] : []))];
 }
 export type StorageAuthority = () => Promise<void>;
+// Keep the positional public API while sharing the actor-bound operation contract.
+type ExportOperationArgs = [instanceId: string, generation: string, id: string, actor: string, authorize: StorageAuthority];
 interface ExportJob { actor: string; status: DatabaseExportStatus; directory: string; worker?: Worker; disposed?: Promise<void>; removing?: Promise<void>; identity?: { dev: number; ino: number }; ancestry: Array<{ path: string; dev: number; ino: number }> }
 
 /** Private, bounded, process-generation-bound jobs. Never accepts a caller path. */
@@ -72,18 +74,23 @@ export class DatabaseExports {
     } finally { await handle.close(); }
   }
 
+  private async validateSource() {
+    await assertRealDirectory(path.dirname(this.source));
+    const stat = await fs.lstat(this.source);
+    if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1 || stat.size > MAX_BYTES) throw new Error('Unsafe database');
+    for (const suffix of ['-wal', '-shm', '-journal']) {
+      const side = await fs.lstat(`${this.source}${suffix}`).catch(error => { if (error.code === 'ENOENT') return null; throw error; });
+      if (side && (!side.isFile() || side.isSymbolicLink() || side.nlink !== 1 || side.size > MAX_BYTES)) throw new Error('Unsafe database sidecar');
+    }
+    return stat;
+  }
+
   async start(instanceId: string, actor: string, authorize: StorageAuthority): Promise<DatabaseExportStatus> {
     if (this.admitting || this.job) throw new Error('Export admission busy');
     this.admitting = true;
     try {
       await authorize();
-      await assertRealDirectory(path.dirname(this.source));
-      const stat = await fs.lstat(this.source);
-      if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1 || stat.size > MAX_BYTES) throw new Error('Unsafe database');
-      for (const suffix of ['-wal', '-shm', '-journal']) {
-        const side = await fs.lstat(`${this.source}${suffix}`).catch(error => { if (error.code === 'ENOENT') return null; throw error; });
-        if (side && (!side.isFile() || side.isSymbolicLink() || side.nlink !== 1 || side.size > MAX_BYTES)) throw new Error('Unsafe database sidecar');
-      }
+      const stat = await this.validateSource();
       await fs.mkdir(this.root, { recursive: true, mode: 0o700 });
       await assertRealDirectory(this.root);
       const rootStat = await fs.stat(this.root);
@@ -161,12 +168,12 @@ export class DatabaseExports {
     if (!job || job.actor !== actor || job.status.instanceId !== instanceId || generation !== this.generation || job.status.operationId !== id || Date.parse(job.status.expiresAt) <= Date.now()) throw new Error('Export unavailable');
     return job;
   }
-  async status(instanceId: string, generation: string, id: string, actor: string, authorize: StorageAuthority) {
+  async status(...[instanceId, generation, id, actor, authorize]: ExportOperationArgs) {
     const job = this.selected(instanceId, generation, id, actor);
     try { await authorize(); } catch (error) { await this.discard(job); throw error; }
     return { ...job.status };
   }
-  async redeem(instanceId: string, generation: string, id: string, actor: string, authorize: StorageAuthority) {
+  async redeem(...[instanceId, generation, id, actor, authorize]: ExportOperationArgs) {
     const job = this.selected(instanceId, generation, id, actor);
     await authorize();
     if (job.status.state !== 'ready') throw new Error('Export not ready or consumed');
@@ -183,7 +190,7 @@ export class DatabaseExports {
       } catch (error) { await file.close(); throw error; }
     } catch (error) { await this.discard(job); throw error; }
   }
-  async cancel(instanceId: string, generation: string, id: string, actor: string, authorize: StorageAuthority) {
+  async cancel(...[instanceId, generation, id, actor, authorize]: ExportOperationArgs) {
     const job = this.selected(instanceId, generation, id, actor);
     await authorize(); await this.discard(job);
   }

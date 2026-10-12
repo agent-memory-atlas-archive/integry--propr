@@ -14,6 +14,8 @@ import { resolveRepositoryClonePath } from '../git/repositoryPaths.js';
 export class StorageContractError extends Error {
   constructor(readonly status: number, message: string) { super(message); }
 }
+// Preserve existing positional callers, including the optional task selection.
+type CleanupPreviewArgs = [instanceId: string, categories: StorageCategory[], actor: string, taskIds?: string[], authorize?: StorageAuthority];
 interface SavedPreview {
   actor: string;
   preview: StorageCleanupPreview;
@@ -254,7 +256,22 @@ export class InstanceStorageService {
       await parent.close(); await root.close();
     }
   }
-  async preview(instanceId: string, categories: StorageCategory[], actor: string, taskIds: string[] = [], authorize?: StorageAuthority): Promise<StorageCleanupPreview> {
+  private async unregisteredCandidates(registered: CacheRecord[]): Promise<StorageCandidate[]> {
+    const candidates: StorageCandidate[] = [];
+    const registeredIds = new Set(registered.map(record => record.id));
+    for (const repository of (await this.services.repositoryInventory?.() ?? []).slice(0, 100)) {
+      const [owner, name, extra] = repository.split('/');
+      if (!owner || !name || extra) continue;
+      const id = createHash('sha256').update(`${owner}/${name}`).digest('hex');
+      if (registeredIds.has(id)) continue;
+      const directory = resolveRepositoryClonePath(this.services.clonesRoot, owner, name);
+      const exists = await fs.lstat(directory).then(() => true, error => { if (error.code === 'ENOENT') return false; throw error; });
+      if (exists) candidates.push({ id, name: repository, category: 'repository_caches', estimatedBytes: null, protectedReasons: ['unknown_ownership'] });
+      registeredIds.add(id);
+    }
+    return candidates;
+  }
+  async preview(...[instanceId, categories, actor, taskIds = [], authorize]: CleanupPreviewArgs): Promise<StorageCleanupPreview> {
     await this.assertInstance(instanceId);
     if (taskIds.length > 10 || new Set(taskIds).size !== taskIds.length || taskIds.some(id => typeof id !== 'string' || !/^[A-Za-z0-9_-]{1,255}$/.test(id))) throw new StorageContractError(400, 'Invalid task selection');
     if (taskIds.length && !categories.includes('task_history')) throw new StorageContractError(400, 'Task selection requires task_history category');
@@ -278,17 +295,7 @@ export class InstanceStorageService {
           continue;
         }
         const registered = await this.records();
-        const registeredIds = new Set(registered.map(record => record.id));
-        for (const repository of (await this.services.repositoryInventory?.() ?? []).slice(0, 100)) {
-          const [owner, name, extra] = repository.split('/');
-          if (!owner || !name || extra) continue;
-          const id = createHash('sha256').update(`${owner}/${name}`).digest('hex');
-          if (registeredIds.has(id)) continue;
-          const directory = resolveRepositoryClonePath(this.services.clonesRoot, owner, name);
-          const exists = await fs.lstat(directory).then(() => true, error => { if (error.code === 'ENOENT') return false; throw error; });
-          if (exists) candidates.push({ id, name: repository, category, estimatedBytes: null, protectedReasons: ['unknown_ownership'] });
-          registeredIds.add(id);
-        }
+        candidates.push(...await this.unregisteredCandidates(registered));
         for (const record of registered) {
           const evaluated = await this.evaluate(record, busy, signal);
           candidates.push(evaluated.candidate);
@@ -306,7 +313,7 @@ export class InstanceStorageService {
       return preview;
     });
   }
-  private async executeCandidate(candidate: StorageCandidate, record: CacheRecord | undefined, fingerprint: string, signal: AbortSignal, authorize?: StorageAuthority): Promise<StorageProtection[]> {
+  private async executeCandidate(candidate: StorageCandidate, record: CacheRecord | undefined, fingerprint: string, { signal, authorize }: { signal: AbortSignal; authorize?: StorageAuthority }): Promise<StorageProtection[]> {
     if (candidate.category === 'task_history' && this.services.taskHistory) {
       await authorize?.();
       return await this.services.taskHistory.erase(candidate.id, fingerprint) ? [] : ['changed'];
@@ -319,6 +326,11 @@ export class InstanceStorageService {
     // No unchecked force/remove fallback exists elsewhere in the cache lifecycle.
     return this.removeCache(record, fingerprint, signal, authorize);
   }
+  private validateConfirmation(saved: SavedPreview, instanceId: string, actor: string): void {
+    if (saved.generation !== this.generation) throw new StorageContractError(409, 'Instance generation changed');
+    if (saved.actor !== actor || saved.preview.instanceId !== instanceId) throw new StorageContractError(403, 'Confirmation belongs to another principal');
+    if (!Number.isFinite(Date.parse(saved.preview.expiresAt)) || Date.parse(saved.preview.expiresAt) <= Date.now()) throw new StorageContractError(409, 'Confirmation expired');
+  }
   async execute(instanceId: string, confirmation: string, actor: string, authorize?: StorageAuthority): Promise<StorageCleanupResult> {
     await this.assertInstance(instanceId);
     if (!/^[0-9a-f-]{36}$/.test(confirmation)) throw new StorageContractError(400, 'Invalid confirmation');
@@ -328,9 +340,7 @@ export class InstanceStorageService {
       let saved: SavedPreview;
       try { saved = await this.read<SavedPreview>(`preview-${confirmation}.json`); }
       catch { throw new StorageContractError(409, 'Confirmation unavailable or consumed'); }
-      if (saved.generation !== this.generation) throw new StorageContractError(409, 'Instance generation changed');
-      if (saved.actor !== actor || saved.preview.instanceId !== instanceId) throw new StorageContractError(403, 'Confirmation belongs to another principal');
-      if (!Number.isFinite(Date.parse(saved.preview.expiresAt)) || Date.parse(saved.preview.expiresAt) <= Date.now()) throw new StorageContractError(409, 'Confirmation expired');
+      this.validateConfirmation(saved, instanceId, actor);
       const result: StorageCleanupResult = { version: 1, instanceId, operationId: confirmation, state: 'interrupted', deleted: [], retained: [] };
       // Consume before any side effects; never automatically replay an interrupted operation.
       await fs.rename(path.join(this.root, `preview-${confirmation}.json`), path.join(this.root, `consumed-${confirmation}.json`));
@@ -350,7 +360,7 @@ export class InstanceStorageService {
         if (!reasons.length && (busy || signal.aborted || clockChanged)) reasons = [busy || signal.aborted ? 'busy' : 'changed'];
         if (!reasons.length) {
           await authorize?.();
-          reasons = await this.executeCandidate(candidate, record, saved.fingerprints[candidate.id], signal, authorize);
+          reasons = await this.executeCandidate(candidate, record, saved.fingerprints[candidate.id], { signal, authorize });
           if (!reasons.length) result.deleted.push(candidate.id);
         }
         if (reasons.length) result.retained.push({ id: candidate.id, reasons });
