@@ -10,7 +10,13 @@ Do not merge on the earlier native results below. The held-pull lifecycle report
 reach `result: 'verified'` for the exact final source revision and its packaged app.
 Rerun the native identity test on that revision as well: earlier passes predate the
 `openChild`/`fstat` corrections and do not prove absent-child errno handling or linked
-child rejection on the current implementation. Keep the real Library ancestry/ACL
+child rejection on the current implementation. That native rerun is a hard precondition
+for claiming Darwin identity works: `identifyHeldChild` now opens children through the
+addon's `openAt` and the pinned algorithm distinguishes `ENOENT` (first-time creation and
+`.ready-v1` resume) from every other failure. The Linux-runnable
+`directoryDescriptor.native-errno.test.ts` pins the addon's shared errno-to-`code` mapping
+(`ENOENT`, `ELOOP`, non-blocking FIFO opens) for the identical C source, but it executes the
+Linux build and does not substitute for `localSetupDarwin.test.ts` on the exact head. Keep the real Library ancestry/ACL
 check and full provisioning/pairing evidence separate from the held-pull report.
 
 The S43–S50 follow-up environment is Linux without a Docker executable or a native
@@ -163,4 +169,9 @@ and root mode revalidation after awaited startup actions in unit tests. These do
 For the next full Linux provisioning run, record the runtime root mode before startup, after `startStack`,
 and after protected health succeeds; it must remain `0700`. Record actual container mounts and any entrypoint
 permission changes. The default mounts target root subdirectories (data/logs/repos), not the root itself.
-Full Linux provisioning for this invariant remains unverified where Docker is unavailable.
+A static review of the host-side `startStack` path (`scaffoldStack`, `.env` writes, identity directory creation,
+agent credential directories, `ensureNetworkAsync`/`startStackAsync` in the launcher orchestrator, and the launcher
+entrypoint) found no step that changes the root directory's own mode: every `chmod`/`mkdir` targets the `.env` file
+(`0600`), the `data`/`logs`/`repos` subdirectories, the identity data directory, or cache/credential directories, and
+the compose mounts bind `.env` and those subdirectories, never the root. This review does not replace the observation;
+full Linux provisioning for this invariant remains unverified where Docker is unavailable.

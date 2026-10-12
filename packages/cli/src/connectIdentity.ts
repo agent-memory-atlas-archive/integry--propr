@@ -1065,7 +1065,11 @@ export async function assertOwnedLocalSetupRoot(rootDir: string): Promise<void> 
     try {
       const root = fstatSync(acquired.root.fd);
       if (root.uid !== process.getuid?.()) refuse("NOT_OWNER", "the directory must be owned by the current user.");
-      if ((root.mode & 0o022) !== 0) refuse("UNSAFE_MODE", "the directory permits writes by other users; desktop runtime directories require mode 0700.");
+      // Match the desktop RootDirectoryAuthority: the runtime root must be
+      // exactly private, not merely free of group/other write bits.
+      if ((root.mode & 0o777) !== 0o700) {
+        refuse("UNSAFE_MODE", `the directory is mode 0${(root.mode & 0o777).toString(8)}; desktop runtime directories require mode 0700.`);
+      }
       await assertPlatformAuthority(acquired, process.platform, nativeConnectRootAuthorityInspector, process.getuid?.());
       const named = lstatSync(path, { bigint: true });
       if (named.isSymbolicLink() || !sameIdentity(named, fstatSync(acquired.root.fd, { bigint: true }))) {

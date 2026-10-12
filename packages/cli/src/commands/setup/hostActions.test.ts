@@ -63,6 +63,68 @@ test('Docker checks precede config errors, verify Linux containers, and honor Da
   }
 });
 
+test('a Docker-compatible CLI without an OSType field is accepted only on Linux and only when plain info succeeds', async t => {
+  const templateError = 'Error: template: info:1:2: executing "info" at <.OSType>: can\'t evaluate field OSType in type *define.Info';
+  for (const row of [
+    { os: 'linux', plainStatus: 0, status: 'ok', fallback: true },
+    { os: 'linux', plainStatus: 125, status: 'fail', fallback: true },
+    { os: 'darwin', plainStatus: 0, status: 'fail', fallback: false },
+  ]) {
+    await t.test(JSON.stringify(row), async sub => {
+      platform(sub, row.os);
+      const calls: string[][] = [];
+      orch = { dockerAsync: async (args: string[]) => {
+        calls.push(args);
+        if (args[0] === '--version') return { status: 0, stdout: 'podman version 5.0.0' };
+        if (args[0] === 'info' && args[1] === '--format') return { status: 125, stdout: '', stderr: templateError };
+        if (args[0] === 'info') return { status: row.plainStatus, stdout: row.plainStatus === 0 ? 'host:\n  os: linux' : '', stderr: row.plainStatus === 0 ? '' : 'Cannot connect to Podman' };
+        return { status: 1, stdout: '', stderr: 'unexpected' };
+      } } as unknown as OrchestratorModule;
+      configError = new Error('manifest unavailable');
+      const results: Awaited<ReturnType<typeof runChecks>>['results'] = [];
+      try {
+        await assert.rejects(runChecks({ onResult: result => results.push(result) }), configError);
+        const daemon = results.find(r => r.name === 'Docker daemon')!;
+        assert.equal(daemon.status, row.status);
+        assert.deepEqual(calls.filter(args => args[0] === 'info'), row.fallback
+          ? [['info', '--format', '{{.OSType}}'], ['info']]
+          : [['info', '--format', '{{.OSType}}']]);
+        if (row.status === 'ok') {
+          assert.match(daemon.detail, /does not report the engine OS type/);
+        } else {
+          // The original template failure stays the reported cause; a plain
+          // info retry must not reach the daemon more than once.
+          assert.match(daemon.detail, /^cannot reach the Docker daemon \(docker info failed\): Error: template:/);
+          assert.equal(daemon.detail.split('\n').length, 1);
+        }
+      } finally { configError = undefined; }
+    });
+  }
+});
+
+test('an unreachable daemon is not retried with plain info and its detail omits the home path', async t => {
+  platform(t, 'darwin');
+  const { homedir } = await import('node:os');
+  const home = homedir();
+  const calls: string[][] = [];
+  orch = { dockerAsync: async (args: string[]) => {
+    calls.push(args);
+    if (args[0] === '--version') return { status: 0, stdout: 'Docker version 27.0.0' };
+    return { status: 1, stdout: '', stderr: `failed to connect to the docker API at unix://${home}/.docker/run/docker.sock; check if the path is correct and if the daemon is running\nmore ${home}` };
+  } } as unknown as OrchestratorModule;
+  configError = new Error('manifest unavailable');
+  const results: Awaited<ReturnType<typeof runChecks>>['results'] = [];
+  try {
+    await assert.rejects(runChecks({ onResult: result => results.push(result) }), configError);
+    const daemon = results.find(r => r.name === 'Docker daemon')!;
+    assert.equal(daemon.status, 'fail');
+    assert.deepEqual(calls, [['--version'], ['info', '--format', '{{.OSType}}']]);
+    assert.ok(!daemon.detail.includes(home), daemon.detail);
+    assert.ok(!daemon.detail.includes('more'), daemon.detail);
+    assert.match(daemon.detail, /unix:\/\/~\/\.docker\/run\/docker\.sock/);
+  } finally { configError = undefined; }
+});
+
 test('missing Docker emits install and daemon guidance before a config failure', async t => {
   platform(t, 'darwin');
   const calls: string[][] = [];

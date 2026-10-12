@@ -210,6 +210,38 @@ export function configurationErrorCheck(error: string): CheckResult {
 }
 
 /** Run all checks and return the structured outcome (no printing). */
+/**
+ * Go template errors from `docker info --format {{.OSType}}` on CLIs whose
+ * info document lacks that field (for example podman-docker). A daemon that is
+ * merely unreachable does not produce a template error.
+ */
+export function isDockerInfoTemplateError(stderr: string | undefined): boolean {
+  const text = (stderr ?? "").trim();
+  if (!text) return false;
+  return /\btemplate\b|can't evaluate field|cannot evaluate field|executing "[^"]*" at <\.OSType>/i.test(text);
+}
+
+/**
+ * Bound a Docker failure to its first meaningful line, without the user's
+ * home path. Docker Desktop embeds the socket under HOME in its connection
+ * errors and diagnostics elsewhere in the project avoid leaking paths.
+ */
+export function summarizeDockerFailure(stderr: string | undefined, home: string = homedir()): string {
+  const line = (stderr ?? "")
+    .split(/\r?\n/)
+    .map(entry => entry.replace(/[\u0000-\u001f\u007f]/g, " ").trim())
+    .find(entry => entry.length > 0);
+  if (!line) return "";
+  let summary = line;
+  if (home && home !== "/") {
+    const escaped = home.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    summary = summary.replace(new RegExp(escaped, "g"), "~");
+  }
+  const limit = 200;
+  if (summary.length > limit) summary = `${summary.slice(0, limit - 1)}…`;
+  return `: ${summary}`;
+}
+
 export async function runChecks(options: RunChecksOptions = {}): Promise<ChecksOutcome> {
   const results: CheckResult[] = [];
   // Record a finalized result and notify any live presenter immediately.
@@ -244,16 +276,34 @@ export async function runChecks(options: RunChecksOptions = {}): Promise<ChecksO
   const daemon = dockerVersion.status === 0
     ? await orch.dockerAsync(["info", "--format", "{{.OSType}}"], { timeout: 10_000, signal: options.signal })
     : undefined;
-  const daemonUp = daemon?.status === 0 && daemon.stdout?.trim() === "linux";
+  let daemonUp = daemon?.status === 0 && daemon.stdout?.trim() === "linux";
+  let engineOsTypeUnreported = false;
+  if (daemon && daemon.status !== 0 && process.platform !== "darwin" && isDockerInfoTemplateError(daemon.stderr)) {
+    // Docker-compatible front-ends such as podman-docker reject the OSType
+    // template but still answer plain `docker info`. Linux previously accepted
+    // them, so keep that behavior; macOS requires Docker Desktop and stays strict.
+    const plain = await orch.dockerAsync(["info"], { timeout: 10_000, signal: options.signal });
+    if (plain.status === 0) {
+      daemonUp = true;
+      engineOsTypeUnreported = true;
+    }
+  }
   emit(
     daemonUp
-      ? { name: "Docker daemon", status: "ok", detail: "daemon is reachable", group: "Docker" }
+      ? {
+          name: "Docker daemon",
+          status: "ok",
+          detail: engineOsTypeUnreported
+            ? "daemon is reachable (this Docker-compatible CLI does not report the engine OS type; Linux containers assumed)"
+            : "daemon is reachable",
+          group: "Docker",
+        }
       : {
           name: "Docker daemon",
           status: "fail",
           detail: daemon?.status === 0
             ? "Docker must be running Linux containers"
-            : `cannot reach the Docker daemon (docker info failed)${daemon?.stderr?.trim() ? `: ${daemon.stderr.trim().slice(0, 2048)}` : ""}`,
+            : `cannot reach the Docker daemon (docker info failed)${summarizeDockerFailure(daemon?.stderr)}`,
           group: "Docker",
           fix: process.platform === "darwin"
             ? "Open Docker Desktop, wait for the engine to start, and retry. Check the selected Docker context if it still fails."

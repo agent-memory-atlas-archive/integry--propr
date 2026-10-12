@@ -351,15 +351,21 @@ test('Darwin host checks and startup surface safe actionable root refusal detail
 test('local setup authority diagnostics distinguish unsafe mode, ownership, and unavailable authority without paths', async t => {
   const directory = fixtureDirectory();
   t.after(() => rmSync(directory, { recursive: true, force: true }));
-  chmodSync(directory, 0o777);
-  await assert.rejects(assertOwnedLocalSetupRoot(directory), error => {
-    assert.ok(error instanceof ConnectRootError);
-    assert.equal(error.reason, 'UNSAFE_MODE');
-    assert.match(error.message, /require mode 0700/);
-    assert.ok(!error.message.includes(directory));
-    return true;
-  });
+  // The message promises exactly 0700, matching the desktop RootDirectoryAuthority,
+  // so a root that is merely free of group/other write bits must still be refused.
+  for (const mode of [0o777, 0o755, 0o750, 0o705]) {
+    chmodSync(directory, mode);
+    await assert.rejects(assertOwnedLocalSetupRoot(directory), error => {
+      assert.ok(error instanceof ConnectRootError);
+      assert.equal(error.reason, 'UNSAFE_MODE');
+      assert.match(error.message, /require mode 0700/);
+      assert.match(error.message, new RegExp(`mode 0${mode.toString(8)};`));
+      assert.ok(!error.message.includes(directory));
+      return true;
+    }, `mode 0${mode.toString(8)}`);
+  }
   chmodSync(directory, 0o700);
+  await assertOwnedLocalSetupRoot(directory);
   const uid = process.getuid!();
   const getuid = t.mock.method(process as NodeJS.Process & { getuid(): number }, 'getuid', () => uid + 1);
   await assert.rejects(assertOwnedLocalSetupRoot(directory), error => {
