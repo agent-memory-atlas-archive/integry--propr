@@ -4,6 +4,8 @@ import { createHash } from 'node:crypto';
 import { gzipSync, gunzipSync } from 'node:zlib';
 import { PinnedDirectory } from './privateDirectory.js';
 import { redactRecord, REDACTION_VERSION } from './redaction.js';
+import type { NativeInventory } from './providerCollector.js';
+import type { NativeLogInventory, NativeLogRoot } from './nativeLogPolicy.js';
 
 interface Statement { run(...args: unknown[]): { lastInsertRowid: number | bigint }; get(...args: unknown[]): unknown; all(...args: unknown[]): unknown[] }
 interface Database { exec(sql: string): void; prepare(sql: string): Statement; close(): void }
@@ -24,7 +26,7 @@ export interface AppendOptions {
     cursor?: { before: Cursor; after: Cursor };
     droppedBytes?: number;
 }
-interface Source { retired: number; id: string; identity: string; cursor: string; next: number; dropped: number; gaps: number; last_success: number | null; reason: string | null; protected_bytes: number; inventory_complete: number; protection: string | null }
+interface Source { retired: number; id: string; identity: string; cursor: string; next: number; dropped: number; gaps: number; last_success: number | null; reason: string | null; protected_bytes: number; diagnostic_bytes: number; inventory_complete: number; protection: string | null; native_inventory: string | null; native_details: string | null }
 interface Segment { id: number; source: string; day: string; first: number; last: number; start: number; end: number; raw: number; digest: string; data: Buffer; sealed: number; ack: number }
 export const digest = (value: string | Buffer): string => createHash('sha256').update(value).digest('hex');
 
@@ -63,10 +65,16 @@ export class ManagedLogSpool {
                 if (!(this.db.prepare('PRAGMA table_info(sources)').all() as Array<{ name: string }>).some(column => column.name === 'inventory_complete')) {
                     this.db.exec('ALTER TABLE sources ADD COLUMN inventory_complete INTEGER NOT NULL DEFAULT 0');
                 }
-                for (const [name, type] of [['retired', 'INTEGER NOT NULL DEFAULT 0'], ['native_root', 'TEXT']]) {
+                for (const [name, type] of [['retired', 'INTEGER NOT NULL DEFAULT 0'], ['native_root', 'TEXT'], ['native_inventory', 'TEXT'], ['native_details', 'TEXT']]) {
                     if (!(this.db.prepare('PRAGMA table_info(sources)').all() as Array<{ name: string }>).some(column => column.name === name)) {
                         this.db.exec(`ALTER TABLE sources ADD COLUMN ${name} ${type}`);
                     }
+                }
+                if (!(this.db.prepare('PRAGMA table_info(sources)').all() as Array<{ name: string }>).some(column => column.name === 'diagnostic_bytes')) {
+                    this.db.exec('ALTER TABLE sources ADD COLUMN diagnostic_bytes INTEGER NOT NULL DEFAULT 0');
+                    // Legacy totals include resumable state. Only classified
+                    // diagnostic evidence can seed the new capacity bound.
+                    this.db.exec(`UPDATE sources SET diagnostic_bytes=coalesce(json_extract(native_inventory,'$.diagnosticBytes'),0)`);
                 }
                 const binding = JSON.stringify({ instance, policy: this.limits });
                 this.db.prepare('INSERT OR IGNORE INTO settings VALUES (?,?)').run('binding', binding);
@@ -84,7 +92,9 @@ export class ManagedLogSpool {
         const json = JSON.stringify(identity), id = digest(json);
         let source = this.db.prepare('SELECT * FROM sources WHERE id=?').get(id) as Source | undefined;
         if (!source || source.retired) {
-            if ((this.db.prepare('SELECT count(*) AS n FROM sources WHERE retired=0').get() as { n: number }).n >= this.limits.sources) throw new Error('diagnostic source capacity');
+            // Admission metadata must remain writable when copy cursors fill.
+            const admissionMetadata = /^(?:native-state(?::|$)|native-capacity:|unmapped-native-state$)/.test(identity.source);
+            if (!admissionMetadata && (this.db.prepare('SELECT count(*) AS n FROM sources WHERE retired=0').get() as { n: number }).n >= this.limits.sources) throw new Error('diagnostic source capacity');
             this.db.prepare('INSERT INTO sources(id,identity) VALUES (?,?) ON CONFLICT(id) DO UPDATE SET retired=0').run(id, json);
             source = this.db.prepare('SELECT * FROM sources WHERE id=?').get(id) as Source;
         }
@@ -96,15 +106,47 @@ export class ManagedLogSpool {
     report(identity: LogIdentity, reason: 'buffer-capacity' | 'unsafe-source' | 'scan-limit' | 'source-replaced' | 'capture-interrupted' | 'protected-native-state' | 'ownership-unverified' | 'storage-unavailable', bytes = 0): void {
         this.atomic(() => {
             const source = this.source(identity);
-            if (reason === 'protected-native-state') this.db.prepare('UPDATE sources SET protected_bytes=?,protection=? WHERE id=?').run(bytes, reason, source.id);
+            if (reason === 'protected-native-state') this.db.prepare('UPDATE sources SET protected_bytes=?,diagnostic_bytes=?,protection=? WHERE id=?').run(bytes, bytes, reason, source.id);
             else this.gap(source, bytes, reason);
         });
     }
-    measureNativeState(identity: LogIdentity, bytes: number, complete: boolean): void {
+    measureNativeState(identity: LogIdentity, bytes: number, complete: boolean, options: { inventory?: NativeInventory; now?: number } = {}): void {
+        const { inventory, now = Date.now() } = options;
         this.atomic(() => {
             const source = this.source(identity);
-            this.db.prepare('UPDATE sources SET protected_bytes=?,protection=?,inventory_complete=? WHERE id=?')
-                .run(bytes, 'protected-native-state', Number(complete), source.id);
+            // A partial scan can only raise the known lower bound. A complete
+            // scan may release capacity, without erasing historical gaps.
+            this.db.prepare('UPDATE sources SET protected_bytes=?,diagnostic_bytes=?,protection=?,inventory_complete=?,native_inventory=? WHERE id=?')
+                .run(complete ? bytes : Math.max(bytes, source.protected_bytes),
+                    complete ? inventory?.diagnosticBytes ?? bytes : Math.max(inventory?.diagnosticBytes ?? bytes, source.diagnostic_bytes),
+                    'protected-native-state', Number(complete),
+                    inventory ? JSON.stringify({ ...inventory, measuredAt: now, complete }) : null, source.id);
+        });
+    }
+    recordNativeInventory(root: NativeLogRoot, inventory: NativeLogInventory): NativeLogInventory {
+        return this.atomic(() => {
+            const source = this.source({ provider: root.provider, agent: root.agent, source: `native-capacity:${digest(root.root)}` });
+            const previous = source.native_details ? JSON.parse(source.native_details) as NativeLogInventory : undefined;
+            const measured: NativeLogInventory = { ...inventory, capacityBasis: 'diagnostic',
+                capacityBytesLowerBound: inventory.inventoryComplete ? inventory.bytes.diagnostic
+                    : Math.max(inventory.bytes.diagnostic, previous?.capacityBasis === 'diagnostic'
+                        ? previous.capacityBytesLowerBound ?? previous.bytes.diagnostic : previous?.bytes.diagnostic ?? 0) };
+            this.db.prepare('UPDATE sources SET native_details=? WHERE id=?').run(JSON.stringify(measured), source.id);
+            return measured;
+        });
+    }
+    /** Private operator remediation, never evidence of native disposal or backup.
+     * Serialize with measurements so the next scan starts a new lower bound.
+     * Keep cursors, gaps and unacknowledged segments intact. */
+    resetNativeCapacity(id: string): void {
+        if (process.env.PROPR_MANAGED_LOGS !== '1') throw new DiagnosticPolicyError('native capacity reset disabled');
+        this.atomic(() => {
+            const source = this.db.prepare('SELECT * FROM sources WHERE id=? AND retired=0').get(id) as Source | undefined;
+            if (!source || !/^(?:native-state(?::[a-f0-9]{64})?|native-capacity:[a-f0-9]{64})$/.test(JSON.parse(source.identity).source)) {
+                throw new DiagnosticPolicyError('unknown native capacity source');
+            }
+            this.db.prepare(`UPDATE sources SET protected_bytes=0,diagnostic_bytes=0,inventory_complete=0,protection=NULL,
+                native_inventory=NULL,native_details=NULL WHERE id=?`).run(id);
         });
     }
     /** Persist membership before collection so retirement survives worker restarts. */
@@ -121,7 +163,7 @@ export class ManagedLogSpool {
             try { fs.lstatSync(root); return; }
             catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
             const summary = digest(JSON.stringify({ ...identity, source: `native-state:${digest(root)}` }));
-            this.db.prepare(`UPDATE sources SET retired=1,protected_bytes=0,inventory_complete=1
+            this.db.prepare(`UPDATE sources SET retired=1,protected_bytes=0,diagnostic_bytes=0,inventory_complete=1
                 WHERE id=? OR (native_root=? AND json_extract(identity,'$.provider')=? AND json_extract(identity,'$.agent')=?)`)
                 .run(summary, digest(root), identity.provider, identity.agent);
             this.prune(Date.now());
@@ -204,24 +246,48 @@ export class ManagedLogSpool {
     status(): object {
         const sources = this.db.prepare('SELECT * FROM sources ORDER BY id').all() as Source[];
         return { policyVersion: 1, redactionVersion: REDACTION_VERSION, instance: this.instance, private: true, historyComplete: false,
+            disposalPolicy: process.env.PROPR_DIAGNOSTIC_DISPOSAL === 'local-only' || process.env.PROPR_DIAGNOSTIC_LOCAL_ONLY === '1' ? 'local-only-loss-accepted' : 'verified-remote-acknowledgement',
             offsiteRetentionDays: 14, limits: this.limits, sourceCapacityWarning: sources.filter(s => !s.retired).length >= this.limits.sources,
             sources: sources.map(s => ({ ...JSON.parse(s.identity), id: s.id, retired: Boolean(s.retired), nextSequence: s.next, droppedBytes: s.dropped, gaps: s.gaps,
-                inventoryComplete: Boolean(s.inventory_complete), lastSuccessfulCollection: s.last_success, reason: s.reason, protectedReason: s.protection, protectedBytes: s.protection && !s.reason && JSON.parse(s.identity).source.startsWith('native-state') ? s.protected_bytes : null, capacityWarning: s.protected_bytes >= this.limits.protectedBytes })),
+                inventoryComplete: Boolean(s.inventory_complete), lastSuccessfulCollection: s.last_success, reason: s.reason, protectedReason: s.protection, protectedBytes: s.protection && !s.reason && JSON.parse(s.identity).source.startsWith('native-state') ? s.protected_bytes : null, capacityWarning: s.diagnostic_bytes >= this.limits.protectedBytes })),
             nativeSources: {
                 rotation: 'none', growthBounded: false, inventoryComplete: false,
+                maintenance: 'unsupported-writer-lifecycle',
+                admission: { existingWritersCapped: false },
                 unmeasured: ['container-only', 'unowned', 'excluded-or-unrecognized'],
                 sources: sources.filter(s => (/^(?:native-state(?::|$)|unmapped-native-state$|shared-tmp-claude-logs$)/).test(JSON.parse(s.identity).source))
                     .map(s => ({ ...JSON.parse(s.identity), protected: true, growthBounded: false,
+                        inventory: s.native_inventory ? JSON.parse(s.native_inventory) : null,
+                        capacityBytesLowerBound: s.diagnostic_bytes,
+                        capacityBasis: 'diagnostic',
                         measurement: s.protection && !s.reason && JSON.parse(s.identity).source.startsWith('native-state') ? 'allowlisted-files-only' : 'unknown',
                         measuredBytes: s.protection && !s.reason && JSON.parse(s.identity).source.startsWith('native-state') ? s.protected_bytes : null })),
+            },
+            nativeMaintenance: {
+                rotation: 'unsupported', growthBounded: false, disposal: 'protected',
+                admission: 'new-launches-only', existingWritersCapped: false,
+                coverage: 'explicit-instance-owned-roots-only',
+                sources: sources.filter(s => s.native_details).map(s => ({ ...JSON.parse(s.identity),
+                    ...JSON.parse(s.native_details!), protected: true, growthBounded: false })),
             },
             spool: this.db.prepare('SELECT count(*) AS segments,coalesce(sum(length(data)),0) AS bytes FROM segments').get() };
     }
     assertCapacity(): void {
-        const row = this.db.prepare('SELECT coalesce(sum(protected_bytes),0) AS bytes,max(protected_bytes) AS largest FROM sources').get() as { bytes: number; largest: number };
-        const count = (this.db.prepare('SELECT count(*) AS n FROM sources WHERE retired=0').get() as { n: number }).n;
-        if (count >= this.limits.sources) throw new Error('managed diagnostics: source capacity; operator action required');
-        if (row.largest >= this.limits.protectedBytes || row.bytes >= 4 * this.limits.protectedBytes) throw new Error('managed diagnostics: protected native state capacity; operator action required');
+        const sources = this.db.prepare('SELECT * FROM sources WHERE retired=0').all() as Source[];
+        const roots = new Map<string, number>();
+        for (const source of sources) {
+            const rootIdentity = source.native_inventory ? (JSON.parse(source.native_inventory) as NativeInventory).rootIdentity : source.id;
+            roots.set(rootIdentity, Math.max(roots.get(rootIdentity) ?? 0, source.diagnostic_bytes));
+        }
+        const bytes = [...roots.values()];
+        if (bytes.some(value => value >= this.limits.protectedBytes) || bytes.reduce((sum, value) => sum + value, 0) >= 4 * this.limits.protectedBytes) throw new Error('managed diagnostics: protected native state capacity; operator action required; after storage remediation use private CLI reset-native-capacity (docs/operations/managed-diagnostics.md)');
+    }
+    assertFilesystemCapacity(directory: PinnedDirectory = this.dir): void {
+        const stat = fs.statfsSync(`/proc/self/fd/${directory.fd}`, { bigint: true });
+        // Dynamic-inode filesystems report files=ffree=0 without exhaustion.
+        if (stat.bavail * stat.bsize < BigInt(this.limits.spoolBytes) || (stat.files > 0n && stat.ffree === 0n)) {
+            throw new Error('managed diagnostics: filesystem capacity; operator action required');
+        }
     }
     exportOne(): { manifest: object; data: Buffer; id: number; digest: string } | null {
         return this.atomic(() => {
@@ -249,6 +315,38 @@ export class ManagedLogSpool {
             this.db.prepare('INSERT OR REPLACE INTO settings VALUES (?,?)').run('lastAck', JSON.stringify({ id, sha256 }));
             this.db.prepare('UPDATE segments SET ack=1 WHERE id=?').run(id);
             this.prune(Date.now());
+        });
+    }
+    discardLocal(id: number, sha256: string): void {
+        if (process.env.PROPR_MANAGED_LOGS !== '1' || process.env.PROPR_DIAGNOSTIC_LOCAL_ONLY !== '1') {
+            throw new Error('local-only diagnostic disposal disabled');
+        }
+        this.atomic(() => {
+            const segment = this.db.prepare('SELECT * FROM segments WHERE id=? AND digest=? AND sealed=1 AND ack=0').get(id, sha256) as Segment | undefined;
+            if (!segment) throw new Error('unknown diagnostic local disposal');
+            const source = this.db.prepare('SELECT * FROM sources WHERE id=?').get(segment.source) as Source;
+            this.gap(source, segment.raw, 'local-only-discard');
+            this.db.prepare('DELETE FROM segments WHERE id=?').run(segment.id);
+            this.prune(Date.now());
+        });
+    }
+    /** Separate OS-admin opt-in: accepting loss is not remote acknowledgement.
+     * This disposes ONLY an exact sealed collected copy, never native history. */
+    disposeLocal(id: number, sha256: string): void {
+        if (process.env.PROPR_MANAGED_LOGS !== '1' || process.env.PROPR_DIAGNOSTIC_DISPOSAL !== 'local-only') {
+            throw new Error('local-only diagnostic disposal is not enabled');
+        }
+        this.atomic(() => {
+            const s = this.db.prepare('SELECT * FROM segments WHERE id=? AND digest=? AND sealed=1').get(id, sha256) as Segment | undefined;
+            const receipt = JSON.stringify({ id, sha256 });
+            if (!s) {
+                if ((this.db.prepare('SELECT value FROM settings WHERE key=?').get('lastLocalDisposal') as { value: string } | undefined)?.value === receipt) return;
+                throw new Error('unknown local diagnostic disposal');
+            }
+            const source = this.db.prepare('SELECT * FROM sources WHERE id=?').get(s.source) as Source;
+            this.gap(source, s.raw, 'local-only-disposal');
+            this.db.prepare('DELETE FROM segments WHERE id=?').run(id);
+            this.db.prepare('INSERT OR REPLACE INTO settings VALUES (?,?)').run('lastLocalDisposal', receipt);
         });
     }
     close(): void { this.db.close(); this.dir.close(); }
