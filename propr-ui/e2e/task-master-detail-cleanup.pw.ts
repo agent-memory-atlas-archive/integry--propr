@@ -40,3 +40,49 @@ for (const width of [1333, 1584]) {
     await expect(list.locator('.task-assignee-filter-label')).toHaveText('All assignees');
   });
 }
+
+for (const width of [390, 1584, 1920]) {
+  test(`timeline and edited files share task scrolling at ${width}px`, async ({ page }) => {
+    await page.setViewportSize({ width, height: 1000 });
+    await fixture(page);
+    await page.route(`**/api/task/${selectedRun}/history`, route => route.fulfill({ json: {
+      history: [
+        detailsHistory[0],
+        ...Array.from({ length: 12 }, (_, index) => ({
+          ...detailsHistory[1],
+          metadata: { model: 'gpt-6-astra', description: `Validate withdrawal handler ${index + 1}` },
+        })),
+      ],
+      taskInfo: { title: 'Task master-detail cleanup', type: 'issue', number: 3016, repoOwner: 'integry', repoName: 'propr' },
+    } }));
+    const files = Array.from({ length: 32 }, (_, index) => ({
+      path: `src/jobs/withdrawal/handler-${index + 1}.ts`,
+      linesAdded: 12, linesRemoved: 4, status: 'modified',
+    }));
+    await page.route(`**/api/task/${selectedRun}/file-changes`, route => route.fulfill({
+      json: { files, taskId: selectedRun, lastUpdated: new Date().toISOString() },
+    }));
+    await page.goto(width === 1584 ? `/tasks?task=${selectedRun}` : `/tasks/${selectedRun}`);
+    const timeline = page.getByTestId('run-timeline-scroll');
+    const changedFiles = page.getByRole('region', { name: 'Changed files' });
+    await expect(timeline.getByTestId('run-timeline-run')).toHaveCount(8);
+    await expect(changedFiles.getByRole('button')).toHaveCount(32);
+    const owner = page.getByTestId(width < 640 ? 'task-details' : 'task-workspace-scroll');
+    for (const section of [timeline, changedFiles, page.getByTestId('task-timeline-scroll')]) {
+      const metrics = await section.evaluate(node => ({
+        height: node.clientHeight, content: node.scrollHeight, overflow: getComputedStyle(node).overflowY,
+      }));
+      expect(metrics.overflow).not.toMatch(/auto|scroll/);
+      expect(metrics.content).toBeLessThanOrEqual(metrics.height);
+    }
+    expect(await timeline.evaluate(node => node.clientHeight)).toBeGreaterThan(420);
+    await changedFiles.getByRole('button').first().scrollIntoViewIfNeeded();
+    await capture(page, `task-shared-scroll-${width}`);
+    await changedFiles.getByRole('button').last().scrollIntoViewIfNeeded();
+    const lastFile = await changedFiles.getByRole('button').last().boundingBox();
+    const ownerBox = await owner.boundingBox();
+    expect(lastFile!.y).toBeGreaterThanOrEqual(ownerBox!.y);
+    expect(lastFile!.y + lastFile!.height).toBeLessThanOrEqual(ownerBox!.y + ownerBox!.height);
+    expect(await owner.evaluate(node => node.scrollTop)).toBeGreaterThan(0);
+  });
+}

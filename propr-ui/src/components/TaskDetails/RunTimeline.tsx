@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useState } from 'react';
 import { ChevronRight, GitCommit } from 'lucide-react';
 import { WorkTypeBadge } from '../Dashboard/sectionPrimitives';
 import { ScoreBadge } from '../TaskList/ScoreBadge';
@@ -57,27 +57,12 @@ const RunResult: React.FC<{ run: TaskRunEntry; open: boolean }> = ({ run, open }
  * the execution log below follow it: the timeline is how the pane moves
  * through the task's history.
  */
-/** Room left above the open run when the list scrolls to it, so the run before it stays in sight. */
-const SCROLL_CONTEXT_PX = 40;
-
 const RunTimeline: React.FC<RunTimelineProps> = ({ runs, selectedTaskId, onSelectRun, children }) => {
   const [expanded, setExpanded] = useState(true);
-  const scrollRef = useRef<HTMLDivElement>(null);
-  const selectedRef = useRef<HTMLLIElement>(null);
 
-  // A task with many runs opens on the one shown, not on its first run. Only
-  // the list scrolls: the page around it stays where it is.
-  useEffect(() => {
-    const list = scrollRef.current;
-    const run = selectedRef.current;
-    if (!list || !run) return;
-    const offset = run.getBoundingClientRect().top - list.getBoundingClientRect().top;
-    list.scrollTop = Math.max(0, list.scrollTop + offset - SCROLL_CONTEXT_PX);
-  }, [selectedTaskId]);
-
-  // Bounded, so 50 runs scroll inside the timeline instead of pushing the files changed off the screen.
+  // Every run expands in the shared task workspace, together with the changed files.
   return (
-    <div ref={scrollRef} data-testid="run-timeline-scroll" className="scrollbar-stealth max-h-[420px] overflow-y-auto overscroll-contain pr-1">
+    <div data-testid="run-timeline-scroll" className="pr-1">
       <ol aria-label="Runs" className="relative m-0 list-none p-0" data-testid="run-timeline">
         {/* The trunk paints above the rows, so an open run's tinted row and its steps never cut it. */}
         <span aria-hidden="true" data-testid="run-timeline-trunk" className="pointer-events-none absolute bottom-3 left-[7px] top-3 z-[1] w-0.5 bg-slate-300" />
@@ -88,7 +73,7 @@ const RunTimeline: React.FC<RunTimelineProps> = ({ runs, selectedTaskId, onSelec
           // A queued run has not started, so it has no runtime to count yet.
           const waiting = run.outcome === 'waiting';
           return (
-            <li key={run.task.id} ref={selected ? selectedRef : undefined} className="relative" data-testid="run-timeline-run">
+            <li key={run.task.id} className="relative" data-testid="run-timeline-run">
               <button
                 type="button"
                 aria-current={selected || undefined}

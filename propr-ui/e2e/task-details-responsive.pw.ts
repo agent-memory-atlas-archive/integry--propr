@@ -194,25 +194,18 @@ for (const viewport of [
     await expect(taskDetails.getByRole('button', { name: 'Prompt' })).toBeVisible();
     await expect(taskDetails.getByRole('button', { name: 'Logs' })).toBeVisible();
 
-    if ((await workspace.boundingBox())!.width < 960) {
-      const metrics = await scrollRegionMetrics(workspace);
-      expect(metrics.overflowY).toBe('auto');
-      expect(metrics.scrollHeight).toBeGreaterThan(metrics.clientHeight);
-      await expectReachableWithin(page.getByText('Timeline final checkpoint'), workspace);
-      await expectReachableWithin(summarySection.getByText(/Implementation summary final marker/), workspace);
-      await expectReachableWithin(output.getByText(/Implementation log final marker/), workspace);
-      await expect(workspace.getByText('EXECUTION TRACE', { exact: true })).toBeVisible();
-    } else {
-      const timelineMetrics = await scrollRegionMetrics(timeline);
-      const outputMetrics = await scrollRegionMetrics(output);
-      expect(timelineMetrics.overflowY).toBe('auto');
-      expect(timelineMetrics.scrollHeight).toBeGreaterThan(timelineMetrics.clientHeight);
-      expect(outputMetrics.overflowY).toBe('auto');
-      expect(outputMetrics.scrollHeight).toBeGreaterThan(outputMetrics.clientHeight);
-      await expectReachableWithin(page.getByText('Timeline final checkpoint'), timeline);
-      await expectReachableWithin(summarySection.getByText(/Implementation summary final marker/), output);
-      await expectReachableWithin(output.getByText(/Implementation log final marker/), output);
+    const metrics = await scrollRegionMetrics(workspace);
+    expect(metrics.overflowY).toBe('auto');
+    expect(metrics.scrollHeight).toBeGreaterThan(metrics.clientHeight);
+    for (const section of [timeline, output]) {
+      const sectionMetrics = await scrollRegionMetrics(section);
+      expect(sectionMetrics.overflowY).not.toMatch(/auto|scroll/);
+      expect(sectionMetrics.scrollHeight).toBeLessThanOrEqual(sectionMetrics.clientHeight);
     }
+    await expectReachableWithin(page.getByText('Timeline final checkpoint'), workspace);
+    await expectReachableWithin(summarySection.getByText(/Implementation summary final marker/), workspace);
+    await expectReachableWithin(output.getByText(/Implementation log final marker/), workspace);
+    await expect(workspace.getByText('EXECUTION TRACE', { exact: true })).toBeVisible();
 
     await expect(taskDetails.getByRole('button', { name: 'Follow Up' })).toBeVisible();
 

@@ -24,7 +24,7 @@ const steps = [
 ];
 
 describe('RunTimeline', () => {
-  it('scrolls 50 runs inside a bounded list, opened on the run shown', () => {
+  it('keeps all 50 runs in the shared task scroll flow', () => {
     const many: TaskGroup = {
       ...group,
       tasks: Array.from({ length: 50 }, (_, index) => ({
@@ -33,18 +33,11 @@ describe('RunTimeline', () => {
       })),
     };
     const manyRuns = buildTaskRuns(buildTaskRow(many));
-    const top = vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function (this: HTMLElement) {
-      const run = this.closest('[data-testid="run-timeline-run"]');
-      const index = run ? [...run.parentElement!.children].indexOf(run) - 1 : 0;
-      return { top: index * 30 } as DOMRect;
-    });
     render(<RunTimeline runs={manyRuns} selectedTaskId="many-44" onSelectRun={vi.fn()}>steps</RunTimeline>);
-    top.mockRestore();
     const scroller = screen.getByTestId('run-timeline-scroll');
-    expect(scroller).toHaveClass('max-h-[420px]', 'overflow-y-auto');
+    expect(scroller.className).not.toMatch(/max-h-|overflow-y-|overscroll-/);
     expect(within(scroller).getAllByTestId('run-timeline-run')).toHaveLength(50);
-    // Run 45 is the 45th row: the list scrolls to it, keeping the run before it in sight.
-    expect(scroller.scrollTop).toBe(44 * 30 - 40);
+    expect(scroller.scrollTop).toBe(0);
   });
 
   it('lists every run oldest first, with only the run shown open over its steps', () => {
