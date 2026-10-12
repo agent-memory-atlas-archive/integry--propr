@@ -4,6 +4,22 @@ Issue #2969 changes the production wizard and shared host, not a Mac-only replic
 production wizard acceptance/zoom coverage. The Mac entry point reuses its existing packaged lifecycle driver.
 Do not alter the frozen fd4960f preview, publish, sign, notarize, deploy, or replace an installed release for this check.
 
+## Exact-head acceptance gate
+
+Do not merge on the earlier native results below. The held-pull lifecycle report must
+reach `result: 'verified'` for the exact final source revision and its packaged app.
+Rerun the native identity test on that revision as well: earlier passes predate the
+`openChild`/`fstat` corrections and do not prove absent-child errno handling or linked
+child rejection on the current implementation. Keep the real Library ancestry/ACL
+check and full provisioning/pairing evidence separate from the held-pull report.
+
+The S43–S50 follow-up environment is Linux without a Docker executable or a native
+macOS GUI session. It cannot supply S43's lifecycle/Library evidence, S46's native
+identity pass, or S48's full Linux provisioning mode observations. These gates remain
+unverified; unit tests and a skipped Darwin test do not satisfy them. For S48, retain
+mode observations at all three boundaries specified below, together with the exact
+source revision and actual container mount configuration.
+
 ## Native evidence at 7cc97e1
 
 PR #2976 comment6104149475 reports native MacBook results for exact

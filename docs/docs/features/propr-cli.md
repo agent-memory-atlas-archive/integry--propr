@@ -52,6 +52,13 @@ Setup is **safe to re-run at any time**: it re-discovers your environment and sk
 | `--no-skill` | Do not offer Agent Skill installation |
 | `--skip-remote-image-check` | Skip the slow registry round-trip that checks whether stack images already exist |
 
+`PROPR_SKIP_REMOTE_IMAGE_CHECK=1` (also `true` or `yes`) skips remote image checks.
+Its setup behavior differs by host: on **macOS**, it also disables pulls and requires
+compatible images already present in the selected Docker engine; missing or incompatible
+local images fail setup. Unset it to allow setup to pull images on macOS. On **Linux**,
+setup still pulls images with this variable set. Source-built app/UI images are checked
+locally on both hosts regardless of this setting.
+
 The full-screen wizard requires an interactive terminal. Over SSH or in shells without raw-mode support, setup falls back to line-by-line prompts automatically (or pass `--no-tui`). When stdin is not a terminal at all (piped, redirected, CI), setup cannot prompt and exits with guidance — scaffold non-interactively with `propr init stack`, edit `<root>/.env`, then run `propr start`.
 
 - `propr init stack [--root <dir>]` creates `data/`, `logs/`, `repos/`, writes `.env` from the bundled template, and auto-detects agent credential directories on the host (`~/.claude`, `~/.codex`, `~/.gemini`, `~/.config/opencode`, `~/.vibe`).

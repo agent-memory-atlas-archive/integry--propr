@@ -92,7 +92,8 @@ export function createDefaultActions(configManager?: ConfigManager, options: {
       });
     } catch (error) {
       signal?.throwIfAborted();
-      if (process.platform === "darwin" && error instanceof Error) error.message += `\nIf Docker reports a denied bind mount, review Docker Desktop Settings → Resources → File sharing for this stack directory. Grant access yourself only if intended, then retry.`;
+      if (process.platform === "darwin" && error instanceof Error
+        && /mounts? denied|(?:bind mount|mounting|mount source path)[^\n]*(?:permission denied|operation not permitted|not shared)|(?:permission denied|operation not permitted)[^\n]*(?:bind mount|mount source path)/i.test(error.message)) error.message += `\nIf Docker reports a denied bind mount, review Docker Desktop Settings → Resources → File sharing for this stack directory. Grant access yourself only if intended, then retry.`;
       throw error;
     }
     signal?.throwIfAborted();
@@ -138,6 +139,7 @@ export function createDefaultActions(configManager?: ConfigManager, options: {
         : new Set<string>();
 
       let architecture: string | undefined;
+      let architectureFailed = false;
       for (const [key, tag] of Object.entries(cfg.images)) {
         signal?.throwIfAborted();
         if (key === "docs" && !cfg.docsEnabled) continue;
@@ -145,6 +147,22 @@ export function createDefaultActions(configManager?: ConfigManager, options: {
         // Pull the shared agent image when the user selected any agent; core images
         // (api/worker/daemon/redis/…) always pull.
         if (isAgent && selected.size === 0) continue;
+
+        if (process.platform === "darwin") {
+          if (architecture === undefined && !architectureFailed) {
+            try {
+              architecture = await inspectSetupEngineArchitecture(orch, signal);
+            } catch (error) {
+              signal?.throwIfAborted();
+              architectureFailed = true;
+              onLog?.(`Cannot prepare images: ${(error as Error).message}`);
+            }
+          }
+          if (architectureFailed) {
+            (isAgent ? result.failedAgents : result.failedCore).push(tag);
+            continue;
+          }
+        }
 
         // A source validation manifest deliberately names images built into the
         // local Docker daemon.  They are never claimed to be published and must
@@ -157,7 +175,6 @@ export function createDefaultActions(configManager?: ConfigManager, options: {
           if (inspected.status === 0) {
             try {
               if (process.platform === "darwin") {
-                architecture ??= await inspectSetupEngineArchitecture(orch, signal);
                 await inspectSetupImagePlatform(orch, tag, isAgent, true, signal, architecture);
               }
               result.pulledCore.push(tag);
@@ -175,7 +192,6 @@ export function createDefaultActions(configManager?: ConfigManager, options: {
         let localPlatformVerified = false;
         if (process.platform === "darwin") {
           try {
-            architecture ??= await inspectSetupEngineArchitecture(orch, signal);
             const present = await orch.dockerAsync(["image", "inspect", tag], { signal });
             signal?.throwIfAborted();
             const skipRemote = /^(1|true|yes)$/i.test(process.env.PROPR_SKIP_REMOTE_IMAGE_CHECK ?? "");

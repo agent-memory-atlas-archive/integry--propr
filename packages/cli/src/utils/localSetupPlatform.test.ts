@@ -1,4 +1,6 @@
 import assert from 'node:assert/strict';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
 import { test } from 'node:test';
 import { localSetupSearchPath } from './localSetupPlatform.js';
 
@@ -26,4 +28,10 @@ test('Docker child environment scopes Finder discovery without mutating the host
   assert.equal(result.DOCKER_HOST, parent.DOCKER_HOST);
   assert.equal(parent.PATH, '/custom/bin:/usr/bin');
   assert.equal(dockerExecutionEnvironment(parent, 'linux'), parent);
+  const withoutHome = Object.freeze({ PATH: '/usr/bin', DOCKER_HOST: 'unix:///selected' });
+  const fallback = dockerExecutionEnvironment(withoutHome, 'darwin');
+  assert.ok(fallback.PATH.split(':').includes(join(homedir(), '.docker', 'bin')));
+  assert.equal(fallback.DOCKER_HOST, withoutHome.DOCKER_HOST);
+  assert.equal(fallback.HOME, undefined);
+  assert.equal(withoutHome.PATH, '/usr/bin');
 });

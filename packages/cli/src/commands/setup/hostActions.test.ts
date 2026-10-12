@@ -169,7 +169,7 @@ for (const cached of [true, false]) {
   });
 }
 
-test('Darwin stack hint preserves the exact typed error', async t => {
+test('Darwin unrelated stack errors preserve identity without mount guidance', async t => {
   platform(t, 'darwin');
   cfg = {} as OrchestratorConfig;
   class Conflict extends Error { code = 'STACK_INCOMPATIBLE'; }
@@ -182,7 +182,7 @@ test('Darwin stack hint preserves the exact typed error', async t => {
   await assert.rejects(createDefaultActions().startStack({ rootDir: '/tmp/root' }), error => {
     assert.equal(error, conflict);
     assert.equal(conflict.code, 'STACK_INCOMPATIBLE');
-    assert.match(conflict.message, /File sharing/);
+    assert.doesNotMatch(conflict.message, /File sharing/);
     return true;
   });
 });
@@ -304,4 +304,60 @@ test('Darwin thrown manifest errors and incompatible offline cache remain per-im
     assert.deepEqual(result.failedCore, ['redis:7']);
     assert.match(logs.join('\n'), skip ? /required linux\/arm64/ : /registry transport unavailable/);
   }
+});
+
+for (const action of ['startStack', 'replaceRunningStack'] as const) {
+  test(`Darwin ${action} limits file-sharing guidance to mount refusals`, async t => {
+    platform(t, 'darwin');
+    cfg = {} as OrchestratorConfig;
+    for (const [message, expected] of [
+      ['Failed to start api: Mounts denied: path is not shared from the host', true],
+      ['Failed to start api: error while creating mount source path: permission denied', true],
+      ['Failed to start api: bind mount operation not permitted', true],
+      ['Failed to start api: permission denied connecting to Docker socket', false],
+      ['Failed to start api: registry access denied', false],
+    ] as const) {
+      const failure = new Error(message);
+      orch = {
+        validateEnv: () => ({ ok: true, warnings: [] }),
+        ensureNetworkAsync: async () => {},
+        replaceStackContainersAsync: async () => {},
+        startStackAsync: async () => { throw failure; },
+      } as unknown as OrchestratorModule;
+      await assert.rejects(createDefaultActions()[action]!({ rootDir: '/tmp/root' }), error => {
+        assert.equal(error, failure);
+        assert.equal(failure.message.includes('File sharing'), expected);
+        return true;
+      });
+    }
+  });
+}
+
+test('Darwin architecture failure is reported once for core, source-built and selected agent images; retry probes afresh', async t => {
+  platform(t, 'darwin');
+  cfg = { images: { app: 'local/app', ui: 'local/ui', redis: 'redis:7', agent: 'agent:1', docs: 'docs:1' }, docsEnabled: false,
+    manifest: { desktopRuntime: { schemaVersion: 1, distribution: 'local' } },
+  } as unknown as OrchestratorConfig;
+  const calls: string[][] = [];
+  const logs: string[] = [];
+  orch = { dockerAsync: async (args: string[]) => { calls.push(args); return { status: 1 }; } } as unknown as OrchestratorModule;
+  const actions = createDefaultActions();
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    const result = await actions.pullImages({ rootDir: '/tmp/root', agentTypes: ['codex'], onLog: line => logs.push(line) });
+    assert.deepEqual(result, { pulledCore: [], pulledAgents: [], failedCore: ['local/app', 'local/ui', 'redis:7'], failedAgents: ['agent:1'] });
+    assert.equal(calls.length, attempt);
+    assert.deepEqual(calls.at(-1), ['info', '--format', '{{.Architecture}}']);
+    assert.equal(logs.length, attempt);
+  }
+});
+
+test('Darwin cancellation during the architecture probe does not become a cached failure', async t => {
+  platform(t, 'darwin');
+  cfg = { images: { app: 'app', redis: 'redis' }, manifest: {} } as unknown as OrchestratorConfig;
+  const controller = new AbortController();
+  const cancelled = new Error('cancelled architecture inspection');
+  let calls = 0;
+  orch = { dockerAsync: async () => { calls++; controller.abort(cancelled); return { status: 1 }; } } as unknown as OrchestratorModule;
+  await assert.rejects(createDefaultActions().pullImages({ rootDir: '/tmp/root', agentTypes: [], signal: controller.signal }), cancelled);
+  assert.equal(calls, 1);
 });

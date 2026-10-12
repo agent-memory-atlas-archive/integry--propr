@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { chmodSync, linkSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync } from 'node:fs';
+import { chmodSync, linkSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync, unlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { getOrCreatePublicInstanceIdentity, assertOwnedLocalSetupRoot } from './connectIdentity.js';
@@ -26,7 +26,11 @@ test('native Darwin local setup preserves identity and refuses linked or replace
     await assert.rejects(getOrCreatePublicInstanceIdentity(join(root, 'alias')));
     linkSync(file, join(root, 'extra-link'));
     await assert.rejects(getOrCreatePublicInstanceIdentity(data));
+    unlinkSync(join(root, 'extra-link'));
+    renameSync(file, join(data, 'identity-target'));
+    symlinkSync(join(data, 'identity-target'), file);
+    await assert.rejects(getOrCreatePublicInstanceIdentity(data), 'a symlink child must fail closed when openAt returns ELOOP');
     chmodSync(root, 0o777);
-    await assert.rejects(assertOwnedLocalSetupRoot(root));
+    await assert.rejects(assertOwnedLocalSetupRoot(root), /require mode 0700/);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });

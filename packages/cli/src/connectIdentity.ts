@@ -1053,12 +1053,27 @@ export async function readSnapshotPublicInstanceIdentity(
 
 /** Verify the native authority of a fixed desktop root before host work. */
 export async function assertOwnedLocalSetupRoot(rootDir: string): Promise<void> {
-  const path = resolve(rootDir);
-  if (realpathSync.native(path) !== path) throw new ConnectRootError();
-  const acquired = openRootNoFollow(path, process.platform);
+  const refuse = (reason: string, detail: string): never => {
+    const error = new ConnectRootError(reason);
+    error.message = `Local setup root refused: ${detail}`;
+    throw error;
+  };
   try {
-    await assertPlatformAuthority(acquired, process.platform, nativeConnectRootAuthorityInspector, process.getuid?.());
-    const named = lstatSync(path, { bigint: true });
-    if (named.isSymbolicLink() || !sameIdentity(named, fstatSync(acquired.root.fd, { bigint: true }))) throw new ConnectRootError();
-  } finally { closeAcquired(acquired); }
+    const path = resolve(rootDir);
+    if (realpathSync.native(path) !== path) refuse("NON_CANONICAL", "use a canonical directory without symlinked components.");
+    const acquired = openRootNoFollow(path, process.platform);
+    try {
+      const root = fstatSync(acquired.root.fd);
+      if (root.uid !== process.getuid?.()) refuse("NOT_OWNER", "the directory must be owned by the current user.");
+      if ((root.mode & 0o022) !== 0) refuse("UNSAFE_MODE", "the directory permits writes by other users; desktop runtime directories require mode 0700.");
+      await assertPlatformAuthority(acquired, process.platform, nativeConnectRootAuthorityInspector, process.getuid?.());
+      const named = lstatSync(path, { bigint: true });
+      if (named.isSymbolicLink() || !sameIdentity(named, fstatSync(acquired.root.fd, { bigint: true }))) {
+        refuse("NAMED_REPLACED", "the directory changed during verification; retry with a stable, owned directory.");
+      }
+    } finally { closeAcquired(acquired); }
+  } catch (error) {
+    if (error instanceof ConnectRootError && error.reason !== "INVALID_ROOT") throw error;
+    refuse("AUTHORITY_UNVERIFIED", "ownership, permissions, or ACL authority could not be verified for the directory or its ancestors. Check that the directory is accessible and its ancestry is trusted.");
+  }
 }
