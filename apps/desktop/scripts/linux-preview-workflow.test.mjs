@@ -85,3 +85,59 @@ describe('desktop Linux preview workflow', () => {
     assert.match(finalize, /test ! -e desktop-linux-preview-final\/desktop-release\.json\.sig/);
   });
 });
+
+const signedWorkflow = await readFile(
+  new URL('../../../.github/workflows/desktop-linux-signed-preview.yml', import.meta.url), 'utf8',
+);
+const signedJob = (name, next) => signedWorkflow.slice(signedWorkflow.indexOf(`\n  ${name}:`),
+  next ? signedWorkflow.indexOf(`\n  ${next}:`) : undefined);
+
+describe('protected signed RPM preview workflow', () => {
+  test('is explicitly manual and main-only with frozen source and exact run provenance', () => {
+    assert.match(signedWorkflow, /^on:\n  workflow_dispatch:/m);
+    assert.doesNotMatch(signedWorkflow, /^  (?:push|pull_request|pull_request_target|workflow_run|schedule):/m);
+    const identity = signedJob('identity', 'sign');
+    assert.match(identity, /github.ref == 'refs\/heads\/main'/);
+    assert.match(identity, /merge-base --is-ancestor "\$SOURCE_REVISION" HEAD/);
+    assert.match(identity, /run.event !== 'workflow_dispatch'/);
+    assert.match(identity, /run.path !== '.github\/workflows\/desktop-linux-preview.yml'/);
+    assert.match(identity, /run.head_branch !== 'main'/);
+    assert.match(identity, /run.conclusion !== 'success'/);
+    assert.match(identity, /run.repository.full_name !== process.env.REPOSITORY/);
+    assert.doesNotMatch(signedWorkflow, /npm ci|npm run|make_latest: true|ENABLE_UPDATES|PRODUCTION_RELEASE/);
+  });
+
+  test('confines private credentials to the protected read-only signing job and step', () => {
+    const sign = signedJob('sign', 'stage-draft');
+    assert.match(sign, /environment:\n\s+name: desktop-linux-rpm-signing/);
+    assert.match(sign, /PROPR_DESKTOP_RPM_SIGNING_AUTHORIZED/);
+    assert.match(sign, /contents: read\n\s+actions: read/);
+    assert.match(sign, /ref: \$\{\{ github.sha \}\}/);
+    assert.match(sign, /ref: \$\{\{ inputs.source_revision \}\}\n\s+path: frozen-source/);
+    assert.match(sign, /secrets.PROPR_DESKTOP_RPM_PRIVATE_KEY/);
+    assert.match(sign, /secrets.PROPR_DESKTOP_RPM_PASSPHRASE/);
+    assert.equal(signedWorkflow.match(/secrets\./g)?.length, 2);
+    assert.doesNotMatch(signedJob('identity', 'sign') + signedJob('stage-draft'), /secrets\./);
+    assert.doesNotMatch(workflow, /secrets\./);
+    assert.match(sign, /sign-bundle --signed-rpm/);
+    assert.match(sign, /manifest.workflowRunId !== process.env.UNSIGNED_RUN_ID/);
+    assert.match(sign, /name: \$\{\{ needs.identity.outputs.unsigned_artifact \}\}/);
+    assert.doesNotMatch(sign, /pattern:/);
+  });
+
+  test('stages only final signed bytes and re-verifies with public inputs on publication', () => {
+    const stage = signedJob('stage-draft', 'publish-draft');
+    const publish = signedJob('publish-draft');
+    assert.match(stage, /name: propr-desktop-rpm-signed-\$\{\{ github.run_id \}\}/);
+    assert.match(stage, /stage-draft --signed-rpm/);
+    assert.match(publish, /publish-draft --signed-rpm/);
+    for (const block of [stage, publish]) {
+      assert.match(block, /PROPR_DESKTOP_RPM_PUBLIC_KEY/);
+      assert.match(block, /PROPR_DESKTOP_RPM_FINGERPRINT/);
+      assert.match(block, /--source-directory frozen-source/);
+      assert.doesNotMatch(block, /unsigned-preview|pattern:/);
+    }
+    assert.match(publish, /name: desktop-linux-preview-publication/);
+    assert.match(publish, /PROPR_DESKTOP_LINUX_PREVIEW_PUBLICATION_AUTHORIZED/);
+  });
+});
