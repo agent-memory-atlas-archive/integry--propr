@@ -45,9 +45,9 @@ export function flushApplicationRecords(): void {
         if (!db) return;
         if (applicationLostBytes) { db.report(applicationIdentity, 'storage-unavailable', applicationLostBytes); applicationLostBytes = 0; }
         if (applicationOverflowBytes) { db.report(applicationIdentity, 'buffer-capacity', applicationOverflowBytes); applicationOverflowBytes = 0; }
-        const known = diagnosticCredentials();
-        if (known === null) db.report(applicationIdentity, 'unsafe-source', applicationBytes);
-        else if (lines.length) db.append(applicationIdentity, lines, 'jsonl', { credentials: [...configuredDiagnosticSecrets(), ...known] });
+        // Use one bounded, deduplicated context, including current environment values.
+        rememberDiagnosticCredentials(configuredDiagnosticSecrets());
+        if (lines.length) db.append(applicationIdentity, lines, 'jsonl', { credentials: diagnosticCredentials() });
     } catch { applicationLostBytes = Math.min(Number.MAX_SAFE_INTEGER, applicationLostBytes + applicationBytes); diagnosticsFailure(); }
     finally { applicationLines = []; applicationBytes = 0; }
 }

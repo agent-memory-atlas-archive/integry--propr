@@ -1,16 +1,21 @@
 export const REDACTION_VERSION = 1;
 const rememberedCredentials = new Set<string>();
-let rememberedBytes = 0, credentialOverflow = false;
-/** Process-local only; learned credentials never enter status or manifests. */
+let rememberedBytes = 0;
+const credentialCountLimit = 512, credentialBytesLimit = 512 * 1024;
+/** Process-local, insertion-ordered cache; evict old credentials rather than
+ * disabling application capture. Learned values never enter status or manifests. */
 export function rememberDiagnosticCredentials(values: readonly string[]): void {
     for (const value of values) {
-        if (value.length < 8 || rememberedCredentials.has(value)) continue;
-        if (rememberedCredentials.size >= 512 || rememberedBytes + value.length > 512 * 1024) { credentialOverflow = true; return; }
+        if (value.length < 8 || value.length > credentialBytesLimit || rememberedCredentials.has(value)) continue;
+        while (rememberedCredentials.size >= credentialCountLimit || rememberedBytes + value.length > credentialBytesLimit) {
+            const oldest = rememberedCredentials.values().next().value!;
+            rememberedCredentials.delete(oldest); rememberedBytes -= oldest.length;
+        }
         rememberedCredentials.add(value); rememberedBytes += value.length;
     }
 }
-export function diagnosticCredentials(): readonly string[] | null {
-    return credentialOverflow ? null : [...rememberedCredentials];
+export function diagnosticCredentials(): readonly string[] {
+    return [...rememberedCredentials];
 }
 const authField = /auth|token|cookie|password|passwd|secret|credential|private.?key|api.?key|^headers$/i;
 const known = /(?:\b(?:sk-[a-zA-Z0-9_-]{8,}|gh[pousr]_[a-zA-Z0-9_]{8,}|github_pat_[a-zA-Z0-9_]+|AIza[a-zA-Z0-9_-]{20,})\b|\beyJ[a-zA-Z0-9_-]+\.[a-zA-Z0-9_-]+\.[a-zA-Z0-9_-]+)/g;

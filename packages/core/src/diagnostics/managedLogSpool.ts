@@ -159,7 +159,8 @@ export class ManagedLogSpool {
     private appendRecords(source: Source, records: Array<{ text: string; seq: number; size: number }>, now: number): void {
         const day = new Date(now).toISOString().slice(0, 10);
         let segment = this.db.prepare('SELECT * FROM segments WHERE source=? ORDER BY id DESC LIMIT 1').get(source.id) as Segment | undefined;
-        if (segment && (segment.sealed || segment.day !== day || segment.last !== records[0].seq - 1)) segment = undefined;
+        // Rejected inputs consume sequence numbers, but not segment capacity.
+        if (segment && (segment.sealed || segment.day !== day || segment.last >= records[0].seq)) segment = undefined;
         let index = 0;
         while (index < records.length) {
             const parts: Buffer[] = segment ? [gunzipSync(segment.data, { maxOutputLength: this.limits.segmentBytes })] : [];

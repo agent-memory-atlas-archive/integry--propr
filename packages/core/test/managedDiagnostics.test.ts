@@ -656,3 +656,76 @@ test('executor and native goal admission retain create and final argument secret
         }
     } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
+
+test('credential cache evicts at count and byte bounds without disabling application capture', () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'diagnostic-credential-eviction-'));
+    try {
+        const result = spawnSync(process.execPath, ['--import', 'tsx', '--input-type=module', '-e', `
+            import assert from 'node:assert/strict';
+            import { gunzipSync } from 'node:zlib';
+            import { rememberDiagnosticCredentials, diagnosticCredentials } from './packages/core/src/diagnostics/redaction.ts';
+            import { captureApplicationRecord, flushApplicationRecords, managedDiagnostics } from './packages/core/src/diagnostics/managedLogRuntime.ts';
+            const values = Array.from({length:600}, (_, n) => 'opaque-' + String(n).padStart(9, '0'));
+            rememberDiagnosticCredentials(values);
+            assert.deepEqual(diagnosticCredentials(), values.slice(88));
+            rememberDiagnosticCredentials([values[599]]);
+            assert.equal(diagnosticCredentials().length, 512);
+            const checkCapture = (message) => {
+                captureApplicationRecord(JSON.stringify({message})); flushApplicationRecords();
+                const db = managedDiagnostics(), item = db.exportOne(); assert.ok(item);
+                assert.equal(JSON.parse(gunzipSync(item.data).toString()).message, 'x [REDACTED] [REDACTED]');
+                assert.equal(db.status().sources.find(s => s.source === 'pino').gaps, 0);
+                db.acknowledge(item.id, item.digest);
+            };
+            checkCapture('x ' + values[599] + ' environment-canary');
+            const large = Array.from({length:6}, (_, n) => String(n) + 'z'.repeat(100 * 1024 - 1));
+            rememberDiagnosticCredentials(large);
+            assert.deepEqual(diagnosticCredentials(), large.slice(1));
+            rememberDiagnosticCredentials(['q'.repeat(512 * 1024 + 1), 'newest-opaque-canary']);
+            assert.ok(diagnosticCredentials().includes('newest-opaque-canary'));
+            assert.ok(diagnosticCredentials().reduce((n, v) => n + v.length, 0) <= 512 * 1024);
+            checkCapture('x newest-opaque-canary environment-canary');
+            managedDiagnostics().close();
+        `], { encoding: 'utf8', timeout: 10000, env: { ...process.env, PROPR_MANAGED_LOGS: '1', PROPR_INSTANCE_ID: 'tenant-a', PROPR_DIAGNOSTIC_ROOT: path.join(root, 'spool'), TEST_DIAGNOSTIC_SECRET: 'environment-canary' } });
+        assert.equal(result.status, 0, result.stderr);
+    } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+for (const format of ['text', 'jsonl'] as const) test(`${format} rejected records leave sequence holes without fragmenting segments`, () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'diagnostic-sequence-holes-'));
+    const spool = new ManagedLogSpool(path.join(root, 'spool'), 'tenant-a', { segments: 4 });
+    const accepted = (n: number) => format === 'text' ? `INFO ok-${n}` : JSON.stringify({ message: `INFO ok-${n}` });
+    try {
+        // Exercise holes both inside a batch and across separate collection calls.
+        spool.append(identity, Array.from({ length: 10 }, (_, n) => [accepted(n), 'plain']).flat(), format, { credentials: [] });
+        for (let n = 10; n < 20; n++) {
+            spool.append(identity, [accepted(n)], format, { credentials: [] });
+            spool.append(identity, ['plain'], format, { credentials: [] });
+        }
+        const status = spool.status() as any;
+        assert.equal(status.spool.segments, 1);
+        assert.ok(status.spool.bytes < spool.limits.spoolBytes / 100);
+        assert.equal(status.sources[0].gaps, 20);
+        assert.equal(status.sources[0].droppedBytes, 20 * 6);
+        assert.equal(status.sources[0].reason, 'unsafe-record');
+        assert.equal(status.sources[0].nextSequence, 41);
+        const exported = spool.exportOne()!;
+        assert.equal((exported.manifest as any).firstSequence, 1);
+        assert.equal((exported.manifest as any).lastSequence, 39);
+        assert.deepEqual(gunzipSync(exported.data).toString().trim().split('\n').map(line => JSON.parse(line).message),
+            Array.from({ length: 20 }, (_, n) => `INFO ok-${n}`));
+        // Export seals the segment: later holes must not let a writer mutate it.
+        spool.append(identity, ['plain', accepted(20)], format, { credentials: [] });
+        const repeated = spool.exportOne()!;
+        assert.equal(repeated.id, exported.id);
+        assert.equal(repeated.digest, exported.digest);
+        assert.deepEqual(repeated.data, exported.data);
+        assert.equal((repeated.manifest as any).lastSequence, 39);
+        assert.throws(() => spool.acknowledge(exported.id, 'wrong'));
+        spool.acknowledge(exported.id, exported.digest);
+        const remaining = drain(spool);
+        assert.equal(remaining.length, 1);
+        assert.equal(JSON.parse(remaining[0].text).message, 'INFO ok-20');
+        assert.equal(remaining[0].manifest.firstSequence, 42);
+    } finally { spool.close(); fs.rmSync(root, { recursive: true, force: true }); }
+});
