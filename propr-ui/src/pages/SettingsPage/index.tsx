@@ -18,6 +18,7 @@ import VisualPreviewAuthSection from './VisualPreviewAuthSection';
 import DesktopNotificationSettingsSection from './DesktopNotificationSettingsSection';
 import VoiceSettingsSection from './VoiceSettingsSection';
 import { useDesktop } from '../../desktop/DesktopContext';
+import InstanceStorageSection from './InstanceStorageSection';
 import ManagedPreviewStorageSection from './ManagedPreviewStorageSection';
 import SettingsNavigation, { type SettingsNavigationSection } from './SettingsNavigation';
 import McpServerSection from './McpServerSection';
@@ -310,6 +311,12 @@ const AdminSettingsPage: React.FC = () => {
       category: 'integrations',
       searchText: 'agent runtime packages dependencies install catalog container image environment build',
       content: <AgentRuntimePackagesSection />
+    },
+    {
+      id: 'instance-storage',
+      category: 'integrations',
+      searchText: 'instance database export inventory repository cache cleanup storage self hosted admin backup',
+      content: <InstanceStorageSection />
     },
     {
       id: 'visual-preview-uploads',

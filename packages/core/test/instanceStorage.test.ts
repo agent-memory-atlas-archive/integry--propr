@@ -414,3 +414,25 @@ test('admission waits past the former deadline without stealing an exclusive gat
   assert.equal(ran, true);
   assert.equal(await a.busy(), false);
 });
+
+test('repository inventory has safe names, actual cache sizes, protections and bounded scan coalescing', async t => {
+  const f = await serviceFixture(t);
+  const [first, second] = await Promise.all([f.service.inventory(), f.service.inventory()]);
+  assert.deepEqual(first, second);
+  assert.equal(first.repositories[0].name, 'owner/repo');
+  assert.ok(first.repositories[0].estimatedBytes! > 0);
+  assert.equal(first.state, 'partial');
+  assert.equal(JSON.stringify(first).includes(f.root), false);
+  assert.ok(first.lastUseAt);
+});
+
+test('demotion after slow Git proof restores quarantine and prevents deletion', async t => {
+  const f = await serviceFixture(t);
+  const preview = await f.service.preview(f.instanceId, ['repository_caches'], 'admin');
+  let checks = 0;
+  await assert.rejects(f.service.execute(f.instanceId, preview.confirmation, 'admin', async () => {
+    if (++checks === 3) throw new Error('Admin demoted during remote proof');
+  }), /demoted/);
+  assert.equal(await fs.readFile(path.join(f.clone, 'public'), 'utf8'), 'published sentinel');
+  await assert.rejects(f.service.execute(f.instanceId, preview.confirmation, 'admin'));
+});

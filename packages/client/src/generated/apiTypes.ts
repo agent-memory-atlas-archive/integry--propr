@@ -175,6 +175,47 @@ export interface Health {
   status: "ok";
 }
 
+export interface InstanceDatabaseExport {
+  version: 1;
+  instanceId: string;
+  generation: string;
+  operationId: string;
+  state: "running" | "ready" | "failed" | "redeemed";
+  expiresAt: string;
+  scope: "customer_database";
+  sizeBytes?: number;
+  sha256?: string;
+  schemaVersion?: number;
+  migration?: string | null;
+}
+
+export interface InstanceDatabaseExportRequest {
+  instanceId: string;
+  generation: string;
+}
+
+export interface InstanceRepositoryInventory {
+  version: 1;
+  instanceId: string;
+  state: "complete" | "partial" | "unknown" | "unsupported";
+  observedAt: string;
+  lastUseAt: string | null;
+  repositories: Array<{
+    id: string;
+    name: string;
+    category: "database_config" | "repository_caches" | "worktrees" | "salvage" | "logs_artifacts" | "provider_credentials" | "task_history";
+    estimatedBytes: number | null;
+    protectedReasons: Array<"busy" | "unknown_use" | "recent_use" | "unknown_ownership" | "unsafe_path" | "private_work" | "worktrees" | "local_history" | "salvage" | "remote_unavailable" | "unknown_git_state" | "changed" | "unsupported">;
+  }>;
+}
+
+export interface InstanceStorageCapabilities {
+  version: 1;
+  instanceId: string;
+  generation: string;
+  features: Array<"repository_inventory" | "repository_cleanup" | "database_export">;
+}
+
 export interface InstanceStorageExecuteRequest {
   instanceId: string;
   confirmation: string;
@@ -204,6 +245,7 @@ export interface InstanceStoragePreview {
   impact: string;
   candidates: Array<{
     id: string;
+    name?: string;
     category: "database_config" | "repository_caches" | "worktrees" | "salvage" | "logs_artifacts" | "provider_credentials" | "task_history";
     estimatedBytes: number | null;
     protectedReasons: Array<"busy" | "unknown_use" | "recent_use" | "unknown_ownership" | "unsafe_path" | "private_work" | "worktrees" | "local_history" | "salvage" | "remote_unavailable" | "unknown_git_state" | "changed" | "unsupported">;
@@ -432,6 +474,12 @@ export interface TaskSummary {
 export interface DeleteTaskQuery {
   /** Delete even when the task is still active. */
   force?: "true" | "false";
+}
+
+/** Query parameters of `getInstanceDatabaseExport`. */
+export interface InstanceDatabaseExportQuery {
+  instanceId: string;
+  generation: string;
 }
 
 /** Query parameters of `getInstanceStorageCleanupResult`. */

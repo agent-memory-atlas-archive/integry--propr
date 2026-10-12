@@ -29,8 +29,8 @@ info:
     name: Apache-2.0
     identifier: Apache-2.0
   x-route-coverage:
-    total: 282
-    documented: 47
+    total: 288
+    documented: 53
     undocumented: 235
 servers:
   - url: "{origin}"
@@ -3839,6 +3839,32 @@ paths:
       x-propr-auth: member
       x-undocumented: true
       x-legacy-error: true
+  /api/instance/storage/v1/capabilities:
+    get:
+      operationId: getInstanceStorageCapabilities
+      summary: Negotiate native instance storage capabilities and process generation.
+      description: Requires the `instance.manage_settings` instance permission.
+      tags:
+        - System
+      security:
+        - sessionCookie: []
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Instance administrator capabilities; no Connect subscription required.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InstanceStorageCapabilities"
+        "401":
+          $ref: "#/components/responses/LegacyUnauthorized"
+        "403":
+          $ref: "#/components/responses/LegacyForbidden"
+        default:
+          $ref: "#/components/responses/LegacyUnexpectedError"
+      x-propr-auth: member
+      x-propr-permission: instance.manage_settings
+      x-legacy-error: true
   /api/instance/storage/v1/cleanup/execute:
     post:
       operationId: executeInstanceStorageCleanup
@@ -3964,6 +3990,178 @@ paths:
       x-propr-auth: member
       x-propr-permission: instance.manage_settings
       x-legacy-error: true
+  /api/instance/storage/v1/exports:
+    post:
+      operationId: startInstanceDatabaseExport
+      summary: Start a private asynchronous customer database snapshot.
+      description: Requires the `instance.manage_settings` instance permission.
+      tags:
+        - System
+      security:
+        - sessionCookie: []
+        - bearerAuth: []
+      parameters:
+        - name: X-ProPR-Storage
+          in: header
+          required: true
+          description: Must equal 1.
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/InstanceDatabaseExportRequest"
+      responses:
+        "202":
+          description: Actor-bound expiring export job.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InstanceDatabaseExport"
+        "401":
+          $ref: "#/components/responses/LegacyUnauthorized"
+        "403":
+          $ref: "#/components/responses/LegacyForbidden"
+        default:
+          $ref: "#/components/responses/LegacyUnexpectedError"
+      x-propr-auth: member
+      x-propr-permission: instance.manage_settings
+      x-legacy-error: true
+  /api/instance/storage/v1/exports/{operationId}:
+    get:
+      operationId: getInstanceDatabaseExport
+      summary: Read the initiating administrator’s export status.
+      description: Requires the `instance.manage_settings` instance permission.
+      tags:
+        - System
+      security:
+        - sessionCookie: []
+        - bearerAuth: []
+      parameters:
+        - name: operationId
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: instanceId
+          in: query
+          required: true
+          schema:
+            type: string
+        - name: generation
+          in: query
+          required: true
+          schema:
+            type: string
+            format: uuid
+            pattern: ^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$
+      responses:
+        "200":
+          description: Export state, digest, size and schema version.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InstanceDatabaseExport"
+        "401":
+          $ref: "#/components/responses/LegacyUnauthorized"
+        "403":
+          $ref: "#/components/responses/LegacyForbidden"
+        default:
+          $ref: "#/components/responses/LegacyUnexpectedError"
+      x-propr-query-type: InstanceDatabaseExportQuery
+      x-propr-auth: member
+      x-propr-permission: instance.manage_settings
+      x-legacy-error: true
+  /api/instance/storage/v1/exports/{operationId}/cancel:
+    post:
+      operationId: cancelInstanceDatabaseExport
+      summary: Abort and discard an administrator’s private export.
+      description: Requires the `instance.manage_settings` instance permission.
+      tags:
+        - System
+      security:
+        - sessionCookie: []
+        - bearerAuth: []
+      parameters:
+        - name: operationId
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: X-ProPR-Storage
+          in: header
+          required: true
+          description: Must equal 1.
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/InstanceDatabaseExportRequest"
+      responses:
+        "200":
+          description: Export discarded.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/JsonObject"
+        "401":
+          $ref: "#/components/responses/LegacyUnauthorized"
+        "403":
+          $ref: "#/components/responses/LegacyForbidden"
+        default:
+          $ref: "#/components/responses/LegacyUnexpectedError"
+      x-propr-auth: member
+      x-propr-permission: instance.manage_settings
+      x-legacy-error: true
+  /api/instance/storage/v1/exports/{operationId}/download:
+    post:
+      operationId: downloadInstanceDatabaseExport
+      summary: Redeem an export once using current instance-admin authority.
+      description: Requires the `instance.manage_settings` instance permission.
+      tags:
+        - System
+      security:
+        - sessionCookie: []
+        - bearerAuth: []
+      parameters:
+        - name: operationId
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: X-ProPR-Storage
+          in: header
+          required: true
+          description: Must equal 1.
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/InstanceDatabaseExportRequest"
+      responses:
+        "200":
+          description: Integrity-checked SQLite snapshot; attachment, no-store.
+          content:
+            application/vnd.sqlite3:
+              schema:
+                type: string
+        "401":
+          $ref: "#/components/responses/LegacyUnauthorized"
+        "403":
+          $ref: "#/components/responses/LegacyForbidden"
+        default:
+          $ref: "#/components/responses/LegacyUnexpectedError"
+      x-propr-auth: member
+      x-propr-permission: instance.manage_settings
+      x-legacy-error: true
   /api/instance/storage/v1/policy:
     get:
       operationId: getInstanceStoragePolicy
@@ -4025,6 +4223,32 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/InstanceStoragePolicy"
+        "401":
+          $ref: "#/components/responses/LegacyUnauthorized"
+        "403":
+          $ref: "#/components/responses/LegacyForbidden"
+        default:
+          $ref: "#/components/responses/LegacyUnexpectedError"
+      x-propr-auth: member
+      x-propr-permission: instance.manage_settings
+      x-legacy-error: true
+  /api/instance/storage/v1/repositories:
+    get:
+      operationId: getInstanceRepositoryInventory
+      summary: Read a bounded partial repository storage inventory with protection reasons.
+      description: Requires the `instance.manage_settings` instance permission.
+      tags:
+        - System
+      security:
+        - sessionCookie: []
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Safe identifiers and sizes; no host paths or contents.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InstanceRepositoryInventory"
         "401":
           $ref: "#/components/responses/LegacyUnauthorized"
         "403":
@@ -8005,6 +8229,174 @@ components:
         - status
       additionalProperties: false
       description: Liveness probe result.
+    InstanceDatabaseExport:
+      type: object
+      properties:
+        version:
+          type: number
+          const: 1
+        instanceId:
+          type: string
+        generation:
+          type: string
+          format: uuid
+          pattern: ^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$
+        operationId:
+          type: string
+          format: uuid
+          pattern: ^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$
+        state:
+          type: string
+          enum:
+            - running
+            - ready
+            - failed
+            - redeemed
+        expiresAt:
+          type: string
+          format: date-time
+        scope:
+          type: string
+          const: customer_database
+        sizeBytes:
+          type: number
+          minimum: 0
+        sha256:
+          type: string
+        schemaVersion:
+          type: integer
+        migration:
+          type:
+            - string
+            - "null"
+      required:
+        - version
+        - instanceId
+        - generation
+        - operationId
+        - state
+        - expiresAt
+        - scope
+      additionalProperties: false
+    InstanceDatabaseExportRequest:
+      type: object
+      properties:
+        instanceId:
+          type: string
+        generation:
+          type: string
+          format: uuid
+          pattern: ^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$
+      required:
+        - instanceId
+        - generation
+      additionalProperties: false
+    InstanceRepositoryInventory:
+      type: object
+      properties:
+        version:
+          type: number
+          const: 1
+        instanceId:
+          type: string
+        state:
+          type: string
+          enum:
+            - complete
+            - partial
+            - unknown
+            - unsupported
+        observedAt:
+          type: string
+          format: date-time
+        lastUseAt:
+          anyOf:
+            - type: string
+              format: date-time
+            - type: "null"
+        repositories:
+          type: array
+          items:
+            type: object
+            properties:
+              id:
+                type: string
+              name:
+                type: string
+              category:
+                type: string
+                enum:
+                  - database_config
+                  - repository_caches
+                  - worktrees
+                  - salvage
+                  - logs_artifacts
+                  - provider_credentials
+                  - task_history
+              estimatedBytes:
+                anyOf:
+                  - type: number
+                    minimum: 0
+                  - type: "null"
+              protectedReasons:
+                type: array
+                items:
+                  type: string
+                  enum:
+                    - busy
+                    - unknown_use
+                    - recent_use
+                    - unknown_ownership
+                    - unsafe_path
+                    - private_work
+                    - worktrees
+                    - local_history
+                    - salvage
+                    - remote_unavailable
+                    - unknown_git_state
+                    - changed
+                    - unsupported
+            required:
+              - id
+              - name
+              - category
+              - estimatedBytes
+              - protectedReasons
+            additionalProperties: false
+      required:
+        - version
+        - instanceId
+        - state
+        - observedAt
+        - lastUseAt
+        - repositories
+      additionalProperties: false
+    InstanceStorageCapabilities:
+      type: object
+      properties:
+        version:
+          type: number
+          const: 1
+        instanceId:
+          type: string
+        generation:
+          type: string
+          format: uuid
+          pattern: ^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$
+        features:
+          type: array
+          items:
+            type: string
+            enum:
+              - repository_inventory
+              - repository_cleanup
+              - database_export
+      required:
+        - version
+        - instanceId
+        - generation
+        - features
+      additionalProperties: false
     InstanceStorageExecuteRequest:
       type: object
       properties:
@@ -8095,6 +8487,8 @@ components:
             type: object
             properties:
               id:
+                type: string
+              name:
                 type: string
               category:
                 type: string

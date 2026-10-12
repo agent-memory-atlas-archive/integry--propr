@@ -199,3 +199,111 @@ execution reach the real isolated instance API. Chromium (`CHROMIUM_PATH` may
 select it) and OpenSSL are required. No live relay, account, or customer storage
 is used. The browser checks default OFF/24h, explicit opt-in, confirmation,
 unsupported-origin behavior, and generates focused transient preview evidence.
+
+## Native instance data management (#3013)
+
+**Settings → Integrations → Instance data** is available to current instance
+administrators with `instance.manage_settings` on self-hosted and Hosted deployments.
+No Fleet subscription, Connect session, Connect account ownership, repository assignment
+or installation membership establishes this authority. Connect may use the same instance
+contract with an already authenticated instance principal; it cannot manufacture the role.
+The server re-resolves authorization from the instance authority at request time, after
+slow inventory/proof work, before deletion, during export execution, on status requests
+and at download redemption. A demotion during Git proof restores the quarantined cache.
+Cleanup confirmations and results also expire and are bound to the process generation;
+restarting requires a new preview.
+
+The following endpoints extend v1 additively. First request `/capabilities`; require the
+named feature and keep both `instanceId` and `generation`. A missing endpoint, unsupported
+feature, offline runtime or authorization failure is unavailable, **never an empty or
+zero-byte inventory**. Existing v1 clients remain compatible.
+
+| Method/path (under `/api/instance/storage/v1`) | Contract |
+| --- | --- |
+| GET `/capabilities` | `{version:1,instanceId,generation,features}`; features include `repository_inventory`, `repository_cleanup`, `database_export` |
+| GET `/repositories` | `RepositoryStorageInventory`; safe names/IDs, categorized cache/worktree bytes, protection reasons and conservative instance-wide last-use timestamp |
+| POST `/exports` | `{instanceId,generation}` → 202 `DatabaseExportStatus` |
+| GET `/exports/:operationId?instanceId=…&generation=…` | Initiating actor's status, expiry, digest, size, SQLite `user_version` and latest Knex migration |
+| POST `/exports/:operationId/download` | `{instanceId,generation}` → single-use SQLite attachment; session/bearer authority required, no bearer URL |
+| POST `/exports/:operationId/cancel` | `{instanceId,generation}` → abort, remove private artifact and release admission |
+
+POSTs use the same strict JSON/`X-ProPR-Storage: 1` preflight contract as cleanup.
+All storage responses use `Cache-Control: no-store`. Download redemption consumes the job
+before opening its file; simultaneous attempts, replay, a different actor, instance or
+process generation cannot redeem it. Interrupted downloads require a new export. No
+endpoint accepts a source/destination path, provider home, remote URL, role or actor.
+The native UI clears pending confirmations on account/authority errors and verifies the
+current browser actor and selected instance before actions.
+
+Inventory uses the existing cache registry and Git proofs, with at most ten registered
+repositories per rotating batch. Configured on-disk clones without current registration
+are reported as unknown ownership. Worktree observations are always protected. Batches
+are explicitly partial, coalesced for 60 seconds and carry the shared instance-wide use
+clock rather than claiming per-repository filesystem timestamps prove inactivity. A
+refresh can advance to another batch after the observation interval. Inventory, manual
+previews and cleanup have one in-process admission and the existing cross-process Git
+barrier, with a 60-second cooperative proof deadline. The registry, queue admissions,
+clone/worktree lifecycle and automatic cleanup continue to use that same barrier.
+
+### Database scope and restore semantics
+
+The download is a real SQLite customer database produced with `better-sqlite3.backup()`
+(the SQLite online backup API), so committed WAL data participates in a coherent snapshot
+while local writers continue. It is not a raw DB-file copy or a redacted empty schema.
+The private copy is integrity/foreign-key checked and described by SHA-256, file size,
+SQLite schema marker and latest application migration. Export runs in a disposable worker
+so backup, integrity checking and compaction do not block the API event loop.
+
+| Data | Export treatment |
+| --- | --- |
+| Tasks, plans, goals, history, repository metadata, memberships and customer settings | Preserved in the database |
+| Encrypted GitHub grants and visual-preview OAuth credential fields | Ciphertext preserved; never decrypted for export |
+| Agent definitions in `system_configs.agents` | Models/aliases preserved; `envVars` and provider `configPath` excluded |
+| Infrastructure `system_configs` keys | Keys prefixed `fleet`, `operator`, `routing`, `tunnel`, `connect` with separators, or secret/password/private-key/access-token/API-key names, excluded |
+| Fleet/operator environment, relay/Fleet control secrets, encryption keys, `.env`, provider homes/login files, storage-control records, repository/worktree files, Redis and external services | Not read or copied |
+
+Removed configuration is erased from the copy's pages with secure deletion and VACUUM
+before release, including SQLite free pages. As a final defense against historical logs,
+a copy containing a currently configured Fleet/relay/session/encryption/OAuth control
+secret anywhere is refused, rather than exposing it or substituting an empty database.
+Ordinary customer records and encrypted
+fields are not blanket-redacted. Customer-authored content remains private customer data
+and must be treated as sensitive by the receiving administrator. Provider-log sanitization
+belongs to core3012; this implementation does not change that writer or its files.
+
+To verify/import offline, open the downloaded database with SQLite and run
+`PRAGMA integrity_check` and `PRAGMA foreign_key_check`; inspect the migration metadata
+before running a matching ProPR runtime. Stop the target runtime before replacing its DB
+and manage target WAL/SHM through the normal offline SQLite restore procedure. Export does
+not restore filesystem configuration, Git work, provider logins, external services or the
+instance storage identity. Existing encrypted fields require the original configured
+credential-encryption secret through a separately secured operator procedure; without it,
+reauthenticate the relevant customer accounts. Export never includes that key or converts
+ciphertext to plaintext. This is not a full recoverable instance backup or an automatic
+import/reset endpoint. Off-site backups/reset remain Fleet's separate contract.
+
+### Limits, failure and restart
+
+Only one export per storage root is admitted, including across API processes. The current
+limit is 512 MiB of database pages/output, a 60-second execution deadline and five-minute
+job lifetime. Admission checks for three times the maximum output in free space to allow
+backup/compaction; an ENOSPC or integrity failure never exposes a partial download. Cancel,
+expiry and completed download terminate any worker and remove known private snapshot
+files. A failed job can be discarded immediately. The export root is private (0700), with
+0600 output, and symlink components, hardlinked/nonregular DB or sidecar files, substituted
+ancestors and substituted output inodes are refused. Cleanup only removes the fixed
+snapshot filenames, never arbitrary caller paths.
+
+A new process generation cannot access an old job. On Linux, expired artifacts are reaped
+at startup plus five minutes or the next admission only when the recorded owning PID is
+provably absent in the same PID namespace. A different namespace, still-live/reused PID, corrupt ownership record, path substitution or
+unknown file fails closed and requires operator investigation; a lock is never stolen on
+age alone. No provider credentials, ACLs, instance roles or live deployments are modified
+by these flows.
+
+Tests include a concurrent real WAL writer and offline restore/content checks, privacy
+canaries, ENOSPC admission, abort/expiry/restart, file substitutions, real Git positive
+cleanup and post-proof demotion, native self-hosted API authorization, browser account
+switch/confirmation behavior and focused desktop/mobile UI evidence. Run the storage
+core/API tests and `InstanceStorageSection.test.tsx`; browser evidence is generated by
+`PROPR_CAPTURE_PREVIEWS=1 npm exec -w propr-ui -- playwright test --config playwright.config.ts e2e/instance-storage.pw.ts`.
