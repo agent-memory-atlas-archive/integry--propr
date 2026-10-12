@@ -317,3 +317,64 @@ test('stream capture stays bounded across chunks and keeps the original live chi
         assert.ok((f.spool.status() as any).sources.some((s: any) => s.droppedBytes >= 100000));
     } finally { f.close(); }
 });
+
+test('runtime diagnostics require explicit activation and reject missing, invalid and cross-instance bindings', () => {
+    const f = fixture();
+    try {
+        for (const secret of ['', 'test-fleet-auth']) {
+            for (const flag of ['', '0', 'true', '1']) {
+                for (const instance of ['tenant-a', '', '../tenant-b', 'tenant-b']) {
+                    const env: NodeJS.ProcessEnv = { ...process.env, PROPR_MANAGED_LOGS: flag, PROPR_FLEET_CONTROL_SECRET: secret,
+                        PROPR_INSTANCE_ID: instance, PROPR_DIAGNOSTIC_ROOT: path.join(f.root, 'spool') };
+                    if (!flag) delete env.PROPR_MANAGED_LOGS;
+                    if (!secret) delete env.PROPR_FLEET_CONTROL_SECRET;
+                    if (!instance) delete env.PROPR_INSTANCE_ID;
+                    const result = spawnSync(process.execPath, ['--import', 'tsx', '--input-type=module', '-e', `
+                        import assert from 'node:assert/strict';
+                        import { managedDiagnostics, captureApplicationRecord, prepareProviderCapture } from './packages/core/src/diagnostics/managedLogRuntime.ts';
+                        const enabled = process.env.PROPR_MANAGED_LOGS === '1';
+                        const valid = process.env.PROPR_INSTANCE_ID === 'tenant-a';
+                        if (enabled && !valid) {
+                            assert.throws(() => managedDiagnostics(), /invalid diagnostic instance|instance mismatch/);
+                            assert.throws(() => prepareProviderCapture({ provider: 'codex', agent: 'agent-a' }));
+                            captureApplicationRecord('{"message":"must not cross instance"}');
+                        } else {
+                            const db = managedDiagnostics();
+                            assert.equal(Boolean(db), enabled);
+                            const capture = prepareProviderCapture({ provider: 'codex', agent: 'agent-a' });
+                            assert.equal(Boolean(capture), enabled);
+                            captureApplicationRecord('{"message":"explicit policy"}');
+                            capture?.stdout.write('INFO explicit provider policy\\n');
+                            capture?.stdout.close();
+                        }
+                    `], { env, encoding: 'utf8' });
+                    assert.equal(result.status, 0, result.stderr);
+                    const records = drain(f.spool);
+                    assert.equal(records.length > 0, flag === '1' && instance === 'tenant-a');
+                    assert.ok(!records.some(r => r.text.includes('must not cross instance')));
+                }
+            }
+        }
+    } finally { f.close(); }
+});
+
+test('native source uncertainty is separate from bounded collected spool bytes', () => {
+    const f = fixture();
+    try {
+        const native = { provider: 'codex', agent: 'agent-a', source: 'native-state' };
+        f.spool.report(native, 'protected-native-state', 123);
+        let status = f.spool.status() as any;
+        assert.equal(status.nativeSources.sources[0].measuredBytes, 123);
+        assert.equal(status.nativeSources.growthBounded, false);
+        assert.equal(status.nativeSources.inventoryComplete, false);
+        f.spool.report(native, 'scan-limit');
+        f.spool.report(native, 'protected-native-state', f.spool.limits.protectedBytes);
+        f.spool.report({ provider: 'claude', agent: 'unknown', source: 'shared-tmp-claude-logs' }, 'ownership-unverified');
+        status = f.spool.status() as any;
+        assert.ok(status.nativeSources.sources.every((s: any) => s.measuredBytes === null && s.measurement === 'unknown'));
+        assert.ok(status.sources.every((s: any) => s.protectedBytes === null));
+        assert.deepEqual(status.spool, { segments: 0, bytes: 0 });
+        assert.ok(status.nativeSources.unmeasured.includes('container-only'));
+        assert.throws(() => f.spool.assertCapacity(), /protected native state/);
+    } finally { f.close(); }
+});

@@ -138,7 +138,15 @@ export class ManagedLogSpool {
         return { policyVersion: 1, redactionVersion: REDACTION_VERSION, instance: this.instance, private: true, historyComplete: false,
             offsiteRetentionDays: 14, limits: this.limits, sourceCapacityWarning: sources.length >= this.limits.sources,
             sources: sources.map(s => ({ ...JSON.parse(s.identity), id: s.id, nextSequence: s.next, droppedBytes: s.dropped, gaps: s.gaps,
-                lastSuccessfulCollection: s.last_success, reason: s.reason, protectedReason: s.protection, protectedBytes: s.protected_bytes, capacityWarning: s.protected_bytes >= this.limits.protectedBytes })),
+                lastSuccessfulCollection: s.last_success, reason: s.reason, protectedReason: s.protection, protectedBytes: s.protection && !s.reason && JSON.parse(s.identity).source === 'native-state' ? s.protected_bytes : null, capacityWarning: s.protected_bytes >= this.limits.protectedBytes })),
+            nativeSources: {
+                rotation: 'none', growthBounded: false, inventoryComplete: false,
+                unmeasured: ['container-only', 'unowned', 'excluded-or-unrecognized'],
+                sources: sources.filter(s => ['native-state', 'unmapped-native-state', 'shared-tmp-claude-logs'].includes(JSON.parse(s.identity).source))
+                    .map(s => ({ ...JSON.parse(s.identity), protected: true, growthBounded: false,
+                        measurement: s.protection && !s.reason && JSON.parse(s.identity).source === 'native-state' ? 'allowlisted-files-only' : 'unknown',
+                        measuredBytes: s.protection && !s.reason && JSON.parse(s.identity).source === 'native-state' ? s.protected_bytes : null })),
+            },
             spool: this.db.prepare('SELECT count(*) AS segments,coalesce(sum(length(data)),0) AS bytes FROM segments').get() };
     }
     assertCapacity(): void {

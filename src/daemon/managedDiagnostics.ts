@@ -41,7 +41,7 @@ export function scheduleManagedDiagnostics(): () => void {
                 } else if (!managed && mounted && (agent.configPath.startsWith('~/') || resolveConfigPath(agent.configPath) === mounted)) {
                     root = mounted;
                 } else {
-                    spool.report({ provider: agent.type, agent: agent.id, source: 'unmapped-native-state' }, 'protected-native-state');
+                    spool.report({ provider: agent.type, agent: agent.id, source: 'unmapped-native-state' }, 'ownership-unverified');
                     continue;
                 }
                 collectProvider(spool, { provider: agent.type, agent: agent.id, root,

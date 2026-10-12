@@ -35,7 +35,7 @@ export function collectProvider(spool: ManagedLogSpool, input: ProviderRoot, now
     let root: PinnedDirectory;
     try { root = PinnedDirectory.open(input.root); }
     catch (e) {
-        if ((e as NodeJS.ErrnoException).code !== 'ENOENT') spool.report(summary, 'unsafe-source');
+        spool.report(summary, (e as NodeJS.ErrnoException).code === 'ENOENT' ? 'ownership-unverified' : 'unsafe-source');
         return;
     }
     let credentials: readonly string[];
@@ -95,7 +95,7 @@ export function collectProvider(spool: ManagedLogSpool, input: ProviderRoot, now
                         if (!recordBound && (discard || length - start > spool.limits.recordBytes)) { dropped += length - start; start = length; discard = true; }
                         spool.append(identity, records, relative.endsWith('.jsonl') ? 'jsonl' : 'text', credentials, now,
                             { before, after: { inode, offset: offset + start, discard, anchor: anchorAt(offset + start) } }, dropped);
-                    } catch { spool.report(identity, 'unsafe-source'); }
+                    } catch { inventoryIncomplete = true; spool.report(summary, 'unsafe-source'); spool.report(identity, 'unsafe-source'); }
                     finally { if (fd !== undefined) fs.closeSync(fd); }
                 } else if (directories[input.provider].test(relative)) {
                     let child: PinnedDirectory | undefined;

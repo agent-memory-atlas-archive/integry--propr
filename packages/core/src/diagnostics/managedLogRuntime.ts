@@ -19,7 +19,7 @@ export function diagnosticsFailure(): void {
 }
 export function managedDiagnostics(): ManagedLogSpool | null {
     if (spool !== undefined) return spool;
-    const enabled = Boolean(process.env.PROPR_FLEET_CONTROL_SECRET) || process.env.PROPR_MANAGED_LOGS === '1';
+    const enabled = process.env.PROPR_MANAGED_LOGS === '1';
     if (!enabled) return null;
     const root = process.env.PROPR_DIAGNOSTIC_ROOT || '/usr/src/app/data/managed-diagnostics';
     spool = new ManagedLogSpool(root, process.env.PROPR_INSTANCE_ID || '');

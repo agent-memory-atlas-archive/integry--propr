@@ -367,7 +367,8 @@ export function resolveConfig(env = process.env, overrides = {}) {
         stack, network, envFileLocal, envFileHost, nodeEnv,
         validateHostPaths: overrides.validateHostPaths === true,
         hostData, hostLogs, hostRepos, managedCredentialsDir,
-        managedDiagnosticsEnabled: Boolean(get('PROPR_FLEET_CONTROL_SECRET')) || get('PROPR_MANAGED_LOGS') === '1',
+        managedDiagnosticsEnabled: get('PROPR_MANAGED_LOGS') === '1',
+        managedDiagnosticsInstanceValid: /^[a-zA-Z0-9._:-]{1,128}$/.test(get('PROPR_INSTANCE_ID') || ''),
         apiPort, uiPort, docsPort, redisExternalPort, docsEnabled,
         apiRateLimitMax, apiRateLimitWindowMs,
         authRateLimitMax, authRateLimitWindowMs,
@@ -1046,7 +1047,7 @@ export function buildServiceSpec(cfg, service) {
         }
         case 'daemon':
             return appSpec(cfg, ['dist/src/daemon.js'], [
-                ...(cfg.managedDiagnosticsEnabled ? [
+                ...(cfg.managedDiagnosticsEnabled && cfg.managedDiagnosticsInstanceValid ? [
                     ...managedCredentialArgs(cfg, true),
                     ...agentCredentialArgs(cfg, { readOnly: true }),
                 ] : []),
@@ -2075,6 +2076,10 @@ export function getServiceLogs(cfg, service, { follow = false, tail = 'all', std
 export function validateEnv(cfg) {
     const errors = [];
     const warnings = [];
+
+    if (cfg.managedDiagnosticsEnabled && !cfg.managedDiagnosticsInstanceValid) {
+        errors.push('PROPR_MANAGED_LOGS=1 requires a valid PROPR_INSTANCE_ID diagnostic binding');
+    }
 
     const runtimeModeError = packagedRuntimeModeError(cfg);
     if (runtimeModeError) errors.push(runtimeModeError);
