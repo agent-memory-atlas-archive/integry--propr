@@ -23,6 +23,21 @@ async function continueThrough(...headings: string[]) {
   }
 }
 
+function installationSnapshot(
+  identity: Partial<NonNullable<DesktopSetupSnapshot['githubIdentity']>> = {},
+): DesktopSetupSnapshot {
+  return {
+    ...idle, phase: 'running', githubIdentity: {
+      status: 'selection-required', username: 'member-user', installAvailable: true,
+      installations: [
+        { installationId: '100', accountLogin: 'acme', accountType: 'Organization' },
+        { installationId: '200', accountLogin: 'member-user', accountType: 'User' },
+      ],
+      ...identity,
+    },
+  };
+}
+
 describe('production local setup journey', () => {
   beforeEach(() => vi.clearAllMocks());
 
@@ -73,17 +88,10 @@ describe('production local setup journey', () => {
   });
 
   it('shows the authenticated identity, installation types, and explicit recovery controls', async () => {
-    const choosing: DesktopSetupSnapshot = {
-      ...idle, phase: 'running', githubIdentity: {
-        status: 'authorization-failed', username: 'member-user', installAvailable: true,
-        selectedInstallationId: '100',
-        permissionExplanation: 'This account has access, but an installation owner must authorize enrollment.',
-        installations: [
-          { installationId: '100', accountLogin: 'acme', accountType: 'Organization' },
-          { installationId: '200', accountLogin: 'member-user', accountType: 'User' },
-        ],
-      },
-    };
+    const choosing = installationSnapshot({
+      status: 'authorization-failed', selectedInstallationId: '100',
+      permissionExplanation: 'This account has access, but an installation owner must authorize enrollment.',
+    });
     const resolveGithubInstallation = vi.fn(async () => ({
       ...choosing, githubIdentity: { ...choosing.githubIdentity!, status: 'enrolling' as const, selectedInstallationId: '200' },
     }));
@@ -133,26 +141,14 @@ describe('production local setup journey', () => {
   });
 
   it('requires a fresh choice after reauthentication even when identity metadata is unchanged', async () => {
-    const choosing: DesktopSetupSnapshot = {
-      ...idle, phase: 'running', githubIdentity: {
-        status: 'authorization-failed', username: 'shared-user', installAvailable: true,
-        selectedInstallationId: '100', installations: [
-          { installationId: '100', accountLogin: 'shared-org', accountType: 'Organization' },
-          { installationId: '200', accountLogin: 'shared-user', accountType: 'User' },
-        ],
-      },
-    };
-    const afterReauthentication: DesktopSetupSnapshot = {
-      ...choosing, githubIdentity: {
-        ...choosing.githubIdentity!, status: 'selection-required', selectedInstallationId: undefined,
-      },
-    };
+    const choosing = installationSnapshot({ status: 'authorization-failed', selectedInstallationId: '100' });
+    const afterReauthentication = installationSnapshot();
     const resolveGithubInstallation = vi.fn(async (decision: DesktopGithubInstallationDecision) => decision.action === 'reauthenticate'
       ? afterReauthentication : choosing);
     render(<LocalSetupWizard adapter={guidedAdapter({ status: vi.fn(async () => choosing), resolveGithubInstallation })} onBack={vi.fn()} onComplete={vi.fn()} />);
 
-    expect(await screen.findByRole('radio', { name: /shared-org/i })).toBeChecked();
-    fireEvent.click(screen.getByRole('radio', { name: /shared-user/i }));
+    expect(await screen.findByRole('radio', { name: /acme/i })).toBeChecked();
+    fireEvent.click(screen.getByRole('radio', { name: /member-user/i }));
     fireEvent.click(screen.getByRole('button', { name: 'Change GitHub account' }));
 
     await waitFor(() => expect(resolveGithubInstallation).toHaveBeenCalledWith({ action: 'reauthenticate' }));
@@ -161,20 +157,8 @@ describe('production local setup journey', () => {
   });
 
   it('clears a local choice that disappears from a refreshed installation list', async () => {
-    const choosing: DesktopSetupSnapshot = {
-      ...idle, phase: 'running', githubIdentity: {
-        status: 'selection-required', username: 'member-user', installAvailable: true,
-        installations: [
-          { installationId: '100', accountLogin: 'acme', accountType: 'Organization' },
-          { installationId: '200', accountLogin: 'member-user', accountType: 'User' },
-        ],
-      },
-    };
-    const refreshed: DesktopSetupSnapshot = {
-      ...choosing, githubIdentity: {
-        ...choosing.githubIdentity!, installations: [choosing.githubIdentity!.installations[0]],
-      },
-    };
+    const choosing = installationSnapshot();
+    const refreshed = installationSnapshot({ installations: [choosing.githubIdentity!.installations[0]] });
     const resolveGithubInstallation = vi.fn(async () => refreshed);
     render(<LocalSetupWizard adapter={guidedAdapter({ status: vi.fn(async () => choosing), resolveGithubInstallation })} onBack={vi.fn()} onComplete={vi.fn()} />);
 
@@ -281,33 +265,24 @@ describe('production local setup journey', () => {
     expect(onBack).toHaveBeenCalledOnce();
   });
 
-  it('keeps cancellation failures visible with retry and back available', async () => {
+  it.each([
+    { action: 'cancel', phase: 'running', button: 'Cancel safely', recovery: 'Try cancellation again',
+      message: 'Setup cancellation could not be confirmed.' },
+    { action: 'retry', phase: 'failed', button: 'Retry setup', recovery: 'Retry setup',
+      message: 'Local setup could not be started.' },
+  ] as const)('keeps $action failures visible with recovery and back available', async ({ action, phase, button, recovery, message }) => {
     const adapter = guidedAdapter({
-      status: vi.fn(async () => ({ ...idle, phase: 'running' as const })),
-      cancel: vi.fn(async () => { throw new Error('private cancellation failure'); }),
+      status: vi.fn(async () => ({ ...idle, phase })),
+      [action]: vi.fn(async () => { throw new Error(`private ${action} failure`); }),
     });
     const onBack = vi.fn();
     render(<LocalSetupWizard adapter={adapter} onBack={onBack} onComplete={vi.fn()} />);
 
-    fireEvent.click(await screen.findByRole('button', { name: 'Cancel safely' }));
-    expect(await screen.findByRole('alert')).toHaveTextContent('Setup cancellation could not be confirmed.');
-    expect(screen.getByRole('button', { name: 'Try cancellation again' })).toBeInTheDocument();
+    fireEvent.click(await screen.findByRole('button', { name: button }));
+    expect(await screen.findByRole('alert')).toHaveTextContent(message);
+    expect(screen.getByRole('button', { name: recovery })).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: 'Back' }));
     expect(onBack).toHaveBeenCalledOnce();
-  });
-
-  it('renders a failed recovery retry without hiding recovery controls', async () => {
-    const failed = { ...idle, phase: 'failed' as const, error: 'Docker is unavailable.' };
-    const adapter = guidedAdapter({
-      status: vi.fn(async () => failed),
-      retry: vi.fn(async () => { throw new Error('private retry failure'); }),
-    });
-    render(<LocalSetupWizard adapter={adapter} onBack={vi.fn()} onComplete={vi.fn()} />);
-
-    fireEvent.click(await screen.findByRole('button', { name: 'Retry setup' }));
-    expect(await screen.findByRole('alert')).toHaveTextContent('Local setup could not be started.');
-    expect(screen.getByRole('button', { name: 'Retry setup' })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Back' })).toBeInTheDocument();
   });
 
   it('requires the dedicated recovery control before replacing an incompatible running stack', async () => {
