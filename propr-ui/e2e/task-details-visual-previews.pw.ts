@@ -139,8 +139,10 @@ test('collapses the scrolled mobile header into one line and keeps Files Changed
   const more = bar.getByRole('button', { name: 'More task actions' });
   await expect(more).toBeVisible();
   const moreBox = (await more.boundingBox())!;
-  expect(moreBox.width).toBeGreaterThanOrEqual(44);
-  expect(moreBox.height).toBeGreaterThanOrEqual(44);
+  // The compact overflow control stays a 32px rounded rectangle.
+  expect(moreBox.width).toBe(32);
+  expect(moreBox.height).toBe(32);
+  await expect(more).toHaveCSS('border-radius', '6px');
   await expect(bar.getByRole('button', { name: 'Follow Up' })).toHaveCount(0);
   // The title block's status badge has scrolled behind the bar, not through it.
   const badge = details.getByText('Completed', { exact: true }).first();
