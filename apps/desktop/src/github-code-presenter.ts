@@ -7,7 +7,7 @@ export function createGithubCodePresenter(dependencies: {
   openExternal(url: string): Promise<void>;
   isShuttingDown(): boolean;
 }) {
-  return async (code: string, url: string, signal: AbortSignal, cancel: () => void): Promise<() => Promise<void>> => {
+  return async (code: string, url: string, signal: AbortSignal, cancel: (reason?: 'browser-failure') => void): Promise<() => Promise<void>> => {
     const detail = `Enter this one-time code on GitHub: ${code}\nChoose the intended GitHub account before approving. Return to ProPR to confirm your verified account.`;
     signal.throwIfAborted();
     const prompt = new AbortController();
@@ -24,17 +24,17 @@ export function createGithubCodePresenter(dependencies: {
           defaultId: 0, cancelId: browserOpened ? 1 : 2, signal: promptSignal,
         });
         if (promptSignal.aborted) return;
-        if (dependencies.isShuttingDown()) { cancel(); return; }
+        if (dependencies.isShuttingDown()) { cancel('browser-failure'); return; }
         if (result.response === (browserOpened ? 0 : 1)) dependencies.copy(code);
         else if (!browserOpened && result.response === 0) {
-          if (!isSafeExternalUrl(url)) { cancel(); return; }
+          if (!isSafeExternalUrl(url)) { cancel('browser-failure'); return; }
           // An OS browser launch can settle late. It must not hold prompt
           // cleanup or cancel an already completed/superseded attempt.
-          void dependencies.openExternal(url).catch(() => { if (!promptSignal.aborted) cancel(); });
+          void dependencies.openExternal(url).catch(() => { if (!promptSignal.aborted) cancel('browser-failure'); });
           browserOpened = true;
         } else { cancel(); return; }
       }
-    })().catch(() => { if (!promptSignal.aborted) cancel(); });
+    })().catch(() => { if (!promptSignal.aborted) cancel('browser-failure'); });
     return async () => { prompt.abort(); await waiting; };
   };
 }

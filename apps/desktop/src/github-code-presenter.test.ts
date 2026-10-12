@@ -56,21 +56,25 @@ for (const waiting of [false, true]) test(`native Cancel sign-in aborts the atte
   assert.equal(controller.signal.aborted, true); assert.equal(opened, waiting ? 1 : 0);
 });
 
-for (const failure of ['rejection', 'unsafe URL', 'shutdown']) test(`browser action cancels safely on ${failure}`, async () => {
+for (const failure of ['rejection', 'unsafe URL', 'shutdown', 'dialog rejection']) test(`browser action aborts with a failure reason on ${failure}`, async () => {
   const controller = new AbortController(); let opened = 0;
   const present = createGithubCodePresenter({
     isShuttingDown: () => failure === 'shutdown', copy: () => assert.fail('must not copy'),
     openExternal: async () => { opened++; throw new Error('private OS details'); },
     showDialog: async options => {
+      if (failure === 'dialog rejection') throw new Error('private dialog details');
       if (controller.signal.aborted) return { response: 2 };
       if (opened) return new Promise(resolve => options.signal!.addEventListener('abort', () => resolve({ response: 1 }), { once: true }));
       return { response: 0 };
     },
   });
-  const close = await present('fixture-code', failure === 'unsafe URL' ? 'javascript:alert(1)' : url, controller.signal, () => controller.abort());
+  const close = await present('fixture-code', failure === 'unsafe URL' ? 'javascript:alert(1)' : url, controller.signal, reason => {
+    assert.equal(reason, 'browser-failure');
+    controller.abort(reason);
+  });
   await new Promise(resolve => setImmediate(resolve));
   await close();
-  assert.equal(controller.signal.aborted, true);
+  assert.equal(controller.signal.reason, 'browser-failure');
   assert.equal(opened, failure === 'rejection' ? 1 : 0);
 });
 

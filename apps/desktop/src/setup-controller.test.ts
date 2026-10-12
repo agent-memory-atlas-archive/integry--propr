@@ -520,7 +520,7 @@ describe('desktop local setup controller', () => {
 
 // Real browser -> desktop host -> isolated ConfigManager -> relay API -> controller.
 // Only native UI, network responses, and unrelated Docker/backend I/O are fixtures.
-for (const outcome of ['approved', 'approved-waiting', 'unconfirmed', 'declined', 'expired', 'transport', 'persistence'] as const) it(`browser host handoff through persistence and enrollment: ${outcome}`, async t => {
+for (const outcome of ['approved', 'approved-waiting', 'unconfirmed', 'declined', 'expired', 'transport', 'browser-launch', 'persistence'] as const) it(`browser host handoff through persistence and enrollment: ${outcome}`, async t => {
   const { createDesktopSetupHost } = await import('../../../packages/cli/src/desktopLocalSetup');
   const { ConfigManager } = await import('../../../packages/cli/src/config/index');
   const { createGithubBrowserLogin } = await import('./github-browser-auth');
@@ -552,10 +552,10 @@ for (const outcome of ['approved', 'approved-waiting', 'unconfirmed', 'declined'
   try {
     const host = await createDesktopSetupHost({ configDir, authenticationHandoff: async () => { throw new Error('terminal handoff must not run'); },
       githubBrowserLogin: createGithubBrowserLogin({ clientId: 'fixture-client', sleep: async () => undefined,
-        presentCode: createGithubCodePresenter({ isShuttingDown: () => false, copy: () => assert.fail('no copy action'), openExternal: async url => { assert.equal(outcome, 'approved-waiting'); assert.equal(url, 'https://github.com/login/device'); },
+        presentCode: createGithubCodePresenter({ isShuttingDown: () => false, copy: () => assert.fail('no copy action'), openExternal: async url => { if (activeOutcome === 'browser-launch') throw new Error(`${accessToken} ${deviceSecret} private OS details`); assert.equal(outcome, 'approved-waiting'); assert.equal(url, 'https://github.com/login/device'); },
           showDialog: options => {
             nativeDialogs++;
-            if (outcome === 'approved-waiting' && nativeDialogs === 1) return Promise.resolve({ response: 0 });
+            if ((outcome === 'approved-waiting' || activeOutcome === 'browser-launch') && nativeDialogs === 1) return Promise.resolve({ response: 0 });
             if (outcome === 'approved-waiting') assert.equal(options.title, 'Waiting for GitHub');
             dialogOpen = true;
             return new Promise(resolve => options.signal!.addEventListener('abort', () => { dialogOpen = false; resolve({ response: 2 }); }, { once: true }));
@@ -598,7 +598,7 @@ for (const outcome of ['approved', 'approved-waiting', 'unconfirmed', 'declined'
       const failed = result.state?.steps.find(step => step.id === 'github-auth');
       assert.match(failed?.nextAction ?? '', /Retry setup.*browser/);
       assert.doesNotMatch(failed?.nextAction ?? '', /propr login|propr setup/);
-      assert.match(failed?.detail ?? '', { unconfirmed: /account was not confirmed/, declined: /declined/, expired: /expired/, transport: /browser sign-in could not complete/, persistence: /could not save sign-in/ }[outcome]);
+      assert.match(failed?.detail ?? '', { unconfirmed: /account was not confirmed/, declined: /declined/, expired: /expired/, transport: /browser sign-in could not complete/, 'browser-launch': /browser sign-in could not complete/, persistence: /could not save sign-in/ }[outcome]);
     }
     if (outcome !== 'approved' && outcome !== 'approved-waiting') {
       t.mock.restoreAll();
