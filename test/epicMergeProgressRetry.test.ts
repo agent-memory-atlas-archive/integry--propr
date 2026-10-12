@@ -3,7 +3,7 @@ import { after, describe, mock, test } from 'node:test';
 import { closeConnection } from '../packages/core/src/db/connection.js';
 import { EPIC_COMPLETE_MARKER, EPIC_PROGRESS_MARKER, updateEpicMergeProgress } from '../packages/core/src/webhook/epicMergeProgress.js';
 import {
-    EPIC_PROGRESS_RETRY_KEY, EPIC_PROGRESS_RETRY_MAX_AGE_MS, EpicProgressLeaseLostError, epicProgressRetryField,
+    EPIC_PROGRESS_RETRY_KEY, EPIC_PROGRESS_RETRY_MAX_AGE_MS, EPIC_PROGRESS_SCRIPTS, EpicProgressLeaseLostError, epicProgressRetryField,
     recordEpicProgressRetry, runEpicProgressUpdate, sweepEpicProgressRetries,
     type EpicProgressTarget,
 } from '../packages/core/src/webhook/epicMergeProgressRetry.js';
@@ -12,7 +12,7 @@ after(async () => { await closeConnection(); });
 
 const log = { debug() {}, info() {}, warn() {}, error() {} } as never;
 const target: EpicProgressTarget = { owner: 'integry', repo: 'propr', epicBranch: '100-epic-big-plan-abc', epicPrNumber: 500, mergedChildPrNumber: 203 };
-const field = epicProgressRetryField(target.owner, target.repo, target.epicBranch);
+const field = epicProgressRetryField(target);
 
 function fakeRedis() {
     const hash = new Map<string, string>();
@@ -31,16 +31,24 @@ function fakeRedis() {
             return 'OK';
         },
         async eval(script: string, _n: number, key: string, ...args: string[]) {
-            if (script.includes('HGET')) {
-                if (hash.get(args[0]) !== args[1]) return 0;
-                return Number(hash.delete(args[0]));
+            switch (script) {
+                case EPIC_PROGRESS_SCRIPTS.compareAndDeleteField:
+                    if (hash.get(args[0]) !== args[1]) return 0;
+                    return Number(hash.delete(args[0]));
+                case EPIC_PROGRESS_SCRIPTS.migrateLegacyField:
+                    if (hash.get(args[0]) !== args[1] || (hash.get(args[2]) ?? '') !== args[3]) return 0;
+                    hash.set(args[2], args[4]);
+                    return Number(hash.delete(args[0]));
+                case EPIC_PROGRESS_SCRIPTS.compareAndExtendKey:
+                    if (keys.get(key) !== args[0]) return 0;
+                    extensions.push(args[1]);
+                    return 1;
+                case EPIC_PROGRESS_SCRIPTS.compareAndDeleteKey:
+                    if (keys.get(key) !== args[0]) return 0;
+                    return Number(keys.delete(key));
+                default:
+                    throw new Error(`Unknown script: ${script}`);
             }
-            if (keys.get(key) !== args[0]) return 0;
-            if (script.includes('PEXPIRE')) {
-                extensions.push(args[1]);
-                return 1;
-            }
-            return Number(keys.delete(key));
         },
     };
 }
@@ -94,8 +102,9 @@ function fakeEpicOctokit() {
         get commentReads() { return commentReads; },
         /** Holds the next comment read open after its snapshot is taken; queued holds apply to later reads in order. */
         holdCommentRead(until: Promise<void>, onHeld: () => void) { commentReadHolds.push({ until, onHeld }); },
-        async paginate(route: string) {
-            if (route === 'GET /repos/{owner}/{repo}/pulls') return [{ number: 203, state: 'closed', merged_at: '2026-10-09T00:00:00Z' }];
+        async paginate(route: string, parameters: Record<string, unknown>) {
+            // Child PRs of the epic branch; the branch has no merged predecessor epic.
+            if (route === 'GET /repos/{owner}/{repo}/pulls') return parameters.head ? [] : [{ number: 203, state: 'closed', merged_at: '2026-10-09T00:00:00Z' }];
             commentReads++;
             const snapshot = comments.map(comment => ({ ...comment }));
             const hold = commentReadHolds.shift();
@@ -106,6 +115,9 @@ function fakeEpicOctokit() {
             return snapshot;
         },
         async request(route: string, parameters: Record<string, unknown>) {
+            if (route === 'GET /repos/{owner}/{repo}/pulls/{pull_number}') {
+                return { data: { merged: false, base: { ref: 'main' } } };
+            }
             assert.equal(route, 'POST /repos/{owner}/{repo}/issues/{issue_number}/comments');
             comments.push({ id: comments.length + 1, body: parameters.body as string, user: { login: 'propr-dev[bot]' } });
             return { data: {} };
@@ -283,7 +295,7 @@ describe('runEpicProgressUpdate lease ownership', () => {
 
     test('never runs the update when the lease is busy and the retry cannot be recorded', async () => {
         const redis = fakeRedis();
-        redis.keys.set(`epic:merge-progress-lock:${field}`, 'other-owner');
+        redis.keys.set(`epic:merge-progress-lock:${target.owner}/${target.repo}#${target.epicBranch}`, 'other-owner');
         redis.hset = async () => { throw new Error('redis write failed'); };
         let updates = 0;
         const outcome = await runEpicProgressUpdate(target, {
@@ -296,14 +308,18 @@ describe('runEpicProgressUpdate lease ownership', () => {
 });
 
 describe('recordEpicProgressRetry', () => {
-    test('keeps a known epic PR number when a later failure could not locate it', async () => {
+    test('keeps unresolved child work separate from a known epic PR', async () => {
         const redis = fakeRedis();
         await recordEpicProgressRetry(redis as never, target, 1_000);
         await recordEpicProgressRetry(redis as never, { ...target, epicPrNumber: null, mergedChildPrNumber: 204 }, 2_000);
         const retry = JSON.parse(redis.hash.get(field)!);
         assert.equal(retry.epicPrNumber, 500);
-        assert.equal(retry.mergedChildPrNumber, 204);
-        assert.equal(retry.attempts, 2);
+        assert.equal(retry.mergedChildPrNumber, 203);
+        assert.equal(retry.attempts, 1);
+        const unresolved = JSON.parse(redis.hash.get(epicProgressRetryField({ ...target, epicPrNumber: null, mergedChildPrNumber: 204 }))!);
+        assert.equal(unresolved.epicPrNumber, null);
+        assert.equal(unresolved.mergedChildPrNumber, 204);
+        assert.equal(redis.hash.size, 2);
     });
 });
 
@@ -330,4 +346,135 @@ describe('sweepEpicProgressRetries', () => {
         assert.equal(retries, 0);
         assert.equal(redis.hash.size, 0);
     });
+});
+
+test('a successor deferred while the aggregate holds the branch lease keeps its own obligation', async () => {
+    const redis = fakeRedis();
+    const aggregate = { ...target, mergedChildPrNumber: null };
+    const successor = { ...target, epicPrNumber: 501 };
+    await recordEpicProgressRetry(redis as never, aggregate, 1_000);
+    const outcome = await runEpicProgressUpdate(aggregate, {
+        redis: redis as never, log,
+        update: async () => {
+            assert.equal(await runEpicProgressUpdate(successor, {
+                redis: redis as never, log, now: () => 2_000,
+                update: async () => { assert.fail('the branch lease must serialize different targets'); },
+            }), 'retry_scheduled');
+            return true;
+        },
+    });
+    assert.equal(outcome, 'updated');
+    assert.equal(redis.hash.size, 1);
+    assert.equal(JSON.parse([...redis.hash.values()][0]).epicPrNumber, 501);
+});
+
+test('the sweep releases a legacy branch record only after retrying its own target', async () => {
+    const redis = fakeRedis();
+    const aggregate = { ...target, mergedChildPrNumber: null };
+    const legacyField = `${target.owner}/${target.repo}#${target.epicBranch}`;
+    const legacyValue = JSON.stringify({ ...aggregate, attempts: 1, firstFailedAt: 1_000, nextAttemptAt: 0 });
+    redis.hash.set(legacyField, legacyValue);
+    await runEpicProgressUpdate({ ...target, epicPrNumber: 501 }, {
+        redis: redis as never, log, update: async () => true,
+    });
+    assert.equal(redis.hash.get(legacyField), legacyValue);
+    assert.equal(await sweepEpicProgressRetries({
+        redis: redis as never, log, now: () => 2_000,
+        retry: pending => runEpicProgressUpdate(pending, {
+            redis: redis as never, log,
+            update: async () => { assert.deepEqual(pending, aggregate); return true; },
+        }),
+    }), 1);
+    assert.equal(redis.hash.size, 0);
+});
+
+for (const aggregateFirst of [true, false]) {
+    test(`same epic retains both child and aggregate evidence (aggregate first: ${aggregateFirst})`, async () => {
+        const redis = fakeRedis();
+        const aggregate = { ...target, mergedChildPrNumber: null };
+        const first = aggregateFirst ? aggregate : target;
+        const second = aggregateFirst ? target : aggregate;
+        await recordEpicProgressRetry(redis as never, first, 1_000);
+        await recordEpicProgressRetry(redis as never, second, 2_000);
+        assert.equal(redis.hash.size, 2);
+        assert.equal(JSON.parse(redis.hash.get(epicProgressRetryField(first))!).mergedChildPrNumber, first.mergedChildPrNumber);
+        await runEpicProgressUpdate(second, { redis: redis as never, log, update: async () => true });
+        assert.equal(redis.hash.size, 1);
+        assert.ok(redis.hash.has(epicProgressRetryField(first)));
+    });
+}
+
+test('failed legacy retry migrates once and retains exponential backoff and age', async () => {
+    const redis = fakeRedis();
+    const legacy = `${target.owner}/${target.repo}#${target.epicBranch}`;
+    redis.hash.set(legacy, JSON.stringify({ ...target, attempts: 3, firstFailedAt: 1_000, nextAttemptAt: 2_000 }));
+    let attempts = 0;
+    let now = 3_000;
+    const sweep = () => sweepEpicProgressRetries({ redis: redis as never, log, now: () => now,
+        retry: pending => runEpicProgressUpdate(pending, { redis: redis as never, log, now: () => now,
+            update: async () => { attempts++; return false; } }),
+    });
+    await sweep();
+    assert.equal(redis.hash.has(legacy), false);
+    assert.equal(redis.hash.size, 1);
+    assert.deepEqual(JSON.parse(redis.hash.get(field)!), { ...target, attempts: 4, firstFailedAt: 1_000, nextAttemptAt: 483_000 });
+    now += 60_000;
+    await sweep();
+    assert.equal(attempts, 1);
+});
+
+test('migration preserves a newer target backoff and a concurrently replaced legacy record', async () => {
+    const redis = fakeRedis();
+    const legacy = `${target.owner}/${target.repo}#${target.epicBranch}`;
+    const old = JSON.stringify({ ...target, attempts: 1, firstFailedAt: 1_000, nextAttemptAt: 0 });
+    const newer = JSON.stringify({ ...target, attempts: 5, firstFailedAt: 1_000, nextAttemptAt: 900_000 });
+    redis.hash.set(legacy, old);
+    redis.hash.set(field, newer);
+    const sweep = () => sweepEpicProgressRetries({ redis: redis as never, log, now: () => 2_000,
+        retry: async () => { assert.fail('new target backoff must be respected'); },
+    });
+    await sweep();
+    assert.deepEqual(JSON.parse(redis.hash.get(field)!), JSON.parse(newer));
+    assert.equal(redis.hash.has(legacy), false);
+    redis.hash.set(legacy, old);
+    const evaluate = redis.eval;
+    redis.eval = async (...args) => {
+        if (args[0] === EPIC_PROGRESS_SCRIPTS.migrateLegacyField) redis.hash.set(legacy, newer);
+        return evaluate(...args);
+    };
+    await sweep();
+    assert.equal(redis.hash.get(legacy), newer);
+});
+
+test('migration into an existing target record keeps its backoff but inherits the older age and attempts', async () => {
+    const redis = fakeRedis();
+    const legacy = `${target.owner}/${target.repo}#${target.epicBranch}`;
+    redis.hash.set(legacy, JSON.stringify({ ...target, attempts: 3, firstFailedAt: 1_000, nextAttemptAt: 0 }));
+    redis.hash.set(field, JSON.stringify({ ...target, attempts: 1, firstFailedAt: 5_000, nextAttemptAt: 900_000 }));
+    await sweepEpicProgressRetries({ redis: redis as never, log, now: () => 6_000,
+        retry: async () => { assert.fail('the merged record is not due yet'); },
+    });
+    assert.equal(redis.hash.has(legacy), false);
+    assert.deepEqual(JSON.parse(redis.hash.get(field)!), { ...target, attempts: 3, firstFailedAt: 1_000, nextAttemptAt: 900_000 });
+    // The merged age, not the newer record's, decides when the obligation is dropped.
+    await sweepEpicProgressRetries({ redis: redis as never, log, now: () => 1_000 + EPIC_PROGRESS_RETRY_MAX_AGE_MS + 1,
+        retry: async () => { assert.fail('an expired obligation is dropped, not retried'); },
+    });
+    assert.equal(redis.hash.size, 0);
+});
+
+test('migration leaves a target record replaced since the sweep read it for the next sweep', async () => {
+    const redis = fakeRedis();
+    const legacy = `${target.owner}/${target.repo}#${target.epicBranch}`;
+    const old = JSON.stringify({ ...target, attempts: 1, firstFailedAt: 1_000, nextAttemptAt: 0 });
+    const replaced = JSON.stringify({ ...target, attempts: 2, firstFailedAt: 3_000, nextAttemptAt: 900_000 });
+    redis.hash.set(legacy, old);
+    const evaluate = redis.eval;
+    redis.eval = async (...args) => {
+        if (args[0] === EPIC_PROGRESS_SCRIPTS.migrateLegacyField) redis.hash.set(field, replaced);
+        return evaluate(...args);
+    };
+    await sweepEpicProgressRetries({ redis: redis as never, log, now: () => 2_000, retry: async () => 'retry_scheduled' });
+    assert.equal(redis.hash.get(legacy), old);
+    assert.equal(redis.hash.get(field), replaced);
 });

@@ -30,6 +30,21 @@ end
 return 0
 `;
 
+// Move the exact legacy snapshot atomically into the target record the
+// caller computed from it and the exact target record it observed (ARGV[4],
+// empty when absent), so a concurrently replaced legacy or target record is
+// left alone for the next sweep.
+const MIGRATE_LEGACY_FIELD = `
+if redis.call('HGET', KEYS[1], ARGV[1]) ~= ARGV[2] then
+    return 0
+end
+if (redis.call('HGET', KEYS[1], ARGV[3]) or '') ~= ARGV[4] then
+    return 0
+end
+redis.call('HSET', KEYS[1], ARGV[3], ARGV[5])
+return redis.call('HDEL', KEYS[1], ARGV[1])
+`;
+
 const COMPARE_AND_DELETE_KEY = `
 if redis.call('GET', KEYS[1]) == ARGV[1] then
     return redis.call('DEL', KEYS[1])
@@ -44,6 +59,14 @@ end
 return 0
 `;
 
+/** The Lua scripts this module evaluates, exported so fakes can match them by identity. */
+export const EPIC_PROGRESS_SCRIPTS = {
+    compareAndDeleteField: COMPARE_AND_DELETE_FIELD,
+    migrateLegacyField: MIGRATE_LEGACY_FIELD,
+    compareAndDeleteKey: COMPARE_AND_DELETE_KEY,
+    compareAndExtendKey: COMPARE_AND_EXTEND_KEY,
+} as const;
+
 export type EpicProgressRetryRedis = Pick<Redis, 'hget' | 'hset' | 'hgetall' | 'set' | 'eval'>;
 
 export interface EpicProgressTarget {
@@ -52,7 +75,8 @@ export interface EpicProgressTarget {
     epicBranch: string;
     /** Null when the epic PR could not be located yet; the retry resolves it. */
     epicPrNumber: number | null;
-    mergedChildPrNumber: number;
+    /** Null for the aggregate epic PR merge. */
+    mergedChildPrNumber: number | null;
 }
 
 export interface EpicProgressRetry extends EpicProgressTarget {
@@ -89,8 +113,19 @@ export interface EpicProgressUpdateOptions {
     log?: ReturnType<typeof logger.withCorrelation>;
 }
 
-export function epicProgressRetryField(owner: string, repo: string, epicBranch: string): string {
+function epicProgressBranchField(owner: string, repo: string, epicBranch: string): string {
     return `${owner.toLowerCase()}/${repo.toLowerCase()}#${epicBranch}`;
+}
+
+/**
+ * Keep each target separate: a child can be redirected to a successor while
+ * the original epic still needs its final-merge confirmation. Unknown targets
+ * must not inherit the PR number of an unrelated obligation on the branch.
+ */
+export function epicProgressRetryField(
+    { owner, repo, epicBranch, epicPrNumber, mergedChildPrNumber }: EpicProgressTarget,
+): string {
+    return JSON.stringify([owner.toLowerCase(), repo.toLowerCase(), epicBranch, epicPrNumber, mergedChildPrNumber]);
 }
 
 function parseRetry(value: string | null | undefined): EpicProgressRetry | null {
@@ -99,7 +134,7 @@ function parseRetry(value: string | null | undefined): EpicProgressRetry | null 
         const parsed = JSON.parse(value) as Partial<EpicProgressRetry>;
         if (typeof parsed.owner !== 'string' || typeof parsed.repo !== 'string' || typeof parsed.epicBranch !== 'string'
             || (typeof parsed.epicPrNumber !== 'number' && parsed.epicPrNumber !== null)
-            || typeof parsed.mergedChildPrNumber !== 'number') return null;
+            || (typeof parsed.mergedChildPrNumber !== 'number' && parsed.mergedChildPrNumber !== null)) return null;
         return {
             owner: parsed.owner, repo: parsed.repo, epicBranch: parsed.epicBranch,
             epicPrNumber: parsed.epicPrNumber, mergedChildPrNumber: parsed.mergedChildPrNumber,
@@ -113,16 +148,14 @@ function parseRetry(value: string | null | undefined): EpicProgressRetry | null 
 }
 
 /**
- * Records (or extends) the retry obligation for an epic. A target without an
- * epic PR number keeps the number already known from an earlier failure.
+ * Records (or extends) the retry obligation for this specific target.
  */
 export async function recordEpicProgressRetry(redis: EpicProgressRetryRedis, target: EpicProgressTarget, now: number = Date.now()): Promise<void> {
-    const field = epicProgressRetryField(target.owner, target.repo, target.epicBranch);
+    const field = epicProgressRetryField(target);
     const previous = parseRetry(await redis.hget(EPIC_PROGRESS_RETRY_KEY, field));
     const attempts = (previous?.attempts ?? 0) + 1;
     const retry: EpicProgressRetry = {
         ...target,
-        epicPrNumber: target.epicPrNumber ?? previous?.epicPrNumber ?? null,
         attempts,
         firstFailedAt: previous?.firstFailedAt || now,
         nextAttemptAt: now + Math.min(RETRY_MAX_DELAY_MS, RETRY_BASE_DELAY_MS * 2 ** (attempts - 1)),
@@ -146,8 +179,8 @@ export async function runEpicProgressUpdate(
     target: EpicProgressTarget,
     { redis, update, now = Date.now, log = logger.withCorrelation('epic-merge-progress') }: EpicProgressUpdateOptions,
 ): Promise<EpicProgressUpdateOutcome> {
-    const field = epicProgressRetryField(target.owner, target.repo, target.epicBranch);
-    const lockKey = `${EPIC_PROGRESS_LOCK_PREFIX}${field}`;
+    const field = epicProgressRetryField(target);
+    const lockKey = `${EPIC_PROGRESS_LOCK_PREFIX}${epicProgressBranchField(target.owner, target.repo, target.epicBranch)}`;
     const token = randomUUID();
     /**
      * Records a retry for an update that must not run now. 'skipped' means
@@ -237,6 +270,22 @@ export interface EpicProgressRetrySweepOptions {
 }
 
 /**
+ * The record a legacy branch-keyed obligation migrates into. An existing
+ * record for the same target keeps its backoff, but inherits the older first
+ * failure and the higher attempt count, so the migration neither resets the
+ * drop window nor forgets attempts already made.
+ */
+function mergeLegacyRetry(legacy: EpicProgressRetry, current: EpicProgressRetry | null): EpicProgressRetry {
+    if (!current) return legacy;
+    const firstFailures = [current.firstFailedAt, legacy.firstFailedAt].filter(Boolean);
+    return {
+        ...current,
+        attempts: Math.max(current.attempts, legacy.attempts),
+        firstFailedAt: firstFailures.length > 0 ? Math.min(...firstFailures) : 0,
+    };
+}
+
+/**
  * Retries every due epic progress obligation; returns how many were updated.
  * An obligation whose first failure is older than
  * {@link EPIC_PROGRESS_RETRY_MAX_AGE_MS} (or that can no longer be parsed) is
@@ -245,7 +294,19 @@ export interface EpicProgressRetrySweepOptions {
 export async function sweepEpicProgressRetries(
     { redis, retry, now = Date.now, log = logger.withCorrelation('epic-merge-progress') }: EpicProgressRetrySweepOptions,
 ): Promise<number> {
-    const entries = await redis.hgetall(EPIC_PROGRESS_RETRY_KEY);
+    let entries = await redis.hgetall(EPIC_PROGRESS_RETRY_KEY);
+    let migrated = false;
+    for (const [field, value] of Object.entries(entries)) {
+        const pending = parseRetry(value);
+        if (pending && field === epicProgressBranchField(pending.owner, pending.repo, pending.epicBranch)) {
+            const targetField = epicProgressRetryField(pending);
+            const current = entries[targetField];
+            const merged = current === undefined ? value : JSON.stringify(mergeLegacyRetry(pending, parseRetry(current)));
+            await redis.eval(MIGRATE_LEGACY_FIELD, 1, EPIC_PROGRESS_RETRY_KEY, field, value, targetField, current ?? '', merged);
+            migrated = true;
+        }
+    }
+    if (migrated) entries = await redis.hgetall(EPIC_PROGRESS_RETRY_KEY);
     let updated = 0;
     for (const [field, value] of Object.entries(entries)) {
         const pending = parseRetry(value);
@@ -257,7 +318,14 @@ export async function sweepEpicProgressRetries(
         }
         if (pending.nextAttemptAt > current) continue;
         const { owner, repo, epicBranch, epicPrNumber, mergedChildPrNumber } = pending;
-        if (await retry({ owner, repo, epicBranch, epicPrNumber, mergedChildPrNumber }) === 'updated') updated++;
+        if (await retry({ owner, repo, epicBranch, epicPrNumber, mergedChildPrNumber }) === 'updated') {
+            // The update normally releases the snapshot it observed itself;
+            // this repeats that release in case it failed after the update
+            // (e.g. the delete call errored), still only for the snapshot
+            // whose own target succeeded.
+            await redis.eval(COMPARE_AND_DELETE_FIELD, 1, EPIC_PROGRESS_RETRY_KEY, field, value);
+            updated++;
+        }
     }
     return updated;
 }
