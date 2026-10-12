@@ -330,10 +330,24 @@ export const InstanceStorageExecuteRequest = component('InstanceStorageExecuteRe
 export const InstanceStoragePreview = component('InstanceStoragePreview', z.object({
   version: z.literal(1), instanceId: z.string(), confirmation: z.uuid(), expiresAt: isoDateTime,
   categories: z.array(storageCategory), impact: z.string(),
-  candidates: z.array(z.object({ id: z.string(), category: storageCategory, estimatedBytes: z.number().nonnegative().nullable(), protectedReasons: z.array(storageProtection) })),
+  candidates: z.array(z.object({ id: z.string(), name: z.string().optional(), category: storageCategory, estimatedBytes: z.number().nonnegative().nullable(), protectedReasons: z.array(storageProtection) })),
 }));
 export const InstanceStorageResult = component('InstanceStorageResult', z.object({
   version: z.literal(1), instanceId: z.string(), operationId: z.uuid(), state: z.enum(['completed', 'interrupted']),
   deleted: z.array(z.string()), retained: z.array(z.object({ id: z.string(), reasons: z.array(storageProtection) })),
 }));
 export const InstanceStorageResultQuery = querySet('InstanceStorageResultQuery', z.object({ instanceId: z.string() }));
+export const InstanceStorageCapabilities = component('InstanceStorageCapabilities', z.object({
+  version: z.literal(1), instanceId: z.string(), generation: z.uuid(), features: z.array(z.enum(['repository_inventory', 'repository_cleanup', 'database_export'])),
+}));
+export const InstanceRepositoryInventory = component('InstanceRepositoryInventory', z.object({
+  version: z.literal(1), instanceId: z.string(), state: storageState, observedAt: isoDateTime, lastUseAt: isoDateTime.nullable(),
+  repositories: z.array(z.object({ id: z.string(), name: z.string(), category: storageCategory, estimatedBytes: z.number().nonnegative().nullable(), protectedReasons: z.array(storageProtection) })),
+}));
+export const InstanceDatabaseExportRequest = component('InstanceDatabaseExportRequest', z.object({ instanceId: z.string(), generation: z.uuid() }).strict());
+export const InstanceDatabaseExportQuery = querySet('InstanceDatabaseExportQuery', z.object({ instanceId: z.string(), generation: z.uuid() }));
+export const InstanceDatabaseExport = component('InstanceDatabaseExport', z.object({
+  version: z.literal(1), instanceId: z.string(), generation: z.uuid(), operationId: z.uuid(),
+  state: z.enum(['running', 'ready', 'failed', 'redeemed']), expiresAt: isoDateTime, scope: z.literal('customer_database'),
+  sizeBytes: z.number().nonnegative().optional(), sha256: z.string().optional(), schemaVersion: z.number().int().optional(), migration: z.string().nullable().optional(),
+}));

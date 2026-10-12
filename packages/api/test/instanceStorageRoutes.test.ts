@@ -26,7 +26,7 @@ test('instance storage enforces administrator, CSRF, instance and confirmation a
     if (actor) req.user = { id: actor, username: actor } as typeof req.user;
     next();
   });
-  registerRouteEntries(app, createStorageRouteEntries(createInstanceStorageRoutes(service)));
+  registerRouteEntries(app, createStorageRouteEntries(createInstanceStorageRoutes(service, async user => ({ role: user.id === 'member' ? 'member' : 'admin', permissions: user.id === 'member' ? [] : ['instance.manage_settings'], source: 'local' }))));
   const server = app.listen(0, '127.0.0.1');
   await new Promise<void>(resolve => server.once('listening', resolve));
   t.after(() => new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve())));

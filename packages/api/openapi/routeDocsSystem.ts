@@ -1,4 +1,5 @@
 import {
+  InstanceStorageCapabilities, InstanceRepositoryInventory, InstanceDatabaseExportRequest, InstanceDatabaseExportQuery, InstanceDatabaseExport,
   InstanceStorageUsage, InstanceStoragePolicy, InstanceStoragePolicyRequest, InstanceStoragePreviewRequest, InstanceStorageExecuteRequest, InstanceStoragePreview, InstanceStorageResult, InstanceStorageResultQuery,
   AuthenticatedUser,
   Compatibility,
@@ -21,6 +22,37 @@ const PAIRING_GUIDE = 'See the desktop pairing guide (docs/operations/desktop-pa
 const MCP_OAUTH = 'Served by the MCP SDK\'s OAuth router at the API origin root, and only while MCP is enabled. See the MCP guide (docs/features/mcp).';
 
 export const SYSTEM_ROUTE_DOCS: Record<string, RouteDoc> = {
+  'GET /api/instance/storage/v1/capabilities': {
+    operationId: 'getInstanceStorageCapabilities', summary: 'Negotiate native instance storage capabilities and process generation.', tags: ['System'],
+    responses: { 200: { description: 'Instance administrator capabilities; no Connect subscription required.', schema: InstanceStorageCapabilities } },
+  },
+  'GET /api/instance/storage/v1/repositories': {
+    operationId: 'getInstanceRepositoryInventory', summary: 'Read a bounded partial repository storage inventory with protection reasons.', tags: ['System'],
+    responses: { 200: { description: 'Safe identifiers and sizes; no host paths or contents.', schema: InstanceRepositoryInventory } },
+  },
+  'POST /api/instance/storage/v1/exports': {
+    operationId: 'startInstanceDatabaseExport', summary: 'Start a private asynchronous customer database snapshot.', tags: ['System'],
+    requestBody: { schema: InstanceDatabaseExportRequest },
+    headers: [{ name: 'X-ProPR-Storage', description: 'Must equal 1.', required: true }],
+    responses: { 202: { description: 'Actor-bound expiring export job.', schema: InstanceDatabaseExport } },
+  },
+  'GET /api/instance/storage/v1/exports/:operationId': {
+    operationId: 'getInstanceDatabaseExport', summary: 'Read the initiating administrator’s export status.', tags: ['System'],
+    query: InstanceDatabaseExportQuery,
+    responses: { 200: { description: 'Export state, digest, size and schema version.', schema: InstanceDatabaseExport } },
+  },
+  'POST /api/instance/storage/v1/exports/:operationId/download': {
+    operationId: 'downloadInstanceDatabaseExport', summary: 'Redeem an export once using current instance-admin authority.', tags: ['System'],
+    requestBody: { schema: InstanceDatabaseExportRequest },
+    headers: [{ name: 'X-ProPR-Storage', description: 'Must equal 1.', required: true }],
+    responses: { 200: { description: 'Integrity-checked SQLite snapshot; attachment, no-store.', contentType: 'application/vnd.sqlite3' } },
+  },
+  'POST /api/instance/storage/v1/exports/:operationId/cancel': {
+    operationId: 'cancelInstanceDatabaseExport', summary: 'Abort and discard an administrator’s private export.', tags: ['System'],
+    requestBody: { schema: InstanceDatabaseExportRequest },
+    headers: [{ name: 'X-ProPR-Storage', description: 'Must equal 1.', required: true }],
+    responses: { 200: { description: 'Export discarded.', schema: JsonObject } },
+  },
   'GET /api/instance/storage/v1/usage': {
     operationId: 'getInstanceStorageUsage',
     summary: 'Get bounded asynchronous per-instance storage observations.',

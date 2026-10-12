@@ -17,6 +17,8 @@ export const DEFAULT_STORAGE_POLICY: StoragePolicy = { enabled: false, idleHours
 export type StorageProtection = 'busy' | 'unknown_use' | 'recent_use' | 'unknown_ownership' | 'unsafe_path' | 'private_work' | 'worktrees' | 'local_history' | 'salvage' | 'remote_unavailable' | 'unknown_git_state' | 'changed' | 'unsupported';
 export interface StorageCandidate {
   id: string;
+  /** Validated repository identity, when this candidate is a repository cache. */
+  name?: string;
   category: StorageCategory;
   estimatedBytes: number | null;
   protectedReasons: StorageProtection[];
@@ -37,4 +39,34 @@ export interface StorageCleanupResult {
   state: 'completed' | 'interrupted';
   deleted: string[];
   retained: Array<{ id: string; reasons: StorageProtection[] }>;
+}
+
+/** Additive capability negotiation; older v1 runtimes need not support these features. */
+export interface StorageCapabilities {
+  version: 1;
+  instanceId: string;
+  generation: string;
+  features: Array<'repository_inventory' | 'database_export' | 'repository_cleanup'>;
+}
+export interface RepositoryStorageInventory {
+  version: 1;
+  instanceId: string;
+  state: StorageState;
+  observedAt: string;
+  /** Conservative instance-wide use clock, not filesystem mtime. */
+  lastUseAt: string | null;
+  repositories: Array<StorageCandidate & { name: string }>;
+}
+export interface DatabaseExportStatus {
+  version: 1;
+  instanceId: string;
+  generation: string;
+  operationId: string;
+  state: 'running' | 'ready' | 'failed' | 'redeemed';
+  expiresAt: string;
+  scope: 'customer_database';
+  sizeBytes?: number;
+  sha256?: string;
+  schemaVersion?: number;
+  migration?: string | null;
 }

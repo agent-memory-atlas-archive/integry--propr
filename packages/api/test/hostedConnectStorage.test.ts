@@ -68,6 +68,10 @@ test('hosted Connect CORS grants only exact configured origin, routes, methods a
   const storage = '/api/instance/storage/v1';
   for (const [url, method] of [
     ['/api/auth/user', 'GET'], [`${storage}/usage`, 'GET'], [`${storage}/policy`, 'GET'],
+    [`${storage}/capabilities`, 'GET'], [`${storage}/repositories`, 'GET'], [`${storage}/exports`, 'POST'],
+    [`${storage}/exports/12345678-1234-4234-8234-123456789abc`, 'GET'],
+    [`${storage}/exports/12345678-1234-4234-8234-123456789abc/download`, 'POST'],
+    [`${storage}/exports/12345678-1234-4234-8234-123456789abc/cancel`, 'POST'],
     [`${storage}/policy`, 'PUT'], [`${storage}/cleanup/preview`, 'POST'], [`${storage}/cleanup/execute`, 'POST'],
     [`${storage}/cleanup/operations/12345678-1234-4234-8234-123456789abc`, 'GET'],
   ]) {

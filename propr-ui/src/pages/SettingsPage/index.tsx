@@ -14,14 +14,13 @@ import { useSettingsState } from './useSettingsState';
 import { useDemoMode } from '../../contexts/DemoModeContext';
 import { useCurrentUser, userHasPermission } from '../../contexts/AuthContext';
 import NotificationSettingsSection from './NotificationSettingsSection';
-import VisualPreviewAuthSection from './VisualPreviewAuthSection';
 import DesktopNotificationSettingsSection from './DesktopNotificationSettingsSection';
 import VoiceSettingsSection from './VoiceSettingsSection';
 import { useDesktop } from '../../desktop/DesktopContext';
-import ManagedPreviewStorageSection from './ManagedPreviewStorageSection';
 import SettingsNavigation, { type SettingsNavigationSection } from './SettingsNavigation';
 import McpServerSection from './McpServerSection';
 import { useSettingsCategoryRoute } from './useSettingsCategoryRoute';
+import { settingsDataSections } from './settingsDataSections';
 import SettingsSaveStatusBar from './SettingsSaveStatusBar';
 
 const AdminSettingsPage: React.FC = () => {
@@ -30,26 +29,18 @@ const AdminSettingsPage: React.FC = () => {
   const categoryRoute = useSettingsCategoryRoute();
 
   const {
-    loading,
-    saveStatus,
-    globalError,
+    loading, saveStatus, globalError,
     settings,
     prLabel,
-    whitelist,
-    newWhitelistItem,
-    primaryLabels,
-    newPrimaryLabel,
-    keywords,
-    newKeyword,
-    ignoreKeywords,
-    newIgnoreKeyword,
-    agents,
-    catalogAgents,
+    whitelist, newWhitelistItem,
+    primaryLabels, newPrimaryLabel,
+    keywords, newKeyword,
+    ignoreKeywords, newIgnoreKeyword,
+    agents, catalogAgents,
     summarizationSettings,
     isReindexing,
     agentTankSettings,
-    agentTankAvailable,
-    agentTankCheckingStatus,
+    agentTankAvailable, agentTankCheckingStatus,
     setSettings,
     setPrLabel,
     setNewWhitelistItem,
@@ -63,14 +54,10 @@ const AdminSettingsPage: React.FC = () => {
     handleAgentRunSettingChange,
     handleReviewContextBudgetPercentCommit,
     handleRemoveLegacyReviewCap,
-    addWhitelistItem,
-    removeWhitelistItem,
-    addPrimaryLabel,
-    removePrimaryLabel,
-    addKeyword,
-    removeKeyword,
-    addIgnoreKeyword,
-    removeIgnoreKeyword,
+    addWhitelistItem, removeWhitelistItem,
+    addPrimaryLabel, removePrimaryLabel,
+    addKeyword, removeKeyword,
+    addIgnoreKeyword, removeIgnoreKeyword,
     handleSummarizationChange,
     handleSummarizationModelChange,
     handleSummarizationFallbackModelChange,
@@ -311,17 +298,7 @@ const AdminSettingsPage: React.FC = () => {
       searchText: 'agent runtime packages dependencies install catalog container image environment build',
       content: <AgentRuntimePackagesSection />
     },
-    {
-      id: 'visual-preview-uploads',
-      category: 'integrations',
-      searchText: 'visual preview upload screenshots videos GitHub login personal access token PAT credential authentication connect managed storage quota retention Plus originals',
-      content: (
-        <div className="space-y-10">
-          <VisualPreviewAuthSection />
-          <ManagedPreviewStorageSection />
-        </div>
-      )
-    },
+    ...settingsDataSections(),
     {
       id: 'voice-briefings',
       category: 'integrations',

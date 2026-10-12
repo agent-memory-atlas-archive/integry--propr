@@ -5,6 +5,12 @@ import type { RouteEntry } from './routeRegistry.js';
 export function createStorageRouteEntries(storage: ReturnType<typeof createInstanceStorageRoutes>): RouteEntry[] {
   const base = '/api/instance/storage/v1';
   return [
+    ['get', `${base}/capabilities`, requireManageSettings, storage.capabilities],
+    ['get', `${base}/repositories`, requireManageSettings, storage.inventory],
+    ['post', `${base}/exports`, requireManageSettings, storage.startExport],
+    ['get', `${base}/exports/:operationId`, requireManageSettings, storage.exportStatus],
+    ['post', `${base}/exports/:operationId/cancel`, requireManageSettings, storage.cancelExport],
+    ['post', `${base}/exports/:operationId/download`, requireManageSettings, storage.downloadExport],
     ['get', `${base}/usage`, requireManageSettings, storage.usage],
     ['get', `${base}/policy`, requireManageSettings, storage.policy],
     ['put', `${base}/policy`, requireManageSettings, storage.updatePolicy],
