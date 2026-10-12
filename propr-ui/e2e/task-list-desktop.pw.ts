@@ -261,7 +261,7 @@ test('1920px opens a task beside the list and steps through rows from the keyboa
   const header = details.getByTestId('task-header-tiers');
   await expect(header.getByTestId('task-header-identity')).toContainText('integry/propr');
   await expect(header.getByTestId('task-status-badge')).toHaveText('Implementing');
-  // Tier 1 reads `integry/propr #2664 ↗  ● Implementing`: chips set apart by space, no bullets and no empty icon.
+  // Tier 1 separates the Git cluster from Implementing with a hairline, no bullets and no empty icon.
   // The cluster ends with the pull request's assignment, which GitHub answered, so no read error stands in for it.
   const gitContext = header.getByTestId('task-header-identity').getByRole('group', { name: 'Git context' });
   expect(await gitContext.getByRole('link').evaluateAll(links => links.map(link => [link.textContent!.trim(), link.getAttribute('href')]))).toEqual([
@@ -280,10 +280,10 @@ test('1920px opens a task beside the list and steps through rows from the keyboa
   await expect(header.getByRole('group', { name: 'Execution runtime' })).toHaveText(/gpt-6-astra.*3m 0?0s/);
   await expect(header.getByRole('group', { name: 'Consumption' })).toHaveText('↑420k↓12k(0.1% quota)');
   await expect(header).not.toContainText('3.9M');
-  // No divider floats in front of Stop when nothing stands before it.
-  // The assignment's own hairline, which sets it apart inside the Git cluster, is not one of them.
-  expect(await header.getByTestId('task-header-identity').locator('.w-px').evaluateAll(nodes => nodes
-    .filter(node => !node.closest('[role="group"][aria-label="Assignment"]')).length)).toBe(0);
+  // The identity row has one hairline before the status, plus the assignment's own
+  // hairline inside the Git cluster. No extra divider floats in front of Stop.
+  await expect(header.getByTestId('task-header-identity').locator('.w-px + [data-testid="task-status-badge"]')).toHaveCount(1);
+  await expect(header.getByTestId('task-header-identity').locator('.w-px')).toHaveCount(2);
   await expect(assignment.locator('.w-px')).toHaveCount(1);
   expect((await header.boundingBox())!.height).toBeLessThanOrEqual(120);
   // The pane's controls are icons in the header's first row, not a row of their own.
