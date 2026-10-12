@@ -40,7 +40,9 @@ const unwrapWirePayload = (content: string): string => {
  */
 export const readableThoughtContent = (content: string | undefined): string | null => {
   if (!content) return null;
-  const unwrapped = unwrapWirePayload(content);
+  // Strip only the transport label at the start, including its Markdown form.
+  // Interior mentions and raw tool output retain their original meaning.
+  const unwrapped = unwrapWirePayload(content).replace(/^\s*(?:\*\*Result:\*\*|Result:)\s*/i, '');
   const text = unwrapped.trim();
   if (!text || INTERNAL_PLACEHOLDER.test(text)) return null;
   return unwrapped === content ? content : text;

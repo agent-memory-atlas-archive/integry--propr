@@ -23,6 +23,16 @@ describe('readableThoughtContent', () => {
     expect(readableThoughtContent('{"content": [not json')).toBe('{"content": [not json');
   });
 
+  it('strips the leading Result label from prose and unwrapped responses only', () => {
+    for (const prefix of ['Result: ', '**Result:** ', '  Result:\n']) {
+      expect(readableThoughtContent(`${prefix}I will trace the setup.`)).toBe('I will trace the setup.');
+    }
+    expect(readableThoughtContent(JSON.stringify({ content: [{ type: 'text', text: 'Result: Checks pass.' }] }))).toBe('Checks pass.');
+    expect(readableThoughtContent('Result: [local preview omitted]')).toBeNull();
+    expect(readableThoughtContent('The command prints Result: success.')).toBe('The command prints Result: success.');
+    expect(readableThoughtContent('```\nResult: success\n```')).toBe('```\nResult: success\n```');
+  });
+
   it('only rewrites thoughts', () => {
     const tool = { type: 'tool_result' as const, content: '[local preview omitted]' };
     const thought = { type: 'thought' as const, content: 'Plain' };

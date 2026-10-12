@@ -175,9 +175,6 @@ const TokenUsageChip: React.FC<{ tokenUsage: TokenUsage }> = ({ tokenUsage }) =>
     (tokenUsage.cache_creation_input_tokens ?? 0) +
     (tokenUsage.cache_read_input_tokens ?? 0);
   const outputTokens = tokenUsage.output_tokens ?? 0;
-  const hasTokens = inputTokens > 0 || outputTokens > 0;
-
-  if (!hasTokens) return null;
 
   return (
     <span
@@ -198,13 +195,14 @@ function findMetricRecord(records: UsageMetricRecord[], rawKey: string): UsageMe
 
 // Usage metrics chip component (Agent Tank tracking)
 const UsageMetricsChip: React.FC<{ usageMetricRecords: UsageMetricRecord[] }> = ({ usageMetricRecords }) => {
-  if (!usageMetricRecords || usageMetricRecords.length === 0) return null;
 
   // Find the session usage (most relevant for current task)
   const sessionRecord = findMetricRecord(usageMetricRecords, 'session');
   const weeklyRecord = findMetricRecord(usageMetricRecords, 'weeklyAll') || findMetricRecord(usageMetricRecords, 'weekly');
 
-  if (!sessionRecord && !weeklyRecord) return null;
+  if (!sessionRecord && !weeklyRecord) {
+    return <span className="font-mono text-xs text-slate-500" title="Quota usage has not been reported">(Quota unavailable)</span>;
+  }
 
   const sessionPct = sessionRecord?.metricValue ?? 0;
   const weeklyPct = weeklyRecord?.metricValue ?? 0;
@@ -214,18 +212,15 @@ const UsageMetricsChip: React.FC<{ usageMetricRecords: UsageMetricRecord[] }> = 
     .map(r => `${humanizeMetricKey(r.metricKey)}: ${r.metricValue.toFixed(1)}%`)
     .join(' | ');
 
-  // Only show if there's actual usage
-  if (sessionPct === 0 && weeklyPct === 0) return null;
-
   // One quota reads `(0.4% quota)`, its kind in the tooltip; both name theirs.
-  const both = sessionPct > 0 && weeklyPct > 0;
+  const both = Boolean(sessionRecord && weeklyRecord);
   const tone = (pct: number) => pct > 25 ? 'text-amber-600 font-medium' : 'text-slate-500';
   return (
     <span className="font-mono text-xs text-slate-500" title={`Usage consumed: ${tooltip}`}>
       (
-      {sessionPct > 0 && <span className={tone(sessionPct)}>{sessionPct.toFixed(1)}% {both ? 'session' : 'quota'}</span>}
+      {sessionRecord && <span className={tone(sessionPct)}>{sessionPct.toFixed(1)}% {both ? 'session' : 'quota'}</span>}
       {both && ', '}
-      {weeklyPct > 0 && <span className={tone(weeklyPct)}>{weeklyPct.toFixed(1)}% {both ? 'weekly' : 'quota'}</span>}
+      {weeklyRecord && <span className={tone(weeklyPct)}>{weeklyPct.toFixed(1)}% {both ? 'weekly' : 'quota'}</span>}
       )
     </span>
   );
@@ -273,9 +268,6 @@ const TelemetryGroups: React.FC<{
   lead?: React.ReactNode;
   divided: boolean;
 }> = ({ modelName, duration, synthetic, tokenUsage, usageMetricRecords, budget, lead, divided }) => {
-  const hasTokens = tokenUsage && Object.values(tokenUsage).some(value => (value ?? 0) > 0);
-  const hasQuota = usageMetricRecords?.some(record => record.metricValue > 0 &&
-    ['session', 'Session', 'weeklyAll', 'weekly', 'Weekly'].includes(record.metricKey));
   const hasBudget = Boolean(budget && (budget.capUsd !== null || budget.spentUsd > 0));
   return (
     <>
@@ -287,13 +279,11 @@ const TelemetryGroups: React.FC<{
       <ContextGroup label="Execution runtime" divided={divided}>
         <ModelChip modelName={modelName} duration={duration} synthetic={synthetic} />
       </ContextGroup>
-      {(hasTokens || hasQuota || hasBudget) && (
-        <ContextGroup label="Consumption" divided>
-          {hasTokens && <TokenUsageChip tokenUsage={tokenUsage} />}
-          {hasQuota && <UsageMetricsChip usageMetricRecords={usageMetricRecords!} />}
-          {hasBudget && <BudgetChip budget={budget!} />}
-        </ContextGroup>
-      )}
+      <ContextGroup label="Consumption" divided>
+        <TokenUsageChip tokenUsage={tokenUsage ?? {}} />
+        <UsageMetricsChip usageMetricRecords={usageMetricRecords ?? []} />
+        {hasBudget && <BudgetChip budget={budget!} />}
+      </ContextGroup>
     </>
   );
 };

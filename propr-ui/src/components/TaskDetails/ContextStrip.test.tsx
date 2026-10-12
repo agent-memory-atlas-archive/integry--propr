@@ -40,10 +40,15 @@ describe('Task details telemetry', () => {
     expect(screen.getByText('5.1% weekly')).toHaveClass('text-slate-500');
   });
 
-  it('omits consumption when there are no tokens or quota deltas', () => {
+  it('keeps zero tokens and reported zero quota visible', () => {
     render(<ContextStrip {...props} tokenUsage={{ input_tokens: 0, output_tokens: null }}
       usageMetricRecords={[{ agent: 'codex', metricKey: 'Weekly', metricValue: 0 }]} />);
-    expect(screen.queryByRole('group', { name: 'Consumption' })).not.toBeInTheDocument();
+    expect(screen.getByRole('group', { name: 'Consumption' })).toHaveTextContent('↑0↓0(0.0% quota)');
+  });
+
+  it('keeps a consumption slot before any usage is reported', () => {
+    render(<ContextStrip {...props} />);
+    expect(screen.getByRole('group', { name: 'Consumption' })).toHaveTextContent('↑0↓0(Quota unavailable)');
   });
 
   it('shows the run spend beside its cap and marks a run stopped at the cap', () => {

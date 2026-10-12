@@ -260,7 +260,7 @@ const AssignmentControl: React.FC<{ assignment: TaskAssignment }> = ({ assignmen
   if (error) {
     return (
       <div role="group" aria-label="Assignment" data-testid="task-assignment-error" className="inline-flex min-w-0 items-center gap-1.5 text-xs text-slate-500">
-        <span aria-hidden="true" className="mr-0.5 hidden h-3 w-px flex-none bg-slate-200 sm:inline-block" />
+        <span aria-hidden="true" className="mx-2 hidden h-3 w-px flex-none bg-slate-200 sm:inline-block" />
         <span className="truncate" title={error}>Couldn't load assignment</span>
         <button
           type="button"
@@ -295,7 +295,7 @@ const AssignmentControl: React.FC<{ assignment: TaskAssignment }> = ({ assignmen
       }}
     >
       {/* On a phone the control wraps to its own line, where a divider would dangle. */}
-      <span aria-hidden="true" className="mr-0.5 hidden h-3 w-px flex-none bg-slate-200 sm:inline-block" />
+      <span aria-hidden="true" className="mx-2 hidden h-3 w-px flex-none bg-slate-200 sm:inline-block" />
       {assignees.length > 0
         ? <AssigneeList assignees={assignees} variant="prominent" />
         : <span data-testid="assignment-unassigned" className="text-xs text-slate-500">Unassigned</span>}
