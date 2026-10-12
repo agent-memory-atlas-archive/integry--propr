@@ -86,7 +86,7 @@ not delete worktrees, files, notifications, external GitHub issues/PRs, external
 logs, or third-party provider history. Credential bytes stored in SQLite are already in
 `database_config`, never counted twice as another category.
 
-An operation ID is the confirmation UUID. It expires after five minutes and is bound to
+An operation ID is the confirmation UUID. The confirmation expires after five minutes and is bound to
 the instance, actor, exact candidate fingerprints and use clock. Execution consumes it
 before side effects; replay returns 409. During execution the durable result has state
 `interrupted`; after successful completion it is `completed`. A crashed execution is not
@@ -210,8 +210,10 @@ contract with an already authenticated instance principal; it cannot manufacture
 The server re-resolves authorization from the instance authority at request time, after
 slow inventory/proof work, before deletion, during export execution, on status requests
 and at download redemption. A demotion during Git proof restores the quarantined cache.
-Cleanup confirmations and results also expire and are bound to the process generation;
-restarting requires a new preview.
+Cleanup confirmations expire after five minutes and are bound to the process generation;
+restarting requires a new preview. Cleanup results remain durable without expiry, scoped
+to the initiating actor, instance and operation. Completed and interrupted results remain
+readable after preview expiry and restart, including results written by earlier v1 versions.
 
 The following endpoints extend v1 additively. First request `/capabilities`; require the
 named feature and keep both `instanceId` and `generation`. A missing endpoint, unsupported

@@ -350,8 +350,9 @@ export class InstanceStorageService {
       this.validateConfirmation(saved, instanceId, actor);
       const result: StorageCleanupResult = { version: 1, instanceId, operationId: confirmation, state: 'interrupted', deleted: [], retained: [] };
       // Consume before any side effects; never automatically replay an interrupted operation.
+      // Results outlive confirmations and process generations for durable recovery.
       await fs.rename(path.join(this.root, `preview-${confirmation}.json`), path.join(this.root, `consumed-${confirmation}.json`));
-      await this.write(`result-${confirmation}.json`, { actor, result, generation: this.generation, expiresAt: saved.preview.expiresAt });
+      await this.write(`result-${confirmation}.json`, { actor, result });
       await this.audit(actor, 'execute_started', { operationId: confirmation });
       if (actor === 'automatic') await this.validateAutomaticExecution();
       const busy = await this.busy();
@@ -367,11 +368,11 @@ export class InstanceStorageService {
           if (!reasons.length) result.deleted.push(candidate.id);
         }
         if (reasons.length) result.retained.push({ id: candidate.id, reasons });
-        await this.write(`result-${confirmation}.json`, { actor, result, generation: this.generation, expiresAt: saved.preview.expiresAt });
+        await this.write(`result-${confirmation}.json`, { actor, result });
       }
       result.state = 'completed';
       await this.audit(actor, 'execute_completed', result);
-      await this.write(`result-${confirmation}.json`, { actor, result, generation: this.generation, expiresAt: saved.preview.expiresAt });
+      await this.write(`result-${confirmation}.json`, { actor, result });
       this.observation = undefined; this.inventoryScan = undefined;
       return result;
     });
@@ -379,8 +380,8 @@ export class InstanceStorageService {
   async result(instanceId: string, operationId: string, actor: string): Promise<StorageCleanupResult> {
     await this.assertInstance(instanceId);
     if (!/^[0-9a-f-]{36}$/.test(operationId)) throw new StorageContractError(400, 'Invalid operation');
-    const saved = await this.read<{ actor: string; result: StorageCleanupResult; generation: string; expiresAt: string }>(`result-${operationId}.json`).catch(() => null);
-    if (!saved || saved.actor !== actor || saved.generation !== this.generation || !(Date.parse(saved.expiresAt) > Date.now())) throw new StorageContractError(404, 'Operation unavailable');
+    const saved = await this.read<{ actor: string; result: StorageCleanupResult }>(`result-${operationId}.json`).catch(() => null);
+    if (!saved || saved.actor !== actor || saved.result.instanceId !== instanceId || saved.result.operationId !== operationId) throw new StorageContractError(404, 'Operation unavailable');
     return saved.result;
   }
   /** Automatic execution uses exactly the manual proof and revalidation, never age alone. */
