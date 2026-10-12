@@ -1,8 +1,9 @@
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { mkdir, mkdtemp, readFile, readdir, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { Readable } from 'node:stream';
 import { describe, test } from 'node:test';
 import {
@@ -418,4 +419,49 @@ describe('Linux preview release channel', () => {
       workflowRunId: '1234',
     }), /bytes drifted/);
   });
+});
+
+// Does not need RPM installed: stop at the first package parser and observe only
+// presence/absence, never print the supplied secret values.
+test('sign-bundle scrubs inherited signing secrets before its first package parser', {
+  skip: process.platform === 'win32' ? 'POSIX parser wrappers' : false,
+}, async t => {
+  const { root, directory } = await createBundle();
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const bin = join(root, 'bin');
+  const evidence = join(root, 'parser.json');
+  await mkdir(bin);
+  const parser = `#!${process.execPath}
+const fs = require('node:fs');
+fs.writeFileSync(${JSON.stringify(evidence)}, JSON.stringify({
+  key: 'PROPR_DESKTOP_RPM_PRIVATE_KEY' in process.env,
+  passphrase: 'PROPR_DESKTOP_RPM_PASSPHRASE' in process.env,
+}));
+process.exit(42);
+`;
+  for (const name of ['rpm', 'dpkg-deb']) await writeFile(join(bin, name), parser, { mode: 0o755 });
+  const result = spawnSync(process.execPath, ['apps/desktop/scripts/linux-preview-release.mjs',
+    'sign-bundle', '--signed-rpm', '--input', directory, '--output', join(root, 'signed'),
+    '--version', version, '--source-revision', sourceRevision, '--repository', repository], {
+    cwd: resolve(import.meta.dirname, '../../..'),
+    encoding: 'utf8', env: { ...process.env, PATH: bin,
+      PROPR_DESKTOP_RPM_PRIVATE_KEY: 'private-test-sentinel', PROPR_DESKTOP_RPM_PASSPHRASE: 'password-test-sentinel',
+      PROPR_DESKTOP_RPM_PUBLIC_KEY: '-----BEGIN PGP PUBLIC KEY BLOCK-----',
+      PROPR_DESKTOP_RPM_FINGERPRINT: 'A'.repeat(40) },
+  });
+  assert.equal(result.status, 1);
+  assert.deepEqual(JSON.parse(await readFile(evidence, 'utf8')), { key: false, passphrase: false });
+  assert.doesNotMatch(result.stdout + result.stderr, /private-test-sentinel|password-test-sentinel/);
+});
+
+test('signed install notes make rpmkeys primary and offer a standalone pinned-source helper', () => {
+  const rpmIdentity = { fingerprint: 'A'.repeat(40), publicKey: '-----BEGIN PGP PUBLIC KEY BLOCK-----' };
+  const notes = linuxPreviewInstallNotes({ version, sourceRevision, tag: linuxPreviewTag(version, sourceRevision, rpmIdentity), rpmIdentity });
+  assert.match(notes, /rpmkeys --checksig --verbose/);
+  assert.match(notes, /does not require Node or a repository checkout/);
+  assert.match(notes, /Both key IDs must match the confirmed fingerprint suffix/);
+  assert.match(notes, /Optionally.*Node.js 22\+/);
+  assert.ok(notes.includes('https://raw.githubusercontent.com/integry/propr/${HELPER_REVISION}/apps/desktop/scripts/rpm-signing.mjs'));
+  assert.match(notes, /node \.\/rpm-signing.mjs verify/);
+  assert.doesNotMatch(notes, /node apps\/desktop\/scripts/);
 });

@@ -1,0 +1,245 @@
+name: Desktop Linux Signed RPM Preview
+
+on:
+  workflow_dispatch:
+    inputs:
+      operation:
+        description: Sign an existing unsigned bundle into a distinct draft, or publish the signed draft
+        required: true
+        type: choice
+        default: sign-draft
+        options: [sign-draft, publish-draft]
+      source_revision:
+        description: Frozen full source SHA of the unsigned preview (do not refresh implicitly)
+        required: true
+        type: string
+      unsigned_run_id:
+        description: Sign only - successful Desktop Linux Preview Release stage-draft run ID
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: desktop-linux-signed-preview-${{ inputs.source_revision }}
+  cancel-in-progress: false
+
+jobs:
+  identity:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      version: ${{ steps.identity.outputs.version }}
+      unsigned_artifact: ${{ steps.identity.outputs.unsigned_artifact }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Validate frozen source and trusted unsigned workflow provenance
+        id: identity
+        env:
+          SOURCE_REVISION: ${{ inputs.source_revision }}
+          OPERATION: ${{ inputs.operation }}
+          UNSIGNED_RUN_ID: ${{ inputs.unsigned_run_id }}
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          [[ "$SOURCE_REVISION" =~ ^[a-f0-9]{40}$ ]]
+          git merge-base --is-ancestor "$SOURCE_REVISION" HEAD
+          git show "$SOURCE_REVISION:apps/desktop/package.json" > "$RUNNER_TEMP/frozen-desktop-package.json"
+          version="$(node -p 'require(process.env.RUNNER_TEMP + "/frozen-desktop-package.json").version')"
+          [[ "$version" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
+          if [ "$OPERATION" = sign-draft ]; then
+            [[ "$UNSIGNED_RUN_ID" =~ ^[0-9]+$ ]]
+            gh api "repos/$REPOSITORY/actions/runs/$UNSIGNED_RUN_ID" > "$RUNNER_TEMP/unsigned-run.json"
+            node --input-type=module - <<'NODE'
+          import { readFileSync } from 'node:fs';
+          const run = JSON.parse(readFileSync(`${process.env.RUNNER_TEMP}/unsigned-run.json`));
+          if (String(run.id) !== process.env.UNSIGNED_RUN_ID || run.event !== 'workflow_dispatch'
+            || run.path !== '.github/workflows/desktop-linux-preview.yml'
+            || run.head_branch !== 'main' || run.conclusion !== 'success'
+            || run.repository.full_name !== process.env.REPOSITORY) {
+            throw new Error('Expected a successful main-dispatched unsigned preview workflow in this repository');
+          }
+          NODE
+          else
+            test "$OPERATION" = publish-draft
+            test -z "$UNSIGNED_RUN_ID"
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "unsigned_artifact=propr-desktop-linux-preview-final-desktop-linux-preview-v${version}-${SOURCE_REVISION:0:12}-${UNSIGNED_RUN_ID}" >> "$GITHUB_OUTPUT"
+
+  verify-helpers:
+    needs: identity
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version-file: '.nvmrc'
+      - run: |
+          sudo apt-get update
+          sudo apt-get install --yes rpm gnupg cpio
+      - name: Exercise disposable keys, native fixtures, and signed publication rejection
+        env:
+          PROPR_REQUIRE_RPM_TESTS: '1'
+        run: |
+          node --test apps/desktop/scripts/rpm-signing.test.mjs \
+            apps/desktop/scripts/linux-preview-release.test.mjs \
+            apps/desktop/scripts/linux-preview-workflow.test.mjs
+
+  sign:
+    if: inputs.operation == 'sign-draft'
+    needs: [identity, verify-helpers]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    environment:
+      name: desktop-linux-rpm-signing
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - name: Require owner-provisioned signing authority
+        env:
+          AUTHORIZED: ${{ vars.PROPR_DESKTOP_RPM_SIGNING_AUTHORIZED }}
+        run: test "$AUTHORIZED" = 1
+      - name: Checkout reviewed signing code only
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Checkout frozen source pins as data
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ inputs.source_revision }}
+          path: frozen-source
+          persist-credentials: false
+      - name: Install RPM signing and package inspection tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes rpm gnupg cpio
+      - name: Download only the exact finalized unsigned bundle
+        uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6
+        with:
+          github-token: ${{ github.token }}
+          run-id: ${{ inputs.unsigned_run_id }}
+          name: ${{ needs.identity.outputs.unsigned_artifact }}
+          path: unsigned-preview
+      - name: Bind bundle to original workflow run
+        env:
+          UNSIGNED_RUN_ID: ${{ inputs.unsigned_run_id }}
+        run: |
+          node --input-type=module - <<'NODE'
+          import { readFileSync } from 'node:fs';
+          const manifest = JSON.parse(readFileSync('unsigned-preview/linux-preview.json'));
+          if (manifest.workflowRunId !== process.env.UNSIGNED_RUN_ID) throw new Error('Original preview run mismatch');
+          NODE
+      - name: Sign both RPM architectures, independently verify, then finalize metadata
+        env:
+          PROPR_DESKTOP_RPM_PRIVATE_KEY: ${{ secrets.PROPR_DESKTOP_RPM_PRIVATE_KEY }}
+          PROPR_DESKTOP_RPM_PASSPHRASE: ${{ secrets.PROPR_DESKTOP_RPM_PASSPHRASE }}
+          PROPR_DESKTOP_RPM_PUBLIC_KEY: ${{ vars.PROPR_DESKTOP_RPM_PUBLIC_KEY }}
+          PROPR_DESKTOP_RPM_FINGERPRINT: ${{ vars.PROPR_DESKTOP_RPM_FINGERPRINT }}
+          VERSION: ${{ needs.identity.outputs.version }}
+          SOURCE_REVISION: ${{ inputs.source_revision }}
+        run: |
+          node apps/desktop/scripts/linux-preview-release.mjs sign-bundle --signed-rpm \
+            --version "$VERSION" --source-revision "$SOURCE_REVISION" \
+            --repository "${{ github.repository }}" --source-directory frozen-source \
+            --input unsigned-preview --output signed-preview
+          (cd signed-preview && sha256sum --check SHA256SUMS)
+      - name: Upload only final signed bytes
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: propr-desktop-rpm-signed-${{ github.run_id }}
+          path: signed-preview
+          if-no-files-found: error
+          retention-days: 90
+
+  stage-draft:
+    if: inputs.operation == 'sign-draft'
+    needs: [identity, sign]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ inputs.source_revision }}
+          path: frozen-source
+          persist-credentials: false
+      - run: |
+          sudo apt-get update
+          sudo apt-get install --yes rpm gnupg cpio
+      - uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6
+        with:
+          name: propr-desktop-rpm-signed-${{ github.run_id }}
+          path: signed-preview
+      - name: Reverify signed bundle and stage or resume exact draft bytes
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          PROPR_DESKTOP_RPM_PUBLIC_KEY: ${{ vars.PROPR_DESKTOP_RPM_PUBLIC_KEY }}
+          PROPR_DESKTOP_RPM_FINGERPRINT: ${{ vars.PROPR_DESKTOP_RPM_FINGERPRINT }}
+          VERSION: ${{ needs.identity.outputs.version }}
+          SOURCE_REVISION: ${{ inputs.source_revision }}
+        run: |
+          node apps/desktop/scripts/linux-preview-release.mjs stage-draft --signed-rpm \
+            --version "$VERSION" --source-revision "$SOURCE_REVISION" \
+            --repository "${{ github.repository }}" --source-directory frozen-source \
+            --directory signed-preview
+
+  publish-draft:
+    if: inputs.operation == 'publish-draft'
+    needs: [identity, verify-helpers]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    environment:
+      name: desktop-linux-preview-publication
+    permissions:
+      contents: write
+    steps:
+      - name: Require explicit protected preview publication authority
+        env:
+          AUTHORIZED: ${{ vars.PROPR_DESKTOP_LINUX_PREVIEW_PUBLICATION_AUTHORIZED }}
+        run: test "$AUTHORIZED" = 1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ inputs.source_revision }}
+          path: frozen-source
+          persist-credentials: false
+      - run: |
+          sudo apt-get update
+          sudo apt-get install --yes rpm gnupg cpio
+      - name: Download exact draft bytes and reverify signatures and payload before publication
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          PROPR_DESKTOP_RPM_PUBLIC_KEY: ${{ vars.PROPR_DESKTOP_RPM_PUBLIC_KEY }}
+          PROPR_DESKTOP_RPM_FINGERPRINT: ${{ vars.PROPR_DESKTOP_RPM_FINGERPRINT }}
+          VERSION: ${{ needs.identity.outputs.version }}
+          SOURCE_REVISION: ${{ inputs.source_revision }}
+        run: |
+          node apps/desktop/scripts/linux-preview-release.mjs publish-draft --signed-rpm \
+            --version "$VERSION" --source-revision "$SOURCE_REVISION" \
+            --repository "${{ github.repository }}" --source-directory frozen-source
