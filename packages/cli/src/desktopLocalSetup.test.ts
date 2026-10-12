@@ -6,6 +6,7 @@ import { describe, test } from 'node:test';
 import { PROPR_API_COMPATIBILITY, PROPR_UI_COMPATIBILITY } from '@propr/shared';
 import { checkDesktopRuntimeCompatibility, createDesktopSetupHost } from './desktopLocalSetup.js';
 import { assertOwnedLocalSetupRoot, ConnectRootError } from './connectIdentity.js';
+import { ConfigManager } from './config/index.js';
 import type { CapturedCommandRunner } from './auth/githubLogin.js';
 
 const fixtureDirectory = (): string => realpathSync.native(mkdtempSync(join(tmpdir(), 'propr-desktop-host-')));
@@ -244,7 +245,7 @@ describe('desktop setup host authentication boundary', () => {
         capturedCommand: async () => { throw new Error('must not probe gh'); },
         authenticationHandoff: async () => { throw new Error('must not open a terminal'); },
       });
-      await assert.rejects(host.actions.loginWithGithub(), /browser sign-in is not configured/);
+      assert.equal(await host.actions.loginWithGithub(), false);
       assert.equal(host.actions.hasGithubToken(), false);
     } finally { rmSync(configDir, { recursive: true, force: true }); }
   });
@@ -407,3 +408,52 @@ test('local setup authority diagnostics distinguish unsafe mode, ownership, and 
     return true;
   });
 });
+
+for (const failure of ['cancel', 'denied', 'wrong-account', 'transport']) test(`desktop preserves stored token on ${failure} and permits retry`, async () => {
+  const configDir = fixtureDirectory();
+  let fail = true; let externalCalls = 0;
+  const logs: string[] = [];
+  try {
+    const config = new ConfigManager(configDir);
+    await config.setGithubToken('original-token');
+    const host = await createDesktopSetupHost({ configDir,
+      capturedCommand: async () => { externalCalls++; throw new Error('gh'); },
+      authenticationHandoff: async () => { externalCalls++; throw new Error('terminal'); },
+      githubBrowserLogin: async () => {
+        if (fail) throw Object.assign(new Error('private-provider-payload'), { name: failure === 'cancel' ? 'AbortError' : 'Error' });
+        return 'replacement-token';
+      },
+    });
+    assert.equal(await host.actions.loginWithGithub({ force: true, onLog: line => logs.push(line) }), false);
+    assert.equal(await readStoredToken(configDir), 'original-token');
+    assert.deepEqual(logs, ['GitHub authentication did not complete. Try again or keep the current account.']);
+    fail = false;
+    assert.equal(await host.actions.loginWithGithub({ force: true }), true);
+    assert.equal(await readStoredToken(configDir), 'replacement-token');
+    assert.equal(externalCalls, 0);
+  } finally { rmSync(configDir, { recursive: true, force: true }); }
+});
+
+for (const rejects of [true, false]) test(`setup cancellation propagates and prevents token replacement (provider rejects: ${rejects})`, async () => {
+  const configDir = fixtureDirectory(); const controller = new AbortController();
+  const reason = new Error('setup cancelled');
+  try {
+    await new ConfigManager(configDir).setGithubToken('original-token');
+    const host = await createDesktopSetupHost({ configDir,
+      authenticationHandoff: async () => assert.fail('must not open terminal'),
+      capturedCommand: async () => assert.fail('must not invoke gh'),
+      githubBrowserLogin: async () => {
+      controller.abort(reason);
+      if (rejects) throw new Error('provider payload');
+      return 'late-token';
+    } });
+    await assert.rejects(host.actions.loginWithGithub({ signal: controller.signal }), error => error === reason);
+    assert.equal(await readStoredToken(configDir), 'original-token');
+  } finally { rmSync(configDir, { recursive: true, force: true }); }
+});
+
+async function readStoredToken(configDir: string) {
+  const config = new ConfigManager(configDir);
+  await config.init();
+  return config.getGithubToken();
+}

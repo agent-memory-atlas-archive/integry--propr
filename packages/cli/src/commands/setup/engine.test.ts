@@ -1703,3 +1703,50 @@ test("prompts drive a full unattended run to completion", async () => {
     ["check", "init-stack", "pull-images", "configure-agents", "github-auth", "intake", "start-stack", "enable-agents", "whitelist", "repo", "launch-ui"]
   );
 });
+
+test("failed account change retains chooser identity and installations, then retry succeeds", async () => {
+  let username = "first-user"; let attempts = 0; let choices = 0;
+  const result = await runSetup({ root: "/stack", prompts: relayPrompts({
+    chooseInstallation: async context => {
+      choices++;
+      if (choices === 1) return { action: "select", installationId: "100" };
+      if (choices <= 3) {
+        assert.equal(context.username, "first-user");
+        assert.deepEqual(context.installations, [inst(100, "first-user")]);
+        assert.equal(context.selectedInstallationId, "100");
+        if (choices === 3) assert.match(context.enrollmentPermissionError ?? "", /Try again or keep the current account/);
+        return { action: "reauthenticate" };
+      }
+      assert.equal(context.username, "second-user");
+      assert.equal(context.selectedInstallationId, undefined);
+      assert.equal(context.enrollmentPermissionError, undefined);
+      return { action: "select", installationId: "200" };
+    },
+  }), actions: mockActions({
+    hasGithubToken: () => true,
+    enrollRelay: async ({ installationId }) => {
+      if (installationId === "100") throw Object.assign(new Error("owner authorization required"), { status: 403 });
+      return { relayUrl: DEFAULT_PROPR_GH_RELAY_URL, token: "fixture-relay-token" };
+    },
+    loginWithGithub: async () => { if (++attempts === 1) return false; username = "second-user"; return true; },
+    fetchRelayInstallations: async () => ({ username, installations: [inst(username === "first-user" ? 100 : 200, username)] }),
+  }) });
+  assert.equal(choices, 4); assert.equal(attempts, 2);
+  assert.equal(statusOf(result.state, "github-auth"), "done");
+});
+
+test("incomplete initial browser login stops before enrollment and backend startup", async () => {
+  let loginCalls = 0;
+  const result = await runSetup({ root: "/stack", prompts: relayPrompts({ confirmGithubLogin: async () => true }),
+    actions: mockActions({
+      hasGithubToken: () => false,
+      loginWithGithub: async () => { loginCalls++; return false; },
+      fetchRelayInstallations: async () => assert.fail("no discovery without a token"),
+      enrollRelay: async () => assert.fail("no enrollment without a token"),
+      startStack: async () => assert.fail("no backend startup without a token"),
+    }),
+  });
+  assert.equal(loginCalls, 1);
+  assert.match(getStep(result.state, "github-auth")?.detail ?? "", /not logged in/);
+  assert.equal(statusOf(result.state, "start-stack"), "pending");
+});

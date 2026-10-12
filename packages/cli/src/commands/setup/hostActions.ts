@@ -355,7 +355,15 @@ export function createDefaultActions(configManager?: ConfigManager, options: {
     async loginWithGithub({ onLog, signal, force } = {}) {
       if (!configManager) return false;
       if (options.githubBrowserLogin) {
-        const token = await options.githubBrowserLogin({ signal, onLog });
+        let token: string;
+        try {
+          token = await options.githubBrowserLogin({ signal, onLog });
+        } catch {
+          signal?.throwIfAborted();
+          // Injected providers/transport errors may contain credentials. Never log them.
+          onLog?.("GitHub authentication did not complete. Try again or keep the current account.");
+          return false;
+        }
         signal?.throwIfAborted();
         await configManager.setGithubToken(token);
         return true;

@@ -42,7 +42,7 @@ test('polling respects pending and cumulative slowdown intervals', async () => {
 
 for (const error of ['access_denied', 'expired_token', 'incorrect_client_credentials']) test(`handles ${error} and closes native UI`, async () => {
   const f = fixture([device, { error }]);
-  await assert.rejects(createGithubBrowserLogin(f.dependencies)(), /GitHub sign-in/);
+  await assert.rejects(createGithubBrowserLogin(f.dependencies)(), /GitHub (sign-in|OAuth client)/);
   assert.equal(f.closed(), 1);
 });
 
@@ -127,4 +127,34 @@ test('unsupported expiring credentials fail clearly before storage or identity c
   await assert.rejects(createGithubBrowserLogin(f.dependencies)(), /non-expiring user tokens/);
   assert.deepEqual(f.identities, []);
   assert.equal(f.closed(), 1);
+});
+
+for (const error of ['device_flow_disabled', 'incorrect_client_credentials']) test(`recognizes HTTP 400 ${error} without provider text`, async () => {
+  const f = fixture();
+  f.dependencies.fetch = async () => Response.json({ error, error_description: 'secret-provider-text' }, { status: 400 });
+  await assert.rejects(createGithubBrowserLogin(f.dependencies)(), error => {
+    assert.match((error as Error).message, /Contact the desktop distributor/);
+    assert.ok(!(error as Error).message.includes('secret-provider-text')); return true;
+  });
+});
+
+for (const body of ['not-json', JSON.stringify({ error: 'unknown', error_description: 'private-data' })]) test('unknown HTTP error bodies remain private', async () => {
+  const f = fixture(); f.dependencies.fetch = async () => new Response(body, { status: 400 });
+  await assert.rejects(createGithubBrowserLogin(f.dependencies)(), error => {
+    assert.ok(!(error as Error).message.includes(body)); return true;
+  });
+});
+
+test('bounded opaque provider codes accept alternate printable formats', async () => {
+  const alternate = { ...device, device_code: 'opaque_DEVICE.code+/=', user_code: 'code_123.456' };
+  const f = fixture([alternate, token, { login: 'propr-ultrafix', id: 123 }]);
+  f.dependencies.presentCode = async code => { assert.equal(code, alternate.user_code); return async () => {}; };
+  f.dependencies.confirmIdentity = async () => true;
+  assert.equal(await createGithubBrowserLogin(f.dependencies)(), token.access_token);
+  assert.equal(new URLSearchParams(f.calls[1].options?.body as URLSearchParams).get('device_code'), alternate.device_code);
+});
+for (const field of ['device_code', 'user_code']) for (const value of ['', 'a\nb', 'x'.repeat(field === 'device_code' ? 1025 : 129)]) test(`unsafe or oversized ${field} is rejected before presentation`, async () => {
+  const f = fixture([{ ...device, [field]: value }]);
+  await assert.rejects(createGithubBrowserLogin(f.dependencies)(), /unavailable/);
+  assert.equal(f.calls.length, 1);
 });

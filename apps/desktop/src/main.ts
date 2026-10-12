@@ -1,3 +1,7 @@
+import { resolveGithubClientId } from './github-client-config';
+import { createGithubCodePresenter } from './github-code-presenter';
+import { openAllowedExternalUrl as openExternalWithPolicy } from './external-url';
+declare const __PROPR_DESKTOP_GITHUB_CLIENT_ID__: string | undefined;
 import { randomBytes } from 'node:crypto';
 import { lstatSync, realpathSync } from 'node:fs';
 import { basename, isAbsolute, join, relative, resolve } from 'node:path';
@@ -76,7 +80,6 @@ import {
   createLatestRendererReloader,
   deepLinkFromArguments,
   hasExactArgument,
-  isSafeExternalUrl,
   isTrustedRendererUrl,
   normalizeApiBaseUrl,
   normalizeDeepLink,
@@ -668,11 +671,7 @@ const configurePackagedRendererProtocol = (
 
 const openAllowedExternalUrl = async (url: string): Promise<void> => {
   if (shutdownStarted) return;
-  if (!isSafeExternalUrl(url)) {
-    log('warn', 'desktop.external_url.rejected');
-    return;
-  }
-  await shell.openExternal(url);
+  await openExternalWithPolicy(url, value => shell.openExternal(value), () => log('warn', 'desktop.external_url.rejected'));
 };
 
 const inspectPackagedLayout = async (window: BrowserWindow): Promise<Record<string, unknown>> => {
@@ -1883,29 +1882,13 @@ if (!hasSingleInstanceLock) {
           configDir: join(app.getPath('userData'), 'local-setup', 'cli'),
           authenticationHandoff: launchDesktopAuthentication,
           githubBrowserLogin: createGithubBrowserLogin({
-            clientId: process.env.PROPR_DESKTOP_GITHUB_CLIENT_ID,
-            presentCode: async (code, url, signal, cancel) => {
-              const approval = await showGithubDialog({
-                type: 'info', title: 'Sign in via GitHub',
-                message: 'Open GitHub in your browser',
-                detail: `Enter this one-time code on GitHub: ${code}\nChoose the GitHub account you intend to use. You can switch accounts on GitHub before approving. Return to ProPR afterward.`,
-                buttons: ['Open GitHub', 'Cancel'], defaultId: 0, cancelId: 1, signal,
-              });
-              signal.throwIfAborted();
-              if (approval.response !== 0) { cancel(); signal.throwIfAborted(); }
-              // Fixed, protocol-validated URL, also subject to the desktop external URL policy.
-              if (shutdownStarted || !isSafeExternalUrl(url)) throw new Error('Browser unavailable');
-              await openAllowedExternalUrl(url);
-              signal.throwIfAborted();
-              const prompt = new AbortController();
-              const waiting = showGithubDialog({
-                type: 'info', title: 'Waiting for GitHub', message: 'Finish signing in in your browser',
-                detail: `Enter this one-time code on GitHub: ${code}\nCheck the account before approving. Return to ProPR to confirm your verified account.`,
-                buttons: ['Cancel sign-in'], cancelId: 0,
-                signal: AbortSignal.any([signal, prompt.signal]),
-              }).then(() => { if (!signal.aborted && !prompt.signal.aborted) cancel(); }, () => cancel());
-              return async () => { prompt.abort(); await waiting; };
-            },
+            clientId: resolveGithubClientId(app.isPackaged, __PROPR_DESKTOP_GITHUB_CLIENT_ID__, process.env.PROPR_DESKTOP_GITHUB_CLIENT_ID),
+            presentCode: createGithubCodePresenter({
+              showDialog: showGithubDialog,
+              copy: code => clipboard.writeText(code),
+              openExternal: openAllowedExternalUrl,
+              isShuttingDown: () => shutdownStarted,
+            }),
             confirmIdentity: async (login, signal) => {
               mainWindow?.show();
               mainWindow?.focus();

@@ -103,7 +103,7 @@ describe('production local setup journey', () => {
     expect(screen.getByRole('button', { name: 'Change GitHub account' })).toBeInTheDocument();
   });
 
-  it('announces browser account switching and keeps cancellation usable', async () => {
+  it('directs browser account switching cancellation to the native dialog', async () => {
     const waiting: DesktopSetupSnapshot = {
       ...idle, phase: 'running', githubIdentity: {
         status: 'reauthenticating', username: 'example-user', installAvailable: true, installations: [],
@@ -112,6 +112,7 @@ describe('production local setup journey', () => {
     const adapter = guidedAdapter({ status: vi.fn(async () => waiting) });
     render(<LocalSetupWizard adapter={adapter} onBack={vi.fn()} onComplete={vi.fn()} />);
     expect(await screen.findByRole('status')).toHaveTextContent('Waiting for GitHub sign-in in your browser');
+    expect(screen.getByRole('status')).toHaveTextContent('choose Cancel sign-in in the desktop dialog');
     expect(screen.getByRole('button', { name: 'Change GitHub account' })).toBeDisabled();
     const cancel = screen.getByRole('button', { name: 'Cancel safely' });
     expect(cancel).toBeEnabled();
@@ -127,6 +128,7 @@ describe('production local setup journey', () => {
     } };
     render(<LocalSetupWizard adapter={guidedAdapter({ status: vi.fn(async () => waiting) })} onBack={vi.fn()} onComplete={vi.fn()} />);
     expect(await screen.findByRole('status')).toHaveTextContent('return to ProPR to confirm your account');
+    expect(screen.getByRole('status')).toHaveTextContent('choose Cancel sign-in in the desktop dialog');
     expect(screen.getByRole('button', { name: 'Cancel safely' })).toBeEnabled();
   });
 
