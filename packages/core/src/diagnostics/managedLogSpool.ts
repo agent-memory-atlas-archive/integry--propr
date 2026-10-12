@@ -5,7 +5,7 @@ import { gzipSync, gunzipSync } from 'node:zlib';
 import { PinnedDirectory } from './privateDirectory.js';
 import { redactRecord, REDACTION_VERSION } from './redaction.js';
 import type { NativeInventory } from './providerCollector.js';
-import type { NativeLogInventory, NativeLogRoot } from './nativeLogPolicy.js';
+import type { NativeLogInventory, NativeLogRoot } from './nativeLogPolicy.js'; import type { CredentialRootRefusal } from './providerRoots.js';
 
 interface Statement { run(...args: unknown[]): { lastInsertRowid: number | bigint }; get(...args: unknown[]): unknown; all(...args: unknown[]): unknown[] }
 export interface Database { exec(sql: string): void; prepare(sql: string): Statement; close(): void }
@@ -51,10 +51,10 @@ export interface AppendOptions {
     credentials: readonly string[];
     now?: number;
     cursor?: { before: Cursor; after: Cursor };
-    droppedBytes?: number;
+    droppedBytes?: number; continuation?: readonly boolean[]; // per record: a bounded stack/error continuation
 }
 interface Source { retired: number; id: string; identity: string; cursor: string; next: number; dropped: number; gaps: number; last_success: number | null; reason: string | null; protected_bytes: number; diagnostic_bytes: number; inventory_complete: number; protection: string | null; native_inventory: string | null; native_details: string | null }
-interface Segment { id: number; source: string; day: string; first: number; last: number; start: number; end: number; raw: number; digest: string; data: Buffer; sealed: number; ack: number }
+interface Segment { id: number; source: string; day: string; first: number; last: number; start: number; end: number; raw: number; digest: string; data: Buffer; sealed: number; ack: number; redaction: number }
 export const digest = (value: string | Buffer): string => createHash('sha256').update(value).digest('hex');
 
 /** A private transactional outbox. Only this database is pruned, never provider state.
@@ -91,12 +91,12 @@ export class ManagedLogSpool {
                     digest TEXT NOT NULL, data BLOB NOT NULL, sealed INTEGER NOT NULL DEFAULT 0, ack INTEGER NOT NULL DEFAULT 0);
                 CREATE INDEX IF NOT EXISTS segments_source ON segments(source,id); COMMIT; PRAGMA busy_timeout=100;`);
             this.atomic(() => {
-                if (!(this.db.prepare('PRAGMA table_info(sources)').all() as Array<{ name: string }>).some(column => column.name === 'inventory_complete')) {
-                    this.db.exec('ALTER TABLE sources ADD COLUMN inventory_complete INTEGER NOT NULL DEFAULT 0');
-                }
-                for (const [name, type] of [['retired', 'INTEGER NOT NULL DEFAULT 0'], ['native_root', 'TEXT'], ['native_inventory', 'TEXT'], ['native_details', 'TEXT']]) {
-                    if (!(this.db.prepare('PRAGMA table_info(sources)').all() as Array<{ name: string }>).some(column => column.name === name)) {
-                        this.db.exec(`ALTER TABLE sources ADD COLUMN ${name} ${type}`);
+                for (const [table, name, type] of [['sources', 'inventory_complete', 'INTEGER NOT NULL DEFAULT 0'], ['sources', 'retired', 'INTEGER NOT NULL DEFAULT 0'],
+                    ['sources', 'native_root', 'TEXT'], ['sources', 'native_inventory', 'TEXT'], ['sources', 'native_details', 'TEXT'],
+                    // Segments stored before the column existed were redacted by adapter v1.
+                    ['segments', 'redaction', 'INTEGER NOT NULL DEFAULT 1']]) {
+                    if (!(this.db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>).some(column => column.name === name)) {
+                        this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${name} ${type}`);
                     }
                 }
                 if (!(this.db.prepare('PRAGMA table_info(sources)').all() as Array<{ name: string }>).some(column => column.name === 'diagnostic_bytes')) {
@@ -167,7 +167,7 @@ export class ManagedLogSpool {
     private gap(source: Source, bytes: number, reason: string): void {
         this.db.prepare('UPDATE sources SET dropped=dropped+?,gaps=gaps+1,reason=?,inventory_complete=0 WHERE id=?').run(bytes, reason, source.id);
     }
-    report(identity: LogIdentity, reason: 'buffer-capacity' | 'unsafe-source' | 'ownership-unsupported' | 'scan-limit' | 'source-replaced' | 'capture-interrupted' | 'protected-native-state' | 'ownership-unverified' | 'storage-unavailable', bytes = 0): void {
+    report(identity: LogIdentity, reason: 'buffer-capacity' | 'unsafe-source' | 'ownership-unsupported' | 'scan-limit' | 'source-replaced' | 'capture-interrupted' | 'protected-native-state' | 'ownership-unverified' | 'storage-unavailable' | `credential-root:${CredentialRootRefusal | 'missing'}`, bytes = 0): void {
         this.atomic(() => {
             const source = this.source(identity);
             if (reason === 'protected-native-state') this.db.prepare('UPDATE sources SET protected_bytes=?,diagnostic_bytes=?,protection=? WHERE id=?').run(bytes, bytes, reason, source.id);
@@ -239,7 +239,7 @@ export class ManagedLogSpool {
     }
     /** Cursor CAS + segments commit together. Concurrent/restarted scans cannot duplicate records. */
     append(identity: LogIdentity, records: string[], format: 'jsonl' | 'text', options: AppendOptions): boolean {
-        const { credentials, now = Date.now(), cursor, droppedBytes = 0 } = options;
+        const { credentials, now = Date.now(), cursor, droppedBytes = 0, continuation } = options;
         if (records.length > 4096 || records.reduce((sum, r) => sum + Buffer.byteLength(r), 0) > this.limits.scanBytes) throw new Error('diagnostic batch exceeds bound');
         return this.atomic(() => {
             const source = this.source(identity);
@@ -249,9 +249,9 @@ export class ManagedLogSpool {
             const batch: Array<{ text: string; seq: number; size: number }> = [];
             const flush = () => { if (batch.length) this.appendRecords(source, batch.splice(0), now); };
             if (droppedBytes) this.gap(source, droppedBytes, 'oversize-record');
-            for (const record of records) {
+            for (const [index, record] of records.entries()) {
                 const size = Buffer.byteLength(record) + (record.endsWith('\n') ? 0 : 1);
-                const redacted = size <= this.limits.recordBytes ? redactRecord(record, format, credentials) : null;
+                const redacted = size <= this.limits.recordBytes ? redactRecord(record, format, credentials, { continuation: continuation?.[index] === true }) : null;
                 const seq = next++;
                 if (!redacted || Buffer.byteLength(redacted) > this.limits.recordBytes) { flush(); this.gap(source, size, 'unsafe-record'); continue; }
                 batch.push({ text: redacted, seq, size });
@@ -266,7 +266,8 @@ export class ManagedLogSpool {
         const day = new Date(now).toISOString().slice(0, 10);
         let segment = this.db.prepare('SELECT * FROM segments WHERE source=? ORDER BY id DESC LIMIT 1').get(source.id) as Segment | undefined;
         // Rejected inputs consume sequence numbers, but not segment capacity.
-        if (segment && (segment.sealed || segment.day !== day || segment.last >= records[0].seq)) segment = undefined;
+        // A segment is never extended by a different redaction adapter.
+        if (segment && (segment.sealed || segment.day !== day || segment.last >= records[0].seq || segment.redaction !== REDACTION_VERSION)) segment = undefined;
         let index = 0;
         while (index < records.length) {
             const parts: Buffer[] = segment ? [gunzipSync(segment.data, { maxOutputLength: this.limits.segmentBytes })] : [];
@@ -296,8 +297,8 @@ export class ManagedLogSpool {
         if (segment) this.db.prepare('UPDATE segments SET last=?,end=?,raw=?,digest=?,data=? WHERE id=?').run(last, now, raw.length, digest(compressed), compressed, segment.id);
         else {
             this.db.prepare('UPDATE segments SET sealed=1 WHERE source=?').run(source.id);
-            this.db.prepare('INSERT INTO segments(source,day,first,last,start,end,raw,digest,data) VALUES (?,?,?,?,?,?,?,?,?)')
-                .run(source.id, day, records[0].seq, last, now, now, raw.length, digest(compressed), compressed);
+            this.db.prepare('INSERT INTO segments(source,day,first,last,start,end,raw,digest,data,redaction) VALUES (?,?,?,?,?,?,?,?,?,?)')
+                .run(source.id, day, records[0].seq, last, now, now, raw.length, digest(compressed), compressed, REDACTION_VERSION);
         }
     }
     private prune(now: number): void {
@@ -309,7 +310,9 @@ export class ManagedLogSpool {
     }
     status(): object {
         const sources = this.db.prepare('SELECT * FROM sources ORDER BY id').all() as Source[];
-        return { policyVersion: this.limits.version, redactionVersion: REDACTION_VERSION, instance: this.instance, private: true, historyComplete: false,
+        // Preserved pre-upgrade segments keep (and export with) the adapter that produced them.
+        const segmentRedactionVersions = (this.db.prepare('SELECT DISTINCT redaction FROM segments ORDER BY redaction').all() as Array<{ redaction: number }>).map(r => r.redaction);
+        return { policyVersion: this.limits.version, redactionVersion: REDACTION_VERSION, segmentRedactionVersions, instance: this.instance, private: true, historyComplete: false,
             disposalPolicy: process.env.PROPR_DIAGNOSTIC_DISPOSAL === 'local-only' || process.env.PROPR_DIAGNOSTIC_LOCAL_ONLY === '1' ? 'local-only-loss-accepted' : 'verified-remote-acknowledgement',
             offsiteRetentionDays: 14, limits: this.limits, sourceCapacityWarning: sources.filter(s => !s.retired).length >= this.limits.sources,
             sources: sources.map(s => ({ ...JSON.parse(s.identity), id: s.id, retired: Boolean(s.retired), nextSequence: s.next, droppedBytes: s.dropped, gaps: s.gaps,
@@ -360,7 +363,7 @@ export class ManagedLogSpool {
             this.db.prepare('UPDATE segments SET sealed=1 WHERE id=?').run(s.id);
             const source = this.db.prepare('SELECT * FROM sources WHERE id=?').get(s.source) as Source;
             return { id: s.id, digest: s.digest, data: s.data, manifest: {
-                schemaVersion: 1, policyVersion: this.limits.version, redactionVersion: REDACTION_VERSION, tenantPrivate: true, instance: this.instance,
+                schemaVersion: 1, policyVersion: this.limits.version, redactionVersion: s.redaction, tenantPrivate: true, instance: this.instance,
                 ...JSON.parse(source.identity), sourceId: source.id, segment: s.id, utcDay: s.day,
                 collectionWindow: { start: s.start, end: s.end }, firstSequence: s.first, lastSequence: s.last,
                 compressedBytes: s.data.length, uncompressedBytes: s.raw, sha256: s.digest, encoding: 'gzip-jsonl',
