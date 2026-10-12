@@ -5,36 +5,12 @@ import type { DesktopGithubInstallationDecision, DesktopSetupSnapshot } from '..
 import { DesktopExperience } from './DesktopExperience';
 import { adaptersFor, localProfile } from './DesktopExperience.testSupport';
 import { LocalSetupWizard } from './LocalSetupWizard';
-import { completed, guidedAdapter, idle, openAndSubmitWizard } from './LocalSetupWizard.integration.testSupport';
+import { clickAndWaitForHeading, completed, continueThrough, guidedAdapter, idle, installationSnapshot, openAndSubmitWizard } from './LocalSetupWizard.integration.testSupport';
 
 const apiMock = vi.hoisted(() => ({ setApiBaseUrl: vi.fn() }));
 const runtimeMock = vi.hoisted(() => ({ setDesktopApiBaseUrl: vi.fn() }));
 vi.mock('../api/apiClient', () => ({ setApiBaseUrl: apiMock.setApiBaseUrl }));
 vi.mock('../config/runtimeConfig', () => ({ setDesktopApiBaseUrl: runtimeMock.setDesktopApiBaseUrl }));
-
-async function clickAndWaitForHeading(button: string | RegExp, heading: string) {
-  fireEvent.click(await screen.findByRole('button', { name: button }));
-  expect(await screen.findByRole('heading', { name: heading })).toBeInTheDocument();
-}
-
-async function continueThrough(...headings: string[]) {
-  for (const heading of headings) {
-    await clickAndWaitForHeading(/Continue/i, heading);
-  }
-}
-
-function installationSnapshot(identity: Partial<NonNullable<DesktopSetupSnapshot['githubIdentity']>> = {}): DesktopSetupSnapshot {
-  return {
-    ...idle, phase: 'running', githubIdentity: {
-      status: 'selection-required', username: 'member-user', installAvailable: true,
-      installations: [
-        { installationId: '100', accountLogin: 'acme', accountType: 'Organization' },
-        { installationId: '200', accountLogin: 'member-user', accountType: 'User' },
-      ],
-      ...identity,
-    },
-  };
-}
 
 describe('production local setup journey', () => {
   beforeEach(() => vi.clearAllMocks());
