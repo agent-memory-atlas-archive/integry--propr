@@ -13,13 +13,15 @@ export function isExportSecretName(name: string): boolean {
   return credential || (token && !tuning);
 }
 
-/** Common scalar configuration must not become a database-wide substring ban.
+/** Exclude only values shorter than eight trimmed characters and boolean literals
+ * to avoid overly broad database-wide substring bans. Numeric credentials at or
+ * above that length remain forbidden; tuning settings are excluded by name.
  * Keep the original value for matching; only classification uses trimmed text.
  */
 export function isExportSecretValue(value: unknown): value is string {
   if (typeof value !== 'string') return false;
   const text = value.trim();
-  return text.length >= 8 && !(/^[+-]?(?:\d+\.?\d*|\.\d+)(?:e[+-]?\d+)?$/i.test(text)) && !/^(?:true|false)$/i.test(text);
+  return text.length >= 8 && !/^(?:true|false)$/i.test(text);
 }
 
 /** Runs in a disposable worker: SQLite integrity/VACUUM cannot block API requests. */

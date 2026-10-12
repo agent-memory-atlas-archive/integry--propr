@@ -300,19 +300,23 @@ test('token tuning names are configuration while credential families remain secr
   for (const name of ['GITHUB_TOKEN', 'PROVIDER_TOKENS', 'MAX_PROVIDER_API_KEY']) {
     assert.equal(isExportSecretName(name), true, name);
   }
-  for (const value of ['', 'short', '1234567', '100000000', '9'.repeat(400), '1.234567e8', 'true', '   FALSE   ', '        ']) {
+  for (const value of ['', 'short', '1234567', 'true', '   FALSE   ', '        ']) {
     assert.deepEqual(configuredExportSecrets({ PROVIDER_TOKEN: value }), [], JSON.stringify(value));
   }
-  assert.deepEqual(configuredExportSecrets({ PROVIDER_TOKEN: 'aB3dE6gH' }), ['aB3dE6gH']);
+  for (const name of ['REDIS_PASSWORD', 'WEBHOOK_SECRET', 'PROVIDER_API_KEY', 'AWS_ACCESS_KEY_ID', 'PROVIDER_TOKEN', 'NUMERIC_TOKEN']) {
+    for (const value of ['12345678', '123456789012', '00000000', '9'.repeat(400), '1.234567e8', 'aB3dE6gH']) {
+      assert.deepEqual(configuredExportSecrets({ [name]: value }), [value], name);
+    }
+  }
 });
 
 for (const source of ['process', 'agent', 'both']) {
-  test(`export stays ready with token tuning and scalar values from ${source}`, async t => {
+  test(`export stays ready with token tuning and short/boolean values from ${source}`, async t => {
     const f = await fixture(t);
     const envVars = {
       MAX_THINKING_TOKENS: '10000', CLAUDE_CODE_MAX_OUTPUT_TOKENS: '32000',
       MAX_TOKENS: 'unlimited-tuning-value', TOKEN_COUNT: 'configured-count-value',
-      SHORT_TOKEN: 'short', NUMERIC_TOKEN: '123456789012', BOOLEAN_TOKEN: '   FALSE   ',
+      SHORT_TOKEN: 'short', SHORT_NUMERIC_TOKEN: '1234567', BOOLEAN_TOKEN: '   FALSE   ',
     };
     if (source !== 'agent') {
       for (const [name, value] of Object.entries(envVars)) {
@@ -342,4 +346,40 @@ for (const source of ['process', 'agent', 'both']) {
       assert.equal(data.includes(Buffer.from('operator-env-canary')), false);
     } finally { await download.file.close(); await download.dispose(); }
   });
+}
+
+for (const source of ['process', 'agent']) {
+  for (const [name, canary] of Object.entries({
+    REDIS_PASSWORD: '12345678', WEBHOOK_SECRET: '123456789012',
+    PROVIDER_API_KEY: '234567890123', AWS_ACCESS_KEY_ID: '345678901234',
+    PROVIDER_TOKEN: '456789012345', NUMERIC_TOKEN: '567890123456',
+  })) {
+    for (const encoding of ['text', 'utf8', 'utf16le', 'utf16be']) {
+      test(`numeric ${name} from ${source} fails closed in historical ${encoding} rows`, async t => {
+        const f = await fixture(t);
+        if (source === 'process') {
+          const previous = process.env[name]; process.env[name] = canary;
+          t.after(() => { if (previous === undefined) delete process.env[name]; else process.env[name] = previous; });
+        } else {
+          f.db.prepare("UPDATE system_configs SET value=? WHERE key='agents'").run(JSON.stringify([
+            { id: 'agent', envVars: { [name]: canary } },
+          ]));
+        }
+        const body = 'historical customer log: ' + canary;
+        let payload: string | Buffer = body;
+        if (encoding !== 'text') payload = Buffer.from(body, encoding === 'utf8' ? 'utf8' : 'utf16le');
+        if (encoding === 'utf16be') (payload as Buffer).swap16();
+        f.db.exec('CREATE TABLE historical_customer_events(payload)');
+        f.db.prepare('INSERT INTO historical_customer_events VALUES(?)').run(payload);
+        const job = await f.start();
+        const result = await settled(f.exports, job.operationId);
+        assert.equal(result.state, 'failed');
+        await assert.rejects(f.exports.redeem('instance', f.exports.generation, job.operationId, 'admin', allow));
+        await f.exports.cancel('instance', f.exports.generation, job.operationId, 'admin', allow);
+        assert.deepEqual(await fs.readdir(path.join(f.root, 'exports')), []);
+        assert.equal(JSON.stringify({ job, result }).includes(canary), false);
+        assert.deepEqual(f.db.prepare('SELECT payload FROM historical_customer_events').get().payload, payload);
+      });
+    }
+  }
 }
