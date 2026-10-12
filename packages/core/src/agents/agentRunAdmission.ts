@@ -5,7 +5,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { Redis } from 'ioredis';
 import logger from '../utils/logger.js';
 import { checkAbortSignal, plannerAbortSignalKeyForTask } from '../claude/docker/dockerAbortController.js';
-import { ExecutionAbortedError } from '../claude/docker/dockerExecutionOwnership.js';
+import { ExecutionAbortedError, getExecutionAbortError } from '../claude/docker/dockerExecutionOwnership.js';
 
 /** Fleet's existing server-side activation boundary is PROPR_FLEET_CONTROL_SECRET.
  * WORKER_CONCURRENCY is provisioned by Fleet, not the persisted UI setting.
@@ -169,6 +169,8 @@ export async function agentAdmissionMetrics(client: AdmissionRedis, instance: st
 }
 
 export interface AdmissionOptions {
+    /** Resolve time-sensitive arguments synchronously at the physical create boundary. */
+    createArgs?: () => string[];
     signal?: AbortSignal;
     taskId?: string;
     extraEnvVars?: Record<string, string>;
@@ -186,6 +188,11 @@ export interface AdmittedAgent {
     id: string;
     signal: AbortSignal;
     finish(): Promise<void>;
+}
+
+function checkAdmissionAbort(signal: AbortSignal): void {
+    const error = getExecutionAbortError(signal);
+    if (error) throw error;
 }
 
 function createAdmissionClient(): Redis {
@@ -222,11 +229,11 @@ export async function prepareAdmittedAgent(args: string[], options: AdmissionOpt
     const call = (op: string, owner = token, extra = '', limit = '') =>
         client.eval(SCRIPT, 2, holders, configKey, op, owner, String(leaseMs), extra, limit);
     const checkCancelled = async () => {
-        signal.throwIfAborted();
+        checkAdmissionAbort(signal);
         if (options.taskId && await checkAbortSignal(options.taskId, plannerAbortSignalKeyForTask(options.taskId))) {
             throw new ExecutionAbortedError();
         }
-        signal.throwIfAborted();
+        checkAdmissionAbort(signal);
     };
     const recover = async (identity: string) => {
         const expired = await call('expired', token, identity) as string[];
@@ -280,6 +287,7 @@ export async function prepareAdmittedAgent(args: string[], options: AdmissionOpt
         await call('initialize', token, identity);
     };
     try {
+        await checkCancelled();
         const identity = JSON.stringify({ limit: config.limit, daemon: await runtime.daemon(), ...(config.generation ? { generation: config.generation } : {}) });
         await checkCancelled();
         logger.info({ instance: config.instance, limit: config.limit }, 'Waiting for physical agent admission');
@@ -299,17 +307,19 @@ export async function prepareAdmittedAgent(args: string[], options: AdmissionOpt
         renew();
         await checkCancelled();
         // No agent executes during create. Keep the caller's security, mounts,
-        // names, environment and network policy arguments intact.
-        id = await runtime.create(['run', '--label', `propr.agent-admission.token=${token}`, '--label', `propr.agent-admission.instance=${createHash('sha256').update(config.instance).digest('hex')}`, ...args.slice(1)], options.extraEnvVars, options.cwd);
+        // names, environment and network policy arguments intact. Do not race or
+        // abandon create on cancellation: collect its immutable ID (the Docker
+        // call is separately bounded), then remove it without ever starting it.
+        id = await runtime.create(['run', '--label', `propr.agent-admission.token=${token}`, '--label', `propr.agent-admission.instance=${createHash('sha256').update(config.instance).digest('hex')}`, ...(options.createArgs?.() ?? args).slice(1)], options.extraEnvVars, options.cwd);
         await checkCancelled();
         if (await call('attach', token, id) !== 1) throw new Error('Agent admission lost before container start');
-        signal.throwIfAborted();
+        checkAdmissionAbort(signal);
         logger.info({ instance: config.instance, containerId: id, ...await agentAdmissionMetrics(client, config.instance) }, 'Physical agent admitted');
         return { id, args: ['start', '--attach', '--interactive', id], environment, signal, finish };
     } catch (error) {
         try { await finish(); }
         catch (cleanupError) { logger.error({ error: String(cleanupError) }, 'Agent admission retained for recovery'); }
-        throw signal.aborted ? signal.reason : error;
+        throw getExecutionAbortError(signal) ?? error;
     }
 }
 
@@ -321,7 +331,7 @@ export async function spawnAdmittedAgent(args: string[], spawnChild: (args: stri
     const admission = await prepareAdmittedAgent(args, { signal: getExecutionOwnershipContext()?.signal, taskId: taskLabel?.slice('propr.task.id='.length) });
     if (!admission) return spawnChild(args);
     let child: ChildProcess;
-    try { admission.signal.throwIfAborted(); child = spawnChild(admission.args); }
+    try { checkAdmissionAbort(admission.signal); child = spawnChild(admission.args); }
     catch (error) { await admission.finish(); throw error; }
     const stop = () => { child.kill('SIGKILL'); };
     admission.signal.addEventListener('abort', stop, { once: true });

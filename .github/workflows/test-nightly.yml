@@ -15,24 +15,19 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  e2e-tests:
-    name: Run E2E Test Suite
+  full-tests:
+    name: Run Full Test Suite
     runs-on: [self-hosted, linux, x64, propr]
     timeout-minutes: 120
     permissions:
       contents: read
-    # The test steps continue on error, so the health job reads their outcomes
-    # here to tell which step failed and whether its output artifact applies.
     outputs:
       full_tests: ${{ steps.full_tests.outcome }}
-      e2e_config: ${{ steps.e2e_config.outcome }}
-      e2e_tests: ${{ steps.e2e_tests.outcome }}
 
     steps:
-      # Live E2E plan creation stops by this deadline so the job, whose
-      # 120-minute timeout also covers the full suite, still uploads diagnostics.
-      - name: Record E2E deadline
-        run: echo "PROPR_E2E_DEADLINE_EPOCH_MS=$(( ($(date +%s) + 110 * 60) * 1000 ))" >> "$GITHUB_ENV"
+      # Bound full-suite work independently and leave diagnostic upload headroom.
+      - name: Record full suite deadline
+        run: echo "PROPR_FULL_DEADLINE_SECONDS=$(( $(date +%s) + 110 * 60 ))" >> "$GITHUB_ENV"
 
       - name: Checkout repository
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -78,8 +73,12 @@ jobs:
           PROPR_REQUIRE_REDIS_INTEGRATION: '1'
         run: |
           echo "Running full test suite with Redis..."
-          npm run test:full:prepared 2>&1 | tee test_output.txt
+          remaining=$(( PROPR_FULL_DEADLINE_SECONDS - $(date +%s) ))
+          test "$remaining" -gt 0
+          set +e
+          timeout --signal=TERM --kill-after=60s "${remaining}s" npm run test:full:prepared 2>&1 | tee test_output.txt
           TEST_EXIT_CODE=${PIPESTATUS[0]}
+          set -e
 
           if [ $TEST_EXIT_CODE -eq 0 ]; then
             echo "test_result=success" >> $GITHUB_OUTPUT
@@ -91,15 +90,94 @@ jobs:
 
           exit $TEST_EXIT_CODE
 
+      - name: Sanitize failure diagnostics
+        if: always()
+        env:
+          GITHUB_TOKEN_TO_REDACT: ${{ github.token }}
+          PROPR_E2E_API_URL_TO_REDACT: ${{ secrets.PROPR_E2E_API_URL }}
+          PROPR_E2E_TOKEN_TO_REDACT: ${{ secrets.PROPR_E2E_TOKEN }}
+        run: node scripts/sanitize-ci-output.mjs test_output.txt test_output.sanitized.txt
+
+      - name: Remove raw failure diagnostics
+        if: always()
+        run: rm -f -- "$GITHUB_WORKSPACE/test_output.txt"
+
+      - name: Upload sanitized failure diagnostics
+        if: always() && !cancelled() && (failure() || steps.full_tests.outcome == 'failure')
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: nightly-test-output-${{ github.run_id }}-${{ github.run_attempt }}-full
+          path: test_output.sanitized.txt
+          if-no-files-found: warn
+          retention-days: 7
+
+      - name: Fail Job
+        if: steps.full_tests.outcome == 'failure'
+        run: exit 1
+
+      - name: Stop isolated Redis
+        if: always()
+        run: ./scripts/ci-redis.sh stop
+
+  e2e-tests:
+    name: Run E2E Test Suite
+    needs: [full-tests]
+    if: ${{ success() && needs.full-tests.result == 'success' && needs.full-tests.outputs.full_tests == 'success' }}
+    runs-on: [self-hosted, linux, x64, propr]
+    timeout-minutes: 120
+    permissions:
+      contents: read
+    outputs:
+      e2e_config: ${{ steps.e2e_config.outcome }}
+      e2e_tests: ${{ steps.e2e_tests.outcome }}
+
+    steps:
+      # This clock starts in the dedicated live job, after the full suite.
+      # Reserve ten minutes for canonical cleanup and terminal diagnostics.
+      - name: Record E2E deadline
+        run: echo "PROPR_E2E_DEADLINE_EPOCH_MS=$(( ($(date +%s) + 110 * 60) * 1000 ))" >> "$GITHUB_ENV"
+
+      - name: Checkout repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version-file: '.nvmrc'
+          cache: 'npm'
+          cache-dependency-path: |
+            package-lock.json
+            propr-ui/package-lock.json
+            docs/package-lock.json
+            packages/shared/package-lock.json
+            packages/api/package-lock.json
+            packages/core/package-lock.json
+
+      - name: Install Dependencies
+        id: install
+        run: npm ci
+
+      - name: Build workspace packages
+        id: build
+        run: npm run test:prepare
+
       - name: Validate live E2E configuration
         id: e2e_config
-        if: steps.full_tests.outcome == 'success'
         continue-on-error: true
         env:
           PROPR_E2E_API_URL: ${{ secrets.PROPR_E2E_API_URL }}
           PROPR_E2E_TOKEN: ${{ secrets.PROPR_E2E_TOKEN }}
           PROPR_E2E_REPO: ${{ vars.PROPR_E2E_REPO }}
+          PROPR_E2E_MODEL_TASK_TIMEOUT_MS: ${{ vars.PROPR_E2E_MODEL_TASK_TIMEOUT_MS || '1800000' }}
         run: |
+          # Both model polling phases must fit the bounded model suite.
+          node --input-type=module -e '
+            const value = Number(process.env.PROPR_E2E_MODEL_TASK_TIMEOUT_MS);
+            if (!Number.isSafeInteger(value) || value <= 0 || value > 1800000) {
+              console.error("Nightly model-task timeout must be 1..1800000 ms");
+              process.exit(1);
+            }
+          '
           missing=()
           for name in PROPR_E2E_API_URL PROPR_E2E_TOKEN PROPR_E2E_REPO; do
             if [ -z "${!name:-}" ]; then
@@ -113,7 +191,7 @@ jobs:
 
       - name: Run E2E Tests
         id: e2e_tests
-        if: steps.full_tests.outcome == 'success' && steps.e2e_config.outcome == 'success'
+        if: steps.e2e_config.outcome == 'success'
         continue-on-error: true
         env:
           NODE_ENV: test
@@ -126,8 +204,14 @@ jobs:
           PROPR_E2E_MODEL_TASK_TIMEOUT_MS: ${{ vars.PROPR_E2E_MODEL_TASK_TIMEOUT_MS || '1800000' }}
         run: |
           echo "Running E2E test suite..."
-          npm run test:e2e 2>&1 | tee e2e_output.txt
+          # Backstop after the work deadline: allow five minutes for cleanup,
+          # then retain four minutes for diagnostics even after a forced kill.
+          remaining=$(( PROPR_E2E_DEADLINE_EPOCH_MS / 1000 + 5 * 60 - $(date +%s) ))
+          test "$remaining" -gt 0
+          set +e
+          timeout --signal=TERM --kill-after=60s "${remaining}s" npm run test:e2e 2>&1 | tee e2e_output.txt
           E2E_EXIT_CODE=${PIPESTATUS[0]}
+          set -e
 
           if [ $E2E_EXIT_CODE -eq 0 ]; then
             echo "e2e_result=success" >> $GITHUB_OUTPUT
@@ -145,32 +229,24 @@ jobs:
           GITHUB_TOKEN_TO_REDACT: ${{ github.token }}
           PROPR_E2E_API_URL_TO_REDACT: ${{ secrets.PROPR_E2E_API_URL }}
           PROPR_E2E_TOKEN_TO_REDACT: ${{ secrets.PROPR_E2E_TOKEN }}
-        run: |
-          node scripts/sanitize-ci-output.mjs test_output.txt test_output.sanitized.txt
-          node scripts/sanitize-ci-output.mjs e2e_output.txt e2e_output.sanitized.txt
+        run: node scripts/sanitize-ci-output.mjs e2e_output.txt e2e_output.sanitized.txt
 
       - name: Remove raw failure diagnostics
         if: always()
-        run: rm -f -- "$GITHUB_WORKSPACE/test_output.txt" "$GITHUB_WORKSPACE/e2e_output.txt"
+        run: rm -f -- "$GITHUB_WORKSPACE/e2e_output.txt"
 
       - name: Upload sanitized failure diagnostics
-        if: always() && !cancelled() && (failure() || steps.full_tests.outcome == 'failure' || steps.e2e_config.outcome == 'failure' || steps.e2e_tests.outcome == 'failure')
+        if: always() && !cancelled() && (failure() || steps.e2e_config.outcome == 'failure' || steps.e2e_tests.outcome == 'failure')
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
-          name: nightly-test-output-${{ github.run_id }}-${{ github.run_attempt }}
-          path: |
-            test_output.sanitized.txt
-            e2e_output.sanitized.txt
+          name: nightly-test-output-${{ github.run_id }}-${{ github.run_attempt }}-live
+          path: e2e_output.sanitized.txt
           if-no-files-found: warn
           retention-days: 7
 
       - name: Fail Job
-        if: steps.full_tests.outcome == 'failure' || steps.e2e_config.outcome == 'failure' || steps.e2e_tests.outcome == 'failure'
+        if: steps.e2e_config.outcome == 'failure' || steps.e2e_tests.outcome == 'failure'
         run: exit 1
-
-      - name: Stop isolated Redis
-        if: always()
-        run: ./scripts/ci-redis.sh stop
 
   # Pull requests skip the desktop checks unless they touch the desktop app, so
   # the nightly run is where every change reaches them.
@@ -242,7 +318,7 @@ jobs:
   # Actions artifact only: no release, tag, registry, feed or signing.
   desktop-nightly-download:
     name: Nightly desktop download
-    needs: [e2e-tests, native-electron, desktop-package, desktop-connect]
+    needs: [full-tests, e2e-tests, native-electron, desktop-package, desktop-connect]
     if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -334,7 +410,7 @@ jobs:
   # See scripts/nightly-health-issue.mjs.
   nightly-health:
     name: Nightly test health
-    needs: [e2e-tests, native-electron, desktop-package, desktop-connect, desktop-nightly-download]
+    needs: [full-tests, e2e-tests, native-electron, desktop-package, desktop-connect, desktop-nightly-download]
     if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -358,7 +434,8 @@ jobs:
         continue-on-error: true
         uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6
         with:
-          name: nightly-test-output-${{ github.run_id }}-${{ github.run_attempt }}
+          pattern: nightly-test-output-${{ github.run_id }}-${{ github.run_attempt }}-*
+          merge-multiple: true
           path: nightly-diagnostics
 
       - name: Update nightly health issue
@@ -366,8 +443,7 @@ jobs:
         env:
           NEEDS_JSON: ${{ toJSON(needs) }}
           NIGHTLY_DIAGNOSTICS_DIR: nightly-diagnostics
-          NIGHTLY_SUITE_JOB_ID: e2e-tests
-          NIGHTLY_SUITE_JOB_NAME: Run E2E Test Suite
+          NIGHTLY_SUITE_JOBS: '{"full-tests":"Run Full Test Suite","e2e-tests":"Run E2E Test Suite"}'
           NIGHTLY_HEALTH_JOB_NAME: Nightly test health
           GITHUB_TOKEN_TO_REDACT: ${{ github.token }}
         with:

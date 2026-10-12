@@ -190,3 +190,66 @@ test('Run now confirms with a toast and opens the run under a breadcrumb', async
   await expect(page.getByTestId('agent-run-state')).toHaveText('Queued');
   await capture(page, 'automations-run-breadcrumb');
 });
+
+test.describe('contextual mobile creation navigation', () => {
+  test.use({ hasTouch: true });
+
+  for (const width of [320, 390]) {
+    for (const [route, label, destination] of [
+      ['/automations', 'New Automation', '/automations/new'],
+      ['/tasks', 'New Task', '/tasks/new'],
+      ['/plans', 'New Plan', '/studio/new'],
+      ['/goals', 'New Goal', '/goals?new=1'],
+    ]) {
+      test(`${label} stays within its tab and activates by touch at ${width}px`, async ({ page }) => {
+        await page.setViewportSize({ width, height: 844 });
+        await page.goto(route);
+        const navigation = page.getByRole('navigation', { name: 'Primary navigation', exact: true });
+        const action = navigation.getByRole('button', { name: label, exact: true });
+        await expect(action).toBeVisible();
+        await expect(action).toHaveAccessibleName(label);
+        await action.tap();
+        if (label === 'New Goal') {
+          // Goals consumes ?new=1 after opening its creation dialog.
+          const dialog = page.getByRole('dialog', { name: 'Start a goal' });
+          await expect(dialog).toBeVisible();
+          await dialog.getByRole('button', { name: 'Cancel', exact: true }).tap();
+          await expect(page).toHaveURL(/\/goals$/);
+        } else {
+          await expect(page).toHaveURL(url => `${url.pathname}${url.search}` === destination);
+          await expect(action).toHaveAttribute('aria-current', 'page');
+        }
+        await expect(navigation.getByRole('link', { name: 'Dashboard', exact: true })).toBeVisible();
+        await expect(navigation.getByRole('link', { name: 'Repositories', exact: true })).toBeVisible();
+        if (label === 'New Automation') await capture(page, `automation-new-${width}`);
+
+        const bounds = await navigation.evaluate(nav => Array.from(nav.children).map(tab => {
+          const label = tab.lastElementChild as HTMLElement;
+          const box = label.getBoundingClientRect();
+          const target = tab.getBoundingClientRect();
+          const style = getComputedStyle(label);
+          return {
+            text: label.textContent,
+            left: box.left, right: box.right,
+            tabLeft: target.left, tabRight: target.right,
+            targetWidth: target.width, targetHeight: target.height,
+            clipped: label.scrollWidth > label.clientWidth,
+            overflow: style.overflowX, ellipsis: style.textOverflow,
+          };
+        }));
+        expect(bounds.map(bound => bound.text)).toEqual(['Inbox', 'Dashboard', label, 'Repositories', 'More']);
+        for (const [index, bound] of bounds.entries()) {
+          expect(bound.left, `${bound.text} left edge`).toBeGreaterThanOrEqual(bound.tabLeft);
+          expect(bound.right, `${bound.text} right edge`).toBeLessThanOrEqual(bound.tabRight);
+          expect(bound.targetWidth).toBeGreaterThanOrEqual(44);
+          expect(bound.targetHeight).toBeGreaterThanOrEqual(44);
+          if (index > 0) expect(bound.left).toBeGreaterThan(bounds[index - 1].right);
+          if (bound.clipped) {
+            expect(bound.overflow).toBe('hidden');
+            expect(bound.ellipsis).toBe('ellipsis');
+          }
+        }
+      });
+    }
+  }
+});

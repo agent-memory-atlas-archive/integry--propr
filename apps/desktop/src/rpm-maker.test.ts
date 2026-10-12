@@ -1,11 +1,17 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import { describe, test } from 'node:test';
 import { fileURLToPath } from 'node:url';
+import { build } from 'esbuild';
+import { createPackageWithOptions, extractFile } from '@electron/asar';
+import { MakerDeb } from '@electron-forge/maker-deb';
+import { MakerZIP } from '@electron-forge/maker-zip';
+import { LINUX_DIRECTORY_OPERATION_SHA256, verifyDirectoryOperationArtifact } from '../../../packages/cli/src/utils/directoryDescriptor';
+import { copyPackagedNativeAuthority } from './package-native-authority';
 import { portableRpmRequires, ProprMakerRpm } from './rpm-maker';
 
 type RedhatDependenciesModule = {
@@ -188,5 +194,136 @@ describe('ProPR RPM native generation', () => {
         rmSync(root, { recursive: true, force: true });
       }
     });
+  }
+});
+
+// These are real maker outputs with real pinned ELF addons, not just staging
+// assertions. Keep independent of libsolv so missing solver tools cannot hide
+// a payload integrity regression.
+describe('Linux package native payload preservation', () => {
+  for (const kind of ['rpm', 'deb', 'zip'] as const) {
+    // RPM's brp-strip silently does nothing without `file`; require it so the
+    // native-build regression would fail under the original spec.
+    const required = kind === 'rpm' ? ['rpmbuild', 'rpm2cpio', 'cpio', 'file', 'strip']
+      : kind === 'deb' ? ['dpkg-deb', 'fakeroot'] : ['zip', 'unzip'];
+    const missing = required.filter(tool => spawnSync(tool, ['--version'], { stdio: 'ignore' }).error);
+    for (const targetArch of ['x64', 'arm64'] as const) {
+      test(`${kind} ${targetArch} preserves pinned bytes and supports host identity publication`, {
+        skip: process.platform !== 'linux' ? 'Linux packaging required'
+          : missing.length > 0 && `packaging tools unavailable: ${missing.join(', ')}`,
+        timeout: 120_000,
+      }, async t => {
+        const root = mkdtempSync(join(tmpdir(), 'propr-native-payload-'));
+        try {
+          const appDir = createPackagedAppFixture(root);
+          const resources = join(appDir, 'resources');
+          const nativeRoot = fileURLToPath(new URL('../../../packages/cli/native/prebuilds', import.meta.url));
+          copyPackagedNativeAuthority({
+            arch: targetArch, platform: 'linux', sourceRoot: nativeRoot,
+            resourcesPath: join(resources, 'app'),
+          });
+          // Bundle the production CLI path alongside the unpacked addon. Using
+          // an app.asar logical path exercises the physical-path remapping and
+          // runtime hash/type/ancestry checks, with no loader override or mock.
+          const probeRelative = 'resources/app.asar/.vite/build/identity-probe.mjs';
+          await build({
+            stdin: {
+              resolveDir: fileURLToPath(new URL('../../../', import.meta.url)),
+              contents: `
+                import assert from 'node:assert/strict';
+                import { closeSync, constants, lstatSync, openSync, readFileSync, writeFileSync } from 'node:fs';
+                import { join } from 'node:path';
+                import { getOrCreatePublicInstanceIdentity } from './packages/cli/src/connectIdentity.ts';
+                import { renameAt } from './packages/cli/src/utils/directoryDescriptor.ts';
+                assert.notEqual(process.getuid(), 0, 'identity acceptance must run as a normal user');
+                const data = join(process.argv[2], 'data');
+                const identity = await getOrCreatePublicInstanceIdentity(data);
+                assert.equal(await getOrCreatePublicInstanceIdentity(data), identity);
+                for (const path of [process.argv[2], data]) {
+                  const info = lstatSync(path);
+                  assert.equal(info.uid, process.getuid());
+                  assert.equal(info.mode & 0o777, 0o700);
+                }
+                const file = join(data, 'public-instance-identity.json');
+                assert.equal(JSON.parse(readFileSync(file, 'utf8')).publicInstanceIdentity, identity);
+                const info = lstatSync(file);
+                assert.equal(info.uid, process.getuid());
+                assert.equal(info.mode & 0o777, 0o644);
+                assert.equal(info.nlink, 1);
+                // Directly prove native no-replace semantics, too.
+                writeFileSync(join(data, 'source'), 'source');
+                writeFileSync(join(data, 'destination'), 'destination');
+                const fd = openSync(data, constants.O_RDONLY | constants.O_DIRECTORY);
+                try { assert.throws(() => renameAt(fd, 'source', 'destination'), { code: 'EEXIST' }); }
+                finally { closeSync(fd); }
+                assert.equal(readFileSync(join(data, 'source'), 'utf8'), 'source');
+                assert.equal(readFileSync(join(data, 'destination'), 'utf8'), 'destination');
+                console.log(identity);
+              `,
+            },
+            outfile: join(resources, 'app/.vite/build/identity-probe.mjs'),
+            bundle: true, platform: 'node', format: 'esm', target: 'node22',
+          });
+          await createPackageWithOptions(join(resources, 'app'), join(resources, 'app.asar'), {
+            unpack: '**/.vite/native/prebuilds/**',
+          });
+          rmSync(join(resources, 'app'), { recursive: true, force: true });
+          const options = { options: {
+            name: 'propr-desktop', productName: 'ProPR Desktop', version: '0.9.0',
+            bin: 'propr-desktop', icon: desktopLinuxIcon,
+          } };
+          const maker = kind === 'rpm' ? new ProprMakerRpm(options)
+            : kind === 'deb' ? new MakerDeb(options) : new MakerZIP({});
+          const [artifact] = await maker.make({
+            dir: appDir, makeDir: join(root, 'make'), appName: 'ProPR Desktop',
+            targetPlatform: 'linux', targetArch, forgeConfig: {} as never,
+            packageJSON: { version: '0.9.0' },
+          });
+          const extracted = join(root, 'extracted');
+          mkdirSync(extracted);
+          if (kind === 'rpm') {
+            const archive = spawnSync('rpm2cpio', [artifact], { maxBuffer: 16 * 1024 * 1024 });
+            assert.equal(archive.status, 0, String(archive.stderr));
+            const extraction = spawnSync('cpio', ['-idm', '--quiet', '--no-absolute-filenames'], {
+              cwd: extracted, input: archive.stdout, encoding: 'utf8',
+            });
+            assert.equal(extraction.status, 0, extraction.stderr);
+          } else if (kind === 'deb') {
+            run('dpkg-deb', ['-x', artifact, extracted]);
+          } else {
+            run('unzip', ['-q', artifact, '-d', extracted]);
+          }
+          const payload = kind === 'zip' ? join(extracted, basename(appDir)) : join(extracted, 'usr/lib/propr-desktop');
+          const addon = join(payload, 'resources/app.asar.unpacked/.vite/native/prebuilds',
+            `linux-${targetArch}`, 'directory-operations.node');
+          verifyDirectoryOperationArtifact(addon, LINUX_DIRECTORY_OPERATION_SHA256[targetArch], targetArch);
+          assert.deepEqual(readFileSync(addon), readFileSync(join(nativeRoot, `linux-${targetArch}`, 'directory-operations.node')));
+          t.diagnostic(`${kind} linux-${targetArch} payload SHA256 ${LINUX_DIRECTORY_OPERATION_SHA256[targetArch]}`);
+          // Remove staging before execution: a source-tree fallback cannot make
+          // this pass. Two fresh processes prove durable identity persistence.
+          rmSync(appDir, { recursive: true, force: true });
+          if (targetArch !== process.arch || process.getuid?.() === 0) {
+            t.diagnostic(`Native execution NOT performed: requires non-root Linux ${targetArch}; host is ${process.arch}, uid ${process.getuid?.()}`);
+          } else {
+            const stack = join(root, 'stack');
+            mkdirSync(stack, { mode: 0o700 });
+            // Node does not read ASARs. Extract only the bundled JS to its
+            // logical location; leave the actual unpacked native payload intact.
+            const asar = join(payload, 'resources/app.asar');
+            const code = extractFile(asar, '.vite/build/identity-probe.mjs');
+            rmSync(asar);
+            const probe = join(payload, probeRelative);
+            mkdirSync(dirname(probe), { recursive: true });
+            writeFileSync(probe, code);
+            const first = run(process.execPath, [probe, stack]);
+            assert.match(first.trim(), /^[0-9a-f-]{36}$/);
+            assert.equal(run(process.execPath, [probe, stack]), first);
+            t.diagnostic(`Native publication and fresh-process persistence passed as uid ${process.getuid?.()}`);
+          }
+        } finally {
+          rmSync(root, { recursive: true, force: true });
+        }
+      });
+    }
   }
 });
