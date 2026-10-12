@@ -3,7 +3,10 @@ import TaskStatusTable from './TaskStatusTable';
 import RunTimeline from './RunTimeline';
 import ExecutionRail from './ExecutionRail';
 import LiveFileChips from './LiveFileChips';
-import { TaskReviewScoreHistory } from './ReviewScoreHistory';
+import ReviewScoreHistory from './ReviewScoreHistory';
+import PullRequestOutcomeEntry from './PullRequestOutcomeEntry';
+import { pullRequestOutcome, taskPullRequest, usePullRequestScores } from './pullRequestScores';
+import type { PullRequestScoresResponse } from '../../api/taskStatsApi';
 import type { HistoryItem, HistoryItemMetadata, TaskInfo, LiveDetails } from './types';
 import { RefreshCw } from 'lucide-react';
 import type { TaskRunEntry } from '../TaskList/rowModel';
@@ -45,10 +48,12 @@ function getUltrafixMeta(history: HistoryItem[]): HistoryItemMetadata | null {
   return bestMeta;
 }
 
-type RunNotesProps = Pick<LeftPaneBodyProps, 'history' | 'taskInfo' | 'currentStatus' | 'prInfo' | 'consumedReviewCommentIds'>;
+type RunNotesProps = Pick<LeftPaneBodyProps, 'history' | 'taskInfo' | 'currentStatus' | 'prInfo' | 'consumedReviewCommentIds'> & {
+  pullRequest: { prNumber: number; history: PullRequestScoresResponse | null } | null;
+};
 
 /** What a run recorded beyond its steps: pool routing, the ultrafix loop, review notes. */
-const RunNotes: React.FC<RunNotesProps> = ({ history, taskInfo, currentStatus, prInfo, consumedReviewCommentIds }) => {
+const RunNotes: React.FC<RunNotesProps> = ({ history, taskInfo, currentStatus, prInfo, consumedReviewCommentIds, pullRequest }) => {
   const ultrafixMeta = useMemo(() => getUltrafixMeta(history), [history]);
   const routingAttempts = useMemo(
     () => history.flatMap(item => item.metadata?.syntheticRouting ? [item.metadata.syntheticRouting] : []),
@@ -100,7 +105,7 @@ const RunNotes: React.FC<RunNotesProps> = ({ history, taskInfo, currentStatus, p
         </div>
       )}
 
-      <TaskReviewScoreHistory taskInfo={taskInfo} prInfo={prInfo} />
+      {pullRequest && <ReviewScoreHistory prNumber={pullRequest.prNumber} history={pullRequest.history} />}
 
       {taskInfo?.commandMode === 'review' && currentStatus === 'COMPLETED' && !prInfo && (
         <div className="bg-indigo-50 border border-indigo-100 rounded-md px-3 py-2 text-xs text-indigo-700">
@@ -132,6 +137,9 @@ const LeftPaneBody: React.FC<LeftPaneBodyProps> = ({
   runs,
   onSelectRun,
 }) => {
+  const pr = taskPullRequest(taskInfo, prInfo);
+  const prHistory = usePullRequestScores(pr?.repository, pr?.prNumber);
+  const outcome = pr ? pullRequestOutcome(pr.prNumber, prHistory) : null;
   const runNotes = (
     <RunNotes
       history={history}
@@ -139,6 +147,7 @@ const LeftPaneBody: React.FC<LeftPaneBodyProps> = ({
       currentStatus={currentStatus}
       prInfo={prInfo}
       consumedReviewCommentIds={consumedReviewCommentIds}
+      pullRequest={pr && { prNumber: pr.prNumber, history: prHistory }}
     />
   );
   const timeline = runs && runs.length > 1 && taskId && onSelectRun;
@@ -150,7 +159,7 @@ const LeftPaneBody: React.FC<LeftPaneBodyProps> = ({
   return (
     <div className="p-3 lg:p-4 space-y-2">
       {timeline ? (
-        <RunTimeline runs={runs} selectedTaskId={taskId} onSelectRun={onSelectRun}>
+        <RunTimeline runs={runs} selectedTaskId={taskId} onSelectRun={onSelectRun} outcome={outcome}>
           <TaskStatusTable history={history} commandMode={taskInfo?.commandMode} variant="branch" />
           <div className="space-y-2 pl-6 pr-1 pt-1 empty:hidden">{runNotes}</div>
         </RunTimeline>
@@ -158,6 +167,8 @@ const LeftPaneBody: React.FC<LeftPaneBodyProps> = ({
         <>
           <TaskStatusTable history={history} compact={true} commandMode={taskInfo?.commandMode} />
           {runNotes}
+          {/* The task's last entry, after its run: where the pull request ended. */}
+          {outcome && <PullRequestOutcomeEntry outcome={outcome} variant="standalone" />}
         </>
       )}
 

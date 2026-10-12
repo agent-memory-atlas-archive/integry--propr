@@ -4,6 +4,8 @@ import { WorkTypeBadge } from '../Dashboard/sectionPrimitives';
 import { ScoreBadge } from '../TaskList/ScoreBadge';
 import { formatDuration, formatRelativeTime } from '../TaskList/utils.tsx';
 import { describeRun, isReviewRun, runScore, type TaskRunEntry } from '../TaskList/rowModel';
+import PullRequestOutcomeEntry from './PullRequestOutcomeEntry';
+import type { PullRequestOutcome } from './pullRequestScores';
 import { RUN_DURATION_COLUMN, RUN_NUMBER_COLUMN, RUN_SUMMARY_MIN_WIDTH, RUN_TAG_COLUMN, RUN_TIME_COLUMN } from './runTimelineColumns';
 
 interface RunTimelineProps {
@@ -14,6 +16,8 @@ interface RunTimelineProps {
   onSelectRun: (taskId: string) => void;
   /** The selected run's steps, drawn under its row. */
   children: React.ReactNode;
+  /** Where the task's pull request ended, if it has: the timeline's last entry, after every run and review. */
+  outcome?: PullRequestOutcome | null;
 }
 
 /**
@@ -55,12 +59,13 @@ const RunResult: React.FC<{ run: TaskRunEntry; open: boolean }> = ({ run, open }
  * open, its steps branching off the rail. The rail's nodes are plain: the type
  * and the result slot already say what each run was and how it went. Choosing another run opens it in the pane, so the files changed and
  * the execution log below follow it: the timeline is how the pane moves
- * through the task's history.
+ * through the task's history. Once the task's pull request is merged or
+ * closed, that is the last entry, after every run and review.
  */
 /** Room left above the open run when the list scrolls to it, so the run before it stays in sight. */
 const SCROLL_CONTEXT_PX = 40;
 
-const RunTimeline: React.FC<RunTimelineProps> = ({ runs, selectedTaskId, onSelectRun, children }) => {
+const RunTimeline: React.FC<RunTimelineProps> = ({ runs, selectedTaskId, onSelectRun, children, outcome }) => {
   const [expanded, setExpanded] = useState(true);
   const scrollRef = useRef<HTMLDivElement>(null);
   const selectedRef = useRef<HTMLLIElement>(null);
@@ -141,6 +146,7 @@ const RunTimeline: React.FC<RunTimelineProps> = ({ runs, selectedTaskId, onSelec
             </li>
           );
         })}
+        {outcome && <PullRequestOutcomeEntry outcome={outcome} variant="rail" />}
       </ol>
     </div>
   );

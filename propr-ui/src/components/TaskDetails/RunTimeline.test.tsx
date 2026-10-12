@@ -113,4 +113,23 @@ describe('RunTimeline', () => {
     expect(commit).toHaveClass('inline-flex');
     expect(commit).not.toHaveClass('hidden');
   });
+
+  it('ends on the merge status, its own entry after every run and review', () => {
+    render(
+      <RunTimeline runs={runs} selectedTaskId="run-3" onSelectRun={vi.fn()} outcome={{ prNumber: 2664, state: 'merged', at: '2026-09-10T12:20:00Z' }}>
+        steps
+      </RunTimeline>,
+    );
+    const items = within(screen.getByRole('list', { name: 'Runs' })).getAllByRole('listitem');
+    expect(items).toHaveLength(5);
+    // After all four runs, not folded into the open run's steps.
+    expect(items[4]).toBe(screen.getByTestId('pr-outcome-entry'));
+    expect(items[4]).toHaveTextContent(/^MergedPR #2664/);
+    expect(within(items[2]).queryByText('Merged')).toBeNull();
+  });
+
+  it('has no final entry while the PR is open', () => {
+    render(<RunTimeline runs={runs} selectedTaskId="run-4" onSelectRun={vi.fn()} outcome={null}>steps</RunTimeline>);
+    expect(screen.queryByTestId('pr-outcome-entry')).toBeNull();
+  });
 });
