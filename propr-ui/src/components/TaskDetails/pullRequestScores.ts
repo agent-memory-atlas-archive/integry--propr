@@ -2,6 +2,7 @@
 import { useEffect, useState } from 'react';
 import { getPullRequestScores, type PullRequestScoresResponse } from '../../api/taskStatsApi';
 import type { TaskInfo } from './types';
+import type { TaskRunEntry } from '../TaskList/rowModel';
 
 /**
  * The PR a task belongs to: the PR it opened, or the PR a PR follow-up or
@@ -44,9 +45,18 @@ export interface PullRequestOutcome {
   at: string | null;
 }
 
-/** The PR's final state from its score history; null while it is still open, or unknown. */
-export function pullRequestOutcome(prNumber: number, history: PullRequestScoresResponse | null): PullRequestOutcome | null {
+/**
+ * The PR's final state from its score history; null while it is still open, or unknown.
+ * Also null while any of the task's runs is still working or queued: a merge or close
+ * ends the task, so it is never shown beside a run that has not.
+ */
+export function pullRequestOutcome(
+  prNumber: number,
+  history: PullRequestScoresResponse | null,
+  runs: TaskRunEntry[] = [],
+): PullRequestOutcome | null {
   if (!history?.outcome) return null;
+  if (runs.some(run => run.outcome === 'active' || run.outcome === 'waiting')) return null;
   return {
     prNumber,
     state: history.outcome,

@@ -16,6 +16,8 @@
 
 /** Node box (16px + 4px margin), gap, caret (12px), gap: where the tag column starts. */
 export const RUN_LEAD_INSET = 'pl-12';
+/** The same inset for a phone's second run line (time, duration, result), so it starts under `Run N`. */
+export const RUN_LEAD_INSET_PHONE = 'max-sm:pl-12';
 /** `Run N` (3rem) + gap + the compact type badge (5rem). */
 export const RUN_TAG_COLUMN = 'w-[8.5rem]';
 export const RUN_NUMBER_COLUMN = 'w-12';

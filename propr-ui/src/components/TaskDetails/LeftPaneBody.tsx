@@ -105,7 +105,7 @@ const RunNotes: React.FC<RunNotesProps> = ({ history, taskInfo, currentStatus, p
         </div>
       )}
 
-      {pullRequest && <ReviewScoreHistory prNumber={pullRequest.prNumber} history={pullRequest.history} />}
+      {pullRequest && <ReviewScoreHistory prNumber={pullRequest.prNumber} history={pullRequest.history} variant="standalone" />}
 
       {taskInfo?.commandMode === 'review' && currentStatus === 'COMPLETED' && !prInfo && (
         <div className="bg-indigo-50 border border-indigo-100 rounded-md px-3 py-2 text-xs text-indigo-700">
@@ -139,7 +139,9 @@ const LeftPaneBody: React.FC<LeftPaneBodyProps> = ({
 }) => {
   const pr = taskPullRequest(taskInfo, prInfo);
   const prHistory = usePullRequestScores(pr?.repository, pr?.prNumber);
-  const outcome = pr ? pullRequestOutcome(pr.prNumber, prHistory) : null;
+  const timeline = runs && runs.length > 1 && taskId && onSelectRun;
+  const outcome = pr ? pullRequestOutcome(pr.prNumber, prHistory, runs) : null;
+  const reviewScores = pr && { prNumber: pr.prNumber, history: prHistory };
   const runNotes = (
     <RunNotes
       history={history}
@@ -147,10 +149,10 @@ const LeftPaneBody: React.FC<LeftPaneBodyProps> = ({
       currentStatus={currentStatus}
       prInfo={prInfo}
       consumedReviewCommentIds={consumedReviewCommentIds}
-      pullRequest={pr && { prNumber: pr.prNumber, history: prHistory }}
+      // On the timeline the scores are a milestone on its trunk instead, after every run.
+      pullRequest={timeline ? null : reviewScores}
     />
   );
-  const timeline = runs && runs.length > 1 && taskId && onSelectRun;
   // An earlier run's files are named as that run's, so they never read as the live run's.
   const inspectedRun = timeline && runs[runs.length - 1].task.id !== taskId
     ? runs.find(run => run.task.id === taskId)?.number
@@ -159,7 +161,7 @@ const LeftPaneBody: React.FC<LeftPaneBodyProps> = ({
   return (
     <div className="p-3 lg:p-4 space-y-2">
       {timeline ? (
-        <RunTimeline runs={runs} selectedTaskId={taskId} onSelectRun={onSelectRun} outcome={outcome}>
+        <RunTimeline runs={runs} selectedTaskId={taskId} onSelectRun={onSelectRun} reviewScores={reviewScores} outcome={outcome}>
           <TaskStatusTable history={history} commandMode={taskInfo?.commandMode} variant="branch" />
           <div className="space-y-2 pl-6 pr-1 pt-1 empty:hidden">{runNotes}</div>
         </RunTimeline>

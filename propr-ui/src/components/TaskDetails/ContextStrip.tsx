@@ -52,12 +52,12 @@ const formatTokenCount = (count: number | null | undefined): string => {
  * stands between clusters. Chips carry their own boundaries, so no dot or
  * bullet separates them.
  */
-const ContextGroup: React.FC<{ label: string; divided?: boolean; children: React.ReactNode }> = ({ label, divided, children }) => {
+// Clusters are set apart by the strip's gap alone: a drawn divider would start the line whenever the strip wraps.
+const ContextGroup: React.FC<{ label: string; children: React.ReactNode }> = ({ label, children }) => {
   const items = React.Children.toArray(children);
   if (!items.length) return null;
   return (
     <div role="group" aria-label={label} className="flex min-w-0 flex-wrap items-center gap-x-1.5 gap-y-1">
-      {divided && <span aria-hidden="true" data-testid="context-divider" className="mr-1.5 inline-block h-3 w-px flex-none self-center bg-slate-200 align-middle" />}
       {items}
     </div>
   );
@@ -271,8 +271,7 @@ const TelemetryGroups: React.FC<{
   usageMetricRecords?: UsageMetricRecord[];
   budget?: TaskBudget | null;
   lead?: React.ReactNode;
-  divided: boolean;
-}> = ({ modelName, duration, synthetic, tokenUsage, usageMetricRecords, budget, lead, divided }) => {
+}> = ({ modelName, duration, synthetic, tokenUsage, usageMetricRecords, budget, lead }) => {
   const hasTokens = tokenUsage && Object.values(tokenUsage).some(value => (value ?? 0) > 0);
   const hasQuota = usageMetricRecords?.some(record => record.metricValue > 0 &&
     ['session', 'Session', 'weeklyAll', 'weekly', 'Weekly'].includes(record.metricKey));
@@ -284,11 +283,11 @@ const TelemetryGroups: React.FC<{
           <span className="min-w-0 text-gray-700">{lead}</span>
         </ContextGroup>
       )}
-      <ContextGroup label="Execution runtime" divided={divided}>
+      <ContextGroup label="Execution runtime">
         <ModelChip modelName={modelName} duration={duration} synthetic={synthetic} />
       </ContextGroup>
       {(hasTokens || hasQuota || hasBudget) && (
-        <ContextGroup label="Consumption" divided>
+        <ContextGroup label="Consumption">
           {hasTokens && <TokenUsageChip tokenUsage={tokenUsage} />}
           {hasQuota && <UsageMetricsChip usageMetricRecords={usageMetricRecords!} />}
           {hasBudget && <BudgetChip budget={budget!} />}
@@ -426,7 +425,7 @@ const ContextStrip: React.FC<ContextStripProps> = ({
   const showGit = part !== 'telemetry';
   const showTelemetry = part !== 'git';
   return (
-    <div className={`flex min-w-0 flex-wrap items-center gap-x-3 gap-y-2 text-sm text-gray-600${part === 'git' ? '' : ' flex-1'}`}>
+    <div className={`flex min-w-0 flex-wrap items-center gap-x-4 gap-y-2 text-sm text-gray-600${part === 'git' ? '' : ' flex-1'}`}>
       {showGit && (
         <GitGroup taskInfo={taskInfo} prInfo={prInfo} commitInfo={commitInfo} assignment={assignment} showRepo={!mobileMetadataOnly} />
       )}
@@ -439,7 +438,6 @@ const ContextStrip: React.FC<ContextStripProps> = ({
           usageMetricRecords={usageMetricRecords}
           budget={budget}
           lead={lead}
-          divided={showGit || Boolean(lead)}
         />
       )}
     </div>

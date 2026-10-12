@@ -4,6 +4,7 @@ import ReviewScoreHistory, { ReviewScoreSequence } from './ReviewScoreHistory';
 import PullRequestOutcomeEntry from './PullRequestOutcomeEntry';
 import { pullRequestOutcome, usePullRequestScores } from './pullRequestScores';
 import { getPullRequestScores } from '../../api/taskStatsApi';
+import type { TaskRunEntry } from '../TaskList/rowModel';
 
 vi.mock('../../api/taskStatsApi', () => ({ getPullRequestScores: vi.fn() }));
 
@@ -28,14 +29,14 @@ describe('ReviewScoreHistory', () => {
   beforeEach(() => vi.clearAllMocks());
 
   it('joins the scores in sequence and lists each with its cycle, reviewer and head, leaving the merge status out', () => {
-    render(<ReviewScoreHistory prNumber={42} history={mergedHistory} />);
+    render(<ReviewScoreHistory prNumber={42} history={mergedHistory} variant="standalone" />);
 
     const history = screen.getByTestId('review-score-history');
-    expect(history).toHaveTextContent('Review scores · PR #42');
+    expect(history).toHaveTextContent(/^Review scoresPR #42/);
     // A plain progression of the scores, oldest first, not a chart.
     const sequence = within(history).getByRole('list', { name: 'Review scores: 4, 6, 8 out of 10' });
     expect(within(sequence).getAllByRole('listitem').map(item => item.textContent)).toEqual(['4', '6', '8']);
-    expect(history.querySelector('svg')).toBeNull();
+    expect(history.querySelector('polyline')).toBeNull();
 
     const items = within(within(history).getByRole('list', { name: 'Review score details' })).getAllByRole('listitem');
     expect(items[0]).toHaveTextContent('Cycle 1');
@@ -48,17 +49,32 @@ describe('ReviewScoreHistory', () => {
   });
 
   it('renders nothing for an unscored PR or before the history loads', () => {
-    const { container, rerender } = render(<ReviewScoreHistory prNumber={7} history={{ ...mergedHistory, scores: [] }} />);
+    const { container, rerender } = render(<ReviewScoreHistory prNumber={7} history={{ ...mergedHistory, scores: [] }} variant="standalone" />);
     expect(container).toBeEmptyDOMElement();
-    rerender(<ReviewScoreHistory prNumber={7} history={null} />);
+    rerender(<ReviewScoreHistory prNumber={7} history={null} variant="rail" />);
     expect(container).toBeEmptyDOMElement();
   });
 
   it('connects each score to the one before it', () => {
     const { rerender } = render(<ReviewScoreSequence scores={[4, 6, 8]} />);
-    expect(screen.getByTestId('review-score-sequence').querySelectorAll('[aria-hidden="true"]')).toHaveLength(2);
+    expect(screen.getByTestId('review-score-sequence').querySelectorAll('span[aria-hidden="true"]')).toHaveLength(2);
     rerender(<ReviewScoreSequence scores={[5]} />);
-    expect(screen.getByTestId('review-score-sequence').querySelectorAll('[aria-hidden="true"]')).toHaveLength(0);
+    expect(screen.getByTestId('review-score-sequence').querySelectorAll('span[aria-hidden="true"]')).toHaveLength(0);
+  });
+
+  it('colours each score by its grade, so a failing or poor score never reads teal', () => {
+    render(<ReviewScoreSequence scores={[4, 6, 8, 10]} />);
+    const badges = within(screen.getByTestId('review-score-sequence')).getAllByTitle(/^Review score: /);
+    expect(badges.map(badge => [badge.textContent, badge.className.match(/text-(red|amber|slate|primary)-600/)?.[1]]))
+      .toEqual([['4', 'red'], ['6', 'amber'], ['8', 'slate'], ['10', 'primary']]);
+  });
+
+  it('is a node on the run timeline\'s trunk, not a box beside it', () => {
+    render(<ol><ReviewScoreHistory prNumber={42} history={mergedHistory} variant="rail" /></ol>);
+    const history = screen.getByTestId('review-score-history');
+    expect(history.tagName).toBe('LI');
+    expect(history).not.toHaveClass('border', 'rounded-md');
+    expect(within(history).getByTestId('review-score-node')).toBeInTheDocument();
   });
 });
 
@@ -98,6 +114,13 @@ describe('PullRequestOutcomeEntry', () => {
       .toEqual({ prNumber: 42, state: 'closed', at: '2026-10-07T08:00:00.000Z' });
     expect(pullRequestOutcome(42, { ...mergedHistory, outcome: null })).toBeNull();
     expect(pullRequestOutcome(42, null)).toBeNull();
+  });
+
+  it('names no outcome while a run is still working or queued, since the PR\'s end is the task\'s', () => {
+    const run = (outcome: string) => ({ outcome }) as unknown as TaskRunEntry;
+    expect(pullRequestOutcome(42, mergedHistory, [run('completed'), run('active')])).toBeNull();
+    expect(pullRequestOutcome(42, mergedHistory, [run('waiting')])).toBeNull();
+    expect(pullRequestOutcome(42, mergedHistory, [run('completed'), run('failed')])?.state).toBe('merged');
   });
 
   it('stands on its own after a single run', () => {

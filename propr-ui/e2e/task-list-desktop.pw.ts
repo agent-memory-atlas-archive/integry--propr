@@ -274,9 +274,10 @@ test('1920px opens a task beside the list and steps through rows from the keyboa
   await expect(gitContext).toHaveText(new RegExp(`^integry/propr#2664.*@${prAssignee.login}`));
   await expect(header.getByTestId('task-status-badge').locator('svg')).toHaveCount(0);
   await expect(header.getByRole('group', { name: 'Run', exact: true })).toHaveText('Run 3/8 (Completed 36 mins ago): Found 2 issues');
-  // Neither tier separates with dots or bullets; hairline rules divide the run line's three clusters.
-  expect(await header.innerText()).not.toMatch(/[·•]/);
-  await expect(header.locator('h2 + div [data-testid="context-divider"]')).toHaveCount(2);
+  // Neither tier separates with dots, bullets or rules: the run line's three clusters are set apart by space,
+  // so a wrapped line never starts with a delimiter.
+  expect(await header.innerText()).not.toMatch(/[·•|]/);
+  await expect(header.locator('h2 + div [data-testid="context-divider"]')).toHaveCount(0);
   await expect(header.getByRole('group', { name: 'Execution runtime' })).toHaveText(/gpt-6-astra.*3m 0?0s/);
   await expect(header.getByRole('group', { name: 'Consumption' })).toHaveText('↑420k↓12k(0.1% quota)');
   await expect(header).not.toContainText('3.9M');
