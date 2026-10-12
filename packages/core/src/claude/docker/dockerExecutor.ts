@@ -1,4 +1,4 @@
-import { prepareProviderCapture, managedDiagnostics, type DiagnosticAgent } from '../../diagnostics/managedLogRuntime.js';
+import { prepareCommandCapture, finishDiagnosticOutput, scheduleProviderCapture, managedDiagnostics, type DiagnosticAgent } from '../../diagnostics/managedLogRuntime.js';
 import { createExecutionDeadline, type ExecutionDeadline } from './dockerExecutionDeadline.js';
 import { prepareAdmittedAgent, type AdmittedAgent } from '../../agents/agentRunAdmission.js';
 import { captureWorkflowMarkers, withWorkflowExecutionDeadline } from '../../workflow/workflowExecution.js';
@@ -251,8 +251,7 @@ function runDockerCommand(
 ): Promise<ExecutionResult> {
     return new Promise((resolve, reject) => {
         const { timeout = 300000, cwd, onSessionId, onContainerId, worktreePath, stdinData, extraEnvVars, taskId, streamToRedis, streamStderrToRedis, streamExtraOutput, stripAnsi, preserveOutputOnTimeout = false, model, costCapExempt } = options;
-        const capture = options.diagnostics ? prepareProviderCapture(options.diagnostics, args, extraEnvVars) : null;
-        const diagnosticStdout = capture?.stdout, diagnosticStderr = capture?.stderr;
+        const { capture, stdout: diagnosticStdout, stderr: diagnosticStderr } = prepareCommandCapture(options.diagnostics, args, extraEnvVars);
         const executionArgs = resolveExecutionArgs(command, withWorkflowExecutionDeadline(command, args, remainingMs), taskId, ownershipContext?.attemptGeneration);
         const executablePath = command;
         const namedContainer = command === 'docker' ? getDockerRunContainerName(executionArgs) : null;
@@ -389,8 +388,7 @@ function runDockerCommand(
         };
         detectExecutionContainer();
 
-        const diagnosticTimer = capture ? setInterval(capture.snapshot, 30_000) : undefined;
-        diagnosticTimer?.unref();
+        const diagnosticTimer = scheduleProviderCapture(capture);
         child.stdout?.on('data', (data: Buffer) => {
             const chunk = stdoutDecoder.write(data), ts = new Date().toISOString();
             recordWatchdogActivity();
@@ -422,12 +420,9 @@ function runDockerCommand(
             clearTimeout(timeoutHandle);
             watchdog.stop();
             const finalStdout = stdoutDecoder.end();
-            diagnosticStdout?.write(finalStdout);
-            diagnosticStdout?.close();
             if (finalStdout) stdoutBuffer.append(finalStdout);
             const finalStderr = stderrDecoder.end();
-            diagnosticStderr?.write(finalStderr);
-            diagnosticStderr?.close();
+            finishDiagnosticOutput(capture, finalStdout, finalStderr);
             stderrTail.append(finalStderr);
             const stderr = stderrTail.value;
             workflowMarkers?.finish(finalStderr);

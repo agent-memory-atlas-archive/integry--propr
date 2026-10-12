@@ -15,11 +15,7 @@ import type { ExecutionType } from '../../utils/llmMetrics.types.js';
 import { DEFAULT_AGENT_EXECUTION_TIMEOUT_MS } from '../constants.js';
 import { NoDefaultModelConfiguredError } from '../../config/modelAliases.js';
 import { resolveAgentTerminationReason } from '../termination.js';
-import {
-    buildVibeRepositoryScoutConfig,
-    REPOSITORY_SCOUT_CONTAINER_ROOT,
-    REPOSITORY_SCOUT_PREFIXED_MCP_TOOLS,
-} from './utils/repositoryScoutMcpServer.js';
+import { buildVibeRepositoryScoutConfig, REPOSITORY_SCOUT_CONTAINER_ROOT, REPOSITORY_SCOUT_PREFIXED_MCP_TOOLS } from './utils/repositoryScoutMcpServer.js';
 
 export { UsageLimitError };
 export { parseVibeConversationLog, parseVibeOutput } from './utils/vibeOutputParser.js';

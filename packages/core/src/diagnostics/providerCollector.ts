@@ -1,7 +1,7 @@
 import { rememberDiagnosticCredentials } from './redaction.js';
 import { nativeCredentialValues } from './credentialRedaction.js';
 import fs from 'node:fs';
-import { ManagedLogSpool, digest, type LogIdentity } from './managedLogSpool.js';
+import { ManagedLogSpool, digest, type LogIdentity, type Cursor } from './managedLogSpool.js';
 import { PinnedDirectory } from './privateDirectory.js';
 
 export type DiagnosticProvider = 'codex' | 'claude' | 'antigravity' | 'opencode' | 'vibe';
@@ -45,64 +45,70 @@ export function collectProvider(spool: ManagedLogSpool, input: ProviderRoot, now
     let count = 0, readBytes = 0, protectedBytes = 0;
     const deadline = performance.now() + spool.limits.scanMs;
     let limited = false, inventoryIncomplete = false;
+    const measureProtectedFile = (dir: PinnedDirectory, entry: fs.Dirent): void => {
+        let fd: number | undefined;
+        try { fd = dir.file(entry.name); protectedBytes += fs.fstatSync(fd).size; }
+        catch { inventoryIncomplete = true; spool.report(summary, 'unsafe-source'); }
+        finally { if (fd !== undefined) fs.closeSync(fd); }
+    };
+    const collectFile = (dir: PinnedDirectory, entry: fs.Dirent, relative: string): void => {
+        const identity = { provider: input.provider, agent: input.agent, source: digest(relative) };
+        let fd: number | undefined;
+        try {
+            fd = dir.file(entry.name);
+            const stat = fs.fstatSync(fd);
+            protectedBytes += stat.size;
+            if (readBytes >= spool.limits.scanBytes) { limited = true; return; }
+            const before = spool.cursor(identity);
+            const inode = `${stat.dev}:${stat.ino}:${stat.birthtimeMs}`;
+            let offset = before.offset ?? 0;
+            const anchorAt = (position: number) => {
+                const bytes = Buffer.alloc(Math.min(128, position));
+                const n = fs.readSync(fd!, bytes, 0, bytes.length, position - bytes.length);
+                return digest(bytes.subarray(0, n));
+            };
+            const replaced = sourceWasReplaced(before, { offset, size: stat.size, inode }, anchorAt);
+            if (replaced) {
+                spool.report(identity, 'source-replaced', Math.max(0, offset - stat.size)); offset = 0;
+            }
+            const buffer = Buffer.alloc(Math.min(spool.limits.scanBytes - readBytes, stat.size - offset));
+            const length = fs.readSync(fd, buffer, 0, buffer.length, offset);
+            readBytes += length;
+            let start = 0, dropped = 0, discard = replaced ? false : before.discard ?? false;
+            const records: string[] = [];
+            let recordBound = false;
+            for (let end = 0; end < length; end++) if (buffer[end] === 10) {
+                if (discard || end - start > spool.limits.recordBytes) dropped += end + 1 - start;
+                else records.push(buffer.subarray(start, end).toString('utf8'));
+                discard = false; start = end + 1;
+                if (records.length >= 4096) { recordBound = true; limited = true; break; }
+            }
+            // An oversized unfinished line is consumed in bounded pieces,
+            // and its tail can NEVER be reclassified as a safe record.
+            if (!recordBound && (discard || length - start > spool.limits.recordBytes)) { dropped += length - start; start = length; discard = true; }
+            spool.append(identity, records, relative.endsWith('.jsonl') ? 'jsonl' : 'text', credentials, now,
+                { before, after: { inode, offset: offset + start, discard, anchor: anchorAt(offset + start) } }, dropped);
+        } catch { inventoryIncomplete = true; spool.report(summary, 'unsafe-source'); spool.report(identity, 'unsafe-source'); }
+        finally { if (fd !== undefined) fs.closeSync(fd); }
+    };
+    const visitEntry = (dir: PinnedDirectory, entry: fs.Dirent, relative: string): void => {
+        // File matches precede directory matches (Claude session basenames).
+        if (protectedFiles[input.provider].test(relative)) measureProtectedFile(dir, entry);
+        else if (files[input.provider].test(relative)) collectFile(dir, entry, relative);
+        else if (directories[input.provider].test(relative)) {
+            let child: PinnedDirectory | undefined;
+            try { child = dir.child(entry.name); walk(child, relative + '/'); }
+            catch { inventoryIncomplete = true; spool.report(summary, 'unsafe-source'); }
+            finally { child?.close(); }
+        }
+    };
     const walk = (dir: PinnedDirectory, prefix: string): void => {
         const listing = fs.opendirSync(`/proc/self/fd/${dir.fd}`);
         try {
             let entry: fs.Dirent | null;
             while ((entry = listing.readSync())) {
                 if (++count > spool.limits.scanFiles || performance.now() > deadline) { limited = true; inventoryIncomplete = true; break; }
-                const relative = prefix + entry.name;
-                // File matches precede directory matches (Claude session basenames).
-                if (protectedFiles[input.provider].test(relative)) {
-                    let fd: number | undefined;
-                    try { fd = dir.file(entry.name); protectedBytes += fs.fstatSync(fd).size; }
-                    catch { inventoryIncomplete = true; spool.report(summary, 'unsafe-source'); }
-                    finally { if (fd !== undefined) fs.closeSync(fd); }
-                } else if (files[input.provider].test(relative)) {
-                    const identity = { provider: input.provider, agent: input.agent, source: digest(relative) };
-                    let fd: number | undefined;
-                    try {
-                        fd = dir.file(entry.name);
-                        const stat = fs.fstatSync(fd);
-                        protectedBytes += stat.size;
-                        if (readBytes >= spool.limits.scanBytes) { limited = true; continue; }
-                        const before = spool.cursor(identity);
-                        const inode = `${stat.dev}:${stat.ino}:${stat.birthtimeMs}`;
-                        let offset = before.offset ?? 0;
-                        const anchorAt = (position: number) => {
-                            const bytes = Buffer.alloc(Math.min(128, position));
-                            const n = fs.readSync(fd!, bytes, 0, bytes.length, position - bytes.length);
-                            return digest(bytes.subarray(0, n));
-                        };
-                        const replaced = Boolean((before.anchor && offset <= stat.size && before.anchor !== anchorAt(offset)) || (before.inode && before.inode !== inode) || offset > stat.size);
-                        if (replaced) {
-                            spool.report(identity, 'source-replaced', Math.max(0, offset - stat.size)); offset = 0;
-                        }
-                        const buffer = Buffer.alloc(Math.min(spool.limits.scanBytes - readBytes, stat.size - offset));
-                        const length = fs.readSync(fd, buffer, 0, buffer.length, offset);
-                        readBytes += length;
-                        let start = 0, dropped = 0, discard = replaced ? false : before.discard ?? false;
-                        const records: string[] = [];
-                        let recordBound = false;
-                        for (let end = 0; end < length; end++) if (buffer[end] === 10) {
-                            if (discard || end - start > spool.limits.recordBytes) dropped += end + 1 - start;
-                            else records.push(buffer.subarray(start, end).toString('utf8'));
-                            discard = false; start = end + 1;
-                            if (records.length >= 4096) { recordBound = true; limited = true; break; }
-                        }
-                        // An oversized unfinished line is consumed in bounded pieces,
-                        // and its tail can NEVER be reclassified as a safe record.
-                        if (!recordBound && (discard || length - start > spool.limits.recordBytes)) { dropped += length - start; start = length; discard = true; }
-                        spool.append(identity, records, relative.endsWith('.jsonl') ? 'jsonl' : 'text', credentials, now,
-                            { before, after: { inode, offset: offset + start, discard, anchor: anchorAt(offset + start) } }, dropped);
-                    } catch { inventoryIncomplete = true; spool.report(summary, 'unsafe-source'); spool.report(identity, 'unsafe-source'); }
-                    finally { if (fd !== undefined) fs.closeSync(fd); }
-                } else if (directories[input.provider].test(relative)) {
-                    let child: PinnedDirectory | undefined;
-                    try { child = dir.child(entry.name); walk(child, relative + '/'); }
-                    catch { inventoryIncomplete = true; spool.report(summary, 'unsafe-source'); }
-                    finally { child?.close(); }
-                }
+                visitEntry(dir, entry, prefix + entry.name);
             }
         } finally { listing.closeSync(); }
     };
@@ -110,4 +116,9 @@ export function collectProvider(spool: ManagedLogSpool, input: ProviderRoot, now
     finally { root.close(); }
     spool.report(summary, 'protected-native-state', inventoryIncomplete ? Math.max(protectedBytes, spool.limits.protectedBytes) : protectedBytes);
     if (limited) spool.report(summary, 'scan-limit');
+}
+
+function sourceWasReplaced(before: Cursor, current: { offset: number; size: number; inode: string }, anchorAt: (position: number) => string): boolean {
+    const { offset, size, inode } = current;
+    return Boolean((before.anchor && offset <= size && before.anchor !== anchorAt(offset)) || (before.inode && before.inode !== inode) || offset > size);
 }

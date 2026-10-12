@@ -12,8 +12,7 @@ export class PinnedDirectory {
             const parts = absolute.split('/').filter(Boolean);
             for (let i = 0; i < parts.length; i++) {
                 if (createPrivate && i === parts.length - 1) {
-                    try { fs.mkdirSync(dir.path(parts[i]), { mode: 0o700 }); }
-                    catch (e) { if ((e as NodeJS.ErrnoException).code !== 'EEXIST') throw e; }
+                    dir.createPrivateChild(parts[i]);
                 }
                 const next = dir.child(parts[i]);
                 dir.close(); dir = next;
@@ -24,6 +23,10 @@ export class PinnedDirectory {
             }
             return dir;
         } catch (e) { dir.close(); throw e; }
+    }
+    private createPrivateChild(name: string): void {
+        try { fs.mkdirSync(this.path(name), { mode: 0o700 }); }
+        catch (e) { if ((e as NodeJS.ErrnoException).code !== 'EEXIST') throw e; }
     }
     path(name: string): string {
         if (!name || name === '.' || name === '..' || name.includes('/') || name.includes('\0')) throw new Error('unsafe diagnostic entry');

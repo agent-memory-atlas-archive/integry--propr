@@ -84,6 +84,24 @@ export function captureProviderOutput(identity: LogIdentity, secrets: readonly s
 }
 
 export interface DiagnosticAgent { provider: string; agent: string; configPath?: string; credentials?: Record<string, string>; nativeRoot?: string }
+function providerCredentialRoot(agent: DiagnosticAgent): string | undefined {
+    const relative = getManagedAgentConfigRelativePath(agent.configPath ?? '');
+    const mounts: Record<string, string | undefined> = {
+        codex: process.env.CODEX_CONFIG_PATH || process.env.HOST_CODEX_DIR,
+        claude: process.env.CLAUDE_CONFIG_PATH || process.env.HOST_CLAUDE_DIR,
+        antigravity: process.env.ANTIGRAVITY_CONFIG_PATH || process.env.HOST_ANTIGRAVITY_DIR,
+        opencode: process.env.HOST_OPENCODE_DATA_DIR,
+        vibe: process.env.VIBE_CONFIG_PATH || process.env.HOST_VIBE_DIR,
+    };
+    let root: string | undefined;
+    if (relative && process.env.PROPR_MANAGED_CREDENTIALS_DIR) {
+        root = path.join(process.env.PROPR_MANAGED_CREDENTIALS_DIR, relative);
+        if (agent.provider === 'opencode') root = root.replace(/\/\.config\/opencode$/, '/.local/share/opencode');
+    } else if (!relative && (agent.configPath?.startsWith('~/') || agent.configPath === mounts[agent.provider])) {
+        root = mounts[agent.provider];
+    }
+    return root;
+}
 /** Prepare BEFORE spawning so protected-state backpressure cannot orphan a child. */
 export function prepareProviderCapture(agent: DiagnosticAgent, args: string[] = [], extraEnv: Record<string, string> = {}) {
     const db = managedDiagnostics();
@@ -94,22 +112,8 @@ export function prepareProviderCapture(agent: DiagnosticAgent, args: string[] = 
         const separator = args[i + 1].indexOf('=');
         if (separator > 0) secrets.push(...configuredDiagnosticSecrets({ [args[i + 1].slice(0, separator)]: args[i + 1].slice(separator + 1) }));
     }
-    const relative = getManagedAgentConfigRelativePath(agent.configPath ?? '');
     try {
-        const mounts: Record<string, string | undefined> = {
-            codex: process.env.CODEX_CONFIG_PATH || process.env.HOST_CODEX_DIR,
-            claude: process.env.CLAUDE_CONFIG_PATH || process.env.HOST_CLAUDE_DIR,
-            antigravity: process.env.ANTIGRAVITY_CONFIG_PATH || process.env.HOST_ANTIGRAVITY_DIR,
-            opencode: process.env.HOST_OPENCODE_DATA_DIR,
-            vibe: process.env.VIBE_CONFIG_PATH || process.env.HOST_VIBE_DIR,
-        };
-        let root: string | undefined;
-        if (relative && process.env.PROPR_MANAGED_CREDENTIALS_DIR) {
-            root = path.join(process.env.PROPR_MANAGED_CREDENTIALS_DIR, relative);
-            if (agent.provider === 'opencode') root = root.replace(/\/\.config\/opencode$/, '/.local/share/opencode');
-        } else if (!relative && (agent.configPath?.startsWith('~/') || agent.configPath === mounts[agent.provider])) {
-            root = mounts[agent.provider];
-        }
+        const root = providerCredentialRoot(agent);
         if (root) secrets.push(...nativeCredentialValues(root, agent.provider));
         rememberDiagnosticCredentials(secrets);
         const snapshot = () => {
@@ -140,4 +144,26 @@ export function attachProviderCapture(child: ChildProcess, capture: ReturnType<t
         capture.stdout.write(stdout.end()); capture.stdout.close();
         capture.stderr.write(stderr.end()); capture.stderr.close();
     });
+}
+
+export function prepareCommandCapture(agent: DiagnosticAgent | undefined, args: string[], extraEnv?: Record<string, string>) {
+    const capture = agent ? prepareProviderCapture(agent, args, extraEnv) : null;
+    return {
+        capture,
+        stdout: capture?.stdout,
+        stderr: capture?.stderr,
+    };
+}
+
+export function finishDiagnosticOutput(output: ReturnType<typeof prepareProviderCapture>, stdout: string, stderr: string): void {
+    output?.stdout.write(stdout);
+    output?.stdout.close();
+    output?.stderr.write(stderr);
+    output?.stderr.close();
+}
+
+export function scheduleProviderCapture(capture: ReturnType<typeof prepareProviderCapture>) {
+    const timer = capture ? setInterval(capture.snapshot, 30_000) : undefined;
+    timer?.unref();
+    return timer;
 }

@@ -89,7 +89,8 @@ export class ManagedLogSpool {
         return this.atomic(() => JSON.parse(this.source(identity).cursor) as Cursor);
     }
     /** Cursor CAS + segments commit together. Concurrent/restarted scans cannot duplicate records. */
-    append(identity: LogIdentity, records: string[], format: 'jsonl' | 'text', credentials: readonly string[], now = Date.now(), cursor?: { before: Cursor; after: Cursor }, droppedBytes = 0): boolean {
+    append(identity: LogIdentity, records: string[], format: 'jsonl' | 'text', ...options: [credentials: readonly string[], now?: number, cursor?: { before: Cursor; after: Cursor }, droppedBytes?: number]): boolean {
+        const [credentials, now = Date.now(), cursor, droppedBytes = 0] = options;
         if (records.length > 4096 || records.reduce((sum, r) => sum + Buffer.byteLength(r), 0) > this.limits.scanBytes) throw new Error('diagnostic batch exceeds bound');
         return this.atomic(() => {
             const source = this.source(identity);
@@ -103,29 +104,32 @@ export class ManagedLogSpool {
                 const redacted = performance.now() <= deadline && size <= this.limits.recordBytes ? redactRecord(record, format, credentials) : null;
                 const seq = next++;
                 if (!redacted || Buffer.byteLength(redacted) > this.limits.recordBytes) { this.gap(source, size, 'unsafe-record'); continue; }
-                const day = new Date(now).toISOString().slice(0, 10);
-                let segment = this.db.prepare('SELECT * FROM segments WHERE source=? ORDER BY id DESC LIMIT 1').get(source.id) as Segment | undefined;
-                if (segment && (segment.sealed || segment.day !== day || segment.raw + Buffer.byteLength(redacted) > this.limits.segmentBytes || segment.last !== seq - 1)) segment = undefined;
-                const data = Buffer.from(redacted);
-                const raw = segment ? Buffer.concat([gunzipSync(segment.data, { maxOutputLength: this.limits.segmentBytes }), data]) : data;
-                const compressed = gzipSync(raw, { level: 6 });
-                const total = this.db.prepare('SELECT coalesce(sum(length(data)),0) AS bytes, count(*) AS n FROM segments').get() as { bytes: number; n: number };
-                const perSource = this.db.prepare('SELECT coalesce(sum(length(data)),0) AS bytes FROM segments WHERE source=?').get(source.id) as { bytes: number };
-                const added = compressed.length - (segment?.data.length ?? 0);
-                if (total.bytes + added > this.limits.spoolBytes || perSource.bytes + added > this.limits.sourceBytes || (!segment && total.n >= this.limits.segments)) {
-                    this.gap(source, size, 'unacknowledged-capacity'); continue;
-                }
-                if (segment) this.db.prepare('UPDATE segments SET last=?,end=?,raw=?,digest=?,data=? WHERE id=?').run(seq, now, raw.length, digest(compressed), compressed, segment.id);
-                else {
-                    this.db.prepare('UPDATE segments SET sealed=1 WHERE source=?').run(source.id);
-                    this.db.prepare('INSERT INTO segments(source,day,first,last,start,end,raw,digest,data) VALUES (?,?,?,?,?,?,?,?,?)')
-                        .run(source.id, day, seq, seq, now, now, raw.length, digest(compressed), compressed);
-                }
+                this.appendRecord(source, redacted, { seq, now, size });
             }
             this.db.prepare('UPDATE sources SET next=?,cursor=?,last_success=? WHERE id=?').run(next, cursor ? JSON.stringify(cursor.after) : source.cursor,
                 (this.db.prepare('SELECT gaps FROM sources WHERE id=?').get(source.id) as { gaps: number }).gaps === source.gaps ? now : source.last_success, source.id);
             return true;
         });
+    }
+    private appendRecord(source: Source, redacted: string, { seq, now, size }: { seq: number; now: number; size: number }): void {
+        const day = new Date(now).toISOString().slice(0, 10);
+        let segment = this.db.prepare('SELECT * FROM segments WHERE source=? ORDER BY id DESC LIMIT 1').get(source.id) as Segment | undefined;
+        if (segment && (segment.sealed || segment.day !== day || segment.raw + Buffer.byteLength(redacted) > this.limits.segmentBytes || segment.last !== seq - 1)) segment = undefined;
+        const data = Buffer.from(redacted);
+        const raw = segment ? Buffer.concat([gunzipSync(segment.data, { maxOutputLength: this.limits.segmentBytes }), data]) : data;
+        const compressed = gzipSync(raw, { level: 6 });
+        const total = this.db.prepare('SELECT coalesce(sum(length(data)),0) AS bytes, count(*) AS n FROM segments').get() as { bytes: number; n: number };
+        const perSource = this.db.prepare('SELECT coalesce(sum(length(data)),0) AS bytes FROM segments WHERE source=?').get(source.id) as { bytes: number };
+        const added = compressed.length - (segment?.data.length ?? 0);
+        if (total.bytes + added > this.limits.spoolBytes || perSource.bytes + added > this.limits.sourceBytes || (!segment && total.n >= this.limits.segments)) {
+            this.gap(source, size, 'unacknowledged-capacity'); return;
+        }
+        if (segment) this.db.prepare('UPDATE segments SET last=?,end=?,raw=?,digest=?,data=? WHERE id=?').run(seq, now, raw.length, digest(compressed), compressed, segment.id);
+        else {
+            this.db.prepare('UPDATE segments SET sealed=1 WHERE source=?').run(source.id);
+            this.db.prepare('INSERT INTO segments(source,day,first,last,start,end,raw,digest,data) VALUES (?,?,?,?,?,?,?,?,?)')
+                .run(source.id, day, seq, seq, now, now, raw.length, digest(compressed), compressed);
+        }
     }
     private prune(now: number): void {
         // Acknowledgement includes encrypted upload AND verified readback. Unacked

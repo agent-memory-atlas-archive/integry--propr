@@ -34,22 +34,29 @@ export function nativeCredentialValues(root: string, provider: string, pinned?: 
                 const parts = name.split('/');
                 for (const part of parts.slice(0, -1)) { parent = parent.child(part); children.push(parent); }
                 fd = parent.file(parts.at(-1)!);
-                const stat = fs.fstatSync(fd);
-                if (stat.size > 64 * 1024) throw new Error('credential redaction bound');
-                const buffer = Buffer.alloc(64 * 1024 + 1);
-                const n = fs.readSync(fd, buffer, 0, buffer.length, 0);
-                if (n > 64 * 1024) throw new Error('credential redaction bound');
-                const content = buffer.subarray(0, n).toString('utf8');
-                if (name === '.env') {
-                    for (const line of content.split(/\r?\n/)) {
-                        if (line.trim() && !line.trim().startsWith('#') && !/^\s*(?:export\s+)?[A-Za-z_][A-Za-z0-9_]*\s*=/.test(line)) throw new Error('unsupported credential format');
-                    }
-                    walk(parseEnv(content));
-                } else if (name.endsWith('antigravity-oauth-token') && /^[A-Za-z0-9._-]+\s*$/.test(content)) walk(content.trim());
-                else walk(JSON.parse(content));
+                walk(parseCredentialContent(name, readCredentialContent(fd)));
             } catch (e) { if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw new Error('credential redaction unavailable'); }
             finally { if (fd !== undefined) fs.closeSync(fd); for (const child of children.reverse()) child.close(); }
         }
     } finally { if (!pinned) dir.close(); }
     return values;
+}
+
+function readCredentialContent(fd: number): string {
+    if (fs.fstatSync(fd).size > 64 * 1024) throw new Error('credential redaction bound');
+    const buffer = Buffer.alloc(64 * 1024 + 1);
+    const n = fs.readSync(fd, buffer, 0, buffer.length, 0);
+    if (n > 64 * 1024) throw new Error('credential redaction bound');
+    return buffer.subarray(0, n).toString('utf8');
+}
+
+function parseCredentialContent(name: string, content: string): unknown {
+    if (name === '.env') {
+        for (const line of content.split(/\r?\n/)) {
+            if (line.trim() && !line.trim().startsWith('#') && !/^\s*(?:export\s+)?[A-Za-z_][A-Za-z0-9_]*\s*=/.test(line)) throw new Error('unsupported credential format');
+        }
+        return parseEnv(content);
+    }
+    if (name.endsWith('antigravity-oauth-token') && /^[A-Za-z0-9._-]+\s*$/.test(content)) return content.trim();
+    return JSON.parse(content);
 }
