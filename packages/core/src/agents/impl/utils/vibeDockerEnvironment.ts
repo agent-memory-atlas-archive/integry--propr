@@ -37,4 +37,3 @@ export function buildVibeDockerEnvVars(config: AgentConfig, params: { cleanModel
     envVars.push('-e', `VIBE_MAX_TURNS=${maxTurns}`);
     return envVars;
 }
-
