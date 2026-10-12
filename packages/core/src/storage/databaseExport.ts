@@ -19,8 +19,19 @@ export function configuredExportSecrets(env: NodeJS.ProcessEnv = process.env): s
     isExportSecretName(name) && value ? [value] : []))];
 }
 export type StorageAuthority = () => Promise<void>;
-// Keep the positional public API while sharing the actor-bound operation contract.
+// Compatibility boundary for existing storage callers.
 type ExportOperationArgs = [instanceId: string, generation: string, id: string, actor: string, authorize: StorageAuthority];
+interface ExportRequest {
+  instanceId: string;
+  generation: string;
+  operationId: string;
+  actor: string;
+  authorize: StorageAuthority;
+}
+function exportRequest(args: ExportOperationArgs): ExportRequest {
+  const [instanceId, generation, operationId, actor, authorize] = args;
+  return { instanceId, generation, operationId, actor, authorize };
+}
 interface ExportJob { actor: string; status: DatabaseExportStatus; directory: string; worker?: Worker; disposed?: Promise<void>; removing?: Promise<void>; identity?: { dev: number; ino: number }; ancestry: Array<{ path: string; dev: number; ino: number }> }
 
 /** Private, bounded, process-generation-bound jobs. Never accepts a caller path. */
@@ -103,16 +114,7 @@ export class DatabaseExports {
       let directory: string;
       try { directory = await fs.mkdtemp(path.join(this.root, 'snapshot-')); }
       catch (error) { await fs.rmdir(path.join(this.root, 'active')); throw error; }
-      const ancestry: ExportJob['ancestry'] = [];
-      for (const leaf of [path.dirname(this.source), directory]) {
-        let current = path.resolve(leaf);
-        for (;;) {
-          const stat = await fs.lstat(current);
-          if (!stat.isDirectory() || stat.isSymbolicLink()) throw new Error('Unsafe ancestor');
-          ancestry.push({ path: current, dev: stat.dev, ino: stat.ino });
-          const parent = path.dirname(current); if (parent === current) break; current = parent;
-        }
-      }
+      const ancestry = await this.captureAncestry(directory);
       const job: ExportJob = {
         actor, directory, ancestry,
         status: { version: 1, instanceId, generation: this.generation, operationId: randomUUID(), state: 'running', expiresAt: new Date(Date.now() + TTL).toISOString(), scope: 'customer_database' },
@@ -124,6 +126,20 @@ export class DatabaseExports {
       expiry.unref();
       return { ...job.status };
     } finally { this.admitting = false; }
+  }
+
+  private async captureAncestry(directory: string): Promise<ExportJob['ancestry']> {
+    const ancestry: ExportJob['ancestry'] = [];
+    for (const leaf of [path.dirname(this.source), directory]) {
+      let current = path.resolve(leaf);
+      for (;;) {
+        const stat = await fs.lstat(current);
+        if (!stat.isDirectory() || stat.isSymbolicLink()) throw new Error('Unsafe ancestor');
+        ancestry.push({ path: current, dev: stat.dev, ino: stat.ino });
+        const parent = path.dirname(current); if (parent === current) break; current = parent;
+      }
+    }
+    return ancestry;
   }
 
   private async run(job: ExportJob, original: Awaited<ReturnType<typeof fs.stat>>, authorize: StorageAuthority) {
@@ -163,18 +179,23 @@ export class DatabaseExports {
     }
   }
 
-  private selected(instanceId: string, generation: string, id: string, actor: string): ExportJob {
+  private selected(request: ExportRequest): ExportJob {
+    const { instanceId, generation, operationId, actor } = request;
     const job = this.job;
-    if (!job || job.actor !== actor || job.status.instanceId !== instanceId || generation !== this.generation || job.status.operationId !== id || Date.parse(job.status.expiresAt) <= Date.now()) throw new Error('Export unavailable');
+    if (!job || job.actor !== actor || job.status.instanceId !== instanceId || generation !== this.generation || job.status.operationId !== operationId || Date.parse(job.status.expiresAt) <= Date.now()) throw new Error('Export unavailable');
     return job;
   }
-  async status(...[instanceId, generation, id, actor, authorize]: ExportOperationArgs) {
-    const job = this.selected(instanceId, generation, id, actor);
+  async status(...args: ExportOperationArgs) {
+    const request = exportRequest(args);
+    const job = this.selected(request);
+    const { authorize } = request;
     try { await authorize(); } catch (error) { await this.discard(job); throw error; }
     return { ...job.status };
   }
-  async redeem(...[instanceId, generation, id, actor, authorize]: ExportOperationArgs) {
-    const job = this.selected(instanceId, generation, id, actor);
+  async redeem(...args: ExportOperationArgs) {
+    const request = exportRequest(args);
+    const job = this.selected(request);
+    const { authorize } = request;
     await authorize();
     if (job.status.state !== 'ready') throw new Error('Export not ready or consumed');
     // Synchronous consumption before opening: simultaneous redemptions cannot both succeed.
@@ -190,8 +211,10 @@ export class DatabaseExports {
       } catch (error) { await file.close(); throw error; }
     } catch (error) { await this.discard(job); throw error; }
   }
-  async cancel(...[instanceId, generation, id, actor, authorize]: ExportOperationArgs) {
-    const job = this.selected(instanceId, generation, id, actor);
+  async cancel(...args: ExportOperationArgs) {
+    const request = exportRequest(args);
+    const job = this.selected(request);
+    const { authorize } = request;
     await authorize(); await this.discard(job);
   }
   private async checkAncestry(job: ExportJob) {

@@ -14,15 +14,13 @@ import { useSettingsState } from './useSettingsState';
 import { useDemoMode } from '../../contexts/DemoModeContext';
 import { useCurrentUser, userHasPermission } from '../../contexts/AuthContext';
 import NotificationSettingsSection from './NotificationSettingsSection';
-import VisualPreviewAuthSection from './VisualPreviewAuthSection';
 import DesktopNotificationSettingsSection from './DesktopNotificationSettingsSection';
 import VoiceSettingsSection from './VoiceSettingsSection';
 import { useDesktop } from '../../desktop/DesktopContext';
-import InstanceStorageSection from './InstanceStorageSection';
-import ManagedPreviewStorageSection from './ManagedPreviewStorageSection';
 import SettingsNavigation, { type SettingsNavigationSection } from './SettingsNavigation';
 import McpServerSection from './McpServerSection';
 import { useSettingsCategoryRoute } from './useSettingsCategoryRoute';
+import { settingsDataSections } from './settingsDataSections';
 import SettingsSaveStatusBar from './SettingsSaveStatusBar';
 
 const AdminSettingsPage: React.FC = () => {
@@ -300,23 +298,7 @@ const AdminSettingsPage: React.FC = () => {
       searchText: 'agent runtime packages dependencies install catalog container image environment build',
       content: <AgentRuntimePackagesSection />
     },
-    {
-      id: 'instance-storage',
-      category: 'integrations',
-      searchText: 'instance database export inventory repository cache cleanup storage self hosted admin backup',
-      content: <InstanceStorageSection />
-    },
-    {
-      id: 'visual-preview-uploads',
-      category: 'integrations',
-      searchText: 'visual preview upload screenshots videos GitHub login personal access token PAT credential authentication connect managed storage quota retention Plus originals',
-      content: (
-        <div className="space-y-10">
-          <VisualPreviewAuthSection />
-          <ManagedPreviewStorageSection />
-        </div>
-      )
-    },
+    ...settingsDataSections(),
     {
       id: 'voice-briefings',
       category: 'integrations',

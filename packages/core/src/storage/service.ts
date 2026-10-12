@@ -1,28 +1,18 @@
+import { StorageContractError, validatePreviewSelection, type CleanupPreviewArgs, type CleanupPreviewRequest, type CandidateExecution, type SavedPreview } from './cleanupRequest.js';
 import fs from 'node:fs/promises';
 import { DatabaseExports, type StorageAuthority } from './databaseExport.js';
 import type { RepositoryStorageInventory } from '@propr/shared';
 import { constants } from 'node:fs';
 import path from 'node:path';
 import { randomUUID, createHash } from 'node:crypto';
-import { DEFAULT_STORAGE_POLICY, type StoragePolicy, type StorageCategory, type StorageObservation, type StorageCleanupPreview, type StorageCleanupResult, type StorageCandidate, type StorageProtection } from '@propr/shared';
+import { DEFAULT_STORAGE_POLICY, type StoragePolicy, type StorageObservation, type StorageCleanupPreview, type StorageCleanupResult, type StorageCandidate, type StorageProtection } from '@propr/shared';
 import { StorageLifecycle, StorageBusyError, assertRealDirectory } from './lifecycle.js';
 import { observeStorage, type StorageRoot } from './observation.js';
 import { auditRepository } from './repositorySafety.js';
 import type { CacheRecord } from './registry.js';
 import { resolveRepositoryClonePath } from '../git/repositoryPaths.js';
 
-export class StorageContractError extends Error {
-  constructor(readonly status: number, message: string) { super(message); }
-}
-// Preserve existing positional callers, including the optional task selection.
-type CleanupPreviewArgs = [instanceId: string, categories: StorageCategory[], actor: string, taskIds?: string[], authorize?: StorageAuthority];
-interface SavedPreview {
-  actor: string;
-  preview: StorageCleanupPreview;
-  fingerprints: Record<string, string>;
-  useClock: number | null;
-  generation: string;
-}
+export { StorageContractError } from './cleanupRequest.js';
 interface StorageServices {
   databaseFile?: string;
   lifecycle: StorageLifecycle;
@@ -271,11 +261,14 @@ export class InstanceStorageService {
     }
     return candidates;
   }
-  async preview(...[instanceId, categories, actor, taskIds = [], authorize]: CleanupPreviewArgs): Promise<StorageCleanupPreview> {
+  async preview(...args: CleanupPreviewArgs): Promise<StorageCleanupPreview> {
+    const [instanceId, categories, actor, taskIds = [], authorize] = args;
+    return this.previewRequest({ instanceId, categories, actor, taskIds, authorize });
+  }
+  private async previewRequest(request: CleanupPreviewRequest): Promise<StorageCleanupPreview> {
+    const { instanceId, categories, actor, taskIds, authorize } = request;
     await this.assertInstance(instanceId);
-    if (taskIds.length > 10 || new Set(taskIds).size !== taskIds.length || taskIds.some(id => typeof id !== 'string' || !/^[A-Za-z0-9_-]{1,255}$/.test(id))) throw new StorageContractError(400, 'Invalid task selection');
-    if (taskIds.length && !categories.includes('task_history')) throw new StorageContractError(400, 'Task selection requires task_history category');
-    if (!categories.length || new Set(categories).size !== categories.length || categories.length > 7) throw new StorageContractError(400, 'Select explicit categories');
+    validatePreviewSelection(request);
     return this.cleanup(async admissionSignal => {
       const signal = AbortSignal.any([admissionSignal, AbortSignal.timeout(60_000)]);
       const candidates: StorageCandidate[] = [];
@@ -283,11 +276,9 @@ export class InstanceStorageService {
       const busy = await this.busy() || !await this.services.lifecycle.lastUse();
       for (const category of categories) {
         if (category === 'task_history' && this.services.taskHistory && taskIds.length) {
-          for (const evaluated of await this.services.taskHistory.inspect(taskIds)) {
-            if (busy) evaluated.candidate.protectedReasons = ['busy'];
-            candidates.push(evaluated.candidate);
-            if (evaluated.fingerprint) fingerprints[evaluated.candidate.id] = evaluated.fingerprint;
-          }
+          const evaluated = await this.previewTaskHistory(taskIds, busy);
+          candidates.push(...evaluated.candidates);
+          Object.assign(fingerprints, evaluated.fingerprints);
           continue;
         }
         if (category !== 'repository_caches') {
@@ -313,7 +304,18 @@ export class InstanceStorageService {
       return preview;
     });
   }
-  private async executeCandidate(candidate: StorageCandidate, record: CacheRecord | undefined, fingerprint: string, { signal, authorize }: { signal: AbortSignal; authorize?: StorageAuthority }): Promise<StorageProtection[]> {
+  private async previewTaskHistory(taskIds: string[], busy: boolean) {
+    const candidates: StorageCandidate[] = [];
+    const fingerprints: Record<string, string> = {};
+    for (const evaluated of await this.services.taskHistory!.inspect(taskIds)) {
+      if (busy) evaluated.candidate.protectedReasons = ['busy'];
+      candidates.push(evaluated.candidate);
+      if (evaluated.fingerprint) fingerprints[evaluated.candidate.id] = evaluated.fingerprint;
+    }
+    return { candidates, fingerprints };
+  }
+  private async executeCandidate(candidate: StorageCandidate, execution: CandidateExecution): Promise<StorageProtection[]> {
+    const { record, fingerprint, signal, authorize } = execution;
     if (candidate.category === 'task_history' && this.services.taskHistory) {
       await authorize?.();
       return await this.services.taskHistory.erase(candidate.id, fingerprint) ? [] : ['changed'];
@@ -331,6 +333,11 @@ export class InstanceStorageService {
     if (saved.actor !== actor || saved.preview.instanceId !== instanceId) throw new StorageContractError(403, 'Confirmation belongs to another principal');
     if (!Number.isFinite(Date.parse(saved.preview.expiresAt)) || Date.parse(saved.preview.expiresAt) <= Date.now()) throw new StorageContractError(409, 'Confirmation expired');
   }
+  private async validateAutomaticExecution(): Promise<void> {
+    const policy = await this.policy();
+    const clock = await this.services.lifecycle.lastUse();
+    if (!policy.enabled || !clock || Date.now() - clock < policy.idleHours * 3_600_000) throw new StorageContractError(409, 'Automatic policy or idle interval changed');
+  }
   async execute(instanceId: string, confirmation: string, actor: string, authorize?: StorageAuthority): Promise<StorageCleanupResult> {
     await this.assertInstance(instanceId);
     if (!/^[0-9a-f-]{36}$/.test(confirmation)) throw new StorageContractError(400, 'Invalid confirmation');
@@ -346,11 +353,7 @@ export class InstanceStorageService {
       await fs.rename(path.join(this.root, `preview-${confirmation}.json`), path.join(this.root, `consumed-${confirmation}.json`));
       await this.write(`result-${confirmation}.json`, { actor, result, generation: this.generation, expiresAt: saved.preview.expiresAt });
       await this.audit(actor, 'execute_started', { operationId: confirmation });
-      if (actor === 'automatic') {
-        const policy = await this.policy();
-        const clock = await this.services.lifecycle.lastUse();
-        if (!policy.enabled || !clock || Date.now() - clock < policy.idleHours * 3_600_000) throw new StorageContractError(409, 'Automatic policy or idle interval changed');
-      }
+      if (actor === 'automatic') await this.validateAutomaticExecution();
       const busy = await this.busy();
       const clockChanged = saved.useClock !== await this.services.lifecycle.lastUse();
       const records = new Map((await this.records(saved.preview.candidates.filter(candidate => candidate.category === 'repository_caches').map(candidate => candidate.id))).map(record => [record.id, record]));
@@ -360,7 +363,7 @@ export class InstanceStorageService {
         if (!reasons.length && (busy || signal.aborted || clockChanged)) reasons = [busy || signal.aborted ? 'busy' : 'changed'];
         if (!reasons.length) {
           await authorize?.();
-          reasons = await this.executeCandidate(candidate, record, saved.fingerprints[candidate.id], { signal, authorize });
+          reasons = await this.executeCandidate(candidate, { record, fingerprint: saved.fingerprints[candidate.id], signal, authorize });
           if (!reasons.length) result.deleted.push(candidate.id);
         }
         if (reasons.length) result.retained.push({ id: candidate.id, reasons });
