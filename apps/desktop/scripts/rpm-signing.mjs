@@ -76,9 +76,12 @@ export async function verifyRpm({ path, identity }) {
     // A digest-only unsigned RPM also exits zero. Require BOTH native header and
     // header+payload signatures, with no missing key or digest/signature failure.
     const id = identity.fingerprint.slice(-8).toLowerCase();
-    const header = new RegExp(`^\\s*Header V[34] RSA/SHA256 Signature, key ID ${id}: OK$`, 'mi');
-    const packageSignature = new RegExp(`^\\s*V[34] RSA/SHA256 Signature, key ID ${id}: OK$`, 'mi');
-    if (!header.test(stdout) || !packageSignature.test(stdout)
+    // Parse key IDs with fixed patterns, then compare them as literal strings.
+    const header = [...stdout.matchAll(/^\s*Header V[34] RSA\/SHA256 Signature, key ID ([a-f0-9]{8}): OK$/gmi)]
+      .some(match => match[1].toLowerCase() === id);
+    const packageSignature = [...stdout.matchAll(/^\s*V[34] RSA\/SHA256 Signature, key ID ([a-f0-9]{8}): OK$/gmi)]
+      .some(match => match[1].toLowerCase() === id);
+    if (!header || !packageSignature
       || /NOT OK|NOKEY|NOTTRUSTED|BAD|UNKNOWN/i.test(stdout)) {
       throw new Error('RPM must have verified header and package signatures from the pinned identity');
     }
