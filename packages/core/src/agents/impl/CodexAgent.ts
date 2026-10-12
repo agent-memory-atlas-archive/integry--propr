@@ -77,7 +77,7 @@ export class CodexAgent implements Agent {
 
             const { result, usageMetrics } = await executeWithUsageTracking(
                 'codex',
-                async () => executeDockerCommand('docker', dockerArgs, {
+                async () => executeDockerCommand('docker', dockerArgs, { diagnostics: { provider: this.config.type, agent: this.config.id, configPath: this.config.configPath, credentials: this.config.envVars },
                     timeout: this.timeoutMs,
                     cwd: worktreePath,
                     onSessionId,
@@ -253,7 +253,7 @@ export class CodexAgent implements Agent {
 
             const { result, usageMetrics } = await executeWithUsageTracking(
                 'codex',
-                async () => executeDockerCommand('docker', dockerArgs, {
+                async () => executeDockerCommand('docker', dockerArgs, { diagnostics: { provider: this.config.type, agent: this.config.id, configPath: this.config.configPath, credentials: this.config.envVars },
                     timeout: timeoutMs ?? 1800000, stdinData: analysisPrompt, taskId,
                     model: effectiveModel === 'unknown' ? undefined : effectiveModel
                 }),

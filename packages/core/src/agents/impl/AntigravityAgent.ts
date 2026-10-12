@@ -113,7 +113,7 @@ export class AntigravityAgent implements Agent {
 
             const { result, usageMetrics } = await executeWithUsageTracking(
                 'antigravity',
-                async () => executeDockerCommand('docker', dockerArgs, {
+                async () => executeDockerCommand('docker', dockerArgs, { diagnostics: { provider: this.config.type, agent: this.config.id, configPath: this.config.configPath, credentials: this.config.envVars },
                     timeout: this.timeoutMs, cwd: worktreePath, onSessionId, onContainerId, worktreePath, stdinData: prompt,
                     taskId, streamToRedis: true, preserveOutputOnTimeout: true, model: effectiveModel
                 }),
@@ -145,6 +145,7 @@ export class AntigravityAgent implements Agent {
             const worktreeGitContent = verifyWorktreeStructure(worktreePath, issueRef.number);
             const reasoningLevel = await this.resolveReasoningLevel(options.reasoningLevel, model);
             const response = await executeAntigravityNativeGoal(options, {
+                diagnostics: { provider: this.config.type, agent: this.config.id, configPath: this.config.configPath, credentials: this.config.envVars },
                 buildDockerArgs: async ({ conversationId, launch }) => {
                     const { githubToken, gitMountArgs } = await prepareAgentGitAccess(options);
                     return this.buildDockerArgs({
@@ -385,7 +386,7 @@ export class AntigravityAgent implements Agent {
 
             const { result, usageMetrics } = await executeWithUsageTracking(
                 'antigravity',
-                async () => executeDockerCommand('docker', dockerArgs, { timeout: effectiveTimeoutMs, stdinData: fullPrompt, taskId, model: effectiveModel }),
+                async () => executeDockerCommand('docker', dockerArgs, { diagnostics: { provider: this.config.type, agent: this.config.id, configPath: this.config.configPath, credentials: this.config.envVars }, timeout: effectiveTimeoutMs, stdinData: fullPrompt, taskId, model: effectiveModel }),
                 ANALYSIS_AGENT_TANK_TIMEOUT_MS,
                 this.config.alias,
                 options?.skipUsageTracking

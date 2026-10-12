@@ -367,6 +367,7 @@ export function resolveConfig(env = process.env, overrides = {}) {
         stack, network, envFileLocal, envFileHost, nodeEnv,
         validateHostPaths: overrides.validateHostPaths === true,
         hostData, hostLogs, hostRepos, managedCredentialsDir,
+        managedDiagnosticsEnabled: Boolean(get('PROPR_FLEET_CONTROL_SECRET')) || get('PROPR_MANAGED_LOGS') === '1',
         apiPort, uiPort, docsPort, redisExternalPort, docsEnabled,
         apiRateLimitMax, apiRateLimitWindowMs,
         authRateLimitMax, authRateLimitWindowMs,
@@ -424,22 +425,22 @@ export function resolveHostConfig({ rootDir = process.cwd(), env = process.env, 
 // Mount host credentials at the same path on both sides (HOST:HOST) and set the
 // *_CONFIG_PATH env vars to that path, so the worker/api can re-mount them into
 // agent containers without any path translation.
-export function agentCredentialArgs(cfg, { opencodeDataReadWrite = false } = {}) {
+export function agentCredentialArgs(cfg, { opencodeDataReadWrite = false, readOnly = false } = {}) {
     const args = [];
     if (cfg.hostClaudeDir) {
-        args.push('-v', `${cfg.hostClaudeDir}:${cfg.hostClaudeDir}`);
+        args.push('-v', `${cfg.hostClaudeDir}:${cfg.hostClaudeDir}${readOnly ? ':ro' : ''}`);
         args.push('-e', `CLAUDE_CONFIG_PATH=${cfg.hostClaudeDir}`);
     }
     if (cfg.hostCodexDir) {
-        args.push('-v', `${cfg.hostCodexDir}:${cfg.hostCodexDir}`);
+        args.push('-v', `${cfg.hostCodexDir}:${cfg.hostCodexDir}${readOnly ? ':ro' : ''}`);
         args.push('-e', `CODEX_CONFIG_PATH=${cfg.hostCodexDir}`);
     }
     if (cfg.hostAntigravityDir) {
-        args.push('-v', `${cfg.hostAntigravityDir}:${cfg.hostAntigravityDir}`);
+        args.push('-v', `${cfg.hostAntigravityDir}:${cfg.hostAntigravityDir}${readOnly ? ':ro' : ''}`);
         args.push('-e', `ANTIGRAVITY_CONFIG_PATH=${cfg.hostAntigravityDir}`);
     }
     if (cfg.hostOpencodeXdgDir) {
-        args.push('-v', `${cfg.hostOpencodeXdgDir}:${cfg.hostOpencodeXdgDir}`);
+        args.push('-v', `${cfg.hostOpencodeXdgDir}:${cfg.hostOpencodeXdgDir}${readOnly ? ':ro' : ''}`);
         args.push('-e', `OPENCODE_CONFIG_PATH=${cfg.hostOpencodeXdgDir}`);
     }
     if (cfg.hostOpencodeDataDir) {
@@ -448,18 +449,18 @@ export function agentCredentialArgs(cfg, { opencodeDataReadWrite = false } = {})
         args.push('-e', `HOST_OPENCODE_DATA_DIR=${cfg.hostOpencodeDataDir}`);
     }
     if (cfg.hostVibeDir) {
-        args.push('-v', `${cfg.hostVibeDir}:${cfg.hostVibeDir}`);
+        args.push('-v', `${cfg.hostVibeDir}:${cfg.hostVibeDir}${readOnly ? ':ro' : ''}`);
         args.push('-e', `VIBE_CONFIG_PATH=${cfg.hostVibeDir}`);
     }
     return args;
 }
 
-function managedCredentialArgs(cfg) {
+function managedCredentialArgs(cfg, readOnly = false) {
     if (!cfg.managedCredentialsDir) return [];
     return [
         // HOST:HOST keeps the generated path valid when an app container asks
         // the host Docker daemon to mount it into a sibling agent container.
-        '-v', `${cfg.managedCredentialsDir}:${cfg.managedCredentialsDir}`,
+        '-v', `${cfg.managedCredentialsDir}:${cfg.managedCredentialsDir}${readOnly ? ':ro' : ''}`,
         '-e', `PROPR_MANAGED_CREDENTIALS_DIR=${cfg.managedCredentialsDir}`,
     ];
 }
@@ -1045,6 +1046,10 @@ export function buildServiceSpec(cfg, service) {
         }
         case 'daemon':
             return appSpec(cfg, ['dist/src/daemon.js'], [
+                ...(cfg.managedDiagnosticsEnabled ? [
+                    ...managedCredentialArgs(cfg, true),
+                    ...agentCredentialArgs(cfg, { readOnly: true }),
+                ] : []),
                 '-v', `${cfg.envFileHost}:/usr/src/app/.env:ro`,
                 '-v', '/tmp/pr-worktrees:/tmp/pr-worktrees',
                 '-e', `GITHUB_BOT_USERNAME=${cfg.githubBotUsername}`,

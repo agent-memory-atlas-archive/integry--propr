@@ -104,7 +104,7 @@ export class VibeAgent implements Agent {
             });
             const { result, usageMetrics } = await executeWithUsageTracking(
                 'vibe',
-                async () => executeDockerCommand('docker', dockerArgs, {
+                async () => executeDockerCommand('docker', dockerArgs, { diagnostics: { provider: this.config.type, agent: this.config.id, configPath: this.config.configPath, nativeRoot: runtimeHomePath, credentials: { ...this.config.envVars, MISTRAL_API_KEY: mistralApiKey || '' } },
                     timeout: this.timeoutMs,
                     cwd: worktreePath,
                     onSessionId,
@@ -228,7 +228,7 @@ export class VibeAgent implements Agent {
             });
             const { result, usageMetrics } = await executeWithUsageTracking(
                 'vibe',
-                async () => executeDockerCommand('docker', dockerArgs, {
+                async () => executeDockerCommand('docker', dockerArgs, { diagnostics: { provider: this.config.type, agent: this.config.id, configPath: this.config.configPath, nativeRoot: runtimeHomePath, credentials: { ...this.config.envVars, MISTRAL_API_KEY: mistralApiKey || '' } },
                     timeout: timeoutMs ?? parseInt(process.env.VIBE_ANALYSIS_TIMEOUT_MS || '1800000', 10),
                     taskId,
                     model: effectiveModel

@@ -1,3 +1,4 @@
+import { prepareProviderCapture, attachProviderCapture, type DiagnosticAgent } from '../../diagnostics/managedLogRuntime.js';
 import { toAntigravityCliModelId } from './antigravityModelIds.js';
 import { execFile, spawn, type ChildProcess } from 'node:child_process';
 import { promisify } from 'node:util';
@@ -351,6 +352,7 @@ export function sumAntigravitySegmentUsage(segments: ReadonlyArray<Pick<Antigrav
 }
 
 export interface AntigravityNativeGoalLaunch {
+    diagnostics?: DiagnosticAgent;
     /** Docker args for one invocation; `launch` keeps slash commands enabled for `/goal`. */
     buildDockerArgs(options: { conversationId?: string; launch: boolean }): string[] | Promise<string[]>;
     model: string;
@@ -383,7 +385,9 @@ export async function executeAntigravityNativeGoal(
         if (ownership?.signal.aborted) throw getExecutionAbortError(ownership.signal)!;
         if (expired) throw new Error('Antigravity native goal attempt exceeded its execution timeout');
         const args = resolveExecutionArgs('docker', dockerArgs, options.taskId, ownership?.attemptGeneration);
+        const capture = launch.diagnostics ? prepareProviderCapture(launch.diagnostics, args) : null;
         const child = await spawnWithNetworkPolicy(args, runArgs => spawn('docker', runArgs, { stdio: ['pipe', 'pipe', 'pipe'], cwd: options.worktreePath }));
+        attachProviderCapture(child, capture);
         current = child;
         // Print mode reads the prompt from non-TTY stdin, avoiding argv limits.
         child.stdin?.end(message);

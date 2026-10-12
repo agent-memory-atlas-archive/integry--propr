@@ -1,3 +1,4 @@
+import { prepareProviderCapture, managedDiagnostics, type DiagnosticAgent } from '../../diagnostics/managedLogRuntime.js';
 import { createExecutionDeadline, type ExecutionDeadline } from './dockerExecutionDeadline.js';
 import { prepareAdmittedAgent, type AdmittedAgent } from '../../agents/agentRunAdmission.js';
 import { captureWorkflowMarkers, withWorkflowExecutionDeadline } from '../../workflow/workflowExecution.js';
@@ -59,6 +60,7 @@ export type LegacyTaskContainerLiveness = 'running' | 'not_found' | 'unavailable
  * streamed agent runs that preserve partial output.
  */
 export interface DockerCommandOptions extends Pick<ExecutionWatchdogOptions, 'watchdog' | 'onWatchdogTrip'>, NetworkPolicyOptions {
+    diagnostics?: DiagnosticAgent;
     timeout?: number; cwd?: string; worktreePath?: string; stdinData?: string; taskId?: string; streamToRedis?: boolean; streamStderrToRedis?: boolean; stripAnsi?: boolean;
     /** Resolve with buffered output on timeout or a spend-cap stop so implementation jobs can publish partial work. */
     preserveOutputOnTimeout?: boolean;
@@ -193,6 +195,7 @@ function spawnCommandProcess(
 }
 
 export async function executeDockerCommand(command: string, args: string[], options: DockerCommandOptions = {}): Promise<ExecutionResult> {
+    if (options.diagnostics) managedDiagnostics()?.assertCapacity();
     const ownershipContext = getExecutionOwnershipContext();
     const timeout = options.timeout ?? 300000;
     const { deadline, executionSignal, timeoutError } = createExecutionDeadline(timeout, options.signal, ownershipContext?.signal);
@@ -248,6 +251,8 @@ function runDockerCommand(
 ): Promise<ExecutionResult> {
     return new Promise((resolve, reject) => {
         const { timeout = 300000, cwd, onSessionId, onContainerId, worktreePath, stdinData, extraEnvVars, taskId, streamToRedis, streamStderrToRedis, streamExtraOutput, stripAnsi, preserveOutputOnTimeout = false, model, costCapExempt } = options;
+        const capture = options.diagnostics ? prepareProviderCapture(options.diagnostics, args, extraEnvVars) : null;
+        const diagnosticStdout = capture?.stdout, diagnosticStderr = capture?.stderr;
         const executionArgs = resolveExecutionArgs(command, withWorkflowExecutionDeadline(command, args, remainingMs), taskId, ownershipContext?.attemptGeneration);
         const executablePath = command;
         const namedContainer = command === 'docker' ? getDockerRunContainerName(executionArgs) : null;
@@ -384,10 +389,13 @@ function runDockerCommand(
         };
         detectExecutionContainer();
 
+        const diagnosticTimer = capture ? setInterval(capture.snapshot, 30_000) : undefined;
+        diagnosticTimer?.unref();
         child.stdout?.on('data', (data: Buffer) => {
             const chunk = stdoutDecoder.write(data), ts = new Date().toISOString();
             recordWatchdogActivity();
             stdoutBuffer.append(chunk);
+            diagnosticStdout?.write(chunk);
             liveOutput?.stdout(chunk);
             inspectSessionLines(chunk, ts);
         });
@@ -396,6 +404,7 @@ function runDockerCommand(
             recordWatchdogActivity();
             stderrTail.append(chunk);
             workflowMarkers?.append(chunk);
+            diagnosticStderr?.write(chunk);
             liveOutput?.stderr(chunk);
         });
 
@@ -408,11 +417,17 @@ function runDockerCommand(
             await state.teardownPromise;
         };
         child.on('close', async (exitCode: number | null) => {
+            clearInterval(diagnosticTimer);
+            capture?.snapshot();
             clearTimeout(timeoutHandle);
             watchdog.stop();
             const finalStdout = stdoutDecoder.end();
+            diagnosticStdout?.write(finalStdout);
+            diagnosticStdout?.close();
             if (finalStdout) stdoutBuffer.append(finalStdout);
             const finalStderr = stderrDecoder.end();
+            diagnosticStderr?.write(finalStderr);
+            diagnosticStderr?.close();
             stderrTail.append(finalStderr);
             const stderr = stderrTail.value;
             workflowMarkers?.finish(finalStderr);

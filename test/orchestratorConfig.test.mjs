@@ -954,3 +954,22 @@ test('validateEnv permits broad private proxy trust only behind a loopback API b
     /PROPR_TRUSTED_PROXY_PEERS=uniquelocal/,
   );
 });
+
+test('native diagnostic mounts are read-only and require Hosted activation or explicit opt-in', () => {
+  const env = {
+    PROPR_DATA_DIR: '/managed/data', PROPR_MANAGED_CREDENTIALS_DIR: '/managed/agents',
+    HOST_CODEX_DIR: '/mounted/codex', HOST_CLAUDE_DIR: '/mounted/claude',
+    HOST_OPENCODE_DATA_DIR: '/mounted/opencode-data',
+  };
+  const disabled = buildServiceSpec(resolveConfig(env, { manifestPath }), 'daemon').args;
+  assert.ok(!disabled.includes('/mounted/codex:/mounted/codex:ro'));
+  for (const activation of [{ PROPR_MANAGED_LOGS: '1' }, { PROPR_FLEET_CONTROL_SECRET: 'test-fleet-activation' }]) {
+    const cfg = resolveConfig({ ...env, ...activation }, { manifestPath });
+    const enabled = buildServiceSpec(cfg, 'daemon').args;
+    assert.ok(enabled.includes('/managed/agents:/managed/agents:ro'));
+    assert.ok(enabled.includes('/mounted/codex:/mounted/codex:ro'));
+    assert.ok(enabled.includes('/mounted/claude:/mounted/claude:ro'));
+    assert.ok(enabled.includes('/mounted/opencode-data:/mounted/opencode-data:ro'));
+    assert.ok(buildServiceSpec(cfg, 'worker').args.includes('/managed/agents:/managed/agents'));
+  }
+});
