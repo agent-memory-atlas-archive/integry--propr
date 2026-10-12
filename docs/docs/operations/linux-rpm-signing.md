@@ -84,7 +84,8 @@ source/run requires explicit selection and renewed validation.
 
 Review the signed candidate and draft. Its tag is
 `desktop-linux-preview-v<version>-<first-12-source-SHA>-rpm-signed`. The existing unsigned
-tag/draft is left intact. Then dispatch `publish-draft` with the same source and **omit**
+tag/draft is left intact. The signed title ends with **(signed RPMs)**. Then dispatch
+`publish-draft` with the same source and **omit**
 `unsigned_run_id`. The protected publication job re-downloads the draft, validates final
 hashes, signatures, architecture, sandbox metadata, native pins and runtime references,
 and publishes a prerelease with `make_latest=false`.
@@ -113,7 +114,10 @@ rpmkeys --checksig --verbose "./ProPR-Desktop-${VERSION}-linux-${ARCH}.rpm"
 sudo zypper install "./ProPR-Desktop-${VERSION}-linux-${ARCH}.rpm"
 ```
 
-Require both the header signature and package signature to report `OK`, not just digests.
+The primary verification path is `rpmkeys --checksig --verbose` above; it needs neither
+Node nor a repository checkout. Require both the header signature and package signature
+to report `OK`, not just digests, with both key IDs matching the suffix of the independently
+confirmed full fingerprint. Reject any failed signature or digest status.
 First-time `NOKEY` / unknown-key indicates missing trust; an unsigned header means the
 wrong asset was downloaded. Stop on missing/invalid signatures, digest errors, or fingerprint
 mismatch. Do not accept an ignore/bypass option. Importing a public key establishes local
@@ -128,11 +132,17 @@ after the same checks. Fedora/RHEL users should enforce local-package checking w
 also includes upgrade/reinstall/removal commands. This work does not claim installed
 openSUSE GUI/runtime acceptance or remove the documented ARM managed-agent limitation.
 
-For exact-key verification independent of any system keyring, the reusable helper accepts
-an RPM path, public export and full fingerprint:
+Optionally, for exact-key verification independent of any system keyring, use the standalone
+helper with Node.js 22+, GnuPG and RPM tools. No repository checkout is needed. Select a
+reviewed full commit SHA containing the helper from `integry/propr`; this is the helper
+revision, which may differ from the package source revision. Download the pinned source
+and inspect it before running:
 
 ```sh
-node apps/desktop/scripts/rpm-signing.mjs verify \
+HELPER_REVISION='REPLACE_WITH_REVIEWED_FULL_HELPER_COMMIT_SHA'
+curl --fail --location "https://raw.githubusercontent.com/integry/propr/${HELPER_REVISION}/apps/desktop/scripts/rpm-signing.mjs" -o rpm-signing.mjs
+# Inspect the downloaded helper before running it.
+node ./rpm-signing.mjs verify \
   --rpm "./ProPR-Desktop-${VERSION}-linux-${ARCH}.rpm" \
   --public-key propr-desktop-rpm.asc \
   --fingerprint "$INDEPENDENTLY_CONFIRMED_FULL_FINGERPRINT"
@@ -198,3 +208,6 @@ PROPR_REQUIRE_RPM_TESTS=1 node --test apps/desktop/scripts/rpm-signing.test.mjs 
 
 Tests use disposable passphrase-protected keys and real x64/ARM64 package fixtures in
 isolated temporary directories. They require no provider credentials or host trust changes.
+
+The regular desktop PR validation-version job installs these tools and sets
+`PROPR_REQUIRE_RPM_TESTS=1`, so missing tools fail CI rather than skipping real signing tests.

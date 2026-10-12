@@ -113,6 +113,24 @@ jobs:
       - name: Checkout pull-request validation source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
+      - name: Set up Node.js for release helper tests
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version-file: '.nvmrc'
+
+      - name: Install disposable RPM test tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes rpm gnupg cpio
+
+      - name: Require real disposable-key and RPM release helper tests
+        env:
+          PROPR_REQUIRE_RPM_TESTS: '1'
+        run: |
+          node --test apps/desktop/scripts/rpm-signing.test.mjs \
+            apps/desktop/scripts/linux-preview-release.test.mjs \
+            apps/desktop/scripts/linux-preview-workflow.test.mjs
+
       - name: Resolve unsigned validation version
         id: version
         run: |

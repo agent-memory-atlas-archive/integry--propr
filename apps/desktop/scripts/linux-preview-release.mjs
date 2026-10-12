@@ -171,17 +171,24 @@ ARCH=x64 # or arm64
 sha256sum --check SHA256SUMS
 rpmkeys --checksig --verbose "./ProPR-Desktop-\${VERSION}-linux-\${ARCH}.rpm"
 # Require both Header ... Signature ... OK and ... Signature ... OK, not just digests.
+# Both key IDs must match the confirmed fingerprint suffix; reject any failed status.
 sudo zypper install "./ProPR-Desktop-\${VERSION}-linux-\${ARCH}.rpm"
 # For an intentionally unchanged package version, after the same verification:
 sudo zypper install --force "./ProPR-Desktop-\${VERSION}-linux-\${ARCH}.rpm"
 \`\`\`
 
 Do not accept an unsigned-package override or signature failure. An already imported
-unrelated key is not proof of this release identity. For isolated, exact-key checking,
-use the repository's public-only helper:
+unrelated key is not proof of this release identity. The primary path for
+ordinary verification above uses rpmkeys and does not require Node or a repository checkout.
+Optionally, use the standalone public-only helper with Node.js 22+, GnuPG and RPM tools.
+Choose a reviewed full helper commit SHA from integry/propr (which may differ from this
+package's source revision), download that pinned source, and inspect it before running:
 
 \`\`\`sh
-node apps/desktop/scripts/rpm-signing.mjs verify \\
+HELPER_REVISION='REPLACE_WITH_REVIEWED_FULL_HELPER_COMMIT_SHA'
+curl --fail --location "https://raw.githubusercontent.com/integry/propr/\${HELPER_REVISION}/apps/desktop/scripts/rpm-signing.mjs" -o rpm-signing.mjs
+# Inspect the downloaded helper before running it.
+node ./rpm-signing.mjs verify \\
   --rpm "./ProPR-Desktop-\${VERSION}-linux-\${ARCH}.rpm" \\
   --public-key propr-desktop-rpm.asc \\
   --fingerprint "${rpmIdentity.fingerprint}"
@@ -484,15 +491,15 @@ const githubClient = ({ repository, token, apiUrl, fetchImpl }) => {
   return { request, json };
 };
 
-const previewReleaseName = (version, sourceRevision) => (
-  `ProPR Desktop Linux preview ${version} (${sourceRevision.slice(0, 12)})`
+const previewReleaseName = (version, sourceRevision, rpmIdentity) => (
+  `ProPR Desktop Linux preview ${version} (${sourceRevision.slice(0, 12)})${rpmIdentity ? ' (signed RPMs)' : ''}`
 );
 
 const assertDraft = (release, { tag, sourceRevision, version, rpmIdentity }) => {
   if (!Number.isSafeInteger(release?.id) || release.tag_name !== tag
     || release.target_commitish !== sourceRevision || release.draft !== true
     || release.prerelease !== true || release.published_at != null
-    || release.name !== previewReleaseName(version, sourceRevision)
+    || release.name !== previewReleaseName(version, sourceRevision, rpmIdentity)
     || release.body !== linuxPreviewInstallNotes({ version, sourceRevision, tag, rpmIdentity })
     || typeof release.upload_url !== 'string') {
     throw new Error('GitHub release is not the exact unpublished Linux preview draft');
@@ -586,7 +593,7 @@ export const stageLinuxPreviewDraft = async ({
       json: {
         tag_name: tag,
         target_commitish: sourceRevision,
-        name: previewReleaseName(version, sourceRevision),
+        name: previewReleaseName(version, sourceRevision, rpmIdentity),
         body: notes,
         draft: true,
         prerelease: true,
@@ -744,6 +751,11 @@ const argument = name => {
 };
 
 if (process.argv[1] && pathToFileURL(resolve(process.argv[1])).href === import.meta.url) {
+  // Capture before any await or package parser can spawn an inheriting child.
+  const privateKey = process.env.PROPR_DESKTOP_RPM_PRIVATE_KEY;
+  const passphrase = process.env.PROPR_DESKTOP_RPM_PASSPHRASE;
+  delete process.env.PROPR_DESKTOP_RPM_PRIVATE_KEY;
+  delete process.env.PROPR_DESKTOP_RPM_PASSPHRASE;
   try {
     const command = process.argv[2];
     const version = argument('--version');
@@ -755,7 +767,7 @@ if (process.argv[1] && pathToFileURL(resolve(process.argv[1])).href === import.m
       if (!rpmIdentity) throw new Error('sign-bundle requires --signed-rpm');
       await signLinuxPreviewBundle({ directory: resolve(argument('--input')), outputDirectory: resolve(argument('--output')),
         version, sourceRevision, repository, rpmIdentity, sourceDirectory,
-        privateKey: process.env.PROPR_DESKTOP_RPM_PRIVATE_KEY, passphrase: process.env.PROPR_DESKTOP_RPM_PASSPHRASE });
+        privateKey, passphrase });
     } else if (command === 'prepare') {
       if (rpmIdentity) throw new Error('Use sign-bundle for signed previews');
       await prepareLinuxPreview({

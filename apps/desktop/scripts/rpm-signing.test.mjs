@@ -6,8 +6,8 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { test } from 'node:test';
 import { inspectSignedPreviewPayload } from './rpm-preview-payload.mjs';
-import { requireRpmIdentity, rpmContentDigest, signRpm, verifyRpm } from './rpm-signing.mjs';
-import { linuxPreviewTag, prepareLinuxPreview, readLinuxPreviewBundle, signLinuxPreviewBundle, stageLinuxPreviewDraft, publishLinuxPreviewDraft } from './linux-preview-release.mjs';
+import { assertRpmSignatures, requireRpmIdentity, rpmContentDigest, signRpm, verifyRpm } from './rpm-signing.mjs';
+import { linuxPreviewTag, prepareLinuxPreview, readLinuxPreviewBundle, stageLinuxPreviewDraft, publishLinuxPreviewDraft } from './linux-preview-release.mjs';
 import { createDesktopRuntimeManifest } from './desktop-runtime-manifest.mjs';
 
 const sha256 = bytes => createHash('sha256').update(bytes).digest('hex');
@@ -129,6 +129,28 @@ test('signed mode requires exact public identity inputs', async () => {
   }
 });
 
+test('signature status parsing ignores filename tokens but requires both pinned signatures', () => {
+  const fingerprint = 'A'.repeat(32) + '1234ABCD';
+  const header = '    Header V4 RSA/SHA256 Signature, key ID 1234abcd: OK';
+  const payload = '    V4 RSA/SHA256 Signature, key ID 1234abcd: OK';
+  const digest = '    Payload SHA256 digest: OK';
+  for (const path of ['/home/abadi/Downloads/valid.rpm', '/tmp/XbAd1z/UNKNOWN.rpm', '/tmp/NOT OK-NOKEY-NOTTRUSTED.rpm']) {
+    const output = `${path}:\n${header}\n${payload}\n${digest}\n`;
+    assert.doesNotThrow(() => assertRpmSignatures(output, fingerprint));
+    for (const line of [header, payload]) {
+      assert.throws(() => assertRpmSignatures(output.replace(line, ''), fingerprint), /signatures/);
+      assert.throws(() => assertRpmSignatures(output.replace(line, line.replace('1234abcd', 'deadbeef')), fingerprint), /signatures/);
+      for (const status of ['NOT OK', 'NOKEY', 'NOTTRUSTED', 'BAD', 'UNKNOWN']) {
+        assert.throws(() => assertRpmSignatures(output.replace(line, line.replace(': OK', `: ${status}`)), fingerprint), /signatures/);
+        // Additional failures must be rejected even alongside two good signatures.
+        assert.throws(() => assertRpmSignatures(`${output}    Signature: ${status}\n`, fingerprint), /signatures/);
+        assert.throws(() => assertRpmSignatures(output.replace(digest, digest.replace(': OK', `: ${status}`)), fingerprint), /signatures/);
+      }
+    }
+  }
+  assert.throws(() => assertRpmSignatures(`/tmp/unsigned.rpm:\n${digest}\n`, fingerprint), /signatures/);
+});
+
 test('real RPM signatures and signed preview bundles fail closed and preserve frozen payloads', {
   skip: missing.length ? `Missing tools: ${missing.join(', ')}` : false,
   timeout: 180_000,
@@ -174,8 +196,34 @@ test('real RPM signatures and signed preview bundles fail closed and preserve fr
   await assert.rejects(readLinuxPreviewBundle({ ...options, directory, rpmIdentity: correct.identity }), /schema/);
 
   const signed = join(root, 'signed');
-  const manifest = await signLinuxPreviewBundle({ ...options, directory, outputDirectory: signed,
-    rpmIdentity: correct.identity, sourceDirectory: repositoryRoot, ...correct });
+  // Every package parser must see a scrubbed environment, before and after signing.
+  const wrappers = join(root, 'bin');
+  const parserLog = join(root, 'parsers.log');
+  await mkdir(wrappers);
+  for (const tool of ['rpm', 'dpkg-deb', 'rpm2cpio', 'cpio']) {
+    const executable = run('which', [tool]).trim();
+    await writeFile(join(wrappers, tool), `#!${process.execPath}
+import { appendFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+if ('PROPR_DESKTOP_RPM_PRIVATE_KEY' in process.env || 'PROPR_DESKTOP_RPM_PASSPHRASE' in process.env) process.exit(99);
+appendFileSync(${JSON.stringify(parserLog)}, ${JSON.stringify(tool + '\n')});
+const result = spawnSync(${JSON.stringify(executable)}, process.argv.slice(2), { stdio: 'inherit' });
+process.exit(result.status ?? 98);
+`, { mode: 0o755 });
+  }
+  // Extensionless parser wrappers use ESM under this explicit package boundary.
+  await writeFile(join(wrappers, 'package.json'), '{"type":"module"}');
+  run(process.execPath, ['apps/desktop/scripts/linux-preview-release.mjs', 'sign-bundle', '--signed-rpm',
+    '--input', directory, '--output', signed, '--version', version, '--source-revision', sourceRevision,
+    '--repository', repository, '--source-directory', repositoryRoot], { cwd: repositoryRoot,
+    env: { ...process.env, PATH: `${wrappers}:${process.env.PATH}`,
+      PROPR_DESKTOP_RPM_PRIVATE_KEY: correct.privateKey, PROPR_DESKTOP_RPM_PASSPHRASE: correct.passphrase,
+      PROPR_DESKTOP_RPM_PUBLIC_KEY: correct.identity.publicKey, PROPR_DESKTOP_RPM_FINGERPRINT: correct.identity.fingerprint } });
+  const parserCalls = (await readFile(parserLog, 'utf8')).trim().split('\n');
+  for (const tool of ['rpm', 'dpkg-deb', 'rpm2cpio', 'cpio']) {
+    assert.ok(parserCalls.filter(call => call === tool).length >= 4, `${tool} inspected both architectures before and after signing`);
+  }
+  const manifest = JSON.parse(await readFile(join(signed, 'linux-preview.json'), 'utf8'));
   assert.equal(manifest.tag, `${linuxPreviewTag(version, sourceRevision)}-rpm-signed`);
   assert.equal(manifest.trust, 'rpm-signed-preview');
   const bundle = await readLinuxPreviewBundle({ ...options, directory: signed,
@@ -191,6 +239,12 @@ test('real RPM signatures and signed preview bundles fail closed and preserve fr
     join(signed, manifest.artifacts.find(a => a.kind === 'rpm').fileName),
     '--public-key', publicPath, '--fingerprint', correct.identity.fingerprint];
   assert.match(run(process.execPath, cli, { cwd: repositoryRoot }), /header and package signatures verified/);
+  const awkwardPath = join(root, 'XbAd1z-UNKNOWN.rpm');
+  await copyFile(cli[3], awkwardPath);
+  await verifyRpm({ path: awkwardPath, identity: correct.identity });
+  const awkwardCli = [...cli];
+  awkwardCli[3] = awkwardPath;
+  assert.match(run(process.execPath, awkwardCli, { cwd: repositoryRoot }), /header and package signatures verified/);
 
   const inspected = manifest.artifacts.find(a => a.kind === 'rpm');
   await assert.rejects(inspectSignedPreviewPayload({ path: join(signed, inspected.fileName), artifact: inspected,
@@ -223,7 +277,24 @@ test('real RPM signatures and signed preview bundles fail closed and preserve fr
   const publication = { ...options, directory: signed, rpmIdentity: correct.identity,
     sourceDirectory: repositoryRoot, token: 'disposable-test-token', fetchImpl: remote.fetchImpl };
   await stageLinuxPreviewDraft(publication);
+  const signedTitle = `ProPR Desktop Linux preview ${version} (${sourceRevision.slice(0, 12)}) (signed RPMs)`;
+  assert.equal(remote.release.name, signedTitle);
+  remote.release.name = signedTitle.replace(' (signed RPMs)', '');
+  await assert.rejects(stageLinuxPreviewDraft(publication), /exact unpublished/);
+  await assert.rejects(publishLinuxPreviewDraft(publication), /exact unpublished/);
+  assert.equal(remote.publications, 0);
+  remote.release.name = signedTitle;
   await stageLinuxPreviewDraft(publication); // exact-byte upload retry
+  // A title change across the awaited validation work must also fail the final check.
+  const driftedPublication = { ...publication, fetchImpl: async (url, options) => {
+    if (new URL(url).pathname === '/repos/integry/propr/releases/7') remote.release.name = 'wrong title';
+    return remote.fetchImpl(url, options);
+  } };
+  await assert.rejects(stageLinuxPreviewDraft(driftedPublication), /exact unpublished/);
+  remote.release.name = signedTitle;
+  await assert.rejects(publishLinuxPreviewDraft(driftedPublication), /exact unpublished/);
+  assert.equal(remote.publications, 0);
+  remote.release.name = signedTitle;
   const remoteRpm = remote.assets.find(a => a.name.endsWith('.rpm'));
   const originalRemote = { ...remoteRpm };
   remoteRpm.bytes = await readFile(join(directory, remoteRpm.name));

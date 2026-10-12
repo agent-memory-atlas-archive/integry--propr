@@ -141,3 +141,18 @@ describe('protected signed RPM preview workflow', () => {
     assert.match(publish, /PROPR_DESKTOP_LINUX_PREVIEW_PUBLICATION_AUTHORIZED/);
   });
 });
+
+test('regular desktop PR validation requires disposable-key and real RPM tests', async () => {
+  const guard = await readFile(new URL('../../../.github/workflows/desktop-release-guard.yml', import.meta.url), 'utf8');
+  assert.match(guard, /^  pull_request:/m);
+  const start = guard.indexOf('\n  validation-version:');
+  const block = guard.slice(start, guard.indexOf('\n  renderer-axe-boundary:', start));
+  assert.match(block, /github.event_name != 'push'/);
+  assert.match(block, /needs.classify.outputs.desktop != 'false'/);
+  assert.match(block, /runs-on: ubuntu-latest/);
+  assert.match(block, /sudo apt-get install --yes rpm gnupg cpio/);
+  assert.match(block, /PROPR_REQUIRE_RPM_TESTS: '1'/);
+  assert.match(block, /node --test apps\/desktop\/scripts\/rpm-signing.test.mjs/);
+  assert.doesNotMatch(block, /continue-on-error|secrets\.|environment:/);
+  assert.ok(block.indexOf('sudo apt-get install') < block.indexOf('node --test'));
+});

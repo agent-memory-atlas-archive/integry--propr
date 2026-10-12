@@ -66,6 +66,24 @@ async function withKey(identity, callback) {
   }
 }
 
+// rpmkeys prints the supplied pathname as its first line. Only indented
+// result lines are verification evidence; filenames can contain status words.
+export function assertRpmSignatures(stdout, fingerprint) {
+  const statuses = stdout.split('\n').filter(line => /^[ \t]+/.test(line)).join('\n');
+  // A digest-only unsigned RPM also exits zero. Require BOTH native header and
+  // header+payload signatures, with no missing key or digest/signature failure.
+  const id = fingerprint.slice(-8).toLowerCase();
+  // Parse key IDs with fixed patterns, then compare them as literal strings.
+  const header = [...statuses.matchAll(/^\s*Header V[34] RSA\/SHA256 Signature, key ID ([a-f0-9]{8}): OK$/gmi)]
+    .some(match => match[1].toLowerCase() === id);
+  const packageSignature = [...statuses.matchAll(/^\s*V[34] RSA\/SHA256 Signature, key ID ([a-f0-9]{8}): OK$/gmi)]
+    .some(match => match[1].toLowerCase() === id);
+  if (!header || !packageSignature
+    || /NOT OK|NOKEY|NOTTRUSTED|BAD|UNKNOWN/i.test(statuses)) {
+    throw new Error('RPM must have verified header and package signatures from the pinned identity');
+  }
+}
+
 export async function verifyRpm({ path, identity }) {
   return withKey(identity, async (home, publicPath) => {
     const database = join(home, 'rpmdb');
@@ -73,18 +91,7 @@ export async function verifyRpm({ path, identity }) {
     await run('rpmdb', ['--dbpath', database, '--initdb'], home);
     await run('rpmkeys', ['--dbpath', database, '--import', publicPath], home);
     const { stdout } = await run('rpmkeys', ['--dbpath', database, '--checksig', '--verbose', resolve(path)], home);
-    // A digest-only unsigned RPM also exits zero. Require BOTH native header and
-    // header+payload signatures, with no missing key or digest/signature failure.
-    const id = identity.fingerprint.slice(-8).toLowerCase();
-    // Parse key IDs with fixed patterns, then compare them as literal strings.
-    const header = [...stdout.matchAll(/^\s*Header V[34] RSA\/SHA256 Signature, key ID ([a-f0-9]{8}): OK$/gmi)]
-      .some(match => match[1].toLowerCase() === id);
-    const packageSignature = [...stdout.matchAll(/^\s*V[34] RSA\/SHA256 Signature, key ID ([a-f0-9]{8}): OK$/gmi)]
-      .some(match => match[1].toLowerCase() === id);
-    if (!header || !packageSignature
-      || /NOT OK|NOKEY|NOTTRUSTED|BAD|UNKNOWN/i.test(stdout)) {
-      throw new Error('RPM must have verified header and package signatures from the pinned identity');
-    }
+    assertRpmSignatures(stdout, identity.fingerprint);
     return { fingerprint: identity.fingerprint };
   });
 }
