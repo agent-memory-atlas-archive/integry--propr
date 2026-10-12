@@ -256,3 +256,13 @@ test('repeated native attempts close superseded initial dialog before a fresh co
   assert.deepEqual(f.identities, []);
   assert.deepEqual(fresh.identities, ['propr-ultrafix']);
 });
+
+test('host-safe failures use fixed messages even if an Error message is overwritten', async () => {
+  const { GithubBrowserSignInError } = await import('@propr/local-setup');
+  const failure = new GithubBrowserSignInError('GitHub account was not confirmed. Retry sign-in and choose the intended account in GitHub.');
+  failure.message = `${token.access_token} ${device.device_code} ${device.user_code}`;
+  assert.match(GithubBrowserSignInError.safeMessage(failure), /account was not confirmed/);
+  const arbitrary = GithubBrowserSignInError.safeMessage(new Error(failure.message));
+  assert.match(arbitrary, /browser sign-in could not complete/);
+  for (const secret of [token.access_token, device.device_code, device.user_code]) assert.ok(!arbitrary.includes(secret));
+});

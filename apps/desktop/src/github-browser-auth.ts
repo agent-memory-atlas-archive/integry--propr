@@ -2,7 +2,7 @@ import { validateGithubClientId } from './github-client-config';
 import { randomBytes } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 
-class SignInError extends Error {}
+import { GithubBrowserSignInError as SignInError } from '@propr/local-setup';
 
 const VERIFICATION_URL = 'https://github.com/login/device';
 const cancelled = () => Object.assign(new SignInError('GitHub sign-in was cancelled. Retry when ready.'), { name: 'AbortError' });

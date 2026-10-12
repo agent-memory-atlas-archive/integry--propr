@@ -493,6 +493,8 @@ export interface SetupActions extends AgentSetupActions {
   }): Promise<{ relayUrl: string; token: string }>;
   /** Authenticate with GitHub through the host's interactive handoff and store the token. */
   loginWithGithub(params?: { onLog?: (line: string) => void; signal?: AbortSignal; force?: boolean }): Promise<boolean>;
+  /** Fixed safe browser failure and desktop retry copy, when supported by the host. */
+  githubLoginRecovery?(): { detail: string; nextAction: string } | undefined;
   /** Host preference used to select managed browser authentication. */
   getTunnelEnabled?(rootDir: string): boolean | undefined;
 }
@@ -670,7 +672,7 @@ async function runSetupAttempt(options: RunSetupOptions): Promise<SetupRunResult
       }
       if (!actions.hasGithubToken()) {
         return {
-          note: {
+          note: actions.githubLoginRecovery?.() ?? {
             detail: "relay not enrolled — not logged in to GitHub",
             nextAction: "Run `propr login`, then re-run `propr setup` and accept ProPR Connect.",
           },
@@ -740,7 +742,7 @@ async function runSetupAttempt(options: RunSetupOptions): Promise<SetupRunResult
         if (decision.action === "reauthenticate") {
           const authenticated = await actions.loginWithGithub({ onLog: log, signal: options.signal, force: true });
           if (!authenticated) {
-            enrollmentPermissionError = "GitHub authentication did not complete. Try again or keep the current account.";
+            enrollmentPermissionError = actions.githubLoginRecovery?.()?.detail ?? "GitHub authentication did not complete. Try again or keep the current account.";
           } else {
             selectedInstallationId = undefined;
             enrollmentPermissionError = undefined;
@@ -1172,8 +1174,10 @@ async function runSetupAttempt(options: RunSetupOptions): Promise<SetupRunResult
     if (!actions.hasGithubToken()) {
       settle("github-auth", {
         status: "failed",
-        detail: `auth mode: ${resolvedAuth.mode}; GitHub user login is required to finish setup`,
-        nextAction: "Run `propr login`, then re-run `propr setup`; the existing stack configuration will be reused.",
+        ...(actions.githubLoginRecovery?.() ?? {
+          detail: `auth mode: ${resolvedAuth.mode}; GitHub user login is required to finish setup`,
+          nextAction: "Run `propr login`, then re-run `propr setup`; the existing stack configuration will be reused.",
+        }),
       });
       return finish();
     }

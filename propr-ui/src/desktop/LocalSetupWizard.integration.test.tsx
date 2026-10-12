@@ -41,6 +41,22 @@ function installationSnapshot(
 describe('production local setup journey', () => {
   beforeEach(() => vi.clearAllMocks());
 
+  it('shows a safe browser failure and retries through the desktop action', async () => {
+    const retry = vi.fn(async () => completed);
+    const setup = guidedAdapter({ status: vi.fn(async () => ({ ...idle, phase: 'failed' as const,
+      state: { rootDir: '/private/local-runtime', steps: [{ id: 'github-auth', title: 'GitHub authentication', status: 'failed',
+        detail: 'GitHub account was not confirmed. Retry sign-in and choose the intended account in GitHub.',
+        nextAction: 'Choose Retry setup to start a new GitHub browser sign-in, then return to ProPR and confirm the intended account.',
+      }] },
+    } as DesktopSetupSnapshot)), retry });
+    render(<LocalSetupWizard adapter={setup} onBack={() => undefined} onComplete={() => undefined} />);
+    expect(await screen.findByText(/GitHub account was not confirmed/)).toBeInTheDocument();
+    expect(screen.getByText(/Choose Retry setup to start a new GitHub browser sign-in/)).toBeInTheDocument();
+    expect(screen.queryByText(/propr login|propr setup/)).toBeNull();
+    await clickAndWaitForHeading('Retry setup', 'ProPR is ready');
+    expect(retry).toHaveBeenCalled();
+  });
+
   it.each(['linux', 'macos'] as const)('opens the production wizard from the %s chooser', async platform => {
     const adapters = adaptersFor();
     adapters.platform = platform;
