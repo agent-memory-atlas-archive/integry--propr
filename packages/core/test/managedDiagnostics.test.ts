@@ -336,7 +336,7 @@ test('runtime diagnostics require explicit activation and reject missing, invali
                         const valid = process.env.PROPR_INSTANCE_ID === 'tenant-a';
                         if (enabled && !valid) {
                             assert.throws(() => managedDiagnostics(), /invalid diagnostic instance|instance mismatch/);
-                            assert.throws(() => prepareProviderCapture({ provider: 'codex', agent: 'agent-a' }));
+                            assert.equal(prepareProviderCapture({ provider: 'codex', agent: 'agent-a' }), null);
                             captureApplicationRecord('{"message":"must not cross instance"}');
                         } else {
                             const db = managedDiagnostics();
@@ -468,7 +468,7 @@ test('transient roots retire only on confirmed absence and preserve concurrent r
         const restarted = new ManagedLogSpool(path.join(f.root, 'spool'), 'tenant-a');
         try {
             native = (restarted.status() as any).sources.filter((s: any) => s.source.startsWith('native-state:'));
-            assert.deepEqual(native.map((s: any) => s.protectedBytes).sort((a: number, b: number) => a-b), [0, 20]);
+            assert.deepEqual(native.map((s: any) => s.protectedBytes).sort((a: number, b: number) => a-b), [20]);
         } finally { restarted.close(); }
         assert.equal(drain(f.spool).length, 2);
     } finally { f.close(); }
@@ -502,4 +502,156 @@ test('Antigravity capture uses the effective override and refuses unavailable au
         const source = fs.readFileSync('packages/core/src/agents/impl/AntigravityAgent.ts', 'utf8');
         assert.equal((source.match(/authenticationRoot: this.getHostConfigPath\(\)/g) ?? []).length, 3);
     } finally { f.close(); }
+});
+
+test('retired transient sources release capacity while pending exports survive restart', () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'diagnostic-retirement-'));
+    let spool = new ManagedLogSpool(path.join(root, 'spool'), 'tenant-a', { sources: 4 });
+    try {
+        for (let n = 0; n < 3; n++) {
+            const home = path.join(root, `run-${n}`);
+            fs.mkdirSync(path.join(home, 'logs/session/run'), { recursive: true });
+            fs.writeFileSync(path.join(home, 'logs/session/run/messages.jsonl'), JSON.stringify({ message: `run-${n}` }) + '\n');
+            collectProvider(spool, { provider: 'vibe', agent: 'a', root: home, credentials: [], credentialContextComplete: true, transient: true });
+            fs.rmSync(home, { recursive: true });
+            spool.close();
+            spool = new ManagedLogSpool(path.join(root, 'spool'), 'tenant-a', { sources: 4 });
+            spool.retireNativeRoot({ provider: 'vibe', agent: 'other' }, home);
+            assert.ok((spool.status() as any).sources.some((s: any) => !s.retired));
+            spool.retireNativeRoot({ provider: 'vibe', agent: 'a' }, home);
+            spool.retireNativeRoot({ provider: 'vibe', agent: 'a' }, path.join(root, 'never-collected'));
+            assert.equal((spool.status() as any).sourceCapacityWarning, false);
+            spool.assertCapacity();
+        }
+        assert.equal((spool.status() as any).sources.length, 3);
+        assert.ok((spool.status() as any).sources.every((s: any) => s.retired));
+        spool.append(identity, ['INFO new agent'], 'text', { credentials: [] });
+        assert.deepEqual(drain(spool).map(item => item.text.trim()), [
+            '{"message":"run-0"}', '{"message":"run-1"}', '{"message":"run-2"}', '{"message":"INFO new agent"}',
+        ]);
+        assert.equal((spool.status() as any).sources.length, 1);
+    } finally { spool.close(); fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test('new agent capture remains available after transient root churn at a four-source cap', () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'diagnostic-churn-'));
+    try {
+        const result = spawnSync(process.execPath, ['--import', 'tsx', '--input-type=module', '-e', `
+            import assert from 'node:assert/strict';
+            import fs from 'node:fs';
+            import { managedDiagnostics, prepareProviderCapture } from './packages/core/src/diagnostics/managedLogRuntime.ts';
+            import { collectProvider } from './packages/core/src/diagnostics/providerCollector.ts';
+            const db = managedDiagnostics(); db.limits.sources = 4;
+            for (let n = 0; n < 3; n++) {
+                const root = ${JSON.stringify(root)} + '/run-' + n;
+                fs.mkdirSync(root + '/logs/session/run', {recursive:true});
+                fs.writeFileSync(root + '/logs/session/run/messages.jsonl', '{"message":"hello"}\\n');
+                collectProvider(db, {provider:'vibe', agent:'old', root, credentials:[], credentialContextComplete:true, transient:true});
+                fs.rmSync(root, {recursive:true});
+                db.retireNativeRoot({provider:'vibe',agent:'old'}, root);
+            }
+            const capture = prepareProviderCapture({provider:'vibe',agent:'new',authenticationRoot:${JSON.stringify(root)}});
+            assert.ok(capture); capture.stdout.write('INFO working\\n'); capture.stdout.close(); capture.stderr.close();
+        `], { encoding: 'utf8', env: { ...process.env, PROPR_MANAGED_LOGS: '1', PROPR_INSTANCE_ID: 'tenant-a', PROPR_DIAGNOSTIC_ROOT: path.join(root, 'spool') } });
+        assert.equal(result.status, 0, result.stderr);
+    } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test('unavailable spool does not block executor or daemon and capture retries after storage repair', () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'diagnostic-unavailable-'));
+    try {
+        for (const failure of ['missing-parent', 'public-root']) {
+            const spoolRoot = path.join(root, failure, 'spool');
+            if (failure === 'public-root') fs.mkdirSync(spoolRoot, { recursive: true, mode: 0o755 });
+            const result = spawnSync(process.execPath, ['--experimental-test-module-mocks', '--import', 'tsx', '-e', `
+                import assert from 'node:assert/strict';
+                import fs from 'node:fs';
+                import path from 'node:path';
+                import { mock } from 'node:test';
+                class Redis { on(){return this} async quit(){} disconnect(){} }
+                mock.module('ioredis', {namedExports:{Redis,default:Redis}});
+                const { executeDockerCommand } = await import('./packages/core/src/claude/docker/dockerExecutor.ts');
+                const { prepareProviderCapture, captureProviderOutput } = await import('./packages/core/src/diagnostics/managedLogRuntime.ts');
+                const { scheduleManagedDiagnostics } = await import('./src/daemon/managedDiagnostics.ts');
+                const diagnostics = {provider:'vibe',agent:'new',authenticationRoot:${JSON.stringify(root)}};
+                assert.equal(prepareProviderCapture(diagnostics), null);
+                captureProviderOutput({...diagnostics, source:'stdout'}, []).close();
+                const stop = scheduleManagedDiagnostics(); stop();
+                const result = await executeDockerCommand(process.execPath, ['-e','process.stdout.write("working")'], {diagnostics,timeout:10000});
+                assert.equal(result.exitCode, 0); assert.equal(result.stdout, 'working');
+                fs.mkdirSync(path.dirname(process.env.PROPR_DIAGNOSTIC_ROOT), {recursive:true});
+                if (fs.existsSync(process.env.PROPR_DIAGNOSTIC_ROOT)) fs.chmodSync(process.env.PROPR_DIAGNOSTIC_ROOT, 0o700);
+                const capture = prepareProviderCapture(diagnostics);
+                assert.ok(capture); capture.stdout.close(); capture.stderr.close();
+                const { closeConnection } = await import('./packages/core/src/db/connection.ts'); await closeConnection();
+            `], { encoding: 'utf8', timeout: 30000, env: { ...process.env, NODE_ENV: 'test', PROPR_MANAGED_LOGS: '1', PROPR_INSTANCE_ID: 'tenant-a', PROPR_DIAGNOSTIC_ROOT: spoolRoot } });
+            assert.equal(result.status, 0, result.stderr);
+            assert.equal(result.stderr.split('managed diagnostics unavailable').length - 1, 1);
+        }
+    } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test('executor and native goal admission retain create and final argument secrets', () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'diagnostic-admitted-'));
+    try {
+        for (const entry of ['executor', 'claude', 'antigravity', 'codex']) {
+            const result = spawnSync(process.execPath, ['--experimental-test-module-mocks', '--import', 'tsx', '-e', `
+                import assert from 'node:assert/strict';
+                import { mock } from 'node:test';
+                import { gunzipSync } from 'node:zlib';
+                class Redis { on(){return this} async quit(){} disconnect(){} }
+                mock.module('ioredis', {namedExports:{Redis,default:Redis}});
+                const runtime = await import('./packages/core/src/diagnostics/managedLogRuntime.ts');
+                const create = ['run','-e','GITHUB_TOKEN=opaque-create-canary','image'];
+                const final = ['start','--attach','--interactive','container','--env','RUN_SECRET=opaque-final-canary'];
+                let captures = 0;
+                const capture = (agent, args, env) => {
+                    captures++;
+                    assert.ok(args.includes('GITHUB_TOKEN=opaque-create-canary'));
+                    assert.ok(args.includes('RUN_SECRET=opaque-final-canary'));
+                    const result = runtime.prepareProviderCapture({...agent,authenticationRoot:${JSON.stringify(root)}}, args, env);
+                    assert.ok(result);
+                    result.stdout.write('INFO opaque-create-canary opaque-final-canary\\n'); result.stdout.close(); result.stderr.close();
+                    throw new Error('capture-verified');
+                };
+                mock.module('./packages/core/src/diagnostics/managedLogRuntime.ts', {namedExports:{...runtime,
+                    prepareProviderCapture:capture, prepareCommandCapture:capture}});
+                mock.module('./packages/core/src/claude/docker/dockerNetworkPolicy.ts', {namedExports:{
+                    startWithNetworkPolicy:async (_command,args,_options,start) => start(args),
+                    spawnWithNetworkPolicy:async (_args,start) => {await Promise.resolve(); return start(final)},
+                }});
+                mock.module('./packages/core/src/agents/agentRunAdmission.ts', {namedExports:{
+                    prepareAdmittedAgent:async () => ({args:final,finish:async()=>{}}),
+                }});
+                const options = {nativeGoalObjective:'test',taskId:'diagnostic-test',goalControl:{
+                    setActiveTurn:async()=>{},appendOutput:async()=>{},load:async()=>({desiredState:'running',pendingInputs:[]})},issueRef:{number:1}};
+                const diagnostics = {provider:'vibe',agent:'admitted'};
+                const launch = {diagnostics,buildDockerArgs:async()=>create,sessionId:'s',model:'test',timeoutMs:1000};
+                let failure;
+                try {
+                    if (${JSON.stringify(entry)} === 'executor') {
+                        const {executeDockerCommand} = await import('./packages/core/src/claude/docker/dockerExecutor.ts');
+                        await executeDockerCommand('docker',create,{diagnostics,timeout:1000});
+                    } else if (${JSON.stringify(entry)} === 'claude') {
+                        const {executeClaudeNativeGoal} = await import('./packages/core/src/agents/impl/claudeNativeGoal.ts');
+                        await executeClaudeNativeGoal(options,launch);
+                    } else if (${JSON.stringify(entry)} === 'antigravity') {
+                        const {executeAntigravityNativeGoal} = await import('./packages/core/src/agents/impl/antigravityNativeGoal.ts');
+                        await executeAntigravityNativeGoal(options,launch);
+                    } else {
+                        mock.module('./packages/core/src/agents/agentGitAccess.ts',{namedExports:{prepareAgentGitAccess:async()=>({gitMountArgs:[]})}});
+                        mock.module('./packages/core/src/agents/impl/utils/codexDockerArgsBuilder.ts',{namedExports:{buildCodexAppServerDockerArgs:()=>create}});
+                        const {executeCodexAppServerGoal} = await import('./packages/core/src/agents/impl/codexAppServer.ts');
+                        await executeCodexAppServerGoal({id:'admitted',type:'codex',defaultModel:'test'},options,1000);
+                    }
+                } catch (error) { failure = error; }
+                assert.equal(captures,1,failure?.stack);
+                const item = runtime.managedDiagnostics().exportOne(); assert.ok(item, failure?.stack);
+                const text = gunzipSync(item.data).toString();
+                assert.ok(!text.includes('opaque-create-canary')); assert.ok(!text.includes('opaque-final-canary'));
+                const {closeConnection} = await import('./packages/core/src/db/connection.ts'); await closeConnection();
+            `], { encoding: 'utf8', timeout: 30000, env: { ...process.env, NODE_ENV: 'test', PROPR_MANAGED_LOGS: '1', PROPR_INSTANCE_ID: 'tenant-a', PROPR_DIAGNOSTIC_ROOT: path.join(root, entry) } });
+            assert.equal(result.status, 0, `${entry}: ${result.stderr}`);
+        }
+    } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });

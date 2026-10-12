@@ -1,11 +1,16 @@
 import { loadAgents, resolveConfigPath } from '@propr/core';
+import { DiagnosticPolicyError } from '../../packages/core/src/diagnostics/managedLogSpool.js';
 import { collectProvider } from '../../packages/core/src/diagnostics/providerCollector.js';
 import { managedDiagnostics, configuredDiagnosticSecrets, diagnosticsFailure, providerCredentialRoot } from '../../packages/core/src/diagnostics/managedLogRuntime.js';
 
 /** Daemon measures native inventories; workers own capture with run credentials.
  * Only configured managed roots and explicit launcher mounts are eligible. */
 export function scheduleManagedDiagnostics(): () => void {
-    if (!managedDiagnostics()) return () => {};
+    try { if (!managedDiagnostics()) return () => {}; }
+    catch (error) {
+        if (error instanceof DiagnosticPolicyError) throw error;
+        diagnosticsFailure();
+    }
     let running = false, nextAgent = 0;
     const collect = async (): Promise<void> => {
         if (running) return;

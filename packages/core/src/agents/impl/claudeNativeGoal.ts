@@ -707,7 +707,7 @@ export async function executeClaudeNativeGoal(
     if (ownership?.signal.aborted) throw getExecutionAbortError(ownership.signal)!;
     const args = resolveExecutionArgs('docker', dockerArgs, options.taskId, ownership?.attemptGeneration);
     const child = await spawnWithNetworkPolicy(args, runArgs => {
-        const capture = launch.diagnostics ? prepareProviderCapture(launch.diagnostics, runArgs) : null;
+        const capture = launch.diagnostics ? prepareProviderCapture(launch.diagnostics, [...args, ...runArgs]) : null;
         const spawned = spawn('docker', runArgs, { stdio: ['pipe', 'pipe', 'pipe'], cwd: options.worktreePath });
         attachProviderCapture(spawned, capture);
         return spawned;

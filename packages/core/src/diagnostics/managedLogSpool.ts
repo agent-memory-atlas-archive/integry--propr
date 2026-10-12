@@ -15,6 +15,7 @@ export const MANAGED_LOG_POLICY = Object.freeze({
     retentionMs: 14 * 86400_000, scanBytes: 1024 * 1024, scanFiles: 4096,
     scanMs: 250, protectedBytes: 256 * 1024 * 1024,
 });
+export class DiagnosticPolicyError extends Error {}
 export type LogIdentity = { provider: string; agent: string; source: string };
 export type Cursor = { inode?: string; offset?: number; discard?: boolean; anchor?: string };
 export interface AppendOptions {
@@ -23,7 +24,7 @@ export interface AppendOptions {
     cursor?: { before: Cursor; after: Cursor };
     droppedBytes?: number;
 }
-interface Source { id: string; identity: string; cursor: string; next: number; dropped: number; gaps: number; last_success: number | null; reason: string | null; protected_bytes: number; inventory_complete: number; protection: string | null }
+interface Source { retired: number; id: string; identity: string; cursor: string; next: number; dropped: number; gaps: number; last_success: number | null; reason: string | null; protected_bytes: number; inventory_complete: number; protection: string | null }
 interface Segment { id: number; source: string; day: string; first: number; last: number; start: number; end: number; raw: number; digest: string; data: Buffer; sealed: number; ack: number }
 export const digest = (value: string | Buffer): string => createHash('sha256').update(value).digest('hex');
 
@@ -35,7 +36,7 @@ export class ManagedLogSpool {
     private readonly db!: Database;
     readonly limits: typeof MANAGED_LOG_POLICY;
     constructor(root: string, readonly instance: string, limits: Partial<typeof MANAGED_LOG_POLICY> = {}) {
-        if (!/^[a-zA-Z0-9._:-]{1,128}$/.test(instance)) throw new Error('invalid diagnostic instance');
+        if (!/^[a-zA-Z0-9._:-]{1,128}$/.test(instance)) throw new DiagnosticPolicyError('invalid diagnostic instance');
         this.limits = { ...MANAGED_LOG_POLICY, ...limits };
         this.dir = PinnedDirectory.open(root, true);
         try {
@@ -62,9 +63,14 @@ export class ManagedLogSpool {
                 if (!(this.db.prepare('PRAGMA table_info(sources)').all() as Array<{ name: string }>).some(column => column.name === 'inventory_complete')) {
                     this.db.exec('ALTER TABLE sources ADD COLUMN inventory_complete INTEGER NOT NULL DEFAULT 0');
                 }
+                for (const [name, type] of [['retired', 'INTEGER NOT NULL DEFAULT 0'], ['native_root', 'TEXT']]) {
+                    if (!(this.db.prepare('PRAGMA table_info(sources)').all() as Array<{ name: string }>).some(column => column.name === name)) {
+                        this.db.exec(`ALTER TABLE sources ADD COLUMN ${name} ${type}`);
+                    }
+                }
                 const binding = JSON.stringify({ instance, policy: this.limits });
                 this.db.prepare('INSERT OR IGNORE INTO settings VALUES (?,?)').run('binding', binding);
-                if ((this.db.prepare('SELECT value FROM settings WHERE key=?').get('binding') as { value: string }).value !== binding) throw new Error('diagnostic policy/instance mismatch');
+                if ((this.db.prepare('SELECT value FROM settings WHERE key=?').get('binding') as { value: string }).value !== binding) throw new DiagnosticPolicyError('diagnostic policy/instance mismatch');
             });
         } catch (e) { this.db?.close(); this.dir.close(); throw e; }
     }
@@ -77,9 +83,9 @@ export class ManagedLogSpool {
         for (const value of Object.values(identity)) if (!/^[a-zA-Z0-9._:-]{1,160}$/.test(value)) throw new Error('invalid diagnostic identity');
         const json = JSON.stringify(identity), id = digest(json);
         let source = this.db.prepare('SELECT * FROM sources WHERE id=?').get(id) as Source | undefined;
-        if (!source) {
-            if ((this.db.prepare('SELECT count(*) AS n FROM sources').get() as { n: number }).n >= this.limits.sources) throw new Error('diagnostic source capacity');
-            this.db.prepare('INSERT INTO sources(id,identity) VALUES (?,?)').run(id, json);
+        if (!source || source.retired) {
+            if ((this.db.prepare('SELECT count(*) AS n FROM sources WHERE retired=0').get() as { n: number }).n >= this.limits.sources) throw new Error('diagnostic source capacity');
+            this.db.prepare('INSERT INTO sources(id,identity) VALUES (?,?) ON CONFLICT(id) DO UPDATE SET retired=0').run(id, json);
             source = this.db.prepare('SELECT * FROM sources WHERE id=?').get(id) as Source;
         }
         return source;
@@ -101,11 +107,25 @@ export class ManagedLogSpool {
                 .run(bytes, 'protected-native-state', Number(complete), source.id);
         });
     }
+    /** Persist membership before collection so retirement survives worker restarts. */
+    trackNativeSource(identity: LogIdentity, root: string | undefined): void {
+        if (!root) return;
+        this.atomic(() => {
+            const source = this.source(identity);
+            this.db.prepare('UPDATE sources SET native_root=? WHERE id=?').run(digest(root), source.id);
+        });
+    }
     /** Only confirmed absence releases a transient root's measured contribution. */
     retireNativeRoot(identity: Pick<LogIdentity, 'provider' | 'agent'>, root: string): void {
-        try { fs.lstatSync(root); return; }
-        catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
-        this.measureNativeState({ ...identity, source: `native-state:${digest(root)}` }, 0, true);
+        this.atomic(() => {
+            try { fs.lstatSync(root); return; }
+            catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+            const summary = digest(JSON.stringify({ ...identity, source: `native-state:${digest(root)}` }));
+            this.db.prepare(`UPDATE sources SET retired=1,protected_bytes=0,inventory_complete=1
+                WHERE id=? OR (native_root=? AND json_extract(identity,'$.provider')=? AND json_extract(identity,'$.agent')=?)`)
+                .run(summary, digest(root), identity.provider, identity.agent);
+            this.prune(Date.now());
+        });
     }
     cursor(identity: LogIdentity): Cursor {
         const existing = this.db.prepare('SELECT cursor FROM sources WHERE id=?').get(digest(JSON.stringify(identity))) as { cursor: string } | undefined;
@@ -177,13 +197,14 @@ export class ManagedLogSpool {
         // Acknowledgement includes encrypted upload AND verified readback. Unacked
         // data is never evicted; capacity drops NEW diagnostics with durable gaps.
         this.db.prepare('DELETE FROM segments WHERE ack=1').run();
+        this.db.prepare('DELETE FROM sources WHERE retired=1 AND NOT EXISTS (SELECT 1 FROM segments WHERE segments.source=sources.id)').run();
         this.db.prepare('UPDATE segments SET sealed=1 WHERE day<>?').run(new Date(now).toISOString().slice(0, 10));
     }
     status(): object {
         const sources = this.db.prepare('SELECT * FROM sources ORDER BY id').all() as Source[];
         return { policyVersion: 1, redactionVersion: REDACTION_VERSION, instance: this.instance, private: true, historyComplete: false,
-            offsiteRetentionDays: 14, limits: this.limits, sourceCapacityWarning: sources.length >= this.limits.sources,
-            sources: sources.map(s => ({ ...JSON.parse(s.identity), id: s.id, nextSequence: s.next, droppedBytes: s.dropped, gaps: s.gaps,
+            offsiteRetentionDays: 14, limits: this.limits, sourceCapacityWarning: sources.filter(s => !s.retired).length >= this.limits.sources,
+            sources: sources.map(s => ({ ...JSON.parse(s.identity), id: s.id, retired: Boolean(s.retired), nextSequence: s.next, droppedBytes: s.dropped, gaps: s.gaps,
                 inventoryComplete: Boolean(s.inventory_complete), lastSuccessfulCollection: s.last_success, reason: s.reason, protectedReason: s.protection, protectedBytes: s.protection && !s.reason && JSON.parse(s.identity).source.startsWith('native-state') ? s.protected_bytes : null, capacityWarning: s.protected_bytes >= this.limits.protectedBytes })),
             nativeSources: {
                 rotation: 'none', growthBounded: false, inventoryComplete: false,
@@ -197,7 +218,7 @@ export class ManagedLogSpool {
     }
     assertCapacity(): void {
         const row = this.db.prepare('SELECT coalesce(sum(protected_bytes),0) AS bytes,max(protected_bytes) AS largest FROM sources').get() as { bytes: number; largest: number };
-        const count = (this.db.prepare('SELECT count(*) AS n FROM sources').get() as { n: number }).n;
+        const count = (this.db.prepare('SELECT count(*) AS n FROM sources WHERE retired=0').get() as { n: number }).n;
         if (count >= this.limits.sources) throw new Error('managed diagnostics: source capacity; operator action required');
         if (row.largest >= this.limits.protectedBytes || row.bytes >= 4 * this.limits.protectedBytes) throw new Error('managed diagnostics: protected native state capacity; operator action required');
     }

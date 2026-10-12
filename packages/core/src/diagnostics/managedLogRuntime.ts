@@ -26,6 +26,10 @@ export function managedDiagnostics(): ManagedLogSpool | null {
     spool = new ManagedLogSpool(root, process.env.PROPR_INSTANCE_ID || '');
     return spool;
 }
+function availableDiagnostics(): ManagedLogSpool | null {
+    try { return managedDiagnostics(); }
+    catch { diagnosticsFailure(); return null; }
+}
 export function configuredDiagnosticSecrets(env: Record<string, string | undefined> = process.env): string[] {
     return Object.entries(env).filter(([k, v]) => /secret|token|password|key|credential/i.test(k) && v && v.length >= 8).map(([, v]) => v!);
 }
@@ -57,7 +61,7 @@ export function captureApplicationRecord(line: string): void {
 }
 export function captureProviderOutput(identity: LogIdentity, secrets: readonly string[]): { write(chunk: string): void; close(): void } {
     let pending = '', discard = false, lostBytes = 0;
-    const db = managedDiagnostics();
+    const db = availableDiagnostics();
     if (!db) return { write() {}, close() {} };
     // There is no durable stdout offset across process death. Expose the capture
     // boundary rather than claiming continuous history after a restart.
@@ -123,7 +127,7 @@ export function providerCredentialRoot(agent: DiagnosticAgent, resolve?: (value:
 }
 /** Establish redaction context immediately before spawning with final arguments. */
 export function prepareProviderCapture(agent: DiagnosticAgent, args: string[] = [], extraEnv: Record<string, string | undefined> = {}) {
-    const db = managedDiagnostics();
+    const db = availableDiagnostics();
     if (!db) return null;
     const secrets = [...configuredDiagnosticSecrets(), ...configuredDiagnosticSecrets(agent.credentials ?? {}), ...configuredDiagnosticSecrets(extraEnv)];
     for (let i = 0; i < args.length - 1; i++) if (args[i] === '-e' || args[i] === '--env') {

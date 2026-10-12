@@ -32,6 +32,7 @@ export interface ProviderRoot { provider: DiagnosticProvider; agent: string; roo
  * descriptor, native filename, DB, resume state, or live UI watcher. */
 export function collectProvider(spool: ManagedLogSpool, input: ProviderRoot, now = Date.now()): void {
     const summary: LogIdentity = { provider: input.provider, agent: input.agent, source: input.transient ? `native-state:${digest(input.root)}` : 'native-state' };
+    const transientRoot = input.transient ? input.root : undefined;
     let root: PinnedDirectory;
     try { root = PinnedDirectory.open(input.root); }
     catch (e) {
@@ -55,6 +56,7 @@ export function collectProvider(spool: ManagedLogSpool, input: ProviderRoot, now
         const identity = { provider: input.provider, agent: input.agent, source: digest(input.transient ? `${input.root}:${relative}` : relative) };
         let fd: number | undefined;
         try {
+            spool.trackNativeSource(identity, transientRoot);
             fd = dir.file(entry.name);
             const stat = fs.fstatSync(fd);
             protectedBytes += stat.size;
