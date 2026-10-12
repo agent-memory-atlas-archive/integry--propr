@@ -6,7 +6,7 @@ import os from 'node:os';
 import { createRequire } from 'node:module';
 import { createHash } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
-import { DatabaseExports } from '../src/storage/databaseExport.js';
+import { configuredExportSecrets, DatabaseExports } from '../src/storage/databaseExport.js';
 const SQLite = createRequire(import.meta.url)('better-sqlite3');
 const allow = async () => {};
 async function fixture(t: test.TestContext) {
@@ -48,6 +48,11 @@ async function settled(exports: DatabaseExports, id: string, authority = allow) 
 
 test('real WAL writer: coherent restorable customer database, integrity, metadata and DB-only privacy', async t => {
   const f = await fixture(t);
+  // Public/path configuration may legitimately occur in customer records.
+  for (const [name, value] of Object.entries({ WEB_PUSH_VAPID_PUBLIC_KEY: 'encrypted-customer-canary', HOST_GH_PRIVATE_KEY: 'customer content survives' })) {
+    const previous = process.env[name]; process.env[name] = value;
+    t.after(() => { if (previous === undefined) delete process.env[name]; else process.env[name] = previous; });
+  }
   const writer = setInterval(() => f.db.transaction(() => {
     f.db.prepare('INSERT INTO customer(body) VALUES(?)').run('concurrent customer');
     f.db.prepare('INSERT INTO customer(body) VALUES(?)').run('paired customer');
@@ -206,5 +211,76 @@ test('execution deadline terminates a worker and leaves no downloadable partial 
   const schedule = globalThis.setTimeout;
   t.mock.method(globalThis, 'setTimeout', (callback: (...args: unknown[]) => void, ms: number, ...args: unknown[]) => schedule(callback, ms === 60_000 ? 1 : ms, ...args));
   const job = await f.start(); assert.equal((await settled(f.exports, job.operationId)).state, 'failed');
+  await assert.rejects(f.exports.redeem('instance', f.exports.generation, job.operationId, 'admin', allow));
+});
+
+
+test('configured secret policy covers provider families and excludes public keys and paths', () => {
+  const names = [
+    'GH_WEBHOOK_SECRET', 'GITHUB_TOKEN', 'GH_TOKEN', 'MISTRAL_API_KEY',
+    'REDIS_PASSWORD', 'WEB_PUSH_VAPID_PRIVATE_KEY', 'PROPR_FLEET_SECRET',
+    'PROPR_FLEET_CONTROL_SECRET', 'PROPR_CREDENTIAL_ENCRYPTION_KEY',
+    'PROVIDER_CREDENTIALS', 'AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY',
+    'NEW_PROVIDER_APIKEY', 'providerApiKey', 'SESSION_SECRET', 'SYSTEM_TASK_SECRET',
+    'PROPR_GH_RELAY_TOKEN', 'GH_CLIENT_SECRET', 'GH_OAUTH_CLIENT_SECRET',
+  ];
+  const env = Object.fromEntries(names.map(name => [name, `synthetic-${name}`]));
+  assert.deepEqual(configuredExportSecrets(env), Object.values(env));
+  assert.deepEqual(configuredExportSecrets({
+    GH_PRIVATE_KEY_PATH: '/keys/app.pem', HOST_GH_PRIVATE_KEY: '/keys/app.pem',
+    GOOGLE_APPLICATION_CREDENTIALS_FILE: '/keys/provider.json',
+    PROPR_MANAGED_CREDENTIALS_DIR: '/credentials',
+    WEB_PUSH_VAPID_PUBLIC_KEY: 'public-value', PROVIDER_PUBLICKEY: 'public-value',
+    HOME: '/home/customer', EMPTY_SECRET: '', MISSING_SECRET: undefined,
+  }), []);
+  assert.deepEqual(configuredExportSecrets({ A_SECRET: ' padded secret ', B_TOKEN: ' padded secret ' }), [' padded secret ']);
+});
+
+for (const name of ['GH_WEBHOOK_SECRET', 'MISTRAL_API_KEY', 'GITHUB_TOKEN', 'GH_TOKEN',
+  'REDIS_PASSWORD', 'WEB_PUSH_VAPID_PRIVATE_KEY', 'PROPR_FLEET_SECRET', 'PROVIDER_CREDENTIALS']) {
+  test(`historical table rejects process-global ${name} absent from current agents without disclosure`, async t => {
+    const f = await fixture(t);
+    const canary = `historical-export-canary-3018-${name}`;
+    const previous = process.env[name];
+    process.env[name] = canary;
+    t.after(() => { if (previous === undefined) delete process.env[name]; else process.env[name] = previous; });
+    const logs: unknown[][] = [];
+    for (const method of ['log', 'info', 'warn', 'error', 'debug'] as const) {
+      t.mock.method(console, method, (...args: unknown[]) => { logs.push(args); });
+    }
+    // Worker stdout/stderr are forwarded to the parent streams, bypassing its console.
+    for (const stream of [process.stdout, process.stderr]) {
+      const write = stream.write.bind(stream);
+      t.mock.method(stream, 'write', (...args: Parameters<typeof stream.write>) => {
+        logs.push([String(args[0])]);
+        return write(...args);
+      });
+    }
+    f.db.exec('CREATE TABLE historical_provider_events(id INTEGER PRIMARY KEY, payload TEXT)');
+    f.db.prepare('INSERT INTO historical_provider_events(payload) VALUES(?)').run('retired agent log: ' + canary);
+    const job = await f.start();
+    const result = await settled(f.exports, job.operationId);
+    assert.equal(result.state, 'failed');
+    let failure = '';
+    await assert.rejects(f.exports.redeem('instance', f.exports.generation, job.operationId, 'admin', allow), error => {
+      failure = String(error); return /Export not ready or consumed/.test(failure);
+    });
+    // Await worker termination and cleanup, not just the failed state transition.
+    await f.exports.cancel('instance', f.exports.generation, job.operationId, 'admin', allow);
+    assert.equal(JSON.stringify({ job, result, failure, logs }).includes(canary), false);
+    assert.deepEqual(await fs.readdir(path.join(f.root, 'exports')), []);
+    assert.equal(f.db.prepare('SELECT payload FROM historical_provider_events').get().payload, 'retired agent log: ' + canary);
+  });
+}
+
+test('current agent credential family is removed and historical copies fail closed', async t => {
+  const f = await fixture(t);
+  const canary = 'current-agent-credential-history-canary';
+  f.db.prepare("UPDATE system_configs SET value=? WHERE key='agents'").run(JSON.stringify([
+    { id: 'agent', envVars: { PROVIDER_CREDENTIAL: canary } },
+  ]));
+  f.db.prepare('INSERT INTO customer(body) VALUES(?)').run(canary);
+  const job = await f.start();
+  assert.equal((await settled(f.exports, job.operationId)).state, 'failed');
   await assert.rejects(f.exports.redeem('instance', f.exports.generation, job.operationId, 'admin', allow));
 });

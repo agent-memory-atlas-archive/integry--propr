@@ -1,5 +1,18 @@
+/** Shared export policy for process-global and agent environment configuration.
+ * Match secret families rather than a provider allowlist so legacy/new providers
+ * are covered. Keep path/public-key exceptions here alongside the policy.
+ */
+export function isExportSecretName(name: string): boolean {
+  const key = name.replace(/([a-z0-9])([A-Z])/g, '$1_$2').toUpperCase();
+  // HOST_GH_PRIVATE_KEY is a host PEM path despite its name (.env.example).
+  if (key === 'HOST_GH_PRIVATE_KEY' || /(?:^|[_-])(?:PATH|FILE|DIR|DIRECTORY)$/.test(key)) return false;
+  if (/(?:^|[_-])PUBLIC[_-]?KEY(?:$|[_-])/.test(key)) return false;
+  return /(?:^|[_-])(?:SECRETS?|TOKENS?|PASSWORDS?|CREDENTIALS?|PRIVATE[_-]?KEY|API[_-]?KEY|ACCESS[_-]?KEY|ENCRYPTION[_-]?KEY)(?:$|[_-])/.test(key);
+}
+
 /** Runs in a disposable worker: SQLite integrity/VACUUM cannot block API requests. */
 export const databaseExportWorker = String.raw`
+const isExportSecretName = ${isExportSecretName.toString()};
 const { workerData: d, parentPort } = require('node:worker_threads');
 const fs = require('node:fs');
 const path = require('node:path');
@@ -49,7 +62,7 @@ const SQLite = require(d.sqliteModule);
           if (!Array.isArray(agents)) throw Error('scope');
           for (const agent of agents) {
             for (const [key, value] of Object.entries(agent.envVars || {})) {
-              if (/token|secret|password|api[_-]?key|access[_-]?key|private[_-]?key/i.test(key) && typeof value === 'string' && value) d.forbiddenSecrets.push(value);
+              if (isExportSecretName(key) && typeof value === 'string' && value) d.forbiddenSecrets.push(value);
             }
             delete agent.envVars; delete agent.configPath;
           }

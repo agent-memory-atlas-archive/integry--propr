@@ -6,12 +6,18 @@ import { createRequire } from 'node:module';
 import { Worker } from 'node:worker_threads';
 import type { DatabaseExportStatus } from '@propr/shared';
 import { assertRealDirectory } from './lifecycle.js';
-import { databaseExportWorker } from './databaseExportWorker.js';
+import { databaseExportWorker, isExportSecretName } from './databaseExportWorker.js';
 
 const require = createRequire(import.meta.url);
 const MAX_BYTES = 512 * 1024 ** 2;
 const TTL = 5 * 60_000;
-const OPERATOR_SECRET_KEYS = ['PROPR_FLEET_CONTROL_SECRET', 'PROPR_GH_RELAY_TOKEN', 'SESSION_SECRET', 'SYSTEM_TASK_SECRET', 'PROPR_CREDENTIAL_ENCRYPTION_KEY', 'GH_CLIENT_SECRET', 'GH_OAUTH_CLIENT_SECRET'];
+// Recollect at job execution, including credentials absent from current agents.
+// Preserve exact values (whitespace may be significant); never expose this set
+// through job metadata, diagnostics, or errors.
+export function configuredExportSecrets(env: NodeJS.ProcessEnv = process.env): string[] {
+  return [...new Set(Object.entries(env).flatMap(([name, value]) =>
+    isExportSecretName(name) && value ? [value] : []))];
+}
 export type StorageAuthority = () => Promise<void>;
 interface ExportJob { actor: string; status: DatabaseExportStatus; directory: string; worker?: Worker; disposed?: Promise<void>; removing?: Promise<void>; identity?: { dev: number; ino: number }; ancestry: Array<{ path: string; dev: number; ino: number }> }
 
@@ -120,7 +126,7 @@ export class DatabaseExports {
       await authorize();
       const worker = new Worker(databaseExportWorker, { eval: true, resourceLimits: { maxOldGenerationSizeMb: 128 }, workerData: {
         sqliteModule: require.resolve('better-sqlite3'), source: this.source,
-        forbiddenSecrets: OPERATOR_SECRET_KEYS.map(key => process.env[key]?.trim()).filter(Boolean),
+        forbiddenSecrets: configuredExportSecrets(),
         ancestry: job.ancestry, identity: { dev: original.dev, ino: original.ino },
         target: path.join(job.directory, 'database.sqlite'), maxBytes: MAX_BYTES,
       } });
