@@ -61,10 +61,10 @@ const TaskActionSheet: React.FC<{
         aria-haspopup="menu"
         aria-expanded={open}
         aria-controls={open ? menuId : undefined}
-        className="-mr-2 flex h-11 w-11 flex-none items-center justify-center rounded-full text-slate-500 transition-colors active:bg-slate-100 focus:outline-none focus-visible:ring-2 focus-visible:ring-teal-500"
+        className="flex h-8 w-8 flex-none items-center justify-center rounded-md border border-slate-200 bg-white text-slate-500 transition-colors active:bg-slate-100 focus:outline-none focus-visible:ring-2 focus-visible:ring-teal-500"
         onClick={() => setOpen(true)}
       >
-        <MoreHorizontal size={20} />
+        <MoreHorizontal size={16} />
       </button>
       {open && createPortal(
         <div className="fixed inset-0 z-50" onKeyDown={onKeyDown}>

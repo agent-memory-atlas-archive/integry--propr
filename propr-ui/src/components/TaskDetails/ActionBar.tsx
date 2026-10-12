@@ -179,7 +179,7 @@ const TaskOverflowMenu: React.FC<{
         aria-haspopup="menu"
         aria-expanded={open}
         aria-controls={open ? menuId : undefined}
-        className="flex h-7 w-7 items-center justify-center rounded text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-teal-500"
+        className="flex h-8 w-8 items-center justify-center rounded-md border border-slate-200 bg-white text-slate-500 transition-colors hover:bg-slate-100 hover:text-slate-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-teal-500"
         onClick={() => setOpen(value => !value)}
         onKeyDown={event => {
           if (event.key === 'ArrowDown') { event.preventDefault(); setOpen(true); }

@@ -1,5 +1,5 @@
 import React, { useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react';
-import { UserPlus } from 'lucide-react';
+import { AlertTriangle, UserPlus } from 'lucide-react';
 import { MAX_TASK_ASSIGNEES, type AttributedUser } from '@propr/shared';
 import { AssigneeList } from '../AssigneeList';
 import UserAvatar from '../UserAvatar';
@@ -259,13 +259,14 @@ const AssignmentControl: React.FC<{ assignment: TaskAssignment }> = ({ assignmen
 
   if (error) {
     return (
-      <div role="group" aria-label="Assignment" data-testid="task-assignment-error" className="inline-flex min-w-0 items-center gap-1.5 text-xs text-slate-500">
-        <span aria-hidden="true" className="mx-2 hidden h-3 w-px flex-none bg-slate-200 sm:inline-block" />
-        <span className="truncate" title={error}>Couldn't load assignment</span>
+      <div role="group" aria-label="Assignment" data-testid="task-assignment-error" className="inline-flex shrink-0 items-center gap-1 whitespace-nowrap rounded-sm border border-amber-200/70 bg-amber-50 px-1.5 py-0.5 text-[11px] font-medium text-amber-700">
+        <AlertTriangle aria-hidden="true" className="h-3 w-3 flex-none" />
+        <span title={error}>Assignment error</span>
+        <span aria-hidden="true">·</span>
         <button
           type="button"
           onClick={reload}
-          className="rounded px-1 py-0.5 font-medium text-slate-600 underline-offset-2 hover:bg-slate-100 hover:text-slate-900 hover:underline focus:outline-none focus-visible:ring-2 focus-visible:ring-teal-500"
+          className="rounded underline underline-offset-2 hover:text-amber-900 focus:outline-none focus-visible:ring-2 focus-visible:ring-teal-500"
         >
           Retry
         </button>
@@ -294,8 +295,6 @@ const AssignmentControl: React.FC<{ assignment: TaskAssignment }> = ({ assignmen
         }
       }}
     >
-      {/* On a phone the control wraps to its own line, where a divider would dangle. */}
-      <span aria-hidden="true" className="mx-2 hidden h-3 w-px flex-none bg-slate-200 sm:inline-block" />
       {assignees.length > 0
         ? <AssigneeList assignees={assignees} variant="prominent" />
         : <span data-testid="assignment-unassigned" className="text-xs text-slate-500">Unassigned</span>}

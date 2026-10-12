@@ -241,7 +241,7 @@ const LiveFileChips: React.FC<LiveFileChipsProps> = ({ taskId, isActive, runNumb
                   title={file.path}
                 >
                   {getFileIcon(file.status)}
-                  <span className="min-w-0 flex-1 break-all">
+                  <span className="min-w-0 flex-1 truncate">
                     {parentDirectory && <span className="text-slate-400">{parentDirectory}</span>}
                     <span className="text-slate-700">{file.path.split('/').pop()}</span>
                   </span>

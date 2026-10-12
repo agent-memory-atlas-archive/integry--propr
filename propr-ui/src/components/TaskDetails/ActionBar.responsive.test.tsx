@@ -124,7 +124,7 @@ describe('TaskDetails collapsed mobile header', () => {
     expect(screen.queryByRole('button', { name: 'Follow Up' })).toBeNull();
     expect(screen.queryByRole('button', { name: 'Prompt' })).toBeNull();
     const trigger = screen.getByRole('button', { name: 'More task actions' });
-    expect(trigger).toHaveClass('h-11', 'w-11', 'rounded-full');
+    expect(trigger).toHaveClass('h-8', 'w-8', 'rounded-md');
     fireEvent.click(trigger);
 
     const sheet = screen.getByRole('dialog', { name: 'Task actions' });

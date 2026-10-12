@@ -321,7 +321,7 @@ for (const [width, height] of [[1440, 900], [390, 844]] as const) {
     const details = page.getByTestId('task-details');
     const failed = details.getByTestId('task-assignment-error').filter({ visible: true });
     await expect(failed).toHaveCount(1);
-    await expect(failed).toContainText("Couldn't load assignment");
+    await expect(failed).toContainText("Assignment error");
     await expect(details.getByTestId('task-assignment').filter({ visible: true })).toHaveCount(0);
     await expectNoHorizontalOverflow(page);
     await capture(page, `task-assignment-read-failed-${width}`);

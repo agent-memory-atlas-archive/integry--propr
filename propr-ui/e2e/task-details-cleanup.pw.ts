@@ -107,7 +107,16 @@ for (const width of [390, 1440]) {
       await expect(terminal).toHaveCSS('color', 'rgb(212, 212, 216)');
       await expect(task.getByRole('menuitem', { name: 'Delete' })).toHaveCount(0);
       await expect(task.getByRole('region', { name: 'Changed files' }).getByRole('button')).toHaveCount(32);
+      const filename = task.getByRole('region', { name: 'Changed files' }).getByRole('button').first().locator('span.truncate');
+      await expect(filename).toHaveCSS('white-space', 'nowrap');
+      await expect(filename).toHaveCSS('text-overflow', 'ellipsis');
+      const filenameSize = await filename.evaluate(node => ({ height: node.clientHeight, lineHeight: parseFloat(getComputedStyle(node).lineHeight) }));
+      expect(filenameSize.height).toBe(filenameSize.lineHeight);
+      await expect(task.getByTestId('task-assignment-error').filter({ visible: true })).toHaveCSS('background-color', 'rgb(255, 251, 235)');
       const more = task.getByRole('button', { name: 'More task actions' });
+      await expect(more).toHaveCSS('width', '32px');
+      await expect(more).toHaveCSS('height', '32px');
+      await expect(more).toHaveCSS('border-radius', '6px');
       await more.click();
       // On mobile the overflow is a bottom sheet laid over the whole page, outside the task pane.
       const deletion = page.getByRole('menuitem', { name: 'Delete' });
@@ -116,6 +125,8 @@ for (const width of [390, 1440]) {
       await page.keyboard.press('Escape');
       await expect(more).toBeFocused();
       await expect(page.getByRole('menu')).toHaveCount(0);
+      // Capture the resting button after verifying keyboard focus restoration.
+      await more.evaluate(node => node.blur());
       await capture(page, `task-details-${completed ? 'completed' : 'live'}-${width}`);
 
       const list = task.getByRole('region', { name: 'Changed files' });
