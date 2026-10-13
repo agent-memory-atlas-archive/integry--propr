@@ -271,6 +271,7 @@ let runtimeBuildQueue: Queue;
 let configReloadSubscription: ConfigReloadSubscription | undefined;
 let invalidateStatusAgentCache: (() => void) | undefined;
 let dashboardReads: DashboardReadService | undefined;
+let fleetDataListener: ReturnType<typeof startConfiguredFleetData> = Promise.resolve(undefined);
 let notificationBackground: NotificationBackgroundService | undefined;
 let webPushDispatcherConfigured = false;
 let resolvedWebPushConfiguration: ValidatedWebPushConfiguration = { configured: false, issue: 'disabled' };
@@ -422,11 +423,10 @@ function setupRoutes(): void {
   const storageService = createDefaultStorageService();
   const storageRoutes = createInstanceStorageRoutes(storageService);
   // Management-only Unix transport; no customer/tunnel route is registered.
-  if (!demoMode) {
-    void startConfiguredFleetData(storageService).catch(() => {
-      console.warn('Fleet data listener unavailable');
-    });
-  }
+  fleetDataListener = demoMode ? Promise.resolve(undefined) : startConfiguredFleetData(storageService).catch(() => {
+    console.warn('Fleet data listener unavailable');
+    return undefined;
+  });
   // Background work is bounded/coalesced; no startup deletion or live-data scan.
   const storageSweep = setInterval(() => {
     void storageService.sweep().catch(() => undefined);
@@ -720,6 +720,10 @@ async function start(): Promise<void> {
 
     process.on('SIGTERM', async () => {
       console.log('SIGTERM received, shutting down gracefully...');
+      // Stop admissions and drain Fleet handlers before their dependencies close.
+      await (await fleetDataListener)?.shutdown().catch(error => {
+        console.warn('Fleet listener socket cleanup refused:', error);
+      });
       const shutdownTasks: ShutdownTask[] = [
         { name: 'dashboard read service', close: () => dashboardReads?.close() ?? Promise.resolve() },
         { name: 'task queue', close: () => taskQueue.close() },

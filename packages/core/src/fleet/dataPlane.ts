@@ -75,10 +75,10 @@ export class FleetDataPlane {
   }
   private name(id: string) { return `operation-${id}.jsonl`; }
   private async save(op: Operation, state: FleetDataState, result?: FleetDataResult['result']) {
-    op.state = state;
-    if (result !== undefined) op.result = result;
-    if (Buffer.byteLength(JSON.stringify(op)) > 24000) throw new FleetRefusal();
-    await this.files.append(this.name(op.operationId), { ...op, recordDigest: digest(op) });
+    const candidate = { ...op, state, ...(result === undefined ? {} : { result }) };
+    if (Buffer.byteLength(JSON.stringify(candidate)) > 24000) throw new FleetRefusal();
+    await this.files.append(this.name(op.operationId), { ...candidate, recordDigest: digest(candidate) });
+    Object.assign(op, candidate);
   }
   private async read(id: string): Promise<Operation> {
     const raw = await this.files.read(this.name(id));

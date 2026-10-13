@@ -72,7 +72,7 @@ async function fixture(t: test.TestContext, repository = false) {
     }); req.on('error', reject); req.end(raw);
   });
   t.after(async () => {
-    server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve()));
+    await server.shutdown().catch(() => undefined);
     // Cancel native staging regardless of whether Fleet authority was revoked by the test.
     const entries = await fs.readdir(control).catch(() => []);
     for (const entry of entries.filter(name => name.startsWith('operation-'))) {
@@ -370,4 +370,147 @@ test('torn or corrupted ledger refuses result release and replay', async t => {
     await assert.rejects(f.invoke({ action: 'operation.status', targetOperationId: op.operationId }));
     await assert.rejects(f.plane.invoke(raw));
   }
+});
+
+test('oversized inventory persists a bounded failure, readable by status before and after restart', async t => {
+  const f = await fixture(t);
+  t.mock.method(f.storage, 'inventory', async () => ({ repositories: [{ name: 'x'.repeat(40_000) }] }));
+  const raw = f.sign({ action: 'repositories.list' });
+  const id = JSON.parse(raw).assertion.operationId;
+  assert.equal((await f.http(raw)).status, 403);
+  const status = async (plane: FleetDataPlane) => {
+    const result = await plane.invoke(f.sign({ action: 'operation.status', targetOperationId: id }));
+    assert.equal((result.result as FleetDataResult).state, 'failed');
+    assert.equal((result.result as FleetDataResult).result, undefined);
+  };
+  await status(f.plane);
+  // Process-local plane recovery with the same native generation supports status.
+  const next = new FleetDataPlane(f.storage, f.control, () => f.secret); await next.initialize();
+  await status(next);
+  const ledger = await fs.readFile(path.join(f.control, `operation-${id}.jsonl`), 'utf8');
+  assert.ok(Buffer.byteLength(ledger) < 5000);
+  assert.equal(JSON.parse(ledger.trimEnd().split('\n').at(-1)!).state, 'failed');
+  await f.restart(); // A new native runtime must preserve the durable terminal failure.
+  assert.equal(await fs.readFile(path.join(f.control, `operation-${id}.jsonl`), 'utf8'), ledger);
+});
+
+for (const revoke of [false, true]) {
+  test(`96 MiB transport uses bounded buffers and repeated fencing: revoke=${revoke}`, async t => {
+    const f = await fixture(t);
+    const op = await f.invoke({ action: 'database.export' }); await ready(f, op.operationId);
+    const size = 96 * 1024 ** 2;
+    const large = path.join(f.root, 'large-artifact');
+    const file = await fs.open(large, 'w'); await file.truncate(size); await file.close();
+    const redeem = f.storage.exports!.redeem.bind(f.storage.exports!);
+    let source: import('node:fs').ReadStream | undefined;
+    let maxBuffered = 0, produced = 0, received = 0, maxAhead = 0;
+    t.mock.method(f.storage.exports!, 'redeem', async (...args: Parameters<typeof redeem>) => {
+      const download = await redeem(...args); await download.file.close();
+      const largeFile = await fs.open(large, 'r');
+      const create = largeFile.createReadStream.bind(largeFile);
+      t.mock.method(largeFile, 'createReadStream', (options: Parameters<typeof create>[0]) => {
+        source = create(options);
+        source.on('data', chunk => {
+          produced += chunk.length;
+          maxAhead = Math.max(maxAhead, produced - received);
+          maxBuffered = Math.max(maxBuffered, source!.readableLength);
+        });
+        return source;
+      });
+      return { ...download, file: largeFile, status: { ...download.status, sizeBytes: size } };
+    });
+    const stream = f.plane.stream.bind(f.plane);
+    let validations = 0;
+    t.mock.method(f.plane, 'stream', (raw: string, consume: Parameters<typeof stream>[1]) => stream(raw, (download, authorize) => consume(download, async () => {
+      validations++;
+      if (revoke && validations === 6) { f.authority.placementGeneration = 'revoked'; await f.writeAuthority(); }
+      await authorize();
+    })));
+    const transfer = new Promise<void>((resolve, reject) => {
+      const req = request({ socketPath: f.server.address() as string, path: '/v1/invoke', method: 'POST', headers: { 'Content-Type': 'application/json' } }, res => {
+        assert.equal(res.statusCode, 200);
+        // Force backpressure without collecting the artifact in memory.
+        res.pause(); setTimeout(() => res.resume(), 600);
+        res.on('data', chunk => { received += chunk.length; maxBuffered = Math.max(maxBuffered, res.readableLength, source?.readableLength ?? 0); });
+        res.on('end', resolve); res.on('error', reject);
+      });
+      req.on('error', reject); req.end(f.sign({ action: 'artifact.stream', targetOperationId: op.operationId }));
+    });
+    if (revoke) { await assert.rejects(transfer); assert.ok(received < size); }
+    else { await transfer; assert.equal(received, size); }
+    assert.ok(validations >= 6, `validations=${validations}`);
+    assert.ok(validations < 100, `bounded validation count=${validations}`);
+    assert.ok(maxBuffered <= 256 * 1024, `buffered=${maxBuffered}`);
+    assert.ok(maxAhead <= 2 * 1024 ** 2, `producer lead=${maxAhead}`);
+    await f.server.shutdown();
+    const record = JSON.parse((await fs.readFile(path.join(f.control, `operation-${op.operationId}.jsonl`), 'utf8')).trimEnd().split('\n').at(-1)!);
+    assert.equal(record.state, revoke ? 'fenced' : 'consumed');
+  });
+}
+
+test('transfer deadline scales to the export cap with a finite throughput budget', async () => {
+  const { fleetTransferDeadline } = await import('../../api/fleetDataListener.js');
+  assert.equal(fleetTransferDeadline(96 * 1024 ** 2), 54_000);
+  assert.equal(fleetTransferDeadline(512 * 1024 ** 2), 158_000);
+  assert.equal(fleetTransferDeadline(1024 ** 3), 158_000);
+});
+
+test('shutdown closes admissions, drains work, removes the socket and permits restart', async t => {
+  const f = await fixture(t);
+  let release!: () => void;
+  let entered!: () => void;
+  const started = new Promise<void>(resolve => { entered = resolve; });
+  const blocked = new Promise<void>(resolve => { release = resolve; });
+  const inventory = f.storage.inventory.bind(f.storage);
+  t.mock.method(f.storage, 'inventory', async () => { entered(); await blocked; return inventory(); });
+  const response = f.http(f.sign({ action: 'repositories.list' })).catch(() => undefined);
+  await started;
+  const socket = f.server.address() as string;
+  let stopped = false;
+  const shutdown = f.server.shutdown().then(() => { stopped = true; });
+  await delay(25); assert.equal(stopped, false);
+  await assert.rejects(fs.lstat(socket), { code: 'ENOENT' });
+  await assert.rejects(f.http(f.sign({ action: 'repositories.list' })));
+  release(); await shutdown; await response;
+  await f.server.shutdown();
+  const next = await f.restart();
+  const listener = await listenFleetData(next);
+  await listener.shutdown();
+  assert.equal((await fs.readdir(f.control)).filter(name => name.endsWith('.sock')).length, 0);
+  const serverSource = await fs.readFile(path.resolve('packages/api/server.ts'), 'utf8');
+  assert.ok(serverSource.indexOf('await (await fleetDataListener)?.shutdown()') < serverSource.indexOf('await closeResources(shutdownTasks)'));
+});
+
+for (const substitution of ['file', 'symlink', 'socket', 'root'] as const) {
+  test(`shutdown preserves substituted ${substitution}`, async t => {
+    const f = await fixture(t);
+    const socket = f.server.address() as string;
+    if (substitution === 'root') {
+      await fs.rename(f.control, `${f.control}-old`); await fs.mkdir(f.control, { mode: 0o700 });
+      await fs.writeFile(socket, 'replacement');
+    } else {
+      await fs.unlink(socket);
+      if (substitution === 'file') await fs.writeFile(socket, 'replacement');
+      else if (substitution === 'socket') await exec(process.execPath, ['-e', `process.umask(0o077);require('net').createServer().listen(process.argv[1],()=>process.exit(0));`, socket]);
+      else await fs.symlink(f.source, socket);
+    }
+    await assert.rejects(f.server.shutdown());
+    const stat = await fs.lstat(socket);
+    assert.ok(substitution === 'symlink' ? stat.isSymbolicLink() : substitution === 'socket' ? stat.isSocket() : stat.isFile());
+  });
+}
+
+test('restart removes crashed stale sockets but refuses live or unsafe entries', async t => {
+  const f = await fixture(t); await f.server.shutdown();
+  const socket = path.join(f.control, `data-${randomUUID()}.sock`);
+  // A process exit bypasses close(), leaving a real stale Unix socket.
+  await exec(process.execPath, ['-e', `const fs=require('fs'); const s=require('net').createServer(); s.listen(process.argv[1],()=>{fs.chmodSync(process.argv[1],0o600);process.exit(0)});`, socket]);
+  assert.ok((await fs.lstat(socket)).isSocket());
+  const listener = await listenFleetData(f.plane);
+  await assert.rejects(fs.lstat(socket), { code: 'ENOENT' });
+  await assert.rejects(listenFleetData(f.plane));
+  await listener.shutdown();
+  await fs.writeFile(socket, 'preserve', { mode: 0o600 });
+  await assert.rejects(listenFleetData(f.plane));
+  assert.equal(await fs.readFile(socket, 'utf8'), 'preserve');
 });
