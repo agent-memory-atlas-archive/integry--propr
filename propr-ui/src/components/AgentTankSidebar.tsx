@@ -47,11 +47,11 @@ function saveExpandedAgents(expanded: Set<string>): void {
 }
 
 // Until someone toggles a provider, a lone provider starts open (there is
-// nothing else to scan past), and so does every provider behind the menu
-// disclosure: opening "API & quota usage" is already the request to see the
-// numbers. Once a preference is saved it is shared with the sidebar.
-function defaultExpansion(agents: AgentUsageData[], layout: 'panel' | 'disclosure'): Set<string> {
-  return layout === 'disclosure' || agents.length === 1
+// nothing else to scan past), and so does every provider on a surface opened
+// only to read the numbers (the mobile Usage sheet). Once a preference is
+// saved it is shared with the sidebar.
+function defaultExpansion(agents: AgentUsageData[], expandAll: boolean): Set<string> {
+  return expandAll || agents.length === 1
     ? new Set(agents.map(agent => agent.name))
     : new Set();
 }
@@ -213,10 +213,13 @@ interface AgentTankSidebarProps {
   allowManualRefresh?: boolean;
   className?: string;
   scrollable?: boolean;
-  // `disclosure` folds the widget into one summary row ("Claude 25% · Codex 7%")
-  // that expands to the full breakdown — for menus, where a block of progress
-  // bars would push every entry below it off screen.
-  layout?: 'panel' | 'disclosure';
+  // `summary` folds the widget into one drill-down row ("Claude 25% · Codex 7%")
+  // that calls `onOpenDetails` — for menus, where a block of progress bars
+  // would push every entry below it off screen.
+  layout?: 'panel' | 'summary';
+  onOpenDetails?: () => void;
+  // Open every provider until a preference is saved.
+  expandAll?: boolean;
 }
 
 const AgentTankSidebar: React.FC<AgentTankSidebarProps> = ({
@@ -224,6 +227,8 @@ const AgentTankSidebar: React.FC<AgentTankSidebarProps> = ({
   className = '',
   scrollable = false,
   layout = 'panel',
+  onOpenDetails,
+  expandAll = false,
 }) => {
   const [refreshing, setRefreshing] = useState(false);
   const [savedExpansion, setSavedExpansion] = useState<Set<string> | null>(() => loadExpandedAgents());
@@ -263,7 +268,7 @@ const AgentTankSidebar: React.FC<AgentTankSidebarProps> = ({
     .sort((a, b) => getProviderRank(a.name) - getProviderRank(b.name));
   if (agents.length === 0) return null;
 
-  const expandedAgents = savedExpansion ?? defaultExpansion(agents, layout);
+  const expandedAgents = savedExpansion ?? defaultExpansion(agents, expandAll);
   const toggleAgent = (agentName: string) => {
     const next = new Set(expandedAgents);
     if (next.has(agentName)) {
@@ -296,31 +301,30 @@ const AgentTankSidebar: React.FC<AgentTankSidebarProps> = ({
     />
   ));
 
-  if (layout === 'disclosure') {
+  if (layout === 'summary') {
     const summary = agents.flatMap(agent => {
       const metric = getPrimaryMetric(agent);
       return metric ? [{ name: getProviderDisplayName(agent.name), percent: metric.percent }] : [];
     });
     return (
-      <details className={`group ${className}`}>
-        <summary className="flex min-h-12 cursor-pointer list-none items-center gap-3 px-4 py-3 text-sm text-slate-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-primary-500 [&::-webkit-details-marker]:hidden">
-          <Gauge className="h-5 w-5 flex-none text-slate-500" aria-hidden="true" />
-          <span className="flex-none font-medium">API &amp; quota usage</span>
-          <span className="ml-auto min-w-0 truncate text-right text-xs font-medium text-slate-500" data-testid="usage-summary">
-            {summary.map((item, index) => (
-              <React.Fragment key={item.name}>
-                {index > 0 && <span className="text-slate-300" aria-hidden="true"> · </span>}
-                {item.name} <span className={getTextColor(item.percent)}>{item.percent}%</span>
-              </React.Fragment>
-            ))}
-          </span>
-          <ChevronRight className="h-4 w-4 flex-none text-slate-400 transition-transform group-open:rotate-90" aria-hidden="true" />
-        </summary>
-        <div className="bg-slate-50 px-4 py-2">
-          {refreshButton && <div className="flex justify-end pt-1">{refreshButton}</div>}
-          <div className="agent-tank-scrollport min-w-0 max-w-full">{agentRows}</div>
-        </div>
-      </details>
+      <button
+        type="button"
+        onClick={onOpenDetails}
+        aria-haspopup="dialog"
+        className={`flex min-h-11 w-full items-center gap-3 px-4 py-2.5 text-left text-sm text-slate-700 transition-colors hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-primary-500 ${className}`}
+      >
+        <Gauge className="h-5 w-5 flex-none text-slate-500" aria-hidden="true" />
+        <span className="flex-none font-medium">API &amp; quota usage</span>
+        <span className="ml-auto min-w-0 truncate text-right text-xs font-medium text-slate-500" data-testid="usage-summary">
+          {summary.map((item, index) => (
+            <React.Fragment key={item.name}>
+              {index > 0 && <span className="text-slate-300" aria-hidden="true"> · </span>}
+              {item.name} <span className={getTextColor(item.percent)}>{item.percent}%</span>
+            </React.Fragment>
+          ))}
+        </span>
+        <ChevronRight className="h-4 w-4 flex-none text-slate-400" aria-hidden="true" />
+      </button>
     );
   }
 

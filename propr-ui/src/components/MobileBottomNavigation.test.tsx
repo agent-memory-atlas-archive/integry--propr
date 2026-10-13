@@ -292,8 +292,9 @@ describe('MobileBottomNavigation', () => {
 
     expect(await screen.findByText('API & quota usage')).toBeInTheDocument();
     expect(screen.getByTestId('usage-summary')).toHaveTextContent('Claude 25%');
-    expect(screen.getByText('API & quota usage').closest('details')).not.toHaveAttribute('open');
-    expect(screen.getByTitle('Refresh usage')).toBeInTheDocument();
+    // The menu shows only the summary; the bars and refresh live in the Usage sheet.
+    expect(screen.queryByText('Session')).not.toBeInTheDocument();
+    expect(screen.queryByTitle('Refresh usage')).not.toBeInTheDocument();
   });
 
   it('hides Agent Tank usage without agent management permission outside demo mode', () => {
@@ -330,10 +331,12 @@ describe('MobileBottomNavigation', () => {
 
     expect(await screen.findByText('API & quota usage')).toBeInTheDocument();
     expect(screen.getByTestId('usage-summary')).toHaveTextContent('Codex 40%');
+    fireEvent.click(screen.getByRole('button', { name: /API & quota usage/ }));
+    expect(await screen.findByRole('dialog', { name: 'API & quota usage' })).toBeInTheDocument();
     expect(screen.queryByTitle('Refresh usage')).not.toBeInTheDocument();
   });
 
-  it('opens a lone provider with the usage row and still lets it collapse', async () => {
+  it('drills from the usage row into a Usage sheet and back', async () => {
     mockGetAgentTankUsage.mockResolvedValue({
       enabled: true,
       agents: {
@@ -344,26 +347,34 @@ describe('MobileBottomNavigation', () => {
             weeklyAll: { percent: 50, resetsIn: '4d' },
           },
         },
+        codex: {
+          name: 'codex',
+          usage: { fiveHour: { percentUsed: 7, resetsIn: '3h' } },
+        },
       },
     });
 
     renderNavigation();
-    fireEvent.click(screen.getByRole('button', { name: 'More' }));
+    const moreButton = screen.getByRole('button', { name: 'More' });
+    fireEvent.click(moreButton);
+    fireEvent.click(await screen.findByRole('button', { name: /API & quota usage/ }));
 
-    const agentRow = await screen.findByRole('button', { name: /Claude/ });
-    expect(agentRow).toHaveAttribute('aria-expanded', 'true');
-    expect(screen.getByText('Session')).toBeInTheDocument();
-    expect(screen.getByText('Weekly')).toBeInTheDocument();
+    expect(screen.queryByRole('dialog', { name: 'More' })).not.toBeInTheDocument();
+    const usageSheet = await screen.findByRole('dialog', { name: 'API & quota usage' });
+    // Opened to read the numbers, so every provider starts expanded.
+    expect(within(usageSheet).getByRole('button', { name: /Claude/ })).toHaveAttribute('aria-expanded', 'true');
+    expect(within(usageSheet).getByRole('button', { name: /Codex/ })).toHaveAttribute('aria-expanded', 'true');
+    expect(within(usageSheet).getByText('Weekly')).toBeInTheDocument();
+    expect(within(usageSheet).getByTitle('Refresh usage')).toBeInTheDocument();
 
-    fireEvent.click(agentRow);
+    fireEvent.click(within(usageSheet).getByRole('button', { name: 'Back to More' }));
+    expect(screen.queryByRole('dialog', { name: 'API & quota usage' })).not.toBeInTheDocument();
+    expect(screen.getByRole('dialog', { name: 'More' })).toBeInTheDocument();
 
-    expect(agentRow).toHaveAttribute('aria-expanded', 'false');
-    expect(screen.queryByText('Session')).not.toBeInTheDocument();
-    expect(screen.queryByText('Weekly')).not.toBeInTheDocument();
-
-    fireEvent.click(agentRow);
-
-    expect(agentRow).toHaveAttribute('aria-expanded', 'true');
-    expect(screen.getByText('Session')).toBeInTheDocument();
+    fireEvent.click(await screen.findByRole('button', { name: /API & quota usage/ }));
+    await screen.findByRole('dialog', { name: 'API & quota usage' });
+    fireEvent.click(screen.getByTestId('mobile-usage-sheet-backdrop'));
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    expect(moreButton).toHaveFocus();
   });
 });

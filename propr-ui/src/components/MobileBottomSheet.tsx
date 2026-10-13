@@ -1,5 +1,5 @@
 import React, { useEffect, useRef } from 'react';
-import { X } from 'lucide-react';
+import { ChevronLeft, X } from 'lucide-react';
 
 const focusableSelector = [
   'a[href]',
@@ -15,13 +15,18 @@ interface BottomSheetProps {
   title: string;
   closeLabel: string;
   onClose: () => void;
+  // A drill-down sheet (e.g. More › Usage) offers a way back to its parent.
+  onBack?: () => void;
+  backLabel?: string;
   children: React.ReactNode;
 }
 
 // A modal sheet anchored to the bottom bar: focus moves in and is trapped,
 // Escape or the backdrop closes it, and the page behind does not scroll. The
-// bottom padding keeps the last row 20px clear of the home-gesture bar.
-const BottomSheet: React.FC<BottomSheetProps> = ({ id, title, closeLabel, onClose, children }) => {
+// scrim dims and blurs the page so a white sheet never floats on a white
+// dashboard. The bottom padding keeps the last row 20px clear of the
+// home-gesture bar.
+const BottomSheet: React.FC<BottomSheetProps> = ({ id, title, closeLabel, onClose, onBack, backLabel = 'Back', children }) => {
   const sheetRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -66,7 +71,7 @@ const BottomSheet: React.FC<BottomSheetProps> = ({ id, title, closeLabel, onClos
     <div className="fixed inset-0 z-50 md:hidden">
       <div
         data-testid={`${id}-backdrop`}
-        className="absolute inset-0 h-full w-full cursor-default bg-slate-950/45"
+        className="fixed inset-0 z-40 cursor-default bg-slate-900/40 backdrop-blur-sm animate-fade-in motion-reduce:animate-none"
         onClick={onClose}
         aria-hidden="true"
       />
@@ -77,9 +82,19 @@ const BottomSheet: React.FC<BottomSheetProps> = ({ id, title, closeLabel, onClos
         aria-modal="true"
         aria-labelledby={`${id}-title`}
         tabIndex={-1}
-        className="absolute inset-x-0 bottom-0 max-h-[min(85vh,40rem)] overflow-y-auto rounded-t-2xl bg-white pb-[calc(1.25rem+env(safe-area-inset-bottom))] shadow-2xl"
+        className="absolute inset-x-0 bottom-0 z-50 max-h-[min(90vh,44rem)] overflow-y-auto rounded-t-2xl bg-white pb-[calc(1.25rem+env(safe-area-inset-bottom))] shadow-2xl animate-sheet-up motion-reduce:animate-none"
       >
-        <div className="sticky top-0 z-10 flex items-center border-b border-slate-200 bg-white px-4 py-3">
+        <div className="sticky top-0 z-10 flex items-center gap-1 border-b border-slate-200 bg-white px-4 py-3">
+          {onBack && (
+            <button
+              type="button"
+              onClick={onBack}
+              className="-ml-2 rounded-md p-2 text-slate-500 hover:bg-slate-100 hover:text-slate-800 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary-500"
+              aria-label={backLabel}
+            >
+              <ChevronLeft className="h-5 w-5" aria-hidden="true" />
+            </button>
+          )}
           <h2 id={`${id}-title`} className="text-base font-semibold text-slate-900">{title}</h2>
           <button
             type="button"

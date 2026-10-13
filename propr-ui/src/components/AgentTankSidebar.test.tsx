@@ -63,9 +63,13 @@ const usageResponse = (): AgentTankUsageResponse => ({
 });
 
 // The widget renders nothing until the first fetch resolves.
-async function renderSidebar(): Promise<HTMLElement> {
-  render(<AgentTankSidebar />);
+async function renderSidebarWith(element: React.ReactElement): Promise<HTMLElement> {
+  render(element);
   return (await screen.findByText('Usage')).closest('div')!.parentElement!;
+}
+
+async function renderSidebar(): Promise<HTMLElement> {
+  return renderSidebarWith(<AgentTankSidebar />);
 }
 
 function providerRow(name: string): HTMLElement {
@@ -258,9 +262,8 @@ describe('AgentTankSidebar expansion persistence', () => {
     expect(storedExpansion()).toEqual([]);
   });
 
-  it('opens every provider in the disclosure layout until a preference is saved', async () => {
-    render(<AgentTankSidebar layout="disclosure" />);
-    await screen.findByTestId('usage-summary');
+  it('opens every provider with expandAll until a preference is saved', async () => {
+    await renderSidebarWith(<AgentTankSidebar expandAll />);
 
     expect(providerRow('Claude')).toHaveAttribute('aria-expanded', 'true');
     expect(providerRow('Codex')).toHaveAttribute('aria-expanded', 'true');
@@ -269,14 +272,27 @@ describe('AgentTankSidebar expansion persistence', () => {
     expect(storedExpansion()).toEqual(['claude']);
   });
 
-  it('follows the saved sidebar preference in the disclosure layout', async () => {
+  it('follows the saved sidebar preference with expandAll', async () => {
     window.localStorage.setItem(EXPANDED_AGENTS_STORAGE_KEY, JSON.stringify(['codex']));
 
-    render(<AgentTankSidebar layout="disclosure" />);
-    await screen.findByTestId('usage-summary');
+    await renderSidebarWith(<AgentTankSidebar expandAll />);
 
     expect(providerRow('Claude')).toHaveAttribute('aria-expanded', 'false');
     expect(providerRow('Codex')).toHaveAttribute('aria-expanded', 'true');
+  });
+
+  it('condenses usage to one drill-down row in the summary layout', async () => {
+    const onOpenDetails = vi.fn();
+    render(<AgentTankSidebar layout="summary" onOpenDetails={onOpenDetails} />);
+
+    const row = await screen.findByRole('button', { name: /API & quota usage/ });
+    expect(screen.getByTestId('usage-summary').textContent).toMatch(/^Claude \d+% · Codex \d+%$/);
+    // No metric rows and no refresh control: the details live behind the row.
+    expect(screen.queryByText('Session')).not.toBeInTheDocument();
+    expect(screen.queryByTitle('Refresh usage')).not.toBeInTheDocument();
+
+    fireEvent.click(row);
+    expect(onOpenDetails).toHaveBeenCalledOnce();
   });
 
   it('keeps toggling when localStorage is unavailable', async () => {

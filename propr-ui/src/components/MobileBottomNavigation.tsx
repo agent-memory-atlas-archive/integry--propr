@@ -39,7 +39,7 @@ interface MobileBottomNavigationProps {
   systemHealth: HeaderStats['systemHealth'];
 }
 
-type SheetId = 'create' | 'more';
+type SheetId = 'create' | 'more' | 'usage';
 
 const pathMatches = (pathname: string, path: string): boolean =>
   pathname === path || pathname.startsWith(`${path}/`);
@@ -143,26 +143,74 @@ const MobileNavLink: React.FC<MobileNavLinkProps> = ({
 
 const listRowClassName = 'flex min-h-12 items-center gap-3 px-4 py-3 text-sm text-slate-700 transition-colors hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-primary-500';
 
-const ListSection: React.FC<{ title: string; children: React.ReactNode }> = ({ title, children }) => {
-  const id = `mobile-more-${title.toLowerCase().replace(/[^a-z]+/g, '-')}`;
-  return (
-    <section aria-labelledby={id} className="border-t border-slate-100 first:border-t-0">
-      <h3 id={id} className="px-4 pb-1 pt-4 text-[11px] font-bold uppercase tracking-wider text-slate-400">
-        {title}
-      </h3>
-      <ul className="divide-y divide-slate-100">{children}</ul>
-    </section>
-  );
-};
+// More rows are a step tighter than the Create sheet's (44px, still a full
+// touch target) so the whole menu fits one screen without scrolling.
+const moreRowClassName = 'flex min-h-11 items-center gap-3 px-4 py-2.5 text-sm text-slate-700 transition-colors hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-primary-500';
+
+const sectionId = (title: string) => `mobile-more-${title.toLowerCase().replace(/[^a-z]+/g, '-')}`;
+const sectionHeadingClassName = 'px-4 pb-1 pt-3 text-[11px] font-bold uppercase tracking-wider text-slate-400';
+
+const ListSection: React.FC<{ title: string; children: React.ReactNode }> = ({ title, children }) => (
+  <section aria-labelledby={sectionId(title)} className="border-t border-slate-100">
+    <h3 id={sectionId(title)} className={sectionHeadingClassName}>{title}</h3>
+    <ul className="divide-y divide-slate-100">{children}</ul>
+  </section>
+);
+
+// The workspace destinations are what More is opened for, so they lead the
+// sheet as one row of tiles rather than four list rows: always above the fold,
+// and visibly weightier than the logs and settings beneath them.
+const WorkspaceSection: React.FC<{ items: MoreItem[]; onNavigate: () => void }> = ({ items, onNavigate }) => (
+  <section aria-labelledby={sectionId('Workspace')}>
+    <h3 id={sectionId('Workspace')} className={sectionHeadingClassName}>Workspace</h3>
+    <ul className="grid grid-cols-4 gap-2 px-3 pb-3 pt-1">
+      {items.map(item => (
+        <li key={item.to} className="min-w-0">
+          <Link
+            to={item.to}
+            onClick={onNavigate}
+            className="flex min-h-16 flex-col items-center justify-center gap-1 rounded-xl bg-slate-50 px-1 py-2 text-xs font-medium text-slate-700 transition-colors hover:bg-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary-500"
+          >
+            <item.icon className="h-5 w-5 flex-none text-primary-700" aria-hidden="true" />
+            <span className="max-w-full truncate">{item.label}</span>
+          </Link>
+        </li>
+      ))}
+    </ul>
+  </section>
+);
 
 const MoreLink: React.FC<{ item: MoreItem; onNavigate: () => void }> = ({ item, onNavigate }) => (
   <li>
-    <Link to={item.to} onClick={onNavigate} className={listRowClassName}>
+    <Link to={item.to} onClick={onNavigate} className={moreRowClassName}>
       <item.icon className="h-5 w-5 flex-none text-slate-500" aria-hidden="true" />
       <span className="min-w-0 flex-1 truncate font-medium">{item.label}</span>
       <ChevronRight className="h-4 w-4 flex-none text-slate-400" aria-hidden="true" />
     </Link>
   </li>
+);
+
+const ProfileRow: React.FC<{ user: CurrentUser; onLogout: () => void }> = ({ user, onLogout }) => (
+  <div className="flex items-center gap-3 px-4 py-2.5">
+    <UserAvatar
+      user={user}
+      className="flex h-9 w-9 flex-none items-center justify-center rounded-full border border-slate-200 object-cover text-xs font-bold"
+      fallbackClassName="bg-primary-100 text-primary-700"
+      decorative
+    />
+    <div className="min-w-0 flex-1">
+      <p className="truncate text-sm font-semibold text-slate-800">{user.displayName || user.username}</p>
+      <p className="truncate text-xs text-slate-500">@{user.username}</p>
+    </div>
+    <button
+      type="button"
+      onClick={onLogout}
+      className="inline-flex min-h-10 flex-none items-center gap-2 rounded-md px-3 text-sm font-medium text-slate-600 hover:bg-red-50 hover:text-red-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary-500"
+    >
+      <LogOut className="h-4 w-4" aria-hidden="true" />
+      Sign out
+    </button>
+  </div>
 );
 
 const HealthDetails: React.FC<{ systemHealth: HeaderStats['systemHealth'] }> = ({ systemHealth }) => {
@@ -176,7 +224,7 @@ const HealthDetails: React.FC<{ systemHealth: HeaderStats['systemHealth'] }> = (
 
   return (
     <details className="group">
-      <summary className="flex min-h-12 cursor-pointer list-none items-center gap-3 px-4 py-3 text-sm text-slate-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-primary-500 [&::-webkit-details-marker]:hidden">
+      <summary className="flex min-h-11 cursor-pointer list-none items-center gap-3 px-4 py-2.5 text-sm text-slate-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-primary-500 [&::-webkit-details-marker]:hidden">
         {systemHealth.isHealthy ? (
           <CircleCheck className="h-5 w-5 flex-none text-green-600" aria-hidden="true" />
         ) : (
@@ -220,6 +268,7 @@ const MobileBottomNavigation: React.FC<MobileBottomNavigationProps> = ({
     setOpenSheet(null);
     moreButtonRef.current?.focus();
   }, []);
+  const backToMore = useCallback(() => setOpenSheet('more'), []);
   // Following a link closes the sheet without pulling focus back to the bar.
   const closeForNavigation = () => setOpenSheet(null);
   const toggleSheet = (sheet: SheetId) => setOpenSheet(current => (current === sheet ? null : sheet));
@@ -232,9 +281,10 @@ const MobileBottomNavigation: React.FC<MobileBottomNavigationProps> = ({
   const groups = getMoreGroups(user);
   const showUsage = isDemoMode || userHasPermission(user, 'instance.manage_agents');
 
-  const unreadBadge = unreadCount !== null && unreadCount > 0 ? (
+  const unread = unreadCount ?? 0;
+  const unreadBadge = unread > 0 ? (
     <span className="absolute right-0 top-0 inline-flex min-w-4 items-center justify-center rounded-full bg-primary-500 px-1 text-[9px] font-bold leading-4 text-white">
-      {unreadCount > 99 ? '99+' : unreadCount}
+      {unread > 99 ? '99+' : unread}
     </span>
   ) : undefined;
 
@@ -265,39 +315,16 @@ const MobileBottomNavigation: React.FC<MobileBottomNavigationProps> = ({
 
       {openSheet === 'more' && (
         <BottomSheet id="mobile-more-sheet" title="More" closeLabel="Close More menu" onClose={closeMore}>
-          {user && (
-            <div className="flex items-center gap-3 border-b border-slate-100 px-4 py-3">
-              <UserAvatar
-                user={user}
-                className="flex h-10 w-10 flex-none items-center justify-center rounded-full border border-slate-200 object-cover text-xs font-bold"
-                fallbackClassName="bg-primary-100 text-primary-700"
-                decorative
-              />
-              <div className="min-w-0 flex-1">
-                <p className="truncate text-sm font-semibold text-slate-800">{user.displayName || user.username}</p>
-                <p className="truncate text-xs text-slate-500">@{user.username}</p>
-              </div>
-              <button
-                type="button"
-                onClick={onLogout}
-                className="inline-flex min-h-10 flex-none items-center gap-2 rounded-md px-3 text-sm font-medium text-slate-600 hover:bg-red-50 hover:text-red-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary-500"
-              >
-                <LogOut className="h-4 w-4" aria-hidden="true" />
-                Sign out
-              </button>
-            </div>
-          )}
+          {user && <ProfileRow user={user} onLogout={onLogout} />}
 
           <nav aria-label="More navigation">
-            <ListSection title="Workspace">
-              {groups.workspace.map(item => <MoreLink key={item.to} item={item} onNavigate={closeForNavigation} />)}
-            </ListSection>
+            <WorkspaceSection items={groups.workspace} onNavigate={closeForNavigation} />
             <ListSection title="Telemetry & system">
               {groups.telemetry.map(item => <MoreLink key={item.to} item={item} onNavigate={closeForNavigation} />)}
               <li><HealthDetails systemHealth={systemHealth} /></li>
               {showUsage && (
                 <li className="empty:hidden">
-                  <AgentTankSidebar allowManualRefresh={!isDemoMode} layout="disclosure" />
+                  <AgentTankSidebar layout="summary" onOpenDetails={() => setOpenSheet('usage')} />
                 </li>
               )}
             </ListSection>
@@ -305,6 +332,19 @@ const MobileBottomNavigation: React.FC<MobileBottomNavigationProps> = ({
               {groups.configuration.map(item => <MoreLink key={item.to} item={item} onNavigate={closeForNavigation} />)}
             </ListSection>
           </nav>
+        </BottomSheet>
+      )}
+
+      {openSheet === 'usage' && (
+        <BottomSheet
+          id="mobile-usage-sheet"
+          title="API & quota usage"
+          closeLabel="Close usage"
+          onClose={closeMore}
+          onBack={backToMore}
+          backLabel="Back to More"
+        >
+          <AgentTankSidebar allowManualRefresh={!isDemoMode} expandAll />
         </BottomSheet>
       )}
 
@@ -349,8 +389,8 @@ const MobileBottomNavigation: React.FC<MobileBottomNavigationProps> = ({
           to="/inbox"
           label="Inbox"
           active={active.inbox}
-          accessibleLabel={unreadCount !== null && unreadCount > 0
-            ? `Inbox, ${unreadCount} unread notifications`
+          accessibleLabel={unread > 0
+            ? `Inbox, ${unread} unread notifications`
             : 'Inbox'}
           icon={<Inbox className="h-5 w-5" aria-hidden="true" />}
           badge={unreadBadge}
@@ -364,7 +404,7 @@ const MobileBottomNavigation: React.FC<MobileBottomNavigationProps> = ({
           aria-controls="mobile-more-sheet"
           aria-current={active.more ? 'page' : undefined}
           className={`flex min-w-0 flex-1 flex-col items-center justify-center gap-0.5 px-1 text-[11px] font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-primary-500 ${
-            active.more || openSheet === 'more' ? 'text-primary-700' : 'text-slate-500 hover:text-slate-800'
+            active.more || openSheet === 'more' || openSheet === 'usage' ? 'text-primary-700' : 'text-slate-500 hover:text-slate-800'
           }`}
         >
           <span className="flex h-8 w-9 items-center justify-center">
