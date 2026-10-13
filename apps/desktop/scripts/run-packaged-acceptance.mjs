@@ -1449,7 +1449,10 @@ const rendererErrorAcceptanceSummary = () => {
 const sanitizedRendererErrorDiagnostics = () => {
   const allowedJourneys = new Set([...ACCEPTANCE_JOURNEYS, 'startup',
     'csp-reload-startup', 'csp-reload-pairing', 'csp-reload-restart', 'csp-reload-deselection',
-    'csp-reload-saved-selection', 'csp-reload-removal']);
+    'csp-reload-saved-selection', 'csp-reload-removal',
+    'installed-approved', 'installed-restart', 'installed-logged-out',
+    'installed-reject', 'installed-reject-restart', 'installed-expire', 'installed-expire-restart',
+    'installed-wrong-account', 'installed-wrong-account-restart']);
   const expectedCsp = new Set(correlateExpectedCspReloadConsoleRecords({
     records: consoleRecords, origin: readyOrigin, evidence: cspReloadEvidence,
     deniedRequests: cspDeniedRequests,

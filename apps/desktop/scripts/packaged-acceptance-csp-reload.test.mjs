@@ -786,5 +786,7 @@ test('installed lifecycle errors reach final diagnostics and fail the integrated
   assert.equal(files.get('output/sanitized-log.json').mode, 'installed-rpm');
   assert.equal(files.get('output/sanitized-log.json').schemaVersion, 2);
   assert.ok(files.get('output/sanitized-log.json').records.every(record => record.journey === 'installed-restart'));
-  assert.equal(files.get('output/sanitized-renderer-errors.json').unexpectedErrors, 2);
+  const diagnostics = files.get('output/sanitized-renderer-errors.json');
+  assert.equal(diagnostics.unexpectedErrors, 2);
+  assert.ok(diagnostics.errorRecords.every(record => record.phase === 'installed-restart'));
 });
