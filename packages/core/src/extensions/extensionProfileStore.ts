@@ -1,3 +1,4 @@
+import logger from '../utils/logger.js';
 import { OperatorCatalog } from './operatorCatalog.js';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import type { Knex } from 'knex';
@@ -158,7 +159,13 @@ export class ExtensionProfileStore {
     });
   }
   async finishGatewayCall(token: string, bytes: number): Promise<void> {
-    await this.database('extension_run_grants').where({ token_hash: extensionTokenHash(token) }).where('connections', '>', 0).decrement({ connections: 1, bytes: Math.max(0, EXTENSION_LIMITS.responseBytes - bytes) });
+    try {
+      await this.database('extension_run_grants').where({ token_hash: extensionTokenHash(token) }).where('connections', '>', 0).decrement({ connections: 1, bytes: Math.max(0, EXTENSION_LIMITS.responseBytes - bytes) });
+    } catch {
+      // Failed bookkeeping retains the full byte/connection reservation, so it
+      // cannot grant extra capacity or replace the upstream result or failure.
+      logger.warn('Could not release extension gateway reservation; reserved budget retained');
+    }
   }
   async createGrant(actor: string, snapshot: ExtensionProfileRevision, taskId: string, network: ExtensionGrantNetwork = { mode: 'open', allow: [], instanceAllow: [] }, allowWrite = false): Promise<string> {
     await this.read(actor, { instanceId: snapshot.instanceId, profileId: snapshot.profileId, revision: snapshot.revision });

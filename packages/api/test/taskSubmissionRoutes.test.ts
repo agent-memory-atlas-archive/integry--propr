@@ -350,9 +350,9 @@ test('submission routing rejects extension selections on unsupported runtimes be
     let labelCalls = 0;
     const labels = async () => { labelCalls++; return 'llm-selected'; };
     if (['claude', 'codex'].includes(type)) {
-      assert.equal((await routing({ agentAlias: 'selected', extensionProfile }, registry, labels)).agentAlias, 'selected');
+      assert.equal((await routing({ agentAlias: 'selected', extensionProfile }, registry, labels, async () => ({ agentAlias: 'selected', model: 'model' }))).agentAlias, 'selected');
     } else {
-      await assert.rejects(routing({ agentAlias: 'selected', extensionProfile }, registry, labels), error => (error as any).status === 400 && /Claude or Codex/.test((error as Error).message));
+      await assert.rejects(routing({ agentAlias: 'selected', extensionProfile }, registry, labels, async () => ({ agentAlias: 'selected', model: 'model' })), error => (error as any).status === 400 && /Claude or Codex/.test((error as Error).message));
       assert.equal(labelCalls, 0);
     }
     assert.equal((await routing({ agentAlias: 'selected' }, registry, labels)).agentAlias, 'selected');
@@ -428,4 +428,17 @@ test('authenticated API seals the explicit choice and idempotency rejects changi
     const replay = response(); await routes.submit(make(body), replay.res); assert.equal(replay.state.body.id, first.state.body.id); assert.equal(sideEffects, before);
     assert.ok(!JSON.stringify(replay.state.body).includes(saved.extension_authorization));
   }
+});
+
+
+test('extension submission routing rejects label round trips that change the alias or model', async () => {
+  const { routing } = await import('../routes/taskSubmissionRoutes.js');
+  const registry = { ensureInitialized: async () => undefined, getAgentByAlias: () => ({ config: { alias: 'selected', type: 'codex', enabled: true, supportedModels: ['model'] } }) } as never;
+  const body = { agentAlias: 'selected', model: 'model', extensionProfile: { instanceId: 'instance', profileId: 'profile', revision: 1 } };
+  for (const resolved of [{ agentAlias: 'other', model: 'model' }, { agentAlias: 'selected', model: 'other' }]) {
+    await assert.rejects(routing(body, registry, async () => 'llm-selection', async label => {
+      assert.equal(label, 'selection'); return resolved;
+    }), error => (error as any).status === 400 && /routed exactly/.test((error as Error).message));
+  }
+  assert.deepEqual(await routing(body, registry, async () => 'llm-selection', async () => ({ agentAlias: 'selected', model: 'model' })), { agentAlias: 'selected', model: 'model', routingLabel: 'llm-selection' });
 });

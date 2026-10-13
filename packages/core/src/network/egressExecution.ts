@@ -462,8 +462,13 @@ export async function sweepOrphanedEgressProxies(options: { now?: number; root?:
     const namespace = await egressProcessNamespace();
     const touched = new Date(now);
     await Promise.all([...ownedDirectories].map(id => fs.utimes(path.join(root, id), touched, touched).catch(() => undefined)));
-    const { sweepOrphanedExtensionStaging } = await import('../extensions/skillStaging.js');
-    let removed = await sweepOrphanedExtensionStaging(path.join(root, 'extensions'));
+    let removed = 0;
+    try {
+        const { sweepOrphanedExtensionStaging } = await import('../extensions/skillStaging.js');
+        removed = await sweepOrphanedExtensionStaging(path.join(root, 'extensions'));
+    } catch {
+        logger.warn('Extension staging sweep failed; continuing egress proxy cleanup');
+    }
     for (const id of entries) {
         // Task extension bundles share this host-visible transport root, but
         // dead extension owners were swept separately; preserve live mounts.

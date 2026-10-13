@@ -31,6 +31,9 @@ test('instance extension editor shows capability boundaries, immutable provenanc
   await expect(section).toBeVisible();
   await section.getByRole('button', { name: 'Edit profile' }).click();
   await expect(section.getByText('Capability and security boundary')).toBeVisible();
+  await expect(section.getByText(/Codex profile runs use/)).toContainText('--ignore-user-config');
+  await expect(section.getByText(/Codex profile runs use/)).toContainText('CODEX_HOME/config.toml');
+  await expect(section.getByText(/Codex profile runs use/)).toContainText('.codex/config.toml');
   const password = section.getByLabel(/Replace bearer token/);
   await expect(password).toHaveValue('');
   await expect(section.getByText(/SHA-256 d853bea/)).toBeVisible();
@@ -57,9 +60,9 @@ test('instance extension editor shows capability boundaries, immutable provenanc
     await page.setViewportSize({ width: 1280, height: 1900 });
     await section.scrollIntoViewIfNeeded();
     const directory = path.resolve('../.propr/previews'); await mkdir(directory, { recursive: true });
-    await section.getByText('Operator catalog entry: operator-documentation').locator('..').locator('..').locator('..').screenshot({ path: path.join(directory, 'agent-extensions-catalog.png'), animations: 'disabled' });
+    await section.getByText('Capability and security boundary').locator('..').screenshot({ path: path.join(directory, 'agent-extensions-codex-boundary.png'), animations: 'disabled' });
     await writeFile(path.join(directory, 'manifest.json'), JSON.stringify({ previews: [
-      { path: '.propr/previews/agent-extensions-catalog.png', title: 'Operator catalog selection', description: 'Pinned operator entry with bounded tool selection, declared write capability and opaque secret configuration status.' },
+      { path: '.propr/previews/agent-extensions-codex-boundary.png', title: 'Codex extension limitations', description: 'Editor boundary note explains ignored user provider configuration and refusal of repository Codex configuration.' },
     ], toolSuggestions: [] }));
   }
 });

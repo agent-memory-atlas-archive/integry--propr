@@ -1,3 +1,4 @@
+import logger from '../utils/logger.js';
 import { resolveExtensionEndpoint } from './endpointPolicy.js';
 import { ensureStagingRoot, stagingValidator, writeStagedSkill, createStagingDirectory } from './skillStaging.js';
 import { currentAgentNetworkPolicy, egressSocketRoots } from '../network/egressExecution.js';
@@ -101,9 +102,15 @@ export async function executeWithExtensions(config: AgentConfig, options: AgentT
       await store.activateGrant(token, options.extensionActorId!, selection);
     } }, () => execute(prepared));
   } finally {
-    try { await store.retainGatewayTelemetry(token); } finally {
-      try { await store.database('extension_run_grants').where({ token_hash: extensionTokenHash(token) }).delete(); }
-      finally { if (cleanupStaging) await cleanupStaging(); }
-    }
+    // Cleanup must attempt every obligation without replacing the run outcome.
+    // Log fixed messages: database and filesystem errors can contain private data.
+    try { await store.database('extension_run_grants').where({ token_hash: extensionTokenHash(token) }).update({ active: false }); }
+    catch { logger.error({ taskId: options.taskId }, 'Could not deactivate extension run grant; deletion will still be attempted'); }
+    try { await store.retainGatewayTelemetry(token); }
+    catch { logger.warn({ taskId: options.taskId }, 'Could not retain extension gateway telemetry'); }
+    try { await store.database('extension_run_grants').where({ token_hash: extensionTokenHash(token) }).delete(); }
+    catch { logger.error({ taskId: options.taskId }, 'Could not delete extension run grant; durable row remains until expiry'); }
+    try { if (cleanupStaging) await cleanupStaging(); }
+    catch { logger.warn({ taskId: options.taskId }, 'Could not clean extension staging; orphan sweep will retry'); }
   }
 }

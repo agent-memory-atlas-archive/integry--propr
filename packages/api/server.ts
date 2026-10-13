@@ -355,7 +355,7 @@ export function setupRoutes(): void {
   // Register before registerDesktopApiBoundary installs the shared API guard;
   // registration is a no-op unless Fleet control was enabled at startup. The
   // general /api request limiter is mounted at module load, before setupRoutes
-  // runs, so these handlers are rate-limited like every other /api route.
+  // runs, so these handlers are rate-limited; extension MCP calls use a grant-hash bucket.
   registerHostedFleetRoutes(app, {
     operationalStatus: statusRoutes.readStatusSnapshot,
     queueStatus: queueRoutes.collectQueueStats

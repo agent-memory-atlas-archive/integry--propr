@@ -583,3 +583,95 @@ test('startup egress sweep reclaims crashed extension owners and preserves live,
   assert.equal(await fs.readFile(path.join(outside, 'sentinel'), 'utf8'), 'preserve');
   assert.ok((await fs.lstat(path.join(instance, linkName))).isSymbolicLink());
 });
+
+
+test('launch wrapper persists restricted egress authority across preparation and activation', async t => {
+  const { executeWithExtensions, currentExtensionLaunch } = await import('../src/extensions/extensionLaunch.js');
+  const { executeWithNetworkPolicy } = await import('../src/network/egressExecution.js');
+  const { baseEgressAllowlist } = await import('../src/network/egressAllowlist.js');
+  const { database, store } = await fixture(); t.after(() => database.destroy());
+  const profile = await store.save('1', input(), { docs: secret });
+  const policy = { mode: 'restricted' as const, source: 'workflow' as const, allow: ['8.8.8.8', 'docs.example.com'], instanceAllow: ['10.0.0.8'] };
+  const config = { type: 'codex' as const, alias: 'codex-main', id: randomUUID(), enabled: true, dockerImage: 'synthetic', configPath: '/unused', supportedModels: ['synthetic'] };
+  const options = { extensionProfile: select(profile), extensionActorId: '1', taskId: 'restricted-run', issueRef: { repoOwner: 'team', repoName: 'repo', number: 1 }, worktreePath: '/unused', prompt: 'Selected run', githubToken: '' };
+  const result = { success: true, executionTimeMs: 0, modifiedFiles: [], commitMessage: null, logs: '', modelUsed: 'synthetic' };
+  await executeWithNetworkPolicy(policy, () => executeWithExtensions(config, options, async prepared => {
+    const token = prepared.toolPolicy!.mcpServers![0].bearerToken;
+    const readNetwork = async () => JSON.parse((await database('extension_run_grants').where({ token_hash: extensionTokenHash(token) }).first()).network_policy);
+    const expected = { mode: 'restricted', allow: [...baseEgressAllowlist('codex'), ...policy.allow], instanceAllow: policy.instanceAllow };
+    assert.deepEqual(await readNetwork(), expected);
+    await currentExtensionLaunch()!.beforeLaunch();
+    assert.deepEqual(await readNetwork(), expected);
+    assert.deepEqual((await store.grantSnapshot(token)).network, expected);
+    return result;
+  }, store));
+  assert.equal((await database('extension_run_grants')).length, 0);
+});
+
+test('telemetry and grant cleanup failures preserve results and original exceptions', async t => {
+  const { executeWithExtensions, currentExtensionLaunch } = await import('../src/extensions/extensionLaunch.js');
+  const { database, store } = await fixture(); t.after(() => database.destroy());
+  const profile = await store.save('1', input(), { docs: secret });
+  const config = { type: 'claude' as const, alias: 'claude-main', id: randomUUID(), enabled: true, dockerImage: 'synthetic', configPath: '/unused', supportedModels: ['synthetic'] };
+  const options = { extensionProfile: select(profile), extensionActorId: '1', taskId: 'cleanup-run', issueRef: { repoOwner: 'team', repoName: 'repo', number: 1 }, worktreePath: '/unused', prompt: 'Selected run', githubToken: '' };
+  const result = { success: true, executionTimeMs: 0, modifiedFiles: [], commitMessage: null, logs: '', modelUsed: 'synthetic' };
+  t.mock.method(store, 'retainGatewayTelemetry', async () => {
+    const grant = await database('extension_run_grants').first();
+    assert.equal(Boolean(grant.active), false, 'grant authority ends before awaited telemetry');
+    throw new Error('synthetic telemetry database failure');
+  });
+  for (const fails of [false, true]) {
+    const original = new Error('original agent failure');
+    const execution = executeWithExtensions(config, options, async () => {
+      await currentExtensionLaunch()!.beforeLaunch();
+      if (fails) throw original;
+      return result;
+    }, store);
+    if (fails) await assert.rejects(execution, error => error === original);
+    else assert.equal(await execution, result);
+    assert.equal((await database('extension_run_grants')).length, 0);
+  }
+  const failDeletion = (query: { sql: string }) => { if (query.sql.startsWith('delete from `extension_run_grants`') && !query.sql.includes('expires_at')) throw new Error('synthetic deletion failure'); };
+  database.on('query', failDeletion);
+  try {
+    assert.equal(await executeWithExtensions(config, options, async () => { await currentExtensionLaunch()!.beforeLaunch(); return result; }, store), result);
+    assert.equal(Boolean((await database('extension_run_grants').first()).active), false);
+  } finally { database.removeListener('query', failDeletion); }
+});
+
+
+test('gateway reservation cleanup errors preserve responses and capability errors without releasing budget', async t => {
+  const { database, store } = await fixture(); t.after(() => database.destroy());
+  const profile = await store.save('1', input(), { docs: secret });
+  const token = await store.createGrant('1', profile, 'gateway-cleanup');
+  await store.activateGrant(token, '1', select(profile));
+  const failRelease = (query: { sql: string }) => { if (query.sql.includes('`connections` = `connections` -')) throw new Error('synthetic reservation database failure'); };
+  database.on('query', failRelease);
+  try {
+    const response = await extensionGatewayCall(store, token, 'docs', { jsonrpc: '2.0', id: 1, method: 'ping' }, async () => ({ jsonrpc: '2.0', id: 1, result: {} }));
+    assert.deepEqual(response, { jsonrpc: '2.0', id: 1, result: {} });
+    await assert.rejects(extensionGatewayCall(store, token, 'missing', { jsonrpc: '2.0', id: 2, method: 'ping' }), /capability unavailable/);
+    const grant = await database('extension_run_grants').first();
+    assert.equal(grant.connections, 2);
+    assert.equal(grant.bytes, 2 * 1024 * 1024);
+  } finally { database.removeListener('query', failRelease); }
+});
+
+
+test('staging creation preserves its original error when cleanup also fails', async t => {
+  const { createStagingDirectory } = await import('../src/extensions/skillStaging.js');
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'extension-staging-error-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const original = new Error('synthetic staging creation failure');
+  const open = fs.open.bind(fs);
+  t.mock.method(fs, 'open', async (...args: Parameters<typeof fs.open>) => {
+    const handle = await open(...args);
+    if (String(args[0]).endsWith('/' + path.basename(root))) {
+      const close = handle.close.bind(handle);
+      t.mock.method(handle, 'close', async () => { await close(); throw new Error('synthetic close failure'); });
+    }
+    return handle;
+  });
+  t.mock.method(fs, 'mkdtemp', async () => { throw original; });
+  await assert.rejects(createStagingDirectory(root), error => error === original);
+});

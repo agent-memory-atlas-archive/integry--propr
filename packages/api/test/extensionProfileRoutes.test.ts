@@ -2,6 +2,9 @@ import { up as grantMigration } from '../../core/src/db/migrations/2026101322000
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import express from 'express';
+import https from 'node:https';
+import { EventEmitter } from 'node:events';
+import { Readable } from 'node:stream';
 import knex from 'knex';
 import fs from 'node:fs/promises';
 import os from 'node:os';
@@ -82,6 +85,28 @@ test('extension HTTP boundary requires fresh durable administration, preflight J
   for (const projection of [catalogSnapshot, catalogList, catalogHistory]) {
     for (const sentinel of ['API_KEY', 'OPERATOR_DOCS_KEY', 'CATALOG_SECRET_VALUE_SENTINEL', entry.executable, 'CATALOG_ARGUMENT_SENTINEL', 'CATALOG_PATH_SENTINEL', catalogFile]) assert.ok(!JSON.stringify(projection).includes(sentinel), sentinel);
   }
+  // Native restores deliberately remove ciphertext. Both public and authenticated
+  // descriptors must produce connectivity results instead of an unseal error.
+  let validationRequests = 0;
+  t.mock.method(https, 'request', (_url: unknown, options: any, callback: any) => {
+    validationRequests++;
+    assert.equal(options.headers.Authorization, undefined);
+    const request = new EventEmitter() as any;
+    request.end = () => {
+      const response = Object.assign(Readable.from([Buffer.from(JSON.stringify({ jsonrpc: '2.0', id: 1, result: {} }))]), { statusCode: 200, headers: { 'content-type': 'application/json' } });
+      callback(response); response.on('end', () => request.emit('close'));
+    };
+    request.destroy = () => request.emit('close');
+    return request;
+  });
+  for (const authentication of ['none', 'bearer']) {
+    const restored = await store.save('1', { ...input, mcpServers: [{ ...input.mcpServers[0], enabled: true, authentication }] } as any, authentication === 'bearer' ? { synthetic: sentinel } : {});
+    await database('extension_profile_revisions').where({ profile_id: restored.profileId, revision: restored.revision }).update({ secrets_encrypted: '' });
+    const validated = await fetch(base + '/validate', { method: 'POST', headers, body: JSON.stringify({ selection: { instanceId: restored.instanceId, profileId: restored.profileId, revision: restored.revision } }) });
+    assert.equal(validated.status, 200);
+    assert.deepEqual(await validated.json(), { results: [{ name: 'synthetic', reachable: true }] });
+  }
+  assert.equal(validationRequests, 2);
   for (const commit of ['main', 'v1.0', 'a'.repeat(39)]) assert.equal((await fetch(base + '/skills/github', { method: 'POST', headers, body: JSON.stringify({ repository: 'fixture/repo', commit, directory: 'skills/test' }) })).status, 400);
   const selection = { instanceId: profile.instanceId, profileId: profile.profileId, revision: profile.revision };
   assert.equal((await fetch(base + '/delete', { method: 'POST', headers, body: JSON.stringify({ selection: { ...selection, instanceId: randomUUID() } }) })).status, 404);

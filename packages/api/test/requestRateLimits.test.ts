@@ -292,3 +292,22 @@ test('rejects invalid overrides instead of silently disabling protection', () =>
     /must be at most 2147483647/,
   );
 });
+
+
+test('extension gateway quotas are isolated by grant across servers and shared bridge IPs', async () => {
+  const app = express();
+  app.use('/api', createApiRequestRateLimiter({ PROPR_API_RATE_LIMIT_MAX: '2' }));
+  app.post('/api/extensions/mcp/:serverName', (_req, res) => res.json({ ok: true }));
+  app.get('/api/resource', (_req, res) => res.json({ ok: true }));
+  const server = await listenTestApp(app); openServers.push(server.close);
+  const call = (name: string, token?: string) => fetch(`${server.origin}/api/extensions/mcp/${name}`, { method: 'POST', headers: token ? { Authorization: `Bearer ${token}` } : {} });
+  for (const token of ['a'.repeat(43), 'b'.repeat(43)]) {
+    assert.equal((await call('docs', token)).status, 200);
+    assert.equal((await call('other', token)).status, 200);
+    assert.equal((await call('docs', token)).status, 429);
+  }
+  assert.equal((await call('docs')).status, 200);
+  assert.equal((await call('docs', 'malformed')).status, 200);
+  assert.equal((await call('docs')).status, 429);
+  assert.equal((await fetch(`${server.origin}/api/resource`, { headers: { Authorization: `Bearer ${'c'.repeat(43)}` } })).status, 429, 'grant headers on unrelated routes cannot escape IP quota');
+});

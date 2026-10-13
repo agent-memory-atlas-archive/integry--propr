@@ -415,3 +415,18 @@ test('the instance policy read is retried while the settings database is locked,
     }), /disk I\/O error/);
     assert.equal(reads, 1, 'only lock contention is retried');
 });
+
+
+test('an invalid extension staging root cannot abort orphaned socket cleanup', async () => {
+    const sweepRoot = await mkdtemp(path.join(tmpdir(), 'egress-extension-sweep-'));
+    try {
+        await writeFile(path.join(sweepRoot, 'extensions'), 'not a directory');
+        const orphan = path.join(sweepRoot, 'orphan');
+        await mkdir(orphan);
+        const stale = new Date(Date.now() - EGRESS_ORPHAN_MAX_AGE_MS - 60_000);
+        await utimes(orphan, stale, stale);
+        assert.equal((await sweepOrphanedEgressProxies({ root: sweepRoot })).removed, 1);
+        assert.equal(existsSync(orphan), false);
+        assert.equal(await readFile(path.join(sweepRoot, 'extensions'), 'utf8'), 'not a directory');
+    } finally { await rm(sweepRoot, { recursive: true, force: true }); }
+});

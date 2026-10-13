@@ -41,7 +41,7 @@ export interface ExtensionSkillBundle {
 }
 export interface ExtensionProfileRevision extends ExtensionSelection, ExtensionProfileInput {
   createdAt: number; updatedAt: number; auditActor: string;
-  secrets: Record<string, { fields?: string[]; count?: number; configured: boolean }>;
+  secrets: Record<string, { fields: ['bearerToken']; count?: never; configured: boolean } | { count: number; fields?: never; configured: boolean }>;
   skillBundles: ExtensionSkillBundle[];
 }
 export const EXTENSION_PROFILE_CONTRACT = {
@@ -55,7 +55,8 @@ export function publicExtensionProfile(snapshot: ExtensionProfileRevision): Exte
   const secrets = { ...snapshot.secrets };
   for (const server of snapshot.mcpServers ?? []) {
     if (server.kind !== 'catalog' || !secrets[server.name]) continue;
-    const status = secrets[server.name];
+    // Historical stored catalog snapshots can still contain private field names.
+    const status = secrets[server.name] as { count?: number; fields?: string[]; configured: boolean };
     secrets[server.name] = { count: status.count ?? status.fields?.length ?? 0, configured: status.configured };
   }
   return { ...snapshot, secrets };

@@ -30,7 +30,7 @@ export function createExtensionProfileRoutes(store = new ExtensionProfileStore(d
       exact(req, ['selection']); const profile = await store.read(actor, req.body.selection);
       const row = await store.database('extension_profile_revisions').where({ profile_id: profile.profileId, revision: profile.revision }).first();
       const { unsealExtensionSecrets } = await import('../../core/src/extensions/privateSecrets.js');
-      const secrets = unsealExtensionSecrets(row.secrets_encrypted, `${profile.instanceId}/${profile.profileId}/${profile.revision}`, store.environment);
+      const secrets = row.secrets_encrypted === '' ? {} : unsealExtensionSecrets(row.secrets_encrypted, `${profile.instanceId}/${profile.profileId}/${profile.revision}`, store.environment);
       const results = [];
       for (const server of profile.mcpServers.filter(s => s.enabled)) {
         let reachable = false;

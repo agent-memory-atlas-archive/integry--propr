@@ -1,3 +1,4 @@
+import logger from '../utils/logger.js';
 import fs from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import { egressProcessNamespace } from '../network/egressExecution.js';
@@ -87,7 +88,11 @@ export async function createStagingDirectory(root: string): Promise<{ directory:
     if (await fs.realpath(`/proc/self/fd/${parent.fd}`) !== path.resolve(root) || await fs.realpath(`/proc/self/fd/${runHandle.fd}`) !== path.resolve(directory)) throw new ExtensionError(409, 'Staging root replaced during creation');
     await runHandle.chmod(0o755);
     return { directory, cleanup };
-  } catch (error) { await cleanup(); throw error; }
+  } catch (error) {
+    try { await cleanup(); }
+    catch { logger.warn('Could not clean failed extension staging; orphan sweep will retry'); }
+    throw error;
+  }
 }
 export async function stagingValidator(root: string, directory: string, bundles: { id: string; digest: string }[]): Promise<() => Promise<void>> {
   const ancestors = await inspectStagingAncestors(directory);

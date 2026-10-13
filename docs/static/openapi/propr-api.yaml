@@ -3876,7 +3876,7 @@ paths:
   /api/instance/extensions/v1:
     get:
       operationId: listAgentExtensionProfiles
-      summary: List secret-free current extension revisions, the versioned contract and operator catalog identity/digest/secret-field presence.
+      summary: List secret-free current extension revisions, the versioned contract and operator catalog identity/digest, tools/capability and opaque secret count/configuration status.
       description: Requires the `instance.manage_settings` instance permission.
       tags:
         - Configuration

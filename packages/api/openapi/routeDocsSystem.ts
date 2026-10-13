@@ -24,7 +24,7 @@ const MCP_OAUTH = 'Served by the MCP SDK\'s OAuth router at the API origin root,
 
 export const SYSTEM_ROUTE_DOCS: Record<string, RouteDoc> = {
   'GET /api/instance/extensions/v1': {
-    operationId: 'listAgentExtensionProfiles', summary: 'List secret-free current extension revisions, the versioned contract and operator catalog identity/digest/secret-field presence.', tags: ['Configuration'],
+    operationId: 'listAgentExtensionProfiles', summary: 'List secret-free current extension revisions, the versioned contract and operator catalog identity/digest, tools/capability and opaque secret count/configuration status.', tags: ['Configuration'],
     responses: { 200: { description: 'Current durable instance administrators only; works without Connect.', schema: JsonObject } },
   },
   'POST /api/instance/extensions/v1/profiles': {

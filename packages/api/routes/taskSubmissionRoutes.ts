@@ -8,7 +8,7 @@ import type { Request, RequestHandler, Response } from 'express';
 import type { Knex } from 'knex';
 import {
   AttachmentService, AgentRegistry, getAuthenticatedOctokit, loadMonitoredReposRaw,
-  loadPrimaryProcessingLabels, resolvePlanIssueDefaultSelection, safeAddLabel, logger,
+  loadPrimaryProcessingLabels, resolvePlanIssueDefaultSelection, resolveLlmLabel, safeAddLabel, logger,
   insertTaskSubmission, resumeTaskSubmission, completeTodosForIssue, submissionMarker, submissionAssetPath, resolveVisualPreviewUploadToken,
   type MulterFile, type SubmissionAttachment, type SubmissionPayload, type TaskSubmission,
 } from '@propr/core';
@@ -52,7 +52,7 @@ export async function authorizeTaskSubmissionRepository(req: Request, repository
   return config;
 }
 
-export async function routing(body: { agentAlias?: string; model?: string; extensionProfile?: import('@propr/shared').ExtensionSelection | null }, registry = AgentRegistry.getInstance(), labelLookup = getLlmLabel) {
+export async function routing(body: { agentAlias?: string; model?: string; extensionProfile?: import('@propr/shared').ExtensionSelection | null }, registry = AgentRegistry.getInstance(), labelLookup = getLlmLabel, labelResolution = resolveLlmLabel) {
   await registry.ensureInitialized();
   const defaults = !body.agentAlias ? await resolvePlanIssueDefaultSelection() : null;
   const agentAlias = body.agentAlias || defaults?.agent_alias;
@@ -66,6 +66,13 @@ export async function routing(body: { agentAlias?: string; model?: string; exten
   }
   const label = await labelLookup(model, agent.config.alias);
   if (!label) throw Object.assign(new Error('Selected agent/model cannot be routed through GitHub issues'), { status: 400 });
+  if (body.extensionProfile) {
+    // The issue dispatcher resolves the published label, not the submission payload.
+    const resolved = await labelResolution(label.replace(/^llm-/, ''));
+    if (resolved.agentAlias !== agent.config.alias || resolved.model !== model) {
+      throw Object.assign(new Error('Selected extension agent/model cannot be routed exactly through GitHub issues'), { status: 400 });
+    }
+  }
   return { agentAlias: agent.config.alias, model, routingLabel: label };
 }
 

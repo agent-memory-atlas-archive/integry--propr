@@ -9,6 +9,7 @@ it('automation requests send the preflight header only when selecting a profile'
   for (const patch of [{ prompt: 'Edit' }, { extensionProfile: null }, { extensionProfile: selection }]) {
     await updateAutomationDefinition('automation', patch, 1);
     const init = api.fetch.mock.lastCall![1] as RequestInit;
+    expect(new Headers(init.headers).get('Content-Type')).toBe('application/json');
     expect(new Headers(init.headers).get('X-ProPR-Extensions')).toBe('extensionProfile' in patch && patch.extensionProfile ? '1' : null);
   }
 });
