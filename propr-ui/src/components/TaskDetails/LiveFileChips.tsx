@@ -269,22 +269,8 @@ const LiveFileChips: React.FC<LiveFileChipsProps> = ({ taskId, isActive, runNumb
         <p className="mt-1.5 text-[10px] text-slate-500">Most modified first</p>
       )}
 
-      {/* Diff Viewer Overlay */}
       {selectedFile && (
-        <>
-          {/* Semi-transparent backdrop */}
-          <div
-            className="fixed inset-0 bg-black/20 z-40"
-            onClick={() => setSelectedFilePath(null)}
-          />
-          {/* Diff viewer overlay - full width on mobile, adjusted for 30% left pane on desktop */}
-          <div className="fixed top-4 left-4 right-4 bottom-4 lg:top-20 lg:left-[calc(30%+2rem)] z-50 bg-white rounded-lg shadow-2xl border border-gray-200 overflow-hidden">
-            <DiffViewer
-              file={selectedFile}
-              onClose={() => setSelectedFilePath(null)}
-            />
-          </div>
-        </>
+        <DiffViewer file={selectedFile} onClose={() => setSelectedFilePath(null)} />
       )}
     </section>
   );
