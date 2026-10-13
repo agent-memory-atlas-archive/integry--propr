@@ -45,7 +45,7 @@ services:
     restart: unless-stopped
     build:
       context: .
-      dockerfile: Dockerfile.node
+      dockerfile: docker/Dockerfile.node
     init: true
     command: npm run daemon
     extra_hosts:
@@ -75,7 +75,7 @@ services:
     restart: unless-stopped
     build:
       context: .
-      dockerfile: Dockerfile.node
+      dockerfile: docker/Dockerfile.node
     init: true
     ulimits:
       nofile:
@@ -131,7 +131,7 @@ services:
     restart: unless-stopped
     build:
       context: .
-      dockerfile: Dockerfile.node
+      dockerfile: docker/Dockerfile.node
     init: true
     command: npm run indexing-worker
     extra_hosts:
@@ -191,7 +191,7 @@ services:
     restart: unless-stopped
     build:
       context: .
-      dockerfile: Dockerfile.node
+      dockerfile: docker/Dockerfile.node
     init: true
     ulimits:
       nofile:
