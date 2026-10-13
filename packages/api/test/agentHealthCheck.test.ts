@@ -439,3 +439,110 @@ test('health resolver returns during a pending rebuild and does not refresh unre
   }
   assert.equal(recoveries, 1);
 });
+
+
+test('missing base prepares once while the merged resolver probes only a locally available retained runtime', async () => {
+  const { resolveHealthCheckImage } = await import('../routes/agentRoutes.js');
+  for (const runtimePresent of [true, false]) {
+    const runtime = 'propr/runtime-agent:retained';
+    const base = bundleImage([config]);
+    const prepared: string[] = [];
+    const probed: string[] = [];
+    let finish!: () => void;
+    const imageExists = async (image: string) => runtimePresent && image === runtime;
+    const registry = {
+      isImageRecoveryPending: () => true,
+      getAgentById: () => ({ config: { ...config, dockerImage: runtime } }),
+      getOperationalStatus: () => ({ unifiedAgentImage: { status: 'preparing' } }),
+      ensureInitialized: async () => {},
+      recoverImagesAndRefresh: async () => {},
+    } as unknown as import('@propr/core').AgentRegistry;
+    const check = createAgentHealthCheck({
+      loadAgents: async () => [config, { ...config, id: 'sibling' }],
+      imageExists,
+      prepareImage: async image => {
+        prepared.push(image);
+        await new Promise<void>(resolve => { finish = resolve; });
+        throw new Error('Base rebuild failed');
+      },
+      resolveExecutionImage: agent => resolveHealthCheckImage(agent, registry, imageExists),
+      createAgent: agent => ({ analyze: async () => {
+        assert.equal(await imageExists(agent.dockerImage), true);
+        probed.push(agent.dockerImage);
+        return { success: true, response: 'OK' };
+      } }),
+    });
+    const results = await Promise.all([check(config.id), check(config.id), check('sibling')]);
+    assert.ok(results.every(result => result?.status === (runtimePresent ? 'ready' : 'preparing')));
+    await check(config.id);
+    assert.deepEqual(prepared, [base]);
+    assert.deepEqual(probed, runtimePresent ? [runtime, runtime, runtime] : []);
+    finish();
+    await new Promise(resolve => setImmediate(resolve));
+    const afterFailure = await check(config.id);
+    assert.equal(afterFailure?.status, runtimePresent ? 'ready' : 'error');
+    assert.equal(afterFailure?.errorCode, runtimePresent ? undefined : 'preparation_failed');
+    assert.deepEqual(prepared, [base]);
+    if (!runtimePresent) assert.deepEqual(probed, []);
+  }
+});
+
+test('resolved execution images must exist locally even when the base is available', async () => {
+  for (const basePresent of [true, false]) {
+    const check = createAgentHealthCheck({
+      loadAgents: async () => [config],
+      imageExists: async image => basePresent && image === bundleImage([config]),
+      prepareImage: async () => new Promise<void>(() => {}),
+      resolveExecutionImage: async () => ({ image: 'runtime:missing' }),
+      createAgent: () => { throw new Error('Must not execute a missing runtime'); },
+    });
+    const result = await check(config.id);
+    assert.equal(result?.status, basePresent ? 'error' : 'preparing');
+    if (basePresent) assert.match(result?.error ?? '', /unavailable/);
+  }
+});
+
+test('missing-base checks discard shared runtime results after configuration changes', async () => {
+  for (const boundary of ['resolution', 'probe'] as const) {
+    for (const change of ['edit', 'disable', 'delete'] as const) {
+      // Missing runtimes have no probe, so exercise their asynchronous resolution.
+      for (const runtimePresent of boundary === 'probe' ? [true] : [true, false]) {
+        let configured = [config];
+        let finish!: () => void;
+        const prepared: string[] = [];
+        const probedPaths: string[] = [];
+        const edited: AgentConfig = { ...config, configPath: '/updated/credentials',
+          cliVersionType: 'specific', cliVersion: '9.9.9', cliVersionResolved: '9.9.9' };
+        const check = createAgentHealthCheck({
+          loadAgents: async () => configured,
+          imageExists: async image => image === 'runtime:retained' && runtimePresent,
+          prepareImage: async image => { prepared.push(image); await new Promise<void>(() => {}); },
+          resolveExecutionImage: async agent => {
+            if (boundary === 'resolution' && agent.configPath === config.configPath) {
+              await new Promise<void>(resolve => { finish = resolve; });
+            }
+            return runtimePresent ? { image: 'runtime:retained' } : { error: 'Runtime missing' };
+          },
+          createAgent: agent => ({ analyze: async () => {
+            probedPaths.push(agent.configPath);
+            if (boundary === 'probe' && agent.configPath === config.configPath) {
+              await new Promise<void>(resolve => { finish = resolve; });
+            }
+            return { success: true, response: 'OK' };
+          } }),
+        });
+        const initial = check(config.id);
+        const shared = check(config.id);
+        await new Promise(resolve => setImmediate(resolve));
+        configured = change === 'delete' ? [] : [change === 'disable' ? { ...config, enabled: false } : edited];
+        finish();
+        const results = await Promise.all([initial, shared]);
+        const expected = change === 'delete' ? undefined : change === 'disable' ? 'disabled' : runtimePresent ? 'ready' : 'preparing';
+        assert.ok(results.every(result => result?.status === expected));
+        assert.deepEqual(prepared, change === 'edit' ? [bundleImage([config]), bundleImage([edited])] : [bundleImage([config])]);
+        if (change === 'edit' && runtimePresent) assert.equal(probedPaths.at(-1), edited.configPath);
+        if (!runtimePresent) assert.deepEqual(probedPaths, []);
+      }
+    }
+  }
+});
