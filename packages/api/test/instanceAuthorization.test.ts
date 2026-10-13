@@ -10,6 +10,7 @@ import {
     resolveInstanceAuthorization,
     resolveDurableInstanceAuthorization,
     requirePermission,
+    INSTANCE_PERMISSIONS,
     type InstanceAuthorization
 } from '../authorization.js';
 import { configureDemoMode, resetConfiguredDemoMode } from '../demoMode.js';
@@ -32,12 +33,7 @@ const actor: GitHubUser = {
 
 const adminAuthorization: InstanceAuthorization = {
     role: 'admin',
-    permissions: [
-        'instance.manage_agents',
-        'instance.manage_members',
-        'instance.manage_runtime',
-        'instance.manage_settings'
-    ],
+    permissions: [...INSTANCE_PERMISSIONS],
     source: 'local'
 };
 
@@ -359,9 +355,7 @@ describe('instance admin routes', () => {
     test('resolves a GitHub username and creates one durable member assignment', async () => {
         const routes = createAdminRoutes({
             database,
-            services: {
-                resolveGitHubUser: async username => ({ id: '200', username })
-            }
+            services: { resolveGitHubUser: async username => ({ id: '200', username }) }
         });
         const { response, record } = responseRecorder();
 

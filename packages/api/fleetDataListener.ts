@@ -140,7 +140,8 @@ export async function listenFleetData(plane: FleetDataPlane): Promise<FleetDataL
                   const done = (error?: Error) => {
                     res.off('drain', drain); res.off('close', closed);
                     controller.signal.removeEventListener('abort', aborted);
-                    error ? reject(error) : resolve();
+                    if (error) reject(error);
+                    else resolve();
                   };
                   const drain = () => done();
                   const closed = () => done(new Error());
