@@ -10,6 +10,29 @@ import { GeneratedPayloadStorage } from '../src/storage/generatedPayloads.js';
 import { InstanceStorageService } from '../src/storage/service.js';
 const exec = promisify(execFile);
 const signal = () => new AbortController().signal;
+function isNamespacePermissionDenied(error: unknown): boolean {
+  const failure = error as { code?: number | string; stderr?: string; signal?: string };
+  // unshare can be denied before Node starts. Match only its complete setup
+  // diagnostic, so loader errors and assertion failures remain hard failures.
+  return failure.code === 1 && !failure.signal
+    && /^unshare: (?:unshare failed|write failed \/proc\/self\/(?:uid_map|gid_map)): (?:Operation not permitted|Permission denied)\n?$/.test(failure.stderr ?? '');
+}
+test('namespace skips require an explicit setup permission denial', () => {
+  const stderr = 'unshare: write failed /proc/self/uid_map: Operation not permitted\n';
+  assert.equal(isNamespacePermissionDenied({ code: 1, stderr }), true);
+  assert.equal(isNamespacePermissionDenied({ code: 1, stderr: 'unshare: unshare failed: Permission denied\n' }), true);
+  assert.equal(isNamespacePermissionDenied({ code: 1, stderr: stderr.replace('uid_map', 'gid_map') }), true);
+  for (const failure of [
+    { code: 2, stderr },
+    { code: 'ENOENT', stderr },
+    { code: 1, stderr, signal: 'SIGTERM' },
+    { code: 1, stderr: '' },
+    { code: 1, stderr: 'unshare: unshare failed: Invalid argument\n' },
+    { code: 1, stderr: 'Error [ERR_MODULE_NOT_FOUND]: Cannot find package tsx\n' },
+    { code: 1, stderr: 'AssertionError [ERR_ASSERTION]: Operation not permitted\n' },
+    { code: 1, stderr: `AssertionError [ERR_ASSERTION]\n${stderr}` },
+  ]) assert.equal(isNamespacePermissionDenied(failure), false, JSON.stringify(failure));
+});
 async function fixture(t: { after: (fn: () => Promise<void>) => void }) {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'propr-generated-test-'));
   t.after(() => fs.rm(root, { recursive: true, force: true }));
@@ -235,9 +258,9 @@ test('real same-device bind mount is rejected in an isolated mount namespace', a
     assert.equal(await fs.readFile(${JSON.stringify(path.join(outside, 'canary'))}, 'utf8'), 'outside');
   `;
   try {
-    await exec('unshare', ['--user', '--map-root-user', '--mount', process.execPath, '--import', 'tsx', '--input-type=module', '-e', program]);
+    await exec('unshare', ['--user', '--map-root-user', '--mount', process.execPath, '--import', 'tsx', '--input-type=module', '-e', program], { env: { ...process.env, LC_ALL: 'C' } });
   } catch (error) {
-    if ((error as { code?: number }).code !== 77) throw error;
+    if ((error as { code?: number }).code !== 77 && !isNamespacePermissionDenied(error)) throw error;
     t.skip('Requires a bind mount in an isolated user/mount namespace; no host mounts are changed');
   }
 });
