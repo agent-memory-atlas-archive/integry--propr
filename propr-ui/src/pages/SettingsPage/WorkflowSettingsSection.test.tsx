@@ -59,3 +59,23 @@ it('names the ultrafix goal a target review score out of 10', () => {
   expect(screen.getByRole('option', { name: '10/10' })).toBeInTheDocument();
   expect(screen.queryByText('Rating Goal')).toBeNull();
 });
+
+it.each([
+  ['openai/gpt-5.5', 'GPT-5.5'],
+  ['claude-sonnet-9-1-20990101', 'Claude Sonnet 9.1'],
+])('shows a readable unavailable escalation model label for %s while retaining its ID', (modelId, displayName) => {
+  const onEscalationModelsChange = vi.fn();
+  render(<UltrafixSettingsSection
+    settings={{ ...ULTRAFIX_SETTINGS, ultrafix_escalation_enabled: true, ultrafix_escalation_models: [modelId] }}
+    onSettingChange={vi.fn()} modelAgents={[]} onEscalationModelsChange={onEscalationModelsChange}
+  />);
+
+  const modelSelect = screen.getByRole('combobox', { name: 'Escalation model 1' });
+  const option = screen.getByRole('option', { name: `${displayName} (unavailable)` });
+  expect(modelSelect).toHaveValue(modelId);
+  expect(option).toHaveAttribute('value', modelId);
+  expect(screen.queryByText(`${modelId} (unavailable)`)).toBeNull();
+
+  fireEvent.change(modelSelect, { target: { value: modelId } });
+  expect(onEscalationModelsChange).toHaveBeenCalledWith([modelId]);
+});
