@@ -20,7 +20,7 @@ it('locks explicit targets independently of test ids and restores styles and scr
   expect(pane.style.overflow).toBe('auto');
   first.rerender({ open: true });
   const second = renderHook(() => useLockTaskScroll(true));
-  expect(pane.style.overflow).toBe('hidden');
+  expect(getComputedStyle(pane).overflow).toBe('hidden');
   expect(unrelated.style.overflow).toBe('');
   expect(document.body.style.position).toBe('fixed');
   expect(document.body.style.top).toBe('-140px');
@@ -46,4 +46,21 @@ it('releases locks when scrollTo is absent', () => {
   expect(() => unmount()).not.toThrow();
   expect(document.body.style.position).toBe('');
   vi.unstubAllGlobals();
+});
+
+it('locks remounted panes until the last owner releases without overwriting their styles', () => {
+  const first = renderHook(() => useLockTaskScroll(true));
+  const second = renderHook(() => useLockTaskScroll(true));
+  const pane = document.createElement('main');
+  pane.setAttribute('data-scroll-lock-target', '');
+  document.body.append(pane);
+  expect(getComputedStyle(pane).overflow).toBe('hidden');
+  const replacement = pane.cloneNode() as HTMLElement;
+  pane.replaceWith(replacement);
+  first.unmount();
+  expect(getComputedStyle(replacement).overflow).toBe('hidden');
+  replacement.style.overflow = 'scroll';
+  second.unmount();
+  expect(getComputedStyle(replacement).overflow).toBe('scroll');
+  replacement.remove();
 });

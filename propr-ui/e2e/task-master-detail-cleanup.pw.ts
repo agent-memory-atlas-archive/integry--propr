@@ -89,3 +89,23 @@ for (const width of [390, 1584, 1920]) {
     expect(await owner.evaluate(node => node.scrollTop)).toBeGreaterThan(0);
   });
 }
+
+for (const width of [390, 1584]) {
+  test(`reports alternate quota windows at ${width}px`, async ({ page }) => {
+    await page.setViewportSize({ width, height: 1000 });
+    await fixture(page);
+    await page.route(`**/api/task/${selectedRun}/history`, route => route.fulfill({ json: {
+      history: detailsHistory,
+      taskInfo: { title: 'Task master-detail cleanup', type: 'issue', number: 3016, repoOwner: 'integry', repoName: 'propr', modelName: 'gemini-2.5-pro' },
+      usageMetricRecords: [
+        { agent: 'gemini', metricKey: 'Gemini · Weekly Limit Remaining', metricValue: 12 },
+        { agent: 'claude', metricKey: 'weeklySonnet', metricValue: 0 },
+      ],
+    } }));
+    await page.goto(width === 390 ? `/tasks/${selectedRun}` : `/tasks?task=${selectedRun}`);
+    const quota = page.getByTitle('Gemini · Weekly Limit: 12.0% | Sonnet: 0.0%').filter({ visible: true });
+    await expect(quota).toHaveText('(12.0% Gemini · Weekly Limit)');
+    await expect(page.getByText('(no quota data)').filter({ visible: true })).toHaveCount(0);
+    await capture(page, `task-alternate-quota-${width}`);
+  });
+}

@@ -241,6 +241,6 @@ it('marks compact steps that carry additional details, including terminal and eg
     } },
     { state: 'FAILED', timestamp: '2026-09-30T23:52:00Z', metadata: { terminalReason: 'timed_out' } },
   ]} />);
-  expect(screen.getAllByLabelText('Additional step details')).toHaveLength(2);
-  expect(within(screen.getAllByRole('button')[0]).queryByLabelText('Additional step details')).toBeNull();
+  expect(screen.getAllByRole('img', { name: 'Additional step details' })).toHaveLength(2);
+  expect(within(screen.getAllByRole('button')[0]).queryByRole('img', { name: 'Additional step details' })).toBeNull();
 });

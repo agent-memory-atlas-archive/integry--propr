@@ -33,6 +33,10 @@ describe('readableThoughtContent', () => {
     expect(readableThoughtContent('```\nResult: success\n```')).toBe('```\nResult: success\n```');
   });
 
+  it('documents the legacy ambiguity when authored prose starts with Result:', () => {
+    expect(readableThoughtContent('Result: the experiment was inconclusive.')).toBe('the experiment was inconclusive.');
+  });
+
   it('only rewrites thoughts', () => {
     const tool = { type: 'tool_result' as const, content: '[local preview omitted]' };
     const thought = { type: 'thought' as const, content: 'Plain' };

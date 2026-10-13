@@ -1,3 +1,4 @@
+import { version as reactVersion } from 'react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { act, fireEvent, render, screen, within } from '@testing-library/react';
 import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom';
@@ -186,6 +187,8 @@ describe('TaskDetails embedded beside the task list', () => {
 });
 
 it('disconnects timeline observers across keyed task remounts', () => {
+  // observeTimeline returns ref cleanup, a React 19 API.
+  expect(Number(reactVersion.split('.')[0])).toBeGreaterThanOrEqual(19);
   const observers: Array<{ observe: ReturnType<typeof vi.fn>; disconnect: ReturnType<typeof vi.fn> }> = [];
   vi.stubGlobal('ResizeObserver', class {
     observe = vi.fn();
@@ -204,5 +207,41 @@ it('disconnects timeline observers across keyed task remounts', () => {
   expect(second).not.toBe(first);
   unmount();
   expect(second.disconnect).toHaveBeenCalledOnce();
+  vi.unstubAllGlobals();
+});
+
+it('defers timeline positioning changes until the workspace returns to the top', () => {
+  const callbacks: ResizeObserverCallback[] = [];
+  vi.stubGlobal('ResizeObserver', class {
+    observe = vi.fn();
+    disconnect = vi.fn();
+    constructor(callback: ResizeObserverCallback) { callbacks.push(callback); }
+  });
+  const { unmount } = render(<MemoryRouter><TaskDetails taskId="streaming" /></MemoryRouter>);
+  const timeline = screen.getByTestId('task-timeline-scroll');
+  const scroller = screen.getByTestId('task-workspace-scroll');
+  Object.defineProperty(scroller, 'clientHeight', { configurable: true, value: 600 });
+  const resize = (height: number) => {
+    Object.defineProperty(timeline, 'offsetHeight', { configurable: true, value: height });
+    act(() => callbacks.forEach(callback => callback([], {} as ResizeObserver)));
+  };
+  resize(300);
+  expect(timeline.style.getPropertyValue('--timeline-position')).toBe('sticky');
+  scroller.scrollTop = 100;
+  resize(800);
+  expect(timeline.style.getPropertyValue('--timeline-position')).toBe('sticky');
+  scroller.scrollTop = 0;
+  fireEvent.scroll(scroller);
+  expect(timeline.style.getPropertyValue('--timeline-position')).toBe('static');
+  scroller.scrollTop = 100;
+  resize(300);
+  expect(timeline.style.getPropertyValue('--timeline-position')).toBe('static');
+  scroller.scrollTop = 0;
+  fireEvent.scroll(scroller);
+  expect(timeline.style.getPropertyValue('--timeline-position')).toBe('sticky');
+  unmount();
+  timeline.style.removeProperty('--timeline-position');
+  fireEvent.scroll(scroller);
+  expect(timeline.style.getPropertyValue('--timeline-position')).toBe('');
   vi.unstubAllGlobals();
 });

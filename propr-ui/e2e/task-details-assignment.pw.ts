@@ -421,6 +421,9 @@ for (const width of [320, 390]) {
 
 // Mobile emulation does not launch an OS keyboard. This covers a reduced viewport;
 // an Android/iOS device run is still needed for actual visualViewport/IME behavior.
+// Device checklist (pending): iOS Safari and Android Chrome, OS keyboard open;
+// filter/select a user and reach search, results, Save and Cancel without hiding
+// the keyboard. Exercise both dismissal paths and verify background scroll restores.
 test('mobile assignment search, results, Save and Cancel remain reachable in a reduced viewport', async ({ browser }) => {
   const context = await browser.newContext({ isMobile: true, hasTouch: true, viewport: { width: 390, height: 844 } });
   const page = await context.newPage();

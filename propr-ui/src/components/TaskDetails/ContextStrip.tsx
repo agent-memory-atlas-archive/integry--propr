@@ -198,7 +198,7 @@ const UsageMetricsChip: React.FC<{ usageMetricRecords: UsageMetricRecord[] }> = 
   const sessionRecord = findMetricRecord(usageMetricRecords, 'session');
   const weeklyRecord = findMetricRecord(usageMetricRecords, 'weeklyAll') || findMetricRecord(usageMetricRecords, 'weekly');
 
-  if (!sessionRecord && !weeklyRecord) {
+  if (usageMetricRecords.length === 0) {
     return <span className="font-mono text-xs text-slate-500" title="Quota usage has not been reported">(no quota data)</span>;
   }
 
@@ -209,6 +209,11 @@ const UsageMetricsChip: React.FC<{ usageMetricRecords: UsageMetricRecord[] }> = 
   const tooltip = usageMetricRecords
     .map(r => `${humanizeMetricKey(r.metricKey)}: ${r.metricValue.toFixed(1)}%`)
     .join(' | ');
+
+  if (!sessionRecord && !weeklyRecord) {
+    const first = usageMetricRecords[0];
+    return <span className="font-mono text-xs text-slate-500" title={tooltip}>({first.metricValue.toFixed(1)}% {humanizeMetricKey(first.metricKey)})</span>;
+  }
 
   // One quota reads `(0.4% quota)`, its kind in the tooltip; both name theirs.
   const both = Boolean(sessionRecord && weeklyRecord);

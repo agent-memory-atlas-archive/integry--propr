@@ -344,7 +344,7 @@ const StepDisclosure: React.FC<{ label: string; hasDetails: boolean; className: 
         onClick={() => setOpen(value => !value)}
         className={`hidden w-full items-center gap-1 text-left [@container(max-width:527px)]:flex ${className}`}>
         <span className="min-w-0 flex-1 truncate">{label}</span>
-        {hasDetails && <span aria-label="Additional step details" className="font-semibold text-teal-700">•</span>}
+        {hasDetails && <span role="img" aria-label="Additional step details" className="font-semibold text-teal-700">•</span>}
         <span aria-hidden="true">{open ? '−' : '+'}</span>
       </button>
       <div id={id} className={open ? '' : '[@container(max-width:527px)]:hidden'}>

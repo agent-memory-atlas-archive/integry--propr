@@ -1,6 +1,6 @@
 import { render, screen, within } from '@testing-library/react';
 import { describe, expect, it } from 'vitest';
-import ContextStrip from './ContextStrip';
+import ContextStrip, { ConsumptionGroup } from './ContextStrip';
 
 const props = {
   taskInfo: { repoOwner: 'integry', repoName: 'propr', type: 'issue', number: 2658 },
@@ -53,6 +53,30 @@ describe('Task details telemetry', () => {
       { agent: 'codex', metricKey: 'weeklyAll', metricValue: 0 },
     ]} />);
     expect(screen.getByTitle('Usage consumed: Session: 0.0% | Weekly: 0.0%')).toHaveTextContent('(0.0% session, 0.0% weekly)');
+  });
+
+  it.each([
+    ['Gemini · Weekly Limit Remaining', 'Gemini · Weekly Limit'],
+    ['fiveHour', 'Five Hour'],
+    ['weeklySonnet', 'Sonnet'],
+    ['customWindow', 'Custom Window'],
+  ])('shows reported %s quota in desktop and mobile consumption', (metricKey, label) => {
+    const records = [
+      { agent: 'gemini', metricKey, metricValue: 12 },
+      { agent: 'claude', metricKey: 'daily', metricValue: 0 },
+    ];
+    const { rerender } = render(<ContextStrip {...props} usageMetricRecords={records} />);
+    const check = () => {
+      expect(screen.queryByText('(no quota data)')).not.toBeInTheDocument();
+      expect(screen.getByTitle(`${label}: 12.0% | Daily: 0.0%`)).toHaveTextContent(`(12.0% ${label})`);
+    };
+    check();
+    rerender(<ConsumptionGroup usageMetricRecords={records} />);
+    check();
+    rerender(<ConsumptionGroup usageMetricRecords={[{ ...records[0], metricValue: 0 }]} />);
+    expect(screen.getByTitle(`${label}: 0.0%`)).toHaveTextContent(`(0.0% ${label})`);
+    rerender(<ConsumptionGroup usageMetricRecords={[]} />);
+    expect(screen.getByTitle('Quota usage has not been reported')).toBeInTheDocument();
   });
 
   it('keeps a consumption slot before any usage is reported', () => {

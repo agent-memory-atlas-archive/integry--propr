@@ -194,12 +194,20 @@ const TimelineHeading: React.FC<{ runCount: number }> = ({ runCount }) => (
 const observeTimeline = (node: HTMLDivElement | null) => {
   const scroller = node?.parentElement;
   if (!node || !scroller || typeof ResizeObserver === 'undefined') return;
-  const update = () => node.style.setProperty('--timeline-position', node.offsetHeight <= scroller.clientHeight ? 'sticky' : 'static');
+  const update = () => {
+    // Streaming steps must not relocate the timeline while the reader is mid-scroll.
+    if (scroller.scrollTop !== 0) return;
+    node.style.setProperty('--timeline-position', node.offsetHeight <= scroller.clientHeight ? 'sticky' : 'static');
+  };
   const observer = new ResizeObserver(update);
   for (const target of [node, scroller]) observer.observe(target);
   update();
+  scroller.addEventListener('scroll', update, { passive: true });
   // Ref callback cleanup requires the React 19 version pinned by propr-ui.
-  return () => observer.disconnect();
+  return () => {
+    observer.disconnect();
+    scroller.removeEventListener('scroll', update);
+  };
 };
 
 const TaskDetails: React.FC<TaskDetailsProps> = ({ taskId: taskIdProp, embedded = false, onDeleted, runs, revealHistory, onSelectRun, paneControls }) => {
