@@ -255,11 +255,11 @@ const MobileBottomNavigation: React.FC<MobileBottomNavigationProps> = ({
                   </Link>
                 </li>
               ))}
+              <li>
+                <QuickAddTodo layout="inline" disabled={isDemoMode} />
+              </li>
             </ul>
           </nav>
-          <div className="border-t border-slate-100 p-3">
-            <QuickAddTodo layout="inline" disabled={isDemoMode} />
-          </div>
         </BottomSheet>
       )}
 

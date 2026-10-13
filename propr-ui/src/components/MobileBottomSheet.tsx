@@ -19,7 +19,8 @@ interface BottomSheetProps {
 }
 
 // A modal sheet anchored to the bottom bar: focus moves in and is trapped,
-// Escape or the backdrop closes it, and the page behind does not scroll.
+// Escape or the backdrop closes it, and the page behind does not scroll. The
+// bottom padding keeps the last row 20px clear of the home-gesture bar.
 const BottomSheet: React.FC<BottomSheetProps> = ({ id, title, closeLabel, onClose, children }) => {
   const sheetRef = useRef<HTMLDivElement>(null);
 
@@ -76,7 +77,7 @@ const BottomSheet: React.FC<BottomSheetProps> = ({ id, title, closeLabel, onClos
         aria-modal="true"
         aria-labelledby={`${id}-title`}
         tabIndex={-1}
-        className="absolute inset-x-0 bottom-0 max-h-[min(85vh,40rem)] overflow-y-auto rounded-t-2xl bg-white pb-[env(safe-area-inset-bottom)] shadow-2xl"
+        className="absolute inset-x-0 bottom-0 max-h-[min(85vh,40rem)] overflow-y-auto rounded-t-2xl bg-white pb-[calc(1.25rem+env(safe-area-inset-bottom))] shadow-2xl"
       >
         <div className="sticky top-0 z-10 flex items-center border-b border-slate-200 bg-white px-4 py-3">
           <h2 id={`${id}-title`} className="text-base font-semibold text-slate-900">{title}</h2>

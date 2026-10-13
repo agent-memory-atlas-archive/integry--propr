@@ -146,7 +146,8 @@ describe('AgentTankSidebar Antigravity rows', () => {
   it('groups the quota windows under their pool so every row reads in full', async () => {
     await renderSidebar();
 
-    fireEvent.click(providerRow('Antigravity'));
+    // A lone provider opens by default.
+    expect(providerRow('Antigravity')).toHaveAttribute('aria-expanded', 'true');
 
     expect(screen.getByText('Gemini')).toBeInTheDocument();
     expect(screen.getByText('Claude and GPT')).toBeInTheDocument();
@@ -163,8 +164,6 @@ describe('AgentTankSidebar Antigravity rows', () => {
   it('keeps the full window name and reset countdown in the tooltip', async () => {
     await renderSidebar();
 
-    fireEvent.click(providerRow('Antigravity'));
-
     expect(screen.getAllByText('Weekly')[0])
       .toHaveAttribute('title', 'Gemini · Weekly Limit · Resets in 136h 1m');
     expect(screen.getAllByText('5h')[0])
@@ -173,8 +172,6 @@ describe('AgentTankSidebar Antigravity rows', () => {
 
   it('keeps the full window name alone when Agent Tank reports no reset window', async () => {
     await renderSidebar();
-
-    fireEvent.click(providerRow('Antigravity'));
 
     expect(screen.getAllByText('Weekly')[1])
       .toHaveAttribute('title', 'Claude and GPT · Weekly Limit');
@@ -245,6 +242,41 @@ describe('AgentTankSidebar expansion persistence', () => {
     // The corrupt value is replaced, not rethrown, on the next toggle.
     fireEvent.click(providerRow('Claude'));
     expect(storedExpansion()).toEqual(['claude']);
+  });
+
+  it('opens a lone provider by default', async () => {
+    const { codex: _codex, ...agents } = usageResponse().agents!;
+    mockGetAgentTankUsage.mockResolvedValue({ enabled: true, agents });
+
+    await renderSidebar();
+
+    expect(providerRow('Claude')).toHaveAttribute('aria-expanded', 'true');
+    expect(screen.getByText('Fable')).toBeInTheDocument();
+    // The default is only a default: collapsing it is saved and sticks.
+    fireEvent.click(providerRow('Claude'));
+    expect(providerRow('Claude')).toHaveAttribute('aria-expanded', 'false');
+    expect(storedExpansion()).toEqual([]);
+  });
+
+  it('opens every provider in the disclosure layout until a preference is saved', async () => {
+    render(<AgentTankSidebar layout="disclosure" />);
+    await screen.findByTestId('usage-summary');
+
+    expect(providerRow('Claude')).toHaveAttribute('aria-expanded', 'true');
+    expect(providerRow('Codex')).toHaveAttribute('aria-expanded', 'true');
+
+    fireEvent.click(providerRow('Codex'));
+    expect(storedExpansion()).toEqual(['claude']);
+  });
+
+  it('follows the saved sidebar preference in the disclosure layout', async () => {
+    window.localStorage.setItem(EXPANDED_AGENTS_STORAGE_KEY, JSON.stringify(['codex']));
+
+    render(<AgentTankSidebar layout="disclosure" />);
+    await screen.findByTestId('usage-summary');
+
+    expect(providerRow('Claude')).toHaveAttribute('aria-expanded', 'false');
+    expect(providerRow('Codex')).toHaveAttribute('aria-expanded', 'true');
   });
 
   it('keeps toggling when localStorage is unavailable', async () => {

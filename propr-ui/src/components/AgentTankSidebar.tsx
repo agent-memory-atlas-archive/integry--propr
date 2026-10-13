@@ -21,18 +21,19 @@ export const EXPANDED_AGENTS_STORAGE_KEY = 'agent-tank-expanded-agents';
 
 // Storage access throws in private browsing, sandboxed iframes and non-browser
 // renderers, and the stored value can be anything a previous version (or a
-// user) left behind — so both directions fall back to the collapsed default
-// rather than taking the widget down with them.
-function loadExpandedAgents(): Set<string> {
+// user) left behind — so both directions fall back to the default expansion
+// rather than taking the widget down with them. `null` means no preference has
+// been saved yet, which is what lets the default differ by layout.
+function loadExpandedAgents(): Set<string> | null {
   try {
-    if (typeof window === 'undefined' || !window.localStorage) return new Set();
+    if (typeof window === 'undefined' || !window.localStorage) return null;
     const stored = window.localStorage.getItem(EXPANDED_AGENTS_STORAGE_KEY);
-    if (!stored) return new Set();
+    if (!stored) return null;
     const parsed = JSON.parse(stored);
-    if (!Array.isArray(parsed)) return new Set();
+    if (!Array.isArray(parsed)) return null;
     return new Set(parsed.filter((name): name is string => typeof name === 'string'));
   } catch {
-    return new Set();
+    return null;
   }
 }
 
@@ -43,6 +44,16 @@ function saveExpandedAgents(expanded: Set<string>): void {
   } catch {
     // Persistence is a convenience; a storage failure must not break toggling.
   }
+}
+
+// Until someone toggles a provider, a lone provider starts open (there is
+// nothing else to scan past), and so does every provider behind the menu
+// disclosure: opening "API & quota usage" is already the request to see the
+// numbers. Once a preference is saved it is shared with the sidebar.
+function defaultExpansion(agents: AgentUsageData[], layout: 'panel' | 'disclosure'): Set<string> {
+  return layout === 'disclosure' || agents.length === 1
+    ? new Set(agents.map(agent => agent.name))
+    : new Set();
 }
 
 interface MetricRowProps {
@@ -215,7 +226,7 @@ const AgentTankSidebar: React.FC<AgentTankSidebarProps> = ({
   layout = 'panel',
 }) => {
   const [refreshing, setRefreshing] = useState(false);
-  const [expandedAgents, setExpandedAgents] = useState<Set<string>>(() => loadExpandedAgents());
+  const [savedExpansion, setSavedExpansion] = useState<Set<string> | null>(() => loadExpandedAgents());
 
   const { data: usage, error: usageError, isLoading: loading, refreshNow } = useLiveResource<AgentTankUsageResponse>({
     read: signal => getAgentTankUsage({ signal }),
@@ -241,18 +252,6 @@ const AgentTankSidebar: React.FC<AgentTankSidebarProps> = ({
     }
   }, [refreshNow]);
 
-  const toggleAgent = useCallback((agentName: string) => {
-    setExpandedAgents(prev => {
-      const next = new Set(prev);
-      if (next.has(agentName)) {
-        next.delete(agentName);
-      } else {
-        next.add(agentName);
-      }
-      saveExpandedAgents(next);
-      return next;
-    });
-  }, []);
 
   // Don't render if disabled or loading
   if (loading) return null;
@@ -263,6 +262,18 @@ const AgentTankSidebar: React.FC<AgentTankSidebarProps> = ({
     .filter(a => a.usage || a.error)
     .sort((a, b) => getProviderRank(a.name) - getProviderRank(b.name));
   if (agents.length === 0) return null;
+
+  const expandedAgents = savedExpansion ?? defaultExpansion(agents, layout);
+  const toggleAgent = (agentName: string) => {
+    const next = new Set(expandedAgents);
+    if (next.has(agentName)) {
+      next.delete(agentName);
+    } else {
+      next.add(agentName);
+    }
+    saveExpandedAgents(next);
+    setSavedExpansion(next);
+  };
 
   const refreshButton = allowManualRefresh && (
     <button

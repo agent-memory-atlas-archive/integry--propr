@@ -77,6 +77,8 @@ function renderNavigation(
 describe('MobileBottomNavigation', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    // Provider rows persist their expansion; start each test from no preference.
+    window.localStorage.clear();
     mockGetAgentTankUsage.mockResolvedValue({ enabled: false });
     mockRefreshAgentTank.mockResolvedValue({ success: true });
   });
@@ -331,7 +333,7 @@ describe('MobileBottomNavigation', () => {
     expect(screen.queryByTitle('Refresh usage')).not.toBeInTheDocument();
   });
 
-  it('expands and collapses the metric breakdown for an agent with multiple metrics', async () => {
+  it('opens a lone provider with the usage row and still lets it collapse', async () => {
     mockGetAgentTankUsage.mockResolvedValue({
       enabled: true,
       agents: {
@@ -349,12 +351,6 @@ describe('MobileBottomNavigation', () => {
     fireEvent.click(screen.getByRole('button', { name: 'More' }));
 
     const agentRow = await screen.findByRole('button', { name: /Claude/ });
-    expect(agentRow).toHaveAttribute('aria-expanded', 'false');
-    expect(screen.queryByText('Session')).not.toBeInTheDocument();
-    expect(screen.queryByText('Weekly')).not.toBeInTheDocument();
-
-    fireEvent.click(agentRow);
-
     expect(agentRow).toHaveAttribute('aria-expanded', 'true');
     expect(screen.getByText('Session')).toBeInTheDocument();
     expect(screen.getByText('Weekly')).toBeInTheDocument();
@@ -363,5 +359,11 @@ describe('MobileBottomNavigation', () => {
 
     expect(agentRow).toHaveAttribute('aria-expanded', 'false');
     expect(screen.queryByText('Session')).not.toBeInTheDocument();
+    expect(screen.queryByText('Weekly')).not.toBeInTheDocument();
+
+    fireEvent.click(agentRow);
+
+    expect(agentRow).toHaveAttribute('aria-expanded', 'true');
+    expect(screen.getByText('Session')).toBeInTheDocument();
   });
 });
