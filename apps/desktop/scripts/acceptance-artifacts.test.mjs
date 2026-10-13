@@ -1007,7 +1007,8 @@ describe('packaged acceptance artifact contract', () => {
       await assert.rejects(removeOwnedAcceptanceProfileSingletons(profile, options), /socket requires/);
       await rm(join(profile, 'SingletonSocket'));
       await removeOwnedAcceptanceProfileSingletons(profile, options);
-      for (const name of ['SingletonLockExtra', 'SingletonSocketExtra', 'SingletonOther']) {
+      for (const name of ['SingletonLockExtra', 'SingletonSocketExtra', 'SingletonOther',
+        'singletoncookie', 'singletonlock', 'singletonsocket', 'SINGLETONLOCK']) {
         await symlink(`${hostname()}-${pid}`, join(profile, name));
         await removeOwnedAcceptanceProfileSingletons(profile, options);
         await assert.rejects(scanAcceptancePaths([profile]), /symbolic link/);
@@ -1025,15 +1026,11 @@ describe('packaged acceptance artifact contract', () => {
       if (canonicalStats) {
         assert.equal(canonicalStats.dev, variantStats.dev);
         assert.equal(canonicalStats.ino, variantStats.ino);
-        await removeOwnedAcceptanceProfileSingletons(profile, options);
-        await assert.rejects(lstat(caseVariant), { code: 'ENOENT' });
-        await scanAcceptancePaths([profile]);
-      } else {
-        await removeOwnedAcceptanceProfileSingletons(profile, options);
-        assert.equal(await readlink(caseVariant), `${hostname()}-${pid}`);
-        await assert.rejects(scanAcceptancePaths([profile]), /symbolic link/);
-        await rm(caseVariant);
       }
+      await removeOwnedAcceptanceProfileSingletons(profile, options);
+      assert.equal(await readlink(caseVariant), `${hostname()}-${pid}`);
+      await assert.rejects(scanAcceptancePaths([profile]), /symbolic link/);
+      await rm(caseVariant);
       await mkdir(join(profile, 'nested'));
       await symlink(`${hostname()}-${pid}`, join(profile, 'nested', 'SingletonLock'));
       await removeOwnedAcceptanceProfileSingletons(profile, options);
@@ -1053,12 +1050,60 @@ describe('packaged acceptance artifact contract', () => {
     }
   });
 
+  it('preserves case-insensitive singleton aliases on macOS for strict scanning', {
+    skip: process.platform !== 'darwin' ? 'macOS-only case-insensitive filesystem regression' : false,
+  }, async t => {
+    const profile = await mkdtemp(join(tmpdir(), ACCEPTANCE_PROFILE_PREFIX));
+    const targets = { SingletonCookie: '123', SingletonLock: `${hostname()}-12345`,
+      SingletonSocket: '/tmp/scoped_dirABC123/SingletonSocket' };
+    try {
+      for (const [name, target] of Object.entries(targets)) {
+        const alias = join(profile, name.toLowerCase());
+        await symlink(target, alias);
+        const aliasStats = await lstat(alias);
+        const canonicalStats = await lstat(join(profile, name)).catch(error => {
+          if (error.code === 'ENOENT') return undefined;
+          throw error;
+        });
+        if (!canonicalStats) {
+          t.skip('the configured macOS temporary volume is case-sensitive');
+          return;
+        }
+        assert.equal(canonicalStats.dev, aliasStats.dev);
+        assert.equal(canonicalStats.ino, aliasStats.ino);
+        await removeOwnedAcceptanceProfileSingletons(profile, { stoppedChildPid: 12345 });
+        assert.equal(await readlink(alias), target);
+        await assert.rejects(scanAcceptancePaths([profile]), /symbolic link/);
+        await rm(alias);
+      }
+    } finally {
+      await rm(profile, { recursive: true, force: true });
+    }
+  });
+
+  it('does not probe differently spelled singleton entries even when path lookup would alias them', async () => {
+    const source = await readFile(new URL('./acceptance-artifacts.mjs', import.meta.url), 'utf8');
+    const start = source.indexOf('export const removeOwnedAcceptanceProfileSingletons =');
+    const end = source.indexOf('export const prepareAcceptanceArtifactDirectory', start);
+    const cleanup = runInNewContext(source.slice(start, end).replace('export const', 'const') +
+      '; removeOwnedAcceptanceProfileSingletons;', {
+        process: { getuid: () => 1000 }, hostname: () => 'local-host', join,
+        validateAcceptanceLeaf: async () => ({ target: '/tmp/profile',
+          stats: { dev: 1, ino: 2, uid: 1000, mode: 0o40700 } }),
+        readdir: async () => ['singletoncookie', 'singletonlock', 'singletonsocket', 'SingletonOther'],
+        lstat: async () => assert.fail('unrecognized directory entry must not be probed'),
+        readlink: async () => assert.fail('unrecognized link must not be read'),
+        unlink: async () => assert.fail('unrecognized link must not be removed'),
+      });
+    await cleanup('/tmp/profile', { stoppedChildPid: 321 });
+  });
+
   it('rejects changed links and profile identity before unlink, including replacement with the same target', async () => {
     const source = await readFile(new URL('./acceptance-artifacts.mjs', import.meta.url), 'utf8');
     const start = source.indexOf('export const removeOwnedAcceptanceProfileSingletons =');
     const end = source.indexOf('export const prepareAcceptanceArtifactDirectory', start);
     for (const name of ['SingletonCookie', 'SingletonLock', 'SingletonSocket']) {
-      for (const race of ['target', 'inode', 'regular-file', 'owner', 'profile']) {
+      for (const race of ['target', 'inode', 'regular-file', 'owner', 'profile', 'spelling']) {
         for (const phase of [2, 3, 4, 5]) { // Before/after readlink in both validation passes.
           const targets = { SingletonCookie: '123', SingletonLock: 'local-host-321',
             SingletonSocket: '/tmp/scoped_dirABC123/SingletonSocket' };
@@ -1072,6 +1117,8 @@ describe('packaged acceptance artifact contract', () => {
               process: { getuid: () => 1000 }, hostname: () => 'local-host', join, Number, BigInt,
               validateAcceptanceLeaf: async () => ({ target: '/tmp/profile',
                 stats: raced && race === 'profile' ? { ...profileStats, ino: 9 } : profileStats }),
+              readdir: async () => Object.keys(targets).map(entry =>
+                raced && race === 'spelling' && entry === name ? entry.toLowerCase() : entry),
               lstat: async path => {
                 const entry = path.split('/').at(-1);
                 if (!(entry in targets)) throw Object.assign(new Error('missing token'), { code: 'ENOENT' });

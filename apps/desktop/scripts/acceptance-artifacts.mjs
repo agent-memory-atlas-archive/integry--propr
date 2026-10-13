@@ -448,7 +448,11 @@ export const removeOwnedAcceptanceProfileSingletons = async (input, { stoppedChi
   if (!leaf) return;
   const entries = new Map();
   const uid = process.getuid?.();
+  // Path lookup alone accepts differently cased aliases on macOS volumes.
+  // Only actual directory entries with exact allowlisted spelling qualify.
+  const names = new Set(await readdir(leaf.target));
   for (const name of ['SingletonCookie', 'SingletonLock', 'SingletonSocket']) {
+    if (!names.has(name)) continue;
     const path = join(leaf.target, name);
     let stats;
     try { stats = await lstat(path); } catch (error) { if (error?.code === 'ENOENT') continue; throw error; }
@@ -456,7 +460,7 @@ export const removeOwnedAcceptanceProfileSingletons = async (input, { stoppedChi
     if (uid === undefined || leaf.stats.uid !== uid || stats.uid !== uid || (leaf.stats.mode & 0o077) !== 0) {
       throw new Error('Acceptance singleton requires an owned private profile and link');
     }
-    entries.set(name, { path, stats, target: await readlink(path) });
+    entries.set(name, { name, path, stats, target: await readlink(path) });
   }
   const cookie = entries.get('SingletonCookie');
   if (cookie && (!/^(0|[1-9][0-9]{0,19})$/.test(cookie.target) || BigInt(cookie.target) > 18446744073709551615n)) {
@@ -490,8 +494,10 @@ export const removeOwnedAcceptanceProfileSingletons = async (input, { stoppedChi
     const target = await readlink(entry.path);
     const afterRead = await lstat(entry.path);
     const currentProfile = await validateAcceptanceLeaf(input, { kind: 'profile' });
+    const currentNames = currentProfile ? await readdir(currentProfile.target) : [];
     if (!currentProfile || currentProfile.stats.dev !== leaf.stats.dev || currentProfile.stats.ino !== leaf.stats.ino ||
         currentProfile.stats.uid !== uid || (currentProfile.stats.mode & 0o077) !== 0 ||
+        !currentNames.includes(entry.name) ||
         !sameEntry(current, entry.stats) || !sameEntry(afterRead, entry.stats) || target !== entry.target) {
       throw new Error('Acceptance singleton changed during cleanup');
     }
