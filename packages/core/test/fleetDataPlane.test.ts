@@ -15,14 +15,14 @@ import { contractPin, digest, parseEnvelope } from '../src/fleet/contract.js';
 import { InstanceStorageService } from '../src/storage/service.js';
 import { StorageLifecycle } from '../src/storage/lifecycle.js';
 import { auditRepository, repositoryIdentity, repositoryMetadataFingerprint } from '../src/storage/repositorySafety.js';
-import { listenFleetData } from '../../api/fleetDataListener.js';
+import { listenFleetData, startConfiguredFleetData } from '../../api/fleetDataListener.js';
 const SQLite = createRequire(import.meta.url)('better-sqlite3');
 const exec = promisify(execFile);
 const git = async (cwd: string, ...args: string[]) => exec('git', ['-c', 'core.hooksPath=/dev/null', '-C', cwd, ...args], { env: { ...process.env, GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null', GIT_AUTHOR_NAME: 'Fleet Test', GIT_AUTHOR_EMAIL: 'test@example.invalid', GIT_COMMITTER_NAME: 'Fleet Test', GIT_COMMITTER_EMAIL: 'test@example.invalid' } });
 
 async function fixture(t: test.TestContext, repository = false) {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'fleet-'));
-  const control = path.join(root, 'fleet'); await fs.mkdir(control, { mode: 0o700 });
+  const control = path.join(root, 'fleet-data-control'); await fs.mkdir(control, { mode: 0o700 });
   let secret = 'fleet-secret-canary-'.repeat(3);
   const authority = { hostedInstanceId: 'hosted-tenant-a', placementGeneration: 'placement-7', scope: 'hosted_customer_data', secretSha256: createHash('sha256').update(secret).digest('hex') };
   const writeAuthority = async () => fs.writeFile(path.join(control, 'authority.json'), JSON.stringify(authority), { mode: 0o600 });
@@ -499,6 +499,56 @@ for (const substitution of ['file', 'symlink', 'socket', 'root'] as const) {
     assert.ok(substitution === 'symlink' ? stat.isSymbolicLink() : substitution === 'socket' ? stat.isSocket() : stat.isFile());
   });
 }
+
+test('configured startup rejects a live overlapping listener and succeeds after it exits', async t => {
+  const f = await fixture(t);
+  const previousDataDir = process.env.DATA_DIR;
+  const previousSecret = process.env.PROPR_FLEET_CONTROL_SECRET;
+  process.env.DATA_DIR = f.root;
+  process.env.PROPR_FLEET_CONTROL_SECRET = f.secret;
+  t.after(() => {
+    if (previousDataDir === undefined) delete process.env.DATA_DIR;
+    else process.env.DATA_DIR = previousDataDir;
+    if (previousSecret === undefined) delete process.env.PROPR_FLEET_CONTROL_SECRET;
+    else process.env.PROPR_FLEET_CONTROL_SECRET = previousSecret;
+  });
+  const oldSocket = f.server.address()!;
+  const oldIdentity = await fs.lstat(oldSocket);
+  const next = await f.restart();
+  const nextRuntime = await next.runtime();
+  assert.notEqual(nextRuntime.runtimeGeneration, f.runtime.runtimeGeneration);
+  await assert.rejects(startConfiguredFleetData(next.storage), /Fleet listener already active/);
+  const preserved = await fs.lstat(oldSocket);
+  assert.equal(preserved.dev, oldIdentity.dev);
+  assert.equal(preserved.ino, oldIdentity.ino);
+  assert.deepEqual((await fs.readdir(f.control)).filter(name => name.endsWith('.sock')), [path.basename(oldSocket)]);
+  // The old listener still accepts connections, but its generation is fenced.
+  assert.equal((await f.http(f.sign({ action: 'repositories.list' }))).status, 403);
+  await f.server.shutdown();
+  const listener = await startConfiguredFleetData(next.storage);
+  assert.ok(listener);
+  t.after(() => listener.shutdown());
+  assert.notEqual(listener.address(), oldSocket);
+  assert.deepEqual((await fs.readdir(f.control)).filter(name => name.endsWith('.sock')), [path.basename(listener.address()!)]);
+  const response = await new Promise<number>((resolve, reject) => {
+    const req = request({ socketPath: listener.address()!, path: '/v1/invoke', method: 'POST', headers: { 'Content-Type': 'application/json' } }, res => {
+      res.resume(); res.on('end', () => resolve(res.statusCode!));
+    });
+    req.on('error', reject);
+    req.end(f.sign({ action: 'repositories.list' }, nextRuntime));
+  });
+  assert.equal(response, 200);
+  await listener.shutdown();
+
+  // Production must propagate that rejection before opening readiness/customer HTTP.
+  const source = await fs.readFile(path.resolve('packages/api/server.ts'), 'utf8');
+  assert.match(source, /fleetDataListener = demoMode \? Promise.resolve\(undefined\) : startConfiguredFleetData\(storageService\);/);
+  const setup = source.indexOf('    setupRoutes();');
+  const gate = source.indexOf('try { await fleetDataListener; }', setup);
+  assert.ok(gate > setup && gate < source.indexOf('httpServer.listen(PORT'));
+  assert.match(source.slice(gate), /Configured Fleet data listener failed to start; refusing API readiness/);
+  assert.match(source.slice(gate), /console.error\('Failed to start server:', error\);\s+process.exit\(1\)/);
+});
 
 test('restart removes crashed stale sockets but refuses live or unsafe entries', async t => {
   const f = await fixture(t); await f.server.shutdown();

@@ -4,7 +4,7 @@ import path from 'node:path';
 import { createServer } from 'node:http';
 import { Transform } from 'node:stream';
 import { connect, type Socket, type Server as UnixServer } from 'node:net';
-import { fork } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import type { Stats } from 'node:fs';
 import { pipeline } from 'node:stream/promises';
 import { FleetDataPlane } from '../core/src/fleet/dataPlane.js';
@@ -56,6 +56,7 @@ async function removeStaleSockets(plane: FleetDataPlane) {
 /** Receive an already-bound Unix descriptor. The receiving libuv handle has no
  * bind pathname, so close() cannot blindly unlink a substituted filesystem entry.
  * The short-lived binder exits without close(); all unlinking belongs to us.
+ * Use Node's documented --eval invocation with an IPC stdio channel for send().
  * Fixed Node code, no shell and no externally supplied command or path. */
 async function bindUnix(socket: string): Promise<{ server: UnixServer; identity: Pick<Stats, 'dev' | 'ino'> }> {
   const code = `process.umask(0o177);
@@ -65,7 +66,7 @@ async function bindUnix(socket: string): Promise<{ server: UnixServer; identity:
       process.send({ dev, ino }, server, { keepOpen: true }, error => process.exit(error ? 1 : 0));
     });`;
   return new Promise((resolve, reject) => {
-    const binder = fork('-e', [code, socket], { execArgv: [], stdio: ['ignore', 'ignore', 'ignore', 'ipc'] });
+    const binder = spawn(process.execPath, ['--eval', code, '--', socket], { stdio: ['ignore', 'ignore', 'ignore', 'ipc'] });
     let handle: UnixServer | undefined;
     let identity: Pick<Stats, 'dev' | 'ino'> | undefined;
     const timeout = setTimeout(() => { binder.kill('SIGKILL'); }, 5000);

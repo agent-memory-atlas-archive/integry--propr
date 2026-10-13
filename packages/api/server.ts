@@ -423,10 +423,7 @@ function setupRoutes(): void {
   const storageService = createDefaultStorageService();
   const storageRoutes = createInstanceStorageRoutes(storageService);
   // Management-only Unix transport; no customer/tunnel route is registered.
-  fleetDataListener = demoMode ? Promise.resolve(undefined) : startConfiguredFleetData(storageService).catch(() => {
-    console.warn('Fleet data listener unavailable');
-    return undefined;
-  });
+  fleetDataListener = demoMode ? Promise.resolve(undefined) : startConfiguredFleetData(storageService);
   // Background work is bounded/coalesced; no startup deletion or live-data scan.
   const storageSweep = setInterval(() => {
     void storageService.sweep().catch(() => undefined);
@@ -665,6 +662,13 @@ async function start(): Promise<void> {
       }
     }
     setupRoutes();
+    // Configured Fleet transport is required for readiness. In a rolling overlap,
+    // fail startup and let the supervisor restart after the old listener exits.
+    // Await immediately so startup failures cannot become unhandled rejections.
+    try { await fleetDataListener; }
+    catch (error) {
+      throw new Error('Configured Fleet data listener failed to start; refusing API readiness', { cause: error });
+    }
     if (!demoMode) {
       await desktopAuthService.cleanupPairings();
       desktopPairingCleanupTimer = setInterval(() => {
