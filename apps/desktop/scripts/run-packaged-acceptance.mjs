@@ -34,6 +34,7 @@ import {
   prepareAcceptanceArtifactDirectory,
   readPngDimensions,
   safeRemoveAcceptanceLeaf,
+  removeOwnedAcceptanceProfileCookie,
   sanitizeAcceptanceTrace,
   scanAcceptancePaths,
   screenshotName,
@@ -830,11 +831,19 @@ const launchApplication = async (scenario, initialDeepLink, retainedProfile) => 
     cleaned = true;
     const failures = [];
     if (browser) await browser.close().catch(error => failures.push(error));
-    if (child && childClosed) await terminateProcessTree(child, childClosed).catch(error => failures.push(error));
+    let stopped = !child;
+    if (child && childClosed) {
+      try {
+        await terminateProcessTree(child, childClosed);
+        if (child.exitCode === null && child.signalCode === null) throw new Error('Acceptance child has not stopped');
+        stopped = true;
+      } catch (error) { failures.push(error); }
+    }
+    if (stopped) await removeOwnedAcceptanceProfileCookie(userData).catch(error => failures.push(error));
     await scanAcceptancePaths([userData], SENTINELS).catch(error => failures.push(error));
     surfaces.push({ kind: 'packaged-process-output', journey: activeJourney, value: output });
     processRecords.push({ journey: activeJourney, source: 'packaged-process', level: 'combined', bytes: Buffer.byteLength(output), sha256: digest(output) });
-    if (!preserveProfile) await safeRemoveAcceptanceLeaf(userData, { kind: 'profile' }).catch(error => failures.push(error));
+    if (stopped && !preserveProfile) await safeRemoveAcceptanceLeaf(userData, { kind: 'profile' }).catch(error => failures.push(error));
     if (failures.length) throw new AggregateError(failures, 'Packaged acceptance cleanup failed');
   };
 

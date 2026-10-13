@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
-import { lstat, mkdir, readFile, readdir, realpath, rm, writeFile } from 'node:fs/promises';
+import { lstat, mkdir, readFile, readdir, readlink, realpath, rm, unlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { basename, dirname, isAbsolute, join, parse, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -403,7 +403,7 @@ const allowedCleanup = (kind, allowedWorkspaceParents) => {
   throw new Error('Unknown acceptance cleanup kind');
 };
 
-export const safeRemoveAcceptanceLeaf = async (input, { kind = 'artifact', allowedWorkspaceParents } = {}) => {
+const validateAcceptanceLeaf = async (input, { kind = 'artifact', allowedWorkspaceParents } = {}) => {
   if (!isAbsolute(input)) throw new Error('Acceptance cleanup requires an absolute path');
   const target = resolve(input);
   const policy = allowedCleanup(kind, allowedWorkspaceParents);
@@ -430,7 +430,44 @@ export const safeRemoveAcceptanceLeaf = async (input, { kind = 'artifact', allow
   let stats;
   try { stats = await lstat(target); } catch (error) { if (error?.code === 'ENOENT') return; throw error; }
   if (stats.isSymbolicLink() || !stats.isDirectory()) throw new Error('Acceptance cleanup target must be a non-link directory');
-  await rm(target, { recursive: true, force: false });
+  return { target, stats };
+};
+
+export const safeRemoveAcceptanceLeaf = async (input, options = {}) => {
+  const leaf = await validateAcceptanceLeaf(input, options);
+  if (leaf) await rm(leaf.target, { recursive: true, force: false });
+};
+
+// Call only after the profile's child has stopped. Chromium stores a random
+// uint64 token as a dangling symlink, not a file path:
+// chrome/browser/process_singleton_posix.cc, GenerateCookie()/Create().
+// This exception belongs only to the private test profile, never to artifacts.
+export const removeOwnedAcceptanceProfileCookie = async input => {
+  const leaf = await validateAcceptanceLeaf(input, { kind: 'profile' });
+  if (!leaf) return;
+  const cookie = join(leaf.target, 'SingletonCookie');
+  let stats;
+  try { stats = await lstat(cookie); } catch (error) { if (error?.code === 'ENOENT') return; throw error; }
+  if (!stats.isSymbolicLink()) return; // Regular files still undergo secret scanning.
+  const uid = process.getuid?.();
+  if (uid === undefined || leaf.stats.uid !== uid || stats.uid !== uid || (leaf.stats.mode & 0o077) !== 0) {
+    throw new Error('Acceptance singleton cookie requires an owned private profile and link');
+  }
+  const token = await readlink(cookie);
+  if (!/^(0|[1-9][0-9]{0,19})$/.test(token) || BigInt(token) > 18446744073709551615n) {
+    throw new Error('Acceptance singleton cookie target is not a Chromium uint64 token');
+  }
+  // A valid cookie is dangling. Never allow the numeric token to hide a file
+  // or another link (including one that escapes the profile).
+  try {
+    await lstat(join(leaf.target, token));
+    throw new Error('Acceptance singleton cookie target must be absent inside the profile');
+  } catch (error) { if (error?.code !== 'ENOENT') throw error; }
+  const current = await lstat(cookie);
+  if (current.dev !== stats.dev || current.ino !== stats.ino || await readlink(cookie) !== token) {
+    throw new Error('Acceptance singleton cookie changed during cleanup');
+  }
+  await unlink(cookie); // Unlink the owned entry; never follow or delete its target.
 };
 
 export const prepareAcceptanceArtifactDirectory = async outputDirectory => {

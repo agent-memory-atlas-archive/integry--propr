@@ -1,7 +1,7 @@
 import { SETUP_ACTIONS, setupPhase } from './packaged-acceptance-setup.mjs';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { mkdtemp, mkdir, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises';
+import { chmod, mkdtemp, mkdir, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { describe, it } from 'node:test';
@@ -9,6 +9,8 @@ import { inflateRawSync } from 'node:zlib';
 import { runInNewContext } from 'node:vm';
 import {
   ACCEPTANCE_ARTIFACT_LEAF,
+  ACCEPTANCE_PROFILE_PREFIX,
+  removeOwnedAcceptanceProfileCookie,
   ACCEPTANCE_JOURNEYS,
   CSP_SOCKET_JOURNEYS,
   INSTALLED_SOCKET_JOURNEYS,
@@ -892,6 +894,54 @@ describe('packaged acceptance artifact contract', () => {
         /non-link directory/,
       );
     } finally { await rm(parent, { recursive: true, force: true }); }
+  });
+
+  it('confines the singleton exception to an owned private profile root with a dangling uint64 target', {
+    skip: process.platform === 'win32' ? 'POSIX singleton regression' : false,
+  }, async () => {
+    const profile = await mkdtemp(join(tmpdir(), ACCEPTANCE_PROFILE_PREFIX));
+    const outside = await mkdtemp(join(tmpdir(), 'propr-cookie-escape-'));
+    try {
+      const cookie = join(profile, 'SingletonCookie');
+      for (const target of [join(outside, 'outside'), '../outside', '18446744073709551616', '01', 'not-a-cookie']) {
+        await symlink(target, cookie);
+        await assert.rejects(removeOwnedAcceptanceProfileCookie(profile), /uint64 token/);
+        await assert.rejects(scanAcceptancePaths([profile]), /symbolic link/);
+        await rm(cookie);
+      }
+      await symlink('123', cookie);
+      await chmod(profile, 0o755);
+      await assert.rejects(removeOwnedAcceptanceProfileCookie(profile), /owned private profile/);
+      await chmod(profile, 0o700);
+      await rm(cookie);
+      const alias = join(outside, 'profile-alias');
+      await symlink(profile, alias);
+      await assert.rejects(removeOwnedAcceptanceProfileCookie(alias), /allowlisted leaf/);
+      await writeFile(join(profile, '123'), 'regular target');
+      await symlink('123', cookie);
+      await assert.rejects(removeOwnedAcceptanceProfileCookie(profile), /target must be absent/);
+      await rm(cookie);
+      await rm(join(profile, '123'));
+      await symlink(outside, join(profile, '123'));
+      await symlink('123', cookie);
+      await assert.rejects(removeOwnedAcceptanceProfileCookie(profile), /target must be absent/);
+      await rm(cookie);
+      await rm(join(profile, '123'));
+      await mkdir(join(profile, 'nested'));
+      await symlink('123', join(profile, 'nested', 'SingletonCookie'));
+      await removeOwnedAcceptanceProfileCookie(profile);
+      await assert.rejects(scanAcceptancePaths([profile]), /symbolic link/);
+      await symlink('123', join(outside, 'SingletonCookie'));
+      await assert.rejects(removeOwnedAcceptanceProfileCookie(outside), /allowlisted leaf/);
+      await assert.rejects(scanAcceptancePaths([outside]), /symbolic link/);
+      await writeFile(cookie, 'secret-cookie-sentinel');
+      await removeOwnedAcceptanceProfileCookie(profile);
+      await rm(join(profile, 'nested'), { recursive: true });
+      await assert.rejects(scanAcceptancePaths([profile], ['secret-cookie-sentinel']), /Secret sentinel/);
+    } finally {
+      await rm(profile, { recursive: true, force: true });
+      await rm(outside, { recursive: true, force: true });
+    }
   });
 
   it('authorizes the standard macOS temporary-directory alias by canonical parent identity', {
