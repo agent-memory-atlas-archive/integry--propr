@@ -165,7 +165,7 @@ const RepositoryReport: React.FC = () => {
               const percentage = totalModelCount > 0 ? (count / totalModelCount) * 100 : 0;
               return (
                 <div
-                  key={formatModelName(modelId)}
+                  key={modelId}
                   className="flex items-center gap-3 py-2.5 px-3 rounded-lg transition-colors duration-150 hover:bg-white hover:shadow-sm cursor-default group"
                 >
                   {/* Model Icon */}
