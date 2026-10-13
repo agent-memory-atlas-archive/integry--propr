@@ -77,6 +77,78 @@ test('a task is a pull request with every run on it, as the task list groups the
   assert.equal(summary.dailyCounts.find(day => day.count > 0)?.date, daysAgo(3).slice(0, 10));
 });
 
+for (const source of ['column', 'job', 'result'] as const) {
+  test(`task links from before the period survive when the PR comes from ${source}`, async () => {
+    await seedTask(database, { taskId: 'old-link', issueNumber: 7, prNumber: source === 'column' ? 70 : null,
+      states: [{ state: 'failed', timestamp: daysAgo(10) }] });
+    await database('tasks').where({ task_id: 'old-link' }).update({
+      initial_job_data: JSON.stringify({ issueNumber: 7, ...(source === 'job' ? { pullRequestNumber: 70 } : {}) }),
+      final_result: source === 'result' ? JSON.stringify({ postProcessing: { pr: { number: 70 } } }) : null,
+    });
+    await seedTask(database, { taskId: 'attempt', issueNumber: 7, states: [{ state: 'queued', timestamp: daysAgo(7) }] });
+    await seedTask(database, { taskId: 'review', issueNumber: 70, taskType: 'pr-comment',
+      states: [{ state: 'completed', timestamp: daysAgo(1) }] });
+    await database('tasks').where({ task_id: 'review' }).update({ initial_job_data: JSON.stringify({ pullRequestNumber: 70 }) });
+    await seedTask(database, { taskId: 'other-repo', repository: 'integry/other', issueNumber: 7,
+      states: [{ state: 'queued', timestamp: daysAgo(2) }] });
+    await database('llm_executions').insert([
+      { task_id: 'old-link', start_time: daysAgo(10) },
+      { task_id: 'attempt', start_time: daysAgo(7) },
+      { task_id: 'review', start_time: daysAgo(1) },
+    ]);
+
+    assert.deepEqual(await loadRunVolume(database, WEEK), { total: 2, tasks: 2, per_task: 1 });
+    const summary = await loadTaskSummary(database, WEEK, 'integry/propr');
+    assert.deepEqual({ total: summary.total, completed: summary.completed, failed: summary.failed },
+      { total: 1, completed: 1, failed: 0 });
+    assert.deepEqual(summary.dailyCounts.filter(day => day.count), [{ date: daysAgo(7).slice(0, 10), count: 1 }]);
+    assert.equal((await loadTaskSummary(database, WEEK)).total, 2);
+    assert.equal((await loadTaskSummary(database, WEEK, 'integry/other')).total, 1);
+    assert.equal((await loadTaskSummary(database, WEEK, 'integry/propr', { dailySince: new Date(daysAgo(2)) })).dailyCounts.reduce((sum, day) => sum + day.count, 0), 0);
+
+    // With only issue runs in the window, earlier linkage still supplies identity,
+    // but the old failure must never become this period's outcome.
+    const beforeReview = { ...WEEK, to: new Date(daysAgo(1)), toExclusive: true };
+    const earlier = await loadTaskSummary(database, beforeReview, 'integry/propr');
+    assert.deepEqual({ total: earlier.total, completed: earlier.completed, failed: earlier.failed },
+      { total: 1, completed: 0, failed: 0 });
+    assert.deepEqual(await loadRunVolume(database, beforeReview), { total: 1, tasks: 2, per_task: 0.5 });
+    await database('tasks').where({ task_id: 'other-repo' }).del();
+    assert.deepEqual(await loadRunVolume(database, WEEK), { total: 2, tasks: 1, per_task: 2 });
+  });
+}
+
+test('historical links preserve a shared PR identity even without a PR run in the period', async () => {
+  for (const issueNumber of [7, 8]) {
+    await seedTask(database, { taskId: `link-${issueNumber}`, issueNumber, prNumber: 70,
+      states: [{ state: 'completed', timestamp: daysAgo(10) }] });
+    await database('tasks').where({ task_id: `link-${issueNumber}` }).update({ initial_job_data: JSON.stringify({ issueNumber }) });
+    await seedTask(database, { taskId: `attempt-${issueNumber}`, issueNumber,
+      states: [{ state: 'failed', timestamp: daysAgo(issueNumber === 7 ? 3 : 1) }] });
+  }
+  const summary = await loadTaskSummary(database, WEEK);
+  assert.deepEqual({ total: summary.total, completed: summary.completed, failed: summary.failed }, { total: 1, completed: 0, failed: 1 });
+  assert.deepEqual(summary.dailyCounts.filter(day => day.count), [{ date: daysAgo(3).slice(0, 10), count: 1 }]);
+  assert.deepEqual(await loadRunVolume(database, WEEK), { total: 0, tasks: 1, per_task: 0 });
+});
+
+test('historical linkage excludes goals and does not cross the upper period boundary', async () => {
+  for (const [taskId, days, taskType] of [['old-goal', 10, 'goal'], ['future-link', 0, 'issue']] as const) {
+    await seedTask(database, { taskId, issueNumber: 7, prNumber: 70, taskType,
+      states: [{ state: 'failed', timestamp: daysAgo(days) }] });
+    await database('tasks').where({ task_id: taskId }).update({ initial_job_data: JSON.stringify({ issueNumber: 7 }) });
+  }
+  await seedTask(database, { taskId: 'attempt', issueNumber: 7, states: [{ state: 'queued', timestamp: daysAgo(3) }] });
+  await seedTask(database, { taskId: 'review', issueNumber: 70, prNumber: 70, states: [{ state: 'completed', timestamp: daysAgo(1) }] });
+  const window = { ...WEEK, toExclusive: true };
+  const summary = await loadTaskSummary(database, window);
+  assert.deepEqual({ total: summary.total, completed: summary.completed, failed: summary.failed }, { total: 2, completed: 1, failed: 0 });
+  assert.deepEqual(await loadRunVolume(database, window), { total: 0, tasks: 2, per_task: 0 });
+  assert.deepEqual(summary.dailyCounts.filter(day => day.count), [
+    { date: daysAgo(3).slice(0, 10), count: 1 }, { date: daysAgo(1).slice(0, 10), count: 1 },
+  ]);
+});
+
 test('cache usage reports the hit rate over the whole prompt and what cached reads saved at known prices', async () => {
   // Rows as `recordLLMMetrics` persists them: `input_tokens` is the whole
   // prompt, cache writes and reads included, beside the separate cache counts.

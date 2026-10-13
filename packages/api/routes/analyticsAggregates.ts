@@ -81,34 +81,34 @@ const positiveNumber = (value: unknown): number | null => {
  * a task of its own. Rows arrive oldest first, so each group's first row is
  * the task's first run.
  */
-export function groupTaskRuns<T extends TaskRunRow>(rows: T[]): Map<string, T[]> {
+export function groupTaskRuns<T extends TaskRunRow>(rows: T[], linkageRows: TaskRunRow[] = rows): Map<string, T[]> {
   const groups = new Map<string, T[]>();
   const issueToPullRequest = new Map<string, string>();
-  for (const row of rows) {
+  // Linkage can precede the counted runs. It establishes identity only;
+  // these rows must not contribute outcomes or first-run buckets.
+  for (const row of linkageRows) {
     const repository = row.repository || 'unknown/unknown';
     const prNumber = positiveNumber(row.pr_number) ?? positiveNumber(row.job_pr_number) ?? positiveNumber(row.result_pr_number);
     const linkedIssue = positiveNumber(row.job_issue_number);
-    const issueNumber = positiveNumber(row.issue_number);
     if (prNumber && linkedIssue) issueToPullRequest.set(`${repository}-issue-${linkedIssue}`, `${repository}-pr-${prNumber}`);
+  }
+  for (const row of rows) {
+    const repository = row.repository || 'unknown/unknown';
+    const prNumber = positiveNumber(row.pr_number) ?? positiveNumber(row.job_pr_number) ?? positiveNumber(row.result_pr_number);
+    const issueNumber = positiveNumber(row.issue_number);
+    const issueKey = `${repository}-issue-${issueNumber}`;
     const key = prNumber ? `${repository}-pr-${prNumber}`
-      : issueNumber ? `${repository}-issue-${issueNumber}`
+      : issueNumber ? issueToPullRequest.get(issueKey) ?? issueKey
       : row.task_id;
     groups.set(key, [...(groups.get(key) ?? []), row]);
-  }
-  for (const [issueKey, prKey] of issueToPullRequest) {
-    const issueRuns = groups.get(issueKey);
-    const prRuns = groups.get(prKey);
-    if (!issueRuns || !prRuns) continue;
-    groups.set(prKey, [...prRuns, ...issueRuns].sort((left, right) => String(left.created_at).localeCompare(String(right.created_at))));
-    groups.delete(issueKey);
   }
   return groups;
 }
 
-/** The runs created in the window, goal tasks aside, oldest first, with what `groupTaskRuns` reads. */
+/** Counted runs and their linkage metadata, goal tasks aside, oldest first. */
 async function loadTaskRuns(
   db: Knex, window: AnalyticsWindow | null, repository: string, bucketKey?: string,
-): Promise<TaskRunRow[]> {
+): Promise<{ runs: TaskRunRow[]; linkageRows: TaskRunRow[] }> {
   const [hasJobData, hasFinalResult] = await Promise.all([
     hasColumn(db, 'tasks', 'initial_job_data'),
     hasColumn(db, 'tasks', 'final_result'),
@@ -120,11 +120,18 @@ async function loadTaskRuns(
     .orderBy('created_at', 'asc');
   if (hasJobData) query.select(json('initial_job_data', '$.pullRequestNumber', 'job_pr_number'), json('initial_job_data', '$.issueNumber', 'job_issue_number'));
   if (hasFinalResult) query.select(json('final_result', '$.postProcessing.pr.number', 'result_pr_number'));
-  if (bucketKey) query.select(db.raw(`${bucketKey} as bucket`));
-  whereCreatedWithin(query, 'created_at', window);
   scopeToRepository(query, 'repository', repository);
   excludeGoalTasks(query, 'task_type');
-  return await query as unknown as TaskRunRow[];
+  // Only older rows can supply omitted links. Preserve the repository and
+  // goal scope, and keep newer rows beyond the window's upper bound out.
+  const earlierLinks = window?.from && hasJobData
+    ? query.clone().where('created_at', '<', window.from.toISOString())
+      .whereRaw("CASE WHEN json_valid(initial_job_data) THEN json_extract(initial_job_data, '$.issueNumber') END IS NOT NULL")
+    : Promise.resolve([]);
+  if (bucketKey) query.select(db.raw(`${bucketKey} as bucket`));
+  whereCreatedWithin(query, 'created_at', window);
+  const [runs, links] = await Promise.all([query, earlierLinks]) as [TaskRunRow[], TaskRunRow[]];
+  return { runs, linkageRows: [...links, ...runs] };
 }
 
 /**
@@ -151,7 +158,7 @@ export async function loadTaskSummary(
   scopeToRepository(outcomesQuery, 't.repository', repository);
   excludeGoalTasks(outcomesQuery, 't.task_type');
 
-  const [runs, outcomes] = await Promise.all([
+  const [{ runs, linkageRows }, outcomes] = await Promise.all([
     loadTaskRuns(db, window, repository, bucketKey),
     outcomesQuery as unknown as Promise<Array<{ task_id: string; state: string }>>,
   ]);
@@ -161,7 +168,7 @@ export async function loadTaskSummary(
   // Each task counts once, in the bucket of its first run in the window.
   const since = dailySince?.toISOString();
   const counts = new Map<string, number>();
-  const tasks = [...groupTaskRuns(runs).values()];
+  const tasks = [...groupTaskRuns(runs, linkageRows).values()];
   const countTasks = (runIds: Set<string>) => tasks.filter(task => task.some(run => runIds.has(String(run.task_id)))).length;
   for (const [first] of tasks) {
     if (!first.bucket || (since && String(first.created_at) < since)) continue;
@@ -253,12 +260,12 @@ export interface RunVolume {
 export async function loadRunVolume(db: Knex, window: AnalyticsWindow | null): Promise<RunVolume> {
   const runsQuery = db('llm_executions').count('* as total');
   whereCreatedWithin(runsQuery, 'start_time', window);
-  const [runs, taskRuns] = await Promise.all([
+  const [runs, { runs: taskRuns, linkageRows }] = await Promise.all([
     runsQuery.first() as unknown as Promise<{ total?: number | string } | undefined>,
     loadTaskRuns(db, window, 'all'),
   ]);
   const total = Number(runs?.total ?? 0);
-  const taskCount = groupTaskRuns(taskRuns).size;
+  const taskCount = groupTaskRuns(taskRuns, linkageRows).size;
   return {
     total,
     tasks: taskCount,
