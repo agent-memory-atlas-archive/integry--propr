@@ -1,0 +1,62 @@
+import dns from 'node:dns/promises';
+import https from 'node:https';
+import { isIP, BlockList } from 'node:net';
+import { EXTENSION_LIMITS } from '@propr/shared';
+import { isNonPublicAddress } from '../network/egressProxy.js';
+
+const responseWireBytes = new WeakMap<object, number>();
+/** Internal accounting metadata; never serialized with an MCP response. */
+export const extensionResponseWireBytes = (value: unknown): number | undefined => value !== null && typeof value === 'object' ? responseWireBytes.get(value) : undefined;
+const additional = new BlockList();
+for (const [address, prefix] of [['198.18.0.0', 15], ['192.0.2.0', 24], ['198.51.100.0', 24], ['203.0.113.0', 24]] as const) additional.addSubnet(address, prefix, 'ipv4');
+additional.addSubnet('2001:db8::', 32, 'ipv6');
+additional.addSubnet('fec0::', 10, 'ipv6');
+additional.addSubnet('2002::', 16, 'ipv6');
+additional.addSubnet('2001::', 32, 'ipv6');
+additional.addAddress('168.63.129.16', 'ipv4');
+export function extensionPublicAddress(address: string): boolean {
+  return !isNonPublicAddress(address) && !additional.check(address, isIP(address) === 6 ? 'ipv6' : 'ipv4');
+}
+export function extensionEndpoint(value: string): URL {
+  let url: URL; try { url = new URL(value); } catch { throw new Error('Invalid MCP endpoint'); }
+  // Query parameters can be credentials; v1 accepts path-only endpoints.
+  if (!value.startsWith('https://') || /[?#]/.test(value) || url.protocol !== 'https:' || url.username || url.password || url.hash || url.search || (url.port && url.port !== '443') || value.length > 2048) throw new Error('MCP endpoints require HTTPS without credentials, query parameters or fragments');
+  const host = url.hostname.replace(/^\[|\]$/g, '');
+  if (isIP(host) && !extensionPublicAddress(host)) throw new Error('MCP endpoint must be public');
+  if (/^(localhost|.*\.localhost|.*\.local|metadata\.google\.internal)$/i.test(host)) throw new Error('MCP endpoint must be public');
+  return url;
+}
+export type ExtensionLookup = (host: string) => Promise<Array<{ address: string; family: number }>>;
+export async function resolveExtensionEndpoint(value: string, lookup: ExtensionLookup = host => dns.lookup(host, { all: true, verbatim: true })): Promise<{ url: URL; address: string; family: number }> {
+  const url = extensionEndpoint(value); const host = url.hostname.replace(/^\[|\]$/g, '');
+  const addresses = isIP(host) ? [{ address: host, family: isIP(host) }] : await Promise.race([
+    lookup(host), new Promise<never>((_, reject) => { const timer = setTimeout(() => reject(new Error('Endpoint DNS timeout')), EXTENSION_LIMITS.timeoutMs); timer.unref(); }),
+  ]);
+  if (!addresses.length || addresses.some(a => !extensionPublicAddress(a.address))) throw new Error('MCP endpoint must resolve exclusively to public addresses');
+  return { url, ...addresses[0] };
+}
+/** Resolve on every request, dial only the checked address, keep original TLS
+ * identity. No redirect, proxy environment, cookies, content decompression or
+ * upstream response headers cross this boundary. */
+export async function requestExtensionMcp(endpoint: string, body: unknown, token?: string): Promise<unknown> {
+  const { url, address, family } = await resolveExtensionEndpoint(endpoint);
+  const payload = JSON.stringify(body);
+  if (Buffer.byteLength(payload) > 64 * 1024) throw new Error('MCP request too large');
+  return new Promise((resolve, reject) => {
+    const unavailable = () => reject(new Error('MCP connection failed'));
+    const request = https.request(url, {
+      method: 'POST', agent: false,
+      lookup: (_host, _options, callback) => callback(null, address, family),
+      headers: { 'Content-Type': 'application/json', Accept: 'application/json', 'MCP-Protocol-Version': '2025-03-26', ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+    }, response => {
+      if (response.statusCode === 202 || response.statusCode === 204) { response.destroy(); resolve(null); return; }
+      if (response.statusCode !== 200 || !response.headers['content-type']?.startsWith('application/json')) { response.destroy(); unavailable(); return; }
+      const chunks: Buffer[] = []; let bytes = 0;
+      response.on('data', (chunk: Buffer) => { bytes += chunk.length; if (bytes > EXTENSION_LIMITS.responseBytes) { response.destroy(); unavailable(); } else chunks.push(chunk); });
+      response.on('error', unavailable);
+      response.on('end', () => { try { const parsed: unknown = JSON.parse(Buffer.concat(chunks).toString('utf8')); if (parsed !== null && typeof parsed === 'object') responseWireBytes.set(parsed, bytes); resolve(parsed); } catch { unavailable(); } });
+    });
+    const timer = setTimeout(() => { request.destroy(); unavailable(); }, EXTENSION_LIMITS.timeoutMs);
+    request.on('close', () => clearTimeout(timer)); request.on('error', unavailable); request.end(payload);
+  });
+}

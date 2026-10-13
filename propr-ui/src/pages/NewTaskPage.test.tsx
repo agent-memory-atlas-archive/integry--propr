@@ -9,7 +9,7 @@ import * as planner from '../api/plannerApi';
 vi.mock('../api/taskSubmissions', () => ({ submitTask: vi.fn(), getTaskSubmission: vi.fn(), retryTaskSubmission: vi.fn(), listTaskSnapshots: vi.fn().mockResolvedValue([]), taskSnapshotStorage: vi.fn().mockResolvedValue(undefined) }));
 vi.mock('../api/plannerApi', () => ({ createDraft: vi.fn(), uploadAttachment: vi.fn() }));
 vi.mock('../api/proprApi', () => ({ getInstanceCatalog: vi.fn().mockResolvedValue({ repositories: [{ name: 'acme/billing', enabled: true }], agents: [{ alias: 'issue-only', enabled: true, supportedModels: ['model-1'], defaultModel: 'model-1' }] }) }));
-vi.mock('../contexts/AuthContext', () => ({ useCurrentUser: () => ({ id: 'alice' }) }));
+vi.mock('../contexts/AuthContext', async importOriginal => ({ ...await importOriginal<typeof import('../contexts/AuthContext')>(), useCurrentUser: () => ({ id: 'alice', permissions: [] }) }));
 vi.mock('../contexts/DemoModeContext', () => ({ useDemoMode: () => ({ isDemoMode: false }) }));
 vi.mock('../components/RepositorySelector', () => ({ RepositorySelector: ({ selectedRepo, onRepoChange }: { selectedRepo: string; onRepoChange: (value: string) => void }) => <select aria-label="Repository" value={selectedRepo} onChange={event => onRepoChange(event.target.value)}><option value="" /><option>acme/billing</option></select> }));
 function Destination() { const location = useLocation(); return <div data-testid="destination">{location.pathname} {JSON.stringify(location.state)}</div>; }

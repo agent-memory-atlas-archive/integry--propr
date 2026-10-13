@@ -250,10 +250,13 @@ test('the sweep removes directories left by dead or forgotten owners and keeps l
     const live = await make('live', { namespace, hostname: hostname(), pid: process.ppid });
     const otherHost = await make('other-host', { namespace: 'another-boot:pid:[1]', hostname: 'another-worker', pid: 1 });
     const stale = await make('stale', { namespace: 'another-boot:pid:[1]', hostname: 'another-worker', pid: 1 }, EGRESS_ORPHAN_MAX_AGE_MS + 60_000);
+    const extensions = await make('extensions', null, EGRESS_ORPHAN_MAX_AGE_MS + 60_000);
+    await writeFile(path.join(extensions, 'selected-skill'), 'immutable selected run input');
     const { removed } = await sweepOrphanedEgressProxies({ root });
     assert.equal(removed, 3);
     assert.ok(!existsSync(dead) && !existsSync(reused) && !existsSync(stale));
     assert.ok(existsSync(live) && existsSync(otherHost));
+    assert.equal(await readFile(path.join(extensions, 'selected-skill'), 'utf8'), 'immutable selected run input', 'the socket sweeper must not delete task extension mounts');
 });
 
 test('a container sharing this hostname but not this PID namespace never has its live directory removed', async () => {

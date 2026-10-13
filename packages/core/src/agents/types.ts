@@ -53,11 +53,20 @@ export interface AgentToolPolicyMcpServer {
  * (Claude, Codex); other runtimes apply the web restriction through the prompt only.
  */
 export interface AgentToolPolicy {
+    /** Profiles replace inherited MCP catalogs rather than merging ambient endpoints. */
+    exclusiveMcp?: boolean;
     allowWeb: boolean;
     mcpServers?: AgentToolPolicyMcpServer[];
 }
 
 export interface AgentTaskOptions {
+    /** Immutable, instance-local extension revision selected by an administrator. */
+    extensionProfile?: import('@propr/shared').ExtensionSelection | null;
+    /** Worker-validated actor; never read from profile input. */
+    extensionActorId?: string;
+    extensionRepositories?: string[];
+    /** Explicit per-run authorization; a profile cannot grant write capabilities. */
+    extensionAllowWrite?: boolean;
     worktreePath: string;
     issueRef: IssueRef;
     issueDetails?: IssueDetails;

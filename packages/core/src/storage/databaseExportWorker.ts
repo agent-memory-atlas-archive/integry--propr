@@ -85,6 +85,8 @@ const SQLite = require(d.sqliteModule);
         }
       }
     }
+    // Restore customer custody and revisions, never a previous execution lease.
+    if (copy.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='extension_run_grants'").get()) copy.exec('DELETE FROM extension_run_grants');
     // Rebuild pages so removed fields/free pages cannot leak in the downloadable file.
     copy.exec('VACUUM');
     const integrity = copy.pragma('integrity_check');

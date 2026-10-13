@@ -33,6 +33,7 @@ export interface TaskSubmission {
   error: string | null;
 }
 export interface SubmissionPayload {
+  extensionProfile?: import('@propr/shared').ExtensionSelection | null;
   instruction: string;
   agentAlias: string;
   model: string;

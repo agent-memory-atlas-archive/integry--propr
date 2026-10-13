@@ -22,6 +22,34 @@ const PAIRING_GUIDE = 'See the desktop pairing guide (docs/operations/desktop-pa
 const MCP_OAUTH = 'Served by the MCP SDK\'s OAuth router at the API origin root, and only while MCP is enabled. See the MCP guide (docs/features/mcp).';
 
 export const SYSTEM_ROUTE_DOCS: Record<string, RouteDoc> = {
+  'GET /api/instance/extensions/v1': {
+    operationId: 'listAgentExtensionProfiles', summary: 'List secret-free current extension revisions and the versioned contract.', tags: ['Configuration'],
+    responses: { 200: { description: 'Current durable instance administrators only; works without Connect.', schema: JsonObject } },
+  },
+  'POST /api/instance/extensions/v1/profiles': {
+    operationId: 'saveAgentExtensionProfile', summary: 'Create an immutable revision with optional write-only secret replacements.', tags: ['Configuration'],
+    headers: [{ name: 'X-ProPR-Extensions', description: 'Must be 1. JSON requests only.', required: true }],
+    requestBody: { schema: JsonObject, description: 'input follows ExtensionProfileInput v1; expected is the exact instance/profile/revision selection for updates. secrets maps server names to replacement tokens or null; values are never returned.' },
+    responses: { 200: { description: 'Secret-free revision.', schema: JsonObject } },
+  },
+  'GET /api/instance/extensions/v1/profiles/:profileId/history': {
+    operationId: 'getAgentExtensionProfileHistory', summary: 'Read immutable, secret-free revision history.', tags: ['Configuration'], responses: { 200: { description: 'Revision history.', schema: JsonObject } },
+  },
+  'POST /api/instance/extensions/v1/delete': {
+    operationId: 'deleteAgentExtensionProfile', summary: 'Disable new launches without changing active snapshots.', tags: ['Configuration'], requestBody: { schema: JsonObject, description: 'selection: exact instanceId, profileId and revision.' }, responses: { 200: { description: 'Profile tombstoned.', schema: JsonObject } },
+  },
+  'POST /api/instance/extensions/v1/validate': {
+    operationId: 'validateAgentExtensionMcp', summary: 'Validate connectivity without disclosing any upstream response content.', tags: ['Configuration'], requestBody: { schema: JsonObject, description: 'selection: exact instanceId, profileId and revision.' }, responses: { 200: { description: 'Server names and reachable booleans only.', schema: JsonObject } },
+  },
+  'POST /api/instance/extensions/v1/skills/archive': {
+    operationId: 'importAgentExtensionSkillArchive', summary: 'Import a bounded strict tar or tar.gz skill bundle.', tags: ['Configuration'], requestBody: { schema: JsonObject, description: 'filename and base64 archive, at most 5 MiB compressed and 4 MiB expanded. Requires SKILL.md.' }, responses: { 200: { description: 'Immutable digest and provenance.', schema: JsonObject } },
+  },
+  'POST /api/instance/extensions/v1/skills/github': {
+    operationId: 'importAgentExtensionGitSkill', summary: 'Import an authorized GitHub skill at an exact commit and relative directory.', tags: ['Configuration'], requestBody: { schema: JsonObject, description: 'repository, 40-character commit SHA, directory. Caller repository authorization is required.' }, responses: { 200: { description: 'Immutable digest and exact source commit.', schema: JsonObject } },
+  },
+  'POST /api/extensions/mcp/:serverName': {
+    operationId: 'callAgentExtensionMcp', summary: 'Run-scoped bounded MCP gateway; no browser or OAuth authority.', tags: ['MCP'], requestBody: { schema: JsonObject, description: 'JSON-RPC initialize, ping, initialized notification, tools/list or explicitly authorized tools/call.' }, responses: { 200: { description: 'Sanitized MCP response.', schema: JsonObject }, 202: { description: 'Notification accepted.' } },
+  },
   'GET /api/instance/storage/v1/capabilities': {
     operationId: 'getInstanceStorageCapabilities', summary: 'Negotiate native instance storage capabilities and process generation.', tags: ['System'],
     responses: { 200: { description: 'Instance administrator capabilities; no Connect subscription required.', schema: InstanceStorageCapabilities } },

@@ -1,7 +1,7 @@
 import { after, before, describe, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync, mkdirSync } from 'node:fs';
 import { createServer, type IncomingMessage, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
@@ -128,11 +128,14 @@ function runtimeHarness(build: (policy: AgentToolPolicy) => ToolPolicyLaunchArgs
         server?.close();
         if (home) rmSync(home, { recursive: true, force: true });
     });
-    return async (policy: AgentToolPolicy, mcp: boolean): Promise<RuntimeObservation> => {
+    return async (policy: AgentToolPolicy, mcp: boolean, ambient = false): Promise<RuntimeObservation> => {
         captured.mcpAuthorizations.length = 0;
         captured.mcpMethods.length = 0;
         captured.modelBodies.length = 0;
         const baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+        mkdirSync(join(home, '.codex'), { recursive: true });
+        writeFileSync(join(home, '.codex', 'config.toml'), ambient ? `[mcp_servers.ambient]\nurl="${baseUrl}/mcp-ambient"\n` : '');
+        writeFileSync(join(home, '.claude.json'), JSON.stringify(ambient ? { mcpServers: { ambient: { type: 'http', url: `${baseUrl}/mcp-ambient` } } } : {}));
         const withMcp: AgentToolPolicy = mcp ? {
             ...policy,
             mcpServers: [{ name: PROPR_MCP_SERVER_NAME, url: `${baseUrl}/mcp`, bearerTokenEnv: PROPR_MCP_BEARER_TOKEN_ENV, bearerToken: TOKEN }],
@@ -161,6 +164,13 @@ describe('Claude Code runtime honours the tool policy', { skip: skipUnlessPinned
         assert.ok(tools.includes('WebFetch') && tools.includes('WebSearch'), `tools: ${tools.join(', ')}`);
     });
 
+    test('exclusive profile catalogs retain only selected MCP tools with env authentication', { timeout: 120_000 }, async () => {
+        const { tools, mcpAuthorizations } = await run({ allowWeb: false, exclusiveMcp: true }, true, true);
+        assert.ok(tools.includes(`mcp__${PROPR_MCP_SERVER_NAME}__${MCP_TOOL}`));
+        assert.ok(!tools.some(name => name.includes('ambient')), tools.join(', '));
+        assert.ok(mcpAuthorizations.every(header => header === `Bearer ${TOKEN}`));
+    });
+
     test('web off removes the web tools and the MCP server authenticates with the expanded token', { timeout: 120_000 }, async () => {
         const { tools, mcpAuthorizations, mcpMethods } = await run({ allowWeb: false }, true);
         assert.ok(!tools.includes('WebFetch') && !tools.includes('WebSearch'), `tools: ${tools.join(', ')}`);
@@ -187,6 +197,14 @@ describe('Codex runtime honours the tool policy', { skip: skipUnlessPinned('code
     test('without a restriction the web search tool is offered', { timeout: 120_000 }, async () => {
         const { tools } = await run({ allowWeb: true }, false);
         assert.ok(tools.includes('web_search'), `tools: ${tools.join(', ')}`);
+    });
+
+    test('exclusive profile catalogs retain only selected MCP tools with env authentication', { timeout: 120_000 }, async () => {
+        const { tools, mcpAuthorizations, mcpMethods } = await run({ allowWeb: false, exclusiveMcp: true }, true, true);
+        assert.ok(mcpMethods.includes('tools/list'));
+        assert.ok(mcpAuthorizations.length > 0);
+        assert.ok(!tools.some(name => name.includes('ambient')), tools.join(', '));
+        assert.ok(mcpAuthorizations.every(header => header === `Bearer ${TOKEN}`));
     });
 
     test('web off removes web search and the MCP server authenticates from the token variable', { timeout: 120_000 }, async () => {

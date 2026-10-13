@@ -1,3 +1,5 @@
+import { ExtensionStreamRedactor } from '../../extensions/extensionOutput.js';
+import { currentExtensionLaunch } from '../../extensions/extensionLaunch.js';
 import { assertNativeLogAdmission, prepareCommandCapture, finishDiagnosticOutput, scheduleProviderCapture, type DiagnosticAgent } from '../../diagnostics/managedLogRuntime.js';
 import { createExecutionDeadline, type ExecutionDeadline } from './dockerExecutionDeadline.js';
 import { prepareAdmittedAgent, type AdmittedAgent } from '../../agents/agentRunAdmission.js';
@@ -195,6 +197,10 @@ function spawnCommandProcess(
 }
 
 export async function executeDockerCommand(command: string, args: string[], options: DockerCommandOptions = {}): Promise<ExecutionResult> {
+    const extensions = currentExtensionLaunch();
+    if (extensions && command === 'docker' && args[0] === 'run') {
+        args = [args[0], ...extensions.mounts, ...args.slice(1)];
+    }
     const ownershipContext = getExecutionOwnershipContext();
     const timeout = options.timeout ?? 300000;
     const { deadline, executionSignal, timeoutError } = createExecutionDeadline(timeout, options.signal, ownershipContext?.signal);
@@ -235,6 +241,7 @@ async function startDockerCommand(
     try {
         const abortError = getExecutionAbortError(admission?.signal);
         if (abortError) throw abortError;
+        if (command === 'docker' && args[0] === 'run') await currentExtensionLaunch()?.beforeLaunch();
         const remainingMs = deadline.remaining();
         // Transfer the same budget to the subprocess timer. Keep timeout reporting
         // in terms of the caller's original limit and preserve partial output.
@@ -283,6 +290,9 @@ function runDockerCommand(
         // Built on read only (it costs the whole bounded output), never per chunk.
         const stdoutBuffer = new BoundedProviderRecordBuffer();
         const readStdout = (): string => stdoutBuffer.output;
+        const extensionSecrets = currentExtensionLaunch()?.secrets;
+        const extensionStdout = extensionSecrets ? new ExtensionStreamRedactor(extensionSecrets) : undefined;
+        const extensionStderr = extensionSecrets ? new ExtensionStreamRedactor(extensionSecrets) : undefined;
         const stdoutDecoder = new StringDecoder('utf8');
         const stderrDecoder = new StringDecoder('utf8');
         const state = createDockerExecutionState();
@@ -395,7 +405,8 @@ function runDockerCommand(
 
         const diagnosticTimer = scheduleProviderCapture(capture);
         child.stdout?.on('data', (data: Buffer) => {
-            const chunk = stdoutDecoder.write(data), ts = new Date().toISOString();
+            const decoded = stdoutDecoder.write(data);
+            const chunk = extensionStdout ? extensionStdout.push(decoded) : decoded, ts = new Date().toISOString();
             recordWatchdogActivity();
             stdoutBuffer.append(chunk);
             diagnosticStdout?.write(chunk);
@@ -403,7 +414,8 @@ function runDockerCommand(
             inspectSessionLines(chunk, ts);
         });
         child.stderr?.on('data', (data: Buffer) => {
-            const chunk = stderrDecoder.write(data);
+            const decoded = stderrDecoder.write(data);
+            const chunk = extensionStderr ? extensionStderr.push(decoded) : decoded;
             recordWatchdogActivity();
             stderrTail.append(chunk);
             workflowMarkers?.append(chunk);
@@ -424,9 +436,11 @@ function runDockerCommand(
             capture?.snapshot();
             clearTimeout(timeoutHandle);
             watchdog.stop();
-            const finalStdout = stdoutDecoder.end();
+            const stdoutEnd = stdoutDecoder.end();
+            const finalStdout = extensionStdout ? extensionStdout.push(stdoutEnd) + extensionStdout.finish() : stdoutEnd;
             if (finalStdout) stdoutBuffer.append(finalStdout);
-            const finalStderr = stderrDecoder.end();
+            const stderrEnd = stderrDecoder.end();
+            const finalStderr = extensionStderr ? extensionStderr.push(stderrEnd) + extensionStderr.finish() : stderrEnd;
             finishDiagnosticOutput(capture, finalStdout, finalStderr);
             stderrTail.append(finalStderr);
             const stderr = stderrTail.value;

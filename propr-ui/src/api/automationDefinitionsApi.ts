@@ -25,6 +25,7 @@ export interface AutomationDefinitionAttachment {
 }
 
 export interface AutomationDefinitionRecord {
+  extensionProfile?: import('@propr/shared').ExtensionSelection | null;
   id: string;
   ownerId: string;
   name: string;
@@ -112,7 +113,7 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
     credentials: 'include',
     ...init,
     headers: init.body && !(init.body instanceof FormData)
-      ? { 'Content-Type': 'application/json', ...init.headers }
+      ? { 'Content-Type': 'application/json', 'X-ProPR-Extensions': '1', ...init.headers }
       : init.headers,
   });
   if (response.ok || response.status === 401) {

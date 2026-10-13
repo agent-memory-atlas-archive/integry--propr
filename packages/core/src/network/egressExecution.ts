@@ -61,6 +61,7 @@ interface NetworkEgressContext {
 }
 
 const networkEgressExecution = new AsyncLocalStorage<NetworkEgressContext>();
+export const currentAgentNetworkPolicy = () => networkEgressExecution.getStore()?.policy;
 const activeProxies = new Map<string, EgressProxy>();
 /** Directories this process owns, from before the proxy listens until it is released. */
 const ownedDirectories = new Set<string>();
@@ -463,7 +464,9 @@ export async function sweepOrphanedEgressProxies(options: { now?: number; root?:
     await Promise.all([...ownedDirectories].map(id => fs.utimes(path.join(root, id), touched, touched).catch(() => undefined)));
     let removed = 0;
     for (const id of entries) {
-        if (ownedDirectories.has(id)) continue;
+        // Task extension bundles share this host-visible transport root, but
+        // their launch lifecycle owns cleanup; never sweep an active mount.
+        if (id === 'extensions' || ownedDirectories.has(id)) continue;
         const directory = path.join(root, id);
         try {
             const stat = await fs.stat(directory);

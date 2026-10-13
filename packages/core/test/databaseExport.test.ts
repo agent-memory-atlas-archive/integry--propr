@@ -18,12 +18,20 @@ async function fixture(t: test.TestContext) {
   db.pragma('journal_mode = WAL');
   db.exec(`CREATE TABLE customer(id INTEGER PRIMARY KEY, body TEXT NOT NULL);
     CREATE TABLE encrypted_credentials(value TEXT);
+    CREATE TABLE extension_profile_revisions(profile_id TEXT, revision INTEGER, snapshot TEXT, secrets_encrypted TEXT);
+    CREATE TABLE extension_skill_bundles(id TEXT, descriptor TEXT, files_json TEXT);
+    CREATE TABLE extension_instance_identity(id INTEGER, instance_id TEXT);
+    CREATE TABLE extension_run_grants(token_hash TEXT);
     CREATE TABLE system_configs(key TEXT PRIMARY KEY, value TEXT);
     CREATE TABLE knex_migrations(id INTEGER PRIMARY KEY, name TEXT);
     INSERT INTO knex_migrations VALUES(1, 'customer-schema-v1');
     PRAGMA user_version=7;`);
   db.prepare('INSERT INTO customer(body) VALUES(?)').run('customer content survives');
   db.prepare('INSERT INTO encrypted_credentials VALUES(?)').run('encrypted-customer-canary');
+  db.prepare('INSERT INTO extension_profile_revisions VALUES(?,?,?,?)').run('extension-profile', 1, JSON.stringify({ name: 'Documentation', secrets: { documentation: { configured: true, fields: ['bearerToken'] } } }), 'encrypted-extension-custody-canary');
+  db.prepare('INSERT INTO extension_skill_bundles VALUES(?,?,?)').run('skill', JSON.stringify({ digest: 'immutable-skill-digest' }), JSON.stringify([{ path: 'SKILL.md', content: 'validated-asset' }]));
+  db.prepare('INSERT INTO extension_instance_identity VALUES(?,?)').run(1, 'extension-instance');
+  db.prepare('INSERT INTO extension_run_grants VALUES(?)').run('previous-execution-lease-canary');
   db.prepare('INSERT INTO system_configs VALUES(?,?)').run('agents', JSON.stringify([{ id: 'agent', alias: 'My agent', configPath: '/provider-home-canary', envVars: { API_KEY: 'operator-env-canary' } }]));
   db.prepare('INSERT INTO system_configs VALUES(?,?)').run('fleet_control_secret', JSON.stringify('fleet-secret-canary'));
   db.prepare('INSERT INTO system_configs VALUES(?,?)').run('settings', JSON.stringify({ worker_concurrency: 2 }));
@@ -80,6 +88,11 @@ test('real WAL writer: coherent restorable customer database, integrity, metadat
       assert.equal(db.prepare('SELECT body FROM customer WHERE id=1').get().body, 'customer content survives');
       assert.equal(db.prepare('SELECT COUNT(*) AS n FROM customer').get().n % 2, 1);
       assert.equal(db.prepare('SELECT value FROM encrypted_credentials').get().value, 'encrypted-customer-canary');
+      assert.equal(db.prepare('SELECT secrets_encrypted FROM extension_profile_revisions').get().secrets_encrypted, 'encrypted-extension-custody-canary');
+      assert.equal(db.prepare('SELECT instance_id FROM extension_instance_identity').get().instance_id, 'extension-instance');
+      assert.equal(JSON.parse(db.prepare('SELECT descriptor FROM extension_skill_bundles').get().descriptor).digest, 'immutable-skill-digest');
+      assert.equal(db.prepare('SELECT COUNT(*) AS n FROM extension_run_grants').get().n, 0);
+      assert.equal(data.includes(Buffer.from('previous-execution-lease-canary')), false);
       assert.deepEqual(JSON.parse(db.prepare("SELECT value FROM system_configs WHERE key='agents'").get().value), [{ id: 'agent', alias: 'My agent' }]);
       db.prepare('INSERT INTO customer(body) VALUES(?)').run('restored write');
     } finally { db.close(); }

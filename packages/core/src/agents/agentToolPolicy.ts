@@ -41,7 +41,8 @@ export function claudeToolPolicyArgs(policy: AgentToolPolicy): ToolPolicyLaunchA
     const servers = mcpServers(policy);
     const cliArgs: string[] = [];
     if (!policy.allowWeb) cliArgs.push('--disallowedTools', ...CLAUDE_WEB_TOOLS);
-    if (servers.length > 0) {
+    if (policy.exclusiveMcp) cliArgs.push('--strict-mcp-config');
+    if (servers.length > 0 || policy.exclusiveMcp) {
         const config = {
             mcpServers: Object.fromEntries(servers.map(server => [server.name, {
                 type: 'http',
@@ -64,7 +65,12 @@ export function codexToolPolicyArgs(policy: AgentToolPolicy): ToolPolicyLaunchAr
     const servers = mcpServers(policy);
     const cliArgs: string[] = [];
     if (!policy.allowWeb) cliArgs.push('-c', 'web_search="disabled"');
-    for (const server of servers) {
+    if (policy.exclusiveMcp) {
+        const catalog = servers.map(server => `${server.name}={url=${JSON.stringify(server.url)},bearer_token_env_var=${JSON.stringify(server.bearerTokenEnv)}}`).join(',');
+        // The pinned runtime merges table overrides with its user catalog.
+        // Ignore that catalog while retaining auth custody in CODEX_HOME.
+        cliArgs.push('--ignore-user-config', '-c', `mcp_servers={${catalog}}`);
+    } else for (const server of servers) {
         cliArgs.push(
             '-c', `mcp_servers.${server.name}.url=${JSON.stringify(server.url)}`,
             '-c', `mcp_servers.${server.name}.bearer_token_env_var=${JSON.stringify(server.bearerTokenEnv)}`,

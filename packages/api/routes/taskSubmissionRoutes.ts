@@ -1,3 +1,4 @@
+import { ExtensionProfileStore } from '../../core/src/extensions/extensionProfileStore.js';
 import { createHash, randomUUID } from 'node:crypto';
 import fs from 'fs-extra';
 import path from 'node:path';
@@ -211,6 +212,7 @@ function submissionServices(octokit: SubmissionOctokit, enqueue = enqueueIssueIm
 interface SubmissionRequest {
   repository: string;
   instruction: string;
+  extensionProfile?: import('@propr/shared').ExtensionSelection | null;
   agentAlias?: string;
   model?: string;
   todoIds?: string[];
@@ -330,7 +332,9 @@ export function createTaskSubmissionRoutes({ db, services = {} }: { db: Knex; se
       const { body, key } = parseSubmissionRequest(req);
       const repository = body.repository.toLowerCase();
       const config = await checkAccess(req, repository);
-      const payloadHash = fingerprint({ repository, instruction: body.instruction, agentAlias: body.agentAlias || '', model: body.model || '', todoIds: body.todoIds || [], files: await goalUploadIdentity(files), ...submissionAutomation(body), ...submissionBudget(body) });
+      if (body.extensionProfile && req.get('X-ProPR-Extensions') !== '1') throw Object.assign(new Error('Extension selection requires a preflight-protected request'), { status: 403 });
+      if (body.extensionProfile) await new ExtensionProfileStore(db).read(req.user!.id, body.extensionProfile);
+      const payloadHash = fingerprint({ repository, instruction: body.instruction, extensionProfile: body.extensionProfile, agentAlias: body.agentAlias || '', model: body.model || '', todoIds: body.todoIds || [], files: await goalUploadIdentity(files), ...submissionAutomation(body), ...submissionBudget(body) });
       let row = await db<TaskSubmission>('task_submissions').where({ user_id: String(req.user!.id), submission_key: key }).first();
       if (row && row.payload_hash !== payloadHash) { res.status(409).json({ error: 'Submission identity was already used with different content' }); return; }
       if (!row) {
@@ -338,7 +342,7 @@ export function createTaskSubmissionRoutes({ db, services = {} }: { db: Knex; se
         const octokit = await getOctokit();
         const [owner, repo] = repository.split('/');
         await octokit.request('GET /repos/{owner}/{repo}', { owner, repo });
-        const payload: SubmissionPayload = { instruction: body.instruction, ...selection, baseBranch: config.baseBranch,
+        const payload: SubmissionPayload = { extensionProfile: body.extensionProfile, instruction: body.instruction, ...selection, baseBranch: config.baseBranch,
           trigger: (await processingLabels())[0] || 'AI', username: req.user!.username, todoIds: body.todoIds,
           ...submissionAutomation(body), ...submissionBudget(body) };
         let attachments: SubmissionAttachment[];

@@ -1,0 +1,72 @@
+import { useEffect, useState } from 'react';
+import type { ExtensionMcpDescriptor, ExtensionProfileInput, ExtensionProfileRevision, ExtensionSelection, ExtensionSkillBundle } from '@propr/shared';
+import { deleteExtensionProfile, extensionProfileHistory, importArchiveSkill, importGithubSkill, listExtensionProfiles, saveExtensionProfile, validateExtensionProfile } from '../../api/extensionProfilesApi';
+import { SettingsSection } from './SettingsLayout';
+const blank = (): ExtensionProfileInput => ({ version: 1, name: '', enabled: true, agentScope: [], repositoryScope: [], mcpServers: [], skillBundleIds: [] });
+const selection = (profile: ExtensionProfileRevision): ExtensionSelection => ({ instanceId: profile.instanceId, profileId: profile.profileId, revision: profile.revision });
+const inputClass = 'mt-1 block w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm';
+const buttonClass = 'rounded-md border border-slate-300 px-3 py-2 text-sm font-medium disabled:opacity-50 hover:bg-slate-50';
+export default function AgentExtensionsSection() {
+  const [profiles, setProfiles] = useState<ExtensionProfileRevision[]>([]);
+  const [current, setCurrent] = useState<ExtensionProfileRevision>();
+  const [draft, setDraft] = useState<ExtensionProfileInput>(blank);
+  const [editorVersion, setEditorVersion] = useState(0);
+  const [editing, setEditing] = useState(false);
+  const [secrets, setSecrets] = useState<Record<string, string | null>>({});
+  const [bundles, setBundles] = useState<ExtensionSkillBundle[]>([]);
+  const [history, setHistory] = useState<ExtensionProfileRevision[]>([]);
+  const [busy, setBusy] = useState(false); const [error, setError] = useState(''); const [notice, setNotice] = useState('');
+  const [github, setGithub] = useState({ repository: '', commit: '', directory: '' });
+  const refresh = async () => setProfiles((await listExtensionProfiles()).profiles);
+  useEffect(() => { let active = true; void listExtensionProfiles().then(result => { if (active) setProfiles(result.profiles); }).catch(e => { if (active) setError((e as Error).message); }); return () => { active = false; }; }, []);
+  const action = async (run: () => Promise<void>) => { setBusy(true); setError(''); setNotice(''); try { await run(); } catch (e) { setError((e as Error).message); } finally { setBusy(false); } };
+  const open = (profile?: ExtensionProfileRevision) => {
+    setEditorVersion(v => v + 1); setCurrent(profile); setDraft(profile ? { version: 1, name: profile.name, enabled: profile.enabled, agentScope: profile.agentScope, repositoryScope: profile.repositoryScope, mcpServers: profile.mcpServers, skillBundleIds: profile.skillBundleIds } : blank());
+    setBundles(profile?.skillBundles ?? []); setSecrets({}); setHistory([]); setNotice(''); setEditing(true);
+  };
+  const changeServer = (index: number, patch: Partial<ExtensionMcpDescriptor>) => setDraft(d => ({ ...d, mcpServers: d.mcpServers.map((s, i) => i === index ? { ...s, ...patch } : s) }));
+  const addBundle = (bundle: ExtensionSkillBundle) => { setBundles(b => [...b, bundle]); setDraft(d => ({ ...d, skillBundleIds: [...d.skillBundleIds, bundle.id] })); setNotice('Validated skill bundle imported. Save the profile to select it.'); };
+  return <SettingsSection title="Agent extensions" description="Reusable MCP servers and immutable skill bundles managed by this instance’s administrators.">
+    <div className="max-w-4xl space-y-5">
+      <div className="rounded-lg border border-teal-200 bg-teal-50 p-4 text-sm text-teal-900">
+        <p className="font-semibold">Capability and security boundary</p>
+        <p className="mt-1 leading-6">Claude and Codex task runs can select one profile. MCP tools are explicitly allowed through Core’s bounded HTTPS gateway. Skills mount read-only per run and grant no credentials or capabilities.</p>
+        <p className="mt-2 text-xs">Public HTTPS, stateless JSON MCP only · 8 servers · 64 tools per server · 4 MiB per skill bundle. Local stdio and stateful/SSE transports require a qualified operator runner and are unavailable.</p>
+      </div>
+      {error && <p role="alert" className="rounded-md bg-red-50 p-3 text-sm text-red-800">{error}</p>}
+      {notice && <p role="status" className="text-sm text-teal-800">{notice}</p>}
+      <div className="flex items-center justify-between"><h3 className="text-sm font-semibold text-slate-800">Extension profiles</h3><button type="button" className={buttonClass} disabled={busy} onClick={() => open()}>New profile</button></div>
+      {profiles.length === 0 && <p className="text-sm text-slate-500">No profiles configured. Create a profile to authorize tools and attach validated skills.</p>}
+      <ul className="divide-y rounded-lg border border-slate-200">{profiles.map(p => <li key={p.profileId} className="flex flex-wrap items-center justify-between gap-3 px-4 py-3">
+        <div><p className="text-sm font-medium text-slate-900">{p.name}</p><p className="mt-1 text-xs text-slate-500">Revision {p.revision} · {p.enabled ? 'Enabled' : 'Disabled'} · {p.mcpServers.filter(s => s.enabled).length} MCP servers · {p.skillBundles.length} skill bundles</p></div>
+        <button type="button" className={buttonClass} disabled={busy} onClick={() => open(p)}>Edit profile</button>
+      </li>)}</ul>
+      {editing && <fieldset key={editorVersion} disabled={busy} className="space-y-5 rounded-lg border border-slate-200 bg-slate-50/50 p-4 sm:p-5">
+        <div className="flex justify-between gap-3"><h3 className="font-semibold text-slate-900">{current ? `Edit ${current.name}` : 'New extension profile'}</h3><button type="button" onClick={() => { setSecrets({}); setEditing(false); }} className="text-sm text-slate-500">Close</button></div>
+        <label className="block text-sm font-medium">Profile name<input className={inputClass} value={draft.name} onChange={e => setDraft(d => ({ ...d, name: e.target.value }))} maxLength={100} /></label>
+        <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={draft.enabled} onChange={e => setDraft(d => ({ ...d, enabled: e.target.checked }))} />Enabled for new launches</label>
+        <div className="grid gap-4 sm:grid-cols-2">
+          <label className="text-sm">Agent aliases (optional, comma separated)<input className={inputClass} defaultValue={draft.agentScope.join(', ')} onChange={e => setDraft(d => ({ ...d, agentScope: e.target.value.split(',').map(v => v.trim()).filter(Boolean) }))} placeholder="claude-main, codex-main" /></label>
+          <label className="text-sm">Repositories (optional, comma separated)<input className={inputClass} defaultValue={draft.repositoryScope.join(', ')} onChange={e => setDraft(d => ({ ...d, repositoryScope: e.target.value.split(',').map(v => v.trim()).filter(Boolean) }))} placeholder="team/project" /></label>
+        </div>
+        <div className="flex items-center justify-between"><h4 className="text-sm font-semibold">MCP servers</h4><button type="button" className={buttonClass} disabled={draft.mcpServers.length >= 8} onClick={() => setDraft(d => ({ ...d, mcpServers: [...d.mcpServers, { kind: 'https', name: `server-${d.mcpServers.length + 1}`, url: '', enabled: true, tools: [], capability: 'read', authentication: 'none' }] }))}>Add HTTPS server</button></div>
+        {draft.mcpServers.map((s, i) => <div key={i} className="space-y-3 rounded-md border border-slate-200 bg-white p-4">
+          <div className="grid gap-3 sm:grid-cols-2"><label className="text-sm">Stable server name<input className={inputClass} value={s.name} onChange={e => changeServer(i, { name: e.target.value })} /></label><label className="text-sm">HTTPS endpoint<input className={inputClass} value={s.url} placeholder="https://tools.example.com/mcp" onChange={e => changeServer(i, { url: e.target.value })} /></label></div>
+          <label className="block text-sm">Allowed tool names (comma separated)<input className={inputClass} defaultValue={s.tools.join(', ')} onChange={e => changeServer(i, { tools: e.target.value.split(',').map(v => v.trim()).filter(Boolean) })} placeholder="search, read_document" /></label>
+          <div className="flex flex-wrap items-end gap-4"><label className="text-sm">Capability<select className={inputClass} value={s.capability} onChange={e => changeServer(i, { capability: e.target.value as 'read' | 'write' })}><option value="read">Read</option><option value="write">Write — requires run authorization</option></select></label><label className="text-sm">Authentication<select className={inputClass} value={s.authentication} onChange={e => changeServer(i, { authentication: e.target.value as 'none' | 'bearer' })}><option value="none">None</option><option value="bearer">Bearer token</option></select></label><label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={s.enabled} onChange={e => changeServer(i, { enabled: e.target.checked })} />Enabled</label></div>
+          {s.authentication === 'bearer' && <label className="block text-sm">Replace bearer token <span className="text-xs text-slate-500">({current?.secrets[s.name]?.configured ? 'configured' : 'not configured'}; write-only)</span><input type="password" autoComplete="new-password" className={inputClass} value={secrets[s.name] ?? ''} placeholder="Leave blank to keep the configured token" onChange={e => setSecrets(values => { const next = { ...values }; if (e.target.value) next[s.name] = e.target.value; else delete next[s.name]; return next; })} /></label>}
+          <button type="button" className="text-sm text-red-700" onClick={() => { setEditorVersion(v => v + 1); setDraft(d => ({ ...d, mcpServers: d.mcpServers.filter((_, index) => index !== i) })); setSecrets(values => { const next = { ...values }; delete next[s.name]; return next; }); }}>Remove server</button>
+        </div>)}
+        <h4 className="text-sm font-semibold">Validated skills</h4>
+        {bundles.filter(b => draft.skillBundleIds.includes(b.id)).map(b => <div key={b.id} className="rounded-md border border-slate-200 bg-white p-3 text-xs"><p className="font-semibold">{b.name} · {b.files} files · {b.bytes} bytes</p><p className="mt-1 break-all font-mono">SHA-256 {b.digest}</p><p className="mt-1 break-all">{b.source.kind === 'github' ? `${b.source.repository} @ ${b.source.commit} / ${b.source.directory}` : `Uploaded archive: ${b.source.filename}`}</p><p className="mt-1">Declared requirements: {b.requirements.join(', ') || 'none'}. Authorize capabilities separately.</p><button type="button" className="mt-2 text-red-700" onClick={() => setDraft(d => ({ ...d, skillBundleIds: d.skillBundleIds.filter(id => id !== b.id) }))}>Remove skill</button></div>)}
+        <label className="block text-sm">Import a bounded tar or tar.gz archive<input type="file" accept=".tar,.tar.gz,.tgz" className="mt-2 block text-sm" onChange={e => { const file = e.target.files?.[0]; if (file) void action(async () => addBundle((await importArchiveSkill(file)).bundle)); e.target.value = ''; }} /></label>
+        <details className="text-sm"><summary className="cursor-pointer font-medium">Import from an authorized GitHub repository</summary><div className="mt-3 grid gap-3"><label>Repository<input className={inputClass} value={github.repository} onChange={e => setGithub(g => ({ ...g, repository: e.target.value }))} placeholder="team/project" /></label><label>Exact 40-character commit<input className={inputClass} value={github.commit} onChange={e => setGithub(g => ({ ...g, commit: e.target.value }))} /></label><label>Relative skill directory<input className={inputClass} value={github.directory} onChange={e => setGithub(g => ({ ...g, directory: e.target.value }))} placeholder="skills/review" /></label><button type="button" className={buttonClass} onClick={() => void action(async () => addBundle((await importGithubSkill(github.repository, github.commit, github.directory)).bundle))}>Import pinned skill</button></div></details>
+        <p className="text-xs leading-5 text-slate-500">Saving creates an immutable revision. Secret replacement invalidates older launches. Disabling or deleting blocks new launches; running snapshots keep their selected revision.</p>
+        <div className="flex flex-wrap gap-2"><button type="button" className={`${buttonClass} bg-teal-700 text-white hover:bg-teal-800`} onClick={() => void action(async () => { const result = await saveExtensionProfile(draft, secrets, current ? selection(current) : undefined); setSecrets({}); open(result.profile); await refresh(); setNotice('Profile revision saved.'); })}>Save revision</button>
+        {current && <><button type="button" className={buttonClass} onClick={() => void action(async () => { const result = await validateExtensionProfile(selection(current)); setNotice(result.results.map(r => `${r.name}: ${r.reachable ? 'reachable' : 'unavailable'}`).join(' · ') || 'No enabled MCP servers.'); })}>Validate saved MCP connectivity</button><button type="button" className={buttonClass} onClick={() => void action(async () => setHistory((await extensionProfileHistory(current.profileId)).revisions))}>Revision history</button><button type="button" className={`${buttonClass} text-red-700`} onClick={() => void action(async () => { await deleteExtensionProfile(selection(current)); setCurrent(undefined); setSecrets({}); setEditing(false); await refresh(); setNotice('Profile deleted for new launches.'); })}>Delete profile</button></>}
+        </div>
+        {history.length > 0 && <ul className="space-y-2 text-xs text-slate-600">{history.map(p => <li key={p.revision}>Revision {p.revision} · {new Date(p.updatedAt).toLocaleString()} · administrator {p.auditActor} · {p.enabled ? 'enabled' : 'disabled'} · {p.mcpServers.length} servers · {p.skillBundles.length} bundles</li>)}</ul>}
+      </fieldset>}
+    </div>
+  </SettingsSection>;
+}

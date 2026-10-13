@@ -3,7 +3,7 @@
  */
 
 import {
-  TaskStates, AgentRegistry, generateClaudePrompt, updateFileChangesFromWorktree, recordLLMMetrics,
+  TaskStates, AgentRegistry, findIssueSubmission, generateClaudePrompt, updateFileChangesFromWorktree, recordLLMMetrics,
   resolveAgentTerminationReason, repositoryWorkflowPrompt
 } from '@propr/core';
 import type { AgentExecutionResult, ClaudeCodeResponse, ClaudeResult } from '@propr/core';
@@ -130,12 +130,17 @@ export async function executeAgentAndRecordMetrics(executionParams: ExecutionPar
   }, FILE_CHANGES_INTERVAL_MS);
 
   // Execute task via agent abstraction
+  const extensionSubmission = await findIssueSubmission(issueRef);
+  const extensionProfile = extensionSubmission ? (JSON.parse(extensionSubmission.payload) as import('@propr/core').SubmissionPayload).extensionProfile : null;
   let agentResult;
   try {
     agentResult = await runRepositoryWorkflow({
       workflow: repositoryWorkflow, repoOwner: issueRef.repoOwner, repoName: issueRef.repoName,
       redisClient, taskId, stateManager, correlatedLogger,
     }, () => agent.executeTask({
+      extensionProfile,
+      extensionActorId: extensionSubmission?.user_id,
+      extensionAllowWrite: true,
       worktreePath: worktreeInfo.worktreePath,
       issueRef: agentIssueRef,
       prompt: [prompt, workflowPrompt].filter(Boolean).join('\n\n'),

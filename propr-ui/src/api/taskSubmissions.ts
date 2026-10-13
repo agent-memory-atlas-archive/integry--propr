@@ -8,6 +8,7 @@ export interface TaskSubmission {
   error: string | null;
 }
 export interface TaskRequest {
+  extensionProfile?: import('@propr/shared').ExtensionSelection | null;
   repository: string;
   instruction: string;
   agentAlias?: string;
@@ -24,7 +25,7 @@ export async function submitTask(key: string, payload: TaskRequest, files: File[
   const form = new FormData();
   form.append('payload', JSON.stringify(payload));
   files.forEach(file => form.append('files', file));
-  return request('', { method: 'POST', headers: { 'Idempotency-Key': key }, body: form });
+  return request('', { method: 'POST', headers: { 'Idempotency-Key': key, 'X-ProPR-Extensions': '1' }, body: form });
 }
 export const getTaskSubmission = (key: string) => request(`/${encodeURIComponent(key)}`);
 export const retryTaskSubmission = (key: string) => request(`/${encodeURIComponent(key)}/retry`, { method: 'POST' });

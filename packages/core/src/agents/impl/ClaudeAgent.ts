@@ -1,3 +1,4 @@
+import { executeWithExtensions } from '../../extensions/extensionLaunch.js';
 import { prepareAgentGitAccess, prepareAnalysisGitAccess } from '../agentGitAccess.js';
 /** Claude Agent Implementation. */
 
@@ -108,6 +109,10 @@ export class ClaudeAgent implements Agent {
 
     /** Executes a task that modifies files in the worktree. */
     async executeTask(options: AgentTaskOptions): Promise<AgentExecutionResult> {
+        return executeWithExtensions(this.config, options, prepared => this.executeTaskWithoutExtensions(prepared));
+    }
+
+    private async executeTaskWithoutExtensions(options: AgentTaskOptions): Promise<AgentExecutionResult> {
         const {
             worktreePath, issueRef, prompt: customPrompt, model, systemPrompt,
             isRetry = false, retryReason, branchName, issueDetails,

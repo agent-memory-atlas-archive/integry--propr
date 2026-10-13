@@ -29,8 +29,8 @@ info:
     name: Apache-2.0
     identifier: Apache-2.0
   x-route-coverage:
-    total: 288
-    documented: 53
+    total: 296
+    documented: 61
     undocumented: 235
 servers:
   - url: "{origin}"
@@ -3322,6 +3322,40 @@ paths:
       x-propr-auth: member
       x-undocumented: true
       x-legacy-error: true
+  /api/extensions/mcp/{serverName}:
+    post:
+      operationId: callAgentExtensionMcp
+      summary: Run-scoped bounded MCP gateway; no browser or OAuth authority.
+      tags:
+        - MCP
+      security:
+        - extensionBearer: []
+      parameters:
+        - name: serverName
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        description: JSON-RPC initialize, ping, initialized notification, tools/list or explicitly authorized tools/call.
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/JsonObject"
+      responses:
+        "200":
+          description: Sanitized MCP response.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/JsonObject"
+        "202":
+          description: Notification accepted.
+        default:
+          $ref: "#/components/responses/LegacyUnexpectedError"
+      x-propr-auth: extensionGrant
+      x-legacy-error: true
   /api/github/repos:
     get:
       operationId: getApiGithubRepos
@@ -3838,6 +3872,236 @@ paths:
           $ref: "#/components/responses/LegacyUnexpectedError"
       x-propr-auth: member
       x-undocumented: true
+      x-legacy-error: true
+  /api/instance/extensions/v1:
+    get:
+      operationId: listAgentExtensionProfiles
+      summary: List secret-free current extension revisions and the versioned contract.
+      description: Requires the `instance.manage_settings` instance permission.
+      tags:
+        - Configuration
+      security:
+        - sessionCookie: []
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Current durable instance administrators only; works without Connect.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/JsonObject"
+        "401":
+          $ref: "#/components/responses/LegacyUnauthorized"
+        "403":
+          $ref: "#/components/responses/LegacyForbidden"
+        default:
+          $ref: "#/components/responses/LegacyUnexpectedError"
+      x-propr-auth: member
+      x-propr-permission: instance.manage_settings
+      x-legacy-error: true
+  /api/instance/extensions/v1/delete:
+    post:
+      operationId: deleteAgentExtensionProfile
+      summary: Disable new launches without changing active snapshots.
+      description: Requires the `instance.manage_settings` instance permission.
+      tags:
+        - Configuration
+      security:
+        - sessionCookie: []
+        - bearerAuth: []
+      requestBody:
+        required: true
+        description: "selection: exact instanceId, profileId and revision."
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/JsonObject"
+      responses:
+        "200":
+          description: Profile tombstoned.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/JsonObject"
+        "401":
+          $ref: "#/components/responses/LegacyUnauthorized"
+        "403":
+          $ref: "#/components/responses/LegacyForbidden"
+        default:
+          $ref: "#/components/responses/LegacyUnexpectedError"
+      x-propr-auth: member
+      x-propr-permission: instance.manage_settings
+      x-legacy-error: true
+  /api/instance/extensions/v1/profiles:
+    post:
+      operationId: saveAgentExtensionProfile
+      summary: Create an immutable revision with optional write-only secret replacements.
+      description: Requires the `instance.manage_settings` instance permission.
+      tags:
+        - Configuration
+      security:
+        - sessionCookie: []
+        - bearerAuth: []
+      parameters:
+        - name: X-ProPR-Extensions
+          in: header
+          required: true
+          description: Must be 1. JSON requests only.
+          schema:
+            type: string
+      requestBody:
+        required: true
+        description: input follows ExtensionProfileInput v1; expected is the exact instance/profile/revision selection for updates. secrets maps server names to replacement tokens or null; values are never returned.
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/JsonObject"
+      responses:
+        "200":
+          description: Secret-free revision.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/JsonObject"
+        "401":
+          $ref: "#/components/responses/LegacyUnauthorized"
+        "403":
+          $ref: "#/components/responses/LegacyForbidden"
+        default:
+          $ref: "#/components/responses/LegacyUnexpectedError"
+      x-propr-auth: member
+      x-propr-permission: instance.manage_settings
+      x-legacy-error: true
+  /api/instance/extensions/v1/profiles/{profileId}/history:
+    get:
+      operationId: getAgentExtensionProfileHistory
+      summary: Read immutable, secret-free revision history.
+      description: Requires the `instance.manage_settings` instance permission.
+      tags:
+        - Configuration
+      security:
+        - sessionCookie: []
+        - bearerAuth: []
+      parameters:
+        - name: profileId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Revision history.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/JsonObject"
+        "401":
+          $ref: "#/components/responses/LegacyUnauthorized"
+        "403":
+          $ref: "#/components/responses/LegacyForbidden"
+        default:
+          $ref: "#/components/responses/LegacyUnexpectedError"
+      x-propr-auth: member
+      x-propr-permission: instance.manage_settings
+      x-legacy-error: true
+  /api/instance/extensions/v1/skills/archive:
+    post:
+      operationId: importAgentExtensionSkillArchive
+      summary: Import a bounded strict tar or tar.gz skill bundle.
+      description: Requires the `instance.manage_settings` instance permission.
+      tags:
+        - Configuration
+      security:
+        - sessionCookie: []
+        - bearerAuth: []
+      requestBody:
+        required: true
+        description: filename and base64 archive, at most 5 MiB compressed and 4 MiB expanded. Requires SKILL.md.
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/JsonObject"
+      responses:
+        "200":
+          description: Immutable digest and provenance.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/JsonObject"
+        "401":
+          $ref: "#/components/responses/LegacyUnauthorized"
+        "403":
+          $ref: "#/components/responses/LegacyForbidden"
+        default:
+          $ref: "#/components/responses/LegacyUnexpectedError"
+      x-propr-auth: member
+      x-propr-permission: instance.manage_settings
+      x-legacy-error: true
+  /api/instance/extensions/v1/skills/github:
+    post:
+      operationId: importAgentExtensionGitSkill
+      summary: Import an authorized GitHub skill at an exact commit and relative directory.
+      description: Requires the `instance.manage_settings` instance permission.
+      tags:
+        - Configuration
+      security:
+        - sessionCookie: []
+        - bearerAuth: []
+      requestBody:
+        required: true
+        description: repository, 40-character commit SHA, directory. Caller repository authorization is required.
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/JsonObject"
+      responses:
+        "200":
+          description: Immutable digest and exact source commit.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/JsonObject"
+        "401":
+          $ref: "#/components/responses/LegacyUnauthorized"
+        "403":
+          $ref: "#/components/responses/LegacyForbidden"
+        default:
+          $ref: "#/components/responses/LegacyUnexpectedError"
+      x-propr-auth: member
+      x-propr-permission: instance.manage_settings
+      x-legacy-error: true
+  /api/instance/extensions/v1/validate:
+    post:
+      operationId: validateAgentExtensionMcp
+      summary: Validate connectivity without disclosing any upstream response content.
+      description: Requires the `instance.manage_settings` instance permission.
+      tags:
+        - Configuration
+      security:
+        - sessionCookie: []
+        - bearerAuth: []
+      requestBody:
+        required: true
+        description: "selection: exact instanceId, profileId and revision."
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/JsonObject"
+      responses:
+        "200":
+          description: Server names and reachable booleans only.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/JsonObject"
+        "401":
+          $ref: "#/components/responses/LegacyUnauthorized"
+        "403":
+          $ref: "#/components/responses/LegacyForbidden"
+        default:
+          $ref: "#/components/responses/LegacyUnexpectedError"
+      x-propr-auth: member
+      x-propr-permission: instance.manage_settings
       x-legacy-error: true
   /api/instance/storage/v1/capabilities:
     get:
@@ -9288,6 +9552,10 @@ components:
       type: http
       scheme: bearer
       description: A GitHub token (when `ENABLE_BEARER_AUTH` is not `false`) or a desktop/CLI instance token (`propr_it_…`).
+    extensionBearer:
+      type: http
+      scheme: bearer
+      description: Ephemeral, run-scoped extension gateway token. Not a GitHub, Connect or MCP OAuth grant.
     mcpOAuth:
       type: oauth2
       description: OAuth 2.1 access token issued to MCP clients by `/authorize` and `/token` (PKCE, public clients). Every token carries `read`, which is all `/api/mcp` itself requires; each MCP tool then checks its own scope, as listed in the MCP guide (docs/features/mcp).

@@ -1,3 +1,4 @@
+import { extensionSelectionSchema, type ExtensionSelection } from './extensionProfiles.js';
 /**
  * Authoritative automation definition contract shared by the REST API, MCP, web UI,
  * CLI, worker and daemon scheduler. An automation is a saved, reusable definition
@@ -74,6 +75,7 @@ export const AUTOMATION_ACTION_OPERATOR_NOTE_MAX_CHARS = 2_000;
 export const AUTOMATION_ACTION_SUMMARY_MAX_CHARS = 20_000;
 
 export interface AutomationDefinitionInput {
+  extensionProfile?: ExtensionSelection | null;
   name: string;
   description?: string | null;
   prompt: string;
@@ -220,6 +222,7 @@ function validateOptionalText(value: unknown, field: string, maxLength: number):
 export function validateAutomationDefinitionInput(input: unknown, options: { partial?: boolean } = {}): string | null {
   if (input == null || typeof input !== 'object' || Array.isArray(input)) return 'automation definition must be an object';
   const body = input as Record<string, unknown>;
+  if (body.extensionProfile != null && !extensionSelectionSchema.safeParse(body.extensionProfile).success) return 'Invalid extension profile selection';
   const partial = options.partial === true;
 
   if (!partial || has(body, 'name')) {

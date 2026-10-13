@@ -1,3 +1,4 @@
+import { createExtensionProfileRoutes } from './routes/extensionProfileRoutes.js';
 import { startConfiguredFleetData, refusePublicFleetData } from './fleetDataListener.js';
 import { createStorageRouteEntries } from './instanceStorageRouteRegistry.js';
 import { protectStorageQueue } from '../core/src/storage/lifecycle.js';
@@ -257,6 +258,7 @@ app.use(corsRejectionHandler);
 app.use('/api', createApiRequestRateLimiter());
 setupWebhookRoute();
 
+app.use('/api/instance/extensions/v1/skills/archive', express.json({ limit: '7mb' }));
 app.use(express.json({ limit: '1mb' }));
 
 // Register demo read-only protection before routes so future mutating /api routes,
@@ -358,6 +360,8 @@ function setupRoutes(): void {
     operationalStatus: statusRoutes.readStatusSnapshot,
     queueStatus: queueRoutes.collectQueueStats
   });
+  const extensionRoutes = createExtensionProfileRoutes();
+  app.post('/api/extensions/mcp/:serverName', extensionRoutes.gateway);
   // MCP authenticates its own bearer tokens before the shared API guard.
   mountMcp(app, { db, taskQueue, redisClient, runtimeBuildQueue });
   // Worker-only: run-scoped MCP grants for agent containers, authenticated by
@@ -491,6 +495,13 @@ function setupRoutes(): void {
   assertNoDuplicateRoutes(routes);
   registerRouteEntries(app, routes);
   app.use('/api/agents', agentRoutes.router);
+  app.get('/api/instance/extensions/v1', extensionRoutes.list);
+  app.post('/api/instance/extensions/v1/profiles', extensionRoutes.save);
+  app.get('/api/instance/extensions/v1/profiles/:profileId/history', extensionRoutes.history);
+  app.post('/api/instance/extensions/v1/delete', extensionRoutes.remove);
+  app.post('/api/instance/extensions/v1/validate', extensionRoutes.validate);
+  app.post('/api/instance/extensions/v1/skills/archive', extensionRoutes.importArchive);
+  app.post('/api/instance/extensions/v1/skills/github', extensionRoutes.importGithub);
 }
 
 function setupWebhookRoute(): void {

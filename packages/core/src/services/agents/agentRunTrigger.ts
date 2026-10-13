@@ -273,9 +273,11 @@ export async function validateAgentDefinitionRuntime(
   const needsProprMcp = definition.capabilities.includes('propr_mcp') || definition.autonomyMode !== 'dry_run';
   if (alias === null) {
     if (modelName !== null) return 'A model requires an agent';
-    if (!needsProprMcp) return null;
+    if (!needsProprMcp && !definition.extensionProfile) return null;
     const [agents, configuredAlias] = await Promise.all([loadDirectAgents(), loadDefaultAgentAlias()]);
     const type = defaultAgentType(agents, configuredAlias);
+    if (definition.extensionProfile && (!type || !['claude', 'codex'].includes(type))) return 'Extension profiles require a Claude or Codex task runtime';
+    if (!needsProprMcp) return null;
     if (type === null) return 'No default agent is configured; choose an agent that supports propr_mcp';
     if (!agentTypeSupportsProprMcp(type)) {
       return 'The default agent does not support propr_mcp, which the propr_mcp capability and the preview and auto acting steps require';
@@ -289,6 +291,7 @@ export async function validateAgentDefinitionRuntime(
     : synthetic.find(agent => agent.alias === alias && syntheticAgentSupportsModel(agent, modelName));
   if (!direct && !syntheticAgent) return 'Choose an enabled agent and a model it supports';
 
+  if (definition.extensionProfile && (!direct || !['claude', 'codex'].includes(direct.type))) return 'Extension profiles require a direct Claude or Codex task runtime';
   if (needsProprMcp) {
     const supported = direct ? agentTypeSupportsProprMcp(direct.type)
       : syntheticAgentSupportsProprMcp(syntheticAgent!, modelName, agents);

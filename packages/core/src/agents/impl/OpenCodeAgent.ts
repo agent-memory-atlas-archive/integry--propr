@@ -54,6 +54,7 @@ export class OpenCodeAgent implements Agent {
     }
 
     async executeTask(options: AgentTaskOptions): Promise<AgentExecutionResult> {
+        if (options.extensionProfile) throw new Error('Extension profiles require Claude or Codex task execution');
         const { worktreePath, issueRef, prompt: rawCustomPrompt, model, systemPrompt, isRetry = false, retryReason, branchName, issueDetails, onSessionId, onContainerId, taskId, prNumber, metadata } = options;
         // No native web switch: the restriction is best effort through the prompt.
         const customPrompt = withPromptOnlyToolPolicy(rawCustomPrompt, options.toolPolicy);
