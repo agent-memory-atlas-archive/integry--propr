@@ -81,66 +81,80 @@ describe('MobileBottomNavigation', () => {
     mockRefreshAgentTank.mockResolvedValue({ success: true });
   });
 
-  it.each([
-    ['/', 'New Task', '/tasks/new', ['New Plan', 'New Goal', 'New Automation']],
-    ['/plans', 'New Plan', '/studio/new', ['New Task', 'New Goal', 'New Automation']],
-    ['/studio/draft-1', 'New Plan', '/studio/new', ['New Task', 'New Goal', 'New Automation']],
-    ['/goals', 'New Goal', '/goals?new=1', ['New Task', 'New Plan', 'New Automation']],
-    ['/goals/goal-1', 'New Goal', '/goals?new=1', ['New Task', 'New Plan', 'New Automation']],
-    ['/automations/def-1', 'New Automation', '/automations/new', ['New Task', 'New Plan', 'New Goal']],
-  ])('matches the primary action and More options to %s', (route, label, to, options) => {
-    renderNavigation(route);
-    fireEvent.click(screen.getByRole('button', { name: 'More' }));
-    const more = screen.getByRole('navigation', { name: 'More navigation' });
-    expect(within(more).getAllByRole('link', { name: /^New / }).map(item => item.textContent)).toEqual(options);
-    fireEvent.keyDown(document, { key: 'Escape' });
-    fireEvent.click(screen.getByRole('button', { name: label }));
-    expect(screen.getByTestId('location').textContent).toBe(to);
-  });
-
-  it('updates creation actions after navigating from the More sheet', () => {
-    renderNavigation('/plans');
-    fireEvent.click(screen.getByRole('button', { name: 'More' }));
-    fireEvent.click(screen.getByRole('link', { name: 'New Goal' }));
-    expect(screen.getByTestId('location').textContent).toBe('/goals?new=1');
-    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'New Goal' })).toBeInTheDocument();
-    fireEvent.click(screen.getByRole('button', { name: 'More' }));
-    fireEvent.click(screen.getByRole('link', { name: 'New Task' }));
-    expect(screen.getByTestId('location').textContent).toBe('/tasks/new');
-    expect(screen.getByRole('button', { name: 'New Task' })).toHaveAttribute('aria-current', 'page');
-  });
-
-  it.each([['/', 'New Task'], ['/plans', 'New Plan'], ['/goals', 'New Goal']])(
-    'keeps all creation options inert in demo mode on %s', (route, label) => {
-      renderNavigation(route, vi.fn(), user, true);
-      expect(screen.getByRole('button', { name: `${label} unavailable in demo mode` })).toBeDisabled();
-      fireEvent.click(screen.getByRole('button', { name: 'More' }));
-      for (const option of screen.getAllByRole('link', { name: /^New / })) {
-        expect(option).toHaveAttribute('aria-disabled', 'true');
-        fireEvent.click(option);
-        expect(screen.getByTestId('location').textContent).toBe(route);
-      }
-    },
-  );
-
-  it('renders all five destinations in order with the unread count and route active state', () => {
+  it('renders Dashboard, Tasks, Create, Inbox and More in order with the unread count', () => {
     renderNavigation('/');
 
     const navigation = screen.getByRole('navigation', { name: 'Primary navigation' });
-    const destinations = within(navigation).getAllByText(/^(Inbox|Dashboard|New Task|Repositories|More)$/);
+    const destinations = within(navigation).getAllByText(/^(Dashboard|Tasks|Create|Inbox|More)$/);
 
     expect(destinations.map(destination => destination.textContent)).toEqual([
-      'Inbox',
       'Dashboard',
-      'New Task',
-      'Repositories',
+      'Tasks',
+      'Create',
+      'Inbox',
       'More',
     ]);
     expect(within(navigation).getByText('7')).toBeInTheDocument();
     expect(within(navigation).getByRole('link', { name: 'Dashboard' })).toHaveAttribute('aria-current', 'page');
+    expect(within(navigation).getByRole('link', { name: 'Tasks' })).toHaveAttribute('href', '/tasks');
     expect(within(navigation).getByRole('link', { name: /Inbox/ })).not.toHaveAttribute('aria-current');
+    expect(within(navigation).queryByRole('link', { name: 'Repositories' })).not.toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'More' })).not.toHaveAttribute('aria-current');
+  });
+
+  it.each(['/', '/plans', '/goals/goal-1', '/automations/def-1'])(
+    'offers every creation action from the Create sheet on %s', route => {
+      renderNavigation(route);
+      fireEvent.click(screen.getByRole('button', { name: 'Create' }));
+      const sheet = screen.getByRole('dialog', { name: 'Create' });
+      const actions = within(sheet).getAllByRole('link', { name: /^New / });
+      expect(actions.map(action => [action.textContent, action.getAttribute('href')])).toEqual([
+        ['New Task', '/tasks/new'],
+        ['New Goal', '/goals?new=1'],
+        ['New Plan', '/studio/new'],
+        ['New Automation', '/automations/new'],
+      ]);
+    },
+  );
+
+  it.each([
+    ['New Task', '/tasks/new'],
+    ['New Goal', '/goals?new=1'],
+    ['New Plan', '/studio/new'],
+    ['New Automation', '/automations/new'],
+  ])('navigates to %s from the Create sheet and marks Create active', (label, to) => {
+    renderNavigation('/inbox');
+    fireEvent.click(screen.getByRole('button', { name: 'Create' }));
+    fireEvent.click(screen.getByRole('link', { name: label }));
+    expect(screen.getByTestId('location').textContent).toBe(to);
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Create' })).toHaveAttribute('aria-current', 'page');
+    expect(screen.getByRole('button', { name: 'More' })).not.toHaveAttribute('aria-current');
+  });
+
+  it('closes the Create sheet with Escape and restores focus', () => {
+    renderNavigation('/');
+    const create = screen.getByRole('button', { name: 'Create' });
+    fireEvent.click(create);
+    expect(screen.getByRole('dialog', { name: 'Create' })).toContainElement(document.activeElement as HTMLElement);
+    fireEvent.keyDown(document, { key: 'Escape' });
+    expect(screen.queryByRole('dialog', { name: 'Create' })).not.toBeInTheDocument();
+    expect(create).toHaveFocus();
+  });
+
+  it('disables Create in demo mode', () => {
+    renderNavigation('/', vi.fn(), user, true);
+    const create = screen.getByRole('button', { name: 'Create unavailable in demo mode' });
+    expect(create).toBeDisabled();
+    fireEvent.click(create);
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+  });
+
+  it('keeps creation out of the More sheet', () => {
+    renderNavigation('/');
+    fireEvent.click(screen.getByRole('button', { name: 'More' }));
+    const more = screen.getByRole('dialog', { name: 'More' });
+    expect(within(more).queryAllByRole('link', { name: /^New / })).toHaveLength(0);
   });
 
   it('names the dashboard tab the way the sidebar does, with no second name for it', () => {
@@ -164,7 +178,10 @@ describe('MobileBottomNavigation', () => {
     const dialog = screen.getByRole('dialog', { name: 'More' });
     expect(dialog).toBeInTheDocument();
     expect(within(dialog).queryByRole('link', { name: 'Dashboard' })).not.toBeInTheDocument();
-    expect(within(dialog).getByRole('link', { name: 'Tasks' })).toHaveAttribute('href', '/tasks');
+    expect(within(dialog).queryByRole('link', { name: 'Tasks' })).not.toBeInTheDocument();
+    expect(within(dialog).getByRole('link', { name: 'Repositories' })).toHaveAttribute('href', '/repositories');
+    expect(within(dialog).getByRole('link', { name: 'Automations' })).toHaveAttribute('href', '/automations');
+    expect(within(dialog).getByRole('link', { name: 'Analytics' })).toHaveAttribute('href', '/analytics');
     expect(screen.getByRole('link', { name: 'Plans' })).toBeInTheDocument();
     expect(screen.getByRole('link', { name: 'Coding Agents' })).toBeInTheDocument();
     expect(screen.getByRole('link', { name: 'LLM Log' })).toBeInTheDocument();
@@ -174,6 +191,15 @@ describe('MobileBottomNavigation', () => {
     expect(screen.getByText('The Octocat')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Sign out' })).toBeInTheDocument();
     expect(dialog).toContainElement(document.activeElement as HTMLElement);
+    // Identity leads the sheet instead of trailing every destination.
+    expect(within(dialog).getByRole('button', { name: 'Sign out' }).compareDocumentPosition(
+      within(dialog).getByRole('link', { name: 'Goals' }),
+    ) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(within(dialog).getAllByRole('heading', { level: 3 }).map(heading => heading.textContent)).toEqual([
+      'Workspace',
+      'Telemetry & system',
+      'Configuration',
+    ]);
 
     fireEvent.keyDown(document, { key: 'Escape' });
 
@@ -181,7 +207,7 @@ describe('MobileBottomNavigation', () => {
     expect(moreButton).toHaveFocus();
 
     fireEvent.click(moreButton);
-    fireEvent.click(screen.getByTestId('mobile-more-backdrop'));
+    fireEvent.click(screen.getByTestId('mobile-more-sheet-backdrop'));
 
     expect(screen.queryByRole('dialog', { name: 'More' })).not.toBeInTheDocument();
     expect(moreButton).toHaveFocus();
@@ -199,10 +225,17 @@ describe('MobileBottomNavigation', () => {
     expect(moreButton).toHaveAttribute('aria-current', 'page');
   });
 
-  it.each(['/tasks', '/tasks/task-1', '/admin/members', '/llm-logs', '/mcp-logs'])('marks More active for %s', route => {
+  it.each(['/repositories', '/automations', '/analytics', '/admin/members', '/llm-logs', '/mcp-logs'])('marks More active for %s', route => {
     renderNavigation(route);
 
     expect(screen.getByRole('button', { name: 'More' })).toHaveAttribute('aria-current', 'page');
+  });
+
+  it.each(['/tasks', '/tasks/task-1'])('marks Tasks active for %s', route => {
+    renderNavigation(route);
+
+    expect(screen.getByRole('link', { name: 'Tasks' })).toHaveAttribute('aria-current', 'page');
+    expect(screen.getByRole('button', { name: 'More' })).not.toHaveAttribute('aria-current');
   });
 
   it('offers the MCP log only to operators who may read it', () => {
@@ -228,7 +261,7 @@ describe('MobileBottomNavigation', () => {
 
     fireEvent.click(screen.getByRole('button', { name: 'More' }));
 
-    expect(screen.getByRole('link', { name: 'Tasks' })).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'Settings' })).toBeInTheDocument();
     expect(screen.queryByRole('link', { name: 'Access' })).not.toBeInTheDocument();
   });
 
@@ -241,7 +274,7 @@ describe('MobileBottomNavigation', () => {
     expect(onLogout).toHaveBeenCalledOnce();
   });
 
-  it('shows Agent Tank usage for users with agent management permission', async () => {
+  it('condenses Agent Tank usage into one summary row for users with agent management permission', async () => {
     mockGetAgentTankUsage.mockResolvedValue({
       enabled: true,
       agents: {
@@ -255,9 +288,9 @@ describe('MobileBottomNavigation', () => {
     renderNavigation();
     fireEvent.click(screen.getByRole('button', { name: 'More' }));
 
-    expect(await screen.findByText('Usage')).toBeInTheDocument();
-    expect(screen.getByText('Claude')).toBeInTheDocument();
-    expect(screen.getByText('25%')).toBeInTheDocument();
+    expect(await screen.findByText('API & quota usage')).toBeInTheDocument();
+    expect(screen.getByTestId('usage-summary')).toHaveTextContent('Claude 25%');
+    expect(screen.getByText('API & quota usage').closest('details')).not.toHaveAttribute('open');
     expect(screen.getByTitle('Refresh usage')).toBeInTheDocument();
   });
 
@@ -275,7 +308,7 @@ describe('MobileBottomNavigation', () => {
     renderNavigation('/tasks', vi.fn(), { ...user, permissions: [] });
     fireEvent.click(screen.getByRole('button', { name: 'More' }));
 
-    expect(screen.queryByText('Usage')).not.toBeInTheDocument();
+    expect(screen.queryByText('API & quota usage')).not.toBeInTheDocument();
     expect(mockGetAgentTankUsage).not.toHaveBeenCalled();
   });
 
@@ -293,8 +326,8 @@ describe('MobileBottomNavigation', () => {
     renderNavigation('/tasks', vi.fn(), { ...user, permissions: [] }, true);
     fireEvent.click(screen.getByRole('button', { name: 'More' }));
 
-    expect(await screen.findByText('Usage')).toBeInTheDocument();
-    expect(screen.getByText('Codex')).toBeInTheDocument();
+    expect(await screen.findByText('API & quota usage')).toBeInTheDocument();
+    expect(screen.getByTestId('usage-summary')).toHaveTextContent('Codex 40%');
     expect(screen.queryByTitle('Refresh usage')).not.toBeInTheDocument();
   });
 
