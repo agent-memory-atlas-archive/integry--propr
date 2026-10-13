@@ -66,33 +66,17 @@ async function getGitStatusOutput(git: SimpleGit): Promise<string> {
 }
 
 /**
- * Get git diff stat output for uncommitted or committed changes
+ * Get git diff stat output for uncommitted changes
  */
-async function getGitDiffStatOutput(git: SimpleGit, hasUncommittedChanges: boolean): Promise<string> {
-    if (hasUncommittedChanges) {
-        try {
-            return (await git.diff(['--stat', 'HEAD'])).trim();
-        } catch {
-            try {
-                return (await git.diff(['--stat', '--cached'])).trim();
-            } catch {
-                return '';
-            }
-        }
-    }
-
-    // No uncommitted changes, check against tracking branch
+async function getGitDiffStatOutput(git: SimpleGit): Promise<string> {
     try {
-        let trackingBranch: string;
-        try {
-            trackingBranch = (await git.revparse(['--abbrev-ref', '@{upstream}'])).trim();
-        } catch {
-            trackingBranch = 'HEAD~1';
-        }
-
-        return (await git.diff(['--stat', `${trackingBranch}...HEAD`])).trim();
+        return (await git.diff(['--stat', 'HEAD'])).trim();
     } catch {
-        return '';
+        try {
+            return (await git.diff(['--stat', '--cached'])).trim();
+        } catch {
+            return '';
+        }
     }
 }
 
@@ -212,7 +196,19 @@ export async function getWorktreeChanges(worktreePath: string): Promise<FileChan
     try {
         const git: SimpleGit = simpleGit({ baseDir: worktreePath });
         const statusOutput = await getGitStatusOutput(git);
-        const statOutput = await getGitDiffStatOutput(git, !!statusOutput);
+        if (!statusOutput) {
+            // After post-processing commits the task, HEAD has no working diff.
+            // Read status, counts and patch from the same committed range so the
+            // final cache cannot replace the live patch with empty metadata.
+            let comparisonBranch: string;
+            try {
+                comparisonBranch = (await git.revparse(['--abbrev-ref', '@{upstream}'])).trim();
+            } catch {
+                comparisonBranch = 'HEAD~1';
+            }
+            return parseCommitDiffOutput(await git.diff([`${comparisonBranch}...HEAD`]));
+        }
+        const statOutput = await getGitDiffStatOutput(git);
 
         if (!statOutput) return [];
 
