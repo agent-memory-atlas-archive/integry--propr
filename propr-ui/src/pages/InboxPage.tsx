@@ -22,6 +22,10 @@ function inboxState(inbox: InboxNotificationsState): 'loading' | 'empty' | 'erro
   return inbox.hasMore ? null : 'empty';
 }
 
+/** Whether a read of the list is in flight, so another page must wait for it. */
+const readingPage = (inbox: InboxNotificationsState): boolean =>
+  inbox.initialLoading || inbox.refreshing || inbox.loadingMore || inbox.clearing;
+
 const InboxPage: React.FC = () => {
   useDocumentTitle('Inbox');
   const location = useLocation();
@@ -55,10 +59,13 @@ const InboxPage: React.FC = () => {
 
   const { selected, select, closePane, isSplitViewport } = useInboxTriage({
     queue: activity,
+    notifications: inbox.notifications,
     dismiss,
     open: inbox.open,
     mutationsEnabled: listProps.mutationsEnabled,
     loaded: !inbox.initialLoading && inbox.error === null,
+    hasMore: inbox.hasMore,
+    loadMore: readingPage(inbox) ? null : inbox.loadMore,
   });
 
   const showState = inboxState(inbox);

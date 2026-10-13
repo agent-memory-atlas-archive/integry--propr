@@ -6,7 +6,8 @@ import { ToastProvider } from '../ui/Toast';
 import type { TaskRunEntry } from '../TaskList/rowModel';
 import type { Task } from '../TaskList/types';
 import LatestRunCommands from './LatestRunCommands';
-import { latestRunFollowup } from './runFollowup';
+import { notificationSchema } from '@propr/shared';
+import { latestRunFollowup, notificationRunFollowup } from './runFollowup';
 
 vi.mock('../../api/proprApi', () => ({ postTaskFollowup: vi.fn() }));
 
@@ -45,6 +46,30 @@ describe('latestRunFollowup', () => {
   test('offers nothing on a clean review', () => {
     expect(latestRunFollowup([run(1, 'review', { score: 10 })], 'run-1')).toBeNull();
     expect(latestRunFollowup([{ ...run(1, 'review', { score: 9 }), summary: 'Score 9/10 · 0 issues found' }], 'run-1')).toBeNull();
+  });
+
+  test('reads a review summary as the Inbox reads its recap: a failed reviewer leaves something to fix', () => {
+    const recap = 'Scores 9/10, 8/10 · 0 issues found · 1 reviewer failed';
+    expect(latestRunFollowup([{ ...run(1, 'review', { score: 9 }), summary: recap }], 'run-1')?.commands).toEqual(['/fix']);
+  });
+});
+
+describe('notificationRunFollowup', () => {
+  const reviewNotification = notificationSchema.parse({
+    id: 'review-1', deduplicationKey: 'review-1', kind: 'review', severity: 'success',
+    target: { type: 'review', repository: 'integry/propr', prNumber: 3065, taskId: 'run-2' },
+    title: 'Review', body: 'Score 6/10 · 1 issue found: Guard the cursor', actions: ['follow_up', 'dismiss'],
+    occurredAt: '2026-10-13T10:00:00.000Z', createdAt: '2026-10-13T10:00:00.000Z', readAt: null, dismissedAt: null,
+  });
+
+  test('offers the notification its commands while its run is the newest', () => {
+    expect(notificationRunFollowup(reviewNotification, [implementation, review])).toEqual({ taskId: 'run-2', prNumber: 3065, commands: ['/fix'] });
+  });
+
+  test('offers nothing once a newer run supersedes it, before the runs are read, or for a clean recap', () => {
+    expect(notificationRunFollowup(reviewNotification, [implementation, review, run(3, 'fix')])).toBeNull();
+    expect(notificationRunFollowup(reviewNotification, null)).toBeNull();
+    expect(notificationRunFollowup({ ...reviewNotification, body: 'Score 9/10 · 0 issues found' }, [implementation, review])).toBeNull();
   });
 });
 

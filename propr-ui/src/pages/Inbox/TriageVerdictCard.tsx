@@ -6,7 +6,8 @@ import { getFileChanges } from '../../api/fileChangesApi';
 import { getTasks } from '../../api/proprApi';
 import NotificationActions from '../../components/Inbox/NotificationActions';
 import { ReferenceChip } from '../../components/TaskList/ReferenceChips';
-import { taskPath } from '../../components/TaskList/rowModel';
+import { buildTaskRow, buildTaskRuns, taskPath, type TaskRunEntry } from '../../components/TaskList/rowModel';
+import type { TaskGroup } from '../../components/TaskList/types';
 import { groupTasksForDisplay } from '../../components/TaskList/utils';
 import {
   formatRelativeTime,
@@ -31,37 +32,48 @@ const SECTION_HEADING = 'text-[11px] font-bold uppercase tracking-wider text-sla
 
 const pluralize = (count: number, word: string) => `${count} ${word}${count === 1 ? '' : 's'}`;
 
-/** The newest earlier run of the review's task that pushed a commit: the code the review read. */
-async function reviewedRun(reviewTaskId: string): Promise<string | null> {
-  const data = await getTasks({ groupBy: 'task', task: reviewTaskId, limit: 1, offset: 0 });
-  const group = groupTasksForDisplay(data.tasks ?? []).find(entry => entry.tasks.some(task => task.id === reviewTaskId));
-  return group ? reviewedRunId(group.tasks, reviewTaskId) : null;
+/** Every run of the task the notification's run belongs to, or null when it cannot be read. */
+async function readTaskGroup(taskId: string): Promise<TaskGroup | null> {
+  const data = await getTasks({ groupBy: 'task', task: taskId, limit: 1, offset: 0 });
+  return groupTasksForDisplay(data.tasks ?? []).find(entry => entry.tasks.some(task => task.id === taskId)) ?? null;
+}
+
+interface TriageRead {
+  diff: TriageDiff | null;
+  /** The task's runs, oldest first; null until read, or when they cannot be. */
+  runs: TaskRunEntry[] | null;
 }
 
 /**
- * The few changed lines behind the selected notification, read once per
- * selection, never polled, and silent when it fails, because the verdict and
- * the buttons are what the card is for. A review commits nothing, so when its
- * own run has no changes the card reads the run it reviewed instead.
+ * What the card reads for the selected notification: the few changed lines
+ * behind it and its task's runs, each read once per selection, never polled,
+ * and silent when they fail, because the verdict is what the card is for. A
+ * review commits nothing, so when its own run has no changes the card shows
+ * the newest earlier run of the task that pushed a commit, the code it read.
  */
-function useTriageDiff(taskId: string | null, isReview: boolean): TriageDiff | null {
-  const [diff, setDiff] = useState<TriageDiff | null>(null);
+function useTriageRead(taskId: string | null, isReview: boolean): TriageRead {
+  const [read, setRead] = useState<TriageRead>({ diff: null, runs: null });
   useEffect(() => {
-    setDiff(null);
+    setRead({ diff: null, runs: null });
     if (!taskId) return;
     let current = true;
-    const read = async () => {
+    const group = readTaskGroup(taskId).catch(() => null);
+    void group.then(found => {
+      if (current && found) setRead(previous => ({ ...previous, runs: buildTaskRuns(buildTaskRow(found)) }));
+    });
+    const readDiff = async () => {
       const own = trimDiffForTriage((await getFileChanges(taskId)).files ?? []);
       if (own.files.length > 0 || !isReview || !current) return own;
-      const reviewed = await reviewedRun(taskId);
+      const found = await group;
+      const reviewed = found && current ? reviewedRunId(found.tasks, taskId) : null;
       return reviewed && current ? trimDiffForTriage((await getFileChanges(reviewed)).files ?? []) : own;
     };
-    read()
-      .then(result => { if (current) setDiff(result); })
+    readDiff()
+      .then(diff => { if (current) setRead(previous => ({ ...previous, diff })); })
       .catch(() => undefined);
     return () => { current = false; };
   }, [taskId, isReview]);
-  return diff;
+  return read;
 }
 
 const ReviewVerdict: React.FC<{ notification: Notification }> = ({ notification }) => {
@@ -144,7 +156,7 @@ const TriageVerdictCard: React.FC<TriageVerdictCardProps> = ({
   paneControls,
 }) => {
   const taskId = triageTaskId(notification);
-  const diff = useTriageDiff(taskId, notification.target.type === 'review');
+  const { diff, runs } = useTriageRead(taskId, notification.target.type === 'review');
   const reference = notificationReference(notification);
   const pullRequestUrl = notificationPullRequestUrl(notification);
   const status = notificationStatus(notification);
@@ -210,6 +222,7 @@ const TriageVerdictCard: React.FC<TriageVerdictCardProps> = ({
         )}
         <NotificationActions
           notification={notification}
+          runs={runs}
           mutationsEnabled={mutationsEnabled}
           onCommandSent={() => onCommandSent(notification.id)}
           className="ml-auto"

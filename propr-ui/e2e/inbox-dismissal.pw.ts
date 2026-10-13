@@ -385,9 +385,38 @@ for (const viewport of [singleColumnDesktop, { width: 390, height: 844 }]) {
   });
 }
 
+/** One run of PR `prNumber`'s task, as `/api/tasks?groupBy=task` lists it. */
+const taskRun = (id: string, prNumber: number, title: string, minutes: number, commitHash: string | null = null) => ({
+  id, repository: 'integry/propr', repoOwner: 'integry', repoName: 'propr', prNumber, status: 'completed',
+  title, createdAt: minutesAgo(minutes), updatedAt: minutesAgo(minutes), commitHash,
+});
+
+/**
+ * Serves `/api/tasks?groupBy=task&task=<run>` from `groups`, the runs of each
+ * task newest first, and records the run each read asked for.
+ */
+async function stubTaskGroups(page: Page, groups: Record<string, ReturnType<typeof taskRun>[]>): Promise<string[]> {
+  const reads: string[] = [];
+  await page.route(/\/api\/tasks\?/, route => {
+    const params = new URL(route.request().url()).searchParams;
+    const runId = params.get('task');
+    // The shell reads the task list too; only the verdict's task-scoped reads are recorded.
+    if (params.get('groupBy') !== 'task' || !runId) return route.fulfill({ json: { tasks: [], total: 0 } });
+    reads.push(`${runId}:${params.get('limit')}`);
+    const tasks = Object.values(groups).find(runs => runs.some(run => run.id === runId)) ?? [];
+    return route.fulfill({ json: { tasks, total: tasks.length ? 1 : 0, offset: 0, limit: 1, totalRuns: tasks.length } });
+  });
+  return reads;
+}
+
 test('wide screens triage the selected row in a verdict card beside the queue', async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
   await stubInbox(page, triageNotifications);
+  // Each review is still its task's newest run, so its verdict offers /fix.
+  await stubTaskGroups(page, {
+    2511: [taskRun('task-2511', 2511, 'Review PR #2511: MCP operator surface', 14)],
+    2519: [taskRun('task-2519', 2519, 'Review PR #2519: Retry webhook deliveries', 32)],
+  });
   const fileChangeReads: string[] = [];
   await page.route('**/api/task/*/file-changes', route => {
     const taskId = decodeURIComponent(new URL(route.request().url()).pathname.split('/').at(-2)!);
@@ -458,4 +487,42 @@ test('wide screens triage the selected row in a verdict card beside the queue', 
     name: 'Retry webhook deliveries that time out', exact: true,
   })).toHaveAttribute('aria-current', 'true');
   await capture(page, 'inbox-triage-console-advanced-desktop.png');
+});
+
+test('an older review shows the diff it reviewed but no /fix once a newer run of its task exists', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await stubInbox(page, triageNotifications);
+  // PR #2511: a fix has run since the review; the review read the implementation's commit.
+  const taskReads = await stubTaskGroups(page, {
+    2511: [
+      taskRun('fix-2511', 2511, 'Fix PR #2511: MCP operator surface', 4, 'f1x0000'),
+      taskRun('task-2511', 2511, 'Review PR #2511: MCP operator surface', 14),
+      taskRun('impl-2511', 2511, 'Implement PR #2511: MCP operator surface', 40, 'abc1234'),
+    ],
+  });
+  const fileChangeReads: string[] = [];
+  await page.route('**/api/task/*/file-changes', route => {
+    const taskId = decodeURIComponent(new URL(route.request().url()).pathname.split('/').at(-2)!);
+    fileChangeReads.push(taskId);
+    // The review itself committed nothing.
+    const files = taskId === 'impl-2511' ? [{
+      path: 'packages/core/src/activity.ts', status: 'modified', linesAdded: 1, linesRemoved: 0,
+      diff: '@@ -40 +40,2 @@\n+  return reviewedPage;',
+    }] : [];
+    return route.fulfill({ json: { taskId, lastUpdated: timestamp, files } });
+  });
+  await page.route(/\/api\/notifications\/[^/]+\/read$/, route => {
+    const id = decodeURIComponent(new URL(route.request().url()).pathname.split('/').at(-2)!);
+    const notification = triageNotifications.find(entry => entry.id === id)!;
+    return route.fulfill({ json: { notification: { ...notification, readAt: new Date().toISOString() }, unreadCount: 0 } });
+  });
+  await page.goto('/inbox?notification=review-2511');
+  const verdict = page.getByRole('region', { name: 'Triage verdict' });
+  await expect(verdict.getByRole('heading', { name: 'Review verdict: 2 findings (Score 6/10)' })).toBeVisible();
+  await expect(verdict.getByText('+   return reviewedPage;')).toBeVisible();
+  expect(taskReads).toEqual(['task-2511:1']);
+  expect(fileChangeReads).toEqual(['task-2511', 'impl-2511']);
+  await expect(verdict.getByRole('button', { name: /^Send \// })).toHaveCount(0);
+  await expect(verdict.getByRole('link', { name: /Inspect in Tasks/ })).toHaveAttribute('href', '/tasks/task-2511');
+  await capture(page, 'inbox-verdict-superseded-review-desktop.png');
 });

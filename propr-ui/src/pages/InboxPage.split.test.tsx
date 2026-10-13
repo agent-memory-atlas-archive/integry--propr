@@ -1,10 +1,11 @@
+/* eslint-disable max-lines */
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import { notificationSchema, type Notification } from '@propr/shared';
 import { ToastProvider } from '../components/ui/Toast';
 import InboxPage from './InboxPage';
-import { dismissNotification, listNotifications } from '../api/notificationApi';
+import { dismissNotification, listNotifications, markNotificationRead } from '../api/notificationApi';
 import { getFileChanges } from '../api/fileChangesApi';
 import { getTasks, postTaskFollowup } from '../api/proprApi';
 import { resetFollowupSubmissions } from '../components/Inbox/followupSubmissions';
@@ -75,6 +76,16 @@ const failed = item('failed-3049', 28, {
 });
 const queue = [review, ready, failed];
 
+// Each notification's run is its task's newest, so its commands are offered.
+const newestRuns: Record<string, Record<string, unknown>> = {
+  'task-3057': { title: 'Review PR #3057: Draft validation', prNumber: 3057 },
+  'task-3063': { title: 'Implement PR #3063: Mobile footer', prNumber: 3063 },
+  'task-3049': { title: 'Implement issue #3049', issueNumber: 3049 },
+};
+const taskRun = (id: string, minutes: number, fields: Record<string, unknown> = {}) => ({
+  id, repository: 'integry/propr', status: 'completed', createdAt: at(minutes), commitHash: null, ...fields,
+});
+
 const Location = () => <output data-testid="location">{useLocation().search}</output>;
 const search = () => new URLSearchParams(screen.getByTestId('location').textContent ?? '');
 
@@ -104,6 +115,10 @@ const pane = () => screen.queryByRole('region', { name: 'Triage verdict' });
 
 describe('Inbox triage console', () => {
   beforeEach(() => {
+    vi.mocked(getTasks).mockImplementation(async options => {
+      const id = (options as { task: string }).task;
+      return { tasks: [taskRun(id, 1, newestRuns[id])] } as never;
+    });
     vi.mocked(listNotifications).mockResolvedValue({ notifications: queue, unreadCount: 0, nextCursor: null });
     vi.mocked(dismissNotification).mockImplementation(async id => ({
       notification: { ...queue.find(entry => entry.id === id)!, dismissedAt: at(0) } as Notification, unreadCount: 0,
@@ -149,7 +164,7 @@ describe('Inbox triage console', () => {
     expect(card.queryByText(/more findings? in Tasks/)).not.toBeInTheDocument();
     expect(card.getByRole('link', { name: 'PR #3057 on GitHub' })).toHaveAttribute('href', 'https://github.com/integry/propr/pull/3057');
     expect(card.getByRole('link', { name: /Inspect in Tasks/ })).toHaveAttribute('href', '/tasks/task-3057');
-    expect(card.getByRole('button', { name: 'Send /fix to PR #3057' })).toBeInTheDocument();
+    expect(await card.findByRole('button', { name: 'Send /fix to PR #3057' })).toBeInTheDocument();
     expect(await card.findByText(/claude-opus-5\.5/)).toBeInTheDocument();
     expect(getFileChanges).toHaveBeenCalledTimes(1);
     expect(getFileChanges).toHaveBeenCalledWith('task-3057');
@@ -267,8 +282,9 @@ describe('Inbox triage console', () => {
     vi.mocked(postTaskFollowup).mockResolvedValue(undefined as never);
     renderInbox(`/inbox?notification=${review.id}`);
     await screen.findByRole('article', { name: review.title });
+    const fix = await within(pane()!).findByRole('button', { name: 'Send /fix to PR #3057' });
     await act(async () => {
-      fireEvent.click(within(pane()!).getByRole('button', { name: 'Send /fix to PR #3057' }));
+      fireEvent.click(fix);
     });
     expect(postTaskFollowup).toHaveBeenCalledWith('task-3057', '/fix', 'pull_request');
     await waitFor(() => expect(search().get('notification')).toBe(ready.id));
@@ -281,13 +297,13 @@ describe('Inbox triage console', () => {
     vi.mocked(postTaskFollowup).mockReturnValue(new Promise(done => { resolve = () => done({ success: true, message: 'Posted' }); }));
     renderInbox(`/inbox?notification=${review.id}`);
     await screen.findByRole('article', { name: review.title });
-    fireEvent.click(within(pane()!).getByRole('button', { name: 'Send /fix to PR #3057' }));
+    fireEvent.click(await within(pane()!).findByRole('button', { name: 'Send /fix to PR #3057' }));
     expect(postTaskFollowup).toHaveBeenCalledTimes(1);
 
     fireEvent.click(row(ready.title));
     expect(search().get('notification')).toBe(ready.id);
     fireEvent.click(row(review.title));
-    const fix = within(pane()!).getByRole('button', { name: 'Send /fix to PR #3057' });
+    const fix = await within(pane()!).findByRole('button', { name: 'Send /fix to PR #3057' });
     expect(fix).toBeDisabled();
     fireEvent.click(fix);
     expect(postTaskFollowup).toHaveBeenCalledTimes(1);
@@ -341,6 +357,104 @@ describe('Inbox triage console', () => {
     expect(await card.findByText(/const reviewed = true;/)).toBeInTheDocument();
     expect(getTasks).toHaveBeenCalledWith({ groupBy: 'task', task: 'task-3057', limit: 1, offset: 0 });
     expect(vi.mocked(getFileChanges).mock.calls.map(([taskId]) => taskId)).toEqual(['task-3057', 'task-3055']);
+  });
+
+  test('a review verdict offers /fix only while the review is still its task\'s newest run', async () => {
+    mockViewport(true);
+    vi.mocked(getTasks).mockResolvedValue({ tasks: [
+      taskRun('task-3058', 2, { title: 'Fix PR #3057: Draft validation', prNumber: 3057 }),
+      taskRun('task-3057', 18, newestRuns['task-3057']),
+    ] } as never);
+    renderInbox(`/inbox?notification=${review.id}`);
+    const card = within(await screen.findByRole('region', { name: 'Triage verdict' }));
+    await waitFor(() => expect(getTasks).toHaveBeenCalledWith({ groupBy: 'task', task: 'task-3057', limit: 1, offset: 0 }));
+    // A fix has run since the review, so /fix would replay it against code that has moved on.
+    await act(async () => undefined);
+    expect(card.queryByRole('button', { name: /^Send \// })).not.toBeInTheDocument();
+    expect(card.getByRole('link', { name: /Inspect in Tasks/ })).toHaveAttribute('href', '/tasks/task-3057');
+  });
+
+  test('the verdict offers no commands while its task\'s runs cannot be read', async () => {
+    mockViewport(true);
+    vi.mocked(getTasks).mockRejectedValue(new Error('unavailable'));
+    renderInbox(`/inbox?notification=${review.id}`);
+    const card = within(await screen.findByRole('region', { name: 'Triage verdict' }));
+    expect(await card.findByText(/claude-opus-5\.5/)).toBeInTheDocument();
+    expect(card.queryByRole('button', { name: /^Send \// })).not.toBeInTheDocument();
+  });
+
+  test('a selection on a page not loaded yet is looked for instead of being dropped', async () => {
+    mockViewport(true);
+    const older = item('review-2990', 600, {
+      kind: 'review', target: { type: 'review', repository: 'integry/propr', prNumber: 2990, taskId: 'task-2990' },
+      title: 'Older review on the third page', body: 'Score 5/10 · 1 issue found: Guard the cursor',
+    });
+    const middle = item('failed-2995', 300, {
+      kind: 'task', severity: 'error',
+      target: { type: 'task', repository: 'integry/propr', taskId: 'task-2995', issueNumber: 2995 },
+      title: 'Second page failure', body: 'Work did not complete.', actions: ['dismiss'],
+    });
+    vi.mocked(listNotifications).mockImplementation(async ({ cursor } = {}) => {
+      if (!cursor) return { notifications: queue, unreadCount: 0, nextCursor: 'page-2' };
+      if (cursor === 'page-2') return { notifications: [middle], unreadCount: 0, nextCursor: 'page-3' };
+      return { notifications: [older], unreadCount: 0, nextCursor: null };
+    });
+    renderInbox(`/inbox?notification=${older.id}&repository=integry%2Fpropr`);
+    const card = within(await screen.findByRole('region', { name: 'Triage verdict' }));
+    expect(card.getByRole('heading', { name: older.title })).toBeInTheDocument();
+    expect(search().get('notification')).toBe(older.id);
+    expect(search().get('repository')).toBe('integry/propr');
+    expect(vi.mocked(listNotifications).mock.calls.map(([options]) => options?.cursor ?? null)).toEqual([null, 'page-2', 'page-3']);
+  });
+
+  test('a selection is dropped only once every page has been read without finding it', async () => {
+    mockViewport(true);
+    vi.mocked(listNotifications).mockImplementation(async ({ cursor } = {}) => (cursor
+      ? { notifications: [], unreadCount: 0, nextCursor: null }
+      : { notifications: queue, unreadCount: 0, nextCursor: 'page-2' }));
+    renderInbox('/inbox?notification=dismissed-elsewhere');
+    await screen.findByRole('article', { name: review.title });
+    await waitFor(() => expect(search().get('notification')).toBeNull());
+    expect(listNotifications).toHaveBeenCalledTimes(2);
+    expect(pane()).not.toBeInTheDocument();
+  });
+
+  test('a selection is kept while the page that would hold it fails to load', async () => {
+    mockViewport(true);
+    vi.mocked(listNotifications).mockImplementation(async ({ cursor } = {}) => {
+      if (cursor) throw new Error('offline');
+      return { notifications: queue, unreadCount: 0, nextCursor: 'page-2' };
+    });
+    renderInbox('/inbox?notification=review-2990');
+    await screen.findByRole('article', { name: review.title });
+    await waitFor(() => expect(listNotifications).toHaveBeenCalledTimes(2));
+    await act(async () => undefined);
+    expect(search().get('notification')).toBe('review-2990');
+    expect(listNotifications).toHaveBeenCalledTimes(2);
+  });
+
+  test('reopening an unread item after its read failed tries the read again, once per opening', async () => {
+    mockViewport(true);
+    const unread = { ...review, readAt: null } as Notification;
+    vi.mocked(listNotifications).mockResolvedValue({ notifications: [unread, ready, failed], unreadCount: 1, nextCursor: null });
+    vi.mocked(markNotificationRead).mockRejectedValue(new Error('offline'));
+    renderInbox();
+    await screen.findByRole('article', { name: review.title });
+    fireEvent.click(row(review.title));
+    await waitFor(() => expect(markNotificationRead).toHaveBeenCalledTimes(1));
+    // The failed read rolls the item back to unread without retrying in a loop.
+    await act(async () => undefined);
+    expect(markNotificationRead).toHaveBeenCalledTimes(1);
+
+    vi.mocked(markNotificationRead).mockResolvedValue({ notification: { ...unread, readAt: at(0) }, unreadCount: 0 } as never);
+    fireEvent.click(row(ready.title));
+    fireEvent.click(row(review.title));
+    await waitFor(() => expect(markNotificationRead).toHaveBeenCalledTimes(2));
+
+    fireEvent.keyDown(window, { key: 'Escape' });
+    fireEvent.click(row(review.title));
+    await act(async () => undefined);
+    expect(markNotificationRead).toHaveBeenCalledTimes(2);
   });
 
   test('narrow viewports keep the single column and rows navigate', async () => {

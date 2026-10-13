@@ -86,8 +86,11 @@ export function notificationFindingReference(text: string): { reference: string;
  * "Score 6/10 · 2 issues found: …" or "Scores 6/10, 8/10 · 1 issue found".
  */
 export function notificationReviewOutcome(notification: Notification): ReviewOutcome | null {
-  if (notification.kind !== 'review') return null;
-  const body = notification.body;
+  return notification.kind === 'review' ? reviewRecapOutcome(notification.body) : null;
+}
+
+/** The score and finding count in any text carrying a review recap, such as a review run's summary. */
+export function reviewRecapOutcome(body: string): ReviewOutcome {
   const scoreText = /\bScores? ((?:\d+(?:\.\d+)?\/10(?:, )?)+)/.exec(body)?.[1] ?? '';
   const scores = [...scoreText.matchAll(/(\d+(?:\.\d+)?)\/10/g)].map(match => Number(match[1]));
   const issueCount = Number(/\b(\d+) issues? found\b/.exec(body)?.[1] ?? 0);
@@ -180,11 +183,17 @@ export interface NotificationFollowupCommand {
   commands: readonly string[];
 }
 
-/** A review whose reviewers all reported and found nothing, so there is nothing to /fix. */
-function isIssueFreeReview(notification: Notification): boolean {
-  const outcome = notificationReviewOutcome(notification);
-  return outcome !== null && !outcome.reviewerFailed && /\b0 issues found\b/.test(notification.body);
+/**
+ * A review recap whose reviewers all reported and found nothing, so there is
+ * nothing to /fix. The Inbox reads it from the notification and Tasks from the
+ * review run's summary, so both offer /fix on the same reviews.
+ */
+export function isIssueFreeReviewRecap(body: string): boolean {
+  return !reviewRecapOutcome(body).reviewerFailed && /\b0 issues found\b/.test(body);
 }
+
+const isIssueFreeReview = (notification: Notification): boolean =>
+  notification.kind === 'review' && isIssueFreeReviewRecap(notification.body);
 
 /**
  * The only buttons an Inbox card offers: the common next command after a

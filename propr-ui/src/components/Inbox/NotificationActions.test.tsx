@@ -4,6 +4,7 @@ import { beforeEach, describe, expect, test, vi } from 'vitest';
 import { postTaskFollowup } from '../../api/proprApi';
 import { ToastProvider } from '../ui/Toast';
 import { notificationFollowupCommand } from '../../pages/inboxUtils';
+import type { TaskRunEntry } from '../TaskList/rowModel';
 import NotificationActions from './NotificationActions';
 
 vi.mock('../../api/proprApi', () => ({
@@ -33,6 +34,12 @@ const review = notification({
   title: 'Review completed for PR #12',
   target: { type: 'review', repository: 'integry/propr', prNumber: 12, taskId: 'task-review' },
 });
+
+/** The task's runs when the notification's run is the newest, so its commands are offered. */
+const newestRun = (id: string, type: string | null): TaskRunEntry[] => [{
+  number: 1, type, summary: '', outcome: 'passed',
+  task: { id, status: 'completed', createdAt: '2026-08-24T12:00:00.000Z', prNumber: 12 },
+}];
 
 describe('Notification follow-up commands', () => {
   beforeEach(() => {
@@ -68,7 +75,7 @@ describe('Notification follow-up commands', () => {
     const onCommandSent = vi.fn().mockResolvedValue(undefined);
     render(
       <ToastProvider>
-        <NotificationActions notification={review} mutationsEnabled onCommandSent={onCommandSent} />
+        <NotificationActions notification={review} runs={newestRun('task-review', 'review')} mutationsEnabled onCommandSent={onCommandSent} />
       </ToastProvider>,
     );
 
@@ -90,7 +97,12 @@ describe('Notification follow-up commands', () => {
     });
     render(
       <ToastProvider>
-        <NotificationActions notification={pullRequest} mutationsEnabled onCommandSent={onCommandSent} />
+        <NotificationActions
+          notification={pullRequest}
+          runs={newestRun('task-implementation', null)}
+          mutationsEnabled
+          onCommandSent={onCommandSent}
+        />
       </ToastProvider>,
     );
 
@@ -104,10 +116,27 @@ describe('Notification follow-up commands', () => {
     expect(screen.queryByRole('menu')).not.toBeInTheDocument();
   });
 
+  test('renders nothing until the runs are read, or once a newer run supersedes the notification\'s', () => {
+    const { rerender } = render(
+      <ToastProvider>
+        <NotificationActions notification={review} runs={null} mutationsEnabled onCommandSent={vi.fn()} />
+      </ToastProvider>,
+    );
+    expect(screen.queryByRole('button')).not.toBeInTheDocument();
+    const [reviewRun] = newestRun('task-review', 'review');
+    const [fixRun] = newestRun('task-fix', 'fix');
+    rerender(
+      <ToastProvider>
+        <NotificationActions notification={review} runs={[reviewRun, { ...fixRun, number: 2 }]} mutationsEnabled onCommandSent={vi.fn()} />
+      </ToastProvider>,
+    );
+    expect(screen.queryByRole('button')).not.toBeInTheDocument();
+  });
+
   test('renders nothing in read-only mode', () => {
     render(
       <ToastProvider>
-        <NotificationActions notification={review} mutationsEnabled={false} onCommandSent={vi.fn()} />
+        <NotificationActions notification={review} runs={newestRun('task-review', 'review')} mutationsEnabled={false} onCommandSent={vi.fn()} />
       </ToastProvider>,
     );
     expect(screen.queryByRole('button')).not.toBeInTheDocument();

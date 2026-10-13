@@ -27,7 +27,7 @@ interface ActionBarProps {
   compact?: boolean;
   /** Mobile: the overflow opens as a bottom action sheet rather than a popover. */
   sheet?: boolean;
-  /** The newest run's follow-up commands for its pull request; the compact bar leaves them to the full header. */
+  /** The newest run's follow-up commands for its pull request, shown in the full bar only: the compact bar returns before rendering them. */
   followupCommands?: React.ReactNode;
 }
 
