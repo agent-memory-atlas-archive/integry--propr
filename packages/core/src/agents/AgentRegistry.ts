@@ -76,9 +76,7 @@ export class AgentRegistry {
      * work; first-use initialization and missing-image recovery use the
      * preparation path below so execution cannot remain permanently degraded.
      */
-    refresh(): Promise<void> {
-        return this.requestRefresh(false);
-    }
+    refresh(): Promise<void> { return this.requestRefresh(false); }
 
     /**
      * Prepares missing base and runtime-package images, then refreshes the
@@ -86,9 +84,7 @@ export class AgentRegistry {
      * API and analysis processes use the worker-owned preparation queue when an
      * image is missing. Ordinary configuration reloads use refresh().
      */
-    prepareImagesAndRefresh(): Promise<void> {
-        return this.requestRefresh(true);
-    }
+    prepareImagesAndRefresh(): Promise<void> { return this.requestRefresh(true); }
 
     /** Runs automatic preparation through this registry's backoff and circuit. */
     async recoverImagesAndRefresh(): Promise<void> {
@@ -248,20 +244,14 @@ export class AgentRegistry {
     /**
      * Gets an agent by its unique ID.
      */
-    getAgentById(id: string): Agent | undefined {
-        return this.agents.get(id);
-    }
+    getAgentById(id: string): Agent | undefined { return this.agents.get(id); }
 
     /**
      * Gets an agent by its human-readable alias.
      */
-    getAgentByAlias(alias: string): Agent | undefined {
-        return this.agentsByAlias.get(alias);
-    }
+    getAgentByAlias(alias: string): Agent | undefined { return this.agentsByAlias.get(alias); }
 
-    beginRoutingSession(options: BeginSyntheticRoutingOptions): SyntheticRoutingSession {
-        return this.syntheticAgents.begin(options);
-    }
+    beginRoutingSession(options: BeginSyntheticRoutingOptions): SyntheticRoutingSession { return this.syntheticAgents.begin(options); }
 
     /**
      * Gets the default agent based on settings, then fallback to 'default' alias or first available.
@@ -274,16 +264,12 @@ export class AgentRegistry {
         // First try the configured default agent from settings
         if (this.defaultAgentAlias) {
             const configuredAgent = this.agentsByAlias.get(this.defaultAgentAlias);
-            if (configuredAgent) {
-                return configuredAgent;
-            }
+            if (configuredAgent) return configuredAgent;
         }
 
         // Then try to get agent with 'default' alias
         const defaultAgent = this.agentsByAlias.get('default');
-        if (defaultAgent) {
-            return defaultAgent;
-        }
+        if (defaultAgent) return defaultAgent;
 
         // No default agent configured — return undefined so callers handle the error explicitly
         return undefined;
@@ -292,28 +278,20 @@ export class AgentRegistry {
     /**
      * Sets the default agent alias (used when syncing from settings).
      */
-    setDefaultAgentAlias(alias: string | null): void {
-        this.defaultAgentAlias = alias;
-    }
+    setDefaultAgentAlias(alias: string | null): void { this.defaultAgentAlias = alias; }
 
     /**
      * Gets the current default agent alias from the registry's cached settings.
      */
-    getDefaultAgentAlias(): string | null {
-        return this.defaultAgentAlias;
-    }
+    getDefaultAgentAlias(): string | null { return this.defaultAgentAlias; }
 
     /**
      * Gets all registered agent instances.
      */
-    getAllAgents(): Agent[] {
-        return Array.from(this.agents.values());
-    }
+    getAllAgents(): Agent[] { return Array.from(this.agents.values()); }
 
     /** Capability-probes the exact configured image using non-inference introspection. */
-    async getGoalCapabilities(options: { force?: boolean } = {}): Promise<GoalCapability[]> {
-        return this.goalCapabilityProbe.getAll(this.getAllAgents(), options);
-    }
+    async getGoalCapabilities(options: { force?: boolean } = {}): Promise<GoalCapability[]> { return this.goalCapabilityProbe.getAll(this.getAllAgents(), options); }
 
     /**
      * Gets all agent configurations (including disabled ones from config).
@@ -331,9 +309,7 @@ export class AgentRegistry {
     /**
      * Checks if the registry has been initialized.
      */
-    isInitialized(): boolean {
-        return this.initialized;
-    }
+    isInitialized(): boolean { return this.initialized; }
 
     getOperationalStatus(): AgentRegistryOperationalStatus {
         if (this.unavailableUnifiedAgentImage) {
@@ -514,9 +490,7 @@ export class AgentRegistry {
 
     private clearUnifiedAgentImageRetry(): void { if (this.unifiedAgentImageRetryTimer) clearTimeout(this.unifiedAgentImageRetryTimer); this.unifiedAgentImageRetryTimer = null; }
 
-    createAgentFromConfig(config: AgentConfig): Agent {
-        return createAgentFromConfig(config);
-    }
+    createAgentFromConfig(config: AgentConfig): Agent { return createAgentFromConfig(config); }
 
     private async registerDefaultAgent(prepareImages: boolean): Promise<void> {
         const result = await resolveDefaultAgentConfig(prepareImages);
