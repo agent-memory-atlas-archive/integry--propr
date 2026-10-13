@@ -37,6 +37,28 @@ const verifyArtifact = (evidence, bytes, artifacts = [authoritative(bytes)]) => 
   signingRunId: '123', evidence, json: async () => ({ artifacts }), request: async () => new Response(bytes),
 });
 
+test('acceptance artifact ZIP download uses the GitHub API Accept header', async () => {
+  const evidence = passed();
+  const bytes = archive(evidence);
+  let downloads = 0;
+  await verifySignedRpmEvidenceArtifact({
+    signingRunId: '123', evidence,
+    json: async path => {
+      assert.equal(path, '/actions/runs/123/artifacts?per_page=100&page=1');
+      return { artifacts: [authoritative(bytes)] };
+    },
+    request: async (path, options) => {
+      assert.equal(path, '/actions/artifacts/42/zip');
+      if (options?.headers?.Accept !== 'application/vnd.github+json') {
+        throw new Error('GitHub API artifact ZIP download failed with HTTP 415: Unsupported Accept header');
+      }
+      downloads++;
+      return new Response(bytes);
+    },
+  });
+  assert.equal(downloads, 1);
+});
+
 test('publication verifies the retained signing-run archive rather than trusting local passed JSON', async () => {
   const evidence = passed();
   const bytes = archive(evidence);
