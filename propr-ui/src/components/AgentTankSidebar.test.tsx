@@ -173,7 +173,7 @@ describe('AgentTankSidebar Antigravity rows', () => {
     mockGetAgentTankUsage.mockResolvedValue(response);
     await renderSidebar();
 
-    fireEvent.click(providerRow('Antigravity'));
+    expect(providerRow('Antigravity')).toHaveAttribute('aria-expanded', 'true');
 
     expect(screen.getByText('Claude and GPT')).toBeInTheDocument();
     expect(screen.getByText('Claude Sonnet 9.1'))
