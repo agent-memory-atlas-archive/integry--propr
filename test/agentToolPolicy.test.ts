@@ -139,6 +139,14 @@ describe('launcher integration', () => {
         assert.ok(!args.some(arg => arg.includes(TOKEN)));
     });
 
+    test('Codex: exclusive catalogs enable the container config guard after operator environment values', () => {
+        const args = buildCodexDockerArgs({ ...codexConfig, envVars: { PROPR_EXTENSION_EXCLUSIVE_MCP: '0' } }, { ...baseParams, toolPolicy: { ...MCP_POLICY, exclusiveMcp: true } });
+        assert.ok(args.includes('--ignore-user-config'));
+        assert.ok(args.lastIndexOf('PROPR_EXTENSION_EXCLUSIVE_MCP=1') > args.lastIndexOf('PROPR_EXTENSION_EXCLUSIVE_MCP=0'));
+        assert.ok(hasSequence(args, ['-e', 'PROPR_EXTENSION_EXCLUSIVE_MCP=1']));
+        assert.ok(!buildCodexDockerArgs(codexConfig, baseParams).includes('PROPR_EXTENSION_EXCLUSIVE_MCP=1'));
+    });
+
     test('Codex: no toolPolicy leaves the arguments unchanged', () => {
         const without = buildCodexDockerArgs(codexConfig, baseParams);
         assert.ok(!without.includes('web_search="disabled"'));

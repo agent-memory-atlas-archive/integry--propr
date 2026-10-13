@@ -12,16 +12,16 @@ export function ExtensionProfileSelector({ value, onChange, disabled = false }: 
     return () => { active = false; };
   }, [permitted]);
   if (!permitted && !value) return null;
-  const selected = profiles.find(p => p.profileId === value?.profileId && p.revision === value.revision);
+  const selected = permitted ? profiles.find(p => p.profileId === value?.profileId && p.revision === value.revision) : undefined;
   return <div className="space-y-2 text-sm">
     <label className="block font-medium text-slate-700">Agent extension profile
-      <select aria-label="Agent extension profile" disabled={disabled || !permitted} value={selected?.profileId ?? (value ? 'unavailable' : '')} onChange={event => {
-        const profile = profiles.find(p => p.profileId === event.target.value);
+      <select aria-label="Agent extension profile" disabled={disabled} value={selected?.profileId ?? (value ? 'unavailable' : '')} onChange={event => {
+        const profile = permitted ? profiles.find(p => p.profileId === event.target.value) : undefined;
         onChange(profile ? { instanceId: profile.instanceId, profileId: profile.profileId, revision: profile.revision } : null);
       }} className="mt-2 block w-full rounded-md border border-slate-300 bg-white p-2">
         <option value="">None</option>
-        {value && !selected && <option value="unavailable" disabled>Selected revision unavailable — select a current profile</option>}
-        {profiles.map(p => <option key={p.profileId} value={p.profileId}>{p.name} · revision {p.revision}</option>)}
+        {value && !selected && <option value="unavailable" disabled>{permitted ? 'Selected revision unavailable — clear selection or select a current profile' : 'Selected revision unavailable — choose None to clear'}</option>}
+        {permitted && profiles.map(p => <option key={p.profileId} value={p.profileId}>{p.name} · revision {p.revision}</option>)}
       </select>
     </label>
     <p className="text-xs text-slate-500">Claude and Codex task runs only. Profiles keep the run’s existing repository, network and tool restrictions.</p>

@@ -7,8 +7,9 @@ import { isNonPublicAddress } from '../network/egressProxy.js';
 const responseWireBytes = new WeakMap<object, number>();
 /** Internal accounting metadata; never serialized with an MCP response. */
 export const extensionResponseWireBytes = (value: unknown): number | undefined => value !== null && typeof value === 'object' ? responseWireBytes.get(value) : undefined;
+// Match the egress proxy: fake-IP DNS uses 198.18.0.0/15 for public names.
 const additional = new BlockList();
-for (const [address, prefix] of [['198.18.0.0', 15], ['192.0.2.0', 24], ['198.51.100.0', 24], ['203.0.113.0', 24]] as const) additional.addSubnet(address, prefix, 'ipv4');
+for (const [address, prefix] of [['192.0.2.0', 24], ['198.51.100.0', 24], ['203.0.113.0', 24]] as const) additional.addSubnet(address, prefix, 'ipv4');
 additional.addSubnet('2001:db8::', 32, 'ipv6');
 additional.addSubnet('fec0::', 10, 'ipv6');
 additional.addSubnet('2002::', 16, 'ipv6');

@@ -16,11 +16,12 @@ export async function extensionGatewayCall(store: ExtensionProfileStore, token: 
   const rpc = body as Record<string, unknown>;
   if (rpc.jsonrpc !== '2.0' || Object.keys(rpc).some(k => !['jsonrpc', 'id', 'method', 'params'].includes(k)) || !(rpc.id === undefined || typeof rpc.id === 'string' || typeof rpc.id === 'number') || !['initialize', 'ping', 'notifications/initialized', 'tools/list', 'tools/call'].includes(String(rpc.method))) throw new ExtensionError(403, 'MCP method unavailable');
   const params = rpc.params as Record<string, unknown> | undefined;
-  if (rpc.method === 'tools/call' && (!params || typeof params.name !== 'string' || !server.tools.includes(params.name) || Object.keys(params).some(k => !['name', 'arguments'].includes(k)))) throw new ExtensionError(403, 'MCP tool unavailable');
+  if (rpc.method === 'tools/call' && (!params || typeof params.name !== 'string' || !server.tools.includes(params.name) || Object.keys(params).some(k => !['name', 'arguments', '_meta'].includes(k)))) throw new ExtensionError(403, 'MCP tool unavailable');
   // Stateful upstream MCP is intentionally unsupported: no upstream session
   // headers/cookies or reverse requests can extend a run's capabilities.
   let upstream: unknown;
-  try { upstream = await send(server.url, body, secrets[serverName]); } catch { throw new ExtensionError(502, 'MCP connection failed'); }
+  const forwarded = rpc.method === 'tools/call' ? { ...rpc, params: { name: params!.name, ...(params!.arguments === undefined ? {} : { arguments: params!.arguments }) } } : rpc;
+  try { upstream = await send(server.url, forwarded, secrets[serverName]); } catch { throw new ExtensionError(502, 'MCP connection failed'); }
   if (upstream === null && rpc.id === undefined) return null;
   if (!upstream || typeof upstream !== 'object' || Array.isArray(upstream)) throw new ExtensionError(502, 'MCP protocol unavailable');
   responseBytes = extensionResponseWireBytes(upstream) ?? EXTENSION_LIMITS.responseBytes;

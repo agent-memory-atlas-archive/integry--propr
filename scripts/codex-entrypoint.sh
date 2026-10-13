@@ -101,6 +101,22 @@ if [ -d "/home/node/workspace" ]; then
     fi
 fi
 
+# Check the container-visible ancestry after repository setup has completed.
+# The user config is intentionally ignored by --ignore-user-config; project
+# config remains loadable by the pinned CLI and can expand the MCP catalog.
+if [ "${PROPR_EXTENSION_EXCLUSIVE_MCP:-0}" = "1" ]; then
+    extension_config_cursor=$(cd /home/node/workspace && pwd -P)
+    while :; do
+        extension_config_candidate="$extension_config_cursor/.codex/config.toml"
+        if [ "$extension_config_candidate" != "${CODEX_HOME:-/home/node/.codex}/config.toml" ] && { [ -e "$extension_config_candidate" ] || [ -L "$extension_config_candidate" ]; }; then
+            echo "Codex extension runs cannot load project MCP configuration" >&2
+            exit 1
+        fi
+        [ "$extension_config_cursor" = "/" ] && break
+        extension_config_cursor=$(dirname "$extension_config_cursor")
+    done
+fi
+
 # If arguments are provided, execute them
 if [ $# -gt 0 ]; then
     echo "Executing command: $@"

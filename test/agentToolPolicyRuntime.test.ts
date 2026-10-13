@@ -216,3 +216,50 @@ describe('Codex runtime honours the tool policy', { skip: skipUnlessPinned('code
         assert.ok(mcpAuthorizations.every(header => header === `Bearer ${TOKEN}`), `Authorization: ${mcpAuthorizations.join(', ')}`);
     });
 });
+
+describe('Codex extension configuration on the pinned CLI', { skip: skipUnlessPinned('codex', 'CODEX_CLI_VERSION') }, () => {
+    test('ignoring user config also removes the operator provider and base URL', { timeout: 120_000 }, async () => {
+        const home = mkdtempSync(join(tmpdir(), 'codex-extension-provider-'));
+        const requests: string[] = [];
+        const server = createServer(async (req, res) => {
+            await readBody(req); requests.push(req.url ?? '');
+            res.writeHead(400, { 'content-type': 'application/json' }).end(JSON.stringify({ error: { message: 'fixture ends here' } }));
+        });
+        await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+        try {
+            const baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+            writeFileSync(join(home, 'config.toml'), `model_provider="operator"\n[model_providers.operator]\nname="Operator"\nbase_url="${baseUrl}/operator"\nwire_api="responses"\nenv_key="FIXTURE_OPERATOR_KEY"\nrequest_max_retries=0\nstream_max_retries=0\n`);
+            const env = { PATH: process.env.PATH ?? '', HOME: home, CODEX_HOME: home, FIXTURE_OPERATOR_KEY: 'synthetic-operator-key' };
+            const args = ['exec', '--ephemeral', '--json', '--dangerously-bypass-approvals-and-sandbox', '--skip-git-repo-check', '--model', 'gpt-5.5', '-c', 'features.multi_agent=false', '-'];
+            const ordinary = await runCli('codex', args, env, 'Reply OK.');
+            assert.ok(requests.some(url => url.startsWith('/operator/')), ordinary);
+            requests.length = 0;
+            const exclusive = await runCli('codex', [...args.slice(0, -1), ...codexToolPolicyArgs({ allowWeb: false, exclusiveMcp: true }).cliArgs, '-c', 'model_provider="operator"', '-'], env, 'Reply OK.');
+            assert.equal(requests.length, 0);
+            assert.match(exclusive, /[Pp]rovider.*operator.*not found/);
+        } finally { server.close(); rmSync(home, { recursive: true, force: true }); }
+    });
+});
+
+test('Codex entrypoint rejects container project ancestry after setup and skips ignored user configuration', () => {
+    const script = readFileSync(new URL('../scripts/codex-entrypoint.sh', import.meta.url), 'utf8');
+    const guard = script.slice(script.indexOf('if [ "${PROPR_EXTENSION_EXCLUSIVE_MCP'), script.indexOf('# If arguments are provided'));
+    assert.ok(guard.includes('cannot load project MCP configuration'));
+    const root = mkdtempSync(join(tmpdir(), 'codex-container-ancestry-'));
+    const workspace = join(root, 'home', 'node', 'workspace');
+    const userHome = join(root, 'home', 'node', '.codex');
+    mkdirSync(workspace, { recursive: true }); mkdirSync(userHome);
+    writeFileSync(join(userHome, 'config.toml'), 'model_provider="operator"');
+    const containerGuard = guard.replace('cd /home/node/workspace', `cd '${workspace}'`);
+    const run = (exclusive: string) => spawnSync('bash', ['-c', `set -e\n${containerGuard}`], { env: { ...process.env, CODEX_HOME: userHome, PROPR_EXTENSION_EXCLUSIVE_MCP: exclusive }, encoding: 'utf8' });
+    try {
+        assert.equal(run('1').status, 0);
+        // A repository setup hook may create this after host-side validation.
+        mkdirSync(join(workspace, '.codex')); writeFileSync(join(workspace, '.codex', 'config.toml'), '[mcp_servers.ambient]\ncommand="unselected"');
+        assert.equal(run('1').status, 1); assert.match(run('1').stderr, /project MCP configuration/);
+        assert.equal(run('0').status, 0);
+        rmSync(join(workspace, '.codex'), { recursive: true });
+        mkdirSync(join(root, 'home', '.codex')); writeFileSync(join(root, 'home', '.codex', 'config.toml'), '[mcp_servers.ambient]');
+        assert.equal(run('1').status, 1);
+    } finally { rmSync(root, { recursive: true, force: true }); }
+});

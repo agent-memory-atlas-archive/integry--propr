@@ -116,7 +116,9 @@ export class ExtensionProfileStore {
       // apply to later launches and cannot mutate the now-running snapshot.
       const fenced = await trx('extension_profiles').where({ id: selection.profileId, instance_id: selection.instanceId, revision: selection.revision, enabled: true, deleted: false }).update({ enabled: true });
       if (!fenced) throw new ExtensionError(409, 'Extension profile changed before launch');
-      const claimed = await trx('extension_run_grants').where({ token_hash: extensionTokenHash(token), actor, profile_id: selection.profileId, revision: selection.revision, active: false }).where('expires_at', '>', Date.now()).update({ active: true });
+      // Repeated launches for this same run token retain their snapshot and
+      // still recheck authority/revision; helper containers never reach here.
+      const claimed = await trx('extension_run_grants').where({ token_hash: extensionTokenHash(token), actor, profile_id: selection.profileId, revision: selection.revision }).where('expires_at', '>', Date.now()).update({ active: true });
       if (!claimed) throw new ExtensionError(409, 'Extension launch grant unavailable');
     });
   }
@@ -136,13 +138,21 @@ export class ExtensionProfileStore {
     const hash = extensionTokenHash(token);
     const changed = await this.database('extension_run_grants').where({ token_hash: hash, active: true }).where('connections', '<', 4).where('expires_at', '>', Date.now()).where('calls', '<', EXTENSION_LIMITS.calls).where('bytes', '<=', EXTENSION_LIMITS.egressBytes - EXTENSION_LIMITS.responseBytes).increment({ calls: 1, bytes: EXTENSION_LIMITS.responseBytes, connections: 1 });
     if (!changed) throw new ExtensionError(401, 'Extension grant expired or exhausted');
-    const grant = await this.database('extension_run_grants').where({ token_hash: hash }).first();
-    const row = await this.database('extension_profile_revisions').where({ profile_id: grant.profile_id, revision: grant.revision }).first();
-    if (!row) throw new ExtensionError(401, 'Extension grant unavailable');
-    const snapshot = JSON.parse(row.snapshot) as ExtensionProfileRevision;
-    const expected = { instanceId: await this.instanceId(), profileId: grant.profile_id as string, revision: Number(grant.revision) };
-    if (snapshot.version !== 1 || snapshot.instanceId !== expected.instanceId || snapshot.profileId !== expected.profileId || snapshot.revision !== expected.revision) throw new ExtensionError(401, 'Extension revision identity mismatch');
-    // Running snapshots survive profile edits/disable/delete. Credentials never leave Core.
-    return { snapshot, secrets: unsealExtensionSecrets(row.secrets_encrypted, identity(expected), this.environment) };
+    try {
+      const grant = await this.database('extension_run_grants').where({ token_hash: hash }).first();
+      if (!grant) throw new ExtensionError(401, 'Extension grant unavailable');
+      const row = await this.database('extension_profile_revisions').where({ profile_id: grant.profile_id, revision: grant.revision }).first();
+      if (!row) throw new ExtensionError(401, 'Extension grant unavailable');
+      const snapshot = JSON.parse(row.snapshot) as ExtensionProfileRevision;
+      const expected = { instanceId: await this.instanceId(), profileId: grant.profile_id as string, revision: Number(grant.revision) };
+      if (snapshot.version !== 1 || snapshot.instanceId !== expected.instanceId || snapshot.profileId !== expected.profileId || snapshot.revision !== expected.revision) throw new ExtensionError(401, 'Extension revision identity mismatch');
+      // Running snapshots survive profile edits/disable/delete. Credentials never leave Core.
+      return { snapshot, secrets: unsealExtensionSecrets(row.secrets_encrypted, identity(expected), this.environment) };
+    } catch (error) {
+      // The reservation belongs to this call even if snapshot loading fails.
+      // Keep the failed-call byte charge but release its connection slot.
+      await this.finishGatewayCall(token, EXTENSION_LIMITS.responseBytes);
+      throw error;
+    }
   }
 }

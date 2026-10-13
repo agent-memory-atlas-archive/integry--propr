@@ -1,6 +1,6 @@
 import { redactSecrets } from '../utils/secretRedaction.js';
 
-export function redactExtensionOutput(value: unknown, secrets: string[]): unknown {
+export function redactExtensionOutput(value: unknown, secrets: string[], schema = false): unknown {
   const scrub = (text: string) => {
     let result = text;
     for (const secret of secrets.filter(Boolean)) {
@@ -9,8 +9,8 @@ export function redactExtensionOutput(value: unknown, secrets: string[]): unknow
     return redactSecrets(result);
   };
   if (typeof value === 'string') return scrub(value);
-  if (Array.isArray(value)) return value.map(v => redactExtensionOutput(v, secrets));
-  if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value).map(([key, v]) => [scrub(key), /^(authorization|cookie|set-cookie|.*token|.*secret|.*password)$/i.test(key) ? '[REDACTED]' : redactExtensionOutput(v, secrets)]));
+  if (Array.isArray(value)) return value.map(v => redactExtensionOutput(v, secrets, schema));
+  if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value).map(([key, v]) => [scrub(key), !schema && /^(authorization|proxy-authorization|cookie|set-cookie|x-api-key)$/i.test(key) ? '[REDACTED]' : redactExtensionOutput(v, secrets, schema || key === 'inputSchema')]));
   return value;
 }
 /** Holds a bounded suffix so credentials split across subprocess chunks are

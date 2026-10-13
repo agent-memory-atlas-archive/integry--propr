@@ -15,6 +15,7 @@ import { createPreviewMediaRoutes } from './routes/previewMediaRoutes.js';
 import { ROUTING_STATUS_REDIS_KEY } from '@propr/shared';
 /* eslint-disable max-lines -- route registration and coordinated shutdown share startup state */
 import express, { Request, Response } from 'express';
+import { pathToFileURL } from 'node:url';
 import { mountMcp, mcpResponseHeaders } from './mcp/server.js';
 import { getMcpOriginSync, isMcpEnabledSync, invalidateMcpConfigCache, resolveMcpConfig } from './mcp/configResolver.js';
 import { createServer, Server as HttpServer } from 'http';
@@ -184,7 +185,7 @@ const processCommentEventWrapper = (payload: CommentPayload, eventType: CommentE
 const handleCommentDeletedWrapper = (payload: CommentPayload, eventType: CommentEventType, correlationId: string): Promise<void> => handleCommentDeleted(payload, eventType, correlationId, getCommentConfig());
 const handleCommentEditedWrapper = (payload: CommentPayload, eventType: CommentEventType, correlationId: string): Promise<void> => handleCommentEdited(payload, eventType, correlationId, getCommentConfig());
 
-const app = express();
+export const app = express();
 app.use(refusePublicFleetData);
 const PORT = Number(process.env.DASHBOARD_API_PORT || 4000);
 const HOST = resolveApiListenHost();
@@ -293,7 +294,7 @@ function createDemoTaskQueue(): Queue {
   } as unknown as Queue;
 }
 
-async function initRedis(): Promise<void> {
+export async function initRedis(): Promise<void> {
   if (demoMode) {
     redisClient = createDemoRedisClient();
     taskQueue = createDemoTaskQueue();
@@ -323,7 +324,7 @@ async function initRedis(): Promise<void> {
 
 let readSystemStatus: (() => Promise<Record<string, unknown>>) | undefined;
 
-function setupRoutes(): void {
+export function setupRoutes(): void {
   const statusRoutes = createStatusRoutes({
     redisClient,
     ...(notificationBackground === undefined ? {} : {
@@ -769,4 +770,4 @@ async function start(): Promise<void> {
   }
 }
 
-start();
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) void start();

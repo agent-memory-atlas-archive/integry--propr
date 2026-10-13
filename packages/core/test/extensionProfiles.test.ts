@@ -101,7 +101,9 @@ test('typed descriptors reject commands, host paths, mounts, credentials and unk
 
 test('HTTPS policy refuses private, metadata, mapped addresses and DNS rebinding', async () => {
   for (const url of ['http://example.com/mcp', 'https://user:secret@example.com/mcp', 'https://example.com/mcp#token', 'https://example.com/mcp?token=secret', 'https://localhost/mcp', 'https://127.0.0.1/mcp', 'https://169.254.169.254/mcp', 'https://10.0.0.1/mcp', 'https://[::ffff:127.0.0.1]/mcp', 'https://[fc00::1]/mcp']) assert.throws(() => extensionEndpoint(url));
-  for (const address of ['127.0.0.1', '169.254.169.254', '10.0.0.1', '172.16.0.1', '192.168.1.1', '::1', '::ffff:127.0.0.1', '64:ff9b::7f00:1', '198.18.0.1', '2001:db8::1']) assert.equal(extensionPublicAddress(address), false, address);
+  for (const address of ['127.0.0.1', '169.254.169.254', '10.0.0.1', '172.16.0.1', '192.168.1.1', '::1', '::ffff:127.0.0.1', '64:ff9b::7f00:1', '2001:db8::1']) assert.equal(extensionPublicAddress(address), false, address);
+  assert.equal(extensionPublicAddress('198.18.0.1'), true);
+  assert.equal((await resolveExtensionEndpoint('https://tools.example.com/mcp', async () => [{ address: '198.18.0.1', family: 4 }])).address, '198.18.0.1');
   await assert.rejects(resolveExtensionEndpoint('https://tools.example.com/mcp', async () => [{ address: '8.8.8.8', family: 4 }, { address: '10.0.0.1', family: 4 }]), /public/);
   let calls = 0; const lookup = async () => [{ address: ++calls === 1 ? '8.8.8.8' : '127.0.0.1', family: 4 }];
   assert.equal((await resolveExtensionEndpoint('https://tools.example.com/mcp', lookup)).address, '8.8.8.8');
@@ -154,6 +156,13 @@ test('selected skill appears only in its read-only run staging and all temporary
     assert.match(await fs.readFile(path.join(staged, bundle.id, 'SKILL.md'), 'utf8'), /synthetic-skill/);
     assert.match(prepared.prompt, /\/opt\/propr\/extensions/);
     assert.ok(!JSON.stringify(prepared.toolPolicy!.mcpServers!.map(({ bearerToken: _token, ...args }) => args)).includes(secret));
+    const { extensionLaunchForDockerRun } = await import('../src/extensions/extensionLaunch.js');
+    assert.equal(extensionLaunchForDockerRun('docker', ['run'], { taskId: options.taskId, extensionAgentLaunch: true }), launch);
+    assert.equal(extensionLaunchForDockerRun('docker', ['run'], {}), undefined);
+    assert.equal(extensionLaunchForDockerRun('docker', ['run'], { taskId: options.taskId }), undefined);
+    assert.equal(extensionLaunchForDockerRun('docker', ['run'], { taskId: options.taskId, extensionAgentLaunch: true, costCapExempt: true }), undefined);
+    assert.equal(extensionLaunchForDockerRun('docker', ['run'], { taskId: 'another-task', extensionAgentLaunch: true }), undefined);
+    await launch.beforeLaunch();
     await launch.beforeLaunch();
     const token = prepared.toolPolicy!.mcpServers![0].bearerToken;
     await extensionGatewayCall(store, token, 'docs', { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'lookup' } }, async () => ({ jsonrpc: '2.0', id: 1, result: { content: [{ type: 'text', text: secret }] } }));
@@ -250,4 +259,50 @@ test('stored revision and credential substitutions cannot redirect a live grant 
   await assert.rejects(store.grantSnapshot(token), /identity mismatch/);
   await database('extension_profile_revisions').where({ profile_id: first.profileId, revision: 1 }).update({ snapshot: JSON.stringify(first) });
   await assert.rejects(store.grantSnapshot(token), /credentials unavailable/);
+});
+
+
+test('gateway accepts progress metadata without forwarding it and preserves credential-named schemas', async t => {
+  const { database, store } = await fixture(); t.after(() => database.destroy());
+  const profile = await store.save('1', input(), { docs: secret });
+  const token = await store.createGrant('1', profile, 'progress'); await store.activateGrant(token, '1', select(profile));
+  await store.activateGrant(token, '1', select(profile)); // Same task's retry is idempotent.
+  await assert.rejects(store.activateGrant(token, '3', select(profile)), /grant unavailable/);
+  const schema = { type: 'object', properties: { page_token: { type: 'string' }, secret: { type: 'string' }, password: { type: 'string' }, authorization: { type: 'string' } } };
+  const catalog = await extensionGatewayCall(store, token, 'docs', { jsonrpc: '2.0', id: 1, method: 'tools/list' }, async () => ({ jsonrpc: '2.0', id: 1, result: { tools: [{ name: 'lookup', inputSchema: schema, description: secret }] } }));
+  assert.deepEqual((catalog as any).result.tools[0].inputSchema, schema);
+  assert.equal((catalog as any).result.tools[0].description, '[REDACTED]');
+  const body = { jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'lookup', arguments: { page_token: 'next' }, _meta: { progressToken: 'progress-1' } } };
+  await extensionGatewayCall(store, token, 'docs', body, async (_url, forwarded) => {
+    assert.deepEqual(forwarded, { ...body, params: { name: 'lookup', arguments: { page_token: 'next' } } });
+    return { jsonrpc: '2.0', id: 2, result: { Authorization: 'Bearer unrelated', text: secret } };
+  });
+  await assert.rejects(extensionGatewayCall(store, token, 'docs', { ...body, params: { ...body.params, unauthorized: true } }), /tool unavailable/);
+  await assert.rejects(extensionGatewayCall(store, token, 'docs', { ...body, params: { ...body.params, name: 'unselected' } }), /tool unavailable/);
+  assert.deepEqual(redactExtensionOutput({ headers: { Authorization: 'Bearer unrelated', 'x-api-key': 'unknown' }, next_token: 'next', password: { type: 'string' } }, []), { headers: { Authorization: '[REDACTED]', 'x-api-key': '[REDACTED]' }, next_token: 'next', password: { type: 'string' } });
+});
+
+test('snapshot loading failures release only their own reserved slot and keep failure charges', async t => {
+  const { database, store } = await fixture(); t.after(() => database.destroy());
+  const profile = await store.save('1', input(), { docs: secret });
+  const token = await store.createGrant('1', profile, 'bad-snapshot'); await store.activateGrant(token, '1', select(profile));
+  const revision = await database('extension_profile_revisions').first();
+  // Keep a successful call outstanding: failed loads must not release its slot.
+  await store.grantSnapshot(token);
+  for (const mutation of [
+    { snapshot: JSON.stringify({ ...profile, instanceId: randomUUID() }) },
+    { snapshot: revision.snapshot, secrets_encrypted: 'invalid' },
+  ]) {
+    await database('extension_profile_revisions').update(mutation);
+    await assert.rejects(extensionGatewayCall(store, token, 'docs', { jsonrpc: '2.0', id: 1, method: 'ping' }));
+    assert.equal((await database('extension_run_grants').first()).connections, 1);
+  }
+  await database('extension_profile_revisions').delete();
+  await assert.rejects(store.grantSnapshot(token), /unavailable/);
+  const grant = await database('extension_run_grants').first();
+  assert.equal(grant.connections, 1); assert.equal(grant.calls, 4);
+  const { EXTENSION_LIMITS } = await import('@propr/shared');
+  assert.equal(grant.bytes, 4 * EXTENSION_LIMITS.responseBytes);
+  await store.finishGatewayCall(token, EXTENSION_LIMITS.responseBytes);
+  assert.equal((await database('extension_run_grants').first()).connections, 0);
 });

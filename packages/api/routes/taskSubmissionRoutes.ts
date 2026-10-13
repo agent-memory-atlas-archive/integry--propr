@@ -51,8 +51,7 @@ export async function authorizeTaskSubmissionRepository(req: Request, repository
   return config;
 }
 
-async function routing(body: { agentAlias?: string; model?: string }) {
-  const registry = AgentRegistry.getInstance();
+export async function routing(body: { agentAlias?: string; model?: string; extensionProfile?: import('@propr/shared').ExtensionSelection | null }, registry = AgentRegistry.getInstance(), labelLookup = getLlmLabel) {
   await registry.ensureInitialized();
   const defaults = !body.agentAlias ? await resolvePlanIssueDefaultSelection() : null;
   const agentAlias = body.agentAlias || defaults?.agent_alias;
@@ -61,7 +60,10 @@ async function routing(body: { agentAlias?: string; model?: string }) {
   if (!agent?.config.enabled || !model || !agent.config.supportedModels.includes(model)) {
     throw Object.assign(new Error('Selected agent or model is no longer available. Choose a supported selection in Options.'), { status: 400 });
   }
-  const label = await getLlmLabel(model, agent.config.alias);
+  if (body.extensionProfile && !['claude', 'codex'].includes(agent.config.type)) {
+    throw Object.assign(new Error('Extension profiles require Claude or Codex task execution'), { status: 400 });
+  }
+  const label = await labelLookup(model, agent.config.alias);
   if (!label) throw Object.assign(new Error('Selected agent/model cannot be routed through GitHub issues'), { status: 400 });
   return { agentAlias: agent.config.alias, model, routingLabel: label };
 }

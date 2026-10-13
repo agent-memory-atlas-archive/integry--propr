@@ -113,7 +113,7 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
     credentials: 'include',
     ...init,
     headers: init.body && !(init.body instanceof FormData)
-      ? { 'Content-Type': 'application/json', 'X-ProPR-Extensions': '1', ...init.headers }
+      ? { 'Content-Type': 'application/json', ...init.headers }
       : init.headers,
   });
   if (response.ok || response.status === 401) {
@@ -134,7 +134,7 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
 
 const json = (method: string, body?: unknown): RequestInit => ({
   method,
-  ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+  ...(body === undefined ? {} : { body: JSON.stringify(body), ...((body as { extensionProfile?: unknown })?.extensionProfile ? { headers: { 'X-ProPR-Extensions': '1' } } : {}) }),
 });
 
 const query = (page: Page = {}): string => {

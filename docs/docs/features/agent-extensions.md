@@ -37,7 +37,9 @@ validation returns only server names and reachable booleans.
 Endpoints must use port 443 and have no credentials, query parameters or fragments.
 Core resolves and checks all DNS answers on every connection, then dials only a
 vetted address while verifying the original TLS identity. Redirects, private,
-loopback, link-local, metadata and reserved destinations are refused. V1 has no
+loopback, link-local, metadata and reserved destinations are refused. The fake-IP
+DNS range `198.18.0.0/15` remains reachable, matching the existing egress proxy;
+TLS still verifies the original endpoint hostname. V1 has no
 operator-installed local catalog runner: internal exceptions and local stdio are
 therefore unavailable. Customer commands, host paths, Docker sockets and bind
 mounts are rejected by the shared strict contract.
@@ -61,8 +63,13 @@ Bearer/header values, exact configured secrets and their common encodings are
 redacted from gateway output, including tool descriptions. Upstream errors and
 connectivity validation disclose no response content. Claude uses a strict MCP
 catalog. Codex ignores its ambient user configuration while retaining the existing
-`CODEX_HOME` authentication; profile runs refuse `.codex/config.toml` in the task
-workspace or its ancestry because the qualified CLI has no project-config ignore
+`CODEX_HOME` authentication. This also skips operator settings in
+`CODEX_HOME/config.toml`, including custom `model_provider`, provider base URLs
+and profiles. Profile runs use ProPR’s explicit runtime launch settings; custom
+providers configured only in that file are unsupported with a profile. Leave the
+profile unselected when relying on those operator settings.
+Profile runs refuse `.codex/config.toml` in the task
+container workspace or its ancestry after repository setup because the qualified CLI has no project-config ignore
 switch. These limitations are displayed in the editor.
 
 ## Skills
@@ -86,7 +93,9 @@ Only selected bundles are copied into a unique temporary directory under
 at `/opt/propr/extensions`. The launch prompt identifies their `SKILL.md` paths.
 No bundle is installed into a provider or executor home. Docker-outside-Docker
 deployments use the existing `HOST_PROPR_EGRESS_SOCKET_DIR` mapping; a
-missing/unusable bind namespace fails the launch. Other task mounts, sandbox
+missing/unusable bind namespace fails the launch. Skill-bearing runs require
+Docker Engine **25 or newer** (API **1.44 or newer**) for
+`bind-recursive=disabled`; older engines reject the mount option. Other task mounts, sandbox
 settings and repository isolation remain in force.
 
 ## Backup, restore and reset

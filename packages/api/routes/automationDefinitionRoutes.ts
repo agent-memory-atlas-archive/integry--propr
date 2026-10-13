@@ -393,8 +393,9 @@ export function createAutomationDefinitionRoutes(deps: AutomationDefinitionRoute
     if (validationError) throw new RouteError(400, validationError);
     const current = await requireDefinition(req, owner);
     const patch = automationDefinitionInputToPatch(body as Partial<AutomationDefinitionInput>);
-    if (patch.extensionProfile && req.get('X-ProPR-Extensions') !== '1') throw new RouteError(403, 'Extension selection requires a preflight-protected request');
-    if (patch.extensionProfile) await new ExtensionProfileStore(database).read(owner, patch.extensionProfile);
+    const selectionChanged = patch.extensionProfile && (patch.extensionProfile.instanceId !== current.extensionProfile?.instanceId || patch.extensionProfile.profileId !== current.extensionProfile?.profileId || patch.extensionProfile.revision !== current.extensionProfile?.revision);
+    if (selectionChanged && req.get('X-ProPR-Extensions') !== '1') throw new RouteError(403, 'Extension selection requires a preflight-protected request');
+    if (selectionChanged) await new ExtensionProfileStore(database).read(owner, patch.extensionProfile!);
 
     if (RUNTIME_FIELDS.some(field => patch[field] !== undefined)) {
       await requireRuntimeValid({ ...current, ...patch } as StoredAgentDefinition);

@@ -1,5 +1,5 @@
 import { ExtensionStreamRedactor } from '../../extensions/extensionOutput.js';
-import { currentExtensionLaunch } from '../../extensions/extensionLaunch.js';
+import { currentExtensionLaunch, extensionLaunchForDockerRun } from '../../extensions/extensionLaunch.js';
 import { assertNativeLogAdmission, prepareCommandCapture, finishDiagnosticOutput, scheduleProviderCapture, type DiagnosticAgent } from '../../diagnostics/managedLogRuntime.js';
 import { createExecutionDeadline, type ExecutionDeadline } from './dockerExecutionDeadline.js';
 import { prepareAdmittedAgent, type AdmittedAgent } from '../../agents/agentRunAdmission.js';
@@ -74,6 +74,8 @@ export interface DockerCommandOptions extends Pick<ExecutionWatchdogOptions, 'wa
     model?: string;
     /** A container that runs no agent and spends nothing (e.g. a usage probe): not counted toward, or refused by, the run's spend cap. */
     costCapExempt?: boolean;
+    /** Explicitly identifies the selected agent launch, excluding helper containers. */
+    extensionAgentLaunch?: boolean;
 }
 
 /**
@@ -197,8 +199,8 @@ function spawnCommandProcess(
 }
 
 export async function executeDockerCommand(command: string, args: string[], options: DockerCommandOptions = {}): Promise<ExecutionResult> {
-    const extensions = currentExtensionLaunch();
-    if (extensions && command === 'docker' && args[0] === 'run') {
+    const extensions = extensionLaunchForDockerRun(command, args, options);
+    if (extensions) {
         args = [args[0], ...extensions.mounts, ...args.slice(1)];
     }
     const ownershipContext = getExecutionOwnershipContext();
@@ -241,7 +243,7 @@ async function startDockerCommand(
     try {
         const abortError = getExecutionAbortError(admission?.signal);
         if (abortError) throw abortError;
-        if (command === 'docker' && args[0] === 'run') await currentExtensionLaunch()?.beforeLaunch();
+        await extensionLaunchForDockerRun(command, args, options)?.beforeLaunch();
         const remainingMs = deadline.remaining();
         // Transfer the same budget to the subprocess timer. Keep timeout reporting
         // in terms of the caller's original limit and preserve partial output.
