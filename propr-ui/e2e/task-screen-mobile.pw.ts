@@ -86,10 +86,10 @@ for (const width of [390, 1280]) {
 
     // 3. Each readable entry is one column on a phone: its label sits above the text, which keeps the full width.
     const entry = page.getByText('The label check also matches unrelated labels', { exact: false });
-    await entry.scrollIntoViewIfNeeded();
-    // React can replace the Markdown paragraph between locator resolution and evaluation.
-    // Resolve it again on each attempt and require the same geometry on a connected row.
+    // React can replace the Markdown paragraph during scrolling or before evaluation.
+    // Retry the scroll and geometry together, resolving a connected row on each attempt.
     await expect(async () => {
+      await entry.scrollIntoViewIfNeeded();
       const layout = await entry.evaluate(element => {
         if (!element.isConnected) return null;
         const content = element.closest('.flex-1');
