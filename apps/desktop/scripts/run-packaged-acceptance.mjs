@@ -34,7 +34,7 @@ import {
   prepareAcceptanceArtifactDirectory,
   readPngDimensions,
   safeRemoveAcceptanceLeaf,
-  removeOwnedAcceptanceProfileCookie,
+  removeOwnedAcceptanceProfileSingletons,
   sanitizeAcceptanceTrace,
   scanAcceptancePaths,
   screenshotName,
@@ -839,7 +839,7 @@ const launchApplication = async (scenario, initialDeepLink, retainedProfile) => 
         stopped = true;
       } catch (error) { failures.push(error); }
     }
-    if (stopped) await removeOwnedAcceptanceProfileCookie(userData).catch(error => failures.push(error));
+    if (stopped) await removeOwnedAcceptanceProfileSingletons(userData, { stoppedChildPid: child?.pid }).catch(error => failures.push(error));
     await scanAcceptancePaths([userData], SENTINELS).catch(error => failures.push(error));
     surfaces.push({ kind: 'packaged-process-output', journey: activeJourney, value: output });
     processRecords.push({ journey: activeJourney, source: 'packaged-process', level: 'combined', bytes: Buffer.byteLength(output), sha256: digest(output) });

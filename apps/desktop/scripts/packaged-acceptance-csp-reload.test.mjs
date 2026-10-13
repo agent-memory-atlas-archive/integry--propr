@@ -9,7 +9,7 @@ import { mkdtemp, readFile, lstat, rm, symlink, writeFile } from 'node:fs/promis
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
-import { ACCEPTANCE_PROFILE_PREFIX, removeOwnedAcceptanceProfileCookie, safeRemoveAcceptanceLeaf, scanAcceptancePaths } from './acceptance-artifacts.mjs';
+import { ACCEPTANCE_PROFILE_PREFIX, removeOwnedAcceptanceProfileSingletons, safeRemoveAcceptanceLeaf, scanAcceptancePaths } from './acceptance-artifacts.mjs';
 import { runInNewContext } from 'node:vm';
 import { exercisePackagedCspReload, observeCspReloadRequestFailures, correlateExpectedCspReloadConsoleRecords, sanitizedCspReloadError, sanitizedCspReloadRequestFailure } from './packaged-acceptance-csp-reload.mjs';
 
@@ -696,7 +696,7 @@ const cleanupFixture = (overrides = {}) => {
     activeJourney: 'cleanup-test', surfaces: [], processRecords: [],
     scanAcceptancePaths: async (paths, sentinels) => { assert.deepEqual(Array.from(sentinels), ['secret']); scanned.push(...paths); },
     fixtureChild: undefined, fixtureClosed: undefined,
-    removeOwnedAcceptanceProfileCookie: async () => {},
+    removeOwnedAcceptanceProfileSingletons: async () => {},
     SENTINELS: ['secret'], safeRemoveAcceptanceLeaf: async (path, options) => {
       assert.equal(options.kind, 'profile'); removed.push(path);
     },
@@ -727,13 +727,16 @@ test('installed caller-owned profile is scanned and retained while ordinary pack
 });
 
 // Exercise the runner's actual cleanup and termination against a real child. The
-// child leaves Chromium's dangling cookie on shutdown, including after restart.
-const startCookieProcess = async profile => {
+// child leaves the verified Chromium singleton links on shutdown, including restart.
+const startSingletonProcess = async profile => {
   const child = spawn(process.execPath, ['--input-type=module', '-e', `
     import { symlinkSync } from 'node:fs';
     import { join } from 'node:path';
+    import { hostname } from 'node:os';
     process.on('SIGTERM', () => {
       symlinkSync('18446744073709551615', join(process.argv[1], 'SingletonCookie'));
+      symlinkSync(hostname() + '-' + process.pid, join(process.argv[1], 'SingletonLock'));
+      symlinkSync('/tmp/scoped_dirABC123/SingletonSocket', join(process.argv[1], 'SingletonSocket'));
       process.exit(0);
     });
     setInterval(() => {}, 1000);
@@ -745,12 +748,12 @@ const startCookieProcess = async profile => {
   const end = runnerSource.indexOf('const initializeRenderer =', start);
   const terminate = runInNewContext(`${runnerSource.slice(start, end)}; terminateProcessTree;`, { process, sleep });
   const fixture = cleanupFixture({ fixtureChild: child, fixtureClosed: closed,
-    terminateProcessTree: terminate, removeOwnedAcceptanceProfileCookie,
+    terminateProcessTree: terminate, removeOwnedAcceptanceProfileSingletons,
     scanAcceptancePaths, safeRemoveAcceptanceLeaf });
   return fixture.launch('default', null, profile);
 };
 
-test('owned singleton cookie is handled after stopped installed restart while profile secrets and foreign links still fail', {
+test('owned singleton links are handled after stopped installed restart while profile secrets and foreign links still fail', {
   skip: process.platform === 'win32' ? 'POSIX singleton regression' : false,
 }, async () => {
   const profile = await mkdtemp(join(tmpdir(), ACCEPTANCE_PROFILE_PREFIX));
@@ -758,25 +761,29 @@ test('owned singleton cookie is handled after stopped installed restart while pr
   try {
     const state = join(profile, 'persisted-session');
     await writeFile(state, 'persisted binding');
-    await (await startCookieProcess(profile)).close();
+    await (await startSingletonProcess(profile)).close();
     assert.equal(await readFile(state, 'utf8'), 'persisted binding');
-    await assert.rejects(lstat(join(profile, 'SingletonCookie')), { code: 'ENOENT' });
-    await (await startCookieProcess(profile)).close();
+    for (const name of ['SingletonCookie', 'SingletonLock', 'SingletonSocket']) {
+      await assert.rejects(lstat(join(profile, name)), { code: 'ENOENT' });
+    }
+    await (await startSingletonProcess(profile)).close();
     assert.equal(await readFile(state, 'utf8'), 'persisted binding');
-    await assert.rejects(lstat(join(profile, 'SingletonCookie')), { code: 'ENOENT' });
+    for (const name of ['SingletonCookie', 'SingletonLock', 'SingletonSocket']) {
+      await assert.rejects(lstat(join(profile, name)), { code: 'ENOENT' });
+    }
 
     await writeFile(state, 'secret');
-    await assert.rejects((await startCookieProcess(profile)).close(), error =>
+    await assert.rejects((await startSingletonProcess(profile)).close(), error =>
       error.message === 'Packaged acceptance cleanup failed' && error.errors.some(inner => /Secret sentinel/.test(inner.message)));
     await writeFile(state, 'persisted binding');
     const external = join(outside, 'external-file');
     await writeFile(external, 'outside data');
     await symlink(external, join(profile, 'unrelated-link'));
-    await assert.rejects((await startCookieProcess(profile)).close(), error =>
+    await assert.rejects((await startSingletonProcess(profile)).close(), error =>
       error.errors.some(inner => /symbolic link: unrelated-link/.test(inner.message)));
     assert.equal(await readFile(external, 'utf8'), 'outside data');
     await rm(join(profile, 'unrelated-link'));
-    await (await startCookieProcess(profile)).close({ preserveProfile: false });
+    await (await startSingletonProcess(profile)).close({ preserveProfile: false });
     await assert.rejects(lstat(profile), { code: 'ENOENT' });
   } finally {
     await rm(profile, { recursive: true, force: true });
@@ -784,11 +791,11 @@ test('owned singleton cookie is handled after stopped installed restart while pr
   }
 });
 
-test('failed child termination cannot remove a singleton cookie or its profile', async () => {
+test('failed child termination cannot remove singleton links or its profile', async () => {
   for (const terminateProcessTree of [async () => { throw new Error('termination failed'); }, async () => {}]) {
     const f = cleanupFixture({ fixtureChild: { exitCode: null, signalCode: null }, fixtureClosed: Promise.resolve(),
       terminateProcessTree,
-      removeOwnedAcceptanceProfileCookie: async () => assert.fail('cannot unlink before stop') });
+      removeOwnedAcceptanceProfileSingletons: async () => assert.fail('cannot unlink before stop') });
     await assert.rejects((await f.launch('default', null)).close(), /Packaged acceptance cleanup failed/);
     assert.deepEqual(f.removed, []);
   }

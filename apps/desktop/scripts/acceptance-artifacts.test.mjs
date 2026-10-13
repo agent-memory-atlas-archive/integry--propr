@@ -1,8 +1,8 @@
 import { SETUP_ACTIONS, setupPhase } from './packaged-acceptance-setup.mjs';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { chmod, mkdtemp, mkdir, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { chmod, mkdtemp, mkdir, lstat, readFile, readlink, realpath, rm, symlink, writeFile } from 'node:fs/promises';
+import { hostname, tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { describe, it } from 'node:test';
 import { inflateRawSync } from 'node:zlib';
@@ -10,7 +10,7 @@ import { runInNewContext } from 'node:vm';
 import {
   ACCEPTANCE_ARTIFACT_LEAF,
   ACCEPTANCE_PROFILE_PREFIX,
-  removeOwnedAcceptanceProfileCookie,
+  removeOwnedAcceptanceProfileSingletons,
   ACCEPTANCE_JOURNEYS,
   CSP_SOCKET_JOURNEYS,
   INSTALLED_SOCKET_JOURNEYS,
@@ -905,42 +905,177 @@ describe('packaged acceptance artifact contract', () => {
       const cookie = join(profile, 'SingletonCookie');
       for (const target of [join(outside, 'outside'), '../outside', '18446744073709551616', '01', 'not-a-cookie']) {
         await symlink(target, cookie);
-        await assert.rejects(removeOwnedAcceptanceProfileCookie(profile), /uint64 token/);
+        await assert.rejects(removeOwnedAcceptanceProfileSingletons(profile), /uint64 token/);
         await assert.rejects(scanAcceptancePaths([profile]), /symbolic link/);
         await rm(cookie);
       }
       await symlink('123', cookie);
       await chmod(profile, 0o755);
-      await assert.rejects(removeOwnedAcceptanceProfileCookie(profile), /owned private profile/);
+      await assert.rejects(removeOwnedAcceptanceProfileSingletons(profile), /owned private profile/);
       await chmod(profile, 0o700);
       await rm(cookie);
       const alias = join(outside, 'profile-alias');
       await symlink(profile, alias);
-      await assert.rejects(removeOwnedAcceptanceProfileCookie(alias), /allowlisted leaf/);
+      await assert.rejects(removeOwnedAcceptanceProfileSingletons(alias), /allowlisted leaf/);
       await writeFile(join(profile, '123'), 'regular target');
       await symlink('123', cookie);
-      await assert.rejects(removeOwnedAcceptanceProfileCookie(profile), /target must be absent/);
+      await assert.rejects(removeOwnedAcceptanceProfileSingletons(profile), /target must be absent/);
       await rm(cookie);
       await rm(join(profile, '123'));
       await symlink(outside, join(profile, '123'));
       await symlink('123', cookie);
-      await assert.rejects(removeOwnedAcceptanceProfileCookie(profile), /target must be absent/);
+      await assert.rejects(removeOwnedAcceptanceProfileSingletons(profile), /target must be absent/);
       await rm(cookie);
       await rm(join(profile, '123'));
       await mkdir(join(profile, 'nested'));
       await symlink('123', join(profile, 'nested', 'SingletonCookie'));
-      await removeOwnedAcceptanceProfileCookie(profile);
+      await removeOwnedAcceptanceProfileSingletons(profile);
       await assert.rejects(scanAcceptancePaths([profile]), /symbolic link/);
       await symlink('123', join(outside, 'SingletonCookie'));
-      await assert.rejects(removeOwnedAcceptanceProfileCookie(outside), /allowlisted leaf/);
+      await assert.rejects(removeOwnedAcceptanceProfileSingletons(outside), /allowlisted leaf/);
       await assert.rejects(scanAcceptancePaths([outside]), /symbolic link/);
       await writeFile(cookie, 'secret-cookie-sentinel');
-      await removeOwnedAcceptanceProfileCookie(profile);
+      await removeOwnedAcceptanceProfileSingletons(profile);
       await rm(join(profile, 'nested'), { recursive: true });
       await assert.rejects(scanAcceptancePaths([profile], ['secret-cookie-sentinel']), /Secret sentinel/);
     } finally {
       await rm(profile, { recursive: true, force: true });
       await rm(outside, { recursive: true, force: true });
+    }
+  });
+
+  it('accepts only exact stopped-child singleton entries and preserves outside paths and profile files', {
+    skip: process.platform === 'win32' ? 'POSIX singleton regression' : false,
+  }, async () => {
+    const profile = await mkdtemp(join(tmpdir(), ACCEPTANCE_PROFILE_PREFIX));
+    const outside = await mkdtemp('/tmp/scoped_dir');
+    const pid = 12345;
+    const options = { stoppedChildPid: pid };
+    try {
+      const socketTarget = join(outside, 'SingletonSocket');
+      await writeFile(socketTarget, 'outside data');
+      await writeFile(join(profile, 'persisted-session'), 'session data');
+      for (const token of ['0', '18446744073709551615']) {
+        await symlink(token, join(profile, 'SingletonCookie'));
+        await symlink(`${hostname()}-${pid}`, join(profile, 'SingletonLock'));
+        await symlink(socketTarget, join(profile, 'SingletonSocket'));
+        await removeOwnedAcceptanceProfileSingletons(profile, options);
+        for (const name of ['SingletonCookie', 'SingletonLock', 'SingletonSocket']) {
+          await assert.rejects(lstat(join(profile, name)), { code: 'ENOENT' });
+        }
+        await scanAcceptancePaths([profile]);
+        assert.equal(await readFile(socketTarget, 'utf8'), 'outside data');
+        assert.equal(await readFile(join(profile, 'persisted-session'), 'utf8'), 'session data');
+      }
+      for (const target of ['foreign-host-12345', `${hostname()}-12346`, `${hostname()}-012345`,
+        `${hostname()}-0`, `${hostname()}--1`, `${hostname()}-12345/extra`, '../escape', socketTarget]) {
+        await symlink(target, join(profile, 'SingletonLock'));
+        await assert.rejects(removeOwnedAcceptanceProfileSingletons(profile, options), /stopped child PID/);
+        assert.equal(await readlink(join(profile, 'SingletonLock')), target);
+        await assert.rejects(scanAcceptancePaths([profile]), /symbolic link/);
+        await rm(join(profile, 'SingletonLock'));
+      }
+      await symlink(`${hostname()}-${pid}`, join(profile, 'SingletonLock'));
+      for (const stoppedChildPid of [undefined, 0, -1, 1.5, '12345', Number.MAX_SAFE_INTEGER + 1]) {
+        await assert.rejects(removeOwnedAcceptanceProfileSingletons(profile, { stoppedChildPid }), /stopped child PID/);
+      }
+      await chmod(profile, 0o755);
+      await assert.rejects(removeOwnedAcceptanceProfileSingletons(profile, options), /owned private profile/);
+      await chmod(profile, 0o700);
+      await writeFile(join(profile, `${hostname()}-${pid}`), 'secret');
+      await assert.rejects(removeOwnedAcceptanceProfileSingletons(profile, options), /target must be absent/);
+      await rm(join(profile, `${hostname()}-${pid}`));
+      await symlink(outside, join(profile, `${hostname()}-${pid}`));
+      await assert.rejects(removeOwnedAcceptanceProfileSingletons(profile, options), /target must be absent/);
+      await rm(join(profile, `${hostname()}-${pid}`));
+      await symlink('123', join(profile, 'SingletonCookie'));
+      for (const target of ['/tmp/scoped_dirABC12/SingletonSocket', '/tmp/scoped_dirABC1234/SingletonSocket',
+        '/tmp/scoped_dirABC_12/SingletonSocket', '/tmp/scoped_dirABC123/other',
+        '/tmp/org.chromium.Chromium.ABC123/SingletonSocket', '/outside/scoped_dirABC123/SingletonSocket',
+        '../scoped_dirABC123/SingletonSocket', '/tmp/scoped_dirABC123/../SingletonSocket']) {
+        await symlink(target, join(profile, 'SingletonSocket'));
+        await assert.rejects(removeOwnedAcceptanceProfileSingletons(profile, options), /socket requires/);
+        assert.equal(await readlink(join(profile, 'SingletonCookie')), '123'); // No partial cleanup.
+        assert.equal(await readlink(join(profile, 'SingletonSocket')), target);
+        await rm(join(profile, 'SingletonSocket'));
+      }
+      await symlink(socketTarget, join(profile, 'SingletonSocket'));
+      await rm(join(profile, 'SingletonCookie'));
+      await assert.rejects(removeOwnedAcceptanceProfileSingletons(profile, options), /socket requires/);
+      await rm(join(profile, 'SingletonLock'));
+      await symlink('123', join(profile, 'SingletonCookie'));
+      await assert.rejects(removeOwnedAcceptanceProfileSingletons(profile, options), /socket requires/);
+      await rm(join(profile, 'SingletonSocket'));
+      await removeOwnedAcceptanceProfileSingletons(profile, options);
+      for (const name of ['SingletonLockExtra', 'singletonlock', 'SingletonSocketExtra', 'SingletonOther']) {
+        await symlink(`${hostname()}-${pid}`, join(profile, name));
+        await removeOwnedAcceptanceProfileSingletons(profile, options);
+        await assert.rejects(scanAcceptancePaths([profile]), /symbolic link/);
+        await rm(join(profile, name));
+      }
+      await mkdir(join(profile, 'nested'));
+      await symlink(`${hostname()}-${pid}`, join(profile, 'nested', 'SingletonLock'));
+      await removeOwnedAcceptanceProfileSingletons(profile, options);
+      await assert.rejects(scanAcceptancePaths([profile]), /symbolic link/);
+      await rm(join(profile, 'nested'), { recursive: true });
+      await symlink(`${hostname()}-${pid}`, join(outside, 'SingletonLock'));
+      await assert.rejects(removeOwnedAcceptanceProfileSingletons(outside, options), /allowlisted leaf/);
+      for (const name of ['SingletonLock', 'SingletonSocket']) {
+        await writeFile(join(profile, name), 'regular-file-secret');
+        await removeOwnedAcceptanceProfileSingletons(profile, options);
+        await assert.rejects(scanAcceptancePaths([profile], ['regular-file-secret']), /Secret sentinel/);
+        await rm(join(profile, name));
+      }
+    } finally {
+      await rm(profile, { recursive: true, force: true });
+      await rm(outside, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects changed links and profile identity before unlink, including replacement with the same target', async () => {
+    const source = await readFile(new URL('./acceptance-artifacts.mjs', import.meta.url), 'utf8');
+    const start = source.indexOf('export const removeOwnedAcceptanceProfileSingletons =');
+    const end = source.indexOf('export const prepareAcceptanceArtifactDirectory', start);
+    for (const name of ['SingletonCookie', 'SingletonLock', 'SingletonSocket']) {
+      for (const race of ['target', 'inode', 'regular-file', 'owner', 'profile']) {
+        for (const phase of [2, 3, 4, 5]) { // Before/after readlink in both validation passes.
+          const targets = { SingletonCookie: '123', SingletonLock: 'local-host-321',
+            SingletonSocket: '/tmp/scoped_dirABC123/SingletonSocket' };
+          const entryStats = { dev: 1, ino: 1, uid: 1000, mode: 0o120777, ctimeMs: 1, isSymbolicLink: () => true };
+          const profileStats = { dev: 1, ino: 2, uid: 1000, mode: 0o40700 };
+          const reads = new Map();
+          let raced = false;
+          const unlinked = [];
+          const cleanup = runInNewContext(source.slice(start, end).replace('export const', 'const') +
+            '; removeOwnedAcceptanceProfileSingletons;', {
+              process: { getuid: () => 1000 }, hostname: () => 'local-host', join, Number, BigInt,
+              validateAcceptanceLeaf: async () => ({ target: '/tmp/profile',
+                stats: raced && race === 'profile' ? { ...profileStats, ino: 9 } : profileStats }),
+              lstat: async path => {
+                const entry = path.split('/').at(-1);
+                if (!(entry in targets)) throw Object.assign(new Error('missing token'), { code: 'ENOENT' });
+                const count = (reads.get(entry) ?? 0) + 1;
+                reads.set(entry, count);
+                if (entry === name && count === phase) raced = true;
+                if (entry === name && raced) {
+                  if (race === 'target') return { ...entryStats, ctimeMs: 9 };
+                  if (race === 'inode') return { ...entryStats, ino: 9 };
+                  if (race === 'regular-file') return { ...entryStats, mode: 0o100600 };
+                  if (race === 'owner') return { ...entryStats, uid: 999 };
+                }
+                return entryStats;
+              },
+              readlink: async path => {
+                const entry = path.split('/').at(-1);
+                return raced && entry === name && race === 'target' ? '/outside/changed' : targets[entry];
+              },
+              unlink: async path => { unlinked.push(path.split('/').at(-1)); },
+            });
+          await assert.rejects(cleanup('/tmp/profile', { stoppedChildPid: 321 }), /changed during cleanup/);
+          assert.equal(unlinked.includes(name), false, `${name}/${race}/${phase}`);
+          if (phase <= 3) assert.deepEqual(unlinked, []);
+        }
+      }
     }
   });
 

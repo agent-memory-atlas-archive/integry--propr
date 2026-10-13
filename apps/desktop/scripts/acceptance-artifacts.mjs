@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import { lstat, mkdir, readFile, readdir, readlink, realpath, rm, unlink, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { hostname, tmpdir } from 'node:os';
 import { basename, dirname, isAbsolute, join, parse, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { deflateRawSync, inflateRawSync } from 'node:zlib';
@@ -438,36 +438,69 @@ export const safeRemoveAcceptanceLeaf = async (input, options = {}) => {
   if (leaf) await rm(leaf.target, { recursive: true, force: false });
 };
 
-// Call only after the profile's child has stopped. Chromium stores a random
-// uint64 token as a dangling symlink, not a file path:
-// chrome/browser/process_singleton_posix.cc, GenerateCookie()/Create().
-// This exception belongs only to the private test profile, never to artifacts.
-export const removeOwnedAcceptanceProfileCookie = async input => {
+// Call only after the profile's child has stopped. Verified with Electron 44.7.0
+// (Chromium 152.0.7977.130): cookie = uint64, lock = hostname-PID,
+// socket = /tmp/scoped_dirXXXXXX/SingletonSocket. Chromium implements these in
+// chrome/browser/process_singleton_posix.cc (GenerateCookie/Create).
+// Only unlink these exact entries in the private profile; never follow targets.
+export const removeOwnedAcceptanceProfileSingletons = async (input, { stoppedChildPid } = {}) => {
   const leaf = await validateAcceptanceLeaf(input, { kind: 'profile' });
   if (!leaf) return;
-  const cookie = join(leaf.target, 'SingletonCookie');
-  let stats;
-  try { stats = await lstat(cookie); } catch (error) { if (error?.code === 'ENOENT') return; throw error; }
-  if (!stats.isSymbolicLink()) return; // Regular files still undergo secret scanning.
+  const entries = new Map();
   const uid = process.getuid?.();
-  if (uid === undefined || leaf.stats.uid !== uid || stats.uid !== uid || (leaf.stats.mode & 0o077) !== 0) {
-    throw new Error('Acceptance singleton cookie requires an owned private profile and link');
+  for (const name of ['SingletonCookie', 'SingletonLock', 'SingletonSocket']) {
+    const path = join(leaf.target, name);
+    let stats;
+    try { stats = await lstat(path); } catch (error) { if (error?.code === 'ENOENT') continue; throw error; }
+    if (!stats.isSymbolicLink()) continue; // Regular files still undergo secret scanning.
+    if (uid === undefined || leaf.stats.uid !== uid || stats.uid !== uid || (leaf.stats.mode & 0o077) !== 0) {
+      throw new Error('Acceptance singleton requires an owned private profile and link');
+    }
+    entries.set(name, { path, stats, target: await readlink(path) });
   }
-  const token = await readlink(cookie);
-  if (!/^(0|[1-9][0-9]{0,19})$/.test(token) || BigInt(token) > 18446744073709551615n) {
+  const cookie = entries.get('SingletonCookie');
+  if (cookie && (!/^(0|[1-9][0-9]{0,19})$/.test(cookie.target) || BigInt(cookie.target) > 18446744073709551615n)) {
     throw new Error('Acceptance singleton cookie target is not a Chromium uint64 token');
   }
-  // A valid cookie is dangling. Never allow the numeric token to hide a file
-  // or another link (including one that escapes the profile).
-  try {
-    await lstat(join(leaf.target, token));
-    throw new Error('Acceptance singleton cookie target must be absent inside the profile');
-  } catch (error) { if (error?.code !== 'ENOENT') throw error; }
-  const current = await lstat(cookie);
-  if (current.dev !== stats.dev || current.ino !== stats.ino || await readlink(cookie) !== token) {
-    throw new Error('Acceptance singleton cookie changed during cleanup');
+  const lock = entries.get('SingletonLock');
+  const host = hostname();
+  if (lock && (!Number.isSafeInteger(stoppedChildPid) || stoppedChildPid <= 0 ||
+      !/^[A-Za-z0-9][A-Za-z0-9.-]*$/.test(host) || lock.target !== `${host}-${stoppedChildPid}`)) {
+    throw new Error('Acceptance singleton lock target must match the local hostname and stopped child PID');
   }
-  await unlink(cookie); // Unlink the owned entry; never follow or delete its target.
+  const socket = entries.get('SingletonSocket');
+  if (socket && (!lock || !cookie || !/^\/tmp\/scoped_dir[A-Za-z0-9]{6}\/SingletonSocket$/.test(socket.target))) {
+    throw new Error('Acceptance singleton socket requires the verified Chromium target shape, lock and cookie');
+  }
+  // Cookie and lock are dangling non-path tokens. Refuse to hide a real file
+  // or another link inside the profile. Do not inspect the outside socket target.
+  for (const entry of [cookie, lock]) {
+    if (!entry) continue;
+    try {
+      await lstat(join(leaf.target, entry.target));
+      throw new Error('Acceptance singleton token target must be absent inside the profile');
+    } catch (error) { if (error?.code !== 'ENOENT') throw error; }
+  }
+  const sameEntry = (current, original) => current.dev === original.dev && current.ino === original.ino &&
+    current.uid === original.uid && current.mode === original.mode && current.ctimeMs === original.ctimeMs;
+  // Validate the complete set before removing anything, including companion
+  // links used as socket evidence. Recheck each entry immediately before unlink.
+  const check = async entry => {
+    const current = await lstat(entry.path);
+    const target = await readlink(entry.path);
+    const afterRead = await lstat(entry.path);
+    const currentProfile = await validateAcceptanceLeaf(input, { kind: 'profile' });
+    if (!currentProfile || currentProfile.stats.dev !== leaf.stats.dev || currentProfile.stats.ino !== leaf.stats.ino ||
+        currentProfile.stats.uid !== uid || (currentProfile.stats.mode & 0o077) !== 0 ||
+        !sameEntry(current, entry.stats) || !sameEntry(afterRead, entry.stats) || target !== entry.target) {
+      throw new Error('Acceptance singleton changed during cleanup');
+    }
+  };
+  for (const entry of entries.values()) await check(entry);
+  for (const entry of entries.values()) {
+    await check(entry);
+    await unlink(entry.path);
+  }
 };
 
 export const prepareAcceptanceArtifactDirectory = async outputDirectory => {
