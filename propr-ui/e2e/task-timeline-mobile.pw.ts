@@ -97,16 +97,21 @@ for (const { width, hasTouch, hideSidebar } of layoutsToCheck) {
       const [time, content, duration] = Array.from(row.children).slice(1) as HTMLElement[];
       const box = (element: Element) => element.getBoundingClientRect().toJSON();
       return { time: box(time), label: box(content), duration: box(duration),
+        height: row.getBoundingClientRect().height,
+        title: content.firstElementChild?.getAttribute('title'),
         overflow: [row, time, content, duration].some(el => el.scrollWidth > el.clientWidth),
         text: row.textContent };
     }));
     for (const layout of layouts) {
       expect(layout.overflow, JSON.stringify(layout)).toBe(false);
       if (width <= 520) {
-        expect(layout.label.width).toBeGreaterThanOrEqual(timelineWidth - 53);
-        expect(layout.label.top).toBeGreaterThanOrEqual(layout.time.bottom);
-        expect(layout.duration.top).toBeGreaterThanOrEqual(layout.label.bottom);
-        expect(layout.duration.left).toBe(layout.label.left);
+        expect(layout.height).toBe(26);
+        expect(layout.time.width).toBe(56);
+        expect(layout.label.width).toBeGreaterThan(70);
+        expect(layout.label.top).toBe(layout.time.top);
+        expect(layout.duration.top).toBe(layout.label.top);
+        expect(layout.duration.left).toBeGreaterThanOrEqual(layout.label.right);
+        expect(layout.duration.width).toBeGreaterThanOrEqual(48);
       } else {
         expect(layout.label.width).toBeGreaterThanOrEqual(260);
         const run = await open.evaluate(button => ({
@@ -120,6 +125,7 @@ for (const { width, hasTouch, hideSidebar } of layoutsToCheck) {
     }
     expect(layouts[0].text).toMatch(/Task Queued12s$/);
     expect(layouts[1].text).toContain(label);
+    expect(layouts[1].title).toBe(label);
     expect(layouts[1].text).toMatch(/1m 48s$/);
     expect(layouts[2].text).toContain('Task Completed');
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);

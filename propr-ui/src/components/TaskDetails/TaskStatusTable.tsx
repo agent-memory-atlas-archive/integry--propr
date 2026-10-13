@@ -348,8 +348,8 @@ const coalescePipelineHistory = (history: HistoryItem[]): HistoryItem[] => {
  * One run's steps hanging off the run rail (2px at 7px in): each step branches
  * off it with a tic under the run's caret, and keeps to the run row's columns:
  * its time in the tag column, its label under the run's summary, its duration
- * under the run's. In a narrow timeline, stack time, label and duration in reading order
- * so metadata never competes with the label for horizontal space.
+ * under the run's. Narrow timelines keep compact single-line summaries, with
+ * fixed metadata columns and an ellipsis for labels that do not fit.
  */
 const BranchSteps: React.FC<{
   items: Array<HistoryItem & { duration: number | null }>;
@@ -362,15 +362,16 @@ const BranchSteps: React.FC<{
       const isLast = index === items.length - 1;
       const isRunning = isLast && !['COMPLETED', 'FAILED', 'CANCELLED'].includes(stateUpper);
       const isFailure = stateUpper === 'FAILED' && !item.metadata?.event;
+      const label = getDisplayLabel(item, index, history, commandMode);
       return (
-        <li key={`${item.state}-${item.timestamp}-${index}`} className={`relative flex min-w-0 items-start gap-2 [@container(max-width:527px)]:flex-col [@container(max-width:527px)]:items-stretch [@container(max-width:527px)]:gap-0 py-0.5 ${RUN_LEAD_INSET} pr-1 text-xs leading-5`}>
-          <span aria-hidden="true" className="absolute left-[9px] top-[10px] h-px w-6 bg-slate-300" />
-          <span className={`${RUN_TAG_COLUMN} [@container(max-width:527px)]:w-auto flex-none font-mono text-[11px] tabular-nums text-slate-400`}>
+        <li key={`${item.state}-${item.timestamp}-${index}`} className={`relative flex min-w-0 items-start gap-2 [@container(max-width:527px)]:min-h-[26px] [@container(max-width:527px)]:py-[3px] [@container(max-width:527px)]:gap-1 py-0.5 ${RUN_LEAD_INSET} pr-1 text-xs leading-5`}>
+          <span aria-hidden="true" className="absolute left-[9px] top-[10px] [@container(max-width:527px)]:top-[13px] h-px w-6 bg-slate-300" />
+          <span className={`${RUN_TAG_COLUMN} [@container(max-width:527px)]:w-14 flex-none font-mono text-[11px] tabular-nums text-slate-500`}>
             {item.timestamp ? formatTimeOnly(item.timestamp) : '--:--'}
           </span>
           <span className="min-w-0 flex-1">
-            <span className={`block break-words ${isFailure ? 'font-medium text-red-700' : isRunning ? 'font-medium text-slate-900' : 'text-slate-600'}`}>
-              {getDisplayLabel(item, index, history, commandMode)}
+            <span title={label} className={`block break-words [@container(max-width:527px)]:truncate ${isFailure ? 'font-medium text-red-700' : isRunning ? 'font-medium text-slate-900' : 'text-slate-800'}`}>
+              {label}
             </span>
             {item.metadata?.terminalReason && (
               <span className="block break-words text-[11px] text-slate-500" data-testid="task-terminal-reason">
@@ -380,7 +381,7 @@ const BranchSteps: React.FC<{
             <NetworkEgressDetail metadata={item.metadata} />
             <PushFailureDetails metadata={item.metadata} />
           </span>
-          <span className={`${RUN_DURATION_COLUMN} [@container(max-width:527px)]:w-auto [@container(max-width:527px)]:text-left flex-none whitespace-nowrap text-right font-mono text-[11px] tabular-nums ${isRunning ? 'font-medium text-teal-700' : 'text-slate-500'}`}>
+          <span className={`${RUN_DURATION_COLUMN} [@container(max-width:527px)]:w-auto [@container(max-width:527px)]:min-w-12 flex-none whitespace-nowrap text-right font-mono text-[11px] tabular-nums ${isRunning ? 'font-medium text-teal-700' : 'text-slate-500'}`}>
             {isRunning ? 'Running…' : item.duration !== null ? formatRelativeTime(item.duration) : ''}
           </span>
         </li>
