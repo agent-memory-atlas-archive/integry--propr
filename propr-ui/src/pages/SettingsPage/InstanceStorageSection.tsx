@@ -4,7 +4,7 @@ import { useCurrentUser, userHasPermission } from '../../contexts/AuthContext';
 import * as api from '../../api/instanceStorageApi';
 import { SettingsSection } from './SettingsLayout';
 
-const button = 'rounded border border-slate-300 px-3 py-2 text-xs font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50';
+const button = 'max-w-full rounded border border-slate-300 px-3 py-2 text-xs font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50';
 const supports = (capabilities: StorageCapabilities | undefined, feature: StorageCapabilities['features'][number]) => capabilities?.features.includes(feature) === true;
 const bytes = (n: number | null | undefined) => n == null ? 'Unknown' : `${(n / 1024 ** 2).toFixed(1)} MiB`;
 
@@ -75,7 +75,7 @@ function StorageControls({ actor }: { actor: string }) {
     const current = await api.storageCapabilities();
     if (!capabilities || current.instanceId !== capabilities.instanceId || current.generation !== capabilities.generation) throw new Error('Instance selection changed. Refresh before continuing.');
   };
-  return <SettingsSection title="Instance data" description="Export this instance’s customer database and safely clean recoverable repository caches. Available to instance administrators on every deployment; no Connect subscription is required.">
+  return <SettingsSection className="min-w-0 [overflow-wrap:anywhere]" title="Instance data" description="Export this instance’s customer database and safely clean recoverable repository caches. Available to instance administrators on every deployment; no Connect subscription is required.">
     <div className="space-y-5 text-xs">
       {error && <p role="alert" className="text-red-700">{error}</p>}
       {message && <p role="status">{message}</p>}
@@ -104,9 +104,9 @@ function StorageControls({ actor }: { actor: string }) {
         </div>}
       </div>
       <div>
-        <div className="mb-2 flex items-center justify-between gap-3"><h5 className="font-semibold text-slate-900">Repository inventory</h5><button className={button} disabled={busy} onClick={() => void refresh()}>Refresh inventory</button></div>
+        <div className="mb-2 flex flex-wrap items-center justify-between gap-3"><h5 className="font-semibold text-slate-900">Repository inventory</h5><button className={button} disabled={busy} onClick={() => void refresh()}>Refresh inventory</button></div>
         <p className="mb-3 leading-5 text-slate-500">{inventory ? 'Partial inventory: each refresh scans a bounded batch. Unknown sizes are never counted as zero.' : 'Inventory unavailable until the runtime responds.'} Last instance use: {inventory?.lastUseAt ? new Date(inventory.lastUseAt).toLocaleString() : 'Unknown'}.</p>
-        {inventory && <div className="overflow-x-auto"><table className="w-full text-left"><thead><tr className="border-b"><th className="py-2">Repository</th><th>Category</th><th>Size</th><th>Protection</th></tr></thead><tbody>
+        {inventory && <div role="region" aria-label="Repository storage inventory" tabIndex={0} className="overflow-x-auto focus-visible:outline focus-visible:outline-2 focus-visible:outline-teal-600"><table className="w-full min-w-[28rem] text-left [overflow-wrap:normal]"><thead><tr className="border-b"><th className="py-2">Repository</th><th>Category</th><th>Size</th><th>Protection</th></tr></thead><tbody>
           {inventory.repositories.map(repo => <tr key={repo.id + repo.category} className="border-b border-slate-100"><td className="py-3 pr-4">{repo.name}</td><td className="pr-4">{repo.category.replace(/_/g, ' ')}</td><td className="pr-4">{bytes(repo.estimatedBytes)}</td><td>{repo.protectedReasons.join(', ').replace(/_/g, ' ') || 'Eligible for preview'}</td></tr>)}
         </tbody></table>{inventory.repositories.length === 0 && <p className="py-3 text-slate-500">No registered repository caches in this batch. Unregistered storage is not proven empty.</p>}</div>}
         <button className={`${button} mt-4`} disabled={busy || !supports(capabilities, 'repository_cleanup')} onClick={() => void action(async () => {
@@ -117,8 +117,8 @@ function StorageControls({ actor }: { actor: string }) {
         <h5 className="mb-2 font-semibold">Confirm repository cache cleanup</h5>
         <p className="mb-3 leading-5 text-slate-500">{preview.impact}</p>
         <ul className="mb-3 space-y-2">{preview.candidates.map(candidate => <li key={candidate.id} className="break-all">{candidate.name || inventory?.repositories.find(repo => repo.id === candidate.id)?.name || candidate.id}: {bytes(candidate.estimatedBytes)} — {candidate.protectedReasons.join(', ').replace(/_/g, ' ') || 'Eligible; rechecked before deletion'}</li>)}</ul>
-        <label className="flex items-start gap-2"><input type="checkbox" checked={confirmed} onChange={event => setConfirmed(event.target.checked)} />I confirm deletion of only the eligible caches listed in this preview.</label>
-        <div className="mt-3 flex gap-3"><button className={button} disabled={busy || !confirmed || !preview.candidates.some(item => !item.protectedReasons.length) || Date.parse(preview.expiresAt) <= Date.now()} onClick={() => void action(async () => {
+        <label className="flex items-start gap-2"><input className="shrink-0" type="checkbox" checked={confirmed} onChange={event => setConfirmed(event.target.checked)} /><span className="min-w-0">I confirm deletion of only the eligible caches listed in this preview.</span></label>
+        <div className="mt-3 flex flex-wrap gap-3"><button className={button} disabled={busy || !confirmed || !preview.candidates.some(item => !item.protectedReasons.length) || Date.parse(preview.expiresAt) <= Date.now()} onClick={() => void action(async () => {
           await checkInstance(); const result = await api.storageExecute(preview); if (alive.current) { setPreview(undefined); setInventory(undefined); setMessage(`Cleanup ${result.state}: ${result.deleted.length} deleted, ${result.retained.length} retained.`); }
         })}>Confirm cleanup</button><button className={button} disabled={busy} onClick={() => { setPreview(undefined); setConfirmed(false); }}>Cancel</button></div>
       </div>}

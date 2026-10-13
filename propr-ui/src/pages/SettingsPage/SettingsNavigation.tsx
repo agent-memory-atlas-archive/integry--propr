@@ -255,7 +255,8 @@ const SettingsCategoryPanel: React.FC<SettingsCategoryPanelProps> = ({
             className={section === lastVisibleSection ? undefined : SETTINGS_BLOCK}
             data-settings-section={section.id}
           >
-            <fieldset disabled={isReadOnly} className={isReadOnly ? 'opacity-70' : ''}>
+            {/* Override the fieldset default so tables cannot widen the reading pane. */}
+            <fieldset disabled={isReadOnly} className={`min-w-0 ${isReadOnly ? 'opacity-70' : ''}`}>
               {section.content}
             </fieldset>
           </div>
