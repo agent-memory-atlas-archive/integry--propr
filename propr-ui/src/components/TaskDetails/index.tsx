@@ -272,17 +272,9 @@ const TaskDetails: React.FC<TaskDetailsProps> = ({ taskId: taskIdProp, embedded 
 
   const mobileHeader = useMobileHeaderCollapsed();
 
-  const executionLogRef = useClickOutsideCollapse(
-    thinkingLog.eventsCollapsed,
-    thinkingLog.collapseEvents,
-  );
+  const executionLogRef = useClickOutsideCollapse(thinkingLog.eventsCollapsed, thinkingLog.collapseEvents);
 
-  const statusView = renderTaskDetailsStatus(
-    taskData.loading,
-    taskData.error,
-    taskData.history,
-    taskId,
-  );
+  const statusView = renderTaskDetailsStatus(taskData.loading, taskData.error, taskData.history, taskId);
 
   if (statusView) {
     // The pane's controls live in the task's header; until there is one, they sit above the status.
