@@ -164,3 +164,14 @@ test('signed preview requires installed x64 RPM gate and exact-run acceptance ev
   assert.match(publish, /--acceptance-evidence signed-rpm-acceptance\/signed-rpm-acceptance.json/);
   assert.match(publish, /--signing-run-id/);
 });
+
+test('signed RPM acceptance installs locked workspace dependencies before loading the runner', () => {
+  const acceptance = signedJob('installed-rpm-acceptance', 'stage-draft');
+  const checkout = acceptance.indexOf('uses: actions/checkout@');
+  const setupNode = acceptance.indexOf('uses: actions/setup-node@');
+  const install = acceptance.indexOf('run: npm ci --ignore-scripts --no-audit --no-fund');
+  const runner = acceptance.indexOf('node apps/desktop/scripts/run-signed-installed-rpm-acceptance.mjs');
+  assert.match(acceptance, /node-version-file: '\.nvmrc'/);
+  assert.ok(checkout >= 0 && setupNode > checkout && install > setupNode && runner > install,
+    'a fresh checkout must install lockfile-pinned dependencies under the configured Node version before acceptance');
+});
