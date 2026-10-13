@@ -6,7 +6,13 @@ for (const [device, viewport] of Object.entries({ desktop: { width: 1440, height
     await page.setViewportSize(viewport);
     const requests = await fixture(page);
     await page.goto('/tasks');
-    await page.getByRole('button', { name: 'New Task', exact: true }).click();
+    if (device === 'mobile') {
+      // On phones, creation starts from the bottom bar's Create sheet.
+      await page.getByRole('navigation', { name: 'Primary navigation', exact: true }).getByRole('button', { name: 'Create', exact: true }).click();
+      await page.getByRole('dialog', { name: 'Create' }).getByRole('link', { name: 'New Task', exact: true }).click();
+    } else {
+      await page.getByRole('button', { name: 'New Task', exact: true }).click();
+    }
     await expect(page.getByRole('heading', { name: 'New task', exact: true })).toBeVisible();
     await page.getByText('Select a repository', { exact: true }).click();
     await page.getByRole('button', { name: /acme.*billing/ }).click();
