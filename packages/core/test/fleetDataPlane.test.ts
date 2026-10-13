@@ -9,7 +9,7 @@ import { request } from 'node:http';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { setTimeout as delay } from 'node:timers/promises';
-import { canonicalFleetJson, type FleetDataRequest, type FleetDataAssertion, type FleetDataResult, type StorageCleanupPreview, type StorageCleanupResult } from '@propr/shared';
+import { canonicalFleetJson, type FleetDataRequest, type FleetActorDataAssertion as FleetDataAssertion, type FleetActorDataResult as FleetDataResult, type StorageCleanupPreview, type StorageCleanupResult, FLEET_DATA_SCHEMA } from '@propr/shared';
 import { FleetDataPlane } from '../src/fleet/dataPlane.js';
 import { contractPin, digest, parseEnvelope } from '../src/fleet/contract.js';
 import { InstanceStorageService } from '../src/storage/service.js';
@@ -57,10 +57,16 @@ async function fixture(t: test.TestContext, repository = false) {
     await fs.mkdir(path.join(native, 'repositories'));
     await fs.writeFile(path.join(native, 'repositories', `${id}.json`), JSON.stringify({ id, owner: 'owner', name: 'repo', identity: await repositoryIdentity(clone), metadataFingerprint: await repositoryMetadataFingerprint(clone) }));
   }
-  const plane = new FleetDataPlane(storage, control, () => secret); await plane.initialize();
+  const members = new Map<number, { role: string; permissions: string[]; source: string }>([
+    [100, { role: 'admin', permissions: ['instance.manage_settings'], source: 'local' }],
+    [101, { role: 'admin', permissions: ['instance.manage_settings'], source: 'managed' }],
+    [200, { role: 'member', permissions: [], source: 'local' }],
+  ]);
+  const authorizeActor = async (id: number) => members.get(id) ?? { role: 'member', permissions: [], source: 'implicit' };
+  const plane = new FleetDataPlane(storage, control, () => secret, authorizeActor); await plane.initialize();
   const runtime = await plane.runtime();
   const sign = (r: FleetDataRequest, patch: Partial<FleetDataAssertion> = {}) => {
-    const assertion = { ...runtime, action: r.action, requestDigest: digest(r), operationId: randomUUID(), nonce: randomBytes(32).toString('hex'), issuedAt: Math.floor(Date.now() / 1000), expiresAt: Math.floor(Date.now() / 1000) + 60, ...patch };
+    const assertion = { ...runtime, githubActorId: 100, action: r.action, requestDigest: digest(r), operationId: randomUUID(), nonce: randomBytes(32).toString('hex'), issuedAt: Math.floor(Date.now() / 1000), expiresAt: Math.floor(Date.now() / 1000) + 60, ...patch };
     return canonicalFleetJson({ assertion, request: r, mac: createHmac('sha256', secret).update(canonicalFleetJson(assertion)).digest('hex') });
   };
   const invoke = (r: FleetDataRequest) => plane.invoke(sign(r));
@@ -78,15 +84,15 @@ async function fixture(t: test.TestContext, repository = false) {
     for (const entry of entries.filter(name => name.startsWith('operation-'))) {
       try {
         const op = JSON.parse((await fs.readFile(path.join(control, entry), 'utf8')).trimEnd().split('\n').at(-1)!);
-        if (op.nativeExport) await storage.exports!.cancel(runtime.storageInstanceId, storage.exports!.generation, op.nativeExport.operationId, 'fleet', async () => {});
+        if (op.nativeExport) await storage.exports!.cancel(runtime.storageInstanceId, storage.exports!.generation, op.nativeExport.operationId, String(op.githubActorId), async () => {});
       } catch { /* consumed or deliberately substituted */ }
     }
     db.close(); await fs.rm(root, { recursive: true, force: true });
   });
-  return { root, control, source, native, storage, plane, sign, invoke, runtime, db, http, server, secret, authority, writeAuthority, clone, remote, id,
+  return { root, control, source, native, storage, plane, sign, invoke, runtime, db, http, server, secret, authority, writeAuthority, clone, remote, id, members, authorizeActor,
     pending: () => { pending = true; }, rotate: () => { secret = 'rotated-secret-canary-'.repeat(3); },
     afterProof: (callback: () => Promise<void>) => { afterProof = callback; },
-    restart: async () => { const next = new FleetDataPlane(new InstanceStorageService(options), control, () => secret); await next.initialize(); return next; } };
+    restart: async () => { const next = new FleetDataPlane(new InstanceStorageService(options), control, () => secret, authorizeActor); await next.initialize(); return next; } };
 }
 async function ready(f: Awaited<ReturnType<typeof fixture>>, id: string) {
   for (let i = 0; i < 200; i++) {
@@ -141,7 +147,7 @@ test('real Git inventory and confirmation remove only the refetchable cache; Fle
   await git(f.root, 'clone', f.remote, f.clone);
   assert.equal(await fs.readFile(path.join(f.clone, 'published'), 'utf8'), 'refetchable sentinel');
   const audit = (await fs.readFile(path.join(f.native, 'audit.jsonl'), 'utf8')).trim().split('\n').map(line => JSON.parse(line));
-  assert.ok(audit.length); assert.ok(audit.every(record => record.actor === 'fleet'));
+  assert.ok(audit.length); assert.ok(audit.every(record => record.actor === '100'));
   assert.ok(!JSON.stringify(result).includes(f.root));
 });
 
@@ -165,7 +171,7 @@ for (const protection of ['active', 'dirty', 'unpublished', 'changed', 'revoked-
 test('strict signed binding matrix refuses other tenant/generation/scope/action/digest/id, tamper, expiry and raw credentials', async t => {
   const f = await fixture(t);
   const r = { action: 'repositories.list' as const };
-  const patches = [ { hostedInstanceId: 'other' }, { storageInstanceId: randomUUID() }, { runtimeGeneration: randomUUID() }, { placementGeneration: 'other' },
+  const patches = [ { hostedInstanceId: 'other' }, { storageInstanceId: randomUUID() }, { runtimeGeneration: randomUUID() }, { storageGeneration: randomUUID() }, { placementGeneration: 'other' },
     { scope: 'other' }, { action: 'database.export' }, { requestDigest: '0'.repeat(64) }, { contractPin: '0'.repeat(64) }, { operationId: '/tmp/path' },
     { issuedAt: 1, expiresAt: 61 }, { issuedAt: Math.floor(Date.now() / 1000) + 100 }, { expiresAt: Math.floor(Date.now() / 1000) + 600 } ];
   for (const patch of patches) assert.equal((await f.http(f.sign(r, patch as Partial<FleetDataAssertion>))).status, 403);
@@ -241,7 +247,7 @@ for (const attack of ['symlink', 'hardlink', 'fifo', 'ancestor', 'native-identit
 }
 
 test('canonical contract fixtures pin exact schema, digest, assertion MAC and UTF-8 bytes', async () => {
-  const directory = path.resolve('docs/contracts/fleet-data-v1');
+  const directory = path.resolve('docs/contracts/fleet-data-v2');
   const fixture = JSON.parse(await fs.readFile(path.join(directory, 'fixtures.json'), 'utf8'));
   assert.equal(fixture.contractPin, contractPin);
   for (const item of fixture.requests) {
@@ -385,7 +391,7 @@ test('oversized inventory persists a bounded failure, readable by status before 
   };
   await status(f.plane);
   // Process-local plane recovery with the same native generation supports status.
-  const next = new FleetDataPlane(f.storage, f.control, () => f.secret); await next.initialize();
+  const next = new FleetDataPlane(f.storage, f.control, () => f.secret, f.authorizeActor); await next.initialize();
   await status(next);
   const ledger = await fs.readFile(path.join(f.control, `operation-${id}.jsonl`), 'utf8');
   assert.ok(Buffer.byteLength(ledger) < 5000);
@@ -402,20 +408,17 @@ for (const revoke of [false, true]) {
     const large = path.join(f.root, 'large-artifact');
     const file = await fs.open(large, 'w'); await file.truncate(size); await file.close();
     const redeem = f.storage.exports!.redeem.bind(f.storage.exports!);
-    let source: import('node:fs').ReadStream | undefined;
     let maxBuffered = 0, produced = 0, received = 0, maxAhead = 0;
     t.mock.method(f.storage.exports!, 'redeem', async (...args: Parameters<typeof redeem>) => {
       const download = await redeem(...args); await download.file.close();
       const largeFile = await fs.open(large, 'r');
-      const create = largeFile.createReadStream.bind(largeFile);
-      t.mock.method(largeFile, 'createReadStream', (options: Parameters<typeof create>[0]) => {
-        source = create(options);
-        source.on('data', chunk => {
-          produced += chunk.length;
-          maxAhead = Math.max(maxAhead, produced - received);
-          maxBuffered = Math.max(maxBuffered, source!.readableLength);
-        });
-        return source;
+      const read = largeFile.read.bind(largeFile);
+      t.mock.method(largeFile, 'read', async (...args: any[]) => {
+        const result = await (read as any)(...args);
+        assert.ok(result.bytesRead <= 64 * 1024);
+        produced += result.bytesRead;
+        maxAhead = Math.max(maxAhead, produced - received);
+        return result;
       });
       return { ...download, file: largeFile, status: { ...download.status, sizeBytes: size } };
     });
@@ -431,7 +434,7 @@ for (const revoke of [false, true]) {
         assert.equal(res.statusCode, 200);
         // Force backpressure without collecting the artifact in memory.
         res.pause(); setTimeout(() => res.resume(), 600);
-        res.on('data', chunk => { received += chunk.length; maxBuffered = Math.max(maxBuffered, res.readableLength, source?.readableLength ?? 0); });
+        res.on('data', chunk => { received += chunk.length; maxBuffered = Math.max(maxBuffered, res.readableLength); });
         res.on('end', resolve); res.on('error', reject);
       });
       req.on('error', reject); req.end(f.sign({ action: 'artifact.stream', targetOperationId: op.operationId }));
@@ -439,7 +442,7 @@ for (const revoke of [false, true]) {
     if (revoke) { await assert.rejects(transfer); assert.ok(received < size); }
     else { await transfer; assert.equal(received, size); }
     assert.ok(validations >= 6, `validations=${validations}`);
-    assert.ok(validations < 100, `bounded validation count=${validations}`);
+    assert.ok(validations < size / (32 * 1024) + 100, `bounded validation count=${validations}`);
     assert.ok(maxBuffered <= 256 * 1024, `buffered=${maxBuffered}`);
     assert.ok(maxAhead <= 2 * 1024 ** 2, `producer lead=${maxAhead}`);
     await f.server.shutdown();
@@ -517,7 +520,7 @@ test('configured startup rejects a live overlapping listener and succeeds after 
   const next = await f.restart();
   const nextRuntime = await next.runtime();
   assert.notEqual(nextRuntime.runtimeGeneration, f.runtime.runtimeGeneration);
-  await assert.rejects(startConfiguredFleetData(next.storage), /Fleet listener already active/);
+  await assert.rejects(startConfiguredFleetData(next.storage, f.authorizeActor), /Fleet listener already active/);
   const preserved = await fs.lstat(oldSocket);
   assert.equal(preserved.dev, oldIdentity.dev);
   assert.equal(preserved.ino, oldIdentity.ino);
@@ -525,7 +528,7 @@ test('configured startup rejects a live overlapping listener and succeeds after 
   // The old listener still accepts connections, but its generation is fenced.
   assert.equal((await f.http(f.sign({ action: 'repositories.list' }))).status, 403);
   await f.server.shutdown();
-  const listener = await startConfiguredFleetData(next.storage);
+  const listener = await startConfiguredFleetData(next.storage, f.authorizeActor);
   assert.ok(listener);
   t.after(() => listener.shutdown());
   assert.notEqual(listener.address(), oldSocket);
@@ -542,7 +545,7 @@ test('configured startup rejects a live overlapping listener and succeeds after 
 
   // Production must propagate that rejection before opening readiness/customer HTTP.
   const source = await fs.readFile(path.resolve('packages/api/server.ts'), 'utf8');
-  assert.match(source, /fleetDataListener = demoMode \? Promise.resolve\(undefined\) : startConfiguredFleetData\(storageService\);/);
+  assert.match(source, /fleetDataListener = demoMode \? Promise.resolve\(undefined\) : startConfiguredFleetData\(storageService, actorId => resolveDurableInstanceAuthorization\(String\(actorId\)\)\);/);
   const setup = source.indexOf('    setupRoutes();');
   const gate = source.indexOf('try { await fleetDataListener; }', setup);
   assert.ok(gate > setup && gate < source.indexOf('httpServer.listen(PORT'));
@@ -563,4 +566,133 @@ test('restart removes crashed stale sockets but refuses live or unsafe entries',
   await fs.writeFile(socket, 'preserve', { mode: 0o600 });
   await assert.rejects(listenFleetData(f.plane));
   assert.equal(await fs.readFile(socket, 'utf8'), 'preserve');
+});
+
+test('v1 native grants and actorless or nonnumeric v2 grants fail closed', async t => {
+  const f = await fixture(t);
+  const legacy = JSON.parse(await fs.readFile('docs/contracts/fleet-data-v1/fixtures.json', 'utf8'));
+  assert.equal(createHash('sha256').update(FLEET_DATA_SCHEMA).digest('hex'), legacy.contractPin);
+  for (const item of legacy.requests) {
+    const envelope = JSON.parse(item.canonical);
+    Object.assign(envelope.assertion, f.runtime, { contract: 'propr.fleet-data.v1', contractPin: legacy.contractPin,
+      issuedAt: Math.floor(Date.now() / 1000), expiresAt: Math.floor(Date.now() / 1000) + 60, operationId: randomUUID(), nonce: randomBytes(32).toString('hex') });
+    delete envelope.assertion.storageGeneration;
+    envelope.mac = createHmac('sha256', f.secret).update(canonicalFleetJson(envelope.assertion)).digest('hex');
+    assert.equal((await f.http(canonicalFleetJson(envelope))).status, 403);
+  }
+  for (const actor of [undefined, '100', 0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1]) {
+    assert.equal((await f.http(f.sign({ action: 'repositories.list' }, { githubActorId: actor as number }))).status, 403);
+  }
+  const omitted = JSON.parse(f.sign({ action: 'repositories.list' }));
+  delete omitted.assertion.githubActorId;
+  omitted.mac = createHmac('sha256', f.secret).update(canonicalFleetJson(omitted.assertion)).digest('hex');
+  assert.equal((await f.http(canonicalFleetJson(omitted))).status, 403);
+  const actorless = new FleetDataPlane(f.storage, f.control, () => f.secret);
+  await assert.rejects(actorless.invoke(f.sign({ action: 'repositories.list' })));
+});
+
+test('current exact durable admin is required independently of Fleet authority', async t => {
+  const f = await fixture(t);
+  for (const authorization of [
+    { role: 'member', permissions: [], source: 'local' },
+    { role: 'admin', permissions: [], source: 'local' },
+    { role: 'admin', permissions: ['instance.manage_settings'], source: 'bootstrap' },
+    { role: 'admin', permissions: ['instance.manage_settings'], source: 'implicit' },
+  ]) {
+    f.members.set(100, authorization);
+    for (const action of ['database.export', 'repositories.list', 'repositories.cleanup.preview'] as const) {
+      assert.equal((await f.http(f.sign({ action }))).status, 403);
+    }
+  }
+  f.members.delete(100);
+  assert.equal((await f.http(f.sign({ action: 'repositories.list' }))).status, 403);
+  assert.equal((await f.http(f.sign({ action: 'repositories.list' }, { githubActorId: 999 }))).status, 403);
+  assert.equal((await f.http(f.sign({ action: 'repositories.list' }, { githubActorId: 101 }))).status, 200);
+});
+
+test('durable operations refuse another admin for status, cancellation, confirmation and stream', async t => {
+  const f = await fixture(t, true);
+  const preview = await f.invoke({ action: 'repositories.cleanup.preview' });
+  const exported = await f.invoke({ action: 'database.export' }); await ready(f, exported.operationId);
+  const requests: FleetDataRequest[] = [
+    { action: 'operation.status', targetOperationId: exported.operationId },
+    { action: 'operation.cancel', targetOperationId: exported.operationId },
+    { action: 'artifact.stream', targetOperationId: exported.operationId },
+    { action: 'operation.cancel', targetOperationId: preview.operationId },
+    { action: 'repositories.cleanup.execute', previewOperationId: preview.operationId, confirmation: (preview.result as StorageCleanupPreview).confirmation },
+  ];
+  for (const request of requests) assert.equal((await f.http(f.sign(request, { githubActorId: 101 }))).status, 403);
+  const substituted = JSON.parse(f.sign({ action: 'repositories.list' }));
+  substituted.assertion.githubActorId = 101;
+  assert.equal((await f.http(canonicalFleetJson(substituted))).status, 403);
+  f.members.delete(100);
+  for (const request of requests) assert.equal((await f.http(f.sign(request))).status, 403);
+  assert.ok((await fs.stat(f.clone)).isDirectory());
+});
+
+test('revocation after durable dispatch stops native export before it starts', async t => {
+  const f = await fixture(t);
+  const append = f.plane.files.append.bind(f.plane.files);
+  let calls = 0;
+  t.mock.method(f.storage.exports!, 'start', async () => { calls++; throw new Error(); });
+  t.mock.method(f.plane.files, 'append', async (name: string, record: any) => {
+    await append(name, record);
+    if (record.state === 'dispatched') f.members.delete(100);
+  });
+  await assert.rejects(f.invoke({ action: 'database.export' }));
+  assert.equal(calls, 0);
+});
+
+for (const phase of ['preview', 'execute'] as const) {
+  test(`admin revocation during cleanup ${phase} proof prevents disclosure or mutation`, async t => {
+    const f = await fixture(t, true);
+    let preview: FleetDataResult | undefined;
+    if (phase === 'execute') preview = await f.invoke({ action: 'repositories.cleanup.preview' });
+    f.afterProof(async () => { f.members.delete(100); });
+    if (phase === 'preview') await assert.rejects(f.invoke({ action: 'repositories.cleanup.preview' }));
+    else await assert.rejects(f.invoke({ action: 'repositories.cleanup.execute', previewOperationId: preview!.operationId,
+      confirmation: (preview!.result as StorageCleanupPreview).confirmation }));
+    assert.ok((await fs.stat(f.clone)).isDirectory());
+  });
+}
+
+test('revocation during artifact read releases no bytes from that read', async t => {
+  const f = await fixture(t);
+  const op = await f.invoke({ action: 'database.export' }); await ready(f, op.operationId);
+  const redeem = f.storage.exports!.redeem.bind(f.storage.exports!);
+  let reads = 0;
+  t.mock.method(f.storage.exports!, 'redeem', async (...args: Parameters<typeof redeem>) => {
+    const download = await redeem(...args);
+    const read = download.file.read.bind(download.file);
+    t.mock.method(download.file, 'read', async (...args: any[]) => {
+      const result = await (read as any)(...args); reads++; f.members.delete(100); return result;
+    });
+    return download;
+  });
+  let received = 0;
+  await assert.rejects(new Promise<void>((resolve, reject) => {
+    const req = request({ socketPath: f.server.address()!, path: '/v1/invoke', method: 'POST', headers: { 'Content-Type': 'application/json' } }, res => {
+      res.on('data', chunk => { received += chunk.length; }); res.on('end', resolve); res.on('error', reject);
+    });
+    req.on('error', reject); req.end(f.sign({ action: 'artifact.stream', targetOperationId: op.operationId }));
+  }));
+  assert.equal(reads, 1); assert.equal(received, 0);
+});
+
+test('migration retains actorless v1 journals as recovery evidence without authorizing follow-ups', async t => {
+  const f = await fixture(t);
+  const admitted = await (f.plane as any).admit(f.sign({ action: 'database.export' }));
+  const legacy = { ...admitted.op, contract: 'propr.fleet-data.v1', state: 'dispatched' };
+  delete legacy.githubActorId; delete legacy.binding.storageGeneration;
+  await fs.writeFile(path.join(f.control, `operation-${legacy.operationId}.jsonl`), JSON.stringify({ ...legacy, recordDigest: digest(legacy) }) + '\n', { mode: 0o600 });
+  const next = await f.restart();
+  const raw = await fs.readFile(path.join(f.control, `operation-${legacy.operationId}.jsonl`), 'utf8');
+  const record = JSON.parse(raw.trimEnd().split('\n').at(-1)!);
+  assert.equal(record.contract, 'propr.fleet-data.v1'); assert.equal(record.state, 'fenced');
+  const runtime = await next.runtime();
+  for (const action of ['operation.status', 'operation.cancel', 'artifact.stream'] as const) {
+    const request = f.sign({ action, targetOperationId: legacy.operationId }, runtime);
+    if (action === 'artifact.stream') await assert.rejects(next.stream(request, async () => { assert.fail('legacy stream must never dispatch'); }));
+    else await assert.rejects(next.invoke(request));
+  }
 });

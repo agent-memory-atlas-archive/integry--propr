@@ -2,18 +2,15 @@ import type { RequestHandler } from 'express';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { createServer } from 'node:http';
-import { Transform } from 'node:stream';
 import { connect, type Socket, type Server as UnixServer } from 'node:net';
 import { spawn } from 'node:child_process';
 import type { Stats } from 'node:fs';
-import { pipeline } from 'node:stream/promises';
-import { FleetDataPlane } from '../core/src/fleet/dataPlane.js';
+import { FleetDataPlane, type FleetActorAuthorization } from '../core/src/fleet/dataPlane.js';
 import { parseEnvelope } from '../core/src/fleet/contract.js';
 import type { InstanceStorageService } from '../core/src/storage/service.js';
 import { storageControlRoot } from '../core/src/storage/lifecycle.js';
 
 const MAX_ARTIFACT_BYTES = 512 * 1024 ** 2;
-const REVALIDATE_BYTES = 4 * 1024 ** 2;
 const REVALIDATE_MS = 250;
 /** 4 MiB/s minimum supported throughput, plus 30s scheduling/backpressure slack.
  * Hard capped at 158s for 512 MiB; authority expiry remains an independent fence. */
@@ -122,29 +119,41 @@ export async function listenFleetData(plane: FleetDataPlane): Promise<FleetDataL
           await authorize();
           const size = download.status.sizeBytes!;
           res.writeHead(200, { 'Content-Type': 'application/vnd.sqlite3', 'Content-Length': size, 'X-Content-Type-Options': 'nosniff' });
-          let sent = 0, checkedBytes = 0;
-          let checkedAt = performance.now();
-          let checking: Promise<void> | undefined;
+          let sent = 0;
           const controller = new AbortController();
-          const check = () => checking ??= authorize().then(() => {
-            checkedBytes = sent; checkedAt = performance.now();
-          }).finally(() => { checking = undefined; });
-          // Check even while the reader is stalled, and serialize all validations.
-          const fence = setInterval(() => { void check().catch(() => controller.abort()); }, REVALIDATE_MS);
+          const fence = setInterval(() => { void authorize().catch(() => controller.abort()); }, REVALIDATE_MS);
           const deadline = setTimeout(() => controller.abort(), fleetTransferDeadline(size));
-          const bounded = new Transform({ highWaterMark: 64 * 1024, transform(chunk, _encoding, callback) {
-            sent += chunk.length;
-            if (sent > size || sent > MAX_ARTIFACT_BYTES) { callback(new Error()); return; }
-            if (checking || sent - checkedBytes >= REVALIDATE_BYTES || performance.now() - checkedAt >= REVALIDATE_MS) {
-              void check().then(() => callback(null, chunk), () => callback(new Error()));
-            } else callback(null, chunk);
-          } });
           try {
-            await pipeline(download.file.createReadStream({ highWaterMark: 64 * 1024 }), bounded, res, { signal: controller.signal });
-          } finally {
-            clearInterval(fence); clearTimeout(deadline);
-            await checking?.catch(() => undefined);
-          }
+            const buffer = Buffer.alloc(64 * 1024);
+            while (sent < size) {
+              if (controller.signal.aborted || res.destroyed) throw new Error();
+              // Check before each file read AND again before releasing those bytes.
+              await authorize();
+              const { bytesRead } = await download.file.read(buffer, 0, Math.min(buffer.length, size - sent), sent);
+              if (!bytesRead || sent + bytesRead > MAX_ARTIFACT_BYTES) throw new Error();
+              await authorize();
+              if (controller.signal.aborted || res.destroyed) throw new Error();
+              const chunk = Buffer.from(buffer.subarray(0, bytesRead));
+              sent += bytesRead;
+              if (!res.write(chunk)) {
+                await new Promise<void>((resolve, reject) => {
+                  const done = (error?: Error) => {
+                    res.off('drain', drain); res.off('close', closed);
+                    controller.signal.removeEventListener('abort', aborted);
+                    error ? reject(error) : resolve();
+                  };
+                  const drain = () => done();
+                  const closed = () => done(new Error());
+                  const aborted = () => done(new Error());
+                  res.once('drain', drain); res.once('close', closed);
+                  controller.signal.addEventListener('abort', aborted, { once: true });
+                  if (res.destroyed || controller.signal.aborted) closed();
+                });
+              }
+            }
+            await authorize();
+            res.end();
+          } finally { clearInterval(fence); clearTimeout(deadline); }
           if (sent !== size) throw new Error();
         });
       } else {
@@ -199,11 +208,11 @@ export async function listenFleetData(plane: FleetDataPlane): Promise<FleetDataL
 }
 
 /** Provisioning is Fleet's job. Missing authority does not create or enable controls. */
-export async function startConfiguredFleetData(storage: InstanceStorageService): Promise<FleetDataListener | undefined> {
+export async function startConfiguredFleetData(storage: InstanceStorageService, authorizeActor: FleetActorAuthorization): Promise<FleetDataListener | undefined> {
   const root = path.join(path.dirname(storageControlRoot()), 'fleet-data-control');
   try { await fs.lstat(path.join(root, 'authority.json')); }
   catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return; throw error; }
-  const plane = new FleetDataPlane(storage, root);
+  const plane = new FleetDataPlane(storage, root, undefined, authorizeActor);
   await plane.initialize();
   return listenFleetData(plane);
 }

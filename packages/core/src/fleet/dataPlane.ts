@@ -1,13 +1,14 @@
 import fs from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
-import { FLEET_DATA_CONTRACT, FLEET_DATA_SCOPE, type FleetDataAssertion, type FleetDataBinding, type FleetDataEnvelope, type FleetDataResult, type FleetDataState, type DatabaseExportStatus } from '@propr/shared';
+import { FLEET_DATA_ACTOR_CONTRACT, FLEET_DATA_SCOPE, type FleetActorDataAssertion as FleetDataAssertion, type FleetActorDataBinding as FleetDataBinding, type FleetActorDataEnvelope as FleetDataEnvelope, type FleetActorDataResult as FleetDataResult, type FleetDataState, type DatabaseExportStatus } from '@propr/shared';
 import { InstanceStorageService } from '../storage/service.js';
 import { FleetFiles } from './files.js';
 import { contractPin, digest, exact, FleetRefusal, identifier, parseEnvelope, verifyAssertion } from './contract.js';
 
 interface Authority { hostedInstanceId: string; placementGeneration: string; scope: typeof FLEET_DATA_SCOPE; secretSha256: string }
 interface Operation extends FleetDataResult {
+  githubActorId: number;
   binding: FleetDataBinding;
   secretHash: string;
   action: FleetDataAssertion['action'];
@@ -18,18 +19,22 @@ interface Operation extends FleetDataResult {
   previewOperationId?: string;
 }
 const secretHash = (secret: string) => createHash('sha256').update(secret).digest('hex');
-const binding = (a: FleetDataBinding): FleetDataBinding => ({ hostedInstanceId: a.hostedInstanceId, storageInstanceId: a.storageInstanceId, runtimeGeneration: a.runtimeGeneration, placementGeneration: a.placementGeneration, scope: a.scope });
+const binding = (a: FleetDataBinding): FleetDataBinding => ({ hostedInstanceId: a.hostedInstanceId, storageInstanceId: a.storageInstanceId, runtimeGeneration: a.runtimeGeneration, storageGeneration: a.storageGeneration, placementGeneration: a.placementGeneration, scope: a.scope });
 const irreversible = new Set(['database.export', 'repositories.cleanup.execute', 'artifact.stream']);
 const terminal = new Set<FleetDataState>(['completed', 'failed', 'fenced', 'cancelled', 'consumed']);
-const publicResult = (op: Operation): FleetDataResult => ({ contract: FLEET_DATA_CONTRACT, operationId: op.operationId, actor: 'fleet', state: op.state, expiresAt: op.expiresAt, ...(op.result === undefined ? {} : { result: op.result }) });
+const publicResult = (op: Operation): FleetDataResult => ({ contract: FLEET_DATA_ACTOR_CONTRACT, operationId: op.operationId, actor: 'fleet', state: op.state, expiresAt: op.expiresAt, ...(op.result === undefined ? {} : { result: op.result }) });
 
-/** No user/session authority enters this service. Requests are fixed, signed Fleet grants. */
+/** Private exact-ID durable authorization; never accepts sessions, usernames or tokens. */
+export type FleetActorAuthorization = (githubActorId: number) => Promise<{ role: string; permissions: readonly string[]; source: string }>;
+const nativeActor = (op: Operation) => String(op.githubActorId);
+
+/** Fixed signed grants supplement, never replace, durable instance authorization. */
 export class FleetDataPlane {
   readonly files: FleetFiles;
   private count = 3; // Reserve startup runtime/temp/socket entries as well.
   private active = new Set<string>();
   private busyTargets = new Set<string>();
-  constructor(readonly storage: InstanceStorageService, root: string, private readonly secret: () => string | undefined = () => process.env.PROPR_FLEET_CONTROL_SECRET) {
+  constructor(readonly storage: InstanceStorageService, root: string, private readonly secret: () => string | undefined = () => process.env.PROPR_FLEET_CONTROL_SECRET, private readonly authorizeActor?: FleetActorAuthorization) {
     this.files = new FleetFiles(root);
   }
   async initialize() {
@@ -63,15 +68,18 @@ export class FleetDataPlane {
     const { authority } = await this.authority();
     const capabilities = await this.storage.capabilities();
     await this.storage.revalidateIdentity(capabilities.instanceId);
-    return { contract: FLEET_DATA_CONTRACT, contractPin, hostedInstanceId: authority.hostedInstanceId, placementGeneration: authority.placementGeneration,
-      scope: authority.scope, storageInstanceId: capabilities.instanceId, runtimeGeneration: capabilities.generation };
+    return { contract: FLEET_DATA_ACTOR_CONTRACT, contractPin, hostedInstanceId: authority.hostedInstanceId, placementGeneration: authority.placementGeneration,
+      scope: authority.scope, storageInstanceId: capabilities.instanceId, runtimeGeneration: capabilities.generation, storageGeneration: this.storage.generation };
   }
-  private async validate(op: Pick<Operation, 'binding' | 'secretHash' | 'expiresAt'>) {
+  private async validate(op: Pick<Operation, 'binding' | 'secretHash' | 'expiresAt' | 'githubActorId'>) {
+    if (!Number.isSafeInteger(op.githubActorId) || op.githubActorId <= 0 || !this.authorizeActor) throw new FleetRefusal();
     const current = await this.runtime();
     const published = JSON.parse(await this.files.read('runtime.json'));
     if (digest(published) !== digest(current)) throw new FleetRefusal();
     const { secret } = await this.authority();
     if (digest(binding(current)) !== digest(op.binding) || secretHash(secret) !== op.secretHash || Date.now() >= op.expiresAt) throw new FleetRefusal();
+    const authorization = await this.authorizeActor(op.githubActorId);
+    if (authorization.role !== 'admin' || !['local', 'managed'].includes(authorization.source) || !authorization.permissions.includes('instance.manage_settings')) throw new FleetRefusal();
   }
   private name(id: string) { return `operation-${id}.jsonl`; }
   private async save(op: Operation, state: FleetDataState, result?: FleetDataResult['result']) {
@@ -89,13 +97,13 @@ export class FleetDataPlane {
       return record as Operation;
     });
     const op = records.at(-1)!;
-    if (!op || op.operationId !== id || op.actor !== 'fleet' || op.contract !== FLEET_DATA_CONTRACT || !op.binding || !op.secretHash || !op.action || !Number.isSafeInteger(op.expiresAt)) throw new FleetRefusal();
+    if (!op || op.operationId !== id || op.actor !== 'fleet' || !['propr.fleet-data.v1', FLEET_DATA_ACTOR_CONTRACT].includes(op.contract) || !op.binding || !op.secretHash || !op.action || !Number.isSafeInteger(op.expiresAt)) throw new FleetRefusal();
     return op;
   }
   private async target(envelope: FleetDataEnvelope, id: string) {
     const op = await this.read(id);
     const { secret } = await this.authority();
-    if (digest(op.binding) !== digest(binding(envelope.assertion)) || op.secretHash !== secretHash(secret)) throw new FleetRefusal();
+    if (op.contract !== FLEET_DATA_ACTOR_CONTRACT || op.githubActorId !== envelope.assertion.githubActorId || digest(op.binding) !== digest(binding(envelope.assertion)) || op.secretHash !== secretHash(secret)) throw new FleetRefusal();
     await this.validate(op);
     if (!this.active.has(id) && !terminal.has(op.state)) {
       // accepted proves dispatch was impossible. Anything beyond the durable
@@ -110,7 +118,7 @@ export class FleetDataPlane {
     const { secret } = await this.authority();
     verifyAssertion(envelope, secret);
     const a = envelope.assertion;
-    const op: Operation = { contract: FLEET_DATA_CONTRACT, operationId: a.operationId, actor: 'fleet', state: 'accepted', expiresAt: Date.now() + 300_000,
+    const op: Operation = { contract: FLEET_DATA_ACTOR_CONTRACT, operationId: a.operationId, actor: 'fleet', githubActorId: a.githubActorId, state: 'accepted', expiresAt: Date.now() + 300_000,
       action: a.action, binding: binding(a), secretHash: secretHash(secret), requestDigest: a.requestDigest, grantDigest: digest(a) };
     await this.validate(op);
     if (this.count + 2 > 16384) throw new FleetRefusal();
@@ -137,7 +145,7 @@ export class FleetDataPlane {
         if (op.state !== 'running' || !op.nativeExport) return;
         await this.validate(op);
         const selected = op;
-        const status = await this.storage.exports!.status(op.binding.storageInstanceId, op.nativeExport.generation, op.nativeExport.operationId, 'fleet', () => this.validate(selected));
+        const status = await this.storage.exports!.status(op.binding.storageInstanceId, op.nativeExport.generation, op.nativeExport.operationId, nativeActor(op), () => this.validate(selected));
         if (status.state !== 'running') {
           op.nativeExport = status;
           await this.validate(op);
@@ -153,7 +161,7 @@ export class FleetDataPlane {
   private async pollOperation(envelope: FleetDataEnvelope, op: Operation, targetOperationId: string) {
     const target = await this.target(envelope, targetOperationId);
     if (target.state === 'running' && target.nativeExport) {
-      const status = await this.storage.exports!.status(target.binding.storageInstanceId, target.nativeExport.generation, target.nativeExport.operationId, 'fleet', () => this.validate(target));
+      const status = await this.storage.exports!.status(target.binding.storageInstanceId, target.nativeExport.generation, target.nativeExport.operationId, nativeActor(target), () => this.validate(target));
       if (status.state !== 'running') {
         target.nativeExport = status;
         await this.save(target, status.state === 'ready' ? 'completed' : 'failed', status);
@@ -165,20 +173,22 @@ export class FleetDataPlane {
     const target = await this.target(envelope, targetOperationId);
     if (this.active.has(target.operationId) || ['streaming', 'fenced', 'failed', 'consumed', 'cancelled'].includes(target.state) || !['database.export', 'repositories.cleanup.preview'].includes(target.action)) throw new FleetRefusal();
     if (target.nativeExport && !['consumed', 'cancelled', 'failed'].includes(target.state)) {
-      await this.storage.exports!.cancel(target.binding.storageInstanceId, target.nativeExport.generation, target.nativeExport.operationId, 'fleet', () => this.validate(target));
+      await this.storage.exports!.cancel(target.binding.storageInstanceId, target.nativeExport.generation, target.nativeExport.operationId, nativeActor(target), () => this.validate(target));
     }
+    await this.validate(target); await this.validate(op);
     await this.save(target, 'cancelled'); await this.save(op, 'completed', { cancelled: true });
   }
   private async dispatch(envelope: FleetDataEnvelope, op: Operation) {
     const r = envelope.request;
     const authorize = () => this.validate(op);
+    await authorize();
     switch (r.action) {
       case 'repositories.list': {
         const inventory = await this.storage.inventory();
         await authorize(); await this.save(op, 'completed', inventory); break;
       }
       case 'repositories.cleanup.preview': {
-        const preview = await this.storage.preview(op.binding.storageInstanceId, ['repository_caches'], 'fleet', [], authorize);
+        const preview = await this.storage.preview(op.binding.storageInstanceId, ['repository_caches'], nativeActor(op), [], authorize);
         await authorize(); op.nativeConfirmation = preview.confirmation;
         await this.save(op, 'completed', { ...preview, impact: 'Only proven refetchable repository caches can be removed. Private work and all other storage are retained.' }); break;
       }
@@ -189,12 +199,12 @@ export class FleetDataPlane {
         if (++this.count > 16384) throw new FleetRefusal();
         await this.files.create(`confirmation-${r.previewOperationId}`, { operationId: op.operationId, grantDigest: op.grantDigest });
         op.previewOperationId = r.previewOperationId;
-        const result = await this.storage.execute(op.binding.storageInstanceId, r.confirmation, 'fleet', authorize);
+        const result = await this.storage.execute(op.binding.storageInstanceId, r.confirmation, nativeActor(op), authorize);
         await authorize(); await this.save(op, result.state === 'completed' ? 'completed' : 'fenced', result); break;
       }
       case 'database.export': {
         if (!this.storage.exports) throw new FleetRefusal();
-        op.nativeExport = await this.storage.exports.start(op.binding.storageInstanceId, 'fleet', authorize);
+        op.nativeExport = await this.storage.exports.start(op.binding.storageInstanceId, nativeActor(op), authorize);
         await authorize(); await this.save(op, 'running', op.nativeExport); break;
       }
       case 'operation.status': await this.pollOperation(envelope, op, r.targetOperationId); break;
@@ -259,7 +269,7 @@ export class FleetDataPlane {
       await authorize();
       await this.save(op, 'dispatched');
       await this.save(target, 'streaming'); // Consume before opening/releasing bytes.
-      download = await this.storage.exports.redeem(target.binding.storageInstanceId, target.nativeExport.generation, target.nativeExport.operationId, 'fleet', authorize);
+      download = await this.storage.exports.redeem(target.binding.storageInstanceId, target.nativeExport.generation, target.nativeExport.operationId, nativeActor(target), authorize);
       if (!download.status.sizeBytes || download.status.sizeBytes > 512 * 1024 ** 2) throw new FleetRefusal();
       await authorize();
       await consume(download, authorize);

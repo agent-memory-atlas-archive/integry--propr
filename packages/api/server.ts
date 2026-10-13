@@ -90,7 +90,7 @@ import { stopTaskExecution } from './routes/dockerRoutes.js';
 import { initializePushSubscriptionMaintenance } from './services/pushSubscriptionMaintenance.js';
 import { resolveInstanceWebPushConfiguration } from './services/instanceWebPushConfiguration.js';
 import { WEB_PUSH_CONFIGURATION_WARNINGS, type ValidatedWebPushConfiguration } from './services/webPushConfiguration.js';
-import { assertInstanceAdministratorConfigured } from './authorization.js';
+import { assertInstanceAdministratorConfigured, resolveDurableInstanceAuthorization } from './authorization.js';
 import { resolveApiListenHost } from './listenAddress.js';
 import {
   configureApiProxyTrust,
@@ -423,7 +423,7 @@ function setupRoutes(): void {
   const storageService = createDefaultStorageService();
   const storageRoutes = createInstanceStorageRoutes(storageService);
   // Management-only Unix transport; no customer/tunnel route is registered.
-  fleetDataListener = demoMode ? Promise.resolve(undefined) : startConfiguredFleetData(storageService);
+  fleetDataListener = demoMode ? Promise.resolve(undefined) : startConfiguredFleetData(storageService, actorId => resolveDurableInstanceAuthorization(String(actorId)));
   // Background work is bounded/coalesced; no startup deletion or live-data scan.
   const storageSweep = setInterval(() => {
     void storageService.sweep().catch(() => undefined);

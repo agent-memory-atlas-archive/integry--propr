@@ -2,6 +2,7 @@ import type { DatabaseExportStatus, RepositoryStorageInventory, StorageCleanupPr
 
 /** Fleet-only wire contract. This is deliberately not part of the customer API. */
 export const FLEET_DATA_CONTRACT = 'propr.fleet-data.v1' as const;
+export const FLEET_DATA_ACTOR_CONTRACT = 'propr.fleet-data.v2' as const;
 export const FLEET_DATA_SCOPE = 'hosted_customer_data' as const;
 export const FLEET_DATA_ACTIONS = ['database.export', 'repositories.list', 'repositories.cleanup.preview', 'repositories.cleanup.execute', 'operation.status', 'operation.cancel', 'artifact.stream'] as const;
 export type FleetDataAction = typeof FLEET_DATA_ACTIONS[number];
@@ -36,6 +37,17 @@ export interface FleetDataResult {
   expiresAt: number;
   result?: DatabaseExportStatus | RepositoryStorageInventory | StorageCleanupPreview | StorageCleanupResult | FleetDataResult | { cancelled: true } | { delivered: true };
 }
+/** V2 types are additive; historical v1 types and schema remain unchanged. */
+export interface FleetActorDataBinding extends FleetDataBinding { storageGeneration: string }
+export interface FleetActorDataAssertion extends Omit<FleetDataAssertion, 'contract'>, FleetActorDataBinding {
+  contract: typeof FLEET_DATA_ACTOR_CONTRACT;
+  githubActorId: number;
+}
+export interface FleetActorDataEnvelope { assertion: FleetActorDataAssertion; request: FleetDataRequest; mac: string }
+export interface FleetActorDataResult extends Omit<FleetDataResult, 'contract' | 'result'> {
+  contract: typeof FLEET_DATA_ACTOR_CONTRACT;
+  result?: Exclude<FleetDataResult['result'], FleetDataResult> | FleetActorDataResult;
+}
 /** Sorted ASCII keys, UTF-8, no whitespace; all numeric wire fields are integers. */
 export function canonicalFleetJson(value: unknown): string {
   if (value === null || typeof value !== 'object') return JSON.stringify(value);
@@ -52,4 +64,16 @@ export const FLEET_DATA_SCHEMA = canonicalFleetJson({
   result: ['contract', 'operationId', 'actor=fleet', 'state', 'expiresAt=epoch-milliseconds', 'result?'],
   states: ['accepted', 'dispatched', 'running', 'completed', 'failed', 'fenced', 'cancelled', 'streaming', 'consumed'],
   error: 'fleet_data_unavailable', maxJsonResponseBytes: 32768,
+});
+
+/** Additive actor-bound revision. The v1 schema above remains byte-for-byte pinned. */
+export const FLEET_DATA_ACTOR_SCHEMA = canonicalFleetJson({
+  ...JSON.parse(FLEET_DATA_SCHEMA),
+  version: FLEET_DATA_ACTOR_CONTRACT,
+  assertion: [...JSON.parse(FLEET_DATA_SCHEMA).assertion, 'githubActorId', 'storageGeneration'].sort(),
+  githubActorId: 'positive-safe-integer-exact-durable-instance-admin',
+  storageGeneration: 'native-cleanup-generation-lowercase-uuid',
+  authorization: 'current-durable-admin-and-instance.manage_settings-at-every-boundary',
+  operationActor: 'original-githubActorId-private-only',
+  nativeAuditActor: 'decimal-githubActorId',
 });

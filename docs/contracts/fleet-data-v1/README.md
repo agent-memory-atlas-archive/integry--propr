@@ -1,4 +1,7 @@
-# Fleet guest data plane v1
+# Fleet guest data plane v1 (historical, native actions disabled)
+
+**Compatibility boundary:** the current listener rejects every v1 action, including status, cancel and artifact streaming. This contract contains only native data actions; no reviewed infrastructure-only action needs to remain enabled. Its published schema, fixtures and checksums remain unchanged as historical artifacts. The descriptions below document the previous implementation, not current authorization behavior. Fleet must migrate to [actor-bound v2](../fleet-data-v2/README.md); Routing account ownership is insufficient to authorize these actions. Old v1 journals remain private recovery evidence and cannot be queried, confirmed or redeemed with a v2 grant.
+
 
 This contract is an infrastructure bridge for a separately authorized Fleet executor. It is not a Connect or customer API. Routing must authorize the account, passkey and exact operation before Fleet signs a grant. Native instance administration remains unchanged; no user or session is created or impersonated. This work does not enable Hosted UI controls, deploy an instance, or complete Fleet #80 / Routing #231.
 
