@@ -55,6 +55,8 @@ async function createDatabase(): Promise<Knex> {
     table.increments('execution_id').primary();
     table.string('task_id');
     table.text('analysis_report');
+    table.string('model_name');
+    table.timestamp('start_time');
     table.index('task_id');
   });
   await database.schema.createTable('task_assignees', table => {
@@ -182,7 +184,7 @@ test('presentation enrichment queries are constrained to the selected page', asy
   database.on('query', event => queries.push({ sql: event.sql, bindings: event.bindings ?? [] }));
   await getTasksFromDb({ db: database, status: 'all', repository: 'all', limit: 1, offset: 0 });
 
-  assert.equal(queries.length, 7);
+  assert.equal(queries.length, 9);
   assert.ok(queries.every(query => !/analysis_report/i.test(query.sql)));
   assert.match(queries[6].sql, /from `task_assignees`/i);
   assert.doesNotMatch(queries[0].sql, /ROW_NUMBER|processing_start_timestamp|analysis_report/i);
@@ -452,4 +454,21 @@ test('a task page asked for by one of its runs lists that whole task whatever th
   });
   assert.equal(result.total, 1);
   assert.deepEqual((result.tasks as Array<{ id: string; status: string }>).map(task => [task.id, task.status]), [['pr40-fix', 'processing'], ['pr40-review', 'completed']]);
+});
+
+test('task ledger recovers actual Codex follow-up routing and leaves unresolved runs unknown', async () => {
+  const database = await createDatabase();
+  for (const id of ['followup', 'review', 'pending']) {
+    await database('tasks').insert({ task_id: id, repository: 'acme/widget', task_type: 'pr-comment', model_name: 'claude-opus-5-5', created_at: '2026-10-13T12:00:00Z', initial_job_data: JSON.stringify({ pullRequestNumber: 7 }) });
+    await database('task_history').insert({ task_id: id, state: id === 'pending' ? 'pending' : 'completed', timestamp: '2026-10-13T12:01:00Z', metadata: id === 'review' ? JSON.stringify({ model: 'gpt-6-astra', executionRouting: { model: 'gpt-6-astra', agentAlias: 'codex' } }) : null });
+  }
+  await database('llm_executions').insert({ task_id: 'followup', model_name: 'gpt-6-astra', start_time: '2026-10-13T12:00:30Z' });
+  const { tasks } = await getTasksFromDb({ db: database, status: 'all', repository: 'all', limit: 20, offset: 0 });
+  for (const id of ['followup', 'review']) {
+    const run = tasks.find(task => task.id === id)!;
+    assert.equal(run.model, 'gpt-6-astra');
+    assert.equal(run.modelName, 'gpt-6-astra');
+    assert.notEqual(run.llmProvider, 'claude');
+  }
+  assert.equal(tasks.find(task => task.id === 'pending')!.model, null);
 });

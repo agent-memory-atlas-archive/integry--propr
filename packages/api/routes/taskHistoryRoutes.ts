@@ -1,3 +1,4 @@
+import { taskModelIdentity } from './taskModelIdentity.js';
 import type { Response } from 'express';
 import { redactVisualPreviewValue } from '@propr/core';
 import { loadTaskBudget } from './taskBudget.js';
@@ -138,6 +139,7 @@ async function getHistoryFromDb(db: Knex, taskId: string, previewReader: typeof 
       mapDbHistoryRecord(record, executionsByHistoryId, executionsBySessionId)
     );
 
+    Object.assign(taskInfo, taskModelIdentity(task, historyRecords, llmExecutions));
     applyMetadataFlags(taskInfo, history);
 
     return { history, taskInfo, ...usage, ...(previewMedia.length ? { previewMedia } : {}) };
@@ -291,6 +293,7 @@ function buildTaskInfoFromState(
     modelName: ref.modelName, agentAlias: ref.agentAlias
   };
   if (issueNumber) taskInfo.issueNumber = issueNumber;
+  Object.assign(taskInfo, taskModelIdentity({ task_id: taskId, initial_job_data: ref, model_name: ref.modelName }, historyEntries));
   applyMetadataFlags(taskInfo, historyEntries);
   return taskInfo;
 }
@@ -334,6 +337,7 @@ async function getHistoryFromQueue(
 
     const taskInfo = buildTaskInfoFromJob(job, taskId);
     const history = buildHistoryFromJob(job);
+    if (taskInfo) Object.assign(taskInfo, taskModelIdentity({ task_id: taskId, initial_job_data: job.data, model_name: job.data?.modelName }, history));
 
     return { history, taskInfo };
   } catch (e) {

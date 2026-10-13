@@ -376,3 +376,37 @@ test('out-of-scope executions with terminal task IDs bypass workflow admission a
     }
     assert.equal(executions, 3);
 });
+
+test('follow-up persists the resolved route before the agent executes', async t => {
+    const registry = AgentRegistry.getInstance();
+    const events: string[] = [];
+    const agent = {
+        config: { alias: 'codex', type: 'codex', enabled: true, defaultModel: 'gpt-6-astra', supportedModels: ['gpt-6-astra'] },
+        executeTask: async (options: { model: string }) => {
+            assert.equal(options.model, 'gpt-6-astra');
+            events.push('execute');
+            return { success: true, modelUsed: options.model, executionTimeMs: 1, summary: 'done', conversationLog: [] };
+        },
+    };
+    t.mock.method(registry, 'ensureInitialized', async () => undefined);
+    t.mock.method(registry, 'getDefaultAgent', () => agent);
+    t.mock.method(registry, 'getAgentByAlias', () => agent);
+    t.mock.method(registry, 'getAllAgents', () => [agent]);
+    // No override uses the runtime selection; PR-inherited labels use the same persistence path.
+    for (const llm of [null, 'codex:gpt-6-astra']) {
+        await resolveAndExecuteAgent({
+            llm, worktreePath: '/tmp/worktree', branchName: 'followup', prompt: 'Fix the PR',
+            pullRequestNumber: 7, repoOwner: 'acme', repoName: 'widget', taskId: 'followup', applyRepositoryWorkflow: true,
+            stateManager: {
+                getTaskState: async () => ({ state: 'processing' }),
+                updateTaskState: async (_id: string, state: string, update: { historyMetadata: unknown }) => {
+                    assert.equal(state, 'processing');
+                    assert.deepEqual(update.historyMetadata, { model: 'gpt-6-astra', executionRouting: { model: 'gpt-6-astra', agentAlias: 'codex' } });
+                    events.push('persist');
+                },
+            } as never,
+            correlatedLogger: logger as never, githubToken: 'token', redisClient: {} as never,
+        });
+    }
+    assert.deepEqual(events, ['persist', 'execute', 'persist', 'execute']);
+});

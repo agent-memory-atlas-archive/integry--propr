@@ -308,6 +308,14 @@ export async function executeReviewProcessing(params: ExecuteReviewParams): Prom
         outcome.status === 'routed' ? [outcome.assignment] : []
     );
 
+    if (routedAssignments.length === 1) {
+        const { model, agentAlias } = routedAssignments[0];
+        await stateManager.updateTaskState(taskId, TaskStates.PROCESSING, {
+            reason: 'PR review routing resolved',
+            historyMetadata: { model, executionRouting: { model, agentAlias } },
+        });
+    }
+
     const { allComments, commentHistory, linkedIssueResult, prDiff, preparedDiff, changedFilePaths, fileContents, checkSummary, hasCurrentCheckFailure } = await fetchReviewContext(
         state.octokit, prData!, { repoOwner, repoName, pullRequestNumber, correlationId, correlatedLogger }
     );

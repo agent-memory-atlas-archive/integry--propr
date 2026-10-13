@@ -67,6 +67,7 @@ export async function createDashboardTestDatabase(): Promise<Knex> {
     table.timestamp('start_time');
     table.decimal('cost_usd', 10, 6);
     table.text('analysis_report');
+    table.string('model_name');
   });
   // Inbox state, shaped like the real notification schema. The dashboard must
   // never read either table: attention is derived from work state alone.
