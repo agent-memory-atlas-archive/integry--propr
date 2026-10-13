@@ -57,6 +57,28 @@ export interface ReviewOutcome {
   score: number | null;
   issueCount: number;
   reviewerFailed: boolean;
+  /** The finding titles listed after "issues found:", in the reviewer's order. */
+  findings: string[];
+}
+
+/** The "A; B" list after "N issues found:", up to the next " · " part of the recap. */
+function reviewFindingTitles(body: string): string[] {
+  const list = /\bissues? found:\s*(.*?)(?:\s+·\s+|$)/s.exec(body)?.[1] ?? '';
+  return list.split(/;\s*/).map(title => title.trim()).filter(Boolean);
+}
+
+/**
+ * A `path:line` reference a finding leads with, such as
+ * "packages/core/src/auth.ts:118 Clear expiry feedback" or
+ * "`src/a.ts:42`: Guard the empty page". The path needs a directory or a file
+ * extension, so prose such as "Note: …" is not read as a reference.
+ */
+const FINDING_REFERENCE = /^`?((?:[\w@.-]+\/)+[\w@.-]+|[\w@-]+(?:\.[\w-]+)*\.[A-Za-z0-9]+):(\d+(?:[-–]\d+)?)`?(?:\s*[:—–-]\s+|\s+|$)/;
+
+export function notificationFindingReference(text: string): { reference: string; text: string } | null {
+  const match = FINDING_REFERENCE.exec(text.trim());
+  if (!match) return null;
+  return { reference: `${match[1]}:${match[2]}`, text: text.trim().slice(match[0].length).trim() };
 }
 
 /**
@@ -73,6 +95,7 @@ export function notificationReviewOutcome(notification: Notification): ReviewOut
     score: scores.length > 0 ? Math.min(...scores) : null,
     issueCount,
     reviewerFailed: /\breviewers? failed\b/.test(body),
+    findings: reviewFindingTitles(body),
   };
 }
 

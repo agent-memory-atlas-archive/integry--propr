@@ -1,3 +1,4 @@
+/* eslint-disable max-lines */
 import { expect, test, type Page } from '@playwright/test';
 import { mkdir } from 'node:fs/promises';
 
@@ -181,8 +182,11 @@ test('touch swipe moves the card out without extra affordances or undo', async (
   await expect(page.getByRole('button', { name: 'Undo' })).toHaveCount(0);
 });
 
+// 1280px and wider is the triage console; the single-column cases run just below it.
+const singleColumnDesktop = { width: 1279, height: 800 };
+
 test('desktop shows one newest-first list titled by PR, with only System collapsed apart', async ({ page }) => {
-  await page.setViewportSize({ width: 1280, height: 800 });
+  await page.setViewportSize(singleColumnDesktop);
   await stubInbox(page);
   await page.goto('/inbox');
   await expect(page.getByText('Fixed 2 review findings in 3 files; tests pass.')).toBeVisible();
@@ -246,7 +250,7 @@ test('header offers a labelled Clear all with confirmation, and System sits in a
 });
 
 test('desktop rows stack title over summary, cluster time with the metadata, and end their text on one rail', async ({ page }) => {
-  await page.setViewportSize({ width: 1280, height: 800 });
+  await page.setViewportSize(singleColumnDesktop);
   await openTriageInbox(page);
   const ready = page.getByRole('article', { name: 'PR #2498 ready for review' });
   await expect(ready.getByRole('heading', { level: 3 })).toHaveText('Ready for review');
@@ -355,7 +359,7 @@ test('a preview image that fails to load leaves no placeholder beside the comman
   await expect(ready.getByRole('img', { name: /image unavailable/ })).toHaveCount(0);
 });
 
-for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844 }]) {
+for (const viewport of [singleColumnDesktop, { width: 390, height: 844 }]) {
   test(`notification rows open ProPR and PR chips open GitHub at ${viewport.width}px`, async ({ page, context }) => {
     await page.setViewportSize(viewport);
     const ready = {
@@ -399,3 +403,65 @@ for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844 
     expect(await page.evaluate(() => document.documentElement.dataset.navigationTest)).toBe('preserved');
   });
 }
+
+test('wide screens triage the selected row in a verdict card beside the queue', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await stubInbox(page, triageNotifications);
+  const fileChangeReads: string[] = [];
+  await page.route('**/api/task/*/file-changes', route => {
+    const taskId = decodeURIComponent(new URL(route.request().url()).pathname.split('/').at(-2)!);
+    fileChangeReads.push(taskId);
+    return route.fulfill({ json: {
+      taskId, lastUpdated: timestamp,
+      files: [{
+        path: 'packages/core/src/activity.ts', status: 'modified', linesAdded: 2, linesRemoved: 1,
+        diff: [
+          '--- a/packages/core/src/activity.ts', '+++ b/packages/core/src/activity.ts', '@@ -40,3 +40,4 @@',
+          '-  if (page.items.length) return page;', '+  if (!page?.items?.length) return emptyPage(cursor);', '+  return page;',
+        ].join('\n'),
+      }],
+    } });
+  });
+  // The triage rows are timed relative to now, so reads and dismissals are stamped now too.
+  await page.route(/\/api\/notifications\/[^/]+\/(read|dismiss)$/, route => {
+    const [id, action] = new URL(route.request().url()).pathname.split('/').slice(-2);
+    const notification = triageNotifications.find(entry => entry.id === decodeURIComponent(id))!;
+    const stamp = new Date().toISOString();
+    return route.fulfill({ json: {
+      notification: { ...notification, ...(action === 'read' ? { readAt: stamp } : { dismissedAt: stamp }) },
+      unreadCount: 0,
+    } });
+  });
+  await page.goto('/inbox?repository=integry%2Fpropr');
+  const epicTitle = '[Epic] MCP Operator Surface: Activity, Control And Observability';
+  const epic = page.getByRole('article', { name: epicTitle });
+  await expect(epic).toBeVisible();
+  await expect(page.getByRole('region', { name: 'Triage verdict' })).toHaveCount(0);
+
+  await epic.getByRole('button', { name: epicTitle, exact: true }).click();
+  await expect(page).toHaveURL(/notification=review-2511/);
+  await expect(page).toHaveURL(/repository=integry%2Fpropr/);
+  const verdict = page.getByRole('region', { name: 'Triage verdict' });
+  await expect(verdict.getByRole('heading', { name: 'Review verdict: 2 findings (Score 6/10)' })).toBeVisible();
+  await expect(verdict.getByText('Check the head SHA before posting')).toBeVisible();
+  await expect(verdict.getByText('Guard the empty activity page')).toBeVisible();
+  await expect(verdict.getByText('+ if (!page?.items?.length) return emptyPage(cursor);')).toBeVisible();
+  await expect(verdict.getByRole('link', { name: /Inspect in Tasks/ })).toHaveAttribute('href', '/tasks/task-2511');
+  await expect(verdict.getByRole('button', { name: 'Send /fix to PR #2511' })).toBeVisible();
+  expect(fileChangeReads).toEqual(['task-2511']);
+
+  // The queue keeps about a third of the width; the verdict takes the rest.
+  const queueBox = (await page.getByTestId('inbox-split-list').boundingBox())!;
+  const verdictBox = (await verdict.boundingBox())!;
+  expect(verdictBox.width).toBeGreaterThan(queueBox.width * 1.5);
+  await capture(page, 'inbox-triage-console-desktop.png');
+
+  await verdict.getByRole('button', { name: 'Dismiss' }).click();
+  await expect(epic).toHaveCount(0);
+  await expect(page).toHaveURL(/notification=review-2519/);
+  await expect(verdict.getByText('Retries never back off')).toBeVisible();
+  await expect(page.getByRole('article', { name: 'Retry webhook deliveries that time out' }).getByRole('button', {
+    name: 'Retry webhook deliveries that time out', exact: true,
+  })).toHaveAttribute('aria-current', 'true');
+  await capture(page, 'inbox-triage-console-advanced-desktop.png');
+});

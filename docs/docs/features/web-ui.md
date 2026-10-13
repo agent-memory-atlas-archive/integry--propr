@@ -55,7 +55,7 @@ These records are the heart of ProPR's observability — see [Observability And 
 
 ## Goals and Inbox
 
-**Goals** (`/goals`) shows continuing objectives and opens the console for progress, artifacts and corrective inputs. See [Goals](./goals.md) for native execution and lifecycle controls. **Inbox** (`/inbox`) links notifications to the work requiring your attention; [Inbox and notifications](./inbox.md) explains personal and repository preferences.
+**Goals** (`/goals`) shows continuing objectives and opens the console for progress, artifacts and corrective inputs. See [Goals](./goals.md) for native execution and lifecycle controls. **Inbox** (`/inbox`) is the queue of events that need you, worked down to zero. On screens 1280px and wider it is a triage console: the queue sits on the left and the selected item's **Triage Verdict** on the right — the review findings with their `path:line`, a short diff, the follow-up commands and **Inspect in Tasks**, which opens the full task in `/tasks`. Dismissing an item or sending a command opens the next one. Inbox is deliberately lighter than **Tasks**: Tasks is the permanent ledger with the full diagnostic workbench, while Inbox holds only what still needs a decision. On narrower screens rows open their destination directly. [Inbox and notifications](./inbox.md) covers the triage console and personal and repository preferences.
 
 ## Automations
 
@@ -133,7 +133,7 @@ The UI subscribes to socket.io events, so the dashboard, task list, task detail,
 
 Polling is the fallback for a client whose websocket is unavailable, not the normal path: while the socket is connected and nothing is happening, an open tab issues no requests of its own. A hidden or backgrounded tab does no work either, and reconciles once when you come back to it — as does a tab whose socket dropped and reconnected. The Agent Tank **Refresh usage** button still asks the backend to re-probe the providers on demand.
 
-Keyboard shortcuts: `Cmd/Ctrl+K` opens the search palette, `j`/`k` move through the Tasks list, `Alt+T` opens quick add to-do, and `Esc` closes open popovers.
+Keyboard shortcuts: `Cmd/Ctrl+K` opens the search palette, `j`/`k` move through the Tasks list and the Inbox queue, `x` dismisses the open Inbox item, `Alt+T` opens quick add to-do, and `Esc` closes open popovers.
 
 
 ## Visual preview settings
