@@ -1,4 +1,6 @@
 import fs from 'node:fs/promises';
+import { createHash } from 'node:crypto';
+import { egressProcessNamespace } from '../network/egressExecution.js';
 import { EXTENSION_LIMITS } from '@propr/shared';
 import { constants, type Stats } from 'node:fs';
 import path from 'node:path';
@@ -76,7 +78,10 @@ export async function createStagingDirectory(root: string): Promise<{ directory:
     } finally { await runHandle?.close(); await parent.close(); }
   };
   try {
-    const target = await fs.mkdtemp(`/proc/self/fd/${parent.fd}/run-`); created = path.basename(target);
+    // Ownership is in the atomic directory name, including if creation crashes
+    // before any file can be written. PIDs are meaningful only in this namespace.
+    const namespace = createHash('sha256').update(await egressProcessNamespace()).digest('hex').slice(0, 16);
+    const target = await fs.mkdtemp(`/proc/self/fd/${parent.fd}/run-${namespace}-${process.pid}-`); created = path.basename(target);
     runHandle = await fs.open(target, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
     const directory = path.join(root, created);
     if (await fs.realpath(`/proc/self/fd/${parent.fd}`) !== path.resolve(root) || await fs.realpath(`/proc/self/fd/${runHandle.fd}`) !== path.resolve(directory)) throw new ExtensionError(409, 'Staging root replaced during creation');
@@ -133,4 +138,40 @@ export async function stagingValidator(root: string, directory: string, bundles:
     const after = await inspectStagingAncestors(directory);
     for (const [target, stat] of ancestors) if (!after.has(target) || !same(stat, after.get(target)!)) throw new ExtensionError(409, 'Skill staging ancestor replaced during read');
   };
+}
+
+/** Reclaim only demonstrably dead owners; age alone cannot prove a mount unused. */
+export async function sweepOrphanedExtensionStaging(extensionsRoot: string): Promise<number> {
+  let root: Awaited<ReturnType<typeof openDirectory>>;
+  try { root = await openDirectory(extensionsRoot); } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return 0;
+    throw error;
+  }
+  const namespace = createHash('sha256').update(await egressProcessNamespace()).digest('hex').slice(0, 16);
+  let removed = 0;
+  try {
+    for (const instance of await fs.readdir(`/proc/self/fd/${root.fd}`)) {
+      let parent: Awaited<ReturnType<typeof openDirectory>>;
+      try { parent = await openDirectory(path.join(extensionsRoot, instance)); } catch { continue; }
+      try {
+        const stat = await parent.stat();
+        if (stat.uid !== process.getuid?.() || (stat.mode & 0o077)) continue;
+        for (const name of await fs.readdir(`/proc/self/fd/${parent.fd}`)) {
+          const owner = /^run-([a-f0-9]{16})-([1-9][0-9]*)-[A-Za-z0-9]+$/.exec(name);
+          if (!owner || owner[1] !== namespace) continue;
+          const pid = Number(owner[2]);
+          if (!Number.isSafeInteger(pid)) continue;
+          try { process.kill(pid, 0); continue; } catch (error) {
+            if ((error as NodeJS.ErrnoException).code !== 'ESRCH') continue;
+          }
+          const target = `/proc/self/fd/${parent.fd}/${name}`;
+          const run = await fs.lstat(target);
+          if (!run.isDirectory() || run.isSymbolicLink() || run.uid !== process.getuid?.()) continue;
+          await fs.rm(target, { recursive: true, force: true });
+          removed++;
+        }
+      } finally { await parent.close(); }
+    }
+  } finally { await root.close(); }
+  return removed;
 }

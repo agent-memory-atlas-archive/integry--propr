@@ -15,7 +15,6 @@ import { createPreviewMediaRoutes } from './routes/previewMediaRoutes.js';
 import { ROUTING_STATUS_REDIS_KEY } from '@propr/shared';
 /* eslint-disable max-lines -- route registration and coordinated shutdown share startup state */
 import express, { Request, Response } from 'express';
-import { pathToFileURL } from 'node:url';
 import { mountMcp, mcpResponseHeaders } from './mcp/server.js';
 import { getMcpOriginSync, isMcpEnabledSync, invalidateMcpConfigCache, resolveMcpConfig } from './mcp/configResolver.js';
 import { createServer, Server as HttpServer } from 'http';
@@ -770,4 +769,6 @@ async function start(): Promise<void> {
   }
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) void start();
+// Importing supervisors and symlinked entries retain the production startup contract.
+// Composition tests explicitly disable infrastructure startup before importing.
+if (process.env.PROPR_API_DISABLE_AUTOSTART !== '1') void start();

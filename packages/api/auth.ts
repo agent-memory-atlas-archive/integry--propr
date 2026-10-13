@@ -41,7 +41,6 @@ import { rememberCreator } from './services/creatorProjection.js';
 import './authTypes.js';
 import { timeApiStage } from './apiPerformanceTiming.js';
 import { createCorsOriginValidator } from './corsValidation.js';
-import { getMcpOriginSync } from './mcp/configResolver.js';
 
 declare module 'express-session' {
     interface SessionData {
@@ -196,18 +195,17 @@ async function completeAuthenticatedSessionWithPreviewCredential(req: Request, r
     completeAuthenticatedSession(req, res);
 }
 
-/** Protect cookie-authenticated mutations without requiring browser UI changes. */
+/** Protect extension management without changing unrelated session routes. */
 export function createSessionCsrfProtection(
     frontendUrl: string,
     cookieDomain: string | undefined,
-    getConsentOrigin: () => string | undefined = getMcpOriginSync,
 ): RequestHandler {
     const validateOrigin = createCorsOriginValidator(frontendUrl, cookieDomain);
     return (req, res, next) => {
         // Installed after Passport's session middleware and before any bearer
         // authentication. Explicit credentials without a logged-in session do
         // not confer ambient browser authority.
-        if (!req.isAuthenticated()) { next(); return; }
+        if (!/^\/api\/instance\/extensions\/v1(?:\/|$)/.test(req.path) || !req.isAuthenticated()) { next(); return; }
 
         if (['GET', 'HEAD', 'OPTIONS'].includes(req.method)) {
             req.session.csrfToken ??= randomBytes(32).toString('base64url');
@@ -226,12 +224,6 @@ export function createSessionCsrfProtection(
         // native clients: cookie clients without Origin must send the token.
         const origin = req.get('Origin');
         if (!origin) { res.status(403).json({ error: 'CSRF validation failed' }); return; }
-        // Server-rendered MCP forms use their separately configured API origin;
-        // retain their own, stricter form-token checks downstream.
-        if (req.path.startsWith('/mcp/') && origin === getConsentOrigin()) {
-            next();
-            return;
-        }
         validateOrigin(origin, (error, allowed) => {
             if (error || !allowed) { res.status(403).json({ error: 'CSRF validation failed' }); return; }
             next();

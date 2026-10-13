@@ -373,12 +373,13 @@ test('extension write choices default false, persist exact authority and cannot 
       await db('task_submissions').where({ id: row.id }).update({ task_id: run.taskId, latest_task_id: run.taskId, issue_number: run.issueNumber, state: 'queued' });
       const saved = await db('task_submissions').where({ id: row.id }).first();
       assert.equal(submissionExtensionsForRun(saved, run, environment).extensionAllowWrite, choice === true);
-      for (const changed of [{ taskId: 'replayed' }, { agentAlias: 'codex' }, { model: 'other' }, { repository: 'other/repo' }, { issueNumber: 43 }]) assert.throws(() => submissionExtensionsForRun(saved, { ...run, ...changed }, environment), /exact run/);
-      assert.throws(() => submissionExtensionsForRun({ ...saved, latest_task_id: 'retry' }, run, environment), /exact run/);
+      for (const changed of [{ agentAlias: 'codex' }, { model: 'other' }, { repository: 'other/repo' }, { issueNumber: 43 }]) assert.throws(() => submissionExtensionsForRun(saved, { ...run, ...changed }, environment), /exact run/);
+      assert.deepEqual(submissionExtensionsForRun(saved, { ...run, taskId: 'replayed' }, environment), {});
+      for (const changed of [{ latest_task_id: 'retry' }, { task_id: 'replacement' }, { state: 'completed' }, { extension_authorization: null }]) assert.deepEqual(submissionExtensionsForRun({ ...saved, ...changed }, run, environment), {});
       assert.throws(() => submissionExtensionsForRun({ ...saved, user_id: '2' }, run, environment), /unavailable/);
       assert.throws(() => submissionExtensionsForRun({ ...saved, payload: JSON.stringify({ ...JSON.parse(saved.payload), extensionAllowWrite: choice !== true }) }, run, environment), /exact run/);
       assert.throws(() => submissionExtensionsForRun({ ...saved, payload: JSON.stringify({ ...JSON.parse(saved.payload), extensionProfile: { ...selection, revision: 2 } }) }, run, environment), /exact run/);
-      assert.throws(() => submissionExtensionsForRun({ ...saved, extension_authorization: null }, run, environment), /unavailable/);
+
       await db('task_submissions').where({ id: row.id }).delete();
     }
   } finally { await db.destroy(); }

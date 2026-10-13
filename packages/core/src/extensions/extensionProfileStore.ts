@@ -107,10 +107,9 @@ export class ExtensionProfileStore {
     const current = await this.database('extension_profiles').where({ id: selection.profileId, instance_id: selection.instanceId, revision: selection.revision, enabled: true, deleted: false }).first('id');
     if (!current || !snapshot.enabled) throw new ExtensionError(409, 'Extension profile disabled, deleted or superseded');
     if (snapshot.agentScope.length && !snapshot.agentScope.includes(context.agentAlias)) throw new ExtensionError(403, 'Profile agent scope does not match');
-    if (snapshot.repositoryScope.length && (!context.repositories.length || context.repositories.some(r => !snapshot.repositoryScope.includes(r)))) throw new ExtensionError(403, 'Profile repository scope does not match');
+    if (snapshot.repositoryScope.length && (!context.repositories.length || context.repositories.some(r => !snapshot.repositoryScope.some(scope => scope.toLowerCase() === r.toLowerCase())))) throw new ExtensionError(403, 'Profile repository scope does not match');
     const credentials = await this.database('extension_profile_revisions').where({ profile_id: selection.profileId, revision: selection.revision }).first('secrets_encrypted');
-    for (const server of snapshot.mcpServers.filter(s => s.enabled)) {
-      if (server.capability === 'write' && !context.allowWrite) throw new ExtensionError(403, 'Run tool policy does not authorize write capabilities');
+    for (const server of snapshot.mcpServers.filter(s => s.enabled && (context.allowWrite || s.capability !== 'write'))) {
       if (server.kind === 'https' && server.authentication === 'bearer' && (!snapshot.secrets[server.name]?.configured || credentials?.secrets_encrypted === '')) throw new ExtensionError(409, 'MCP authentication is not configured');
       if (server.kind === 'catalog') await this.catalog.resolve(server.catalogId, server.digest, server.tools, server.capability);
       else await resolveExtensionEndpoint(server.url);

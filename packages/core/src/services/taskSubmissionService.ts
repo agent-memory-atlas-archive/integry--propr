@@ -76,8 +76,10 @@ export function submissionExtensionsForRun(row: TaskSubmission | undefined, run:
   if (!row) return {};
   const payload = JSON.parse(row.payload) as SubmissionPayload;
   if (!payload.extensionProfile) return {};
-  const authorization = unsealExtensionSecrets(row.extension_authorization ?? '', `submission/${row.id}/${row.user_id}/${row.repository}/${row.payload_hash}`, environment);
-  if (row.task_id !== run.taskId || row.latest_task_id !== run.taskId || !['queued', 'issue_created'].includes(row.state) || row.issue_number !== run.issueNumber || row.repository !== run.repository.toLowerCase() || payload.agentAlias !== run.agentAlias || payload.model !== run.model || authorization.payloadDigest !== createHash('sha256').update(row.payload).digest('hex')) throw new Error('Extension submission does not authorize this exact run');
+  // Retries, replacement tasks and native restores receive no inherited authority.
+  if (row.task_id !== run.taskId || row.latest_task_id !== run.taskId || !['queued', 'issue_created'].includes(row.state) || !row.extension_authorization) return {};
+  const authorization = unsealExtensionSecrets(row.extension_authorization, `submission/${row.id}/${row.user_id}/${row.repository}/${row.payload_hash}`, environment);
+  if (row.issue_number !== run.issueNumber || row.repository !== run.repository.toLowerCase() || payload.agentAlias !== run.agentAlias || payload.model !== run.model || authorization.payloadDigest !== createHash('sha256').update(row.payload).digest('hex')) throw new Error('Extension submission does not authorize this exact run');
   return { extensionProfile: payload.extensionProfile, extensionActorId: row.user_id, extensionAllowWrite: authorization.allowWrite === 'true' && payload.extensionAllowWrite === true };
 }
 

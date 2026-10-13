@@ -30,11 +30,12 @@ const lines = (stream, limit, run) => {
   return reader;
 };
 lines(process.stdin, 64 * 1024, rpc => {
-  if (++calls > 256 || pending.size >= 4) return stop();
+  if (++calls > 256) return stop();
   const method = rpc.method;
   const valid = rpc.jsonrpc === '2.0' && Object.keys(rpc).every(k => ['jsonrpc', 'id', 'method', 'params'].includes(k)) && ['initialize', 'ping', 'notifications/initialized', 'tools/list', 'tools/call'].includes(method) && (rpc.id === undefined || typeof rpc.id === 'string' || typeof rpc.id === 'number');
   const permitted = method !== 'tools/call' || (rpc.params && config.tools.includes(rpc.params.name) && Object.keys(rpc.params).every(k => ['name', 'arguments', '_meta'].includes(k)));
   if (!valid || !permitted || (rpc.id !== undefined && pending.has(rpc.id))) { if (rpc.id !== undefined) send({ jsonrpc: '2.0', id: rpc.id, error: { code: -32601, message: 'MCP capability unavailable' } }); return; }
+  if (rpc.id !== undefined && pending.size >= 4) { send({ jsonrpc: '2.0', id: rpc.id, error: { code: -32000, message: 'MCP concurrency limit reached' } }); return; }
   if (rpc.id !== undefined) { const timer = setTimeout(stop, 10_000); pending.set(rpc.id, { method, timer }); }
   if (method === 'tools/call') rpc.params = { name: rpc.params.name, arguments: rpc.params.arguments };
   child.stdin.write(JSON.stringify(rpc) + '\n');
@@ -42,7 +43,14 @@ lines(process.stdin, 64 * 1024, rpc => {
 process.stdin.on('end', stop);
 lines(child.stdout, 1024 * 1024, rpc => {
   const request = pending.get(rpc.id);
-  if (!request || rpc.jsonrpc !== '2.0' || !Object.hasOwn(rpc, 'result') || rpc.error) return;
+  if (!request || rpc.jsonrpc !== '2.0') return;
+  if (rpc.error && typeof rpc.error === 'object' && Number.isInteger(rpc.error.code)) {
+    clearTimeout(request.timer); pending.delete(rpc.id);
+    // Preserve the protocol code without disclosing upstream messages or data.
+    send({ jsonrpc: '2.0', id: rpc.id, error: { code: rpc.error.code, message: 'MCP request failed' } });
+    return;
+  }
+  if (!Object.hasOwn(rpc, 'result') || rpc.error) return;
   clearTimeout(request.timer); pending.delete(rpc.id);
   let result = rpc.result;
   if (request.method === 'initialize') result = { protocolVersion: '2025-03-26', capabilities: { tools: {} }, serverInfo: { name: config.name, version: '1' } };

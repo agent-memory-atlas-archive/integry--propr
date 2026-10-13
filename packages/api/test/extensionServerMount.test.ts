@@ -23,6 +23,7 @@ test('server mounts extension gateway before auth, management after auth, and ar
   mock.module('../auth.js', { namedExports: { ...auth, setupAuth: () => ({ engineMiddleware: [], authenticate: () => undefined }) } });
   const endpoint = await import('../../core/src/extensions/endpointPolicy.js');
   mock.module('../../core/src/extensions/endpointPolicy.js', { namedExports: { ...endpoint, requestExtensionMcp: async (_url: string, body: any) => ({ jsonrpc: '2.0', id: body.id, result: { tools: [{ name: 'lookup', inputSchema: { type: 'object' } }] } }) } });
+  process.env.PROPR_API_DISABLE_AUTOSTART = '1';
   const { app, setupRoutes, initRedis } = await import('../server.js');
   const core = await import('@propr/core');
   await core.runMigrations();

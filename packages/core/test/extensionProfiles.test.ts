@@ -77,11 +77,12 @@ test('native durable instance-admin CRUD, encrypted custody, revision fencing an
 test('scope, runtime, capability, demotion, tenant and secret substitution fail closed', async t => {
   const { database, store } = await fixture(); t.after(() => database.destroy());
   const scoped = await store.save('1', { ...input(), agentScope: ['claude-main'], repositoryScope: ['team/repo'] }, { docs: secret });
+  await store.assertLaunch('1', select(scoped), { ...context, repositories: ['TEAM/REPO'] });
   await assert.rejects(store.assertLaunch('1', select(scoped), { ...context, agentAlias: 'codex-other' }), /scope/);
   await assert.rejects(store.assertLaunch('1', select(scoped), { ...context, repositories: ['other/repo'] }), /scope/);
   await assert.rejects(store.assertLaunch('1', select(scoped), { ...context, runtime: 'opencode' }), /Claude or Codex/);
   const writes = await store.save('1', { ...input(), mcpServers: [{ ...input().mcpServers[0], capability: 'write' }] }, { docs: secret });
-  await assert.rejects(store.assertLaunch('1', select(writes), context), /write capabilities/);
+  await store.assertLaunch('1', select(writes), context);
   await store.assertLaunch('1', select(writes), { ...context, allowWrite: true });
   await assert.rejects(store.save('1', { ...input(), name: secret }, { docs: secret }), /public profile/);
   await assert.rejects(store.save('1', { ...input(), skillBundleIds: [randomUUID()] }, { docs: secret }), /unavailable/);
@@ -515,4 +516,70 @@ test('gateway accounting and denied resolutions survive grant cleanup in per-tas
   assert.equal(event.event, 'network.extensions'); assert.deepEqual(event.network, { mode: 'restricted' }); assert.equal(event.denied, 3); assert.equal(event.calls, 1); assert.equal(event.responseBytes, 1024 * 1024); assert.deepEqual(event.resolutions, [{ allowed: false }, { allowed: false }, { allowed: false }, { host: `catalog:local-docs@${'a'.repeat(64)}`, allowed: true }]);
   for (const sentinel of ['10.43.21.9', 'catalog-endpoint-sentinel', 'unrelated-base-allow.example']) assert.ok(!JSON.stringify(event).includes(sentinel));
   assert.ok(!JSON.stringify(event).includes(secret)); assert.ok(!JSON.stringify(event).includes(token));
+});
+
+test('write profiles launch report and non-opted-in tasks without write tools, then expose them for action', async t => {
+  const { database, store } = await fixture(); t.after(() => database.destroy());
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'extension-write-')); t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const { operatorCatalogDigest } = await import('../src/extensions/operatorCatalog.js');
+  const { executeWithExtensions, currentExtensionLaunch } = await import('../src/extensions/extensionLaunch.js');
+  const { agentTaskOptions } = await import('../../../src/jobs/agentRuns/agentTaskOptions.js');
+  const entry = { id: 'local-write', kind: 'stdio' as const, executable: '/usr/bin/env', args: ['node', '--version'], secretEnv: { API_KEY: 'LOCAL_WRITE_SECRET' }, tools: ['update'], capability: 'write' as const };
+  const catalogFile = path.join(root, 'catalog.json'); await fs.writeFile(catalogFile, JSON.stringify([entry]), { mode: 0o600 });
+  store.environment.PROPR_EXTENSION_CATALOG_FILE = catalogFile; store.environment.LOCAL_WRITE_SECRET = secret;
+  const profile = await store.save('1', { ...input(), repositoryScope: ['Team/Repo'], mcpServers: [
+    { ...input().mcpServers[0], capability: 'write' },
+    { kind: 'catalog', name: 'local-write', catalogId: entry.id, digest: operatorCatalogDigest(entry), enabled: true, tools: ['update'], capability: 'write' },
+    { ...input().mcpServers[0], name: 'read-docs', authentication: 'none' },
+  ] }, { docs: secret });
+  const config = { type: 'claude' as const, alias: 'claude', id: randomUUID(), enabled: true, dockerImage: 'synthetic', configPath: root, supportedModels: ['synthetic'] };
+  const result = { success: true, executionTimeMs: 0, modifiedFiles: [], commitMessage: null, logs: '', modelUsed: 'synthetic' };
+  for (const phase of ['report', 'action'] as const) {
+    const options = agentTaskOptions({ runId: 'run', taskId: phase, definition: { id: 'definition', ownerId: '1', extensionProfile: select(profile), repositories: ['team/repo'], capabilities: [] } as any, issueRef: { repoOwner: 'team', repoName: 'repo', number: 1 }, prompt: 'Run phase', model: undefined, token: '', workspace: { worktreePath: root, promptWorkspace: { repositoriesReadable: false } } as any, ...(phase === 'action' ? { phase } : {}) });
+    await executeWithExtensions(config, options, async prepared => {
+      await currentExtensionLaunch()!.beforeLaunch();
+      assert.deepEqual(prepared.toolPolicy!.mcpServers!.map(s => s.name), phase === 'action' ? ['docs', 'read-docs'] : ['read-docs']);
+      assert.deepEqual(prepared.toolPolicy!.localMcpServers!.map(s => s.name), phase === 'action' ? ['local-write'] : []);
+      const token = prepared.toolPolicy!.mcpServers![0].bearerToken;
+      if (phase === 'report') await assert.rejects(extensionGatewayCall(store, token, 'docs', { jsonrpc: '2.0', id: 1, method: 'tools/list' }), /write grant/);
+      return result;
+    }, store);
+    if (phase === 'report') {
+      // Omitted New Task write opt-in also excludes servers whose catalog or
+      // credentials are no longer available; excluded tools are never resolved.
+      await fs.writeFile(catalogFile, '[]');
+      await database('extension_profile_revisions').where({ profile_id: profile.profileId }).update({ secrets_encrypted: '' });
+      await executeWithExtensions(config, { ...options, extensionAllowWrite: undefined }, async prepared => {
+        await currentExtensionLaunch()!.beforeLaunch();
+        assert.deepEqual(prepared.toolPolicy!.mcpServers!.map(s => s.name), ['read-docs']);
+        assert.deepEqual(prepared.toolPolicy!.localMcpServers, []);
+        return result;
+      }, store);
+      await fs.writeFile(catalogFile, JSON.stringify([entry]));
+      // Restore synthetic credentials for the action phase.
+      const revision = await store.save('1', { ...input(), mcpServers: profile.mcpServers, repositoryScope: profile.repositoryScope }, { docs: secret }, select(profile));
+      Object.assign(profile, revision);
+    }
+  }
+  assert.equal((await database('extension_run_grants')).length, 0);
+});
+
+test('startup egress sweep reclaims crashed extension owners and preserves live, foreign, legacy and symlink trees', async t => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'extension-orphan-')); t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const { createStagingDirectory, ensureStagingRoot } = await import('../src/extensions/skillStaging.js');
+  const { sweepOrphanedEgressProxies } = await import('../src/network/egressExecution.js');
+  const instance = path.join(root, 'extensions', randomUUID()); await ensureStagingRoot(instance);
+  const live = await createStagingDirectory(instance); t.after(live.cleanup);
+  const deadName = path.basename(live.directory).replace(`-${process.pid}-`, '-2147483647-');
+  const dead = path.join(instance, deadName); await fs.mkdir(dead); await fs.writeFile(path.join(dead, 'skill'), 'dead-owner');
+  const foreign = path.join(instance, deadName.replace(/^run-[a-f0-9]{16}/, 'run-0000000000000000')); await fs.mkdir(foreign);
+  const legacy = path.join(instance, 'run-legacy'); await fs.mkdir(legacy);
+  const outside = path.join(root, 'outside'); await fs.mkdir(outside); await fs.writeFile(path.join(outside, 'sentinel'), 'preserve');
+  const linkName = deadName.slice(0, -6) + 'ABCDEF'; await fs.symlink(outside, path.join(instance, linkName));
+  const old = new Date(0); await fs.utimes(live.directory, old, old);
+  assert.equal((await sweepOrphanedEgressProxies({ root })).removed, 1);
+  await assert.rejects(fs.stat(dead), /ENOENT/);
+  for (const preserved of [live.directory, foreign, legacy]) assert.ok((await fs.stat(preserved)).isDirectory());
+  assert.equal(await fs.readFile(path.join(outside, 'sentinel'), 'utf8'), 'preserve');
+  assert.ok((await fs.lstat(path.join(instance, linkName))).isSymbolicLink());
 });
