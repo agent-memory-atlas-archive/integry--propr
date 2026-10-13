@@ -103,6 +103,20 @@ async function ready(f: Awaited<ReturnType<typeof fixture>>, id: string) {
   throw new Error('Export did not settle');
 }
 
+// Signal only after stream admission has reached the real lock acquisition.
+function streamWaiting(t: test.TestContext, plane: FleetDataPlane, count = 1) {
+  const internals = plane as unknown as { acquireTarget: (id: string, action: FleetDataRequest['action']) => Promise<void> };
+  const acquire = internals.acquireTarget.bind(plane);
+  let entered!: () => void;
+  const waiting = new Promise<void>(resolve => { entered = resolve; });
+  t.mock.method(internals, 'acquireTarget', (id: string, action: FleetDataRequest['action']) => {
+    const pending = acquire(id, action);
+    if (action === 'artifact.stream' && --count === 0) entered();
+    return pending;
+  });
+  return waiting;
+}
+
 test('private Unix contract runs real WAL export, streams once, preserves ciphertext and excludes secrets', async t => {
   const f = await fixture(t);
   assert.equal(typeof f.server.address(), 'string');
@@ -319,16 +333,16 @@ test('consumer failure consumes redemption and fences result; native staging is 
   });
   const watcher = (f.plane as any).watchExport(op.operationId);
   await entered;
-  const create = f.plane.files.create.bind(f.plane.files);
-  t.mock.method(f.plane.files, 'create', async (name: string, value: any) => {
-    await create(name, value);
-    if (value.action === 'artifact.stream') setTimeout(releaseWatcher, 50);
-  });
+  const waiting = streamWaiting(t, f.plane);
   let sawBytes = false;
-  await assert.rejects(f.plane.stream(f.sign({ action: 'artifact.stream', targetOperationId: op.operationId }), async download => {
+  const transfer = assert.rejects(f.plane.stream(f.sign({ action: 'artifact.stream', targetOperationId: op.operationId }), async download => {
     const buffer = Buffer.alloc(32); await download.file.read(buffer, 0, 32, 0); sawBytes = true;
     throw new Error('consumer-disconnected-canary');
   }));
+  await waiting;
+  assert.equal(sawBytes, false);
+  releaseWatcher();
+  await transfer;
   await watcher;
   assert.ok(sawBytes);
   const status = await f.invoke({ action: 'operation.status', targetOperationId: op.operationId });
@@ -336,6 +350,132 @@ test('consumer failure consumes redemption and fences result; native staging is 
   assert.ok(!JSON.stringify(status).includes('consumer-disconnected-canary'));
   assert.equal((await f.http(f.sign({ action: 'artifact.stream', targetOperationId: op.operationId }))).status, 403);
   assert.ok(!(await fs.readdir(path.join(f.native, 'exports'))).some(name => name.startsWith('snapshot-')));
+});
+
+test('fresh streams wait for a status owner and exactly one redeems after release', async t => {
+  const f = await fixture(t);
+  const op = await f.invoke({ action: 'database.export' }); await ready(f, op.operationId);
+  let release!: () => void;
+  let entered!: () => void;
+  const held = new Promise<void>(resolve => { release = resolve; });
+  const locked = new Promise<void>(resolve => { entered = resolve; });
+  t.after(release);
+  const read = f.plane.files.read.bind(f.plane.files);
+  let block = true, statusOwnsTarget = false;
+  const internals = f.plane as unknown as { acquireTarget: (id: string, action: FleetDataRequest['action']) => Promise<void> };
+  const acquire = internals.acquireTarget.bind(f.plane);
+  t.mock.method(internals, 'acquireTarget', async (id: string, action: FleetDataRequest['action']) => {
+    await acquire(id, action);
+    if (action === 'operation.status') statusOwnsTarget = true;
+  });
+  t.mock.method(f.plane.files, 'read', async (name: string) => {
+    const value = await read(name);
+    if (statusOwnsTarget && block && name === `operation-${op.operationId}.jsonl`) {
+      block = false; entered(); await held;
+    }
+    return value;
+  });
+  const status = f.invoke({ action: 'operation.status', targetOperationId: op.operationId });
+  await locked;
+  const waiting = streamWaiting(t, f.plane, 2);
+  const redeem = t.mock.method(f.storage.exports!, 'redeem');
+  let consumers = 0, bytes = 0;
+  const grants = [0, 1].map(() => f.sign({ action: 'artifact.stream', targetOperationId: op.operationId }));
+  const transfers = Promise.allSettled(grants.map(raw => f.plane.stream(raw, async (download, authorize) => {
+    consumers++;
+    await authorize();
+    const buffer = Buffer.alloc(32);
+    const result = await download.file.read(buffer, 0, buffer.length, 0);
+    await authorize(); bytes += result.bytesRead;
+  })));
+  await waiting;
+  assert.equal(consumers, 0); assert.equal(redeem.mock.callCount(), 0);
+  release(); await status;
+  const results = await transfers;
+  assert.equal(results.filter(result => result.status === 'fulfilled').length, 1);
+  assert.equal(consumers, 1); assert.equal(redeem.mock.callCount(), 1); assert.equal(bytes, 32);
+  for (const raw of grants) await assert.rejects(f.plane.stream(raw, async () => assert.fail('replay')));
+  assert.equal(redeem.mock.callCount(), 1);
+  const final = await f.invoke({ action: 'operation.status', targetOperationId: op.operationId });
+  assert.equal((final.result as FleetDataResult).state, 'consumed');
+  assert.ok(!(await fs.readdir(path.join(f.native, 'exports'))).some(name => name.startsWith('snapshot-')));
+});
+
+test('target-lock timeout never redeems and does not release the status owner', async t => {
+  const f = await fixture(t);
+  const op = await f.invoke({ action: 'database.export' }); await ready(f, op.operationId);
+  let release!: () => void;
+  let entered!: () => void;
+  const held = new Promise<void>(resolve => { release = resolve; });
+  const locked = new Promise<void>(resolve => { entered = resolve; });
+  t.after(release);
+  const read = f.plane.files.read.bind(f.plane.files);
+  let block = true, statusOwnsTarget = false;
+  const internals = f.plane as unknown as { acquireTarget: (id: string, action: FleetDataRequest['action']) => Promise<void> };
+  const acquire = internals.acquireTarget.bind(f.plane);
+  t.mock.method(internals, 'acquireTarget', async (id: string, action: FleetDataRequest['action']) => {
+    await acquire(id, action);
+    if (action === 'operation.status') statusOwnsTarget = true;
+  });
+  t.mock.method(f.plane.files, 'read', async (name: string) => {
+    const value = await read(name);
+    if (statusOwnsTarget && block && name === `operation-${op.operationId}.jsonl`) {
+      block = false; entered(); await held;
+    }
+    return value;
+  });
+  const status = f.invoke({ action: 'operation.status', targetOperationId: op.operationId });
+  await locked;
+  const redeem = t.mock.method(f.storage.exports!, 'redeem');
+  const raw = f.sign({ action: 'artifact.stream', targetOperationId: op.operationId });
+  await assert.rejects(f.plane.stream(raw, async () => assert.fail('timed-out consumer')));
+  await assert.rejects(f.plane.stream(raw, async () => assert.fail('replay')));
+  // A second fresh grant must still time out: the first waiter cannot unlock its owner.
+  await assert.rejects(f.plane.stream(f.sign({ action: 'artifact.stream', targetOperationId: op.operationId }), async () => assert.fail('owner was released')));
+  assert.equal(redeem.mock.callCount(), 0);
+  const streamRecord = JSON.parse((await read(`operation-${JSON.parse(raw).assertion.operationId}.jsonl`)).trimEnd().split('\n').at(-1)!);
+  assert.equal(streamRecord.state, 'failed');
+  const targetRecord = JSON.parse((await read(`operation-${op.operationId}.jsonl`)).trimEnd().split('\n').at(-1)!);
+  assert.equal(targetRecord.state, 'completed');
+  release(); await status;
+  await f.invoke({ action: 'operation.cancel', targetOperationId: op.operationId });
+  assert.ok(!(await fs.readdir(path.join(f.native, 'exports'))).some(name => name.startsWith('snapshot-')));
+});
+
+test('parallel stream times out behind a consumer; actor revocation fences and cleans staging', async t => {
+  const f = await fixture(t);
+  const op = await f.invoke({ action: 'database.export' }); await ready(f, op.operationId);
+  let release!: () => void;
+  let entered!: () => void;
+  const held = new Promise<void>(resolve => { release = resolve; });
+  const consuming = new Promise<void>(resolve => { entered = resolve; });
+  t.after(release);
+  const redeem = t.mock.method(f.storage.exports!, 'redeem');
+  let bytes = 0;
+  const raw = f.sign({ action: 'artifact.stream', targetOperationId: op.operationId });
+  const first = assert.rejects(f.plane.stream(raw, async (download, authorize) => {
+    entered(); await held;
+    await authorize();
+    const result = await download.file.read(Buffer.alloc(32), 0, 32, 0);
+    await authorize(); bytes += result.bytesRead;
+  }));
+  await consuming;
+  const parallel = f.sign({ action: 'artifact.stream', targetOperationId: op.operationId });
+  await assert.rejects(f.plane.stream(parallel, async () => assert.fail('parallel consumer')));
+  await assert.rejects(f.plane.stream(parallel, async () => assert.fail('parallel replay')));
+  assert.equal(redeem.mock.callCount(), 1);
+  assert.ok((await fs.readdir(path.join(f.native, 'exports'))).some(name => name.startsWith('snapshot-')));
+  f.members.delete(100); release(); await first;
+  assert.equal(bytes, 0);
+  await assert.rejects(f.plane.stream(raw, async () => assert.fail('revoked replay')));
+  assert.equal(redeem.mock.callCount(), 1);
+  const record = JSON.parse((await f.plane.files.read(`operation-${op.operationId}.jsonl`)).trimEnd().split('\n').at(-1)!);
+  assert.equal(record.state, 'fenced');
+  assert.ok(!(await fs.readdir(path.join(f.native, 'exports'))).some(name => name.startsWith('snapshot-')));
+  // Restore authorization only to prove the terminal fence still prevents redemption.
+  f.members.set(100, { role: 'admin', permissions: ['instance.manage_settings'], source: 'local' });
+  await assert.rejects(f.plane.stream(f.sign({ action: 'artifact.stream', targetOperationId: op.operationId }), async () => assert.fail('fenced consumer')));
+  assert.equal(redeem.mock.callCount(), 1);
 });
 
 test('concurrent cleanup execution has only one durable confirmation claim', async t => {

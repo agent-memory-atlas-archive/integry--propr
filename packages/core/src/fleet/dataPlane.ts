@@ -212,12 +212,21 @@ export class FleetDataPlane {
     }
   }
   private async acquireTarget(targetId: string, action: FleetDataAssertion['action']) {
-    // Briefly serialize metadata polling with the completion outbox writer.
-    if (action === 'operation.status' || action === 'operation.cancel' || action === 'artifact.stream') {
-      for (let attempt = 0; attempt < 100 && this.busyTargets.has(targetId); attempt++) await delay(10);
+    // Streams also serialize with metadata writers. Contention does not grant
+    // permission: the caller still revalidates the grant and target after waiting.
+    const waits = action === 'operation.status' || action === 'operation.cancel' || action === 'artifact.stream';
+    const deadline = performance.now() + 1000;
+    for (;;) {
+      // Check the deadline even after a delayed wakeup with a now-free target.
+      if (performance.now() >= deadline) throw new FleetRefusal();
+      if (!this.busyTargets.has(targetId)) {
+        // No await between checking and claiming: exactly one caller owns it.
+        this.busyTargets.add(targetId);
+        return;
+      }
+      if (!waits) throw new FleetRefusal();
+      await delay(10);
     }
-    if (this.busyTargets.has(targetId)) throw new FleetRefusal();
-    this.busyTargets.add(targetId);
   }
   async invoke(raw: string): Promise<FleetDataResult> {
     const { envelope, op } = await this.admit(raw);
