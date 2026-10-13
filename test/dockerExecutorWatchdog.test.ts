@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mock, test } from 'node:test';
+import { after, mock, test } from 'node:test';
 import type { Redis as RedisClient } from 'ioredis';
 
 class FakeRedis {
@@ -26,6 +26,11 @@ const { startExecutionWatchdog } = await import('../packages/core/src/claude/doc
 const { ACQUIRE_WORKFLOW_SLOT, RELEASE_WORKFLOW_SLOT, releaseRepositoryWorkflowSlot, withRepositoryWorkflowSlot } = await import('../packages/core/src/workflow/workflowConcurrency.js');
 const { resolveAgentTerminationReason } = await import('../packages/core/src/agents/termination.js');
 const { taskTerminalReasonForAgentTermination } = await import('../src/jobs/agentTerminalReason.js');
+const { closeConnection } = await import('../packages/core/src/db/connection.js');
+
+// The executor's import chain opens SQLite; release its pool after the suite.
+after(async () => { await closeConnection(); });
+
 type AgentWatchdogTrip = import('../packages/core/src/claude/docker/agentActivityWatchdog.js').AgentWatchdogTrip;
 
 const FAST = { stallTimeoutMs: 300, toolStallTimeoutMs: 1_500, degenerateOutputLimit: 5 };
