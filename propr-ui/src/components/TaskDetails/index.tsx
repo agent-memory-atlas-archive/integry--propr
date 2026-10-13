@@ -349,18 +349,19 @@ const TaskDetails: React.FC<TaskDetailsProps> = ({ taskId: taskIdProp, embedded 
         todos={taskData.liveDetails.todos}
       />
 
-      {/* Split only when the 576px timeline and at least 384px of output fit. */}
+      {/* Split only when the 576px timeline and at least 384px of output fit.
+          A grid row grows to the taller pane so both columns share the full scrollable height. */}
       <div className="flex flex-col min-w-0 sm:min-h-0 sm:flex-1 sm:overflow-hidden [container:task-workspace/inline-size]">
         <div
           data-testid="task-workspace-scroll"
-          className={`scrollbar-stealth flex flex-col min-w-0 sm:min-h-0 sm:flex-1 sm:overflow-y-auto sm:overscroll-contain${wideOnly(embedded, '[@container_task-workspace_(min-width:960px)]:flex-row [@container_task-workspace_(min-width:960px)]:items-stretch')}`}
+          className={`scrollbar-stealth flex flex-col min-w-0 sm:min-h-0 sm:flex-1 sm:overflow-y-auto sm:overscroll-contain${wideOnly(embedded, '[@container_task-workspace_(min-width:960px)]:grid [@container_task-workspace_(min-width:960px)]:grid-cols-[max(30%,576px)_minmax(0,1fr)]')}`}
         >
           {/* Keep 528px for step columns after pane padding, scrollbar and border. */}
           <div
             data-testid="task-timeline-scroll"
             role="region"
             aria-label="Task timeline"
-            className={`w-full min-w-0 flex-shrink-0 border-b border-gray-200${wideOnly(embedded, '[@container_task-workspace_(min-width:960px)]:w-[max(30%,576px)] [@container_task-workspace_(min-width:960px)]:border-b-0 [@container_task-workspace_(min-width:960px)]:border-r')}`}
+            className={`w-full min-w-0 flex-shrink-0 border-b border-gray-200${wideOnly(embedded, '[@container_task-workspace_(min-width:960px)]:border-b-0 [@container_task-workspace_(min-width:960px)]:border-r')}`}
           >
             <div className={`z-[1] flex ${PANE_HEADER_HEIGHT} items-center justify-between gap-3 border-b border-slate-200 bg-white px-4 sm:sticky sm:top-0`}>
               <TimelineHeading runCount={runs?.length ?? 0} />
@@ -383,7 +384,7 @@ const TaskDetails: React.FC<TaskDetailsProps> = ({ taskId: taskIdProp, embedded 
           </div>
 
           {/* RIGHT PANE: the run's deliverables first, then the trace of how it got there. */}
-          <div className={`flex flex-col min-w-0${wideOnly(embedded, '[@container_task-workspace_(min-width:960px)]:flex-1')}`}>
+          <div className="flex flex-col min-w-0">
             <div
               data-testid="task-output-scroll"
               role="region"
