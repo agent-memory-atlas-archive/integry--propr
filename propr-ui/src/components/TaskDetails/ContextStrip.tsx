@@ -1,3 +1,4 @@
+import { formatModelName } from '../../utils/modelDisplay';
 import React from 'react';
 import { TaskBudget, TaskInfo, TokenUsage, UsageMetricRecord } from './types';
 import { ExternalLink, GitPullRequest, GitCommit, Layers3 } from 'lucide-react';
@@ -36,7 +37,7 @@ const MODEL_DISPLAY_NAMES: Record<string, string> = {
 };
 
 const getDisplayModelName = (modelId: string): string => {
-  return MODEL_DISPLAY_NAMES[modelId] || modelId;
+  return MODEL_DISPLAY_NAMES[modelId] || formatModelName(modelId);
 };
 
 // Format token count for display (e.g., 1234 -> "1.2k", 1234567 -> "1.2M")
@@ -118,7 +119,7 @@ const ModelChip: React.FC<{ modelName: string; duration?: number | null; synthet
   <>
     <span
       className="inline-flex items-center gap-1 rounded border border-slate-200 bg-slate-100 px-1.5 py-0.5 font-mono text-xs text-slate-800"
-      title={modelName}
+      title={getDisplayModelName(modelName)}
     >
       {synthetic
         ? <Layers3 className="h-3 w-3" aria-label="Synthetic pool" />

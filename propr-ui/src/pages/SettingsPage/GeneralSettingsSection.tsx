@@ -1,3 +1,4 @@
+import { formatModelName } from '../../utils/modelDisplay';
 import React from 'react';
 import { SettingsCheckboxField, SettingsField, SettingsSection } from './SettingsLayout';
 import { buildAllModelOptions, type ModelSelectionAgent } from './modelSelectionHelpers';
@@ -209,7 +210,7 @@ const GeneralSettingsSection: React.FC<GeneralSettingsSectionProps> = ({
                     <select id={`ultrafix_escalation_model_${index}`} aria-label={`Escalation model ${index + 1}`}
                       value={model} className={`${SETTINGS_CONTROL} min-w-0`}
                       onChange={event => onEscalationModelsChange(models.map((value, i) => i === index ? event.target.value : value))}>
-                      {!modelOptions.some(option => option.value === model) && <option value={model}>{model} (unavailable)</option>}
+                      {!modelOptions.some(option => option.value === model) && <option value={model}>{formatModelName(model)} (unavailable)</option>}
                       {modelOptions.map(option => <option key={option.value} value={option.value}>
                         {option.label}{option.enabled ? '' : ' (disabled)'}
                       </option>)}

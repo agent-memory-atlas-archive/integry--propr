@@ -1,3 +1,4 @@
+import { formatModelName } from '../utils/modelDisplay';
 import React, { useState, useEffect } from 'react';
 import { getStatsOverview, StatsOverviewResponse } from '../api/taskStatsApi';
 import { ProviderLogo } from './ui/ProviderLogo';
@@ -164,7 +165,7 @@ const RepositoryReport: React.FC = () => {
               const percentage = totalModelCount > 0 ? (count / totalModelCount) * 100 : 0;
               return (
                 <div
-                  key={modelId}
+                  key={formatModelName(modelId)}
                   className="flex items-center gap-3 py-2.5 px-3 rounded-lg transition-colors duration-150 hover:bg-white hover:shadow-sm cursor-default group"
                 >
                   {/* Model Icon */}
@@ -173,9 +174,9 @@ const RepositoryReport: React.FC = () => {
                   {/* Model Name - Left Aligned */}
                   <span
                     className="w-40 sm:w-48 md:w-56 text-sm font-medium text-slate-700 truncate"
-                    title={modelId}
+                    title={formatModelName(modelId)}
                   >
-                    {modelId}
+                    {formatModelName(modelId)}
                   </span>
 
                   {/* Thin Progress Bar - Middle */}
