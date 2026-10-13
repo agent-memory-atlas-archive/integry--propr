@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { useLocation } from 'react-router-dom';
 import { useTaskSearchParams } from '../components/TaskList/hooks';
 
 /** Tailwind `xl`: wide enough to show the queue and a triage verdict side by side. */
@@ -30,10 +31,22 @@ export function useInboxSelection(): InboxSelection {
   const [pending, setPending] = useState<{ id: string | null } | null>(null);
   const selectedId = pending ? pending.id : urlId;
   const [isSplitViewport, setIsSplitViewport] = useState(matchesSplit);
+  // Every id written since the choice was made. The URL write is refused when
+  // history has already moved on (Back, another route); a location this hook
+  // did not write means that happened, and the URL wins again.
+  const { key: locationKey } = useLocation();
+  const writtenRef = useRef(new Set<string | null>());
+  const locationKeyRef = useRef(locationKey);
 
   useEffect(() => {
-    if (pending && pending.id === urlId) setPending(null);
-  }, [pending, urlId]);
+    const navigated = locationKeyRef.current !== locationKey;
+    locationKeyRef.current = locationKey;
+    if (!pending) return;
+    if (pending.id === urlId || (navigated && !writtenRef.current.has(urlId))) {
+      writtenRef.current.clear();
+      setPending(null);
+    }
+  }, [pending, urlId, locationKey]);
 
   useEffect(() => {
     if (typeof window.matchMedia !== 'function') return;
@@ -45,6 +58,7 @@ export function useInboxSelection(): InboxSelection {
   }, []);
 
   const select = useCallback((notificationId: string | null) => {
+    writtenRef.current.add(notificationId);
     setPending({ id: notificationId });
     setSearchParams(previous => {
       const next = new URLSearchParams(previous);

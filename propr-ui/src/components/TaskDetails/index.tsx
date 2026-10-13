@@ -28,6 +28,7 @@ import DesktopTaskHeader from './DesktopTaskHeader';
 import { useTaskHeaderView } from './useTaskHeaderView';
 import { useLiveRunStop } from './useLiveRunStop';
 import { useTaskAssignment } from './useTaskAssignment';
+import LatestRunCommands from './LatestRunCommands';
 
 const CenteredStatus: React.FC<{ className: string; children: React.ReactNode }> = ({ className, children }) => (
   <div className="h-full bg-white flex items-center justify-center">
@@ -299,6 +300,7 @@ const TaskDetails: React.FC<TaskDetailsProps> = ({ taskId: taskIdProp, embedded 
     onViewChange: (view: LogView) => (view === 'terminal' ? thinkingLog.expandEvents() : thinkingLog.collapseEvents()),
   };
   const actionBarProps = {
+    followupCommands: <LatestRunCommands runs={runs} taskId={taskId} />,
     currentStatus: derivedData.currentStatus,
     historyItemWithPaths: derivedData.historyItemWithPaths,
     stoppingExecution: taskData.stoppingExecution,

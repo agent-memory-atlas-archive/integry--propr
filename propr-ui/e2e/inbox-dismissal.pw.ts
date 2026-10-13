@@ -202,15 +202,16 @@ test('desktop shows one newest-first list titled by PR, with only System collaps
   await expect(review).toContainText('Review completed');
   await expect(review.getByTitle('Pull request #81')).toHaveText('PR #81');
   await expect(review.getByRole('img', { name: 'Unread · Score 8/10 · 2 issues' })).toBeVisible();
-  await expect(review.getByRole('button')).toHaveText(['/fix', '']);
+  // Rows carry no commands at any width: they live in the verdict and on the run in Tasks.
+  await expect(review.getByRole('button')).toHaveText(['']);
   await expect(fix).toContainText('Fix completed');
-  await expect(fix.getByRole('button')).toHaveText(['/review', '/ultrafix', '']);
+  await expect(fix.getByRole('button')).toHaveText(['']);
   await expect(plan).toHaveAccessibleName('Improve Inbox notifications');
   await expect(plan.getByRole('button')).toHaveCount(1);
   for (const article of await articles.all()) {
     await expect(article).toHaveCSS('background-color', 'rgb(255, 255, 255)');
     await expect(article).toHaveCSS('border-radius', '0px');
-    // Status, title and summary lines with the commands in the right rail, not a card per item.
+    // Status, title and summary lines with the preview in the right rail, not a card per item.
     expect((await article.boundingBox())!.height).toBeLessThanOrEqual(80);
   }
   await capture(page, 'inbox-cards-desktop.png');
@@ -255,16 +256,16 @@ test('desktop rows stack title over summary, cluster time with the metadata, and
   const ready = page.getByRole('article', { name: 'PR #2498 ready for review' });
   await expect(ready.getByRole('heading', { level: 3 })).toHaveText('Ready for review');
   await expect(ready.getByTitle('Pull request #2498')).toHaveText('PR #2498');
-  await expect(ready.getByRole('button')).toHaveText(['/review', '/ultrafix', '']);
-  // The widest rail (thumbnail and two commands) still clears the dismiss button.
+  await expect(ready.getByRole('button')).toHaveText(['']);
+  // The rail holds only the thumbnail, which still clears the dismiss button.
   await expect(ready.getByRole('group', { name: 'Published visual previews' })).toBeVisible();
-  const ultrafix = (await ready.getByRole('button', { name: /ultrafix/ }).boundingBox())!;
+  const railThumbnail = (await ready.getByTitle('Inbox rows').boundingBox())!;
   const readyDismiss = (await ready.getByRole('button', { name: /^Dismiss/ }).boundingBox())!;
-  expect(ultrafix.x + ultrafix.width).toBeLessThanOrEqual(readyDismiss.x);
+  expect(railThumbnail.x + railThumbnail.width).toBeLessThanOrEqual(readyDismiss.x);
 
   const clean = page.getByRole('article', { name: /^Dashboard cleanup/ });
   await expect(clean.getByRole('button')).toHaveText(['']);
-  await expect(page.getByRole('article', { name: /^\[Epic\]/ }).getByRole('button')).toHaveText(['/fix', '']);
+  await expect(page.getByRole('article', { name: /^\[Epic\]/ }).getByRole('button')).toHaveText(['']);
 
   const thumbnail = (await ready.getByTitle('Inbox rows').boundingBox())!;
   expect([thumbnail.width, thumbnail.height]).toEqual([48, 32]);
@@ -293,68 +294,48 @@ test('desktop rows stack title over summary, cluster time with the metadata, and
   await capture(page, 'inbox-rail-desktop.png');
 });
 
-test('phones keep one command line per row, with extra commands in a menu and a clear dismiss target', async ({ page }) => {
+test('phones keep the chip, repository and preview on one line, with no commands and a clear dismiss target', async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   await openTriageInbox(page);
   const epic = page.getByRole('article', { name: /^\[Epic\]/ });
   await expect(epic.getByRole('heading', { level: 3 })).toBeVisible();
+  // Commands live in the verdict and on the run in Tasks, never in the list.
+  await expect(page.getByRole('button', { name: /^(Send \/|More commands)/ })).toHaveCount(0);
 
   const status = (await epic.getByRole('img').boundingBox())!;
   const time = (await epic.locator('time').boundingBox())!;
   const chip = (await epic.getByTitle('Pull request #2511').boundingBox())!;
-  const fix = (await epic.getByRole('button', { name: 'Send /fix to PR #2511' }).boundingBox())!;
   const dismiss = (await epic.getByRole('button', { name: /^Dismiss/ }).boundingBox())!;
   expect(Math.abs(time.y + time.height / 2 - (status.y + status.height / 2))).toBeLessThan(3);
-  // The PR chip and repository share the command line instead of squeezing line one.
+  // The PR chip and repository sit on their own line instead of squeezing line one.
   expect(chip.y).toBeGreaterThan(time.y + 30);
-  expect(Math.abs(chip.y + chip.height / 2 - (fix.y + fix.height / 2))).toBeLessThan(3);
   await expect(epic.getByTitle('integry/propr')).toHaveText('propr', { useInnerText: true });
-  expect(fix.height).toBeGreaterThanOrEqual(40);
   // Dismiss is a 32px target on line one that stays clear of the time.
   expect([dismiss.width, dismiss.height]).toEqual([32, 32]);
   expect(Math.abs(dismiss.y + dismiss.height / 2 - (time.y + time.height / 2))).toBeLessThan(3);
   expect(dismiss.x - (time.x + time.width)).toBeGreaterThanOrEqual(8);
 
-  // Two commands: /review stays inline beside the chip and /ultrafix moves to the overflow menu.
   const ready = page.getByRole('article', { name: 'PR #2498 ready for review' });
-  await expect(ready.getByRole('button', { name: /ultrafix/ })).toHaveCount(0);
   const readyChip = (await ready.getByTitle('Pull request #2498').boundingBox())!;
-  const review = (await ready.getByRole('button', { name: 'Send /review to PR #2498' }).boundingBox())!;
-  const more = ready.getByRole('button', { name: 'More commands for PR #2498' });
-  const moreBox = (await more.boundingBox())!;
   const thumbnail = (await ready.getByTitle('Inbox rows').boundingBox())!;
-  for (const box of [review, moreBox, thumbnail]) {
-    expect(Math.abs(box.y + box.height / 2 - (readyChip.y + readyChip.height / 2))).toBeLessThan(3);
-  }
+  expect(Math.abs(thumbnail.y + thumbnail.height / 2 - (readyChip.y + readyChip.height / 2))).toBeLessThan(3);
   const readyRepository = ready.getByTitle('integry/propr');
   expect(await readyRepository.evaluate(element => element.scrollWidth <= element.clientWidth)).toBe(true);
-  // The shared chip and command line is the row's last line, so two commands don't add a fifth.
-  const readyBox = (await ready.boundingBox())!;
-  expect(readyBox.y + readyBox.height - (review.y + review.height)).toBeLessThanOrEqual(9);
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
 
   // The long title wraps to a second line rather than cutting off after a few words.
   const titleBox = (await epic.getByRole('heading', { level: 3 }).boundingBox())!;
   expect(titleBox.height).toBeGreaterThan(30);
-  await expect(page.getByRole('article', { name: /^Dashboard cleanup/ }).getByRole('button', { name: /^Send/ }))
-    .toHaveCount(0);
   await capture(page, 'inbox-triage-mobile.png');
-
-  await more.click();
-  await expect(more).toHaveAttribute('aria-expanded', 'true');
-  await expect(ready.getByRole('menuitem', { name: 'Send /ultrafix to PR #2498' })).toBeVisible();
-  await capture(page, 'inbox-overflow-menu-mobile.png');
-  await page.keyboard.press('Escape');
-  await expect(ready.getByRole('menu')).toHaveCount(0);
 });
 
-test('a preview image that fails to load leaves no placeholder beside the commands', async ({ page }) => {
+test('a preview image that fails to load leaves no placeholder in the rail', async ({ page }) => {
   await page.setViewportSize(singleColumnDesktop);
   await stubInbox(page, triageNotifications);
   await page.route('https://github.com/user-attachments/assets/**', route => route.abort());
   await page.goto('/inbox');
   const ready = page.getByRole('article', { name: 'PR #2498 ready for review' });
-  await expect(ready.getByRole('button', { name: 'Send /review to PR #2498' })).toBeVisible();
+  await expect(ready.getByRole('heading', { level: 3 })).toBeVisible();
   await expect(ready.getByRole('group', { name: 'Published visual previews' })).toBeHidden();
   await expect(ready.getByRole('img', { name: /image unavailable/ })).toHaveCount(0);
 });
@@ -440,7 +421,9 @@ test('wide screens triage the selected row in a verdict card beside the queue', 
   // Commands are sent from the verdict card only, never from queue rows.
   await expect(page.getByTestId('inbox-split-list').getByRole('button', { name: /^(Send \/|More commands)/ })).toHaveCount(0);
 
-  await epic.getByRole('button', { name: epicTitle, exact: true }).click();
+  const epicLink = epic.getByRole('link', { name: epicTitle, exact: true });
+  await expect(epicLink).toHaveAttribute('href', '/tasks/task-2511');
+  await epicLink.click();
   await expect(page).toHaveURL(/notification=review-2511/);
   await expect(page).toHaveURL(/repository=integry%2Fpropr/);
   const verdict = page.getByRole('region', { name: 'Triage verdict' });
@@ -451,6 +434,12 @@ test('wide screens triage the selected row in a verdict card beside the queue', 
   await expect(verdict.getByRole('link', { name: /Inspect in Tasks/ })).toHaveAttribute('href', '/tasks/task-2511');
   await expect(verdict.getByRole('button', { name: 'Send /fix to PR #2511' })).toBeVisible();
   expect(fileChangeReads).toEqual(['task-2511']);
+  // The selected row is anchored by a teal rule and a tint, not only by aria-current.
+  await expect(epicLink).toHaveAttribute('aria-current', 'true');
+  await expect(epic).toHaveCSS('box-shadow', /rgb\(13, 148, 136\) 4px 0px 0px 0px inset/);
+  await expect(epic).toHaveCSS('background-color', 'rgb(240, 253, 250)');
+  await expect(page.getByRole('article', { name: 'Retry webhook deliveries that time out' }))
+    .toHaveCSS('background-color', 'rgb(255, 255, 255)');
 
   // The queue keeps about a third of the width; the verdict takes the rest.
   const queueBox = (await page.getByTestId('inbox-split-list').boundingBox())!;
@@ -459,13 +448,13 @@ test('wide screens triage the selected row in a verdict card beside the queue', 
   await expect(page.getByTestId('inbox-split-list').getByRole('button', { name: /^(Send \/|More commands)/ })).toHaveCount(0);
   await capture(page, 'inbox-triage-console-desktop.png');
 
-  await verdict.getByRole('button', { name: 'Dismiss' }).click();
+  await verdict.getByRole('button', { name: 'Done' }).click();
   await expect(epic).toHaveCount(0);
   await expect(page).toHaveURL(/notification=review-2519/);
   await expect(verdict.getByRole('heading', { name: 'Review verdict: 4 findings (Score 3/10)' })).toBeVisible();
   await expect(verdict.getByText('Retries never back off')).toBeVisible();
   await expect(verdict.getByText('2 more findings in Tasks')).toBeVisible();
-  await expect(page.getByRole('article', { name: 'Retry webhook deliveries that time out' }).getByRole('button', {
+  await expect(page.getByRole('article', { name: 'Retry webhook deliveries that time out' }).getByRole('link', {
     name: 'Retry webhook deliveries that time out', exact: true,
   })).toHaveAttribute('aria-current', 'true');
   await capture(page, 'inbox-triage-console-advanced-desktop.png');

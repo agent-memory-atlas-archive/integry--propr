@@ -5,6 +5,7 @@ import { notificationFindingReference } from '../inboxUtils';
 import {
   MAX_TRIAGE_DIFF_FILES,
   MAX_TRIAGE_DIFF_LINES,
+  reviewedRunId,
   reviewFindings,
   triageTaskId,
   trimDiffForTriage,
@@ -114,6 +115,24 @@ describe('trimDiffForTriage', () => {
     });
   });
 
+  test('strips headers by position, so a removed line that starts with -- is still a change', () => {
+    const diff: FileChange = {
+      path: 'schema.sql', linesAdded: 1, linesRemoved: 2, status: 'modified',
+      diff: ['diff --git a/schema.sql b/schema.sql', 'index 1..2 100644', '--- a/schema.sql', '+++ b/schema.sql',
+        '@@ -1,2 +1 @@', '--- legacy column', '-ALTER TABLE t DROP c;', '+++counter;', '@@ -9 +8 @@', ' unchanged'].join('\n'),
+    };
+    expect(trimDiffForTriage([diff]).files[0].lines).toEqual([
+      { kind: 'removed', text: '-- legacy column' },
+      { kind: 'removed', text: 'ALTER TABLE t DROP c;' },
+      { kind: 'added', text: '++counter;' },
+    ]);
+    // Without a hunk header only the leading header lines are dropped.
+    expect(trimDiffForTriage([{ ...diff, diff: '--- a/x\n+++ b/x\n--- removed\n+added' }]).files[0].lines).toEqual([
+      { kind: 'removed', text: '-- removed' },
+      { kind: 'added', text: 'added' },
+    ]);
+  });
+
   test('bounds the diff to the first files and changed lines', () => {
     const trimmed = trimDiffForTriage([file('a.ts', 30), file('empty.ts', 0), file('b.ts', 3), file('c.ts', 4)]);
     expect(trimmed.files.map(entry => entry.path)).toEqual(['a.ts', 'b.ts']);
@@ -121,5 +140,20 @@ describe('trimDiffForTriage', () => {
     expect(trimmed.files[0].lines).toHaveLength(MAX_TRIAGE_DIFF_LINES);
     expect(trimmed.files[0].hiddenLines).toBe(30 - MAX_TRIAGE_DIFF_LINES);
     expect(trimmed.hiddenFiles).toBe(1);
+  });
+});
+
+describe('reviewedRunId', () => {
+  test('is the newest earlier run that pushed a commit', () => {
+    const runs = [
+      { id: 'review-2', commitHash: null },
+      { id: 'fix-2', commitHash: 'bbb' },
+      { id: 'review-1', commitHash: null },
+      { id: 'implementation', commitHash: 'aaa' },
+    ];
+    expect(reviewedRunId(runs, 'review-2')).toBe('fix-2');
+    expect(reviewedRunId(runs, 'review-1')).toBe('implementation');
+    expect(reviewedRunId(runs, 'implementation')).toBeNull();
+    expect(reviewedRunId(runs, 'unknown')).toBeNull();
   });
 });

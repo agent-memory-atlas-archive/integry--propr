@@ -6,7 +6,8 @@ import { ToastProvider } from '../components/ui/Toast';
 import InboxPage from './InboxPage';
 import { dismissNotification, listNotifications } from '../api/notificationApi';
 import { getFileChanges } from '../api/fileChangesApi';
-import { postTaskFollowup } from '../api/proprApi';
+import { getTasks, postTaskFollowup } from '../api/proprApi';
+import { resetFollowupSubmissions } from '../components/Inbox/followupSubmissions';
 
 vi.mock('../contexts/NotificationCenterContext', () => ({
   useNotificationCenter: () => ({
@@ -23,7 +24,7 @@ vi.mock('../api/notificationApi', () => ({
   markNotificationRead: vi.fn(),
 }));
 vi.mock('../api/fileChangesApi', () => ({ getFileChanges: vi.fn() }));
-vi.mock('../api/proprApi', () => ({ postTaskFollowup: vi.fn() }));
+vi.mock('../api/proprApi', () => ({ postTaskFollowup: vi.fn(), getTasks: vi.fn() }));
 vi.mock('../contexts/DemoModeContext', () => ({ useDemoMode: () => ({ isDemoMode: false }) }));
 vi.mock('../contexts/useSocket', () => ({
   useSocket: () => ({ isConnected: true, onNotificationUpdate: () => () => undefined }),
@@ -84,6 +85,7 @@ function renderInbox(entry = '/inbox') {
         <Routes>
           <Route path="/inbox" element={<><InboxPage /><Location /></>} />
           <Route path="/tasks/:id" element={<div>Task page</div>} />
+          <Route path="/studio/:draftId" element={<div>Plan studio</div>} />
         </Routes>
       </MemoryRouter>
     </ToastProvider>,
@@ -97,7 +99,7 @@ function mockViewport(wide: boolean) {
   }));
 }
 
-const row = (title: string) => within(screen.getByRole('article', { name: title })).getByRole('button', { name: title });
+const row = (title: string) => within(screen.getByRole('article', { name: title })).getByRole('link', { name: title });
 const pane = () => screen.queryByRole('region', { name: 'Triage verdict' });
 
 describe('Inbox triage console', () => {
@@ -118,6 +120,7 @@ describe('Inbox triage console', () => {
   afterEach(() => {
     vi.unstubAllGlobals();
     vi.clearAllMocks();
+    resetFollowupSubmissions();
   });
 
   test('keeps the queue full width until a row is selected', async () => {
@@ -154,20 +157,38 @@ describe('Inbox triage console', () => {
     expect(listNotifications).toHaveBeenCalledTimes(1);
   });
 
-  test('restores the selection from the URL, shows the body without findings, and omits Inspect without a task', async () => {
+  test('a plan opens its destination directly, and a selection the queue never holds is dropped from the URL', async () => {
     mockViewport(true);
     const plan = item('plan-1', 30, {
       kind: 'plan', target: { type: 'plan', repository: 'integry/propr', draftId: 'draft-1' },
       title: 'Improve the Inbox', body: 'Ready for review with 4 planned tasks.', actions: ['dismiss'],
     });
     vi.mocked(listNotifications).mockResolvedValue({ notifications: [...queue, plan], unreadCount: 0, nextCursor: null });
-    renderInbox('/inbox?notification=plan-1');
+    renderInbox('/inbox?notification=plan-1&repository=integry%2Fpropr');
     await screen.findByRole('article', { name: plan.title });
-    const card = within(pane()!);
-    expect(card.getByText('Ready for review with 4 planned tasks.')).toBeInTheDocument();
-    expect(card.queryByRole('link', { name: /Inspect in Tasks/ })).not.toBeInTheDocument();
-    expect(card.getByRole('button', { name: 'Dismiss' })).toBeInTheDocument();
+    await waitFor(() => expect(search().get('notification')).toBeNull());
+    expect(search().get('repository')).toBe('integry/propr');
+    expect(pane()).not.toBeInTheDocument();
+
+    const link = row(plan.title);
+    expect(link).toHaveAttribute('href', '/studio/draft-1');
+    fireEvent.click(link);
+    expect(await screen.findByText('Plan studio')).toBeInTheDocument();
     expect(getFileChanges).not.toHaveBeenCalled();
+  });
+
+  test('a task row stays a real link: a modified click is left to the browser, a plain one opens the verdict', async () => {
+    mockViewport(true);
+    renderInbox();
+    await screen.findByRole('article', { name: review.title });
+    const link = row(review.title);
+    expect(link).toHaveAttribute('href', '/tasks/task-3057');
+    // The browser opens a modified click in a new tab: nothing prevents it, and no verdict opens here.
+    expect(fireEvent.click(link, { ctrlKey: true })).toBe(true);
+    expect(search().get('notification')).toBeNull();
+    expect(pane()).not.toBeInTheDocument();
+    fireEvent.click(link);
+    expect(search().get('notification')).toBe(review.id);
   });
 
   test('the verdict heading counts every issue the recap reports, not just the titles it lists', async () => {
@@ -227,7 +248,7 @@ describe('Inbox triage console', () => {
     mockViewport(true);
     renderInbox(`/inbox?notification=${ready.id}`);
     await screen.findByRole('article', { name: ready.title });
-    fireEvent.click(within(pane()!).getByRole('button', { name: 'Dismiss' }));
+    fireEvent.click(within(pane()!).getByRole('button', { name: 'Done' }));
     await waitFor(() => expect(search().get('notification')).toBe(failed.id));
     expect(screen.queryByRole('article', { name: ready.title })).not.toBeInTheDocument();
 
@@ -252,6 +273,74 @@ describe('Inbox triage console', () => {
     expect(postTaskFollowup).toHaveBeenCalledWith('task-3057', '/fix', 'pull_request');
     await waitFor(() => expect(search().get('notification')).toBe(ready.id));
     expect(dismissNotification).toHaveBeenCalledWith(review.id);
+  });
+
+  test('a command in flight stays claimed when the selection moves away and back', async () => {
+    mockViewport(true);
+    let resolve: () => void = () => undefined;
+    vi.mocked(postTaskFollowup).mockReturnValue(new Promise(done => { resolve = () => done({ success: true, message: 'Posted' }); }));
+    renderInbox(`/inbox?notification=${review.id}`);
+    await screen.findByRole('article', { name: review.title });
+    fireEvent.click(within(pane()!).getByRole('button', { name: 'Send /fix to PR #3057' }));
+    expect(postTaskFollowup).toHaveBeenCalledTimes(1);
+
+    fireEvent.click(row(ready.title));
+    expect(search().get('notification')).toBe(ready.id);
+    fireEvent.click(row(review.title));
+    const fix = within(pane()!).getByRole('button', { name: 'Send /fix to PR #3057' });
+    expect(fix).toBeDisabled();
+    fireEvent.click(fix);
+    expect(postTaskFollowup).toHaveBeenCalledTimes(1);
+
+    await act(async () => resolve());
+    await waitFor(() => expect(dismissNotification).toHaveBeenCalledWith(review.id));
+    expect(postTaskFollowup).toHaveBeenCalledTimes(1);
+  });
+
+  test('a dismissal that fails reopens the item it was made on', async () => {
+    mockViewport(true);
+    let reject: (error: Error) => void = () => undefined;
+    vi.mocked(dismissNotification).mockReturnValue(new Promise((_, fail) => { reject = fail; }));
+    renderInbox(`/inbox?notification=${review.id}`);
+    await screen.findByRole('article', { name: review.title });
+    fireEvent.click(within(pane()!).getByRole('button', { name: 'Done' }));
+    await waitFor(() => expect(search().get('notification')).toBe(ready.id));
+
+    await act(async () => reject(new Error('offline')));
+    await screen.findByRole('article', { name: review.title });
+    await waitFor(() => expect(search().get('notification')).toBe(review.id));
+    expect(within(pane()!).getByRole('heading', { name: review.title })).toBeInTheDocument();
+  });
+
+  test('arrow keys pressed inside the verdict scroll it instead of stepping the queue', async () => {
+    mockViewport(true);
+    renderInbox(`/inbox?notification=${review.id}`);
+    await screen.findByRole('article', { name: review.title });
+    const inspect = within(pane()!).getByRole('link', { name: /Inspect in Tasks/ });
+    expect(fireEvent.keyDown(inspect, { key: 'ArrowDown' })).toBe(true);
+    expect(search().get('notification')).toBe(review.id);
+    fireEvent.keyDown(inspect, { key: 'j' });
+    expect(search().get('notification')).toBe(ready.id);
+  });
+
+  test("a review's diff falls back to the run it reviewed when the review itself committed nothing", async () => {
+    mockViewport(true);
+    vi.mocked(getFileChanges).mockImplementation(async taskId => (taskId === 'task-3057'
+      ? { taskId, lastUpdated: at(0), files: [] }
+      : {
+        taskId, lastUpdated: at(0),
+        files: [{ path: 'src/a.ts', status: 'modified', linesAdded: 1, linesRemoved: 0, diff: '@@ -1 +1,2 @@\n+const reviewed = true;' }],
+      }));
+    vi.mocked(getTasks).mockResolvedValue({ tasks: [
+      { id: 'task-3057', repository: 'integry/propr', prNumber: 3057, status: 'completed', createdAt: at(1), commitHash: null },
+      { id: 'task-3056', repository: 'integry/propr', prNumber: 3057, status: 'completed', createdAt: at(5), commitHash: null },
+      { id: 'task-3055', repository: 'integry/propr', prNumber: 3057, status: 'completed', createdAt: at(9), commitHash: 'abc1234' },
+    ] } as never);
+    renderInbox(`/inbox?notification=${review.id}`);
+    const card = within(await screen.findByRole('region', { name: 'Triage verdict' }));
+    expect(await card.findByText(/const reviewed = true;/)).toBeInTheDocument();
+    expect(getTasks).toHaveBeenCalledWith({ groupBy: 'task', task: 'task-3057', limit: 1, offset: 0 });
+    expect(vi.mocked(getFileChanges).mock.calls.map(([taskId]) => taskId)).toEqual(['task-3057', 'task-3055']);
   });
 
   test('narrow viewports keep the single column and rows navigate', async () => {

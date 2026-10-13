@@ -1,5 +1,5 @@
 import { PreviewThumbnails } from '../components/PreviewMedia';
-import React, { useRef, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { isNotificationPreviewEligible, type Notification } from '@propr/shared';
 import {
@@ -9,10 +9,9 @@ import {
   WifiOff,
   X,
 } from 'lucide-react';
-import NotificationActions from '../components/Inbox/NotificationActions';
 import { ReferenceChip } from '../components/TaskList/ReferenceChips';
-import { SELECTED_ROW_CLASSES } from '../components/TaskList/rowModel';
 import { ListSkeleton } from '../components/ui/Skeleton';
+import { triageTaskId } from './Inbox/triageVerdict';
 import {
   formatRelativeTime,
   notificationDisplayTitle,
@@ -37,23 +36,39 @@ function DetailLink({
   className,
   children,
   onOpen,
+  onSelect,
+  current,
 }: {
   notification: Notification;
   label: string;
   className: string;
   children: React.ReactNode;
   onOpen: (id: string) => void;
+  /** Takes a plain click instead of navigating; modified and middle clicks still open the destination. */
+  onSelect?: (id: string) => void;
+  current?: boolean;
 }) {
   const href = notificationHref(notification);
-  const handleClick = () => onOpen(notification.id);
+  const handleClick = (event: React.MouseEvent<HTMLAnchorElement>) => {
+    if (onSelect && event.button === 0 && !event.metaKey && !event.ctrlKey && !event.shiftKey && !event.altKey) {
+      event.preventDefault();
+      onSelect(notification.id);
+      return;
+    }
+    onOpen(notification.id);
+  };
   if (/^https?:\/\//i.test(href)) {
     return (
-      <a href={href} target="_blank" rel="noopener noreferrer" onClick={handleClick} aria-label={label} className={className}>
+      <a href={href} target="_blank" rel="noopener noreferrer" onClick={handleClick} aria-label={label} aria-current={current ? 'true' : undefined} className={className}>
         {children}
       </a>
     );
   }
-  return <Link to={href} onClick={handleClick} aria-label={label} className={className}>{children}</Link>;
+  return (
+    <Link to={href} onClick={handleClick} aria-label={label} aria-current={current ? 'true' : undefined} className={className}>
+      {children}
+    </Link>
+  );
 }
 
 /** System rows have no better destination, so clicking expands the full message. */
@@ -170,13 +185,17 @@ const RepositoryName: React.FC<{ repository: string }> = ({ repository }) => {
 /*
  * Each row is one grid, so every element renders once and only moves between
  * layouts. Phones stack status, time and dismiss, the title and summary (two
- * lines each), then the PR chip and repository beside the commands. Desktop
+ * lines each), then the PR chip and repository beside the preview. Desktop
  * clusters status · chip · repository · time on the left above the title and
- * summary; the fixed-width right rail holds only the preview, commands and
- * dismiss, so every row's text ends on the same edge.
+ * summary; the fixed-width right rail holds only the preview and dismiss, so
+ * every row's text ends on the same edge. Rows carry no commands: those live
+ * in the triage verdict and on the run in Tasks.
  */
-const ROW_GRID = 'grid grid-cols-[minmax(0,1fr)_auto_auto] sm:grid-cols-[auto_minmax(0,auto)_minmax(0,1fr)_16rem_2rem]';
+const ROW_GRID = 'grid grid-cols-[minmax(0,1fr)_auto_auto] sm:grid-cols-[auto_minmax(0,auto)_minmax(0,1fr)_4rem_2rem]';
 const TEXT_SPAN = 'col-start-1 col-span-3 min-w-0 pl-[18px]';
+
+/** The row open in the verdict: a teal rule and a teal tint, so it reads at a glance beside the pane. */
+const SELECTED_ROW = 'bg-teal-50 shadow-[inset_4px_0_0_0_#0d9488]';
 
 /** The phone layout: every `sm:` class dropped, for rows in the narrow queue beside the triage verdict. */
 const phoneLayout = (classes: string): string => classes.split(/\s+/).filter(name => !name.startsWith('sm:')).join(' ');
@@ -188,7 +207,11 @@ interface InboxCardProps {
   mutationsEnabled: boolean;
   /** The notification open in the triage pane beside the queue. */
   selectedId?: string | null;
-  /** On wide screens the row opens its verdict beside the queue instead of navigating, and leaves its commands to the verdict. */
+  /**
+   * On wide screens a row backed by a task opens its verdict beside the queue
+   * on a plain click; rows without a task (plans, goals' GitHub links) still
+   * open their destination directly.
+   */
   onSelect?: (id: string) => void;
   /** Lays the row out as on phones, for the narrow queue beside an open verdict. */
   compact?: boolean;
@@ -204,12 +227,18 @@ export const InboxCard: React.FC<InboxCardProps> = ({ notification, onDismiss, o
   const inPlace = expandsInPlace(notification);
   const reference = notificationReference(notification);
   const pullRequestUrl = notificationPullRequestUrl(notification);
-  // The title link stretches over the whole row; commands and dismiss sit above it.
+  // The title link stretches over the whole row; the chip and dismiss sit above it.
   const targetClass = 'text-left after:absolute after:inset-0 after:content-[""] focus:outline-none focus-visible:after:ring-2 focus-visible:after:ring-inset focus-visible:after:ring-teal-500';
   const title = notificationDisplayTitle(notification);
   // System rows are grouped under the System heading, so their titles are not headings.
   const Title = inPlace ? 'div' : 'h3';
   const selected = selectedId === notification.id;
+  const selectsVerdict = onSelect && triageTaskId(notification) !== null ? onSelect : undefined;
+  // Keyboard steps through the queue can land below the fold of its own scroll pane.
+  const articleRef = useRef<HTMLElement>(null);
+  useEffect(() => {
+    if (selected) articleRef.current?.scrollIntoView?.({ block: 'nearest' });
+  }, [selected]);
 
   return (
     <div
@@ -218,10 +247,11 @@ export const InboxCard: React.FC<InboxCardProps> = ({ notification, onDismiss, o
       {...swipe.handlers}
     >
       <article
+        ref={articleRef}
         aria-label={notification.title}
         style={{ transform: `translate3d(${swipe.offset}px, 0, 0)` }}
         className={rowLayout(`relative ${ROW_GRID} min-w-0 items-center py-2 pl-4 pr-4 transition-transform sm:pl-6 ${
-          selected ? SELECTED_ROW_CLASSES : 'bg-white hover:bg-slate-50'
+          selected ? SELECTED_ROW : 'bg-white hover:bg-slate-50'
         } ${
           swipe.dragging ? 'duration-0' : 'duration-200 ease-out'
         }`)}
@@ -248,18 +278,15 @@ export const InboxCard: React.FC<InboxCardProps> = ({ notification, onDismiss, o
             >
               {title}
             </button>
-          ) : onSelect ? (
-            <button
-              type="button"
-              aria-label={notification.title}
-              aria-current={selected ? 'true' : undefined}
-              onClick={() => onSelect(notification.id)}
+          ) : (
+            <DetailLink
+              notification={notification}
+              onOpen={onOpen}
+              onSelect={selectsVerdict}
+              current={selected}
+              label={notification.title}
               className={targetClass}
             >
-              {title}
-            </button>
-          ) : (
-            <DetailLink notification={notification} onOpen={onOpen} label={notification.title} className={targetClass}>
               {title}
             </DetailLink>
           )}
@@ -269,7 +296,7 @@ export const InboxCard: React.FC<InboxCardProps> = ({ notification, onDismiss, o
         }`)}>
           {notification.body}
         </p>
-        {/* Phones keep the chip and commands on one line, truncating the repository if they must; desktop grids both cells. */}
+        {/* Phones keep the chip and preview on one line, truncating the repository if they must; desktop grids both cells. */}
         <div className={rowLayout('col-start-1 col-span-3 row-start-4 mt-2 flex items-center gap-x-3 sm:contents')}>
           <span className={rowLayout('flex min-w-0 items-center gap-x-1.5 pl-[18px] text-xs leading-5 text-slate-500 sm:col-start-2 sm:row-start-1 sm:pl-1.5')}>
             {reference && (
@@ -291,14 +318,6 @@ export const InboxCard: React.FC<InboxCardProps> = ({ notification, onDismiss, o
           <div className={rowLayout('relative z-10 ml-auto flex flex-none items-center justify-end gap-2 empty:hidden sm:col-start-4 sm:row-span-3 sm:row-start-1 sm:ml-0')}>
             {isNotificationPreviewEligible(notification) && (
               <PreviewThumbnails media={notification.previewMedia} limit={1} size="rail" />
-            )}
-            {/* Beside the triage verdict the commands live only in the verdict card. */}
-            {!onSelect && (
-              <NotificationActions
-                notification={notification}
-                mutationsEnabled={mutationsEnabled}
-                onCommandSent={() => onDismiss(notification.id)}
-              />
             )}
           </div>
         </div>

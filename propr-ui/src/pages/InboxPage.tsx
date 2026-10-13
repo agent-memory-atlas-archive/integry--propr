@@ -53,12 +53,12 @@ const InboxPage: React.FC = () => {
     mutationsEnabled: inbox.mutationsEnabled && !inbox.clearing,
   };
 
-
   const { selected, select, closePane, isSplitViewport } = useInboxTriage({
     queue: activity,
     dismiss,
     open: inbox.open,
     mutationsEnabled: listProps.mutationsEnabled,
+    loaded: !inbox.initialLoading && inbox.error === null,
   });
 
   const showState = inboxState(inbox);

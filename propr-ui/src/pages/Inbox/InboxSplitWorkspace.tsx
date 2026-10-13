@@ -2,6 +2,7 @@ import React, { useEffect } from 'react';
 import { GripVertical } from 'lucide-react';
 import { Panel, PanelGroup, PanelResizeHandle } from 'react-resizable-panels';
 import { isDialogOpen, isTypingTarget } from '../../components/TaskList/keyboardOwnership';
+import { VERDICT_PANE_ATTRIBUTE } from './useInboxTriage';
 
 interface InboxSplitWorkspaceProps {
   /** The queue; it keeps its place in the tree whether or not a verdict is open, so it never remounts. */
@@ -55,7 +56,12 @@ const InboxSplitWorkspace: React.FC<InboxSplitWorkspaceProps> = ({ list, verdict
           </PanelResizeHandle>
 
           <Panel id="inbox-split-verdict" order={2} defaultSize={65} minSize={35}>
-            <section aria-label="Triage verdict" className="flex h-full min-h-0 min-w-0 flex-col bg-white" data-testid="inbox-split-verdict">
+            <section
+              aria-label="Triage verdict"
+              className="flex h-full min-h-0 min-w-0 flex-col bg-white"
+              data-testid="inbox-split-verdict"
+              {...{ [VERDICT_PANE_ATTRIBUTE]: '' }}
+            >
               {verdict}
             </section>
           </Panel>

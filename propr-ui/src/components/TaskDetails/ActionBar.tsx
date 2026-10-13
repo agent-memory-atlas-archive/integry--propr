@@ -27,6 +27,8 @@ interface ActionBarProps {
   compact?: boolean;
   /** Mobile: the overflow opens as a bottom action sheet rather than a popover. */
   sheet?: boolean;
+  /** The newest run's follow-up commands for its pull request; the compact bar leaves them to the full header. */
+  followupCommands?: React.ReactNode;
 }
 
 export interface LiveRunControl {
@@ -246,6 +248,7 @@ const ActionBar: React.FC<ActionBarProps> = ({
   liveRun,
   compact,
   sheet,
+  followupCommands,
 }) => {
   const isActive = ACTIVE_STATUSES.includes(currentStatus);
   // The run on screen is done, but a newer one is still working: its Stop takes this run's place.
@@ -273,6 +276,8 @@ const ActionBar: React.FC<ActionBarProps> = ({
   return (
     <div className="flex w-full min-w-0 flex-wrap items-center justify-end gap-1.5 sm:w-auto sm:flex-shrink-0">
       <CancelledBadge isCancelled={isCancelled} />
+
+      {followupCommands}
 
       {/* View Prompt Button - Ghost style */}
       {historyItemWithPaths?.promptPath && (

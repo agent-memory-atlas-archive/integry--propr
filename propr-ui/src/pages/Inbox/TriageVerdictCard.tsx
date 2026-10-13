@@ -1,11 +1,13 @@
 import React, { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { ExternalLink, SquareArrowOutUpRight, X } from 'lucide-react';
+import { Check, ExternalLink, SquareArrowOutUpRight } from 'lucide-react';
 import type { Notification } from '@propr/shared';
 import { getFileChanges } from '../../api/fileChangesApi';
+import { getTasks } from '../../api/proprApi';
 import NotificationActions from '../../components/Inbox/NotificationActions';
 import { ReferenceChip } from '../../components/TaskList/ReferenceChips';
 import { taskPath } from '../../components/TaskList/rowModel';
+import { groupTasksForDisplay } from '../../components/TaskList/utils';
 import {
   formatRelativeTime,
   notificationKindLabel,
@@ -14,7 +16,7 @@ import {
   notificationRepository,
   notificationStatus,
 } from '../inboxUtils';
-import { reviewFindings, triageTaskId, trimDiffForTriage, type TriageDiff } from './triageVerdict';
+import { reviewedRunId, reviewFindings, triageTaskId, trimDiffForTriage, type TriageDiff } from './triageVerdict';
 
 interface TriageVerdictCardProps {
   notification: Notification;
@@ -29,22 +31,36 @@ const SECTION_HEADING = 'text-[11px] font-bold uppercase tracking-wider text-sla
 
 const pluralize = (count: number, word: string) => `${count} ${word}${count === 1 ? '' : 's'}`;
 
+/** The newest earlier run of the review's task that pushed a commit: the code the review read. */
+async function reviewedRun(reviewTaskId: string): Promise<string | null> {
+  const data = await getTasks({ groupBy: 'task', task: reviewTaskId, limit: 1, offset: 0 });
+  const group = groupTasksForDisplay(data.tasks ?? []).find(entry => entry.tasks.some(task => task.id === reviewTaskId));
+  return group ? reviewedRunId(group.tasks, reviewTaskId) : null;
+}
+
 /**
- * The few changed lines behind the selected notification: one read per
+ * The few changed lines behind the selected notification, read once per
  * selection, never polled, and silent when it fails, because the verdict and
- * the buttons are what the card is for.
+ * the buttons are what the card is for. A review commits nothing, so when its
+ * own run has no changes the card reads the run it reviewed instead.
  */
-function useTriageDiff(taskId: string | null): TriageDiff | null {
+function useTriageDiff(taskId: string | null, isReview: boolean): TriageDiff | null {
   const [diff, setDiff] = useState<TriageDiff | null>(null);
   useEffect(() => {
     setDiff(null);
     if (!taskId) return;
     let current = true;
-    getFileChanges(taskId)
-      .then(response => { if (current) setDiff(trimDiffForTriage(response.files ?? [])); })
+    const read = async () => {
+      const own = trimDiffForTriage((await getFileChanges(taskId)).files ?? []);
+      if (own.files.length > 0 || !isReview || !current) return own;
+      const reviewed = await reviewedRun(taskId);
+      return reviewed && current ? trimDiffForTriage((await getFileChanges(reviewed)).files ?? []) : own;
+    };
+    read()
+      .then(result => { if (current) setDiff(result); })
       .catch(() => undefined);
     return () => { current = false; };
-  }, [taskId]);
+  }, [taskId, isReview]);
   return diff;
 }
 
@@ -128,7 +144,7 @@ const TriageVerdictCard: React.FC<TriageVerdictCardProps> = ({
   paneControls,
 }) => {
   const taskId = triageTaskId(notification);
-  const diff = useTriageDiff(taskId);
+  const diff = useTriageDiff(taskId, notification.target.type === 'review');
   const reference = notificationReference(notification);
   const pullRequestUrl = notificationPullRequestUrl(notification);
   const status = notificationStatus(notification);
@@ -156,19 +172,22 @@ const TriageVerdictCard: React.FC<TriageVerdictCardProps> = ({
           <time className="flex-none" dateTime={notification.occurredAt} title={new Date(notification.occurredAt).toLocaleString()}>
             {formatRelativeTime(notification.occurredAt)}
           </time>
-          <div className="ml-auto flex flex-none items-center gap-1">
+          {/* Done removes the item for good, so it neither looks like nor sits beside Close, which only hides the pane. */}
+          <div className="ml-auto flex flex-none items-center gap-3">
             {canDismiss && (
               <button
                 type="button"
                 onClick={() => onDismiss(notification.id)}
                 className="inline-flex h-7 items-center gap-1 rounded-md border border-slate-300 px-2 text-xs font-semibold text-slate-700 hover:bg-slate-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-teal-500"
-                title="Dismiss (x)"
+                title="Dismiss from the Inbox (x)"
               >
-                <X className="h-3.5 w-3.5" aria-hidden="true" />
-                Dismiss
+                <Check className="h-3.5 w-3.5" aria-hidden="true" />
+                Done
               </button>
             )}
-            {paneControls}
+            {paneControls && (
+              <div className="flex items-center border-l border-slate-200 pl-3">{paneControls}</div>
+            )}
           </div>
         </div>
         <h2 className="mt-1 break-words text-base font-semibold leading-6 text-slate-950">{notification.title}</h2>

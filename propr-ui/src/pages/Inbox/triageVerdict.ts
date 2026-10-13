@@ -39,6 +39,17 @@ export function reviewFindings(notification: Notification): TriageReviewVerdict 
   };
 }
 
+/**
+ * The run whose commit shows what a review read: a review commits nothing, so
+ * its diff is the newest earlier run of the same task that pushed a commit.
+ * `runs` is newest first; null when no earlier run pushed one.
+ */
+export function reviewedRunId(runs: ReadonlyArray<{ id: string; commitHash?: string | null }>, reviewTaskId: string): string | null {
+  const index = runs.findIndex(run => run.id === reviewTaskId);
+  if (index === -1) return null;
+  return runs.slice(index + 1).find(run => run.commitHash)?.id ?? null;
+}
+
 /** The task behind a notification, which the diff and `Inspect in Tasks` open; null when none backs it. */
 export function triageTaskId(notification: Notification): string | null {
   const { target } = notification;
@@ -63,9 +74,27 @@ export interface TriageDiff {
   hiddenFiles: number;
 }
 
+/** A file header line of a unified diff, before its first hunk. */
+const DIFF_HEADER = /^(?:diff |index |--- |\+\+\+ |new file mode|deleted file mode|old mode|new mode|similarity index|rename |Binary files )/;
+
+/**
+ * The added and removed lines of a unified diff. Only the lines before the
+ * first `@@` hunk are headers, so a removed `-- comment` line (`--- comment`
+ * in the diff) is still a change; a diff without hunks drops its leading
+ * header lines only, which end at the `+++` file line.
+ */
 function changedLines(diff: string): TriageDiffFile['lines'] {
-  return diff.split('\n').flatMap<TriageDiffFile['lines'][number]>(line => {
-    if (line.startsWith('+++') || line.startsWith('---')) return [];
+  const lines = diff.split('\n');
+  const firstHunk = lines.findIndex(line => line.startsWith('@@'));
+  let start = firstHunk + 1;
+  if (firstHunk === -1) {
+    start = 0;
+    while (start < lines.length && DIFF_HEADER.test(lines[start])) {
+      start += 1;
+      if (lines[start - 1].startsWith('+++ ')) break;
+    }
+  }
+  return lines.slice(start).flatMap<TriageDiffFile['lines'][number]>(line => {
     if (line.startsWith('+')) return [{ kind: 'added', text: line.slice(1) }];
     if (line.startsWith('-')) return [{ kind: 'removed', text: line.slice(1) }];
     return [];

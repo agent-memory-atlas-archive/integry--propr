@@ -49,13 +49,14 @@ The task detail view contains:
 - the exact prompt and execution log files;
 - a live event log, a thinking log where the agent emits one, and per-file diffs as they change, largest changes first;
 - a progress bar over the agent's to-do list;
-- **Follow Up** and **Stop** buttons, with **Delete** in the **⋯** (More task actions) menu.
+- **Follow Up** and **Stop** buttons, with **Delete** in the **⋯** (More task actions) menu;
+- follow-up commands on the task's newest run only, once it has finished with a pull request: `/fix` after a review with findings, or `/review` and `/ultrafix` after any other run. Earlier runs show none, so a command cannot be replayed from an older run.
 
 These records are the heart of ProPR's observability — see [Observability And Control](./observability.md). To undo a committed change, the **Revert** flow (`/revert`) previews the target commit and the resulting HEAD before running a signed revert.
 
 ## Goals and Inbox
 
-**Goals** (`/goals`) shows continuing objectives and opens the console for progress, artifacts and corrective inputs. See [Goals](./goals.md) for native execution and lifecycle controls. **Inbox** (`/inbox`) is the queue of events that need you, worked down to zero. On screens 1280px and wider it is a triage console: the queue sits on the left and the selected item's **Triage Verdict** on the right — the review findings with their `path:line`, a short diff, the follow-up commands and **Inspect in Tasks**, which opens the full task in `/tasks`. Dismissing an item or sending a command opens the next one. Inbox is deliberately lighter than **Tasks**: Tasks is the permanent ledger with the full diagnostic workbench, while Inbox holds only what still needs a decision. On narrower screens rows open their destination directly. [Inbox and notifications](./inbox.md) covers the triage console and personal and repository preferences.
+**Goals** (`/goals`) shows continuing objectives and opens the console for progress, artifacts and corrective inputs. See [Goals](./goals.md) for native execution and lifecycle controls. **Inbox** (`/inbox`) is the queue of events that need you, worked down to zero. On screens 1280px and wider it is a triage console: the queue sits on the left and the selected item's **Triage Verdict** on the right — the review findings with their `path:line`, a short diff, the follow-up commands and **Inspect in Tasks**, which opens the full task in `/tasks`. Dismissing an item or sending a command opens the next one. Inbox is deliberately lighter than **Tasks**: Tasks is the permanent ledger with the full diagnostic workbench, while Inbox holds only what still needs a decision. Rows without a task, such as plans, open their destination directly, and so does every row on narrower screens. Rows never show follow-up commands; those appear in the verdict and in Tasks, on the newest run only. [Inbox and notifications](./inbox.md) covers the triage console and personal and repository preferences.
 
 ## Automations
 
