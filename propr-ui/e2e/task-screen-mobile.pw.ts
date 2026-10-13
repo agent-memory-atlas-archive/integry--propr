@@ -42,7 +42,7 @@ async function taskScreen(page: Page, width: number) {
 
 for (const width of [390, 1280]) {
   const phone = width < 640;
-  test(`${width}px task screen: merge status ends the timeline, scores in sequence, ${phone ? 'one-column log without' : 'two-column log with'} the raw switch`, async ({ page }) => {
+  test(`${width}px task screen: merge status ends the timeline, scores in sequence, ${phone ? 'one-column' : 'two-column'} log without the raw switch`, async ({ page }) => {
     await taskScreen(page, width);
 
     // 1. Every run, then the review scores as a node on the trunk, then the merge status as the last entry.
@@ -79,10 +79,9 @@ for (const width of [390, 1280]) {
       }
     }
 
-    // 2. The raw log switch is a desktop control.
+    // 2. Both layouts show the readable log without a view selector.
     const logView = page.getByRole('group', { name: 'Log view' });
-    if (phone) await expect(logView).toBeHidden();
-    else await expect(logView).toBeVisible();
+    await expect(logView).toHaveCount(0);
 
     // 3. Each readable entry is one column on a phone: its label sits above the text, which keeps the full width.
     const entry = page.getByText('The label check also matches unrelated labels', { exact: false });

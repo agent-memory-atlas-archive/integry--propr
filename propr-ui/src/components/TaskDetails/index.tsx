@@ -13,7 +13,7 @@ import ActionBar from './ActionBar';
 import TaskHeader, { ReturnToRunButton } from './TaskHeader';
 import ProgressBar from './ProgressBar';
 import LeftPaneBody from './LeftPaneBody';
-import SectionLabelHeader, { EXECUTION_LOG_CONTROL_ATTRIBUTE, type LogView } from './SectionLabelHeader';
+import SectionLabelHeader from './SectionLabelHeader';
 import TaskVisualPreviews from './TaskVisualPreviews';
 import { useTaskData, usePromptData, useLogFilesData } from './hooks';
 import { useThinkingLog } from './useThinkingLog';
@@ -259,7 +259,6 @@ const TaskDetails: React.FC<TaskDetailsProps> = ({ taskId: taskIdProp, embedded 
   const executionLogRef = useClickOutsideCollapse(
     thinkingLog.eventsCollapsed,
     thinkingLog.collapseEvents,
-    EXECUTION_LOG_CONTROL_ATTRIBUTE,
   );
 
   const statusView = renderTaskDetailsStatus(
@@ -290,14 +289,12 @@ const TaskDetails: React.FC<TaskDetailsProps> = ({ taskId: taskIdProp, embedded 
     headActive: inspection.headActive,
     onBack: () => onSelectRun(inspection.head.task.id),
   } : null;
-  // One header names the log, counts its steps and switches to the raw terminal drawer below.
+  // One header names the log, counts its steps and identifies the inspected run.
   const logHeaderProps = {
     commandMode: getLogCommandMode(taskData.taskInfo?.commandMode, runs, taskId),
     ultrafixCycle: taskData.taskInfo?.ultrafixCycle,
     inspection: inspectionContext,
     stepCount: thinkingLog.thinkingLogWithTimestamps.length,
-    view: (thinkingLog.eventsCollapsed ? 'readable' : 'terminal') as LogView,
-    onViewChange: (view: LogView) => (view === 'terminal' ? thinkingLog.expandEvents() : thinkingLog.collapseEvents()),
   };
   const actionBarProps = {
     currentStatus: derivedData.currentStatus,
@@ -395,7 +392,7 @@ const TaskDetails: React.FC<TaskDetailsProps> = ({ taskId: taskIdProp, embedded 
             >
               {/* Visual evidence is an outcome with its own header; its bottom rule divides it from the trace. */}
               <TaskVisualPreviews previews={taskData.previewMedia} />
-              {/* The trace's header stays with its logs, so its view switch sits above what it controls. */}
+              {/* The trace's header stays with its logs. */}
               <SectionLabelHeader
                 {...logHeaderProps}
                 className={`z-[1] flex ${PANE_HEADER_HEIGHT} flex-shrink-0 items-center gap-3 border-b border-slate-200 bg-white px-4 sm:sticky sm:top-0`}
