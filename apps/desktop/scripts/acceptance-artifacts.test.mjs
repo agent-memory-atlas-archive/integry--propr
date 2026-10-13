@@ -1007,11 +1007,32 @@ describe('packaged acceptance artifact contract', () => {
       await assert.rejects(removeOwnedAcceptanceProfileSingletons(profile, options), /socket requires/);
       await rm(join(profile, 'SingletonSocket'));
       await removeOwnedAcceptanceProfileSingletons(profile, options);
-      for (const name of ['SingletonLockExtra', 'singletonlock', 'SingletonSocketExtra', 'SingletonOther']) {
+      for (const name of ['SingletonLockExtra', 'SingletonSocketExtra', 'SingletonOther']) {
         await symlink(`${hostname()}-${pid}`, join(profile, name));
         await removeOwnedAcceptanceProfileSingletons(profile, options);
         await assert.rejects(scanAcceptancePaths([profile]), /symbolic link/);
         await rm(join(profile, name));
+      }
+      // Default macOS volumes resolve this spelling to SingletonLock. Detect
+      // that identity in the fixture rather than assuming case sensitivity.
+      const caseVariant = join(profile, 'singletonlock');
+      await symlink(`${hostname()}-${pid}`, caseVariant);
+      const variantStats = await lstat(caseVariant);
+      const canonicalStats = await lstat(join(profile, 'SingletonLock')).catch(error => {
+        if (error.code === 'ENOENT') return undefined;
+        throw error;
+      });
+      if (canonicalStats) {
+        assert.equal(canonicalStats.dev, variantStats.dev);
+        assert.equal(canonicalStats.ino, variantStats.ino);
+        await removeOwnedAcceptanceProfileSingletons(profile, options);
+        await assert.rejects(lstat(caseVariant), { code: 'ENOENT' });
+        await scanAcceptancePaths([profile]);
+      } else {
+        await removeOwnedAcceptanceProfileSingletons(profile, options);
+        assert.equal(await readlink(caseVariant), `${hostname()}-${pid}`);
+        await assert.rejects(scanAcceptancePaths([profile]), /symbolic link/);
+        await rm(caseVariant);
       }
       await mkdir(join(profile, 'nested'));
       await symlink(`${hostname()}-${pid}`, join(profile, 'nested', 'SingletonLock'));
