@@ -40,6 +40,14 @@ import { githubUserGrantService } from './githubUserGrantService.js';
 import { rememberCreator } from './services/creatorProjection.js';
 import './authTypes.js';
 import { timeApiStage } from './apiPerformanceTiming.js';
+import { createCorsOriginValidator } from './corsValidation.js';
+import { getMcpOriginSync } from './mcp/configResolver.js';
+
+declare module 'express-session' {
+    interface SessionData {
+        csrfToken?: string;
+    }
+}
 
 export { refreshGitHubTokenIfNeeded } from './authGithubTokens.js';
 export { getSessionCookieDomain, shouldUseSecureSessionCookie } from './authSession.js';
@@ -188,6 +196,49 @@ async function completeAuthenticatedSessionWithPreviewCredential(req: Request, r
     completeAuthenticatedSession(req, res);
 }
 
+/** Protect cookie-authenticated mutations without requiring browser UI changes. */
+export function createSessionCsrfProtection(
+    frontendUrl: string,
+    cookieDomain: string | undefined,
+    getConsentOrigin: () => string | undefined = getMcpOriginSync,
+): RequestHandler {
+    const validateOrigin = createCorsOriginValidator(frontendUrl, cookieDomain);
+    return (req, res, next) => {
+        // Installed after Passport's session middleware and before any bearer
+        // authentication. Explicit credentials without a logged-in session do
+        // not confer ambient browser authority.
+        if (!req.isAuthenticated()) { next(); return; }
+
+        if (['GET', 'HEAD', 'OPTIONS'].includes(req.method)) {
+            req.session.csrfToken ??= randomBytes(32).toString('base64url');
+            res.set('X-CSRF-Token', req.session.csrfToken);
+            res.set('Cache-Control', 'no-store');
+            next();
+            return;
+        }
+        if (req.session.csrfToken && req.get('X-CSRF-Token') === req.session.csrfToken) {
+            next();
+            return;
+        }
+
+        // Browser mutations supply Origin even on same-origin requests. Never
+        // accept a missing Origin merely because the CORS validator permits
+        // native clients: cookie clients without Origin must send the token.
+        const origin = req.get('Origin');
+        if (!origin) { res.status(403).json({ error: 'CSRF validation failed' }); return; }
+        // Server-rendered MCP forms use their separately configured API origin;
+        // retain their own, stricter form-token checks downstream.
+        if (req.path.startsWith('/mcp/') && origin === getConsentOrigin()) {
+            next();
+            return;
+        }
+        validateOrigin(origin, (error, allowed) => {
+            if (error || !allowed) { res.status(403).json({ error: 'CSRF validation failed' }); return; }
+            next();
+        });
+    };
+}
+
 export function setupAuth(app: Express, demoModeAtStartup = isDemoMode()): SocketAuthMiddlewareBundle {
     configureDemoMode(demoModeAtStartup);
     const browserAuthMode = demoModeAtStartup ? 'disabled' : resolveBrowserAuthMode();
@@ -229,12 +280,6 @@ export function setupAuth(app: Express, demoModeAtStartup = isDemoMode()): Socke
         const redisStore = new RedisStore({ client: redisClient, prefix: 'propr:session:' });
 
         const cookieDomain = getSessionCookieDomain();
-        // Extension-profile mutations require application/json and X-ProPR-Extensions: 1
-        // in createExtensionProfileRoutes; server.ts rejects untrusted CORS origins.
-        // The extension MCP gateway instead requires an explicit bearer grant.
-        // CodeQL's CSRF query does not recognize these preflight/bearer guards.
-        // Regression coverage: test/extensionProfileRoutes.test.ts.
-        // codeql[js/missing-token-validation]
         const sessionMiddleware = session({
             store: redisStore,
             secret: sessionSecret!,
@@ -259,6 +304,7 @@ export function setupAuth(app: Express, demoModeAtStartup = isDemoMode()): Socke
         app.use(sessionMiddleware);
         app.use(passportInitializeMiddleware);
         app.use(passportSessionMiddleware);
+        app.use(createSessionCsrfProtection(process.env.FRONTEND_URL!, cookieDomain));
 
         if (browserAuthMode === 'github') {
             passport.use(createGitHubOAuthStrategy({
