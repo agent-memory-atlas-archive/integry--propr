@@ -116,7 +116,9 @@ test('private Unix contract runs real WAL export, streams once, preserves cipher
   assert.equal(start.status, 200);
   const operation = JSON.parse(start.body.toString());
   const status = await ready(f, operation.operationId); assert.equal(status.state, 'completed');
-  const response = await f.http(f.sign({ action: 'artifact.stream', targetOperationId: operation.operationId }));
+  const responses = await Promise.all([0, 1].map(() => f.http(f.sign({ action: 'artifact.stream', targetOperationId: operation.operationId }))));
+  assert.deepEqual(responses.map(response => response.status).sort(), [200, 403]);
+  const response = responses.find(response => response.status === 200)!;
   clearInterval(writer);
   assert.equal(response.status, 200);
   const meta = status.result as { sizeBytes: number; sha256: string; schemaVersion: number; migration: string };
@@ -302,11 +304,32 @@ test('foreign confirmation, cross-tenant status and artifact grants are refused'
 test('consumer failure consumes redemption and fences result; native staging is deleted after outcome', async t => {
   const f = await fixture(t);
   const op = await f.invoke({ action: 'database.export' }); await ready(f, op.operationId);
+  // Hold the completion watcher while it checks an already-completed export.
+  // Streaming must wait for that metadata check before claiming redemption.
+  let releaseWatcher!: () => void;
+  let watcherEntered!: () => void;
+  const held = new Promise<void>(resolve => { releaseWatcher = resolve; });
+  const entered = new Promise<void>(resolve => { watcherEntered = resolve; });
+  t.after(releaseWatcher);
+  const read = f.plane.files.read.bind(f.plane.files);
+  t.mock.method(f.plane.files, 'read', async (name: string) => {
+    const value = await read(name);
+    if (name === `operation-${op.operationId}.jsonl`) { watcherEntered(); await held; }
+    return value;
+  });
+  const watcher = (f.plane as any).watchExport(op.operationId);
+  await entered;
+  const create = f.plane.files.create.bind(f.plane.files);
+  t.mock.method(f.plane.files, 'create', async (name: string, value: any) => {
+    await create(name, value);
+    if (value.action === 'artifact.stream') setTimeout(releaseWatcher, 50);
+  });
   let sawBytes = false;
   await assert.rejects(f.plane.stream(f.sign({ action: 'artifact.stream', targetOperationId: op.operationId }), async download => {
     const buffer = Buffer.alloc(32); await download.file.read(buffer, 0, 32, 0); sawBytes = true;
     throw new Error('consumer-disconnected-canary');
   }));
+  await watcher;
   assert.ok(sawBytes);
   const status = await f.invoke({ action: 'operation.status', targetOperationId: op.operationId });
   assert.equal((status.result as FleetDataResult).state, 'fenced');

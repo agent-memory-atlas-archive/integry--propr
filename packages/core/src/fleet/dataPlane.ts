@@ -213,7 +213,7 @@ export class FleetDataPlane {
   }
   private async acquireTarget(targetId: string, action: FleetDataAssertion['action']) {
     // Briefly serialize metadata polling with the completion outbox writer.
-    if (action === 'operation.status' || action === 'operation.cancel') {
+    if (action === 'operation.status' || action === 'operation.cancel' || action === 'artifact.stream') {
       for (let attempt = 0; attempt < 100 && this.busyTargets.has(targetId); attempt++) await delay(10);
     }
     if (this.busyTargets.has(targetId)) throw new FleetRefusal();
@@ -260,8 +260,8 @@ export class FleetDataPlane {
     let owned = false;
     try {
       const r = envelope.request;
-      if (r.action !== 'artifact.stream' || this.busyTargets.has(r.targetOperationId)) throw new FleetRefusal();
-      this.busyTargets.add(r.targetOperationId); owned = true;
+      if (r.action !== 'artifact.stream') throw new FleetRefusal();
+      await this.acquireTarget(r.targetOperationId, r.action); owned = true;
       target = await this.target(envelope, r.targetOperationId);
       if (target.action !== 'database.export' || target.state !== 'completed' || target.nativeExport?.state !== 'ready' || !this.storage.exports) throw new FleetRefusal();
       const selected = target;
