@@ -3,12 +3,12 @@ import { createRequire } from 'node:module';
 import { createHash } from 'node:crypto';
 import { gzipSync, gunzipSync } from 'node:zlib';
 import { PinnedDirectory } from './privateDirectory.js';
-import { redactRecord, REDACTION_VERSION } from './redaction.js';
+import { redactRecord, REDACTION_VERSION, type DiagnosticAttribution } from './redaction.js'; import { untilDeadline } from './providerOutputLedger.js';
 import type { NativeInventory } from './providerCollector.js';
 import type { NativeLogInventory, NativeLogRoot } from './nativeLogPolicy.js'; import type { CredentialRootRefusal } from './providerRoots.js';
 
 interface Statement { run(...args: unknown[]): { lastInsertRowid: number | bigint }; get(...args: unknown[]): unknown; all(...args: unknown[]): unknown[] }
-export interface Database { exec(sql: string): void; prepare(sql: string): Statement; close(): void }
+export interface Database { exec(sql: string): void; prepare(sql: string): Statement; close(): void; readonly inTransaction: boolean }
 type SqliteConstructor = new (file: string) => Database;
 let sqlite: SqliteConstructor | undefined;
 /** The native binding loads only when a spool is constructed, so importing the
@@ -49,7 +49,7 @@ export type LogIdentity = { provider: string; agent: string; source: string };
 export type Cursor = { inode?: string; birth?: string; offset?: number; discard?: boolean; anchor?: string };
 export interface AppendOptions {
     credentials: readonly string[];
-    now?: number;
+    now?: number; attribution?: DiagnosticAttribution; // per-record task/run labels, never part of the source identity
     cursor?: { before: Cursor; after: Cursor };
     droppedBytes?: number; continuation?: readonly boolean[]; // per record: a bounded stack/error continuation
 }
@@ -65,7 +65,7 @@ export class ManagedLogSpool {
     private readonly db!: Database;
     readonly limits: ManagedLogPolicy;
     constructor(root: string, readonly instance: string, limits: Partial<ManagedLogPolicy> = {},
-        options: { migrations?: readonly ManagedLogPolicyMigration[] } = {}) {
+        options: { migrations?: readonly ManagedLogPolicyMigration[]; openDeadline?: number } = {}) {
         if (!/^[a-zA-Z0-9._:-]{1,128}$/.test(instance)) throw new DiagnosticPolicyError('invalid diagnostic instance');
         this.limits = validPolicy({ ...MANAGED_LOG_POLICY, ...limits });
         const Sqlite = loadSqlite();
@@ -80,33 +80,34 @@ export class ManagedLogSpool {
             try { fs.closeSync(fs.openSync(this.dir.path('spool.sqlite'), 'wx', 0o600)); }
             catch (e) { if ((e as NodeJS.ErrnoException).code !== 'EEXIST') throw e; }
             this.db = new Sqlite(this.dir.path('spool.sqlite'));
-            this.db.exec(`PRAGMA busy_timeout=1000; PRAGMA journal_mode=DELETE; PRAGMA synchronous=FULL;
-                PRAGMA max_page_count=${Math.floor(this.limits.databaseBytes / 4096)};
-                BEGIN IMMEDIATE;
-                CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
-                CREATE TABLE IF NOT EXISTS sources (id TEXT PRIMARY KEY, identity TEXT NOT NULL, cursor TEXT NOT NULL DEFAULT '{}', next INTEGER NOT NULL DEFAULT 1,
-                    dropped INTEGER NOT NULL DEFAULT 0, gaps INTEGER NOT NULL DEFAULT 0, last_success INTEGER, reason TEXT, protection TEXT, protected_bytes INTEGER NOT NULL DEFAULT 0);
-                CREATE TABLE IF NOT EXISTS segments (id INTEGER PRIMARY KEY AUTOINCREMENT, source TEXT NOT NULL, day TEXT NOT NULL,
-                    first INTEGER NOT NULL, last INTEGER NOT NULL, start INTEGER NOT NULL, end INTEGER NOT NULL, raw INTEGER NOT NULL,
-                    digest TEXT NOT NULL, data BLOB NOT NULL, sealed INTEGER NOT NULL DEFAULT 0, ack INTEGER NOT NULL DEFAULT 0);
-                CREATE INDEX IF NOT EXISTS segments_source ON segments(source,id); COMMIT; PRAGMA busy_timeout=100;`);
-            this.atomic(() => {
-                for (const [table, name, type] of [['sources', 'inventory_complete', 'INTEGER NOT NULL DEFAULT 0'], ['sources', 'retired', 'INTEGER NOT NULL DEFAULT 0'],
-                    ['sources', 'native_root', 'TEXT'], ['sources', 'native_inventory', 'TEXT'], ['sources', 'native_details', 'TEXT'],
-                    // Segments stored before the column existed were redacted by adapter v1.
-                    ['segments', 'redaction', 'INTEGER NOT NULL DEFAULT 1']]) {
-                    if (!(this.db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>).some(column => column.name === name)) {
-                        this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${name} ${type}`);
+            untilDeadline(() => { try { // other workers may hold the write lock past busy_timeout; a past `openDeadline` means one attempt
+                this.db.exec(`PRAGMA busy_timeout=1000; PRAGMA journal_mode=DELETE; PRAGMA synchronous=FULL;
+                    PRAGMA max_page_count=${Math.floor(this.limits.databaseBytes / 4096)};
+                    BEGIN IMMEDIATE;
+                    CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+                    CREATE TABLE IF NOT EXISTS sources (id TEXT PRIMARY KEY, identity TEXT NOT NULL, cursor TEXT NOT NULL DEFAULT '{}', next INTEGER NOT NULL DEFAULT 1,
+                        dropped INTEGER NOT NULL DEFAULT 0, gaps INTEGER NOT NULL DEFAULT 0, last_success INTEGER, reason TEXT, protection TEXT, protected_bytes INTEGER NOT NULL DEFAULT 0);
+                    CREATE TABLE IF NOT EXISTS segments (id INTEGER PRIMARY KEY AUTOINCREMENT, source TEXT NOT NULL, day TEXT NOT NULL,
+                        first INTEGER NOT NULL, last INTEGER NOT NULL, start INTEGER NOT NULL, end INTEGER NOT NULL, raw INTEGER NOT NULL,
+                        digest TEXT NOT NULL, data BLOB NOT NULL, sealed INTEGER NOT NULL DEFAULT 0, ack INTEGER NOT NULL DEFAULT 0);
+                    CREATE INDEX IF NOT EXISTS segments_source ON segments(source,id); COMMIT; PRAGMA busy_timeout=100;`);
+                this.atomic(() => {
+                    for (const [table, name, type] of [['sources', 'inventory_complete', 'INTEGER NOT NULL DEFAULT 0'], ['sources', 'retired', 'INTEGER NOT NULL DEFAULT 0'],
+                        ['sources', 'native_root', 'TEXT'], ['sources', 'native_inventory', 'TEXT'], ['sources', 'native_details', 'TEXT'],
+                        // Segments stored before the column existed were redacted by adapter v1.
+                        ['segments', 'redaction', 'INTEGER NOT NULL DEFAULT 1']]) {
+                        if (!(this.db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>).some(column => column.name === name)) {
+                            this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${name} ${type}`);
+                        }
                     }
-                }
-                if (!(this.db.prepare('PRAGMA table_info(sources)').all() as Array<{ name: string }>).some(column => column.name === 'diagnostic_bytes')) {
-                    this.db.exec('ALTER TABLE sources ADD COLUMN diagnostic_bytes INTEGER NOT NULL DEFAULT 0');
-                    // Legacy totals include resumable state. Only classified
-                    // diagnostic evidence can seed the new capacity bound.
-                    this.db.exec(`UPDATE sources SET diagnostic_bytes=coalesce(json_extract(native_inventory,'$.diagnosticBytes'),0)`);
-                }
-                this.bind(options.migrations ?? MANAGED_LOG_POLICY_MIGRATIONS);
-            });
+                    if (!(this.db.prepare('PRAGMA table_info(sources)').all() as Array<{ name: string }>).some(column => column.name === 'diagnostic_bytes')) {
+                        this.db.exec('ALTER TABLE sources ADD COLUMN diagnostic_bytes INTEGER NOT NULL DEFAULT 0');
+                        // Legacy totals include resumable state. Only classified
+                        // diagnostic evidence can seed the new capacity bound.
+                        this.db.exec(`UPDATE sources SET diagnostic_bytes=coalesce(json_extract(native_inventory,'$.diagnosticBytes'),0)`);
+                    }
+                    this.bind(options.migrations ?? MANAGED_LOG_POLICY_MIGRATIONS);
+                }); } catch (e) { if (this.db.inTransaction) this.db.exec('ROLLBACK'); throw e; } }, options.openDeadline ?? Date.now() + 10_000);
         } catch (e) { this.db?.close(); this.dir.close(); throw e; }
     }
     /** The instance binding is permanent; the policy binding changes only
@@ -164,14 +165,14 @@ export class ManagedLogSpool {
         }
         return source;
     }
-    private gap(source: Source, bytes: number, reason: string): void {
-        this.db.prepare('UPDATE sources SET dropped=dropped+?,gaps=gaps+1,reason=?,inventory_complete=0 WHERE id=?').run(bytes, reason, source.id);
-    }
-    report(identity: LogIdentity, reason: 'buffer-capacity' | 'unsafe-source' | 'ownership-unsupported' | 'scan-limit' | 'source-replaced' | 'capture-interrupted' | 'protected-native-state' | 'ownership-unverified' | 'storage-unavailable' | `credential-root:${CredentialRootRefusal | 'missing'}`, bytes = 0): void {
+    private gap(source: Source, bytes: number, reason: string): void { this.db.prepare('UPDATE sources SET dropped=dropped+?,gaps=gaps+1,reason=?,inventory_complete=0 WHERE id=?').run(bytes, reason, source.id); }
+    /** `standing`: a limitation re-observed on every pass (e.g. the daemon's 30s
+     * inventory) records one durable gap when it begins or changes, not per pass. */
+    report(identity: LogIdentity, reason: 'buffer-capacity' | 'unsafe-source' | 'ownership-unsupported' | 'scan-limit' | 'source-replaced' | 'capture-interrupted' | 'protected-native-state' | 'ownership-unverified' | 'storage-unavailable' | `credential-root:${CredentialRootRefusal | 'missing'}`, bytes = 0, options: { standing?: boolean } = {}): void {
         this.atomic(() => {
             const source = this.source(identity);
             if (reason === 'protected-native-state') this.db.prepare('UPDATE sources SET protected_bytes=?,diagnostic_bytes=?,protection=? WHERE id=?').run(bytes, bytes, reason, source.id);
-            else this.gap(source, bytes, reason);
+            else if (!options.standing || source.reason !== reason) this.gap(source, bytes, reason);
         });
     }
     measureNativeState(identity: LogIdentity, bytes: number, complete: boolean, options: { inventory?: NativeInventory; now?: number } = {}): void {
@@ -233,13 +234,15 @@ export class ManagedLogSpool {
             this.prune(Date.now());
         });
     }
+    /** Changes whenever another connection commits: progress, not a stalled spool. */
+    dataVersion(): number { return (this.db.prepare('PRAGMA data_version').get() as { data_version: number }).data_version; }
     cursor(identity: LogIdentity): Cursor {
         const existing = this.db.prepare('SELECT cursor FROM sources WHERE id=?').get(digest(JSON.stringify(identity))) as { cursor: string } | undefined;
         return existing ? JSON.parse(existing.cursor) as Cursor : this.atomic(() => JSON.parse(this.source(identity).cursor) as Cursor);
     }
     /** Cursor CAS + segments commit together. Concurrent/restarted scans cannot duplicate records. */
     append(identity: LogIdentity, records: string[], format: 'jsonl' | 'text', options: AppendOptions): boolean {
-        const { credentials, now = Date.now(), cursor, droppedBytes = 0, continuation } = options;
+        const { credentials, now = Date.now(), cursor, droppedBytes = 0, continuation, attribution } = options;
         if (records.length > 4096 || records.reduce((sum, r) => sum + Buffer.byteLength(r), 0) > this.limits.scanBytes) throw new Error('diagnostic batch exceeds bound');
         return this.atomic(() => {
             const source = this.source(identity);
@@ -251,7 +254,7 @@ export class ManagedLogSpool {
             if (droppedBytes) this.gap(source, droppedBytes, 'oversize-record');
             for (const [index, record] of records.entries()) {
                 const size = Buffer.byteLength(record) + (record.endsWith('\n') ? 0 : 1);
-                const redacted = size <= this.limits.recordBytes ? redactRecord(record, format, credentials, { continuation: continuation?.[index] === true }) : null;
+                const redacted = size <= this.limits.recordBytes ? redactRecord(record, format, credentials, { continuation: continuation?.[index] === true, attribution }) : null;
                 const seq = next++;
                 if (!redacted || Buffer.byteLength(redacted) > this.limits.recordBytes) { flush(); this.gap(source, size, 'unsafe-record'); continue; }
                 batch.push({ text: redacted, seq, size });
