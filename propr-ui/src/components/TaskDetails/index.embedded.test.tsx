@@ -47,6 +47,7 @@ vi.mock('./LogFilesModal', () => ({ default: () => null }));
 vi.mock('./FollowupModal', () => ({ default: () => null }));
 vi.mock('./ContextStrip', () => ({
   default: ({ lead }: { lead?: React.ReactNode }) => <>{lead}</>,
+  ConsumptionGroup: () => null,
   MobileGitContext: () => null,
   MobilePeopleRuntime: () => null,
 }));
