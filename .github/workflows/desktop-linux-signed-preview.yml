@@ -194,6 +194,9 @@ jobs:
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version-file: '.nvmrc'
+      - name: Install locked workspace dependencies for the acceptance runner
+        # Host imports require sharp; Electron and browser installation stays in the disposable container.
+        run: npm ci --ignore-scripts --no-audit --no-fund
       - run: |
           sudo apt-get update
           sudo apt-get install --yes rpm gnupg
