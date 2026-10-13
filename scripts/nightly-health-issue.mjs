@@ -62,14 +62,16 @@ export function nightlyOutcome(needs) {
 const stripTimestamp = (line) => line.replace(/^\d{4}-\d\d-\d\dT[\d:.]+Z ?/, "");
 const clip = (line) => (line.length > MAX_LINE_LENGTH ? `${line.slice(0, MAX_LINE_LENGTH)}…` : line);
 
-// Prefers the failure summary scripts/run-test-suite.mjs prints last; falls
-// back to the first lines of the output.
+// Prefers the failure summary scripts/run-test-suite.mjs prints last. TAP
+// output has no such summary, so show the first failed test and its context.
 export function summarizeLog(text, maxLines = EXCERPT_LINES) {
   const lines = String(text ?? "").replace(/\r\n/g, "\n").split("\n").map(stripTimestamp);
   while (lines.length > 0 && lines[lines.length - 1].trim() === "") lines.pop();
   if (lines.length === 0) return "";
   const summaryStart = lines.findLastIndex((line) => /^\d+\/\d+ test runs failed\b/.test(line));
-  const selected = summaryStart >= 0 ? lines.slice(summaryStart) : lines;
+  const tapFailure = lines.findIndex((line) => /^\s*not ok \d+ -/.test(line));
+  const selected = summaryStart >= 0 ? lines.slice(summaryStart)
+    : tapFailure >= 0 ? lines.slice(Math.max(0, tapFailure - 5)) : lines;
   const excerpt = selected.slice(0, maxLines).map(clip);
   if (selected.length > maxLines) excerpt.push(`… ${selected.length - maxLines} more lines in the run log`);
   return excerpt.join("\n");

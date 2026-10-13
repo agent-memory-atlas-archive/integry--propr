@@ -157,6 +157,21 @@ describe("nightly health issue", () => {
     assert.match(excerpt[60], /40 more lines/);
   });
 
+  it("starts a long TAP excerpt near the first failed test", () => {
+    const tap = [
+      ...Array.from({ length: 100 }, (_, index) => `passing test ${index}`),
+      "provider quota reached",
+      "    # Subtest: multi-model parallel",
+      "    not ok 2 - multi-model parallel",
+      "      error: provider quota reached",
+      ...Array.from({ length: 100 }, (_, index) => `later detail ${index}`),
+    ].join("\n");
+    const excerpt = summarizeLog(tap);
+    assert.match(excerpt, /provider quota reached/);
+    assert.match(excerpt, /not ok 2 - multi-model parallel/);
+    assert.doesNotMatch(excerpt, /passing test 0/);
+  });
+
   it("extracts the failing step from a timestamped job log", () => {
     const log = [
       "2026-10-06T02:00:00.0000000Z ##[group]Run npm ci",
