@@ -71,7 +71,8 @@ export const verifySignedRpmEvidenceArtifact = async ({ json, request, signingRu
     || !/^sha256:[a-f0-9]{64}$/.test(artifact.digest ?? '')) {
     throw new Error('Missing, expired, or invalid authoritative signed RPM acceptance artifact');
   }
-  const response = await request(`/actions/artifacts/${artifact.id}/zip`, { headers: { Accept: 'application/octet-stream' } });
+  // The Actions ZIP endpoint requires the API media type, even though it returns archive bytes.
+  const response = await request(`/actions/artifacts/${artifact.id}/zip`, { headers: { Accept: 'application/vnd.github+json' } });
   const chunks = [];
   let size = 0;
   for await (const chunk of response.body ?? []) {
