@@ -150,6 +150,65 @@ export class FleetDataPlane {
       } finally { this.busyTargets.delete(id); }
     }
   }
+  private async pollOperation(envelope: FleetDataEnvelope, op: Operation, targetOperationId: string) {
+    const target = await this.target(envelope, targetOperationId);
+    if (target.state === 'running' && target.nativeExport) {
+      const status = await this.storage.exports!.status(target.binding.storageInstanceId, target.nativeExport.generation, target.nativeExport.operationId, 'fleet', () => this.validate(target));
+      if (status.state !== 'running') {
+        target.nativeExport = status;
+        await this.save(target, status.state === 'ready' ? 'completed' : 'failed', status);
+      }
+    }
+    await this.validate(op); await this.save(op, 'completed', publicResult(target));
+  }
+  private async cancelOperation(envelope: FleetDataEnvelope, op: Operation, targetOperationId: string) {
+    const target = await this.target(envelope, targetOperationId);
+    if (this.active.has(target.operationId) || ['streaming', 'fenced', 'failed', 'consumed', 'cancelled'].includes(target.state) || !['database.export', 'repositories.cleanup.preview'].includes(target.action)) throw new FleetRefusal();
+    if (target.nativeExport && !['consumed', 'cancelled', 'failed'].includes(target.state)) {
+      await this.storage.exports!.cancel(target.binding.storageInstanceId, target.nativeExport.generation, target.nativeExport.operationId, 'fleet', () => this.validate(target));
+    }
+    await this.save(target, 'cancelled'); await this.save(op, 'completed', { cancelled: true });
+  }
+  private async dispatch(envelope: FleetDataEnvelope, op: Operation) {
+    const r = envelope.request;
+    const authorize = () => this.validate(op);
+    switch (r.action) {
+      case 'repositories.list': {
+        const inventory = await this.storage.inventory();
+        await authorize(); await this.save(op, 'completed', inventory); break;
+      }
+      case 'repositories.cleanup.preview': {
+        const preview = await this.storage.preview(op.binding.storageInstanceId, ['repository_caches'], 'fleet', [], authorize);
+        await authorize(); op.nativeConfirmation = preview.confirmation;
+        await this.save(op, 'completed', { ...preview, impact: 'Only proven refetchable repository caches can be removed. Private work and all other storage are retained.' }); break;
+      }
+      case 'repositories.cleanup.execute': {
+        const preview = await this.target(envelope, r.previewOperationId);
+        if (preview.action !== 'repositories.cleanup.preview' || preview.state !== 'completed' || preview.nativeConfirmation !== r.confirmation) throw new FleetRefusal();
+        // Durable Fleet binding supplements native actor, generation and exact fingerprint.
+        if (++this.count > 16384) throw new FleetRefusal();
+        await this.files.create(`confirmation-${r.previewOperationId}`, { operationId: op.operationId, grantDigest: op.grantDigest });
+        op.previewOperationId = r.previewOperationId;
+        const result = await this.storage.execute(op.binding.storageInstanceId, r.confirmation, 'fleet', authorize);
+        await authorize(); await this.save(op, result.state === 'completed' ? 'completed' : 'fenced', result); break;
+      }
+      case 'database.export': {
+        if (!this.storage.exports) throw new FleetRefusal();
+        op.nativeExport = await this.storage.exports.start(op.binding.storageInstanceId, 'fleet', authorize);
+        await authorize(); await this.save(op, 'running', op.nativeExport); break;
+      }
+      case 'operation.status': await this.pollOperation(envelope, op, r.targetOperationId); break;
+      case 'operation.cancel': await this.cancelOperation(envelope, op, r.targetOperationId); break;
+    }
+  }
+  private async acquireTarget(targetId: string, action: FleetDataAssertion['action']) {
+    // Briefly serialize metadata polling with the completion outbox writer.
+    if (action === 'operation.status' || action === 'operation.cancel') {
+      for (let attempt = 0; attempt < 100 && this.busyTargets.has(targetId); attempt++) await delay(10);
+    }
+    if (this.busyTargets.has(targetId)) throw new FleetRefusal();
+    this.busyTargets.add(targetId);
+  }
   async invoke(raw: string): Promise<FleetDataResult> {
     const { envelope, op } = await this.admit(raw);
     let dispatched = false;
@@ -160,12 +219,7 @@ export class FleetDataPlane {
       if (r.action === 'artifact.stream') throw new FleetRefusal();
       if ('targetOperationId' in r || 'previewOperationId' in r) {
         targetId = 'targetOperationId' in r ? r.targetOperationId : r.previewOperationId;
-        // Briefly serialize metadata polling with the completion outbox writer.
-        if (r.action === 'operation.status' || r.action === 'operation.cancel') {
-          for (let attempt = 0; attempt < 100 && this.busyTargets.has(targetId); attempt++) await delay(10);
-        }
-        if (this.busyTargets.has(targetId)) throw new FleetRefusal();
-        this.busyTargets.add(targetId); ownsTarget = true;
+        await this.acquireTarget(targetId, r.action); ownsTarget = true;
       }
       // Definite refusals happen before the durable dispatch decision.
       if (r.action === 'database.export' && !this.storage.exports) throw new FleetRefusal();
@@ -176,52 +230,7 @@ export class FleetDataPlane {
       await this.validate(op);
       // Commit the irreversible-dispatch decision before entering any native primitive.
       await this.save(op, 'dispatched'); dispatched = true;
-      const authorize = () => this.validate(op);
-      switch (r.action) {
-        case 'repositories.list': {
-          const inventory = await this.storage.inventory();
-          await authorize(); await this.save(op, 'completed', inventory); break;
-        }
-        case 'repositories.cleanup.preview': {
-          const preview = await this.storage.preview(op.binding.storageInstanceId, ['repository_caches'], 'fleet', [], authorize);
-          await authorize(); op.nativeConfirmation = preview.confirmation;
-          await this.save(op, 'completed', { ...preview, impact: 'Only proven refetchable repository caches can be removed. Private work and all other storage are retained.' }); break;
-        }
-        case 'repositories.cleanup.execute': {
-          const preview = await this.target(envelope, r.previewOperationId);
-          if (preview.action !== 'repositories.cleanup.preview' || preview.state !== 'completed' || preview.nativeConfirmation !== r.confirmation) throw new FleetRefusal();
-          // Durable Fleet binding supplements native actor, generation and exact fingerprint.
-          if (++this.count > 16384) throw new FleetRefusal();
-          await this.files.create(`confirmation-${r.previewOperationId}`, { operationId: op.operationId, grantDigest: op.grantDigest });
-          op.previewOperationId = r.previewOperationId;
-          const result = await this.storage.execute(op.binding.storageInstanceId, r.confirmation, 'fleet', authorize);
-          await authorize(); await this.save(op, result.state === 'completed' ? 'completed' : 'fenced', result); break;
-        }
-        case 'database.export': {
-          if (!this.storage.exports) throw new FleetRefusal();
-          op.nativeExport = await this.storage.exports.start(op.binding.storageInstanceId, 'fleet', authorize);
-          await authorize(); await this.save(op, 'running', op.nativeExport); break;
-        }
-        case 'operation.status': {
-          const target = await this.target(envelope, r.targetOperationId);
-          if (target.state === 'running' && target.nativeExport) {
-            const status = await this.storage.exports!.status(target.binding.storageInstanceId, target.nativeExport.generation, target.nativeExport.operationId, 'fleet', () => this.validate(target));
-            if (status.state !== 'running') {
-              target.nativeExport = status;
-              await this.save(target, status.state === 'ready' ? 'completed' : 'failed', status);
-            }
-          }
-          await authorize(); await this.save(op, 'completed', publicResult(target)); break;
-        }
-        case 'operation.cancel': {
-          const target = await this.target(envelope, r.targetOperationId);
-          if (this.active.has(target.operationId) || ['streaming', 'fenced', 'failed', 'consumed', 'cancelled'].includes(target.state) || !['database.export', 'repositories.cleanup.preview'].includes(target.action)) throw new FleetRefusal();
-          if (target.nativeExport && !['consumed', 'cancelled', 'failed'].includes(target.state)) {
-            await this.storage.exports!.cancel(target.binding.storageInstanceId, target.nativeExport.generation, target.nativeExport.operationId, 'fleet', () => this.validate(target));
-          }
-          await this.save(target, 'cancelled'); await this.save(op, 'completed', { cancelled: true }); break;
-        }
-      }
+      await this.dispatch(envelope, op);
       await this.validate(op);
       if (op.action === 'database.export' && op.state === 'running') void this.watchExport(op.operationId).catch(() => undefined);
       return publicResult(op);

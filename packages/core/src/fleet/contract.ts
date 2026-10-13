@@ -8,6 +8,14 @@ export function exact(value: unknown, keys: string[]): asserts value is Record<s
 }
 export const identifier = (value: unknown): value is string => typeof value === 'string' && /^[A-Za-z0-9_-]{1,100}$/.test(value);
 export const uuid = (value: unknown): value is string => typeof value === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(value);
+const sha256 = (value: unknown): value is string => typeof value === 'string' && /^[0-9a-f]{64}$/.test(value);
+function validateAssertion(a: unknown): asserts a is Record<string, unknown> {
+  exact(a, ['contract', 'contractPin', 'hostedInstanceId', 'storageInstanceId', 'runtimeGeneration', 'placementGeneration', 'scope', 'action', 'requestDigest', 'operationId', 'issuedAt', 'expiresAt', 'nonce']);
+  if (a.contract !== FLEET_DATA_CONTRACT || a.contractPin !== contractPin || a.scope !== FLEET_DATA_SCOPE || !FLEET_DATA_ACTIONS.includes(a.action as never)
+    || !identifier(a.hostedInstanceId) || !identifier(a.placementGeneration) || !uuid(a.storageInstanceId) || !uuid(a.runtimeGeneration) || !uuid(a.operationId)
+    || !sha256(a.requestDigest) || !sha256(a.nonce)
+    || !Number.isSafeInteger(a.issuedAt) || !Number.isSafeInteger(a.expiresAt)) throw new FleetRefusal();
+}
 export function parseEnvelope(raw: string): FleetDataEnvelope {
   if (Buffer.byteLength(raw) > 8192) throw new FleetRefusal();
   let value: unknown;
@@ -15,12 +23,9 @@ export function parseEnvelope(raw: string): FleetDataEnvelope {
   // Requiring the canonical representation also refuses duplicate JSON keys.
   if (canonicalFleetJson(value) !== raw) throw new FleetRefusal();
   exact(value, ['assertion', 'request', 'mac']);
+  validateAssertion(value.assertion);
+  if (!sha256(value.mac)) throw new FleetRefusal();
   const a = value.assertion;
-  exact(a, ['contract', 'contractPin', 'hostedInstanceId', 'storageInstanceId', 'runtimeGeneration', 'placementGeneration', 'scope', 'action', 'requestDigest', 'operationId', 'issuedAt', 'expiresAt', 'nonce']);
-  if (a.contract !== FLEET_DATA_CONTRACT || a.contractPin !== contractPin || a.scope !== FLEET_DATA_SCOPE || !FLEET_DATA_ACTIONS.includes(a.action as never)
-    || !identifier(a.hostedInstanceId) || !identifier(a.placementGeneration) || !uuid(a.storageInstanceId) || !uuid(a.runtimeGeneration) || !uuid(a.operationId)
-    || typeof a.requestDigest !== 'string' || !/^[0-9a-f]{64}$/.test(a.requestDigest) || typeof a.nonce !== 'string' || !/^[0-9a-f]{64}$/.test(a.nonce)
-    || !Number.isSafeInteger(a.issuedAt) || !Number.isSafeInteger(a.expiresAt) || typeof value.mac !== 'string' || !/^[0-9a-f]{64}$/.test(value.mac)) throw new FleetRefusal();
   const keys = a.action === 'repositories.cleanup.execute' ? ['action', 'previewOperationId', 'confirmation']
     : ['operation.status', 'operation.cancel', 'artifact.stream'].includes(String(a.action)) ? ['action', 'targetOperationId'] : ['action'];
   exact(value.request, keys);
