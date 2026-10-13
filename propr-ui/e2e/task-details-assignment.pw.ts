@@ -38,25 +38,17 @@ async function fixture(page: Page, options: FixtureOptions = {}) {
     const request = route.request();
     const path = new URL(request.url()).pathname;
     if (path === `/api/task/${taskId}/assignees`) {
-      if (options.goal) {
-        return route.fulfill({ status: 409, json: { error: 'No subject', code: 'NO_GITHUB_SUBJECT', message: 'This task has no GitHub issue or pull request, so there is nothing to assign.' } });
-      }
+      if (options.goal) return route.fulfill({ status: 409, json: { error: 'No subject', code: 'NO_GITHUB_SUBJECT', message: 'This task has no GitHub issue or pull request, so there is nothing to assign.' } });
       if (request.method() === 'PUT') {
         const body = request.postDataJSON() as { logins: string[]; mode: string };
         state.puts.push(body);
-        if (options.save === 'forbidden') {
-          return route.fulfill({ status: 403, json: { error: 'You need write access to integry/propr', code: 'REPOSITORY_WRITE_ACCESS_REQUIRED', message: 'You need write access to integry/propr' } });
-        }
-        if (options.save === 'unavailable') {
-          return route.fulfill({ status: 502, json: { error: 'GitHub could not be reached', code: 'GITHUB_UNAVAILABLE', message: 'GitHub could not be reached' } });
-        }
+        if (options.save === 'forbidden') return route.fulfill({ status: 403, json: { error: 'You need write access to integry/propr', code: 'REPOSITORY_WRITE_ACCESS_REQUIRED', message: 'You need write access to integry/propr' } });
+        if (options.save === 'unavailable') return route.fulfill({ status: 502, json: { error: 'GitHub could not be reached', code: 'GITHUB_UNAVAILABLE', message: 'GitHub could not be reached' } });
         state.assignees = body.logins.map(login => assignable.find(candidate => candidate.login === login)!);
         return route.fulfill({ json: { subject, assignees: state.assignees, rejected: [] } });
       }
       state.reads += 1;
-      if (state.reads <= (options.failedReads ?? 0)) {
-        return route.fulfill({ status: 502, json: { error: 'GitHub could not be reached', code: 'GITHUB_UNAVAILABLE', message: 'GitHub could not be reached' } });
-      }
+      if (state.reads <= (options.failedReads ?? 0)) return route.fulfill({ status: 502, json: { error: 'GitHub could not be reached', code: 'GITHUB_UNAVAILABLE', message: 'GitHub could not be reached' } });
       return route.fulfill({ json: { subject, assignees: state.assignees, synced: true } });
     }
     if (path === `/api/task/${taskId}/assignable-users`) {
@@ -69,10 +61,8 @@ async function fixture(page: Page, options: FixtureOptions = {}) {
         history: [
           { state: 'PENDING', timestamp: at(0), metadata: { model: options.model ?? 'claude-opus-5-5' } },
           { state: 'CLAUDE_EXECUTION', timestamp: at(1), reason: 'Agent execution started' },
-          {
-            state: 'COMPLETED', timestamp: at(20),
-            metadata: { ...(options.denseGit ? { commitResult: { commitHash: '5c7cd9e0123456789' } } : {}), model: options.model ?? 'claude-opus-5-5', pr: { url: 'https://github.com/integry/propr/pull/2911', number: 2911 } },
-          },
+          { state: 'COMPLETED', timestamp: at(20),
+            metadata: { ...(options.denseGit ? { commitResult: { commitHash: '5c7cd9e0123456789' } } : {}), model: options.model ?? 'claude-opus-5-5', pr: { url: 'https://github.com/integry/propr/pull/2911', number: 2911 } } },
         ],
         taskInfo: options.goal
           ? { title: 'Plan the task assignment epic', type: 'goal', repoOwner: 'integry', repoName: 'propr', modelName: options.model ?? 'claude-opus-5-5' }
@@ -200,10 +190,8 @@ test('keeps a read-only display after a 403 and stops offering the editor', asyn
 });
 
 test('renders nothing for a goal task that has no issue or pull request', async ({ page }) => {
-  await fixture(page, { goal: true });
-  await page.setViewportSize({ width: 1440, height: 900 });
   const assigneeReads = page.waitForResponse(response => response.url().endsWith(`/api/task/${taskId}/assignees`));
-  await page.goto(`/tasks/${taskId}`);
+  await openTask(page, { goal: true });
   await assigneeReads;
   await expect(page.getByTestId('task-header-tiers')).toBeVisible();
 
@@ -284,8 +272,6 @@ for (const width of [320, 390]) {
     await expect(page.locator('body')).toHaveCSS('position', 'fixed');
     await expect(details).toHaveCSS('overflow', 'hidden');
     const box = (await editor.boundingBox())!;
-    expect(box.x).toBeGreaterThanOrEqual(0);
-    expect(box.x + box.width).toBeLessThanOrEqual(width);
     await expectNoHorizontalOverflow(page);
     expect(box.x).toBe(0);
     expect(box.width).toBe(width);
@@ -438,8 +424,7 @@ for (const width of [320, 390]) {
 test('mobile assignment search, results, Save and Cancel remain reachable in a reduced viewport', async ({ browser }) => {
   const context = await browser.newContext({ isMobile: true, hasTouch: true, viewport: { width: 390, height: 844 } });
   const page = await context.newPage();
-  const state = await fixture(page);
-  await page.goto(`/tasks/${taskId}`);
+  const state = await openTask(page, {}, { width: 390, height: 844 });
   const trigger = page.getByTestId('assignment-trigger').filter({ visible: true });
   await trigger.tap();
   const editor = page.getByRole('dialog', { name: 'Assign users' });

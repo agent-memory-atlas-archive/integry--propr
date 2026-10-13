@@ -116,9 +116,7 @@ const TimelineIcon: React.FC<{ state: string; isRunning: boolean; isFailure: boo
 }) => {
   const stateUpper = state?.toUpperCase() || '';
 
-  if (isBudgetStop) {
-    return <CircleDollarSign className="h-5 w-5 text-red-500" />;
-  }
+  if (isBudgetStop) return <CircleDollarSign className="h-5 w-5 text-red-500" />;
 
   if (isRunning) {
     return (
@@ -128,30 +126,16 @@ const TimelineIcon: React.FC<{ state: string; isRunning: boolean; isFailure: boo
     );
   }
 
-  if (isFailure) {
-    return <XCircle className="h-5 w-5 text-red-500" />;
-  }
+  if (isFailure) return <XCircle className="h-5 w-5 text-red-500" />;
 
-  if (isCancelled) {
-    return <Ban className="h-5 w-5 text-orange-500" />;
-  }
+  if (isCancelled) return <Ban className="h-5 w-5 text-orange-500" />;
 
   // Specific icons for different states
-  if (stateUpper === 'PENDING') {
-    return <Clock className="h-5 w-5 text-gray-400" />;
-  }
-  if (stateUpper === 'PROCESSING') {
-    return <Timer className="h-5 w-5 text-blue-500" />;
-  }
-  if (stateUpper === 'POST_PROCESSING') {
-    return <GitPullRequest className="h-5 w-5 text-purple-500" />;
-  }
-  if (stateUpper === 'COMPLETED') {
-    return <CheckCircle2 className="h-5 w-5 text-green-500" />;
-  }
-  if (stateUpper.includes('CLAUDE_EXECUTION')) {
-    return <CircleDot className="h-5 w-5 text-blue-500" />;
-  }
+  if (stateUpper === 'PENDING') return <Clock className="h-5 w-5 text-gray-400" />;
+  if (stateUpper === 'PROCESSING') return <Timer className="h-5 w-5 text-blue-500" />;
+  if (stateUpper === 'POST_PROCESSING') return <GitPullRequest className="h-5 w-5 text-purple-500" />;
+  if (stateUpper === 'COMPLETED') return <CheckCircle2 className="h-5 w-5 text-green-500" />;
+  if (stateUpper.includes('CLAUDE_EXECUTION')) return <CircleDot className="h-5 w-5 text-blue-500" />;
 
   return <CheckCircle2 className="h-5 w-5 text-green-500" />;
 };

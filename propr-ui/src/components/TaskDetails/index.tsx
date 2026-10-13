@@ -110,9 +110,7 @@ const useMobileHeaderCollapsed = () => {
 };
 
 const getTaskDocumentTitle = (taskInfo: React.ComponentProps<typeof TaskHeader>['taskInfo'], taskId?: string) => {
-  if (taskInfo?.title) {
-    return getCleanDocumentTitle(taskInfo.title, taskInfo.issueNumber);
-  }
+  if (taskInfo?.title) return getCleanDocumentTitle(taskInfo.title, taskInfo.issueNumber);
 
   return taskId ? `Task #${taskId}` : undefined;
 };
@@ -123,13 +121,9 @@ const renderTaskDetailsStatus = (
   history: ReturnType<typeof useTaskData>['history'],
   taskId?: string,
 ) => {
-  if (loading) {
-    return <CenteredStatus className="text-gray-600">Loading task details...</CenteredStatus>;
-  }
+  if (loading) return <CenteredStatus className="text-gray-600">Loading task details...</CenteredStatus>;
 
-  if (error) {
-    return <CenteredStatus className="text-red-600">Error loading task details: {error}</CenteredStatus>;
-  }
+  if (error) return <CenteredStatus className="text-red-600">Error loading task details: {error}</CenteredStatus>;
 
   if (!history || history.length === 0) {
     return <CenteredStatus className="text-gray-600">No history found for task {taskId}</CenteredStatus>;
