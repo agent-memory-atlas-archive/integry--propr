@@ -71,7 +71,8 @@ for (const width of [390, 1280]) {
       // take their own line, starting under `Run N` rather than pushed to the right.
       await expect(page.getByTestId('run-timeline-scroll')).toHaveCSS('overflow-y', 'visible');
       for (const row of await timeline.getByTestId('run-timeline-run').all()) {
-        const layout = await row.getByRole('button').evaluate(button => ({
+        // Expanded runs also contain step disclosure buttons; measure only the run header.
+        const layout = await row.locator(':scope > button').evaluate(button => ({
           label: [...button.querySelectorAll('span')].find(span => /^Run \d+$/.test(span.textContent!))!.getBoundingClientRect().left,
           time: button.querySelector('[data-testid="run-timeline-meta"] time')!.getBoundingClientRect().left,
         }));
