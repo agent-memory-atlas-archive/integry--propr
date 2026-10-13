@@ -35,6 +35,7 @@ interface StorageServices {
 /** A single instance, with no caller-controlled roots, remote URLs or filesystem operations. */
 export class InstanceStorageService {
   private initialized?: Promise<string>;
+  private identityRoot?: { dev: number; ino: number };
   private observation?: StorageObservation;
   private scan?: Promise<void>;
   private sweeping = false;
@@ -53,6 +54,12 @@ export class InstanceStorageService {
   async capabilities() {
     return { version: 1 as const, instanceId: await this.initialize(), generation: this.exports?.generation ?? this.generation,
       features: ['repository_inventory', 'repository_cleanup', ...(this.exports ? ['database_export'] : [])] };
+  }
+  /** Internal authority must re-read durable identity, never trust the initialization cache. */
+  async revalidateIdentity(expected: string): Promise<void> {
+    await this.initialize();
+    const root = await fs.lstat(this.root);
+    if (!root.isDirectory() || root.isSymbolicLink() || root.dev !== this.identityRoot?.dev || root.ino !== this.identityRoot?.ino || await this.read<string>('instance.json') !== expected) throw instanceSelectionChanged();
   }
   async inventory(): Promise<RepositoryStorageInventory> {
     if (!this.inventoryScan || Date.now() - this.inventoryAt > 60_000) {
@@ -122,6 +129,8 @@ export class InstanceStorageService {
     this.initialized ??= this.services.lifecycle.use(async () => this.services.lifecycle.exclusive(async () => {
       await fs.mkdir(this.root, { recursive: true });
       await assertRealDirectory(this.root);
+      const identityRoot = await fs.lstat(this.root);
+      this.identityRoot = { dev: identityRoot.dev, ino: identityRoot.ino };
       let id: string;
       try { id = await this.read<string>('instance.json'); }
       catch (error) {

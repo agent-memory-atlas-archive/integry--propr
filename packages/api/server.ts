@@ -1,3 +1,4 @@
+import { startConfiguredFleetData, refusePublicFleetData } from './fleetDataListener.js';
 import { createStorageRouteEntries } from './instanceStorageRouteRegistry.js';
 import { protectStorageQueue } from '../core/src/storage/lifecycle.js';
 import { createDefaultStorageService, createInstanceStorageRoutes } from './routes/instanceStorageRoutes.js';
@@ -183,6 +184,7 @@ const handleCommentDeletedWrapper = (payload: CommentPayload, eventType: Comment
 const handleCommentEditedWrapper = (payload: CommentPayload, eventType: CommentEventType, correlationId: string): Promise<void> => handleCommentEdited(payload, eventType, correlationId, getCommentConfig());
 
 const app = express();
+app.use(refusePublicFleetData);
 const PORT = Number(process.env.DASHBOARD_API_PORT || 4000);
 const HOST = resolveApiListenHost();
 
@@ -419,6 +421,12 @@ function setupRoutes(): void {
   const instanceCatalogRoutes = createInstanceCatalogRoutes();
   const storageService = createDefaultStorageService();
   const storageRoutes = createInstanceStorageRoutes(storageService);
+  // Management-only Unix transport; no customer/tunnel route is registered.
+  if (!demoMode) {
+    void startConfiguredFleetData(storageService).catch(() => {
+      console.warn('Fleet data listener unavailable');
+    });
+  }
   // Background work is bounded/coalesced; no startup deletion or live-data scan.
   const storageSweep = setInterval(() => {
     void storageService.sweep().catch(() => undefined);
