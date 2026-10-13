@@ -7,7 +7,9 @@ const username = 'u'.repeat(39);
 const clientName = 'c'.repeat(80);
 const tunnel = 'https://t-pairing123.propr.dev';
 
-async function fixture(page: Page, options: { hosted?: boolean; expiresIn?: number; rejectApproval?: 404 | 410 | 409; delayLogout?: boolean } = {}) {
+async function fixture(page: Page, options: { hosted?: boolean; expiresIn?: number; rejectApproval?: 404 | 410 | 409; delayLogout?: boolean; username?: string; clientName?: string } = {}) {
+  const fixtureUsername = options.username ?? username;
+  const fixtureClientName = options.clientName ?? clientName;
   let loggedOut = false;
   let approvalCount = 0;
   let logoutUrl = '';
@@ -36,14 +38,14 @@ async function fixture(page: Page, options: { hosted?: boolean; expiresIn?: numb
         ? options.rejectApproval === 409
           ? { code: 'PAIRING_ALREADY_CONSUMED', error: 'Pairing request was already used' }
           : { code: 'PAIRING_NOT_FOUND', error: 'Pairing request was not found or has expired' }
-        : { pairingId, clientName, status: 'approved', expiresAt: new Date(Date.now() + 600_000).toISOString() } });
+        : { pairingId, clientName: fixtureClientName, status: 'approved', expiresAt: new Date(Date.now() + 600_000).toISOString() } });
     }
     if (url.pathname.endsWith('/approval')) return route.fulfill({ json: {
-      pairingId: url.pathname.split('/').at(-2), clientName, status: 'pending', createdAt: new Date().toISOString(),
+      pairingId: url.pathname.split('/').at(-2), clientName: fixtureClientName, status: 'pending', createdAt: new Date().toISOString(),
       expiresAt: new Date(Date.now() + (options.expiresIn ?? 600_000)).toISOString(),
     } });
     if (url.pathname === '/api/auth/user') return route.fulfill({ status: loggedOut ? 401 : 200, json: loggedOut ? { error: 'Unauthorized' } : {
-      id: '101', username, login: username, displayName: username, email: null, avatarUrl: null,
+      id: '101', username: fixtureUsername, login: fixtureUsername, displayName: fixtureUsername, email: null, avatarUrl: null,
       role: 'admin', permissions: [], authorizationSource: 'local',
     } });
     if (url.pathname === '/api/auth/demo-mode') return route.fulfill({ json: { demoMode: false } });
@@ -183,6 +185,82 @@ test('pairing history navigation fences delayed account-switch logout', async ({
   await expect(page.getByRole('alert')).toHaveCount(0);
   expect(state.approvalCount()).toBe(0);
 });
+
+for (const outcome of ['success', 'failure'] as const) {
+  for (const newerOperation of [false, true]) {
+    test(`history navigation ignores old approval ${outcome} with newer operation ${newerOperation}`, async ({ page }) => {
+      await fixture(page, { username: 'pairing-reviewer', clientName: 'Request A · Development desktop' });
+      const nextPairingId = `dpr_${'B'.repeat(22)}`;
+      await page.route(`**/api/**/${nextPairingId}/approval`, route => route.fulfill({ json: {
+        pairingId: nextPairingId, clientName: 'Request B · Development desktop', status: 'pending',
+        createdAt: new Date().toISOString(), expiresAt: new Date(Date.now() + 600_000).toISOString(),
+      } }));
+      let releaseOld!: () => void;
+      let releaseNew!: () => void;
+      const oldGate = new Promise<void>(resolve => { releaseOld = resolve; });
+      const newGate = new Promise<void>(resolve => { releaseNew = resolve; });
+      const submitted: string[] = [];
+      await page.route('**/api/**/approve', async route => {
+        const id = new URL(route.request().url()).pathname.split('/').at(-2)!;
+        submitted.push(id);
+        await (id === pairingId ? oldGate : newGate);
+        const failed = id === pairingId && outcome === 'failure';
+        await route.fulfill({ status: failed ? 410 : 200, json: failed
+          ? { code: 'PAIRING_NOT_FOUND', error: 'Pairing request expired' }
+          : { pairingId: id, clientName: id, status: 'approved', expiresAt: new Date(Date.now() + 600_000).toISOString() } });
+      });
+      // Seed B then A in this document's history. Actual back navigation must
+      // update the mounted router without losing the held A request.
+      await page.evaluate(({ a, b }) => {
+        history.pushState(null, '', `/desktop/pairing?pairing_id=${b}`);
+        history.pushState(null, '', `/desktop/pairing?pairing_id=${a}`);
+        document.documentElement.dataset.pairingHistoryDocument = 'same';
+      }, { a: pairingId, b: nextPairingId });
+      await page.getByRole('button', { name: 'Approve desktop' }).click();
+      await expect.poll(() => submitted).toEqual([pairingId]);
+      const loadedB = page.waitForResponse(response => new URL(response.url()).pathname.endsWith(`/${nextPairingId}/approval`));
+      await page.goBack();
+      await loadedB;
+      await expect(page.getByRole('button', { name: 'Approve desktop' })).toBeEnabled();
+      expect(new URL(page.url()).searchParams.get('pairing_id')).toBe(nextPairingId);
+      expect(await page.locator('html').getAttribute('data-pairing-history-document')).toBe('same');
+      await expect(page.getByText('Request B · Development desktop', { exact: true })).toBeVisible();
+      expect(submitted).toEqual([pairingId]);
+      if (newerOperation) {
+        await page.getByRole('button', { name: 'Approve desktop' }).click();
+        await expect.poll(() => submitted).toEqual([pairingId, nextPairingId]);
+      }
+      const oldFinished = page.waitForResponse(response => new URL(response.url()).pathname.endsWith(`/${pairingId}/approve`));
+      releaseOld();
+      await (await oldFinished).finished();
+      await page.evaluate(() => new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
+      await expect(page.getByRole('heading', { name: 'Approve desktop access', exact: true })).toBeVisible();
+      await expect(page.getByRole('alert')).toHaveCount(0);
+      await expect(page.getByText('Request B · Development desktop', { exact: true })).toBeVisible();
+      expect(new URL(page.url()).searchParams.get('pairing_id')).toBe(nextPairingId);
+      if (newerOperation) {
+        await expect(page.getByRole('button', { name: 'Approving…' })).toBeDisabled();
+        await expect(page.getByRole('button', { name: 'Cancel', exact: true })).toBeDisabled();
+      } else {
+        await expect(page.getByRole('button', { name: 'Approve desktop' })).toBeEnabled();
+        if (process.env.PROPR_CAPTURE_PREVIEWS && outcome === 'success') {
+          const directory = path.resolve('../.propr/previews');
+          await mkdir(directory, { recursive: true });
+          await page.screenshot({ path: path.join(directory, 'pairing-stale-approval.png'), fullPage: true });
+          await writeFile(path.join(directory, 'manifest.json'), JSON.stringify({ previews: [{
+            path: '.propr/previews/pairing-stale-approval.png', title: 'Replacement request stays pending',
+            description: 'Request B remains available for explicit approval after browser Back navigation and release of request A’s delayed successful approval.',
+          }], toolSuggestions: [] }));
+        }
+        await page.getByRole('button', { name: 'Approve desktop' }).click();
+        await expect.poll(() => submitted).toEqual([pairingId, nextPairingId]);
+      }
+      releaseNew();
+      await expect(page.getByRole('heading', { name: 'Desktop paired', exact: true })).toBeVisible();
+      expect(submitted).toEqual([pairingId, nextPairingId]);
+    });
+  }
+}
 
 test('pending request expires while the approval page stays open', async ({ page }) => {
   await page.clock.install();

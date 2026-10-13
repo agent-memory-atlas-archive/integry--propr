@@ -15,7 +15,10 @@ const pairingId = `dpr_${'A'.repeat(22)}`;
 const nextPairingId = `dpr_${'B'.repeat(22)}`;
 const PairingNavigation = () => {
   const navigate = useNavigate();
-  return <button onClick={() => void navigate(`/desktop/pairing?pairing_id=${nextPairingId}`)}>Review next request</button>;
+  return <>
+    <button onClick={() => void navigate(`/desktop/pairing?pairing_id=${nextPairingId}`)}>Review next request</button>
+    <button onClick={() => void navigate(-1)}>Review previous request</button>
+  </>;
 };
 const pending = {
   pairingId,
@@ -26,7 +29,11 @@ const pending = {
 };
 
 describe('DesktopPairingPage', () => {
-  beforeEach(() => vi.clearAllMocks());
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.mocked(approveDesktopPairing).mockReset();
+    vi.mocked(getDesktopPairingApproval).mockReset();
+  });
   afterEach(() => vi.unstubAllGlobals());
 
   it('shows the server-provided client name and requires an explicit approval click', async () => {
@@ -138,6 +145,68 @@ describe('DesktopPairingPage', () => {
           await waitFor(() => expect(location.href).toContain('/login?logged_out=true'));
           expect(new URL(location.href, 'http://localhost').searchParams.get('redirect_to')).toBe(`/desktop/pairing?pairing_id=${currentId}`);
           expect(fetchMock).toHaveBeenCalledTimes(2);
+        }
+      });
+    }
+  }
+
+  for (const change of ['pairing', 'identity', 'pairing-return', 'identity-return', 'unmount'] as const) {
+    for (const outcome of ['success', 'failure'] as const) {
+      it(`ignores delayed approval ${outcome} after ${change} changes, including its busy cleanup`, async () => {
+        vi.mocked(getDesktopPairingApproval).mockImplementation(async id => ({ ...pending, pairingId: id, clientName: id }));
+        let resolveOld!: (value: Awaited<ReturnType<typeof approveDesktopPairing>>) => void;
+        let rejectOld!: (error: Error) => void;
+        let resolveCurrent!: (value: Awaited<ReturnType<typeof approveDesktopPairing>>) => void;
+        vi.mocked(approveDesktopPairing)
+          .mockImplementationOnce(() => new Promise((resolve, reject) => { resolveOld = resolve; rejectOld = reject; }))
+          .mockImplementationOnce(() => new Promise(resolve => { resolveCurrent = resolve; }));
+        const flow = (id: string) => (
+          <MemoryRouter initialEntries={[`/desktop/pairing?pairing_id=${pairingId}`]}>
+            <AuthProvider user={{ id, login: `user${id}`, username: `user${id}`, displayName: 'User', email: null, avatarUrl: null, role: 'admin', permissions: [], authorizationSource: 'local' }}>
+              <PairingNavigation />
+              <DesktopPairingPage />
+            </AuthProvider>
+          </MemoryRouter>
+        );
+        const view = render(flow('101'));
+        fireEvent.click(await screen.findByRole('button', { name: 'Approve desktop' }));
+        expect(screen.getByRole('button', { name: 'Approving…' })).toBeDisabled();
+        expect(approveDesktopPairing).toHaveBeenNthCalledWith(1, pairingId);
+        if (change === 'pairing' || change === 'pairing-return') {
+          fireEvent.click(screen.getByRole('button', { name: 'Review next request' }));
+          if (change === 'pairing-return') {
+            expect(await screen.findByText(nextPairingId)).toBeInTheDocument();
+            fireEvent.click(screen.getByRole('button', { name: 'Review previous request' }));
+          }
+        } else if (change === 'identity' || change === 'identity-return') {
+          view.rerender(flow('202'));
+          if (change === 'identity-return') {
+            expect(await screen.findByText('@user202')).toBeInTheDocument();
+            view.rerender(flow('101'));
+          }
+        } else view.unmount();
+        const currentId = change === 'pairing' ? nextPairingId : pairingId;
+        if (change !== 'unmount') {
+          expect(await screen.findByText(currentId)).toBeInTheDocument();
+          if (change === 'identity') expect(screen.getByText('@user202')).toBeInTheDocument();
+          expect(screen.getByRole('button', { name: 'Approve desktop' })).toBeEnabled();
+          expect(approveDesktopPairing).toHaveBeenCalledTimes(1);
+          fireEvent.click(screen.getByRole('button', { name: 'Approve desktop' }));
+          expect(approveDesktopPairing).toHaveBeenNthCalledWith(2, currentId);
+        }
+        await act(async () => {
+          if (outcome === 'success') resolveOld({ ...pending, status: 'approved' });
+          else rejectOld(new DesktopPairingUnavailableError('Expired'));
+        });
+        expect(screen.queryByText('Desktop paired')).not.toBeInTheDocument();
+        expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+        if (change !== 'unmount') {
+          expect(screen.getByText(currentId)).toBeInTheDocument();
+          expect(screen.getByRole('button', { name: 'Approving…' })).toBeDisabled();
+          expect(screen.getByRole('button', { name: 'Cancel' })).toBeDisabled();
+          await act(async () => { resolveCurrent({ ...pending, pairingId: currentId, status: 'approved' }); });
+          expect(screen.getByText('Desktop paired')).toBeInTheDocument();
+          expect(approveDesktopPairing).toHaveBeenCalledTimes(2);
         }
       });
     }

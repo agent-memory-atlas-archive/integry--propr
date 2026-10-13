@@ -58,6 +58,7 @@ const DesktopPairingPage = () => {
   const [signingOut, setSigningOut] = useState(false);
   const [cancelled, setCancelled] = useState(false);
   const accountSwitchGeneration = useRef(0);
+  const approvalGeneration = useRef(0);
   const returnPath = pathWithActiveHostedTunnelFlow(`/desktop/pairing?pairing_id=${encodeURIComponent(pairingId)}`);
   const loginPath = pathWithActiveHostedTunnelFlow(`/login?logged_out=true&redirect_to=${encodeURIComponent(returnPath)}`);
 
@@ -65,11 +66,13 @@ const DesktopPairingPage = () => {
     // Revoke old continuations at commit, before passive effects load the new
     // request, and on unmount. A request/identity returning later is a new flow.
     const generation = accountSwitchGeneration;
-    return () => { generation.current++; };
+    const approval = approvalGeneration;
+    return () => { generation.current++; approval.current++; };
   }, [pairingId, userId]);
 
   useEffect(() => {
     setPairing(null);
+    setApproving(false);
     setError('');
     setChangingAccount(false);
     setSigningOut(false);
@@ -114,18 +117,22 @@ const DesktopPairingPage = () => {
   const approve = async () => {
     if (!user || !pairing || pairing.pairingId !== pairingId || pairing.status !== 'pending' || changingAccount || approving || cancelled) return;
     if (Date.parse(pairing.expiresAt) <= Date.now()) { expirePairing(); return; }
+    const generation = ++approvalGeneration.current;
     setApproving(true);
     setError('');
     try {
-      setPairing(await approveDesktopPairing(pairing.pairingId));
+      const result = await approveDesktopPairing(pairing.pairingId);
+      if (generation !== approvalGeneration.current) return;
+      setPairing(result);
     } catch (error) {
+      if (generation !== approvalGeneration.current) return;
       if (error instanceof DesktopPairingUnavailableError || Date.parse(pairing.expiresAt) <= Date.now()) {
         setPairing(null);
         setChangingAccount(false);
       }
       setError('The pairing request could not be approved. It may have expired; start pairing again from the desktop app.');
     } finally {
-      setApproving(false);
+      if (generation === approvalGeneration.current) setApproving(false);
     }
   };
 
