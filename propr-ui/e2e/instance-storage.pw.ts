@@ -1,8 +1,8 @@
-import { expect, test } from '@playwright/test';
+import { expect, test, type Page } from '@playwright/test';
 import { mkdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 
-test('native self-hosted storage inventory, export and explicit cleanup confirmation', async ({ page }) => {
+async function mockStorage(page: Page) {
   const instanceId = 'local-instance'; const generation = 'generation';
   const repositories = [
     { id: 'published', name: 'sample/docs', category: 'repository_caches', estimatedBytes: 48 * 1024 ** 2, protectedReasons: [] },
@@ -40,6 +40,11 @@ test('native self-hosted storage inventory, export and explicit cleanup confirma
     };
     return pathname in responses ? route.fulfill({ json: responses[pathname] }) : route.fulfill({ status: 503, json: { error: 'Unavailable in isolated UI fixture' } });
   });
+  return () => executed;
+}
+
+test('native self-hosted storage inventory, export and explicit cleanup confirmation', async ({ page }) => {
+  const executed = await mockStorage(page);
   await page.setViewportSize({ width: 1280, height: 1000 });
   await page.goto('/settings?tab=integrations');
   await page.getByPlaceholder('Search settings...').fill('database export');
@@ -49,7 +54,7 @@ test('native self-hosted storage inventory, export and explicit cleanup confirma
   await expect(section.getByRole('button', { name: 'Download once' })).toBeVisible();
   await section.getByRole('button', { name: 'Preview cache cleanup' }).click();
   await expect(section.getByRole('button', { name: 'Confirm cleanup', exact: true })).toBeDisabled();
-  expect(executed).toBe(false);
+  expect(executed()).toBe(false);
   if (process.env.PROPR_CAPTURE_PREVIEWS) {
     const directory = path.resolve('../.propr/previews'); await mkdir(directory, { recursive: true });
     await page.setViewportSize({ width: 1280, height: 1200 });
@@ -66,10 +71,128 @@ test('native self-hosted storage inventory, export and explicit cleanup confirma
     await writeFile(path.join(directory, 'manifest.json'), JSON.stringify({ previews: [
       { path: '.propr/previews/instance-storage-desktop.png', title: 'Instance data — desktop', description: 'Native Settings export metadata, repository inventory and explicit cleanup confirmation with isolated sample data.' },
       { path: '.propr/previews/instance-storage-mobile.png', title: 'Instance data — mobile', description: 'Native cleanup confirmation and protected repository data at mobile width.' },
+      { path: '.propr/previews/instance-storage-195-zoom100.png', title: 'Cleanup confirmation — 195 CSS px', description: 'Wrapped deletion impact, repository candidates, checkbox and actions at a high zoom equivalent phone width.' },
+      { path: '.propr/previews/instance-storage-390-zoom200.png', title: 'Cleanup confirmation — 200% CSS zoom', description: 'The confirmation remains within a 390 px phone viewport with 200% CSS zoom.' },
     ], toolSuggestions: [] }));
   }
   await section.getByRole('checkbox').check();
   await section.getByRole('button', { name: 'Confirm cleanup', exact: true }).click();
   await expect(section.getByText('Cleanup completed: 1 deleted, 1 retained.')).toBeVisible();
-  expect(executed).toBe(true);
+  expect(executed()).toBe(true);
+});
+
+for (const { width, zoom, label } of [
+  { width: 195, zoom: 1, label: '195 CSS px' },
+  { width: 390, zoom: 2, label: '390 px at 200% CSS zoom' },
+  { width: 320, zoom: 1, label: '320 px' },
+  { width: 768, zoom: 1, label: '768 px' },
+]) {
+  test(`instance data fits and cleanup remains accessible at ${label}`, async ({ page }) => {
+    const executed = await mockStorage(page);
+    await page.setViewportSize({ width, height: 844 });
+    await page.goto('/settings?tab=integrations');
+    if (zoom !== 1) await page.evaluate(value => { document.documentElement.style.zoom = String(value); }, zoom);
+    if (width < 768) await page.getByRole('button', { name: 'Back to Settings' }).click();
+    await page.getByPlaceholder('Search settings...').fill('database export');
+    const section = page.getByRole('region', { name: 'Instance data', exact: true });
+    await section.getByRole('button', { name: 'Preview cache cleanup' }).click();
+    const confirmation = section.getByRole('region', { name: 'Confirm repository cache cleanup' });
+    await confirmation.scrollIntoViewIfNeeded();
+    // The document can fit even while a nested Settings scroller hides content.
+    // Check the actual section, controls and rendered text lines, excluding the
+    // inventory table which has its own accessible horizontal scroll region.
+    const layout = await section.evaluate(element => {
+      const viewport = window.innerWidth;
+      const fits = (rect: DOMRect) => rect.left >= -1 && rect.right <= viewport + 1;
+      const table = element.querySelector('table')!;
+      const walker = document.createTreeWalker(element, NodeFilter.SHOW_TEXT);
+      const clippedText: string[] = [];
+      while (walker.nextNode()) {
+        const node = walker.currentNode;
+        if (!node.textContent?.trim() || table.contains(node)) continue;
+        const range = document.createRange();
+        range.selectNodeContents(node);
+        if (Array.from(range.getClientRects()).some(rect => !fits(rect))) clippedText.push(node.textContent);
+      }
+      const fieldset = element.closest('fieldset')!;
+      const scroller = element.closest('[data-settings-scroll]')!;
+      return {
+        sectionFits: fits(element.getBoundingClientRect()),
+        controlsFit: Array.from(element.querySelectorAll('button, input, label')).every(control => fits(control.getBoundingClientRect())),
+        clippedText,
+        fieldsetFits: fieldset.scrollWidth <= fieldset.clientWidth + 1,
+        panelFits: scroller.scrollWidth <= scroller.clientWidth + 1,
+      };
+    });
+    expect(layout).toEqual({ sectionFits: true, controlsFit: true, clippedText: [], fieldsetFits: true, panelFits: true });
+
+    const inventory = section.getByRole('region', { name: 'Repository storage inventory' });
+    await inventory.scrollIntoViewIfNeeded();
+    await inventory.focus();
+    await expect(inventory).toBeFocused();
+    if (width / zoom < 448 + 32) {
+      await page.keyboard.press('ArrowRight');
+      await expect.poll(() => inventory.evaluate(element => element.scrollLeft)).toBeGreaterThan(0);
+      await expect.poll(async () => {
+        await page.keyboard.press('ArrowRight');
+        return inventory.evaluate(element => element.scrollLeft + element.clientWidth >= element.scrollWidth - 1);
+      }, { intervals: [100] }).toBe(true);
+    }
+    await confirmation.scrollIntoViewIfNeeded();
+    if (process.env.PROPR_CAPTURE_PREVIEWS && width / zoom === 195) {
+      const directory = path.resolve('../.propr/previews');
+      await mkdir(directory, { recursive: true });
+      await page.screenshot({ path: path.join(directory, `instance-storage-${width}-zoom${zoom * 100}.png`) });
+    }
+    const checkbox = confirmation.getByRole('checkbox');
+    await checkbox.focus();
+    await page.keyboard.press('Space');
+    await expect(checkbox).toBeChecked();
+    await page.keyboard.press('Tab');
+    const confirm = confirmation.getByRole('button', { name: 'Confirm cleanup', exact: true });
+    await expect(confirm).toBeFocused();
+    await page.keyboard.press('Enter');
+    await expect(section.getByText('Cleanup completed: 1 deleted, 1 retained.')).toBeVisible();
+    expect(executed()).toBe(true);
+  });
+}
+
+test.describe('touch access at high zoom equivalent width', () => {
+  test.use({ hasTouch: true, isMobile: true, viewport: { width: 195, height: 844 } });
+
+  test('inventory scrolls by swipe and cleanup can be confirmed by touch', async ({ page }) => {
+    const executed = await mockStorage(page);
+    await page.goto('/settings?tab=integrations');
+    await page.getByRole('button', { name: 'Back to Settings' }).tap();
+    await page.getByPlaceholder('Search settings...').fill('database export');
+    const section = page.getByRole('region', { name: 'Instance data', exact: true });
+    const inventory = section.getByRole('region', { name: 'Repository storage inventory' });
+    await inventory.scrollIntoViewIfNeeded();
+    const box = (await inventory.boundingBox())!;
+    const session = await page.context().newCDPSession(page);
+    const x = box.x + box.width * 0.75;
+    const y = box.y + box.height / 2;
+    await session.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [{ x, y }] });
+    for (let distance = 10; distance <= 100; distance += 10) {
+      await session.send('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: [{ x: x - distance, y }] });
+      await page.waitForTimeout(20);
+    }
+    await session.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+    await expect.poll(() => inventory.evaluate(element => element.scrollLeft)).toBeGreaterThan(0);
+    await session.detach();
+    // A tap during inertial scrolling only stops the swipe on mobile Chromium.
+    await expect.poll(async () => {
+      const before = await inventory.evaluate(element => element.scrollLeft);
+      await page.waitForTimeout(100);
+      return inventory.evaluate((element, previous) => element.scrollLeft === previous, before);
+    }).toBe(true);
+    await section.getByRole('button', { name: 'Preview cache cleanup' }).tap();
+    const confirmation = section.getByRole('region', { name: 'Confirm repository cache cleanup' });
+    await expect(confirmation).toBeVisible();
+    await confirmation.getByRole('checkbox').tap();
+    await expect(confirmation.getByRole('checkbox')).toBeChecked();
+    await confirmation.getByRole('button', { name: 'Confirm cleanup', exact: true }).tap();
+    await expect(section.getByText('Cleanup completed: 1 deleted, 1 retained.')).toBeVisible();
+    expect(executed()).toBe(true);
+  });
 });
