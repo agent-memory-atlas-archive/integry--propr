@@ -2,8 +2,7 @@ import { deleteTaskRecords } from '../../core/src/storage/taskHistoryControl.js'
 import { Request, Response } from 'express';
 import { Knex } from 'knex';
 import { Queue } from 'bullmq';
-import { issueQueue, COMMENT_BATCH_DELAY_MS, getAuthenticatedOctokit, generateCorrelationId, logger, syncTaskAssignees } from '@propr/core';
-import type { CommentJobData, UnprocessedComment } from '@propr/core';
+import { issueQueue, getAuthenticatedOctokit, generateCorrelationId, logger, syncTaskAssignees, dispatchPostedFollowup } from '@propr/core';
 import { ACTIVE_TASK_LIFECYCLE_STATES, parseTaskAssignmentFilter } from '@propr/shared';
 import { getTasksFromDb, type TaskQuery } from './taskHelpers.js';
 import { isPullRequestTask } from './pullRequestTaskIdentity.js';
@@ -411,31 +410,23 @@ export function createTaskRoutes(deps: TaskRoutesDeps) {
         }
       }
 
-      // Add comment directly to the processing queue (bypassing bot filter)
-      const correlationId = generateCorrelationId();
-      const unprocessedComment: UnprocessedComment = {
-        id: commentId,
-        body: body.trim(),
-        author: commentAuthor,
-        type: 'issue',
-        hasCodeContext: false
-      };
-
-      const jobData: CommentJobData = {
-        userId,
-        pullRequestNumber: issueNumber,
-        comments: [unprocessedComment],
-        repoOwner,
-        repoName,
-        branchName,
-        correlationId
-      };
-
-      const timestamp = Date.now();
-      const jobId = `pr-comments-batch-${repoOwner}-${repoName}-${issueNumber}-${timestamp}-${commentId}`;
-
+      const jobId = `pr-comments-batch-${repoOwner}-${repoName}-${issueNumber}-${Date.now()}-${commentId}`;
+      let dispatchedJobId: string | undefined;
       try {
-        await issueQueue.add('processPullRequestComment', jobData, { jobId, delay: COMMENT_BATCH_DELAY_MS });
+        dispatchedJobId = await dispatchPostedFollowup({
+          owner: repoOwner, repo: repoName, prNumber: issueNumber, userId: String(userId), branchName,
+          comment: {
+            id: commentId, body: body.trim(),
+            created_at: commentResponse.data.created_at,
+            updated_at: commentResponse.data.updated_at,
+            user: { login: commentAuthor, type: commentResponse.data.user?.type },
+          },
+        }, generateCorrelationId(), {
+          redisClient: await issueQueue.client,
+          PR_FOLLOWUP_TRIGGER_KEYWORDS: (process.env.PR_FOLLOWUP_TRIGGER_KEYWORDS ?? '').split(',').map(k => k.trim()).filter(Boolean),
+          MODEL_LABEL_PATTERN: process.env.MODEL_LABEL_PATTERN || '^llm-(.+)$',
+          jobId,
+        });
       } catch (queueErr) {
         // Redis may have accepted the job before the connection failed. A posted
         // comment is not evidence of a successful submission; retain both handles.
@@ -444,7 +435,7 @@ export function createTaskRoutes(deps: TaskRoutesDeps) {
           sourceTaskId: taskId, message: 'Comment posted, but queue submission could not be confirmed. Inspect this job before retrying.' });
         return;
       }
-      res.status(202).json({ success: true, state: 'queued', posted: true, commentId, jobId, sourceTaskId: taskId });
+      res.status(202).json({ success: true, state: 'queued', posted: true, commentId, jobId: dispatchedJobId, sourceTaskId: taskId });
     } catch (error) {
       console.error('Error posting follow-up comment:', error);
       res.status(500).json({ error: 'Failed to post follow-up comment' });
