@@ -27,6 +27,14 @@ const TaskActionSheet: React.FC<{
     if (open) sheetRef.current?.querySelector<HTMLButtonElement>(SHEET_FOCUSABLE)?.focus();
   }, [open]);
 
+  useEffect(() => {
+    if (!open) return;
+    const scrollers = [document.body, ...document.querySelectorAll<HTMLElement>('[data-testid="task-details"]')];
+    const previous = scrollers.map(node => node.style.overflow);
+    scrollers.forEach(node => { node.style.overflow = 'hidden'; });
+    return () => scrollers.forEach((node, index) => { node.style.overflow = previous[index]; });
+  }, [open]);
+
   const close = () => {
     setOpen(false);
     triggerRef.current?.focus();
@@ -61,7 +69,7 @@ const TaskActionSheet: React.FC<{
         aria-haspopup="menu"
         aria-expanded={open}
         aria-controls={open ? menuId : undefined}
-        className="flex h-8 w-8 flex-none items-center justify-center rounded-md border border-slate-200 bg-white text-slate-500 transition-colors active:bg-slate-100 focus:outline-none focus-visible:ring-2 focus-visible:ring-teal-500"
+        className="flex h-11 w-11 flex-none items-center justify-center rounded-md border border-slate-200 bg-white text-slate-500 transition-colors active:bg-slate-100 focus:outline-none focus-visible:ring-2 focus-visible:ring-teal-500"
         onClick={() => setOpen(true)}
       >
         <MoreHorizontal size={16} />

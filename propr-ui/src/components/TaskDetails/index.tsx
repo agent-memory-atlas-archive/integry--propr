@@ -8,7 +8,7 @@ import ResultOverview from './ResultOverview';
 import PromptModal from './PromptModal';
 import LogFilesModal from './LogFilesModal';
 import FollowupModal from './FollowupModal';
-import ContextStrip, { MobileGitContext, MobilePeopleRuntime } from './ContextStrip';
+import ContextStrip, { ConsumptionGroup, MobileGitContext, MobilePeopleRuntime } from './ContextStrip';
 import ActionBar from './ActionBar';
 import TaskHeader, { ReturnToRunButton } from './TaskHeader';
 import ProgressBar from './ProgressBar';
@@ -52,6 +52,7 @@ const MobileSummary = React.forwardRef<HTMLDivElement, MobileHeaderProps>(({ con
           <ActionBar {...actionBarProps} mobileSummary />
         </div>
         <MobilePeopleRuntime {...contextStripProps} />
+        <ConsumptionGroup {...contextStripProps} />
       </div>
     </div>
     <ProgressBar todos={todos} />
@@ -355,7 +356,7 @@ const TaskDetails: React.FC<TaskDetailsProps> = ({ taskId: taskIdProp, embedded 
       <div className="flex flex-col min-w-0 sm:min-h-0 sm:flex-1 sm:overflow-hidden [container:task-workspace/inline-size]">
         <div
           data-testid="task-workspace-scroll"
-          className={`scrollbar-stealth flex flex-col min-w-0 sm:min-h-0 sm:flex-1 sm:overflow-y-auto sm:overscroll-contain${wideOnly(embedded, '[@container_task-workspace_(min-width:960px)]:flex-row [@container_task-workspace_(min-width:960px)]:items-start')}`}
+          className={`scrollbar-stealth flex flex-col min-w-0 sm:min-h-0 sm:flex-1 sm:overflow-y-auto sm:overscroll-contain${wideOnly(embedded, '[@container_task-workspace_(min-width:960px)]:flex-row [@container_task-workspace_(min-width:960px)]:items-stretch')}`}
         >
           {/* Keep 528px for step columns after pane padding, scrollbar and border. */}
           <div

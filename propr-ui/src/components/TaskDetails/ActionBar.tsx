@@ -220,7 +220,7 @@ const CompactActions: React.FC<{
   if (logsPath) items.push({ label: 'Logs', title: 'View Logs', icon: <Terminal size={18} />, onSelect: () => onViewLogs(logsPath) });
   // Stop is a safety control, so it never folds into the sheet.
   return (
-    <div className={`flex flex-none items-center gap-1.5${summary ? ' [&_button[aria-haspopup=menu]]:h-6 [&_button[aria-haspopup=menu]]:w-6' : ''}`}>
+    <div className="flex flex-none items-center gap-1.5">
       {summary && onFollowUp && (
         <button onClick={onFollowUp} className="inline-flex items-center gap-1 whitespace-nowrap rounded py-1 text-[11px] leading-4 font-medium text-slate-600" title="Follow Up - Post a follow-up comment">
           <MessageSquarePlus size={12} /><span>Follow Up</span>

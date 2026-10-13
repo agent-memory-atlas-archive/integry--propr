@@ -33,11 +33,28 @@ describe('RunTimeline', () => {
       })),
     };
     const manyRuns = buildTaskRuns(buildTaskRow(many));
-    render(<RunTimeline runs={manyRuns} selectedTaskId="many-44" onSelectRun={vi.fn()}>steps</RunTimeline>);
+    const scroll = vi.fn();
+    Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', { configurable: true, value: scroll });
+    const { rerender } = render(<RunTimeline runs={manyRuns} selectedTaskId="many-44" onSelectRun={vi.fn()}>steps</RunTimeline>);
     const scroller = screen.getByTestId('run-timeline-scroll');
     expect(scroller.className).not.toMatch(/max-h-|overflow-y-|overscroll-/);
     expect(within(scroller).getAllByTestId('run-timeline-run')).toHaveLength(50);
-    expect(scroller.scrollTop).toBe(0);
+    expect(scroll).toHaveBeenCalledExactlyOnceWith({ block: 'nearest' });
+    expect(scroll.mock.instances[0]).toBe(screen.getByRole('button', { current: true }).closest('li'));
+    rerender(<RunTimeline runs={[...manyRuns]} selectedTaskId="many-43" onSelectRun={vi.fn()}>updated steps</RunTimeline>);
+    expect(scroll).toHaveBeenCalledTimes(1);
+    delete (HTMLElement.prototype as Partial<HTMLElement>).scrollIntoView;
+  });
+
+  it('reveals the selection when runs arrive after mount', () => {
+    const scroll = vi.fn();
+    Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', { configurable: true, value: scroll });
+    const { rerender } = render(<RunTimeline runs={[]} selectedTaskId="run-3" onSelectRun={vi.fn()}>{null}</RunTimeline>);
+    expect(scroll).not.toHaveBeenCalled();
+    rerender(<RunTimeline runs={runs} selectedTaskId="run-3" onSelectRun={vi.fn()}>{null}</RunTimeline>);
+    expect(scroll).toHaveBeenCalledExactlyOnceWith({ block: 'nearest' });
+    expect(scroll.mock.instances[0]).toBe(screen.getByRole('button', { current: true }).closest('li'));
+    delete (HTMLElement.prototype as Partial<HTMLElement>).scrollIntoView;
   });
 
   it('lists every run oldest first, with only the run shown open over its steps', () => {

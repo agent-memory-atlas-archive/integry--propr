@@ -70,14 +70,14 @@ const AssignmentActions: React.FC<{
 
   return (
     <div className={sheet ? "flex shrink-0 flex-col gap-2 border-t border-slate-100 p-4" : "flex items-center gap-1.5 border-t border-slate-100 p-2"}>
-      {!sheet && <button
+      <button
         type="button"
         disabled={!canClear}
         onClick={onClear}
-        className="rounded px-2 py-1 font-medium text-slate-500 hover:bg-slate-100 hover:text-slate-800 disabled:opacity-40 disabled:hover:bg-transparent"
+        className={`rounded px-2 py-1 font-medium text-slate-500 hover:bg-slate-100 hover:text-slate-800 disabled:opacity-40 disabled:hover:bg-transparent ${sheet ? "min-h-11 w-full" : ""}`}
       >
         Clear
-      </button>}
+      </button>
       {!sheet && <span className="flex-1" />}
       {!sheet && cancelButton}
       <button
@@ -119,6 +119,15 @@ const AssignmentEditor: React.FC<EditorProps> = ({ id, assignment, onClose, shee
     if (sheet && !window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
       ref.current?.animate?.([{ transform: 'translateY(100%)' }, { transform: 'translateY(0)' }], { duration: 180, easing: 'ease-out' });
     }
+  }, [sheet]);
+
+  useEffect(() => {
+    if (!sheet) return;
+    // The task pane is the mobile scroller; lock it as well as the document.
+    const scrollers = [document.body, ...document.querySelectorAll<HTMLElement>('[data-testid="task-details"]')];
+    const previous = scrollers.map(node => node.style.overflow);
+    scrollers.forEach(node => { node.style.overflow = 'hidden'; });
+    return () => scrollers.forEach((node, index) => { node.style.overflow = previous[index]; });
   }, [sheet]);
 
   // Keep desktop popovers within the viewport.
@@ -308,7 +317,6 @@ const AssignmentControl: React.FC<{ assignment: TaskAssignment; dense?: boolean 
       <div role="group" aria-label="Assignment" data-testid="task-assignment-error" className="inline-flex shrink-0 items-center gap-1 whitespace-nowrap rounded-sm border border-amber-200/70 bg-amber-50 px-1.5 py-0.5 text-[11px] font-medium text-amber-700">
         <AlertTriangle aria-hidden="true" className="h-3 w-3 flex-none" />
         <span title={error}>Assignment error</span>
-        <span aria-hidden="true">·</span>
         <button
           type="button"
           onClick={reload}

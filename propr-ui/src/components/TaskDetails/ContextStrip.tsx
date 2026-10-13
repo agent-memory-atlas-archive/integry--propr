@@ -265,7 +265,6 @@ const TelemetryGroups: React.FC<{
   budget?: TaskBudget | null;
   lead?: React.ReactNode;
 }> = ({ modelName, duration, synthetic, tokenUsage, usageMetricRecords, budget, lead }) => {
-  const hasBudget = Boolean(budget && (budget.capUsd !== null || budget.spentUsd > 0));
   return (
     <>
       {lead && (
@@ -276,14 +275,19 @@ const TelemetryGroups: React.FC<{
       <ContextGroup label="Execution runtime">
         <ModelChip modelName={modelName} duration={duration} synthetic={synthetic} />
       </ContextGroup>
-      <ContextGroup label="Consumption">
-        <TokenUsageChip tokenUsage={tokenUsage ?? {}} />
-        <UsageMetricsChip usageMetricRecords={usageMetricRecords ?? []} />
-        {hasBudget && <BudgetChip budget={budget!} />}
-      </ContextGroup>
+      <ConsumptionGroup tokenUsage={tokenUsage} usageMetricRecords={usageMetricRecords} budget={budget} />
     </>
   );
 };
+
+/** Shared by desktop telemetry and the expanded mobile summary. */
+export const ConsumptionGroup: React.FC<Pick<ContextStripProps, 'tokenUsage' | 'usageMetricRecords' | 'budget'>> = ({ tokenUsage, usageMetricRecords, budget }) => (
+  <ContextGroup label="Consumption">
+    <TokenUsageChip tokenUsage={tokenUsage ?? {}} />
+    <UsageMetricsChip usageMetricRecords={usageMetricRecords ?? []} />
+    {budget && (budget.capUsd !== null || budget.spentUsd > 0) && <BudgetChip budget={budget} />}
+  </ContextGroup>
+);
 
 /** Where the task lives: repository, pull request, issue, commit, then who it is assigned to. */
 const GitGroup: React.FC<{
@@ -351,7 +355,7 @@ export const MobileGitContext: React.FC<Pick<ContextStripProps, 'taskInfo' | 'pr
   const pr = prInfo?.url ? prInfo : taskInfo.type === 'pr-comment' && taskInfo.number
     ? { url: `${repoUrl}/pull/${taskInfo.number}`, number: taskInfo.number } : null;
   return (
-    <div role="group" aria-label="Git context" className="flex min-w-0 items-center gap-1 text-xs [&>a]:shrink-0">
+    <div role="group" aria-label="Git context" className="flex min-w-0 flex-wrap items-center gap-1 text-xs [&>a]:shrink-0 [&>span]:max-w-full [&>span]:flex-wrap">
       <a href={pr?.url || repoUrl} target="_blank" rel="noopener noreferrer"
         title={`${taskInfo.repoOwner}/${taskInfo.repoName}${pr ? ` PR #${pr.number}` : ''}`}
         className="!shrink inline-flex min-w-0 items-center gap-1 rounded bg-green-50 px-1.5 py-0.5 text-green-700">

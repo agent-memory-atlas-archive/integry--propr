@@ -14,6 +14,7 @@ const assignable = [hubot, monalisa, octocat];
 
 interface FixtureOptions {
   assignees?: FixtureUser[];
+  denseGit?: boolean;
   /** The assignees read answers 409 for a task with no issue or pull request. */
   goal?: boolean;
   /** How a save answers: applied, refused for lack of write access, or GitHub being down. */
@@ -69,12 +70,12 @@ async function fixture(page: Page, options: FixtureOptions = {}) {
           { state: 'CLAUDE_EXECUTION', timestamp: at(1), reason: 'Agent execution started' },
           {
             state: 'COMPLETED', timestamp: at(20),
-            metadata: { model: 'claude-opus-5-5', pr: { url: 'https://github.com/integry/propr/pull/2911', number: 2911 } },
+            metadata: { ...(options.denseGit ? { commitResult: { commitHash: '5c7cd9e0123456789' } } : {}), model: 'claude-opus-5-5', pr: { url: 'https://github.com/integry/propr/pull/2911', number: 2911 } },
           },
         ],
         taskInfo: options.goal
           ? { title: 'Plan the task assignment epic', type: 'goal', repoOwner: 'integry', repoName: 'propr', modelName: 'claude-opus-5-5' }
-          : { title: 'Show and edit task assignment on the task detail page', type: 'issue', number: 2894, issueNumber: 2894, repoOwner: 'integry', repoName: 'propr', modelName: 'claude-opus-5-5' },
+          : { ...(options.denseGit ? { attemptNumber: 2, attemptLineage: [{ taskId: 'previous', attemptNumber: 1 }, { taskId, attemptNumber: 2 }] } : {}), title: 'Show and edit task assignment on the task detail page', type: 'issue', number: 2894, issueNumber: 2894, repoOwner: 'integry', repoName: 'propr', modelName: 'claude-opus-5-5' },
         usageMetricRecords: [],
       },
       [`/api/task/${taskId}/live-details`]: { events: [], todos: [], currentTask: null },
@@ -267,7 +268,7 @@ for (const width of [320, 390]) {
     const runtimeBox = (await runtime.boundingBox())!;
     expect(Math.abs(peopleBox.y - runtimeBox.y)).toBeLessThan(4);
     expect(peopleBox.x + peopleBox.width).toBeLessThanOrEqual(runtimeBox.x);
-    expect((await metadata.boundingBox())!.height).toBeLessThanOrEqual(48);
+    await expect(metadata.getByRole('group', { name: 'Consumption' })).toContainText('↑0↓0(Quota unavailable)');
     await expect(metadata.getByRole('button', { name: 'Follow Up', exact: true })).toBeVisible();
     await expectNoHorizontalOverflow(page);
     if (process.env.PROPR_CAPTURE_PREVIEWS && width === 390) {
@@ -278,6 +279,9 @@ for (const width of [320, 390]) {
     await assignment.getByRole('button', { name: 'Edit assignees' }).click();
     const editor = page.getByRole('dialog', { name: 'Assign users' });
     await expect(editor).toBeVisible();
+    await expect(editor).toHaveAttribute('aria-modal', 'true');
+    await expect(page.locator('body')).toHaveCSS('overflow', 'hidden');
+    await expect(details).toHaveCSS('overflow', 'hidden');
     const box = (await editor.boundingBox())!;
     expect(box.x).toBeGreaterThanOrEqual(0);
     expect(box.x + box.width).toBeLessThanOrEqual(width);
@@ -307,6 +311,7 @@ for (const width of [320, 390]) {
     await capture(page, `task-assignment-sheet-${width}`);
     await cancel.click();
     expect(state.puts).toHaveLength(0);
+    await expect(details).toHaveCSS('overflow-y', 'auto');
     await assignment.getByRole('button', { name: 'Edit assignees' }).click();
     await expect(editor.getByRole('checkbox', { name: /@monalisa/ })).not.toBeChecked();
     await backdrop.click({ position: { x: 10, y: 10 } });
@@ -317,6 +322,14 @@ for (const width of [320, 390]) {
     await save.click();
     await expect(editor).toBeHidden();
     expect(state.puts.at(-1)?.logins).toEqual(expect.arrayContaining(['octocat', 'hubot', 'monalisa']));
+
+    await assignment.getByRole('button', { name: 'Edit assignees' }).click();
+    await editor.getByRole('button', { name: 'Clear', exact: true }).click();
+    await expect(editor.getByRole('checkbox', { checked: true })).toHaveCount(0);
+    await save.click();
+    await expect(assignment).toContainText('Unassigned');
+    expect(state.puts.at(-1)).toEqual({ logins: [], mode: 'replace' });
+    await expect(details).toHaveCSS('overflow-y', 'auto');
 
     const bar = page.getByTestId('task-mobile-compact-bar');
     await details.evaluate(element => {
@@ -378,6 +391,7 @@ for (const [width, height] of [[1440, 900], [390, 844]] as const) {
     const failed = details.getByTestId('task-assignment-error').filter({ visible: true });
     await expect(failed).toHaveCount(1);
     await expect(failed).toContainText("Assignment error");
+    expect(await failed.innerText()).not.toMatch(/[·•|]/);
     await expect(details.getByTestId('task-assignment').filter({ visible: true })).toHaveCount(0);
     await expectNoHorizontalOverflow(page);
     await capture(page, `task-assignment-read-failed-${width}`);
@@ -387,5 +401,38 @@ for (const [width, height] of [[1440, 900], [390, 844]] as const) {
     await expect(assignment.getByRole('listitem', { name: 'Assigned to @octocat' })).toBeVisible();
     await expect(details.getByTestId('task-assignment-error')).toHaveCount(0);
     expect(state.reads).toBe(2);
+  });
+}
+
+for (const width of [320, 390]) {
+  test(`dense mobile metadata stays reachable at ${width}px`, async ({ page }) => {
+    const users = [user(11, 'long-assignee-login-for-maintainer-one'), user(12, 'long-assignee-login-for-maintainer-two'), user(13, 'long-assignee-login-for-maintainer-three')];
+    await fixture(page, { assignees: users, denseGit: true });
+    await page.setViewportSize({ width, height: 844 });
+    await page.goto(`/tasks/${taskId}`);
+    const metadata = page.getByTestId('task-mobile-metadata');
+    await expect(metadata.getByRole('group', { name: 'Attempt lineage' })).toBeVisible();
+    await expect(metadata.getByTitle('View commit on GitHub')).toBeVisible();
+    const repo = metadata.getByRole('link', { name: 'propr #2911' });
+    await expect(repo).toBeVisible();
+    expect((await repo.boundingBox())!.width).toBeGreaterThan(90);
+    const gitBox = (await metadata.getByRole('group', { name: 'Git context', exact: true }).boundingBox())!;
+    const followUpBox = (await metadata.getByRole('button', { name: 'Follow Up', exact: true }).boundingBox())!;
+    expect(gitBox.x + gitBox.width).toBeLessThanOrEqual(followUpBox.x);
+    for (const link of await metadata.getByRole('group', { name: 'Git context', exact: true }).getByRole('link').all()) {
+      const box = (await link.boundingBox())!;
+      expect(box.x + box.width).toBeLessThanOrEqual(gitBox.x + gitBox.width + 1);
+    }
+    for (const user of users) await expect(metadata.getByRole('listitem', { name: `Assigned to @${user.login}` })).toBeVisible();
+    const bounds = await metadata.evaluate(node => [...node.querySelectorAll('a, button, [role="listitem"]')].map(child => {
+      const rect = child.getBoundingClientRect();
+      return { left: rect.left, right: rect.right };
+    }));
+    for (const bound of bounds) {
+      expect(bound.left).toBeGreaterThanOrEqual(0);
+      expect(bound.right).toBeLessThanOrEqual(width);
+    }
+    await expectNoHorizontalOverflow(page);
+    await capture(page, `task-dense-metadata-${width}`);
   });
 }

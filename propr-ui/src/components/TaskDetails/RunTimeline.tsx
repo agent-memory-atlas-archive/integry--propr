@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { ChevronRight, GitCommit } from 'lucide-react';
 import { WorkTypeBadge } from '../Dashboard/sectionPrimitives';
 import { ScoreBadge } from '../TaskList/ScoreBadge';
@@ -60,6 +60,14 @@ const RunResult: React.FC<{ run: TaskRunEntry; open: boolean }> = ({ run, open }
 const RunTimeline: React.FC<RunTimelineProps> = ({ runs, selectedTaskId, onSelectRun, children }) => {
   const [expanded, setExpanded] = useState(true);
 
+  const selectedRef = useRef<HTMLLIElement>(null);
+  const revealed = useRef(false);
+  useEffect(() => {
+    if (revealed.current || !selectedRef.current) return;
+    selectedRef.current.scrollIntoView?.({ block: 'nearest' });
+    revealed.current = true;
+  }, [runs, selectedTaskId]);
+
   // Every run expands in the shared task workspace, together with the changed files.
   return (
     <div data-testid="run-timeline-scroll" className="pr-1">
@@ -73,7 +81,7 @@ const RunTimeline: React.FC<RunTimelineProps> = ({ runs, selectedTaskId, onSelec
           // A queued run has not started, so it has no runtime to count yet.
           const waiting = run.outcome === 'waiting';
           return (
-            <li key={run.task.id} className="relative" data-testid="run-timeline-run">
+            <li ref={selected ? selectedRef : undefined} key={run.task.id} className="relative" data-testid="run-timeline-run">
               <button
                 type="button"
                 aria-current={selected || undefined}
