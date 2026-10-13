@@ -1,6 +1,6 @@
 import { createHash, createHmac, timingSafeEqual } from 'node:crypto';
-import { canonicalFleetJson, FLEET_DATA_ACTIONS, FLEET_DATA_CONTRACT, FLEET_DATA_SCHEMA, FLEET_DATA_SCOPE, type FleetDataEnvelope } from '@propr/shared';
-export const contractPin = createHash('sha256').update(FLEET_DATA_SCHEMA).digest('hex');
+import { canonicalFleetJson, FLEET_DATA_ACTIONS, FLEET_DATA_ACTOR_CONTRACT, FLEET_DATA_ACTOR_SCHEMA, FLEET_DATA_SCOPE, type FleetActorDataEnvelope as FleetDataEnvelope } from '@propr/shared';
+export const contractPin = createHash('sha256').update(FLEET_DATA_ACTOR_SCHEMA).digest('hex');
 export const digest = (value: unknown) => createHash('sha256').update(canonicalFleetJson(value)).digest('hex');
 export class FleetRefusal extends Error { constructor() { super('Fleet data operation unavailable'); } }
 export function exact(value: unknown, keys: string[]): asserts value is Record<string, unknown> {
@@ -10,9 +10,10 @@ export const identifier = (value: unknown): value is string => typeof value === 
 export const uuid = (value: unknown): value is string => typeof value === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(value);
 const sha256 = (value: unknown): value is string => typeof value === 'string' && /^[0-9a-f]{64}$/.test(value);
 function validateAssertion(a: unknown): asserts a is Record<string, unknown> {
-  exact(a, ['contract', 'contractPin', 'hostedInstanceId', 'storageInstanceId', 'runtimeGeneration', 'placementGeneration', 'scope', 'action', 'requestDigest', 'operationId', 'issuedAt', 'expiresAt', 'nonce']);
-  if (a.contract !== FLEET_DATA_CONTRACT || a.contractPin !== contractPin || a.scope !== FLEET_DATA_SCOPE || !FLEET_DATA_ACTIONS.includes(a.action as never)
+  exact(a, ['contract', 'contractPin', 'hostedInstanceId', 'storageInstanceId', 'runtimeGeneration', 'placementGeneration', 'scope', 'action', 'requestDigest', 'operationId', 'issuedAt', 'expiresAt', 'nonce', 'githubActorId', 'storageGeneration']);
+  if (a.contract !== FLEET_DATA_ACTOR_CONTRACT || a.contractPin !== contractPin || a.scope !== FLEET_DATA_SCOPE || !FLEET_DATA_ACTIONS.includes(a.action as never)
     || !identifier(a.hostedInstanceId) || !identifier(a.placementGeneration) || !uuid(a.storageInstanceId) || !uuid(a.runtimeGeneration) || !uuid(a.operationId)
+    || !uuid(a.storageGeneration) || !Number.isSafeInteger(a.githubActorId) || Number(a.githubActorId) <= 0
     || !sha256(a.requestDigest) || !sha256(a.nonce)
     || !Number.isSafeInteger(a.issuedAt) || !Number.isSafeInteger(a.expiresAt)) throw new FleetRefusal();
 }

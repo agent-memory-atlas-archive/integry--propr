@@ -74,12 +74,28 @@ export async function resolveInstanceAuthorization(
         return { role: 'admin', permissions: [...ADMIN_PERMISSIONS], source: 'bootstrap' };
     }
 
+    return readDurableInstanceAuthorization(user.id, database);
+}
+
+/** Internal exact-ID lookup without bootstrap username or session fallbacks. */
+export async function resolveDurableInstanceAuthorization(
+    githubUserId: string,
+    database: Knex = db
+): Promise<InstanceAuthorization> {
+    if (!/^[1-9][0-9]*$/.test(githubUserId)) return { role: 'member', permissions: [], source: 'implicit' };
+    return readDurableInstanceAuthorization(githubUserId, database);
+}
+
+async function readDurableInstanceAuthorization(
+    githubUserId: string,
+    database: Knex
+): Promise<InstanceAuthorization> {
     // Keep this single primary-key lookup uncached so demotions and removals
     // take effect on the next request.
     const member = await timeApiStage('authorization.role-query', () =>
         database<InstanceMemberRow>('instance_members')
             .select('github_user_id', 'role', 'source')
-            .where({ github_user_id: user.id })
+            .where({ github_user_id: githubUserId })
             .first()
     );
     if (member) {
