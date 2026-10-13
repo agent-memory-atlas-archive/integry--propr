@@ -248,6 +248,10 @@ test('390px the card shows assignees on its meta line and the filter shares the 
   expect(filterBox!.y).toBeGreaterThan(statusBox!.y + statusBox!.height);
   expect(filterBox!.x + filterBox!.width).toBeLessThanOrEqual(390);
   expect(await pageFits(page)).toBe(true);
+  expect(filterBox!.width).toBe(44);
+  expect(searchBox!.width).toBeGreaterThan(280);
+  await expect(page.locator('.task-assignee-filter-icon')).toBeVisible();
+  await expect(page.locator('.task-assignee-filter-label')).toBeHidden();
   await capture(page, 'tasks-assignees-390');
 
   const dialog = await openAssigneeFilter(page);

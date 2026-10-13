@@ -24,7 +24,7 @@ for (const width of [1333, 1584]) {
     expect(await repoLabel.evaluate(node => node.getBoundingClientRect().width)).toBeGreaterThan(40);
     const consumption = page.getByRole('group', { name: 'Consumption' });
     await expect(consumption).toContainText('↑0↓0');
-    await expect(consumption).toContainText('Quota unavailable');
+    await expect(consumption).toContainText('no quota data');
     const trace = page.locator('#thinking-log-section');
     await expect(trace).toContainText('Linting flagged the withdrawal handler');
     await expect(trace).not.toContainText('Result:');

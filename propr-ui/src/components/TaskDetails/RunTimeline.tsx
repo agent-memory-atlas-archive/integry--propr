@@ -10,7 +10,10 @@ import type { PullRequestScoresResponse } from '../../api/taskStatsApi';
 import type { PullRequestOutcome } from './pullRequestScores';
 import { RUN_DURATION_COLUMN, RUN_LEAD_INSET_PHONE, RUN_NUMBER_COLUMN, RUN_SUMMARY_MIN_WIDTH, RUN_TAG_COLUMN, RUN_TIME_COLUMN } from './runTimelineColumns';
 
+export type RunRevealHistory = React.RefObject<{ group: string; selected: string } | null>;
+
 interface RunTimelineProps {
+  revealHistory?: RunRevealHistory;
   /** Every run of the task, oldest first. */
   runs: TaskRunEntry[];
   /** The run the pane shows: its steps hang under its row, and the panels below describe it. */
@@ -69,15 +72,18 @@ const RunResult: React.FC<{ run: TaskRunEntry; open: boolean }> = ({ run, open }
  * through the task's history. After the runs, the PR's review scores are a
  * milestone on the trunk; once the PR is merged or closed, that is the last entry.
  */
-const RunTimeline: React.FC<RunTimelineProps> = ({ runs, selectedTaskId, onSelectRun, children, reviewScores, outcome }) => {
+const RunTimeline: React.FC<RunTimelineProps> = ({ runs, selectedTaskId, onSelectRun, children, reviewScores, outcome, revealHistory }) => {
   const [expanded, setExpanded] = useState(true);
 
   const selectedRef = useRef<HTMLLIElement>(null);
-  const revealed = useRef<string | null>(null);
+  const localHistory = useRef<{ group: string; selected: string } | null>(null);
+  const revealed = revealHistory ?? localHistory;
   useEffect(() => {
-    if (revealed.current === selectedTaskId || !selectedRef.current) return;
-    const initialReveal = revealed.current === null;
-    revealed.current = selectedTaskId;
+    const group = runs[0]?.task.id;
+    if (!group || !selectedRef.current) return;
+    if (revealed.current?.group === group && revealed.current.selected === selectedTaskId) return;
+    const initialReveal = revealed.current?.group !== group;
+    revealed.current = { group, selected: selectedTaskId };
     // Initial selection (including asynchronously loaded runs) preserves the task overview.
     // Only subsequent run switches reveal their header.
     if (initialReveal) return;
@@ -90,7 +96,7 @@ const RunTimeline: React.FC<RunTimelineProps> = ({ runs, selectedTaskId, onSelec
     // The expanded steps can be taller than the viewport; only the header needs revealing.
     if (bounds && header && header.top >= bounds.top + margin && header.bottom <= bounds.bottom) return;
     row.scrollIntoView?.({ block: 'start' });
-  }, [runs, selectedTaskId]);
+  }, [runs, selectedTaskId, revealed]);
 
   // Every run expands in the shared task workspace, together with the changed files.
   return (

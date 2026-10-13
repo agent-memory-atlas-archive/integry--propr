@@ -199,7 +199,7 @@ const UsageMetricsChip: React.FC<{ usageMetricRecords: UsageMetricRecord[] }> = 
   const weeklyRecord = findMetricRecord(usageMetricRecords, 'weeklyAll') || findMetricRecord(usageMetricRecords, 'weekly');
 
   if (!sessionRecord && !weeklyRecord) {
-    return <span className="font-mono text-xs text-slate-500" title="Quota usage has not been reported">(Quota unavailable)</span>;
+    return <span className="font-mono text-xs text-slate-500" title="Quota usage has not been reported">(no quota data)</span>;
   }
 
   const sessionPct = sessionRecord?.metricValue ?? 0;

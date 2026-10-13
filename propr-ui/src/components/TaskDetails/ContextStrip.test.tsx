@@ -57,7 +57,7 @@ describe('Task details telemetry', () => {
 
   it('keeps a consumption slot before any usage is reported', () => {
     render(<ContextStrip {...props} />);
-    expect(screen.getByRole('group', { name: 'Consumption' })).toHaveTextContent('↑0↓0(Quota unavailable)');
+    expect(screen.getByRole('group', { name: 'Consumption' })).toHaveTextContent('↑0↓0(no quota data)');
   });
 
   it('shows the run spend beside its cap and marks a run stopped at the cap', () => {

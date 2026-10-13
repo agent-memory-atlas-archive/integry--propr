@@ -1,4 +1,5 @@
 import React, { useState, useCallback, useMemo, useEffect } from 'react';
+import type { RunRevealHistory } from './RunTimeline';
 import { useParams, useNavigate } from 'react-router-dom';
 import { useDocumentTitle } from '../../hooks/useDocumentTitle';
 import { renderMarkdown } from './renderMarkdown';
@@ -155,6 +156,7 @@ interface TaskDetailsProps {
    * execution log follow the run chosen there.
    */
   runs?: TaskRunEntry[];
+  revealHistory?: RunRevealHistory;
   /** Opens another run of this task in its place. */
   onSelectRun?: (taskId: string) => void;
   /** The pane's own controls, docked at the right of the header's first row. */
@@ -202,10 +204,11 @@ const observeTimeline = (node: HTMLDivElement | null) => {
   const observer = new ResizeObserver(update);
   for (const target of [node, scroller]) observer.observe(target);
   update();
+  // Ref callback cleanup requires the React 19 version pinned by propr-ui.
   return () => observer.disconnect();
 };
 
-const TaskDetails: React.FC<TaskDetailsProps> = ({ taskId: taskIdProp, embedded = false, onDeleted, runs, onSelectRun, paneControls }) => {
+const TaskDetails: React.FC<TaskDetailsProps> = ({ taskId: taskIdProp, embedded = false, onDeleted, runs, revealHistory, onSelectRun, paneControls }) => {
   const params = useParams();
   const taskId = taskIdProp ?? params.taskId;
   const navigate = useNavigate();
@@ -390,6 +393,7 @@ const TaskDetails: React.FC<TaskDetailsProps> = ({ taskId: taskIdProp, embedded 
               isTaskActive={derivedData.isTaskActive}
               onTodoHover={setHighlightedTodoId}
               runs={runs}
+              revealHistory={revealHistory}
               onSelectRun={onSelectRun}
             />
           </div>

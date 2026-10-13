@@ -344,8 +344,13 @@ const coalescePipelineHistory = (history: HistoryItem[]): HistoryItem[] => {
   return steps;
 };
 
+// Match the detail renderers, including salvage summaries that are already the label.
+const hasStepDetails = (metadata: HistoryItem['metadata']): boolean => !!(metadata?.terminalReason ||
+  (metadata?.event === 'network.egress' && metadata.networkEgress) || metadata?.pushFailure ||
+  (metadata?.pushSalvage && metadata.description !== metadata.pushSalvage.summary));
+
 /** Touch and keyboard access to full labels and detail lines in compact timelines. */
-const StepDisclosure: React.FC<{ label: string; className: string; children: React.ReactNode }> = ({ label, className, children }) => {
+const StepDisclosure: React.FC<{ label: string; hasDetails: boolean; className: string; children: React.ReactNode }> = ({ label, hasDetails, className, children }) => {
   const [open, setOpen] = useState(false);
   const id = useId();
   return (
@@ -355,6 +360,7 @@ const StepDisclosure: React.FC<{ label: string; className: string; children: Rea
         onClick={() => setOpen(value => !value)}
         className={`hidden w-full items-center gap-1 text-left [@container(max-width:527px)]:flex ${className}`}>
         <span className="min-w-0 flex-1 truncate">{label}</span>
+        {hasDetails && <span aria-label="Additional step details" className="font-semibold text-teal-700">•</span>}
         <span aria-hidden="true">{open ? '−' : '+'}</span>
       </button>
       <div id={id} className={open ? '' : '[@container(max-width:527px)]:hidden'}>
@@ -390,7 +396,7 @@ const BranchSteps: React.FC<{
           <span className={`${RUN_TAG_COLUMN} [@container(max-width:527px)]:w-14 flex-none font-mono text-[11px] tabular-nums text-slate-500`}>
             {item.timestamp ? formatTimeOnly(item.timestamp) : '--:--'}
           </span>
-          <StepDisclosure label={label} className={isFailure ? 'font-medium text-red-700' : isRunning ? 'font-medium text-slate-900' : 'text-slate-800'}>
+          <StepDisclosure label={label} hasDetails={hasStepDetails(item.metadata)} className={isFailure ? 'font-medium text-red-700' : isRunning ? 'font-medium text-slate-900' : 'text-slate-800'}>
             {item.metadata?.terminalReason && (
               <span className="block break-words text-[11px] text-slate-500" data-testid="task-terminal-reason">
                 {formatTaskTerminalReason(item.metadata.terminalReason)}

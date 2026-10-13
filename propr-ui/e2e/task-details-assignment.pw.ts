@@ -264,7 +264,7 @@ for (const width of [320, 390]) {
     const runtimeBox = (await runtime.boundingBox())!;
     expect(Math.abs(peopleBox.y - runtimeBox.y)).toBeLessThan(4);
     expect(peopleBox.x + peopleBox.width).toBeLessThanOrEqual(runtimeBox.x);
-    await expect(metadata.getByRole('group', { name: 'Consumption' })).toContainText('↑0↓0(Quota unavailable)');
+    await expect(metadata.getByRole('group', { name: 'Consumption' })).toContainText('↑0↓0(no quota data)');
     await expect(metadata.getByRole('button', { name: 'Follow Up', exact: true })).toBeVisible();
     await expectNoHorizontalOverflow(page);
     if (process.env.PROPR_CAPTURE_PREVIEWS && width === 390) {
@@ -444,6 +444,7 @@ test('mobile assignment search, results, Save and Cancel remain reachable in a r
   await trigger.tap();
   const editor = page.getByRole('dialog', { name: 'Assign users' });
   await expect(editor).toBeFocused();
+  await expect(page.locator('main')).toHaveCSS('overflow-y', 'hidden');
   const search = editor.getByRole('searchbox');
   await search.tap();
   await expect(search).toBeFocused();
@@ -457,6 +458,7 @@ test('mobile assignment search, results, Save and Cancel remain reachable in a r
   await capture(page, 'task-assignment-reduced-mobile-viewport');
   await editor.getByRole('button', { name: 'Cancel' }).tap();
   expect(state.puts).toHaveLength(0);
+  await expect(page.locator('main')).toHaveCSS('overflow-y', 'auto');
   await page.setViewportSize({ width: 390, height: 844 });
   await trigger.tap();
   await search.tap();

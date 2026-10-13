@@ -201,3 +201,21 @@ describe('RunTimeline', () => {
     expect(screen.queryByTestId('pr-outcome-entry')).toBeNull();
   });
 });
+
+it('retains reveal history across keyed remounts, but preserves a new group overview', () => {
+  const scroll = vi.fn();
+  Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', { configurable: true, value: scroll });
+  const revealHistory = { current: null };
+  const view = (id: string, entries = runs) => <RunTimeline key={id} revealHistory={revealHistory} runs={entries} selectedTaskId={id} onSelectRun={() => {}}>Steps</RunTimeline>;
+  const { rerender, unmount } = render(view('run-4'));
+  expect(scroll).not.toHaveBeenCalled();
+  rerender(view('run-3'));
+  expect(scroll).toHaveBeenCalledTimes(1);
+  rerender(view('run-3', [...runs]));
+  expect(scroll).toHaveBeenCalledTimes(1);
+  const other = runs.map(run => ({ ...run, task: { ...run.task, id: `other-${run.task.id}` } }));
+  rerender(view('other-run-4', other));
+  expect(scroll).toHaveBeenCalledTimes(1);
+  unmount();
+  delete (HTMLElement.prototype as Partial<HTMLElement>).scrollIntoView;
+});

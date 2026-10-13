@@ -307,3 +307,59 @@ for (const runCount of [2, 50]) {
     await expect(page.getByTestId('run-timeline-run').first().getByRole('button').first()).toBeInViewport();
   });
 }
+
+for (const mode of ['embedded', 'desktop', 'phone'] as const) {
+  test(`${mode} run navigation reveals run 45 after the details scroller remounts`, async ({ page }) => {
+    await page.setViewportSize({ width: mode === 'phone' ? 390 : 1584, height: 820 });
+    await stubTaskDetailsApis(page, 49);
+    await page.route('**/api/task/responsive-run-*/history', route => route.fulfill({ json: {
+      history, taskInfo: { title: 'Selected historical run', type: 'issue', number: 2252,
+        repoOwner: 'integry', repoName: 'propr-responsive-workspace-fixture' },
+    } }));
+    await page.goto(mode === 'embedded' ? `/tasks?task=${taskId}` : `/tasks/${taskId}`);
+    const pane = mode === 'embedded' ? page.getByTestId('task-split-details') : page;
+    await expect(pane.getByTestId('run-timeline-run')).toHaveCount(50);
+    const owner = pane.getByTestId(mode === 'phone' ? 'task-details' : 'task-workspace-scroll');
+    expect(await owner.evaluate(node => node.scrollTop)).toBe(0);
+    for (const index of [44, 43]) {
+      await pane.getByTestId('run-timeline-run').nth(index).getByRole('button').first().click();
+      const selected = pane.locator('[aria-current="true"]');
+      await expect(selected).toContainText(`Run ${index + 1}`);
+      await expect.poll(async () => {
+        const header = await selected.boundingBox();
+        const viewport = await owner.boundingBox();
+        return !!header && !!viewport && header.y >= viewport.y && header.y + header.height <= viewport.y + viewport.height;
+      }).toBe(true);
+      expect(await owner.evaluate(node => node.scrollTop)).toBeGreaterThan(0);
+      if (process.env.PROPR_CAPTURE_PREVIEWS && index === 44 && mode === 'embedded') {
+        await mkdir('../.propr/previews', { recursive: true });
+        await page.screenshot({ animations: 'disabled', path: '../.propr/previews/embedded-run-45.png' });
+      }
+    }
+  });
+
+}
+
+test('phone compact steps distinguish hidden details from ordinary labels', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await stubTaskDetailsApis(page, 0, 2);
+  await page.route(`**/api/task/${taskId}/history`, route => route.fulfill({ json: {
+    history: [
+      { state: 'PENDING', timestamp: new Date(startedAt).toISOString() },
+      { state: 'FAILED', timestamp: new Date(startedAt + 60000).toISOString(), metadata: { terminalReason: 'timed_out' } },
+    ],
+    taskInfo: { title: 'Review task changes', type: 'issue', number: 2252,
+      repoOwner: 'integry', repoName: 'propr-responsive-workspace-fixture' },
+  } }));
+  await page.goto(`/tasks/${taskId}`);
+  const steps = page.getByRole('list', { name: 'Run steps' });
+  await expect(steps.getByLabel('Additional step details')).toHaveCount(1);
+  await expect(steps.getByLabel('Additional step details')).toBeVisible();
+  await expect(steps.getByTestId('task-terminal-reason')).toBeHidden();
+  await steps.getByRole('button').filter({ has: page.getByLabel('Additional step details') }).click();
+  await expect(steps.getByTestId('task-terminal-reason')).toBeVisible();
+  if (process.env.PROPR_CAPTURE_PREVIEWS) {
+    await mkdir('../.propr/previews', { recursive: true });
+    await page.screenshot({ animations: 'disabled', path: '../.propr/previews/compact-step-details.png' });
+  }
+});

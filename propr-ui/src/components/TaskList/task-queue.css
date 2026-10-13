@@ -125,7 +125,7 @@
 
 /* Keep query state readable in narrow list panes. Search takes its own line
    when the labelled filters cannot share one row with it. */
-/* The label is always visible, so the collapsed-state icon is redundant. */
+/* Desktop panes retain labels; phones reserve that space for search. */
 .task-assignee-filter-icon { display: none; }
 .task-filters { container: task-filters / inline-size; }
 @media (min-width: 640px) {
@@ -140,4 +140,11 @@
     /* Hide RepositorySelector’s RepoCountBadge (selected repository task count) in the narrow task pane. */
     .task-repo-filter > button > [data-repo-count] { display: none; }
   }
+}
+
+@media (max-width: 639px) {
+  .task-assignee-filter { width: 2.75rem; }
+  .task-assignee-filter > button { justify-content: center; }
+  .task-assignee-filter-icon { display: block; }
+  .task-assignee-filter-label, .task-assignee-filter-chevron { display: none; }
 }
