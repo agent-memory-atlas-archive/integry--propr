@@ -25,6 +25,12 @@ interface ActionBarProps {
    * task works, and everything else moves into the overflow menu.
    */
   compact?: boolean;
+  /**
+   * The newest run's follow-up commands for its pull request, shown in the
+   * full bar and the expanded mobile summary; the one-line compact bar leaves
+   * them out.
+   */
+  followupCommands?: React.ReactNode;
   /** Expanded mobile summary: Follow Up stays beside the overflow. */
   mobileSummary?: boolean;
 }
@@ -204,13 +210,14 @@ const TaskOverflowMenu: React.FC<{
 /** The collapsed header's actions: Stop while the task works, everything else in the action sheet. */
 const CompactActions: React.FC<{
   summary?: boolean;
+  followupCommands?: React.ReactNode;
   stopButtons: React.ReactNode;
   deletion?: DeletionProps;
   onFollowUp?: () => void;
   historyItemWithPaths?: HistoryItem;
   onViewPrompt: (promptPath: string) => void;
   onViewLogs: (logsPath: string) => void;
-}> = ({ summary, stopButtons, deletion, onFollowUp, historyItemWithPaths, onViewPrompt, onViewLogs }) => {
+}> = ({ summary, followupCommands, stopButtons, deletion, onFollowUp, historyItemWithPaths, onViewPrompt, onViewLogs }) => {
   const { promptPath, logsPath } = historyItemWithPaths ?? {};
   const items: OverflowMenuItem[] = [];
   if (onFollowUp && !summary) items.push({ label: 'Follow Up', title: 'Follow Up - Post a follow-up comment', icon: <MessageSquarePlus size={18} />, onSelect: onFollowUp });
@@ -219,6 +226,7 @@ const CompactActions: React.FC<{
   // Stop is a safety control, so it never folds into the sheet.
   return (
     <div className="flex flex-none items-center gap-1.5">
+      {summary && followupCommands}
       {summary && onFollowUp && (
         <button onClick={onFollowUp} className="inline-flex min-h-11 items-center gap-1 whitespace-nowrap rounded py-1 text-[11px] leading-4 font-medium text-slate-600" title="Follow Up - Post a follow-up comment">
           <MessageSquarePlus size={12} /><span>Follow Up</span>
@@ -246,6 +254,7 @@ const ActionBar: React.FC<ActionBarProps> = ({
   onFollowUp,
   liveRun,
   compact,
+  followupCommands,
   mobileSummary,
 }) => {
   const isActive = ACTIVE_STATUSES.includes(currentStatus);
@@ -265,6 +274,7 @@ const ActionBar: React.FC<ActionBarProps> = ({
     return (
       <CompactActions
         summary={mobileSummary}
+        followupCommands={followupCommands}
         stopButtons={stopButtons}
         deletion={deletion}
         onFollowUp={followUp}
@@ -278,6 +288,8 @@ const ActionBar: React.FC<ActionBarProps> = ({
   return (
     <div className="flex w-full min-w-0 flex-wrap items-center justify-end gap-1.5 sm:w-auto sm:flex-shrink-0">
       <CancelledBadge isCancelled={isCancelled} />
+
+      {followupCommands}
 
       {/* View Prompt Button - Ghost style */}
       {historyItemWithPaths?.promptPath && (
