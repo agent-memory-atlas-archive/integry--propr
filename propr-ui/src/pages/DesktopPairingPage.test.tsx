@@ -66,6 +66,34 @@ describe('DesktopPairingPage', () => {
     </MemoryRouter>,
   );
 
+  for (const status of ['approved', 'consumed'] as const) {
+    it(`clears local expiry feedback when a delayed current approval returns ${status}`, async () => {
+      vi.useFakeTimers();
+      try {
+        const request = { ...pending, expiresAt: new Date(Date.now() + 60_000).toISOString() };
+        vi.mocked(getDesktopPairingApproval).mockResolvedValue(request);
+        let finishApproval!: (value: Awaited<ReturnType<typeof approveDesktopPairing>>) => void;
+        vi.mocked(approveDesktopPairing).mockImplementation(() => new Promise(resolve => { finishApproval = resolve; }));
+        renderPending();
+        await act(async () => {});
+        fireEvent.click(screen.getByRole('button', { name: 'Approve desktop' }));
+        expect(approveDesktopPairing).toHaveBeenCalledWith(pairingId);
+        await act(async () => { vi.advanceTimersByTime(60_001); });
+        expect(screen.getByRole('alert')).toHaveTextContent(/expired/);
+        expect(screen.queryByRole('button', { name: 'Approve desktop' })).not.toBeInTheDocument();
+
+        await act(async () => { finishApproval({ ...request, status }); });
+        expect(screen.getByRole('heading', { name: 'Desktop paired' })).toBeInTheDocument();
+        expect(screen.getByText(/Return to the ProPR desktop app/)).toBeInTheDocument();
+        expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+        expect(screen.queryByRole('button', { name: 'Approve desktop' })).not.toBeInTheDocument();
+        expect(approveDesktopPairing).toHaveBeenCalledTimes(1);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+  }
+
   it('hides approval while changing account and preserves the exact request after logout', async () => {
     vi.mocked(getDesktopPairingApproval).mockResolvedValue(pending);
     const fetchMock = vi.fn().mockResolvedValue({ ok: false, type: 'opaqueredirect', status: 0 });

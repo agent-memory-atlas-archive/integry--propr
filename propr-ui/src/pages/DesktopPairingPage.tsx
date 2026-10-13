@@ -124,6 +124,7 @@ const DesktopPairingPage = () => {
       const result = await approveDesktopPairing(pairing.pairingId);
       if (generation !== approvalGeneration.current) return;
       setPairing(result);
+      setError('');
     } catch (error) {
       if (generation !== approvalGeneration.current) return;
       if (error instanceof DesktopPairingUnavailableError || Date.parse(pairing.expiresAt) <= Date.now()) {

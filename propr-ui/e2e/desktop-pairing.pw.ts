@@ -272,6 +272,43 @@ test('pending request expires while the approval page stays open', async ({ page
   expect(state.approvalCount()).toBe(0);
 });
 
+test('successful approval clears expiry feedback after its response crosses the local deadline', async ({ page }) => {
+  await page.setViewportSize({ width: 375, height: 812 });
+  await page.clock.install();
+  await fixture(page, { expiresIn: 60_000, username: 'pairing-reviewer', clientName: 'Development desktop' });
+  let release!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  let approvalCount = 0;
+  await page.route('**/api/**/approve', async route => {
+    approvalCount++;
+    // The server accepted the request while valid; only delivery is delayed.
+    const result = { pairingId, clientName: 'Development desktop', status: 'approved',
+      expiresAt: new Date(Date.now() + 60_000).toISOString() };
+    await gate;
+    await route.fulfill({ json: result });
+  });
+  await page.getByRole('button', { name: 'Approve desktop' }).click();
+  await expect.poll(() => approvalCount).toBe(1);
+  await page.clock.fastForward(60_001);
+  await expect(page.getByRole('alert')).toContainText('expired');
+  await expect(page.getByRole('button', { name: 'Approve desktop' })).toHaveCount(0);
+  release();
+  await expect(page.getByRole('heading', { name: 'Desktop paired', exact: true })).toBeVisible();
+  await expect(page.getByText('Return to the ProPR desktop app.', { exact: false })).toBeVisible();
+  await expect(page.getByRole('alert')).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'Approve desktop' })).toHaveCount(0);
+  expect(approvalCount).toBe(1);
+  if (process.env.PROPR_CAPTURE_PREVIEWS) {
+    const directory = path.resolve('../.propr/previews');
+    await mkdir(directory, { recursive: true });
+    await page.screenshot({ path: path.join(directory, 'pairing-approved-after-expiry.png'), fullPage: true });
+    await writeFile(path.join(directory, 'manifest.json'), JSON.stringify({ previews: [{
+      path: '.propr/previews/pairing-approved-after-expiry.png', title: 'Successful pairing after delayed response',
+      description: 'A successful approval delivered after the local deadline shows return-to-Desktop instructions with no obsolete expiry alert.',
+    }], toolSuggestions: [] }));
+  }
+});
+
 test('approval rechecks the deadline when the expiry timer has not run yet', async ({ page }) => {
   await page.clock.install();
   const state = await fixture(page, { expiresIn: 60_000 });
