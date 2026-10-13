@@ -177,20 +177,23 @@ function getAllMetrics(agent: AgentUsageData): UsageMetric[] {
     const isAntigravity = agent.name.toLowerCase() === 'antigravity';
     for (const model of agent.usage.models) {
       if (isAntigravity) {
-        // Keep the full model name (incl. "Gemini" prefix and thinking level) for the tooltip,
-        // but shorten the visible label.
-        const fullName = stripRemainingSuffix(getModelDisplayName(model.model));
-        const quotaWindow = parseAntigravityQuotaWindow(fullName);
+        // Quota windows already carry product labels, not model IDs. Preserve
+        // their spelling (e.g. "Claude and GPT") before formatting model IDs.
+        const quotaName = stripRemainingSuffix(model.model);
+        const quotaWindow = parseAntigravityQuotaWindow(quotaName);
         if (quotaWindow) {
           metrics.push({
             label: quotaWindow.label,
             group: quotaWindow.group,
-            title: fullName,
+            title: quotaName,
             percent: model.percentUsed,
             resetsIn: model.resetsIn
           });
           continue;
         }
+        // Keep the full model name (incl. "Gemini" prefix and thinking level) for the tooltip,
+        // but shorten the visible label.
+        const fullName = stripRemainingSuffix(getModelDisplayName(model.model));
         const { display, plain } = formatAntigravityModelLabel(fullName);
         metrics.push({
           label: plain,

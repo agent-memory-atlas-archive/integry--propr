@@ -149,15 +149,33 @@ describe('AgentTankSidebar Antigravity rows', () => {
     fireEvent.click(providerRow('Antigravity'));
 
     expect(screen.getByText('Gemini')).toBeInTheDocument();
-    expect(screen.getByText('Claude And GPT')).toBeInTheDocument();
+    expect(screen.getByText('Claude and GPT')).toBeInTheDocument();
     expect(screen.getAllByText('Weekly')).toHaveLength(2);
     expect(screen.getAllByText('5h')).toHaveLength(2);
     expect(screen.queryByText(/Remaining/)).not.toBeInTheDocument();
     expect(screen.queryByText(/Limit/)).not.toBeInTheDocument();
 
     // Each pool header precedes its own windows.
-    const labels = screen.getAllByText(/^(Gemini|Claude And GPT|Weekly|5h)$/).map(el => el.textContent);
-    expect(labels).toEqual(['Gemini', 'Weekly', '5h', 'Claude And GPT', 'Weekly', '5h']);
+    const labels = screen.getAllByText(/^(Gemini|Claude and GPT|Weekly|5h)$/).map(el => el.textContent);
+    expect(labels).toEqual(['Gemini', 'Weekly', '5h', 'Claude and GPT', 'Weekly', '5h']);
+  });
+
+  it('formats raw model IDs while preserving friendly quota pool labels', async () => {
+    const response = antigravityResponse();
+    response.agents.antigravity.usage!.models!.push({
+      model: 'claude-sonnet-9-1-20990101', percentUsed: 7,
+    });
+    mockGetAgentTankUsage.mockResolvedValue(response);
+    await renderSidebar();
+
+    fireEvent.click(providerRow('Antigravity'));
+
+    expect(screen.getByText('Claude and GPT')).toBeInTheDocument();
+    expect(screen.getByText('Claude Sonnet 9.1'))
+      .toHaveAttribute('title', 'Claude Sonnet 9.1');
+    expect(screen.queryByText('claude-sonnet-9-1-20990101')).not.toBeInTheDocument();
+    expect(response.agents.antigravity.usage!.models!.at(-1)?.model)
+      .toBe('claude-sonnet-9-1-20990101');
   });
 
   it('keeps the full window name and reset countdown in the tooltip', async () => {
@@ -177,9 +195,9 @@ describe('AgentTankSidebar Antigravity rows', () => {
     fireEvent.click(providerRow('Antigravity'));
 
     expect(screen.getAllByText('Weekly')[1])
-      .toHaveAttribute('title', 'Claude And GPT · Weekly Limit');
+      .toHaveAttribute('title', 'Claude and GPT · Weekly Limit');
     expect(screen.getAllByText('5h')[1])
-      .toHaveAttribute('title', 'Claude And GPT · Five Hour Limit');
+      .toHaveAttribute('title', 'Claude and GPT · Five Hour Limit');
   });
 });
 
