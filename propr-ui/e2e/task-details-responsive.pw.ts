@@ -216,7 +216,7 @@ for (const viewport of [
       expect(sectionMetrics.overflowY).not.toMatch(/auto|scroll/);
       expect(sectionMetrics.scrollHeight).toBeLessThanOrEqual(sectionMetrics.clientHeight);
     }
-    await expectReachableWithin(page.getByText('Timeline final checkpoint'), workspace);
+    await expectReachableWithin(page.getByText('Timeline final checkpoint', { exact: true }).filter({ visible: true }), workspace);
     await expectReachableWithin(summarySection.getByText(/Implementation summary final marker/), workspace);
     await expectReachableWithin(output.getByText(/Implementation log final marker/), workspace);
     await expect(workspace.getByText('EXECUTION TRACE', { exact: true })).toBeVisible();
@@ -252,28 +252,15 @@ for (const viewport of [
 }
 
 for (const width of [390, 1280]) {
-  for (const selectedIndex of [0, 44]) {
-    test(`initial reveal keeps run ${selectedIndex + 1} visible at ${width}px`, async ({ page }) => {
+  for (const selectedIndex of [0, 44, 49]) {
+    test(`initial selection preserves the overview for run ${selectedIndex + 1} visible at ${width}px`, async ({ page }) => {
       await page.setViewportSize({ width, height: 820 });
       await stubTaskDetailsApis(page, selectedIndex);
       await page.goto(`/tasks/${taskId}`);
       await expect(page.getByTestId('run-timeline-run')).toHaveCount(50);
       const owner = page.getByTestId(width < 640 ? 'task-details' : 'task-workspace-scroll');
-      const header = page.locator('button[aria-current="true"]');
-      await expect(header).toBeInViewport();
-      const row = (await header.boundingBox())!;
-      const scrollport = (await owner.boundingBox())!;
-      expect(row.y).toBeGreaterThanOrEqual(scrollport.y + (width < 640 ? 0 : 44));
-      if (width < 640 && selectedIndex > 0) {
-        const compact = page.getByTestId('task-mobile-compact-bar');
-        await expect(compact).toBeVisible();
-        await expect.poll(async () => {
-          const bar = (await compact.boundingBox())!;
-          return (await header.boundingBox())!.y - (bar.y + bar.height);
-        }).toBeGreaterThanOrEqual(0);
-      }
-      if (selectedIndex === 0) expect(await owner.evaluate(node => node.scrollTop)).toBe(0);
-      else expect(await owner.evaluate(node => node.scrollTop)).toBeGreaterThan(0);
+      expect(await owner.evaluate(node => node.scrollTop)).toBe(0);
+      if (width < 640) await expect(page.getByTestId('task-mobile-compact-bar')).not.toBeVisible();
       if (process.env.PROPR_CAPTURE_PREVIEWS) {
         await mkdir('../.propr/previews', { recursive: true });
         await page.screenshot({ animations: 'disabled', path: `../.propr/previews/task-initial-run-${selectedIndex + 1}-${width}.png` });
@@ -297,6 +284,10 @@ for (const runCount of [2, 50]) {
     const owner = page.getByTestId('task-workspace-scroll');
     await expect(page.getByTestId('run-timeline-run')).toHaveCount(runCount);
     await expect(timeline).toHaveCSS('position', runCount === 2 ? 'sticky' : 'static');
+    const result = page.getByTestId('task-result-pane');
+    await expect(result).toHaveCSS('border-left-style', 'solid');
+    expect(await result.evaluate(node => parseFloat(getComputedStyle(node).borderLeftWidth))).toBeGreaterThan(0);
+    expect((await result.boundingBox())!.height).toBeGreaterThanOrEqual((await timeline.boundingBox())!.height);
     const height = (await timeline.boundingBox())!.height;
     const port = (await owner.boundingBox())!;
     expect(runCount === 2 ? height < port.height : height > port.height).toBe(true);

@@ -372,7 +372,7 @@ const TaskDetails: React.FC<TaskDetailsProps> = ({ taskId: taskIdProp, embedded 
             ref={observeTimeline} data-testid="task-timeline-scroll"
             role="region"
             aria-label="Task timeline"
-            className={`w-full min-w-0 flex-shrink-0 border-b border-gray-200${wideOnly(embedded, '[@container_task-workspace_(min-width:960px)]:[position:var(--timeline-position,static)] [@container_task-workspace_(min-width:960px)]:top-0 [@container_task-workspace_(min-width:960px)]:self-start [@container_task-workspace_(min-width:960px)]:border-b-0 [@container_task-workspace_(min-width:960px)]:border-r')}`}
+            className={`w-full min-w-0 flex-shrink-0 border-b border-gray-200${wideOnly(embedded, '[@container_task-workspace_(min-width:960px)]:[position:var(--timeline-position,static)] [@container_task-workspace_(min-width:960px)]:top-0 [@container_task-workspace_(min-width:960px)]:self-start [@container_task-workspace_(min-width:960px)]:border-b-0')}`}
           >
             <div className={`z-[1] flex ${PANE_HEADER_HEIGHT} items-center justify-between gap-3 border-b border-slate-200 bg-white px-4 sm:sticky sm:top-0`}>
               <TimelineHeading runCount={runs?.length ?? 0} />
@@ -395,7 +395,7 @@ const TaskDetails: React.FC<TaskDetailsProps> = ({ taskId: taskIdProp, embedded 
           </div>
 
           {/* RIGHT PANE: the run's deliverables first, then the trace of how it got there. */}
-          <div className="flex flex-col min-w-0">
+          <div data-testid="task-result-pane" className={`flex flex-col min-w-0 border-gray-200${wideOnly(embedded, '[@container_task-workspace_(min-width:960px)]:border-l')}`}>
             <div
               data-testid="task-output-scroll"
               role="region"

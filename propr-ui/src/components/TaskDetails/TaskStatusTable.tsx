@@ -1,4 +1,4 @@
-import React, { useMemo } from 'react';
+import React, { useId, useMemo, useState } from 'react';
 import { formatTaskTerminalReason } from '@propr/shared';
 import { HistoryItem } from './types';
 import PushFailureDetails from './PushFailureDetails';
@@ -344,6 +344,27 @@ const coalescePipelineHistory = (history: HistoryItem[]): HistoryItem[] => {
   return steps;
 };
 
+/** Touch and keyboard access to full labels and detail lines in compact timelines. */
+const StepDisclosure: React.FC<{ label: string; className: string; children: React.ReactNode }> = ({ label, className, children }) => {
+  const [open, setOpen] = useState(false);
+  const id = useId();
+  return (
+    <div className="min-w-0 flex-1">
+      <span className={`block break-words [@container(max-width:527px)]:hidden ${className}`}>{label}</span>
+      <button type="button" aria-expanded={open} aria-controls={id}
+        onClick={() => setOpen(value => !value)}
+        className={`hidden w-full items-center gap-1 text-left [@container(max-width:527px)]:flex ${className}`}>
+        <span className="min-w-0 flex-1 truncate">{label}</span>
+        <span aria-hidden="true">{open ? '−' : '+'}</span>
+      </button>
+      <div id={id} className={open ? '' : '[@container(max-width:527px)]:hidden'}>
+        <div className="hidden break-words [@container(max-width:527px)]:block">{label}</div>
+        {children}
+      </div>
+    </div>
+  );
+};
+
 /**
  * One run's steps hanging off the run rail (2px at 7px in): each step branches
  * off it with a tic under the run's caret, and keeps to the run row's columns:
@@ -369,10 +390,7 @@ const BranchSteps: React.FC<{
           <span className={`${RUN_TAG_COLUMN} [@container(max-width:527px)]:w-14 flex-none font-mono text-[11px] tabular-nums text-slate-500`}>
             {item.timestamp ? formatTimeOnly(item.timestamp) : '--:--'}
           </span>
-          <span className="min-w-0 flex-1">
-            <span title={label} className={`block break-words [@container(max-width:527px)]:truncate ${isFailure ? 'font-medium text-red-700' : isRunning ? 'font-medium text-slate-900' : 'text-slate-800'}`}>
-              {label}
-            </span>
+          <StepDisclosure label={label} className={isFailure ? 'font-medium text-red-700' : isRunning ? 'font-medium text-slate-900' : 'text-slate-800'}>
             {item.metadata?.terminalReason && (
               <span className="block break-words text-[11px] text-slate-500" data-testid="task-terminal-reason">
                 {formatTaskTerminalReason(item.metadata.terminalReason)}
@@ -380,7 +398,7 @@ const BranchSteps: React.FC<{
             )}
             <NetworkEgressDetail metadata={item.metadata} />
             <PushFailureDetails metadata={item.metadata} />
-          </span>
+          </StepDisclosure>
           <span className={`${RUN_DURATION_COLUMN} [@container(max-width:527px)]:w-auto [@container(max-width:527px)]:min-w-12 flex-none whitespace-nowrap text-right font-mono text-[11px] tabular-nums ${isRunning ? 'font-medium text-teal-700' : 'text-slate-500'}`}>
             {isRunning ? 'Running…' : item.duration !== null ? formatRelativeTime(item.duration) : ''}
           </span>

@@ -26,7 +26,9 @@ export function useLockTaskScroll(open: boolean): void {
       restore = () => {
         previous.forEach(([key, value, priority]) => body.style.setProperty(key, value, priority));
         panes.forEach((node, index) => node.style.setProperty('overflow', ...overflows[index] as [string, string]));
-        window.scrollTo({ left: x, top: y, behavior: 'instant' });
+        if (typeof window.scrollTo === 'function' && (window.scrollX !== x || window.scrollY !== y)) {
+          window.scrollTo({ left: x, top: y, behavior: 'instant' });
+        }
       };
     }
     return () => {

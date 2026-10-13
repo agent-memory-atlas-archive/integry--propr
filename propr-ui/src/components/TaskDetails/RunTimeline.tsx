@@ -78,8 +78,9 @@ const RunTimeline: React.FC<RunTimelineProps> = ({ runs, selectedTaskId, onSelec
     if (revealed.current === selectedTaskId || !selectedRef.current) return;
     const initialReveal = revealed.current === null;
     revealed.current = selectedTaskId;
-    // Opening the first run must leave both panes (and the mobile title) at the top.
-    if (initialReveal && runs[0]?.task.id === selectedTaskId) return;
+    // Initial selection (including asynchronously loaded runs) preserves the task overview.
+    // Only subsequent run switches reveal their header.
+    if (initialReveal) return;
     const row = selectedRef.current;
     let scroller = row.parentElement;
     while (scroller && !/auto|scroll/.test(getComputedStyle(scroller).overflowY)) scroller = scroller.parentElement;

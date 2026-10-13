@@ -184,3 +184,25 @@ describe('TaskDetails embedded beside the task list', () => {
     expect(within(timelineHeader()).getByRole('button', { name: 'Return to live Run 2' })).toBeInTheDocument();
   });
 });
+
+it('disconnects timeline observers across keyed task remounts', () => {
+  const observers: Array<{ observe: ReturnType<typeof vi.fn>; disconnect: ReturnType<typeof vi.fn> }> = [];
+  vi.stubGlobal('ResizeObserver', class {
+    observe = vi.fn();
+    disconnect = vi.fn();
+    unobserve = vi.fn();
+    constructor() { observers.push(this); }
+  });
+  const view = (id: string) => <MemoryRouter><TaskDetails key={id} taskId={id} /></MemoryRouter>;
+  const { rerender, unmount } = render(view('first'));
+  const timelineObserver = () => observers.find(observer => observer.observe.mock.calls.some(([node]) => node === screen.getByTestId('task-timeline-scroll')))!;
+  const first = timelineObserver();
+  expect(first.observe).toHaveBeenCalledWith(screen.getByTestId('task-workspace-scroll'));
+  rerender(view('second'));
+  expect(first.disconnect).toHaveBeenCalledOnce();
+  const second = timelineObserver();
+  expect(second).not.toBe(first);
+  unmount();
+  expect(second.disconnect).toHaveBeenCalledOnce();
+  vi.unstubAllGlobals();
+});

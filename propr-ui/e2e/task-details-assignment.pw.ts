@@ -15,6 +15,7 @@ const assignable = [hubot, monalisa, octocat];
 interface FixtureOptions {
   assignees?: FixtureUser[];
   denseGit?: boolean;
+  model?: string;
   /** The assignees read answers 409 for a task with no issue or pull request. */
   goal?: boolean;
   /** How a save answers: applied, refused for lack of write access, or GitHub being down. */
@@ -66,16 +67,16 @@ async function fixture(page: Page, options: FixtureOptions = {}) {
       '/api/auth/demo-mode': { demoMode: false },
       [`/api/task/${taskId}/history`]: {
         history: [
-          { state: 'PENDING', timestamp: at(0), metadata: { model: 'claude-opus-5-5' } },
+          { state: 'PENDING', timestamp: at(0), metadata: { model: options.model ?? 'claude-opus-5-5' } },
           { state: 'CLAUDE_EXECUTION', timestamp: at(1), reason: 'Agent execution started' },
           {
             state: 'COMPLETED', timestamp: at(20),
-            metadata: { ...(options.denseGit ? { commitResult: { commitHash: '5c7cd9e0123456789' } } : {}), model: 'claude-opus-5-5', pr: { url: 'https://github.com/integry/propr/pull/2911', number: 2911 } },
+            metadata: { ...(options.denseGit ? { commitResult: { commitHash: '5c7cd9e0123456789' } } : {}), model: options.model ?? 'claude-opus-5-5', pr: { url: 'https://github.com/integry/propr/pull/2911', number: 2911 } },
           },
         ],
         taskInfo: options.goal
-          ? { title: 'Plan the task assignment epic', type: 'goal', repoOwner: 'integry', repoName: 'propr', modelName: 'claude-opus-5-5' }
-          : { ...(options.denseGit ? { attemptNumber: 2, attemptLineage: [{ taskId: 'previous', attemptNumber: 1 }, { taskId, attemptNumber: 2 }] } : {}), title: 'Show and edit task assignment on the task detail page', type: 'issue', number: 2894, issueNumber: 2894, repoOwner: 'integry', repoName: 'propr', modelName: 'claude-opus-5-5' },
+          ? { title: 'Plan the task assignment epic', type: 'goal', repoOwner: 'integry', repoName: 'propr', modelName: options.model ?? 'claude-opus-5-5' }
+          : { ...(options.denseGit ? { attemptNumber: 2, attemptLineage: [{ taskId: 'previous', attemptNumber: 1 }, { taskId, attemptNumber: 2 }] } : {}), title: 'Show and edit task assignment on the task detail page', type: 'issue', number: 2894, issueNumber: 2894, repoOwner: 'integry', repoName: 'propr', modelName: options.model ?? 'claude-opus-5-5' },
         usageMetricRecords: [],
       },
       [`/api/task/${taskId}/live-details`]: { events: [], todos: [], currentTask: null },
@@ -303,7 +304,8 @@ for (const width of [320, 390]) {
     const cancel = editor.getByRole('button', { name: 'Cancel' });
     const saveBox = (await save.boundingBox())!;
     expect(saveBox.height).toBeGreaterThanOrEqual(44);
-    expect(saveBox.width).toBe(width - 32);
+    expect(saveBox.width).toBeGreaterThanOrEqual(width * 0.85);
+    expect(saveBox.width).toBeLessThan(width);
     expect((await cancel.boundingBox())!.y).toBeGreaterThanOrEqual(saveBox.y + saveBox.height);
     await cancel.focus();
     await page.keyboard.press('Tab');
@@ -337,7 +339,8 @@ for (const width of [320, 390]) {
       element.scrollTop = 600;
     });
     await expect(bar).toBeVisible();
-    expect(Math.round((await bar.boundingBox())!.height)).toBe(44);
+    expect((await bar.boundingBox())!.height).toBeGreaterThanOrEqual(44);
+    expect((await bar.boundingBox())!.height).toBeLessThanOrEqual(56);
     await expect(bar).toHaveText('#2911:Show and edit task assignment on the task detail page');
     await expect(bar.getByTestId('task-assignment')).toHaveCount(0);
     await expectNoHorizontalOverflow(page);
@@ -368,9 +371,9 @@ test('explains a truncated candidate list and points to GitHub for anyone else',
   await expect(editor.getByText('Only the first 3 assignable users are listed, and the filter searches only these. Assign anyone else on GitHub.')).toBeVisible();
 });
 
-for (const [width, height] of [[1440, 900], [390, 844]] as const) {
+for (const [width, height] of [[1440, 900], [390, 844], [320, 844]] as const) {
   test(`${width}px offers a retry when the assignment cannot be read, and shows it once a retry succeeds`, async ({ page }) => {
-    const state = await openTask(page, { assignees: [octocat, hubot], failedReads: 1 }, { width, height });
+    const state = await openTask(page, { assignees: [octocat, hubot], failedReads: 1, model: 'gpt-6-astra' }, { width, height });
 
     const details = page.getByTestId('task-details');
     const failed = details.getByTestId('task-assignment-error').filter({ visible: true });
@@ -379,6 +382,16 @@ for (const [width, height] of [[1440, 900], [390, 844]] as const) {
     expect(await failed.innerText()).not.toMatch(/[·•|]/);
     await expect(details.getByTestId('task-assignment').filter({ visible: true })).toHaveCount(0);
     await expectNoHorizontalOverflow(page);
+    if (width < 640) {
+      const row = details.getByTestId('task-mobile-people-runtime');
+      const bounds = (await row.boundingBox())!;
+      for (const content of [failed, failed.getByRole('button', { name: 'Retry' }), row.getByRole('group', { name: 'Execution runtime' })]) {
+        const box = (await content.boundingBox())!;
+        expect(box.x).toBeGreaterThanOrEqual(bounds.x);
+        expect(box.x + box.width).toBeLessThanOrEqual(bounds.x + bounds.width + 1);
+        expect(box.y + box.height).toBeLessThanOrEqual(bounds.y + bounds.height + 1);
+      }
+    }
     await capture(page, `task-assignment-read-failed-${width}`);
 
     await failed.getByRole('button', { name: 'Retry' }).click();

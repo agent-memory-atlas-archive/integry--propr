@@ -46,27 +46,25 @@ describe('RunTimeline', () => {
     const scroller = screen.getByTestId('run-timeline-scroll');
     expect(scroller.className).not.toMatch(/max-h-|overflow-y-|overscroll-/);
     expect(within(scroller).getAllByTestId('run-timeline-run')).toHaveLength(50);
-    expect(scroll).toHaveBeenCalledExactlyOnceWith({ block: 'start' });
-    expect(scroll.mock.instances[0]).toBe(screen.getByRole('button', { current: true }).closest('li'));
+    expect(scroll).not.toHaveBeenCalled();
     rerender(<RunTimeline runs={[...manyRuns]} selectedTaskId="many-43" onSelectRun={vi.fn()}>updated steps</RunTimeline>);
+    expect(scroll).toHaveBeenCalledTimes(1);
+    expect(scroll.mock.instances[0]).toBe(screen.getByRole('button', { current: true }).closest('li'));
+    rerender(<RunTimeline runs={[...manyRuns]} selectedTaskId="many-43" onSelectRun={vi.fn()}>streamed steps</RunTimeline>);
+    expect(scroll).toHaveBeenCalledTimes(1);
+    rerender(<RunTimeline runs={manyRuns} selectedTaskId="many-0" onSelectRun={vi.fn()}>first run again</RunTimeline>);
     expect(scroll).toHaveBeenCalledTimes(2);
     expect(scroll.mock.instances[1]).toBe(screen.getByRole('button', { current: true }).closest('li'));
-    rerender(<RunTimeline runs={[...manyRuns]} selectedTaskId="many-43" onSelectRun={vi.fn()}>streamed steps</RunTimeline>);
-    expect(scroll).toHaveBeenCalledTimes(2);
-    rerender(<RunTimeline runs={manyRuns} selectedTaskId="many-0" onSelectRun={vi.fn()}>first run again</RunTimeline>);
-    expect(scroll).toHaveBeenCalledTimes(3);
-    expect(scroll.mock.instances[2]).toBe(screen.getByRole('button', { current: true }).closest('li'));
     delete (HTMLElement.prototype as Partial<HTMLElement>).scrollIntoView;
   });
 
-  it('reveals the selection when runs arrive after mount', () => {
+  it('preserves the overview when runs arrive after mount', () => {
     const scroll = vi.fn();
     Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', { configurable: true, value: scroll });
     const { rerender } = render(<RunTimeline runs={[]} selectedTaskId="run-3" onSelectRun={vi.fn()}>{null}</RunTimeline>);
     expect(scroll).not.toHaveBeenCalled();
     rerender(<RunTimeline runs={runs} selectedTaskId="run-3" onSelectRun={vi.fn()}>{null}</RunTimeline>);
-    expect(scroll).toHaveBeenCalledExactlyOnceWith({ block: 'start' });
-    expect(scroll.mock.instances[0]).toBe(screen.getByRole('button', { current: true }).closest('li'));
+    expect(scroll).not.toHaveBeenCalled();
     delete (HTMLElement.prototype as Partial<HTMLElement>).scrollIntoView;
   });
 
@@ -84,7 +82,9 @@ describe('RunTimeline', () => {
     const rect = vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function (this: HTMLElement) {
       return { top: this.tagName === 'BUTTON' ? 160 : 100, bottom: this.tagName === 'BUTTON' ? 204 : 700 } as DOMRect;
     });
-    render(<div style={{ overflowY: 'auto' }}><RunTimeline runs={runs} selectedTaskId="run-3" onSelectRun={vi.fn()}><div style={{ height: 2000 }}>steps</div></RunTimeline></div>);
+    const view = (id: string) => <div style={{ overflowY: 'auto' }}><RunTimeline runs={runs} selectedTaskId={id} onSelectRun={vi.fn()}><div style={{ height: 2000 }}>steps</div></RunTimeline></div>;
+    const { rerender } = render(view('run-1'));
+    rerender(view('run-3'));
     expect(scroll).not.toHaveBeenCalled();
     rect.mockRestore();
     delete (HTMLElement.prototype as Partial<HTMLElement>).scrollIntoView;

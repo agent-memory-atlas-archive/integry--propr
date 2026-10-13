@@ -120,7 +120,7 @@ const AssignmentEditor: React.FC<EditorProps> = ({ id, assignment, onClose, shee
   }, [sheet]);
 
   useLayoutEffect(() => {
-    if (sheet && !window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+    if (sheet && typeof window.matchMedia === 'function' && !window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
       ref.current?.animate?.([{ transform: 'translateY(100%)' }, { transform: 'translateY(0)' }], { duration: 180, easing: 'ease-out' });
     }
   }, [sheet]);

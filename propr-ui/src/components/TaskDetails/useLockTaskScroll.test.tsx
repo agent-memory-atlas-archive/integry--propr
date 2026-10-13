@@ -28,6 +28,7 @@ it('locks explicit targets independently of test ids and restores styles and scr
   first.rerender({ open: false });
   expect(document.body.style.position).toBe('fixed');
   expect(scrollTo).not.toHaveBeenCalled();
+  vi.stubGlobal('scrollY', 0);
   second.unmount();
   expect(document.body.style.cssText).toBe(original);
   expect(pane.style.overflow).toBe('auto');
@@ -36,5 +37,13 @@ it('locks explicit targets independently of test ids and restores styles and scr
   pane.remove();
   unrelated.remove();
   document.body.removeAttribute('style');
+  vi.unstubAllGlobals();
+});
+
+it('releases locks when scrollTo is absent', () => {
+  vi.stubGlobal('scrollTo', undefined);
+  const { unmount } = renderHook(() => useLockTaskScroll(true));
+  expect(() => unmount()).not.toThrow();
+  expect(document.body.style.position).toBe('');
   vi.unstubAllGlobals();
 });

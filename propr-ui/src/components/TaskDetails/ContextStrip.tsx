@@ -372,7 +372,7 @@ export const MobileGitContext: React.FC<Pick<ContextStripProps, 'taskInfo' | 'pr
 };
 
 export const MobilePeopleRuntime: React.FC<Pick<ContextStripProps, 'assignment' | 'modelName' | 'duration' | 'synthetic'>> = ({ assignment, modelName, duration, synthetic }) => (
-  <div data-testid="task-mobile-people-runtime" className="flex min-w-0 items-center justify-between gap-2">
+  <div data-testid="task-mobile-people-runtime" className="flex min-w-0 flex-wrap items-center justify-between gap-2">
     {assignment?.taskId && <AssignmentControl assignment={assignment} dense />}
     <div role="group" aria-label="Execution runtime" className="ml-auto flex min-w-0 max-w-[50%] shrink-0 items-center gap-1 whitespace-nowrap [&>span]:text-[10px] [&>span]:leading-3">
       <ModelChip modelName={modelName} duration={duration} synthetic={synthetic} compact />
