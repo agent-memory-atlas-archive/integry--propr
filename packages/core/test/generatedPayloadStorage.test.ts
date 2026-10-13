@@ -206,10 +206,15 @@ test('partial interruption is truthful and retries protect remaining state', asy
   assert.equal(await fs.readFile(path.join(f.worktree, 'customer.txt'), 'utf8'), 'customer data');
 });
 test('real same-device bind mount is rejected in an isolated mount namespace', async t => {
-  try { await exec('unshare', ['--user', '--map-root-user', '--mount', 'true']); }
-  catch { t.skip('Requires unshare with user/mount namespaces; no host mounts are changed'); return; }
   const f = await fixture(t); await f.generate();
   const outside = path.join(f.root, 'mount-source'); await fs.mkdir(outside); await fs.writeFile(path.join(outside, 'canary'), 'outside');
+  // Probe the operation itself: namespace creation alone does not grant mount
+  // permission on restricted runners. The mount disappears with this process.
+  try {
+    await exec('unshare', ['--user', '--map-root-user', '--mount', 'mount', '--bind', outside, path.join(f.worktree, 'node_modules', 'dependency')]);
+  } catch {
+    t.skip('Requires a bind mount in an isolated user/mount namespace; no host mounts are changed'); return;
+  }
   const source = path.resolve('packages/core/src/storage/generatedPayloads.ts');
   const lifecycleSource = path.resolve('packages/core/src/storage/lifecycle.ts');
   const program = `
@@ -251,4 +256,85 @@ test('policy withdrawal after preview prevents manual execution', async t => {
   const result = await f.service.execute(f.id, preview.confirmation, 'operator');
   assert.equal(result.deleted.length, 0);
   assert.ok(result.retained.some(candidate => candidate.reasons.includes('unsupported')));
+});
+
+test('trusted producer can regenerate an owned cleaned root across durable cleanup cycles', async t => {
+  const f = await fixture(t);
+  const before = await snapshot(f.worktree);
+  await f.service.updatePolicy(f.id, { enabled: true, idleHours: 24 }, 'operator');
+  for (let cycle = 0; cycle < 2; cycle++) {
+    await f.payloads.generate(f.worktree, 'node_modules', 'fixture public dependency', async directory => {
+      await fs.mkdir(path.join(directory, 'dependency'));
+      await fs.writeFile(path.join(directory, 'dependency', 'index.js'), 'generated dependency');
+    });
+    await f.payloads.complete(f.worktree, true); await f.age();
+    const preview = await f.service.preview(f.id, ['worktrees'], 'operator');
+    const result = await f.service.execute(f.id, preview.confirmation, 'operator');
+    assert.equal(result.deleted.length, 1);
+    assert.deepEqual(await fs.readdir(path.join(f.worktree, 'node_modules')), []);
+    assert.deepEqual(await snapshot(f.worktree), before);
+    // A new instance must recognize the durable tombstone, without offering it
+    // as another deletion or relying on process-local state.
+    const restarted = new GeneratedPayloadStorage(f.worktrees, path.join(f.root, 'control'), f.lifecycle);
+    assert.deepEqual(await f.lifecycle.cleanup(s => restarted.preview(false, 24, s)), []);
+    f.payloads = restarted;
+  }
+});
+for (const mutation of ['private-file', 'replacement', 'unknown-empty', 'failed-regeneration']) {
+  test(`cleaned-root regeneration protects ${mutation}`, async t => {
+    const f = await fixture(t); await f.generate();
+    const [candidate] = await f.lifecycle.cleanup(s => f.payloads.preview(false, 24, s));
+    assert.deepEqual(await f.lifecycle.cleanup(s => f.payloads.remove(candidate.id, s)), []);
+    const directory = path.join(f.worktree, 'node_modules');
+    if (mutation === 'private-file') await fs.writeFile(path.join(directory, 'private'), 'private canary');
+    if (mutation === 'replacement') {
+      // Keep the owned inode alive so the filesystem cannot reuse it.
+      await fs.rename(directory, `${directory}-owned`); await fs.mkdir(directory);
+    }
+    if (mutation === 'unknown-empty') await fs.unlink(path.join(f.root, 'control', 'generated-payloads', `${candidate.id}.json`));
+    if (mutation === 'failed-regeneration') {
+      await assert.rejects(f.payloads.generate(f.worktree, 'node_modules', 'regenerate', async () => { throw new Error('producer failed'); }), /producer failed/);
+      await f.payloads.complete(f.worktree, true); await f.age();
+      const restarted = new GeneratedPayloadStorage(f.worktrees, path.join(f.root, 'control'), f.lifecycle);
+      const protectedCandidates = await f.lifecycle.cleanup(s => restarted.preview(false, 24, s));
+      assert.ok(protectedCandidates[0].protectedReasons.includes('busy'));
+      assert.deepEqual(await f.lifecycle.cleanup(s => restarted.remove(candidate.id, s)), ['busy']);
+    }
+    await assert.rejects(f.payloads.generate(f.worktree, 'node_modules', 'regenerate', async () => assert.fail('must not adopt')));
+    if (mutation === 'private-file') assert.equal(await fs.readFile(path.join(directory, 'private'), 'utf8'), 'private canary');
+  });
+}
+
+test('cleaned-root claim excludes a second trusted producer while regeneration runs', async t => {
+  const f = await fixture(t); await f.generate();
+  const [candidate] = await f.lifecycle.cleanup(s => f.payloads.preview(false, 24, s));
+  assert.deepEqual(await f.lifecycle.cleanup(s => f.payloads.remove(candidate.id, s)), []);
+  let release!: () => void;
+  let started!: () => void;
+  const wait = new Promise<void>(resolve => { release = resolve; });
+  const ready = new Promise<void>(resolve => { started = resolve; });
+  const production = f.payloads.generate(f.worktree, 'node_modules', 'regenerate', async directory => {
+    started(); await wait;
+    await fs.writeFile(path.join(directory, 'dependency'), 'generated');
+  });
+  await ready;
+  try {
+    await assert.rejects(f.payloads.generate(f.worktree, 'node_modules', 'competing', async () => assert.fail('claim already consumed')), { code: 'EEXIST' });
+  } finally { release(); await production; }
+  await f.payloads.complete(f.worktree, true); await f.age();
+  assert.deepEqual(await f.lifecycle.cleanup(s => f.payloads.remove(candidate.id, s)), []);
+});
+test('replacement during trusted regeneration never registers the replacement payload', async t => {
+  const f = await fixture(t); await f.generate();
+  const [candidate] = await f.lifecycle.cleanup(s => f.payloads.preview(false, 24, s));
+  assert.deepEqual(await f.lifecycle.cleanup(s => f.payloads.remove(candidate.id, s)), []);
+  const original = path.join(f.worktree, 'node_modules');
+  await assert.rejects(f.payloads.generate(f.worktree, 'node_modules', 'regenerate', async directory => {
+    await fs.rename(original, `${original}-owned`); await fs.mkdir(original);
+    await fs.writeFile(path.join(original, 'private'), 'private canary');
+    await fs.writeFile(path.join(directory, 'dependency'), 'generated');
+  }), /unsafe_path/);
+  await f.payloads.complete(f.worktree, true); await f.age();
+  assert.deepEqual(await f.lifecycle.cleanup(s => f.payloads.remove(candidate.id, s)), ['busy']);
+  assert.equal(await fs.readFile(path.join(original, 'private'), 'utf8'), 'private canary');
 });

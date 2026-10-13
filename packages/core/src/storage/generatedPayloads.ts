@@ -7,6 +7,7 @@ import path from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import type { StorageCandidate, StorageProtection } from '@propr/shared';
 import { assertRealDirectory, repositoryStorageLifecycle, storageControlRoot, type StorageLifecycle } from './lifecycle.js';
+import { walk, budget, type Budget, type Limits } from './generatedPayloadWalk.js';
 
 // Names alone never establish ownership. Only an empty directory created by a
 // trusted producer, with a complete post-generation content proof, is eligible.
@@ -14,66 +15,7 @@ export const GENERATED_PAYLOADS = ['node_modules', '.propr/cache', '.propr/build
 type Payload = typeof GENERATED_PAYLOADS[number];
 interface Record {
   id: string; worktree: string; payload: Payload; device: number; inode: number;
-  completed: boolean; fingerprint: string; regeneration: string;
-}
-interface Budget { entries: number; bytes: number; deadline: number }
-interface Limits { maxEntries?: number; maxBytes?: number; maxMs?: number }
-const budget = (limits: Limits = {}): Budget => ({ entries: Math.min(100_000, limits.maxEntries ?? 100_000), bytes: Math.min(512 * 1024 * 1024, limits.maxBytes ?? 512 * 1024 * 1024), deadline: Date.now() + Math.min(5_000, limits.maxMs ?? 5_000) });
-
-/** Linux descriptor-pinned walk. Reject links (including hardlinks), mounts,
- * nested Git state, and special files. Delete only exact files already proved.
- * No recursive rm, globbing, or following caller-provided filesystem paths.
- */
-async function walk(directory: string, device: number, limits: Budget, signal?: AbortSignal, remove = false, expected?: Map<string, string>, onRemove?: () => void): Promise<{ fingerprint: string; bytes: number; nodes: Map<string, string> }> {
-  if (process.platform !== 'linux') throw new Error('unsupported');
-  const mounts = (await fs.readFile('/proc/self/mountinfo', 'utf8')).split('\n').filter(Boolean).map(line => line.split(' ')[4].replace(/\\([0-7]{3})/g, (_, octal: string) => String.fromCharCode(parseInt(octal, 8))));
-  const hash = createHash('sha256');
-  let bytes = 0;
-  const nodes = new Map<string, string>();
-  const visit = async (target: string, relative: string): Promise<void> => {
-    signal?.throwIfAborted();
-    if (--limits.entries < 0 || Date.now() >= limits.deadline) throw new Error('bounded_scan');
-    const stat = await fs.lstat(target);
-    const real = await fs.realpath(target);
-    if (stat.dev !== device || stat.isSymbolicLink() || mounts.includes(real) || (!stat.isDirectory() && !stat.isFile()) || (stat.isFile() && stat.nlink !== 1) || path.basename(relative) === '.git') throw new Error('unsafe_path');
-    if (relative) bytes += stat.blocks * 512; // Empty root is retained.
-    limits.bytes -= stat.blocks * 512;
-    if (limits.bytes < 0) throw new Error('bounded_scan');
-    const handle = await fs.open(target, constants.O_RDONLY | constants.O_NOFOLLOW | (stat.isDirectory() ? constants.O_DIRECTORY : constants.O_NONBLOCK));
-    try {
-      const pinned = await handle.stat();
-      if (pinned.ino !== stat.ino || pinned.dev !== stat.dev) throw new Error('unsafe_path');
-      const node = createHash('sha256');
-      node.update(`${relative}\0${stat.dev}:${stat.ino}:${stat.mode}:${stat.isFile() ? stat.size : 0}\0`);
-      if (remove && stat.isDirectory() && expected?.get(relative) !== node.copy().digest('hex')) throw new Error('private_work');
-      if (stat.isDirectory()) {
-        const pinnedPath = `/proc/self/fd/${handle.fd}`;
-        const names: string[] = [];
-        const entries = await fs.opendir(pinnedPath);
-        for await (const entry of entries) {
-          if (names.length >= limits.entries || Date.now() >= limits.deadline) throw new Error('bounded_scan');
-          names.push(entry.name);
-        }
-        for (const name of names.sort()) await visit(path.join(pinnedPath, name), path.posix.join(relative, name));
-        if (!remove && (await handle.stat()).mtimeMs !== stat.mtimeMs) throw new Error('changed');
-      } else {
-        const stream = handle.createReadStream({ autoClose: false });
-        for await (const chunk of stream) { signal?.throwIfAborted(); if (Date.now() >= limits.deadline) throw new Error('bounded_scan'); node.update(chunk); }
-      }
-      const digest = node.digest('hex');
-      nodes.set(relative, digest); hash.update(relative).update(digest);
-      if (remove && expected?.get(relative) !== digest) throw new Error('private_work');
-      if (remove && relative) {
-        signal?.throwIfAborted();
-        const final = await fs.lstat(target);
-        if (final.ino !== pinned.ino || final.dev !== pinned.dev || (stat.isFile() && (final.size !== stat.size || final.mtimeMs !== stat.mtimeMs || final.ctimeMs !== stat.ctimeMs))) throw new Error('unsafe_path');
-        if (stat.isDirectory()) await fs.rmdir(target); else await fs.unlink(target);
-        onRemove?.();
-      }
-    } finally { await handle.close(); }
-  };
-  await visit(directory, '');
-  return { fingerprint: hash.digest('hex'), bytes, nodes };
+  completed: boolean; cleaned?: boolean; generating?: boolean; fingerprint: string; regeneration: string;
 }
 
 export class GeneratedPayloadStorage {
@@ -114,16 +56,22 @@ export class GeneratedPayloadStorage {
       const stat = await handle.stat();
       if (!stat.isFile() || stat.nlink !== 1 || stat.size > 16384) throw new Error('unknown_ownership');
       const record = JSON.parse(await handle.readFile('utf8')) as Record;
-      if (record.id !== id || this.id(record.worktree, record.payload) !== id || !Number.isSafeInteger(record.device) || !Number.isSafeInteger(record.inode) || typeof record.completed !== 'boolean' || !/^[0-9a-f]{64}$/.test(record.fingerprint) || !record.regeneration) throw new Error('unknown_ownership');
+      if (record.id !== id || this.id(record.worktree, record.payload) !== id || !Number.isSafeInteger(record.device) || !Number.isSafeInteger(record.inode) || typeof record.completed !== 'boolean' || !this.validState(record) || !/^[0-9a-f]{64}$/.test(record.fingerprint) || !record.regeneration) throw new Error('unknown_ownership');
       this.directory(record.worktree, record.payload);
       return record;
     } finally { await handle.close(); }
+  }
+  private validState(record: Record): boolean {
+    return (record.cleaned === undefined || typeof record.cleaned === 'boolean')
+      && (record.generating === undefined || typeof record.generating === 'boolean')
+      && !(record.cleaned && record.generating);
   }
   private id(worktree: string, payload: Payload): string { return `payload-${createHash('sha256').update(`${path.resolve(worktree)}\0${payload}`).digest('hex')}`; }
   /** Trusted producer API, never an HTTP adopt-existing-directory operation.
    * regenerate must produce only refetchable dependencies/generated outputs.
    * It must not copy customer inputs, secrets or private state into the payload.
-   * An existing directory, interrupted producer or later edit remains protected.
+   * Only a descriptor-proved owned cleaned root may be reused. Unknown existing
+   * directories, interrupted producers and later edits remain protected.
    */
   async generate(worktree: string, payload: Payload, regeneration: string, regenerate: (directory: string) => Promise<void>): Promise<void> {
     if (!regeneration || regeneration.length > 4096) throw new Error('Regeneration semantics required');
@@ -132,11 +80,47 @@ export class GeneratedPayloadStorage {
       await assertRealDirectory(worktree);
       await this.gitProof(worktree, payload);
       await fs.mkdir(path.dirname(directory), { recursive: true }); await assertRealDirectory(path.dirname(directory));
-      await fs.mkdir(directory); // EEXIST deliberately refuses adoption.
+      const cleaned = await this.prepareGeneration(worktree, payload, directory);
+      if (cleaned) {
+        await this.regenerateCleaned(cleaned, { directory, regeneration, regenerate });
+        return;
+      }
       const stat = await fs.lstat(worktree);
       await regenerate(directory);
       const proof = await walk(directory, stat.dev, budget(this.limits));
       await this.write({ id: this.id(worktree, payload), worktree: path.resolve(worktree), payload, device: stat.dev, inode: stat.ino, completed: false, fingerprint: proof.fingerprint, regeneration });
+    });
+  }
+  private async prepareGeneration(worktree: string, payload: Payload, directory: string): Promise<Record | null> {
+    return this.lifecycle.exclusive(async () => {
+      try { await fs.mkdir(directory); return null; }
+      catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+        const record = await this.read(this.id(worktree, payload)).catch(() => null);
+        if (!record?.cleaned) throw error; // Unknown existing directories are never adopted.
+        await this.pinned(record, async pinnedDirectory => {
+          const empty = await walk(pinnedDirectory, record.device, budget(this.limits));
+          if (empty.nodes.size !== 1 || empty.fingerprint !== record.fingerprint) throw new Error('private_work');
+          // Consume before the producer runs. Failed/interrupted generation cannot
+          // reuse the tombstone, even when it left the root empty.
+          await this.write({ ...record, cleaned: false, generating: true, completed: false });
+        });
+        return record;
+      }
+    });
+  }
+  private async regenerateCleaned(record: Record, producer: {
+    directory: string; regeneration: string; regenerate: (directory: string) => Promise<void>;
+  }): Promise<void> {
+    await this.pinned(record, async directory => {
+      const empty = await walk(directory, record.device, budget(this.limits));
+      if (empty.nodes.size !== 1 || empty.fingerprint !== record.fingerprint) throw new Error('private_work');
+      const identity = await fs.lstat(directory);
+      await producer.regenerate(directory);
+      const proof = await walk(directory, record.device, budget(this.limits));
+      const current = await fs.lstat(producer.directory);
+      if (current.dev !== identity.dev || current.ino !== identity.ino || await fs.realpath(producer.directory) !== await fs.realpath(directory)) throw new Error('unsafe_path');
+      await this.write({ ...record, cleaned: false, generating: false, completed: false, fingerprint: proof.fingerprint, regeneration: producer.regeneration });
     });
   }
   async complete(worktree: string, success: boolean): Promise<void> {
@@ -146,7 +130,7 @@ export class GeneratedPayloadStorage {
           if (error.code === 'ENOENT') return null;
           throw error;
         });
-        if (record) { record.completed = success; await this.write(record); }
+        if (record && !record.cleaned && !record.generating) { record.completed = success; await this.write(record); }
       }
     });
   }
@@ -174,18 +158,12 @@ export class GeneratedPayloadStorage {
   private async inspect(record: Record, limits: Budget, signal?: AbortSignal) {
     await this.gitProof(record.worktree, record.payload, signal);
     return this.pinned(record, async directory => {
-      const proof = await walk(directory, record.device, limits, signal);
+      const proof = await walk(directory, record.device, limits, { signal });
       if (proof.fingerprint !== record.fingerprint) throw new Error('private_work');
       return proof;
     });
   }
-  /** Called under the shared cleanup barrier, with fresh queue/DB authority. */
-  async preview(busy: boolean, idleHours: number, signal: AbortSignal, enabled = true): Promise<StorageCandidate[]> {
-    const candidates: StorageCandidate[] = [];
-    const root = path.join(this.root, 'generated-payloads');
-    try { await assertRealDirectory(root); } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return candidates; throw error; }
-    const limits = budget(this.limits);
-    const clock = await this.lifecycle.lastUse();
+  private async previewNames(root: string, limits: Budget): Promise<{ names: string[]; cursor: string }> {
     const directory = await fs.opendir(root);
     const names: string[] = [];
     for await (const entry of directory) { if (names.length >= 10_000 || Date.now() >= limits.deadline) break; names.push(entry.name); }
@@ -202,26 +180,48 @@ export class GeneratedPayloadStorage {
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
     }
+    return { names, cursor };
+  }
+  /** Called under the shared cleanup barrier, with fresh queue/DB authority. */
+  async preview(busy: boolean, idleHours: number, signal: AbortSignal, enabled = true): Promise<StorageCandidate[]> {
+    const candidates: StorageCandidate[] = [];
+    const root = path.join(this.root, 'generated-payloads');
+    try { await assertRealDirectory(root); } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return candidates; throw error; }
+    const limits = budget(this.limits);
+    const clock = await this.lifecycle.lastUse();
+    const { names, cursor } = await this.previewNames(root, limits);
+    const cursorPath = path.join(root, 'cursor');
     const selected = [...names.filter(name => name > cursor), ...names.filter(name => name <= cursor)].filter(name => name !== 'cursor').slice(0, 10);
+    let lastName: string | undefined;
     for (const name of selected) {
       if (candidates.length >= 10 || Date.now() >= limits.deadline || limits.entries <= 0 || limits.bytes <= 0) break;
+      lastName = name;
       const candidate: StorageCandidate = { id: name.slice(0, -5), category: 'worktrees', estimatedBytes: null, protectedReasons: [] };
-      try {
-        const record = await this.read(candidate.id);
-        if (!enabled) candidate.protectedReasons = ['unsupported'];
-        else if (busy || !record.completed || signal.aborted) candidate.protectedReasons = ['busy'];
-        else if (!clock) candidate.protectedReasons = ['unknown_use'];
-        else if (Date.now() - clock < Math.max(24, idleHours) * 3_600_000) candidate.protectedReasons = ['recent_use'];
-        else candidate.estimatedBytes = (await this.inspect(record, limits, signal)).bytes;
-      } catch (error) { candidate.protectedReasons = [signal.aborted ? 'busy' : this.reason(error)]; }
+      const inspected = await this.previewCandidate(candidate, { busy, idleHours, signal, enabled, clock, limits });
+      if (!inspected) continue;
       candidates.push(candidate);
     }
-    if (candidates.length) {
+    if (lastName) {
       const temporary = path.join(root, randomUUID());
-      await fs.writeFile(temporary, `${candidates.at(-1)!.id}.json`, { flag: 'wx' });
+      await fs.writeFile(temporary, lastName, { flag: 'wx' });
       await fs.rename(temporary, cursorPath);
     }
     return candidates;
+  }
+  private async previewCandidate(candidate: StorageCandidate, state: {
+    busy: boolean; idleHours: number; signal: AbortSignal; enabled: boolean; clock: number | null; limits: Budget;
+  }): Promise<boolean> {
+    const { busy, idleHours, signal, enabled, clock, limits } = state;
+    try {
+      const record = await this.read(candidate.id);
+      if (record.cleaned) return false;
+      if (!enabled) candidate.protectedReasons = ['unsupported'];
+      else if (busy || record.generating || !record.completed || signal.aborted) candidate.protectedReasons = ['busy'];
+      else if (!clock) candidate.protectedReasons = ['unknown_use'];
+      else if (Date.now() - clock < Math.max(24, idleHours) * 3_600_000) candidate.protectedReasons = ['recent_use'];
+      else candidate.estimatedBytes = (await this.inspect(record, limits, signal)).bytes;
+    } catch (error) { candidate.protectedReasons = [signal.aborted ? 'busy' : this.reason(error)]; }
+    return true;
   }
   private reason(error: unknown): StorageProtection {
     const message = (error as Error).message;
@@ -231,19 +231,24 @@ export class GeneratedPayloadStorage {
     let removed = false;
     try {
       const record = await this.read(id);
-      if (!record.completed || await this.lifecycle.busy()) return ['busy'];
+      if (record.cleaned || record.generating || !record.completed || await this.lifecycle.busy()) return ['busy'];
       const proof = await this.inspect(record, budget(this.limits), signal);
       signal.throwIfAborted();
       // No rename: the exact worktree/path and manifest remain valid for partial
       // interruption. A partial removal fails its fingerprint on a future retry.
       // Managed writers are excluded by the lifecycle gate for this entire walk.
-      await this.pinned(record, directory => walk(directory, record.device, budget(this.limits), signal, true, proof.nodes, () => { removed = true; }));
+      await this.pinned(record, async directory => {
+        await walk(directory, record.device, budget(this.limits), { signal, remove: true, expected: proof.nodes, onRemove: () => { removed = true; } });
+        signal.throwIfAborted();
+        const empty = await walk(directory, record.device, budget(this.limits), { signal });
+        if (empty.nodes.size !== 1) throw new Error('changed');
+        await this.write({ ...record, completed: false, cleaned: true, fingerprint: empty.fingerprint });
+      });
       // Keep the empty payload root: removing by its original pathname would
       // add a substitution race after releasing descriptors. No customer file
-      // can be lost by retaining an empty directory.
-
+      // can be lost by retaining an empty directory. The durable cleaned proof
+      // permits only this owned empty inode to enter another production cycle.
       signal.throwIfAborted();
-      await fs.unlink(path.join(this.root, 'generated-payloads', `${id}.json`));
       return [];
     } catch (error) { return [signal.aborted ? 'busy' : this.reason(error), ...(removed ? ['partial_generated_cleanup' as const] : [])]; }
   }

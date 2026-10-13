@@ -1,3 +1,4 @@
+import { removeRegisteredCache } from './cacheRemoval.js';
 import { GeneratedPayloadStorage } from './generatedPayloads.js';
 import { StorageContractError, confirmationInvalid, instanceSelectionChanged, validatePreviewSelection, type CleanupPreviewArgs, type CleanupPreviewRequest, type CandidateExecution, type SavedPreview } from './cleanupRequest.js';
 import fs from 'node:fs/promises';
@@ -216,42 +217,10 @@ export class InstanceStorageService {
     return (this.services.auditRepository ?? auditRepository)(directory, record.identity, `https://github.com/${record.owner}/${record.name}.git`, { signal, token: await this.services.remoteToken?.().catch(() => undefined), metadataFingerprint: record.metadataFingerprint });
   }
   private async removeCache(record: CacheRecord, fingerprint: string, signal: AbortSignal, authorize?: StorageAuthority): Promise<StorageProtection[]> {
-    const directory = resolveRepositoryClonePath(this.services.clonesRoot, record.owner, record.name);
-    await assertRealDirectory(this.services.clonesRoot);
-    await assertRealDirectory(path.dirname(directory));
-    const root = await fs.open(this.services.clonesRoot, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_DIRECTORY);
-    const parent = await fs.open(path.dirname(directory), constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_DIRECTORY);
-    let quarantine: string | undefined;
-    try {
-      const source = `/proc/self/fd/${parent.fd}/${record.name}`;
-      const stat = await fs.lstat(source);
-      if (stat.isSymbolicLink() || stat.dev !== record.identity.device || stat.ino !== record.identity.inode) return ['unsafe_path'];
-      quarantine = await fs.mkdtemp(`/proc/self/fd/${root.fd}/.cleanup-`);
-      await fs.rename(source, `${quarantine}/repository`);
-      // Rename isolates the exact inode; a substituted source is retained, never followed.
-      // On interruption the quarantine remains intact and is never age-pruned.
-      const realQuarantine = await fs.realpath(`${quarantine}/repository`);
-      const final = await this.auditCache(realQuarantine, record, signal);
-      if (signal.aborted || final.reasons.length || final.fingerprint !== fingerprint) {
-        // Restore only when the original name is still absent; lifecycle peers cannot race
-        // here. If an external writer replaced it, retain both directories for recovery.
-        const occupied = await fs.lstat(source).then(() => true, error => { if (error.code === 'ENOENT') return false; throw error; });
-        if (!occupied) await fs.rename(`${quarantine}/repository`, source);
-        return signal.aborted ? ['busy'] : final.reasons.length ? final.reasons : ['changed'];
-      }
-      try { await authorize?.(); }
-      catch (error) {
-        const occupied = await fs.lstat(source).then(() => true, error => { if (error.code === 'ENOENT') return false; throw error; });
-        if (!occupied) await fs.rename(`${quarantine}/repository`, source);
-        throw error;
-      }
-      await fs.rm(`${quarantine}/repository`, { recursive: true });
-      await fs.unlink(path.join(this.root, 'repositories', `${record.id}.json`));
-      return [];
-    } finally {
-      if (quarantine) await fs.rmdir(quarantine).catch(() => undefined);
-      await parent.close(); await root.close();
-    }
+    return removeRegisteredCache(record, fingerprint, signal, {
+      clonesRoot: this.services.clonesRoot, root: this.root, authorize,
+      auditCache: (directory, cache, abortSignal) => this.auditCache(directory, cache, abortSignal),
+    });
   }
   private async unregisteredCandidates(registered: CacheRecord[]): Promise<StorageCandidate[]> {
     const candidates: StorageCandidate[] = [];
