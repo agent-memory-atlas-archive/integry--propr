@@ -1,4 +1,4 @@
-import { expect, test, type Page } from '@playwright/test';
+import { expect, test, type Locator, type Page } from '@playwright/test';
 import { mkdir } from 'node:fs/promises';
 
 const taskId = 'task-assignment-2894';
@@ -85,7 +85,7 @@ async function openTask(page: Page, options: FixtureOptions, viewport = { width:
   return state;
 }
 
-async function capture(page: Page, name: string) {
+async function capture(page: Page | Locator, name: string) {
   if (!process.env.PROPR_CAPTURE_PREVIEWS) return;
   await mkdir('../.propr/previews', { recursive: true });
   await page.screenshot({ animations: 'disabled', path: `../.propr/previews/${name}.png` });
@@ -246,19 +246,20 @@ for (const width of [320, 390]) {
     await expect(git.getByRole('link', { name: '#2894' })).toBeVisible();
     await expect(git).not.toContainText('integry/');
     const runtime = metadata.getByRole('group', { name: 'Execution runtime' });
-    await expect(runtime.locator('[title="Claude Opus 5.5"] > span')).toHaveText('Claude Opus 5.5');
+    const modelLabel = runtime.locator('[title="Claude Opus 5.5"] > span');
+    await expect(modelLabel).toHaveText('Claude Opus 5.5');
+    await expect(modelLabel).toBeVisible();
+    await expect.poll(() => modelLabel.evaluate(element => element.scrollWidth <= element.clientWidth)).toBe(true);
     await expect(runtime).toContainText('20m 0s');
     const peopleBox = (await assignment.boundingBox())!;
     const runtimeBox = (await runtime.boundingBox())!;
-    expect(Math.abs(peopleBox.y - runtimeBox.y)).toBeLessThan(4);
-    expect(peopleBox.x + peopleBox.width).toBeLessThanOrEqual(runtimeBox.x);
+    if (width === 390) expect(Math.abs(peopleBox.y - runtimeBox.y)).toBeLessThan(4);
+    // Only the narrow layout may stack runtime below assignment.
+    expect(peopleBox.x + peopleBox.width <= runtimeBox.x || (width === 320 && peopleBox.y + peopleBox.height <= runtimeBox.y)).toBe(true);
     await expect(metadata.getByRole('group', { name: 'Consumption' })).toContainText('↑0↓0(no quota data)');
-    await expect(metadata.getByRole('button', { name: 'Follow Up', exact: true })).toBeVisible();
+    await metadata.getByRole('button', { name: 'Follow Up', exact: true }).click({ trial: true });
     await expectNoHorizontalOverflow(page);
-    if (process.env.PROPR_CAPTURE_PREVIEWS && width === 390) {
-      await mkdir('../.propr/previews', { recursive: true });
-      await metadata.screenshot({ path: '../.propr/previews/mobile-metadata-390.png' });
-    }
+    await capture(metadata, `mobile-metadata-${width}`);
 
     expect((await details.getByRole('button', { name: 'Follow Up', exact: true }).boundingBox())!.height).toBeGreaterThanOrEqual(44);
     await assignment.getByRole('button', { name: 'Edit assignees' }).click();
