@@ -87,6 +87,13 @@ async function fixture(page: Page, options: FixtureOptions = {}) {
   return state;
 }
 
+async function openTask(page: Page, options: FixtureOptions, viewport = { width: 1440, height: 900 }) {
+  const state = await fixture(page, options);
+  await page.setViewportSize(viewport);
+  await page.goto(`/tasks/${taskId}`);
+  return state;
+}
+
 async function capture(page: Page, name: string) {
   if (!process.env.PROPR_CAPTURE_PREVIEWS) return;
   await mkdir('../.propr/previews', { recursive: true });
@@ -102,9 +109,7 @@ async function expectNoHorizontalOverflow(page: Page) {
 }
 
 test('shows the assignees in the Git cluster and loads assignable users only when the editor opens', async ({ page }) => {
-  const state = await fixture(page, { assignees: [octocat, hubot] });
-  await page.setViewportSize({ width: 1440, height: 900 });
-  await page.goto(`/tasks/${taskId}`);
+  const state = await openTask(page, { assignees: [octocat, hubot] });
 
   const assignment = gitContext(page).getByTestId('task-assignment');
   await expect(assignment.getByRole('listitem', { name: 'Assigned to @octocat' })).toBeVisible();
@@ -130,9 +135,7 @@ test('shows the assignees in the Git cluster and loads assignable users only whe
 });
 
 test('assigns several users and then unassigns everyone', async ({ page }) => {
-  const state = await fixture(page, { assignees: [] });
-  await page.setViewportSize({ width: 1440, height: 900 });
-  await page.goto(`/tasks/${taskId}`);
+  const state = await openTask(page, { assignees: [] });
 
   const assignment = gitContext(page).getByTestId('task-assignment');
   await expect(assignment.getByText('Unassigned', { exact: true })).toBeVisible();
@@ -162,9 +165,7 @@ test('assigns several users and then unassigns everyone', async ({ page }) => {
 });
 
 test('rolls the display back and toasts when a save fails', async ({ page }) => {
-  await fixture(page, { assignees: [octocat], save: 'unavailable' });
-  await page.setViewportSize({ width: 1440, height: 900 });
-  await page.goto(`/tasks/${taskId}`);
+  await openTask(page, { assignees: [octocat], save: 'unavailable' });
 
   const assignment = gitContext(page).getByTestId('task-assignment');
   await assignment.getByRole('button', { name: 'Edit assignees' }).click();
@@ -181,9 +182,7 @@ test('rolls the display back and toasts when a save fails', async ({ page }) => 
 });
 
 test('keeps a read-only display after a 403 and stops offering the editor', async ({ page }) => {
-  const state = await fixture(page, { assignees: [octocat], save: 'forbidden' });
-  await page.setViewportSize({ width: 1440, height: 900 });
-  await page.goto(`/tasks/${taskId}`);
+  const state = await openTask(page, { assignees: [octocat], save: 'forbidden' });
 
   const assignment = gitContext(page).getByTestId('task-assignment');
   await assignment.getByRole('button', { name: 'Edit assignees' }).click();
@@ -213,9 +212,7 @@ test('renders nothing for a goal task that has no issue or pull request', async 
 });
 
 test('traps focus in the popover and returns it to the trigger on Escape', async ({ page }) => {
-  await fixture(page, { assignees: [octocat] });
-  await page.setViewportSize({ width: 1440, height: 900 });
-  await page.goto(`/tasks/${taskId}`);
+  await openTask(page, { assignees: [octocat] });
 
   const trigger = gitContext(page).getByRole('button', { name: 'Edit assignees' });
   await trigger.click();
@@ -247,9 +244,7 @@ test('traps focus in the popover and returns it to the trigger on Escape', async
 
 for (const width of [320, 390]) {
   test(`shows the assignment in the expanded mobile summary and leaves the compact bar alone at ${width}px`, async ({ page }) => {
-    const state = await fixture(page, { assignees: [octocat, hubot] });
-    await page.setViewportSize({ width, height: 844 });
-    await page.goto(`/tasks/${taskId}`);
+    const state = await openTask(page, { assignees: [octocat, hubot] }, { width, height: 844 });
 
     const details = page.getByTestId('task-details');
     const assignment = details.getByTestId('task-assignment').filter({ visible: true });
@@ -350,36 +345,23 @@ for (const width of [320, 390]) {
 
 }
 
-test('1440px renders exactly one visible assignment control, with one edit button', async ({ page }) => {
-  await fixture(page, { assignees: [octocat] });
-  await page.setViewportSize({ width: 1440, height: 900 });
-  await page.goto(`/tasks/${taskId}`);
-
-  const details = page.getByTestId('task-details');
-  const visible = details.getByTestId('task-assignment').filter({ visible: true });
-  await expect(visible).toHaveCount(1);
-  await expect(details.getByRole('button', { name: 'Edit assignees' }).filter({ visible: true })).toHaveCount(1);
-  await expect(details.getByRole('button', { name: 'Assign users' }).filter({ visible: true })).toHaveCount(0);
-  // Inside the Git cluster too: one control, one edit button.
-  await expect(gitContext(page).getByTestId('task-assignment')).toHaveCount(1);
-  await expect(gitContext(page).getByRole('button', { name: /^(Edit assignees|Assign users)$/ })).toHaveCount(1);
-});
-
-test('1440px an unassigned task offers one visible Assign button', async ({ page }) => {
-  await fixture(page, { assignees: [] });
-  await page.setViewportSize({ width: 1440, height: 900 });
-  await page.goto(`/tasks/${taskId}`);
-
-  const details = page.getByTestId('task-details');
-  await expect(details.getByTestId('task-assignment').filter({ visible: true })).toHaveCount(1);
-  await expect(details.getByRole('button', { name: 'Assign users' }).filter({ visible: true })).toHaveCount(1);
-  await expect(gitContext(page).getByRole('button', { name: 'Assign users' })).toHaveCount(1);
-});
+for (const assignees of [[octocat], []]) {
+  const buttonName = assignees.length ? 'Edit assignees' : 'Assign users';
+  test(`1440px renders exactly one visible assignment control with one ${buttonName} button`, async ({ page }) => {
+    await openTask(page, { assignees });
+    const details = page.getByTestId('task-details');
+    await expect(details.getByTestId('task-assignment').filter({ visible: true })).toHaveCount(1);
+    await expect(details.getByRole('button', { name: buttonName }).filter({ visible: true })).toHaveCount(1);
+    await expect(details.getByRole('button', { name: assignees.length ? 'Assign users' : 'Edit assignees' }).filter({ visible: true })).toHaveCount(0);
+    // Inside the Git cluster too: one control, one assignment button.
+    await expect(gitContext(page).getByTestId('task-assignment')).toHaveCount(1);
+    await expect(gitContext(page).getByRole('button', { name: /^(Edit assignees|Assign users)$/ })).toHaveCount(1);
+    await expect(gitContext(page).getByRole('button', { name: buttonName })).toHaveCount(1);
+  });
+}
 
 test('explains a truncated candidate list and points to GitHub for anyone else', async ({ page }) => {
-  await fixture(page, { assignees: [octocat], truncated: true });
-  await page.setViewportSize({ width: 1440, height: 900 });
-  await page.goto(`/tasks/${taskId}`);
+  await openTask(page, { assignees: [octocat], truncated: true });
 
   await gitContext(page).getByRole('button', { name: 'Edit assignees' }).click();
   const editor = page.getByRole('dialog', { name: 'Assign users' });
@@ -388,9 +370,7 @@ test('explains a truncated candidate list and points to GitHub for anyone else',
 
 for (const [width, height] of [[1440, 900], [390, 844]] as const) {
   test(`${width}px offers a retry when the assignment cannot be read, and shows it once a retry succeeds`, async ({ page }) => {
-    const state = await fixture(page, { assignees: [octocat, hubot], failedReads: 1 });
-    await page.setViewportSize({ width, height });
-    await page.goto(`/tasks/${taskId}`);
+    const state = await openTask(page, { assignees: [octocat, hubot], failedReads: 1 }, { width, height });
 
     const details = page.getByTestId('task-details');
     const failed = details.getByTestId('task-assignment-error').filter({ visible: true });
@@ -412,9 +392,7 @@ for (const [width, height] of [[1440, 900], [390, 844]] as const) {
 for (const width of [320, 390]) {
   test(`dense mobile metadata stays reachable at ${width}px`, async ({ page }) => {
     const users = [user(11, 'long-assignee-login-for-maintainer-one'), user(12, 'long-assignee-login-for-maintainer-two'), user(13, 'long-assignee-login-for-maintainer-three')];
-    await fixture(page, { assignees: users, denseGit: true });
-    await page.setViewportSize({ width, height: 844 });
-    await page.goto(`/tasks/${taskId}`);
+    await openTask(page, { assignees: users, denseGit: true }, { width, height: 844 });
     const metadata = page.getByTestId('task-mobile-metadata');
     await expect(metadata.getByRole('group', { name: 'Attempt lineage' })).toBeVisible();
     await expect(metadata.getByTitle('View commit on GitHub')).toBeVisible();
