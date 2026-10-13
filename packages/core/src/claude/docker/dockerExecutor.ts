@@ -233,9 +233,13 @@ async function startDockerCommand(
     if (command === 'docker' && args[0] === 'run') assertNativeLogAdmission(options.diagnostics);
     const executionArgs = resolveExecutionArgs(command, args, options.taskId, ownershipContext?.attemptGeneration);
     deadline.remaining();
+    await extensionLaunchForDockerRun(command, args, options)?.beforeLaunch();
     const admission = command === 'docker' && args[0] === 'run' && !options.costCapExempt
         ? await prepareAdmittedAgent(executionArgs, {
-            createArgs: () => withWorkflowExecutionDeadline(command, executionArgs, deadline.remaining()),
+            createArgs: async () => {
+                await extensionLaunchForDockerRun(command, args, options)?.beforeLaunch();
+                return withWorkflowExecutionDeadline(command, executionArgs, deadline.remaining());
+            },
             signal: executionSignal, taskId: options.taskId, extraEnvVars: options.extraEnvVars,
             cwd: options.cwd && fs.existsSync(options.cwd) ? options.cwd : undefined,
         })

@@ -1,3 +1,4 @@
+import { up as grantMigration } from '../src/db/migrations/20261013220000_extension_grant_network.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import knex from 'knex';
@@ -25,7 +26,7 @@ async function fixture() {
   await database.schema.createTable('instance_members', t => { t.string('github_user_id').primary(); t.string('role'); });
   await database.schema.createTable('agent_definitions', t => { t.string('id').primary(); });
   await database('instance_members').insert([{ github_user_id: '1', role: 'admin' }, { github_user_id: '2', role: 'member' }, { github_user_id: '3', role: 'admin' }]);
-  await up(database);
+  await up(database); await grantMigration(database);
   return { database, store: new ExtensionProfileStore(database, { SYSTEM_TASK_SECRET: 'synthetic-private-custody-test-key' }) };
 }
 
@@ -88,7 +89,11 @@ test('scope, runtime, capability, demotion, tenant and secret substitution fail 
   assert.equal(moved.secrets.docs.configured, false);
   await database('instance_members').where({ github_user_id: '1' }).update({ role: 'member' });
   await assert.rejects(store.assertLaunch('1', select(writes), context), /durable/);
-  await assert.rejects(store.assertLaunch('3', select(writes), context), /durable/);
+  await store.assertLaunch('3', select(writes), { ...context, allowWrite: true });
+  const demotedCreatorGrant = await store.createGrant('3', writes, 'demoted-creator');
+  await store.activateGrant(demotedCreatorGrant, '3', select(writes));
+  await database('instance_members').where({ github_user_id: '3' }).update({ role: 'member' });
+  await assert.rejects(store.activateGrant(demotedCreatorGrant, '3', select(writes)), /durable/);
   const { database: other, store: otherStore } = await fixture(); t.after(() => other.destroy());
   await assert.rejects(otherStore.read('1', select(writes)), /unavailable/);
 });
@@ -305,4 +310,199 @@ test('snapshot loading failures release only their own reserved slot and keep fa
   assert.equal(grant.bytes, 4 * EXTENSION_LIMITS.responseBytes);
   await store.finishGatewayCall(token, EXTENSION_LIMITS.responseBytes);
   assert.equal((await database('extension_run_grants').first()).connections, 0);
+});
+
+test('operator catalog projections exclude internals and customers cannot smuggle stdio fields', async t => {
+  const { database, store } = await fixture(); t.after(() => database.destroy());
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'operator-catalog-')); t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const { operatorCatalogDigest } = await import('../src/extensions/operatorCatalog.js');
+  const entry = { id: 'local-docs', kind: 'stdio' as const, executable: process.execPath, args: ['--version'], secretEnv: { API_KEY: 'OPERATOR_DOCS_KEY' }, tools: ['lookup'], capability: 'read' as const };
+  const filename = path.join(root, 'catalog.json'); await fs.writeFile(filename, JSON.stringify([entry]), { mode: 0o600 });
+  store.environment.PROPR_EXTENSION_CATALOG_FILE = filename; store.environment.OPERATOR_DOCS_KEY = secret;
+  const descriptor = { kind: 'catalog' as const, name: 'local', catalogId: entry.id, digest: operatorCatalogDigest(entry), enabled: true, tools: ['lookup'], capability: 'read' as const };
+  delete store.environment.OPERATOR_DOCS_KEY;
+  const pending = await store.save('1', { ...input(), mcpServers: [descriptor] });
+  assert.equal(pending.secrets.local.configured, false);
+  await assert.rejects(store.assertLaunch('1', select(pending), context), /not configured/);
+  store.environment.OPERATOR_DOCS_KEY = secret;
+  const profile = await store.save('1', { ...input(), mcpServers: [descriptor] });
+  assert.deepEqual(profile.secrets.local, { fields: ['API_KEY'], configured: true });
+  const projection = JSON.stringify({ profiles: await store.list('1'), history: await store.history('1', profile.profileId), catalog: await store.catalog.publicEntries() });
+  for (const forbidden of [secret, entry.executable, '--version', 'OPERATOR_DOCS_KEY', filename]) assert.ok(!projection.includes(forbidden), forbidden);
+  for (const patch of [{ command: '/bin/sh' }, { args: ['-c', 'id'] }, { argv: ['id'] }, { env: { API_KEY: secret } }, { hostPath: '/etc' }, { socket: '/var/run/docker.sock' }, { bindMount: '/etc:/etc' }, { url: 'https://internal.local' }]) {
+    assert.equal(extensionProfileInputSchema.safeParse({ ...input(), mcpServers: [{ ...descriptor, ...patch }] }).success, false);
+    await assert.rejects(store.save('1', { ...input(), mcpServers: [{ ...descriptor, ...patch }] } as any), /Invalid extension profile/);
+  }
+  await assert.rejects(store.save('1', { ...input(), mcpServers: [{ ...descriptor, digest: '0'.repeat(64) }] }), /digest changed/);
+  await assert.rejects(store.save('1', { ...input(), mcpServers: [{ ...descriptor, tools: ['delete'] }] }), /capability unavailable/);
+  await assert.rejects(store.save('1', { ...input(), mcpServers: [{ ...descriptor, capability: 'write' }] }), /capability unavailable/);
+  const writeEntry = { ...entry, id: 'local-writes', capability: 'write' as const };
+  await fs.writeFile(filename, JSON.stringify([entry, writeEntry]));
+  await assert.rejects(store.save('1', { ...input(), mcpServers: [{ ...descriptor, catalogId: writeEntry.id, digest: operatorCatalogDigest(writeEntry), capability: 'read' }] }), /capability unavailable/);
+  await fs.writeFile(filename, JSON.stringify([{ ...entry, args: ['--changed'] }]));
+  await assert.rejects(store.assertLaunch('1', select(profile), context), /digest changed/);
+});
+
+test('catalog stdio is callable through both selected authorized launcher policies and never retains sentinel secrets', async t => {
+  const { database, store } = await fixture(); t.after(() => database.destroy());
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'catalog-launch-')); t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const { operatorCatalogDigest } = await import('../src/extensions/operatorCatalog.js');
+  const { executeWithExtensions, currentExtensionLaunch } = await import('../src/extensions/extensionLaunch.js');
+  const { claudeToolPolicyArgs, codexToolPolicyArgs } = await import('../src/agents/agentToolPolicy.js');
+  const { spawn } = await import('node:child_process'); const { createInterface } = await import('node:readline');
+  const code = `const rl = require('node:readline').createInterface({input:process.stdin}); rl.on('line', line => { const rpc=JSON.parse(line); if(rpc.id===undefined)return; const result = rpc.method==='tools/list' ? {tools:[{name:'lookup'},{name:'delete'}]} : {content:[{type:'text',text:'called '+process.env.API_KEY+' '+Buffer.from(process.env.API_KEY).toString('base64')}]}; process.stderr.write(process.env.API_KEY); console.log(JSON.stringify({jsonrpc:'2.0',id:rpc.id,result})); });`;
+  const entry = { id: 'synthetic-docs', kind: 'stdio' as const, executable: process.execPath, args: ['-e', code], secretEnv: { API_KEY: 'OPERATOR_DOCS_KEY' }, tools: ['lookup'], capability: 'read' as const };
+  const catalogFile = path.join(root, 'catalog.json'); await fs.writeFile(catalogFile, JSON.stringify([entry]), { mode: 0o600 });
+  store.environment.PROPR_EXTENSION_CATALOG_FILE = catalogFile; store.environment.OPERATOR_DOCS_KEY = secret;
+  const profile = await store.save('1', { ...input(), mcpServers: [{ kind: 'catalog', name: 'local', catalogId: entry.id, digest: operatorCatalogDigest(entry), enabled: true, tools: ['lookup'], capability: 'read' }] });
+  const result = { success: true, executionTimeMs: 0, modifiedFiles: [], commitMessage: null, logs: '', modelUsed: 'synthetic' };
+  const options = { extensionProfile: select(profile), extensionActorId: '1', taskId: 'catalog-selected', issueRef: { repoOwner: 'team', repoName: 'repo', number: 1 }, worktreePath: root, prompt: 'Use selected tools', githubToken: '' };
+  for (const runtime of ['claude', 'codex'] as const) {
+    const config = { type: runtime, alias: runtime, id: randomUUID(), enabled: true, dockerImage: 'synthetic', configPath: root, supportedModels: ['synthetic'] };
+    await executeWithExtensions(config, options, async prepared => {
+      await currentExtensionLaunch()!.beforeLaunch();
+      const launch = runtime === 'claude' ? claudeToolPolicyArgs(prepared.toolPolicy!) : codexToolPolicyArgs(prepared.toolPolicy!);
+      assert.ok(!JSON.stringify(launch.cliArgs).includes(secret));
+      assert.ok(!JSON.stringify(launch).includes(secret));
+      assert.ok(!JSON.stringify(prepared.toolPolicy).includes(secret));
+      const local = prepared.toolPolicy!.localMcpServers![0];
+      assert.equal(Object.values(launch.env)[0], secret);
+      const child = spawn(process.execPath, [path.resolve('scripts/extension-stdio-bridge.mjs'), local.bridgeConfig], { cwd: root, env: { ...launch.env }, stdio: ['pipe', 'pipe', 'pipe'] });
+      let logs = ''; child.stderr.on('data', chunk => { logs += chunk; });
+      const reader = createInterface({ input: child.stdout }); const lines: string[] = []; const waiters: ((line: string) => void)[] = [];
+      reader.on('line', line => { lines.push(line); waiters.shift()?.(line); });
+      const call = async (rpc: unknown) => { const reply = new Promise<string>((resolve, reject) => { const timer = setTimeout(() => reject(new Error('stdio fixture timed out')), 5000); waiters.push(line => { clearTimeout(timer); resolve(line); }); child.once('close', () => { clearTimeout(timer); reject(new Error('stdio fixture closed')); }); }); child.stdin.write(JSON.stringify(rpc) + '\n'); return JSON.parse(await reply); };
+      try {
+        const tools = await call({ jsonrpc: '2.0', id: 1, method: 'tools/list' }); assert.deepEqual(tools.result.tools, [{ name: 'lookup' }]);
+        const output = await call({ jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'lookup' } }); assert.match(output.result.content[0].text, /^called \[REDACTED\] \[REDACTED\]$/);
+        const refused = await call({ jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'delete' } }); assert.ok(refused.error);
+        assert.ok(!JSON.stringify(lines).includes(secret)); assert.equal(logs, '');
+      } finally { if (child.exitCode === null) { child.kill('SIGTERM'); await new Promise<void>(resolve => child.once('close', () => resolve())); } reader.close(); }
+      return result;
+    }, store);
+    await executeWithExtensions(config, { ...options, extensionProfile: null }, async prepared => { assert.equal(prepared.toolPolicy, undefined); assert.equal(currentExtensionLaunch(), undefined); return result; }, store);
+    await assert.rejects(executeWithExtensions(config, { ...options, extensionActorId: '2' }, async () => { assert.fail('Unauthorized launch'); }, store), /administrator/);
+    await assert.rejects(executeWithExtensions(config, options, async prepared => { const changed = { ...entry, args: ['--version'] }; await fs.writeFile(catalogFile, JSON.stringify([changed])); await currentExtensionLaunch()!.beforeLaunch(); return result; }, store), /digest changed/);
+    await fs.writeFile(catalogFile, JSON.stringify([entry]));
+  }
+  for (const name of await fs.readdir(root)) assert.ok(!(await fs.readFile(path.join(root, name), 'utf8')).includes(secret));
+  assert.equal((await database('extension_run_grants')).length, 0);
+  assert.ok(!JSON.stringify(await database('extension_profile_revisions')).includes(secret));
+});
+
+test('immutable gateway policy enforces allowlist on every call and private DNS re-resolution; catalog exceptions remain bounded', async t => {
+  const { database, store } = await fixture(); t.after(() => database.destroy());
+  const profile = await store.save('1', input(), { docs: secret });
+  const token = await store.createGrant('1', profile, 'restricted-gateway', { mode: 'restricted', allow: [], instanceAllow: [] }); await store.activateGrant(token, '1', select(profile));
+  let sent = false;
+  await assert.rejects(extensionGatewayCall(store, token, 'docs', { jsonrpc: '2.0', id: 1, method: 'ping' }, async () => { sent = true; return {}; }), /network policy/);
+  assert.equal(sent, false); const row = await database('extension_run_grants').first(); assert.equal(row.calls, 1); assert.equal(row.network_denials, 1); assert.equal(row.connections, 0);
+  const decisions: boolean[] = [];
+  const policy = { network: { mode: 'restricted' as const, allow: ['tools.example.com'], instanceAllow: [] }, onDecision: async (_host: string, allowed: boolean) => { decisions.push(allowed); } };
+  let lookup = 0;
+  const dns = async () => [{ address: ++lookup === 1 ? '8.8.8.8' : '10.0.0.1', family: 4 }];
+  await resolveExtensionEndpoint('https://tools.example.com/mcp', dns, policy);
+  await assert.rejects(resolveExtensionEndpoint('https://tools.example.com/mcp', dns, policy), /authorized/); assert.deepEqual(decisions, [true, false]);
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'internal-catalog-')); t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const { operatorCatalogDigest } = await import('../src/extensions/operatorCatalog.js');
+  const entry = { id: 'internal-docs', kind: 'https' as const, url: 'https://10.0.0.1/mcp', addresses: ['10.0.0.1'], bearerSecretRef: 'INTERNAL_DOCS_KEY', tools: ['lookup'], capability: 'read' as const };
+  const filename = path.join(root, 'catalog.json'); await fs.writeFile(filename, JSON.stringify([entry]), { mode: 0o600 });
+  store.environment.PROPR_EXTENSION_CATALOG_FILE = filename; store.environment.INTERNAL_DOCS_KEY = secret;
+  assert.throws(() => extensionEndpoint(entry.url), /public/);
+  const internal = await store.save('1', { ...input(), mcpServers: [{ kind: 'catalog', name: 'internal', catalogId: entry.id, digest: operatorCatalogDigest(entry), tools: ['lookup'], capability: 'read', enabled: true }] });
+  for (const authorized of [false, true]) {
+    const grant = await store.createGrant('1', internal, 'internal-' + authorized, { mode: 'restricted', allow: ['10.0.0.1'], instanceAllow: authorized ? ['10.0.0.1'] : [] }); await store.activateGrant(grant, '1', select(internal));
+    const call = () => extensionGatewayCall(store, grant, 'internal', { jsonrpc: '2.0', id: 2, method: 'ping' }, async (url, _body, supplied, policy) => { assert.equal(url, entry.url); assert.equal(supplied, secret); assert.deepEqual(policy.internalAddresses, entry.addresses); return { jsonrpc: '2.0', id: 2, result: {} }; });
+    if (authorized) await call(); else await assert.rejects(call(), /authorized/);
+  }
+  await assert.rejects(resolveExtensionEndpoint('https://tools.example.com/mcp', async () => [{ address: '10.0.0.2', family: 4 }], { internalAddresses: ['10.0.0.1'] }), /authorized/);
+});
+
+test('physical skill validation refuses ancestor links, replacement races, digest edits and hardlinks and cleans failures', async t => {
+  const { database, store } = await fixture(); t.after(() => database.destroy());
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'skill-adversary-')); t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const oldTransport = process.env.PROPR_EGRESS_SOCKET_DIR; process.env.PROPR_EGRESS_SOCKET_DIR = root;
+  t.after(() => { if (oldTransport === undefined) delete process.env.PROPR_EGRESS_SOCKET_DIR; else process.env.PROPR_EGRESS_SOCKET_DIR = oldTransport; });
+  const { executeWithExtensions, currentExtensionLaunch } = await import('../src/extensions/extensionLaunch.js');
+  const { ensureStagingRoot } = await import('../src/extensions/skillStaging.js');
+  const bundle = await store.importSkill('1', skillFiles(), { kind: 'archive', filename: 'skill.tar' });
+  const profile = await store.save('1', { ...input(), mcpServers: [], skillBundleIds: [bundle.id] });
+  const config = { type: 'claude' as const, alias: 'claude', id: randomUUID(), enabled: true, dockerImage: 'synthetic', configPath: root, supportedModels: ['synthetic'] };
+  const options = { extensionProfile: select(profile), extensionActorId: '1', taskId: 'skill-race', issueRef: { repoOwner: 'team', repoName: 'repo', number: 1 }, worktreePath: root, prompt: 'Skills', githubToken: '' };
+  const outside = path.join(root, 'outside'); await fs.mkdir(outside);
+  const link = path.join(root, 'link'); await fs.symlink(outside, link);
+  await assert.rejects(ensureStagingRoot(path.join(link, 'nested'))); assert.deepEqual(await fs.readdir(outside), []);
+  const notDirectory = path.join(root, 'file'); await fs.writeFile(notDirectory, 'x'); await assert.rejects(ensureStagingRoot(path.join(notDirectory, 'nested')));
+  for (const mutation of ['ancestor-link', 'root-link', 'replace-file', 'read-race', 'digest', 'hardlink', 'extra-file']) {
+    let staged = '';
+    await assert.rejects(executeWithExtensions(config, options, async () => {
+      const launch = currentExtensionLaunch()!; staged = launch.mounts[1].match(/source=([^,]+)/)![1];
+      const file = path.join(staged, bundle.id, 'SKILL.md');
+      if (mutation === 'ancestor-link') { await fs.rename(path.join(staged, bundle.id), path.join(staged, 'original')); await fs.symlink(path.join(staged, 'original'), path.join(staged, bundle.id)); }
+      if (mutation === 'root-link') { const parent = path.dirname(staged); await fs.rename(parent, parent + '.original'); await fs.symlink(outside, parent); }
+      if (mutation === 'read-race') { const open = fs.open; let replaced = false; t.mock.method(fs, 'open', async (...args: Parameters<typeof fs.open>) => { const handle = await open(...args); if (String(args[0]) === file && !replaced) { replaced = true; await fs.rename(file, file + '.old'); await fs.writeFile(file, 'Replacement', { mode: 0o444 }); } return handle; }); }
+      if (mutation === 'replace-file') { const content = await fs.readFile(file); await fs.rename(file, file + '.old'); await fs.writeFile(file, content, { mode: 0o444 }); }
+      if (mutation === 'digest') { await fs.chmod(file, 0o644); await fs.appendFile(file, '\nChanged'); await fs.chmod(file, 0o444); }
+      if (mutation === 'hardlink') await fs.link(file, path.join(staged, 'linked'));
+      if (mutation === 'extra-file') await fs.writeFile(path.join(staged, 'extra'), 'unselected');
+      await launch.beforeLaunch(); assert.fail('Unsafe mount authorized');
+    }, store));
+    t.mock.restoreAll();
+    if (mutation === 'root-link') { const parent = path.dirname(staged); assert.deepEqual(await fs.readdir(outside), []); await fs.unlink(parent); await fs.rename(parent + '.original', parent); }
+    await assert.rejects(fs.lstat(staged), /ENOENT/); assert.equal((await database('extension_run_grants')).length, 0);
+  }
+});
+
+test('gateway write authority is captured per run and omission stays false', async t => {
+  const { database, store } = await fixture(); t.after(() => database.destroy());
+  const profile = await store.save('1', { ...input(), mcpServers: [{ ...input().mcpServers[0], capability: 'write' }] }, { docs: secret });
+  const policy = { mode: 'restricted' as const, allow: ['8.8.8.8'], instanceAllow: [] };
+  const readOnly = await store.createGrant('1', profile, 'no-write', policy); await store.activateGrant(readOnly, '1', select(profile));
+  let called = false; const send = async () => { called = true; return { jsonrpc: '2.0', id: 1, result: {} }; };
+  const body = { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'lookup' } };
+  await assert.rejects(extensionGatewayCall(store, readOnly, 'docs', body, send), /write grant/); assert.equal(called, false);
+  const write = await store.createGrant('1', profile, 'explicit-write', policy, true); await store.activateGrant(write, '1', select(profile));
+  policy.allow.length = 0; // Mutable caller state cannot change the persisted run policy.
+  await extensionGatewayCall(store, write, 'docs', body, send); assert.equal(called, true);
+});
+
+test('redacted export restores public presence but requires fresh remote credentials and permits rotation', async t => {
+  const { database, store } = await fixture(); t.after(() => database.destroy());
+  const profile = await store.save('1', input(), { docs: secret });
+  await database('extension_profile_revisions').where({ profile_id: profile.profileId }).update({ secrets_encrypted: '' });
+  assert.equal((await store.read('1', select(profile))).secrets.docs.configured, true);
+  await assert.rejects(store.assertLaunch('1', select(profile), context), /authentication is not configured/);
+  const restored = await store.save('1', input(), { docs: 'NEW_SYNTHETIC_RESTORE_SENTINEL' }, select(profile));
+  await store.assertLaunch('1', select(restored), context); assert.equal(restored.revision, 2);
+});
+
+test('follow-up migration upgrades installed v1 tables, revokes policy-less grants and is repeatable', async t => {
+  const database = knex({ client: 'better-sqlite3', connection: { filename: ':memory:' }, useNullAsDefault: true }); t.after(() => database.destroy());
+  await database.schema.createTable('agent_definitions', c => c.string('id').primary());
+  await database.schema.createTable('task_submissions', c => c.string('id').primary());
+  await up(database);
+  const profileId = randomUUID(); const instanceId = (await database('extension_instance_identity').first()).instance_id;
+  await database('extension_profiles').insert({ id: profileId, instance_id: instanceId, revision: 1, enabled: true });
+  const grant = { token_hash: 'legacy', profile_id: profileId, revision: 1, actor: '1', task_id: 'initial', expires_at: Date.now() + 100000 };
+  await database('extension_run_grants').insert(grant);
+  await grantMigration(database); assert.equal((await database('extension_run_grants')).length, 0);
+  assert.equal(await database.schema.hasColumn('task_submissions', 'extension_authorization'), true);
+  const network = JSON.stringify({ mode: 'restricted', allow: ['example.com'], instanceAllow: [] });
+  await database('extension_run_grants').insert({ ...grant, token_hash: 'new', network_policy: network }); await grantMigration(database);
+  const row = await database('extension_run_grants').first(); assert.equal(row.network_policy, network); assert.equal(Boolean(row.allow_write), false); assert.equal(row.network_events, '[]');
+});
+
+test('gateway accounting and denied resolutions survive grant cleanup in per-task telemetry', async t => {
+  const { database, store } = await fixture(); t.after(() => database.destroy());
+  await database.schema.createTable('tasks', c => c.string('task_id').primary());
+  await database.schema.createTable('task_history', c => { c.string('task_id'); c.string('state'); c.string('timestamp'); c.text('reason'); c.text('metadata'); });
+  await database('tasks').insert({ task_id: 'network-accounting' });
+  const profile = await store.save('1', input(), { docs: secret });
+  const network = { mode: 'restricted' as const, allow: [], instanceAllow: [] };
+  const token = await store.createGrant('1', profile, 'network-accounting', network); await store.activateGrant(token, '1', select(profile));
+  await assert.rejects(extensionGatewayCall(store, token, 'docs', { jsonrpc: '2.0', id: 1, method: 'ping' }, async () => { assert.fail('Denied network dialed'); }), /network policy/);
+  await store.retainGatewayTelemetry(token); await database('extension_run_grants').delete();
+  const event = JSON.parse((await database('task_history').first()).metadata);
+  assert.equal(event.event, 'network.extensions'); assert.deepEqual(event.network, network); assert.equal(event.denied, 1); assert.equal(event.calls, 1); assert.equal(event.responseBytes, 1024 * 1024); assert.deepEqual(event.resolutions, [{ host: '8.8.8.8', allowed: false }]);
+  assert.ok(!JSON.stringify(event).includes(secret)); assert.ok(!JSON.stringify(event).includes(token));
 });

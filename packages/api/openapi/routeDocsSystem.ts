@@ -13,6 +13,7 @@ import {
   DesktopPairingStartRequest,
   DesktopPairingTicket,
   Health,
+  ExtensionProfileSave,
   JsonObject,
 } from './schemas.js';
 import type { RouteDoc } from './types.js';
@@ -23,13 +24,13 @@ const MCP_OAUTH = 'Served by the MCP SDK\'s OAuth router at the API origin root,
 
 export const SYSTEM_ROUTE_DOCS: Record<string, RouteDoc> = {
   'GET /api/instance/extensions/v1': {
-    operationId: 'listAgentExtensionProfiles', summary: 'List secret-free current extension revisions and the versioned contract.', tags: ['Configuration'],
+    operationId: 'listAgentExtensionProfiles', summary: 'List secret-free current extension revisions, the versioned contract and operator catalog identity/digest/secret-field presence.', tags: ['Configuration'],
     responses: { 200: { description: 'Current durable instance administrators only; works without Connect.', schema: JsonObject } },
   },
   'POST /api/instance/extensions/v1/profiles': {
     operationId: 'saveAgentExtensionProfile', summary: 'Create an immutable revision with optional write-only secret replacements.', tags: ['Configuration'],
     headers: [{ name: 'X-ProPR-Extensions', description: 'Must be 1. JSON requests only.', required: true }],
-    requestBody: { schema: JsonObject, description: 'input follows ExtensionProfileInput v1; expected is the exact instance/profile/revision selection for updates. secrets maps server names to replacement tokens or null; values are never returned.' },
+    requestBody: { schema: ExtensionProfileSave, description: 'input follows ExtensionProfileInput v1; expected is the exact instance/profile/revision selection for updates. secrets maps server names to replacement tokens or null; values are never returned.' },
     responses: { 200: { description: 'Secret-free revision.', schema: JsonObject } },
   },
   'GET /api/instance/extensions/v1/profiles/:profileId/history': {

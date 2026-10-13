@@ -3876,7 +3876,7 @@ paths:
   /api/instance/extensions/v1:
     get:
       operationId: listAgentExtensionProfiles
-      summary: List secret-free current extension revisions and the versioned contract.
+      summary: List secret-free current extension revisions, the versioned contract and operator catalog identity/digest/secret-field presence.
       description: Requires the `instance.manage_settings` instance permission.
       tags:
         - Configuration
@@ -3955,7 +3955,7 @@ paths:
         content:
           application/json:
             schema:
-              $ref: "#/components/schemas/JsonObject"
+              $ref: "#/components/schemas/ExtensionProfileSave"
       responses:
         "200":
           description: Secret-free revision.
@@ -8483,6 +8483,163 @@ components:
         - message
       additionalProperties: false
       description: The common error envelope. New routes return it for every 4xx and 5xx response.
+    ExtensionProfileInput:
+      type: object
+      properties:
+        version:
+          type: number
+          const: 1
+        name:
+          type: string
+          minLength: 1
+          maxLength: 100
+        enabled:
+          type: boolean
+        agentScope:
+          maxItems: 64
+          type: array
+          items:
+            type: string
+            pattern: ^[A-Za-z0-9_-]{1,100}$
+        repositoryScope:
+          maxItems: 64
+          type: array
+          items:
+            type: string
+            pattern: ^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$
+        mcpServers:
+          maxItems: 8
+          type: array
+          items:
+            oneOf:
+              - type: object
+                properties:
+                  kind:
+                    type: string
+                    const: https
+                  name:
+                    type: string
+                    pattern: ^[a-z][a-z0-9_-]{0,47}$
+                  url:
+                    type: string
+                    maxLength: 2048
+                  enabled:
+                    type: boolean
+                  tools:
+                    maxItems: 64
+                    type: array
+                    items:
+                      type: string
+                      pattern: ^[A-Za-z0-9_.-]{1,128}$
+                  capability:
+                    type: string
+                    enum:
+                      - read
+                      - write
+                  authentication:
+                    type: string
+                    enum:
+                      - none
+                      - bearer
+                required:
+                  - kind
+                  - name
+                  - url
+                  - enabled
+                  - tools
+                  - capability
+                  - authentication
+                additionalProperties: false
+              - type: object
+                properties:
+                  kind:
+                    type: string
+                    const: catalog
+                  name:
+                    type: string
+                    pattern: ^[a-z][a-z0-9_-]{0,47}$
+                  catalogId:
+                    type: string
+                    pattern: ^[a-z][a-z0-9_-]{0,63}$
+                  digest:
+                    type: string
+                    pattern: ^[0-9a-f]{64}$
+                  enabled:
+                    type: boolean
+                  tools:
+                    maxItems: 64
+                    type: array
+                    items:
+                      type: string
+                      pattern: ^[A-Za-z0-9_.-]{1,128}$
+                  capability:
+                    type: string
+                    enum:
+                      - read
+                      - write
+                required:
+                  - kind
+                  - name
+                  - catalogId
+                  - digest
+                  - enabled
+                  - tools
+                  - capability
+                additionalProperties: false
+        skillBundleIds:
+          maxItems: 8
+          type: array
+          items:
+            type: string
+            format: uuid
+            pattern: ^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$
+      required:
+        - version
+        - name
+        - enabled
+        - agentScope
+        - repositoryScope
+        - mcpServers
+        - skillBundleIds
+      additionalProperties: false
+      description: Strict shared v1 contract. Operator catalog descriptors accept only immutable catalogId/digest and selected tools/capability; customer commands, arguments, environment and mount paths are rejected.
+    ExtensionProfileSave:
+      type: object
+      properties:
+        input:
+          $ref: "#/components/schemas/ExtensionProfileInput"
+        expected:
+          $ref: "#/components/schemas/ExtensionSelection"
+        secrets:
+          type: object
+          propertyNames:
+            type: string
+          additionalProperties:
+            type:
+              - string
+              - "null"
+      required:
+        - input
+      additionalProperties: false
+    ExtensionSelection:
+      type: object
+      properties:
+        instanceId:
+          type: string
+          format: uuid
+          pattern: ^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$
+        profileId:
+          type: string
+          format: uuid
+          pattern: ^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$
+        revision:
+          type: integer
+          exclusiveMinimum: 0
+      required:
+        - instanceId
+        - profileId
+        - revision
+      additionalProperties: false
     Health:
       type: object
       properties:
@@ -9329,6 +9486,13 @@ components:
     TaskSubmissionRequest:
       type: object
       properties:
+        extensionProfile:
+          anyOf:
+            - $ref: "#/components/schemas/ExtensionSelection"
+            - type: "null"
+        extensionAllowWrite:
+          description: Explicit write grant for this exact authenticated coding submission and initial run; omitted is false. Requires an extension selection. Never inherited by label retries.
+          type: boolean
         repository:
           type: string
           pattern: ^[\w.-]+\/[\w.-]+$

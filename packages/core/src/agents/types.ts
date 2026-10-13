@@ -57,6 +57,8 @@ export interface AgentToolPolicy {
     exclusiveMcp?: boolean;
     allowWeb: boolean;
     mcpServers?: AgentToolPolicyMcpServer[];
+    /** Internal operator-resolved stdio descriptors; never customer API input. */
+    localMcpServers?: { name: string; bridgeConfig: string; env: Record<string, string> }[];
 }
 
 export interface AgentTaskOptions {

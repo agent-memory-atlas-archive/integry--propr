@@ -1,3 +1,5 @@
+import { compileEgressAllowlist, normalizeEgressHost } from '../network/egressAllowlist.js';
+import type { ExtensionGrantNetwork } from './extensionProfileStore.js';
 import dns from 'node:dns/promises';
 import https from 'node:https';
 import { isIP, BlockList } from 'node:net';
@@ -28,19 +30,32 @@ export function extensionEndpoint(value: string): URL {
   return url;
 }
 export type ExtensionLookup = (host: string) => Promise<Array<{ address: string; family: number }>>;
-export async function resolveExtensionEndpoint(value: string, lookup: ExtensionLookup = host => dns.lookup(host, { all: true, verbatim: true })): Promise<{ url: URL; address: string; family: number }> {
-  const url = extensionEndpoint(value); const host = url.hostname.replace(/^\[|\]$/g, '');
+export interface ExtensionEndpointPolicy { network?: ExtensionGrantNetwork; internalAddresses?: string[]; onDecision?: (host: string, allowed: boolean) => Promise<void> }
+export async function resolveExtensionEndpoint(value: string, lookup: ExtensionLookup = host => dns.lookup(host, { all: true, verbatim: true }), policy: ExtensionEndpointPolicy = {}): Promise<{ url: URL; address: string; family: number }> {
+  const url = policy.internalAddresses ? new URL(value) : extensionEndpoint(value); const host = url.hostname.replace(/^\[|\]$/g, '');
+  if (url.protocol !== 'https:' || url.username || url.password || url.search || url.hash || (url.port && url.port !== '443')) throw new Error('Invalid MCP endpoint');
+  if (policy.network?.mode === 'restricted' && !compileEgressAllowlist(policy.network.allow).allows(host, 443)) {
+    await policy.onDecision?.(host, false); throw new Error('MCP endpoint outside run network policy');
+  }
   const addresses = isIP(host) ? [{ address: host, family: isIP(host) }] : await Promise.race([
     lookup(host), new Promise<never>((_, reject) => { const timer = setTimeout(() => reject(new Error('Endpoint DNS timeout')), EXTENSION_LIMITS.timeoutMs); timer.unref(); }),
   ]);
-  if (!addresses.length || addresses.some(a => !extensionPublicAddress(a.address))) throw new Error('MCP endpoint must resolve exclusively to public addresses');
+  const pinned = policy.internalAddresses?.map(normalizeEgressHost);
+  const permitted = addresses.length > 0 && addresses.every(a => {
+    if (pinned && !pinned.includes(normalizeEgressHost(a.address))) return false;
+    if (!pinned && !extensionPublicAddress(a.address)) return false;
+    // Catalog access does not override a restricted run's private-address policy.
+    return policy.network?.mode !== 'restricted' || extensionPublicAddress(a.address) || compileEgressAllowlist(policy.network.instanceAllow).allows(a.address, 443);
+  });
+  await policy.onDecision?.(host, permitted);
+  if (!permitted) throw new Error('MCP endpoint must resolve exclusively to public addresses or authorized pinned catalog addresses');
   return { url, ...addresses[0] };
 }
 /** Resolve on every request, dial only the checked address, keep original TLS
  * identity. No redirect, proxy environment, cookies, content decompression or
  * upstream response headers cross this boundary. */
-export async function requestExtensionMcp(endpoint: string, body: unknown, token?: string): Promise<unknown> {
-  const { url, address, family } = await resolveExtensionEndpoint(endpoint);
+export async function requestExtensionMcp(endpoint: string, body: unknown, token?: string, policy: ExtensionEndpointPolicy = {}): Promise<unknown> {
+  const { url, address, family } = await resolveExtensionEndpoint(endpoint, undefined, policy);
   const payload = JSON.stringify(body);
   if (Buffer.byteLength(payload) > 64 * 1024) throw new Error('MCP request too large');
   return new Promise((resolve, reject) => {

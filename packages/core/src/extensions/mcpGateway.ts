@@ -1,11 +1,11 @@
 import { EXTENSION_LIMITS } from '@propr/shared';
-import { ExtensionError, ExtensionProfileStore } from './extensionProfileStore.js';
-import { requestExtensionMcp, extensionResponseWireBytes } from './endpointPolicy.js';
+import { ExtensionError, ExtensionProfileStore, extensionTokenHash } from './extensionProfileStore.js';
+import { requestExtensionMcp, extensionResponseWireBytes, resolveExtensionEndpoint } from './endpointPolicy.js';
 import { redactExtensionOutput } from './extensionOutput.js';
 export { redactExtensionOutput } from './extensionOutput.js';
 
 export async function extensionGatewayCall(store: ExtensionProfileStore, token: string, serverName: string, body: unknown, send = requestExtensionMcp): Promise<unknown> {
-  const { snapshot, secrets } = await store.grantSnapshot(token);
+  const { snapshot, secrets, network, allowWrite } = await store.grantSnapshot(token);
   // Failed/oversized requests consume the full reservation, so failures cannot
   // bypass the run budget. Successful responses charge actual wire bytes,
   // including whitespace that disappears during JSON parsing.
@@ -13,6 +13,7 @@ export async function extensionGatewayCall(store: ExtensionProfileStore, token: 
   try {
   const server = snapshot.mcpServers.find(s => s.enabled && s.name === serverName);
   if (!server || !body || typeof body !== 'object' || Array.isArray(body)) throw new ExtensionError(403, 'MCP capability unavailable');
+  if (server.capability === 'write' && !allowWrite) throw new ExtensionError(403, 'Run write grant unavailable');
   const rpc = body as Record<string, unknown>;
   if (rpc.jsonrpc !== '2.0' || Object.keys(rpc).some(k => !['jsonrpc', 'id', 'method', 'params'].includes(k)) || !(rpc.id === undefined || typeof rpc.id === 'string' || typeof rpc.id === 'number') || !['initialize', 'ping', 'notifications/initialized', 'tools/list', 'tools/call'].includes(String(rpc.method))) throw new ExtensionError(403, 'MCP method unavailable');
   const params = rpc.params as Record<string, unknown> | undefined;
@@ -21,7 +22,17 @@ export async function extensionGatewayCall(store: ExtensionProfileStore, token: 
   // headers/cookies or reverse requests can extend a run's capabilities.
   let upstream: unknown;
   const forwarded = rpc.method === 'tools/call' ? { ...rpc, params: { name: params!.name, ...(params!.arguments === undefined ? {} : { arguments: params!.arguments }) } } : rpc;
-  try { upstream = await send(server.url, forwarded, secrets[serverName]); } catch { throw new ExtensionError(502, 'MCP connection failed'); }
+  const entry = server.kind === 'catalog' ? await store.catalog.resolve(server.catalogId, server.digest, server.tools, server.capability) : undefined;
+  if (entry?.kind === 'stdio') throw new ExtensionError(403, 'Local catalog tools require the selected task container');
+  const endpoint = server.kind === 'https' ? server.url : entry!.kind === 'https' ? entry!.url : '';
+  const operatorToken = entry?.kind === 'https' ? store.catalog.secrets(entry).bearerToken : undefined;
+  if (operatorToken) secrets[serverName] = operatorToken;
+  const policy = { network, ...(entry?.kind === 'https' ? { internalAddresses: entry.addresses } : {}), onDecision: async (host: string, allowed: boolean) => { await store.recordGatewayNetwork(token, server.kind === 'catalog' ? `catalog:${server.catalogId}@${server.digest}` : host, allowed); } };
+  // Check even with an injected transport; the real transport resolves again and
+  // pins the checked address immediately before TLS dialing.
+  await resolveExtensionEndpoint(endpoint, undefined, policy);
+  await store.database('extension_run_grants').where({ token_hash: extensionTokenHash(token) }).increment('request_bytes', Buffer.byteLength(JSON.stringify(forwarded)));
+  try { upstream = await send(endpoint, forwarded, secrets[serverName], policy); } catch { throw new ExtensionError(502, 'MCP connection failed'); }
   if (upstream === null && rpc.id === undefined) return null;
   if (!upstream || typeof upstream !== 'object' || Array.isArray(upstream)) throw new ExtensionError(502, 'MCP protocol unavailable');
   responseBytes = extensionResponseWireBytes(upstream) ?? EXTENSION_LIMITS.responseBytes;

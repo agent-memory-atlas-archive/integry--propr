@@ -23,7 +23,7 @@ test('instance extension editor shows capability boundaries, immutable provenanc
       expect(request.headers()['x-propr-extensions']).toBe('1');
       return route.fulfill({ json: { profile: { ...profile, ...request.postDataJSON().input, revision: 4 } } });
     }
-    return route.fulfill({ json: { instanceId, profiles: [profile] } });
+    return route.fulfill({ json: { instanceId, profiles: [profile], catalog: [{ id: 'operator-documentation', digest: 'a'.repeat(64), secrets: { fields: ['API_KEY'], configured: true } }] } });
   });
   await page.setViewportSize({ width: 1280, height: 1000 });
   await page.goto('/settings?tab=integrations');
@@ -38,17 +38,45 @@ test('instance extension editor shows capability boundaries, immutable provenanc
   await expect(section.getByRole('status')).toHaveText('documentation: reachable');
   await section.getByRole('button', { name: 'Revision history' }).click();
   await expect(section.getByText(/Revision 3.*administrator 1/)).toBeVisible();
+  await section.getByLabel('Add operator catalog entry').selectOption('operator-documentation');
+  await expect(section.getByText('Operator catalog entry: operator-documentation')).toBeVisible();
+  await expect(section.getByText(/Operator secret fields: API_KEY/)).toBeVisible();
+  expect(await section.textContent()).not.toMatch(/OPERATOR_DOCS_KEY|UNMISTAKABLE|\/usr\/bin\/node/);
   if (process.env.PROPR_CAPTURE_PREVIEWS) {
     await page.setViewportSize({ width: 1280, height: 1900 });
     await section.scrollIntoViewIfNeeded();
     const directory = path.resolve('../.propr/previews'); await mkdir(directory, { recursive: true });
     await section.getByText('Capability and security boundary').locator('..').screenshot({ path: path.join(directory, 'agent-extensions-security.png'), animations: 'disabled' });
-    await section.getByLabel('Stable server name').locator('..').locator('..').locator('..').screenshot({ path: path.join(directory, 'agent-extensions-mcp.png'), animations: 'disabled' });
-    await section.getByText(/SHA-256 d853bea/).locator('..').screenshot({ path: path.join(directory, 'agent-extensions-skill.png'), animations: 'disabled' });
+    await section.getByText('Operator catalog entry: operator-documentation').locator('..').locator('..').locator('..').screenshot({ path: path.join(directory, 'agent-extensions-catalog.png'), animations: 'disabled' });
     await writeFile(path.join(directory, 'manifest.json'), JSON.stringify({ previews: [
       { path: '.propr/previews/agent-extensions-security.png', title: 'Extension security boundary', description: 'Supported runtime, transport and isolation limits in Instance Settings.' },
-      { path: '.propr/previews/agent-extensions-mcp.png', title: 'MCP capability editor', description: 'HTTPS server with explicitly allowed tools and a blank write-only token replacement field.' },
-      { path: '.propr/previews/agent-extensions-skill.png', title: 'Immutable skill provenance', description: 'Validated skill digest, exact Git commit and separately authorized requirements.' },
+      { path: '.propr/previews/agent-extensions-catalog.png', title: 'Operator catalog selection', description: 'Immutable entry identity and digest with secret-field presence; customer inputs contain no command or environment values.' },
     ], toolSuggestions: [] }));
+  }
+});
+
+
+test('New Task makes write authority an explicit per-run choice and resets it on reselection', async ({ page }) => {
+  await installSettingsFixture(page);
+  const selection = { instanceId: 'c63a25da-fd5e-4a46-8fe1-566136e12289', profileId: '5b14d6d6-9357-4b56-9eb3-31e5f921d125', revision: 3 };
+  await page.route('**/api/instance/catalog', route => route.fulfill({ json: { agents: [{ id: 'claude', kind: 'direct', alias: 'claude', enabled: true, supportedModels: ['claude-sonnet-5-5'], defaultModel: 'claude-sonnet-5-5' }], repositories: [{ name: 'example/docs', enabled: true }] } }));
+  await page.route('**/api/instance/extensions/v1', route => route.fulfill({ json: { profiles: [{ ...selection, name: 'Documentation tools', enabled: true }] } }));
+  await page.goto('/tasks/new');
+  await page.getByRole('button', { name: 'Select a repository' }).click();
+  await page.getByRole('button', { name: 'example/docs' }).click();
+  await page.getByLabel('Prompt').fill('Review and update the selected documentation.');
+  await page.getByLabel('Agent extension profile').selectOption(selection.profileId);
+  const grant = page.getByLabel('Allow selected MCP write capabilities for this run');
+  await expect(grant).not.toBeChecked();
+  await grant.check(); await expect(grant).toBeChecked();
+  await page.getByLabel('Agent extension profile').selectOption(''); await expect(grant).toHaveCount(0);
+  await page.getByLabel('Agent extension profile').selectOption(selection.profileId); await expect(grant).not.toBeChecked();
+  if (process.env.PROPR_CAPTURE_PREVIEWS) {
+    const directory = path.resolve('../.propr/previews'); await mkdir(directory, { recursive: true });
+    await page.getByRole('dialog', { name: 'New task' }).screenshot({ path: path.join(directory, 'extension-write-grant.png'), animations: 'disabled' });
+    const { readFile } = await import('node:fs/promises');
+    const manifest = JSON.parse(await readFile(path.join(directory, 'manifest.json'), 'utf8'));
+    manifest.previews.push({ path: '.propr/previews/extension-write-grant.png', title: 'Explicit write grant', description: 'Selected extension profile with write capability opt-in unchecked by default and reset on reselection.' });
+    await writeFile(path.join(directory, 'manifest.json'), JSON.stringify(manifest));
   }
 });

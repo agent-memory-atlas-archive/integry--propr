@@ -1,5 +1,6 @@
+import { createHash, randomUUID } from 'node:crypto';
+import { sealExtensionSecrets, unsealExtensionSecrets } from '../extensions/privateSecrets.js';
 import knex, { type Knex } from 'knex';
-import { randomUUID } from 'node:crypto';
 import fs from 'fs-extra';
 import path from 'node:path';
 import { db } from '../db/connection.js';
@@ -17,6 +18,7 @@ export interface TaskSubmission {
   user_id: string;
   submission_key: string;
   payload_hash: string;
+  extension_authorization?: string | null;
   repository: string;
   payload: string;
   attachments: string;
@@ -33,6 +35,7 @@ export interface TaskSubmission {
   error: string | null;
 }
 export interface SubmissionPayload {
+  extensionAllowWrite?: boolean;
   extensionProfile?: import('@propr/shared').ExtensionSelection | null;
   instruction: string;
   agentAlias: string;
@@ -60,6 +63,22 @@ export async function findIssueSubmission(issue: IssueJobData, database: Knex = 
   return database<TaskSubmission>('task_submissions').where({
     repository: `${issue.repoOwner}/${issue.repoName}`.toLowerCase(), issue_number: issue.number,
   }).first();
+}
+
+/** Persisted only by authenticated submission handling; issue text/labels cannot create authority. */
+export async function sealSubmissionExtensions(database: Knex, row: TaskSubmission, environment: NodeJS.ProcessEnv = process.env): Promise<void> {
+  const payload = JSON.parse(row.payload) as SubmissionPayload;
+  if (!payload.extensionProfile) return;
+  const authorization = sealExtensionSecrets({ payloadDigest: createHash('sha256').update(row.payload).digest('hex'), allowWrite: payload.extensionAllowWrite === true ? 'true' : 'false' }, `submission/${row.id}/${row.user_id}/${row.repository}/${row.payload_hash}`, environment);
+  await database('task_submissions').where({ id: row.id }).whereNull('extension_authorization').update({ extension_authorization: authorization });
+}
+export function submissionExtensionsForRun(row: TaskSubmission | undefined, run: { taskId: string; agentAlias: string; model: string; repository: string; issueNumber: number }, environment: NodeJS.ProcessEnv = process.env) {
+  if (!row) return {};
+  const payload = JSON.parse(row.payload) as SubmissionPayload;
+  if (!payload.extensionProfile) return {};
+  const authorization = unsealExtensionSecrets(row.extension_authorization ?? '', `submission/${row.id}/${row.user_id}/${row.repository}/${row.payload_hash}`, environment);
+  if (row.task_id !== run.taskId || row.latest_task_id !== run.taskId || !['queued', 'issue_created'].includes(row.state) || row.issue_number !== run.issueNumber || row.repository !== run.repository.toLowerCase() || payload.agentAlias !== run.agentAlias || payload.model !== run.model || authorization.payloadDigest !== createHash('sha256').update(row.payload).digest('hex')) throw new Error('Extension submission does not authorize this exact run');
+  return { extensionProfile: payload.extensionProfile, extensionActorId: row.user_id, extensionAllowWrite: authorization.allowWrite === 'true' && payload.extensionAllowWrite === true };
 }
 
 /** The submission owns the initial delivery only; normal task retries keep their own contract. */

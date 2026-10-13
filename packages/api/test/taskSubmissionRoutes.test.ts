@@ -358,3 +358,73 @@ test('submission routing rejects extension selections on unsupported runtimes be
     assert.equal((await routing({ agentAlias: 'selected' }, registry, labels)).agentAlias, 'selected');
   }
 });
+
+test('extension write choices default false, persist exact authority and cannot be replayed or substituted', async () => {
+  const db = await fixture();
+  const { sealSubmissionExtensions, submissionExtensionsForRun } = await import('../../core/src/services/taskSubmissionService.js');
+  await db.schema.alterTable('task_submissions', t => t.text('extension_authorization'));
+  const environment = { SYSTEM_TASK_SECRET: 'synthetic-submission-integrity-key' };
+  const selection = { instanceId: randomUUID(), profileId: randomUUID(), revision: 1 };
+  const run = { taskId: 'initial', agentAlias: 'claude', model: 'model', repository: 'owner/repo', issueNumber: 42 };
+  try {
+    for (const choice of [undefined, false, true]) {
+      const row = await insertTaskSubmission(db, { user_id: '1', submission_key: randomUUID(), payload_hash: randomUUID(), repository: run.repository, attachments: '[]', payload: JSON.stringify({ instruction: 'Fix it', agentAlias: run.agentAlias, model: run.model, routingLabel: 'route', trigger: 'AI', username: 'admin', extensionProfile: selection, ...(choice === undefined ? {} : { extensionAllowWrite: choice }) }) });
+      await sealSubmissionExtensions(db, row, environment);
+      await db('task_submissions').where({ id: row.id }).update({ task_id: run.taskId, latest_task_id: run.taskId, issue_number: run.issueNumber, state: 'queued' });
+      const saved = await db('task_submissions').where({ id: row.id }).first();
+      assert.equal(submissionExtensionsForRun(saved, run, environment).extensionAllowWrite, choice === true);
+      for (const changed of [{ taskId: 'replayed' }, { agentAlias: 'codex' }, { model: 'other' }, { repository: 'other/repo' }, { issueNumber: 43 }]) assert.throws(() => submissionExtensionsForRun(saved, { ...run, ...changed }, environment), /exact run/);
+      assert.throws(() => submissionExtensionsForRun({ ...saved, latest_task_id: 'retry' }, run, environment), /exact run/);
+      assert.throws(() => submissionExtensionsForRun({ ...saved, user_id: '2' }, run, environment), /unavailable/);
+      assert.throws(() => submissionExtensionsForRun({ ...saved, payload: JSON.stringify({ ...JSON.parse(saved.payload), extensionAllowWrite: choice !== true }) }, run, environment), /exact run/);
+      assert.throws(() => submissionExtensionsForRun({ ...saved, payload: JSON.stringify({ ...JSON.parse(saved.payload), extensionProfile: { ...selection, revision: 2 } }) }, run, environment), /exact run/);
+      assert.throws(() => submissionExtensionsForRun({ ...saved, extension_authorization: null }, run, environment), /unavailable/);
+      await db('task_submissions').where({ id: row.id }).delete();
+    }
+  } finally { await db.destroy(); }
+});
+
+test('submission API rejects implicit, malformed or unselected write escalation before side effects', async () => {
+  const db = await fixture();
+  const routes = createTaskSubmissionRoutes({ db, services: { authorize: async () => { assert.fail('Invalid write escalation reached repository access'); } } });
+  try {
+    for (const extensionAllowWrite of [true, 'true', 1, null, {}]) {
+      const res = response();
+      await routes.submit(request({ repository: 'owner/repo', instruction: 'Fix it', extensionAllowWrite }), res.res);
+      assert.equal(res.state.status, 400);
+    }
+    assert.equal((await db('task_submissions')).length, 0);
+  } finally { await db.destroy(); }
+});
+
+test('authenticated API seals the explicit choice and idempotency rejects changing it', async t => {
+  const database = await fixture(); t.after(() => database.destroy());
+  const previous = process.env.SYSTEM_TASK_SECRET; process.env.SYSTEM_TASK_SECRET = 'synthetic-api-submission-key';
+  t.after(() => { if (previous === undefined) delete process.env.SYSTEM_TASK_SECRET; else process.env.SYSTEM_TASK_SECRET = previous; });
+  await database.schema.alterTable('task_submissions', c => c.text('extension_authorization'));
+  await database.schema.createTable('instance_members', c => { c.string('github_user_id'); c.string('role'); });
+  await database.schema.createTable('agent_definitions', c => c.string('id').primary());
+  await (await import('../../core/src/db/migrations/20261013210000_extension_profiles.js')).up(database);
+  await (await import('../../core/src/db/migrations/20261013220000_extension_grant_network.js')).up(database);
+  await database('instance_members').insert({ github_user_id: '1', role: 'admin' });
+  const { ExtensionProfileStore } = await import('../../core/src/extensions/extensionProfileStore.js');
+  const profile = await new ExtensionProfileStore(database).save('1', { version: 1, name: 'Write tools', enabled: true, agentScope: [], repositoryScope: [], mcpServers: [{ kind: 'https', name: 'tools', url: 'https://8.8.8.8/mcp', enabled: true, tools: ['update'], capability: 'write', authentication: 'none' }], skillBundleIds: [] });
+  const extensionProfile = { instanceId: profile.instanceId, profileId: profile.profileId, revision: profile.revision };
+  let issue = 41; let sideEffects = 0;
+  const routes = createTaskSubmissionRoutes({ db: database, services: {
+    authorize: async () => ({ id: 'repo', name: 'owner/repo', enabled: true, baseBranch: 'main' }),
+    routing: async () => ({ agentAlias: 'claude', model: 'model', routingLabel: 'route' }),
+    getOctokit: async () => ({ request: async (route: string) => { sideEffects++; return { data: route === 'POST /repos/{owner}/{repo}/issues' ? { number: ++issue, html_url: 'https://github.com/owner/repo/issues/' + issue } : {} }; } }) as never,
+    processingLabels: async () => ['AI'], enqueue: async () => {},
+  } });
+  for (const choice of [false, true]) {
+    const key = randomUUID(); const body = { repository: 'owner/repo', instruction: 'Update documentation', extensionProfile, extensionAllowWrite: choice };
+    const make = (input: unknown) => { const req = request(input, key, { id: '1', username: 'admin' }); req.get = ((name: string) => name === 'X-ProPR-Extensions' ? '1' : key) as Request['get']; return req; };
+    const first = response(); await routes.submit(make(body), first.res); assert.equal(first.state.status, 200);
+    const saved = await database('task_submissions').where({ submission_key: key }).first(); assert.ok(saved.extension_authorization); assert.equal(JSON.parse(saved.payload).extensionAllowWrite, choice);
+    const before = sideEffects;
+    const changed = response(); await routes.submit(make({ ...body, extensionAllowWrite: !choice }), changed.res); assert.equal(changed.state.status, 409); assert.equal(sideEffects, before);
+    const replay = response(); await routes.submit(make(body), replay.res); assert.equal(replay.state.body.id, first.state.body.id); assert.equal(sideEffects, before);
+    assert.ok(!JSON.stringify(replay.state.body).includes(saved.extension_authorization));
+  }
+});

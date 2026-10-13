@@ -1,3 +1,4 @@
+import { sealSubmissionExtensions } from '../../core/src/services/taskSubmissionService.js';
 import { ExtensionProfileStore } from '../../core/src/extensions/extensionProfileStore.js';
 import { createHash, randomUUID } from 'node:crypto';
 import fs from 'fs-extra';
@@ -214,6 +215,7 @@ function submissionServices(octokit: SubmissionOctokit, enqueue = enqueueIssueIm
 interface SubmissionRequest {
   repository: string;
   instruction: string;
+  extensionAllowWrite?: boolean;
   extensionProfile?: import('@propr/shared').ExtensionSelection | null;
   agentAlias?: string;
   model?: string;
@@ -240,6 +242,7 @@ function invalidSubmissionOptions(body: SubmissionRequest) {
   return (body.agentAlias !== undefined && typeof body.agentAlias !== 'string')
     || (body.model !== undefined && typeof body.model !== 'string')
     || (body.todoIds !== undefined && (!Array.isArray(body.todoIds) || body.todoIds.some((id: unknown) => typeof id !== 'string')))
+    || invalidFlag(body.extensionAllowWrite) || (body.extensionAllowWrite === true && !body.extensionProfile)
     || invalidFlag(body.autoMerge) || invalidFlag(body.runUltrafix)
     || invalidBound(body.ultrafixGoal, ULTRAFIX_GOAL_RANGE) || invalidBound(body.ultrafixMaxCycles, ULTRAFIX_MAX_CYCLES_RANGE);
 }
@@ -336,7 +339,7 @@ export function createTaskSubmissionRoutes({ db, services = {} }: { db: Knex; se
       const config = await checkAccess(req, repository);
       if (body.extensionProfile && req.get('X-ProPR-Extensions') !== '1') throw Object.assign(new Error('Extension selection requires a preflight-protected request'), { status: 403 });
       if (body.extensionProfile) await new ExtensionProfileStore(db).read(req.user!.id, body.extensionProfile);
-      const payloadHash = fingerprint({ repository, instruction: body.instruction, extensionProfile: body.extensionProfile, agentAlias: body.agentAlias || '', model: body.model || '', todoIds: body.todoIds || [], files: await goalUploadIdentity(files), ...submissionAutomation(body), ...submissionBudget(body) });
+      const payloadHash = fingerprint({ repository, instruction: body.instruction, extensionProfile: body.extensionProfile, ...(body.extensionProfile ? { extensionAllowWrite: body.extensionAllowWrite === true } : {}), agentAlias: body.agentAlias || '', model: body.model || '', todoIds: body.todoIds || [], files: await goalUploadIdentity(files), ...submissionAutomation(body), ...submissionBudget(body) });
       let row = await db<TaskSubmission>('task_submissions').where({ user_id: String(req.user!.id), submission_key: key }).first();
       if (row && row.payload_hash !== payloadHash) { res.status(409).json({ error: 'Submission identity was already used with different content' }); return; }
       if (!row) {
@@ -344,7 +347,7 @@ export function createTaskSubmissionRoutes({ db, services = {} }: { db: Knex; se
         const octokit = await getOctokit();
         const [owner, repo] = repository.split('/');
         await octokit.request('GET /repos/{owner}/{repo}', { owner, repo });
-        const payload: SubmissionPayload = { extensionProfile: body.extensionProfile, instruction: body.instruction, ...selection, baseBranch: config.baseBranch,
+        const payload: SubmissionPayload = { extensionAllowWrite: body.extensionAllowWrite === true, extensionProfile: body.extensionProfile, instruction: body.instruction, ...selection, baseBranch: config.baseBranch,
           trigger: (await processingLabels())[0] || 'AI', username: req.user!.username, todoIds: body.todoIds,
           ...submissionAutomation(body), ...submissionBudget(body) };
         let attachments: SubmissionAttachment[];
@@ -353,6 +356,7 @@ export function createTaskSubmissionRoutes({ db, services = {} }: { db: Knex; se
         row = await insertTaskSubmission(db, { user_id: String(req.user!.id), submission_key: key, payload_hash: payloadHash,
           repository, payload: JSON.stringify(payload), attachments: JSON.stringify(attachments) });
       }
+      await sealSubmissionExtensions(db, row);
       const result = await resume(row.id);
       res.status(result.state === 'queued' ? 200 : 202).json(publicSubmission(result));
     } catch (error) { await sendError(req, res, error); }

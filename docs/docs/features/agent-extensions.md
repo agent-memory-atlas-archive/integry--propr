@@ -15,9 +15,9 @@ instance/profile/revision tuple. Choose the new revision after editing a profile
 queued runs do not silently move to it. Claude and Codex task execution are the
 qualified targets. Goal execution and other runtimes refuse profiles.
 
-Core rechecks the selecting administrator, the revision's administrator, scope,
+Core rechecks the current selecting/launch administrator, scope,
 capability policy, endpoint policy and current revision at the physical launch
-boundary, after network setup and capacity admission. A conditional database
+boundary, immediately before container creation and again after capacity admission before start. Historical audit actors are provenance only; demoting a creator/editor does not revoke a valid profile used by another current administrator. A conditional database
 write fences launch against disable, deletion, demotion and secret rotation. An
 edit that wins before this boundary refuses the old launch; an edit after it
 does not mutate the running revision. Completion revokes the gateway grant and
@@ -28,7 +28,7 @@ removes the temporary skill directory, including when execution fails.
 V1 supports stateless HTTPS MCP endpoints with JSON responses. Each server has a
 stable name, an explicit list of allowed tool names, a read/write capability and
 optional write-only bearer authentication. A write server also requires the run's
-write authorization; report phases refuse it. `initialize`, `ping`, the initialized
+explicit write authorization; report phases refuse it. New Task exposes an unchecked write opt-in, persists it as part of the authenticated idempotent submission, and seals the exact payload/actor/repository/routing selection. Only that submission’s initial task can use it; stale tasks, routing/profile substitutions and later label retries cannot inherit it. Omission is false. Agent-definition action phases retain their existing explicit phase policy. `initialize`, `ping`, the initialized
 notification, `tools/list` and explicitly listed `tools/call` are the only gateway
 methods. Resource APIs, prompts, server-initiated requests, response cookies,
 upstream session headers, SSE and stateful transports are unavailable. Connectivity
@@ -39,9 +39,7 @@ Core resolves and checks all DNS answers on every connection, then dials only a
 vetted address while verifying the original TLS identity. Redirects, private,
 loopback, link-local, metadata and reserved destinations are refused. The fake-IP
 DNS range `198.18.0.0/15` remains reachable, matching the existing egress proxy;
-TLS still verifies the original endpoint hostname. V1 has no
-operator-installed local catalog runner: internal exceptions and local stdio are
-therefore unavailable. Customer commands, host paths, Docker sockets and bind
+TLS still verifies the original endpoint hostname. Operator-installed catalog entries can qualify local stdio and fixed internal HTTPS exceptions, as described below. Customer commands, host paths, Docker sockets and bind
 mounts are rejected by the shared strict contract.
 
 Core bounds each request to 64 KiB, each response to 1 MiB, four simultaneous
@@ -50,7 +48,7 @@ connection/response deadline. A run reserves a full response budget during each
 request and refunds unused bytes after successful responses. Failed and oversized
 responses consume the full reservation. Grants expire after twelve hours.
 The existing task network policy is preserved; restricted runs additionally
-require the remote endpoint in the existing run allowlist. The Core API gateway derives its container-reachable address from the existing
+capture the effective allowlist and instance-only private-address permissions in the immutable grant. Every gateway request and its DNS re-resolution must pass that captured policy. Catalog identity never overrides a restricted run’s hostname or private-address rules. Core retains per-run request/response accounting, connection reservations and resolution/denial telemetry as a `network.extensions` task event before revoking the grant. The Core API gateway derives its container-reachable address from the existing
 `PROPR_AGENT_MCP_URL` (or `PROPR_INTERNAL_API_URL`) setting and must itself
 be reachable under that policy; profiles do not open internal
 network destinations or relax enforced egress restrictions.
@@ -72,6 +70,16 @@ Profile runs refuse `.codex/config.toml` in the task
 container workspace or its ancestry after repository setup because the qualified CLI has no project-config ignore
 switch. These limitations are displayed in the editor.
 
+## Operator-installed catalog
+
+An operator supplies a bounded JSON array through `PROPR_EXTENSION_CATALOG_FILE` on Core and workers. Install it outside task/repository mounts, owned by the operator with no group/other write permissions. The file contains configuration and secret **references**, never secret values. No API accepts catalog installation or command configuration. Restart/update the operator service configuration through its existing secret-management mechanism; never put credentials in profile/UI input.
+
+A stdio entry contains `id`, `kind: "stdio"`, an absolute `executable` under `/usr/local/bin`, `/usr/bin` or `/opt/propr` already installed in the qualified task image, a fixed `args` array, `secretEnv` mapping child environment field names to operator-managed service environment references, and allowed `tools` and required `capability`. There is no shell interpolation, customer argument substitution, host path/socket access or additional bind mount. Both Claude and Codex launch the installed `/opt/propr/extension-stdio-bridge.mjs` adapter in the existing isolated task container. It enforces the selected tools and bounded JSON protocol, drops child stderr and redacts configured secrets and encodings. Secret values travel through inherited environment names only, stay out of launch args/config JSON, and are never written to the repository or provider home. Deployments must rebuild the qualified task image to include the adapter; no runtime package installation is attempted.
+
+An HTTPS catalog entry instead contains `kind: "https"`, one credential-free fixed `url`, explicit pinned IP `addresses`, optional operator `bearerSecretRef`, and allowed `tools` and required `capability`. TLS identity and every resolved address must match; redirects remain refused. Restricted runs additionally need the hostname in their effective allowlist and private IP literals in the instance-owned address allowlist. Merely installing an internal catalog entry grants no network exception to a run.
+
+The public catalog returns only `id`, canonical SHA-256 `digest`, and secret field names/presence. The selected capability must match the operator entry; a write entry cannot be relabeled read to avoid a run write grant. Profiles reference `{kind: "catalog", name, catalogId, digest, enabled, tools, capability}`. The digest covers the entire private entry, including fixed arguments and secret reference names, using recursively sorted object keys and JSON encoding; secret values are excluded. Resolve and digest-check the entry at save, launch preparation, physical container creation/start, and each HTTPS gateway call. Catalog edits/removal fail existing mismatched selections closed. Choose the newly installed digest in a new profile revision. Customer `command`, `argv`, `args`, `env`, endpoint overrides, host paths, sockets and mounts are always rejected. Settings validation does not execute local catalog tools; their qualification and connectivity are exercised only in an authorized selected task run.
+
 ## Skills
 
 Import a strict tar/tar.gz archive (5 MiB compressed, 4 MiB expanded, 256 entries),
@@ -91,7 +99,7 @@ untrusted task input and are never executed during import.
 Only selected bundles are copied into a unique temporary directory under
 `PROPR_EGRESS_SOCKET_DIR/extensions/<instance-id>`, verified against the saved digest and mounted read-only
 at `/opt/propr/extensions`. The launch prompt identifies their `SKILL.md` paths.
-No bundle is installed into a provider or executor home. Docker-outside-Docker
+Every staging ancestor must be a real directory. Writes use no-follow directory handles under a private operator staging root. Launch rechecks directory/file identities, rejects links, replacement races and unexpected files, and recomputes the saved content digest immediately before the read-only mount. Cleanup uses a retained parent handle so substituted ancestors cannot redirect it. No bundle is installed into a provider or executor home. Docker-outside-Docker
 deployments use the existing `HOST_PROPR_EGRESS_SOCKET_DIR` mapping; a
 missing/unusable bind namespace fails the launch. Skill-bearing runs require
 Docker Engine **25 or newer** (API **1.44 or newer**) for
@@ -107,12 +115,7 @@ credential trust root (`PROPR_CREDENTIAL_ENCRYPTION_KEY`, then
 instance/profile/revision authenticated binding. Configure the same root on API
 and workers. Never store the root in profile input.
 
-Normal list/read/history/config projections contain only authentication field
-names and presence markers. The existing full database export includes encrypted
-custody and bundle contents, so treat it as a private instance backup. Export does
-not include the encryption root; back that up separately using the existing
-operator secret-custody procedure. Restore the database and the matching root
-together. A different root fails decryption closed. Revision and the dedicated `extension_instance_identity` database row
+Normal list/read/history/config projections contain only authentication field names and presence markers. Native database exports retain public profile revisions and bundle contents, erase encrypted extension credentials and sealed submission authority, and remove run grants. Reconfigure remote bearer tokens after a native export restore. Operator catalog files and secret references/values are never stored in the database or included in exports. Raw operator backups require the matching private encryption root; a different root fails decryption closed. Revision and the dedicated `extension_instance_identity` database row
 must be restored together; IDs from another installation cannot be substituted.
 The native database export removes ephemeral run grants, so an old execution
 token cannot regain access after restore. Normal execution revokes grants on

@@ -8,6 +8,7 @@ export interface TaskSubmission {
   error: string | null;
 }
 export interface TaskRequest {
+  extensionAllowWrite?: boolean;
   extensionProfile?: import('@propr/shared').ExtensionSelection | null;
   repository: string;
   instruction: string;

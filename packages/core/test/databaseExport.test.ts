@@ -22,6 +22,7 @@ async function fixture(t: test.TestContext) {
     CREATE TABLE extension_skill_bundles(id TEXT, descriptor TEXT, files_json TEXT);
     CREATE TABLE extension_instance_identity(id INTEGER, instance_id TEXT);
     CREATE TABLE extension_run_grants(token_hash TEXT);
+    CREATE TABLE task_submissions(id TEXT, payload TEXT, extension_authorization TEXT);
     CREATE TABLE system_configs(key TEXT PRIMARY KEY, value TEXT);
     CREATE TABLE knex_migrations(id INTEGER PRIMARY KEY, name TEXT);
     INSERT INTO knex_migrations VALUES(1, 'customer-schema-v1');
@@ -31,6 +32,7 @@ async function fixture(t: test.TestContext) {
   db.prepare('INSERT INTO extension_profile_revisions VALUES(?,?,?,?)').run('extension-profile', 1, JSON.stringify({ name: 'Documentation', secrets: { documentation: { configured: true, fields: ['bearerToken'] } } }), 'encrypted-extension-custody-canary');
   db.prepare('INSERT INTO extension_skill_bundles VALUES(?,?,?)').run('skill', JSON.stringify({ digest: 'immutable-skill-digest' }), JSON.stringify([{ path: 'SKILL.md', content: 'validated-asset' }]));
   db.prepare('INSERT INTO extension_instance_identity VALUES(?,?)').run(1, 'extension-instance');
+  db.prepare('INSERT INTO task_submissions VALUES(?,?,?)').run('submission', JSON.stringify({ extensionAllowWrite: true }), 'previous-extension-submission-authority-canary');
   db.prepare('INSERT INTO extension_run_grants VALUES(?)').run('previous-execution-lease-canary');
   db.prepare('INSERT INTO system_configs VALUES(?,?)').run('agents', JSON.stringify([{ id: 'agent', alias: 'My agent', configPath: '/provider-home-canary', envVars: { API_KEY: 'operator-env-canary' } }]));
   db.prepare('INSERT INTO system_configs VALUES(?,?)').run('fleet_control_secret', JSON.stringify('fleet-secret-canary'));
@@ -80,7 +82,7 @@ test('real WAL writer: coherent restorable customer database, integrity, metadat
     const data = await download.file.readFile();
     assert.equal(data.length, ready.sizeBytes);
     assert.equal(createHash('sha256').update(data).digest('hex'), ready.sha256);
-    for (const canary of ['operator-env-canary', 'fleet-secret-canary', 'provider-home-canary', 'env-file-canary', 'provider-file-canary']) assert.equal(data.includes(Buffer.from(canary)), false, canary);
+    for (const canary of ['operator-env-canary', 'fleet-secret-canary', 'provider-home-canary', 'env-file-canary', 'provider-file-canary', 'encrypted-extension-custody-canary', 'previous-extension-submission-authority-canary']) assert.equal(data.includes(Buffer.from(canary)), false, canary);
     const imported = path.join(f.root, 'restored.sqlite'); await fs.writeFile(imported, data);
     const db = new SQLite(imported);
     try {
@@ -88,7 +90,8 @@ test('real WAL writer: coherent restorable customer database, integrity, metadat
       assert.equal(db.prepare('SELECT body FROM customer WHERE id=1').get().body, 'customer content survives');
       assert.equal(db.prepare('SELECT COUNT(*) AS n FROM customer').get().n % 2, 1);
       assert.equal(db.prepare('SELECT value FROM encrypted_credentials').get().value, 'encrypted-customer-canary');
-      assert.equal(db.prepare('SELECT secrets_encrypted FROM extension_profile_revisions').get().secrets_encrypted, 'encrypted-extension-custody-canary');
+      assert.equal(db.prepare('SELECT secrets_encrypted FROM extension_profile_revisions').get().secrets_encrypted, '');
+      assert.equal(db.prepare('SELECT extension_authorization FROM task_submissions').get().extension_authorization, null);
       assert.equal(db.prepare('SELECT instance_id FROM extension_instance_identity').get().instance_id, 'extension-instance');
       assert.equal(JSON.parse(db.prepare('SELECT descriptor FROM extension_skill_bundles').get().descriptor).digest, 'immutable-skill-digest');
       assert.equal(db.prepare('SELECT COUNT(*) AS n FROM extension_run_grants').get().n, 0);

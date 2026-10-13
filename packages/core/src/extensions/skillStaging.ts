@@ -1,0 +1,136 @@
+import fs from 'node:fs/promises';
+import { EXTENSION_LIMITS } from '@propr/shared';
+import { constants, type Stats } from 'node:fs';
+import path from 'node:path';
+import { ExtensionError } from './extensionProfileStore.js';
+import { validateSkillFiles, type SkillFile } from './skillBundles.js';
+
+const same = (a: Stats, b: Stats) => a.dev === b.dev && a.ino === b.ino && a.mode === b.mode && (!a.isFile() || (a.size === b.size && a.mtimeMs === b.mtimeMs && a.ctimeMs === b.ctimeMs));
+/** Inspect every component, not just the final directory. */
+export async function inspectStagingAncestors(directory: string): Promise<Map<string, Stats>> {
+  const result = new Map<string, Stats>();
+  let cursor = path.parse(path.resolve(directory)).root;
+  for (const component of path.resolve(directory).slice(cursor.length).split('/').filter(Boolean)) {
+    cursor = path.join(cursor, component);
+    const stat = await fs.lstat(cursor);
+    if (!stat.isDirectory() || stat.isSymbolicLink()) throw new ExtensionError(503, 'Unsafe extension staging ancestor');
+    result.set(cursor, stat);
+  }
+  if (await fs.realpath(directory) !== path.resolve(directory)) throw new ExtensionError(503, 'Unsafe extension staging resolution');
+  return result;
+}
+/** Linux directory handles anchor each operation; no path component can redirect a write. */
+async function openDirectory(directory: string, create = false) {
+  let handle = await fs.open('/', constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
+  try {
+    for (const component of path.resolve(directory).slice(1).split('/').filter(Boolean)) {
+      const target = `/proc/self/fd/${handle.fd}/${component}`;
+      if (create) try { await fs.mkdir(target, { mode: 0o700 }); } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error; }
+      const next = await fs.open(target, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
+      await handle.close(); handle = next;
+    }
+    if (await fs.realpath(`/proc/self/fd/${handle.fd}`) !== path.resolve(directory)) throw new ExtensionError(409, 'Staging directory replaced');
+    return handle;
+  } catch (error) { await handle.close(); throw error; }
+}
+export async function ensureStagingRoot(directory: string): Promise<void> {
+  const handle = await openDirectory(directory, true);
+  try {
+    await inspectStagingAncestors(directory);
+    const stat = await handle.stat();
+    if (stat.uid !== process.getuid?.() || (stat.mode & 0o077)) throw new ExtensionError(503, 'Extension staging root is not private');
+  } finally { await handle.close(); }
+}
+export async function writeStagedSkill(directory: string, relative: string, content: Buffer): Promise<void> {
+  let handle = await openDirectory(directory);
+  try {
+    const parts = relative.split('/'); const filename = parts.pop()!;
+    for (const component of parts) {
+      const target = `/proc/self/fd/${handle.fd}/${component}`;
+      try { await fs.mkdir(target, { mode: 0o755 }); } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error; }
+      const next = await fs.open(target, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
+      await handle.close(); handle = next;
+    }
+    const file = await fs.open(`/proc/self/fd/${handle.fd}/${filename}`, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o444);
+    try { await file.writeFile(content); } finally { await file.close(); }
+    if (await fs.realpath(`/proc/self/fd/${handle.fd}`) !== path.dirname(path.join(directory, relative))) throw new ExtensionError(409, 'Staging directory replaced during write');
+  } finally { await handle.close(); }
+}
+/** Create and retain the private parent before any path-based work or cleanup. */
+export async function createStagingDirectory(root: string): Promise<{ directory: string; cleanup: () => Promise<void> }> {
+  const parent = await openDirectory(root);
+  let runHandle: Awaited<ReturnType<typeof fs.open>> | undefined;
+  let created: string | undefined;
+  const cleanup = async () => {
+    try {
+      if (runHandle) {
+        const original = await runHandle.stat();
+        // A rename inside the trusted root must not leave our original tree behind.
+        for (const name of await fs.readdir(`/proc/self/fd/${parent.fd}`)) {
+          const target = `/proc/self/fd/${parent.fd}/${name}`;
+          const stat = await fs.lstat(target);
+          if (stat.dev === original.dev && stat.ino === original.ino) await fs.rm(target, { recursive: true, force: true });
+        }
+      }
+      if (created) await fs.rm(`/proc/self/fd/${parent.fd}/${created}`, { recursive: true, force: true });
+    } finally { await runHandle?.close(); await parent.close(); }
+  };
+  try {
+    const target = await fs.mkdtemp(`/proc/self/fd/${parent.fd}/run-`); created = path.basename(target);
+    runHandle = await fs.open(target, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
+    const directory = path.join(root, created);
+    if (await fs.realpath(`/proc/self/fd/${parent.fd}`) !== path.resolve(root) || await fs.realpath(`/proc/self/fd/${runHandle.fd}`) !== path.resolve(directory)) throw new ExtensionError(409, 'Staging root replaced during creation');
+    await runHandle.chmod(0o755);
+    return { directory, cleanup };
+  } catch (error) { await cleanup(); throw error; }
+}
+export async function stagingValidator(root: string, directory: string, bundles: { id: string; digest: string }[]): Promise<() => Promise<void>> {
+  const ancestors = await inspectStagingAncestors(directory);
+  const original = new Map<string, Stats>();
+  const collect = async (target: string) => {
+    const stat = await fs.lstat(target);
+    if (stat.isSymbolicLink() || (!stat.isFile() && !stat.isDirectory()) || (stat.isFile() && stat.nlink !== 1)) throw new ExtensionError(503, 'Unsafe staged skill link');
+    original.set(target, stat);
+    if (stat.isDirectory()) for (const name of await fs.readdir(target)) await collect(path.join(target, name));
+  };
+  await collect(directory);
+  return async () => {
+    const current = await inspectStagingAncestors(directory);
+    for (const [target, stat] of ancestors) if (!current.has(target) || !same(stat, current.get(target)!)) throw new ExtensionError(409, 'Skill staging ancestor replaced');
+    const seen = new Set<string>();
+    const inventory = async (target: string) => {
+      const stat = await fs.lstat(target);
+      if (!original.has(target) || !same(stat, original.get(target)!) || (stat.isFile() && stat.nlink !== 1)) throw new ExtensionError(409, 'Staged skill tree replaced');
+      seen.add(target);
+      if (stat.isDirectory()) for (const name of await fs.readdir(target)) await inventory(path.join(target, name));
+    };
+    await inventory(directory);
+    if (seen.size !== original.size) throw new ExtensionError(409, 'Staged skill tree changed');
+    const resolved = await fs.realpath(directory);
+    if (!resolved.startsWith(path.resolve(root) + path.sep)) throw new ExtensionError(503, 'Skill staging escaped trusted root');
+    const read = async (target: string, prefix = ''): Promise<SkillFile[]> => {
+      const stat = await fs.lstat(target);
+      if (!original.has(target) || !same(stat, original.get(target)!)) throw new ExtensionError(409, 'Staged skill replaced');
+      if (stat.isDirectory()) {
+        const files: SkillFile[] = [];
+        for (const name of await fs.readdir(target)) files.push(...await read(path.join(target, name), prefix ? `${prefix}/${name}` : name));
+        return files;
+      }
+      const file = await fs.open(target, constants.O_RDONLY | constants.O_NOFOLLOW);
+      try {
+        if (!stat.isFile() || stat.nlink !== 1 || !same(stat, await file.stat())) throw new ExtensionError(409, 'Staged skill replaced during read');
+        if (stat.size > EXTENSION_LIMITS.bytes) throw new ExtensionError(409, 'Staged skill exceeds its saved size');
+        const bytes = Buffer.alloc(stat.size); let offset = 0;
+        while (offset < bytes.length) { const result = await file.read(bytes, offset, bytes.length - offset, offset); if (!result.bytesRead) break; offset += result.bytesRead; }
+        if (offset !== bytes.length || (await file.read(Buffer.alloc(1), 0, 1, offset)).bytesRead || !same(stat, await file.stat())) throw new ExtensionError(409, 'Staged skill changed during read');
+        const content = bytes.toString('base64');
+        if (!same(stat, await fs.lstat(target))) throw new ExtensionError(409, 'Staged skill replaced during read');
+        return [{ path: prefix, content }];
+      } finally { await file.close(); }
+    };
+    for (const bundle of bundles) if (validateSkillFiles(await read(path.join(directory, bundle.id))).digest !== bundle.digest) throw new ExtensionError(409, 'Staged skill digest mismatch');
+    // Recheck after reads to detect ancestor replacement during digesting.
+    const after = await inspectStagingAncestors(directory);
+    for (const [target, stat] of ancestors) if (!after.has(target) || !same(stat, after.get(target)!)) throw new ExtensionError(409, 'Skill staging ancestor replaced during read');
+  };
+}

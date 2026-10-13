@@ -22,7 +22,7 @@ export function createExtensionProfileRoutes(store = new ExtensionProfileStore(d
     if (!req.body || typeof req.body !== 'object' || Array.isArray(req.body) || Object.keys(req.body).some(k => !keys.includes(k))) throw new ExtensionError(400, 'Invalid extension request');
   };
   return {
-    list: handle(async (_req, actor) => ({ contract: EXTENSION_PROFILE_CONTRACT, instanceId: await store.instanceId(), profiles: await store.list(actor) })),
+    list: handle(async (_req, actor) => ({ contract: EXTENSION_PROFILE_CONTRACT, instanceId: await store.instanceId(), profiles: await store.list(actor), catalog: await store.catalog.publicEntries() })),
     save: handle(async (req, actor) => { exact(req, ['input', 'secrets', 'expected']); return { profile: await store.save(actor, req.body.input, req.body.secrets, req.body.expected) }; }),
     history: handle(async (req, actor) => ({ revisions: await store.history(actor, String(req.params.profileId)) })),
     remove: handle(async (req, actor) => { exact(req, ['selection']); await store.delete(actor, req.body.selection); return { deleted: true }; }),
@@ -34,6 +34,7 @@ export function createExtensionProfileRoutes(store = new ExtensionProfileStore(d
       const results = [];
       for (const server of profile.mcpServers.filter(s => s.enabled)) {
         let reachable = false;
+        if (server.kind === 'catalog') { results.push({ name: server.name, reachable: false }); continue; }
         try {
           const response = await requestExtensionMcp(server.url, { jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-03-26', capabilities: {}, clientInfo: { name: 'propr-validation', version: '1' } } }, secrets[server.name]) as { result?: unknown };
           reachable = Boolean(response?.result);

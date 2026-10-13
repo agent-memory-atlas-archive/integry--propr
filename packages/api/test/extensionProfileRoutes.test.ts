@@ -1,3 +1,4 @@
+import { up as grantMigration } from '../../core/src/db/migrations/20261013220000_extension_grant_network.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import express from 'express';
@@ -19,7 +20,7 @@ test('extension HTTP boundary requires fresh durable administration, preflight J
   await database.schema.createTable('config', c => { c.string('key').primary(); c.text('value'); });
   await database.schema.createTable('instance_members', c => { c.string('github_user_id').primary(); c.string('role'); });
   await database.schema.createTable('agent_definitions', c => c.string('id').primary());
-  await up(database); await database('instance_members').insert([{ github_user_id: '1', role: 'admin' }, { github_user_id: '2', role: 'member' }]);
+  await up(database); await grantMigration(database); await database('instance_members').insert([{ github_user_id: '1', role: 'admin' }, { github_user_id: '2', role: 'member' }]);
   const store = new ExtensionProfileStore(database, { SYSTEM_TASK_SECRET: 'synthetic-test-custody-root' });
   const routes = createExtensionProfileRoutes(store); const app = express();
   // Match the production boundary: bound requests before parsing or authorization.

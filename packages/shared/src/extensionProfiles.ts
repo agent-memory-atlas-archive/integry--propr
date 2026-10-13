@@ -11,12 +11,22 @@ export const remoteMcpSchema = z.strictObject({
   tools: z.array(z.string().regex(/^[A-Za-z0-9_.-]{1,128}$/)).max(EXTENSION_LIMITS.tools),
   capability: z.enum(['read', 'write']), authentication: z.enum(['none', 'bearer']),
 });
-export type ExtensionMcpDescriptor = z.infer<typeof remoteMcpSchema>;
+export const catalogMcpSchema = z.strictObject({
+  kind: z.literal('catalog'), name, catalogId: z.string().regex(/^[a-z][a-z0-9_-]{0,63}$/),
+  digest: z.string().regex(/^[0-9a-f]{64}$/), enabled: z.boolean(),
+  tools: remoteMcpSchema.shape.tools, capability: z.enum(['read', 'write']),
+});
+export const extensionMcpSchema = z.discriminatedUnion('kind', [remoteMcpSchema, catalogMcpSchema]);
+export type ExtensionMcpDescriptor = z.infer<typeof extensionMcpSchema>;
+/** Public catalog projection: never includes executable, endpoint, arguments or secret references. */
+export interface ExtensionCatalogEntry {
+  id: string; digest: string; secrets: { fields: string[]; configured: boolean };
+}
 export const extensionProfileInputSchema = z.strictObject({
   version: z.literal(EXTENSION_PROFILE_VERSION), name: z.string().trim().min(1).max(100), enabled: z.boolean(),
   agentScope: z.array(z.string().regex(/^[A-Za-z0-9_-]{1,100}$/)).max(64),
   repositoryScope: z.array(repository).max(64),
-  mcpServers: z.array(remoteMcpSchema).max(EXTENSION_LIMITS.servers),
+  mcpServers: z.array(extensionMcpSchema).max(EXTENSION_LIMITS.servers),
   skillBundleIds: z.array(z.uuid()).max(EXTENSION_LIMITS.bundles),
 }).superRefine((v, ctx) => {
   if (new Set(v.mcpServers.map(s => s.name)).size !== v.mcpServers.length) ctx.addIssue({ code: 'custom', message: 'Duplicate server names' });
@@ -30,11 +40,11 @@ export interface ExtensionSkillBundle {
 }
 export interface ExtensionProfileRevision extends ExtensionSelection, ExtensionProfileInput {
   createdAt: number; updatedAt: number; auditActor: string;
-  secrets: Record<string, { fields: ['bearerToken']; configured: boolean }>;
+  secrets: Record<string, { fields: string[]; configured: boolean }>;
   skillBundles: ExtensionSkillBundle[];
 }
 export const EXTENSION_PROFILE_CONTRACT = {
   version: EXTENSION_PROFILE_VERSION, limits: EXTENSION_LIMITS, runtimes: ['claude', 'codex'],
-  transports: ['https'], localStdio: 'unsupported: operator catalog runner required',
+  transports: ['https', 'catalog'], localStdio: 'operator-installed-catalog-only',
   skills: ['tar', 'tar.gz', 'github-exact-commit'], permission: 'instance.manage_settings',
 } as const;

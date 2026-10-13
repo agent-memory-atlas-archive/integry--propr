@@ -6,6 +6,7 @@ import { createServer, type IncomingMessage, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import zlib from 'node:zlib';
 
 import {
@@ -28,6 +29,8 @@ import type { AgentToolPolicy } from '../packages/core/src/agents/types.ts';
 
 const TOKEN = 'propr_mcp_runtime_token_0123456789';
 const MCP_TOOL = 'policy_probe';
+const LOCAL_SENTINEL = 'UNMISTAKABLE_LOCAL_CATALOG_RUNTIME_SENTINEL';
+const localPolicy = (): AgentToolPolicy => ({ allowWeb: false, exclusiveMcp: true, localMcpServers: [{ name: 'local', bridgeConfig: Buffer.from(JSON.stringify({ name: 'local', executable: process.execPath, args: ['-e', `const rl=require('node:readline').createInterface({input:process.stdin});rl.on('line',line=>{const rpc=JSON.parse(line);if(rpc.id===undefined)return;const result=rpc.method==='initialize'?{protocolVersion:'2025-03-26',capabilities:{tools:{}},serverInfo:{name:'fixture',version:'1'}}:rpc.method==='tools/list'?{tools:[{name:'policy_probe',description:process.env.API_KEY,inputSchema:{type:'object',properties:{}}},{name:'unselected',inputSchema:{type:'object',properties:{}}}]}:{content:[{type:'text',text:process.env.API_KEY}]};console.log(JSON.stringify({jsonrpc:'2.0',id:rpc.id,result}));});`], tools: ['policy_probe'], secretEnv: { API_KEY: 'PROPR_EXTENSION_STDIO_0_0_SECRET' } })).toString('base64url'), env: { PROPR_EXTENSION_STDIO_0_0_SECRET: LOCAL_SENTINEL } }] });
 
 function pinnedVersion(arg: string): string {
     const match = readFileSync(new URL('../Dockerfile.agent', import.meta.url), 'utf8').match(new RegExp(`^ARG ${arg}=(\\S+)$`, 'm'));
@@ -93,9 +96,10 @@ function startStandIn(captured: Captured): Promise<Server> {
 /** Resolves with the tail of stderr so a run that never reaches the stand-in explains why. */
 function runCli(command: string, args: string[], env: Record<string, string>, stdin: string): Promise<string> {
     return new Promise((resolve, reject) => {
-        const child = spawn(command, args, { env, stdio: ['pipe', 'ignore', 'pipe'] });
+        const child = spawn(command, args, { env, stdio: ['pipe', 'pipe', 'pipe'] });
         let stderr = '';
-        child.stderr.on('data', chunk => { stderr = (stderr + chunk.toString()).slice(-2000); });
+        child.stdout.on('data', chunk => { assert.ok(!chunk.toString().includes(LOCAL_SENTINEL)); });
+        child.stderr.on('data', chunk => { assert.ok(!chunk.toString().includes(LOCAL_SENTINEL)); stderr = (stderr + chunk.toString()).slice(-2000); });
         const timer = setTimeout(() => { child.kill('SIGKILL'); reject(new Error(`${command} did not finish`)); }, 90_000);
         child.on('error', reject);
         child.on('close', () => { clearTimeout(timer); resolve(stderr.trim()); });
@@ -142,9 +146,12 @@ function runtimeHarness(build: (policy: AgentToolPolicy) => ToolPolicyLaunchArgs
         } : policy;
         const launchArgs = build(withMcp);
         assert.ok(!launchArgs.cliArgs.some(arg => arg.includes(TOKEN)), 'the token never appears in the arguments');
+        // Outside Docker, map only the image-installed adapter path to its exact source.
+        if (policy.localMcpServers?.length) launchArgs.cliArgs = launchArgs.cliArgs.map(arg => arg.replaceAll('/opt/propr/extension-stdio-bridge.mjs', fileURLToPath(new URL('../scripts/extension-stdio-bridge.mjs', import.meta.url))));
         const { command, args, env } = launch({ baseUrl, home, launchArgs });
         const stderr = await runCli(command, args, { PATH: process.env.PATH ?? '', HOME: home, ...env, ...launchArgs.env }, 'Reply with OK.');
         assert.ok(captured.modelBodies.length > 0, `${command} reached the model stand-in${stderr ? `; stderr: ${stderr}` : ''}`);
+        assert.ok(!JSON.stringify(captured).includes(LOCAL_SENTINEL));
         return { ...captured, tools: toolNames(captured.modelBodies[0]) };
     };
 }
@@ -162,6 +169,12 @@ describe('Claude Code runtime honours the tool policy', { skip: skipUnlessPinned
     test('without a restriction the web tools are offered', { timeout: 120_000 }, async () => {
         const { tools } = await run({ allowWeb: true }, false);
         assert.ok(tools.includes('WebFetch') && tools.includes('WebSearch'), `tools: ${tools.join(', ')}`);
+    });
+
+    test('local catalog adapter offers only selected tools without credential serialization', { timeout: 120_000 }, async () => {
+        const { tools } = await run(localPolicy(), false, true);
+        assert.ok(tools.includes('mcp__local__policy_probe'), tools.join(', '));
+        assert.ok(!tools.some(name => name.includes('unselected') || name.includes('ambient')));
     });
 
     test('exclusive profile catalogs retain only selected MCP tools with env authentication', { timeout: 120_000 }, async () => {
@@ -197,6 +210,13 @@ describe('Codex runtime honours the tool policy', { skip: skipUnlessPinned('code
     test('without a restriction the web search tool is offered', { timeout: 120_000 }, async () => {
         const { tools } = await run({ allowWeb: true }, false);
         assert.ok(tools.includes('web_search'), `tools: ${tools.join(', ')}`);
+    });
+
+    test('local catalog adapter uses native stdio and excludes ambient tools and credential values', { timeout: 120_000 }, async () => {
+        const { tools, modelBodies } = await run(localPolicy(), false, true);
+        assert.ok(!tools.some(name => name.includes('unselected') || name.includes('ambient')));
+        // Deferred tools still carry the selected server inventory in Responses input.
+        assert.match(JSON.stringify(modelBodies), /local/);
     });
 
     test('exclusive profile catalogs retain only selected MCP tools with env authentication', { timeout: 120_000 }, async () => {
