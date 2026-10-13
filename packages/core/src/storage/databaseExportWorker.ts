@@ -1,3 +1,4 @@
+import { publicExtensionProfile } from '@propr/shared';
 /** Shared export policy for process-global and agent environment configuration.
  * Match secret families rather than a provider allowlist so legacy/new providers
  * are covered. Keep path/public-key exceptions here alongside the policy.
@@ -26,6 +27,7 @@ export function isExportSecretValue(value: unknown): value is string {
 
 /** Runs in a disposable worker: SQLite integrity/VACUUM cannot block API requests. */
 export const databaseExportWorker = String.raw`
+const publicExtensionProfile = ${publicExtensionProfile.toString()};
 const isExportSecretName = ${isExportSecretName.toString()};
 const isExportSecretValue = ${isExportSecretValue.toString()};
 const { workerData: d, parentPort } = require('node:worker_threads');
@@ -86,7 +88,11 @@ const SQLite = require(d.sqliteModule);
       }
     }
     // Export public revision identity and secret presence only; never secret custody or launch authority.
-    if (copy.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='extension_profile_revisions'").get()) copy.exec("UPDATE extension_profile_revisions SET secrets_encrypted = ''");
+    if (copy.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='extension_profile_revisions'").get()) {
+      copy.exec("UPDATE extension_profile_revisions SET secrets_encrypted = ''");
+      const update = copy.prepare('UPDATE extension_profile_revisions SET snapshot = ? WHERE rowid = ?');
+      for (const row of copy.prepare('SELECT rowid, snapshot FROM extension_profile_revisions').all()) update.run(JSON.stringify(publicExtensionProfile(JSON.parse(row.snapshot))), row.rowid);
+    }
     if (copy.prepare("SELECT 1 FROM pragma_table_info('task_submissions') WHERE name='extension_authorization'").get()) copy.exec("UPDATE task_submissions SET extension_authorization = NULL");
     if (copy.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='extension_run_grants'").get()) copy.exec('DELETE FROM extension_run_grants');
     // Rebuild pages so removed fields/free pages cannot leak in the downloadable file.

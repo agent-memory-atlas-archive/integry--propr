@@ -23,7 +23,7 @@ test('instance extension editor shows capability boundaries, immutable provenanc
       expect(request.headers()['x-propr-extensions']).toBe('1');
       return route.fulfill({ json: { profile: { ...profile, ...request.postDataJSON().input, revision: 4 } } });
     }
-    return route.fulfill({ json: { instanceId, profiles: [profile], catalog: [{ id: 'operator-documentation', digest: 'a'.repeat(64), secrets: { fields: ['API_KEY'], configured: true } }] } });
+    return route.fulfill({ json: { instanceId, profiles: [profile], catalog: [{ id: 'operator-documentation', digest: 'a'.repeat(64), tools: ['lookup', 'update_document'], capability: 'write', secrets: { count: 1, configured: true } }] } });
   });
   await page.setViewportSize({ width: 1280, height: 1000 });
   await page.goto('/settings?tab=integrations');
@@ -40,17 +40,26 @@ test('instance extension editor shows capability boundaries, immutable provenanc
   await expect(section.getByText(/Revision 3.*administrator 1/)).toBeVisible();
   await section.getByLabel('Add operator catalog entry').selectOption('operator-documentation');
   await expect(section.getByText('Operator catalog entry: operator-documentation')).toBeVisible();
-  await expect(section.getByText(/Operator secret fields: API_KEY/)).toBeVisible();
-  expect(await section.textContent()).not.toMatch(/OPERATOR_DOCS_KEY|UNMISTAKABLE|\/usr\/bin\/node/);
+  await expect(section.getByText('Operator secrets: configured', { exact: true })).toBeVisible();
+  const catalogServer = section.getByText('Operator catalog entry: operator-documentation').locator('..').locator('..').locator('..');
+  await expect(catalogServer.getByLabel('lookup', { exact: true })).toBeChecked();
+  await expect(catalogServer.getByLabel('update_document', { exact: true })).toBeChecked();
+  await expect(catalogServer.getByLabel(/^Capability/)).toHaveValue('write');
+  await expect(catalogServer.getByLabel(/^Capability/)).toBeDisabled();
+  await catalogServer.getByLabel('update_document', { exact: true }).uncheck();
+  const saveRequest = page.waitForRequest(r => r.method() === 'POST' && r.url().includes('/api/instance/extensions/v1'));
+  await section.getByRole('button', { name: 'Save revision' }).click();
+  const descriptor = (await saveRequest).postDataJSON().input.mcpServers[1];
+  expect(descriptor).toEqual({ kind: 'catalog', name: 'server-2', catalogId: 'operator-documentation', digest: 'a'.repeat(64), enabled: true, tools: ['lookup'], capability: 'write' });
+  await expect(section.getByRole('status')).toHaveText('Profile revision saved.');
+  expect(await section.textContent()).not.toMatch(/API_KEY|OPERATOR_DOCS_KEY|UNMISTAKABLE|CATALOG_ARGUMENT_SENTINEL|CATALOG_PATH_SENTINEL|\/usr\/bin\/env/);
   if (process.env.PROPR_CAPTURE_PREVIEWS) {
     await page.setViewportSize({ width: 1280, height: 1900 });
     await section.scrollIntoViewIfNeeded();
     const directory = path.resolve('../.propr/previews'); await mkdir(directory, { recursive: true });
-    await section.getByText('Capability and security boundary').locator('..').screenshot({ path: path.join(directory, 'agent-extensions-security.png'), animations: 'disabled' });
     await section.getByText('Operator catalog entry: operator-documentation').locator('..').locator('..').locator('..').screenshot({ path: path.join(directory, 'agent-extensions-catalog.png'), animations: 'disabled' });
     await writeFile(path.join(directory, 'manifest.json'), JSON.stringify({ previews: [
-      { path: '.propr/previews/agent-extensions-security.png', title: 'Extension security boundary', description: 'Supported runtime, transport and isolation limits in Instance Settings.' },
-      { path: '.propr/previews/agent-extensions-catalog.png', title: 'Operator catalog selection', description: 'Immutable entry identity and digest with secret-field presence; customer inputs contain no command or environment values.' },
+      { path: '.propr/previews/agent-extensions-catalog.png', title: 'Operator catalog selection', description: 'Pinned operator entry with bounded tool selection, declared write capability and opaque secret configuration status.' },
     ], toolSuggestions: [] }));
   }
 });

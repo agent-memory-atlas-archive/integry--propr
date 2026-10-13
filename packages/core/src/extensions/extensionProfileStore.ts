@@ -1,7 +1,7 @@
 import { OperatorCatalog } from './operatorCatalog.js';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import type { Knex } from 'knex';
-import { EXTENSION_LIMITS, extensionProfileInputSchema, extensionSelectionSchema, type ExtensionProfileInput, type ExtensionProfileRevision, type ExtensionSelection, type ExtensionSkillBundle } from '@propr/shared';
+import { EXTENSION_LIMITS, publicExtensionProfile, extensionProfileInputSchema, extensionSelectionSchema, type ExtensionProfileInput, type ExtensionProfileRevision, type ExtensionSelection, type ExtensionSkillBundle } from '@propr/shared';
 import { extensionEndpoint, resolveExtensionEndpoint } from './endpointPolicy.js';
 import { sealExtensionSecrets, unsealExtensionSecrets } from './privateSecrets.js';
 import { validateSkillFiles, type SkillFile } from './skillBundles.js';
@@ -25,7 +25,7 @@ export class ExtensionProfileStore {
   async list(actor: string): Promise<ExtensionProfileRevision[]> {
     await this.authorize(actor); const instanceId = await this.instanceId();
     const rows = await this.database('extension_profiles as p').join('extension_profile_revisions as r', function () { this.on('p.id', 'r.profile_id').andOn('p.revision', 'r.revision'); }).where({ 'p.instance_id': instanceId, 'p.deleted': false }).select('r.snapshot');
-    return rows.map(r => JSON.parse(r.snapshot));
+    return rows.map(r => publicExtensionProfile(JSON.parse(r.snapshot)));
   }
   async read(actor: string, selection: ExtensionSelection, database = this.database): Promise<ExtensionProfileRevision> {
     await this.authorize(actor, database);
@@ -35,12 +35,12 @@ export class ExtensionProfileStore {
     if (!row) throw new ExtensionError(404, 'Extension profile unavailable');
     const snapshot = JSON.parse(row.snapshot) as ExtensionProfileRevision;
     if (snapshot.version !== 1 || snapshot.instanceId !== parsed.instanceId || snapshot.profileId !== parsed.profileId || snapshot.revision !== parsed.revision) throw new ExtensionError(409, 'Extension revision identity mismatch');
-    return snapshot;
+    return publicExtensionProfile(snapshot);
   }
   async history(actor: string, profileId: string): Promise<ExtensionProfileRevision[]> {
     await this.authorize(actor);
     const rows = await this.database('extension_profile_revisions as r').join('extension_profiles as p', 'r.profile_id', 'p.id').where({ 'p.id': profileId, 'p.instance_id': await this.instanceId(), 'p.deleted': false }).orderBy('r.revision', 'desc').select('r.snapshot');
-    return rows.map(row => JSON.parse(row.snapshot));
+    return rows.map(row => publicExtensionProfile(JSON.parse(row.snapshot)));
   }
   async save(actor: string, input: ExtensionProfileInput, replacements: Record<string, string | null> = {}, expected?: ExtensionSelection): Promise<ExtensionProfileRevision> {
     let parsed: ExtensionProfileInput; try { parsed = extensionProfileInputSchema.parse(input); } catch { throw new ExtensionError(400, 'Invalid extension profile'); }
@@ -80,7 +80,7 @@ export class ExtensionProfileStore {
       for (const server of parsed.mcpServers.filter(s => s.kind === 'catalog')) {
         if (server.kind !== 'catalog') continue;
         const entry = await this.catalog.resolve(server.catalogId, server.digest, server.tools, server.capability, false);
-        snapshot.secrets[server.name] = { fields: Object.keys(this.catalog.secrets(entry)), configured: Object.values(this.catalog.secrets(entry)).every(Boolean) };
+        snapshot.secrets[server.name] = { count: Object.keys(this.catalog.secrets(entry)).length, configured: Object.values(this.catalog.secrets(entry)).every(Boolean) };
       }
       await trx('extension_profile_revisions').insert({ profile_id: profileId, revision: snapshot.revision, snapshot: JSON.stringify(snapshot), secrets_encrypted: sealExtensionSecrets(nextSecrets, identity(snapshot), this.environment) });
       return snapshot;
@@ -147,7 +147,16 @@ export class ExtensionProfileStore {
     const row = await this.database('extension_run_grants').where({ token_hash: extensionTokenHash(token) }).first();
     if (!row || !await this.database.schema.hasTable('task_history')) return;
     if (!await this.database('tasks').where({ task_id: row.task_id }).first()) return;
-    await this.database('task_history').insert({ task_id: row.task_id, state: 'claude_execution', timestamp: new Date().toISOString(), reason: 'Extension MCP network accounting', metadata: JSON.stringify({ event: 'network.extensions', network: JSON.parse(row.network_policy), calls: row.calls, responseBytes: row.bytes, requestBytes: row.request_bytes, denied: row.network_denials, resolutions: JSON.parse(row.network_events) }) });
+    // Persist decisions and accounting, never the operator's allowlists or addresses.
+    const network = { mode: (JSON.parse(row.network_policy) as ExtensionGrantNetwork).mode };
+    const resolutions = (JSON.parse(row.network_events) as { host: string; allowed: boolean }[]).map(({ host, allowed }) => ({
+      allowed,
+      ...(/^catalog:[a-z][a-z0-9_-]{0,63}@[0-9a-f]{64}$/.test(host) ? { host } : {}),
+    }));
+    await this.database('task_history').insert({
+      task_id: row.task_id, state: 'claude_execution', timestamp: new Date().toISOString(), reason: 'Extension MCP network accounting',
+      metadata: JSON.stringify({ event: 'network.extensions', network, calls: row.calls, responseBytes: row.bytes, requestBytes: row.request_bytes, denied: row.network_denials, resolutions }),
+    });
   }
   async finishGatewayCall(token: string, bytes: number): Promise<void> {
     await this.database('extension_run_grants').where({ token_hash: extensionTokenHash(token) }).where('connections', '>', 0).decrement({ connections: 1, bytes: Math.max(0, EXTENSION_LIMITS.responseBytes - bytes) });

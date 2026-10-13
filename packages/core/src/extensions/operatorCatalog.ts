@@ -49,7 +49,7 @@ export class OperatorCatalog {
     return Object.fromEntries(Object.entries(refs).map(([field, ref]) => [field, this.environment[ref] ?? '']));
   }
   async publicEntries(): Promise<ExtensionCatalogEntry[]> {
-    return (await this.entries()).map(e => ({ id: e.id, digest: operatorCatalogDigest(e), secrets: { fields: Object.keys(this.secrets(e)), configured: Object.values(this.secrets(e)).every(Boolean) } }));
+    return (await this.entries()).map(e => ({ id: e.id, digest: operatorCatalogDigest(e), tools: e.tools, capability: e.capability, secrets: { count: Object.keys(this.secrets(e)).length, configured: Object.values(this.secrets(e)).every(Boolean) } }));
   }
   async resolve(id: string, digest: string, tools: string[], capability: 'read' | 'write', requireSecrets = true): Promise<OperatorCatalogEntry> {
     const entry = (await this.entries()).find(e => e.id === id);

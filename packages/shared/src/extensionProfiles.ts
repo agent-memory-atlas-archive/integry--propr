@@ -18,9 +18,10 @@ export const catalogMcpSchema = z.strictObject({
 });
 export const extensionMcpSchema = z.discriminatedUnion('kind', [remoteMcpSchema, catalogMcpSchema]);
 export type ExtensionMcpDescriptor = z.infer<typeof extensionMcpSchema>;
-/** Public catalog projection: never includes executable, endpoint, arguments or secret references. */
+/** Immutable selection metadata only; excludes transport, addresses, commands, paths, environment names/values and secret references. */
 export interface ExtensionCatalogEntry {
-  id: string; digest: string; secrets: { fields: string[]; configured: boolean };
+  id: string; digest: string; tools: string[]; capability: 'read' | 'write';
+  secrets: { count: number; configured: boolean };
 }
 export const extensionProfileInputSchema = z.strictObject({
   version: z.literal(EXTENSION_PROFILE_VERSION), name: z.string().trim().min(1).max(100), enabled: z.boolean(),
@@ -40,7 +41,7 @@ export interface ExtensionSkillBundle {
 }
 export interface ExtensionProfileRevision extends ExtensionSelection, ExtensionProfileInput {
   createdAt: number; updatedAt: number; auditActor: string;
-  secrets: Record<string, { fields: string[]; configured: boolean }>;
+  secrets: Record<string, { fields?: string[]; count?: number; configured: boolean }>;
   skillBundles: ExtensionSkillBundle[];
 }
 export const EXTENSION_PROFILE_CONTRACT = {
@@ -48,3 +49,14 @@ export const EXTENSION_PROFILE_CONTRACT = {
   transports: ['https', 'catalog'], localStdio: 'operator-installed-catalog-only',
   skills: ['tar', 'tar.gz', 'github-exact-commit'], permission: 'instance.manage_settings',
 } as const;
+
+/** Remove implementation field names from catalog snapshots written by older versions. */
+export function publicExtensionProfile(snapshot: ExtensionProfileRevision): ExtensionProfileRevision {
+  const secrets = { ...snapshot.secrets };
+  for (const server of snapshot.mcpServers ?? []) {
+    if (server.kind !== 'catalog' || !secrets[server.name]) continue;
+    const status = secrets[server.name];
+    secrets[server.name] = { count: status.count ?? status.fields?.length ?? 0, configured: status.configured };
+  }
+  return { ...snapshot, secrets };
+}

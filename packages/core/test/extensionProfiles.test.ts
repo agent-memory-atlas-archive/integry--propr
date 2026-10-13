@@ -316,7 +316,7 @@ test('operator catalog projections exclude internals and customers cannot smuggl
   const { database, store } = await fixture(); t.after(() => database.destroy());
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'operator-catalog-')); t.after(() => fs.rm(root, { recursive: true, force: true }));
   const { operatorCatalogDigest } = await import('../src/extensions/operatorCatalog.js');
-  const entry = { id: 'local-docs', kind: 'stdio' as const, executable: process.execPath, args: ['--version'], secretEnv: { API_KEY: 'OPERATOR_DOCS_KEY' }, tools: ['lookup'], capability: 'read' as const };
+  const entry = { id: 'local-docs', kind: 'stdio' as const, executable: '/usr/bin/env', args: ['node', '--version', 'CATALOG_ARGUMENT_SENTINEL'], secretEnv: { API_KEY: 'OPERATOR_DOCS_KEY' }, tools: ['lookup'], capability: 'read' as const };
   const filename = path.join(root, 'catalog.json'); await fs.writeFile(filename, JSON.stringify([entry]), { mode: 0o600 });
   store.environment.PROPR_EXTENSION_CATALOG_FILE = filename; store.environment.OPERATOR_DOCS_KEY = secret;
   const descriptor = { kind: 'catalog' as const, name: 'local', catalogId: entry.id, digest: operatorCatalogDigest(entry), enabled: true, tools: ['lookup'], capability: 'read' as const };
@@ -326,9 +326,13 @@ test('operator catalog projections exclude internals and customers cannot smuggl
   await assert.rejects(store.assertLaunch('1', select(pending), context), /not configured/);
   store.environment.OPERATOR_DOCS_KEY = secret;
   const profile = await store.save('1', { ...input(), mcpServers: [descriptor] });
-  assert.deepEqual(profile.secrets.local, { fields: ['API_KEY'], configured: true });
+  assert.deepEqual(profile.secrets.local, { count: 1, configured: true });
   const projection = JSON.stringify({ profiles: await store.list('1'), history: await store.history('1', profile.profileId), catalog: await store.catalog.publicEntries() });
-  for (const forbidden of [secret, entry.executable, '--version', 'OPERATOR_DOCS_KEY', filename]) assert.ok(!projection.includes(forbidden), forbidden);
+  for (const forbidden of [secret, entry.executable, '--version', 'CATALOG_ARGUMENT_SENTINEL', 'API_KEY', 'OPERATOR_DOCS_KEY', filename]) assert.ok(!projection.includes(forbidden), forbidden);
+  assert.deepEqual((await store.catalog.publicEntries())[0], { id: entry.id, digest: descriptor.digest, tools: ['lookup'], capability: 'read', secrets: { count: 1, configured: true } });
+  // Previously saved revisions must also stop exposing child environment names.
+  await database('extension_profile_revisions').where({ profile_id: profile.profileId }).update({ snapshot: JSON.stringify({ ...profile, secrets: { local: { fields: ['API_KEY'], configured: true } } }) });
+  for (const projection of [await store.list('1'), await store.history('1', profile.profileId), await store.read('1', select(profile))]) assert.ok(!JSON.stringify(projection).includes('API_KEY'));
   for (const patch of [{ command: '/bin/sh' }, { args: ['-c', 'id'] }, { argv: ['id'] }, { env: { API_KEY: secret } }, { hostPath: '/etc' }, { socket: '/var/run/docker.sock' }, { bindMount: '/etc:/etc' }, { url: 'https://internal.local' }]) {
     assert.equal(extensionProfileInputSchema.safeParse({ ...input(), mcpServers: [{ ...descriptor, ...patch }] }).success, false);
     await assert.rejects(store.save('1', { ...input(), mcpServers: [{ ...descriptor, ...patch }] } as any), /Invalid extension profile/);
@@ -351,7 +355,9 @@ test('catalog stdio is callable through both selected authorized launcher polici
   const { claudeToolPolicyArgs, codexToolPolicyArgs } = await import('../src/agents/agentToolPolicy.js');
   const { spawn } = await import('node:child_process'); const { createInterface } = await import('node:readline');
   const code = `const rl = require('node:readline').createInterface({input:process.stdin}); rl.on('line', line => { const rpc=JSON.parse(line); if(rpc.id===undefined)return; const result = rpc.method==='tools/list' ? {tools:[{name:'lookup'},{name:'delete'}]} : {content:[{type:'text',text:'called '+process.env.API_KEY+' '+Buffer.from(process.env.API_KEY).toString('base64')}]}; process.stderr.write(process.env.API_KEY); console.log(JSON.stringify({jsonrpc:'2.0',id:rpc.id,result})); });`;
-  const entry = { id: 'synthetic-docs', kind: 'stdio' as const, executable: process.execPath, args: ['-e', code], secretEnv: { API_KEY: 'OPERATOR_DOCS_KEY' }, tools: ['lookup'], capability: 'read' as const };
+  // The allowlisted env executable invokes this suite's Node via a fixed argument,
+  // including NVM/toolcache runtimes outside the production executable roots.
+  const entry = { id: 'synthetic-docs', kind: 'stdio' as const, executable: '/usr/bin/env', args: [process.execPath, '-e', code], secretEnv: { API_KEY: 'OPERATOR_DOCS_KEY' }, tools: ['lookup'], capability: 'read' as const };
   const catalogFile = path.join(root, 'catalog.json'); await fs.writeFile(catalogFile, JSON.stringify([entry]), { mode: 0o600 });
   store.environment.PROPR_EXTENSION_CATALOG_FILE = catalogFile; store.environment.OPERATOR_DOCS_KEY = secret;
   const profile = await store.save('1', { ...input(), mcpServers: [{ kind: 'catalog', name: 'local', catalogId: entry.id, digest: operatorCatalogDigest(entry), enabled: true, tools: ['lookup'], capability: 'read' }] });
@@ -498,11 +504,15 @@ test('gateway accounting and denied resolutions survive grant cleanup in per-tas
   await database.schema.createTable('task_history', c => { c.string('task_id'); c.string('state'); c.string('timestamp'); c.text('reason'); c.text('metadata'); });
   await database('tasks').insert({ task_id: 'network-accounting' });
   const profile = await store.save('1', input(), { docs: secret });
-  const network = { mode: 'restricted' as const, allow: [], instanceAllow: [] };
+  const network = { mode: 'restricted' as const, allow: ['unrelated-base-allow.example'], instanceAllow: ['10.43.21.9'] };
   const token = await store.createGrant('1', profile, 'network-accounting', network); await store.activateGrant(token, '1', select(profile));
   await assert.rejects(extensionGatewayCall(store, token, 'docs', { jsonrpc: '2.0', id: 1, method: 'ping' }, async () => { assert.fail('Denied network dialed'); }), /network policy/);
+  await store.recordGatewayNetwork(token, 'https://catalog-endpoint-sentinel.internal/mcp', false);
+  await store.recordGatewayNetwork(token, '10.43.21.9', false);
+  await store.recordGatewayNetwork(token, `catalog:local-docs@${'a'.repeat(64)}`, true);
   await store.retainGatewayTelemetry(token); await database('extension_run_grants').delete();
   const event = JSON.parse((await database('task_history').first()).metadata);
-  assert.equal(event.event, 'network.extensions'); assert.deepEqual(event.network, network); assert.equal(event.denied, 1); assert.equal(event.calls, 1); assert.equal(event.responseBytes, 1024 * 1024); assert.deepEqual(event.resolutions, [{ host: '8.8.8.8', allowed: false }]);
+  assert.equal(event.event, 'network.extensions'); assert.deepEqual(event.network, { mode: 'restricted' }); assert.equal(event.denied, 3); assert.equal(event.calls, 1); assert.equal(event.responseBytes, 1024 * 1024); assert.deepEqual(event.resolutions, [{ allowed: false }, { allowed: false }, { allowed: false }, { host: `catalog:local-docs@${'a'.repeat(64)}`, allowed: true }]);
+  for (const sentinel of ['10.43.21.9', 'catalog-endpoint-sentinel', 'unrelated-base-allow.example']) assert.ok(!JSON.stringify(event).includes(sentinel));
   assert.ok(!JSON.stringify(event).includes(secret)); assert.ok(!JSON.stringify(event).includes(token));
 });

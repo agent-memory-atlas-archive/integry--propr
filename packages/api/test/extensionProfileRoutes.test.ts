@@ -22,6 +22,11 @@ test('extension HTTP boundary requires fresh durable administration, preflight J
   await database.schema.createTable('agent_definitions', c => c.string('id').primary());
   await up(database); await grantMigration(database); await database('instance_members').insert([{ github_user_id: '1', role: 'admin' }, { github_user_id: '2', role: 'member' }]);
   const store = new ExtensionProfileStore(database, { SYSTEM_TASK_SECRET: 'synthetic-test-custody-root' });
+  const { operatorCatalogDigest } = await import('../../core/src/extensions/operatorCatalog.js');
+  const entry = { id: 'operator-docs', kind: 'stdio' as const, executable: '/usr/bin/env', args: ['node', 'CATALOG_ARGUMENT_SENTINEL', '/opt/propr/CATALOG_PATH_SENTINEL'], secretEnv: { API_KEY: 'OPERATOR_DOCS_KEY' }, tools: ['lookup', 'update'], capability: 'write' as const };
+  const catalogFile = path.join(root, 'catalog.json');
+  await fs.writeFile(catalogFile, JSON.stringify([entry]), { mode: 0o600 });
+  store.environment.PROPR_EXTENSION_CATALOG_FILE = catalogFile; store.environment.OPERATOR_DOCS_KEY = 'CATALOG_SECRET_VALUE_SENTINEL';
   const routes = createExtensionProfileRoutes(store); const app = express();
   // Match the production boundary: bound requests before parsing or authorization.
   const rateLimiter = createApiRequestRateLimiter({ PROPR_API_RATE_LIMIT_MAX: '100' });
@@ -66,6 +71,17 @@ test('extension HTTP boundary requires fresh durable administration, preflight J
   assert.equal(saved.status, 200); const text = await saved.text(); assert.ok(!text.includes(sentinel));
   const profile = JSON.parse(text).profile;
   const publicText = await fetch(base + '/profiles', { headers }).then(r => r.text()); assert.ok(!publicText.includes(sentinel)); assert.ok(!publicText.includes('secrets_encrypted'));
+  const catalogInput = { ...input, mcpServers: [{ kind: 'catalog', name: 'operator', catalogId: entry.id, digest: operatorCatalogDigest(entry), enabled: true, tools: ['lookup'], capability: entry.capability }] };
+  const catalogSaved = await fetch(base + '/profiles', { method: 'POST', headers, body: JSON.stringify({ input: catalogInput }) });
+  assert.equal(catalogSaved.status, 200);
+  const catalogSnapshot = await catalogSaved.json();
+  assert.deepEqual(catalogSnapshot.profile.secrets.operator, { count: 1, configured: true });
+  const catalogList = await fetch(base + '/profiles', { headers }).then(r => r.json());
+  assert.deepEqual(catalogList.catalog[0], { id: entry.id, digest: operatorCatalogDigest(entry), tools: entry.tools, capability: entry.capability, secrets: { count: 1, configured: true } });
+  const catalogHistory = await fetch(base + `/profiles/${catalogSnapshot.profile.profileId}/history`, { headers }).then(r => r.json());
+  for (const projection of [catalogSnapshot, catalogList, catalogHistory]) {
+    for (const sentinel of ['API_KEY', 'OPERATOR_DOCS_KEY', 'CATALOG_SECRET_VALUE_SENTINEL', entry.executable, 'CATALOG_ARGUMENT_SENTINEL', 'CATALOG_PATH_SENTINEL', catalogFile]) assert.ok(!JSON.stringify(projection).includes(sentinel), sentinel);
+  }
   for (const commit of ['main', 'v1.0', 'a'.repeat(39)]) assert.equal((await fetch(base + '/skills/github', { method: 'POST', headers, body: JSON.stringify({ repository: 'fixture/repo', commit, directory: 'skills/test' }) })).status, 400);
   const selection = { instanceId: profile.instanceId, profileId: profile.profileId, revision: profile.revision };
   assert.equal((await fetch(base + '/delete', { method: 'POST', headers, body: JSON.stringify({ selection: { ...selection, instanceId: randomUUID() } }) })).status, 404);
