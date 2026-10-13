@@ -10,6 +10,9 @@ import { runInNewContext } from 'node:vm';
 import {
   ACCEPTANCE_ARTIFACT_LEAF,
   ACCEPTANCE_JOURNEYS,
+  CSP_SOCKET_JOURNEYS,
+  INSTALLED_SOCKET_JOURNEYS,
+  validateSocketServiceSummary,
   ACCEPTANCE_REDACTION_PLACEHOLDER,
   acceptanceVariantsFor,
   validateSetupEvidence,
@@ -133,157 +136,292 @@ const accessibilityFor = () => ({
   },
 });
 
-const summaryFor = () => ({
-  schemaVersion: 7,
-  generatedAt: FIXED_TIME,
-  status: 'passed',
-  journeys: ACCEPTANCE_JOURNEYS.length,
-  screenshots: expectedScreenshotNames().length,
-  boundary: { packagedExecutable: true, rendererOrigin: 'propr-app://renderer', preloadBridge: true, journeys: ACCEPTANCE_JOURNEYS },
-  console: {
-    records: 3,
-    errors: 0,
-    expectedErrors: 0,
-    unexpectedErrors: 0,
-    errorCategoryCounts: {
-      expectedCspPolicyTransition: 0,
-      expectedRevokedAuthorizationResponse: 0,
-      currentUserSync: 0,
-      apiLoad: 0,
-      socketContext: 0,
-      reactRuntime: 0,
-      networkResource: 0,
-      other: 0,
-      pageError: 0,
-    },
-  },
-  services: {
-    rest: {
-      requestCount: 12,
-      authenticatedRequestCount: 3,
-      journeys: ['dashboard-profile-manager'],
-      currentUserValidation: {
-        correlation: 'current-scope-user-validation',
-        rendererRequestIssued: true,
-        rendererScopeGeneration: 1,
-        mainProxyObserved: true,
-        mainActiveScopeGeneration: 0,
-        activeScopeAccepted: true,
-        mainOnlyBearerInjection: true,
-        upstreamRequestArrived: true,
-        responseStatus: 200,
-        responseClassification: 'success',
-        parsedUserSchemaAccepted: true,
-        rendererActiveScopeAccepted: true,
-        firstFailedPredicate: 'none',
+const summaryFor = (mode = 'packaged') => {
+  const summary = {
+    schemaVersion: 7,
+    generatedAt: FIXED_TIME,
+    status: 'passed',
+    journeys: ACCEPTANCE_JOURNEYS.length,
+    screenshots: expectedScreenshotNames().length,
+    boundary: { packagedExecutable: true, rendererOrigin: 'propr-app://renderer', preloadBridge: true, journeys: ACCEPTANCE_JOURNEYS },
+    console: {
+      records: 3,
+      errors: 0,
+      expectedErrors: 0,
+      unexpectedErrors: 0,
+      errorCategoryCounts: {
+        expectedCspPolicyTransition: 0,
+        expectedRevokedAuthorizationResponse: 0,
+        currentUserSync: 0,
+        apiLoad: 0,
+        socketContext: 0,
+        reactRuntime: 0,
+        networkResource: 0,
+        other: 0,
+        pageError: 0,
       },
     },
-    socketIo: {
-      authenticatedConnections: 1,
-      events: 1,
-      journeys: ['dashboard-profile-manager'],
-      handshake: {
-        mainAttempts: 1,
-        fixtureAttempts: 1,
-        scopeQueryPresent: true,
-        scopeQueryCount: 1,
-        scopeEqualsActivatedBinding: true,
-        activeBindingPresent: true,
-        profileGenerationCurrent: true,
-        originEqualsActivatedBinding: true,
-        path: 'socket-io',
-        transport: 'websocket',
-        resource: 'websocket',
-        rendererBearerPresent: false,
-        rendererCookiePresent: false,
-        authorizationHeaderPresent: true,
-        authorizationHeaderExactlyMainInjected: true,
-        rendererObservedApplicationEvent: true,
-        rendererLifecycle: {
-          phase: 'socket-connect-invoked',
-          profileActivationPublished: true,
-          socketProviderMounted: true,
-          providerDisabled: false,
-          disabledByDemoModeLoading: false,
-          disabledByDemoMode: false,
-          disabledByCurrentUserLoading: false,
-          disabledByCurrentUserAbsent: false,
-          desktopRuntime: true,
-          connectionScope: 'available',
-          socketConstructionInvocations: 1,
-          socketConstructions: 1,
-          connectInvocations: 1,
+    services: {
+      rest: {
+        requestCount: 12,
+        authenticatedRequestCount: 3,
+        journeys: ['dashboard-profile-manager'],
+        currentUserValidation: {
+          correlation: 'current-scope-user-validation',
+          rendererRequestIssued: true,
+          rendererScopeGeneration: 1,
+          mainProxyObserved: true,
+          mainActiveScopeGeneration: 0,
+          activeScopeAccepted: true,
+          mainOnlyBearerInjection: true,
+          upstreamRequestArrived: true,
+          responseStatus: 200,
+          responseClassification: 'success',
+          parsedUserSchemaAccepted: true,
+          rendererActiveScopeAccepted: true,
+          firstFailedPredicate: 'none',
         },
-        rejectionCategory: 'none',
       },
+      socketIo: {
+        records: 3,
+        subscriptions: 1,
+        authenticatedConnections: 1,
+        events: 1,
+        journeys: ['dashboard-profile-manager'],
+        handshake: {
+          mainAttempts: 1,
+          fixtureAttempts: 1,
+          scopeQueryPresent: true,
+          scopeQueryCount: 1,
+          scopeEqualsActivatedBinding: true,
+          activeBindingPresent: true,
+          profileGenerationCurrent: true,
+          originEqualsActivatedBinding: true,
+          path: 'socket-io',
+          transport: 'websocket',
+          resource: 'websocket',
+          rendererBearerPresent: false,
+          rendererCookiePresent: false,
+          authorizationHeaderPresent: true,
+          authorizationHeaderExactlyMainInjected: true,
+          rendererObservedApplicationEvent: true,
+          rendererLifecycle: {
+            phase: 'socket-connect-invoked',
+            profileActivationPublished: true,
+            socketProviderMounted: true,
+            providerDisabled: false,
+            disabledByDemoModeLoading: false,
+            disabledByDemoMode: false,
+            disabledByCurrentUserLoading: false,
+            disabledByCurrentUserAbsent: false,
+            desktopRuntime: true,
+            connectionScope: 'available',
+            socketConstructionInvocations: 1,
+            socketConstructions: 1,
+            connectInvocations: 1,
+          },
+          rejectionCategory: 'none',
+        },
+      },
+      pairing: { started: 1, polled: 1, activated: 1, journeys: ['dashboard-profile-manager'] },
+      connect: { confirmedRequests: 1, journeys: ['connect-confirmation'] },
     },
-    pairing: { started: 1, polled: 1, activated: 1, journeys: ['dashboard-profile-manager'] },
-    connect: { confirmedRequests: 1, journeys: ['connect-confirmation'] },
-  },
-  redaction: 'Full raw surfaces were scanned; published logs retain only source, level, byte count, and digest.',
-});
-
-it('scopes the native socket service gate to the dashboard while CSP journeys also connect', async () => {
-  // Execute the runner's actual gate without launching Electron or capturing UI.
-  const source = await readFile(new URL('./run-packaged-acceptance.mjs', import.meta.url), 'utf8');
-  const start = source.indexOf('const observedServiceSummary = () => {');
-  const end = source.indexOf('\ntry {', start);
-  assert.ok(start >= 0 && end > start);
-  const journey = 'dashboard-profile-manager';
-  const { rest, socketIo } = summaryFor().services;
-  const handshake = socketIo.handshake;
-  const socketRecords = [journey, 'csp-reload-pairing', 'csp-reload-restart', 'csp-reload-saved-selection']
-    .flatMap(journey => [
-      { journey, event: 'connection', authenticated: true },
-      { journey, event: 'subscribe:queue:stats', authenticated: true,
-        genuineApplicationSubscription: true, direction: 'client-to-fixture' },
-      { journey, event: 'queue:stats:update', authenticated: true,
-        genuineApplicationEvent: true, direction: 'fixture-to-renderer' },
-    ]);
-  const context = {
-    socketRecords,
-    QUEUE_STATS_SUBSCRIBE_EVENT: 'subscribe:queue:stats',
-    QUEUE_STATS_UPDATE: 'queue:stats:update',
-    PAIRING_ID: 'fixture-pairing',
-    unique: values => [...new Set(values)],
-    requestRecords: [
-      { journey, method: 'GET', url: '/api/auth/user', hasAuthorization: true },
-      ...['', '/fixture-pairing/poll', '/fixture-pairing/activate'].map(suffix => ({
-        journey, method: 'POST', url: '/api/desktop/pairings' + suffix,
-      })),
-      { journey: 'connect-confirmation', method: 'GET', url: '/api/desktop/discovery' },
-    ],
-    mainHandshakeRecords: [{ ...handshake, journey, accepted: true,
-      scopeEqualsActive: true, originEqualsActive: true, bearerMainInjected: true }],
-    fixtureHandshakeRecords: [{ journey, accepted: true, scopeQueryPresent: true,
-      authorizationPresent: true, authorizationMatchesActivatedBearer: true }],
-    consoleRecords: [{ journey, text: '[SocketContext] Received queue stats update: {}' }],
-    rendererLifecycleRecords: [{ journey, ...handshake.rendererLifecycle }],
-    rendererCurrentUserRecords: ['request-issued', 'parsed-user-accepted', 'active-scope-accepted']
-      .map(phase => ({ journey, phase, activeScopePresent: true, scopeGeneration: 1, schemaAccepted: true })),
-    mainCurrentUserRecords: [{ journey, activeScopeGeneration: 1, accepted: true,
-      rendererBearerPresent: false, rendererCookiePresent: false, bearerMainInjected: true }],
-    fixtureCurrentUserRecords: [{ journey, source: 'renderer', requestArrived: true,
-      responseStatus: 200, classification: 'success' }],
-    currentUserValidationFailureCategory: () => rest.currentUserValidation.firstFailedPredicate,
-    socketHandshakeFailureCategory: () => 'none',
+    redaction: 'Full raw surfaces were scanned; published logs retain only source, level, byte count, and digest.',
   };
-  const summary = () => runInNewContext(source.slice(start, end) + '\nobservedServiceSummary()', { ...context });
-  const services = summary();
-  assert.equal(services.socketIo.authenticatedConnections, 1);
-  assert.equal(services.socketIo.events, 1);
-  assert.deepEqual(Array.from(services.socketIo.journeys), [journey]);
-  assert.equal(services.socketIo.handshake.mainAttempts, 1);
-  assert.equal(services.socketIo.handshake.fixtureAttempts, 1);
+  summary.services.socketIo.cspSessions = CSP_SOCKET_JOURNEYS.map(journey => ({
+    ...structuredClone(summary.services.socketIo), journeys: [journey],
+    handshake: { ...structuredClone(summary.services.socketIo.handshake), rendererLifecycle: null },
+  }));
+  summary.services.socketIo.installedSessions = mode === 'installed-rpm'
+    ? INSTALLED_SOCKET_JOURNEYS.map((journey, index) => ({
+      ...structuredClone(summary.services.socketIo.cspSessions[index]), journeys: [journey],
+    })) : [];
+  summary.services.socketIo.mode = mode;
+  summary.services.socketIo.unexpectedRecords = 0;
+  return summary;
+};
 
-  // Other journeys cannot mask missing dashboard evidence or excuse duplicates.
-  for (const event of ['connection', 'subscribe:queue:stats', 'queue:stats:update']) {
-    const index = socketRecords.findIndex(record => record.journey === journey && record.event === event);
-    const [record] = socketRecords.splice(index, 1);
-    assert.throws(summary, /service journeys were incomplete/, `missing ${event}`);
-    socketRecords.splice(index, 0, record, { ...record });
-    assert.throws(summary, /service journeys were incomplete/, `duplicate ${event}`);
-    socketRecords.splice(index + 1, 1);
+  for (const mode of ['packaged', 'installed-rpm']) {
+  it(`validates actual runner service evidence through final ${mode} artifacts`, async () => {
+    const parent = await mkdtemp(join(tmpdir(), 'combined-session-contract-'));
+    try {
+      const evidence = await createCompleteArtifactSet(join(parent, ACCEPTANCE_ARTIFACT_LEAF), mode);
+      // Execute the runner's actual gate without launching Electron or capturing UI.
+      const source = await readFile(new URL('./run-packaged-acceptance.mjs', import.meta.url), 'utf8');
+      const start = source.indexOf('const observedServiceSummary = () => {');
+      const end = source.indexOf('\ntry {', start);
+      assert.ok(start >= 0 && end > start);
+      const journey = 'dashboard-profile-manager';
+      const journeys = [journey, ...CSP_SOCKET_JOURNEYS, ...(mode === 'installed-rpm' ? INSTALLED_SOCKET_JOURNEYS : [])];
+      const { rest, socketIo } = summaryFor().services;
+      const handshake = socketIo.handshake;
+      const socketRecords = journeys
+        .flatMap(journey => [
+          { journey, event: 'connection', authenticated: true },
+          { journey, event: 'subscribe:queue:stats', authenticated: true,
+            genuineApplicationSubscription: true, direction: 'client-to-fixture' },
+          { journey, event: 'queue:stats:update', authenticated: true,
+            genuineApplicationEvent: true, direction: 'fixture-to-renderer' },
+        ]);
+      const context = {
+        socketRecords,
+        CSP_SOCKET_JOURNEYS,
+        INSTALLED_SOCKET_JOURNEYS,
+        installedRpm: mode === 'installed-rpm',
+        validateSocketServiceSummary: socket => {
+          evidence.summary.services.socketIo = socket;
+          validateAcceptanceEvidence(evidence.accessibility, evidence.manifest, evidence.summary, evidence.sanitizedLog);
+        },
+        QUEUE_STATS_SUBSCRIBE_EVENT: 'subscribe:queue:stats',
+        QUEUE_STATS_UPDATE: 'queue:stats:update',
+        PAIRING_ID: 'fixture-pairing',
+        unique: values => [...new Set(values)],
+        requestRecords: [
+          { journey, method: 'GET', url: '/api/auth/user', hasAuthorization: true },
+          ...['', '/fixture-pairing/poll', '/fixture-pairing/activate'].map(suffix => ({
+            journey, method: 'POST', url: '/api/desktop/pairings' + suffix,
+          })),
+          { journey: 'connect-confirmation', method: 'GET', url: '/api/desktop/discovery' },
+        ],
+        mainHandshakeRecords: journeys.map(journey => ({ ...handshake, journey, accepted: true,
+          scopeEqualsActive: true, originEqualsActive: true, bearerMainInjected: true })),
+        fixtureHandshakeRecords: journeys.map(journey => ({ journey, accepted: true, scopeQueryPresent: true,
+          authorizationPresent: true, authorizationMatchesActivatedBearer: true })),
+        consoleRecords: journeys.map(journey => ({ journey, text: '[SocketContext] Received queue stats update: {}' })),
+        rendererLifecycleRecords: [{ journey, ...handshake.rendererLifecycle }],
+        rendererCurrentUserRecords: ['request-issued', 'parsed-user-accepted', 'active-scope-accepted']
+          .map(phase => ({ journey, phase, activeScopePresent: true, scopeGeneration: 1, schemaAccepted: true })),
+        mainCurrentUserRecords: [{ journey, activeScopeGeneration: 1, accepted: true,
+          rendererBearerPresent: false, rendererCookiePresent: false, bearerMainInjected: true }],
+        fixtureCurrentUserRecords: [{ journey, source: 'renderer', requestArrived: true,
+          responseStatus: 200, classification: 'success' }],
+        currentUserValidationFailureCategory: () => rest.currentUserValidation.firstFailedPredicate,
+        socketHandshakeFailureCategory: () => 'none',
+      };
+      const summary = () => runInNewContext(source.slice(start, end) + '\nobservedServiceSummary()', { ...context });
+      const services = summary();
+      assert.equal(services.socketIo.authenticatedConnections, 1);
+      assert.equal(services.socketIo.events, 1);
+      assert.deepEqual(Array.from(services.socketIo.journeys), [journey]);
+      assert.equal(services.socketIo.handshake.mainAttempts, 1);
+      assert.equal(services.socketIo.handshake.fixtureAttempts, 1);
+
+      assert.equal(services.socketIo.cspSessions.length, 3);
+      validateSocketServiceSummary(services.socketIo, mode);
+
+      // Every expected journey requires one complete session, independently.
+      for (const journey of journeys) {
+        for (const event of ['connection', 'subscribe:queue:stats', 'queue:stats:update']) {
+          const index = socketRecords.findIndex(record => record.journey === journey && record.event === event);
+          const [record] = socketRecords.splice(index, 1);
+          assert.throws(summary, /service journeys were incomplete/, `missing ${event}`);
+          socketRecords.splice(index, 0, record, { ...record });
+          assert.throws(summary, /service journeys were incomplete/, `duplicate ${event}`);
+          socketRecords.splice(index + 1, 1);
+          record.authenticated = false;
+          assert.throws(summary, /service journeys were incomplete/, `unauthorized ${journey} ${event}`);
+          record.authenticated = true;
+        }
+        for (const key of ['mainHandshakeRecords', 'fixtureHandshakeRecords', 'consoleRecords']) {
+          const records = context[key];
+          const index = records.findIndex(record => record.journey === journey);
+          const [record] = records.splice(index, 1);
+          assert.throws(summary, /service journeys were incomplete/, `missing ${journey} ${key}`);
+          records.splice(index, 0, record, { ...record });
+          assert.throws(summary, /service journeys were incomplete/, `duplicate ${journey} ${key}`);
+          records.splice(index + 1, 1);
+          if (key !== 'consoleRecords') {
+            record.accepted = false;
+            assert.throws(summary, /service journeys were incomplete/, `rejected ${journey} ${key}`);
+            record.accepted = true;
+          }
+        }
+      }
+      // An extra unauthenticated record in an owned journey cannot be filtered out.
+      for (const journey of journeys) {
+        socketRecords.push({ journey, event: 'connection', authenticated: false });
+        assert.throws(summary, /service journeys were incomplete/);
+        socketRecords.pop();
+        const main = context.mainHandshakeRecords.find(record => record.journey === journey);
+        const fixture = context.fixtureHandshakeRecords.find(record => record.journey === journey);
+        for (const [record, key, invalid] of [
+          [main, 'scopeQueryCount', 2], [main, 'scopeEqualsActive', false],
+          [main, 'activeBindingPresent', false], [main, 'profileGenerationCurrent', false],
+          [main, 'originEqualsActive', false], [main, 'path', 'other'],
+          [main, 'transport', 'other'], [main, 'resource', 'other'],
+          [main, 'rendererBearerPresent', true], [main, 'rendererCookiePresent', true],
+          [main, 'bearerMainInjected', false], [fixture, 'authorizationPresent', false],
+          [fixture, 'authorizationMatchesActivatedBearer', false],
+        ]) {
+          const original = record[key];
+          record[key] = invalid;
+          assert.throws(summary, /service journeys were incomplete/, `${journey} ${key}`);
+          record[key] = original;
+        }
+      }
+      for (const key of ['socketRecords', 'mainHandshakeRecords', 'fixtureHandshakeRecords']) {
+        for (const authenticated of [true, false]) {
+          for (const unexpectedJourney of ['unknown-session', 'installed-unknown',
+            ...installedJourneys.filter(value => !journeys.includes(value))]) {
+            context[key].push({ ...context[key][0], journey: unexpectedJourney, authenticated, accepted: authenticated });
+            assert.throws(summary, /service journeys were incomplete/, `${unexpectedJourney} ${key}`);
+            context[key].pop();
+          }
+        }
+      }
+      for (const mutate of [
+        socket => { socket.installedSessions = []; },
+        socket => { socket.installedSessions.push(structuredClone(socket.cspSessions[0])); },
+        socket => { socket.installedSessions = [socket.installedSessions[0], socket.installedSessions[0]]; },
+        socket => { socket.installedSessions[0].handshake.rendererLifecycle = structuredClone(handshake.rendererLifecycle); },
+      ]) {
+        if (mode !== 'installed-rpm') continue;
+        const services = summary();
+        mutate(services.socketIo);
+        evidence.summary.services.socketIo = services.socketIo;
+        assert.throws(() => validateAcceptanceEvidence(evidence.accessibility, evidence.manifest, evidence.summary, evidence.sanitizedLog), /installed sessions disagree|not observed/);
+      }
+      // The final artifact gate ties session coverage to the schema-2 log mode.
+      for (const mismatch of ['packaged', 'installed-rpm', 'unknown']) {
+        if (mismatch === mode) continue;
+        const services = summary();
+        services.socketIo.mode = mismatch;
+        evidence.summary.services.socketIo = services.socketIo;
+        assert.throws(() => validateAcceptanceEvidence(evidence.accessibility, evidence.manifest, evidence.summary, evidence.sanitizedLog), /mode/);
+      }
+    } finally { await rm(parent, { recursive: true, force: true }); }
+  });
+}
+
+it('requires exact dashboard and CSP session counts in the sanitized service summary', () => {
+  const valid = summaryFor().services.socketIo;
+  assert.doesNotThrow(() => validateSocketServiceSummary(valid));
+  for (const index of [-1, 0, 1, 2]) {
+    for (const field of ['records', 'authenticatedConnections', 'subscriptions', 'events']) {
+      for (const delta of [-1, 1]) {
+        const summary = structuredClone(valid);
+        const session = index === -1 ? summary : summary.cspSessions[index];
+        session[field] += delta;
+        assert.throws(() => validateSocketServiceSummary(summary), /not observed/);
+      }
+    }
+    const summary = structuredClone(valid);
+    const session = index === -1 ? summary : summary.cspSessions[index];
+    session.journeys = ['unknown-session'];
+    assert.throws(() => validateSocketServiceSummary(summary), /not observed/);
+    session.handshake.authorizationHeaderExactlyMainInjected = false;
+    session.journeys = index === -1 ? ['dashboard-profile-manager'] : [CSP_SOCKET_JOURNEYS[index]];
+    assert.throws(() => validateSocketServiceSummary(summary), /not observed/);
+  }
+  for (const mutate of [
+    summary => summary.cspSessions.pop(),
+    summary => summary.cspSessions.push(structuredClone(summary.cspSessions[0])),
+    summary => { summary.cspSessions[1] = structuredClone(summary.cspSessions[0]); },
+    summary => { summary.unexpectedRecords = 1; },
+  ]) {
+    const summary = structuredClone(valid);
+    mutate(summary);
+    assert.throws(() => validateSocketServiceSummary(summary), /not observed/);
   }
 });
 
@@ -367,7 +505,7 @@ const createCompleteArtifactSet = async (root, mode = 'packaged') => {
     }
   }
   const accessibility = accessibilityFor();
-  const summary = summaryFor();
+  const summary = summaryFor(mode);
   const sanitizedLog = sanitizedLogFor(mode);
   summary.console.records = sanitizedLog.records.filter(record => record.source !== 'packaged-process').length;
   await writeFile(join(root, 'accessibility.json'), `${JSON.stringify(accessibility)}\n`);

@@ -552,7 +552,86 @@ const validateAccessibility = accessibility => {
   });
 };
 
-const validateSummary = summary => {
+export const CSP_SOCKET_JOURNEYS = Object.freeze([
+  'csp-reload-pairing', 'csp-reload-restart', 'csp-reload-saved-selection',
+]);
+
+export const INSTALLED_SOCKET_JOURNEYS = Object.freeze(['installed-approved', 'installed-restart']);
+
+const validateSocketSession = (socketIo, journey) => {
+  assertExactKeys(socketIo, ['records', 'authenticatedConnections', 'subscriptions', 'events', 'journeys', 'handshake'], 'Acceptance Socket.IO session');
+  assertExactKeys(socketIo.handshake, [
+    'mainAttempts', 'fixtureAttempts', 'scopeQueryPresent', 'scopeQueryCount',
+    'scopeEqualsActivatedBinding', 'activeBindingPresent', 'profileGenerationCurrent',
+    'originEqualsActivatedBinding', 'path', 'transport', 'resource',
+    'rendererBearerPresent', 'rendererCookiePresent', 'authorizationHeaderPresent',
+    'authorizationHeaderExactlyMainInjected', 'rendererObservedApplicationEvent', 'rendererLifecycle',
+    'rejectionCategory',
+  ], 'Acceptance Socket.IO handshake summary');
+  const handshake = socketIo.handshake;
+  // Only the dashboard captures ordered renderer lifecycle diagnostics. CSP
+  // and installed sessions instead retain null, plus strict handshake and
+  // application subscription/event evidence from their actual scenarios.
+  const dashboard = journey === 'dashboard-profile-manager';
+  if (dashboard) {
+    assertExactKeys(handshake.rendererLifecycle, [
+      'phase', 'profileActivationPublished', 'socketProviderMounted', 'providerDisabled',
+      'disabledByDemoModeLoading', 'disabledByDemoMode',
+      'disabledByCurrentUserLoading', 'disabledByCurrentUserAbsent',
+      'desktopRuntime', 'connectionScope', 'socketConstructionInvocations', 'socketConstructions',
+      'connectInvocations',
+    ], 'Acceptance renderer Socket.IO lifecycle summary');
+  } else if (handshake.rendererLifecycle !== null) {
+    throw new Error('Acceptance claimed service journey was not observed');
+  }
+  if (socketIo.authenticatedConnections !== 1 || socketIo.events !== 1 || socketIo.subscriptions !== 1 || socketIo.records !== 3
+    || socketIo.journeys?.length !== 1 || socketIo.journeys[0] !== journey
+    || handshake.mainAttempts !== 1 || handshake.fixtureAttempts !== 1
+    || handshake.scopeQueryPresent !== true || handshake.scopeQueryCount !== 1
+    || handshake.scopeEqualsActivatedBinding !== true
+    || handshake.activeBindingPresent !== true || handshake.profileGenerationCurrent !== true
+    || handshake.originEqualsActivatedBinding !== true
+    || handshake.path !== 'socket-io' || handshake.transport !== 'websocket' || handshake.resource !== 'websocket'
+    || handshake.rendererBearerPresent !== false || handshake.rendererCookiePresent !== false
+    || handshake.authorizationHeaderPresent !== true || handshake.authorizationHeaderExactlyMainInjected !== true
+    || handshake.rendererObservedApplicationEvent !== true
+    || (dashboard && (
+      handshake.rendererLifecycle.phase !== 'socket-connect-invoked'
+      || handshake.rendererLifecycle.profileActivationPublished !== true
+      || handshake.rendererLifecycle.socketProviderMounted !== true
+      || handshake.rendererLifecycle.providerDisabled !== false
+      || handshake.rendererLifecycle.disabledByDemoModeLoading !== false
+      || handshake.rendererLifecycle.disabledByDemoMode !== false
+      || handshake.rendererLifecycle.disabledByCurrentUserLoading !== false
+      || handshake.rendererLifecycle.disabledByCurrentUserAbsent !== false
+      || handshake.rendererLifecycle.desktopRuntime !== true
+      || handshake.rendererLifecycle.connectionScope !== 'available'
+      || handshake.rendererLifecycle.socketConstructionInvocations !== 1
+      || handshake.rendererLifecycle.socketConstructions !== 1
+      || handshake.rendererLifecycle.connectInvocations !== 1))
+    || handshake.rejectionCategory !== 'none') {
+    throw new Error('Acceptance claimed service journey was not observed');
+  }
+};
+
+export const validateSocketServiceSummary = (socketIo, mode = 'packaged') => {
+  const { cspSessions, installedSessions, mode: summaryMode, unexpectedRecords, ...dashboard } = socketIo;
+  assertExactKeys(socketIo, ['records', 'authenticatedConnections', 'subscriptions', 'events', 'journeys', 'handshake', 'cspSessions', 'installedSessions', 'mode', 'unexpectedRecords'], 'Acceptance Socket.IO summary');
+  if (!['packaged', 'installed-rpm'].includes(mode) || summaryMode !== mode
+    || !Array.isArray(installedSessions)
+    || installedSessions.length !== (mode === 'installed-rpm' ? INSTALLED_SOCKET_JOURNEYS.length : 0)) {
+    throw new Error('Acceptance socket summary mode or installed sessions disagree');
+  }
+  installedSessions.forEach((session, index) => validateSocketSession(session, INSTALLED_SOCKET_JOURNEYS[index]));
+  validateSocketSession(dashboard, 'dashboard-profile-manager');
+  if (unexpectedRecords !== 0 || !Array.isArray(cspSessions)
+    || cspSessions.length !== CSP_SOCKET_JOURNEYS.length) {
+    throw new Error('Acceptance claimed service journey was not observed');
+  }
+  cspSessions.forEach((session, index) => validateSocketSession(session, CSP_SOCKET_JOURNEYS[index]));
+};
+
+const validateSummary = (summary, mode) => {
   assertExactKeys(summary, ['schemaVersion', 'generatedAt', 'status', 'journeys', 'screenshots', 'boundary', 'console', 'services', 'redaction'], 'Acceptance summary');
   if (summary.schemaVersion !== 7 || summary.generatedAt !== FIXED_TIME || summary.status !== 'passed'
     || summary.journeys !== ACCEPTANCE_JOURNEYS.length || summary.screenshots !== expectedScreenshotNames().length
@@ -595,25 +674,9 @@ const validateSummary = summary => {
     'responseClassification', 'parsedUserSchemaAccepted', 'rendererActiveScopeAccepted',
     'firstFailedPredicate',
   ], 'Acceptance current-user validation summary');
-  assertExactKeys(socketIo, ['authenticatedConnections', 'events', 'journeys', 'handshake'], 'Acceptance Socket.IO summary');
+  validateSocketServiceSummary(socketIo, mode);
   assertExactKeys(pairing, ['started', 'polled', 'activated', 'journeys'], 'Acceptance pairing summary');
   assertExactKeys(connect, ['confirmedRequests', 'journeys'], 'Acceptance Connect summary');
-  assertExactKeys(socketIo.handshake, [
-    'mainAttempts', 'fixtureAttempts', 'scopeQueryPresent', 'scopeQueryCount',
-    'scopeEqualsActivatedBinding', 'activeBindingPresent', 'profileGenerationCurrent',
-    'originEqualsActivatedBinding', 'path', 'transport', 'resource',
-    'rendererBearerPresent', 'rendererCookiePresent', 'authorizationHeaderPresent',
-    'authorizationHeaderExactlyMainInjected', 'rendererObservedApplicationEvent', 'rendererLifecycle',
-    'rejectionCategory',
-  ], 'Acceptance Socket.IO handshake summary');
-  const handshake = socketIo.handshake;
-  assertExactKeys(handshake.rendererLifecycle, [
-    'phase', 'profileActivationPublished', 'socketProviderMounted', 'providerDisabled',
-    'disabledByDemoModeLoading', 'disabledByDemoMode',
-    'disabledByCurrentUserLoading', 'disabledByCurrentUserAbsent',
-    'desktopRuntime', 'connectionScope', 'socketConstructionInvocations', 'socketConstructions',
-    'connectInvocations',
-  ], 'Acceptance renderer Socket.IO lifecycle summary');
   const currentUserValidation = rest.currentUserValidation;
   if (rest.requestCount <= 0 || rest.authenticatedRequestCount <= 0 || !rest.journeys.includes('dashboard-profile-manager')
     || currentUserValidation.correlation !== 'current-scope-user-validation'
@@ -629,30 +692,6 @@ const validateSummary = summary => {
     || currentUserValidation.parsedUserSchemaAccepted !== true
     || currentUserValidation.rendererActiveScopeAccepted !== true
     || currentUserValidation.firstFailedPredicate !== 'none'
-    || socketIo.authenticatedConnections !== 1 || socketIo.events <= 0 || !socketIo.journeys.includes('dashboard-profile-manager')
-    || handshake.mainAttempts !== 1 || handshake.fixtureAttempts !== 1
-    || handshake.scopeQueryPresent !== true || handshake.scopeQueryCount !== 1
-    || handshake.scopeEqualsActivatedBinding !== true
-    || handshake.activeBindingPresent !== true || handshake.profileGenerationCurrent !== true
-    || handshake.originEqualsActivatedBinding !== true
-    || handshake.path !== 'socket-io' || handshake.transport !== 'websocket' || handshake.resource !== 'websocket'
-    || handshake.rendererBearerPresent !== false || handshake.rendererCookiePresent !== false
-    || handshake.authorizationHeaderPresent !== true || handshake.authorizationHeaderExactlyMainInjected !== true
-    || handshake.rendererObservedApplicationEvent !== true
-    || handshake.rendererLifecycle.phase !== 'socket-connect-invoked'
-    || handshake.rendererLifecycle.profileActivationPublished !== true
-    || handshake.rendererLifecycle.socketProviderMounted !== true
-    || handshake.rendererLifecycle.providerDisabled !== false
-    || handshake.rendererLifecycle.disabledByDemoModeLoading !== false
-    || handshake.rendererLifecycle.disabledByDemoMode !== false
-    || handshake.rendererLifecycle.disabledByCurrentUserLoading !== false
-    || handshake.rendererLifecycle.disabledByCurrentUserAbsent !== false
-    || handshake.rendererLifecycle.desktopRuntime !== true
-    || handshake.rendererLifecycle.connectionScope !== 'available'
-    || handshake.rendererLifecycle.socketConstructionInvocations !== 1
-    || handshake.rendererLifecycle.socketConstructions !== 1
-    || handshake.rendererLifecycle.connectInvocations !== 1
-    || handshake.rejectionCategory !== 'none'
     || pairing.started <= 0 || pairing.polled <= 0 || pairing.activated <= 0 || !pairing.journeys.includes('dashboard-profile-manager')
     || connect.confirmedRequests <= 0 || connect.journeys.join('\n') !== 'connect-confirmation') {
     throw new Error('Acceptance claimed service journey was not observed');
@@ -731,8 +770,8 @@ export const validateAcceptanceEvidence = (accessibility, manifest, summary, san
     }
   });
   validateAccessibility(accessibility);
-  validateSummary(summary);
   validateSanitizedLog(sanitizedLog);
+  validateSummary(summary, sanitizedLog.mode);
   const rendererLogs = sanitizedLog.records.filter(record => record.source !== 'packaged-process');
   if (rendererLogs.length !== summary.console.records
     || rendererLogs.filter(record => record.level === 'error').length !== summary.console.errors) {
