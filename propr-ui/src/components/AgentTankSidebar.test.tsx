@@ -121,7 +121,7 @@ describe('AgentTankSidebar Claude metrics', () => {
 // Agent Tank names Antigravity quotas after the window they cover, e.g.
 // "Gemini · Weekly Limit Remaining", and reports a countdown for the windows it
 // has started tracking (null for the rest).
-const antigravityResponse = (): AgentTankUsageResponse => ({
+const antigravityResponse = () => ({
   enabled: true,
   agents: {
     antigravity: {
@@ -136,7 +136,7 @@ const antigravityResponse = (): AgentTankUsageResponse => ({
       },
     },
   },
-});
+} satisfies AgentTankUsageResponse);
 
 describe('AgentTankSidebar Antigravity rows', () => {
   beforeEach(() => {
