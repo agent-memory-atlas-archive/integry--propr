@@ -208,13 +208,6 @@ test('partial interruption is truthful and retries protect remaining state', asy
 test('real same-device bind mount is rejected in an isolated mount namespace', async t => {
   const f = await fixture(t); await f.generate();
   const outside = path.join(f.root, 'mount-source'); await fs.mkdir(outside); await fs.writeFile(path.join(outside, 'canary'), 'outside');
-  // Probe the operation itself: namespace creation alone does not grant mount
-  // permission on restricted runners. The mount disappears with this process.
-  try {
-    await exec('unshare', ['--user', '--map-root-user', '--mount', 'mount', '--bind', outside, path.join(f.worktree, 'node_modules', 'dependency')]);
-  } catch {
-    t.skip('Requires a bind mount in an isolated user/mount namespace; no host mounts are changed'); return;
-  }
   const source = path.resolve('packages/core/src/storage/generatedPayloads.ts');
   const lifecycleSource = path.resolve('packages/core/src/storage/lifecycle.ts');
   const program = `
@@ -223,14 +216,26 @@ test('real same-device bind mount is rejected in an isolated mount namespace', a
     import fs from 'node:fs/promises';
     import { GeneratedPayloadStorage } from ${JSON.stringify(source)};
     import { StorageLifecycle } from ${JSON.stringify(lifecycleSource)};
-    execFileSync('mount', ['--bind', ${JSON.stringify(outside)}, ${JSON.stringify(path.join(f.worktree, 'node_modules', 'dependency'))}]);
+    // Decide capability in the same process that runs the assertions. Only
+    // environmental mount denial gets the reserved skip exit code.
+    try {
+      execFileSync('mount', ['--bind', ${JSON.stringify(outside)}, ${JSON.stringify(path.join(f.worktree, 'node_modules', 'dependency'))}], { env: { ...process.env, LC_ALL: 'C' } });
+    } catch (error) {
+      if (error.status === 32 && /permission denied|operation not permitted/i.test(error.stderr?.toString() ?? '')) process.exit(77);
+      throw error;
+    }
     const lifecycle = new StorageLifecycle(${JSON.stringify(f.lifecycle.root)});
     const storage = new GeneratedPayloadStorage(${JSON.stringify(f.worktrees)}, ${JSON.stringify(path.join(f.root, 'control'))}, lifecycle);
     const candidates = await lifecycle.cleanup(signal => storage.preview(false, 24, signal));
     assert.ok(candidates.some(candidate => candidate.protectedReasons.includes('unsafe_path')));
     assert.equal(await fs.readFile(${JSON.stringify(path.join(outside, 'canary'))}, 'utf8'), 'outside');
   `;
-  await exec('unshare', ['--user', '--map-root-user', '--mount', process.execPath, '--import', 'tsx', '--input-type=module', '-e', program]);
+  try {
+    await exec('unshare', ['--user', '--map-root-user', '--mount', process.execPath, '--import', 'tsx', '--input-type=module', '-e', program]);
+  } catch (error) {
+    if ((error as { code?: number }).code !== 77) throw error;
+    t.skip('Requires a bind mount in an isolated user/mount namespace; no host mounts are changed');
+  }
 });
 test('missing/corrupt/future use clocks and old mtimes cannot authorize cleanup', async t => {
   const f = await fixture(t); await f.generate();

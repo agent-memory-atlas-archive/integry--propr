@@ -72,6 +72,8 @@ export class GeneratedPayloadStorage {
    * It must not copy customer inputs, secrets or private state into the payload.
    * Only a descriptor-proved owned cleaned root may be reused. Unknown existing
    * directories, interrupted producers and later edits remain protected.
+   * A cleaned-root producer path may be /proc/self/fd/N/. and is process-relative.
+   * Use it within this process; do not pass it unchanged to a child process.
    */
   async generate(worktree: string, payload: Payload, regeneration: string, regenerate: (directory: string) => Promise<void>): Promise<void> {
     if (!regeneration || regeneration.length > 4096) throw new Error('Regeneration semantics required');
