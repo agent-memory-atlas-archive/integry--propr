@@ -124,6 +124,44 @@ describe('SettingsNavigation', () => {
     expect(screen.getByRole('tab', { name: 'Sandbox & Network' })).toHaveAttribute('aria-selected', 'true');
   });
 
+  test('returns a phone to the category list when its search is cleared', () => {
+    const { container } = render(<SettingsNavigation sections={sections} header={<h2>Settings</h2>} />);
+    const rail = container.querySelector('[data-settings-rail]');
+    // A category was opened earlier, for instance on a wider window.
+    fireEvent.click(screen.getByRole('tab', { name: 'Sandbox & Network' }));
+
+    fireEvent.change(screen.getByRole('searchbox', { name: 'Search settings' }), { target: { value: 'egress' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Clear settings search' }));
+    expect(rail).not.toHaveClass('hidden');
+    expect(screen.queryByRole('button', { name: 'Back to Settings' })).toBeNull();
+  });
+
+  test('a search started inside a routed category also clears back to the list', () => {
+    const { container } = render(<SettingsNavigation sections={sections} activeCategory="notifications" openCategoryOnMobile />);
+    expect(screen.getByRole('button', { name: 'Back to Settings' })).toBeInTheDocument();
+    fireEvent.change(screen.getByRole('searchbox', { name: 'Search settings' }), { target: { value: 'quiet' } });
+    fireEvent.change(screen.getByRole('searchbox', { name: 'Search settings' }), { target: { value: '' } });
+    expect(container.querySelector('[data-settings-rail]')).not.toHaveClass('hidden');
+    expect(screen.queryByRole('button', { name: 'Back to Settings' })).toBeNull();
+  });
+
+  test('announces the opened category outside the rail phones hide', () => {
+    const { container } = render(<SettingsNavigation sections={sections} activeCategory="notifications" openCategoryOnMobile />);
+    const rail = container.querySelector('[data-settings-rail]');
+    expect(rail).toHaveClass('hidden');
+    const announcement = container.querySelector('[aria-live="polite"]');
+    expect(announcement).toHaveTextContent('Notifications settings selected.');
+    expect(rail).not.toContainElement(announcement as HTMLElement);
+  });
+
+  test('explains inert controls in the phone category header in demo mode', () => {
+    const view = render(<SettingsNavigation sections={sections} activeCategory="workflow" openCategoryOnMobile isReadOnly />);
+    expect(view.container.querySelector('[data-settings-mobile-header]')).toHaveTextContent('Demo mode is read-only.');
+
+    view.rerender(<SettingsNavigation sections={sections} activeCategory="workflow" openCategoryOnMobile />);
+    expect(view.container.querySelector('[data-settings-mobile-header]')).not.toHaveTextContent('read-only');
+  });
+
   test('opens a routed category directly on phones', () => {
     render(<SettingsNavigation sections={sections} activeCategory="notifications" openCategoryOnMobile />);
     expect(screen.getByRole('button', { name: 'Back to Settings' })).toBeInTheDocument();
@@ -209,6 +247,20 @@ describe('SettingsNavigation', () => {
     expect(screen.getByRole('tab', { name: 'Workflow & PR Rules' })).toHaveAttribute('aria-selected', 'true');
     expect(screen.getByText('Merge controls')).toBeVisible();
   });
+
+  test.each(['toString', 'constructor', '__proto__', 'hasOwnProperty'])(
+    'falls back to General for the inherited object key ?tab=%s',
+    (tab) => {
+      render(
+        <MemoryRouter initialEntries={[`/settings?tab=${tab}`]}>
+          <RoutedSettingsNavigation />
+        </MemoryRouter>
+      );
+      expect(screen.getByRole('tab', { name: 'General' })).toHaveAttribute('aria-selected', 'true');
+      expect(screen.getByText('Tip controls')).toBeVisible();
+      expect(screen.getByRole('complementary', { name: 'About General' })).toBeInTheDocument();
+    }
+  );
 
   test('reacts to a notification route while another settings tab is open', () => {
     render(

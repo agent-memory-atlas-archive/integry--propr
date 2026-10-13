@@ -16,9 +16,10 @@ function resolve(
 ): { tone: SettingsStatusTone; message: string } {
   if (saveStatus === 'error' && globalError) return { tone: 'error', message: globalError };
   if (saveStatus === 'warning' && globalError) return { tone: 'warn', message: `Saved with warning: ${globalError}` };
-  // Whether or not this visit saved anything yet, nothing is pending: one
-  // message, one dot colour, so the footer reads the same on every screen.
-  return { tone: 'ok', message: 'All changes saved' };
+  if (saveStatus === 'saved') return { tone: 'ok', message: 'All changes saved' };
+  // Idle cannot vouch for a blur-saved field that is still being edited, so
+  // it explains when saving happens instead of claiming it already did.
+  return { tone: 'pending', message: 'Changes save automatically' };
 }
 
 /**

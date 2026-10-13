@@ -2,12 +2,16 @@ import { useSearchParams } from 'react-router-dom';
 import { DEFAULT_SETTINGS_CATEGORY, SETTINGS_CATEGORIES, type SettingsCategoryId } from './SettingsNavigation';
 
 /** Tabs from the old horizontal layout, kept so saved links keep landing nearby. */
-const LEGACY_SETTINGS_CATEGORIES: Record<string, SettingsCategoryId> = {
-  automation: 'workflow',
-};
+const LEGACY_SETTINGS_CATEGORIES = new Map<string, SettingsCategoryId>([
+  ['automation', 'workflow'],
+]);
 
+// A Map, not an object literal: `?tab=toString` must not resolve to an
+// inherited Object.prototype member.
 const settingsCategoryFrom = (value: string | null): SettingsCategoryId => {
-  if (value && value in LEGACY_SETTINGS_CATEGORIES) return LEGACY_SETTINGS_CATEGORIES[value];
+  if (value === null) return DEFAULT_SETTINGS_CATEGORY;
+  const legacy = LEGACY_SETTINGS_CATEGORIES.get(value);
+  if (legacy) return legacy;
   return SETTINGS_CATEGORIES.some(category => category.id === value)
     ? value as SettingsCategoryId
     : DEFAULT_SETTINGS_CATEGORY;

@@ -162,6 +162,13 @@ test('lays settings out as a vertical rail beside one contained, single-column f
   await expect(whitelist.getByRole('button', { name: 'Remove monalisa' })).toBeVisible();
   await expect(whitelist.getByRole('button', { name: 'Remove dependabot' })).toBeVisible();
   await expect(tagInput).toHaveValue('');
+  // A pasted list becomes one chip per entry, saved together; Enter adds the last one.
+  const pasted = page.waitForRequest(request => request.url().endsWith('/api/config/settings') && request.method() === 'POST');
+  await tagInput.fill('alice,bob,carol');
+  expect((await pasted).postDataJSON().settings.github_user_whitelist).toEqual(['octocat', 'hubot', 'monalisa', 'dependabot', 'alice', 'bob']);
+  await expect(tagInput).toHaveValue('carol');
+  await tagInput.press('Enter');
+  await expect(whitelist.getByRole('button', { name: /^Remove (alice|bob|carol)$/ })).toHaveCount(3);
   await capture(page, 'settings-workflow-lists', whitelist);
 
   await page.getByRole('tab', { name: 'Sandbox & Network' }).click();
@@ -169,6 +176,8 @@ test('lays settings out as a vertical rail beside one contained, single-column f
   await expect(network.getByLabel('Network mode')).toHaveValue('restricted');
   await expect(network.getByLabel('Additional allowed hosts')).toHaveValue('registry.example.com\n*.internal.example.com');
   await expect(network.getByLabel('Repository allowed hosts')).toHaveValue('true');
+  // The watchdog guards every agent run, so it sits with the other execution limits.
+  await expect(page.getByRole('region', { name: 'Agent watchdog' })).toBeVisible();
   if (process.env.PROPR_CAPTURE_PREVIEWS) {
     await mkdir(path.resolve('../.propr/previews'), { recursive: true });
     await network.scrollIntoViewIfNeeded();
@@ -180,7 +189,7 @@ test('lays settings out as a vertical rail beside one contained, single-column f
   await expect.poll(() => page.locator('[data-settings-scroll]').evaluate(element => element.scrollTop)).toBe(0);
   await expect(page.getByLabel('Target Review Score')).toHaveValue('7');
   await expect(page.getByLabel('Target Review Score').locator('option:checked')).toHaveText('7/10 (Default)');
-  await expect(page.getByRole('region', { name: 'Agent watchdog' })).toBeVisible();
+  await expect(page.getByRole('region', { name: 'Agent watchdog' })).toBeHidden();
   await capture(page, 'settings-ultrafix');
 
   await page.getByRole('tab', { name: 'General' }).click();
@@ -235,7 +244,7 @@ test('balances a widescreen canvas with an inspector beside the form', async ({ 
   expect(Math.abs(leftGutter - rightGutter)).toBeLessThanOrEqual(24);
   expect(rightGutter).toBeLessThan(scroll.width * 0.2);
   // The save status starts where the rail does.
-  const status = (await page.getByRole('status').filter({ hasText: 'All changes saved' }).boundingBox())!;
+  const status = (await page.getByRole('status').filter({ hasText: 'Changes save automatically' }).boundingBox())!;
   expect(Math.abs(status.x - rail.x)).toBeLessThanOrEqual(2);
   await capture(page, 'settings-widescreen-sandbox');
 
@@ -431,7 +440,7 @@ test('ultrafix escalation controls retain ordered models and support direct hand
 test('agent watchdog thresholds save as overrides of the environment defaults', async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 900 });
   await installSettingsFixture(page);
-  await page.goto('/settings?tab=ultrafix');
+  await page.goto('/settings?tab=sandbox');
   const section = page.getByRole('region', { name: 'Agent watchdog' });
   await expect(section).toBeVisible();
   const stall = section.getByLabel('Stall timeout (minutes)', { exact: true });

@@ -55,10 +55,10 @@ const AdminSettingsPage: React.FC = () => {
     handleAgentRunSettingChange,
     handleReviewContextBudgetPercentCommit,
     handleRemoveLegacyReviewCap,
-    addWhitelistItem, removeWhitelistItem,
-    addPrimaryLabel, removePrimaryLabel,
-    addKeyword, removeKeyword,
-    addIgnoreKeyword, removeIgnoreKeyword,
+    addWhitelistItems, removeWhitelistItem,
+    addPrimaryLabels, removePrimaryLabel,
+    addKeywords, removeKeyword,
+    addIgnoreKeywords, removeIgnoreKeyword,
     handleSummarizationChange,
     handleSummarizationModelChange,
     handleSummarizationFallbackModelChange,
@@ -199,9 +199,10 @@ const AdminSettingsPage: React.FC = () => {
           items={primaryLabels}
           newItem={newPrimaryLabel}
           onNewItemChange={setNewPrimaryLabel}
-          onAddItem={addPrimaryLabel}
+          onAddItems={addPrimaryLabels}
           onRemoveItem={removePrimaryLabel}
           placeholder="e.g., AI"
+          minItems={1}
           addLabel="Label name"
           emptyMessage="No labels configured."
           helperText="State labels (-processing, -done) are generated automatically."
@@ -219,7 +220,7 @@ const AdminSettingsPage: React.FC = () => {
           items={keywords}
           newItem={newKeyword}
           onNewItemChange={setNewKeyword}
-          onAddItem={addKeyword}
+          onAddItems={addKeywords}
           onRemoveItem={removeKeyword}
           placeholder="e.g., PROPR"
           addLabel="Keyword"
@@ -238,7 +239,7 @@ const AdminSettingsPage: React.FC = () => {
           items={ignoreKeywords}
           newItem={newIgnoreKeyword}
           onNewItemChange={setNewIgnoreKeyword}
-          onAddItem={addIgnoreKeyword}
+          onAddItems={addIgnoreKeywords}
           onRemoveItem={removeIgnoreKeyword}
           placeholder="e.g., Deployment In Progress"
           addLabel="Ignored phrase"
@@ -257,7 +258,7 @@ const AdminSettingsPage: React.FC = () => {
           items={whitelist}
           newItem={newWhitelistItem}
           onNewItemChange={setNewWhitelistItem}
-          onAddItem={addWhitelistItem}
+          onAddItems={addWhitelistItems}
           onRemoveItem={removeWhitelistItem}
           placeholder="e.g., octocat"
           addLabel="GitHub username"
@@ -287,9 +288,11 @@ const AdminSettingsPage: React.FC = () => {
         />
       )
     },
+    { id: 'agent-network', category: 'sandbox', searchText: 'agent network restricted open egress proxy allowlist firewall hosts outbound internet enforce',
+      content: <AgentNetworkSettingsSection values={settings} defaults={settings.agent_network_defaults} onCommit={handleAgentRunSettingChange} /> },
     {
       id: 'agent-watchdog',
-      category: 'ultrafix',
+      category: 'sandbox',
       searchText: 'agent watchdog stall timeout inactivity silent hung tool stall degenerate whitespace output limit',
       content: (
         <AgentWatchdogSettingsSection
@@ -303,8 +306,6 @@ const AdminSettingsPage: React.FC = () => {
         />
       )
     },
-    { id: 'agent-network', category: 'sandbox', searchText: 'agent network restricted open egress proxy allowlist firewall hosts outbound internet enforce',
-      content: <AgentNetworkSettingsSection values={settings} defaults={settings.agent_network_defaults} onCommit={handleAgentRunSettingChange} /> },
     {
       id: 'agent-tank',
       category: 'integrations',

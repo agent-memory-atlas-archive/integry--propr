@@ -13,6 +13,7 @@ const DOCS = 'https://docs.propr.dev/docs';
 /**
  * Background shown in the Settings inspector beside each category. Every note
  * restates documented behaviour; follow the links for the full rules.
+ * settingsCategoryGuides.test.ts checks each link against the docs tree.
  */
 export const SETTINGS_CATEGORY_GUIDES: Record<SettingsCategoryId, SettingsCategoryGuide> = {
   general: {
@@ -68,9 +69,11 @@ export const SETTINGS_CATEGORY_GUIDES: Record<SettingsCategoryId, SettingsCatego
       'Private and loopback addresses are refused unless you list the IP literal here, for example 10.0.0.5:5000.',
       'Only HTTP(S) goes through the proxy, so Git remotes must use HTTPS rather than SSH.',
       'Each restricted run adds a Restricted Network event to the task timeline listing the hosts it denied.',
+      'The agent watchdog applies to every agent run, not only Ultrafix. A silent or whitespace-only run is stopped and its partial work is published.',
     ],
     links: [
       { label: 'Restricted network mode', href: `${DOCS}/features/execution-safety#restricted-network-mode` },
+      { label: 'Agent watchdog', href: `${DOCS}/architecture/worker#stall-and-degenerate-output-watchdog` },
     ],
   },
   integrations: {

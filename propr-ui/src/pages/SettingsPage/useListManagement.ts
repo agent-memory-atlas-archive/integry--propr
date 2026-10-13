@@ -3,27 +3,28 @@ type SaveList = (items: string[]) => void;
 
 /**
  * One tag list: the saved items plus the text still being typed. `add` takes
- * an explicit value so a comma or blur can commit text that has not reached
- * state yet; it defaults to the typed text.
+ * every entry parsed from the field at once, so a pasted list becomes one
+ * updated list and one save. `minItems` keeps a required list from emptying.
  */
-function useTagList(save: SaveList) {
+function useTagList(save: SaveList, minItems = 0) {
   const [items, setItems] = useState<string[]>([]);
   const [draft, setDraft] = useState('');
 
-  const add = useCallback((value: string = draft) => {
-    const item = value.trim();
-    if (!item || items.includes(item)) return;
-    const newList = [...items, item];
-    setItems(newList);
-    setDraft('');
-    save(newList);
-  }, [draft, items, save]);
-
-  const remove = useCallback((item: string) => {
-    const newList = items.filter(i => i !== item);
+  const add = useCallback((values: string[]) => {
+    const newItems = values.map(value => value.trim()).filter((value, index, all) =>
+      value && !items.includes(value) && all.indexOf(value) === index);
+    if (newItems.length === 0) return;
+    const newList = [...items, ...newItems];
     setItems(newList);
     save(newList);
   }, [items, save]);
+
+  const remove = useCallback((item: string) => {
+    const newList = items.filter(i => i !== item);
+    if (newList.length < minItems) return;
+    setItems(newList);
+    save(newList);
+  }, [items, minItems, save]);
 
   return { items, setItems, draft, setDraft, add, remove };
 }
@@ -35,7 +36,8 @@ export function useListManagement(
   saveIgnoreKeywords: SaveList
 ) {
   const whitelist = useTagList(saveWhitelist);
-  const primaryLabels = useTagList(savePrimaryLabels);
+  // The server rejects an empty primary label list, so the last label stays.
+  const primaryLabels = useTagList(savePrimaryLabels, 1);
   const keywords = useTagList(saveKeywords);
   const ignoreKeywords = useTagList(saveIgnoreKeywords);
 
@@ -48,9 +50,9 @@ export function useListManagement(
     newKeyword: keywords.draft, setNewKeyword: keywords.setDraft,
     ignoreKeywords: ignoreKeywords.items, setIgnoreKeywords: ignoreKeywords.setItems,
     newIgnoreKeyword: ignoreKeywords.draft, setNewIgnoreKeyword: ignoreKeywords.setDraft,
-    addWhitelistItem: whitelist.add, removeWhitelistItem: whitelist.remove,
-    addPrimaryLabel: primaryLabels.add, removePrimaryLabel: primaryLabels.remove,
-    addKeyword: keywords.add, removeKeyword: keywords.remove,
-    addIgnoreKeyword: ignoreKeywords.add, removeIgnoreKeyword: ignoreKeywords.remove,
+    addWhitelistItems: whitelist.add, removeWhitelistItem: whitelist.remove,
+    addPrimaryLabels: primaryLabels.add, removePrimaryLabel: primaryLabels.remove,
+    addKeywords: keywords.add, removeKeyword: keywords.remove,
+    addIgnoreKeywords: ignoreKeywords.add, removeIgnoreKeyword: ignoreKeywords.remove,
   };
 }

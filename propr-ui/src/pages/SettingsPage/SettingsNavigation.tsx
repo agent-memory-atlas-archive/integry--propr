@@ -55,13 +55,13 @@ export const SETTINGS_CATEGORIES: SettingsCategory[] = [
   {
     id: 'ultrafix',
     label: 'Ultrafix & Escalation',
-    description: 'Fix-and-review loops, model escalation, and agent watchdogs.',
+    description: 'Fix-and-review loops and model escalation.',
     icon: RefreshCcw
   },
   {
     id: 'sandbox',
     label: 'Sandbox & Network',
-    description: 'Outbound network access for agent containers.',
+    description: 'Network access and run watchdogs for agent containers.',
     icon: ShieldCheck
   },
   {
@@ -177,21 +177,30 @@ const SettingsSearchField: React.FC<{ query: string; onQueryChange(query: string
   </div>
 );
 
-/** The phone header inside a category: a back button to the category list and the category's name. */
-const MobileCategoryHeader: React.FC<{ label: string; onBack(): void }> = ({ label, onBack }) => (
-  <div className="flex flex-shrink-0 items-center border-b border-slate-200 bg-white px-2 py-1.5 md:hidden" data-settings-mobile-header>
-    <button
-      type="button"
-      onClick={onBack}
-      aria-label="Back to Settings"
-      className="inline-flex flex-shrink-0 items-center gap-0.5 rounded px-1.5 py-1.5 text-sm font-medium text-teal-700 hover:bg-teal-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary-500"
-    >
-      <ChevronLeft aria-hidden="true" className="h-5 w-5" />
-      Settings
-    </button>
-    <span className="min-w-0 flex-1 truncate pr-2 text-center text-sm font-semibold text-slate-900">{label}</span>
-    {/* Balances the back button so the title stays centred. */}
-    <span aria-hidden="true" className="w-[5.5rem] flex-shrink-0" />
+/**
+ * The phone header inside a category: a back button to the category list and
+ * the category's name. The page header (and its demo-mode notice) is hidden
+ * here, so a read-only hint explains why the controls are inert.
+ */
+const MobileCategoryHeader: React.FC<{ label: string; isReadOnly: boolean; onBack(): void }> = ({ label, isReadOnly, onBack }) => (
+  <div className="flex-shrink-0 border-b border-slate-200 bg-white md:hidden" data-settings-mobile-header>
+    <div className="flex items-center px-2 py-1.5">
+      <button
+        type="button"
+        onClick={onBack}
+        aria-label="Back to Settings"
+        className="inline-flex flex-shrink-0 items-center gap-0.5 rounded px-1.5 py-1.5 text-sm font-medium text-teal-700 hover:bg-teal-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary-500"
+      >
+        <ChevronLeft aria-hidden="true" className="h-5 w-5" />
+        Settings
+      </button>
+      <span className="min-w-0 flex-1 truncate pr-2 text-center text-sm font-semibold text-slate-900">{label}</span>
+      {/* Balances the back button so the title stays centred. */}
+      <span aria-hidden="true" className="w-[5.5rem] flex-shrink-0" />
+    </div>
+    {isReadOnly && (
+      <p className="px-4 pb-2 text-center text-[12px] text-amber-700">Demo mode is read-only.</p>
+    )}
   </div>
 );
 
@@ -291,6 +300,13 @@ const SettingsNavigation: React.FC<SettingsNavigationProps> = ({
     if (scrollRef.current) scrollRef.current.scrollTop = 0;
   }, [activeCategory, mobileCategoryOpen]);
 
+  // Phones search from the category list, so clearing a search returns there
+  // rather than to a category opened before the search began.
+  const handleQueryChange = (nextQuery: string): void => {
+    if (nextQuery.trim() && !normalizedQuery) setMobileCategoryOpen(false);
+    setQuery(nextQuery);
+  };
+
   const selectCategory = (category: SettingsCategoryId): void => {
     setLocalActiveCategory(category);
     onActiveCategoryChange?.(category);
@@ -329,8 +345,19 @@ const SettingsNavigation: React.FC<SettingsNavigationProps> = ({
       </div>
 
       {phoneShowsCategory && (
-        <MobileCategoryHeader label={activeCategoryDetails.label} onBack={() => setMobileCategoryOpen(false)} />
+        <MobileCategoryHeader
+          label={activeCategoryDetails.label}
+          isReadOnly={isReadOnly}
+          onBack={() => setMobileCategoryOpen(false)}
+        />
       )}
+
+      {/* Outside the rail, which phones hide inside a category, so announcements reach both phone screens. */}
+      <p className="sr-only" aria-live="polite" data-settings-announcement>
+        {normalizedQuery
+          ? `${searchResultCount} settings ${searchResultCount === 1 ? 'section' : 'sections'} found.`
+          : `${activeCategoryDetails.label} settings selected.`}
+      </p>
 
       <div ref={scrollRef} className="min-h-0 flex-1 overflow-y-auto bg-white" data-settings-scroll>
         <div className={`${SETTINGS_CONTAINER} flex flex-col md:flex-row md:items-start md:gap-10`}>
@@ -339,7 +366,7 @@ const SettingsNavigation: React.FC<SettingsNavigationProps> = ({
             data-settings-rail
             className={`${phoneShowsCategory ? 'hidden' : 'flex'} flex-shrink-0 flex-col gap-3 bg-white pb-3 pt-2 md:sticky md:top-0 md:z-10 md:flex md:w-56 md:pb-8`}
           >
-            <SettingsSearchField query={query} onQueryChange={setQuery} />
+            <SettingsSearchField query={query} onQueryChange={handleQueryChange} />
 
             <div
               className={`${normalizedQuery ? 'hidden md:flex' : 'flex'} flex-col divide-y divide-slate-100 border-y border-slate-100 md:gap-1 md:divide-y-0 md:border-y-0`}
@@ -362,11 +389,6 @@ const SettingsNavigation: React.FC<SettingsNavigationProps> = ({
               ))}
             </div>
 
-            <p className="sr-only" aria-live="polite">
-              {normalizedQuery
-                ? `${searchResultCount} settings ${searchResultCount === 1 ? 'section' : 'sections'} found.`
-                : `${activeCategoryDetails.label} settings selected.`}
-            </p>
           </nav>
 
           <div
@@ -412,7 +434,7 @@ const SettingsNavigation: React.FC<SettingsNavigationProps> = ({
             )}
           </div>
 
-          {!normalizedQuery && <SettingsInspector categoryId={activeCategory} label={activeCategoryDetails.label} />}
+          {!normalizedQuery && <SettingsInspector categoryId={activeCategoryDetails.id} label={activeCategoryDetails.label} />}
         </div>
       </div>
     </>
