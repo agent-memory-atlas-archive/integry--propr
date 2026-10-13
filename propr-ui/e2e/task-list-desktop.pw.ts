@@ -277,7 +277,7 @@ test('1920px opens a task beside the list and steps through rows from the keyboa
   // Wrapping metadata groups use spacing so no separator can lead a new line.
   expect(await header.innerText()).not.toMatch(/[·•|]/);
   await expect(header.getByTestId('context-divider')).toHaveCount(0);
-  await expect(header.getByRole('group', { name: 'Execution runtime' })).toHaveText(/gpt-6-astra.*3m 0?0s/);
+  await expect(header.getByRole('group', { name: 'Execution runtime' })).toHaveText(/GPT-6 Astra.*3m 0?0s/);
   await expect(header.getByRole('group', { name: 'Consumption' })).toHaveText('↑420k↓12k(0.1% quota)');
   await expect(header).not.toContainText('3.9M');
   // No standalone hairline precedes the assignment, status or Stop.

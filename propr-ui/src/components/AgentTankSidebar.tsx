@@ -4,8 +4,8 @@ import { getAgentTankUsage, refreshAgentTank, AgentTankUsageResponse, AgentUsage
 import { ProviderLogo } from './ui/ProviderLogo';
 import {
   getAllMetrics,
-  getMetricTooltip,
   getPrimaryMetric,
+  getMetricTooltip,
   getProviderDisplayName,
   getProviderRank,
   getStatusColor,

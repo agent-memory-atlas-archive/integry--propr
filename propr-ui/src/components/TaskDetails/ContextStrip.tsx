@@ -1,3 +1,4 @@
+import { formatModelName } from '../../utils/modelDisplay';
 import React from 'react';
 import { TaskBudget, TaskInfo, TokenUsage, UsageMetricRecord } from './types';
 import { ExternalLink, GitPullRequest, GitCommit, Layers3 } from 'lucide-react';
@@ -37,7 +38,7 @@ const MODEL_DISPLAY_NAMES: Record<string, string> = {
 };
 
 const getDisplayModelName = (modelId: string): string => {
-  return (MODEL_DISPLAY_NAMES[modelId] || modelId).replace(/\s+/g, ' ').trim();
+  return (MODEL_DISPLAY_NAMES[modelId] || formatModelName(modelId)).replace(/\s+/g, ' ').trim();
 };
 
 // Format token count for display (e.g., 1234 -> "1.2k", 1234567 -> "1.2M")
@@ -116,7 +117,7 @@ const ModelChip: React.FC<{ modelName: string; duration?: number | null; synthet
   <>
     <span
       className="inline-flex min-w-0 items-center gap-1 rounded border border-slate-200 bg-slate-100 px-1.5 py-0.5 font-mono text-xs text-slate-800 [&>svg]:shrink-0"
-      title={modelName}
+      title={getDisplayModelName(modelName)}
     >
       {synthetic
         ? <Layers3 className="h-3 w-3" aria-label="Synthetic pool" />
@@ -379,7 +380,7 @@ export const MobileGitContext: React.FC<Pick<ContextStripProps, 'taskInfo' | 'pr
 export const MobilePeopleRuntime: React.FC<Pick<ContextStripProps, 'assignment' | 'modelName' | 'duration' | 'synthetic'>> = ({ assignment, modelName, duration, synthetic }) => (
   <div data-testid="task-mobile-people-runtime" className="flex min-w-0 flex-wrap items-center justify-between gap-2">
     {assignment?.taskId && <AssignmentControl assignment={assignment} dense />}
-    <div role="group" aria-label="Execution runtime" className="ml-auto flex min-w-0 max-w-[50%] shrink-0 items-center gap-1 whitespace-nowrap [&>span]:text-[10px] [&>span]:leading-3">
+    <div role="group" aria-label="Execution runtime" className="ml-auto flex min-w-0 max-w-full shrink-0 items-center gap-1 whitespace-nowrap [&>span]:text-[10px] [&>span]:leading-3">
       <ModelChip modelName={modelName} duration={duration} synthetic={synthetic} compact />
     </div>
   </div>

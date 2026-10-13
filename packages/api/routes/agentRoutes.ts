@@ -5,6 +5,8 @@ import path from 'path';
 import { promisify } from 'util';
 import {
   getAgentRegistry,
+  agentDockerImageExists,
+  enqueueAgentImagePreparation,
   loadAgents,
   resolveConfigPath,
   toProprOpenCodeExternalModelId,
@@ -240,6 +242,8 @@ export function createAgentRoutes() {
   const router = Router();
   const checkAgentHealth = createAgentHealthCheck({
     loadAgents,
+    imageExists: agentDockerImageExists,
+    prepareImage: enqueueAgentImagePreparation,
     createAgent: config => getAgentRegistry().createAgentFromConfig(config),
     resolveExecutionImage: resolveHealthCheckImage,
   });

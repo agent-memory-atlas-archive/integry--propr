@@ -5,6 +5,7 @@ import { getAgentTankUsage, refreshAgentTank } from '../api/revertApi';
 import type { CurrentUser } from '../api/proprTypes';
 import type { HeaderStats } from '../hooks/useHeaderStats';
 import MobileBottomNavigation from './MobileBottomNavigation';
+import { getPrimaryMetric } from './agentTankMetrics';
 
 vi.mock('../api/revertApi', () => ({
   getAgentTankUsage: vi.fn(),
@@ -295,6 +296,39 @@ describe('MobileBottomNavigation', () => {
     // The menu shows only the summary; the bars and refresh live in the Usage sheet.
     expect(screen.queryByText('Session')).not.toBeInTheDocument();
     expect(screen.queryByTitle('Refresh usage')).not.toBeInTheDocument();
+  });
+
+  it('preserves quota pool names and formats model IDs through the mobile summary and Usage sheet', async () => {
+    const agent = {
+      name: 'antigravity',
+      usage: {
+        models: [
+          { model: 'Claude and GPT · Weekly Limit Remaining', percentUsed: 12 },
+          { model: 'claude-sonnet-9-1-20990101', percentUsed: 7 },
+        ],
+      },
+    };
+    mockGetAgentTankUsage.mockResolvedValue({ enabled: true, agents: { antigravity: agent } });
+
+    // The summary's primary metric retains the product label before formatting model IDs.
+    expect(getPrimaryMetric(agent)).toMatchObject({
+      label: 'Weekly', group: 'Claude and GPT', title: 'Claude and GPT · Weekly Limit', percent: 12,
+    });
+    renderNavigation();
+    fireEvent.click(screen.getByRole('button', { name: 'More' }));
+    const summary = await screen.findByRole('button', { name: /API & quota usage/ });
+    expect(screen.getByTestId('usage-summary')).toHaveTextContent('Antigravity 12%');
+    expect(screen.queryByText('Weekly')).not.toBeInTheDocument();
+
+    fireEvent.click(summary);
+    const sheet = within(await screen.findByRole('dialog', { name: 'API & quota usage' }));
+    expect(sheet.getByRole('button', { name: /Antigravity/ })).toHaveAttribute('aria-expanded', 'true');
+    expect(sheet.getByText('Claude and GPT')).toBeInTheDocument();
+    expect(sheet.getByText('Weekly')).toHaveAttribute('title', 'Claude and GPT · Weekly Limit');
+    expect(sheet.getByText('Claude Sonnet 9.1')).toHaveAttribute('title', 'Claude Sonnet 9.1');
+    expect(sheet.queryByText('claude-sonnet-9-1-20990101')).not.toBeInTheDocument();
+    expect(sheet.queryByTitle('claude-sonnet-9-1-20990101')).not.toBeInTheDocument();
+    expect(agent.usage.models[1].model).toBe('claude-sonnet-9-1-20990101');
   });
 
   it('hides Agent Tank usage without agent management permission outside demo mode', () => {

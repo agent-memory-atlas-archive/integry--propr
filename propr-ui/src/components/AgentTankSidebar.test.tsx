@@ -125,7 +125,7 @@ describe('AgentTankSidebar Claude metrics', () => {
 // Agent Tank names Antigravity quotas after the window they cover, e.g.
 // "Gemini · Weekly Limit Remaining", and reports a countdown for the windows it
 // has started tracking (null for the rest).
-const antigravityResponse = (): AgentTankUsageResponse => ({
+const antigravityResponse = () => ({
   enabled: true,
   agents: {
     antigravity: {
@@ -140,7 +140,7 @@ const antigravityResponse = (): AgentTankUsageResponse => ({
       },
     },
   },
-});
+} satisfies AgentTankUsageResponse);
 
 describe('AgentTankSidebar Antigravity rows', () => {
   beforeEach(() => {
@@ -163,6 +163,24 @@ describe('AgentTankSidebar Antigravity rows', () => {
     // Each pool header precedes its own windows.
     const labels = screen.getAllByText(/^(Gemini|Claude and GPT|Weekly|5h)$/).map(el => el.textContent);
     expect(labels).toEqual(['Gemini', 'Weekly', '5h', 'Claude and GPT', 'Weekly', '5h']);
+  });
+
+  it('formats raw model IDs while preserving friendly quota pool labels', async () => {
+    const response = antigravityResponse();
+    response.agents.antigravity.usage!.models!.push({
+      model: 'claude-sonnet-9-1-20990101', percentUsed: 7,
+    });
+    mockGetAgentTankUsage.mockResolvedValue(response);
+    await renderSidebar();
+
+    expect(providerRow('Antigravity')).toHaveAttribute('aria-expanded', 'true');
+
+    expect(screen.getByText('Claude and GPT')).toBeInTheDocument();
+    expect(screen.getByText('Claude Sonnet 9.1'))
+      .toHaveAttribute('title', 'Claude Sonnet 9.1');
+    expect(screen.queryByText('claude-sonnet-9-1-20990101')).not.toBeInTheDocument();
+    expect(response.agents.antigravity.usage!.models!.at(-1)?.model)
+      .toBe('claude-sonnet-9-1-20990101');
   });
 
   it('keeps the full window name and reset countdown in the tooltip', async () => {

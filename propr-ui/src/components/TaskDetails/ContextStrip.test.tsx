@@ -20,7 +20,7 @@ describe('Task details telemetry', () => {
     expect(git.getByRole('link', { name: /PR #2661/ })).toBeInTheDocument();
     expect(git.getByRole('link', { name: '5c7cd9e' })).toBeInTheDocument();
     const runtime = screen.getByRole('group', { name: 'Execution runtime' });
-    expect(runtime).toHaveTextContent('gpt-6-astra');
+    expect(runtime).toHaveTextContent('GPT-6 Astra');
     expect(runtime).toHaveTextContent('10m 32s');
     const consumption = within(screen.getByRole('group', { name: 'Consumption' }));
     expect(screen.getByRole('group', { name: 'Consumption' })).toHaveTextContent('↑3.9M↓30k(1.0% quota)');

@@ -86,21 +86,28 @@ for (const width of [390, 1280]) {
 
     // 3. Each readable entry is one column on a phone: its label sits above the text, which keeps the full width.
     const entry = page.getByText('The label check also matches unrelated labels', { exact: false });
-    await entry.scrollIntoViewIfNeeded();
-    const layout = await entry.evaluate(element => {
-      const content = element.closest('.flex-1')!;
-      const row = content.parentElement!;
-      const gutter = row.firstElementChild!;
-      return { row: row.getBoundingClientRect().toJSON(), gutter: gutter.getBoundingClientRect().toJSON(), content: content.getBoundingClientRect().toJSON() };
-    });
-    if (phone) {
-      expect(layout.content.top).toBeGreaterThanOrEqual(layout.gutter.bottom - 1);
-      expect(layout.content.width).toBeCloseTo(layout.row.width, 0);
-    } else {
-      expect(layout.gutter.width).toBe(100);
-      expect(layout.content.left).toBeGreaterThan(layout.gutter.right);
-      expect(layout.content.top).toBe(layout.gutter.top);
-    }
+    // React can replace the Markdown paragraph during scrolling or before evaluation.
+    // Retry the scroll and geometry together, resolving a connected row on each attempt.
+    await expect(async () => {
+      await entry.scrollIntoViewIfNeeded();
+      const layout = await entry.evaluate(element => {
+        if (!element.isConnected) return null;
+        const content = element.closest('.flex-1');
+        const row = content?.parentElement;
+        const gutter = row?.firstElementChild;
+        if (!content || !row || !gutter) return null;
+        return { row: row.getBoundingClientRect().toJSON(), gutter: gutter.getBoundingClientRect().toJSON(), content: content.getBoundingClientRect().toJSON() };
+      });
+      if (!layout) throw new Error('Readable log entry must be connected to its content row and gutter');
+      if (phone) {
+        expect(layout.content.top).toBeGreaterThanOrEqual(layout.gutter.bottom - 1);
+        expect(layout.content.width).toBeCloseTo(layout.row.width, 0);
+      } else {
+        expect(layout.gutter.width).toBe(100);
+        expect(layout.content.left).toBeGreaterThan(layout.gutter.right);
+        expect(layout.content.top).toBe(layout.gutter.top);
+      }
+    }).toPass({ timeout: 5_000 });
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
 
     if (process.env.PROPR_CAPTURE_PREVIEWS) {

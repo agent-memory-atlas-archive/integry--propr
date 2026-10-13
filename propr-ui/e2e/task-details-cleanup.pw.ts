@@ -81,7 +81,7 @@ for (const width of [390, 1440]) {
         // Mobile retains the same consumption and spend-cap information.
         const metadata = task.getByTestId('task-mobile-metadata');
         await expect(metadata).toBeVisible();
-        await expect(metadata.getByRole('group', { name: 'Execution runtime' })).toContainText('gpt-6-astra');
+        await expect(metadata.getByRole('group', { name: 'Execution runtime' })).toContainText('GPT-6 Astra');
       }
       await expect(consumption).toContainText('↑3.9M↓30k');
       await expect(consumption.getByLabel('Spend $5.10 of $5.00 cap, 102%, stopped at cap', { exact: true })).toBeVisible();
