@@ -44,6 +44,15 @@ describe('Task details telemetry', () => {
     render(<ContextStrip {...props} tokenUsage={{ input_tokens: 0, output_tokens: null }}
       usageMetricRecords={[{ agent: 'codex', metricKey: 'Weekly', metricValue: 0 }]} />);
     expect(screen.getByRole('group', { name: 'Consumption' })).toHaveTextContent('↑0↓0(0.0% quota)');
+    expect(screen.getByTitle('Usage consumed: Weekly: 0.0%')).toBeInTheDocument();
+  });
+
+  it('includes all-zero session and weekly records in the tooltip', () => {
+    render(<ContextStrip {...props} usageMetricRecords={[
+      { agent: 'codex', metricKey: 'session', metricValue: 0 },
+      { agent: 'codex', metricKey: 'weeklyAll', metricValue: 0 },
+    ]} />);
+    expect(screen.getByTitle('Usage consumed: Session: 0.0% | Weekly: 0.0%')).toHaveTextContent('(0.0% session, 0.0% weekly)');
   });
 
   it('keeps a consumption slot before any usage is reported', () => {

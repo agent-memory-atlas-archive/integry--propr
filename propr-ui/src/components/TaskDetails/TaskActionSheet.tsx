@@ -1,3 +1,4 @@
+import { useLockTaskScroll } from './useLockTaskScroll';
 import React, { useEffect, useId, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { Loader2, MoreHorizontal, Trash2 } from 'lucide-react';
@@ -27,13 +28,7 @@ const TaskActionSheet: React.FC<{
     if (open) sheetRef.current?.querySelector<HTMLButtonElement>(SHEET_FOCUSABLE)?.focus();
   }, [open]);
 
-  useEffect(() => {
-    if (!open) return;
-    const scrollers = [document.body, ...document.querySelectorAll<HTMLElement>('[data-testid="task-details"]')];
-    const previous = scrollers.map(node => node.style.overflow);
-    scrollers.forEach(node => { node.style.overflow = 'hidden'; });
-    return () => scrollers.forEach((node, index) => { node.style.overflow = previous[index]; });
-  }, [open]);
+  useLockTaskScroll(open);
 
   const close = () => {
     setOpen(false);

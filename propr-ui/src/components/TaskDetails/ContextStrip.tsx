@@ -295,10 +295,9 @@ const GitGroup: React.FC<{
   prInfo?: { url?: string; number?: number };
   commitInfo?: { shortHash: string; url: string };
   assignment?: TaskAssignment;
-  showRepo: boolean;
-}> = ({ taskInfo, prInfo, commitInfo, assignment, showRepo }) => (
+}> = ({ taskInfo, prInfo, commitInfo, assignment }) => (
   <ContextGroup label="Git context">
-    {showRepo && taskInfo && <RepoLink taskInfo={taskInfo} />}
+    {taskInfo && <RepoLink taskInfo={taskInfo} />}
     {prInfo?.url && <PRInfoChip prInfo={prInfo} />}
     {Boolean(taskInfo?.number) && <IssuePRChip taskInfo={taskInfo!} />}
     {taskInfo?.type === 'pr-comment' && Boolean(taskInfo.issueNumber) && <LinkedIssueChip taskInfo={taskInfo} />}
@@ -392,10 +391,6 @@ interface ContextStripProps {
   /** Estimated spend against the run's spend cap. */
   budget?: TaskBudget | null;
   synthetic?: boolean;
-  /** Mobile only: Show only the repository name link */
-  mobileRepoOnly?: boolean;
-  /** Mobile only: Show only the metadata (PR, issue, model, etc.) without repo name */
-  mobileMetadataOnly?: boolean;
   /** Mobile only: the collapsed header's one line, the pull request then the task's title, truncated. */
   mobileCompact?: boolean;
   /**
@@ -419,8 +414,6 @@ const ContextStrip: React.FC<ContextStripProps> = ({
   usageMetricRecords,
   budget,
   synthetic,
-  mobileRepoOnly,
-  mobileMetadataOnly,
   mobileCompact,
   part,
   lead,
@@ -428,31 +421,12 @@ const ContextStrip: React.FC<ContextStripProps> = ({
 }) => {
   if (mobileCompact) return <CompactTitleLine taskInfo={taskInfo} prInfo={prInfo} />;
 
-  // Mobile: Show only repo name
-  if (mobileRepoOnly) {
-    return (
-      <div className="flex items-center text-sm text-gray-600 min-w-0">
-        {taskInfo && (
-          <a
-            href={`https://github.com/${taskInfo.repoOwner}/${taskInfo.repoName}`}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="inline-flex min-w-0 items-center gap-1 text-gray-700 hover:text-blue-600 transition-colors"
-          >
-            <GitHubIcon size={12} className="text-gray-500" />
-            <span className="font-medium truncate">{taskInfo.repoOwner}/{taskInfo.repoName}</span>
-          </a>
-        )}
-      </div>
-    );
-  }
-
   const showGit = part !== 'telemetry';
   const showTelemetry = part !== 'git';
   return (
     <div className={`flex min-w-0 flex-wrap items-center gap-x-4 gap-y-2 text-sm text-gray-600${part === 'git' ? '' : ' flex-1'}`}>
       {showGit && (
-        <GitGroup taskInfo={taskInfo} prInfo={prInfo} commitInfo={commitInfo} assignment={assignment} showRepo={!mobileMetadataOnly} />
+        <GitGroup taskInfo={taskInfo} prInfo={prInfo} commitInfo={commitInfo} assignment={assignment} />
       )}
       {showTelemetry && (
         <TelemetryGroups

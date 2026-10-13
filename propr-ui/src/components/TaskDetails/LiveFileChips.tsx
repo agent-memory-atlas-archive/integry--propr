@@ -232,8 +232,9 @@ const LiveFileChips: React.FC<LiveFileChipsProps> = ({ taskId, isActive, runNumb
               const isSelected = selectedFilePath === file.path;
               const relativePath = file.path.slice(commonDirectory.length);
               const basename = file.path.split('/').pop()!;
-              // Keep compound extensions (.test.ts, .d.ts, etc.) visible as the stem gives way.
-              const extensionIndex = basename.indexOf('.', 1);
+              // Preserve short final extensions and known compounds, never an arbitrary dotted tail.
+              const suffix = basename.match(/\.(?:test|spec)\.[cm]?[jt]sx?$|\.d\.[cm]?ts$|\.tar\.(?:gz|bz2|xz)$|\.[^.]{1,8}$/)?.[0];
+              const extensionIndex = suffix && suffix.length < basename.length ? basename.length - suffix.length : -1;
               const stem = extensionIndex < 0 ? basename : basename.slice(0, extensionIndex);
               const extension = extensionIndex < 0 ? '' : basename.slice(extensionIndex);
               const parentDirectory = relativePath.split('/').slice(0, -1).map(part => `${part}/`).join('');
@@ -249,7 +250,7 @@ const LiveFileChips: React.FC<LiveFileChipsProps> = ({ taskId, isActive, runNumb
                   <span data-testid="changed-file-name" className="flex min-w-0 flex-1 whitespace-nowrap">
                     {parentDirectory && <span className="min-w-0 shrink-[1000] truncate text-slate-400">{parentDirectory}</span>}
                     <span className="min-w-0 truncate text-slate-700">{stem}</span>
-                    <span data-testid="changed-file-extension" className="shrink-0 text-slate-700">{extension}</span>
+                    <span data-testid="changed-file-extension" className="max-w-[60%] shrink-0 truncate text-slate-700">{extension}</span>
                   </span>
                   {(file.linesAdded > 0 || file.linesRemoved > 0) && (
                     <span className="flex flex-shrink-0 items-center gap-1 text-[11px] tabular-nums">

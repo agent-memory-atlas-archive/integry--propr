@@ -136,6 +136,6 @@
     .task-filter-controls .task-repo-filter { flex: 1; width: auto; min-width: 8rem; }
     .task-filter-controls .task-assignee-filter { flex: 1; min-width: 10rem; max-width: none; }
     /* Hide RepositorySelector’s RepoCountBadge (selected repository task count) in the narrow task pane. */
-    .task-repo-filter > button > .rounded-full { display: none; }
+    .task-repo-filter > button > [data-repo-count] { display: none; }
   }
 }

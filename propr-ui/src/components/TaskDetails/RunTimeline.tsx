@@ -76,8 +76,18 @@ const RunTimeline: React.FC<RunTimelineProps> = ({ runs, selectedTaskId, onSelec
   const revealed = useRef(false);
   useEffect(() => {
     if (revealed.current || !selectedRef.current) return;
-    selectedRef.current.scrollIntoView?.({ block: 'nearest' });
     revealed.current = true;
+    // Opening the first run must leave both panes (and the mobile title) at the top.
+    if (runs[0]?.task.id === selectedTaskId) return;
+    const row = selectedRef.current;
+    let scroller = row.parentElement;
+    while (scroller && !/auto|scroll/.test(getComputedStyle(scroller).overflowY)) scroller = scroller.parentElement;
+    const bounds = scroller?.getBoundingClientRect();
+    const header = row.querySelector('button')?.getBoundingClientRect();
+    const margin = parseFloat(getComputedStyle(row).scrollMarginTop) || 0;
+    // The expanded steps can be taller than the viewport; only the header needs revealing.
+    if (bounds && header && header.top >= bounds.top + margin && header.bottom <= bounds.bottom) return;
+    row.scrollIntoView?.({ block: 'start' });
   }, [runs, selectedTaskId]);
 
   // Every run expands in the shared task workspace, together with the changed files.
@@ -93,7 +103,7 @@ const RunTimeline: React.FC<RunTimelineProps> = ({ runs, selectedTaskId, onSelec
           // A queued run has not started, so it has no runtime to count yet.
           const waiting = run.outcome === 'waiting';
           return (
-            <li ref={selected ? selectedRef : undefined} key={run.task.id} className="relative" data-testid="run-timeline-run">
+            <li ref={selected ? selectedRef : undefined} key={run.task.id} className="relative scroll-mt-3 sm:scroll-mt-[3.75rem]" data-testid="run-timeline-run">
               <button
                 type="button"
                 aria-current={selected || undefined}

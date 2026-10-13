@@ -46,7 +46,7 @@ describe('RunTimeline', () => {
     const scroller = screen.getByTestId('run-timeline-scroll');
     expect(scroller.className).not.toMatch(/max-h-|overflow-y-|overscroll-/);
     expect(within(scroller).getAllByTestId('run-timeline-run')).toHaveLength(50);
-    expect(scroll).toHaveBeenCalledExactlyOnceWith({ block: 'nearest' });
+    expect(scroll).toHaveBeenCalledExactlyOnceWith({ block: 'start' });
     expect(scroll.mock.instances[0]).toBe(screen.getByRole('button', { current: true }).closest('li'));
     rerender(<RunTimeline runs={[...manyRuns]} selectedTaskId="many-43" onSelectRun={vi.fn()}>updated steps</RunTimeline>);
     expect(scroll).toHaveBeenCalledTimes(1);
@@ -59,8 +59,28 @@ describe('RunTimeline', () => {
     const { rerender } = render(<RunTimeline runs={[]} selectedTaskId="run-3" onSelectRun={vi.fn()}>{null}</RunTimeline>);
     expect(scroll).not.toHaveBeenCalled();
     rerender(<RunTimeline runs={runs} selectedTaskId="run-3" onSelectRun={vi.fn()}>{null}</RunTimeline>);
-    expect(scroll).toHaveBeenCalledExactlyOnceWith({ block: 'nearest' });
+    expect(scroll).toHaveBeenCalledExactlyOnceWith({ block: 'start' });
     expect(scroll.mock.instances[0]).toBe(screen.getByRole('button', { current: true }).closest('li'));
+    delete (HTMLElement.prototype as Partial<HTMLElement>).scrollIntoView;
+  });
+
+  it('leaves the first run at the top even when its steps are tall', () => {
+    const scroll = vi.fn();
+    Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', { configurable: true, value: scroll });
+    render(<RunTimeline runs={runs} selectedTaskId="run-1" onSelectRun={vi.fn()}><div style={{ height: 2000 }}>steps</div></RunTimeline>);
+    expect(scroll).not.toHaveBeenCalled();
+    delete (HTMLElement.prototype as Partial<HTMLElement>).scrollIntoView;
+  });
+
+  it('does not move a later run whose header is already visible above tall steps', () => {
+    const scroll = vi.fn();
+    Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', { configurable: true, value: scroll });
+    const rect = vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function (this: HTMLElement) {
+      return { top: this.tagName === 'BUTTON' ? 160 : 100, bottom: this.tagName === 'BUTTON' ? 204 : 700 } as DOMRect;
+    });
+    render(<div style={{ overflowY: 'auto' }}><RunTimeline runs={runs} selectedTaskId="run-3" onSelectRun={vi.fn()}><div style={{ height: 2000 }}>steps</div></RunTimeline></div>);
+    expect(scroll).not.toHaveBeenCalled();
+    rect.mockRestore();
     delete (HTMLElement.prototype as Partial<HTMLElement>).scrollIntoView;
   });
 

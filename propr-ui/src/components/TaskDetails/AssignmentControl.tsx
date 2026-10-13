@@ -1,3 +1,4 @@
+import { useLockTaskScroll } from './useLockTaskScroll';
 import React, { useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { AlertTriangle, UserPlus } from 'lucide-react';
@@ -112,8 +113,11 @@ const AssignmentEditor: React.FC<EditorProps> = ({ id, assignment, onClose, shee
 
   useEffect(() => {
     loadAssignableUsers();
-    filterRef.current?.focus({ preventScroll: true });
   }, [loadAssignableUsers]);
+
+  useEffect(() => {
+    (sheet ? ref.current : filterRef.current)?.focus({ preventScroll: true });
+  }, [sheet]);
 
   useLayoutEffect(() => {
     if (sheet && !window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
@@ -121,14 +125,7 @@ const AssignmentEditor: React.FC<EditorProps> = ({ id, assignment, onClose, shee
     }
   }, [sheet]);
 
-  useEffect(() => {
-    if (!sheet) return;
-    // The task pane is the mobile scroller; lock it as well as the document.
-    const scrollers = [document.body, ...document.querySelectorAll<HTMLElement>('[data-testid="task-details"]')];
-    const previous = scrollers.map(node => node.style.overflow);
-    scrollers.forEach(node => { node.style.overflow = 'hidden'; });
-    return () => scrollers.forEach((node, index) => { node.style.overflow = previous[index]; });
-  }, [sheet]);
+  useLockTaskScroll(sheet);
 
   // Keep desktop popovers within the viewport.
   useLayoutEffect(() => {
@@ -198,6 +195,7 @@ const AssignmentEditor: React.FC<EditorProps> = ({ id, assignment, onClose, shee
     <div
       id={id}
       ref={ref}
+      tabIndex={-1}
       role="dialog"
       aria-modal="true"
       aria-label="Assign users"
@@ -213,7 +211,7 @@ const AssignmentEditor: React.FC<EditorProps> = ({ id, assignment, onClose, shee
         if (!focusable.length) return;
         const first = focusable[0];
         const last = focusable[focusable.length - 1];
-        if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
+        if (event.shiftKey && (document.activeElement === first || document.activeElement === ref.current)) { event.preventDefault(); last.focus(); }
         else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
       }}
     >

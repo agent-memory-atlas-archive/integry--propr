@@ -16,6 +16,7 @@ for (const width of [1333, 1584]) {
     await page.goto(`/tasks?repository=integry%2Fpropr&assignee=octocat&task=${selectedRun}`);
     const list = page.getByTestId('task-split-list');
     await expect(list.locator('.task-repo-filter > button')).toContainText('propr');
+    await expect(list.locator('.task-repo-filter > button > [data-repo-count]')).toBeHidden();
     await expect(list.locator('.task-assignee-filter-label')).toBeVisible();
     await expect(list.locator('.task-assignee-filter-label')).toHaveText('@octocat');
     const repoLabel = list.locator('.task-repo-filter > button > :nth-child(2)');

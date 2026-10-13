@@ -27,8 +27,6 @@ interface ActionBarProps {
   compact?: boolean;
   /** Expanded mobile summary: Follow Up stays beside the overflow. */
   mobileSummary?: boolean;
-  /** Mobile: the overflow opens as a bottom action sheet rather than a popover. */
-  sheet?: boolean;
 }
 
 export interface LiveRunControl {
@@ -222,7 +220,7 @@ const CompactActions: React.FC<{
   return (
     <div className="flex flex-none items-center gap-1.5">
       {summary && onFollowUp && (
-        <button onClick={onFollowUp} className="inline-flex items-center gap-1 whitespace-nowrap rounded py-1 text-[11px] leading-4 font-medium text-slate-600" title="Follow Up - Post a follow-up comment">
+        <button onClick={onFollowUp} className="inline-flex min-h-11 items-center gap-1 whitespace-nowrap rounded py-1 text-[11px] leading-4 font-medium text-slate-600" title="Follow Up - Post a follow-up comment">
           <MessageSquarePlus size={12} /><span>Follow Up</span>
         </button>
       )}
@@ -231,11 +229,6 @@ const CompactActions: React.FC<{
     </div>
   );
 };
-
-/** The full header's overflow holds only Delete: a popover on desktop, the bottom sheet on mobile. */
-const DeleteOverflow: React.FC<{ deletion: DeletionProps; sheet?: boolean }> = ({ deletion, sheet }) => (
-  sheet ? <TaskActionSheet items={[]} deletion={deletion} /> : <TaskOverflowMenu deletion={deletion} />
-);
 
 // Ghost button style for action buttons - small with icon + text
 const ghostButtonClass = "flex items-center gap-1.5 px-2.5 py-1 rounded text-xs font-medium text-slate-600 hover:text-slate-900 hover:bg-white/80 border border-transparent hover:border-slate-200 transition-colors";
@@ -254,7 +247,6 @@ const ActionBar: React.FC<ActionBarProps> = ({
   liveRun,
   compact,
   mobileSummary,
-  sheet,
 }) => {
   const isActive = ACTIVE_STATUSES.includes(currentStatus);
   // The run on screen is done, but a newer one is still working: its Stop takes this run's place.
@@ -330,7 +322,7 @@ const ActionBar: React.FC<ActionBarProps> = ({
 
       {stopButtons}
 
-      {deletion && <DeleteOverflow deletion={deletion} sheet={sheet} />}
+      {deletion && <TaskOverflowMenu deletion={deletion} />}
     </div>
   );
 };

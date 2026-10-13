@@ -193,7 +193,7 @@ test('keeps extensions visible for mixed directories and bare filenames at 390px
   for (const path of paths.slice(0, 2)) {
     const row = page.getByRole('button', { name: `View diff for ${path}`, exact: true });
     const extension = row.getByTestId('changed-file-extension');
-    await expect(extension).toHaveText(path.endsWith('.tsx') ? '.integration.test.tsx' : '.test.ts');
+    await expect(extension).toHaveText(path.endsWith('.tsx') ? '.test.tsx' : '.test.ts');
     const bounds = await extension.evaluate(node => {
       const rect = node.getBoundingClientRect();
       const parent = node.parentElement!.getBoundingClientRect();
@@ -205,3 +205,33 @@ test('keeps extensions visible for mixed directories and bare filenames at 390px
   await expect(rows.filter({ hasText: '.gitignore' })).toBeVisible();
   await expect(rows.filter({ hasText: 'README' })).toBeVisible();
 });
+
+for (const width of [320, 390]) {
+  test(`bounds hashed and dotted filename suffixes beside counts at ${width}px`, async ({ page }) => {
+    await page.setViewportSize({ width, height: 844 });
+    const cases = [
+      [`app.${'a'.repeat(64)}.js`, '.js'],
+      ['2024.10.12-release-notes.md', '.md'],
+      ['v1.2.3.lock', '.lock'],
+      [`app.${'x'.repeat(64)}`, ''],
+    ];
+    await fixture(page, true, cases.map(([path], index) => ({ ...files[index], path })));
+    await page.goto(`/tasks/${taskId}`);
+    for (const [path, suffix] of cases) {
+      const row = page.getByRole('button', { name: `View diff for ${path}`, exact: true });
+      await row.scrollIntoViewIfNeeded();
+      await expect(row.getByTestId('changed-file-extension')).toHaveText(suffix);
+      const geometry = await row.evaluate(node => {
+        const filename = node.querySelector('[data-testid="changed-file-name"]')!;
+        const suffix = filename.lastElementChild!;
+        const counts = node.lastElementChild!;
+        return { filename: filename.getBoundingClientRect(), suffix: suffix.getBoundingClientRect(), counts: counts.getBoundingClientRect(), row: node.getBoundingClientRect(), overflow: node.scrollWidth > node.clientWidth };
+      });
+      expect(geometry.overflow).toBe(false);
+      expect(geometry.suffix.right).toBeLessThanOrEqual(geometry.filename.right + 1);
+      expect(geometry.filename.right).toBeLessThanOrEqual(geometry.counts.left);
+      expect(geometry.counts.right).toBeLessThanOrEqual(geometry.row.right);
+    }
+    if (width === 320) await capture(page, 'task-filename-suffixes-320');
+  });
+}

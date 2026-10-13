@@ -90,11 +90,20 @@ const analysis = JSON.stringify({
   error_analysis: 'No section should be clipped by an ancestor with hidden overflow.',
 });
 
-async function stubTaskDetailsApis(page: Page): Promise<void> {
+async function stubTaskDetailsApis(page: Page, selectedIndex = 0): Promise<void> {
   await page.route('**/api/**', async route => {
     const pathname = new URL(route.request().url()).pathname;
     if (pathname === '/api/auth/demo-mode') {
       await route.fulfill({ json: { demoMode: true } });
+      return;
+    }
+    if (pathname === '/api/tasks') {
+      await route.fulfill({ json: { tasks: Array.from({ length: 50 }, (_, index) => ({
+        id: index === selectedIndex ? taskId : `responsive-run-${index}`,
+        repository: 'integry/propr-responsive-workspace-fixture', repositoryOwner: 'integry', repositoryName: 'propr-responsive-workspace-fixture',
+        issueNumber: 2252, title: `Followup: Responsive run ${index + 1}`, status: 'completed',
+        createdAt: new Date(startedAt + index * 3600000).toISOString(),
+      })), total: 1 } });
       return;
     }
     if (pathname === `/api/task/${taskId}/history`) {
@@ -183,6 +192,11 @@ for (const viewport of [
     await expect(page.getByText('Implementation Review Details')).toHaveCount(0);
     await expect(page.locator('[title^="Score:"]')).toHaveCount(0);
     expect(analysisRequests).toEqual([]);
+    await expect(page.getByTestId('run-timeline-run')).toHaveCount(50);
+    expect(await workspace.evaluate(node => node.scrollTop)).toBe(0);
+    const selectedHeader = page.locator('button[aria-current="true"]');
+    const heading = workspace.getByTestId('timeline-run-count').locator('..');
+    expect((await selectedHeader.boundingBox())!.y).toBeGreaterThanOrEqual((await heading.boundingBox())!.y + (await heading.boundingBox())!.height);
     if (process.env.PROPR_CAPTURE_PREVIEWS && viewport.width === 1280) {
       const directory = path.resolve('../.propr/previews');
       await mkdir(directory, { recursive: true });
@@ -235,4 +249,27 @@ for (const viewport of [
     }));
     expect(pageWidth.document).toBeLessThanOrEqual(pageWidth.viewport);
   });
+}
+
+for (const width of [390, 1280]) {
+  for (const selectedIndex of [0, 44]) {
+    test(`initial reveal keeps run ${selectedIndex + 1} visible at ${width}px`, async ({ page }) => {
+      await page.setViewportSize({ width, height: 820 });
+      await stubTaskDetailsApis(page, selectedIndex);
+      await page.goto(`/tasks/${taskId}`);
+      await expect(page.getByTestId('run-timeline-run')).toHaveCount(50);
+      const owner = page.getByTestId(width < 640 ? 'task-details' : 'task-workspace-scroll');
+      const header = page.locator('button[aria-current="true"]');
+      await expect(header).toBeInViewport();
+      const row = (await header.boundingBox())!;
+      const scrollport = (await owner.boundingBox())!;
+      expect(row.y).toBeGreaterThanOrEqual(scrollport.y + (width < 640 ? 0 : 44));
+      if (selectedIndex === 0) expect(await owner.evaluate(node => node.scrollTop)).toBe(0);
+      else expect(await owner.evaluate(node => node.scrollTop)).toBeGreaterThan(0);
+      if (process.env.PROPR_CAPTURE_PREVIEWS && width === 1280) {
+        await mkdir('../.propr/previews', { recursive: true });
+        await page.screenshot({ animations: 'disabled', path: `../.propr/previews/task-initial-run-${selectedIndex + 1}.png` });
+      }
+    });
+  }
 }

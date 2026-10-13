@@ -276,10 +276,15 @@ for (const width of [320, 390]) {
       await metadata.screenshot({ path: '../.propr/previews/mobile-metadata-390.png' });
     }
 
+    expect((await details.getByRole('button', { name: 'Follow Up', exact: true }).boundingBox())!.height).toBeGreaterThanOrEqual(44);
     await assignment.getByRole('button', { name: 'Edit assignees' }).click();
     const editor = page.getByRole('dialog', { name: 'Assign users' });
     await expect(editor).toBeVisible();
     await expect(editor).toHaveAttribute('aria-modal', 'true');
+    await expect(editor).toBeFocused();
+    await expect(editor.getByRole('searchbox')).not.toBeFocused();
+    await page.keyboard.press('Shift+Tab');
+    await expect(editor.getByRole('button', { name: 'Cancel' })).toBeFocused();
     await expect(page.locator('body')).toHaveCSS('overflow', 'hidden');
     await expect(details).toHaveCSS('overflow', 'hidden');
     const box = (await editor.boundingBox())!;
@@ -436,3 +441,39 @@ for (const width of [320, 390]) {
     await capture(page, `task-dense-metadata-${width}`);
   });
 }
+
+// Mobile emulation does not launch an OS keyboard. This covers a reduced viewport;
+// an Android/iOS device run is still needed for actual visualViewport/IME behavior.
+test('mobile assignment search, results, Save and Cancel remain reachable in a reduced viewport', async ({ browser }) => {
+  const context = await browser.newContext({ isMobile: true, hasTouch: true, viewport: { width: 390, height: 844 } });
+  const page = await context.newPage();
+  const state = await fixture(page);
+  await page.goto(`/tasks/${taskId}`);
+  const trigger = page.getByTestId('assignment-trigger').filter({ visible: true });
+  await trigger.tap();
+  const editor = page.getByRole('dialog', { name: 'Assign users' });
+  await expect(editor).toBeFocused();
+  const search = editor.getByRole('searchbox');
+  await search.tap();
+  await expect(search).toBeFocused();
+  await page.setViewportSize({ width: 390, height: 480 });
+  await search.fill('monalisa');
+  const option = editor.getByRole('checkbox', { name: /@monalisa/ });
+  for (const target of [search, option, editor.getByRole('button', { name: 'Save Assignments' }), editor.getByRole('button', { name: 'Cancel' })]) {
+    await expect(target).toBeInViewport();
+  }
+  await option.check();
+  await capture(page, 'task-assignment-reduced-mobile-viewport');
+  await editor.getByRole('button', { name: 'Cancel' }).tap();
+  expect(state.puts).toHaveLength(0);
+  await page.setViewportSize({ width: 390, height: 844 });
+  await trigger.tap();
+  await search.tap();
+  await page.setViewportSize({ width: 390, height: 480 });
+  await search.fill('monalisa');
+  await option.check();
+  await editor.getByRole('button', { name: 'Save Assignments' }).tap();
+  await expect(editor).toBeHidden();
+  expect(state.puts.at(-1)?.logins).toEqual(['octocat', 'monalisa']);
+  await context.close();
+});
