@@ -30,7 +30,7 @@ await mock.module('../packages/core/src/agents/agentImagePreparationQueue.js', {
 const dockerCommand = mock.fn(async (_command: string, _args: string[]): Promise<import('../packages/core/src/claude/docker/dockerExecutor.js').ExecutionResult> => {
     throw new Error('Unexpected Docker command');
 });
-const unexpectedBuild = mock.fn(async () => { throw new Error('Consumers must not build images'); });
+const unexpectedBuild = mock.fn(async (): Promise<{ success: boolean; imageTag: string }> => { throw new Error('Consumers must not build images'); });
 await mock.module('../packages/core/src/claude/docker/dockerExecutor.js', {
     namedExports: {
         executeDockerCommand: dockerCommand,
@@ -891,8 +891,8 @@ test('AgentRegistry rebuilds a removed base bundle in the background while its r
     registry.setImagePreparationOwner(false);
     skipImageChecks(registry);
     await registry.refresh();
-    const internal = registry as unknown as { trackUnifiedBaseImage: (base?: string, execution?: string) => void };
-    internal.trackUnifiedBaseImage('propr/agent:bundle-base', 'propr/runtime-agent:ready');
+    const internal = registry as unknown as { unifiedBaseImage: { track: (base?: string, execution?: string) => void; image: string | null } };
+    internal.unifiedBaseImage.track('propr/agent:bundle-base', 'propr/runtime-agent:ready');
 
     let baseExists = false;
     const inspected: string[][] = [];
@@ -923,13 +923,12 @@ test('AgentRegistry rebuilds a removed base bundle in the background while its r
 test('AgentRegistry only tracks a base bundle that differs from the execution image', () => {
     const registry = AgentRegistry.getInstance();
     const internal = registry as unknown as {
-        trackUnifiedBaseImage: (base?: string, execution?: string) => void;
-        unifiedBaseImage: string | null;
+        unifiedBaseImage: { track: (base?: string, execution?: string) => void; image: string | null };
     };
-    internal.trackUnifiedBaseImage('propr/agent:bundle-base', 'propr/runtime-agent:ready');
-    assert.strictEqual(internal.unifiedBaseImage, 'propr/agent:bundle-base');
-    internal.trackUnifiedBaseImage('propr/agent:bundle-base', 'propr/agent:bundle-base');
-    assert.strictEqual(internal.unifiedBaseImage, null);
+    internal.unifiedBaseImage.track('propr/agent:bundle-base', 'propr/runtime-agent:ready');
+    assert.strictEqual(internal.unifiedBaseImage.image, 'propr/agent:bundle-base');
+    internal.unifiedBaseImage.track('propr/agent:bundle-base', 'propr/agent:bundle-base');
+    assert.strictEqual(internal.unifiedBaseImage.image, null);
 });
 
 test('AgentRegistry shares one recovery refresh across concurrent callers', async () => {
@@ -1218,4 +1217,64 @@ test('guarded recovery discovers an uninitialized registry before preparing its 
     assert.strictEqual(registry.isInitialized(), true);
     assert.strictEqual(registry.getOperationalStatus().unifiedAgentImage.status, 'ready');
     assert.strictEqual(enqueuePreparation.mock.callCount(), 0);
+});
+
+
+test('missing base does not skip runtime package checks when recovery is refused', async t => {
+    const registry = AgentRegistry.getInstance();
+    skipImageChecks(registry);
+    await registry.refresh();
+    const internal = registry as unknown as {
+        unifiedBaseImage: { track: (base: string, execution: string) => void };
+        startWorkerOwnedImageRecovery: () => Promise<void>;
+        hasRuntimePackageStateChanged: () => Promise<boolean>;
+    };
+    internal.unifiedBaseImage.track('base:missing', 'runtime:ready');
+    t.mock.method(internal, 'startWorkerOwnedImageRecovery', async () => {});
+    const check = t.mock.method(internal, 'hasRuntimePackageStateChanged', async () => false);
+    dockerCommand.mock.mockImplementation(async () => ({ exitCode: 1, stdout: '', stderr: '', messageTimestamps: new Map() }));
+    await registry.ensureInitialized();
+    assert.strictEqual(check.mock.callCount(), 1);
+});
+
+test('owner rebuilds a removed base through preparation and re-tracks the resolved base', async t => {
+    const registry = AgentRegistry.getInstance();
+    const bases = ['propr/agent:owner-old', 'propr/agent:owner-new'];
+    const images = Object.fromEntries(bases.map(base => [base, {
+        baseImage: base, baseImageId: 'sha256:owner', image: 'propr/runtime-agent:owner',
+        packageManager: 'apt' as const, builtAt: new Date().toISOString(),
+    }]));
+    await saveAgentRuntimePackageState({
+        installationId: 'owner-test', packages: ['jq'], activePackages: ['jq'],
+        status: 'ready', images, updatedAt: new Date().toISOString(),
+    });
+    let baseExists = true;
+    dockerCommand.mock.mockImplementation(async (_command, args) => ({
+        exitCode: args.at(-1) === bases[0] && !baseExists && args.includes('{{.Id}}') ? 1 : 0,
+        stdout: args[0] === 'run' ? 'apt\nPRETTY_NAME="Debian"' : 'sha256:owner\t"node"',
+        stderr: '', messageTimestamps: new Map(),
+    }));
+    unexpectedBuild.mock.resetCalls();
+    unexpectedBuild.mock.mockImplementation(async () => ({ success: true, imageTag: bases[0] }));
+    t.after(() => unexpectedBuild.mock.mockImplementation(async () => { throw new Error('Consumers must not build images'); }));
+    await registry.prepareImagesAndRefresh();
+    const internal = registry as unknown as { unifiedBaseImage: { image: string | null } };
+    assert.strictEqual(internal.unifiedBaseImage.image, bases[0]);
+    let finish!: () => void;
+    const gate = new Promise<void>(resolve => { finish = resolve; });
+    unexpectedBuild.mock.mockImplementation(async () => {
+        await gate;
+        baseExists = true;
+        return { success: true, imageTag: bases[1] };
+    });
+    baseExists = false;
+    await registry.ensureInitialized();
+    assert.strictEqual(registry.getAgentByAlias('opencode')?.config.dockerImage, 'propr/runtime-agent:owner');
+    assert.strictEqual(registry.isImageRecoveryPending(), true);
+    finish();
+    await registry.waitForPendingRefresh();
+    assert.strictEqual(unexpectedBuild.mock.callCount(), 2);
+    assert.strictEqual(enqueuePreparation.mock.callCount(), 0);
+    assert.strictEqual(internal.unifiedBaseImage.image, bases[1]);
+    assert.strictEqual(registry.getOperationalStatus().unifiedAgentImage.status, 'ready');
 });

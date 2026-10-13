@@ -211,23 +211,29 @@ async function executeChatQuery(
   }
 }
 
-async function resolveHealthCheckImage(config: AgentConfig): Promise<{ image?: string; error?: string }> {
-  const registry = getAgentRegistry();
-  // Requests worker-owned preparation when the registered image is missing.
-  await registry.ensureInitialized();
-  let agent = registry.getAgentById(config.id);
-  if (!agent) {
-    await registry.refresh();
-    agent = registry.getAgentById(config.id);
+export async function resolveHealthCheckImage(
+  config: AgentConfig,
+  registry = getAgentRegistry(),
+  imageAvailable = hasLocalDockerImage,
+): Promise<{ image?: string; error?: string }> {
+  // Inspect-only discovery must not join a pending worker build.
+  if (!registry.isImageRecoveryPending()) await registry.inspectAgentImageAvailability();
+  const image = registry.getAgentById(config.id)?.config.dockerImage;
+  if (image && await imageAvailable(image)) {
+    // Keep an available retained image serving while checking for a pruned base.
+    void registry.ensureInitialized().catch(() => {});
+    return { image };
   }
-  if (agent?.config.dockerImage) return { image: agent.config.dockerImage };
   const status = registry.getOperationalStatus().unifiedAgentImage;
-  if (status.status !== 'unavailable') return { error: 'Agent is not registered yet. Check again shortly.' };
-  return {
-    error: status.operatorActionRequired
-      ? `Agent image cannot be prepared: ${status.error}`
-      : `Agent image is being prepared by the worker. Check again in a few minutes. (${status.error})`,
-  };
+  if (image || status.status === 'unavailable' || registry.isImageRecoveryPending()) {
+    void registry.recoverImagesAndRefresh().catch(() => {});
+    return {
+      error: status.status === 'unavailable' && status.operatorActionRequired
+        ? `Agent image cannot be prepared: ${status.error}`
+        : `Agent image is being prepared by the worker. Check again in a few minutes.${status.status === 'unavailable' ? ` (${status.error})` : ''}`,
+    };
+  }
+  return { error: 'Agent is not registered yet. Check again shortly.' };
 }
 
 export function createAgentRoutes() {
