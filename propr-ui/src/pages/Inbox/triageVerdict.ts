@@ -16,15 +16,18 @@ export interface TriageFinding {
 
 export interface TriageReviewVerdict {
   score: number | null;
+  /** The recap's issue count; the recap may list fewer titles than this, never more. */
+  issueCount: number;
   findings: TriageFinding[];
 }
 
 /** The review's score and enumerated findings, read from the notification itself; no extra request. */
 export function reviewFindings(notification: Notification): TriageReviewVerdict {
   const outcome = notificationReviewOutcome(notification);
-  if (!outcome) return { score: null, findings: [] };
+  if (!outcome) return { score: null, issueCount: 0, findings: [] };
   return {
     score: outcome.score,
+    issueCount: Math.max(outcome.issueCount, outcome.findings.length),
     findings: outcome.findings.map((finding, position) => {
       const reference = notificationFindingReference(finding);
       return {

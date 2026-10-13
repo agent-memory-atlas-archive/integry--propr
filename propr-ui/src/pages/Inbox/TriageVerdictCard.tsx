@@ -49,14 +49,15 @@ function useTriageDiff(taskId: string | null): TriageDiff | null {
 }
 
 const ReviewVerdict: React.FC<{ notification: Notification }> = ({ notification }) => {
-  const { score, findings } = reviewFindings(notification);
+  const { score, issueCount, findings } = reviewFindings(notification);
+  const unlistedFindings = issueCount - findings.length;
   if (findings.length === 0) {
     return <p className="whitespace-pre-line break-words text-sm leading-6 text-slate-700">{notification.body}</p>;
   }
   return (
     <section aria-labelledby="triage-verdict-heading">
       <h3 id="triage-verdict-heading" className={SECTION_HEADING}>
-        Review verdict: {pluralize(findings.length, 'finding')}{score === null ? '' : ` (Score ${score}/10)`}
+        Review verdict: {pluralize(issueCount, 'finding')}{score === null ? '' : ` (Score ${score}/10)`}
       </h3>
       <ol className="mt-3 space-y-3">
         {findings.map(finding => (
@@ -71,6 +72,9 @@ const ReviewVerdict: React.FC<{ notification: Notification }> = ({ notification 
           </li>
         ))}
       </ol>
+      {unlistedFindings > 0 && (
+        <p className="mt-3 text-xs text-slate-500">{pluralize(unlistedFindings, 'more finding')} in Tasks</p>
+      )}
     </section>
   );
 };

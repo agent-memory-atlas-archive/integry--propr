@@ -143,6 +143,7 @@ describe('Inbox triage console', () => {
     expect(card.getByText('packages/cli/test/model.test.ts:42')).toBeInTheDocument();
     expect(card.getByText('Uncaught layout expectation')).toBeInTheDocument();
     expect(card.getByText('Clear expiry feedback')).toBeInTheDocument();
+    expect(card.queryByText(/more findings? in Tasks/)).not.toBeInTheDocument();
     expect(card.getByRole('link', { name: 'PR #3057 on GitHub' })).toHaveAttribute('href', 'https://github.com/integry/propr/pull/3057');
     expect(card.getByRole('link', { name: /Inspect in Tasks/ })).toHaveAttribute('href', '/tasks/task-3057');
     expect(card.getByRole('button', { name: 'Send /fix to PR #3057' })).toBeInTheDocument();
@@ -167,6 +168,20 @@ describe('Inbox triage console', () => {
     expect(card.queryByRole('link', { name: /Inspect in Tasks/ })).not.toBeInTheDocument();
     expect(card.getByRole('button', { name: 'Dismiss' })).toBeInTheDocument();
     expect(getFileChanges).not.toHaveBeenCalled();
+  });
+
+  test('the verdict heading counts every issue the recap reports, not just the titles it lists', async () => {
+    mockViewport(true);
+    const truncated = item('review-2519', 32, {
+      kind: 'review', target: { type: 'review', repository: 'integry/propr', prNumber: 2519, taskId: 'task-2519' },
+      title: 'Retry webhook deliveries', body: 'Score 3/10 · 4 issues found: Retries never back off; Delivery ids are reused',
+    });
+    vi.mocked(listNotifications).mockResolvedValue({ notifications: [...queue, truncated], unreadCount: 0, nextCursor: null });
+    renderInbox('/inbox?notification=review-2519');
+    const card = within(await screen.findByRole('region', { name: 'Triage verdict' }));
+    expect(card.getByRole('heading', { name: 'Review verdict: 4 findings (Score 3/10)' })).toBeInTheDocument();
+    expect(card.getAllByRole('listitem')).toHaveLength(2);
+    expect(card.getByText('2 more findings in Tasks')).toBeInTheDocument();
   });
 
   test('a failed diff read still shows the verdict and the buttons', async () => {

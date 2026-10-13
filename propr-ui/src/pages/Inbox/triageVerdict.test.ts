@@ -37,6 +37,7 @@ describe('reviewFindings', () => {
       + '`packages/core/src/auth.ts:118`: Clear expiry feedback after successful auth handoff',
     ))).toEqual({
       score: 6,
+      issueCount: 2,
       findings: [
         { index: 1, reference: 'packages/cli/test/model.test.ts:42', text: 'Uncaught layout expectation' },
         { index: 2, reference: 'packages/core/src/auth.ts:118', text: 'Clear expiry feedback after successful auth handoff' },
@@ -48,6 +49,7 @@ describe('reviewFindings', () => {
     expect(reviewFindings(review('Scores 8/10, 5/10 · 3 issues found: Retries never back off; src/a.ts:7 - Ids reused · 1 reviewer failed')))
       .toEqual({
         score: 5,
+        issueCount: 3,
         findings: [
           { index: 1, reference: null, text: 'Retries never back off' },
           { index: 2, reference: 'src/a.ts:7', text: 'Ids reused' },
@@ -55,10 +57,17 @@ describe('reviewFindings', () => {
       });
   });
 
+  test('keeps the recap issue count when it lists fewer titles, and never reports fewer than it lists', () => {
+    const truncated = reviewFindings(review('Score 3/10 · 4 issues found: Retries never back off; Delivery ids are reused'));
+    expect(truncated.issueCount).toBe(4);
+    expect(truncated.findings.map(finding => finding.text)).toEqual(['Retries never back off', 'Delivery ids are reused']);
+    expect(reviewFindings(review('Score 5/10 · 1 issue found: A; B')).issueCount).toBe(2);
+  });
+
   test('has no findings for a clean review or a notification that is not a review', () => {
-    expect(reviewFindings(review('Score 9/10 · 0 issues found'))).toEqual({ score: 9, findings: [] });
+    expect(reviewFindings(review('Score 9/10 · 0 issues found'))).toEqual({ score: 9, issueCount: 0, findings: [] });
     expect(reviewFindings(item({ kind: 'task', severity: 'error', target: { type: 'task', repository: 'integry/propr', taskId: 't' }, body: 'Failed' })))
-      .toEqual({ score: null, findings: [] });
+      .toEqual({ score: null, issueCount: 0, findings: [] });
   });
 
   test('leaves prose that only looks like a reference alone', () => {

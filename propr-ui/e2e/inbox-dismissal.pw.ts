@@ -459,7 +459,9 @@ test('wide screens triage the selected row in a verdict card beside the queue', 
   await verdict.getByRole('button', { name: 'Dismiss' }).click();
   await expect(epic).toHaveCount(0);
   await expect(page).toHaveURL(/notification=review-2519/);
+  await expect(verdict.getByRole('heading', { name: 'Review verdict: 4 findings (Score 3/10)' })).toBeVisible();
   await expect(verdict.getByText('Retries never back off')).toBeVisible();
+  await expect(verdict.getByText('2 more findings in Tasks')).toBeVisible();
   await expect(page.getByRole('article', { name: 'Retry webhook deliveries that time out' }).getByRole('button', {
     name: 'Retry webhook deliveries that time out', exact: true,
   })).toHaveAttribute('aria-current', 'true');
