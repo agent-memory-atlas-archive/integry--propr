@@ -1,7 +1,7 @@
 // Run from repository root after building @propr/shared. Contains public test data only.
 import { createHash, createHmac } from 'node:crypto';
 import { writeFile } from 'node:fs/promises';
-import { canonicalFleetJson, FLEET_DATA_SCHEMA, FLEET_DATA_CONTRACT, FLEET_DATA_SCOPE } from '../../../packages/shared/dist/fleetData.js';
+import { canonicalFleetJson, FLEET_DATA_SCHEMA, FLEET_DATA_CONTRACT, FLEET_DATA_SCOPE } from '../packages/shared/dist/fleetData.js';
 const sha256 = value => createHash('sha256').update(value).digest('hex');
 const contractPin = sha256(FLEET_DATA_SCHEMA);
 const testSecret = 'PUBLIC-FIXTURE-KEY-NOT-A-PRODUCTION-SECRET';
@@ -19,6 +19,6 @@ const requests = [
   return { action: request.action, canonical, sha256: sha256(canonical) };
 });
 const fixtures = JSON.stringify({ contractPin, testSecret, requests }, null, 2) + '\n';
-await writeFile(new URL('./schema.json', import.meta.url), FLEET_DATA_SCHEMA);
-await writeFile(new URL('./fixtures.json', import.meta.url), fixtures);
-await writeFile(new URL('./SHA256SUMS', import.meta.url), `${contractPin}  schema.json\n${sha256(fixtures)}  fixtures.json\n`);
+await writeFile(new URL('../docs/contracts/fleet-data-v1/schema.json', import.meta.url), FLEET_DATA_SCHEMA);
+await writeFile(new URL('../docs/contracts/fleet-data-v1/fixtures.json', import.meta.url), fixtures);
+await writeFile(new URL('../docs/contracts/fleet-data-v1/SHA256SUMS', import.meta.url), `${contractPin}  schema.json\n${sha256(fixtures)}  fixtures.json\n`);

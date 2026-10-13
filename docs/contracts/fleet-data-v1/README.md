@@ -4,7 +4,7 @@ This contract is an infrastructure bridge for a separately authorized Fleet exec
 
 ## Pin and transport
 
-Pin `schema.json` by SHA-256 (`419b435424c9273bb2b39097277595e323f160a30ed3fb48cbe066e9b5d7c655`). `SHA256SUMS` also pins `fixtures.json`; each of its seven canonical request fixtures has its own byte hash and a MAC using an explicitly public test key. Regenerate with `node docs/contracts/fleet-data-v1/generate-fixtures.mjs` after building `@propr/shared`. Fixtures use historical timestamps and must not be accepted as live grants. Shared TypeScript types and canonical serialization live in `packages/shared/src/fleetData.ts`.
+Pin `schema.json` by SHA-256 (`419b435424c9273bb2b39097277595e323f160a30ed3fb48cbe066e9b5d7c655`). `SHA256SUMS` also pins `fixtures.json`; each of its seven canonical request fixtures has its own byte hash and a MAC using an explicitly public test key. Regenerate with `node scripts/generate-fleet-data-fixtures.mjs` after building `@propr/shared`. Fixtures use historical timestamps and must not be accepted as live grants. Shared TypeScript types and canonical serialization live in `packages/shared/src/fleetData.ts`.
 
 The API process optionally creates a **separate Unix domain HTTP socket**, never a TCP listener. Fleet Ansible can POST canonical JSON to `/v1/invoke` using its Unix-socket HTTP client. There is no proxy from the customer Express application to this listener. The customer listener explicitly returns 404 for `/v1/invoke`, including requests arriving through the existing customer tunnel. Cookies, bearer secrets, initial-admin IDs and local instance-admin roles do not grant access to the socket's operation handler.
 
