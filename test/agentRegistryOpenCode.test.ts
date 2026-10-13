@@ -886,6 +886,52 @@ test('AgentRegistry refreshes before use when its registered image was removed',
     assert.strictEqual(registry.getAgentByAlias('opencode')?.config.dockerImage, 'propr/agent:second');
 });
 
+test('AgentRegistry rebuilds a removed base bundle in the background while its runtime image keeps serving', async t => {
+    const registry = AgentRegistry.getInstance();
+    registry.setImagePreparationOwner(false);
+    skipImageChecks(registry);
+    await registry.refresh();
+    const internal = registry as unknown as { trackUnifiedBaseImage: (base?: string, execution?: string) => void };
+    internal.trackUnifiedBaseImage('propr/agent:bundle-base', 'propr/runtime-agent:ready');
+
+    let baseExists = false;
+    const inspected: string[][] = [];
+    dockerCommand.mock.mockImplementation(async (_command, args) => {
+        inspected.push(args);
+        return { exitCode: baseExists ? 0 : 1, stdout: '', stderr: 'No such image', messageTimestamps: new Map() };
+    });
+    let finishPreparation!: () => void;
+    enqueuePreparation.mock.mockImplementation(() => new Promise<void>(resolve => { finishPreparation = resolve; }));
+    t.after(() => { dockerCommand.mock.resetCalls(); });
+
+    // Does not wait for the worker-owned build.
+    await registry.ensureInitialized();
+    assert.deepStrictEqual(inspected, [['image', 'inspect', '--format', '{{.Id}}', 'propr/agent:bundle-base']]);
+    assert.deepStrictEqual(enqueuePreparation.mock.calls.map(call => call.arguments[0]), ['propr/agent:bundle-base']);
+    assert.ok(registry.getAgentByAlias('opencode'));
+
+    baseExists = true;
+    finishPreparation();
+    await registry.waitForPendingRefresh();
+
+    // The base check is throttled between initialization guards.
+    await registry.ensureInitialized();
+    assert.strictEqual(inspected.length, 1);
+    assert.strictEqual(enqueuePreparation.mock.callCount(), 1);
+});
+
+test('AgentRegistry only tracks a base bundle that differs from the execution image', () => {
+    const registry = AgentRegistry.getInstance();
+    const internal = registry as unknown as {
+        trackUnifiedBaseImage: (base?: string, execution?: string) => void;
+        unifiedBaseImage: string | null;
+    };
+    internal.trackUnifiedBaseImage('propr/agent:bundle-base', 'propr/runtime-agent:ready');
+    assert.strictEqual(internal.unifiedBaseImage, 'propr/agent:bundle-base');
+    internal.trackUnifiedBaseImage('propr/agent:bundle-base', 'propr/agent:bundle-base');
+    assert.strictEqual(internal.unifiedBaseImage, null);
+});
+
 test('AgentRegistry shares one recovery refresh across concurrent callers', async () => {
     const registry = AgentRegistry.getInstance();
     let refreshes = 0;

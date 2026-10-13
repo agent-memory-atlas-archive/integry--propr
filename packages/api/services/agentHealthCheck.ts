@@ -38,6 +38,9 @@ function healthErrorCode(error: unknown): NonNullable<AgentHealthResult['errorCo
 export function createAgentHealthCheck(dependencies: {
   loadAgents: () => Promise<AgentConfig[]>;
   createAgent: (config: AgentConfig) => Pick<Agent, 'analyze'>;
+  // Saved configs name the base bundle tag; probes must run on the image the
+  // registry resolved, so a missing image is reported instead of pulled.
+  resolveExecutionImage?: (config: AgentConfig) => Promise<{ image?: string; error?: string }>;
 }) {
   const inFlight = new Map<string, Promise<AgentHealthResult>>();
   return async function check(agentId: string, fresh = false): Promise<AgentHealthResult | undefined> {
@@ -57,7 +60,9 @@ export function createAgentHealthCheck(dependencies: {
       const model = agentHealthModel(config);
       if (!model) return { agentId, status: 'error', errorCode: 'unknown', error: 'No models configured. Edit this agent to add a model.' };
       try {
-        const result = await dependencies.createAgent(config).analyze('Reply with only OK. Do not use tools.', {
+        const resolved = dependencies.resolveExecutionImage ? await dependencies.resolveExecutionImage(config) : { image: config.dockerImage };
+        if (!resolved.image) return { agentId, model, status: 'error', errorCode: 'unknown', error: redactSecrets(resolved.error || 'Agent image is unavailable.').slice(0, 2000) };
+        const result = await dependencies.createAgent({ ...config, dockerImage: resolved.image }).analyze('Reply with only OK. Do not use tools.', {
           model,
           timeoutMs: 30_000,
           executionType: 'agent-health-check',

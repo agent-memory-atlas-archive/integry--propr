@@ -10,6 +10,7 @@ import {
   toProprOpenCodeExternalModelId,
   toProprOpenCodeModelId,
   type Agent,
+  type AgentConfig,
   type AgentRegistry,
   SyntheticAgent,
 } from '@propr/core';
@@ -210,11 +211,31 @@ async function executeChatQuery(
   }
 }
 
+async function resolveHealthCheckImage(config: AgentConfig): Promise<{ image?: string; error?: string }> {
+  const registry = getAgentRegistry();
+  // Requests worker-owned preparation when the registered image is missing.
+  await registry.ensureInitialized();
+  let agent = registry.getAgentById(config.id);
+  if (!agent) {
+    await registry.refresh();
+    agent = registry.getAgentById(config.id);
+  }
+  if (agent?.config.dockerImage) return { image: agent.config.dockerImage };
+  const status = registry.getOperationalStatus().unifiedAgentImage;
+  if (status.status !== 'unavailable') return { error: 'Agent is not registered yet. Check again shortly.' };
+  return {
+    error: status.operatorActionRequired
+      ? `Agent image cannot be prepared: ${status.error}`
+      : `Agent image is being prepared by the worker. Check again in a few minutes. (${status.error})`,
+  };
+}
+
 export function createAgentRoutes() {
   const router = Router();
   const checkAgentHealth = createAgentHealthCheck({
     loadAgents,
     createAgent: config => getAgentRegistry().createAgentFromConfig(config),
+    resolveExecutionImage: resolveHealthCheckImage,
   });
 
   router.post('/:agentId/health', requireManageAgents, async (req: Request, res: Response): Promise<void> => {

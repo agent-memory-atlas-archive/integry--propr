@@ -22,6 +22,7 @@ import {
 export type { AgentRegistryOperationalStatus } from './agentRegistryTypes.js';
 
 const RUNTIME_PACKAGE_STATE_CHECK_INTERVAL_MS = 5000;
+const UNIFIED_BASE_IMAGE_CHECK_INTERVAL_MS = 30_000;
 
 export { getUnifiedAgentImageRetryDelay, UNIFIED_AGENT_IMAGE_CIRCUIT_COOLDOWN_MS, UNIFIED_AGENT_IMAGE_RETRY_MAX_ATTEMPTS } from './unifiedAgentImageRecovery.js';
 
@@ -43,6 +44,10 @@ export class AgentRegistry {
     private pendingRefreshPreparesImages = false;
     private pendingBackgroundRefresh: Promise<void> | null = null;
     private unavailableUnifiedAgentImage: UnavailableUnifiedAgentImage | null = null;
+    // Base bundle behind a derived runtime-package image. Agents execute on the
+    // runtime image, so its removal is invisible to the registered-image check.
+    private unifiedBaseImage: string | null = null;
+    private unifiedBaseImageCheckAfter = 0;
     private unifiedAgentImageRetryTimer: NodeJS.Timeout | null = null;
     private imagePreparationOwner = false;
     private imageRecoveryGeneration = 0;
@@ -146,6 +151,7 @@ export class AgentRegistry {
                 // runtime to prepare. This keeps no-work installations alive
                 // without weakening the empty-config default-agent fallback or
                 // any startup that has an enabled direct agent.
+                this.trackUnifiedBaseImage(undefined, undefined);
                 this.markUnifiedAgentImageReady('');
                 this.agents.clear();
                 this.agentsByAlias.clear();
@@ -375,6 +381,15 @@ export class AgentRegistry {
             return;
         }
 
+        // Registered agents still run on their derived runtime image, but every
+        // later refresh and runtime-package rebuild needs the base bundle. Rebuild
+        // it in the background so a pruned base does not block execution.
+        if (!(await this.unifiedBaseImageAvailable())) {
+            logger.warn({ imageTag: this.unifiedBaseImage }, 'Requesting worker-owned agent image preparation because the unified base image was removed');
+            void this.startWorkerOwnedImageRecovery();
+            return;
+        }
+
         // A failed replacement configuration can leave retained agents serving
         // an older, still-available image while the recovery circuit is open.
         // Keep them available and run the throttled inspect-only check in the
@@ -403,6 +418,16 @@ export class AgentRegistry {
             .filter(Boolean))];
         return areAgentImagesAvailable(images, () => executeDockerCommand('docker', [
                 'image', 'inspect', '--format', '{{.Id}}', ...images
+            ], { timeout: 10000 }));
+    }
+
+    private async unifiedBaseImageAvailable(): Promise<boolean> {
+        const image = this.unifiedBaseImage;
+        const now = Date.now();
+        if (!image || now < this.unifiedBaseImageCheckAfter) return true;
+        this.unifiedBaseImageCheckAfter = now + UNIFIED_BASE_IMAGE_CHECK_INTERVAL_MS;
+        return areAgentImagesAvailable([image], () => executeDockerCommand('docker', [
+                'image', 'inspect', '--format', '{{.Id}}', image
             ], { timeout: 10000 }));
     }
 
@@ -439,7 +464,13 @@ export class AgentRegistry {
             this.recordUnavailableUnifiedAgentImage(result.imageTag, error, prepareImages || !!this.pendingBackgroundRefresh);
             return null;
         }
+        this.trackUnifiedBaseImage(result.imageTag, result.image);
         return this.markUnifiedAgentImageReady(result.image);
+    }
+
+    private trackUnifiedBaseImage(baseImage: string | undefined, executionImage: string | undefined): void {
+        this.unifiedBaseImage = baseImage && baseImage !== executionImage ? baseImage : null;
+        this.unifiedBaseImageCheckAfter = 0;
     }
 
     private markUnifiedAgentImageReady(image: string): string { this.imageRecoveryGeneration += 1; this.clearUnifiedAgentImageRetry(); this.unavailableUnifiedAgentImage = null; return image; }
@@ -463,7 +494,7 @@ export class AgentRegistry {
         // once its cooldown has elapsed; disk pressure keeps it closed.
         if (mustStayInspectOnly(this.unavailableUnifiedAgentImage)) return inspectUnifiedAgentImageWhileCircuitOpen(this.circuitOpenInspection, this.pendingBackgroundRefresh, () => this.refresh());
         const firstAgent = this.agents.values().next().value as Agent | undefined;
-        const imageTag = this.unavailableUnifiedAgentImage?.imageTag || firstAgent?.config.dockerImage;
+        const imageTag = this.unavailableUnifiedAgentImage?.imageTag || this.unifiedBaseImage || firstAgent?.config.dockerImage;
         const generation = this.imageRecoveryGeneration;
         return startUnifiedAgentImageRecovery({
             fromTimer,
@@ -496,6 +527,7 @@ export class AgentRegistry {
             return;
         }
 
+        this.trackUnifiedBaseImage(result.imageTag, result.config.dockerImage);
         this.markUnifiedAgentImageReady(result.config.dockerImage || '');
         this.agents.clear();
         this.agentsByAlias.clear();

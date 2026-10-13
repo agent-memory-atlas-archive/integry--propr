@@ -173,3 +173,24 @@ test('distinguishes authentication, quota, HTTP 429, and unrelated failures for 
   });
   assert.equal((await check(config.id))?.errorCode, 'rate_limit');
 });
+
+test('probes run on the registry-resolved image and report an unavailable image without executing', async () => {
+  const images: Array<string | undefined> = [];
+  let resolved: { image?: string; error?: string } = { image: 'propr/runtime-agent:ready' };
+  const check = createAgentHealthCheck({
+    loadAgents: async () => [{ ...config, dockerImage: 'propr/agent:bundle-base' }],
+    createAgent: agent => ({ analyze: async () => {
+      images.push(agent.dockerImage);
+      return { response: 'OK', success: true, modelUsed: 'gpt-6-luna', executionTimeMs: 1 } as AnalysisResult;
+    } }),
+    resolveExecutionImage: async () => resolved,
+  });
+  assert.equal((await check('codex'))?.status, 'ready');
+  assert.deepEqual(images, ['propr/runtime-agent:ready']);
+
+  resolved = { error: 'Agent image is being prepared by the worker. Check again in a few minutes.' };
+  const result = await check('codex', true);
+  assert.equal(result?.status, 'error');
+  assert.match(result?.error ?? '', /being prepared/);
+  assert.equal(images.length, 1);
+});
