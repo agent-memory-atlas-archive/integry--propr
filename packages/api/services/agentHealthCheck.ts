@@ -1,5 +1,5 @@
 import type { Agent, AgentConfig } from '@propr/core';
-import { redactSecrets } from '@propr/core';
+import { computeContentHash, generateAgentBundleImageTag, getAgentCliVersionMatrix, redactSecrets } from '@propr/core';
 import { AGENT_MODELS } from '@propr/shared';
 
 // Prefer inexpensive, quick models already offered by this configuration.
@@ -20,10 +20,10 @@ export function agentHealthModel(config: AgentConfig): string | undefined {
 
 export interface AgentHealthResult {
   agentId: string;
-  status: 'ready' | 'error' | 'disabled';
+  status: 'ready' | 'error' | 'disabled' | 'preparing';
   model?: string;
   error?: string;
-  errorCode?: 'auth_required' | 'rate_limit' | 'unknown';
+  errorCode?: 'auth_required' | 'rate_limit' | 'unknown' | 'preparation_failed';
 }
 
 function healthErrorCode(error: unknown): NonNullable<AgentHealthResult['errorCode']> {
@@ -38,20 +38,79 @@ function healthErrorCode(error: unknown): NonNullable<AgentHealthResult['errorCo
 export function createAgentHealthCheck(dependencies: {
   loadAgents: () => Promise<AgentConfig[]>;
   createAgent: (config: AgentConfig) => Pick<Agent, 'analyze'>;
+  imageExists?: (image: string) => Promise<boolean>;
+  prepareImage?: (image: string) => Promise<void>;
 }) {
+  // Share worker requests across providers using the same exact image.
+  const preparations = new Map<string, { failed: boolean; pending: boolean }>();
   const inFlight = new Map<string, Promise<AgentHealthResult>>();
+
+  async function loadEffectiveAgents(): Promise<AgentConfig[]> {
+    const agents = await dependencies.loadAgents();
+    // Match registry resolution: saved tags can outlive bundle/version changes,
+    // and even a sibling provider's CLI version changes the shared image.
+    const image = generateAgentBundleImageTag(getAgentCliVersionMatrix(agents), computeContentHash());
+    return agents.map(agent => ({ ...agent, dockerImage: image }));
+  }
+
+  function pruneUnusedPreparations(agents: AgentConfig[]): void {
+    for (const [image, state] of preparations) {
+      if (!state.pending && !agents.some(agent => agent.enabled && agent.dockerImage === image)) preparations.delete(image);
+    }
+  }
+
   return async function check(agentId: string, fresh = false): Promise<AgentHealthResult | undefined> {
-    const config = (await dependencies.loadAgents()).find(agent => agent.id === agentId);
+    const agents = await loadEffectiveAgents();
+    pruneUnusedPreparations(agents);
+    const config = agents.find(agent => agent.id === agentId);
     if (!config) return undefined;
     if (!config.enabled) return { agentId, status: 'disabled' };
     const key = JSON.stringify(config);
+    if (dependencies.imageExists && dependencies.prepareImage) {
+      const image = config.dockerImage;
+      try {
+        const exists = await dependencies.imageExists(image);
+        const current = (await loadEffectiveAgents()).find(agent => agent.id === agentId);
+        if (JSON.stringify(current) !== key) return check(agentId, fresh);
+        if (!exists) {
+          let preparation = preparations.get(image);
+          if (fresh && preparation?.failed) {
+            preparations.delete(image);
+            preparation = undefined;
+          }
+          if (!preparation) {
+            preparation = { failed: false, pending: true };
+            preparations.set(image, preparation);
+            const state = preparation;
+            void dependencies.prepareImage(image).then(async () => {
+              // Completion is evidence for this target only. A later check
+              // resolves a newer bundle independently if configuration changed.
+              state.failed = !await dependencies.imageExists!(image);
+            }).catch(() => { state.failed = true; }).finally(() => { state.pending = false; });
+          }
+          return preparation.failed
+            ? { agentId, status: 'error', errorCode: 'preparation_failed',
+                error: 'Agent image preparation failed. Check the worker status and available disk space, then check again.' }
+            : { agentId, status: 'preparing' };
+        }
+        // A verified image can recover even after an earlier worker failure.
+        preparations.delete(image);
+      } catch {
+        return { agentId, status: 'error', errorCode: 'preparation_failed',
+          error: 'Could not verify the agent image. Check that Docker and the worker are running, then check again.' };
+      }
+    }
     const existing = inFlight.get(key);
     if (existing) {
-      if (!fresh) return existing;
+      if (!fresh) {
+        const result = await existing;
+        const current = (await loadEffectiveAgents()).find(agent => agent.id === agentId);
+        return JSON.stringify(current) === key ? result : check(agentId);
+      }
       // Login changes credentials without changing config. A refresh must wait
       // for the old probe, then reload config and create a new agent instance.
       await existing;
-      return check(agentId, fresh);
+      return check(agentId);
     }
     const probe = async (): Promise<AgentHealthResult> => {
       const model = agentHealthModel(config);
@@ -76,6 +135,8 @@ export function createAgentHealthCheck(dependencies: {
       if (inFlight.get(key) === promise) inFlight.delete(key);
     });
     inFlight.set(key, promise);
-    return promise;
+    const result = await promise;
+    const current = (await loadEffectiveAgents()).find(agent => agent.id === agentId);
+    return JSON.stringify(current) === key ? result : check(agentId);
   };
 }
