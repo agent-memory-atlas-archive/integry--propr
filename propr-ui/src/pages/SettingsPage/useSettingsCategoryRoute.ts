@@ -1,10 +1,17 @@
 import { useSearchParams } from 'react-router-dom';
-import { SETTINGS_CATEGORIES, type SettingsCategoryId } from './SettingsNavigation';
+import { DEFAULT_SETTINGS_CATEGORY, SETTINGS_CATEGORIES, type SettingsCategoryId } from './SettingsNavigation';
 
-const settingsCategoryFrom = (value: string | null): SettingsCategoryId =>
-  SETTINGS_CATEGORIES.some(category => category.id === value)
+/** Tabs from the old horizontal layout, kept so saved links keep landing nearby. */
+const LEGACY_SETTINGS_CATEGORIES: Record<string, SettingsCategoryId> = {
+  automation: 'workflow',
+};
+
+const settingsCategoryFrom = (value: string | null): SettingsCategoryId => {
+  if (value && value in LEGACY_SETTINGS_CATEGORIES) return LEGACY_SETTINGS_CATEGORIES[value];
+  return SETTINGS_CATEGORIES.some(category => category.id === value)
     ? value as SettingsCategoryId
-    : 'models';
+    : DEFAULT_SETTINGS_CATEGORY;
+};
 
 export const useSettingsCategoryRoute = (): {
   activeCategory: SettingsCategoryId;
@@ -16,7 +23,7 @@ export const useSettingsCategoryRoute = (): {
   const onActiveCategoryChange = (category: SettingsCategoryId): void => {
     setSearchParams(current => {
       const next = new URLSearchParams(current);
-      if (category === 'models') next.delete('tab');
+      if (category === DEFAULT_SETTINGS_CATEGORY) next.delete('tab');
       else next.set('tab', category);
       return next;
     }, { replace: true });

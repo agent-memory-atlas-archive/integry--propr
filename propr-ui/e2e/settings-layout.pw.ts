@@ -107,15 +107,24 @@ async function capture(page: Page, name: string, scrollTo?: Locator): Promise<vo
   await page.screenshot({ animations: 'disabled', path: path.join(directory, `${name}.png`) });
 }
 
-test('lays settings out as one contained, single-column form', async ({ page }) => {
+test('lays settings out as a vertical rail beside one contained, single-column form', async ({ page }) => {
   await page.setViewportSize({ width: 1600, height: 900 });
   await installSettingsFixture(page);
   await page.goto('/settings?tab=models');
 
-  // No arbitrary counts beside the tabs.
-  for (const label of ['AI & Models', 'Automation', 'Integrations', 'Notifications']) {
-    await expect(page.getByRole('tab', { name: label, exact: true })).toBeVisible();
+  // A vertical rail lists the settings domains, with no arbitrary counts.
+  const rail = page.getByRole('tablist', { name: 'Settings categories' });
+  await expect(rail.getByRole('tab')).toHaveText([
+    'General', 'AI Models & Reasoning', 'Workflow & PR Rules', 'Ultrafix & Escalation',
+    'Sandbox & Network', 'Integrations & MCP', 'Notifications',
+  ]);
+  const tabBoxes = await Promise.all((await rail.getByRole('tab').all()).map(tab => tab.boundingBox()));
+  for (const box of tabBoxes.slice(1)) {
+    expect(Math.abs(box!.x - tabBoxes[0]!.x)).toBeLessThanOrEqual(1);
+    expect(box!.y).toBeGreaterThan(tabBoxes[0]!.y);
   }
+  // The rail names the open domain; the pane does not repeat it as a heading.
+  await expect(page.getByRole('heading', { name: 'AI Models & Reasoning' })).toHaveCount(0);
 
   // The form is contained rather than stretching across a 1600px canvas.
   const select = page.getByLabel('Plan Generation Model');
@@ -129,18 +138,33 @@ test('lays settings out as one contained, single-column form', async ({ page }) 
   }
   await capture(page, 'settings-ai-models');
 
-  await page.getByRole('tab', { name: 'Automation' }).click();
-  await capture(page, 'settings-automation');
+  await page.getByRole('tab', { name: 'Workflow & PR Rules' }).click();
+  await expect(page).toHaveURL(/\/settings\?tab=workflow$/);
+  await expect(page.getByLabel('Worker Concurrency')).toBeVisible();
+  // Ultrafix, sandbox and usage-tip settings no longer share this page.
+  for (const label of ['Max Cycles', 'Network mode', 'Show usage tips']) {
+    await expect(page.getByLabel(label, { exact: true })).toBeHidden();
+  }
+  await capture(page, 'settings-workflow');
 
-  // The "Add" action is a real button, and the chips wrap in a plain flex row
-  // rather than sitting inside a padded grey box.
+  // List settings are tag inputs: chips sit inside the input container and
+  // Enter or comma turns the typed text into a chip.
   const whitelist = page.getByRole('region', { name: 'GitHub trigger whitelist' });
-  await expect(whitelist.getByRole('button', { name: 'Add' })).toBeVisible();
+  await expect(whitelist.getByRole('button', { name: 'Add' })).toHaveCount(0);
   const chipRemove = whitelist.getByRole('button', { name: 'Remove octocat' });
   await expect(chipRemove).toBeVisible();
-  await expect(chipRemove.locator('xpath=../..')).toHaveClass(/flex-wrap/);
-  await capture(page, 'settings-automation-lists', whitelist);
+  const tagInput = whitelist.getByLabel('GitHub username');
+  await expect(chipRemove.locator('xpath=../..')).toHaveAttribute('data-tag-input');
+  await expect(tagInput.locator('xpath=..')).toHaveAttribute('data-tag-input');
+  await tagInput.fill('monalisa');
+  await tagInput.press('Enter');
+  await tagInput.pressSequentially('dependabot,');
+  await expect(whitelist.getByRole('button', { name: 'Remove monalisa' })).toBeVisible();
+  await expect(whitelist.getByRole('button', { name: 'Remove dependabot' })).toBeVisible();
+  await expect(tagInput).toHaveValue('');
+  await capture(page, 'settings-workflow-lists', whitelist);
 
+  await page.getByRole('tab', { name: 'Sandbox & Network' }).click();
   const network = page.getByRole('region', { name: 'Agent network' });
   await expect(network.getByLabel('Network mode')).toHaveValue('restricted');
   await expect(network.getByLabel('Additional allowed hosts')).toHaveValue('registry.example.com\n*.internal.example.com');
@@ -151,19 +175,30 @@ test('lays settings out as one contained, single-column form', async ({ page }) 
     await network.screenshot({ animations: 'disabled', path: path.resolve('../.propr/previews/settings-agent-network.png') });
   }
 
-  await page.getByRole('tab', { name: 'Integrations' }).click();
+  await page.getByRole('tab', { name: 'Ultrafix & Escalation' }).click();
+  // A newly opened category starts at its top, not at the previous one's scroll offset.
+  await expect.poll(() => page.locator('[data-settings-scroll]').evaluate(element => element.scrollTop)).toBe(0);
+  await expect(page.getByLabel('Target Review Score')).toHaveValue('7');
+  await expect(page.getByLabel('Target Review Score').locator('option:checked')).toHaveText('7/10 (Default)');
+  await expect(page.getByRole('region', { name: 'Agent watchdog' })).toBeVisible();
+  await capture(page, 'settings-ultrafix');
+
+  await page.getByRole('tab', { name: 'General' }).click();
+  await expect(page.getByLabel('Show usage tips')).toBeVisible();
+  await expect(page.getByRole('checkbox', { name: 'Enable voice briefings' })).toBeVisible();
+  await capture(page, 'settings-general');
+
+  await page.getByRole('tab', { name: 'Integrations & MCP' }).click();
   await expect(page.getByRole('heading', { name: 'LLM Usage Tracking' })).toBeVisible();
   await expect(page.getByText('Agent Tank connected')).toBeVisible();
   await capture(page, 'settings-integrations');
   await capture(page, 'settings-mcp', page.getByRole('region', { name: 'MCP Server', exact: true }));
 
   // Card Hell stays banned: these blocks are separated by rules, not boxes.
-  for (const name of ['Managed preview storage', 'Voice briefings · Experimental']) {
-    const region = page.getByRole('region', { name });
-    await expect(region).toHaveCSS('border-top-width', '0px');
-    await expect(region).toHaveCSS('border-radius', '0px');
-  }
-  await capture(page, 'settings-integrations-storage', page.getByRole('region', { name: 'Voice briefings · Experimental' }));
+  const storage = page.getByRole('region', { name: 'Managed preview storage' });
+  await expect(storage).toHaveCSS('border-top-width', '0px');
+  await expect(storage).toHaveCSS('border-radius', '0px');
+  await capture(page, 'settings-integrations-storage', storage);
 
   await page.getByRole('tab', { name: 'Notifications' }).click();
   const inbox = page.getByLabel('Inbox notifications for Plans');
@@ -212,14 +247,14 @@ test('fast analysis model describes the review context scout', async ({ page }) 
       animations: 'disabled', path: path.join(directory, 'fast-analysis-model.png'),
     });
   }
-  await page.getByRole('tab', { name: 'Automation' }).click();
+  await page.getByRole('tab', { name: 'Workflow & PR Rules' }).click();
   await expect(page.getByLabel('Auto-Followup Score Threshold')).toHaveCount(0);
 });
 
 test('ultrafix escalation controls retain ordered models and support direct handoff', async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 1000 });
   await installSettingsFixture(page);
-  await page.goto('/settings?tab=automation');
+  await page.goto('/settings?tab=ultrafix');
   const section = page.getByRole('region', { name: 'Ultrafix', exact: true });
   await expect(section.getByLabel('Automatic Escalation')).not.toBeChecked();
   for (const label of ['Add escalation model', 'Escalation Patience', 'Max Reasoning Levels per Model']) {
@@ -308,7 +343,7 @@ test('ultrafix escalation controls retain ordered models and support direct hand
 test('agent watchdog thresholds save as overrides of the environment defaults', async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 900 });
   await installSettingsFixture(page);
-  await page.goto('/settings?tab=automation');
+  await page.goto('/settings?tab=ultrafix');
   const section = page.getByRole('region', { name: 'Agent watchdog' });
   await expect(section).toBeVisible();
   const stall = section.getByLabel('Stall timeout (minutes)', { exact: true });

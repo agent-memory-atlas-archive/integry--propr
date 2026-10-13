@@ -146,7 +146,7 @@ remain limited to 10 MiB; videos allow 10 MiB on Free and 100 MiB on paid.
 Only the override is saved; resolved capacity is read-only. This setting does
 not change the installation's Plus entitlement.
 
-**Settings → Integrations → Visual preview uploads** contains the attachment
+**Settings → Integrations & MCP → Visual preview uploads** contains the attachment
 credential and **Managed preview storage** status. Status is **Enabled**,
 **Plus required**, **Disabled**, or **Unavailable**. **Refresh status** reads
 Connect again. Quota, object maximum, and retention show Connect's effective

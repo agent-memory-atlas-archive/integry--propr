@@ -1,37 +1,80 @@
-import React, { useMemo, useState } from 'react';
-import { Search, X } from 'lucide-react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
+import {
+  Bell,
+  Bot,
+  GitPullRequest,
+  type LucideIcon,
+  Plug,
+  RefreshCcw,
+  Search,
+  ShieldCheck,
+  SlidersHorizontal,
+  X
+} from 'lucide-react';
 
-export type SettingsCategoryId = 'models' | 'automation' | 'integrations' | 'notifications';
+export type SettingsCategoryId =
+  | 'general'
+  | 'models'
+  | 'workflow'
+  | 'ultrafix'
+  | 'sandbox'
+  | 'integrations'
+  | 'notifications';
 
 interface SettingsCategory {
   id: SettingsCategoryId;
   label: string;
   description: string;
+  icon: LucideIcon;
 }
 
 // eslint-disable-next-line react-refresh/only-export-components
 export const SETTINGS_CATEGORIES: SettingsCategory[] = [
   {
-    id: 'models',
-    label: 'AI & Models',
-    description: 'Choose models and configure the repository knowledge base.'
+    id: 'general',
+    label: 'General',
+    description: 'Application preferences for this workspace.',
+    icon: SlidersHorizontal
   },
   {
-    id: 'automation',
-    label: 'Automation',
-    description: 'Control processing rules, labels, follow-ups, and worker behavior.'
+    id: 'models',
+    label: 'AI Models & Reasoning',
+    description: 'Choose models and configure the repository knowledge base.',
+    icon: Bot
+  },
+  {
+    id: 'workflow',
+    label: 'Workflow & PR Rules',
+    description: 'Processing rules, GitHub triggers, and assignment gates.',
+    icon: GitPullRequest
+  },
+  {
+    id: 'ultrafix',
+    label: 'Ultrafix & Escalation',
+    description: 'Fix-and-review loops, model escalation, and agent watchdogs.',
+    icon: RefreshCcw
+  },
+  {
+    id: 'sandbox',
+    label: 'Sandbox & Network',
+    description: 'Outbound network access for agent containers.',
+    icon: ShieldCheck
   },
   {
     id: 'integrations',
-    label: 'Integrations',
-    description: 'Connect supporting services and customize agent runtimes.'
+    label: 'Integrations & MCP',
+    description: 'Connect supporting services and customize agent runtimes.',
+    icon: Plug
   },
   {
     id: 'notifications',
     label: 'Notifications',
-    description: 'Choose which updates reach your inbox and browser.'
+    description: 'Choose which updates reach your inbox and browser.',
+    icon: Bell
   }
 ];
+
+export const DEFAULT_SETTINGS_CATEGORY: SettingsCategoryId = 'general';
 
 export interface SettingsNavigationSection {
   id: string;
@@ -56,21 +99,54 @@ export function matchesSettingsSearch(section: SettingsNavigationSection, query:
   return terms.every(term => searchableText.includes(term));
 }
 
+const NEXT_TAB_KEYS: Record<string, number> = { ArrowDown: 1, ArrowRight: 1, ArrowUp: -1, ArrowLeft: -1 };
+
+/**
+ * Settings as a split-pane console: a vertical category rail on the left and a
+ * reading pane held to `max-w-2xl` on the right. The selected rail item names
+ * the open category, so the pane carries no second heading for it. On narrow
+ * screens the rail folds into a horizontally scrolling strip above the pane.
+ */
 const SettingsNavigation: React.FC<SettingsNavigationProps> = ({
   sections,
   isReadOnly = false,
   activeCategory: controlledActiveCategory,
   onActiveCategoryChange,
 }) => {
-  const [localActiveCategory, setLocalActiveCategory] = useState<SettingsCategoryId>('models');
+  const [localActiveCategory, setLocalActiveCategory] = useState<SettingsCategoryId>(DEFAULT_SETTINGS_CATEGORY);
   const [query, setQuery] = useState('');
+  const tabRefs = useRef<Partial<Record<SettingsCategoryId, HTMLButtonElement | null>>>({});
+  const scrollRef = useRef<HTMLDivElement>(null);
   const activeCategory = controlledActiveCategory ?? localActiveCategory;
   const normalizedQuery = query.trim();
+
+  // A newly opened category starts at its top, and on narrow screens, where the
+  // rail scrolls sideways, its rail item stays in view.
+  useEffect(() => {
+    if (scrollRef.current) scrollRef.current.scrollTop = 0;
+    tabRefs.current[activeCategory]?.scrollIntoView?.({ block: 'nearest', inline: 'nearest' });
+  }, [activeCategory]);
 
   const selectCategory = (category: SettingsCategoryId): void => {
     setLocalActiveCategory(category);
     onActiveCategoryChange?.(category);
     setQuery('');
+  };
+
+  const handleTabKeyDown = (event: React.KeyboardEvent<HTMLButtonElement>, index: number): void => {
+    let nextIndex: number | null = null;
+    if (event.key in NEXT_TAB_KEYS) {
+      nextIndex = (index + NEXT_TAB_KEYS[event.key] + SETTINGS_CATEGORIES.length) % SETTINGS_CATEGORIES.length;
+    } else if (event.key === 'Home') {
+      nextIndex = 0;
+    } else if (event.key === 'End') {
+      nextIndex = SETTINGS_CATEGORIES.length - 1;
+    }
+    if (nextIndex === null) return;
+    event.preventDefault();
+    const next = SETTINGS_CATEGORIES[nextIndex].id;
+    selectCategory(next);
+    tabRefs.current[next]?.focus();
   };
 
   const matchedSectionIds = useMemo(
@@ -81,36 +157,14 @@ const SettingsNavigation: React.FC<SettingsNavigationProps> = ({
   const searchResultCount = normalizedQuery ? matchedSectionIds.size : 0;
 
   return (
-    <div className="flex min-h-0 flex-1 flex-col">
-      <div className="flex-shrink-0 bg-white">
-        <div className="mx-auto flex w-full max-w-4xl flex-col items-stretch gap-3 border-b border-slate-200 px-4 sm:flex-row sm:items-end sm:gap-6">
-          <div className="min-w-0 flex-1 overflow-x-auto">
-            <div className="flex min-w-max gap-6" role="tablist" aria-label="Settings categories">
-              {SETTINGS_CATEGORIES.map(category => {
-                const selected = activeCategory === category.id;
-                return (
-                  <button
-                    key={category.id}
-                    id={`settings-tab-${category.id}`}
-                    type="button"
-                    role="tab"
-                    aria-selected={selected}
-                    aria-controls={`settings-panel-${category.id}`}
-                    onClick={() => selectCategory(category.id)}
-                    className={`inline-flex items-center border-b-2 pb-2 text-xs transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-primary-500 focus-visible:ring-offset-1 ${
-                      selected
-                        ? 'border-teal-600 font-semibold text-teal-700'
-                        : 'border-transparent font-medium text-slate-500 hover:text-slate-900'
-                    }`}
-                  >
-                    {category.label}
-                  </button>
-                );
-              })}
-            </div>
-          </div>
-
-          <div className="relative order-first w-full flex-shrink-0 sm:order-none sm:mb-2 sm:ml-auto sm:w-64">
+    <div ref={scrollRef} className="min-h-0 flex-1 overflow-y-auto bg-white" data-settings-scroll>
+      <div className="mx-auto flex w-full max-w-5xl flex-col md:flex-row md:items-start md:gap-10 md:px-4">
+        <nav
+          aria-label="Settings"
+          data-settings-rail
+          className="sticky top-0 z-10 flex flex-shrink-0 flex-col gap-3 border-b border-slate-200 bg-white px-4 pb-3 pt-2 md:w-56 md:border-b-0 md:px-0 md:pb-8 md:pt-2"
+        >
+          <div className="relative">
             <label htmlFor="settings-search" className="sr-only">Search settings</label>
             <Search
               aria-hidden="true"
@@ -135,17 +189,50 @@ const SettingsNavigation: React.FC<SettingsNavigationProps> = ({
               </button>
             )}
           </div>
-        </div>
 
-        <p className="sr-only" aria-live="polite">
-          {normalizedQuery
-            ? `${searchResultCount} settings ${searchResultCount === 1 ? 'section' : 'sections'} found.`
-            : `${SETTINGS_CATEGORIES.find(category => category.id === activeCategory)?.label} settings selected.`}
-        </p>
-      </div>
+          <div
+            className="-mx-4 flex gap-1 overflow-x-auto px-4 md:mx-0 md:flex-col md:overflow-visible md:px-0"
+            role="tablist"
+            aria-label="Settings categories"
+            aria-orientation="vertical"
+          >
+            {SETTINGS_CATEGORIES.map((category, index) => {
+              const selected = activeCategory === category.id;
+              const Icon = category.icon;
+              return (
+                <button
+                  key={category.id}
+                  ref={element => { tabRefs.current[category.id] = element; }}
+                  id={`settings-tab-${category.id}`}
+                  type="button"
+                  role="tab"
+                  aria-selected={selected}
+                  aria-controls={`settings-panel-${category.id}`}
+                  tabIndex={selected ? 0 : -1}
+                  title={category.description}
+                  onClick={() => selectCategory(category.id)}
+                  onKeyDown={event => handleTabKeyDown(event, index)}
+                  className={`inline-flex flex-shrink-0 items-center gap-2 whitespace-nowrap rounded px-2.5 py-1.5 text-left text-[13px] transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-primary-500 md:w-full ${
+                    selected
+                      ? 'bg-teal-50 font-semibold text-teal-700'
+                      : 'font-medium text-slate-600 hover:bg-slate-50 hover:text-slate-900'
+                  }`}
+                >
+                  <Icon aria-hidden="true" className={`h-4 w-4 flex-shrink-0 ${selected ? 'text-teal-600' : 'text-slate-400'}`} />
+                  {category.label}
+                </button>
+              );
+            })}
+          </div>
 
-      <div className="min-h-0 flex-1 overflow-y-auto bg-white">
-        <div className="mx-auto max-w-4xl px-4 py-8">
+          <p className="sr-only" aria-live="polite">
+            {normalizedQuery
+              ? `${searchResultCount} settings ${searchResultCount === 1 ? 'section' : 'sections'} found.`
+              : `${SETTINGS_CATEGORIES.find(category => category.id === activeCategory)?.label} settings selected.`}
+          </p>
+        </nav>
+
+        <div className="min-w-0 max-w-2xl flex-1 px-4 pb-16 pt-6 md:px-0 md:pt-2" data-settings-pane>
           {normalizedQuery && (
             <div className="mb-4 flex items-center justify-between gap-3">
               <div>
@@ -173,11 +260,12 @@ const SettingsNavigation: React.FC<SettingsNavigationProps> = ({
                 role={normalizedQuery ? 'region' : 'tabpanel'}
                 aria-labelledby={`settings-tab-${category.id}`}
                 hidden={!categoryIsVisible}
+                className={normalizedQuery ? 'mb-12' : undefined}
               >
-                <div className={normalizedQuery ? 'mb-6 mt-8 first:mt-0' : 'mb-8'}>
-                  <h3 className="text-sm font-semibold text-slate-900">{category.label}</h3>
-                  <p className="mt-0.5 max-w-2xl text-[12px] leading-5 text-slate-500">{category.description}</p>
-                </div>
+                {/* Search results mix categories, so only they name the category a match came from. */}
+                {normalizedQuery && (
+                  <h3 className="mb-6 text-sm font-semibold text-slate-900">{category.label}</h3>
+                )}
 
                 <div className="space-y-10">
                   {categorySections.map(section => (
