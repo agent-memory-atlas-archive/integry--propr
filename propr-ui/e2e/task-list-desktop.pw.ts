@@ -278,7 +278,7 @@ test('1920px opens a task beside the list and steps through rows from the keyboa
   // so a wrapped line never starts with a delimiter.
   expect(await header.innerText()).not.toMatch(/[·•|]/);
   await expect(header.locator('h2 + div [data-testid="context-divider"]')).toHaveCount(0);
-  await expect(header.getByRole('group', { name: 'Execution runtime' })).toHaveText(/gpt-6-astra.*3m 0?0s/);
+  await expect(header.getByRole('group', { name: 'Execution runtime' })).toHaveText(/GPT-6 Astra.*3m 0?0s/);
   await expect(header.getByRole('group', { name: 'Consumption' })).toHaveText('↑420k↓12k(0.1% quota)');
   await expect(header).not.toContainText('3.9M');
   // No divider floats in front of Stop when nothing stands before it.
