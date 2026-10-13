@@ -1955,7 +1955,7 @@ try {
       ...processRecords,
     ];
     await writeFile(join(outputDirectory, 'sanitized-log.json'), `${JSON.stringify({
-      schemaVersion: 1, generatedAt: FIXED_TIME, records: sanitizedLogRecords,
+      schemaVersion: 2, generatedAt: FIXED_TIME, mode: installedRpm ? 'installed-rpm' : 'packaged', records: sanitizedLogRecords,
     }, null, 2)}\n`, { mode: 0o600 });
     const diagnostics = sanitizedRendererErrorDiagnostics();
     if (diagnostics.unexpectedErrors > 0) {

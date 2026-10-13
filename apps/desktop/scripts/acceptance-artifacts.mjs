@@ -661,19 +661,38 @@ const validateSummary = summary => {
 
 const CSP_RELOAD_LOG_JOURNEYS = ['csp-reload-startup', 'csp-reload-pairing', 'csp-reload-restart', 'csp-reload-deselection', 'csp-reload-saved-selection', 'csp-reload-removal'];
 const CSP_RELOAD_PROCESS_JOURNEYS = ['csp-reload-pairing', 'csp-reload-removal'];
+const INSTALLED_LOG_JOURNEYS = Object.freeze([
+  'installed-approved', 'installed-restart', 'installed-logged-out',
+  'installed-reject', 'installed-reject-restart',
+  'installed-expire', 'installed-expire-restart',
+  'installed-wrong-account', 'installed-wrong-account-restart',
+]);
+// Each installed phase owns a separate process, including every restart.
+const SANITIZED_LOG_CONTRACTS = Object.freeze({
+  packaged: {
+    journeys: [...ACCEPTANCE_JOURNEYS, ...CSP_RELOAD_LOG_JOURNEYS],
+    processJourneys: [...ACCEPTANCE_JOURNEYS, ...CSP_RELOAD_PROCESS_JOURNEYS],
+  },
+  'installed-rpm': {
+    journeys: [...ACCEPTANCE_JOURNEYS, ...CSP_RELOAD_LOG_JOURNEYS, ...INSTALLED_LOG_JOURNEYS],
+    processJourneys: [...ACCEPTANCE_JOURNEYS, ...CSP_RELOAD_PROCESS_JOURNEYS, ...INSTALLED_LOG_JOURNEYS],
+  },
+});
 
 const validateSanitizedLog = log => {
-  assertExactKeys(log, ['schemaVersion', 'generatedAt', 'records'], 'Acceptance sanitized log');
-  if (log.schemaVersion !== 1 || log.generatedAt !== FIXED_TIME || !Array.isArray(log.records)) throw new Error('Acceptance sanitized log is invalid');
+  assertExactKeys(log, ['schemaVersion', 'generatedAt', 'mode', 'records'], 'Acceptance sanitized log');
+  if (log.schemaVersion !== 2 || log.generatedAt !== FIXED_TIME || !Array.isArray(log.records)
+    || typeof log.mode !== 'string' || !Object.hasOwn(SANITIZED_LOG_CONTRACTS, log.mode)) throw new Error('Acceptance sanitized log is invalid');
+  const contract = SANITIZED_LOG_CONTRACTS[log.mode];
   for (const record of log.records) {
     assertExactKeys(record, ['journey', 'source', 'level', 'bytes', 'sha256'], 'Acceptance sanitized log record');
-    if (![...ACCEPTANCE_JOURNEYS, ...CSP_RELOAD_LOG_JOURNEYS].includes(record.journey) || !['renderer-console', 'renderer-page-error', 'packaged-process'].includes(record.source)
+    if (!contract.journeys.includes(record.journey) || !['renderer-console', 'renderer-page-error', 'packaged-process'].includes(record.source)
       || typeof record.level !== 'string' || !isInteger(record.bytes) || !isSha256(record.sha256)) {
       throw new Error('Acceptance sanitized log record is invalid');
     }
   }
   const processJourneys = log.records.filter(record => record.source === 'packaged-process').map(record => record.journey);
-  if (processJourneys.join('\n') !== [...ACCEPTANCE_JOURNEYS, ...CSP_RELOAD_PROCESS_JOURNEYS].join('\n')) throw new Error('Acceptance sanitized process log coverage is incomplete');
+  if (processJourneys.join('\n') !== contract.processJourneys.join('\n')) throw new Error('Acceptance sanitized process log coverage is incomplete');
 };
 
 export const validateAcceptanceEvidence = (accessibility, manifest, summary, sanitizedLog) => {

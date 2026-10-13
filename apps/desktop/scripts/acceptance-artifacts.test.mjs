@@ -222,9 +222,10 @@ const summaryFor = () => ({
   redaction: 'Full raw surfaces were scanned; published logs retain only source, level, byte count, and digest.',
 });
 
-const sanitizedLogFor = () => ({
-  schemaVersion: 1,
+const sanitizedLogFor = (mode = 'packaged') => ({
+  schemaVersion: 2,
   generatedAt: FIXED_TIME,
+  mode,
   records: [
     ...Array.from({ length: 3 }, (_, index) => ({
       journey: 'first-run-chooser', source: 'renderer-console', level: 'info', bytes: index, sha256: '5'.repeat(64),
@@ -232,6 +233,10 @@ const sanitizedLogFor = () => ({
     ...[...ACCEPTANCE_JOURNEYS, 'csp-reload-pairing', 'csp-reload-removal'].map(journey => ({
       journey, source: 'packaged-process', level: 'combined', bytes: 0, sha256: '6'.repeat(64),
     })),
+    ...(mode === 'installed-rpm' ? installedJourneys.flatMap(journey => [
+      { journey, source: 'renderer-console', level: 'info', bytes: 12, sha256: '5'.repeat(64) },
+      { journey, source: 'packaged-process', level: 'combined', bytes: 24, sha256: '6'.repeat(64) },
+    ]) : []),
   ],
 });
 
@@ -259,7 +264,14 @@ it('rejects substituted setup presentation and presence-only action evidence', (
   assert.throws(() => validateSetupEvidence({ ...valid, phase: 'idle' }, journey, variant), /fixture/);
 });
 
-const createCompleteArtifactSet = async root => {
+const installedJourneys = [
+  'installed-approved', 'installed-restart', 'installed-logged-out',
+  'installed-reject', 'installed-reject-restart',
+  'installed-expire', 'installed-expire-restart',
+  'installed-wrong-account', 'installed-wrong-account-restart',
+];
+
+const createCompleteArtifactSet = async (root, mode = 'packaged') => {
   await mkdir(join(root, 'screenshots'), { recursive: true });
   const metadata = [];
   for (const journey of ACCEPTANCE_JOURNEYS) {
@@ -291,7 +303,8 @@ const createCompleteArtifactSet = async root => {
   }
   const accessibility = accessibilityFor();
   const summary = summaryFor();
-  const sanitizedLog = sanitizedLogFor();
+  const sanitizedLog = sanitizedLogFor(mode);
+  summary.console.records = sanitizedLog.records.filter(record => record.source !== 'packaged-process').length;
   await writeFile(join(root, 'accessibility.json'), `${JSON.stringify(accessibility)}\n`);
   await writeFile(join(root, 'sanitized-summary.json'), `${JSON.stringify(summary)}\n`);
   await writeFile(join(root, 'sanitized-log.json'), `${JSON.stringify(sanitizedLog)}\n`);
@@ -301,6 +314,47 @@ const createCompleteArtifactSet = async root => {
 };
 
 describe('packaged acceptance artifact contract', () => {
+  it('verifies installed-mode artifacts and strictly accounts for every lifecycle phase', async () => {
+    const parent = await mkdtemp(join(tmpdir(), 'acceptance-installed-contract-'));
+    const root = join(parent, ACCEPTANCE_ARTIFACT_LEAF);
+    try {
+      const evidence = await createCompleteArtifactSet(root, 'installed-rpm');
+      const validate = log => validateAcceptanceEvidence(evidence.accessibility, evidence.manifest, evidence.summary, log);
+      assert.doesNotThrow(() => validate(evidence.sanitizedLog));
+      await verifyAcceptanceArtifacts(root, { ocr: async () => '' });
+
+      for (const journey of installedJourneys) {
+        const processRecord = evidence.sanitizedLog.records.find(record => record.journey === journey && record.source === 'packaged-process');
+        assert.throws(() => validate({ ...evidence.sanitizedLog,
+          records: evidence.sanitizedLog.records.filter(record => record !== processRecord),
+        }), /process log coverage/);
+        assert.throws(() => validate({ ...evidence.sanitizedLog,
+          records: [...evidence.sanitizedLog.records, processRecord],
+        }), /process log coverage/);
+        const rendererRecord = evidence.sanitizedLog.records.find(record => record.journey === journey && record.source === 'renderer-console');
+        assert.throws(() => validate({ ...evidence.sanitizedLog,
+          records: evidence.sanitizedLog.records.filter(record => record !== rendererRecord),
+        }), /log and summary counts disagree/);
+        for (const source of ['renderer-console', 'renderer-page-error']) {
+          assert.throws(() => validate({ ...evidence.sanitizedLog,
+            records: evidence.sanitizedLog.records.map(record => record === rendererRecord ? { ...record, source, level: 'error' } : record),
+          }), /log and summary counts disagree/);
+        }
+      }
+      const unknownPhase = structuredClone(evidence.sanitizedLog);
+      unknownPhase.records.at(-1).journey = 'installed-unknown';
+      assert.throws(() => validate(unknownPhase), /log record is invalid/);
+      const reordered = structuredClone(evidence.sanitizedLog);
+      reordered.records.reverse();
+      assert.throws(() => validate(reordered), /process log coverage/);
+      assert.throws(() => validate({ ...evidence.sanitizedLog, mode: 'packaged' }), /log record is invalid/);
+      for (const mode of ['unknown', 'toString', null, ['installed-rpm']]) {
+        assert.throws(() => validate({ ...evidence.sanitizedLog, mode }), /sanitized log is invalid/);
+      }
+      assert.throws(() => validate({ ...sanitizedLogFor(), mode: 'installed-rpm' }), /process log coverage/);
+    } finally { await rm(parent, { recursive: true, force: true }); }
+  });
+
   it('has exactly 67 deterministic unique names and physical dimensions', () => {
     const names = ACCEPTANCE_JOURNEYS.flatMap(journey => Object.entries(acceptanceVariantsFor(journey)).map(([variant, config]) => {
       assert.deepEqual(readPngDimensions(pngHeader(config.viewport.width * config.deviceScaleFactor, config.viewport.height * config.deviceScaleFactor)), {

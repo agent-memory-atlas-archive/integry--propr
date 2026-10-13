@@ -529,6 +529,45 @@ test('installed mode cannot be redirected away from the package-owned executable
   assert.equal(binary({}), '/resolved/out/propr-desktop-linux-x64/propr-desktop');
 });
 
+test('successful installed lifecycle retains every phase in final logs and accounting', async () => {
+  const files = new Map();
+  const context = diagnosticContext();
+  const scenario = runnerSource.slice(runnerSource.indexOf('  if (!traceWritten)'), runnerSource.indexOf('  const serious ='));
+  const drain = runnerSource.slice(runnerSource.indexOf('const settlePendingRendererConsoleCaptures ='), runnerSource.indexOf('const boundedAcceptanceDiagnosticCount ='));
+  const installedJourneys = [
+    'installed-approved', 'installed-restart', 'installed-logged-out',
+    'installed-reject', 'installed-reject-restart',
+    'installed-expire', 'installed-expire-restart',
+    'installed-wrong-account', 'installed-wrong-account-restart',
+  ];
+  Object.assign(context, {
+    installedRpm: true, traceWritten: true, pendingConsoleRecords: [], processRecords: [], outputDirectory: 'output',
+    FIXED_TIME: 'fixed', join: (...parts) => parts.join('/'), Buffer, digest: () => 'digest', console: { info: () => {} },
+    writeFile: async (path, content) => files.set(path, JSON.parse(content)),
+    rendererLifecycleInvalidStates: new Map(), boundaryJourneys: new Set(context.ACCEPTANCE_JOURNEYS), surfaces: [],
+    launchApplication: () => {}, pair: () => {}, exercisePackagedCspReload: async () => {},
+    installedPairingLifecycle: async () => {
+      for (const journey of installedJourneys) {
+        context.processRecords.push({ journey, source: 'packaged-process', level: 'combined', bytes: 0, sha256: 'digest' });
+        context.pendingConsoleRecords.push(Promise.resolve().then(() => {
+          context.pendingConsoleRecords.push(Promise.resolve().then(() => {
+            context.consoleRecords.push({ type: 'info', journey, text: 'Lifecycle completed' });
+          }));
+        }));
+      }
+    },
+  });
+  const summary = await runInNewContext(`(async () => { ${drain}\n${runnerDiagnosticFunctions}\n${scenario}\nreturn rendererErrors; })()`, context);
+  const log = files.get('output/sanitized-log.json');
+  assert.equal(log.mode, 'installed-rpm');
+  assert.equal(log.schemaVersion, 2);
+  for (const source of ['renderer-console', 'packaged-process']) {
+    assert.deepEqual(log.records.filter(record => record.source === source).map(record => record.journey), installedJourneys);
+  }
+  assert.equal(summary.records, installedJourneys.length);
+  assert.equal(summary.unexpectedErrors, 0);
+});
+
 test('installed lifecycle errors reach final diagnostics and fail the integrated gate', async () => {
   const files = new Map();
   const context = diagnosticContext();
@@ -549,5 +588,8 @@ test('installed lifecycle errors reach final diagnostics and fail the integrated
   });
   await assert.rejects(runInNewContext(`(async () => { ${drain}\n${runnerDiagnosticFunctions}\n${scenario} })()`, context), /unexpected renderer errors/);
   assert.equal(files.get('output/sanitized-log.json').records.length, 2);
+  assert.equal(files.get('output/sanitized-log.json').mode, 'installed-rpm');
+  assert.equal(files.get('output/sanitized-log.json').schemaVersion, 2);
+  assert.ok(files.get('output/sanitized-log.json').records.every(record => record.journey === 'installed-restart'));
   assert.equal(files.get('output/sanitized-renderer-errors.json').unexpectedErrors, 2);
 });
