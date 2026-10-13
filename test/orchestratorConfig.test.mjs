@@ -954,3 +954,37 @@ test('validateEnv permits broad private proxy trust only behind a loopback API b
     /PROPR_TRUSTED_PROXY_PEERS=uniquelocal/,
   );
 });
+
+test('native diagnostic mounts require explicit policy and a valid instance binding', () => {
+  const env = {
+    PROPR_DATA_DIR: '/managed/data', PROPR_MANAGED_CREDENTIALS_DIR: '/managed/agents',
+    PROPR_INSTANCE_ID: 'tenant-a',
+    HOST_CODEX_DIR: '/mounted/codex', HOST_CLAUDE_DIR: '/mounted/claude',
+    HOST_OPENCODE_DATA_DIR: '/mounted/opencode-data',
+  };
+  for (const activation of [
+    {}, { PROPR_FLEET_CONTROL_SECRET: 'test-fleet-auth' },
+    { PROPR_MANAGED_LOGS: '0' }, { PROPR_MANAGED_LOGS: 'true' },
+    { PROPR_MANAGED_LOGS: '0', PROPR_FLEET_CONTROL_SECRET: 'test-fleet-auth' },
+    { PROPR_MANAGED_LOGS: '1' },
+    { PROPR_MANAGED_LOGS: '1', PROPR_FLEET_CONTROL_SECRET: 'test-fleet-auth' },
+    { PROPR_MANAGED_LOGS: '1', PROPR_INSTANCE_ID: '' },
+    { PROPR_MANAGED_LOGS: '1', PROPR_INSTANCE_ID: '../tenant-b' },
+  ]) {
+    const cfg = resolveConfig({ ...env, ...activation }, { manifestPath });
+    const enabled = activation.PROPR_MANAGED_LOGS === '1' &&
+      !Object.hasOwn(activation, 'PROPR_INSTANCE_ID');
+    const daemon = buildServiceSpec(cfg, 'daemon');
+    for (const mount of ['/managed/agents:/managed/agents:ro', '/mounted/codex:/mounted/codex:ro',
+      '/mounted/claude:/mounted/claude:ro', '/mounted/opencode-data:/mounted/opencode-data:ro']) {
+      assert.equal(daemon.args.includes(mount), enabled, JSON.stringify(activation));
+    }
+    const worker = buildServiceSpec(cfg, 'worker');
+    assert.ok(worker.args.includes('/managed/agents:/managed/agents'));
+    assert.ok(worker.args.some(arg => arg.startsWith('/mounted/codex:/mounted/codex')));
+    assert.deepEqual(worker.command, buildServiceSpec(resolveConfig(env, { manifestPath }), 'worker').command);
+    if (activation.PROPR_MANAGED_LOGS === '1' && !enabled) {
+      assert.match(validateEnv(cfg).errors.join('\n'), /diagnostic binding/);
+    }
+  }
+});

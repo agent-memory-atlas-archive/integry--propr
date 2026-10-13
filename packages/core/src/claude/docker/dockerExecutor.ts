@@ -1,3 +1,4 @@
+import { assertNativeLogAdmission, prepareCommandCapture, finishDiagnosticOutput, scheduleProviderCapture, type DiagnosticAgent } from '../../diagnostics/managedLogRuntime.js';
 import { createExecutionDeadline, type ExecutionDeadline } from './dockerExecutionDeadline.js';
 import { prepareAdmittedAgent, type AdmittedAgent } from '../../agents/agentRunAdmission.js';
 import { captureWorkflowMarkers, withWorkflowExecutionDeadline } from '../../workflow/workflowExecution.js';
@@ -59,6 +60,7 @@ export type LegacyTaskContainerLiveness = 'running' | 'not_found' | 'unavailable
  * streamed agent runs that preserve partial output.
  */
 export interface DockerCommandOptions extends Pick<ExecutionWatchdogOptions, 'watchdog' | 'onWatchdogTrip'>, NetworkPolicyOptions {
+    diagnostics?: DiagnosticAgent;
     timeout?: number; cwd?: string; worktreePath?: string; stdinData?: string; taskId?: string; streamToRedis?: boolean; streamStderrToRedis?: boolean; stripAnsi?: boolean;
     /** Resolve with buffered output on timeout or a spend-cap stop so implementation jobs can publish partial work. */
     preserveOutputOnTimeout?: boolean;
@@ -220,6 +222,7 @@ async function startDockerCommand(
     command: string, args: string[], options: DockerCommandOptions,
     { ownershipContext, executionSignal, deadline }: { ownershipContext: ReturnType<typeof getExecutionOwnershipContext>; executionSignal: AbortSignal | undefined; deadline: ExecutionDeadline },
 ): Promise<ExecutionResult> {
+    if (command === 'docker' && args[0] === 'run') assertNativeLogAdmission(options.diagnostics);
     const executionArgs = resolveExecutionArgs(command, args, options.taskId, ownershipContext?.attemptGeneration);
     deadline.remaining();
     const admission = command === 'docker' && args[0] === 'run' && !options.costCapExempt
@@ -242,6 +245,10 @@ async function startDockerCommand(
     }
 }
 
+function prepareExecutionCapture(options: DockerCommandOptions, args: string[], admission: AdmittedAgent | null) {
+    return prepareCommandCapture(options.diagnostics, admission?.args ?? args, { ...options.extraEnvVars, ...admission?.environment }, args);
+}
+
 function runDockerCommand(
     command: string, args: string[], options: DockerCommandOptions,
     { ownershipContext, executionSignal, admission, remainingMs }: { ownershipContext: ReturnType<typeof getExecutionOwnershipContext>; executionSignal: AbortSignal | undefined; admission: AdmittedAgent | null; remainingMs: number },
@@ -249,6 +256,7 @@ function runDockerCommand(
     return new Promise((resolve, reject) => {
         const { timeout = 300000, cwd, onSessionId, onContainerId, worktreePath, stdinData, extraEnvVars, taskId, streamToRedis, streamStderrToRedis, streamExtraOutput, stripAnsi, preserveOutputOnTimeout = false, model, costCapExempt } = options;
         const executionArgs = resolveExecutionArgs(command, withWorkflowExecutionDeadline(command, args, remainingMs), taskId, ownershipContext?.attemptGeneration);
+        const { capture, stdout: diagnosticStdout, stderr: diagnosticStderr } = prepareExecutionCapture(options, executionArgs, admission);
         const executablePath = command;
         const namedContainer = command === 'docker' ? getDockerRunContainerName(executionArgs) : null;
         // Agent containers count toward their run's spend cap; reaching it stops
@@ -384,10 +392,12 @@ function runDockerCommand(
         };
         detectExecutionContainer();
 
+        const diagnosticTimer = scheduleProviderCapture(capture);
         child.stdout?.on('data', (data: Buffer) => {
             const chunk = stdoutDecoder.write(data), ts = new Date().toISOString();
             recordWatchdogActivity();
             stdoutBuffer.append(chunk);
+            diagnosticStdout?.write(chunk);
             liveOutput?.stdout(chunk);
             inspectSessionLines(chunk, ts);
         });
@@ -396,6 +406,7 @@ function runDockerCommand(
             recordWatchdogActivity();
             stderrTail.append(chunk);
             workflowMarkers?.append(chunk);
+            diagnosticStderr?.write(chunk);
             liveOutput?.stderr(chunk);
         });
 
@@ -408,11 +419,14 @@ function runDockerCommand(
             await state.teardownPromise;
         };
         child.on('close', async (exitCode: number | null) => {
+            clearInterval(diagnosticTimer);
+            capture?.snapshot();
             clearTimeout(timeoutHandle);
             watchdog.stop();
             const finalStdout = stdoutDecoder.end();
             if (finalStdout) stdoutBuffer.append(finalStdout);
             const finalStderr = stderrDecoder.end();
+            finishDiagnosticOutput(capture, finalStdout, finalStderr);
             stderrTail.append(finalStderr);
             const stderr = stderrTail.value;
             workflowMarkers?.finish(finalStderr);

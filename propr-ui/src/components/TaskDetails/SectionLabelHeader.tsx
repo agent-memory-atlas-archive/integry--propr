@@ -49,12 +49,14 @@ const SectionLabelHeader: React.FC<SectionLabelHeaderProps> = ({ commandMode, ul
         )}
         {inspection && <InspectedRunContext {...inspection} />}
       </div>
+      {/* Desktop only: a phone keeps the readable log, and the raw terminal stays one tap away in the footer. */}
       {onViewChange && (
         <div
           role="group"
           aria-label="Log view"
+          data-testid="log-view-switch"
           {...{ [EXECUTION_LOG_CONTROL_ATTRIBUTE]: '' }}
-          className="ml-auto inline-flex flex-none rounded-md border border-slate-200 bg-slate-50 p-0.5"
+          className="ml-auto hidden flex-none sm:inline-flex rounded-md border border-slate-200 bg-slate-50 p-0.5"
         >
           <button
             type="button"

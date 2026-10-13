@@ -9,6 +9,7 @@ import { auditRepository, repositoryIdentity, repositoryMetadataFingerprint } fr
 import { StorageLifecycle } from '../src/storage/lifecycle.js';
 import { observeStorage } from '../src/storage/observation.js';
 import { InstanceStorageService } from '../src/storage/service.js';
+import { STORAGE_CONFIRMATION_INVALID_CODE, STORAGE_INSTANCE_CHANGED_CODE } from '@propr/shared';
 
 const exec = promisify(execFile);
 const git = async (cwd: string, ...args: string[]) => (await exec('git', ['-c', 'core.hooksPath=/dev/null', '-C', cwd, ...args], { env: { ...process.env, GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null', GIT_AUTHOR_NAME: 'Storage Test', GIT_AUTHOR_EMAIL: 'storage@example.invalid', GIT_COMMITTER_NAME: 'Storage Test', GIT_COMMITTER_EMAIL: 'storage@example.invalid' } })).stdout;
@@ -111,14 +112,14 @@ test('policy defaults persist; confirmation is instance/actor bound and single u
   const result = await service.execute(id, preview.confirmation, 'admin');
   assert.deepEqual(result.deleted, []);
   assert.deepEqual(result.retained[0].reasons, ['unsupported']);
-  await assert.rejects(service.execute(id, preview.confirmation, 'admin'));
+  await assert.rejects(service.execute(id, preview.confirmation, 'admin'), { status: 409, code: STORAGE_CONFIRMATION_INVALID_CODE });
   assert.deepEqual(await service.result(id, preview.confirmation, 'admin'), result);
   const expired = await service.preview(id, ['repository_caches'], 'admin');
   const previewFile = path.join(root, `preview-${expired.confirmation}.json`);
   const saved = JSON.parse(await fs.readFile(previewFile, 'utf8'));
   saved.preview.expiresAt = 'unknown';
   await fs.writeFile(previewFile, JSON.stringify(saved));
-  await assert.rejects(service.execute(id, expired.confirmation, 'admin'));
+  await assert.rejects(service.execute(id, expired.confirmation, 'admin'), { status: 409, message: 'Confirmation expired', code: STORAGE_CONFIRMATION_INVALID_CODE });
   const concurrent = await service.preview(id, ['repository_caches'], 'admin');
   const attempts = await Promise.allSettled([
     service.execute(id, concurrent.confirmation, 'admin'),
@@ -160,6 +161,74 @@ test('actual cleanup engine removes only the confirmed pushed cache and it refet
   await git(f.root, 'clone', f.remote, f.clone);
   assert.equal(await fs.readFile(path.join(f.clone, 'public'), 'utf8'), 'published sentinel');
 });
+
+test('cleanup results survive confirmation expiry during awaited Git proof and restart', async t => {
+  let expiresAt: number | undefined;
+  const f = await serviceFixture(t, async (...args) => {
+    const proof = await auditRepository(...args);
+    if (expiresAt) {
+      const afterExpiry = expiresAt + 1;
+      t.mock.method(Date, 'now', () => afterExpiry);
+      expiresAt = undefined;
+    }
+    return proof;
+  });
+  const preview = await f.service.preview(f.instanceId, ['repository_caches'], 'admin');
+  expiresAt = Date.parse(preview.expiresAt);
+  const result = await f.service.execute(f.instanceId, preview.confirmation, 'admin');
+  assert.equal(result.state, 'completed');
+  assert.deepEqual(result.deleted, [f.id]);
+  assert.deepEqual(await f.service.result(f.instanceId, preview.confirmation, 'admin'), result);
+  const restarted = new InstanceStorageService({ lifecycle: new StorageLifecycle(f.control), clonesRoot: path.dirname(path.dirname(f.clone)), roots: [], hasPendingTasks: async () => false });
+  assert.notEqual(restarted.generation, f.service.generation);
+  assert.deepEqual(await restarted.result(f.instanceId, preview.confirmation, 'admin'), result);
+  await assert.rejects(restarted.result(f.instanceId, preview.confirmation, 'other-admin'), { status: 404 });
+  await assert.rejects(restarted.result('another-instance', preview.confirmation, 'admin'), { status: 409 });
+});
+
+test('interrupted cleanup progress remains readable after restart without replaying confirmations', async t => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'storage-recovery-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const services = {
+    lifecycle: new StorageLifecycle(root), clonesRoot: path.join(root, 'clones'), roots: [], hasPendingTasks: async () => false,
+    taskHistory: {
+      inspect: async (ids: string[]) => ids.map(id => ({ candidate: { id, category: 'task_history' as const, estimatedBytes: null, protectedReasons: [] }, fingerprint: id })),
+      erase: async (id: string) => { if (id === 'second') throw new Error('Execution interrupted'); return true; },
+    },
+  };
+  const service = new InstanceStorageService(services);
+  const instanceId = await service.initialize();
+  const unused = await service.preview(instanceId, ['worktrees'], 'admin');
+  const preview = await service.preview(instanceId, ['worktrees', 'task_history'], 'admin', ['first', 'second']);
+  await assert.rejects(service.execute(instanceId, preview.confirmation, 'admin'), /Execution interrupted/);
+  t.mock.method(Date, 'now', () => Date.parse(preview.expiresAt) + 1);
+  const restarted = new InstanceStorageService({ ...services, lifecycle: new StorageLifecycle(root) });
+  const result = await restarted.result(instanceId, preview.confirmation, 'admin');
+  assert.equal(result.state, 'interrupted');
+  assert.deepEqual(result.deleted, ['first']);
+  assert.deepEqual(result.retained, [{ id: 'worktrees', reasons: ['unsupported'] }]);
+  await assert.rejects(restarted.result(instanceId, preview.confirmation, 'other-admin'), { status: 404 });
+  await assert.rejects(restarted.execute(instanceId, preview.confirmation, 'admin'), { message: /consumed/, code: STORAGE_CONFIRMATION_INVALID_CODE });
+  await assert.rejects(restarted.execute(instanceId, unused.confirmation, 'admin'), { message: /generation changed/, code: STORAGE_INSTANCE_CHANGED_CODE });
+});
+
+for (const format of ['legacy', 'preview-bound'] as const) {
+  test(`reads ${format} cleanup results while enforcing stored instance and operation bindings`, async t => {
+    const f = await serviceFixture(t);
+    const preview = await f.service.preview(f.instanceId, ['worktrees'], 'admin');
+    const result = await f.service.execute(f.instanceId, preview.confirmation, 'admin');
+    const file = path.join(f.control, `result-${preview.confirmation}.json`);
+    const metadata = format === 'legacy' ? {} : { generation: 'old-process', expiresAt: '2000-01-01T00:00:00Z' };
+    const saved = { actor: 'admin', result, ...metadata };
+    await fs.writeFile(file, JSON.stringify(saved));
+    assert.deepEqual(await f.service.result(f.instanceId, preview.confirmation, 'admin'), result);
+    await assert.rejects(f.service.result(f.instanceId, preview.confirmation, 'other-admin'), { status: 404 });
+    for (const field of ['instanceId', 'operationId'] as const) {
+      await fs.writeFile(file, JSON.stringify({ ...saved, result: { ...result, [field]: 'another-selection' } }));
+      await assert.rejects(f.service.result(f.instanceId, preview.confirmation, 'admin'), { status: 404 });
+    }
+  });
+}
 
 for (const change of ['private_work', 'reuse', 'queued', 'swap', 'restart', 'policy'] as const) {
   test(`confirmation revalidation protects ${change}`, async t => {
@@ -413,4 +482,26 @@ test('admission waits past the former deadline without stealing an exclusive gat
   await admission;
   assert.equal(ran, true);
   assert.equal(await a.busy(), false);
+});
+
+test('repository inventory has safe names, actual cache sizes, protections and bounded scan coalescing', async t => {
+  const f = await serviceFixture(t);
+  const [first, second] = await Promise.all([f.service.inventory(), f.service.inventory()]);
+  assert.deepEqual(first, second);
+  assert.equal(first.repositories[0].name, 'owner/repo');
+  assert.ok(first.repositories[0].estimatedBytes! > 0);
+  assert.equal(first.state, 'partial');
+  assert.equal(JSON.stringify(first).includes(f.root), false);
+  assert.ok(first.lastUseAt);
+});
+
+test('demotion after slow Git proof restores quarantine and prevents deletion', async t => {
+  const f = await serviceFixture(t);
+  const preview = await f.service.preview(f.instanceId, ['repository_caches'], 'admin');
+  let checks = 0;
+  await assert.rejects(f.service.execute(f.instanceId, preview.confirmation, 'admin', async () => {
+    if (++checks === 3) throw new Error('Admin demoted during remote proof');
+  }), /demoted/);
+  assert.equal(await fs.readFile(path.join(f.clone, 'public'), 'utf8'), 'published sentinel');
+  await assert.rejects(f.service.execute(f.instanceId, preview.confirmation, 'admin'));
 });

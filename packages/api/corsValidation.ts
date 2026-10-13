@@ -124,6 +124,9 @@ export function createConnectStorageCorsMiddleware(env: NodeJS.ProcessEnv = proc
   const base = '/api/instance/storage/v1';
   const routes = new Map([
     ['/api/auth/user', ['GET']],
+    [`${base}/capabilities`, ['GET']],
+    [`${base}/repositories`, ['GET']],
+    [`${base}/exports`, ['POST']],
     [`${base}/usage`, ['GET']],
     [`${base}/policy`, ['GET', 'PUT']],
     [`${base}/cleanup/preview`, ['POST']],
@@ -132,7 +135,8 @@ export function createConnectStorageCorsMiddleware(env: NodeJS.ProcessEnv = proc
   const operationPath = /^\/api\/instance\/storage\/v1\/cleanup\/operations\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
   return (req, res, next) => {
     if (!sameSite || req.get('Origin') !== connectOrigin) { next(); return; }
-    const methods = routes.get(req.path) ?? (operationPath.test(req.path) ? ['GET'] : []);
+    const exportPath = /^\/api\/instance\/storage\/v1\/exports\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}(\/(?:download|cancel))?$/.exec(req.path);
+    const methods = routes.get(req.path) ?? (operationPath.test(req.path) ? ['GET'] : exportPath ? [exportPath[1] ? 'POST' : 'GET'] : []);
     const method = req.method === 'OPTIONS' ? req.get('Access-Control-Request-Method') : req.method;
     const mutation = method === 'PUT' || method === 'POST';
     const allowedHeaders = mutation ? ['content-type', 'x-propr-storage'] : [];

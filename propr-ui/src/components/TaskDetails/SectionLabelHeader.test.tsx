@@ -24,4 +24,9 @@ describe('SectionLabelHeader', () => {
     expect(onViewChange).toHaveBeenCalledWith('terminal');
     expect(screen.getByRole('group', { name: 'Log view' })).toHaveAttribute('data-execution-log-control');
   });
+
+  it('offers the raw log switch on desktop only, never on a phone', () => {
+    render(<SectionLabelHeader commandMode="fix" view="readable" onViewChange={vi.fn()} />);
+    expect(screen.getByTestId('log-view-switch')).toHaveClass('hidden', 'sm:inline-flex');
+  });
 });

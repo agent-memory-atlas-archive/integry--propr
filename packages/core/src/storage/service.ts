@@ -1,24 +1,20 @@
+import { StorageContractError, confirmationInvalid, instanceSelectionChanged, validatePreviewSelection, type CleanupPreviewArgs, type CleanupPreviewRequest, type CandidateExecution, type SavedPreview } from './cleanupRequest.js';
 import fs from 'node:fs/promises';
+import { DatabaseExports, type StorageAuthority } from './databaseExport.js';
+import type { RepositoryStorageInventory } from '@propr/shared';
 import { constants } from 'node:fs';
 import path from 'node:path';
 import { randomUUID, createHash } from 'node:crypto';
-import { DEFAULT_STORAGE_POLICY, type StoragePolicy, type StorageCategory, type StorageObservation, type StorageCleanupPreview, type StorageCleanupResult, type StorageCandidate, type StorageProtection } from '@propr/shared';
-import { StorageLifecycle, assertRealDirectory } from './lifecycle.js';
+import { DEFAULT_STORAGE_POLICY, STORAGE_INSTANCE_CHANGED_CODE, type StoragePolicy, type StorageObservation, type StorageCleanupPreview, type StorageCleanupResult, type StorageCandidate, type StorageProtection } from '@propr/shared';
+import { StorageLifecycle, StorageBusyError, assertRealDirectory } from './lifecycle.js';
 import { observeStorage, type StorageRoot } from './observation.js';
 import { auditRepository } from './repositorySafety.js';
 import type { CacheRecord } from './registry.js';
 import { resolveRepositoryClonePath } from '../git/repositoryPaths.js';
 
-export class StorageContractError extends Error {
-  constructor(readonly status: number, message: string) { super(message); }
-}
-interface SavedPreview {
-  actor: string;
-  preview: StorageCleanupPreview;
-  fingerprints: Record<string, string>;
-  useClock: number | null;
-}
+export { StorageContractError, instanceSelectionChanged } from './cleanupRequest.js';
 interface StorageServices {
+  databaseFile?: string;
   lifecycle: StorageLifecycle;
   clonesRoot: string;
   storageRoot?: string;
@@ -40,19 +36,80 @@ export class InstanceStorageService {
   private observation?: StorageObservation;
   private scan?: Promise<void>;
   private sweeping = false;
-  constructor(private readonly services: StorageServices) {}
+  private inspecting = false;
+  private inventoryScan?: Promise<RepositoryStorageInventory>;
+  private inventoryAt = 0;
+  readonly exports?: DatabaseExports;
+  readonly generation = randomUUID();
+  constructor(private readonly services: StorageServices) {
+    if (services.databaseFile) this.exports = new DatabaseExports(path.resolve(services.databaseFile), path.join(this.root, 'exports'));
+  }
+  async capabilities() {
+    return { version: 1 as const, instanceId: await this.initialize(), generation: this.exports?.generation ?? this.generation,
+      features: ['repository_inventory', 'repository_cleanup', ...(this.exports ? ['database_export'] : [])] };
+  }
+  async inventory(): Promise<RepositoryStorageInventory> {
+    if (!this.inventoryScan || Date.now() - this.inventoryAt > 60_000) {
+      this.inventoryAt = Date.now();
+      this.inventoryScan = this.scanInventory().catch(error => { this.inventoryScan = undefined; throw error; });
+    }
+    return this.inventoryScan;
+  }
+  private async scanInventory(): Promise<RepositoryStorageInventory> {
+    const instanceId = await this.initialize();
+    return this.cleanup(async admissionSignal => {
+      const signal = AbortSignal.any([admissionSignal, AbortSignal.timeout(60_000)]);
+      const records = await this.records();
+      const busy = await this.busy();
+      const lastUse = await this.services.lifecycle.lastUse();
+      const repositories: RepositoryStorageInventory['repositories'] = [];
+      for (const record of records) {
+        const evaluated = await this.evaluate(record, busy, signal);
+        repositories.push({ ...evaluated.candidate, name: `${record.owner}/${record.name}` });
+      }
+      const known = new Set(records.map(record => record.id));
+      for (const name of (await this.services.repositoryInventory?.() ?? []).slice(0, 100)) {
+        const [owner, repository, extra] = name.split('/');
+        if (!owner || !repository || extra) continue;
+        const directory = resolveRepositoryClonePath(this.services.clonesRoot, owner, repository);
+        const id = createHash('sha256').update(name).digest('hex');
+        if (known.has(id)) continue;
+        const exists = await fs.lstat(directory).then(() => true, error => { if (error.code === 'ENOENT') return false; throw error; });
+        if (exists) repositories.push({ id, name, category: 'repository_caches', estimatedBytes: null, protectedReasons: ['unknown_ownership'] });
+      }
+      const worktreesRoot = this.services.roots.find(root => root.category === 'worktrees');
+      for (const record of records) {
+        if (!worktreesRoot || signal.aborted) break;
+        const observation = await observeStorage(instanceId, [{ category: 'worktrees', path: resolveRepositoryClonePath(worktreesRoot.path, record.owner, record.name) }], { maxEntries: 10_000, maxMs: 250 });
+        const category = observation.categories.find(category => category.category === 'worktrees')!;
+        repositories.push({ id: record.id, name: `${record.owner}/${record.name}`, category: 'worktrees', estimatedBytes: category.bytes, protectedReasons: ['worktrees'] });
+      }
+      // Registry reads are rotating, bounded batches. Never claim a batch is a full inventory.
+      return { version: 1, instanceId, state: 'partial', observedAt: new Date().toISOString(),
+        lastUseAt: lastUse ? new Date(lastUse).toISOString() : null, repositories };
+    });
+  }
   private get root(): string { return this.services.storageRoot ?? this.services.lifecycle.root; }
 
+  private async cleanup<T>(run: (signal: AbortSignal) => Promise<T>): Promise<T> {
+    if (this.inspecting) throw new StorageBusyError();
+    this.inspecting = true;
+    try { return await this.services.lifecycle.cleanup(run); }
+    finally { this.inspecting = false; }
+  }
   private async read<T>(name: string): Promise<T> {
-    const file = await fs.open(path.join(this.root, name), constants.O_RDONLY | constants.O_NOFOLLOW);
+    await assertRealDirectory(path.dirname(path.join(this.root, name)));
+    const file = await fs.open(path.join(this.root, name), constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
     try {
-      if ((await file.stat()).size > 1024 * 1024) throw new Error('Storage record too large');
+      const stat = await file.stat();
+      if (!stat.isFile() || stat.nlink !== 1 || stat.size > 1024 * 1024) throw new Error('Storage record too large');
       return JSON.parse(await file.readFile('utf8')) as T;
     } finally { await file.close(); }
   }
   private async write(name: string, value: unknown): Promise<void> {
+    await assertRealDirectory(this.root);
     const temp = path.join(this.root, randomUUID());
-    await fs.writeFile(temp, JSON.stringify(value), { flag: 'wx' });
+    await fs.writeFile(temp, JSON.stringify(value), { flag: 'wx', mode: 0o600 });
     await fs.rename(temp, path.join(this.root, name));
   }
   async initialize(): Promise<string> {
@@ -81,17 +138,18 @@ export class InstanceStorageService {
     if (!value || typeof value.enabled !== 'boolean' || !Number.isInteger(value.idleHours) || value.idleHours < 1 || value.idleHours > 8760) throw new Error('Invalid storage policy');
     return value;
   }
-  async updatePolicy(instanceId: string, policy: StoragePolicy, actor: string): Promise<StoragePolicy> {
+  async updatePolicy(instanceId: string, policy: StoragePolicy, actor: string, authorize?: StorageAuthority): Promise<StoragePolicy> {
     await this.assertInstance(instanceId);
     if (typeof policy.enabled !== 'boolean' || !Number.isInteger(policy.idleHours) || policy.idleHours < 1 || policy.idleHours > 8760) throw new StorageContractError(400, 'Invalid cleanup policy');
     return this.services.lifecycle.exclusive(async () => {
+      await authorize?.();
       await this.audit(actor, 'policy', { enabled: policy.enabled, idleHours: policy.idleHours });
       await this.write('policy.json', { enabled: policy.enabled, idleHours: policy.idleHours });
       return policy;
     });
   }
   private async assertInstance(id: string): Promise<void> {
-    if (id !== await this.initialize()) throw new StorageContractError(409, 'Instance selection changed');
+    if (id !== await this.initialize()) throw instanceSelectionChanged();
   }
   async usage(): Promise<StorageObservation> {
     const instanceId = await this.initialize();
@@ -141,16 +199,16 @@ export class InstanceStorageService {
     finally { await handle.close(); }
   }
   private async evaluate(record: CacheRecord, busy: boolean, signal?: AbortSignal): Promise<{ candidate: StorageCandidate; fingerprint: string | null }> {
-    if (!record.metadataFingerprint) return { candidate: { id: record.id, category: 'repository_caches', estimatedBytes: null, protectedReasons: ['unknown_ownership'] }, fingerprint: null };
-    if (busy || signal?.aborted) return { candidate: { id: record.id, category: 'repository_caches', estimatedBytes: null, protectedReasons: ['busy'] }, fingerprint: null };
+    if (!record.metadataFingerprint) return { candidate: { id: record.id, name: `${record.owner}/${record.name}`, category: 'repository_caches', estimatedBytes: null, protectedReasons: ['unknown_ownership'] }, fingerprint: null };
+    if (busy || signal?.aborted) return { candidate: { id: record.id, name: `${record.owner}/${record.name}`, category: 'repository_caches', estimatedBytes: null, protectedReasons: ['busy'] }, fingerprint: null };
     const result = await this.auditCache(resolveRepositoryClonePath(this.services.clonesRoot, record.owner, record.name), record, signal);
-    return { candidate: { id: record.id, category: 'repository_caches', estimatedBytes: result.bytes, protectedReasons: result.reasons }, fingerprint: result.fingerprint };
+    return { candidate: { id: record.id, name: `${record.owner}/${record.name}`, category: 'repository_caches', estimatedBytes: result.bytes, protectedReasons: result.reasons }, fingerprint: result.fingerprint };
   }
   private async auditCache(directory: string, record: CacheRecord, signal?: AbortSignal) {
     if (signal?.aborted) return { reasons: ['busy'] as StorageProtection[], bytes: null, fingerprint: null };
     return (this.services.auditRepository ?? auditRepository)(directory, record.identity, `https://github.com/${record.owner}/${record.name}.git`, { signal, token: await this.services.remoteToken?.().catch(() => undefined), metadataFingerprint: record.metadataFingerprint });
   }
-  private async removeCache(record: CacheRecord, fingerprint: string, signal: AbortSignal): Promise<StorageProtection[]> {
+  private async removeCache(record: CacheRecord, fingerprint: string, signal: AbortSignal, authorize?: StorageAuthority): Promise<StorageProtection[]> {
     const directory = resolveRepositoryClonePath(this.services.clonesRoot, record.owner, record.name);
     await assertRealDirectory(this.services.clonesRoot);
     await assertRealDirectory(path.dirname(directory));
@@ -174,6 +232,12 @@ export class InstanceStorageService {
         if (!occupied) await fs.rename(`${quarantine}/repository`, source);
         return signal.aborted ? ['busy'] : final.reasons.length ? final.reasons : ['changed'];
       }
+      try { await authorize?.(); }
+      catch (error) {
+        const occupied = await fs.lstat(source).then(() => true, error => { if (error.code === 'ENOENT') return false; throw error; });
+        if (!occupied) await fs.rename(`${quarantine}/repository`, source);
+        throw error;
+      }
       await fs.rm(`${quarantine}/repository`, { recursive: true });
       await fs.unlink(path.join(this.root, 'repositories', `${record.id}.json`));
       return [];
@@ -182,22 +246,39 @@ export class InstanceStorageService {
       await parent.close(); await root.close();
     }
   }
-  async preview(instanceId: string, categories: StorageCategory[], actor: string, taskIds: string[] = []): Promise<StorageCleanupPreview> {
+  private async unregisteredCandidates(registered: CacheRecord[]): Promise<StorageCandidate[]> {
+    const candidates: StorageCandidate[] = [];
+    const registeredIds = new Set(registered.map(record => record.id));
+    for (const repository of (await this.services.repositoryInventory?.() ?? []).slice(0, 100)) {
+      const [owner, name, extra] = repository.split('/');
+      if (!owner || !name || extra) continue;
+      const id = createHash('sha256').update(`${owner}/${name}`).digest('hex');
+      if (registeredIds.has(id)) continue;
+      const directory = resolveRepositoryClonePath(this.services.clonesRoot, owner, name);
+      const exists = await fs.lstat(directory).then(() => true, error => { if (error.code === 'ENOENT') return false; throw error; });
+      if (exists) candidates.push({ id, name: repository, category: 'repository_caches', estimatedBytes: null, protectedReasons: ['unknown_ownership'] });
+      registeredIds.add(id);
+    }
+    return candidates;
+  }
+  async preview(...args: CleanupPreviewArgs): Promise<StorageCleanupPreview> {
+    const [instanceId, categories, actor, taskIds = [], authorize] = args;
+    return this.previewRequest({ instanceId, categories, actor, taskIds, authorize });
+  }
+  private async previewRequest(request: CleanupPreviewRequest): Promise<StorageCleanupPreview> {
+    const { instanceId, categories, actor, taskIds, authorize } = request;
     await this.assertInstance(instanceId);
-    if (taskIds.length > 10 || new Set(taskIds).size !== taskIds.length || taskIds.some(id => typeof id !== 'string' || !/^[A-Za-z0-9_-]{1,255}$/.test(id))) throw new StorageContractError(400, 'Invalid task selection');
-    if (taskIds.length && !categories.includes('task_history')) throw new StorageContractError(400, 'Task selection requires task_history category');
-    if (!categories.length || new Set(categories).size !== categories.length || categories.length > 7) throw new StorageContractError(400, 'Select explicit categories');
-    return this.services.lifecycle.cleanup(async signal => {
+    validatePreviewSelection(request);
+    return this.cleanup(async admissionSignal => {
+      const signal = AbortSignal.any([admissionSignal, AbortSignal.timeout(60_000)]);
       const candidates: StorageCandidate[] = [];
       const fingerprints: Record<string, string> = {};
       const busy = await this.busy() || !await this.services.lifecycle.lastUse();
       for (const category of categories) {
         if (category === 'task_history' && this.services.taskHistory && taskIds.length) {
-          for (const evaluated of await this.services.taskHistory.inspect(taskIds)) {
-            if (busy) evaluated.candidate.protectedReasons = ['busy'];
-            candidates.push(evaluated.candidate);
-            if (evaluated.fingerprint) fingerprints[evaluated.candidate.id] = evaluated.fingerprint;
-          }
+          const evaluated = await this.previewTaskHistory(taskIds, busy);
+          candidates.push(...evaluated.candidates);
+          Object.assign(fingerprints, evaluated.fingerprints);
           continue;
         }
         if (category !== 'repository_caches') {
@@ -205,35 +286,38 @@ export class InstanceStorageService {
           continue;
         }
         const registered = await this.records();
-        const registeredIds = new Set(registered.map(record => record.id));
-        for (const repository of (await this.services.repositoryInventory?.() ?? []).slice(0, 100)) {
-          const [owner, name, extra] = repository.split('/');
-          if (!owner || !name || extra) continue;
-          const id = createHash('sha256').update(`${owner}/${name}`).digest('hex');
-          if (registeredIds.has(id)) continue;
-          const directory = resolveRepositoryClonePath(this.services.clonesRoot, owner, name);
-          const exists = await fs.lstat(directory).then(() => true, error => { if (error.code === 'ENOENT') return false; throw error; });
-          if (exists) candidates.push({ id, category, estimatedBytes: null, protectedReasons: ['unknown_ownership'] });
-          registeredIds.add(id);
-        }
+        candidates.push(...await this.unregisteredCandidates(registered));
         for (const record of registered) {
           const evaluated = await this.evaluate(record, busy, signal);
           candidates.push(evaluated.candidate);
           if (evaluated.fingerprint) fingerprints[record.id] = evaluated.fingerprint;
         }
       }
+      await authorize?.();
       const confirmation = randomUUID();
       const preview: StorageCleanupPreview = {
         version: 1, instanceId, confirmation, expiresAt: new Date(Date.now() + 5 * 60_000).toISOString(), categories, candidates,
         impact: 'Repository caches are refetched on next use. Explicitly selected terminal task records and their database logs/history are permanently removed locally. Worktrees, filesystem logs, provider credentials, retained backups (60 days) and external services are unaffected. SQLite file size may not shrink.',
       };
-      await this.write(`preview-${confirmation}.json`, { actor, preview, fingerprints, useClock: await this.services.lifecycle.lastUse() } satisfies SavedPreview);
+      await this.write(`preview-${confirmation}.json`, { actor, preview, fingerprints, useClock: await this.services.lifecycle.lastUse(), generation: this.generation } satisfies SavedPreview);
       await this.audit(actor, 'preview', { confirmation, categories, candidates });
       return preview;
     });
   }
-  private async executeCandidate(candidate: StorageCandidate, record: CacheRecord | undefined, fingerprint: string, signal: AbortSignal): Promise<StorageProtection[]> {
+  private async previewTaskHistory(taskIds: string[], busy: boolean) {
+    const candidates: StorageCandidate[] = [];
+    const fingerprints: Record<string, string> = {};
+    for (const evaluated of await this.services.taskHistory!.inspect(taskIds)) {
+      if (busy) evaluated.candidate.protectedReasons = ['busy'];
+      candidates.push(evaluated.candidate);
+      if (evaluated.fingerprint) fingerprints[evaluated.candidate.id] = evaluated.fingerprint;
+    }
+    return { candidates, fingerprints };
+  }
+  private async executeCandidate(candidate: StorageCandidate, execution: CandidateExecution): Promise<StorageProtection[]> {
+    const { record, fingerprint, signal, authorize } = execution;
     if (candidate.category === 'task_history' && this.services.taskHistory) {
+      await authorize?.();
       return await this.services.taskHistory.erase(candidate.id, fingerprint) ? [] : ['changed'];
     }
     if (!record) return ['unknown_ownership'];
@@ -242,27 +326,35 @@ export class InstanceStorageService {
     if (current.fingerprint !== fingerprint) return ['changed'];
     // The same cross-process barrier covers remote proof, final identity and removal.
     // No unchecked force/remove fallback exists elsewhere in the cache lifecycle.
-    return this.removeCache(record, fingerprint, signal);
+    return this.removeCache(record, fingerprint, signal, authorize);
   }
-  async execute(instanceId: string, confirmation: string, actor: string): Promise<StorageCleanupResult> {
+  private validateConfirmation(saved: SavedPreview, instanceId: string, actor: string): void {
+    if (saved.generation !== this.generation) throw new StorageContractError(409, 'Instance generation changed', STORAGE_INSTANCE_CHANGED_CODE);
+    if (saved.actor !== actor || saved.preview.instanceId !== instanceId) throw new StorageContractError(403, 'Confirmation belongs to another principal');
+    if (!Number.isFinite(Date.parse(saved.preview.expiresAt)) || Date.parse(saved.preview.expiresAt) <= Date.now()) throw confirmationInvalid('Confirmation expired');
+  }
+  private async validateAutomaticExecution(): Promise<void> {
+    const policy = await this.policy();
+    const clock = await this.services.lifecycle.lastUse();
+    if (!policy.enabled || !clock || Date.now() - clock < policy.idleHours * 3_600_000) throw new StorageContractError(409, 'Automatic policy or idle interval changed');
+  }
+  async execute(instanceId: string, confirmation: string, actor: string, authorize?: StorageAuthority): Promise<StorageCleanupResult> {
     await this.assertInstance(instanceId);
     if (!/^[0-9a-f-]{36}$/.test(confirmation)) throw new StorageContractError(400, 'Invalid confirmation');
-    return this.services.lifecycle.cleanup(async signal => {
+    return this.cleanup(async admissionSignal => {
+      const signal = AbortSignal.any([admissionSignal, AbortSignal.timeout(60_000)]);
+      await authorize?.();
       let saved: SavedPreview;
       try { saved = await this.read<SavedPreview>(`preview-${confirmation}.json`); }
-      catch { throw new StorageContractError(409, 'Confirmation unavailable or consumed'); }
-      if (saved.actor !== actor || saved.preview.instanceId !== instanceId) throw new StorageContractError(403, 'Confirmation belongs to another principal');
-      if (!Number.isFinite(Date.parse(saved.preview.expiresAt)) || Date.parse(saved.preview.expiresAt) <= Date.now()) throw new StorageContractError(409, 'Confirmation expired');
+      catch { throw confirmationInvalid('Confirmation unavailable or consumed'); }
+      this.validateConfirmation(saved, instanceId, actor);
       const result: StorageCleanupResult = { version: 1, instanceId, operationId: confirmation, state: 'interrupted', deleted: [], retained: [] };
       // Consume before any side effects; never automatically replay an interrupted operation.
+      // Results outlive confirmations and process generations for durable recovery.
       await fs.rename(path.join(this.root, `preview-${confirmation}.json`), path.join(this.root, `consumed-${confirmation}.json`));
       await this.write(`result-${confirmation}.json`, { actor, result });
       await this.audit(actor, 'execute_started', { operationId: confirmation });
-      if (actor === 'automatic') {
-        const policy = await this.policy();
-        const clock = await this.services.lifecycle.lastUse();
-        if (!policy.enabled || !clock || Date.now() - clock < policy.idleHours * 3_600_000) throw new StorageContractError(409, 'Automatic policy or idle interval changed');
-      }
+      if (actor === 'automatic') await this.validateAutomaticExecution();
       const busy = await this.busy();
       const clockChanged = saved.useClock !== await this.services.lifecycle.lastUse();
       const records = new Map((await this.records(saved.preview.candidates.filter(candidate => candidate.category === 'repository_caches').map(candidate => candidate.id))).map(record => [record.id, record]));
@@ -271,7 +363,8 @@ export class InstanceStorageService {
         const record = records.get(candidate.id);
         if (!reasons.length && (busy || signal.aborted || clockChanged)) reasons = [busy || signal.aborted ? 'busy' : 'changed'];
         if (!reasons.length) {
-          reasons = await this.executeCandidate(candidate, record, saved.fingerprints[candidate.id], signal);
+          await authorize?.();
+          reasons = await this.executeCandidate(candidate, { record, fingerprint: saved.fingerprints[candidate.id], signal, authorize });
           if (!reasons.length) result.deleted.push(candidate.id);
         }
         if (reasons.length) result.retained.push({ id: candidate.id, reasons });
@@ -280,7 +373,7 @@ export class InstanceStorageService {
       result.state = 'completed';
       await this.audit(actor, 'execute_completed', result);
       await this.write(`result-${confirmation}.json`, { actor, result });
-      this.observation = undefined;
+      this.observation = undefined; this.inventoryScan = undefined;
       return result;
     });
   }
@@ -288,7 +381,7 @@ export class InstanceStorageService {
     await this.assertInstance(instanceId);
     if (!/^[0-9a-f-]{36}$/.test(operationId)) throw new StorageContractError(400, 'Invalid operation');
     const saved = await this.read<{ actor: string; result: StorageCleanupResult }>(`result-${operationId}.json`).catch(() => null);
-    if (!saved || saved.actor !== actor) throw new StorageContractError(404, 'Operation unavailable');
+    if (!saved || saved.actor !== actor || saved.result.instanceId !== instanceId || saved.result.operationId !== operationId) throw new StorageContractError(404, 'Operation unavailable');
     return saved.result;
   }
   /** Automatic execution uses exactly the manual proof and revalidation, never age alone. */

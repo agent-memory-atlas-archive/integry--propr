@@ -16,6 +16,13 @@ const group: TaskGroup = {
   ],
 };
 const runs = buildTaskRuns(buildTaskRow(group));
+const scoresHistory = {
+  repository: 'integry/propr', pr_number: 2664, outcome: 'merged' as const, merged_at: '2026-09-10T12:20:00Z', closed_at: null,
+  scores: [4, 6].map((score, index) => ({
+    cycle_number: index + 1, source: 'ultrafix' as const, score, goal: 8, blocker_count: 0, suggestion_count: 0, reviewer_agent: 'codex',
+    reviewer_model: 'gpt-6-astra', implementer_model: 'gpt-6-astra', head_sha: null, task_id: `run-${index * 2 + 1}`, created_at: '2026-09-10T12:00:00Z',
+  })),
+};
 
 const steps = [
   { state: 'PENDING', timestamp: '2026-09-10T12:09:00Z' },
@@ -122,5 +129,49 @@ describe('RunTimeline', () => {
     const commit = within(screen.getByRole('button', { name: /^Run 2/ })).getByTestId('run-commit');
     expect(commit).toHaveClass('inline-flex');
     expect(commit).not.toHaveClass('hidden');
+  });
+
+  it('ends on the merge status, its own entry after every run and review', () => {
+    render(
+      <RunTimeline runs={runs} selectedTaskId="run-3" onSelectRun={vi.fn()} outcome={{ prNumber: 2664, state: 'merged', at: '2026-09-10T12:20:00Z' }}>
+        steps
+      </RunTimeline>,
+    );
+    const items = within(screen.getByRole('list', { name: 'Runs' })).getAllByRole('listitem');
+    expect(items).toHaveLength(5);
+    // After all four runs, not folded into the open run's steps.
+    expect(items[4]).toBe(screen.getByTestId('pr-outcome-entry'));
+    expect(items[4]).toHaveTextContent(/^MergedPR #2664/);
+    expect(within(items[2]).queryByText('Merged')).toBeNull();
+  });
+
+  it('puts the review scores on the trunk after every run, before the merge status', () => {
+    render(
+      <RunTimeline
+        runs={runs}
+        selectedTaskId="run-3"
+        onSelectRun={vi.fn()}
+        reviewScores={{ prNumber: 2664, history: scoresHistory }}
+        outcome={{ prNumber: 2664, state: 'merged', at: '2026-09-10T12:20:00Z' }}
+      >
+        steps
+      </RunTimeline>,
+    );
+    const items = [...screen.getByRole('list', { name: 'Runs' }).querySelectorAll<HTMLElement>(':scope > li')];
+    expect(items.map(item => item.dataset.testid)).toEqual([
+      'run-timeline-run', 'run-timeline-run', 'run-timeline-run', 'run-timeline-run', 'review-score-history', 'pr-outcome-entry',
+    ]);
+  });
+
+  it('moves a run\'s time, duration and result to their own phone line, under the run label', () => {
+    render(<RunTimeline runs={runs} selectedTaskId="run-2" onSelectRun={vi.fn()}>{null}</RunTimeline>);
+    const meta = within(screen.getByRole('button', { name: /^Run 2/ })).getByTestId('run-timeline-meta');
+    expect(meta).toHaveClass('max-sm:basis-full', 'max-sm:ml-0', 'max-sm:pl-12');
+    expect(within(meta).getByTestId('run-commit')).toHaveClass('max-sm:order-last');
+  });
+
+  it('has no final entry while the PR is open', () => {
+    render(<RunTimeline runs={runs} selectedTaskId="run-4" onSelectRun={vi.fn()} outcome={null}>steps</RunTimeline>);
+    expect(screen.queryByTestId('pr-outcome-entry')).toBeNull();
   });
 });

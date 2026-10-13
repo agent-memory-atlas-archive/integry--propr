@@ -8,6 +8,7 @@ import { promisify } from 'node:util';
 import { pathToFileURL } from 'node:url';
 
 const execFile = promisify(execFileCallback);
+export const OWNER_FINGERPRINT = 'DD4E7F65CE2345A1F4597D643CF856B53093D3A3';
 const fingerprintPattern = /^[A-F0-9]{40}$/;
 
 export function requireRpmIdentity(identity) {
@@ -21,6 +22,7 @@ export function requireRpmIdentity(identity) {
 }
 
 export function rpmIdentityFromEnvironment() {
+  if (process.env.PROPR_DESKTOP_RPM_FINGERPRINT !== OWNER_FINGERPRINT) throw new Error('Release identity differs from owner pin');
   return requireRpmIdentity({
     fingerprint: process.env.PROPR_DESKTOP_RPM_FINGERPRINT,
     publicKey: process.env.PROPR_DESKTOP_RPM_PUBLIC_KEY,
@@ -28,7 +30,7 @@ export function rpmIdentityFromEnvironment() {
 }
 
 // Do not forward subprocess diagnostics: import/sign errors can echo key material.
-async function run(file, args, home) {
+export async function run(file, args, home) {
   try {
     return await execFile(file, args, {
       env: { PATH: process.env.PATH, LD_LIBRARY_PATH: process.env.LD_LIBRARY_PATH,
@@ -40,13 +42,13 @@ async function run(file, args, home) {
   }
 }
 
-async function withKey(identity, callback) {
+export async function withKey(identity, callback) {
   requireRpmIdentity(identity);
   const home = await mkdtemp(join(tmpdir(), 'propr-rpm-key-'));
   try {
     const publicPath = join(home, 'release.asc');
     await writeFile(publicPath, identity.publicKey, { mode: 0o600 });
-    await run('gpg', ['--batch', '--import', publicPath], home);
+    await run('gpg', ['--batch', '--no-autostart', '--import', publicPath], home);
     const { stdout } = await run('gpg', ['--batch', '--with-colons', '--list-keys'], home);
     const lines = stdout.trim().split('\n').map(line => line.split(':'));
     const primary = lines.filter(fields => fields[0] === 'pub');
@@ -78,8 +80,9 @@ export function assertRpmSignatures(stdout, fingerprint) {
     .some(match => match[1].toLowerCase() === id);
   const packageSignature = [...statuses.matchAll(/^\s*V[34] RSA\/SHA256 Signature, key ID ([a-f0-9]{8}): OK$/gmi)]
     .some(match => match[1].toLowerCase() === id);
+  // Failure words must be result values, not substrings of hexadecimal key IDs.
   if (!header || !packageSignature
-    || /NOT OK|NOKEY|NOTTRUSTED|BAD|UNKNOWN/i.test(statuses)) {
+    || /:[ \t]*(?:NOT OK|NOKEY|NOTTRUSTED|BAD|UNKNOWN)\b/i.test(statuses)) {
     throw new Error('RPM must have verified header and package signatures from the pinned identity');
   }
 }

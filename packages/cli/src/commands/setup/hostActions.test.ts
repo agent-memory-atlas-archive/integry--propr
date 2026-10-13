@@ -1,5 +1,9 @@
 import assert from 'node:assert/strict';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { mock, test, type TestContext } from 'node:test';
+import { ConfigManager } from '../../config/ConfigManager.js';
 import type { OrchestratorConfig, OrchestratorModule } from '../../orchestrator/index.js';
 
 const real = await import('../../orchestrator/index.js');
@@ -16,6 +20,40 @@ mock.module('../../orchestrator/index.js', { namedExports: {
 } });
 const { createDefaultActions } = await import('./hostActions.js');
 const { runChecks } = await import('../checkCommands.js');
+
+test('failed browser token save cannot leak through a later stack-root write and allows retry', async t => {
+  const configDir = mkdtempSync(join(tmpdir(), 'propr-browser-save-'));
+  try {
+    const config = new ConfigManager(configDir);
+    await config.init();
+    await config.setStackRoot('/previous/root');
+    let token = 'rejected-token';
+    const actions = createDefaultActions(config, { githubBrowserLogin: async () => token });
+    const failedSave = t.mock.method(config, 'save', async () => { throw new Error('fixture save failure'); });
+
+    assert.equal(await actions.loginWithGithub!(), false);
+    assert.equal(actions.hasGithubToken!(), false);
+    assert.equal(config.getGithubToken(), undefined);
+    await assert.rejects(actions.fetchRelayInstallations!({}), /sign-in could not be saved/);
+
+    failedSave.mock.restore();
+    await actions.persistStackRoot!('/next/root');
+    const disk = new ConfigManager(configDir);
+    await disk.init();
+    assert.equal(disk.getStackRoot(), '/next/root');
+    assert.equal(disk.getGithubToken(), undefined);
+    assert.equal(actions.hasGithubToken!(), false);
+
+    token = 'retry-token';
+    assert.equal(await actions.loginWithGithub!(), true);
+    assert.equal(actions.hasGithubToken!(), true);
+    assert.equal(config.getGithubToken(), token);
+    await disk.load();
+    assert.equal(disk.getGithubToken(), token);
+  } finally {
+    rmSync(configDir, { recursive: true, force: true });
+  }
+});
 
 function platform(t: TestContext, value: string) {
   const descriptor = Object.getOwnPropertyDescriptor(process, 'platform')!;

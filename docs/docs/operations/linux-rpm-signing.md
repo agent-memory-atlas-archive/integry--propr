@@ -1,204 +1,129 @@
-# Linux RPM preview signing
+# Linux package authentication
 
-The credential-free `desktop-linux-preview.yml` and nightly native validation bundles remain
-unsigned. Existing artifacts, including the observed 0.9.0 preview from source
-`ef0350859b1d726abbcb72ac40ddef77a210d384`, run `38230913378`, are not retroactively signed.
-Keep ongoing validation on its frozen source. Signing does not rebuild the application,
-refresh its runtime image references, promote stable/latest, or enable self-updates.
+New public Linux previews authenticate **both DEB and RPM packages, on x64 and
+arm64**. The owner identity is **DD4E7F65CE2345A1F4597D643CF856B53093D3A3**.
+See the independent [release-key notice and public download](linux-release-key.md).
 
-`desktop-linux-signed-preview.yml` is a separate, manual, main-only distribution path.
-It consumes the exact finalized four-package artifact from a successful main-dispatched
-unsigned preview run. Reviewed code from the dispatched `main` revision signs both RPMs;
-the original source checkout is read only as data to verify native pins. No package scripts
-or frozen-source JavaScript are executed by the signing helper.
+The main-only `desktop-linux-signed-preview.yml` consumes the exact finalized
+four-package artifact from a successful main-dispatched unsigned preview run.
+Reviewed main control code signs; the frozen source is data for native pins only.
+Original unsigned inputs remain intact. DEBs stay byte-for-byte unchanged; RPM
+signing changes only their signature region, preserving the entire main header
+and payload. Native architecture, hash pins, root-owned 4755 sandbox metadata,
+and source/app/UI/agent runtime digests are rechecked before and after signing.
 
-## Owner provisioning (required before any signed preview)
+## Protected boundary
 
-No release key or signing authority is supplied by this change. An owner must provision
-an existing, stable OpenPGP v4 RSA signing-capable **primary** key (at least 2048 bits;
-3072 or 4096 recommended for a newly owner-provisioned identity). The helper selects its
-full fingerprint with `!`; it does not silently select a subkey. The primary must be
-unexpired and unrevoked. Keep offline backups and a revocation certificate under the
-owner's custody. Do not use disposable test keys as release keys.
+Reuse the existing owner-provisioned `desktop-linux-rpm-signing` environment.
+Its compatibility names remain unchanged:
 
-An owner must configure the following manually; the workflow never changes permissions,
-environments, protection rules, or key custody:
+| Setting | Purpose |
+| --- | --- |
+| `PROPR_DESKTOP_RPM_SIGNING_AUTHORIZED` | Protected authorization, `1` |
+| `PROPR_DESKTOP_RPM_PRIVATE_KEY` | Existing protected private key secret |
+| `PROPR_DESKTOP_RPM_PASSPHRASE` | Existing protected passphrase secret |
+| `PROPR_DESKTOP_RPM_PUBLIC_KEY` | Repository variable containing the public export |
+| `PROPR_DESKTOP_RPM_FINGERPRINT` | Repository variable with the complete owner fingerprint |
 
-| Scope | Name | Value/purpose |
-| --- | --- | --- |
-| Protected environment | `desktop-linux-rpm-signing` | Required reviewers, prevent self-review as appropriate, deployment restricted to `main` |
-| Environment variable | `PROPR_DESKTOP_RPM_SIGNING_AUTHORIZED` | `1`, only after protections and identity are reviewed |
-| Environment secret | `PROPR_DESKTOP_RPM_PRIVATE_KEY` | ASCII-armored, passphrase-protected private key export for the selected identity |
-| Environment secret | `PROPR_DESKTOP_RPM_PASSPHRASE` | Nonempty single-line passphrase; never a workflow input, command argument, or artifact |
-| Repository variable | `PROPR_DESKTOP_RPM_PUBLIC_KEY` | ASCII-armored public export of that identity, with actual newlines |
-| Repository variable | `PROPR_DESKTOP_RPM_FINGERPRINT` | Exact full 40-character uppercase fingerprint, no spaces or key-ID abbreviation |
-| Protected publication environment | `desktop-linux-preview-publication` | Existing required-reviewer, main-only preview-publication environment |
-| Publication environment variable | `PROPR_DESKTOP_LINUX_PREVIEW_PUBLICATION_AUTHORIZED` | Existing `1` authorization for preview publication |
+Private credentials are confined to the protected read-only signing job. The
+entry point removes them from the environment before package parsers run. GnuPG
+uses temporary private files, scrubbed subprocess environments, exact-primary
+selection, bounded diagnostics, and cleanup. Stage/publication jobs have public
+inputs only. No keys, permissions, hosting, or access are provisioned by this work.
 
-Use repository **Settings → Environments → desktop-linux-rpm-signing** for its
-protections, environment secrets and authorization variable. Set the two public repository
-variables under **Settings → Secrets and variables → Actions → Variables**. Use the existing
-publication environment for its own authorization variable.
+## Authentication graph
 
-Store the private key and passphrase **only** in the signing environment, never repository
-or organization secrets shared with build/PR jobs. Signing has read-only repository and
-Actions permissions; separate jobs stage and publish with `contents: write` and no private
-signing secrets. Do not override the public repository variables with different environment
-values: sign, stage and publish must use exactly the same public export and fingerprint.
-Maintain the existing immutable `desktop-linux-preview-v*` tag rules, which also cover the
-new `-rpm-signed` suffix. Provisioning is an owner action, not implied by preview-publication
-standing authorization.
+Schema 4 has trust `authenticated-linux-preview`, tag suffix `-all-signed`, and
+title suffix **(authenticated DEB and RPM)**. `rpmSigning.originals` records the
+unsigned RPM hash and preserved main-header/payload digest; `signing.originalDebs`
+records unchanged DEB hashes. Source and original workflow-run bindings remain in
+the authenticated manifest.
 
-On the owner's trusted key-management machine, inspect the public export without importing
-system trust:
+1. Final native RPM header and header+payload signatures are verified in an
+   isolated RPM database containing only the pinned public identity.
+2. `APT-Packages-amd64` and `APT-Packages-arm64` describe the final DEBs, including
+   their real dependency fields, sizes and SHA256 hashes.
+3. `APT-Release` binds both indexes by SHA256 and size; `APT-InRelease` and
+   `APT-Release.gpg` each authenticate those exact Release bytes with the pinned
+   primary key. Metadata expires after 30 days.
+4. Final `SHA256SUMS` covers all four packages, `linux-preview.json`, `INSTALL.md`,
+   and all five APT assets. `SHA256SUMS.asc` is its detached armored signature.
+   Neither the checksum file nor its detached signature hashes itself. There is
+   no circular dependency or unauthenticated checksum claim.
 
-```sh
-gpg --show-keys --with-colons --with-fingerprint propr-desktop-rpm.asc
-```
+Canonical stage and publication verification require the exact 13-file allowlist,
+all hashes, both APT signatures, the complete Release → Packages → DEB chain, both
+native RPM signatures, and the source/runtime/payload checks. Missing, extra,
+duplicate, symlinked, changed, expired or wrong-key assets fail closed. No RPM-only
+fallback is available.
 
-Identify the `fpr` immediately following the single `pub` record. Independently compare it
-to the owner-controlled key inventory, then set the two public variables above. Publish
-`propr-desktop-rpm.asc` and the full fingerprint in an owner-controlled HTTPS release-key
-notice (for example the project's official documentation), with issuance, expiry, and
-revocation contact information. The notice must be independently discoverable, not solely
-embedded in an installer download. Announce the fingerprint through an existing trusted
-owner channel. This implementation deliberately contains no invented production fingerprint.
-The signed bundle also carries the identical public export in `linux-preview.json` under
-`rpmSigning.publicKey` and the fingerprint in both that manifest and `INSTALL.md`.
+## Direct downloads
 
-## Stage and publish
-
-After merging the reviewed workflow and provisioning authority, dispatch from `main`:
+Download every asset into a fresh directory. Obtain the public export through the
+independent notice, inspect its full primary fingerprint, and use isolated trust:
 
 ```sh
-# Preserve the observed source and its already-finalized runtime digests:
-gh workflow run desktop-linux-signed-preview.yml --ref main \
-  -f operation=sign-draft \
-  -f source_revision=ef0350859b1d726abbcb72ac40ddef77a210d384 \
-  -f unsigned_run_id=38230913378
-```
-
-This requires that run's exact finalized artifact still be retained. If it is unavailable,
-stop; do not substitute build fragments or rebuild a different source implicitly. A newer
-source/run requires explicit selection and renewed validation.
-
-Review the signed candidate and draft. Its tag is
-`desktop-linux-preview-v<version>-<first-12-source-SHA>-rpm-signed`. The existing unsigned
-tag/draft is left intact. The signed title ends with **(signed RPMs)**. Then dispatch
-`publish-draft` with the same source and **omit**
-`unsigned_run_id`. The protected publication job re-downloads the draft, validates final
-hashes, signatures, architecture, sandbox metadata, native pins and runtime references,
-and publishes a prerelease with `make_latest=false`.
-
-A failed upload can resume by re-running the failed staging job using the same run's
-`propr-desktop-rpm-signed-<run-id>` artifact. Never re-sign to resume an existing draft:
-OpenPGP signature timestamps can change bytes. Conflicting assets/tags are refused, not
-overwritten. Publication downloads only the signed draft's exact allowlisted assets;
-there is no fallback to unsigned originals, wildcard fragment download, or update feed.
-
-## Verification and installation on openSUSE / RPM systems
-
-Download all assets from the **signed** preview into one directory. Read its `INSTALL.md`.
-Compare the full fingerprint with the independently published owner notice before trusting
-the key. Extract the public key without evaluating manifest content:
-
-```sh
-python3 -c 'import json; print(json.load(open("linux-preview.json"))["rpmSigning"]["publicKey"], end="")' > propr-desktop-rpm.asc
-gpg --show-keys --with-fingerprint propr-desktop-rpm.asc
-# Only after independently confirming the full fingerprint:
-sudo rpm --import propr-desktop-rpm.asc
+KEYHOME="$(mktemp -d)"
+chmod 700 "$KEYHOME"
+gpg --homedir "$KEYHOME" --import propr-desktop-release.asc
+gpg --homedir "$KEYHOME" --with-colons --fingerprint
+# Require exactly one primary key with the full fingerprint in the notice.
+gpg --homedir "$KEYHOME" --verify SHA256SUMS.asc SHA256SUMS
+# Stop on errors, a different signer, expiry, or revocation.
 sha256sum --check SHA256SUMS
-VERSION=0.9.0
-ARCH=x64 # or arm64
-rpmkeys --checksig --verbose "./ProPR-Desktop-${VERSION}-linux-${ARCH}.rpm"
-sudo zypper install "./ProPR-Desktop-${VERSION}-linux-${ARCH}.rpm"
 ```
 
-The primary verification path is `rpmkeys --checksig --verbose` above; it needs neither
-Node nor a repository checkout. Require both the header signature and package signature
-to report `OK`, not just digests, with both key IDs matching the suffix of the independently
-confirmed full fingerprint. Reject any failed signature or digest status.
-First-time `NOKEY` / unknown-key indicates missing trust; an unsigned header means the
-wrong asset was downloaded. Stop on missing/invalid signatures, digest errors, or fingerprint
-mismatch. Do not accept an ignore/bypass option. Importing a public key establishes local
-trust; it cannot manufacture a signature on an unsigned RPM. These are explicit user
-commands: neither the application nor these helpers modifies the user's system trust store.
-The normal local-RPM install is documented in the
-[openSUSE Leap 15.6 Zypper manual](https://manpages.opensuse.org/Leap-15.6/zypper/zypper.8.en.html).
+Only after both checks succeed, follow the authenticated `INSTALL.md`. This
+explicitly authenticates direct DEB downloads; `apt install ./package.deb` alone
+does not establish that provenance. RPM users additionally require both native
+signatures with `rpmkeys --checksig --verbose`. Use
+`dnf --setopt=localpkg_gpgcheck=1` or ordinary `zypper install` after bootstrapping
+the confirmed RPM key. Never override a missing key or failed signature.
 
-For a same-version manual upgrade use `zypper install --force ./<verified-package>.rpm`
-after the same checks. Fedora/RHEL users should enforce local-package checking with
-`dnf --setopt=localpkg_gpgcheck=1 install ./<verified-package>.rpm`. Generated `INSTALL.md`
-also includes upgrade/reinstall/removal commands. This work does not claim installed
-openSUSE GUI/runtime acceptance or remove the documented ARM managed-agent limitation.
+## Exported APT repository
 
-Optionally, for exact-key verification independent of any system keyring, use the standalone
-helper with Node.js 22+, GnuPG and RPM tools. No repository checkout is needed. Select a
-reviewed full commit SHA containing the helper from `integry/propr`; this is the helper
-revision, which may differ from the package source revision. Download the pinned source
-and inspect it before running:
+This release supplies a **repository bundle**, not a live hosted APT endpoint.
+Authenticated `INSTALL.md` contains exact assembly commands: map APT-Release,
+APT-InRelease and APT-Release.gpg to `dists/preview/`; map each architecture index
+to `dists/preview/main/binary-<architecture>/Packages`; copy the unchanged DEBs
+into `pool/`. Verify both Release signatures, including equality of the plaintext
+recovered from InRelease. Use a source-scoped binary or armored public keyring:
 
-```sh
-HELPER_REVISION='REPLACE_WITH_REVIEWED_FULL_HELPER_COMMIT_SHA'
-curl --fail --location "https://raw.githubusercontent.com/integry/propr/${HELPER_REVISION}/apps/desktop/scripts/rpm-signing.mjs" -o rpm-signing.mjs
-# Inspect the downloaded helper before running it.
-node ./rpm-signing.mjs verify \
-  --rpm "./ProPR-Desktop-${VERSION}-linux-${ARCH}.rpm" \
-  --public-key propr-desktop-rpm.asc \
-  --fingerprint "$INDEPENDENTLY_CONFIRMED_FULL_FINGERPRINT"
+```text
+deb [signed-by=/absolute/path/propr-desktop-release.gpg] file:/absolute/path/apt-repository preview main
 ```
 
-It imports only that public key into a new
-temporary RPM database and requires header **and** package signatures. It rejects unsigned
-RPMs even though `rpmkeys` can return success for their digest checks. The signer uses
-RSA/SHA256 plus `--rpmv3` for an additional header+payload signature; see the
-[RPM signing manual](https://rpm.org/docs/4.20.x/man/rpmsign.8). GnuPG uses a private temporary
-home and a mode-0600 passphrase file (only its pathname is an argument), with bounded,
-non-forwarded tool output. Temporary signing material is removed on completion/failure.
+The keyring and repository must be readable by APT. A locally served copy can use
+a local HTTP URL with the same scoped keyring. There is no production URL to
+configure. Run `apt update` before downloading, and stop on authentication/hash
+errors. APT authenticates signed repository metadata and package hashes; it does
+not check an embedded DEB signature. See Debian's
+[apt-secure documentation](https://manpages.debian.org/bookworm/apt/apt-secure.8.en.html)
+and [repository format](https://wiki.debian.org/DebianRepository/Format).
 
-## Metadata and payload guarantees
+## Operator review and historical releases
 
-Schema 2 remains `unsigned-preview`. Signed schema 3 explicitly requires `--signed-rpm`
-and operator-pinned public inputs; its trust value is `rpm-signed-preview`, **not** a claim
-that the DEBs, manifest, or SHA256SUMS are OpenPGP-signed. The canonical preview reader and
-publication helper reject cross-mode bundles. `rpmSigning.originals` retains each original
-unsigned RPM checksum plus the SHA256 of its full main-header/payload region. Signing may
-only change the RPM signature area. Final artifact sizes/hashes and `SHA256SUMS` always
-refer to final bytes, including the final instructions and manifest.
+After integration, the operator independently reviews the exact main head and
+selects a frozen source and successful unsigned `stage-draft` run. Dispatch
+`sign-draft` in the authenticated workflow with those inputs. Review its distinct
+signed draft before separately authorizing `publish-draft` with the same source.
+Publication uses the existing `desktop-linux-preview-publication` environment and
+`PROPR_DESKTOP_LINUX_PREVIEW_PUBLICATION_AUTHORIZED` gate. It never promotes latest
+or stable, and Linux self-update remains disabled.
 
-Before signing and again afterward, the helpers inspect both native architectures, root:root
-4755 RPM sandbox metadata, launcher layout, runtime source/app/UI/agent digest bindings,
-and native addon bytes against hash pins read from the frozen source. Full main-header/payload
-hash equality additionally preserves all native files, package file hashes, scripts and modes.
-Independent public-only signature verification is repeated at staging and publication.
+Resume failed staging with the same `propr-desktop-linux-signed-<run-id>` artifact.
+Do not re-sign or overwrite an existing candidate: signatures can change bytes.
+Unavailable inputs require a new explicitly selected source/run, not a fallback.
 
-Standalone DEBs remain unsigned and are byte-for-byte unchanged. RPM signatures do not
-authenticate them. An apt repository authenticates package hashes through signed repository
-metadata (`InRelease` or `Release.gpg`); this preview has no apt repository. Building or
-hosting one is outside this change. Apple notarization and Ed25519 desktop update metadata
-remain separate, and Linux self-updates stay disabled.
+Unsigned schema 2 remains private validation evidence and cannot be newly
+published. Historical schema 3 (`rpm-signed-preview`, `-rpm-signed`) authenticated
+RPMs only; its DEBs and claimed checksums were unsigned. Historical immutable
+assets remain unchanged and must retain that classification. They cannot satisfy
+schema 4 publication. Existing source529d9fb image publication and private unsigned
+installer staging remain separate evidence. ARM managed-agent limitations still
+apply; signing is not end-to-end runtime acceptance.
 
-## Rotation and revocation
-
-Keep the same identity across previews until the owner deliberately rotates it. Publish a
-transition notice with both full fingerprints, effective dates, and an independently
-verified new public export; authenticate the transition with the old key where appropriate.
-Provision the new protected secret and public variables together, then review a fresh preview
-identity. Do not overwrite or relabel historical signed assets. Existing drafts pinned to
-the old identity will fail current-policy verification and must not be silently promoted.
-
-On compromise/revocation, disable signing/publication authorization immediately, remove
-access to the compromised private key, publish the owner's revocation certificate and an
-incident notice through independent channels, and identify affected packages. RPM trust
-databases do not automatically learn online revocations: users must explicitly stop trusting
-and remove the affected key after matching its full fingerprint, then bootstrap the replacement.
-Keep historical public keys/notices for audit, clearly marked revoked/retired. Never instruct
-users to bypass verification to work around expiry or revocation.
-
-## Offline regression test
-
-On Linux with Node, GnuPG, RPM tools (`rpm`, `rpmkeys`, `rpmsign`, `rpmbuild`, `rpm2cpio`),
-`cpio`, and `dpkg-deb`:
+## Required regression tests
 
 ```sh
 PROPR_REQUIRE_RPM_TESTS=1 node --test apps/desktop/scripts/rpm-signing.test.mjs \
@@ -206,8 +131,11 @@ PROPR_REQUIRE_RPM_TESTS=1 node --test apps/desktop/scripts/rpm-signing.test.mjs 
   apps/desktop/scripts/linux-preview-workflow.test.mjs
 ```
 
-Tests use disposable passphrase-protected keys and real x64/ARM64 package fixtures in
-isolated temporary directories. They require no provider credentials or host trust changes.
-
-The regular desktop PR validation-version job installs these tools and sets
-`PROPR_REQUIRE_RPM_TESTS=1`, so missing tools fail CI rather than skipping real signing tests.
+CI installs GnuPG, RPM tools, cpio, dpkg and APT and requires real disposable-key
+coverage; missing tools fail rather than skip. Tests cover both architectures,
+unchanged DEBs, native RPM preservation/signatures, signed checksums, both APT
+signatures, tampering and publication rejection. Real loopback HTTP APT update and
+download tests use isolated source lists, keyrings, status, cache and download
+directories, including successful detached-signature fallback and tamper rejection.
+They neither install packages nor alter host trust. Backup, revocation, rotation,
+and maintainer contact procedures are in the [key notice](linux-release-key.md).

@@ -1,3 +1,4 @@
+import { assertNativeLogAdmission, prepareProviderCapture, attachProviderCapture, type DiagnosticAgent } from '../../diagnostics/managedLogRuntime.js';
 /* eslint-disable max-lines -- the live Claude goal session, its transcript goal state, and the protocol loop share one boundary */
 import { spawn, execFile, type ChildProcess } from 'node:child_process';
 import fs from 'node:fs/promises';
@@ -673,6 +674,7 @@ async function detectContainer(
 }
 
 export interface ClaudeNativeGoalLaunch {
+    diagnostics?: DiagnosticAgent;
     buildDockerArgs(): Promise<string[]>;
     sessionId: string;
     transcriptPath: string;
@@ -704,7 +706,13 @@ export async function executeClaudeNativeGoal(
     const dockerArgs = await launch.buildDockerArgs();
     if (ownership?.signal.aborted) throw getExecutionAbortError(ownership.signal)!;
     const args = resolveExecutionArgs('docker', dockerArgs, options.taskId, ownership?.attemptGeneration);
-    const child = await spawnWithNetworkPolicy(args, runArgs => spawn('docker', runArgs, { stdio: ['pipe', 'pipe', 'pipe'], cwd: options.worktreePath }));
+    assertNativeLogAdmission(launch.diagnostics);
+    const child = await spawnWithNetworkPolicy(args, (runArgs, launched) => {
+        const capture = launch.diagnostics ? prepareProviderCapture(launch.diagnostics, runArgs, launched?.environment, launched?.createArgs ?? args) : null;
+        const spawned = spawn('docker', runArgs, { stdio: ['pipe', 'pipe', 'pipe'], cwd: options.worktreePath });
+        attachProviderCapture(spawned, capture);
+        return spawned;
+    });
     const abort = (): void => { child.kill('SIGTERM'); };
     ownership?.signal.addEventListener('abort', abort, { once: true });
     const stream = new ClaudeGoalStream(child, options.taskId, records => control.appendOutput(records));
