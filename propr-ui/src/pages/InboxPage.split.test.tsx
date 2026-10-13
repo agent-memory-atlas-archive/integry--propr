@@ -2,13 +2,14 @@
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
-import { notificationSchema, type Notification } from '@propr/shared';
+import { notificationSchema, type ActivityUpdatePayload, type Notification } from '@propr/shared';
 import { ToastProvider } from '../components/ui/Toast';
 import InboxPage from './InboxPage';
 import { dismissNotification, listNotifications, markNotificationRead } from '../api/notificationApi';
 import { getFileChanges } from '../api/fileChangesApi';
 import { getTasks, postTaskFollowup } from '../api/proprApi';
 import { resetFollowupSubmissions } from '../components/Inbox/followupSubmissions';
+import { MAX_SELECTION_LOOKUP_READS } from './Inbox/useInboxTriage';
 
 vi.mock('../contexts/NotificationCenterContext', () => ({
   useNotificationCenter: () => ({
@@ -27,9 +28,31 @@ vi.mock('../api/notificationApi', () => ({
 vi.mock('../api/fileChangesApi', () => ({ getFileChanges: vi.fn() }));
 vi.mock('../api/proprApi', () => ({ postTaskFollowup: vi.fn(), getTasks: vi.fn() }));
 vi.mock('../contexts/DemoModeContext', () => ({ useDemoMode: () => ({ isDemoMode: false }) }));
+const activitySocket = vi.hoisted(() => {
+  const callbacks = new Set<(payload: ActivityUpdatePayload) => void>();
+  return {
+    callbacks,
+    onActivityUpdate: (callback: (payload: ActivityUpdatePayload) => void) => {
+      callbacks.add(callback);
+      return () => { callbacks.delete(callback); };
+    },
+    subscribeToActivity: () => undefined,
+    unsubscribeFromActivity: () => undefined,
+  };
+});
 vi.mock('../contexts/useSocket', () => ({
   useSocket: () => ({ isConnected: true, onNotificationUpdate: () => () => undefined }),
+  useOptionalSocket: () => activitySocket,
 }));
+
+/** Delivers an `activity:update` for a task the way the server publishes it. */
+async function pushTaskActivity(change: ActivityUpdatePayload['change'], repository: string) {
+  await act(async () => {
+    activitySocket.callbacks.forEach(callback => callback({
+      eventType: 'activity:update', domain: 'task', change, repository, subjectId: 'task-3058', occurredAt: at(0),
+    } as ActivityUpdatePayload));
+  });
+}
 // The verdict card must never be the task workbench; if anything mounts it, this says so.
 vi.mock('../components/TaskDetails', () => ({
   default: () => <div data-testid="task-details">TaskDetails</div>,
@@ -298,7 +321,7 @@ describe('Inbox triage console', () => {
     renderInbox(`/inbox?notification=${review.id}`);
     await screen.findByRole('article', { name: review.title });
     fireEvent.click(await within(pane()!).findByRole('button', { name: 'Send /fix to PR #3057' }));
-    expect(postTaskFollowup).toHaveBeenCalledTimes(1);
+    await waitFor(() => expect(postTaskFollowup).toHaveBeenCalledTimes(1));
 
     fireEvent.click(row(ready.title));
     expect(search().get('notification')).toBe(ready.id);
@@ -374,6 +397,67 @@ describe('Inbox triage console', () => {
     expect(card.getByRole('link', { name: /Inspect in Tasks/ })).toHaveAttribute('href', '/tasks/task-3057');
   });
 
+  test('a verdict sends nothing once a run started elsewhere supersedes it after it opened', async () => {
+    mockViewport(true);
+    renderInbox(`/inbox?notification=${review.id}`);
+    const card = within(await screen.findByRole('region', { name: 'Triage verdict' }));
+    const fix = await card.findByRole('button', { name: 'Send /fix to PR #3057' });
+    vi.mocked(getTasks).mockResolvedValue({ tasks: [
+      taskRun('task-3058', 2, { title: 'Fix PR #3057: Draft validation', prNumber: 3057 }),
+      taskRun('task-3057', 18, newestRuns['task-3057']),
+    ] } as never);
+
+    await act(async () => {
+      fireEvent.click(fix);
+    });
+    expect(await screen.findByText('/fix was not sent: newer work on PR #3057 has superseded this run.')).toBeInTheDocument();
+    expect(postTaskFollowup).not.toHaveBeenCalled();
+    expect(dismissNotification).not.toHaveBeenCalled();
+    // The read that refused the command also withdraws it.
+    expect(card.queryByRole('button', { name: /^Send \// })).not.toBeInTheDocument();
+    expect(search().get('notification')).toBe(review.id);
+  });
+
+  test("a task started in the verdict's repository reads its runs again and withdraws superseded commands", async () => {
+    mockViewport(true);
+    renderInbox(`/inbox?notification=${review.id}`);
+    const card = within(await screen.findByRole('region', { name: 'Triage verdict' }));
+    await card.findByRole('button', { name: 'Send /fix to PR #3057' });
+    const reads = vi.mocked(getTasks).mock.calls.length;
+    vi.mocked(getTasks).mockResolvedValue({ tasks: [
+      taskRun('task-3058', 0, { title: 'Fix PR #3057: Draft validation', prNumber: 3057 }),
+      taskRun('task-3057', 18, newestRuns['task-3057']),
+    ] } as never);
+
+    await pushTaskActivity('created', 'integry/other');
+    await pushTaskActivity('progress', 'integry/propr');
+    expect(getTasks).toHaveBeenCalledTimes(reads);
+    expect(card.getByRole('button', { name: 'Send /fix to PR #3057' })).toBeInTheDocument();
+
+    await pushTaskActivity('created', 'integry/propr');
+    await waitFor(() => expect(card.queryByRole('button', { name: /^Send \// })).not.toBeInTheDocument());
+    expect(getTasks).toHaveBeenCalledTimes(reads + 1);
+  });
+
+  test("a review's diff falls back to the run it reviewed when its own changes cannot be read", async () => {
+    mockViewport(true);
+    vi.mocked(getFileChanges).mockImplementation(async taskId => {
+      if (taskId === 'task-3057') throw new Error('Not found');
+      return {
+        taskId, lastUpdated: at(0),
+        files: [{ path: 'src/a.ts', status: 'modified', linesAdded: 1, linesRemoved: 0, diff: '@@ -1 +1,2 @@\n+const reviewed = true;' }],
+      };
+    });
+    vi.mocked(getTasks).mockResolvedValue({ tasks: [
+      { id: 'task-3057', repository: 'integry/propr', prNumber: 3057, status: 'completed', createdAt: at(1), commitHash: null },
+      { id: 'task-3055', repository: 'integry/propr', prNumber: 3057, status: 'completed', createdAt: at(9), commitHash: 'abc1234' },
+    ] } as never);
+    renderInbox(`/inbox?notification=${review.id}`);
+    const card = within(await screen.findByRole('region', { name: 'Triage verdict' }));
+    expect(await card.findByText(/const reviewed = true;/)).toBeInTheDocument();
+    expect(vi.mocked(getFileChanges).mock.calls.map(([taskId]) => taskId)).toEqual(['task-3057', 'task-3055']);
+  });
+
   test('the verdict offers no commands while its task\'s runs cannot be read', async () => {
     mockViewport(true);
     vi.mocked(getTasks).mockRejectedValue(new Error('unavailable'));
@@ -417,6 +501,24 @@ describe('Inbox triage console', () => {
     await waitFor(() => expect(search().get('notification')).toBeNull());
     expect(listNotifications).toHaveBeenCalledTimes(2);
     expect(pane()).not.toBeInTheDocument();
+  });
+
+  test('a selection the bounded lookup does not reach is dropped with a notice', async () => {
+    mockViewport(true);
+    vi.mocked(listNotifications).mockImplementation(async ({ cursor } = {}) => (cursor
+      ? { notifications: [], unreadCount: 0, nextCursor: `${cursor}-next` }
+      : { notifications: queue, unreadCount: 0, nextCursor: 'page-2' }));
+    renderInbox('/inbox?notification=far-back');
+    await screen.findByRole('article', { name: review.title });
+    expect(await screen.findByText('That notification isn’t in the loaded Inbox. Load more to look further back.')).toBeInTheDocument();
+    expect(search().get('notification')).toBeNull();
+    expect(pane()).not.toBeInTheDocument();
+    // Each Load more follows empty pages on its own; the lookup stops after its bounded number of them.
+    const reads = vi.mocked(listNotifications).mock.calls.length;
+    expect(reads).toBeGreaterThan(MAX_SELECTION_LOOKUP_READS);
+    await act(async () => undefined);
+    expect(listNotifications).toHaveBeenCalledTimes(reads);
+    expect(screen.getAllByText('That notification isn’t in the loaded Inbox. Load more to look further back.')).toHaveLength(1);
   });
 
   test('a selection is kept while the page that would hold it fails to load', async () => {

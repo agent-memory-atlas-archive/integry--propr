@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef } from 'react';
 import { useLocation } from 'react-router-dom';
 import type { Notification } from '@propr/shared';
 import { isDialogOpen, isTypingTarget } from '../../components/TaskList/keyboardOwnership';
+import { useOptionalToast } from '../../components/ui/useToast';
 import { useInboxSelection } from '../../hooks/useInboxSelection';
 import { triageTaskId } from './triageVerdict';
 
@@ -113,6 +114,7 @@ export function useInboxTriage({
 }: InboxTriageOptions): InboxTriage {
   const queue = useMemo(() => activity.filter(notification => triageTaskId(notification) !== null), [activity]);
   const location = useLocation();
+  const addToast = useOptionalToast()?.addToast;
   const selection = useInboxSelection();
   const { select, isSplitViewport } = selection;
   // A push notification's dismiss intent also names the notification; it is not a selection.
@@ -152,10 +154,11 @@ export function useInboxTriage({
   // held is looked for on the pages not loaded yet, a bounded number of reads
   // at a time, and dropped only once it is known not to be there: every page
   // is loaded (dismissed in another tab), or it is loaded but opens no
-  // verdict (a System row, a plan).
+  // verdict (a System row, a plan). One the bounded reads do not reach is
+  // dropped too, with a notice, rather than left in the URL opening nothing.
   const previousQueueRef = useRef(queue);
   const advancedRef = useRef<{ from: string; to: string | null } | null>(null);
-  const lookupRef = useRef<{ id: string; reads: number } | null>(null);
+  const lookupRef = useRef<{ id: string; reads: number; dropped?: boolean } | null>(null);
   useEffect(() => {
     const previous = previousQueueRef.current;
     previousQueueRef.current = queue;
@@ -180,10 +183,17 @@ export function useInboxTriage({
       return;
     }
     if (lookupRef.current?.id !== selectedId) lookupRef.current = { id: selectedId, reads: 0 };
-    if (!loadMore || lookupRef.current.reads >= MAX_SELECTION_LOOKUP_READS) return;
+    if (!loadMore) return;
+    if (lookupRef.current.reads >= MAX_SELECTION_LOOKUP_READS) {
+      // Until the URL drops the selection this effect can run again; the notice is given once.
+      if (!lookupRef.current.dropped) addToast?.({ type: 'info', message: 'That notification isn’t in the loaded Inbox. Load more to look further back.' });
+      lookupRef.current.dropped = true;
+      select(null);
+      return;
+    }
     lookupRef.current.reads += 1;
     void loadMore();
-  }, [queue, notifications, isSplitViewport, select, selectedId, loaded, hasMore, loadMore]);
+  }, [queue, notifications, isSplitViewport, select, selectedId, loaded, hasMore, loadMore, addToast]);
 
   return { selected, select, closePane, isSplitViewport };
 }

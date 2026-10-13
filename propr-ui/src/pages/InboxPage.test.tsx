@@ -47,6 +47,7 @@ vi.mock('../contexts/useSocket', () => ({
       return () => socketState.notificationCallbacks.delete(callback);
     },
   }),
+  useOptionalSocket: () => null,
 }));
 
 /** Delivers a `notification:update` the way the server publishes it. */

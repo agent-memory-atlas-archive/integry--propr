@@ -1,14 +1,13 @@
-import React, { useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { Check, ExternalLink, SquareArrowOutUpRight } from 'lucide-react';
 import type { Notification } from '@propr/shared';
 import { getFileChanges } from '../../api/fileChangesApi';
-import { getTasks } from '../../api/proprApi';
 import NotificationActions from '../../components/Inbox/NotificationActions';
 import { ReferenceChip } from '../../components/TaskList/ReferenceChips';
-import { buildTaskRow, buildTaskRuns, taskPath, type TaskRunEntry } from '../../components/TaskList/rowModel';
-import type { TaskGroup } from '../../components/TaskList/types';
-import { groupTasksForDisplay } from '../../components/TaskList/utils';
+import { readTaskGroup, readTaskRuns, taskGroupRuns } from '../../components/TaskDetails/readTaskRuns';
+import { taskPath, type TaskRunEntry } from '../../components/TaskList/rowModel';
+import { useOptionalSocket } from '../../contexts/useSocket';
 import {
   formatRelativeTime,
   notificationKindLabel,
@@ -32,48 +31,82 @@ const SECTION_HEADING = 'text-[11px] font-bold uppercase tracking-wider text-sla
 
 const pluralize = (count: number, word: string) => `${count} ${word}${count === 1 ? '' : 's'}`;
 
-/** Every run of the task the notification's run belongs to, or null when it cannot be read. */
-async function readTaskGroup(taskId: string): Promise<TaskGroup | null> {
-  const data = await getTasks({ groupBy: 'task', task: taskId, limit: 1, offset: 0 });
-  return groupTasksForDisplay(data.tasks ?? []).find(entry => entry.tasks.some(task => task.id === taskId)) ?? null;
-}
-
-interface TriageRead {
+interface TriageReadState {
   diff: TriageDiff | null;
   /** The task's runs, oldest first; null until read, or when they cannot be. */
   runs: TaskRunEntry[] | null;
 }
 
+interface TriageRead extends TriageReadState {
+  /** Reads the task's runs again and shows them; null when the task is not found. */
+  readRuns: () => Promise<TaskRunEntry[] | null>;
+}
+
+/** A diff that cannot be read reads as no changes, so a review still falls back to the code it read. */
+const readDiff = async (taskId: string): Promise<TriageDiff> =>
+  trimDiffForTriage((await getFileChanges(taskId).catch(() => null))?.files ?? []);
+
 /**
  * What the card reads for the selected notification: the few changed lines
- * behind it and its task's runs, each read once per selection, never polled,
- * and silent when they fail, because the verdict is what the card is for. A
- * review commits nothing, so when its own run has no changes the card shows
- * the newest earlier run of the task that pushed a commit, the code it read.
+ * behind it and its task's runs, each read once per selection and silent when
+ * they fail, because the verdict is what the card is for. A review commits
+ * nothing, so when its own run shows no changes the card shows the newest
+ * earlier run of the task that pushed a commit, the code it read. The runs are
+ * read again whenever a task in the repository starts or settles, so a newer
+ * run started elsewhere withdraws the commands it supersedes.
  */
-function useTriageRead(taskId: string | null, isReview: boolean): TriageRead {
-  const [read, setRead] = useState<TriageRead>({ diff: null, runs: null });
+function useTriageRead(taskId: string | null, isReview: boolean, repository: string | null): TriageRead {
+  const [read, setRead] = useState<TriageReadState>({ diff: null, runs: null });
+  // Every runs read takes a number; only the newest one started is shown, and none once the selection changes.
+  const runsReadRef = useRef(0);
+  const readRuns = useCallback(async () => {
+    if (!taskId) return null;
+    const sequence = ++runsReadRef.current;
+    const runs = await readTaskRuns(taskId);
+    if (sequence === runsReadRef.current) setRead(previous => ({ ...previous, runs }));
+    return runs;
+  }, [taskId]);
+
   useEffect(() => {
     setRead({ diff: null, runs: null });
     if (!taskId) return;
     let current = true;
+    const sequence = ++runsReadRef.current;
     const group = readTaskGroup(taskId).catch(() => null);
     void group.then(found => {
-      if (current && found) setRead(previous => ({ ...previous, runs: buildTaskRuns(buildTaskRow(found)) }));
+      if (current && found && sequence === runsReadRef.current) setRead(previous => ({ ...previous, runs: taskGroupRuns(found) }));
     });
-    const readDiff = async () => {
-      const own = trimDiffForTriage((await getFileChanges(taskId)).files ?? []);
+    const readTriageDiff = async () => {
+      const own = await readDiff(taskId);
       if (own.files.length > 0 || !isReview || !current) return own;
       const found = await group;
       const reviewed = found && current ? reviewedRunId(found.tasks, taskId) : null;
-      return reviewed && current ? trimDiffForTriage((await getFileChanges(reviewed)).files ?? []) : own;
+      return reviewed && current ? readDiff(reviewed) : own;
     };
-    readDiff()
-      .then(diff => { if (current) setRead(previous => ({ ...previous, diff })); })
-      .catch(() => undefined);
-    return () => { current = false; };
+    void readTriageDiff().then(diff => { if (current) setRead(previous => ({ ...previous, diff })); });
+    return () => {
+      current = false;
+      runsReadRef.current += 1;
+    };
   }, [taskId, isReview]);
-  return read;
+
+  const socket = useOptionalSocket();
+  const { onActivityUpdate, subscribeToActivity, unsubscribeFromActivity } = socket ?? {};
+  useEffect(() => {
+    if (!taskId || !onActivityUpdate) return;
+    const stop = onActivityUpdate(payload => {
+      if (payload.domain !== 'task' || payload.change === 'progress') return;
+      if (repository && payload.repository && payload.repository !== repository) return;
+      void readRuns().catch(() => undefined);
+    });
+    subscribeToActivity?.();
+    return () => {
+      stop();
+      unsubscribeFromActivity?.();
+    };
+  }, [taskId, repository, readRuns, onActivityUpdate, subscribeToActivity, unsubscribeFromActivity]);
+
+  return { ...read, readRuns };
 }
 
 const ReviewVerdict: React.FC<{ notification: Notification }> = ({ notification }) => {
@@ -156,7 +189,8 @@ const TriageVerdictCard: React.FC<TriageVerdictCardProps> = ({
   paneControls,
 }) => {
   const taskId = triageTaskId(notification);
-  const { diff, runs } = useTriageRead(taskId, notification.target.type === 'review');
+  const repository = notification.target.type === 'system_failure' ? null : notification.target.repository;
+  const { diff, runs, readRuns } = useTriageRead(taskId, notification.target.type === 'review', repository);
   const reference = notificationReference(notification);
   const pullRequestUrl = notificationPullRequestUrl(notification);
   const status = notificationStatus(notification);
@@ -223,6 +257,7 @@ const TriageVerdictCard: React.FC<TriageVerdictCardProps> = ({
         <NotificationActions
           notification={notification}
           runs={runs}
+          readRuns={readRuns}
           mutationsEnabled={mutationsEnabled}
           onCommandSent={() => onCommandSent(notification.id)}
           className="ml-auto"

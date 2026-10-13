@@ -38,7 +38,19 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 390, height: 844 
     const review = page.getByRole('button', { name: 'Send /review to PR #2663' }).filter({ visible: true });
     await expect(review).toHaveCount(1);
     if (viewport.width >= 1280) await expect(page.getByRole('button', { name: 'Send /ultrafix to PR #2663' }).filter({ visible: true })).toHaveCount(1);
-    else await expect(page.getByRole('button', { name: 'More commands for PR #2663' }).filter({ visible: true })).toHaveCount(1);
+    else {
+      const more = page.getByRole('button', { name: 'More commands for PR #2663' }).filter({ visible: true });
+      await expect(more).toHaveCount(1);
+      // The commands sit near the top of a phone's screen, so the menu opens downward and stays on it.
+      await more.click();
+      const menu = page.getByRole('menu');
+      await expect(menu.getByRole('menuitem', { name: 'Send /ultrafix to PR #2663' })).toBeVisible();
+      const [trigger, opened] = [await more.boundingBox(), await menu.boundingBox()];
+      expect(opened!.y).toBeGreaterThanOrEqual(trigger!.y + trigger!.height);
+      expect(opened!.x).toBeGreaterThanOrEqual(0);
+      await capture(page, 'task-latest-run-commands-390-menu');
+      await page.keyboard.press('Escape');
+    }
     await capture(page, `task-latest-run-commands-${viewport.width}`);
 
     await review.click();
@@ -48,3 +60,19 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 390, height: 844 
     expect(followups).toEqual([`${newest} /review`]);
   });
 }
+
+test('1440px the /tasks split pane offers the newest run its commands and withdraws them on an earlier run', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await stubRuns(page, []);
+  await page.goto(`/tasks?task=${newest}`);
+  const pane = page.getByTestId('task-details');
+  await expect(pane).toHaveAttribute('data-embedded', 'true');
+  await expect(pane.getByRole('button', { name: 'Send /review to PR #2663' }).filter({ visible: true })).toHaveCount(1);
+  await expect(pane.getByRole('button', { name: 'Send /ultrafix to PR #2663' }).filter({ visible: true })).toHaveCount(1);
+  await capture(page, 'task-latest-run-commands-split-1440');
+
+  // Opening the earlier run from the pane's own timeline withdraws the commands.
+  await pane.getByRole('button', { name: /Multi-model review/ }).first().click();
+  await expect(page).toHaveURL(new RegExp(`task=${earlier}`));
+  await expect(pane.getByRole('button', { name: /^Send \// })).toHaveCount(0);
+});
