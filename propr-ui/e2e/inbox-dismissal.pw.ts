@@ -349,7 +349,7 @@ test('phones keep one command line per row, with extra commands in a menu and a 
 });
 
 test('a preview image that fails to load leaves no placeholder beside the commands', async ({ page }) => {
-  await page.setViewportSize({ width: 1280, height: 800 });
+  await page.setViewportSize(singleColumnDesktop);
   await stubInbox(page, triageNotifications);
   await page.route('https://github.com/user-attachments/assets/**', route => route.abort());
   await page.goto('/inbox');
@@ -437,6 +437,8 @@ test('wide screens triage the selected row in a verdict card beside the queue', 
   const epic = page.getByRole('article', { name: epicTitle });
   await expect(epic).toBeVisible();
   await expect(page.getByRole('region', { name: 'Triage verdict' })).toHaveCount(0);
+  // Commands are sent from the verdict card only, never from queue rows.
+  await expect(page.getByTestId('inbox-split-list').getByRole('button', { name: /^(Send \/|More commands)/ })).toHaveCount(0);
 
   await epic.getByRole('button', { name: epicTitle, exact: true }).click();
   await expect(page).toHaveURL(/notification=review-2511/);
@@ -454,6 +456,7 @@ test('wide screens triage the selected row in a verdict card beside the queue', 
   const queueBox = (await page.getByTestId('inbox-split-list').boundingBox())!;
   const verdictBox = (await verdict.boundingBox())!;
   expect(verdictBox.width).toBeGreaterThan(queueBox.width * 1.5);
+  await expect(page.getByTestId('inbox-split-list').getByRole('button', { name: /^(Send \/|More commands)/ })).toHaveCount(0);
   await capture(page, 'inbox-triage-console-desktop.png');
 
   await verdict.getByRole('button', { name: 'Dismiss' }).click();

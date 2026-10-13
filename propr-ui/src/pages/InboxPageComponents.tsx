@@ -188,7 +188,7 @@ interface InboxCardProps {
   mutationsEnabled: boolean;
   /** The notification open in the triage pane beside the queue. */
   selectedId?: string | null;
-  /** On wide screens the row opens its verdict beside the queue instead of navigating. */
+  /** On wide screens the row opens its verdict beside the queue instead of navigating, and leaves its commands to the verdict. */
   onSelect?: (id: string) => void;
   /** Lays the row out as on phones, for the narrow queue beside an open verdict. */
   compact?: boolean;
@@ -292,11 +292,14 @@ export const InboxCard: React.FC<InboxCardProps> = ({ notification, onDismiss, o
             {isNotificationPreviewEligible(notification) && (
               <PreviewThumbnails media={notification.previewMedia} limit={1} size="rail" />
             )}
-            <NotificationActions
-              notification={notification}
-              mutationsEnabled={mutationsEnabled}
-              onCommandSent={() => onDismiss(notification.id)}
-            />
+            {/* Beside the triage verdict the commands live only in the verdict card. */}
+            {!onSelect && (
+              <NotificationActions
+                notification={notification}
+                mutationsEnabled={mutationsEnabled}
+                onCommandSent={() => onDismiss(notification.id)}
+              />
+            )}
           </div>
         </div>
         {canDismiss && (
