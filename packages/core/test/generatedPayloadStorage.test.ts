@@ -221,7 +221,11 @@ test('real same-device bind mount is rejected in an isolated mount namespace', a
     try {
       execFileSync('mount', ['--bind', ${JSON.stringify(outside)}, ${JSON.stringify(path.join(f.worktree, 'node_modules', 'dependency'))}], { env: { ...process.env, LC_ALL: 'C' } });
     } catch (error) {
-      if (error.status === 32 && /permission denied|operation not permitted/i.test(error.stderr?.toString() ?? '')) process.exit(77);
+      const spawnDenied = (error.code === 'EACCES' || error.code === 'EPERM')
+        && error.syscall === 'spawnSync mount' && error.path === 'mount';
+      const mountDenied = error.status === 32
+        && /permission denied|operation not permitted/i.test(error.stderr?.toString() ?? '');
+      if (spawnDenied || mountDenied) process.exit(77);
       throw error;
     }
     const lifecycle = new StorageLifecycle(${JSON.stringify(f.lifecycle.root)});
