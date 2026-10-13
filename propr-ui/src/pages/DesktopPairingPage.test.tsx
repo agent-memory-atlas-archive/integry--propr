@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
-import { MemoryRouter } from 'react-router-dom';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { MemoryRouter, useNavigate } from 'react-router-dom';
 import DesktopPairingPage from './DesktopPairingPage';
 import { AuthProvider } from '../contexts/AuthContext';
 import { approveDesktopPairing, getDesktopPairingApproval, DesktopPairingUnavailableError } from '../api/desktopAuth';
@@ -12,6 +12,11 @@ vi.mock('../api/desktopAuth', async importOriginal => ({
 }));
 
 const pairingId = `dpr_${'A'.repeat(22)}`;
+const nextPairingId = `dpr_${'B'.repeat(22)}`;
+const PairingNavigation = () => {
+  const navigate = useNavigate();
+  return <button onClick={() => void navigate(`/desktop/pairing?pairing_id=${nextPairingId}`)}>Review next request</button>;
+};
 const pending = {
   pairingId,
   clientName: 'Alice’s MacBook',
@@ -86,6 +91,57 @@ describe('DesktopPairingPage', () => {
     expect(screen.getByRole('button', { name: 'Approve desktop' })).toBeInTheDocument();
     expect(approveDesktopPairing).not.toHaveBeenCalled();
   });
+
+  for (const change of ['pairing', 'identity', 'unmount'] as const) {
+    for (const outcome of ['success', 'failure'] as const) {
+      it(`ignores delayed logout ${outcome} after ${change} changes`, async () => {
+        vi.mocked(getDesktopPairingApproval).mockImplementation(async id => ({ ...pending, pairingId: id }));
+        let finishLogout!: (response: { ok: boolean; status: number }) => void;
+        let finishCurrentLogout!: (response: { ok: boolean; status: number }) => void;
+        const fetchMock = vi.fn().mockImplementationOnce(() => new Promise(resolve => { finishLogout = resolve; }))
+          .mockImplementationOnce(() => new Promise(resolve => { finishCurrentLogout = resolve; }));
+        vi.stubGlobal('fetch', fetchMock);
+        const flow = (id: string) => (
+          <MemoryRouter initialEntries={[`/desktop/pairing?pairing_id=${pairingId}`]}>
+            <AuthProvider user={{ id, login: 'alice', username: 'alice', displayName: 'Alice', email: null, avatarUrl: null, role: 'admin', permissions: [], authorizationSource: 'local' }}>
+              <PairingNavigation />
+              <DesktopPairingPage />
+            </AuthProvider>
+          </MemoryRouter>
+        );
+        const view = render(flow('101'));
+        fireEvent.click(await screen.findByRole('button', { name: 'Change GitHub account' }));
+        const location = { href: '', hostname: 'localhost', search: '', pathname: '/desktop/pairing' };
+        vi.stubGlobal('window', { location, document, setTimeout, clearTimeout });
+        fireEvent.click(screen.getByRole('button', { name: 'Sign out of ProPR and sign in again' }));
+        expect(screen.getByRole('button', { name: 'Signing out…' })).toBeDisabled();
+
+        if (change === 'pairing') fireEvent.click(screen.getByRole('button', { name: 'Review next request' }));
+        else if (change === 'identity') view.rerender(flow('202'));
+        else view.unmount();
+        if (change !== 'unmount') {
+          expect(await screen.findByRole('button', { name: 'Approve desktop' })).toBeEnabled();
+          fireEvent.click(screen.getByRole('button', { name: 'Change GitHub account' }));
+          expect(screen.getByRole('button', { name: 'Sign out of ProPR and sign in again' })).toBeEnabled();
+          // A newer operation can start without waiting for the obsolete fetch.
+          fireEvent.click(screen.getByRole('button', { name: 'Sign out of ProPR and sign in again' }));
+        }
+
+        await act(async () => { finishLogout({ ok: outcome === 'success', status: outcome === 'success' ? 200 : 500 }); });
+        expect(location.href).toBe('');
+        expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+        expect(approveDesktopPairing).not.toHaveBeenCalled();
+        if (change !== 'unmount') {
+          expect(screen.getByRole('button', { name: 'Signing out…' })).toBeDisabled();
+          await act(async () => { finishCurrentLogout({ ok: true, status: 200 }); });
+          const currentId = change === 'pairing' ? nextPairingId : pairingId;
+          await waitFor(() => expect(location.href).toContain('/login?logged_out=true'));
+          expect(new URL(location.href, 'http://localhost').searchParams.get('redirect_to')).toBe(`/desktop/pairing?pairing_id=${currentId}`);
+          expect(fetchMock).toHaveBeenCalledTimes(2);
+        }
+      });
+    }
+  }
 
   it('offers unauthenticated users sign-in for the same request without fetching or approving', () => {
     render(<MemoryRouter initialEntries={[`/desktop/pairing?pairing_id=${pairingId}`]}><DesktopPairingPage /></MemoryRouter>);

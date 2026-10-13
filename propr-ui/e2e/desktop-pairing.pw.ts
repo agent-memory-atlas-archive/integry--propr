@@ -39,7 +39,7 @@ async function fixture(page: Page, options: { hosted?: boolean; expiresIn?: numb
         : { pairingId, clientName, status: 'approved', expiresAt: new Date(Date.now() + 600_000).toISOString() } });
     }
     if (url.pathname.endsWith('/approval')) return route.fulfill({ json: {
-      pairingId, clientName, status: 'pending', createdAt: new Date().toISOString(),
+      pairingId: url.pathname.split('/').at(-2), clientName, status: 'pending', createdAt: new Date().toISOString(),
       expiresAt: new Date(Date.now() + (options.expiresIn ?? 600_000)).toISOString(),
     } });
     if (url.pathname === '/api/auth/user') return route.fulfill({ status: loggedOut ? 401 : 200, json: loggedOut ? { error: 'Unauthorized' } : {
@@ -153,6 +153,34 @@ test('expiry while account change is open removes actions and fences delayed log
   await expect(page.getByRole('button', { name: 'Approve desktop' })).toHaveCount(0);
   await expect(page.getByRole('button', { name: 'Sign out of ProPR and sign in again' })).toHaveCount(0);
   expect(new URL(page.url()).pathname).toBe('/desktop/pairing');
+  expect(state.approvalCount()).toBe(0);
+});
+
+test('pairing history navigation fences delayed account-switch logout', async ({ page }) => {
+  const state = await fixture(page, { delayLogout: true });
+  await page.getByRole('button', { name: 'Change GitHub account', exact: true }).click();
+  await page.getByRole('button', { name: 'Sign out of ProPR and sign in again' }).click();
+  await expect.poll(state.logoutUrl).toContain('/api/auth/logout');
+  const nextPairingId = `dpr_${'B'.repeat(22)}`;
+  const nextApproval = page.waitForResponse(response => new URL(response.url()).pathname.endsWith(`/${nextPairingId}/approval`));
+  // Change the route in the mounted app, leaving the original logout pending.
+  await page.evaluate(id => {
+    history.pushState(null, '', `/desktop/pairing?pairing_id=${id}`);
+    dispatchEvent(new PopStateEvent('popstate'));
+  }, nextPairingId);
+  await nextApproval;
+  await expect(page.getByRole('button', { name: 'Approve desktop' })).toBeVisible();
+  await page.getByRole('button', { name: 'Change GitHub account', exact: true }).click();
+  await expect(page.getByRole('button', { name: 'Sign out of ProPR and sign in again' })).toBeEnabled();
+
+  const logoutFinished = page.waitForResponse(response => new URL(response.url()).pathname === '/api/auth/logout');
+  state.releaseLogout();
+  await logoutFinished;
+  await page.evaluate(() => new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
+  expect(new URL(page.url()).pathname).toBe('/desktop/pairing');
+  expect(new URL(page.url()).searchParams.get('pairing_id')).toBe(nextPairingId);
+  await expect(page.getByRole('button', { name: 'Sign out of ProPR and sign in again' })).toBeEnabled();
+  await expect(page.getByRole('alert')).toHaveCount(0);
   expect(state.approvalCount()).toBe(0);
 });
 
