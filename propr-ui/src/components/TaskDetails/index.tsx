@@ -96,7 +96,7 @@ const useMobileHeaderCollapsed = () => {
   const [summary, setSummary] = useState<HTMLDivElement | null>(null);
   const [collapsed, setCollapsed] = useState(false);
   useEffect(() => {
-    const root = summary?.closest<HTMLElement>('[data-testid="task-details"]');
+    const root = summary?.closest<HTMLElement>('[data-scroll-lock-target]');
     if (!summary || !root || typeof IntersectionObserver === 'undefined') return;
     const observer = new IntersectionObserver(([entry]) => {
       const top = entry.rootBounds?.top ?? 0;
@@ -193,6 +193,17 @@ const TimelineHeading: React.FC<{ runCount: number }> = ({ runCount }) => (
     )}
   </div>
 );
+
+/** Pin timelines that fit; taller ones must scroll freely to keep every run reachable. */
+const observeTimeline = (node: HTMLDivElement | null) => {
+  const scroller = node?.parentElement;
+  if (!node || !scroller || typeof ResizeObserver === 'undefined') return;
+  const update = () => node.style.setProperty('--timeline-position', node.offsetHeight <= scroller.clientHeight ? 'sticky' : 'static');
+  const observer = new ResizeObserver(update);
+  for (const target of [node, scroller]) observer.observe(target);
+  update();
+  return () => observer.disconnect();
+};
 
 const TaskDetails: React.FC<TaskDetailsProps> = ({ taskId: taskIdProp, embedded = false, onDeleted, runs, onSelectRun, paneControls }) => {
   const params = useParams();
@@ -311,7 +322,7 @@ const TaskDetails: React.FC<TaskDetailsProps> = ({ taskId: taskIdProp, embedded 
   };
 
   return (
-    <div data-testid="task-details" data-embedded={embedded || undefined} className="h-full min-h-0 flex flex-col overflow-x-hidden overflow-y-auto bg-white pb-24 sm:overflow-hidden sm:pb-0">
+    <div data-scroll-lock-target data-testid="task-details" data-embedded={embedded || undefined} className="h-full min-h-0 flex flex-col overflow-x-hidden overflow-y-auto bg-white pb-24 sm:overflow-hidden sm:pb-0">
       <MobileCompactBar
         contextStripProps={contextStripProps}
         actionBarProps={actionBarProps}
@@ -358,10 +369,10 @@ const TaskDetails: React.FC<TaskDetailsProps> = ({ taskId: taskIdProp, embedded 
         >
           {/* Keep 528px for step columns after pane padding, scrollbar and border. */}
           <div
-            data-testid="task-timeline-scroll"
+            ref={observeTimeline} data-testid="task-timeline-scroll"
             role="region"
             aria-label="Task timeline"
-            className={`w-full min-w-0 flex-shrink-0 border-b border-gray-200${wideOnly(embedded, '[@container_task-workspace_(min-width:960px)]:border-b-0 [@container_task-workspace_(min-width:960px)]:border-r')}`}
+            className={`w-full min-w-0 flex-shrink-0 border-b border-gray-200${wideOnly(embedded, '[@container_task-workspace_(min-width:960px)]:[position:var(--timeline-position,static)] [@container_task-workspace_(min-width:960px)]:top-0 [@container_task-workspace_(min-width:960px)]:self-start [@container_task-workspace_(min-width:960px)]:border-b-0 [@container_task-workspace_(min-width:960px)]:border-r')}`}
           >
             <div className={`z-[1] flex ${PANE_HEADER_HEIGHT} items-center justify-between gap-3 border-b border-slate-200 bg-white px-4 sm:sticky sm:top-0`}>
               <TimelineHeading runCount={runs?.length ?? 0} />

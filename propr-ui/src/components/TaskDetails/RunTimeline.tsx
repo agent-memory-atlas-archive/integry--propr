@@ -73,12 +73,13 @@ const RunTimeline: React.FC<RunTimelineProps> = ({ runs, selectedTaskId, onSelec
   const [expanded, setExpanded] = useState(true);
 
   const selectedRef = useRef<HTMLLIElement>(null);
-  const revealed = useRef(false);
+  const revealed = useRef<string | null>(null);
   useEffect(() => {
-    if (revealed.current || !selectedRef.current) return;
-    revealed.current = true;
+    if (revealed.current === selectedTaskId || !selectedRef.current) return;
+    const initialReveal = revealed.current === null;
+    revealed.current = selectedTaskId;
     // Opening the first run must leave both panes (and the mobile title) at the top.
-    if (runs[0]?.task.id === selectedTaskId) return;
+    if (initialReveal && runs[0]?.task.id === selectedTaskId) return;
     const row = selectedRef.current;
     let scroller = row.parentElement;
     while (scroller && !/auto|scroll/.test(getComputedStyle(scroller).overflowY)) scroller = scroller.parentElement;
@@ -103,7 +104,7 @@ const RunTimeline: React.FC<RunTimelineProps> = ({ runs, selectedTaskId, onSelec
           // A queued run has not started, so it has no runtime to count yet.
           const waiting = run.outcome === 'waiting';
           return (
-            <li ref={selected ? selectedRef : undefined} key={run.task.id} className="relative scroll-mt-3 sm:scroll-mt-[3.75rem]" data-testid="run-timeline-run">
+            <li ref={selected ? selectedRef : undefined} key={run.task.id} className="relative scroll-mt-14 sm:scroll-mt-[3.75rem]" data-testid="run-timeline-run">
               <button
                 type="button"
                 aria-current={selected || undefined}

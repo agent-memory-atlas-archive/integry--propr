@@ -314,7 +314,7 @@ const AssignmentControl: React.FC<{ assignment: TaskAssignment; dense?: boolean 
     return (
       <div role="group" aria-label="Assignment" data-testid="task-assignment-error" className="inline-flex shrink-0 items-center gap-1 whitespace-nowrap rounded-sm border border-amber-200/70 bg-amber-50 px-1.5 py-0.5 text-[11px] font-medium text-amber-700">
         <AlertTriangle aria-hidden="true" className="h-3 w-3 flex-none" />
-        <span title={error}>Assignment error</span>
+        <span title={error}>Assignees unavailable</span>
         <button
           type="button"
           onClick={reload}

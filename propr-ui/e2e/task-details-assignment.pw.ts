@@ -280,7 +280,7 @@ for (const width of [320, 390]) {
     await expect(editor.getByRole('searchbox')).not.toBeFocused();
     await page.keyboard.press('Shift+Tab');
     await expect(editor.getByRole('button', { name: 'Cancel' })).toBeFocused();
-    await expect(page.locator('body')).toHaveCSS('overflow', 'hidden');
+    await expect(page.locator('body')).toHaveCSS('position', 'fixed');
     await expect(details).toHaveCSS('overflow', 'hidden');
     const box = (await editor.boundingBox())!;
     expect(box.x).toBeGreaterThanOrEqual(0);
@@ -375,7 +375,7 @@ for (const [width, height] of [[1440, 900], [390, 844]] as const) {
     const details = page.getByTestId('task-details');
     const failed = details.getByTestId('task-assignment-error').filter({ visible: true });
     await expect(failed).toHaveCount(1);
-    await expect(failed).toContainText("Assignment error");
+    await expect(failed).toContainText("Assignees unavailable");
     expect(await failed.innerText()).not.toMatch(/[·•|]/);
     await expect(details.getByTestId('task-assignment').filter({ visible: true })).toHaveCount(0);
     await expectNoHorizontalOverflow(page);

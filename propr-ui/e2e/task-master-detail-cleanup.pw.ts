@@ -18,6 +18,7 @@ for (const width of [1333, 1584]) {
     await expect(list.locator('.task-repo-filter > button')).toContainText('propr');
     await expect(list.locator('.task-repo-filter > button > [data-repo-count]')).toBeHidden();
     await expect(list.locator('.task-assignee-filter-label')).toBeVisible();
+    await expect(list.locator('.task-assignee-filter-icon')).toBeHidden();
     await expect(list.locator('.task-assignee-filter-label')).toHaveText('@octocat');
     const repoLabel = list.locator('.task-repo-filter > button > :nth-child(2)');
     expect(await repoLabel.evaluate(node => node.getBoundingClientRect().width)).toBeGreaterThan(40);
@@ -38,6 +39,7 @@ for (const width of [1333, 1584]) {
     await page.goto(`/tasks?task=${selectedRun}`);
     await expect(list.locator('.task-repo-filter > button')).toContainText('All Repos');
     await expect(list.locator('.task-assignee-filter-label')).toBeVisible();
+    await expect(list.locator('.task-assignee-filter-icon')).toBeHidden();
     await expect(list.locator('.task-assignee-filter-label')).toHaveText('All assignees');
   });
 }

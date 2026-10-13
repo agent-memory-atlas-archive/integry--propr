@@ -90,7 +90,7 @@ const analysis = JSON.stringify({
   error_analysis: 'No section should be clipped by an ancestor with hidden overflow.',
 });
 
-async function stubTaskDetailsApis(page: Page, selectedIndex = 0): Promise<void> {
+async function stubTaskDetailsApis(page: Page, selectedIndex = 0, runCount = 50): Promise<void> {
   await page.route('**/api/**', async route => {
     const pathname = new URL(route.request().url()).pathname;
     if (pathname === '/api/auth/demo-mode') {
@@ -98,7 +98,7 @@ async function stubTaskDetailsApis(page: Page, selectedIndex = 0): Promise<void>
       return;
     }
     if (pathname === '/api/tasks') {
-      await route.fulfill({ json: { tasks: Array.from({ length: 50 }, (_, index) => ({
+      await route.fulfill({ json: { tasks: Array.from({ length: runCount }, (_, index) => ({
         id: index === selectedIndex ? taskId : `responsive-run-${index}`,
         repository: 'integry/propr-responsive-workspace-fixture', repositoryOwner: 'integry', repositoryName: 'propr-responsive-workspace-fixture',
         issueNumber: 2252, title: `Followup: Responsive run ${index + 1}`, status: 'completed',
@@ -264,12 +264,55 @@ for (const width of [390, 1280]) {
       const row = (await header.boundingBox())!;
       const scrollport = (await owner.boundingBox())!;
       expect(row.y).toBeGreaterThanOrEqual(scrollport.y + (width < 640 ? 0 : 44));
+      if (width < 640 && selectedIndex > 0) {
+        const compact = page.getByTestId('task-mobile-compact-bar');
+        await expect(compact).toBeVisible();
+        await expect.poll(async () => {
+          const bar = (await compact.boundingBox())!;
+          return (await header.boundingBox())!.y - (bar.y + bar.height);
+        }).toBeGreaterThanOrEqual(0);
+      }
       if (selectedIndex === 0) expect(await owner.evaluate(node => node.scrollTop)).toBe(0);
       else expect(await owner.evaluate(node => node.scrollTop)).toBeGreaterThan(0);
-      if (process.env.PROPR_CAPTURE_PREVIEWS && width === 1280) {
+      if (process.env.PROPR_CAPTURE_PREVIEWS) {
         await mkdir('../.propr/previews', { recursive: true });
-        await page.screenshot({ animations: 'disabled', path: `../.propr/previews/task-initial-run-${selectedIndex + 1}.png` });
+        await page.screenshot({ animations: 'disabled', path: `../.propr/previews/task-initial-run-${selectedIndex + 1}-${width}.png` });
       }
     });
   }
+}
+
+for (const runCount of [2, 50]) {
+  test(`desktop keeps a ${runCount}-run timeline reachable beside a long trace`, async ({ page }) => {
+    await page.setViewportSize({ width: 1440, height: 820 });
+    await stubTaskDetailsApis(page, 0, runCount);
+    await page.route(`**/api/task/${taskId}/live-details`, route => route.fulfill({ json: { events, todos: [], currentTask: null } }));
+    await page.route(`**/api/task/${taskId}/history`, route => route.fulfill({ json: {
+      history: history.slice(0, 1),
+      taskInfo: { title: 'Pinned timeline beside a long execution trace', type: 'issue', number: 2252,
+        issueNumber: 2252, repoOwner: 'integry', repoName: 'propr-responsive-workspace-fixture' },
+    } }));
+    await page.goto(`/tasks/${taskId}`);
+    const timeline = page.getByTestId('task-timeline-scroll');
+    const owner = page.getByTestId('task-workspace-scroll');
+    await expect(page.getByTestId('run-timeline-run')).toHaveCount(runCount);
+    await expect(timeline).toHaveCSS('position', runCount === 2 ? 'sticky' : 'static');
+    const height = (await timeline.boundingBox())!.height;
+    const port = (await owner.boundingBox())!;
+    expect(runCount === 2 ? height < port.height : height > port.height).toBe(true);
+    if (runCount === 2) {
+      await owner.evaluate(node => { node.scrollTop = 500; });
+      await expect.poll(async () => Math.round((await timeline.boundingBox())!.y)).toBe(Math.round(port.y));
+    } else {
+      await page.getByTestId('run-timeline-run').last().scrollIntoViewIfNeeded();
+    }
+    await expect(page.getByTestId('run-timeline-run').last().getByRole('button').first()).toBeInViewport();
+    expect(await timeline.evaluate(node => getComputedStyle(node).overflowY)).not.toMatch(/auto|scroll/);
+    if (process.env.PROPR_CAPTURE_PREVIEWS && runCount === 2) {
+      await mkdir('../.propr/previews', { recursive: true });
+      await page.screenshot({ animations: 'disabled', path: '../.propr/previews/task-sticky-timeline-desktop.png' });
+    }
+    await page.getByTestId('run-timeline-run').first().scrollIntoViewIfNeeded();
+    await expect(page.getByTestId('run-timeline-run').first().getByRole('button').first()).toBeInViewport();
+  });
 }

@@ -49,7 +49,13 @@ describe('RunTimeline', () => {
     expect(scroll).toHaveBeenCalledExactlyOnceWith({ block: 'start' });
     expect(scroll.mock.instances[0]).toBe(screen.getByRole('button', { current: true }).closest('li'));
     rerender(<RunTimeline runs={[...manyRuns]} selectedTaskId="many-43" onSelectRun={vi.fn()}>updated steps</RunTimeline>);
-    expect(scroll).toHaveBeenCalledTimes(1);
+    expect(scroll).toHaveBeenCalledTimes(2);
+    expect(scroll.mock.instances[1]).toBe(screen.getByRole('button', { current: true }).closest('li'));
+    rerender(<RunTimeline runs={[...manyRuns]} selectedTaskId="many-43" onSelectRun={vi.fn()}>streamed steps</RunTimeline>);
+    expect(scroll).toHaveBeenCalledTimes(2);
+    rerender(<RunTimeline runs={manyRuns} selectedTaskId="many-0" onSelectRun={vi.fn()}>first run again</RunTimeline>);
+    expect(scroll).toHaveBeenCalledTimes(3);
+    expect(scroll.mock.instances[2]).toBe(screen.getByRole('button', { current: true }).closest('li'));
     delete (HTMLElement.prototype as Partial<HTMLElement>).scrollIntoView;
   });
 
