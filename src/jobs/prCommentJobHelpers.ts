@@ -2,7 +2,7 @@ import { logger } from '@propr/core';
 import type { Logger } from 'pino';
 import fs from 'fs-extra';
 import type { Redis } from 'ioredis';
-import { TaskStates } from '@propr/core';
+import { TaskStates, getExecutionLogDirectory } from '@propr/core';
 import type { WorkerStateManager } from '@propr/core';
 import { db } from '@propr/core';
 import { filterCommentByAuthor } from '@propr/core';
@@ -366,7 +366,7 @@ export function createSessionIdCallbackForPR(
             }
 
             const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-            const logDir = '/tmp/claude-logs';
+            const logDir = getExecutionLogDirectory();
             await fs.ensureDir(logDir);
 
             const filePrefix = `issue-${pullRequestNumber}-${timestamp}`;
