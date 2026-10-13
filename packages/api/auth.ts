@@ -229,6 +229,12 @@ export function setupAuth(app: Express, demoModeAtStartup = isDemoMode()): Socke
         const redisStore = new RedisStore({ client: redisClient, prefix: 'propr:session:' });
 
         const cookieDomain = getSessionCookieDomain();
+        // Extension-profile mutations require application/json and X-ProPR-Extensions: 1
+        // in createExtensionProfileRoutes; server.ts rejects untrusted CORS origins.
+        // The extension MCP gateway instead requires an explicit bearer grant.
+        // CodeQL's CSRF query does not recognize these preflight/bearer guards.
+        // Regression coverage: test/extensionProfileRoutes.test.ts.
+        // codeql[js/missing-token-validation]
         const sessionMiddleware = session({
             store: redisStore,
             secret: sessionSecret!,
