@@ -3,12 +3,15 @@ import { closeConnection } from '@propr/core';
 after(closeConnection);
 import assert from 'node:assert/strict';
 import express from 'express';
+import { rateLimit } from 'express-rate-limit';
 import type { AddressInfo } from 'node:net';
 import { createSessionCsrfProtection } from '../auth.js';
 
 test('extension session CSRF protection leaves consent, desktop and unrelated API behavior intact', async t => {
   const app = express();
   const session: any = {};
+  // Bound fixture requests before session authentication and CSRF authorization.
+  app.use(rateLimit({ windowMs: 60_000, limit: 100 }));
   app.use((req, _res, next) => { req.isAuthenticated = (() => true) as any; req.session = session; next(); });
   app.use(createSessionCsrfProtection('https://ui.example.com', undefined));
   app.use((_req, res) => res.json({ ok: true }));
