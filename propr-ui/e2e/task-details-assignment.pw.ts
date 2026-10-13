@@ -246,7 +246,7 @@ for (const width of [320, 390]) {
     await expect(git.getByRole('link', { name: '#2894' })).toBeVisible();
     await expect(git).not.toContainText('integry/');
     const runtime = metadata.getByRole('group', { name: 'Execution runtime' });
-    expect(await runtime.locator('[title="claude-opus-5-5"] > span').textContent()).toBe('Opus 5.5');
+    await expect(runtime.locator('[title="Claude Opus 5.5"] > span')).toHaveText('Claude Opus 5.5');
     await expect(runtime).toContainText('20m 0s');
     const peopleBox = (await assignment.boundingBox())!;
     const runtimeBox = (await runtime.boundingBox())!;
