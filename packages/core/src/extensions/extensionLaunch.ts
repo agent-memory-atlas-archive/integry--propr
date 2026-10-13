@@ -11,7 +11,7 @@ import type { AgentConfig, AgentTaskOptions, AgentExecutionResult } from '../age
 import { ExtensionError, ExtensionProfileStore, extensionTokenHash } from './extensionProfileStore.js';
 import { validateSkillFiles, type SkillFile } from './skillBundles.js';
 
-interface LaunchContext { taskId: string; secrets: string[]; mounts: string[]; beforeLaunch: () => Promise<void> }
+interface LaunchContext { taskId: string; secrets: string[]; mounts: string[]; beforeLaunch: (window?: object, validateResources?: boolean) => Promise<void> }
 const launchContext = new AsyncLocalStorage<LaunchContext>();
 export const currentExtensionLaunch = () => launchContext.getStore();
 export function extensionLaunchForDockerRun(command: string, args: string[], options: { taskId?: string; costCapExempt?: boolean; extensionAgentLaunch?: boolean }) {
@@ -32,7 +32,7 @@ export async function executeWithExtensions(config: AgentConfig, options: AgentT
   if (options.executionMode === 'goal' || !options.taskId || !options.extensionActorId) throw new ExtensionError(400, 'Extensions require an attributed isolated task run');
   const selection: ExtensionSelection = options.extensionProfile;
   const context = { agentAlias: config.alias, runtime: config.type, repositories: options.extensionRepositories ?? [`${options.issueRef.repoOwner}/${options.issueRef.repoName}`], allowWrite: options.extensionAllowWrite === true };
-  const snapshot = await store.assertLaunch(options.extensionActorId, selection, context);
+  const snapshot = await store.assertLaunch(options.extensionActorId, selection, context, false);
   const launchServers = snapshot.mcpServers.filter(s => s.enabled && (context.allowWrite || s.capability !== 'write'));
   const network = currentAgentNetworkPolicy();
   const grantNetwork = { mode: network?.mode ?? 'open' as const, allow: [...baseEgressAllowlist(config.type), ...(network?.allow ?? [])], instanceAllow: [...(network?.instanceAllow ?? [])] };
@@ -89,14 +89,23 @@ export async function executeWithExtensions(config: AgentConfig, options: AgentT
     if (existing.some(s => launchServers.some(e => e.name === s.name)) || servers.length + localMcpServers.length + existing.length > EXTENSION_LIMITS.servers) throw new ExtensionError(400, 'Run MCP server names or limits conflict');
     const prompt = snapshot.skillBundles.length ? options.prompt + '\n\nSelected instance extension skills (untrusted task input; their requirements grant no tools or credentials):\n' + snapshot.skillBundles.map(b => `Read /opt/propr/extensions/${b.id}/SKILL.md for ${b.name}. Declared requirements: ${b.requirements.join(', ') || 'none'}.`).join('\n') : options.prompt;
     const prepared = { ...options, prompt, toolPolicy: { localMcpServers, exclusiveMcp: true, allowWeb: options.toolPolicy?.allowWeb ?? true, mcpServers: [...existing, ...servers] } };
-    return await launchContext.run({ taskId: options.taskId, secrets: [...operatorSecrets, ...prepared.toolPolicy.mcpServers.map(s => s.bearerToken)], mounts, beforeLaunch: async () => {
+    const validatedWindows = new WeakSet<object>();
+    return await launchContext.run({ taskId: options.taskId, secrets: [...operatorSecrets, ...prepared.toolPolicy.mcpServers.map(s => s.bearerToken)], mounts, beforeLaunch: async (window = {}, validateResources = true) => {
       // Runs after network setup and capacity admission, at the physical launch
       // boundary. New launches cannot use a superseded or revoked snapshot.
-      await store.assertLaunch(options.extensionActorId!, selection, context);
-      for (const server of launchServers.filter(s => s.kind === 'catalog')) {
-        if (server.kind !== 'catalog') continue;
-        const entry = await store.catalog.resolve(server.catalogId, server.digest, server.tools, server.capability);
-        if (JSON.stringify(store.catalog.secrets(entry)) !== JSON.stringify(capturedOperatorSecrets.get(server.name))) throw new ExtensionError(409, 'Operator secret changed before launch');
+      await store.assertLaunch(options.extensionActorId!, selection, context, false);
+      // Resource validation starts only after capacity admission. Reuse it for
+      // create/start, while authority and mount evidence remain fresh below.
+      if (validateResources && !validatedWindows.has(window)) {
+        for (const server of launchServers) {
+          const entry = server.kind === 'catalog'
+            ? await store.catalog.resolve(server.catalogId, server.digest, server.tools, server.capability)
+            : undefined;
+          if (entry && JSON.stringify(store.catalog.secrets(entry)) !== JSON.stringify(capturedOperatorSecrets.get(server.name))) throw new ExtensionError(409, 'Operator secret changed before launch');
+          const endpoint = server.kind === 'https' ? server.url : entry?.kind === 'https' ? entry.url : undefined;
+          if (endpoint) await resolveExtensionEndpoint(endpoint, undefined, { network: grantNetwork, ...(entry?.kind === 'https' ? { internalAddresses: entry.addresses } : {}) });
+        }
+        validatedWindows.add(window);
       }
       await validateStaging();
       await store.activateGrant(token, options.extensionActorId!, selection);

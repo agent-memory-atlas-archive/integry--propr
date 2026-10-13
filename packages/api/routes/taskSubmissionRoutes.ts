@@ -346,7 +346,7 @@ export function createTaskSubmissionRoutes({ db, services = {} }: { db: Knex; se
       const config = await checkAccess(req, repository);
       if (body.extensionProfile && req.get('X-ProPR-Extensions') !== '1') throw Object.assign(new Error('Extension selection requires a preflight-protected request'), { status: 403 });
       if (body.extensionProfile) await new ExtensionProfileStore(db).read(req.user!.id, body.extensionProfile);
-      const payloadHash = fingerprint({ repository, instruction: body.instruction, extensionProfile: body.extensionProfile, ...(body.extensionProfile ? { extensionAllowWrite: body.extensionAllowWrite === true } : {}), agentAlias: body.agentAlias || '', model: body.model || '', todoIds: body.todoIds || [], files: await goalUploadIdentity(files), ...submissionAutomation(body), ...submissionBudget(body) });
+      const payloadHash = fingerprint({ repository, instruction: body.instruction, ...(body.extensionProfile ? { extensionProfile: body.extensionProfile, extensionAllowWrite: body.extensionAllowWrite === true } : {}), agentAlias: body.agentAlias || '', model: body.model || '', todoIds: body.todoIds || [], files: await goalUploadIdentity(files), ...submissionAutomation(body), ...submissionBudget(body) });
       let row = await db<TaskSubmission>('task_submissions').where({ user_id: String(req.user!.id), submission_key: key }).first();
       if (row && row.payload_hash !== payloadHash) { res.status(409).json({ error: 'Submission identity was already used with different content' }); return; }
       if (!row) {

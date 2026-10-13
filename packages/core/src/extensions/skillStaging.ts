@@ -8,6 +8,10 @@ import path from 'node:path';
 import { ExtensionError } from './extensionProfileStore.js';
 import { validateSkillFiles, type SkillFile } from './skillBundles.js';
 
+export function assertSkillStagingPlatform(platform: NodeJS.Platform = process.platform): void {
+  if (platform !== 'linux') throw new ExtensionError(503, 'Extension skill staging requires a Linux worker with /proc/self/fd available');
+}
+
 const same = (a: Stats, b: Stats) => a.dev === b.dev && a.ino === b.ino && a.mode === b.mode && (!a.isFile() || (a.size === b.size && a.mtimeMs === b.mtimeMs && a.ctimeMs === b.ctimeMs));
 /** Inspect every component, not just the final directory. */
 export async function inspectStagingAncestors(directory: string): Promise<Map<string, Stats>> {
@@ -24,6 +28,7 @@ export async function inspectStagingAncestors(directory: string): Promise<Map<st
 }
 /** Linux directory handles anchor each operation; no path component can redirect a write. */
 async function openDirectory(directory: string, create = false) {
+  assertSkillStagingPlatform();
   let handle = await fs.open('/', constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
   try {
     for (const component of path.resolve(directory).slice(1).split('/').filter(Boolean)) {

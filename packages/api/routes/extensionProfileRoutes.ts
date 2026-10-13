@@ -34,12 +34,12 @@ export function createExtensionProfileRoutes(store = new ExtensionProfileStore(d
       const results = [];
       for (const server of profile.mcpServers.filter(s => s.enabled)) {
         let reachable = false;
-        if (server.kind === 'catalog') { results.push({ name: server.name, reachable: false }); continue; }
+        if (server.kind === 'catalog') { results.push({ name: server.name, reachable: null, status: 'not_validated' }); continue; }
         try {
           const response = await requestExtensionMcp(server.url, { jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-03-26', capabilities: {}, clientInfo: { name: 'propr-validation', version: '1' } } }, secrets[server.name]) as { result?: unknown };
           reachable = Boolean(response?.result);
         } catch { /* No response content or error from upstream is disclosed. */ }
-        results.push({ name: server.name, reachable });
+        results.push({ name: server.name, reachable, status: reachable ? 'reachable' : 'unavailable' });
       }
       await store.authorize(actor); return { results };
     }),

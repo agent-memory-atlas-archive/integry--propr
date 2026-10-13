@@ -12,7 +12,7 @@ export const listExtensionProfiles = () => request<{ instanceId: string; profile
 export const saveExtensionProfile = (input: ExtensionProfileInput, secrets: Record<string, string | null>, expected?: ExtensionSelection) => request<{ profile: ExtensionProfileRevision }>('/profiles', { input, secrets, expected });
 export const deleteExtensionProfile = (selection: ExtensionSelection) => request('/delete', { selection });
 export const extensionProfileHistory = (profileId: string) => request<{ revisions: ExtensionProfileRevision[] }>(`/profiles/${encodeURIComponent(profileId)}/history`);
-export const validateExtensionProfile = (selection: ExtensionSelection) => request<{ results: { name: string; reachable: boolean }[] }>('/validate', { selection });
+export const validateExtensionProfile = (selection: ExtensionSelection) => request<{ results: { name: string; reachable: boolean | null; status?: 'reachable' | 'unavailable' | 'not_validated' }[] }>('/validate', { selection });
 export const importGithubSkill = (repository: string, commit: string, directory: string) => request<{ bundle: ExtensionSkillBundle }>('/skills/github', { repository, commit, directory });
 export async function importArchiveSkill(file: File): Promise<{ bundle: ExtensionSkillBundle }> {
   if (file.size > 5 * 1024 * 1024) throw new Error('Skill archives must be at most 5 MiB.');

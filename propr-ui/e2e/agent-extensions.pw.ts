@@ -18,7 +18,7 @@ test('instance extension editor shows capability boundaries, immutable provenanc
   await page.route('**/api/instance/extensions/v1**', route => {
     const request = route.request(); const url = new URL(request.url());
     if (url.pathname.endsWith('/history')) return route.fulfill({ json: { revisions: [profile] } });
-    if (url.pathname.endsWith('/validate')) return route.fulfill({ json: { results: [{ name: 'documentation', reachable: true }] } });
+    if (url.pathname.endsWith('/validate')) return route.fulfill({ json: { results: [{ name: 'documentation', reachable: true, status: 'reachable' }, { name: 'operator-documentation', reachable: null, status: 'not_validated' }] } });
     if (request.method() === 'POST') {
       expect(request.headers()['x-propr-extensions']).toBe('1');
       return route.fulfill({ json: { profile: { ...profile, ...request.postDataJSON().input, revision: 4 } } });
@@ -36,9 +36,10 @@ test('instance extension editor shows capability boundaries, immutable provenanc
   await expect(section.getByText(/Codex profile runs use/)).toContainText('.codex/config.toml');
   const password = section.getByLabel(/Replace bearer token/);
   await expect(password).toHaveValue('');
+  await expect(section.getByText('(configured; write-only)', { exact: true })).toBeVisible();
   await expect(section.getByText(/SHA-256 d853bea/)).toBeVisible();
   await section.getByRole('button', { name: 'Validate saved MCP connectivity' }).click();
-  await expect(section.getByRole('status')).toHaveText('documentation: reachable');
+  await expect(section.getByRole('status')).toHaveText('documentation: reachable · operator-documentation: not validated');
   await section.getByRole('button', { name: 'Revision history' }).click();
   await expect(section.getByText(/Revision 3.*administrator 1/)).toBeVisible();
   await section.getByLabel('Add operator catalog entry').selectOption('operator-documentation');
@@ -60,9 +61,11 @@ test('instance extension editor shows capability boundaries, immutable provenanc
     await page.setViewportSize({ width: 1280, height: 1900 });
     await section.scrollIntoViewIfNeeded();
     const directory = path.resolve('../.propr/previews'); await mkdir(directory, { recursive: true });
-    await section.getByText('Capability and security boundary').locator('..').screenshot({ path: path.join(directory, 'agent-extensions-codex-boundary.png'), animations: 'disabled' });
+    await section.getByRole('button', { name: 'Validate saved MCP connectivity' }).click();
+    await expect(section.getByRole('status')).toContainText('operator-documentation: not validated');
+    await section.getByRole('status').screenshot({ path: path.join(directory, 'extension-validation-status.png'), animations: 'disabled' });
     await writeFile(path.join(directory, 'manifest.json'), JSON.stringify({ previews: [
-      { path: '.propr/previews/agent-extensions-codex-boundary.png', title: 'Codex extension limitations', description: 'Editor boundary note explains ignored user provider configuration and refusal of repository Codex configuration.' },
+      { path: '.propr/previews/extension-validation-status.png', title: 'Catalog validation status', description: 'Saved MCP validation distinguishes catalog entries that have not been validated from unavailable endpoints.' },
     ], toolSuggestions: [] }));
   }
 });

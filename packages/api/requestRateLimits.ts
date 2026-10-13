@@ -1,4 +1,3 @@
-import { createHash } from 'node:crypto';
 import type { Express } from 'express';
 import { networkInterfaces } from 'node:os';
 import { ipKeyGenerator, rateLimit, type Options, type RateLimitRequestHandler } from 'express-rate-limit';
@@ -174,18 +173,9 @@ export function createRequestRateLimiter(policy: RequestRateLimitPolicy): RateLi
 export function createApiRequestRateLimiter(
   environment: RateLimitEnvironment = process.env,
 ): RateLimitRequestHandler {
-  const options = requestRateLimitOptions(resolveRequestRateLimitPolicies(environment).api);
-  const ipKey = options.keyGenerator!;
-  return rateLimit({ ...options, keyGenerator: (request, response) => {
-    // Each run has its own durable MCP call/byte budget. Containers sharing a
-    // bridge address must not spend one another's API request quota. Keep tokens
-    // out of limiter storage; malformed or missing grants use the ordinary IP key.
-    if (request.method === 'POST' && /^\/api\/extensions\/mcp\/[a-z][a-z0-9_-]{0,47}\/?$/.test(request.originalUrl.split('?')[0])) {
-      const token = request.get('Authorization')?.match(/^Bearer ([A-Za-z0-9_-]{43})$/)?.[1];
-      if (token) return `extension-grant:${createHash('sha256').update(token).digest('hex')}`;
-    }
-    return ipKey(request, response);
-  } });
+  // Authentication has not happened yet, including on the extension gateway.
+  // Every token (valid, malformed or forged) must share the client's IP bound.
+  return createRequestRateLimiter(resolveRequestRateLimitPolicies(environment).api);
 }
 
 export function createAuthRequestRateLimiter(

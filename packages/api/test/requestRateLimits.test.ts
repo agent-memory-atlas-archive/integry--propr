@@ -294,20 +294,20 @@ test('rejects invalid overrides instead of silently disabling protection', () =>
 });
 
 
-test('extension gateway quotas are isolated by grant across servers and shared bridge IPs', async () => {
+test('distinct well-formed forged grants share the global IP quota before the handler', async () => {
   const app = express();
   app.use('/api', createApiRequestRateLimiter({ PROPR_API_RATE_LIMIT_MAX: '2' }));
-  app.post('/api/extensions/mcp/:serverName', (_req, res) => res.json({ ok: true }));
-  app.get('/api/resource', (_req, res) => res.json({ ok: true }));
-  const server = await listenTestApp(app); openServers.push(server.close);
-  const call = (name: string, token?: string) => fetch(`${server.origin}/api/extensions/mcp/${name}`, { method: 'POST', headers: token ? { Authorization: `Bearer ${token}` } : {} });
-  for (const token of ['a'.repeat(43), 'b'.repeat(43)]) {
-    assert.equal((await call('docs', token)).status, 200);
-    assert.equal((await call('other', token)).status, 200);
-    assert.equal((await call('docs', token)).status, 429);
+  let lookups = 0;
+  app.post('/api/extensions/mcp/:serverName', (_req, res) => { lookups++; res.sendStatus(401); });
+  app.get('/api/resource', (_req, res) => res.sendStatus(200));
+  const server = await listenTestApp(app);
+  openServers.push(server.close);
+  for (const [index, token] of ['a'.repeat(43), 'b'.repeat(43), 'c'.repeat(43)].entries()) {
+    const response = await fetch(`${server.origin}/api/extensions/mcp/${index === 1 ? 'other' : 'docs'}`, {
+      method: 'POST', headers: { Authorization: `Bearer ${token}` },
+    });
+    assert.equal(response.status, index < 2 ? 401 : 429);
   }
-  assert.equal((await call('docs')).status, 200);
-  assert.equal((await call('docs', 'malformed')).status, 200);
-  assert.equal((await call('docs')).status, 429);
-  assert.equal((await fetch(`${server.origin}/api/resource`, { headers: { Authorization: `Bearer ${'c'.repeat(43)}` } })).status, 429, 'grant headers on unrelated routes cannot escape IP quota');
+  assert.equal(lookups, 2, 'excess requests never reach grant lookup or database writes');
+  assert.equal((await fetch(`${server.origin}/api/resource`)).status, 429);
 });

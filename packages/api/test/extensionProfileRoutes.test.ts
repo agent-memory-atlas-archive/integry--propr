@@ -85,6 +85,8 @@ test('extension HTTP boundary requires fresh durable administration, preflight J
   for (const projection of [catalogSnapshot, catalogList, catalogHistory]) {
     for (const sentinel of ['API_KEY', 'OPERATOR_DOCS_KEY', 'CATALOG_SECRET_VALUE_SENTINEL', entry.executable, 'CATALOG_ARGUMENT_SENTINEL', 'CATALOG_PATH_SENTINEL', catalogFile]) assert.ok(!JSON.stringify(projection).includes(sentinel), sentinel);
   }
+  const catalogValidation = await fetch(base + '/validate', { method: 'POST', headers, body: JSON.stringify({ selection: { instanceId: catalogSnapshot.profile.instanceId, profileId: catalogSnapshot.profile.profileId, revision: catalogSnapshot.profile.revision } }) });
+  assert.deepEqual(await catalogValidation.json(), { results: [{ name: 'operator', reachable: null, status: 'not_validated' }] });
   // Native restores deliberately remove ciphertext. Both public and authenticated
   // descriptors must produce connectivity results instead of an unseal error.
   let validationRequests = 0;
@@ -104,7 +106,7 @@ test('extension HTTP boundary requires fresh durable administration, preflight J
     await database('extension_profile_revisions').where({ profile_id: restored.profileId, revision: restored.revision }).update({ secrets_encrypted: '' });
     const validated = await fetch(base + '/validate', { method: 'POST', headers, body: JSON.stringify({ selection: { instanceId: restored.instanceId, profileId: restored.profileId, revision: restored.revision } }) });
     assert.equal(validated.status, 200);
-    assert.deepEqual(await validated.json(), { results: [{ name: 'synthetic', reachable: true }] });
+    assert.deepEqual(await validated.json(), { results: [{ name: 'synthetic', reachable: true, status: 'reachable' }] });
   }
   assert.equal(validationRequests, 2);
   for (const commit of ['main', 'v1.0', 'a'.repeat(39)]) assert.equal((await fetch(base + '/skills/github', { method: 'POST', headers, body: JSON.stringify({ repository: 'fixture/repo', commit, directory: 'skills/test' }) })).status, 400);

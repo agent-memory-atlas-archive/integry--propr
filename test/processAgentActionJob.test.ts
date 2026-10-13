@@ -385,3 +385,13 @@ describe('buildAgentActionPrompt', () => {
     assert.match(buildAgentActionPrompt({ ...input, definition: definition({ repositories: [] }) }), /concerns no repository/);
   });
 });
+
+
+test('extension automation captures instance restriction before agent.executeTask', async t => {
+  const { extensionLaunchIntegrationFixture } = await import('./fixtures/extensionLaunchIntegration.js');
+  const fixture = await extensionLaunchIntegrationFixture(); t.after(fixture.cleanup);
+  const h = harness({ run: actingRun({ ownerId: '1', definitionSnapshot: definition({ ownerId: '1', extensionProfile: fixture.selection }) }), execute: fixture.execute });
+  const result = await createAgentActionProcessor(h.deps)(actionJob());
+  assert.equal(result.status, 'complete');
+  assert.equal(fixture.captures(), 1);
+});

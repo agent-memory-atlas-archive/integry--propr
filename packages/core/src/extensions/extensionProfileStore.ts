@@ -102,7 +102,7 @@ export class ExtensionProfileStore {
     await this.database('extension_skill_bundles').insert({ id: descriptor.id, instance_id: descriptor.instanceId, descriptor: JSON.stringify(descriptor), files_json: JSON.stringify(validated.files) });
     return descriptor;
   }
-  async assertLaunch(actor: string, selection: ExtensionSelection, context: { agentAlias: string; runtime: string; repositories: string[]; allowWrite: boolean }): Promise<ExtensionProfileRevision> {
+  async assertLaunch(actor: string, selection: ExtensionSelection, context: { agentAlias: string; runtime: string; repositories: string[]; allowWrite: boolean }, validateResources = true): Promise<ExtensionProfileRevision> {
     if (!['claude', 'codex'].includes(context.runtime)) throw new ExtensionError(400, 'Extension profiles require Claude or Codex task execution');
     const snapshot = await this.read(actor, selection);
     const current = await this.database('extension_profiles').where({ id: selection.profileId, instance_id: selection.instanceId, revision: selection.revision, enabled: true, deleted: false }).first('id');
@@ -112,6 +112,7 @@ export class ExtensionProfileStore {
     const credentials = await this.database('extension_profile_revisions').where({ profile_id: selection.profileId, revision: selection.revision }).first('secrets_encrypted');
     for (const server of snapshot.mcpServers.filter(s => s.enabled && (context.allowWrite || s.capability !== 'write'))) {
       if (server.kind === 'https' && server.authentication === 'bearer' && (!snapshot.secrets[server.name]?.configured || credentials?.secrets_encrypted === '')) throw new ExtensionError(409, 'MCP authentication is not configured');
+      if (!validateResources) continue;
       if (server.kind === 'catalog') await this.catalog.resolve(server.catalogId, server.digest, server.tools, server.capability);
       else await resolveExtensionEndpoint(server.url);
     }
@@ -154,7 +155,7 @@ export class ExtensionProfileStore {
       ...(/^catalog:[a-z][a-z0-9_-]{0,63}@[0-9a-f]{64}$/.test(host) ? { host } : {}),
     }));
     await this.database('task_history').insert({
-      task_id: row.task_id, state: 'claude_execution', timestamp: new Date().toISOString(), reason: 'Extension MCP network accounting',
+      task_id: row.task_id, state: 'processing', timestamp: new Date().toISOString(), reason: 'Extension MCP network accounting',
       metadata: JSON.stringify({ event: 'network.extensions', network, calls: row.calls, responseBytes: row.bytes, requestBytes: row.request_bytes, denied: row.network_denials, resolutions }),
     });
   }

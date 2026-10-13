@@ -512,7 +512,9 @@ test('gateway accounting and denied resolutions survive grant cleanup in per-tas
   await store.recordGatewayNetwork(token, '10.43.21.9', false);
   await store.recordGatewayNetwork(token, `catalog:local-docs@${'a'.repeat(64)}`, true);
   await store.retainGatewayTelemetry(token); await database('extension_run_grants').delete();
-  const event = JSON.parse((await database('task_history').first()).metadata);
+  const history = await database('task_history').first();
+  assert.equal(history.state, 'processing', 'extension telemetry uses a runtime-neutral state');
+  const event = JSON.parse(history.metadata);
   assert.equal(event.event, 'network.extensions'); assert.deepEqual(event.network, { mode: 'restricted' }); assert.equal(event.denied, 3); assert.equal(event.calls, 1); assert.equal(event.responseBytes, 1024 * 1024); assert.deepEqual(event.resolutions, [{ allowed: false }, { allowed: false }, { allowed: false }, { host: `catalog:local-docs@${'a'.repeat(64)}`, allowed: true }]);
   for (const sentinel of ['10.43.21.9', 'catalog-endpoint-sentinel', 'unrelated-base-allow.example']) assert.ok(!JSON.stringify(event).includes(sentinel));
   assert.ok(!JSON.stringify(event).includes(secret)); assert.ok(!JSON.stringify(event).includes(token));
@@ -674,4 +676,64 @@ test('staging creation preserves its original error when cleanup also fails', as
   });
   t.mock.method(fs, 'mkdtemp', async () => { throw original; });
   await assert.rejects(createStagingDirectory(root), error => error === original);
+});
+
+
+test('skill staging explicitly rejects unsupported worker platforms', async () => {
+  const { assertSkillStagingPlatform, ensureStagingRoot } = await import('../src/extensions/skillStaging.js');
+  assert.doesNotThrow(() => assertSkillStagingPlatform('linux'));
+  const original = Object.getOwnPropertyDescriptor(process, 'platform')!;
+  try {
+    for (const platform of ['darwin', 'win32', 'freebsd'] as const) {
+      Object.defineProperty(process, 'platform', { ...original, value: platform });
+      await assert.rejects(ensureStagingRoot('/unused-skill-staging'), /requires a Linux worker with \/proc\/self\/fd/);
+    }
+  } finally { Object.defineProperty(process, 'platform', original); }
+});
+
+test('one create/start window reuses catalog validation but fences authority at every boundary', async t => {
+  const { executeWithExtensions, currentExtensionLaunch } = await import('../src/extensions/extensionLaunch.js');
+  const { operatorCatalogDigest } = await import('../src/extensions/operatorCatalog.js');
+  const { database, store } = await fixture(); t.after(() => database.destroy());
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'extension-window-')); t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const entry = { id: 'local-docs', kind: 'stdio' as const, executable: '/usr/bin/env', args: ['node', '--version'], tools: ['lookup'], capability: 'read' as const, secretEnv: {} };
+  const file = path.join(root, 'catalog.json'); await fs.writeFile(file, JSON.stringify([entry])); store.environment.PROPR_EXTENSION_CATALOG_FILE = file;
+  const profile = await store.save('1', { ...input(), mcpServers: [{ kind: 'catalog', name: 'docs', catalogId: entry.id, digest: operatorCatalogDigest(entry), tools: ['lookup'], capability: 'read', enabled: true }] }, {});
+  const { OperatorCatalog } = await import('../src/extensions/operatorCatalog.js');
+  const resolve = t.mock.method(OperatorCatalog.prototype, 'resolve');
+  const config = { type: 'codex', alias: 'codex-main' } as any;
+  const options = { extensionProfile: select(profile), extensionActorId: '1', taskId: 'window-run', issueRef: { repoOwner: 'team', repoName: 'repo', number: 1 }, worktreePath: '/unused', prompt: 'Selected run', githubToken: '' };
+  const result = { success: true, logs: '', modifiedFiles: [], modelUsed: 'synthetic', executionTimeMs: 1 };
+  await executeWithExtensions(config, options, async () => {
+    const launch = currentExtensionLaunch()!; const window = {};
+    const preparedReads = resolve.mock.callCount();
+    await launch.beforeLaunch(window, false);
+    assert.equal(resolve.mock.callCount(), preparedReads, 'the pre-admission check cannot populate the resource cache');
+    await launch.beforeLaunch(window); await launch.beforeLaunch(window); await launch.beforeLaunch(window);
+    assert.equal(resolve.mock.callCount(), preparedReads + 1);
+    await launch.beforeLaunch({});
+    assert.equal(resolve.mock.callCount(), preparedReads + 2, 'a later container has a fresh validation window');
+    await database('instance_members').where({ github_user_id: '1' }).update({ role: 'member' });
+    await assert.rejects(launch.beforeLaunch(window), /durable instance administrator/);
+    return result;
+  }, store);
+});
+
+
+test('DNS is resolved once per create/start window and checked again for later containers', async t => {
+  const dns = (await import('node:dns/promises')).default;
+  const lookup = t.mock.method(dns, 'lookup', async () => [{ address: '8.8.8.8', family: 4 }] as any);
+  const { executeWithExtensions, currentExtensionLaunch } = await import('../src/extensions/extensionLaunch.js');
+  const { database, store } = await fixture(); t.after(() => database.destroy());
+  const profile = await store.save('1', { ...input(), mcpServers: [{ ...input().mcpServers[0], kind: 'https', url: 'https://docs.example.com/mcp', authentication: 'none' }] }, {});
+  const options = { extensionProfile: select(profile), extensionActorId: '1', taskId: 'dns-window-run', issueRef: { repoOwner: 'team', repoName: 'repo', number: 1 }, worktreePath: '/unused', prompt: 'Selected run', githubToken: '' };
+  const result = { success: true, logs: '', modifiedFiles: [], modelUsed: 'synthetic', executionTimeMs: 1 };
+  await executeWithExtensions({ type: 'codex', alias: 'codex-main' } as any, options, async () => {
+    const launch = currentExtensionLaunch()!; const window = {}; const preparedLookups = lookup.mock.callCount();
+    await launch.beforeLaunch(window); await launch.beforeLaunch(window); await launch.beforeLaunch(window);
+    assert.equal(lookup.mock.callCount(), preparedLookups + 1);
+    lookup.mock.mockImplementation(async () => [{ address: '127.0.0.1', family: 4 }] as any);
+    await assert.rejects(launch.beforeLaunch({}), /public addresses/);
+    return result;
+  }, store);
 });

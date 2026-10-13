@@ -3,7 +3,7 @@ import { after, test } from 'node:test';
 import knex from 'knex';
 import fs from 'fs-extra';
 import path from 'node:path';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import type { Request, Response } from 'express';
 import { closeConnection, insertTaskSubmission } from '@propr/core';
 import { up } from '../../core/src/db/migrations/20260922000000_add_task_submissions.js';
@@ -81,9 +81,16 @@ test('route preserves instructions, validates before creation, publishes routing
     const retry = response();
     await routes.retry(request({}), retry.res);
     assert.equal(retry.state.body.state, 'queued');
+    // Seed the pre-extension identity for an in-flight replay across upgrade.
+    const legacyIdentity = { repository: 'owner/repo', instruction, agentAlias: '', model: '', todoIds: ['todo-1'], files: [] };
+    await db('task_submissions').where({ submission_key: 'stable-key' }).update({ payload_hash: createHash('sha256').update(JSON.stringify(legacyIdentity)).digest('hex') });
     const duplicate = response();
     await routes.submit(request({ repository: 'owner/repo', instruction, todoIds: ['todo-1'] }), duplicate.res);
     assert.equal(duplicate.state.body.id, first.state.body.id);
+    const noSelectionReplay = response();
+    await routes.submit(request({ repository: 'owner/repo', instruction, todoIds: ['todo-1'], extensionProfile: null }), noSelectionReplay.res);
+    assert.equal(noSelectionReplay.state.status, 200);
+    assert.equal(noSelectionReplay.state.body.id, first.state.body.id, 'an explicit absent selection retains the pre-upgrade identity');
     assert.equal(calls.filter(call => call.route === 'POST /repos/{owner}/{repo}/issues').length, 1);
     assert.equal(queues, 2);
     const changed = response();

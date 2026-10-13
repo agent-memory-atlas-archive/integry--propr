@@ -232,12 +232,13 @@ async function startDockerCommand(
 ): Promise<ExecutionResult> {
     if (command === 'docker' && args[0] === 'run') assertNativeLogAdmission(options.diagnostics);
     const executionArgs = resolveExecutionArgs(command, args, options.taskId, ownershipContext?.attemptGeneration);
+    const extensionValidationWindow = {};
     deadline.remaining();
-    await extensionLaunchForDockerRun(command, args, options)?.beforeLaunch();
+    await extensionLaunchForDockerRun(command, args, options)?.beforeLaunch(extensionValidationWindow, false);
     const admission = command === 'docker' && args[0] === 'run' && !options.costCapExempt
         ? await prepareAdmittedAgent(executionArgs, {
             createArgs: async () => {
-                await extensionLaunchForDockerRun(command, args, options)?.beforeLaunch();
+                await extensionLaunchForDockerRun(command, args, options)?.beforeLaunch(extensionValidationWindow);
                 return withWorkflowExecutionDeadline(command, executionArgs, deadline.remaining());
             },
             signal: executionSignal, taskId: options.taskId, extraEnvVars: options.extraEnvVars,
@@ -247,7 +248,7 @@ async function startDockerCommand(
     try {
         const abortError = getExecutionAbortError(admission?.signal);
         if (abortError) throw abortError;
-        await extensionLaunchForDockerRun(command, args, options)?.beforeLaunch();
+        await extensionLaunchForDockerRun(command, args, options)?.beforeLaunch(extensionValidationWindow);
         const remainingMs = deadline.remaining();
         // Transfer the same budget to the subprocess timer. Keep timeout reporting
         // in terms of the caller's original limit and preserve partial output.

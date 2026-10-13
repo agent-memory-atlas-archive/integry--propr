@@ -141,3 +141,5 @@ call the approved tool, an unselected grant cannot, redirects are refused and
 oversized responses fail. Qualified pinned Claude/Codex CLI tests check exclusive
 MCP catalogs and environment authentication. The browser test renders the actual
 settings editor and checks security/provenance/history and write-only controls.
+
+Skill-bearing runs require a Linux worker with `/proc/self/fd` available for secure directory-handle staging. Non-Linux workers reject skill staging with an explicit error; MCP-only profiles do not require these staging primitives.
