@@ -348,21 +348,19 @@ const AdminSettingsPage: React.FC = () => {
 
   return (
     <div className="flex flex-col h-full bg-white">
-      {/* Anchored Header */}
-      <div className="flex-shrink-0 pb-4 pt-6">
-        <div className="mx-auto max-w-5xl px-4">
-          <h2 className="text-xl font-semibold text-slate-900">Settings</h2>
-          {isDemoMode && (
-            <p className="mt-1 text-[12px] text-amber-700">
-              Demo mode is read-only. Settings can be inspected but not saved.
-            </p>
-          )}
-        </div>
-      </div>
-
       <SettingsNavigation
         sections={settingsSections}
         isReadOnly={isDemoMode}
+        header={
+          <>
+            <h2 className="text-xl font-semibold text-slate-900">Settings</h2>
+            {isDemoMode && (
+              <p className="mt-1 text-[12px] text-amber-700">
+                Demo mode is read-only. Settings can be inspected but not saved.
+              </p>
+            )}
+          </>
+        }
         {...categoryRoute}
       />
 

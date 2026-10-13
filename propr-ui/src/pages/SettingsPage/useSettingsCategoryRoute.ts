@@ -16,6 +16,8 @@ const settingsCategoryFrom = (value: string | null): SettingsCategoryId => {
 export const useSettingsCategoryRoute = (): {
   activeCategory: SettingsCategoryId;
   onActiveCategoryChange(category: SettingsCategoryId): void;
+  /** The URL names a category, so phones open it directly instead of the category list. */
+  openCategoryOnMobile: boolean;
 } => {
   const [searchParams, setSearchParams] = useSearchParams();
   const activeCategory = settingsCategoryFrom(searchParams.get('tab'));
@@ -29,5 +31,5 @@ export const useSettingsCategoryRoute = (): {
     }, { replace: true });
   };
 
-  return { activeCategory, onActiveCategoryChange };
+  return { activeCategory, onActiveCategoryChange, openCategoryOnMobile: searchParams.has('tab') };
 };

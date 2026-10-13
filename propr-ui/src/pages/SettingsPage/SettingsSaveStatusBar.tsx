@@ -1,6 +1,7 @@
 import React from 'react';
 import { Loader2 } from 'lucide-react';
 import { SettingsStatus, type SettingsStatusTone } from './SettingsLayout';
+import { SETTINGS_CONTAINER } from './settingsStyles';
 
 export type SettingsSaveStatus = 'idle' | 'saving' | 'saved' | 'warning' | 'error';
 
@@ -15,8 +16,9 @@ function resolve(
 ): { tone: SettingsStatusTone; message: string } {
   if (saveStatus === 'error' && globalError) return { tone: 'error', message: globalError };
   if (saveStatus === 'warning' && globalError) return { tone: 'warn', message: `Saved with warning: ${globalError}` };
-  if (saveStatus === 'saved') return { tone: 'ok', message: 'Settings auto-saved' };
-  return { tone: 'pending', message: 'All changes saved' };
+  // Whether or not this visit saved anything yet, nothing is pending: one
+  // message, one dot colour, so the footer reads the same on every screen.
+  return { tone: 'ok', message: 'All changes saved' };
 }
 
 /**
@@ -26,8 +28,8 @@ function resolve(
 const SettingsSaveStatusBar: React.FC<SettingsSaveStatusBarProps> = ({ saveStatus, globalError }) => {
   const { tone, message } = resolve(saveStatus, globalError);
   return (
-    <div className="flex-shrink-0 border-t border-slate-200 bg-white px-4 py-3">
-      <div className="mx-auto flex max-w-4xl items-center justify-between">
+    <div className="flex-shrink-0 border-t border-slate-200 bg-white py-3">
+      <div className={`${SETTINGS_CONTAINER} flex items-center justify-between`}>
         {saveStatus === 'saving' ? (
           <span className="flex items-center gap-2 font-mono text-[12px] text-slate-500">
             <Loader2 aria-hidden="true" className="h-3 w-3 animate-spin text-slate-400" />

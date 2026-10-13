@@ -214,11 +214,99 @@ test('lays settings out as a vertical rail beside one contained, single-column f
   }
 });
 
-test('keeps the contained settings column usable on a phone', async ({ page }) => {
+test('balances a widescreen canvas with an inspector beside the form', async ({ page }) => {
+  await page.setViewportSize({ width: 1920, height: 1080 });
+  await installSettingsFixture(page);
+  await page.goto('/settings?tab=sandbox');
+
+  const inspector = page.getByRole('complementary', { name: 'About Sandbox & Network' });
+  await expect(inspector).toBeVisible();
+  await expect(inspector).toContainText('per-run proxy');
+  await expect(inspector.getByRole('link', { name: 'Restricted network mode' }))
+    .toHaveAttribute('href', 'https://docs.propr.dev/docs/features/execution-safety#restricted-network-mode');
+
+  // Rail, form and inspector sit in one centred band: the space left of the
+  // rail and right of the inspector match instead of pooling on the right.
+  const scroll = (await page.locator('[data-settings-scroll]').boundingBox())!;
+  const rail = (await page.locator('[data-settings-rail]').boundingBox())!;
+  const inspectorBox = (await inspector.boundingBox())!;
+  const leftGutter = rail.x - scroll.x;
+  const rightGutter = scroll.x + scroll.width - (inspectorBox.x + inspectorBox.width);
+  expect(Math.abs(leftGutter - rightGutter)).toBeLessThanOrEqual(24);
+  expect(rightGutter).toBeLessThan(scroll.width * 0.2);
+  // The save status starts where the rail does.
+  const status = (await page.getByRole('status').filter({ hasText: 'All changes saved' }).boundingBox())!;
+  expect(Math.abs(status.x - rail.x)).toBeLessThanOrEqual(2);
+  await capture(page, 'settings-widescreen-sandbox');
+
+  await page.getByRole('tab', { name: 'Ultrafix & Escalation' }).click();
+  await expect(page.getByRole('complementary', { name: 'About Ultrafix & Escalation' })).toContainText('6 → 7 resets patience');
+  await capture(page, 'settings-widescreen-ultrafix');
+
+  // Search results mix categories, so the inspector steps aside.
+  await page.getByRole('searchbox', { name: 'Search settings' }).fill('labels');
+  await expect(page.locator('[data-settings-inspector]')).toHaveCount(0);
+
+  // Below 2xl the inspector folds away and the form keeps its width.
+  await page.getByRole('searchbox', { name: 'Search settings' }).fill('');
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await expect(page.getByRole('complementary', { name: 'About Ultrafix & Escalation' })).toBeHidden();
+});
+
+test('keeps helper text inside the block it belongs to', async ({ page }) => {
+  await page.setViewportSize({ width: 1600, height: 900 });
+  await installSettingsFixture(page);
+  await page.goto('/settings?tab=workflow');
+
+  const labels = page.locator('[data-settings-section="primary-processing-labels"]');
+  const helper = labels.getByText('State labels (-processing, -done) are generated automatically.');
+  await expect(labels).toHaveCSS('border-bottom-width', '1px');
+  const [helperBox, labelsBox, nextBox] = await Promise.all([
+    helper.boundingBox(),
+    labels.boundingBox(),
+    page.locator('[data-settings-section="follow-up-keywords"]').boundingBox(),
+  ]);
+  // The helper ends inside its block, and the rule sits no further from it
+  // than from the next block's header, so the helper reads as part of its own block.
+  const ruleY = labelsBox!.y + labelsBox!.height;
+  const helperToRule = ruleY - (helperBox!.y + helperBox!.height);
+  const ruleToNext = nextBox!.y - ruleY;
+  expect(helperToRule).toBeGreaterThanOrEqual(24);
+  expect(helperToRule).toBeLessThanOrEqual(ruleToNext + 1);
+  await capture(page, 'settings-block-separation', page.locator('[data-settings-section="follow-up-keywords"]'));
+});
+
+test('drills into settings on a phone instead of scrolling a tab strip', async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 780 });
   await installSettingsFixture(page);
-  await page.goto('/settings?tab=models');
+  await page.goto('/settings');
 
+  // Screen 1: every category is listed vertically and fully readable.
+  const tabs = page.getByRole('tablist', { name: 'Settings categories' }).getByRole('tab');
+  await expect(tabs).toHaveCount(7);
+  for (const tab of await tabs.all()) {
+    await expect(tab).toBeInViewport({ ratio: 1 });
+    expect(await tab.evaluate(element => element.scrollWidth <= element.clientWidth)).toBe(true);
+  }
+  await expect(page.getByLabel('Show usage tips')).toBeHidden();
+  await capture(page, 'settings-mobile-menu');
+
+  // Screen 2: one category under a back button.
+  await page.getByRole('tab', { name: 'Workflow & PR Rules' }).click();
+  const back = page.getByRole('button', { name: 'Back to Settings' });
+  await expect(back).toBeVisible();
+  await expect(page.getByLabel('Worker Concurrency')).toBeVisible();
+  await expect(page.getByRole('searchbox', { name: 'Search settings' })).toBeHidden();
+  await expect(page.locator('[data-settings-mobile-header]')).toContainText('Workflow & PR Rules');
+  await capture(page, 'settings-mobile-category');
+
+  await back.click();
+  await expect(tabs.first()).toBeVisible();
+  await expect(page.getByLabel('Worker Concurrency')).toBeHidden();
+
+  // A link that names a category opens straight into it, without overflowing.
+  await page.goto('/settings?tab=models');
+  await expect(page.getByRole('button', { name: 'Back to Settings' })).toBeVisible();
   const select = page.getByLabel('Plan Generation Model');
   await expect(select).toBeVisible();
   const overflow = await page.evaluate(() => {
@@ -296,7 +384,7 @@ test('ultrafix escalation controls retain ordered models and support direct hand
     ultrafix_escalation_patience: 4,
     ultrafix_escalation_max_reasoning_levels: 0,
   });
-  await expect(page.getByRole('status').filter({ hasText: 'Settings auto-saved' })).toBeVisible();
+  await expect(page.getByRole('status').filter({ hasText: 'All changes saved' })).toBeVisible();
   await page.reload();
   await expect(section.getByLabel('Automatic Escalation')).toBeChecked();
   await expect(models).toHaveValue('codex:gpt-6-astra');

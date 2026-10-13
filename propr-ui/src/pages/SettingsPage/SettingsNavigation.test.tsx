@@ -65,7 +65,7 @@ describe('SettingsNavigation', () => {
 
     const rail = screen.getByRole('tablist', { name: 'Settings categories' });
     expect(rail).toHaveAttribute('aria-orientation', 'vertical');
-    expect(rail).toHaveClass('md:flex-col');
+    expect(rail).toHaveClass('flex-col');
     expect(screen.getAllByRole('tab').map(tab => tab.textContent)).toEqual([
       'General',
       'AI Models & Reasoning',
@@ -80,7 +80,7 @@ describe('SettingsNavigation', () => {
 
     const generalTab = screen.getByRole('tab', { name: 'General' });
     expect(generalTab).toHaveAttribute('aria-selected', 'true');
-    expect(generalTab).toHaveClass('bg-teal-50', 'text-teal-700');
+    expect(generalTab).toHaveClass('md:bg-teal-50', 'md:text-teal-700');
     expect(screen.getByText('Tip controls')).toBeVisible();
     expect(screen.getByRole('navigation', { name: 'Settings' })).toContainElement(
       screen.getByRole('searchbox', { name: 'Search settings' })
@@ -89,7 +89,6 @@ describe('SettingsNavigation', () => {
     // The reading pane is held to max-w-2xl and blocks stay flat — no card.
     const pane = container.querySelector('[data-settings-pane]');
     expect(pane).toHaveClass('max-w-2xl');
-    expect(container.querySelector('[data-settings-section="usage-tips"]')?.parentElement).toHaveClass('space-y-10');
     expect(container.querySelector('[data-settings-section="usage-tips"]')).not.toHaveClass('rounded-lg', 'border', 'shadow-sm');
 
     // The rail names the open domain, so the pane does not repeat it as a heading.
@@ -100,6 +99,63 @@ describe('SettingsNavigation', () => {
     expect(screen.getByText('Network controls')).toBeVisible();
     expect(screen.getByText('Tip controls')).not.toBeVisible();
     expect(screen.queryByRole('heading', { name: 'Sandbox & Network' })).toBeNull();
+  });
+
+  test('drills into a category on phones and returns to the category list', () => {
+    const { container } = render(<SettingsNavigation sections={sections} header={<h2>Settings</h2>} />);
+    const rail = container.querySelector('[data-settings-rail]');
+    const pane = container.querySelector('[data-settings-pane]');
+
+    // Screen 1: the category list, each row with a chevron; no form yet.
+    expect(rail).not.toHaveClass('hidden');
+    expect(pane).toHaveClass('hidden', 'md:block');
+    expect(screen.queryByRole('button', { name: 'Back to Settings' })).toBeNull();
+
+    fireEvent.click(screen.getByRole('tab', { name: 'Sandbox & Network' }));
+    // Screen 2: the category under a back button; the list and page title step aside.
+    expect(rail).toHaveClass('hidden', 'md:flex');
+    expect(pane).toHaveClass('block');
+    expect(container.querySelector('[data-settings-header]')).toHaveClass('hidden', 'md:block');
+    expect(container.querySelector('[data-settings-mobile-header]')).toHaveTextContent('Sandbox & Network');
+
+    fireEvent.click(screen.getByRole('button', { name: 'Back to Settings' }));
+    expect(rail).not.toHaveClass('hidden');
+    expect(pane).toHaveClass('hidden');
+    expect(screen.getByRole('tab', { name: 'Sandbox & Network' })).toHaveAttribute('aria-selected', 'true');
+  });
+
+  test('opens a routed category directly on phones', () => {
+    render(<SettingsNavigation sections={sections} activeCategory="notifications" openCategoryOnMobile />);
+    expect(screen.getByRole('button', { name: 'Back to Settings' })).toBeInTheDocument();
+  });
+
+  test('explains the open category in the inspector, and steps aside for search results', () => {
+    render(<SettingsNavigation sections={sections} />);
+    fireEvent.click(screen.getByRole('tab', { name: 'Sandbox & Network' }));
+    const inspector = screen.getByRole('complementary', { name: 'About Sandbox & Network' });
+    expect(inspector).toHaveClass('hidden', '2xl:block');
+    expect(inspector).toHaveTextContent('per-run proxy');
+    expect(inspector.querySelector('a[href$="#restricted-network-mode"]')).toHaveAttribute('target', '_blank');
+
+    fireEvent.change(screen.getByRole('searchbox', { name: 'Search settings' }), { target: { value: 'egress' } });
+    expect(screen.queryByRole('complementary')).toBeNull();
+  });
+
+  test('closes every block but the last with its own rule', () => {
+    const { container } = render(
+      <SettingsNavigation
+        sections={[
+          { id: 'first', category: 'general', searchText: 'first', content: <p>First</p> },
+          { id: 'second', category: 'general', searchText: 'second', content: <p>Second</p> },
+        ]}
+      />
+    );
+    expect(container.querySelector('[data-settings-section="first"]')).toHaveClass('mb-8', 'border-b', 'pb-8');
+    expect(container.querySelector('[data-settings-section="second"]')).not.toHaveClass('border-b');
+
+    // In search results the last visible block drops the rule, even when a hidden one follows it.
+    fireEvent.change(screen.getByRole('searchbox', { name: 'Search settings' }), { target: { value: 'first' } });
+    expect(container.querySelector('[data-settings-section="first"]')).not.toHaveClass('border-b');
   });
 
   test('moves between rail items with the arrow keys', () => {
