@@ -327,6 +327,29 @@ test('drills into settings on a phone instead of scrolling a tab strip', async (
 });
 
 
+test('walks the phone category list with the keyboard before opening one', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 780 });
+  await installSettingsFixture(page);
+  await page.goto('/settings');
+
+  const tabs = page.getByRole('tablist', { name: 'Settings categories' });
+  await tabs.getByRole('tab', { name: 'General' }).focus();
+  await page.keyboard.press('ArrowDown');
+  await page.keyboard.press('ArrowDown');
+
+  // Arrows only move focus: the list stays up and the route is unchanged.
+  const workflow = tabs.getByRole('tab', { name: 'Workflow & PR Rules' });
+  await expect(workflow).toBeFocused();
+  await expect(workflow).toBeVisible();
+  expect(new URL(page.url()).search).toBe('');
+  await expect(page.getByRole('button', { name: 'Back to Settings' })).toHaveCount(0);
+
+  await page.keyboard.press('Enter');
+  await expect(page).toHaveURL(/\?tab=workflow$/);
+  await expect(page.getByRole('button', { name: 'Back to Settings' })).toBeVisible();
+  await expect(page.getByLabel('Worker Concurrency')).toBeVisible();
+});
+
 test('fast analysis model describes the review context scout', async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 820 });
   await installSettingsFixture(page);

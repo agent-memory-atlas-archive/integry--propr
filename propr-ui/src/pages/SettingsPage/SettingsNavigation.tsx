@@ -15,6 +15,7 @@ import {
 } from 'lucide-react';
 import { SETTINGS_BLOCK, SETTINGS_CONTAINER } from './settingsStyles';
 import SettingsInspector from './SettingsInspector';
+import { useDesktopLayout } from '../../hooks/useDesktopLayout';
 
 export type SettingsCategoryId =
   | 'general'
@@ -115,13 +116,15 @@ const NEXT_TAB_KEYS: Record<string, number> = { ArrowDown: 1, ArrowRight: 1, Arr
 interface SettingsRailTabProps {
   category: SettingsCategory;
   selected: boolean;
+  /** The rail's single Tab stop: the selected item, or the one arrow keys last moved to. */
+  focusable: boolean;
   tabRef(element: HTMLButtonElement | null): void;
   onSelect(): void;
   onKeyDown(event: React.KeyboardEvent<HTMLButtonElement>): void;
 }
 
 /** A rail item on wider screens; a full-width row with a chevron on phones. */
-const SettingsRailTab: React.FC<SettingsRailTabProps> = ({ category, selected, tabRef, onSelect, onKeyDown }) => {
+const SettingsRailTab: React.FC<SettingsRailTabProps> = ({ category, selected, focusable, tabRef, onSelect, onKeyDown }) => {
   const Icon = category.icon;
   return (
     <button
@@ -131,7 +134,7 @@ const SettingsRailTab: React.FC<SettingsRailTabProps> = ({ category, selected, t
       role="tab"
       aria-selected={selected}
       aria-controls={`settings-panel-${category.id}`}
-      tabIndex={selected ? 0 : -1}
+      tabIndex={focusable ? 0 : -1}
       title={category.description}
       onClick={onSelect}
       onKeyDown={onKeyDown}
@@ -283,6 +286,9 @@ const SettingsNavigation: React.FC<SettingsNavigationProps> = ({
   const [localActiveCategory, setLocalActiveCategory] = useState<SettingsCategoryId>(DEFAULT_SETTINGS_CATEGORY);
   const [query, setQuery] = useState('');
   const [mobileCategoryOpen, setMobileCategoryOpen] = useState(openCategoryOnMobile);
+  // Phones move focus through the category list without opening anything.
+  const [focusedCategory, setFocusedCategory] = useState<SettingsCategoryId | null>(null);
+  const isDesktop = useDesktopLayout();
   const tabRefs = useRef<Partial<Record<SettingsCategoryId, HTMLButtonElement | null>>>({});
   const scrollRef = useRef<HTMLDivElement>(null);
   const activeCategory = controlledActiveCategory ?? localActiveCategory;
@@ -309,6 +315,7 @@ const SettingsNavigation: React.FC<SettingsNavigationProps> = ({
 
   const selectCategory = (category: SettingsCategoryId): void => {
     setLocalActiveCategory(category);
+    setFocusedCategory(null);
     onActiveCategoryChange?.(category);
     setQuery('');
   };
@@ -325,7 +332,12 @@ const SettingsNavigation: React.FC<SettingsNavigationProps> = ({
     if (nextIndex === null) return;
     event.preventDefault();
     const next = SETTINGS_CATEGORIES[nextIndex].id;
-    selectCategory(next);
+    // Wider screens show the rail beside the pane, so arrows select as they
+    // move. On phones selecting would replace the list with the category
+    // (a routed category opens there), hiding the item just focused, so
+    // arrows only move focus and Enter, Space or a tap opens it.
+    if (isDesktop) selectCategory(next);
+    else setFocusedCategory(next);
     tabRefs.current[next]?.focus();
   };
 
@@ -379,6 +391,7 @@ const SettingsNavigation: React.FC<SettingsNavigationProps> = ({
                   key={category.id}
                   category={category}
                   selected={activeCategory === category.id}
+                  focusable={(focusedCategory ?? activeCategory) === category.id}
                   tabRef={element => { tabRefs.current[category.id] = element; }}
                   onSelect={() => {
                     selectCategory(category.id);

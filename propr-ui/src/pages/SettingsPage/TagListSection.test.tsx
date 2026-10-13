@@ -148,6 +148,33 @@ it('needs a second Backspace to remove the last chip', () => {
   expect(screen.queryByText('bug')).toBeNull();
 });
 
+it('ignores a held Backspace once it has cleared the draft', () => {
+  const onSave = vi.fn();
+  render(<Harness initial={['AI', 'bug']} onSave={onSave} />);
+  const input = screen.getByLabelText('Keyword');
+  fireEvent.change(input, { target: { value: 'do' } });
+
+  // Holding Backspace: the first event and its auto-repeats clear the draft…
+  fireEvent.keyDown(input, { key: 'Backspace' });
+  fireEvent.change(input, { target: { value: 'd' } });
+  fireEvent.keyDown(input, { key: 'Backspace', repeat: true });
+  fireEvent.change(input, { target: { value: '' } });
+  // …and the repeats that keep arriving on the empty field touch no chip.
+  for (let i = 0; i < 6; i++) fireEvent.keyDown(input, { key: 'Backspace', repeat: true });
+  expect(onSave).not.toHaveBeenCalled();
+  expect(screen.getByText('bug').closest('[data-removal-armed]')).toBeNull();
+  expect(screen.getByText('AI')).toBeInTheDocument();
+
+  // Holding a fresh press arms the removal, but only another press removes.
+  fireEvent.keyDown(input, { key: 'Backspace' });
+  fireEvent.keyDown(input, { key: 'Backspace', repeat: true });
+  expect(onSave).not.toHaveBeenCalled();
+  fireEvent.keyDown(input, { key: 'Backspace' });
+  for (let i = 0; i < 6; i++) fireEvent.keyDown(input, { key: 'Backspace', repeat: true });
+  expect(onSave).toHaveBeenCalledTimes(1);
+  expect(onSave).toHaveBeenLastCalledWith(['AI']);
+});
+
 it('never removes the last required label', () => {
   const onSave = vi.fn();
   render(<Harness required initial={['AI']} onSave={onSave} />);

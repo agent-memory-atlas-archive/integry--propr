@@ -28,7 +28,7 @@ interface TagListSectionProps {
  * container as the text field. Enter or a comma turns the typed text into a
  * chip, and a pasted comma-separated list becomes one chip per entry.
  * Backspace on an empty field first selects the last chip and only a second
- * Backspace removes it. Leaving the field saves nothing: the typed text stays
+ * Backspace removes it; auto-repeat from a held key does neither. Leaving the field saves nothing: the typed text stays
  * in the field until Enter or a comma.
  */
 const TagListSection: React.FC<TagListSectionProps> = ({
@@ -74,6 +74,9 @@ const TagListSection: React.FC<TagListSectionProps> = ({
       commit(newItem, true);
     } else if (event.key === 'Backspace' && newItem === '' && canRemove) {
       event.preventDefault();
+      // A held Backspace that has just emptied the draft must not go on to
+      // arm and remove saved entries: each step takes a fresh press.
+      if (event.repeat) return;
       if (removalArmed) {
         setRemovalArmed(false);
         onRemoveItem(lastItem);

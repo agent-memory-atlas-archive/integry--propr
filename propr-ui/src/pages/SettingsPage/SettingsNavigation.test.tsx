@@ -212,6 +212,45 @@ describe('SettingsNavigation', () => {
     expect(screen.getByRole('tab', { name: 'General' })).toHaveFocus();
   });
 
+  test('on phones the arrow keys move through the category list without opening a category', () => {
+    const innerWidth = window.innerWidth;
+    window.innerWidth = 375;
+    try {
+      const { container } = render(
+        <MemoryRouter initialEntries={['/settings']}>
+          <RoutedSettingsNavigation />
+        </MemoryRouter>
+      );
+      const rail = container.querySelector('[data-settings-rail]');
+      const general = screen.getByRole('tab', { name: 'General' });
+      general.focus();
+
+      fireEvent.keyDown(general, { key: 'ArrowDown' });
+      const models = screen.getByRole('tab', { name: 'AI Models & Reasoning' });
+      expect(models).toHaveFocus();
+      expect(rail).not.toHaveClass('hidden');
+      expect(screen.getByTestId('settings-location')).toHaveTextContent(/^$/);
+      expect(general).toHaveAttribute('aria-selected', 'true');
+      // The focused row is the list's Tab stop, so leaving and returning lands on it.
+      expect(models).toHaveAttribute('tabindex', '0');
+      expect(general).toHaveAttribute('tabindex', '-1');
+
+      fireEvent.keyDown(models, { key: 'ArrowDown' });
+      fireEvent.keyDown(screen.getByRole('tab', { name: 'Workflow & PR Rules' }), { key: 'End' });
+      const notifications = screen.getByRole('tab', { name: 'Notifications' });
+      expect(notifications).toHaveFocus();
+      expect(rail).not.toHaveClass('hidden');
+
+      // Enter or Space activates the button, which opens the category and routes to it.
+      fireEvent.click(notifications);
+      expect(screen.getByTestId('settings-location')).toHaveTextContent('?tab=notifications');
+      expect(rail).toHaveClass('hidden');
+      expect(container.querySelector('[data-settings-mobile-header]')).toHaveTextContent('Notifications');
+    } finally {
+      window.innerWidth = innerWidth;
+    }
+  });
+
   test('selects a routed category and reports tab changes to routing state', () => {
     const onActiveCategoryChange = vi.fn();
     const view = render(
