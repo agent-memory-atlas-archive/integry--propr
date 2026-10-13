@@ -198,6 +198,7 @@ export interface AgentConfig {
   configPath: string;
   supportedModels: string[];
   defaultModel?: string;
+  /** Values arrive redacted as `[REDACTED]`; sending the marker back keeps the stored value. */
   envVars?: Record<string, string>;
   modelCustomLabels?: Record<string, string>;
   modelReasoningLevels?: Record<string, ReasoningLevel>;
