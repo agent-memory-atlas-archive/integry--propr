@@ -32,6 +32,10 @@ export interface GlobalSearchResults {
   repositories: MonitoredRepo[];
 }
 
+// Consumers use result identity to reset their selection. Keep the hidden
+// results stable while a desktop binding is unavailable or changing.
+const EMPTY_SEARCH_RESULTS: GlobalSearchResults = { plans: [], tasks: [], repositories: [] };
+
 export interface GlobalSearchState {
   query: string;
   results: GlobalSearchResults;
@@ -222,7 +226,7 @@ export function useGlobalSearch(): UseGlobalSearchReturn {
 
   return {
     query: visible ? query : '',
-    results: visible ? results : { plans: [], tasks: [], repositories: [] },
+    results: visible ? results : EMPTY_SEARCH_RESULTS,
     isLoading: visible && isLoading,
     isOpen: visible && isOpen,
     error: visible ? error : null,

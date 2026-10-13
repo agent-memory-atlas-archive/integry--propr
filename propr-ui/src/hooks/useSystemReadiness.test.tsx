@@ -1,6 +1,8 @@
 import { act, render, renderHook, screen, waitFor, cleanup } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { useGlobalSearch } from './useGlobalSearch';
+import GlobalSearch from '../components/GlobalSearch';
+import { MemoryRouter } from 'react-router-dom';
 import { logout } from '../api/proprApi';
 import * as proprApi from '../api/proprApi';
 import { setDesktopConnectionScope } from '../api/apiClient';
@@ -77,6 +79,21 @@ const bindDesktop = (nativeLogout = vi.fn().mockResolvedValue(undefined), id = '
 };
 
 describe('desktop logout data loading', () => {
+  it('keeps the search component renderable without a binding and across logout', async () => {
+    runtime.desktop = true;
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(() => Promise.resolve(json(populatedCatalog)));
+    const view = render(<MemoryRouter><GlobalSearch /></MemoryRouter>);
+    expect(screen.getByRole('combobox', { name: 'Search' })).toBeVisible();
+    expect(fetchSpy).not.toHaveBeenCalled();
+
+    bindDesktop();
+    await waitFor(() => expect(fetchSpy).toHaveBeenCalledTimes(1));
+    act(() => setDesktopConnectionScope(null));
+    view.rerender(<MemoryRouter><GlobalSearch /></MemoryRouter>);
+    expect(screen.getByRole('combobox', { name: 'Search' })).toHaveValue('');
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+  });
+
   it('starts no repository/readiness/search loads when mounted without a binding', async () => {
     runtime.desktop = true;
     const fetchSpy = vi.spyOn(globalThis, 'fetch');
