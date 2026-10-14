@@ -1,5 +1,6 @@
-import { useEffect, useState, type Dispatch, type SetStateAction } from 'react';
+import { useEffect, useId, useState, type Dispatch, type SetStateAction } from 'react';
 import type {
+  InstanceCatalogResponse,
   ExtensionCatalogEntry,
   ExtensionMcpDescriptor,
   ExtensionProfileInput,
@@ -16,6 +17,7 @@ import {
   saveExtensionProfile,
   validateExtensionProfile,
 } from '../../api/extensionProfilesApi';
+import { getInstanceCatalog } from '../../api/proprApi';
 import { SettingsSection } from './SettingsLayout';
 const blank = (): ExtensionProfileInput => ({
   version: 1,
@@ -35,9 +37,56 @@ const inputClass =
   'mt-1 block w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm';
 const buttonClass =
   'rounded-md border border-slate-300 px-3 py-2 text-sm font-medium disabled:opacity-50 hover:bg-slate-50';
+function ItemPicker({ label, options, selected, onChange, hint, allowManual = false }: {
+  label: string;
+  options: string[];
+  selected: string[];
+  onChange: (items: string[]) => void;
+  hint?: string;
+  allowManual?: boolean;
+}) {
+  const [manual, setManual] = useState('');
+  const [unlisted, setUnlisted] = useState(() => selected.filter((item) => !options.includes(item)));
+  const items = [...new Set([...options, ...unlisted, ...selected])];
+  return (
+    <fieldset className="space-y-2 text-sm">
+      <legend className="font-medium">{label}</legend>
+      {hint && <p className="text-xs text-slate-500">{hint}</p>}
+      <div className="max-h-48 space-y-2 overflow-y-auto rounded-md border border-slate-200 bg-white p-3">
+        {items.length === 0 && <p className="text-slate-500">No available items yet.</p>}
+        {items.map((item) => (
+          <label key={item} className="flex items-center gap-2 break-all">
+            <input type="checkbox" checked={selected.includes(item)} onChange={(e) =>
+              onChange(e.target.checked ? [...selected, item] : selected.filter((v) => v !== item))
+            } />
+            {item}
+          </label>
+        ))}
+      </div>
+      {allowManual && (
+        <details>
+          <summary className="cursor-pointer text-slate-600">Advanced: add an unlisted item</summary>
+          <div className="mt-2 flex items-end gap-2">
+            <label className="flex-1">Unlisted {label.toLowerCase()} item
+              <input className={inputClass} value={manual} onChange={(e) => setManual(e.target.value)} />
+            </label>
+            <button type="button" className={buttonClass} disabled={!manual.trim()} onClick={() => {
+              setUnlisted((values) => [...new Set([...values, manual.trim()])]);
+              onChange([...new Set([...selected, manual.trim()])]);
+              setManual('');
+            }}>Add item</button>
+          </div>
+        </details>
+      )}
+    </fieldset>
+  );
+}
+
 function ServerEditor({
   server,
   catalog,
+  knownTools,
+  endpoints,
   current,
   secret,
   onChange,
@@ -46,6 +95,8 @@ function ServerEditor({
 }: {
   server: ExtensionMcpDescriptor;
   catalog: ExtensionCatalogEntry[];
+  knownTools: string[];
+  endpoints: string[];
   current?: ExtensionProfileRevision;
   secret: string | null | undefined;
   onChange: (patch: Partial<ExtensionMcpDescriptor>) => void;
@@ -64,7 +115,17 @@ function ServerEditor({
           />
         </label>
         {server.kind === 'https' ? (
-          <label className="text-sm">
+          <div className="space-y-2 text-sm">
+            {endpoints.length > 0 && <label className="block">
+              Use a saved HTTPS endpoint
+              <select className={inputClass} value="" onChange={(e) => {
+                if (e.target.value) onChange({ url: e.target.value });
+              }}>
+                <option value="">Select an endpoint</option>
+                {endpoints.map((url) => <option key={url} value={url}>{url}</option>)}
+              </select>
+            </label>}
+          <label className="block text-sm">
             HTTPS endpoint
             <input
               className={inputClass}
@@ -73,6 +134,7 @@ function ServerEditor({
               onChange={(e) => onChange({ url: e.target.value })}
             />
           </label>
+          </div>
         ) : (
           <div className="text-xs break-all">
             <p>Operator catalog entry: {server.catalogId}</p>
@@ -89,47 +151,16 @@ function ServerEditor({
           </div>
         )}
       </div>
-      {server.kind === 'catalog' ? (
-        <fieldset className="space-y-2 text-sm">
-          <legend>Allowed tools</legend>
-          {(
-            catalog.find((c) => c.id === server.catalogId && c.digest === server.digest)?.tools ??
-            server.tools
-          ).map((tool) => (
-            <label key={tool} className="flex items-center gap-2">
-              <input
-                type="checkbox"
-                checked={server.tools.includes(tool)}
-                onChange={(e) =>
-                  onChange({
-                    tools: e.target.checked
-                      ? [...server.tools, tool]
-                      : server.tools.filter((t) => t !== tool),
-                  })
-                }
-              />
-              {tool}
-            </label>
-          ))}
-        </fieldset>
-      ) : (
-        <label className="block text-sm">
-          Allowed tool names (comma separated)
-          <input
-            className={inputClass}
-            defaultValue={server.tools.join(', ')}
-            onChange={(e) =>
-              onChange({
-                tools: e.target.value
-                  .split(',')
-                  .map((v) => v.trim())
-                  .filter(Boolean),
-              })
-            }
-            placeholder="search, read_document"
-          />
-        </label>
-      )}
+      <ItemPicker
+        label="Allowed tools"
+        options={server.kind === 'catalog'
+          ? catalog.find((c) => c.id === server.catalogId && c.digest === server.digest)?.tools ?? server.tools
+          : knownTools}
+        selected={server.tools}
+        onChange={(tools) => onChange({ tools })}
+        allowManual={server.kind === 'https'}
+        hint={server.kind === 'https' ? 'Choose tools from saved configurations for this endpoint. If none are listed, add an exact tool name under Advanced.' : undefined}
+      />
       <div className="flex flex-wrap items-end gap-4">
         <label className="text-sm">
           Capability
@@ -197,6 +228,8 @@ type GithubSkillSource = { repository: string; commit: string; directory: string
 
 function SkillsEditor({
   bundles,
+  availableBundles,
+  repositories,
   github,
   setGithub,
   action,
@@ -204,15 +237,28 @@ function SkillsEditor({
   onRemove,
 }: {
   bundles: ExtensionSkillBundle[];
+  availableBundles: ExtensionSkillBundle[];
+  repositories: string[];
   github: GithubSkillSource;
   setGithub: Dispatch<SetStateAction<GithubSkillSource>>;
   action: (run: () => Promise<void>) => Promise<void>;
   addBundle: (bundle: ExtensionSkillBundle) => void;
   onRemove: (id: string) => void;
 }) {
+  const repositoryId = useId();
   return (
     <>
       <h4 className="text-sm font-semibold">Validated skills</h4>
+      <label className="block text-sm">
+        Add an existing validated skill
+        <select className={inputClass} value="" disabled={!availableBundles.length} onChange={(e) => {
+          const bundle = availableBundles.find((b) => b.id === e.target.value);
+          if (bundle) addBundle(bundle);
+        }}>
+          <option value="">Select a skill bundle</option>
+          {availableBundles.map((b) => <option key={b.id} value={b.id}>{b.name} · {b.digest.slice(0, 12)}</option>)}
+        </select>
+      </label>
       {bundles.map((b) => (
         <div key={b.id} className="rounded-md border border-slate-200 bg-white p-3 text-xs">
           <p className="font-semibold">
@@ -251,15 +297,21 @@ function SkillsEditor({
           Import from an authorized GitHub repository
         </summary>
         <div className="mt-3 grid gap-3">
-          <label>
-            Repository
-            <input
-              className={inputClass}
-              value={github.repository}
-              onChange={(e) => setGithub((g) => ({ ...g, repository: e.target.value }))}
-              placeholder="team/project"
-            />
-          </label>
+          <div>
+          <label htmlFor={repositoryId}>Repository</label>
+            <select id={repositoryId} className={inputClass} value={github.repository} onChange={(e) => setGithub((g) => ({ ...g, repository: e.target.value }))}>
+              <option value="">Select an authorized repository</option>
+              {[...new Set([...repositories, github.repository].filter(Boolean))].map((repository) =>
+                <option key={repository} value={repository}>{repository}</option>)}
+            </select>
+            <details className="mt-2">
+              <summary className="cursor-pointer text-slate-600">Advanced: use an unlisted repository</summary>
+              <label>Unlisted repository
+                <input className={inputClass} value={github.repository} placeholder="team/project"
+                  onChange={(e) => setGithub((g) => ({ ...g, repository: e.target.value }))} />
+              </label>
+            </details>
+          </div>
           <label>
             Exact 40-character commit
             <input
@@ -303,6 +355,8 @@ export default function AgentExtensionsSection() {
     commit: '',
     directory: '',
   });
+  const [instanceCatalog, setInstanceCatalog] = useState<InstanceCatalogResponse>({ agents: [], repositories: [] });
+  const [catalogError, setCatalogError] = useState(false);
   const [catalog, setCatalog] = useState<ExtensionCatalogEntry[]>([]);
   const [profiles, setProfiles] = useState<ExtensionProfileRevision[]>([]);
   const [current, setCurrent] = useState<ExtensionProfileRevision>();
@@ -322,6 +376,9 @@ export default function AgentExtensionsSection() {
   };
   useEffect(() => {
     let active = true;
+    void getInstanceCatalog().then((result) => {
+      if (active) setInstanceCatalog(result);
+    }).catch(() => { if (active) setCatalogError(true); });
     void listExtensionProfiles()
       .then((result) => {
         if (active) {
@@ -378,12 +435,12 @@ export default function AgentExtensionsSection() {
       ),
     }));
   const addBundle = (bundle: ExtensionSkillBundle) => {
-    setBundles((b) => [...b, bundle]);
+    setBundles((b) => [...b.filter((existing) => existing.id !== bundle.id), bundle]);
     setDraft((d) => ({
       ...d,
-      skillBundleIds: [...d.skillBundleIds, bundle.id],
+      skillBundleIds: [...new Set([...d.skillBundleIds, bundle.id])],
     }));
-    setNotice('Validated skill bundle imported. Save the profile to select it.');
+    setNotice('Validated skill bundle added. Save the profile to select it.');
   };
   return (
     <SettingsSection
@@ -490,41 +547,14 @@ export default function AgentExtensionsSection() {
               />
               Enabled for new launches
             </label>
+            {catalogError && <p role="status" className="text-sm text-amber-800">Agent and repository choices could not be loaded. Reopen Settings to retry, or use Advanced to add an unlisted item.</p>}
             <div className="grid gap-4 sm:grid-cols-2">
-              <label className="text-sm">
-                Agent aliases (optional, comma separated)
-                <input
-                  className={inputClass}
-                  defaultValue={draft.agentScope.join(', ')}
-                  onChange={(e) =>
-                    setDraft((d) => ({
-                      ...d,
-                      agentScope: e.target.value
-                        .split(',')
-                        .map((v) => v.trim())
-                        .filter(Boolean),
-                    }))
-                  }
-                  placeholder="claude-main, codex-main"
-                />
-              </label>
-              <label className="text-sm">
-                Repositories (optional, comma separated)
-                <input
-                  className={inputClass}
-                  defaultValue={draft.repositoryScope.join(', ')}
-                  onChange={(e) =>
-                    setDraft((d) => ({
-                      ...d,
-                      repositoryScope: e.target.value
-                        .split(',')
-                        .map((v) => v.trim())
-                        .filter(Boolean),
-                    }))
-                  }
-                  placeholder="team/project"
-                />
-              </label>
+              <ItemPicker label="Agents" options={instanceCatalog.agents.map((a) => a.alias)}
+                selected={draft.agentScope} onChange={(agentScope) => setDraft((d) => ({ ...d, agentScope }))}
+                hint="Leave all unchecked to allow any agent." allowManual />
+              <ItemPicker label="Repositories" options={instanceCatalog.repositories.map((r) => r.name)}
+                selected={draft.repositoryScope} onChange={(repositoryScope) => setDraft((d) => ({ ...d, repositoryScope }))}
+                hint="Leave all unchecked to allow any repository." allowManual />
             </div>
             <div className="flex items-center justify-between">
               <h4 className="text-sm font-semibold">MCP servers</h4>
@@ -592,6 +622,9 @@ export default function AgentExtensionsSection() {
                 key={index}
                 server={server}
                 catalog={catalog}
+                endpoints={[...new Set(profiles.flatMap((p) => p.mcpServers.flatMap((s) => s.kind === 'https' ? [s.url] : [])))]}
+                knownTools={server.kind === 'https' ? profiles.flatMap((p) => p.mcpServers.flatMap((s) =>
+                  s.kind === 'https' && s.url === server.url ? s.tools : [])) : []}
                 current={current}
                 secret={secrets[server.name]}
                 onChange={(patch) => changeServer(index, patch)}
@@ -619,6 +652,8 @@ export default function AgentExtensionsSection() {
             ))}
             <SkillsEditor
               bundles={bundles.filter((b) => draft.skillBundleIds.includes(b.id))}
+              availableBundles={[...new Map(profiles.flatMap((p) => p.skillBundles).concat(bundles).map((b) => [b.id, b])).values()].filter((b) => !draft.skillBundleIds.includes(b.id))}
+              repositories={instanceCatalog.repositories.map((r) => r.name)}
               github={github}
               setGithub={setGithub}
               action={action}
