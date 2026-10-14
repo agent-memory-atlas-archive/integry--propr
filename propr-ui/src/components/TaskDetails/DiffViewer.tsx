@@ -80,7 +80,8 @@ const DiffViewer: React.FC<DiffViewerProps> = ({ file, onClose }) => {
                 <span id={titleId} className="font-medium text-gray-900 truncate">{fileName}</span>
                 {getStatusLabel()}
               </div>
-              <div className="text-xs text-gray-500 truncate">{path}</div>
+              {/* A phone has room for neither in full, so the path wraps there to still name the file. */}
+              <div data-testid="diff-file-path" className="text-xs text-gray-500 break-all sm:truncate" title={path}>{path}</div>
             </div>
           </div>
           <div className="flex flex-none items-center gap-4">
@@ -117,7 +118,11 @@ const DiffViewer: React.FC<DiffViewerProps> = ({ file, onClose }) => {
                 fontSize: '12px',
                 margin: 0,
                 borderRadius: 0,
-                minHeight: '100%'
+                minHeight: '100%',
+                // The focusable pane scrolls both ways, so long lines are reachable without first scrolling to the diff's end.
+                overflow: 'visible',
+                width: 'max-content',
+                minWidth: '100%',
               }}
               showLineNumbers={false}
               wrapLines={true}
