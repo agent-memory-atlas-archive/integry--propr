@@ -33,11 +33,19 @@ export async function extensionGatewayCall(store: ExtensionProfileStore, token: 
   await resolveExtensionEndpoint(endpoint, undefined, policy);
   await store.database('extension_run_grants').where({ token_hash: extensionTokenHash(token) }).increment('request_bytes', Buffer.byteLength(JSON.stringify(forwarded)));
   try { upstream = await send(endpoint, forwarded, secrets[serverName], policy); } catch { throw new ExtensionError(502, 'MCP connection failed'); }
-  if (upstream === null && rpc.id === undefined) return null;
+  if (upstream === null && rpc.id === undefined) { responseBytes = 0; return null; }
   if (!upstream || typeof upstream !== 'object' || Array.isArray(upstream)) throw new ExtensionError(502, 'MCP protocol unavailable');
   responseBytes = extensionResponseWireBytes(upstream) ?? EXTENSION_LIMITS.responseBytes;
   const result = upstream as Record<string, unknown>;
-  if (result.jsonrpc !== '2.0' || result.id !== rpc.id || result.error || !Object.hasOwn(result, 'result')) throw new ExtensionError(502, 'MCP request failed');
+  if (result.jsonrpc !== '2.0' || result.id !== rpc.id) throw new ExtensionError(502, 'MCP request failed');
+  if (Object.hasOwn(result, 'error')) {
+    const error = result.error as { code?: unknown; message?: unknown } | null;
+    if (Object.hasOwn(result, 'result') || !error || typeof error !== 'object' || Array.isArray(error) || !Number.isSafeInteger(error.code) || typeof error.message !== 'string') throw new ExtensionError(502, 'MCP protocol unavailable');
+    // Upstream messages/data are untrusted and may contain credentials or
+    // operator details. Preserve only the protocol code, as the stdio bridge does.
+    return { jsonrpc: '2.0', id: rpc.id, error: { code: error.code, message: 'MCP request failed' } };
+  }
+  if (!Object.hasOwn(result, 'result')) throw new ExtensionError(502, 'MCP request failed');
   let projection = result.result;
   if (rpc.method === 'initialize') {
     projection = { protocolVersion: '2025-03-26', capabilities: { tools: {} }, serverInfo: { name: server.name, version: '1' } };

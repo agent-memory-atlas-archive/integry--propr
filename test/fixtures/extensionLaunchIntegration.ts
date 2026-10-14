@@ -27,6 +27,7 @@ export async function extensionLaunchIntegrationFixture() {
   let captures = 0;
   return {
     selection,
+    database,
     captures: () => captures,
     execute: (options: AgentTaskOptions) => executeWithExtensions({ type: 'claude', alias: 'claude' } as AgentConfig, options, async prepared => {
       const token = prepared.toolPolicy!.mcpServers!.find(s => s.name === 'docs')!.bearerToken;

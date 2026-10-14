@@ -105,7 +105,7 @@ fi
 # The user config is intentionally ignored by --ignore-user-config; project
 # config remains loadable by the pinned CLI and can expand the MCP catalog.
 if [ "${PROPR_EXTENSION_EXCLUSIVE_MCP:-0}" = "1" ]; then
-    extension_config_cursor=$(cd /home/node/workspace && pwd -P)
+    extension_config_cursor=$(cd /home/node/workspace && pwd -P) || { echo "Codex extension workspace unavailable" >&2; exit 1; }
     while :; do
         extension_config_candidate="$extension_config_cursor/.codex/config.toml"
         if [ "$extension_config_candidate" != "${CODEX_HOME:-/home/node/.codex}/config.toml" ] && { [ -e "$extension_config_candidate" ] || [ -L "$extension_config_candidate" ]; }; then

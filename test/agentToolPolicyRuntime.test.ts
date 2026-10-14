@@ -281,5 +281,9 @@ test('Codex entrypoint rejects container project ancestry after setup and skips 
         rmSync(join(workspace, '.codex'), { recursive: true });
         mkdirSync(join(root, 'home', '.codex')); writeFileSync(join(root, 'home', '.codex', 'config.toml'), '[mcp_servers.ambient]');
         assert.equal(run('1').status, 1);
+        rmSync(workspace, { recursive: true });
+        const missing = spawnSync('bash', ['-c', containerGuard], { env: { ...process.env, CODEX_HOME: userHome, PROPR_EXTENSION_EXCLUSIVE_MCP: '1' }, encoding: 'utf8', timeout: 2000 });
+        assert.equal(missing.status, 1);
+        assert.match(missing.stderr, /workspace unavailable/);
     } finally { rmSync(root, { recursive: true, force: true }); }
 });

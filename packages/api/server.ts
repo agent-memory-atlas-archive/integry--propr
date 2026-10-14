@@ -258,8 +258,12 @@ app.use(corsRejectionHandler);
 app.use('/api', createApiRequestRateLimiter());
 setupWebhookRoute();
 
-app.use('/api/instance/extensions/v1/skills/archive', express.json({ limit: '7mb' }));
-app.use(express.json({ limit: '1mb' }));
+const defaultJsonParser = express.json({ limit: '1mb' });
+app.use((req, res, next) => {
+  // The archive parser is installed at its route, after the member guard.
+  if (req.method === 'POST' && /^\/api\/instance\/extensions\/v1\/skills\/archive\/?$/i.test(req.path)) return next();
+  return defaultJsonParser(req, res, next);
+});
 
 // Register demo read-only protection before routes so future mutating /api routes,
 // including auth-adjacent endpoints, cannot bypass it by ordering.
@@ -355,7 +359,7 @@ export function setupRoutes(): void {
   // Register before registerDesktopApiBoundary installs the shared API guard;
   // registration is a no-op unless Fleet control was enabled at startup. The
   // general /api request limiter is mounted at module load, before setupRoutes
-  // runs, so these handlers are rate-limited; extension MCP calls use a grant-hash bucket.
+  // runs, so these handlers and extension MCP calls share the global IP-keyed limiter.
   registerHostedFleetRoutes(app, {
     operationalStatus: statusRoutes.readStatusSnapshot,
     queueStatus: queueRoutes.collectQueueStats
@@ -500,7 +504,7 @@ export function setupRoutes(): void {
   app.get('/api/instance/extensions/v1/profiles/:profileId/history', extensionRoutes.history);
   app.post('/api/instance/extensions/v1/delete', extensionRoutes.remove);
   app.post('/api/instance/extensions/v1/validate', extensionRoutes.validate);
-  app.post('/api/instance/extensions/v1/skills/archive', extensionRoutes.importArchive);
+  app.post('/api/instance/extensions/v1/skills/archive', express.json({ limit: '7mb' }), extensionRoutes.importArchive);
   app.post('/api/instance/extensions/v1/skills/github', extensionRoutes.importGithub);
 }
 

@@ -186,12 +186,17 @@ test('synthetic HTTPS MCP enforces TLS, pins the vetted address, refuses redirec
   const { requestExtensionMcp } = await import('../src/extensions/endpointPolicy.js');
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'extension-https-'));
   execFileSync('openssl', ['req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-keyout', path.join(root, 'key.pem'), '-out', path.join(root, 'cert.pem'), '-days', '1', '-subj', '/CN=mcp.synthetic.example', '-addext', 'subjectAltName=DNS:mcp.synthetic.example'], { stdio: 'ignore' });
-  const cert = await fs.readFile(path.join(root, 'cert.pem')); let redirect = false; let oversized = false; let authorizations = 0;
+  const cert = await fs.readFile(path.join(root, 'cert.pem')); let redirect = false; let oversized = false; let authorizations = 0; let protocolError = false; let errorWire = '';
   const server = https.createServer({ key: await fs.readFile(path.join(root, 'key.pem')), cert }, async (req, res) => {
     assert.equal(req.headers.authorization, `Bearer ${secret}`); authorizations++;
     if (redirect) { res.writeHead(307, { location: 'https://127.0.0.1/metadata' }).end(); return; }
     const chunks = []; for await (const chunk of req) chunks.push(chunk);
     const rpc = JSON.parse(Buffer.concat(chunks).toString());
+    if (rpc.id === undefined) { res.writeHead(202).end(); return; }
+    if (protocolError) {
+      errorWire = '   ' + JSON.stringify({ jsonrpc: '2.0', id: rpc.id, error: { code: -32602, message: secret, data: { secret } } }) + '\n';
+      res.writeHead(200, { 'content-type': 'application/json' }).end(errorWire); return;
+    }
     res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({ jsonrpc: '2.0', id: rpc.id, result: { content: [{ type: 'text', text: oversized ? 'x'.repeat(1024 * 1024 + 1) : secret }] } }));
   });
   await new Promise<void>(r => server.listen(0, '127.0.0.1', r));
@@ -212,6 +217,15 @@ test('synthetic HTTPS MCP enforces TLS, pins the vetted address, refuses redirec
   await assert.rejects(extensionGatewayCall(store, 'x'.repeat(43), 'docs', body), /expired/); assert.equal(authorizations, 1);
   redirect = true; await assert.rejects(requestExtensionMcp(input().mcpServers[0].url, body, secret), /connection failed/); assert.equal(authorizations, 2);
   redirect = false; oversized = true; await assert.rejects(requestExtensionMcp(input().mcpServers[0].url, body, secret), /connection failed/);
+  oversized = false;
+  const before = (await database('extension_run_grants').first()).bytes;
+  assert.equal(await extensionGatewayCall(store, token, 'docs', { jsonrpc: '2.0', method: 'notifications/initialized' }), null);
+  assert.equal((await database('extension_run_grants').first()).bytes, before);
+  protocolError = true;
+  assert.deepEqual(await extensionGatewayCall(store, token, 'docs', body), { jsonrpc: '2.0', id: 1, error: { code: -32602, message: 'MCP request failed' } });
+  const charged = await database('extension_run_grants').first();
+  assert.equal(charged.bytes, before + Buffer.byteLength(errorWire));
+  assert.equal(charged.connections, 0);
 });
 
 test('concurrent edits, pending launch disable/delete and exhausted grants refuse safely', async t => {
@@ -574,7 +588,7 @@ test('startup egress sweep reclaims crashed extension owners and preserves live,
   const live = await createStagingDirectory(instance); t.after(live.cleanup);
   const deadName = path.basename(live.directory).replace(`-${process.pid}-`, '-2147483647-');
   const dead = path.join(instance, deadName); await fs.mkdir(dead); await fs.writeFile(path.join(dead, 'skill'), 'dead-owner');
-  const foreign = path.join(instance, deadName.replace(/^run-[a-f0-9]{16}/, 'run-0000000000000000')); await fs.mkdir(foreign);
+  const foreign = path.join(instance, deadName.replace(/^(run-[a-f0-9]{16}-)[a-f0-9]{16}/, (_match, prefix) => prefix + '0000000000000000')); await fs.mkdir(foreign);
   const legacy = path.join(instance, 'run-legacy'); await fs.mkdir(legacy);
   const outside = path.join(root, 'outside'); await fs.mkdir(outside); await fs.writeFile(path.join(outside, 'sentinel'), 'preserve');
   const linkName = deadName.slice(0, -6) + 'ABCDEF'; await fs.symlink(outside, path.join(instance, linkName));
@@ -736,4 +750,77 @@ test('DNS is resolved once per create/start window and checked again for later c
     await assert.rejects(launch.beforeLaunch({}), /public addresses/);
     return result;
   }, store);
+});
+
+
+test('accepted MCP notifications refund reservations and release connections', async t => {
+  const { database, store } = await fixture(); t.after(() => database.destroy());
+  const profile = await store.save('1', input(), { docs: secret });
+  const token = await store.createGrant('1', profile, 'accepted-notifications');
+  await store.activateGrant(token, '1', select(profile));
+  for (let i = 0; i < 20; i++) {
+    assert.equal(await extensionGatewayCall(store, token, 'docs', { jsonrpc: '2.0', method: 'notifications/initialized' }, async () => null), null);
+    const grant = await database('extension_run_grants').first();
+    assert.equal(grant.bytes, 0);
+    assert.equal(grant.connections, 0);
+  }
+  await assert.rejects(extensionGatewayCall(store, token, 'docs', { jsonrpc: '2.0', id: 1, method: 'ping' }, async () => null), /protocol unavailable/);
+  const grant = await database('extension_run_grants').first();
+  assert.equal(grant.bytes, 1024 * 1024);
+  assert.equal(grant.connections, 0);
+});
+
+test('gateway preserves JSON-RPC error codes while removing upstream messages and data', async t => {
+  const { database, store } = await fixture(); t.after(() => database.destroy());
+  const profile = await store.save('1', input(), { docs: secret });
+  const token = await store.createGrant('1', profile, 'protocol-errors');
+  await store.activateGrant(token, '1', select(profile));
+  for (const method of ['initialize', 'ping', 'tools/list', 'tools/call']) {
+    const rpc = { jsonrpc: '2.0', id: 1, method, ...(method === 'tools/call' ? { params: { name: 'lookup' } } : {}) };
+    const response = await extensionGatewayCall(store, token, 'docs', rpc, async () => ({ jsonrpc: '2.0', id: 1, error: { code: -32602, message: secret, data: { token } } }));
+    assert.deepEqual(response, { jsonrpc: '2.0', id: 1, error: { code: -32602, message: 'MCP request failed' } });
+  }
+  for (const upstream of [
+    { jsonrpc: '2.0', id: 2, error: { code: -32602, message: secret } },
+    { jsonrpc: '2.0', id: 1, error: { code: 'bad', message: secret } },
+    { jsonrpc: '2.0', id: 1, error: { code: -32602, message: secret }, result: {} },
+  ]) await assert.rejects(extensionGatewayCall(store, token, 'docs', { jsonrpc: '2.0', id: 1, method: 'ping' }, async () => upstream), /MCP (request failed|protocol unavailable)/);
+  assert.equal((await database('extension_run_grants').first()).connections, 0);
+});
+
+test('staging reclaims expired foreign leases only on the same host boot and preserves refreshed leases', async t => {
+  const { createStagingDirectory, ensureStagingRoot, sweepOrphanedExtensionStaging, EXTENSION_STAGING_ORPHAN_MAX_AGE_MS } = await import('../src/extensions/skillStaging.js');
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'extension-foreign-lease-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const instance = path.join(root, 'instance'); await ensureStagingRoot(instance);
+  t.mock.timers.enable({ apis: ['setInterval'] });
+  const live = await createStagingDirectory(instance); t.after(live.cleanup);
+  const name = path.basename(live.directory);
+  const foreignName = name.replace(/^(run-[a-f0-9]{16}-)[a-f0-9]{16}/, (_match, prefix) => prefix + '0000000000000000');
+  const stale = path.join(instance, foreignName); await fs.mkdir(stale);
+  const fresh = path.join(instance, foreignName + 'fresh'); await fs.mkdir(fresh);
+  const otherBoot = path.join(instance, foreignName.replace(/^run-[a-f0-9]{16}/, 'run-0000000000000000')); await fs.mkdir(otherBoot);
+  const legacy = path.join(instance, 'run-0000000000000000-2147483647-ABCDEF'); await fs.mkdir(legacy);
+  const old = new Date(Date.now() - EXTENSION_STAGING_ORPHAN_MAX_AGE_MS - 1000);
+  for (const directory of [live.directory, stale, otherBoot, legacy]) await fs.utimes(directory, old, old);
+  t.mock.timers.tick(60_000);
+  // Wait for the asynchronous heartbeat write started by the timer.
+  for (let i = 0; i < 20 && (await fs.stat(live.directory)).mtimeMs === old.getTime(); i++) await new Promise<void>(resolve => setImmediate(resolve));
+  assert.ok((await fs.stat(live.directory)).mtimeMs > old.getTime());
+  // A refresh during the awaited inspection invalidates the age evidence.
+  const refreshedDuringSweep = path.join(instance, foreignName + 'raced'); await fs.mkdir(refreshedDuringSweep);
+  await fs.utimes(refreshedDuringSweep, old, old);
+  const lstat = fs.lstat.bind(fs); let raced = false;
+  t.mock.method(fs, 'lstat', async (...args: Parameters<typeof fs.lstat>) => {
+    const stat = await lstat(...args);
+    if (!raced && String(args[0]).endsWith('/' + path.basename(refreshedDuringSweep))) {
+      raced = true; const now = new Date(); await fs.utimes(refreshedDuringSweep, now, now);
+    }
+    return stat;
+  });
+  assert.equal(await sweepOrphanedExtensionStaging(root), 1);
+  assert.equal(raced, true);
+  assert.ok((await fs.stat(refreshedDuringSweep)).isDirectory());
+  await assert.rejects(fs.stat(stale), /ENOENT/);
+  for (const directory of [live.directory, fresh, otherBoot, legacy]) assert.ok((await fs.stat(directory)).isDirectory());
 });

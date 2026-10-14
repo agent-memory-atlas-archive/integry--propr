@@ -22,7 +22,7 @@ test('server mounts extension gateway before auth, management after auth, and ar
   const auth = await import('../auth.js');
   mock.module('../auth.js', { namedExports: { ...auth, setupAuth: () => ({ engineMiddleware: [], authenticate: () => undefined }) } });
   const endpoint = await import('../../core/src/extensions/endpointPolicy.js');
-  mock.module('../../core/src/extensions/endpointPolicy.js', { namedExports: { ...endpoint, requestExtensionMcp: async (_url: string, body: any) => ({ jsonrpc: '2.0', id: body.id, result: { tools: [{ name: 'lookup', inputSchema: { type: 'object' } }] } }) } });
+  mock.module('../../core/src/extensions/endpointPolicy.js', { namedExports: { ...endpoint, requestExtensionMcp: async (_url: string, body: any) => body.method === 'tools/call' ? ({ jsonrpc: '2.0', id: body.id, error: { code: -32602, message: 'upstream-secret', data: { secret: 'upstream-secret' } } }) : ({ jsonrpc: '2.0', id: body.id, result: { tools: [{ name: 'lookup', inputSchema: { type: 'object' } }] } }) } });
   process.env.PROPR_API_DISABLE_AUTOSTART = '1';
   const { app, setupRoutes, initRedis } = await import('../server.js');
   const core = await import('@propr/core');
@@ -58,6 +58,13 @@ test('server mounts extension gateway before auth, management after auth, and ar
   const authorizedGateway = await fetch(base + '/api/extensions/mcp/docs', { method: 'POST', headers: { 'content-type': 'application/json', Authorization: `Bearer ${token}` }, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list' }) });
   assert.equal(authorizedGateway.status, 200); // No member session is supplied.
   assert.equal((await authorizedGateway.json()).result.tools[0].name, 'lookup');
+  const protocolError = await fetch(base + '/api/extensions/mcp/docs', { method: 'POST', headers: { 'content-type': 'application/json', Authorization: `Bearer ${token}` }, body: JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'lookup' } }) });
+  assert.equal(protocolError.status, 200);
+  assert.deepEqual(await protocolError.json(), { jsonrpc: '2.0', id: 2, error: { code: -32602, message: 'MCP request failed' } });
+  for (const suffix of ['', '/', '?upload=1']) {
+    const unauthenticatedArchive = await fetch(base + '/api/instance/extensions/v1/skills/archive' + suffix, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{invalid-json' });
+    assert.equal(unauthenticatedArchive.status, 401, 'authentication precedes JSON parsing');
+  }
   const payload = JSON.stringify({ padding: 'x'.repeat(2 * 1024 * 1024) });
   const archive = await fetch(base + '/api/instance/extensions/v1/skills/archive', { method: 'POST', headers, body: payload });
   assert.equal(archive.status, 400); // Parsed successfully, then invalid archive input.

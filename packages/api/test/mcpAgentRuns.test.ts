@@ -442,3 +442,18 @@ testWithFixture('new automation receipts replay through legacy approval and reje
   }
   assert.equal(f.acting.length, 1);
 });
+
+
+testWithFixture('MCP automation tools cannot write extension selections into definitions', async f => {
+  for (const name of ['create_automation_definition', 'update_automation_definition', 'create_agent_definition', 'update_agent_definition']) assert.equal(f.catalog.find(tool => tool.name === name), undefined);
+  const definition = await f.define(['acme/app']);
+  const selection = { instanceId: 'instance', profileId: 'profile', revision: 1 };
+  for (const family of ['automation', 'agent']) {
+    for (const action of ['trigger', 'approve', 'reject']) {
+      const tool = f.catalog.find(tool => tool.name === `${action}_${family}_run`)!;
+      const args = action === 'trigger' ? { definitionId: definition.id, idempotencyKey: 'selection-write' } : { runId: 'run' };
+      assert.equal(tool.schema.safeParse({ ...args, extensionProfile: selection }).success, false);
+    }
+  }
+  assert.equal((await f.db('agent_definitions').where({ id: definition.id }).first()).extension_profile, null);
+});

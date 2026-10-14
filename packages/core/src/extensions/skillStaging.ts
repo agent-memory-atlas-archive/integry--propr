@@ -12,6 +12,12 @@ export function assertSkillStagingPlatform(platform: NodeJS.Platform = process.p
   if (platform !== 'linux') throw new ExtensionError(503, 'Extension skill staging requires a Linux worker with /proc/self/fd available');
 }
 
+// Foreign PID namespaces cannot be probed. A worker refreshes its lease while
+// owning the staging handle; a restarted worker may reclaim it after 48 hours.
+export const EXTENSION_STAGING_ORPHAN_MAX_AGE_MS = 48 * 60 * 60 * 1000;
+const ownerHash = (value: string) => createHash('sha256').update(value).digest('hex').slice(0, 16);
+const stagingBoot = async () => ownerHash((await fs.readFile('/proc/sys/kernel/random/boot_id', 'utf8')).trim());
+
 const same = (a: Stats, b: Stats) => a.dev === b.dev && a.ino === b.ino && a.mode === b.mode && (!a.isFile() || (a.size === b.size && a.mtimeMs === b.mtimeMs && a.ctimeMs === b.ctimeMs));
 /** Inspect every component, not just the final directory. */
 export async function inspectStagingAncestors(directory: string): Promise<Map<string, Stats>> {
@@ -69,7 +75,11 @@ export async function createStagingDirectory(root: string): Promise<{ directory:
   const parent = await openDirectory(root);
   let runHandle: Awaited<ReturnType<typeof fs.open>> | undefined;
   let created: string | undefined;
+  let heartbeat: ReturnType<typeof setInterval> | undefined;
+  let refreshing = Promise.resolve();
   const cleanup = async () => {
+    clearInterval(heartbeat);
+    await refreshing;
     try {
       if (runHandle) {
         const original = await runHandle.stat();
@@ -86,12 +96,19 @@ export async function createStagingDirectory(root: string): Promise<{ directory:
   try {
     // Ownership is in the atomic directory name, including if creation crashes
     // before any file can be written. PIDs are meaningful only in this namespace.
-    const namespace = createHash('sha256').update(await egressProcessNamespace()).digest('hex').slice(0, 16);
-    const target = await fs.mkdtemp(`/proc/self/fd/${parent.fd}/run-${namespace}-${process.pid}-`); created = path.basename(target);
+    const namespace = ownerHash(await egressProcessNamespace());
+    const boot = await stagingBoot();
+    const target = await fs.mkdtemp(`/proc/self/fd/${parent.fd}/run-${boot}-${namespace}-${process.pid}-`); created = path.basename(target);
     runHandle = await fs.open(target, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
     const directory = path.join(root, created);
     if (await fs.realpath(`/proc/self/fd/${parent.fd}`) !== path.resolve(root) || await fs.realpath(`/proc/self/fd/${runHandle.fd}`) !== path.resolve(directory)) throw new ExtensionError(409, 'Staging root replaced during creation');
     await runHandle.chmod(0o755);
+    heartbeat = setInterval(() => {
+      refreshing = refreshing.then(async () => {
+        const now = new Date(); await runHandle!.utimes(now, now);
+      }).catch(() => { logger.warn('Could not refresh extension staging lease'); });
+    }, 60_000);
+    heartbeat.unref();
     return { directory, cleanup };
   } catch (error) {
     try { await cleanup(); }
@@ -150,16 +167,17 @@ export async function stagingValidator(root: string, directory: string, bundles:
   };
 }
 
-/** Reclaim only demonstrably dead owners; age alone cannot prove a mount unused. */
+/** Reclaim dead local owners or expired foreign leases on this host and boot. */
 export async function sweepOrphanedExtensionStaging(extensionsRoot: string): Promise<number> {
   let root: Awaited<ReturnType<typeof openDirectory>>;
   try { root = await openDirectory(extensionsRoot); } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') return 0;
     throw error;
   }
-  const namespace = createHash('sha256').update(await egressProcessNamespace()).digest('hex').slice(0, 16);
   let removed = 0;
   try {
+    const namespace = ownerHash(await egressProcessNamespace());
+    const boot = await stagingBoot();
     for (const instance of await fs.readdir(`/proc/self/fd/${root.fd}`)) {
       let parent: Awaited<ReturnType<typeof openDirectory>>;
       try { parent = await openDirectory(path.join(extensionsRoot, instance)); } catch { continue; }
@@ -167,16 +185,26 @@ export async function sweepOrphanedExtensionStaging(extensionsRoot: string): Pro
         const stat = await parent.stat();
         if (stat.uid !== process.getuid?.() || (stat.mode & 0o077)) continue;
         for (const name of await fs.readdir(`/proc/self/fd/${parent.fd}`)) {
-          const owner = /^run-([a-f0-9]{16})-([1-9][0-9]*)-[A-Za-z0-9]+$/.exec(name);
-          if (!owner || owner[1] !== namespace) continue;
-          const pid = Number(owner[2]);
+          const owner = /^run-(?:([a-f0-9]{16})-)?([a-f0-9]{16})-([1-9][0-9]*)-[A-Za-z0-9]+$/.exec(name);
+          if (!owner || (owner[1] && owner[1] !== boot)) continue;
+          const local = owner[2] === namespace;
+          // Older names prove only namespace ownership, never host/boot ownership.
+          if (!local && !owner[1]) continue;
+          const pid = Number(owner[3]);
           if (!Number.isSafeInteger(pid)) continue;
-          try { process.kill(pid, 0); continue; } catch (error) {
-            if ((error as NodeJS.ErrnoException).code !== 'ESRCH') continue;
+          if (local) {
+            try { process.kill(pid, 0); continue; } catch (error) {
+              if ((error as NodeJS.ErrnoException).code !== 'ESRCH') continue;
+            }
           }
           const target = `/proc/self/fd/${parent.fd}/${name}`;
           const run = await fs.lstat(target);
           if (!run.isDirectory() || run.isSymbolicLink() || run.uid !== process.getuid?.()) continue;
+          if (!local && Date.now() - run.mtimeMs <= EXTENSION_STAGING_ORPHAN_MAX_AGE_MS) continue;
+          // Check again after awaited inspection, so refreshed/replaced evidence
+          // does not authorize deletion. The private root limits mutation authority.
+          const current = await fs.lstat(target);
+          if (!same(run, current) || run.mtimeMs !== current.mtimeMs) continue;
           await fs.rm(target, { recursive: true, force: true });
           removed++;
         }
