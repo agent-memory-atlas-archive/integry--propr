@@ -8,10 +8,16 @@ export function ExtensionProfileSelector({ value, onChange, disabled = false }: 
   useEffect(() => {
     if (!permitted) return;
     let active = true;
-    void listExtensionProfiles().then(result => { if (active) setProfiles(result.profiles.filter(p => p.enabled)); }).catch(() => { if (active) setError('Extension selection unavailable. Durable instance administrator access is required.'); });
+    void listExtensionProfiles().then(result => {
+      if (active) { setProfiles(result.profiles.filter(p => p.enabled)); setError(''); }
+    }).catch(() => {
+      if (active) { setProfiles([]); setError('Extension profiles could not be loaded. Select None to clear this selection.'); }
+    });
     return () => { active = false; };
   }, [permitted]);
-  if (!permitted && !value) return null;
+  // A task with no selected profile needs no extension controls. An empty
+  // catalog (or an unavailable optional endpoint) is not a task error.
+  if (!value && (!permitted || profiles.length === 0)) return null;
   const selected = permitted ? profiles.find(p => p.profileId === value?.profileId && p.revision === value.revision) : undefined;
   return <div className="space-y-2 text-sm">
     <label className="block font-medium text-slate-700">Agent extension profile
