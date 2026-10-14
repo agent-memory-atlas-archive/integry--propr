@@ -214,15 +214,11 @@ test('recipient expiry/restart, substitutions, concurrent claims, rotation races
   }
   const changedProfile = await f.recipient(intent);
   await assert.rejects(f.invoke({ ...intent, input: { ...input, name: 'Different intent' }, sealed: [await f.encrypt(changedProfile.recipient, sentinel)] }, { operationId: changedProfile.operationId }), /unavailable/);
-  // Freeze issuance time so slow CI I/O cannot expire the assertion before issuance.
-  // Advance only Date to exercise the expiry guard independently of timer cleanup.
-  t.mock.timers.enable({ apis: ['Date'], now: Date.now() });
-  try {
-    const expired = await f.recipient(intent);
-    const expiredCipher = await f.encrypt(expired.recipient, sentinel);
-    t.mock.timers.setTime(expired.recipient.binding.expiresAt * 1000);
-    await assert.rejects(f.invoke({ ...intent, sealed: [expiredCipher] }, { operationId: expired.operationId }), /unavailable/);
-  } finally { t.mock.timers.reset(); }
+  // Allow slow CI issuance, then wait past the issued recipient's actual expiry.
+  const expired = await f.recipient(intent, randomUUID(), { expiresAt: Math.floor(Date.now() / 1000) + 10 });
+  const expiredCipher = await f.encrypt(expired.recipient, sentinel);
+  await new Promise(resolve => setTimeout(resolve, Math.max(0, expired.recipient.binding.expiresAt * 1000 - Date.now()) + 100));
+  await assert.rejects(f.invoke({ ...intent, sealed: [expiredCipher] }, { operationId: expired.operationId }), /unavailable/);
   const restart = await f.recipient(intent); const restartCipher = await f.encrypt(restart.recipient, sentinel); f.restart();
   await assert.rejects(f.invoke({ ...intent, sealed: [restartCipher] }, { operationId: restart.operationId }), /unavailable/);
   const concurrent = await f.recipient(intent); const encrypted = await f.encrypt(concurrent.recipient, sentinel);
