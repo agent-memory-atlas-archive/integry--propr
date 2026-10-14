@@ -118,7 +118,7 @@ export class FleetExtensionPlane {
       case 'profile.disable': {
         const profile = await this.store.read(actor, r.selection);
         const { version, name, agentScope, repositoryScope, mcpServers, skillBundleIds } = profile;
-        return { profile: await this.store.save(actor, { version, name, enabled: false, agentScope, repositoryScope, mcpServers, skillBundleIds }, {}, { expected: r.selection, guard, preflight: preflightProfile }) };
+        return { profile: await this.store.saveWithOptions(actor, { version, name, enabled: false, agentScope, repositoryScope, mcpServers, skillBundleIds }, {}, { expected: r.selection, guard, preflight: preflightProfile }) };
       }
       case 'profile.delete': await this.store.delete(actor, r.selection, guard); return { deleted: true };
       case 'selection.validate': await this.store.assertLaunch(actor, r.selection, r.context); await guard(); return { selection: r.selection, valid: true };
@@ -140,7 +140,7 @@ export class FleetExtensionPlane {
     const replacements = await this.decrypt(a, r);
     try {
       await guard();
-      return { profile: await this.store.save(actor, r.input, replacements, { expected: r.action === 'profile.update' ? r.selection : undefined, guard, preflight }) };
+      return { profile: await this.store.saveWithOptions(actor, r.input, replacements, { expected: r.action === 'profile.update' ? r.selection : undefined, guard, preflight }) };
     } finally { for (const key of Object.keys(replacements)) delete replacements[key]; }
   }
   private async validateProfile(a: FleetExtensionAssertion, selection: Extract<FleetExtensionRequest, { action: 'profile.validate' }>['selection']) {
