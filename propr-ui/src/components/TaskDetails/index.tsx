@@ -275,7 +275,7 @@ const TaskDetails: React.FC<TaskDetailsProps> = ({ taskId: taskIdProp, embedded 
   const executionLogRef = useClickOutsideCollapse(thinkingLog.eventsCollapsed, thinkingLog.collapseEvents);
 
   const derivedData = getHistoryDerivedData(taskData.history, taskData.taskInfo);
-  const pullRequest = useTaskPullRequestScores(taskData.taskInfo, derivedData.prInfo);
+  const pullRequest = useTaskPullRequestScores(taskData.taskInfo, derivedData.prInfo, runs);
 
   const statusView = renderTaskDetailsStatus(taskData.loading, taskData.error, taskData.history, taskId);
 
@@ -316,8 +316,8 @@ const TaskDetails: React.FC<TaskDetailsProps> = ({ taskId: taskIdProp, embedded 
     onViewPrompt: promptData.fetchPrompt,
     onViewLogs: logFilesData.fetchLogFilesData,
     onDeleteTask: handleDeleteTask,
-    // A merged pull request takes no more follow-ups, so none are offered.
-    ...(pullRequest.merged ? {} : { followupCommands: <LatestRunCommands runs={runs} taskId={taskId} />, onFollowUp: handleOpenFollowup }),
+    // A merged pull request takes no more follow-ups, so none are offered until the PR is known to be unmerged.
+    ...(pullRequest.merged !== false ? {} : { followupCommands: <LatestRunCommands runs={runs} taskId={taskId} />, onFollowUp: handleOpenFollowup }),
     liveRun,
   };
 
