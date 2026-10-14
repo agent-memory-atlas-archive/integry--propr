@@ -344,3 +344,5 @@ stable release. Remove callable aliases only in a subsequent breaking release.
 No retirement version is assigned yet, and this rename does not hide aliases.
 Legacy stored operation receipts keep their original field names throughout
 this migration.
+
+Instance administrators can also manage reusable [agent extension profiles](./agent-extensions.md) for selected Claude and Codex task runs, with explicitly authorized MCP tools and immutable skill bundles.

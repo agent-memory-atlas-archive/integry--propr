@@ -358,8 +358,10 @@ describe('Inbox triage console', () => {
     const inspect = within(pane()!).getByRole('link', { name: /Inspect in Tasks/ });
     expect(fireEvent.keyDown(inspect, { key: 'ArrowDown' })).toBe(true);
     expect(search().get('notification')).toBe(review.id);
-    fireEvent.keyDown(inspect, { key: 'j' });
-    expect(search().get('notification')).toBe(ready.id);
+    expect(fireEvent.keyDown(inspect, { key: 'j' })).toBe(false);
+    // React Router commits URL changes in a transition, which can settle after keyDown returns.
+    await waitFor(() => expect(search().get('notification')).toBe(ready.id));
+    expect(within(pane()!).getByRole('heading', { name: ready.title })).toBeInTheDocument();
   });
 
   test("a review's diff falls back to the run it reviewed when the review itself committed nothing", async () => {
@@ -511,7 +513,8 @@ describe('Inbox triage console', () => {
     renderInbox('/inbox?notification=far-back');
     await screen.findByRole('article', { name: review.title });
     expect(await screen.findByText('That notification isn’t in the loaded Inbox. Load more to look further back.')).toBeInTheDocument();
-    expect(search().get('notification')).toBeNull();
+    // The notice can render before the router's URL transition has committed.
+    await waitFor(() => expect(search().get('notification')).toBeNull());
     expect(pane()).not.toBeInTheDocument();
     // Each Load more follows empty pages on its own; the lookup stops after its bounded number of them.
     const reads = vi.mocked(listNotifications).mock.calls.length;

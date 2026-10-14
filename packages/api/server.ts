@@ -1,3 +1,4 @@
+import { createExtensionProfileRoutes } from './routes/extensionProfileRoutes.js';
 import { startConfiguredFleetData, refusePublicFleetData } from './fleetDataListener.js';
 import { createStorageRouteEntries } from './instanceStorageRouteRegistry.js';
 import { protectStorageQueue } from '../core/src/storage/lifecycle.js';
@@ -183,7 +184,7 @@ const processCommentEventWrapper = (payload: CommentPayload, eventType: CommentE
 const handleCommentDeletedWrapper = (payload: CommentPayload, eventType: CommentEventType, correlationId: string): Promise<void> => handleCommentDeleted(payload, eventType, correlationId, getCommentConfig());
 const handleCommentEditedWrapper = (payload: CommentPayload, eventType: CommentEventType, correlationId: string): Promise<void> => handleCommentEdited(payload, eventType, correlationId, getCommentConfig());
 
-const app = express();
+export const app = express();
 app.use(refusePublicFleetData);
 const PORT = Number(process.env.DASHBOARD_API_PORT || 4000);
 const HOST = resolveApiListenHost();
@@ -257,7 +258,12 @@ app.use(corsRejectionHandler);
 app.use('/api', createApiRequestRateLimiter());
 setupWebhookRoute();
 
-app.use(express.json({ limit: '1mb' }));
+const defaultJsonParser = express.json({ limit: '1mb' });
+app.use((req, res, next) => {
+  // The archive parser is installed at its route, after the member guard.
+  if (req.method === 'POST' && /^\/api\/instance\/extensions\/v1\/skills\/archive\/?$/i.test(req.path)) return next();
+  return defaultJsonParser(req, res, next);
+});
 
 // Register demo read-only protection before routes so future mutating /api routes,
 // including auth-adjacent endpoints, cannot bypass it by ordering.
@@ -291,7 +297,7 @@ function createDemoTaskQueue(): Queue {
   } as unknown as Queue;
 }
 
-async function initRedis(): Promise<void> {
+export async function initRedis(): Promise<void> {
   if (demoMode) {
     redisClient = createDemoRedisClient();
     taskQueue = createDemoTaskQueue();
@@ -321,7 +327,7 @@ async function initRedis(): Promise<void> {
 
 let readSystemStatus: (() => Promise<Record<string, unknown>>) | undefined;
 
-function setupRoutes(): void {
+export function setupRoutes(): void {
   const statusRoutes = createStatusRoutes({
     redisClient,
     ...(notificationBackground === undefined ? {} : {
@@ -353,11 +359,13 @@ function setupRoutes(): void {
   // Register before registerDesktopApiBoundary installs the shared API guard;
   // registration is a no-op unless Fleet control was enabled at startup. The
   // general /api request limiter is mounted at module load, before setupRoutes
-  // runs, so these handlers are rate-limited like every other /api route.
+  // runs, so these handlers and extension MCP calls share the global IP-keyed limiter.
   registerHostedFleetRoutes(app, {
     operationalStatus: statusRoutes.readStatusSnapshot,
     queueStatus: queueRoutes.collectQueueStats
   });
+  const extensionRoutes = createExtensionProfileRoutes();
+  app.post('/api/extensions/mcp/:serverName', extensionRoutes.gateway);
   // MCP authenticates its own bearer tokens before the shared API guard.
   mountMcp(app, { db, taskQueue, redisClient, runtimeBuildQueue });
   // Worker-only: run-scoped MCP grants for agent containers, authenticated by
@@ -491,6 +499,15 @@ function setupRoutes(): void {
   assertNoDuplicateRoutes(routes);
   registerRouteEntries(app, routes);
   app.use('/api/agents', agentRoutes.router);
+  app.get('/api/instance/extensions/v1', extensionRoutes.list);
+  app.post('/api/instance/extensions/v1/profiles', extensionRoutes.save);
+  app.get('/api/instance/extensions/v1/profiles/:profileId/history', extensionRoutes.history);
+  app.post('/api/instance/extensions/v1/delete', extensionRoutes.remove);
+  app.post('/api/instance/extensions/v1/validate', extensionRoutes.validate);
+  app.post('/api/instance/extensions/v1/skills/archive', express.json({ limit: '7mb' }), extensionRoutes.importArchive);
+  app.post('/api/instance/extensions/v1/skills/github', extensionRoutes.importGithub);
+  app.post('/api/instance/extensions/v1/skills/github-source', extensionRoutes.githubSource);
+  app.post('/api/instance/extensions/v1/tools/discover', extensionRoutes.discoverTools);
 }
 
 function setupWebhookRoute(): void {
@@ -758,4 +775,6 @@ async function start(): Promise<void> {
   }
 }
 
-start();
+// Importing supervisors and symlinked entries retain the production startup contract.
+// Composition tests explicitly disable infrastructure startup before importing.
+if (process.env.PROPR_API_DISABLE_AUTOSTART !== '1') void start();

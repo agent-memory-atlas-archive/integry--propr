@@ -126,6 +126,27 @@ describe('automation definition routes', () => {
     return created.body.definition as { id: string; revision: number; [key: string]: unknown };
   }
 
+  test('demoted owners can edit or clear a stored profile but cannot select a new revision', async () => {
+    const { ExtensionProfileStore } = await import('../../core/src/extensions/extensionProfileStore.js');
+    await database('instance_members').insert({ github_user_id: '1', github_username: '1', role: 'admin', source: 'local', created_at: NOW, updated_at: NOW });
+    const store = new ExtensionProfileStore(database, { SYSTEM_TASK_SECRET: 'synthetic-profile-test-key' });
+    const profile = await store.save('1', { version: 1, name: 'Tools', enabled: true, agentScope: [], repositoryScope: [], mcpServers: [], skillBundleIds: [] }, {});
+    const selection = { instanceId: profile.instanceId, profileId: profile.profileId, revision: profile.revision };
+    const definition = await createDefinition('1');
+    await database('agent_definitions').where({ id: definition.id }).update({ extension_profile: JSON.stringify(selection) });
+    await database('instance_members').where({ github_user_id: '1' }).update({ role: 'member' });
+    for (const patch of [{ prompt: 'Updated prompt', extensionProfile: { ...selection } }, { scheduleCron: '0 9 * * *', extensionProfile: selection }]) {
+      const result = await call(routes.update, request('1', { params: { id: definition.id }, body: patch }));
+      assert.equal(result.status, 200, JSON.stringify(result.body));
+      assert.deepEqual(result.body.definition.extensionProfile, selection);
+    }
+    const changed = { ...selection, revision: 2 };
+    assert.equal((await call(routes.update, request('1', { params: { id: definition.id }, body: { extensionProfile: changed } }))).status, 403);
+    assert.equal((await call(routes.update, request('1', { params: { id: definition.id }, headers: { 'X-ProPR-Extensions': '1' }, body: { extensionProfile: changed } }))).status, 403);
+    const cleared = await call(routes.update, request('1', { params: { id: definition.id }, body: { extensionProfile: null } }));
+    assert.equal(cleared.status, 200); assert.equal(cleared.body.definition.extensionProfile, null);
+  });
+
   /** Run `action` as soon as a matching query has answered, before the waiting caller resumes. */
   function afterQuery(matches: (sql: string) => boolean, action: () => Promise<unknown>): Promise<void> {
     return new Promise((resolve, reject) => {

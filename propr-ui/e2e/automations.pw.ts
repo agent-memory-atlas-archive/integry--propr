@@ -1,5 +1,5 @@
 import { expect, test, type Locator, type Page } from '@playwright/test';
-import { mkdir } from 'node:fs/promises';
+import { mkdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { user } from './dashboard-sections.fixture';
 
@@ -256,4 +256,33 @@ test.describe('mobile creation sheet', () => {
       });
     }
   }
+});
+
+
+test('demoted owner can clear a stored extension profile', async ({ page }) => {
+  const selection = { instanceId: 'c63a25da-fd5e-4a46-8fe1-566136e12289', profileId: '5b14d6d6-9357-4b56-9eb3-31e5f921d125', revision: 1 };
+  await page.route('**/api/auth/user', route => route.fulfill({ json: { ...user, instanceRole: 'member', instancePermissions: [], authorization: { role: 'member', permissions: [], source: 'local' } } }));
+  await page.route(`**/api/automation-definitions/${definition.id}`, route => {
+    if (route.request().method() === 'PATCH') {
+      expect(route.request().postDataJSON().extensionProfile).toBeNull();
+      return route.fulfill({ json: { definition: { ...definition, extensionProfile: null, revision: 2 } } });
+    }
+    return route.fulfill({ json: { definition: { ...definition, extensionProfile: selection } } });
+  });
+  await page.goto(`/automations/${definition.id}`);
+  const form = page.getByTestId('agent-editor');
+  const selector = form.getByRole('combobox', { name: 'Agent extension profile' });
+  await expect(selector).toBeEnabled(); await selector.scrollIntoViewIfNeeded();
+  await expect(selector.locator('option')).toHaveCount(2);
+  await expect(selector.locator('option:checked')).toContainText('Selected revision unavailable');
+  if (process.env.PROPR_CAPTURE_PREVIEWS) {
+    const directory = path.resolve('../.propr/previews'); await mkdir(directory, { recursive: true });
+    await selector.locator('..').locator('..').screenshot({ path: path.join(directory, 'extension-profile-clear.png'), animations: 'disabled' });
+    await writeFile(path.join(directory, 'manifest.json'), JSON.stringify({ previews: [{ path: '.propr/previews/extension-profile-clear.png', title: 'Clear unavailable extension profile', description: 'An automation owner who was demoted can select None to clear a stored profile.' }], toolSuggestions: [] }));
+  }
+  await selector.selectOption('');
+  await expect(selector).toHaveCount(0);
+  const save = form.getByRole('button', { name: 'Save changes' });
+  const saved = page.waitForResponse(response => response.url().endsWith(`/api/automation-definitions/${definition.id}`) && response.request().method() === 'PATCH');
+  await save.click(); expect((await saved).status()).toBe(200);
 });

@@ -250,10 +250,13 @@ test('the sweep removes directories left by dead or forgotten owners and keeps l
     const live = await make('live', { namespace, hostname: hostname(), pid: process.ppid });
     const otherHost = await make('other-host', { namespace: 'another-boot:pid:[1]', hostname: 'another-worker', pid: 1 });
     const stale = await make('stale', { namespace: 'another-boot:pid:[1]', hostname: 'another-worker', pid: 1 }, EGRESS_ORPHAN_MAX_AGE_MS + 60_000);
+    const extensions = await make('extensions', null, EGRESS_ORPHAN_MAX_AGE_MS + 60_000);
+    await writeFile(path.join(extensions, 'selected-skill'), 'immutable selected run input');
     const { removed } = await sweepOrphanedEgressProxies({ root });
     assert.equal(removed, 3);
     assert.ok(!existsSync(dead) && !existsSync(reused) && !existsSync(stale));
     assert.ok(existsSync(live) && existsSync(otherHost));
+    assert.equal(await readFile(path.join(extensions, 'selected-skill'), 'utf8'), 'immutable selected run input', 'the socket sweeper must not delete task extension mounts');
 });
 
 test('a container sharing this hostname but not this PID namespace never has its live directory removed', async () => {
@@ -411,4 +414,19 @@ test('the instance policy read is retried while the settings database is locked,
         read: async () => { reads++; throw Object.assign(new Error('disk I/O error'), { code: 'SQLITE_IOERR' }); }, retry,
     }), /disk I\/O error/);
     assert.equal(reads, 1, 'only lock contention is retried');
+});
+
+
+test('an invalid extension staging root cannot abort orphaned socket cleanup', async () => {
+    const sweepRoot = await mkdtemp(path.join(tmpdir(), 'egress-extension-sweep-'));
+    try {
+        await writeFile(path.join(sweepRoot, 'extensions'), 'not a directory');
+        const orphan = path.join(sweepRoot, 'orphan');
+        await mkdir(orphan);
+        const stale = new Date(Date.now() - EGRESS_ORPHAN_MAX_AGE_MS - 60_000);
+        await utimes(orphan, stale, stale);
+        assert.equal((await sweepOrphanedEgressProxies({ root: sweepRoot })).removed, 1);
+        assert.equal(existsSync(orphan), false);
+        assert.equal(await readFile(path.join(sweepRoot, 'extensions'), 'utf8'), 'not a directory');
+    } finally { await rm(sweepRoot, { recursive: true, force: true }); }
 });

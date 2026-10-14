@@ -170,6 +170,47 @@ export interface ErrorEnvelope {
   hint?: string;
 }
 
+/** Strict shared v1 contract. Operator catalog descriptors accept only immutable catalogId/digest and selected tools/capability; customer commands, arguments, environment and mount paths are rejected. */
+export interface ExtensionProfileInput {
+  version: 1;
+  name: string;
+  enabled: boolean;
+  agentScope: string[];
+  repositoryScope: string[];
+  mcpServers: Array<{
+    kind: "https";
+    name: string;
+    url: string;
+    enabled: boolean;
+    tools: string[];
+    capability: "read" | "write";
+    authentication: "none" | "bearer";
+  } | {
+    kind: "catalog";
+    name: string;
+    catalogId: string;
+    digest: string;
+    enabled: boolean;
+    tools: string[];
+    capability: "read" | "write";
+  }>;
+  skillBundleIds: string[];
+}
+
+export interface ExtensionProfileSave {
+  input: ExtensionProfileInput;
+  expected?: ExtensionSelection;
+  secrets?: {
+    [key: string]: string | null;
+  };
+}
+
+export interface ExtensionSelection {
+  instanceId: string;
+  profileId: string;
+  revision: number;
+}
+
 /** Liveness probe result. */
 export interface Health {
   status: "ok";
@@ -430,6 +471,9 @@ export interface TaskSubmission {
 
 /** A request to open a GitHub issue and start an implementation run for it. */
 export interface TaskSubmissionRequest {
+  extensionProfile?: ExtensionSelection | null;
+  /** Explicit write grant for this exact authenticated coding submission and initial run; omitted is false. Requires an extension selection. Never inherited by label retries. */
+  extensionAllowWrite?: boolean;
   /** `owner/name` of an enabled repository you can push to. */
   repository: string;
   /** What the agent should do; becomes the GitHub issue body. Must not be only whitespace. */

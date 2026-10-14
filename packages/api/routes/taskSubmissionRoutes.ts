@@ -1,3 +1,5 @@
+import { sealSubmissionExtensions } from '../../core/src/services/taskSubmissionService.js';
+import { ExtensionError, ExtensionProfileStore } from '../../core/src/extensions/extensionProfileStore.js';
 import { createHash, randomUUID } from 'node:crypto';
 import fs from 'fs-extra';
 import path from 'node:path';
@@ -6,7 +8,7 @@ import type { Request, RequestHandler, Response } from 'express';
 import type { Knex } from 'knex';
 import {
   AttachmentService, AgentRegistry, getAuthenticatedOctokit, loadMonitoredReposRaw,
-  loadPrimaryProcessingLabels, resolvePlanIssueDefaultSelection, safeAddLabel, logger,
+  loadPrimaryProcessingLabels, resolvePlanIssueDefaultSelection, resolveLlmLabel, safeAddLabel, logger,
   insertTaskSubmission, resumeTaskSubmission, completeTodosForIssue, submissionMarker, submissionAssetPath, resolveVisualPreviewUploadToken,
   type MulterFile, type SubmissionAttachment, type SubmissionPayload, type TaskSubmission,
 } from '@propr/core';
@@ -50,8 +52,8 @@ export async function authorizeTaskSubmissionRepository(req: Request, repository
   return config;
 }
 
-async function routing(body: { agentAlias?: string; model?: string }) {
-  const registry = AgentRegistry.getInstance();
+// eslint-disable-next-line complexity -- extension routing validates the selected alias and model before routing side effects
+export async function routing(body: { agentAlias?: string; model?: string; extensionProfile?: import('@propr/shared').ExtensionSelection | null }, registry = AgentRegistry.getInstance(), labelLookup = getLlmLabel, labelResolution = resolveLlmLabel) {
   await registry.ensureInitialized();
   const defaults = !body.agentAlias ? await resolvePlanIssueDefaultSelection() : null;
   const agentAlias = body.agentAlias || defaults?.agent_alias;
@@ -60,9 +62,19 @@ async function routing(body: { agentAlias?: string; model?: string }) {
   if (!agent?.config.enabled || !model || !agent.config.supportedModels.includes(model)) {
     throw Object.assign(new Error('Selected agent or model is no longer available. Choose a supported selection in Options.'), { status: 400 });
   }
-  const label = await getLlmLabel(model, agent.config.alias);
+  if (body.extensionProfile && !['claude', 'codex'].includes(agent.config.type)) {
+    throw Object.assign(new Error('Extension profiles require Claude or Codex task execution'), { status: 400 });
+  }
+  const label = await labelLookup(model, agent.config.alias);
   if (!label) throw Object.assign(new Error('Selected agent/model cannot be routed through GitHub issues'), { status: 400 });
-  return { agentAlias: agent.config.alias, model, routingLabel: label };
+  if (body.extensionProfile) {
+    // The issue dispatcher resolves the published label, not the submission payload.
+    const resolved = await labelResolution(label.replace(/^llm-/, ''));
+    if (resolved.agentAlias !== agent.config.alias || resolved.model !== model) {
+      throw Object.assign(new Error('Selected extension agent/model cannot be routed exactly through GitHub issues'), { status: 400 });
+    }
+  }
+  return { agentAlias: agent.config.alias, model, routingLabel: label, runtime: agent.config.type };
 }
 
 async function storeUploads(files: MulterFile[]): Promise<SubmissionAttachment[]> {
@@ -156,13 +168,14 @@ export function submissionIssueTitle(instruction: string): string {
   return `${shortened}...`;
 }
 
-function submissionServices(octokit: SubmissionOctokit, enqueue = enqueueIssueImplementationJob, images?: SubmissionImageUploadServices) {
+function submissionServices(octokit: SubmissionOctokit, enqueue = enqueueIssueImplementationJob, images?: SubmissionImageUploadServices, validateExtensions?: (row: TaskSubmission) => Promise<void>) {
   const coordinates = (row: TaskSubmission) => { const [owner, repo] = row.repository.split('/'); return { owner, repo }; };
   return {
     async createIssue(row: TaskSubmission) {
       const payload = JSON.parse(row.payload) as SubmissionPayload;
       const files = JSON.parse(row.attachments) as SubmissionAttachment[];
       const body = submissionIssueBody(row, payload, files, await uploadSubmissionImages(octokit, coordinates(row), files, images));
+      await validateExtensions?.(row);
       const { data } = await octokit.request('POST /repos/{owner}/{repo}/issues', {
         ...coordinates(row), title: submissionIssueTitle(payload.instruction), body,
         // No trigger label until the durable association and all routing are ready.
@@ -211,6 +224,8 @@ function submissionServices(octokit: SubmissionOctokit, enqueue = enqueueIssueIm
 interface SubmissionRequest {
   repository: string;
   instruction: string;
+  extensionAllowWrite?: boolean;
+  extensionProfile?: import('@propr/shared').ExtensionSelection | null;
   agentAlias?: string;
   model?: string;
   todoIds?: string[];
@@ -236,6 +251,7 @@ function invalidSubmissionOptions(body: SubmissionRequest) {
   return (body.agentAlias !== undefined && typeof body.agentAlias !== 'string')
     || (body.model !== undefined && typeof body.model !== 'string')
     || (body.todoIds !== undefined && (!Array.isArray(body.todoIds) || body.todoIds.some((id: unknown) => typeof id !== 'string')))
+    || invalidFlag(body.extensionAllowWrite) || (body.extensionAllowWrite === true && !body.extensionProfile)
     || invalidFlag(body.autoMerge) || invalidFlag(body.runUltrafix)
     || invalidBound(body.ultrafixGoal, ULTRAFIX_GOAL_RANGE) || invalidBound(body.ultrafixMaxCycles, ULTRAFIX_MAX_CYCLES_RANGE);
 }
@@ -301,7 +317,7 @@ export async function linkSubmissionTodos(db: Knex, row: TaskSubmission, complet
 
 export function createTaskSubmissionRoutes({ db, services = {} }: { db: Knex; services?: Partial<{
   authorize: typeof authorizeTaskSubmissionRepository;
-  routing: typeof routing;
+  routing: (body: Parameters<typeof routing>[0]) => Promise<Omit<Awaited<ReturnType<typeof routing>>, 'runtime'> & { runtime?: string }>;
   getOctokit: typeof getAuthenticatedOctokit;
   processingLabels: typeof loadPrimaryProcessingLabels;
   enqueue: typeof enqueueIssueImplementationJob;
@@ -312,8 +328,30 @@ export function createTaskSubmissionRoutes({ db, services = {} }: { db: Knex; se
   const resolveRouting = services.routing ?? routing;
   const getOctokit = services.getOctokit ?? getAuthenticatedOctokit;
   const processingLabels = services.processingLabels ?? loadPrimaryProcessingLabels;
+  // eslint-disable-next-line max-params -- submission and routing inputs remain explicit at the queue publication boundary
+  const checkExtensions = async (actor: string, profile: NonNullable<SubmissionPayload['extensionProfile']>, agentAlias: string, runtime: string | undefined, repository: string, allowWrite: boolean) => {
+    try {
+      await new ExtensionProfileStore(db).assertLaunch(actor, profile, { agentAlias, runtime: runtime ?? '', repositories: [repository], allowWrite }, false);
+    } catch (error) {
+      // These local rejections precede the GitHub POST. Mark them definite,
+      // so the submission retains permission to retry rather than reconcile.
+      if (error instanceof ExtensionError) throw new ExtensionError(400, error.message);
+      throw error;
+    }
+  };
+  const validateExtensions = async (row: TaskSubmission) => {
+    const payload = JSON.parse(row.payload) as SubmissionPayload;
+    if (!payload.extensionProfile) return;
+    const resolved = await resolveRouting(payload);
+    await checkExtensions(row.user_id, payload.extensionProfile, resolved.agentAlias, resolved.runtime, row.repository, payload.extensionAllowWrite === true);
+  };
   const resume = async (id: string) => {
-    const result = await resumeTaskSubmission(db, id, submissionServices(await getOctokit(), services.enqueue, services.images));
+    const octokit = await getOctokit();
+    const row = await db<TaskSubmission>('task_submissions').where({ id }).first();
+    // Only pending creation needs this preflight. Reconcile an ambiguous POST
+    // even if its profile subsequently changes; never discard that obligation.
+    if (row && !row.issue_number && row.state === 'prepared') await validateExtensions(row);
+    const result = await resumeTaskSubmission(db, id, submissionServices(octokit, services.enqueue, services.images, validateExtensions));
     await linkSubmissionTodos(db, result, services.completeTodos);
     return result;
   };
@@ -330,15 +368,18 @@ export function createTaskSubmissionRoutes({ db, services = {} }: { db: Knex; se
       const { body, key } = parseSubmissionRequest(req);
       const repository = body.repository.toLowerCase();
       const config = await checkAccess(req, repository);
-      const payloadHash = fingerprint({ repository, instruction: body.instruction, agentAlias: body.agentAlias || '', model: body.model || '', todoIds: body.todoIds || [], files: await goalUploadIdentity(files), ...submissionAutomation(body), ...submissionBudget(body) });
+      if (body.extensionProfile && req.get('X-ProPR-Extensions') !== '1') throw Object.assign(new Error('Extension selection requires a preflight-protected request'), { status: 403 });
+      if (body.extensionProfile) await new ExtensionProfileStore(db).authorize(req.user.id);
+      const payloadHash = fingerprint({ repository, instruction: body.instruction, ...(body.extensionProfile ? { extensionProfile: body.extensionProfile, extensionAllowWrite: body.extensionAllowWrite === true } : {}), agentAlias: body.agentAlias || '', model: body.model || '', todoIds: body.todoIds || [], files: await goalUploadIdentity(files), ...submissionAutomation(body), ...submissionBudget(body) });
       let row = await db<TaskSubmission>('task_submissions').where({ user_id: String(req.user!.id), submission_key: key }).first();
       if (row && row.payload_hash !== payloadHash) { res.status(409).json({ error: 'Submission identity was already used with different content' }); return; }
       if (!row) {
-        const selection = await resolveRouting(body);
+        const { runtime, ...selection } = await resolveRouting(body);
+        if (body.extensionProfile) await checkExtensions(req.user.id, body.extensionProfile, selection.agentAlias, runtime, repository, body.extensionAllowWrite === true);
         const octokit = await getOctokit();
         const [owner, repo] = repository.split('/');
         await octokit.request('GET /repos/{owner}/{repo}', { owner, repo });
-        const payload: SubmissionPayload = { instruction: body.instruction, ...selection, baseBranch: config.baseBranch,
+        const payload: SubmissionPayload = { extensionAllowWrite: body.extensionAllowWrite === true, extensionProfile: body.extensionProfile, instruction: body.instruction, ...selection, baseBranch: config.baseBranch,
           trigger: (await processingLabels())[0] || 'AI', username: req.user!.username, todoIds: body.todoIds,
           ...submissionAutomation(body), ...submissionBudget(body) };
         let attachments: SubmissionAttachment[];
@@ -347,6 +388,7 @@ export function createTaskSubmissionRoutes({ db, services = {} }: { db: Knex; se
         row = await insertTaskSubmission(db, { user_id: String(req.user!.id), submission_key: key, payload_hash: payloadHash,
           repository, payload: JSON.stringify(payload), attachments: JSON.stringify(attachments) });
       }
+      await sealSubmissionExtensions(db, row);
       const result = await resume(row.id);
       res.status(result.state === 'queued' ? 200 : 202).json(publicSubmission(result));
     } catch (error) { await sendError(req, res, error); }

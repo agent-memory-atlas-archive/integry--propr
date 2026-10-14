@@ -22,6 +22,10 @@ export function agentTaskOptions(input: {
     // Web and MCP are enforced by the runtime; repository access through `repositoryAccess`.
     const toolPolicy = agentRunToolPolicy({ phase, capabilities: definition.capabilities, mcpGrant });
     return {
+        extensionProfile: definition.extensionProfile,
+        extensionActorId: definition.ownerId,
+        extensionRepositories: definition.repositories,
+        extensionAllowWrite: phase === 'action',
         worktreePath: workspace.worktreePath,
         issueRef,
         prompt,

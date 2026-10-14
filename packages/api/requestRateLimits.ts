@@ -173,6 +173,8 @@ export function createRequestRateLimiter(policy: RequestRateLimitPolicy): RateLi
 export function createApiRequestRateLimiter(
   environment: RateLimitEnvironment = process.env,
 ): RateLimitRequestHandler {
+  // Authentication has not happened yet, including on the extension gateway.
+  // Every token (valid, malformed or forged) must share the client's IP bound.
   return createRequestRateLimiter(resolveRequestRateLimitPolicies(environment).api);
 }
 

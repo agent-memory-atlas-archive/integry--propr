@@ -1,3 +1,4 @@
+import { executeWithExtensions } from '../../extensions/extensionLaunch.js';
 import { prepareAgentGitAccess, prepareAnalysisGitAccess } from '../agentGitAccess.js';
 import fs from 'fs';
 import { execSync } from 'child_process';
@@ -45,6 +46,10 @@ export class CodexAgent implements Agent {
     }
 
     async executeTask(options: AgentTaskOptions): Promise<AgentExecutionResult> {
+        return executeWithExtensions(this.config, options, prepared => this.executeTaskWithoutExtensions(prepared));
+    }
+
+    private async executeTaskWithoutExtensions(options: AgentTaskOptions): Promise<AgentExecutionResult> {
         assertToolPolicySupported(options);
         if (options.executionMode === 'goal') return this.executeNativeGoal(options);
         const { worktreePath, issueRef, prompt: customPrompt, model, systemPrompt,
@@ -77,7 +82,7 @@ export class CodexAgent implements Agent {
 
             const { result, usageMetrics } = await executeWithUsageTracking(
                 'codex',
-                async () => executeDockerCommand('docker', dockerArgs, { diagnostics: { provider: this.config.type, agent: this.config.id, configPath: this.config.configPath, credentials: this.config.envVars },
+                async () => executeDockerCommand('docker', dockerArgs, { extensionAgentLaunch: !!options.extensionProfile, diagnostics: { provider: this.config.type, agent: this.config.id, configPath: this.config.configPath, credentials: this.config.envVars },
                     timeout: this.timeoutMs,
                     cwd: worktreePath,
                     onSessionId,
