@@ -20,8 +20,12 @@ describe('Desktop GitHub grant recovery', () => {
   it('connects API grant failures to the notice while leaving the task mounted', async () => {
     const adapters = adaptersFor([remoteProfile], remoteProfile.id, async () => ({ status: 'ready', transportScope: 'current-scope' }));
     const closeTask = vi.fn();
-    render(<DesktopExperience adapters={adapters}><CreationDialog title="New task" icon={Zap} description="Describe your task" closeLabel="Close task" onClose={closeTask}><input aria-label="Original task" defaultValue="Work in progress" /></CreationDialog></DesktopExperience>);
-    const task = await screen.findByLabelText('Original task');
+    // Flush startup effects too: the task can appear before the recovery listener
+    // is attached, so finding its input alone is not a readiness boundary.
+    await act(async () => {
+      render(<DesktopExperience adapters={adapters}><CreationDialog title="New task" icon={Zap} description="Describe your task" closeLabel="Close task" onClose={closeTask}><input aria-label="Original task" defaultValue="Work in progress" /></CreationDialog></DesktopExperience>);
+    });
+    const task = screen.getByLabelText('Original task');
     const invalidate = vi.fn();
     setDesktopConnectionScope({ bridge: { connection: { invalidate } } as never, profileId: remoteProfile.id, transportScope: 'current-scope' });
     await act(async () => {
