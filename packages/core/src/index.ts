@@ -159,7 +159,7 @@ export type { RoutingWebSocketIntakeServiceOptions, RoutingWebSocketStatus, Conn
 // DeliveryTracker, URL/payload/token helpers) are internal to the intake service
 // and are intentionally NOT part of the package's public API. Tests import them
 // directly from ./intake/routingWebSocketProtocol.js.
-export { handleCommentDeleted, handleCommentEdited, processCommentEvent, setUltrafixDeps } from './webhook/commentEventHandler.js';
+export { handleCommentDeleted, handleCommentEdited, processCommentEvent, dispatchPostedFollowup, setUltrafixDeps } from './webhook/commentEventHandler.js';
 export type { CommentPayload, CommentEventConfig, CommentEventType, UltrafixDeps } from './webhook/commentEventHandler.js';
 export * from './webhook/followupAssignmentGate.js';
 export { extractLlmFromKeywords, stripKeywordsFromBody, buildCodeContext, isReviewComment, extractLlmFromLabels } from './webhook/commentEventHelpers.js';
