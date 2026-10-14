@@ -358,8 +358,10 @@ describe('Inbox triage console', () => {
     const inspect = within(pane()!).getByRole('link', { name: /Inspect in Tasks/ });
     expect(fireEvent.keyDown(inspect, { key: 'ArrowDown' })).toBe(true);
     expect(search().get('notification')).toBe(review.id);
-    fireEvent.keyDown(inspect, { key: 'j' });
-    expect(search().get('notification')).toBe(ready.id);
+    expect(fireEvent.keyDown(inspect, { key: 'j' })).toBe(false);
+    // React Router commits URL changes in a transition, which can settle after keyDown returns.
+    await waitFor(() => expect(search().get('notification')).toBe(ready.id));
+    expect(within(pane()!).getByRole('heading', { name: ready.title })).toBeInTheDocument();
   });
 
   test("a review's diff falls back to the run it reviewed when the review itself committed nothing", async () => {
