@@ -23,12 +23,8 @@ import { continueUltrafixLoop } from './ultrafixLoopContinuation.js';
 import { buildUltrafixHistoryMeta, buildContinuationMeta, patchUltrafixContinuationMeta } from './ultrafixContinuationMeta.js';
 import { loadState as loadUltrafixState, retainOriginalScope, type UltrafixAction } from './ultrafixOrchestrationService.js';
 import {
-    buildDeterministicPrTaskSubtitle,
-    buildPrTaskTitle,
-    buildPrTaskTitleContext,
-    buildPrTaskTitleContextHistoryMetadata,
-    getPrTaskWorkflowLabel,
-    resolvePrTaskWorkflow,
+    buildDeterministicPrTaskSubtitle, buildPrTaskTitle, buildPrTaskTitleContext,
+    buildPrTaskTitleContextHistoryMetadata, getPrTaskWorkflowLabel, resolvePrTaskWorkflow,
 } from './prTaskTitleHelpers.js';
 import type { Redis } from 'ioredis';
 import { buildWorkEvidenceMarker, filterRealComments } from '../shared/workEvidenceMarker.js';
@@ -255,10 +251,7 @@ export async function executeReviewProcessing(params: ExecuteReviewParams): Prom
     );
     const originalDiscussion = job.data.ultrafixMeta ? '' : await fetchOriginalContributionDiscussion(state.octokit, context, correlationId);
     job.data.reasoningLevel = resolvePrReasoningLevelOverride(prData!.data.labels, linkedIssueResult.linkedIssueLabels, {
-        repoOwner,
-        repoName,
-        pullRequestNumber,
-        correlatedLogger,
+        repoOwner, repoName, pullRequestNumber, correlatedLogger,
     });
 
     const realComments = filterRealComments(state.unprocessedComments);
