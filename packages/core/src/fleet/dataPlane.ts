@@ -86,6 +86,12 @@ export class FleetDataPlane {
   reserveExtensionEntries(count: number) {
     if (this.count + count > 16384) throw new FleetRefusal();
     this.count += count;
+    let reserved = count;
+    return (unused: number) => {
+      if (!Number.isInteger(unused) || unused < 0 || unused > reserved) throw new FleetRefusal();
+      reserved -= unused;
+      this.count -= unused;
+    };
   }
   /** Reuse the provisioned private boundary without extending the pinned data contract. */
   async extensionAuthority(assertion: { githubActorId: number; hostedInstanceId: string; storageInstanceId: string; runtimeGeneration: string; storageGeneration: string; placementGeneration: string; expiresAt: number }, database?: Knex) {

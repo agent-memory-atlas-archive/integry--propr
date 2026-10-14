@@ -4,7 +4,7 @@ import { extensionProfileInputSchema, extensionSelectionSchema } from './extensi
 
 export const FLEET_EXTENSION_CONTRACT = 'propr.fleet-extensions.v1' as const;
 export const FLEET_EXTENSION_SCOPE = 'hosted_instance_extensions' as const;
-export const FLEET_EXTENSION_LIMITS = { requestBytes: 32768, responseBytes: 32768, recipientSeconds: 60, ciphertextBytes: 4112, recipients: 64, operations: 4096 } as const;
+export const FLEET_EXTENSION_LIMITS = { requestBytes: 65536, responseBytes: 32768, recipientSeconds: 60, ciphertextBytes: 4112, recipients: 64, operations: 4096 } as const;
 const uuid = z.uuid();
 const hash = z.string().regex(/^[0-9a-f]{64}$/);
 const opaque = z.string().regex(/^[A-Za-z0-9_-]+$/);

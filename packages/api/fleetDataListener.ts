@@ -1,3 +1,4 @@
+import { FLEET_EXTENSION_LIMITS } from '@propr/shared';
 import { FleetExtensionPlane } from '../core/src/fleet/extensions.js';
 import type { ExtensionProfileStore } from '../core/src/extensions/extensionProfileStore.js';
 import type { RequestHandler } from 'express';
@@ -86,7 +87,7 @@ async function bindUnix(socket: string): Promise<{ server: UnixServer; identity:
 /** Explicit refusal on the customer listener, also used by tunnel ingress. */
 export const refusePublicFleetData: RequestHandler = (req, res, next) => {
   if (req.path !== '/v1/invoke' && req.path !== '/extensions/v1/invoke') { next(); return; }
-  res.set('Cache-Control', 'no-store').status(404).json({ error: 'fleet_data_unavailable' });
+  res.set('Cache-Control', 'no-store').status(404).json({ error: req.path === '/extensions/v1/invoke' ? 'fleet_extensions_unavailable' : 'fleet_data_unavailable' });
 };
 
 /** Separate Unix listener only. Never mount this handler on Express or the tunnel. */
@@ -111,7 +112,7 @@ export async function listenFleetData(plane: FleetDataPlane, extensions?: FleetE
       timer = setTimeout(() => req.destroy(), 5000);
       for await (const part of req) {
         const bytes = Buffer.from(part); length += bytes.length;
-        if (length > (req.url === '/extensions/v1/invoke' ? 32768 : 8192)) throw new Error();
+        if (length > (req.url === '/extensions/v1/invoke' ? FLEET_EXTENSION_LIMITS.requestBytes : 8192)) throw new Error();
         parts.push(bytes);
       }
       clearTimeout(timer);

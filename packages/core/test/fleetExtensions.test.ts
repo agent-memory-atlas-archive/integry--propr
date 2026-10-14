@@ -5,8 +5,8 @@ import path from 'node:path';
 import os from 'node:os';
 import { request as httpRequest } from 'node:http';
 import knex from 'knex';
-import { createHash, createHmac, randomBytes, randomUUID } from 'node:crypto';
-import { canonicalFleetJson, FLEET_EXTENSION_CONTRACT, FLEET_EXTENSION_SCOPE, FLEET_EXTENSION_SCHEMA, fleetExtensionEnvelopeSchema, fleetExtensionRecipientSchema, encryptFleetExtensionSecret, type FleetExtensionRequest, type FleetExtensionIntent, type FleetExtensionAssertion } from '@propr/shared';
+import { createHash, createHmac, randomBytes, randomUUID, ECDH } from 'node:crypto';
+import { canonicalFleetJson, FLEET_EXTENSION_CONTRACT, FLEET_EXTENSION_SCOPE, FLEET_EXTENSION_SCHEMA, FLEET_EXTENSION_LIMITS, fleetExtensionEnvelopeSchema, fleetExtensionRecipientSchema, encryptFleetExtensionSecret, type FleetExtensionRequest, type FleetExtensionIntent, type FleetExtensionAssertion } from '@propr/shared';
 import { up } from '../src/db/migrations/20261013210000_extension_profiles.js';
 import { up as grants } from '../src/db/migrations/20261013220000_extension_grant_network.js';
 import { ExtensionProfileStore } from '../src/extensions/extensionProfileStore.js';
@@ -249,4 +249,114 @@ test('browser authenticates Core key ownership and exact intended binding before
   const another = await fixture(t);
   await assert.rejects(encryptFleetExtensionSecret(first.recipient, sentinel, { verificationKey: another.verificationKey, expectedBinding: first.recipient.binding }), /unavailable/);
   for (const token of ['x', 'x'.repeat(4096)]) assert.equal(Buffer.from((await f.encrypt(first.recipient, token)).ciphertext, 'base64url').length, 4112);
+});
+
+test('private listener accepts eight encrypted fields for both create and update; request cap is shared', async t => {
+  const f = await fixture(t);
+  const { listenFleetData } = await import('../../api/fleetDataListener.js');
+  const listener = await listenFleetData(f.fleet, f.plane); f.cleanup(() => listener.shutdown());
+  const send = (raw: string) => new Promise<any>((resolve, reject) => {
+    const req = httpRequest({ socketPath: listener.address()!, path: '/extensions/v1/invoke', method: 'POST', headers: { 'Content-Type': 'application/json' } }, res => {
+      const chunks: Buffer[] = []; res.on('data', chunk => chunks.push(chunk));
+      res.on('end', () => { const result = JSON.parse(Buffer.concat(chunks).toString()); res.statusCode === 200 ? resolve(result) : reject(new Error(result.error)); });
+    }); req.on('error', reject); req.end(raw);
+  });
+  const fullInput = { ...input, mcpServers: Array.from({ length: 8 }, (_, i) => ({ ...input.mcpServers[0], name: `docs${i}` })) };
+  let selection: ReturnType<typeof select> | undefined;
+  for (const action of ['profile.create', 'profile.update'] as const) {
+    const intent = action === 'profile.create' ? { action, input: fullInput } : { action, input: fullInput, selection: selection! };
+    const operationId = randomUUID(); const sealed = [];
+    for (const server of fullInput.mcpServers) {
+      const recipient = await f.invoke({ action: 'recipient.issue', intent, mutationOperationId: operationId, server: server.name, field: 'bearerToken' });
+      sealed.push(await f.encrypt(recipient, sentinel));
+    }
+    const raw = f.envelope({ ...intent, sealed }, { operationId });
+    assert.ok(Buffer.byteLength(raw) > 32768);
+    assert.ok(Buffer.byteLength(raw) <= FLEET_EXTENSION_LIMITS.requestBytes);
+    const profile = (await send(raw)).result.profile;
+    for (const server of fullInput.mcpServers) assert.equal(profile.secrets[server.name].configured, true);
+    selection = select(profile);
+  }
+  const oversized = 'x'.repeat(FLEET_EXTENSION_LIMITS.requestBytes + 1);
+  await assert.rejects(f.plane.invoke(oversized), /fleet_extensions_unavailable/);
+  await assert.rejects(send(oversized), /fleet_extensions_unavailable/);
+});
+
+test('extension reservations count restart tombstones and release only proven unused slots', async t => {
+  const f = await fixture(t);
+  const counts = () => ({ shared: (f.fleet as any).count, extension: (f.plane as any).slots });
+  const raw = f.envelope({ action: 'profile.list' });
+  await f.plane.invoke(raw); const after = counts();
+  for (let i = 0; i < 3; i++) await assert.rejects(f.plane.invoke(raw), /unavailable/);
+  assert.deepEqual(counts(), after);
+  // A fresh nonce for an existing operation leaves only the new nonce tombstone.
+  const operationId = JSON.parse(raw).assertion.operationId;
+  await assert.rejects(f.invoke({ action: 'profile.list' }, { operationId }), /unavailable/);
+  assert.deepEqual(counts(), { shared: after.shared + 1, extension: after.extension + 1 });
+  const concurrent = f.envelope({ action: 'profile.list' });
+  const results = await Promise.allSettled([f.plane.invoke(concurrent), f.plane.invoke(concurrent)]);
+  assert.equal(results.filter(r => r.status === 'fulfilled').length, 1);
+  assert.deepEqual(counts(), { shared: after.shared + 3, extension: after.extension + 3 });
+  const original = f.fleet.files.create.bind(f.fleet.files);
+  const uncertain = mock.method(f.fleet.files, 'create', async (name: string, value: unknown) => {
+    await original(name, value); throw new Error('Write outcome uncertain');
+  });
+  const beforeUncertain = counts();
+  await assert.rejects(f.invoke({ action: 'profile.list' }), /unavailable/);
+  assert.deepEqual(counts(), { shared: beforeUncertain.shared + 1, extension: beforeUncertain.extension + 1 });
+  uncertain.mock.restore();
+  f.restart();
+  // Full data-plane restart re-counts the shared namespace, including extensions.
+  const next = new FleetDataPlane(f.storage, f.control, () => f.secret, async () => ({ role: 'admin', source: 'local', permissions: ['instance.manage_settings'] }));
+  await next.initialize();
+  const entries = await fs.readdir(f.control);
+  assert.equal((next as any).count, entries.length + 3);
+  // Reserve up to the shared bound; another contract admission cannot exceed it.
+  next.reserveExtensionEntries(16384 - (next as any).count);
+  assert.throws(() => next.reserveExtensionEntries(1), /unavailable/);
+  await f.plane.invoke(f.envelope({ action: 'profile.list' }));
+  assert.equal((f.plane as any).slots, entries.filter(n => n.startsWith('extension-')).length + 2);
+});
+
+test('recipient issuance zeroes private buffers on signing, capacity and awaited shutdown failures', async t => {
+  const f = await fixture(t); const intent = { action: 'profile.create' as const, input };
+  const buffers: Buffer[] = [];
+  const original = ECDH.prototype.getPrivateKey;
+  const capture = mock.method(ECDH.prototype, 'getPrivateKey', function (this: ECDH) {
+    const buffer = original.call(this) as Buffer; buffers.push(buffer); return buffer;
+  });
+  t.after(() => capture.mock.restore());
+  const identity = mock.method(f.store, 'instanceId', async () => { throw new Error('Identity unavailable'); });
+  await assert.rejects(f.recipient(intent), /unavailable/);
+  assert.ok(buffers.at(-1)!.every(byte => byte === 0));
+  identity.mock.restore();
+  const completion = mock.method(f.fleet.files, 'append', async () => { throw new Error('Completion unavailable'); });
+  await assert.rejects(f.recipient(intent), /unavailable/);
+  assert.ok(buffers.at(-1)!.every(byte => byte === 0));
+  assert.equal((f.plane as any).recipients.size, 0);
+  completion.mock.restore();
+  const signing = mock.method(f.plane as any, 'recipientSigningKey', async () => { throw new Error('Signing unavailable'); });
+  await assert.rejects(f.recipient(intent), /unavailable/);
+  assert.ok(buffers.at(-1)!.every(byte => byte === 0));
+  signing.mock.restore();
+  for (let i = 0; i < FLEET_EXTENSION_LIMITS.recipients; i++) await f.recipient(intent);
+  await assert.rejects(f.recipient(intent), /unavailable/);
+  assert.ok(buffers.at(-1)!.every(byte => byte === 0));
+  f.restart();
+  await f.recipient(intent);
+  const lateCapacity = mock.method(f.plane as any, 'recipientSigningKey', async () => {
+    const recipients = (f.plane as any).recipients as Map<string, unknown>;
+    const existing = recipients.values().next().value;
+    for (let i = recipients.size; i < FLEET_EXTENSION_LIMITS.recipients; i++) recipients.set(randomUUID(), existing);
+    return signing.mock.original.call(f.plane);
+  });
+  await assert.rejects(f.recipient(intent), /unavailable/);
+  assert.ok(buffers.at(-1)!.every(byte => byte === 0));
+  lateCapacity.mock.restore();
+  f.restart();
+  const shutdown = mock.method(f.plane as any, 'recipientSigningKey', async () => { f.plane.shutdown(); return signing.mock.original.call(f.plane); });
+  await assert.rejects(f.recipient(intent), /unavailable/);
+  assert.ok(buffers.at(-1)!.every(byte => byte === 0));
+  assert.equal((f.plane as any).recipients.size, 0);
+  shutdown.mock.restore();
 });

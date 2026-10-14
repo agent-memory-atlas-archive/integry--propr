@@ -56,15 +56,21 @@ export class FleetExtensionPlane {
     const server = r.intent.input.mcpServers.find(s => s.name === r.server);
     if (!server || server.kind !== 'https' || server.authentication !== 'bearer') throw new FleetRefusal();
     const recipientId = randomUUID(); const key = createECDH('prime256v1'); key.generateKeys();
-    const binding = { contract: FLEET_EXTENSION_CONTRACT, audience: 'core-extension-mutation', assertion: a, extensionInstanceId: await this.store.instanceId(), action: r.intent.action,
-      intentDigest: digest(r.intent), target: r.intent.action === 'profile.update' ? { kind: 'revision', selection: r.intent.selection } : { kind: 'create', intentDigest: digest(r.intent) }, mutationOperationId: r.mutationOperationId, server: r.server, field: r.field, recipientId, expiresAt: a.expiresAt };
-    const timer = setTimeout(() => this.destroyRecipient(recipientId), Math.max(1, a.expiresAt * 1000 - Date.now())); timer.unref();
-    if (this.stopped || this.recipients.size >= FLEET_EXTENSION_LIMITS.recipients) { clearTimeout(timer); throw new FleetRefusal(); }
-    const publicRecipient = { recipientId, algorithm: 'P-256-ECDH/HKDF-SHA256/AES-256-GCM', publicKey: key.getPublicKey().toString('base64url'), binding };
-    const signature = sign(null, Buffer.from(canonicalFleetJson(publicRecipient)), await this.recipientSigningKey()).toString('base64url');
-    if (this.stopped || this.recipients.size >= FLEET_EXTENSION_LIMITS.recipients) { clearTimeout(timer); throw new FleetRefusal(); }
-    this.recipients.set(recipientId, { assertion: a, server: r.server, privateKey: key.getPrivateKey(), binding, timer, authorityDigest: digest(authority) });
-    return fleetExtensionRecipientSchema.parse({ ...publicRecipient, signature });
+    const privateKey = key.getPrivateKey();
+    let retained = false;
+    try {
+      const binding = { contract: FLEET_EXTENSION_CONTRACT, audience: 'core-extension-mutation', assertion: a, extensionInstanceId: await this.store.instanceId(), action: r.intent.action,
+        intentDigest: digest(r.intent), target: r.intent.action === 'profile.update' ? { kind: 'revision', selection: r.intent.selection } : { kind: 'create', intentDigest: digest(r.intent) }, mutationOperationId: r.mutationOperationId, server: r.server, field: r.field, recipientId, expiresAt: a.expiresAt };
+      if (this.stopped || this.recipients.size >= FLEET_EXTENSION_LIMITS.recipients) throw new FleetRefusal();
+      const publicRecipient = { recipientId, algorithm: 'P-256-ECDH/HKDF-SHA256/AES-256-GCM', publicKey: key.getPublicKey().toString('base64url'), binding };
+      const signature = sign(null, Buffer.from(canonicalFleetJson(publicRecipient)), await this.recipientSigningKey()).toString('base64url');
+      if (this.stopped || this.recipients.size >= FLEET_EXTENSION_LIMITS.recipients) throw new FleetRefusal();
+      const response = fleetExtensionRecipientSchema.parse({ ...publicRecipient, signature });
+      const timer = setTimeout(() => this.destroyRecipient(recipientId), Math.max(1, a.expiresAt * 1000 - Date.now())); timer.unref();
+      this.recipients.set(recipientId, { assertion: a, server: r.server, privateKey, binding, timer, authorityDigest: digest(authority) });
+      retained = true;
+      return response;
+    } finally { if (!retained) privateKey.fill(0); }
   }
   private async decrypt(a: FleetExtensionAssertion, r: Extract<FleetExtensionRequest, { action: 'profile.create' | 'profile.update' }>) {
     const intent = r.action === 'profile.create' ? { action: r.action, input: r.input } : { action: r.action, input: r.input, selection: r.selection };
@@ -147,6 +153,7 @@ export class FleetExtensionPlane {
     }
   }
   async invoke(raw: string): Promise<RecordResult> {
+    let issuedRecipientId: string | undefined;
     try {
       await this.ready;
       if (Buffer.byteLength(raw) > FLEET_EXTENSION_LIMITS.requestBytes) throw new FleetRefusal();
@@ -158,12 +165,27 @@ export class FleetExtensionPlane {
       if (a.issuedAt > now + 5 || a.issuedAt < now - 65 || a.expiresAt <= now || a.expiresAt <= a.issuedAt || a.expiresAt - a.issuedAt > 60
         || !timingSafeEqual(createHmac('sha256', secret).update(canonicalFleetJson(a)).digest(), Buffer.from(mac, 'hex'))) throw new FleetRefusal();
       if (this.slots + 2 > FLEET_EXTENSION_LIMITS.operations * 2) throw new FleetRefusal();
-      this.fleet.reserveExtensionEntries(2); this.slots += 2;
-      await this.fleet.files.create(`extension-nonce-${a.nonce}`, { operationId: a.operationId });
-      const initial = { assertion: a, operationId: a.operationId, state: 'fenced' };
-      await this.fleet.files.create(`extension-operation-${a.operationId}.json`, { ...initial, recordDigest: digest(initial) });
+      const release = this.fleet.reserveExtensionEntries(2); this.slots += 2;
+      let unattempted = 2;
+      const claim = async (name: string, value: unknown) => {
+        unattempted--;
+        try { await this.fleet.files.create(name, value); }
+        catch (error) {
+          // O_EXCL refusal proves this attempt created no entry. Other failures
+          // may follow a durable create/write: retain their reservation.
+          if ((error as NodeJS.ErrnoException).code === 'EEXIST') { release(1); this.slots--; }
+          throw error;
+        }
+      };
+      try {
+        await claim(`extension-nonce-${a.nonce}`, { operationId: a.operationId });
+        const initial = { assertion: a, operationId: a.operationId, state: 'fenced' };
+        await claim(`extension-operation-${a.operationId}.json`, { ...initial, recordDigest: digest(initial) });
+      } finally { release(unattempted); this.slots -= unattempted; }
       await this.authorize(a);
-      const result = await this.dispatch(a, r); await this.authorize(a);
+      const result = await this.dispatch(a, r);
+      if (r.action === 'recipient.issue') issuedRecipientId = (result as { recipientId: string }).recipientId;
+      await this.authorize(a);
       const response: RecordResult = { contract: FLEET_EXTENSION_CONTRACT, operationId: a.operationId, state: 'completed', result };
       if (Buffer.byteLength(JSON.stringify(response)) > FLEET_EXTENSION_LIMITS.responseBytes) throw new FleetRefusal();
       // Journal records only outcome metadata. Lost replies require a new operation; no automatic retry.
@@ -171,6 +193,8 @@ export class FleetExtensionPlane {
       await this.fleet.files.append(`extension-operation-${a.operationId}.json`, { ...completed, recordDigest: digest(completed) });
       return response;
     } catch {
+      // A recipient is not issued until the caller can return a completed reply.
+      if (issuedRecipientId) this.destroyRecipient(issuedRecipientId);
       // No diagnostics include requests, crypto failures or native error details.
       throw new ExtensionRefusal();
     }

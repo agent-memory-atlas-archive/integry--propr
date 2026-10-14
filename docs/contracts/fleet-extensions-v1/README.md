@@ -62,7 +62,7 @@ Native profile mutations use revision compare-and-swap and transaction checks.
 
 Recipients expire with the acquisition assertion (maximum 60 seconds). Keys
 exist only in process memory; consumption, invalid authenticated consumption,
-expiry and shutdown erase private buffers. Restart discards every recipient;
+expiry, issuance failure and shutdown erase private buffers. Restart discards every recipient;
 keys are never persisted, exported, backed up or returned. Runtime restart also
 fences old assertions. JavaScript/crypto runtimes may retain temporary internal
 copies until garbage collection; process dumps and memory snapshots are outside
@@ -80,8 +80,8 @@ new authorized operation. Lost replies cannot reuse an operation or recipient.
 The private namespace retains tombstones, with a 4096-extension-operation hard cap and shared 16384-entry namespace cap; an
 operator must migrate to a new placement/runtime and private namespace when
 exhausted. Do not recycle tombstones under the same authority. At most 64
-recipients and 8 encrypted fields per mutation are supported. Requests and
-responses are capped at 32 KiB; oversized lists/history are refused, not partly
+recipients and 8 encrypted fields per mutation are supported. Requests are capped at 64 KiB and
+responses at 32 KiB; oversized lists/history are refused, not partly
 returned. All errors are generic fleet_extensions_unavailable.
 
 ## Skills and runs

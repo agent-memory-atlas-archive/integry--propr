@@ -1,6 +1,6 @@
 {
   "contract": "propr.fleet-extensions.v1",
-  "contractPin": "05f3e0b53e72951d5a57024132237bc64af6b02b81f1430dab1961b48b50a069",
+  "contractPin": "c995fc89df0699f892eac858da520aba80e4597bb1b485767143a56eb9e0ec82",
   "transport": "existing-private-fleet-unix-listener",
   "path": "/extensions/v1/invoke",
   "actions": [
