@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import type { RefObject } from 'react';
 import { Plus, X } from 'lucide-react';
+import { DesktopGitHubAuthorizationRecovery } from './DesktopGitHubAuthorizationRecovery';
 import { DesktopContext } from './DesktopContext';
 import { ProfileEditor, ProfileList } from './DesktopExperiencePanels';
 import type { DesktopAdapters, DesktopConnectionResult, DesktopProfile } from './types';
@@ -82,6 +83,7 @@ export const DesktopConnectedExperience: React.FC<DesktopConnectedExperienceProp
 
   return (
     <DesktopContext.Provider value={contextValue}>
+      <DesktopGitHubAuthorizationRecovery key={`${profile.id}:${result.transportScope}`} adapters={adapters} profile={profile} transportScope={result.transportScope} />
       {deepLinkError && <div className="desktop-inline-error" role="alert">{deepLinkError}</div>}
       <div className={`desktop-app desktop-platform-${adapters.platform}`} inert={managerOpen} aria-hidden={managerOpen || undefined}>{children}</div>
       {managerOpen && (
