@@ -369,6 +369,7 @@ export function createTaskRoutes(deps: TaskRoutesDeps) {
     let reviewKey: string | undefined;
     let reviewClaimed = false;
     let postAttempted = false;
+    let commentRejected = false;
     const report = async (payload: Record<string, unknown>) => {
       let receipt = reviewOnly ? { ...payload, commandMode: 'review' } : payload;
       if (reviewRedis && reviewKey && reviewClaimed) {
@@ -490,6 +491,15 @@ export function createTaskRoutes(deps: TaskRoutesDeps) {
         repo: repoName,
         issue_number: issueNumber,
         body: postedBody
+      }).catch((error: unknown) => {
+        const status = (error as { status?: number } | null)?.status;
+        // Only a rejection of this POST proves no comment was created. A
+        // timeout or server/transport failure can occur after GitHub accepts it.
+        if (typeof status === 'number' && status >= 400 && status < 500 && status !== 408) {
+          commentRejected = true;
+          postAttempted = false;
+        }
+        throw error;
       });
 
       const commentId = commentResponse.data.id;
@@ -539,6 +549,11 @@ export function createTaskRoutes(deps: TaskRoutesDeps) {
         await reviewRedis.del(reviewKey);
       }
       console.error('Error posting follow-up comment:', error);
+      if (reviewOnly && commentRejected) {
+        res.status(503).json({ success: false, state: 'failed', posted: false, commandMode: 'review',
+          sourceTaskId: req.params.taskId, error: 'GitHub rejected the review comment. No review was submitted. Try again shortly.' });
+        return;
+      }
       res.status(500).json({ error: reviewOnly ? 'Review is unavailable right now. Check server connectivity and try again.' : 'Failed to post follow-up comment' });
     }
   }

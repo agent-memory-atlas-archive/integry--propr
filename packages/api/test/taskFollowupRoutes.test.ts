@@ -51,6 +51,7 @@ await mock.module('../../core/src/queue/taskQueue.js', {
 });
 let webhookFirst = false;
 let prState = 'open';
+let commentPostError: unknown;
 async function deliverWebhook(body: string, login = 'propr-dev[bot]', repo = 'propr') {
   return processCommentEvent({
     repository: { owner: { login: 'integry' }, name: repo },
@@ -62,6 +63,7 @@ async function deliverWebhook(body: string, login = 'propr-dev[bot]', repo = 'pr
   });
 }
 const request = mock.fn(async (route: string, options: { body?: string }) => {
+  if (route.startsWith('POST') && route.endsWith('/comments') && commentPostError) throw commentPostError;
   if (webhookFirst && options.body?.includes('<!-- propr-api-followup:')) await deliverWebhook(options.body);
   if (route.startsWith('POST') && route.endsWith('/comments')) return { data: {
     id: 6157569382, body: options.body, user: { login: 'propr-dev[bot]', type: 'Bot' },
@@ -100,7 +102,7 @@ setUltrafixDeps({
   getPendingReviewState: async () => ({ hasPendingReview: pendingReview }),
 });
 beforeEach(() => {
-  startLoopFails = false; prState = 'open';
+  startLoopFails = false; prState = 'open'; commentPostError = undefined;
   claims.clear(); existingJobs = []; queueFails = false; pendingReview = false; webhookFirst = false; acceptBeforeFailure = false; acceptedJobs.clear();
   for (const fn of [add, request, invalidate, startLoop, clearState, updateLabels, redis.rpush]) fn.mock.resetCalls();
 });
@@ -456,6 +458,43 @@ test('uncertain review receipt is retained on retry without a second implementat
   assert.equal(add.mock.callCount(), 1);
   assert.equal(acceptedJobs.size, 1);
 });
+
+for (const status of [400, 401, 403, 404, 422, 429]) {
+  test(`GitHub comment rejection (${status}) releases the review claim and permits recovery`, async () => {
+    commentPostError = Object.assign(new Error('GitHub rejected comment creation'), { status });
+    const result = await postReview();
+    assert.equal(result.status, 503);
+    assert.equal(result.json.state, 'failed');
+    assert.equal(result.json.success, false);
+    assert.equal(result.json.posted, false);
+    assert.match(String(result.json.error), /No review was submitted/);
+    assert.equal(claims.has('task-review:completed-task'), false);
+    assert.equal(add.mock.callCount(), 0);
+    assert.equal(redis.rpush.mock.callCount(), 0);
+    commentPostError = undefined;
+    const retry = await postReview();
+    assert.equal(retry.json.state, 'queued');
+    assert.equal(retry.json.success, true);
+    assert.equal(add.mock.callCount(), 1);
+    assert.deepEqual(await postReview(), retry);
+    assert.equal(request.mock.calls.filter(call => call.arguments[0].startsWith('POST')).length, 2);
+  });
+}
+
+for (const status of [undefined, 408, 500, 502]) {
+  test(`ambiguous comment failure (${status ?? 'connection lost'}) retains the review claim`, async () => {
+    commentPostError = Object.assign(new Error('Comment response lost'), status === undefined ? {} : { status });
+    const result = await postReview();
+    assert.equal(result.status, 202);
+    assert.equal(result.json.state, 'unknown');
+    assert.equal(result.json.success, false);
+    assert.equal(claims.has('task-review:completed-task'), true);
+    commentPostError = undefined;
+    assert.deepEqual(await postReview(), result);
+    assert.equal(request.mock.calls.filter(call => call.arguments[0].startsWith('POST')).length, 1);
+    assert.equal(add.mock.callCount(), 0);
+  });
+}
 
 test('closed PR and unavailable assignment never post review commands', async () => {
   prState = 'closed';
