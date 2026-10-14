@@ -424,7 +424,7 @@ export function createTaskRoutes(deps: TaskRoutesDeps) {
           },
         }, generateCorrelationId(), {
           // The queue is configured with ioredis; BullMQ exposes a narrower client interface.
-          redisClient: await issueQueue.client as Redis,
+          redisClient: await issueQueue.client as unknown as Redis,
           PR_FOLLOWUP_TRIGGER_KEYWORDS: (process.env.PR_FOLLOWUP_TRIGGER_KEYWORDS ?? '').split(',').map(k => k.trim()).filter(Boolean),
           MODEL_LABEL_PATTERN: process.env.MODEL_LABEL_PATTERN || '^llm-(.+)$',
           jobId,
