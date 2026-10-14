@@ -12,7 +12,6 @@ const WEEK = { timeframe: '7d' as const, from: new Date(NOW.getTime() - 7 * 24 *
 before(async () => {
   database = await createDashboardTestDatabase();
   await database.schema.alterTable('llm_executions', table => {
-    table.string('model_name');
     table.integer('input_tokens');
     table.integer('cache_read_input_tokens');
     table.integer('cache_creation_input_tokens');
