@@ -50,6 +50,11 @@ function successMessage(response: PostFollowupResponse | undefined, command: str
   return action ? `${action} ${command} for PR #${prNumber}.` : `Sent ${command} to PR #${prNumber}.`;
 }
 
+function isAcceptedReview(response: PostFollowupResponse | undefined): boolean {
+  return response?.success === true && response.commandMode === 'review'
+    && (response.state === 'queued' || response.state === 'batched');
+}
+
 /**
  * The follow-up commands for one run's pull request. A command in flight or
  * already sent is shared by every card showing the run, so neither a second
@@ -132,8 +137,7 @@ export const FollowupCommands: React.FC<FollowupCommandsProps> = ({
       });
       return;
     }
-    if (command === '/review' && !(response?.success === true && response.commandMode === 'review'
-      && (response.state === 'queued' || response.state === 'batched'))) {
+    if (command === '/review' && !isAcceptedReview(response)) {
       settleFollowupUncertain(taskId, { ...reconciliation(response),
         message: 'The server did not confirm an accepted review. Inspect the pull request and update the ProPR server before retrying.' });
       addToast({ type: 'error', message: 'The server did not confirm an accepted review. Inspect the pull request and update the ProPR server before retrying.' });

@@ -1,152 +1,11 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, rm } from 'node:fs/promises';
-import path from 'node:path';
-import { tmpdir } from 'node:os';
-import { after, beforeEach, mock, test } from 'node:test';
-import type { Request, Response } from 'express';
-import knex from 'knex';
+import { test } from 'node:test';
 import type { Redis } from 'ioredis';
-import type { JobsOptions } from 'bullmq';
 import type { IssueCommentEvent } from '@octokit/webhooks-types';
-import type { CommentJobData } from '../../core/src/queue/taskQueue.js';
-import type { UltrafixDeps } from '../../core/src/webhook/commentEventHandler.js';
-
-const originalNodeEnv = process.env.NODE_ENV;
-const originalDbFilename = process.env.DB_FILENAME;
-const isolatedDbDir = await mkdtemp(path.join(tmpdir(), 'propr-task-followup-routes-'));
-process.env.NODE_ENV = 'test';
-process.env.DB_FILENAME = path.join(isolatedDbDir, 'propr.sqlite');
-
-const claims = new Map<string, string>();
-const redis = {
-  set: mock.fn(async (key: string, value: string) => {
-    if (claims.has(key)) return null;
-    claims.set(key, value);
-    return 'OK';
-  }),
-  get: async (key: string) => claims.get(key) ?? null,
-  setex: async (key: string, _ttl: number, value: string) => { claims.set(key, value); },
-  del: async (key: string) => { claims.delete(key); },
-  eval: async (script: string, _count: number, key: string, token: string) => {
-    if (claims.get(key) !== token) return 0;
-    if (script.includes("redis.call('DEL'")) claims.delete(key);
-    return 1;
-  },
-  rpush: mock.fn(async (...args: [string, string]) => { assert.equal(args.length, 2); return 1; }),
-  expire: async () => 1,
-};
-let existingJobs: unknown[] = [];
-let queueFails = false;
-let acceptBeforeFailure = false;
-const acceptedJobs = new Map<string, CommentJobData>();
-const add = mock.fn(async (...args: [string, CommentJobData, JobsOptions]) => {
-  assert.equal(args[0], 'processPullRequestComment');
-  if (!queueFails || acceptBeforeFailure) acceptedJobs.set(args[2].jobId!, args[1]);
-  if (queueFails) throw new Error('connection lost');
-});
-const queue = { add, client: Promise.resolve(redis), getActive: async () => existingJobs, getWaiting: async () => [], getDelayed: async () => [] };
-const queueModule = await import('../../core/src/queue/taskQueue.js');
-await mock.module('../../core/src/queue/taskQueue.js', {
-  namedExports: { ...queueModule, issueQueue: queue, getIssueQueue: async () => queue },
-});
-let webhookFirst = false;
-let prState = 'open';
-let commentPostError: unknown;
-async function deliverWebhook(body: string, login = 'propr-dev[bot]', repo = 'propr') {
-  return processCommentEvent({
-    repository: { owner: { login: 'integry' }, name: repo },
-    issue: { number: 7, pull_request: {} }, sender: { id: 99 },
-    comment: { id: 6157569382, body, user: { login, type: 'Bot' },
-      created_at: '2026-10-13T00:00:00Z', updated_at: '2026-10-13T00:00:00Z' },
-  } as unknown as IssueCommentEvent, 'issue_comment', 'webhook', {
-    redisClient: redis as unknown as Redis, PR_FOLLOWUP_TRIGGER_KEYWORDS: [],
-  });
-}
-const request = mock.fn(async (route: string, options: { body?: string }) => {
-  if (route.startsWith('POST') && route.endsWith('/comments') && commentPostError) throw commentPostError;
-  if (webhookFirst && options.body?.includes('<!-- propr-api-followup:')) await deliverWebhook(options.body);
-  if (route.startsWith('POST') && route.endsWith('/comments')) return { data: {
-    id: 6157569382, body: options.body, user: { login: 'propr-dev[bot]', type: 'Bot' },
-    created_at: '2026-10-13T00:00:00Z', updated_at: '2026-10-13T00:00:00Z',
-  } };
-  if (route.startsWith('GET') && route.includes('/pulls/')) return { data: { state: prState, head: { ref: 'acceptance' }, labels: [] } };
-  return { data: {} };
-});
-const authModule = await import('../../core/src/auth/githubAuth.js');
-await mock.module('../../core/src/auth/githubAuth.js', {
-  namedExports: { ...authModule, getAuthenticatedOctokit: async () => ({ request, paginate: async () => [] }) },
-});
-const labels = await import('../../core/src/utils/github/labelOperations.js');
-const updateLabels = mock.fn(async (_context: unknown, removed: string[], added: string[]) => ({ success: true, removed, added, errors: [] }));
-await mock.module('../../core/src/utils/github/labelOperations.js', { namedExports: { ...labels, safeUpdateLabels: updateLabels } });
-const registryModule = await import('../../core/src/agents/AgentRegistry.js');
-await mock.module('../../core/src/agents/AgentRegistry.js', {
-  namedExports: { ...registryModule, AgentRegistry: class {
-    static getInstance() { return { ensureInitialized: async () => {}, getAllAgents: () => [] }; }
-  } },
-});
-const { setUltrafixDeps, processCommentEvent } = await import('../../core/src/webhook/commentEventHandler.js');
-const invalidate = mock.fn(async () => ({ workEpoch: 8, hadAutomaticWork: true }));
-let startLoopFails = false;
-const clearState = mock.fn(async () => true);
-const startLoop = mock.fn(async (_redis: unknown, _options: Parameters<UltrafixDeps['startLoop']>[1], pending: boolean) => {
-  if (startLoopFails) throw new Error('startLoop failed');
-  return { state: {}, initialAction: pending ? 'fix' as const : 'review' as const };
-});
-let pendingReview = false;
-setUltrafixDeps({
-  loadUltrafixRatingGoal: async () => 9, loadUltrafixMaxCycles: async () => 5,
-  loadUltrafixPauseSeconds: async () => 60, loadPrReviewModel: async () => 'gpt-5',
-  startLoop, clearStateIfCurrent: clearState, hasAutomaticWork: async () => false,
-  reserveAutomaticWork: async () => 8, invalidateAutomaticWork: invalidate,
-  getPendingReviewState: async () => ({ hasPendingReview: pendingReview }),
-});
-beforeEach(() => {
-  startLoopFails = false; prState = 'open'; commentPostError = undefined;
-  claims.clear(); existingJobs = []; queueFails = false; pendingReview = false; webhookFirst = false; acceptBeforeFailure = false; acceptedJobs.clear();
-  for (const fn of [add, request, invalidate, startLoop, clearState, updateLabels, redis.rpush]) fn.mock.resetCalls();
-});
-
-const { closeConnection } = await import('@propr/core');
-const { createTaskRoutes, resolveFollowupThread } = await import('../routes/taskRoutes.js');
-
-const database = knex({ client: 'better-sqlite3', connection: { filename: ':memory:' }, useNullAsDefault: true });
-await database.schema.createTable('tasks', table => {
-  table.text('task_id').primary();
-  table.text('repository').notNullable();
-  table.integer('issue_number').nullable();
-  table.integer('pr_number').nullable();
-  table.text('task_type').notNullable();
-});
-await database('tasks').insert([
-  { task_id: 'completed-task', repository: 'integry/propr', issue_number: 12, pr_number: 7, task_type: 'issue' },
-  { task_id: 'task-without-pr', repository: 'integry/propr', issue_number: null, pr_number: null, task_type: 'issue' },
-  { task_id: 'issue-task-without-pr', repository: 'integry/propr', issue_number: 12, pr_number: null, task_type: 'issue' },
-]);
-
-after(async () => {
-  await database.destroy();
-  await closeConnection();
-  await rm(isolatedDbDir, { recursive: true, force: true });
-  if (originalNodeEnv === undefined) delete process.env.NODE_ENV;
-  else process.env.NODE_ENV = originalNodeEnv;
-  if (originalDbFilename === undefined) delete process.env.DB_FILENAME;
-  else process.env.DB_FILENAME = originalDbFilename;
-});
-
-async function postFollowup(body: Record<string, unknown>, taskId = 'task-without-pr'): Promise<{ status: number; json: Record<string, unknown> }> {
-  const result = { status: 200, json: {} as Record<string, unknown> };
-  const response = {
-    status(code: number) { result.status = code; return this; },
-    json(payload: unknown) { result.json = payload as Record<string, unknown>; return this; },
-  } as unknown as Response;
-  await createTaskRoutes({ db: database }).postFollowup({
-    params: { taskId },
-    body,
-    user: { id: 'user-1' },
-  } as unknown as Request, response);
-  return result;
-}
+import {
+  state, redis, acceptedJobs, add, request, updateLabels, invalidate,
+  clearState, startLoop, processCommentEvent, deliverWebhook, postFollowup, resolveFollowupThread,
+} from './taskFollowupFixture.js';
 
 test('rejects unknown follow-up targets before posting anything', async () => {
   assert.deepEqual(await postFollowup({ body: '/review', target: 'issue' }), {
@@ -186,7 +45,7 @@ test('resolves historical PR-comment task IDs whose stored task type is issue', 
 
 for (const mode of ['review', 'fix']) {
   test(`API /${mode} queues command metadata and takes over automatic work`, async () => {
-    existingJobs = [{ name: 'processPullRequestComment', data: { repoOwner: 'integry', repoName: 'propr', pullRequestNumber: 7, ultrafixMeta: { workEpoch: 7 } } }];
+    state.existingJobs = [{ name: 'processPullRequestComment', data: { repoOwner: 'integry', repoName: 'propr', pullRequestNumber: 7, ultrafixMeta: { workEpoch: 7 } } }];
     const command = mode === 'review' ? '/review gpt-5\nCheck error handling' : '/fix\nFix the blockers';
     const result = await postFollowup({ body: command, target: 'pull_request' }, 'completed-task');
     assert.equal(result.status, 202);
@@ -212,7 +71,7 @@ for (const mode of ['review', 'fix']) {
 
 for (const pending of [false, true]) {
   test(`API /ultrafix starts the loop with ${pending ? 'fix' : 'review'}`, async () => {
-    pendingReview = pending;
+    state.pendingReview = pending;
     const result = await postFollowup({ body: '/ultrafix\nFocus on errors', target: 'pull_request' }, 'completed-task');
     assert.equal(result.json.state, 'queued');
     const job = add.mock.calls[0].arguments[1];
@@ -241,7 +100,7 @@ test('ordinary prose retains the posted text and requesting user', async () => {
 });
 
 test('queue failure preserves the uncertain receipt after posting', async () => {
-  queueFails = true;
+  state.queueFails = true;
   const result = await postFollowup({ body: '/review', target: 'pull_request' }, 'completed-task');
   assert.equal(result.status, 202);
   assert.equal(result.json.success, false);
@@ -271,7 +130,7 @@ for (const command of ['/review', '/fix', '/ultrafix']) {
 }
 
 test('review batched behind manual work preserves command metadata', async () => {
-  existingJobs = [{ name: 'processPullRequestComment', data: { repoOwner: 'integry', repoName: 'propr', pullRequestNumber: 7, commandMode: 'fix' } }];
+  state.existingJobs = [{ name: 'processPullRequestComment', data: { repoOwner: 'integry', repoName: 'propr', pullRequestNumber: 7, commandMode: 'fix' } }];
   const result = await postFollowup({ body: '/review gpt-5\nCheck errors', target: 'pull_request' }, 'completed-task');
   assert.equal(result.json.state, 'batched');
   assert.equal(result.json.jobId, undefined, 'do not return a nonexistent job ID for a batched command');
@@ -315,9 +174,9 @@ for (const first of [false, true]) {
     for (const acceptance of ['confirmed', 'rejected', 'accepted-then-disconnected']) {
       const uncertain = acceptance !== 'confirmed';
       test(`${command}: ${first ? 'webhook' : 'API'} first, queue ${acceptance}`, async () => {
-        webhookFirst = first;
-        queueFails = uncertain;
-        acceptBeforeFailure = acceptance === 'accepted-then-disconnected';
+        state.webhookFirst = first;
+        state.queueFails = uncertain;
+        state.acceptBeforeFailure = acceptance === 'accepted-then-disconnected';
         const result = await postFollowup({ body: command, target: 'pull_request' }, 'completed-task');
         const postedBody = request.mock.calls.find(call => call.arguments[1].body?.includes('<!-- propr-api-followup:'))!.arguments[1].body!;
         await deliverWebhook(postedBody);
@@ -375,8 +234,8 @@ for (const body of ['/switch', '/switch nonexistent-model', '/use', '/use nonexi
 
 for (const first of [false, true]) {
   test(`pre-enqueue startLoop failure is reported after rollback, webhook first=${first}`, async () => {
-    webhookFirst = first;
-    startLoopFails = true;
+    state.webhookFirst = first;
+    state.startLoopFails = true;
     const result = await postFollowup({ body: '/ultrafix', target: 'pull_request' }, 'completed-task');
     assert.equal(result.json.state, 'failed');
     assert.equal(result.json.success, false);
@@ -391,133 +250,8 @@ for (const first of [false, true]) {
 }
 
 test('webhook startLoop failure still rethrows after rollback', async () => {
-  startLoopFails = true;
+  state.startLoopFails = true;
   await assert.rejects(deliverWebhook('/ultrafix'), /startLoop failed/);
   assert.equal(clearState.mock.callCount(), 1);
   assert.equal(add.mock.callCount(), 0);
-});
-
-async function postReview(overrides: Record<string, unknown> = {}, user: unknown = { id: 'user-1', login: 'human' }) {
-  const result = { status: 200, json: {} as Record<string, unknown> };
-  const response = { status(code: number) { result.status = code; return this; },
-    json(payload: Record<string, unknown>) { result.json = payload; return this; } } as unknown as Response;
-  await createTaskRoutes({ db: database,
-    resolveMetadataToken: async () => 'fixture-token', verifyRepositoryAccess: async () => {},
-    reviewAssignmentGate: async () => ({ allowed: true, reason: 'author_assigned' }), ...overrides,
-  }).postReview({ params: { taskId: 'completed-task' }, user } as unknown as Request, response);
-  return result;
-}
-
-test('dedicated desktop review accepts a bot-posted command for the authenticated user only once', async () => {
-  webhookFirst = true;
-  const result = await postReview();
-  assert.equal(result.status, 202);
-  assert.equal(result.json.success, true);
-  assert.equal(result.json.commandMode, 'review');
-  assert.equal(result.json.state, 'queued');
-  const job = add.mock.calls[0].arguments[1];
-  assert.equal(job.commandMode, 'review');
-  assert.equal(job.userId, 'user-1');
-  assert.equal(job.comments![0].author, 'propr-dev[bot]');
-  assert.equal(job.comments![0].body, '');
-  assert.deepEqual(await postReview(), result);
-  assert.equal(add.mock.callCount(), 1);
-  assert.equal(request.mock.calls.filter(call => call.arguments[0].startsWith('POST')).length, 1);
-});
-
-test('review checks the real user grant, repository and PR assignment before posting', async () => {
-  const checked: string[] = [];
-  const result = await postReview({
-    resolveMetadataToken: async (req: Request) => { checked.push(req.user!.id); return 'user-token'; },
-    verifyRepositoryAccess: async (repo: string, token: string) => { checked.push(repo, token); },
-    reviewAssignmentGate: async (input: { authorId: string; authorLogin: string; pullRequestNumber: number }) => {
-      assert.equal(input.authorId, 'user-1'); assert.equal(input.authorLogin, 'human');
-      assert.equal(input.pullRequestNumber, 7);
-      return { allowed: false, reason: 'author_not_assigned' };
-    },
-  });
-  assert.deepEqual(checked, ['user-1', 'integry/propr', 'user-token']);
-  assert.equal(result.status, 403);
-  assert.equal(request.mock.callCount(), 0);
-  assert.equal(add.mock.callCount(), 0);
-});
-
-test('inaccessible repositories and anonymous review requests do not post or queue', async () => {
-  assert.equal((await postReview({}, null)).status, 401);
-  assert.equal((await postReview({ verifyRepositoryAccess: async () => { throw { status: 404 }; } })).status, 404);
-  assert.equal(request.mock.callCount(), 0);
-  assert.equal(add.mock.callCount(), 0);
-});
-
-test('uncertain review receipt is retained on retry without a second implementation or review run', async () => {
-  queueFails = true; acceptBeforeFailure = true;
-  const result = await postReview();
-  assert.equal(result.json.success, false);
-  assert.equal(result.json.state, 'unknown');
-  assert.deepEqual(await postReview(), result);
-  assert.equal(add.mock.callCount(), 1);
-  assert.equal(acceptedJobs.size, 1);
-});
-
-for (const status of [400, 401, 403, 404, 422, 429]) {
-  test(`GitHub comment rejection (${status}) releases the review claim and permits recovery`, async () => {
-    commentPostError = Object.assign(new Error('GitHub rejected comment creation'), { status });
-    const result = await postReview();
-    assert.equal(result.status, 503);
-    assert.equal(result.json.state, 'failed');
-    assert.equal(result.json.success, false);
-    assert.equal(result.json.posted, false);
-    assert.match(String(result.json.error), /No review was submitted/);
-    assert.equal(claims.has('task-review:completed-task'), false);
-    assert.equal(add.mock.callCount(), 0);
-    assert.equal(redis.rpush.mock.callCount(), 0);
-    commentPostError = undefined;
-    const retry = await postReview();
-    assert.equal(retry.json.state, 'queued');
-    assert.equal(retry.json.success, true);
-    assert.equal(add.mock.callCount(), 1);
-    assert.deepEqual(await postReview(), retry);
-    assert.equal(request.mock.calls.filter(call => call.arguments[0].startsWith('POST')).length, 2);
-  });
-}
-
-for (const status of [undefined, 408, 500, 502]) {
-  test(`ambiguous comment failure (${status ?? 'connection lost'}) retains the review claim`, async () => {
-    commentPostError = Object.assign(new Error('Comment response lost'), status === undefined ? {} : { status });
-    const result = await postReview();
-    assert.equal(result.status, 202);
-    assert.equal(result.json.state, 'unknown');
-    assert.equal(result.json.success, false);
-    assert.equal(claims.has('task-review:completed-task'), true);
-    commentPostError = undefined;
-    assert.deepEqual(await postReview(), result);
-    assert.equal(request.mock.calls.filter(call => call.arguments[0].startsWith('POST')).length, 1);
-    assert.equal(add.mock.callCount(), 0);
-  });
-}
-
-test('closed PR and unavailable assignment never post review commands', async () => {
-  prState = 'closed';
-  assert.equal((await postReview()).status, 409);
-  assert.equal((await postReview({ reviewAssignmentGate: async () => ({ allowed: false, reason: 'assignment_unavailable' }) })).status, 503);
-  assert.equal(add.mock.callCount(), 0);
-  assert.equal(request.mock.calls.filter(call => call.arguments[0].startsWith('POST')).length, 0);
-});
-
-test('dedicated review batched behind manual work retains review metadata and its idempotent receipt', async () => {
-  existingJobs = [{ name: 'processPullRequestComment', data: { repoOwner: 'integry', repoName: 'propr', pullRequestNumber: 7, commandMode: 'fix' } }];
-  const result = await postReview();
-  assert.equal(result.json.success, true);
-  assert.equal(result.json.state, 'batched');
-  assert.equal(JSON.parse(redis.rpush.mock.calls[0].arguments[1]).commandMode, 'review');
-  assert.deepEqual(await postReview(), result);
-  assert.equal(redis.rpush.mock.callCount(), 1);
-  assert.equal(add.mock.callCount(), 0);
-});
-
-test('concurrent desktop requests share one review submission', async () => {
-  const results = await Promise.all([postReview(), postReview()]);
-  assert.equal(results.filter(result => result.json.state === 'queued').length, 1);
-  assert.equal(results.filter(result => result.json.state === 'unknown').length, 1);
-  assert.equal(add.mock.callCount(), 1);
 });
