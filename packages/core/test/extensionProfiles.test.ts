@@ -1,7 +1,8 @@
 import { up as grantMigration } from '../src/db/migrations/20261013220000_extension_grant_network.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import knex from 'knex';
+import { extensionTestResources } from './helpers/extensionTestResources.js';
+import type { TestContext } from 'node:test';
 import { randomUUID } from 'node:crypto';
 import { gzipSync } from 'node:zlib';
 import fs from 'node:fs/promises';
@@ -20,8 +21,8 @@ const input = (): ExtensionProfileInput => ({ version: 1, name: 'Documentation t
 const skillFiles = () => [{ path: 'SKILL.md', content: Buffer.from('---\nname: synthetic-skill\ndescription: A synthetic isolated skill\nrequirements: ["docs.lookup"]\n---\nRead the selected documentation.').toString('base64') }];
 const select = (p: { instanceId: string; profileId: string; revision: number }) => ({ instanceId: p.instanceId, profileId: p.profileId, revision: p.revision });
 const context = { agentAlias: 'claude-main', runtime: 'claude', repositories: ['team/repo'], allowWrite: false };
-async function fixture() {
-  const database = knex({ client: 'better-sqlite3', connection: { filename: ':memory:' }, useNullAsDefault: true });
+async function fixture(t: TestContext) {
+  const database = extensionTestResources(t).database();
   await database.schema.createTable('config', t => { t.string('key').primary(); t.text('value'); });
   await database.schema.createTable('instance_members', t => { t.string('github_user_id').primary(); t.string('role'); });
   await database.schema.createTable('agent_definitions', t => { t.string('id').primary(); });
@@ -31,7 +32,7 @@ async function fixture() {
 }
 
 test('native save preserves null creates and refuses malformed expected selections without mutations', async t => {
-  const { database, store } = await fixture(); t.after(() => database.destroy());
+  const { database, store } = await fixture(t);
   const profile = await store.save('1', input(), {}, null);
   assert.equal(profile.revision, 1);
   assert.deepEqual(await store.list('1'), [profile]);
@@ -45,7 +46,7 @@ test('native save preserves null creates and refuses malformed expected selectio
 });
 
 test('native durable instance-admin CRUD, encrypted custody, revision fencing and immutable running grants without Connect', async t => {
-  const { database, store } = await fixture(); t.after(() => database.destroy());
+  const { database, store } = await fixture(t);
   for (const actor of ['2', '4', 'bootstrap', '']) await assert.rejects(store.list(actor), /durable instance administrator/);
   const bundle = await store.importSkill('1', skillFiles(), { kind: 'archive', filename: 'synthetic.tar' });
   const profile = await store.save('1', { ...input(), skillBundleIds: [bundle.id] }, { docs: secret });
@@ -89,7 +90,7 @@ test('native durable instance-admin CRUD, encrypted custody, revision fencing an
 });
 
 test('scope, runtime, capability, demotion, tenant and secret substitution fail closed', async t => {
-  const { database, store } = await fixture(); t.after(() => database.destroy());
+  const { database, store } = await fixture(t);
   const scoped = await store.save('1', { ...input(), agentScope: ['claude-main'], repositoryScope: ['team/repo'] }, { docs: secret });
   await store.assertLaunch('1', select(scoped), { ...context, repositories: ['TEAM/REPO'] });
   await assert.rejects(store.assertLaunch('1', select(scoped), { ...context, agentAlias: 'codex-other' }), /scope/);
@@ -109,7 +110,7 @@ test('scope, runtime, capability, demotion, tenant and secret substitution fail 
   await store.activateGrant(demotedCreatorGrant, '3', select(writes));
   await database('instance_members').where({ github_user_id: '3' }).update({ role: 'member' });
   await assert.rejects(store.activateGrant(demotedCreatorGrant, '3', select(writes)), /durable/);
-  const { database: other, store: otherStore } = await fixture(); t.after(() => other.destroy());
+  const { database: other, store: otherStore } = await fixture(t);
   await assert.rejects(otherStore.read('1', select(writes)), /unavailable/);
 });
 
@@ -155,10 +156,11 @@ test('bounded immutable skill archives reject traversal, links, devices, duplica
 
 test('selected skill appears only in its read-only run staging and all temporary state is cleaned', async t => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'extension-launch-')); const oldData = process.env.DATA_DIR; const oldTransport = process.env.PROPR_EGRESS_SOCKET_DIR;
+  extensionTestResources(t).defer(async () => { if (oldTransport === undefined) delete process.env.PROPR_EGRESS_SOCKET_DIR; else process.env.PROPR_EGRESS_SOCKET_DIR = oldTransport; if (oldData === undefined) delete process.env.DATA_DIR; else process.env.DATA_DIR = oldData; await fs.rm(root, { recursive: true, force: true }); });
   process.env.DATA_DIR = root; process.env.PROPR_EGRESS_SOCKET_DIR = root;
   const { executeWithExtensions, currentExtensionLaunch } = await import('../src/extensions/extensionLaunch.js');
-  const { database, store } = await fixture();
-  t.after(async () => { await (await import('../src/db/connection.js')).closeConnection(); await database.destroy(); if (oldTransport === undefined) delete process.env.PROPR_EGRESS_SOCKET_DIR; else process.env.PROPR_EGRESS_SOCKET_DIR = oldTransport; if (oldData === undefined) delete process.env.DATA_DIR; else process.env.DATA_DIR = oldData; await fs.rm(root, { recursive: true, force: true }); });
+  extensionTestResources(t).defer(async () => { await (await import('../src/db/connection.js')).closeConnection(); });
+  const { database, store } = await fixture(t);
   const bundle = await store.importSkill('1', skillFiles(), { kind: 'github', repository: 'team/repo', commit: 'a'.repeat(40), directory: 'skills/synthetic' });
   const profile = await store.save('1', { ...input(), mcpServers: [...input().mcpServers, { ...input().mcpServers[0], name: 'docs-tools' }], skillBundleIds: [bundle.id] }, { docs: secret, 'docs-tools': secret });
   const config = { type: 'claude' as const, alias: 'claude-main', id: randomUUID(), enabled: true, dockerImage: 'synthetic', configPath: root, supportedModels: ['synthetic'] };
@@ -199,6 +201,7 @@ test('synthetic HTTPS MCP enforces TLS, pins the vetted address, refuses redirec
   const { execFileSync } = await import('node:child_process');
   const { requestExtensionMcp } = await import('../src/extensions/endpointPolicy.js');
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'extension-https-'));
+  extensionTestResources(t).defer(() => fs.rm(root, { recursive: true, force: true }));
   execFileSync('openssl', ['req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-keyout', path.join(root, 'key.pem'), '-out', path.join(root, 'cert.pem'), '-days', '1', '-subj', '/CN=mcp.synthetic.example', '-addext', 'subjectAltName=DNS:mcp.synthetic.example'], { stdio: 'ignore' });
   const cert = await fs.readFile(path.join(root, 'cert.pem')); let redirect = false; let oversized = false; let authorizations = 0; let protocolError = false; let errorWire = '';
   const server = https.createServer({ key: await fs.readFile(path.join(root, 'key.pem')), cert }, async (req, res) => {
@@ -213,6 +216,7 @@ test('synthetic HTTPS MCP enforces TLS, pins the vetted address, refuses redirec
     }
     res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({ jsonrpc: '2.0', id: rpc.id, result: { content: [{ type: 'text', text: oversized ? 'x'.repeat(1024 * 1024 + 1) : secret }] } }));
   });
+  extensionTestResources(t).defer(() => new Promise<void>((resolve, reject) => server.close(error => error && (error as NodeJS.ErrnoException).code !== 'ERR_SERVER_NOT_RUNNING' ? reject(error) : resolve())));
   await new Promise<void>(r => server.listen(0, '127.0.0.1', r));
   const { port } = server.address() as import('node:net').AddressInfo;
   const original = https.request;
@@ -223,8 +227,8 @@ test('synthetic HTTPS MCP enforces TLS, pins the vetted address, refuses redirec
     (options.lookup as Function)('8.8.8.8', {}, (error: unknown, address: string) => { assert.equal(error, null); assert.equal(address, '8.8.8.8'); });
     return original(`https://127.0.0.1:${port}/mcp`, { ...options, lookup: undefined, ca: cert, servername: 'mcp.synthetic.example' }, callback);
   });
-  const { database, store } = await fixture();
-  t.after(async () => { t.mock.restoreAll(); await new Promise<void>(r => server.close(() => r())); await database.destroy(); await fs.rm(root, { recursive: true, force: true }); });
+  const { database, store } = await fixture(t);
+  extensionTestResources(t).defer(() => t.mock.restoreAll());
   const profile = await store.save('1', input(), { docs: secret }); const token = await store.createGrant('1', profile, 'https-selected'); await store.activateGrant(token, '1', select(profile));
   const body = { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'lookup' } };
   const output = await extensionGatewayCall(store, token, 'docs', body); assert.ok(!JSON.stringify(output).includes(secret)); assert.equal(authorizations, 1);
@@ -243,7 +247,7 @@ test('synthetic HTTPS MCP enforces TLS, pins the vetted address, refuses redirec
 });
 
 test('concurrent edits, pending launch disable/delete and exhausted grants refuse safely', async t => {
-  const { database, store } = await fixture(); t.after(() => database.destroy());
+  const { database, store } = await fixture(t);
   const profile = await store.save('1', input(), { docs: secret });
   const raced = await Promise.allSettled([store.save('1', { ...input(), name: 'Edit A' }, {}, select(profile)), store.save('1', { ...input(), name: 'Edit B' }, {}, select(profile))]);
   assert.equal(raced.filter(r => r.status === 'fulfilled').length, 1); assert.equal(raced.filter(r => r.status === 'rejected').length, 1);
@@ -283,7 +287,7 @@ test('extension gateway reuses container MCP routing without accepting URL crede
 });
 
 test('stored revision and credential substitutions cannot redirect a live grant to another profile', async t => {
-  const { database, store } = await fixture(); t.after(() => database.destroy());
+  const { database, store } = await fixture(t);
   const first = await store.save('1', input(), { docs: secret });
   const second = await store.save('1', { ...input(), name: 'Other profile' }, { docs: 'OTHER_UNMISTAKABLE_EXTENSION_SENTINEL' });
   const token = await store.createGrant('1', first, 'bound-live-grant'); await store.activateGrant(token, '1', select(first));
@@ -297,7 +301,7 @@ test('stored revision and credential substitutions cannot redirect a live grant 
 
 
 test('gateway accepts progress metadata without forwarding it and preserves credential-named schemas', async t => {
-  const { database, store } = await fixture(); t.after(() => database.destroy());
+  const { database, store } = await fixture(t);
   const profile = await store.save('1', input(), { docs: secret });
   const token = await store.createGrant('1', profile, 'progress'); await store.activateGrant(token, '1', select(profile));
   await store.activateGrant(token, '1', select(profile)); // Same task's retry is idempotent.
@@ -317,7 +321,7 @@ test('gateway accepts progress metadata without forwarding it and preserves cred
 });
 
 test('snapshot loading failures release only their own reserved slot and keep failure charges', async t => {
-  const { database, store } = await fixture(); t.after(() => database.destroy());
+  const { database, store } = await fixture(t);
   const profile = await store.save('1', input(), { docs: secret });
   const token = await store.createGrant('1', profile, 'bad-snapshot'); await store.activateGrant(token, '1', select(profile));
   const revision = await database('extension_profile_revisions').first();
@@ -342,8 +346,8 @@ test('snapshot loading failures release only their own reserved slot and keep fa
 });
 
 test('operator catalog projections exclude internals and customers cannot smuggle stdio fields', async t => {
-  const { database, store } = await fixture(); t.after(() => database.destroy());
-  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'operator-catalog-')); t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const { database, store } = await fixture(t);
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'operator-catalog-')); extensionTestResources(t).defer(() => fs.rm(root, { recursive: true, force: true }));
   const { operatorCatalogDigest } = await import('../src/extensions/operatorCatalog.js');
   const entry = { id: 'local-docs', kind: 'stdio' as const, executable: '/usr/bin/env', args: ['node', '--version', 'CATALOG_ARGUMENT_SENTINEL'], secretEnv: { API_KEY: 'OPERATOR_DOCS_KEY' }, tools: ['lookup'], capability: 'read' as const };
   const filename = path.join(root, 'catalog.json'); await fs.writeFile(filename, JSON.stringify([entry]), { mode: 0o600 });
@@ -377,8 +381,8 @@ test('operator catalog projections exclude internals and customers cannot smuggl
 });
 
 test('catalog stdio is callable through both selected authorized launcher policies and never retains sentinel secrets', async t => {
-  const { database, store } = await fixture(); t.after(() => database.destroy());
-  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'catalog-launch-')); t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const { database, store } = await fixture(t);
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'catalog-launch-')); extensionTestResources(t).defer(() => fs.rm(root, { recursive: true, force: true }));
   const { operatorCatalogDigest } = await import('../src/extensions/operatorCatalog.js');
   const { executeWithExtensions, currentExtensionLaunch } = await import('../src/extensions/extensionLaunch.js');
   const { claudeToolPolicyArgs, codexToolPolicyArgs } = await import('../src/agents/agentToolPolicy.js');
@@ -426,7 +430,7 @@ test('catalog stdio is callable through both selected authorized launcher polici
 });
 
 test('immutable gateway policy enforces allowlist on every call and private DNS re-resolution; catalog exceptions remain bounded', async t => {
-  const { database, store } = await fixture(); t.after(() => database.destroy());
+  const { database, store } = await fixture(t);
   const profile = await store.save('1', input(), { docs: secret });
   const token = await store.createGrant('1', profile, 'restricted-gateway', { mode: 'restricted', allow: [], instanceAllow: [] }); await store.activateGrant(token, '1', select(profile));
   let sent = false;
@@ -438,7 +442,7 @@ test('immutable gateway policy enforces allowlist on every call and private DNS 
   const dns = async () => [{ address: ++lookup === 1 ? '8.8.8.8' : '10.0.0.1', family: 4 }];
   await resolveExtensionEndpoint('https://tools.example.com/mcp', dns, policy);
   await assert.rejects(resolveExtensionEndpoint('https://tools.example.com/mcp', dns, policy), /authorized/); assert.deepEqual(decisions, [true, false]);
-  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'internal-catalog-')); t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'internal-catalog-')); extensionTestResources(t).defer(() => fs.rm(root, { recursive: true, force: true }));
   const { operatorCatalogDigest } = await import('../src/extensions/operatorCatalog.js');
   const entry = { id: 'internal-docs', kind: 'https' as const, url: 'https://10.0.0.1/mcp', addresses: ['10.0.0.1'], bearerSecretRef: 'INTERNAL_DOCS_KEY', tools: ['lookup'], capability: 'read' as const };
   const filename = path.join(root, 'catalog.json'); await fs.writeFile(filename, JSON.stringify([entry]), { mode: 0o600 });
@@ -454,10 +458,10 @@ test('immutable gateway policy enforces allowlist on every call and private DNS 
 });
 
 test('physical skill validation refuses ancestor links, replacement races, digest edits and hardlinks and cleans failures', async t => {
-  const { database, store } = await fixture(); t.after(() => database.destroy());
-  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'skill-adversary-')); t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const { database, store } = await fixture(t);
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'skill-adversary-')); extensionTestResources(t).defer(() => fs.rm(root, { recursive: true, force: true }));
   const oldTransport = process.env.PROPR_EGRESS_SOCKET_DIR; process.env.PROPR_EGRESS_SOCKET_DIR = root;
-  t.after(() => { if (oldTransport === undefined) delete process.env.PROPR_EGRESS_SOCKET_DIR; else process.env.PROPR_EGRESS_SOCKET_DIR = oldTransport; });
+  extensionTestResources(t).defer(() => { if (oldTransport === undefined) delete process.env.PROPR_EGRESS_SOCKET_DIR; else process.env.PROPR_EGRESS_SOCKET_DIR = oldTransport; });
   const { executeWithExtensions, currentExtensionLaunch } = await import('../src/extensions/extensionLaunch.js');
   const { ensureStagingRoot } = await import('../src/extensions/skillStaging.js');
   const bundle = await store.importSkill('1', skillFiles(), { kind: 'archive', filename: 'skill.tar' });
@@ -489,7 +493,7 @@ test('physical skill validation refuses ancestor links, replacement races, diges
 });
 
 test('gateway write authority is captured per run and omission stays false', async t => {
-  const { database, store } = await fixture(); t.after(() => database.destroy());
+  const { database, store } = await fixture(t);
   const profile = await store.save('1', { ...input(), mcpServers: [{ ...input().mcpServers[0], capability: 'write' }] }, { docs: secret });
   const policy = { mode: 'restricted' as const, allow: ['8.8.8.8'], instanceAllow: [] };
   const readOnly = await store.createGrant('1', profile, 'no-write', policy); await store.activateGrant(readOnly, '1', select(profile));
@@ -502,7 +506,7 @@ test('gateway write authority is captured per run and omission stays false', asy
 });
 
 test('redacted export restores public presence but requires fresh remote credentials and permits rotation', async t => {
-  const { database, store } = await fixture(); t.after(() => database.destroy());
+  const { database, store } = await fixture(t);
   const profile = await store.save('1', input(), { docs: secret });
   await database('extension_profile_revisions').where({ profile_id: profile.profileId }).update({ secrets_encrypted: '' });
   assert.equal((await store.read('1', select(profile))).secrets.docs.configured, true);
@@ -512,7 +516,7 @@ test('redacted export restores public presence but requires fresh remote credent
 });
 
 test('follow-up migration upgrades installed v1 tables, revokes policy-less grants and is repeatable', async t => {
-  const database = knex({ client: 'better-sqlite3', connection: { filename: ':memory:' }, useNullAsDefault: true }); t.after(() => database.destroy());
+  const database = extensionTestResources(t).database();
   await database.schema.createTable('agent_definitions', c => c.string('id').primary());
   await database.schema.createTable('task_submissions', c => c.string('id').primary());
   await up(database);
@@ -528,7 +532,7 @@ test('follow-up migration upgrades installed v1 tables, revokes policy-less gran
 });
 
 test('gateway accounting and denied resolutions survive grant cleanup in per-task telemetry', async t => {
-  const { database, store } = await fixture(); t.after(() => database.destroy());
+  const { database, store } = await fixture(t);
   await database.schema.createTable('tasks', c => c.string('task_id').primary());
   await database.schema.createTable('task_history', c => { c.string('task_id'); c.string('state'); c.string('timestamp'); c.text('reason'); c.text('metadata'); });
   await database('tasks').insert({ task_id: 'network-accounting' });
@@ -549,8 +553,8 @@ test('gateway accounting and denied resolutions survive grant cleanup in per-tas
 });
 
 test('write profiles launch report and non-opted-in tasks without write tools, then expose them for action', async t => {
-  const { database, store } = await fixture(); t.after(() => database.destroy());
-  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'extension-write-')); t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const { database, store } = await fixture(t);
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'extension-write-')); extensionTestResources(t).defer(() => fs.rm(root, { recursive: true, force: true }));
   const { operatorCatalogDigest } = await import('../src/extensions/operatorCatalog.js');
   const { executeWithExtensions, currentExtensionLaunch } = await import('../src/extensions/extensionLaunch.js');
   const { agentTaskOptions } = await import('../../../src/jobs/agentRuns/agentTaskOptions.js');
@@ -595,11 +599,11 @@ test('write profiles launch report and non-opted-in tasks without write tools, t
 });
 
 test('startup egress sweep reclaims crashed extension owners and preserves live, foreign, legacy and symlink trees', async t => {
-  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'extension-orphan-')); t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'extension-orphan-')); extensionTestResources(t).defer(() => fs.rm(root, { recursive: true, force: true }));
   const { createStagingDirectory, ensureStagingRoot } = await import('../src/extensions/skillStaging.js');
   const { sweepOrphanedEgressProxies } = await import('../src/network/egressExecution.js');
   const instance = path.join(root, 'extensions', randomUUID()); await ensureStagingRoot(instance);
-  const live = await createStagingDirectory(instance); t.after(live.cleanup);
+  const live = await createStagingDirectory(instance); extensionTestResources(t).defer(live.cleanup);
   const deadName = path.basename(live.directory).replace(`-${process.pid}-`, '-2147483647-');
   const dead = path.join(instance, deadName); await fs.mkdir(dead); await fs.writeFile(path.join(dead, 'skill'), 'dead-owner');
   const foreign = path.join(instance, deadName.replace(/^(run-[a-f0-9]{16}-)[a-f0-9]{16}/, (_match, prefix) => prefix + '0000000000000000')); await fs.mkdir(foreign);
@@ -619,7 +623,7 @@ test('launch wrapper persists restricted egress authority across preparation and
   const { executeWithExtensions, currentExtensionLaunch } = await import('../src/extensions/extensionLaunch.js');
   const { executeWithNetworkPolicy } = await import('../src/network/egressExecution.js');
   const { baseEgressAllowlist } = await import('../src/network/egressAllowlist.js');
-  const { database, store } = await fixture(); t.after(() => database.destroy());
+  const { database, store } = await fixture(t);
   const profile = await store.save('1', input(), { docs: secret });
   const policy = { mode: 'restricted' as const, source: 'workflow' as const, allow: ['8.8.8.8', 'docs.example.com'], instanceAllow: ['10.0.0.8'] };
   const config = { type: 'codex' as const, alias: 'codex-main', id: randomUUID(), enabled: true, dockerImage: 'synthetic', configPath: '/unused', supportedModels: ['synthetic'] };
@@ -640,7 +644,7 @@ test('launch wrapper persists restricted egress authority across preparation and
 
 test('telemetry and grant cleanup failures preserve results and original exceptions', async t => {
   const { executeWithExtensions, currentExtensionLaunch } = await import('../src/extensions/extensionLaunch.js');
-  const { database, store } = await fixture(); t.after(() => database.destroy());
+  const { database, store } = await fixture(t);
   const profile = await store.save('1', input(), { docs: secret });
   const config = { type: 'claude' as const, alias: 'claude-main', id: randomUUID(), enabled: true, dockerImage: 'synthetic', configPath: '/unused', supportedModels: ['synthetic'] };
   const options = { extensionProfile: select(profile), extensionActorId: '1', taskId: 'cleanup-run', issueRef: { repoOwner: 'team', repoName: 'repo', number: 1 }, worktreePath: '/unused', prompt: 'Selected run', githubToken: '' };
@@ -671,7 +675,7 @@ test('telemetry and grant cleanup failures preserve results and original excepti
 
 
 test('gateway reservation cleanup errors preserve responses and capability errors without releasing budget', async t => {
-  const { database, store } = await fixture(); t.after(() => database.destroy());
+  const { database, store } = await fixture(t);
   const profile = await store.save('1', input(), { docs: secret });
   const token = await store.createGrant('1', profile, 'gateway-cleanup');
   await store.activateGrant(token, '1', select(profile));
@@ -691,7 +695,7 @@ test('gateway reservation cleanup errors preserve responses and capability error
 test('staging creation preserves its original error when cleanup also fails', async t => {
   const { createStagingDirectory } = await import('../src/extensions/skillStaging.js');
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'extension-staging-error-'));
-  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  extensionTestResources(t).defer(() => fs.rm(root, { recursive: true, force: true }));
   const original = new Error('synthetic staging creation failure');
   const open = fs.open.bind(fs);
   t.mock.method(fs, 'open', async (...args: Parameters<typeof fs.open>) => {
@@ -722,8 +726,8 @@ test('skill staging explicitly rejects unsupported worker platforms', async () =
 test('one create/start window reuses catalog validation but fences authority at every boundary', async t => {
   const { executeWithExtensions, currentExtensionLaunch } = await import('../src/extensions/extensionLaunch.js');
   const { operatorCatalogDigest } = await import('../src/extensions/operatorCatalog.js');
-  const { database, store } = await fixture(); t.after(() => database.destroy());
-  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'extension-window-')); t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const { database, store } = await fixture(t);
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'extension-window-')); extensionTestResources(t).defer(() => fs.rm(root, { recursive: true, force: true }));
   const entry = { id: 'local-docs', kind: 'stdio' as const, executable: '/usr/bin/env', args: ['node', '--version'], tools: ['lookup'], capability: 'read' as const, secretEnv: {} };
   const file = path.join(root, 'catalog.json'); await fs.writeFile(file, JSON.stringify([entry])); store.environment.PROPR_EXTENSION_CATALOG_FILE = file;
   const profile = await store.save('1', { ...input(), mcpServers: [{ kind: 'catalog', name: 'docs', catalogId: entry.id, digest: operatorCatalogDigest(entry), tools: ['lookup'], capability: 'read', enabled: true }] }, {});
@@ -752,7 +756,7 @@ test('DNS is resolved once per create/start window and checked again for later c
   const dns = (await import('node:dns/promises')).default;
   const lookup = t.mock.method(dns, 'lookup', async () => [{ address: '8.8.8.8', family: 4 }] as any);
   const { executeWithExtensions, currentExtensionLaunch } = await import('../src/extensions/extensionLaunch.js');
-  const { database, store } = await fixture(); t.after(() => database.destroy());
+  const { database, store } = await fixture(t);
   const profile = await store.save('1', { ...input(), mcpServers: [{ ...input().mcpServers[0], kind: 'https', url: 'https://docs.example.com/mcp', authentication: 'none' }] }, {});
   const options = { extensionProfile: select(profile), extensionActorId: '1', taskId: 'dns-window-run', issueRef: { repoOwner: 'team', repoName: 'repo', number: 1 }, worktreePath: '/unused', prompt: 'Selected run', githubToken: '' };
   const result = { success: true, logs: '', modifiedFiles: [], modelUsed: 'synthetic', executionTimeMs: 1 };
@@ -768,7 +772,7 @@ test('DNS is resolved once per create/start window and checked again for later c
 
 
 test('accepted MCP notifications refund reservations and release connections', async t => {
-  const { database, store } = await fixture(); t.after(() => database.destroy());
+  const { database, store } = await fixture(t);
   const profile = await store.save('1', input(), { docs: secret });
   const token = await store.createGrant('1', profile, 'accepted-notifications');
   await store.activateGrant(token, '1', select(profile));
@@ -785,7 +789,7 @@ test('accepted MCP notifications refund reservations and release connections', a
 });
 
 test('gateway preserves JSON-RPC error codes while removing upstream messages and data', async t => {
-  const { database, store } = await fixture(); t.after(() => database.destroy());
+  const { database, store } = await fixture(t);
   const profile = await store.save('1', input(), { docs: secret });
   const token = await store.createGrant('1', profile, 'protocol-errors');
   await store.activateGrant(token, '1', select(profile));
@@ -805,10 +809,10 @@ test('gateway preserves JSON-RPC error codes while removing upstream messages an
 test('staging reclaims expired foreign leases only on the same host boot and preserves refreshed leases', async t => {
   const { createStagingDirectory, ensureStagingRoot, sweepOrphanedExtensionStaging, EXTENSION_STAGING_ORPHAN_MAX_AGE_MS } = await import('../src/extensions/skillStaging.js');
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'extension-foreign-lease-'));
-  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  extensionTestResources(t).defer(() => fs.rm(root, { recursive: true, force: true }));
   const instance = path.join(root, 'instance'); await ensureStagingRoot(instance);
   t.mock.timers.enable({ apis: ['setInterval'] });
-  const live = await createStagingDirectory(instance); t.after(live.cleanup);
+  const live = await createStagingDirectory(instance); extensionTestResources(t).defer(live.cleanup);
   const name = path.basename(live.directory);
   const foreignName = name.replace(/^(run-[a-f0-9]{16}-)[a-f0-9]{16}/, (_match, prefix) => prefix + '0000000000000000');
   const stale = path.join(instance, foreignName); await fs.mkdir(stale);
@@ -840,7 +844,7 @@ test('staging reclaims expired foreign leases only on the same host boot and pre
 });
 
 test('disabled profiles and servers can be saved without live DNS or removed catalog resources', async t => {
-  const { database, store } = await fixture(); t.after(() => database.destroy());
+  const { database, store } = await fixture(t);
   const profile = await store.save('1', input(), { docs: secret });
   const unavailable = { ...input(), mcpServers: [
     { ...input().mcpServers[0], kind: 'https' as const, url: 'https://unavailable.invalid/mcp' },
@@ -853,7 +857,7 @@ test('disabled profiles and servers can be saved without live DNS or removed cat
   assert.equal(inactiveServers.enabled, true);
   await assert.rejects(store.save('1', unavailable, {}, select(inactiveServers)));
   await assert.rejects(store.save('1', { ...unavailable, enabled: false, mcpServers: [{ ...unavailable.mcpServers[0], url: 'http://localhost' }] } as any));
-  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'disabled-catalog-')); t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'disabled-catalog-')); extensionTestResources(t).defer(() => fs.rm(root, { recursive: true, force: true }));
   const entry = { id: 'docs', kind: 'stdio' as const, executable: '/usr/bin/env', args: ['node', '--version'], tools: ['lookup'], capability: 'read' as const, secretEnv: { API_KEY: 'OPERATOR_DOCS_KEY' } };
   const filename = path.join(root, 'catalog.json'); await fs.writeFile(filename, JSON.stringify([entry]));
   store.environment.PROPR_EXTENSION_CATALOG_FILE = filename; store.environment.OPERATOR_DOCS_KEY = secret;
@@ -868,7 +872,7 @@ test('disabled profiles and servers can be saved without live DNS or removed cat
 });
 
 test('gateway records one final DNS decision per call while enforcing the second resolution', async t => {
-  const { database, store } = await fixture(); t.after(() => database.destroy());
+  const { database, store } = await fixture(t);
   const profile = await store.save('1', input(), { docs: secret });
   const token = await store.createGrant('1', profile, 'single-decision'); await store.activateGrant(token, '1', select(profile));
   for (const allowed of [true, false]) {
@@ -888,7 +892,7 @@ test('gateway records one final DNS decision per call while enforcing the second
 test('staging sweep quietly skips unsupported workers and absent roots', async t => {
   const { sweepOrphanedExtensionStaging } = await import('../src/extensions/skillStaging.js');
   const platform = Object.getOwnPropertyDescriptor(process, 'platform')!;
-  t.after(() => Object.defineProperty(process, 'platform', platform));
+  extensionTestResources(t).defer(() => Object.defineProperty(process, 'platform', platform));
   Object.defineProperty(process, 'platform', { value: 'darwin' });
   assert.equal(await sweepOrphanedExtensionStaging('/missing/extensions'), 0);
   Object.defineProperty(process, 'platform', platform);

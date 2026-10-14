@@ -129,7 +129,7 @@
     "@octokit/plugin-paginate-rest": "^13.1.1",
     "@propr/core": "^0.9.0",
     "@propr/local-setup": "^0.9.0",
-    "better-sqlite3": "^11.7.0",
+    "better-sqlite3": "13.0.3",
     "bullmq": "^5.81.3",
     "cors": "^2.8.5",
     "dotenv": "^16.5.0",
