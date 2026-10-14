@@ -72,11 +72,33 @@ describe('notification recaps', () => {
         assert.equal(fullNotificationSummary(summary), '## Summary of Changes\n\n\n- Fixed the **Inbox** detail pane\n- Added tests');
         assert.equal(fullNotificationSummary('  <!-- only -->  '), undefined);
         assert.equal(fullNotificationSummary('Done<!<!---->-- hidden -->'), 'Done');
-        assert.equal(fullNotificationSummary('Done <!-- unclosed'), 'Done');
+        assert.equal(fullNotificationSummary('Done\n<!-- unclosed\nhidden'), 'Done');
         assert.equal(fullNotificationSummary(42), undefined);
-        const long = fullNotificationSummary('word '.repeat(5_000))!;
-        assert.equal(Array.from(long).length, 20_000);
-        assert.ok(long.endsWith('…'));
+    });
+
+    test('keeps a summary of any length whole', () => {
+        const long = `${'word '.repeat(10_000)}last finding`;
+        assert.equal(fullNotificationSummary(long), long);
+        const review = (label: string) => `## Review ${label}\n\n${'finding '.repeat(3_000)}end of ${label}`;
+        assert.equal(
+            buildReviewNotificationSummary([
+                { analysisResult: { success: true }, commentBody: review('A') },
+                { analysisResult: { success: true }, commentBody: review('B') },
+            ]),
+            `${review('A')}\n\n${review('B')}`,
+        );
+    });
+
+    test('keeps comment syntax that code spans and fenced blocks show', () => {
+        const inline = 'Fixed handling of `<!--` in the parser.\n\n## Testing\n\n- Parser tests pass <!-- hidden -->';
+        assert.equal(fullNotificationSummary(inline), 'Fixed handling of `<!--` in the parser.\n\n## Testing\n\n- Parser tests pass');
+        assert.equal(fullNotificationSummary('Matches ``a `<!--` b`` only. Then <!-- x -->more.'), 'Matches ``a `<!--` b`` only. Then more.');
+        const fenced = 'Example:\n\n```html\n<!-- kept -->\n<!-- unclosed\n```\n\nAfter the fence <!-- hidden -->stays.';
+        assert.equal(fullNotificationSummary(fenced), 'Example:\n\n```html\n<!-- kept -->\n<!-- unclosed\n```\n\nAfter the fence stays.');
+        assert.equal(fullNotificationSummary('~~~\n<!--\n~~~\nDone'), '~~~\n<!--\n~~~\nDone');
+        assert.equal(fullNotificationSummary('An inline <!-- opener with no close stays.'), 'An inline <!-- opener with no close stays.');
+        assert.equal(fullNotificationSummary('Escaped \\`<!-- x -->` tick'), 'Escaped \\`` tick');
+        assert.equal(compactNotificationRecap('Fixed `<!--` parsing. Tests pass.'), 'Fixed <!-- parsing. Tests pass.');
     });
 
     test('keeps every posted review in full, without its details footer', () => {

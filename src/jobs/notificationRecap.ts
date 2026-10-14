@@ -10,15 +10,85 @@ function truncateAtWord(text: string, maximum = MAX_RECAP_CHARACTERS): string {
     return `${shortened.slice(0, lastSpace >= maximum * 0.6 ? lastSpace : undefined).trimEnd()}…`;
 }
 
+const FENCE_RE = /^ {0,3}(`{3,}(?=[^`]*$)|~{3,})/;
+const BACKTICK_RUN_RE = /`+/y;
+
+/** Where the code span opened by the backtick run at `start` ends, or -1 when the run is literal. */
+function codeSpanEnd(text: string, start: number, length: number): number {
+    const closer = new RegExp(`(?<!\`)\`{${length}}(?!\`)`, 'g');
+    closer.lastIndex = start + length;
+    const match = closer.exec(text);
+    // A code span cannot cross a blank line, which ends its paragraph.
+    if (!match || /\n[ \t]*\n/.test(text.slice(start, match.index))) return -1;
+    return match.index + length;
+}
+
+/** Where the fenced code block opening at `start` ends: after its closing fence, or at the end of the text. */
+function fenceEnd(text: string, start: number, fence: string): number {
+    const closer = new RegExp(`^ {0,3}${fence[0] === '`' ? '`' : '~'}{${fence.length},}[ \t]*$`, 'm');
+    const bodyStart = text.indexOf('\n', start);
+    if (bodyStart === -1) return text.length;
+    const match = closer.exec(text.slice(bodyStart + 1));
+    return match ? bodyStart + 1 + match.index + match[0].length : text.length;
+}
+
 /**
- * Drop HTML comments until none remain: one pass can splice a new `<!--`
- * together (`<!<!---->--`), and an unclosed one hides the rest as HTML would.
+ * One pass over Markdown, removing the HTML comments it hides while keeping
+ * comment syntax that code spans and fenced blocks show. An unclosed comment
+ * opening a line hides the rest, as Markdown's HTML block does; one inside a
+ * line stays visible text.
+ */
+function stripHtmlCommentsOnce(text: string, replacement: string): string {
+    let result = '';
+    let index = 0;
+    while (index < text.length) {
+        const atLineStart = index === 0 || text[index - 1] === '\n';
+        const lineEnd = text.indexOf('\n', index);
+        const fence = atLineStart ? FENCE_RE.exec(text.slice(index, lineEnd === -1 ? undefined : lineEnd)) : null;
+        if (fence) {
+            const end = fenceEnd(text, index, fence[1]);
+            result += text.slice(index, end);
+            index = end;
+            continue;
+        }
+        const character = text[index];
+        if (character === '\\') {
+            result += text.slice(index, index + 2);
+            index += 2;
+            continue;
+        }
+        if (character === '`') {
+            BACKTICK_RUN_RE.lastIndex = index;
+            const run = BACKTICK_RUN_RE.exec(text)![0].length;
+            const end = codeSpanEnd(text, index, run);
+            result += text.slice(index, end === -1 ? index + run : end);
+            index = end === -1 ? index + run : end;
+            continue;
+        }
+        if (text.startsWith('<!--', index)) {
+            const close = text.indexOf('-->', index + 4);
+            if (close !== -1) {
+                result += replacement;
+                index = close + 3;
+                continue;
+            }
+            if (!text.slice(text.lastIndexOf('\n', index - 1) + 1, index).trim()) return result + replacement;
+        }
+        result += character;
+        index += 1;
+    }
+    return result;
+}
+
+/**
+ * Drop HTML comments until none remain, since one pass can splice a new
+ * `<!--` together (`<!<!---->--`).
  */
 function stripHtmlComments(text: string, replacement = ''): string {
     let previous: string;
     do {
         previous = text;
-        text = text.replace(/<!--[^]*?(?:-->|$)/g, replacement);
+        text = stripHtmlCommentsOnce(text, replacement);
     } while (text !== previous);
     return text;
 }
@@ -46,22 +116,14 @@ export function compactNotificationRecap(value: unknown): string | undefined {
     return compact ? truncateAtWord(compact) : undefined;
 }
 
-/** Longest summary kept for the Inbox's detail pane; far beyond any agent's usual report. */
-const MAX_SUMMARY_CHARACTERS = 20_000;
-
 /**
  * The agent-authored Markdown summary in full, for the Inbox's detail pane:
  * the one-line recap abridges it, this keeps it. Only hidden comments are
- * dropped, and a runaway report is bounded.
+ * dropped.
  */
 export function fullNotificationSummary(value: unknown): string | undefined {
     if (typeof value !== 'string') return undefined;
-    const summary = stripHtmlComments(value).trim();
-    if (!summary) return undefined;
-    const characters = Array.from(summary);
-    return characters.length <= MAX_SUMMARY_CHARACTERS
-        ? summary
-        : `${characters.slice(0, MAX_SUMMARY_CHARACTERS - 1).join('').trimEnd()}…`;
+    return stripHtmlComments(value).trim() || undefined;
 }
 
 /** The review as posted, without the model, cost and `/fix` details GitHub shows below it. */
