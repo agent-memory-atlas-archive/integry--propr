@@ -66,7 +66,6 @@ export const MobileTaskCard: React.FC<MobileTaskCardProps> = ({ row, prNumber, o
   const { task } = row;
   const selected = rowContainsTask(row, selectedTaskId);
   const summary = row.detail ?? row.outcome;
-  const hasAgent = Boolean(task.llmProvider || task.model || task.modelName);
   return (
     <div
       data-testid="task-card"
@@ -92,7 +91,7 @@ export const MobileTaskCard: React.FC<MobileTaskCardProps> = ({ row, prNumber, o
           <TaskTitleLink title={row.title} tooltip={row.fullTitle} taskId={task.id} onRowClick={onRowClick} selected={selected} singleLine={selectsInPlace} className="min-w-0" />
           <div data-testid="task-card-meta" className="flex h-5 min-w-0 flex-wrap content-start items-center gap-x-3 overflow-hidden text-xs leading-5 text-slate-500">
             {row.earlierRuns.length > 0 && <RunCountChip row={row} />}
-            {hasAgent && <span className="flex min-w-0 max-w-[40%] flex-none"><TaskAgent task={task} /></span>}
+            <span className="flex min-w-0 max-w-[40%] flex-none"><TaskAgent task={task} /></span>
             {row.type && <span className="flex-none"><WorkTypeBadge type={row.type} /></span>}
             {row.assignees.length > 0 && (
               <span data-testid="task-card-assignees" className="flex flex-none items-center">

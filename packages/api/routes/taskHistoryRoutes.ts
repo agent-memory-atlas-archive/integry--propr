@@ -1,3 +1,5 @@
+import { fetchUsageMetrics } from './taskHistoryUsage.js';
+import { taskModelIdentity } from './taskModelIdentity.js';
 import type { Response } from 'express';
 import { redactVisualPreviewValue } from '@propr/core';
 import { loadTaskBudget } from './taskBudget.js';
@@ -85,27 +87,6 @@ function buildTaskInfoFromDb(
   return { ...taskInfo, ...attemptLineageFields(task) };
 }
 
-async function fetchUsageMetrics(
-  db: Knex,
-  taskId: string
-): Promise<{ usageMetrics: Record<string, unknown> | null; usageMetricRecords: Array<{ agent: string; metricKey: string; metricValue: number }> }> {
-  const llmLog = await db('llm_logs')
-    .where({ draft_id: taskId, execution_type: 'implementation' }).orderBy('start_time', 'desc').first();
-  if (!llmLog) return { usageMetrics: null, usageMetricRecords: [] };
-
-  let usageMetrics: Record<string, unknown> | null = null;
-  if (llmLog.usage_metrics) {
-    try {
-      usageMetrics = typeof llmLog.usage_metrics === 'string' ? JSON.parse(llmLog.usage_metrics) : llmLog.usage_metrics;
-    } catch (e) { console.error('Failed to parse usage_metrics:', e); }
-  }
-  const records = await db('usage_metric_records').where({ llm_log_id: llmLog.log_id });
-  const usageMetricRecords = records.map((r: Record<string, unknown>) => ({
-    agent: r.agent_name as string, metricKey: r.metric_key as string, metricValue: r.metric_value as number
-  }));
-  return { usageMetrics, usageMetricRecords };
-}
-
 async function getHistoryFromDb(db: Knex, taskId: string, previewReader: typeof previewMediaReader): Promise<{
   history: Array<Record<string, unknown>>;
   taskInfo: Record<string, unknown>;
@@ -138,6 +119,7 @@ async function getHistoryFromDb(db: Knex, taskId: string, previewReader: typeof 
       mapDbHistoryRecord(record, executionsByHistoryId, executionsBySessionId)
     );
 
+    Object.assign(taskInfo, taskModelIdentity(task, historyRecords, llmExecutions));
     applyMetadataFlags(taskInfo, history);
 
     return { history, taskInfo, ...usage, ...(previewMedia.length ? { previewMedia } : {}) };
@@ -291,6 +273,7 @@ function buildTaskInfoFromState(
     modelName: ref.modelName, agentAlias: ref.agentAlias
   };
   if (issueNumber) taskInfo.issueNumber = issueNumber;
+  Object.assign(taskInfo, taskModelIdentity({ task_id: taskId, initial_job_data: ref, model_name: ref.modelName }, historyEntries));
   applyMetadataFlags(taskInfo, historyEntries);
   return taskInfo;
 }
@@ -334,6 +317,7 @@ async function getHistoryFromQueue(
 
     const taskInfo = buildTaskInfoFromJob(job, taskId);
     const history = buildHistoryFromJob(job);
+    if (taskInfo) Object.assign(taskInfo, taskModelIdentity({ task_id: taskId, initial_job_data: job.data, model_name: job.data?.modelName }, history));
 
     return { history, taskInfo };
   } catch (e) {

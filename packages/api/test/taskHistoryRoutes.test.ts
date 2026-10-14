@@ -314,6 +314,20 @@ test('task detail reports the automatic-replacement attempt lineage', async () =
   }
 });
 
+test('detail context recovers the same inherited route as recorded execution history', async () => {
+  const database = await createHistoryDatabase();
+  try {
+    await database('tasks').insert({ task_id: 'followup', repository: 'acme/repo', task_type: 'pr-comment', model_name: 'claude-opus-5-5', initial_job_data: JSON.stringify({ pullRequestNumber: 7 }) });
+    await database('task_history').insert({ task_id: 'followup', state: 'processing', timestamp: '2026-10-13T12:00:00Z', metadata: JSON.stringify({ model: 'gpt-6-astra', executionRouting: { model: 'gpt-6-astra', agentAlias: 'codex' } }) });
+    const routes = createTaskHistoryRoutes({ db: database, redisClient: { get: async () => null } as never, taskQueue: { getJob: async () => null } as never });
+    const recorder = responseRecorder();
+    await routes.getTaskHistory({ params: { taskId: 'followup' } } as unknown as FlatRequest, recorder.response);
+    const result = recorder.body() as { taskInfo: { modelName: string; agentAlias: string }; history: Array<{ metadata: { model: string } }> };
+    assert.equal(result.taskInfo.modelName, 'gpt-6-astra');
+    assert.equal(result.taskInfo.agentAlias, 'codex');
+    assert.equal(result.history[0].metadata.model, result.taskInfo.modelName);
+  } finally { await database.destroy(); }
+});
 
 test('extension task-history API retains accounting and catalog decisions without private network policy', async t => {
   const database = await createHistoryDatabase(); t.after(() => database.destroy());

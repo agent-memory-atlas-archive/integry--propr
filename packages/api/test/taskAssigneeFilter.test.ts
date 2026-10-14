@@ -69,6 +69,9 @@ async function createDatabase(): Promise<Knex> {
     table.text('reason');
     table.text('metadata');
   });
+  await database.schema.createTable('llm_executions', table => {
+    table.increments('execution_id'); table.string('task_id'); table.string('model_name'); table.timestamp('start_time');
+  });
   await database.schema.createTable('plan_issues', table => {
     table.increments('id').primary();
     table.string('task_id');

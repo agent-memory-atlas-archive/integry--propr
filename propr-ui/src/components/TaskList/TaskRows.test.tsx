@@ -306,3 +306,10 @@ describe('task ledger rows', () => {
     expect(runs).toHaveTextContent('Expose the implementation log and the terminal output through MCP so that a client can…');
   });
 });
+
+it('shows an honest unknown model for an unresolved follow-up', () => {
+  const pending = { ...group, tasks: [{ ...group.tasks[0], model: null, modelName: null, llmProvider: null }] };
+  render(<Fixture groups={[pending]} />);
+  expect(screen.getAllByText('Unknown Model').length).toBeGreaterThan(0);
+  expect(screen.queryByText(/Opus/)).not.toBeInTheDocument();
+});

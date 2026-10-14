@@ -335,7 +335,7 @@ async function createTaskListSchema(db: ReturnType<typeof knex>) {
   });
   await db.schema.createTable('task_history', table => { table.increments('history_id'); table.string('task_id'); table.string('state'); table.string('timestamp'); table.string('reason'); table.text('metadata'); });
   await db.schema.createTable('plan_issues', table => { table.increments('id'); table.string('task_id'); table.string('status'); });
-  await db.schema.createTable('llm_executions', table => { table.string('task_id'); table.string('execution_id'); table.text('analysis_report'); });
+  await db.schema.createTable('llm_executions', table => { table.string('task_id'); table.string('execution_id'); table.text('analysis_report'); table.string('model_name'); table.timestamp('start_time'); });
 }
 
 test('task list includes bounded media in the existing response and omits it after disabling', async () => {
