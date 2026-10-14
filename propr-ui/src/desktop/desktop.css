@@ -595,3 +595,23 @@ body:has(.desktop-platform-macos),
 .desktop-app.desktop-platform-macos .desktop-sidebar-hidden .desktop-content-toolbar {
   padding-left: max(80px, env(titlebar-area-x, 80px));
 }
+
+.desktop-github-recovery {
+  position: fixed;
+  z-index: 90;
+  right: 1.5rem;
+  bottom: 1.5rem;
+  width: min(32rem, calc(100vw - 3rem));
+  max-height: calc(100vh - 6rem);
+  overflow: auto;
+  padding: 1.5rem;
+  color: #17212b;
+  background: #fff;
+  border: 1px solid #d3dfdf;
+  border-radius: 12px;
+  box-shadow: 0 8px 32px rgb(15 23 42 / 18%);
+}
+
+.desktop-github-recovery h2 { margin: 0 0 1rem; font-size: 1.2rem; }
+.desktop-github-recovery p { margin: 0 0 1rem; line-height: 1.5; }
+.desktop-github-recovery .desktop-actions { display: flex; flex-wrap: wrap; gap: .75rem; }

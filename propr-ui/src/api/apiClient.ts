@@ -3,7 +3,7 @@ import { normalizeApiBaseUrl, ProprClient, ProprClientError } from '@propr/clien
 import type { DesktopBridge } from '../../../apps/desktop/src/shared/contract';
 import { getRuntimeApiBaseUrlState, pathWithActiveHostedTunnelFlow } from '../config/runtimeConfig';
 import { currentUiPathname, isDesktopRuntime, navigateToUiPath } from '../config/runtimeMode';
-import { DESKTOP_ACCESS_INVALID_EVENT } from '../desktop/types';
+import { DESKTOP_ACCESS_INVALID_EVENT, DESKTOP_GITHUB_AUTHORIZATION_REQUIRED_EVENT } from '../desktop/types';
 
 export interface DesktopConnectionScope {
   bridge: DesktopBridge;
@@ -112,6 +112,8 @@ const DEFINITIVE_INSTANCE_TOKEN_CODES = new Set([
   'INSTANCE_TOKEN_EXPIRED',
   'INSTANCE_TOKEN_REVOKED',
 ]);
+const GITHUB_USER_GRANT_CODES = new Set(['GITHUB_REAUTH_REQUIRED', 'GITHUB_AUTHORIZATION_REQUIRED']);
+const GITHUB_REAUTH_MESSAGE = 'GitHub authorization is required. Sign in with the same GitHub account in your instance’s browser login, then retry your original action in Desktop. Desktop pairing does not renew GitHub authorization.';
 const AUTHORIZATION_CHANGE_CODES = new Set([
   'AUTHORIZATION_CHANGED',
   'USER_NOT_WHITELISTED',
@@ -425,6 +427,16 @@ export const handleApiResponse = async (response: Response): Promise<Response> =
 
   const data = await parseApiErrorBody(response);
   responseGuards.get(response)?.();
+  // A user grant failure leaves the Desktop instance token and current form intact.
+  // Only these statuses describe the caller's grant (an agent owner's 409 does not).
+  const scope = scopeForResponse(response);
+  if ((response.status === 401 || response.status === 403)
+    && GITHUB_USER_GRANT_CODES.has(data?.code ?? '') && scope && isCurrentDesktopScope(scope)) {
+    window.dispatchEvent(new CustomEvent(DESKTOP_GITHUB_AUTHORIZATION_REQUIRED_EVENT, {
+      detail: { profileId: scope.profileId, transportScope: scope.transportScope, code: data?.code },
+    }));
+    throw new Error(GITHUB_REAUTH_MESSAGE);
+  }
   if (response.status === 401) return await throwUnauthorizedResponse(data, response);
   const errorMessage = getApiErrorMessage(data);
 

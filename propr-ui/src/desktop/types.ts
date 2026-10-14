@@ -80,6 +80,7 @@ export class DesktopAuthenticationError extends Error {
 
 export const DESKTOP_AUTHENTICATION_COMPLETE_EVENT = 'propr:desktop-authentication-complete';
 export const DESKTOP_ACCESS_INVALID_EVENT = 'propr:desktop-access-invalid';
+export const DESKTOP_GITHUB_AUTHORIZATION_REQUIRED_EVENT = 'propr:desktop-github-authorization-required';
 
 export interface DesktopAuthenticationCompleteEventDetail {
   profileId: string;
