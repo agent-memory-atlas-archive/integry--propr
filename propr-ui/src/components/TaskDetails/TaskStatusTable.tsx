@@ -48,7 +48,7 @@ const getDisplayLabel = (item: HistoryItem, index: number, history: HistoryItem[
     return getClaudeExecutionLabel(item, index, history, commandMode);
   }
   if (stateUpper === 'CLAUDE_EXECUTION_COMPLETED') return isReview ? 'Review Completed' : isFix ? 'Fix Completed' : 'Implementation Completed';
-  if (stateUpper === 'POST_PROCESSING') return 'Creating Pull Request';
+  if (stateUpper === 'POST_PROCESSING') return isReview ? 'Finalizing Review' : 'Creating Pull Request';
   if (stateUpper === 'COMPLETED') return isReview ? 'Review Completed' : 'Task Completed';
   if (stateUpper === 'FAILED') return 'Task Failed';
   if (stateUpper === 'CANCELLED') return 'Task Cancelled';
