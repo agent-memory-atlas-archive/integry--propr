@@ -28,6 +28,8 @@ export interface LiveResourceInterest {
   repository?: string;
   /** Also refresh on goal-shaped events (the Goals console wants these). */
   goals?: boolean;
+  /** Reconcile this resource when its backing task settles, using the lifecycle stream. */
+  taskId?: string;
   /** Also refresh on this user's notification events. */
   notifications?: boolean;
   /** Also refresh on agent usage change triggers. */
@@ -129,6 +131,7 @@ export function useLiveResource<T>({
     onActivityReady,
     onActivityUpdate,
     onGoalUpdate,
+    onTaskUpdate,
     onNotificationUpdate,
     onUsageUpdate,
   } = useSocket();
@@ -226,7 +229,7 @@ export function useLiveResource<T>({
     return () => { unsubscribeFromActivity?.(); };
   }, [disabled, subscribeToActivity, unsubscribeFromActivity]);
 
-  const { goals, notifications, usage } = interest;
+  const { goals, taskId, notifications, usage } = interest;
   useEffect(() => {
     if (disabled || receivesSnapshots) return;
     const unsubscribers: Array<() => void> = [
@@ -242,6 +245,12 @@ export function useLiveResource<T>({
         if (scope === ALL_SCOPES || payload.repository === null || payload.repository === scope) schedule();
       }));
     }
+    if (taskId) {
+      unsubscribers.push(onTaskUpdate(payload => {
+        if (payload.taskId === interestRef.current.taskId
+          && ['completed', 'failed', 'cancelled'].includes(payload.state)) schedule();
+      }));
+    }
     if (notifications) {
       unsubscribers.push(onNotificationUpdate(() => { schedule(); }));
     }
@@ -253,11 +262,13 @@ export function useLiveResource<T>({
     disabled,
     receivesSnapshots,
     goals,
+    taskId,
     notifications,
     usage,
     onActivityReady,
     onActivityUpdate,
     onGoalUpdate,
+    onTaskUpdate,
     onNotificationUpdate,
     onUsageUpdate,
     schedule,
