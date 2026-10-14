@@ -113,6 +113,21 @@ describe('notification recaps', () => {
         assert.equal(fullNotificationSummary('Done\n   <!-- unclosed\nhidden'), 'Done');
     });
 
+    test('keeps comment syntax that code inside blockquotes and list items shows', () => {
+        const quotedFence = 'See:\n\n> ~~~html\n> <!-- required marker -->\n> ~~~\n\nAfter <!-- hidden -->stays.';
+        assert.equal(fullNotificationSummary(quotedFence), 'See:\n\n> ~~~html\n> <!-- required marker -->\n> ~~~\n\nAfter stays.');
+        const quotedIndented = 'See:\n\n>     <!-- required marker -->\n> Quoted <!-- hidden -->text.';
+        assert.equal(fullNotificationSummary(quotedIndented), 'See:\n\n>     <!-- required marker -->\n> Quoted text.');
+        assert.equal(fullNotificationSummary('> > ```\n> > <!-- kept\n> > ```\n> <!-- x -->Done'), '> > ```\n> > <!-- kept\n> > ```\n> Done');
+        assert.equal(fullNotificationSummary('- ```html\n  <!-- kept -->\n  ```\n- Item <!-- x -->two'), '- ```html\n  <!-- kept -->\n  ```\n- Item two');
+        assert.equal(fullNotificationSummary('1. Step\n\n   > ```\n   > <!-- kept -->\n   > ```'), '1. Step\n\n   > ```\n   > <!-- kept -->\n   > ```');
+        // Leaving the blockquote closes its code block, so later comments stay hidden.
+        assert.equal(fullNotificationSummary('> ```\n> <!-- kept -->\n\nOutside <!-- x -->the quote'), '> ```\n> <!-- kept -->\n\nOutside the quote');
+        assert.equal(fullNotificationSummary('>     <!-- kept -->\nLazy <!-- x -->line'), '>     <!-- kept -->\nLazy line');
+        // Indentation that continues a quoted paragraph is not code.
+        assert.equal(fullNotificationSummary('> Paragraph\n>     <!-- x -->more'), '> Paragraph\n>     more');
+    });
+
     test('keeps every posted review in full, without its details footer', () => {
         const body = (label: string) => `## 🔍 AI Code Review — ${label}\n\n## Overall Evaluation\n\nLooks right.\n\n---\n### 🤖 Review Details\n\n* **Model:** Opus`;
         assert.equal(buildReviewNotificationSummary([

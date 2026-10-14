@@ -26,58 +26,119 @@ function codeSpanEnd(text: string, start: number, length: number): number {
     return match.index + length;
 }
 
-/** Where the fenced code block opening at `start` ends: after its closing fence, or at the end of the text. */
-function fenceEnd(text: string, start: number, fence: string): number {
-    const closer = new RegExp(`^ {0,3}${fence[0] === '`' ? '`' : '~'}{${fence.length},}[ \t]*$`, 'm');
-    const bodyStart = text.indexOf('\n', start);
-    if (bodyStart === -1) return text.length;
-    const match = closer.exec(text.slice(bodyStart + 1));
-    return match ? bodyStart + 1 + match.index + match[0].length : text.length;
+/** A blockquote, or a list item whose content is indented `width` columns. */
+type Container = { quote: true } | { quote: false; width: number };
+
+const QUOTE_MARKER_RE = /^ {0,3}> ?/;
+const LIST_MARKER_RE = /^ {0,3}(?:[-*+]|\d{1,9}[.)])( +)(?=\S)/;
+
+function lineAt(text: string, from: number): string {
+    const lineEnd = text.indexOf('\n', from);
+    return text.slice(from, lineEnd === -1 ? undefined : lineEnd);
+}
+
+/** The blockquotes and list items a line opens, and its content inside them. */
+function openContainers(line: string): { containers: Container[]; rest: string } {
+    const containers: Container[] = [];
+    let rest = line;
+    for (;;) {
+        const quote = QUOTE_MARKER_RE.exec(rest);
+        if (quote) {
+            containers.push({ quote: true });
+            rest = rest.slice(quote[0].length);
+            continue;
+        }
+        const item = LIST_MARKER_RE.exec(rest);
+        if (!item) return { containers, rest };
+        // Five or more spaces after the marker start indented code one space in.
+        const width = item[0].length - (item[1].length > 4 ? item[1].length - 1 : 0);
+        containers.push({ quote: false, width });
+        rest = rest.slice(width);
+    }
+}
+
+/** A later line's content inside `containers`, or null when the line falls outside them. */
+function containedRest(line: string, containers: readonly Container[]): string | null {
+    let rest = line;
+    for (const container of containers) {
+        if (container.quote) {
+            const quote = QUOTE_MARKER_RE.exec(rest);
+            if (!quote) return null;
+            rest = rest.slice(quote[0].length);
+        } else if (!rest.trim()) {
+            rest = '';
+        } else if (rest.startsWith(' '.repeat(container.width))) {
+            rest = rest.slice(container.width);
+        } else {
+            return null;
+        }
+    }
+    return rest;
+}
+
+/**
+ * Where the fenced code block opening at `start` ends: after its closing
+ * fence, before the first line outside its containers, or at the end of the text.
+ */
+function fenceEnd(text: string, start: number, containers: readonly Container[], fence: string): number {
+    const closer = new RegExp(`^ {0,3}${fence[0] === '`' ? '`' : '~'}{${fence.length},}[ \t]*$`);
+    let end = text.indexOf('\n', start);
+    if (end === -1) return text.length;
+    end += 1;
+    while (end < text.length) {
+        const line = lineAt(text, end);
+        const rest = containedRest(line, containers);
+        if (rest === null) return end;
+        if (closer.test(rest)) return end + line.length;
+        end += line.length + 1;
+    }
+    return text.length;
 }
 
 /**
  * Where the indented code block opening at `start` ends: at the first
- * non-blank line indented less than four columns, or at the end of the text.
- * Returns -1 when the line cannot open one, because it is blank, not indented
- * enough, or continues a paragraph.
+ * non-blank line indented less than four columns inside its containers, or
+ * outside them, or at the end of the text. Returns -1 when the line cannot
+ * open one, because it is blank, not indented enough, or continues a paragraph.
  */
-function indentedCodeEnd(text: string, start: number): number {
-    const lineAt = (from: number) => {
-        const lineEnd = text.indexOf('\n', from);
-        return text.slice(from, lineEnd === -1 ? undefined : lineEnd);
-    };
-    const line = lineAt(start);
-    const previous = start === 0 ? '' : text.slice(text.lastIndexOf('\n', start - 2) + 1, start - 1);
-    if (!INDENTED_CODE_RE.test(line) || !line.trim() || !INDENTED_CODE_FOLLOWS_RE.test(previous)) return -1;
+function indentedCodeEnd(text: string, start: number, containers: readonly Container[], rest: string): number {
+    if (!INDENTED_CODE_RE.test(rest) || !rest.trim()) return -1;
+    if (start > 0) {
+        // A line outside these containers ends its paragraph; one inside must be blank or a heading.
+        const previous = containedRest(text.slice(text.lastIndexOf('\n', start - 2) + 1, start - 1), containers);
+        if (previous !== null && !INDENTED_CODE_FOLLOWS_RE.test(previous)) return -1;
+    }
     let end = start;
     while (end < text.length) {
-        const next = lineAt(end);
-        if (next.trim() && !INDENTED_CODE_RE.test(next)) return end;
-        end += next.length + 1;
+        const line = lineAt(text, end);
+        const next = containedRest(line, containers);
+        if (next === null || (next.trim() && !INDENTED_CODE_RE.test(next))) return end;
+        end += line.length + 1;
     }
     return text.length;
 }
 
 /**
  * One pass over Markdown, removing the HTML comments it hides while keeping
- * comment syntax that code spans, fenced blocks and indented blocks show. An
- * unclosed comment opening a line, indented at most three spaces, hides the
- * rest, as Markdown's HTML block does; one elsewhere stays visible text.
+ * comment syntax that code spans, fenced blocks and indented blocks show,
+ * including those inside blockquotes and list items. An unclosed comment
+ * opening a line, indented at most three spaces, hides the rest, as Markdown's
+ * HTML block does; one elsewhere stays visible text.
  */
 function stripHtmlCommentsOnce(text: string, replacement: string): string {
     let result = '';
     let index = 0;
     while (index < text.length) {
         const atLineStart = index === 0 || text[index - 1] === '\n';
-        const lineEnd = text.indexOf('\n', index);
-        const fence = atLineStart ? FENCE_RE.exec(text.slice(index, lineEnd === -1 ? undefined : lineEnd)) : null;
-        if (fence) {
-            const end = fenceEnd(text, index, fence[1]);
+        const opened = atLineStart ? openContainers(lineAt(text, index)) : null;
+        const fence = opened ? FENCE_RE.exec(opened.rest) : null;
+        if (opened && fence) {
+            const end = fenceEnd(text, index, opened.containers, fence[1]);
             result += text.slice(index, end);
             index = end;
             continue;
         }
-        const indentedEnd = atLineStart ? indentedCodeEnd(text, index) : -1;
+        const indentedEnd = opened ? indentedCodeEnd(text, index, opened.containers, opened.rest) : -1;
         if (indentedEnd !== -1) {
             result += text.slice(index, indentedEnd);
             index = indentedEnd;
