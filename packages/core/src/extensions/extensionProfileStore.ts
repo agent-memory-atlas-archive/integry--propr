@@ -11,6 +11,11 @@ export interface ExtensionGrantNetwork { mode: 'open' | 'restricted'; allow: str
 export class ExtensionError extends Error { constructor(readonly status: number, message: string) { super(message); } }
 export const extensionTokenHash = (token: string) => createHash('sha256').update(token).digest('hex');
 const identity = (s: ExtensionSelection) => `${s.instanceId}/${s.profileId}/${s.revision}`;
+interface ExtensionProfileSaveOptions {
+  expected?: ExtensionSelection;
+  guard?: (database?: Knex) => Promise<void>;
+  preflight?: (snapshot: ExtensionProfileRevision) => void;
+}
 export class ExtensionProfileStore {
   constructor(readonly database: Knex, readonly environment: NodeJS.ProcessEnv = process.env) {}
   get catalog(): OperatorCatalog { return new OperatorCatalog(this.environment); }
@@ -49,7 +54,9 @@ export class ExtensionProfileStore {
     const rows = await this.database('extension_profile_revisions as r').join('extension_profiles as p', 'r.profile_id', 'p.id').where({ 'p.id': profileId, 'p.instance_id': await this.instanceId(), 'p.deleted': false }).orderBy('r.revision', 'desc').select('r.snapshot');
     return rows.map(row => publicExtensionProfile(JSON.parse(row.snapshot)));
   }
-  async save(actor: string, input: ExtensionProfileInput, replacements: Record<string, string | null> = {}, expected?: ExtensionSelection, guard: (database?: Knex) => Promise<void> = async () => {}, preflight: (snapshot: ExtensionProfileRevision) => void = () => {}): Promise<ExtensionProfileRevision> {
+  async save(actor: string, input: ExtensionProfileInput, replacements: Record<string, string | null> = {}, options: ExtensionSelection | ExtensionProfileSaveOptions = {}): Promise<ExtensionProfileRevision> {
+    // Native callers may continue passing the expected revision directly.
+    const { expected, guard = async () => {}, preflight = () => {} } = 'profileId' in options ? { expected: options } : options;
     let parsed: ExtensionProfileInput; try { parsed = extensionProfileInputSchema.parse(input); } catch { throw new ExtensionError(400, 'Invalid extension profile'); }
     if (!replacements || typeof replacements !== 'object' || Array.isArray(replacements) || Object.entries(replacements).some(([name, token]) => !parsed.mcpServers.some(s => s.name === name && s.kind === 'https' && s.authentication === 'bearer') || (token !== null && (typeof token !== 'string' || !/^[\x21-\x7e]{1,4096}$/.test(token))))) throw new ExtensionError(400, 'Invalid secret replacement');
     await this.authorize(actor);

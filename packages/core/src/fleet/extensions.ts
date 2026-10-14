@@ -114,34 +114,15 @@ export class FleetExtensionPlane {
       case 'skill.list': return { bundles: await this.store.listSkillBundles(actor) };
       case 'skill.import': return { bundle: await importExactGitSkill(this.store, actor, r, guard) };
       case 'recipient.issue': return this.issue(a, r);
-      case 'profile.create': case 'profile.update': {
-        const replacements = await this.decrypt(a, r);
-        try { await guard(); return { profile: await this.store.save(actor, r.input, replacements, r.action === 'profile.update' ? r.selection : undefined, guard, preflightProfile) }; }
-        finally { for (const key of Object.keys(replacements)) delete replacements[key]; }
-      }
+      case 'profile.create': case 'profile.update': return this.saveProfile(a, r);
       case 'profile.disable': {
         const profile = await this.store.read(actor, r.selection);
         const { version, name, agentScope, repositoryScope, mcpServers, skillBundleIds } = profile;
-        return { profile: await this.store.save(actor, { version, name, enabled: false, agentScope, repositoryScope, mcpServers, skillBundleIds }, {}, r.selection, guard, preflightProfile) };
+        return { profile: await this.store.save(actor, { version, name, enabled: false, agentScope, repositoryScope, mcpServers, skillBundleIds }, {}, { expected: r.selection, guard, preflight: preflightProfile }) };
       }
       case 'profile.delete': await this.store.delete(actor, r.selection, guard); return { deleted: true };
       case 'selection.validate': await this.store.assertLaunch(actor, r.selection, r.context); await guard(); return { selection: r.selection, valid: true };
-      case 'profile.validate': {
-        const profile = await this.store.read(actor, r.selection); await guard();
-        const row = await this.store.database('extension_profile_revisions').where({ profile_id: profile.profileId, revision: profile.revision }).first();
-        const secrets = row.secrets_encrypted === '' ? {} : unsealExtensionSecrets(row.secrets_encrypted, `${profile.instanceId}/${profile.profileId}/${profile.revision}`, this.store.environment);
-        const results = [];
-        try {
-          for (const server of profile.mcpServers.filter(s => s.enabled)) {
-            await guard();
-            if (server.kind === 'catalog') { results.push({ name: server.name, status: 'not_validated' }); continue; }
-            let reachable = false;
-            try { const response = await requestExtensionMcp(server.url, { jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-03-26', capabilities: {}, clientInfo: { name: 'propr-validation', version: '1' } } }, secrets[server.name]) as { result?: unknown }; reachable = Boolean(response?.result); } catch { /* Upstream details never cross the boundary. */ }
-            await guard(); results.push({ name: server.name, status: reachable ? 'reachable' : 'unavailable' });
-          }
-          return { results };
-        } finally { for (const key of Object.keys(secrets)) delete secrets[key]; }
-      }
+      case 'profile.validate': return this.validateProfile(a, r.selection);
       case 'operation.status': {
         const journal = await this.fleet.files.read(`extension-operation-${r.targetOperationId}.json`);
         if (!journal.endsWith('\n')) throw new FleetRefusal();
@@ -152,6 +133,32 @@ export class FleetExtensionPlane {
         return { operationId: record.operationId, state: record.state };
       }
     }
+  }
+  private async saveProfile(a: FleetExtensionAssertion, r: Extract<FleetExtensionRequest, { action: 'profile.create' | 'profile.update' }>) {
+    const actor = String(a.githubActorId); const guard = async (database?: Knex) => { await this.authorize(a, database); };
+    const preflight = (profile: unknown) => { this.response(a, { profile }); };
+    const replacements = await this.decrypt(a, r);
+    try {
+      await guard();
+      return { profile: await this.store.save(actor, r.input, replacements, { expected: r.action === 'profile.update' ? r.selection : undefined, guard, preflight }) };
+    } finally { for (const key of Object.keys(replacements)) delete replacements[key]; }
+  }
+  private async validateProfile(a: FleetExtensionAssertion, selection: Extract<FleetExtensionRequest, { action: 'profile.validate' }>['selection']) {
+    const actor = String(a.githubActorId); const guard = async () => { await this.authorize(a); };
+    const profile = await this.store.read(actor, selection); await guard();
+    const row = await this.store.database('extension_profile_revisions').where({ profile_id: profile.profileId, revision: profile.revision }).first();
+    const secrets = row.secrets_encrypted === '' ? {} : unsealExtensionSecrets(row.secrets_encrypted, `${profile.instanceId}/${profile.profileId}/${profile.revision}`, this.store.environment);
+    const results = [];
+    try {
+      for (const server of profile.mcpServers.filter(s => s.enabled)) {
+        await guard();
+        if (server.kind === 'catalog') { results.push({ name: server.name, status: 'not_validated' }); continue; }
+        let reachable = false;
+        try { const response = await requestExtensionMcp(server.url, { jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-03-26', capabilities: {}, clientInfo: { name: 'propr-validation', version: '1' } } }, secrets[server.name]) as { result?: unknown }; reachable = Boolean(response?.result); } catch { /* Upstream details never cross the boundary. */ }
+        await guard(); results.push({ name: server.name, status: reachable ? 'reachable' : 'unavailable' });
+      }
+      return { results };
+    } finally { for (const key of Object.keys(secrets)) delete secrets[key]; }
   }
   private response(a: FleetExtensionAssertion, result: unknown): RecordResult {
     const response: RecordResult = { contract: FLEET_EXTENSION_CONTRACT, operationId: a.operationId, state: 'completed', result };
