@@ -1,7 +1,7 @@
 import { formatTaskTerminalReason } from '@propr/shared';
 import type { Logger } from 'pino';
 import type { Job } from 'bullmq';
-import { AgentRegistry, getActiveRunCostGuard, getAuthenticatedOctokit, getModelName, loadPrReviewModel, RepositoryWorkflowPolicyError, resolveLlmLabel, retryConfigs, TaskStates, withRetry } from '@propr/core';
+import { AgentRegistry, getActiveRunCostGuard, getAuthenticatedOctokit, getModelName, RepositoryWorkflowPolicyError, retryConfigs, TaskStates, withRetry } from '@propr/core';
 import { prepareRepositoryWorkflow } from './repositoryWorkflow.js';
 import { runWithNetworkPolicy } from './networkEgress.js';
 import { applyWorkflowCostCap } from './runCostCap.js';
@@ -15,10 +15,10 @@ import { resolvePullRequestGitTarget } from './prGitTarget.js';
 import { prepareRelatedReviewContext } from './reviewContextScout.js';
 import { loadReviewRuntimeSettings } from './reviewRuntimeSettings.js';
 import { getNextAuthenticatedReviewRecordNumbers } from './reviewCommentFormatter.js';
-import { routeReviewAssignments, runReviewRoutingOutcomes, type ReviewAssignment, type ReviewResult, type RunReviewsContext } from './prReviewRunner.js';
+import { routeReviewAssignments, runReviewRoutingOutcomes, type ReviewResult, type RunReviewsContext } from './prReviewRunner.js';
 import { recordReviewMetrics } from './reviewResultMetrics.js';
 import { persistReviewScores } from './reviewScorePersistence.js';
-import { generateSummaryTitle, resolveDefaultAgentAndModel } from './prCommentAgentUtils.js';
+import { generateSummaryTitle } from './prCommentAgentUtils.js';
 import { continueUltrafixLoop } from './ultrafixLoopContinuation.js';
 import { buildUltrafixHistoryMeta, buildContinuationMeta, patchUltrafixContinuationMeta } from './ultrafixContinuationMeta.js';
 import { loadState as loadUltrafixState, retainOriginalScope, type UltrafixAction } from './ultrafixOrchestrationService.js';
@@ -33,6 +33,9 @@ import {
 import type { Redis } from 'ioredis';
 import { buildWorkEvidenceMarker, filterRealComments } from '../shared/workEvidenceMarker.js';
 import { buildReviewNotificationRecap } from './notificationRecap.js';
+import { resolveReviewAssignments } from './reviewModelResolution.js';
+
+export { resolveReviewAssignments } from './reviewModelResolution.js';
 
 export type { ReviewAssignment, ReviewResult } from './prReviewRunner.js';
 
@@ -85,75 +88,6 @@ export interface JobResult {
     reviewsPosted?: number;
     reviewsFailed?: number;
     [key: string]: unknown;
-}
-
-export async function resolveReviewAssignments(
-    requestedModels: string[] | undefined,
-    llm: string | null | undefined,
-    correlatedLogger: Logger
-): Promise<ReviewAssignment[]> {
-    const registry = AgentRegistry.getInstance();
-    await registry.ensureInitialized();
-
-    const assignments: ReviewAssignment[] = [];
-    const resolvedAssignments = new Set<string>();
-    const hasExplicitRequestedModels = Boolean(requestedModels?.length);
-
-    const addAssignment = (assignment: ReviewAssignment): void => {
-        const key = `${assignment.agentAlias}\u0000${assignment.model}`;
-        if (resolvedAssignments.has(key)) return;
-        resolvedAssignments.add(key);
-        assignments.push(assignment);
-    };
-
-    let modelsToReview: string[];
-    if (requestedModels && requestedModels.length > 0) {
-        // Explicit model(s) specified in /review command
-        modelsToReview = requestedModels;
-    } else {
-        // No explicit models - use pr_review_model config, ignoring llm from PR labels
-        // (labels specify implementation model, not review model)
-        let prReviewModel = '';
-        try {
-            prReviewModel = await loadPrReviewModel();
-        } catch (err) {
-            correlatedLogger.debug({ error: (err as Error).message }, 'Failed to load pr_review_model setting');
-        }
-        if (prReviewModel) {
-            modelsToReview = [prReviewModel];
-            correlatedLogger.info({ prReviewModel }, 'Using configured pr_review_model as default review model');
-        } else if (llm) {
-            // Fall back to llm from labels only if no pr_review_model configured
-            modelsToReview = [llm];
-            correlatedLogger.info({ llm }, 'No pr_review_model configured, falling back to llm from labels');
-        } else {
-            modelsToReview = ['default'];
-        }
-    }
-
-    for (const modelLabel of modelsToReview) {
-        try {
-            if (modelLabel === 'default') {
-                const { resolvedAlias, resolvedModel } = await resolveDefaultAgentAndModel(registry, correlatedLogger);
-                addAssignment({ agentAlias: resolvedAlias, model: resolvedModel, label: resolvedModel });
-            } else {
-                const resolution = await resolveLlmLabel(modelLabel);
-                addAssignment({ agentAlias: resolution.agentAlias, model: resolution.model, label: modelLabel });
-            }
-        } catch (resolveError) {
-            correlatedLogger.warn({ modelLabel, error: (resolveError as Error).message }, 'Failed to resolve review model, skipping');
-        }
-    }
-
-    if (assignments.length === 0) {
-        if (hasExplicitRequestedModels) {
-            throw new Error(`None of the explicitly requested review models could be resolved: ${requestedModels!.join(', ')}`);
-        }
-        const { resolvedAlias, resolvedModel } = await resolveDefaultAgentAndModel(registry, correlatedLogger);
-        addAssignment({ agentAlias: resolvedAlias, model: resolvedModel, label: resolvedModel });
-    }
-
-    return assignments;
 }
 
 async function updateReviewCompletionComment(
