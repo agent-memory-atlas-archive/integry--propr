@@ -12,6 +12,9 @@ function truncateAtWord(text: string, maximum = MAX_RECAP_CHARACTERS): string {
 
 const FENCE_RE = /^ {0,3}(`{3,}(?=[^`]*$)|~{3,})/;
 const BACKTICK_RUN_RE = /`+/y;
+const INDENTED_CODE_RE = /^(?: {4}| {0,3}\t)/;
+const INDENTED_CODE_FOLLOWS_RE = /^(?:[ \t]*| {0,3}#{1,6}(?:[ \t].*)?)$/;
+const BLOCK_INDENT_RE = /^ {0,3}$/;
 
 /** Where the code span opened by the backtick run at `start` ends, or -1 when the run is literal. */
 function codeSpanEnd(text: string, start: number, length: number): number {
@@ -33,10 +36,33 @@ function fenceEnd(text: string, start: number, fence: string): number {
 }
 
 /**
+ * Where the indented code block opening at `start` ends: at the first
+ * non-blank line indented less than four columns, or at the end of the text.
+ * Returns -1 when the line cannot open one, because it is blank, not indented
+ * enough, or continues a paragraph.
+ */
+function indentedCodeEnd(text: string, start: number): number {
+    const lineAt = (from: number) => {
+        const lineEnd = text.indexOf('\n', from);
+        return text.slice(from, lineEnd === -1 ? undefined : lineEnd);
+    };
+    const line = lineAt(start);
+    const previous = start === 0 ? '' : text.slice(text.lastIndexOf('\n', start - 2) + 1, start - 1);
+    if (!INDENTED_CODE_RE.test(line) || !line.trim() || !INDENTED_CODE_FOLLOWS_RE.test(previous)) return -1;
+    let end = start;
+    while (end < text.length) {
+        const next = lineAt(end);
+        if (next.trim() && !INDENTED_CODE_RE.test(next)) return end;
+        end += next.length + 1;
+    }
+    return text.length;
+}
+
+/**
  * One pass over Markdown, removing the HTML comments it hides while keeping
- * comment syntax that code spans and fenced blocks show. An unclosed comment
- * opening a line hides the rest, as Markdown's HTML block does; one inside a
- * line stays visible text.
+ * comment syntax that code spans, fenced blocks and indented blocks show. An
+ * unclosed comment opening a line, indented at most three spaces, hides the
+ * rest, as Markdown's HTML block does; one elsewhere stays visible text.
  */
 function stripHtmlCommentsOnce(text: string, replacement: string): string {
     let result = '';
@@ -49,6 +75,12 @@ function stripHtmlCommentsOnce(text: string, replacement: string): string {
             const end = fenceEnd(text, index, fence[1]);
             result += text.slice(index, end);
             index = end;
+            continue;
+        }
+        const indentedEnd = atLineStart ? indentedCodeEnd(text, index) : -1;
+        if (indentedEnd !== -1) {
+            result += text.slice(index, indentedEnd);
+            index = indentedEnd;
             continue;
         }
         const character = text[index];
@@ -72,7 +104,7 @@ function stripHtmlCommentsOnce(text: string, replacement: string): string {
                 index = close + 3;
                 continue;
             }
-            if (!text.slice(text.lastIndexOf('\n', index - 1) + 1, index).trim()) return result + replacement;
+            if (BLOCK_INDENT_RE.test(text.slice(text.lastIndexOf('\n', index - 1) + 1, index))) return result + replacement;
         }
         result += character;
         index += 1;
@@ -123,7 +155,8 @@ export function compactNotificationRecap(value: unknown): string | undefined {
  */
 export function fullNotificationSummary(value: unknown): string | undefined {
     if (typeof value !== 'string') return undefined;
-    return stripHtmlComments(value).trim() || undefined;
+    // Trim whole blank lines only, so a leading indented code block stays code.
+    return stripHtmlComments(value).replace(/^(?:[ \t]*\r?\n)+/, '').trimEnd() || undefined;
 }
 
 /** The review as posted, without the model, cost and `/fix` details GitHub shows below it. */

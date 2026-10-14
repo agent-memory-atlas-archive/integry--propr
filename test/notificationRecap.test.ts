@@ -101,6 +101,18 @@ describe('notification recaps', () => {
         assert.equal(compactNotificationRecap('Fixed `<!--` parsing. Tests pass.'), 'Fixed <!-- parsing. Tests pass.');
     });
 
+    test('keeps comment syntax that indented code blocks show', () => {
+        const unclosed = 'Parser example:\n\n    <!-- example\n\n## Testing\n\nAll tests passed.';
+        assert.equal(fullNotificationSummary(unclosed), unclosed);
+        const closed = '    <!-- kept -->\n\n\t<!-- tab -->\n\nAfter the code <!-- hidden -->stays.';
+        assert.equal(fullNotificationSummary(closed), '    <!-- kept -->\n\n\t<!-- tab -->\n\nAfter the code stays.');
+        assert.equal(fullNotificationSummary('## Example\n    <!-- kept -->\nDone <!-- x -->'), '## Example\n    <!-- kept -->\nDone');
+        // Indentation that continues a paragraph is not code, and does not open a hidden block.
+        assert.equal(fullNotificationSummary('Paragraph\n    <!-- literal\n\nDone'), 'Paragraph\n    <!-- literal\n\nDone');
+        assert.equal(fullNotificationSummary('Paragraph\n    <!-- x -->more'), 'Paragraph\n    more');
+        assert.equal(fullNotificationSummary('Done\n   <!-- unclosed\nhidden'), 'Done');
+    });
+
     test('keeps every posted review in full, without its details footer', () => {
         const body = (label: string) => `## 🔍 AI Code Review — ${label}\n\n## Overall Evaluation\n\nLooks right.\n\n---\n### 🤖 Review Details\n\n* **Model:** Opus`;
         assert.equal(buildReviewNotificationSummary([
