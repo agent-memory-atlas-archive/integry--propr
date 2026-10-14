@@ -10,6 +10,7 @@ export interface Task {
   linkedIssueNumber?: number | null;
   title?: string | null;
   subtitle?: string | null;
+  commandMode?: string | null;
   status: string;
   createdAt: string;
   processedAt?: string | null;

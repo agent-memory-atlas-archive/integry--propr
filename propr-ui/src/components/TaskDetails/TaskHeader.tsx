@@ -42,7 +42,7 @@ const getStatusInfo = (status: string, commandMode?: string): { icon: React.Reac
   if (normalizedStatus === 'PROCESSING') {
     return {
       icon: <Loader2 className="h-4 w-4 text-blue-600 animate-spin" />,
-      label: 'Analyzing',
+      label: commandMode === 'review' ? 'Review' : 'Analyzing',
       color: 'text-blue-700',
       bgColor: 'bg-blue-50'
     };
@@ -51,7 +51,7 @@ const getStatusInfo = (status: string, commandMode?: string): { icon: React.Reac
   if (normalizedStatus === 'CLAUDE_EXECUTION' || normalizedStatus === 'CLAUDE_EXECUTION_STARTED') {
     return {
       icon: <Play className="h-4 w-4 text-blue-600 animate-pulse" />,
-      label: commandMode === 'review' ? 'Reviewing' : commandMode === 'fix' ? 'Fixing' : 'Implementing',
+      label: commandMode === 'review' ? 'Review' : commandMode === 'fix' ? 'Fixing' : 'Implementing',
       color: 'text-blue-700',
       bgColor: 'bg-blue-50'
     };
@@ -69,7 +69,7 @@ const getStatusInfo = (status: string, commandMode?: string): { icon: React.Reac
   if (normalizedStatus === 'POST_PROCESSING') {
     return {
       icon: <GitPullRequest className="h-4 w-4 text-purple-600 animate-pulse" />,
-      label: 'Creating PR',
+      label: commandMode === 'review' ? 'Review' : 'Creating PR',
       color: 'text-purple-700',
       bgColor: 'bg-purple-50'
     };

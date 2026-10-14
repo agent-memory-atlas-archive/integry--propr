@@ -216,7 +216,11 @@ const TaskDetails: React.FC<TaskDetailsProps> = ({ taskId: taskIdProp, embedded 
   const taskId = taskIdProp ?? params.taskId;
   const navigate = useNavigate();
   const { addToast } = useToast();
-  const taskData = useTaskData(taskId);
+  const rawTaskData = useTaskData(taskId);
+  const commandMode = getLogCommandMode(rawTaskData.taskInfo?.commandMode, runs, taskId);
+  const taskData = useMemo(() => commandMode === 'review' && rawTaskData.taskInfo
+    ? { ...rawTaskData, taskInfo: { ...rawTaskData.taskInfo, commandMode: 'review' as const } }
+    : rawTaskData, [rawTaskData, commandMode]);
   const promptData = usePromptData();
   const logFilesData = useLogFilesData();
   const thinkingLog = useThinkingLog(taskData.liveDetails, taskData.history);

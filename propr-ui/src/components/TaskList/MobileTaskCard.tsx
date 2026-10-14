@@ -83,7 +83,7 @@ export const MobileTaskCard: React.FC<MobileTaskCardProps> = ({ row, prNumber, o
             <span className="flex-none"><TaskPrimaryChip task={task} prNumber={prNumber} /></span>
             <PreviewCountBadge count={row.previewCount} compact />
             <span className="min-w-0 truncate font-mono text-[11px]" style={{ minWidth: `${Math.min(row.repositoryName.length, REPOSITORY_MIN_CHARS)}ch` }} title={row.repository}>{row.repositoryName}</span>
-            <span className="flex-none">{getStatusPill(getDisplayStatus(task))}</span>
+            <span className="flex-none">{getStatusPill(getDisplayStatus(task), row.type)}</span>
             <span className="ml-auto flex-none whitespace-nowrap pl-2 tabular-nums" title={`Started ${new Date(task.createdAt).toLocaleString()}`}>
               <time dateTime={task.createdAt}>{formatRelativeTime(task.createdAt)}</time>
               <span className="ml-1 font-mono text-[11px] text-slate-400 max-sm:hidden" title="Run time">({taskDuration(task)})</span>

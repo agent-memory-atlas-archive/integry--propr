@@ -72,7 +72,10 @@ export function useTaskHeaderView(taskId: string | undefined, runs: TaskRunEntry
   // The list's account of the newest run: when it changes, e.g. a finished run is started again, the header reads it again.
   const headListState = head ? [head.task.status, head.task.processedAt, head.task.completedAt].join('|') : undefined;
   const headSummary = useTaskHeadSummary(run ? head?.task.id : undefined, headListState);
-  const source = headSummary && headSummary.history.length > 0 ? headSummary : own;
+  const rawSource = headSummary && headSummary.history.length > 0 ? headSummary : own;
+  const source = rawSource === headSummary && head?.type?.toLowerCase() === 'review' && rawSource.taskInfo && !rawSource.taskInfo.commandMode
+    ? { ...rawSource, taskInfo: { ...rawSource.taskInfo, commandMode: 'review' as const } }
+    : rawSource;
   const duration = useTotalDuration(source.history);
   const commitInfo = useCommitInfo(source.history, source.taskInfo);
   const runDuration = useTotalDuration(own.history);
@@ -86,7 +89,7 @@ export function useTaskHeaderView(taskId: string | undefined, runs: TaskRunEntry
   const derived = getHistoryDerivedData(source.history, source.taskInfo);
   const runDerived = source === own ? derived : getHistoryDerivedData(own.history, own.taskInfo);
   // Until the newest run's history is read, the list's account of it decides.
-  const headActive = source === headSummary
+  const headActive = rawSource === headSummary
     ? derived.isTaskActive
     : head?.outcome === 'active' || head?.outcome === 'waiting';
   return {

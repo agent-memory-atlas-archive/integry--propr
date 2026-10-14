@@ -247,7 +247,7 @@ export async function getTasksFromDb(query: TaskQuery): Promise<TaskPage> {
   await refreshAssignees(query.syncAssignees, containsTask);
 
   const taskIds = pageTasks.map((row: Record<string, unknown>) => String(row.task_id));
-  const { historyByTask, planStatusByTask, commentMetadataByTask, scoreByTask, assigneesByTask } = await timeApiStage(
+  const { historyByTask, planStatusByTask, commentMetadataByTask, scoreByTask, commandModeByTask, assigneesByTask } = await timeApiStage(
     'sql.tasks.enrichment',
     async () => enrichTaskPage(db, taskIds, Boolean(excludeMerged))
   );
@@ -259,6 +259,7 @@ export async function getTasksFromDb(query: TaskQuery): Promise<TaskPage> {
     ...mapDbTaskToResponse({
       ...row,
       ...historyByTask.get(String(row.task_id)),
+      command_mode: commandModeByTask.get(String(row.task_id)),
       plan_issue_status: planStatusByTask.get(String(row.task_id)) ?? null,
     }),
     score: scoreByTask.get(String(row.task_id)) ?? null,
@@ -287,6 +288,7 @@ interface TaskPageEnrichment {
   commentMetadataByTask: Map<string, unknown>;
   /** The score the task's latest run recorded when it completed (a review's `Score 6/10`). */
   scoreByTask: Map<string, number>;
+  commandModeByTask: Map<string, string>;
   /** Stored assignees from the local projection; tasks without any have no entry. */
   assigneesByTask: Map<string, AttributedUser[]>;
 }
@@ -295,21 +297,30 @@ interface TaskPageEnrichment {
 const RUN_START_STATES: readonly string[] = [...QUEUED_TASK_STATES, ...RUNNING_TASK_STATES];
 
 /**
- * The score of each task's latest run. Only the completions at the end of the
+ * The latest recorded command mode and the score of each task's latest run.
+ * Modes can change as ultrafix alternates reviews and fixes. Only completions at the end of the
  * task's history count: once a task is started again, an earlier run's score
  * no longer describes it, and a run still in flight has none.
  */
-async function loadRunScores(db: Knex, taskIds: string[]): Promise<Map<string, number>> {
+async function loadRunMetadata(db: Knex, taskIds: string[]) {
   const rows = await db('task_history')
     .whereIn('task_id', taskIds)
-    .whereIn('state', ['completed', ...RUN_START_STATES])
+    .where(builder => builder.whereIn('state', ['completed', ...RUN_START_STATES]).orWhere('metadata', 'like', '%commandMode%'))
     .select('task_id', 'state', 'metadata')
     .orderBy([{ column: 'timestamp', order: 'desc' }, { column: 'history_id', order: 'desc' }]) as Array<Record<string, unknown>>;
   const scores = new Map<string, number>();
   const settled = new Set<string>();
+  const commandModeByTask = new Map<string, string>();
   for (const row of rows) {
     const taskId = String(row.task_id);
+    if (!commandModeByTask.has(taskId)) {
+      try {
+        const metadata = typeof row.metadata === 'string' ? JSON.parse(row.metadata) : row.metadata;
+        if (typeof metadata?.commandMode === 'string') commandModeByTask.set(taskId, metadata.commandMode);
+      } catch { /* Ignore malformed historical metadata. */ }
+    }
     if (settled.has(taskId)) continue;
+    if (row.state !== 'completed' && !RUN_START_STATES.includes(String(row.state))) continue;
     if (row.state !== 'completed') {
       settled.add(taskId);
       continue;
@@ -320,7 +331,7 @@ async function loadRunScores(db: Knex, taskIds: string[]): Promise<Map<string, n
       settled.add(taskId);
     }
   }
-  return scores;
+  return { scoreByTask: scores, commandModeByTask };
 }
 
 async function enrichTaskPage(db: Knex, taskIds: string[], excludeMerged: boolean): Promise<TaskPageEnrichment> {
@@ -370,10 +381,10 @@ async function enrichTaskPage(db: Knex, taskIds: string[], excludeMerged: boolea
     if (!planStatusByTask.has(taskId)) planStatusByTask.set(taskId, row.status);
   }
 
-  const scoreByTask = await loadRunScores(db, taskIds);
+  const { scoreByTask, commandModeByTask } = await loadRunMetadata(db, taskIds);
   const assigneesByTask = await loadPageAssignees(db, taskIds);
 
-  return { historyByTask, planStatusByTask, commentMetadataByTask, scoreByTask, assigneesByTask };
+  return { historyByTask, planStatusByTask, commentMetadataByTask, scoreByTask, commandModeByTask, assigneesByTask };
 }
 
 function parseRepositoryParts(repository: unknown): { owner: string | null; name: string | null } {
@@ -386,14 +397,15 @@ function parseRepositoryParts(repository: unknown): { owner: string | null; name
 
 function parseInitialJobData(row: Record<string, unknown>): {
   title: string | null; subtitle: string | null; llmProvider: string | null;
-  prNumber: number | null; issueNumber: number | null;
+  prNumber: number | null; issueNumber: number | null; commandMode: string | null;
 } {
-  const result = { title: null as string | null, subtitle: null as string | null, llmProvider: null as string | null, prNumber: null as number | null, issueNumber: null as number | null };
+  const result = { commandMode: null as string | null, title: null as string | null, subtitle: null as string | null, llmProvider: null as string | null, prNumber: null as number | null, issueNumber: null as number | null };
   if (!row.initial_job_data) return result;
   try {
     const jobData = typeof row.initial_job_data === 'string' ? JSON.parse(row.initial_job_data) : row.initial_job_data;
     result.title = jobData.title || (jobData.issueRef ? jobData.issueRef.title : null) || null;
     result.subtitle = jobData.subtitle || null;
+    result.commandMode = typeof jobData.commandMode === 'string' ? jobData.commandMode : null;
     result.llmProvider = jobData.agentAlias || null;
     if (jobData.pullRequestNumber) result.prNumber = jobData.pullRequestNumber;
     if (jobData.issueNumber) result.issueNumber = jobData.issueNumber;
@@ -415,7 +427,7 @@ function extractPrNumberFromFinalResult(row: Record<string, unknown>): number | 
 
 function mapDbTaskToResponse(row: Record<string, unknown>): Record<string, unknown> {
   const { owner: repositoryOwner, name: repositoryName } = parseRepositoryParts(row.repository);
-  const { title, subtitle, llmProvider, prNumber: jobDataPrNumber, issueNumber: jobDataIssueNumber } = parseInitialJobData(row);
+  const { title, subtitle, llmProvider, commandMode, prNumber: jobDataPrNumber, issueNumber: jobDataIssueNumber } = parseInitialJobData(row);
   const prNumber = (row.pr_number as number | null) || jobDataPrNumber || extractPrNumberFromFinalResult(row);
   const linkedIssueNumber = jobDataIssueNumber;
 
@@ -423,6 +435,7 @@ function mapDbTaskToResponse(row: Record<string, unknown>): Record<string, unkno
     id: row.task_id, issueId: row.task_id, repository: row.repository,
     repositoryOwner, repositoryName, issueNumber: row.issue_number,
     prNumber, linkedIssueNumber, title, subtitle, status: row.state,
+    commandMode: row.command_mode ?? commandMode ?? (row.task_type === 'review' ? 'review' : null),
     createdAt: new Date(row.created_at as string).toISOString(),
     updatedAt: new Date(row.state_timestamp as string).toISOString(),
     completedAt: row.completion_timestamp ? new Date(row.completion_timestamp as string).toISOString() : null,

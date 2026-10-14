@@ -453,3 +453,26 @@ test('a task page asked for by one of its runs lists that whole task whatever th
   assert.equal(result.total, 1);
   assert.deepEqual((result.tasks as Array<{ id: string; status: string }>).map(task => [task.id, task.status]), [['pr40-fix', 'processing'], ['pr40-review', 'completed']]);
 });
+
+
+test('task list exposes recorded command mode with latest history taking precedence over job data', async () => {
+  const database = await createDatabase();
+  const at = '2026-10-14T08:00:00.000Z';
+  await database('tasks').insert([
+    { task_id: 'job-review', repository: 'acme/widget', task_type: 'pr_comment', created_at: at, initial_job_data: JSON.stringify({ commandMode: 'review' }) },
+    { task_id: 'history-review', repository: 'acme/widget', task_type: 'pr_comment', created_at: at, initial_job_data: JSON.stringify({ commandMode: 'fix' }) },
+    { task_id: 'current-fix', repository: 'acme/widget', task_type: 'pr_comment', created_at: at, initial_job_data: JSON.stringify({ commandMode: 'review' }) },
+    { task_id: 'typed-review', repository: 'acme/widget', task_type: 'review', created_at: at },
+  ]);
+  await database('task_history').insert([
+    { task_id: 'job-review', state: 'queued', timestamp: at },
+    { task_id: 'history-review', state: 'processing', timestamp: at, metadata: JSON.stringify({ commandMode: 'review' }) },
+    { task_id: 'history-review', state: 'claude_execution', timestamp: '2026-10-14T08:01:00.000Z' },
+    { task_id: 'current-fix', state: 'processing', timestamp: at, metadata: JSON.stringify({ commandMode: 'review' }) },
+    { task_id: 'current-fix', state: 'claude_execution', timestamp: '2026-10-14T08:01:00.000Z', metadata: JSON.stringify({ commandMode: 'fix' }) },
+    { task_id: 'typed-review', state: 'processing', timestamp: at },
+  ]);
+  const page = await getTasksFromDb({ db: database, status: 'all', repository: 'all', limit: 10, offset: 0 });
+  const modes = Object.fromEntries((page.tasks as Array<Record<string, unknown>>).map(task => [task.id, task.commandMode]));
+  assert.deepEqual(modes, { 'job-review': 'review', 'history-review': 'review', 'current-fix': 'fix', 'typed-review': 'review' });
+});

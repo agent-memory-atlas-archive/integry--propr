@@ -35,6 +35,21 @@ describe('lifecycle status presentation', () => {
     }
   );
 
+  it.each(['active', 'processing', 'claude_execution', 'post_processing'])(
+    'labels an active review as Review in the %s state', status => {
+      render(<>{getStatusPill(status, 'Review')}</>);
+      expect(screen.getByText('Review')).toBeInTheDocument();
+      expect(screen.queryByText('Implementing')).not.toBeInTheDocument();
+    }
+  );
+
+  it.each(['completed', 'failed', 'cancelled', 'pending'])(
+    'preserves the %s lifecycle for reviews', status => {
+      render(<>{getStatusPill(status, 'Review')}</>);
+      expect(screen.queryByText('Review')).not.toBeInTheDocument();
+    }
+  );
+
   it.each(['waiting', 'pending', 'queued'])('renders a neutral slate Pending badge for the %s queue state', status => {
     render(<>{getStatusPill(status)}</>);
     const pill = screen.getByText('Pending');

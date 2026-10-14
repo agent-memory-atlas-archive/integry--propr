@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { buildTaskRow, runOutcome, runOutcomeOf, sanitizeTaskTitle } from './rowModel';
+import { buildTaskRuns, buildTaskRow, runOutcome, runOutcomeOf, sanitizeTaskTitle } from './rowModel';
 import type { Task, TaskGroup } from './types';
 
 const base: Task = { id: 'task-1', status: 'completed', createdAt: '2026-09-15T10:00:00Z' };
@@ -53,6 +53,17 @@ describe('sanitizeTaskTitle', () => {
 });
 
 describe('buildTaskRow', () => {
+  it('uses recorded review mode even when a follow-up title and summary suggest a fix', () => {
+    const row = buildTaskRow(group([
+      { title: 'Follow-up PR #2664: Add desktop documentation', subtitle: 'Follow-up requested without additional context', commandMode: 'review', status: 'claude_execution' },
+      { title: 'Fix PR #2664: Add desktop documentation', commandMode: 'review' },
+      { title: 'Review PR #2664: Add desktop documentation', commandMode: 'fix' },
+    ]));
+    expect(row.type).toBe('Review');
+    expect(row.earlierRuns.map(run => run.type)).toEqual(['Review', 'Fix']);
+    expect(buildTaskRuns(row).at(-1)?.type).toBe('Review');
+  });
+
   it('rolls every earlier run into one row named after the entity', () => {
     const row = buildTaskRow(group([
       { title: 'Ultrafix PR #2664: [2659 by GPT-6 Astra] Stop work when intent is withdrawn', subtitle: 'Ultrafix cycle 3 (linting)' },

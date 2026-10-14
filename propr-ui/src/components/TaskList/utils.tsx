@@ -49,7 +49,7 @@ export const getCleanDocumentTitle = (title: string | undefined, issueNumber?: n
 export const getDisplayStatus = (task: Task): string =>
   task.status === 'completed' && task.planIssueStatus?.toLowerCase() === 'merged' ? 'merged' : task.status;
 
-export const getStatusPill = (status: string) => {
+export const getStatusPill = (status: string, runType?: string | null) => {
   const baseClasses = "px-2 py-0.5 text-xs font-medium rounded-full inline-flex items-center gap-1.5";
 
   switch (status) {
@@ -89,7 +89,7 @@ export const getStatusPill = (status: string) => {
       return (
         <span className={`${baseClasses} bg-teal-50 text-teal-700 border border-teal-200`}>
            <span className="w-1.5 h-1.5 rounded-full bg-teal-500 animate-pulse"></span>
-           Implementing
+           {runType?.toLowerCase() === 'review' ? 'Review' : 'Implementing'}
         </span>
       );
     case 'waiting':

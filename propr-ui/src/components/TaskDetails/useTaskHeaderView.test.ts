@@ -38,6 +38,7 @@ describe('useTaskHeaderView', () => {
 
     // Tier 1: the task, which is still working on its newest run.
     expect(result.current.headerProps.currentStatus).toBe('CLAUDE_EXECUTION');
+    expect(result.current.headerProps.taskInfo?.commandMode).toBe('review');
     expect(result.current.contextStripProps.tokenUsage?.input_tokens).toBe(3_900_000);
     expect(result.current.inspection?.headActive).toBe(true);
 
