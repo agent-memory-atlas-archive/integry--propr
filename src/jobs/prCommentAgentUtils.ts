@@ -317,19 +317,28 @@ export async function resolveAndExecuteAgent(params: AgentExecutionParams): Prom
         reasoningLevel,
     }, 'Executing PR comment task with agent');
 
-    const execute = () => agent.executeTask({
-        worktreePath,
-        issueRef: { number: pullRequestNumber, repoOwner, repoName },
-        prompt,
-        model: modelToUse,
-        githubToken,
-        branchName,
-        onSessionId: createSessionIdCallbackForPR(taskId, { pullRequestNumber, repoOwner, repoName }, { llm: modelToUse, stateManager, correlatedLogger, redisClient }),
-        onContainerId: createContainerIdCallbackForPR(taskId, stateManager),
-        taskId,
-        prNumber: pullRequestNumber,
-        reasoningLevel,
-    });
+    const execute = async () => {
+        // Only implementation follow-ups own this task; merge helpers may reuse a completed task id.
+        if (params.applyRepositoryWorkflow) {
+            await stateManager.updateTaskState(taskId, 'processing', {
+                reason: 'PR execution routing resolved',
+                historyMetadata: { model: modelToUse, executionRouting: { model: modelToUse, agentAlias } },
+            });
+        }
+        return agent.executeTask({
+            worktreePath,
+            issueRef: { number: pullRequestNumber, repoOwner, repoName },
+            prompt,
+            model: modelToUse,
+            githubToken,
+            branchName,
+            onSessionId: createSessionIdCallbackForPR(taskId, { pullRequestNumber, repoOwner, repoName }, { llm: modelToUse, stateManager, correlatedLogger, redisClient }),
+            onContainerId: createContainerIdCallbackForPR(taskId, stateManager),
+            taskId,
+            prNumber: pullRequestNumber,
+            reasoningLevel,
+        });
+    };
     const agentResult = await (params.applyRepositoryWorkflow ? runRepositoryWorkflow({
         workflow: params.repositoryWorkflow, repoOwner, repoName, redisClient, taskId, stateManager, correlatedLogger,
     // Outside the workflow the agent still runs under the run's network policy (and its timeline record).

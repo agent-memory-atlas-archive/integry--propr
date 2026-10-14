@@ -1,3 +1,4 @@
+import { loadTaskModelIdentities } from './taskModelIdentity.js';
 import { latestCommentMetadata, previewMediaReader, taskPreviewSource } from '../services/previewMediaProjection.js';
 import { Knex } from 'knex';
 import type { AttributedUser, TaskAssignmentFilter } from '@propr/shared';
@@ -255,6 +256,7 @@ export async function getTasksFromDb(query: TaskQuery): Promise<TaskPage> {
   // Completion comments stay with their run even when later entries (e.g. cleanup) carry no metadata.
   const media = await (query.previewReader ?? previewMediaReader).project(pageTasks.map((row: Record<string, unknown>) =>
     taskPreviewSource({ ...row, latest_metadata: commentMetadataByTask.get(String(row.task_id)) })), 3);
+  const identities = await loadTaskModelIdentities(db, pageTasks);
   const tasks = pageTasks.map((row: Record<string, unknown>, index: number) => ({
     ...mapDbTaskToResponse({
       ...row,
@@ -262,6 +264,9 @@ export async function getTasksFromDb(query: TaskQuery): Promise<TaskPage> {
       command_mode: commandModeByTask.get(String(row.task_id)),
       plan_issue_status: planStatusByTask.get(String(row.task_id)) ?? null,
     }),
+    modelName: identities.get(String(row.task_id))?.modelName ?? null,
+    model: identities.get(String(row.task_id))?.modelName ?? null,
+    llmProvider: identities.get(String(row.task_id))?.agentAlias ?? null,
     score: scoreByTask.get(String(row.task_id)) ?? null,
     assignees: assigneesByTask.get(String(row.task_id)) ?? [],
     ...(media[index].previews.length ? { previewMedia: media[index].previews } : {}),

@@ -78,11 +78,11 @@ export const PreviewCountBadge: React.FC<{
 export const TaskAgent: React.FC<{ task: Task }> = ({ task }) => {
   const agent = task.llmProvider || '';
   const model = task.model || task.modelName || '';
-  if (!agent && !model) return <span className="text-xs text-slate-300">—</span>;
+  if (!agent && !model) return <span className="text-xs text-slate-400">Unknown Model</span>;
   const label = getTaskModelLabel(model, agent);
   return (
     <span className="flex min-w-0 items-center gap-1.5 text-xs text-slate-700" title={[agent, model ? getModelDisplayName(model) : ''].filter(Boolean).join(' · ')}>
-      <ProviderLogo provider={agent} className="h-3.5 w-3.5 flex-none" />
+      <ProviderLogo provider={agent || model} className="h-3.5 w-3.5 flex-none" />
       <span className="truncate">{label}</span>
     </span>
   );

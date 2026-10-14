@@ -37,6 +37,7 @@ test('generic task lists exclude native goal backing tasks', async () => {
     });
     await database.schema.createTable('llm_executions', table => {
       table.increments('execution_id'); table.string('task_id'); table.text('analysis_report');
+      table.string('model_name'); table.timestamp('start_time');
     });
     await database.schema.createTable('task_assignees', table => {
       table.string('task_id'); table.string('github_user_id');
@@ -64,7 +65,7 @@ test('generic task lists exclude native goal backing tasks', async () => {
     });
     assert.equal(result.total, 2);
     assert.deepEqual(new Set((result.tasks as Array<{ id: string }>).map(task => task.id)), new Set(['ordinary-task', 'legacy-task']));
-    assert.equal(taskListSql.length, 7);
+    assert.equal(taskListSql.length, 9);
     assert.match(taskListSql[0], /count\(\*\)/i);
     assert.doesNotMatch(taskListSql[0], /processing_start_timestamp|completion_timestamp|critique_score/i);
     assert.doesNotMatch(taskListSql[1], /processing_start_timestamp|completion_timestamp|critique_score/i);

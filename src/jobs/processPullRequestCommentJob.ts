@@ -375,7 +375,8 @@ async function processAdmittedPRCommentJob(job: Job<CommentJobData>): Promise<Jo
     correlatedLogger.info({ pullRequestNumber, branchName: jobBranchName, llm, isBatchJob, commentsCount: commentsToProcess.length }, `Processing PR comment${isBatchJob ? 's batch' : ''} job...`);
     if (await restorePendingCommentsIfUltrafixJobSuperseded(job, { repoOwner, repoName, pullRequestNumber, redisClient }, context.pickedUpComments, context.originalUltrafixMeta)) return { status: 'cancelled', reason: 'ultrafix_superseded' };
 
-    const modelName = await resolvePRCommentModelName(llm, correlatedLogger);
+    // PR labels and review settings are resolved later. Do not record a default as execution evidence.
+    const modelName = llm ? await resolvePRCommentModelName(llm, correlatedLogger) : null;
 
     const taskId = job.id || `pr-comment-${pullRequestNumber}-${Date.now()}`;
     const stateManager = getStateManager();
