@@ -22,7 +22,7 @@ export function createExtensionProfileRoutes(store = new ExtensionProfileStore(d
     if (!req.body || typeof req.body !== 'object' || Array.isArray(req.body) || Object.keys(req.body).some(k => !keys.includes(k))) throw new ExtensionError(400, 'Invalid extension request');
   };
   return {
-    list: handle(async (_req, actor) => ({ contract: EXTENSION_PROFILE_CONTRACT, instanceId: await store.instanceId(), profiles: await store.list(actor), catalog: await store.catalog.publicEntries() })),
+    list: handle(async (_req, actor) => ({ contract: EXTENSION_PROFILE_CONTRACT, instanceId: await store.instanceId(), profiles: await store.list(actor), bundles: await store.listSkillBundles(actor), catalog: await store.catalog.publicEntries() })),
     save: handle(async (req, actor) => { exact(req, ['input', 'secrets', 'expected']); return { profile: await store.save(actor, req.body.input, req.body.secrets, req.body.expected) }; }),
     history: handle(async (req, actor) => ({ revisions: await store.history(actor, String(req.params.profileId)) })),
     remove: handle(async (req, actor) => { exact(req, ['selection']); await store.delete(actor, req.body.selection); return { deleted: true }; }),

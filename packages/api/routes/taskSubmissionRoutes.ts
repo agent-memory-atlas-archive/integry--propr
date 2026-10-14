@@ -1,5 +1,5 @@
 import { sealSubmissionExtensions } from '../../core/src/services/taskSubmissionService.js';
-import { ExtensionProfileStore } from '../../core/src/extensions/extensionProfileStore.js';
+import { ExtensionError, ExtensionProfileStore } from '../../core/src/extensions/extensionProfileStore.js';
 import { createHash, randomUUID } from 'node:crypto';
 import fs from 'fs-extra';
 import path from 'node:path';
@@ -73,7 +73,7 @@ export async function routing(body: { agentAlias?: string; model?: string; exten
       throw Object.assign(new Error('Selected extension agent/model cannot be routed exactly through GitHub issues'), { status: 400 });
     }
   }
-  return { agentAlias: agent.config.alias, model, routingLabel: label };
+  return { agentAlias: agent.config.alias, model, routingLabel: label, runtime: agent.config.type };
 }
 
 async function storeUploads(files: MulterFile[]): Promise<SubmissionAttachment[]> {
@@ -167,13 +167,14 @@ export function submissionIssueTitle(instruction: string): string {
   return `${shortened}...`;
 }
 
-function submissionServices(octokit: SubmissionOctokit, enqueue = enqueueIssueImplementationJob, images?: SubmissionImageUploadServices) {
+function submissionServices(octokit: SubmissionOctokit, enqueue = enqueueIssueImplementationJob, images?: SubmissionImageUploadServices, validateExtensions?: (row: TaskSubmission) => Promise<void>) {
   const coordinates = (row: TaskSubmission) => { const [owner, repo] = row.repository.split('/'); return { owner, repo }; };
   return {
     async createIssue(row: TaskSubmission) {
       const payload = JSON.parse(row.payload) as SubmissionPayload;
       const files = JSON.parse(row.attachments) as SubmissionAttachment[];
       const body = submissionIssueBody(row, payload, files, await uploadSubmissionImages(octokit, coordinates(row), files, images));
+      await validateExtensions?.(row);
       const { data } = await octokit.request('POST /repos/{owner}/{repo}/issues', {
         ...coordinates(row), title: submissionIssueTitle(payload.instruction), body,
         // No trigger label until the durable association and all routing are ready.
@@ -315,7 +316,7 @@ export async function linkSubmissionTodos(db: Knex, row: TaskSubmission, complet
 
 export function createTaskSubmissionRoutes({ db, services = {} }: { db: Knex; services?: Partial<{
   authorize: typeof authorizeTaskSubmissionRepository;
-  routing: typeof routing;
+  routing: (body: Parameters<typeof routing>[0]) => Promise<Omit<Awaited<ReturnType<typeof routing>>, 'runtime'> & { runtime?: string }>;
   getOctokit: typeof getAuthenticatedOctokit;
   processingLabels: typeof loadPrimaryProcessingLabels;
   enqueue: typeof enqueueIssueImplementationJob;
@@ -326,8 +327,29 @@ export function createTaskSubmissionRoutes({ db, services = {} }: { db: Knex; se
   const resolveRouting = services.routing ?? routing;
   const getOctokit = services.getOctokit ?? getAuthenticatedOctokit;
   const processingLabels = services.processingLabels ?? loadPrimaryProcessingLabels;
+  const checkExtensions = async (actor: string, profile: NonNullable<SubmissionPayload['extensionProfile']>, agentAlias: string, runtime: string | undefined, repository: string, allowWrite: boolean) => {
+    try {
+      await new ExtensionProfileStore(db).assertLaunch(actor, profile, { agentAlias, runtime: runtime ?? '', repositories: [repository], allowWrite }, false);
+    } catch (error) {
+      // These local rejections precede the GitHub POST. Mark them definite,
+      // so the submission retains permission to retry rather than reconcile.
+      if (error instanceof ExtensionError && (error.status === 409 || /Profile (agent|repository) scope/.test(error.message))) throw new ExtensionError(400, error.message);
+      throw error;
+    }
+  };
+  const validateExtensions = async (row: TaskSubmission) => {
+    const payload = JSON.parse(row.payload) as SubmissionPayload;
+    if (!payload.extensionProfile) return;
+    const resolved = await resolveRouting(payload);
+    await checkExtensions(row.user_id, payload.extensionProfile, resolved.agentAlias, resolved.runtime, row.repository, payload.extensionAllowWrite === true);
+  };
   const resume = async (id: string) => {
-    const result = await resumeTaskSubmission(db, id, submissionServices(await getOctokit(), services.enqueue, services.images));
+    const octokit = await getOctokit();
+    const row = await db<TaskSubmission>('task_submissions').where({ id }).first();
+    // Only pending creation needs this preflight. Reconcile an ambiguous POST
+    // even if its profile subsequently changes; never discard that obligation.
+    if (row && !row.issue_number && row.state === 'prepared') await validateExtensions(row);
+    const result = await resumeTaskSubmission(db, id, submissionServices(octokit, services.enqueue, services.images, validateExtensions));
     await linkSubmissionTodos(db, result, services.completeTodos);
     return result;
   };
@@ -345,12 +367,13 @@ export function createTaskSubmissionRoutes({ db, services = {} }: { db: Knex; se
       const repository = body.repository.toLowerCase();
       const config = await checkAccess(req, repository);
       if (body.extensionProfile && req.get('X-ProPR-Extensions') !== '1') throw Object.assign(new Error('Extension selection requires a preflight-protected request'), { status: 403 });
-      if (body.extensionProfile) await new ExtensionProfileStore(db).read(req.user!.id, body.extensionProfile);
+      if (body.extensionProfile) await new ExtensionProfileStore(db).authorize(req.user.id);
       const payloadHash = fingerprint({ repository, instruction: body.instruction, ...(body.extensionProfile ? { extensionProfile: body.extensionProfile, extensionAllowWrite: body.extensionAllowWrite === true } : {}), agentAlias: body.agentAlias || '', model: body.model || '', todoIds: body.todoIds || [], files: await goalUploadIdentity(files), ...submissionAutomation(body), ...submissionBudget(body) });
       let row = await db<TaskSubmission>('task_submissions').where({ user_id: String(req.user!.id), submission_key: key }).first();
       if (row && row.payload_hash !== payloadHash) { res.status(409).json({ error: 'Submission identity was already used with different content' }); return; }
       if (!row) {
-        const selection = await resolveRouting(body);
+        const { runtime, ...selection } = await resolveRouting(body);
+        if (body.extensionProfile) await checkExtensions(req.user.id, body.extensionProfile, selection.agentAlias, runtime, repository, body.extensionAllowWrite === true);
         const octokit = await getOctokit();
         const [owner, repo] = repository.split('/');
         await octokit.request('GET /repos/{owner}/{repo}', { owner, repo });

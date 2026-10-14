@@ -55,6 +55,14 @@ test('extension HTTP boundary requires fresh durable administration, preflight J
   assert.equal((await fetch(base + '/profiles', { headers: { 'x-test-actor': '2' } })).status, 403);
   assert.equal((await fetch(base + '/profiles', { headers: { 'x-test-actor': '1', 'x-test-no-permission': '1' } })).status, 403);
   const headers = { 'x-test-actor': '1', 'content-type': 'application/json', 'x-propr-extensions': '1' };
+  const bundle = await store.importSkill('1', [{ path: 'SKILL.md', content: Buffer.from('---\nname: unused-skill\ndescription: Imported but never attached\n---\nSKILL_CONTENT_SENTINEL').toString('base64') }], { kind: 'archive', filename: 'unused.tar' });
+  const otherInstance = { ...bundle, id: randomUUID(), instanceId: randomUUID(), name: 'other-instance' };
+  await database('extension_skill_bundles').insert({ id: otherInstance.id, instance_id: otherInstance.instanceId, descriptor: JSON.stringify(otherInstance), files_json: '[]' });
+  const inventory = await fetch(base + '/profiles', { headers }).then(r => r.json());
+  assert.deepEqual(inventory.bundles, [bundle]);
+  assert.equal(inventory.profiles.length, 0);
+  assert.ok(!JSON.stringify(inventory).includes('SKILL_CONTENT_SENTINEL'));
+  assert.ok(!JSON.stringify(inventory).includes('files_json'));
   const sentinel = 'UNMISTAKABLE_API_EXTENSION_SENTINEL';
   const input = { version: 1, name: 'Synthetic tools', enabled: true, agentScope: [], repositoryScope: [], mcpServers: [{ kind: 'https', name: 'synthetic', url: 'https://8.8.8.8/mcp', enabled: true, tools: ['lookup'], capability: 'read', authentication: 'bearer' }], skillBundleIds: [] };
   // Every cookie-authenticated mutation must reject browser-simple requests

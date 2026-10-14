@@ -28,6 +28,12 @@ export class ExtensionProfileStore {
     const rows = await this.database('extension_profiles as p').join('extension_profile_revisions as r', function () { this.on('p.id', 'r.profile_id').andOn('p.revision', 'r.revision'); }).where({ 'p.instance_id': instanceId, 'p.deleted': false }).select('r.snapshot');
     return rows.map(r => publicExtensionProfile(JSON.parse(r.snapshot)));
   }
+  async listSkillBundles(actor: string): Promise<ExtensionSkillBundle[]> {
+    await this.authorize(actor);
+    const rows = await this.database('extension_skill_bundles').where({ instance_id: await this.instanceId() }).select('descriptor');
+    await this.authorize(actor);
+    return rows.map(row => JSON.parse(row.descriptor) as ExtensionSkillBundle);
+  }
   async read(actor: string, selection: ExtensionSelection, database = this.database): Promise<ExtensionProfileRevision> {
     await this.authorize(actor, database);
     let parsed: ExtensionSelection; try { parsed = extensionSelectionSchema.parse(selection); } catch { throw new ExtensionError(400, 'Invalid extension selection'); }

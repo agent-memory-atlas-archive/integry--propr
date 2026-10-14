@@ -19,6 +19,11 @@ import {
 } from '../../api/extensionProfilesApi';
 import { getInstanceCatalog } from '../../api/proprApi';
 import { SettingsSection } from './SettingsLayout';
+const nextServerName = (servers: ExtensionMcpDescriptor[]) => {
+  let number = 1;
+  while (servers.some((server) => server.name === `server-${number}`)) number++;
+  return `server-${number}`;
+};
 const blank = (): ExtensionProfileInput => ({
   version: 1,
   name: '',
@@ -363,7 +368,8 @@ export default function AgentExtensionsSection() {
   const [draft, setDraft] = useState<ExtensionProfileInput>(blank);
   const [editorVersion, setEditorVersion] = useState(0);
   const [editing, setEditing] = useState(false);
-  const [secrets, setSecrets] = useState<Record<string, string | null>>({});
+  const [secrets, setSecrets] = useState<Record<number, string | null>>({});
+  const [availableBundles, setAvailableBundles] = useState<ExtensionSkillBundle[]>([]);
   const [bundles, setBundles] = useState<ExtensionSkillBundle[]>([]);
   const [history, setHistory] = useState<ExtensionProfileRevision[]>([]);
   const [busy, setBusy] = useState(false);
@@ -373,6 +379,7 @@ export default function AgentExtensionsSection() {
     const result = await listExtensionProfiles();
     setProfiles(result.profiles);
     setCatalog(result.catalog ?? []);
+    setAvailableBundles(result.bundles ?? []);
   };
   useEffect(() => {
     let active = true;
@@ -384,6 +391,7 @@ export default function AgentExtensionsSection() {
         if (active) {
           setProfiles(result.profiles);
           setCatalog(result.catalog ?? []);
+          setAvailableBundles(result.bundles ?? []);
         }
       })
       .catch((e) => {
@@ -427,14 +435,24 @@ export default function AgentExtensionsSection() {
     setNotice('');
     setEditing(true);
   };
-  const changeServer = (index: number, patch: Partial<ExtensionMcpDescriptor>) =>
+  const changeServer = (index: number, patch: Partial<ExtensionMcpDescriptor>) => {
+    const server = draft.mcpServers[index];
+    if (('authentication' in patch && patch.authentication === 'none') || ('url' in patch && patch.url !== undefined && server?.kind === 'https' && patch.url !== server.url)) {
+      setSecrets((values) => {
+        const next = { ...values };
+        delete next[index];
+        return next;
+      });
+    }
     setDraft((d) => ({
       ...d,
       mcpServers: d.mcpServers.map((s, i) =>
         i === index ? ({ ...s, ...patch } as ExtensionMcpDescriptor) : s,
       ),
     }));
+  };
   const addBundle = (bundle: ExtensionSkillBundle) => {
+    setAvailableBundles((items) => [...items.filter((existing) => existing.id !== bundle.id), bundle]);
     setBundles((b) => [...b.filter((existing) => existing.id !== bundle.id), bundle]);
     setDraft((d) => ({
       ...d,
@@ -549,7 +567,7 @@ export default function AgentExtensionsSection() {
             </label>
             {catalogError && <p role="status" className="text-sm text-amber-800">Agent and repository choices could not be loaded. Reopen Settings to retry, or use Advanced to add an unlisted item.</p>}
             <div className="grid gap-4 sm:grid-cols-2">
-              <ItemPicker label="Agents" options={instanceCatalog.agents.map((a) => a.alias)}
+              <ItemPicker label="Agents" options={instanceCatalog.agents.filter((a) => a.enabled && a.kind !== 'synthetic' && (a.type === 'claude' || a.type === 'codex') && /^[A-Za-z0-9_-]{1,100}$/.test(a.alias)).map((a) => a.alias)}
                 selected={draft.agentScope} onChange={(agentScope) => setDraft((d) => ({ ...d, agentScope }))}
                 hint="Leave all unchecked to allow any agent." allowManual />
               <ItemPicker label="Repositories" options={instanceCatalog.repositories.map((r) => r.name)}
@@ -569,7 +587,7 @@ export default function AgentExtensionsSection() {
                       ...d.mcpServers,
                       {
                         kind: 'https',
-                        name: `server-${d.mcpServers.length + 1}`,
+                        name: nextServerName(d.mcpServers),
                         url: '',
                         enabled: true,
                         tools: [],
@@ -598,7 +616,7 @@ export default function AgentExtensionsSection() {
                         ...d.mcpServers,
                         {
                           kind: 'catalog',
-                          name: `server-${d.mcpServers.length + 1}`,
+                          name: nextServerName(d.mcpServers),
                           catalogId: entry.id,
                           digest: entry.digest,
                           enabled: true,
@@ -626,13 +644,13 @@ export default function AgentExtensionsSection() {
                 knownTools={server.kind === 'https' ? profiles.flatMap((p) => p.mcpServers.flatMap((s) =>
                   s.kind === 'https' && s.url === server.url ? s.tools : [])) : []}
                 current={current}
-                secret={secrets[server.name]}
+                secret={secrets[index]}
                 onChange={(patch) => changeServer(index, patch)}
                 onSecret={(value) =>
                   setSecrets((values) => {
                     const next = { ...values };
-                    if (value) next[server.name] = value;
-                    else delete next[server.name];
+                    if (value) next[index] = value;
+                    else delete next[index];
                     return next;
                   })
                 }
@@ -643,16 +661,16 @@ export default function AgentExtensionsSection() {
                     mcpServers: d.mcpServers.filter((_, i) => i !== index),
                   }));
                   setSecrets((values) => {
-                    const next = { ...values };
-                    delete next[server.name];
-                    return next;
+                    return Object.fromEntries(Object.entries(values)
+                      .filter(([key]) => Number(key) !== index)
+                      .map(([key, value]) => [Number(key) > index ? Number(key) - 1 : Number(key), value]));
                   });
                 }}
               />
             ))}
             <SkillsEditor
               bundles={bundles.filter((b) => draft.skillBundleIds.includes(b.id))}
-              availableBundles={[...new Map(profiles.flatMap((p) => p.skillBundles).concat(bundles).map((b) => [b.id, b])).values()].filter((b) => !draft.skillBundleIds.includes(b.id))}
+              availableBundles={[...new Map(availableBundles.concat(profiles.flatMap((p) => p.skillBundles), bundles).map((b) => [b.id, b])).values()].filter((b) => !draft.skillBundleIds.includes(b.id))}
               repositories={instanceCatalog.repositories.map((r) => r.name)}
               github={github}
               setGithub={setGithub}
@@ -678,7 +696,9 @@ export default function AgentExtensionsSection() {
                   void action(async () => {
                     const result = await saveExtensionProfile(
                       draft,
-                      secrets,
+                      Object.fromEntries(draft.mcpServers.flatMap((server, index) =>
+                        server.kind === 'https' && server.authentication === 'bearer' && Object.prototype.hasOwnProperty.call(secrets, index)
+                          ? [[server.name, secrets[index]]] : [])),
                       current ? selection(current) : undefined,
                     );
                     setSecrets({});
