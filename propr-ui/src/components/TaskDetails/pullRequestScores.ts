@@ -37,6 +37,19 @@ export function usePullRequestScores(repository: string | undefined, prNumber: n
   return identity && loaded?.identity === identity ? loaded.history : null;
 }
 
+/**
+ * The task's PR, read once for the task screen: its scores and outcome, and
+ * whether it has merged. A merged PR takes no more follow-ups.
+ */
+export function useTaskPullRequestScores(
+  taskInfo: TaskInfo | null | undefined,
+  prInfo?: { number?: number },
+): { history: PullRequestScoresResponse | null; merged: boolean } {
+  const pr = taskPullRequest(taskInfo, prInfo);
+  const history = usePullRequestScores(pr?.repository, pr?.prNumber);
+  return { history, merged: history?.outcome === 'merged' };
+}
+
 /** Where the task's pull request ended: merged, or closed without merging. */
 export interface PullRequestOutcome {
   prNumber: number;

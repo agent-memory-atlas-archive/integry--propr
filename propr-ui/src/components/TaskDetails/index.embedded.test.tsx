@@ -37,7 +37,20 @@ vi.mock('./useDerivedTaskData', () => ({
 }));
 vi.mock('../ui/useToast', () => ({ useToast: () => ({ addToast: vi.fn() }) }));
 vi.mock('./ActionBar', () => ({
-  default: ({ onDeleteTask }: { onDeleteTask: () => void }) => <button type="button" onClick={onDeleteTask}>Delete task</button>,
+  default: ({ onDeleteTask, onFollowUp, followupCommands }: { onDeleteTask: () => void; onFollowUp?: () => void; followupCommands?: React.ReactNode }) => (
+    <>
+      <button type="button" onClick={onDeleteTask}>Delete task</button>
+      {onFollowUp && <button type="button" onClick={onFollowUp}>Follow Up</button>}
+      {followupCommands && <span data-testid="followup-commands" />}
+    </>
+  ),
+}));
+// The task's PR is open unless a test merges it.
+const pullRequestScores = vi.hoisted(() => ({ outcome: null as 'merged' | 'closed' | null }));
+vi.mock('../../api/taskStatsApi', () => ({
+  getPullRequestScores: vi.fn(async (repository: string, prNumber: number) => ({
+    repository, pr_number: prNumber, outcome: pullRequestScores.outcome, merged_at: null, closed_at: null, scores: [],
+  })),
 }));
 // Children have their own suites; this one is about the details shell.
 vi.mock('./ThinkingLog', () => ({ default: () => null }));
@@ -65,6 +78,7 @@ afterEach(() => {
   vi.clearAllMocks();
   loadedTaskIds.length = 0;
   loadedTaskInfo.current = {};
+  pullRequestScores.outcome = null;
   document.title = '';
 });
 
@@ -183,6 +197,29 @@ describe('TaskDetails embedded beside the task list', () => {
   it('offers to return to the newest run as live while it is still working', () => {
     renderInspecting(run('run-2', 2, 'active'));
     expect(within(timelineHeader()).getByRole('button', { name: 'Return to live Run 2' })).toBeInTheDocument();
+  });
+});
+
+describe('follow-up actions', () => {
+  const renderPullRequestTask = () => {
+    loadedTaskInfo.current = { type: 'pr-comment', number: 12, repoOwner: 'integry', repoName: 'propr' };
+    render(<MemoryRouter><TaskDetails taskId="pr-task" embedded /></MemoryRouter>);
+  };
+
+  it('offers a follow-up while the pull request is open', async () => {
+    renderPullRequestTask();
+    await act(async () => {});
+    expect(screen.getAllByRole('button', { name: 'Follow Up' }).length).toBeGreaterThan(0);
+    expect(screen.getAllByTestId('followup-commands').length).toBeGreaterThan(0);
+  });
+
+  it('offers no follow-up actions once the pull request has merged', async () => {
+    pullRequestScores.outcome = 'merged';
+    renderPullRequestTask();
+    await act(async () => {});
+    expect(screen.queryByRole('button', { name: 'Follow Up' })).toBeNull();
+    expect(screen.queryByTestId('followup-commands')).toBeNull();
+    expect(screen.getAllByRole('button', { name: 'Delete task' }).length).toBeGreaterThan(0);
   });
 });
 
