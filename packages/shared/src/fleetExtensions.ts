@@ -4,13 +4,17 @@ import { extensionProfileInputSchema, extensionSelectionSchema } from './extensi
 
 export const FLEET_EXTENSION_CONTRACT = 'propr.fleet-extensions.v1' as const;
 export const FLEET_EXTENSION_SCOPE = 'hosted_instance_extensions' as const;
-export const FLEET_EXTENSION_LIMITS = { requestBytes: 65536, responseBytes: 32768, recipientSeconds: 60, ciphertextBytes: 4112, recipients: 64, operations: 4096 } as const;
+export const FLEET_EXTENSION_LIMITS = { requestBytes: 256 * 1024, responseBytes: 256 * 1024, recipientSeconds: 60, ciphertextBytes: 4112, recipients: 64, operations: 4096 } as const;
 const uuid = z.uuid();
 const hash = z.string().regex(/^[0-9a-f]{64}$/);
 const opaque = z.string().regex(/^[A-Za-z0-9_-]+$/);
 const selection = extensionSelectionSchema;
-const create = z.strictObject({ action: z.literal('profile.create'), input: extensionProfileInputSchema });
-const update = z.strictObject({ action: z.literal('profile.update'), input: extensionProfileInputSchema, selection });
+// Bound remote scopes independently of the transport cap; native input remains unchanged.
+export const fleetExtensionProfileInputSchema = extensionProfileInputSchema.safeExtend({
+  repositoryScope: z.array(z.string().max(200).regex(/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/)).max(64),
+});
+const create = z.strictObject({ action: z.literal('profile.create'), input: fleetExtensionProfileInputSchema });
+const update = z.strictObject({ action: z.literal('profile.update'), input: fleetExtensionProfileInputSchema, selection });
 export const fleetExtensionIntentSchema = z.discriminatedUnion('action', [create, update]);
 export type FleetExtensionIntent = z.infer<typeof fleetExtensionIntentSchema>;
 const sealed = z.array(z.strictObject({ recipientId: uuid, publicKey: opaque.length(87), iv: opaque.length(16), ciphertext: opaque.max(5483) })).max(8);
@@ -56,6 +60,7 @@ export const FLEET_EXTENSION_SCHEMA = canonicalFleetJson({
   secret: 'P-256-ECDH/HKDF-SHA256/AES-256-GCM', secretEncoding: 'base64url-unpadded', secretPlaintext: 'printable-ASCII-1..4096-padded-with-zero-to-4096',
   secretAAD: 'canonical-recipient-binding', recipientAuthentication: 'Ed25519-independent-native-SPKI-pin-and-exact-expected-binding', secretHKDF: { salt: 'UTF8-recipientId', info: 'UTF8-propr.fleet-extensions.v1' },
   skills: { exactGit: true, upload: false }, error: 'fleet_extensions_unavailable',
+  mutationResponsePreflight: { actions: ['profile.create', 'profile.update', 'profile.disable'], policy: 'exact-completed-response-within-responseBytes-before-transaction-commit' },
   result: ['contract', 'operationId', 'state=completed', 'result'], recipient: z.toJSONSchema(fleetExtensionRecipientSchema),
   projections: {
     'profile.list': ['instanceId', 'profiles=public-ExtensionProfileRevision[]'],

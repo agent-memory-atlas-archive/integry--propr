@@ -119,6 +119,7 @@ export async function listenFleetData(plane: FleetDataPlane, extensions?: FleetE
       const raw = Buffer.concat(parts).toString('utf8');
       if (req.url === '/extensions/v1/invoke') {
         const body = JSON.stringify(await extensions!.invoke(raw));
+        if (Buffer.byteLength(body) > FLEET_EXTENSION_LIMITS.responseBytes) throw new Error();
         res.writeHead(200, { 'Content-Type': 'application/json' }); res.end(body);
       } else if (parseEnvelope(raw).request.action === 'artifact.stream') {
         await plane.stream(raw, async (download, authorize) => {

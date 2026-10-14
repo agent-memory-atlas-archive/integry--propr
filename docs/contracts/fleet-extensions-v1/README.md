@@ -80,9 +80,29 @@ new authorized operation. Lost replies cannot reuse an operation or recipient.
 The private namespace retains tombstones, with a 4096-extension-operation hard cap and shared 16384-entry namespace cap; an
 operator must migrate to a new placement/runtime and private namespace when
 exhausted. Do not recycle tombstones under the same authority. At most 64
-recipients and 8 encrypted fields per mutation are supported. Requests are capped at 64 KiB and
-responses at 32 KiB; oversized lists/history are refused, not partly
-returned. All errors are generic fleet_extensions_unavailable.
+recipients and 8 encrypted fields per mutation are supported. Requests (the entire canonical envelope) and completed responses are each capped
+at 256 KiB, using the shared `FLEET_EXTENSION_LIMITS` constants in Core and the
+private listener. Remote profile repository scopes have at most 64 entries of
+200 characters each; native same-origin input behavior is preserved.
+
+The maximum create/update envelope fits independently of the transport cap:
+URLs contribute at most 8 × 2,048 × 6 = 98,304 JSON bytes, the profile name at
+most 100 × 6 = 600 (including worst-case JSON escaping), tool names at most
+8 × 64 × 128 = 65,536, agent scopes 64 × 100 = 6,400, repository scopes
+64 × 200 = 12,800, server names 8 × 48 = 384, bundle IDs 8 × 36 = 288,
+and eight sealed fields at most 8 × (5,483 + 87 + 16 + 36) = 44,976.
+These total 229,288 bytes; JSON keys/punctuation, fixed values, selection and
+assertion metadata together consume less than 16 KiB, leaving the envelope
+below 256 KiB. Restricted identifier alphabets cannot require JSON escaping.
+Recipient acquisition embeds the same bounded input without ciphertext and
+also fits.
+
+Public responses include stored skill-bundle descriptors and historical metadata,
+whose sizes cannot be inferred from the input's bundle IDs. Create, update and
+disable therefore preflight the exact completed response inside the save
+transaction before committing; an oversized projection rolls back both the
+profile head and revision. The response serializer uses the same size check
+at completion. Oversized lists/history are refused, not partly returned. All errors are generic fleet_extensions_unavailable.
 
 ## Skills and runs
 

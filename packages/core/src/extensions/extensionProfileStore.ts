@@ -49,7 +49,7 @@ export class ExtensionProfileStore {
     const rows = await this.database('extension_profile_revisions as r').join('extension_profiles as p', 'r.profile_id', 'p.id').where({ 'p.id': profileId, 'p.instance_id': await this.instanceId(), 'p.deleted': false }).orderBy('r.revision', 'desc').select('r.snapshot');
     return rows.map(row => publicExtensionProfile(JSON.parse(row.snapshot)));
   }
-  async save(actor: string, input: ExtensionProfileInput, replacements: Record<string, string | null> = {}, expected?: ExtensionSelection, guard: (database?: Knex) => Promise<void> = async () => {}): Promise<ExtensionProfileRevision> {
+  async save(actor: string, input: ExtensionProfileInput, replacements: Record<string, string | null> = {}, expected?: ExtensionSelection, guard: (database?: Knex) => Promise<void> = async () => {}, preflight: (snapshot: ExtensionProfileRevision) => void = () => {}): Promise<ExtensionProfileRevision> {
     let parsed: ExtensionProfileInput; try { parsed = extensionProfileInputSchema.parse(input); } catch { throw new ExtensionError(400, 'Invalid extension profile'); }
     if (!replacements || typeof replacements !== 'object' || Array.isArray(replacements) || Object.entries(replacements).some(([name, token]) => !parsed.mcpServers.some(s => s.name === name && s.kind === 'https' && s.authentication === 'bearer') || (token !== null && (typeof token !== 'string' || !/^[\x21-\x7e]{1,4096}$/.test(token))))) throw new ExtensionError(400, 'Invalid secret replacement');
     await this.authorize(actor);
@@ -99,6 +99,7 @@ export class ExtensionProfileStore {
         const previous = old?.mcpServers.find(s => s.kind === 'catalog' && s.name === server.name && s.catalogId === server.catalogId && s.digest === server.digest);
         snapshot.secrets[server.name] = catalogSecrets.get(server.name) ?? (previous ? old?.secrets[server.name] : undefined) ?? { count: 0, configured: false };
       }
+      preflight(publicExtensionProfile(snapshot));
       await guard(trx);
       await trx('extension_profile_revisions').insert({ profile_id: profileId, revision: snapshot.revision, snapshot: JSON.stringify(snapshot), secrets_encrypted: sealExtensionSecrets(nextSecrets, identity(snapshot), this.environment) });
       await guard(trx); return snapshot;

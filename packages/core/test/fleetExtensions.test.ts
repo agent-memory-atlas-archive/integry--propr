@@ -6,7 +6,7 @@ import os from 'node:os';
 import { request as httpRequest } from 'node:http';
 import knex from 'knex';
 import { createHash, createHmac, randomBytes, randomUUID, ECDH } from 'node:crypto';
-import { canonicalFleetJson, FLEET_EXTENSION_CONTRACT, FLEET_EXTENSION_SCOPE, FLEET_EXTENSION_SCHEMA, FLEET_EXTENSION_LIMITS, fleetExtensionEnvelopeSchema, fleetExtensionRecipientSchema, encryptFleetExtensionSecret, type FleetExtensionRequest, type FleetExtensionIntent, type FleetExtensionAssertion } from '@propr/shared';
+import { canonicalFleetJson, FLEET_EXTENSION_CONTRACT, FLEET_EXTENSION_SCOPE, FLEET_EXTENSION_SCHEMA, FLEET_EXTENSION_LIMITS, fleetExtensionEnvelopeSchema, fleetExtensionProfileInputSchema, fleetExtensionRecipientSchema, encryptFleetExtensionSecret, type FleetExtensionRequest, type FleetExtensionIntent, type FleetExtensionAssertion } from '@propr/shared';
 import { up } from '../src/db/migrations/20261013210000_extension_profiles.js';
 import { up as grants } from '../src/db/migrations/20261013220000_extension_grant_network.js';
 import { ExtensionProfileStore } from '../src/extensions/extensionProfileStore.js';
@@ -251,7 +251,7 @@ test('browser authenticates Core key ownership and exact intended binding before
   for (const token of ['x', 'x'.repeat(4096)]) assert.equal(Buffer.from((await f.encrypt(first.recipient, token)).ciphertext, 'base64url').length, 4112);
 });
 
-test('private listener accepts eight encrypted fields for both create and update; request cap is shared', async t => {
+test('private listener completes worst-case schema-valid eight-field create/update within shared caps', async t => {
   const f = await fixture(t);
   const { listenFleetData } = await import('../../api/fleetDataListener.js');
   const listener = await listenFleetData(f.fleet, f.plane); f.cleanup(() => listener.shutdown());
@@ -261,7 +261,22 @@ test('private listener accepts eight encrypted fields for both create and update
       res.on('end', () => { const result = JSON.parse(Buffer.concat(chunks).toString()); res.statusCode === 200 ? resolve(result) : reject(new Error(result.error)); });
     }); req.on('error', reject); req.end(raw);
   });
-  const fullInput = { ...input, mcpServers: Array.from({ length: 8 }, (_, i) => ({ ...input.mcpServers[0], name: `docs${i}` })) };
+  // Six-byte JSON escapes maximize arbitrary string fields, including URLs. Native
+  // URL parsing permits these path characters; disable the profile to avoid I/O.
+  const bundles = [];
+  for (let i = 0; i < 8; i++) bundles.push(await f.store.importSkill('100', [{ path: 'SKILL.md', content: skill.toString('base64') }], { kind: 'github', repository: 'r'.repeat(99) + '/' + 'r'.repeat(100), commit: 'a'.repeat(40), directory: 'd'.repeat(240) }));
+  const fullInput = {
+    ...input, enabled: false, name: '\u0001'.repeat(100),
+    agentScope: Array.from({ length: 64 }, (_, i) => String(i).padEnd(100, 'a')),
+    repositoryScope: Array.from({ length: 64 }, (_, i) => String(i).padEnd(99, 'r') + '/' + 'r'.repeat(100)),
+    mcpServers: Array.from({ length: 8 }, (_, i) => ({
+      ...input.mcpServers[0], name: `docs${i}`.padEnd(48, 'a'),
+      url: 'https://8.8.8.8/' + '\u0001'.repeat(2048 - 'https://8.8.8.8/'.length),
+      tools: Array.from({ length: 64 }, (_, j) => String(j).padEnd(128, 't')),
+    })), skillBundleIds: bundles.map(bundle => bundle.id),
+  };
+  assert.equal(fleetExtensionProfileInputSchema.safeParse(fullInput).success, true);
+  assert.equal(fleetExtensionProfileInputSchema.safeParse({ ...fullInput, repositoryScope: ['r/'.padEnd(201, 'r')] }).success, false);
   let selection: ReturnType<typeof select> | undefined;
   for (const action of ['profile.create', 'profile.update'] as const) {
     const intent = action === 'profile.create' ? { action, input: fullInput } : { action, input: fullInput, selection: selection! };
@@ -271,15 +286,42 @@ test('private listener accepts eight encrypted fields for both create and update
       sealed.push(await f.encrypt(recipient, sentinel));
     }
     const raw = f.envelope({ ...intent, sealed }, { operationId });
-    assert.ok(Buffer.byteLength(raw) > 32768);
+    assert.ok(Buffer.byteLength(raw) > 150_953);
+    assert.equal(fleetExtensionEnvelopeSchema.safeParse(JSON.parse(raw)).success, true);
     assert.ok(Buffer.byteLength(raw) <= FLEET_EXTENSION_LIMITS.requestBytes);
-    const profile = (await send(raw)).result.profile;
+    const response = await send(raw);
+    assert.equal(response.state, 'completed');
+    assert.equal(response.operationId, operationId);
+    assert.ok(Buffer.byteLength(JSON.stringify(response)) <= FLEET_EXTENSION_LIMITS.responseBytes);
+    assert.ok(Buffer.byteLength(JSON.stringify(response)) > 32768);
+    assert.equal((await f.invoke({ action: 'operation.status', targetOperationId: operationId })).state, 'completed');
+    const profile = response.result.profile;
     for (const server of fullInput.mcpServers) assert.equal(profile.secrets[server.name].configured, true);
     selection = select(profile);
   }
   const oversized = 'x'.repeat(FLEET_EXTENSION_LIMITS.requestBytes + 1);
   await assert.rejects(f.plane.invoke(oversized), /fleet_extensions_unavailable/);
   await assert.rejects(send(oversized), /fleet_extensions_unavailable/);
+});
+
+test('oversized public bundle metadata rolls back create, update and disable before commit', async t => {
+  const f = await fixture(t);
+  // Native archive filenames are not schema-bounded. Such a stored descriptor
+  // must not make an otherwise valid remote mutation fail after committing.
+  const bundle = await f.store.importSkill('100', [{ path: 'SKILL.md', content: skill.toString('base64') }], { kind: 'archive', filename: '\u0001'.repeat(FLEET_EXTENSION_LIMITS.responseBytes) });
+  const profile = await f.store.save('100', { ...input, skillBundleIds: [bundle.id] });
+  for (const request of [
+    { action: 'profile.create' as const, input: { ...input, skillBundleIds: [bundle.id] }, sealed: [] },
+    { action: 'profile.update' as const, input: { ...input, skillBundleIds: [bundle.id] }, selection: select(profile), sealed: [] },
+    { action: 'profile.disable' as const, selection: select(profile) },
+  ]) {
+    const operationId = randomUUID();
+    await assert.rejects(f.invoke(request, { operationId }), /fleet_extensions_unavailable/);
+    assert.equal((await f.database('extension_profiles')).length, 1);
+    assert.equal((await f.database('extension_profiles').first()).revision, 1);
+    assert.equal((await f.database('extension_profile_revisions')).length, 1);
+    assert.equal((await f.invoke({ action: 'operation.status', targetOperationId: operationId })).state, 'fenced');
+  }
 });
 
 test('extension reservations count restart tombstones and release only proven unused slots', async t => {

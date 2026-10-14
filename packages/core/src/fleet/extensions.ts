@@ -104,6 +104,7 @@ export class FleetExtensionPlane {
   }
   private async dispatch(a: FleetExtensionAssertion, r: FleetExtensionRequest): Promise<unknown> {
     const actor = String(a.githubActorId); const guard = async (database?: Knex) => { await this.authorize(a, database); };
+    const preflightProfile = (profile: unknown) => { this.response(a, { profile }); };
     await guard();
     switch (r.action) {
       case 'profile.list': return { instanceId: await this.store.instanceId(), profiles: await this.store.list(actor) };
@@ -115,13 +116,13 @@ export class FleetExtensionPlane {
       case 'recipient.issue': return this.issue(a, r);
       case 'profile.create': case 'profile.update': {
         const replacements = await this.decrypt(a, r);
-        try { await guard(); return { profile: await this.store.save(actor, r.input, replacements, r.action === 'profile.update' ? r.selection : undefined, guard) }; }
+        try { await guard(); return { profile: await this.store.save(actor, r.input, replacements, r.action === 'profile.update' ? r.selection : undefined, guard, preflightProfile) }; }
         finally { for (const key of Object.keys(replacements)) delete replacements[key]; }
       }
       case 'profile.disable': {
         const profile = await this.store.read(actor, r.selection);
         const { version, name, agentScope, repositoryScope, mcpServers, skillBundleIds } = profile;
-        return { profile: await this.store.save(actor, { version, name, enabled: false, agentScope, repositoryScope, mcpServers, skillBundleIds }, {}, r.selection, guard) };
+        return { profile: await this.store.save(actor, { version, name, enabled: false, agentScope, repositoryScope, mcpServers, skillBundleIds }, {}, r.selection, guard, preflightProfile) };
       }
       case 'profile.delete': await this.store.delete(actor, r.selection, guard); return { deleted: true };
       case 'selection.validate': await this.store.assertLaunch(actor, r.selection, r.context); await guard(); return { selection: r.selection, valid: true };
@@ -151,6 +152,11 @@ export class FleetExtensionPlane {
         return { operationId: record.operationId, state: record.state };
       }
     }
+  }
+  private response(a: FleetExtensionAssertion, result: unknown): RecordResult {
+    const response: RecordResult = { contract: FLEET_EXTENSION_CONTRACT, operationId: a.operationId, state: 'completed', result };
+    if (Buffer.byteLength(JSON.stringify(response)) > FLEET_EXTENSION_LIMITS.responseBytes) throw new FleetRefusal();
+    return response;
   }
   async invoke(raw: string): Promise<RecordResult> {
     let issuedRecipientId: string | undefined;
@@ -186,8 +192,7 @@ export class FleetExtensionPlane {
       const result = await this.dispatch(a, r);
       if (r.action === 'recipient.issue') issuedRecipientId = (result as { recipientId: string }).recipientId;
       await this.authorize(a);
-      const response: RecordResult = { contract: FLEET_EXTENSION_CONTRACT, operationId: a.operationId, state: 'completed', result };
-      if (Buffer.byteLength(JSON.stringify(response)) > FLEET_EXTENSION_LIMITS.responseBytes) throw new FleetRefusal();
+      const response = this.response(a, result);
       // Journal records only outcome metadata. Lost replies require a new operation; no automatic retry.
       const completed = { assertion: a, operationId: a.operationId, state: 'completed' };
       await this.fleet.files.append(`extension-operation-${a.operationId}.json`, { ...completed, recordDigest: digest(completed) });
