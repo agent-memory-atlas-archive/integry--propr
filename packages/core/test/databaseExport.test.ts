@@ -40,12 +40,15 @@ async function fixture(t: test.TestContext) {
   return { root, source, db, exports, start };
 }
 async function settled(exports: DatabaseExports, id: string, authority = allow) {
-  for (let i = 0; i < 400; i++) {
+  // Allow the worker's 60-second execution deadline plus time to publish its
+  // terminal state on a busy CI runner. Date is mocked by the expiry tests.
+  const deadline = performance.now() + 65_000;
+  while (performance.now() < deadline) {
     const status = await exports.status('instance', exports.generation, id, 'admin', authority);
     if (status.state !== 'running') return status;
     await delay(10);
   }
-  throw new Error('Export did not settle');
+  throw new Error('Export did not settle within 65 seconds');
 }
 
 test('real WAL writer: coherent restorable customer database, integrity, metadata and DB-only privacy', async t => {
