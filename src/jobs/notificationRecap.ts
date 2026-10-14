@@ -10,11 +10,23 @@ function truncateAtWord(text: string, maximum = MAX_RECAP_CHARACTERS): string {
     return `${shortened.slice(0, lastSpace >= maximum * 0.6 ? lastSpace : undefined).trimEnd()}…`;
 }
 
+/**
+ * Drop HTML comments until none remain: one pass can splice a new `<!--`
+ * together (`<!<!---->--`), and an unclosed one hides the rest as HTML would.
+ */
+function stripHtmlComments(text: string, replacement = ''): string {
+    let previous: string;
+    do {
+        previous = text;
+        text = text.replace(/<!--[^]*?(?:-->|$)/g, replacement);
+    } while (text !== previous);
+    return text;
+}
+
 /** Convert an agent-authored Markdown summary into one safe, scannable Inbox line. */
 export function compactNotificationRecap(value: unknown): string | undefined {
     if (typeof value !== 'string') return undefined;
-    const lines = value
-        .replace(/<!--[^]*?-->/g, ' ')
+    const lines = stripHtmlComments(value, ' ')
         .replace(/!\[([^\]]*)\]\([^)]*\)/g, '$1')
         .replace(/\[([^\]]+)\]\([^)]*\)/g, '$1')
         .replace(/```[^\n]*\n?/g, ' ')
@@ -44,7 +56,7 @@ const MAX_SUMMARY_CHARACTERS = 20_000;
  */
 export function fullNotificationSummary(value: unknown): string | undefined {
     if (typeof value !== 'string') return undefined;
-    const summary = value.replace(/<!--[^]*?-->/g, '').trim();
+    const summary = stripHtmlComments(value).trim();
     if (!summary) return undefined;
     const characters = Array.from(summary);
     return characters.length <= MAX_SUMMARY_CHARACTERS

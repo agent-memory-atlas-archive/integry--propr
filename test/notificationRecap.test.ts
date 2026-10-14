@@ -71,6 +71,8 @@ describe('notification recaps', () => {
         const summary = '## Summary of Changes\n\n<!-- marker -->\n- Fixed the **Inbox** detail pane\n- Added tests';
         assert.equal(fullNotificationSummary(summary), '## Summary of Changes\n\n\n- Fixed the **Inbox** detail pane\n- Added tests');
         assert.equal(fullNotificationSummary('  <!-- only -->  '), undefined);
+        assert.equal(fullNotificationSummary('Done<!<!---->-- hidden -->'), 'Done');
+        assert.equal(fullNotificationSummary('Done <!-- unclosed'), 'Done');
         assert.equal(fullNotificationSummary(42), undefined);
         const long = fullNotificationSummary('word '.repeat(5_000))!;
         assert.equal(Array.from(long).length, 20_000);
