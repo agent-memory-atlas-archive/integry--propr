@@ -54,13 +54,23 @@ export const fleetExtensionRecipientSchema = z.strictObject({
   recipientId: uuid, algorithm: z.literal('P-256-ECDH/HKDF-SHA256/AES-256-GCM'), publicKey: opaque.length(87), binding: fleetExtensionRecipientBindingSchema, signature: opaque.length(86),
 });
 export type FleetExtensionRecipient = z.infer<typeof fleetExtensionRecipientSchema>;
+/** Exact public native descriptor; strict parsing refuses request-only and credential fields. */
+export const fleetExtensionSkillBundleSchema = z.strictObject({
+  id: uuid, instanceId: uuid, digest: hash, name: z.string(), files: z.number().int().nonnegative(), bytes: z.number().int().nonnegative(),
+  source: z.discriminatedUnion('kind', [
+    z.strictObject({ kind: z.literal('github'), repository: z.string(), commit: z.string().regex(/^[0-9a-f]{40}$/), directory: z.string() }),
+    z.strictObject({ kind: z.literal('archive'), filename: z.string() }),
+  ]),
+  requirements: z.array(z.string()), createdAt: z.number().int().nonnegative(), auditActor: z.string().regex(/^[1-9][0-9]*$/),
+});
 export const FLEET_EXTENSION_SCHEMA = canonicalFleetJson({
   contract: FLEET_EXTENSION_CONTRACT, envelope: z.toJSONSchema(fleetExtensionEnvelopeSchema), limits: FLEET_EXTENSION_LIMITS,
   canonical: 'sorted-keys-utf8-json', authentication: 'HMAC-SHA256-canonical-assertion', assertionSeconds: 60, clockSkewSeconds: 5,
   secret: 'P-256-ECDH/HKDF-SHA256/AES-256-GCM', secretEncoding: 'base64url-unpadded', secretPlaintext: 'printable-ASCII-1..4096-padded-with-zero-to-4096',
   secretAAD: 'canonical-recipient-binding', recipientAuthentication: 'Ed25519-independent-native-SPKI-pin-and-exact-expected-binding', secretHKDF: { salt: 'UTF8-recipientId', info: 'UTF8-propr.fleet-extensions.v1' },
-  skills: { exactGit: true, upload: false }, error: 'fleet_extensions_unavailable',
-  mutationResponsePreflight: { actions: ['profile.create', 'profile.update', 'profile.disable'], policy: 'exact-completed-response-within-responseBytes-before-transaction-commit' },
+  authority: { role: 'admin', source: 'local', permission: 'instance.manage_settings', durable: true },
+  skills: { exactGit: true, upload: false, bundle: z.toJSONSchema(fleetExtensionSkillBundleSchema) }, error: 'fleet_extensions_unavailable',
+  mutationResponsePreflight: { actions: ['profile.create', 'profile.update', 'profile.disable', 'skill.import'], policy: 'exact-completed-response-within-responseBytes-before-transaction-commit' },
   result: ['contract', 'operationId', 'state=completed', 'result'], recipient: z.toJSONSchema(fleetExtensionRecipientSchema),
   projections: {
     'profile.list': ['instanceId', 'profiles=public-ExtensionProfileRevision[]'],

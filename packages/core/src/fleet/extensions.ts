@@ -1,7 +1,7 @@
 import type { Knex } from 'knex';
 import { createECDH, createDecipheriv, hkdfSync, randomUUID, createHmac, timingSafeEqual, createPrivateKey, createPublicKey, sign, createHash } from 'node:crypto';
 import fs from 'node:fs/promises';
-import { canonicalFleetJson, FLEET_EXTENSION_CONTRACT, FLEET_EXTENSION_SCHEMA, FLEET_EXTENSION_LIMITS, fleetExtensionEnvelopeSchema, type FleetExtensionAssertion, type FleetExtensionRequest, fleetExtensionRecipientSchema } from '@propr/shared';
+import { canonicalFleetJson, FLEET_EXTENSION_CONTRACT, FLEET_EXTENSION_SCHEMA, FLEET_EXTENSION_LIMITS, fleetExtensionEnvelopeSchema, type FleetExtensionAssertion, type FleetExtensionRequest, fleetExtensionRecipientSchema, fleetExtensionSkillBundleSchema } from '@propr/shared';
 import { digest, FleetRefusal } from './contract.js';
 import type { FleetDataPlane } from './dataPlane.js';
 import { ExtensionProfileStore } from '../extensions/extensionProfileStore.js';
@@ -113,7 +113,7 @@ export class FleetExtensionPlane {
       case 'profile.history': return { revisions: await this.store.history(actor, r.profileId) };
       case 'catalog.list': return { catalog: await this.store.catalog.publicEntries() };
       case 'skill.list': return { bundles: await this.store.listSkillBundles(actor) };
-      case 'skill.import': return { bundle: await importExactGitSkill(this.store, actor, r, guard) };
+      case 'skill.import': return { bundle: await importExactGitSkill(this.store, actor, r, { guard, preflight: bundle => { fleetExtensionSkillBundleSchema.parse(bundle); this.response(a, { bundle }); } }) };
       case 'recipient.issue': return this.issue(a, r, rawIntent);
       case 'profile.create': case 'profile.update': return this.saveProfile(a, r, rawIntent);
       case 'profile.disable': {
