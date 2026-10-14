@@ -13,6 +13,16 @@ import type { RegisteredRoute } from './types.js';
  * or an `MCP_AUTH_PATHS` entry is not covered by a listed or registry route.
  */
 export const DIRECT_ROUTE_REGISTRATIONS: readonly RegisteredRoute[] = [
+  { method: 'post', path: '/api/extensions/mcp/:serverName', auth: 'extensionGrant', source: 'server.ts' },
+  { method: 'get', path: '/api/instance/extensions/v1', auth: 'member', permission: 'instance.manage_settings', source: 'server.ts' },
+  { method: 'post', path: '/api/instance/extensions/v1/profiles', auth: 'member', permission: 'instance.manage_settings', source: 'server.ts' },
+  { method: 'get', path: '/api/instance/extensions/v1/profiles/:profileId/history', auth: 'member', permission: 'instance.manage_settings', source: 'server.ts' },
+  { method: 'post', path: '/api/instance/extensions/v1/delete', auth: 'member', permission: 'instance.manage_settings', source: 'server.ts' },
+  { method: 'post', path: '/api/instance/extensions/v1/validate', auth: 'member', permission: 'instance.manage_settings', source: 'server.ts' },
+  { method: 'post', path: '/api/instance/extensions/v1/skills/archive', auth: 'member', permission: 'instance.manage_settings', source: 'server.ts' },
+  { method: 'post', path: '/api/instance/extensions/v1/skills/github', auth: 'member', permission: 'instance.manage_settings', source: 'server.ts' },
+  { method: 'post', path: '/api/instance/extensions/v1/skills/github-source', auth: 'member', permission: 'instance.manage_settings', source: 'server.ts' },
+  { method: 'post', path: '/api/instance/extensions/v1/tools/discover', auth: 'member', permission: 'instance.manage_settings', source: 'server.ts' },
   { method: 'get', path: '/health', auth: 'public', source: 'server.ts' },
   { method: 'post', path: '/webhook', auth: 'webhook', source: 'server.ts' },
   { method: 'get', path: '/api/compatibility', auth: 'public', source: 'server.ts' },

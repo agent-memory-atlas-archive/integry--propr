@@ -76,12 +76,12 @@ const DesktopTaskHeader: React.FC<DesktopTaskHeaderProps> = ({ headerProps, cont
   return (
     <div data-testid="task-header-tiers" className="flex flex-col gap-1 border-b border-slate-200 px-6 py-2">
       {breadcrumb && <TaskBreadcrumb label={crumbLabel(taskInfo)} />}
-      <div data-testid="task-header-identity" className="flex min-h-8 items-center justify-between gap-3">
-        <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
+      <div data-testid="task-header-identity" className="flex min-h-8 flex-wrap items-center justify-between gap-x-3 gap-y-1">
+        <div className="flex min-w-[12rem] flex-1 flex-wrap items-center gap-x-2 gap-y-1">
           <ContextStrip {...contextStripProps} part="git" />
           <TaskStatusBadge {...headerProps} />
         </div>
-        <div className="flex flex-none items-center gap-1">
+        <div className="flex min-w-0 max-w-full flex-wrap items-center justify-end gap-1">
           <ActionBar {...actionBarProps} />
           {paneControls && (
             <div className="ml-1 flex items-center gap-0.5 border-l border-slate-200 pl-2">{paneControls}</div>

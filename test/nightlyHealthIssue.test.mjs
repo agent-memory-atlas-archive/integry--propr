@@ -157,6 +157,21 @@ describe("nightly health issue", () => {
     assert.match(excerpt[60], /40 more lines/);
   });
 
+  it("starts a long TAP excerpt near the first failed test", () => {
+    const tap = [
+      ...Array.from({ length: 100 }, (_, index) => `passing test ${index}`),
+      "provider quota reached",
+      "    # Subtest: multi-model parallel",
+      "    not ok 2 - multi-model parallel",
+      "      error: provider quota reached",
+      ...Array.from({ length: 100 }, (_, index) => `later detail ${index}`),
+    ].join("\n");
+    const excerpt = summarizeLog(tap);
+    assert.match(excerpt, /provider quota reached/);
+    assert.match(excerpt, /not ok 2 - multi-model parallel/);
+    assert.doesNotMatch(excerpt, /passing test 0/);
+  });
+
   it("extracts the failing step from a timestamped job log", () => {
     const log = [
       "2026-10-06T02:00:00.0000000Z ##[group]Run npm ci",
@@ -206,6 +221,56 @@ describe("nightly health issue", () => {
     } finally {
       rmSync(diagnostics, { recursive: true, force: true });
     }
+  });
+
+  it("reports failed workflow needs and sanitized suite output when GitHub's jobs API returns 502", async () => {
+    const diagnostics = mkdtempSync(join(tmpdir(), "nightly-health-"));
+    try {
+      writeFileSync(join(diagnostics, "e2e_output.sanitized.txt"), "Model task failed: provider quota reached\n");
+      const github = fakeGitHub({ issues: [healthIssue(31)] });
+      github.rest.actions.listJobsForWorkflowRunAttempt = async () => {
+        throw Object.assign(new Error("Server Error"), { status: 502 });
+      };
+      const messages = [];
+      const result = await runNightlyHealth({
+        github,
+        context: { repo: { owner: OWNER, repo: REPO }, ref: "refs/heads/main", runId: 42, sha: SHA, serverUrl: "https://github.com" },
+        core: { info: (message) => messages.push(message) },
+        env: {
+          NEEDS_JSON: JSON.stringify({
+            "full-tests": { result: "success" },
+            "e2e-tests": { result: "failure", outputs: { e2e_tests: "failure" } },
+            "desktop-package": { result: "failure" },
+          }),
+          NIGHTLY_SUITE_JOBS: '{"full-tests":"Run Full Test Suite","e2e-tests":"Run E2E Test Suite"}',
+          NIGHTLY_DIAGNOSTICS_DIR: diagnostics,
+          NIGHTLY_HEALTH_JOB_NAME: "Nightly test health",
+        },
+      });
+      assert.deepEqual(result, { action: "commented", number: 31 });
+      const body = github.calls.find(({ name }) => name === "createComment").params.body;
+      assert.match(body, /Run E2E Test Suite \(Run E2E Tests\)/);
+      assert.match(body, /Nightly desktop package/);
+      assert.match(body, /provider quota reached/);
+      assert.ok(messages.some((message) => message.includes("HTTP 502")));
+      assert.ok(!github.calls.some(({ name }) => name === "downloadJobLogs"));
+    } finally {
+      rmSync(diagnostics, { recursive: true, force: true });
+    }
+  });
+
+  it("does not hide GitHub authorization errors behind the workflow-needs fallback", async () => {
+    const github = fakeGitHub();
+    github.rest.actions.listJobsForWorkflowRunAttempt = async () => {
+      throw Object.assign(new Error("Forbidden"), { status: 403 });
+    };
+    await assert.rejects(
+      collectFailures({
+        github, owner: OWNER, repo: REPO, runId: 42, runAttempt: 1,
+        fallbackJobs: [{ name: "Run E2E Test Suite", conclusion: "failure" }],
+      }),
+      (error) => error.status === 403,
+    );
   });
 
   const suiteFailure = async ({ outcomes, files, jobLog }) => {

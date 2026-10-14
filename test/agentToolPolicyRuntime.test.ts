@@ -1,11 +1,12 @@
 import { after, before, describe, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync, mkdirSync } from 'node:fs';
 import { createServer, type IncomingMessage, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import zlib from 'node:zlib';
 
 import {
@@ -28,6 +29,8 @@ import type { AgentToolPolicy } from '../packages/core/src/agents/types.ts';
 
 const TOKEN = 'propr_mcp_runtime_token_0123456789';
 const MCP_TOOL = 'policy_probe';
+const LOCAL_SENTINEL = 'UNMISTAKABLE_LOCAL_CATALOG_RUNTIME_SENTINEL';
+const localPolicy = (): AgentToolPolicy => ({ allowWeb: false, exclusiveMcp: true, localMcpServers: [{ name: 'local', bridgeConfig: Buffer.from(JSON.stringify({ name: 'local', executable: process.execPath, args: ['-e', `const rl=require('node:readline').createInterface({input:process.stdin});rl.on('line',line=>{const rpc=JSON.parse(line);if(rpc.id===undefined)return;const result=rpc.method==='initialize'?{protocolVersion:'2025-03-26',capabilities:{tools:{}},serverInfo:{name:'fixture',version:'1'}}:rpc.method==='tools/list'?{tools:[{name:'policy_probe',description:process.env.API_KEY,inputSchema:{type:'object',properties:{}}},{name:'unselected',inputSchema:{type:'object',properties:{}}}]}:{content:[{type:'text',text:process.env.API_KEY}]};console.log(JSON.stringify({jsonrpc:'2.0',id:rpc.id,result}));});`], tools: ['policy_probe'], secretEnv: { API_KEY: 'PROPR_EXTENSION_STDIO_0_0_SECRET' } })).toString('base64url'), env: { PROPR_EXTENSION_STDIO_0_0_SECRET: LOCAL_SENTINEL } }] });
 
 function pinnedVersion(arg: string): string {
     const match = readFileSync(new URL('../Dockerfile.agent', import.meta.url), 'utf8').match(new RegExp(`^ARG ${arg}=(\\S+)$`, 'm'));
@@ -93,9 +96,10 @@ function startStandIn(captured: Captured): Promise<Server> {
 /** Resolves with the tail of stderr so a run that never reaches the stand-in explains why. */
 function runCli(command: string, args: string[], env: Record<string, string>, stdin: string): Promise<string> {
     return new Promise((resolve, reject) => {
-        const child = spawn(command, args, { env, stdio: ['pipe', 'ignore', 'pipe'] });
+        const child = spawn(command, args, { env, stdio: ['pipe', 'pipe', 'pipe'] });
         let stderr = '';
-        child.stderr.on('data', chunk => { stderr = (stderr + chunk.toString()).slice(-2000); });
+        child.stdout.on('data', chunk => { assert.ok(!chunk.toString().includes(LOCAL_SENTINEL)); });
+        child.stderr.on('data', chunk => { assert.ok(!chunk.toString().includes(LOCAL_SENTINEL)); stderr = (stderr + chunk.toString()).slice(-2000); });
         const timer = setTimeout(() => { child.kill('SIGKILL'); reject(new Error(`${command} did not finish`)); }, 90_000);
         child.on('error', reject);
         child.on('close', () => { clearTimeout(timer); resolve(stderr.trim()); });
@@ -128,20 +132,26 @@ function runtimeHarness(build: (policy: AgentToolPolicy) => ToolPolicyLaunchArgs
         server?.close();
         if (home) rmSync(home, { recursive: true, force: true });
     });
-    return async (policy: AgentToolPolicy, mcp: boolean): Promise<RuntimeObservation> => {
+    return async (policy: AgentToolPolicy, mcp: boolean, ambient = false): Promise<RuntimeObservation> => {
         captured.mcpAuthorizations.length = 0;
         captured.mcpMethods.length = 0;
         captured.modelBodies.length = 0;
         const baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+        mkdirSync(join(home, '.codex'), { recursive: true });
+        writeFileSync(join(home, '.codex', 'config.toml'), ambient ? `[mcp_servers.ambient]\nurl="${baseUrl}/mcp-ambient"\n` : '');
+        writeFileSync(join(home, '.claude.json'), JSON.stringify(ambient ? { mcpServers: { ambient: { type: 'http', url: `${baseUrl}/mcp-ambient` } } } : {}));
         const withMcp: AgentToolPolicy = mcp ? {
             ...policy,
             mcpServers: [{ name: PROPR_MCP_SERVER_NAME, url: `${baseUrl}/mcp`, bearerTokenEnv: PROPR_MCP_BEARER_TOKEN_ENV, bearerToken: TOKEN }],
         } : policy;
         const launchArgs = build(withMcp);
         assert.ok(!launchArgs.cliArgs.some(arg => arg.includes(TOKEN)), 'the token never appears in the arguments');
+        // Outside Docker, map only the image-installed adapter path to its exact source.
+        if (policy.localMcpServers?.length) launchArgs.cliArgs = launchArgs.cliArgs.map(arg => arg.replaceAll('/opt/propr/extension-stdio-bridge.mjs', fileURLToPath(new URL('../scripts/extension-stdio-bridge.mjs', import.meta.url))));
         const { command, args, env } = launch({ baseUrl, home, launchArgs });
         const stderr = await runCli(command, args, { PATH: process.env.PATH ?? '', HOME: home, ...env, ...launchArgs.env }, 'Reply with OK.');
         assert.ok(captured.modelBodies.length > 0, `${command} reached the model stand-in${stderr ? `; stderr: ${stderr}` : ''}`);
+        assert.ok(!JSON.stringify(captured).includes(LOCAL_SENTINEL));
         return { ...captured, tools: toolNames(captured.modelBodies[0]) };
     };
 }
@@ -159,6 +169,19 @@ describe('Claude Code runtime honours the tool policy', { skip: skipUnlessPinned
     test('without a restriction the web tools are offered', { timeout: 120_000 }, async () => {
         const { tools } = await run({ allowWeb: true }, false);
         assert.ok(tools.includes('WebFetch') && tools.includes('WebSearch'), `tools: ${tools.join(', ')}`);
+    });
+
+    test('local catalog adapter offers only selected tools without credential serialization', { timeout: 120_000 }, async () => {
+        const { tools } = await run(localPolicy(), false, true);
+        assert.ok(tools.includes('mcp__local__policy_probe'), tools.join(', '));
+        assert.ok(!tools.some(name => name.includes('unselected') || name.includes('ambient')));
+    });
+
+    test('exclusive profile catalogs retain only selected MCP tools with env authentication', { timeout: 120_000 }, async () => {
+        const { tools, mcpAuthorizations } = await run({ allowWeb: false, exclusiveMcp: true }, true, true);
+        assert.ok(tools.includes(`mcp__${PROPR_MCP_SERVER_NAME}__${MCP_TOOL}`));
+        assert.ok(!tools.some(name => name.includes('ambient')), tools.join(', '));
+        assert.ok(mcpAuthorizations.every(header => header === `Bearer ${TOKEN}`));
     });
 
     test('web off removes the web tools and the MCP server authenticates with the expanded token', { timeout: 120_000 }, async () => {
@@ -189,6 +212,21 @@ describe('Codex runtime honours the tool policy', { skip: skipUnlessPinned('code
         assert.ok(tools.includes('web_search'), `tools: ${tools.join(', ')}`);
     });
 
+    test('local catalog adapter uses native stdio and excludes ambient tools and credential values', { timeout: 120_000 }, async () => {
+        const { tools, modelBodies } = await run(localPolicy(), false, true);
+        assert.ok(!tools.some(name => name.includes('unselected') || name.includes('ambient')));
+        // Deferred tools still carry the selected server inventory in Responses input.
+        assert.match(JSON.stringify(modelBodies), /local/);
+    });
+
+    test('exclusive profile catalogs retain only selected MCP tools with env authentication', { timeout: 120_000 }, async () => {
+        const { tools, mcpAuthorizations, mcpMethods } = await run({ allowWeb: false, exclusiveMcp: true }, true, true);
+        assert.ok(mcpMethods.includes('tools/list'));
+        assert.ok(mcpAuthorizations.length > 0);
+        assert.ok(!tools.some(name => name.includes('ambient')), tools.join(', '));
+        assert.ok(mcpAuthorizations.every(header => header === `Bearer ${TOKEN}`));
+    });
+
     test('web off removes web search and the MCP server authenticates from the token variable', { timeout: 120_000 }, async () => {
         const { tools, mcpAuthorizations, mcpMethods } = await run({ allowWeb: false }, true);
         assert.ok(!tools.includes('web_search'), `tools: ${tools.join(', ')}`);
@@ -197,4 +235,55 @@ describe('Codex runtime honours the tool policy', { skip: skipUnlessPinned('code
         assert.ok(mcpAuthorizations.length > 0);
         assert.ok(mcpAuthorizations.every(header => header === `Bearer ${TOKEN}`), `Authorization: ${mcpAuthorizations.join(', ')}`);
     });
+});
+
+describe('Codex extension configuration on the pinned CLI', { skip: skipUnlessPinned('codex', 'CODEX_CLI_VERSION') }, () => {
+    test('ignoring user config also removes the operator provider and base URL', { timeout: 120_000 }, async () => {
+        const home = mkdtempSync(join(tmpdir(), 'codex-extension-provider-'));
+        const requests: string[] = [];
+        const server = createServer(async (req, res) => {
+            await readBody(req); requests.push(req.url ?? '');
+            res.writeHead(400, { 'content-type': 'application/json' }).end(JSON.stringify({ error: { message: 'fixture ends here' } }));
+        });
+        await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+        try {
+            const baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+            writeFileSync(join(home, 'config.toml'), `model_provider="operator"\n[model_providers.operator]\nname="Operator"\nbase_url="${baseUrl}/operator"\nwire_api="responses"\nenv_key="FIXTURE_OPERATOR_KEY"\nrequest_max_retries=0\nstream_max_retries=0\n`);
+            const env = { PATH: process.env.PATH ?? '', HOME: home, CODEX_HOME: home, FIXTURE_OPERATOR_KEY: 'synthetic-operator-key' };
+            const args = ['exec', '--ephemeral', '--json', '--dangerously-bypass-approvals-and-sandbox', '--skip-git-repo-check', '--model', 'gpt-5.5', '-c', 'features.multi_agent=false', '-'];
+            const ordinary = await runCli('codex', args, env, 'Reply OK.');
+            assert.ok(requests.some(url => url.startsWith('/operator/')), ordinary);
+            requests.length = 0;
+            const exclusive = await runCli('codex', [...args.slice(0, -1), ...codexToolPolicyArgs({ allowWeb: false, exclusiveMcp: true }).cliArgs, '-c', 'model_provider="operator"', '-'], env, 'Reply OK.');
+            assert.equal(requests.length, 0);
+            assert.match(exclusive, /[Pp]rovider.*operator.*not found/);
+        } finally { server.close(); rmSync(home, { recursive: true, force: true }); }
+    });
+});
+
+test('Codex entrypoint rejects container project ancestry after setup and skips ignored user configuration', () => {
+    const script = readFileSync(new URL('../scripts/codex-entrypoint.sh', import.meta.url), 'utf8');
+    const guard = script.slice(script.indexOf('if [ "${PROPR_EXTENSION_EXCLUSIVE_MCP'), script.indexOf('# If arguments are provided'));
+    assert.ok(guard.includes('cannot load project MCP configuration'));
+    const root = mkdtempSync(join(tmpdir(), 'codex-container-ancestry-'));
+    const workspace = join(root, 'home', 'node', 'workspace');
+    const userHome = join(root, 'home', 'node', '.codex');
+    mkdirSync(workspace, { recursive: true }); mkdirSync(userHome);
+    writeFileSync(join(userHome, 'config.toml'), 'model_provider="operator"');
+    const containerGuard = guard.replace('cd /home/node/workspace', `cd '${workspace}'`);
+    const run = (exclusive: string) => spawnSync('bash', ['-c', `set -e\n${containerGuard}`], { env: { ...process.env, CODEX_HOME: userHome, PROPR_EXTENSION_EXCLUSIVE_MCP: exclusive }, encoding: 'utf8' });
+    try {
+        assert.equal(run('1').status, 0);
+        // A repository setup hook may create this after host-side validation.
+        mkdirSync(join(workspace, '.codex')); writeFileSync(join(workspace, '.codex', 'config.toml'), '[mcp_servers.ambient]\ncommand="unselected"');
+        assert.equal(run('1').status, 1); assert.match(run('1').stderr, /project MCP configuration/);
+        assert.equal(run('0').status, 0);
+        rmSync(join(workspace, '.codex'), { recursive: true });
+        mkdirSync(join(root, 'home', '.codex')); writeFileSync(join(root, 'home', '.codex', 'config.toml'), '[mcp_servers.ambient]');
+        assert.equal(run('1').status, 1);
+        rmSync(workspace, { recursive: true });
+        const missing = spawnSync('bash', ['-c', containerGuard], { env: { ...process.env, CODEX_HOME: userHome, PROPR_EXTENSION_EXCLUSIVE_MCP: '1' }, encoding: 'utf8', timeout: 2000 });
+        assert.equal(missing.status, 1);
+        assert.match(missing.stderr, /workspace unavailable/);
+    } finally { rmSync(root, { recursive: true, force: true }); }
 });

@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { INSTANCE_PERMISSIONS, MAX_RUN_COST_CAP_USD, MAX_TASK_ASSIGNEES } from '@propr/shared';
+import { extensionProfileInputSchema, extensionSelectionSchema, INSTANCE_PERMISSIONS, MAX_RUN_COST_CAP_USD, MAX_TASK_ASSIGNEES } from '@propr/shared';
 
 /**
  * Request and response schemas for the dashboard HTTP API reference.
@@ -198,7 +198,13 @@ export const TaskHistory = component('TaskHistory', z.object({
   budget: z.object({}).loose().optional().describe('Spend so far against the task\'s cost cap, when a cap applies.'),
 }).loose(), 'A task together with its lifecycle events.');
 
+export const ExtensionProfileInput = component('ExtensionProfileInput', extensionProfileInputSchema as unknown as z.ZodType, 'Strict shared v1 contract. Operator catalog descriptors accept only immutable catalogId/digest and selected tools/capability; customer commands, arguments, environment and mount paths are rejected.');
+export const ExtensionSelection = component('ExtensionSelection', extensionSelectionSchema as unknown as z.ZodType);
+export const ExtensionProfileSave = component('ExtensionProfileSave', z.strictObject({ input: ExtensionProfileInput, expected: ExtensionSelection.optional(), secrets: z.record(z.string(), z.string().nullable()).optional() }));
+
 export const TaskSubmissionRequest = component('TaskSubmissionRequest', z.object({
+  extensionProfile: ExtensionSelection.nullable().optional(),
+  extensionAllowWrite: z.boolean().optional().describe('Explicit write grant for this exact authenticated coding submission and initial run; omitted is false. Requires an extension selection. Never inherited by label retries.'),
   repository: z.string().regex(/^[\w.-]+\/[\w.-]+$/).describe('`owner/name` of an enabled repository you can push to.'),
   instruction: z.string().min(1).max(50_000).regex(/\S/).describe('What the agent should do; becomes the GitHub issue body. Must not be only whitespace.'),
   agentAlias: z.string().optional().describe('Agent to route to. Omit to use the instance default.'),

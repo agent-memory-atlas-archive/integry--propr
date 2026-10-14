@@ -580,3 +580,5 @@ export * from './assignment.js';
 
 export * from './instanceStorage.js';
 export * from './fleetData.js';
+
+export * from './extensionProfiles.js';

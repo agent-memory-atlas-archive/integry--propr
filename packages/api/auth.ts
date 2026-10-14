@@ -40,6 +40,13 @@ import { githubUserGrantService } from './githubUserGrantService.js';
 import { rememberCreator } from './services/creatorProjection.js';
 import './authTypes.js';
 import { timeApiStage } from './apiPerformanceTiming.js';
+import { createCorsOriginValidator } from './corsValidation.js';
+
+declare module 'express-session' {
+    interface SessionData {
+        csrfToken?: string;
+    }
+}
 
 export { refreshGitHubTokenIfNeeded } from './authGithubTokens.js';
 export { getSessionCookieDomain, shouldUseSecureSessionCookie } from './authSession.js';
@@ -188,6 +195,42 @@ async function completeAuthenticatedSessionWithPreviewCredential(req: Request, r
     completeAuthenticatedSession(req, res);
 }
 
+/** Protect extension management without changing unrelated session routes. */
+export function createSessionCsrfProtection(
+    frontendUrl: string,
+    cookieDomain: string | undefined,
+): RequestHandler {
+    const validateOrigin = createCorsOriginValidator(frontendUrl, cookieDomain);
+    return (req, res, next) => {
+        // Installed after Passport's session middleware and before any bearer
+        // authentication. Explicit credentials without a logged-in session do
+        // not confer ambient browser authority.
+        if (!/^\/api\/instance\/extensions\/v1(?:\/|$)/i.test(req.path) || !req.isAuthenticated()) { next(); return; }
+
+        if (['GET', 'HEAD', 'OPTIONS'].includes(req.method)) {
+            req.session.csrfToken ??= randomBytes(32).toString('base64url');
+            res.set('X-CSRF-Token', req.session.csrfToken);
+            res.set('Cache-Control', 'no-store');
+            next();
+            return;
+        }
+        if (req.session.csrfToken && req.get('X-CSRF-Token') === req.session.csrfToken) {
+            next();
+            return;
+        }
+
+        // Browser mutations supply Origin even on same-origin requests. Never
+        // accept a missing Origin merely because the CORS validator permits
+        // native clients: cookie clients without Origin must send the token.
+        const origin = req.get('Origin');
+        if (!origin) { res.status(403).json({ error: 'CSRF validation failed' }); return; }
+        validateOrigin(origin, (error, allowed) => {
+            if (error || !allowed) { res.status(403).json({ error: 'CSRF validation failed' }); return; }
+            next();
+        });
+    };
+}
+
 export function setupAuth(app: Express, demoModeAtStartup = isDemoMode()): SocketAuthMiddlewareBundle {
     configureDemoMode(demoModeAtStartup);
     const browserAuthMode = demoModeAtStartup ? 'disabled' : resolveBrowserAuthMode();
@@ -253,6 +296,7 @@ export function setupAuth(app: Express, demoModeAtStartup = isDemoMode()): Socke
         app.use(sessionMiddleware);
         app.use(passportInitializeMiddleware);
         app.use(passportSessionMiddleware);
+        app.use(createSessionCsrfProtection(process.env.FRONTEND_URL!, cookieDomain));
 
         if (browserAuthMode === 'github') {
             passport.use(createGitHubOAuthStrategy({

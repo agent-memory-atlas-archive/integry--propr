@@ -25,6 +25,7 @@ export interface AutomationDefinitionAttachment {
 }
 
 export interface AutomationDefinitionRecord {
+  extensionProfile?: import('@propr/shared').ExtensionSelection | null;
   id: string;
   ownerId: string;
   name: string;
@@ -133,7 +134,7 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
 
 const json = (method: string, body?: unknown): RequestInit => ({
   method,
-  ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+  ...(body === undefined ? {} : { body: JSON.stringify(body), ...((body as { extensionProfile?: unknown })?.extensionProfile ? { headers: { 'X-ProPR-Extensions': '1' } } : {}) }),
 });
 
 const query = (page: Page = {}): string => {

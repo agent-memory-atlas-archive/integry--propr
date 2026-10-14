@@ -14,7 +14,7 @@ import type { RouteMethod } from '../routeRegistry.js';
  * - `browserSession`: a browser session cookie only (HTML consent pages).
  * - `fleetSecret`: the hosted Fleet control secret (`x-propr-fleet-secret`).
  */
-export type RouteAuth = 'member' | 'public' | 'instanceToken' | 'mcp' | 'webhook' | 'browserSession' | 'fleetSecret';
+export type RouteAuth = 'member' | 'public' | 'instanceToken' | 'mcp' | 'webhook' | 'browserSession' | 'fleetSecret' | 'extensionGrant';
 
 export interface RegisteredRoute {
   method: RouteMethod;

@@ -19,6 +19,14 @@ const MAX_LINE_LENGTH = 400;
 // GitHub rejects issue and comment bodies over 65536 characters.
 const MAX_BODY_LENGTH = 60000;
 const FAILED_CONCLUSIONS = new Set(["failure", "timed_out"]);
+const FALLBACK_JOB_NAMES = {
+  "full-tests": "Run Full Test Suite",
+  "e2e-tests": "Run E2E Test Suite",
+  "native-electron": "Nightly Native Electron (hosted)",
+  "desktop-package": "Nightly desktop package",
+  "desktop-connect": "Nightly Packaged Connect",
+  "desktop-nightly-download": "Nightly desktop download",
+};
 
 // ProPR only admits issues carrying a configured trigger label (`AI` by
 // default, `llm-*` for model selection), so this issue must never carry one.
@@ -54,14 +62,16 @@ export function nightlyOutcome(needs) {
 const stripTimestamp = (line) => line.replace(/^\d{4}-\d\d-\d\dT[\d:.]+Z ?/, "");
 const clip = (line) => (line.length > MAX_LINE_LENGTH ? `${line.slice(0, MAX_LINE_LENGTH)}…` : line);
 
-// Prefers the failure summary scripts/run-test-suite.mjs prints last; falls
-// back to the first lines of the output.
+// Prefers the failure summary scripts/run-test-suite.mjs prints last. TAP
+// output has no such summary, so show the first failed test and its context.
 export function summarizeLog(text, maxLines = EXCERPT_LINES) {
   const lines = String(text ?? "").replace(/\r\n/g, "\n").split("\n").map(stripTimestamp);
   while (lines.length > 0 && lines[lines.length - 1].trim() === "") lines.pop();
   if (lines.length === 0) return "";
   const summaryStart = lines.findLastIndex((line) => /^\d+\/\d+ test runs failed\b/.test(line));
-  const selected = summaryStart >= 0 ? lines.slice(summaryStart) : lines;
+  const tapFailure = lines.findIndex((line) => /^\s*not ok \d+ -/.test(line));
+  const selected = summaryStart >= 0 ? lines.slice(summaryStart)
+    : tapFailure >= 0 ? lines.slice(Math.max(0, tapFailure - 5)) : lines;
   const excerpt = selected.slice(0, maxLines).map(clip);
   if (selected.length > maxLines) excerpt.push(`… ${selected.length - maxLines} more lines in the run log`);
   return excerpt.join("\n");
@@ -226,14 +236,21 @@ function suiteArtifactExcerpt(diagnosticsDir, failedSteps) {
  * Each suite job's excerpt comes from the sanitized output artifact of its
  * failed test step; anything else uses the GitHub job log.
  */
-export async function collectFailures({ github, owner, repo, runId, runAttempt, diagnosticsDir, suiteJobs = {}, currentJobName, log = () => {} }) {
-  const jobs = await github.paginate(github.rest.actions.listJobsForWorkflowRunAttempt, {
-    owner,
-    repo,
-    run_id: runId,
-    attempt_number: runAttempt,
-    per_page: 100,
-  });
+export async function collectFailures({ github, owner, repo, runId, runAttempt, diagnosticsDir, suiteJobs = {}, currentJobName, fallbackJobs = [], log = () => {} }) {
+  let jobs;
+  try {
+    jobs = await github.paginate(github.rest.actions.listJobsForWorkflowRunAttempt, {
+      owner,
+      repo,
+      run_id: runId,
+      attempt_number: runAttempt,
+      per_page: 100,
+    });
+  } catch (error) {
+    if (!Number.isInteger(error?.status) || error.status < 500 || error.status > 599 || fallbackJobs.length === 0) throw error;
+    log(`GitHub jobs listing returned HTTP ${error.status}; reporting failed workflow needs instead`);
+    jobs = fallbackJobs;
+  }
   const failures = [];
   for (const job of jobs) {
     if (job.name === currentJobName || !FAILED_CONCLUSIONS.has(job.conclusion)) continue;
@@ -247,7 +264,7 @@ export async function collectFailures({ github, owner, repo, runId, runAttempt, 
       }
       excerpt = suiteArtifactExcerpt(diagnosticsDir, failedSteps);
     }
-    if (!excerpt) {
+    if (!excerpt && job.id) {
       try {
         const { data } = await github.rest.actions.downloadJobLogsForWorkflowRun({ owner, repo, job_id: job.id });
         excerpt = summarizeLog(extractFailingStepLog(responseText(data)));
@@ -283,6 +300,13 @@ export async function runNightlyHealth({ github, context, core, env = process.en
       suiteJobs: Object.fromEntries(Object.entries(JSON.parse(env.NIGHTLY_SUITE_JOBS || "{}"))
         .map(([id, name]) => [name, needs[id]?.outputs ?? {}])),
       currentJobName: env.NIGHTLY_HEALTH_JOB_NAME,
+      fallbackJobs: Object.entries(needs)
+        .filter(([, need]) => FAILED_CONCLUSIONS.has(need?.result))
+        .map(([id, need]) => ({
+          name: FALLBACK_JOB_NAMES[id] ?? id,
+          conclusion: need.result,
+          steps: [],
+        })),
       log,
     })
     : [];

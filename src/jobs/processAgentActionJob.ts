@@ -1,3 +1,4 @@
+import { runWithNetworkPolicy } from './networkEgress.js';
 import type { Job } from 'bullmq';
 import type { Logger } from 'pino';
 import {
@@ -274,7 +275,9 @@ export function createAgentActionProcessor(overrides: Partial<AgentActionProcess
             const options = agentTaskOptions({ runId, taskId, definition, issueRef, prompt, model, token, workspace, mcpGrant, phase: 'action' });
             const result = await deps.withCostCap(
                 { taskId, repoOwner: issueRef.repoOwner, repoName: issueRef.repoName, modelName: model, logger: log },
-                () => agent.executeTask(options),
+                () => options.extensionProfile
+                    ? runWithNetworkPolicy({ taskId, correlatedLogger: log }, () => agent.executeTask(options))
+                    : agent.executeTask(options),
             );
 
             // 6. A task stopped during execution cancels the run; otherwise store the summary.

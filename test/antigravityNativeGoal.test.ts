@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { toAntigravityCliModelId } from '../packages/core/src/agents/impl/antigravityModelIds.js';
-import { describe, test } from 'node:test';
+import { after, describe, test } from 'node:test';
+import { closeConnection } from '../packages/core/src/db/connection.js';
 import { GOAL_CONTINUE_INPUT } from '../packages/core/src/goals.ts';
 import { probeGoalCapability } from '../packages/core/src/agents/goalCapabilities.ts';
 import { EventEmitter } from 'node:events';
@@ -28,6 +29,8 @@ import type {
     GoalControlSnapshot,
     GoalExecutionControl,
 } from '../packages/core/src/agents/types.ts';
+
+after(closeConnection);
 
 const COMMAND = '/goal Add subtract(a, b) to math.js';
 const CHECKPOINT = '{"checkpointReady":true,"message":"feat(math): add subtract","include":["math.js"]}';
