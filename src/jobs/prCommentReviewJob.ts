@@ -28,7 +28,7 @@ import {
 } from './prTaskTitleHelpers.js';
 import type { Redis } from 'ioredis';
 import { buildWorkEvidenceMarker, filterRealComments } from '../shared/workEvidenceMarker.js';
-import { buildReviewNotificationRecap } from './notificationRecap.js';
+import { buildReviewNotificationRecap, buildReviewNotificationSummary } from './notificationRecap.js';
 import { resolveReviewAssignments } from './reviewModelResolution.js';
 
 export { resolveReviewAssignments } from './reviewModelResolution.js';
@@ -383,6 +383,7 @@ export async function executeReviewProcessing(params: ExecuteReviewParams): Prom
                 success: r.analysisResult.success, commentId: r.commentId, commentUrl: r.commentUrl, error: r.error,
             })),
             notificationRecap: buildReviewNotificationRecap(reviewResults),
+            notificationSummary: buildReviewNotificationSummary(reviewResults),
             ...ultrafixHistoryMeta,
         },
     });

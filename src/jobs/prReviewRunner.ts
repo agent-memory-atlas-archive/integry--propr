@@ -33,6 +33,8 @@ export interface ReviewResult {
     suggestionCount?: number;
     /** The posted review covered only part of the diff (its comment is marked partial). */
     isPartial?: boolean;
+    /** The review comment as posted to the pull request. */
+    commentBody?: string;
 }
 
 export interface RunReviewsContext {
@@ -181,7 +183,7 @@ export async function runSingleReview(
 
         const isPartial = promptResult.prDiffTruncated === true || promptResult.missingPatchFiles.length > 0
             || promptResult.ioGuardOmittedFiles.length > 0 || promptResult.budgetOmittedFiles.length > 0;
-        return { assignment, analysisResult, commentId: reviewComment.data.id, commentUrl: reviewComment.data.html_url, prompt: reviewPrompt, findingCount, suggestionCount, isPartial };
+        return { assignment, analysisResult, commentId: reviewComment.data.id, commentUrl: reviewComment.data.html_url, prompt: reviewPrompt, findingCount, suggestionCount, isPartial, commentBody: reviewCommentBody };
     } catch (reviewError) {
         const errorMsg = (reviewError as Error).message;
         correlatedLogger.error({ pullRequestNumber, model, error: errorMsg }, 'Review analysis failed');

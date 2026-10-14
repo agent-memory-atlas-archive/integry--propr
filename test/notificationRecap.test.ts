@@ -3,8 +3,10 @@ import { describe, test } from 'node:test';
 import {
     buildMergeNotificationRecap,
     buildReviewNotificationRecap,
+    buildReviewNotificationSummary,
     buildWorkNotificationRecap,
     compactNotificationRecap,
+    fullNotificationSummary,
 } from '../src/jobs/notificationRecap.js';
 
 const REVIEW = [
@@ -63,5 +65,25 @@ describe('notification recaps', () => {
             baseBranch: 'main', headBranch: 'feature/inbox',
             conflictedFiles: ['Inbox.tsx'], summary: 'Kept both accessibility handlers.',
         }), /resolved conflicts in 1 file.*Kept both accessibility handlers/);
+    });
+
+    test('keeps the full summary for the Inbox detail pane, dropping only hidden comments', () => {
+        const summary = '## Summary of Changes\n\n<!-- marker -->\n- Fixed the **Inbox** detail pane\n- Added tests';
+        assert.equal(fullNotificationSummary(summary), '## Summary of Changes\n\n\n- Fixed the **Inbox** detail pane\n- Added tests');
+        assert.equal(fullNotificationSummary('  <!-- only -->  '), undefined);
+        assert.equal(fullNotificationSummary(42), undefined);
+        const long = fullNotificationSummary('word '.repeat(5_000))!;
+        assert.equal(Array.from(long).length, 20_000);
+        assert.ok(long.endsWith('…'));
+    });
+
+    test('keeps every posted review in full, without its details footer', () => {
+        const body = (label: string) => `## 🔍 AI Code Review — ${label}\n\n## Overall Evaluation\n\nLooks right.\n\n---\n### 🤖 Review Details\n\n* **Model:** Opus`;
+        assert.equal(buildReviewNotificationSummary([
+            { analysisResult: { success: true }, commentBody: body('Claude') },
+            { analysisResult: { success: false }, commentBody: 'error' },
+            { analysisResult: { success: true }, commentBody: body('GPT') },
+        ]), `## 🔍 AI Code Review — Claude\n\n## Overall Evaluation\n\nLooks right.\n\n## 🔍 AI Code Review — GPT\n\n## Overall Evaluation\n\nLooks right.`);
+        assert.equal(buildReviewNotificationSummary([{ analysisResult: { success: false } }]), undefined);
     });
 });

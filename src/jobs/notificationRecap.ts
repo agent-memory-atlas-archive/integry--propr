@@ -34,6 +34,36 @@ export function compactNotificationRecap(value: unknown): string | undefined {
     return compact ? truncateAtWord(compact) : undefined;
 }
 
+/** Longest summary kept for the Inbox's detail pane; far beyond any agent's usual report. */
+const MAX_SUMMARY_CHARACTERS = 20_000;
+
+/**
+ * The agent-authored Markdown summary in full, for the Inbox's detail pane:
+ * the one-line recap abridges it, this keeps it. Only hidden comments are
+ * dropped, and a runaway report is bounded.
+ */
+export function fullNotificationSummary(value: unknown): string | undefined {
+    if (typeof value !== 'string') return undefined;
+    const summary = value.replace(/<!--[^]*?-->/g, '').trim();
+    if (!summary) return undefined;
+    const characters = Array.from(summary);
+    return characters.length <= MAX_SUMMARY_CHARACTERS
+        ? summary
+        : `${characters.slice(0, MAX_SUMMARY_CHARACTERS - 1).join('').trimEnd()}…`;
+}
+
+/** The review as posted, without the model, cost and `/fix` details GitHub shows below it. */
+const REVIEW_DETAILS_RE = /\n+---\n+### 🤖 Review Details[^]*$/;
+
+/** Every posted review in full, one after another, for the Inbox's detail pane. */
+export function buildReviewNotificationSummary(results: readonly { commentBody?: string; analysisResult: { success: boolean } }[]): string | undefined {
+    const reviews = results
+        .filter(result => result.analysisResult.success && result.commentBody)
+        .map(result => result.commentBody!.replace(REVIEW_DETAILS_RE, '').trim())
+        .filter(Boolean);
+    return fullNotificationSummary(reviews.join('\n\n'));
+}
+
 /** Task history metadata for a review that moved to its continuation pull request. */
 export function stoppedReviewRecap(reason: string): { notificationRecap: string | undefined } {
     return { notificationRecap: compactNotificationRecap(reason) };
