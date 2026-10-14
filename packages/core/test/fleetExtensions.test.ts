@@ -4,7 +4,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 import { request as httpRequest } from 'node:http';
-import knex from 'knex';
+import { extensionTestResources } from './helpers/extensionTestResources.js';
 import { createHash, createHmac, randomBytes, randomUUID, ECDH } from 'node:crypto';
 import { canonicalFleetJson, FLEET_EXTENSION_CONTRACT, FLEET_EXTENSION_SCOPE, FLEET_EXTENSION_SCHEMA, FLEET_EXTENSION_LIMITS, fleetExtensionEnvelopeSchema, fleetExtensionProfileInputSchema, fleetExtensionRecipientSchema, fleetExtensionSkillBundleSchema, encryptFleetExtensionSecret, type FleetExtensionRequest, type FleetExtensionIntent, type FleetExtensionAssertion } from '@propr/shared';
 import { up } from '../src/db/migrations/20261013210000_extension_profiles.js';
@@ -26,8 +26,10 @@ const hash = (s: string) => createHash('sha256').update(s).digest('hex');
 const select = (p: any) => ({ instanceId: p.instanceId, profileId: p.profileId, revision: p.revision });
 const input = { version: 1 as const, name: 'Remote tools', enabled: true, agentScope: [], repositoryScope: [], mcpServers: [{ kind: 'https' as const, name: 'docs', url: 'https://8.8.8.8/mcp', enabled: true, tools: ['lookup'], capability: 'read' as const, authentication: 'bearer' as const }], skillBundleIds: [] as string[] };
 async function fixture(t: any) {
+  const resources = extensionTestResources(t);
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'fleet-extension-')); let cleanup = async () => {};
-  const database = knex({ client: 'better-sqlite3', connection: { filename: ':memory:' }, useNullAsDefault: true });
+  resources.defer(() => fs.rm(root, { recursive: true, force: true }));
+  const database = resources.database();
   await database.schema.createTable('config', tb => { tb.string('key').primary(); tb.text('value'); });
   await database.schema.createTable('instance_members', tb => { tb.string('github_user_id').primary(); tb.string('role'); tb.string('source'); });
   await database.schema.createTable('agent_definitions', tb => { tb.string('id').primary(); });
@@ -48,7 +50,9 @@ async function fixture(t: any) {
   });
   await fleet.initialize();
   const store = new ExtensionProfileStore(database, { SYSTEM_TASK_SECRET: 'local-encrypted-custody-test-key' });
-  let plane = new FleetExtensionPlane(fleet, store); t.after(async () => { await cleanup(); plane.shutdown(); await database.destroy(); await fs.rm(root, { recursive: true, force: true }); });
+  let plane = new FleetExtensionPlane(fleet, store);
+  resources.defer(() => plane.shutdown());
+  resources.defer(() => cleanup());
   const runtime = await fleet.runtime();
   const base = { hostedInstanceId: runtime.hostedInstanceId, storageInstanceId: runtime.storageInstanceId, runtimeGeneration: runtime.runtimeGeneration, storageGeneration: runtime.storageGeneration, placementGeneration: runtime.placementGeneration };
   const envelope = (request: FleetExtensionRequest, overrides: Partial<FleetExtensionAssertion> = {}) => {
@@ -428,7 +432,7 @@ test('recipient issuance zeroes private buffers on signing, capacity and awaited
   const capture = mock.method(ECDH.prototype, 'getPrivateKey', function (this: ECDH) {
     const buffer = original.call(this) as Buffer; buffers.push(buffer); return buffer;
   });
-  t.after(() => capture.mock.restore());
+  extensionTestResources(t).defer(() => capture.mock.restore());
   const identity = mock.method(f.store, 'instanceId', async () => { throw new Error('Identity unavailable'); });
   await assert.rejects(f.recipient(intent), /unavailable/);
   assert.ok(buffers.at(-1)!.every(byte => byte === 0));

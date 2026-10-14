@@ -39,9 +39,13 @@ export async function resolveExtensionEndpoint(value: string, lookup: ExtensionL
   }
   // Node's lookup also accepts IP literals without making a DNS request. Keep
   // the dial address separate from the caller's URL for both names and IPs.
-  const addresses = await Promise.race([
-    lookup(host), new Promise<never>((_, reject) => { const timer = setTimeout(() => reject(new Error('Endpoint DNS timeout')), EXTENSION_LIMITS.timeoutMs); timer.unref(); }),
-  ]);
+  let timer: NodeJS.Timeout | undefined;
+  let addresses: Awaited<ReturnType<ExtensionLookup>>;
+  try {
+    addresses = await Promise.race([
+      lookup(host), new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error('Endpoint DNS timeout')), EXTENSION_LIMITS.timeoutMs); timer.unref(); }),
+    ]);
+  } finally { clearTimeout(timer); }
   const pinned = policy.internalAddresses?.map(normalizeEgressHost);
   const permitted = addresses.length > 0 && addresses.every(a => {
     if (pinned && !pinned.includes(normalizeEgressHost(a.address))) return false;
