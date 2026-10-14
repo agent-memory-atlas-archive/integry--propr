@@ -708,7 +708,7 @@ test('configured startup rejects a live overlapping listener and succeeds after 
 
   // Production must propagate that rejection before opening readiness/customer HTTP.
   const source = await fs.readFile(path.resolve('packages/api/server.ts'), 'utf8');
-  assert.match(source, /fleetDataListener = demoMode \? Promise.resolve\(undefined\) : startConfiguredFleetData\(storageService, actorId => resolveDurableInstanceAuthorization\(String\(actorId\)\)\);/);
+  assert.match(source, /fleetDataListener = demoMode \? Promise.resolve\(undefined\) : startConfiguredFleetData\(storageService, \(actorId, database\) => resolveDurableInstanceAuthorization\(String\(actorId\), database\), new ExtensionProfileStore\(db\)\);/);
   const setup = source.indexOf('    setupRoutes();');
   const gate = source.indexOf('try { await fleetDataListener; }', setup);
   assert.ok(gate > setup && gate < source.indexOf('httpServer.listen(PORT'));

@@ -49,7 +49,7 @@ export class ExtensionProfileStore {
     const rows = await this.database('extension_profile_revisions as r').join('extension_profiles as p', 'r.profile_id', 'p.id').where({ 'p.id': profileId, 'p.instance_id': await this.instanceId(), 'p.deleted': false }).orderBy('r.revision', 'desc').select('r.snapshot');
     return rows.map(row => publicExtensionProfile(JSON.parse(row.snapshot)));
   }
-  async save(actor: string, input: ExtensionProfileInput, replacements: Record<string, string | null> = {}, expected?: ExtensionSelection): Promise<ExtensionProfileRevision> {
+  async save(actor: string, input: ExtensionProfileInput, replacements: Record<string, string | null> = {}, expected?: ExtensionSelection, guard: (database?: Knex) => Promise<void> = async () => {}): Promise<ExtensionProfileRevision> {
     let parsed: ExtensionProfileInput; try { parsed = extensionProfileInputSchema.parse(input); } catch { throw new ExtensionError(400, 'Invalid extension profile'); }
     if (!replacements || typeof replacements !== 'object' || Array.isArray(replacements) || Object.entries(replacements).some(([name, token]) => !parsed.mcpServers.some(s => s.name === name && s.kind === 'https' && s.authentication === 'bearer') || (token !== null && (typeof token !== 'string' || !/^[\x21-\x7e]{1,4096}$/.test(token))))) throw new ExtensionError(400, 'Invalid secret replacement');
     await this.authorize(actor);
@@ -67,7 +67,7 @@ export class ExtensionProfileStore {
     if (operatorSecretValues.some(value => value && JSON.stringify(parsed).includes(value))) throw new ExtensionError(400, 'Secrets cannot appear in public profile fields');
     // eslint-disable-next-line complexity -- revision fencing, credential rotation and snapshot persistence share one transaction
     return this.database.transaction(async trx => {
-      await this.authorize(actor, trx); const instanceId = await this.instanceId(trx);
+      await guard(trx); await this.authorize(actor, trx); const instanceId = await this.instanceId(trx);
       const profileId = expected?.profileId ?? randomUUID(); const now = Date.now();
       let old: ExtensionProfileRevision | undefined; let secrets: Record<string, string> = {};
       if (expected) {
@@ -99,23 +99,31 @@ export class ExtensionProfileStore {
         const previous = old?.mcpServers.find(s => s.kind === 'catalog' && s.name === server.name && s.catalogId === server.catalogId && s.digest === server.digest);
         snapshot.secrets[server.name] = catalogSecrets.get(server.name) ?? (previous ? old?.secrets[server.name] : undefined) ?? { count: 0, configured: false };
       }
+      await guard(trx);
       await trx('extension_profile_revisions').insert({ profile_id: profileId, revision: snapshot.revision, snapshot: JSON.stringify(snapshot), secrets_encrypted: sealExtensionSecrets(nextSecrets, identity(snapshot), this.environment) });
-      return snapshot;
+      await guard(trx); return snapshot;
     });
   }
-  async delete(actor: string, selection: ExtensionSelection): Promise<void> {
+  async delete(actor: string, selection: ExtensionSelection, guard: (database?: Knex) => Promise<void> = async () => {}): Promise<void> {
     await this.database.transaction(async trx => {
       await this.read(actor, selection, trx);
+      await guard(trx);
       const changed = await trx('extension_profiles').where({ id: selection.profileId, instance_id: selection.instanceId, revision: selection.revision, deleted: false }).update({ deleted: true, enabled: false, deleted_at: Date.now(), deleted_by: actor });
       if (!changed) throw new ExtensionError(409, 'Profile revision changed; refresh before deleting');
+      await guard(trx);
     });
   }
-  async importSkill(actor: string, files: SkillFile[], source: ExtensionSkillBundle['source']): Promise<ExtensionSkillBundle> {
+  async importSkill(actor: string, files: SkillFile[], source: ExtensionSkillBundle['source'], guard: (database?: Knex) => Promise<void> = async () => {}): Promise<ExtensionSkillBundle> {
     await this.authorize(actor); const validated = validateSkillFiles(files);
     if (source.kind === 'github' && !/^[0-9a-f]{40}$/.test(source.commit)) throw new ExtensionError(400, 'Skill source must pin an exact Git commit');
     const descriptor: ExtensionSkillBundle = { id: randomUUID(), instanceId: await this.instanceId(), digest: validated.digest, name: validated.name, files: files.length, bytes: validated.bytes, source, requirements: validated.requirements, createdAt: Date.now(), auditActor: actor };
     await this.authorize(actor);
-    await this.database('extension_skill_bundles').insert({ id: descriptor.id, instance_id: descriptor.instanceId, descriptor: JSON.stringify(descriptor), files_json: JSON.stringify(validated.files) });
+    await this.database.transaction(async trx => {
+      await guard(trx); await this.authorize(actor, trx);
+      if (descriptor.instanceId !== await this.instanceId(trx)) throw new ExtensionError(409, 'Skill instance changed');
+      await trx('extension_skill_bundles').insert({ id: descriptor.id, instance_id: descriptor.instanceId, descriptor: JSON.stringify(descriptor), files_json: JSON.stringify(validated.files) });
+      await guard(trx);
+    });
     return descriptor;
   }
   async assertLaunch(actor: string, selection: ExtensionSelection, context: { agentAlias: string; runtime: string; repositories: string[]; allowWrite: boolean }, validateResources = true): Promise<ExtensionProfileRevision> {
