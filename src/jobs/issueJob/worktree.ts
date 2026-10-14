@@ -4,6 +4,7 @@
 
 import { db, materializeSubmissionAttachments, createWorktreeForIssue, pushBranch, TaskStates, updateFileChangesFromWorktree, loadRepositoryVisualPreviewSettings, refineWorkflowPreviews } from '@propr/core';
 import { recordPushedBranch } from '../../taskReplacement/store.js';
+import { simpleGit } from 'simple-git';
 import type { ExecuteWorktreeParams, ExecuteWorktreeResult } from './types.js';
 import { fetchIssueComments } from './github.js';
 import { executeAgentAndRecordMetrics } from './agent.js';
@@ -20,6 +21,9 @@ export async function executeWorktreeOperations(params: ExecuteWorktreeParams): 
     // A replacement attempt continues the work branch its predecessor pushed.
     ...(issueRef.replacementBranch ? { reuseBranch: issueRef.replacementBranch } : {}),
   });
+  // Pin the task's starting commit before the agent or post-processing can
+  // commit and push. The work branch's upstream moves with each push.
+  const fileChangesBase = (await simpleGit(worktreeInfo.worktreePath).revparse(['HEAD'])).trim();
   await materializeSubmissionAttachments(issueRef, worktreeInfo.worktreePath);
   await job.updateProgress(75);
 
@@ -61,7 +65,7 @@ export async function executeWorktreeOperations(params: ExecuteWorktreeParams): 
 
   // Update file changes after post-processing to capture final state
   try {
-    await updateFileChangesFromWorktree(taskId, worktreeInfo.worktreePath);
+    await updateFileChangesFromWorktree(taskId, worktreeInfo.worktreePath, fileChangesBase);
   } catch (fileChangesError) {
     correlatedLogger.warn({ error: (fileChangesError as Error).message }, 'Failed to update file changes after post-processing');
   }
