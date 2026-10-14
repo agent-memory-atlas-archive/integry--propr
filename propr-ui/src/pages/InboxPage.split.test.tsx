@@ -513,7 +513,8 @@ describe('Inbox triage console', () => {
     renderInbox('/inbox?notification=far-back');
     await screen.findByRole('article', { name: review.title });
     expect(await screen.findByText('That notification isn’t in the loaded Inbox. Load more to look further back.')).toBeInTheDocument();
-    expect(search().get('notification')).toBeNull();
+    // The notice can render before the router's URL transition has committed.
+    await waitFor(() => expect(search().get('notification')).toBeNull());
     expect(pane()).not.toBeInTheDocument();
     // Each Load more follows empty pages on its own; the lookup stops after its bounded number of them.
     const reads = vi.mocked(listNotifications).mock.calls.length;
