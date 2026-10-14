@@ -24,9 +24,9 @@ import { useToast } from '../ui/useToast';
 import { postTaskFollowup } from '../../api/proprApi';
 import { useConsumedReviewCommentIds, useTokenUsage } from './useDerivedTaskData';
 import { useClickOutsideCollapse } from './useClickOutsideCollapse';
-import { isReviewRun, type TaskRunEntry } from '../TaskList/rowModel';
+import type { TaskRunEntry } from '../TaskList/rowModel';
 import DesktopTaskHeader from './DesktopTaskHeader';
-import { useTaskHeaderView } from './useTaskHeaderView';
+import { getLogCommandMode, useTaskHeaderView } from './useTaskHeaderView';
 import { useLiveRunStop } from './useLiveRunStop';
 import { useTaskAssignment } from './useTaskAssignment';
 import LatestRunCommands from './LatestRunCommands';
@@ -157,12 +157,6 @@ interface TaskDetailsProps {
   /** The pane's own controls, docked at the right of the header's first row. */
   paneControls?: React.ReactNode;
 }
-
-/** The run's kind for its log's header; the run list knows a review by its type even when the task's own record doesn't say. */
-const getLogCommandMode = (commandMode: string | undefined, runs: TaskRunEntry[] | undefined, taskId: string | undefined) => {
-  if (commandMode === 'review' || isReviewRun(runs?.find(run => run.task.id === taskId)?.type)) return 'review';
-  return commandMode;
-};
 
 /** The timeline's and the trace's headers share a height, so their rules line up side by side. */
 const PANE_HEADER_HEIGHT = 'min-h-[2.75rem]';
