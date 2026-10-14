@@ -50,7 +50,8 @@ export class FleetExtensionPlane {
     if (this.stopped || secret !== await this.fleet.extensionAuthority(a, database)) throw new FleetRefusal();
     return secret;
   }
-  private async issue(a: FleetExtensionAssertion, r: Extract<FleetExtensionRequest, { action: 'recipient.issue' }>) {
+  private async issue(a: FleetExtensionAssertion, r: Extract<FleetExtensionRequest, { action: 'recipient.issue' }>, rawIntent: unknown) {
+    const intentDigest = digest(rawIntent);
     const authority = await this.authorize(a);
     if (r.intent.action === 'profile.update') await this.store.read(String(a.githubActorId), r.intent.selection);
     const server = r.intent.input.mcpServers.find(s => s.name === r.server);
@@ -60,7 +61,7 @@ export class FleetExtensionPlane {
     let retained = false;
     try {
       const binding = { contract: FLEET_EXTENSION_CONTRACT, audience: 'core-extension-mutation', assertion: a, extensionInstanceId: await this.store.instanceId(), action: r.intent.action,
-        intentDigest: digest(r.intent), target: r.intent.action === 'profile.update' ? { kind: 'revision', selection: r.intent.selection } : { kind: 'create', intentDigest: digest(r.intent) }, mutationOperationId: r.mutationOperationId, server: r.server, field: r.field, recipientId, expiresAt: a.expiresAt };
+        intentDigest, target: r.intent.action === 'profile.update' ? { kind: 'revision', selection: r.intent.selection } : { kind: 'create', intentDigest }, mutationOperationId: r.mutationOperationId, server: r.server, field: r.field, recipientId, expiresAt: a.expiresAt };
       if (this.stopped || this.recipients.size >= FLEET_EXTENSION_LIMITS.recipients) throw new FleetRefusal();
       const publicRecipient = { recipientId, algorithm: 'P-256-ECDH/HKDF-SHA256/AES-256-GCM', publicKey: key.getPublicKey().toString('base64url'), binding };
       const signature = sign(null, Buffer.from(canonicalFleetJson(publicRecipient)), await this.recipientSigningKey()).toString('base64url');
@@ -72,14 +73,14 @@ export class FleetExtensionPlane {
       return response;
     } finally { if (!retained) privateKey.fill(0); }
   }
-  private async decrypt(a: FleetExtensionAssertion, r: Extract<FleetExtensionRequest, { action: 'profile.create' | 'profile.update' }>) {
-    const intent = r.action === 'profile.create' ? { action: r.action, input: r.input } : { action: r.action, input: r.input, selection: r.selection };
+  private async decrypt(a: FleetExtensionAssertion, r: Extract<FleetExtensionRequest, { action: 'profile.create' | 'profile.update' }>, rawIntent: unknown) {
+    const intentDigest = digest(rawIntent);
     const replacements: Record<string, string> = {};
     // Claim ALL recipients before the first await. Even a malformed/substituted attempt burns the recipient.
     const claimed = r.sealed.map(s => { const recipient = this.recipients.get(s.recipientId); this.recipients.delete(s.recipientId); if (recipient) clearTimeout(recipient.timer); return { s, recipient }; });
     try {
       for (const { s, recipient: p } of claimed) {
-        if (!p || !sameAudience(a, p.assertion) || p.binding.mutationOperationId !== a.operationId || p.binding.intentDigest !== digest(intent)
+        if (!p || !sameAudience(a, p.assertion) || p.binding.mutationOperationId !== a.operationId || p.binding.intentDigest !== intentDigest
           || p.assertion.expiresAt * 1000 <= Date.now() || p.binding.extensionInstanceId !== await this.store.instanceId() || Object.hasOwn(replacements, p.server)) throw new FleetRefusal();
         const authority = await this.authorize(p.assertion); await this.authorize(a);
         if (digest(authority) !== p.authorityDigest) throw new FleetRefusal();
@@ -102,7 +103,7 @@ export class FleetExtensionPlane {
       return replacements;
     } finally { for (const { recipient } of claimed) recipient?.privateKey.fill(0); }
   }
-  private async dispatch(a: FleetExtensionAssertion, r: FleetExtensionRequest): Promise<unknown> {
+  private async dispatch(a: FleetExtensionAssertion, r: FleetExtensionRequest, rawIntent: unknown): Promise<unknown> {
     const actor = String(a.githubActorId); const guard = async (database?: Knex) => { await this.authorize(a, database); };
     const preflightProfile = (profile: unknown) => { this.response(a, { profile }); };
     await guard();
@@ -113,8 +114,8 @@ export class FleetExtensionPlane {
       case 'catalog.list': return { catalog: await this.store.catalog.publicEntries() };
       case 'skill.list': return { bundles: await this.store.listSkillBundles(actor) };
       case 'skill.import': return { bundle: await importExactGitSkill(this.store, actor, r, guard) };
-      case 'recipient.issue': return this.issue(a, r);
-      case 'profile.create': case 'profile.update': return this.saveProfile(a, r);
+      case 'recipient.issue': return this.issue(a, r, rawIntent);
+      case 'profile.create': case 'profile.update': return this.saveProfile(a, r, rawIntent);
       case 'profile.disable': {
         const profile = await this.store.read(actor, r.selection);
         const { version, name, agentScope, repositoryScope, mcpServers, skillBundleIds } = profile;
@@ -134,10 +135,10 @@ export class FleetExtensionPlane {
       }
     }
   }
-  private async saveProfile(a: FleetExtensionAssertion, r: Extract<FleetExtensionRequest, { action: 'profile.create' | 'profile.update' }>) {
+  private async saveProfile(a: FleetExtensionAssertion, r: Extract<FleetExtensionRequest, { action: 'profile.create' | 'profile.update' }>, rawIntent: unknown) {
     const actor = String(a.githubActorId); const guard = async (database?: Knex) => { await this.authorize(a, database); };
     const preflight = (profile: unknown) => { this.response(a, { profile }); };
-    const replacements = await this.decrypt(a, r);
+    const replacements = await this.decrypt(a, r, rawIntent);
     try {
       await guard();
       return { profile: await this.store.saveWithOptions(actor, r.input, replacements, { expected: r.action === 'profile.update' ? r.selection : undefined, guard, preflight }) };
@@ -173,7 +174,11 @@ export class FleetExtensionPlane {
       const parsed = JSON.parse(raw);
       if (canonicalFleetJson(parsed) !== raw) throw new FleetRefusal();
       const { assertion: a, request: r, mac } = fleetExtensionEnvelopeSchema.parse(parsed);
-      if (a.contractPin !== extensionContractPin || a.action !== r.action || a.requestDigest !== digest(r)) throw new FleetRefusal();
+      // Bind signed digests to the canonical JSON sent by the client, before Zod normalizes names.
+      if (a.contractPin !== extensionContractPin || a.action !== r.action || a.requestDigest !== digest(parsed.request)) throw new FleetRefusal();
+      const rawIntent = r.action === 'recipient.issue' ? parsed.request.intent
+        : r.action === 'profile.create' ? { action: r.action, input: parsed.request.input }
+          : r.action === 'profile.update' ? { action: r.action, input: parsed.request.input, selection: parsed.request.selection } : undefined;
       const secret = await this.authorize(a); const now = Math.floor(Date.now() / 1000);
       if (a.issuedAt > now + 5 || a.issuedAt < now - 65 || a.expiresAt <= now || a.expiresAt <= a.issuedAt || a.expiresAt - a.issuedAt > 60
         || !timingSafeEqual(createHmac('sha256', secret).update(canonicalFleetJson(a)).digest(), Buffer.from(mac, 'hex'))) throw new FleetRefusal();
@@ -196,7 +201,7 @@ export class FleetExtensionPlane {
         await claim(`extension-operation-${a.operationId}.json`, { ...initial, recordDigest: digest(initial) });
       } finally { release(unattempted); this.slots -= unattempted; }
       await this.authorize(a);
-      const result = await this.dispatch(a, r);
+      const result = await this.dispatch(a, r, rawIntent);
       if (r.action === 'recipient.issue') issuedRecipientId = (result as { recipientId: string }).recipientId;
       await this.authorize(a);
       const response = this.response(a, result);

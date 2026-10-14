@@ -131,6 +131,55 @@ test('private channel: browser encrypted create/rotation, all capabilities, exac
   assert.equal(JSON.stringify(sealed).includes(sentinel), false); assert.equal(Buffer.from(sealed.ciphertext, 'base64url').length, 4112);
 });
 
+test('request digests bind raw whitespace names while native create/update normalize them', async t => {
+  const f = await fixture(t);
+  const create = { action: 'profile.create' as const, input: { ...input, name: 'Docs ', mcpServers: [] }, sealed: [] };
+  const normalizedDigest = hash(canonicalFleetJson({ ...create, input: { ...create.input, name: 'Docs' } }));
+  await assert.rejects(f.invoke(create, { requestDigest: normalizedDigest }), /unavailable/);
+  assert.equal((await fs.readdir(f.control)).filter(n => n.startsWith('extension-')).length, 0);
+  const profile = (await f.invoke(create)).profile;
+  assert.equal(profile.name, 'Docs');
+  const updated = (await f.invoke({ action: 'profile.update', selection: select(profile), input: { ...create.input, name: ' Updated docs ' }, sealed: [] })).profile;
+  assert.equal(updated.name, 'Updated docs');
+  assert.equal(updated.revision, 2);
+});
+
+test('recipient issuance and encrypted create/update bind raw intents before name normalization', async t => {
+  const f = await fixture(t);
+  const create = { action: 'profile.create' as const, input: { ...input, name: 'Docs ' } };
+  const seal = async (intent: FleetExtensionIntent, acquired: Awaited<ReturnType<typeof f.recipient>>) => {
+    const intentDigest = hash(canonicalFleetJson(intent));
+    assert.equal(acquired.recipient.binding.intentDigest, intentDigest);
+    const target = intent.action === 'profile.create' ? { kind: 'create', intentDigest } : { kind: 'revision', selection: intent.selection };
+    assert.deepEqual(acquired.recipient.binding.target, target);
+    return encryptFleetExtensionSecret(acquired.recipient, sentinel, {
+      verificationKey: f.verificationKey,
+      expectedBinding: { ...acquired.recipient.binding, intentDigest, target },
+    });
+  };
+  const acquired = await f.recipient(create);
+  const profile = (await f.invoke({ ...create, sealed: [await seal(create, acquired)] }, { operationId: acquired.operationId })).profile;
+  assert.equal(profile.name, 'Docs');
+  assert.equal(profile.secrets.docs.configured, true);
+  const update = { action: 'profile.update' as const, input: { ...input, name: ' Updated docs ' }, selection: select(profile) };
+  const next = await f.recipient(update);
+  const updated = (await f.invoke({ ...update, sealed: [await seal(update, next)] }, { operationId: next.operationId })).profile;
+  assert.equal(updated.name, 'Updated docs');
+  assert.equal(updated.revision, 2);
+  assert.equal(updated.secrets.docs.configured, true);
+
+  // A different raw intent must fail even when it normalizes to the same native profile.
+  for (const intent of [create, { ...update, selection: select(updated) }]) {
+    const substituted = await f.recipient(intent);
+    const sealed = await seal(intent, substituted);
+    await assert.rejects(f.invoke({ ...intent, input: { ...intent.input, name: intent.input.name.trim() }, sealed: [sealed] }, { operationId: substituted.operationId }), /unavailable/);
+    await assert.rejects(f.invoke({ ...intent, sealed: [sealed] }, { operationId: substituted.operationId }), /unavailable/);
+    assert.equal((await f.invoke({ action: 'operation.status', targetOperationId: substituted.operationId })).state, 'fenced');
+  }
+  assert.equal((await f.store.list('100')).length, 1);
+  assert.equal((await f.store.read('100', select(updated))).revision, 2);
+});
+
 test('nonadmins, bootstrap/implicit/managed identities, revocation, permission, actor and every audience generation fence', async t => {
   const f = await fixture(t);
   for (const githubActorId of [101, 300, 0, -1, Number.MAX_SAFE_INTEGER + 1]) await assert.rejects(f.invoke({ action: 'profile.list' }, { githubActorId }), /unavailable/);
